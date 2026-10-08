@@ -59,6 +59,15 @@ An item counts as done only when none of its code carries an `INFERRED`, `PROVIS
 - **Napoleon: Total War** from Steam. It is read from `C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War`; set `NAPOLEON_INSTALL_DIR` if yours is somewhere else.
 - **Rust** stable, 1.95 or newer, installed through [rustup](https://rustup.rs).
 
+To contribute you also need the reverse-engineering setup (step by step in [`CONTRIBUTING.md`](CONTRIBUTING.md)):
+
+- **[Ghidra](https://github.com/NationalSecurityAgency/ghidra/releases) 12.1.4.**
+- **[ghidra-mcp](https://github.com/bethington/ghidra-mcp)** (its `dev` branch), which needs:
+  - **Java 21** (a JDK, with `JAVA_HOME` set),
+  - **Apache Maven 3.9 or newer**,
+  - **Python 3.10 or newer** with [uv](https://docs.astral.sh/uv/). Python is only for ghidra-mcp's own tools; this repository has none.
+- **Git**, and an AI assistant that supports MCP (such as Claude Code) if you use one.
+
 ## Building and running
 
 ```bash
