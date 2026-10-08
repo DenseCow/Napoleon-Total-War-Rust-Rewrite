@@ -102,7 +102,7 @@ If you do contribute, please follow these rules:
 
 ## License
 
-The source code is intended to be dual-licensed under the MIT License or the Apache License 2.0, at your option, as declared in `Cargo.toml`. The license files have not been added yet.
+The source code is dual-licensed under the MIT License ([LICENSE-MIT](LICENSE-MIT)) or the Apache License 2.0 ([LICENSE-APACHE](LICENSE-APACHE)), at your option, as declared in `Cargo.toml`.
 
 This license covers Napoleon Total War Rust Rewrite's own code and notes only. It grants no rights to Napoleon: Total War or any of its content.
 
