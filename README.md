@@ -8,6 +8,14 @@ The aim is a complete, faithful 1:1 remake. That means the same campaign map and
 
 > Napoleon Total War Rust Rewrite is an unofficial fan project. It is not affiliated with, endorsed by or connected to Creative Assembly or SEGA. *Napoleon: Total War* and *Total War* are trademarks of their respective owners.
 
+## Contributing
+
+Contributions are welcome. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before you start. In short:
+
+- **Set up [ghidra-mcp](https://github.com/bethington/ghidra-mcp).** The original game's behaviour is worked out from its executable in Ghidra, and ghidra-mcp lets you, and AI assistants, read it.
+- **If you use an AI assistant, have it follow the project workflow:** the rules in [`CLAUDE.md`](CLAUDE.md) and the ghidra-mcp workflow guides in that repository's `docs/prompts/`.
+- **Never commit files from the original game or decompiled code.** Describe the behaviour in the notes, then write new Rust from that description.
+
 ---
 
 ## Project status
@@ -50,6 +58,26 @@ Every finding in the notes is tagged by confidence:
 | `UNKNOWN` | Not yet worked out |
 
 ## Requirements
+
+- **Windows.**
+- **Your own copy of Napoleon: Total War** from Steam. It is read from `C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War`; set `NAPOLEON_INSTALL_DIR` if yours is somewhere else.
+- **Rust** stable, 1.95 or newer, installed through [rustup](https://rustup.rs).
+
+## Building and running
+
+```bash
+cargo run -p napoleon
+```
+
+This starts at the intro movies and the main menu. Add `--release` for full speed; debug builds stay playable.
+
+### Command-line options
+
+| Option | What it does |
+|---|---|
+| `--campaign <name>` | Opens a campaign map directly, for example `eur_napoleon`. |
+| `--campaign-faction <key>` | The faction to play in that campaign, for example `france`. |
+| `--battle` | Opens a test battle directly. |
 | `--battle-map <name>` | Uses a specific battle map. Use `list` to print the names. |
 | `--battle-key <key>` | Opens one of the historical battles, for example `NHB_Arcole`. |
 | `--view-model <key>` | Opens the 3D model viewer for a model or unit. |
@@ -88,17 +116,6 @@ Other folders:
 
 - [`analysis/`](analysis) holds the research notes: file formats, game rules, open questions, and standalone research tools.
 - [`docs/`](docs) holds the design document, the architecture report, the backlog, and a checklist for comparing Napoleon Total War Rust Rewrite against the original game.
-
-## Contributing
-
-The project is not set up for outside contributions yet. Issues and suggestions are welcome.
-
-If you do contribute, please follow these rules:
-
-- **Never commit files from the original game,** including extracted files, models, textures, sounds or text.
-- **Never paste decompiled code.** Describe the behaviour in the notes and write new code from that description.
-- Tag findings `CONFIRMED`, `INFERRED` or `UNKNOWN`, and mark any stand-in as `PROVISIONAL` or `PLACEHOLDER`.
-- Keep `cargo test --workspace` passing, and add no new `cargo clippy` warnings.
 
 ## License
 
