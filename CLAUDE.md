@@ -51,7 +51,8 @@ large: grep for the section you need, and read that file's "Where I am" / "Next"
   scripts, commit messages). Paths use `%USERPROFILE%` in docs, `$env:USERPROFILE` in PowerShell and
   the `USERPROFILE` variable in Rust; commits use the checkout's git config, never `-c user.*`.
   The public repo gets snapshots only through `tools/publish_public.sh` (manager, after a merge);
-  never add it as a remote or push the private history to it.
+  never add it as a remote or push the private history to it. The user's session setup (launcher,
+  usage budget, hooks, sandbox) stays private: list any new such file in that script's `PRIVATE_ONLY`.
 - Keep `cargo test --workspace` passing and add no new `cargo clippy` warnings.
 
 ## Code quality (optimal, not just working)

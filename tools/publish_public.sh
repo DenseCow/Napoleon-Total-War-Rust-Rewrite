@@ -30,7 +30,18 @@ esac
 parent="$(git ls-remote "$URL" refs/heads/main | cut -f1)"
 [ -n "$parent" ] || { echo "cannot read the public main" >&2; exit 1; }
 git fetch -q "$URL" main
-tree="$(git rev-parse 'HEAD^{tree}')"
+
+# The user's own session setup stays private: the launcher, day/night usage budget, its hooks and
+# status line, the sandbox watchdog and the sandbox agent briefs. Testing and Ghidra tools are kept.
+PRIVATE_ONLY=(
+  start-claude.bat tools/start-claude.ps1 tools/usage_budget.ps1 tools/usage_sim.ps1
+  tools/sandbox_watchdog.ps1 tools/guard_main_push.sh .claude/settings.json .opencode
+)
+index="$(mktemp)"
+trap 'rm -f "$index"' EXIT
+GIT_INDEX_FILE="$index" git read-tree HEAD
+GIT_INDEX_FILE="$index" git rm -r -q --cached --ignore-unmatch -- "${PRIVATE_ONLY[@]}"
+tree="$(GIT_INDEX_FILE="$index" git write-tree)"
 if [ "$(git rev-parse "$parent^{tree}")" = "$tree" ]; then echo "public repo is already up to date"; exit 0; fi
 commit="$(git commit-tree "$tree" -p "$parent" -m "$MSG (private $(git rev-parse --short HEAD))")"
 git push -q "$URL" "$commit:refs/heads/main"
