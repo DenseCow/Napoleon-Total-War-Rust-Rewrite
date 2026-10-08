@@ -1,6 +1,6 @@
 # Napoleon Total War Rust Rewrite
 
-A from-scratch remake of **Napoleon: Total War** (2010), written in Rust with the Bevy game engine.
+A remake of **Napoleon: Total War** (2010), written in Rust with the Bevy game engine.
 
 The aim is a complete, faithful 1:1 remake: the same campaign map and battles, the same rules and formulas, the same screens and the same behaviour as the original, in an open codebase that is easy to mod. The one deliberate difference is that the original engine's hard limits are gone (factions, regions, religions, units per army, unit and battle sizes). The defaults still match the original.
 
