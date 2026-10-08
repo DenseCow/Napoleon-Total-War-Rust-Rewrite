@@ -3,6 +3,26 @@
 A complete 1:1 remake of Napoleon: Total War in Rust + Bevy, reading all assets at runtime from the
 user's own install. This file is the single source of project rules. Keep it short.
 
+## Outside contributors (read first)
+
+If `git remote get-url origin` does not end in `-Private.git`, you are a contributor's session
+working in a fork of the public repo, not the maintainer's. Then:
+
+- **Apply in full:** Goal, Hard rules, Code quality, Evidence tags, the ghidra-mcp guides and
+  "Trace in Ghidra, don't guess". Read `CONTRIBUTING.md` too.
+- **Session start:** skip steps 1–2; read `docs/HANDOFF.md`, your BACKLOG section and the repo's open
+  issues (a "Claim a BACKLOG item" issue marks taken work).
+- **Done means**, for you: implemented, `cargo test --workspace` passes, no new clippy warnings, a
+  test per fixed bug, `/code-review medium` run if available, findings in the analysis notes, tags
+  removed only with cited evidence, then a pull request filled in from its template. Ticking the
+  BACKLOG, the Progress table, HANDOFF and merging are the maintainer's.
+- **Ignore** (maintainer-only): Agent workflow, the usage budget, night/day mode, `docs/FOR_USER.md`,
+  the sandbox and `tools/publish_public.sh`. Work on a branch in your fork; never push to anyone's `main`.
+- The ghidra-mcp paths below are the maintainer's install; use your own. The writer lock matters
+  only when several agents share one Ghidra.
+- Keep changes to `.github/`, `.mcp.json`, `CLAUDE.md`, `AGENTS.md`, `tools/` and build scripts out of
+  feature pull requests: they run code or steer agents on other machines and are reviewed on their own.
+
 ## Session start
 
 1. `git pull`, then `git status`.
@@ -53,6 +73,9 @@ large: grep for the section you need, and read that file's "Where I am" / "Next"
   The public repo gets snapshots only through `tools/publish_public.sh` (manager, after a merge);
   never add it as a remote or push the private history to it. The user's session setup (launcher,
   usage budget, hooks, sandbox) stays private: list any new such file in that script's `PRIVATE_ONLY`.
+  Contributor pull requests are squash-merged on the public repo after CI and review; then
+  `tools/publish_public.sh import` puts them on a private branch, reviewed and merged like a worker's
+  (publishing refuses until they are in main, since a snapshot would undo them).
 - Keep `cargo test --workspace` passing and add no new `cargo clippy` warnings.
 
 ## Code quality (optimal, not just working)

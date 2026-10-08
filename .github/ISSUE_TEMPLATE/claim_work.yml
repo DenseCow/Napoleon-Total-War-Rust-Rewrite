@@ -1,0 +1,16 @@
+name: Claim a BACKLOG item
+description: Say which BACKLOG item you are taking, so two people don't do the same work.
+labels: [claim]
+body:
+  - type: input
+    id: item
+    attributes:
+      label: BACKLOG section and item
+      description: 'For example "§3 Battle gameplay: unit pathfinding on the battlefield".'
+    validations:
+      required: true
+  - type: textarea
+    id: plan
+    attributes:
+      label: Plan
+      description: What you will trace in Ghidra, which notes you will update, how you will check it.

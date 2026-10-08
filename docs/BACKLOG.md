@@ -550,6 +550,7 @@ worked on, `[ ]` = not started.
 
 ## Polish
 Non-blocking review findings, one line each (CLAUDE.md "Done means"). A worker editing a file clears that file's lines.
+- [ ] Clear the 28 existing `cargo clippy --workspace --all-targets` warnings, then drop `continue-on-error` from the Clippy step in `.github/workflows/ci.yml` and add `-- -D warnings`.
 - [ ] AI table fallback can spend budget on a restricted level, unreachable in game (ntw_ai/src/campaign/mod.rs, construction table fallback ~line 1081).
 - [ ] `slot_candidates`' `only` parameter could be a bool helper "is this level a candidate" sharing the match (ntw_sim/src/campaign/commands.rs ~1235).
 - [ ] A refused negative construction cost reports `InsufficientFunds { needed: -300 }`; a dedicated error would read better (ntw_sim/src/campaign/commands.rs `construct` ~1370).

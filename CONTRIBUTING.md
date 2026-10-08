@@ -24,8 +24,8 @@ the setup you need and the rules every change follows.
 
 ## 2. Pick something to work on
 
-- [`docs/BACKLOG.md`](docs/BACKLOG.md) lists everything left to do, by section. Open an issue first
-  to say what you are taking, so two people don't do the same work.
+- [`docs/BACKLOG.md`](docs/BACKLOG.md) lists everything left to do, by section. Open a "Claim a
+  BACKLOG item" issue first, so two people don't do the same work.
 - Read the notes for that area in [`analysis/`](analysis) before changing code. The files are large:
   search for the section you need.
 
@@ -43,8 +43,9 @@ Have it follow the project workflow, not its own:
 - **Trace, don't guess.** Behaviour a change depends on is traced in Ghidra first. A guess is tagged
   `INFERRED` and never presented as fact.
 - **Review AI output before you open a pull request.** You are responsible for what you submit.
-- The "Agent workflow" and usage-budget parts of `CLAUDE.md` describe the maintainer's own sessions
-  (who may push to `main`, worker limits). As a contributor, work on a branch in your fork instead.
+- `CLAUDE.md` starts with an "Outside contributors" section saying which of its parts apply to you;
+  the rest (agent workflow, usage budget) describes the maintainer's own sessions. Assistants other
+  than Claude Code are pointed there by [`AGENTS.md`](AGENTS.md).
 
 ## 4. Rules for every change
 
@@ -71,9 +72,13 @@ Have it follow the project workflow, not its own:
 ## 5. Open a pull request
 
 1. Fork the repository and make a branch for your change.
-2. Run `cargo test --workspace` and `cargo clippy --workspace`.
-3. Open a pull request that says what changed, how you checked it (tests, Ghidra addresses, in-game
-   comparison) and which tags changed.
+2. Run `cargo test --workspace` and `cargo clippy --workspace --all-targets`.
+3. Open a pull request against `main` and fill in its template: what changed, how you checked it
+   (tests, Ghidra addresses, in-game comparison) and which tags changed.
+4. CI builds and tests it on Windows (a maintainer approves the first run for new contributors).
+   The maintainer reviews it and squash-merges it.
+
+Security problems go through private reporting, not issues: see [`SECURITY.md`](SECURITY.md).
 
 By contributing, you agree that your contribution is licensed under the MIT License or the Apache
 License 2.0, at the user's option, like the rest of the project.
