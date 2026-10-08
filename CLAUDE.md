@@ -50,6 +50,8 @@ large: grep for the section you need, and read that file's "Where I am" / "Next"
 - Never write the user's name, email, Windows username or personal paths into the repo (code, docs,
   scripts, commit messages). Paths use `%USERPROFILE%` in docs, `$env:USERPROFILE` in PowerShell and
   the `USERPROFILE` variable in Rust; commits use the checkout's git config, never `-c user.*`.
+  The public repo gets snapshots only through `tools/publish_public.sh` (manager, after a merge);
+  never add it as a remote or push the private history to it.
 - Keep `cargo test --workspace` passing and add no new `cargo clippy` warnings.
 
 ## Code quality (optimal, not just working)
