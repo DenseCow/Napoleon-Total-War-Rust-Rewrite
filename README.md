@@ -1,12 +1,12 @@
 # Napoleon Total War Rust Rewrite
 
-Napoleon Total War Rust Rewrite is a from-scratch remake of **Napoleon: Total War** (2010), written in Rust with the Bevy game engine.
+A from-scratch remake of **Napoleon: Total War** (2010), written in Rust with the Bevy game engine.
 
-The aim is a complete, faithful 1:1 remake. That means the same campaign map and battles, the same rules and formulas, the same screens and menus, and the same behaviour as the original game. It also means a codebase that is open, modern and easy to mod. The one deliberate difference: the original engine's hard limits are gone. These include the caps on factions, regions, religions, cultures, units per army, unit sizes and battle sizes. The defaults still match the original, but nothing in the code caps them.
+The aim is a complete, faithful 1:1 remake: the same campaign map and battles, the same rules and formulas, the same screens and the same behaviour as the original, in an open codebase that is easy to mod. The one deliberate difference is that the original engine's hard limits are gone (factions, regions, religions, units per army, unit and battle sizes). The defaults still match the original.
 
-> **You need your own copy on steam of Napoleon: Total War to play.** Napoleon Total War Rust Rewrite ships no game files at all. Every model, texture, sound, map and line of text is read at run time from the original game you already own, and that folder is never modified.
+> **You need your own copy of Napoleon: Total War from Steam.** This project ships no game files. Every model, texture, sound, map and line of text is read at run time from your install, and that folder is never modified.
 
-> Napoleon Total War Rust Rewrite is an unofficial fan project. It is not affiliated with, endorsed by or connected to Creative Assembly or SEGA. *Napoleon: Total War* and *Total War* are trademarks of their respective owners.
+> This is an unofficial fan project, not affiliated with or endorsed by Creative Assembly or SEGA. *Napoleon: Total War* and *Total War* are trademarks of their respective owners.
 
 ## Contributing
 
@@ -16,51 +16,47 @@ Contributions are welcome. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before you 
 - **If you use an AI assistant, have it follow the project workflow:** the rules in [`CLAUDE.md`](CLAUDE.md) and the ghidra-mcp workflow guides in that repository's `docs/prompts/`.
 - **Never commit files from the original game or decompiled code.** Describe the behaviour in the notes, then write new Rust from that description.
 
----
-
 ## Project status
 
 **Early and in active development. Not playable as a full game yet.**
 
 What works today:
 
-- **Main menu.** It is rebuilt from the original game's own menu layouts, fonts, art and UI scripts. You can browse campaigns, historical battles, the Load Game page and Options.
-- **Campaign map.** It shows terrain, borders, rivers, roads, settlements and armies. Turns can be ended, and the AI factions take their turns. Armies move with the original pathfinding rules. Taxes, trade, research, construction, recruitment, diplomacy and agents run on the original formulas, and much of this has been checked against the original game.
-- **Settlement and campaign screens.** These include the settlement panel with building and recruitment, the building tree, the capture screen, and the government, technology, objectives and diplomacy lists.
-- **3D land battles.** Battles play on the original battle maps with original buildings and trees. Infantry and cavalry are fully animated, with shooting, melee, morale, fatigue, charges and the battle AI. About 175 frames per second with 2,000 soldiers on screen.
-- **Saving and loading** of campaigns, in the original save format.
-- **Original intro movies and music.** The game's Bink videos are played by our own decoder.
+- **Main menu**, built from the original's own layouts, fonts, art and UI scripts: campaigns, historical battles, Load Game and Options, after the original intro movies.
+- **Campaign map** with terrain, borders, rivers, roads, settlements, armies and fleets. Turns end and the AI factions play theirs. Armies and fleets move by the original pathfinding, including ports, landings and zones of control. Taxes, trade, research, construction, recruitment, diplomacy and agents run on the original formulas, many of them checked against saves from the original.
+- **Campaign screens**: the settlement panel with building and recruitment, the building tree, the capture screen, the army panel, and the government, technology, objectives, diplomacy and Lists screens.
+- **3D land battles** on the original battle maps, with their buildings and trees. Infantry and cavalry are fully animated, with shooting, melee, morale, fatigue, charges, routing and the battle AI, at about 175 frames per second with 2,000 soldiers on screen. The historical battles run with their original scripts.
+- **Saves**: campaigns save and load, and every save made by the original game can be read.
+- **Video and music**: the game's Bink movies play through our own decoder, and the original music plays in battle.
 
-Still to come, among other things: naval battles, the full battle interface, many campaign screens, multiplayer, mod loading and final graphics. The detailed list lives in [`docs/BACKLOG.md`](docs/BACKLOG.md).
+Not there yet: campaign battles started from the map, naval battles, siege battles, the full battle interface, several campaign screens, final graphics and effects, multiplayer and mod loading. Everything left is listed in [`docs/BACKLOG.md`](docs/BACKLOG.md), with a progress table at the top.
 
 ## Goals
 
 1. **Complete.** The whole game: menus, the campaign, land and sea battles, multiplayer, saves, settings, the advisor, video, audio and UI scripting.
-2. **Faithful.** The same formulas, constants, random numbers, turn order and data as the original. Screens are built from the original layout files, not redrawn by hand. Anything not yet matched to the original is clearly marked `PROVISIONAL` or `PLACEHOLDER` in the code until it is.
-3. **Moddable.**
-   - Mods made for the original game (`.pack` files and `user.script.txt` mod lines) should load and behave the same way.
-   - A content folder will let you add or override data, text, textures, models, scripts and maps, with a clear load order.
-   - Common open formats will be accepted alongside the original ones, such as glTF models and higher-resolution textures.
-4. **Multiplayer** between copies of Napoleon Total War Rust Rewrite, using its own networking. It will not connect to the original game's multiplayer.
-
-Napoleon Total War Rust Rewrite has no Steam integration: no achievements, overlay or Steam API.
+2. **Faithful.** The same formulas, constants, random numbers, turn order and data as the original. Screens are built from the original layout files, never redrawn by hand.
+3. **Moddable.** Mods for the original (`.pack` files and `user.script.txt` mod lines) will load the same way. A content folder will let you add or override data, text, textures, models, scripts and maps, and open formats such as glTF models and higher-resolution textures will work alongside the original ones.
+4. **Its own multiplayer.** It does not connect to the original game's multiplayer, and there is no Steam integration.
 
 ## How it is built
 
-The original game's behaviour is studied, written down in plain-language notes, and then implemented as new Rust code. File formats are documented from the game's own files. Rules and formulas are documented by analysing how the original game works, then tested against data and saves produced by the original. The project contains no code or assets from the original game.
+The original game's behaviour is studied, written down in plain-language notes, and then implemented as new Rust code. File formats are worked out from the game's own files; rules and formulas from its executable, then tested against data and saves from the original. The project contains no code or assets from the original game.
 
-Every finding in the notes is tagged by confidence:
+Every finding and every piece of code is tagged by how certain it is:
 
 | Tag | Meaning |
 |---|---|
 | `CONFIRMED` | Verified against the original game |
-| `INFERRED` | Strongly suggested by the evidence, not fully proven |
+| `INFERRED` | Suggested by the evidence, not yet proven |
 | `UNKNOWN` | Not yet worked out |
+| `PROVISIONAL` / `PLACEHOLDER` | Code standing in until the original's behaviour is matched |
+
+An item counts as done only when none of its code carries an `INFERRED`, `PROVISIONAL` or `PLACEHOLDER` tag.
 
 ## Requirements
 
 - **Windows.**
-- **Your own copy of Napoleon: Total War** from Steam. It is read from `C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War`; set `NAPOLEON_INSTALL_DIR` if yours is somewhere else.
+- **Napoleon: Total War** from Steam. It is read from `C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War`; set `NAPOLEON_INSTALL_DIR` if yours is somewhere else.
 - **Rust** stable, 1.95 or newer, installed through [rustup](https://rustup.rs).
 
 ## Building and running
@@ -69,9 +65,15 @@ Every finding in the notes is tagged by confidence:
 cargo run -p napoleon
 ```
 
-This starts at the intro movies and the main menu. Add `--release` for full speed; debug builds stay playable.
+This plays the intro movies and opens the main menu. Add `--release` for full speed; debug builds stay playable.
 
 ### Command-line options
+
+These are for testing and jump past the menus. Pass them after `--`:
+
+```bash
+cargo run -p napoleon -- --campaign eur_napoleon --campaign-faction france
+```
 
 | Option | What it does |
 |---|---|
@@ -84,42 +86,34 @@ This starts at the intro movies and the main menu. Add `--release` for full spee
 | `--no-intro` | Skips the intro movies. |
 | `--screenshot <file.png>` | Saves a screenshot and exits, for automated checks. |
 
-Pass them after `--`, for example:
-
-```bash
-cargo run -p napoleon -- --campaign eur_napoleon --campaign-faction france
-```
-
 ### Running the tests
 
 ```bash
 cargo test --workspace
 ```
 
-Some slower tests read the full game install and are skipped by default. Run them with `-- --ignored`.
+Tests that read the game install skip themselves when it isn't found. The slowest ones are ignored by default; run them with `cargo test --workspace -- --ignored`.
 
 ## Repository layout
 
-The game is split into several Rust crates, each with one job:
-
 | Crate | Purpose |
 |---|---|
-| [`ntw_formats`](crates/ntw_formats) | Read-only readers for the original file formats: `.pack` archives, database tables, text, models, textures, animations, maps, UI layouts, fonts and more |
+| [`ntw_formats`](crates/ntw_formats) | Readers for the original file formats: `.pack` archives, database tables, text, models, textures, animations, maps, UI layouts, fonts, video and more |
 | [`ntw_data`](crates/ntw_data) | Typed game records (units, factions, buildings and so on) built from the database tables |
-| [`ntw_sim`](crates/ntw_sim) | The deterministic game simulation for battles and the campaign. It has no graphics code and is fully unit-tested |
-| [`ntw_campaign`](crates/ntw_campaign) | Builds a campaign from the original start positions and save files, and writes saves |
-| [`ntw_script`](crates/ntw_script) | The Lua 5.1 scripting layer: campaign events, the game interface for scripts, and the UI scripts |
+| [`ntw_sim`](crates/ntw_sim) | The deterministic simulation for battles and the campaign, with no graphics code |
+| [`ntw_campaign`](crates/ntw_campaign) | Builds a campaign from the original start positions and saves, and writes saves |
+| [`ntw_script`](crates/ntw_script) | The Lua 5.1 layer: campaign and battle scripts, and the UI scripts |
 | [`ntw_ai`](crates/ntw_ai) | The battle AI and the campaign AI |
-| [`napoleon`](crates/napoleon) | The Bevy program you actually run: rendering, input, audio, video and screens |
+| [`napoleon`](crates/napoleon) | The program you run: rendering, input, audio, video and screens |
 
 Other folders:
 
-- [`analysis/`](analysis) holds the research notes: file formats, game rules, open questions, and standalone research tools.
-- [`docs/`](docs) holds the design document, the architecture report, the backlog, and a checklist for comparing Napoleon Total War Rust Rewrite against the original game.
+- [`analysis/`](analysis): the research notes, one folder per system, with what is known about the original and how certain it is.
+- [`docs/`](docs): the backlog, the design and architecture documents, and a checklist for comparing against the original.
+- [`tools/`](tools): helper scripts, such as counting the remaining tags and screenshotting the original for side-by-side checks.
 
 ## License
 
-The source code is dual-licensed under the MIT License ([LICENSE-MIT](LICENSE-MIT)) or the Apache License 2.0 ([LICENSE-APACHE](LICENSE-APACHE)), at your option, as declared in `Cargo.toml`.
+The source code is dual-licensed under the MIT License ([LICENSE-MIT](LICENSE-MIT)) or the Apache License 2.0 ([LICENSE-APACHE](LICENSE-APACHE)), at your option.
 
-This license covers Napoleon Total War Rust Rewrite's own code and notes only. It grants no rights to Napoleon: Total War or any of its content.
-
+This covers the project's own code and notes only. It grants no rights to Napoleon: Total War or any of its content.
