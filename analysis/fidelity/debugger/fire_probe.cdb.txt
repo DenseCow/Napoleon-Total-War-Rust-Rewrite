@@ -1,0 +1,16 @@
+.logopen <path>ire_log.txt
+.echo NapoleonRust fire probe attached
+lm m Napoleon
+r $t0=0
+r $t1=0
+r $t2=0
+sxi ld
+sxi ud
+sxi ct
+sxi et
+sxi av
+sxi eh
+bp Napoleon+0x405B80 "r $t0=@$t0+1; .if (@$t0 <= 400) {.echo ==FIRE_ENTER==; r ecx; r $t0; kb 16} .else {.if (@$t0 == 401) {.echo ==DONE==; .logclose; qd}}; gc"
+bp Napoleon+0x1DFA90 "r $t1=@$t1+1; .if (@$t1 <= 150) {.echo ==GIVE_FIRE==; r ecx; kb 16}; gc"
+bp Napoleon+0x262E90 "r $t2=@$t2+1; .if (@$t2 <= 150) {.echo ==ENGAGE==; r ecx; kb 16}; gc"
+g

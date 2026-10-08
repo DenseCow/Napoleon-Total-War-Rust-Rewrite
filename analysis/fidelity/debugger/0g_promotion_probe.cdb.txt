@@ -1,0 +1,131 @@
+* =====================================================================================
+* 0-G promotion probe: what a field promotion actually charges (vanilla Napoleon: Total War)
+* Hand-written breakpoint script (ours). It READS ONLY: every breakpoint logs with .printf /
+* du and continues with gc. Nothing here writes game memory or registers. The self-checks
+* (cargo test -p ntw_data --test probe_script) reject any other command.
+* -------------------------------------------------------------------------------------
+* Comments in this file are '*' lines. cdb treats '*' as a comment to the end of the line,
+* semicolons included. ('$$' comments end at the first ';', and a line starting '#' is
+* cdb's disassembly search command, so neither is used.)
+*
+* WHAT IT IS FOR. The static reading (0-G rounds 1-3, Ghidra, decompiles NOT kept in the
+* repo, so INFERRED until this probe logs it) is:
+*   * the land unit class's cost slot +0x44 is 0x008E2770, which looks a value up through
+*     0x008E27D0 and the string hash 0x00F9C2A0, keyed by agent-type name + the human
+*     faction's subculture, and returns -1 with no record; no rank or distance input;
+*   * the naval class's slot +0x44 returns 0, so a naval promotion is free;
+*   * both promotion executors pass that value to the treasury spend 0x00BAF500.
+* The probe logs the value, the spend and the key, and so settles all three.
+* -------------------------------------------------------------------------------------
+* HOW TO RUN (one sitting, about ten minutes; the run sheet is
+* 0G_PROMOTION_PROBE_2026-10-05.md next to this file)
+*   0. From the repo root, create target\tmp\gh\ if it does not exist. The log path below
+*      is relative, so run cdb FROM THE REPO ROOT.
+*   1. Launch Napoleon: Total War as normal and reach the campaign map.
+*   2. Attach (x86 cdb from the Windows SDK; -pn needs the game already running):
+*        cdb -pn Napoleon.exe -pd -cf analysis\fidelity\debugger\0g_promotion_probe.cdb.txt
+*   3. END TURN until your faction has `promote_general_in_field` (army) and/or
+*      `promote_admiral_at_sea` (navy). Without it the promote button is never offered.
+*   4. Promote, noting what you clicked and what the tooltip said each time:
+*      A. LAND, twice, two different unit types, each commanded by a plain colonel.
+*      B. LAND, a unit whose colonel has command stars, if you have one.
+*      C. NAVAL, a ship commanded by a captain (the static reading says 0).
+*   5. Quit the game. Send back target\tmp\gh\promotion_probe.log, the whole file.
+*
+* READING THE LOG
+*   * `ARMED <name>`: printed once as each bp is SET, before the game runs on; 21 in all,
+*     then cdb's own `bl` listing. A missing ARMED line, or a bl entry marked unresolved,
+*     names the breakpoint cdb refused.
+*   * `PRICE land=`: the value the land cost slot returns. Two land promotions giving the
+*     SAME number => one figure per (agent type, subculture); different => it follows the
+*     unit.
+*   * `PAY amount= reason=`: the treasury spend. It must equal PRICE. `PAY amount=0` after
+*     `EXEC-NAVAL` confirms a naval promotion is free.
+*   * `CHAIN` / `HASH`: the pointer chain and key behind a price. The chain past `rec` is a
+*     guess; a broken one shows as ????????, never as a plausible wrong number.
+*   * `COST44-NORECORD`: no record for that pair, the slot returns -1. An answer, not a
+*     failure.
+*   * `POOL-TAKE`: the counter at +0x6C both promotions and both hires touch. Not the
+*     treasury, not the price.
+*   * The treasury spend, the hash and POOL-TAKE are also hit OUTSIDE the promote path
+*     (other spends, other lookups), so expect extra PAY / HASH lines and a slower game
+*     while attached. Read the lines between an EXEC-* line and its PROMOTE line.
+* -------------------------------------------------------------------------------------
+* ASLR: every address is Napoleon+(static VA - 0x400000). The subtraction is by hand, so
+* `cargo test -p ntw_data --test probe_script` re-derives each offset from the table in
+* crates/ntw_data/src/debugger.rs and fails on any disagreement. Run it first.
+* =====================================================================================
+
+.logopen target\tmp\gh\promotion_probe.log
+.echo === 0-G promotion probe: setting breakpoints ===
+
+* 1. The land cost slot 0x008E2770 (the land unit class's vtable slot +0x44). Entry, then its
+*    two returns, four bytes apart: 0x008E279C returns the value, 0x008E27A0 returns -1.
+bp Napoleon+0x4E2770 ".printf \"COST44-ENTER this=%x rec=%x agenttype=%d\n\", @ecx, poi(@ecx+0x40), poi(poi(@ecx+0x40)+8); gc"
+.printf "ARMED cost44-enter\n"
+bp Napoleon+0x4E279C ".printf \"PRICE land=%d rec=%x\n\", @eax, @ecx; gc"
+.printf "ARMED price-land\n"
+bp Napoleon+0x4E27A0 ".printf \"COST44-NORECORD (-1, no record)\n\"; gc"
+.printf "ARMED cost44-norecord\n"
+
+* 2. The naval pair, slots +0x38 (0x008E27B0) and +0x3C (0x008E2A60), the same two-return
+*    shape. Comparison only.
+bp Napoleon+0x4E27B0 ".printf \"COST38-ENTER this=%x\n\", @ecx; gc"
+.printf "ARMED cost38-enter\n"
+bp Napoleon+0x4E27BC ".printf \"COST38-VALUE value=%d\n\", @eax; gc"
+.printf "ARMED cost38-value\n"
+bp Napoleon+0x4E27C0 ".printf \"COST38-NORECORD (-1)\n\"; gc"
+.printf "ARMED cost38-norecord\n"
+bp Napoleon+0x4E2A60 ".printf \"COST3C-ENTER this=%x\n\", @ecx; gc"
+.printf "ARMED cost3c-enter\n"
+bp Napoleon+0x4E2A6C ".printf \"COST3C-VALUE value=%d\n\", @eax; gc"
+.printf "ARMED cost3c-value\n"
+bp Napoleon+0x4E2A70 ".printf \"COST3C-NORECORD (-1)\n\"; gc"
+.printf "ARMED cost3c-norecord\n"
+
+* 3. The record lookup 0x008E27D0 at its two exits (the agent type is at esp+0x2C there: the
+*    frame is SUB ESP,0x1C and four register pushes).
+bp Napoleon+0x4E297F ".printf \"LOOKUP agenttype=%d value=%x\n\", poi(@esp+0x2c), @eax; gc"
+.printf "ARMED lookup-found\n"
+bp Napoleon+0x4E2989 ".printf \"LOOKUP agenttype=%d NOTFOUND\n\", poi(@esp+0x2c); gc"
+.printf "ARMED lookup-missing\n"
+
+* 4. The string hash 0x00F9C2A0: entry (the map and its key) and the found node (the chain to
+*    the price).
+bp Napoleon+0xB9C2A0 ".printf \"HASH this=%x buckets=%d array=%x key=\", @ecx, poi(@ecx+0x3c), poi(@ecx+0x40); du poi(poi(@esp+4)); .echo; gc"
+.printf "ARMED hash-entry\n"
+bp Napoleon+0xB9C358 ".printf \"CHAIN node=%x key=\", @esi; du poi(@esi+8); .printf \"  value=%x rec=%x rec2=%x price=%x\n\", poi(@esi+0x14), poi(poi(@esi+0x14)+0x2c), poi(poi(poi(@esi+0x14)+0x2c)), poi(poi(poi(poi(@esi+0x14)+0x2c))); gc"
+.printf "ARMED hash-node\n"
+
+* 5. The treasury spend 0x00BAF500(amount, reason).
+bp Napoleon+0x7AF500 ".printf \"PAY econ=%x amount=%d reason=%d\n\", @ecx, poi(@esp+4), poi(@esp+8); gc"
+.printf "ARMED treasury\n"
+
+* 6. 0x008F35E0, the +0x6C counter both promotions and both hires touch.
+bp Napoleon+0x4F35E0 ".printf \"POOL-TAKE this=%x arg=%d have=%d\n\", @ecx, poi(@esp+4), poi(@ecx+0x6c); gc"
+.printf "ARMED pool-take\n"
+
+* 7. The two promotion executors: 0x008E1C20 land, 0x008E2260 naval.
+bp Napoleon+0x4E1C20 ".printf \"EXEC-LAND this=%x\n\", @ecx; gc"
+.printf "ARMED exec-land\n"
+bp Napoleon+0x4E2260 ".printf \"EXEC-NAVAL this=%x\n\", @ecx; gc"
+.printf "ARMED exec-naval\n"
+
+* 8. The promote gate 0x009E0AF0 (entry only; its result is not logged, and what it tests
+*    is UNKNOWN).
+bp Napoleon+0x5E0AF0 ".printf \"GATE this=%x\n\", @ecx; gc"
+.printf "ARMED gate\n"
+
+* 9. 0x00A1A2E0: sets the character's agent record and fires CharacterPromoted.
+bp Napoleon+0x61A2E0 ".printf \"PROMOTE record=%x\n\", poi(@esp+4); gc"
+.printf "ARMED promote\n"
+
+* 10. The pool hires, for comparison: 0x00A164C0 a General, 0x00A16110 an admiral.
+bp Napoleon+0x6164C0 ".printf \"HIRE-GENERAL pool=%x\n\", @ecx; gc"
+.printf "ARMED hire-general\n"
+bp Napoleon+0x616110 ".printf \"HIRE-ADMIRAL pool=%x\n\", @ecx; gc"
+.printf "ARMED hire-admiral\n"
+
+bl
+.echo === all 21 breakpoints set; continuing ===
+g

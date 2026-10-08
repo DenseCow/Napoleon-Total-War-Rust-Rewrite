@@ -1,0 +1,12 @@
+[package]
+name = "terrain_tools"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Read-only research tool for battlefield terrain (Worker 5). Uses ntw_formats as a library.
+[dependencies]
+ntw_formats = { path = "../../../crates/ntw_formats" }
+
+# Stand-alone: not a member of the main workspace.
+[workspace]

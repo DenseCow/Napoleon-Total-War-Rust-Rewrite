@@ -1,0 +1,13 @@
+[package]
+name = "ntw_campaign"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ntw_formats = { path = "../ntw_formats" }
+ntw_sim = { path = "../ntw_sim" }
+ntw_data = { path = "../ntw_data" }
+# Warnings the save writer logs (the game routes `log` records into its own log).
+log = "0.4"

@@ -1,0 +1,116 @@
+# Claims on BACKLOG work (CONTRIBUTING.md §3), so two people never do the same item.
+#   check    a claim issue gets its section:N label; when it overlaps the maintainer's work (the
+#            pinned maintainer-claim issue, rebuilt from the maintainer's BACKLOG by
+#            tools/claims.sh sync) or another open claim, one comment and the needs-maintainer label.
+#   unclaim  the claimer (or a maintainer) comments /unclaim: the claim closes and the item is free.
+#   stale    daily: a claim with no activity for 14 days goes stale and closes 7 days later. A claim
+#            with an open pull request that closes it (label linked-pr) never goes stale.
+# Security: issue and comment text never reach a shell through ${{ }}: only numbers and names go in
+# through env, and tools/claims.sh reads the text with gh and only compares it. The only code that
+# runs is main's own tools/claims.sh (issue events run the default branch's workflow and checkout
+# takes main); /unclaim runs no repository code. The token can only write issues.
+name: Claims
+
+on:
+  issues:
+    types: [opened, reopened, edited, labeled]
+  issue_comment:
+    types: [created]
+  schedule:
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    name: Check claim
+    # Only this repository (not forks or the private copy); `labeled` only when the claim label
+    # itself is added, so the labels this job adds don't start it again.
+    if: >-
+      github.repository == 'DenseCow/Napoleon-Total-War-Rust-Rewrite' &&
+      github.event_name == 'issues' &&
+      (github.event.action != 'labeled' || github.event.label.name == 'claim') &&
+      contains(github.event.issue.labels.*.name, 'claim') &&
+      !contains(github.event.issue.labels.*.name, 'maintainer-claim')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # One run per issue at a time, so a quick edit can't post the overlap comment twice.
+    concurrency:
+      group: claims-${{ github.event.issue.number }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+          sparse-checkout: tools/claims.sh
+          sparse-checkout-cone-mode: false
+      - name: Label and check the claim
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NR_PUBLIC_REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: bash tools/claims.sh check "$ISSUE"
+
+  unclaim:
+    name: Release claim
+    if: >-
+      github.repository == 'DenseCow/Napoleon-Total-War-Rust-Rewrite' &&
+      github.event_name == 'issue_comment' &&
+      !github.event.issue.pull_request &&
+      github.event.issue.state == 'open' &&
+      contains(github.event.issue.labels.*.name, 'claim') &&
+      !contains(github.event.issue.labels.*.name, 'maintainer-claim') &&
+      startsWith(github.event.comment.body, '/unclaim') &&
+      (github.event.comment.user.login == github.event.issue.user.login ||
+       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Close the claim
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: >-
+          timeout 30 gh issue close "$ISSUE" -R "$REPO" --reason "not planned"
+          --comment "Released with /unclaim: this BACKLOG work is open again for anyone to claim."
+
+  stale:
+    name: Stale claims
+    if: >-
+      github.repository == 'DenseCow/Napoleon-Total-War-Rust-Rewrite' &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+          sparse-checkout: tools/claims.sh
+          sparse-checkout-cone-mode: false
+      - name: Label claims that have an open pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NR_PUBLIC_REPO: ${{ github.repository }}
+        run: bash tools/claims.sh mark-linked
+      - uses: actions/stale@1e223db275d687790206a7acac4d1a11bd6fe629 # v10.4.0
+        with:
+          only-issue-labels: claim
+          exempt-issue-labels: maintainer-claim,linked-pr
+          days-before-issue-stale: 14
+          days-before-issue-close: 7
+          days-before-pr-stale: -1
+          days-before-pr-close: -1
+          stale-issue-label: stale
+          close-issue-reason: not_planned
+          stale-issue-message: >-
+            This claim has had no activity for 14 days (no comment, edit or open pull request).
+            If you are still on it, comment here; otherwise comment `/unclaim` or close it.
+            It closes in 7 days and the work becomes free for others (CONTRIBUTING.md §3).
+          close-issue-message: >-
+            Closed after 21 days without activity: this BACKLOG work is open again for anyone to
+            claim. If you pick it up again, open a new claim (CONTRIBUTING.md §3).

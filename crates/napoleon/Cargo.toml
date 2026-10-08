@@ -1,0 +1,29 @@
+[package]
+name = "napoleon"
+description = "NapoleonRust: the Bevy game program (the .exe you run)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Bevy: the game engine (window, rendering, input, ECS). Version chosen and verified in Phase 3.
+bevy = { version = "0.19.1", features = ["jpeg"] }
+# Our own crates: the game rules and the game data.
+ntw_sim = { path = "../ntw_sim" }
+ntw_data = { path = "../ntw_data" }
+# File readers (packs, DB tables, .rigid_model, .dds) for the model viewer.
+ntw_formats = { path = "../ntw_formats" }
+# The UI script host (runs the original front-end Lua) and its component tree.
+ntw_script = { path = "../ntw_script" }
+ntw_campaign = { path = "../ntw_campaign" }
+# The battle AI (controls the non-player army, `--ai on|off`).
+ntw_ai = { path = "../ntw_ai" }
+# Lua, for the campaign HUD's engine bindings (same version and features as ntw_script).
+mlua = { version = "0.12", features = ["lua51", "vendored"] }
+# Audio sources for Bevy (same version Bevy uses; we implement our own rodio::Source).
+rodio = { version = "0.22", default-features = false }
+
+[dev-dependencies]
+# The in-memory sound test files for the audio tests.
+ntw_formats = { path = "../ntw_formats", features = ["test-files"] }

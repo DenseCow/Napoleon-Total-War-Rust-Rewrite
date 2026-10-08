@@ -1,0 +1,29 @@
+# NapoleonRust workspace root.
+# Each folder under crates/ is one Rust "crate" (a library or a program).
+[workspace]
+resolver = "3"
+# The research tools under analysis/ are standalone projects, not part of the game.
+exclude = ["analysis"]
+members = [
+    "crates/ntw_formats",   # byte-level readers for the original file formats (read-only)
+    "crates/ntw_sim",       # deterministic game simulation (no Bevy, fully unit-tested)
+    "crates/ntw_data",      # typed game records (units, factions...) built from the DB tables
+    "crates/ntw_campaign",  # builds a campaign from startpos.esf / save files
+    "crates/ntw_script",    # Lua 5.1 scripting layer (events, game_interface, conditions, effect)
+    "crates/ntw_ai",        # battle AI and campaign AI (reads the sim, issues orders through its command APIs)
+    "crates/napoleon",      # the Bevy game program (the .exe you run)
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[profile.dev]
+opt-level = 1            # keeps debug builds reasonably fast
+debug = "line-tables-only"  # file:line in backtraces; full debug info filled the disk (2026-10-03)
+
+[profile.dev.package."*"]
+opt-level = 3            # dependencies (e.g. Bevy later) are compiled optimized
+debug = false            # no debug info for dependencies (Bevy alone was many GB per build folder)

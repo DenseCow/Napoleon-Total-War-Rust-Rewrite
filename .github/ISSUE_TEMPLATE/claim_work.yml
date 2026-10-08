@@ -1,0 +1,45 @@
+name: Claim a BACKLOG item
+description: Say which BACKLOG section, subsection or item you are taking, so two people don't do the same work. First check the open claim issues, including the pinned one the maintainer keeps.
+title: "Claim: §"
+labels: [claim]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Claim a whole section, one subsection (a `###` header such as `0-D`) or one item of [`docs/BACKLOG.md`](https://github.com/DenseCow/Napoleon-Total-War-Rust-Rewrite/blob/main/docs/BACKLOG.md). A bot labels the claim with its section and, if it overlaps work the maintainer holds or another open claim, comments once and adds `needs-maintainer`: then wait for the maintainer. A claim with no activity (comment, edit or an open pull request that closes it) for 14 days goes stale and closes 7 days later. Release it early by closing it or commenting `/unclaim`. Put `Closes #<this issue>` in your pull request so merging it closes the claim.
+  - type: dropdown
+    id: section
+    attributes:
+      label: Section
+      options:
+        - "§0 Cross-cutting fidelity"
+        - "§1 File formats and data"
+        - "§2 Graphics and rendering"
+        - "§3 Battle gameplay (land)"
+        - "§4 Naval battles"
+        - "§5 Campaign gameplay"
+        - "§6 AI"
+        - "§7 User interface"
+        - "§8 Video (Bink)"
+        - "§9 Audio"
+        - "§10 Multiplayer"
+        - "§11 Modding"
+        - "§12 Platform, release and quality"
+        - "Polish"
+    validations:
+      required: true
+  - type: input
+    id: subsection
+    attributes:
+      label: Subsection
+      description: 'The first word of a `###` header in that section, e.g. "0-D". Leave blank for none.'
+  - type: input
+    id: item
+    attributes:
+      label: Item
+      description: The item's line copied from docs/BACKLOG.md. Leave blank to claim the whole section or subsection.
+  - type: textarea
+    id: plan
+    attributes:
+      label: Plan
+      description: What you will trace in Ghidra, which notes you will update, how you will check it.

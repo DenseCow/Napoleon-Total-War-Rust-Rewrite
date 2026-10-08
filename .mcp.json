@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "ghidra-mcp": {
+      "type": "stdio",
+      "command": "C:/ghidra-mcp-setup/ghidra-mcp/.venv/Scripts/bridge-mcp-ghidra.exe",
+      "args": ["--transport", "stdio", "--default-groups", "listing,function,program,xref,comment,symbol"],
+      "env": {
+        "GHIDRA_MCP_URL": "http://127.0.0.1:8089",
+        "GHIDRA_MCP_REQUIRE_PROGRAM_SELECTORS": "1",
+        "PYTHONIOENCODING": "utf-8"
+      }
+    }
+  }
+}

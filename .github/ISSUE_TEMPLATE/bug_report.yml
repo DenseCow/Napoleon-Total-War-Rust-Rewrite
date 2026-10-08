@@ -1,0 +1,22 @@
+name: Bug or difference from the original
+description: "Something crashes, or behaves differently from Napoleon: Total War."
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens, and what the original does instead
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: The exact command (e.g. `cargo run -p napoleon -- --campaign eur_napoleon --campaign-faction france`) and the steps.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Screenshots of ours and the original, log lines, the commit you ran. No game files.
