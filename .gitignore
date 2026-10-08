@@ -1,0 +1,40 @@
+# ---- Build output (huge, rebuildable) ----
+/target/
+/target-*/
+**/target/
+**/target_*/
+**/target-*/
+
+# ---- NEVER upload: contains a disassembled copy of Creative Assembly's Napoleon.exe ----
+**/ghidra_project/
+# Raw decompiler output (bulk reconstructed code from the original exe)
+**/ghidra_out/
+*.gpr
+*.rep/
+
+# ---- Bulk data extracted from the game (copyrighted text/tables) ----
+# Our own reports (*.md) and code are uploaded. Bulk dumps stay local.
+analysis/**/*.txt
+analysis/**/*.tsv
+analysis/**/*.csv
+analysis/**/*.log
+analysis/**/*.bin
+analysis/**/*.dat
+analysis/**/pack_indexes/
+# Small, hand-curated summaries that are safe and useful to keep:
+!analysis/**/lua_api.txt
+!analysis/**/rtti_classes.txt
+# Hand-written debugger probe scripts (breakpoint lists we wrote, not exe's output):
+!analysis/**/debugger/*.cdb.txt
+
+# ---- No Python in this project (old helper scripts are being retired) ----
+*.py
+__pycache__/
+
+# ---- Editor / OS junk ----
+.vs/
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini

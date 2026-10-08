@@ -1,0 +1,26 @@
+# RTTI classes recovered from Napoleon.exe by re_tools rtti (Rust). CONFIRMED byte-level structures.
+# columns: demangled_name | TD_va | vtables[va(+offset,methods)] | direct_bases | all_bases(BCA order) | raw
+IdvFileError | 0x0146d22c |  |  |  | .?AVIdvFileError@@
+IdvRuntimeError | 0x0146d2b8 |  |  |  | .?AVIdvRuntimeError@@
+_com_error | 0x0146d0e0 |  |  |  | .?AV_com_error@@
+std::_Crt_new_delete | 0x0146d35c |  |  |  | .?AU_Crt_new_delete@std@@
+std::_Facet_base | 0x0146d2f8 | 0x01446574(+0,3m) |  |  | .?AV_Facet_base@std@@
+std::_System_error | 0x0146d2d8 | 0x01445a6c(+0,2m) | std::runtime_error | std::runtime_error, std::exception | .?AV_System_error@std@@
+std::bad_alloc | 0x0146d114 | 0x01431814(+0,2m) | std::exception | std::exception | .?AVbad_alloc@std@@
+std::bad_exception | 0x0146d1cc | 0x014424a8(+0,2m) | std::exception | std::exception | .?AVbad_exception@std@@
+std::basic_string<char,std::char_traits<char>,std::allocator<char>> | 0x0146d248 |  |  |  | .?AV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@
+std::ctype<char> | 0x0146d3a0 | 0x0144663c(+0,11m) | std::ctype_base | std::ctype_base, std::locale::facet, std::_Facet_base, std::_Crt_new_delete | .?AV?$ctype@D@std@@
+std::ctype_base | 0x0146d380 |  |  |  | .?AUctype_base@std@@
+std::exception | 0x0146d130 | 0x01431808(+0,2m) |  |  | .?AVexception@std@@
+std::ios_base::failure | 0x0146d294 |  |  |  | .?AVfailure@ios_base@std@@
+std::length_error | 0x0146d16c | 0x0143183c(+0,2m) | std::logic_error | std::logic_error, std::exception | .?AVlength_error@std@@
+std::locale::_Locimp | 0x0146d318 | 0x01446584(+0,3m) | std::locale::facet | std::locale::facet, std::_Facet_base, std::_Crt_new_delete | .?AV_Locimp@locale@std@@
+std::locale::facet | 0x0146d33c |  |  |  | .?AVfacet@locale@std@@
+std::logic_error | 0x0146d14c | 0x01431830(+0,2m) | std::exception | std::exception | .?AVlogic_error@std@@
+std::num_get<char,std::istreambuf_iterator<char,std::char_traits<char>>> | 0x0146d3c0 | 0x0144666c(+0,14m) | std::locale::facet | std::locale::facet, std::_Facet_base, std::_Crt_new_delete | .?AV?$num_get@DV?$istreambuf_iterator@DU?$char_traits@D@std@@@std@@@std@@
+std::numpunct<char> | 0x0146d414 | 0x014466a8(+0,8m) | std::locale::facet | std::locale::facet, std::_Facet_base, std::_Crt_new_delete | .?AV?$numpunct@D@std@@
+std::out_of_range | 0x0146d18c | 0x01431848(+0,2m) | std::logic_error | std::logic_error, std::exception | .?AVout_of_range@std@@
+std::runtime_error | 0x0146d1ac | 0x01431854(+0,2m) | std::exception | std::exception | .?AVruntime_error@std@@
+stdext::bad_alloc | 0x0146d1ec |  |  |  | .?AVbad_alloc@stdext@@
+stdext::exception | 0x0146d20c |  |  |  | .?AVexception@stdext@@
+type_info | 0x0146d0fc | 0x014317f8(+0,1m) |  |  | .?AVtype_info@@

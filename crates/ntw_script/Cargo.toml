@@ -1,0 +1,29 @@
+[package]
+name = "ntw_script"
+description = "Lua 5.1 scripting layer: runs the original campaign scripts against the campaign model"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Lua 5.1 (the original's Lua version), compiled from the bundled official C source ("vendored").
+# Chosen in docs/DESIGN.md §3.5. mlua is the standard, maintained Rust binding for Lua.
+mlua = { version = "0.12", features = ["lua51", "vendored"] }
+# Our own crates: the campaign model the scripts drive, and the pack reader the scripts come from.
+ntw_sim = { path = "../ntw_sim" }
+ntw_formats = { path = "../ntw_formats" }
+# Save headers for the load-game page (read only).
+ntw_campaign = { path = "../ntw_campaign" }
+# The factions table for the campaign-selection page.
+ntw_data = { path = "../ntw_data" }
+# Remaining native stack, a safety net for UI state functions that nest very deep (host.rs).
+stacker = "0.1.25"
+
+[features]
+# `ui::test_support`, for this crate's own integration tests (enabled by the dev-dependency below),
+# kept out of the game's builds.
+test-support = []
+
+[dev-dependencies]
+ntw_script = { path = ".", features = ["test-support"] }

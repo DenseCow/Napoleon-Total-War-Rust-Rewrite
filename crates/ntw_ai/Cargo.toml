@@ -1,0 +1,20 @@
+[package]
+name = "ntw_ai"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The battle AI and the campaign AI. They READ the deterministic ntw_sim models and issue orders
+# only through ntw_sim's public command APIs (battle: Battle::order_*; campaign: CampaignCommand).
+# Their tuning comes from the original's DB tables (campaign_ai_*, cdir_*), loaded through
+# ntw_formats so that mods that change those tables take effect.
+
+[dependencies]
+ntw_sim = { path = "../ntw_sim" }
+ntw_formats = { path = "../ntw_formats" }
+ntw_data = { path = "../ntw_data" }
+ntw_script = { path = "../ntw_script" }
+
+[dev-dependencies]
+ntw_campaign = { path = "../ntw_campaign" }

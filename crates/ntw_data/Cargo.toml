@@ -1,0 +1,10 @@
+[package]
+name = "ntw_data"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ntw_formats = { path = "../ntw_formats" }
+ntw_sim = { path = "../ntw_sim" }
