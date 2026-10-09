@@ -652,8 +652,11 @@ fn click(hud: &mut CampaignHud, id: &str, sounds: &mut MessageWriter<crate::audi
 /// Settlement labels: each frame the HUD gets the camera position and the settlements on screen
 /// (projected from their map position), and the original Labels.lua (driven by the root layout's
 /// pulse) creates and moves the `city_info_bar` labels ("Settlement, Region" in the owner's
-/// colours). PROVISIONAL: the label sits at the settlement's projected ground point; settlements
-/// behind the HUD panels get no label; the one under the pointer is the nearest within 24 px.
+/// colours). The labels draw under every HUD panel: they are root children of priority -1 and
+/// the root's `OnAdoptChild` sorts its children by priority (CONFIRMED, see the host's
+/// `adopted`). PROVISIONAL: the label sits at the settlement's projected ground point;
+/// settlements behind the HUD panels get no label (whether `RetrieveVisibleEnitityDetails` leaves
+/// them out is UNKNOWN); the one under the pointer is the nearest within 24 px.
 /// Also reports the camera target and theatre to the HUD (`CameraTarget`, which the radar
 /// follows) and applies a camera move the HUD asked for (a radar click).
 pub fn labels(

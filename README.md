@@ -4,7 +4,7 @@ A remake of **Napoleon: Total War** (2010), written in Rust with the Bevy game e
 
 The aim is a complete, faithful 1:1 remake: the same campaign map and battles, the same rules and formulas, the same screens and the same behaviour as the original, in an open codebase that is easy to mod. The one deliberate difference is that the original engine's hard limits are gone (factions, regions, religions, units per army, unit and battle sizes). The defaults still match the original.
 
-Beyond the remake, the project is a complete modding platform: a new engine on which any Total War game can be built, with new maps, custom campaigns on new worlds, eras, factions, units and rules. Napoleon, played exactly like the original, is the first game on it. Original Napoleon mods keep working, and bugs found in the original are fixed (with an option to restore the original behaviour).
+Beyond the remake, the project is a complete modding platform: a new engine on which any Total War game can be built, with new maps, custom campaigns on new worlds, eras, factions, units and rules. Napoleon, played exactly like the original, is the first game on it. Original Napoleon mods keep working, and bugs found in the original are fixed.
 
 > **You need your own copy of Napoleon: Total War from Steam.** This project ships no game files. Every model, texture, sound, map and line of text is read at run time from your install, and that folder is never modified.
 

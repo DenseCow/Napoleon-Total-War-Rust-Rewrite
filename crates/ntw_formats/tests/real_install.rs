@@ -985,3 +985,20 @@ fn gait_blend_survey() {
     }
     assert!(fragments > 0);
 }
+
+/// The Priority values the campaign root sorts its children by (`OnAdoptChild` in
+/// `layout.root.lua`): the settlement label `city_info_bar` is -1, signed, so it sorts under the
+/// HUD (0) and under the Diplomatic Relations panel (47). Read as unsigned it was 4294967295 and
+/// the labels drew over every panel.
+#[test]
+#[ignore]
+fn label_and_panel_priorities_are_signed() {
+    use ntw_formats::ui_layout::UiLayout;
+    let vfs = Vfs::open_install(data_dir()).unwrap();
+    let top = |path: &str| {
+        let l = UiLayout::read(&vfs.read(path).unwrap()).unwrap();
+        l.root.children[0].priority
+    };
+    assert_eq!(top("ui/campaign ui/city_info_bar"), -1);
+    assert_eq!(top("ui/campaign ui/diplomatic_relations"), 47);
+}

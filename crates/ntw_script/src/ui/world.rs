@@ -254,9 +254,10 @@ impl UiWorld {
             .initial_state()
             .and_then(|s| comp.states.iter().position(|x| x.this == s.this))
             .unwrap_or(0);
+        let priority = self.inherited_priority(parent, comp.priority);
         let id = self.nodes.len();
         self.nodes.push(Some(UiNode {
-            data: UiComponent { children: Vec::new(), ..comp.clone() },
+            data: UiComponent { children: Vec::new(), priority, ..comp.clone() },
             state,
             visible: comp.visible,
             offset: (comp.offset.0 as f32, comp.offset.1 as f32),
@@ -291,7 +292,8 @@ impl UiWorld {
     /// `Component.CreateFromComponent` (list rows are copies of a hidden example row).
     /// The new nodes are listed in `created` in pre-order.
     pub fn clone_subtree(&mut self, src: NodeId, parent: Option<NodeId>, created: &mut Vec<NodeId>) -> Option<NodeId> {
-        let node = self.get(src)?.clone();
+        let mut node = self.get(src)?.clone();
+        node.data.priority = self.inherited_priority(parent, node.data.priority);
         let id = self.nodes.len();
         let kids = node.children.clone();
         self.nodes.push(Some(UiNode {
@@ -314,15 +316,34 @@ impl UiWorld {
         Some(id)
     }
 
-    /// Moves `child` to position `index` among its parent's children (draw order).
-    pub fn reorder(&mut self, child: NodeId, index: usize) {
-        let Some(p) = self.get(child).and_then(|c| c.parent) else { return };
-        if let Some(pn) = self.nodes[p].as_mut() {
-            pn.children.retain(|&c| c != child);
-            let i = index.min(pn.children.len());
-            pn.children.insert(i, child);
+    /// The priority a component made under `parent` takes: its own, or the parent's when that is
+    /// higher and the parent has a parent of its own (CONFIRMED: the constructor `0x0101E270` at
+    /// `0x0101F1A6` and the copy constructor `0x0101FC20` at `0x0101FDBC`). So the root's own
+    /// children keep their layout value and everything below them is at least at their level.
+    pub fn inherited_priority(&self, parent: Option<NodeId>, own: i32) -> i32 {
+        match parent.and_then(|p| self.get(p)) {
+            Some(p) if p.parent.is_some() => own.max(p.data.priority),
+            _ => own,
+        }
+    }
+
+    /// `ReorderChildren(list)` (CONFIRMED `0x01014850` → `0x01031ED0`): the new child order is
+    /// `list` followed by the children it leaves out, in their current order. It is applied only
+    /// when that comes to exactly the parent's child count, so a list with a duplicate or a
+    /// component that is not a child changes nothing. Returns whether it was applied. Children
+    /// draw in this order (`0x01027D20` walks them first to last).
+    pub fn reorder_children(&mut self, parent: NodeId, list: &[NodeId]) -> bool {
+        let Some(p) = self.get(parent) else { return false };
+        let mut order = list.to_vec();
+        order.extend(p.children.iter().filter(|c| !list.contains(c)));
+        if order.len() != p.children.len() {
+            return false;
+        }
+        if let Some(pn) = self.nodes[parent].as_mut() {
+            pn.children = order;
         }
         self.generation += 1;
+        true
     }
 
     /// Depth-first search for a descendant (or `from` itself) with this component id.
@@ -342,7 +363,8 @@ impl UiWorld {
         id
     }
 
-    /// Moves `child` under `parent` (last in draw order). CONFIRMED name `Adopt`; order INFERRED.
+    /// Moves `child` under `parent`, last in draw order (CONFIRMED: `Adopt` → `0x01024F70` with
+    /// index -1, which appends).
     pub fn adopt(&mut self, parent: NodeId, child: NodeId) {
         if self.get(parent).is_none() || self.get(child).is_none() || parent == child {
             return;
@@ -627,6 +649,32 @@ mod tests {
         assert_eq!(w.destroy(other), vec![other]);
         assert_eq!(w.get(r).unwrap().children, vec![b]);
         assert_eq!(w.root_of(b), r);
+    }
+
+    /// A component takes its parent's priority when that is higher, except under the root
+    /// (`0x0101E270` / `0x0101FC20`): a -1 label under the root stays -1, a child of a 47 panel
+    /// rises to 47, a higher one keeps its own; a copy follows the parent it is copied under.
+    #[test]
+    fn priority_is_inherited_below_the_roots_children() {
+        let mut root = comp("root", 100, 100, (0, 0), 0);
+        let mut panel = comp("panel", 50, 50, (0, 0), 0);
+        panel.priority = 47;
+        panel.children.push(comp("low", 10, 10, (0, 0), 0));
+        let mut high = comp("high", 10, 10, (0, 0), 0);
+        high.priority = 60;
+        panel.children.push(high);
+        root.children.push(panel);
+        let mut label = comp("label", 10, 10, (0, 0), 0);
+        label.priority = -1;
+        label.children.push(comp("name", 10, 10, (0, 0), 0));
+        root.children.push(label);
+        let mut w = UiWorld::new();
+        let r = w.instantiate(&root, None, "x", &mut Vec::new());
+        let prio = |w: &UiWorld, id: &str| w.get(w.find(r, id).unwrap()).unwrap().data.priority;
+        assert_eq!((prio(&w, "panel"), prio(&w, "low"), prio(&w, "high")), (47, 47, 60));
+        assert_eq!((prio(&w, "label"), prio(&w, "name")), (-1, 0), "the root's child keeps -1; its child keeps its own 0");
+        let copy = w.clone_subtree(w.find(r, "label").unwrap(), w.find(r, "panel"), &mut Vec::new()).unwrap();
+        assert_eq!(w.get(copy).unwrap().data.priority, 47, "copied under the panel");
     }
 
     /// The scripts' frame (`script_rect`): the root at its layout size, a top-level component and

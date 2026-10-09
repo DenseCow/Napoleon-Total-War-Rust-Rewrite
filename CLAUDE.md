@@ -64,8 +64,8 @@ large: grep for the section you need, and read that file's "Where I am" / "Next"
 - **Better where the original is broken (user, 2026-10-09):** the original's outdated systems (fixed tables,
   32-bit or single-thread limits, slow data structures) get our own better design that gives the same
   results. A gameplay bug in the original (a check that can never pass, data loaded but never applied, a
-  value written to the wrong field, an off-by-one, a crash) is fixed in ours by default, with a settings
-  toggle that restores the original's behaviour; all such toggles live in one place in the settings.
+  value written to the wrong field, an off-by-one, a crash) is fixed in ours (no toggle to
+  restore it; user, 2026-10-09).
   It counts as a bug only when traced in Ghidra and shown to contradict the exe's own data or intent,
   never because it seems unbalanced: balance and design choices stay 1:1. The analysis notes record the
   original's behaviour (exe address) and our fix; the code says `ORIGINAL BUG: <what> (0x...)`; worker

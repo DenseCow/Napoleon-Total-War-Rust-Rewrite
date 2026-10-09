@@ -137,8 +137,13 @@ pub struct UiComponent {
     pub properties: Vec<(String, String)>,
     /// Event bindings: (event name from [`EVENT_NAMES`], Lua function name).
     pub events: Vec<(String, String)>,
-    /// CONFIRMED (`"Priority"`, +0xE0): draw/input order among siblings.
-    pub priority: u32,
+    /// CONFIRMED (`"Priority"`, +0xE0, an `:int32` property in `0x0103A040`, compared signed):
+    /// the input layer (components below `g_nUIMinInputLayer` are greyed and get no input,
+    /// `0x01028DB0`) and the key the campaign and battle root scripts sort their children by in
+    /// `OnAdoptChild`, which is their draw order. `city_info_bar` (the settlement labels) has -1,
+    /// below every HUD panel. A component created under a parent that has a parent of its own
+    /// takes that parent's value when it is higher (`0x0101E270`, `0x0101FC20`).
+    pub priority: i32,
     /// Animations, version > 34.
     pub animations: Vec<UiAnimation>,
     /// Child components, in file order.
@@ -658,7 +663,7 @@ impl Reader<'_> {
                     break;
                 }
             }
-            c.priority = self.c.u32()?;
+            c.priority = self.c.u32()? as i32;
         }
         if v > 34 {
             for _ in 0..self.count(6)? {

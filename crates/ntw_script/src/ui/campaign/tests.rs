@@ -1896,3 +1896,24 @@ fn negotiation_sync_posts_only_on_a_count_change() {
     assert_eq!(log.iter().filter(|l| l.contains("negotiation counts went back")).count(), 1, "{log:?}");
     assert_eq!(ui.negotiation.borrow().target, None);
 }
+
+/// `InitialiseRegionInfoDetails(region)` answers the region info table (`0x009E69B0` →
+/// `0x009AF570`), whose `Name` region_details.lua puts in the panel's title. Bug: the call was an
+/// UNKNOWN stub, so the title kept the layout's " XXX Details".
+#[test]
+fn region_info_details_carry_the_region_name_for_the_title() {
+    let hud = test_hud();
+    let lua = hud.host.lua();
+    lua.globals().set("r", hud.region_addr(REGION)).unwrap();
+    let t: Table = lua.load("return CampaignUI.InitialiseRegionInfoDetails(r)").eval().unwrap();
+    // The fixture has no loc table: the name falls back to the key, as every region table's.
+    assert_eq!(t.get::<String>("Name").unwrap(), "test_region_10");
+    assert!(lua.load("return CampaignUI.InitialiseRegionInfoDetails(r).Address == r").eval::<bool>().unwrap());
+    assert_eq!(t.get::<String>("OwningFactionKey").unwrap(), HUMAN);
+    assert_eq!(t.get::<i64>("PopulationNumber").unwrap(), 1000);
+    assert_eq!(t.get::<String>("Population").unwrap(), "1000", "\"%d\" of the population (0x009FB8F0)");
+    assert_eq!(t.get::<String>("Settlement").unwrap(), "test_region_10");
+    assert!(hud.errors().is_empty(), "the call is bound, not an UNKNOWN stub");
+    let none: Value = lua.load("return CampaignUI.InitialiseRegionInfoDetails()").eval().unwrap();
+    assert!(none.is_nil());
+}

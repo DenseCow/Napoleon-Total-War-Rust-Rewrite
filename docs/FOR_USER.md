@@ -7,6 +7,13 @@ The morning report from night sessions, newest night first. Two lists per night:
 - **Done tonight:** everything finished, merged or settled. One line each: what, commit, how to see it.
   Claude clears a night's list once the user has read it.
 
+## Day of 2026-10-09 — needs you (batched; any time)
+
+- **Debugger sitting, gait (~10 min, next session):** the original under Ghidra's debugger, a custom land battle with line
+  infantry and cavalry. Claude logs two reads while you order cavalry to walk, then infantry walk → run → walk (the
+  reads and breakpoints are at the end of analysis/fidelity/UNITS_TERRAIN_FIDELITY.md §1.10). Settles why our
+  walk-ordered cavalry trots and which code switches infantry walk/run.
+
 ## Day of 2026-10-07 — needs you (batched; any time)
 
 ## Night of 2026-10-07

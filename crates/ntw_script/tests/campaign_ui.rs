@@ -1661,3 +1661,58 @@ fn leader_names_carry_the_regnal_numeral() {
 }
 
 
+
+/// The settlement labels draw under the HUD's panels: Labels.lua creates each `city_info_bar`
+/// (priority -1) under the root, the root hears `OnAdoptChild` and sorts its children by
+/// `Priority()` (`layout.root.lua:563`), so the labels come before the Diplomatic Relations panel
+/// (47) and the HUD (0) in the draw order, even when they are made after the panel opened. Bug
+/// 2026-10-09: "Wales, Wales" and "London, England" drew over the panel's bottom edge.
+#[test]
+fn settlement_labels_draw_under_the_diplomatic_relations_panel() {
+    let Some(s) = setup() else { return };
+    no_errors(&s.host);
+    click(&s.host, find(&s.host, s.root, "button_diplomacy").unwrap());
+    no_errors(&s.host);
+    let panel = find(&s.host, s.root, "diplomatic_relations").expect("the panel opens");
+    let regions: Vec<ntw_sim::campaign::RegionId> = {
+        let st = s.scripts.state();
+        let france = st.model.faction_by_key("france").unwrap().id;
+        st.model.world.regions.values().filter(|r| r.owner == france).map(|r| r.id).take(3).collect()
+    };
+    let on_screen = regions.iter().enumerate().map(|(i, r)| (*r, 100.0 + 60.0 * i as f32, 700.0)).collect();
+    s.host.campaign_set_view((1.0, 2.0, 3.0), on_screen, None);
+    s.host.pulse(16.0);
+    no_errors(&s.host);
+    let w = s.host.world();
+    let kids = w.get(s.root).unwrap().children.clone();
+    let mut panel_top = panel;
+    while let Some(p) = w.get(panel_top).and_then(|n| n.parent).filter(|&p| p != s.root) {
+        panel_top = p;
+    }
+    let at = |n: NodeId| kids.iter().position(|&k| k == n).unwrap();
+    let labels: Vec<usize> = kids.iter().enumerate().filter(|(_, k)| w.get(**k).unwrap().data.id.starts_with("label")).map(|(i, _)| i).collect();
+    assert_eq!(labels.len(), regions.len(), "one label per settlement on screen");
+    assert!(labels.iter().all(|&i| i < at(panel_top)), "labels {labels:?} before the panel at {}", at(panel_top));
+    assert_eq!(labels, (0..labels.len()).collect::<Vec<_>>(), "the labels are the first children: under the whole HUD");
+}
+
+/// The region details panel's title is the region's name: the root's ShowRegionInfo opens it with
+/// `CampaignUI.InitialiseRegionInfoDetails(region)`, whose `Name` region_details.lua writes into
+/// `region_name`. Bug 2026-10-09: the title kept the layout's " XXX Details".
+/// PROVISIONAL: our table has only the region info's first fields, so the script still stops at
+/// line 124 (`UpperTax`); the rest of the panel is BACKLOG §0-E "Region details panel".
+#[test]
+fn region_details_title_is_the_region_name() {
+    let Some(s) = setup() else { return };
+    no_errors(&s.host);
+    let lua = s.host.lua();
+    let row: mlua::Table = lua.load("return CampaignUI.RetrieveFactionRegionList('france')[1]").eval().unwrap();
+    let name: String = row.get("Name").unwrap();
+    let show: mlua::Function = s.host.script_env(s.root).unwrap().raw_get("ShowRegionInfo").unwrap();
+    let r = show.call::<()>(row.get::<mlua::Value>("Address").unwrap());
+    let stop = r.expect_err("the script stops at the first missing field").to_string();
+    assert!(stop.contains("region_details.lua:124") && stop.contains("UpperTax"), "{stop}");
+    let title = find(&s.host, s.root, "region_name").expect("the region details panel is open");
+    assert_eq!(text(&s.host, title).trim(), name);
+    assert!(!name.is_empty() && !name.contains("XXX"));
+}

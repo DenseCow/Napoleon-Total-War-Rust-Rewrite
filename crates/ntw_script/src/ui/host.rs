@@ -937,6 +937,20 @@ fn fire_event(lua: &Lua, inner: &Inner, id: NodeId, event: &str, args: MultiValu
     }
 }
 
+/// `child` has just been given to its parent: the parent hears `OnAdoptChild(child)`. CONFIRMED:
+/// the parent's virtual `+0x38` (`0x0102DCD0`) fires event slot 17 (`+0x22C`, `OnAdoptChild`;
+/// slot 18 at `+0x238` is `OnDivorceChild`), called by `CreateFromLayout` (`0x01016BD0`),
+/// `CreateComponentFromTemplate` (`0x010171A0`) and `CreateFromComponent` (`0x01017850`) after
+/// the new component's states are initialised (`0x01034210`), and by `Adopt` (`0x01024F70`). The
+/// campaign and battle root scripts sort their children by `Priority()` there, which puts the
+/// settlement labels (priority -1) under every HUD panel.
+fn adopted(lua: &Lua, inner: &Inner, child: NodeId) {
+    let parent = inner.world.borrow().get(child).and_then(|n| n.parent);
+    if let Some(p) = parent {
+        fire_event(lua, inner, p, "OnAdoptChild", MultiValue::from_vec(vec![addr(child)]));
+    }
+}
+
 /// True if the component's current state takes the input focus (the state record's +0xD4,
 /// our `unknown_d4`, CONFIRMED: the focus setter `0x010367F0` and the character dispatch
 /// `0x0102DD50` test it; 2 on the text fields).
@@ -1893,6 +1907,9 @@ fn component_methods(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
     method!("Adopt", |inner, lua, id, args| {
         if let Some(child) = args.front().and_then(node_of) {
             inner.world.borrow_mut().adopt(id, child);
+            if inner.world.borrow().get(child).is_some_and(|c| c.parent == Some(id)) {
+                adopted(lua, &inner, child);
+            }
         }
         ret(lua, ())
     });
@@ -1975,17 +1992,43 @@ fn component_methods(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
         }
         ret(lua, cur.map(addr))
     });
-    // ReorderChildren(child, index) INFERRED shape: moves a child in the draw order.
+    // ReorderChildren(list) → applied (CONFIRMED `0x01014850`; every shipped call passes one
+    // table): the list's entries 1..#list are component addresses or, when `lua_isnumber`, 0-based
+    // child indices; the new order is [`UiWorld::reorder_children`]'s. A non-table argument is an
+    // empty list. An entry that is neither names no child, which always fails the count check.
+    // ORIGINAL BUG: the index is not bounds-checked (`0x01014850` reads `children[n]` for any n,
+    // past the array); ours treats an index outside the children as no child (the call then
+    // changes nothing), logged once. No toggle: the original's result is an out-of-bounds read.
     method!("ReorderChildren", |inner, lua, id, args| {
-        let child = args.front().and_then(node_of);
-        let index: Option<f64> = arg(lua, &args, 1)?;
-        if let (Some(c), Some(i)) = (child, index) {
-            let ok = inner.world.borrow().get(c).is_some_and(|n| n.parent == Some(id));
-            if ok {
-                inner.world.borrow_mut().reorder(c, i.max(0.0) as usize);
+        let mut list = Vec::new();
+        let mut all_children = true;
+        if let Some(Value::Table(t)) = args.front() {
+            let children = inner.world.borrow().get(id).map(|n| n.children.clone()).unwrap_or_default();
+            for i in 1..=t.raw_len() {
+                let entry: Value = t.raw_get(i)?;
+                let child = match &entry {
+                    Value::Integer(_) | Value::Number(_) | Value::String(_) => match lua.coerce_number(entry.clone())? {
+                        Some(n) => {
+                            let c = (n >= 0.0).then(|| children.get(n as usize).copied()).flatten();
+                            if c.is_none() {
+                                inner.log_once("ReorderChildren index", || {
+                                    format!("ReorderChildren: index {n} is outside the {} children: nothing reordered (logged once)", children.len())
+                                });
+                            }
+                            c
+                        }
+                        None => None,
+                    },
+                    v => node_of(v),
+                };
+                match child {
+                    Some(c) => list.push(c),
+                    None => all_children = false,
+                }
             }
         }
-        ret(lua, ())
+        let applied = all_children && inner.world.borrow_mut().reorder_children(id, &list);
+        ret(lua, applied)
     });
     // Internal: a script bound a mouse event at run time (see `UiNode::script_events`).
     method!("__MarkEvent", |inner, lua, id, args| {
@@ -2156,9 +2199,12 @@ fn component_functions(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
         Ok(id.map(|id| addr(i2.world.borrow().root_of(id))))
     })?)?;
     let i3 = i.clone();
-    t.set("Adopt", lua.create_function(move |_, (a, child): (Value, Value)| {
+    t.set("Adopt", lua.create_function(move |lua, (a, child): (Value, Value)| {
         if let (Some(p), Some(c)) = (node_of(&a), node_of(&child)) {
             i3.world.borrow_mut().adopt(p, c);
+            if i3.world.borrow().get(c).is_some_and(|n| n.parent == Some(p)) {
+                adopted(lua, &i3, c);
+            }
         }
         Ok(())
     })?)?;
@@ -2192,6 +2238,7 @@ fn component_functions(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
                     n.size_override = None;
                 }
                 init_new(lua, &i5, new);
+                adopted(lua, &i5, new);
                 Ok(Some(addr(new)))
             }
             Err(e) => {
@@ -2214,6 +2261,7 @@ fn component_functions(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
             run_component_scripts(lua, &i6, c, None);
         }
         finish_created(lua, &i6, new, id.as_deref(), (x, y), texts, &_fmt)?;
+        adopted(lua, &i6, new);
         Ok(Some(addr(new)))
     })?)?;
     // CreateComponentFromTemplate(template, id, parent, x, y, {...}, {...}) → address: the same,
@@ -2260,6 +2308,7 @@ fn component_functions(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
             run_component_scripts(lua, &i7, c, None);
         }
         finish_created(lua, &i7, new, id.as_deref(), (x, y), texts, &_fmt)?;
+        adopted(lua, &i7, new);
         Ok(Some(addr(new)))
     })?)?;
     // KeyboardModifiersHeld() → shift, ctrl, alt (INFERRED order); the mouse UI never holds any.
@@ -2462,6 +2511,76 @@ pub(crate) mod tests {
         // The root's environment does not see the button's globals.
         assert!(renv.get::<Option<i64>>("clicks").unwrap().is_none());
         no_errors(&host);
+    }
+
+    /// A component made by a script is announced to its parent with `OnAdoptChild(child)` (as
+    /// `0x01016BD0` does), and a root that sorts its children by `Priority()` there, as the
+    /// campaign's and the battle's root.lua do, draws the new one under a higher-priority panel
+    /// made before it. Bug: the settlement labels (priority -1) drew over the HUD's panels.
+    #[test]
+    fn a_created_child_is_announced_to_its_parent_which_can_reorder_it() {
+        let root_script = "adopted = {}\n\
+            function OnAdoptChild(child)\n\
+              table.insert(adopted, UIComponent(child):Id())\n\
+              local kids = {}\n\
+              for i = 0, UIComponent(Address):ChildCount() - 1 do kids[#kids + 1] = UIComponent(Address):Find(i) end\n\
+              table.sort(kids, function(a, b) return UIComponent(a):Priority() < UIComponent(b):Priority() end)\n\
+              applied = UIComponent(Address):ReorderChildren(kids)\n\
+            end\n\
+            UIComponent(Address):SetEventCallback('OnAdoptChild', OnAdoptChild)";
+        let source = ScriptSource::empty()
+            .with_memory_file("ui/test/page", layout_bytes_with_root(root_script, ""))
+            .with_memory_file("ui/test/label", layout_bytes(""));
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        let root = host.load_root_layout("ui/test/page").unwrap();
+        let panel = host.world().find(root, "button").unwrap();
+        host.inner.world.borrow_mut().get_mut(panel).unwrap().data.priority = 47;
+        let env = component_env(&host, root);
+        host.lua().load("Component.CreateFromLayout('data/ui/test/label', 'label1', Address, 5, 5)").set_environment(env.clone()).exec().unwrap();
+        let kids = host.world().get(root).unwrap().children.clone();
+        let label = host.world().find(root, "label1").unwrap();
+        assert_eq!(kids, vec![label, panel], "the label (priority 0) sorted under the panel (47)");
+        let adopted: Vec<String> = env.get::<Table>("adopted").unwrap().sequence_values().map(Result::unwrap).collect();
+        assert_eq!(adopted, ["label1"]);
+        assert!(env.get::<bool>("applied").unwrap());
+        // Priority is signed: the labels' -1 sorts first.
+        host.inner.world.borrow_mut().get_mut(panel).unwrap().data.priority = -1;
+        let p: i64 = host.lua().load("return UIComponent(UIComponent(Address):Find('button')):Priority()").set_environment(env.clone()).eval().unwrap();
+        assert_eq!(p, -1);
+        no_errors(&host);
+    }
+
+    /// `ReorderChildren(list)` as `0x01031ED0`: the list first, the children it leaves out after
+    /// them in their order, and nothing changes when the list holds a duplicate, a component that
+    /// is not a child or an index outside the children (answering false).
+    #[test]
+    fn reorder_children_puts_the_list_first_and_refuses_a_bad_list() {
+        let source = ScriptSource::empty().with_memory_file("ui/test/page", layout_bytes(""));
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        let root = host.load_root_layout("ui/test/page").unwrap();
+        let env = component_env(&host, root);
+        let run = |code: &str| -> bool { host.lua().load(code).set_environment(env.clone()).eval().unwrap() };
+        for i in 0..2 {
+            host.lua()
+                .load(format!("Component.CreateFromLayout('data/ui/test/page', 'extra{i}', Address)"))
+                .set_environment(env.clone())
+                .exec()
+                .unwrap();
+        }
+        let order = || -> Vec<String> {
+            let w = host.world();
+            w.get(root).unwrap().children.iter().map(|&c| w.get(c).unwrap().data.id.clone()).collect()
+        };
+        assert_eq!(order(), ["button", "extra0", "extra1"]);
+        let root_ui = "UIComponent(Address)";
+        assert!(run(&format!("return {root_ui}:ReorderChildren({{ {root_ui}:Find('extra1'), 1 }})")));
+        assert_eq!(order(), ["extra1", "extra0", "button"], "listed first (an address and an index), the rest after");
+        assert!(!run(&format!("return {root_ui}:ReorderChildren({{ {root_ui}:Find('button'), {root_ui}:Find('button') }})")));
+        assert!(!run(&format!("return {root_ui}:ReorderChildren({{ Address }})")), "the root is not its own child");
+        assert!(!run(&format!("return {root_ui}:ReorderChildren({{ 7 }})")), "no child 7");
+        assert_eq!(order(), ["extra1", "extra0", "button"], "a refused list changes nothing");
+        assert!(run(&format!("return {root_ui}:ReorderChildren({{}})")));
+        assert_eq!(host.take_log().iter().filter(|l| l.contains("ReorderChildren: index 7")).count(), 1);
     }
 
     /// The script environment (globals) of component `id`.

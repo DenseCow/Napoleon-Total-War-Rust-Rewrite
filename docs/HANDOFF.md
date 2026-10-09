@@ -3,9 +3,9 @@
 Keep this file short. It holds what is true now: replace finished items rather than appending logs.
 Old session logs are in `docs/archive/`.
 
-Last updated: 2026-10-08. Main tests at last full run (2026-10-08): `cargo test --workspace` passes on the install.
+Last updated: 2026-10-09. Main tests at last full run (2026-10-08): `cargo test --workspace` passes on the install.
 
-## Resume here (2026-10-08)
+## Resume here (2026-10-09)
 
 - **Repos:** work happens in the private repo (origin, `…-Private`). The public repo
   `DenseCow/Napoleon-Total-War-Rust-Rewrite` is a snapshot mirror for contributors: publish after a
@@ -16,14 +16,29 @@ Last updated: 2026-10-08. Main tests at last full run (2026-10-08): `cargo test 
   merge, applying the worker's BACKLOG ticks/Polish lines in the merge commit → `bash tools/progress.sh`
   → push (the hook syncs public #2) → publish in batches. Running work = the BACKLOG `(running: …)`
   markers and `git worktree list`; merged work = `git log`.
-- **Resume points (2026-10-09):**
-  1. 0-B recruitment details (NR-0b-recruit): the category converters are CONFIRMED identity; next, find
-     where the recruitable entry's cost (entry[0]) is written. Workers commit and push a checkpoint every
-     ~20 min (a PC freeze on 2026-10-09 killed two sessions; their uncommitted work survived on disk).
-  2. 0-C middleware (NR-0c-middleware): bank query, cue dispatch, movie skip, headphones multiplier.
+- **Resume points (2026-10-09, block cap 46%):** workers commit and push a checkpoint every ~20 min.
+  1. gait-blend2 (NR-gait-blend2, head `baa65793`, don't merge yet): done except two debugger reads (FOR_USER gait
+     sitting): walk-ordered horses trot (rider vs horse record speed) and infantry at store C. Arrival braking,
+     rider legs, gait by order and ladder timing are CONFIRMED; resume block at the end of UNITS_TERRAIN_FIDELITY.md §1.10.
+  2. mod-loading2 (NR-mod-loading): review round 1 found 2 blocking (precedence must follow the whole graph
+     `0x0108EBB0`/`0x0109ECF0`; `ntw_ai` tables.rs:79 `load_raw` must read the merged tables) plus three silent
+     failures (unknown script line, `--mods` with no value, mods.rs:734 warning per open). The fix round was cut by
+     the cap before any edit (branch clean at `9e7ffd58`). Notes: the exe drops a precedence pair that would close a
+     cycle (`0x0108E8F0`); the AI's raw tables have no traced key (trace the exe's key reader per table). Then review
+     the fix commits only. The unattended start-up debugger run for
+     the six open points is MOD_LOADING.md §6 (no user input).
+  3. 0e-panel (NR-0e-panel): region details panel fields (`0x009E69B0`) and `OnDivorceChild`; check its last push.
+  4. campaign-source (NR-campaign-source, `75c2b8c2`): done: versioned RON/deflate own save (`own_save.rs`, F5), AI keys and
+     region base values moved into the model, old ESF saves still load, `ntw_campaign::source` seam used by the scene,
+     campaign list and UI. Left: the real-install round-trip and seam tests, the full test run + clippy + own-diff check,
+     analysis/modding/OWN_SAVE_FORMAT.md, and the display port (`MapData` still wraps `CampaignMap`). Was: our own campaign save format and the `CampaignSource` seam
+     (MODDING_AUDIT.md §4 items 1-2); check its last push.
+  5. Then: MODDING_AUDIT.md items 3-4 (after mod-loading2 merges), ui-fixes (front-end UI scale, battle
+     CursorPosition, prelude x/y). `tools/usage_budget.ps1` has a local `$WrapAt = 1.0` (user, 2026-10-09): ask
+     whether to keep and commit it or restore 2.0.
 - **Disk:** C: filled up on 2026-10-09; 21 merged worktrees were removed (~100 GB back). Remove a
   worktree after its merge; check `df -h /c` before starting builds.
-- **Next:** §0, several workers tracing in parallel under the Ghidra writer lock; the unwrap audit last.
+- **Next:** §0, several workers tracing in parallel under the Ghidra writer lock, plus the §11 modding work alongside it (user, 2026-10-09: mod loading and the audits come early); the unwrap audit last.
 - Evidence saves live in `%USERPROFILE%\Documents\ntw-evidence\saves` (never inside a target folder);
   recovered build-folder data in `ntw-evidence\recovered-targets\`.
 - Usage (user plan, 2026-10-07): one 11-point block a day (~12 with the reading lag), until the weekly
@@ -38,10 +53,9 @@ Last updated: 2026-10-08. Main tests at last full run (2026-10-08): `cargo test 
   lists (ignored test; cause untraced), red cancel texts. Original screens in
   `%USERPROFILE%\Documents\ntw-evidence\screens\`: `2026-10-08_original_diplomacy_negotiation_britain_france.png`,
   `…_britain_ottoman_trade.png`, `…_britain_austria_ally.png`, `2026-10-08_original_diplomatic_relations_britain.png`.
-- **Campaign:** region labels draw on top of UI panels (must sit under the HUD; also over the Diplomatic Relations
-  panel, user screenshot 2026-10-09: "Wales, Wales" and "London, England" over its bottom edge); the region details
-  title reads "XXX Details" (missing loc key, should be the region name); the user couldn't find the
-  demolish button (offered from a building slot via `CanDemolishBuilding`: check it shows).
+- **Campaign:** the region details panel shows the region name but its other fields keep the layout's defaults
+  (BACKLOG §0-E); the user couldn't find the demolish button (offered from a building slot via
+  `CanDemolishBuilding`: check it shows).
 - **Battle** (`--battle-key NHB_Austerlitz --skip-deployment`):
   - Unit cards hidden ~3 min in Austerlitz only: likely its intro cutscene hides the HUD and we run the
     cutscene timer without playing it. Play or skip it the way the original does.
@@ -83,6 +97,9 @@ Base command: `cargo run -p napoleon -- <flags>`.
 
 
 
+- **Region labels (merged 0e-labels):** `cargo run -p napoleon -- --campaign eur_napoleon --campaign-faction france
+  --no-intro`, open Diplomatic Relations: the region labels sit under the panel; open a region's details: the
+  title is the region name.
 - **Battle HUD layout (merged with battle-ui2):** `cargo run --release -p napoleon -- --battle` at 1920x1080, then
   resize the window to 1280x720. The HUD scales to fit like the original at 1920x1080 (deployment panel, unit cards,
   orders bar on the cards), and clicks land on its buttons at both sizes.
