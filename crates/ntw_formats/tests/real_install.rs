@@ -929,3 +929,59 @@ fn campaign_save_naming_layout_fields() {
     }
     // Data fact: the requester's Cancel id carries a leading space (" button_cancel").
 }
+
+/// Gait-change evidence (UNITS_TERRAIN_FIDELITY.md §1.9): which clips carry the
+/// `*_FOOT_GEAR_UP_START/END` markers the exe turns into blend windows (`0x00E4F4D0`), and which
+/// `blend_in_time` values and `WALK_TO_RUN` / `RUN_TO_WALK` lines the vanilla fragments give the
+/// gait slots. Run with `--nocapture` to see it.
+#[test]
+#[ignore]
+fn gait_blend_survey() {
+    use ntw_formats::anim::Anim;
+    use ntw_formats::battle_animation::Fragment;
+    use std::collections::BTreeMap;
+    let vfs = Vfs::open_install(data_dir()).unwrap();
+    let mut gear = Vec::new();
+    for path in vfs.list("animations/") {
+        if !path.ends_with(".anim") {
+            continue;
+        }
+        let Ok(a) = Anim::read(&vfs.read(path).unwrap()) else { continue };
+        let marks: Vec<_> = a.events.iter().filter(|e| e[0].contains("GEAR_UP")).cloned().collect();
+        if !marks.is_empty() {
+            gear.push(format!("{path} ({:.3} s): {marks:?}", a.duration));
+        }
+    }
+    println!("clips with gear-up markers: {}", gear.len());
+    for g in &gear {
+        println!("  {g}");
+    }
+    let mut blends: BTreeMap<String, usize> = BTreeMap::new();
+    let mut transitions: BTreeMap<String, usize> = BTreeMap::new();
+    let mut fragments = 0;
+    for path in vfs.list("animations/") {
+        if !path.ends_with(".frg") && !path.contains("fragment") {
+            continue;
+        }
+        let Ok(bytes) = vfs.read(path) else { continue };
+        let frag = Fragment::parse(&String::from_utf8_lossy(&bytes));
+        fragments += 1;
+        for (slot, clips) in &frag.slots {
+            let gait = slot.starts_with("WALK") || slot.starts_with("RUN") || slot.starts_with("RIDER_WALK") || slot.starts_with("RIDER_RUN");
+            if !gait {
+                continue;
+            }
+            if slot.contains("_TO_") {
+                *transitions.entry(slot.clone()).or_default() += clips.len();
+            }
+            for c in clips {
+                *blends.entry(format!("{slot} {:?}", c.blend_in_time)).or_default() += 1;
+            }
+        }
+    }
+    println!("fragments read {fragments}\ngait transitions {transitions:?}");
+    for (k, n) in &blends {
+        println!("  {k}: {n}");
+    }
+    assert!(fragments > 0);
+}

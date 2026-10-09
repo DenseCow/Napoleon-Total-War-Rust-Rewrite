@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::*;
-use super::effects::{BonusKind, EffectKey, Effects, TECH_RESEARCHED};
+use super::effects::{BonusKind, EffectKey, Effects, SavedBonus, TECH_RESEARCHED};
 use crate::calendar::{Calendar, Date, HALF_EARLY, HALF_LATE};
 use crate::fixed::Fixed20;
 use crate::rng::CaRng;
@@ -506,7 +506,7 @@ fn command_validation_errors_leave_model_unchanged() {
     let h = m.state_hash();
     assert_eq!(
         m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_unit".into() }),
-        Err(CommandError::InsufficientFunds { needed: 500, available: 0 })
+        Err(CommandError::InsufficientFunds { needed: 400, available: 0 })
     );
     assert_eq!(m.state_hash(), h);
 
@@ -660,20 +660,20 @@ fn recruited_units_are_sized_by_num_men_or_the_crew_sum() {
 #[test]
 fn recruitment_completes_after_n_turns() {
     let mut m = test_model();
-    // MADE-UP rules: cost 500, 2 turns, 100 men; region 10 has 2 recruitment points.
+    // MADE-UP rules: campaign cost (#7) 400, 2 turns, 100 men; region 10 has 2 recruitment points.
     let ev = m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into() }).unwrap();
     assert_eq!(ev, vec![CampaignEvent::RecruitmentItemIssuedByPlayer { region: RegionId(10) }]);
-    assert_eq!(m.world.factions[&A].treasury, 500);
+    assert_eq!(m.world.factions[&A].treasury, 600);
     m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_unit".into() }).unwrap();
-    assert_eq!(m.world.factions[&A].treasury, 0);
+    assert_eq!(m.world.factions[&A].treasury, 200);
     m.world.factions.get_mut(&A).unwrap().treasury = 10_000;
     // A third item queues too (a queue holds 10, 0x00B62040); it would wait while both points train.
     m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_unit".into() }).unwrap();
-    assert_eq!(m.world.factions[&A].treasury, 9_500);
+    assert_eq!(m.world.factions[&A].treasury, 9_600);
     m.apply(CampaignCommand::CancelRecruitment { region: RegionId(10), item: queued(&m, RegionId(10), 2) }).unwrap();
     // Cancelling refunds.
     m.apply(CampaignCommand::CancelRecruitment { region: RegionId(10), item: queued(&m, RegionId(10), 1) }).unwrap();
-    assert_eq!(m.world.factions[&A].treasury, 10_500);
+    assert_eq!(m.world.factions[&A].treasury, 10_400);
     m.turn.humans = vec![A];
     let ev1 = m.start_campaign();
     assert!(!ev1.iter().any(|e| matches!(e, CampaignEvent::UnitTrained { .. })));
@@ -711,98 +711,234 @@ fn recruitment_completes_after_n_turns() {
     assert_eq!(m.world.forces[&force].units[1].character, None);
 }
 
-/// The XP-adjusted cost tables of the test rules: the REAL rank 0 and rank 9 rows of
-/// `unit_stats_land_experience_bonuses` (`+0x24` = 0 / 360, `+0x28` = 1.0 / 1.9) and of
-/// `unit_stats_naval_experience_bonuses` (`+0x1C` = 0 / 255, `+0x20` = 1.0 / 1.45), CONFIRMED in
-/// BATTLE_FIDELITY.md §19a. A rank with no row is left out on purpose (the exe's else branch).
-fn rules_with_xp_costs() -> CampaignRules {
-    use super::rules::{XpCostRow, XpCostTables};
-    let mut r = CampaignRules::test_rules();
-    r.xp_cost = XpCostTables {
-        land: [(0, XpCostRow { flat: 0, mult: 1.0 }), (9, XpCostRow { flat: 360, mult: 1.9 })].into_iter().collect(),
-        naval: [(0, XpCostRow { flat: 0, mult: 1.0 }), (9, XpCostRow { flat: 255, mult: 1.45 })].into_iter().collect(),
-    };
-    r
+/// `0x00B0D220`, the recruitable entry's cost (CONFIRMED): `units` #7 (not the #4 cost) scaled by
+/// `max(−100, mod) + 100` percent in f32 and rounded by FISTP (half to even), `mod` being the integer
+/// `recruitment_mod_cost_land_all` (`_naval_all` for a ship) plus the unit category's and class's
+/// `cost_mod`, and in `spa_napoleon` the guerrilla / auxiliary cost mod of a unit key ending so.
+#[test]
+fn the_recruitment_cost_is_units_7_scaled_by_the_cost_effects() {
+    use super::effects::EffectSet;
+    let mut rules = CampaignRules::test_rules();
+    let land = UnitRules { cost: 710, campaign_cost: 580, category: "infantry".into(), unit_class: "infantry_line".into(), ..Default::default() };
+    let ship = UnitRules { is_naval: true, category: "naval_frigate".into(), unit_class: "frigate".into(), ..land.clone() };
+    let mut set = EffectSet::default();
+    // No effects: the #7 cost exactly.
+    assert_eq!(economy::recruitment_cost_in(&rules, &set, "u", &land), 580);
+    // −8 (a real vanilla figure: Sweden's line infantry was queued at 534, its hussars at 432).
+    set.add(EffectKey::basic("recruitment_mod_cost_land_all"), -8.0);
+    assert_eq!(economy::recruitment_cost_in(&rules, &set, "u", &land), 534);
+    assert_eq!(economy::recruitment_cost_in(&rules, &set, "u", &UnitRules { campaign_cost: 470, ..land.clone() }), 432);
+    // A ship reads the naval key only.
+    assert_eq!(economy::recruitment_cost_in(&rules, &set, "u", &ship), 580);
+    set.add(EffectKey::basic("recruitment_mod_cost_naval_all"), -1.0);
+    assert_eq!(economy::recruitment_cost_in(&rules, &set, "u", &UnitRules { campaign_cost: 500, ..ship.clone() }), 495);
+    // The category's and the class's cost_mod add in.
+    set.add(EffectKey { kind: BonusKind::UnitCategory, bonus: "cost_mod".into(), qualifier: "infantry".into() }, -2.0);
+    set.add(EffectKey { kind: BonusKind::UnitClass, bonus: "cost_mod".into(), qualifier: "infantry_line".into() }, -10.0);
+    assert_eq!(economy::recruitment_cost_in(&rules, &set, "u", &land), 464); // 580 × 0.80
+    // Each effect is read as an integer, half to even: −0.5 reads 0, −1.5 reads −2.
+    let mut half = EffectSet::default();
+    half.add(EffectKey::basic("recruitment_mod_cost_land_all"), -0.5);
+    assert_eq!(economy::recruitment_cost_in(&rules, &half, "u", &land), 580);
+    half.add(EffectKey { kind: BonusKind::UnitCategory, bonus: "cost_mod".into(), qualifier: "infantry".into() }, -1.5);
+    assert_eq!(economy::recruitment_cost_in(&rules, &half, "u", &land), 568); // 580 × 0.98 = 568.4
+    // The product is rounded half to even: 25 × 0.5 = 12.5 → 12, 35 × 0.5 = 17.5 → 18.
+    let mut fifty = EffectSet::default();
+    fifty.add(EffectKey::basic("recruitment_mod_cost_land_all"), -50.0);
+    assert_eq!(economy::recruitment_cost_in(&rules, &fifty, "u", &UnitRules { campaign_cost: 25, ..land.clone() }), 12);
+    assert_eq!(economy::recruitment_cost_in(&rules, &fifty, "u", &UnitRules { campaign_cost: 35, ..land.clone() }), 18);
+    // The sum is clamped at −100: never a negative price.
+    fifty.add(EffectKey::basic("recruitment_mod_cost_land_all"), -500.0);
+    assert_eq!(economy::recruitment_cost_in(&rules, &fifty, "u", &land), 0);
+    // The guerrilla / auxiliary mods count only in spa_napoleon, by the end of the unit key.
+    let mut spa = EffectSet::default();
+    spa.add(EffectKey::basic("guerrilla_cost_mod"), -20.0);
+    spa.add(EffectKey::basic("auxiliary_cost_mod"), 10.0);
+    assert_eq!(economy::recruitment_cost_in(&rules, &spa, "Inf_Spanish_Guerrilla", &land), 580);
+    rules.campaign = "spa_napoleon".into();
+    assert_eq!(economy::recruitment_cost_in(&rules, &spa, "Inf_Spanish_Guerrilla", &land), 464);
+    assert_eq!(economy::recruitment_cost_in(&rules, &spa, "Inf_British_Auxiliary", &land), 638);
+    assert_eq!(economy::recruitment_cost_in(&rules, &spa, "Inf_Guerrilla_Line", &land), 580);
+    assert_eq!(economy::recruitment_cost_in(&rules, &spa, "Inf_Spanish_guerrilla", &land), 580);
 }
 
-/// `0x00ED49A0`, the campaign's experience-adjusted recruitment cost: a veteran unit of the same type
-/// costs more than a fresh one, `flat + ROUND(base × mult)` — the base is scaled, not added — and
-/// the naval table is the one a ship reads (the exe's unit-type flag `+0xA0`).
+/// The recruit command charges the region's entry cost (#7 with the region's effects, here a faction
+/// `recruitment_mod_cost_land_all` of −8 from its saved bonuses), the item keeps it, and a cancel
+/// credits exactly that back (`0x00B5C060`: item +0x20 as income category 3).
 #[test]
-fn veteran_units_cost_more_than_recruits() {
-    let rules = rules_with_xp_costs();
-    let land = &rules.units["test_unit"];
-    let ship = UnitRules { is_naval: true, ..land.clone() };
-    // Rank 0 (no chevrons) pays the plain `units` cost; rank 9 pays +360 and 1.9× the 500 recruit
-    // cost, i.e. 360 + 950 = 1310.
-    assert_eq!(economy::recruit_cost(&rules, land, 0), 500);
-    assert_eq!(economy::recruit_cost(&rules, land, 9), 360 + 950);
-    assert!(economy::recruit_cost(&rules, land, 9) > economy::recruit_cost(&rules, land, 0));
-    // A rank the tables do not have leaves the cost alone (the exe's else branch).
-    for rank in [1, 5, 8, 42, 255] {
-        assert_eq!(economy::recruit_cost(&rules, land, rank), 500);
-    }
-    // A ship reads the naval twin: +255 and 1.45× (255 + 725 = 980), not the land row.
-    assert_eq!(economy::recruit_cost(&rules, &ship, 0), 500);
-    assert_eq!(economy::recruit_cost(&rules, &ship, 9), 255 + 725);
-    // ROUND is half away from zero, not a truncation: 10 × 1.45 = 14.5 → 15 (and −14.5 → −15,
-    // which a `trunc` would give as −14).
-    assert_eq!(super::rules::XpCostRow { flat: 0, mult: 1.45 }.adjust(10), 15);
-    assert_eq!(super::rules::XpCostRow { flat: 0, mult: 1.45 }.adjust(-10), -15);
-}
-
-/// With the tables unfilled (what a rules set without the two experience tables gives) every cost is
-/// exactly what it was before the wiring: no adjustment at all.
-#[test]
-fn xp_costs_are_off_without_the_tables() {
-    let rules = CampaignRules::test_rules();
-    let land = &rules.units["test_unit"];
-    for rank in 0..=255u8 {
-        assert_eq!(economy::recruit_cost(&rules, land, rank), land.cost);
-    }
-}
-
-/// The recruitment path itself: a fresh unit pays the XP-adjusted cost (`0x0045CB50` →
-/// `0x00ED49A0`), which for a rank-0 unit is the plain cost — and the queue remembers what was
-/// paid, so cancelling refunds it.
-#[test]
-fn recruiting_charges_the_xp_adjusted_cost() {
+fn recruiting_charges_the_entry_cost_and_cancelling_refunds_it() {
     let mut m = test_model();
-    m.rules = Arc::new(rules_with_xp_costs());
-    // A rank-0 row is flat 0 ×1.0, so the 500 of the made-up test unit is charged.
+    let unit = m.rules.units["test_recruit"].clone();
+    assert_ne!(unit.cost, unit.campaign_cost, "the fixture tells the two costs apart");
+    m.world.faction_details.entry(A).or_default().bonus_base = vec![SavedBonus { kind: 1, bonus: 30, value: -8.0, qualifier: String::new() }];
+    let before = m.world.factions[&A].treasury;
+    let cost = (unit.campaign_cost as f32 * 0.92).round_ties_even() as i32;
+    assert_eq!(economy::recruitment_cost(&m, &m.world.regions[&RegionId(10)], "test_recruit", &unit), cost);
     m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into() }).unwrap();
-    assert_eq!(m.world.factions[&A].treasury, 500);
-    assert_eq!(m.world.regions[&RegionId(10)].recruitment_queue[0].cost, 500);
-    // A table that charges a rank-0 unit differently is honoured, and the refund is what was paid.
-    let mut rules = (*m.rules).clone();
-    rules.xp_cost.land.insert(0, super::rules::XpCostRow { flat: 100, mult: 2.0 });
-    m.rules = Arc::new(rules);
-    m.world.factions.get_mut(&A).unwrap().treasury = 10_000;
-    m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into() }).unwrap();
-    assert_eq!(m.world.regions[&RegionId(10)].recruitment_queue[1].cost, 100 + 1000);
-    assert_eq!(m.world.factions[&A].treasury, 10_000 - 1100);
-    // Not enough money for the adjusted cost: refused, with the adjusted figure in the error.
-    m.world.factions.get_mut(&A).unwrap().treasury = 1000;
+    assert_eq!(m.world.factions[&A].treasury, before - cost);
+    assert_eq!(m.world.regions[&RegionId(10)].recruitment_queue[0].cost, cost);
+    m.apply(CampaignCommand::CancelRecruitment { region: RegionId(10), item: queued(&m, RegionId(10), 0) }).unwrap();
+    assert_eq!(m.world.factions[&A].treasury, before);
+}
+
+/// The entry is "too dear" only when its cost is above the treasury compared unsigned (`0x00B69BA0`,
+/// flag 2), and the command has no other money test: a faction in debt may recruit, going deeper into
+/// debt; one with a positive treasury below the cost may not.
+#[test]
+fn a_faction_in_debt_may_recruit() {
+    let mut m = test_model();
+    let cost = m.rules.units["test_recruit"].campaign_cost;
+    m.world.factions.get_mut(&A).unwrap().treasury = cost - 1;
     assert_eq!(
         m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into() }),
-        Err(CommandError::InsufficientFunds { needed: 1100, available: 1000 })
+        Err(CommandError::InsufficientFunds { needed: cost, available: cost - 1 })
     );
-    // Cancelling gives the paid amount back (1000 left + 1100).
-    m.apply(CampaignCommand::CancelRecruitment { region: RegionId(10), item: queued(&m, RegionId(10), 1) }).unwrap();
-    assert_eq!(m.world.factions[&A].treasury, 2100);
+    m.world.factions.get_mut(&A).unwrap().treasury = -5;
+    m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into() }).unwrap();
+    assert_eq!(m.world.factions[&A].treasury, -5 - cost);
 }
 
-/// The per-turn upkeep is NOT experience-adjusted: whether `0x00ED49A0` is charged on the upkeep is
-/// UNKNOWN, so filling the cost tables must not move the turn-end economy.
+/// The recruit command (`0x00936B90` → `0x00B58DD0`) does not look at the recruitment points: a region
+/// with none still queues, and its items then wait (`0x00B71FB0` counts down only the first
+/// `recruitment_points` items); only a full queue (10) refuses.
 #[test]
-fn faction_upkeep_ignores_the_experience_cost_tables() {
+fn a_region_without_recruitment_points_still_queues() {
     let mut m = test_model();
-    m.rules = Arc::new(rules_with_xp_costs());
-    // A holds force 1000 with one test_unit: 10 upkeep; B holds two (see `income_and_upkeep`).
-    assert_eq!(economy::faction_upkeep(&m, A), 10);
-    assert_eq!(economy::faction_upkeep(&m, B), 20);
-    let fx = super::effects::Effects::compute_for(&m, A);
-    assert_eq!(economy::faction_upkeep_with(&m, &fx, A), 10);
+    // The region's building gives 2 points; a faction effect of −2 takes them away.
+    m.world.faction_details.entry(A).or_default().bonus_base = vec![SavedBonus { kind: 1, bonus: 32, value: -2.0, qualifier: String::new() }];
+    assert_eq!(m.recruitment_points(RegionId(10), false), 0);
+    m.world.factions.get_mut(&A).unwrap().treasury = 1_000_000;
+    m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into() }).unwrap();
+    let turns = m.world.regions[&RegionId(10)].recruitment_queue[0].turns_remaining;
+    m.turn.humans = vec![A];
+    m.start_campaign();
+    assert_eq!(m.world.regions[&RegionId(10)].recruitment_queue[0].turns_remaining, turns);
+    while m.world.regions[&RegionId(10)].recruitment_queue.len() < super::commands::MAX_QUEUE as usize {
+        m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into() }).unwrap();
+    }
+    assert_eq!(
+        m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into() }),
+        Err(CommandError::NoRecruitmentCapacity)
+    );
+}
+
+/// `units` #15 caps what a faction may hold and have queued of one unit type (`0x008F68B0`: the faction's
+/// live units of the type plus its queued items of it, against the cap; flag 0x40 of `0x00B69BA0`). Other
+/// factions' units and queues do not count, a cancel or a lost unit frees a place, and 0 means no cap.
+#[test]
+fn the_unit_cap_counts_the_factions_units_and_queued_items() {
+    use super::commands::{ENTRY_QUEUE_FULL, ENTRY_TOO_DEAR, ENTRY_UNIT_CAP};
+    let mut m = test_model();
+    let mut rules = (*m.rules).clone();
+    rules.units.get_mut("test_recruit").unwrap().unit_cap = 3;
+    m.rules = Arc::new(rules);
+    m.world.factions.get_mut(&A).unwrap().treasury = 1_000_000;
+    let recruit = |k: &str| CampaignUnit { unit_key: k.into(), ..unit(50) };
+    // A holds one; B holds two and has one queued, which are B's own.
+    m.world.forces.get_mut(&ForceId(1000)).unwrap().units.push(recruit("test_recruit"));
+    m.world.forces.get_mut(&ForceId(1001)).unwrap().units.extend([recruit("test_recruit"), recruit("test_recruit")]);
+    m.world.regions.get_mut(&RegionId(11)).unwrap().recruitment_queue.push(RecruitmentItem {
+        id: RecruitmentItemId(9000),
+        unit_key: "test_recruit".into(),
+        turns_remaining: 2,
+        cost: 400,
+    });
+    let order = || CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into() };
+    // 1 held + 0 and then 1 queued are below 3; at 1 + 2 the entry is flagged.
+    m.apply(order()).unwrap();
+    m.apply(order()).unwrap();
+    assert_eq!(m.apply(order()), Err(CommandError::UnitCapReached("test_recruit".into())));
+    let unit = m.rules.units["test_recruit"].clone();
+    let flags = |m: &CampaignModel| m.recruitable_entry_flags(&m.world.regions[&RegionId(10)], "test_recruit", &unit, 400, &m.unit_type_counts(A));
+    assert_eq!(flags(&m), ENTRY_UNIT_CAP);
+    // A cancel frees a place.
+    m.apply(CampaignCommand::CancelRecruitment { region: RegionId(10), item: queued(&m, RegionId(10), 1) }).unwrap();
+    assert_eq!(flags(&m), 0);
+    m.apply(order()).unwrap();
+    // So does a unit the faction no longer holds.
+    m.world.forces.get_mut(&ForceId(1000)).unwrap().units.retain(|u| u.unit_key != "test_recruit");
+    assert_eq!(flags(&m), 0);
+    m.apply(order()).unwrap();
+    assert_eq!(flags(&m), ENTRY_UNIT_CAP);
+    // The flags add up: also too dear and, once the queue holds 10, full.
+    m.world.factions.get_mut(&A).unwrap().treasury = 399;
+    assert_eq!(flags(&m), ENTRY_UNIT_CAP | ENTRY_TOO_DEAR);
+    let mut rules = (*m.rules).clone();
+    rules.units.get_mut("test_recruit").unwrap().unit_cap = 0;
+    m.rules = Arc::new(rules);
+    let unit = m.rules.units["test_recruit"].clone();
+    let flags = |m: &CampaignModel| m.recruitable_entry_flags(&m.world.regions[&RegionId(10)], "test_recruit", &unit, 400, &m.unit_type_counts(A));
+    assert_eq!(flags(&m), ENTRY_TOO_DEAR, "a cap of 0 is no cap");
+    m.world.factions.get_mut(&A).unwrap().treasury = 1_000_000;
+    while m.world.regions[&RegionId(10)].recruitment_queue.len() < super::commands::MAX_QUEUE as usize {
+        m.apply(order()).unwrap();
+    }
+    assert_eq!(flags(&m), ENTRY_QUEUE_FULL);
+}
+
+/// The ranking's power (`0x008B2150` with flag 0) sums each unit's raw upkeep: no effects, whatever
+/// the unit's strength (A: one test_unit, B: two; 80 of 100 men each). A unit with no record counts
+/// 0 and is reported.
+#[test]
+fn faction_power_is_the_raw_upkeep_of_the_forces() {
+    let mut m = test_model();
+    let mut unknown = std::collections::BTreeSet::new();
+    let p = m.faction_powers(&mut unknown);
+    assert_eq!((p.get(&A).copied(), p.get(&B).copied(), p.get(&C).copied()), (Some(10), Some(20), None));
+    assert!(unknown.is_empty());
+    m.world.forces.get_mut(&ForceId(1000)).unwrap().units[0].unit_key = "no_such_unit".into();
+    let r = m.faction_rankings();
+    assert_eq!(r.unknown_units.iter().map(String::as_str).collect::<Vec<_>>(), ["no_such_unit"]);
+    assert!(r.ranks.contains_key(&A));
+}
+
+/// The negotiation's constructor (`0x00BF5A60`, run by the `BeginNegotiation` command) picks the
+/// human proposer's greeting (the recipient's `receive` line) and the human recipient's `approach`
+/// line; an override row costs one RNG draw, no override row none, and reading the negotiation
+/// draws nothing. `EndNegotiation` ends it once.
+#[test]
+fn a_negotiation_picks_its_greetings_once() {
+    use super::negotiation::Greeting;
+    let mut m = test_model();
+    m.turn.humans = vec![A];
+    m.world.factions.get_mut(&B).unwrap().government_key = "gov_republic".into();
+    let mut rules = (*m.rules).clone();
+    rules.faction_cultures.insert("test_faction_b".into(), "european".into());
+    for attitude in ["hostile", "unfriendly", "neutral", "friendly", "very_friendly"] {
+        let key = (format!("receive_{attitude}"), "european".to_owned(), "gov_republic".to_owned());
+        rules.negotiation_strings.insert(key.clone(), "generic".into());
+        rules.negotiation_overrides.insert((key.0, key.1, key.2, "test_faction_b".into()), "own".into());
+    }
+    m.rules = Arc::new(rules);
+    // A (human) proposes to B: B's receive line, one draw for its override row.
+    let before = m.rng;
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    let mut once = before;
+    let pick = if once.unit_float() < 0.5 { "own" } else { "generic" };
+    assert_eq!(m.rng, once);
+    let n = m.negotiations.current.clone().unwrap();
+    assert_eq!((n.serial, n.proposer, n.recipient), (1, A, B));
+    assert_eq!(n.greeting, Some(Greeting::Line(pick.into())));
+    assert_eq!(n.approach, None, "B is not human");
+    let _ = m.faction_rankings();
+    assert_eq!(m.rng, once, "reading draws nothing");
+    // B proposes to A (human), over the open one: no greeting; B's approach line has no row:
+    // Missing, no draw. Building over it ends nothing.
+    m.apply(CampaignCommand::BeginNegotiation { proposer: B, recipient: A }).unwrap();
+    assert_eq!(m.rng, once);
+    let n = m.negotiations.current.clone().unwrap();
+    assert_eq!((n.serial, n.greeting), (2, None));
+    let key = ("approach_neutral".to_owned(), "european".to_owned(), "gov_republic".to_owned());
+    assert_eq!(n.approach, Some(Greeting::Missing { faction: "test_faction_b".into(), key }), "the log names the faction and the row");
+    assert_eq!(m.negotiations.ended, 0);
+    m.apply(CampaignCommand::EndNegotiation).unwrap();
+    m.apply(CampaignCommand::EndNegotiation).unwrap();
+    assert_eq!((m.negotiations.current.is_none(), m.negotiations.begun, m.negotiations.ended), (true, 2, 1), "ended once");
+    assert_eq!(
+        m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: FactionId(999) }),
+        Err(CommandError::UnknownFaction(FactionId(999)))
+    );
+    assert_eq!(m.negotiations.begun, 2, "a rejected begin leaves no negotiation");
 }
 
 #[test]
@@ -1209,13 +1345,15 @@ fn trade_commodities_and_blockades() {
     // Far from the port it no longer blocks.
     m.world.characters.get_mut(&CharacterId(104)).unwrap().position = pos(50, 30);
     assert_eq!(economy::trade_routes_value(&m, A), 303);
-    // A domestic route that is blockaded cuts the supply: the export volumes shrink with it.
+    // With a domestic route the supply is split (`0x00BC26D0`): B has no demand in this world, so it takes no
+    // share and the route carries nothing (the loaded volumes are replaced); a blockaded domestic route
+    // cuts the supply to 0 as well.
     let home = TradePath {
         waypoints: vec![TradeWaypoint { region: RegionId(0), from: 120, to: 1, sea: true, from_pos: Some(pos(60, 30)), to_pos: Some(port) }],
         volumes: vec![2, 1],
     };
     m.world.domestic_trade.insert(A, vec![home]);
-    assert_eq!(economy::trade_routes_value(&m, A), 303);
+    assert_eq!(economy::trade_routes_value(&m, A), 263);
     m.world.characters.get_mut(&CharacterId(104)).unwrap().position = pos(60, 30);
     assert_eq!(m.trade_supply(A), Some(vec![0, 0]));
     assert_eq!(economy::trade_routes_value(&m, A), 263);
@@ -1470,37 +1608,86 @@ fn compute_for_gives_the_same_answers_for_its_faction() {
     }
 }
 
-#[test]
-fn supply_is_split_over_the_partners_by_their_demand() {
+/// A test model for the trade split: A trades with B (region 11, GDP 8000) and C (region 12, given to
+/// C, GDP 2000); A's capital is region 10 and its trade ships bring home `home` of each commodity.
+fn split_model(commodities: &[&str], home: Vec<u32>) -> CampaignModel {
     use super::trade::{TradePath, TradeWaypoint};
     let mut m = test_model();
     let mut rules = (*m.rules).clone();
-    // Demand of commodity `c0` = the region's GDP.
+    // Demand of `c0` = the region's GDP; of `c1` = trunc(sqrt(town wealth)).
     rules.commodity_demand.push(("c0".into(), "ddr_GDP".into(), 1.0, 1.0));
+    rules.commodity_demand.push(("c1".into(), "ddr_TW".into(), 1.0, 1.0));
     m.rules = Arc::new(rules);
-    m.world.commodity_keys = vec!["c0".into()];
-    m.world.commodity_prices = vec![10];
-    // A trades with B (region 11, GDP 8000) and C (region 12, given to C, GDP 2000).
+    m.world.commodity_keys = commodities.iter().map(|c| c.to_string()).collect();
+    m.world.commodity_prices = vec![10; commodities.len()];
     m.world.regions.get_mut(&RegionId(12)).unwrap().owner = C;
+    m.world.faction_details.entry(A).or_default().capital = Some(RegionId(10));
     for b in [B, C] {
         for (x, y) in [(A, b), (b, A)] {
             m.world.relationships.insert((x, y), details::Relationship { trade_agreement: true, ..Default::default() });
         }
         let end = TradeWaypoint { region: RegionId(11), from: u32::MAX, to: u32::MAX, sea: false, from_pos: None, to_pos: None };
-        m.world.trade_paths.insert((A, b), vec![TradePath { waypoints: vec![end], volumes: vec![0] }]);
+        m.world.trade_paths.insert((A, b), vec![TradePath { waypoints: vec![end], volumes: vec![0; commodities.len()] }]);
     }
-    // A's trade ships bring home 33.
-    let home = TradeWaypoint { region: RegionId(10), from: 120, to: 1, sea: true, from_pos: None, to_pos: None };
-    m.world.domestic_trade.insert(A, vec![TradePath { waypoints: vec![home], volumes: vec![33] }]);
+    let w = TradeWaypoint { region: RegionId(10), from: 120, to: 1, sea: true, from_pos: None, to_pos: None };
+    m.world.domestic_trade.insert(A, vec![TradePath { waypoints: vec![w], volumes: home }]);
+    m
+}
+
+/// `0x00BC26D0` (CONFIRMED): per commodity the partners, sorted by net demand, take
+/// `max(1, demand × rest / total)` from the smallest demand up while there are at least as many units
+/// left as partners.
+#[test]
+fn supply_is_split_over_the_partners_by_their_net_demand() {
+    use super::trade::{TradePath, TradeWaypoint};
+    let mut m = split_model(&["c0"], vec![33]);
     // The smaller demand first: C trunc(33 × 2000 / 10000) = 6, then B the rest, 27.
     let split = m.trade_split(A).unwrap();
     assert_eq!((split[&C].clone(), split[&B].clone()), (vec![6], vec![27]));
-    // No demand at all: the last partner (largest demand, then highest id) takes everything.
+    // A partner's own supply comes off its demand when it has a capital: B brings home 6000 itself,
+    // so both partners have 2000. Equal demands keep the faction list order (B before C: turn order
+    // B, A, C) and are handed out from the end: C 33 × 2000 / 4000 = 16 first, then B the rest, 17.
+    let w = TradeWaypoint { region: RegionId(11), from: 121, to: 2, sea: true, from_pos: None, to_pos: None };
+    m.world.domestic_trade.insert(B, vec![TradePath { waypoints: vec![w], volumes: vec![6000] }]);
+    m.world.faction_details.entry(B).or_default().capital = Some(RegionId(11));
+    let split = m.trade_split(A).unwrap();
+    assert_eq!((split[&C].clone(), split[&B].clone()), (vec![16], vec![17]));
+    // Without its capital B's own supply does not count.
+    m.world.faction_details.entry(B).or_default().capital = None;
+    assert_eq!(m.trade_split(A).unwrap()[&B], vec![27]);
+    // A second route of the pair carries the same share (the exe adds it to every route of the pair).
+    let path = m.world.trade_paths[&(A, B)][0].clone();
+    m.world.trade_paths.get_mut(&(A, B)).unwrap().push(path.clone());
+    let split = m.trade_split(A).unwrap();
+    for p in &m.world.trade_paths[&(A, B)] {
+        assert_eq!(m.trade_path_volumes(Some(&split), B, p), vec![27]);
+    }
+    // An exporter without a capital exports nothing.
+    m.world.faction_details.entry(A).or_default().capital = None;
+    assert_eq!(m.trade_split(A).unwrap().values().cloned().collect::<Vec<_>>(), vec![vec![0], vec![0]]);
+}
+
+#[test]
+fn partners_without_net_demand_take_nothing_and_the_rest_may_stay_home() {
+    // No demand at all: no partner takes a share, the supply is not exported.
+    let mut m = split_model(&["c0"], vec![33]);
     let mut rules = (*m.rules).clone();
     rules.commodity_demand.clear();
     m.rules = Arc::new(rules);
+    assert_eq!(m.trade_split(A).unwrap().values().cloned().collect::<Vec<_>>(), vec![vec![0], vec![0]]);
+
+    // C has no demand for c0 (GDP 0) but some for c1 (town wealth 100 → 10), so it counts with demand
+    // 0 for c0: the total is 8000 + max(0, 1) = 8001. Of 5 units C gets max(1, 0) = 1, then B
+    // trunc(8000 × 4 / 8001) = 3; the last unit is not exported.
+    let mut m = split_model(&["c0", "c1"], vec![5, 0]);
+    let r = m.world.regions.get_mut(&RegionId(12)).unwrap();
+    (r.gdp, r.town_wealth) = (0, 100);
     let split = m.trade_split(A).unwrap();
-    assert_eq!((split[&B].clone(), split[&C].clone()), (vec![0], vec![33]));
+    assert_eq!((split[&C][0], split[&B][0]), (1, 3));
+    // One unit for two partners: C (first, two partners left) gets nothing, B takes max(1, 0) = 1.
+    m.world.domestic_trade.get_mut(&A).unwrap()[0].volumes = vec![1, 0];
+    let split = m.trade_split(A).unwrap();
+    assert_eq!((split[&C][0], split[&B][0]), (0, 1));
 }
 
 #[test]
@@ -1803,7 +1990,7 @@ fn schools_research_technologies_and_unlock_the_next() {
 /// Unit rules for the commander pick tests (MADE-UP keys; categories are the DB's).
 fn with_pick_units(m: &mut CampaignModel) {
     let mut rules = (*m.rules).clone();
-    for (k, category, value_7, flag_21, is_naval) in [
+    for (k, category, campaign_cost, flag_21, is_naval) in [
         ("t_cav", "cavalry", 0, false, false),
         ("t_art", "artillery", 0, false, false),
         ("t_inf_rich", "infantry", 900, false, false),
@@ -1811,7 +1998,7 @@ fn with_pick_units(m: &mut CampaignModel) {
         ("t_line", "naval_line_of_battle", 0, false, true),
         ("t_frig", "naval_frigate", 0, false, true),
     ] {
-        rules.units.insert(k.into(), UnitRules { category: category.into(), value_7, flag_21, is_naval, ..Default::default() });
+        rules.units.insert(k.into(), UnitRules { category: category.into(), campaign_cost, flag_21, is_naval, ..Default::default() });
     }
     m.rules = Arc::new(rules);
 }
@@ -2223,7 +2410,7 @@ fn queued_units_the_region_can_no_longer_recruit_are_dropped_and_refunded() {
     m.turn.humans = vec![A];
     m.start_campaign();
     assert!(m.world.regions[&RegionId(10)].recruitment_queue.is_empty());
-    assert_eq!(m.world.factions[&A].treasury, after + 500);
+    assert_eq!(m.world.factions[&A].treasury, after + 400);
 }
 
 #[test]
@@ -3677,4 +3864,32 @@ fn government_change_skips_the_dead_and_rejects_the_unknown() {
     assert!(m.world.relationships[&(C, A)].attitudes[i].limited);
     m.diplomacy_round_end(C);
     assert_eq!(m.world.relationships[&(C, A)].attitudes[i].value, 70);
+}
+
+/// `0x008BA1E0` (CONFIRMED): units of the four exempt classes (`units` #3 `cavalry_heavy`, `elephants`,
+/// `general`, `infantry_elite`; class codes 4 / 0xB / 0xC / 0xE of `0x00EED3E0`) do not desert and draw no
+/// random number, so the next unit's loss is the one it would have had alone.
+#[test]
+fn exempt_unit_classes_do_not_desert() {
+    let mut rules = (*test_model().rules).clone();
+    for (key, class) in [("test_guard", "infantry_elite"), ("test_cuirassiers", "cavalry_heavy"), ("test_general", "general"), ("test_elephants", "elephants")] {
+        let mut u = rules.units["test_unit"].clone();
+        u.unit_class = class.into();
+        rules.units.insert(key.into(), u);
+    }
+    let rules = Arc::new(rules);
+    let run = |keys: &[&str]| {
+        let mut m = test_model();
+        m.rules = rules.clone();
+        let f = m.world.forces.get_mut(&ForceId(1001)).unwrap();
+        f.units = keys.iter().enumerate().map(|(i, k)| CampaignUnit { unit_key: (*k).into(), ..unit(10 + i as i32) }).collect();
+        // Income 0: p = 0.3, so each loss depends on the unit's random draw.
+        economy::bankrupt_desertion(&mut m, B, 0, 20);
+        (m.world.forces[&ForceId(1001)].units.iter().map(|u| u.men).collect::<Vec<_>>(), m.rng.unit_float())
+    };
+    let (alone, next_alone) = run(&["test_unit"]);
+    assert!(alone[0] < 80);
+    let (mixed, next_mixed) = run(&["test_guard", "test_cuirassiers", "test_general", "test_elephants", "test_unit"]);
+    assert_eq!(mixed, vec![80, 80, 80, 80, alone[0]]);
+    assert_eq!(next_mixed, next_alone, "the exempt units drew no random number");
 }

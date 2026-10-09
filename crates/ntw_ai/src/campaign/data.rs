@@ -6,12 +6,13 @@
 //! | `campaign_ai_managers` + `_manager_behaviour_junctions` | which behaviours a manager runs, and their priorities |
 //! | `cdir_unit_balances` | target army composition by army size |
 //! | `cdir_unit_qualities` | each unit's quality (strength value) |
-//! | `campaign_difficulty_handicap_effects` | AI cost modifiers per difficulty |
-//! | `building_units_allowed` | which buildings recruit which units |
 //! | `building_chains`, `building_levels` | construction options, costs, chain category |
-//! | `units`, `factions`, `units_to_*_permissions` | unit category/cost, who may recruit what |
+//! | `units` | unit category, upkeep and the quality stand-in |
+//!
+//! What a unit costs, whether the faction may recruit it and its difficulty handicap come from the campaign
+//! model (`world::AiRecruitable`), not from these tables.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use ntw_data::GameDatabase;
 use ntw_formats::pack::Vfs;
@@ -44,8 +45,9 @@ pub struct AiUnitInfo {
     pub category: String,
     /// `units.class`.
     pub class: String,
-    /// Recruitment cost.
-    pub cost: i32,
+    /// `units` #4, the battle army-setup price: only the stand-in quality of a unit `cdir_unit_qualities` does not
+    /// list (`AiWorld::army_strength`, the recruitment pick). Not what recruiting costs: that is the model's entry price, `world::AiRecruitable`.
+    pub battle_cost: i32,
     /// Upkeep per turn.
     pub upkeep: i32,
     /// `cdir_unit_qualities` value, if listed.
@@ -82,18 +84,6 @@ pub struct CampaignAiData {
     pub buildings: BTreeMap<String, AiBuildingInfo>,
     /// Chain key → category (`military`, `money`, `agriculture`, `research`, `happiness`, `government`).
     pub chain_category: BTreeMap<String, String>,
-    /// Building level key → units it lets a region recruit.
-    pub units_allowed: BTreeMap<String, Vec<String>>,
-    /// Unit key → factions with an exclusive permission (value: allowed).
-    pub exclusive: BTreeMap<String, BTreeMap<String, bool>>,
-    /// Unit key → military groupings allowed.
-    pub groupings: BTreeMap<String, BTreeSet<String>>,
-    /// Faction key → faction group (`factions` col 34).
-    pub faction_group: BTreeMap<String, String>,
-    /// `campaign_difficulty_handicap_effects`: (difficulty, bool column, effect) → value. The bool
-    /// column is matched against the faction's `+0x6E0` flag (CONFIRMED lookup `0x00F9F970`; the flag
-    /// is INFERRED to be "is human", AI_RESEARCH §4 "Difficulty").
-    pub handicaps: BTreeMap<(i32, bool, String), f32>,
 }
 
 impl CampaignAiData {
@@ -152,7 +142,7 @@ impl CampaignAiData {
                 AiUnitInfo {
                     category: u.category.clone(),
                     class: u.unit_class.clone(),
-                    cost: u.recruitment_cost,
+                    battle_cost: u.recruitment_cost,
                     upkeep: u.upkeep,
                     quality: quality.get(&u.key).copied(),
                 },
@@ -167,24 +157,6 @@ impl CampaignAiData {
         for r in tables::load_raw(vfs, "building_chains", layouts::BUILDING_CHAINS)?.rows {
             d.chain_category.insert(col_str(&r, 0).to_string(), col_str(&r, 3).to_string());
         }
-        for r in tables::load_raw(vfs, "building_units_allowed", layouts::BUILDING_UNITS_ALLOWED)?.rows {
-            d.units_allowed.entry(col_str(&r, 0).to_string()).or_default().push(col_str(&r, 1).to_string());
-        }
-        for r in tables::load_raw(vfs, "units_to_exclusive_faction_permissions", "ssb")?.rows {
-            d.exclusive
-                .entry(col_str(&r, 0).to_string())
-                .or_default()
-                .insert(col_str(&r, 1).to_string(), col_bool(&r, 2));
-        }
-        for r in tables::load_raw(vfs, "units_to_groupings_military_permissions", "ss")?.rows {
-            d.groupings.entry(col_str(&r, 0).to_string()).or_default().insert(col_str(&r, 1).to_string());
-        }
-        for f in db.factions.rows() {
-            d.faction_group.insert(f.key.clone(), f.faction_group.clone());
-        }
-        for r in tables::load_raw(vfs, "campaign_difficulty_handicap_effects", layouts::CAMPAIGN_DIFFICULTY_HANDICAP_EFFECTS)?.rows {
-            d.handicaps.insert((col_i32(&r, 0), col_bool(&r, 1), col_str(&r, 2).to_string()), col_f32(&r, 3));
-        }
         Ok(d)
     }
 
@@ -196,43 +168,4 @@ impl CampaignAiData {
             .or_else(|| self.personalities.get(&self.default_personality).and_then(|p| p.get(key)))
             .copied()
     }
-
-    /// INFERRED rule: a faction may recruit `unit` if it has an exclusive permission for it, or
-    /// (when the unit has no exclusive rows at all) if its faction group is allowed.
-    pub fn faction_may_recruit(&self, faction_key: &str, unit: &str) -> bool {
-        if let Some(ex) = self.exclusive.get(unit) {
-            return ex.get(faction_key).copied().unwrap_or(false);
-        }
-        let group = self.faction_group.get(faction_key).map(String::as_str).unwrap_or("");
-        self.groupings.get(unit).is_some_and(|g| g.contains(group) || g.contains(faction_key))
-    }
-
-    /// The handicap rows that apply to a faction with difficulty `difficulty` and flag `is_human`
-    /// (`0x00F9F970`, CONFIRMED: the difficulty is clamped to −2..2 and the flag picks the list).
-    pub fn handicap_effects(&self, difficulty: i32, is_human: bool) -> Vec<(&str, f32)> {
-        let d = handicap_index(difficulty);
-        self.handicaps
-            .iter()
-            .filter(|((rd, rb, _), _)| *rd == d && *rb == is_human)
-            .map(|((_, _, e), v)| (e.as_str(), *v))
-            .collect()
-    }
-
-    /// One handicap value (0 when absent), lookup as [`Self::handicap_effects`].
-    pub fn handicap(&self, difficulty: i32, is_human: bool, effect: &str) -> f32 {
-        self.handicaps.get(&(handicap_index(difficulty), is_human, effect.to_string())).copied().unwrap_or(0.0)
-    }
-
-    /// The handicap value an **AI** faction gets in a campaign played at `player_difficulty`
-    /// (−2 very hard .. 1 easy, the preference's scale). INFERRED: AI factions use the negated
-    /// player difficulty with the flag clear (their rows are bonuses that grow with the difficulty;
-    /// the writer of the AI factions' difficulty is not found yet), so PROVISIONAL.
-    pub fn ai_handicap(&self, player_difficulty: i32, effect: &str) -> f32 {
-        self.handicap(-player_difficulty, false, effect)
-    }
-}
-
-/// `0x00F9F970` (CONFIRMED): the difficulty a handicap list is looked up with, clamped to −2..2.
-pub fn handicap_index(difficulty: i32) -> i32 {
-    difficulty.clamp(-2, 2)
 }

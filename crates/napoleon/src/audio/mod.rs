@@ -20,6 +20,7 @@
 mod battle;
 mod clip;
 pub mod mixer;
+mod speakers;
 pub mod feed;
 
 use std::collections::{HashMap, HashSet};
@@ -244,11 +245,11 @@ impl ProjectileKind {
     /// is small arms with `bullet`, arrow with `arrow`, artillery with `cannon_ball`. `None` for
     /// the rest: `naval` (the naval bands are a PLACEHOLDER) and, shipped, grenades, axes,
     /// javelins, chakram, grapple, grape and fragment shrapnel and fougasse; they play with the
-    /// artillery bands (PROVISIONAL, noted once by the battle bridge). INFERRED: for the shipped
-    /// rows this gives the kinds the old weapon-family rule gave (a one-off dump of the shipped
-    /// `projectiles` rows, no test); a row whose family is not a musket, pistol, airgun, camel gun
-    /// or puckle but fires a `bullet` as a `missile` (a modded rifle) is now small arms, not
-    /// artillery.
+    /// artillery bands (PROVISIONAL, noted once by the battle bridge). For every shipped
+    /// `projectiles` row this gives the kind the old weapon-family rule gave (CONFIRMED by the
+    /// install test `projectile_kinds_match_the_weapon_family_rule_on_every_shipped_row`); a row
+    /// whose family is not a musket, pistol, airgun, camel gun or puckle but fires a `bullet` as a
+    /// `missile` (a modded rifle) is now small arms, not artillery.
     pub fn of(category: &str, missile_type: &str) -> Option<Self> {
         let is = |s: &str, name: &str| s.eq_ignore_ascii_case(name);
         if ["artillery", "fort_battery", "rocket"].iter().any(|c| is(category, c)) {
@@ -311,6 +312,9 @@ pub use mixer::VolumeGroup;
 #[derive(Resource, Debug, Clone)]
 pub struct Volumes {
     pub groups: [mixer::GroupVolume; 6],
+    /// The original would open a headphones setup for these preferences ([`speakers`]): the
+    /// headphones volume multiplier applies.
+    headphones: bool,
     prefs_path: Option<PathBuf>,
     prefs_mtime: Option<std::time::SystemTime>,
     check_timer: f32,
@@ -339,7 +343,10 @@ impl Volumes {
         groups[VolumeGroup::Music as usize] = group("sound_music_volume", "sound_music_enabled");
         groups[VolumeGroup::Speech as usize] = group("sound_speech_volume", "sound_speech_enabled");
         groups[VolumeGroup::Sfx as usize] = group("sound_sfx_volume", "sound_sfx_enabled");
-        Self { groups, prefs_path: path, prefs_mtime: mtime, check_timer: 0.0 }
+        // `sound_provider` is an int preference, default 0 (registered at `0x00405140`).
+        let provider = prefs.get_f64("sound_provider").map_or(0, |p| p.round() as i64);
+        let headphones = speakers::opened_is_headphones(provider, speakers::system_speaker_config());
+        Self { groups, headphones, prefs_path: path, prefs_mtime: mtime, check_timer: 0.0 }
     }
 
     /// Sets the movie group from `MOVIE_VOLUME` (CONFIRMED `round(MOVIE_VOLUME × 100)`).
@@ -358,9 +365,11 @@ struct MixSettings {
     low_pass_min: f32,
     mult_2d: f32,
     mult_3d: f32,
-    /// `SS_SPEAKERS_VOLUME_MULTIPLIER` (the headphones multiplier applies when Miles reports
-    /// headphones; we always use the speakers one: PROVISIONAL).
+    /// `SS_SPEAKERS_VOLUME_MULTIPLIER`: used unless the opened setup is headphones
+    /// ([`speakers`], CONFIRMED `0x01004390`).
     speaker_mult: f32,
+    /// `SS_HEADPHONES_VOLUME_MULTIPLIER`: used when it is headphones.
+    headphones_mult: f32,
     battle_distance_mult: f32,
     campaign_distance_mult: f32,
     launch_min_distance: f32,
@@ -378,6 +387,7 @@ impl MixSettings {
         mult_2d: 2.0,
         mult_3d: 2.0,
         speaker_mult: 1.0,
+        headphones_mult: 0.5,
         battle_distance_mult: 14.0,
         campaign_distance_mult: 20.0,
         launch_min_distance: 100.0,
@@ -396,12 +406,18 @@ impl MixSettings {
             mult_2d: get("SS_2D_VOLUME_MULTIPLIER", s.mult_2d),
             mult_3d: get("SS_3D_VOLUME_MULTIPLIER", s.mult_3d),
             speaker_mult: get("SS_SPEAKERS_VOLUME_MULTIPLIER", s.speaker_mult),
+            headphones_mult: get("SS_HEADPHONES_VOLUME_MULTIPLIER", s.headphones_mult),
             battle_distance_mult: get("GLOBAL_RECORDED_DISTANCE_MULTIPLIER", s.battle_distance_mult),
             campaign_distance_mult: get("CAMPAIGN_GLOBAL_RECORDED_DISTANCE_MULTIPLIER", s.campaign_distance_mult),
             launch_min_distance: get("MIN_DIST_TO_APPLY_DISTANCE_FROM_LISTENER_TRIGGER_DELAY", s.launch_min_distance),
             launch_min_delay: get("MIN_DISTANCE_FROM_LISTENER_TRIGGER_DELAY", s.launch_min_delay),
             speed_of_sound: get("SPEED_OF_SOUND_IN_METRES_PER_SECOND", s.speed_of_sound),
         }
+    }
+
+    /// The manager's speaker multiplier for the opened setup (CONFIRMED `0x01004390`).
+    fn speaker_mult(&self, headphones: bool) -> f32 {
+        if headphones { self.headphones_mult } else { self.speaker_mult }
     }
 }
 
@@ -1093,7 +1109,7 @@ impl Player<'_, '_> {
         let ev = data.lib.events.events.get(event)?;
         let Some(paths) = data.paths.get(event) else {
             // Cannot happen: `SoundData::new` builds one path list per event, and neither changes
-            // after. Logged once.
+            // after. Logged once (prepare runs on the main thread, never the audio thread).
             static MISSING: std::sync::Once = std::sync::Once::new();
             MISSING.call_once(|| error!("sound: event {event} has no file paths (sound data out of step)"));
             return None;
@@ -1826,7 +1842,10 @@ fn update_voices(
         } else {
             settings.mult_3d
         };
-        let g = mixer::manager_gain(master, vol.group(v.group), v.volume, settings.speaker_mult, dim);
+        // Movie sound goes out through Bink's own driver at `group(4) × 0.01 × group(5)`, without
+        // the manager's speaker multiplier (CONFIRMED `0x004831D0`, BINK.md §7).
+        let speaker = if v.group == VolumeGroup::Movie { 1.0 } else { settings.speaker_mult(vol.headphones) };
+        let g = mixer::manager_gain(master, vol.group(v.group), v.volume, speaker, dim);
         // The voice volume Miles gets (pan always 0.5), then Miles' curve and centre pan.
         let side = mixer::miles_curve((g * fade).clamp(0.0, 1.0)) * mixer::CENTRE_PAN;
         let (l, r) = match (v.position, ear) {
@@ -2174,6 +2193,34 @@ mod tests {
         assert_eq!(ProjectileKind::of("naval", "cannon_ball"), None);
         assert_eq!(ProjectileKind::of("missile", "grenade"), None);
         assert_eq!(ProjectileKind::of("special", "shrapnel"), None);
+    }
+
+    /// Every shipped `projectiles` row gets the bands the old weapon-family rule gave it (a musket,
+    /// pistol, airgun, camel gun or puckle family is small arms, an `arrow` shot an arrow, the rest
+    /// artillery; a row of no kind plays with the artillery bands). Needs the install; skipped
+    /// (passes) otherwise.
+    #[test]
+    fn projectile_kinds_match_the_weapon_family_rule_on_every_shipped_row() {
+        let dir = crate::config::game_data_dir();
+        let Ok(db) = ntw_data::GameDatabase::from_install(&dir) else {
+            eprintln!("skipped: no install at {}", dir.display());
+            return;
+        };
+        let old = |p: &ntw_data::Projectile| {
+            let g = p.weapon_family.as_deref().unwrap_or("none");
+            if g.starts_with("musket") || ["pistol", "airgun", "camel_gun", "puckle"].contains(&g) {
+                ProjectileKind::SmallArms
+            } else if p.shot_type == "arrow" {
+                ProjectileKind::Arrow
+            } else {
+                ProjectileKind::Artillery
+            }
+        };
+        assert!(!db.projectiles.is_empty());
+        for p in db.projectiles.iter() {
+            let kind = ProjectileKind::of(&p.category, &p.missile_type).unwrap_or(ProjectileKind::Artillery);
+            assert_eq!(kind, old(p), "{} (category {}, missile type {}, family {:?})", p.key, p.category, p.missile_type, p.weapon_family);
+        }
     }
 
     /// A volley's bank entry: the most specific match for its gun, shot and audio distance (from

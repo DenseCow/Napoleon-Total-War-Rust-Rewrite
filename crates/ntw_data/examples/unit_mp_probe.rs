@@ -12,7 +12,7 @@ fn main() {
     }
     for k in ["Inf_Line_Austrian_German_Fusiliers", "Gen_Generals_Staff", "Art_Foot_Austrian_12_lber"] {
         if let Some(u) = db.unit(k) {
-            println!("{k}: cost {} second {} upkeep {} class {} cat {} mp {} scope {:?} u84 {} u98 {} u9c {} ua0 {}", u.recruitment_cost, u.secondary_cost, u.upkeep, u.unit_class, u.category, u.mp_category, u.recruitment_scope, u.unknown_84, u.unknown_98, u.unknown_9c, u.unknown_a0);
+            println!("{k}: cost {} second {} upkeep {} class {} cat {} mp {} scope {:?} cap {} u98 {} u9c {} ua0 {}", u.recruitment_cost, u.secondary_cost, u.upkeep, u.unit_class, u.category, u.mp_category, u.recruitment_scope, u.unit_cap, u.unknown_98, u.unknown_9c, u.unknown_a0);
         }
     }
 }

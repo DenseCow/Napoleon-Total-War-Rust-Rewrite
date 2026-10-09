@@ -17,8 +17,8 @@
 //!
 //! - **Trade** ([`Income::trade`]): every trade route's GDP part `trunc(2.2 × sqrt(GDP_a + GDP_b))` and
 //!   accumulated value plus its commodity part `Σ volume × price` (CONFIRMED), 0 when blockaded
-//!   (see [`super::trade`]); the supply is split over the partners by their demand
-//!   ([`CampaignModel::trade_split`], INFERRED from the vanilla saves).
+//!   (see [`super::trade`]); the supply is split over the partners by their net demand
+//!   ([`CampaignModel::trade_split`], `0x00BC26D0`, CONFIRMED).
 //!
 //! The effects (traits, ministers, technologies, buildings, difficulty) come from the effects store
 //! ([`super::effects`]); GDP and town wealth growth are recomputed at each round end
@@ -160,18 +160,35 @@ pub fn unit_upkeep(fx: &Effects, faction: FactionId, unit: &super::rules::UnitRu
     (f64::from(unit.upkeep) * f64::from(mult) * 0.01).round_ties_even() as i32
 }
 
-/// The campaign's **experience-adjusted recruitment cost** of one unit (`0x00ED49A0`, CONFIRMED
-/// `flat + ROUND(base × mult)` from `unit_stats_land_experience_bonuses` / its naval twin): what the
-/// army auto-build pays (`0x0045CB50` sums `0x0045D170` → `0x00ED49A0` over the units it is about to
-/// buy and refuses the purchase when the total would pass its budget) and what the unit info panel
-/// shows as "XpAdjustedCost" (BATTLE_FIDELITY.md §19a). `experience` is the unit's chevrons; a unit
-/// being raised afresh has none. A rank with no row leaves the cost alone (the exe's else branch).
-///
-/// Only the recruitment cost goes through it. `0x00ED49A0` can also take the upkeep as its base,
-/// but whether the per-turn upkeep is charged that way is UNKNOWN, so [`unit_upkeep`] /
-/// [`faction_upkeep`] do not apply it.
-pub fn recruit_cost(rules: &CampaignRules, unit: &super::rules::UnitRules, experience: u8) -> i32 {
-    rules.xp_adjusted_cost(unit.is_naval, experience, unit.cost)
+/// What recruiting `unit_key` in `region` costs: the cost of the region's recruitable entry, which the
+/// queue command charges and the queued item keeps (CONFIRMED: `0x00B58DD0` charges entry[0], the
+/// list `0x00B31020` builds from the region's recruitables and prices with `0x00B0D220` over the
+/// region's effect set `0x00A67530`). Computes the region's effect set; use [`recruitment_cost_in`]
+/// to reuse one.
+pub fn recruitment_cost(model: &CampaignModel, region: &Region, unit_key: &str, unit: &super::rules::UnitRules) -> i32 {
+    recruitment_cost_in(&model.rules, &region_effect_set(model, region), unit_key, unit)
+}
+
+/// [`recruitment_cost`] over an already built region effect set (`0x00B0D220`, CONFIRMED):
+/// `FISTP(((max(−100, mod) + 100) × units #7) × 0.01)` in f32, where `mod` is the sum of the
+/// integer effects `recruitment_mod_cost_land_all` (or `_naval_all` for a ship), the unit category's
+/// and the unit class's `cost_mod`, and in `spa_napoleon` `guerrilla_cost_mod` for a unit key
+/// ending in `_Guerrilla`, else `auxiliary_cost_mod` for one ending in `_Auxiliary` (case-sensitive).
+/// The base is `units` #7 ([`super::rules::UnitRules::campaign_cost`]), not the #4 cost.
+pub fn recruitment_cost_in(rules: &CampaignRules, set: &super::effects::EffectSet, unit_key: &str, unit: &super::rules::UnitRules) -> i32 {
+    // Every lookup is the exe's int read of the effect (`0x00E23E10`, half to even).
+    let int = |v: f32| f64::from(v).round_ties_even() as i32;
+    let mut sum = set.get_int(if unit.is_naval { "recruitment_mod_cost_naval_all" } else { "recruitment_mod_cost_land_all" })
+        + int(set.get_qualified(BonusKind::UnitCategory, "cost_mod", &unit.category))
+        + int(set.get_qualified(BonusKind::UnitClass, "cost_mod", &unit.unit_class));
+    if rules.campaign == "spa_napoleon" {
+        if unit_key.ends_with("_Guerrilla") {
+            sum += set.get_int("guerrilla_cost_mod");
+        } else if unit_key.ends_with("_Auxiliary") {
+            sum += set.get_int("auxiliary_cost_mod");
+        }
+    }
+    super::commands::fistp((sum.max(-100) as f32 + 100.0) * unit.campaign_cost as f32 * 0.01)
 }
 
 /// Upkeep per turn of every unit in the faction's forces (0x008B2150 over the faction's forces,
@@ -261,9 +278,9 @@ pub fn trade_pair_value_with(model: &CampaignModel, split: Option<&Split>, a: Fa
         Some(paths) => {
             let mut total = 0i32;
             let mut open = false;
-            for (i, p) in paths.iter().enumerate().filter(|(_, p)| !model.trade_path_blockaded(a, p)) {
+            for p in paths.iter().filter(|p| !model.trade_path_blockaded(a, p)) {
                 open = true;
-                let value = model.trade_commodity_value(&model.trade_path_volumes(split, b, i, p));
+                let value = model.trade_commodity_value(&model.trade_path_volumes(split, b, p));
                 total = total.saturating_add(value).saturating_add(trade_path_gdp_value(model, a, b, p));
             }
             if open { total.saturating_add(acc) } else { 0 }
@@ -304,9 +321,8 @@ pub fn accumulate_trade_with(model: &mut CampaignModel, fx: &Effects, faction: F
             None => (p * gdp as f32) as i32,
             Some(paths) => paths
                 .iter()
-                .enumerate()
-                .filter(|(_, path)| !model.trade_path_blockaded(faction, path))
-                .map(|(i, path)| (p * model.trade_commodity_value(&model.trade_path_volumes(split.as_ref(), b, i, path)).saturating_add(trade_path_gdp_value(model, faction, b, path)) as f32) as i32)
+                .filter(|path| !model.trade_path_blockaded(faction, path))
+                .map(|path| (p * model.trade_commodity_value(&model.trade_path_volumes(split.as_ref(), b, path)).saturating_add(trade_path_gdp_value(model, faction, b, path)) as f32) as i32)
                 .fold(0i32, i32::saturating_add),
         };
         adds.push((b, add));
@@ -514,6 +530,10 @@ pub fn settle_round(model: &mut CampaignModel, faction: FactionId) -> Settlement
     let mut fx = Effects::compute_for(model, faction);
     let income = faction_income_with(model, &fx, faction);
     let revenue = income.revenue();
+    // The turn's record goes to the history (0x00BABE30); its categories 5..11 are the ranking's
+    // Wealth (`0x00BBCC40`). PROVISIONAL: the model's revenue holds categories 5 (taxes), 7 (trade)
+    // and 11 (other); 6 and 8..10 are not modelled.
+    model.world.last_income.insert(faction, revenue);
     let mut result = Settlement::Paid;
     if let Some(f) = model.world.factions.get_mut(&faction) {
         if i64::from(f.treasury) + i64::from(revenue) < i64::from(income.upkeep) {
@@ -669,7 +689,7 @@ impl ClassPublicOrder {
 /// The region's effect set as `0x008EDF70` reads it (`0x00A67530`): its buildings (at full health),
 /// the owner's faction sum and the tax-level bundles of both classes (compiled through the effect
 /// mapping).
-pub(crate) fn region_effect_set(model: &CampaignModel, reg: &Region) -> super::effects::EffectSet {
+pub fn region_effect_set(model: &CampaignModel, reg: &Region) -> super::effects::EffectSet {
     let rules = &model.rules;
     // The faction part comes from the governing faction (normally the owner).
     let gov = model.world.governing_faction(reg.id).unwrap_or(reg.owner);
@@ -831,15 +851,20 @@ pub fn unit_minimum_men(model: &CampaignModel, max_men: u32) -> u32 {
     if v < 4 { 4 } else { v.min(max_men) }
 }
 
+/// The unit classes whose units never desert (`0x008BA1E0`, CONFIRMED): it skips the units whose `UNIT_RECORD`
+/// +0x20 is 0xE, 0xB, 4 or 0xC. The record constructor `0x00E91320` sets +0x20 from the `units` #3 class key
+/// through the class enum `0x00EED3E0` (a fixed list of keys; any other key is 0), whose codes 4 / 0xB / 0xC / 0xE
+/// are these four keys.
+pub const DESERTION_EXEMPT_CLASSES: [&str; 4] = ["cavalry_heavy", "elephants", "general", "infantry_elite"];
+
 /// Bankrupt armies desert (`0x008BA020` / `0x008BA1E0`, CONFIRMED formula): every unit of a force
 /// outside a settlement, except the commander's own unit, loses `round(r × men)` men with
 /// `r = 0.07 + rand × (p − 0.07)` (one campaign-RNG step per unit) and
 /// `p = 0.3` if the income is below 1, else `clamp((expenses / income − 1) × 0.3 + 0.07, 0.07, 0.3)`;
 /// a unit left at or under [`unit_minimum_men`] is disbanded. It runs while faction `+0x50C` > 1: that field is
 /// the bankrupt-turn count (the economics object sits at faction +0xAC, and its +0x460 is the counter; CONFIRMED
-/// with a debugger write-watch, CAMPAIGN_FIDELITY.md §Bankruptcy). The original also skips units of four
-/// record classes (codes 4, 0xB, 0xC, 0xE of the unit record `+0x20`); not mapped, so the model skips none
-/// (PROVISIONAL).
+/// with a debugger write-watch, CAMPAIGN_FIDELITY.md §Bankruptcy). Units of the [`DESERTION_EXEMPT_CLASSES`]
+/// are skipped too, and draw no random number.
 pub fn bankrupt_desertion(model: &mut CampaignModel, faction: FactionId, income: i32, expenses: i32) {
     let p = if income < 1 { 0.3f32 } else { ((expenses as f32 / income as f32 - 1.0) * 0.3 + 0.07).clamp(0.07, 0.3) };
     let garrisons: Vec<ForceId> = model.world.regions.values().filter_map(|r| r.garrison).collect();
@@ -859,7 +884,8 @@ pub fn bankrupt_desertion(model: &mut CampaignModel, faction: FactionId, income:
         let mut gone = Vec::new();
         let f = model.world.forces.get_mut(&fid).expect("checked above");
         for (i, u) in f.units.iter_mut().enumerate() {
-            if commander.is_some() && u.character == commander {
+            let exempt = model.rules.units.get(&u.unit_key).is_some_and(|r| DESERTION_EXEMPT_CLASSES.contains(&r.unit_class.as_str()));
+            if exempt || (commander.is_some() && u.character == commander) {
                 continue;
             }
             let r = model.rng.unit_float() * (p - 0.07) + 0.07;

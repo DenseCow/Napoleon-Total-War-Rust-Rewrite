@@ -87,6 +87,14 @@ pub struct FragmentClip {
     pub attributes: Vec<(String, String)>,
 }
 
+impl FragmentClip {
+    /// The line's blend-in time (s): its `blend_in_time`, or [`DEFAULT_BLEND_IN_TIME`] when it has
+    /// none (the parser writes that into every fragment it materialises, `0x00E62760`).
+    pub fn blend_in(&self) -> f32 {
+        self.blend_in_time.unwrap_or(DEFAULT_BLEND_IN_TIME)
+    }
+}
+
 /// A parsed fragment file: slot name -> alternatives, in file order. A slot that is
 /// cancelled maps to an empty list. The order is the exe's order and matters: the exe
 /// indexes into it by [`fragment_index`], it never replaces an entry.
@@ -1770,10 +1778,10 @@ mod tests {
             stand[0].blend_in_time.is_none(),
             "the line says nothing, so the field is absent"
         );
-        let resolved = stand[0].blend_in_time.unwrap_or(DEFAULT_BLEND_IN_TIME);
+        let resolved = stand[0].blend_in();
         assert_eq!(resolved, 1.0);
         assert_eq!(stand[1].blend_in_time, Some(0.5));
-        assert_ne!(stand[1].blend_in_time.unwrap_or(DEFAULT_BLEND_IN_TIME), 1.0);
+        assert_ne!(stand[1].blend_in(), 1.0);
     }
 
     #[test]

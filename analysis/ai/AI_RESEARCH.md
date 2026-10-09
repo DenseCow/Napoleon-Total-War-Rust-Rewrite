@@ -1149,9 +1149,10 @@ Round 3: MERGE_UNITS (smallest land armies first join the nearest reachable own 
 big when both fit in 20 units) and TAXATION (per class, the highest `taxes_levels` level that keeps
 that class's public order >= 0 in every owned region, else the lowest) on the model's
 `MergeForces` / `SetTaxLevel`; both rules PROVISIONAL (the original's are BDI desires, not decoded).
-AI handicaps: `CampaignAiData::{handicap, handicap_effects, ai_handicap}` with the CONFIRMED lookup;
-the AI's recruitment budget uses `ai_handicap(player difficulty)` (PROVISIONAL mapping). The model
-itself applies no handicap effects yet (see the report: needs an effects hook in the economy).
+AI handicaps: (superseded, 0-B 2026-10-09) the model now applies them as faction effects
+(`ntw_sim::campaign::effects::apply_start_handicaps`, `0x008DD090`), so the AI reads its recruit prices,
+handicap included, from the model's recruitable entries (`world::AiRecruitable`); the AI's own handicap
+lookup (`CampaignAiData::{handicap, handicap_effects, ai_handicap}`) is removed.
 Round 4: each faction runs its own stored manager and personality (CONFIRMED source, §2.3; the
 naming rule is only a fallback). REGION_DEFENCE and EXPANSION are BDI desires with the CONFIRMED
 priority rules (`campaign::desires`), served highest priority first. PROVISIONAL there: serving

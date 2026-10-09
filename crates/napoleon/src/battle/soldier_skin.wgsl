@@ -4,7 +4,8 @@
 // that bone's frame (no bind pose): posed = sum_k w_k * (M_k * p_k). Up to 4 influences here
 // (soldiers use 2, rigid equipment 1). M_k come from `bones` (every clip frame's model-space bone
 // matrices); `figures[tag]` says which frames this man shows now (his own phase) and how far
-// between them. The file space is left-handed (a man faces +Z); like the CPU path we negate Z.
+// between them, and `fades` the poses a figure cross-fades out of after a clip change. The file
+// space is left-handed (a man faces +Z); like the CPU path we negate Z.
 // The fragment stage is Bevy's StandardMaterial.
 
 #import bevy_pbr::{
@@ -14,8 +15,17 @@
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<storage, read> bones: array<mat4x4<f32>>;
-// x: first matrix of frame A, y: of frame B, z: bitcast blend A->B, w: unused
+// x, y: first matrix of frames A and B, z: bitcast blend A->B, w: 0 or 1 + the index of the
+// figure's cross-fade in `fades` (battle/skin.rs `Figure`).
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var<storage, read> figures: array<vec4<u32>>;
+// A figure's cross-fade out of a clip change: up to two frozen poses, newest first (x, y, z as a
+// figure; w: bitcast weight, 0 = unused); the figure's own frame has the rest of the weight
+// (battle/skin.rs `Fade`, view.rs `ClipBlend`).
+struct Fade {
+    a: vec4<u32>,
+    b: vec4<u32>,
+}
+@group(#{MATERIAL_BIND_GROUP}) @binding(102) var<storage, read> fades: array<Fade>;
 
 struct SkinVertex {
     @builtin(instance_index) instance_index: u32,
@@ -34,12 +44,26 @@ struct SkinVertex {
 
 const NO_BONE: u32 = 65535u;
 
-fn bone(fig: vec4<u32>, j: u32) -> mat4x4<f32> {
+fn frame(f: vec4<u32>, j: u32) -> mat4x4<f32> {
+    let t = bitcast<f32>(f.z);
+    return bones[f.x + j] * (1.0 - t) + bones[f.y + j] * t;
+}
+
+fn bone(fig: vec4<u32>, fade: Fade, j: u32) -> mat4x4<f32> {
     if j == NO_BONE {
         return mat4x4<f32>(vec4(1.0, 0.0, 0.0, 0.0), vec4(0.0, 1.0, 0.0, 0.0), vec4(0.0, 0.0, 1.0, 0.0), vec4(0.0, 0.0, 0.0, 1.0));
     }
-    let t = bitcast<f32>(fig.z);
-    return bones[fig.x + j] * (1.0 - t) + bones[fig.y + j] * t;
+    let m = frame(fig, j);
+    if fig.w == 0u {
+        return m;
+    }
+    let ka = bitcast<f32>(fade.a.w);
+    let kb = bitcast<f32>(fade.b.w);
+    var out = m * (1.0 - ka - kb) + frame(fade.a, j) * ka;
+    if kb > 0.0 {
+        out += frame(fade.b, j) * kb;
+    }
+    return out;
 }
 
 struct Posed {
@@ -49,6 +73,10 @@ struct Posed {
 
 fn pose(v: SkinVertex) -> Posed {
     let fig = figures[mesh_functions::get_tag(v.instance_index)];
+    var fade: Fade;
+    if fig.w != 0u {
+        fade = fades[fig.w - 1u];
+    }
     var p = vec3<f32>(0.0);
     var n = vec3<f32>(0.0);
     let ps = array<vec3<f32>, 4>(v.p0, v.p1, v.p2, v.p3);
@@ -56,7 +84,7 @@ fn pose(v: SkinVertex) -> Posed {
     for (var k = 0u; k < 4u; k++) {
         let w = v.weights[k];
         if w > 0.0 {
-            let m = bone(fig, v.joints[k]);
+            let m = bone(fig, fade, v.joints[k]);
             p += w * (m * vec4<f32>(ps[k], 1.0)).xyz;
             n += w * (m * vec4<f32>(ns[k], 0.0)).xyz;
         }

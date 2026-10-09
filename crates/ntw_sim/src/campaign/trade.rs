@@ -118,70 +118,99 @@ impl CampaignModel {
     /// How the faction's supply ([`Self::trade_supply`]) is split over its trade partners this turn:
     /// importer → volumes per commodity. `None` when the supply is unknown (the loaded volumes stand).
     ///
-    /// INFERRED from the vanilla files (it reproduces every loaded route volume, see CAMPAIGN_FIDELITY.md
-    /// §Trade, supply split): per commodity, the partners with a route share the supply in proportion
-    /// to their demand for it (Σ [`Self::commodity_demand`] over their regions). The shares are taken in
-    /// ascending order of demand (ties by faction id), each `trunc(rest × demand / remaining demand)` of
-    /// what is left, so the partner with the largest demand gets the remainder (all of it when no
-    /// partner has demand). The original's builder
-    /// (0x00BC0DC0 → 0x00BC56C0 / 0x00BB5730: highest-price source first, cheapest path, port
-    /// capacities `commodity_export_vol` and 300 per settlement by land) is read but its importer-side
-    /// limit is not found; the split stands in for it.
+    /// The original's split, `0x00BC26D0` (CONFIRMED; run by `0x00BBD870` after the builder `0x00BC0960`
+    /// has gathered each faction's supply home). The builder has no importer-side limit (`0x00BB5730`
+    /// caps a source only by its path's first stop: 300 per settlement by land, the port's
+    /// `commodity_export_vol`); the importers' shares are decided here:
+    /// - every international route's volumes are cleared first (`0x00B1C1A0`);
+    /// - an exporter without a capital (faction `+0x72C`) has no supply entry and exports nothing;
+    /// - a partner's demand is its **net** demand: Σ region demand over its regions (`0x008F4E50`,
+    ///   [`Self::commodity_demand`]) minus its own supply when it has a capital ([`Self::trade_supply`];
+    ///   region production, the other term, is 0 in every shipped region). A partner counts only when its
+    ///   net demand is above 0 for at least one commodity; for the others its demand is 0;
+    /// - the partners are the factions in the campaign's faction list order ([`World::factions_in_turn_order`])
+    ///   with a trade agreement (relationship `+0x788`) and a route from the exporter;
+    /// - per commodity with supply: the (partner, demand) pairs are sorted by demand, largest first, with the
+    ///   exe's `std::sort` ([`crate::msvc_sort`]), and handed out from the end (smallest demand first). The
+    ///   total starts at Σ max(demand, 1). While `k` partners are left and `k ≤ rest`, the next one gets
+    ///   `max(1, (demand × rest) / total)` (32-bit product, unsigned division) and `rest` falls by it; with
+    ///   fewer units left than partners it gets nothing. Either way the total then falls by its demand;
+    /// - a partner's share goes onto every route of the pair (`0x00B08880`), see [`Self::trade_path_volumes`].
+    ///
+    /// [`World::factions_in_turn_order`]: super::world::World::factions_in_turn_order
     pub fn trade_split(&self, faction: FactionId) -> Option<std::collections::BTreeMap<FactionId, Vec<u32>>> {
         let supply = self.trade_supply(faction)?;
         let n = supply.len();
-        let partners: Vec<FactionId> =
-            super::economy::trade_partners(self, faction).into_iter().filter(|b| self.trade_routes_of(faction, *b).is_some()).collect();
-        let demand: Vec<(FactionId, Vec<u64>)> = partners
-            .iter()
-            .map(|b| {
-                let mut d = vec![0u64; n];
-                for r in self.world.regions.values().filter(|r| r.owner == *b) {
-                    for (x, v) in d.iter_mut().zip(self.commodity_demand(r)) {
-                        *x += u64::from(v);
-                    }
-                }
-                (*b, d)
-            })
+        let agreed = super::economy::trade_partners(self, faction);
+        let partners: Vec<FactionId> = self
+            .world
+            .factions_in_turn_order()
+            .into_iter()
+            .filter(|b| *b != faction && agreed.contains(b) && self.trade_routes_of(faction, *b).is_some())
             .collect();
         let mut out: std::collections::BTreeMap<FactionId, Vec<u32>> = partners.iter().map(|b| (*b, vec![0; n])).collect();
+        if self.world.capital(faction).is_none() {
+            return Some(out);
+        }
+        let demand: Vec<(FactionId, Vec<u32>)> = partners.iter().filter_map(|b| self.trade_net_demand(*b, n).map(|d| (*b, d))).collect();
         for (c, s) in supply.iter().enumerate() {
-            let mut order: Vec<(u64, FactionId)> = demand.iter().map(|(b, d)| (d[c], *b)).collect();
-            order.sort();
-            let mut rest = u64::from(*s);
-            let mut total: u64 = order.iter().map(|(d, _)| d).sum();
-            let last = order.len().saturating_sub(1);
-            for (i, (d, b)) in order.into_iter().enumerate() {
-                // The last partner takes the rest: its proportional share when there is demand, and
-                // everything when no partner has demand (INFERRED).
-                let share = if i == last { rest } else { (rest * d).checked_div(total).unwrap_or(0) };
-                if let Some(v) = out.get_mut(&b) {
-                    v[c] = share as u32;
+            if *s == 0 {
+                continue;
+            }
+            let mut pairs: Vec<(FactionId, u32)> = demand.iter().map(|(b, d)| (*b, d[c])).collect();
+            let mut total = pairs.iter().fold(0u32, |t, (_, d)| t.wrapping_add((*d).max(1)));
+            crate::msvc_sort::sort_by(&mut pairs, |x, y| x.1 > y.1);
+            let mut rest = *s;
+            for (left, (b, d)) in pairs.iter().enumerate().rev() {
+                if (left as u32) < rest {
+                    // `total` stays ≥ the remaining partners' Σ max(demand, 1) ≥ 1 (it only wraps past
+                    // u32::MAX demand in all, where the exe's division would fault).
+                    let share = ((*d as i32).wrapping_mul(rest as i32) as u32).checked_div(total).unwrap_or(0).max(1);
+                    rest = rest.wrapping_sub(share);
+                    if let Some(v) = out.get_mut(b) {
+                        v[c] = v[c].wrapping_add(share);
+                    }
                 }
-                rest -= share;
-                total -= d;
+                total = total.wrapping_sub(*d);
             }
         }
         Some(out)
     }
 
-    /// The volumes the `index`-th route of the pair (`faction`, `importer`) carries this turn: the
-    /// importer's share of [`Self::trade_split`] on its first route (0 on any other), or the loaded
-    /// volumes when the supply is unknown. `split` is `trade_split(faction)` (passed in to compute it
-    /// once per faction).
+    /// A faction's net demand per commodity for [`Self::trade_split`] (`0x00BC26D0`, CONFIRMED): its
+    /// demand (`0x008F4E50`: Σ [`Self::commodity_demand`] over its regions; the exe counts the regions in
+    /// its home theatre, and every shipped map is one theatre) minus its own supply when it has a capital,
+    /// kept where it is above 0. `None` when no commodity is above 0 (the faction takes no share).
+    fn trade_net_demand(&self, faction: FactionId, n: usize) -> Option<Vec<u32>> {
+        let mut demand = vec![0i32; n];
+        for r in self.world.regions.values().filter(|r| r.owner == faction) {
+            for (x, v) in demand.iter_mut().zip(self.commodity_demand(r)) {
+                *x = x.wrapping_add(v as i32);
+            }
+        }
+        if self.world.capital(faction).is_some()
+            && let Some(own) = self.trade_supply(faction)
+        {
+            for (x, v) in demand.iter_mut().zip(own) {
+                *x = x.wrapping_sub(v as i32);
+            }
+        }
+        demand.iter().any(|d| *d > 0).then(|| demand.into_iter().map(|d| d.max(0) as u32).collect())
+    }
+
+    /// The volumes a route of the pair (`faction`, `importer`) carries this turn: the
+    /// importer's share of [`Self::trade_split`] (the exe adds it to every route of the pair, `0x00BC26D0`
+    /// → `0x00B08880`, CONFIRMED), or the loaded volumes when the supply is unknown. `split` is
+    /// `trade_split(faction)` (passed in to compute it once per faction).
     pub fn trade_path_volumes(
         &self,
         split: Option<&std::collections::BTreeMap<FactionId, Vec<u32>>>,
         importer: FactionId,
-        index: usize,
         path: &TradePath,
     ) -> Vec<u32> {
         match split {
             None => path.volumes.clone(),
-            Some(s) => {
-                let zeros = vec![0; self.world.commodity_prices.len()];
-                if index == 0 { s.get(&importer).cloned().unwrap_or(zeros) } else { zeros }
-            }
+            Some(s) => s.get(&importer).cloned().unwrap_or_else(|| vec![0; self.world.commodity_prices.len()]),
         }
     }
 

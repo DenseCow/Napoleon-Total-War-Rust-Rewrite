@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use ntw_sim::campaign::rules::TaxClass;
+use ntw_sim::campaign::commands::UnitTypeCounts;
 use ntw_sim::campaign::{CampaignModel, CharacterId, FactionId, ForceId, RegionId, SlotRef, Stance};
 
 use super::data::{AiUnitInfo, CampaignAiData};
@@ -87,9 +88,11 @@ pub struct AiRegion {
     /// `None` when the snapshot was built without the model's rules (then v1's one-per-turn rule
     /// alone applies).
     pub recruit_capacity: Option<u32>,
-    /// The units the model lets the owner recruit here now (`CampaignModel::recruitable_units`).
-    /// `None`: derive them from the AI's own tables ([`AiWorld::recruitable`]).
-    pub recruitable: Option<Vec<String>>,
+    /// The region's recruitable entries as the model prices and flags them for the owner now
+    /// ([`AiRecruitable`]), in unit key order. Filled only for the regions of the faction the snapshot
+    /// was built for ([`AiWorld::from_model_for`]) and only with the model's rules; empty otherwise, and a
+    /// model without rules recruits nothing.
+    pub recruitable: Vec<AiRecruitable>,
     /// What the model lets the owner build here now: its one option rule
     /// (`CampaignModel::region_construction_options`, researched levels only, as `can_build` checks) for
     /// every slot, the walls and the road ([`SlotRef`]); empty for a model without rules, which permits
@@ -108,6 +111,28 @@ pub struct AiRegion {
     /// owner holds (`ntw_sim::campaign::research`, CONFIRMED the school's own test). `None`: the
     /// snapshot was built without the model's rules, so the AI cannot research here.
     pub schools: Option<Vec<AiSchool>>,
+}
+
+/// A unit the region's owner can recruit there now, as the model's recruitable entry: the price the
+/// queue command charges (`ntw_sim::campaign::economy::recruitment_cost_in`, `0x00B0D220`; it already holds
+/// the faction's difficulty handicap, which the campaign start adds to the faction's effects, `0x008DD090`)
+/// and the entry's flags (`CampaignModel::recruitable_entry_flags`, `0x00B69BA0`; any flag makes the command
+/// refuse the unit).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AiRecruitable {
+    /// Unit key.
+    pub unit_key: String,
+    /// What recruiting it costs.
+    pub cost: i32,
+    /// The entry's unavailability flags (0: the command accepts it).
+    pub flags: u32,
+    /// How many more the faction may queue before its unit cap flags the entry
+    /// (`UnitTypeCounts::cap_room`); `None` without a cap.
+    pub cap_room: Option<usize>,
+    /// A ship (it goes to the region's naval queue).
+    pub naval: bool,
+    /// How many more items the queue of its kind takes (`CampaignModel::recruitment_queue_room`).
+    pub queue_room: usize,
 }
 
 /// Something a region can build now.
@@ -196,8 +221,15 @@ impl AiWorld {
     /// The snapshot of the campaign model. The regions' build options come from the model's own option
     /// rule (empty without rules: the model permits nothing then);
     /// when the model has rules (DB data), the recruitable units and free recruitment points come from
-    /// its own validation helpers too, so every order the AI gives is one the model accepts.
+    /// its own validation helpers too, so every order the AI gives is one the model accepts. The
+    /// recruitable entries are priced for every region ([`AiWorld::from_model_for`] prices one faction's).
     pub fn from_model(m: &CampaignModel) -> Self {
+        Self::from_model_for(m, None)
+    }
+
+    /// [`AiWorld::from_model`], pricing the recruitable entries ([`AiRegion::recruitable`]) of `faction`'s
+    /// regions only (each needs the region's effect set), or of every region with `None`.
+    pub fn from_model_for(m: &CampaignModel, faction: Option<FactionId>) -> Self {
         let w = &m.world;
         let mut out = AiWorld { move_cost_per_unit: m.rules.road_cost(0), ..Default::default() };
         let has_rules = !m.rules.buildings.is_empty() || !m.rules.units.is_empty();
@@ -230,6 +262,8 @@ impl AiWorld {
                 })
                 .collect()
         });
+        // Each owner's unit-type counts (what its unit caps are held against), counted once per snapshot.
+        let mut unit_counts = BTreeMap::new();
         for r in w.regions.values() {
             *owned.entry(r.owner).or_default() += 1;
             let pos = (r.settlement.position.0.to_f64(), r.settlement.position.1.to_f64());
@@ -262,9 +296,14 @@ impl AiWorld {
                     .filter(|i| !m.rules.units.get(&i.unit_key).is_some_and(|u| u.is_naval))
                     .count() as u32;
                 let cap = m.recruitment_points_with(fx.as_ref().expect("has rules"), r.id, false).saturating_sub(used);
-                (Some(cap), Some(m.recruitable_units(r.id)))
+                let entries = if faction.is_none_or(|f| f == r.owner) {
+                    recruitable_entries(m, r, unit_counts.entry(r.owner).or_insert_with(|| m.unit_type_counts(r.owner)))
+                } else {
+                    Vec::new()
+                };
+                (Some(cap), entries)
             } else {
-                (None, None)
+                (None, Vec::new())
             };
             out.regions.insert(
                 r.id,
@@ -337,13 +376,13 @@ impl AiWorld {
         self.stances.get(&(a, b)).copied().unwrap_or_default()
     }
 
-    /// Strength of an army: sum of unit quality (`cdir_unit_qualities`, else recruitment cost,
+    /// Strength of an army: sum of unit quality (`cdir_unit_qualities`, else the `units` #4 battle cost,
     /// else 100) x men / max men. PROVISIONAL (the original's strength analysers are UNKNOWN).
     pub fn army_strength(&self, a: &AiArmy, data: &CampaignAiData) -> f32 {
         a.units
             .iter()
             .map(|u| {
-                let q = data.units.get(&u.key).map_or(100, |i| i.quality.unwrap_or(i.cost.max(1)));
+                let q = data.units.get(&u.key).map_or(100, |i| i.quality.unwrap_or(i.battle_cost.max(1)));
                 q as f32 * u.men as f32 / u.max_men.max(1) as f32
             })
             .sum()
@@ -420,23 +459,28 @@ impl AiWorld {
         }
         out
     }
+}
 
-    /// Units the region can recruit, sorted: the model's list when the snapshot has it, else what
-    /// the region's buildings allow in the AI's own tables (`building_units_allowed`).
-    pub fn recruitable(&self, r: &AiRegion, data: &CampaignAiData) -> Vec<String> {
-        if let Some(list) = &r.recruitable {
-            let mut v = list.clone();
-            v.sort();
-            return v;
-        }
-        let mut set = BTreeSet::new();
-        for b in r.buildings.iter().flatten() {
-            if let Some(us) = data.units_allowed.get(b) {
-                set.extend(us.iter().cloned());
-            }
-        }
-        set.into_iter().collect()
-    }
+/// Region `r`'s recruitable entries for its owner, priced and flagged by the model's own functions (the ones
+/// the queue command uses), in unit key order. The region's effect set is built once for all of them, and
+/// `counts` (the owner's unit-type counts) once per snapshot.
+fn recruitable_entries(m: &CampaignModel, r: &ntw_sim::campaign::Region, counts: &UnitTypeCounts<'_>) -> Vec<AiRecruitable> {
+    let set = ntw_sim::campaign::economy::region_effect_set(m, r);
+    let room = [m.recruitment_queue_room(r, false), m.recruitment_queue_room(r, true)];
+    let mut out: Vec<AiRecruitable> = m
+        .recruitable_units(r.id)
+        .into_iter()
+        .filter_map(|unit_key| {
+            let unit = m.rules.units.get(&unit_key)?;
+            let cost = ntw_sim::campaign::economy::recruitment_cost_in(&m.rules, &set, &unit_key, unit);
+            let flags = m.recruitable_entry_flags(r, &unit_key, unit, cost, counts);
+            let cap_room = counts.cap_room(&unit_key, unit);
+            let queue_room = room[usize::from(unit.is_naval)];
+            Some(AiRecruitable { unit_key, cost, flags, cap_room, naval: unit.is_naval, queue_room })
+        })
+        .collect();
+    out.sort_by(|a, b| a.unit_key.cmp(&b.unit_key));
+    out
 }
 
 /// What region `r` can build now: the model's one option rule

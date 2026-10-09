@@ -66,6 +66,9 @@ pub struct CampaignModel {
     /// [`ScriptRngs`](super::characters::ScriptRngs)). Hashed, not saved (the original keeps them
     /// process-wide).
     pub script_rngs: super::characters::ScriptRngs,
+    /// The campaign negotiation slot (campaign +0xF9C) and its begin / end counts, see
+    /// [`super::negotiation::Negotiations`]. Not saved, not hashed.
+    pub negotiations: super::negotiation::Negotiations,
 }
 
 impl CampaignModel {
@@ -83,6 +86,7 @@ impl CampaignModel {
             terrain: None,
             last_autoresolve: None,
             script_rngs: super::characters::ScriptRngs::default(),
+            negotiations: super::negotiation::Negotiations::default(),
         }
     }
 
@@ -148,6 +152,11 @@ impl CampaignModel {
         for (f, n) in &w.bankrupt_turns {
             h.i32(f.raw());
             h.u32(*n);
+        }
+        h.u32(w.last_income.len() as u32);
+        for (f, n) in &w.last_income {
+            h.i32(f.raw());
+            h.i32(*n);
         }
         // The relationship records the diplomacy rules change (attitude factors and counters).
         h.u32(w.relationships.len() as u32);
@@ -436,6 +445,13 @@ pub struct World {
     /// Bankrupt turns in a row of each faction (the economics object's +0x460, CONFIRMED); a faction
     /// that can pay is not listed.
     pub bankrupt_turns: BTreeMap<FactionId, u32>,
+    /// Each faction's income of the last turn: the sum of categories 5..11 of its last economics
+    /// history record (`GetFactionLastTurnIncomeTotal` `0x00BBCC40`, CONFIRMED; the Wealth of
+    /// [`CampaignModel::faction_rankings`]). Loaded from the save's last `ECONOMICS_DATA` (#1 and #2),
+    /// written by [`super::economy::settle_round`]. A faction without an entry has 0. PROVISIONAL:
+    /// the save writer does not write the economics history yet, so a save of ours keeps the record
+    /// it was loaded with.
+    pub last_income: BTreeMap<FactionId, i32>,
     /// Each faction's diplomacy manager counters (CONFIRMED uses, not loaded from the file yet: the
     /// `DIPLOMACY_MANAGER` fields are not read): +0x1C the treaties it broke during friendship (the
     /// backstabbing count, `0x00B0E420`) ...

@@ -19,7 +19,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use ntw_script::{ScriptHost, ScriptState};
-use ntw_sim::campaign::{CampaignEvent, CampaignModel, FactionId, TurnStep};
+use ntw_sim::campaign::{CampaignEvent, CampaignModel, CommandError, FactionId, TurnStep};
 
 use super::keys::FactionAiKeys;
 use super::{AiOrder, CampaignAiData, TurnContext, apply_orders_with_events, take_turn};
@@ -35,9 +35,12 @@ pub struct AiTurnReport {
     pub orders: Vec<AiOrder>,
     /// How many the model accepted.
     pub accepted: usize,
+    /// The orders the model refused, with why (the app logs each kind once).
+    pub rejected: Vec<(AiOrder, CommandError)>,
 }
 
-/// A context for a bare model: the model's human factions, normal difficulty, no script hints.
+/// A context for a bare model: the model's human factions, no script hints (the difficulty is in the model's
+/// faction effects, see [`TurnContext::new`]).
 pub fn context_for(model: &CampaignModel, campaign_key: &str) -> TurnContext {
     let mut ctx = TurnContext::new(campaign_key);
     ctx.humans.extend(model.turn.humans.iter().copied());
@@ -64,7 +67,7 @@ pub fn context_from_script(state: &ScriptState) -> TurnContext {
 /// Plays AI faction `faction` now: decides and applies its orders. Returns the report and every
 /// event the orders caused. Human factions are skipped (empty report).
 pub fn play_faction(model: &mut CampaignModel, data: &CampaignAiData, ctx: &TurnContext, faction: FactionId) -> (AiTurnReport, Vec<CampaignEvent>) {
-    let mut report = AiTurnReport { faction, turn: model.calendar.turn_number(), orders: Vec::new(), accepted: 0 };
+    let mut report = AiTurnReport { faction, turn: model.calendar.turn_number(), orders: Vec::new(), accepted: 0, rejected: Vec::new() };
     let mut events = Vec::new();
     if ctx.humans.contains(&faction) {
         return (report, events);
@@ -72,7 +75,7 @@ pub fn play_faction(model: &mut CampaignModel, data: &CampaignAiData, ctx: &Turn
     let mut rng = model.rng;
     report.orders = take_turn(model, data, ctx, faction, &mut rng);
     model.rng = rng;
-    report.accepted = apply_orders_with_events(model, &report.orders, &mut events);
+    report.accepted = apply_orders_with_events(model, &report.orders, &mut events, &mut report.rejected);
     (report, events)
 }
 

@@ -26,7 +26,7 @@ fn main() {
             u.unknown_3c,
             u.upkeep,
             u.unknown_44,
-            u.unknown_84,
+            u.unit_cap,
             if is_naval { "  naval" } else { "" }
         );
     }

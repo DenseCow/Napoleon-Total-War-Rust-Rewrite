@@ -102,6 +102,17 @@ impl ScriptSource {
         }
         None
     }
+
+    /// Whether [`ScriptSource::find`] would find `path` (the same places in the same order),
+    /// without reading it: the pack index, then the loose file's metadata.
+    pub fn exists(&self, path: &str) -> bool {
+        let norm = normalise(path);
+        [norm.clone(), format!("{norm}c")].iter().any(|candidate| {
+            self.memory.iter().any(|(p, _)| p == candidate)
+                || self.vfs.as_ref().is_some_and(|vfs| vfs.contains(candidate))
+                || self.data_dir.as_ref().is_some_and(|dir| dir.join(candidate.replace('/', std::path::MAIN_SEPARATOR_STR)).is_file())
+        })
+    }
 }
 
 #[cfg(test)]
@@ -123,5 +134,7 @@ mod tests {
         assert_eq!(s.find("data/A.lua").unwrap().bytes, b"x = 1");
         assert_eq!(s.find("data/ui/B.lua").unwrap().chunk_name, "@ui/b.luac");
         assert!(s.find("missing.lua").is_none());
+        assert!(s.exists("data/A.lua") && s.exists("data/ui/B.lua"));
+        assert!(!s.exists("missing.lua"));
     }
 }

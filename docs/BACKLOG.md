@@ -8,13 +8,13 @@ the original's values. See the Goal section of `CLAUDE.md`.
 
 ## Progress
 
-Generated 2026-10-08 by `bash tools/progress.sh` (from `tools/backlog_count.sh` and `tools/tag_count.sh`); never edit it by hand.
+Generated 2026-10-09 by `bash tools/progress.sh` (from `tools/backlog_count.sh` and `tools/tag_count.sh`); never edit it by hand.
 
-Tags left in the code (done means zero): 1773 (642 PROVISIONAL, 106 PLACEHOLDER, 1025 INFERRED), plus 586 UNKNOWN.
+Tags left in the code (done means zero): 1769 (643 PROVISIONAL, 106 PLACEHOLDER, 1020 INFERRED), plus 587 UNKNOWN.
 
 | Section | Done | Partly done | To do |
 |---|---|---|---|
-| 0. Cross-cutting fidelity | 77 | 0 | 31 |
+| 0. Cross-cutting fidelity | 81 | 0 | 35 |
 | 1. File formats and data | 11 | 0 | 0 |
 | 2. Graphics and rendering | 0 | 11 | 29 |
 | 3. Battle gameplay (land) | 1 | 11 | 22 |
@@ -97,20 +97,25 @@ first. Evidence and round history live there; the pre-2026-10-07 long form of th
 - [x] Experience-adjusted recruitment cost (recruitment use INFERRED; upkeep untouched)
 - [ ] Region transfer in deals (`TransferRegion` rejected: needs the `0x00B449F0` flags)
 - [ ] Peace terms: regions and techs as deal items (`0x00B449F0`)
-- [ ] Recruitment details (`0x00AECEE0`, `0x00AED220`) (running: campaign-0b)
-- [ ] The importer limit (`0x00BB5730`) (running: campaign-0b)
-- [ ] The 4 desertion-exempt unit classes (running: campaign-0b)
+- [x] Recruitment details (`0x00AECEE0`, `0x00AED220`): cost from units #7 and region effects, the unit cap (units #15, `0x008F68B0`), the AI handicap and recruit prices from the model (`0x008DD090`)
+- [ ] Recruitable population gate and charge (`0x00A89550` / `0x00AAF190` / `0x00A61AA0`, `REGION_FACTORS` #2)
+- [ ] 14 recruit-cost save misses: the faction cost modifier at queue time vs at save
+- [ ] Trace whether turn.rs:471 should block training of flagged items (`0x00B5AD90`)
+- [ ] Trace whether the exe reads `units_to_groupings_military_permissions`
+- [x] The importer limit (`0x00BB5730`): none; the split `0x00BC26D0` ported (352/352 route volumes)
+- [x] The 4 desertion-exempt unit classes (`0x008BA1E0` + `0x00EED3E0`: cavalry_heavy, elephants, general, infantry_elite)
 - [ ] Naval PROVISIONAL details: capture share weighting, captured crew base, gun counts of 8 ship models (needs a probe)
-- [ ] Trace the affordability rules of recruitment, the unit pool and treaties (ours: their own checks in commands.rs ~1067, pool.rs ~309/484, treaties.rs ~467), and their charging arithmetic (ours: saturating/plain; overflow behaviour untraced; upkeep economy.rs ~525 and script treasury changes ntw_script game.rs:211 also bypass treasury.rs)
+- [ ] Trace the affordability rules of the unit pool and treaties (ours: their own checks in pool.rs ~309/484, treaties.rs ~467), and their charging arithmetic (ours: saturating/plain; overflow behaviour untraced; upkeep economy.rs ~525 and script treasury changes ntw_script game.rs:211 also bypass treasury.rs)
 
 ### 0-C middleware — [analysis/fidelity/MIDDLEWARE_VERIFY.md, BINK.md]
 - [x] Miles mixing rules and loudness (CONFIRMED against the exe); game-speed sfx rule; UI sound kinds
 - [x] Bink intro: order, once per start, full-screen sizing
-- [x] Battle animation ACTION table contract (CONFIRMED against the dumps); cue dispatch closed exe-side
-- [ ] The sound bank query
-- [ ] Animation cue → slot dispatch (INFERRED)
-- [ ] The movie skip rule
-- [ ] The headphones multiplier
+- [x] Battle animation ACTION table contract (CONFIRMED against the dumps)
+- [ ] The sound bank query: reopened 2026-10-09 (the entry reader `0x00E28DF0` is reached through vtable slot `0x013A9944` from `0x00E256D0`); next a main-menu debugger watchpoint (MIDDLEWARE_VERIFY.md §3 round 14)
+- [ ] Animation cue → slot dispatch (INFERRED): the round-9 "dead" proof is void (the play paths are vtable slots); needs a user debugger sitting in a battle
+- [ ] The movie skip rule: trigger CONFIRMED (Escape key-up while the intro queue plays, `0x0048A650`; user check 2026-10-09: Escape skips in ours); the can-stop flag `+0x58` still INFERRED
+- [ ] The headphones multiplier: CONFIRMED from the `sound_provider` pref and Miles' speaker setup (`0x01004390`, `0x01006600`); left INFERRED: which speaker setups Miles opens on a machine (a failed one shifts a saved index)
+- [ ] `EnumerateSoundProviders` (ntw_script ui_prelude.lua:869) returns `{}`; it should list the providers from `0x00DA1270`
 
 SpeedTree leftovers are in §2.
 
@@ -148,8 +153,9 @@ SpeedTree leftovers are in §2.
 - [ ] Map forts (the `fFort` chain, separate from settlement walls): `BuildFort`/`UpgradeFort` levels PROVISIONAL; nothing in the shipped exe builds a map fort (UI_FIDELITY.md)
 - [ ] Agent attribute icons: merged `25a6b21` (`agent_attributes` icons, main attribute, `PrimaryLevel` CONFIRMED);
   waits for its in-game check (HANDOFF). Left: rank PROVISIONAL for non-agents, UI skin folders not modelled
-- [ ] Region labels under the HUD; region details title "XXX Details"
-- [ ] Diplomacy negotiation playable; region exchange rows (running: diplomacy2)
+- [ ] (running: 0e-labels) Region labels under the HUD; region details title "XXX Details"
+- [ ] Diplomacy negotiation playable; region exchange rows. Merged diplomacy2: (user check 2026-10-09: the changes work) greeting by attitude through the queued BeginNegotiation (`0x00BF5A60`), diplomat portrait, button lists for all three relationships, power/wealth words (power = raw unit upkeep, CONFIRMED `0x008B2150`), regnal numerals. Open: Austria power reads "Mighty" (original "Terrifying"; PROVISIONAL, debugger read at `0x00949630`), the panel creates no `diplomacy_button_*` components from the lists (ignored test), red cancel texts, deal rows and result still held in the UI until the deal is modelled
+- [ ] Runtime `force_diplomacy` calls reach only the ntw_script state (ntw_script game.rs ~300), so the model and the negotiation panel ignore them; give them one home in the model
 - [ ] Campaign save naming
 - [ ] The five agent options actions via `MoveIntoTarget` (contract known; needs the model's agent order queue)
 - [ ] `AgentRogueSabotageArmy` (no army target list)
@@ -178,10 +184,12 @@ SpeedTree leftovers are in §2.
 - [x] Determinism audit (no hash-map order, clocks, threads or OS randomness in the model crates); twice-run harness identical
 - [x] Comparison harness built: `image_diff`, `NAPOLEON_BATTLE_TRACE`, `docs/COMPARE_WITH_ORIGINAL.md`
 - [ ] First real side-by-side run against the original (needs the user)
-- [ ] Battle `B.WindowsTime` returns os.clock() (process CPU time, fractional); the exe gives whole wall-clock seconds (0x009FB0B0) (ntw_script/src/ui/battle_prelude.lua:143)
+- [x] Battle `B.WindowsTime`: `timeGetTime()*0.001f` as a float (`0x005D4BF0`); the campaign's `0x009FB0B0` truncates to int; one shared clock
 - [ ] Portraits of generated characters: the recruitment pool's hires and promoted generals (`promote_unit`) get empty CHARACTER_DETAILS (ntw_sim pool.rs), so their army card and Lists row keep the unit card (PLACEHOLDER, ntw_script ui/campaign/army.rs `unit_entry` / campaign/characters.rs `character_details`); trace how the exe picks a new character's portrait and give it in the model.
 - [ ] Army recruitment tab contents: `0x009FE7B0` reads the tab's own manager (commander `+0x34` → `+0x124`), not traced; ours opens it empty (PLACEHOLDER, ntw_script ui/campaign/tabs.rs `generate_current_tab`). Evidence: the original's army Recruitment tab in an own region has an Options row (4 cards, a "2/1" badge, cost 472) and a 10-slot Queue (user screenshot `ntw-evidence\screens\2026-10-07_original_wellesley_army_recruitment_tab.png`); the naval tab's port path is untraced too (PROVISIONAL).
-- [ ] Battle HUD scripts' frame: the campaign HUD's scripts work in the root's 1280x960 layout frame (debugger sitting 2026-10-07); the battle HUD is untraced, so ours keeps screen geometry there (ntw_script ui/host.rs `set_script_frame`).
+- [ ] (running: battle-ui2) Battle HUD scripts' frame: debugger sitting 2026-10-09 read the root state size 1280x960 at a 1920x1080 screen (root at manager +0xC4); ours switches to the script frame
+- [ ] (running: battle-ui2) Battle HUD UI scale: the exe's UI scale (`0x0114EB20`) applies to the battle HUD too; ours draws the battle HUD at scale 1
+- [ ] (running: battle-ui2) Battle `B.Time` (ntw_script/src/ui/battle_prelude.lua): BATTLE_FLOW.md marks it an INFERRED extra binding the exe may not have, untagged in code; trace whether the exe binds it, then tag or remove it
 
 AI (§6) is paused by the user's section order; its open questions stay in `analysis/ai/AI_RESEARCH.md` §7.
 
@@ -357,7 +365,7 @@ worked on, `[ ]` = not started.
 - [ ] **PARTLY DONE:** Region and settlement labels, selection effects, movement arrows and zone-of-control display. Done (sandbox port 06d6a7e, not checked in game): region labels (names/positions CONFIRMED, rendering PROVISIONAL), movement arrows with the original's assets (layout INFERRED, spacing/colours PROVISIONAL). Open: settlement labels, selection effects, zone of control.
 
 ## 3. Battle gameplay (land)
-- [ ] The walk → run (and run → walk) change is abrupt (user 2026-10-08, after the Run fix; Run and smooth walking confirmed working): the men snap from one gait clip to the other. Trace in Ghidra the exe's blend between gait animations (cross-fade time, phase matching, speed ramp) and match it (napoleon/src/battle/view.rs gait choice).
+- [ ] (running: gait-blend2) Gait change blend: the cross-fade (`0x007725D0`) is merged. User check 2026-10-09: infantry walk/run smoother but still needs polish; cavalry still abrupt. Open (UNITS_TERRAIN_FIDELITY.md §1.9): the mount's own blend, the display-root blend (Dr 0.5 s), the slot state graph and whether `WALK_TO_RUN` / `RUN_TO_WALK` transition clips play, the sim's speed change, the recursive pose blend (napoleon/src/battle/view.rs).
 - [ ] Battle controls are ours, not the original's (PLACEHOLDER, napoleon/src/battle/input.rs): R restarts with a new seed, F toggles fire at will, arrow keys / Q / E move the camera. Replace them with the original's battle key set read from the shipped key bindings (find the file and the exe's defaults first); keep any restart only behind a test flag (user, 2026-10-08: R is not in the original).
 **Battle rules from §0-A** (moved 2026-10-07; notes in analysis/fidelity/BATTLE_FIDELITY.md)
 - [ ] `volley_plan` runtime confirmation in the battle probe
@@ -510,7 +518,7 @@ worked on, `[ ]` = not started.
 
 ## 9. Audio
 - [ ] **PARTLY DONE:** Sound banks, decoding, front-end music, UI clicks and hover sounds, 3D volleys, the music state machine, the Miles mixing (0-C), battle music looping without restarting (merged `d6c843b`, user-checked 2026-10-07). Open: bank selection, the anim cue dispatch [AUDIO_FORMAT.md §7, MIDDLEWARE_VERIFY.md §3].
-- [ ] **PARTLY DONE:** The Miles mixing rules 1:1: gain law, 2D/3D multipliers, falloff, pan, low-pass, doppler, ducking, speed-of-sound delay. Done (0-C, CONFIRMED vs the exe): all of these and the loudness. Open: the headphones multiplier, low-pass at the output rate (PROVISIONAL).
+- [ ] **PARTLY DONE:** The Miles mixing rules 1:1: gain law, 2D/3D multipliers, falloff, pan, low-pass, doppler, ducking, speed-of-sound delay. Done (0-C, CONFIRMED vs the exe): all of these and the loudness. Open: which speaker setups open (headphones, 0-C), low-pass at the output rate (PROVISIONAL).
 - [ ] Footsteps and group movement by ground type, projectile impacts, explosions, cannon.
 - [ ] Unit voices and officers' commands, battle ambience and weather.
 - [ ] Advisor speech, and campaign ambience in full (emitters exist).
@@ -560,17 +568,22 @@ worked on, `[ ]` = not started.
 
 ## Polish
 Non-blocking review findings, one line each (CLAUDE.md "Done means"). A worker editing a file clears that file's lines.
-- [ ] `ProjectileSounds` keys its cache by the projectile key `String`, hashed per volley; the row index from `primary_projectile` would be an allocation-free key (napoleon/src/audio/battle.rs ~41).
 - [ ] The campaign model addresses building slots as `Option<usize>` (None = the road/fort slot); replace it with a slot enum so no sentinel values remain (from the walls review; ntw_sim campaign).
-- [ ] The missing-paths log-once guard checks what `SoundData::new` guarantees; a `debug_assert` would do (napoleon/src/audio/mod.rs ~996).
-- [ ] Each volley looks its gun's shots up by string hash (gun type, then each projectile key through `Table::get`; ntw_data/src/database.rs `gun_shots`); row numbers would need a cheap check that `projectiles` was not replaced.
 - [ ] Logging is inconsistent: ntw_data reports with `eprintln!` while ntw_campaign uses the `log` crate.
 - [ ] `CursorPosition` (ui_prelude.lua ~281) and CampaignUI's label `ScreenPos` (Labels.lua) give screen pixels while the campaign HUD's Position / MoveTo use the 1280x960 scripts' frame; read what the original returns on a wide screen.
 - [ ] `unwrap()` audit on paths that read install or mod data (ntw_formats, ntw_data, pack loading): a malformed file or broken mod must log one error and skip, never panic. Unwraps on the code's own invariants and in tests stay.
-- [ ] `ProjectileKind::of` matching the old weapon-family rule on every shipped `projectiles` row is INFERRED from a one-off dump; a real-install test over those rows would make it CONFIRMED (napoleon/src/audio/mod.rs ~243).
 - [ ] `manager_record` / `manager()` rebuild the whole `manager_records` Vec on every lookup (cold path; ntw_campaign/src/save.rs ~1535).
 - [ ] Hoist the `__ntw_battle_update_card` lookup out of the per-card loop (ntw_script/src/ui/battle.rs ~312); needs a `call_entry` that takes the `Function` (ntw_script/src/ui/host.rs, another branch's file).
-- [ ] `set_facts` builds new `__battle.units` / `results` tables and strings every frame, and `facts_of` its facts (ntw_script/src/ui/battle.rs ~180, napoleon/src/battle/hud.rs); refresh them in place.
-- [ ] `observe_ticks` finds each view's unit with a linear `find` per view per tick (O(n²) in units; napoleon/src/battle/view.rs ~735); an id → index map built once per battle would do.
 - [ ] The battle HUD sets its frame through the old `set_pages_fill_screen(false)`; call `set_frame(UiFrame::Panels)` and drop that wrapper (ntw_script/src/ui/battle.rs ~147, host.rs `set_pages_fill_screen`).
 - [ ] `small_table` turns a read failure into an empty table, now cached for the HUD's life (`post_names`, `tech_links`); log once (ntw_script/src/ui/campaign/mod.rs ~1380).
+- [ ] `bridge_volleys` rescans the recent-volley list and the unit list for every volley (napoleon/src/audio/battle.rs ~81, ~87); its row-count check next to the table id is redundant (~37).
+- [ ] The `put_changed!` field lists in `set_facts` are written by hand, so a new fact can compile and never reach `__battle`; and writing only changed fields no longer resets a value a script or mod wrote into `__battle` (ntw_script/src/ui/battle.rs ~204, ~216).
+- [ ] Muzzle flash, dust, `facts_of` and the trace CSV still pair `battle.units` with `sim.info` by position (napoleon/src/battle/fx_draw.rs ~910, ~506, scripts.rs ~160, battle/mod.rs ~463); use `unit_with_info`.
+- [ ] `BattleSim::info` and `battle` are public, so a bare `battle.add_unit` breaks the pairing silently; make `info` private behind `BattleSim::add_unit`, and drop the `.min(info.len())` that hides lists already out of step (napoleon/src/battle/mod.rs ~127, ~219).
+- [ ] Unit lookups by id search linearly although units are sorted by id; use `binary_search_by_key` (napoleon/src/battle/mod.rs ~212, ~240, view.rs fallback); `observe_ticks` checks the slot twice (view.rs ~823).
+- [ ] The missing-paths error's static `Once` logs once per process, not once per sound-data build (napoleon/src/audio/mod.rs ~1097).
+- [ ] `last_income` is not written by the save writer (PROVISIONAL), its meaning changes after `settle_round` (categories 5, 7, 11 only), and `.items.last()` assumes the history ring is saved oldest-first (ntw_sim campaign).
+- [ ] Duplicate negotiation-string rows: the last one wins silently (ntw_data negotiation tables).
+- [ ] `CampaignModel`'s derived `PartialEq` compares `negotiations`, which is neither saved nor hashed (ntw_sim/src/campaign/world.rs ~39).
+- [ ] `log_once_for` formats a String on every call, even for logged keys; `faction_details` calls it per unknown unit on each of ~55 calls (ntw_script/src/ui/host.rs ~357, campaign/mod.rs).
+- [ ] `CampaignSim::command`: BeginNegotiation / EndNegotiation each bump `generation` and set `last_message` (napoleon campaign play.rs).

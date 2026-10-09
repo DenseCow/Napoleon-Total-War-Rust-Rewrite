@@ -140,7 +140,9 @@ B.IsDeploymentOrConflict = function() return __battle.phase ~= "deployment" end
 -- Battle time in seconds (the scripts compare it with TotalTime and with their own timestamps).
 B.ElapsedBattleTime = function() return __battle.elapsed or 0 end
 B.Time = function() return __battle.elapsed or 0 end
-B.WindowsTime = function() return os.clock() end
+-- "Returns the current time in seconds" (CONFIRMED 0x005D4BF0): timeGetTime() * 0.001f as a float,
+-- fractional, unlike CampaignUI.WindowsTime (whole seconds); see host.rs `battle_windows_time`.
+B.WindowsTime = __ntw_battle_windows_time
 -- "Returns the current time multiplier of the battle".
 B.TickPeriod = function() return __battle.speed or 1 end
 B.ScreenSize = function() return FrontEnd.ScreenSize() end

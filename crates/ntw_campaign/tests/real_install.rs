@@ -434,3 +434,14 @@ fn mission_managers_read_and_write_back() {
     println!("{seen_files} files, {managers} mission managers, {missions_total} missions");
     assert!(managers > 0, "no CAMPAIGN_MISSION_MANAGER found");
 }
+
+/// The model's recruit permission (`units_to_exclusive_faction_permissions`, `CampaignRules::faction_may_recruit`)
+/// on the real data: France's own line infantry is France's alone. (Ported from the AI's deleted copy of the
+/// rule, 0b-recruit review round 2.)
+#[test]
+fn recruit_permissions_from_the_real_data() {
+    let Some(db) = db() else { return };
+    let rules = ntw_campaign::rules_from_db(db, "eur_napoleon");
+    assert!(rules.faction_may_recruit("france", "Inf_Line_French_Fusiliers"));
+    assert!(!rules.faction_may_recruit("austria", "Inf_Line_French_Fusiliers"));
+}

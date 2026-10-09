@@ -2,30 +2,33 @@
 //! (`UIDiplomacyNegotiation`).
 
 use super::*;
+use ntw_sim::campaign::negotiation::Greeting;
 
-/// The diplomacy panel's negotiation: the host's stand-in for the exe's `UIDiplomacyNegotiation`
-/// userdata (ctor 0x00A102B0, 0xB4 bytes) and the campaign negotiation behind it (campaign
-/// +0xF9C, built by 0x008AF620 / 0x00BF5A60). One negotiation at a time, as the campaign holds one.
+/// The diplomacy panel's negotiation object: the host's stand-in for the exe's
+/// `UIDiplomacyNegotiation` userdata (ctor 0x00A102B0, 0xB4 bytes). The campaign negotiation behind
+/// it (campaign +0xF9C, built by 0x008AF620 / 0x00BF5A60) is the model's
+/// ([`ntw_sim::campaign::negotiation::Negotiations`]); this object only reads it.
 ///
-/// Lifecycle (CONFIRMED, UI_FIDELITY.md §4.6): the constructor's two-key form begins the campaign
-/// negotiation (`CCQ_DIPLOMACY_BEGIN_NEGOTIATION`), which posts "started" to the panel; accept /
-/// decline only set the campaign negotiation's result (+0x28, 1 / 2); cancel clears the deal and
-/// re-initialises the panel; only `End()` (`CCQ_DIPLOMACY_END_NEGOTIATION`, executor 0x00932F20 →
-/// 0x008BC5D0) ends it, posting "ended" once. Every way the panel closes reaches `End()`: the
-/// PanelManager runs the panel's `ExitFunc` "OnExit", which ends a negotiation the panel still
-/// holds.
+/// Lifecycle (CONFIRMED, UI_FIDELITY.md §4.6): the constructor's two-key form queues
+/// `CCQ_DIPLOMACY_BEGIN_NEGOTIATION` (`CampaignCommand::BeginNegotiation`), whose execution posts
+/// "started" to the panel; accept / decline only set the negotiation's result (+0x28, 1 / 2);
+/// cancel clears the deal and re-initialises the panel; only `End()` queues
+/// `CCQ_DIPLOMACY_END_NEGOTIATION` (`CampaignCommand::EndNegotiation`, executor 0x00932F20 →
+/// 0x008BC5D0), which ends it and posts "ended" once. The one open path and the one close path are
+/// those two commands; the model's begin / end counts are the events, turned into the panel's
+/// calls by [`sync_negotiation`]. Every way the panel closes reaches `End()`: the PanelManager runs
+/// the panel's `ExitFunc` "OnExit", which ends a negotiation the panel still holds.
 #[derive(Debug, Default)]
 pub(super) struct NegotiationState {
-    /// The campaign negotiation's proposer (+0x18) and recipient (+0x1C).
-    proposer: Option<String>,
-    recipient: Option<String>,
-    /// A campaign negotiation exists (campaign +0xF9C is set).
-    open: bool,
-    /// Its result (+0x28): 0 open, 1 accepted (0x00C114B0), 2 declined (0x00C1F210).
+    /// The result (+0x28) of the negotiation this object last saw begin: 0 open, 1 accepted
+    /// (0x00C114B0), 2 declined (0x00C1F210). With the deal rows below, campaign negotiation state
+    /// the host keeps here until the deal is modelled (see [`NegotiationItem`]); reset by
+    /// [`sync_negotiation`] whenever a negotiation begins or ends.
     status: NegotiationStatus,
-    /// The object's counterpart (+0xAC): set when the "started" event reaches it (0x00A147A0);
-    /// while unset every accessor answers nothing, as the original does.
-    pub(super) target: Option<String>,
+    /// The object's counterpart (+0xAC): the serial of the campaign negotiation whose "started"
+    /// event reached it (0x00A147A0). While it is not the open negotiation's, every accessor
+    /// answers nothing, as the original does.
+    pub(super) target: Option<u64>,
     /// The "Offers" rows.
     pub(super) offers: Vec<DealRow>,
     /// The "Demands" rows.
@@ -34,6 +37,10 @@ pub(super) struct NegotiationState {
     /// `InitializeUIDiplomacyNegotiationListeners` 0x0099AF70): the component whose globals the
     /// engine's events are LuaCalled in. `None` once `End()` unregistered the listeners.
     context: Option<NodeId>,
+    /// The model's negotiation begin count the events were posted for ([`sync_negotiation`]).
+    pub(super) seen_begun: u64,
+    /// The model's negotiation end count the events were posted for.
+    pub(super) seen_ended: u64,
 }
 
 /// The campaign negotiation's result (+0x28), what `Finished()` reports (0x009BB8B0 pushes
@@ -53,29 +60,111 @@ const NEGOTIATION_LISTENER: &str = "UI negotiation object";
 /// The HUD's own listener (HUD ctor 0x0098C2F0, CONFIRMED), never unregistered.
 const HUD_LISTENER: &str = "campaign HUD";
 
-/// The campaign events the negotiation object and the HUD listen to, posted for the start of the
-/// next UI frame ([`Inner::post_call`]). "Started", hub +0x318, posted by the campaign negotiation's
-/// constructor (0x00BF5A60) when the proposer is human: `NotifyPanelNegotiationStarted`
-/// (0x00A147A0) sets the object's counterpart (+0xAC) and LuaCalls `InitialiseNegotiation(greeting,
-/// proposer == local player, false)` in the context that constructed the object. PROVISIONAL: the
-/// greeting is empty, so the panel hides its diplomat. The original's is the recipient's
-/// `..._receive_<attitude>` diplomacy string, picked by `ResolveDiplomacyNegotiationString`
-/// (0x00C55CC0) with a campaign-RNG draw when the faction has an override row (UI_FIDELITY.md
-/// §4.6). "Proposer == local player" is the value when the event was posted. A context whose
-/// component is gone by then gets nothing.
-fn post_negotiation_started(lua: &Lua, inner: &Inner, ui: &Rc<CampaignUi>, context: NodeId, player_proposed: bool) -> mlua::Result<()> {
+/// The campaign's negotiation events since the last UI frame, read from the model's begin / end
+/// counts at the start of the frame (`UiScriptHost::campaign_frame`) and posted for that frame
+/// ([`Inner::post_call`]): one "ended" ([`post_negotiation_ended`]) per negotiation that ended,
+/// then "started" ([`post_negotiation_started`]) for the open negotiation if it is new since the
+/// last frame. The campaign negotiation's constructor (0x00BF5A60) posts "started" only when the
+/// proposer is human, the case in which the model picked a greeting. A negotiation that began and
+/// ended between two frames gets "ended" only (its object's listeners went with `End()`). The deal
+/// and result are reset whenever a negotiation began or ended. A count below the one seen means a
+/// different model (a reload): nothing is due then (logged once).
+///
+/// Runs every UI frame: with no change it only compares the two counts (no allocation, no faction
+/// lookup); the rest is read only when a count moved.
+pub(super) fn sync_negotiation(lua: &Lua, inner: &Inner, ui: &Rc<CampaignUi>) -> mlua::Result<()> {
+    let (begun, ended) = {
+        let m = ui.model();
+        (m.negotiations.begun, m.negotiations.ended)
+    };
+    let mut state = ui.negotiation.borrow_mut();
+    if begun == state.seen_begun && ended == state.seen_ended {
+        return Ok(());
+    }
+    let reloaded = begun < state.seen_begun || ended < state.seen_ended;
+    let (new_begin, new_ends) = (begun != state.seen_begun, ended.saturating_sub(state.seen_ended));
+    state.seen_begun = begun;
+    state.seen_ended = ended;
+    state.status = NegotiationStatus::Open;
+    state.clear_deal();
+    if reloaded {
+        state.target = None;
+        inner.log_once("negotiation counts went back", || {
+            "UNKNOWN the campaign's negotiation counts went back (a different model): no negotiation event is \
+             posted for it (logged once)"
+                .into()
+        });
+        return Ok(());
+    }
+    for _ in 0..new_ends {
+        post_negotiation_ended(inner);
+    }
+    if !new_begin {
+        return Ok(());
+    }
+    let open = {
+        let m = ui.model();
+        let human = m.faction_by_key(&ui.link.human).map(|f| f.id);
+        m.negotiations.current.as_ref().map(|c| (c.serial, c.greeting.clone(), Some(c.proposer) == human))
+    };
+    let Some((serial, Some(greeting), player_proposed)) = open else { return Ok(()) };
+    let context = state.context;
+    drop(state);
+    match context {
+        Some(context) => post_negotiation_started(lua, inner, ui, context, serial, player_proposed, greeting_text(inner, &greeting))?,
+        None => inner.log_once("negotiation without context", || {
+            "UNKNOWN UIDiplomacyNegotiation was called with no component script running: the \
+             negotiation's events have no panel to go to (logged once)"
+                .into()
+        }),
+    }
+    Ok(())
+}
+
+/// "Started", hub +0x318: `NotifyPanelNegotiationStarted` (0x00A147A0) sets the object's
+/// counterpart (+0xAC, here the negotiation's serial) and LuaCalls
+/// `InitialiseNegotiation(greeting, proposer == local player, false)` in the context that
+/// constructed the object. The greeting is the text of the line the model picked when the
+/// negotiation began ([`greeting_text`]; the panel's `AIResponse` shows it in the diplomat's speech
+/// bubble). A context whose component is gone by then gets nothing.
+fn post_negotiation_started(
+    lua: &Lua,
+    inner: &Inner,
+    ui: &Rc<CampaignUi>,
+    context: NodeId,
+    serial: u64,
+    player_proposed: bool,
+    greeting: String,
+) -> mlua::Result<()> {
     let ui = ui.clone();
     inner.post_call(PostedCall {
         listener: NEGOTIATION_LISTENER,
         target: CallTarget::Component(context),
         name: "InitialiseNegotiation",
-        args: ("", player_proposed, false).into_lua_multi(lua)?,
-        before: Some(Box::new(move || {
-            let mut state = ui.negotiation.borrow_mut();
-            state.target = state.recipient.clone();
-        })),
+        args: (greeting, player_proposed, false).into_lua_multi(lua)?,
+        before: Some(Box::new(move || ui.negotiation.borrow_mut().target = Some(serial))),
     });
     Ok(())
+}
+
+/// The text of the greeting the model picked when the negotiation began (the recipient's
+/// `receive_<attitude>` line, UI_FIDELITY.md §4.7): its `diplomacy_strings_string_<key>` text. A
+/// read only: the pick and its RNG draw are the model's. No line in the data gives "Missing
+/// String", as `ResolveDiplomacyNegotiationString` (0x00C55CC0) does, logged once per faction with
+/// the row looked up; a key without a text is logged once per key and gives "".
+fn greeting_text(inner: &Inner, greeting: &Greeting) -> String {
+    match greeting {
+        Greeting::Line(key) => loc_required(inner, &format!("diplomacy_strings_string_{key}")),
+        Greeting::Missing { faction, key: (event, culture, government) } => {
+            inner.log_once_for("negotiation greeting missing", faction, || {
+                format!(
+                    "UNKNOWN no diplomacy_negotiation_strings line for {faction:?} (event {event:?}, culture {culture:?}, \
+                     government {government:?}): \"Missing String\" (logged once per faction)"
+                )
+            });
+            "Missing String".into()
+        }
+    }
 }
 
 /// "Cleared", hub +0x348, posted by `CCQ_DIPLOMACY_CLEAR_NEGOTIATION` (0x00932EC0, event flag 0):
@@ -100,62 +189,41 @@ fn post_negotiation_ended(inner: &Inner) {
     inner.post_call(PostedCall { listener: HUD_LISTENER, target: CallTarget::Root, name: "EnableDiplomacy", args: MultiValue::new(), before: None });
 }
 
-/// `End()` (0x009BA850): the end command ends the campaign negotiation if there is one (one
-/// "ended" event, [`post_negotiation_ended`]), then the object's listeners go and its +0xAC /
-/// +0xB0 are cleared (0x009B8560), so nothing more reaches the panel.
+/// `End()` (0x009BA850): queues the end command (which ends the campaign negotiation if there is
+/// one; its "ended" event comes from [`sync_negotiation`]), then the object's listeners go and its
+/// +0xAC / +0xB0 are cleared (0x009B8560), so nothing more reaches the panel.
 fn end_negotiation(inner: &Inner, ui: &CampaignUi) {
-    let ended = ui.negotiation.borrow_mut().end();
-    if ended {
-        post_negotiation_ended(inner);
-    }
+    ui.push(CampaignRequest::Command(CampaignCommand::EndNegotiation));
+    ui.negotiation.borrow_mut().release();
     inner.cancel_posted(NEGOTIATION_LISTENER);
+}
+
+/// Whether `faction` is the local player's: what the "started" and "cleared" events carry for the
+/// proposer (0x00A147A0 / 0x00A14850 compare the proposer, +0x18, with the local player faction,
+/// 0x009BF110).
+fn is_local_player(ui: &CampaignUi, faction: FactionId) -> bool {
+    ui.model().faction_by_key(&ui.link.human).is_some_and(|f| f.id == faction)
 }
 
 impl NegotiationState {
     /// The constructor's reset of the object (0x0099AF70): a new object with no counterpart, in
     /// `context` (the caller drops the last object's listeners' calls). The campaign negotiation is
-    /// not the object's and stays as it is (only `begin` or `end` change it).
+    /// not the object's and stays as it is (only its commands change it).
     fn construct(&mut self, context: Option<NodeId>) {
         self.target = None;
         self.context = context;
     }
 
-    /// Whether the campaign negotiation's proposer is the local player (`human`): what the
-    /// "started" and "cleared" events carry (0x00A147A0 / 0x00A14850 compare the proposer, +0x18,
-    /// with the local player faction, 0x009BF110).
-    fn player_proposed(&self, human: &str) -> bool {
-        self.proposer.as_deref() == Some(human)
-    }
-
-    /// `CCQ_DIPLOMACY_BEGIN_NEGOTIATION` (the two-key constructor): a new campaign negotiation,
-    /// built over whatever was there (0x008AF620 overwrites +0xF9C without ending it).
-    pub(super) fn begin(&mut self, proposer: String, recipient: String) {
-        self.proposer = Some(proposer);
-        self.recipient = Some(recipient);
-        self.open = true;
-        self.status = NegotiationStatus::Open;
-        self.clear_deal();
-    }
-
-    /// Empties the deal (BEGIN, CLEAR, END).
+    /// Empties the deal (CLEAR, and whenever a negotiation begins or ends).
     fn clear_deal(&mut self) {
         self.offers.clear();
         self.demands.clear();
     }
 
-    /// The state side of [`end_negotiation`]: ends the campaign negotiation if there is one and
-    /// clears the object's +0xAC / +0xB0. Returns whether a negotiation ended (the "ended" event
-    /// is then due).
-    pub(super) fn end(&mut self) -> bool {
-        // 0x008BC5D0: only while +0xF9C is set; it posts "ended" and deletes the negotiation.
-        let ended = std::mem::take(&mut self.open);
-        if ended {
-            self.status = NegotiationStatus::Open;
-            self.clear_deal();
-        }
+    /// The object's side of [`end_negotiation`] (0x009B8560): clears +0xAC / +0xB0.
+    pub(super) fn release(&mut self) {
         self.target = None;
         self.context = None;
-        ended
     }
 }
 
@@ -404,17 +472,13 @@ fn attitude_text(inner: &Inner, ui: &CampaignUi, from: &str, to: &str) -> Option
 
 /// The proposer and recipient of the counterpart's negotiation, as ids: the one guard every
 /// negotiation entry point and accessor shares. `None` unless the object has a counterpart (+0xAC,
-/// set by "started", cleared by `End()`) and the campaign negotiation exists (+0xF9C). The exe's
-/// wrappers test +0xAC (TradeableRegions also +0xF9C, 0x009C5770); ours never has a counterpart
-/// without the negotiation, so the two tests agree everywhere.
+/// set by "started", cleared by `End()`) and that negotiation is the model's open one (+0xF9C).
+/// The exe's wrappers test +0xAC (TradeableRegions also +0xF9C, 0x009C5770); ours never has a
+/// counterpart without the negotiation, so the two tests agree everywhere.
 fn negotiation_factions(ui: &CampaignUi) -> Option<(FactionId, FactionId)> {
-    let state = ui.negotiation.borrow();
-    if state.target.is_none() || !state.open {
-        return None;
-    }
+    let target = ui.negotiation.borrow().target?;
     let m = ui.model();
-    let id = |key: Option<&str>| key.and_then(|k| m.faction_by_key(k)).map(|f| f.id);
-    Some((id(state.proposer.as_deref())?, id(state.recipient.as_deref())?))
+    m.negotiations.current.as_ref().filter(|n| n.serial == target).map(|n| (n.proposer, n.recipient))
 }
 
 /// What `MaxPlayerPaymentAllowed` / `MaxOppositionPaymentAllowed` (`method`) push: the faction's
@@ -609,24 +673,27 @@ pub(super) fn install_negotiation_object(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<C
     // `UIDiplomacyNegotiation(...)`: the constructor, in the context the engine is running
     // (`host::running_script_context`, 0x01058750's `lookup[L]`).
     let (inner, ui) = (inner.clone(), ui.clone());
-    let new = lua.create_function(move |lua, args: Variadic<Value>| {
+    let new = lua.create_function(move |_lua, args: Variadic<Value>| {
         let context = super::super::host::running_script_context(&inner);
         inner.cancel_posted(NEGOTIATION_LISTENER);
         ui.negotiation.borrow_mut().construct(context);
         if let [Value::String(proposer), Value::String(recipient), ..] = args.as_slice() {
-            let player_proposed = {
-                let mut state = ui.negotiation.borrow_mut();
-                state.begin(proposer.to_string_lossy(), recipient.to_string_lossy());
-                state.player_proposed(&ui.link.human)
+            let (proposer, recipient) = (proposer.to_string_lossy(), recipient.to_string_lossy());
+            // CCQ_DIPLOMACY_BEGIN_NEGOTIATION, queued like every campaign command: the model's
+            // negotiation constructor (0x00BF5A60) picks the greeting (and may draw the RNG) when
+            // the command runs; its "started" event reaches this object through
+            // `sync_negotiation`.
+            let ids = {
+                let m = ui.model();
+                (m.faction_by_key(&proposer).map(|f| f.id), m.faction_by_key(&recipient).map(|f| f.id))
             };
-            match (player_proposed, context) {
-                (true, Some(context)) => post_negotiation_started(lua, &inner, &ui, context, player_proposed)?,
-                (true, None) => inner.log_once("negotiation without context", || {
-                    "UNKNOWN UIDiplomacyNegotiation was called with no component script running: the \
-                     negotiation's events have no panel to go to (logged once)"
-                        .into()
+            match ids {
+                (Some(proposer), Some(recipient)) => {
+                    ui.push(CampaignRequest::Command(CampaignCommand::BeginNegotiation { proposer, recipient }))
+                }
+                _ => inner.log_once_for("negotiation unknown faction", &format!("{proposer}\u{0}{recipient}"), || {
+                    format!("UNKNOWN UIDiplomacyNegotiation({proposer:?}, {recipient:?}): no model faction, no negotiation is begun (logged once per pair)")
                 }),
-                (false, _) => {}
             }
         } else {
             inner.log_once("pending move negotiation", || {
@@ -718,22 +785,28 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
         v.sort();
         lua.create_sequence_from(v)
     });
-    // MinisterPortraitPath(faction) → a minister's portrait for the negotiation screen (0x009ED8A0
-    // picks one through the minister agent record, "random" per the description). PROVISIONAL:
-    // the card picture of the faction's first character whose portrait is a minister's, else of
-    // its leader; "" if none.
+    // MinisterPortraitPath(faction) → the negotiation screen's diplomat picture (0x009ED8A0 →
+    // 0x009C1300 / 0x009CBF40, CONFIRMED, UI_FIDELITY.md §4.7): the card of the minister agent
+    // (agent type 13, `minister` in 0x0145D9E0) at age 25 (the `young` cards), picture 001:
+    // `ui/portraits/<folder>/Cards/minister/young/001.tga`, with no "data/" (the panel adds it).
+    // The folder is the faction's culture key (european, middle_east: the two diplomats of the
+    // original's screens); INFERRED: when that folder lacks the picture, the culture's fallback
+    // (`CampaignUi::culture_fallback`) — the exe's folder map 0x008C05B0 is not decoded. No
+    // picture at all: "" (logged once).
     f!("MinisterPortraitPath", |_l, inner, ui, key: Option<String>| {
-        let m = ui.model();
-        let Some(f) = m.faction_by_key(&key.unwrap_or_else(|| ui.link.human.clone())).map(|f| f.id) else { return Ok(String::new()) };
-        let cards: Vec<&str> = m
-            .world
-            .characters
-            .values()
-            .filter(|c| c.faction == f)
-            .filter_map(|c| portrait_card(&m, c.id))
-            .collect();
-        let pick = cards.iter().find(|p| p.to_ascii_lowercase().contains("/minister/")).or(cards.first());
-        Ok(pick.map(|p| format!("data/{p}")).unwrap_or_default())
+        let key = key.unwrap_or_else(|| ui.link.human.clone());
+        let culture = ui.model().rules.faction_cultures.get(&key).cloned().unwrap_or_default();
+        let path = |folder: &str| format!("ui/portraits/{folder}/Cards/minister/young/001.tga");
+        let fallback = ui.culture_fallback(&inner, &culture).unwrap_or_default();
+        match [culture.as_str(), fallback.as_str()].into_iter().filter(|f| !f.is_empty()).map(path).find(|p| inner.source.exists(p)) {
+            Some(p) => Ok(p),
+            None => {
+                inner.log_once("minister portrait folder", || {
+                    format!("UNKNOWN MinisterPortraitPath({key:?}): no minister card for culture {culture:?} (logged once)")
+                });
+                Ok(String::new())
+            }
+        }
     });
     // RetrieveDiplomacyDetails(key): a read only. The negotiation is opened by the panel's own
     // constructor call, `UIDiplomacyNegotiation(player, opposing)` (see `install_negotiation_object`).
@@ -762,17 +835,46 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     // shape): nothing while the counterpart (+0xAC) is unset, else one table
     // `{OffersAndDemands = {...}, Unilaterals = {...}}` whose entries are
     // `{State, Active, Address, Unilateral, Tooltip}` (InitialiseNegotiation hands each list to
-    // CreateButtons, which builds one `diplomacy_button` per entry).
-    // PROVISIONAL: both lists are empty. The entries come from the campaign's diplomatic action
-    // list (0x00C45E90), each action's availability (0x00C1A530) and its state name (0x009C7700),
-    // none of which the model has yet (UI_FIDELITY.md §4.6).
+    // CreateButtons, which builds one `diplomacy_button` per entry). The lists are the model's
+    // (`CampaignModel::possible_actions`: the rules of 0x009B5220 over the action records of
+    // 0x00BF5A60, UI_FIDELITY.md 4.7): `State` the action's name, `Active` its availability,
+    // `Unilateral` for ids 1, 3, 5, 8, 12, `Tooltip` the text of the model's
+    // `random_localisation_strings` key. INFERRED: `Address` is the action's name (the exe hands
+    // the action record's pointer, which the panel only gives back to `Propose`).
     f!("BuildPossibleActions", |lua, inner, ui, _a: Variadic<Value>| {
-        if ui.negotiation.borrow().target.is_none() {
-            return Ok(Value::Nil);
-        }
+        let Some((p, r)) = negotiation_factions(&ui) else { return Ok(Value::Nil) };
+        let lists = {
+            let m = ui.model();
+            match m.faction_by_key(&ui.link.human).map(|f| f.id) {
+                Some(local) => m.possible_actions(local, p, r),
+                None => {
+                    inner.log_once("negotiation factions", || {
+                        format!("UNKNOWN BuildPossibleActions: no model faction for the local player {:?} (logged once)", ui.link.human)
+                    });
+                    Default::default()
+                }
+            }
+        };
+        let list = |entries: &[ntw_sim::campaign::negotiation::ListedAction]| -> mlua::Result<Table> {
+            let out = lua.create_table()?;
+            for (i, a) in entries.iter().enumerate() {
+                let e = lua.create_table()?;
+                e.set("State", a.action.name())?;
+                e.set("Active", a.active)?;
+                e.set("Address", a.action.name())?;
+                if a.action.unilateral() {
+                    e.set("Unilateral", true)?;
+                }
+                if let Some(key) = a.tooltip {
+                    e.set("Tooltip", loc_required(&inner, &format!("random_localisation_strings_string_{key}")))?;
+                }
+                out.raw_set(i + 1, e)?;
+            }
+            Ok(out)
+        };
         let t = lua.create_table()?;
-        t.set("OffersAndDemands", lua.create_table()?)?;
-        t.set("Unilaterals", lua.create_table()?)?;
+        t.set("OffersAndDemands", list(&lists.offers_and_demands)?)?;
+        t.set("Unilaterals", list(&lists.unilaterals)?)?;
         Ok(Value::Table(t))
     });
 
@@ -922,7 +1024,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     });
     f!("MaxOppositionPaymentAllowed", |_l, inner, ui, _a: Variadic<Value>| {
         let other = negotiation_factions(&ui).map(|(proposer, recipient)| {
-            if ui.negotiation.borrow().player_proposed(&ui.link.human) { recipient } else { proposer }
+            if is_local_player(&ui, proposer) { recipient } else { proposer }
         });
         Ok(payment_cap(&inner, &ui, other, "MaxOppositionPaymentAllowed"))
     });
@@ -931,7 +1033,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     // userdata, FUN_008E5060; we have no userdata, so the faction key string is returned instead —
     // INFERRED). Nothing without a counterpart (CONFIRMED guard).
     f!("ProposerId", |_l, inner, ui, _a: Variadic<Value>| {
-        Ok(negotiation_factions(&ui).and(ui.negotiation.borrow().proposer.clone()))
+        Ok(negotiation_factions(&ui).and_then(|(proposer, _)| ui.model().world.factions.get(&proposer).map(|f| f.key.clone())))
     });
 
     // The deal entry points. Each wrapper reads no Lua argument and, while the counterpart
@@ -942,7 +1044,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     // CCQ_DIPLOMACY_DECLINE_DEAL (0x00932F00 → 0x00C1F210: result = 2, the reply goes to the
     // proposer's panel, which is not the decliner's), `Cancel` → CCQ_DIPLOMACY_CLEAR_NEGOTIATION
     // (0x00932EC0: the deal emptied, the panel re-initialised over hub +0x348), `End` →
-    // CCQ_DIPLOMACY_END_NEGOTIATION (see [`NegotiationState::end`]). None but `End` ends the
+    // CCQ_DIPLOMACY_END_NEGOTIATION (see [`end_negotiation`]). None but `End` ends the
     // negotiation. Accepting applies the deal at most once ([`accept_deal`]).
     // PLACEHOLDER: `Propose` / `ProposeDeal` (0x009BF3C0 / 0x009BFCF0, CCQ_DIPLOMACY_PROPOSE_DEAL →
     // 0x00933690 → 0x00C49BE0) hand the deal to the AI's evaluation, which the model does not
@@ -960,16 +1062,14 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     // (CONFIRMED for the executor; INFERRED for the per-item callbacks it runs, item vtable +0x2C
     // and 0x00C5C730 → vtable +0x50, not traced).
     f!("Cancel", |lua, inner, ui, _a: Variadic<Value>| {
-        if negotiation_factions(&ui).is_none() {
-            return Ok(());
-        }
-        let cleared = {
+        let Some((proposer, _)) = negotiation_factions(&ui) else { return Ok(()) };
+        let context = {
             let mut state = ui.negotiation.borrow_mut();
             state.clear_deal();
-            state.context.map(|context| (context, state.player_proposed(&ui.link.human)))
+            state.context
         };
-        if let Some((context, player_proposed)) = cleared {
-            post_negotiation_cleared(lua, &inner, context, player_proposed)?;
+        if let Some(context) = context {
+            post_negotiation_cleared(lua, &inner, context, is_local_player(&ui, proposer))?;
         }
         Ok(())
     });
@@ -1007,7 +1107,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     // `negotiation:IsNegotiation`); the method exists in the exe (0x009BD7C0). Registered so a
     // script that asks gets the host's answer rather than a nil call error (UNKNOWN shape:
     // whether a campaign negotiation is open).
-    f!("IsNegotiation", |_l, inner, ui, _a: Variadic<Value>| Ok(ui.negotiation.borrow().open));
+    f!("IsNegotiation", |_l, inner, ui, _a: Variadic<Value>| Ok(ui.model().negotiations.current.is_some()));
 
     Ok(())
 }

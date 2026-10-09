@@ -1818,10 +1818,14 @@ fn negotiation_with_offer(hud: &TestHud) {
             diplomacy: Default::default(),
         },
     );
+    // The negotiation begun by its command, and the "started" event delivered (the counterpart set,
+    // the counts seen).
+    hud._scripts.state_mut().model.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    let n = hud._scripts.state().model.negotiations.clone();
     let ui = hud.host.campaign_ui().unwrap();
     let mut state = ui.negotiation.borrow_mut();
-    state.begin(HUMAN.into(), "test_faction_b".into());
-    state.target = Some("test_faction_b".into());
+    (state.seen_begun, state.seen_ended) = (n.begun, n.ended);
+    state.target = n.current.map(|c| c.serial);
     state.offers.push(DealRow { item: NegotiationItem::Payment { amount: 500, turns: 0 }, applied: false });
 }
 
@@ -1847,7 +1851,7 @@ fn a_deal_applies_at_most_once() {
     hud.host.campaign_ui().unwrap().negotiation.borrow_mut().offers.push(DealRow { item: NegotiationItem::Payment { amount: 500, turns: 0 }, applied: false });
     assert_eq!(hud.requests_of("CampaignUI.AcceptOffer()"), gift, "a new deal after Cancel");
     // Without a counterpart nothing is applied.
-    hud.host.campaign_ui().unwrap().negotiation.borrow_mut().end();
+    hud.host.campaign_ui().unwrap().negotiation.borrow_mut().release();
     assert_eq!(hud.requests_of("CampaignUI.AcceptOffer() CampaignUI.Propose()"), Vec::new());
 }
 
@@ -1863,10 +1867,32 @@ fn payment_caps_are_the_treasuries() {
     };
     assert_eq!(caps(&hud), (1000.0, 300.0));
     assert!(hud.errors().is_empty());
-    hud.host.campaign_ui().unwrap().negotiation.borrow_mut().end();
+    hud.host.campaign_ui().unwrap().negotiation.borrow_mut().release();
     assert_eq!(caps(&hud), (1000.0, 0.0));
     assert_eq!(caps(&hud), (1000.0, 0.0));
     let errors = hud.errors();
     assert_eq!(errors.len(), 1, "logged once: {errors:?}");
     assert!(errors[0].contains("MaxOppositionPaymentAllowed"), "{errors:?}");
+}
+
+/// The per-frame negotiation sync: nothing is due while the model's counts stay as seen; counts
+/// below the seen ones (a different model) post nothing and are logged once.
+#[test]
+fn negotiation_sync_posts_only_on_a_count_change() {
+    let hud = test_hud();
+    negotiation_with_offer(&hud);
+    hud.host.take_log();
+    for t in [0.0, 8.0] {
+        hud.host.pulse(t);
+    }
+    let ui = hud.host.campaign_ui().unwrap();
+    assert_eq!(ui.negotiation.borrow().offers.len(), 1, "no change: the deal is kept");
+    assert!(hud.host.take_log().is_empty());
+    ui.negotiation.borrow_mut().seen_begun = 99;
+    for t in [16.0, 24.0] {
+        hud.host.pulse(t);
+    }
+    let log = hud.host.take_log();
+    assert_eq!(log.iter().filter(|l| l.contains("negotiation counts went back")).count(), 1, "{log:?}");
+    assert_eq!(ui.negotiation.borrow().target, None);
 }

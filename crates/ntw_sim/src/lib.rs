@@ -25,4 +25,5 @@ pub mod calendar;
 pub mod campaign;
 pub mod fixed;
 mod fnv;
+pub(crate) mod msvc_sort;
 pub mod rng;

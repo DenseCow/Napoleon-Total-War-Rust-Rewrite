@@ -71,8 +71,10 @@ pub struct ArmyData {
     men: BTreeMap<String, i32>,
     /// faction → its units (`uniforms`).
     faction_units: BTreeMap<String, Vec<String>>,
-    /// (fixed cost, multiplier) by experience 0..9: land, naval.
-    xp: [Vec<(i32, f32)>; 2],
+    /// `unit_stats_land_experience_bonuses` rows by rank (0..9).
+    xp_land: BTreeMap<u8, ntw_data::UnitStatsLandExperienceBonuses>,
+    /// `unit_stats_naval_experience_bonuses` rows by rank.
+    xp_naval: BTreeMap<u8, ntw_data::UnitStatsNavalExperienceBonuses>,
     /// (type, composition, size, era) → (limits [inf, cav, art], id).
     limits: BTreeMap<LimitKey, ([i32; 3], i32)>,
     /// (faction, setup id) → preset id.
@@ -107,19 +109,14 @@ impl ArmyData {
                 d.faction_units.entry(st(&r[1])).or_default().push(st(&r[3]));
             }
         }
-        for (i, (path, codes, fixed)) in [
-            ("db/unit_stats_land_experience_bonuses_tables/unit_stats_land_experience_bonuses", "s,i,i,i,i,i,i,i,f", 7),
-            ("db/unit_stats_naval_experience_bonuses_tables/unit_stats_naval_experience_bonuses", "s,i,i,i,i,i,f", 5),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            if let Some(t) = table(inner, path, codes) {
-                let mut rows: Vec<(i32, (i32, f32))> =
-                    t.rows.iter().map(|r| (st(&r[0]).parse().unwrap_or(0), (r[fixed].as_i32().unwrap_or(0), r[fixed + 1].as_f32().unwrap_or(1.0)))).collect();
-                rows.sort_by_key(|r| r.0);
-                d.xp[i] = rows.into_iter().map(|r| r.1).collect();
-            }
+        // The experience rows by rank; a row whose key is not a rank cannot be looked up as one.
+        let path = <ntw_data::UnitStatsLandExperienceBonuses as ntw_data::DbRecord>::path();
+        if let Some(t) = inner.source.find(&path).and_then(|f| ntw_data::Table::<ntw_data::UnitStatsLandExperienceBonuses>::from_bytes(&f.bytes).ok()) {
+            d.xp_land = t.rows().iter().filter_map(|r| Some((r.rank.parse().ok()?, r.clone()))).collect();
+        }
+        let path = <ntw_data::UnitStatsNavalExperienceBonuses as ntw_data::DbRecord>::path();
+        if let Some(t) = inner.source.find(&path).and_then(|f| ntw_data::Table::<ntw_data::UnitStatsNavalExperienceBonuses>::from_bytes(&f.bytes).ok()) {
+            d.xp_naval = t.rows().iter().filter_map(|r| Some((r.rank.parse().ok()?, r.clone()))).collect();
         }
         if let Some(t) = table(inner, "db/battle_type_setup_limits_tables/battle_type_setup_limits", "s,s,s,s,i,i,i,i,i,i,i") {
             for r in &t.rows {
@@ -149,12 +146,16 @@ impl ArmyData {
         self.units.get(key).map_or(0, |u| if late { u.secondary_cost } else { u.recruitment_cost })
     }
 
-    /// `XpAdjustedCost` (see the module docs).
+    /// `XpAdjustedCost` (see the module docs): the experience row's `adjusted_cost`, the one copy of the
+    /// `0x00ED49A0` rule (`ntw_data::GameDatabase::experience_adjusted_cost` uses it too); a rank with no
+    /// row leaves the cost alone.
     pub fn xp_cost(&self, key: &str, xp: i32, late: bool) -> i32 {
         let cost = self.mp_cost(key, late);
-        match self.xp[usize::from(self.is_naval(key))].get(xp.clamp(0, 9) as usize) {
-            Some((fixed, mult)) => fixed + (cost as f32 * mult).round() as i32,
-            None => cost,
+        let rank = xp.clamp(0, 9) as u8;
+        if self.is_naval(key) {
+            self.xp_naval.get(&rank).map_or(cost, |r| r.adjusted_cost(cost))
+        } else {
+            self.xp_land.get(&rank).map_or(cost, |r| r.adjusted_cost(cost))
         }
     }
 }
@@ -189,7 +190,7 @@ fn unit_details(lua: &Lua, inner: &Inner, d: &ArmyData, faction: &str, key: &str
     t.set("Icon", format!("data/ui/units/icons/{}", pick("icons", "icon")))?;
     t.set("InfoPic", format!("data/ui/units/info/{}", pick("info", "info")))?;
     t.set("Experience", xp)?;
-    t.set("Cap", u.map_or(0, |u| u.unknown_84))?;
+    t.set("Cap", u.map_or(0, |u| u.unit_cap))?;
     t.set("Command", 0)?;
     let class = u.map_or(-1, |u| class_id(&u.unit_class));
     t.set("CommanderClass", class == 12 || class == 23)?;
@@ -350,7 +351,12 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Result<(
     t.set("MPExperienceTables", lua.create_function(move |lua, naval: Option<bool>| {
         let d = dd.get_or_init(|| ArmyData::load(&i));
         let out = lua.create_table()?;
-        for (k, (fixed, mult)) in d.xp[usize::from(naval.unwrap_or(false))].iter().enumerate() {
+        let rows: Vec<(i32, f32)> = if naval.unwrap_or(false) {
+            d.xp_naval.values().map(|r| (r.unknown_1c, r.unknown_20)).collect()
+        } else {
+            d.xp_land.values().map(|r| (r.unknown_24, r.unknown_28)).collect()
+        };
+        for (k, (fixed, mult)) in rows.iter().enumerate() {
             let e = lua.create_table()?;
             e.set("FixedCost", *fixed)?;
             e.set("Multiplier", *mult)?;
@@ -634,7 +640,7 @@ fn file_to_setup(lua: &Lua, inner: &Inner, d: &ArmyData, f: &ArmySetupFile) -> m
             units.set(units.raw_len() + 1, e)?;
         }
         cost += d.xp_cost(&c.key, c.experience, late);
-        cap = u.unknown_84;
+        cap = u.unit_cap;
     }
     let t = lua.create_table()?;
     t.set("Units", units)?;

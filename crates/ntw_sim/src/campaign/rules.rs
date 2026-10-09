@@ -18,7 +18,8 @@ use std::collections::BTreeMap;
 /// What the campaign rules need to know about one unit (`units` + `unit_stats_land` rows).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct UnitRules {
-    /// `units` #4 recruitment cost (column name INFERRED M).
+    /// `units` #4 (`UNIT_RECORD` +0x2C): the battle army-setup price (custom and multiplayer
+    /// battles: the `0x00ED49A0` base), **not** what the campaign charges ([`Self::campaign_cost`]).
     pub cost: i32,
     /// `units` #8 upkeep per turn (INFERRED M).
     pub upkeep: i32,
@@ -37,9 +38,13 @@ pub struct UnitRules {
     pub category: String,
     /// `units` #3 class key (`infantry_line`, ...): qualifier of the unit-class effects.
     pub unit_class: String,
-    /// `units` #7 (meaning UNKNOWN, about 0.8 × the cost; `UNIT_RECORD` +0x38, CONFIRMED offset):
-    /// the commander pick prefers the higher value (`characters::commander_order`).
-    pub value_7: i32,
+    /// `units` #7 (`UNIT_RECORD` +0x38): the campaign recruitment cost before effects. CONFIRMED:
+    /// the recruitable entry's cost `0x00B0D220` scales record +0x38
+    /// ([`super::economy::recruitment_cost`]), and the queued items of the saves the original wrote hold it
+    /// with the effects applied (`economy_check` `ECON_RECRUITCOST`: 392 of 406 items; CAMPAIGN_FIDELITY.md
+    /// §Recruitment cost and money). The commander pick prefers the higher
+    /// value (`characters::commander_order`).
+    pub campaign_cost: i32,
     /// `units` #21 (flag, meaning UNKNOWN; `UNIT_RECORD` +0x78, CONFIRMED offset): the commander
     /// pick puts land units without it first (`characters::commander_order`).
     pub flag_21: bool,
@@ -50,6 +55,9 @@ pub struct UnitRules {
     /// the unit can hide on the campaign map (light cavalry, skirmishers, guerrillas; the stealth
     /// test `0x009D1010` lets a force whose units all have it hide anywhere).
     pub campaign_stealth: bool,
+    /// `units` #15 (`UNIT_RECORD` +0x68): the most units of this type the faction may hold and have queued
+    /// together, 0 = no limit (CONFIRMED: `0x008F68B0`, see [`super::CampaignModel::recruitable_entry_flags`]).
+    pub unit_cap: i32,
 }
 
 /// A land unit's autoresolve inputs, from its `units` / `unit_stats_land` rows.
@@ -270,6 +278,12 @@ pub struct CampaignRules {
     /// `diplomatic_relations_attitudes`: (key, threshold), e.g. (`hostile`, -85). Empty: the shipped values are
     /// used (see [`super::treaties::attitude_category`]).
     pub attitude_thresholds: BTreeMap<String, i32>,
+    /// `diplomacy_negotiation_strings`: (event, culture, government key) → `diplomacy_strings` key
+    /// ([`super::negotiation`]).
+    pub negotiation_strings: BTreeMap<(String, String, String), String>,
+    /// `diplomacy_negotiation_faction_override_strings`: (event, culture, government key, faction key)
+    /// → `diplomacy_strings` key ([`super::negotiation`]).
+    pub negotiation_overrides: BTreeMap<(String, String, String, String), String>,
     /// `factions` #2 subculture of each faction key: factions of the same subculture share some attitude
     /// changes (the faction record +0x10 compared by `0x00B13840` / `0x00B0E420`, CONFIRMED).
     pub faction_subcultures: BTreeMap<String, String>,
@@ -282,54 +296,6 @@ pub struct CampaignRules {
     pub effects: super::effects::EffectRules,
     /// The character rules (traits, ancillaries; slot 0-G).
     pub characters: super::characters::CharacterRules,
-    /// `unit_stats_land_experience_bonuses` / `unit_stats_naval_experience_bonuses`: what a
-    /// veteran costs more than a recruit ([`XpCostTables`], CONFIRMED by `0x00ED49A0`).
-    /// Empty unless the loader copies the two tables in, and then the cost is the plain
-    /// `units` cost, as before.
-    pub xp_cost: XpCostTables,
-}
-
-/// One row of the experience-adjusted **cost**: the flat term and the multiplier of
-/// `unit_stats_land_experience_bonuses` (`row+0x24` / `row+0x28`) or of its naval twin
-/// `unit_stats_naval_experience_bonuses` (`row+0x1C` / `row+0x20`).
-///
-/// CONFIRMED by `0x00ED49A0`, which returns `flat + ROUND(base × mult)` — the base is **scaled**,
-/// not added (BATTLE_FIDELITY.md §19a). Land rank 9 is `+360` and `×1.9` (so a 100-cost recruit
-/// costs 550), naval rank 9 `+255` and `×1.45` (400).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct XpCostRow {
-    /// The flat term (`row+0x24` land, `row+0x1C` naval).
-    pub flat: i32,
-    /// The multiplier term (`row+0x28` land, `row+0x20` naval).
-    pub mult: f32,
-}
-
-impl XpCostRow {
-    /// What a unit of this experience rank costs instead of `base`: `flat + ROUND(base × mult)`,
-    /// with the exe's `ROUND` (half away from zero — *not* a truncation).
-    pub fn adjust(&self, base: i32) -> i32 {
-        self.flat + (base as f32 * self.mult).round() as i32
-    }
-}
-
-/// The two experience-adjusted cost tables, by experience rank (chevrons 0..9). The naval table is
-/// the one `0x00ED49A0` reads when the unit type has `+0xA0 != 0` (a ship), the land one otherwise;
-/// a rank neither table has leaves the cost alone (the exe's else branch).
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct XpCostTables {
-    /// `unit_stats_land_experience_bonuses` (rank → row).
-    pub land: BTreeMap<u8, XpCostRow>,
-    /// `unit_stats_naval_experience_bonuses` (rank → row).
-    pub naval: BTreeMap<u8, XpCostRow>,
-}
-
-impl XpCostTables {
-    /// The cost of a unit of experience `experience` instead of `base` (`0x00ED49A0`): the naval
-    /// row for a ship, the land row otherwise, and `base` itself when the rank has no row.
-    pub fn adjust_cost(&self, naval: bool, experience: u8, base: i32) -> i32 {
-        let table = if naval { &self.naval } else { &self.land };
-        table.get(&experience).map_or(base, |row| row.adjust(base))
-    }
 }
 
 /// The tax classes of `taxes_keys` (CONFIRMED keys).
@@ -382,17 +348,6 @@ impl CampaignRules {
     pub fn tax_rate(&self, level: &str) -> i32 {
         self.tax_levels.get(level).copied().unwrap_or(0)
     }
-
-    /// What a unit of experience `experience` costs instead of `base`: the campaign's
-    /// **experience-adjusted cost** (`0x00ED49A0` — the army auto-build spends it against its
-    /// budget, `0x0045CB50`, and the unit info panel shows it as "XpAdjustedCost",
-    /// `0x005CD340`). `naval` picks the naval table, as the exe's unit-type flag `+0xA0` does.
-    /// [`XpCostTables::adjust_cost`] leaves the cost alone when the table has no such rank, so an
-    /// unfilled table is exactly the old behaviour.
-    pub fn xp_adjusted_cost(&self, naval: bool, experience: u8, base: i32) -> i32 {
-        self.xp_cost.adjust_cost(naval, experience, base)
-    }
-
     /// `level_key`'s level and its chain's highest level ([`BuildingTable::chain_levels`]).
     pub fn chain_levels(&self, level_key: &str) -> Option<(i32, i32)> {
         self.buildings.chain_levels(level_key)
@@ -442,11 +397,11 @@ impl CampaignRules {
         }
         r.units.insert(
             "test_unit".into(),
-            UnitRules { cost: 500, upkeep: 10, turns: 2, is_naval: false, men: 100, autoresolve: Some(TEST_AUTORESOLVE), category: "infantry".into(), unit_class: "infantry_line".into(), value_7: 0, flag_21: false, militia: false, campaign_stealth: false },
+            UnitRules { cost: 500, upkeep: 10, turns: 2, is_naval: false, men: 100, autoresolve: Some(TEST_AUTORESOLVE), category: "infantry".into(), unit_class: "infantry_line".into(), campaign_cost: 400, flag_21: false, militia: false, campaign_stealth: false, unit_cap: 0 },
         );
         r.units.insert(
             "test_recruit".into(),
-            UnitRules { cost: 500, upkeep: 10, turns: 2, is_naval: false, men: 100, autoresolve: Some(TEST_AUTORESOLVE), category: "infantry".into(), unit_class: "infantry_line".into(), value_7: 0, flag_21: false, militia: false, campaign_stealth: false },
+            UnitRules { cost: 500, upkeep: 10, turns: 2, is_naval: false, men: 100, autoresolve: Some(TEST_AUTORESOLVE), category: "infantry".into(), unit_class: "infantry_line".into(), campaign_cost: 400, flag_21: false, militia: false, campaign_stealth: false, unit_cap: 0 },
         );
         r.buildings.insert(
             "test_building_level".into(),

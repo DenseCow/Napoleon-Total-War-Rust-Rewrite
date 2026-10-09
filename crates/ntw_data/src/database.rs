@@ -97,10 +97,20 @@ pub struct GameDatabase {
     pub kv_morale_raw: KvTable,
     /// The raw `_kv_fatigue` rows.
     pub kv_fatigue_raw: KvTable,
-    /// Gun type → its projectiles' keys in the exe's shot order, built at load from
+    /// Gun type → its projectiles in the exe's shot order, built at load from
     /// `gun_type_to_projectiles` and `projectiles` ([`index_gun_shots`]); whoever replaces those two
     /// tables rebuilds it (a stale index can only miss or misorder shots, never panic).
-    gun_shots: HashMap<String, Vec<String>>,
+    gun_shots: GunShots,
+}
+
+/// The gun shot index ([`index_gun_shots`]): per gun type, each shot's `projectiles` row number
+/// and key. The row numbers are read only while `projectiles` is still the table they were taken
+/// from (its [`Table::id`]); a replaced table is read by key.
+#[derive(Debug, Clone, Default)]
+struct GunShots {
+    /// The [`Table::id`] of the `projectiles` table the row numbers index.
+    projectiles: u64,
+    by_gun: HashMap<String, Vec<(usize, String)>>,
 }
 
 /// A unit with its foreign keys already followed. Returned by [`GameDatabase::land_unit`].
@@ -112,18 +122,20 @@ pub struct LandUnitView<'a> {
     pub stats: &'a UnitStatsLand,
 }
 
-/// For each gun type, its projectiles' keys in the exe's shot order (see
-/// [`GameDatabase::gun_projectiles`]): built once at load, so a volley's shot lookup is a few hash
-/// lookups, no table scan. Keys, not row numbers, and every lookup is `Table::get` (the table's
-/// one "first row of a key" rule), so a `projectiles` table replaced later is read as it is (a
-/// missing key is skipped) and never indexed out of bounds. The sort key is the shot type enum
-/// value (`ntw_sim`'s one lookup), an unknown name 0 as the exe's `0x00F59030`.
-fn index_gun_shots(guns: &Table<GunTypeProjectile>, projectiles: &Table<Projectile>) -> HashMap<String, Vec<String>> {
-    let mut by_gun: HashMap<&str, Vec<&Projectile>> = HashMap::new();
+/// For each gun type, its projectiles in the exe's shot order (see
+/// [`GameDatabase::gun_projectiles`]): built once at load, so a volley's shot lookup is one hash
+/// lookup (the gun type) and row reads, no table scan. Each shot keeps its row number (from
+/// `Table::get_row`, the table's one "first row of a key" rule) and its key: the rows are read
+/// while `projectiles` is the table indexed here (same [`Table::id`]), else each key is looked up
+/// again, so a `projectiles` table replaced later is read as it is (a missing key is skipped) and
+/// never indexed out of bounds. The sort key is the shot type enum value (`ntw_sim`'s one lookup),
+/// an unknown name 0 as the exe's `0x00F59030`.
+fn index_gun_shots(guns: &Table<GunTypeProjectile>, projectiles: &Table<Projectile>) -> GunShots {
+    let mut by_gun: HashMap<&str, Vec<(usize, &Projectile)>> = HashMap::new();
     // `gun_type_to_projectiles` rows naming no `projectiles` row: skipped, logged once per load.
     let mut missing: Vec<&str> = Vec::new();
     for g in guns.iter() {
-        match projectiles.get(&g.projectile) {
+        match projectiles.get_row(&g.projectile) {
             Some(p) => by_gun.entry(g.gun_type.as_str()).or_default().push(p),
             None => missing.push(&g.projectile),
         }
@@ -131,13 +143,14 @@ fn index_gun_shots(guns: &Table<GunTypeProjectile>, projectiles: &Table<Projecti
     if let Some(first) = missing.first() {
         eprintln!("WARN ntw_data: {} gun_type_to_projectiles rows name no projectile (first: {first}); those shots are skipped", missing.len());
     }
-    by_gun
+    let by_gun = by_gun
         .into_iter()
         .map(|(gun, mut shots)| {
-            shots.sort_by_key(|p| ntw_sim::battle::attributes::shot_type_value(&p.shot_type).unwrap_or(0));
-            (gun.to_owned(), shots.into_iter().map(|p| p.key.clone()).collect())
+            shots.sort_by_key(|(_, p)| ntw_sim::battle::attributes::shot_type_value(&p.shot_type).unwrap_or(0));
+            (gun.to_owned(), shots.into_iter().map(|(row, p)| (row, p.key.clone())).collect())
         })
-        .collect()
+        .collect();
+    GunShots { projectiles: projectiles.id(), by_gun }
 }
 
 fn load<T: DbRecord>(vfs: &Vfs) -> Result<Table<T>, DataError> {
@@ -167,6 +180,9 @@ fn load_campaign(vfs: &Vfs) -> Result<crate::campaign::CampaignTables, DataError
         building_upgrades: load(vfs)?,
         government_relations: load(vfs)?,
         attitude_thresholds: load(vfs)?,
+        // Only the diplomat's greeting reads them (no line → "Missing String", as the exe).
+        negotiation_strings: load_optional(vfs)?,
+        negotiation_override_strings: load_optional(vfs)?,
         naval_stats: load(vfs)?,
         chains: load(vfs)?,
         chain_slots: load(vfs)?,
@@ -231,6 +247,23 @@ fn load_campaign(vfs: &Vfs) -> Result<crate::campaign::CampaignTables, DataError
 
 fn load_kv(vfs: &Vfs, name: &'static str) -> Result<KvTable, DataError> {
     KvTable::from_bytes(name, &vfs.read(&KvTable::path(name))?)
+}
+
+impl UnitStatsLandExperienceBonuses {
+    /// The land branch of `0x00ED49A0` (CONFIRMED) on this rank's row: `row+0x24 + ROUND(base * row+0x28)`,
+    /// with the exe's `ROUND` (half away from zero). The one copy of the rule
+    /// ([`GameDatabase::experience_adjusted_cost`], the battle army setup's `XpAdjustedCost`).
+    pub fn adjusted_cost(&self, base: i32) -> i32 {
+        self.unknown_24 + (base as f32 * self.unknown_28).round() as i32
+    }
+}
+
+impl UnitStatsNavalExperienceBonuses {
+    /// The naval branch of `0x00ED49A0` (CONFIRMED): `row+0x1C + ROUND(base * row+0x20)`
+    /// ([`GameDatabase::naval_experience_adjusted_cost`]).
+    pub fn adjusted_cost(&self, base: i32) -> i32 {
+        self.unknown_1c + (base as f32 * self.unknown_20).round() as i32
+    }
 }
 
 impl GameDatabase {
@@ -337,45 +370,24 @@ impl GameDatabase {
 
     /// The experience-adjusted **cost** of a naval unit: `row+0x1C + ROUND(base * row+0x20)`, the
     /// naval branch of `0x00ED49A0` (CONFIRMED — note the base is *not* added, it is scaled).
-    /// `base` is the cost the caller starts from (the recruit or upkeep cost, chosen by the exe's
-    /// flag) and `rank` the unit's experience level. Without the row the exe returns `base`.
+    /// `base` is the cost the caller starts from (`UNIT_RECORD` +0x2C or +0x30, `units` #4 or the
+    /// late-era #5, chosen by the exe's flag) and `rank` the unit's experience level. Without the
+    /// row the exe returns `base`.
     pub fn naval_experience_adjusted_cost(&self, rank: u8, base: i32) -> i32 {
-        match self.naval_experience_bonuses(rank) {
-            Some(r) => r.unknown_1c + (base as f32 * r.unknown_20).round() as i32,
-            None => base,
-        }
+        self.naval_experience_bonuses(rank).map_or(base, |r| r.adjusted_cost(base))
     }
 
     /// The land twin of [`GameDatabase::naval_experience_adjusted_cost`]: `row+0x24 +
-    /// ROUND(base * row+0x28)`, the land branch of `0x00ED49A0` (CONFIRMED). This is the cost the
-    /// campaign's auto-build (`0x0045CB50` → `0x0045D170`) pays and the unit info panel shows as
-    /// "XpAdjustedCost" (`0x005CD340`) — a campaign cost, NOT a battle stat.
+    /// ROUND(base * row+0x28)`, the land branch of `0x00ED49A0` (CONFIRMED). This is the battle
+    /// army-setup price of a unit bought with chevrons (custom and multiplayer battles: the army
+    /// generator `0x004765F0`, which reads "MPCost", "Experience" and "LateEra", spends it through
+    /// `0x0045CB50` → `0x0045D170`) and what the unit info shows as "XpAdjustedCost" (`0x005CD340`).
+    /// The campaign does not use it: its recruitment cost is `units` #7 with the region's effects
+    /// (`ntw_sim::campaign::economy::recruitment_cost`, `0x00B0D220`).
     pub fn experience_adjusted_cost(&self, rank: u8, base: i32) -> i32 {
-        match self.experience_bonuses(rank) {
-            Some(r) => r.unknown_24 + (base as f32 * r.unknown_28).round() as i32,
-            None => base,
-        }
+        self.experience_bonuses(rank).map_or(base, |r| r.adjusted_cost(base))
     }
 
-    /// The land XP-cost rows as `(rank, flat, multiplier)`, i.e. what a campaign rules loader would
-    /// copy into the campaign's cost rules (`+0x24` / `+0x28`, the two columns `0x00ED49A0` reads;
-    /// not wired into `ntw_campaign` yet). In table order, which is rank 0..9; a row whose key is not a rank
-    /// number is left out, since it cannot be looked up as one.
-    pub fn experience_cost_rows(&self) -> Vec<(u8, i32, f32)> {
-        self.unit_stats_land_experience_bonuses
-            .iter()
-            .filter_map(|r| Some((r.rank.parse::<u8>().ok()?, r.unknown_24, r.unknown_28)))
-            .collect()
-    }
-
-    /// The naval XP-cost rows as `(rank, flat, multiplier)`, i.e. what a campaign rules loader
-    /// copies into the campaign's cost rules (`+0x1C` / `+0x20`; `ntw_campaign::rules` loads them).
-    pub fn naval_experience_cost_rows(&self) -> Vec<(u8, i32, f32)> {
-        self.unit_stats_naval_experience_bonuses
-            .iter()
-            .filter_map(|r| Some((r.rank.parse::<u8>().ok()?, r.unknown_1c, r.unknown_20)))
-            .collect()
-    }
 
     /// The `projectiles` row for `key`.
     pub fn projectile(&self, key: &str) -> Option<&Projectile> {
@@ -414,7 +426,13 @@ impl GameDatabase {
     /// its effects and sounds and AI strength; the unit card's Range has its own exe rule
     /// ([`unit_card_range`](Self::unit_card_range)). Allocates nothing (called per volley).
     pub fn primary_projectile(&self, stats: &UnitStatsLand) -> Option<&Projectile> {
-        self.unit_projectile(stats).or_else(|| self.gun_shots(stats).next())
+        self.primary_projectile_row(stats).map(|(_, p)| p)
+    }
+
+    /// [`primary_projectile`](Self::primary_projectile) with its row number in `projectiles`: a
+    /// key for a per-row cache, valid while `projectiles` keeps its [`Table::id`].
+    pub fn primary_projectile_row(&self, stats: &UnitStatsLand) -> Option<(usize, &Projectile)> {
+        stats.projectile.as_deref().and_then(|k| self.projectiles.get_row(k)).or_else(|| self.gun_shots(stats).next())
     }
 
     /// The unit attribute flags from the boolean `unit_stats_land` columns (record offsets and
@@ -553,13 +571,17 @@ impl GameDatabase {
     /// sort; a gun with more is UNKNOWN, ours stays stable). Empty if the unit has no gun type.
     /// From the index built at load (`index_gun_shots`).
     pub fn gun_projectiles(&self, stats: &UnitStatsLand) -> Vec<&Projectile> {
-        self.gun_shots(stats).collect()
+        self.gun_shots(stats).map(|(_, p)| p).collect()
     }
 
-    /// The gun's projectiles in the exe's order, from the load-time index (no table scan).
-    fn gun_shots<'a>(&'a self, stats: &UnitStatsLand) -> impl Iterator<Item = &'a Projectile> + use<'a> {
-        let rows = stats.gun_type.as_deref().and_then(|g| self.gun_shots.get(g)).map_or(&[][..], Vec::as_slice);
-        rows.iter().filter_map(|k| self.projectiles.get(k))
+    /// The gun's projectiles in the exe's order with their row numbers, from the load-time index
+    /// (no table scan): its row numbers while `projectiles` is the table it indexed, else by key.
+    fn gun_shots<'a>(&'a self, stats: &UnitStatsLand) -> impl Iterator<Item = (usize, &'a Projectile)> + use<'a> {
+        let shots = stats.gun_type.as_deref().and_then(|g| self.gun_shots.by_gun.get(g)).map_or(&[][..], Vec::as_slice);
+        let fresh = self.gun_shots.projectiles == self.projectiles.id();
+        shots.iter().filter_map(move |(row, key)| {
+            if fresh { self.projectiles.rows().get(*row).map(|p| (*row, p)) } else { self.projectiles.get_row(key) }
+        })
     }
 
     /// The unit card's `Range` (the card snapshot's +0x5C, built by `0x008DF190`): for a unit
@@ -578,7 +600,7 @@ impl GameDatabase {
     pub fn unit_card_range(&self, stats: &UnitStatsLand) -> u32 {
         // `as u32` reinterprets the exe's unsigned field (two's complement), not a clamp.
         if stats.gun_type.as_deref().is_some_and(|g| !g.is_empty()) {
-            self.gun_shots(stats).map(|p| p.effective_range as u32).max().unwrap_or(0)
+            self.gun_shots(stats).map(|(_, p)| p.effective_range as u32).max().unwrap_or(0)
         } else {
             self.unit_projectile(stats).map_or(0, |p| p.effective_range as u32)
         }
@@ -604,6 +626,7 @@ impl GameDatabase {
                 unit_class: "infantry_line".into(),
                 recruitment_cost: 111,
                 secondary_cost: 111,
+                unknown_3c: 99,
                 upkeep: 11,
                 ..Default::default()
             },
@@ -614,6 +637,7 @@ impl GameDatabase {
                 unit_class: "artillery_foot".into(),
                 recruitment_cost: 222,
                 secondary_cost: 222,
+                unknown_3c: 188,
                 upkeep: 22,
                 ..Default::default()
             },
@@ -787,6 +811,16 @@ mod tests {
         assert_eq!(c.attribute_icon("command_land"), "");
     }
 
+    /// The two negotiation-string tables only give the diplomat's greeting: a mod set without them
+    /// still loads, with empty tables.
+    #[test]
+    fn missing_negotiation_string_tables_are_empty() {
+        use crate::campaign::{NegotiationOverrideStringRecord, NegotiationStringRecord};
+        let vfs = Vfs::new();
+        assert!(load_optional::<NegotiationStringRecord>(&vfs).expect("optional").is_empty());
+        assert!(load_optional::<NegotiationOverrideStringRecord>(&vfs).expect("optional").is_empty());
+    }
+
     #[test]
     fn fixture_lookups_and_foreign_keys() {
         let db = GameDatabase::test_fixture();
@@ -854,11 +888,16 @@ mod tests {
         let keys = |db: &GameDatabase| db.gun_projectiles(&art).iter().map(|p| p.key.clone()).collect::<Vec<_>>();
         let shots = keys(&db);
         assert!(!shots.is_empty(), "the fixture's gun has shots");
-        // Rows moved: each shot is found by its key, not the stale row.
+        let (row, p) = db.primary_projectile_row(&art).unwrap();
+        assert!(std::ptr::eq(&db.projectiles.rows()[row], p), "the row number names the row");
+        // Rows moved: each shot is found by its key, not the stale row (a new table has a new id).
         let mut rows = db.projectiles.rows().to_vec();
         rows.reverse();
         db.projectiles = Table::from_rows(1, rows);
         assert_eq!(keys(&db), shots);
+        let (row, p) = db.primary_projectile_row(&art).unwrap();
+        assert!(std::ptr::eq(&db.projectiles.rows()[row], p), "the moved row's number");
+        assert_eq!(p.key, shots[0]);
         db.projectiles = Table::from_rows(1, Vec::new());
         assert!(db.gun_projectiles(&art).is_empty());
         assert!(db.primary_projectile(&art).is_none());
@@ -880,7 +919,7 @@ mod tests {
     }
 
     /// `0x00ED49A0`: the experience-adjusted **cost** (the unit info panel's "XpAdjustedCost", what
-    /// the campaign auto-build pays) is `flat + ROUND(base * multiplier)` — the base is scaled,
+    /// the battle army setup pays) is `flat + ROUND(base * multiplier)` — the base is scaled,
     /// not added — for both the land (`+0x24`/`+0x28`) and the naval (`+0x1C`/`+0x20`) row. A rank
     /// the table does not have leaves the cost alone (the exe's else branch).
     #[test]
@@ -900,14 +939,15 @@ mod tests {
         assert_eq!(db.experience_fatigue_bonuses(), vec![0, -3]);
     }
 
-    /// The rank boundaries and the row accessors a campaign rules loader copies the tables through:
-    /// rank 0 is a recruit (flat 0, ×1.0 → the base unchanged) and rank 9 the last row, and the two
-    /// tables are read apart (`this+0xA0` in `0x00ED49A0` picks the naval one).
+    /// The rank boundaries: rank 0 is a recruit (flat 0, ×1.0 → the base unchanged) and rank 9 the
+    /// last row, and the two tables are read apart (`this+0xA0` in `0x00ED49A0` picks the naval one).
     #[test]
-    fn experience_cost_rows_and_rank_boundaries() {
+    fn experience_cost_rank_boundaries() {
         let db = GameDatabase::test_fixture();
-        assert_eq!(db.experience_cost_rows(), vec![(0, 0, 1.0), (9, 360, 1.9)]);
-        assert_eq!(db.naval_experience_cost_rows(), vec![(0, 0, 1.0), (9, 255, 1.45)]);
+        let land = |r: u8| db.experience_bonuses(r).map(|b| (b.unknown_24, b.unknown_28));
+        let naval = |r: u8| db.naval_experience_bonuses(r).map(|b| (b.unknown_1c, b.unknown_20));
+        assert_eq!((land(0), land(9)), (Some((0, 1.0)), Some((360, 1.9))));
+        assert_eq!((naval(0), naval(9)), (Some((0, 1.0)), Some((255, 1.45))));
         // The two rank boundaries of the shipped tables: 0 and 9 (ranks "0".."9", CONFIRMED).
         for rank in 0..=9u8 {
             let base = 200;

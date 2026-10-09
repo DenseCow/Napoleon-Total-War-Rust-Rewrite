@@ -10,6 +10,23 @@ Ghidra: `analysis/fidelity/run_ghidra.ps1 <exe|miles> <targets> <out>` with `ghi
 Output goes to a scratch folder, never git.
 
 ## 0. Where I am / what's next
+**2026-10-09 (worker 0c-middleware, BACKLOG §0-C), newest first.**
+- Headphones multiplier: **CONFIRMED and ported** (§1.10, `audio::speakers`): the `sound_provider` preference picks the
+  Miles setup; headphones (directly, or "Windows default" on a DirectSound headphones configuration) takes
+  `SS_HEADPHONES_VOLUME_MULTIPLIER`. The PROVISIONAL tag is gone; one INFERRED left: which setups other than Windows default open (§1.10).
+- Movie skip rule: the trigger is **CONFIRMED and ported** (BINK.md §8.3 "Skip"): Escape *released* skips the playing
+  intro-queue movie; mouse buttons and other keys do nothing. One INFERRED bit left: the movie controller's own
+  can-stop flag (`+0x58`) is not decoded (an in-game check settles it: press Escape during the SEGA logo).
+- **Bank query: round 11's "CLOSED NEGATIVELY" is REFUTED as evidence** (§3 top). Its premise was "0 callers and 0 code
+  references => never called", but the bank entry reader `0x00E28DF0` has exactly that profile (0 callers, one DATA ref
+  = its vtable slot) and still runs for every entry at load: `0x00E256D0` calls it through `[vtable + 8]`, which leaves
+  no reference. So "no reference" proves nothing for any vtable slot, the weight `0x00CB0280` included. The query is
+  UNKNOWN again; our matcher stays PROVISIONAL. Leads in §3 "Bank query, round 14".
+- **Cue dispatch: round 9's proof (c) is unsound for the same reason** (§3 "CUE DISPATCH"): the three play paths it
+  censused are reached through the sound manager's vtable (`0x013EE610`: `0x01005840`, `0x01004F80`, `0x01004E50` are
+  slots), so "6 callers, all inside the manager" says nothing about who calls them. Parts (a) and (b) (offset scans)
+  stand. The `cue + 187` mapping stays INFERRED; `cue_slot` is still unused by the engine.
+
 **RESUMED 2026-10-04.** Workspace build / test / clippy pass (no new warnings). Game runs: main menu (front-end music
 starts), battle `--battle --skip-deployment --ai off` (volleys at 342..533 m, "close" and "medium" audio distances, start 6/6
 voices each; nothing closer than 342 m happened in the 9-minute run with `NAPOLEON_BATTLE_ZOOM=40`; no panics). Both
@@ -33,9 +50,11 @@ no velocities, so the factor is 1).
   leads). The animation-object maker `0x010CB060` takes the cue list as its 7th argument CONFIRMED at the `0x00F85780`
   call site; the global battle-side cue list (`0x01650414`) has no consumer reads (the loader writes, `0x00F76E30`
   teardown frees). No code change (nothing new CONFIRMED).
-- NEXT: ~~the bank query function~~ **CLOSED NEGATIVELY in round 11 - nothing in 1.3 dispatches one (§3 top)**;
-  the cue dispatch to CONFIRM the cue mapping (the dispatch itself is closed exe-side dead, round 9); OnMove / OnShortcut
-  sounds once our UI runtime has sliders and shortcut targets.
+- NEXT (updated 2026-10-09): the bank query function is open again (round 11's negative closure is refuted; leads in
+  §3 "Bank query, round 14": the game-context struct, or a debugger read watchpoint on `db + 0x74` at the main menu);
+  whether anything reads an animation cue at all (round 9's proof (c) is refuted, §3 "Correction" before "CUE
+  DISPATCH"; lead: a watchpoint on a loaded cue container during a battle, a user debugger sitting); OnMove /
+  OnShortcut sounds once our UI runtime has sliders and shortcut targets.
 - 2026-10-04 round 7 (sandbox): the "vtable slot 7" premise is REFUTED - `0x01469494` / `0x0145D504` are global
   `UIFileIn` objects, not vtables (details and the new next leads in §3). Cue container / anim object / walk anim set
   layouts are now CONFIRMED (0x1C container, 0xA4 anim object with the list at +0xA0, 0x34-byte walk anim set of 10).
@@ -74,7 +93,8 @@ no velocities, so the factor is 1).
   **+0x218** (`0x0061CDCC`); the per-frame chain is `0x0066CE00` (per-frame entity update, vtable-only) ->
   `0x006618D0` (bearing -> slot 53..58) / `0x006613A0` (best-direction slot pick, max dot product) ->
   **`0x00E5F760`** (43 callers; `fragment = slot % count`, the count at descriptor `+0x14`) -> `0x006666E0`
-  (26 callers; play, blend 1.0f at +0x448) -> `0x007F1730` (queue lookup, 9 callers). **`0x00817BB0` picks the
+  (26 callers; play; the 1.0f it stores at +0x448 is the root-motion scale read by `0x0066EEB0`, not a blend:
+  UNITS_TERRAIN_FIDELITY §1.9) -> `0x007F1730` (queue lookup, 9 callers). **`0x00817BB0` picks the
   transition clip by weighted random** over `from*0x49 + to` (73 states). **Two earlier INFERRED readings are
   REFUTED/CONFIRMED: the five fragments are ALTERNATIVES chosen by modulo, not a priority list** (our
   "later fragment replaces the slot" is wrong), **and the descriptor `+0x14` is the per-slot "has a clip"
@@ -86,7 +106,7 @@ no velocities, so the factor is 1).
   `battle_animation.rs` (sentinels 10/11, `special` 0x8000, the 0x360 tag, `blend_in_time` = 1.0, `strcmp` case
   sensitivity, `SLOT_NAMES[i]` index spot-check); `cargo test -p ntw_formats --lib` **152 passed** (was 146).
   No behaviour change - the selection rule is CONFIRMED but needs the clip queue and state machine to be usable.
-- 2026-10-04 round 9 (sandbox): **the cue thread is CLOSED - do not re-open it.** The `+0xA0` read scan plus a
+- 2026-10-04 round 9 (sandbox): **the cue thread was declared CLOSED** (proof (c) refuted 2026-10-09, see §3). The `+0xA0` read scan plus a
   complete `getCallingFunctions` census of the three sound play paths proves there is **no exe-side path from any
   frame to a sound start** outside the sound manager (6 call sites, all `0x0100xxxx`), so the `.anim_sound_event`
   cue lists are parsed, cached and never read; cues are data-side only (§3 "CUE DISPATCH: CLOSED"). Round 8's
@@ -255,6 +275,36 @@ channel = `clamp01(w / √3) × distance_gain`. Source at the listener (d < 0.00
 Doppler: `pitch × 0.355 / (0.355 + v_radial × doppler × distance_factor)` clamped to [0.25, 4]; the game only sets
 velocities through its velocity hook (default zero).
 
+### 1.10 Speaker setup and the speakers / headphones multiplier (CONFIRMED 2026-10-09, worker 0c-middleware)
+- **The list.** `0x01003EA0` (called from the manager's init `0x01004AF0`) tries twelve Miles channel setups in this
+  order and keeps those whose `AIL_open_digital_driver` succeeds (name + setup, 16-byte entries at manager `+0xC058`,
+  count `+0xC054`; a per-setup "opened" byte at `+0xC068`): Windows default `0x10`, Stereo speakers `0x02`, Mono `0x01`,
+  Stereo headphones `0x20`, Dolby Surround `0x30`, SRS Circle Surround `0x40`, 4.0 `0x50`, 5.1 `0x60`, 6.1 `0x70`,
+  7.1 `0x80`, 8.1 `0x90`, DirectSound 3D hardware `0xA0`. The UI gets this list through the Lua binding
+  `EnumerateSoundProviders` (`0x00DA1270`; localisation keys `audio_provider_*`).
+- **Start-up.** `0x01003A70` opens the first entry that opens (normally Windows default). Then the preferences apply
+  `0x004837D0` passes the int preference `sound_provider` (id `0x2A`, registered at `0x00405140` with default 0) to
+  manager slot `+0xE8` = `0x01006600`, which reopens the driver with entry `index` when `0 <= index < count` and it is
+  not the current one, and ignores anything else. The Lua `SetAudioOptions` (`0x00DA1740`) does the same switch;
+  `CurrentOptions` (`0x00D9FBB0`) reports the current index (manager slot `+0xE4` = `0x010038F0`).
+- **The multiplier.** `0x01004390` (after every driver open in `0x01003AD0`, and from property 10 / 11 of `0x01005E40`)
+  reads the open setup with `AIL_speaker_configuration` (5th out = driver `+0x18`, Miles `0x211151B0`) and stores
+  `SS_HEADPHONES_VOLUME_MULTIPLIER` (manager `+0xC180`) into the live multiplier `+0xC184` when it is `0x20`, else
+  `SS_SPEAKERS_VOLUME_MULTIPLIER` (`+0xC17C`). (It also sets a surround flag `+0xC06C` for `0x40..0x90`; we do not mix
+  surround.)
+- **Windows default.** Miles' driver open (`0x21135DC0`) resolves `0x10` before anything else through `0x211328F0`:
+  `DirectSoundCreate(NULL)`, `IDirectSound::GetSpeakerConfig`, then on the low byte: 0 DIRECTOUT -> stereo, **1
+  HEADPHONE -> `0x20`**, 2 MONO -> mono, 3 QUAD -> `0x50`, 4 STEREO -> stereo, 5 SURROUND -> `0x40` / `0x30` / stereo
+  (by two provider-name checks not decoded; none is headphones), 6 -> `0x60`, 7 -> `0x80`, 8+ -> stereo. The resolved
+  setup replaces `0x10` and is what driver `+0x18` holds. When DirectSound or the query fails, the open fails and
+  "Windows default" is not in the list (indices shift down by one).
+- **Movies** are not affected: Bink plays through its own driver at `group(4) × 0.01 × group(5)` (`0x004831D0`).
+- Ours: `crates/napoleon/src/audio/speakers.rs` (`opened_is_headphones`, the DirectSound query once per run) and
+  `MixSettings::speaker_mult`. INFERRED there: setups other than Windows default are taken to open. Which ones Miles
+  opens on a machine is not traced, and it can change the answer: a failed setup shrinks the list, so a saved index
+  can fall out of range, where the exe keeps index 0 (e.g. Windows default on a headphones configuration) while we
+  pick the setup at that index.
+
 ## 2. UI sounds (CONFIRMED, handler `0x0047F0C0`, event types = the UI `EVENT_NAMES` order)
 | UI event | sound |
 |---|---|
@@ -273,7 +323,24 @@ shipped data has for them: `slider_moved_handle`, `right_click_item1..20`, `mous
 1602 (`single_player`) and 1694 (`grand_campaign`).
 
 ## 3. Sound bank selection
-- **CLOSED NEGATIVELY in round 11: in Napoleon.exe 1.3 nothing dispatches a bank query at all.** The
+- **Bank query, round 14 (2026-10-09, worker 0c-middleware): the round-11 verdict below is REFUTED as evidence; the
+  query is UNKNOWN again.** The verdict rests on "0 callers + only a vtable DATA reference => never called". The
+  entry reader `0x00E28DF0` it lists has exactly that profile, yet it runs once per entry when the database loads:
+  `0x00E256D0` (the per-bank entry loop, called from the bank factory `0x00E15D20`) reads the entry count and calls
+  `[vtable + 8]` of the bank for each, a virtual call that leaves no reference in Ghidra. So the census cannot tell a
+  dead slot from a live one, and the weight `0x00CB0280`, the condition and entry slots may be called the same way.
+  Also corrected: the vtable round 11 dumped as "the bank vtable" `0x013A993C` is the **type-0** bank's; type 1
+  (projectile fire) is `0x013A98C8` and type 2 `0x013A9900` (`0x00E15D20` cases). Where the banks live at run time:
+  the database (`0x00DF3640`, 800 bytes, vtable `0x013A9E54` with only a destructor) keeps bank `t` at `+0x28 + 4t`; a
+  4-byte holder made by `0x00DF3600` points at it; the holder is kept at `+0x1BC` of the object `[0x0149BA94]`
+  (`0x00481020` / `0x00480FB0`) and copied into the game-context struct that `0x00485B90` builds for the battle /
+  campaign (holder at context `+0x14`, beside the sound manager `[0x0149BA7C]` at `+0x08`). No `[reg + idx*4 + 0x28]`
+  bank lookup exists in the sound module, so banks are read at constant offsets. **Next leads:** (1) follow that
+  context struct into the battle / campaign objects and look for `holder -> db -> [db + 0x2C]` (projectile fire) or
+  `[db + 0x74]` (music states, bank 19); (2) dynamic, no player input needed: at the main menu the front-end music is
+  chosen from bank 19, so a debugger read watchpoint on `db + 0x74` (db = the return of `0x00DF3640`) while the menu
+  loads lands in the query. Our weighted matcher stays PROVISIONAL.
+- **(Refuted as evidence, see round 14 above.) CLOSED NEGATIVELY in round 11: in Napoleon.exe 1.3 nothing dispatches a bank query at all.** The
   weight accessor `0x00CB0280` has **0 callers and 0 code references** (13 refs, all DATA, all vtables);
   the entry reader `0x00E28DF0` has **exactly one reference**, its own vtable slot. A complete
   `getCallingFunctions` + `xref:` census of *all* the slots of the condition vtable `0x013A91F8`
@@ -499,7 +566,15 @@ shipped data has for them: `slider_moved_handle`, `right_click_item1..20`, `mous
     battle dispatcher from the battle HUD/interface code or from `0x00F7xxxx` entry points, not from the app main
     loop; (3) a data-side check on the shipped `.anim_sound_event` files (are the cue lists non-empty?) to decide
     whether to keep hunting or mark the feature dormant.
-- **CUE DISPATCH: CLOSED, EXE-SIDE DEAD (2026-10-04 round 9, sandbox worker copy). Do not re-open this thread.**
+- **Correction (2026-10-09, worker 0c-middleware): proof (c) below does not hold.** The three play paths it censuses
+  are entry points of the sound manager's vtable `0x013EE610` (`0x01005840` slot 8, `0x01004F80` slot 23,
+  `0x01004E50` slot 26; the game calls the manager through `[0x0149BA7C]`'s vtable, e.g. `0x004837D0`), so
+  `getCallingFunctions` cannot see the game's calls to them and "6 call sites, all inside the manager" proves nothing.
+  The verdict now rests on (a) and (b) only (no reader of the anim object's `+0xA0`, the sound-side `+0xD0` / `+0x100`
+  cache never looked up), which are offset scans with the usual limits. The `cue + 187` mapping stays INFERRED; the
+  question is still whether anything reads a cue at all. Next lead: a debugger read watchpoint on the entries of one
+  loaded cue container during a battle (needs player input: a user debugger sitting).
+- **CUE DISPATCH: declared CLOSED, EXE-SIDE DEAD (2026-10-04 round 9, sandbox worker copy; proof (c) refuted, see the correction above).**
   The answer is not "not found yet", it is *there is no such code path*, and it is now proved three ways.
   - **(a) The `+0xA0` READ scan (what round 8 asked for).** Over `0x010C0000..0x01220000` there are 216
     register-indirect `[reg + 0xa0]` sites; none of them is this class. The only store to *this* class's `+0xA0`

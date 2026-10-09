@@ -24,6 +24,11 @@ mlua = { version = "0.12", features = ["lua51", "vendored"] }
 # Audio sources for Bevy (same version Bevy uses; we implement our own rodio::Source).
 rodio = { version = "0.22", default-features = false }
 
+[target.'cfg(windows)'.dependencies]
+# DirectSound's speaker configuration, which the original's "Windows default" sound setup reads
+# (audio::speakers). Same version Bevy's audio backend already uses.
+windows = { version = "0.62", features = ["Win32_Media_Audio_DirectSound"] }
+
 [dev-dependencies]
 # The in-memory sound test files for the audio tests.
 ntw_formats = { path = "../ntw_formats", features = ["test-files"] }

@@ -182,7 +182,9 @@ fn province_management_with_db_values() {
     assert!(!units.is_empty());
     assert!(m.recruitment_points(paris, false) > 0);
     let unit = units.iter().find(|u| !m.rules.units[*u].is_naval).unwrap().clone();
-    let cost = m.rules.units[&unit].cost;
+    // The region's entry cost: `units` #7 with the region's cost effects (`0x00B0D220`).
+    let cost = ntw_sim::campaign::economy::recruitment_cost(&m, &m.world.regions[&paris], &unit, &m.rules.units[&unit]);
+    assert!(cost > 0 && cost != m.rules.units[&unit].cost);
     let t0 = m.world.factions[&france].treasury;
     m.apply(CampaignCommand::Recruit { region: paris, unit_key: unit.clone() }).unwrap();
     assert_eq!(m.world.factions[&france].treasury, t0 - cost);

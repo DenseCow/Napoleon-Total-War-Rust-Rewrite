@@ -456,6 +456,41 @@ db_record! {
 }
 
 db_record! {
+    /// `diplomacy_negotiation_strings` (`ssss`, 1387 rows, CONFIRMED layout from the vanilla file): the
+    /// diplomat's line for a negotiation event said by a faction of a culture and government type. The
+    /// campaign negotiation (`0x00BF5A60`) looks a row up by (event, culture, government); the string
+    /// is a `diplomacy_strings` key (loc `diplomacy_strings_string_<key>`). UI_FIDELITY.md 4.7.
+    pub struct NegotiationStringRecord in "diplomacy_negotiation_strings", key = event {
+        /// #0 H: the event, e.g. `receive_hostile`.
+        event: String,
+        /// #1 H: the speaker's culture (`european`, `middle_east`, ...).
+        culture: String,
+        /// #2 H: the speaker's government type key (`gov_empire`, ...).
+        government: String,
+        /// #3: the `diplomacy_strings` key.
+        string: String,
+    }
+}
+
+db_record! {
+    /// `diplomacy_negotiation_faction_override_strings` (`sssss`, 537 rows, CONFIRMED layout): a
+    /// faction's own line for (event, culture, government); `ResolveDiplomacyNegotiationString`
+    /// (`0x00C55CC0`) picks it over the generic row on a campaign-RNG draw below 0.5.
+    pub struct NegotiationOverrideStringRecord in "diplomacy_negotiation_faction_override_strings", key = event {
+        /// #0 H: the event.
+        event: String,
+        /// #1 H: the culture.
+        culture: String,
+        /// #2 H: the government type key.
+        government: String,
+        /// #3 H: the faction key.
+        faction: String,
+        /// #4: the `diplomacy_strings` key.
+        string: String,
+    }
+}
+
+db_record! {
     /// `diplomatic_relations_attitudes` (`si`, 5 rows): the attitude thresholds (hostile -85, unfriendly -45,
     /// neutral 0, friendly 45, very_friendly 85). The attitude category `0x00B0DBA0` puts its boundaries
     /// half-way between neighbouring rows (CONFIRMED).
@@ -756,6 +791,10 @@ pub struct CampaignTables {
     pub government_relations: Table<GovernmentRelationRecord>,
     /// `diplomatic_relations_attitudes`.
     pub attitude_thresholds: Table<AttitudeThresholdRecord>,
+    /// `diplomacy_negotiation_strings`.
+    pub negotiation_strings: Table<NegotiationStringRecord>,
+    /// `diplomacy_negotiation_faction_override_strings`.
+    pub negotiation_override_strings: Table<NegotiationOverrideStringRecord>,
     /// `unit_stats_naval`.
     pub naval_stats: Table<NavalStatsRecord>,
     /// `building_chains`.

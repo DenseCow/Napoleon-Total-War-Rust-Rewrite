@@ -17,7 +17,7 @@ PROVISIONAL.
   movies with sound decode, every packet used exactly, sample counts exact; tables byte-identical to `binkw32.dll`);
   Bevy player with GPU colour conversion, sound through our audio system with the movie volumes, skip, `--intro`,
   `--frontend-movie`, `PlayMovie` hook; track-per-language, intro list and front-end movie read from Napoleon.exe (§8).
-  Open: §7 (skip rule, volume group 4, intro order, sample-exact audio, ±1 colour on the GPU path).
+  Open: §7 (the skip rule's can-stop flag `+0x58`, volume group 4, sample-exact audio, ±1 colour on the GPU path).
 - 2026-10-03 (latest): video side complete. Install test: 73/73 movies, 71,518 frames, every plane boundary exact; golden
   frame hashes; colour conversion now follows the game's own movie shader (§6, `Frame::to_rgba` / `YuvToRgb`; a
   player should do the same maths in a shader from three R8 textures: `Frame::{y,u,v}`, sizes `y_size`/`c_size`,
@@ -210,9 +210,10 @@ checked).
 ## 7. Open questions
 - INFERRED: the initial frame-buffer contents (zero) and the quad half-pixel alignment (§6).
 - Not supported: alpha planes and revisions before `'h'` (none shipped).
-- UNKNOWN: the skip rule (which keys/clicks skip which movies). PROVISIONAL in the player: any key or mouse button skips
-  a skippable full-screen movie. (`DismissMovieEvent` at `0x00A281C0` is a scripted UI event, not the intro skip.)
-  Leads (0-C, 2026-10-04): while a full-screen movie object exists, the front-end UI's three mouse-button handlers (UI
+- Skip rule: **trigger CONFIRMED 2026-10-09** (§8.3 "Skip"): Escape released skips the playing intro-queue movie.
+  Still INFERRED: that the intro movies accept the stop (the controller's can-stop flag `+0x58`, not decoded).
+  (`DismissMovieEvent` at `0x00A281C0` is a scripted UI event, not the intro skip.)
+  Earlier leads (0-C, 2026-10-04), kept for the record: while a full-screen movie object exists, the front-end UI's three mouse-button handlers (UI
   vtable `0x01312C2C` slots 20..22, `0x00DB20C0` / `0x00DB2100` / `0x00DB2140`) ask `0x00D9FB40` and swallow the click when it
   says no; the movie stop itself is `0x00D9FB70` (the movie's +0x28 "can stop" then +0x14 "stop"). The key path that ends
   an intro movie was not found (no `0x1B` Escape compare in the movie code). Front-end Lua: `root.luac` steals ESCAPE for
@@ -262,9 +263,24 @@ precision; not yet resolved.
 - **Full-screen size (CONFIRMED, `0x0048B5B0`):** a type-1 (wide) movie on a screen narrower than 1.4:1 is shown at
   (width, width × 0.5625), centred; a type-0 movie on a screen wider than 1.4:1 at (height × 4/3, height); otherwise it fills
   the screen (stretched). Ours: `video::fullscreen_size` (the type taken from the movie's own shape: INFERRED).
+- **Skip (CONFIRMED trigger, 0c-middleware 2026-10-09).** The window procedure (`0x0048CCF0`) queues key events only
+  for `WM_KEYDOWN` / `WM_KEYUP` (`0x0048CE2B`; `WM_SYSKEY*` are not in the range) and only when the top input handler's
+  message filter (`0x0047B9E0` -> handler slot `+0x2C`) did not take the message: it appends `{state, key}` to the
+  front end's list at `+0x90/+0x94` (`0x0047CAF0`), state from `0x00E201E0` (down 1, up 0) and key from `0x00E1B960`
+  (the scan code with its extended bit, minus 1, except a remap table for extended keys: Escape, scan code 1, is
+  key 0). While the intro queue runs (front end `+0x1B0` set), the per-frame update `0x0048A650` calls the queue player
+  `0x0048B5B0` and then, for every queued key event equal to `{0, 0}` (**Escape released**), calls the movie stop
+  `0x00D9FB70`; it then clears the key list, the character list `+0xA0` and the mouse list `+0xB0` without reading
+  them, so mouse buttons and other keys do nothing. The stop asks the movie controller (vtable `0x01429D90`) slot
+  `+0x28` (`0x006CA380`, returns its byte `+0x58`) and, if set, calls slot `+0x14` (`0x01244890`: closes the Bink
+  handle and marks it finished, `+0xF9`); the queue player sees the finished flag (slot `+0x24`, `0x00CF1100`) on the
+  next frame and starts the next queued movie. `+0x58` is copied from a play parameter by the opener (`0x01215D6B`);
+  which queue parameter feeds it is not decoded (INFERRED that the intro movies set it). Outside the queue the original
+  stops movies only from scripts: Lua `StopAllMovies` (`0x00478F30` -> `0x00488F90`) and `StopMovieInComponent`
+  (`0x009F7D70`). Ours: `video::skips_queued_movie`, `MovieMode::Fullscreen { queued }`.
 - **Defaults (2026-10-04):** the intro and the front-end movie are now on by default (`--no-intro`,
   `--no-frontend-movie` turn them off); harness runs (`--screenshot`, `--ui-click`, `--battle*`, `--campaign`, ...) skip
-  both unless `--intro` / `--frontend-movie` are given. The skip rule stays PROVISIONAL (§7).
+  both unless `--intro` / `--frontend-movie` are given. Skip rule: "Skip" above.
 - Front end (`0x004858D0`): finds component `movie_bg` and plays `Frontend2.bik` there (`0x004831D0(name, 0, 1, 0)`).
   `movie_bg` is 1920x960 under the 1920x1200 `background` (`fe_background_2.tga` still); we stretch the 1280x720 movie
   over `movie_bg`'s rectangle (PROVISIONAL scaling).

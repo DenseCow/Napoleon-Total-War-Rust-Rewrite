@@ -189,6 +189,10 @@ fn main() {
             turns_detail(l.model.clone(), n);
             continue;
         }
+        if std::env::var("ECON_RECRUITCOST").is_ok() {
+            recruit_cost_detail(m, &db);
+            continue;
+        }
         if let Ok(next) = std::env::var("ECON_DIPLO") {
             // Attitude factors: the next file's values against this file's after k drift steps (k = turns between).
             let n = ntw_campaign::read_file(&next, &db).expect("load next");
@@ -1532,7 +1536,7 @@ pub fn split_check(m: &ntw_sim::campaign::CampaignModel) {
             }
             for (i, p) in paths.iter().enumerate() {
                 n += 1;
-                let model = m.trade_path_volumes(split.as_ref(), *b, i, p);
+                let model = m.trade_path_volumes(split.as_ref(), *b, p);
                 if model == p.volumes {
                     ok += 1;
                 } else {
@@ -1642,4 +1646,27 @@ pub fn tech_rate(m: &ntw_sim::campaign::CampaignModel) {
             );
         }
     }
+}
+
+/// `ECON_RECRUITCOST=1`: every queued recruitment item of the file, the cost the original stored in it
+/// (`RECRUITMENT_ITEM` #4, the item's `+0x20` = the recruitable entry's cost, `0x00AF3F80`) next to
+/// the model's [`economy::recruitment_cost`], the plain `units` #4 / #7 columns, the region's and the
+/// faction's `recruitment_mod_cost_*` sums and the turns left / the unit's turns.
+#[allow(dead_code)]
+pub fn recruit_cost_detail(m: &ntw_sim::campaign::CampaignModel, db: &GameDatabase) {
+    let (mut items, mut exact) = (0, 0);
+    for r in m.world.regions.values() {
+        let owner = m.world.factions.get(&r.owner).map_or("?", |f| f.key.as_str());
+        for it in &r.recruitment_queue {
+            let Some(u) = db.units.iter().find(|u| u.key == it.unit_key) else { continue };
+            let set = economy::region_effect_set(m, r);
+            let model = m.rules.units.get(&it.unit_key).map(|ur| economy::recruitment_cost_in(&m.rules, &set, &it.unit_key, ur));
+            items += 1;
+            exact += usize::from(model == Some(it.cost));
+            let fset = ntw_sim::campaign::effects::Effects::faction_sum(m, r.owner);
+            let key = if u.category.starts_with("naval") { "recruitment_mod_cost_naval_all" } else { "recruitment_mod_cost_land_all" };
+            println!("  {} {owner} {}: saved {} model {model:?} | #4 {} #7 {} | mod region {} faction {} | turns {}/{}", r.key, it.unit_key, it.cost, u.recruitment_cost, u.unknown_3c, set.get(key), fset.get(key), it.turns_remaining, u.unknown_38);
+        }
+    }
+    println!("  RECRUITCOST {exact}/{items} exact");
 }

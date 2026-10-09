@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use ntw_data::GameDatabase;
-use ntw_sim::campaign::{BuildingRules, CampaignRules, UnitAutoresolve, UnitRules, XpCostRow, XpCostTables};
+use ntw_sim::campaign::{BuildingRules, CampaignRules, UnitAutoresolve, UnitRules};
 use ntw_sim::campaign::rules::TechRules;
 
 /// Copies every table the campaign rules use, with `campaign`'s per-campaign variable overrides
@@ -33,21 +33,14 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
                 autoresolve: unit_autoresolve(db, &u.key),
                 category: u.category.clone(),
                 unit_class: u.unit_class.clone(),
-                value_7: u.unknown_3c,
+                campaign_cost: u.unknown_3c,
                 flag_21: u.unknown_9c,
                 militia: stats.is_some_and(|s| s.unknown_205),
                 campaign_stealth: stats.is_some_and(|s| s.unknown_204),
+                unit_cap: u.unit_cap,
             },
         );
     }
-    // The experience-adjusted cost tables `0x00ED49A0` reads (`unit_stats_land_experience_bonuses`
-    // `+0x24` / `+0x28` and its naval twin `+0x1C` / `+0x20`), keyed by the chevron count. Until
-    // this copy, `CampaignRules::xp_cost` is empty and every unit costs its plain `units` cost;
-    // with it, a rank-9 recruit costs `flat + ROUND(cost × mult)` (see `economy::recruit_cost`).
-    r.xp_cost = XpCostTables {
-        land: db.experience_cost_rows().into_iter().map(|(rank, flat, mult)| (rank, XpCostRow { flat, mult })).collect(),
-        naval: db.naval_experience_cost_rows().into_iter().map(|(rank, flat, mult)| (rank, XpCostRow { flat, mult })).collect(),
-    };
     r.hiding_ground = c.ground_types.iter().filter(|g| g.hides).map(|g| g.key.clone()).collect();
     r.general_units = c.agent_cultures.iter().filter(|a| a.agent == "General").filter_map(|a| Some((a.culture.clone(), a.unit.clone()?))).collect();
     r.historical = c
@@ -123,6 +116,12 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
     }
     for t in c.attitude_thresholds.iter() {
         r.attitude_thresholds.insert(t.key.clone(), t.value);
+    }
+    for s in c.negotiation_strings.iter() {
+        r.negotiation_strings.insert((s.event.clone(), s.culture.clone(), s.government.clone()), s.string.clone());
+    }
+    for s in c.negotiation_override_strings.iter() {
+        r.negotiation_overrides.insert((s.event.clone(), s.culture.clone(), s.government.clone(), s.faction.clone()), s.string.clone());
     }
     for f in db.factions.iter() {
         r.faction_subcultures.insert(f.key.clone(), f.subculture.clone());

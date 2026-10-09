@@ -77,6 +77,45 @@ Engine functions given to the scripts (names CONFIRMED in the scripts / binding 
 INFERRED); `LocalisationString`; `PostBattleInfo` (see §4); `UICardManager` (Lua class: AddCard, RemoveCard, Selected,
 ManageSelection, SelectCardList, DeselectAll, PositionCards, ...); `MPAvatar` (no Steam: no-op);
 `Component.LockPriority` returns the previous lock (PanelManager logs "Was: ..").
+`WindowsTime` (`0x005D4BF0`, registered at `0x0040C320` with "Returns the current time in seconds", CONFIRMED): `timeGetTime()`
+(winmm import `0x013073EC`, ms since Windows started) widened unsigned to double, rounded to float, times `0.001f`
+(`0x01318030`), pushed as that float (`0x010565A0`): fractional seconds since Windows started at float precision. The
+campaign's `CampaignUI.WindowsTime` (`0x009FB0B0`) is the same clock and arithmetic but truncates to whole seconds
+(`CVTTSS2SI`) before pushing. Ours: both from `host::time_get_time_ms` (winmm `timeGetTime`); before 2026-10-09 the
+battle one returned `os.clock()` (process CPU time). Battle `Time`: no "Time" string in the exe is referenced (nor the
+"Time" tails of `WindowsTime` / `ElapsedBattleTime`), so INFERRED not a battle binding (ours is an extra;
+registrations not all enumerated), and `ElapsedBattleTime` (`0x005D07D0`) reads a float through the battle UI
+manager (`0x014A418C`, `0x005CB810`: `[[[+0xF8]+8]+0xB0]+0x24`), not traced further.
+
+**The battle HUD scripts' frame (static trace 2026-10-09; INFERRED, a debugger sitting settles it).** The campaign
+HUD's scripts see the root at its layout size, 1280x960, at 1920x1080 (debugger sitting 2026-10-07,
+`analysis/campaign/CAMPAIGN_UI.md` "Panel placement"). Static evidence that the battle HUD is the same:
+- One root loader for every UI manager, CONFIRMED: the generic manager ctor `0x00DAFCD0` (callers: front end
+  `0x004581B0`, battle `0x00596B00`, campaign `0x0098C2F0`) calls `LoadUIManagerRootLayout` `0x00DB21E0`
+  ("data/UI/<folder>/<layout>", root built by `0x00DA6860` → the component reader `0x0101E270`, stored at the
+  sub-object's `+0xAC`). The battle HUD's mode reload `LoadBattleHudLayoutForMode` `0x0060BAC0` ("Battle UI" /
+  `layout` or `minimised_HUD`) goes `0x00DB2880` → `0x00DB2900` → the same `0x00DB21E0`. Battle and campaign pass the
+  same trailing ctor arguments (1, 8; font / `ui.xml` set-up via `0x01023840` → `0x0102AF00`, not geometry); the front
+  end passes (0, 0xC). Neither `0x00DB21E0` nor the battle ctor `0x00596B00` nor `0x0060BAC0` resizes the root at
+  their own level (their callees are not all read).
+- The layout-to-screen mapping is device-wide, CONFIRMED: position `0x011881C0` / size `0x011617C0` (device vtable
+  +0x274 / +0x278) apply `ComputeUIScaleForScreen` `0x0114EB20` (min(1, W/1280, H/960)) and the component's anchor
+  share of the screen to every DrawMode-0 draw; the only switch, device `+0x69C70` ("no UI scaling"), is written
+  once, in the device ctor `0x01132530`. No per-HUD frame exists at the draw level, so the battle HUD is drawn
+  through the same anchor mapping (and the same UI scale under 1280x960) as the campaign HUD.
+- `UIComponent:Dimensions` (`0x01014B70`) returns the current state's own size (`[[comp+0xAC]+0x24]`, `+0x28`): no
+  screen term. The battle root is `[[g_pBattleUIManager 0x014A418C]+0xE0]` (manager `+0x18` = the generic part,
+  `+0x34` = its root holder, root at holder `+0xAC`; `0x00596BDD` stores the manager in the global).
+So INFERRED: the battle HUD scripts work in the root's 1280x960 frame too. Ours still gives the battle HUD screen
+geometry (`UiFrame::Panels`, PROVISIONAL) and draws it at scale 1 in the window; with the battle window at 1280x960
+the two agree, they differ on any other window size. Not changed until the sitting below reads it.
+Debugger sitting (needs the user to start a battle): launch the original under Ghidra's debugger (CLAUDE.md
+"ghidra-mcp", `cwd` = the install), at a screen that is not 1280x960 (1920x1080); start a custom land battle; in
+deployment, break in and read, translating each static address with `debugger_static_to_dynamic`: M = dword at
+`0x014A418C`; R = dword at M+0xE0 (check dword at R = the root class vtable `0x01393B6C`); S = dword at R+0xAC;
+floats at S+0x24 and S+0x28. 1280 / 960 = the scripts' frame (switch the battle host to `UiFrame::ScriptFrame`
+and the UI scale like the campaign HUD); 1920 / 1080 = screen geometry (keep `Panels`, tag CONFIRMED). No
+breakpoint needed; resume afterwards.
 
 Cards: the engine calls review_DY.lua `CreateCards(list, state)` with `{CardID="card_<unit id>", Portrait}` per player
 unit (Portrait = `data/ui/units/icons/<faction unit_icon_path>_<key>_icon`, the script adds `.tga`; CONFIRMED file

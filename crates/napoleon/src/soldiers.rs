@@ -105,8 +105,18 @@ pub struct KitLevel {
     pub speed: f32,
     /// The man's (rider's) alternatives.
     pub man: Vec<Arc<Anim>>,
+    /// Each of `man`'s fragment lines' blend-in time (s, `FragmentClip::blend_in`; same length
+    /// and order as `man`): how long a change into that clip cross-fades (`view::ClipBlend`).
+    pub blend_in: Vec<f32>,
     /// The mount's alternatives (empty on foot).
     pub mount: Vec<Arc<Anim>>,
+}
+
+impl KitLevel {
+    /// The blend-in time of the alternative a man with selection number `sel` plays.
+    pub fn blend_in_of(&self, sel: u32) -> f32 {
+        self.blend_in[ntw_formats::unit_animation::alternative(sel, self.man.len())]
+    }
 }
 
 /// A whole figure: the man, his mount if he rides, and his clips per gait, all chosen
@@ -233,7 +243,10 @@ impl SoldierLibrary {
                     })
                 }
             };
-            let man: Vec<_> = resolved.iter().filter_map(|c| load(self, &c.clip.filename)).collect();
+            let (man, blend_in): (Vec<_>, Vec<_>) = resolved
+                .iter()
+                .filter_map(|c| load(self, &c.clip.filename).map(|a| (a, c.clip.blend_in())))
+                .unzip();
             let mut mount = Vec::new();
             if let (Some(m), Some(ms)) = (&plan.mount, unit_animation::rider_mount_slot(&slot)) {
                 for c in tables.resolve(&m.animation_table, &ms) {
@@ -243,7 +256,7 @@ impl SoldierLibrary {
                 }
             }
             if !man.is_empty() {
-                out.insert(slot, KitLevel { speed, man, mount });
+                out.insert(slot, KitLevel { speed, man, blend_in, mount });
             }
         }
         out
@@ -291,12 +304,13 @@ impl SoldierLibrary {
             let found = gait_levels(&tables, &plan, gait, &mut speed_of);
             let mut kit_levels = Vec::new();
             for level in found {
-                let man: Vec<_> = level.man.iter().filter_map(|c| self.clip(&c.path)).collect();
+                let (man, blend_in): (Vec<_>, Vec<_>) =
+                    level.man.iter().filter_map(|c| self.clip(&c.path).map(|a| (a, c.blend_in_time))).unzip();
                 let mount: Vec<_> = level.mount.iter().flatten().filter_map(|c| self.clip(&c.path)).collect();
                 if man.is_empty() || (plan.mount.is_some() && mount.is_empty()) {
                     continue;
                 }
-                kit_levels.push(KitLevel { speed: level.speed, man, mount });
+                kit_levels.push(KitLevel { speed: level.speed, man, blend_in, mount });
             }
             if !kit_levels.is_empty() {
                 levels.push((gait, kit_levels));

@@ -162,6 +162,9 @@ pub struct ChosenClip {
     pub equipment_display: Vec<String>,
     /// Root speed (m/s) of the slot's first clip.
     pub speed: f32,
+    /// The line's blend-in time (s, [`crate::battle_animation::FragmentClip::blend_in`]): how
+    /// long the exe cross-fades into this clip (UNITS_TERRAIN_FIDELITY.md §1.9, CONFIRMED `0x007725D0`).
+    pub blend_in_time: f32,
 }
 
 impl ChosenClip {
@@ -172,6 +175,7 @@ impl ChosenClip {
             path: r.clip.filename.clone(),
             equipment_display: r.equipment_display.clone(),
             speed,
+            blend_in_time: r.clip.blend_in(),
         }
     }
 }
@@ -528,6 +532,7 @@ pub fn death_family(cause: DeathCause, trained: bool) -> SlotFamily {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::battle_animation::DEFAULT_BLEND_IN_TIME;
 
     const TABLES: &str = "version 1\nanimation_table rider_sabre\n{\n skeleton_type man\n fragment foot default_equipment_display = primary_weapon\n fragment rider default_equipment_display = primary_weapon, secondary_weapon\n mount_table mount_horse\n}\nanimation_table mount_horse\n{\n skeleton_type horse\n fragment horse\n}\nanimation_table man_musket\n{\n skeleton_type man\n fragment foot default_equipment_display = primary_weapon, ambient\n}\n";
     const FOOT: &str = "STAND filename = \"s.anim\"\nSTAND_TRAINED filename = \"st.anim\"\nSTAND_TRAINED filename = \"st2.anim\"\nWALK_TRAINED_1 filename = \"w100.anim\"\nWALK_TRAINED_2 filename = \"w127.anim\"\nWALK_1 filename = \"iw.anim\"\nRUN_TRAINED_1 filename = \"r313.anim\"\nRUN_TRAINED_2 filename = \"r407.anim\"\n";
@@ -632,6 +637,17 @@ mod tests {
         let mrun = gait_levels(&t, &mplan, Gait::Run, &mut speed);
         let slots: Vec<_> = mrun.iter().map(|l| (l.mount.as_ref().unwrap()[0].slot.clone(), l.man[0].slot.clone())).collect();
         assert_eq!(slots, [("TROT".to_string(), "RIDER_TROT".to_string()), ("GALLOP".into(), "RIDER_GALLOP".into())]);
+    }
+
+    /// Each level clip carries its line's `blend_in_time`, the parser's 1.0 s when the line has
+    /// none (UNITS_TERRAIN_FIDELITY.md §1.9).
+    #[test]
+    fn level_clips_carry_the_lines_blend_in_time() {
+        let foot = "WALK_TRAINED_1 filename = \"w100.anim\", blend_in_time = 0.25\nWALK_TRAINED_2 filename = \"w127.anim\"\n";
+        let t = AnimationTables::from_text(TABLES, |n| (n == "foot").then(|| foot.to_string()));
+        let plan = plan_figure(&keys(false), VariantRole::Soldier, &BattleTables::default(), &t).unwrap();
+        let walk = gait_levels(&t, &plan, Gait::Walk, &mut speed);
+        assert_eq!(walk.iter().map(|l| l.man[0].blend_in_time).collect::<Vec<_>>(), [0.25, DEFAULT_BLEND_IN_TIME]);
     }
 
     #[test]

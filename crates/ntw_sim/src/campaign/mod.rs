@@ -36,6 +36,7 @@ pub mod effects;
 pub mod characters;
 pub mod embark;
 pub mod family;
+pub mod negotiation;
 pub mod movers;
 pub mod naval;
 pub mod events;
@@ -62,7 +63,7 @@ pub use commands::{CampaignCommand, CommandError, CommandQueue, ConstructionOpti
 pub use details::{CharacterDetails, FactionDetails, GovernmentPost, Governorship, GovernorshipTaxes, Relationship};
 pub use events::CampaignEvent;
 pub use ids::{CharacterId, FactionId, FortId, ForceId, RecruitmentItemId, RegionId, UnitId};
-pub use rules::{BuildingRules, BuildingTable, CampaignRules, TaxClass, UnitAutoresolve, UnitRules, XpCostRow, XpCostTables};
+pub use rules::{BuildingRules, BuildingTable, CampaignRules, TaxClass, UnitAutoresolve, UnitRules};
 pub use turn::{TurnState, TurnStep};
 pub use world::{SlotRef,
     BuildingRef, CampaignModel, CampaignUnit, Character, CharacterKind, ConstructionItem, Faction,

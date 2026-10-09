@@ -39,8 +39,15 @@ pub struct BattleHud {
     hovered: Option<NodeId>,
     pressed: Option<NodeId>,
     clock_ms: f64,
-    /// Card portrait per faction/unit key (without `.tga`).
-    portraits: HashMap<String, String>,
+    /// Card portrait per faction, then unit key (without `.tga`).
+    portraits: HashMap<String, HashMap<String, String>>,
+    /// Flag folder per faction ([`flag_of`]).
+    flags: HashMap<String, String>,
+    /// The facts the last successful write left in `__battle` (`None`: unknown, the next write
+    /// writes all), and a spare snapshot refreshed in place for the next frame; the two swap after
+    /// each write, so the snapshots' strings and lists are reused.
+    written_facts: Option<BattleHudFacts>,
+    spare_facts: Option<BattleHudFacts>,
     /// The phase whose popups were opened last.
     shown: Option<BattlePhase>,
     /// Screen rectangles of the HUD panels (clicks there do not reach the battlefield).
@@ -138,6 +145,9 @@ pub fn enter(world: &mut World) {
         pressed: None,
         clock_ms: 0.0,
         portraits: HashMap::new(),
+        flags: HashMap::new(),
+        written_facts: None,
+        spare_facts: None,
         shown: None,
         panels: Vec::new(),
         vfs,
@@ -145,9 +155,8 @@ pub fn enter(world: &mut World) {
         loc,
         frame_errors: FrameErrors::default(),
     };
-    let facts = world.get_resource::<BattleSim>().map(|sim| facts_of(&mut hud, sim, &world.resource::<GameData>().db));
-    if let Some(f) = &facts
-        && let Err(e) = ui_battle::set_facts(&hud.host, f)
+    if let Some(sim) = world.get_resource::<BattleSim>()
+        && let Err(e) = write_facts(&mut hud, sim, &world.resource::<GameData>().db)
     {
         warn!("Battle HUD: {e}");
     }
@@ -195,12 +204,18 @@ fn log_errors(host: &UiScriptHost) {
 
 /// The card portrait of a unit: `ui/units/icons/<faction icon folder>_<key>_icon.tga` (CONFIRMED
 /// file names, e.g. `french_rep_ita_inf_line_french_fusiliers_icon.tga`), with the faction's
-/// `unit_icon_path` as the prefix (INFERRED), else any icon of that unit.
-fn portrait(hud: &mut BattleHud, db: &ntw_data::GameDatabase, faction: &str, key: &str) -> String {
-    let cache_key = format!("{faction}/{key}");
-    if let Some(p) = hud.portraits.get(&cache_key) {
-        return p.clone();
+/// `unit_icon_path` as the prefix (INFERRED), else any icon of that unit. Worked out once per
+/// faction and unit key and kept in `portraits` (faction → key → path), looked up by `&str`.
+fn portrait<'a>(portraits: &'a mut HashMap<String, HashMap<String, String>>, vfs: &Vfs, db: &ntw_data::GameDatabase, faction: &str, key: &str) -> &'a str {
+    if !portraits.get(faction).is_some_and(|m| m.contains_key(key)) {
+        let path = find_portrait(vfs, db, faction, key);
+        portraits.entry(faction.to_owned()).or_default().insert(key.to_owned(), path);
     }
+    portraits.get(faction).and_then(|m| m.get(key)).map_or("", String::as_str)
+}
+
+/// [`portrait`]'s search, without the cache.
+fn find_portrait(vfs: &Vfs, db: &ntw_data::GameDatabase, faction: &str, key: &str) -> String {
     let lower = key.to_ascii_lowercase();
     let mut prefixes: Vec<String> = Vec::new();
     if let Some(f) = db.faction(faction) {
@@ -212,103 +227,150 @@ fn portrait(hud: &mut BattleHud, db: &ntw_data::GameDatabase, faction: &str, key
         .iter()
         .filter(|p| !p.is_empty())
         .map(|p| format!("ui/units/icons/{p}_{lower}_icon"))
-        .find(|p| hud.vfs.read(&format!("{p}.tga")).is_ok());
+        .find(|p| vfs.read(&format!("{p}.tga")).is_ok());
     if found.is_none() {
         let suffix = format!("_{lower}_icon.tga");
-        found = hud.vfs.list("ui/units/icons/").into_iter().find(|p| p.to_ascii_lowercase().ends_with(&suffix)).map(|p| {
+        found = vfs.list("ui/units/icons/").into_iter().find(|p| p.to_ascii_lowercase().ends_with(&suffix)).map(|p| {
             let p = p.replace('\\', "/");
             p[..p.len() - 4].to_owned()
         });
     }
-    let path = found.map(|p| format!("data/{p}")).unwrap_or_default();
-    hud.portraits.insert(cache_key, path.clone());
-    path
+    found.map(|p| format!("data/{p}")).unwrap_or_default()
 }
 
 /// A faction's flag folder as the HUD scripts use it (`FlagPath` .. `/HUD_right.tga`): the
-/// `factions` flag folder (#13) with `data/` in front (INFERRED form).
-fn flag_of(db: &ntw_data::GameDatabase, faction: &str) -> String {
-    db.faction(faction).map(|f| format!("data/{}", f.flag_path.replace('\\', "/").trim_matches('/'))).unwrap_or_default()
+/// `factions` flag folder (#13) with `data/` in front (INFERRED form). Made once per faction and
+/// kept in `flags`, looked up by `&str`.
+fn flag_of<'a>(flags: &'a mut HashMap<String, String>, db: &ntw_data::GameDatabase, faction: &str) -> &'a str {
+    if !flags.contains_key(faction) {
+        let flag = db.faction(faction).map(|f| format!("data/{}", f.flag_path.replace('\\', "/").trim_matches('/'))).unwrap_or_default();
+        flags.insert(faction.to_owned(), flag);
+    }
+    flags.get(faction).map_or("", String::as_str)
 }
 
-/// The model, as the HUD scripts see it.
-fn facts_of(hud: &mut BattleHud, sim: &BattleSim, db: &ntw_data::GameDatabase) -> BattleHudFacts {
+/// Sets `s` to `v` when they differ, keeping its buffer (an unchanged fact allocates nothing).
+fn set_str(s: &mut String, v: &str) {
+    if s != v {
+        s.clear();
+        s.push_str(v);
+    }
+}
+
+/// The model, as the HUD scripts see it, written into `out` in place (each frame: its strings and
+/// lists keep their buffers, so a frame allocates nothing when no name or unit changed). Every
+/// field is set: the destructuring patterns name them all, so a new fact does not compile until it
+/// is filled here.
+fn refresh_facts(out: &mut BattleHudFacts, hud: &mut BattleHud, sim: &BattleSim, db: &ntw_data::GameDatabase) {
     let b = &sim.battle;
-    let mut units = Vec::new();
-    for (u, info) in b.units.iter().zip(&sim.info) {
+    let BattleHudFacts { phase, elapsed_s, total_s, speed, units, naval, player_won, results, battle_name, player_faction, player_flag, balance } = out;
+    let mut n = 0;
+    for (u, info) in sim.units_with_info() {
         if !info.controllable {
             continue;
         }
-        let stats = db.unit_stats(&info.key);
-        let is_artillery = stats.is_some_and(|s| s.is_artillery);
-        let guns = stats.map_or(0, |s| s.num_guns.max(0) as u32);
-        let max_ammo = stats.map_or(0, |s| s.ammunition.max(0) as u32);
-        units.push(HudUnit {
-            id: u.id,
-            key: info.key.clone(),
-            name: info.general.clone().unwrap_or_else(|| info.name.clone()),
-            kills: u.kills,
-            portrait: portrait(hud, db, &info.faction, &info.key),
-            men: u.men,
-            max_men: u.max_men,
+        if n == units.len() {
+            units.push(HudUnit::default());
+        }
+        let HudUnit {
+            id,
+            key,
+            name,
+            kills,
+            portrait: portrait_path,
+            men,
+            max_men,
             guns,
-            max_guns: guns,
+            max_guns,
             is_artillery,
-            has_ammo: u.missile.is_some() && u.ammunition > 0,
-            // Despite its name, the card script's `AmmoRemainingAsPercent` is a 0..1 fraction: it scales the bar
-            // as RoundToInt(bar_height * value). INFERRED: with 0..100 every bar was drawn 100x too tall
-            // (green lines up the whole screen); with 0..1 it fits the card (template.battleunitcard.luac).
-            ammo_percent: if max_ammo > 0 { u.ammunition as f32 / max_ammo as f32 } else { 0.0 },
-            experience: info.experience,
-            wavering: u.morale.state == MoraleState::Wavering,
-            routing: matches!(u.morale.behaviour, MoraleBehaviour::Routing | MoraleBehaviour::Shattered),
-            walking: u.moved && !u.charging,
-            running: u.running || u.charging,
-            firing: u.fired_this_tick || (u.reload_ticks_left > 0 && u.fire_target.is_some()),
-            melee: u.in_melee,
-            under_fire: u.under_fire_ticks > 0,
-            selected: sim.selected == Some(u.id),
-            category: info.category.clone(),
-            fire_at_will: u.fire_at_will,
-        });
+            has_ammo,
+            ammo_percent,
+            experience,
+            wavering,
+            routing,
+            walking,
+            running,
+            firing,
+            melee,
+            under_fire,
+            selected,
+            category,
+            fire_at_will,
+        } = &mut units[n];
+        n += 1;
+        let stats = db.unit_stats(&info.key);
+        let max_ammo = stats.map_or(0, |s| s.ammunition.max(0) as u32);
+        *id = u.id;
+        set_str(key, &info.key);
+        set_str(name, info.general.as_deref().unwrap_or(&info.name));
+        *kills = u.kills;
+        set_str(portrait_path, portrait(&mut hud.portraits, &hud.vfs, db, &info.faction, &info.key));
+        *men = u.men;
+        *max_men = u.max_men;
+        *guns = stats.map_or(0, |s| s.num_guns.max(0) as u32);
+        *max_guns = *guns;
+        *is_artillery = stats.is_some_and(|s| s.is_artillery);
+        *has_ammo = u.missile.is_some() && u.ammunition > 0;
+        // Despite its name, the card script's `AmmoRemainingAsPercent` is a 0..1 fraction: it scales the bar
+        // as RoundToInt(bar_height * value). INFERRED: with 0..100 every bar was drawn 100x too tall
+        // (green lines up the whole screen); with 0..1 it fits the card (template.battleunitcard.luac).
+        *ammo_percent = if max_ammo > 0 { u.ammunition as f32 / max_ammo as f32 } else { 0.0 };
+        *experience = info.experience;
+        *wavering = u.morale.state == MoraleState::Wavering;
+        *routing = matches!(u.morale.behaviour, MoraleBehaviour::Routing | MoraleBehaviour::Shattered);
+        *walking = u.moved && !u.charging;
+        *running = u.running || u.charging;
+        *firing = u.fired_this_tick || (u.reload_ticks_left > 0 && u.fire_target.is_some());
+        *melee = u.in_melee;
+        *under_fire = u.under_fire_ticks > 0;
+        *selected = sim.selected == Some(u.id);
+        set_str(category, &info.category);
+        *fire_at_will = u.fire_at_will;
     }
-    let results = [0u8, 1]
-        .into_iter()
-        .map(|side| {
-            let t = victory::totals(b, side);
-            HudSideResult {
-                name: sim.side_names[side as usize].clone(),
-                faction: sim.side_factions[side as usize].clone(),
-                flag: flag_of(db, &sim.side_factions[side as usize]),
-                men_start: t.men_start,
-                men_alive: t.men_alive,
-                kills: t.kills,
-                units_start: t.units_start,
-                units_left: t.units_fighting,
-            }
-        })
-        .collect();
-    let mine = victory::totals(b, 0).men_alive as f32;
-    let theirs = victory::totals(b, 1).men_alive as f32;
-    let flag = flag_of(db, &sim.side_factions[0]);
-    BattleHudFacts {
-        phase: match sim.phase {
-            BattlePhase::Deployment => HudPhase::Deployment,
-            BattlePhase::Conflict => HudPhase::Conflict,
-            BattlePhase::Finished => HudPhase::Finished,
-        },
-        elapsed_s: b.time_seconds(),
-        total_s: sim.victory.time_limit_s.unwrap_or(0.0),
-        speed: sim.speed.multiplier(),
-        units,
-        naval: false,
-        player_won: sim.outcome.is_over().then(|| sim.outcome.winner() == Some(0)),
-        results,
-        battle_name: hud.battle_name.clone(),
-        player_faction: sim.side_factions[0].clone(),
-        player_flag: flag,
-        balance: if mine + theirs > 0.0 { mine / (mine + theirs) } else { 0.5 },
+    units.truncate(n);
+    results.resize_with(2, HudSideResult::default);
+    for (side, r) in results.iter_mut().enumerate() {
+        let t = victory::totals(b, side as u8);
+        let HudSideResult { name, faction, flag, men_start, men_alive, kills, units_start, units_left } = r;
+        set_str(name, &sim.side_names[side]);
+        set_str(faction, &sim.side_factions[side]);
+        set_str(flag, flag_of(&mut hud.flags, db, &sim.side_factions[side]));
+        *men_start = t.men_start;
+        *men_alive = t.men_alive;
+        *kills = t.kills;
+        *units_start = t.units_start;
+        *units_left = t.units_fighting;
     }
+    let (mine, theirs) = (results[0].men_alive as f32, results[1].men_alive as f32);
+    *phase = match sim.phase {
+        BattlePhase::Deployment => HudPhase::Deployment,
+        BattlePhase::Conflict => HudPhase::Conflict,
+        BattlePhase::Finished => HudPhase::Finished,
+    };
+    *elapsed_s = b.time_seconds();
+    *total_s = sim.victory.time_limit_s.unwrap_or(0.0);
+    *speed = sim.speed.multiplier();
+    *naval = false;
+    *player_won = sim.outcome.is_over().then(|| sim.outcome.winner() == Some(0));
+    set_str(battle_name, &hud.battle_name);
+    set_str(player_faction, &sim.side_factions[0]);
+    set_str(player_flag, flag_of(&mut hud.flags, db, &sim.side_factions[0]));
+    *balance = if mine + theirs > 0.0 { mine / (mine + theirs) } else { 0.5 };
+}
+
+/// Model → `__battle`: refreshes the spare snapshot in place and writes what changed since the
+/// last successful write; after a failed write the next one writes all.
+fn write_facts(hud: &mut BattleHud, sim: &BattleSim, db: &ntw_data::GameDatabase) -> mlua::Result<()> {
+    let mut facts = hud.spare_facts.take().unwrap_or_default();
+    refresh_facts(&mut facts, hud, sim, db);
+    let result = ui_battle::update_facts(&hud.host, &facts, hud.written_facts.as_ref());
+    if result.is_ok() {
+        hud.spare_facts = hud.written_facts.replace(facts);
+    } else {
+        hud.written_facts = None;
+        hud.spare_facts = Some(facts);
+    }
+    result
 }
 
 /// Every frame: model → HUD, phase popups, pointer → HUD, HUD requests → model.
@@ -334,13 +396,14 @@ pub fn frame(
         hud.host.set_screen(size.x, size.y);
     }
     // Model → HUD.
-    let facts = facts_of(&mut hud, &sim, &data.db);
-    {
+    let player_won = {
         let hud = &mut *hud;
-        log_once(&mut hud.frame_errors.facts, "facts", ui_battle::set_facts(&hud.host, &facts));
+        let written = write_facts(hud, &sim, &data.db);
+        log_once(&mut hud.frame_errors.facts, "facts", written);
         log_once(&mut hud.frame_errors.cards, "unit cards", ui_battle::update_cards(&hud.host));
         log_once(&mut hud.frame_errors.orders, "order buttons", ui_battle::update_orders(&hud.host));
-    }
+        hud.written_facts.as_ref().or(hud.spare_facts.as_ref()).and_then(|f| f.player_won)
+    };
     hud.clock_ms += f64::from(time.delta_secs()) * 1000.0;
     let t = hud.clock_ms;
     hud.host.pulse(t);
@@ -363,7 +426,7 @@ pub fn frame(
             BattlePhase::Finished => {
                 // INFERRED: a single-player battle first offers "continue / end battle"
                 // (SP_victory_options); End leads to the summary popup, then the results screen.
-                let _ = hud.host.lua().globals().set("is_winner", facts.player_won == Some(true));
+                let _ = hud.host.lua().globals().set("is_winner", player_won == Some(true));
                 let _ = ui_battle::call_event(&hud.host, "ShowSinglePlayerEndPhasePopup");
                 music.write(music_for(&sim, &data.db, "music_land_battle_results"));
             }

@@ -33,13 +33,15 @@ db_record! {
         category: String,
         /// #3 @0x24 H: class, e.g. infantry_line, cavalry_heavy.
         unit_class: String,
-        /// #4 @0x30 M: recruitment cost.
+        /// #4 @0x30 M: the battle army-setup cost (custom and multiplayer battles, the `0x00ED49A0` base; `UNIT_RECORD`
+        /// +0x2C). Not the campaign recruitment cost (#7).
         recruitment_cost: i32,
         /// #5 @0x34 M {v>=1}: second cost (MP / custom battle?). In v0 the exe copies #4 here.
         secondary_cost: i32 => since 1 copy,
         /// #6 @0x38: recruitment time in turns (record +0x34, CONFIRMED by 0-B: see `ntw_sim::campaign::UnitRules::turns`).
         unknown_38: i32,
-        /// #7 @0x3C: UNKNOWN (about 0.8 x cost).
+        /// #7 @0x3C: the campaign recruitment cost before effects (`UNIT_RECORD` +0x38, read by the
+        /// recruitable entry pricing `0x00B0D220`, CONFIRMED; `ntw_sim::campaign::UnitRules::campaign_cost`).
         unknown_3c: i32,
         /// #8 @0x40 M: upkeep.
         upkeep: i32,
@@ -55,8 +57,11 @@ db_record! {
         info_key: String,
         /// #14 @0x78 L: recruitment scope ("global").
         recruitment_scope: Option<String>,
-        /// #15 @0x84: UNKNOWN (0 in samples).
-        unknown_84: i32,
+        /// #15 @0x84: the most units of this type a faction may hold and have queued together, 0 = no limit
+        /// (`UNIT_RECORD` +0x68, copied by `0x00E91320`; the campaign test `0x008F68B0`, CONFIRMED; 142 of the
+        /// 442 vanilla units have one, e.g. `Cav_Heavy_French_Grenadiers_a_Cheval` 4). The custom battle
+        /// army setup shows it as "Cap". `ntw_sim::campaign::UnitRules::unit_cap`.
+        unit_cap: i32,
         /// #16 @0x88 H: multiplayer category, e.g. mp_infantry.
         mp_category: String,
         /// #17 @0x94: UNKNOWN flag.
@@ -852,11 +857,12 @@ db_record! {
     ///   9 = −3 (so veterans tire more slowly).
     /// * `+0x24` (col 7) and `+0x28` (col 8) — the **experience-adjusted cost**: `0x00ED49A0`
     ///   returns `row+0x24 + ROUND(base * row+0x28)`, where `base` is `this+0x2C` or `this+0x30`
-    ///   (which one is chosen by its `param_3`). Rank 9 = +360 and ×1.9. RESOLVED (sandbox 0-A
-    ///   round N+1): those two fields are the recruit / upkeep cost, and the value is what the
-    ///   campaign **pays** for a veteran unit — the unit info panel labels it "XpAdjustedCost"
-    ///   (`0x005CD340`) and the auto-build spends it against a budget (`0x0045CB50`). NOT a battle
-    ///   stat; see `GameDatabase::experience_adjusted_cost` and BATTLE_FIDELITY.md §19a.
+    ///   (which one is chosen by its `param_3`). Rank 9 = +360 and ×1.9. Those two fields are
+    ///   `units` #4 and the late-era #5 (`UNIT_RECORD` +0x2C / +0x30), and the value is the battle
+    ///   army-setup price of a veteran unit (custom and multiplayer battles: the generator
+    ///   `0x004765F0` spends it against its budget through `0x0045CB50`; the unit info labels it
+    ///   "XpAdjustedCost", `0x005CD340`). Not a battle stat, and not the campaign's recruitment cost
+    ///   (that is `units` #7 with effects, `0x00B0D220`); see `GameDatabase::experience_adjusted_cost`.
     /// * `+0x0C..+0x1C` (cols 1..5) — five more per-rank bonuses; no reader found (UNKNOWN).
     pub struct UnitStatsLandExperienceBonuses in "unit_stats_land_experience_bonuses", key = rank {
         /// #0 @0x00 H: experience rank as string ("0".."9"); the exe's fatigue path uses the row
@@ -897,8 +903,8 @@ db_record! {
     /// flat) and `row+0x20` (col 6, f32 multiplier) as
     /// `return row+0x1C + ROUND(base * row+0x20)` — the naval counterpart of the land
     /// `+0x24`/`+0x28` pair. `base` is `this+0x2C` or `this+0x30`, the same two cost fields the land
-    /// branch uses, and the result is the campaign's **experience-adjusted cost** (the unit info
-    /// panel labels it "XpAdjustedCost"), NOT a battle stat: see BATTLE_FIDELITY.md §19a.
+    /// branch uses, and the result is the battle army-setup **experience-adjusted cost** (the unit
+    /// info labels it "XpAdjustedCost"), not a battle stat and not the campaign's recruitment cost.
     /// `+0x0C..+0x18` (cols 1..4) have no reader yet (UNKNOWN).
     pub struct UnitStatsNavalExperienceBonuses in "unit_stats_naval_experience_bonuses", key = rank {
         /// #0 @0x00 H: experience rank as string (the land table's ranks "0".."9").

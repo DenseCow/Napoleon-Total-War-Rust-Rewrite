@@ -312,6 +312,12 @@ pub(crate) fn load_world(
         if let Some(n) = rf.record.child("FACTION_ECONOMICS").and_then(|e| e.get_u32(3)).filter(|&n| n != 0) {
             world.bankrupt_turns.insert(rf.faction.id, n);
         }
+        // The last turn's income: categories 5..11 = #1 and #2 of the last ECONOMICS_DATA of
+        // FACTION_ECONOMICS #0 (the saver 0x00B985B0 writes the 25 categories as groups
+        // 5/3/4/1/5/7; `0x00BBCC40` sums 5..11, UI_FIDELITY.md 4.7).
+        if let Some(n) = last_income(rf.record) {
+            world.last_income.insert(rf.faction.id, n);
+        }
     }
 
     Ok(LoadedWorld {
@@ -319,6 +325,15 @@ pub(crate) fn load_world(
         rebel_faction,
         recruitment_sources,
     })
+}
+
+/// The last turn's income of a `FACTION`: the sum of `ECONOMICS_DATA` #1 and #2 (categories 5..11)
+/// of the last item of `FACTION_ECONOMICS` #0; `None` without a history.
+fn last_income(faction: &EsfRecord) -> Option<i32> {
+    let last = faction.child("FACTION_ECONOMICS")?.get(0)?.as_record_array()?.items.last()?;
+    let data = first_record(last, "ECONOMICS_DATA")?;
+    let sum = |i: usize| data.get(i).and_then(EsfNode::as_i32_array).map_or(0i32, |a| a.iter().fold(0i32, |s, v| s.wrapping_add(*v)));
+    Some(sum(1).wrapping_add(sum(2)))
 }
 
 /// The first record in a record-array item, if it has the expected name.

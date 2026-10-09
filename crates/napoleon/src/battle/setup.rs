@@ -378,8 +378,7 @@ fn historical_armies(db: &GameDatabase, setup: &SetupData, key: &str, spec: &Bat
                 info.faction = army.faction.clone();
                 info.controllable = controllable;
                 info.army = (ai, ri);
-                sim.battle.add_unit(unit);
-                sim.info.push(info);
+                sim.add_unit(unit, info);
                 next_id += 1;
             }
         }
@@ -423,8 +422,7 @@ fn historical_armies(db: &GameDatabase, setup: &SetupData, key: &str, spec: &Bat
                 info.faction = army.faction.clone();
                 info.controllable = false;
                 info.army = (ai, alliance.armies.len() + ri);
-                sim.battle.add_unit(unit);
-                sim.info.push(info);
+                sim.add_unit(unit, info);
                 next_id += 1;
             }
         }
@@ -537,11 +535,10 @@ fn test_armies(db: &GameDatabase, setup: &SetupData, sim: &mut BattleSim) {
             }
         }
         for b in built {
-            sim.battle.add_unit(b.unit);
-            sim.info.push(b.info);
+            sim.add_unit(b.unit, b.info);
         }
     }
-    // `add_unit` keeps units sorted by id; ids were assigned in order, so `info` matches.
+    // `BattleSim::add_unit` keeps `info` in the model's (id) order.
 }
 
 /// The armies of a custom battle (the front end's StartBattle): every alliance is a side, every
@@ -612,8 +609,7 @@ fn custom_armies(db: &GameDatabase, setup: &SetupData, sim: &mut BattleSim) {
             b.unit.facing = facing;
         }
         for b in built {
-            sim.battle.add_unit(b.unit);
-            sim.info.push(b.info);
+            sim.add_unit(b.unit, b.info);
         }
     }
     info!(

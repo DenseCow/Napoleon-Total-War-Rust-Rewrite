@@ -242,16 +242,25 @@ original with `debugger_launch`, offer `dbgeng extra options` with `cwd` = the i
 `python_executable=C:\ghidra-mcp-setup\dbg-venv\Scripts\python.exe` (a venv holding Ghidra's bundled
 wheels; never pip-install them globally), and `windbg_dir=C:\Windows\System32`. At the first loader
 stop, make exceptions second-chance only: `run_script_inline` finds the Debugger tool's
-`DebuggerTraceManagerService` target and runs `ghidradbg.util.dbg.cmd('sxd av')` (also `ld ud ct et
-eh ch dz gp ii sov`, `sxi out`) through `Target.execute`. It stops twice at the loader: resume both times.
+`DebuggerTraceManagerService` target (`getCurrent().getTarget()`, by reflection) and passes Python to
+`Target.execute(src, true)`: `__import__('ghidradbg.util', fromlist=['dbg']).dbg.cmd('sxd av')` (also `ld ud ct
+et eh ch dz gp ii sov`, `sxi out`); `dbg.read(addr, n)` reads live memory (Ghidra's own memory reads can be
+stale). It stops twice at the loader: resume both times.
 The debugger holds the game open after it quits (Task Manager can't end it): end the session by
-stopping the two `python.exe ... local-dbgeng.py` processes, then the game if it is still there.
+stopping the two `python.exe ... local-dbgeng*.py` processes, then the game if it is still there.
 Night sessions may run the debugger alone, only when no `Napoleon.exe` is running, and only for
 what needs no player input (start-up, loading, the main menu, tables in memory). Anything that needs
-clicks in the original goes in `docs/FOR_USER.md` as a debugger sitting. The module is `napoleon.retail.exe`, rebased, so translate addresses with
-`debugger_static_to_dynamic`. Never attach a raw dbgeng/pybag script to the user's running game: a
+clicks in the original goes in `docs/FOR_USER.md` as a debugger sitting. The module is `napoleon.retail.exe`, rebased: take
+its base from `debugger_modules` (dynamic = static − 0x400000 + base; `debugger_static_to_dynamic` returned the
+static address unchanged on 2026-10-09). Never attach a raw dbgeng/pybag script to the user's running game: a
 failed detach ends the process and loses their progress (it happened 2026-10-07). Launch under Ghidra
-instead, and set breakpoints only right before the action you're watching. The
+instead, and set breakpoints only right before the action you're watching. Logging breakpoints: run
+`.effmach x86` first, the evaluator is C++ (wrap MASM as `@@masm(poi(...))`), no quotes inside the command
+(`bp <addr> ".catch { r eip,edi; dd @edi+0xd0 L2 }; gc"`, output to `.logopen <file>`), and call
+`ghidradbg.commands.ghidra_trace_sync_disable()` first (each recorded stop costs ~150 ms; re-enable after).
+Even then a site hit by every soldier each frame freezes the game: log only sites the action alone reaches.
+To break in while such breakpoints run, loop `dbg._protected_base._control.SetInterrupt(0)` until `dbg.cmd`
+stops raising; leftover interrupts leave break-instruction stops to resume. The
 WinDbg proxy on port 8099 isn't part of this setup. `.luac` scripts still go through `luac_dump`.
 Findings go into the analysis notes as described behaviour. Ghidra holds the names and comments.
 

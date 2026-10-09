@@ -35,7 +35,7 @@ mod skin;
 mod view;
 
 use bevy::prelude::*;
-use ntw_sim::battle::model::Battle;
+use ntw_sim::battle::model::{Battle, LandUnit};
 use ntw_sim::battle::victory::{self, Outcome, VictoryRules};
 use ntw_sim::battle::shooting::VolleyEvent;
 use ntw_sim::battle::speed::BattleSpeed;
@@ -124,7 +124,7 @@ pub struct BattleSim {
     pub speed: BattleSpeed,
     /// Speed to return to when un-pausing.
     pub speed_before_pause: BattleSpeed,
-    /// Display info for every unit, in the same order as `battle.units`.
+    /// Display info for every unit, in the same order as `battle.units` (kept by [`Self::add_unit`]).
     pub info: Vec<UnitInfo>,
     /// Names of the two sides, e.g. ["France", "Austria"].
     pub side_names: [String; 2],
@@ -211,6 +211,77 @@ impl BattleSim {
     pub fn info_of(&self, id: u32) -> Option<&UnitInfo> {
         self.info.iter().find(|i| i.id == id)
     }
+
+    /// Adds a unit and its display info: `info` goes to the index the model's
+    /// [`Battle::add_unit`] gives the unit (sorted by id), so `info` keeps `battle.units`' order
+    /// whatever order units are added in (a reinforcement with a lower id included).
+    pub fn add_unit(&mut self, unit: LandUnit, info: UnitInfo) {
+        debug_assert_eq!(unit.id, info.id);
+        let at = self.battle.units.partition_point(|u| u.id < unit.id).min(self.info.len());
+        self.battle.add_unit(unit);
+        self.info.insert(at, info);
+    }
+
+    /// Display info of unit `id`, expected at `slot` (its index in `battle.units`; [`add_unit`]
+    /// keeps `info` in that order): O(1) while that slot holds it, else found by id.
+    ///
+    /// [`add_unit`]: Self::add_unit
+    pub fn info_at(&self, slot: usize, id: u32) -> Option<&UnitInfo> {
+        self.info.get(slot).filter(|i| i.id == id).or_else(|| self.info_of(id))
+    }
+
+    /// Every model unit with its display info, paired by id (a unit with no info is skipped).
+    pub fn units_with_info(&self) -> impl Iterator<Item = (&LandUnit, &UnitInfo)> {
+        self.battle.units.iter().enumerate().filter_map(|(i, u)| Some((u, self.info_at(i, u.id)?)))
+    }
+
+    /// Model unit `id` with its display info.
+    pub fn unit_with_info(&self, id: u32) -> Option<(&LandUnit, &UnitInfo)> {
+        let i = self.battle.units.iter().position(|u| u.id == id)?;
+        Some((&self.battle.units[i], self.info_at(i, id)?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ntw_sim::battle::fatigue::KvFatigue;
+    use ntw_sim::battle::morale::KvMorale;
+
+    fn info(id: u32) -> UnitInfo {
+        UnitInfo { id, name: format!("unit {id}"), ..UnitInfo::default() }
+    }
+
+    /// Regression (review of the polish-hotpaths branch): the HUD cards (`hud::refresh_facts`)
+    /// and the volley sounds (`audio::battle::bridge_volleys`) paired `battle.units` with `info`
+    /// by position, but the model inserts a unit in id order while `info` was appended, so a
+    /// reinforcement with a lower id gave every later unit the next unit's info. Both now pair by
+    /// id (`units_with_info`, `unit_with_info`), and `add_unit` keeps the two in one order.
+    #[test]
+    fn a_lower_id_reinforcement_keeps_every_unit_with_its_own_info() {
+        let mut battle = Battle::new(1, KvMorale::default(), KvFatigue::default());
+        battle.add_unit(LandUnit::new(2, 0, 100, (0.0, 0.0)));
+        battle.add_unit(LandUnit::new(3, 1, 100, (0.0, 900.0)));
+        let mut sim = BattleSim::new(battle, 1);
+        sim.info = vec![info(2), info(3)];
+        // Appended out of the model's order (as a bare `info.push` would).
+        sim.battle.add_unit(LandUnit::new(1, 0, 100, (0.0, -50.0)));
+        sim.info.push(info(1));
+        let pairs: Vec<(u32, u32)> = sim.units_with_info().map(|(u, i)| (u.id, i.id)).collect();
+        assert_eq!(pairs, [(1, 1), (2, 2), (3, 3)], "HUD cards");
+        for id in 1..=3 {
+            let (u, i) = sim.unit_with_info(id).unwrap();
+            assert_eq!((u.id, i.id), (id, id), "volley sound of unit {id}");
+        }
+        assert!(sim.unit_with_info(9).is_none());
+        // `add_unit` keeps `info` in the model's order, so the slot lookups stay O(1).
+        let mut sim = BattleSim::new(Battle::new(1, KvMorale::default(), KvFatigue::default()), 1);
+        for id in [2, 4, 1, 3] {
+            sim.add_unit(LandUnit::new(id, 0, 100, (0.0, 0.0)), info(id));
+        }
+        assert_eq!(sim.battle.units.iter().map(|u| u.id).collect::<Vec<_>>(), [1, 2, 3, 4]);
+        assert_eq!(sim.info.iter().map(|i| i.id).collect::<Vec<_>>(), [1, 2, 3, 4]);
+    }
 }
 
 /// Registers everything the battle needs.
@@ -221,6 +292,7 @@ impl Plugin for BattlePlugin {
         bevy::asset::embedded_asset!(app, "soldier_skin.wgsl");
         bevy::asset::embedded_asset!(app, "soldier_skin_prepass.wgsl");
         bevy::asset::embedded_asset!(app, "particle.wgsl");
+        skin::add_fade_upload(app);
         app
             // Run `FixedUpdate` 10 times per (virtual) second = one model tick each time.
             .add_plugins(MaterialPlugin::<skin::SkinMaterial>::default())

@@ -318,13 +318,11 @@ fn naval_experience_bonus_table() {
     assert_eq!(db.experience_adjusted_cost(0, 100), 100);
     assert_eq!(db.experience_adjusted_cost(9, 100), 550);
     // Every rank 0..9 exists and the cost grows with it (the shipped rows are flat 0 / x1.0 at
-    // rank 0 and rising), which is the head-to-head comparison rule the campaign spends against.
-    let land_rows = db.experience_cost_rows();
-    let naval_rows = db.naval_experience_cost_rows();
-    assert_eq!(land_rows.len(), 10);
-    assert_eq!(naval_rows.len(), 10);
-    assert_eq!(land_rows.iter().map(|r| r.0).collect::<Vec<_>>(), (0..10).collect::<Vec<u8>>());
-    assert_eq!(naval_rows.iter().map(|r| r.0).collect::<Vec<_>>(), (0..10).collect::<Vec<u8>>());
+    // rank 0 and rising): the price of a veteran in the custom and multiplayer battle army setup
+    // (`0x004765F0` → `0x0045D170`). The campaign does not use it (its recruits cost `units` #7).
+    assert_eq!(db.unit_stats_land_experience_bonuses.rows().len(), 10);
+    assert_eq!(db.unit_stats_naval_experience_bonuses.rows().len(), 10);
+    assert!((0..10u8).all(|rank| db.experience_bonuses(rank).is_some() && db.naval_experience_bonuses(rank).is_some()));
     let mut prev_land = 0;
     let mut prev_naval = 0;
     for rank in 0..=9u8 {

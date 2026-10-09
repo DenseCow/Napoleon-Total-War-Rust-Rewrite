@@ -8,7 +8,9 @@
 //!   storage buffer (uploaded once per battle);
 //! - a small per-figure storage buffer, rewritten every frame: which two frames a man shows
 //!   now and the blend between them. Each part entity's `MeshTag` is its figure's slot (man and
-//!   mount have separate slots, as they play different, paired clips).
+//!   mount have separate slots, as they play different, paired clips);
+//! - a fade buffer: for the figures cross-fading out of a clip change only, the frozen poses
+//!   and their weights ([`Fade`], [`FadeUpload`]).
 //!
 //! Men sharing a kit share its meshes and materials, so Bevy draws them instanced.
 //! PROVISIONAL: the per-man phase is a hash of the unit id and the man's index (the original's
@@ -45,13 +47,16 @@ pub const ATTRIBUTE_WEIGHTS: MeshVertexAttribute = MeshVertexAttribute::new("Ski
 /// Bone index meaning "no bone" (the vertex is already in model space).
 const NO_BONE: u32 = 65535;
 
-/// The skinning extension of `StandardMaterial`: two shared storage buffers.
+/// The skinning extension of `StandardMaterial`: three shared storage buffers (bone matrices,
+/// figure slots, cross-fades).
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 pub struct SkinExt {
     #[storage(100, read_only)]
     pub bones: Handle<ShaderBuffer>,
     #[storage(101, read_only)]
     pub figures: Handle<ShaderBuffer>,
+    #[storage(102, read_only)]
+    pub fades: Handle<ShaderBuffer>,
 }
 
 /// A soldier material: Bevy's PBR fragment with our skinning vertex stage.
@@ -191,7 +196,7 @@ pub fn piece_mesh(piece: &WeightedPiece) -> Mesh {
 }
 
 /// Where a clip's frames start in the bone storage buffer.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ClipSlot {
     /// Index of frame 0, bone 0.
     pub base: u32,
@@ -272,9 +277,86 @@ impl BoneAtlas {
     }
 }
 
-/// Figure slots as bytes for the storage buffer.
-pub fn figure_bytes(figures: &[[u32; 4]]) -> Vec<u8> {
-    figures.iter().flatten().flat_map(|u| u.to_le_bytes()).collect()
+/// One figure slot: a [`ClipSlot::figure`] `[frame A, frame B, blend A->B bits, fade]`, where
+/// `fade` is 0, or 1 + the index of the figure's [`Fade`] in the frame's fade entries.
+pub type Figure = [u32; 4];
+
+/// A figure's cross-fade out of the poses frozen at its last loop-clip changes (`view::ClipBlend`,
+/// UNITS_TERRAIN_FIDELITY.md §1.9): up to two clip frames, newest first, each
+/// `[frame A, frame B, blend A->B bits, weight bits]` (weight 0 = unused); the figure's own frame
+/// has the rest of the weight. Only fading figures have one, so the per-frame upload of the
+/// figure slots stays at four words per slot.
+pub type Fade = [[u32; 4]; 2];
+
+/// The [`Fade`] of frozen frames `frames` (each a [`ClipSlot::figure`]) at weights `keeps`.
+pub fn fade(frames: [[u32; 4]; 2], keeps: [f32; 2]) -> Fade {
+    std::array::from_fn(|k| {
+        let [a, b, t, _] = frames[k];
+        [a, b, t, keeps[k].to_bits()]
+    })
+}
+
+/// Writes figure slots as bytes for the storage buffer into `out`, reusing its allocation (the
+/// buffer is rewritten every frame).
+pub fn write_figure_bytes(figures: &[Figure], out: &mut Vec<u8>) {
+    out.clear();
+    out.extend(figures.iter().flatten().flat_map(|u| u.to_le_bytes()));
+}
+
+/// The frame's [`Fade`] entries (main world, filled by `view::sync_views`) and the fade buffer
+/// they go to. Only the entries in use are copied to the GPU: the render world writes them into
+/// the start of that buffer (sized at one entry per figure slot) with `write_buffer`, so a frame
+/// without a cross-fade uploads nothing.
+#[derive(Resource, Default)]
+pub struct FadeUpload {
+    pub buffer: Option<AssetId<ShaderBuffer>>,
+    pub entries: Vec<Fade>,
+}
+
+/// The render world's copy of [`FadeUpload`], as bytes, until it is written.
+#[derive(Resource, Default)]
+struct RenderFades {
+    buffer: Option<AssetId<ShaderBuffer>>,
+    bytes: Vec<u8>,
+    dirty: bool,
+}
+
+/// Registers the fade upload: [`FadeUpload`] in the main world, its extraction and the write (in
+/// the render app; an app without one, e.g. a headless test, draws nothing to upload to).
+pub fn add_fade_upload(app: &mut App) {
+    use bevy::render::{ExtractSchedule, Render, RenderApp, RenderSystems};
+    app.init_resource::<FadeUpload>();
+    if let Some(render) = app.get_sub_app_mut(RenderApp) {
+        render
+            .init_resource::<RenderFades>()
+            .add_systems(ExtractSchedule, extract_fades)
+            .add_systems(Render, write_fades.in_set(RenderSystems::PrepareResources));
+    }
+}
+
+fn extract_fades(main: bevy::render::Extract<Res<FadeUpload>>, mut ours: ResMut<RenderFades>) {
+    if !main.is_changed() {
+        return;
+    }
+    ours.buffer = main.buffer;
+    ours.bytes.clear();
+    ours.bytes.extend(main.entries.iter().flatten().flatten().flat_map(|u| u.to_le_bytes()));
+    ours.dirty = !ours.bytes.is_empty();
+}
+
+fn write_fades(
+    mut ours: ResMut<RenderFades>,
+    gpu: Res<bevy::render::render_asset::RenderAssets<bevy::render::storage::GpuShaderBuffer>>,
+    queue: Res<bevy::render::renderer::RenderQueue>,
+) {
+    if !ours.dirty {
+        return;
+    }
+    ours.dirty = false;
+    // Before the buffer's first upload (the battle's first frame) its fades read as weight 0.
+    let Some(buffer) = ours.buffer.and_then(|id| gpu.get(id)) else { return };
+    let len = ours.bytes.len().min(buffer.buffer.size() as usize);
+    queue.write_buffer(&buffer.buffer, 0, &ours.bytes[..len]);
 }
 
 /// PROVISIONAL per-man phase in `[0, 1)`: a hash of the unit id and the man's index.

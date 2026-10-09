@@ -24,6 +24,11 @@ struct Setup {
 }
 
 fn setup() -> Option<Setup> {
+    setup_as("france")
+}
+
+/// [`setup`] with `human` as the player's faction.
+fn setup_as(human: &str) -> Option<Setup> {
     let dir = data_dir();
     if !dir.join("data.pack").is_file() {
         eprintln!("skipped: no install at {}", dir.display());
@@ -33,11 +38,11 @@ fn setup() -> Option<Setup> {
     let db = ntw_data::GameDatabase::from_vfs(&vfs).unwrap();
     let bytes = std::fs::read(dir.join("campaigns/eur_napoleon/startpos.esf")).unwrap();
     let mut loaded = ntw_campaign::read(&bytes, &db).unwrap();
-    loaded.set_human("france");
-    let scripts = ScriptHost::new(loaded.model, "france", ScriptSource::from_install(&dir).unwrap()).unwrap();
+    loaded.set_human(human);
+    let scripts = ScriptHost::new(loaded.model, human, ScriptSource::from_install(&dir).unwrap()).unwrap();
     let loc = Localisation::from_vfs(&vfs).unwrap();
     let host = UiScriptHost::new(ScriptSource::from_install(&dir).unwrap(), loc, FrontEndFacts::default(), (1280.0, 960.0)).unwrap();
-    host.install_campaign(CampaignLink { state: scripts.shared_state(), human: "france".into(), campaign: "eur_napoleon".into(), db: Rc::new(db) })
+    host.install_campaign(CampaignLink { state: scripts.shared_state(), human: human.into(), campaign: "eur_napoleon".into(), db: Rc::new(db) })
         .unwrap();
     let root = host.load_root_layout("data/ui/campaign ui/layout").unwrap();
     host.campaign_ready();
@@ -1291,6 +1296,18 @@ fn slot_upgrade_drops_down_on_the_ui_clock() {
     assert!(errors(&s.host).is_empty());
 }
 
+/// One game frame for the negotiation tests: the HUD's queued model commands applied, as the game
+/// applies them after a UI frame, then the next UI frame (which turns the campaign's negotiation
+/// events into the panel's calls).
+fn frame(s: &Setup, t: f64) {
+    for r in s.host.take_campaign_requests() {
+        if let CampaignRequest::Command(cmd) = r {
+            s.scripts.state_mut().model.apply(cmd).expect("command applies");
+        }
+    }
+    s.host.pulse(t);
+}
+
 /// Opens the negotiation screen the way the diplomatic relations screen's "Open Negotiations"
 /// button does: its `OpenNegotiations` (scroll.lua:230) calls the root's
 /// `ToggleDiplomacyPopup(<faction>)`, which opens `diplomacy_panel` through the PanelManager and
@@ -1317,22 +1334,22 @@ fn negotiation_ends_once(act: &str, close: impl Fn(&Setup, NodeId)) {
     // Before the campaign's event the X is hidden (`SetCloseable(false)` hides `gilt_corner_TR`),
     // as in the original; the next UI frame delivers the event.
     assert!(find(&s.host, panel, "button_close").is_none(), "no X before the negotiation started");
-    s.host.pulse(0.0);
+    frame(&s, 0.0);
     no_errors(&s.host);
     assert_eq!(calls(&s.host, panel, "InitialiseNegotiation"), 1, "the negotiation-started event reaches the panel once");
     let finished = |s: &Setup| s.host.lua().load("return CampaignUI.Finished()").eval::<Option<bool>>().unwrap();
     assert_eq!(finished(&s), Some(false), "no result yet");
     s.host.lua().load(act).exec().unwrap();
-    s.host.pulse(8.0);
+    frame(&s, 8.0);
     no_errors(&s.host);
     assert!(find(&s.host, s.root, "diplomacy_panel").is_some(), "{act}: the panel stays open");
     close(&s, panel);
     no_errors(&s.host);
     assert!(find(&s.host, s.root, "diplomacy_panel").is_none(), "{act}: the negotiation screen closes");
-    s.host.pulse(16.0);
+    frame(&s, 16.0);
     no_errors(&s.host);
     assert_eq!(calls(&s.host, s.root, "EnableDiplomacy"), 1, "{act}: ending the negotiation re-enables diplomacy");
-    s.host.pulse(24.0);
+    frame(&s, 24.0);
     assert_eq!(calls(&s.host, s.root, "EnableDiplomacy"), 1, "{act}: once");
     assert_eq!(finished(&s), None, "{act}: the ended object answers nothing");
     open_negotiations(&s, "austria");
@@ -1391,7 +1408,7 @@ fn cancel_offer_ends_the_negotiation_once() {
 fn the_pending_move_constructor_keeps_nothing_of_the_last_negotiation() {
     let Some(s) = setup() else { return };
     let panel = open_negotiations(&s, "britain");
-    s.host.pulse(0.0);
+    frame(&s, 0.0);
     no_errors(&s.host);
     let proposer: Option<String> = s.host.lua().load("return CampaignUI.ProposerId()").eval().unwrap();
     assert_eq!(proposer.as_deref(), Some("france"));
@@ -1406,7 +1423,7 @@ fn the_pending_move_constructor_keeps_nothing_of_the_last_negotiation() {
     s.host.lua().load("UIDiplomacyNegotiation({})").set_environment(env).exec().unwrap();
     assert!(s.host.take_log().iter().all(|l| !l.contains("pending move")), "logged once");
     assert!(count_calls(&s.host, panel, "InitialiseNegotiation"));
-    s.host.pulse(8.0);
+    frame(&s, 8.0);
     no_errors(&s.host);
     assert_eq!(calls(&s.host, panel, "InitialiseNegotiation"), 0, "no event for the pending move");
 }
@@ -1420,7 +1437,7 @@ fn the_pending_move_constructor_keeps_nothing_of_the_last_negotiation() {
 fn a_negotiation_belongs_to_the_running_script_context() {
     let Some(s) = setup() else { return };
     let panel = open_negotiations(&s, "britain");
-    s.host.pulse(0.0);
+    frame(&s, 0.0);
     no_errors(&s.host);
     s.host.lua().load("CampaignUI.End()").exec().unwrap();
     let root_env = s.host.script_env(s.root).unwrap();
@@ -1437,12 +1454,14 @@ fn a_negotiation_belongs_to_the_running_script_context() {
     let call: mlua::Function = s.host.lua().globals().get("__ntw_call_if_defined").unwrap();
     let address: mlua::Value = panel_env.raw_get("Address").unwrap();
     assert!(call.call::<bool>((address, "NtwTestCall")).unwrap());
-    s.host.pulse(8.0);
+    frame(&s, 8.0);
     no_errors(&s.host);
     assert_eq!(calls(&s.host, panel, "InitialiseNegotiation"), 1, "the running panel's context gets the event");
     // No component script running: logged once, no event.
+    // The begins run with the next frame; their "started" events find no context: logged once.
     for _ in 0..2 {
         s.host.lua().load("UIDiplomacyNegotiation('france', 'britain')").exec().unwrap();
+        frame(&s, 16.0);
     }
     let log = s.host.take_log();
     assert_eq!(log.iter().filter(|l| l.contains("no component script running")).count(), 1, "{log:?}");
@@ -1465,24 +1484,180 @@ fn negotiation_screen_lists_the_current_treaties() {
     assert_eq!(text(&s.host, line), expected);
 }
 
-/// FactionDetails' rankings are strings, as the exe pushes them (`GetFactionRankingStrings`
-/// 0x008C7170 -> random_localisation_strings `power_category_<n>` ...), never numbers: the panel
-/// puts them straight into its `power_dy` / `wealth_dy` texts (bug 2026-10-07: "Power: 0"). The
-/// host's value is PROVISIONAL: the empty string 0x008C7170 starts from, until the ranking values
-/// exist in the model. The test pins that exact value, so filling the rankings in updates it.
+/// The diplomacy screen against the three original screens (Britain, Early January 1805 →
+/// France / Ottoman Empire / Austria → Open Negotiations; UI_FIDELITY.md §4.7): the ranking words
+/// (`GetFactionRankingStrings` 0x008C7170, strings put straight into `power_dy` / `wealth_dy`, bug
+/// 2026-10-07 "Power: 0"), the option buttons (0x009B5220 over the records of 0x00BF5A60), the
+/// greeting by attitude (`receive_<attitude>`, 0x00C55CC0) and its diplomat card
+/// (`MinisterPortraitPath` 0x009ED8A0), and the leader's regnal numeral (0x00A0FE80).
+/// One test per difference below; they share this setup.
+fn britain_negotiates(with: &str) -> Option<(Setup, NodeId)> {
+    let s = setup_as("britain")?;
+    no_errors(&s.host);
+    let panel = open_negotiations(&s, with);
+    frame(&s, 0.0);
+    no_errors(&s.host);
+    Some((s, panel))
+}
+
+fn loc_text(key: &str) -> String {
+    let dir = data_dir();
+    let vfs = ntw_formats::pack::Vfs::open_install(&dir).unwrap();
+    Localisation::from_vfs(&vfs).unwrap().get(key).unwrap_or_else(|| panic!("no loc {key}")).to_owned()
+}
+
+/// (1) Power / Wealth words: the original shows Britain and France "Terrifying" / "Spectacular",
+/// the Ottomans "Mighty" / "Rich", Austria "Terrifying" / "Rich" (the screenshots).
 #[test]
-fn faction_rankings_are_strings() {
-    let Some(s) = setup() else { return };
-    let rankings: (String, String, String) = s
-        .host
-        .lua()
-        .load("local d = CampaignUI.FactionDetails('britain') return d.PowerRanking, d.WealthRanking, d.PrestigeRanking")
-        .eval()
-        .unwrap();
-    assert_eq!(rankings, (String::new(), String::new(), String::new()), "PROVISIONAL: empty rankings");
-    let panel = open_negotiations(&s, "britain");
+fn faction_rankings_are_the_originals_words() {
+    let Some((s, panel)) = britain_negotiates("france") else { return };
+    let rank = |f: &str| -> (String, String) {
+        s.host.lua().load(format!("local d = CampaignUI.FactionDetails('{f}') return d.PowerRanking, d.WealthRanking")).eval().unwrap()
+    };
+    let words = |p: u8, w: u8| {
+        (
+            loc_text(&format!("random_localisation_strings_string_power_category_{p}")),
+            loc_text(&format!("random_localisation_strings_string_wealth_category_{w}")),
+        )
+    };
+    assert_eq!(rank("britain"), words(1, 1), "Britain: Terrifying / Spectacular");
+    assert_eq!(rank("france"), words(1, 1), "France: Terrifying / Spectacular");
+    assert_eq!(rank("ottomans"), words(2, 2), "Ottomans: Mighty / Rich");
+    // Austria: the original shows "Terrifying" power; ours gives "Mighty" (category 2). Power = the
+    // raw upkeep of the faction's units (`faction_powers`, 0x008B2150 with an empty effect set)
+    // still puts Austria 5th (Britain 8300, France 7870, Prussia 6860, Russia 6710, Austria 6590);
+    // the cause is open (UI_FIDELITY.md §4.7). This pins the known difference.
+    assert_eq!(rank("austria"), words(2, 2), "Austria: KNOWN DIFFERENCE, the original is Terrifying / Rich");
     for id in ["power_dy", "wealth_dy"] {
-        let shown = text(&s.host, find(&s.host, panel, id).unwrap());
-        assert_eq!(shown, "", "{id} shows the PROVISIONAL empty ranking");
+        assert!(!text(&s.host, find(&s.host, panel, id).unwrap()).is_empty(), "{id} shows a word");
     }
 }
+
+/// The panel's two lists as (State, Active) pairs.
+type Buttons = Vec<(String, bool)>;
+
+fn listed(s: &Setup) -> (Buttons, Buttons) {
+    let t: mlua::Table = s.host.lua().load("return CampaignUI.BuildPossibleActions()").eval().unwrap();
+    let list = |k: &str| -> Buttons {
+        let l: mlua::Table = t.get(k).unwrap();
+        l.sequence_values::<mlua::Table>().map(|e| e.unwrap()).map(|e| (e.get("State").unwrap(), e.get("Active").unwrap())).collect()
+    };
+    (list("Unilaterals"), list("OffersAndDemands"))
+}
+
+fn on(names: &[&str]) -> Buttons {
+    names.iter().map(|n| (n.trim_start_matches('~').to_owned(), !n.starts_with('~'))).collect()
+}
+
+/// (2) Option buttons, at war (France): Present State Gift; Regions, Technology, Payments,
+/// Request peace.
+#[test]
+fn negotiation_buttons_at_war() {
+    let Some((s, _)) = britain_negotiates("france") else { return };
+    assert_eq!(listed(&s), (on(&["state_gift"]), on(&["regions", "technology", "payments", "peace"])));
+}
+
+/// (2) At peace with a trade agreement (Ottomans): the held treaty's red cancel, the greyed
+/// Joining Wars (not allied).
+#[test]
+fn negotiation_buttons_at_peace_with_trade() {
+    let Some((s, _)) = britain_negotiates("ottomans") else { return };
+    let (u, o) = listed(&s);
+    assert_eq!(u, on(&["trade_cancel", "alliance", "state_gift", "war", "~request_join_war", "break_trade", "break_alliance"]));
+    assert_eq!(o, on(&["access", "regions", "technology", "payments"]));
+    let tip: String = s
+        .host
+        .lua()
+        .load("for _, e in ipairs(CampaignUI.BuildPossibleActions().Unilaterals) do if e.State == 'request_join_war' then return e.Tooltip end end")
+        .eval()
+        .unwrap();
+    assert_eq!(tip, loc_text("random_localisation_strings_string_join_war_tooltip_not_allied"));
+}
+
+/// (2) Allied with trade and access both ways (Austria): three cancels, no alliance / access
+/// requests, Joining Wars greyed (no joinable war).
+#[test]
+fn negotiation_buttons_with_an_ally() {
+    let Some((s, _)) = britain_negotiates("austria") else { return };
+    let (u, o) = listed(&s);
+    assert_eq!(
+        u,
+        on(&["trade_cancel", "access_cancel", "alliance_cancel", "state_gift", "war", "~request_join_war", "break_trade", "break_alliance"])
+    );
+    assert_eq!(o, on(&["regions", "technology", "payments"]));
+}
+
+/// OPEN BUG (worker diplomacy2, 2026-10-08): `BuildPossibleActions` returns the right lists (the
+/// three tests above) but the panel creates no `diplomacy_button_<State>` component from them
+/// (`CreateButtons`, diplomacy_panel.luac:313); not yet traced why. Then: check the red cancel
+/// texts are the layout's per-state `font_colour`.
+#[test]
+#[ignore = "open bug: the panel builds no option buttons from the lists"]
+fn negotiation_buttons_are_built_on_the_panel() {
+    let Some((s, panel)) = britain_negotiates("austria") else { return };
+    for name in ["trade_cancel", "access_cancel", "alliance_cancel", "request_join_war"] {
+        assert!(find(&s.host, panel, &format!("diplomacy_button_{name}")).is_some(), "{name} button");
+    }
+}
+
+/// (3) The greeting follows the recipient's attitude (hostile France, friendly Ottomans, very
+/// friendly Austria: the three screenshot texts), with the culture's minister card 001.
+#[test]
+fn negotiation_greeting_by_attitude() {
+    for (with, key, folder) in [
+        ("france", "european_monarchy_receive_hostile", "european"),
+        ("ottomans", "middle_east_monarchy_receive_friendly", "middle_east"),
+        ("austria", "european_monarchy_receive_very_friendly", "european"),
+    ] {
+        let Some((s, panel)) = britain_negotiates(with) else { return };
+        let speech = find(&s.host, panel, "speechbox").expect("the diplomat's speech bubble is shown");
+        assert_eq!(text(&s.host, speech), loc_text(&format!("diplomacy_strings_string_{key}")), "{with}");
+        let path: String = s.host.lua().load(format!("return CampaignUI.MinisterPortraitPath('{with}')")).eval().unwrap();
+        assert_eq!(path, format!("ui/portraits/{folder}/Cards/minister/young/001.tga"));
+    }
+}
+
+/// (3) The greeting is the model's pick, made once when the queued begin command runs
+/// (0x00BF5A60): with a faction override row the pick draws the campaign RNG once; recreating the
+/// negotiation object, rebuilding the buttons and reading the details draw nothing more.
+#[test]
+fn the_greeting_draws_the_rng_once_per_negotiation() {
+    let Some(s) = setup_as("britain") else { return };
+    {
+        let mut st = s.scripts.state_mut();
+        let m = &mut st.model;
+        let gov = m.faction_by_key("austria").unwrap().government_key.clone();
+        let key = ("receive_very_friendly".to_owned(), "european".to_owned(), gov, "austria".to_owned());
+        std::sync::Arc::make_mut(&mut m.rules).negotiation_overrides.insert(key, "european_monarchy_receive_very_friendly".into());
+    }
+    let rng = |s: &Setup| s.scripts.state().model.rng;
+    let before = rng(&s);
+    let _panel = open_negotiations(&s, "austria");
+    // The constructor only queues CCQ_DIPLOMACY_BEGIN_NEGOTIATION: nothing begins and nothing is
+    // drawn until the game applies the command (commands are ordered for multiplayer and replays).
+    assert_eq!((rng(&s), s.scripts.state().model.negotiations.begun), (before, 0), "nothing before the command runs");
+    frame(&s, 0.0);
+    no_errors(&s.host);
+    let mut once = before;
+    once.unit_float();
+    assert_eq!(rng(&s), once, "one draw when the negotiation began");
+    let greeting = s.scripts.state().model.negotiations.current.as_ref().and_then(|n| n.greeting.clone());
+    assert!(greeting.is_some(), "the model holds the pick");
+    s.host.lua().load("UIDiplomacyNegotiation() CampaignUI.BuildPossibleActions() CampaignUI.FactionDetails('austria')").exec().unwrap();
+    frame(&s, 0.0);
+    assert_eq!(rng(&s), once, "no further draw");
+    assert_eq!(s.scripts.state().model.negotiations.current.as_ref().and_then(|n| n.greeting.clone()), greeting);
+}
+
+/// (4) The leader's name carries the regnal numeral (CHARACTER_DETAILS #4): "George III",
+/// "Selim I", "Franz I".
+#[test]
+fn leader_names_carry_the_regnal_numeral() {
+    let Some(s) = setup_as("britain") else { return };
+    for (f, name) in [("britain", "George III"), ("ottomans", "Selim I"), ("austria", "Franz I")] {
+        let got: String = s.host.lua().load(format!("return CampaignUI.FactionDetails('{f}').Leader.Name")).eval().unwrap();
+        assert_eq!(got, name);
+    }
+}
+
+

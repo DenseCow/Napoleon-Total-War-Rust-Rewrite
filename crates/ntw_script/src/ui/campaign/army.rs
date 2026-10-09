@@ -221,7 +221,10 @@ fn card_category(db: &GameDatabase, unit_key: &str) -> &'static str {
 /// slot, faction_key. card_id = "<unit>!recruitable!<n>" / "<unit>!enqueued!<n>" (the card script
 /// cuts the id at "!"; the exe strings "!recruitable!" and "!enqueued!" CONFIRMED, the index suffix
 /// INFERRED). PROVISIONAL: the entries' experience 0 (a unit being raised is a fresh recruit);
-/// reasons only "no slot" and "unaffordable"; the queue's turns are the remaining turns.
+/// reasons_unavailable is the entry's flags (`CampaignModel::recruitable_entry_flags`, `0x00B69BA0`),
+/// whose 1 / 2 / 4 / 0x40 are bits 0 / 1 / 2 / 6 of that list (no slot = queue full, unaffordable,
+/// population, limit), INFERRED from that match, not from the generator; the queue's turns are the
+/// remaining turns.
 ///
 /// Naval (0-E round N+1). The generator is `0x009FE7B0` (14,199 bytes), CONFIRMED as the owner of
 /// every string named above. There is no `GenerateNaval` symbol in the exe: the only generator
@@ -371,7 +374,6 @@ pub(super) fn recruitment_info(lua: &Lua, inner: &Inner, ui: &CampaignUi, region
     let treasury = m.world.factions.get(&r.owner).map_or(0, |f| f.treasury);
     let human = m.faction_by_key(&ui.link.human).map(|f| f.id);
     let capacity = m.recruitment_points(region, naval);
-    let used = r.recruitment_queue.len() as u32;
     let recruitable = m.recruitable_units(region);
     let is_naval = |k: &str| is_ship(&ui.link.db, k);
     // The naval tab shows the ships only (`units` #2 category, CONFIRMED source of the generator's
@@ -380,17 +382,19 @@ pub(super) fn recruitment_info(lua: &Lua, inner: &Inner, ui: &CampaignUi, region
     let recruitable: Vec<&String> = recruitable.iter().filter(|k| shown(k)).collect();
     let queue: Vec<(RecruitmentItemId, String, u32, i32)> =
         r.recruitment_queue.iter().filter(|q| shown(&q.unit_key)).map(|q| (q.id, q.unit_key.clone(), q.turns_remaining, q.cost)).collect();
-    // The price the exe's card shows is the **experience-adjusted** recruitment cost (`0x0045CB50`
-    // -> `0x00ED49A0`, the value the queue item records), not the bare `units` #4 cost: go through
-    // the same `economy::recruit_cost` the treasury is charged by, so the card can never drift from
-    // the charge. A unit being raised afresh has no chevrons, so the rank is 0 and this is the
-    // plain cost - the tables land in `rules.xp_cost` through `ntw_campaign::rules_from_db`.
-    // `upkeep` stays the unit type's own `UpkeepCost` (`card+0x3C`), which is what the panel shows.
-    let rules: Vec<(i32, i32, u32)> = recruitable
+    // The price is the region's recruitable entry cost (`0x00B31020` → `0x00B0D220`: `units` #7 with the
+    // region's cost effects), the value the queue command charges and the item records, and the reasons are
+    // the entry's flags (`0x00B69BA0`): both come from the model functions the queue command uses, so the
+    // card can never drift from the command. `upkeep` stays the unit type's own `UpkeepCost` (`card+0x3C`),
+    // which is what the panel shows.
+    let set = economy::region_effect_set(&m, r);
+    let counts = m.unit_type_counts(r.owner);
+    let rules: Vec<(i32, i32, u32, u32)> = recruitable
         .iter()
         .map(|k| {
-            m.rules.units.get(*k).map_or((0, 0, 1), |u| {
-                (economy::recruit_cost(&m.rules, u, 0), u.upkeep, u.turns)
+            m.rules.units.get(*k).map_or((0, 0, 1, 0), |u| {
+                let cost = economy::recruitment_cost_in(&m.rules, &set, k, u);
+                (cost, u.upkeep, u.turns, m.recruitable_entry_flags(r, k, u, cost, &counts))
             })
         })
         .collect();
@@ -417,21 +421,14 @@ pub(super) fn recruitment_info(lua: &Lua, inner: &Inner, ui: &CampaignUi, region
         e.set("class", db.unit(key).map(|u| u.unit_class.clone()).unwrap_or_default())?;
         e.set("experience", 0)?;
         e.set("faction_key", owner_key.as_str())?;
-        e.set("affordable", cost <= treasury)?;
+        e.set("affordable", treasury::recruitment_affordable(treasury, cost))?;
         if let Some(s) = slot {
             e.set("slot", s)?;
         }
         Ok(e)
     };
     let units = lua.create_table()?;
-    for (i, (key, (cost, upkeep, turns))) in recruitable.iter().zip(rules).enumerate() {
-        let mut reasons = 0;
-        if used >= capacity {
-            reasons |= 1;
-        }
-        if cost > treasury {
-            reasons |= 2;
-        }
+    for (i, (key, (cost, upkeep, turns, reasons))) in recruitable.iter().zip(rules).enumerate() {
         let e = entry(key.as_str(), if reasons == 0 { "Available" } else { "Unavailable" }, cost, upkeep, turns, format!("{key}!recruitable!{i}"), None)?;
         e.set("reasons_unavailable", reasons)?;
         units.set(i + 1, e)?;

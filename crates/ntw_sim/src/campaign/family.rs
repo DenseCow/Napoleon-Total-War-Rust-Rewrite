@@ -290,6 +290,21 @@ fn new_relative(fam: &mut Family, rng: &mut CaRng, slot: usize, owner: u32) {
     fam.new_member(rng, slot, owner, male, age, false);
 }
 
+/// The regnal numeral shown after a monarch's name (`0x008DCF50`, CONFIRMED): "X" repeated
+/// `n / 10` times, then the units of `n % 10` as `I` .. `IX` (string table `0x01357040`), so 3 →
+/// "III", 14 → "XIV", 40 → "XXXX" (no L / C). The original counts the tens in a byte, so the tens
+/// wrap at 256 (kept); a number below 1 gives "" (UNKNOWN in the original, whose table index would
+/// be out of range; no shipped data reaches it).
+pub fn regnal_numeral(n: i32) -> String {
+    const UNITS: [&str; 10] = ["", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX"];
+    if n < 1 {
+        return String::new();
+    }
+    let mut s = "X".repeat(usize::from((n / 10) as u8));
+    s.push_str(UNITS[(n % 10) as usize]);
+    s
+}
+
 /// The succession (`0x008B9500`), when the leader's post falls vacant (or a republic's family
 /// head dies). CONFIRMED rules:
 /// - the heir is the first child (of the leader's `children`) flagged as heir; a daughter when
@@ -387,11 +402,15 @@ impl CampaignModel {
         let monarchy = matches!(gov, GovernmentType::AbsoluteMonarchy | GovernmentType::ConstitutionalMonarchy);
         let year = self.calendar.date.year as i32;
         let mut names = (String::new(), String::new());
+        let mut numeral = String::new();
         let age = if leader_post && monarchy && details.family.as_ref().is_some_and(|f| f.members.len() == 10) {
             let fam = self.world.faction_details.get_mut(&faction).and_then(|d| d.family.as_mut()).expect("checked");
             succession(fam, &mut self.rng, faction.raw() as u32);
             let l = &fam.members[LEADER];
             names.0 = l.names.first().cloned().unwrap_or_default();
+            // The new monarch-minister's name carries the successor's numeral (`0x008B7070` /
+            // `0x008B7340` call `0x008DCF50` into character +0x33C, CONFIRMED).
+            numeral = regnal_numeral(l.regnal);
             l.age
         } else {
             let base = if gov == GovernmentType::AbsoluteMonarchy && !leader_post { 21 } else { 25 };
@@ -414,7 +433,14 @@ impl CampaignModel {
         let birth = crate::calendar::Date { year: (year - age).max(0) as u32, ..self.calendar.date };
         self.world.character_details.insert(
             id,
-            CharacterDetails { forename: names.0, surname: names.1, birth: Some(birth), post: post_id as u32, ..Default::default() },
+            CharacterDetails {
+                forename: names.0,
+                surname: names.1,
+                regnal_numeral: numeral,
+                birth: Some(birth),
+                post: post_id as u32,
+                ..Default::default()
+            },
         );
         if let Some(p) = self.world.faction_details.get_mut(&faction).and_then(|d| d.posts.get_mut(post)) {
             p.holder = Some(id);
@@ -556,6 +582,15 @@ mod tests {
         f.members[FIRST_RELATIVE] = member("Otto", true, 40);
         f.members[FIRST_RELATIVE + 1] = member("Hans", true, 35);
         f
+    }
+
+    /// `0x008DCF50`: tens as repeated "X", units from the I..IX table (bug 2026-10-08: the
+    /// negotiation screen read "George" for the original's "George III").
+    #[test]
+    fn regnal_numerals_follow_the_exe_table() {
+        for (n, s) in [(0, ""), (1, "I"), (3, "III"), (4, "IV"), (9, "IX"), (10, "X"), (14, "XIV"), (19, "XIX"), (40, "XXXX")] {
+            assert_eq!(regnal_numeral(n), s, "{n}");
+        }
     }
 
     #[test]

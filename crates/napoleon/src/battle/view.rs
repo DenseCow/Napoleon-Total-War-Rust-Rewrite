@@ -18,12 +18,13 @@ use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 use bevy::transform::commands::BuildChildrenTransformExt;
 use bevy::render::storage::ShaderBuffer;
+use ntw_formats::anim::Anim;
 use ntw_formats::unit_model::{VariantRole, unit_lod};
 use ntw_sim::battle::model::LandUnit;
 use ntw_sim::battle::morale::MoraleState;
 
-use super::skin::{self, BoneAtlas, SkinExt, SkinMaterial};
-use super::{BattleSim, VOLLEY_FX_SECONDS, VolleyFx};
+use super::skin::{self, BoneAtlas, ClipSlot, SkinExt, SkinMaterial};
+use super::{BattleSim, UnitInfo, VOLLEY_FX_SECONDS, VolleyFx};
 use crate::data::GameData;
 use crate::soldiers::{FigureKit, KitAssets, SoldierLibrary, animation_keys};
 use ntw_formats::unit_animation::{self, DeathCause, Gait, SelectionRng, alternative, family_pick, pick_level};
@@ -50,6 +51,41 @@ fn selection_seed(battle_seed: u32) -> u32 {
 #[derive(Component)]
 pub struct UnitView {
     pub id: u32,
+    /// Where the unit was last seen in `sim.battle.units`: read only while that slot still holds
+    /// unit `id` (checked on every read), re-found by id and kept by [`observe`](Self::observe)
+    /// otherwise (a unit added before it, a reinforcement, moves it), so a lookup is O(1).
+    slot: usize,
+}
+
+impl UnitView {
+    fn new(id: u32, slot: usize) -> Self {
+        Self { id, slot }
+    }
+
+    /// The unit at the kept slot, if that slot still holds it.
+    fn at_slot<'a>(&self, units: &'a [LandUnit]) -> Option<&'a LandUnit> {
+        units.get(self.slot).filter(|u| u.id == self.id)
+    }
+
+    /// The model unit this view shows (`units`: `sim.battle.units`): its slot when that still
+    /// holds it, else found by id.
+    fn unit<'a>(&self, units: &'a [LandUnit]) -> Option<&'a LandUnit> {
+        self.at_slot(units).or_else(|| units.iter().find(|u| u.id == self.id))
+    }
+
+    /// [`unit`](Self::unit), keeping the slot it was found at (once per model tick).
+    fn observe<'a>(&mut self, units: &'a [LandUnit]) -> Option<&'a LandUnit> {
+        if self.at_slot(units).is_none() {
+            self.slot = units.iter().position(|u| u.id == self.id)?;
+        }
+        units.get(self.slot)
+    }
+
+    /// The unit's display info: at the same slot in `sim.info` (kept in `battle.units`' order,
+    /// [`BattleSim::add_unit`]) when that holds it, else found by id.
+    fn info<'a>(&self, sim: &'a BattleSim) -> Option<&'a UnitInfo> {
+        sim.info_at(self.slot, self.id)
+    }
 }
 
 /// Where a unit is drawn between two model ticks.
@@ -130,9 +166,8 @@ pub struct UnitFigures {
     /// Each man's selection number: which alternative clip of every slot he plays
     /// (`unit_animation::alternative`).
     selections: Vec<u32>,
-    /// The unit's animation clock (s), advanced by the frame time × the playback rate of
-    /// the speed level its men play.
-    clock: f32,
+    /// Per-man loop clip, its own time and cross-fade, then the standard bearer's (last).
+    blends: Vec<ClipBlend>,
     /// Per-man action state (fire, reload, melee, death; see `actions`).
     acts: Vec<actions::ManAct>,
     /// Model state at the last frame, to see events: men alive, volleys fired, in melee.
@@ -152,6 +187,202 @@ pub struct UnitFigures {
 /// Model ticks without movement before a unit's men stop walking and stand (0.3 s at the 0.1 s
 /// tick). PROVISIONAL (ours): the exe's stand rule is not traced.
 const STILL_TICKS: u32 = 3;
+
+/// A figure's loop clip (gait, speed level, ready or melee loop): which clip it plays, its own
+/// time in it, and its cross-fade out of the poses shown at its last clip changes.
+///
+/// CONFIRMED rule (`0x007725D0`, UNITS_TERRAIN_FIDELITY.md §1.9): each soldier's display keeps its
+/// own clip and clip time. When the clip changes, the new clip starts at [`carry_phase`]'s time,
+/// the blend time D is the new fragment line's `blend_in_time` (vanilla gaits 0.5 or 0.25 s, 1.0 s
+/// when the line has none; the gear-window override `0x00E6DB90` never applies: no vanilla soldier
+/// clip has the markers) and the elapsed time e restarts at 0. Every frame the drawn pose is the
+/// previous frame's drawn pose blended toward the new clip at weight e / D, then e grows by the
+/// frame time, so the pose shown at the change keeps weight prod(1 - e_k / D) and is gone once
+/// e >= D. With D = 0, or no pose drawn the frame before, the new clip is drawn alone.
+///
+/// PROVISIONAL (ours): the GPU keeps at most two poses frozen at clip changes, with their weights
+/// (newest first, [`skin::Fade`]), rather than the recursive blended pose, so the new clip's
+/// earlier frames do not linger ([`freeze`]: a change never waits; of three poses within one
+/// blend time the lightest is dropped and the two heaviest kept). A one-shot drawn over the loop is
+/// not blended and ends a running cross-fade (one-shots are not blended yet). The exe also lerps
+/// the display root (position, heading) at e / Dr (Dr = 0.5 s, `0x01318038`); that root blend is
+/// not implemented (our men stand at their formation places).
+#[derive(Debug, Clone, Copy, Default)]
+struct ClipBlend {
+    /// The loop clip played (its `Arc` address; 0 before the first frame) and its man's and
+    /// mount's atlas slots.
+    clip: usize,
+    man: ClipSlot,
+    mount: Option<ClipSlot>,
+    /// Its root speed (m/s, [`clip_speed`]) and the figure's time in it (s).
+    speed: f32,
+    time: f32,
+    /// Up to two poses frozen at clip changes (the two heaviest when a third came within one blend
+    /// time, [`freeze`]), newest first (weight 0 = unused); the clip played has the rest of the
+    /// weight.
+    frozen: [Frozen; 2],
+    /// Blend time D (s) of the last change, and the time since it e (s).
+    blend: f32,
+    elapsed: f32,
+    /// The man's and mount's frames drawn at the frame numbered `drawn` (`SkinState::frame`; 0 =
+    /// never drawn).
+    shown: [[u32; 4]; 2],
+    drawn: u32,
+}
+
+/// A pose frozen at a clip change: the man's and mount's clip frames, and its weight.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct Frozen {
+    figs: [[u32; 4]; 2],
+    keep: f32,
+}
+
+/// The loop clip a figure is to play this frame: its `Arc` address, its man's and mount's atlas
+/// slots, and its line's `blend_in_time` (s).
+#[derive(Debug, Clone, Copy)]
+struct LoopClip {
+    key: usize,
+    man: ClipSlot,
+    mount: Option<ClipSlot>,
+    blend_in: f32,
+}
+
+impl ClipBlend {
+    /// One frame of a figure that is to play `want`. `shown` is [`Self::shown`] (the frames drawn
+    /// last frame, if any), `speed` gives `want`'s root speed (called only when the man's or the
+    /// mount's clip changes), `offset`
+    /// is the figure's own phase (a fraction of a clip, `skin::phase`), `advance` the clip time to
+    /// add (frame time x playback rate), `dt` the frame time, and `shot` whether a one-shot is
+    /// drawn instead of the loop.
+    #[allow(clippy::too_many_arguments)]
+    fn step(&mut self, want: &LoopClip, shown: Option<[[u32; 4]; 2]>, speed: impl FnOnce() -> f32, offset: f32, advance: f32, dt: f32, shot: bool) {
+        // A one-shot ends a running cross-fade; so does a frame the figure was skipped (its slot
+        // was drawn without the fade then, so the frozen poses would come back stale).
+        if shot || shown.is_none() {
+            self.frozen = Default::default();
+        }
+        // The mount clip is picked again every frame: in melee the man keeps his idle clip while the
+        // mount's follows the gait. PROVISIONAL (ours): a mount clip changing on its own snaps (the
+        // pair shares one blend; the exe blends each display, rider and mount, on its own).
+        let mount_changed = want.mount != self.mount;
+        self.mount = want.mount;
+        if want.key == self.clip {
+            // The pair's root speed is the faster clip's: a mount change alone changes it too.
+            if mount_changed {
+                self.speed = speed();
+            }
+        } else {
+            let duration = want.man.duration();
+            self.time = carry_phase(self.time, self.man.duration(), self.speed, duration).unwrap_or(offset * duration);
+            self.clip = want.key;
+            self.man = want.man;
+            self.speed = speed();
+            match shown.filter(|_| !shot && want.blend_in > 0.0) {
+                Some(figs) => {
+                    self.frozen = freeze(self.frozen, figs);
+                    self.blend = want.blend_in;
+                    self.elapsed = 0.0;
+                }
+                None => self.frozen = Default::default(),
+            }
+        }
+        if self.fading() {
+            let w = self.elapsed / self.blend;
+            if w >= 1.0 {
+                self.frozen = Default::default();
+            } else {
+                for f in &mut self.frozen {
+                    f.keep *= 1.0 - w;
+                }
+            }
+            self.elapsed += dt;
+        }
+        self.time += advance;
+    }
+
+    /// The frames the figure drew last frame (frame `frame - 1`), if it was drawn then: a figure
+    /// skipped since (its whole unit, or itself) has no pose to fade from.
+    fn shown(&self, frame: u32) -> Option<[[u32; 4]; 2]> {
+        (self.drawn != 0 && self.drawn.wrapping_add(1) == frame).then_some(self.shown)
+    }
+
+    /// Whether a cross-fade runs.
+    fn fading(&self) -> bool {
+        self.frozen.iter().any(|f| f.keep > 0.0)
+    }
+
+    /// The man's and mount's frames to draw: the one-shot's when one is drawn, else the loop's at
+    /// the figure's time (without a mount clip the mount slot repeats the man's frame).
+    fn draw(&mut self, man_shot: Option<[u32; 4]>, mount_shot: Option<[u32; 4]>, frame: u32) -> [[u32; 4]; 2] {
+        let man = man_shot.unwrap_or_else(|| self.man.figure(self.time));
+        let mount = mount_shot.or_else(|| self.mount.map(|m| m.figure(self.time))).unwrap_or(man);
+        self.shown = [man, mount];
+        self.drawn = frame;
+        [man, mount]
+    }
+
+    /// The cross-fade of the man's (`part` 0) or mount's (1) slot, if one runs.
+    fn fade(&self, part: usize) -> Option<skin::Fade> {
+        let [a, b] = self.frozen;
+        self.fading().then(|| skin::fade([a.figs[part], b.figs[part]], [a.keep, b.keep]))
+    }
+}
+
+/// The frozen poses after a clip change: the frame drawn last (`figs`) at the weight the old
+/// clip had (1 - the frozen weights), then the poses frozen before, newest first, without the
+/// ones of weight 0 (a change on the frame after a change: the old clip had none yet). Of three,
+/// the lightest is dropped (the older of equals) and the other two scaled up to its weight
+/// (PROVISIONAL, ours: a small jump of that weight, only on a third change within one blend
+/// time). The weights then add up to 1, the new clip starts at 0, and every pose is gone one
+/// blend time after the last change.
+fn freeze(old: [Frozen; 2], figs: [[u32; 4]; 2]) -> [Frozen; 2] {
+    let live = Frozen { figs, keep: (1.0 - old[0].keep - old[1].keep).max(0.0) };
+    let mut poses = [live, old[0], old[1]];
+    let lightest = (0..3).rev().min_by(|&a, &b| poses[a].keep.total_cmp(&poses[b].keep)).unwrap_or(2);
+    let total: f32 = poses.iter().map(|p| p.keep).sum();
+    let dropped = poses[lightest].keep;
+    poses[lightest].keep = 0.0;
+    let scale = if total - dropped > 0.0 { total / (total - dropped) } else { 1.0 };
+    let mut out = [Frozen::default(); 2];
+    for (slot, pose) in out.iter_mut().zip(poses.iter().filter(|p| p.keep > 0.0)) {
+        *slot = Frozen { keep: pose.keep * scale, ..*pose };
+    }
+    out
+}
+
+/// Writes a figure slot: the frame drawn and, when it cross-fades, its fade entry's number.
+fn put_figure(slot: &mut skin::Figure, frame: [u32; 4], fade: Option<skin::Fade>, fades: &mut Vec<skin::Fade>) {
+    *slot = [frame[0], frame[1], frame[2], 0];
+    if let Some(f) = fade {
+        fades.push(f);
+        slot[3] = fades.len() as u32;
+    }
+}
+
+/// The time (s) a figure starts a new looping clip of `duration` s at, after a clip of
+/// `old_duration` s whose root moved at `old_speed` m/s, when the step phase carries over.
+///
+/// CONFIRMED rule (`0x007725D0`, UNITS_TERRAIN_FIDELITY.md §1.9): after a clip whose root moves
+/// faster than [`MOVING_CLIP_SPEED`] (the old clip's own root speed, anim `+0x60`), the new clip
+/// starts at the old clip's normalised time (old time mod old length / old length x new length);
+/// else at 0 (`None`; ours then starts the figure at its own phase offset, `skin::phase`). Each
+/// figure keeps its own time, so a change carries that man's own phase and leaves the figures
+/// whose clip did not change untouched.
+fn carry_phase(time: f32, old_duration: f32, old_speed: f32, duration: f32) -> Option<f32> {
+    (old_speed > MOVING_CLIP_SPEED && old_duration > 0.0).then(|| time.rem_euclid(old_duration) / old_duration * duration)
+}
+
+/// Clip root speed (m/s) above which the clip left counts as moving for [`carry_phase`]
+/// (`0x0131A7B0`, CONFIRMED).
+const MOVING_CLIP_SPEED: f32 = 0.1;
+
+/// A loop clip's root speed for [`carry_phase`] (`Anim::root_speed`, the exe's anim `+0x60`): the
+/// man's clip's, or a rider's mount clip's when faster. PROVISIONAL (ours): a rider and his
+/// mount share one clip time here, so the pair carries its phase when either moves (the exe
+/// tests each display's own clip).
+fn clip_speed(man: &Anim, mount: Option<&Anim>) -> f32 {
+    mount.map_or(0.0, Anim::root_speed).max(man.root_speed())
+}
 
 /// A unit's ground speed, which picks its gait and speed level (`unit_animation::pick_level`).
 ///
@@ -279,7 +510,10 @@ pub struct SkinState {
     atlas: BoneAtlas,
     figures: Handle<ShaderBuffer>,
     /// One entry per figure slot, rewritten every frame.
-    data: Vec<[u32; 4]>,
+    data: Vec<skin::Figure>,
+    /// The number of the current frame (counted by `sync_views` from 1), so a figure knows whether
+    /// it was drawn the frame before (`ClipBlend::shown`).
+    frame: u32,
     /// The [`BattleSim::build`] these views were built for.
     build: u32,
 }
@@ -510,6 +744,7 @@ pub fn spawn_missing_views(
     label_font: Option<Res<super::labels::LabelFont>>,
     corpses: Query<Entity, With<Corpse>>,
     skin: Option<Res<SkinState>>,
+    mut fade_upload: ResMut<skin::FadeUpload>,
 ) {
     if !sim.is_changed() {
         return;
@@ -586,7 +821,13 @@ pub fn spawn_missing_views(
     let figures_data = vec![[0u32; 4]; (2 * total_men).max(1)];
     info!("Bone atlas: {} matrices ({:.1} MB)", atlas.matrices.len(), atlas.matrices.len() as f64 * 64.0 / 1e6);
     let bones = buffers.add(ShaderBuffer::new(&atlas.bytes(), RenderAssetUsages::RENDER_WORLD));
-    let figures = buffers.add(ShaderBuffer::new(&skin::figure_bytes(&figures_data), RenderAssetUsages::default()));
+    let mut figure_bytes = Vec::new();
+    skin::write_figure_bytes(&figures_data, &mut figure_bytes);
+    let figures = buffers.add(ShaderBuffer::new(&figure_bytes, RenderAssetUsages::default()));
+    // Room for a cross-fade on every figure slot; only the entries in use are written (`skin::FadeUpload`).
+    let fades = buffers.add(ShaderBuffer::with_size(figures_data.len() * std::mem::size_of::<skin::Fade>(), RenderAssetUsages::RENDER_WORLD));
+    fade_upload.buffer = Some(fades.id());
+    fade_upload.entries.clear();
     // 3. Static skinned meshes and skin materials, shared by every man of a kit.
     let mut part_meshes: HashMap<usize, Vec<Handle<Mesh>>> = HashMap::new();
     let mut skin_mats: HashMap<AssetId<StandardMaterial>, Handle<SkinMaterial>> = HashMap::new();
@@ -595,7 +836,7 @@ pub fn spawn_missing_views(
             .entry(h.id())
             .or_insert_with(|| {
                 let base = materials.get(h).cloned().unwrap_or_default();
-                skin_materials.add(SkinMaterial { base, extension: SkinExt { bones: bones.clone(), figures: figures.clone() } })
+                skin_materials.add(SkinMaterial { base, extension: SkinExt { bones: bones.clone(), figures: figures.clone(), fades: fades.clone() } })
             })
             .clone()
     };
@@ -666,10 +907,10 @@ pub fn spawn_missing_views(
         .zip(bearer_parts)
         .collect();
     for ((((info, kits), parts), bkit), bparts) in spawns {
-        let Some(unit) = sim.battle.units.iter().find(|u| u.id == info.id) else { continue };
+        let Some((slot, unit)) = sim.battle.units.iter().enumerate().find(|(_, u)| u.id == info.id) else { continue };
         let pos = Vec2::new(unit.position.0, unit.position.1);
         let parent = commands
-            .spawn((Transform::from_translation(world_of(pos)), Visibility::default(), UnitView { id: info.id }, DrawnPose::at(pos, unit.facing)))
+            .spawn((Transform::from_translation(world_of(pos)), Visibility::default(), UnitView::new(info.id, slot), DrawnPose::at(pos, unit.facing)))
             .id();
         if soldiers.lib.is_some() {
             let mut men = Vec::new();
@@ -757,6 +998,7 @@ pub fn spawn_missing_views(
                 seated: false,
                 ground: GroundSpeed::new(pos, sim.battle.tick, on_ground(unit)),
                 acts: vec![actions::ManAct::default(); men.len()],
+                blends: vec![ClipBlend::default(); men.len() + 1],
                 lods: vec![0; men.len()],
                 last_men: unit.men,
                 last_volleys: unit.volleys_fired,
@@ -767,7 +1009,6 @@ pub fn spawn_missing_views(
                 bearer,
                 men,
                 selections,
-                clock: 0.0,
             });
         }
         let mut label = commands.spawn((Node { position_type: PositionType::Absolute, ..default() }, UnitLabel { id: info.id, text: String::new() }));
@@ -777,14 +1018,21 @@ pub fn spawn_missing_views(
             label.insert((Text::new(""), TextFont { font_size: bevy::text::FontSize::Px(13.0), ..default() }, TextColor(Color::WHITE)));
         }
     }
-    commands.insert_resource(SkinState { atlas, figures, data: figures_data, build: sim.build });
+    commands.insert_resource(SkinState { atlas, figures, data: figures_data, frame: 0, build: sim.build });
 }
 
 /// After every fixed step (`FixedUpdate`, after the model tick and the battle scripts): each
 /// unit's drawn pose and ground speed observe the tick (see [`DrawnPose`], [`GroundSpeed`]).
-pub fn observe_ticks(sim: Res<BattleSim>, mut views: Query<(&UnitView, &mut DrawnPose, Option<&mut UnitFigures>)>) {
-    for (view, mut pose, figures) in &mut views {
-        let Some(unit) = find(&sim, view.id) else { continue };
+pub fn observe_ticks(sim: Res<BattleSim>, mut views: Query<(&mut UnitView, &mut DrawnPose, Option<&mut UnitFigures>)>) {
+    for (mut view, mut pose, figures) in &mut views {
+        // Through `Mut` only when the slot moved, so an unmoved view is not marked changed.
+        let unit = match view.at_slot(&sim.battle.units) {
+            Some(u) => u,
+            None => match view.observe(&sim.battle.units) {
+                Some(u) => u,
+                None => continue,
+            },
+        };
         pose.observe(Vec2::new(unit.position.0, unit.position.1), unit.facing, unit.moved && on_ground(unit));
         if let Some(mut figures) = figures {
             figures.ground.observe_unit(unit, sim.battle.tick);
@@ -811,6 +1059,7 @@ pub fn sync_views(
     children: Query<&Children>,
     mut part_lods: Query<(&mut Mesh3d, &PartLods)>,
     mut pole_bones: Query<&mut PoleBone>,
+    mut fade_upload: ResMut<skin::FadeUpload>,
 ) {
     // Test harness: `NAPOLEON_UNIT_LOD=0` keeps every man at LOD 0 (for frame-rate comparisons).
     let cam_pos = cams.iter().next().map(|g| g.translation()).filter(|_| std::env::var("NAPOLEON_UNIT_LOD").map_or(true, |v| v != "0"));
@@ -819,13 +1068,26 @@ pub fn sync_views(
     let ground = |p: Vec2| map.as_ref().map_or(0.0, |m| m.height_at(p.x, p.y));
     // How far the next model tick has come: the drawn poses blend by it (see `DrawnPose`).
     let alpha = fixed.overstep_fraction();
+    // This frame's cross-fades: no slot points into last frame's (a figure skipped this frame keeps
+    // its frame, without the fade).
+    if !fade_upload.entries.is_empty() {
+        fade_upload.entries.clear();
+        for f in skin.iter_mut().flat_map(|s| s.data.iter_mut()) {
+            f[3] = 0;
+        }
+    }
+    if let Some(s) = skin.as_mut() {
+        s.frame = s.frame.wrapping_add(1).max(1);
+    }
+    let fades = &mut fade_upload.bypass_change_detection().entries;
     for (view, drawn, mut transform, figures) in &mut views {
-        let Some(unit) = find(&sim, view.id) else { continue };
+        let Some(unit) = view.unit(&sim.battle.units) else { continue };
         let (pos, facing) = drawn.blend(Vec2::new(unit.position.0, unit.position.1), unit.facing, alpha);
         transform.translation = world_of(pos);
         // A figure faces local -Z; model facing 0 = +x. See `world_of` for the axes.
         transform.rotation = Quat::from_rotation_y(facing - std::f32::consts::FRAC_PI_2);
-        if let Some(info) = sim.info.iter().find(|i| i.id == view.id).filter(|_| !unit.off_field()) {
+        let info = view.info(&sim);
+        if let Some(info) = info.filter(|_| !unit.off_field()) {
             let half = info.size_m * 0.5;
             let corners = [(-half.x, -half.y), (half.x, -half.y), (half.x, half.y), (-half.x, half.y)]
                 .map(|(x, z)| {
@@ -860,7 +1122,8 @@ pub fn sync_views(
         };
         let now = time.elapsed_secs();
         let Some(skin) = skin.as_mut() else { continue };
-        let SkinState { atlas, data: skin_data, .. } = &mut **skin;
+        let SkinState { atlas, data: skin_data, frame, .. } = &mut **skin;
+        let frame = *frame;
         let mut fallback_rng = ActionRng(SelectionRng(1));
         let action_rng: &mut ActionRng = match action_rng.as_deref_mut() {
             Some(r) => r,
@@ -868,7 +1131,7 @@ pub fn sync_views(
         };
         let length = |a: &std::sync::Arc<ntw_formats::anim::Anim>| atlas.slot(a).map_or(0.0, |s| s.play_length());
         let files = {
-            let ranks = sim.info.iter().find(|i| i.id == view.id).map_or(1, |i| i.ranks.max(1)) as usize;
+            let ranks = info.map_or(1, |i| i.ranks.max(1)) as usize;
             figures.men.len().div_ceil(ranks).max(1)
         };
         let figures = &mut *figures;
@@ -977,11 +1240,11 @@ pub fn sync_views(
         let Some((li, rate)) = pick_level(levels.iter().map(|l| l.speed), ground_speed) else { continue };
         // PROVISIONAL clamp (ours): the exe's playback-rate limits are not traced. (A placement
         // does not show as a huge speed: `GroundSpeed` skips the tick a unit is placed in.)
-        figures.clock += dt * rate.clamp(0.25, 4.0);
-        let clock = figures.clock;
-        // Every man plays his own alternative clips, with his own phase (GPU skinning): a
+        let advance = dt * rate.clamp(0.25, 4.0);
+        // Every man plays his own alternative clips, with his own clip time (GPU skinning): a
         // one-shot if one runs, else the loop of the unit's mode.
         for i in 0..figures.men.len() {
+            let shown = figures.blends[i].shown(frame);
             let kit = &figures.kits[i % figures.kits.len()];
             let sel = figures.selections.get(i).copied().unwrap_or(0);
             let act = &mut figures.acts[i];
@@ -995,17 +1258,18 @@ pub fn sync_views(
             }
             // The loop: gait level, or the mode's action loop (stand level if the table has none).
             let Some(level) = kit.gait_levels(gait).and_then(|l| l.get(li)) else { continue };
-            let gait_pair = (level.man[alternative(sel, level.man.len())].clone(), (!level.mount.is_empty()).then(|| level.mount[alternative(sel, level.mount.len())].clone()));
             let loop_slot = match mode {
-                Mode::Ready { aiming } if aiming && kit.actions.contains_key(unit_animation::AIM) => Some(unit_animation::AIM.to_string()),
-                Mode::Ready { .. } => Some(unit_animation::COMBAT_READY.to_string()),
-                Mode::Melee => figures.melee_idle.get(alternative(sel, figures.melee_idle.len().max(1))).cloned(),
+                Mode::Ready { aiming } if aiming && kit.actions.contains_key(unit_animation::AIM) => Some(unit_animation::AIM),
+                Mode::Ready { .. } => Some(unit_animation::COMBAT_READY),
+                Mode::Melee => figures.melee_idle.get(alternative(sel, figures.melee_idle.len().max(1))).map(String::as_str),
                 Mode::Gait(_) => None,
             };
-            let (loop_man, loop_mount) = match loop_slot.as_deref().and_then(|s| actions::pick(kit, s, sel)) {
-                Some((m, mount)) => (m, mount.or(gait_pair.1.clone())),
-                None => gait_pair.clone(),
-            };
+            // The action loop's man clip and line; its mount clip, else the gait level's.
+            let action = loop_slot.and_then(|s| kit.actions.get(s));
+            let man_level = action.unwrap_or(level);
+            let mount_level = action.filter(|a| !a.mount.is_empty()).unwrap_or(level);
+            let loop_man = &man_level.man[alternative(sel, man_level.man.len())];
+            let loop_mount = (!mount_level.mount.is_empty()).then(|| &mount_level.mount[alternative(sel, mount_level.mount.len())]);
             let slot = figures.first_slot + i;
             let shot = act.shot.as_ref().filter(|s| now >= s.start);
             let (man_fig, mount_fig) = match shot {
@@ -1017,38 +1281,54 @@ pub fn sync_views(
                 }
                 None => (None, None),
             };
-            let Some(man_clip) = atlas.slot(&loop_man) else { continue };
-            let t = clock + skin::phase(view.id, i) * man_clip.duration();
-            let man_fig = man_fig.unwrap_or_else(|| man_clip.figure(t));
-            skin_data[2 * slot] = man_fig;
+            let Some(man_clip) = atlas.slot(loop_man) else { continue };
             // A paired mount clip has the same frame count: same frame, same blend.
-            skin_data[2 * slot + 1] = mount_fig.or_else(|| loop_mount.as_ref().and_then(|m| atlas.slot(m)).map(|m| m.figure(t))).unwrap_or(man_fig);
+            let want = LoopClip {
+                key: std::sync::Arc::as_ptr(loop_man) as usize,
+                man: man_clip,
+                mount: loop_mount.and_then(|m| atlas.slot(m)),
+                blend_in: man_level.blend_in_of(sel),
+            };
+            let blend = &mut figures.blends[i];
+            let speed = || clip_speed(loop_man, loop_mount.map(|m| &**m));
+            blend.step(&want, shown, speed, skin::phase(view.id, i), advance, dt, man_fig.is_some());
+            let [man_now, mount_now] = blend.draw(man_fig, mount_fig, frame);
+            put_figure(&mut skin_data[2 * slot], man_now, blend.fade(0), fades);
+            if mount_fig.is_none() && blend.mount.is_none() {
+                // On foot the mount slot is unused: the man's slot again, without a second fade.
+                skin_data[2 * slot + 1] = skin_data[2 * slot];
+            } else {
+                put_figure(&mut skin_data[2 * slot + 1], mount_now, blend.fade(1), fades);
+            }
         }
         // The standard bearer: the same clip choice as a man, on his own figure slot, and the
         // pole bone's matrix for the frame he is on so `flag::sync_flags` can hang the cloth from
         // it. He is not one of `unit.men`, so he never fires and never dies with the count.
         if let Some(bearer) = figures.bearer.as_ref() {
+            let blend = &mut figures.blends[figures.men.len()];
+            let shown = blend.shown(frame);
             // A stable selection number of his own, from the unit's first man (deterministic, and
             // it only picks which alternative clip of the gait he plays).
             let sel = figures.selections.first().copied().unwrap_or(0);
             let level = bearer.kit.gait_levels(gait).and_then(|l| l.get(li));
-            let clip = level
-                .map(|l| l.man[alternative(sel, l.man.len())].clone())
-                .or_else(|| bearer.kit.anims(gait).map(|a| a.man.clone()));
-            if let Some(clip) = clip
-                && let Some(slot_atlas) = atlas.slot(&clip)
+            // Without levels he plays the kit's per-gait clip, whose line is not kept: drawn at
+            // once on a change (no blend time known).
+            let clip = level.map(|l| (&l.man[alternative(sel, l.man.len())], l.blend_in_of(sel))).or_else(|| bearer.kit.anims(gait).map(|a| (&a.man, 0.0)));
+            let bslot = figures.first_slot + figures.men.len();
+            if let Some((clip, blend_in)) = clip
+                && let Some(slot_atlas) = atlas.slot(clip)
+                && bslot * 2 + 1 < skin_data.len()
             {
-                let t = clock + skin::phase(view.id, usize::MAX) * slot_atlas.duration();
-                let fig = slot_atlas.figure(t);
-                let bslot = figures.first_slot + figures.men.len();
-                if bslot * 2 + 1 < skin_data.len() {
-                    skin_data[2 * bslot] = fig;
-                    skin_data[2 * bslot + 1] = fig;
-                    if let Some(bone) = bone_at(atlas, &fig, ntw_formats::cloth::POLE_BONE as usize)
-                        && let Ok(mut p) = pole_bones.get_mut(bearer.entity)
-                    {
-                        p.model = bone;
-                    }
+                let want = LoopClip { key: std::sync::Arc::as_ptr(clip) as usize, man: slot_atlas, mount: None, blend_in };
+                blend.step(&want, shown, || clip.root_speed(), skin::phase(view.id, usize::MAX), advance, dt, false);
+                let [fig, _] = blend.draw(None, None, frame);
+                let fade = blend.fade(0);
+                put_figure(&mut skin_data[2 * bslot], fig, fade, fades);
+                skin_data[2 * bslot + 1] = skin_data[2 * bslot];
+                if let Some(bone) = bone_at(atlas, &fig, fade.as_ref(), ntw_formats::cloth::POLE_BONE as usize)
+                    && let Ok(mut p) = pole_bones.get_mut(bearer.entity)
+                {
+                    p.model = bone;
                 }
             }
             // He stands on the terrain under him, and is hidden with the rest of his unit.
@@ -1065,20 +1345,43 @@ pub fn sync_views(
             }
         }
     }
+    // Fades pushed above bypass change detection: mark the frame's entries for the render world.
+    if !fade_upload.entries.is_empty() {
+        fade_upload.set_changed();
+    }
     if let Some(skin) = skin.as_ref()
         && let Some(mut buffer) = buffers.get_mut(&skin.figures)
     {
-        buffer.data = Some(skin::figure_bytes(&skin.data));
+        skin::write_figure_bytes(&skin.data, buffer.data.get_or_insert_default());
     }
 }
 
-/// One bone's matrix, in the figure's own model space, from the four numbers a figure slot holds
-/// (`skin::ClipSlot::figure`): the two frames' starts in the bone storage and the blend between
-/// them. The bone's own index offsets into the frame.
-fn bone_at(atlas: &BoneAtlas, fig: &[u32; 4], bone: usize) -> Option<[f32; 16]> {
-    let a = (*fig.first()? as usize).checked_add(bone)?;
-    let b = (*fig.get(1)? as usize).checked_add(bone)?;
-    let t = f32::from_bits(*fig.get(2)?);
+/// One bone's matrix, in the figure's own model space, as the skinning shader poses it: the clip
+/// frame the figure shows (`[frame A start, frame B start, blend A->B bits, _]`,
+/// `skin::ClipSlot::figure`), cross-faded with its frozen poses when it has a [`skin::Fade`].
+fn bone_at(atlas: &BoneAtlas, frame: &[u32; 4], fade: Option<&skin::Fade>, bone: usize) -> Option<[f32; 16]> {
+    let now = frame_bone(atlas, frame, bone)?;
+    let Some(fade) = fade else { return Some(now) };
+    let mut out = now;
+    for f in fade {
+        let keep = f32::from_bits(f[3]);
+        if keep > 0.0
+            && let Some(m) = frame_bone(atlas, f, bone)
+        {
+            for k in 0..16 {
+                out[k] += (m[k] - now[k]) * keep;
+            }
+        }
+    }
+    Some(out)
+}
+
+/// One bone's matrix from a clip frame `[frame A start, frame B start, blend A->B bits, _]`
+/// (`skin::ClipSlot::figure`). The bone's own index offsets into the frame.
+fn frame_bone(atlas: &BoneAtlas, frame: &[u32; 4], bone: usize) -> Option<[f32; 16]> {
+    let a = (frame[0] as usize).checked_add(bone)?;
+    let b = (frame[1] as usize).checked_add(bone)?;
+    let t = f32::from_bits(frame[2]);
     let ma = atlas.matrices.get(a)?;
     let mb = atlas.matrices.get(b).unwrap_or(ma);
     Some(std::array::from_fn(|k| ma[k] + (mb[k] - ma[k]) * t))
@@ -1189,6 +1492,51 @@ mod tests {
         }
         assert!((frames[2] - step.x * 0.5).abs() < 1e-6, "half way at half a tick");
         assert_eq!(pose.blend(step, 0.0, 1.0).0, step, "at the model pose when the next tick is due");
+    }
+
+    /// Polish (O(n²) per tick): a view reads its unit at its kept slot; a unit added before it
+    /// (a reinforcement, `Battle::add_unit` keeps id order) moves it, and the view finds it again
+    /// by id and keeps the new slot; a unit no longer there is none.
+    #[test]
+    fn a_view_finds_its_unit_at_its_slot_and_again_after_it_moved() {
+        let mut units = vec![LandUnit::new(2, 0, 100, (0.0, 0.0)), LandUnit::new(5, 1, 100, (0.0, 0.0))];
+        let mut view = UnitView::new(5, 1);
+        assert_eq!(view.observe(&units).map(|u| u.id), Some(5));
+        units.insert(0, LandUnit::new(1, 0, 100, (0.0, 0.0)));
+        assert_eq!(view.unit(&units).map(|u| u.id), Some(5), "found by id while the slot is stale");
+        assert_eq!(view.observe(&units).map(|u| u.id), Some(5));
+        assert_eq!(view.slot, 2, "the new slot is kept");
+        units.retain(|u| u.id != 5);
+        assert!(view.unit(&units).is_none() && view.observe(&units).is_none());
+    }
+
+    /// Review of the polish-hotpaths branch: `sync_views` read each view's info by a linear search
+    /// of `sim.info` (twice per view per frame), and `observe_ticks` marked every view changed
+    /// each tick. The info is read at the view's slot (`info` keeps `battle.units`' order), also
+    /// after a lower-id reinforcement moved it, and a view is changed only when its slot moved.
+    #[test]
+    fn a_view_reads_its_info_at_its_slot_and_changes_only_when_moved() {
+        use bevy::ecs::system::RunSystemOnce;
+        use ntw_sim::battle::fatigue::KvFatigue;
+        use ntw_sim::battle::model::Battle;
+        use ntw_sim::battle::morale::KvMorale;
+        let info = |id| UnitInfo { id, ranks: id, ..UnitInfo::default() };
+        let mut sim = BattleSim::new(Battle::new(1, KvMorale::default(), KvFatigue::default()), 1);
+        sim.add_unit(LandUnit::new(2, 0, 100, (0.0, 0.0)), info(2));
+        sim.add_unit(LandUnit::new(5, 1, 100, (0.0, 900.0)), info(5));
+        let mut world = World::new();
+        world.insert_resource(sim);
+        let e = world.spawn((UnitView::new(5, 1), DrawnPose::at(Vec2::ZERO, 0.0))).id();
+        let changed = |world: &World| world.entity(e).get_ref::<UnitView>().unwrap().last_changed();
+        let spawned = changed(&world);
+        world.run_system_once(observe_ticks).unwrap();
+        assert_eq!(changed(&world), spawned, "slot unmoved: the view is not marked changed");
+        world.resource_mut::<BattleSim>().add_unit(LandUnit::new(1, 0, 100, (0.0, -50.0)), info(1));
+        world.run_system_once(observe_ticks).unwrap();
+        assert_ne!(changed(&world), spawned, "slot moved: kept");
+        let view = world.entity(e).get::<UnitView>().unwrap();
+        assert_eq!(view.slot, 2);
+        assert_eq!(view.info(world.resource::<BattleSim>()).map(|i| i.ranks), Some(5));
     }
 
     /// Anything that is not a moving tick is drawn at once: a still tick, a placement jump, and a
@@ -1381,6 +1729,330 @@ mod tests {
     fn every_battle_gets_its_own_build() {
         let (a, b) = (super::super::next_build(), super::super::next_build());
         assert_ne!(a, b);
+    }
+
+    /// Loop clips (their `Arc` addresses in `sync_views`), each 1 s at 20 frames/s, 1 bone, at
+    /// their own place in the bone atlas.
+    fn clip(key: usize, blend_in: f32) -> LoopClip {
+        LoopClip { key, man: ClipSlot { base: key as u32, frames: 20, bones: 1, rate: 20.0 }, mount: None, blend_in }
+    }
+    const A: usize = 0x1000;
+    const B: usize = 0x2000;
+    const C: usize = 0x3000;
+    const D: usize = 0x4000;
+    /// A stand clip's root speed (m/s); clips moving at [`WALK`] count as moving.
+    const STAND: f32 = 0.0;
+
+    /// A figure and the number of the frame it is on.
+    #[derive(Default)]
+    struct Fig {
+        b: ClipBlend,
+        frame: u32,
+    }
+    impl std::ops::Deref for Fig {
+        type Target = ClipBlend;
+        fn deref(&self) -> &ClipBlend {
+            &self.b
+        }
+    }
+    impl std::ops::DerefMut for Fig {
+        fn deref_mut(&mut self) -> &mut ClipBlend {
+            &mut self.b
+        }
+    }
+    impl Fig {
+        /// A new frame starts: what the figure drew the frame before, if it was drawn then.
+        fn next(&mut self) -> Option<[[u32; 4]; 2]> {
+            self.frame += 1;
+            self.b.shown(self.frame)
+        }
+        /// One frame as `sync_views` runs it: step, draw.
+        fn run(&mut self, want: &LoopClip, speed: f32, dt: f32) -> [[u32; 4]; 2] {
+            let shown = self.next();
+            self.b.step(want, shown, || speed, 0.0, dt, dt, false);
+            self.b.draw(None, None, self.frame)
+        }
+    }
+
+    /// The weights of the pose shown at a change from A to B, every frame from the change until
+    /// it is gone (dt and blend times are exact in binary, so the products are too).
+    fn fade(blend_in: f32, dt: f32) -> Vec<f32> {
+        let mut b = Fig::default();
+        b.run(&clip(A, blend_in), WALK, dt);
+        assert_eq!(b.frozen[0].keep, 0.0, "the first clip is drawn at once");
+        let shown = b.run(&clip(A, blend_in), WALK, dt);
+        assert_eq!(b.frozen[0].keep, 0.0, "no change");
+        b.run(&clip(B, blend_in), WALK, dt);
+        assert_eq!(b.frozen[0].figs, shown, "fades out of what was drawn the frame before the change");
+        let mut keeps = vec![b.frozen[0].keep];
+        while *keeps.last().unwrap() > 0.0 {
+            b.run(&clip(B, blend_in), WALK, dt);
+            keeps.push(b.frozen[0].keep);
+            assert!(keeps.len() < 100, "the cross-fade ends");
+        }
+        keeps
+    }
+
+    /// `0x007725D0`: the pose shown at a clip change keeps weight prod(1 - e_k / D): whole on the
+    /// change frame, gone once e >= D. D = 0.5 s (most vanilla WALK / RUN lines), 8 frames/s.
+    #[test]
+    fn a_clip_change_cross_fades_over_the_lines_blend_in_time() {
+        // e = 0, 0.125, 0.25, 0.375, 0.5: weights 1, 0.75, 0.75 x 0.5, 0.375 x 0.25, gone.
+        assert_eq!(fade(0.5, 0.125), [1.0, 0.75, 0.375, 0.09375, 0.0]);
+        // A 0.25 s line (the other vanilla gait value) is gone twice as soon.
+        assert_eq!(fade(0.25, 0.125), [1.0, 0.5, 0.0]);
+    }
+
+    /// A line without `blend_in_time` gets the parser's 1.0 s (`FragmentClip::blend_in`): still
+    /// blending half way, gone at 1.0 s.
+    #[test]
+    fn a_line_without_blend_in_time_cross_fades_over_one_second() {
+        let line = |blend_in_time| ntw_formats::battle_animation::FragmentClip { filename: "w.anim".into(), blend_in_time, attributes: vec![] };
+        assert_eq!(line(Some(0.25)).blend_in(), 0.25);
+        let d = line(None).blend_in();
+        assert_eq!(d, 1.0);
+        let keeps = fade(d, 0.125);
+        assert_eq!(keeps.len(), 9, "change frame + e = 0.125 .. 1.0: {keeps:?}");
+        assert!(keeps[4] > 0.0 && keeps[4] < keeps[3], "mid-way at e = 0.5: {keeps:?}");
+        assert!(keeps.windows(2).all(|w| w[1] < w[0]), "fades steadily: {keeps:?}");
+    }
+
+    /// Each man's line: the alternative he plays gives the blend time.
+    #[test]
+    fn the_blend_time_is_the_played_alternatives_line() {
+        let anim = || std::sync::Arc::new(ntw_formats::anim::Anim { frame_rate: 20.0, duration: 1.0, bones: vec![], frames: vec![], events: vec![] });
+        let level = crate::soldiers::KitLevel { speed: 1.4, man: vec![anim(), anim()], blend_in: vec![0.5, 0.25], mount: vec![] };
+        assert_eq!([0, 1, 2, 3].map(|sel| level.blend_in_of(sel)), [0.5, 0.25, 0.5, 0.25]);
+    }
+
+    /// A zero blend time draws the new clip at once (the exe draws the new clip alone for D = 0).
+    #[test]
+    fn a_zero_blend_time_snaps() {
+        let mut b = Fig::default();
+        b.run(&clip(A, 0.5), WALK, 0.125);
+        b.run(&clip(B, 0.0), WALK, 0.125);
+        assert_eq!(b.frozen, [Frozen::default(); 2]);
+        assert_eq!(b.fade(0), None);
+    }
+
+    /// Review bug 1: each figure keeps its own clip time, so a figure whose clip did not change
+    /// (a standard bearer, a man whose kit has no AIM) goes on smoothly when another man's clip
+    /// changes; and the man who changes carries his own phase.
+    #[test]
+    fn a_figure_whose_clip_did_not_change_keeps_its_time() {
+        let (mut changing, mut steady) = (Fig::default(), Fig::default());
+        for _ in 0..10 {
+            changing.run(&clip(A, 0.5), WALK, 0.125);
+            steady.run(&clip(A, 0.5), WALK, 0.125);
+        }
+        let before = steady.time;
+        changing.run(&clip(B, 0.5), WALK, 0.125);
+        steady.run(&clip(A, 0.5), WALK, 0.125);
+        assert_eq!(steady.time, before + 0.125, "only the frame's advance");
+        assert_eq!(steady.frozen[0].keep, 0.0, "and no cross-fade");
+        // 1.25 s into the 1 s walk = a quarter step: B (also 1 s) goes on from there.
+        assert_eq!(changing.time, 0.25 + 0.125);
+    }
+
+    /// Review bug 2: a change during a running cross-fade keeps the older pose at its weight and
+    /// freezes the pose drawn last at the rest, so the drawn pose does not jump.
+    #[test]
+    fn a_change_mid_fade_does_not_drop_the_older_pose() {
+        let mut b = Fig::default();
+        b.run(&clip(A, 0.5), WALK, 0.125);
+        let at_a = b.run(&clip(A, 0.5), WALK, 0.125);
+        b.run(&clip(B, 0.5), WALK, 0.125);
+        let at_b = b.run(&clip(B, 0.5), WALK, 0.125);
+        assert_eq!(b.frozen[0].keep, 0.75);
+        // The level changes 0.125 s later: the frame drawn was B at 0.25 and A at 0.75.
+        b.run(&clip(C, 0.5), WALK, 0.125);
+        assert_eq!(b.frozen, [Frozen { figs: at_b, keep: 0.25 }, Frozen { figs: at_a, keep: 0.75 }]);
+        assert_eq!(b.clip, C);
+    }
+
+    /// Runs `keys` as clip changes on consecutive frames (then holds the last), and returns the
+    /// frames until the cross-fade is gone; checks every change is taken at once and the frozen
+    /// weights never add up to more than 1.
+    fn quick_changes(keys: &[usize], blend_in: f32, dt: f32) -> usize {
+        let mut b = Fig::default();
+        b.run(&clip(A, blend_in), WALK, dt);
+        for &k in keys {
+            b.run(&clip(k, blend_in), WALK, dt);
+            assert_eq!(b.clip, k, "a change never waits");
+            let sum: f32 = b.frozen.iter().map(|f| f.keep).sum();
+            assert!(sum <= 1.0 + 1e-6, "weights {:?}", b.frozen);
+        }
+        let last = *keys.last().unwrap();
+        let mut frames = 0;
+        while b.fading() {
+            b.run(&clip(last, blend_in), WALK, dt);
+            frames += 1;
+            assert!(frames < 1000, "the cross-fade ends");
+        }
+        assert_eq!(b.clip, last);
+        assert_eq!(b.fade(0), None);
+        frames
+    }
+
+    /// Round-2 review: a change on the frame right after a change (the old clip had no weight
+    /// yet) used to leave a frozen pose that never faded and held every later change. Back-to-back
+    /// changes, and three and four in quick succession, end on the newest clip with no fade within
+    /// one blend time of the last change.
+    #[test]
+    fn back_to_back_changes_never_stick() {
+        // D = 0.5 s at 8 frames/s: gone at e = 0.5, the 4th frame after the last change.
+        assert_eq!(quick_changes(&[B, C], 0.5, 0.125), 4);
+        assert_eq!(quick_changes(&[B, C, D], 0.5, 0.125), 4);
+        assert_eq!(quick_changes(&[B, C, D, A], 0.5, 0.125), 4);
+        assert_eq!(quick_changes(&[B, A, B, A, B], 0.5, 0.1), 5);
+        // At ~10 frames/s the same, 3 frames at 0.25 s.
+        assert_eq!(quick_changes(&[B, C, D, A], 0.25, 0.1), 3);
+        // The change on the next frame: B had weight 0 yet, so only A stays, whole again as the
+        // blend restarts (e = 0).
+        let mut b = Fig::default();
+        b.run(&clip(A, 0.5), WALK, 0.125);
+        let at_a = b.run(&clip(A, 0.5), WALK, 0.125);
+        b.run(&clip(B, 0.5), WALK, 0.125);
+        b.run(&clip(C, 0.5), WALK, 0.125);
+        assert_eq!(b.frozen, [Frozen { figs: at_a, keep: 1.0 }, Frozen::default()]);
+    }
+
+    /// A third pose within one blend time: the lightest of the three is dropped and the other two
+    /// scaled up to its weight, so the weights still add up to 1.
+    #[test]
+    fn a_third_pose_drops_the_lightest() {
+        let pose = |n: u32| [[n, n, 0, 0], [n, n, 0, 0]];
+        let old = [Frozen { figs: pose(1), keep: 0.25 }, Frozen { figs: pose(2), keep: 0.5 }];
+        // The live clip had 0.25 too: the older 0.25 (the first of the lightest) goes.
+        let out = freeze(old, pose(3));
+        assert_eq!(out, [Frozen { figs: pose(3), keep: 1.0 / 3.0 }, Frozen { figs: pose(2), keep: 2.0 / 3.0 }]);
+        let old = [Frozen { figs: pose(1), keep: 0.1 }, Frozen { figs: pose(2), keep: 0.3 }];
+        let out = freeze(old, pose(3));
+        assert_eq!(out.map(|f| f.figs), [pose(3), pose(2)]);
+        assert!((out[0].keep + out[1].keep - 1.0).abs() < 1e-6);
+    }
+
+    /// Manager review: the mount clip is picked again every frame, also when the man's clip does
+    /// not change (in melee the man keeps his idle clip while the horse follows the gait).
+    #[test]
+    fn the_mount_clip_follows_while_the_mans_stays() {
+        let mut b = Fig::default();
+        let stand = ClipSlot { base: 500, frames: 20, bones: 1, rate: 20.0 };
+        let walk = ClipSlot { base: 900, ..stand };
+        b.run(&LoopClip { mount: Some(stand), ..clip(A, 0.5) }, STAND, 0.125);
+        let drawn = b.run(&LoopClip { mount: Some(walk), ..clip(A, 0.5) }, STAND, 0.125);
+        assert_eq!(b.mount, Some(walk));
+        assert_eq!(drawn[1], walk.figure(b.time));
+    }
+
+    /// Review round 3: a mount clip changing on its own also changes the pair's root speed, so the
+    /// man's next change carries the phase when the horse moves (melee idle, horse walking, melee
+    /// ends) and not when it stopped.
+    #[test]
+    fn a_mount_change_alone_updates_the_pairs_speed() {
+        let stand = ClipSlot { base: 500, frames: 20, bones: 1, rate: 20.0 };
+        let walk = ClipSlot { base: 900, ..stand };
+        // The man on A throughout; the horse on `first` for 10 frames, then `then` (moving at
+        // `speed`) for one; then the man changes to B.
+        let time_after = |first: ClipSlot, first_speed: f32, then: ClipSlot, speed: f32| {
+            let mut b = Fig::default();
+            for _ in 0..10 {
+                b.run(&LoopClip { mount: Some(first), ..clip(A, 0.5) }, first_speed, 0.125);
+            }
+            b.run(&LoopClip { mount: Some(then), ..clip(A, 0.5) }, speed, 0.125);
+            assert_eq!(b.speed, speed);
+            b.run(&LoopClip { mount: Some(then), ..clip(B, 0.5) }, speed, 0.125);
+            b.time
+        };
+        // 1.375 s into the 1 s clip: B goes on from 0.375, plus the frame's advance.
+        assert_eq!(time_after(stand, STAND, walk, WALK), 0.5);
+        // The horse stopped: B starts at the figure's offset (0 here).
+        assert_eq!(time_after(walk, WALK, stand, STAND), 0.125);
+    }
+
+    /// Review bug 4: the phase carries over from the old clip's own root speed: after a stand
+    /// clip the new clip starts at the figure's own offset, after a walk at the walk's phase.
+    #[test]
+    fn the_phase_carries_by_the_old_clips_own_root_speed() {
+        let step = |old_speed: f32| {
+            let mut b = Fig::default();
+            for _ in 0..10 {
+                b.run(&clip(A, 0.5), old_speed, 0.125);
+            }
+            let shown = b.next();
+            // The new clip is 0.5 s long; the figure's own offset is 0.5 of a clip.
+            let half = LoopClip { man: ClipSlot { frames: 10, ..clip(B, 0.5).man }, ..clip(B, 0.5) };
+            b.step(&half, shown, || WALK, 0.5, 0.0, 0.125, false);
+            b.time
+        };
+        assert_eq!(step(WALK), 0.125, "1.25 s into a 1 s walk = a quarter of the 0.5 s clip");
+        assert_eq!(step(STAND), 0.25, "from a still clip: the figure's own offset");
+        assert_eq!(carry_phase(2.25, 1.0, 0.05, 0.5), None, "0.05 m/s is not moving (0x0131A7B0)");
+        assert_eq!(carry_phase(2.25, 0.0, WALK, 0.5), None, "a zero-length clip");
+    }
+
+    /// Review bug 5: a figure that was not drawn last frame (`sync_views` skipped it) has no pose
+    /// to fade from: its next clip is drawn at once.
+    #[test]
+    fn a_figure_not_drawn_last_frame_does_not_fade() {
+        let mut b = Fig::default();
+        b.run(&clip(A, 0.5), WALK, 0.125);
+        // Skipped for two frames (its unit, or the man himself, hit a `continue`).
+        b.frame += 2;
+        b.run(&clip(B, 0.5), WALK, 0.125);
+        assert_eq!(b.clip, B);
+        assert_eq!(b.frozen[0].keep, 0.0);
+    }
+
+    /// Round-2 review: a figure skipped while it cross-fades was drawn without the fade then
+    /// (`sync_views` clears every slot's fade each frame); drawn again, the fade does not come back
+    /// with the poses frozen before the skip.
+    #[test]
+    fn a_skip_mid_fade_ends_the_fade() {
+        let mut b = Fig::default();
+        b.run(&clip(A, 0.5), WALK, 0.125);
+        b.run(&clip(A, 0.5), WALK, 0.125);
+        b.run(&clip(B, 0.5), WALK, 0.125);
+        assert!(b.fading());
+        // Skipped for one frame, then drawn again on the same clip.
+        b.frame += 1;
+        b.run(&clip(B, 0.5), WALK, 0.125);
+        assert!(!b.fading());
+        assert_eq!(b.fade(0), None);
+    }
+
+    /// A one-shot drawn over the loop: not blended, it ends a running cross-fade, and the loop
+    /// clip is still followed, so the loop shown after it does not fade (PROVISIONAL).
+    #[test]
+    fn a_one_shot_follows_the_loop_clip_without_fading() {
+        let mut b = Fig::default();
+        b.run(&clip(A, 0.5), WALK, 0.125);
+        b.run(&clip(B, 0.5), WALK, 0.125);
+        assert_eq!(b.frozen[0].keep, 1.0);
+        let shown = b.next();
+        b.step(&clip(C, 0.5), shown, || WALK, 0.0, 0.125, 0.125, true);
+        assert_eq!(b.b.draw(Some([7, 8, 0, 0]), None, b.frame)[0], [7, 8, 0, 0]);
+        assert_eq!((b.clip, b.frozen[0].keep), (C, 0.0));
+        b.run(&clip(C, 0.5), WALK, 0.125);
+        assert_eq!(b.frozen[0].keep, 0.0);
+    }
+
+    /// The GPU side: a fading figure's slot points at its fade entry (1 + index), the others hold
+    /// 0; and the pole bone is posed as the shader does: now + (frozen - now) x weight, per pose.
+    #[test]
+    fn fades_are_numbered_and_posed_like_the_shader() {
+        let mut fades = Vec::new();
+        let mut slots = [[9u32; 4]; 2];
+        let fade = skin::fade([[1, 1, 0, 0], [2, 2, 0, 0]], [0.25, 0.5]);
+        put_figure(&mut slots[0], [0, 0, 0, 0], None, &mut fades);
+        put_figure(&mut slots[1], [0, 0, 0, 0], Some(fade), &mut fades);
+        assert_eq!(slots, [[0, 0, 0, 0], [0, 0, 0, 1]]);
+        assert_eq!(fades, [fade]);
+        let mut atlas = BoneAtlas::default();
+        atlas.matrices = vec![[0.0; 16], [4.0; 16], [8.0; 16]];
+        // 0 x 0.25 + 4 x 0.25 + 8 x 0.5.
+        assert_eq!(bone_at(&atlas, &[0, 0, 0, 1], Some(&fade), 0), Some([5.0; 16]));
+        assert_eq!(bone_at(&atlas, &[1, 1, 0, 0], None, 0), Some([4.0; 16]));
     }
 }
 

@@ -405,10 +405,12 @@ impl CampaignModel {
         }
 
         // Recruitment (`0x00B71FB0` with force 0, from the region update `0x00AAE820`, CONFIRMED): first
-        // the items whose unit the region can no longer recruit are removed (`0x00B1A820`, the cancel
-        // path; refunded like a cancel, INFERRED). The cancel path also adds campaign variable 37
-        // (`recruitment_population_cost`) to the queue manager's +0x54 (round 12 step 1; meaning
-        // UNKNOWN, the model has no population simulation).
+        // the items whose unit the region can no longer recruit are removed through the cancel path
+        // `0x00B1A820` with 1, so each is refunded like a cancel (CONFIRMED: the cancel command's call,
+        // crediting the item's cost; 32-bit wrapping sums, [`super::treasury::refund`]). The cancel path
+        // also credits campaign variable 37 (`recruitment_population_cost`, 0 in the shipped data) back to the
+        // region's recruitable population (`0x00A61AA0`), which the model does not hold (PROVISIONAL, see
+        // [`CampaignModel::recruitable_entry_flags`]).
         let recruitable = self.recruitable_units(region);
         let owner = reg.owner;
         let mut refund = 0i32;
@@ -416,7 +418,7 @@ impl CampaignModel {
             r.recruitment_queue.retain(|i| {
                 let keep = recruitable.contains(&i.unit_key);
                 if !keep {
-                    refund = refund.saturating_add(i.cost);
+                    refund = refund.wrapping_add(i.cost);
                 }
                 keep
             });
@@ -424,7 +426,7 @@ impl CampaignModel {
         if refund != 0
             && let Some(f) = self.world.factions.get_mut(&owner)
         {
-            f.treasury = f.treasury.saturating_add(refund);
+            super::treasury::refund(&mut f.treasury, refund);
         }
         let reg = &self.world.regions[&region];
         // Capacity (the queue's method 1: `recruitment_points`), read before the queues change.

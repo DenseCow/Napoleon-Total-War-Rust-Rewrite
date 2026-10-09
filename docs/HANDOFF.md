@@ -16,15 +16,13 @@ Last updated: 2026-10-08. Main tests at last full run (2026-10-08): `cargo test 
   merge, applying the worker's BACKLOG ticks/Polish lines in the merge commit → `bash tools/progress.sh`
   → push (the hook syncs public #2) → publish in batches. Running work = the BACKLOG `(running: …)`
   markers and `git worktree list`; merged work = `git log`.
-- **Stopped at the usage cap (2026-10-08 night), resume in this order:**
-  1. `work/diplomacy2` (NR-diplomacy2, head `7b143591` WIP: builds, tests not updated). Rules traced and
-     CONFIRMED (UI_FIDELITY.md §4.7). Done in code: regnal numeral, Power/Wealth words, button lists.
-     Next: in `ui/campaign/diplomacy.rs` `post_negotiation_started` pass the greeting from
-     `model.negotiation_greeting` (not ""), fix `MinisterPortraitPath`, update the stale test
-     `faction_rankings_are_strings`, a test per difference, clippy 0, full tests; then the first
-     `/code-review medium` of `870d6f19...`, merge, in-game check vs the three original screens.
-  2. `work/campaign-0b` (NR-campaign-0b): see its last commit message / report for where it stopped.
-  3. `work/polish-hotpaths` (NR-polish-hotpaths, uncommitted start in ntw_data/src/record.rs).
+- **Resume points (2026-10-09):**
+  1. 0-B recruitment details (NR-0b-recruit): the category converters are CONFIRMED identity; next, find
+     where the recruitable entry's cost (entry[0]) is written. Workers commit and push a checkpoint every
+     ~20 min (a PC freeze on 2026-10-09 killed two sessions; their uncommitted work survived on disk).
+  2. 0-C middleware (NR-0c-middleware): bank query, cue dispatch, movie skip, headphones multiplier.
+- **Disk:** C: filled up on 2026-10-09; 21 merged worktrees were removed (~100 GB back). Remove a
+  worktree after its merge; check `df -h /c` before starting builds.
 - **Next:** §0, several workers tracing in parallel under the Ghidra writer lock; the unwrap audit last.
 - Evidence saves live in `%USERPROFILE%\Documents\ntw-evidence\saves` (never inside a target folder);
   recovered build-folder data in `ntw-evidence\recovered-targets\`.
@@ -33,39 +31,15 @@ Last updated: 2026-10-08. Main tests at last full run (2026-10-08): `cargo test 
 
 ## Open bugs
 
-- **Diplomacy screen (§0-E):** close button and "Test" treaty FIXED (user check 2026-10-08: X closes,
-  reopen works, Current Treaties reads "At war"). Side by side with the original (Britain → France →
-  Open Negotiations, Early January 1805), still different: (1) Power / Wealth are blank; the original
-  shows word ratings ("Terrifying" / "Spectacular" for both); (2) the left panel's action buttons are
-  missing: Present State Gift, Regions, Technology, Payments, Request peace (these fill Your Offers /
-  Your Demands, which start empty in both); (3) the opposing diplomat's speech bubble with portrait
-  ("Our dread sovereign has little time to consider your mewlings, so let us be brief: speak!") is
-  missing; (4) the leader name reads "George", the original "George III". Same in both: flag rows,
-  Current Treaties, public opinion, the three bottom buttons. Screens in
-  `%USERPROFILE%\Documents\ntw-evidence\screens\`: `2026-10-08_ours_diplomacy_after_close_fix.png`,
-  `2026-10-08_original_diplomacy_negotiation_britain_france.png`, and the original's Diplomatic
-  Relations list `2026-10-08_original_diplomatic_relations_britain.png` (compare ours against it too).
-  A second original screen, Britain → Ottoman Empire (at peace, trade agreement),
-  `2026-10-08_original_diplomacy_negotiation_britain_ottoman_trade.png`, shows the button list depends
-  on the relationship: at war = Present State Gift, Regions, Technology, Payments, Request peace; at
-  peace with trade = Cancel Trade Agreement (red text), Request Alliance, Present State Gift, Declare
-  war, Joining Wars (looks greyed), Trade Embargoes, Breaking Alliances, Military Access, Regions,
-  Technology, Payments. Ratings there: Ottoman Power "Mighty", Wealth "Rich" (Britain "Terrifying" /
-  "Spectacular"). The greeting follows the attitude (Friendly Ottomans: "Welcome! God willing, our
-  friendship will blossom as a result of this meeting."). Leader "Selim I". Public opinion towards
-  them "Indifferent", towards us "Friendly". Current Treaties "Trade agreement".
-  Third original screen, Britain → Austria (ally),
-  `2026-10-08_original_diplomacy_negotiation_britain_austria_ally.png`: buttons Cancel Trade Agreement,
-  Cancel Military Access, Cancel Your Alliance (all red text), Present State Gift, Declare war, Joining
-  Wars (greyed), Trade Embargoes, Breaking Alliances, Regions, Technology, Payments (no Request
-  Alliance / Military Access: a held treaty swaps its request for a red cancel). Current Treaties:
-  Military alliance, Trade agreement, Grants military access (indefinite), Has military access to your
-  lands (indefinite). Power "Terrifying", Wealth "Rich", leader "Franz I", opinion "Very friendly" both
-  ways; greeting "Valued friends of our gracious sovereign are always welcome. What matters do you wish
-  to discuss this fine day?" (same diplomat portrait as the France screen).
-  Trace in Ghidra what feeds each (rating thresholds, button visibility and red/grey states, greeting
-  line choice, regnal number) before changing it; §0-E, next free slot.
-- **Campaign:** region labels draw on top of UI panels (must sit under the HUD); the region details
+- **Diplomacy screen (§0-E):** diplomacy2 merged (greeting by attitude, diplomat portrait, button lists
+  for war / peace+trade / ally, Power and Wealth words, regnal numerals). Still different from the
+  original: Austria's power reads "Mighty" (original "Terrifying"; it ranks 5th behind Prussia and
+  Russia: debugger read at `0x00949630`), the panel creates no `diplomacy_button_*` components from the
+  lists (ignored test; cause untraced), red cancel texts. Original screens in
+  `%USERPROFILE%\Documents\ntw-evidence\screens\`: `2026-10-08_original_diplomacy_negotiation_britain_france.png`,
+  `…_britain_ottoman_trade.png`, `…_britain_austria_ally.png`, `2026-10-08_original_diplomatic_relations_britain.png`.
+- **Campaign:** region labels draw on top of UI panels (must sit under the HUD; also over the Diplomatic Relations
+  panel, user screenshot 2026-10-09: "Wales, Wales" and "London, England" over its bottom edge); the region details
   title reads "XXX Details" (missing loc key, should be the region name); the user couldn't find the
   demolish button (offered from a building slot via `CanDemolishBuilding`: check it shows).
 - **Battle** (`--battle-key NHB_Austerlitz --skip-deployment`):
@@ -76,6 +50,12 @@ Last updated: 2026-10-08. Main tests at last full run (2026-10-08): `cargo test 
   - No muzzle flashes: the `muzzle_flash` names are exe-side and reach no effect group; find the exe's
     rule. `MUZZLE_HEIGHT` 1.35 m is PROVISIONAL.
   - No artillery crews drawn at the guns.
+  - Glowing streaks from the middle of each unit (user screenshot 2026-10-09, Austerlitz, standing
+    units on the frozen ponds): a bright yellow-white tapered beam per unit, pointing down-left
+    toward the camera, several unit-lengths long, for the whole battle (from the start, moving or
+    not). Possibly unit dust (fx_draw.rs ~506, emitted per
+    unit) drawn with the wrong size/velocity/blend; find which effect emits it, then compare with
+    the original.
   - Shrubs don't sway (trees do); "shrubs sway with the battle wind" is INFERRED and fails in game.
 - **Original reference shots** still to match (agent options, sabotage, enlist general, settlement tabs):
   `analysis/campaign/CAMPAIGN_UI.md` "Original reference shots".
@@ -91,14 +71,15 @@ and `STRING_LABELING_CONVENTION.md` over the whole exe (back it up first). Setup
 ## Who works on what
 
 - **Claude (local):** the BACKLOG `(running: <worker>)` markers, mirrored on the pinned public claim issue #2 (`bash tools/claims.sh list` for contributor claims).
-- **Free model (sandbox, `.opencode/agents/`):** §2 battle effects, 0-E UI leftovers, 0-G character
-  hooks, 0-D units, on sandbox branch `next`, a copy of main. To port: review
-  `git diff <main commit next started from> sandbox/next`; then the sandbox manager recreates `next`.
+- **Free model (sandbox):** inactive (user, 2026-10-09). Its sections (§2 battle effects, 0-D, 0-E, 0-G) are
+  open to our workers; its last round (0-D shrubs) is already in main (`b7b5583b`). Worktrees removed,
+  branches kept.
 
 ## Needs an in-game check
 
 Batched for the user. Delete a line once checked and record the result where it belongs.
 Base command: `cargo run -p napoleon -- <flags>`.
+
 
 
 
@@ -136,7 +117,8 @@ Base command: `cargo run -p napoleon -- <flags>`.
 - **Raw Ghidra dumps in the private repo's history** (322 + 65, untracked since): they stay unless the
   user wants a history rewrite. The public repo has fresh history and none of them.
 - **Debugger session:** who writes `unit+0xD48`, where `unit_scale` is read, formation radius
-  `+0x670`, garrison cap `+0x6C`.
+  `+0x670`, garrison cap `+0x6C`; Austria's power ranking input at `0x00949630` (Britain campaign, Early
+  January 1805, Diplomacy → Austria: ours reads "Mighty", the original "Terrifying").
 
 ## Waiting for a worker slot
 

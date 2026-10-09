@@ -36,7 +36,7 @@ pub mod world;
 use std::collections::{BTreeMap, BTreeSet};
 
 use ntw_sim::campaign::rules::{MAX_UNITS_PER_FORCE, TaxClass};
-use ntw_sim::campaign::{CampaignCommand, CampaignEvent, CampaignModel, FactionId, ForceId, RegionId, SlotRef, Stance};
+use ntw_sim::campaign::{CampaignCommand, CampaignEvent, CampaignModel, CommandError, FactionId, ForceId, RegionId, SlotRef, Stance};
 use ntw_sim::fixed::Fixed20;
 use ntw_sim::rng::CaRng;
 
@@ -258,10 +258,6 @@ pub struct TurnContext {
     pub campaign_key: String,
     /// Human-controlled factions (never run by the AI; their armies count as enemies normally).
     pub humans: BTreeSet<FactionId>,
-    /// The human player's campaign difficulty on the preference scale (CONFIRMED help text: −2 very
-    /// hard, −1 hard, 0 normal, 1 easy). AI factions get their handicap through
-    /// [`data::CampaignAiData::ai_handicap`] (PROVISIONAL mapping).
-    pub difficulty: i32,
     /// Script hints.
     pub hints: ScriptHints,
     /// Each faction's stored manager / personality keys by faction key ([`keys::read_ai_keys`]
@@ -274,12 +270,13 @@ pub struct TurnContext {
 }
 
 impl TurnContext {
-    /// A context for `campaign_key` with no humans, normal difficulty and no script hints.
+    /// A context for `campaign_key` with no humans and no script hints. The difficulty reaches the AI
+    /// through the model: the factions' handicaps are in their effects
+    /// (`ntw_sim::campaign::effects::apply_start_handicaps`, `0x008DD090`), so the prices it reads hold them.
     pub fn new(campaign_key: &str) -> Self {
         TurnContext {
             campaign_key: campaign_key.to_string(),
             humans: BTreeSet::new(),
-            difficulty: 0,
             hints: ScriptHints::default(),
             ai_keys: BTreeMap::new(),
             region_base_values: BTreeMap::new(),
@@ -289,7 +286,7 @@ impl TurnContext {
 
 /// `ntw_ai::campaign::take_turn`: the decisions of AI faction `faction` for this turn.
 pub fn take_turn(model: &CampaignModel, data: &CampaignAiData, ctx: &TurnContext, faction: FactionId, rng: &mut CaRng) -> Vec<AiOrder> {
-    let world = AiWorld::from_model(model);
+    let world = AiWorld::from_model_for(model, Some(faction));
     take_turn_on(&world, data, ctx, faction, rng)
 }
 
@@ -339,6 +336,10 @@ struct FactionTurn<'a> {
     built: BTreeSet<RegionId>,
     /// Units ordered per region this turn (EXCESS_RECRUITMENT intentions).
     recruits_in: BTreeMap<RegionId, u32>,
+    /// Units ordered this turn per unit key, held against each entry's `cap_room` (the model's unit cap).
+    ordered_units: BTreeMap<String, usize>,
+    /// Units ordered this turn per (region, naval queue), held against each entry's `queue_room`.
+    queued_in: BTreeMap<(RegionId, bool), usize>,
     /// Schools already given a RESEARCH_TECHNOLOGY intention this turn (`(region, slot)`), so two
     /// intentions cannot take the same school (the original reserves a school per intention,
     /// CONFIRMED `0x00A74B50` / `0x00A614A0`, which also replaces the school of a gentleman that
@@ -366,6 +367,8 @@ impl<'a> FactionTurn<'a> {
             recruited: BTreeSet::new(),
             built: BTreeSet::new(),
             recruits_in: BTreeMap::new(),
+            ordered_units: BTreeMap::new(),
+            queued_in: BTreeMap::new(),
             researching: BTreeSet::new(),
             orders: Vec::new(),
             last_pool: Vec::new(),
@@ -467,27 +470,22 @@ impl<'a> FactionTurn<'a> {
     /// `u > 0`), option `rng.int_range(0, options − 1)`, subtract its costs, one intention linked
     /// with mult 1.0. PROVISIONAL inputs: `x` = our land strength within
     /// [`world::GARRISON_RADIUS`] (rounded), the options = the region's recruitable land units by
-    /// key, the unit budget = Σ free recruitment capacity of the entries with cost 1 per unit
-    /// (the original's analyser `+0x60` is UNKNOWN), the money = our recruitment budget (the
-    /// original: treasury minus two committed amounts) with the unit's cost; region order = id.
+    /// key (the model's unflagged entries, [`world::AiRecruitable`]), the unit budget = Σ free recruitment
+    /// capacity of the entries with cost 1 per unit (the original's analyser `+0x60` is UNKNOWN), the money =
+    /// our recruitment budget (the original: treasury minus two committed amounts) with the entry's cost (the
+    /// model's, what the queue command charges); region order = id.
     #[allow(clippy::neg_cmp_op_on_partial_ord)] // `!(0.0 < u)` keeps the exe's NaN handling
     fn recruitment_draws(&self, rng: &mut CaRng) -> Vec<(RegionId, String, i32)> {
-        let cost_mod = 1.0 + self.data.ai_handicap(self.ctx.difficulty, "recruitment_cost_mod_land_all") / 100.0;
         // (region, its (unit key, cost) options, x²)
         type Entry = (RegionId, Vec<(String, i32)>, f32);
         let mut entries: Vec<Entry> = Vec::new();
         let mut unit_budget = 0.0f32;
         for r in self.world.regions.values().filter(|r| r.owner == self.faction) {
-            let opts: Vec<(String, i32)> = self
-                .world
-                .recruitable(r, self.data)
-                .into_iter()
-                .filter(|u| !self.ctx.hints.restricted_units.contains(u) && self.data.faction_may_recruit(&self.key, u))
-                .filter_map(|u| {
-                    let info = self.data.units.get(&u)?;
-                    let cost = (info.cost as f32 * cost_mod).round() as i32;
-                    (cost > 0).then_some((u, cost))
-                })
+            let opts: Vec<(String, i32)> = r
+                .recruitable
+                .iter()
+                .filter(|e| e.flags == 0 && e.cost > 0 && !self.ctx.hints.restricted_units.contains(&e.unit_key))
+                .map(|e| (e.unit_key.clone(), e.cost))
                 .collect();
             if opts.is_empty() {
                 continue;
@@ -537,7 +535,7 @@ impl<'a> FactionTurn<'a> {
         let cap = r.recruit_capacity.unwrap_or(if r.recruiting > 0 { 0 } else { 1 });
         let used = self.recruits_in.get(&rid).copied().unwrap_or(0);
         let upkeep = self.data.units.get(unit).map_or(0, |i| i.upkeep);
-        if used >= cap || cost > self.recruitment_budget || self.upkeep_room.is_some_and(|room| upkeep > room) {
+        if used >= cap || cost > self.recruitment_budget || self.upkeep_room.is_some_and(|room| upkeep > room) || self.no_room_for(rid, unit) {
             return;
         }
         self.recruitment_budget -= cost;
@@ -545,6 +543,23 @@ impl<'a> FactionTurn<'a> {
             *room -= upkeep;
         }
         *self.recruits_in.entry(rid).or_default() += 1;
+        self.order_recruit(rid, unit);
+    }
+
+    /// True when this turn's orders already use up what the model left for `unit` in `rid`: the room its unit
+    /// cap leaves (the entry's `cap_room`) or the free places of the region's queue of its kind
+    /// (`queue_room`, [`world::AiRecruitable`]), so one more would be refused. A unit with no entry has none.
+    fn no_room_for(&self, rid: RegionId, unit: &str) -> bool {
+        let Some(e) = self.world.regions[&rid].recruitable.iter().find(|e| e.unit_key == unit) else { return true };
+        let queued = self.queued_in.get(&(rid, e.naval)).copied().unwrap_or(0);
+        queued >= e.queue_room || e.cap_room.is_some_and(|room| self.ordered_units.get(unit).copied().unwrap_or(0) >= room)
+    }
+
+    /// Records a recruit order of `unit` in `rid` against the cap and queue rooms ([`Self::no_room_for`]).
+    fn order_recruit(&mut self, rid: RegionId, unit: &str) {
+        let naval = self.world.regions[&rid].recruitable.iter().find(|e| e.unit_key == unit).is_some_and(|e| e.naval);
+        *self.queued_in.entry((rid, naval)).or_default() += 1;
+        *self.ordered_units.entry(unit.to_string()).or_default() += 1;
         self.recruited.insert(rid);
         self.orders.push(AiOrder::Recruit { region: rid, unit_key: unit.to_string() });
     }
@@ -954,8 +969,9 @@ impl<'a> FactionTurn<'a> {
     /// The category comes from the composition targets (CONFIRMED tables:
     /// `RECRUITMENT_ARMY_CATEGORY_BASE_PROPORTIONS_*` and `cdir_unit_balances`; PROVISIONAL
     /// blend: their mean); within the category, the best `cdir_unit_qualities` quality per cost.
+    /// The candidates are the region's unflagged recruitable entries at the model's price
+    /// ([`world::AiRecruitable`]).
     fn recruitment(&mut self, only: Option<RegionId>) {
-        let cost_mod = 1.0 + self.data.ai_handicap(self.ctx.difficulty, "recruitment_cost_mod_land_all") / 100.0;
         let mut regions: Vec<RegionId> = self
             .world
             .regions
@@ -981,21 +997,21 @@ impl<'a> FactionTurn<'a> {
             }
             let Some(category) = self.wanted_category() else { return };
             let mut best: Option<(f32, String, i32, i32)> = None;
-            for unit in self.world.recruitable(r, self.data) {
-                if self.ctx.hints.restricted_units.contains(&unit) || !self.data.faction_may_recruit(&self.key, &unit) {
+            for e in &r.recruitable {
+                let (unit, cost) = (&e.unit_key, e.cost);
+                if e.flags != 0 || self.ctx.hints.restricted_units.contains(unit) || self.no_room_for(rid, unit) {
                     continue;
                 }
-                let Some(info) = self.data.units.get(&unit) else { continue };
+                let Some(info) = self.data.units.get(unit) else { continue };
                 if world::balance_group(info) != category {
                     continue;
                 }
-                let cost = (info.cost as f32 * cost_mod).round() as i32;
                 if cost > self.recruitment_budget || cost <= 0 || self.upkeep_room.is_some_and(|room| info.upkeep > room) {
                     continue;
                 }
-                let value = info.quality.unwrap_or(info.cost) as f32 / cost as f32;
-                if best.as_ref().is_none_or(|(v, k, _, _)| value > *v || (value == *v && unit < *k)) {
-                    best = Some((value, unit, cost, info.upkeep));
+                let value = info.quality.unwrap_or(info.battle_cost) as f32 / cost as f32;
+                if best.as_ref().is_none_or(|(v, k, _, _)| value > *v || (value == *v && unit < k)) {
+                    best = Some((value, unit.clone(), cost, info.upkeep));
                 }
             }
             if let Some((_, unit, cost, upkeep)) = best {
@@ -1003,8 +1019,7 @@ impl<'a> FactionTurn<'a> {
                 if let Some(room) = &mut self.upkeep_room {
                     *room -= upkeep;
                 }
-                self.recruited.insert(rid);
-                self.orders.push(AiOrder::Recruit { region: rid, unit_key: unit });
+                self.order_recruit(rid, &unit);
             }
         }
     }
@@ -1232,17 +1247,26 @@ impl bdi::Deliberate<Node> for TurnDeliberation<'_, '_> {
 }
 
 pub fn apply_orders(model: &mut CampaignModel, orders: &[AiOrder]) -> usize {
-    let mut events = Vec::new();
-    apply_orders_with_events(model, orders, &mut events)
+    let (mut events, mut rejected) = (Vec::new(), Vec::new());
+    apply_orders_with_events(model, orders, &mut events, &mut rejected)
 }
 
-/// Like [`apply_orders`], collecting every event the commands caused.
-pub fn apply_orders_with_events(model: &mut CampaignModel, orders: &[AiOrder], events: &mut Vec<CampaignEvent>) -> usize {
+/// Like [`apply_orders`], collecting every event the commands caused and every order the model refused
+/// with its error (the driver reports them, [`driver::AiTurnReport::rejected`], and the app logs each kind once).
+pub fn apply_orders_with_events(
+    model: &mut CampaignModel,
+    orders: &[AiOrder],
+    events: &mut Vec<CampaignEvent>,
+    rejected: &mut Vec<(AiOrder, CommandError)>,
+) -> usize {
     let mut accepted = 0;
-    for cmd in orders.iter().filter_map(AiOrder::to_campaign_command) {
-        if let Ok(ev) = model.apply(cmd) {
-            accepted += 1;
-            events.extend(ev);
+    for (order, cmd) in orders.iter().filter_map(|o| Some((o, o.to_campaign_command()?))) {
+        match model.apply(cmd) {
+            Ok(ev) => {
+                accepted += 1;
+                events.extend(ev);
+            }
+            Err(e) => rejected.push((order.clone(), e)),
         }
         if model.pending_battle.is_some()
             && let Ok(ev) = model.apply(CampaignCommand::Autoresolve)
@@ -1315,5 +1339,100 @@ mod tests {
         assert_eq!(keys(&m), ["test_building_level_2"]);
         m.world.restricted_buildings.insert("test_building_level_2".into());
         assert_eq!(keys(&m), Vec::<String>::new(), "a script-restricted level is left out by the model's rule");
+    }
+
+    /// Review (0b-recruit): the AI kept its own recruit price (`units` #4 × its handicap) and ignored the unit
+    /// cap. It now reads the model's recruitable entries: the price the queue command charges (the handicap is
+    /// already in the faction's effects) and the entry flags, so it never orders a capped or unaffordable unit,
+    /// and within a turn it never orders past the cap's room.
+    #[test]
+    fn the_ai_recruits_only_unflagged_entries_at_the_models_price() {
+        use ntw_sim::campaign::commands::{ENTRY_TOO_DEAR, ENTRY_UNIT_CAP};
+        use ntw_sim::campaign::{CampaignUnit, Faction, GovernmentType, MilitaryForce, UnitId, economy};
+        let mut rules = CampaignRules::test_rules();
+        rules.units.get_mut("test_recruit").unwrap().unit_cap = 2;
+        let mut m = model(Some(rules));
+        let me = FactionId(1);
+        m.world.factions.insert(
+            me,
+            Faction {
+                id: me,
+                key: "test_faction".into(),
+                treasury: 100_000,
+                government: GovernmentType::AbsoluteMonarchy,
+                government_key: String::new(),
+                tax_lower: "tax_normal".into(),
+                tax_upper: "tax_normal".into(),
+                diplomacy: BTreeMap::new(),
+            },
+        );
+        // The faction already holds one of the two `test_recruit` its cap allows.
+        let held = CampaignUnit { id: UnitId(7), unit_key: "test_recruit".into(), men: 100, max_men: 100, character: None };
+        m.world.forces.insert(ForceId(9), MilitaryForce { id: ForceId(9), faction: me, commander: None, units: vec![held], is_navy: false });
+        let (data, ctx) = (CampaignAiData::default(), TurnContext::new("test_campaign"));
+        let cfg = FactionAiConfig { manager: String::new(), personality: String::new(), behaviours: BTreeMap::new() };
+        let region = m.world.regions[&RegionId(1)].clone();
+        let price = |m: &CampaignModel, k: &str| economy::recruitment_cost(m, &region, k, &m.rules.units[k]);
+
+        // The snapshot carries the model's price (#7, not the #4 cost) and flags.
+        let w = AiWorld::from_model_for(&m, Some(me));
+        let entries = &w.regions[&RegionId(1)].recruitable;
+        assert_eq!(entries.iter().map(|e| e.unit_key.as_str()).collect::<Vec<_>>(), ["test_recruit", "test_unit"]);
+        for e in entries {
+            assert_eq!(e.cost, price(&m, &e.unit_key));
+            assert_ne!(e.cost, m.rules.units[&e.unit_key].cost, "not the units #4 cost");
+            assert_eq!(e.flags, 0);
+        }
+        assert_eq!(entries[0].cap_room, Some(1));
+
+        // Within a turn the AI orders the capped unit only as often as the cap leaves room for.
+        let mut turn = FactionTurn::new(&w, &data, &ctx, me, cfg.clone());
+        turn.recruitment_budget = 100_000;
+        turn.recruit_unit(RegionId(1), "test_recruit", entries[0].cost);
+        turn.recruit_unit(RegionId(1), "test_recruit", entries[0].cost);
+        assert_eq!(turn.orders, [AiOrder::Recruit { region: RegionId(1), unit_key: "test_recruit".into() }]);
+        assert_eq!(apply_orders(&mut m, &turn.orders), 1, "the model accepts what the AI orders");
+
+        // At the cap the entry is flagged and the draws never offer it; what they offer is at the model's price.
+        let w = AiWorld::from_model_for(&m, Some(me));
+        let capped = &w.regions[&RegionId(1)].recruitable[0];
+        assert_eq!((capped.unit_key.as_str(), capped.flags & ENTRY_UNIT_CAP), ("test_recruit", ENTRY_UNIT_CAP));
+        let mut turn = FactionTurn::new(&w, &data, &ctx, me, cfg.clone());
+        turn.recruitment_budget = 100_000;
+        let mut drawn = 0;
+        for seed in 0..20 {
+            for (rid, unit, cost) in turn.recruitment_draws(&mut CaRng::new(seed)) {
+                assert_eq!((rid, unit.as_str(), cost), (RegionId(1), "test_unit", price(&m, "test_unit")));
+                drawn += 1;
+            }
+        }
+        assert!(drawn > 0);
+        turn.recruit_unit(RegionId(1), "test_recruit", capped.cost);
+        assert!(turn.orders.is_empty(), "a capped unit is never ordered");
+
+        // Unaffordable: every entry is flagged too dear and nothing is drawn.
+        m.world.factions.get_mut(&me).unwrap().treasury = 10;
+        let w = AiWorld::from_model_for(&m, Some(me));
+        assert!(w.regions[&RegionId(1)].recruitable.iter().all(|e| e.flags & ENTRY_TOO_DEAR != 0));
+        let turn = FactionTurn::new(&w, &data, &ctx, me, cfg.clone());
+        assert!((0..20).all(|seed| turn.recruitment_draws(&mut CaRng::new(seed)).is_empty()));
+
+        // The queue's free places bound the orders too: with one place left (9 of 10 land items queued) the AI
+        // orders one unit, however many recruitment points the region has.
+        m.world.factions.get_mut(&me).unwrap().treasury = 100_000;
+        let queued = m.world.regions[&RegionId(1)].recruitment_queue.len();
+        let item = m.world.regions[&RegionId(1)].recruitment_queue[0].clone();
+        let queue = &mut m.world.regions.get_mut(&RegionId(1)).unwrap().recruitment_queue;
+        queue.extend((queued..9).map(|i| ntw_sim::campaign::RecruitmentItem { id: ntw_sim::campaign::RecruitmentItemId(500 + i as i32), unit_key: "test_unit".into(), ..item.clone() }));
+        let mut w = AiWorld::from_model_for(&m, Some(me));
+        assert!(w.regions[&RegionId(1)].recruitable.iter().all(|e| e.queue_room == 1 && e.flags & ENTRY_UNIT_CAP == e.flags));
+        w.regions.get_mut(&RegionId(1)).unwrap().recruit_capacity = Some(5);
+        let mut turn = FactionTurn::new(&w, &data, &ctx, me, cfg);
+        turn.recruitment_budget = 100_000;
+        for _ in 0..3 {
+            turn.recruit_unit(RegionId(1), "test_unit", price(&m, "test_unit"));
+        }
+        assert_eq!(turn.orders.len(), 1);
+        assert_eq!(apply_orders(&mut m, &turn.orders), 1);
     }
 }

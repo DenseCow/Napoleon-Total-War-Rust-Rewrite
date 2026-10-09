@@ -22,14 +22,37 @@ the sandbox). Also ported from other sandbox workers into the campaign model: 0-
 (it reuses the capture's `occupy`), which leaves the old owner's garrison army standing in the
 handed-over settlement with a stale `garrisoned_in` (the capture path destroys the garrison before
 `occupy`; what the deal does with it is UNKNOWN), and its turn gate on the region's owner refuses
-the demand-side deals the sandbox UI issues; it needs `0x00B449F0`'s flags decoded first. Also
-deferred: the experience-adjusted cost
-(`0x00ED49A0`, `XpCostTables`, `CampaignUnit::experience`) — its loader needs the
-`unit_stats_*_experience_bonuses` tables in `ntw_data`, which main does not have, and the sandbox
-also charged it on the per-turn upkeep, which its own notes call UNKNOWN; the UI side of demolish /
+the demand-side deals the sandbox UI issues; it needs `0x00B449F0`'s flags decoded first. The
+sandbox's experience-adjusted campaign cost (`0x00ED49A0`, `XpCostTables`) was wrong and is gone: the
+campaign never calls `0x00ED49A0` (§Recruitment cost and money); the UI side of demolish /
 forts / deals (`ntw_script::ui::campaign`) belongs to the UI worker. The round 14/15 Ghidra listings
 cited below are in `analysis/fidelity/ghidra_evidence/0b/gh__r15_*` (ported to main by the evidence worker).
 
+**Round 16 (worker campaign-0b, 2026-10-08).**
+- **Importer limit — CLOSED: there is none; the split is `0x00BC26D0` (CONFIRMED, ported).** `0x00BB5730` caps a
+  builder source only by its path's first stop (300 per settlement by land, the port's `commodity_export_vol`); the
+  importers' shares come from `0x00BC26D0` (run by `0x00BBD870` after the builder `0x00BC0960`): every international
+  route cleared (`0x00B1C1A0`); an exporter without a capital (faction `+0x72C`) exports nothing; a partner's demand is
+  its **net** demand = Σ region `+0x154` over its region list (`0x008F4E50`, faction `+0x778`) minus its own supply
+  when it has a capital, kept only if > 0 for some commodity; partners in the world's faction list order
+  (`FACTION_ARRAY` file order: loader `0x0090BEB0` appends to world `+0x2C/+0x30`, the list `0x00BC26D0` walks as
+  `+0x20`) with a trade agreement (relationship `+0x788`) and a route; per commodity the (partner, demand) pairs are
+  sorted largest first with the exe's `std::sort` (`0x00B7F790`: VC++ 2008 introsort, insertion sort up to 32,
+  ported as `ntw_sim::msvc_sort`) and handed out from the end: total = Σ max(demand, 1); while `k` partners are left
+  and `k ≤ rest`, share = max(1, (demand × rest as i32) as u32 / total); total −= demand; the share goes onto every
+  route of the pair (`0x00B08880`). Result: `ECON_SPLIT` **352/352** route volumes on the 9 vanilla saves (was
+  350/352; the two `orig_over_nr4_0252` misses are gone), `ECON_TRADE` 230/230 incomes. Tests
+  `supply_is_split_over_the_partners_by_their_net_demand`, `partners_without_net_demand_take_nothing_and_the_rest_may_stay_home`,
+  three `msvc_sort` tests.
+- **The 4 desertion-exempt classes — CLOSED (CONFIRMED, ported).** `UNIT_RECORD` ctor `0x00E91320` sets `+0x20` =
+  `0x00EED3E0(units #3 class key)` (a fixed key list, any other key 0); codes 4 / 0xB / 0xC / 0xE are
+  `cavalry_heavy`, `elephants`, `general`, `infantry_elite`. `0x008BA1E0` skips those units before the RNG draw.
+  Code `economy::DESERTION_EXEMPT_CLASSES`; test `exempt_unit_classes_do_not_desert`.
+- **Recruitment details — CLOSED (CONFIRMED, ported) except the recruitable population.** The campaign cost is
+  `units` #7 with the region's cost effects (not #4, not the experience-adjusted `0x00ED49A0`, which is the battle
+  army-setup price), charged and refunded unchanged; a faction in debt may recruit; `units` #15 caps a unit type per
+  faction. See §Recruitment cost and money. Left: the recruitable population gate and charge (vars 36 / 37, 0 in the
+  shipped data; PROVISIONAL in `recruitable_entry_flags`).
 **Round 15 (data first, Ghidra last), complete in the sandbox.** `ECON_RECOMP` is untouched and still
 exact (sandbox count: 713 tests).
 - **Item 1 — the two round-14 fixes turned into properties (§GDP, "Round 15").** The exposure was
@@ -766,7 +789,7 @@ Recomputed for every owned region at the round end (then `tw += growth`, 0x00AB4
       the cheapest port with room. A settlement's land capacity is a hard-coded 300 (0x00AA67D0). A path that starts
       at a node has no limit.
     - A path is skipped when its first stop is full (0x00BD44A0).
-  - **What the saves show** (INFERRED rule; the importer-side limit is not found in the code read so far). Per
+  - **What the saves show** (superseded by round 16: the exe rule is `0x00BC26D0`, net demand, see "Where I am"). Per
     commodity, the exporter's supply is shared over its trade partners with a route in proportion to the importer's
     demand for that commodity (Σ `REGION` #32 over its regions, `commodity_demand`):
     - The partners are taken in ascending order of demand (ties by faction id), each getting
@@ -941,6 +964,64 @@ faction and liberation target.
   when built per slot; 0.57 ms before round 16, when no faction sum was built).
 - In-game check (one quick look): the Paris prestige card now shows 15000 (full price; 13500 before).
 
+## Recruitment cost and money (0-B recruitment details, CONFIRMED unless tagged; code `economy::recruitment_cost`, `CampaignModel::recruitable_entry_flags`, `treasury.rs`)
+- **The queue command** (`QueueRecruitmentItemForUnit` `0x00B58DD0`; callers: the `CCQ` handler `0x00936B90`, the AI
+  `0x00A9EF50` / `0x00A9F200`, the console `0x00924DE0`): refuses a full queue (`0x00B62040`: more than 9 items), builds
+  the queue's priced and flagged recruitable list (vtable +0xC: land `0x00B31020`, naval `0x00B30E80`), refuses a unit
+  with no entry or an entry with any flag set, charges the entry's cost as spending category 2
+  (`ChargeFactionTreasuryAmount` `0x00BAF500`), charges the recruitable population (below), then builds the item
+  (`0x00AECEE0` land / `0x00AED220` naval → `0x00AF3F80`), which keeps the cost at item +0x20 and bumps the faction's
+  queued count of the unit type. It never looks at the recruitment points (they only pace the training).
+- **The entry cost** (`PriceRecruitableEntry` `0x00B0D220`, over the region effect set `0x00A67530` for both lists):
+  `mod` = the integer effects `recruitment_mod_cost_land_all` (`_naval_all` for a ship) + the unit category's
+  `cost_mod` + the unit class's `cost_mod`; in `spa_napoleon` also `guerrilla_cost_mod` for a key ending in
+  `_Guerrilla`, else `auxiliary_cost_mod` for one ending in `_Auxiliary` (case-sensitive); `mod` clamped at −100; cost =
+  FISTP((mod + 100) × `units` #7 × 0.01) in f32 (half to even). The base is #7 (`UNIT_RECORD` +0x38, copied by
+  `0x00E91320`), not #4. The same function adds the experience effects to entry[1] and puts the upkeep (`0x008B21D0`)
+  in entry[4]. Data: `economy_check` `ECON_RECRUITCOST` matches **392 of 406** queued items in the saves the original
+  wrote (`auto_after_c8` 90/97, `auto_nr1` 46/47, `auto_nr4_t4` 98/99, `orig_fr_may1811` and `orig_fr_t1_b` 13/14 each,
+  `orig_over_nr4_0252` 132/135; `nr2`/`nr3` are our own saves, charged #4 by the old code). Every miss is an AI
+  faction whose `recruitment_mod_cost_*_all` in the save differs from the one the item was priced with: Saxony and
+  Naples items at −5 while the save reads −10 / +1 (the same factions' other items match at −5), one Spanish
+  merchantman at +49 against +24. When the faction's cost mod changes between the AI's queueing and the save is
+  UNKNOWN (no code depends on it: the price is taken once, at queue time, as the original does).
+- **The `0x00ED49A0` experience-adjusted cost is not the campaign's**: the queue charges entry[0], which both list
+  builders set through `0x00B0D220` on every entry just before flagging them. `0x00ED49A0`'s callers are `0x0045D170` (from the army setup generator `0x004765F0`,
+  `0x0045CB50` and `0x00461790`), `0x004C2770` and the unit info "XpAdjustedCost" `0x005CD340`, none on the queue
+  path. The old `XpCostTables` charge on the campaign is removed.
+- **The entry flags** (`FlagUnavailableRecruitableEntries` `0x00B69BA0`, per entry, OR-ed into entry[5]):
+  0x40 when `IsUnitAtFactionUnitCap` (`0x008F68B0`): `units` #15 (`UNIT_RECORD` +0x68) > 0 and the faction's live units
+  of the type (faction +0x7C8, kept by the campaign unit constructors and the destructor `0x0088F870`) plus its queued
+  items of it (faction +0x7E4, kept by `0x00AF3F80` and the item destructor `0x00AF7730`) reach it; 142 of the 442
+  vanilla units have a cap. 0x02 when the cost is above the treasury compared **unsigned** (JBE), so a faction in debt
+  is never too poor. 0x04 when `HasRecruitmentPopulationAvailable` (`0x00A89550`) fails. 0x01 when the queue is full.
+  The card's `reasons_unavailable` list (no slot, unaffordable, population, …, limit at bit 6) matches these bits
+  (INFERRED: the generator `0x009FE7B0` was not traced that far); the UI now shows the model's flags.
+- **The recruitable population — not modelled (PROVISIONAL).** The region's population object (region +0x28, saved as
+  `POPULATION`) holds at +0x54 (region +0x7C) the value saved as `REGION_FACTORS` #2; it differs from `POPULATION` #1
+  (the model's `population`) in `orig_fr_may1811` (31 of 31 regions, e.g. 966967 against 969000) and equals it in the two
+  turn-1 saves. Gate: flagged when it is below var 36 `minimum_population_after_recruitment` + var 37
+  `recruitment_population_cost` (registration order: key objects at `0x0164B550` + 8 × index, `0x0164B670` /
+  `0x0164B678`). Queue charge `0x00AAF190`: subtract var 37 when that leaves at least var 36, else set it to var 36.
+  Cancel credit `0x00A61AA0`: add var 37. Both variables are 0 in the shipped `campaign_variables`, so with vanilla data
+  the flag is never set and the charge and credit are 0.
+- **Money arithmetic.** Charge and refund pass the faction economics' per-category converter (spending +0x42C,
+  income +0x3F8; vtable +4). A new campaign (`ConstructNewFactionEconomics` `0x00B96100`) sets all 13 income and 12
+  spending converters to the object at `0x01459050` (vtable `0x0137EA30`, +4 = `0x004A23F0`: returns its argument). The
+  type table `0x01458E88` = {`0x0145904C` (vtable `0x0137EA28`, +4 = `0x0044C230`: returns 0), `0x01459050`}; only the
+  save loader `0x00B95B90` picks per category from a saved type byte (and forces income category 12 to type 0 for a
+  version-1 save); the saver `0x00BC4F20` writes the type back. The two writes of a base vtable `0x01312460` into those
+  objects (`0x012F37F0` / `0x012F3800`) are their destructors, registered with `_atexit` (`0x004302E0` / `0x004302F0`).
+  So recruitment (category 2) and its refund (income category 3) are plain 32-bit arithmetic (`treasury::pay` /
+  `refund`). Cancel (`CancelRecruitmentItem` `0x00B1A820` → item slot +0x1C `0x00B5C060` land / `0x00B5C0A0` naval with
+  1): credits item +0x20 as income category 3, i.e. exactly what was charged.
+- Tests: `the_recruitment_cost_is_units_7_scaled_by_the_cost_effects`,
+  `recruiting_charges_the_entry_cost_and_cancelling_refunds_it`, `a_faction_in_debt_may_recruit`,
+  `a_region_without_recruitment_points_still_queues`, `the_unit_cap_counts_the_factions_units_and_queued_items`,
+  `the_recruitment_rule_is_unsigned_only` (ntw_sim); `the_loader_takes_the_campaign_cost_from_units_7`,
+  `recruiting_from_a_loaded_campaign_charges_units_7_with_the_region_effects` (ntw_campaign).
+- Not traced here: the AI's own cost estimate (`ntw_ai` prices recruits from #4 with its handicap; §6).
+
 ## Recruitment and construction queues (round 8, CONFIRMED unless tagged; code `turn::region_turn`, `commands::recruit`)
 - **Turn start.** The faction turn start `0x008F2620` (also run for "Campaign first round (from savegame)") calls the
   region update `0x00AAE820`. Unless `0x008CEEF0` holds, that runs the recruitment queue of the region and of each port
@@ -948,7 +1029,8 @@ faction and liberation target.
 - **Recruitment** (`0x00B71FB0`, force 0). The queue is a manager with an item list (+0x4C count, +0x50 array) and a
   vtable (land interface 0x0137CBA0, naval 0x0137CBE4).
   1. Items whose unit the region's recruitable list no longer has (`0x00B45690` lookup) are removed through
-     `0x00B1A820(item, 1)`, the cancel path (refund INFERRED; the model refunds).
+     `0x00B1A820(item, 1)`, the cancel path, so each is refunded its stored cost (CONFIRMED, §Recruitment cost and
+     money).
   2. Capacity = method 1 of the manager: land `0x00B61F30` = recruitment points, naval `0x00B61EE0`.
   3. In queue order, each item that is not blocked (`0x00B5AD90`: its entry in the recruitable list is flagged) and
      has its flag +0x54 set takes one turn (item method +0x18); the loop stops once `capacity` items have.
@@ -1834,7 +1916,7 @@ positions and 9 vanilla saves (§Where I am).
 | Area | State | Evidence |
 |---|---|---|
 | Economy: taxes, other income, upkeep, GDP and town wealth growth, bankruptcy | CONFIRMED | 238 / 238 start-position regions; tax figures of the saves |
-| Trade: routes, supply split, importer, accumulated value, prices | CONFIRMED (supply split INFERRED) | trade income exact for every faction of the 9 saves; 358 / 362 route volumes |
+| Trade: routes, supply split, importer, accumulated value, prices | CONFIRMED (split `0x00BC26D0`, round 16) | trade income exact for every faction of the 9 saves; 352 / 352 save route volumes |
 | Public order (13 happiness + 6 repression factors) | CONFIRMED | 1180 / 1184 classes; garrison factor 284 / 288 (militia flag #70) |
 | Effects store (buildings, techs, government, ministers, traits, saved bonuses) | CONFIRMED structure | used by every rule above |
 | Research: availability, rates, step, gates | CONFIRMED | every start position and save; AI rates whole steps |

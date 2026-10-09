@@ -772,7 +772,8 @@ fn write_technologies(f: &mut EsfRecord, details: Option<&ntw_sim::campaign::det
 
 /// A new character's `CHARACTER_DETAILS` from the model where the model knows them: #1 / #2 names
 /// (a new faction leader is named after the family's successor; otherwise the names are drawn by
-/// `charnames`) and #5 the birth date.
+/// `charnames`), #4 the regnal numeral (a new monarch's; empty for everyone else, so a template
+/// copied from an old monarch does not keep his) and #5 the birth date.
 fn write_new_details(d: &mut EsfRecord, details: &ntw_sim::campaign::details::CharacterDetails) {
     if d.name != "CHARACTER_DETAILS" {
         return;
@@ -785,6 +786,9 @@ fn write_new_details(d: &mut EsfRecord, details: &ntw_sim::campaign::details::Ch
                 *n = EsfNode::Utf16String(v.clone());
             }
         }
+    }
+    if let Some(n @ EsfNode::Utf16String(_)) = d.children.get_mut(4) {
+        *n = EsfNode::Utf16String(details.regnal_numeral.clone());
     }
     if let Some(b) = &details.birth
         && let Some(EsfNode::Record(r)) = d.children.get_mut(5)

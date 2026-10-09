@@ -6,6 +6,7 @@
 //! go through the model's validated commands; everything is deterministic (campaign RNG).
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -21,7 +22,12 @@ use crate::data::GameData;
 pub struct CampaignAiLog {
     reports: Rc<RefCell<Vec<AiTurnReport>>>,
     shown: usize,
+    /// The (faction, kind of refusal) pairs already logged ([`refusals_to_log`]).
+    refusals_logged: RefusalKinds,
 }
+
+/// (faction, error variant) pairs: bounded by factions × variants, whatever numbers the errors carry.
+type RefusalKinds = HashSet<(ntw_sim::campaign::FactionId, std::mem::Discriminant<ntw_sim::campaign::CommandError>)>;
 
 /// True unless `--campaign-ai off`.
 fn enabled() -> bool {
@@ -52,7 +58,7 @@ pub fn attach(world: &mut World, host: &mut ScriptHost, vfs: &Vfs, startpos: &[u
         }
     };
     let reports = driver::install_with(host, Arc::new(data), keys, values);
-    world.insert_non_send(CampaignAiLog { reports, shown: 0 });
+    world.insert_non_send(CampaignAiLog { reports, shown: 0, refusals_logged: RefusalKinds::new() });
 }
 
 /// Logs a one-line summary of each End Turn's AI activity.
@@ -68,6 +74,24 @@ fn log_reports(log: Option<NonSendMut<CampaignAiLog>>) {
     let accepted: usize = new.iter().map(|r| r.accepted).sum();
     info!("Campaign AI: {} faction turns, {orders} orders, {accepted} accepted by the model", new.len());
     log.shown = reports.len();
+    for line in refusals_to_log(&mut log.refusals_logged, new) {
+        warn!("{line}");
+    }
+}
+
+/// The lines for the refused orders of `reports` not logged before: one per faction and kind of refusal
+/// (the error variant, not its numbers, so a faction refused for money every turn logs once), recorded in
+/// `logged`. An order the model refuses is an AI bug to see once, not a per-turn line.
+fn refusals_to_log(logged: &mut RefusalKinds, reports: &[AiTurnReport]) -> Vec<String> {
+    let mut out = Vec::new();
+    for r in reports {
+        for (order, err) in &r.rejected {
+            if logged.insert((r.faction, std::mem::discriminant(err))) {
+                out.push(format!("Campaign AI: faction {} order refused by the model ({err}): {order:?}", r.faction.raw()));
+            }
+        }
+    }
+    out
 }
 
 /// Registers the log system.
@@ -76,5 +100,36 @@ pub struct CampaignAiPlugin;
 impl Plugin for CampaignAiPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Update, log_reports.run_if(in_state(crate::GameMode::Campaign)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ntw_ai::campaign::AiOrder;
+    use ntw_sim::campaign::{CommandError, FactionId, RegionId};
+
+    use super::*;
+
+    fn report(faction: i32, turn: u32, rejected: Vec<CommandError>) -> AiTurnReport {
+        let order = AiOrder::Recruit { region: RegionId(1), unit_key: "u".into() };
+        AiTurnReport { faction: FactionId(faction), turn, orders: vec![order.clone()], accepted: 0, rejected: rejected.into_iter().map(|e| (order.clone(), e)).collect() }
+    }
+
+    /// Review (0b-recruit): the "log once" key was the error's text, which carries numbers, so a faction
+    /// refused for money every turn logged every turn. It is the faction and the error variant now.
+    #[test]
+    fn a_refusal_kind_is_logged_once_per_faction_whatever_its_numbers() {
+        let mut logged = RefusalKinds::new();
+        let poor = |needed, available| CommandError::InsufficientFunds { needed, available };
+        let turns = [
+            report(1, 1, vec![poor(400, 10), CommandError::NoRecruitmentCapacity]),
+            report(1, 2, vec![poor(450, 3)]),
+            report(2, 2, vec![poor(400, 10)]),
+            report(1, 3, vec![poor(500, -20), CommandError::UnitCapReached("u".into())]),
+        ];
+        let lines: Vec<usize> = turns.iter().map(|r| refusals_to_log(&mut logged, std::slice::from_ref(r)).len()).collect();
+        // Turn 1: money and queue; turn 2: nothing new for faction 1, money once for faction 2; turn 3: the cap.
+        assert_eq!(lines, [2, 0, 1, 1]);
+        assert_eq!(logged.len(), 4);
     }
 }

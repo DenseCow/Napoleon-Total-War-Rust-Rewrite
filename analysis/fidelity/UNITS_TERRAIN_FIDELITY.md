@@ -650,6 +650,85 @@ formula (§1.5); alternatives by selection number (§1.3). One-shots keep their 
 0.9/0.02/0.02/0.02/0.04 and 0.9/0.02/0.02/0.06. Weight 1.0 elsewhere; slots without clips are skipped. Stance 0 is
 replaced by stance 4 when the unit's virtual function `+0x1B0` returns 0 or 1. That function is **still not named**;
 §9.6 closes the value set and refutes the training level from data. Not used in code yet.
+
+### 1.9 Clip changes: the display blend and phase (CONFIRMED rule; gait-blend, 2026-10-08)
+User report: in battle the walk -> run and run -> walk change snapped from one clip to the other. Traced statically:
+- **Two layers.** The sim entity update (`0x0066CE00`, once per 0.1 s tick) steps a frame counter (`+0x1C0`) through a
+  clip sampled at 10 frames/s (the clip object's `+0x50` = round(anim duration x 10), `0x00E4F4D0`) and moves the man
+  by the clip's root motion times `+0x448` (`0x0066EEB0`; default 1.0 from the constructor `0x0061CB90`). **Correction:**
+  MIDDLEWARE_VERIFY's "blend 1.0f at +0x448" (`0x006666E0`) is this root-motion scale, not a blend. The pose that is
+  drawn is the per-soldier display object's (built by `0x007179B0`, which reads `ENTITY_DISPLAY_SHARED_POSE_TABLE`),
+  updated every rendered frame by `0x007725D0` (11,856 bytes).
+- **The clip object** (`0x00E4F4D0`, one per fragment line): `+0x1C` the slot kind (§1.1), `+0x20` the line's
+  `blend_in_time` (1.0 s when the line has none, parser `0x00E62760`), `+0x30` / `+0x34` a transition clip's from / to
+  slots, `+0x44` the anim, `+0xB4` / `+0xB8` a list of "gear windows" `{0, start, length}` built from the anim's
+  `L_FOOT_GEAR_UP_START`/`_END` and `R_FOOT_GEAR_UP_START`/`_END` events (length wraps over the clip end, `0x00E5FC40`).
+- **On a clip change** (`0x007725D0`, new clip != current): the pose blend time D = the new clip's `blend_in_time`;
+  when the old clip has gear windows `0x00E6DB90` replaces it (old time inside a window -> the rest of that window; a
+  window starting within the next frame -> the wait plus the window). The root blend time Dr = 0.5 s (`0x01318038`)
+  when D is the clip's own `blend_in_time`, else D. Elapsed e = 0. Vanilla data (`real_install::gait_blend_survey`):
+  **no clip under `animations/` has gear markers**, so a vanilla gait change blends over the new clip's
+  `blend_in_time`: `WALK_n` / `RUN_n` / `*_TRAINED_n` lines say 0.5 s (most) or 0.25 s, 1.0 s when absent.
+- **Start time of the new clip:** when the new anim loops (anim `+0x44` bit 2, the bit that also exempts a clip from
+  the end-of-clip test) and the old clip's root speed (anim `+0x60`) is above 0.1 m/s (`0x0131A7B0`): new time =
+  (old time mod old duration) / old duration x new duration (CRT fmod `0x01285DD0`), so the step phase carries over.
+  Otherwise 0 (deaths and transition kinds have their own cases).
+- **Every frame:** w = e / D. If D > 0, w < 1 and a previous output pose exists, the drawn pose is the per-bone blend
+  (`0x010CDB20`: translations lerped, rotations nlerp or slerp by a mode) of the **previous frame's drawn pose** and
+  the new clip's pose at weight w; else the new clip alone. The result is kept as the next frame's previous pose
+  (pose cache `+0x18`), then e += frame time (ms x 0.001, `0x01318030`). The display root (position, heading) is lerped
+  the same way at e / Dr. So the pose at the switch keeps weight prod(1 - e_k / D) over the frames: the first frame
+  still shows it whole, and it is gone once e >= D. Frame-rate dependent in the original too.
+- **Playback rate:** a locomotion clip (kind 2) advances by frame time x speed / its root speed (anim `+0x60`) x a
+  display scale (`+0xB0`), with no clamp; a transition clip (kind 3, `WALK_TO_RUN` ...) by speed over the lerp of its
+  from / to clips' root speeds (clamped by `0x01318048` / `0x01318060`, not read), and at its end the to-slot clip
+  follows with no blend.
+- **UNKNOWN (not traced):** which slot the display picks each frame. A state graph on the display (`+0xCC` / `+0xD0`,
+  transitions tested by predicate objects through their vtables) chooses it; the walk / run thresholds and whether and
+  when the vanilla `WALK_TO_RUN` (7 lines) / `RUN_TO_WALK` (8 lines) clips play live there. Debugger sitting: break on
+  `0x007725D0`'s clip-change store (display `+0xD4` written) while a unit is ordered to run then walk, and log old /
+  new slot (clip `+0x04`) and the state node (`+0xD0`).
+- Ours (`battle/view.rs` `ClipBlend`, `skin::Fade`): every figure (man, mount pair, standard bearer) keeps its own
+  loop clip and clip time, as each exe display does. A loop clip change starts a blend over the new line's blend-in
+  time (`FragmentClip::blend_in`, the one place the 1.0 s default lives) from the frame the figure drew last frame,
+  weight prod(1 - e_k / D) as above; a moving -> looping change keeps that figure's normalised phase, tested on the old
+  clip's own root speed (`Anim::root_speed` > 0.1 m/s; a rider pair carries when either clip moves); else the figure
+  restarts at its own phase offset. A figure not drawn the frame before (it or its unit skipped; frame-numbered,
+  `SkinState::frame`), or D = 0, snaps, and a skip ends a running cross-fade (the skipped frame drew the slot without
+  it). The mount clip is picked again every frame (in melee the man keeps his idle clip while the horse follows the
+  gait; round-2 review: it used to change only with the man's clip, so a horse walked on its stand clip), and a mount
+  change alone updates the pair's root speed for the next phase carry (round-3 review).
+  PROVISIONAL (ours): (0) a rider and his mount share one blend, so a mount clip changing on its own snaps (the exe
+  blends each display on its own). (1) the GPU keeps at most **two** poses frozen at clip changes, with their
+  weights, not the previous frame's blended pose, so the new clip's earlier frames do not linger as in the recursive
+  blend. A change is never delayed: it freezes the pose drawn last at the old clip's weight (dropped when 0, a change
+  on the frame after a change), keeps the older pose, and of three poses drops the lightest and scales the other two
+  up (a jump of that weight, only on a third change within one blend time); all are gone one blend time after the
+  last change. (An earlier "third change waits" rule stuck for ever after back-to-back changes: round-2 review.)
+  (2) Bone matrices
+  are lerped in model space (no quaternion slerp). (3) **The display-root blend is not implemented**: the exe lerps
+  the display position and heading at e / Dr (Dr 0.5 s, `0x01318038`); our men stand at their formation places, so
+  nothing is blended there. (4) One-shots (fire, reload, melee, deaths) are not blended, and a one-shot drawn ends a
+  running cross-fade. (5) A standard bearer playing the kit's per-gait fallback clip (no levels) snaps. Not done
+  (Polish/BACKLOG): the gear-window override `0x00E6DB90` for mod clips with `*_FOOT_GEAR_UP_*` events.
+  Cost (hot path): the per-frame figure upload stays at 4 words per slot; only fading figures get a 32-byte fade entry,
+  written by the render world into the start of a fade buffer (`skin::FadeUpload`, partial `write_buffer`), so a frame
+  without a cross-fade uploads nothing extra. Release bench of the upload path (serialise + render-world copy +
+  staging copy, best of 5 x 3000, this machine): 13,000 slots (a 20 v 20 unit battle at 160 men, man + mount slots)
+  4 words 0.010 ms vs 0.018 ms for the earlier 8-word slots; 52,000 slots 0.065 ms vs 0.447 ms; the fade entries for
+  every slot fading at once 0.011 ms (13,000) / 0.083 ms (52,000), for a tenth of them 0.001 / 0.005 ms. Checked in a
+  debug `--battle` AI run (NAPOLEON_AI_SHOT at 60 s): shaders build, the fade buffer is written (up to 20 KB a frame),
+  the picture is unchanged. A 120 s debug AI run of `NHB_Austerlitz` after the round-2 fixes (`NAPOLEON_AI_SPEED=2`,
+  each unit's man 0 logged by a temporary print): 251 clip changes, 235 cross-fades ended, each on the first frame
+  with e >= D (D 0.25 s on 190, 0.5 s on 41, 1.0 s on 4; debug frames up to 0.5 s of battle time), none ran on. Speed
+  levels flip between neighbours near a level boundary (median 3.7 s between a unit's changes, a tenth under 0.46 s,
+  once 0.08 s; `pick_level` by ground speed; the exe's slot choice is the UNKNOWN state graph above). A foot soldier's unused mount slot reuses
+  the man's fade entry. Tests: `battle::view` (weights 1, 0.75, 0.375, 0.09375, 0 for D 0.5 s at 8 frames/s; 1.0 s
+  fallback; per-alternative blend time; a figure whose clip did not change keeps its time; a change mid-fade keeps
+  the older pose; back-to-back and 3-4 quick changes end on the newest clip within one blend time; the lightest of
+  three poses dropped; the mount clip followed while the man's stays; a mount change alone updates the pair's speed; the phase carries by the old clip's own root
+  speed; a figure not drawn last frame snaps; a skip mid-fade ends the fade; one-shots; fade numbering and the pole bone posed as the shader does) and
+  `unit_animation::level_clips_carry_the_lines_blend_in_time`.
 ## 2. Soldier LOD (CONFIRMED values)
 Tweaks in `VariantModelManager.cpp`: `variant_lod1` 5.0, `variant_lod2` 10.0, `variant_lod3` 15.0,
 `override_variant_lod` true, `variant_lod_skip` 2. The chooser (`0x0125ED60`) with the override on: LOD 3 if

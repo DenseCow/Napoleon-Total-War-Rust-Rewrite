@@ -107,3 +107,30 @@ fn campaign_start_applies_the_handicap_and_saves_keep_it() {
         assert_eq!(back.model.world.faction_details[&f].bonus_base, m.world.faction_details[&f].bonus_base);
     }
 }
+
+/// The campaign start's handicap lookup clamps the difficulty to −2..2 (`0x00F9F970`) and picks the human or
+/// the AI rows: a human at −7 gets the very hard (−2, human) rows, and the AI factions the (2, AI) rows of the
+/// negated difficulty. (Ported from the AI's deleted copy of the lookup, 0b-recruit review round 2.)
+#[test]
+fn the_start_handicap_clamps_the_difficulty() {
+    let Some((db, source)) = load() else { return };
+    let mut loaded = ntw_campaign::read_esf(&source, &db).expect("load");
+    assert!(loaded.set_human("france"));
+    let mut m = loaded.model.clone();
+    let france = m.faction_by_key("france").unwrap().id;
+    let austria = m.faction_by_key("austria").unwrap().id;
+    m.world.faction_details.get_mut(&france).unwrap().difficulty = -7;
+    apply_start_handicaps(&mut m);
+    let rules = &m.rules.effects;
+    let (human, ai) = (&rules.difficulty()[&(-2, true)], &rules.difficulty()[&(2, false)]);
+    // The shipped rows: very hard costs the human +20 % recruitment; the AI gets +40 % GDP.
+    assert_eq!(human.get("recruitment_mod_cost_land_all"), 20.0);
+    assert_eq!(ai.get("gdp_mod_all"), 40.0);
+    assert_eq!(m.world.faction_details[&austria].difficulty, 7, "the AI takes the negated difficulty");
+    for (f, rows) in [(france, human), (austria, ai)] {
+        let d = &m.world.faction_details[&f];
+        let mut want = saved_set(&d.bonus_base);
+        want.merge(rows);
+        assert_eq!(saved_set(&d.bonus_with_difficulty), want, "faction {f:?}");
+    }
+}

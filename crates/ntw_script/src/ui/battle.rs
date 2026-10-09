@@ -17,6 +17,18 @@ use crate::ScriptSource;
 
 const BATTLE_PRELUDE: &str = include_str!("battle_prelude.lua");
 
+/// Writes each listed field of `$new` into Lua table `$t` under its name when it differs from
+/// `$old`'s (an `Option<&_>`; `None` writes them all).
+macro_rules! put_changed {
+    ($t:expr, $new:expr, $old:expr, { $($name:literal => $field:ident),* $(,)? }) => {
+        $(
+            if $old.is_none_or(|o| o.$field != $new.$field) {
+                Fact::put(&$new.$field, &$t, $name)?;
+            }
+        )*
+    };
+}
+
 /// Battle phase as the HUD sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HudPhase {
@@ -148,6 +160,8 @@ pub fn install(host: &UiScriptHost, source: ScriptSource) -> mlua::Result<()> {
     let lua = host.lua();
     lua.globals().set("__battle", lua.create_table()?)?;
     lua.globals().set("__battle_requests", lua.create_table()?)?;
+    // BattleUI.WindowsTime (battle_prelude.lua; CONFIRMED `0x005D4BF0`).
+    lua.globals().set("__ntw_battle_windows_time", lua.create_function(|_, ()| Ok(super::host::battle_windows_time_now()))?)?;
     // INFERRED: the engine's `loadfile` reads through the VFS (CoreUtils.NamespaceFile calls it on
     // `package.path` templates; the battle root sets `data/ui/battle ui/?.lua` there).
     lua.globals().set(
@@ -176,71 +190,140 @@ pub fn load_hud(host: &UiScriptHost) -> Result<super::NodeId, String> {
     host.load_root_layout("data/ui/battle ui/layout")
 }
 
-/// Writes the snapshot into `__battle` (read by the `BattleUI.*` functions and card updates).
+/// Writes the whole snapshot into `__battle` (read by the `BattleUI.*` functions and card
+/// updates): [`update_facts`] with nothing written before.
 pub fn set_facts(host: &UiScriptHost, f: &BattleHudFacts) -> mlua::Result<()> {
-    let lua = host.lua();
-    let t: Table = lua.globals().get("__battle")?;
-    t.set("phase", match f.phase {
-        HudPhase::Deployment => "deployment",
-        HudPhase::Conflict => "conflict",
-        HudPhase::Finished => "finished",
-    })?;
-    t.set("elapsed", f.elapsed_s)?;
-    t.set("total", f.total_s)?;
-    t.set("speed", f.speed)?;
-    t.set("naval", f.naval)?;
-    t.set("battle_name", f.battle_name.as_str())?;
-    t.set("player_faction", f.player_faction.as_str())?;
-    t.set("player_flag", f.player_flag.as_str())?;
-    t.set("balance", f.balance)?;
-    t.set("player_won", f.player_won)?;
-    let units = lua.create_table()?;
-    for (i, u) in f.units.iter().enumerate() {
-        units.set(i + 1, unit_table(lua, u)?)?;
-    }
-    t.set("units", units)?;
-    let results = lua.create_table()?;
-    for (i, r) in f.results.iter().enumerate() {
-        let e = lua.create_table()?;
-        e.set("name", r.name.as_str())?;
-        e.set("faction", r.faction.as_str())?;
-        e.set("flag", r.flag.as_str())?;
-        e.set("men_start", r.men_start)?;
-        e.set("men_alive", r.men_alive)?;
-        e.set("kills", r.kills)?;
-        e.set("units_start", r.units_start)?;
-        e.set("units_left", r.units_left)?;
-        results.set(i + 1, e)?;
-    }
-    t.set("results", results)
+    update_facts(host, f, None)
 }
 
-fn unit_table(lua: &Lua, u: &HudUnit) -> mlua::Result<Table> {
-    let t = lua.create_table()?;
-    t.set("id", u.id)?;
-    t.set("key", u.key.as_str())?;
-    t.set("name", u.name.as_str())?;
-    t.set("kills", u.kills)?;
-    t.set("portrait", u.portrait.as_str())?;
-    t.set("men", u.men)?;
-    t.set("max_men", u.max_men)?;
-    t.set("guns", u.guns)?;
-    t.set("max_guns", u.max_guns)?;
-    t.set("is_artillery", u.is_artillery)?;
-    t.set("has_ammo", u.has_ammo)?;
-    t.set("ammo_percent", u.ammo_percent)?;
-    t.set("experience", u.experience)?;
-    t.set("wavering", u.wavering)?;
-    t.set("routing", u.routing)?;
-    t.set("walking", u.walking)?;
-    t.set("running", u.running)?;
-    t.set("firing", u.firing)?;
-    t.set("melee", u.melee)?;
-    t.set("under_fire", u.under_fire)?;
-    t.set("selected", u.selected)?;
-    t.set("category", u.category.as_str())?;
-    t.set("fire_at_will", u.fire_at_will)?;
-    Ok(t)
+/// Writes snapshot `f` into `__battle` in place, given `written`, the snapshot the last successful
+/// write left there: only the fields that differ from it are written, and the unit and result
+/// tables are kept and refreshed (a frame where nothing but the clock changed makes no table and no
+/// string). `None` (the first frame, or after a failed write) writes everything into new tables.
+pub fn update_facts(host: &UiScriptHost, f: &BattleHudFacts, written: Option<&BattleHudFacts>) -> mlua::Result<()> {
+    let lua = host.lua();
+    let t: Table = lua.globals().get("__battle")?;
+    put_changed!(t, f, written, {
+        "phase" => phase,
+        "elapsed" => elapsed_s,
+        "total" => total_s,
+        "speed" => speed,
+        "naval" => naval,
+        "battle_name" => battle_name,
+        "player_faction" => player_faction,
+        "player_flag" => player_flag,
+        "balance" => balance,
+        "player_won" => player_won,
+    });
+    refresh_list(lua, &t, "units", &f.units, written.map(|w| &w.units[..]), |e, u, o| {
+        put_changed!(e, u, o, {
+            "id" => id,
+            "key" => key,
+            "name" => name,
+            "kills" => kills,
+            "portrait" => portrait,
+            "men" => men,
+            "max_men" => max_men,
+            "guns" => guns,
+            "max_guns" => max_guns,
+            "is_artillery" => is_artillery,
+            "has_ammo" => has_ammo,
+            "ammo_percent" => ammo_percent,
+            "experience" => experience,
+            "wavering" => wavering,
+            "routing" => routing,
+            "walking" => walking,
+            "running" => running,
+            "firing" => firing,
+            "melee" => melee,
+            "under_fire" => under_fire,
+            "selected" => selected,
+            "category" => category,
+            "fire_at_will" => fire_at_will,
+        });
+        Ok(())
+    })?;
+    refresh_list(lua, &t, "results", &f.results, written.map(|w| &w.results[..]), |e, r, o| {
+        put_changed!(e, r, o, {
+            "name" => name,
+            "faction" => faction,
+            "flag" => flag,
+            "men_start" => men_start,
+            "men_alive" => men_alive,
+            "kills" => kills,
+            "units_start" => units_start,
+            "units_left" => units_left,
+        });
+        Ok(())
+    })
+}
+
+/// A snapshot field, written into its Lua table under `name`.
+trait Fact: PartialEq {
+    fn put(&self, t: &Table, name: &str) -> mlua::Result<()>;
+}
+
+macro_rules! copy_fact {
+    ($($ty:ty),*) => {
+        $(impl Fact for $ty {
+            fn put(&self, t: &Table, name: &str) -> mlua::Result<()> {
+                t.set(name, *self)
+            }
+        })*
+    };
+}
+copy_fact!(u32, f32, bool, Option<bool>);
+
+impl Fact for String {
+    fn put(&self, t: &Table, name: &str) -> mlua::Result<()> {
+        t.set(name, self.as_str())
+    }
+}
+
+impl Fact for HudPhase {
+    fn put(&self, t: &Table, name: &str) -> mlua::Result<()> {
+        t.set(name, match self {
+            HudPhase::Deployment => "deployment",
+            HudPhase::Conflict => "conflict",
+            HudPhase::Finished => "finished",
+        })
+    }
+}
+
+/// Refreshes the Lua list `battle[name]` from `rows` in place: a row `written` also had keeps its
+/// table and `fill` writes what changed (given the written row); a new row gets a new table
+/// (`fill` given no row); rows past the end are removed, last first. `written: None` (or no list
+/// there) makes a new list.
+fn refresh_list<T>(
+    lua: &Lua,
+    battle: &Table,
+    name: &str,
+    rows: &[T],
+    written: Option<&[T]>,
+    fill: impl Fn(&Table, &T, Option<&T>) -> mlua::Result<()>,
+) -> mlua::Result<()> {
+    let (list, old) = match (written, battle.get::<Option<Table>>(name)?) {
+        (Some(old), Some(list)) => (list, old),
+        _ => {
+            let list = lua.create_table()?;
+            battle.set(name, list.clone())?;
+            (list, &[][..])
+        }
+    };
+    for (i, row) in rows.iter().enumerate() {
+        match old.get(i) {
+            Some(o) => fill(&list.get::<Table>(i + 1)?, row, Some(o))?,
+            None => {
+                let e = lua.create_table()?;
+                fill(&e, row, None)?;
+                list.set(i + 1, e)?;
+            }
+        }
+    }
+    for i in (rows.len()..old.len()).rev() {
+        list.set(i + 1, Value::Nil)?;
+    }
+    Ok(())
 }
 
 /// Calls a global function of the HUD (any component environment that defines it, e.g. the root's
@@ -341,6 +424,19 @@ mod tests {
     use super::*;
     use crate::ui::host::tests::{facts, layout_bytes_with_root};
 
+    /// `BattleUI.WindowsTime()` is the battle binding (`0x005D4BF0`): the system clock in seconds as
+    /// a float, the same clock as `CampaignUI.WindowsTime()`'s whole seconds (it was `os.clock()`,
+    /// the process's CPU time).
+    #[test]
+    fn battle_windows_time_is_the_system_clock_in_float_seconds() {
+        let host = UiScriptHost::new(ScriptSource::empty(), ntw_formats::loc::Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        install(&host, ScriptSource::empty()).unwrap();
+        let t: f64 = host.lua().load("return BattleUI.WindowsTime()").eval().unwrap();
+        let whole = super::super::host::windows_time_secs() as f64;
+        assert!((t - whole).abs() < 1.01, "battle {t} vs campaign {whole}");
+        assert_eq!(t, f64::from(t as f32), "a 32-bit float");
+    }
+
     /// The per-frame card update runs each card's `Update` as that card's script without a context
     /// switch (`__ntw_call_as` allocates its arguments; review round 3: it ran per card per frame),
     /// and the order buttons' update reaches the root's `SetOrderButtonState` the same way.
@@ -400,5 +496,37 @@ mod tests {
         assert!(env.get::<bool>("same").unwrap(), "one info table per card");
         assert_eq!(env.get::<i64>("men").unwrap(), 41, "refreshed from the unit's facts");
         assert!(!env.get::<bool>("inactive").unwrap(), "the constant fields are kept");
+    }
+
+    /// Polish: `__battle.units` and `results` were new tables (and strings) every frame. A frame
+    /// writes into the tables already there and only the fields that changed; a unit gone is
+    /// removed from the list, a new one gets a table; with nothing written before, all is written.
+    #[test]
+    fn facts_are_refreshed_in_place_and_only_what_changed_is_written() {
+        let host = UiScriptHost::new(ScriptSource::empty(), ntw_formats::loc::Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        install(&host, ScriptSource::empty()).unwrap();
+        let lua = host.lua();
+        let unit = |id: u32, men: u32| HudUnit { id, key: format!("unit_{id}"), men, ..Default::default() };
+        let side = |kills: u32| HudSideResult { name: "France".into(), kills, ..Default::default() };
+        let f0 = BattleHudFacts { units: vec![unit(1, 60), unit(2, 80)], results: vec![side(0), side(0)], ..Default::default() };
+        set_facts(&host, &f0).unwrap();
+        lua.load("first_unit, first_result = __battle.units[1], __battle.results[2]; __battle.units[1].key = 'untouched'").exec().unwrap();
+        let mut f1 = f0.clone();
+        f1.elapsed_s = 2.5;
+        f1.units[0].men = 41;
+        f1.results[1].kills = 19;
+        f1.units.pop();
+        update_facts(&host, &f1, Some(&f0)).unwrap();
+        let check = |code: &str| lua.load(code).eval::<bool>().unwrap();
+        assert!(check("rawequal(first_unit, __battle.units[1]) and rawequal(first_result, __battle.results[2])"), "the same tables");
+        assert!(check("__battle.units[1].men == 41 and __battle.results[2].kills == 19 and __battle.elapsed == 2.5"), "changes written");
+        assert!(check("__battle.units[1].key == 'untouched'"), "an unchanged field is not written again");
+        assert!(check("#__battle.units == 1 and __battle.units[2] == nil"), "the gone unit is removed");
+        let mut f2 = f1.clone();
+        f2.units.push(unit(3, 30));
+        update_facts(&host, &f2, Some(&f1)).unwrap();
+        assert!(check("#__battle.units == 2 and __battle.units[2].id == 3 and __battle.units[2].key == 'unit_3'"), "a new unit gets a table");
+        set_facts(&host, &f2).unwrap();
+        assert!(check("not rawequal(first_unit, __battle.units[1]) and __battle.units[1].key == 'unit_1'"), "nothing written before: all new");
     }
 }

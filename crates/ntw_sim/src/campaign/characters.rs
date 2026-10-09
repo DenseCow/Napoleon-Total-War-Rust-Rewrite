@@ -663,8 +663,8 @@ impl CampaignModel {
                 let r = self.rules.units.get(&u.unit_key);
                 let category = r.map_or(1, |r| category_order(&r.category));
                 let flag = !navy && r.is_some_and(|r| r.flag_21);
-                let value_7 = r.map_or(0, |r| r.value_7);
-                (Reverse(leads), Reverse(rank), category, flag, Reverse(value_7), *i)
+                let campaign_cost = r.map_or(0, |r| r.campaign_cost);
+                (Reverse(leads), Reverse(rank), category, flag, Reverse(campaign_cost), *i)
             })
             .map(|(i, _)| i)
     }

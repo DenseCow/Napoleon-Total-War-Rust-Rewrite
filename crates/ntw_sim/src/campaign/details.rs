@@ -24,8 +24,12 @@ pub struct CharacterDetails {
     /// #3 `CAMPAIGN_LOCALISATION` with two strings (empty in every sample; INFERRED: a clan or
     /// title name pair).
     pub other_names: (String, String),
-    /// #4 utf16 (empty in every sample; UNKNOWN).
-    pub unknown_4: String,
+    /// #4 utf16: the regnal numeral shown after the name ("III" for George III; empty except for
+    /// monarchs). CONFIRMED: the name builder `0x00A0FE80` appends character +0x33C, which
+    /// `0x008DCF50` fills from the family member's regnal number ([`super::family::regnal_numeral`]);
+    /// the eur startpos holds "III" here for George, Friedrich Wilhelm and Ferdinando
+    /// (UI_FIDELITY.md 4.7).
+    pub regnal_numeral: String,
     /// #5 `DATE`: birth date (INFERRED: years 1730..1800 for 1805 characters).
     pub birth: Option<Date>,
     /// #6 `DATE` (year 0 in every startpos; UNKNOWN, INFERRED death date).

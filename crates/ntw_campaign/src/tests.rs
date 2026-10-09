@@ -1,15 +1,14 @@
 //! Unit tests on a tiny hand-built start position (MADE-UP values, no game data).
 //! Tests against the real install are in `tests/real_install.rs`.
 
-use std::sync::Arc;
 
 use ntw_data::campaign::{BuildingEffect, BuildingUnitAllowed};
 use ntw_data::effects::EffectBonusBasic;
-use ntw_data::{GameDatabase, Table, UnitStatsLandExperienceBonuses, UnitStatsNavalExperienceBonuses};
+use ntw_data::{GameDatabase, Table};
 use ntw_formats::esf::{EsfFile, EsfNode, EsfRecord, EsfRecordArray};
 use ntw_sim::campaign::{
     BuildingRef, CampaignCommand, CharacterId, FactionId, FortId, ForceId, GovernmentType, RegionId,
-    Stance, XpCostRow, economy,
+    Stance, economy,
 };
 
 use super::*;
@@ -605,30 +604,29 @@ fn oddities_become_warnings() {
     assert_eq!(loaded.rebel_faction, None);
 }
 
-/// The XP-cost rows of the fixture, plus a **rank 5** in each table (the fixture ships only ranks
-/// 0 and 9, and a veteran that is not the maximum is what the test below needs), plus the two
-/// campaign rows that turn the fixture's barracks level into somewhere the fixture infantry can be
-/// raised. Everything stays MADE-UP — the shapes are the shipped ones.
-fn db_with_a_middle_experience_rank() -> GameDatabase {
+/// The fixture plus the campaign rows that turn the fixture's barracks level into somewhere the
+/// fixture infantry can be raised, and the effect junction row that gives a building a recruitment
+/// cost effect. Everything stays MADE-UP — the shapes are the shipped ones.
+fn db_with_a_barracks() -> GameDatabase {
     let mut db = GameDatabase::test_fixture();
-    let mut land = db.unit_stats_land_experience_bonuses.rows().to_vec();
-    land.push(UnitStatsLandExperienceBonuses { rank: "5".into(), fatigue_bonus: -1, unknown_24: 180, unknown_28: 1.5, ..Default::default() });
-    db.unit_stats_land_experience_bonuses = Table::from_rows(0, land);
-    let mut naval = db.unit_stats_naval_experience_bonuses.rows().to_vec();
-    naval.push(UnitStatsNavalExperienceBonuses { rank: "5".into(), unknown_1c: 127, unknown_20: 1.25, ..Default::default() });
-    db.unit_stats_naval_experience_bonuses = Table::from_rows(0, naval);
     db.campaign.building_units = Table::from_rows(
         0,
         vec![BuildingUnitAllowed { building: BARRACKS.into(), unit: UNIT.into(), ..Default::default() }],
     );
     db.campaign.building_effects = Table::from_rows(
         0,
-        vec![BuildingEffect { building: BARRACKS.into(), effect: "recruitment_points".into(), value: 2.0 }],
+        vec![
+            BuildingEffect { building: BARRACKS.into(), effect: "recruitment_points".into(), value: 2.0 },
+            BuildingEffect { building: BARRACKS.into(), effect: "fixture_cheaper_recruits".into(), value: -10.0 },
+        ],
     );
     // The effect → bonus junction every source is compiled through, which the fixture leaves empty.
     db.campaign.effects.bonus_basic = Table::from_rows(
         0,
-        vec![EffectBonusBasic { effect: "recruitment_points".into(), bonus: "recruitment_points".into() }],
+        vec![
+            EffectBonusBasic { effect: "recruitment_points".into(), bonus: "recruitment_points".into() },
+            EffectBonusBasic { effect: "fixture_cheaper_recruits".into(), bonus: "recruitment_mod_cost_land_all".into() },
+        ],
     );
     db
 }
@@ -637,44 +635,31 @@ fn db_with_a_middle_experience_rank() -> GameDatabase {
 const BARRACKS: &str = "fixture_barracks_1";
 const UNIT: &str = "fixture_line_infantry";
 
-/// The experience-adjusted cost reaches the campaign economy through the **loader**, not through a
-/// hand-built table: `rules_from_db` (which `read_esf` calls for every campaign and save) copies
-/// `unit_stats_land_experience_bonuses` `+0x24`/`+0x28` and its naval twin `+0x1C`/`+0x20` into
-/// `CampaignRules::xp_cost`, so `economy::recruit_cost` — the function the recruitment command
-/// charges with — sees them. `0x00ED49A0`, CONFIRMED structure (BATTLE_FIDELITY.md §19a, §54 (1)).
+/// The loader copies `units` #7 into the campaign cost and keeps #4 apart: the campaign charges #7
+/// (`UNIT_RECORD` +0x38, read by `0x00B0D220`), #4 is the battle army-setup price. It also copies the
+/// unit cap #15 (`UNIT_RECORD` +0x68, read by `0x008F68B0`).
 #[test]
-fn the_loader_puts_the_experience_tables_in_the_recruitment_cost() {
-    let db = db_with_a_middle_experience_rank();
+fn the_loader_takes_the_campaign_cost_from_units_7() {
+    let mut db = db_with_a_barracks();
+    let units = db.units.rows().iter().cloned().map(|mut u| {
+        if u.key == UNIT {
+            u.unit_cap = 4;
+        }
+        u
+    });
+    db.units = Table::from_rows(0, units.collect());
     let rules = rules_from_db(&db, "test_campaign");
-    // Both tables arrived, keyed by the chevron count, not by file position.
-    assert_eq!(rules.xp_cost.land.len(), 3);
-    assert_eq!(rules.xp_cost.naval.len(), 3);
-    assert_eq!(rules.xp_cost.land[&5], XpCostRow { flat: 180, mult: 1.5 });
-    assert_eq!(rules.xp_cost.naval[&5], XpCostRow { flat: 127, mult: 1.25 });
-    assert_eq!(rules.xp_cost.land[&9], XpCostRow { flat: 360, mult: 1.9 });
-    assert_eq!(rules.xp_cost.naval[&9], XpCostRow { flat: 255, mult: 1.45 });
-    assert_eq!(rules.xp_cost.land[&0], XpCostRow { flat: 0, mult: 1.0 });
-
-    // A rank-5 veteran costs more than a rank-0 recruit: `flat + ROUND(base × mult)` on the 111
-    // `units` #4 cost, so 180 + ROUND(111 × 1.5) = 180 + 167 = 347 against 111.
     let land = &rules.units[UNIT];
-    assert_eq!(land.cost, 111);
-    assert_eq!(economy::recruit_cost(&rules, land, 0), 111);
-    assert_eq!(economy::recruit_cost(&rules, land, 5), 180 + 167);
-    assert!(economy::recruit_cost(&rules, land, 5) > economy::recruit_cost(&rules, land, 0));
-    // A rank neither table has is left alone (the exe's else branch).
-    assert_eq!(economy::recruit_cost(&rules, land, 7), 111);
+    assert_eq!((land.cost, land.campaign_cost, land.unit_cap), (111, 99, 4));
 }
 
-/// The same seam, but all the way through a **loaded campaign**: `read` runs `rules_from_db`, and
-/// the recruitment command then charges the treasury the loaded tables' figure. The command always
-/// raises a fresh unit, so it charges the rank-0 row (the exe's auto-build `0x0045CB50` likewise
-/// only ever buys up to rank 9); the rank-5 leg is `economy::recruit_cost` above, and
-/// `veteran_units_cost_more_than_recruits` in `ntw_sim` covers the same hop with tables built in
-/// code. What this test adds is that nothing between the DB file and the treasury is missing.
+/// All the way through a **loaded campaign**: `read` runs `rules_from_db`, and the recruitment command
+/// then charges the region's entry cost — `units` #7 with the region's building effects (the
+/// barracks' −10 `recruitment_mod_cost_land_all`, compiled through the junction) — keeps it on the
+/// item, and a cancel refunds it.
 #[test]
-fn recruiting_from_a_loaded_campaign_charges_the_loaded_experience_cost() {
-    let db = db_with_a_middle_experience_rank();
+fn recruiting_from_a_loaded_campaign_charges_units_7_with_the_region_effects() {
+    let db = db_with_a_barracks();
     let mut m = read(&tiny(STARTPOS_ROOT, tiny_world()), &db).unwrap().model;
     // The map layout is not what this test is about: point the region's slot at the fixture's
     // barracks level and hand the region to the player faction, whose turn it is.
@@ -682,28 +667,19 @@ fn recruiting_from_a_loaded_campaign_charges_the_loaded_experience_cost() {
     region.owner = FactionId(1000);
     region.slots[0].building = Some(BuildingRef { level_key: BARRACKS.into(), health: 100 });
     m.world.factions.get_mut(&FactionId(1000)).expect("the player is there").treasury = 10_000;
-
-    // The loaded rules carry the tables, and the region can now raise the unit.
-    assert_eq!(m.rules.xp_cost.land[&5], XpCostRow { flat: 180, mult: 1.5 });
     assert_eq!(m.recruitment_points(RegionId(77), false), 2);
     assert!(m.recruitable_units(RegionId(77)).contains(&UNIT.to_owned()));
-    // The cost the command is about to charge, straight out of the loaded tables.
-    let cost = economy::recruit_cost(&m.rules, &m.rules.units[UNIT], 0);
-    assert_eq!(cost, 111);
-    assert!(economy::recruit_cost(&m.rules, &m.rules.units[UNIT], 5) > cost);
 
+    // FISTP(90 × 99 × 0.01) = FISTP(89.1) = 89.
+    let cost = economy::recruitment_cost(&m, &m.world.regions[&RegionId(77)], UNIT, &m.rules.units[UNIT]);
+    assert_eq!(cost, 89);
     m.apply(CampaignCommand::Recruit { region: RegionId(77), unit_key: UNIT.into() }).unwrap();
     assert_eq!(m.world.factions[&FactionId(1000)].treasury, 10_000 - cost);
-    assert_eq!(m.world.regions[&RegionId(77)].recruitment_queue[0].cost, cost);
-    // And the queue is not filled with a hand-built number: an empty rules set would have charged
-    // the plain cost, which happens to be the same here — so make the rank-0 row charge something
-    // else and the loaded table has to follow.
-    let mut rules = (*m.rules).clone();
-    rules.xp_cost.land.insert(0, XpCostRow { flat: 100, mult: 2.0 });
-    m.rules = Arc::new(rules);
-    m.apply(CampaignCommand::Recruit { region: RegionId(77), unit_key: UNIT.into() }).unwrap();
-    assert_eq!(m.world.regions[&RegionId(77)].recruitment_queue[1].cost, 100 + 222);
-    assert_eq!(m.world.factions[&FactionId(1000)].treasury, 10_000 - 111 - 322);
+    let item = &m.world.regions[&RegionId(77)].recruitment_queue[0];
+    assert_eq!(item.cost, cost);
+    let id = item.id;
+    m.apply(CampaignCommand::CancelRecruitment { region: RegionId(77), item: id }).unwrap();
+    assert_eq!(m.world.factions[&FactionId(1000)].treasury, 10_000);
 }
 
 /// `region` with a `REGION_RECRUITMENT_MANAGER` queueing one land item per `(id, unit key)`.

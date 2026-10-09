@@ -105,8 +105,11 @@ pub enum UiFrame {
     #[default]
     Pages,
     /// The battle HUD: panels keep their authored size and dock themselves inside the root
-    /// (deployment, victory options, results); the scripts see screen coordinates (the battle
-    /// HUD's frame is not traced, BACKLOG §0).
+    /// (deployment, victory options, results); the scripts see screen coordinates. PROVISIONAL:
+    /// the static trace (analysis/battle/BATTLE_FLOW.md §3) finds one root loader for every HUD
+    /// (`0x00DB21E0`) and a device-wide layout-to-screen mapping (`0x011881C0`): both point to the
+    /// root's layout frame, as in the campaign HUD. A debugger sitting in a battle settles it
+    /// (this and the layout frame agree at a 1280x960 window).
     Panels,
     /// The campaign HUD: panels keep their authored size, and the scripts see the root at its
     /// layout size and place components in that frame (`UiWorld::script_rect`; CONFIRMED at
@@ -177,8 +180,8 @@ pub(super) struct Inner {
     /// The screen size or the page rule changed since the last layout (changes inside the tree
     /// mark [`UiWorld::layout_dirty`] instead); see [`lay_out_if_stale`].
     layout_stale: std::cell::Cell<bool>,
-    /// What [`Inner::log_once`] has logged in this host.
-    logged_once: RefCell<std::collections::HashSet<&'static str>>,
+    /// What [`Inner::log_once`] and [`Inner::log_once_for`] have logged in this host.
+    logged_once: RefCell<std::collections::HashSet<String>>,
     /// Engine events' calls into the scripts, made at the start of the next UI frame
     /// ([`Inner::post_call`]).
     posted_calls: RefCell<Vec<PostedCall>>,
@@ -210,7 +213,19 @@ impl Inner {
     /// Logs `text` the first time `what` happens in this host (one host per screen: the front
     /// end, a battle HUD, a campaign HUD).
     pub(super) fn log_once(&self, what: &'static str, text: impl FnOnce() -> String) {
-        if self.logged_once.borrow_mut().insert(what) {
+        let first = {
+            let mut seen = self.logged_once.borrow_mut();
+            !seen.contains(what) && seen.insert(what.to_owned())
+        };
+        if first {
+            log(self, text());
+        }
+    }
+
+    /// [`Inner::log_once`] per `key`: logs `text` the first time `what` happens for that key (a
+    /// missing loc string is logged once per string, not once per host).
+    pub(super) fn log_once_for(&self, what: &'static str, key: &str, text: impl FnOnce() -> String) {
+        if self.logged_once.borrow_mut().insert(format!("{what}\u{0}{key}")) {
             log(self, text());
         }
     }
@@ -555,7 +570,9 @@ impl UiScriptHost {
                 let _ = destroy(&self.lua, &self.inner, d);
             }
         }
-        // The engine events' calls posted since the last frame.
+        // The engine events' calls posted since the last frame (the campaign's events become
+        // posted calls first).
+        self.campaign_frame();
         self.make_posted_calls();
         let listeners: Vec<(NodeId, Option<String>)> = {
             let w = self.inner.world.borrow();
@@ -670,13 +687,54 @@ pub(super) fn log(inner: &Inner, text: String) {
     inner.log.borrow_mut().push(text);
 }
 
-/// `WindowsTime()`'s clock: whole seconds of a wall clock that never resets (the exe's
-/// `0x009FB0B0` pushes `(int)(timeGetTime() * 0.001)`, CONFIRMED). PROVISIONAL: ours counts from
-/// the first call in this process, not from the system's start (the scripts only take
-/// differences), so a new HUD does not restart it.
+/// The clock of both `WindowsTime()` bindings: `timeGetTime()`, milliseconds since Windows
+/// started, wrapping at 2^32 (CONFIRMED: `0x009FB0B0` and `0x005D4BF0` both call the winmm import
+/// at `0x013073EC`). Elsewhere (no such call): milliseconds since the first call in this process.
+fn time_get_time_ms() -> u32 {
+    #[cfg(windows)]
+    {
+        #[link(name = "winmm")]
+        unsafe extern "system" {
+            fn timeGetTime() -> u32;
+        }
+        // SAFETY: no arguments and no preconditions; reads the system's millisecond counter.
+        unsafe { timeGetTime() }
+    }
+    #[cfg(not(windows))]
+    {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u32
+    }
+}
+
+/// Seconds of a `timeGetTime()` value as both bindings compute them (CONFIRMED `0x009FB0B0`,
+/// `0x005D4BF0`): the u32 widened to double (with the sign-bit fix-up), rounded to a 32-bit float,
+/// times `0.001f` (`0x01318030`) in float.
+fn windows_seconds(ms: u32) -> f32 {
+    (f64::from(ms) as f32) * 0.001_f32
+}
+
+/// `CampaignUI.WindowsTime()` (`0x009FB0B0`, CONFIRMED): [`windows_seconds`] truncated to an int
+/// (`CVTTSS2SI`) and pushed as a number: whole seconds since Windows started.
+fn campaign_windows_time(ms: u32) -> i32 {
+    windows_seconds(ms) as i32
+}
+
+/// `BattleUI.WindowsTime()` (`0x005D4BF0`, CONFIRMED): [`windows_seconds`] pushed as the float it
+/// is (`0x010565A0`, no truncation): fractional seconds since Windows started, at a 32-bit float's
+/// precision (the engine's `lua_Number` is a float).
+fn battle_windows_time(ms: u32) -> f64 {
+    f64::from(windows_seconds(ms))
+}
+
+/// `CampaignUI.WindowsTime()` now ([`campaign_windows_time`]).
 pub(super) fn windows_time_secs() -> i64 {
-    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    START.get_or_init(std::time::Instant::now).elapsed().as_secs() as i64
+    i64::from(campaign_windows_time(time_get_time_ms()))
+}
+
+/// `BattleUI.WindowsTime()` now ([`battle_windows_time`]).
+pub(super) fn battle_windows_time_now() -> f64 {
+    battle_windows_time(time_get_time_ms())
 }
 
 /// The UIEd template library, read from the install on first use (a loose file; CONFIRMED path
@@ -2274,6 +2332,24 @@ impl UiScriptHost {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// Both `WindowsTime()` bindings from one `timeGetTime()` value: the campaign's truncates to
+    /// whole seconds (`0x009FB0B0`), the battle's keeps the float (`0x005D4BF0`), and both go
+    /// through a 32-bit float first, so a long uptime loses the low milliseconds.
+    #[test]
+    fn windows_time_matches_both_bindings() {
+        assert_eq!(campaign_windows_time(1_999), 1);
+        assert_eq!(battle_windows_time(1_999), f64::from(1_999.0_f32 * 0.001_f32));
+        assert!((battle_windows_time(1_999) - 1.999).abs() < 1e-6, "fractional, not truncated");
+        assert_eq!(campaign_windows_time(0), 0);
+        assert_eq!(battle_windows_time(0), 0.0);
+        // 100_000_007 ms is 100_000_008.0 as a float: the battle value is that × 0.001f.
+        assert_eq!(battle_windows_time(100_000_007), f64::from(100_000_008.0_f32 * 0.001_f32));
+        assert_eq!(campaign_windows_time(100_000_007), 100_000);
+        // Above 2^31 ms (24.8 days) the u32 stays unsigned (the exe's sign-bit fix-up).
+        assert_eq!(campaign_windows_time(u32::MAX), 4_294_967);
+        assert!(battle_windows_time(0x8000_0000) > 2_147_483.0);
+    }
 
     pub(crate) fn facts() -> FrontEndFacts {
         FrontEndFacts { campaign_saves_exist: false, spanish_campaign: false, game_version: "test".into(), ..Default::default() }

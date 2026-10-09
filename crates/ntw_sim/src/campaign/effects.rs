@@ -507,7 +507,7 @@ pub fn minister_level(rules: &EffectRules, government: &str, post: &str, base: i
 /// the flag picks the human or the AI rows). CONFIRMED structure; a loaded save keeps its saved #55 and
 /// never runs this. Human factions use their own difficulty with the human rows; every other faction
 /// takes the campaign setup's difficulty with the AI rows, here the negated difficulty of the first
-/// human (INFERRED, as `ntw_ai::campaign::data::ai_handicap`; AI_RESEARCH.md "Difficulty"), which is
+/// human (INFERRED; AI_RESEARCH.md "Difficulty"), which is
 /// also written to its `difficulty` as the exe writes +0x6E4. PROVISIONAL: the front end has no
 /// difficulty choice yet, so the human's difficulty is the one stored in the file.
 pub fn apply_start_handicaps(model: &mut CampaignModel) {

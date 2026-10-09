@@ -10,6 +10,7 @@
 //! Because the struct and the schema come from the same list, they can never get out of step.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ntw_formats::db::{DbTable, DbValue, FieldType, Schema};
 
@@ -105,16 +106,30 @@ pub trait DbRecord: Sized {
 ///
 /// If several rows share a key, [`get`](Self::get) returns the **first** one (INFERRED; the
 /// exe's duplicate handling is not documented). All rows stay in [`rows`](Self::rows).
-#[derive(Debug, Clone, PartialEq)]
+///
+/// A table never changes after it is built, so its [`id`](Self::id) names its rows: a row number
+/// read from a table stays valid wherever that table's id is still seen.
+#[derive(Debug, Clone)]
 pub struct Table<T> {
     version: u32,
     rows: Vec<T>,
     index: HashMap<String, usize>,
+    id: u64,
 }
+
+/// The next [`Table::id`] (0 is the empty default table's).
+static NEXT_TABLE_ID: AtomicU64 = AtomicU64::new(1);
 
 impl<T> Default for Table<T> {
     fn default() -> Self {
-        Self { version: 0, rows: Vec::new(), index: HashMap::new() }
+        Self { version: 0, rows: Vec::new(), index: HashMap::new(), id: 0 }
+    }
+}
+
+/// Equal rows and version (the id names a build, not the contents).
+impl<T: PartialEq> PartialEq for Table<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.version == other.version && self.rows == other.rows
     }
 }
 
@@ -139,12 +154,23 @@ impl<T: DbRecord> Table<T> {
         for (i, r) in rows.iter().enumerate() {
             index.entry(r.key().to_owned()).or_insert(i);
         }
-        Self { version, rows, index }
+        Self { version, rows, index, id: NEXT_TABLE_ID.fetch_add(1, Ordering::Relaxed) }
     }
 
     /// The row with this key (exact, case-sensitive match).
     pub fn get(&self, key: &str) -> Option<&T> {
         self.index.get(key).map(|&i| &self.rows[i])
+    }
+
+    /// [`get`](Self::get) with the row's number in [`rows`](Self::rows).
+    pub fn get_row(&self, key: &str) -> Option<(usize, &T)> {
+        self.index.get(key).map(|&i| (i, &self.rows[i]))
+    }
+
+    /// Names this table's rows: every table built gets a new id (a clone keeps it, as it has the
+    /// same rows), so a cache of row numbers checks it to see that the table was not replaced.
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// All rows in file order.
@@ -326,5 +352,18 @@ mod tests {
         let t = Table::from_rows(0, vec![a, b]);
         assert_eq!((t.get("k").unwrap().count, t.len()), (1, 2));
         assert!(t.get("K").is_none());
+    }
+
+    /// Every built table gets its own id (a row-number cache checks it), a clone keeps it, and
+    /// equality ignores it (the id names a build, not the contents).
+    #[test]
+    fn each_build_has_its_own_id_and_a_clone_keeps_it() {
+        let row = || Sample { name: "k".into(), count: 1, ..Default::default() };
+        let (a, b) = (Table::from_rows(0, vec![row()]), Table::from_rows(0, vec![row()]));
+        assert_ne!(a.id(), b.id());
+        assert_ne!(a.id(), Table::<Sample>::default().id());
+        assert_eq!(a.clone().id(), a.id());
+        assert_eq!(a, b);
+        assert_eq!(a.get_row("k").map(|(i, r)| (i, r.count)), Some((0, 1)));
     }
 }

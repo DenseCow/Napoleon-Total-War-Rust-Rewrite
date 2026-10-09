@@ -68,7 +68,7 @@ pub(crate) fn character_details(ch: &EsfRecord) -> Option<CharacterDetails> {
         forename: loc(d.get(1)),
         surname: loc(d.get(2)),
         other_names: other,
-        unknown_4: s(d.get(4)),
+        regnal_numeral: s(d.get(4)),
         birth: date_of(rec(5)),
         date_2: date_of(rec(6)),
         portrait,

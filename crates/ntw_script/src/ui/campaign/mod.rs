@@ -20,7 +20,7 @@ use mlua::{Function, IntoLuaMulti, LightUserData, Lua, MultiValue, Table, Value,
 use ntw_data::GameDatabase;
 use ntw_sim::campaign::{
     CampaignCommand, CampaignModel, CharacterId, CharacterKind, ConstructionOption, ForceId, FactionId, MilitaryForce, RecruitmentItemId, RegionId,
-    SlotRef, UnitId, economy,
+    SlotRef, UnitId, economy, treasury,
 };
 
 use super::host::{CallTarget, Inner, PostedCall, UiScriptHost, addr, call_entry, log, state_function_guard};
@@ -264,6 +264,8 @@ pub(super) struct CampaignUi {
     attitude_levels: std::cell::OnceCell<HashMap<String, i32>>,
     /// See `CampaignUi::religion_icon`.
     religion_icons: std::cell::OnceCell<HashMap<String, String>>,
+    /// See `CampaignUi::culture_fallback`.
+    portrait_folders: std::cell::OnceCell<HashMap<String, String>>,
     /// The capture whose screen is open (see `campaign_capture_screen`).
     capture_shown: Cell<Option<RegionId>>,
     /// Negotiation state for the diplomacy panel.
@@ -499,6 +501,14 @@ fn loc(inner: &Inner, key: &str) -> Option<String> {
     inner.loc.get(key).map(str::to_owned)
 }
 
+/// [`loc`] for a key the data must have: a missing string gives "" and is logged once per key.
+fn loc_required(inner: &Inner, key: &str) -> String {
+    loc(inner, key).unwrap_or_else(|| {
+        inner.log_once_for("missing loc string", key, || format!("UNKNOWN no loc string {key:?}: shown as \"\" (logged once per key)"));
+        String::new()
+    })
+}
+
 /// A faction's on-screen name: loc `factions_screen_name_<key>`, else the DB name (as the front
 /// end's `CampaignDetails`).
 fn faction_name(inner: &Inner, db: &GameDatabase, key: &str) -> String {
@@ -569,14 +579,17 @@ impl CampaignUi {
     }
 }
 
-/// A character's name: its `CHARACTER_DETAILS` forename and surname, which are loc keys
-/// (`names_name_names_frenchNapoléon` = "Napoléon", CONFIRMED), joined by a space; `None` if the
-/// model has no names for it (CAMPAIGN_DATA.md §3).
+/// A character's name as `BuildCharacterDisplayName` (`0x00A0FE80`, CONFIRMED) builds it: the
+/// forename, then " " + the surname when there is one, then " " + the regnal numeral when there is
+/// one ("George III"). Forename and surname are loc keys (`names_name_names_frenchNapoléon` =
+/// "Napoléon", CONFIRMED); the numeral is plain text (`CHARACTER_DETAILS` #4). `None` if the model
+/// has no names for it (CAMPAIGN_DATA.md §3).
 fn character_name(inner: &Inner, ui: &CampaignUi, c: CharacterId) -> Option<String> {
     let m = ui.model();
     let d = m.world.character_details.get(&c)?;
     let part = |k: &str| if k.is_empty() { None } else { Some(loc(inner, k).unwrap_or_else(|| k.to_owned())) };
-    let name = [part(&d.forename), part(&d.surname)].into_iter().flatten().collect::<Vec<_>>().join(" ");
+    let numeral = (!d.regnal_numeral.is_empty()).then(|| d.regnal_numeral.clone());
+    let name = [part(&d.forename), part(&d.surname), numeral].into_iter().flatten().collect::<Vec<_>>().join(" ");
     (!name.is_empty()).then_some(name)
 }
 
@@ -629,20 +642,27 @@ fn character_type_name(inner: &Inner, ui: &CampaignUi, c: CharacterId) -> String
 /// `FactionDetails(key)` → {Key, Address, Name, FlagPath, UniformColour, PrimaryColour,
 /// WealthRanking, PowerRanking, PrestigeRanking, Leader, VictoryConditions}: CONFIRMED field names
 /// (`FUN_009e2cb0` builds the table, `FUN_009af1a0` the faction fields). PROVISIONAL: colours as
-/// {r, g, b} (sub-table keys UNKNOWN), VictoryConditions empty, and the three rankings
-/// empty strings. The rankings are strings (CONFIRMED, `GetFactionRankingStrings` 0x008C7170
-/// clears them to "" and fills them from `BuildFactionRankingTable` 0x00949630): every faction is
-/// ranked on power (its forces' strength, 0x008B2150), prestige (0x008F4D30) and wealth (last
-/// turn's economy, 0x00BBCC40), sorted, put in categories 0-5 (`AssignFactionRankCategories`
-/// 0x0096B950) and named `random_localisation_strings_string_{power,prestige,wealth}_category_<n+1>`
-/// ("Terrifying" ... "Feeble"). The three values are not in the model yet (UI_FIDELITY.md §4.6).
+/// {r, g, b} (sub-table keys UNKNOWN), VictoryConditions empty. The rankings are strings
+/// (CONFIRMED, `GetFactionRankingStrings` 0x008C7170 clears them to "" and fills them from
+/// `BuildFactionRankingTable` 0x00949630, rebuilt on every call): the model's categories
+/// ([`ntw_sim::campaign::CampaignModel::faction_rankings`]) named
+/// `random_localisation_strings_string_{power,wealth,prestige}_category_<c+1>` ("Terrifying" ...
+/// "Feeble"; UI_FIDELITY.md 4.7).
 fn faction_details(lua: &Lua, inner: &Inner, ui: &CampaignUi, key: &str) -> mlua::Result<Value> {
     let m = ui.model();
     let Some(f) = m.faction_by_key(key) else { return Ok(Value::Nil) };
     let t = lua.create_table()?;
     t.set("Key", key)?;
     t.set("Address", faction_value(ui, f.id))?;
+    let rankings = m.faction_rankings();
+    let ranks = rankings.ranks.get(&f.id).copied();
     drop(m);
+    // The power counts a unit with no `units` record as 0: logged once per unit key.
+    for unit in &rankings.unknown_units {
+        inner.log_once_for("ranking unknown unit", unit, || {
+            format!("UNKNOWN faction power: no units record for {unit:?}, counted as 0 (logged once per unit)")
+        });
+    }
     t.set("Name", faction_name(inner, &ui.link.db, key))?;
     let rec = ui.link.db.faction(key);
     t.set("FlagPath", rec.map(|r| r.flag_path.clone()))?;
@@ -657,9 +677,13 @@ fn faction_details(lua: &Lua, inner: &Inner, ui: &CampaignUi, key: &str) -> mlua
         t.set("PrimaryColour", colour(r.primary_colour())?)?;
         t.set("UniformColour", colour(r.secondary_colour())?)?;
     }
-    t.set("WealthRanking", "")?;
-    t.set("PowerRanking", "")?;
-    t.set("PrestigeRanking", "")?;
+    // A faction the ranking leaves out (the rebels) keeps the "" the exe starts from.
+    let rank = |kind: &str, c: Option<u8>| {
+        c.map(|c| loc_required(inner, &format!("random_localisation_strings_string_{kind}_category_{}", c + 1))).unwrap_or_default()
+    };
+    t.set("WealthRanking", rank("wealth", ranks.map(|r| r.wealth)))?;
+    t.set("PowerRanking", rank("power", ranks.map(|r| r.power)))?;
+    t.set("PrestigeRanking", rank("prestige", ranks.map(|r| r.prestige)))?;
     // Leader: the holder of the faction_leader post (CAMPAIGN_DATA.md §3), as a character details
     // table (0x009AD250, see `character_details`: its CardImage / InfoImage carry the portraits);
     // absent when the faction has no leader (CONFIRMED test 0x008CF600).
@@ -785,7 +809,7 @@ fn install_functions(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tabl
     // adds a second per step). The result is a 32-bit float as in the exe (`(float)ms * 0.001f`).
     f!("Time", |_l, inner, ui, _a: Variadic<Value>| Ok(inner.ui_time_ms.get() as f32 * 0.001_f32));
     // WindowsTime(): "the current windows time in seconds", CONFIRMED `0x009FB0B0`: whole seconds,
-    // `(int)(timeGetTime() * 0.001)` pushed as an integer ([`super::host::windows_time_secs`]).
+    // `(int)(timeGetTime() * 0.001f)` pushed as a number ([`super::host::windows_time_secs`]).
     f!("WindowsTime", |_l, inner, ui, _a: Variadic<Value>| Ok(super::host::windows_time_secs()));
     // LocalisationString(key): random_localisation_strings (CONFIRMED description).
     f!("LocalisationString", |_l, inner, ui, key: String| {
@@ -972,6 +996,7 @@ impl UiScriptHost {
             radar_view: RefCell::new((None, None)),
             attitude_levels: std::cell::OnceCell::new(),
             religion_icons: std::cell::OnceCell::new(),
+            portrait_folders: std::cell::OnceCell::new(),
             capture_shown: Cell::new(None),
             negotiation: RefCell::new(NegotiationState::default()),
         });
@@ -987,6 +1012,15 @@ impl UiScriptHost {
 
     fn campaign_ui(&self) -> Option<Rc<CampaignUi>> {
         self.campaign.borrow().clone()
+    }
+
+    /// The campaign's part of the start of a UI frame, before the posted calls are made: the
+    /// campaign events due since the last frame become posted calls (`diplomacy::sync_negotiation`).
+    pub(in crate::ui) fn campaign_frame(&self) {
+        let Some(ui) = self.campaign_ui() else { return };
+        if let Err(e) = diplomacy::sync_negotiation(self.lua(), self.inner(), &ui) {
+            log(self.inner(), format!("ERROR posting the negotiation events: {e}"));
+        }
     }
 
     /// What the HUD asked the game to do since the last call; drained.
@@ -1287,6 +1321,22 @@ impl CampaignUi {
                     .collect()
             })
             .get(religion)
+            .cloned()
+    }
+
+    /// A culture's fallback culture: the `cultures` row's third column (egy_european → european,
+    /// middle_east → indian, indian → middle_east; empty for european), layout string, int,
+    /// optional string (DB_BUILDERS.md `cultures_tables`). Read once. INFERRED use: the portrait
+    /// folder when the culture's own folder lacks the picture (`MinisterPortraitPath`).
+    fn culture_fallback(&self, inner: &Inner, culture: &str) -> Option<String> {
+        self.portrait_folders
+            .get_or_init(|| {
+                small_table(inner, "db/cultures_tables/cultures", "s,i,o")
+                    .into_iter()
+                    .filter_map(|r| Some((r.first()?.as_str()?.to_owned(), r.get(2)?.as_str()?.to_owned())))
+                    .collect()
+            })
+            .get(culture)
             .cloned()
     }
 

@@ -118,6 +118,12 @@ Tags: CONFIRMED (code/bytes), INFERRED, UNKNOWN. Addresses are `Napoleon.exe` VA
   - `FORMATION_RADIUS = 0` untouched, no value invented. Checks: **485 passed / 0 failed** across
     `ntw_data ntw_sim ntw_campaign ntw_ai`, 15 against the real install, no clippy warning in a file
     this round touched. `crates/napoleon` not built. Details in **§56**.
+- **Superseded (0-B recruitment details, 2026-10-09): the two entries below (rounds N+3 and N+2) wired the
+  experience-adjusted cost into the campaign's recruitment and upkeep; that was wrong and is removed. The campaign
+  never calls `0x00ED49A0` (its recruit cost is `units` #7 with the region's cost effects, `0x00B0D220`; see §19a
+  and CAMPAIGN_FIDELITY.md §Recruitment cost and money), and `economy::recruit_cost`, `XpCostTables`,
+  `CampaignRules::xp_cost` / `xp_adjusted_cost`, `experience_cost_rows` and `unit_upkeep_with_experience` no longer
+  exist. Kept as history.**
 - **Sandbox 0-A round N+3 (2026-10-04).** SEAMS CLOSED. Both XP seams of §54 (1) are landed:
   `ntw_campaign::rules_from_db` copies `db.{experience,naval_experience}_cost_rows()` into
   `CampaignRules::xp_cost`, so **every loaded campaign now has live experience-adjusted costs** (it is
@@ -293,8 +299,8 @@ Tags: CONFIRMED (code/bytes), INFERRED, UNKNOWN. Addresses are `Napoleon.exe` VA
 | 46 | Units leaving the field | §49 (`0x005857A0` state 2) | CONFIRMED rule, unit-level rectangle | `Battle::leave_step` |
 | 47 | Campaign-battle weather pick | §52 (3), `0x00F5B4D0` | CONFIRMED static (flag meaning INFERRED) | `ntw_data::weather::pick_climate_weather` (not wired: no campaign battles yet) |
 | 48 | Formation `+0x670`, garrison `+0x6C`, unit_scale reader | §52 (2) + sandbox 0-A follow-up | unit_scale **SOLVED** (§18a: `0x004A67E5` `MULSS`, truncated, into card `+0xC8`); formation `+0x670` and garrison `+0x6C` still UNKNOWN (§54 (3) corrects the object chain of §53 (4): the cap's `+0x54` is the **slot block's**, not the building's) | `unit_scale::scaled_men`, `Battle::unit_scale` |
-| 49 | Experience / chevrons | §2.1, §52 (4), §19a, §54 (1) | CONFIRMED (timers, the `+0x20` fatigue term, and the `+0x24`/`+0x28` XP cost pair, now **wired into the recruitment and upkeep paths**; land + naval tables decoded) | `LandUnit::experience`, `morale::waver_timeout`/`rout_timeout`, `fatigue::experience_bonuses`, `GameDatabase::*experience_adjusted_cost`, `CampaignRules::xp_adjusted_cost`, `economy::recruit_cost`, `economy::unit_upkeep_with_experience` |
-| 50 | Naval experience bonuses `unit_stats_naval_experience_bonuses` | §19a, §54 (1) | CONFIRMED (getter `0x00E31710` names it twice; v0, 10 rows, decodes with no leftover bytes) and **wired** as the naval branch of the XP-adjusted cost | `ntw_data::UnitStatsNavalExperienceBonuses`, `XpCostTables::naval` |
+| 49 | Experience / chevrons | §2.1, §52 (4), §19a, §54 (1) | CONFIRMED (timers, the `+0x20` fatigue term, and the `+0x24`/`+0x28` XP cost pair: the battle army setup's veteran price, not a campaign cost, §19a; land + naval tables decoded) | `LandUnit::experience`, `morale::waver_timeout`/`rout_timeout`, `fatigue::experience_bonuses`, `UnitStatsLandExperienceBonuses::adjusted_cost`, `GameDatabase::*experience_adjusted_cost`, `ntw_script` army setup `XpAdjustedCost` |
+| 50 | Naval experience bonuses `unit_stats_naval_experience_bonuses` | §19a, §54 (1) | CONFIRMED (getter `0x00E31710` names it twice; v0, 10 rows, decodes with no leftover bytes): the naval branch of the army setup's XP-adjusted cost | `ntw_data::UnitStatsNavalExperienceBonuses`, `UnitStatsNavalExperienceBonuses::adjusted_cost` |
 | 51 | The `gfx_unit_scale` steps and the exe's default | §18a, §54 (2) | CONFIRMED: settings 0/1/2/3 = 0.25 / 0.5 / **0.75** / 1.0, exe default **2**; `CVTTSS2SI` truncates (7 × 0.75 = 5). UNKNOWN: what fills battle-settings key `0x0B` and the per-mode minimum of modes 2/4 | `unit_scale::STEPS`, `unit_scale::PREFERENCE_DEFAULT`, `unit_scale::scaled_men` |
 | 52 | Experience in the melee chain | §57 (1) | CONFIRMED **negative**: no experience term exists. `0x00DAB5F0` names all eleven of its factors and none is experience; the chain reads rules slots `4/0x10/0x14/0x18/0x5C/0x60/0x64/0x68`, never slot 0; a binary-wide sweep for `experience` strings finds only the battle-file parser `0x0050CAE0`. Key 0 is loaded and never read, so omitting experience from melee is faithful | `melee::hit_number` (deliberately no term), test `no_experience_term_in_the_melee_chain` |
 | 53 | `kv_rules` adapter slot numbering | §57 (2) | CONFIRMED: vtable method `+4*i` returns key `i`, so the list position is the slot. Anchored by fatigue `+4`, height `+0x10/0x14/0x18`, attack direction `+0x5C..0x68` | test `kv_rules_list_order_is_the_exe_slot_index` |
@@ -826,9 +832,17 @@ Still open in item 5: the `unit_movement_modifiers` column reader, the soldier g
 radius `+0x670` (no new leads this round).
 
 ## 19a. The experience table's flat + multiplier columns are the XP-adjusted COST (sandbox 0-A round N+1)
+> **Corrected (0-B recruitment details, 2026-10-09):** this is the **battle army-setup** price of a veteran
+> (custom and multiplayer battles), **not** what the campaign pays. The campaign's recruit cost is `units` #7 with
+> the region's cost effects (`0x00B0D220`), charged by the queue command `0x00B58DD0`, which never reaches
+> `0x00ED49A0`; see CAMPAIGN_FIDELITY.md §Recruitment cost and money. The campaign wiring described below
+> (`economy::recruit_cost`, `XpCostTables`, `CampaignRules::xp_adjusted_cost`, `unit_upkeep_with_experience`) is
+> removed. The one copy of the rule is `UnitStatsLandExperienceBonuses::adjusted_cost` / its naval twin
+> (`GameDatabase::*experience_adjusted_cost` and the army setup's `XpAdjustedCost` call it).
+
 Commit `2054325` CONFIRMED that `0x00ED49A0` returns `row+0x24 + ROUND(base * row+0x28)` off
 `unit_stats_land_experience_bonuses` but left "which stat?" open. Its three callers answer it, and the answer is
-**not a battle stat** — it is the campaign's experience-adjusted cost:
+**not a battle stat** — it is an experience-adjusted cost (the army setup's, see the correction above):
 
 - `0x005CD340` (the unit info panel) calls it right between the labels it writes:
   `"Experience"` = `unit+0xD48`, then `FUN_00ed49a0(...)` labelled **`"XpAdjustedCost"`**, then
@@ -837,7 +851,8 @@ Commit `2054325` CONFIRMED that `0x00ED49A0` returns `row+0x24 + ROUND(base * ro
 - `0x0045D170` is a 22-byte wrapper (it calls `0x00ED49A0` with its own 1st, 3rd and 4th arguments) whose callers add the result to
   a running total; `0x0045CB50` (called from `0x004765F0`, the army auto-build screen) compares it against a
   budget from `FUN_004A2910` and refuses a purchase when the total would pass it, and it looks at each unit
-  type's experience (`< 9`) before buying. So it is what the campaign **pays** for a veteran unit.
+  type's experience (`< 9`) before buying. So it is what the **battle army setup** pays for a veteran unit
+  (not the campaign: corrected above).
 - `0x004C2770` sums the same call over a list of 0x114-byte unit cards (`+0xEC`) and 0xFC-byte ones (`+0x68`) —
   the army's total XP-adjusted cost.
 
@@ -850,13 +865,11 @@ the naval table when the dword at `this + 0xA0` is non-zero (evidence `0a/sb0a_b
 `FUN_00453d40` into a `UniString` and looked up with `record_index`, i.e. by key, not by row position.
 
 > **Main:** the decoders and `GameDatabase::{experience_adjusted_cost, naval_experience_adjusted_cost}`
-> are ported; the campaign wiring in the next paragraph is NOT (outside the battle-rules port).
+> are ported and used by the battle army setup only.
 
-**Wired in round N+2** (§54 (1)): `0x00ED49A0` is now called from the campaign's real cost paths —
-`ntw_sim::campaign::economy::recruit_cost` (used by `CampaignModel::recruit`, so the treasury, the queue item
-and the refusal all use the adjusted figure) and `economy::unit_upkeep_with_experience` (used by
-`faction_upkeep_with`), both via `CampaignRules::xp_adjusted_cost(naval, rank, base)`. The naval twin is the
-`naval` table of the same call. Ported as data before, used now.
+~~Wired in round N+2 (§54 (1))~~ — **removed (0-B, 2026-10-09)**: the sandbox charged `0x00ED49A0` on the
+campaign's recruitment and upkeep through `economy::recruit_cost`, `economy::unit_upkeep_with_experience` and
+`CampaignRules::xp_adjusted_cost`; none of those exist any more, since the campaign never calls `0x00ED49A0`.
 
 ### The naval twin table, decoded (`unit_stats_naval_experience_bonuses`)
 The same proven technique as `2054325` — match the getter's own string to the table name, then validate the
@@ -1907,6 +1920,7 @@ which §53 (4) had wrong. Addresses worked: Ghidra read-only runs against this w
 `0x00E4F4D0` `0x00E55EB0` `0x00E6A030` (scalar-`0x6C` sweeps).
 
 ### (1) `XpAdjustedCost` wired into the campaign economy (CONFIRMED structure, ported)
+> **Superseded (0-B recruitment details, 2026-10-09):** the campaign never calls `0x00ED49A0`; this campaign wiring (`economy::recruit_cost`, `XpCostTables`, `CampaignRules::xp_cost` / `xp_adjusted_cost`, `unit_upkeep_with_experience`) is removed. See §19a and CAMPAIGN_FIDELITY.md §Recruitment cost and money. Kept as history.
 `0x00ED49A0(unit_type, rank, which)` = `row.flat + ROUND(base × row.mult)`, where `base` is the unit type's
 `+0x2C` (`which == 0`) or `+0x30` (any other value) — read straight off the decompilation:
 - the base is the dword at `this + 0x2C` when the third argument (a byte) is 0, else the dword at `this + 0x30`;
@@ -2012,6 +2026,7 @@ No debugger in this sandbox. `FORMATION_RADIUS = 0` stays; **no value was invent
   Nothing this round touched `crates/napoleon`.
 
 ## 55. Sandbox 0-A round N+3: the XP seams closed, the UI price wired, the garrison chain re-derived
+> **Superseded (0-B recruitment details, 2026-10-09):** the campaign never calls `0x00ED49A0`; this campaign wiring (`economy::recruit_cost`, `XpCostTables`, `CampaignRules::xp_cost` / `xp_adjusted_cost`, `unit_upkeep_with_experience`) is removed. See §19a and CAMPAIGN_FIDELITY.md §Recruitment cost and money. Kept as history.
 A wiring-and-correction round. The two seams §54 (1) left are gone (`rules_from_db` now copies both
 experience tables; `CampaignUnit` has an `experience` field and a setter), the recruitment card's
 price goes through `economy::recruit_cost`, and §54 (3)'s garrison reading is **wrong** — the chain
@@ -2023,6 +2038,7 @@ this worker's own project copy `%USERPROFILE%\Documents\NR-sb-0a-ghidra`, eviden
 `0x01338CD0` / `0x01321294`.
 
 ### (1) The XP seams are closed — the feature is reachable (ported)
+> **Superseded (0-B recruitment details, 2026-10-09):** the campaign never calls `0x00ED49A0`; this campaign wiring (`economy::recruit_cost`, `XpCostTables`, `CampaignRules::xp_cost` / `xp_adjusted_cost`, `unit_upkeep_with_experience`) is removed. See §19a and CAMPAIGN_FIDELITY.md §Recruitment cost and money. Kept as history.
 Both one-line seams of §54 (1) are landed, and the tests prove the chain end to end.
 - **`ntw_campaign::rules_from_db`** now fills `r.xp_cost` from `db.experience_cost_rows()` /
   `db.naval_experience_cost_rows()` (the `+0x24`/`+0x28` and `+0x1C`/`+0x20` pairs). It is the only
@@ -2192,6 +2208,7 @@ can be found by looking for `mov byte ptr [eax+0xD48], …`.
   no store instruction to find. **Nothing invented; `CampaignUnit::experience` stays 0 from loaders.**
 
 ### (2) The integration test item 2 asked for was already in place; verified, not duplicated
+> **Superseded (0-B recruitment details, 2026-10-09):** the campaign never calls `0x00ED49A0`; this campaign wiring (`economy::recruit_cost`, `XpCostTables`, `CampaignRules::xp_cost` / `xp_adjusted_cost`, `unit_upkeep_with_experience`) is removed. See §19a and CAMPAIGN_FIDELITY.md §Recruitment cost and money. Kept as history.
 `ntw_campaign/src/tests.rs::{the_loader_puts_the_experience_tables_in_the_recruitment_cost,
 recruiting_from_a_loaded_campaign_charges_the_loaded_experience_cost}` (round N+3, `0b`-owned file,
 **not touched this round**) already do exactly what was asked: a real start position through `read()`,
@@ -2245,6 +2262,7 @@ No debugger here and this round's RE budget went to (1) and (4). `FORMATION_RADI
 **no value was invented**.
 
 ### (6) What is live vs open
+> **Superseded (0-B recruitment details, 2026-10-09):** the campaign never calls `0x00ED49A0`; this campaign wiring (`economy::recruit_cost`, `XpCostTables`, `CampaignRules::xp_cost` / `xp_adjusted_cost`, `unit_upkeep_with_experience`) is removed. See §19a and CAMPAIGN_FIDELITY.md §Recruitment cost and money. Kept as history.
 Live and tested: the XP-adjusted recruitment and upkeep costs (loader seam, `recruit_cost`,
 `unit_upkeep_with_experience`, the card's price in `ntw_script`), the `gfx_unit_scale` option
 end to end in `ntw_sim`, `CampaignUnit::experience` as a settable field.

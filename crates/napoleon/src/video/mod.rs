@@ -13,7 +13,11 @@
 //! - The front end's background movie (`Frontend2.bik`, looped) in place of the layout's still image: on
 //!   by default (`--no-frontend-movie` off; harness runs only with `--frontend-movie`).
 //!
-//! Skipping (PROVISIONAL, `BINK.md`): any key or mouse button skips a skippable full-screen movie.
+//! Skipping (`BINK.md` §8.3 "Skip"): releasing Escape skips a queued full-screen movie (the
+//! intro queue), CONFIRMED; mouse buttons and other keys do not. The original stops other movies
+//! only from the UI scripts (`StopAllMovies`, `StopMovieInComponent`), not from input. INFERRED:
+//! that the intro movies accept the stop at all (the movie controller's own can-stop flag `+0x58`,
+//! set from a play parameter at `0x01215D6B`, is not decoded).
 
 pub mod source;
 
@@ -103,8 +107,9 @@ const MOVIE_LAYER: usize = 30;
 /// How a movie is shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MovieMode {
-    /// Over everything, letterboxed to the window, on black.
-    Fullscreen { skippable: bool },
+    /// Over everything, letterboxed to the window, on black. `queued`: one of the front end's
+    /// queued movies (the intro), which Escape skips ([`skips_queued_movie`]).
+    Fullscreen { queued: bool },
     /// Only into its texture ([`Movie::image`]); the caller draws it.
     Texture,
 }
@@ -123,9 +128,9 @@ pub struct PlayMovie {
 }
 
 impl PlayMovie {
-    /// A skippable full-screen movie with sound (cutscenes).
-    pub fn cutscene(path: impl Into<String>) -> Self {
-        Self { path: path.into(), mode: MovieMode::Fullscreen { skippable: true }, track: None, looped: false, sound: true }
+    /// A queued full-screen movie with sound (the intro queue, `--play-movie`): Escape skips it.
+    pub fn queued(path: impl Into<String>) -> Self {
+        Self { path: path.into(), mode: MovieMode::Fullscreen { queued: true }, track: None, looped: false, sound: true }
     }
 }
 
@@ -253,7 +258,7 @@ impl Plugin for VideoPlugin {
         }
         if let Some(name) = self.play.clone() {
             app.add_systems(Startup, move |mut play: MessageWriter<PlayMovie>| {
-                play.write(PlayMovie::cutscene(name.clone()));
+                play.write(PlayMovie::queued(name.clone()));
             });
         }
         if self.frontend_movie {
@@ -454,20 +459,29 @@ fn stop_movies(
     }
 }
 
-/// Any key or mouse button skips skippable full-screen movies (PROVISIONAL rule).
+/// Whether this frame's input skips a queued movie: the Escape key released (CONFIRMED, BINK.md
+/// §8.3 "Skip"). The window procedure queues `{state, key}` only for `WM_KEYDOWN` / `WM_KEYUP`
+/// (`0x0048CE2B`), so a release while Alt is held (`WM_SYSKEYUP`) does not count.
+pub fn skips_queued_movie(escape_released: bool, alt_down: bool) -> bool {
+    escape_released && !alt_down
+}
+
+/// Escape released skips the queued full-screen movie that is playing; the next in the queue then
+/// starts ([`skips_queued_movie`]). Mouse buttons and other keys do nothing (the queue player
+/// `0x0048A650` reads only the key events).
 fn skip_movies(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
-    mouse: Res<ButtonInput<MouseButton>>,
     movies: Query<(Entity, &Movie)>,
     screens: Query<(Entity, &MovieScreen)>,
     mut finished: MessageWriter<MovieFinished>,
 ) {
-    if keys.get_just_pressed().next().is_none() && mouse.get_just_pressed().next().is_none() {
+    let alt = keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
+    if !skips_queued_movie(keys.just_released(KeyCode::Escape), alt) {
         return;
     }
     for (e, m) in &movies {
-        if m.mode == (MovieMode::Fullscreen { skippable: true }) && m.shown.is_some() {
+        if m.mode == (MovieMode::Fullscreen { queued: true }) {
             end_movie(&mut commands, e, m, true, &screens, &mut finished);
         }
     }
@@ -604,7 +618,7 @@ fn next_intro_movie(mut queue: ResMut<IntroQueue>, mut play: MessageWriter<PlayM
         return;
     }
     let path = queue.0.remove(0);
-    play.write(PlayMovie::cutscene(path));
+    play.write(PlayMovie::queued(path));
 }
 
 fn intro_progress(
@@ -650,6 +664,14 @@ fn stop_frontend_movie(
 mod tests {
     use super::source::StubSource;
     use super::*;
+
+    #[test]
+    fn only_escape_released_without_alt_skips() {
+        assert!(skips_queued_movie(true, false));
+        // Alt held: Windows sends WM_SYSKEYUP, which the original's window procedure does not queue.
+        assert!(!skips_queued_movie(true, true));
+        assert!(!skips_queued_movie(false, false));
+    }
 
     #[test]
     fn fullscreen_sizes_follow_the_exe() {

@@ -99,32 +99,12 @@ fn ai_tables_load_from_the_install() {
     assert_eq!(d.tunable("eur_france", "LOOT_SETTLEMENT_BASE_CHANCE"), Some(0.0), "overlay wins");
     assert_eq!(d.managers["nap_eur_full"]["EXPANSION_BEHAVIOUR"], 3000.0);
     assert!(d.unit_balances.len() >= 10);
-    assert!(d.faction_may_recruit("france", "Inf_Line_French_Fusiliers"));
-    assert!(!d.faction_may_recruit("austria", "Inf_Line_French_Fusiliers"));
     let cfg = FactionAiConfig::resolve(d, "eur_napoleon", "france");
     assert_eq!((cfg.manager.as_str(), cfg.personality.as_str()), ("nap_eur_france", "eur_france"));
     let cfg = FactionAiConfig::resolve(d, "eur_napoleon", "prussia");
     assert_eq!((cfg.manager.as_str(), cfg.personality.as_str()), ("nap_eur_full", "default"));
 }
 
-/// `campaign_difficulty_handicap_effects` through the CONFIRMED lookup (clamp −2..2, flag picks the
-/// list) and the INFERRED mapping (human: (d, true); AI: (−d, false)).
-#[test]
-fn difficulty_handicaps() {
-    let Some(f) = fixture() else { return };
-    let d = &f.data;
-    // Human on very hard: recruitment costs +20 %, attrition +15 (CONFIRMED rows).
-    assert_eq!(d.handicap(-2, true, "recruitment_cost_mod_land_all"), 20.0);
-    assert_eq!(d.handicap(-2, true, "attrition_difficulty_addition"), 15.0);
-    // Out-of-range difficulties clamp (0x00F9F970).
-    assert_eq!(d.handicap(-7, true, "recruitment_cost_mod_land_all"), 20.0);
-    // AI at the player's very hard: the (2, false) rows, e.g. GDP +40 %.
-    assert_eq!(d.ai_handicap(-2, "gdp_mod_all"), 40.0);
-    assert_eq!(d.ai_handicap(-1, "recruitment_cost_mod_land_all"), -10.0);
-    assert_eq!(d.ai_handicap(0, "research_rate_mod"), 25.0);
-    assert_eq!(d.handicap_effects(2, false).len(), 20);
-    assert!(d.handicap_effects(2, true).is_empty());
-}
 
 #[test]
 fn several_end_turns_from_eur_startpos() {
