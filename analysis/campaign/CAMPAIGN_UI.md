@@ -155,9 +155,12 @@ spying_data_level, Portrait, hull_health_l/r.
   scripts work in the HUD layout's fixed 1280x960 frame, and a top-level component is moved on screen by its dock
   anchor's share of the screen's growth (x + 1.0·(1920−1280), y + 0.5·(1080−960)); the HUD band (dock 8) is
   centred the same way (o1). The Enlist panel (dock 5, o5: 648, 59) fits the same rule. Ours: `UiWorld::script_rect`
-  / `script_to_screen` (Position, Dimensions, Width, Height, Bounds and MoveTo in that frame, campaign HUD only via
-  `set_frame(UiFrame::ScriptFrame)`; the battle HUD and the front end keep screen geometry, PROVISIONAL); test `the_lists_panel_docks_to_the_right_edge_of_a_wide_screen`.
-  Not read: what CursorPosition returns on a wide screen (ours: screen pixels, PROVISIONAL).
+  / `script_to_screen` (Position, Dimensions, Width, Height, Bounds and MoveTo in that frame, campaign and battle HUDs via
+  `set_frame(UiFrame::ScriptFrame)`, the battle one CONFIRMED by the sitting of 2026-10-09 (BATTLE_FLOW.md §3); the
+  front end keeps screen geometry, PROVISIONAL); test `the_lists_panel_docks_to_the_right_edge_of_a_wide_screen`.
+  `Component.CursorPosition` (`0x01018590`, 2026-10-09): its screen width and height are the virtual screen, window /
+  UI scale (the corner mapped back through `0x0119B270`), CONFIRMED, as ours; the cursor x, y are the point the UI
+  mouse handler `0x0102E9D0` was given, whose frame is not traced (ours: the virtual screen, PROVISIONAL).
 
 ## Original reference shots (2026-10-07, Coalition campaign as Britain, 1920x1080, turns 1-4)
 In `target/orig_shots/2026-10-07_britain/` (o1..o6); ours: `--campaign mp_eur_napoleon --campaign-faction britain`.

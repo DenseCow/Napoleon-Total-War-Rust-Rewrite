@@ -24,7 +24,7 @@ use ntw_script::ui::{CampaignLink, CampaignRequest, CampaignSelection, FrontEndF
 use super::play::{CampaignSim, month_name};
 use crate::GameMode;
 use crate::data::GameData;
-use crate::frontend::render::{UiAssets, UiSprite, spawn_world, ui_scale};
+use crate::frontend::render::{UiAssets, UiSprite, spawn_world, ui_rect_to_window, ui_scale, ui_to_window, ui_virtual_screen, window_to_ui};
 
 /// The HUD's script host and pointer state. Non-`Send` (Lua).
 pub struct CampaignHud {
@@ -82,7 +82,7 @@ pub fn enter(world: &mut World) {
     };
     let facts = FrontEndFacts { game_version: "1.3.0".into(), user_dir: crate::config::user_dir(), ..Default::default() };
     // The scripts lay the HUD out in the virtual screen of the original UI scale (see `ui_scale`).
-    let virt = screen / ui_scale(screen);
+    let virt = ui_virtual_screen(screen);
     let host = match UiScriptHost::new(source, loc, facts, (virt.x, virt.y)) {
         Ok(h) => h,
         Err(e) => {
@@ -169,18 +169,17 @@ pub fn pointer(
     let size = Vec2::new(window.width(), window.height());
     if hud.screen != size {
         hud.screen = size;
-        let virt = size / ui_scale(size);
+        let virt = ui_virtual_screen(size);
         hud.host.set_screen(virt.x, virt.y);
     }
     let t = advance_ui_clock(&mut hud.clock_ms, &time);
     hud.host.pulse(t);
     if harness.is_none() {
-        if let Some(p) = window.cursor_position() {
-            let s = ui_scale(hud.screen);
-            hud.host.set_cursor_position(p.x / s, p.y / s);
+        let cursor = window.cursor_position().map(|p| window_to_ui(p, hud.screen));
+        if let Some(p) = cursor {
+            hud.host.set_cursor_position(p.x, p.y);
         }
-        let s = ui_scale(hud.screen);
-        let hit = window.cursor_position().and_then(|p| hud.host.hit(p.x / s, p.y / s));
+        let hit = cursor.and_then(|p| hud.host.hit(p.x, p.y));
         if hit != hud.hovered {
             if let Some(old) = hud.hovered {
                 hud.host.pointer(old, PointerEvent::Leave);
@@ -298,13 +297,11 @@ pub fn redraw(
     }
     if let Some(root) = hud.host.root() {
         let world = hud.host.world();
-        let s = ui_scale(hud.screen);
-        spawn_world(&world, root, &mut commands, &mut assets, &mut images, hud.screen, s);
+        spawn_world(&world, root, &mut commands, &mut assets, &mut images, hud.screen, ui_scale(hud.screen));
         let mut panels = Vec::new();
         world.visit_visible(root, &mut |_, node| {
             if matches!(node.data.id.as_str(), "hud_left" | "hud_center" | "hud_right" | "frame") {
-                let r = node.rect;
-                panels.push(Rect::new(r.x * s, r.y * s, (r.x + r.w) * s, (r.y + r.h) * s));
+                panels.push(ui_rect_to_window(node.rect, hud.screen));
             }
         });
         drop(world);
@@ -692,8 +689,8 @@ pub fn labels(
                 over = Some((r.id, d));
             }
         }
-        let s = ui_scale(hud.screen);
-        list.push((r.id, (p.x / s).round(), (p.y / s).round()));
+        let q = window_to_ui(p, hud.screen);
+        list.push((r.id, q.x.round(), q.y.round()));
     }
     let t = cam_tf.translation();
     hud.host.campaign_set_view((t.x, t.y, t.z), list, over.map(|o| o.0));
@@ -730,11 +727,10 @@ pub fn radar_outline(
         ground[i] = (p.x, -p.z);
     }
     let Some((pts, clip)) = hud.host.campaign_radar_outline(ground) else { return };
-    let s = ui_scale(size);
     for i in 0..4 {
         let (a, b) = (pts[i], pts[(i + 1) % 4]);
         let Some((a, b)) = clip_segment(a, b, (clip.x, clip.y, clip.x + clip.w, clip.y + clip.h)) else { continue };
-        let (a, b) = (Vec2::new(a.0, a.1) * s, Vec2::new(b.0, b.1) * s);
+        let (a, b) = (ui_to_window(Vec2::new(a.0, a.1), size), ui_to_window(Vec2::new(b.0, b.1), size));
         let mid = (a + b) / 2.0;
         let len = a.distance(b);
         if len < 0.5 {

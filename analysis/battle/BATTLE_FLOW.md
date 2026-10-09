@@ -82,14 +82,35 @@ ManageSelection, SelectCardList, DeselectAll, PositionCards, ...); `MPAvatar` (n
 (`0x01318030`), pushed as that float (`0x010565A0`): fractional seconds since Windows started at float precision. The
 campaign's `CampaignUI.WindowsTime` (`0x009FB0B0`) is the same clock and arithmetic but truncates to whole seconds
 (`CVTTSS2SI`) before pushing. Ours: both from `host::time_get_time_ms` (winmm `timeGetTime`); before 2026-10-09 the
-battle one returned `os.clock()` (process CPU time). Battle `Time`: no "Time" string in the exe is referenced (nor the
-"Time" tails of `WindowsTime` / `ElapsedBattleTime`), so INFERRED not a battle binding (ours is an extra;
-registrations not all enumerated), and `ElapsedBattleTime` (`0x005D07D0`) reads a float through the battle UI
-manager (`0x014A418C`, `0x005CB810`: `[[[+0xF8]+8]+0xB0]+0x24`), not traced further.
+battle one returned `os.clock()` (process CPU time). `ElapsedBattleTime` (`0x005D07D0`) reads a float through the
+battle UI manager (`0x014A418C`, `0x005CB810`: `[[[+0xF8]+8]+0xB0]+0x24`), not traced further.
 
-**The battle HUD scripts' frame (static trace 2026-10-09; INFERRED, a debugger sitting settles it).** The campaign
-HUD's scripts see the root at its layout size, 1280x960, at 1920x1080 (debugger sitting 2026-10-07,
-`analysis/campaign/CAMPAIGN_UI.md` "Panel placement"). Static evidence that the battle HUD is the same:
+The battle bindings table (2026-10-09, CONFIRMED by enumeration): every BattleUI binding is a static-init stub that
+pushes (description, name, function) and calls the registrar `0x0059EB40` with its own small static object in ECX
+(218 calls; the battle ones `0x00408094`..`0x00410104`, then the advice table `0x00415344`.. and the radar's
+`0x00418D74`..). The earlier "no Time string is referenced" was wrong: the names are referenced from these stubs.
+Among them `Time` (stub `0x0040BCF4`, "Returns the current time in seconds") → `GetBattleUITimeSeconds` `0x005D3BB0`,
+next to `TickPeriod` (`0x0040BCD4`) and `WindowsTime` (`0x0040C334`). It pushes the float at
+`[[0x014A418C]+0xF8]+0x2821C`: the battle UI's frame time, which `0x005F4CF0` / `0x005F5530` (the battle handler's
+vtable slots +0x34 / +0x38, thunks `0x005EE260` / `0x005EE270`) set each frame to `(float)ms * 0.001f` from the
+main loop's frame-time struct {u32 total ms, delta ms, f32 total s, delta s}. The main loop
+`ProcessMVCManagerFrameTick` `0x0048A650` builds it from its `+0xB8` counter: each frame adds the real elapsed time
+(`0x010A1E10`: µs as a float × 0.001f, truncated to whole ms; the frame timer `0x014A0A08` restarts every frame, so
+the fraction is dropped), capped at 300 ms (`0x0048A906`) unless the `frame_rate_test_fps` preference (`0x0149B8C0`)
+fixes a 1000/fps step, times the `root_time` debug variable (`0x0149F5E8` `+0x5C`, default 1.0). Battle pause and
+speed never reach it (the handler's time multiplier feeds a second counter, `+0xBC`). The same ms value is what the
+battle root's update gets (`0x005C5BB0` → `0x00DB2AE0` → root vtable +0x30, the `OnUpdatePulse` time). So
+`BattleUI.Time` is the UI pulse clock in seconds, as `CampaignUI.Time` is the campaign's. The shipped battle scripts
+use it for UI timing (hud_rotate, land_hud_increase_file / _rank, land_hud_move_*, land_hud_special_ability_button,
+lb_unit_id's morale bar, mp_speed_voting's pulse). Ours: `B.Time` reads the host's pulse clock (`Inner::ui_time_secs`,
+shared with `CampaignUI.Time`), and the battle HUD's clock follows the rule above (`battle::hud::advance_ui_clock`);
+before, `B.Time` returned the battle's elapsed time (frozen while paused) and the clock had no cap or truncation.
+Not modelled: `frame_rate_test_fps` and `root_time`. Whether the campaign UI's counter (`0x00A0EB80`, manager
+`+0x9FC` `+0x90`) is fed from the same main-loop struct is not traced.
+
+**The battle HUD scripts' frame (CONFIRMED: static trace and debugger sitting 2026-10-09).** The campaign HUD's
+scripts see the root at its layout size, 1280x960, at 1920x1080 (debugger sitting 2026-10-07,
+`analysis/campaign/CAMPAIGN_UI.md` "Panel placement"); the battle HUD's do too. Static evidence:
 - One root loader for every UI manager, CONFIRMED: the generic manager ctor `0x00DAFCD0` (callers: front end
   `0x004581B0`, battle `0x00596B00`, campaign `0x0098C2F0`) calls `LoadUIManagerRootLayout` `0x00DB21E0`
   ("data/UI/<folder>/<layout>", root built by `0x00DA6860` → the component reader `0x0101E270`, stored at the
@@ -104,18 +125,20 @@ HUD's scripts see the root at its layout size, 1280x960, at 1920x1080 (debugger 
   once, in the device ctor `0x01132530`. No per-HUD frame exists at the draw level, so the battle HUD is drawn
   through the same anchor mapping (and the same UI scale under 1280x960) as the campaign HUD.
 - `UIComponent:Dimensions` (`0x01014B70`) returns the current state's own size (`[[comp+0xAC]+0x24]`, `+0x28`): no
-  screen term. The battle root is `[[g_pBattleUIManager 0x014A418C]+0xE0]` (manager `+0x18` = the generic part,
-  `+0x34` = its root holder, root at holder `+0xAC`; `0x00596BDD` stores the manager in the global).
-So INFERRED: the battle HUD scripts work in the root's 1280x960 frame too. Ours still gives the battle HUD screen
-geometry (`UiFrame::Panels`, PROVISIONAL) and draws it at scale 1 in the window; with the battle window at 1280x960
-the two agree, they differ on any other window size. Not changed until the sitting below reads it.
-Debugger sitting (needs the user to start a battle): launch the original under Ghidra's debugger (CLAUDE.md
-"ghidra-mcp", `cwd` = the install), at a screen that is not 1280x960 (1920x1080); start a custom land battle; in
-deployment, break in and read, translating each static address with `debugger_static_to_dynamic`: M = dword at
-`0x014A418C`; R = dword at M+0xE0 (check dword at R = the root class vtable `0x01393B6C`); S = dword at R+0xAC;
-floats at S+0x24 and S+0x28. 1280 / 960 = the scripts' frame (switch the battle host to `UiFrame::ScriptFrame`
-and the UI scale like the campaign HUD); 1920 / 1080 = screen geometry (keep `Panels`, tag CONFIRMED). No
-breakpoint needed; resume afterwards.
+  screen term. The battle root is `[[g_pBattleUIManager 0x014A418C]+0xC4]`: manager `+0x18` is the generic part
+  (the root holder), and the root sits at holder `+0xAC` (`0x00596BDD` stores the manager in the global). (Earlier
+  notes said `+0xE0`; the sitting found the root at `+0xC4`.)
+Debugger sitting 2026-10-09 (the original at a 1920x1080 screen, custom land battle, deployment; user-confirmed):
+M = `[0x014A418C]`; the root at M+0xC4 has the root class vtable `0x01393B6C`; S = `[root+0xAC]`; the floats at
+S+0x24 / S+0x28 are 1280.0 / 960.0. So the battle root keeps its layout size and the scripts work in that 1280x960
+frame, as in the campaign. Ours: the battle host uses `UiFrame::ScriptFrame` (`ui::battle::install`), like the
+campaign HUD (before, `UiFrame::Panels` gave the scripts screen geometry; the two agreed only at a 1280x960
+window).
+The UI scale (2026-10-09) is the device's, not the frame's: the device applies it to every draw (the bullet above),
+and its inverse `0x0119B270` (device vtable +0x270) maps screen points back (`Component.CursorPosition`
+`0x01018590` returns the virtual screen, window / scale, as its screen size). So the battle HUD uses the campaign's
+mapping (`frontend::render::ui_virtual_screen` / `window_to_ui` / `ui_rect_to_window`): laid out in window / scale,
+drawn scaled, the mouse mapped back.
 
 Cards: the engine calls review_DY.lua `CreateCards(list, state)` with `{CardID="card_<unit id>", Portrait}` per player
 unit (Portrait = `data/ui/units/icons/<faction unit_icon_path>_<key>_icon`, the script adds `.tga`; CONFIRMED file
@@ -144,9 +167,37 @@ of a folder's main `layout` file (`root.luac`, `play.luac`, `pause.luac`, ...); 
 created component (`BattleUnitCard`); scripts are found by the layout id before CreateFromLayout's rename
 (`deployment_end` opened as `finish_deployment`); the first layout is the top root before its scripts run (sizes known
 at load); `Find` falls back to siblings' subtrees (review_DY's `tab_group`); `StealShortcutKey(false)` releases keys;
-`set_pages_fill_screen(false)` for the battle (its panels dock themselves). Battle-only (prelude): the root's
-InitState runs after its children's; image lists `{id:n}path` are applied; a full-screen multi-panel wrapper
-(land_battle_orders) is placed at the screen origin, only its first panel shown, and calls on it reach that panel.
+`set_frame(UiFrame::ScriptFrame)` for the battle (its panels keep their size and dock themselves; the scripts work
+in the root's 1280x960 frame, §3). Battle-only (prelude): the root's
+InitState runs after its children's; image lists `{id:n}path` are applied.
+
+**Where CreateFromLayout puts a layout (traced 2026-10-09, CONFIRMED).** `Component.CreateFromLayout(path, id,
+parent[, x, y][, images])` is `0x01016BD0` (reads its Lua arguments from the top of the stack; numbers there are an
+explicit x, y) → `CreateUIComponentFromLayoutFile` `0x01027400` → `0x01026F90` (instantiates the template under the
+parent with an offset). The template: on a cache miss the file is read into a holder through the UI manager's
++0x24 callback (`0x00DA92D0`, set by the manager ctor `0x01022A50` from `0x00DA6A60`: allocates 0x304 bytes and runs
+`0x00DA6860` → the component reader `0x0101E270`, which reads one component record and builds its children through
+the same callback), so the holder is the file's own root; the template is the holder's FIRST child
+(`[[holder+0x90]]`), detached by `0x01027BA0` (`+0x8C` count, `+0x90` children, its parent `+0x80` cleared) and
+cached (`0x01039610`), and the holder is destroyed. So only that first child is created, renamed to `id`; a file's
+other top children never exist (land_battle_ordersOLD). Without x, y (branch `0x010275F0`) the offset is the
+template's absolute position minus the parent's, both from `GetUIComponentAbsolutePosition` `0x0102FEA0` (vtable
++0x14: parent's absolute position + own offset `+0x94` / `+0x98`, no screen or dock term), truncated to int; the
+detached template has no parent, so the new component's absolute frame position is its own file offset. With x, y
+they go in that offset slot directly. (`MoveTo` is `0x010140B0` → vtable +0x10 `0x0102D780` → +0xC
+`SetUIComponentAbsolutePosition` `0x0102D710`: offset = target − parent's absolute position.) On screen,
+`GetUIComponentDrawAnchor` `0x0102DAD0` (vtable +0x40, with the device mapping) recurses up to the root's child and
+uses that ancestor's docking (`+0xDC`): it subtracts the dock share of the root state's size (1280x960) and returns
+the same share of the screen as the anchor; our `UiWorld::layout` gives every subtree its top-level ancestor's dock
+shift, the same rule.
+So battle_hud.lua's `CreateFromLayout(".../land_battle_orders", "orders", Address, images)` under `veneer_DY`
+creates the file's first panel (land_battle_orders) as "orders" at its file offset (3, 749) in the frame, drawn with
+`veneer_DY`'s shift (dock 8: ((W − 1280) / 2, H − 960) at scale 1), so its bottom sits on the cards' top (854 at
+1280x960, 974 at 1920x1080). Ours (`host::create_layout`, one rule for every CreateFromLayout): the file root's first
+child, offset = file offset − the parent's absolute frame position, or the given x, y; test
+`the_orders_bar_is_the_files_first_panel_at_its_own_position`. Before 2026-10-09 ours created the file root as a
+wrapper when it had two or more children, and the battle prelude moved it to (0, 0), hid the second panel and
+forwarded calls to the first; a single child was placed at its file offset relative to the parent.
 
 ## 4. Victory, defeat and results (task 4)
 | Rule | Evidence | Tag |
@@ -186,8 +237,7 @@ on entering deployment, `music_land_battle` at Start Battle, `music_land_battle_
   ShowSinglePlayerEndPhasePopup / ShowBattleSummaryPopup / ShowPostBattleResultsPopup, and with which text.
 - The order buttons' enable rules per unit type (SetOrderButtonState callers) and the unit-card info table
   (`SquadInfoByPointer`, card manager `PositionCards`, `Selected`).
-- `CreateFromLayout` on a file with several top children (land_battle_orders): what is created and where it is placed;
-  InitState order (children before parent?); `Find` search scope; `DockingPoint` return values.
+- InitState order (children before parent?); `Find` search scope; `DockingPoint` return values.
 - Victory: the exact "kill or rout" test (routing units leaving the map, rallying), the time unit of `duration`, the
   victory grading (close/decisive/heroic/pyrrhic) thresholds.
 - Deployment placement rules (formation drag, spacing) and how the human army is chosen in a battle file.

@@ -72,42 +72,6 @@ local create_from_layout = __comp.CreateFromLayout
 __comp.CreateFromLayout = function(a, path, id, parent, images)
     local new = create_from_layout(a, path, id, parent)
     apply_images(new, images)
-    -- A layout kept with its full-screen `root` wrapper (more than one top child, e.g.
-    -- land_battle_orders) is authored in screen coordinates: put the wrapper at the screen origin
-    -- (INFERRED: its orders bar then sits just above the unit cards, as in the original HUD).
-    -- PROVISIONAL test for such a wrapper: full screen, with two or more children that are all
-    -- screen-wide panels (mp_postbattle is full screen too but is one panel with small parts).
-    local c = new and UIComponent(new)
-    local wrapper = false
-    if c ~= nil then
-        local w, h = c:Dimensions()
-        local n = c:ChildCount() or 0
-        wrapper = w ~= nil and w >= 1280 and h >= 960 and n >= 2
-        for i = 0, n - 1 do
-            local ch = c:Find(i)
-            if ch == nil or (UIComponent(ch):Width() or 0) < 1280 then wrapper = false end
-        end
-    end
-    if wrapper then
-        do
-            c:MoveTo(0, 0)
-            -- Only the file's first panel is shown (land_battle_orders, not land_battle_ordersOLD),
-            -- and calls on the wrapper reach that panel's script (root.lua LuaCalls
-            -- SetOrderButtonState on Find("orders")). Both INFERRED.
-            local first = c:Find(0)
-            local n = c:ChildCount() or 0
-            for i = 1, n - 1 do
-                local other = c:Find(i)
-                if other ~= nil then UIComponent(other):SetVisible(false) end
-            end
-            local wenv, fenv = __ntw_envs[new], first and __ntw_envs[first]
-            if wenv ~= nil and fenv ~= nil then
-                for k, v in pairs(fenv) do
-                    if type(v) == "function" and rawget(wenv, k) == nil then rawset(wenv, k, v) end
-                end
-            end
-        end
-    end
     return new
 end
 
@@ -139,7 +103,12 @@ B.IsConflict = function() return __battle.phase ~= "deployment" end
 B.IsDeploymentOrConflict = function() return __battle.phase ~= "deployment" end
 -- Battle time in seconds (the scripts compare it with TotalTime and with their own timestamps).
 B.ElapsedBattleTime = function() return __battle.elapsed or 0 end
-B.Time = function() return __battle.elapsed or 0 end
+-- "Returns the current time in seconds" (CONFIRMED 0x005D3BB0, registered at 0x0040BCF4): not
+-- battle time but the UI frame clock the root's OnUpdatePulse also gets (real time, each frame
+-- capped at 300 ms, ignoring pause and speed; analysis/battle/BATTLE_FLOW.md §3). The HUD
+-- scripts time button holds, the morale bar and pulses with it (hud_rotate, land_hud_*,
+-- lb_unit_id, mp_speed_voting).
+B.Time = __ntw_battle_time
 -- "Returns the current time in seconds" (CONFIRMED 0x005D4BF0): timeGetTime() * 0.001f as a float,
 -- fractional, unlike CampaignUI.WindowsTime (whole seconds); see host.rs `battle_windows_time`.
 B.WindowsTime = __ntw_battle_windows_time

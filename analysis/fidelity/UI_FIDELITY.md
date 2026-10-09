@@ -573,7 +573,7 @@ tooltips, (3) credits, (4) custom battle setup. The 0-E work before the pause is
 | BuildingBrowserDetails | resolved (PROVISIONAL parts listed in code) | 0x009B5AF0 |
 | ConstructBuildingTree (browser tree view) | resolved, layout INFERRED | 0x009B8830 |
 | RetrieveFactionListForDiplomacy, RetrieveDiplomacyDetails | resolved (trade tests PROVISIONAL) | 0x009F2EA0, 0x009B2690 |
-| UI scale for windows under 1280x960 (0x0114EB20) | resolved | campaign HUD; front end and battle HUD keep their 1280x960 window |
+| UI scale for windows under 1280x960 (0x0114EB20) | resolved | campaign and battle HUDs (one mapping, `frontend::render`; device-wide, BATTLE_FLOW.md §3); the front end still draws at scale 1 |
 | Government screen: InitialiseGovernmentDetails (ministers keyed by post number), RetrieveGovernorshipDetails, SetGovernorshipTaxRate, TradeInfo | resolved, parts PROVISIONAL | popularity inputs, class tax split, trade prices and route kinds, minister pool |
 | Objectives: MissionsDetails, PrestigeDetails, VictoryConditions, CurrentSeasonString | resolved, parts PROVISIONAL | prestige and victory conditions are not in the model |
 | Lists: tabgroup script (template.<id>.lua rule), IsMergingUnit | resolved (rule INFERRED) | |

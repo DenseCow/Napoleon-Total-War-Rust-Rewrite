@@ -104,17 +104,12 @@ pub enum UiFrame {
     /// (pages centre their docked panels that way); the scripts see screen coordinates.
     #[default]
     Pages,
-    /// The battle HUD: panels keep their authored size and dock themselves inside the root
-    /// (deployment, victory options, results); the scripts see screen coordinates. PROVISIONAL:
-    /// the static trace (analysis/battle/BATTLE_FLOW.md §3) finds one root loader for every HUD
-    /// (`0x00DB21E0`) and a device-wide layout-to-screen mapping (`0x011881C0`): both point to the
-    /// root's layout frame, as in the campaign HUD. A debugger sitting in a battle settles it
-    /// (this and the layout frame agree at a 1280x960 window).
-    Panels,
-    /// The campaign HUD: panels keep their authored size, and the scripts see the root at its
-    /// layout size and place components in that frame (`UiWorld::script_rect`; CONFIRMED at
-    /// 1920x1080 by the debugger sitting of 2026-10-07; other screen sizes, above all ones smaller
-    /// than 1280x960, are INFERRED to follow the same rule, not read).
+    /// The campaign and battle HUDs: panels keep their authored size, and the scripts see the root
+    /// at its layout size and place components in that frame (`UiWorld::script_rect`). CONFIRMED
+    /// at 1920x1080 by the debugger sittings of 2026-10-07 (campaign) and 2026-10-09 (battle: root
+    /// state size 1280x960 at a 1920x1080 screen; both HUDs load their root through `0x00DB21E0`,
+    /// analysis/battle/BATTLE_FLOW.md §3); other screen sizes, above all ones smaller than
+    /// 1280x960, are INFERRED to follow the same rule, not read.
     ScriptFrame,
 }
 
@@ -191,12 +186,21 @@ pub(super) struct Inner {
     /// updates never do).
     #[cfg(test)]
     pub(super) cross_context_calls: std::cell::Cell<u64>,
-    /// The time (whole ms) [`UiScriptHost::pulse`] last handed to `OnUpdatePulse`. Only the
-    /// campaign's `CampaignUI.Time` reads it, so its start times and pulse times share one base.
+    /// The time (whole ms) [`UiScriptHost::pulse`] last handed to `OnUpdatePulse`. The HUDs'
+    /// `Time` bindings (`CampaignUI.Time`, `BattleUI.Time`) read it through
+    /// [`Inner::ui_time_secs`], so script start times and pulse times share one base.
     pub(super) ui_time_ms: std::cell::Cell<f64>,
 }
 
 impl Inner {
+    /// The UI clock in seconds as the HUDs' `Time` bindings return it: the last pulse's whole ms
+    /// as a 32-bit float times `0.001f`. CONFIRMED for `BattleUI.Time` (`0x005D3BB0` reads the
+    /// float `0x005F4CF0` stores: `(float)ms * 0.001f`, constant `0x01318030`) and the same form for
+    /// `CampaignUI.Time` (`0x00A0EB80`).
+    pub(super) fn ui_time_secs(&self) -> f32 {
+        self.ui_time_ms.get() as f32 * 0.001_f32
+    }
+
     /// The screen size the layout is laid out for.
     pub(super) fn screen(&self) -> (f32, f32) {
         *self.screen.borrow()
@@ -393,7 +397,7 @@ impl UiScriptHost {
 
     /// Loads a layout file as the top root, sized to the screen, and runs its scripts.
     pub fn load_root_layout(&self, path: &str) -> Result<NodeId, String> {
-        let id = create_layout(&self.lua, &self.inner, path, None, None)?;
+        let id = create_layout(&self.lua, &self.inner, path, None, None, None)?;
         *self.inner.root.borrow_mut() = Some(id);
         init_new(&self.lua, &self.inner, id);
         Ok(id)
@@ -404,11 +408,6 @@ impl UiScriptHost {
     pub fn set_frame(&self, frame: UiFrame) {
         self.inner.frame.set(frame);
         self.inner.layout_stale.set(true);
-    }
-
-    /// [`set_frame`](Self::set_frame) with [`UiFrame::Pages`] (true) or [`UiFrame::Panels`] (false).
-    pub fn set_pages_fill_screen(&self, on: bool) {
-        self.set_frame(if on { UiFrame::Pages } else { UiFrame::Panels });
     }
 
     /// The window changed size.
@@ -857,23 +856,36 @@ fn relayout(inner: &Inner, world: &mut UiWorld) {
 /// the new top component to `id` if given) and runs every new component's scripts. `InitState`
 /// is not called here; see [`init_new`].
 ///
-/// For a script's `CreateFromLayout` (a `parent` is given), the file's root is an editor wrapper:
-/// when it has exactly one child, that child is the component created and returned (INFERRED:
-/// every front-end page file is `root` + one child named like the page; options.lua's
-/// `Find(2)` must reach that child's button_ok, and root.lua calls `OnEnter` on what
-/// CreateFromLayout returned, which the child's script defines). The engine's own load of the
-/// front-end layout keeps the root (root.lua runs on it).
-fn create_layout(lua: &Lua, inner: &Rc<Inner>, path: &str, id: Option<&str>, parent: Option<NodeId>) -> Result<NodeId, String> {
+/// For a script's `CreateFromLayout` (a `parent` is given), CONFIRMED from the exe
+/// (`0x01016BD0` → `CreateUIComponentFromLayoutFile` `0x01027400`): the file is read into a holder
+/// component that is the file's own root (the manager's +0x24 callback `0x00DA92D0` → `0x00DA6860`
+/// → the component reader `0x0101E270`, which reads one component and builds its children through
+/// the same callback); the holder's FIRST child is detached (`0x01027BA0`) and kept as the
+/// template, and the holder is destroyed. So only that child is created (a file's other top
+/// children never exist: land_battle_orders' second panel, land_battle_ordersOLD); front-end page
+/// files are `root` + one page. It is placed at `position` in its parent, or without one (branch
+/// `0x010275F0`) at the offset that keeps its own absolute frame position: its file offset minus
+/// the parent's absolute position (`0x0102FEA0`). The engine's own load of a layout (no `parent`)
+/// keeps the file's root (root.lua runs on it). A file whose root has no child keeps its root
+/// (PROVISIONAL: the exe reads a first child it does not check for).
+fn create_layout(lua: &Lua, inner: &Rc<Inner>, path: &str, id: Option<&str>, parent: Option<NodeId>, position: Option<(f32, f32)>) -> Result<NodeId, String> {
     let norm = path.replace('\\', "/").to_ascii_lowercase();
     let norm = norm.strip_prefix("data/").unwrap_or(&norm).to_owned();
     let file = inner.source.find(&norm).ok_or_else(|| format!("layout {norm} not found"))?;
     let layout = UiLayout::read(&file.bytes).map_err(|e| format!("{norm}: {e}"))?;
-    let top = match (parent, layout.root.children.as_slice()) {
-        (Some(_), [only]) => only,
+    let top = match (parent, layout.root.children.first()) {
+        (Some(_), Some(first)) => first,
         _ => &layout.root,
     };
+    // The parent's absolute position in the scripts' frame, before the new subtree is added.
+    let base = parent.and_then(|p| script_rect_of(inner, p)).map_or((0.0, 0.0), |r| (r.x, r.y));
     let mut created = Vec::new();
     let root = inner.world.borrow_mut().instantiate(top, parent, &norm, &mut created);
+    if parent.is_some()
+        && let Some(n) = inner.world.borrow_mut().get_mut(root)
+    {
+        n.offset = position.unwrap_or((top.offset.0 as f32 - base.0, top.offset.1 as f32 - base.1));
+    }
     // The first layout becomes the top root before its scripts run, so their main chunks see laid
     // out sizes (review_DY.lua reads its tab group's width at load to size the unit cards).
     if parent.is_none() && inner.root.borrow().is_none() {
@@ -1431,11 +1443,10 @@ fn run_component_scripts(lua: &Lua, inner: &Rc<Inner>, id: NodeId, layout_top: O
             // Last: `<folder>/<id>.lua`. The battle UI folder has scripts named after components:
             // `root.luac` (the HUD's top component), `play.luac`, `pause.luac`, `fwd.luac`,
             // `ffwd.luac`, `slow_mo.luac`, `button_halt.luac`, ... (CONFIRMED files; rule INFERRED).
-            // A file's `root` wrapper created under another component (land_battle_orders has
-            // two children, so its wrapper is kept) must not run the HUD's root.lua again.
             // Only for the folder's main `layout` file: the front end's `player_stats.luac` must not
-            // run on a component of that name inside a page.
-            if layout == "layout" && (n.data.id != "root" || n.parent.is_none()) {
+            // run on a component of that name inside a page. (A file's `root` is never created
+            // under another component: CreateFromLayout creates its first child, `create_layout`.)
+            if layout == "layout" {
                 files.push(format!("{dir}/{}.lua", n.data.id));
             }
             // Any other component without a script of its own: `template.<id>.lua` (INFERRED:
@@ -1500,7 +1511,7 @@ fn rect_of(inner: &Inner, id: NodeId) -> Option<UiRect> {
 }
 
 /// A component's rectangle as the scripts see it (Position, Dimensions, Width, Height, Bounds):
-/// in the campaign HUD ([`UiFrame::ScriptFrame`]), the scripts' frame of
+/// in the campaign and battle HUDs ([`UiFrame::ScriptFrame`]), the scripts' frame of
 /// [`super::world::UiWorld::script_rect`], where the root keeps its layout size; elsewhere the
 /// on-screen rectangle.
 fn script_rect_of(inner: &Inner, id: NodeId) -> Option<UiRect> {
@@ -2167,15 +2178,16 @@ fn component_functions(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
     })?)?;
     let i5 = i.clone();
     // CreateFromLayout(path, id, parent) → address. CONFIRMED call shape in root.lua's TransitionTo.
-    // Optional x, y (CONFIRMED 5-argument calls in Labels.lua): the new component's position in its
-    // parent (INFERRED, as CreateFromComponent).
+    // Optional x, y (CONFIRMED 5-argument calls in Labels.lua): the new component's offset in its
+    // parent (CONFIRMED: `0x01027400` passes them in the slot its no-position branch fills with the
+    // computed offset; see `create_layout`).
     t.set("CreateFromLayout", lua.create_function(move |lua, (_a, path, id, parent, x, y): (Value, String, Option<String>, Value, Value, Value)| {
-        match create_layout(lua, &i5, &path, id.as_deref(), node_of(&parent)) {
+        let position = x.as_f64().zip(y.as_f64()).map(|(x, y)| (x as f32, y as f32));
+        match create_layout(lua, &i5, &path, id.as_deref(), node_of(&parent), position) {
             Ok(new) => {
-                if let (Some(x), Some(y)) = (x.as_f64(), y.as_f64())
+                if position.is_some()
                     && let Some(n) = i5.world.borrow_mut().get_mut(new)
                 {
-                    n.offset = (x as f32, y as f32);
                     n.keep_size = true;
                     n.size_override = None;
                 }

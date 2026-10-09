@@ -83,6 +83,9 @@ Base command: `cargo run -p napoleon -- <flags>`.
 
 
 
+- **Battle HUD layout (merged with battle-ui2):** `cargo run --release -p napoleon -- --battle` at 1920x1080, then
+  resize the window to 1280x720. The HUD scales to fit like the original at 1920x1080 (deployment panel, unit cards,
+  orders bar on the cards), and clicks land on its buttons at both sizes.
 - **UI side-by-side (merged `53361ec`), British campaign, compare with the original:** `--campaign mp_eur_napoleon --campaign-faction britain --no-intro`, then (1) open Technology: no line across the title; (2) select Wellesley: Army | Recruitment tabs, his portrait first (the Recruitment tab is empty for now: PLACEHOLDER); (3) open Lists: generals show portraits, colonels the unit card, and the panel docks top-right on a wide screen.
 - **Attribute icons (merged `25a6b21`):** an agent's card (spy: spying picture) and the agents-tab
   recruitment rows, against the original. `--campaign eur_napoleon --campaign-faction france --no-intro`.

@@ -1,7 +1,11 @@
 # NapoleonRust — instructions for Claude
 
 A complete 1:1 remake of Napoleon: Total War in Rust + Bevy, reading all assets at runtime from the
-user's own install. This file is the single source of project rules. Keep it short.
+user's own install, rewritten as a complete modding platform: a new engine on which any Total War game
+can be built (new maps, campaigns, eras, factions, units, rules). Napoleon, played exactly like the
+original, is its first game, and the default. So the engine's code stays generic and data-driven: nothing
+Napoleon-specific (era, unit classes, map, faction set) is hardcoded where data could say it. This file
+is the single source of project rules. Keep it short.
 
 ## Outside contributors (read first)
 
@@ -57,11 +61,23 @@ large: grep for the section you need, and read that file's "Where I am" / "Next"
   tables or small ID types. Defaults and vanilla data still give the original game exactly;
   gameplay caps (20-unit army, unit scale, battle cap) become settings defaulting to the original.
   Code that lifts a limit states the original's limit. Saves must not cap counts either.
+- **Better where the original is broken (user, 2026-10-09):** the original's outdated systems (fixed tables,
+  32-bit or single-thread limits, slow data structures) get our own better design that gives the same
+  results. A gameplay bug in the original (a check that can never pass, data loaded but never applied, a
+  value written to the wrong field, an off-by-one, a crash) is fixed in ours by default, with a settings
+  toggle that restores the original's behaviour; all such toggles live in one place in the settings.
+  It counts as a bug only when traced in Ghidra and shown to contradict the exe's own data or intent,
+  never because it seems unbalanced: balance and design choices stay 1:1. The analysis notes record the
+  original's behaviour (exe address) and our fix; the code says `ORIGINAL BUG: <what> (0x...)`; worker
+  reports list each one found.
 - **Middleware recreated as our own code:** SpeedTree, Miles mixing rules, Bink, etc.
 - **Assets at runtime, read-only,** from the user's install. Ship no Creative Assembly files.
 - **Moddable:** original mods (`.pack`, `user.script.txt` mod lines, loose `data\`) load with the same
   order and overrides; a content folder; open formats (glTF, image heightmaps, 2K/4K textures) as
-  drop-in overrides.
+  drop-in overrides. Custom campaign maps (a whole new world, e.g. a Japan map) in our own open format
+  (region-colour image, heightmap, text files) next to the original's `startpos.esf` importer: both feed
+  one campaign model, so nothing in the model or the map display may depend on `.esf` or the original's
+  map files (docs/DESIGN.md §3.5.1).
 - **Own multiplayer;** no Steam integration.
 
 ## Hard rules

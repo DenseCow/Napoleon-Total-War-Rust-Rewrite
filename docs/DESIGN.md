@@ -291,6 +291,31 @@ Design rules: the loader reads `campaigns\<name>\startpos.esf` (loose file, not 
 `ntw_formats::esf`, and produces an `ntw_sim::campaign::CampaignModel`. It keeps the original ids. Anything it does not
 understand yet must be kept (lossless passthrough, W3 §9.1) so a later writer can produce a byte-identical save.
 
+### 3.5.1 Custom campaign maps (open format; user, 2026-10-09)
+Goal: making a new campaign on a new world (e.g. a Japan map) is easy, while original mods keep working.
+
+- **One campaign model, two sources.** `ntw_sim::campaign::CampaignModel` and the campaign map display run only on
+  our own structures. Sources: the original's importer (`startpos.esf` + pack tables, mods applied in the
+  original's order) and our open format. Neither the model nor the map display may read `.esf` records, ESF ids or
+  the original's pre-baked map files directly; the importer translates them.
+- **The open format** is a folder, e.g. `campaigns/<name>/`:
+  - `campaign.toml`: name, calendar, playable factions, victory conditions, map size.
+  - `regions.png`: one colour per region (a colour → region key table in the TOML).
+  - `heightmap.png`: the terrain; optional splat or texture layers for ground types, plus rivers and coasts.
+  - Text files for settlements, ports and resources (positions), factions and their starting
+    regions, characters, armies and navies, diplomacy and events.
+  - Units, buildings and techs come from the normal database tables (packs or loose `data\`), so a custom
+    campaign reuses or adds them like any mod.
+- **Generated, not hand-made:** borders, region adjacency, region meshes, the pathfinding grid, sea lanes and
+  coastlines are built from the images once at load (or by a tool), then cached with a clear invalidation
+  rule (the hash of the source files). Today the original pre-bakes these with Creative Assembly's internal
+  tools, which is why custom campaign maps were nearly impossible for it.
+- **Exporter:** the original's campaign (with mods) can be written out in the open format, so modders start
+  from the vanilla map.
+- **Scripts:** custom campaigns use the same Lua campaign API as the original's scripts.
+- **Assets:** we ship no Creative Assembly files. A Japan map is made by modders, or later converted from a
+  game the user owns (another Total War game's formats need their own investigation).
+
 ### 3.6 `ntw_script` (Lua 5.1 scripting layer)
 
 **Purpose:** run the original campaign scripts *unchanged*, read at runtime from the player's install

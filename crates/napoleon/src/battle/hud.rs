@@ -29,7 +29,7 @@ use ntw_sim::battle::victory;
 use super::{BattlePhase, BattleSim};
 use crate::GameMode;
 use crate::data::GameData;
-use crate::frontend::render::{UiAssets, UiSprite, spawn_world};
+use crate::frontend::render::{UiAssets, UiSprite, spawn_world, ui_rect_to_window, ui_scale, ui_virtual_screen, window_to_ui};
 
 /// The HUD's script host and pointer state. Non-`Send` (Lua).
 pub struct BattleHud {
@@ -38,7 +38,9 @@ pub struct BattleHud {
     drawn_generation: u64,
     hovered: Option<NodeId>,
     pressed: Option<NodeId>,
-    clock_ms: f64,
+    /// The UI frame clock (ms, [`advance_ui_clock`]): what the root's `OnUpdatePulse` gets and
+    /// `BattleUI.Time` reads.
+    clock_ms: u32,
     /// Card portrait per faction, then unit key (without `.tga`).
     portraits: HashMap<String, HashMap<String, String>>,
     /// Flag folder per faction ([`flag_of`]).
@@ -80,6 +82,22 @@ fn log_once(logged: &mut bool, step: &str, result: mlua::Result<()>) -> bool {
     true
 }
 
+/// The longest frame the UI clock counts, in ms (the main loop's cap, `0x0048A906`).
+const UI_FRAME_CAP_MS: u32 = 300;
+
+/// One frame of the battle UI clock (ms): the clock the root's `OnUpdatePulse` gets and
+/// `BattleUI.Time` reads. CONFIRMED from the main loop `0x0048A650`: each frame adds its real
+/// elapsed time, `(float)µs * 0.001f` truncated to whole ms (`0x010A1E10`; the fraction is dropped
+/// every frame, as the frame timer restarts), capped at 300 ms, to a u32 counter (MVC manager
+/// `+0xB8`) that battle pause and speed never touch; the battle UI keeps it at `+0x28218` and its
+/// seconds at `+0x2821C` (`0x005F4CF0`). Not modelled: the `frame_rate_test_fps` preference
+/// (`0x0149B8C0`, a fixed 1000/fps step without the cap) and the `root_time` debug factor
+/// (`0x0149F5E8`, 1.0).
+fn advance_ui_clock(clock_ms: u32, frame: std::time::Duration) -> u32 {
+    let ms = (frame.as_micros() as f64 as f32 * 0.001_f32) as u32;
+    clock_ms.wrapping_add(ms.min(UI_FRAME_CAP_MS))
+}
+
 /// Whether the mouse is over the HUD this frame (read by `input::mouse`).
 #[derive(Resource, Default)]
 pub struct HudPointer {
@@ -90,7 +108,8 @@ pub struct HudPointer {
 
 /// Layout ids of the HUD panels that take clicks away from the battlefield.
 const PANELS: [&str; 9] = [
-    "land_battle_orders",
+    // land_battle_orders' first panel, named "orders" by battle_hud.lua's CreateFromLayout.
+    "orders",
     "cards_panel",
     "stopwatch",
     "kill_ratio_PH",
@@ -121,7 +140,10 @@ pub fn enter(world: &mut World) {
         .map(|w| Vec2::new(w.width(), w.height()))
         .unwrap_or(Vec2::new(1280.0, 960.0));
     let facts = FrontEndFacts { game_version: "1.3.0".into(), user_dir: crate::config::user_dir(), ..Default::default() };
-    let host = match UiScriptHost::new(source, loc.clone(), facts, (screen.x, screen.y)) {
+    // Laid out in the virtual screen of the original UI scale, like the campaign HUD (the device
+    // applies it to every HUD; see `ui_scale`).
+    let virt = ui_virtual_screen(screen);
+    let host = match UiScriptHost::new(source, loc.clone(), facts, (virt.x, virt.y)) {
         Ok(h) => h,
         Err(e) => {
             warn!("Battle HUD: script host failed: {e}");
@@ -143,7 +165,7 @@ pub fn enter(world: &mut World) {
         drawn_generation: u64::MAX,
         hovered: None,
         pressed: None,
-        clock_ms: 0.0,
+        clock_ms: 0,
         portraits: HashMap::new(),
         flags: HashMap::new(),
         written_facts: None,
@@ -393,7 +415,8 @@ pub fn frame(
     let size = Vec2::new(window.width(), window.height());
     if hud.screen != size {
         hud.screen = size;
-        hud.host.set_screen(size.x, size.y);
+        let virt = ui_virtual_screen(size);
+        hud.host.set_screen(virt.x, virt.y);
     }
     // Model → HUD.
     let player_won = {
@@ -404,9 +427,9 @@ pub fn frame(
         log_once(&mut hud.frame_errors.orders, "order buttons", ui_battle::update_orders(&hud.host));
         hud.written_facts.as_ref().or(hud.spare_facts.as_ref()).and_then(|f| f.player_won)
     };
-    hud.clock_ms += f64::from(time.delta_secs()) * 1000.0;
+    hud.clock_ms = advance_ui_clock(hud.clock_ms, time.delta());
     let t = hud.clock_ms;
-    hud.host.pulse(t);
+    hud.host.pulse(f64::from(t));
     // Phase popups (the engine's calls into root.lua) and the music of each phase.
     if hud.shown != Some(sim.phase) {
         match sim.phase {
@@ -437,7 +460,10 @@ pub fn frame(
     let mut over = false;
     if harness.is_none() && !ai_shot_run() {
         let cursor = window.cursor_position();
-        let hit = cursor.and_then(|p| hud.host.hit(p.x, p.y));
+        let hit = cursor.and_then(|p| {
+            let q = window_to_ui(p, hud.screen);
+            hud.host.hit(q.x, q.y)
+        });
         over = hit.is_some() || cursor.is_some_and(|p| hud.panels.iter().any(|r| r.contains(p)));
         if hit != hud.hovered {
             if let Some(old) = hud.hovered {
@@ -660,12 +686,11 @@ pub fn redraw(
     }
     if let Some(root) = hud.host.root() {
         let world = hud.host.world();
-        spawn_world(&world, root, &mut commands, &mut assets, &mut images, hud.screen, 1.0);
+        spawn_world(&world, root, &mut commands, &mut assets, &mut images, hud.screen, ui_scale(hud.screen));
         let mut panels = Vec::new();
         world.visit_visible(root, &mut |_, node| {
             if PANELS.contains(&node.data.id.as_str()) {
-                let r = node.rect;
-                panels.push(Rect::new(r.x, r.y, r.x + r.w, r.y + r.h));
+                panels.push(ui_rect_to_window(node.rect, hud.screen));
             }
         });
         drop(world);
@@ -764,7 +789,24 @@ pub fn harness(
 
 #[cfg(test)]
 mod harness_tests {
-    use super::{harness_clicks, log_once};
+    use super::{UI_FRAME_CAP_MS, advance_ui_clock, harness_clicks, log_once};
+    use std::time::Duration;
+
+    /// The battle UI clock follows the exe's main loop (`0x0048A650`): each frame's real time in
+    /// whole ms, the fraction dropped, at most 300 ms a frame (it used to add the exact delta with
+    /// no cap, so a stall jumped scripted transitions by the whole gap).
+    #[test]
+    fn the_ui_clock_counts_whole_ms_per_frame_capped_at_300() {
+        // 60 fps: 16.666 ms counts 16 each frame, so 60 frames make 960 ms, not 1000.
+        let mut t = 0;
+        for _ in 0..60 {
+            t = advance_ui_clock(t, Duration::from_micros(16_666));
+        }
+        assert_eq!(t, 960);
+        assert_eq!(advance_ui_clock(5, Duration::from_millis(2_000)), 5 + UI_FRAME_CAP_MS, "a stall counts 300 ms");
+        assert_eq!(advance_ui_clock(7, Duration::from_micros(999)), 7, "under a ms counts nothing");
+        assert_eq!(advance_ui_clock(u32::MAX, Duration::from_millis(2)), 1, "a u32 counter");
+    }
 
     fn args(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| s.to_string()).collect()

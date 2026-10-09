@@ -156,12 +156,18 @@ pub enum BattleUiRequest {
 /// Installs the battle UI's engine side into a UI host. Call before loading
 /// `data/ui/battle ui/layout`.
 pub fn install(host: &UiScriptHost, source: ScriptSource) -> mlua::Result<()> {
-    host.set_pages_fill_screen(false);
+    // Panels keep their authored size and the HUD scripts work in the root layout's 1280x960
+    // frame, as in the campaign HUD (CONFIRMED: debugger sitting 2026-10-09, root state size
+    // 1280x960 at a 1920x1080 screen; analysis/battle/BATTLE_FLOW.md §3).
+    host.set_frame(super::host::UiFrame::ScriptFrame);
     let lua = host.lua();
     lua.globals().set("__battle", lua.create_table()?)?;
     lua.globals().set("__battle_requests", lua.create_table()?)?;
     // BattleUI.WindowsTime (battle_prelude.lua; CONFIRMED `0x005D4BF0`).
     lua.globals().set("__ntw_battle_windows_time", lua.create_function(|_, ()| Ok(super::host::battle_windows_time_now()))?)?;
+    // BattleUI.Time (battle_prelude.lua; CONFIRMED `0x005D3BB0`): the UI pulse clock in seconds.
+    let inner = host.inner().clone();
+    lua.globals().set("__ntw_battle_time", lua.create_function(move |_, ()| Ok(inner.ui_time_secs()))?)?;
     // INFERRED: the engine's `loadfile` reads through the VFS (CoreUtils.NamespaceFile calls it on
     // `package.path` templates; the battle root sets `data/ui/battle ui/?.lua` there).
     lua.globals().set(
@@ -435,6 +441,44 @@ mod tests {
         let whole = super::super::host::windows_time_secs() as f64;
         assert!((t - whole).abs() < 1.01, "battle {t} vs campaign {whole}");
         assert_eq!(t, f64::from(t as f32), "a 32-bit float");
+    }
+
+    /// The battle HUD's scripts see the root at its layout size, not the screen (CONFIRMED by the
+    /// debugger sitting of 2026-10-09: root state size 1280x960 at a 1920x1080 screen), as the
+    /// campaign HUD's do; ours gave them screen geometry (`UiFrame::Panels`).
+    #[test]
+    fn battle_scripts_see_the_root_at_its_layout_size() {
+        let source = ScriptSource::empty().with_memory_file("ui/test/page", layout_bytes_with_root("", ""));
+        let host = UiScriptHost::new(source, ntw_formats::loc::Localisation::new(), facts(), (1920.0, 1080.0)).unwrap();
+        install(&host, ScriptSource::empty()).unwrap();
+        let root = host.load_root_layout("ui/test/page").unwrap();
+        let (w, h): (f32, f32) = host
+            .lua()
+            .load("local r = ...; return UIComponent(r):Dimensions()")
+            .into_function()
+            .unwrap()
+            .call(super::super::host::addr(root))
+            .unwrap();
+        assert_eq!((w, h), (50.0, 20.0), "the root's layout size (the test layout's state)");
+        assert_ne!((w, h), (1920.0, 1080.0), "not the screen");
+    }
+
+    /// `BattleUI.Time()` is bound by the exe (`0x005D3BB0`, registered at `0x0040BCF4`): the UI
+    /// pulse clock in seconds, `(float)ms * 0.001f`, not the battle time `ElapsedBattleTime` gives
+    /// (ours returned the battle's elapsed time, so held buttons stopped while paused).
+    #[test]
+    fn battle_time_is_the_ui_pulse_clock_not_battle_time() {
+        let host = UiScriptHost::new(ScriptSource::empty(), ntw_formats::loc::Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        install(&host, ScriptSource::empty()).unwrap();
+        host.lua().load("__battle.elapsed = 42").exec().unwrap();
+        host.pulse(1_999.6);
+        let t: f64 = host.lua().load("return BattleUI.Time()").eval().unwrap();
+        assert_eq!(t, f64::from(1_999.0_f32 * 0.001_f32), "whole ms of the pulse, as a 32-bit float");
+        let elapsed: f64 = host.lua().load("return BattleUI.ElapsedBattleTime()").eval().unwrap();
+        assert_eq!(elapsed, 42.0, "the battle clock stays separate");
+        host.pulse(2_500.0);
+        let t: f64 = host.lua().load("return BattleUI.Time()").eval().unwrap();
+        assert_eq!(t, f64::from(2_500.0_f32 * 0.001_f32));
     }
 
     /// The per-frame card update runs each card's `Update` as that card's script without a context

@@ -807,7 +807,7 @@ fn install_functions(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tabl
     // HUD's clock) and never pauses. Between two pulses it holds the last pulse's time, so a host
     // that pulses rarely must advance the time it pulses with (`examples/campaign_hud_probe.rs`
     // adds a second per step). The result is a 32-bit float as in the exe (`(float)ms * 0.001f`).
-    f!("Time", |_l, inner, ui, _a: Variadic<Value>| Ok(inner.ui_time_ms.get() as f32 * 0.001_f32));
+    f!("Time", |_l, inner, ui, _a: Variadic<Value>| Ok(inner.ui_time_secs()));
     // WindowsTime(): "the current windows time in seconds", CONFIRMED `0x009FB0B0`: whole seconds,
     // `(int)(timeGetTime() * 0.001f)` pushed as a number ([`super::host::windows_time_secs`]).
     f!("WindowsTime", |_l, inner, ui, _a: Variadic<Value>| Ok(super::host::windows_time_secs()));

@@ -223,10 +223,38 @@ fn argb_color(argb: u32) -> Color {
 
 /// The original's UI scale for a window (0x0114EB20, CONFIRMED): min(1, width / 1280, height / 960),
 /// the same on both axes. Normal (DrawMode 0) components are laid out in a virtual screen of
-/// window / scale and drawn scaled by it (0x011617C0 sizes, 0x011881C0 positions: scale × position
-/// + anchor × window, which is the same for docked components).
+/// window / scale and drawn scaled by it (0x011617C0 sizes, 0x011881C0 positions: scale ×
+/// position plus anchor × window, which is the same for docked components). The mapping is the render
+/// device's, with no per-HUD switch (the only one, device `+0x69C70`, is set in its ctor
+/// `0x01132530`), so every HUD (campaign, battle) is drawn through it; the screen size it reads is
+/// the device's back buffer (`DAT_0182EB18` `+0xC` / `+0x10`). The helpers below (and the scale
+/// [`spawn_world`] draws with) are the one place a HUD maps between window pixels and its virtual
+/// screen.
 pub fn ui_scale(window: Vec2) -> f32 {
     (window.x / 1280.0).min(window.y / 960.0).min(1.0)
+}
+
+/// The virtual screen a HUD's layouts are laid out in for a window: window / [`ui_scale`]. It is
+/// what `Component.CursorPosition` reports as the screen size (`0x01018590` maps the screen corner
+/// back through the device's inverse mapping `0x0119B270`).
+pub fn ui_virtual_screen(window: Vec2) -> Vec2 {
+    window / ui_scale(window)
+}
+
+/// A window point (pixels, top-left origin) in the virtual screen (the inverse of the draw
+/// mapping, as `0x0119B270`).
+pub fn window_to_ui(p: Vec2, window: Vec2) -> Vec2 {
+    p / ui_scale(window)
+}
+
+/// A virtual-screen point in window pixels (where the draw mapping puts it).
+pub fn ui_to_window(p: Vec2, window: Vec2) -> Vec2 {
+    p * ui_scale(window)
+}
+
+/// A virtual-screen rectangle in window pixels ([`ui_to_window`] of its corners).
+pub fn ui_rect_to_window(r: UiRect, window: Vec2) -> Rect {
+    Rect::from_corners(ui_to_window(Vec2::new(r.x, r.y), window), ui_to_window(Vec2::new(r.x + r.w, r.y + r.h), window))
 }
 
 /// Converts a UI rectangle (virtual screen units) to a sprite transform (centre, y up) at depth
@@ -370,4 +398,28 @@ pub fn spawn_world(world: &UiWorld, root: NodeId, commands: &mut Commands, asset
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The window ↔ virtual-screen mapping every HUD uses (`0x0114EB20`, `0x011881C0`,
+    /// `0x0119B270`): below 1280x960 the layouts are laid out in window / scale and drawn scaled;
+    /// at or above it the scale is 1 and nothing changes.
+    #[test]
+    fn hud_mapping_follows_the_ui_scale() {
+        let small = Vec2::new(1280.0, 720.0);
+        assert_eq!(ui_scale(small), 0.75);
+        let virt = ui_virtual_screen(small);
+        assert_eq!(virt.y, 960.0);
+        assert!((virt.x - 1706.6666).abs() < 0.01);
+        assert_eq!(window_to_ui(Vec2::new(300.0, 600.0), small), Vec2::new(400.0, 800.0));
+        let r = ui_rect_to_window(UiRect { x: 400.0, y: 800.0, w: 100.0, h: 40.0 }, small);
+        assert_eq!(r, Rect::new(300.0, 600.0, 375.0, 630.0));
+        let big = Vec2::new(1920.0, 1080.0);
+        assert_eq!(ui_scale(big), 1.0);
+        assert_eq!(ui_virtual_screen(big), big);
+        assert_eq!(window_to_ui(Vec2::new(5.0, 6.0), big), Vec2::new(5.0, 6.0));
+    }
 }

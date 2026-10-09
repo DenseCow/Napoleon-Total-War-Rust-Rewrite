@@ -293,8 +293,12 @@ local component_lua = {
         __ntw_tooltip_object = obj
     end,
     -- Component.CursorPosition() → x, y, screen width, screen height (Utilities.PositionTooltip
-    -- takes four results and keeps tooltips inside the last two; INFERRED). PROVISIONAL: screen
-    -- pixels, while the campaign HUD's Position / MoveTo work in the 1280x960 scripts' frame.
+    -- takes four results and keeps tooltips inside the last two; INFERRED). The width and height
+    -- are the virtual screen, window / UI scale, at least 1280x960 (CONFIRMED 0x01018590: the
+    -- screen corner mapped back through 0x0119B270), which is the HUD hosts' screen size.
+    -- PROVISIONAL: x, y are the cursor in that virtual screen, while the campaign HUD's Position /
+    -- MoveTo work in the 1280x960 scripts' frame (the exe returns the point its mouse handler
+    -- 0x0102E9D0 was given; that point's frame is not traced).
     CursorPosition = function(address)
         local w, h = __ntw_screen_size()
         return __ntw_cursor_x, __ntw_cursor_y, w, h

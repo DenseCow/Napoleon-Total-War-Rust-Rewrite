@@ -107,3 +107,40 @@ fn turn_left_order_button_works_through_its_state_functions() {
     let turns = r.iter().filter(|q| matches!(q, BattleUiRequest::Order { name, .. } if name == "Current_Selection_Rotate_Left")).count();
     assert_eq!(turns, 1, "one turn-left order on release: {r:?}");
 }
+
+/// Where the original puts the orders bar (traced 2026-10-09, BATTLE_FLOW.md §3 "Where
+/// CreateFromLayout puts a layout"): battle_hud.lua's `CreateFromLayout(".../land_battle_orders",
+/// "orders", veneer_DY)` creates only the file root's FIRST child (`0x01027400`: the holder's first
+/// child is the template), named "orders", at the absolute frame position its file offset gives
+/// (`0x010275F0`), drawn with the dock shift of its top-level ancestor `veneer_DY` (dock 8,
+/// `0x0102DAD0`). The second panel (land_battle_ordersOLD) does not exist.
+#[test]
+fn the_orders_bar_is_the_files_first_panel_at_its_own_position() {
+    let dir = data_dir();
+    if !dir.join("data.pack").is_file() {
+        eprintln!("skipped: no install at {}", dir.display());
+        return;
+    }
+    let vfs = ntw_formats::pack::Vfs::open_install(&dir).unwrap();
+    let file = ntw_formats::ui_layout::UiLayout::read(&vfs.read("ui/battle ui/land_battle_orders").unwrap()).unwrap();
+    let first = &file.root.children[0];
+    let own = (first.offset.0 as f32, first.offset.1 as f32);
+    for (w, h) in [(1280.0, 960.0), (1920.0, 1080.0)] {
+        let loc = Localisation::from_vfs(&vfs).unwrap();
+        let facts = FrontEndFacts { game_version: "test".into(), ..Default::default() };
+        let host = UiScriptHost::new(ScriptSource::from_install(&dir).unwrap(), loc, facts, (w, h)).unwrap();
+        ui_battle::install(&host, ScriptSource::from_install(&dir).unwrap()).expect("battle engine functions");
+        ui_battle::set_facts(&host, &BattleHudFacts { phase: HudPhase::Conflict, speed: 1.0, ..Default::default() }).unwrap();
+        let root = ui_battle::load_hud(&host).expect("battle HUD layout");
+        let world = host.world();
+        let orders = world.find(root, "orders").expect("the orders panel");
+        assert_eq!(world.get(orders).unwrap().layout_file, "ui/battle ui/land_battle_orders");
+        assert!(world.find(root, "land_battle_ordersOLD").is_none(), "only the first panel is created");
+        // Its absolute frame position is its own file offset, on screen plus veneer_DY's shift.
+        let shift = ((w - 1280.0) / 2.0, h - 960.0);
+        let r = world.get(orders).unwrap().rect;
+        assert_eq!((r.x, r.y), (own.0 + shift.0, own.1 + shift.1), "at {w}x{h}");
+        let cards = world.get(world.find(root, "cards_panel").unwrap()).unwrap().rect;
+        assert_eq!(r.y + r.h, cards.y, "the bar sits on the cards at {w}x{h}");
+    }
+}

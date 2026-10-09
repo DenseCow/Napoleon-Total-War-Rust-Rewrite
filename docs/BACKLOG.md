@@ -10,11 +10,11 @@ the original's values. See the Goal section of `CLAUDE.md`.
 
 Generated 2026-10-09 by `bash tools/progress.sh` (from `tools/backlog_count.sh` and `tools/tag_count.sh`); never edit it by hand.
 
-Tags left in the code (done means zero): 1769 (643 PROVISIONAL, 106 PLACEHOLDER, 1020 INFERRED), plus 587 UNKNOWN.
+Tags left in the code (done means zero): 1767 (643 PROVISIONAL, 106 PLACEHOLDER, 1018 INFERRED), plus 587 UNKNOWN.
 
 | Section | Done | Partly done | To do |
 |---|---|---|---|
-| 0. Cross-cutting fidelity | 81 | 0 | 35 |
+| 0. Cross-cutting fidelity | 84 | 0 | 36 |
 | 1. File formats and data | 11 | 0 | 0 |
 | 2. Graphics and rendering | 0 | 11 | 29 |
 | 3. Battle gameplay (land) | 1 | 11 | 22 |
@@ -25,8 +25,8 @@ Tags left in the code (done means zero): 1769 (643 PROVISIONAL, 106 PLACEHOLDER,
 | 8. Video (Bink) | 2 | 1 | 0 |
 | 9. Audio | 0 | 2 | 8 |
 | 10. Multiplayer | 0 | 0 | 5 |
-| 11. Modding (goal: original mods work out of the box, plus easy modding) | 0 | 1 | 6 |
-| 12. Platform, release and quality | 0 | 0 | 6 |
+| 11. Modding (goal: original mods work out of the box, plus easy modding) | 0 | 0 | 9 |
+| 12. Platform, release and quality | 0 | 0 | 7 |
 
 §0 counts individual pieces; the other sections still count whole features, so their numbers move
 more slowly. Split a big item into sub-checkboxes when work on it starts.
@@ -187,9 +187,13 @@ SpeedTree leftovers are in §2.
 - [x] Battle `B.WindowsTime`: `timeGetTime()*0.001f` as a float (`0x005D4BF0`); the campaign's `0x009FB0B0` truncates to int; one shared clock
 - [ ] Portraits of generated characters: the recruitment pool's hires and promoted generals (`promote_unit`) get empty CHARACTER_DETAILS (ntw_sim pool.rs), so their army card and Lists row keep the unit card (PLACEHOLDER, ntw_script ui/campaign/army.rs `unit_entry` / campaign/characters.rs `character_details`); trace how the exe picks a new character's portrait and give it in the model.
 - [ ] Army recruitment tab contents: `0x009FE7B0` reads the tab's own manager (commander `+0x34` → `+0x124`), not traced; ours opens it empty (PLACEHOLDER, ntw_script ui/campaign/tabs.rs `generate_current_tab`). Evidence: the original's army Recruitment tab in an own region has an Options row (4 cards, a "2/1" badge, cost 472) and a 10-slot Queue (user screenshot `ntw-evidence\screens\2026-10-07_original_wellesley_army_recruitment_tab.png`); the naval tab's port path is untraced too (PROVISIONAL).
-- [ ] (running: battle-ui2) Battle HUD scripts' frame: debugger sitting 2026-10-09 read the root state size 1280x960 at a 1920x1080 screen (root at manager +0xC4); ours switches to the script frame
-- [ ] (running: battle-ui2) Battle HUD UI scale: the exe's UI scale (`0x0114EB20`) applies to the battle HUD too; ours draws the battle HUD at scale 1
-- [ ] (running: battle-ui2) Battle `B.Time` (ntw_script/src/ui/battle_prelude.lua): BATTLE_FLOW.md marks it an INFERRED extra binding the exe may not have, untagged in code; trace whether the exe binds it, then tag or remove it
+- [x] Battle HUD scripts' frame: CONFIRMED 1280x960 (debugger sitting 2026-10-09, root at manager +0xC4); the battle host uses `UiFrame::ScriptFrame`; CreateFromLayout makes the file root's first child at its own frame position (`0x01027400`, `0x0101E270`)
+- [x] Battle HUD UI scale: the exe's UI scale (`0x0114EB20`) applies to the battle HUD too; ours lays the battle HUD out at window / scale and maps the mouse back
+- [x] Battle `B.Time`: the exe binds it (`0x005D3BB0`): the UI pulse clock, real time capped at 300 ms a frame
+- [ ] The front end still draws at UI scale 1 (the exe's `0x0114EB20` applies to every HUD)
+- [ ] The battle HUD never calls `set_cursor_position`: `Component.CursorPosition` returns nil x, y in battle
+- [ ] `battle_prelude.lua:72` drops CreateFromLayout's x, y: root.luac's pip_frame and xp_bling and the esc_menu options (all 0,0) land at their file offsets
+- [ ] Trace the campaign `Time` counter (`0x00A0EB80`; pulse `0x009D5F31`) against the main-loop clock; if it is the same struct, share the battle `advance_ui_clock` (campaign's is uncapped and fractional, PROVISIONAL)
 
 AI (§6) is paused by the user's section order; its open questions stay in `analysis/ai/AI_RESEARCH.md` §7.
 
@@ -538,12 +542,28 @@ worked on, `[ ]` = not started.
 - [ ] Desync detection and multiplayer replays.
 
 ## 11. Modding (goal: original mods work out of the box, plus easy modding)
-- [ ] **PARTLY DONE:** Parked on `work/mod-loading`: layered Vfs, `user.script.txt` parser, DB merging, loc rules [MOD_LOADING.md §7]
-- [ ] Wire it into the app: `--mods`, `--no-mods`, `--list-mods`, the `mods\` folder with `load_order.txt`.
-- [ ] Exact original pack priority and DB merge order (Ghidra) [MOD_LOADING.md §5]
+- [ ] (running: mod-loading2) **PARTLY DONE:** Parked on `work/mod-loading`: layered Vfs, `user.script.txt` parser, DB merging, loc rules [MOD_LOADING.md §7]
+- [ ] (running: mod-loading2) Wire it into the app: `--mods`, `--no-mods`, `--list-mods`, the `mods\` folder with `load_order.txt`.
+- [ ] (running: mod-loading2) Exact original pack priority and DB merge order (Ghidra) [MOD_LOADING.md §5]
 - [ ] Test with real original-game mods (unit packs, overhaul mods, map mods).
 - [ ] Optional open formats: glTF models, image heightmaps, hi-res texture overrides.
-- [ ] Modding docs and our own tools (pack editor, DB editor, map tools), so modders don't need the original's closed tools.
+- [ ] Modding docs and our own tools (pack editor, DB editor, map tools, a campaign map editor with live preview), so modders don't need the original's closed tools.
+- [ ] **Custom campaign maps** (user, 2026-10-09: a whole new world, e.g. a Japan map; design in docs/DESIGN.md §3.5.1)
+  - [ ] Audit now (keeps the door open, cheap while campaign work runs): list every place the campaign model, its
+        saves, the campaign UI or the map display depends on `.esf` records, ESF ids, the lossless passthrough or the
+        original's pre-baked map files, and move each behind the importer.
+  - [ ] Open campaign format spec and loader (campaign.toml, regions.png, heightmap.png, settlements, factions,
+        armies, diplomacy, events) → `CampaignModel`.
+  - [ ] Generator: borders, adjacency, region meshes, pathfinding grid, sea lanes and coastlines from the images,
+        cached by source hash; the same output types the importer produces from the original's map files.
+  - [ ] Campaign map display from generated data (terrain, ground layers, coasts, rivers, labels).
+  - [ ] Custom campaigns listed in the campaign menu next to the original's.
+  - [ ] Exporter: the original's campaign (with mods) to the open format.
+  - [ ] A small sample custom campaign as a test and a modding example.
+  - [ ] Later: converters from other Total War games the user owns (e.g. a Shogun 2 map); separate format investigation.
+- [ ] **Generic engine** (user, 2026-10-09: a platform to build any Total War game; CLAUDE.md intro): audit the code for
+      Napoleon-specific hardcoding (faction, region, unit or map keys in code, unit-class and era assumptions such as
+      gunpowder-only combat, fixed calendars) and move each into data, defaults unchanged.
 - [ ] **No engine limits** (user, 2026-10-06; see Goal in `CLAUDE.md`). Defaults stay 1:1.
   - [ ] Audit the code for hardcoded counts and small ID types: `u8`/`u16` ids, fixed arrays, `MAX_*` constants and
         loops over a fixed number of factions, regions, religions or cultures. Make each data-driven.
@@ -565,16 +585,17 @@ worked on, `[ ]` = not started.
 - [ ] Packaging: ship only our executable, never Creative Assembly assets.
 - [ ] Clippy and cleanup passes, and docs for building and running.
 - [ ] File-size guard: a test (like `napoleon/tests/encoding.rs`) that fails when a non-test `.rs` source file passes 3,000 lines, so no file grows like `ui/campaign.rs` (7,985) again. Its allow-list is empty: the split (2026-10-08) left no source file over 3,000 lines.
+- [ ] Original-bug toggles: one settings group (with the options screen entry) holding a flag per fixed original bug, default "fixed" (CLAUDE.md Goal "Better where the original is broken"); the first worker that fixes one creates it
 
 ## Polish
 Non-blocking review findings, one line each (CLAUDE.md "Done means"). A worker editing a file clears that file's lines.
+- [ ] `ntw_script` host.rs:882 `create_layout` computes `base` even when x, y are given, forcing a full relayout for each Labels/PanelManager create; compute it only when `position` is None
 - [ ] The campaign model addresses building slots as `Option<usize>` (None = the road/fort slot); replace it with a slot enum so no sentinel values remain (from the walls review; ntw_sim campaign).
 - [ ] Logging is inconsistent: ntw_data reports with `eprintln!` while ntw_campaign uses the `log` crate.
 - [ ] `CursorPosition` (ui_prelude.lua ~281) and CampaignUI's label `ScreenPos` (Labels.lua) give screen pixels while the campaign HUD's Position / MoveTo use the 1280x960 scripts' frame; read what the original returns on a wide screen.
 - [ ] `unwrap()` audit on paths that read install or mod data (ntw_formats, ntw_data, pack loading): a malformed file or broken mod must log one error and skip, never panic. Unwraps on the code's own invariants and in tests stay.
 - [ ] `manager_record` / `manager()` rebuild the whole `manager_records` Vec on every lookup (cold path; ntw_campaign/src/save.rs ~1535).
 - [ ] Hoist the `__ntw_battle_update_card` lookup out of the per-card loop (ntw_script/src/ui/battle.rs ~312); needs a `call_entry` that takes the `Function` (ntw_script/src/ui/host.rs, another branch's file).
-- [ ] The battle HUD sets its frame through the old `set_pages_fill_screen(false)`; call `set_frame(UiFrame::Panels)` and drop that wrapper (ntw_script/src/ui/battle.rs ~147, host.rs `set_pages_fill_screen`).
 - [ ] `small_table` turns a read failure into an empty table, now cached for the HUD's life (`post_names`, `tech_links`); log once (ntw_script/src/ui/campaign/mod.rs ~1380).
 - [ ] `bridge_volleys` rescans the recent-volley list and the unit list for every volley (napoleon/src/audio/battle.rs ~81, ~87); its row-count check next to the table id is redundant (~37).
 - [ ] The `put_changed!` field lists in `set_facts` are written by hand, so a new fact can compile and never reach `__battle`; and writing only changed fields no longer resets a value a script or mod wrote into `__battle` (ntw_script/src/ui/battle.rs ~204, ~216).
