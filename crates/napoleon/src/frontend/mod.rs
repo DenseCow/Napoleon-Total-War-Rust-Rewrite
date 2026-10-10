@@ -103,7 +103,9 @@ fn enter(world: &mut World) {
         .single(world)
         .map(|w| Vec2::new(w.width(), w.height()))
         .unwrap_or(Vec2::new(1280.0, 960.0));
-    let host = match UiScriptHost::new(source, loc, facts, (screen.x, screen.y)) {
+    // The custom battle pages read the moddable unit limits and funds (GameDatabase::limits).
+    let limits = world.resource::<crate::data::GameData>().db.limits.clone();
+    let host = match UiScriptHost::new(source, loc, facts, (screen.x, screen.y), limits) {
         Ok(h) => h,
         Err(e) => {
             error!("UI script host failed to start: {e}");

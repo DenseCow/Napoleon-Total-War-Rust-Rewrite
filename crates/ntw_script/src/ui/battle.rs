@@ -17,10 +17,17 @@ use crate::ScriptSource;
 
 const BATTLE_PRELUDE: &str = include_str!("battle_prelude.lua");
 
-/// Writes each listed field of `$new` into Lua table `$t` under its name when it differs from
-/// `$old`'s (an `Option<&_>`; `None` writes them all).
+/// Writes each listed field of `$new` (a `$ty`) into Lua table `$t` under its name when it differs
+/// from `$old`'s (an `Option<&_>`; `None` writes them all). `$ty` is destructured with every field
+/// named, so a field added to the struct and listed neither here nor after `;` (the ones sent
+/// another way) does not compile: a new fact cannot miss `__battle`.
+///
+/// `__battle` belongs to the engine and the shipped scripts only read it (`battle_prelude.lua`
+/// writes nothing into it); a value some script or mod writes into it stays until the engine's
+/// own value for that field next changes.
 macro_rules! put_changed {
-    ($t:expr, $new:expr, $old:expr, { $($name:literal => $field:ident),* $(,)? }) => {
+    ($t:expr, $new:expr, $old:expr, $ty:ident { $($name:literal => $field:ident),* $(,)? } $(; $($other:ident),*)?) => {
+        let $ty { $($field: _,)* $($($other: _,)*)? } = $new;
         $(
             if $old.is_none_or(|o| o.$field != $new.$field) {
                 Fact::put(&$new.$field, &$t, $name)?;
@@ -209,7 +216,7 @@ pub fn set_facts(host: &UiScriptHost, f: &BattleHudFacts) -> mlua::Result<()> {
 pub fn update_facts(host: &UiScriptHost, f: &BattleHudFacts, written: Option<&BattleHudFacts>) -> mlua::Result<()> {
     let lua = host.lua();
     let t: Table = lua.globals().get("__battle")?;
-    put_changed!(t, f, written, {
+    put_changed!(t, f, written, BattleHudFacts {
         "phase" => phase,
         "elapsed" => elapsed_s,
         "total" => total_s,
@@ -220,9 +227,9 @@ pub fn update_facts(host: &UiScriptHost, f: &BattleHudFacts, written: Option<&Ba
         "player_flag" => player_flag,
         "balance" => balance,
         "player_won" => player_won,
-    });
+    } ; units, results);
     refresh_list(lua, &t, "units", &f.units, written.map(|w| &w.units[..]), |e, u, o| {
-        put_changed!(e, u, o, {
+        put_changed!(e, u, o, HudUnit {
             "id" => id,
             "key" => key,
             "name" => name,
@@ -250,7 +257,7 @@ pub fn update_facts(host: &UiScriptHost, f: &BattleHudFacts, written: Option<&Ba
         Ok(())
     })?;
     refresh_list(lua, &t, "results", &f.results, written.map(|w| &w.results[..]), |e, r, o| {
-        put_changed!(e, r, o, {
+        put_changed!(e, r, o, HudSideResult {
             "name" => name,
             "faction" => faction,
             "flag" => flag,
@@ -436,7 +443,7 @@ mod tests {
     /// the process's CPU time).
     #[test]
     fn battle_windows_time_is_the_system_clock_in_float_seconds() {
-        let host = UiScriptHost::new(ScriptSource::empty(), ntw_formats::loc::Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        let host = UiScriptHost::new(ScriptSource::empty(), ntw_formats::loc::Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
         install(&host, ScriptSource::empty()).unwrap();
         let t: f64 = host.lua().load("return BattleUI.WindowsTime()").eval().unwrap();
         let whole = super::super::host::windows_time_secs() as f64;
@@ -450,7 +457,7 @@ mod tests {
     #[test]
     fn battle_scripts_see_the_root_at_its_layout_size() {
         let source = ScriptSource::empty().with_memory_file("ui/test/page", layout_bytes_with_root("", ""));
-        let host = UiScriptHost::new(source, ntw_formats::loc::Localisation::new(), facts(), (1920.0, 1080.0)).unwrap();
+        let host = UiScriptHost::new(source, ntw_formats::loc::Localisation::new(), facts(), (1920.0, 1080.0), ntw_sim::limits::GameLimits::default()).unwrap();
         install(&host, ScriptSource::empty()).unwrap();
         let root = host.load_root_layout("ui/test/page").unwrap();
         let (w, h): (f32, f32) = host
@@ -469,7 +476,7 @@ mod tests {
     /// (ours returned the battle's elapsed time, so held buttons stopped while paused).
     #[test]
     fn battle_time_is_the_ui_pulse_clock_not_battle_time() {
-        let host = UiScriptHost::new(ScriptSource::empty(), ntw_formats::loc::Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        let host = UiScriptHost::new(ScriptSource::empty(), ntw_formats::loc::Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
         install(&host, ScriptSource::empty()).unwrap();
         host.lua().load("__battle.elapsed = 42").exec().unwrap();
         host.pulse(1_999.6);
@@ -490,7 +497,7 @@ mod tests {
         let root_script = "orders = 0\nfunction SetOrderButtonState(id, s) orders = orders + 1; orders_in = __ntw_script_context() end";
         let card_script = "updates = 0\nfunction Update(info) updates = updates + 1; seen = __ntw_script_context(); men = info.Men end";
         let source = ScriptSource::empty().with_memory_file("ui/test/page", layout_bytes_with_root(root_script, card_script));
-        let host = UiScriptHost::new(source, ntw_formats::loc::Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        let host = UiScriptHost::new(source, ntw_formats::loc::Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
         install(&host, ScriptSource::empty()).unwrap();
         let root = host.load_root_layout("ui/test/page").unwrap();
         let card = host.world().find(root, "button").unwrap();
@@ -521,7 +528,7 @@ mod tests {
     fn card_info_is_made_once_and_refreshed_in_place() {
         let card_script = "function Update(info) first = first or info; same = rawequal(first, info); men = info.Men; inactive = info.Inactive end";
         let source = ScriptSource::empty().with_memory_file("ui/test/page", layout_bytes_with_root("", card_script));
-        let host = UiScriptHost::new(source, ntw_formats::loc::Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        let host = UiScriptHost::new(source, ntw_formats::loc::Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
         install(&host, ScriptSource::empty()).unwrap();
         let root = host.load_root_layout("ui/test/page").unwrap();
         let card = host.world().find(root, "button").unwrap();
@@ -548,7 +555,7 @@ mod tests {
     /// removed from the list, a new one gets a table; with nothing written before, all is written.
     #[test]
     fn facts_are_refreshed_in_place_and_only_what_changed_is_written() {
-        let host = UiScriptHost::new(ScriptSource::empty(), ntw_formats::loc::Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        let host = UiScriptHost::new(ScriptSource::empty(), ntw_formats::loc::Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
         install(&host, ScriptSource::empty()).unwrap();
         let lua = host.lua();
         let unit = |id: u32, men: u32| HudUnit { id, key: format!("unit_{id}"), men, ..Default::default() };

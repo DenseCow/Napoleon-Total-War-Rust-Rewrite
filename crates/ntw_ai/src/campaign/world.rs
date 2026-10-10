@@ -197,6 +197,8 @@ pub struct AiWorld {
     pub stances: BTreeMap<(FactionId, FactionId), Stance>,
     /// Movement points per map unit (`road_level_0_action_point_cost` on `main`).
     pub move_cost_per_unit: f32,
+    /// Units an army may hold (the model's [`CampaignModel::max_units`](ntw_sim::campaign::CampaignModel::max_units)).
+    pub max_units_per_army: usize,
     /// `taxes_levels`: (key, rate %), lowest rate first.
     pub tax_levels: Vec<(String, i32)>,
     /// Public order a tax level gives its class: `[class][level key]`, class 0 lower, 1 upper (the
@@ -213,13 +215,17 @@ pub fn dist(a: (f64, f64), b: (f64, f64)) -> f64 {
     ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt()
 }
 
-/// The `cdir_unit_balances` group of a unit: `infantry`, `cavalry`, `artillery` or `navy`.
+/// The `cdir_unit_balances` group of a unit: `infantry`, `cavalry`, `artillery` or `navy`, by its
+/// category ([`ntw_sim::unit_kind::category`]: an unknown key is artillery). PROVISIONAL: the groups of
+/// dragoons, camels and elephants (here `cavalry`) are not traced; the exe has a
+/// `cdir_unit_balance_groups` table that may say.
 pub fn balance_group(info: &AiUnitInfo) -> &'static str {
-    match info.category.as_str() {
-        "cavalry" => "cavalry",
-        "artillery" => "artillery",
-        "infantry" => "infantry",
-        _ => "navy",
+    use ntw_sim::unit_kind::Category;
+    match ntw_sim::unit_kind::category(&info.category) {
+        c if c.is_naval() => "navy",
+        Category::Artillery => "artillery",
+        Category::Infantry => "infantry",
+        _ => "cavalry",
     }
 }
 
@@ -237,7 +243,7 @@ impl AiWorld {
     /// regions only (each needs the region's effect set), or of every region with `None`.
     pub fn from_model_for(m: &CampaignModel, faction: Option<FactionId>) -> Self {
         let w = &m.world;
-        let mut out = AiWorld { move_cost_per_unit: m.rules.road_cost(0), ..Default::default() };
+        let mut out = AiWorld { move_cost_per_unit: m.rules.road_cost(0), max_units_per_army: m.max_units(false), ..Default::default() };
         let has_rules = !m.rules.buildings.is_empty() || !m.rules.units.is_empty();
         // The effect sums, once for the whole snapshot.
         let fx = has_rules.then(|| ntw_sim::campaign::effects::Effects::compute(m));
@@ -478,13 +484,13 @@ fn recruitable_entries(m: &CampaignModel, r: &ntw_sim::campaign::Region, counts:
     let mut out: Vec<AiRecruitable> = m
         .recruitable_units(r.id)
         .into_iter()
-        .filter_map(|unit_key| {
-            let unit = m.rules.units.get(&unit_key)?;
-            let cost = ntw_sim::campaign::economy::recruitment_cost_in(&m.rules, &set, &unit_key, unit);
-            let flags = m.recruitable_entry_flags(r, &unit_key, unit, cost, counts);
-            let cap_room = counts.cap_room(&unit_key, unit);
+        .filter_map(|entry| {
+            let unit = m.rules.units.get(&entry.unit_key)?;
+            let cost = ntw_sim::campaign::economy::recruitment_cost_in(&m.rules, &set, &entry.unit_key, unit);
+            let flags = m.recruitable_entry_flags(r, &entry, unit, cost, counts);
+            let cap_room = counts.cap_room(&entry.unit_key, unit);
             let queue_room = room[usize::from(unit.is_naval)];
-            Some(AiRecruitable { unit_key, cost, flags, cap_room, naval: unit.is_naval, queue_room })
+            Some(AiRecruitable { unit_key: entry.unit_key, cost, flags, cap_room, naval: unit.is_naval, queue_room })
         })
         .collect();
     out.sort_by(|a, b| a.unit_key.cmp(&b.unit_key));

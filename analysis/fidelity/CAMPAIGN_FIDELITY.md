@@ -48,11 +48,11 @@ cited below are in `analysis/fidelity/ghidra_evidence/0b/gh__r15_*` (ported to m
   `0x00EED3E0(units #3 class key)` (a fixed key list, any other key 0); codes 4 / 0xB / 0xC / 0xE are
   `cavalry_heavy`, `elephants`, `general`, `infantry_elite`. `0x008BA1E0` skips those units before the RNG draw.
   Code `economy::DESERTION_EXEMPT_CLASSES`; test `exempt_unit_classes_do_not_desert`.
-- **Recruitment details — CLOSED (CONFIRMED, ported) except the recruitable population.** The campaign cost is
+- **Recruitment details — CLOSED (CONFIRMED, ported).** The campaign cost is
   `units` #7 with the region's cost effects (not #4, not the experience-adjusted `0x00ED49A0`, which is the battle
   army-setup price), charged and refunded unchanged; a faction in debt may recruit; `units` #15 caps a unit type per
-  faction. See §Recruitment cost and money. Left: the recruitable population gate and charge (vars 36 / 37, 0 in the
-  shipped data; PROVISIONAL in `recruitable_entry_flags`).
+  faction; the recruitable population gate, charge and credit are ported (`population::RecruitmentPopulation`;
+  vars 36 / 37, 0 in the shipped data). See §Recruitment cost and money.
 **Round 15 (data first, Ghidra last), complete in the sandbox.** `ECON_RECOMP` is untouched and still
 exact (sandbox count: 713 tests).
 - **Item 1 — the two round-14 fixes turned into properties (§GDP, "Round 15").** The exposure was
@@ -998,11 +998,36 @@ faction and liberation target.
   `0x00E91320`), not #4. The same function adds the experience effects to entry[1] and puts the upkeep (`0x008B21D0`)
   in entry[4]. Data: `economy_check` `ECON_RECRUITCOST` matches **392 of 406** queued items in the saves the original
   wrote (`auto_after_c8` 90/97, `auto_nr1` 46/47, `auto_nr4_t4` 98/99, `orig_fr_may1811` and `orig_fr_t1_b` 13/14 each,
-  `orig_over_nr4_0252` 132/135; `nr2`/`nr3` are our own saves, charged #4 by the old code). Every miss is an AI
-  faction whose `recruitment_mod_cost_*_all` in the save differs from the one the item was priced with: Saxony and
-  Naples items at −5 while the save reads −10 / +1 (the same factions' other items match at −5), one Spanish
-  merchantman at +49 against +24. When the faction's cost mod changes between the AI's queueing and the save is
-  UNKNOWN (no code depends on it: the price is taken once, at queue time, as the original does).
+  `orig_over_nr4_0252` 132/135; `nr2`/`nr3` are our own saves, charged #4 by the old code).
+- **The 14 misses are effects that changed after the AI queued the item (worker recruit-cost 2026-10-10).**
+  - The price is taken once (CONFIRMED). `0x00AF3F80` copies entry[0] to item +0x20 (and +0x28) at queue time.
+    The count-down (land item vtable `0x0137CB1C` +0x18 → `0x006009F0`) touches only +0x1C. Nothing re-prices an
+    item: the Naples items stay at 551 from `auto_after_c8` to `orig_over_nr4_0252` while the faction reads +1.
+  - What it is priced from (CONFIRMED): the region effect set `0x00A67530`: the region's cached +0x188, its
+    +0x1DC, and `0x008AFB50` over the faction's cached sum +0x6FC. That sum is rebuilt only by `0x008B16C0` (18
+    callers, not traced one by one). It is a copy of +0x8D4 (saved base + difficulty), plus the owned regions'
+    faction-wide building sets (+0x198), plus the technology set (+0x7C4 → +0x18), plus the government part
+    `0x008AFAB0`. That part is the government set, and for each non-governor post with a holder, the post level's
+    `ministerial_positions_to_effects` set (`0x008D9D40`) and the holder's own set (+0x48C).
+  - Every miss lies in the army or navy post's term, or in the saved bonus. The formula and the region part
+    match (a temporary diagnostic broke each faction's sum down by source):
+    - Naples (7 items, `auto_after_c8`, `orig_over_nr4_0252`): priced at −5. The save has the army minister at
+      level 1 (+6 cost, +5 % land upkeep); priced at level 2 (0, 0 %). The round-end land upkeep in
+      `FACTION_ECONOMICS` goes 990 → 1039 (+4.9 %) in the round the 2/2 items were queued. So the level dropped
+      after Naples' turn and before the round end; the model's upkeep at the save, 1039, matches.
+    - Britain (3 items, `auto_after_c8`): priced at −6 (iron mine −3, stables −3 on the dragoons, the infantry's own
+      −3), i.e. the faction part 0 (army level 2). The save has army level 0 (+12 cost, +10 % upkeep). Land
+      upkeep goes 3870 → 4268 (+10.3 %) at the end of the round the items were queued in.
+    - Saxony (2 items, `auto_nr1`, `auto_nr4_t4`): priced at −5 (the government's). The save adds −5 from a trait
+      of the navy minister (his +0x48C), gained after the item was queued.
+    - Spain (2 copies of one merchantman, `orig_fr_may1811` = `orig_fr_t1_b`): priced at +49. The save reads +24
+      (saved bonus +25, navy level 3 −1), so +25 more at queue time: 49 = 2 × 25 − 1. `bonus_base` and
+      `bonus_with_difficulty` both hold the +25. What gave it twice for a while is UNKNOWN; no save of that
+      campaign between turn 0 and the queueing holds a queued item.
+  - So the misses are not a pricing error, and no save can be matched without the state at queue time. The model
+    prices from its state at its own queue time, as the exe does. Whether the exe's cached sum +0x6FC can lag
+    behind a minister or trait change (`0x008B16C0`'s callers) is a separate question for the effects system: it
+    would change every reader of the sum, not only recruitment.
 - **The `0x00ED49A0` experience-adjusted cost is not the campaign's**: the queue charges entry[0], which both list
   builders set through `0x00B0D220` on every entry just before flagging them. `0x00ED49A0`'s callers are `0x0045D170` (from the army setup generator `0x004765F0`,
   `0x0045CB50` and `0x00461790`), `0x004C2770` and the unit info "XpAdjustedCost" `0x005CD340`, none on the queue
@@ -1013,16 +1038,83 @@ faction and liberation target.
   items of it (faction +0x7E4, kept by `0x00AF3F80` and the item destructor `0x00AF7730`) reach it; 142 of the 442
   vanilla units have a cap. 0x02 when the cost is above the treasury compared **unsigned** (JBE), so a faction in debt
   is never too poor. 0x04 when `HasRecruitmentPopulationAvailable` (`0x00A89550`) fails. 0x01 when the queue is full.
-  The card's `reasons_unavailable` list (no slot, unaffordable, population, …, limit at bit 6) matches these bits
-  (INFERRED: the generator `0x009FE7B0` was not traced that far); the UI now shows the model's flags.
-- **The recruitable population — not modelled (PROVISIONAL).** The region's population object (region +0x28, saved as
-  `POPULATION`) holds at +0x54 (region +0x7C) the value saved as `REGION_FACTORS` #2 (the model's `population` since
-  round 17, §Population); it differs from `POPULATION` #1 in `orig_fr_may1811` (31 of 31 regions, e.g. 966967 against 969000) and equals it in the two
-  turn-1 saves. Gate: flagged when it is below var 36 `minimum_population_after_recruitment` + var 37
-  `recruitment_population_cost` (registration order: key objects at `0x0164B550` + 8 × index, `0x0164B670` /
-  `0x0164B678`). Queue charge `0x00AAF190`: subtract var 37 when that leaves at least var 36, else set it to var 36.
-  Cancel credit `0x00A61AA0`: add var 37. Both variables are 0 in the shipped `campaign_variables`, so with vanilla data
-  the flag is never set and the charge and credit are 0.
+  The card's `reasons_unavailable` list (no slot, unaffordable, population, damaged, occupied, siege, limit,
+  technology) matches all eight bits (INFERRED: the generator `0x009FE7B0` was not traced that far); the UI shows the
+  model's flags.
+- **The building flags (CONFIRMED, worker recruit-cost 2026-10-10; code `CampaignModel::recruitable_units`).** The
+  priced list is a copy of the region's unpriced list (region +0x1A8). `RebuildRegionRecruitablesAndEffects`
+  `0x00A6AE40` builds that list per slot through `0x00A62380` → `BuildSlotBuildingRecruitableList` `0x00B43CA0`,
+  which flags each entry on its own:
+  - 0x08 when the building's health (+0x18) is below 100.
+  - 0x10 when `0x00A91FC0` holds: the slot's faction is not the region's owner. The same test keeps such a slot's
+    building effects out (`0x00A62380`).
+  - 0x20 when the settlement (region +0xFC) answers its virtual +0x98. The script function `IsUnderSiege`
+    (`0x008A1FF0`, strings `0x01352184` / `0x013521B4`) calls the same virtual. The model has no campaign sieges
+    yet, so this flag is never set (BACKLOG "Sieges on the campaign map").
+  - 0x80 when `0x008AAB60` fails: one of the unit's technologies (unit +0xCC/+0xD0, linked from
+    `unit_required_technology_junctions` by `0x00EA9B10`) is not in state 0 (`0x008F3DB0` reads state 5 for one
+    the tree lacks). So a unit whose technology is missing is listed and flagged, not left out. Our tech gate was
+    INFERRED before and is now CONFIRMED.
+  - Some units get no entry at all. These are the ones that fail the faction's permission mask or unit set, or one
+    of three gates:
+    - `0x00EA9810` (CONFIRMED, ported as `CampaignRules::government_may_recruit`, test
+      `a_unit_enabled_for_other_governments_is_not_recruitable`). The unit's list +0xDC holds the government types
+      of its `enabled` rows in `units_to_gov_type_permissions` (`0x00E91320` keeps rows whose status is 0; the
+      status strings `0x00ED5710`: enabled 0, destroyed 1, converted_to 2, non_reinforceable 3). When that list is
+      not empty, the faction's government type (faction +0x70C → +0xB0, `0x008C8CF0`) must be in it. Vanilla has
+      51 rows over 17 guard units: the Republican Guards are enabled only for `gov_republic`, the others only for
+      the two monarchies. So France (`gov_empire`) gets none of them. What `destroyed` / `converted_to` do on a
+      change of government is not traced.
+    - `0x00AA1660` (PROVISIONAL, not ported). When unit +0x98 is set, the slot's region must hold it in its list
+      +0x270. The sources of both are not traced; it may be the region unit resources.
+    - `0x00A27960` (PROVISIONAL, not ported). The unit must not be in a campaign-wide list (model +0xFA8 → +0x24,
+      count +0x20; objects written by `0x00872550` / `0x008742C0`). What fills that list is not traced.
+  - `MergeRecruitableEntrySorted` `0x00B08E30` joins the entries of one unit from several buildings. An unflagged
+    entry replaces a flagged one; an unflagged one stays; two flagged ones OR their flags. So a unit is unflagged
+    when any building allowing it is. Between two unflagged entries, `0x00B780E0` keeps the lower experience,
+    then the lower cost. The model's entries carry neither, so this does not apply to them.
+  - The list is kept sorted by unit key (`0x00B78140` → `CompareUniStrings` `0x004F1F30`: case-sensitive, by UTF-16
+    code unit; the UNIT_RECORD starts with its key). `recruitable_units` sorts the same way, and the card list
+    shows that order.
+  - A port's naval queue uses its port building's own list (`0x00B61DA0`). The model's single naval queue uses the
+    region's list, which is the same for a region with one port.
+- **The recruitable population (CONFIRMED, worker recruit-pop 2026-10-10; code `population::RecruitmentPopulation`,
+  used by `recruitable_entry_flags`, `recruit`, `cancel_recruitment`, `region_turn` and `occupy`).** It is the live
+  population, `REGION_FACTORS` #2 (region +0x7C, the model's `Region::population`, §Population); there is no separate
+  recruitable pool. The variables are read by `0x008B25F0` (FISTP of the f32 at model +0xDA0 + 4 × index): var 36
+  `minimum_population_after_recruitment`, var 37 `recruitment_population_cost` (key objects `0x0164B670` /
+  `0x0164B678`, built at `0x00432FE1` / `0x00432FF0` from the strings `0x0139EFDC` / `0x0139F004`; var 35 at
+  `0x0164B668` is `minimum_population`, which fixes the indexing). No unit field takes part: every entry of a
+  region's land and naval lists gets the same answer.
+  - Gate `HasRecruitmentPopulationAvailable` `0x00A89550` (this = entry[7] +0x54 → region +0x28, from
+    `FlagUnavailableRecruitableEntries` `0x00B69BA0` for every entry): passes when var 37 + var 36 ≤ population
+    (signed); failing sets entry flag 4, which the queue command refuses (`CommandError::NotEnoughPopulation`) and
+    the card shows as its "population" reason (bit 2, the mapping INFERRED with the other bits).
+  - Charge `0x00AAF190` (via thunks `0x00AAF1E0` region +0x28 → `0x00AAF180` +0x24, so +0x30 = region +0x7C): at
+    queue time, by `QueueRecruitmentItemForUnit` `0x00B58DD0` right after the money (its only caller): subtract var
+    37 when var 37 + var 36 ≤ population, else set it to var 36 (unreachable from the command, which refused the
+    flagged entry first). The AI and the console queue through the same command.
+  - Credit `0x00A61AA0` (via thunk `0x00A620A0`, region +0x28 +0x54): add var 37, called only by
+    `CancelRecruitmentItem` `0x00B1A820`, unconditionally (whether or not the money is refunded), once per item. Its
+    callers: the cancel command, the turn start's removal of items the region can no longer recruit (`0x00B71FB0`),
+    and the queue clearers `0x00B1A760` (capture variants `0x00B58560` / `0x00B58890` / `0x00B58C00`, the region
+    transfer `0x00A64AC0`) and `0x00A6CBF0` (one port's naval queue; callers `0x0094D4F0`, `0x00A92380`,
+    `0x00A924D0`, `0x00A925C0`, `0x00A971B0`, not traced further). A trained item is destroyed by the queue step
+    without the cancel path (no credit), and disbanding a unit has no credit.
+  - Signedness: only these three rules read the population signed. The growth (`0x00AB4227`, CVTDQ2PD with the
+    2^32 fix-up) and the factors (`0x00AA9D44`, `0x00AA9F91`) read it unsigned, and the cap compares it unsigned
+    (CMOVA `0x00AB42CB`). So a mod's negative variables that take it below 0 leave the exe with those 32 bits;
+    the model's `u32` holds the same bits (test `a_population_charged_below_zero_keeps_the_exes_bits`). The growth
+    now rounds with FISTP (`commands::fistp`, the indefinite out of range) instead of a saturating cast.
+  - With the shipped data both variables are 0 in every campaign (`campaign_variables` and its per-campaign
+    overrides), so nothing changes; checked by `recruiting_takes_no_population_in_the_vanilla_saves`: the 28 regions
+    that queued new recruits between `auto_nr4_t4` and `orig_over_nr4_0252` (factors and owner unchanged) reach
+    their grown population exactly. Synthetic tests: `recruiting_takes_population_and_cancelling_gives_it_back`,
+    `the_recruitment_population_rules_are_signed_32_bit`.
+  - Found on the way (money, not ported here): the capture variants cancel the land queue with no refund
+    (`0x00B1A760(0)`, `[[region +0x178] +0x124]`) but each port's naval queue **with** the refund
+    (`0x00B1A760(1)` on slot +0x1E8; `0x00B5C0A0` credits item +0x20 as income category 3 to the queue's owner),
+    before the region changes hands. `battles::occupy` refunds nothing.
 - **Money arithmetic.** Charge and refund pass the faction economics' per-category converter (spending +0x42C,
   income +0x3F8; vtable +4). A new campaign (`ConstructNewFactionEconomics` `0x00B96100`) sets all 13 income and 12
   spending converters to the object at `0x01459050` (vtable `0x0137EA30`, +4 = `0x004A23F0`: returns its argument). The
@@ -1036,7 +1128,9 @@ faction and liberation target.
 - Tests: `the_recruitment_cost_is_units_7_scaled_by_the_cost_effects`,
   `recruiting_charges_the_entry_cost_and_cancelling_refunds_it`, `a_faction_in_debt_may_recruit`,
   `a_region_without_recruitment_points_still_queues`, `the_unit_cap_counts_the_factions_units_and_queued_items`,
-  `the_recruitment_rule_is_unsigned_only` (ntw_sim); `the_loader_takes_the_campaign_cost_from_units_7`,
+  `the_recruitment_rule_is_unsigned_only`,
+  `the_recruitable_list_flags_damaged_and_occupied_buildings_and_missing_technologies` (ntw_sim);
+  `the_loader_takes_the_campaign_cost_from_units_7`,
   `recruiting_from_a_loaded_campaign_charges_units_7_with_the_region_effects` (ntw_campaign).
 - Not traced here: the AI's own cost estimate (`ntw_ai` prices recruits from #4 with its handicap; §6).
 
@@ -1050,8 +1144,24 @@ faction and liberation target.
      `0x00B1A820(item, 1)`, the cancel path, so each is refunded its stored cost (CONFIRMED, §Recruitment cost and
      money).
   2. Capacity = method 1 of the manager: land `0x00B61F30` = recruitment points, naval `0x00B61EE0`.
-  3. In queue order, each item that is not blocked (`0x00B5AD90`: its entry in the recruitable list is flagged) and
-     has its flag +0x54 set takes one turn (item method +0x18); the loop stops once `capacity` items have.
+  3. In queue order, each item that is not blocked and has its flag +0x54 set takes one turn (item method +0x18).
+     The loop stops once `capacity` items have. A blocked item takes no turn and uses no capacity, so the items
+     behind it train instead. It is not removed or refunded.
+     - Blocked (`0x00B5AD90`, CONFIRMED, worker recruit-cost 2026-10-10): the item's unit has no entry in the
+       queue's **unpriced** list (vtable +0x14: land `0x00B61E10` = a copy of region +0x1A8; naval `0x00B61DA0` =
+       the port building's list), or that entry has any flag.
+     - Only the building flags 8 / 0x10 / 0x20 / 0x80 can be set there (§Recruitment cost and money). The cost,
+       population, cap and full-queue flags are added only when the list is priced (vtable +0xC), so they never hold
+       back an item that is already queued.
+     - Ported in `region_turn` (test `a_flagged_item_is_held_back_without_taking_a_recruitment_point`). The step
+       reads the list the turn start's removal read: the cache is not rebuilt inside `0x00B71FB0`.
+     - INFERRED: that this is the list from before the turn's construction step. Construction (`0x00A78670`, from
+       `0x00AB3DA0`) is not in the region update. A slot whose construction finishes rebuilds the cache
+       (`0x00A682F0` from `0x00B78800`). Whether that runs before or after the queue step is not traced; the model
+       runs construction between the removal and the countdown.
+     - `RebuildRegionRecruitablesAndEffects` `0x00A6AE40` also reads the settlement container's two extra slots
+       (+0x20 / +0x24, possibly the walls and the road). world.rs says the walls slot is not read (BACKLOG trace
+       line).
   4. Finished items are trained.
   - Flag +0x54 is set on every queued item by `0x00A78620`, called from the faction's round-end economy
     `0x008BC650`. So an item counts down only after a round end has passed since it was queued.

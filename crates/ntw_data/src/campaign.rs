@@ -286,6 +286,23 @@ db_record! {
 }
 
 db_record! {
+    /// `units_to_gov_type_permissions` (`ssss`, 51 rows): a unit's status under a government type. The exe
+    /// links each `enabled` row's government type to the unit (`UNIT_RECORD` +0xDC, in `0x00E91320`; the status
+    /// strings `0x00ED5710`: enabled 0, destroyed 1, converted_to 2, non_reinforceable 3), and a unit with any
+    /// such government type is recruitable only under one of them (`0x00EA9810`, CONFIRMED).
+    pub struct UnitGovernmentPermission in "units_to_gov_type_permissions", key = unit {
+        /// #0 H: unit key.
+        unit: String,
+        /// #1 H: `government_types` key.
+        government: String,
+        /// #2: the row's id (e.g. "63").
+        id: String,
+        /// #3 H: status: `enabled`, `destroyed`, `converted_to` or `non_reinforceable`.
+        status: String,
+    }
+}
+
+db_record! {
     /// `campaign_map_slots` (`sssib`, 145 rows): resource slots on the map.
     pub struct MapSlotRecord in "campaign_map_slots", key = key {
         /// #0 H: slot key, the ESF `REGION_SLOT` #3 string, e.g. `gold:eur_austria:rauris`.
@@ -815,6 +832,8 @@ pub struct CampaignTables {
     pub agents: Table<AgentRecord>,
     /// `units_to_exclusive_faction_permissions`.
     pub unit_factions: Table<UnitFactionPermission>,
+    /// `units_to_gov_type_permissions`.
+    pub unit_governments: Table<UnitGovernmentPermission>,
     /// `campaign_map_slots`.
     pub map_slots: Table<MapSlotRecord>,
     /// `campaign_map_towns_and_ports`.

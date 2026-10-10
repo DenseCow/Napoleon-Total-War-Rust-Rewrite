@@ -216,12 +216,13 @@ impl CampaignModel {
         }
     }
 
-    /// The hard-coded extra of `0x00BB3490` (CONFIRMED): in the campaign `spa_napoleon` the faction
+    /// The hard-coded extra of `0x00BB3490` (CONFIRMED; the campaign's [`home_trade_faction`](super::features::CampaignFeatures::home_trade_faction)): in `spa_napoleon` the faction
     /// `spa_france` also earns `Σ domestic volume × price` over its domestic routes (those whose last
     /// waypoint is in the faction's capital: `0x00A8B5A0`, region == faction `+0x72C`) minus
     /// `Σ volume × price` over its international routes. 0 for every other faction.
     pub fn trade_home_value(&self, faction: FactionId) -> i32 {
-        if self.rules.campaign != "spa_napoleon" || self.world.factions.get(&faction).is_none_or(|f| f.key != "spa_france") {
+        let Some(home) = self.rules.features.home_trade_faction.as_deref() else { return 0 };
+        if self.world.factions.get(&faction).is_none_or(|f| f.key != home) {
             return 0;
         }
         let value = |volumes: &[u32]| -> i64 {
@@ -302,7 +303,7 @@ impl CampaignModel {
     /// flag +0x1F4 that `0x00BC7890` counts; the shipped trade ships are exactly that category).
     pub fn trade_ships(&self, force: super::ids::ForceId) -> u32 {
         self.world.forces.get(&force).map_or(0, |f| {
-            f.units.iter().filter(|u| self.rules.units.get(&u.unit_key).is_some_and(|r| r.category == "naval_merchant")).count() as u32
+            f.units.iter().filter(|u| self.rules.units.get(&u.unit_key).is_some_and(|r| crate::unit_kind::category(&r.category) == crate::unit_kind::Category::NavalMerchant)).count() as u32
         })
     }
 
@@ -314,10 +315,10 @@ impl CampaignModel {
             return None;
         }
         let mut out = Vec::new();
-        // In `spa_napoleon` the volume is `trunc((1 + e/100) × v)` with e the faction's
+        // With the campaign's `node_supply_mod` (`spa_napoleon`) the volume is `trunc((1 + e/100) × v)` with e the faction's
         // `trade_node_supply_mod` (0x00BC9930, CONFIRMED: basic id 0x95 of faction +0x6FC; the vanilla spa
         // saves agree, spa_britain's 37 with +6 → 39).
-        let spa_mod = (self.rules.campaign == "spa_napoleon")
+        let supply_mod = self.rules.features.node_supply_mod
             .then(|| super::effects::Effects::faction_sum(self, faction).get("trade_node_supply_mod"));
         for f in self.world.forces.values().filter(|f| f.faction == faction && f.is_navy) {
             let Some((x, y)) = self.force_position(f.id).map(|(x, y)| (x.to_f32(), y.to_f32())) else { continue };
@@ -327,7 +328,7 @@ impl CampaignModel {
             };
             let Some(info) = &n.info else { continue };
             let mut v = node_volume(info, self.trade_ships(f.id));
-            if let Some(e) = spa_mod {
+            if let Some(e) = supply_mod {
                 v = ((e * 0.01 + 1.0) * v as f32) as u32;
             }
             if v > 0 {
@@ -545,12 +546,12 @@ impl CampaignModel {
     /// have one theatre per map: INFERRED), S = Σ region production (not modelled: 0) + Σ the factions'
     /// trade fleet supply; `price = max(1, round(D × f / (background_commodity_supply + S)))`; the trend
     /// compares the price with #5 (> 1.2× → 0, > 1.1× → 1, < 0.8× → 5, < 0.9× → 4, else 2, or 3 when
-    /// lower); then #5 ← #6 and #6 ← price. In `spa_napoleon` the prices stay (the exe skips the
+    /// lower); then #5 ← #6 and #6 ← price. With the campaign's `fixed_commodity_prices` (`spa_napoleon`) the prices stay (the exe skips the
     /// update there once the factors are set). The factors' first-time setup (`f = (bg + S) × f / D`)
     /// is not needed: every file holds set factors.
     pub fn update_commodity_prices(&mut self) {
         let n = self.world.commodity_prices.len();
-        if n == 0 || self.world.commodity_market.factors.len() != n || self.rules.campaign == "spa_napoleon" {
+        if n == 0 || self.world.commodity_market.factors.len() != n || self.rules.features.fixed_commodity_prices {
             return;
         }
         let mut d = vec![0u64; n];

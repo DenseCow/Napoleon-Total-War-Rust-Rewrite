@@ -56,8 +56,9 @@ pub struct PathGrid {
     pub kind: Vec<u8>,
     /// True if a road spline crosses the cell.
     pub road: Vec<bool>,
-    /// Index into [`PathGrid::region_keys`] per cell (`u16::MAX` = none).
-    pub region: Vec<u16>,
+    /// Index into [`PathGrid::region_keys`] per cell (`u32::MAX` = none). `u32` so a map may have
+    /// any number of regions (the original's `pathfinding.esf` stores 10-bit ids per polygon).
+    pub region: Vec<u32>,
     /// Region keys (e.g. `eur_france`) indexed by [`PathGrid::region`].
     pub region_keys: Vec<String>,
     /// The original's polygon map (`pathfinding.esf`): when present, paths come from the
@@ -143,7 +144,7 @@ impl PathGrid {
             height,
             kind: vec![CellKind::Blocked as u8; n],
             road: vec![false; n],
-            region: vec![u16::MAX; n],
+            region: vec![u32::MAX; n],
             region_keys: Vec::new(),
             poly: None,
             harbours: Vec::new(),
@@ -337,6 +338,16 @@ mod tests {
             g.kind[i] = if c == 5 && r <= 3 { CellKind::Sea as u8 } else { CellKind::Land as u8 };
         }
         g
+    }
+
+    #[test]
+    fn region_indices_past_u16() {
+        // The per-cell region index was a u16 (wrapping past 65,535 regions).
+        let mut g = grid();
+        g.region_keys = (0..70_001).map(|i| format!("r{i}")).collect();
+        g.region[0] = 70_000;
+        assert_eq!(g.region_at(0.5, 0.5), Some("r70000"));
+        assert_eq!(g.region_at(1.5, 0.5), None);
     }
 
     #[test]

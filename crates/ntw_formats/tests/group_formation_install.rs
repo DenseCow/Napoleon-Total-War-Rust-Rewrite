@@ -4,8 +4,13 @@
 //! ```
 use std::path::PathBuf;
 
-use ntw_formats::group_formation::{self, GroupUnit, PURPOSE_DEPLOYMENT, Placement, Role, class_id};
+use ntw_formats::group_formation::{self, GroupUnit, PURPOSE_DEPLOYMENT, Placement, Role};
 use ntw_formats::pack::Vfs;
+
+/// The exe's class code of a class key.
+fn class_id(key: &str) -> u32 {
+    u32::from(ntw_sim::unit_kind::class_code(key))
+}
 
 const DEFAULT_DATA_DIR: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 

@@ -57,7 +57,8 @@ fn main() {
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).unwrap();
     let loc = Localisation::from_vfs(&vfs).unwrap();
     let facts = FrontEndFacts { game_version: "1.3.0".into(), ..Default::default() };
-    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0)).unwrap();
+    let limits = ntw_data::load_game_limits(&vfs, &mut Vec::new()).unwrap();
+    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0), limits).unwrap();
     battle::install(&host, ScriptSource::from_install(&dir).unwrap()).unwrap();
     let phase = match args.iter().position(|a| a == "--phase").and_then(|i| args.get(i + 1)).map(String::as_str) {
         Some("conflict") => HudPhase::Conflict,

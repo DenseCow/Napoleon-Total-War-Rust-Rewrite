@@ -163,26 +163,6 @@ pub fn read(bytes: &[u8]) -> Result<Vec<GroupFormation>, GroupFormationError> {
 // ---------------------------------------------------------------------------------------------
 // Typed templates and the default-deployment rules (UNITS_TERRAIN_FIDELITY.md §5.2).
 
-/// The unit classes, by id: the exe maps `unit_stats_land` #3 `class` to these numbers
-/// alphabetically (CONFIRMED, `0x00EED3E0`; unknown names → 0). Template class lists use the ids;
-/// id 46 (one past the list) appears with tiny weights and matches no unit (INFERRED: a filler).
-pub const UNIT_CLASSES: [&str; 46] = [
-    "artillery_fixed", "artillery_foot", "artillery_horse", "cavalry_camels", "cavalry_heavy",
-    "cavalry_irregular", "cavalry_lancers", "cavalry_light", "cavalry_missile", "cavalry_standard",
-    "dragoons", "elephants", "general", "infantry_berserker", "infantry_elite", "infantry_grenadiers",
-    "infantry_irregulars", "infantry_light", "infantry_line", "infantry_melee", "infantry_militia",
-    "infantry_mob", "infantry_skirmishers", "naval_admiral", "naval_bomb_ketch", "naval_brig",
-    "naval_dhow", "naval_fifth_rate", "naval_first_rate", "naval_fourth_rate", "naval_galleon",
-    "naval_heavy_galley", "naval_indiaman", "naval_light_galley", "naval_lugger", "naval_medium_galley",
-    "naval_over_first_rate", "naval_razee", "naval_rocket_ship", "naval_second_rate", "naval_sixth_rate",
-    "naval_sloop", "naval_steam_ship", "naval_third_rate", "naval_xebec", "naval_transport",
-];
-
-/// A class name's id (the exe's mapping: unknown names are 0).
-pub fn class_id(name: &str) -> u32 {
-    UNIT_CLASSES.iter().position(|c| c.eq_ignore_ascii_case(name)).unwrap_or(0) as u32
-}
-
 /// Template purpose bits (header word 1). The exe tests `purposes & wanted == wanted`, and a
 /// wanted value with bit 0x10 accepts any template (CONFIRMED, `0x006EFD50`). Bit 2 is what the
 /// default deployment asks for (CONFIRMED caller `0x005BA640`); the name of bit 1 is INFERRED
@@ -304,7 +284,10 @@ impl Template {
     }
 }
 
-/// One unit to be laid out: its class id, role and footprint (width across, depth).
+/// One unit to be laid out: its class id, role and footprint (width across, depth). The class id is
+/// the exe's class code (`0x00EED3E0`, `ntw_sim::unit_kind::class_code`), which the templates' class
+/// lists use; their id 46 (one past the exe's list) appears with tiny weights and matches no unit
+/// (INFERRED: a filler).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GroupUnit {
     pub class: u32,
@@ -625,27 +608,23 @@ mod tests {
         }
     }
 
-    fn unit(class: &str, role: Role, width: f32, depth: f32) -> GroupUnit {
-        GroupUnit { class: class_id(class), role, width, depth }
-    }
+    /// Class codes of the exe's enum (`ntw_sim::unit_kind::class_code`).
+    const ARTILLERY_FOOT: u32 = 1;
+    const GENERAL: u32 = 12;
+    const INFANTRY_LINE: u32 = 18;
 
-    #[test]
-    fn class_ids_follow_the_exe_order() {
-        assert_eq!(class_id("artillery_foot"), 1);
-        assert_eq!(class_id("general"), 12);
-        assert_eq!(class_id("infantry_line"), 18);
-        assert_eq!(class_id("naval_transport"), 45);
-        assert_eq!(class_id("no_such_class"), 0);
+    fn unit(class: u32, role: Role, width: f32, depth: f32) -> GroupUnit {
+        GroupUnit { class, role, width, depth }
     }
 
     #[test]
     fn assignment_and_layout() {
         let t = template();
         let units = [
-            unit("infantry_line", Role::Infantry, 40.0, 6.0),
-            unit("artillery_foot", Role::Artillery, 20.0, 10.0),
-            unit("infantry_line", Role::Infantry, 40.0, 6.0),
-            unit("general", Role::Cavalry, 10.0, 8.0),
+            unit(INFANTRY_LINE, Role::Infantry, 40.0, 6.0),
+            unit(ARTILLERY_FOOT, Role::Artillery, 20.0, 10.0),
+            unit(INFANTRY_LINE, Role::Infantry, 40.0, 6.0),
+            unit(GENERAL, Role::Cavalry, 10.0, 8.0),
         ];
         let (score, a) = assign(&t, &units).unwrap();
         assert_eq!(a, [0, 1, 0, 2]);
@@ -665,7 +644,7 @@ mod tests {
     fn full_and_unwanted_elements_do_not_bid() {
         let mut t = template();
         t.elements[1].max_units = 1;
-        let units = [unit("artillery_foot", Role::Artillery, 20.0, 10.0), unit("artillery_foot", Role::Artillery, 20.0, 10.0)];
+        let units = [unit(ARTILLERY_FOOT, Role::Artillery, 20.0, 10.0), unit(ARTILLERY_FOOT, Role::Artillery, 20.0, 10.0)];
         // The second gun has nowhere to go: the line wants infantry only and has no minimum.
         assert!(assign(&t, &units).is_none());
         // With a minimum on the line it takes the gun at weight 0.001.
@@ -682,7 +661,7 @@ mod tests {
         let mut cav = template();
         cav.name = "cav".into();
         cav.min_percent = [0, 40, 0];
-        let units = [unit("infantry_line", Role::Infantry, 40.0, 6.0), unit("artillery_foot", Role::Artillery, 20.0, 10.0)];
+        let units = [unit(INFANTRY_LINE, Role::Infantry, 40.0, 6.0), unit(ARTILLERY_FOOT, Role::Artillery, 20.0, 10.0)];
         let ts = [template(), low.clone(), cav];
         assert_eq!(choose(&ts, &units, "france", PURPOSE_DEPLOYMENT), 0);
         assert_eq!(choose(&ts[1..], &units, "france", PURPOSE_DEPLOYMENT), 0, "only 'low' passes");

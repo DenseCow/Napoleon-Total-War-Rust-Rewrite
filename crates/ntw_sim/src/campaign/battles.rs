@@ -245,6 +245,9 @@ impl CampaignModel {
         r.owner = faction;
         // The queues are cleared (CONFIRMED: the capture variants 0x00B58560 / 0x00B58890 / 0x00B58C00 empty the
         // region's and the ports' recruitment queues, 0x00B1A760, and every slot's construction, 0x00A6CBE0).
+        // Each item leaves through the cancel path `0x00B1A820`, which gives the region its population back
+        // (`0x00A61AA0`, [`super::population::RecruitmentPopulation::credited`]).
+        r.population = super::population::RecruitmentPopulation::of(&self.rules).credited(r.population, r.recruitment_queue.len());
         r.recruitment_queue.clear();
         r.construction.clear();
         r.garrison = None;

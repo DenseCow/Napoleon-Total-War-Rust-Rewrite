@@ -9,7 +9,7 @@ use super::*;
 /// `building_description_texts_*_description_<key>`, CONFIRMED keys); the others UNKNOWN).
 pub fn building_variants(source: &crate::ScriptSource) -> std::collections::BTreeMap<(String, String), (String, String)> {
     let mut out = std::collections::BTreeMap::new();
-    for r in source.table_rows(&ntw_formats::db_folder::tables::BUILDING_CULTURE_VARIANTS).unwrap_or_default() {
+    for r in source.table_rows_or_empty(&ntw_formats::db_folder::tables::BUILDING_CULTURE_VARIANTS).iter() {
         let s = |i: usize| r.get(i).and_then(|v| v.as_str()).unwrap_or("").to_owned();
         let icon = if s(6).is_empty() { s(3) } else { s(6) };
         out.insert((s(0), s(1)), (icon, s(5)));

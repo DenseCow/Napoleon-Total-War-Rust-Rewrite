@@ -1022,3 +1022,23 @@ fn sight_state_is_written() {
     assert!(back.model.world.character_details[&general].hidden);
     assert_eq!(back.model.world.faction_details[&france].exposed, vec![general]);
 }
+
+/// The ESF writer's header season name follows the calendar (`SAVE_GAME_HEADER` #4; review: it kept
+/// the start position's): a Europe campaign saved in June says "Summer" on the load list.
+#[test]
+fn the_header_season_follows_the_calendar() {
+    let dir = data_dir();
+    if !dir.is_dir() {
+        println!("SKIPPED: no install");
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).unwrap();
+    let bytes = std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap();
+    let esf = EsfFile::from_bytes(&bytes).unwrap();
+    let mut l = ntw_campaign::read_esf(&esf, &db).unwrap();
+    assert_eq!(l.info.header.season_name, "Winter");
+    l.model.calendar.date.set_quarter(1805, 5 * 4);
+    let out = save::write_save(&esf, &l.model, "france", 1).unwrap();
+    let info = ntw_campaign::read_info(&out.to_bytes().unwrap()).unwrap();
+    assert_eq!((info.header.season_name.as_str(), info.header.date.map(|d| d.month)), ("Summer", Some(5)));
+}

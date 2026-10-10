@@ -45,7 +45,8 @@ fn main() {
     let loc = Localisation::from_vfs(&vfs).unwrap();
     let original = std::env::var_os("APPDATA").map(|a| std::path::PathBuf::from(a).join("The Creative Assembly").join("Napoleon"));
     let facts = FrontEndFacts { campaign_saves_exist: true, game_version: "1.3.0".into(), original_user_dir: original, user_dir: None, nap_unlock: 1, ..Default::default() };
-    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0)).unwrap();
+    let limits = ntw_data::load_game_limits(&vfs, &mut Vec::new()).unwrap();
+    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0), limits).unwrap();
     let root = host.load_root_layout("data/ui/frontend ui/layout").unwrap();
     for l in host.take_log() {
         println!("  {l}");

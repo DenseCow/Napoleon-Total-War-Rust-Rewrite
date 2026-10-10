@@ -36,6 +36,7 @@ pub mod effects;
 pub mod characters;
 pub mod embark;
 pub mod family;
+pub mod features;
 pub mod names;
 pub mod negotiation;
 pub mod movers;

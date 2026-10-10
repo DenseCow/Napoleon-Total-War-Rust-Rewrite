@@ -31,7 +31,10 @@
 //! straight from the setting, which is the same value for every unit. What *sets* that per-unit
 //! size class byte, and therefore the minimum modes 2 and 4 use, is still UNKNOWN.
 
-/// The four step sizes, in index order (`0x01392770`, CONFIRMED). The names (small / medium /
+use crate::limits::GameLimits;
+
+/// The original's four step sizes, in index order (`0x01392770`, CONFIRMED): the default of
+/// [`GameLimits::unit_scales`], which a mod may change or extend. The names (small / medium /
 /// large / ultra) are INFERRED; index 3 is the "no scaling" step.
 pub const STEPS: [f32; 4] = [0.25, 0.5, 0.75, 1.0];
 
@@ -44,26 +47,19 @@ pub const STEPS: [f32; 4] = [0.25, 0.5, 0.75, 1.0];
 pub const PREFERENCE_DEFAULT: i32 = 2;
 
 /// The lowest and highest scale the exe accepts (`0x004A6540`): below `MIN` and above `MAX` the
-/// value is replaced by the bound, so a stray setting can never produce 0 or > 1 men.
+/// value is replaced by the bound, so a stray setting can never produce 0 or > 1 men. Ours keeps
+/// `MIN` and raises the top to a modded step above 1.0 ([`GameLimits::max_scale`]); without one
+/// the top is the original's `MAX`.
 pub const MIN: f32 = 0.1;
 /// See [`MIN`].
 pub const MAX: f32 = 1.0;
 
-/// The scale for a step index (`0x00DAFBB0`). An index outside the table is `ULTRA`
-/// (the float conversion of entry `i` of the table at `DAT_01392770` reads past the four entries),
-/// which the clamp then keeps at 1.0.
-pub fn step(index: i32) -> f32 {
-    match index {
-        0..=3 => STEPS[index as usize],
-        _ => *STEPS.last().expect("STEPS is not empty"),
-    }
-}
-
 /// The scale a battle uses, the way `0x004A6540` returns it: `if 0.1 <= s { if 1.0 <= s { 1.0 } else
-/// { s } } else { 0.1 }` — i.e. a plain clamp to `[MIN, MAX]` (CONFIRMED).
-pub fn clamp(scale: f32) -> f32 {
-    if scale >= MAX {
-        MAX
+/// { s } } else { 0.1 }` — i.e. a plain clamp to `[MIN, top]` (CONFIRMED with `top` = [`MAX`]; `top`
+/// is [`GameLimits::max_scale`], which is `MAX` unless a mod adds a larger step).
+pub fn clamp(scale: f32, top: f32) -> f32 {
+    if scale >= top {
+        top
     } else if scale >= MIN {
         scale
     } else {
@@ -85,38 +81,45 @@ pub fn scaled_men(card_men: i32, scale: f32) -> u32 {
 /// The scale a battle takes from the `gfx_unit_scale` **preference index** it was handed — the whole
 /// of the decision, in one tested place.
 ///
-/// `None` is the "no preferences file" case (no `gfx_unit_scale` value to hand), which keeps the model's 1.0 rather than guessing the exe's default; an index outside the
-/// four steps reads past the table and lands on 1.0 through the clamp, exactly as in the exe.
-pub fn scale_for_setting(setting: Option<i32>) -> f32 {
-    setting.map_or(MAX, |i| clamp(step(i)))
+/// `None` is the "no preferences file" case (no `gfx_unit_scale` value to hand), which keeps the
+/// model's 1.0 rather than guessing the exe's default; an index outside the steps takes the last
+/// step (`0x00DAFBB0` reads past its four entries and lands on 1.0 through the clamp). The steps
+/// are `limits.unit_scales` (the original's [`STEPS`] unless a mod changes them).
+pub fn scale_for_setting(setting: Option<i32>, limits: &GameLimits) -> f32 {
+    setting.map_or(MAX, |i| clamp(limits.unit_scale(i), limits.max_scale()))
 }
 
 /// [`scale_for_setting`] applied to a card's men: the count the unit is actually built with. The
 /// one call the display layer needs, so the preference index, the step table, the clamp and the
 /// truncation cannot drift apart between crates.
-pub fn men_for_setting(card_men: i32, setting: Option<i32>) -> u32 {
-    scaled_men(card_men, scale_for_setting(setting))
+pub fn men_for_setting(card_men: i32, setting: Option<i32>, limits: &GameLimits) -> u32 {
+    scaled_men(card_men, scale_for_setting(setting, limits))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The original's limits.
+    fn l() -> GameLimits {
+        GameLimits::default()
+    }
+
     /// The step table and its clamp (`0x01392770`, `0x004A6540`).
     #[test]
     fn steps_and_clamp() {
         assert_eq!(STEPS, [0.25, 0.5, 0.75, 1.0]);
-        assert_eq!((0..4).map(step).collect::<Vec<_>>(), vec![0.25, 0.5, 0.75, 1.0]);
+        assert_eq!((0..4).map(|i| l().unit_scale(i)).collect::<Vec<_>>(), vec![0.25, 0.5, 0.75, 1.0]);
         // An out-of-range index reads past the table; the clamp keeps the result at 1.0.
-        assert_eq!(clamp(step(4)), 1.0);
-        assert_eq!(clamp(step(-1)), 1.0);
+        assert_eq!(clamp(l().unit_scale(4), MAX), 1.0);
+        assert_eq!(clamp(l().unit_scale(-1), MAX), 1.0);
         // The clamp: below 0.1 -> 0.1, above 1.0 -> 1.0, inside unchanged.
-        assert_eq!(clamp(0.0), 0.1);
-        assert_eq!(clamp(0.05), 0.1);
-        assert_eq!(clamp(0.1), 0.1);
-        assert_eq!(clamp(0.25), 0.25);
-        assert_eq!(clamp(1.0), 1.0);
-        assert_eq!(clamp(2.0), 1.0);
+        assert_eq!(clamp(0.0, MAX), 0.1);
+        assert_eq!(clamp(0.05, MAX), 0.1);
+        assert_eq!(clamp(0.1, MAX), 0.1);
+        assert_eq!(clamp(0.25, MAX), 0.25);
+        assert_eq!(clamp(1.0, MAX), 1.0);
+        assert_eq!(clamp(2.0, MAX), 1.0);
     }
 
     /// `CVTDQ2PS / MULSS / CVTTSS2SI` at `0x004A67DE`: the men are **truncated**, not rounded, and
@@ -140,7 +143,7 @@ mod tests {
     #[test]
     fn the_four_settings_scale_the_men() {
         for (setting, factor, men) in [(0, 0.25, 40), (1, 0.5, 80), (2, 0.75, 120), (3, 1.0, 160)] {
-            let scale = clamp(step(setting));
+            let scale = clamp(l().unit_scale(setting), MAX);
             assert_eq!(scale, factor, "setting {setting}");
             assert_eq!(scaled_men(160, scale), men, "setting {setting}");
         }
@@ -151,10 +154,10 @@ mod tests {
     #[test]
     fn default_setting_is_three_quarters() {
         assert_eq!(PREFERENCE_DEFAULT, 2);
-        assert_eq!(step(PREFERENCE_DEFAULT), 0.75);
-        assert_eq!(clamp(step(PREFERENCE_DEFAULT)), 0.75);
-        assert_eq!(scaled_men(160, step(PREFERENCE_DEFAULT)), 120);
-        assert_eq!(scaled_men(200, step(PREFERENCE_DEFAULT)), 150);
+        assert_eq!(l().unit_scale(PREFERENCE_DEFAULT), 0.75);
+        assert_eq!(clamp(l().unit_scale(PREFERENCE_DEFAULT), MAX), 0.75);
+        assert_eq!(scaled_men(160, l().unit_scale(PREFERENCE_DEFAULT)), 120);
+        assert_eq!(scaled_men(200, l().unit_scale(PREFERENCE_DEFAULT)), 150);
         // The exe's conversion truncates: a 7-man card at 0.75 is 5 (7 × 0.75 = 5.25), never 5.25
         // and never 6, and 158 men are 118 (118.5), not 119.
         assert_eq!(scaled_men(7, 0.75), 5);
@@ -173,27 +176,27 @@ mod tests {
     #[test]
     fn the_preference_index_becomes_the_scale_and_then_the_men() {
         // No preferences file -> the model's 1.0, not a guess at the exe's default.
-        assert_eq!(scale_for_setting(None), 1.0);
-        assert_eq!(men_for_setting(160, None), 160);
+        assert_eq!(scale_for_setting(None, &l()), 1.0);
+        assert_eq!(men_for_setting(160, None, &l()), 160);
         // The exe's default, `gfx_unit_scale 2`, really is 0.75 and really thins the men.
-        assert_eq!(scale_for_setting(Some(PREFERENCE_DEFAULT)), 0.75);
-        assert_eq!(men_for_setting(160, Some(PREFERENCE_DEFAULT)), 120);
+        assert_eq!(scale_for_setting(Some(PREFERENCE_DEFAULT), &l()), 0.75);
+        assert_eq!(men_for_setting(160, Some(PREFERENCE_DEFAULT), &l()), 120);
         // The truncation survives the whole path: 7 * 0.75 = 5.25 -> 5, 158 -> 118.5 -> 118.
-        assert_eq!(men_for_setting(7, Some(PREFERENCE_DEFAULT)), 5);
-        assert_eq!(men_for_setting(158, Some(PREFERENCE_DEFAULT)), 118);
+        assert_eq!(men_for_setting(7, Some(PREFERENCE_DEFAULT), &l()), 5);
+        assert_eq!(men_for_setting(158, Some(PREFERENCE_DEFAULT), &l()), 118);
         // All four steps, and an index past the table landing on 1.0 through the clamp.
-        assert_eq!([0, 1, 2, 3].map(|i| men_for_setting(160, Some(i))), [40, 80, 120, 160]);
-        assert_eq!(men_for_setting(160, Some(9)), 160);
+        assert_eq!([0, 1, 2, 3].map(|i| men_for_setting(160, Some(i), &l())), [40, 80, 120, 160]);
+        assert_eq!(men_for_setting(160, Some(9), &l()), 160);
         // It agrees with `Battle::men_at_scale`, which is the other way in.
         let b = crate::battle::model::Battle::new(1, Default::default(), Default::default());
         for i in 0..4 {
             let mut b = b.clone();
-            let scale = b.set_unit_scale_setting(Some(i));
-            assert_eq!(scale, scale_for_setting(Some(i)), "step {i}");
-            assert_eq!(b.men_at_scale(160), men_for_setting(160, Some(i)), "step {i}");
+            let scale = b.set_unit_scale_setting(Some(i), &Default::default());
+            assert_eq!(scale, scale_for_setting(Some(i), &l()), "step {i}");
+            assert_eq!(b.men_at_scale(160), men_for_setting(160, Some(i), &l()), "step {i}");
         }
         let mut none = b.clone();
-        assert_eq!(none.set_unit_scale_setting(None), 1.0);
+        assert_eq!(none.set_unit_scale_setting(None, &Default::default()), 1.0);
         assert_eq!(none.men_at_scale(160), 160);
     }
 
@@ -213,7 +216,7 @@ mod tests {
         // differs only in the setting — that is the whole claim being tested here.
         let build = |setting: Option<i32>| {
             let mut b = Battle::new(4242, Default::default(), Default::default());
-            let applied = b.set_unit_scale_setting(setting);
+            let applied = b.set_unit_scale_setting(setting, &Default::default());
             // Two sides' line battalions, plus a 7-man card for the truncation.
             for (id, side, card_men) in [(1u32, 0u8, 160i32), (2, 1, 160), (3, 0, 7)] {
                 let men = b.men_at_scale(card_men);

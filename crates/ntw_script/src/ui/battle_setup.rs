@@ -131,19 +131,22 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Result<(
     })?)?;
 
     // ArmyFundsForSize(size 0..2, is_naval) (`0x0046A4F0` → `0x004A2910`, CONFIRMED tables
-    // `0x0131A190` / `0x0131A19C`): land 5000 / 10000 / 14000, sea 5000 / 14000 / 24000.
-    t.set("ArmyFundsForSize", lua.create_function(|_, (size, naval): (Option<i64>, Option<bool>)| Ok(army_funds(size.unwrap_or(0), naval.unwrap_or(false))))?)?;
+    // `0x0131A190` / `0x0131A19C`): land 5000 / 10000 / 14000, sea 5000 / 14000 / 24000 (the
+    // moddable `GameLimits::custom_battle_funds`).
+    let i = inner.clone();
+    t.set("ArmyFundsForSize", lua.create_function(move |_, (size, naval): (Option<i64>, Option<bool>)| {
+        Ok(i.limits.custom_battle_funds(size.unwrap_or(0), naval.unwrap_or(false)))
+    })?)?;
     // UnitScaleFactor([index]) → scale, index (`0x004795F0`, CONFIRMED table `0x01392770`:
     // 0.25, 0.5, 0.75, 1.0). Without an index the current setting: the preference read is the
     // unit scale (INFERRED: our preferences key `gfx_unit_scale`, 0..3).
     let i = inner.clone();
-    t.set("UnitScaleFactor", lua.create_function(move |_, index: Option<i64>| {
-        let idx = index.or_else(|| i.prefs.borrow().get("gfx_unit_scale").and_then(|v| v.trim().parse().ok())).unwrap_or(3).clamp(0, 3) as usize;
-        Ok((UNIT_SCALES[idx], idx))
-    })?)?;
-    // MaxUnitsFromUnitScaleFactor(scale) → 20, the artillery-type limit for that scale
-    // (`0x00475800` → `0x00851550`, `0x00DACE60`, CONFIRMED: 6 / 8 / 10 / 20 by scale index).
-    t.set("MaxUnitsFromUnitScaleFactor", lua.create_function(|_, scale: Option<f64>| Ok(max_units(scale.unwrap_or(1.0) as f32)))?)?;
+    t.set("UnitScaleFactor", lua.create_function(move |_, index: Option<i64>| Ok(unit_scale_factor(&i, index)))?)?;
+    // MaxUnitsFromUnitScaleFactor(scale) → 20, the ships limit for that scale (`0x00475800` →
+    // `0x00851550`, `0x00DACE60`, CONFIRMED: 6 / 8 / 10 / 20 by scale index; the moddable
+    // `GameLimits::max_units`).
+    let i = inner.clone();
+    t.set("MaxUnitsFromUnitScaleFactor", lua.create_function(move |_, scale: Option<f64>| Ok(i.limits.max_units(scale.unwrap_or(1.0) as f32)))?)?;
     // BuildCpuName(id) → the random loc string `cpu_player` ("CPU %d") with the id
     // (`0x0046AFB0`, CONFIRMED).
     let i = inner.clone();
@@ -176,28 +179,26 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Result<(
     Ok(())
 }
 
-/// Unit scale factors by index (`0x01392770`, CONFIRMED).
-pub const UNIT_SCALES: [f32; 4] = [0.25, 0.5, 0.75, 1.0];
-
-/// See `ArmyFundsForSize`.
-pub fn army_funds(size: i64, naval: bool) -> i32 {
-    let i = size.clamp(0, 2) as usize;
-    if naval { [5000, 14000, 24000][i] } else { [5000, 10000, 14000][i] }
+/// `UnitScaleFactor([index])` (front end `0x004795F0`, campaign `0x009FAB10`): (scale, index) of
+/// unit-size step `index`, or of the `gfx_unit_scale` preference without one (the last step when
+/// it is not set), out of the moddable steps (`GameLimits::unit_scales`, the original's four
+/// `0x01392770`).
+pub(crate) fn unit_scale_factor(inner: &Inner, index: Option<i64>) -> (f32, usize) {
+    let idx = unit_scale_setting(inner, index);
+    // `idx` is inside the list (`unit_scale_setting` clamps it), so the conversion keeps it.
+    (inner.limits.unit_scale(i32::try_from(idx).unwrap_or(i32::MAX)), idx)
 }
 
-/// See `MaxUnitsFromUnitScaleFactor`: (20, limit by the first scale index not below `scale`).
-pub fn max_units(scale: f32) -> (i32, i32) {
-    let idx = UNIT_SCALES.iter().position(|s| scale <= *s).unwrap_or(3);
-    (20, [6, 8, 10, 20][idx])
+/// The unit-size index of `index`, or of the `gfx_unit_scale` preference without one, clamped
+/// into the moddable steps (`GameLimits::unit_scale_setting`): the one reading of the preference.
+pub(crate) fn unit_scale_setting(inner: &Inner, index: Option<i64>) -> usize {
+    let setting = index.or_else(|| inner.prefs.borrow().get("gfx_unit_scale").and_then(|v| v.trim().parse().ok()));
+    inner.limits.unit_scale_setting(setting)
 }
 
 /// The `factions` table, loaded once per source.
-fn factions_table(inner: &Inner) -> Option<std::sync::Arc<ntw_data::Table<ntw_data::FactionRecord>>> {
+pub(super) fn factions_table(inner: &Inner) -> Option<std::sync::Arc<ntw_data::Table<ntw_data::FactionRecord>>> {
     inner.source.typed_table::<ntw_data::FactionRecord>()
-}
-
-pub(super) fn factions(inner: &Inner) -> Option<Vec<ntw_data::FactionRecord>> {
-    factions_table(inner).map(|t| t.rows().to_vec())
 }
 
 /// A faction's custom-battle details table (`0x0045C010`: Key, Name, FlagPath, UniformColour,

@@ -79,7 +79,8 @@ pub struct UnitAutoresolve {
     /// `unit_stats_land` morale (col 42): the rout point of the pair query uses it.
     pub morale: f32,
     /// The unit category code of `units` #2 (compare chain `0x00EED2B0`, CONFIRMED): 0 cavalry,
-    /// 1 artillery, 2 infantry, 3 dragoons, 4 elephants, 5 camels, 6 anything else.
+    /// 1 artillery (and any key the original does not know), 2 infantry, 3 dragoons, 4 elephants, 5 camels,
+    /// 6 the naval ones ([`crate::unit_kind::category`]).
     pub category: u8,
 }
 
@@ -203,6 +204,9 @@ pub struct HistoricalCandidate {
 /// All game data the campaign rules use. See the module docs.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CampaignRules {
+    /// The gameplay caps a mod may change ([`crate::limits`]); a new campaign takes its units per
+    /// army / navy from them ([`ForceCaps::new_campaign`]).
+    pub limits: crate::limits::GameLimits,
     /// `campaign_variables`, with the campaign's `campaigns_campaign_variables_junctions`
     /// overrides already applied.
     pub variables: BTreeMap<String, f32>,
@@ -237,13 +241,17 @@ pub struct CampaignRules {
     /// `units_to_exclusive_faction_permissions`: unit → factions allowed (only units that
     /// have rows are restricted).
     pub unit_factions: BTreeMap<String, Vec<String>>,
+    /// `units_to_gov_type_permissions`: unit → the government types its `enabled` rows name (`UNIT_RECORD`
+    /// +0xDC). A unit listed here is recruitable only under one of them ([`Self::government_may_recruit`]).
+    pub unit_governments: BTreeMap<String, Vec<String>>,
     /// `factions` #3 category (`playable`, `minor`, `non-expansionist`, `rebel`).
     pub faction_categories: BTreeMap<String, String>,
-    /// The campaign key (`campaigns` row) the rules were built for: the exe hard-codes a few rules by
-    /// campaign (e.g. `spa_napoleon` trade, [`CampaignModel::trade_home_value`]).
-    ///
-    /// [`CampaignModel::trade_home_value`]: super::CampaignModel::trade_home_value
+    /// The campaign key (`campaigns` row) the rules were built for. The rules never switch on it: the
+    /// rules the exe hard-codes by campaign are in [`Self::features`].
     pub campaign: String,
+    /// The campaign's rule switches (the exe's `spa_napoleon` / `mp_eur_napoleon` rules), filled by the
+    /// campaign's source.
+    pub features: super::features::CampaignFeatures,
     /// `trade_nodes` rows by node key: (commodity key, base volume, per extra ship, cap).
     pub trade_nodes: BTreeMap<String, (String, i32, f32, f32)>,
     /// `diplomatic_relations_religion`: (religion, other religion) → value.
@@ -325,9 +333,56 @@ impl TaxClass {
 /// `taxes_levels` and the level of every governorship in the shipped start positions.
 pub const DEFAULT_TAX_LEVEL: &str = "tax_normal";
 
-/// The most units an army can hold. INFERRED (the original's army card bar has 20 slots and
-/// armies in every shipped start position hold at most 20 units); not found in a table.
-pub const MAX_UNITS_PER_FORCE: usize = 20;
+/// The most units an army and a navy can hold: campaign state, as in the original (CONFIRMED). The
+/// original keeps them in two globals (`0x014576B0` army, `0x014576B4` navy) that the army's and
+/// the navy's capacity virtual (`+0x48`: `0x008D3920` / `0x008D3930`) return. The campaign loader
+/// `0x00872550` reads them from `CAMPAIGN_MODEL` #23 / #24 (20 / 20 for files older than version
+/// 6); then, when it is handed a campaign setup (a new campaign, `0x008B8930`; a loaded game,
+/// `0x008B8A60`, hands none), it overwrites both with the setup's `+0x48` / `+0x4C`; the writer
+/// `0x008EBAB0` saves them back. So the shipped start positions' 20 / 14 (the start-position
+/// builder `0x008742C0` writes 20 / 14) never reach play: every one of the original's own saves,
+/// turn-0 saves included, holds 20 / 20 (CONFIRMED by result, `campaign_unit_multiplier` 1).
+/// Ours: imported from the same fields, set by [`ForceCaps::new_campaign`] for a new campaign,
+/// saved with the model; [`CampaignModel::max_units`](super::CampaignModel::max_units) is the one
+/// rule every unit-count check asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ForceCaps {
+    /// Units per army (`CAMPAIGN_MODEL` #23).
+    pub army: u32,
+    /// Units (ships) per navy (`CAMPAIGN_MODEL` #24).
+    pub navy: u32,
+}
+
+/// The `campaign_unit_multiplier` preference's default (`0x004032F0` registers it as float
+/// preference `0x6D` with 0.75; CONFIRMED). The player's shipped `preferences.script.txt` may set
+/// another value (1 on the user's install).
+pub const CAMPAIGN_UNIT_MULTIPLIER_DEFAULT: f32 = 0.75;
+/// The preference's key in `preferences.script.txt`.
+pub const CAMPAIGN_UNIT_MULTIPLIER_KEY: &str = "campaign_unit_multiplier";
+
+impl Default for ForceCaps {
+    /// 20 / 20: the loader's caps for a file without them (`0x00872550`), and the caps of a model
+    /// built in code (tests).
+    fn default() -> Self {
+        ForceCaps { army: crate::limits::ORIGINAL_MAX_LAND_UNITS, navy: crate::limits::ORIGINAL_MAX_LAND_UNITS }
+    }
+}
+
+impl ForceCaps {
+    /// A new campaign's caps: the units per army and per fleet
+    /// ([`crate::limits::GameLimits::max_units`]) at the `campaign_unit_multiplier` preference
+    /// (`None`: its default 0.75), i.e. 20 and 6 / 8 / 10 / 20 by the multiplier's unit-size step.
+    /// INFERRED: the new-campaign path `0x00485B90` builds a setup part from exactly these
+    /// (`0x00878060` with `return 20` `0x00851550` and `MaxUnitsFromUnitScaleFactor` `0x00DACE60`
+    /// of preference `0x6D`); that this part is the setup's `+0x48` / `+0x4C` is not traced through
+    /// the stack (at multiplier 1 both readings give 20 / 20, which the saves confirm). PROVISIONAL
+    /// until a new original campaign at multiplier 0.75 is saved (MODDING_AUDIT.md §2.6).
+    pub fn new_campaign(limits: &crate::limits::GameLimits, campaign_unit_multiplier: Option<f32>) -> Self {
+        let (army, navy) = limits.max_units(campaign_unit_multiplier.unwrap_or(CAMPAIGN_UNIT_MULTIPLIER_DEFAULT));
+        ForceCaps { army, navy }
+    }
+}
 
 /// MADE-UP autoresolve data for the test units (infantry, 1 potential per man plus 50).
 pub const TEST_AUTORESOLVE: UnitAutoresolve =
@@ -354,6 +409,13 @@ impl CampaignRules {
     /// `level_key`'s level and its chain's highest level ([`BuildingTable::chain_levels`]).
     pub fn chain_levels(&self, level_key: &str) -> Option<(i32, i32)> {
         self.buildings.chain_levels(level_key)
+    }
+
+    /// May a faction with the `government` type recruit `unit` (CONFIRMED, `0x00EA9810` on the government's
+    /// type record, faction +0x70C → +0xB0, `0x008C8CF0`)? Yes when the unit names no `enabled` government type,
+    /// else only under one of them. Failing it leaves the unit out of the recruitable list (`0x00B43CA0`).
+    pub fn government_may_recruit(&self, government: &str, unit: &str) -> bool {
+        self.unit_governments.get(unit).is_none_or(|list| list.is_empty() || list.iter().any(|g| g == government))
     }
 
     /// May `faction` recruit `unit` at all (exclusive permissions)?

@@ -205,6 +205,24 @@ pub struct Negotiations {
     pub ended: u64,
 }
 
+/// A faction's two force strength totals (`0x008B2150`'s two outputs, split by the force's virtual
+/// +0x38: army or navy); the ranking's power is their sum.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FactionPower {
+    /// Over the faction's armies.
+    pub land: i32,
+    /// Over the faction's navies.
+    pub naval: i32,
+}
+
+impl FactionPower {
+    /// Land + naval, as `BuildFactionRankingTable` `0x00949630` adds them (integer, wrapping as the
+    /// exe's).
+    pub fn total(self) -> i32 {
+        self.land.wrapping_add(self.naval)
+    }
+}
+
 /// The faction rankings ([`CampaignModel::faction_rankings`]) and the unit keys the power found no
 /// unit record for (counted as 0; the caller logs them).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -353,6 +371,32 @@ impl CampaignModel {
         out
     }
 
+    /// The regions `faction` can hand over in a deal (`0x00C5C040`, the list of `TradeableRegions`
+    /// `0x009C5770`): every region of the faction's region list (faction `+0x778`) except its
+    /// capital (`0x00A8B5A0`: faction `+0x72C`) and a settlement under siege (settlement virtual
+    /// `+0x98`, the slot the script function `IsUnderSiege` `0x008A1FF0` reads). CONFIRMED rule.
+    /// PROVISIONAL: sieges are not in the model, so no region is left out for one; the order is
+    /// the model's region order, not the faction list's (acquisition) order.
+    pub fn tradeable_regions(&self, faction: FactionId) -> impl Iterator<Item = super::ids::RegionId> + '_ {
+        let capital = self.world.capital(faction);
+        self.world.regions.values().filter(move |r| r.owner == faction && Some(r.id) != capital).map(|r| r.id)
+    }
+
+    /// The technologies `side` can hand `other` in a deal (`0x008F4F10`, from `0x00C5C170`, the
+    /// lists of `TradeableTechnologies` `0x009C5AA0`): those `side` has researched (state 0) and
+    /// `other` is researching, can research or can steal or trade for (state 1, 2 or 3,
+    /// `0x008F3DB0` / `0x008F3AC0`; a technology `other` has no record of is state 5). CONFIRMED
+    /// rule. PROVISIONAL: in `side`'s technology list order (the exe walks the technology table).
+    pub fn tradeable_technologies(&self, side: FactionId, other: FactionId) -> Vec<String> {
+        let techs = |f: FactionId| self.world.faction_details.get(&f).map(|d| d.technologies.as_slice()).unwrap_or_default();
+        let theirs = techs(other);
+        techs(side)
+            .iter()
+            .filter(|(key, state)| *state == 0 && theirs.iter().any(|(k, s)| k == key && (1..=3).contains(s)))
+            .map(|(key, _)| key.clone())
+            .collect()
+    }
+
     /// The panel's two button lists for `local` (the local player, one side of the negotiation)
     /// negotiating `proposer` → `recipient` (`0x009B5220`): a type-1 action is listed only when
     /// available; a type-0 action when available, and — for trade, alliance, request_join_war,
@@ -408,8 +452,7 @@ impl CampaignModel {
     /// below 0.5 picks the override. The draw happens only when an override row exists. No row:
     /// [`Greeting::Missing`] ("Missing String").
     fn diplomat_line(&mut self, event: &str, speaker: FactionId, listener: FactionId) -> Greeting {
-        const ATTITUDES: [&str; 5] = ["hostile", "unfriendly", "neutral", "friendly", "very_friendly"];
-        let attitude = ATTITUDES[usize::from(self.attitude_category(speaker, listener)).min(4)];
+        let attitude = super::treaties::attitude_name(self.attitude_category(speaker, listener));
         let Some(f) = self.world.factions.get(&speaker) else {
             return Greeting::Missing { faction: String::new(), key: (format!("{event}_{attitude}"), String::new(), String::new()) };
         };
@@ -454,27 +497,28 @@ impl CampaignModel {
         }
     }
 
-    /// The power value of every faction that has forces (`SumFactionForceUnitValuesLandNaval`
-    /// `0x008B2150` with flag 0, called by `BuildFactionRankingTable` `0x00949630`; CONFIRMED): over
-    /// the faction's forces (+0x7BC), land and naval totals added, each force's units' per-unit
-    /// value (`0x008F9C50`: virtual +0x3C of each unit) summed. With flag 0 that value is given an
-    /// **empty** effect set (the round-end upkeep, flag 1, gives the force's commander / region and
-    /// faction effects, `0x008AFC00`), so every upkeep modifier reads 0 and the land unit's
-    /// `0x008F9B10` (vtable slot `0x013554D0`) gives round(upkeep × 100 × 0.01) = the unit's raw
-    /// `upkeep`, whatever its strength: [`super::economy::unit_upkeep`] with no effects. INFERRED:
-    /// ships give their raw upkeep too (their virtual +0x3C was not located; the ship upkeep
-    /// `0x008B21D0` reduces to it the same way), and every model force passes `0x008F9C50`'s owner
-    /// test (force +0x74 handle set, `0x00898E80`), as each has its faction. Integer sums as the
-    /// exe's. A unit key with no `units` record counts 0 and is added to `unknown_units` (the
+    /// The land and naval force strength of every faction that has forces
+    /// (`SumFactionForceUnitValuesLandNaval` `0x008B2150` with flag 0, called by
+    /// `BuildFactionRankingTable` `0x00949630`; CONFIRMED): over the faction's forces (+0x7BC), into
+    /// the land or naval total by the force kind, each force's units' per-unit value (`0x008F9C50`:
+    /// virtual +0x3C of each unit) summed. With flag 0 that value is given an **empty** effect set
+    /// (the round-end upkeep, flag 1, gives the force's commander / region and faction effects,
+    /// `0x008AFC00`), so every upkeep modifier reads 0 and the land unit's `0x008F9B10` (vtable slot
+    /// `0x013554D0`) gives round(upkeep × 100 × 0.01) = the unit's raw `upkeep`, whatever its
+    /// strength: [`super::economy::unit_upkeep`] with no effects. Ships give their raw upkeep too
+    /// and every force counts: CONFIRMED by the original's values read in the debugger (Coalition
+    /// start `mp_eur_napoleon`, 1805), which this gives exactly for every listed faction, land and
+    /// naval (install test `faction_power_is_the_originals_at_the_coalition_start`). Integer sums as
+    /// the exe's. A unit key with no `units` record counts 0 and is added to `unknown_units` (the
     /// caller logs it).
-    pub fn faction_powers(&self, unknown_units: &mut BTreeSet<String>) -> BTreeMap<FactionId, i32> {
+    pub fn faction_powers(&self, unknown_units: &mut BTreeSet<String>) -> BTreeMap<FactionId, FactionPower> {
         let none = super::effects::Effects::default();
-        let mut out: BTreeMap<FactionId, i32> = BTreeMap::new();
+        let mut out: BTreeMap<FactionId, FactionPower> = BTreeMap::new();
         for f in self.world.forces.values() {
             let mut sum = 0i32;
             for u in &f.units {
                 match self.rules.units.get(&u.unit_key) {
-                    Some(r) => sum = sum.wrapping_add(super::economy::unit_upkeep(&none, f.faction, r)),
+                    Some(r) => sum = sum.wrapping_add(super::economy::unit_upkeep(&none, f.faction, &self.rules.features, &u.unit_key, r)),
                     None => {
                         if !unknown_units.contains(&u.unit_key) {
                             unknown_units.insert(u.unit_key.clone());
@@ -482,7 +526,8 @@ impl CampaignModel {
                     }
                 }
             }
-            let total = out.entry(f.faction).or_insert(0);
+            let p = out.entry(f.faction).or_default();
+            let total = if f.is_navy { &mut p.naval } else { &mut p.land };
             *total = total.wrapping_add(sum);
         }
         out
@@ -495,18 +540,14 @@ impl CampaignModel {
     ///
     /// Values: power = [`Self::faction_powers`]; wealth = the last turn's income, categories 5..11
     /// of the last economics record (`0x00BBCC40`, [`super::World::last_income`]); prestige
-    /// (`0x008F4D30`, parts UNKNOWN): PROVISIONAL 0 for every faction.
-    ///
-    /// PROVISIONAL: the power category still differs from the original for Austria (Britain
-    /// campaign, 1805 start: ours "Mighty", category 2, the original "Terrifying", category 1; ours
-    /// ranks it 5th behind Prussia and Russia). The cause is open; the values `0x00949630` passes
-    /// per faction are to be read in the debugger (UI_FIDELITY.md §4.7 row "(1) power result").
+    /// (`0x008F4D30` over the faction's `PRESTIGE` record, which the model does not hold yet;
+    /// UI_FIDELITY.md §4.7 row "(1) prestige value"): PROVISIONAL 0 for every faction.
     pub fn faction_rankings(&self) -> FactionRankings {
         let ids: Vec<FactionId> = self.world.factions.values().filter(|f| !f.key.is_empty()).map(|f| f.id).collect();
         let out_of_game: Vec<bool> = ids.iter().map(|&f| !self.in_the_game(f)).collect();
         let mut unknown_units = BTreeSet::new();
         let powers = self.faction_powers(&mut unknown_units);
-        let power: Vec<f32> = ids.iter().map(|f| powers.get(f).copied().unwrap_or(0) as f32).collect();
+        let power: Vec<f32> = ids.iter().map(|f| powers.get(f).map_or(0, |p| p.total()) as f32).collect();
         let wealth: Vec<f32> = ids.iter().map(|&f| self.world.last_income.get(&f).copied().unwrap_or(0) as f32).collect();
         let prestige = vec![0.0f32; ids.len()];
         let (p, w, s) = (rank_categories(&power, &out_of_game), rank_categories(&wealth, &out_of_game), rank_categories(&prestige, &out_of_game));

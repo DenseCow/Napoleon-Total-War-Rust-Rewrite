@@ -144,7 +144,7 @@ The full schema dump (877 record paths for eur) can be regenerated with `esf-sum
 - "Early April 1806" is stored as 1806/2/3/0.
 - "Late December 1805" is stored as 1805/1/11/2.
 
-Season codes come from the header string: 0 = Summer, 1 = Winter, 2 = Spring, 3 = Autumn. One anomaly: the save "Early September 1805" has season 2 "Spring" (INFERRED: the season is computed by a separate rule, UNKNOWN).
+Season codes come from the header string: 0 = Summer, 1 = Winter, 2 = Spring, 3 = Autumn. One anomaly: the save "Early September 1805" has season 2 "Spring" (a stored start-position value: the calendar sets every date it moves to from its month, `0x008EDC80`, CONFIRMED 2026-10-10, MODDING_AUDIT.md §1.7).
 
 `CAMPAIGN_CALENDAR` = { u32 turns_per_year = 24, u32 turn_in_year = month*2 + (half==2), {DATE}, u32 turns_elapsed } (CONFIRMED across the 8 saves, e.g. Early Apr has index 6). `SAVE_GAME_HEADER` u32 turn_number = turns_elapsed + 1 (CONFIRMED).
 

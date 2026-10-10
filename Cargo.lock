@@ -3696,6 +3696,7 @@ version = "0.1.0"
 dependencies = [
  "log",
  "miniz_oxide 0.8.9",
+ "ntw_sim",
  "symphonia",
 ]
 

@@ -151,7 +151,7 @@ fn core_fixed(pos: (i32, i32), garrisoned: bool) -> Vec<(i32, i32)> {
 }
 
 /// One layer's versions: the cut cells (`inner`) and every cell of the ring around them.
-fn layer_versions(sg: &StaticGrid<'_>, inner: (u16, u16, u16, u16), zone: &HashSet<usize>, core: &[(i32, i32)]) -> BTreeMap<usize, (bool, Vec<VPoly>)> {
+fn layer_versions(sg: &StaticGrid<'_>, inner: CellRange, zone: &HashSet<usize>, core: &[(i32, i32)]) -> BTreeMap<usize, (bool, Vec<VPoly>)> {
     let (cols, rows) = (sg.cols() as i64, sg.rows() as i64);
     let core_q: Vec<(f64, f64)> = core.iter().map(|p| (f64::from(p.0) / FIX, f64::from(p.1) / FIX)).collect();
     let mut out = BTreeMap::new();
@@ -314,16 +314,31 @@ fn rec_array(name: &str, version: u8, items: Vec<Vec<EsfNode>>) -> EsfNode {
     EsfNode::RecordArray(Box::new(EsfRecordArray { name: name.to_string(), version, items }))
 }
 
+type CellRange = (u32, u32, u32, u32);
+
+/// The `OBSTACLE` record's `#11..#18` (the zone and core cell ranges), which the save stores as
+/// u16: a grid too wide for them cannot be written in the original's format (an error, checked
+/// before the grid is touched; never truncated).
+fn cell_range_fields(zone: CellRange, core: CellRange) -> Result<Vec<EsfNode>, String> {
+    let (r, c) = (zone, core);
+    [r.0, r.1, r.2, r.3, c.0, c.1, c.2, c.3]
+        .into_iter()
+        .map(|v| u16::try_from(v).map(EsfNode::U16))
+        .collect::<Result<_, _>>()
+        .map_err(|_| format!("obstacle cell range {r:?} / {c:?} does not fit the save's u16 fields"))
+}
+
 /// Adds the obstacle of `ob` to `grid` (the children of `PATHFINDING_GRID[0]`), as the original
 /// would store it right after creating it (module docs). The character must not have one yet.
 pub fn add_character_obstacle(grid: &mut [EsfNode], sg: &StaticGrid<'_>, ob: &NewObstacle) -> Result<Added, String> {
     let posf = (ob.pos.0 as f32 / FIX as f32, ob.pos.1 as f32 / FIX as f32);
     let rec = zoc::obstacle_record(sg.map, posf, ob.owner, ob.garrisoned);
+    let cells = cell_range_fields(rec.zone_cells, rec.core_cells)?;
     let core = core_fixed(ob.pos, ob.garrisoned);
     let zone: HashSet<usize> = rec.zone.iter().map(|&p| p as usize).collect();
     let pair_owner = ob.character | 2;
     // Layers: (slot, cut cells, zone).
-    type Layer = (u32, (u16, u16, u16, u16), HashSet<usize>);
+    type Layer = (u32, CellRange, HashSet<usize>);
     let mut layers: Vec<Layer> = Vec::new();
     if !zone.is_empty() {
         layers.push((0, rec.zone_cells, zone));
@@ -465,9 +480,7 @@ pub fn add_character_obstacle(grid: &mut [EsfNode], sg: &StaticGrid<'_>, ob: &Ne
     children.push(rec_array("MANAGED_OBSTACLE_BOUNDARY", 1, managed));
     children.push(EsfNode::U32(rec.kind));
     children.extend([fx(rec.bbox.0), fx(rec.bbox.1), fx(rec.bbox.2), fx(rec.bbox.3)].map(EsfNode::I32));
-    let r = rec.zone_cells;
-    let c = rec.core_cells;
-    children.extend([r.0, r.1, r.2, r.3, c.0, c.1, c.2, c.3].map(EsfNode::U16));
+    children.extend(cells);
     let obstacle = EsfRecord { name: "OBSTACLE".into(), version: 4, children };
     if let EsfNode::Record(lists) = &mut grid[lists_at] {
         if let Some(EsfNode::U32Array(ids)) = lists.children.get_mut(2) {
@@ -482,4 +495,18 @@ pub fn add_character_obstacle(grid: &mut [EsfNode], sg: &StaticGrid<'_>, ob: &Ne
         }
     }
     Ok(added)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cell_ranges_past_u16_are_an_error() {
+        // The model's ranges are u32 (a map of any size); the save's fields are u16.
+        let ok = cell_range_fields((1, 2, 3, 4), (5, 6, 7, 65_535)).unwrap();
+        assert_eq!(ok.len(), 8);
+        assert_eq!(ok[7], EsfNode::U16(65_535));
+        assert!(cell_range_fields((1, 2, 3, 4), (5, 6, 7, 65_536)).is_err());
+    }
 }

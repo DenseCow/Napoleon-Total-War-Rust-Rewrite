@@ -311,6 +311,8 @@ pub fn build_battle(db: &GameDatabase, setup: &SetupData, seed: u32) -> BattleSi
     // Column 6 (+0x20) of `unit_stats_land_experience_bonuses` in file order: the per-tick fatigue
     // bonus of a unit's experience level (CONFIRMED read in 0x00670F40, BATTLE_FIDELITY.md §58 (3)).
     battle.experience_fatigue = db.experience_fatigue_bonuses();
+    // The moddable reinforcement cap (the original's 20, ntw_sim::limits).
+    battle.max_reinforcement_units = db.limits.max_reinforcement_units as usize;
     battle.ground = Arc::clone(&setup.ground);
     apply_weather(&mut battle, db, setup.weather.as_deref());
     let mut sim = BattleSim::new(battle, seed);
@@ -352,14 +354,24 @@ fn resolve_spec_key(db: &GameDatabase, key: &str) -> Option<String> {
     db.units.rows().iter().find(|u| u.key.eq_ignore_ascii_case(key) && db.unit_stats(&u.key).is_some()).map(|u| u.key.clone())
 }
 
+/// An army's index within its side (`LandUnit::army_index`). `u32`, so a side may have any number
+/// of armies (it used to saturate at 255, merging every later army into one).
+fn army_number(i: usize) -> u32 {
+    u32::try_from(i).expect("a side has fewer than 2^32 armies")
+}
+
 /// The armies of a historical battle file: every alliance is a side (alliance index = model
 /// side), every `army` of it is placed as the file says (position, orientation, frontage, men).
 /// Reinforcement armies start off the field and arrive in turn (see below).
 fn historical_armies(db: &GameDatabase, setup: &SetupData, key: &str, spec: &BattleSpec, sim: &mut BattleSim) {
     let player = spec.player_army().unwrap_or((0, 0));
+    // Sides are `u8` in the battle model (the original fights two); alliances past 256 are left out.
+    if spec.alliances.len() > usize::from(u8::MAX) + 1 {
+        warn!("Battle {key}: {} alliances; only the first 256 are placed", spec.alliances.len());
+    }
     let mut next_id = 1;
     for (ai, alliance) in spec.alliances.iter().enumerate() {
-        let side = ai as u8;
+        let Ok(side) = u8::try_from(ai) else { break };
         if let (Some(name), Some(army)) = (sim.side_names.get_mut(ai), alliance.armies.first()) {
             *name = db.faction(&army.faction).map_or_else(|| army.faction.clone(), |f| f.screen_name.clone());
             sim.side_factions[ai] = army.faction.clone();
@@ -377,7 +389,7 @@ fn historical_armies(db: &GameDatabase, setup: &SetupData, key: &str, spec: &Bat
                 };
                 let (mut unit, mut info) = make_unit(db, setup, &unit_key, next_id, side);
                 apply_spec_unit(db, &unit_key, su, &mut unit, &mut info);
-                unit.army_index = u8::try_from(ri).unwrap_or(u8::MAX);
+                unit.army_index = army_number(ri);
                 info.faction = army.faction.clone();
                 info.controllable = controllable;
                 info.army = (ai, ri);
@@ -403,9 +415,9 @@ fn historical_armies(db: &GameDatabase, setup: &SetupData, key: &str, spec: &Bat
         sim.battle.playable_area = Some([c.0 - 0.5 * d, c.1 - 0.5 * d, c.0 + 0.5 * d, c.1 + 0.5 * d]);
     }
     for (ai, alliance) in spec.alliances.iter().enumerate() {
-        let side = ai as u8;
+        let Ok(side) = u8::try_from(ai) else { break };
         for (ri, army) in alliance.reinforcements.iter().enumerate() {
-            let army_index = u8::try_from(alliance.armies.len() + ri).unwrap_or(u8::MAX);
+            let army_index = army_number(alliance.armies.len() + ri);
             let a = army.approach_angle.unwrap_or(0.0).to_radians();
             let entry = (centre.0 + 0.5 * dimension * a.sin(), centre.1 + 0.5 * dimension * a.cos());
             let facing = (-a.cos()).atan2(-a.sin());
@@ -438,8 +450,8 @@ fn historical_armies(db: &GameDatabase, setup: &SetupData, key: &str, spec: &Bat
     };
     info!(
         "Battle {key}: {} units ({} the player's), {} vs {}",
-        sim.info.len(),
-        sim.info.iter().filter(|i| i.controllable).count(),
+        sim.infos().len(),
+        sim.infos().iter().filter(|i| i.controllable).count(),
         sim.side_names[0],
         sim.side_names[1]
     );
@@ -579,7 +591,7 @@ fn custom_armies(db: &GameDatabase, setup: &SetupData, sim: &mut BattleSim) {
                 unit.general_rank = Some(0);
                 info.general = Some(info.name.clone());
             }
-            unit.army_index = u8::try_from(ri).unwrap_or(u8::MAX);
+            unit.army_index = army_number(ri);
             info.faction = army.faction.clone();
             info.controllable = army.human;
             info.army = (side, ri);
@@ -617,8 +629,8 @@ fn custom_armies(db: &GameDatabase, setup: &SetupData, sim: &mut BattleSim) {
     }
     info!(
         "Custom battle: {} units ({} the player's), {} vs {}",
-        sim.info.len(),
-        sim.info.iter().filter(|i| i.controllable).count(),
+        sim.infos().len(),
+        sim.infos().iter().filter(|i| i.controllable).count(),
         sim.side_names[0],
         sim.side_names[1]
     );
@@ -672,7 +684,7 @@ pub fn deploy_with_templates(
     let units: Vec<GroupUnit> = classes
         .iter()
         .zip(sizes)
-        .map(|(c, s)| GroupUnit { class: group_formation::class_id(c), role: role_of(c), width: s.x, depth: s.y })
+        .map(|(c, s)| GroupUnit { class: u32::from(ntw_sim::unit_kind::class_code(c)), role: role_of(c), width: s.x, depth: s.y })
         .collect();
     // The template is chosen for the whole army; the guerrilla-deployment units (unit_stats_land
     // #88, unit `+0x1C5`) are laid out with it as a second group placed 25 m ahead (CONFIRMED,
@@ -897,7 +909,7 @@ fn make_unit(db: &GameDatabase, setup: &SetupData, key: &str, id: u32, side: u8)
     let record = db.unit(key).expect("resolve_key checked this unit exists");
     let stats = db.unit_stats(key).expect("resolve_key checked the stats exist");
     let mounted = stats.num_mounts > 0 && stats.mount_entity.is_some();
-    let is_cavalry = record.category == "cavalry" || mounted;
+    let is_cavalry = ntw_sim::unit_kind::category(&record.category) == ntw_sim::unit_kind::Category::Cavalry || mounted;
 
     let mut u = LandUnit::new(id, side, stats.num_men.max(0) as u32, (0.0, 0.0));
     // Real stats (unit_stats_land; column numbers per analysis/worker1/DB_BUILDERS.md):
@@ -924,7 +936,7 @@ fn make_unit(db: &GameDatabase, setup: &SetupData, key: &str, id: u32, side: u8)
             "artillery_horse" => MovementClass::HorseArtillery,
             _ => MovementClass::Fixed,
         }
-    } else if matches!(record.category.as_str(), "cavalry" | "cavalry_camels" | "dragoons") || is_cavalry {
+    } else if matches!(ntw_sim::unit_kind::category(&record.category), ntw_sim::unit_kind::Category::Cavalry | ntw_sim::unit_kind::Category::Camels | ntw_sim::unit_kind::Category::Dragoons) || is_cavalry {
         MovementClass::Mounted
     } else {
         MovementClass::Infantry
@@ -1165,9 +1177,9 @@ mod tests {
             let sim = build_battle(&db, &setup, FIRST_SEED);
             // Armies and reinforcement armies (the latter start off the field).
             let expected: usize = spec.alliances.iter().flat_map(|a| a.armies.iter().chain(&a.reinforcements)).map(|a| a.units.len()).sum();
-            eprintln!("{:24} {} units, {} the player's", rec.key, sim.info.len(), sim.info.iter().filter(|i| i.controllable).count());
-            assert_eq!(sim.info.len(), expected, "{}: some unit types are missing", rec.key);
-            assert!(sim.info.iter().any(|i| i.controllable), "{}", rec.key);
+            eprintln!("{:24} {} units, {} the player's", rec.key, sim.infos().len(), sim.infos().iter().filter(|i| i.controllable).count());
+            assert_eq!(sim.infos().len(), expected, "{}: some unit types are missing", rec.key);
+            assert!(sim.infos().iter().any(|i| i.controllable), "{}", rec.key);
             assert_eq!(sim.battle_key.as_deref(), Some(rec.key.as_str()));
             built += 1;
         }
@@ -1220,12 +1232,12 @@ mod tests {
         let start = BattleStart { key: "NAP_MP_Amazon".into(), spec: None, map: Some("nap_mp_amazon".into()), technologies: Vec::new(), custom };
         let setup = SetupData::load(Some(&vfs), Some(&map), Some(&start));
         let sim = build_battle(&db, &setup, FIRST_SEED);
-        assert_eq!(sim.info.len(), 10);
+        assert_eq!(sim.infos().len(), 10);
         assert_eq!(sim.side_factions, ["austria".to_string(), "denmark".to_string()]);
         assert!(sim.battle_key.is_none(), "no battle file");
-        let xp: Vec<u32> = sim.info.iter().map(|i| i.experience).collect();
+        let xp: Vec<u32> = sim.infos().iter().map(|i| i.experience).collect();
         assert_eq!(xp, [1, 0, 0, 3, 0, 0, 0, 0, 0, 1]);
-        for (u, i) in sim.battle.units.iter().zip(&sim.info) {
+        for (u, i) in sim.battle.units.iter().zip(sim.infos()) {
             assert_eq!(i.controllable, u.side == 0, "{}", i.key);
             assert_eq!(u.general_rank.is_some(), i.key == "Gen_Generals_Staff", "{}", i.key);
             let area = &setup.deployment.as_ref().unwrap().alliances[u.side as usize].areas[0];
@@ -1249,7 +1261,7 @@ mod tests {
             spacing,
             min_units: 0,
             max_units: UNLIMITED,
-            classes: vec![(group_formation::class_id(class), 1.0)],
+            classes: vec![(u32::from(ntw_sim::unit_kind::class_code(class)), 1.0)],
         };
         let t = Template {
             name: "line".into(),

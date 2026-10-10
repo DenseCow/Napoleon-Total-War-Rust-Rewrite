@@ -6,13 +6,16 @@ use std::collections::BTreeMap;
 use ntw_data::GameDatabase;
 use ntw_sim::campaign::{BuildingRules, CampaignRules, UnitAutoresolve, UnitRules};
 use ntw_sim::campaign::rules::TechRules;
+use ntw_sim::unit_kind::Category;
 
 /// Copies every table the campaign rules use, with `campaign`'s per-campaign variable overrides
-/// (`campaigns_campaign_variables_junctions`) applied. Content comes from the DB only (so mods that
+/// (`campaigns_campaign_variables_junctions`) applied and the exe's rule switches for the key
+/// ([`crate::features::original`]; a source with its own sets them in [`crate::source::open`]).
+/// Content comes from the DB only (so mods that
 /// add rows are picked up).
 pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
     let c = &db.campaign;
-    let mut r = CampaignRules { campaign: campaign.to_string(), ..Default::default() };
+    let mut r = CampaignRules { campaign: campaign.to_string(), limits: db.limits.clone(), features: crate::features::original(campaign), ..Default::default() };
     for v in &c.variables {
         r.variables.insert(v.key.clone(), v.value);
     }
@@ -28,7 +31,7 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
                 cost: u.recruitment_cost,
                 upkeep: u.upkeep,
                 turns: u.unknown_38.max(1) as u32,
-                is_naval: u.category.starts_with("naval"),
+                is_naval: ntw_sim::unit_kind::category(&u.category).is_naval(),
                 men,
                 autoresolve: unit_autoresolve(db, &u.key),
                 category: u.category.clone(),
@@ -141,7 +144,7 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
         // The `units` row: its category gives the range class (`0x0070D370` table) and the merchant flag, its class
         // the bombard factor (CAMPAIGN_FIDELITY.md §Naval autoresolve).
         let unit = db.units.get(&s.key);
-        let category = unit.map_or("", |u| u.category.as_str());
+        let category = ntw_sim::unit_kind::category(unit.map_or("", |u| u.category.as_str()));
         let class = unit.map_or("", |u| u.unit_class.as_str());
         r.ships.insert(
             s.key.clone(),
@@ -153,12 +156,12 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
                 fire: [s.c20, s.c21],
                 guns: 0,
                 range: match category {
-                    "naval_line_of_battle" => 3,
-                    "naval_frigate" | "naval_galley" => 2,
+                    Category::NavalLineOfBattle => 3,
+                    Category::NavalFrigate | Category::NavalGalley => 2,
                     _ => 1,
                 },
                 bombard: matches!(class, "naval_bomb_ketch" | "naval_rocket_ship"),
-                merchant: category == "naval_merchant",
+                merchant: category == Category::NavalMerchant,
             },
         );
     }
@@ -198,6 +201,10 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
         if p.allowed {
             list.push(p.faction.clone());
         }
+    }
+    // Only `enabled` rows link a government type to the unit (`0x00E91320`: status 0, `0x00ED5710`).
+    for p in c.unit_governments.iter().filter(|p| p.status == "enabled") {
+        r.unit_governments.entry(p.unit.clone()).or_default().push(p.government.clone());
     }
     for f in &db.factions {
         r.faction_categories.insert(f.key.clone(), f.category.clone());
@@ -340,7 +347,7 @@ pub fn unit_autoresolve(db: &GameDatabase, key: &str) -> Option<UnitAutoresolve>
         u.shield = stats.unknown_188;
         u.morale_stat = stats.morale;
         u.attributes = GameDatabase::unit_attributes(stats);
-        u.is_cavalry = record.category == "cavalry" || mounted;
+        u.is_cavalry = ntw_sim::unit_kind::category(&record.category) == Category::Cavalry || mounted;
         u.unit_class = record.unit_class.clone();
         u.unit_category = record.category.clone();
         u.missile = weapon;
@@ -355,15 +362,8 @@ pub fn unit_autoresolve(db: &GameDatabase, key: &str) -> Option<UnitAutoresolve>
         missile_per_man,
         missile_base: missile_strength(&one) - missile_per_man,
         morale: stats.morale as f32,
-        category: match record.category.as_str() {
-            "cavalry" => 0,
-            "artillery" => 1,
-            "infantry" => 2,
-            "dragoons" => 3,
-            "elephants" => 4,
-            "cavalry_camels" => 5,
-            _ => 6,
-        },
+        // The naval codes (6..12) all read as 6 here: no autoresolve rule tells them apart.
+        category: ntw_sim::unit_kind::category(&record.category).code().min(6),
     })
 }
 

@@ -10,11 +10,11 @@ the original's values. See the Goal section of `CLAUDE.md`.
 
 Generated 2026-10-10 by `bash tools/progress.sh` (from `tools/backlog_count.sh` and `tools/tag_count.sh`); never edit it by hand.
 
-Tags left in the code (done means zero): 1772 (646 PROVISIONAL, 106 PLACEHOLDER, 1020 INFERRED), plus 593 UNKNOWN.
+Tags left in the code (done means zero): 1771 (648 PROVISIONAL, 109 PLACEHOLDER, 1014 INFERRED), plus 588 UNKNOWN.
 
 | Section | Done | Partly done | To do |
 |---|---|---|---|
-| 0. Cross-cutting fidelity | 86 | 0 | 38 |
+| 0. Cross-cutting fidelity | 88 | 0 | 38 |
 | 1. File formats and data | 11 | 0 | 0 |
 | 2. Graphics and rendering | 0 | 11 | 29 |
 | 3. Battle gameplay (land) | 1 | 11 | 22 |
@@ -95,12 +95,14 @@ first. Evidence and round history live there; the pre-2026-10-07 long form of th
 - [x] Recruited unit size (3174/3174 save units), used for new recruits
 - [x] Demolish command (refund PROVISIONAL)
 - [x] Experience-adjusted recruitment cost (recruitment use INFERRED; upkeep untouched)
-- [ ] Region transfer in deals (`TransferRegion` rejected: needs the `0x00B449F0` flags)
-- [ ] Peace terms: regions and techs as deal items (`0x00B449F0`)
+- [ ] (running: deal-items) Region transfer in deals (`TransferRegion` rejected: needs the `0x00B449F0` flags)
+- [ ] (running: deal-items) Peace terms: regions and techs as deal items (`0x00B449F0`)
 - [x] Recruitment details (`0x00AECEE0`, `0x00AED220`): cost from units #7 and region effects, the unit cap (units #15, `0x008F68B0`), the AI handicap and recruit prices from the model (`0x008DD090`)
-- [ ] Recruitable population gate and charge (`0x00A89550` / `0x00AAF190` / `0x00A61AA0`, `REGION_FACTORS` #2)
-- [ ] 14 recruit-cost save misses: the faction cost modifier at queue time vs at save
-- [ ] Trace whether turn.rs:471 should block training of flagged items (`0x00B5AD90`)
+- [x] Recruitable population gate and charge (`0x00A89550` / `0x00AAF190` / `0x00A61AA0`, `REGION_FACTORS` #2)
+- [ ] Capture refunds a port's naval queue items to the old owner (`0x00B1A760(1)` per port); our `occupy` refunds nothing; `0x00B58A30` is a fourth capture variant missing from the notes
+- [ ] 14 recruit-cost save misses: prices are fixed at queue time (traced 2026-10-10); 13 explained by effects changed after queueing; left: Spain priced +49 vs +24 (2×25 − 1, UNKNOWN); trace when `0x008B16C0` refreshes the faction effect sum (18 callers)
+- [x] Trace whether turn.rs:471 should block training of flagged items (`0x00B5AD90`)
+- [ ] Recruitable list: trace the no-entry gates `0x00AA1660` and `0x00A27960` (PROVISIONAL; government gate `0x00EA9810` ported); where construction runs relative to the held-back check (INFERRED); `0x00A6AE40` reads two extra slots (+0x20/+0x24, walls?)
 - [ ] Trace whether the exe reads `units_to_groupings_military_permissions`
 - [x] The importer limit (`0x00BB5730`): none; the split `0x00BC26D0` ported (352/352 route volumes)
 - [x] The 4 desertion-exempt unit classes (`0x008BA1E0` + `0x00EED3E0`: cavalry_heavy, elephants, general, infantry_elite)
@@ -159,9 +161,9 @@ SpeedTree leftovers are in §2.
   - [ ] `RetrieveFactionRegionList` and `LabelDetails` still show 0 for both changes: use the projection
   - [ ] Migration (needs theatres); a `region_wealth_factors` table from mods; base_capacity 0 drops the population to the minimum (check the exe)
 - [x] `OnDivorceChild` fires on Adopt, Divorce, Destroy and DestroyChildren (`0x01027BA0` → `0x0102DE60`; ORIGINAL BUG `0x01027B20` fixed: DestroyChildren could loop for ever)
-- [ ] Does `RetrieveVisibleEnitityDetails` skip settlements behind the HUD (campaign hud.rs `covers`)?
-- [ ] `UIComponent:Adopt(child, index)` ignores the optional index `0x01014580` reads
-- [ ] Diplomacy negotiation playable; region exchange rows. Merged diplomacy2: (user check 2026-10-09: the changes work) greeting by attitude through the queued BeginNegotiation (`0x00BF5A60`), diplomat portrait, button lists for all three relationships, power/wealth words (power = raw unit upkeep, CONFIRMED `0x008B2150`), regnal numerals. Open: Austria power reads "Mighty" (original "Terrifying"; PROVISIONAL; the original's per-faction power values were read 2026-10-10, UI_FIDELITY.md power-result row: Spain and Ottomans match, France/Prussia/Russia/Britain differ), the panel creates no `diplomacy_button_*` components from the lists (ignored test), red cancel texts, deal rows and result still held in the UI until the deal is modelled
+- [ ] (running: ui-small) Does `RetrieveVisibleEnitityDetails` skip settlements behind the HUD (campaign hud.rs `covers`)?
+- [ ] (running: ui-small) `UIComponent:Adopt(child, index)` ignores the optional index `0x01014580` reads
+- [ ] Diplomacy negotiation playable; region exchange rows. Merged diplomacy2: (user check 2026-10-09: the changes work) greeting by attitude through the queued BeginNegotiation (`0x00BF5A60`), diplomat portrait, button lists for all three relationships, power/wealth words (power = raw unit upkeep, CONFIRMED `0x008B2150`), regnal numerals. Austria power now "Terrifying" as the original (power CONFIRMED against the 2026-10-10 debugger values at the Coalition start; prestige PROVISIONAL 0). Merged 2026-10-10: option buttons built (`SetState` returns as `0x01013550`), `FindChildAddress`, treaty lines, tradeable regions and technologies (two lists, `0x009C5770` / `0x00C5C170`); red cancel texts are the original's. Open: Propose drops the chosen regions/techs (PLACEHOLDER, logged once; `0x009BF3C0` → `0x00C49BD0` +0x40), tech list order PROVISIONAL, region-row tooltip empty, our text ~20% wider (a treaty line wraps), deal rows and result still held in the UI until the deal is modelled
 - [ ] Runtime `force_diplomacy` calls reach only the ntw_script state (ntw_script game.rs ~300), so the model and the negotiation panel ignore them; give them one home in the model
 - [ ] Campaign save naming
 - [ ] The five agent options actions via `MoveIntoTarget` (contract known; needs the model's agent order queue)
@@ -574,13 +576,18 @@ worked on, `[ ]` = not started.
   - [ ] Exporter: the original's campaign (with mods) to the open format.
   - [ ] A small sample custom campaign as a test and a modding example.
   - [ ] Later: converters from other Total War games the user owns (e.g. a Shogun 2 map); separate format investigation.
-- [ ] (running: generic-engine) **Generic engine** (user, 2026-10-09: a platform to build any Total War game; CLAUDE.md intro): audit done
+- [ ] **Generic engine** (user, 2026-10-09: a platform to build any Total War game; CLAUDE.md intro): audit done
       (analysis/modding/MODDING_AUDIT.md §1, ~45 sites, ~14 items): one per-campaign feature table for the nine
       `spa_napoleon` / `mp_eur_napoleon` / `spa_france` switches, unit category and class lists from data in one place
       (4 and 3 copies today; an unknown category counts as artillery), the calendar from `turns_per_year`. Move each
-      into data, defaults unchanged.
+      into data, defaults unchanged. Merged 2026-10-10: feature table (`ntw_sim` campaign/features.rs), `unit_kind` as the one category source, calendar and seasons (`0x008A98B0`), upkeep as the exe (`0x008F9B10` / `0x008F9D00`). Left:
+  - [ ] Trace the remaining exe uses of `spa_napoleon` (72 xrefs at `0x01315FF4`; ~11 ported) into the feature table
+  - [ ] The front-end campaign list, default faction and unlock from data (MODDING_AUDIT §1.2, with the custom-campaign menu)
+  - [ ] AI manager/personality fallback; a category behaviour column of our own; `balance_group` against `cdir_unit_balance_groups` (PROVISIONAL)
+  - [ ] Era enums from data (shot, ability, drill, ground, weather, muzzle effect); government, agent, research, tax, ship-gun and MP-category tables
+  - [ ] An upkeep test against a start position or save (economy_fidelity covers other income only)
 - [ ] **Extended Lua API** (user, 2026-10-09): the original's API stays exact (same names, arguments, results and events, so shipped `.luac` and mod scripts run unchanged on the Lua 5.1 VM); a new namespace adds more on top: read and write any model value, hooks for every game event, new commands and rules, UI built from script, campaign and battle setup for custom campaigns, and no fixed limits. One implementation per rule: the old API calls the same model code as the new one.
-- [ ] (running: no-limits) **No engine limits** (user, 2026-10-06; see Goal in `CLAUDE.md`). Defaults stay 1:1.
+- [ ] **No engine limits** (user, 2026-10-06; see Goal in `CLAUDE.md`). Defaults stay 1:1. Merged 2026-10-10 (`ntw_sim` limits.rs, MODDING_AUDIT.md §2.6): wide ID types, caps as `_kv_rules` data (army/navy #23/#24, custom battle 20 land, ships 6/8/10/20, reinforcements 20), required by `UiScriptHost::new`.
   - [ ] Make the hardcoded counts data-driven: audit done 2026-10-09 (analysis/modding/MODDING_AUDIT.md §2, ~25 sites,
         ~8 items: the 20-unit literals in army_setup.rs beside `MAX_UNITS_PER_FORCE`, `MAX_FIGURES` 240 men drawn per unit
         in battle/view.rs:40, small id types).
@@ -590,6 +597,8 @@ worked on, `[ ]` = not started.
         fleet, the unit-size options and the battle unit cap.
   - [ ] Saves, the UI (lists, scrolling, faction colours and flags for many factions) and multiplayer must handle counts
         past the original's limits.
+  - [ ] `ForceCaps::new_campaign` PROVISIONAL: the new-campaign navy cap under `campaign_unit_multiplier` (FOR_USER check: expected 20/10)
+  - [ ] Rest of MODDING_AUDIT §2.1 (`MAX_QUEUE`, road levels, 4 children, 3 research threads) and §2.2 render caps (`MAX_FIGURES` 240 men drawn per unit ...)
   - [ ] Test with a synthetic mod that goes past every limit (e.g. 300 factions, 1,000 regions, 40-unit armies,
         1,000-man units).
 
@@ -605,9 +614,7 @@ worked on, `[ ]` = not started.
 
 ## Polish
 Non-blocking review findings, one line each (CLAUDE.md "Done means"). A worker editing a file clears that file's lines.
-- [ ] Callers deep-copy the cached table rows (army_setup.rs:88, ui campaign/mod.rs:1293/1471, settlement.rs:12, frontend.rs:74, battle_setup `factions()` `to_vec`): use the shared rows / Arc
-- [ ] `ntw_script` source.rs table cache `lock().ok()?`: a poisoned mutex gives a silent `None` (log once)
-- [ ] `ntw_script` diplomacy.rs:694 builds its key with `format!` on every call
+- [ ] `ntw_formats` has a dev-dependency cycle on `ntw_sim`; test `CampaignSource::features()` through `open`; raise the generic-engine Ghidra functions' completeness
 - [ ] Own save: header pixels stored as RON u32 text (bytes would be smaller and faster); `quick_save` clones the whole model (`SaveData` could borrow it)
 - [ ] real_install.rs:1010 merged-vs-old test can't fail on vanilla (one file per table keeps every row): test the keys with a two-file case; cover the typed tables and `models_building`
 - [ ] `ntw_formats` mods.rs: plan-cache misses for different install/language keys wait on each other under `PLAN_BUILD`, and `mount_plan` runs under it (cold path)
@@ -617,11 +624,6 @@ Non-blocking review findings, one line each (CLAUDE.md "Done means"). A worker e
 - [ ] Logging is inconsistent: ntw_data reports with `eprintln!` while ntw_campaign uses the `log` crate.
 - [ ] `CursorPosition` (ui_prelude.lua ~281) and CampaignUI's label `ScreenPos` (Labels.lua) give screen pixels while the campaign HUD's Position / MoveTo use the 1280x960 scripts' frame; read what the original returns on a wide screen.
 - [ ] `unwrap()` audit on paths that read install or mod data (ntw_formats, ntw_data, pack loading): a malformed file or broken mod must log one error and skip, never panic. Unwraps on the code's own invariants and in tests stay.
-- [ ] `bridge_volleys` rescans the recent-volley list and the unit list for every volley (napoleon/src/audio/battle.rs ~81, ~87); its row-count check next to the table id is redundant (~37).
-- [ ] The `put_changed!` field lists in `set_facts` are written by hand, so a new fact can compile and never reach `__battle`; and writing only changed fields no longer resets a value a script or mod wrote into `__battle` (ntw_script/src/ui/battle.rs ~204, ~216).
-- [ ] Muzzle flash, dust, `facts_of` and the trace CSV still pair `battle.units` with `sim.info` by position (napoleon/src/battle/fx_draw.rs ~910, ~506, scripts.rs ~160, battle/mod.rs ~463); use `unit_with_info`.
-- [ ] `BattleSim::info` and `battle` are public, so a bare `battle.add_unit` breaks the pairing silently; make `info` private behind `BattleSim::add_unit`, and drop the `.min(info.len())` that hides lists already out of step (napoleon/src/battle/mod.rs ~127, ~219).
-- [ ] Unit lookups by id still search linearly in napoleon battle/fx_draw.rs and labels.rs (units are sorted by id: use `Battle::unit_index`); `observe_ticks` checks the slot twice (view.rs ~823).
 - [ ] `last_income` is not written by the save writer (PROVISIONAL), its meaning changes after `settle_round` (categories 5, 7, 11 only), and `.items.last()` assumes the history ring is saved oldest-first (ntw_sim campaign).
 - [ ] Duplicate negotiation-string rows: the last one wins silently (ntw_data negotiation tables).
 - [ ] `CampaignModel`'s derived `PartialEq` compares `negotiations`, which is neither saved nor hashed (ntw_sim/src/campaign/world.rs ~39).

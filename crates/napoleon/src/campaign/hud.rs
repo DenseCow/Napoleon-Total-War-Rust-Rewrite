@@ -76,6 +76,7 @@ pub fn enter(world: &mut World) {
         human: sim.human.clone(),
         campaign: sim.campaign.clone(),
         map: sim.info.map_key.clone(),
+        theatres: sim.info.theatres().map(str::to_owned).collect(),
         db,
     }) else {
         warn!("Campaign HUD: no campaign running");
@@ -84,7 +85,7 @@ pub fn enter(world: &mut World) {
     let facts = FrontEndFacts { game_version: "1.3.0".into(), user_dir: crate::config::user_dir(), ..Default::default() };
     // The scripts lay the HUD out in the virtual screen of the original UI scale (see `ui_scale`).
     let virt = ui_virtual_screen(screen);
-    let host = match UiScriptHost::new(source, loc, facts, (virt.x, virt.y)) {
+    let host = match UiScriptHost::new(source, loc, facts, (virt.x, virt.y), world.resource::<GameData>().db.limits.clone()) {
         Ok(h) => h,
         Err(e) => {
             warn!("Campaign HUD: script host failed: {e}");

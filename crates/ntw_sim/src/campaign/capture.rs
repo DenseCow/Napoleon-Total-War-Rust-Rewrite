@@ -27,7 +27,8 @@
 //!
 //! The damage roll `0x00B14560` (CONFIRMED from the listing): `r = rng.next16()`,
 //! `frac = (hi − lo) × (r × 1.5259022e-5) + lo` in f32, new health = clamp(trunc(frac × health), 1, 99), value =
-//! trunc((health − new) × 0.01 × level cost) × 4, then `min(value, max(15000, value / 4))` (spa: × 2, 10000).
+//! trunc((health − new) × 0.01 × level cost) × 4, then `min(value, max(15000, value / 4))` (the campaign's
+//! [`loot_value`](super::features::CampaignFeatures::loot_value); spa: × 2, 10000).
 //!
 //! Repairs (`0x00B66260`, cost `0x00B66410`, CONFIRMED): a damaged building (health < 100, nothing being built in
 //! its slot) is repaired for `round((100 + cost mod) × round((100 − health) × level cost × 0.01) × 0.01)` over
@@ -96,12 +97,12 @@ pub struct CapturePreview {
 }
 
 /// `0x00B14560`: one building's damage roll. Returns (new health, value). Draws once from `rng`.
-pub fn damage_roll(rng: &mut CaRng, health: u32, level_cost: i32, (lo, hi): (f32, f32), spa: bool) -> (u32, u32) {
+/// `(m, cap)` is the campaign's loot value ([`super::features::CampaignFeatures::loot_value`]).
+pub fn damage_roll(rng: &mut CaRng, health: u32, level_cost: i32, (lo, hi): (f32, f32), (m, cap): (u32, u32)) -> (u32, u32) {
     let r = rng.next16();
     let frac = (hi - lo) * (r as f32 * DRAW_SCALE) + lo;
     let new = ((frac * health as f32) as i64).clamp(1, 99) as u32;
     let lost = health.wrapping_sub(new) as i32;
-    let (m, cap) = if spa { (2u32, 10_000u32) } else { (4, 15_000) };
     let value = ((lost as f32 * 0.01 * level_cost as f32) as i32 as u32).wrapping_mul(m);
     (new, value.min(cap.max(value / m)))
 }
@@ -151,7 +152,7 @@ impl CampaignModel {
 
     /// `0x00B14930`: the three options of a capture. Draws from the campaign RNG (loot pass, then occupy pass).
     pub fn capture_preview(&mut self, region: RegionId, faction: FactionId, by: Option<ForceId>, surrender: bool) -> CapturePreview {
-        let spa = self.rules.campaign == "spa_napoleon";
+        let loot_value = self.rules.features.loot_value;
         let slots = self.settlement_slots(region);
         let (tw, gdp) = self.world.regions.get(&region).map_or((0, 0), |r| (r.town_wealth, r.gdp));
         let level_of = |m: &CampaignModel, i: usize| {
@@ -161,14 +162,14 @@ impl CampaignModel {
         for &i in &slots {
             let Some(b) = level_of(self, i).filter(|b| b.health > 1) else { continue };
             let cost = self.rules.buildings.get(&b.level_key).map_or(0, |x| x.cost);
-            let (h, v) = damage_roll(&mut self.rng, b.health, cost, LOOT_DAMAGE, spa);
+            let (h, v) = damage_roll(&mut self.rng, b.health, cost, LOOT_DAMAGE, loot_value);
             loot.buildings.push((i, h));
             loot.money = loot.money.wrapping_add(v as i32);
         }
         let fort = |m: &CampaignModel| m.world.regions.get(&region).and_then(|r| r.fortification.clone()).filter(|b| b.health > 1);
         if let Some(b) = fort(self) {
             let cost = self.rules.buildings.get(&b.level_key).map_or(0, |x| x.cost);
-            loot.fortification = Some(damage_roll(&mut self.rng, b.health, cost, LOOT_DAMAGE, spa).0);
+            loot.fortification = Some(damage_roll(&mut self.rng, b.health, cost, LOOT_DAMAGE, loot_value).0);
         }
         let pct = self.rules.var("settlement_looting_pct_region_gdp", 0.15);
         let clamp = |x: f32, hi: f32| if 150.0 > x { 150.0 } else if x > hi { hi } else { x };
@@ -188,13 +189,13 @@ impl CampaignModel {
             if self.rules.chain_kinds.get(&rules.chain).copied().unwrap_or(0) != 0 {
                 continue;
             }
-            let (h, _) = damage_roll(&mut self.rng, b.health, rules.cost, OCCUPY_DAMAGE, spa);
+            let (h, _) = damage_roll(&mut self.rng, b.health, rules.cost, OCCUPY_DAMAGE, loot_value);
             occupy.buildings.push((i, h));
         }
         // The fortification: no chain test in this pass (CONFIRMED).
         if let Some(b) = fort(self) {
             let cost = self.rules.buildings.get(&b.level_key).map_or(0, |x| x.cost);
-            occupy.fortification = Some(damage_roll(&mut self.rng, b.health, cost, OCCUPY_DAMAGE, spa).0);
+            occupy.fortification = Some(damage_roll(&mut self.rng, b.health, cost, OCCUPY_DAMAGE, loot_value).0);
         }
         let mut preview = CapturePreview { region, faction, surrender, loot, occupy, liberate: self.liberation_target(region, faction) };
         if self.turn.humans.contains(&faction) {
@@ -234,11 +235,12 @@ impl CampaignModel {
             for c in &mut r.class_bases {
                 c.2 -= o.public_order_reduction;
             }
-            // spa_napoleon (`0x00AAA5B0`, CONFIRMED): the population turns against the looter: its alignment loses 0.5 of
-            // the share (floored at 0) and the other alignment gains 0.5 (capped at 1). The rebels skip it (`0x008CEEF0`).
-            if self.rules.campaign == "spa_napoleon" {
+            // spa_napoleon (`0x00AAA5B0`, CONFIRMED; the campaign's `looting_alignment`): the population turns against
+            // the looter: its alignment loses 0.5 of the share (floored at 0) and the other alignment gains 0.5 (capped
+            // at 1). The rebels skip it (`0x008CEEF0`).
+            if let Some((pro, anti)) = &self.rules.features.looting_alignment {
                 let own = self.world.faction_details.get(&faction).map(|d| d.religion.clone()).unwrap_or_default();
-                let other = if own == "align_pro_french" { "align_anti_french" } else { "align_pro_french" };
+                let other = if own == *pro { anti.as_str() } else { pro.as_str() };
                 let r = self.world.regions.get_mut(&region).expect("checked");
                 let has = |k: &str, r: &super::world::Region| r.religions.iter().any(|(x, _)| x == k);
                 if !own.is_empty() && has(&own, r) && has(other, r) {
@@ -376,7 +378,7 @@ impl CampaignModel {
         }
         let Some(r) = self.world.regions.get(&region) else { return false };
         let held = r.slot_held(slot);
-        r.building_at(slot).is_some_and(|b| b.health < 100)
+        r.building_at(slot).is_some_and(|b| b.is_damaged())
             && held
             && !r.construction.iter().any(|c| c.slot == slot)
     }

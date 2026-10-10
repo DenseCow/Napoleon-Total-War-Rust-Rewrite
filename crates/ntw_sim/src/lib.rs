@@ -24,6 +24,8 @@ pub mod battle;
 pub mod calendar;
 pub mod campaign;
 pub mod fixed;
+pub mod limits;
 mod fnv;
 pub(crate) mod msvc_sort;
 pub mod rng;
+pub mod unit_kind;

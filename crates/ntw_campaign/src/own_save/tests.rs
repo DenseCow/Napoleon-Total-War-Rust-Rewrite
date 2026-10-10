@@ -165,3 +165,18 @@ fn bad_saves_are_errors() {
     damaged[last] ^= 0x5A;
     assert!(read_parts(&damaged).is_err());
 }
+
+/// The header of a new save: the season name follows the calendar (review: it stayed the start
+/// position's), and every theatre of the campaign is kept even when its pictures did not load (review:
+/// a save without pictures lost its theatre, and with it the HUD's home theatre).
+#[test]
+fn the_save_header_follows_the_calendar_and_keeps_the_theatres() {
+    let mut model = made_up_model();
+    model.calendar.date.set_quarter(1805, 11 * 4);
+    let info = save_header(&info(), &model, "made_up_a", 1_800_000_000, &[]);
+    assert_eq!(info.header.season_name, "Winter", "December");
+    assert_eq!(info.header.date, Some(model.calendar.date));
+    assert_eq!(info.theatres().collect::<Vec<_>>(), ["made_up_main"]);
+    assert_eq!((info.header.maps[0].width, info.header.maps[0].height), (0, 0), "no picture");
+    assert!(info.header.maps[0].pixels.is_empty());
+}

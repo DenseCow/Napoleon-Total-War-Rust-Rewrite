@@ -56,7 +56,7 @@ fn main() {
         for force in m.world.forces.values().filter(|x| x.faction == f) {
             for u in &force.units {
                 let Some(r) = m.rules.units.get(&u.unit_key) else { continue };
-                let c = economy::unit_upkeep(&fx, f, r);
+                let c = economy::unit_upkeep(&fx, f, &m.rules.features, &u.unit_key, r);
                 if r.is_naval {
                     naval += c;
                     naval_plain += r.upkeep;

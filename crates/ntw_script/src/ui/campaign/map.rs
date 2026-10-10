@@ -8,18 +8,6 @@ pub(super) fn theatre_name(inner: &Inner, row: &ntw_data::CampaignMapPlayableAre
     loc(inner, &format!("campaign_map_playable_areas_onscreen_name_{}", row.id)).unwrap_or_else(|| row.area.clone())
 }
 
-/// The campaign's theatre: (`campaign_map_playable_areas` area key, the radar's theatre button
-/// id). PROVISIONAL mapping by the campaign key's prefix (each Napoleon campaign has one map and
-/// one playable area: italy_main, egypt_main, europe_main, spain_main).
-pub(super) fn theatre_of(campaign: &str) -> (&'static str, &'static str) {
-    let c = campaign.strip_prefix("mp_").unwrap_or(campaign);
-    match c.split('_').next().unwrap_or("") {
-        "ita" => ("italy_main", "italy"),
-        "egy" => ("egypt_main", "egypt"),
-        "spa" => ("spain_main", "spain"),
-        _ => ("europe_main", "europe"),
-    }
-}
 
 impl UiScriptHost {
     /// The campaign HUD's [`UiScriptHost::hover`].
@@ -164,7 +152,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     // given yet; mode 3's colour is a PLACEHOLDER (the exe's 0x00A727D0 is not decoded).
     f!("RegionsInTheatre", |lua, inner, ui, (theatre, faction, _sub, mode): (Option<String>, Option<String>, Value, Option<i32>)| {
         let mode = mode.unwrap_or(4);
-        let theatre = theatre.unwrap_or_else(|| theatre_of(&ui.link.campaign).0.to_owned());
+        let theatre = theatre.unwrap_or_else(|| ui.home_theatre().to_owned());
         let faction = faction.unwrap_or_else(|| ui.link.human.clone());
         let out = lua.create_table()?;
         let folder = ui.map_folder();

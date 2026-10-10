@@ -36,7 +36,7 @@ pub mod characters;
 pub mod schemas;
 pub mod weather;
 
-pub use database::{DataSource, GameDatabase, LandUnitView, load_kv_table, load_merged_rows, load_table};
+pub use database::{DataSource, GameDatabase, LandUnitView, load_game_limits, load_kv_table, load_merged_rows, load_table};
 pub use error::DataError;
 pub use record::{DbRecord, Table};
 pub use schemas::*;

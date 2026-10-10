@@ -29,7 +29,7 @@ fn deployment_waits_for_the_start_battle_button() {
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).unwrap();
     let loc = Localisation::from_vfs(&vfs).unwrap();
     let facts = FrontEndFacts { game_version: "test".into(), ..Default::default() };
-    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0)).unwrap();
+    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0), ntw_sim::limits::GameLimits::default()).unwrap();
     ui_battle::install(&host, ScriptSource::from_install(&dir).unwrap()).expect("battle engine functions");
     let bf = BattleHudFacts { phase: HudPhase::Deployment, speed: 1.0, ..Default::default() };
     ui_battle::set_facts(&host, &bf).unwrap();
@@ -80,7 +80,7 @@ fn turn_left_order_button_works_through_its_state_functions() {
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).unwrap();
     let loc = Localisation::from_vfs(&vfs).unwrap();
     let facts = FrontEndFacts { game_version: "test".into(), ..Default::default() };
-    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0)).unwrap();
+    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0), ntw_sim::limits::GameLimits::default()).unwrap();
     ui_battle::install(&host, ScriptSource::from_install(&dir).unwrap()).expect("battle engine functions");
     let unit = ui_battle::HudUnit { id: 1, key: "Inf_Line_French_Fusiliers".into(), men: 100, max_men: 100, selected: true, category: "infantry".into(), ..Default::default() };
     let bf = BattleHudFacts { phase: HudPhase::Conflict, speed: 1.0, units: vec![unit], ..Default::default() };
@@ -128,7 +128,7 @@ fn the_orders_bar_is_the_files_first_panel_at_its_own_position() {
     for (w, h) in [(1280.0, 960.0), (1920.0, 1080.0)] {
         let loc = Localisation::from_vfs(&vfs).unwrap();
         let facts = FrontEndFacts { game_version: "test".into(), ..Default::default() };
-        let host = UiScriptHost::new(ScriptSource::from_install(&dir).unwrap(), loc, facts, (w, h)).unwrap();
+        let host = UiScriptHost::new(ScriptSource::from_install(&dir).unwrap(), loc, facts, (w, h), ntw_sim::limits::GameLimits::default()).unwrap();
         ui_battle::install(&host, ScriptSource::from_install(&dir).unwrap()).expect("battle engine functions");
         ui_battle::set_facts(&host, &BattleHudFacts { phase: HudPhase::Conflict, speed: 1.0, ..Default::default() }).unwrap();
         let root = ui_battle::load_hud(&host).expect("battle HUD layout");
@@ -158,7 +158,7 @@ fn a_steady_battle_hud_asks_for_no_redraw() {
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).unwrap();
     let loc = Localisation::from_vfs(&vfs).unwrap();
     let facts = FrontEndFacts { game_version: "test".into(), ..Default::default() };
-    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0)).unwrap();
+    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0), ntw_sim::limits::GameLimits::default()).unwrap();
     ui_battle::install(&host, ScriptSource::from_install(&dir).unwrap()).expect("battle engine functions");
     let bf = BattleHudFacts { phase: HudPhase::Conflict, speed: 1.0, ..Default::default() };
     ui_battle::set_facts(&host, &bf).unwrap();

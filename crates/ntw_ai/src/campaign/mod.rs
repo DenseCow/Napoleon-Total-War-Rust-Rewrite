@@ -35,7 +35,7 @@ pub mod world;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use ntw_sim::campaign::rules::{MAX_UNITS_PER_FORCE, TaxClass};
+use ntw_sim::campaign::rules::TaxClass;
 use ntw_sim::campaign::{CampaignCommand, CampaignEvent, CampaignModel, CommandError, FactionId, ForceId, RegionId, SlotRef, Stance};
 use ntw_sim::fixed::Fixed20;
 use ntw_sim::rng::CaRng;
@@ -560,9 +560,11 @@ impl<'a> FactionTurn<'a> {
     /// UNKNOWN; MERGE_UNITS itself is recruitment, [`Self::recruitment_draws`]): smallest land
     /// armies first, each joins the nearest other own land army that it can reach this turn
     /// (movement points / road cost) and that is at least as big, when the two fit in one force
-    /// (`MAX_UNITS_PER_FORCE`). Garrisons (no commander) never move. Runs once per turn.
+    /// (the campaign's units per army, [`AiWorld::max_units_per_army`]). Garrisons (no commander)
+    /// never move. Runs once per turn.
     fn merge_units(&mut self) {
         let me = self.faction;
+        let cap = self.world.max_units_per_army;
         let per_unit = self.world.move_cost_per_unit.max(f32::EPSILON) as f64;
         let mut armies: Vec<&AiArmy> = self
             .world
@@ -583,7 +585,7 @@ impl<'a> FactionTurn<'a> {
             let best = armies
                 .iter()
                 .filter(|b| b.id != a.id && !gone.contains(&b.id))
-                .filter(|b| size[&b.id] >= n && size[&b.id] + n <= MAX_UNITS_PER_FORCE)
+                .filter(|b| size[&b.id] >= n && size[&b.id] + n <= cap)
                 .map(|b| (world::dist(a.position, b.position), b.id))
                 .filter(|(d, _)| *d <= reach)
                 .min_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));

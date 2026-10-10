@@ -145,6 +145,8 @@ pub(super) struct Inner {
     pub(super) source: ScriptSource,
     pub(super) loc: Localisation,
     pub(super) facts: FrontEndFacts,
+    /// The gameplay caps the scripts read (unit limits, funds, unit-size steps; `GameDatabase::limits`).
+    pub(super) limits: ntw_sim::limits::GameLimits,
     /// Our preferences copy (see `FrontEndFacts::user_dir`).
     pub(super) prefs: RefCell<ntw_formats::preferences::Preferences>,
     screen: RefCell<(f32, f32)>,
@@ -179,6 +181,8 @@ pub(super) struct Inner {
     logged_once: RefCell<std::collections::HashSet<String>>,
     /// What [`Inner::log_once_for`] has logged, per `what` (a lookup by `&str` allocates nothing).
     logged_keys: RefCell<std::collections::HashMap<&'static str, std::collections::HashSet<String>>>,
+    /// What [`Inner::log_once_for_pair`] has logged, per `what`, then first key, then second key.
+    logged_pairs: RefCell<std::collections::HashMap<&'static str, std::collections::HashMap<String, std::collections::HashSet<String>>>>,
     /// Engine events' calls into the scripts, made at the start of the next UI frame
     /// ([`Inner::post_call`]).
     posted_calls: RefCell<Vec<PostedCall>>,
@@ -235,6 +239,25 @@ impl Inner {
             let mut seen = self.logged_keys.borrow_mut();
             let keys = seen.entry(what).or_default();
             !keys.contains(key) && keys.insert(key.to_owned())
+        };
+        if first {
+            log(self, text());
+        }
+    }
+
+    /// [`Inner::log_once_for`] for a key of two parts (`a`, `b`): nothing is allocated once the
+    /// pair has been logged, so a call that hits it every time costs two lookups.
+    pub(super) fn log_once_for_pair(&self, what: &'static str, a: &str, b: &str, text: impl FnOnce() -> String) {
+        let first = {
+            let mut seen = self.logged_pairs.borrow_mut();
+            let firsts = seen.entry(what).or_default();
+            match firsts.get_mut(a) {
+                Some(seconds) => !seconds.contains(b) && seconds.insert(b.to_owned()),
+                None => {
+                    firsts.insert(a.to_owned(), std::collections::HashSet::from([b.to_owned()]));
+                    true
+                }
+            }
         };
         if first {
             log(self, text());
@@ -327,8 +350,9 @@ pub(super) fn node_of(v: &Value) -> Option<NodeId> {
 }
 
 impl UiScriptHost {
-    /// Creates the Lua state with the engine's UI functions.
-    pub fn new(source: ScriptSource, loc: Localisation, facts: FrontEndFacts, screen: (f32, f32)) -> mlua::Result<Self> {
+    /// Creates the Lua state with the engine's UI functions. `limits` are the game's caps
+    /// (`GameDatabase::limits`; tests pass `GameLimits::default()`, the original's).
+    pub fn new(source: ScriptSource, loc: Localisation, facts: FrontEndFacts, screen: (f32, f32), limits: ntw_sim::limits::GameLimits) -> mlua::Result<Self> {
         let lua = Lua::new();
         let prefs = super::frontend::load_preferences(facts.user_dir.as_deref(), facts.original_user_dir.as_deref());
         let inner = Rc::new(Inner {
@@ -336,6 +360,7 @@ impl UiScriptHost {
             source,
             loc,
             facts,
+            limits,
             prefs: RefCell::new(prefs),
             screen: RefCell::new(screen),
             root: RefCell::new(None),
@@ -353,6 +378,7 @@ impl UiScriptHost {
             layout_stale: std::cell::Cell::new(false),
             logged_once: RefCell::default(),
             logged_keys: RefCell::default(),
+            logged_pairs: RefCell::default(),
             posted_calls: RefCell::default(),
             script_context: std::cell::Cell::new(None),
             #[cfg(test)]
@@ -1741,11 +1767,16 @@ fn component_methods(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
         // often than the engine does: they call it only when the state differs (how the engine
         // itself marks selected cards is UNKNOWN), as a repeated SetState("Selected") would re-run
         // BattleUnitCard's "Selected" enter function every frame.
+        //
+        // SetState returns whether the component has a state of that name (CONFIRMED: the Lua
+        // binding `0x01013550` pushes the bool `0x01035B30` returns, false = not found, nothing
+        // changed). diplomacy_panel.luac's CreateButtons keeps an option button only when its
+        // icon child has the option's state and destroys it otherwise.
         let exists = inner.world.borrow().get(id).is_some_and(|n| n.current().is_some_and(|s| s.name == name));
         if exists {
             run_state_entry(lua, &inner, id, old)?;
         }
-        ret(lua, ())
+        ret(lua, exists)
     });
     // The geometry reads lay out first what changed since the last layout (layout rule,
     // [`lay_out_if_stale`]): Position, Dimensions, Width, Height, Bounds, MoveTo, Resize,
@@ -2284,6 +2315,14 @@ fn component_functions(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
         let id = node_of(&a);
         Ok(id.map(|id| addr(i2.world.borrow().root_of(id))))
     })?)?;
+    // FindChildAddress(id) → the address of the running component itself when its id matches,
+    // else the first match of a depth-first search of its children in order, or nil (CONFIRMED:
+    // binding `0x01018020` → `0x01029960`). The `diplomacy_button` template's NotifySelected
+    // passes its `button_tx` this way.
+    let i_find = i.clone();
+    t.set("FindChildAddress", lua.create_function(move |_, (a, id): (Value, String)| {
+        Ok(node_of(&a).and_then(|n| i_find.world.borrow().find(n, &id)).map(addr))
+    })?)?;
     let i3 = i.clone();
     t.set("Adopt", lua.create_function(move |lua, (a, child): (Value, Value)| {
         if let (Some(p), Some(c)) = (node_of(&a), node_of(&child)) {
@@ -2581,7 +2620,7 @@ pub(crate) mod tests {
     fn scripts_run_per_component_and_events_fire() {
         let script = "clicks = 0\nfunction OnLeftClickUp() clicks = clicks + 1; UIComponent(Address):SetState('down'); UIComponent(Component.Root()):SetGlobal('seen', Component.Address() == Address) end\nfunction InitState(t) last_state = t.State end";
         let source = ScriptSource::empty().with_memory_file("ui/test/page", layout_bytes(script));
-        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
         let root = host.load_root_layout("data/ui/test/page").unwrap();
         let button = host.world().find(root, "button").unwrap();
         host.fire(button, "OnMouseLClickUp");
@@ -2614,7 +2653,7 @@ pub(crate) mod tests {
         let source = ScriptSource::empty()
             .with_memory_file("ui/test/page", layout_bytes_with_root(root_script, ""))
             .with_memory_file("ui/test/label", layout_bytes(""));
-        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
         let root = host.load_root_layout("ui/test/page").unwrap();
         let panel = host.world().find(root, "button").unwrap();
         host.inner.world.borrow_mut().get_mut(panel).unwrap().data.priority = 47;
@@ -2646,7 +2685,7 @@ pub(crate) mod tests {
         let source = ScriptSource::empty()
             .with_memory_file("ui/test/page", layout_bytes_with_root(root_script, ""))
             .with_memory_file("ui/test/label", layout_bytes(""));
-        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
         let root = host.load_root_layout("ui/test/page").unwrap();
         let env = component_env(&host, root);
         let run = |code: &str| host.lua().load(code).set_environment(env.clone()).exec().unwrap();
@@ -2680,7 +2719,7 @@ pub(crate) mod tests {
         let source = ScriptSource::empty()
             .with_memory_file("ui/test/page", layout_bytes_with_root(root_script, ""))
             .with_memory_file("ui/test/label", layout_bytes(""));
-        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
         let root = host.load_root_layout("ui/test/page").unwrap();
         let env = component_env(&host, root);
         host.lua().load("Component.CreateFromLayout('data/ui/test/label', 'l1', Address, 0, 0)").set_environment(env.clone()).exec().unwrap();
@@ -2695,7 +2734,7 @@ pub(crate) mod tests {
     /// `log_once_for` logs a key's text once per `what`; the text is built only the first time.
     #[test]
     fn log_once_for_builds_its_text_once_per_key() {
-        let host = UiScriptHost::new(ScriptSource::empty(), Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        let host = UiScriptHost::new(ScriptSource::empty(), Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
         let built = std::cell::Cell::new(0);
         for key in ["a", "a", "b", "a"] {
             host.inner.log_once_for("test what", key, || {
@@ -2710,13 +2749,28 @@ pub(crate) mod tests {
         assert_eq!(built.get(), 3, "a, b and the other `what`'s a");
     }
 
+    /// `log_once_for_pair` logs a (first, second) pair once per `what`; ("a", "b") and ("b", "a")
+    /// are different pairs, and the text is built only the first time.
+    #[test]
+    fn log_once_for_pair_builds_its_text_once_per_pair() {
+        let host = UiScriptHost::new(ScriptSource::empty(), Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
+        let built = std::cell::Cell::new(0);
+        for (a, b) in [("a", "b"), ("a", "b"), ("b", "a"), ("a", "c"), ("a", "b")] {
+            host.inner.log_once_for_pair("pair what", a, b, || {
+                built.set(built.get() + 1);
+                format!("test {a} {b}")
+            });
+        }
+        assert_eq!(built.get(), 3, "a+b, b+a and a+c");
+    }
+
     /// `ReorderChildren(list)` as `0x01031ED0`: the list first, the children it leaves out after
     /// them in their order, and nothing changes when the list holds a duplicate, a component that
     /// is not a child or an index outside the children (answering false).
     #[test]
     fn reorder_children_puts_the_list_first_and_refuses_a_bad_list() {
         let source = ScriptSource::empty().with_memory_file("ui/test/page", layout_bytes(""));
-        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
         let root = host.load_root_layout("ui/test/page").unwrap();
         let env = component_env(&host, root);
         let run = |code: &str| -> bool { host.lua().load(code).set_environment(env.clone()).eval().unwrap() };
@@ -2762,7 +2816,7 @@ pub(crate) mod tests {
     /// `event`; `edit` then sets up the two states (0 = normal, 1 = down).
     fn state_function_page(script: &str, event: PointerEvent, edit: impl FnOnce(&mut [ntw_formats::ui_layout::UiState])) -> (UiScriptHost, NodeId) {
         let source = ScriptSource::empty().with_memory_file("ui/test/page", layout_bytes(script));
-        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
         let root = host.load_root_layout("ui/test/page").unwrap();
         let button = host.world().find(root, "button").unwrap();
         add_state_transition(&host, button, event, edit);
@@ -2818,7 +2872,7 @@ pub(crate) mod tests {
             "ui/test/page",
             layout_bytes_with_root("function InitState(t) table.insert(order, 'root') end", "function InitState(t) table.insert(order, 'button') end"),
         );
-        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
         host.lua.globals().set("order", host.lua.create_table().unwrap()).unwrap();
         host.load_root_layout("ui/test/page").unwrap();
         let order: Vec<String> = host.lua.globals().get::<Table>("order").unwrap().sequence_values().map(Result::unwrap).collect();
@@ -2979,7 +3033,7 @@ pub(crate) mod tests {
     #[test]
     fn reads_before_the_root_leave_no_stale_flags_and_the_root_is_laid_out() {
         let source = ScriptSource::empty().with_memory_file("ui/test/page", layout_bytes(""));
-        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
         host.set_screen(300.0, 200.0);
         let _ = host.world();
         assert!(!host.inner.layout_stale.get() && !host.inner.world.borrow().layout_dirty);
@@ -3002,7 +3056,7 @@ pub(crate) mod tests {
                 "function FocusKey(k, a, up) if up then UIComponent(Address):SetState('down') end end\nUIComponent(Address):SetEventCallback('OnKey', FocusKey)",
             ),
         );
-        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
         let root = host.load_root_layout("ui/test/page").unwrap();
         let button = host.world().find(root, "button").unwrap();
         {
@@ -3066,7 +3120,7 @@ pub(crate) mod tests {
                 "function InitState(t) local p = UIComponent(UIComponent(Address):Parent()); p:Resize(p:Width() - 10, 90) child_at = layouts() end",
             ),
         );
-        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
         expose_layout_counter(&host);
         let root = host.load_root_layout("ui/test/page").unwrap();
         // The root's state gets a text, so its InitState measures it; a copy of the root is the batch.
@@ -3423,7 +3477,7 @@ pub(crate) mod tests {
             c:SetStateTextXOffset(11)\n\
             x2 = c:GetStateTextDetails().XOffset";
         let source = ScriptSource::empty().with_memory_file("ui/test/page", layout_bytes(script));
-        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
         let root = host.load_root_layout("ui/test/page").unwrap();
         let button = host.world().find(root, "button").unwrap();
         let benv = component_env(&host, button);
@@ -3439,7 +3493,7 @@ pub(crate) mod tests {
     fn unknown_engine_calls_log_instead_of_failing() {
         let script = "FrontEnd.SomethingNew(1); UIComponent(Address):SomeMethod(); Component.Whatever()";
         let source = ScriptSource::empty().with_memory_file("ui/test/page", layout_bytes(script));
-        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
         host.load_root_layout("ui/test/page").unwrap();
         let log = host.take_log();
         assert!(log.iter().any(|l| l == "UNKNOWN FrontEnd.SomethingNew"), "{log:?}");
@@ -3456,7 +3510,7 @@ pub(crate) mod tests {
             local me = UIComponent(Address); UIComponent(me:Parent()):Divorce(Address); \
             me:MoveTo(30, 40); me:MoveTo(30, 40); px, py = me:Position() end";
         let source = ScriptSource::empty().with_memory_file("ui/test/page", layout_bytes(script));
-        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
         let root = host.load_root_layout("ui/test/page").unwrap();
         let button = host.world().find(root, "button").unwrap();
         host.fire(button, "OnMouseLClickUp");
@@ -3473,7 +3527,7 @@ pub(crate) mod tests {
     fn posted_calls_are_made_at_the_next_pulse_unless_cancelled() {
         let script = "seen = '' function Hear(x) seen = seen .. x end";
         let source = ScriptSource::empty().with_memory_file("ui/test/page", layout_bytes(script));
-        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
         let root = host.load_root_layout("ui/test/page").unwrap();
         let button = host.world().find(root, "button").unwrap();
         let post = |listener: &'static str, name: &'static str, x: &str| {

@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use ntw_data::GameDatabase;
 use ntw_formats::campaign_map::{CampaignMap, FileSpan, GameFiles, SuperTexture, DISPLAY_TO_LOGIC, HEIGHT_SCALE};
+use ntw_sim::campaign::features::CampaignFeatures;
 use ntw_sim::campaign::{CampaignModel, Terrain};
 
 use crate::header_map::TheatrePictures;
@@ -83,6 +84,11 @@ pub trait CampaignSource {
     fn new_campaign(&self, db: &GameDatabase) -> Result<LoadedCampaign, SourceError>;
     /// The campaign's map, for the facts in `info` (its map key and header theatres).
     fn map(&self, db: &GameDatabase, info: &CampaignInfo) -> Result<MapData, SourceError>;
+    /// The campaign's own rule switches from its data, replacing the ones the rules get from the
+    /// campaign key ([`crate::features::original`]). `None` (the original's importer): the key's.
+    fn features(&self) -> Option<CampaignFeatures> {
+        None
+    }
 }
 
 /// The original's start position of campaign `key`, as a game path.
@@ -244,8 +250,10 @@ pub fn find<'a>(files: GameFiles<'a>, key: &str) -> Option<Box<dyn CampaignSourc
 /// How a campaign starts.
 #[derive(Debug, Clone, Copy)]
 pub enum Start<'a> {
-    /// A new campaign of this key.
-    New(&'a str),
+    /// A new campaign of this key, with the player's `campaign_unit_multiplier` preference (`None`:
+    /// its default), which sets the new campaign's units per army / navy
+    /// ([`ntw_sim::campaign::rules::ForceCaps::new_campaign`]).
+    New(&'a str, Option<f32>),
     /// A save: one of ours ([`crate::own_save`]) or an original `.save` (read through the importer).
     Save(&'a [u8]),
 }
@@ -261,9 +269,11 @@ pub struct OpenedCampaign {
 /// The one entry point: opens a new campaign or a save, with its campaign's map.
 pub fn open(files: GameFiles<'_>, start: Start<'_>, db: &GameDatabase) -> Result<OpenedCampaign, SourceError> {
     let (source, mut loaded) = match start {
-        Start::New(key) => {
+        Start::New(key, unit_multiplier) => {
             let source = find(files, key).ok_or_else(|| SourceError::NotFound(key.to_owned()))?;
-            let loaded = source.new_campaign(db)?;
+            let mut loaded = source.new_campaign(db)?;
+            // Not the start position's own 20 / 14: a new campaign sets its caps (`0x00872550`).
+            loaded.model.force_caps = ntw_sim::campaign::rules::ForceCaps::new_campaign(&loaded.model.rules.limits, unit_multiplier);
             (source, loaded)
         }
         Start::Save(bytes) => {
@@ -273,6 +283,9 @@ pub fn open(files: GameFiles<'_>, start: Start<'_>, db: &GameDatabase) -> Result
             (source, loaded)
         }
     };
+    if let Some(features) = source.features() {
+        Arc::make_mut(&mut loaded.model.rules).features = features;
+    }
     let map = source.map(db, &loaded.info)?;
     map.attach(&mut loaded.model);
     // The names new characters get when they are created (game data, like the rules).

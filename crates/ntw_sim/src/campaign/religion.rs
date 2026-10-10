@@ -55,7 +55,7 @@ pub fn missionary_rank(model: &CampaignModel, c: CharacterId) -> i32 {
     let Some(ch) = model.world.characters.get(&c) else { return -1 };
     let level = model.world.character_details.get(&c).and_then(|d| d.attributes.iter().find(|(k, _)| k == "zeal").map(|(_, v)| *v)).unwrap_or(-1);
     let mut bonus = super::effects::Effects::character_effects(model, c).get_int("zeal_europe");
-    if model.rules.campaign == "spa_napoleon" {
+    if model.rules.features.faction_zeal {
         bonus += super::effects::Effects::faction_sum(model, ch.faction).get_int("zeal_europe");
     }
     (level + bonus).clamp(-1, 9)

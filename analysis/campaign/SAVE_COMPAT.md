@@ -141,8 +141,8 @@ vanilla pairs (§19).
   template index (both CONFIRMED, S1_LEFTOVERS.md §2); UI `unknown_e5` = UseGlobalClicks, behaviour CONFIRMED in
   every use (UI_LAYOUT_FORMAT.md). BACKLOG §1 wording updated; check marks left to the manager.
 - Names background (§14): pools, weights, shuffle and builder CONFIRMED (`names_fit`,
-  `names_sizes`, `names_refill`). Regiment names (§20): land list class = row index of
-  `unit_class` (CONFIRMED); a new unit takes the lowest free name of its class (INFERRED, ~99%).
+  `names_sizes`, `names_refill`). Regiment names (§20): land list class = the exe's class
+  code (`0x00EED3E0`; the map holds codes 0..0x16, `0x00880670`, CONFIRMED); a new unit takes the lowest free name of its class (INFERRED, ~99%).
 - Small fix owed: the `World::embarked` doc in `ntw_sim` still says our writer does not store the
   link; it does now (§16).
 - Round 1 (NR-1..3): NR-1 loaded but France played itself; NR-2/NR-3 crashed at ~25% of the
@@ -775,7 +775,10 @@ obsolete): `NR-9 France AI turns.save` (= NR-7, 5 End Turns) and `NR-10 France r
 build.save` (= NR-8).
 ## 20. Regiment and ship names of new units (2026-10-04, morning)
 - **Rules (vanilla evidence, `regiment_names` example).**
-  - The land list's class number is the row index of the `unit_class` table (CONFIRMED).
+  - The land list's class number is the exe's class code (`0x00EED3E0`, `ntw_sim::unit_kind::class_code`):
+    `0x00880670` builds the land map for codes 0..0x16, the naval allocator `0x00881DB0` for
+    0x17..0x2D (CONFIRMED). The vanilla `unit_class` table lists the same keys in the same order, so
+    its row index gave the same numbers on vanilla data.
   - Each list holds that class's `unit_regiment_names` rows of order ≥ 1. The trailing name is the
     order −1 row.
   - Ships have one list per faction.

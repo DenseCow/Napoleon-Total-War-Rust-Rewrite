@@ -3,80 +3,28 @@
 //!
 //! CONFIRMED (round 4): a battle unit's type record (`unit+0x2C`) holds the **category** at
 //! `+0x1C` and the **class** at `+0x20` (both compared by the script condition `0x00531E50`). The
-//! `units` table strings become these enums through two compare chains:
-//! * category `0x00EED2B0`: cavalry 0, artillery 1 (also the default), infantry 2, dragoons 3,
-//!   elephants 4, cavalry_camels 5, naval_line_of_battle 6, naval_frigate 7, naval_galley 8,
-//!   naval_specialist 9, naval_auxiliary 10, naval_merchant 11, naval_invasion_fleet 12;
-//! * class `0x00EED3E0`: the 46 names of [`CLASS_NAMES`] in order (artillery_fixed 0 …
-//!   infantry_line 0x12 … naval_transport 0x2D); an empty key gives 0x2E.
+//! `units` table strings become these codes through the exe's two compare chains, kept in one place:
+//! [`ntw_sim::unit_kind`] (category `0x00EED2B0`, an unknown key artillery; class `0x00EED3E0`, an
+//! unknown key 0). The script condition gives an empty class key 0x2E ([`class::NONE`]).
 
 use ntw_sim::battle::model::LandUnit;
 
-/// Category codes (`0x00EED2B0`).
+/// Category codes (`0x00EED2B0`, [`ntw_sim::unit_kind::Category`]).
 pub mod category {
+    use ntw_sim::unit_kind::Category;
     /// `cavalry`.
-    pub const CAVALRY: u8 = 0;
+    pub const CAVALRY: u8 = Category::Cavalry as u8;
     /// `artillery` (and any unknown key).
-    pub const ARTILLERY: u8 = 1;
+    pub const ARTILLERY: u8 = Category::Artillery as u8;
     /// `infantry`.
-    pub const INFANTRY: u8 = 2;
+    pub const INFANTRY: u8 = Category::Infantry as u8;
     /// `dragoons`.
-    pub const DRAGOONS: u8 = 3;
+    pub const DRAGOONS: u8 = Category::Dragoons as u8;
     /// `elephants`.
-    pub const ELEPHANTS: u8 = 4;
+    pub const ELEPHANTS: u8 = Category::Elephants as u8;
     /// `cavalry_camels`.
-    pub const CAMELS: u8 = 5;
+    pub const CAMELS: u8 = Category::Camels as u8;
 }
-
-/// Class names in enum order (`0x00EED3E0`, CONFIRMED).
-pub const CLASS_NAMES: [&str; 46] = [
-    "artillery_fixed",
-    "artillery_foot",
-    "artillery_horse",
-    "cavalry_camels",
-    "cavalry_heavy",
-    "cavalry_irregular",
-    "cavalry_lancers",
-    "cavalry_light",
-    "cavalry_missile",
-    "cavalry_standard",
-    "dragoons",
-    "elephants",
-    "general",
-    "infantry_berserker",
-    "infantry_elite",
-    "infantry_grenadiers",
-    "infantry_irregulars",
-    "infantry_light",
-    "infantry_line",
-    "infantry_melee",
-    "infantry_militia",
-    "infantry_mob",
-    "infantry_skirmishers",
-    "naval_admiral",
-    "naval_bomb_ketch",
-    "naval_brig",
-    "naval_dhow",
-    "naval_fifth_rate",
-    "naval_first_rate",
-    "naval_fourth_rate",
-    "naval_galleon",
-    "naval_heavy_galley",
-    "naval_indiaman",
-    "naval_light_galley",
-    "naval_lugger",
-    "naval_medium_galley",
-    "naval_over_first_rate",
-    "naval_razee",
-    "naval_rocket_ship",
-    "naval_second_rate",
-    "naval_sixth_rate",
-    "naval_sloop",
-    "naval_steam_ship",
-    "naval_third_rate",
-    "naval_xebec",
-    "naval_transport",
-];
 
 /// Class codes used by the battle AI.
 pub mod class {
@@ -106,29 +54,15 @@ pub mod class {
     pub const NONE: u8 = 0x2E;
 }
 
-/// Category code of a `units` category key (`0x00EED2B0`, CONFIRMED; unknown keys give 1).
+/// Category code of a `units` category key ([`ntw_sim::unit_kind::category`]; unknown keys give 1).
 pub fn category_code(key: &str) -> u8 {
-    match key {
-        "cavalry" => 0,
-        "infantry" => 2,
-        "dragoons" => 3,
-        "elephants" => 4,
-        "cavalry_camels" => 5,
-        "naval_line_of_battle" => 6,
-        "naval_frigate" => 7,
-        "naval_galley" => 8,
-        "naval_specialist" => 9,
-        "naval_auxiliary" => 10,
-        "naval_merchant" => 11,
-        "naval_invasion_fleet" => 12,
-        _ => 1,
-    }
+    ntw_sim::unit_kind::category(key).code()
 }
 
-/// Class code of a `units` class key (`0x00EED3E0`, CONFIRMED; the chain returns 0x2E for keys it
-/// does not know too, INFERRED from the empty-key case).
+/// Class code of a `units` class key ([`ntw_sim::unit_kind::class_code`]: `0x00EED3E0`, CONFIRMED, an
+/// unknown key 0); an empty key [`class::NONE`] as the script condition `0x00531E50`.
 pub fn class_code(key: &str) -> u8 {
-    CLASS_NAMES.iter().position(|n| *n == key).map_or(class::NONE, |i| i as u8)
+    if key.is_empty() { class::NONE } else { ntw_sim::unit_kind::class_code(key) }
 }
 
 /// `(category, class)` of a model unit. From its `units` keys when the battle set them; else a
@@ -255,6 +189,7 @@ mod tests {
         assert_eq!(category_code("cavalry"), 0);
         assert_eq!(category_code("dragoons"), 3);
         assert_eq!(category_code("whatever"), 1);
+        assert_eq!(class_code("samurai_archers"), 0, "an unknown class is 0 (0x00EED3E0's last branch)");
     }
 
     fn unit(cat: &str, cls: &str, pos: (f32, f32), facing: f32) -> LandUnit {

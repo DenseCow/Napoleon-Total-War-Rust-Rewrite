@@ -83,6 +83,9 @@ pub struct CampaignLink {
     pub campaign: String,
     /// The campaign's map key, e.g. `nap_europe` (from its campaign source, `ntw_campaign::source`).
     pub map: String,
+    /// The campaign's theatres (area keys, e.g. `europe_main`; [`ntw_campaign::CampaignInfo::theatres`]):
+    /// the first is its home theatre.
+    pub theatres: Vec<String>,
     /// The game database (units, buildings, factions).
     pub db: Rc<GameDatabase>,
 }
@@ -249,7 +252,7 @@ pub(super) struct CampaignUi {
     tech_links: std::cell::OnceCell<TechLinks>,
     /// `ministerial_positions_by_gov_types` rows (faction, post, government, _, string key), read
     /// once (see [`character_details`]).
-    post_names: std::cell::OnceCell<Vec<Vec<ntw_formats::db::DbValue>>>,
+    post_names: std::cell::OnceCell<crate::source::SharedRows>,
     /// See `CampaignUi::map_folder`.
     map_folder: std::cell::OnceCell<String>,
     /// `campaign_map_playable_areas`, see `CampaignUi::playable_area`.
@@ -264,8 +267,6 @@ pub(super) struct CampaignUi {
     slot_types: std::cell::OnceCell<HashMap<String, ntw_data::SlotTypeRecord>>,
     /// AttachRadarView's component and UpdateRadarView's mapping.
     radar_view: RefCell<(Option<NodeId>, Option<RadarMapping>)>,
-    /// See `CampaignUi::attitude_levels`.
-    attitude_levels: std::cell::OnceCell<HashMap<String, i32>>,
     /// See `CampaignUi::religion_icon`.
     religion_icons: std::cell::OnceCell<HashMap<String, String>>,
     /// See `CampaignUi::order_factor_pip`.
@@ -1002,7 +1003,6 @@ impl UiScriptHost {
             camera_target: Cell::new((0.0, 0.0, 0.0)),
             slot_types: std::cell::OnceCell::new(),
             radar_view: RefCell::new((None, None)),
-            attitude_levels: std::cell::OnceCell::new(),
             religion_icons: std::cell::OnceCell::new(),
             order_factor_pips: std::cell::OnceCell::new(),
             town_factor_pips: std::cell::OnceCell::new(),
@@ -1292,21 +1292,15 @@ impl CampaignUi {
         rows.iter().find(|r| r.area.eq_ignore_ascii_case(theatre) || r.id == theatre).cloned()
     }
 
-    /// The campaign's theatre: its `campaign_map_playable_areas` row (see `theatre_of`).
-    fn theatre(&self, inner: &Inner) -> Option<ntw_data::CampaignMapPlayableArea> {
-        self.playable_area(inner, theatre_of(&self.link.campaign).0)
+    /// The campaign's home theatre: its first theatre's area key ([`CampaignLink::theatres`]; "" for a
+    /// campaign without one).
+    fn home_theatre(&self) -> &str {
+        self.link.theatres.first().map_or("", String::as_str)
     }
 
-    /// `diplomatic_relations_attitudes` (level key → attitude value), read once.
-    fn attitude_levels(&self, inner: &Inner) -> HashMap<String, i32> {
-        self.attitude_levels
-            .get_or_init(|| {
-                small_table(inner, &tables::DIPLOMATIC_RELATIONS_ATTITUDES)
-                    .into_iter()
-                    .filter_map(|r| Some((r.first()?.as_str()?.to_owned(), r.get(1)?.as_i32()?)))
-                    .collect()
-            })
-            .clone()
+    /// The campaign's home theatre's `campaign_map_playable_areas` row.
+    fn theatre(&self, inner: &Inner) -> Option<ntw_data::CampaignMapPlayableArea> {
+        self.playable_area(inner, self.home_theatre())
     }
 
     /// A public order factor's pip picture for its sign (`public_order_factors` column 1 for a
@@ -1316,7 +1310,7 @@ impl CampaignUi {
     fn order_factor_pip(&self, inner: &Inner, key: &str, positive: bool) -> Option<String> {
         let pips = self.order_factor_pips.get_or_init(|| {
             small_table(inner, &tables::PUBLIC_ORDER_FACTORS)
-                .into_iter()
+                .iter()
                 .filter_map(|r| {
                     let s = |i: usize| r.get(i).and_then(|v| v.as_str()).unwrap_or("").to_owned();
                     Some((r.first()?.as_str()?.to_owned(), (s(1), s(2))))
@@ -1338,7 +1332,7 @@ impl CampaignUi {
     fn town_factor_pip(&self, inner: &Inner, key: &str) -> Option<String> {
         let pips = self.town_factor_pips.get_or_init(|| {
             small_table(inner, &tables::TOWN_WEALTH_GROWTH_FACTORS)
-                .into_iter()
+                .iter()
                 .filter_map(|r| Some((r.first()?.as_str()?.to_owned(), r.get(1)?.as_str()?.to_owned())))
                 .collect()
         });
@@ -1355,7 +1349,7 @@ impl CampaignUi {
         self.religion_icons
             .get_or_init(|| {
                 small_table(inner, &tables::RELIGIONS)
-                    .into_iter()
+                    .iter()
                     .filter_map(|r| Some((r.first()?.as_str()?.to_owned(), r.get(2)?.as_str()?.to_owned())))
                     .collect()
             })
@@ -1371,7 +1365,7 @@ impl CampaignUi {
         self.portrait_folders
             .get_or_init(|| {
                 small_table(inner, &tables::CULTURES)
-                    .into_iter()
+                    .iter()
                     .filter_map(|r| Some((r.first()?.as_str()?.to_owned(), r.get(2)?.as_str()?.to_owned())))
                     .collect()
             })
@@ -1463,8 +1457,8 @@ impl CampaignUi {
 }
 
 /// The rows of a small DB table through the merged table reader, empty if the table is missing or
-/// does not read (logged once, `ScriptSource::table_rows`).
-fn small_table(inner: &Inner, table: &RawTable) -> Vec<Vec<ntw_formats::db::DbValue>> {
-    inner.source.table_rows(table).unwrap_or_default()
+/// does not read (logged once, `ScriptSource::table_rows_shared`).
+fn small_table(inner: &Inner, table: &RawTable) -> crate::source::SharedRows {
+    inner.source.table_rows_or_empty(table)
 }
 

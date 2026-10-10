@@ -18,7 +18,8 @@
 //!   CategoryMask = 63}`, with the array part as the category limits `{Max, Actual, Tag}`.
 //!   - The faction's preset is found through `battle_type_setup_limits` (type, "balanced", size,
 //!     era) → `battle_type_faction_presets` → `battle_type_unit_to_faction_presets`.
-//!   - The units are cut to the unit limit: 20 on land, by unit scale at sea (6 / 8 / 10 / 20).
+//!   - The units are cut to the unit limit: 20 on land, by unit scale at sea (6 / 8 / 10 / 20;
+//!     the moddable `ntw_sim::limits::GameLimits::max_units`).
 //!   - Then their experience is raised one step at a time, round the units, while the total
 //!     stays under the army size's funds (`ArmyFundsForSize`), up to experience 9.
 //!   - Without a preset: Units / Ships empty, Cost 0.
@@ -46,10 +47,10 @@ use ntw_formats::db_folder::{RawTable, tables};
 use super::army_file::{ArmySetupFile, BattlePrefsFile, Card, Limit};
 use super::host::Inner;
 
-/// The unit classes in `unit_class` table order (`ClassID`; general 12, naval_admiral 23,
-/// CONFIRMED by the exe's tests `+0x20 == 0xC / 0x17`).
+/// The unit's class code, record +0x20 (`ClassID`; general 12, naval_admiral 23, CONFIRMED by the
+/// exe's tests `+0x20 == 0xC / 0x17`; [`ntw_sim::unit_kind::class_code`], an unknown key 0).
 fn class_id(class: &str) -> i32 {
-    ntw_campaign::regiments::UNIT_CLASSES.iter().position(|c| *c == class).map_or(-1, |i| i as i32)
+    i32::from(ntw_sim::unit_kind::class_code(class))
 }
 
 /// MP category index (`MPCategory`, record +0x6C; order INFERRED: artillery, cavalry, infantry,
@@ -82,10 +83,12 @@ pub struct ArmyData {
     faction_presets: BTreeMap<(String, i32), i32>,
     /// preset id → (unit key, experience) in table order.
     preset_units: BTreeMap<i32, Vec<(String, i32)>>,
+    /// The gameplay caps (unit limits, funds) from the merged `_kv_rules`.
+    game_limits: ntw_sim::limits::GameLimits,
 }
 
-fn table(inner: &Inner, table: &RawTable) -> Vec<Vec<DbValue>> {
-    inner.source.table_rows(table).unwrap_or_default()
+fn table(inner: &Inner, table: &RawTable) -> crate::source::SharedRows {
+    inner.source.table_rows_or_empty(table)
 }
 
 fn st(v: &DbValue) -> String {
@@ -95,14 +98,14 @@ fn st(v: &DbValue) -> String {
 impl ArmyData {
     /// Reads the tables (missing ones stay empty).
     pub(super) fn load(inner: &Inner) -> ArmyData {
-        let mut d = ArmyData::default();
+        let mut d = ArmyData { game_limits: inner.limits.clone(), ..ArmyData::default() };
         if let Some(t) = inner.source.typed_table::<ntw_data::UnitRecord>() {
             d.units = t.rows().iter().map(|u| (u.key.clone(), u.clone())).collect();
         }
         if let Some(t) = inner.source.typed_table::<ntw_data::UnitStatsLand>() {
             d.men = t.rows().iter().map(|u| (u.key.clone(), u.num_men)).collect();
         }
-        for r in table(inner, &tables::UNIFORMS) {
+        for r in table(inner, &tables::UNIFORMS).iter() {
             d.faction_units.entry(st(&r[1])).or_default().push(st(&r[3]));
         }
         // The experience rows by rank; a row whose key is not a rank cannot be looked up as one.
@@ -112,21 +115,21 @@ impl ArmyData {
         if let Some(t) = inner.source.typed_table::<ntw_data::UnitStatsNavalExperienceBonuses>() {
             d.xp_naval = t.rows().iter().filter_map(|r| Some((r.rank.parse().ok()?, r.clone()))).collect();
         }
-        for r in table(inner, &tables::BATTLE_TYPE_SETUP_LIMITS) {
+        for r in table(inner, &tables::BATTLE_TYPE_SETUP_LIMITS).iter() {
             let n = |i: usize| r[i].as_i32().unwrap_or(0);
             d.limits.insert((st(&r[0]), st(&r[1]), st(&r[2]), st(&r[3])), ([n(4), n(5), n(6)], n(10)));
         }
-        for r in table(inner, &tables::BATTLE_TYPE_FACTION_PRESETS) {
+        for r in table(inner, &tables::BATTLE_TYPE_FACTION_PRESETS).iter() {
             d.faction_presets.insert((st(&r[0]), r[1].as_i32().unwrap_or(0)), r[2].as_i32().unwrap_or(0));
         }
-        for r in table(inner, &tables::BATTLE_TYPE_UNIT_TO_FACTION_PRESETS) {
+        for r in table(inner, &tables::BATTLE_TYPE_UNIT_TO_FACTION_PRESETS).iter() {
             d.preset_units.entry(r[1].as_i32().unwrap_or(0)).or_default().push((st(&r[2]), r[3].as_i32().unwrap_or(0)));
         }
         d
     }
 
     fn is_naval(&self, key: &str) -> bool {
-        self.units.get(key).is_some_and(|u| u.category.starts_with("naval"))
+        self.units.get(key).is_some_and(|u| ntw_sim::unit_kind::category(&u.category).is_naval())
     }
 
     /// The unit's MP cost in an era (`+0x2C` early, `+0x30` later).
@@ -187,7 +190,7 @@ fn unit_details(lua: &Lua, inner: &Inner, d: &ArmyData, faction: &str, key: &str
     t.set("Men", men)?;
     t.set("DisplayNumber", if naval { men } else { (men as f32 * scale).round() as i32 })?;
     t.set("IsNaval", naval)?;
-    let artillery = u.is_some_and(|u| u.category == "artillery");
+    let artillery = u.is_some_and(|u| ntw_sim::unit_kind::category(&u.category) == ntw_sim::unit_kind::Category::Artillery);
     t.set("IsArtillery", artillery)?;
     t.set("IsFixedArtillery", u.is_some_and(|u| u.unit_class == "artillery_fixed"))?;
     t.set("UnitLimit", 0)?;
@@ -224,9 +227,10 @@ pub fn balanced_army(d: &ArmyData, faction: &str, kind: &str, size: i64, era: i6
     let late = era > 0;
     let naval = kind == "naval";
     let units = d.faction_presets.get(&(faction.to_owned(), id)).and_then(|p| d.preset_units.get(p)).cloned().unwrap_or_default();
-    let max = if naval { super::battle_setup::max_units(scale).1 as usize } else { 20 };
+    let (land_max, naval_max) = d.game_limits.max_units(scale);
+    let max = if naval { naval_max } else { land_max } as usize;
     let mut units: Vec<(String, i32)> = units.into_iter().take(max).collect();
-    let funds = super::battle_setup::army_funds(size, naval);
+    let funds = d.game_limits.custom_battle_funds(size, naval);
     let mut total: i32 = units.iter().map(|(k, x)| d.xp_cost(k, *x, late)).sum();
     loop {
         let mut changed = false;
@@ -427,7 +431,7 @@ fn install_files(lua: &Lua, inner: &Rc<Inner>, t: &Table, data: &Rc<std::cell::O
         let s = |k: usize| args.get(k).and_then(|v| v.as_string().map(|s| s.to_string_lossy())).unwrap_or_default();
         let n = |k: usize| args.get(k).and_then(int_of);
         let (dir, pattern) = (s(0), s(1));
-        let (era, funds, limit) = (n(2).unwrap_or(0) as i32, n(3).unwrap_or(0) as i32, n(4).unwrap_or(20) as usize);
+        let (era, funds, limit) = (n(2).unwrap_or(0) as i32, n(3).unwrap_or(0) as i32, n(4).map_or(d.game_limits.max_land_units as usize, |v| v as usize));
         let factions: Vec<String> = match args.get(5) {
             Some(Value::Table(t)) => t.clone().sequence_values::<Table>().flatten().map(|e| get_str(&e, "Key")).collect(),
             _ => Vec::new(),
@@ -519,7 +523,7 @@ fn install_files(lua: &Lua, inner: &Rc<Inner>, t: &Table, data: &Rc<std::cell::O
                 .iter()
                 .map(|r| [st(&r[0]), st(&r[1]), st(&r[2]), r[3].as_str().unwrap_or_default().to_owned()])
                 .collect();
-            let groups = super::battle_setup::factions(&i).unwrap_or_default().into_iter().map(|f| (f.key.clone(), f.secondary_names_group.clone())).collect();
+            let groups = super::battle_setup::factions_table(&i).map(|t| t.rows().iter().map(|f| (f.key.clone(), f.secondary_names_group.clone())).collect()).unwrap_or_default();
             (rows, groups)
         });
         let Some(group) = groups.get(&faction) else { return Ok("Invalid faction".to_owned()) };
@@ -725,7 +729,7 @@ fn file_to_prefs(lua: &Lua, inner: &Inner, d: &ArmyData, f: &BattlePrefsFile) ->
     p.set("time_limit_string", f.time_limit_string.as_str())?;
     p.set("allowed_funds", f.allowed_funds)?;
     p.set("ranked", f.ranked)?;
-    let scale = inner.prefs.borrow().get("gfx_unit_scale").and_then(|v| v.trim().parse::<i32>().ok()).unwrap_or(3).clamp(0, 3);
+    let scale = super::battle_setup::unit_scale_setting(inner, None);
     p.set("unit_scale", scale)?;
     let armies = lua.create_table()?;
     for (k, t) in f.teams.iter().enumerate() {
@@ -767,7 +771,9 @@ fn writable(inner: &Inner, path: &Path) -> bool {
 /// `ValidateArmySetup(setup, is_naval, era)` (`0x00479690`) → (setup, cost[, error]).
 /// CONFIRMED structure: the land units are checked in a land battle, the ships at sea; a unit
 /// stays when its record exists, it is available in the era (`+0x70..+0x72`), fewer than 20
-/// units were kept, its MP cost is above 0 and the faction fields it; each kept entry gets
+/// units were kept (a literal for both kinds, `0x00479A79` / `0x00479EE7`; ours is
+/// `GameLimits::max_setup_units`, 20 for both in the original), its MP cost is above 0 and the
+/// faction fields it; each kept entry gets
 /// MPCost and Men, and the cost adds up its experience-adjusted cost. The error is the
 /// localised `invalid_units` when the setup holds the other kind of units (ships in a land
 /// battle or units at sea), `no_valid_units` when no unit stays (INFERRED message keys: the exe
@@ -785,7 +791,8 @@ fn validate(lua: &Lua, inner: &Inner, d: &ArmyData, setup: &Table, naval: bool, 
             continue;
         }
         let kept = lua.create_table()?;
-        let mut n = 0;
+        let cap = i64::from(d.game_limits.max_setup_units(naval));
+        let mut n: i64 = 0;
         for e in list.iter() {
             let k = get_str(e, "Key");
             let xp = get_int(e, "Experience");
@@ -796,7 +803,7 @@ fn validate(lua: &Lua, inner: &Inner, d: &ArmyData, setup: &Table, naval: bool, 
                 _ => u.unknown_96,
             };
             let mp = d.mp_cost(&k, late);
-            if n >= 20 || !in_era || mp <= 0 || !fielded.contains(k.as_str()) {
+            if n >= cap || !in_era || mp <= 0 || !fielded.contains(k.as_str()) {
                 continue;
             }
             cost += d.xp_cost(&k, xp, late);

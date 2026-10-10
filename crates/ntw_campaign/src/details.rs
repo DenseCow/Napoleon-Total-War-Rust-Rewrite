@@ -185,7 +185,7 @@ pub(crate) fn faction_details(f: &EsfRecord) -> (FactionDetails, Option<(String,
 fn read_governorship(g: &EsfRecord) -> Governorship {
     let t = g.child("GOVERNORSHIP_TAXES");
     let u8_at = |i: usize| match t.and_then(|t| t.get(i)) {
-        Some(EsfNode::U8(v)) => *v,
+        Some(EsfNode::U8(v)) => i32::from(*v),
         _ => 0,
     };
     Governorship {

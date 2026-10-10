@@ -192,7 +192,7 @@ fn unit_icon(inner: &Inner, db: &GameDatabase, faction: &str, unit_key: &str) ->
 /// per-card `is_naval` = `[card+0xA0] != 0` (0x009FE7B0) is one flag on the card; which field it is
 /// built from was not decoded, and no script-facing name for it exists.
 fn is_ship(db: &GameDatabase, key: &str) -> bool {
-    db.unit(key).is_some_and(|u| u.category.starts_with("naval")) || (db.unit(key).is_some() && db.unit_stats(key).is_none())
+    db.unit(key).is_some_and(|u| ntw_sim::unit_kind::category(&u.category).is_naval()) || (db.unit(key).is_some() && db.unit_stats(key).is_none())
 }
 
 /// The card state a unit category picks (`artillery`, `infantry`, `cavalry`, `naval`: the
@@ -202,9 +202,10 @@ fn card_category(db: &GameDatabase, unit_key: &str) -> &'static str {
     if is_ship(db, unit_key) {
         return "naval";
     }
-    match db.unit(unit_key).map(|u| u.category.as_str()).unwrap_or("") {
-        "cavalry" => "cavalry",
-        "artillery" => "artillery",
+    use ntw_sim::unit_kind::Category;
+    match db.unit(unit_key).map(|u| ntw_sim::unit_kind::category(&u.category)) {
+        Some(Category::Cavalry) => "cavalry",
+        Some(Category::Artillery) => "artillery",
         _ => "infantry",
     }
 }
@@ -221,10 +222,11 @@ fn card_category(db: &GameDatabase, unit_key: &str) -> &'static str {
 /// slot, faction_key. card_id = "<unit>!recruitable!<n>" / "<unit>!enqueued!<n>" (the card script
 /// cuts the id at "!"; the exe strings "!recruitable!" and "!enqueued!" CONFIRMED, the index suffix
 /// INFERRED). PROVISIONAL: the entries' experience 0 (a unit being raised is a fresh recruit);
-/// reasons_unavailable is the entry's flags (`CampaignModel::recruitable_entry_flags`, `0x00B69BA0`),
-/// whose 1 / 2 / 4 / 0x40 are bits 0 / 1 / 2 / 6 of that list (no slot = queue full, unaffordable,
-/// population, limit), INFERRED from that match, not from the generator; the queue's turns are the
-/// remaining turns.
+/// reasons_unavailable is the entry's flags (`CampaignModel::recruitable_entry_flags`: the building
+/// flags of `0x00B43CA0` and those of `0x00B69BA0`), each flag bit i being reason i of that list (1 / 2 / 4
+/// no slot = queue full, unaffordable, population; 8 / 0x10 / 0x20 damaged, occupied, siege; 0x40 limit;
+/// 0x80 technology), INFERRED from that match of all eight, not from the generator; the queue's turns are
+/// the remaining turns.
 ///
 /// Naval (0-E round N+1). The generator is `0x009FE7B0` (14,199 bytes), CONFIRMED as the owner of
 /// every string named above. There is no `GenerateNaval` symbol in the exe: the only generator
@@ -315,7 +317,7 @@ impl UnitDetails {
             name: loc(inner, &format!("units_on_screen_name_{key}")).unwrap_or_else(|| key.to_owned()),
             description: loc(inner, &format!("unit_description_texts_description_text_{key}")).unwrap_or_default(),
             class: loc(inner, &format!("unit_class_onscreen_{class}")).unwrap_or(class),
-            naval: u.is_some_and(|u| u.category.starts_with("naval")),
+            naval: u.is_some_and(|u| ntw_sim::unit_kind::category(&u.category).is_naval()),
             artillery: s.is_some_and(|s| s.is_artillery),
             stats: s.map(|s| UnitDetailStats {
                 men: i64::from(s.num_men),
@@ -378,23 +380,23 @@ pub(super) fn recruitment_info(lua: &Lua, inner: &Inner, ui: &CampaignUi, region
     let is_naval = |k: &str| is_ship(&ui.link.db, k);
     // The naval tab shows the ships only (`units` #2 category, CONFIRMED source of the generator's
     // own `is_naval`), both among the recruitable units and in the queue.
-    let shown = |k: &String| !naval || is_naval(k);
-    let recruitable: Vec<&String> = recruitable.iter().filter(|k| shown(k)).collect();
+    let shown = |k: &str| !naval || is_naval(k);
+    let recruitable: Vec<&ntw_sim::campaign::commands::RecruitableUnit> = recruitable.iter().filter(|e| shown(&e.unit_key)).collect();
     let queue: Vec<(RecruitmentItemId, String, u32, i32)> =
         r.recruitment_queue.iter().filter(|q| shown(&q.unit_key)).map(|q| (q.id, q.unit_key.clone(), q.turns_remaining, q.cost)).collect();
     // The price is the region's recruitable entry cost (`0x00B31020` → `0x00B0D220`: `units` #7 with the
     // region's cost effects), the value the queue command charges and the item records, and the reasons are
-    // the entry's flags (`0x00B69BA0`): both come from the model functions the queue command uses, so the
+    // the entry's flags (its building flags and `0x00B69BA0`'s): both come from the model functions the queue command uses, so the
     // card can never drift from the command. `upkeep` stays the unit type's own `UpkeepCost` (`card+0x3C`),
     // which is what the panel shows.
     let set = economy::region_effect_set(&m, r);
     let counts = m.unit_type_counts(r.owner);
     let rules: Vec<(i32, i32, u32, u32)> = recruitable
         .iter()
-        .map(|k| {
-            m.rules.units.get(*k).map_or((0, 0, 1, 0), |u| {
-                let cost = economy::recruitment_cost_in(&m.rules, &set, k, u);
-                (cost, u.upkeep, u.turns, m.recruitable_entry_flags(r, k, u, cost, &counts))
+        .map(|e| {
+            m.rules.units.get(&e.unit_key).map_or((0, 0, 1, 0), |u| {
+                let cost = economy::recruitment_cost_in(&m.rules, &set, &e.unit_key, u);
+                (cost, u.upkeep, u.turns, m.recruitable_entry_flags(r, e, u, cost, &counts))
             })
         })
         .collect();
@@ -428,8 +430,9 @@ pub(super) fn recruitment_info(lua: &Lua, inner: &Inner, ui: &CampaignUi, region
         Ok(e)
     };
     let units = lua.create_table()?;
-    for (i, (key, (cost, upkeep, turns, reasons))) in recruitable.iter().zip(rules).enumerate() {
-        let e = entry(key.as_str(), if reasons == 0 { "Available" } else { "Unavailable" }, cost, upkeep, turns, format!("{key}!recruitable!{i}"), None)?;
+    for (i, (unit, (cost, upkeep, turns, reasons))) in recruitable.iter().zip(rules).enumerate() {
+        let key = &unit.unit_key;
+        let e = entry(key, if reasons == 0 { "Available" } else { "Unavailable" }, cost, upkeep, turns, format!("{key}!recruitable!{i}"), None)?;
         e.set("reasons_unavailable", reasons)?;
         units.set(i + 1, e)?;
     }
@@ -716,8 +719,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     // UnitScaleFactor([index]) → scale, index (0x009FAB10; the same description as the front end's
     // 0x004795F0, see battle_setup.rs): the unit card tooltip multiplies a unit's men by it.
     f!("UnitScaleFactor", |_l, inner, ui, index: Option<i64>| {
-        let idx = index.or_else(|| inner.prefs.borrow().get("gfx_unit_scale").and_then(|v| v.trim().parse().ok())).unwrap_or(3).clamp(0, 3) as usize;
-        Ok((super::super::battle_setup::UNIT_SCALES[idx], idx))
+        Ok(super::super::battle_setup::unit_scale_factor(&inner, index))
     });
     Ok(())
 }

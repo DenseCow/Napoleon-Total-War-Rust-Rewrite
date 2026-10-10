@@ -207,6 +207,9 @@ pub enum LoadWarning {
         /// The region key.
         region: String,
     },
+    /// `CAMPAIGN_MODEL` #23 / #24 (units per army / navy) are not two u32 after
+    /// `OSMOSIS_CULTURES`: the original's 20 / 20 are used, as its loader does for old files.
+    MissingForceCaps,
     /// Two objects of the same kind share an id. The later one is skipped.
     DuplicateId {
         /// `"faction"`, `"region"`, `"fort"`, `"character"` or `"force"`.
@@ -279,6 +282,7 @@ impl fmt::Display for LoadWarning {
             Self::RegionWithoutRecruitmentManager { region } => {
                 write!(f, "region {region}: no recruitment manager of its own (read as an empty queue)")
             }
+            Self::MissingForceCaps => write!(f, "CAMPAIGN_MODEL #23 / #24 (units per army / navy) not found; using 20 / 20"),
         }
     }
 }

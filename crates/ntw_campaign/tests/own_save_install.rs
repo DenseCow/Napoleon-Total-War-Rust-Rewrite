@@ -71,7 +71,10 @@ fn saved_part(m: &CampaignModel) -> CampaignModel {
 #[test]
 fn a_played_campaign_round_trips_through_our_own_save() {
     let Some(f) = fixture() else { return };
-    let mut opened = source::open(f.files(), Start::New("eur_napoleon"), &f.db).expect("open eur_napoleon");
+    let mut opened = source::open(f.files(), Start::New("eur_napoleon", None), &f.db).expect("open eur_napoleon");
+    // A new campaign sets its caps (the default multiplier 0.75: 20 per army, 10 per navy), not the
+    // start position's 20 / 14.
+    assert_eq!(opened.loaded.model.force_caps, ntw_sim::campaign::rules::ForceCaps { army: 20, navy: 10 });
     assert!(opened.loaded.set_human("france"));
     let m = &mut opened.loaded.model;
     let at_start: std::collections::BTreeSet<_> = m.world.characters.keys().copied().collect();
@@ -166,7 +169,7 @@ fn the_original_campaigns_are_found_through_the_seam() {
 fn an_unknown_campaign_is_not_found() {
     let Some(f) = fixture() else { return };
     assert!(source::find(f.files(), "made_up_campaign").is_none());
-    match source::open(f.files(), Start::New("made_up_campaign"), &f.db) {
+    match source::open(f.files(), Start::New("made_up_campaign", None), &f.db) {
         Err(SourceError::NotFound(k)) => assert_eq!(k, "made_up_campaign"),
         Err(e) => panic!("wrong error: {e}"),
         Ok(_) => panic!("opened a campaign that does not exist"),

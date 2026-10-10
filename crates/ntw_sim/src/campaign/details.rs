@@ -164,10 +164,11 @@ pub struct GovernorshipTaxes {
     pub lower: u32,
     /// Upper classes' level index.
     pub upper: u32,
-    /// Lower classes' rate in percent.
-    pub lower_rate: u8,
+    /// Lower classes' rate in percent (`i32` like `taxes_levels`; the save field is a u8, which the
+    /// ESF writer checks).
+    pub lower_rate: i32,
     /// Upper classes' rate in percent.
-    pub upper_rate: u8,
+    pub upper_rate: i32,
 }
 
 /// The `taxes_levels` keys in index order (see [`GovernorshipTaxes`]; INFERRED order).

@@ -593,6 +593,88 @@ impl TryFrom<&KvRules> for SimKvRules {
     }
 }
 
+/// The highest `_kv_rules` list index [`game_limits`] reads: its lists hold unit-size steps and
+/// army sizes (four and three entries in the original), so 1,024 is far above any real list.
+pub const MAX_LIST_INDEX: usize = 1023;
+
+/// The gameplay caps from the merged `_kv_rules` ([`ntw_sim::limits`]: our own keys, which the exe
+/// never reads; the original's values where a key is missing). A value that is not a usable
+/// number (not finite, a count below 1, a scale not above 0, negative funds) keeps the original's
+/// and is described in `warnings`; a list runs to its highest index present, a missing entry
+/// keeping the original's.
+pub fn game_limits(table: &KvTable, warnings: &mut Vec<String>) -> ntw_sim::limits::GameLimits {
+    use ntw_sim::limits::*;
+    let d = GameLimits::default();
+    let count = |v: f32| v.is_finite() && v >= 1.0 && v <= u32::MAX as f32;
+    let scale = |v: f32| v.is_finite() && v > 0.0;
+    let funds = |v: f32| v.is_finite() && (0.0..=i32::MAX as f32).contains(&v);
+    // `<key>_<i>` for every i up to the highest index present, over `default`: a missing or
+    // unusable entry keeps the default's; past the default's end a missing run repeats the entry
+    // before it (one warning per run), so a mod may ship only the entries it changes or adds.
+    // Indices above `MAX_LIST_INDEX` are ignored (one warning per list): a typo such as
+    // `unit_scale_4000000000` must not fill billions of entries.
+    let mut list = |key: &str, default: Vec<f32>, ok: fn(f32) -> bool| -> Vec<f32> {
+        let prefix = format!("{key}_");
+        let indices: Vec<usize> = table.entries().iter().filter_map(|(k, _)| k.strip_prefix(&prefix)?.parse::<usize>().ok()).collect();
+        let past = indices.iter().filter(|&&i| i > MAX_LIST_INDEX).count();
+        if past > 0 {
+            warnings.push(format!("_kv_rules {key}_<i>: {past} entries above index {MAX_LIST_INDEX} are ignored (a list holds unit-size steps or army sizes)"));
+        }
+        let mut out = default;
+        let Some(top) = indices.into_iter().filter(|&i| i <= MAX_LIST_INDEX).max() else { return out };
+        let mut gap: Option<(usize, f32)> = None;
+        for i in 0..=top {
+            let k = format!("{prefix}{i}");
+            let raw = table.raw(&k);
+            if let Some(v) = raw.filter(|&v| !ok(v)) {
+                warnings.push(format!("_kv_rules {k} = {v} is not a usable limit; the original's value is kept"));
+            }
+            let usable = raw.filter(|&v| ok(v));
+            if usable.is_some()
+                && let Some((from, prev)) = gap.take()
+            {
+                warnings.push(format!("_kv_rules {prefix}{from}..{prefix}{} are missing below a higher index; they repeat {prev}", i - 1));
+            }
+            match (usable, i < out.len()) {
+                (Some(v), true) => out[i] = v,
+                (Some(v), false) => out.push(v),
+                (None, true) => {}
+                (None, false) => {
+                    let Some(&prev) = out.last() else { break };
+                    gap.get_or_insert((i, prev));
+                    out.push(prev);
+                }
+            }
+        }
+        if let Some((from, prev)) = gap {
+            warnings.push(format!("_kv_rules {prefix}{from}..{prefix}{top} are missing or unusable; they repeat {prev}"));
+        }
+        out
+    };
+    let floats = |v: &[u32]| v.iter().map(|&x| x as f32).collect::<Vec<_>>();
+    let unit_scales = list(KEY_UNIT_SCALE, d.unit_scales.clone(), scale);
+    let max_naval_units = list(KEY_MAX_NAVAL_UNITS, floats(&d.max_naval_units), count).into_iter().map(|v| v as u32).collect();
+    let as_i32 = |v: Vec<f32>| v.into_iter().map(|v| v as i32).collect::<Vec<_>>();
+    let funds_land = as_i32(list(KEY_CUSTOM_BATTLE_FUNDS_LAND, d.custom_battle_funds_land.iter().map(|&x| x as f32).collect(), funds));
+    let funds_naval = as_i32(list(KEY_CUSTOM_BATTLE_FUNDS_NAVAL, d.custom_battle_funds_naval.iter().map(|&x| x as f32).collect(), funds));
+    let mut single = |key: &str, default: u32| match table.raw(key) {
+        Some(v) if count(v) => v as u32,
+        Some(v) => {
+            warnings.push(format!("_kv_rules {key} = {v} is not a usable limit; the original's value is kept"));
+            default
+        }
+        None => default,
+    };
+    GameLimits {
+        unit_scales,
+        max_land_units: single(KEY_MAX_LAND_UNITS, d.max_land_units),
+        max_naval_units,
+        custom_battle_funds_land: funds_land,
+        custom_battle_funds_naval: funds_naval,
+        max_reinforcement_units: single(KEY_MAX_REINFORCEMENT_UNITS, d.max_reinforcement_units),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -724,5 +806,61 @@ mod tests {
             KvFatigue::try_from(&KvTable::from_entries("_kv_fatigue", rows)),
             Err(DataError::MissingKvKey { key: "combat", .. })
         ));
+    }
+
+    #[test]
+    fn game_limits_default_to_the_original_and_take_mod_rows() {
+        use ntw_sim::limits::GameLimits;
+        let mut warnings = Vec::new();
+        // No limit rows (vanilla): the original's values.
+        let vanilla = KvTable::from_entries("_kv_rules", vec![("ship_repair_rate".into(), 1.0)]);
+        assert_eq!(game_limits(&vanilla, &mut warnings), GameLimits::default());
+        assert!(warnings.is_empty());
+        // A mod past the old limits: 40-unit armies, a 1.5 unit-size step, a fourth army size.
+        let rows = [
+            ("max_naval_units_1", 8.0),
+            ("unit_scale_4", 1.5),
+            ("unit_scale_0", 0.2),
+            ("unit_scale_1", 0.5),
+            ("unit_scale_2", 0.75),
+            ("unit_scale_3", 1.0),
+            ("max_land_units", 40.0),
+            ("max_reinforcement_units", 30.0),
+            ("max_naval_units_4", 40.0),
+            ("max_naval_units_0", 6.0),
+            ("custom_battle_funds_land_3", 20000.0),
+            ("custom_battle_funds_land_0", 5000.0),
+            ("custom_battle_funds_land_1", 10000.0),
+            ("custom_battle_funds_land_2", 14000.0),
+            ("custom_battle_funds_naval_0", -1.0),
+        ];
+        let modded = KvTable::from_entries("_kv_rules", rows.iter().map(|(k, v)| (k.to_string(), *v)).collect());
+        let l = game_limits(&modded, &mut warnings);
+        assert_eq!(l.unit_scales, [0.2, 0.5, 0.75, 1.0, 1.5]);
+        assert_eq!((l.max_land_units, l.max_reinforcement_units), (40, 30));
+        // `_2`, `_3` missing: they keep the original's; `_4` is appended.
+        assert_eq!(l.max_naval_units, [6, 8, 10, 20, 40]);
+        assert_eq!(l.custom_battle_funds_land, [5000, 10000, 14000, 20000]);
+        // A negative fund keeps the original's and is reported.
+        assert_eq!(l.custom_battle_funds_naval, [5000, 14000, 24000]);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(l.custom_battle_funds(3, false), 20000);
+        assert_eq!(l.max_units(1.5), (40, 40));
+        // A mod shipping only the entry it changes or adds (vanilla has no `_0` row).
+        let only = |k: &str, v: f32| KvTable::from_entries("_kv_rules", vec![(k.to_string(), v)]);
+        let mut w = Vec::new();
+        assert_eq!(game_limits(&only("max_naval_units_2", 15.0), &mut w).max_naval_units, [6, 8, 15, 20]);
+        assert_eq!(game_limits(&only("unit_scale_4", 1.5), &mut w).unit_scales, [0.25, 0.5, 0.75, 1.0, 1.5]);
+        assert!(w.is_empty(), "{w:?}");
+        // A gap past the original's entries repeats the entry before it, reported.
+        assert_eq!(game_limits(&only("unit_scale_5", 2.0), &mut w).unit_scales, [0.25, 0.5, 0.75, 1.0, 1.0, 2.0]);
+        assert_eq!(w.len(), 1, "{w:?}");
+        // A longer gap is one warning; a typo far past any list is ignored, once, without filling it.
+        let mut w = Vec::new();
+        assert_eq!(game_limits(&only("unit_scale_9", 3.0), &mut w).unit_scales, [0.25, 0.5, 0.75, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 3.0]);
+        assert_eq!(w.len(), 1, "{w:?}");
+        let mut w = Vec::new();
+        assert_eq!(game_limits(&only("unit_scale_4000000000", 3.0), &mut w), GameLimits::default());
+        assert_eq!(w.len(), 1, "{w:?}");
     }
 }

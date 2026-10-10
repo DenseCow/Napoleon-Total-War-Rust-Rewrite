@@ -13,7 +13,7 @@ use std::sync::Arc;
 use super::battles::PendingBattle;
 use super::ids::{CharacterId, FactionId, FortId, ForceId, RecruitmentItemId, RegionId, UnitId};
 use super::pathing::PathGrid;
-use super::rules::CampaignRules;
+use super::rules::{CampaignRules, ForceCaps};
 use super::turn::TurnState;
 use crate::calendar::Calendar;
 use crate::fixed::Fixed20;
@@ -48,6 +48,11 @@ pub struct CampaignModel {
     pub world: World,
     /// Whose turn it is and what is left to process (see [`turn`](super::turn)).
     pub turn: TurnState,
+    /// Units per army and per navy (`CAMPAIGN_MODEL` #23 / #24, [`ForceCaps`]): read from the file,
+    /// set by [`ForceCaps::new_campaign`] when a new campaign starts, saved (an own save from before
+    /// the field reads 20 / 20, the caps it played with).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub force_caps: ForceCaps,
     /// A battle waiting to be fought (the original's `PENDING_BATTLE` record, W3 §2; its content
     /// is not decoded). Set by an attack, cleared by autoresolve or a battle result.
     pub pending_battle: Option<PendingBattle>,
@@ -86,6 +91,7 @@ impl CampaignModel {
             rng,
             world,
             turn: TurnState::default(),
+            force_caps: ForceCaps::default(),
             pending_battle: None,
             pending_capture: None,
             rules: Arc::new(CampaignRules::default()),
@@ -94,6 +100,14 @@ impl CampaignModel {
             script_rngs: super::characters::ScriptRngs::default(),
             negotiations: super::negotiation::Negotiations::default(),
         }
+    }
+
+    /// The most units an army (`is_navy` false) or a navy may hold: the campaign's
+    /// [`CampaignModel::force_caps`] (the army's / navy's capacity virtual `+0x48`, CONFIRMED).
+    /// Every unit-count check of the model and the AI asks this.
+    pub fn max_units(&self, is_navy: bool) -> usize {
+        // u32 -> usize never truncates on the 32- and 64-bit targets we build for.
+        (if is_navy { self.force_caps.navy } else { self.force_caps.army }) as usize
     }
 
     /// A deterministic 64-bit hash (FNV-1a) of the whole campaign state, for desync checks and
@@ -110,6 +124,8 @@ impl CampaignModel {
         h.u32(c.date.half);
         h.u32(c.turns_elapsed);
         h.u32(self.rng.state);
+        h.u32(self.force_caps.army);
+        h.u32(self.force_caps.navy);
         h.u32(self.script_rngs.trait_rng.state);
         h.u32(self.script_rngs.ancillary_rng.state);
         self.turn.hash_into(&mut h);
@@ -748,6 +764,15 @@ pub struct BuildingRef {
     pub health: u32,
 }
 
+impl BuildingRef {
+    /// Damaged: health below 100 (CONFIRMED: the exe tests `health > 99`, e.g. `0x00A62380` for the effects and
+    /// `0x00B43CA0` for recruitable flag 8). A damaged building gives no effects, flags its units, is not
+    /// upgraded, and is what a repair restores.
+    pub fn is_damaged(&self) -> bool {
+        self.health < 100
+    }
+}
+
 /// One `REGION_SLOT` of a region (W3 §3.4, CONFIRMED structure).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -897,7 +922,7 @@ pub struct Region {
     pub construction: Vec<ConstructionItem>,
     /// The army garrisoned in the settlement: `SIEGEABLE_GARRISON_RESIDENCE` #12 of the settlement,
     /// with that `ARMY` #5 = the residence (CONFIRMED, SAVE_COMPAT.md §4); one army at most.
-    /// Recruited land units join it, up to `MAX_UNITS_PER_FORCE`.
+    /// Recruited land units join it, up to the units per army (`CampaignModel::max_units`).
     pub garrison: Option<ForceId>,
     /// The navy that last received ships recruited in the region's port, while it is still there
     /// (our own bookkeeping: navies have no residence link in the original).
@@ -1004,9 +1029,15 @@ impl Region {
     /// (`RegionSlot::holder`); the walls and the road always are the owner's.
     pub fn slot_held(&self, slot: SlotRef) -> bool {
         match slot {
-            SlotRef::Slot(i) => self.slots.get(i).is_some_and(|s| s.holder.is_none_or(|h| h == self.owner)),
+            SlotRef::Slot(i) => self.slots.get(i).is_some_and(|s| !self.slot_occupied(s)),
             SlotRef::Walls | SlotRef::Road => true,
         }
+    }
+
+    /// Is the slot `s` (one of this region's) held by another faction than the region's owner (`0x00A91FC0`,
+    /// CONFIRMED)? Such a slot's building gives no effects and flags its units (recruitable flag 0x10).
+    pub fn slot_occupied(&self, s: &RegionSlot) -> bool {
+        s.holder.is_some_and(|h| h != self.owner)
     }
 
     /// Every building standing in the region (slots and road), in slot order.
@@ -1020,10 +1051,10 @@ impl Region {
     pub fn effect_buildings(&self) -> impl Iterator<Item = &BuildingRef> {
         self.slots
             .iter()
-            .filter(|s| s.holder.is_none_or(|h| h == self.owner))
+            .filter(|s| !self.slot_occupied(s))
             .filter_map(|s| s.building.as_ref())
             .chain(self.road.as_ref())
-            .filter(|b| b.health >= 100)
+            .filter(|b| !b.is_damaged())
     }
 }
 

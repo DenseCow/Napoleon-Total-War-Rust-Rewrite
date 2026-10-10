@@ -4,8 +4,10 @@
 //! `UNIT_CLASS_NAME_ALLOCATOR` {`UNIT_CLASS_NAMES_LIST[]` {`CAMPAIGN_LOCALISATION` name, bool in
 //! use}, `CAMPAIGN_LOCALISATION` next}} and `NAVAL_UNIT_NAME_ALLOCATOR` {bool,
 //! `UNIT_CLASS_NAME_ALLOCATOR`} (one list for every ship). What the original's vanilla saves show:
-//! - the class number is the row index of the `unit_class` table (CONFIRMED: every list's names and
-//!   trailing name are that class's `unit_regiment_names` rows, `regiment_names` example);
+//! - the class number is the exe's class code (`0x00EED3E0`, [`ntw_sim::unit_kind::class_code`]):
+//!   the land map is built for keys 0..0x16 (`0x00880670`) and the naval one for 0x17..0x2D
+//!   (`0x00881DB0` / `0x00881FB0`), the land and naval ranges of that enum (CONFIRMED; every list's
+//!   names and trailing name are that class's `unit_regiment_names` rows, `regiment_names` example);
 //! - a list's in-use flags are exactly the names the faction's units carry (CONFIRMED in all 6
 //!   original vanilla saves: no flag without a unit, no unit name without its flag);
 //! - a new unit takes the lowest free name of its class's list (INFERRED from consecutive saves,
@@ -21,59 +23,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use ntw_formats::esf::{EsfNode, EsfRecord};
 use ntw_sim::campaign::CampaignModel;
 
-/// The `unit_class` table's rows in file order (CONFIRMED vanilla `data.pack`): the class numbers
-/// of `LAND_UNIT_NAMES_MAP`.
-pub const UNIT_CLASSES: [&str; 45] = [
-    "artillery_fixed",
-    "artillery_foot",
-    "artillery_horse",
-    "cavalry_camels",
-    "cavalry_heavy",
-    "cavalry_irregular",
-    "cavalry_lancers",
-    "cavalry_light",
-    "cavalry_missile",
-    "cavalry_standard",
-    "dragoons",
-    "elephants",
-    "general",
-    "infantry_berserker",
-    "infantry_elite",
-    "infantry_grenadiers",
-    "infantry_irregulars",
-    "infantry_light",
-    "infantry_line",
-    "infantry_melee",
-    "infantry_militia",
-    "infantry_mob",
-    "infantry_skirmishers",
-    "naval_admiral",
-    "naval_bomb_ketch",
-    "naval_brig",
-    "naval_dhow",
-    "naval_fifth_rate",
-    "naval_first_rate",
-    "naval_fourth_rate",
-    "naval_galleon",
-    "naval_heavy_galley",
-    "naval_indiaman",
-    "naval_light_galley",
-    "naval_lugger",
-    "naval_medium_galley",
-    "naval_over_first_rate",
-    "naval_razee",
-    "naval_rocket_ship",
-    "naval_second_rate",
-    "naval_sixth_rate",
-    "naval_sloop",
-    "naval_steam_ship",
-    "naval_third_rate",
-    "naval_xebec",
-];
+/// The last land class code: `LAND_UNIT_NAMES_MAP` holds the codes 0..=0x16 (`0x00880670`, CONFIRMED).
+const LAST_LAND_CLASS: u32 = 0x16;
 
-/// The class number of a `unit_class` key.
+/// The `LAND_UNIT_NAMES_MAP` class number of a class key: the exe's class code
+/// ([`ntw_sim::unit_kind::class_code`], an unknown key 0), `None` for a naval code.
 pub fn class_index(class: &str) -> Option<u32> {
-    UNIT_CLASSES.iter().position(|c| *c == class).map(|i| i as u32)
+    Some(u32::from(ntw_sim::unit_kind::class_code(class))).filter(|&c| c <= LAST_LAND_CLASS)
 }
 
 fn rec_mut<'a>(r: &'a mut EsfRecord, name: &str) -> Option<&'a mut EsfRecord> {
@@ -244,5 +200,21 @@ fn write_faction(f: &mut EsfRecord, model: &CampaignModel, new: &BTreeSet<i32>) 
     }
     if let (Some(i), Some(n)) = (naval_pos, naval) {
         f.children[i] = n;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The land name lists are keyed by the exe's class code (`0x00880670`: 0..=0x16), not by a table's
+    /// row order (review: a mod's reordered `unit_class` table would have shifted every list).
+    #[test]
+    fn land_lists_are_keyed_by_the_exe_class_code() {
+        assert_eq!(class_index("artillery_fixed"), Some(0));
+        assert_eq!(class_index("infantry_line"), Some(0x12));
+        assert_eq!(class_index("infantry_skirmishers"), Some(0x16));
+        assert_eq!(class_index("naval_brig"), None, "naval codes are the naval allocator's");
+        assert_eq!(class_index("made_up_class"), Some(0), "an unknown key is code 0, as the exe");
     }
 }

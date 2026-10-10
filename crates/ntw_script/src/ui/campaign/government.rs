@@ -74,7 +74,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
 
     // PROVISIONAL governorship: one per theatre, keyed by the radar's theatre id ("europe").
     f!("GovernorshipList", |lua, inner, ui, _a: Variadic<Value>| {
-        let (_, id) = theatre_of(&ui.link.campaign);
+        let id = ntw_campaign::header_map::theatre_stem(ui.home_theatre());
         let key = ui.theatre(&inner).map(|r| r.id).unwrap_or_default();
         let e = lua.create_table()?;
         e.set("Key", id)?;
@@ -127,7 +127,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
         // +0xC int is the key; head_of_government 1, finance 2, justice 3, army 4, navy 5,
         // governors 6.., government_screens.lua reads Ministers[1..5]).
         let numbers: HashMap<String, i32> = small_table(&inner, &tables::MINISTERIAL_POSITIONS)
-            .into_iter()
+            .iter()
             .filter_map(|r| Some((r.first()?.as_str()?.to_owned(), r.get(1)?.as_i32()?)))
             .collect();
         let ministers = lua.create_table()?;

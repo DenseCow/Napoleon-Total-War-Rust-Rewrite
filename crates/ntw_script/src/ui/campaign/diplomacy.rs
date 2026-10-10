@@ -271,14 +271,10 @@ pub(super) enum NegotiationItem {
     Action(ntw_sim::campaign::treaties::DiplomaticAction),
 }
 
-/// Attitude level of an attitude total (0x00B0DBA0, CONFIRMED rule): the
-/// `diplomatic_relations_attitudes` values (hostile, unfriendly, neutral, friendly, very_friendly)
-/// give four thresholds, each the mean of two neighbours; total ≤ t1 → 0 hostile, ≤ t2 → 1
-/// unfriendly, ≤ t3 → 2 neutral, ≤ t4 → 3 friendly, else 4 very friendly.
-fn attitude_level(levels: &HashMap<String, i32>, total: i32) -> usize {
-    let v = |k: &str| levels.get(k).copied().unwrap_or(0);
-    let t = [(v("hostile") + v("unfriendly")) / 2, (v("unfriendly") + v("neutral")) / 2, (v("neutral") + v("friendly")) / 2, (v("friendly") + v("very_friendly")) / 2];
-    t.iter().position(|&x| total <= x).unwrap_or(4)
+/// The diplomacy loc name of an attitude category (the model's `0x00B0DBA0` rule,
+/// [`ntw_sim::campaign::CampaignModel::attitude_category`]): `relationship_<level>` (`0x00B64CC0`).
+fn attitude_loc(inner: &Inner, category: u8) -> Option<String> {
+    loc(inner, &format!("diplomacy_strings_string_relationship_{}", ntw_sim::campaign::treaties::attitude_name(category)))
 }
 
 /// The attitude factors of a relationship as the exe lists them (0x00B27760, CONFIRMED pieces):
@@ -315,7 +311,6 @@ fn faction_list_for_diplomacy(lua: &Lua, inner: &Inner, ui: &CampaignUi) -> mlua
     let m = ui.model();
     let out = lua.create_table()?;
     let me = m.faction_by_key(&ui.link.human).map(|f| f.id);
-    let levels = ui.attitude_levels(inner);
     let word = |k: &str| loc(inner, &format!("random_localisation_strings_string_{k}")).unwrap_or_default();
     for f in m.world.factions.values() {
         if f.key == "pirates" {
@@ -356,9 +351,8 @@ fn faction_list_for_diplomacy(lua: &Lua, inner: &Inner, ui: &CampaignUi) -> mlua
                 e.set("LandTrade", false)?;
                 e.set("TradingTooltip", word(tip))?;
             }
-            let level = attitude_level(&levels, towards_me.map_or(0, |r| r.attitude_total()));
-            const NAMES: [&str; 5] = ["hostile", "unfriendly", "neutral", "friendly", "very_friendly"];
-            e.set("Attitude", loc(inner, &format!("diplomacy_strings_string_relationship_{}", NAMES[level])).unwrap_or_default())?;
+            let level = m.attitude_category(f.id, me);
+            e.set("Attitude", attitude_loc(inner, level).unwrap_or_default())?;
             e.set("AttitudeValue", level)?;
             e.set("PlayersRelationshipDetails", mine.map(|r| relationship_details(inner, r)).unwrap_or_default())?;
             e.set("FactionRelationshipDetailsTowardsPlayer", towards_me.map(|r| relationship_details(inner, r)).unwrap_or_default())?;
@@ -413,9 +407,13 @@ fn diplomacy_details(lua: &Lua, inner: &Inner, ui: &CampaignUi, key: &str) -> ml
 /// (0x009F2B80 → 0x00B750D0, CONFIRMED pieces), each line a diplomacy loc string
 /// `current_treaty_<x>`: protectorate_of_player, at_war, alliance, trade_agreement,
 /// giving_military_access_indefinite / _turns, has_military_access_indefinite / _turns,
-/// trade_embargoed, embargoing_trade ("%d" = turns). PROVISIONAL: the non-player protectorate
-/// lines and the peace-treaty countdown are not listed; lines are joined with "\n" (the exe's
-/// joiner 0x00B0B120 is not decoded).
+/// trade_embargoed, embargoing_trade ("%d" = turns). The lines are joined with "\n\n" (CONFIRMED:
+/// 0x00B0B120 puts the narrow string at 0x0131604C, `0A 0A`, before every line but the first).
+/// The record read is `b`'s about `a` (CONFIRMED: 0x009F2B80 reads its arguments from the top of
+/// the Lua stack down, 0x01055760, and looks `a` up in `b`'s diplomacy `[b + 0x528]`), so
+/// "Grants military access" is `b` giving `a` access, "Has military access to your lands" `a`
+/// giving `b` access, "Their trade embargo against you" `b`'s, "Your trade embargo" `a`'s.
+/// PROVISIONAL: the non-player protectorate lines and the peace-treaty countdown are not listed.
 fn existing_treaties(inner: &Inner, ui: &CampaignUi, a: &str, b: &str) -> Option<String> {
     use ntw_sim::campaign::Stance;
     let m = ui.model();
@@ -438,12 +436,12 @@ fn existing_treaties(inner: &Inner, ui: &CampaignUi, a: &str, b: &str) -> Option
     if ab.is_some_and(|r| r.trade_agreement) {
         lines.push(text("trade_agreement"));
     }
-    match ab.map_or(0, |r| r.military_access_turns) {
+    match ba.map_or(0, |r| r.military_access_turns) {
         0 => {}
         n if n < 0 => lines.push(text("giving_military_access_indefinite")),
         n => lines.push(turns("giving_military_access_turns", n)),
     }
-    match ba.map_or(0, |r| r.military_access_turns) {
+    match ab.map_or(0, |r| r.military_access_turns) {
         0 => {}
         n if n < 0 => lines.push(text("has_military_access_indefinite")),
         n => lines.push(turns("has_military_access_turns", n)),
@@ -454,17 +452,14 @@ fn existing_treaties(inner: &Inner, ui: &CampaignUi, a: &str, b: &str) -> Option
     if let Some(n) = ab.map(|r| r.trade_embargo_turns).filter(|n| *n > 0) {
         lines.push(turns("embargoing_trade", n as i32));
     }
-    Some(lines.join("\n"))
+    Some(lines.join("\n\n"))
 }
 
 /// The diplomacy loc name of `from`'s attitude towards `to` (0x00B64CC0: `relationship_<level>`).
 fn attitude_text(inner: &Inner, ui: &CampaignUi, from: &str, to: &str) -> Option<String> {
     let m = ui.model();
     let (f, t) = (m.faction_by_key(from)?.id, m.faction_by_key(to)?.id);
-    let total = m.world.relationships.get(&(f, t)).map_or(0, |r| r.attitude_total());
-    const NAMES: [&str; 5] = ["hostile", "unfriendly", "neutral", "friendly", "very_friendly"];
-    let level = attitude_level(&ui.attitude_levels(inner), total);
-    loc(inner, &format!("diplomacy_strings_string_relationship_{}", NAMES[level]))
+    attitude_loc(inner, m.attitude_category(f, t))
 }
 
 
@@ -691,7 +686,7 @@ pub(super) fn install_negotiation_object(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<C
                 (Some(proposer), Some(recipient)) => {
                     ui.push(CampaignRequest::Command(CampaignCommand::BeginNegotiation { proposer, recipient }))
                 }
-                _ => inner.log_once_for("negotiation unknown faction", &format!("{proposer}\u{0}{recipient}"), || {
+                _ => inner.log_once_for_pair("negotiation unknown faction", &proposer, &recipient, || {
                     format!("UNKNOWN UIDiplomacyNegotiation({proposer:?}, {recipient:?}): no model faction, no negotiation is begun (logged once per pair)")
                 }),
             }
@@ -719,8 +714,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     // `campaign_map_playable_areas_onscreen_name_<key>` (the exe reads a theatre string, INFERRED
     // to be that loc). HomeTheatre(faction) → the theatre key (CONFIRMED 0x009E5180).
     // GovernorshipList(faction) → {Name, Key, TheatreKey} (CONFIRMED names 0x009E4D50).
-    // PROVISIONAL: the campaign's theatre is found from the campaign key (`theatre_of`); each
-    // Napoleon map has one.
+    // The campaign's theatre is its header's (`CampaignLink::theatres`; each Napoleon map has one).
     // RetrieveExistingTreaties(a, b) → see `existing_treaties`.
     f!("RetrieveExistingTreaties", |_l, inner, ui, (a, b): (String, String)| Ok(existing_treaties(&inner, &ui, &a, &b)));
     // RetrieveDiplomaticOpinions(a, b) → two attitude texts (0x009F2830, CONFIRMED: two
@@ -921,57 +915,67 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
         Ok(mlua::MultiValue::from_vec(out))
     });
 
-    // TradeableRegions(): CONFIRMED shape (0x009C5770)
-    // `{ Proposer = {{ Region = <region>, "CurrentlyOffered" = bool }, ...},
-    //    Recipient = {{ Region = <region>, "CurrentlyDemanded" = bool }, ...} }`, one entry per
-    // region of that faction; the wrapper returns nothing unless the campaign flag at +0xF9C and
-    // the counterparty (+0xAC) are both set (CONFIRMED guard). Region lists: the faction's own
-    // regions (INFERRED).
+    // TradeableRegions() (0x009C5770, CONFIRMED): nothing unless the campaign has the negotiation
+    // open (+0xF9C) and the object its counterpart (+0xAC); else TWO values, the proposer's list
+    // and the recipient's ("Proposer" / "Recipient" only name the two Lua references; the panel
+    // reads `proposer_regions, recipient_regions = negotiation:TradeableRegions()`). One row per
+    // region of `CampaignModel::tradeable_regions` (0x00C5C040), in that order: the region info
+    // table (`region_info`, 0x009AF570: Address, Name, Theatre, ... which InitRegionList reads)
+    // plus `CurrentlyOffered` (proposer) / `CurrentlyDemanded` (recipient), whether the deal's
+    // offers / demands hold the region (0x00C4D3F0 / 0x00C4D250).
     f!("TradeableRegions", |lua, inner, ui, _a: Variadic<Value>| {
-        let t = lua.create_table()?;
-        let m = ui.model();
-        let Some((proposer, recipient)) = negotiation_factions(&ui) else { return Ok(Value::Nil) };
-        for (key, faction, offered) in [("Proposer", proposer, true), ("Recipient", recipient, false)] {
+        let Some((proposer, recipient)) = negotiation_factions(&ui) else { return Ok(mlua::MultiValue::new()) };
+        let mut out = Vec::with_capacity(2);
+        for (faction, offered) in [(proposer, true), (recipient, false)] {
+            let regions: Vec<(RegionId, String)> = {
+                let m = ui.model();
+                m.tradeable_regions(faction).filter_map(|r| m.world.regions.get(&r).map(|x| (r, x.key.clone()))).collect()
+            };
             let list = lua.create_table()?;
-            for (i, region) in m.world.regions.values().filter(|r| r.owner == faction).enumerate() {
-                let row = lua.create_table()?;
-                row.set("Region", region.key.as_str())?;
-                row.set(if offered { "CurrentlyOffered" } else { "CurrentlyDemanded" }, region_in_deal(&ui, region.key.as_str(), offered))?;
-                list.set(i + 1, row)?;
+            for (r, key) in regions {
+                let Some(row) = super::region_info::region_info(lua, &inner, &ui, r)? else {
+                    inner.log_once_for("TradeableRegions row", &key, || {
+                        format!("ERROR TradeableRegions: no region info for {key} (no population projection), row left out (logged once per region)")
+                    });
+                    continue;
+                };
+                row.set(if offered { "CurrentlyOffered" } else { "CurrentlyDemanded" }, region_in_deal(&ui, &key, offered))?;
+                list.push(row)?;
             }
-            t.set(key, list)?;
+            out.push(Value::Table(list));
         }
-        Ok(Value::Table(t))
+        Ok(mlua::MultiValue::from_vec(out))
     });
 
-    // TradeableTechnologies(): CONFIRMED shape (0x009C5AA0)
-    // `{ Proposer = {rows}, Recipient = {rows} }`; each row carries the literal key "FactionKey"
-    // and the numeric "tech_status" (the wrapper pushes `FUN_0044de40("tech_status", 0)`); the
-    // rows are built by the card helper 0x009ABB50, which also sets "BuildingLevel" and the icon
-    // path `Data/UI/Campaign UI/Technologies/%S.tga`. Every technology of the faction is listed
-    // with its real state (0 researched / 2 available / 4 not yet available, CONFIRMED in
-    // `details.rs`), so the script can filter: the tradeable set (which side may give what) is
-    // UNKNOWN. The two remaining row keys are string constants at 0x009C5B9B / 0x009C5BC0 and are
-    // left out rather than invented.
+    // TradeableTechnologies() (0x009C5AA0, CONFIRMED): nothing without the counterpart (+0xAC);
+    // else TWO values, the proposer's list and the recipient's (the panel reads
+    // `offers, demands = negotiation:TradeableTechnologies()`, diplomacy_panel.luac:1338). A
+    // side's list is `CampaignModel::tradeable_technologies(side, other)` (0x00C5C170 →
+    // 0x008F4F10); each row the tech entry 0x009ABB50 (`negotiation_tech_entry`), `tech_status` =
+    // 0 (a literal) and `FactionKey` = that side's faction key (0x008B9DE0).
     f!("TradeableTechnologies", |lua, inner, ui, _a: Variadic<Value>| {
-        let t = lua.create_table()?;
-        let m = ui.model();
-        let Some((proposer, recipient)) = negotiation_factions(&ui) else { return Ok(Value::Nil) };
-        for (key, faction) in [("Proposer", proposer), ("Recipient", recipient)] {
+        let Some((proposer, recipient)) = negotiation_factions(&ui) else { return Ok(mlua::MultiValue::new()) };
+        let mut out = Vec::with_capacity(2);
+        for (side, other) in [(proposer, recipient), (recipient, proposer)] {
+            let (keys, faction_key) = {
+                let m = ui.model();
+                (m.tradeable_technologies(side, other), m.world.factions.get(&side).map(|f| f.key.clone()).unwrap_or_default())
+            };
             let list = lua.create_table()?;
-            let mut i = 1;
-            if let Some(details) = m.world.faction_details.get(&faction) {
-                for (tech, status) in &details.technologies {
-                    let row = lua.create_table()?;
-                    row.set("FactionKey", tech.as_str())?;
-                    row.set("tech_status", *status as i64)?;
-                    list.set(i, row)?;
-                    i += 1;
-                }
+            for key in keys {
+                let Some(row) = super::technology::negotiation_tech_entry(lua, &inner, &ui, &key)? else {
+                    inner.log_once_for("TradeableTechnologies row", &key, || {
+                        format!("ERROR TradeableTechnologies: technology {key} is not in the data, row left out (logged once per key)")
+                    });
+                    continue;
+                };
+                row.set("tech_status", 0)?;
+                row.set("FactionKey", faction_key.as_str())?;
+                list.push(row)?;
             }
-            t.set(key, list)?;
+            out.push(Value::Table(list));
         }
-        Ok(Value::Table(t))
+        Ok(mlua::MultiValue::from_vec(out))
     });
 
     // FactionListsForStanceDeclarations(): CONFIRMED shape (0x009BAB90) `{ offered = {...},
@@ -1049,7 +1053,23 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     // PLACEHOLDER: `Propose` / `ProposeDeal` (0x009BF3C0 / 0x009BFCF0, CCQ_DIPLOMACY_PROPOSE_DEAL →
     // 0x00933690 → 0x00C49BE0) hand the deal to the AI's evaluation, which the model does not
     // have; here the AI accepts at once (no reply).
-    f!("Propose", |_l, inner, ui, _a: Variadic<Value>| { accept_deal(&ui); Ok(()) });
+    // `Propose(offers, demands, action)` from OkRegions / OkTechnologies carries the chosen regions
+    // or technologies (0x009BF3C0 cases 6 / 7 read the two tables into the deal item before
+    // handing it to the campaign negotiation, 0x00C49BD0 → its virtual +0x40). PLACEHOLDER: the
+    // deal is not in the model, so those items are dropped; logged once.
+    f!("Propose", |_l, inner, ui, a: Variadic<Value>| {
+        // Called as a method: the object first, then the two lists.
+        if let [_, Value::Table(offers), Value::Table(demands), ..] = a.as_slice() {
+            let (o, d) = (offers.raw_len(), demands.raw_len());
+            if o + d > 0 {
+                inner.log_once("Propose items dropped", || {
+                    format!("PLACEHOLDER negotiation:Propose: the deal is not in the model; {o} offered and {d} demanded items dropped (logged once)")
+                });
+            }
+        }
+        accept_deal(&ui);
+        Ok(())
+    });
     f!("ProposeDeal", |_l, inner, ui, _a: Variadic<Value>| { accept_deal(&ui); Ok(()) });
     f!("AcceptOffer", |_l, inner, ui, _a: Variadic<Value>| { accept_deal(&ui); Ok(()) });
     f!("DeclineOffer", |_l, inner, ui, _a: Variadic<Value>| {

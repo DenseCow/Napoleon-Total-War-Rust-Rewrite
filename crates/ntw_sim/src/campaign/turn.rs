@@ -244,7 +244,8 @@ impl CampaignModel {
                 super::characters::yearly_character_pass(self);
                 // The trade update of the round end (0x00BCB020): commodity prices.
                 self.update_commodity_prices();
-                self.calendar.advance_turn()
+                // The calendar moves on (`0x008A98B0`), by the campaign's date step when its data names one.
+                self.calendar.advance_turn(self.rules.features.date_step)
             }
             TurnStep::FactionStart(f) => {
                 self.turn.current = Some(f);
@@ -422,20 +423,22 @@ impl CampaignModel {
         // the items whose unit the region can no longer recruit are removed through the cancel path
         // `0x00B1A820` with 1, so each is refunded like a cancel (CONFIRMED: the cancel command's call,
         // crediting the item's cost; 32-bit wrapping sums, [`super::treasury::refund`]). The cancel path
-        // also credits campaign variable 37 (`recruitment_population_cost`, 0 in the shipped data) back to the
-        // region's recruitable population (`0x00A61AA0`), which the model does not hold (PROVISIONAL, see
-        // [`CampaignModel::recruitable_entry_flags`]).
+        // also gives the region its population back, per item (`0x00A61AA0`,
+        // [`super::population::RecruitmentPopulation::credited`]).
         let recruitable = self.recruitable_units(region);
         let owner = reg.owner;
         let mut refund = 0i32;
+        let population = super::population::RecruitmentPopulation::of(&self.rules);
         if let Some(r) = self.world.regions.get_mut(&region) {
+            let before = r.recruitment_queue.len();
             r.recruitment_queue.retain(|i| {
-                let keep = recruitable.contains(&i.unit_key);
+                let keep = recruitable.iter().any(|e| e.unit_key == i.unit_key);
                 if !keep {
                     refund = refund.wrapping_add(i.cost);
                 }
                 keep
             });
+            r.population = population.credited(r.population, before - r.recruitment_queue.len());
         }
         if refund != 0
             && let Some(f) = self.world.factions.get_mut(&owner)
@@ -446,6 +449,18 @@ impl CampaignModel {
         // Capacity (the queue's method 1: `recruitment_points`), read before the queues change.
         let caps = (self.recruitment_points(region, false), self.recruitment_points(region, true));
         let naval: Vec<bool> = reg.recruitment_queue.iter().map(|i| self.rules.units.get(&i.unit_key).is_some_and(|u| u.is_naval)).collect();
+        // An item whose recruitable entry carries building flags is held back (`0x00B5AD90`, CONFIRMED: the
+        // entry of the item's unit in the region's unpriced list, vtable +0x14 = region +0x1A8, has a flag). The
+        // list is the one the removal above read: the exe's step reads the same cache, which nothing inside
+        // `0x00B71FB0` rebuilds. INFERRED: that it is the list from before this turn's construction step. The
+        // exe's construction (`0x00A78670`, from `0x00AB3DA0`) is not part of the region update, and a slot
+        // whose construction finishes rebuilds the cache (`0x00A682F0`); whether that happens before or after
+        // the queue step is not traced (the model runs construction between the removal and the countdown).
+        let blocked: Vec<bool> = reg
+            .recruitment_queue
+            .iter()
+            .map(|i| recruitable.iter().find(|e| e.unit_key == i.unit_key).is_none_or(|e| e.flags != 0))
+            .collect();
 
         // Construction: every item counts down one turn; finished items replace the slot's
         // building. Every slot advances its own item in the same pass (CONFIRMED: `0x00A78670` runs
@@ -487,14 +502,15 @@ impl CampaignModel {
         // them have (CONFIRMED, `0x00B71FB0`); the rest wait. The land and naval queues are separate
         // managers with their own capacity. An item counts only after a round end has passed since it
         // was queued (flag +0x54, set by `0x00A78620` at the faction's round-end economy), which the
-        // turn order here gives already. Items reaching zero finish, in queue order.
+        // turn order here gives already. A held-back item neither counts down nor takes one of the
+        // `recruitment_points`. Items reaching zero finish, in queue order.
         let mut finished = Vec::new();
         let mut waiting = Vec::with_capacity(reg.recruitment_queue.len());
         let (mut land_n, mut naval_n) = (0u32, 0u32);
-        for (mut item, is_naval) in std::mem::take(&mut reg.recruitment_queue).into_iter().zip(naval) {
+        for ((mut item, is_naval), blocked) in std::mem::take(&mut reg.recruitment_queue).into_iter().zip(naval).zip(blocked) {
             let (n, cap) = if is_naval { (&mut naval_n, caps.1) } else { (&mut land_n, caps.0) };
-            *n += 1;
-            if *n <= cap {
+            if !blocked && *n < cap {
+                *n += 1;
                 item.turns_remaining = item.turns_remaining.saturating_sub(1);
             }
             if item.turns_remaining == 0 {

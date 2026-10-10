@@ -3,9 +3,9 @@
 Keep this file short. It holds what is true now: replace finished items rather than appending logs.
 Old session logs are in `docs/archive/`.
 
-Last updated: 2026-10-09. Main tests at last full run (2026-10-08): `cargo test --workspace` passes on the install.
+Last updated: 2026-10-10. Main tests at last full run (2026-10-08): `cargo test --workspace` passes on the install.
 
-## Resume here (2026-10-09)
+## Resume here (2026-10-10)
 
 - **Repos:** work happens in the private repo (origin, `…-Private`). The public repo
   `DenseCow/Napoleon-Total-War-Rust-Rewrite` is a snapshot mirror for contributors: publish after a
@@ -16,33 +16,18 @@ Last updated: 2026-10-09. Main tests at last full run (2026-10-08): `cargo test 
   merge, applying the worker's BACKLOG ticks/Polish lines in the merge commit → `bash tools/progress.sh`
   → push (the hook syncs public #2) → publish in batches. Running work = the BACKLOG `(running: …)`
   markers and `git worktree list`; merged work = `git log`.
-- **Resume points (2026-10-09, block cap 46%):** workers commit and push a checkpoint every ~20 min.
-  1. gait-blend2 (NR-gait-blend2, head `38df2276`, don't merge yet): the 2026-10-10 sitting settled both reads (end of
-     UNITS_TERRAIN_FIDELITY.md §1.10): cavalry speed is the horse record's, but a walking horse moves at ~80% of its order
-     speed (2.1-2.3 of 2.8 m/s), so it stays in walk; men change levels through store C. Left: trace what lowers the
-     wanted speed `+0x148` in the move state `0x00806D40`, apply it in `ntw_sim`, then review.
-  2. mod-loading2 (NR-mod-loading): review round 1 found 2 blocking (precedence must follow the whole graph
-     `0x0108EBB0`/`0x0109ECF0`; `ntw_ai` tables.rs:79 `load_raw` must read the merged tables) plus three silent
-     failures (unknown script line, `--mods` with no value, mods.rs:734 warning per open). The fix round was cut by
-     the cap before any edit (branch clean at `9e7ffd58`). Notes: the exe drops a precedence pair that would close a
-     cycle (`0x0108E8F0`); the AI's raw tables have no traced key (trace the exe's key reader per table). Then review
-     the fix commits only. The unattended start-up debugger run for
-     the six open points is MOD_LOADING.md §6 (no user input).
-  3. 0e-panel (NR-0e-panel, `4937016a`): done: `OnDivorceChild` fires on Adopt, Divorce, Destroy and DestroyChildren
-     (`0x01027BA0` → `0x0102DE60`; ORIGINAL BUG fixed: DestroyChildren could loop for ever), both Polish lines cleared, the
-     region panel script runs to its end. Left: clippy, notes and Ghidra names (FUNCTION_DOC guides), the model's missing
-     panel values (predicted values, growth and wealth factors, Effects, PopulationChange/WealthChange, next town:
-     PROVISIONAL), Name INFERRED. Then review.
-  4. campaign-source (NR-campaign-source, `75c2b8c2`): done: versioned RON/deflate own save (`own_save.rs`, F5), AI keys and
-     region base values moved into the model, old ESF saves still load, `ntw_campaign::source` seam used by the scene,
-     campaign list and UI. Left: the real-install round-trip and seam tests, the full test run + clippy + own-diff check,
-     analysis/modding/OWN_SAVE_FORMAT.md, and the display port (`MapData` still wraps `CampaignMap`). Was: our own campaign save format and the `CampaignSource` seam
-     (MODDING_AUDIT.md §4 items 1-2); check its last push.
-  5. Then, first free slots (user, 2026-10-10: modding foundations before they get costlier): (a) one table path
-     (BACKLOG §11, with its guard test), (b) no engine limits: data-driven counts and ID types (MODDING_AUDIT.md §2),
-     (c) generic-engine switches (MODDING_AUDIT.md §1). Then MODDING_AUDIT.md items 3-4 (after mod-loading2
-     merges), ui-fixes (front-end UI scale, battle CursorPosition, prelude x/y). The map, Lua, format and tool
-     items of §11 wait.
+- **Resume points (2026-10-10 night, stop at 60%):** merged tonight: mod-loading2, polish ×2 + polish-script,
+  0e-panel, table-path, campaign-source, power-rank, no-limits, generic-engine, recruit-pop, diplomacy3, recruit-cost
+  (all three modding foundations are in). Open branches:
+  1. gait-blend2 (NR-gait-blend2, `dd225fb7`, don't merge yet): static trace done (UNITS_TERRAIN_FIDELITY.md §1.10
+     "Static trace 2026-10-10": wanted speed = order speed × cos(heading error) × ground/fatigue/slope); one debugger
+     read separates the factors (FOR_USER sitting), then port into `ntw_sim` and review. Its branch edits FOR_USER.md:
+     keep main's version at merge.
+  2. polish-battle: merged (`88a10376`).
+  3. deal-items (NR-deal-items): regions and techs as deal items, Propose wired to the model (`0x009BF3C0` →
+     `0x00C49BD0` +0x40, `0x00B449F0` flags); check its last push and notes for the resume point; then review.
+  4. Next in free slots: §0 items (BACKLOG §0); the §11 follow-ups added tonight (spa_napoleon xrefs, campaign list
+     from data, render caps, AI fallbacks) after §0; Polish when it passes ~20 lines.
 - **Disk:** C: filled up on 2026-10-09; 21 merged worktrees were removed (~100 GB back). Remove a
   worktree after its merge; check `df -h /c` before starting builds.
 - **Next:** §0, several workers tracing in parallel under the Ghidra writer lock, plus the §11 modding work alongside it (user, 2026-10-09: mod loading and the audits come early); the unwrap audit last.
@@ -55,8 +40,7 @@ Last updated: 2026-10-09. Main tests at last full run (2026-10-08): `cargo test 
 
 - **Diplomacy screen (§0-E):** diplomacy2 merged (greeting by attitude, diplomat portrait, button lists
   for war / peace+trade / ally, Power and Wealth words, regnal numerals). Still different from the
-  original: Austria's power reads "Mighty" (original "Terrifying"; ours ranks it 5th; the original's
-  values, read 2026-10-10, put it 3rd: UI_FIDELITY.md power-result row), the panel creates no `diplomacy_button_*` components from the
+  original: the panel creates no `diplomacy_button_*` components from the
   lists (ignored test; cause untraced), red cancel texts. Original screens in
   `%USERPROFILE%\Documents\ntw-evidence\screens\`: `2026-10-08_original_diplomacy_negotiation_britain_france.png`,
   `…_britain_ottoman_trade.png`, `…_britain_austria_ally.png`, `2026-10-08_original_diplomatic_relations_britain.png`.

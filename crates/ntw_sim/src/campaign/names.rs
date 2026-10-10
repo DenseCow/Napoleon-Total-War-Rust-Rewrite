@@ -44,14 +44,15 @@ pub struct NameAllocator {
     pub size: u32,
     /// LCG state.
     pub seed: u32,
-    /// Remaining pool indices, next first.
-    pub deck: Vec<u16>,
+    /// Remaining pool indices, next first. `u32` (the save stores u16, which the ESF writer
+    /// checks), so a pool may hold any number of names.
+    pub deck: Vec<u32>,
 }
 
 impl NameAllocator {
     /// The full shuffled deck a refill makes from the (already advanced) seed `seed`.
-    pub fn shuffled(size: u32, seed: u32) -> Vec<u16> {
-        let mut deck: Vec<u16> = (0..size).map(|i| i as u16).collect();
+    pub fn shuffled(size: u32, seed: u32) -> Vec<u32> {
+        let mut deck: Vec<u32> = (0..size).collect();
         let mut r = seed >> 16;
         for i in 1..deck.len() {
             let m = (i + 1) as u32;
@@ -77,7 +78,7 @@ impl NameAllocator {
     }
 
     /// Draws the next pool index (`0x008A9FA0`), or `None` for an empty pool.
-    pub fn draw(&mut self) -> Option<u16> {
+    pub fn draw(&mut self) -> Option<u32> {
         if self.deck.is_empty() {
             if self.size == 0 {
                 return None;
@@ -152,8 +153,8 @@ pub fn draw_name(pools: &NamePools, historical: &BTreeSet<String>, fore: &mut Na
     if fp.is_empty() || sp.is_empty() {
         return None;
     }
-    let f = fore.draw().map_or(0, usize::from).min(fp.len() - 1);
-    let s = sur.draw().map_or(0, usize::from).min(sp.len() - 1);
+    let f = fore.draw().map_or(0, |i| i as usize).min(fp.len() - 1);
+    let s = sur.draw().map_or(0, |i| i as usize).min(sp.len() - 1);
     let (mut fk, mut ft) = (&fp[f].key, &fp[f].text);
     let (mut sk, mut st) = (&sp[s].key, &sp[s].text);
     let mut tries = 0;
@@ -208,7 +209,7 @@ impl CampaignModel {
         self.with_decks(faction, move |names, pools, fore, sur, _| {
             let mut name = name;
             if name.0.is_empty()
-                && let Some(f) = fore.draw().and_then(|f| pools.forenames.get(usize::from(f)))
+                && let Some(f) = fore.draw().and_then(|f| pools.forenames.get(f as usize))
             {
                 name.0 = f.key.clone();
             }
@@ -216,7 +217,7 @@ impl CampaignModel {
             while tries < MAX_TRIES && names.historical.contains(&names.display(&name)) {
                 tries += 1;
                 let (Some(f), Some(s)) = (fore.draw(), sur.draw()) else { break };
-                let (Some(f), Some(s)) = (pools.forenames.get(usize::from(f)), pools.surnames.get(usize::from(s))) else { break };
+                let (Some(f), Some(s)) = (pools.forenames.get(f as usize), pools.surnames.get(s as usize)) else { break };
                 name = (f.key.clone(), s.key.clone());
             }
             name
@@ -460,5 +461,15 @@ mod tests {
         assert_eq!(a.size, 2);
         let d = a.draw().expect("a refill");
         assert!(d < 2 && a.deck.len() == 1 && a.seed == lcg_step(3));
+    }
+
+    #[test]
+    fn decks_hold_pools_past_u16() {
+        // The deck was u16 (an index past 65,535 wrapped); a pool may have any number of names.
+        let deck = NameAllocator::shuffled(70_000, 12345);
+        assert_eq!(deck.len(), 70_000);
+        assert!(deck.contains(&69_999));
+        let mut a = NameAllocator { size: 70_000, seed: 1, deck: Vec::new() };
+        assert!(a.draw().is_some_and(|i| i < 70_000));
     }
 }

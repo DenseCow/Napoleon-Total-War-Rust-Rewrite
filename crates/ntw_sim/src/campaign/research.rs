@@ -78,8 +78,8 @@ impl CampaignModel {
     pub fn school(&self, region: RegionId, slot: usize) -> Option<FactionId> {
         let r = self.world.regions.get(&region)?;
         let s = r.slots.get(slot)?;
-        let b = s.building.as_ref().filter(|b| b.health >= 100)?;
-        if s.holder.is_some_and(|h| h != r.owner) {
+        let b = s.building.as_ref().filter(|b| !b.is_damaged())?;
+        if r.slot_occupied(s) {
             return None;
         }
         let points = self.rules.effects.building_local().get(&b.level_key).map_or(0, |e| e.get_int("research_points"));
@@ -268,14 +268,16 @@ impl CampaignModel {
         techs.iter().all(|t| self.tech_state(faction, t) == Some(state::RESEARCHED))
     }
 
-    /// True if `faction` may recruit `unit` as far as technology goes (`unit_required_technology_junctions`;
-    /// INFERRED gate, consistent with every queued item of the vanilla saves).
+    /// True if `faction` may recruit `unit` as far as technology goes (CONFIRMED, `0x008AAB60`: every
+    /// technology `unit_required_technology_junctions` links to the unit (`0x00EA9B10`, unit +0xCC) is in
+    /// state 0; one the faction's tree lacks reads as state 5 (`0x008F3DB0`)). Failing it flags the unit's
+    /// recruitable entry ([`super::commands::ENTRY_NO_TECHNOLOGY`]).
     pub fn unit_tech_ok(&self, faction: FactionId, unit: &str) -> bool {
         self.rules.unit_techs.get(unit).is_none_or(|t| self.has_researched(faction, t))
     }
 
     /// True if `faction` may build `level` as far as technology goes
-    /// (`building_level_required_technology_junctions`; INFERRED gate, as [`Self::unit_tech_ok`]).
+    /// (`building_level_required_technology_junctions`; INFERRED gate, of the shape of [`Self::unit_tech_ok`], not traced).
     pub fn building_tech_ok(&self, faction: FactionId, level: &str) -> bool {
         self.rules.building_techs.get(level).is_none_or(|t| self.has_researched(faction, t))
     }

@@ -180,7 +180,7 @@ fn province_management_with_db_values() {
     m.start_campaign();
     let france = faction(&m, "france");
     let paris = m.world.regions.values().find(|r| r.key == "eur_france").unwrap().id;
-    let units = m.recruitable_units(paris);
+    let units: Vec<String> = m.recruitable_units(paris).into_iter().filter(|e| e.flags == 0).map(|e| e.unit_key).collect();
     println!("Paris can recruit {} units: {:?}", units.len(), &units[..units.len().min(6)]);
     assert!(!units.is_empty());
     assert!(m.recruitment_points(paris, false) > 0);
@@ -231,7 +231,7 @@ fn save_round_trip() {
     m.start_campaign();
     let france = faction(&m, "france");
     let paris = m.world.regions.values().find(|r| r.key == "eur_france").unwrap().id;
-    let unit = m.recruitable_units(paris).into_iter().find(|u| !m.rules.units[u].is_naval).unwrap();
+    let unit = m.recruitable_units(paris).into_iter().filter(|e| e.flags == 0).map(|e| e.unit_key).find(|u| !m.rules.units[u].is_naval).unwrap();
     m.apply(CampaignCommand::Recruit { region: paris, unit_key: unit.clone() }).unwrap();
     m.end_turn();
     m.end_turn();

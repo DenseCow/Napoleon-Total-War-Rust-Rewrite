@@ -71,7 +71,7 @@ pub struct BattleRecord {
 
 /// The `battles` table from the install, mods included (the merged table reader).
 pub fn read_battles(source: &ScriptSource) -> Vec<BattleRecord> {
-    let Some(rows) = source.table_rows(&ntw_formats::db_folder::tables::BATTLES) else { return Vec::new() };
+    let Some(rows) = source.table_rows_shared(&ntw_formats::db_folder::tables::BATTLES) else { return Vec::new() };
     let s = |v: &DbValue| v.as_str().map(str::to_owned);
     let b = |v: &DbValue| v.as_bool().unwrap_or(false);
     rows
@@ -796,21 +796,14 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Result<(
     })?)?;
 
     // TheatreList(key) → { <theatre> = {Map = image}, ... } (CONFIRMED names "theatres"/"theatre"/
-    // "Map", 0x00478FA0). INFERRED: one theatre per campaign map, keyed as sp_load_game.lua's
-    // theatre_lookup names them (map_nap_europe → europe_main); the Map image is UNKNOWN, so none
-    // is given (PLACEHOLDER).
+    // "Map", 0x00478FA0). INFERRED: the campaign's theatres are its header's (`CampaignInfo::theatres`,
+    // the area keys sp_load_game.lua's theatre_lookup names: map_nap_europe → europe_main); the Map
+    // image is UNKNOWN, so none is given (PLACEHOLDER).
     let i = inner.clone();
     t.set("TheatreList", lua.create_function(move |lua, key: String| {
         let out = lua.create_table()?;
         let info = ntw_campaign::source::campaign_info(&|p| i.source.find(p).map(|f| f.bytes), &key);
-        if let Some(info) = info {
-            let theatre = match info.map_key.as_str() {
-                "nap_italy" => "italy_main",
-                "nap_egypt" => "egypt_main",
-                "nap_europe" => "europe_main",
-                "nap_spain" => "spain_main",
-                other => other,
-            };
+        for theatre in info.iter().flat_map(|info| info.theatres()) {
             out.set(theatre, lua.create_table()?)?;
         }
         Ok(out)

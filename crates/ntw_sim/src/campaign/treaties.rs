@@ -146,6 +146,15 @@ impl Relationship {
     }
 }
 
+/// The attitude categories' names by [`attitude_category`] (the `diplomatic_relations_attitudes` keys,
+/// names `0x015F2910`, CONFIRMED): the one list the diplomat lines and the diplomacy UI read.
+pub const ATTITUDE_NAMES: [&str; 5] = ["hostile", "unfriendly", "neutral", "friendly", "very_friendly"];
+
+/// The name of an attitude category ([`ATTITUDE_NAMES`]; above 4 the last).
+pub fn attitude_name(category: u8) -> &'static str {
+    ATTITUDE_NAMES[usize::from(category).min(ATTITUDE_NAMES.len() - 1)]
+}
+
 /// The attitude category of a total (`0x00B0DBA0`): 0 hostile .. 4 very friendly. The boundaries are
 /// half-way between the `diplomatic_relations_attitudes` rows (integer halves), the upper two minus 1:
 /// with the shipped rows ≤ −65 → 0, ≤ −22 → 1, ≤ 21 → 2, ≤ 64 → 3, else 4.

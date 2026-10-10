@@ -53,7 +53,7 @@ impl CampaignUi {
         self.tech_links.get_or_init(|| {
             let required: Vec<(String, String)> =
                 small_table(inner, &tables::TECHNOLOGY_REQUIRED_TECHNOLOGY_JUNCTIONS)
-                    .into_iter()
+                    .iter()
                     .filter_map(|r| Some((r.first()?.as_str()?.to_owned(), r.get(1)?.as_str()?.to_owned())))
                     .collect();
             let parent_offsets = technology_parent_offsets(&self.link.db, &required);
@@ -83,6 +83,41 @@ impl CampaignUi {
 /// faction's technology list has it with state 0, being researched with state 1, otherwise
 /// available when every required technology is researched, else unavailable (the exe's own test
 /// 0x008B7850 is not decoded); research itself is not modelled, so no university is researching.
+/// A technology's tab: its key's prefix (military / economy / admin; INFERRED).
+fn tech_category(key: &str) -> usize {
+    match key.split(|c: char| c.is_ascii_digit() || c == '_').next() {
+        Some("military") => 0,
+        Some("economy") => 1,
+        _ => 2,
+    }
+}
+
+/// The tech entry table `0x009ABB50` (the keys above but `Record`; `dependancies` and
+/// `tech_status` are the callers').
+fn tech_entry(lua: &Lua, inner: &Inner, parent_offsets: &HashMap<String, (i32, i32)>, t: &ntw_data::Technology) -> mlua::Result<Table> {
+    let (parent_x, parent_y) = parent_offsets.get(t.key.as_str()).copied().unwrap_or((0, 0));
+    let e = lua.create_table()?;
+    e.set("Key", t.key.as_str())?;
+    e.set("Name", loc(inner, &format!("technologies_onscreen_name_{}", t.key)).unwrap_or_else(|| t.key.clone()))?;
+    e.set("BuildingLevel", t.building_level.as_str())?;
+    e.set("ChainPosition", t.tree_column)?;
+    e.set("PointsRequired", t.research_cost)?;
+    e.set("ParentXoffset", parent_x)?;
+    e.set("ParentYoffset", parent_y)?;
+    e.set("IconFilename", format!("Data/UI/Campaign UI/Technologies/{}.tga", t.text_key))?;
+    e.set("LongDescription", loc(inner, &format!("technologies_long_description_{}", t.key)).unwrap_or_default())?;
+    e.set("ShortDescription", loc(inner, &format!("technologies_short_description_{}", t.key)).unwrap_or_default())?;
+    e.set("Category", tech_category(&t.key))?;
+    Ok(e)
+}
+
+/// The tech entry of `key` for the negotiation's technology lists (`0x009C5AA0` rows); `None`
+/// when the technology is not in the data.
+pub(super) fn negotiation_tech_entry(lua: &Lua, inner: &Inner, ui: &CampaignUi, key: &str) -> mlua::Result<Option<Table>> {
+    let Some(t) = ui.link.db.technology(key) else { return Ok(None) };
+    tech_entry(lua, inner, &ui.tech_links(inner).parent_offsets, t).map(Some)
+}
+
 fn technology_details(lua: &Lua, inner: &Inner, ui: &CampaignUi) -> mlua::Result<Value> {
     let db = &ui.link.db;
     let m = ui.model();
@@ -112,31 +147,11 @@ fn technology_details(lua: &Lua, inner: &Inner, ui: &CampaignUi) -> mlua::Result
         }
     }
     drop(m);
-    // A technology's tab: its key's prefix (military / economy / admin; INFERRED).
-    let tech_category = |key: &str| -> usize {
-        match key.split(|c: char| c.is_ascii_digit() || c == '_').next() {
-            Some("military") => 0,
-            Some("economy") => 1,
-            _ => 2,
-        }
-    };
     let mut chains: Vec<String> = db.technologies.rows().iter().filter_map(|t| db.building_level(&t.building_level).map(|b| b.chain.clone())).collect();
     chains.sort();
     chains.dedup();
     let entry = |t: &ntw_data::Technology, with_deps: bool| -> mlua::Result<Table> {
-        let (parent_x, parent_y) = parent_offsets.get(t.key.as_str()).copied().unwrap_or((0, 0));
-        let e = lua.create_table()?;
-        e.set("Key", t.key.as_str())?;
-        e.set("Name", loc(inner, &format!("technologies_onscreen_name_{}", t.key)).unwrap_or_else(|| t.key.clone()))?;
-        e.set("BuildingLevel", t.building_level.as_str())?;
-        e.set("ChainPosition", t.tree_column)?;
-        e.set("PointsRequired", t.research_cost)?;
-        e.set("ParentXoffset", parent_x)?;
-        e.set("ParentYoffset", parent_y)?;
-        e.set("IconFilename", format!("Data/UI/Campaign UI/Technologies/{}.tga", t.text_key))?;
-        e.set("LongDescription", loc(inner, &format!("technologies_long_description_{}", t.key)).unwrap_or_default())?;
-        e.set("ShortDescription", loc(inner, &format!("technologies_short_description_{}", t.key)).unwrap_or_default())?;
-        e.set("Category", tech_category(&t.key))?;
+        let e = tech_entry(lua, inner, parent_offsets, t)?;
         if with_deps {
             let deps = lua.create_table()?;
             for (i, (_, r)) in required.iter().filter(|(k, _)| *k == t.key).enumerate() {

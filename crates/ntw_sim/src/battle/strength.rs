@@ -17,40 +17,17 @@
 use super::model::LandUnit;
 use super::morale::{MoraleBehaviour, MoraleState};
 
-/// The unit category code (`units` column 2, compare chain `0x00EED2B0`, CONFIRMED order).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Category {
-    /// 0 `cavalry`.
-    Cavalry,
-    /// 1 `artillery` (also any unknown key).
-    Artillery,
-    /// 2 `infantry`.
-    Infantry,
-    /// 3 `dragoons`.
-    Dragoons,
-    /// 4 `elephants`.
-    Elephants,
-    /// 5 `cavalry_camels`.
-    Camels,
-    /// 6..12, the naval categories.
-    Naval,
-}
+pub use crate::unit_kind::Category;
 
-/// The unit's category. A unit built without data (empty key) falls back to its model flags
-/// (PROVISIONAL: artillery weapon → artillery, cavalry → cavalry, otherwise infantry).
+/// The unit's category ([`crate::unit_kind::category`]: the original's codes, an unknown key
+/// artillery). A unit built without data (empty key) falls back to its model flags (PROVISIONAL:
+/// artillery weapon → artillery, cavalry → cavalry, otherwise infantry).
 pub fn category(u: &LandUnit) -> Category {
     match u.unit_category.as_str() {
-        "cavalry" => Category::Cavalry,
-        "artillery" => Category::Artillery,
-        "infantry" => Category::Infantry,
-        "dragoons" => Category::Dragoons,
-        "elephants" => Category::Elephants,
-        "cavalry_camels" => Category::Camels,
-        s if s.starts_with("naval_") => Category::Naval,
         "" if u.missile.is_some_and(|w| w.is_artillery) => Category::Artillery,
         "" if u.is_cavalry => Category::Cavalry,
         "" => Category::Infantry,
-        _ => Category::Artillery,
+        key => crate::unit_kind::category(key),
     }
 }
 

@@ -131,14 +131,24 @@ pub fn read_allocator(r: &EsfRecord) -> Option<Allocator> {
         size: r.get_u32(0)?,
         seed: r.get_u32(1)?,
         deck: match r.get(2)? {
-            EsfNode::U16Array(v) => v.clone(),
+            EsfNode::U16Array(v) => v.iter().map(|&i| u32::from(i)).collect(),
             _ => return None,
         },
     })
 }
 
-/// Writes an allocator's state back into a `NAME_ALLOCATION_DETAILS` record.
+/// Writes an allocator's state back into a `NAME_ALLOCATION_DETAILS` record. The record's deck is
+/// a u16 array: a deck holding an index past 65,535 (a pool larger than the original's format
+/// allows) cannot be written, so the record keeps its stored state whole (size, seed and deck,
+/// never half of it) and that is logged once.
 pub fn write_allocator(a: &Allocator, r: &mut EsfRecord) {
+    static UNFIT_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let Ok(deck) = a.deck.iter().map(|&i| u16::try_from(i)).collect::<Result<Vec<u16>, _>>() else {
+        if !UNFIT_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            log::warn!("save: a name deck of {} names does not fit the save's u16 indices; its record keeps the stored state", a.size);
+        }
+        return;
+    };
     if let Some(n @ EsfNode::U32(_)) = r.children.get_mut(0) {
         *n = EsfNode::U32(a.size);
     }
@@ -146,7 +156,7 @@ pub fn write_allocator(a: &Allocator, r: &mut EsfRecord) {
         *n = EsfNode::U32(a.seed);
     }
     if let Some(n @ EsfNode::U16Array(_)) = r.children.get_mut(2) {
-        *n = EsfNode::U16Array(a.deck.clone());
+        *n = EsfNode::U16Array(deck);
     }
 }
 
@@ -263,4 +273,22 @@ pub fn attach_data(model: &mut CampaignModel, data: &NameData) {
         log::warn!("Campaign names: no name decks for {deckless:?}; their new characters and officers stay unnamed");
     }
     std::sync::Arc::make_mut(&mut model.rules).names = rules;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_deck_past_u16_leaves_the_record_whole() {
+        let record = || EsfRecord { name: "NAME_ALLOCATION_DETAILS".into(), version: 0, children: vec![EsfNode::U32(3), EsfNode::U32(7), EsfNode::U16Array(vec![2, 0, 1])] };
+        // Fits: size, seed and deck are written.
+        let mut r = record();
+        write_allocator(&Allocator { size: 4, seed: 9, deck: vec![3, 1] }, &mut r);
+        assert_eq!(r.children, vec![EsfNode::U32(4), EsfNode::U32(9), EsfNode::U16Array(vec![3, 1])]);
+        // A pool past the format's u16 indices: nothing is written (no new size over an old deck).
+        let mut r = record();
+        write_allocator(&Allocator { size: 70_001, seed: 9, deck: vec![70_000, 1] }, &mut r);
+        assert_eq!(r, record());
+    }
 }

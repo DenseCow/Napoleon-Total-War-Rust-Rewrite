@@ -86,21 +86,26 @@ impl std::fmt::Display for FormatError {
 impl std::error::Error for FormatError {}
 
 /// The header of a save of `model` made by `human` now: the loaded campaign's facts (`base`) with
-/// the turn, year and date of the model, the human marked as the player, the territory pictures
-/// of `pictures` rendered for the human's regions (as the original's header shows them,
-/// [`crate::header_map`]) and `timestamp` (unix seconds). Portrait, flag and season name are kept
-/// from `base`, as the ESF writer keeps them.
+/// the turn, year, date and season name of the model, the human marked as the player, the territory
+/// pictures of `pictures` rendered for the human's regions (as the original's header shows them,
+/// [`crate::header_map`]) and `timestamp` (unix seconds). Portrait and flag are kept from `base`, as
+/// the ESF writer keeps them. Every theatre of `base` is kept (the campaign's theatres,
+/// [`CampaignInfo::theatres`]); one whose pictures did not load (logged where they are loaded) is
+/// saved without a picture (0 x 0).
 pub fn save_header(base: &CampaignInfo, model: &CampaignModel, human: &str, timestamp: u32, pictures: &[crate::header_map::TheatrePictures]) -> CampaignInfo {
     let cal = &model.calendar;
     let owned = crate::header_map::owned_regions(model, human);
-    let maps = pictures
-        .iter()
-        .map(|p| crate::HeaderMap {
-            theatre: p.theatre().to_owned(),
-            width: p.size().0,
-            height: p.size().1,
-            pitch: (p.size().0 * 4) as i32,
-            pixels: p.render(&owned, None),
+    let maps = base
+        .theatres()
+        .map(|theatre| match pictures.iter().find(|p| p.theatre() == theatre) {
+            Some(p) => crate::HeaderMap {
+                theatre: theatre.to_owned(),
+                width: p.size().0,
+                height: p.size().1,
+                pitch: (p.size().0 * 4) as i32,
+                pixels: p.render(&owned, None),
+            },
+            None => crate::HeaderMap { theatre: theatre.to_owned(), ..Default::default() },
         })
         .collect();
     let mut info = base.clone();
@@ -112,6 +117,9 @@ pub fn save_header(base: &CampaignInfo, model: &CampaignModel, human: &str, time
     info.header.turn_number = cal.turn_number();
     info.header.year = cal.date.year;
     info.header.date = Some(cal.date);
+    if let Some(season) = cal.date.season_header_name() {
+        info.header.season_name = season.to_owned();
+    }
     info.header.maps = maps;
     for p in &mut info.players {
         p.is_human = p.faction_key == human;

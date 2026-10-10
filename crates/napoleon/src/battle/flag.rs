@@ -209,7 +209,7 @@ pub fn spawn_flags(
     let Some(lib) = lib.as_ref() else { return };
     let Some(template) = lib.template.as_ref() else { return };
     let mut made = 0usize;
-    for info in &sim.info {
+    for info in sim.infos() {
         // Only a unit that ships a standard bearer carries a flag: `unit_stats_land` #4/5/6
         // officer / musician / standard bearer feed `battle_personalities` (CONFIRMED, read in
         // `ntw_formats::unit_animation::plan_figure`).

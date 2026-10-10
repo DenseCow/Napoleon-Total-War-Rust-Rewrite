@@ -36,8 +36,6 @@ use super::actions::{self, Mode};
 /// instanced). Clips do not depend on the kit: each man plays his own alternative clips,
 /// picked by his selection number, with his own phase (see `skin`).
 const KITS_PER_UNIT: usize = 3;
-/// Most figures drawn per unit.
-const MAX_FIGURES: usize = 240;
 /// The figure generators start from the battle's own seed, as the original's battle generator
 /// does (CONFIRMED source: the battle set-up `0x00511210` gets `timeGetTime()`, or the
 /// `constant_random_seed` option, from `0x004847F0`; our battles use their deterministic seed). Which
@@ -73,11 +71,16 @@ impl UnitView {
         self.at_slot(units).or_else(|| units.binary_search_by_key(&self.id, |u| u.id).ok().map(|i| &units[i]))
     }
 
-    /// [`unit`](Self::unit), keeping the slot it was found at (once per model tick).
+    /// [`unit`](Self::unit), keeping the slot it was found at (the same as `observe_ticks` does).
+    #[cfg(test)]
     fn observe<'a>(&mut self, units: &'a [LandUnit]) -> Option<&'a LandUnit> {
-        if self.at_slot(units).is_none() {
-            self.slot = units.binary_search_by_key(&self.id, |u| u.id).ok()?;
-        }
+        self.at_slot(units).or_else(|| self.relocate(units))
+    }
+
+    /// Finds the unit by id and keeps its slot: for when [`at_slot`](Self::at_slot) already said
+    /// the kept slot no longer holds it.
+    fn relocate<'a>(&mut self, units: &'a [LandUnit]) -> Option<&'a LandUnit> {
+        self.slot = units.binary_search_by_key(&self.id, |u| u.id).ok()?;
         units.get(self.slot)
     }
 
@@ -749,7 +752,7 @@ pub fn spawn_missing_views(
     if !sim.is_changed() {
         return;
     }
-    if views_current(skin.map(|s| s.build), sim.build, views.iter().map(|(_, v)| v.id), sim.info.iter().map(|i| i.id)) {
+    if views_current(skin.map(|s| s.build), sim.build, views.iter().map(|(_, v)| v.id), sim.infos().iter().map(|i| i.id)) {
         return;
     }
     // On a restart, throw away the old pictures first.
@@ -766,7 +769,7 @@ pub fn spawn_missing_views(
     // 1. Kits per unit, plus each unit's standard bearer when it has one.
     let mut unit_kits: Vec<Vec<FigureKit>> = Vec::new();
     let mut bearer_kits: Vec<Option<FigureKit>> = Vec::new();
-    for info in &sim.info {
+    for info in sim.infos() {
         let mut kits = Vec::new();
         let mut bearer = None;
         if let (Some(lib), Some(unit)) = (soldiers.lib.as_mut(), find(&sim, info.id)) {
@@ -809,12 +812,13 @@ pub fn spawn_missing_views(
         }
     }
     let total_men: usize = sim
-        .info
+        .infos()
         .iter()
         .zip(&unit_kits)
         .filter(|(_, k)| !k.is_empty())
         .filter_map(|(i, _)| find(&sim, i.id))
-        .map(|u| (u.men as usize).min(MAX_FIGURES))
+        // Every man is drawn (no per-unit cap: a modded 1,000-man unit shows 1,000 men).
+        .map(|u| u.men as usize)
         .sum::<usize>()
         // One figure slot each for the standard bearers.
         + bearer_kits.iter().filter(|k| k.is_some()).count();
@@ -899,7 +903,7 @@ pub fn spawn_missing_views(
     let mut next_slot = 0usize;
     let mut selection_rng = SelectionRng(selection_seed(sim.seed));
     let spawns: Vec<_> = sim
-        .info
+        .infos()
         .iter()
         .zip(unit_kits)
         .zip(kit_parts)
@@ -917,7 +921,7 @@ pub fn spawn_missing_views(
             let mut selections = Vec::new();
             let first_slot = next_slot;
             if !kits.is_empty() {
-                let count = (unit.men as usize).min(MAX_FIGURES);
+                let count = unit.men as usize;
                 let ranks = info.ranks.max(1) as usize;
                 let files = count.div_ceil(ranks).max(1);
                 let (dx, dz) = (info.size_m.x / files as f32, info.size_m.y / ranks as f32);
@@ -1028,7 +1032,7 @@ pub fn observe_ticks(sim: Res<BattleSim>, mut views: Query<(&mut UnitView, &mut 
         // Through `Mut` only when the slot moved, so an unmoved view is not marked changed.
         let unit = match view.at_slot(&sim.battle.units) {
             Some(u) => u,
-            None => match view.observe(&sim.battle.units) {
+            None => match view.relocate(&sim.battle.units) {
                 Some(u) => u,
                 None => continue,
             },
@@ -1388,7 +1392,7 @@ fn frame_bone(atlas: &BoneAtlas, frame: &[u32; 4], bone: usize) -> Option<[f32; 
 }
 
 fn find(sim: &BattleSim, id: u32) -> Option<&LandUnit> {
-    sim.battle.unit_index(id).map(|i| &sim.battle.units[i])
+    sim.unit(id)
 }
 
 /// Blue for France (side 0), red for Austria (side 1). Paler as morale drops; grey when

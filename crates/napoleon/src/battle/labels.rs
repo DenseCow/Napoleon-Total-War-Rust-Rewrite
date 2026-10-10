@@ -90,8 +90,8 @@ pub fn rasterise(font: &CufFont, lines: &[&str]) -> Image {
 
 /// The label lines of a unit.
 fn label_lines(sim: &BattleSim, id: u32) -> Option<Vec<String>> {
-    let unit = sim.battle.units.iter().find(|u| u.id == id)?;
-    let name = sim.info.iter().find(|i| i.id == id).map_or("?", |i| i.name.as_str());
+    let unit = sim.unit(id)?;
+    let name = sim.info_of(id).map_or("?", |i| i.name.as_str());
     let mut lines = vec![name.to_owned(), format!("{} men - {:?}", unit.men, unit.morale.state)];
     // Shooting units also show their ammunition and whether they are reloading.
     if unit.missile.is_some() {
@@ -125,7 +125,7 @@ pub fn update_labels(
     let panels: &[Rect] = hud.as_ref().map_or(&[], |h| h.panels.as_slice());
     let hide_all = sim.phase == super::BattlePhase::Finished;
     for (mut label, mut node, image, text, computed) in &mut labels {
-        let Some(unit) = sim.battle.units.iter().find(|u| u.id == label.id) else { continue };
+        let Some(unit) = sim.unit(label.id) else { continue };
         let Some(lines) = label_lines(&sim, label.id) else { continue };
         let joined = lines.join("\n");
         if label.text != joined {

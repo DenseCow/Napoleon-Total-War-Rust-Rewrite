@@ -21,7 +21,7 @@ use super::battles::PendingBattle;
 use super::events::CampaignEvent;
 use super::ids::{CharacterId, FactionId, ForceId, RecruitmentItemId, RegionId};
 use super::pathing::{Domain, GridPath};
-use super::rules::{TaxClass, MAX_UNITS_PER_FORCE, OFF_ROAD_COST};
+use super::rules::{TaxClass, OFF_ROAD_COST};
 use super::world::{SlotRef, CampaignModel, CampaignUnit, ConstructionItem, MilitaryForce, RecruitmentItem, Stance};
 use crate::fixed::{Fixed20, ONE_RAW};
 
@@ -97,7 +97,8 @@ pub enum CampaignCommand {
         /// The force attacked (its faction must be at war with the attacker's).
         target: ForceId,
     },
-    /// Move to a friendly force and give it units (up to [`MAX_UNITS_PER_FORCE`]).
+    /// Move to a friendly force and give it units (up to the campaign's units per force,
+    /// `CampaignModel::max_units`).
     MergeForces {
         /// The force giving its units.
         force: ForceId,
@@ -380,10 +381,21 @@ pub enum CommandError {
     UnknownUnit(String),
     /// No building in the region allows this unit, or the faction may not recruit it.
     UnitNotAvailable(String),
+    /// The unit's recruitable entry carries building flags ([`ENTRY_BUILDING_FLAGS`]): every building allowing it
+    /// is damaged or held by another faction, or a technology it needs is not researched.
+    RecruitmentBlocked {
+        /// The unit.
+        unit_key: String,
+        /// Its entry's building flags.
+        flags: u32,
+    },
     /// The recruitment queue of that kind (land or naval) already holds 10 items.
     NoRecruitmentCapacity,
     /// The faction already holds and has queued as many units of this type as `units` #15 allows.
     UnitCapReached(String),
+    /// The region's population is below `recruitment_population_cost` + `minimum_population_after_recruitment`
+    /// ([`super::population::RecruitmentPopulation::available`]).
+    NotEnoughPopulation,
     /// The region's recruitment queue has no item with this id.
     UnknownRecruitmentItem(RecruitmentItemId),
     /// The region has no such building slot.
@@ -434,8 +446,10 @@ impl fmt::Display for CommandError {
             CommandError::EmptyUnitKey => write!(f, "empty unit key"),
             CommandError::UnknownUnit(k) => write!(f, "unknown unit {k}"),
             CommandError::UnitNotAvailable(k) => write!(f, "unit {k} cannot be recruited here"),
+            CommandError::RecruitmentBlocked { unit_key, flags } => write!(f, "unit {unit_key} cannot be recruited here now (flags {flags:#x})"),
             CommandError::NoRecruitmentCapacity => write!(f, "the recruitment queue is full"),
             CommandError::UnitCapReached(k) => write!(f, "the faction already has as many {k} as it may"),
+            CommandError::NotEnoughPopulation => write!(f, "the region has too few people to recruit"),
             CommandError::UnknownRecruitmentItem(i) => write!(f, "no recruitment item {}", i.raw()),
             CommandError::BadSlot(slot) => write!(f, "no slot {slot:?}"),
             CommandError::UnknownBuilding(k) => write!(f, "unknown building level {k}"),
@@ -877,7 +891,7 @@ impl CampaignModel {
         if a.is_navy != b.is_navy {
             return Err(CommandError::Unsupported("merging an army with a navy"));
         }
-        if b.units.len() >= MAX_UNITS_PER_FORCE {
+        if b.units.len() >= self.max_units(b.is_navy) {
             return Err(CommandError::Unsupported("the receiving force is full"));
         }
         let to = self.force_position(into).ok_or(CommandError::UnknownForce(into))?;
@@ -889,14 +903,14 @@ impl CampaignModel {
         Ok(events)
     }
 
-    /// Moves `force`'s units into `into` (up to [`MAX_UNITS_PER_FORCE`]), each with its attached
-    /// character. The commander's own unit (the one he is attached to, `UNIT` #10) moves last, so
+    /// Moves `force`'s units into `into` (up to its cap, [`CampaignModel::max_units`]), each with
+    /// its attached character. The commander's own unit (the one he is attached to, `UNIT` #10) moves last, so
     /// when not everything fits he stays with what is left. When everything moves, `force` is
     /// gone and its commander goes along as the character attached to his unit (`CHARACTER` #4 = 0,
     /// #5 = the unit), standing where `into` is: the state the original saves for merged armies
     /// (SAVE_COMPAT.md §4, CONFIRMED in its saves).
     pub(crate) fn merge_units(&mut self, force: ForceId, into: ForceId, events: &mut Vec<CampaignEvent>) {
-        let room = MAX_UNITS_PER_FORCE.saturating_sub(self.world.forces.get(&into).map_or(MAX_UNITS_PER_FORCE, |f| f.units.len()));
+        let room = self.world.forces.get(&into).map_or(0, |f| self.max_units(f.is_navy).saturating_sub(f.units.len()));
         let Some(src) = self.world.forces.get_mut(&force) else { return };
         let commander = src.commander;
         // Stable order with the commander's own unit last.
@@ -969,7 +983,7 @@ impl CampaignModel {
             // garrison is full: the army then waits outside).
             let held = self.world.regions[&region].garrison.filter(|g| *g != force && self.world.forces.contains_key(g));
             if let Some(g) = held {
-                if self.world.forces[&g].units.len() < MAX_UNITS_PER_FORCE {
+                if self.world.forces[&g].units.len() < self.max_units(self.world.forces[&g].is_navy) {
                     self.merge_units(force, g, &mut events);
                 }
                 return Ok(events);
@@ -1009,7 +1023,7 @@ impl CampaignModel {
         // The faction's governorships carry the levels (`GOVERNORSHIP_TAXES`: level index and rate); every
         // faction of the shipped campaigns has one governorship, so the faction's level is its level.
         let index = super::details::TAX_LEVELS.iter().position(|k| *k == level);
-        let rate = self.rules.tax_levels.get(&level).copied().unwrap_or(0).clamp(0, 255) as u8;
+        let rate = self.rules.tax_levels.get(&level).copied().unwrap_or(0);
         if let (Some(index), Some(d)) = (index, self.world.faction_details.get_mut(&faction)) {
             for g in d.posts.iter_mut().filter_map(|p| p.governorship.as_mut()) {
                 match class {
@@ -1029,7 +1043,7 @@ impl CampaignModel {
     /// Recruitment points of a region: how many units can be in training there at once
     /// (INFERRED meaning). Land (`0x00B61F30`, CONFIRMED): the region's `recruitment_points` effect
     /// (rounded int effect), plus `recruitment_points_home_region` in the owner's capital
-    /// (`0x00A8B5A0`: the region is faction `+0x72C`), plus 1 for an AI France in `mp_eur_napoleon`
+    /// (`0x00A8B5A0`: the region is faction `+0x72C`), plus the campaign's [`ai_recruitment_points`](super::features::CampaignFeatures::ai_recruitment_points) for an AI-run owner (1 for France in `mp_eur_napoleon`)
     /// (hard-coded). The region's effects are its buildings' and the owner's faction-wide effects
     /// (`0x00A67530`, [`super::effects::Effects::region`]). Naval:
     /// per port, `naval_recruitment_points` of the port's own building (`0x00B61EE0`, CONFIRMED),
@@ -1056,61 +1070,96 @@ impl CampaignModel {
             pts += sum("recruitment_points_home_region").round_ties_even() as i32;
         }
         let human = self.turn.humans.contains(&r.owner);
-        if self.rules.campaign == "mp_eur_napoleon" && !human && self.world.factions.get(&r.owner).is_some_and(|f| f.key == "france") {
-            pts += 1;
+        if !human && let Some(f) = self.world.factions.get(&r.owner) {
+            pts += self.rules.features.ai_recruitment_bonus(&f.key);
         }
         pts.max(0) as u32
     }
 
-    /// Units the region's owner can recruit there now: allowed by a building in the region
-    /// (`building_units_allowed`) and by `units_to_exclusive_faction_permissions`, in building and
-    /// file order without duplicates.
-    pub fn recruitable_units(&self, region: RegionId) -> Vec<String> {
+    /// The region's recruitable list (region +0x1A8, built by `RebuildRegionRecruitablesAndEffects`
+    /// `0x00A6AE40` from each slot's building, `BuildSlotBuildingRecruitableList` `0x00B43CA0`; CONFIRMED but for
+    /// the two gates tagged PROVISIONAL in the body): the units a building in the region allows
+    /// (`building_units_allowed`) that its owner may recruit (`units_to_exclusive_faction_permissions`, and
+    /// [`super::rules::CampaignRules::government_may_recruit`]), one entry per unit, sorted by unit key, each with
+    /// the building flags that make it unavailable:
+    /// * [`ENTRY_DAMAGED`] when the building's health is below 100;
+    /// * [`ENTRY_OCCUPIED`] when the slot is held by another faction than the region's owner (`0x00A91FC0`);
+    /// * [`ENTRY_BESIEGED`] when the settlement is under siege (its `IsUnderSiege` virtual +0x98): never set,
+    ///   the campaign model has no sieges yet (BACKLOG "Sieges on the campaign map");
+    /// * [`ENTRY_NO_TECHNOLOGY`] when one of the unit's required technologies is not researched (`0x008AAB60`:
+    ///   every `unit_required_technology_junctions` technology, linked by `0x00EA9B10`, must be in state 0).
+    ///
+    /// A unit allowed by several buildings keeps one entry (`MergeRecruitableEntrySorted` `0x00B08E30`): an
+    /// unflagged one replaces a flagged one, an unflagged one stays, and flagged ones OR their flags. The queue
+    /// command refuses a flagged entry, and the queue step holds back an item whose entry is flagged
+    /// ([`Self::recruitable_entry_flags`], `region_turn`). The road counts as a slot of the owner (as in
+    /// [`super::world::Region::effect_buildings`]).
+    pub fn recruitable_units(&self, region: RegionId) -> Vec<RecruitableUnit> {
         let Some(r) = self.world.regions.get(&region) else { return Vec::new() };
-        let fkey = self.world.factions.get(&r.owner).map(|f| f.key.as_str()).unwrap_or("");
-        let mut out: Vec<String> = Vec::new();
-        for b in r.buildings() {
+        let (fkey, government) = self.world.factions.get(&r.owner).map_or(("", ""), |f| (f.key.as_str(), f.government_key.as_str()));
+        let flag = |on: bool, flag: u32| if on { flag } else { 0 };
+        let sources = r
+            .slots
+            .iter()
+            .filter_map(|s| s.building.as_ref().map(|b| (b, flag(b.is_damaged(), ENTRY_DAMAGED) | flag(r.slot_occupied(s), ENTRY_OCCUPIED))))
+            .chain(r.road.as_ref().map(|b| (b, flag(b.is_damaged(), ENTRY_DAMAGED))));
+        let mut out: Vec<RecruitableUnit> = Vec::new();
+        for (b, building_flags) in sources {
             for u in self.rules.buildings.get(&b.level_key).map(|b| b.units_allowed.as_slice()).unwrap_or(&[]) {
-                if !out.contains(u) && self.rules.units.contains_key(u) && self.rules.faction_may_recruit(fkey, u) && self.unit_tech_ok(r.owner, u) {
-                    out.push(u.clone());
+                // PROVISIONAL: two more gates leave a unit out (`0x00B43CA0`), not ported: `0x00AA1660` (unit
+                // +0x98, when set, must be in the region's list +0x270) and `0x00A27960` (the unit must not be in
+                // the campaign-wide list model +0xFA8 → +0x24). Their sources are not traced.
+                if !self.rules.units.contains_key(u) || !self.rules.faction_may_recruit(fkey, u) || !self.rules.government_may_recruit(government, u) {
+                    continue;
+                }
+                let flags = building_flags | if self.unit_tech_ok(r.owner, u) { 0 } else { ENTRY_NO_TECHNOLOGY };
+                match out.iter_mut().find(|e| e.unit_key == *u) {
+                    Some(e) if e.flags == 0 => {}
+                    Some(e) if flags == 0 => e.flags = 0,
+                    Some(e) => e.flags |= flags,
+                    None => out.push(RecruitableUnit { unit_key: u.clone(), flags }),
                 }
             }
         }
+        // The list is kept sorted by unit key (`0x00B78140`: `CompareUniStrings`, case-sensitive code units, the
+        // order of `str::cmp` on these ASCII keys).
+        out.sort_by(|a, b| a.unit_key.cmp(&b.unit_key));
         out
     }
 
-    /// The unavailability flags of the region's recruitable entry for `unit_key` (`0x00B69BA0`, CONFIRMED;
-    /// the list is built and flagged by the land queue's `0x00B31020`, its naval twin for a ship), `cost`
-    /// being the entry's cost ([`super::economy::recruitment_cost`]) and `counts` the owner's
-    /// [`Self::unit_type_counts`] (built once for all the entries). Any flag makes the queue command refuse
-    /// the unit, and the recruitment card shows them as its reasons:
+    /// The unavailability flags of the region's recruitable `entry` (one of [`Self::recruitable_units`]): its
+    /// building flags plus what `0x00B69BA0` adds (CONFIRMED; the list is priced and flagged by the land queue's
+    /// `0x00B31020`, its naval twin for a ship), `cost` being the entry's cost
+    /// ([`super::economy::recruitment_cost`]) and `counts` the owner's [`Self::unit_type_counts`] (built once
+    /// for all the entries). Any flag makes the queue command refuse the unit, and the recruitment card shows
+    /// them as its reasons:
     /// * [`ENTRY_UNIT_CAP`] when the unit has a cap (`units` #15) and the owner's units of that type plus its
     ///   queued items of it reach it (`0x008F68B0`, [`UnitTypeCounts::cap_room`]);
     /// * [`ENTRY_TOO_DEAR`] when the cost is above the owner's treasury compared unsigned
     ///   ([`super::treasury::recruitment_affordable`]), so a faction in debt is never flagged;
+    /// * [`ENTRY_NO_POPULATION`] when the region's population (`REGION_FACTORS` #2) is below
+    ///   `recruitment_population_cost` + `minimum_population_after_recruitment` (`0x00A89550`,
+    ///   [`super::population::RecruitmentPopulation::available`]; never with the shipped data, where both are 0);
     /// * [`ENTRY_QUEUE_FULL`] when the queue of the unit's kind (land or naval) holds [`MAX_QUEUE`] items
     ///   (`0x00B62040`).
-    ///
-    /// PROVISIONAL: the population flag 4 (`0x00A89550`: the region's recruitable population, `REGION_FACTORS`
-    /// #2, below `minimum_population_after_recruitment` + `recruitment_population_cost`) is never set, and the
-    /// queue command's population charge (`0x00AAF190`) and the cancel's credit (`0x00A61AA0`) are not made,
-    /// since the model has no recruitable population. Both variables are 0 in the shipped data, where the flag
-    /// is never set and the charge and credit are 0 (CAMPAIGN_FIDELITY.md §Recruitment cost and money).
     pub fn recruitable_entry_flags(
         &self,
         region: &super::world::Region,
-        unit_key: &str,
+        entry: &RecruitableUnit,
         unit: &super::rules::UnitRules,
         cost: i32,
         counts: &UnitTypeCounts<'_>,
     ) -> u32 {
-        let mut flags = 0;
-        if counts.cap_room(unit_key, unit) == Some(0) {
+        let mut flags = entry.flags;
+        if counts.cap_room(&entry.unit_key, unit) == Some(0) {
             flags |= ENTRY_UNIT_CAP;
         }
         let treasury = self.world.factions.get(&region.owner).map_or(0, |f| f.treasury);
         if !super::treasury::recruitment_affordable(treasury, cost) {
             flags |= ENTRY_TOO_DEAR;
+        }
+        if !counts.population.available(region.population) {
+            flags |= ENTRY_NO_POPULATION;
         }
         if self.recruitment_queue_room(region, unit.is_naval) == 0 {
             flags |= ENTRY_QUEUE_FULL;
@@ -1128,7 +1177,8 @@ impl CampaignModel {
     /// What `faction`'s unit caps are held against (`0x008F68B0`): per unit key, its live units of that type
     /// (faction +0x7C8, kept by the unit constructors and the destructor `0x0088F870`) plus its queued items of
     /// it (+0x7E4, kept by the item constructor `0x00AF3F80` and destructor `0x00AF7730`). Counted once and
-    /// reused for every entry ([`Self::recruitable_entry_flags`], [`UnitTypeCounts::cap_room`]).
+    /// reused for every entry ([`Self::recruitable_entry_flags`], [`UnitTypeCounts::cap_room`]), with the campaign
+    /// variables of the population gate ([`super::population::RecruitmentPopulation`]), read once per list.
     pub fn unit_type_counts(&self, faction: FactionId) -> UnitTypeCounts<'_> {
         let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
         let held = self.world.forces.values().filter(|f| f.faction == faction).flat_map(|f| &f.units).map(|u| u.unit_key.as_str());
@@ -1136,7 +1186,7 @@ impl CampaignModel {
         for key in held.chain(queued) {
             *counts.entry(key).or_default() += 1;
         }
-        UnitTypeCounts(counts)
+        UnitTypeCounts { counts, population: super::population::RecruitmentPopulation::of(&self.rules) }
     }
 
     fn recruit(&mut self, region: RegionId, unit_key: String) -> Result<Vec<CampaignEvent>, CommandError> {
@@ -1146,16 +1196,20 @@ impl CampaignModel {
         let owner = self.world.regions.get(&region).ok_or(CommandError::UnknownRegion(region))?.owner;
         self.check_turn(owner)?;
         let unit = self.rules.units.get(&unit_key).ok_or_else(|| CommandError::UnknownUnit(unit_key.clone()))?.clone();
-        if !self.recruitable_units(region).contains(&unit_key) {
+        let Some(entry) = self.recruitable_units(region).into_iter().find(|e| e.unit_key == unit_key) else {
             return Err(CommandError::UnitNotAvailable(unit_key));
-        }
+        };
         // The command (`CCQ` handler `0x00936B90` → `0x00B58DD0`, CONFIRMED) refuses only a full queue and a
         // flagged recruitable entry ([`Self::recruitable_entry_flags`]); it does not look at the recruitment
         // points, which only pace the training (see `region_turn`). What it charges is the entry's cost
         // ([`super::economy::recruitment_cost`]), through the spending category 2 converter, which passes it
-        // unchanged ([`super::treasury::pay`]).
+        // unchanged ([`super::treasury::pay`]), then the region's population (`0x00AAF190`,
+        // [`super::population::RecruitmentPopulation::charged`]).
         let cost = super::economy::recruitment_cost(self, &self.world.regions[&region], &unit_key, &unit);
-        let flags = self.recruitable_entry_flags(&self.world.regions[&region], &unit_key, &unit, cost, &self.unit_type_counts(owner));
+        let flags = self.recruitable_entry_flags(&self.world.regions[&region], &entry, &unit, cost, &self.unit_type_counts(owner));
+        if flags & ENTRY_BUILDING_FLAGS != 0 {
+            return Err(CommandError::RecruitmentBlocked { unit_key, flags: flags & ENTRY_BUILDING_FLAGS });
+        }
         if flags & ENTRY_QUEUE_FULL != 0 {
             return Err(CommandError::NoRecruitmentCapacity);
         }
@@ -1166,9 +1220,15 @@ impl CampaignModel {
         if flags & ENTRY_TOO_DEAR != 0 {
             return Err(CommandError::InsufficientFunds { needed: cost, available: faction.treasury });
         }
+        if flags & ENTRY_NO_POPULATION != 0 {
+            return Err(CommandError::NotEnoughPopulation);
+        }
         super::treasury::pay(&mut faction.treasury, cost);
         let id = RecruitmentItemId(self.world.alloc_id() as i32);
-        self.world.regions.get_mut(&region).expect("checked").recruitment_queue.push(RecruitmentItem {
+        let population = super::population::RecruitmentPopulation::of(&self.rules);
+        let r = self.world.regions.get_mut(&region).expect("checked");
+        r.population = population.charged(r.population);
+        r.recruitment_queue.push(RecruitmentItem {
             id,
             unit_key,
             turns_remaining: unit.turns.max(1),
@@ -1188,11 +1248,15 @@ impl CampaignModel {
         let owner = r.owner;
         self.check_turn(owner)?;
         let index = r.recruitment_queue.iter().position(|i| i.id == item).ok_or(CommandError::UnknownRecruitmentItem(item))?;
-        let item = self.world.regions.get_mut(&region).expect("checked").recruitment_queue.remove(index);
+        let population = super::population::RecruitmentPopulation::of(&self.rules);
+        let r = self.world.regions.get_mut(&region).expect("checked");
+        let item = r.recruitment_queue.remove(index);
         // A full refund (CONFIRMED): the cancel path `0x00B1A820` calls the item's slot +0x1c with 1
         // (`0x00B5C060` land, `0x00B5C0A0` naval), which credits item +0x20 — the entry cost the queue
         // command charged (`0x00AF3F80`) — as income category 3, whose converter passes it unchanged
-        // ([`super::treasury::refund`]).
+        // ([`super::treasury::refund`]); then it gives the region its population back (`0x00A61AA0`,
+        // [`super::population::RecruitmentPopulation::credited`]).
+        r.population = population.credited(r.population, 1);
         if let Some(f) = self.world.factions.get_mut(&owner) {
             super::treasury::refund(&mut f.treasury, item.cost);
         }
@@ -1325,7 +1389,7 @@ impl CampaignModel {
     fn upgrade_candidates(&self, standing: Option<&super::world::BuildingRef>) -> Option<&[String]> {
         let b = standing?;
         let upgrades = self.rules.buildings.get(&b.level_key).map_or(&[][..], |s| s.upgrades_to.as_slice());
-        Some(if b.health < 100 { &[] } else { upgrades })
+        Some(if b.is_damaged() { &[] } else { upgrades })
     }
 
     /// A slot's candidate levels ([`Self::upgrade_candidates`]): an empty slot takes `new_levels`' list for the
@@ -1511,7 +1575,7 @@ impl CampaignModel {
     /// `0x008EF790` consumes context+0xD4 (land) / +0xC4 (naval) lists via holder virtual +0x3C/+0x44,
     /// iterates holder+0xB8/+0xB4 (land) / +0xA8/+0xA4 (naval), calls `0x008A94C0` for each):
     /// * land: into the army garrisoned in the region's settlement, if it is the owner's and has
-    ///   room (up to `MAX_UNITS_PER_FORCE`); otherwise a new army led by a new colonel attached to
+    ///   room (up to `CampaignModel::max_units`); otherwise a new army led by a new colonel attached to
     ///   the unit, garrisoned in the settlement (CONFIRMED placement branch).
     /// * naval: into the navy that received the port's last ship while it is still in the port
     ///   with room; otherwise a new navy led by a new captain, at the port's slot position (CONFIRMED).
@@ -1536,7 +1600,7 @@ impl CampaignModel {
         };
         let joinable = |id: ForceId| {
             self.world.forces.get(&id).is_some_and(|f| {
-                f.faction == owner && f.is_navy == naval && f.units.len() < MAX_UNITS_PER_FORCE && f.commander.is_some()
+                f.faction == owner && f.is_navy == naval && f.units.len() < self.max_units(f.is_navy) && f.commander.is_some()
             })
         };
         let join = if naval {
@@ -1628,16 +1692,20 @@ impl CampaignModel {
 /// The most items a recruitment queue holds (`0x00B62040`: full when its count is above 9, CONFIRMED).
 pub const MAX_QUEUE: u32 = 10;
 
-/// A faction's live units plus queued items per unit key ([`CampaignModel::unit_type_counts`]): what its unit
-/// caps are held against.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct UnitTypeCounts<'a>(BTreeMap<&'a str, usize>);
+/// What a faction's recruitable entries are flagged against, built once per list
+/// ([`CampaignModel::unit_type_counts`]): its live units plus queued items per unit key (its unit caps) and the
+/// population gate's campaign variables.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnitTypeCounts<'a> {
+    counts: BTreeMap<&'a str, usize>,
+    population: super::population::RecruitmentPopulation,
+}
 
 impl UnitTypeCounts<'_> {
     /// How many more units of `unit_key` the faction may queue before its cap (`units` #15) flags the entry:
     /// the cap less its units and queued items of the type, 0 at or past the cap; `None` without a cap.
     pub fn cap_room(&self, unit_key: &str, unit: &super::rules::UnitRules) -> Option<usize> {
-        (unit.unit_cap > 0).then(|| (unit.unit_cap as usize).saturating_sub(self.0.get(unit_key).copied().unwrap_or(0)))
+        (unit.unit_cap > 0).then(|| (unit.unit_cap as usize).saturating_sub(self.counts.get(unit_key).copied().unwrap_or(0)))
     }
 }
 
@@ -1645,5 +1713,27 @@ impl UnitTypeCounts<'_> {
 pub const ENTRY_QUEUE_FULL: u32 = 0x01;
 /// Recruitable entry flag: the cost is above the treasury (compared unsigned).
 pub const ENTRY_TOO_DEAR: u32 = 0x02;
+/// Recruitable entry flag: the region's population is too small (`0x00A89550`).
+pub const ENTRY_NO_POPULATION: u32 = 0x04;
+/// Recruitable entry flag (`0x00B43CA0`, [`CampaignModel::recruitable_units`]): the building is damaged.
+pub const ENTRY_DAMAGED: u32 = 0x08;
+/// Recruitable entry flag: the building's slot is held by another faction than the region's owner.
+pub const ENTRY_OCCUPIED: u32 = 0x10;
+/// Recruitable entry flag: the settlement is under siege (never set: the campaign model has no sieges yet).
+pub const ENTRY_BESIEGED: u32 = 0x20;
 /// Recruitable entry flag: the faction holds and has queued as many units of the type as its cap allows.
 pub const ENTRY_UNIT_CAP: u32 = 0x40;
+/// Recruitable entry flag (`0x008AAB60`): a technology the unit needs is not researched.
+pub const ENTRY_NO_TECHNOLOGY: u32 = 0x80;
+/// The flags the region's recruitable list itself carries ([`CampaignModel::recruitable_units`]); the others are
+/// added when the list is priced (`0x00B69BA0`). Only these hold back a queued item (`0x00B5AD90`).
+pub const ENTRY_BUILDING_FLAGS: u32 = ENTRY_DAMAGED | ENTRY_OCCUPIED | ENTRY_BESIEGED | ENTRY_NO_TECHNOLOGY;
+
+/// One entry of a region's recruitable list ([`CampaignModel::recruitable_units`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecruitableUnit {
+    /// The unit (`units` key).
+    pub unit_key: String,
+    /// Its building flags ([`ENTRY_BUILDING_FLAGS`]); 0 = recruitable as far as the buildings go.
+    pub flags: u32,
+}

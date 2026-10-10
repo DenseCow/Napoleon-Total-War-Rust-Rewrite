@@ -21,6 +21,12 @@ use ntw_formats::esf::{EsfFile, EsfNode, EsfRecord};
 use ntw_formats::tga::Tga;
 use ntw_sim::campaign::CampaignModel;
 
+/// A theatre area key's short name (`europe_main` → `europe`): the stem of its pictures' file names
+/// and the campaign HUD's theatre id (the radar button, the governorship key; PROVISIONAL there).
+pub fn theatre_stem(theatre: &str) -> &str {
+    theatre.trim_end_matches("_main")
+}
+
 /// The pictures of one theatre: the base map and the region lookup, with the lookup colour of
 /// every region. Both pictures have the same size and complete pixel data ([`TheatrePictures::new`]
 /// checks it), so rendering never reads past either.
@@ -53,7 +59,7 @@ impl TheatrePictures {
     /// (the save header then has no picture for that theatre).
     pub fn load(files: &ntw_formats::campaign_map::GameFiles<'_>, db: &ntw_data::GameDatabase, map_key: &str, theatre: &str) -> Option<TheatrePictures> {
         let folder = map_key.trim_start_matches("campaign_maps/").trim_start_matches("campaign_maps\\");
-        let x = theatre.trim_end_matches("_main");
+        let x = theatre_stem(theatre);
         let read = |name: &str| -> Option<Tga> {
             let path = format!("campaign_maps/{folder}/{name}");
             let bytes = files.read(&path).map_err(|e| log::warn!("Save header picture of {theatre}: {e}")).ok()?;

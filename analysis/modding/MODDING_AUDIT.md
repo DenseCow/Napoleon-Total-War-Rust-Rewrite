@@ -94,6 +94,56 @@ cultures, factions and regions come from the start position and the DB). Effect/
 - `ntw_sim/src/campaign/agents.rs:20`, `:37` `ABILITIES` (12) / `ATTRIBUTES` (14) — character attribute keys; attribute table.
 - `ntw_sim/src/campaign/treaties.rs:46` `ATTITUDE_EVENTS` (30), `details.rs:263` `ATTITUDE_FACTORS` (24) — ESF field orders; keep in the importer (§3).
 
+### 1.7 Status (branch `work/generic-engine`, 2026-10-10)
+
+Done:
+- **Feature table** (§1.1): `ntw_sim::campaign::features::CampaignFeatures` in `CampaignRules::features`;
+  the importer fills it from the key (`ntw_campaign::features::original`, the exe's switches as they
+  are: `spa_napoleon` loot value (2, 10000) vs (4, 15000), looting alignment shift, `_Guerrilla` /
+  `_Auxiliary` cost and land upkeep effects (`0x00B0D220`; land `0x008F9B5F`, naval `0x008F9D4F`: `guerrilla_upkeep_mod` 0x90 /
+  `auxiliary_upkeep_mod` 0x94), public-order religion slot 12 and no hostile-army unrest, faction zeal,
+  `spa_france` home trade, node supply mod, fixed commodity prices; `mp_eur_napoleon` AI `france` +1
+  recruitment point). The rules read the table, never the key. A `CampaignSource` with its own data
+  returns `features()` (serde; RON round-trip tested), applied in `source::open`. Finding: the zeal
+  switch is the theatre `spain_main` in the exe (`0x00A198D0`), not the campaign key; the model has
+  no theatres, so the importer maps it from the key (spa's map is the only `spain_main` theatre).
+  **Open:** the exe references the `spa_napoleon` string at 72 sites (xrefs to `0x01315FF4`), the
+  model ports about 11; the rest (UI, AI, battle, character and recruitment code among them) need a
+  trace each. The upkeep methods (land `0x008F9B10`, naval `0x008F9D00`) read the category / class /
+  unit-key mods as integers and only the naval one floors a negative mod at 0: ported as such.
+- **Unit categories and classes** (§1.3): one module, `ntw_sim::unit_kind`. Traced
+  `0x00EED2B0` (category; exact case-sensitive UTF-16 compares `0x004F0F50` → `0x004F1F30`; unknown
+  key 1 artillery) and `0x00EED3E0` (class; unknown key **0**, `artillery_fixed`: the AI copy said
+  0x2E, now only an empty key gives 0x2E as the script condition). The four category maps and three
+  class lists call it; the autoresolve map gave an unknown key 6 (now 1, as the exe); the group
+  formations' lookup ignored case (now exact). Unknown `units` categories are reported once per load
+  (`GameDatabase::load_warnings`). The regiment-name class numbers are the exe's class codes
+  (`LAND_UNIT_NAMES_MAP` is built for codes 0..0x16, `0x00880670`; the naval allocator for 0x17..0x2D,
+  `0x00881DB0`), not the `unit_class` table's row order. New categories with a behaviour of their
+  own need a data column of ours (the DB has none): open item.
+- **Calendar** (§1.4): traced `0x008A98B0` (calendar advance) and `0x008EDC80` (date setter): the
+  exe follows `turns_per_year` (24 → half a month a turn, 12 → a month, 1-2 → summer / winter flip,
+  other counts keep the month) and **every date it moves to gets its month's season** (Dec-Feb
+  winter, Mar-May spring, Jun-Aug summer, Sep-Nov autumn). Our model kept the start position's season
+  for the whole campaign (W3's "UNKNOWN season rule"; the "Early September = Spring" anomaly is a
+  start-position value): fixed, 1:1. A campaign's own date step: `CampaignFeatures::date_step`. The
+  original's own `auto_save` of a Europe campaign at Early March 1805 holds season 2 "Spring" (the
+  start position: Winter), which confirms it; the save header's season name (#4, "Summer" /
+  "Winter" / "Spring" / "Autumn") is now written from the calendar by both writers.
+- **Theatres** (§1.2): `theatre_of` (campaign-key prefix, PROVISIONAL) and `TheatreList`'s map-key
+  match → the campaign header's theatres (`CampaignInfo::theatres`, tested on the 8 start
+  positions: the tutorial's is `europe_main`).
+- **Attitude names** (§1.6): one list `treaties::ATTITUDE_NAMES`; the diplomacy UI calls the model's
+  `attitude_category` (its own copy compared the upper two boundaries with ≤ instead of <, so a
+  total of exactly 22 or 65 showed one level too low).
+
+Left (separate BACKLOG items): §1.1 AI manager / personality fallback rule (`nap_<prefix>_*`,
+PROVISIONAL; a custom campaign stores its factions' keys); `victory.rs` `spa_france` (importer-only
+ESF check); §1.2 front-end campaign list, default faction and unlock thresholds (with the custom
+campaigns in the menu); §1.3 shot types, abilities, drills, ground types, weather, muzzle effect,
+category behaviour column; §1.4 government and agent types, research threads, tax levels and
+classes, ship guns, MP categories; §1.6 the remaining small lists.
+
 ## 2. Limits
 
 Legend: **orig** = the original's real limit (keep the value as the default, move it to data or a
@@ -154,6 +204,65 @@ data-driven; the remaining count limits are the ones in §2.1–2.3.
 Multiplayer has no code yet (no player cap to audit). The campaign UI's handling of many factions
 (flag/colour lists, scrolling) was not exercised; it belongs to the BACKLOG "Test with a synthetic
 mod" item.
+
+### 2.6 Status (branch `work/no-limits`, 2026-10-10)
+
+**§2.3 done:**
+- Path grid region index (`PathGrid::region`), polygon region id (`PolyInput` / `PolyMap` /
+  `Overlay::region_id`, `rtcut::Piece`) and `region_sets` are `u32`; the importer widens the
+  file's 10-bit ids (`u32::from`, `u32::try_from` for the `i16` sets). Tests
+  `region_indices_past_u16`, `region_ids_past_u16_keep_their_road_cost`.
+- `zoc::ObstacleRecord` cell ranges are `u32`; `grid_obstacle` (the original's format, u16
+  `#11..#18`) refuses a range that does not fit with an error before touching the grid
+  (`cell_range_fields`, test `cell_ranges_past_u16_are_an_error`). Its `VPoly::region` stays u16:
+  it is read from the file's static boundaries and written back to the same 10-bit field.
+- `LandUnit::army_index` is `u32` (the battle setup saturated it at 255, so later armies shared a
+  general); test `armies_past_255_per_side_stay_apart`. `side` stays `u8` (two sides, the original's).
+- Tax rate: `GovernorshipTaxes::{lower,upper}_rate` are `i32` (as `taxes_levels`); the ESF writer
+  writes the save's u8 clamped and warns once per faction when a rate does not fit.
+
+- Name deck: `ntw_sim::campaign::names::NameAllocator::deck` is `Vec<u32>`; the importer widens
+  the save's u16 array, the ESF writer writes it back only when every index fits u16 (else it
+  keeps the stored deck and logs). Test `decks_hold_pools_past_u16`.
+
+**§2.3 left:** unit class / category codes stay `u8` until classes come from data (§1.3). The ESF-shaped arrays (`diplomacy_options`, `happiness`,
+`repression`) are the §3 importer work.
+
+**§2.1 / §2.2 done: gameplay caps are moddable data** (user, 2026-10-10: data, not player
+settings). `ntw_sim::limits::GameLimits` holds them, `GameLimits::default()` is the original, and
+`ntw_data::kv::game_limits` reads our own `_kv_rules` rows (keys the exe never reads, so a mod
+pack's `db\_kv_rules_tables\<file>` changes them without touching the original; lists are
+`<key>_0`, `<key>_1`, ... up to the highest index present (at most 1,023, `ntw_data::kv::MAX_LIST_INDEX`),
+a missing entry keeping the original's). Read once into `GameDatabase::limits`; `CampaignRules::limits`
+and the UI script host (a required argument of `UiScriptHost::new`) carry that one copy's values.
+
+| Cap | Original (where) | Ours | Key |
+|---|---|---|---|
+| Units per army / navy in the campaign | Globals `0x014576B0` / `0x014576B4`, returned by the army's / navy's capacity virtual `+0x48` (`0x008D3920` / `0x008D3930`); loader `0x00872550` reads `CAMPAIGN_MODEL` #23 / #24 (20 / 20 for files below v6) and, given a campaign setup (new game `0x008B8930`; a loaded game `0x008B8A60` gives none), overwrites them from setup `+0x48` / `+0x4C`; writer `0x008EBAB0` saves them. Shipped start positions hold **20 / 14** (the builder `0x008742C0` writes 20 / 14); every original save, turn-0 saves included, holds 20 / 20 (CONFIRMED) | `CampaignModel::force_caps` read / written at #23 / #24; `CampaignModel::max_units` is the one check (merge, garrison join, recruit join, boarding, AI merge). A new campaign sets them with `ForceCaps::new_campaign` | via `max_land_units` / `max_naval_units_<i>` |
+| New campaign's values | INFERRED: `0x00485B90` builds a setup part (`0x00878060`) from `return 20` (`0x00851550`) and `MaxUnitsFromUnitScaleFactor` (`0x00DACE60`) of preference `0x6D` = `campaign_unit_multiplier` (float, default 0.75, `0x004032F0`); not traced that this part is setup `+0x48` / `+0x4C` (at the user's multiplier 1 both readings give 20 / 20) | `ForceCaps::new_campaign(limits, multiplier)` (PROVISIONAL until the check below) | — |
+| Units per side in a custom battle | land: `return 20` (`0x00851550`); fleet: `MaxUnitsFromUnitScaleFactor` 6 / 8 / 10 / 20 by unit-size index (`0x0045CB50`; `0x00DAFBC0` = first step not below the scale) | `GameLimits::max_units(scale)` (same rule as the campaign) | `max_land_units`, `max_naval_units_<i>` |
+| Saved army setup validation | literal 20 for land and sea (`0x00479A79` / `0x00479EE7` in `ValidateArmySetup` `0x00479690`) | `GameLimits::max_setup_units` (largest allowed army / fleet; 20 / 20 by default) | — |
+| Custom battle funds | `0x0131A190` land {5000, 10000, 14000}, `0x0131A19C` sea {5000, 14000, 24000}, size clamped 0..2 (`0x004A2910`) | `GameLimits::custom_battle_funds` | `custom_battle_funds_land_<i>`, `custom_battle_funds_naval_<i>` |
+| Unit-size steps | `0x01392770` {0.25, 0.5, 0.75, 1.0}; clamp `[0.1, 1.0]` (`0x004A6540`) | `GameLimits::unit_scales`; clamp top = the largest step (≥ 1.0), so a step above 1.0 gives more men than the card | `unit_scale_<i>` |
+| Reinforcements per army | arrival `0x00608200` stops at 20 per entry group (`+0xF0 < 0x14`) | `Battle::max_reinforcement_units` | `max_reinforcement_units` |
+| Men drawn per unit (ours) | — (the original draws every man) | `MAX_FIGURES` 240 removed: every man is drawn | — |
+
+The units-per-army preset/default `20` literals in `army_setup.rs` and the three copies of the
+`gfx_unit_scale` clamp (`battle_setup.rs`, `campaign/army.rs`, `army_setup.rs`'s setup file
+`unit_scale`) now read `GameLimits` through one helper, `battle_setup::unit_scale_setting`. Tests: `limits::tests`, `kv::tests::game_limits_*`,
+`units_per_army_come_from_the_campaign_and_a_mod`, `reinforcements_stop_at_the_cap_and_a_mod_lifts_it`,
+`unit_size_option_thins_the_men` (a 1.5 step gives 240 men from 160), real-install `check_details`
+(20 / 14 in every shipped start position).
+
+**In-game check (PROVISIONAL `ForceCaps::new_campaign`):** in the original, set
+`campaign_unit_multiplier 0.75;` in `preferences.script.txt`, start a new Grand Campaign, save on
+turn 1, and dump `CAMPAIGN_ENV/CAMPAIGN_MODEL` #24 (`cargo run -p ntw_campaign --example esf_dump --
+tree <save> CAMPAIGN_ENV/CAMPAIGN_MODEL 1 1`): 10 confirms the rule, 20 means the navy cap does not
+follow the multiplier. Restore the preference afterwards.
+
+**§2.2 left:** `MAX_PARTICLES`, `MAX_SPECIES`, `MAX_TEXTURE_WIDTH`, `MAX_VOICES`, `MAX_STEPS` (render
+and engine limits of ours, no gameplay effect). §2.1 left: `MAX_QUEUE` 10, `road_level` 0..=3,
+`child_ages` / 4 children, 3 research threads, `MELEE_MAX_LOCAL_PER_SIDE`.
 
 ## 3. `.esf` and original-map coupling (DESIGN.md §3.5.1)
 
@@ -225,7 +334,7 @@ Left (separate items): the UI's `theatre_bounds` fallback still parses `regions.
 harness); arrows and rivers have no shared default asset when a map lacks them; the radar and
 header pictures, path `CellInput`s and sea grid from a generator; ESF spellings and index orders in
 the model (`esf_name`, `ATTITUDE_FACTORS`, `DIPLOMACY_OPTIONS`); victory options from the
-start-position tree; `army_setup.rs`'s `UNIT_CLASSES` import.
+start-position tree.
 
 ## 4. Priorities (highest impact first)
 

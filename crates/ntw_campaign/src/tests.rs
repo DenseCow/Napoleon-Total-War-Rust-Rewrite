@@ -668,7 +668,7 @@ fn recruiting_from_a_loaded_campaign_charges_units_7_with_the_region_effects() {
     region.slots[0].building = Some(BuildingRef { level_key: BARRACKS.into(), health: 100 });
     m.world.factions.get_mut(&FactionId(1000)).expect("the player is there").treasury = 10_000;
     assert_eq!(m.recruitment_points(RegionId(77), false), 2);
-    assert!(m.recruitable_units(RegionId(77)).contains(&UNIT.to_owned()));
+    assert!(m.recruitable_units(RegionId(77)).iter().any(|e| e.unit_key == UNIT && e.flags == 0));
 
     // FISTP(90 × 99 × 0.01) = FISTP(89.1) = 89.
     let cost = economy::recruitment_cost(&m, &m.world.regions[&RegionId(77)], UNIT, &m.rules.units[UNIT]);

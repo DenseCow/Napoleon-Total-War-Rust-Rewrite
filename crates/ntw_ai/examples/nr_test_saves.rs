@@ -298,7 +298,7 @@ fn player_actions(host: &mut ScriptHost) {
         let units = host.model().recruitable_units(*id);
         let land: Vec<String> = {
             let m = host.model();
-            units.into_iter().filter(|u| m.rules.units.get(u).is_some_and(|x| !x.is_naval)).collect()
+            units.into_iter().filter(|e| e.flags == 0).map(|e| e.unit_key).filter(|u| m.rules.units.get(u).is_some_and(|x| !x.is_naval)).collect()
         };
         for u in land.iter().take(2) {
             println!(" recruit {u} in {key} (garrison: {garrisoned})");
@@ -317,7 +317,7 @@ fn player_actions(host: &mut ScriptHost) {
         let units = host.model().recruitable_units(*id);
         let naval: Vec<String> = {
             let m = host.model();
-            units.into_iter().filter(|u| m.rules.units.get(u).is_some_and(|x| x.is_naval)).collect()
+            units.into_iter().filter(|e| e.flags == 0).map(|e| e.unit_key).filter(|u| m.rules.units.get(u).is_some_and(|x| x.is_naval)).collect()
         };
         for u in naval.iter().take(1) {
             println!(" recruit ship {u} in {key}");
@@ -416,8 +416,8 @@ fn add_units(host: &mut ScriptHost) {
     let human = m.faction_by_key(HUMAN).expect("france").id;
     let mut regions: Vec<_> = m.world.regions.values().filter(|r| r.owner == human).map(|r| (r.key.clone(), r.id, r.garrison.is_some())).collect();
     regions.sort();
-    let land = |m: &CampaignModel, r: RegionId| m.recruitable_units(r).into_iter().find(|u| m.rules.units.get(u).is_some_and(|x| !x.is_naval));
-    let ship = |m: &CampaignModel, r: RegionId| m.recruitable_units(r).into_iter().find(|u| m.rules.units.get(u).is_some_and(|x| x.is_naval));
+    let land = |m: &CampaignModel, r: RegionId| m.recruitable_units(r).into_iter().filter(|e| e.flags == 0).map(|e| e.unit_key).find(|u| m.rules.units.get(u).is_some_and(|x| !x.is_naval));
+    let ship = |m: &CampaignModel, r: RegionId| m.recruitable_units(r).into_iter().filter(|e| e.flags == 0).map(|e| e.unit_key).find(|u| m.rules.units.get(u).is_some_and(|x| x.is_naval));
     let picks = [
         regions.iter().find(|r| r.2).and_then(|r| Some((r.0.clone(), r.1, land(m, r.1)?))),
         regions.iter().find(|r| !r.2).and_then(|r| Some((r.0.clone(), r.1, land(m, r.1)?))),
@@ -443,7 +443,7 @@ fn add_garrison_unit(host: &mut ScriptHost) {
         .collect();
     regions.sort();
     let pick = regions.iter().find_map(|(k, id)| {
-        let u = m.recruitable_units(*id).into_iter().find(|u| m.rules.units.get(u).is_some_and(|x| !x.is_naval))?;
+        let u = m.recruitable_units(*id).into_iter().filter(|e| e.flags == 0).map(|e| e.unit_key).find(|u| m.rules.units.get(u).is_some_and(|x| !x.is_naval))?;
         Some((k.clone(), *id, u))
     });
     let (key, id, unit) = pick.expect("a french garrison that can recruit");

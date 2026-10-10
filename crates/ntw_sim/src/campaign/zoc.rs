@@ -276,11 +276,12 @@ pub struct ObstacleRecord {
     /// range of `#11..#14` (of `#15..#18` without a zone) widened by one more cell (CONFIRMED:
     /// equal for every start-position obstacle whose zone flood matches, `zoc_install.rs`).
     pub bbox: (f32, f32, f32, f32),
-    /// `#11..#14` (u16 col0, row0, col1, row1): the cells the zone-and-core cut rebuilds (the rule
-    /// of `0x00B0C240` on their bounding box; CONFIRMED on the same data); all 0 without a zone.
-    pub zone_cells: (u16, u16, u16, u16),
+    /// `#11..#14` (col0, row0, col1, row1; u16 in the save, u32 here so a map may have any size):
+    /// the cells the zone-and-core cut rebuilds (the rule of `0x00B0C240` on their bounding box;
+    /// CONFIRMED on the same data); all 0 without a zone.
+    pub zone_cells: (u32, u32, u32, u32),
     /// `#15..#18`: the same for the core alone (CONFIRMED on the same data, `zoc_install.rs`).
-    pub core_cells: (u16, u16, u16, u16),
+    pub core_cells: (u32, u32, u32, u32),
     /// The zone's polygons (static indices; empty for an agent): they turn kind 8 for factions at
     /// war with the owner.
     pub zone: Vec<u32>,
@@ -321,8 +322,8 @@ pub fn obstacle_record(map: &PolyMap, pos: (f32, f32), owner: Owner, garrisoned:
     let range = |b: (f32, f32, f32, f32), open_top: bool| {
         let top = if open_top { tiny } else { 0.0 };
         let u = |v: f32, o: f32| (f64::from(v) - f64::from(o)) / cd;
-        let lo = |v: f32, o: f32| (u(v, o) - 1.0 + tiny).floor().max(0.0) as u16;
-        let hi = |v: f32, o: f32, n: u32| ((u(v, o) - top).floor() + 1.0).clamp(0.0, f64::from(n)) as u16;
+        let lo = |v: f32, o: f32| (u(v, o) - 1.0 + tiny).floor().max(0.0) as u32;
+        let hi = |v: f32, o: f32, n: u32| ((u(v, o) - top).floor() + 1.0).clamp(0.0, f64::from(n)) as u32;
         (lo(b.0, ox), lo(b.1, oz), hi(b.2, ox, map.cols), hi(b.3, oz, map.rows))
     };
     // Layer 0 (zone and core) and layer 1 (core only), `0x00B09030`.
@@ -330,7 +331,7 @@ pub fn obstacle_record(map: &PolyMap, pos: (f32, f32), owner: Owner, garrisoned:
     let core_cells = range(bounds(&mut core.iter().copied()).expect("the core has points"), false);
     // The box: the outer range (the core's without a zone) widened by one more cell.
     let r = if zone.is_empty() { core_cells } else { zone_cells };
-    let at = |i: u16, o: f32| o + f32::from(i) * c;
+    let at = |i: u32, o: f32| o + i as f32 * c;
     let bbox = (at(r.0, ox) - c, at(r.1, oz) - c, at(r.2, ox) + 2.0 * c, at(r.3, oz) + 2.0 * c);
     let ov = rtcut::build(map, &[Cut { shape: Shape::Convex(core.clone()), kind: CORE_KIND }]);
     let view = map.with(&ov);
@@ -445,8 +446,8 @@ mod tests {
         assert_eq!(r.core.len(), 24);
         assert!(r.bbox.0 <= 31.7 - 6.0 - 4.0 && r.bbox.2 >= 31.7 + 6.0 + 4.0, "{:?}", r.bbox);
         // Zone cells: one cell below the rounded box, up to its top cell edge.
-        assert_eq!(f32::from(r.zone_cells.0), (r.bbox.0 + 4.0) / 2.0 - 1.0);
-        assert_eq!(f32::from(r.zone_cells.2), (r.bbox.2 - 4.0) / 2.0);
+        assert_eq!(r.zone_cells.0 as f32, (r.bbox.0 + 4.0) / 2.0 - 1.0);
+        assert_eq!(r.zone_cells.2 as f32, (r.bbox.2 - 4.0) / 2.0);
         // The core at (31.7, 30.5) cuts columns 15..16 and rows 14..15: widened by one.
         assert_eq!(r.core_cells, (14, 13, 17, 16));
         assert!(r.pieces.iter().any(|p| p.kind == 9));

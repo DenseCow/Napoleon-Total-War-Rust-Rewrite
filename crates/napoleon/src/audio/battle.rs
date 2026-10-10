@@ -34,7 +34,7 @@ impl ProjectileSounds {
     /// table's end); a row of no kind (a documented PROVISIONAL gap, see [`ProjectileKind::of`])
     /// is noted at info level once per category and missile type.
     fn of(&mut self, projectiles: &Table<Projectile>, row: usize) -> Option<Arc<ProjectileSound>> {
-        if self.table != projectiles.id() || self.by_row.len() != projectiles.len() {
+        if self.table != projectiles.id() {
             self.table = projectiles.id();
             self.by_row.clear();
             self.by_row.resize(projectiles.len(), None);
@@ -75,10 +75,13 @@ pub(super) fn bridge_volleys(
     mut out: MessageWriter<ProjectileFired>,
 ) {
     let (Some(sim), Some(fx), Some(data)) = (sim, fx, data) else { return };
-    // (tick, count at that tick) of the newest volley already handled.
+    // (tick, count at that tick) of the newest volley already handled. `recent` is in firing
+    // order, so the volleys of one tick are adjacent: one pass numbers them.
     let newest = fx.recent.last().map(|(_, v)| v.tick);
-    for (_, v) in &fx.recent {
-        let at_tick = fx.recent.iter().filter(|(_, w)| w.tick == v.tick).position(|(_, w)| std::ptr::eq(w, v)).unwrap_or(0);
+    let mut run = (0u32, 0usize); // (tick, volleys of it seen so far in this pass)
+    for (j, (_, v)) in fx.recent.iter().enumerate() {
+        let at_tick = if j > 0 && run.0 == v.tick { run.1 } else { 0 };
+        run = (v.tick, at_tick + 1);
         if let Some((t, n)) = *last
             && (v.tick < t || (v.tick == t && at_tick < n))
         {
@@ -92,7 +95,7 @@ pub(super) fn bridge_volleys(
         out.write(ProjectileFired { sound, position, shots: v.shots });
     }
     if let Some(t) = newest {
-        let n = fx.recent.iter().filter(|(_, w)| w.tick == t).count();
+        let n = fx.recent.iter().rev().take_while(|(_, w)| w.tick == t).count();
         *last = Some((t, n));
     } else if sim.battle.time_seconds() < 0.5 {
         // A new battle (restart): forget the old ticks.

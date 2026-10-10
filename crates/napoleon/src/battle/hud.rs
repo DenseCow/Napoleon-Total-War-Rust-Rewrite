@@ -143,7 +143,8 @@ pub fn enter(world: &mut World) {
     // Laid out in the virtual screen of the original UI scale, like the campaign HUD (the device
     // applies it to every HUD; see `ui_scale`).
     let virt = ui_virtual_screen(screen);
-    let host = match UiScriptHost::new(source, loc.clone(), facts, (virt.x, virt.y)) {
+    let limits = world.resource::<crate::data::GameData>().db.limits.clone();
+    let host = match UiScriptHost::new(source, loc.clone(), facts, (virt.x, virt.y), limits) {
         Ok(h) => h,
         Err(e) => {
             warn!("Battle HUD: script host failed: {e}");
@@ -843,17 +844,17 @@ mod order_tests {
     use ntw_sim::battle::TICK_SECONDS;
     use ntw_sim::battle::fatigue::KvFatigue;
     use ntw_sim::battle::model::{Battle, LandUnit};
+    use super::super::UnitInfo;
     use ntw_sim::battle::morale::KvMorale;
 
     fn sim() -> BattleSim {
-        let mut b = Battle::new(1, KvMorale::default(), KvFatigue::default());
+        let mut sim = BattleSim::new(Battle::new(1, KvMorale::default(), KvFatigue::default()), 1);
         let mut me = LandUnit::new(1, 0, 100, (0.0, 0.0));
         (me.walk_speed, me.run_speed) = (1.4, 3.6);
-        b.add_unit(me);
+        sim.add_unit(me, UnitInfo { id: 1, ..UnitInfo::default() });
         let mut enemy = LandUnit::new(2, 1, 100, (500.0, 0.0));
         enemy.hold_position = true;
-        b.add_unit(enemy);
-        let mut sim = BattleSim::new(b, 1);
+        sim.add_unit(enemy, UnitInfo { id: 2, ..UnitInfo::default() });
         sim.selected = Some(1);
         sim
     }

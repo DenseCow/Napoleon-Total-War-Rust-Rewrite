@@ -52,7 +52,7 @@ pub const REINFORCEMENT_WALK_ON_TICKS: u32 = 100;
 pub const REINFORCEMENT_SPACING_M: f32 = 40.0;
 
 /// Where a reinforcement army enters: `((side, army), position, facing)`.
-pub type ReinforcementEntry = ((u8, u8), (f32, f32), f32);
+pub type ReinforcementEntry = ((u8, u32), (f32, f32), f32);
 
 /// A battle-file `reinforcement_army` unit's state (BATTLE_FIDELITY.md §13).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -224,7 +224,7 @@ pub struct LandUnit {
     pub unit_category: String,
     /// Index of the unit's army within its side (alliance): 0 = the first army; units of later
     /// armies are "allies" for `0x0054C840`.
-    pub army_index: u8,
+    pub army_index: u32,
     /// `Some(rank)` if this unit is its army's general: the unit card `+0xC0` is 1, 2, 4 or 5 and
     /// `+0xBC` is the rank (battle files: a `general` element, rank = `star_rating level`; the
     /// `experience` child is not read, CONFIRMED parser `0x0050CAE0`). The last such unit of an
@@ -517,6 +517,9 @@ pub struct Battle {
     /// ([`super::unit_scale::PREFERENCE_DEFAULT`]), a deliberate deviation when no preference is
     /// given (BATTLE_FIDELITY.md §18a). [`Battle::men_at_scale`] clamps it again before use.
     pub unit_scale: f32,
+    /// The top of that clamp: the original's 1.0, or a modded unit-size step above it
+    /// ([`crate::limits::GameLimits::max_scale`]); set with the scale.
+    pub unit_scale_top: f32,
     /// The volleys fired during the most recent tick (cleared at the start of every `step`).
     /// Display-only output: the model never reads it.
     pub volleys: Vec<VolleyEvent>,
@@ -529,10 +532,13 @@ pub struct Battle {
     pub side_start_strength: Vec<(u8, f32)>,
     /// When each army's general unit was destroyed: `((side, army), tick)` (for
     /// `GeneralStatus::DiedRecently`).
-    pub general_died: Vec<((u8, u8), u32)>,
+    pub general_died: Vec<((u8, u32), u32)>,
     /// Where each reinforcement army enters: `((side, army), position, facing)` (PROVISIONAL
     /// position, see `Battle::reinforcements_step`).
     pub reinforcement_entries: Vec<ReinforcementEntry>,
+    /// Reinforcement units an army brings onto the field (the original's 20,
+    /// [`crate::limits::GameLimits::max_reinforcement_units`]; the battle setup sets it from data).
+    pub max_reinforcement_units: usize,
     /// Where arrived reinforcements are sent: the centre of the playable area (CONFIRMED rule of
     /// `0x00606CE0`; the game sets it from the battle file's `playable_area`).
     pub reinforcement_target: (f32, f32),
@@ -592,11 +598,13 @@ impl Battle {
             climate_fatigue: (0, 0),
             experience_fatigue: Vec::new(),
             unit_scale: super::unit_scale::MAX,
+            unit_scale_top: super::unit_scale::MAX,
             volleys: Vec::new(),
             ground: std::sync::Arc::new(BattleGround::default()),
             side_start_strength: Vec::new(),
             general_died: Vec::new(),
             reinforcement_entries: Vec::new(),
+            max_reinforcement_units: crate::limits::ORIGINAL_MAX_REINFORCEMENT_UNITS as usize,
             reinforcement_target: (0.0, 0.0),
             playable_area: None,
             defences: Vec::new(),
@@ -612,22 +620,24 @@ impl Battle {
     pub fn men_at_scale(&self, card_men: i32) -> u32 {
         // The exe clamps once per battle (0x004A6540) before any multiplication; clamping here too
         // is idempotent for an already-clamped scale and keeps a bad setting from reaching the men.
-        super::unit_scale::scaled_men(card_men, super::unit_scale::clamp(self.unit_scale))
+        super::unit_scale::scaled_men(card_men, super::unit_scale::clamp(self.unit_scale, self.unit_scale_top))
     }
 
-    /// Sets [`Battle::unit_scale`] from a `unit_scale` option **index** (0..3, the four steps of
-    /// [`super::unit_scale::STEPS`]) and returns the clamped float the battle will use, so the
-    /// caller can log the step it picked.
-    pub fn set_unit_scale_step(&mut self, index: i32) -> f32 {
-        self.unit_scale = super::unit_scale::clamp(super::unit_scale::step(index));
+    /// Sets [`Battle::unit_scale`] from a `unit_scale` option **index** (the steps of
+    /// `limits.unit_scales`, the original's four [`super::unit_scale::STEPS`] by default) and
+    /// returns the clamped float the battle will use, so the caller can log the step it picked.
+    pub fn set_unit_scale_step(&mut self, index: i32, limits: &crate::limits::GameLimits) -> f32 {
+        self.unit_scale_top = limits.max_scale();
+        self.unit_scale = super::unit_scale::clamp(limits.unit_scale(index), self.unit_scale_top);
         self.unit_scale
     }
 
     /// Sets [`Battle::unit_scale`] from the `gfx_unit_scale` **preference index** the settings gave
     /// us, `None` meaning "no preferences file" (the model's 1.0), and returns the clamped float.
     /// The whole preference → scale decision is [`super::unit_scale::scale_for_setting`].
-    pub fn set_unit_scale_setting(&mut self, setting: Option<i32>) -> f32 {
-        self.unit_scale = super::unit_scale::scale_for_setting(setting);
+    pub fn set_unit_scale_setting(&mut self, setting: Option<i32>, limits: &crate::limits::GameLimits) -> f32 {
+        self.unit_scale_top = limits.max_scale();
+        self.unit_scale = super::unit_scale::scale_for_setting(setting, limits);
         self.unit_scale
     }
 
@@ -1197,7 +1207,7 @@ impl Battle {
 
     /// The general unit (index) of army `(side, army)`: the last unit of that army with a
     /// `general_rank` (CONFIRMED: `0x00505B00` assigns `+0x214` for every general card in order).
-    pub fn general_of(&self, side: u8, army: u8) -> Option<usize> {
+    pub fn general_of(&self, side: u8, army: u32) -> Option<usize> {
         self.units
             .iter()
             .enumerate()
@@ -1278,7 +1288,8 @@ impl Battle {
     /// CONFIRMED structure, BATTLE_FIDELITY.md §13): per reinforcement army, while no unit of it is
     /// still arriving, the next unit in order that is not held by the script (unit `+0x1E5`) and is
     /// not fixed artillery (class 0) starts to arrive. The exe also stops at 20 units per entry
-    /// group (`+0xF0 < 0x14`); arriving units become active when they enter the map.
+    /// group (`+0xF0 < 0x14`; ours [`Battle::max_reinforcement_units`], moddable); arriving units
+    /// become active when they enter the map.
     /// PROVISIONAL: the entry point ([`Battle::reinforcement_entries`]) and the walk-on time
     /// ([`REINFORCEMENT_WALK_ON_TICKS`]).
     fn reinforcements_step(&mut self) {
@@ -1302,7 +1313,7 @@ impl Battle {
                 };
             }
         }
-        let armies: BTreeSet<(u8, u8)> = self
+        let armies: BTreeSet<(u8, u32)> = self
             .units
             .iter()
             .filter(|u| u.reinforcement == Reinforcement::Waiting)
@@ -1314,7 +1325,7 @@ impl Battle {
                 continue;
             }
             let arrived = self.units.iter().filter(|u| in_army(u) && u.reinforcement == Reinforcement::None).count();
-            if arrived >= 20 {
+            if arrived >= self.max_reinforcement_units {
                 continue;
             }
             let Some(i) = self.units.iter().position(|u| {
@@ -1364,7 +1375,7 @@ impl Battle {
     /// Records the tick a general's unit was destroyed (for `GeneralStatus::DiedRecently`).
     fn note_general_deaths(&mut self) {
         let tick = self.tick;
-        let dead: Vec<(u8, u8)> = self
+        let dead: Vec<(u8, u32)> = self
             .units
             .iter()
             .filter(|u| u.general_rank.is_some() && u.men == 0)
@@ -1917,7 +1928,7 @@ mod tests {
         // The four steps of 0x01392770 through `set_unit_scale_step`.
         let men = |i: i32| {
             let mut b = b.clone();
-            b.set_unit_scale_step(i);
+            b.set_unit_scale_step(i, &Default::default());
             b.men_at_scale(160)
         };
         assert_eq!(men(0), 40);
@@ -1928,7 +1939,7 @@ mod tests {
         assert_eq!(men(9), 160);
         // The exe's own default setting, `gfx_unit_scale 2` (0x00404230), is 0.75.
         let mut b2 = b.clone();
-        assert_eq!(b2.set_unit_scale_step(crate::battle::unit_scale::PREFERENCE_DEFAULT), 0.75);
+        assert_eq!(b2.set_unit_scale_step(crate::battle::unit_scale::PREFERENCE_DEFAULT, &Default::default()), 0.75);
         assert_eq!(b2.men_at_scale(160), 120);
         // CVTTSS2SI truncates: 7 × 0.75 = 5.25 -> 5, 158 × 0.75 = 118.5 -> 118.
         assert_eq!(b2.men_at_scale(7), 5);
@@ -1938,6 +1949,13 @@ mod tests {
         assert_eq!(b.men_at_scale(160), 16);
         b.unit_scale = 3.0;
         assert_eq!(b.men_at_scale(160), 160);
+        // A modded step above the original's 1.0 gives units more men than their card.
+        let mut limits = crate::limits::GameLimits::default();
+        limits.unit_scales.push(1.5);
+        let mut big = b.clone();
+        assert_eq!(big.set_unit_scale_step(4, &limits), 1.5);
+        assert_eq!(big.men_at_scale(160), 240);
+        assert_eq!(big.set_unit_scale_setting(Some(9), &limits), 1.5);
     }
 
     #[test]
@@ -2101,6 +2119,29 @@ mod combatant_fatigue_tests {
     }
 
     #[test]
+    fn reinforcements_stop_at_the_cap_and_a_mod_lifts_it() {
+        // 22 reinforcement units: the original brings 20 of an army (0x00608200); a mod's 30 all.
+        let arrived = |cap: usize| {
+            let mut b = Battle::new(1, KvMorale::default(), KvFatigue::default());
+            b.max_reinforcement_units = cap;
+            b.add_unit(LandUnit::new(1, 0, 100, (0.0, 0.0)));
+            b.add_unit(LandUnit::new(2, 1, 100, (0.0, 900.0)));
+            for id in 3..25 {
+                let mut u = LandUnit::new(id, 0, 50, (0.0, 0.0));
+                (u.active, u.army_index, u.reinforcement) = (false, 1, Reinforcement::Waiting);
+                b.add_unit(u);
+            }
+            b.reinforcement_entries.push(((0, 1), (500.0, -400.0), 1.0));
+            for _ in 0..23 * (REINFORCEMENT_WALK_ON_TICKS + 1) {
+                b.step();
+            }
+            b.units.iter().filter(|u| u.army_index == 1 && u.reinforcement == Reinforcement::None).count()
+        };
+        assert_eq!(arrived(crate::limits::GameLimits::default().max_reinforcement_units as usize), 20);
+        assert_eq!(arrived(30), 22);
+    }
+
+    #[test]
     fn reinforcements_join_when_inside_the_playable_area() {
         let mut b = Battle::new(1, KvMorale::default(), KvFatigue::default());
         b.playable_area = Some([-500.0, -500.0, 500.0, 500.0]);
@@ -2154,5 +2195,21 @@ mod combatant_fatigue_tests {
         c.add_unit(r);
         c.step();
         assert!(!c.units[0].left_field);
+    }
+
+    #[test]
+    fn armies_past_255_per_side_stay_apart() {
+        // `army_index` was a u8 the battle setup saturated at 255, so armies 255 and later shared
+        // one general.
+        let mut b = Battle::new(1, KvMorale::default(), KvFatigue::default());
+        for (id, army) in [(1, 300), (2, 301)] {
+            let mut u = LandUnit::new(id, 0, 100, (0.0, id as f32 * 50.0));
+            u.army_index = army;
+            u.general_rank = Some(1);
+            b.add_unit(u);
+        }
+        assert_eq!(b.general_of(0, 300), Some(0));
+        assert_eq!(b.general_of(0, 301), Some(1));
+        assert_eq!(b.allied_units(0), 2);
     }
 }

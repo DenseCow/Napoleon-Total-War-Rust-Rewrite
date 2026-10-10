@@ -498,17 +498,9 @@ pub fn tick_fx(
     let artillery: Vec<u32> = data
         .as_ref()
         .map(|d| {
-            sim.battle
-                .units
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| {
-                    sim.info
-                        .get(*i)
-                        .and_then(|info| d.db.land_unit(&info.key))
-                        .is_some_and(|v| v.stats.gun_type.is_some())
-                })
-                .map(|(_, u)| u.id)
+            sim.units_with_info()
+                .filter(|(_, info)| d.db.land_unit(&info.key).is_some_and(|v| v.stats.gun_type.is_some()))
+                .map(|(u, _)| u.id)
                 .collect()
         })
         .unwrap_or_default();
@@ -814,8 +806,11 @@ fn texture_image(vfs: &ntw_formats::pack::Vfs, path: &str) -> Result<Image, Stri
 /// with R does not replay the old ones.
 fn new_volleys<'a>(volleys: &'a VolleyFx, seen: &mut Option<(u32, usize)>) -> Vec<&'a ntw_sim::battle::shooting::VolleyEvent> {
     let mut out = Vec::new();
-    for (_, v) in &volleys.recent {
-        let at = volleys.recent.iter().filter(|(_, w)| w.tick == v.tick).position(|(_, w)| std::ptr::eq(w, v)).unwrap_or(0);
+    // `recent` is in firing order, so the volleys of one tick are adjacent: one pass numbers them.
+    let mut run = (0u32, 0usize); // (tick, volleys of it seen so far)
+    for (j, (_, v)) in volleys.recent.iter().enumerate() {
+        let at = if j > 0 && run.0 == v.tick { run.1 } else { 0 };
+        run = (v.tick, at + 1);
         if let Some((t, n)) = *seen
             && (v.tick < t || (v.tick == t && at < n))
         {
@@ -824,7 +819,7 @@ fn new_volleys<'a>(volleys: &'a VolleyFx, seen: &mut Option<(u32, usize)>) -> Ve
         out.push(v);
     }
     if let Some(t) = volleys.recent.last().map(|(_, v)| v.tick) {
-        let n = volleys.recent.iter().filter(|(_, w)| w.tick == t).count();
+        let n = volleys.recent.iter().rev().take_while(|(_, w)| w.tick == t).count();
         *seen = Some((t, n));
     } else {
         *seen = None;
@@ -903,11 +898,10 @@ fn fire_muzzle(
     db: &ntw_data::GameDatabase,
     v: &ntw_sim::battle::shooting::VolleyEvent,
 ) {
-    let Some((i, unit)) = sim.battle.units.iter().enumerate().find(|(_, u)| u.id == v.shooter) else {
+    let Some((unit, info)) = sim.unit_with_info(v.shooter) else {
         warn!("FX: volley {} from unknown unit {}", v.tick, v.shooter);
         return;
     };
-    let Some(info) = sim.info.get(i) else { return };
     let Some(view) = db.land_unit(&info.key) else {
         warn!("FX: unit {} has no `units` row for {}", v.shooter, info.key);
         return;
@@ -953,7 +947,7 @@ fn impact_at_target(
     projectile: &ntw_data::schemas::Projectile,
     is_artillery: bool,
 ) {
-    let Some(target) = sim.battle.units.iter().find(|u| u.id == v.target) else { return };
+    let Some(target) = sim.unit(v.target) else { return };
     let ground = world_of(Vec2::new(target.position.0, target.position.1));
     // A shot into a man: blood at chest height.
     if v.kills > 0 {

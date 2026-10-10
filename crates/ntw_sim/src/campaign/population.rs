@@ -161,8 +161,9 @@ pub fn grow(model: &CampaignModel, reg: &Region, pop: u32, state: &PopulationSta
         return (pop, next);
     }
     next.growth = total(&state.factors);
-    // `pop × growth × 0.01` in single precision, then FISTP (round half to even).
-    let change = ((pop as f32 * next.growth) * 0.01f32).round_ties_even() as i32;
+    // `pop × growth × 0.01` in single precision, the population read unsigned (`0x00AB4227`: CVTDQ2PD with the
+    // 2^32 fix-up), then FISTP (round half to even; the integer indefinite out of range).
+    let change = super::commands::fistp((pop as f32 * next.growth) * 0.01f32);
     let mut new = (pop as i32).wrapping_add(next.migrants).wrapping_add(change);
     let minimum = model.rules.var("minimum_population", 0.0);
     if minimum > new as f32 {
@@ -171,6 +172,55 @@ pub fn grow(model: &CampaignModel, reg: &Region, pop: u32, state: &PopulationSta
     let delta = new.wrapping_sub(pop as i32);
     next.trend = if delta == 0 { 2 } else if delta < 0 { 3 } else { 1 };
     (((new as u32).min(POPULATION_CAP)), next)
+}
+
+/// What recruiting costs a region's population (CONFIRMED, CAMPAIGN_FIDELITY.md §Recruitment cost and money):
+/// campaign variable 37 `recruitment_population_cost` and variable 36 `minimum_population_after_recruitment`,
+/// each read as the exe reads a campaign variable (`0x008B25F0`: FISTP of the f32 value). Every rule works on
+/// the live population ([`Region::population`], `REGION_FACTORS` #2, region +0x7C) in signed 32-bit arithmetic,
+/// as the exe does. The exe keeps that field as 32 bits that only these rules read signed: the growth
+/// (`0x00AB4227`) and the factors (`0x00AA9D44`, `0x00AA9F91`) read it unsigned, and the cap compares it unsigned
+/// (`0x00AB42CB`). So a result below 0 (only with a mod's negative variables) is stored as the same bits in
+/// the `u32`, and every reader sees what the exe's readers see. Both variables are 0 in the shipped
+/// `campaign_variables`, so with vanilla data a recruit is never refused for its population and takes and gives
+/// back nothing; a mod may set them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecruitmentPopulation {
+    /// Var 37: what one queued recruit takes from the region's population.
+    pub cost: i32,
+    /// Var 36: the population a recruit must leave behind.
+    pub minimum: i32,
+}
+
+impl RecruitmentPopulation {
+    /// The two variables of `rules` (0 when the table lacks the row).
+    pub fn of(rules: &super::rules::CampaignRules) -> Self {
+        let var = |key| super::commands::fistp(rules.var(key, 0.0));
+        Self { cost: var("recruitment_population_cost"), minimum: var("minimum_population_after_recruitment") }
+    }
+
+    /// The gate (`HasRecruitmentPopulationAvailable` `0x00A89550`, from the entry flags `0x00B69BA0`, which
+    /// set flag 4 when it fails): the population is at least cost + minimum (signed). It does not depend on
+    /// the unit: every entry of the region's land and naval lists gets the same answer.
+    pub fn available(self, pop: u32) -> bool {
+        self.cost.wrapping_add(self.minimum) <= pop as i32
+    }
+
+    /// The population after queueing one recruit (`ChargeRecruitablePopulation` `0x00AAF190`, called by the
+    /// queue command `0x00B58DD0` right after the money): less the cost when [`Self::available`], else set to
+    /// the minimum. The command refuses an entry that fails the gate first, so it always takes the first branch.
+    pub fn charged(self, pop: u32) -> u32 {
+        if self.available(pop) { (pop as i32).wrapping_sub(self.cost) as u32 } else { self.minimum as u32 }
+    }
+
+    /// The population after `items` queued recruits leave the queue untrained (`CreditRecruitablePopulation`
+    /// `0x00A61AA0`, called once per item by `CancelRecruitmentItem` `0x00B1A820`: the cancel command, the
+    /// turn start's removal of items the region can no longer recruit, and the queues a capture empties,
+    /// with or without the money back): the cost back per item, whatever the charge took. A trained item gives
+    /// nothing back (the queue step destroys it without the cancel path), nor does disbanding the unit.
+    pub fn credited(self, pop: u32, items: usize) -> u32 {
+        (0..items).fold(pop as i32, |p, _| p.wrapping_add(self.cost)) as u32
+    }
 }
 
 /// `0x00AA4860`: shares below 0.0005 become 0 and the rest are scaled to sum to 1 (left as they are

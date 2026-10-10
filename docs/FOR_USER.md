@@ -16,6 +16,21 @@ The morning report from night sessions, newest night first. Two lists per night:
 
 ### Needs you
 
+- **Debugger sitting, walking horses (~10 min, one order from you):** a walk-ordered horse moves at ~0.8 of its
+  order speed, from one of two traced factors (heading cosine or slope) that the last read could not separate.
+  Original under the debugger, a battle on level ground with a cavalry unit, one walk order across open ground; the
+  breakpoint (`0x00819D37`) is in `analysis/fidelity/UNITS_TERRAIN_FIDELITY.md` §1.10 on `work/gait-blend2`
+  ("Static trace 2026-10-10"). Claude runs it while you give the order.
+- **New-campaign army cap in the original (~5 min, no debugger):** in the original, set the unit size option to the
+  one that writes `campaign_unit_multiplier 0.75` (check `%APPDATA%\The Creative Assembly\Napoleon\scripts\preferences.script.txt`),
+  start a new campaign (any faction), save on turn 1, and tell Claude the save's name. Claude reads its army/navy cap
+  fields (CAMPAIGN_MODEL #23/#24; expected 20 / 10) to settle `ForceCaps::new_campaign` (PROVISIONAL, MODDING_AUDIT §2.6).
+- **Decision to confirm (taken tonight, reversible):** trading regions/technologies is being wired into deals, but the
+  AI's evaluation of such deals isn't traced yet. Until it is, the AI refuses any deal in which it would give away a
+  region or technology (logged; you can still give yours). Say if you'd rather it be different.
+- **Diplomacy negotiation (~3 min, side by side with the original):** `cargo run -p napoleon -- --campaign
+  mp_eur_napoleon --campaign-faction britain --no-intro`, Diplomacy → Austria → Open Negotiations: the option buttons
+  now appear; Regions and Technologies list both sides. Proposing regions/techs is not in the model yet (dropped, logged).
 - **Region details panel, side by side with the original (~3 min):** `cargo run -p napoleon -- --campaign eur_napoleon
   --campaign-faction france --no-intro`, open a region's details (e.g. Paris): taxes, religion, public order, wealth
   and growth with their factors, predicted values. Compare with the original's same region on turn 1. Effects and
@@ -43,6 +58,25 @@ The morning report from night sessions, newest night first. Two lists per night:
 - **Campaign source merged:** F5 now writes our own save format; the campaign map display no longer depends on the
   original's map files (only the importer reads them) — the first step toward custom maps. Character and officer
   names now live in the model (the exe's historical re-pick ported). See "Needs you".
+- **Second Polish batch merged** (`1c58e28c`): script tables cached, clippy now clean across the workspace.
+- **Austria now reads "Terrifying"** (`13b5581c`): our power formula already matched the original; the test had
+  loaded France's start instead of Britain's Coalition. All 12 factions' power now match the debugger values.
+- **No engine limits merged** (`885d889e`): wide ID types; army/navy caps, custom-battle unit counts and
+  reinforcement limits are moddable data (`_kv_rules`), defaults CONFIRMED from the exe; no player settings added.
+  The new-campaign navy cap is the one PROVISIONAL left (see "Needs you").
+- **Generic engine merged** (`00431cb9`): the Napoleon-campaign switches are one per-campaign feature table, unit
+  categories come from one place, seasons follow the month and unit upkeep is computed exactly as the exe does
+  (land and naval listings). All three modding foundations are now in.
+- **Recruitable population merged** (`17260a0e`): the exe's population gate and charge for recruiting (0 in vanilla
+  data, so unchanged for vanilla; a mod can set it).
+- **Diplomacy buttons merged:** the negotiation panel builds its option buttons (our `SetState` returned nothing),
+  tradeable regions and technologies list both sides, treaty lines fixed. See "Needs you".
+- **Recruit training block merged** (`8cb8f2c4`): a queued unit waits while its building is damaged or occupied or
+  its tech is missing (as the exe); the recruit list is sorted as the original's; recruit prices are fixed at queue
+  time (13 of 14 save mismatches explained).
+- **Public mirror published** (`28bcc8db`) with all of tonight's merges.
+- **Running when this was written:** no-limits (ID types, counts, caps as moddable data), generic-engine (campaign
+  feature table, unit category lists from data, calendar), gait-blend2 (why walking horses trot).
 
 ## Night of 2026-10-07
 

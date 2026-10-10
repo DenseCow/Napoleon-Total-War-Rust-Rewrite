@@ -125,8 +125,8 @@ fn main() {
     let mut scripts = ScriptHost::new(loaded.model, &human, ScriptSource::from_install(&dir).unwrap()).unwrap();
     let loc = Localisation::from_vfs(&vfs).unwrap();
     let facts = FrontEndFacts { game_version: "1.3.0".into(), ..Default::default() };
-    let host = UiScriptHost::new(ScriptSource::from_install(&dir).unwrap(), loc, facts, (1280.0, 960.0)).unwrap();
-    host.install_campaign(CampaignLink { state: scripts.shared_state(), human: human.clone(), campaign: campaign.clone(), map: loaded.info.map_key.clone(), db: Rc::new(db) })
+    let host = UiScriptHost::new(ScriptSource::from_install(&dir).unwrap(), loc, facts, (1280.0, 960.0), db.limits.clone()).unwrap();
+    host.install_campaign(CampaignLink { state: scripts.shared_state(), human: human.clone(), campaign: campaign.clone(), map: loaded.info.map_key.clone(), theatres: loaded.info.theatres().map(str::to_owned).collect(), db: Rc::new(db) })
         .unwrap();
     let root = host.load_root_layout("data/ui/campaign ui/layout").unwrap();
     println!("== loaded");

@@ -26,7 +26,7 @@ fn frontend_scripts_build_the_main_menu() {
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).unwrap();
     let loc = Localisation::from_vfs(&vfs).unwrap();
     let facts = FrontEndFacts { campaign_saves_exist: true, spanish_campaign: false, game_version: "test".into(), ..Default::default() };
-    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0)).unwrap();
+    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0), ntw_sim::limits::GameLimits::default()).unwrap();
     let root = host.load_root_layout("data/ui/frontend ui/layout").expect("layout loads");
     let log = host.take_log();
     for l in &log {
@@ -72,7 +72,7 @@ fn quit_button_binding_reaches_frontend_quit() {
     }
     let source = ScriptSource::from_install(&dir).expect("open packs");
     let facts = FrontEndFacts { campaign_saves_exist: false, spanish_campaign: false, game_version: "test".into(), ..Default::default() };
-    let host = UiScriptHost::new(source, Localisation::new(), facts, (1280.0, 960.0)).unwrap();
+    let host = UiScriptHost::new(source, Localisation::new(), facts, (1280.0, 960.0), ntw_sim::limits::GameLimits::default()).unwrap();
     let root = host.load_root_layout("data/ui/frontend ui/layout").unwrap();
     // The Quit button's layout binding is "call Root.LuaCall, Quit" → root.lua Quit() → FrontEnd.Quit().
     let quit = host.world().find(root, "quit").unwrap();
@@ -88,7 +88,7 @@ fn hovering_never_changes_page() {
     }
     let source = ScriptSource::from_install(&dir).expect("open packs");
     let facts = FrontEndFacts { campaign_saves_exist: true, spanish_campaign: false, game_version: "test".into(), ..Default::default() };
-    let host = UiScriptHost::new(source, Localisation::new(), facts, (1280.0, 960.0)).unwrap();
+    let host = UiScriptHost::new(source, Localisation::new(), facts, (1280.0, 960.0), ntw_sim::limits::GameLimits::default()).unwrap();
     let root = host.load_root_layout("data/ui/frontend ui/layout").unwrap();
     let ids: Vec<_> = host.world().ids().collect();
     for id in ids {
@@ -114,7 +114,7 @@ fn page_host() -> Option<(UiScriptHost, usize)> {
     let original = std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("The Creative Assembly").join("Napoleon"));
     // user_dir None: preference changes stay in memory (never written by tests).
     let facts = FrontEndFacts { campaign_saves_exist: true, game_version: "test".into(), original_user_dir: original, user_dir: None, nap_unlock: 1, ..Default::default() };
-    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0)).unwrap();
+    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0), ntw_sim::limits::GameLimits::default()).unwrap();
     let root = host.load_root_layout("data/ui/frontend ui/layout").unwrap();
     host.take_log();
     Some((host, root))
@@ -220,7 +220,7 @@ fn load_game_page_lists_both_folders_and_loads_by_name() {
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).unwrap();
     let loc = Localisation::from_vfs(&vfs).unwrap();
     let facts = FrontEndFacts { campaign_saves_exist: true, game_version: "test".into(), original_user_dir: Some(orig.clone()), user_dir: Some(ours.clone()), nap_unlock: 1, ..Default::default() };
-    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0)).unwrap();
+    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0), ntw_sim::limits::GameLimits::default()).unwrap();
     let root = host.load_root_layout("data/ui/frontend ui/layout").unwrap();
     host.take_log();
     click(&host, root, "single_player");
@@ -404,7 +404,7 @@ fn army_setups_save_load_validate_and_list() {
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).unwrap();
     let loc = Localisation::from_vfs(&vfs).unwrap();
     let facts = FrontEndFacts { game_version: "test".into(), user_dir: Some(user.clone()), nap_unlock: 1, ..Default::default() };
-    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0)).unwrap();
+    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0), ntw_sim::limits::GameLimits::default()).unwrap();
     let lua = host.lua();
     lua.globals().set("outside", user.parent().unwrap().join("outside.army_setup").display().to_string()).unwrap();
     let script = r#"
@@ -476,7 +476,7 @@ fn battle_settings_are_kept_in_the_default_preferences_file() {
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).unwrap();
     let loc = Localisation::from_vfs(&vfs).unwrap();
     let facts = FrontEndFacts { campaign_saves_exist: true, game_version: "test".into(), user_dir: Some(user.clone()), nap_unlock: 1, ..Default::default() };
-    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0)).unwrap();
+    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0), ntw_sim::limits::GameLimits::default()).unwrap();
     let root = host.load_root_layout("data/ui/frontend ui/layout").unwrap();
     host.take_log();
     for id in ["single_player", "sp_battle", "button_classic_battle", "button_host"] {
@@ -522,7 +522,7 @@ fn saved_battle_setup_loads_from_the_requester() {
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).unwrap();
     let loc = Localisation::from_vfs(&vfs).unwrap();
     let facts = FrontEndFacts { campaign_saves_exist: true, game_version: "test".into(), user_dir: Some(user.clone()), nap_unlock: 1, ..Default::default() };
-    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0)).unwrap();
+    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0), ntw_sim::limits::GameLimits::default()).unwrap();
     let root = host.load_root_layout("data/ui/frontend ui/layout").unwrap();
     host.take_log();
     // The default settings file, then a named setup with armies.
@@ -601,7 +601,7 @@ fn typed_file_name_saves_the_army() {
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).unwrap();
     let loc = Localisation::from_vfs(&vfs).unwrap();
     let facts = FrontEndFacts { campaign_saves_exist: true, game_version: "test".into(), user_dir: Some(user.clone()), nap_unlock: 1, ..Default::default() };
-    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0)).unwrap();
+    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0), ntw_sim::limits::GameLimits::default()).unwrap();
     let root = host.load_root_layout("data/ui/frontend ui/layout").unwrap();
     host.take_log();
     for id in ["single_player", "sp_battle", "button_classic_battle", "button_host", "button_save", "input_name"] {

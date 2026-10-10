@@ -43,9 +43,9 @@ fn factions(esf: &EsfFile) -> BTreeMap<String, Fac> {
     out
 }
 
-fn drawn(a: &Allocator, b: &Allocator) -> Option<Vec<u16>> {
+fn drawn(a: &Allocator, b: &Allocator) -> Option<Vec<u32>> {
     if a.seed == b.seed {
-        let gone: Vec<u16> = a.deck.iter().copied().filter(|x| !b.deck.contains(x)).collect();
+        let gone: Vec<u32> = a.deck.iter().copied().filter(|x| !b.deck.contains(x)).collect();
         return Some(gone);
     }
     // Refilled (maybe more than once: only once is handled).
@@ -55,7 +55,7 @@ fn drawn(a: &Allocator, b: &Allocator) -> Option<Vec<u16>> {
     let full = {
         let mut t = s.clone();
         t.draw()?;
-        let mut d = vec![0u16];
+        let mut d = vec![0u32];
         d.clear();
         let _ = &mut d;
         t
@@ -380,7 +380,7 @@ pub fn positions(x: &EsfFile, y: &EsfFile, rows: &[names::NameRow], db: &GameDat
 pub fn constraints(pairs: &[(EsfFile, EsfFile)], rows: &[names::NameRow], db: &GameDatabase) {
     use std::collections::BTreeSet;
     // (group, pool, index) -> candidate names
-    let mut cand: BTreeMap<(String, usize, u16), BTreeSet<String>> = BTreeMap::new();
+    let mut cand: BTreeMap<(String, usize, u32), BTreeSet<String>> = BTreeMap::new();
     for (x, y) in pairs {
         let (fx, fy) = (factions(x), factions(y));
         for (key, b) in &fy {

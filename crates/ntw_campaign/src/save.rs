@@ -223,6 +223,10 @@ fn write_save_tree(source: &EsfFile, model: &CampaignModel, human: &str, timesta
         set(h, 0, EsfNode::Utf16String(human.to_string()));
         set(h, 2, EsfNode::U32(cal.turn_number()));
         set(h, 3, EsfNode::U32(cal.date.year));
+        // #4 the season's name, from the calendar (the start position's is stale after a turn).
+        if let Some(season) = cal.date.season_header_name() {
+            set(h, 4, EsfNode::Utf16String(season.to_string()));
+        }
         if let Some(d) = child_mut(h, "DATE") {
             write_date(d, &cal.date);
         }
@@ -248,6 +252,13 @@ fn write_save_tree(source: &EsfFile, model: &CampaignModel, human: &str, timesta
         if let Some(d) = child_mut(c, "DATE") {
             write_date(d, &cal.date);
         }
+    }
+    // The units per army / navy (#23 / #24, after `OSMOSIS_CULTURES`), as the original's writer
+    // `0x008EBAB0` saves its globals.
+    if m.children.get(crate::OSMOSIS_CULTURES_AT).and_then(EsfNode::as_record_array).is_some_and(|a| a.name == "OSMOSIS_CULTURES") {
+        let caps = model.force_caps;
+        set(m, crate::OSMOSIS_CULTURES_AT + 3, EsfNode::U32(caps.army));
+        set(m, crate::OSMOSIS_CULTURES_AT + 4, EsfNode::U32(caps.navy));
     }
     let world = child_mut(m, "WORLD").ok_or(SaveError::Missing("WORLD"))?;
     let dropped = drop_duplicate_regions(world);
@@ -1079,8 +1090,17 @@ fn write_taxes(f: &mut EsfRecord, faction: &Faction, model: &CampaignModel) {
         .get(&faction.id)
         .map(|d| d.posts.iter().filter_map(|p| Some((p.id, p.governorship.as_ref()?.taxes))).collect())
         .unwrap_or_default();
-    let faction_levels = GovernorshipTaxes { lower: lo, upper: up, lower_rate: lo_rate.clamp(0, 255) as u8, upper_rate: up_rate.clamp(0, 255) as u8 };
+    let faction_levels = GovernorshipTaxes { lower: lo, upper: up, lower_rate: lo_rate, upper_rate: up_rate };
     let Some(posts) = child_mut(f, "GOVERNMENT").and_then(|g| array_mut(g, "POSTS_ARRAY")) else { return };
+    // The save's rate fields are u8; a modded rate outside 0..=255 is written clamped, logged once
+    // per faction.
+    let mut unfit = None;
+    let mut rate_u8 = |v: i32| {
+        u8::try_from(v).unwrap_or_else(|_| {
+            unfit.get_or_insert(v);
+            v.clamp(0, 255) as u8
+        })
+    };
     for item in &mut posts.items {
         let Some(p) = first_rec_mut(item) else { continue };
         let id = p.get_i32(0);
@@ -1090,8 +1110,11 @@ fn write_taxes(f: &mut EsfRecord, faction: &Faction, model: &CampaignModel) {
         let taxes = model_posts.iter().find(|(pid, _)| Some(*pid) == id).map_or(faction_levels, |(_, t)| *t);
         set(t, 0, EsfNode::U32(taxes.lower));
         set(t, 1, EsfNode::U32(taxes.upper));
-        set(t, 2, EsfNode::U8(taxes.lower_rate));
-        set(t, 3, EsfNode::U8(taxes.upper_rate));
+        set(t, 2, EsfNode::U8(rate_u8(taxes.lower_rate)));
+        set(t, 3, EsfNode::U8(rate_u8(taxes.upper_rate)));
+    }
+    if let Some(v) = unfit {
+        log::warn!("save: {}: tax rate {v} does not fit the save's u8 field; written clamped to 0..=255", faction.key);
     }
 }
 

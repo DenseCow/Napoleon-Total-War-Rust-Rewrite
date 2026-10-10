@@ -377,7 +377,7 @@ fn main() {
             for i in 0..pg.kind.len() {
                 let (c, r) = (i % pg.width as usize, i / pg.width as usize);
                 let o = (((pg.height as usize - 1 - r) * pg.width as usize + c) * 3) as usize;
-                let col = if pg.road[i] { [255, 255, 255] } else { match pg.kind[i] { 1 => { let h = (pg.region[i] as u32).wrapping_mul(2654435761); [(h >> 24) as u8 / 2 + 60, (h >> 16) as u8 / 2 + 60, 40] } 2 => [30, 60, 160], _ => [0, 0, 0] } };
+                let col = if pg.road[i] { [255, 255, 255] } else { match pg.kind[i] { 1 => { let h = pg.region[i].wrapping_mul(2654435761); [(h >> 24) as u8 / 2 + 60, (h >> 16) as u8 / 2 + 60, 40] } 2 => [30, 60, 160], _ => [0, 0, 0] } };
                 rgb[o..o + 3].copy_from_slice(&col);
             }
             write_png(&args[2], pg.width, pg.height, &rgb);

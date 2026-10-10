@@ -54,7 +54,7 @@ pub fn enter(world: &mut World) {
                 .collect()
         })
         .unwrap_or_default();
-    let mut facts = facts_of(&sim.battle, &sim.info, &buildings);
+    let mut facts = facts_of(&sim.battle, sim.infos(), &buildings);
     // The battle file's start view, (x, height, map y) = engine coordinates.
     facts.camera = sim.camera_start.unwrap_or(([0.0; 3], [0.0; 3]));
     let host = match BattleScriptHost::new(source, facts, sim.seed) {
@@ -100,7 +100,7 @@ pub fn tick(world: &mut World) {
 
 fn step(s: &mut BattleScripts, sim: &mut BattleSim) -> Vec<BattleScriptRequest> {
     // The buildings were given at load time and do not change.
-    s.host.set_facts(facts_of(&sim.battle, &sim.info, &[]));
+    s.host.set_facts(facts_of(&sim.battle, sim.infos(), &[]));
     if s.shown != Some(sim.phase) {
         match sim.phase {
             BattlePhase::Deployment => s.host.phase("Deployment"),

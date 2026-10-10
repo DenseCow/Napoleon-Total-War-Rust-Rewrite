@@ -14,7 +14,8 @@
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use ntw_formats::db::DbValue;
 use ntw_formats::db_folder::RawTable;
@@ -44,6 +45,8 @@ pub struct ScriptSource {
     rows_cache: Mutex<HashMap<&'static str, Option<SharedRows>>>,
     /// Typed tables loaded so far, by record type.
     typed_cache: Mutex<HashMap<TypeId, Option<Arc<dyn Any + Send + Sync>>>>,
+    /// A poisoned table cache was already logged (once per source).
+    poison_logged: AtomicBool,
 }
 
 /// Lowercase, `/` separators, no leading separator, no leading `data/`.
@@ -90,6 +93,20 @@ impl ScriptSource {
         ScriptSource { vfs: Some(vfs), ..Self::default() }
     }
 
+    /// Locks a table cache. A poisoned one (a panic while it was held) gives `None`, so the table
+    /// reads as missing; that is logged once per source, not on every call.
+    fn lock_cache<'a, T>(&self, cache: &'a Mutex<T>) -> Option<MutexGuard<'a, T>> {
+        match cache.lock() {
+            Ok(guard) => Some(guard),
+            Err(_) => {
+                if !self.poison_logged.swap(true, Ordering::Relaxed) {
+                    eprintln!("WARN ntw_script: a table cache lock is poisoned (a panic while it was held); tables read as missing from now on");
+                }
+                None
+            }
+        }
+    }
+
     /// A game table's rows through the one merged table reader ([`RawTable::read`]: every file of
     /// its folder, mods included), read and merged once per source: a script calls these on every
     /// Lua call, and the install does not change under a running host. `None` without a VFS
@@ -97,7 +114,7 @@ impl ScriptSource {
     /// does not read; that is logged once per table (and not retried).
     pub fn table_rows_shared(&self, table: &RawTable) -> Option<SharedRows> {
         let vfs = self.vfs.as_ref()?;
-        let mut cache = self.rows_cache.lock().ok()?;
+        let mut cache = self.lock_cache(&self.rows_cache)?;
         cache
             .entry(table.name)
             .or_insert_with(|| {
@@ -109,16 +126,17 @@ impl ScriptSource {
             .clone()
     }
 
-    /// [`table_rows_shared`](Self::table_rows_shared) as an owned copy.
-    pub fn table_rows(&self, table: &RawTable) -> Option<Vec<Vec<DbValue>>> {
-        self.table_rows_shared(table).map(|r| r.as_ref().clone())
+    /// [`table_rows_shared`](Self::table_rows_shared), or an empty table when there are none
+    /// (missing, or no VFS; logged once as there).
+    pub fn table_rows_or_empty(&self, table: &RawTable) -> SharedRows {
+        self.table_rows_shared(table).unwrap_or_default()
     }
 
     /// A typed game table through the merged view (`ntw_data::load_table`), loaded once per
-    /// source. `None` as for [`table_rows`](Self::table_rows).
+    /// source. `None` as for [`table_rows_shared`](Self::table_rows_shared).
     pub fn typed_table<T: ntw_data::DbRecord + Send + Sync + 'static>(&self) -> Option<Arc<ntw_data::Table<T>>> {
         let vfs = self.vfs.as_ref()?;
-        let mut cache = self.typed_cache.lock().ok()?;
+        let mut cache = self.lock_cache(&self.typed_cache)?;
         cache
             .entry(TypeId::of::<T>())
             .or_insert_with(|| {
@@ -232,9 +250,9 @@ mod tests {
         // Read and merged once per source: a second call is the same rows, not a re-read (a
         // missing table is remembered too).
         assert!(Arc::ptr_eq(&source.table_rows_shared(&BATTLES).unwrap(), &source.table_rows_shared(&BATTLES).unwrap()));
-        assert!(source.table_rows(&WIND_LEVELS).is_none());
         assert!(source.table_rows_shared(&WIND_LEVELS).is_none());
-        assert!(ScriptSource::empty().table_rows(&BATTLES).is_none());
+        assert!(source.table_rows_shared(&WIND_LEVELS).is_none());
+        assert!(ScriptSource::empty().table_rows_shared(&BATTLES).is_none());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

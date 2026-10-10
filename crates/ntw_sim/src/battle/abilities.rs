@@ -557,7 +557,7 @@ impl Battle {
     /// abilities change): `+0xD9C` = the unit may skirmish (stats column 53, not dismounted,
     /// `0x0053F9C0`) && `0x0055C230` (no gabionade selected, category artillery (type record
     /// `+0x1C` == 1), can unlimber and is not unlimbered) && class `artillery_horse` (type record
-    /// `+0x20` == 2; the enums are in `ntw_ai::battle::classes`). No shipped unit has column 53 and
+    /// `+0x20` == 2; the enums are in `crate::unit_kind`). No shipped unit has column 53 and
     /// is horse artillery, so every unit starts with skirmish off.
     pub fn skirmish_default(&self, idx: usize) -> bool {
         let u = &self.units[idx];
@@ -566,7 +566,7 @@ impl Battle {
         u.attributes.skirmisher
             && !dismounted
             && u.deployable != Some(ability_ids::GABIONADE)
-            && u.unit_category == "artillery"
+            && crate::unit_kind::category(&u.unit_category) == crate::unit_kind::Category::Artillery
             && u.capabilities.has_ability(ability_ids::UNLIMBER)
             && !unlimbered
             && u.unit_class == "artillery_horse"

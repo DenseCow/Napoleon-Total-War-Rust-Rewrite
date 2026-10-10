@@ -101,7 +101,7 @@ pub fn grid_from_pathfinding(pf: &PathfindingFile, map: &CampaignMap) -> Option<
                 };
                 g.kind[i] = kind as u8;
                 if let Some(r) = region {
-                    g.region[i] = r as u16;
+                    g.region[i] = region_index(r);
                 }
                 // Road: any road polygon of this original cell overlapping the movement cell.
                 if kind == CellKind::Land {
@@ -143,13 +143,13 @@ pub fn poly_map(area: &PathfindingArea, cells: &[GridCell], sets: &[Vec<i16>]) -
                             .map(|&v| if v < 4 { Some(corner[v as usize]) } else { area.vertices.get(v as usize).copied() })
                             .collect::<Option<_>>()?
                     };
-                    Some(PolyInput { kind: (b.flags & 0xF) as u8, region_id: b.region(), outline })
+                    Some(PolyInput { kind: (b.flags & 0xF) as u8, region_id: u32::from(b.region()), outline })
                 })
                 .collect();
             CellInput { header: cell.header, polys }
         })
         .collect();
-    let region_sets = sets.iter().map(|s| s.iter().filter(|&&r| r >= 0).map(|&r| r as u16).collect()).collect();
+    let region_sets = sets.iter().map(|s| s.iter().filter_map(|&r| u32::try_from(r).ok()).collect()).collect();
     PolyMap::build(g.origin, cs, g.cols, g.rows, &inputs, region_sets)
 }
 
@@ -209,7 +209,7 @@ pub fn build_grid_from_regions(map: &CampaignMap) -> PathGrid {
                         let (x, z) = g.centre(i);
                         if inside(a, b, c, x, z) {
                             g.kind[i] = kind;
-                            g.region[i] = ri as u16;
+                            g.region[i] = region_index(ri);
                         }
                     }
                 }
@@ -246,6 +246,12 @@ fn inside(a: (f32, f32), b: (f32, f32), c: (f32, f32), x: f32, z: f32) -> bool {
     let s = |p: (f32, f32), q: (f32, f32)| (q.0 - p.0) * (z - p.1) - (q.1 - p.1) * (x - p.0);
     let (d1, d2, d3) = (s(a, b), s(b, c), s(c, a));
     !((d1 < 0.0 || d2 < 0.0 || d3 < 0.0) && (d1 > 0.0 || d2 > 0.0 || d3 > 0.0))
+}
+
+/// A region's index in [`PathGrid::region_keys`] as the grid stores it (`u32`, like `RegionId`:
+/// a map's regions are counted in `u32` everywhere, so this never fails on a map that loaded).
+fn region_index(i: usize) -> u32 {
+    u32::try_from(i).expect("a map has fewer than 2^32 regions")
 }
 
 #[cfg(test)]

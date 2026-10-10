@@ -296,12 +296,12 @@ fn main() {
                 println!("units {label} in {{4, 0xB, 0xC, 0xE}}: {} rows {:?}", rows.len(), &rows[..rows.len().min(12)]);
             }
             // And the four codes read as indices into the shipped class tables.
-            let cls = ntw_formats::group_formation::UNIT_CLASSES;
+            let cls = ntw_sim::unit_kind::ORIGINAL_CLASSES;
             for c in [4u32, 0xB, 0xC, 0xE] {
                 let land: Vec<&str> = db
                     .units
                     .iter()
-                    .filter(|u| ntw_formats::group_formation::class_id(&u.unit_class) == c)
+                    .filter(|u| u32::from(ntw_sim::unit_kind::class_code(&u.unit_class)) == c)
                     .map(|u| u.key.as_str())
                     .take(4)
                     .collect();
@@ -312,7 +312,7 @@ fn main() {
         if std::env::var("ECON_DESERT").is_ok() {
             // 0-B round 14 item 3: the four unit classes `bankrupt_desertion` skips.  The codes the
             // exe compares `unit + 0x20` against (4, 0xB, 0xC, 0xE) are ids in the alphabetical
-            // class list `0x00EED3E0` (`ntw_formats::group_formation::UNIT_CLASSES`; CONFIRMED by
+            // class list `0x00EED3E0` (`ntw_sim::unit_kind::ORIGINAL_CLASSES`; CONFIRMED by
             // round 11's 0x18 / 0x26 = bomb ketch / rocket ship).  This lists the class ids that
             // actually occur in the units of forces OUTSIDE a settlement - the ones the skip can
             // change - over the vanilla saves and the shipped start positions.
@@ -325,8 +325,8 @@ fn main() {
                 }
                 for u in &f.units {
                     let class = db.unit(&u.unit_key).map(|r| r.unit_class.as_str()).unwrap_or("");
-                    let id = ntw_formats::group_formation::class_id(class);
-                    let name = format!("{} ({class})", ntw_formats::group_formation::UNIT_CLASSES[id as usize]);
+                    let id = u32::from(ntw_sim::unit_kind::class_code(class));
+                    let name = format!("{} ({class})", ntw_sim::unit_kind::ORIGINAL_CLASSES[id as usize]);
                     let map = if garrisons.contains(&f.id) { &mut inside } else { &mut outside };
                     map.entry(id).or_insert((name, 0)).1 += 1;
                 }
@@ -607,7 +607,7 @@ fn main() {
             // Buildings below full health, and repairs under way.
             for r in m.world.regions.values() {
                 for (i, s) in r.slots.iter().enumerate() {
-                    if let Some(b) = s.building.as_ref().filter(|b| b.health < 100) {
+                    if let Some(b) = s.building.as_ref().filter(|b| b.is_damaged()) {
                         let repair = r.construction.iter().any(|c| c.slot == ntw_sim::campaign::SlotRef::Slot(i));
                         println!("  {} {} {} health {} repairing {repair}", r.key, s.key, b.level_key, b.health);
                     }
@@ -677,7 +677,7 @@ fn main() {
                         }
                     }
                 }
-                for s in r.slots.iter().filter(|s| s.holder.is_some_and(|h| h != r.owner)) {
+                for s in r.slots.iter().filter(|s| r.slot_occupied(s)) {
                     let h = s.holder.unwrap();
                     let hf = m.world.factions.get(&h);
                     println!("  slot {} held by {:?} gov {:?} tax {:?}/{:?} regions {}", s.key, hf.map(|x| x.key.clone()), hf.map(|x| x.government_key.clone()), hf.map(|x| x.tax_lower.clone()), hf.map(|x| x.tax_upper.clone()), m.world.regions.values().filter(|x| x.owner == h).count());
@@ -1157,7 +1157,7 @@ pub fn fx_detail(mut l: ntw_campaign::LoadedCampaign, human: &str) {
         for force in m.world.forces.values().filter(|x| x.faction == f) {
             for u in &force.units {
                 if let Some(r) = m.rules.units.get(&u.unit_key) {
-                    let c = economy::unit_upkeep(&fx, f, r);
+                    let c = economy::unit_upkeep(&fx, f, &m.rules.features, &u.unit_key, r);
                     if r.is_naval { naval += c } else { land += c }
                 }
             }

@@ -180,15 +180,25 @@ pub fn building_effect(rules: &CampaignRules, level: &str, effect: &str) -> f32 
     rules.buildings.get(level).map_or(0.0, |b| b.effect(effect))
 }
 
-/// One unit's upkeep (0x008F9B10 land / 0x008B21D0 ship, CONFIRMED): `round_half_even(upkeep ×
-/// max(0, 100 + faction mod + unit-category mod + unit-class mod) × 0.01)`, the faction mod being
-/// `upkeep_cost_mod_land_all` or `upkeep_cost_mod_naval_all`, the others the qualified `upkeep_mod`.
-pub fn unit_upkeep(fx: &Effects, faction: FactionId, unit: &super::rules::UnitRules) -> i32 {
+/// One unit's upkeep: the unit's upkeep methods, land `0x008F9B10` and naval `0x008F9D00` (CONFIRMED
+/// listings). In f32: `mod = 100 + faction mod + category mod + class mod + unit-key mod`, the faction
+/// mod `upkeep_cost_mod_land_all` / `upkeep_cost_mod_naval_all` read as a float, the others integer
+/// reads (the exe's int read, half to even): the qualified `upkeep_mod` of the unit's category and
+/// class, and the campaign's unit-key upkeep effect (`0x008F9B5F` / `0x008F9D4F`, in `spa_napoleon`
+/// `guerrilla_upkeep_mod` (0x90) for a key ending in `_Guerrilla`, else `auxiliary_upkeep_mod` (0x94)
+/// for `_Auxiliary`; [`super::features::CampaignFeatures::unit_key_effects`]). The result is
+/// `FISTP(upkeep × mod × 0.01)`; a ship with a negative `mod` costs 0, a land unit has no such clamp.
+pub fn unit_upkeep(fx: &Effects, faction: FactionId, features: &super::features::CampaignFeatures, unit_key: &str, unit: &super::rules::UnitRules) -> i32 {
+    let int = |v: f32| f64::from(v).round_ties_even() as f32;
     let fmod = fx.faction(faction, if unit.is_naval { "upkeep_cost_mod_naval_all" } else { "upkeep_cost_mod_land_all" });
-    let cat = fx.faction_qualified(faction, BonusKind::UnitCategory, "upkeep_mod", &unit.category);
-    let class = fx.faction_qualified(faction, BonusKind::UnitClass, "upkeep_mod", &unit.unit_class);
-    let mult = (100.0 + fmod + cat + class).max(0.0);
-    (f64::from(unit.upkeep) * f64::from(mult) * 0.01).round_ties_even() as i32
+    let cat = int(fx.faction_qualified(faction, BonusKind::UnitCategory, "upkeep_mod", &unit.category));
+    let class = int(fx.faction_qualified(faction, BonusKind::UnitClass, "upkeep_mod", &unit.unit_class));
+    let key = features.effects_of_unit(unit_key).map_or(0.0, |e| int(fx.faction(faction, &e.upkeep)));
+    let mult = 100.0 + fmod + cat + class + key;
+    if unit.is_naval && mult < 0.0 {
+        return 0;
+    }
+    super::commands::fistp(unit.upkeep as f32 * mult * 0.01)
 }
 
 /// What recruiting `unit_key` in `region` costs: the cost of the region's recruitable entry, which the
@@ -203,8 +213,8 @@ pub fn recruitment_cost(model: &CampaignModel, region: &Region, unit_key: &str, 
 /// [`recruitment_cost`] over an already built region effect set (`0x00B0D220`, CONFIRMED):
 /// `FISTP(((max(−100, mod) + 100) × units #7) × 0.01)` in f32, where `mod` is the sum of the
 /// integer effects `recruitment_mod_cost_land_all` (or `_naval_all` for a ship), the unit category's
-/// and the unit class's `cost_mod`, and in `spa_napoleon` `guerrilla_cost_mod` for a unit key
-/// ending in `_Guerrilla`, else `auxiliary_cost_mod` for one ending in `_Auxiliary` (case-sensitive).
+/// and the unit class's `cost_mod`, and the campaign's unit-key suffix effect ([`super::features::CampaignFeatures::unit_key_effects`]:
+/// in `spa_napoleon` `guerrilla_cost_mod` for a key ending in `_Guerrilla`, else `auxiliary_cost_mod` for `_Auxiliary`).
 /// The base is `units` #7 ([`super::rules::UnitRules::campaign_cost`]), not the #4 cost.
 pub fn recruitment_cost_in(rules: &CampaignRules, set: &super::effects::EffectSet, unit_key: &str, unit: &super::rules::UnitRules) -> i32 {
     // Every lookup is the exe's int read of the effect (`0x00E23E10`, half to even).
@@ -212,12 +222,8 @@ pub fn recruitment_cost_in(rules: &CampaignRules, set: &super::effects::EffectSe
     let mut sum = set.get_int(if unit.is_naval { "recruitment_mod_cost_naval_all" } else { "recruitment_mod_cost_land_all" })
         + int(set.get_qualified(BonusKind::UnitCategory, "cost_mod", &unit.category))
         + int(set.get_qualified(BonusKind::UnitClass, "cost_mod", &unit.unit_class));
-    if rules.campaign == "spa_napoleon" {
-        if unit_key.ends_with("_Guerrilla") {
-            sum += set.get_int("guerrilla_cost_mod");
-        } else if unit_key.ends_with("_Auxiliary") {
-            sum += set.get_int("auxiliary_cost_mod");
-        }
+    if let Some(e) = rules.features.effects_of_unit(unit_key) {
+        sum += set.get_int(&e.cost);
     }
     super::commands::fistp((sum.max(-100) as f32 + 100.0) * unit.campaign_cost as f32 * 0.01)
 }
@@ -237,7 +243,7 @@ pub fn faction_upkeep_with(model: &CampaignModel, fx: &Effects, faction: Faction
         .values()
         .filter(|f| f.faction == faction)
         .flat_map(|f| &f.units)
-        .map(|u| model.rules.units.get(&u.unit_key).map_or(0, |r| unit_upkeep(fx, faction, r)))
+        .map(|u| model.rules.units.get(&u.unit_key).map_or(0, |r| unit_upkeep(fx, faction, &model.rules.features, &u.unit_key, r)))
         .sum()
 }
 
@@ -560,7 +566,7 @@ pub fn region_wealth(model: &CampaignModel, fx: Option<&Effects>, region: &Regio
         let target = predicted.then(|| region.construction_changes().find(|(slot, _, _)| *slot == s)).flatten();
         match target {
             Some((_, level, _)) => Some(level),
-            None => region.building_at(s).filter(|b| b.health >= 100).map(|b| b.level_key.as_str()),
+            None => region.building_at(s).filter(|b| !b.is_damaged()).map(|b| b.level_key.as_str()),
         }
     });
     for level in levels {
@@ -784,7 +790,7 @@ pub struct ClassPublicOrder {
     pub class: String,
     /// Happiness [1..13]: 0 government type, 1 taxes, 2 religion, 3 events, 4 culture, 5 industry,
     /// 6 characters / ministers / traits, 7 (unused), 8 education, 9 (unused), 10 war results,
-    /// 11 gentlemen, 12 religion in `spa_napoleon`.
+    /// 11 gentlemen, 12 religion with [`super::features::CampaignFeatures::alignment_public_order`] (`spa_napoleon`).
     pub happiness: [i32; 13],
     /// Repression [16..21]: 0 government type, 1 government buildings, 2 ministers, 3 automated
     /// policing, 4 garrison, 5 (set elsewhere: 0).
@@ -850,7 +856,7 @@ pub fn public_order_factors_with(model: &CampaignModel, reg: &Region, set: &supe
     let (upper_class, lower_class) = government_classes(model, model.world.governing_faction(region).unwrap_or(reg.owner));
     let int = |b: &str| set.get_int(b);
     let class_int = |b: &str, class: &str| f64::from(set.get_qualified(BonusKind::PopClass, b, class)).round_ties_even() as i32;
-    let spa = rules.campaign == "spa_napoleon";
+    let alignment = rules.features.alignment_public_order;
     let schools = model.world.capital(reg.owner) == Some(region) || int("research_points") != 0;
     let state = model.world.faction_details.get(&reg.owner).map(|d| d.religion.clone()).unwrap_or_default();
     // The owner's (faction-level) conversion only: the region's own buildings do not count here (the vanilla spa
@@ -859,7 +865,7 @@ pub fn public_order_factors_with(model: &CampaignModel, reg: &Region, set: &supe
     let conversion = set.get_qualified(BonusKind::Religion, "conversion", &state) - local;
     let religion = religion_factor(model, reg, religions, int("happiness_mod_religious_unrest"), conversion) as i32;
     let gentlemen = gentlemen_factor(model, reg) as i32;
-    let hostile = !spa && hostile_in_region(model, reg);
+    let hostile = !alignment && hostile_in_region(model, reg);
     let garrison = garrison_repression(rules, garrison_units, reg.population) as i32;
     let classes: Vec<(String, i32, i32)> =
         if reg.class_bases.is_empty() { vec![(lower_class.clone(), 0, 0), (upper_class.clone(), 0, 0)] } else { reg.class_bases.clone() };
@@ -876,7 +882,7 @@ pub fn public_order_factors_with(model: &CampaignModel, reg: &Region, set: &supe
             let mut h = [0i32; 13];
             h[0] = int(&format!("happiness_active_{side}_gov_type"));
             h[1] = int(&format!("happiness_active_{side}_tax"));
-            if !spa {
+            if !alignment {
                 h[2] = religion;
             } else {
                 h[12] = religion;

@@ -30,6 +30,7 @@
 //! |---|---|---|
 //! | `CAMPAIGN_MODEL/RandSeed` u32 | `rng.state` | CONFIRMED location; INFERRED that it is the live LCG state |
 //! | `CAMPAIGN_MODEL/CAMPAIGN_CALENDAR` | `calendar` | CONFIRMED (W3 §3.1) |
+//! | `CAMPAIGN_MODEL` #23 / #24 u32 | `force_caps` (units per army / navy) | CONFIRMED (`0x00872550`) |
 //! | `WORLD/FACTION_ARRAY` + `REBEL_FACTION` | `world.factions` | CONFIRMED |
 //! | `FACTION_ECONOMICS` #1 | `Faction::treasury` | CONFIRMED values, INFERRED meaning |
 //! | `DIPLOMACY_RELATIONSHIP` #0, #4 | `Faction::diplomacy` | CONFIRMED |
@@ -56,6 +57,7 @@ pub mod trade;
 pub mod victory;
 pub mod regiments;
 pub mod charnames;
+pub mod features;
 pub mod header_map;
 pub mod names;
 pub mod own_save;
@@ -189,6 +191,15 @@ pub struct CampaignInfo {
     pub map_key: String,
     /// `CAMPAIGN_PLAYERS_SETUP` entries, in file order.
     pub players: Vec<PlayerSetup>,
+}
+
+impl CampaignInfo {
+    /// The campaign's theatres (`campaign_map_playable_areas` area keys, e.g. `europe_main`), in header
+    /// order: its header's `MAPS` items (CONFIRMED: one per theatre; every shipped campaign has one,
+    /// its home theatre). The UI's one source for "the campaign's theatre".
+    pub fn theatres(&self) -> impl Iterator<Item = &str> {
+        self.header.maps.iter().map(|m| m.theatre.as_str())
+    }
 }
 
 /// Everything a load produces.
@@ -382,6 +393,7 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
 
     let campaign_key = str_at(setup, 0, &setup_path)?.to_string();
     let mut model = CampaignModel::new(calendar, CaRng::new(seed), loaded.world);
+    model.force_caps = read_force_caps(model_rec, &mut check.warnings);
     attach_rules(&mut model, db, &campaign_key);
     // Movement maximums include the commanders' force factor (CAMPAIGN_FIDELITY.md §Action points).
     model.refresh_movement_maximums();
@@ -426,6 +438,24 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
         script_values: script_values::read_script_values(esf),
         restricted_units: restrictions.units,
     })
+}
+
+/// Position of `OSMOSIS_CULTURES[]` in `CAMPAIGN_MODEL`; the units per army and per navy follow
+/// it at #23 / #24 (STARTPOS_LAYOUT.md §2, CONFIRMED order; their meaning CONFIRMED from the
+/// loader `0x00872550` and writer `0x008EBAB0`, see [`ntw_sim::campaign::rules::ForceCaps`]).
+pub(crate) const OSMOSIS_CULTURES_AT: usize = 20;
+
+/// `CAMPAIGN_MODEL` #23 / #24, the units per army and per navy; the original's 20 / 20 (with a
+/// warning) when the record does not have them where the layout puts them.
+fn read_force_caps(model_rec: &EsfRecord, warnings: &mut Vec<LoadWarning>) -> ntw_sim::campaign::rules::ForceCaps {
+    let laid_out = model_rec.get(OSMOSIS_CULTURES_AT).and_then(EsfNode::as_record_array).is_some_and(|a| a.name == "OSMOSIS_CULTURES");
+    match (laid_out, model_rec.get_u32(OSMOSIS_CULTURES_AT + 3), model_rec.get_u32(OSMOSIS_CULTURES_AT + 4)) {
+        (true, Some(army), Some(navy)) => ntw_sim::campaign::rules::ForceCaps { army, navy },
+        _ => {
+            warnings.push(LoadWarning::MissingForceCaps);
+            Default::default()
+        }
+    }
 }
 
 /// Gives the model the campaign's rules from the DB (game data, not state: rebuilt on every load,

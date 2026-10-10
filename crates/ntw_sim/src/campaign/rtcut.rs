@@ -81,7 +81,7 @@ pub type Point = (f64, f64);
 struct Piece {
     outline: Vec<Q>,
     kind: u8,
-    region: u16,
+    region: u32,
     origin: u32,
 }
 

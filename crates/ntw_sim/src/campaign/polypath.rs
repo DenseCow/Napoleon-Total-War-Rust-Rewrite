@@ -75,8 +75,9 @@ impl Mover {
 pub struct PolyInput {
     /// Kind (flags & 0xF).
     pub kind: u8,
-    /// The 10-bit pathfinding region id (1023 = none).
-    pub region_id: u16,
+    /// The pathfinding region id: an index into [`PolyMap::region_sets`] (the original's file stores
+    /// 10 bits, 1023 = none; ours may hold any number).
+    pub region_id: u32,
     /// Outline, Fixed20 (x, z) map coordinates (exact, so shared vertices compare equal).
     pub outline: Vec<(i32, i32)>,
 }
@@ -108,7 +109,7 @@ pub struct PolyMap {
     /// Per polygon: kind.
     pub kind: Vec<u8>,
     /// Per polygon: region id.
-    pub region_id: Vec<u16>,
+    pub region_id: Vec<u32>,
     /// Per polygon: its cell.
     pub poly_cell: Vec<u32>,
     /// Per polygon: start of its outline in [`PolyMap::points`] (one more entry at the end).
@@ -120,7 +121,7 @@ pub struct PolyMap {
     /// Neighbour polygon indices.
     pub adj: Vec<u32>,
     /// Region id -> indices into the grid's region keys (empty = sea / no region).
-    pub region_sets: Vec<Vec<u16>>,
+    pub region_sets: Vec<Vec<u32>>,
     /// Per polygon, its connected component for armies (`[0]`) and fleets (`[1]`): polygons the
     /// mover may enter, joined by adjacency; `u32::MAX` where the mover may not enter. A search
     /// between two components fails at once (the original compares a component id before
@@ -203,7 +204,7 @@ impl Ord for Open {
 impl PolyMap {
     /// Builds the map and its adjacency. `cells` are row-major from the south-west, `cols * rows`
     /// of them; `origin` and `cell` in Fixed20.
-    pub fn build(origin: (i32, i32), cell: i32, cols: u32, rows: u32, cells: &[CellInput], region_sets: Vec<Vec<u16>>) -> PolyMap {
+    pub fn build(origin: (i32, i32), cell: i32, cols: u32, rows: u32, cells: &[CellInput], region_sets: Vec<Vec<u32>>) -> PolyMap {
         let mut m = PolyMap {
             origin: (origin.0 as f32 * FIXED, origin.1 as f32 * FIXED),
             cell: cell as f32 * FIXED,
@@ -397,7 +398,7 @@ impl PolyMap {
     pub fn road_costs(&self, region_cost: impl Fn(usize) -> f32, default: f32) -> Vec<f32> {
         self.region_sets
             .iter()
-            .map(|s| s.iter().map(|&r| region_cost(usize::from(r))).reduce(f32::min).unwrap_or(default))
+            .map(|s| s.iter().map(|&r| region_cost(r as usize)).reduce(f32::min).unwrap_or(default))
             .collect()
     }
 }
@@ -422,7 +423,7 @@ pub struct Overlay {
     /// cut from.
     pub kind: Vec<u8>,
     /// See [`Overlay::kind`].
-    pub region_id: Vec<u16>,
+    pub region_id: Vec<u32>,
     /// See [`Overlay::kind`].
     pub poly_cell: Vec<u32>,
     /// See [`Overlay::kind`].
@@ -492,7 +493,7 @@ impl<'a> View<'a> {
     }
 
     /// Region id of polygon `p`.
-    pub fn region_id(&self, p: usize) -> u16 {
+    pub fn region_id(&self, p: usize) -> u32 {
         match self.piece(p) {
             Some((o, i)) => o.region_id[i],
             None => self.map.region_id[p],
@@ -674,7 +675,7 @@ impl<'a> View<'a> {
             return 0.0;
         }
         if self.kind(p) == kind::ROAD
-            && let Some(&c) = road_cost.get(usize::from(self.region_id(p)))
+            && let Some(&c) = road_cost.get(self.region_id(p) as usize)
         {
             return c;
         }
@@ -1016,6 +1017,21 @@ mod tests {
         // 16 units of road steps at 0.4 plus the ends.
         assert!(*p.costs.last().unwrap() < 18.0 * byte_cost(100) * 0.5, "{:?}", p.costs);
         assert!(m.road_costs(|_| 0.6, 0.67) == vec![0.6]);
+    }
+
+    #[test]
+    fn region_ids_past_u16_keep_their_road_cost() {
+        // Region ids and region indices were u16 (wrapping past 65,535); a map may have more.
+        const ID: u32 = 70_000;
+        let sq = vec![(0, 0), (2 * U, 0), (2 * U, 2 * U), (0, 2 * U)];
+        let cells = [CellInput { header: [100; 8], polys: vec![PolyInput { kind: kind::ROAD, region_id: ID, outline: sq }] }];
+        let mut sets = vec![Vec::new(); ID as usize + 1];
+        sets[ID as usize] = vec![ID + 5];
+        let m = PolyMap::build((0, 0), 2 * U, 1, 1, &cells, sets);
+        let costs = m.road_costs(|r| if r == ID as usize + 5 { 0.3 } else { 1.0 }, 0.67);
+        assert_eq!(m.view().region_id(0), ID);
+        assert_eq!(costs[ID as usize], 0.3);
+        assert_eq!(m.view().multiplier(0, 0, &costs), 0.3);
     }
 
     #[test]

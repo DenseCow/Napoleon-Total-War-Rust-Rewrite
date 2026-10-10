@@ -240,76 +240,109 @@ fn bare_pips(lua: &Lua, total: impl mlua::IntoLua, pip_value: impl mlua::IntoLua
 
 /// `InitialiseRegionInfoDetails(region)`'s table (see the module). `Nil` for a region not in the
 /// campaign.
+/// What the region info table (`0x009AF570`) reads from the model, gathered under one borrow.
+struct Facts {
+    key: String,
+    owner_key: String,
+    population: u32,
+    gdp: u32,
+    town_wealth: u32,
+    tax_exempt: bool,
+    rebel: bool,
+    religions: Vec<(String, f32)>,
+    classes: (String, String),
+    rates: Option<economy::RegionTaxRates>,
+    governorship: bool,
+    projection: population::Projection,
+    wealth_next: economy::RegionWealth,
+}
+
+/// What the details (`0x009E69B0`) add: only `InitialiseRegionInfoDetails` computes these.
+struct DetailFacts {
+    town_wealth_growth: i32,
+    governor: Option<CharacterId>,
+    upper: Option<ClassPublicOrder>,
+    lower: Option<ClassPublicOrder>,
+    wealth_now: economy::RegionWealth,
+    predicted_upper: Option<ClassPublicOrder>,
+    predicted_lower: Option<ClassPublicOrder>,
+}
+
 pub(super) fn region_info_details(lua: &Lua, inner: &Inner, ui: &CampaignUi, r: RegionId) -> mlua::Result<Value> {
-    struct Facts {
-        key: String,
-        owner_key: String,
-        population: u32,
-        gdp: u32,
-        town_wealth: u32,
-        town_wealth_growth: i32,
-        tax_exempt: bool,
-        rebel: bool,
-        religions: Vec<(String, f32)>,
-        classes: (String, String),
-        rates: Option<economy::RegionTaxRates>,
-        governorship: bool,
-        governor: Option<CharacterId>,
-        upper: Option<ClassPublicOrder>,
-        lower: Option<ClassPublicOrder>,
-        projection: population::Projection,
-        wealth_now: economy::RegionWealth,
-        wealth_next: economy::RegionWealth,
-        predicted_upper: Option<ClassPublicOrder>,
-        predicted_lower: Option<ClassPublicOrder>,
+    if !ui.model().world.regions.contains_key(&r) {
+        inner.log_once("InitialiseRegionInfoDetails of a missing region", || {
+            format!("CampaignUI.InitialiseRegionInfoDetails: region {} is not in the campaign, answered nil (logged once)", r.0)
+        });
+        return Ok(Value::Nil);
     }
-    let facts = {
-        let m = ui.model();
-        let Some(reg) = m.world.regions.get(&r) else {
-            inner.log_once("InitialiseRegionInfoDetails of a missing region", || {
-                format!("CampaignUI.InitialiseRegionInfoDetails: region {} is not in the campaign, answered nil (logged once)", r.0)
-            });
-            return Ok(Value::Nil);
-        };
-        let governing = m.world.governing_faction(r).unwrap_or(reg.owner);
-        // The governorship that lists the region (region +0x248) and its governor.
-        let post = m
-            .world
-            .faction_details
-            .get(&governing)
-            .and_then(|d| d.posts.iter().find(|p| p.governorship.as_ref().is_some_and(|g| g.regions.contains(&r))));
-        let fx = ntw_sim::campaign::effects::Effects::compute_for(&m, reg.owner);
+    let Some((facts, Some(details))) = region_facts(ui, r, true) else { return Ok(Value::Nil) };
+    let t = region_info_table(lua, inner, ui, r, &facts)?;
+    region_details_extras(lua, inner, ui, &t, &facts, &details)?;
+    Ok(Value::Table(t))
+}
+
+/// The region info table `0x009AF570` alone (the start of the details above), as the negotiation's
+/// `TradeableRegions` rows carry it. `None` for a region not in the campaign or without a
+/// population projection.
+pub(super) fn region_info(lua: &Lua, inner: &Inner, ui: &CampaignUi, r: RegionId) -> mlua::Result<Option<Table>> {
+    match region_facts(ui, r, false) {
+        Some((facts, _)) => region_info_table(lua, inner, ui, r, &facts).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// The facts of the info table, and with `details` those of the details' additions.
+fn region_facts(ui: &CampaignUi, r: RegionId, details: bool) -> Option<(Facts, Option<DetailFacts>)> {
+    let m = ui.model();
+    let reg = m.world.regions.get(&r)?;
+    let governing = m.world.governing_faction(r).unwrap_or(reg.owner);
+    // The governorship that lists the region (region +0x248) and its governor.
+    let post = m
+        .world
+        .faction_details
+        .get(&governing)
+        .and_then(|d| d.posts.iter().find(|p| p.governorship.as_ref().is_some_and(|g| g.regions.contains(&r))));
+    let fx = ntw_sim::campaign::effects::Effects::compute_for(&m, reg.owner);
+    // The one-round projection (`0x00A727D0`), which the info table's PopulationChange reads too.
+    let projection = population::project(&m, r)?;
+    let extra = details.then(|| {
         let (upper, lower) = economy::governed_class_factors(&m, r);
-        // The one-round projection (`0x00A727D0`) and its public order: the predicted set, the projected
-        // religions and the garrison as it stands. PROVISIONAL: the exe's garrison count
-        // (`0x00A190A0`) adds or removes the units of an army the player has selected to move into or
-        // out of the settlement (`0x00B148B0` / `0x00B14900`); the model's UI has no such selection here.
-        let Some(projection) = population::project(&m, r) else { return Ok(Value::Nil) };
+        // The projection's public order: the predicted set, the projected religions and the
+        // garrison as it stands. PROVISIONAL: the exe's garrison count (`0x00A190A0`) adds or
+        // removes the units of an army the player has selected to move into or out of the
+        // settlement (`0x00B148B0` / `0x00B14900`); the model's UI has no such selection here.
         let predicted = economy::public_order_factors_with(&m, reg, &projection.set, &projection.religions, economy::garrison_units(&m, reg));
         let (predicted_upper, predicted_lower) = economy::governed_classes(&m, reg, predicted);
-        Facts {
-            key: reg.key.clone(),
-            owner_key: m.world.factions.get(&reg.owner).map(|f| f.key.clone()).unwrap_or_default(),
-            population: reg.population,
-            gdp: reg.gdp,
-            town_wealth: reg.town_wealth,
+        DetailFacts {
             town_wealth_growth: reg.town_wealth_growth,
-            tax_exempt: reg.tax_exempt,
-            rebel: m.is_rebel_faction(reg.owner),
-            religions: reg.religions.clone(),
-            classes: economy::government_classes(&m, governing),
-            rates: economy::region_tax_rates(&m, &fx, reg),
-            governorship: post.is_some(),
             governor: post.and_then(|p| p.holder).filter(|c| m.world.characters.contains_key(c)),
             upper,
             lower,
-            projection,
             wealth_now: economy::region_wealth(&m, Some(&fx), reg, false),
-            wealth_next: economy::region_wealth(&m, Some(&fx), reg, true),
             predicted_upper,
             predicted_lower,
         }
+    });
+    let facts = Facts {
+        key: reg.key.clone(),
+        owner_key: m.world.factions.get(&reg.owner).map(|f| f.key.clone()).unwrap_or_default(),
+        population: reg.population,
+        gdp: reg.gdp,
+        town_wealth: reg.town_wealth,
+        tax_exempt: reg.tax_exempt,
+        rebel: m.is_rebel_faction(reg.owner),
+        religions: reg.religions.clone(),
+        classes: economy::government_classes(&m, governing),
+        rates: economy::region_tax_rates(&m, &fx, reg),
+        governorship: post.is_some(),
+        projection,
+        wealth_next: economy::region_wealth(&m, Some(&fx), reg, true),
     };
+    Some((facts, extra))
+}
+
+/// `0x009AF570`: the region info table.
+fn region_info_table(lua: &Lua, inner: &Inner, ui: &CampaignUi, r: RegionId, facts: &Facts) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     t.set("Address", region_value(ui, r))?;
     t.set("Settlement", ui.settlement_name(inner, r))?;
@@ -317,9 +350,11 @@ pub(super) fn region_info_details(lua: &Lua, inner: &Inner, ui: &CampaignUi, r: 
     // `0x00A45950` loads it through `0x00872420` into the key / text pair at +0x290 / +0x29C), whose key is
     // `regions_onscreen_<region key>` in every region of the vanilla saves (CONFIRMED, 134 regions).
     t.set("Name", region_name(&inner.loc, &facts.key))?;
-    // PROVISIONAL: the campaign's theatre as the government screen gives it; the exe reads the
-    // region record's (`0x00AAF350` +0x68), whose text is not traced.
-    t.set("Theatre", ui.theatre(inner).map(|a| theatre_name(inner, &a)))?;
+    // The region's theatre string (`0x00AAF350` → theatre +0x68), the same field `HomeTheatre`
+    // (`0x009E5180`: faction +0x734 → +0x68) returns, so the theatre key (CONFIRMED: the
+    // negotiation's InitRegionList lists a region only when its `Theatre` equals the panel's
+    // `HomeTheatre(player)`). PROVISIONAL as `HomeTheatre`: the campaign's one theatre.
+    t.set("Theatre", ui.theatre(inner).map(|a| a.id))?;
     t.set("OwningFactionKey", facts.owner_key.as_str())?;
     t.set("PopulationNumber", facts.population)?;
     t.set("Population", facts.population.to_string())?;
@@ -362,22 +397,28 @@ pub(super) fn region_info_details(lua: &Lua, inner: &Inner, ui: &CampaignUi, r: 
     // list) not yet emerged with the lowest order (+0x214); the turns (`0x00AAFB40`) are
     // ceil((threshold − pop) / (projected pop − pop) − 0.001) while the population grows, else −1, the
     // threshold (`0x00A8D900`) being round(`POPULATION` #3 × (1 + `pop_growth_for_spawn`%)).
-    if let Some(c) = facts.governor {
+    Ok(t)
+}
+
+/// What `InitialiseRegionInfoDetails` (`0x009E69B0`) adds to the info table.
+fn region_details_extras(lua: &Lua, inner: &Inner, ui: &CampaignUi, t: &Table, facts: &Facts, details: &DetailFacts) -> mlua::Result<()> {
+    if let Some(c) = details.governor {
         t.set("Governor", character_details(lua, inner, ui, c)?)?;
     }
     // PROVISIONAL: the region's effect list (`0x009ACD10` over region +0x1CC: {Icon, Tooltip} per entry
     // of an effect record with a positive priority, equal records merged) is not in the model, and its
     // writer is not traced (BACKLOG §0-E): none.
     t.set("Effects", lua.create_table()?)?;
-    t.set("UpperOrder", order_pips(lua, inner, ui, facts.upper.as_ref(), facts.predicted_upper.as_ref())?)?;
-    t.set("LowerOrder", order_pips(lua, inner, ui, facts.lower.as_ref(), facts.predicted_lower.as_ref())?)?;
+    t.set("UpperOrder", order_pips(lua, inner, ui, details.upper.as_ref(), details.predicted_upper.as_ref())?)?;
+    t.set("LowerOrder", order_pips(lua, inner, ui, details.lower.as_ref(), details.predicted_lower.as_ref())?)?;
     t.set("PopulationGrowth", growth_pips(lua, inner, ui, &facts.projection)?)?;
     // RegionWealth (`0x00A992A0`, CONFIRMED): GDP + town wealth, PipValue 50; its factors are the GDP
     // breakdown's slots that have a `region_wealth_factors` record, and the shipped data has no such
     // table (`table_list wealth`: only `town_wealth_growth_factors`), so the original lists none either.
+    let wealth = i64::from(facts.gdp) + i64::from(facts.town_wealth);
     t.set("RegionWealth", bare_pips(lua, wealth, 50, false)?)?;
-    let (now, next) = (&facts.wealth_now.factors, &facts.wealth_next.factors);
-    t.set("TownWealth", town_wealth_pips(lua, inner, ui, facts.town_wealth_growth, now, next, facts.tax_exempt)?)?;
+    let (now, next) = (&details.wealth_now.factors, &facts.wealth_next.factors);
+    t.set("TownWealth", town_wealth_pips(lua, inner, ui, details.town_wealth_growth, now, next, facts.tax_exempt)?)?;
     // ReligiousBreakdown (`0x00A99510` → `0x00A4E200`, CONFIRMED): each religion of the projection's
     // current breakdown (normalised, `0x00A72990`) with a share above 0, in the region's order:
     // Percentage (share × 100), Icon, Name, Key and Change ((projected share − share) × 100, the same
@@ -398,7 +439,7 @@ pub(super) fn region_info_details(lua: &Lua, inner: &Inner, ui: &CampaignUi, r: 
     }
     t.set("ReligiousBreakdown", rb)?;
     t.set("TaxExempt", facts.tax_exempt)?;
-    Ok(Value::Table(t))
+    Ok(())
 }
 
 #[cfg(test)]

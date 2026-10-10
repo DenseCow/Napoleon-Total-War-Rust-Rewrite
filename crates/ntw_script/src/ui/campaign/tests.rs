@@ -119,12 +119,13 @@ fn test_hud_with(db: GameDatabase) -> TestHud {
     let scripts = crate::ScriptHost::new(model, HUMAN, crate::ScriptSource::empty()).unwrap();
     let source = crate::ScriptSource::empty().with_memory_file("ui/test/root", super::super::host::tests::layout_bytes_with_root(ROOT, ""));
     let host =
-        UiScriptHost::new(source, ntw_formats::loc::Localisation::new(), super::super::host::tests::facts(), (100.0, 100.0)).unwrap();
+        UiScriptHost::new(source, ntw_formats::loc::Localisation::new(), super::super::host::tests::facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
     host.install_campaign(CampaignLink {
         state: scripts.shared_state(),
         human: HUMAN.into(),
         campaign: "test_campaign".into(),
         map: "test_map".into(),
+        theatres: vec!["europe_main".into()],
         db: Rc::new(db),
     })
     .unwrap();

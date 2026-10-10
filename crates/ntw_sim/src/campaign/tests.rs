@@ -716,10 +716,11 @@ fn recruitment_completes_after_n_turns() {
 /// `0x00B0D220`, the recruitable entry's cost (CONFIRMED): `units` #7 (not the #4 cost) scaled by
 /// `max(−100, mod) + 100` percent in f32 and rounded by FISTP (half to even), `mod` being the integer
 /// `recruitment_mod_cost_land_all` (`_naval_all` for a ship) plus the unit category's and class's
-/// `cost_mod`, and in `spa_napoleon` the guerrilla / auxiliary cost mod of a unit key ending so.
+/// `cost_mod`, and the campaign's unit-key suffix cost mod (spa_napoleon's guerrilla / auxiliary).
 #[test]
 fn the_recruitment_cost_is_units_7_scaled_by_the_cost_effects() {
     use super::effects::EffectSet;
+    use super::features::UnitKeyEffects;
     let mut rules = CampaignRules::test_rules();
     let land = UnitRules { cost: 710, campaign_cost: 580, category: "infantry".into(), unit_class: "infantry_line".into(), ..Default::default() };
     let ship = UnitRules { is_naval: true, category: "naval_frigate".into(), unit_class: "frigate".into(), ..land.clone() };
@@ -752,16 +753,54 @@ fn the_recruitment_cost_is_units_7_scaled_by_the_cost_effects() {
     // The sum is clamped at −100: never a negative price.
     fifty.add(EffectKey::basic("recruitment_mod_cost_land_all"), -500.0);
     assert_eq!(economy::recruitment_cost_in(&rules, &fifty, "u", &land), 0);
-    // The guerrilla / auxiliary mods count only in spa_napoleon, by the end of the unit key.
+    // The guerrilla / auxiliary mods count only with the campaign's suffix table (spa_napoleon's), by the end of
+    // the unit key, the first match only.
     let mut spa = EffectSet::default();
     spa.add(EffectKey::basic("guerrilla_cost_mod"), -20.0);
     spa.add(EffectKey::basic("auxiliary_cost_mod"), 10.0);
     assert_eq!(economy::recruitment_cost_in(&rules, &spa, "Inf_Spanish_Guerrilla", &land), 580);
-    rules.campaign = "spa_napoleon".into();
+    rules.features.unit_key_effects = vec![UnitKeyEffects::new("_Guerrilla", "guerrilla_cost_mod", "guerrilla_upkeep_mod"), UnitKeyEffects::new("_Auxiliary", "auxiliary_cost_mod", "auxiliary_upkeep_mod")];
     assert_eq!(economy::recruitment_cost_in(&rules, &spa, "Inf_Spanish_Guerrilla", &land), 464);
     assert_eq!(economy::recruitment_cost_in(&rules, &spa, "Inf_British_Auxiliary", &land), 638);
     assert_eq!(economy::recruitment_cost_in(&rules, &spa, "Inf_Guerrilla_Line", &land), 580);
     assert_eq!(economy::recruitment_cost_in(&rules, &spa, "Inf_Spanish_guerrilla", &land), 580);
+    // Another campaign's own suffix (a Shogun-style roster): any key, any effect.
+    rules.features.unit_key_effects = vec![UnitKeyEffects::new("_Ashigaru", "auxiliary_cost_mod", "auxiliary_upkeep_mod")];
+    assert_eq!(economy::recruitment_cost_in(&rules, &spa, "Inf_Yari_Ashigaru", &land), 638);
+    assert_eq!(economy::recruitment_cost_in(&rules, &spa, "Inf_Spanish_Guerrilla", &land), 580);
+}
+
+/// A unit's upkeep adds the campaign's unit-key upkeep effect (land `0x008F9B5F`, naval `0x008F9D4F`; spa: `_Guerrilla` →
+/// `guerrilla_upkeep_mod`, else `_Auxiliary` → `auxiliary_upkeep_mod`; review: missing). A campaign
+/// without the feature is unchanged.
+#[test]
+fn upkeep_adds_the_unit_key_effect() {
+    use super::effects::{EffectKey, EffectSet, Effects};
+    use super::features::{CampaignFeatures, UnitKeyEffects};
+    let mut set = EffectSet::default();
+    set.add(EffectKey::basic("guerrilla_upkeep_mod"), -50.0);
+    set.add(EffectKey::basic("auxiliary_upkeep_mod"), 20.0);
+    let mut fx = Effects::default();
+    fx.faction.insert(A, set);
+    let land = UnitRules { upkeep: 100, ..Default::default() };
+    let none = CampaignFeatures::default();
+    assert_eq!(economy::unit_upkeep(&fx, A, &none, "Inf_Spanish_Guerrilla", &land), 100);
+    let spa = CampaignFeatures {
+        unit_key_effects: vec![UnitKeyEffects::new("_Guerrilla", "guerrilla_cost_mod", "guerrilla_upkeep_mod"), UnitKeyEffects::new("_Auxiliary", "auxiliary_cost_mod", "auxiliary_upkeep_mod")],
+        ..Default::default()
+    };
+    assert_eq!(economy::unit_upkeep(&fx, A, &spa, "Inf_Spanish_Guerrilla", &land), 50);
+    assert_eq!(economy::unit_upkeep(&fx, A, &spa, "Inf_British_Auxiliary", &land), 120);
+    assert_eq!(economy::unit_upkeep(&fx, A, &spa, "Inf_Line", &land), 100);
+    let ship = UnitRules { upkeep: 100, is_naval: true, ..Default::default() };
+    // Ships too (`0x008F9D00`, review round 2), and a ship's negative mod costs 0 where a land unit's goes negative.
+    assert_eq!(economy::unit_upkeep(&fx, A, &spa, "Ship_Guerrilla", &ship), 50);
+    let mut cheap = EffectSet::default();
+    cheap.add(EffectKey::basic("upkeep_cost_mod_naval_all"), -150.0);
+    cheap.add(EffectKey::basic("upkeep_cost_mod_land_all"), -150.0);
+    fx.faction.insert(A, cheap);
+    assert_eq!(economy::unit_upkeep(&fx, A, &spa, "Ship", &ship), 0);
+    assert_eq!(economy::unit_upkeep(&fx, A, &spa, "Inf_Line", &land), -50);
 }
 
 /// The recruit command charges the region's entry cost (#7 with the region's effects, here a faction
@@ -851,7 +890,7 @@ fn the_unit_cap_counts_the_factions_units_and_queued_items() {
     m.apply(order()).unwrap();
     assert_eq!(m.apply(order()), Err(CommandError::UnitCapReached("test_recruit".into())));
     let unit = m.rules.units["test_recruit"].clone();
-    let flags = |m: &CampaignModel| m.recruitable_entry_flags(&m.world.regions[&RegionId(10)], "test_recruit", &unit, 400, &m.unit_type_counts(A));
+    let flags = |m: &CampaignModel| m.recruitable_entry_flags(&m.world.regions[&RegionId(10)], &super::commands::RecruitableUnit { unit_key: "test_recruit".into(), flags: 0 }, &unit, 400, &m.unit_type_counts(A));
     assert_eq!(flags(&m), ENTRY_UNIT_CAP);
     // A cancel frees a place.
     m.apply(CampaignCommand::CancelRecruitment { region: RegionId(10), item: queued(&m, RegionId(10), 1) }).unwrap();
@@ -869,7 +908,7 @@ fn the_unit_cap_counts_the_factions_units_and_queued_items() {
     rules.units.get_mut("test_recruit").unwrap().unit_cap = 0;
     m.rules = Arc::new(rules);
     let unit = m.rules.units["test_recruit"].clone();
-    let flags = |m: &CampaignModel| m.recruitable_entry_flags(&m.world.regions[&RegionId(10)], "test_recruit", &unit, 400, &m.unit_type_counts(A));
+    let flags = |m: &CampaignModel| m.recruitable_entry_flags(&m.world.regions[&RegionId(10)], &super::commands::RecruitableUnit { unit_key: "test_recruit".into(), flags: 0 }, &unit, 400, &m.unit_type_counts(A));
     assert_eq!(flags(&m), ENTRY_TOO_DEAR, "a cap of 0 is no cap");
     m.world.factions.get_mut(&A).unwrap().treasury = 1_000_000;
     while m.world.regions[&RegionId(10)].recruitment_queue.len() < super::commands::MAX_QUEUE as usize {
@@ -878,16 +917,125 @@ fn the_unit_cap_counts_the_factions_units_and_queued_items() {
     assert_eq!(flags(&m), ENTRY_QUEUE_FULL);
 }
 
+/// The recruitable population (`0x00A89550` / `0x00AAF190` / `0x00A61AA0`): with the shipped variables (both
+/// 0) a recruit needs and takes nothing; with a mod's `recruitment_population_cost` (rounded half to even, as
+/// `0x008B25F0` reads it) and `minimum_population_after_recruitment`, the queue command takes the cost from
+/// the region's population while that leaves the minimum, flags the entry (4) and refuses below it without
+/// charging anything, and every untrained exit (cancel, the turn start's removal, a capture) gives the cost
+/// back per item.
+#[test]
+fn recruiting_takes_population_and_cancelling_gives_it_back() {
+    use super::commands::ENTRY_NO_POPULATION;
+    let mut m = test_model();
+    let r10 = RegionId(10);
+    let order = || CampaignCommand::Recruit { region: r10, unit_key: "test_recruit".into() };
+    let pop = |m: &CampaignModel| m.world.regions[&r10].population;
+    m.world.factions.get_mut(&A).unwrap().treasury = 1_000_000;
+    m.world.regions.get_mut(&r10).unwrap().population = 5;
+    m.apply(order()).unwrap();
+    assert_eq!(pop(&m), 5, "the shipped variables are 0");
+
+    let mut rules = (*m.rules).clone();
+    rules.variables.insert("recruitment_population_cost".into(), 300.5);
+    rules.variables.insert("minimum_population_after_recruitment".into(), 1000.0);
+    m.rules = Arc::new(rules);
+    m.world.regions.get_mut(&r10).unwrap().population = 1600;
+    m.apply(order()).unwrap();
+    assert_eq!(pop(&m), 1300, "300.5 reads as 300");
+    m.apply(order()).unwrap();
+    assert_eq!(pop(&m), 1000, "exactly the minimum is left");
+    let unit = m.rules.units["test_recruit"].clone();
+    let flags = |m: &CampaignModel| m.recruitable_entry_flags(&m.world.regions[&r10], &super::commands::RecruitableUnit { unit_key: "test_recruit".into(), flags: 0 }, &unit, 400, &m.unit_type_counts(A));
+    assert_eq!(flags(&m), ENTRY_NO_POPULATION);
+    let treasury = m.world.factions[&A].treasury;
+    assert_eq!(m.apply(order()), Err(CommandError::NotEnoughPopulation));
+    assert_eq!((pop(&m), m.world.factions[&A].treasury, m.world.regions[&r10].recruitment_queue.len()), (1000, treasury, 3));
+
+    // A cancel gives the cost back.
+    m.apply(CampaignCommand::CancelRecruitment { region: r10, item: queued(&m, r10, 2) }).unwrap();
+    assert_eq!(pop(&m), 1300);
+    assert_eq!(flags(&m), 0);
+
+    // So does the turn start's removal of an item the region can no longer recruit, per item.
+    for id in [9001, 9002] {
+        let item = RecruitmentItem { id: RecruitmentItemId(id), unit_key: "gone_unit".into(), turns_remaining: 5, cost: 0 };
+        m.world.regions.get_mut(&r10).unwrap().recruitment_queue.push(item);
+    }
+    assert!(!m.recruitable_units(r10).iter().any(|e| e.unit_key == "gone_unit"));
+    m.turn.humans = vec![A];
+    m.start_campaign();
+    assert_eq!((pop(&m), m.world.regions[&r10].recruitment_queue.len()), (1900, 2));
+
+    // And a capture, for every item it clears.
+    let mut events = Vec::new();
+    m.occupy(r10, B, None, &mut events);
+    assert_eq!((pop(&m), m.world.regions[&r10].recruitment_queue.len()), (2500, 0));
+}
+
+/// The population rules' 32-bit arithmetic (`0x00AAF190`): a charge that would leave less than the minimum
+/// sets the population to the minimum (unreachable through the queue command, which refuses that entry
+/// first); the gate's sum and compare are signed, so a mod's negative cost passes any population.
+#[test]
+fn the_recruitment_population_rules_are_signed_32_bit() {
+    use super::population::RecruitmentPopulation;
+    let p = RecruitmentPopulation { cost: 300, minimum: 1000 };
+    assert_eq!((p.available(1299), p.charged(1299), p.charged(1300)), (false, 1000, 1000));
+    assert_eq!(p.credited(1000, 3), 1900);
+    let negative = RecruitmentPopulation { cost: -50, minimum: 0 };
+    assert!(negative.available(0));
+    assert_eq!((negative.charged(0), negative.credited(100, 2)), (50, 0));
+    let mut rules = super::rules::CampaignRules::default();
+    rules.variables.insert("recruitment_population_cost".into(), 2.5);
+    rules.variables.insert("minimum_population_after_recruitment".into(), 3.5);
+    assert_eq!(RecruitmentPopulation::of(&rules), RecruitmentPopulation { cost: 2, minimum: 4 });
+    assert_eq!(RecruitmentPopulation::of(&super::rules::CampaignRules::default()), RecruitmentPopulation { cost: 0, minimum: 0 });
+}
+
+/// A mod's negative `minimum_population_after_recruitment` lets recruiting take the population below 0. The exe
+/// keeps the field's 32 bits: the gate keeps reading them signed (so −200 still passes a need of −700 and −800
+/// fails it), while the growth reads them unsigned (`0x00AB4227`), as the `u32` holding the same bits does here.
+#[test]
+fn a_population_charged_below_zero_keeps_the_exes_bits() {
+    use super::commands::ENTRY_NO_POPULATION;
+    let mut m = test_model();
+    let r10 = RegionId(10);
+    let order = || CampaignCommand::Recruit { region: r10, unit_key: "test_recruit".into() };
+    let mut rules = (*m.rules).clone();
+    rules.variables.insert("recruitment_population_cost".into(), 300.0);
+    rules.variables.insert("minimum_population_after_recruitment".into(), -1000.0);
+    m.rules = Arc::new(rules);
+    m.world.factions.get_mut(&A).unwrap().treasury = 1_000_000;
+    m.world.regions.get_mut(&r10).unwrap().population = 100;
+    m.apply(order()).unwrap();
+    assert_eq!(m.world.regions[&r10].population, (-200i32) as u32);
+    m.apply(order()).unwrap();
+    m.apply(order()).unwrap();
+    assert_eq!(m.world.regions[&r10].population, (-800i32) as u32);
+    let unit = m.rules.units["test_recruit"].clone();
+    assert_eq!(m.recruitable_entry_flags(&m.world.regions[&r10], &super::commands::RecruitableUnit { unit_key: "test_recruit".into(), flags: 0 }, &unit, 400, &m.unit_type_counts(A)), ENTRY_NO_POPULATION);
+    assert_eq!(m.apply(order()), Err(CommandError::NotEnoughPopulation));
+    // Growth of 1% on the bits of −200, read unsigned: f32(4294967096) = 4294967040, × 0.01 → 42949668 (FISTP),
+    // plus −200 (a signed read would give −202).
+    let r = &m.world.regions[&r10];
+    let state = super::population::PopulationState { factors: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], ..Default::default() };
+    assert_eq!(super::population::grow(&m, r, (-200i32) as u32, &state).0, 42_949_468);
+}
+
 /// The ranking's power (`0x008B2150` with flag 0) sums each unit's raw upkeep: no effects, whatever
 /// the unit's strength (A: one test_unit, B: two; 80 of 100 men each). A unit with no record counts
-/// 0 and is reported.
+/// 0 and is reported. A navy's units go to the naval total, an army's to the land total.
 #[test]
 fn faction_power_is_the_raw_upkeep_of_the_forces() {
+    use super::negotiation::FactionPower;
     let mut m = test_model();
     let mut unknown = std::collections::BTreeSet::new();
     let p = m.faction_powers(&mut unknown);
-    assert_eq!((p.get(&A).copied(), p.get(&B).copied(), p.get(&C).copied()), (Some(10), Some(20), None));
+    let land = |land| Some(FactionPower { land, naval: 0 });
+    assert_eq!((p.get(&A).copied(), p.get(&B).copied(), p.get(&C).copied()), (land(10), land(20), None));
+    assert_eq!(p[&B].total(), 20);
     assert!(unknown.is_empty());
+    m.world.forces.get_mut(&ForceId(1000)).unwrap().is_navy = true;
+    assert_eq!(m.faction_powers(&mut unknown)[&A], FactionPower { land: 0, naval: 10 });
     m.world.forces.get_mut(&ForceId(1000)).unwrap().units[0].unit_key = "no_such_unit".into();
     let r = m.faction_rankings();
     assert_eq!(r.unknown_units.iter().map(String::as_str).collect::<Vec<_>>(), ["no_such_unit"]);
@@ -1063,6 +1211,44 @@ fn enter_and_occupy_settlements_and_merge() {
     assert!(ev.contains(&CampaignEvent::CampaignArmiesMerge { force: ForceId(1005), into: ForceId(1000) }));
     assert_eq!(m.world.forces[&ForceId(1000)].units.len(), 2);
     assert!(!m.world.forces.contains_key(&ForceId(1005)));
+}
+
+#[test]
+fn units_per_army_come_from_the_campaign_and_a_mod() {
+    // A full 20-unit army (the original's cap) takes no more; the campaign's own value and a new
+    // campaign under a mod's `max_land_units` row both lift it.
+    let setup = |extra: usize| {
+        let mut m = test_model();
+        m.world.forces.get_mut(&ForceId(1000)).unwrap().units = (0..20).map(|i| unit(500 + i)).collect();
+        let mut g = character(103, A, CharacterKind::General, 30);
+        g.position = m.world.characters[&CharacterId(100)].position;
+        m.world.characters.insert(CharacterId(103), g);
+        let units = (0..extra as i32).map(|i| unit(600 + i)).collect();
+        m.world.forces.insert(ForceId(1005), MilitaryForce { id: ForceId(1005), faction: A, commander: Some(CharacterId(103)), units, is_navy: false });
+        m
+    };
+    let merge = CampaignCommand::MergeForces { force: ForceId(1005), into: ForceId(1000) };
+    let mut m = setup(1);
+    assert_eq!((m.max_units(false), m.max_units(true)), (20, 20));
+    assert_eq!(m.apply(merge.clone()), Err(CommandError::Unsupported("the receiving force is full")));
+    // The campaign's own value (CAMPAIGN_MODEL #23).
+    m.force_caps.army = 21;
+    m.apply(merge.clone()).unwrap();
+    assert_eq!(m.world.forces[&ForceId(1000)].units.len(), 21);
+    // A new campaign: the original's caps at each `campaign_unit_multiplier` step (20 and 6 / 8 /
+    // 10 / 20; the default 0.75 gives 10 ships)...
+    let l = crate::limits::GameLimits::default();
+    let caps = |m: Option<f32>| super::rules::ForceCaps::new_campaign(&l, m);
+    assert_eq!([0.25, 0.5, 0.75, 1.0].map(|s| caps(Some(s))).map(|c| (c.army, c.navy)), [(20, 6), (20, 8), (20, 10), (20, 20)]);
+    assert_eq!(caps(None), caps(Some(0.75)));
+    // ...and under a mod's 40-unit armies: 25 units arrive, 20 fit.
+    let mut m = setup(25);
+    Arc::make_mut(&mut m.rules).limits.max_land_units = 40;
+    m.force_caps = super::rules::ForceCaps::new_campaign(&m.rules.limits, Some(1.0));
+    assert_eq!((m.max_units(false), m.max_units(true)), (40, 20));
+    m.apply(merge).unwrap();
+    assert_eq!(m.world.forces[&ForceId(1000)].units.len(), 40);
+    assert_eq!(m.world.forces[&ForceId(1005)].units.len(), 5);
 }
 
 #[test]
@@ -2243,6 +2429,10 @@ fn tax_level_changes_reach_the_governorship() {
     let t = m.world.faction_details[&A].posts[0].governorship.as_ref().unwrap().taxes;
     assert_eq!(t, GovernorshipTaxes { lower: 3, upper: 2, lower_rate: 20, upper_rate: 15 });
     assert_eq!(m.world.factions[&A].tax_lower, "tax_high");
+    // A modded rate past the save's u8 field reaches the model whole (it was clamped to 255).
+    Arc::make_mut(&mut m.rules).tax_levels.insert("tax_extortionate".into(), 300);
+    m.apply(CampaignCommand::SetTaxLevel { faction: A, class: TaxClass::Upper, level: "tax_extortionate".into() }).unwrap();
+    assert_eq!(m.world.faction_details[&A].posts[0].governorship.as_ref().unwrap().taxes.upper_rate, 300);
 }
 
 fn with_relationships(m: &mut CampaignModel, totals: &[((FactionId, FactionId), i32)]) {
@@ -2415,6 +2605,117 @@ fn queued_units_the_region_can_no_longer_recruit_are_dropped_and_refunded() {
     assert_eq!(m.world.factions[&A].treasury, after + 400);
 }
 
+/// The test model plus a `test_depot` level that allows only `test_guard` (a copy of `test_recruit`) and has no
+/// effects, standing in region 10's second slot.
+fn model_with_a_depot() -> CampaignModel {
+    let mut m = test_model();
+    let mut rules = (*m.rules).clone();
+    let guard = rules.units["test_recruit"].clone();
+    rules.units.insert("test_guard".into(), guard);
+    rules.buildings.insert(
+        "test_depot".into(),
+        super::rules::BuildingRules { chain: "test_chain".into(), units_allowed: vec!["test_guard".into(), "test_recruit".into()], ..Default::default() },
+    );
+    m.rules = Arc::new(rules);
+    m.world.regions.get_mut(&RegionId(10)).unwrap().slots[1].building = Some(BuildingRef { level_key: "test_depot".into(), health: 100 });
+    m.world.factions.get_mut(&A).unwrap().treasury = 10_000;
+    m
+}
+
+/// The region's recruitable list carries the building flags of `0x00B43CA0`: 8 for a damaged building, 0x10 for
+/// a slot another faction holds, 0x80 for a unit whose technology is not researched (`0x008AAB60`). A unit
+/// allowed by two buildings is unflagged when one of them is (`0x00B08E30`), else carries both flags; the queue
+/// command refuses a flagged entry and charges nothing.
+#[test]
+fn the_recruitable_list_flags_damaged_and_occupied_buildings_and_missing_technologies() {
+    use super::commands::{RecruitableUnit, ENTRY_DAMAGED, ENTRY_NO_TECHNOLOGY, ENTRY_OCCUPIED};
+    let mut m = model_with_a_depot();
+    let r10 = RegionId(10);
+    let entry = |k: &str, flags: u32| RecruitableUnit { unit_key: k.into(), flags };
+    // Sorted by unit key (`0x00B78140`), not in building order.
+    let all_clear = vec![entry("test_guard", 0), entry("test_recruit", 0), entry("test_unit", 0)];
+    assert_eq!(m.recruitable_units(r10), all_clear);
+    // The barracks is damaged: its own unit is flagged, the one the depot also allows is not.
+    m.world.regions.get_mut(&r10).unwrap().slots[0].building.as_mut().unwrap().health = 99;
+    assert_eq!(m.recruitable_units(r10), vec![entry("test_guard", 0), entry("test_recruit", 0), entry("test_unit", ENTRY_DAMAGED)]);
+    // B holds the depot's slot as well: both sources flagged, so their flags add up.
+    m.world.regions.get_mut(&r10).unwrap().slots[1].holder = Some(B);
+    let flagged = vec![entry("test_guard", ENTRY_OCCUPIED), entry("test_recruit", ENTRY_DAMAGED | ENTRY_OCCUPIED), entry("test_unit", ENTRY_DAMAGED)];
+    assert_eq!(m.recruitable_units(r10), flagged);
+    // Holding one's own slot is no occupation.
+    m.world.regions.get_mut(&r10).unwrap().slots[1].holder = Some(A);
+    m.world.regions.get_mut(&r10).unwrap().slots[0].building.as_mut().unwrap().health = 100;
+    assert_eq!(m.recruitable_units(r10), all_clear);
+    // A technology the faction has not researched flags the unit, wherever it is allowed.
+    let mut rules = (*m.rules).clone();
+    rules.unit_techs.insert("test_recruit".into(), vec!["test_tech".into()]);
+    m.rules = Arc::new(rules);
+    assert_eq!(m.recruitable_units(r10)[1], entry("test_recruit", ENTRY_NO_TECHNOLOGY));
+    let treasury = m.world.factions[&A].treasury;
+    assert_eq!(
+        m.apply(CampaignCommand::Recruit { region: r10, unit_key: "test_recruit".into() }),
+        Err(CommandError::RecruitmentBlocked { unit_key: "test_recruit".into(), flags: ENTRY_NO_TECHNOLOGY })
+    );
+    assert_eq!((m.world.factions[&A].treasury, m.world.regions[&r10].recruitment_queue.len()), (treasury, 0));
+    // The pricing flags come on top of the building flags.
+    let unit = m.rules.units["test_recruit"].clone();
+    m.world.factions.get_mut(&A).unwrap().treasury = 0;
+    let flags = m.recruitable_entry_flags(&m.world.regions[&r10], &m.recruitable_units(r10)[1], &unit, 400, &m.unit_type_counts(A));
+    assert_eq!(flags, ENTRY_NO_TECHNOLOGY | super::commands::ENTRY_TOO_DEAR);
+}
+
+/// A unit whose `units_to_gov_type_permissions` rows enable some government types is listed only under one of
+/// them (`0x00EA9810`); unlike the flags, the unit then has no entry, so the command reports it unavailable.
+#[test]
+fn a_unit_enabled_for_other_governments_is_not_recruitable() {
+    let mut m = model_with_a_depot();
+    let r10 = RegionId(10);
+    let listed = |m: &CampaignModel| m.recruitable_units(r10).iter().any(|e| e.unit_key == "test_guard");
+    let mut rules = (*m.rules).clone();
+    rules.unit_governments.insert("test_guard".into(), vec!["gov_republic".into()]);
+    m.rules = Arc::new(rules);
+    m.world.factions.get_mut(&A).unwrap().government_key = "gov_absolute_monarchy".into();
+    assert!(!listed(&m));
+    assert_eq!(
+        m.apply(CampaignCommand::Recruit { region: r10, unit_key: "test_guard".into() }),
+        Err(CommandError::UnitNotAvailable("test_guard".into()))
+    );
+    m.world.factions.get_mut(&A).unwrap().government_key = "gov_republic".into();
+    assert!(listed(&m));
+    // No enabled government type (only `destroyed` rows, say) is no restriction.
+    let mut rules = (*m.rules).clone();
+    rules.unit_governments.insert("test_guard".into(), Vec::new());
+    m.rules = Arc::new(rules);
+    m.world.factions.get_mut(&A).unwrap().government_key = "gov_absolute_monarchy".into();
+    assert!(listed(&m));
+}
+
+/// The queue step holds back an item whose recruitable entry is flagged (`0x00B5AD90`): it neither counts down
+/// nor takes one of the `recruitment_points`, so the items behind it train in its place; it is not removed or
+/// refunded, and counts down again once its building is repaired.
+#[test]
+fn a_flagged_item_is_held_back_without_taking_a_recruitment_point() {
+    let mut m = model_with_a_depot();
+    let r10 = RegionId(10);
+    // Two points (the barracks); the guard first, then two recruits.
+    for (id, unit) in [(9001, "test_guard"), (9002, "test_recruit"), (9003, "test_recruit")] {
+        let item = RecruitmentItem { id: RecruitmentItemId(id), unit_key: unit.into(), turns_remaining: 3, cost: 400 };
+        m.world.regions.get_mut(&r10).unwrap().recruitment_queue.push(item);
+    }
+    assert_eq!(m.recruitment_points(r10, false), 2);
+    m.world.regions.get_mut(&r10).unwrap().slots[1].building.as_mut().unwrap().health = 50;
+    let treasury = m.world.factions[&A].treasury;
+    m.turn.humans = vec![A];
+    m.start_campaign();
+    let turns = |m: &CampaignModel| m.world.regions[&r10].recruitment_queue.iter().map(|i| (i.id.0, i.turns_remaining)).collect::<Vec<_>>();
+    assert_eq!(turns(&m), vec![(9001, 3), (9002, 2), (9003, 2)]);
+    assert_eq!(m.world.factions[&A].treasury, treasury, "a held-back item is not refunded");
+    // Repaired, the guard takes its point again, and the last recruit waits.
+    m.world.regions.get_mut(&r10).unwrap().slots[1].building.as_mut().unwrap().health = 100;
+    m.end_turn();
+    assert_eq!(turns(&m), vec![(9001, 2), (9002, 1), (9003, 2)]);
+}
+
 #[test]
 fn hidden_characters_are_known_once_exposed() {
     use super::agents::knows_character;
@@ -2474,12 +2775,12 @@ fn capture_damage_roll_matches_the_listing() {
     use super::capture::{damage_roll, LOOT_DAMAGE, OCCUPY_DAMAGE};
     // CaRng::new(0).next16() = 2531011 >> 16 = 38: frac = 0.49 × 38 / 65535 + lo. Value in f32 as the listing:
     // 99 × 0.01 = 0.98999995, × 1000 = 989.99994 → 989, × 4.
-    assert_eq!(damage_roll(&mut CaRng::new(0), 100, 1000, LOOT_DAMAGE, false), (1, 3956));
-    assert_eq!(damage_roll(&mut CaRng::new(0), 100, 1000, OCCUPY_DAMAGE, false), (50, 2000));
+    assert_eq!(damage_roll(&mut CaRng::new(0), 100, 1000, LOOT_DAMAGE, (4, 15_000)), (1, 3956));
+    assert_eq!(damage_roll(&mut CaRng::new(0), 100, 1000, OCCUPY_DAMAGE, (4, 15_000)), (50, 2000));
     // Above the cap the value is a quarter: min(395996, max(15000, 98999)).
-    assert_eq!(damage_roll(&mut CaRng::new(0), 100, 100_000, LOOT_DAMAGE, false), (1, 98_999));
+    assert_eq!(damage_roll(&mut CaRng::new(0), 100, 100_000, LOOT_DAMAGE, (4, 15_000)), (1, 98_999));
     // spa: × 2, cap 10000.
-    assert_eq!(damage_roll(&mut CaRng::new(0), 100, 1000, LOOT_DAMAGE, true), (1, 1978));
+    assert_eq!(damage_roll(&mut CaRng::new(0), 100, 1000, LOOT_DAMAGE, (2, 10_000)), (1, 1978));
 }
 
 /// Region 11 (B's) with a town building, war between A and B, A's army next to it.
@@ -2501,8 +2802,8 @@ fn human_capture_waits_for_the_choice_then_loots() {
     use super::capture::{damage_roll, CaptureChoice, LOOT_DAMAGE, OCCUPY_DAMAGE};
     let mut m = capture_model(vec![A]);
     let mut rng = m.rng;
-    let (loot_h, value) = damage_roll(&mut rng, 100, 300, LOOT_DAMAGE, false);
-    let (occ_h, _) = damage_roll(&mut rng, 100, 300, OCCUPY_DAMAGE, false);
+    let (loot_h, value) = damage_roll(&mut rng, 100, 300, LOOT_DAMAGE, (4, 15_000));
+    let (occ_h, _) = damage_roll(&mut rng, 100, 300, OCCUPY_DAMAGE, (4, 15_000));
     let ev = m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
     assert!(ev.contains(&CampaignEvent::CaptureChoicePending { region: RegionId(11), faction: A }));
     assert_eq!(m.rng, rng, "both passes draw, loot first");
@@ -2542,8 +2843,8 @@ fn ai_capture_occupies_and_liberation_hands_the_region_over() {
     // AI: occupied at once (PROVISIONAL default), the civil building damaged by the occupy roll.
     let mut m = capture_model(Vec::new());
     let mut rng = m.rng;
-    damage_roll(&mut rng, 100, 300, LOOT_DAMAGE, false);
-    let (occ_h, _) = damage_roll(&mut rng, 100, 300, OCCUPY_DAMAGE, false);
+    damage_roll(&mut rng, 100, 300, LOOT_DAMAGE, (4, 15_000));
+    let (occ_h, _) = damage_roll(&mut rng, 100, 300, OCCUPY_DAMAGE, (4, 15_000));
     let ev = m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
     assert!(ev.contains(&CampaignEvent::CaptureResolved { region: RegionId(11), faction: A, choice: CaptureChoice::Occupy, money: 0 }));
     assert!(m.pending_capture.is_none());
@@ -2600,6 +2901,10 @@ fn attitude_factor_writes_and_drift_follow_the_exe() {
     let t = BTreeMap::new();
     let cats: Vec<u8> = [-65, -64, -22, -21, 21, 22, 64, 65].iter().map(|&x| attitude_category(&t, x)).collect();
     assert_eq!(cats, vec![0, 1, 1, 2, 2, 3, 3, 4]);
+    // The one name list (the diplomat lines and the diplomacy UI; regression: three copies, the UI's with its own
+    // boundary rule).
+    let names: Vec<&str> = cats.iter().map(|&c| super::treaties::attitude_name(c)).collect();
+    assert_eq!(names, ["hostile", "unfriendly", "unfriendly", "neutral", "neutral", "friendly", "friendly", "very_friendly"]);
 }
 
 #[test]
@@ -2711,10 +3016,10 @@ fn capture_rolls_the_fortification_after_the_town_buildings() {
     let mut m = capture_model(vec![A]);
     m.world.regions.get_mut(&RegionId(11)).unwrap().fortification = Some(BuildingRef { level_key: "test_building_level".into(), health: 100 });
     let mut rng = m.rng;
-    damage_roll(&mut rng, 100, 300, LOOT_DAMAGE, false);
-    let (fort_loot, _) = damage_roll(&mut rng, 100, 300, LOOT_DAMAGE, false);
-    damage_roll(&mut rng, 100, 300, OCCUPY_DAMAGE, false);
-    let (fort_occ, _) = damage_roll(&mut rng, 100, 300, OCCUPY_DAMAGE, false);
+    damage_roll(&mut rng, 100, 300, LOOT_DAMAGE, (4, 15_000));
+    let (fort_loot, _) = damage_roll(&mut rng, 100, 300, LOOT_DAMAGE, (4, 15_000));
+    damage_roll(&mut rng, 100, 300, OCCUPY_DAMAGE, (4, 15_000));
+    let (fort_occ, _) = damage_roll(&mut rng, 100, 300, OCCUPY_DAMAGE, (4, 15_000));
     m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
     assert_eq!(m.rng, rng);
     let p = m.pending_capture.clone().unwrap();
@@ -3103,7 +3408,7 @@ fn spa_looting_turns_the_region_against_the_looter() {
     use super::capture::CaptureChoice;
     let mut m = capture_model(vec![A]);
     let mut rules = (*m.rules).clone();
-    rules.campaign = "spa_napoleon".into();
+    rules.features.looting_alignment = Some(("align_pro_french".into(), "align_anti_french".into()));
     m.rules = Arc::new(rules);
     m.world.faction_details.entry(A).or_default().religion = "align_pro_french".into();
     m.world.regions.get_mut(&RegionId(11)).unwrap().religions = vec![("align_pro_french".into(), 0.6), ("align_anti_french".into(), 0.4)];
@@ -3111,6 +3416,26 @@ fn spa_looting_turns_the_region_against_the_looter() {
     m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Loot }).unwrap();
     let rel = &m.world.regions[&RegionId(11)].religions;
     assert!((rel[0].1 - 0.1).abs() < 1e-6 && (rel[1].1 - 0.9).abs() < 1e-6, "{rel:?}");
+}
+
+/// The looting shift is the campaign's feature, not its key: another campaign names its own two alignments, and a
+/// campaign without the feature keeps the shares.
+#[test]
+fn looting_shifts_the_alignments_a_campaign_names() {
+    use super::capture::CaptureChoice;
+    for (alignment, expect) in [(Some(("loyal".to_string(), "rebel".to_string())), (0.1, 0.9)), (None, (0.6, 0.4))] {
+        let mut m = capture_model(vec![A]);
+        let mut rules = (*m.rules).clone();
+        rules.campaign = "made_up_campaign".into();
+        rules.features.looting_alignment = alignment;
+        m.rules = Arc::new(rules);
+        m.world.faction_details.entry(A).or_default().religion = "loyal".into();
+        m.world.regions.get_mut(&RegionId(11)).unwrap().religions = vec![("loyal".into(), 0.6), ("rebel".into(), 0.4)];
+        m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+        m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Loot }).unwrap();
+        let rel = &m.world.regions[&RegionId(11)].religions;
+        assert!((rel[0].1 - expect.0).abs() < 1e-6 && (rel[1].1 - expect.1).abs() < 1e-6, "{rel:?}");
+    }
 }
 
 #[test]
@@ -3997,4 +4322,17 @@ fn town_wealth_growth_breaks_down_by_factor_and_predicts_constructions() {
     assert_eq!(region_wealth(&m, None, &reg, false), now);
     // The trend codes of 0x00AB4410.
     assert_eq!([21, 20, 1, 0, -1, -20, -21].map(wealth_trend), [0, 1, 1, 2, 3, 3, 4]);
+}
+
+/// `0x00C5C040`: a faction offers every region it owns but its capital.
+#[test]
+fn tradeable_regions_leave_out_the_capital() {
+    let mut m = test_model();
+    let owned: Vec<RegionId> = m.world.regions.values().filter(|r| r.owner == A).map(|r| r.id).collect();
+    assert!(owned.contains(&RegionId(10)) && owned.len() > 1, "{owned:?}");
+    m.world.faction_details.entry(A).or_default().capital = None;
+    assert_eq!(m.tradeable_regions(A).collect::<Vec<_>>(), owned);
+    m.world.faction_details.entry(A).or_default().capital = Some(RegionId(10));
+    let without: Vec<RegionId> = owned.iter().copied().filter(|r| *r != RegionId(10)).collect();
+    assert_eq!(m.tradeable_regions(A).collect::<Vec<_>>(), without);
 }

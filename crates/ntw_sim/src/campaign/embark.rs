@@ -37,7 +37,7 @@ use super::events::CampaignEvent;
 use super::ids::{CharacterId, FactionId, ForceId};
 use super::pathing::GridPath;
 use super::polypath::{dir_index, dist_to_segment, kind, octant_dir, point_in_polygon, Mover, PolyMap, DIR_LEN, HEURISTIC_PER_UNIT};
-use super::rules::{MAX_UNITS_PER_FORCE, OFF_ROAD_COST};
+use super::rules::OFF_ROAD_COST;
 use super::world::{CampaignModel, Character, Stance};
 use crate::fixed::Fixed20;
 
@@ -592,7 +592,8 @@ fn spent(ch: &Character) -> f32 {
 ///
 /// Rules: CONFIRMED as in the module docs (landing positions, landing ends the turn, port nodes).
 /// A navy carries one army; a second army that boards joins it when both fit into one army
-/// (the comparison is CONFIRMED in `0x0091A560`, the limit INFERRED = [`MAX_UNITS_PER_FORCE`]).
+/// (CONFIRMED in `0x0091A560`: against the carried army's capacity virtual `+0x48`, the
+/// campaign's units per army, [`CampaignModel::max_units`]).
 /// Boarding spends no action points itself (INFERRED: the boarding code sets none; the walk to
 /// the fleet does). The original saves the link as NAVY #4 / ARMY #7 (CONFIRMED; our
 /// loader reads it, our writer does not yet: see [`World::embarked`](super::world::World::embarked)).
@@ -745,10 +746,10 @@ impl CampaignModel {
         }
         // The navy carries one army: a second one joins it, which the original allows when both armies'
         // units fit into one (CONFIRMED comparison in `0x0091A560`: the carried army's units plus the
-        // boarding army's against the carried army's maximum, INFERRED the 20-unit army limit).
+        // boarding army's against the carried army's maximum: its `+0x48`, the units per army `0x008D3920`).
         let carried = self.passengers_of(navy).first().copied();
         let carried_units = carried.and_then(|a| self.world.forces.get(&a)).map_or(0, |a| a.units.len());
-        if army_units + carried_units > MAX_UNITS_PER_FORCE {
+        if army_units + carried_units > self.max_units(false) {
             return Err(CommandError::Unsupported("the navy cannot carry this army"));
         }
         let navy_pos = self.force_position(navy).ok_or(CommandError::UnknownForce(navy))?;

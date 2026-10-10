@@ -54,6 +54,10 @@ const CAMPAIGNS: [&str; 8] = [
 /// a government with a leader and a capital that is a loaded region, and every stored stance its
 /// full relationship record.
 fn check_details(name: &str, l: &LoadedCampaign) {
+    // CAMPAIGN_MODEL #23 / #24: 20 / 14 in every shipped start position (a new campaign replaces
+    // them, ForceCaps::new_campaign).
+    assert_eq!(l.model.force_caps, ntw_sim::campaign::rules::ForceCaps { army: 20, navy: 14 }, "{name}: units per force");
+    assert!(!l.warnings.iter().any(|w| matches!(w, ntw_campaign::LoadWarning::MissingForceCaps)), "{name}");
     let w = &l.model.world;
     assert_eq!(w.character_details.len(), w.characters.len(), "{name}: character details");
     for (id, d) in &w.character_details {
@@ -282,6 +286,17 @@ fn loads_all_eight_startpos() {
         assert_eq!(l.info.kind, FileKind::Startpos);
         assert_eq!(l.info.campaign_key, c);
         assert_eq!(l.model.calendar.turns_elapsed, 0, "{c}: startpos is turn 1");
+        // The campaign's theatre comes from its header (the UI reads no campaign key for it): one
+        // theatre, a `campaign_map_playable_areas` area (the tutorial's map is in the Europe theatre).
+        let theatres: Vec<&str> = l.info.theatres().collect();
+        println!("    {c}: map {} theatres {theatres:?}", l.info.map_key);
+        let expected = match l.info.map_key.as_str() {
+            "nap_italy" => "italy_main",
+            "nap_egypt" => "egypt_main",
+            "nap_spain" => "spain_main",
+            _ => "europe_main",
+        };
+        assert_eq!(theatres, [expected], "{c}");
         check_sane(c, &l, db, true);
 
         // Region owners agree with the front-end ownership table.

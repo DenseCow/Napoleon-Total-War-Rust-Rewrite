@@ -3,7 +3,8 @@
 //! Every shipped start position holds, per faction, an `ECONOMICS_DATA` record whose category 11
 //! (`#2[3]`) is the faction's other income as the original computed it (`faction_gdp_other` for a
 //! major power, `faction_gdp_other_minor` otherwise; 0x00BBC710, CAMPAIGN_FIDELITY.md). The model
-//! must give the same value for every faction of every campaign.
+//! must give the same value for every faction of every campaign. The ranking power is checked against
+//! the values the original computed at the Coalition start (read in the debugger).
 
 use std::path::PathBuf;
 
@@ -300,7 +301,7 @@ fn reference_region(
     let mut gdp = i64::from(region.base_gdp);
     let mut growth: i32 = (region_effect("tw_growth_industry_global") + faction_part("tw_growth_factionwide")).round_ties_even() as i32;
     growth = growth.saturating_add(region.discontent_growth);
-    for b in region.buildings().filter(|b| b.health >= 100) {
+    for b in region.buildings().filter(|b| !b.is_damaged()) {
         let chain = rules.buildings.get(&b.level_key).map_or("", |x| x.chain.as_str());
         let gdp_f = gdp_factor + chain_mod("1", chain) * 0.01;
         let tw_f = tw_factor + chain_mod("2", chain) * 0.01;
@@ -794,4 +795,95 @@ fn population_factors_and_growth_match_the_vanilla_saves() {
         grown += 1;
     }
     assert!(grown >= 68, "{grown}");
+}
+
+/// The recruitable population (`0x00A89550` / `0x00AAF190` / `0x00A61AA0`, `RecruitmentPopulation`) with
+/// the shipped data: `recruitment_population_cost` and `minimum_population_after_recruitment` read 0 in every
+/// campaign, so no region's entries are flagged, and the regions that queued new recruits between
+/// `auto_nr4_t4` and `orig_over_nr4_0252` (one round later; factors and owner unchanged) still reach exactly
+/// their grown population: the original took nothing from them either.
+#[test]
+fn recruiting_takes_no_population_in_the_vanilla_saves() {
+    use ntw_sim::campaign::population::{self, RecruitmentPopulation};
+    let dir = data_dir();
+    let ev = std::env::var_os("NTW_EVIDENCE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default().join(r"Documents\ntw-evidence\saves"));
+    let (a, b) = (ev.join("auto_nr4_t4.save"), ev.join("orig_over_nr4_0252.save"));
+    if !dir.is_dir() || !a.is_file() || !b.is_file() {
+        println!("SKIP: no install at {} or no evidence saves at {}", dir.display(), ev.display());
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).expect("database");
+    let campaigns: std::collections::BTreeSet<&str> = db.campaign.variable_overrides.iter().map(|o| o.campaign.as_str()).chain([""]).collect();
+    for c in campaigns {
+        let rules = ntw_campaign::rules_from_db(&db, c);
+        assert_eq!(RecruitmentPopulation::of(&rules), RecruitmentPopulation { cost: 0, minimum: 0 }, "{c}");
+    }
+    let a = ntw_campaign::read_file(&a, &db).expect("save loads").model;
+    let b = ntw_campaign::read_file(&b, &db).expect("save loads").model;
+    let owner = |m: &ntw_sim::campaign::CampaignModel, f| m.world.factions.get(&f).map(|x| x.key.clone());
+    let mut recruited = 0;
+    for r in a.world.regions.values() {
+        assert!(RecruitmentPopulation::of(&a.rules).available(r.population), "{}", r.key);
+        let Some(r2) = b.world.regions.values().find(|x| x.key == r.key) else { continue };
+        if r2.population_state.factors != r.population_state.factors || owner(&b, r2.owner) != owner(&a, r.owner) {
+            continue;
+        }
+        let mut old: Vec<&str> = r.recruitment_queue.iter().map(|i| i.unit_key.as_str()).collect();
+        let new = r2.recruitment_queue.iter().filter(|i| match old.iter().position(|k| *k == i.unit_key) {
+            Some(p) => {
+                old.swap_remove(p);
+                false
+            }
+            None => true,
+        });
+        if new.count() == 0 {
+            continue;
+        }
+        assert_eq!(population::grow(&a, r, r.population, &r.population_state).0, r2.population, "{}", r.key);
+        recruited += 1;
+    }
+    println!("{recruited} regions queued recruits and grew exactly");
+    assert!(recruited >= 1, "{recruited}");
+}
+
+/// The ranking's power (`0x008B2150` land and naval totals, `CampaignModel::faction_powers`) at the
+/// start of the Coalition campaign (`mp_eur_napoleon`, Early January 1805) equals what the original
+/// passed to `0x0090A710` for each faction, read in the debugger on 2026-10-10 (UI_FIDELITY.md §4.7
+/// row "(1) power result"): Austria's 6650 ranks it 3rd, "Terrifying".
+#[test]
+fn faction_power_is_the_originals_at_the_coalition_start() {
+    let dir = data_dir();
+    let path = dir.join(r"campaigns\mp_eur_napoleon\startpos.esf");
+    if !path.is_file() {
+        println!("SKIP: no install at {}", dir.display());
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).expect("database");
+    let mut loaded = ntw_campaign::read_file(&path, &db).expect("startpos loads");
+    loaded.set_human("britain");
+    let m = &loaded.model;
+    let mut unknown = std::collections::BTreeSet::new();
+    let powers = m.faction_powers(&mut unknown);
+    assert!(unknown.is_empty(), "units with no record: {unknown:?}");
+    let original = [
+        ("france", 7560, 2290),
+        ("britain", 3680, 4360),
+        ("austria", 6650, 0),
+        ("spain", 3130, 3350),
+        ("prussia", 6240, 0),
+        ("russia", 5860, 0),
+        ("ottomans", 2740, 910),
+        ("sweden", 1890, 0),
+        ("netherlands", 590, 1070),
+        ("denmark", 1230, 270),
+        ("portugal", 1180, 270),
+        ("swiss_confederation", 440, 0),
+    ];
+    for (key, land, naval) in original {
+        let f = m.world.factions.values().find(|f| f.key == key).unwrap_or_else(|| panic!("no faction {key}"));
+        let p = powers.get(&f.id).copied().unwrap_or_default();
+        assert_eq!((p.land, p.naval), (land, naval), "{key}: land, naval");
+    }
 }

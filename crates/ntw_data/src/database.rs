@@ -90,6 +90,9 @@ pub struct GameDatabase {
     pub kv_rules: KvRules,
     /// `_kv_rules` converted for the simulation (ints truncated like the exe, floats kept).
     pub kv_rules_sim: SimKvRules,
+    /// The gameplay caps a mod may change (`_kv_rules` rows the exe never reads,
+    /// [`crate::kv::game_limits`]); the original's values without such rows.
+    pub limits: ntw_sim::limits::GameLimits,
     /// `_kv_morale`, converted (truncated) for the simulation.
     pub kv_morale: KvMorale,
     /// `_kv_fatigue`, converted (truncated) for the simulation.
@@ -233,6 +236,7 @@ fn load_campaign(vfs: &Loader) -> Result<crate::campaign::CampaignTables, DataEr
         government_effects: load(vfs)?,
         agents: load(vfs)?,
         unit_factions: load(vfs)?,
+        unit_governments: load(vfs)?,
         map_slots: load(vfs)?,
         map_towns: load(vfs)?,
         slot_art: load(vfs)?,
@@ -301,6 +305,13 @@ pub fn load_table<T: DbRecord>(vfs: &Vfs, warnings: &mut Vec<String>) -> Result<
 pub fn load_kv_table(vfs: &Vfs, name: &'static str, warnings: &mut Vec<String>) -> Result<KvTable, DataError> {
     let (files, tables) = read_table_files(vfs, name, warnings, |b| KvTable::from_bytes(name, b))?;
     Ok(KvTable::merged(name, tables, |holder, new| vfs.db_row_replaces(&files[holder], &files[new])))
+}
+
+/// The gameplay caps of `vfs` alone (`_kv_rules` merged, [`crate::kv::game_limits`]), for tools that
+/// load no [`GameDatabase`]; the game reads them once, in [`GameDatabase::limits`].
+pub fn load_game_limits(vfs: &Vfs, warnings: &mut Vec<String>) -> Result<ntw_sim::limits::GameLimits, DataError> {
+    let table = load_kv_table(vfs, "_kv_rules", warnings)?;
+    Ok(crate::kv::game_limits(&table, warnings))
 }
 
 /// The rows of a table that has no typed record here (the campaign AI's raw tables), through the
@@ -375,6 +386,7 @@ impl GameDatabase {
         let vfs = &ld;
         let kv_rules = KvRules { table: load_kv(vfs, "_kv_rules")? };
         kv_rules.check_complete()?;
+        let limits = crate::kv::game_limits(&kv_rules.table, &mut vfs.warnings.borrow_mut());
         let kv_morale_raw = load_kv(vfs, "_kv_morale")?;
         let kv_fatigue_raw = load_kv(vfs, "_kv_fatigue")?;
         let projectiles: Table<Projectile> = load(vfs)?;
@@ -407,9 +419,15 @@ impl GameDatabase {
         )?;
         let gun_type_to_projectiles = load(vfs)?;
         let gun_shots = index_gun_shots(&gun_type_to_projectiles, &projectiles);
+        let units: Table<UnitRecord> = load(vfs)?;
+        // A category the original's compare chain does not know counts as artillery (`ntw_sim::unit_kind`):
+        // reported once per load.
+        for key in ntw_sim::unit_kind::unknown_categories(units.iter().map(|u| u.category.as_str())) {
+            ld.warnings.borrow_mut().push(format!("units: category {key:?} is not one of the original's; its units count as artillery (0x00EED2B0)"));
+        }
         Ok(Self {
             source: DataSource::Vfs,
-            units: load(vfs)?,
+            units,
             unit_stats_land: load(vfs)?,
             projectiles,
             gun_type_to_projectiles,
@@ -431,6 +449,7 @@ impl GameDatabase {
             building_levels: load(vfs)?,
             technologies: load(vfs)?,
             campaign: load_campaign(vfs)?,
+            limits,
             kv_rules_sim: SimKvRules::try_from(&kv_rules)?,
             kv_rules,
             kv_morale: KvMorale::try_from(&kv_morale_raw)?,
@@ -896,6 +915,7 @@ impl GameDatabase {
             technologies: Table::from_rows(1, technologies),
             campaign: crate::campaign::CampaignTables::default(),
             // Complete by construction (same key list), so this cannot fail; a test checks it.
+            limits: ntw_sim::limits::GameLimits::default(),
             kv_rules_sim: SimKvRules::try_from(&kv_rules).unwrap_or_default(),
             kv_rules,
             kv_morale,

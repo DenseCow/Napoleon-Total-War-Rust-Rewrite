@@ -270,7 +270,12 @@ pub fn enter(world: &mut World) {
         let db = &world.resource::<GameData>().db;
         match &save_bytes {
             Some(b) => ntw_campaign::source::open(files, ntw_campaign::source::Start::Save(b), db),
-            None => ntw_campaign::source::open(files, ntw_campaign::source::Start::New(&start.campaign), db),
+            None => {
+                // The `campaign_unit_multiplier` preference sets a new campaign's units per army / navy.
+                let prefs = ntw_script::ui::frontend::load_preferences(crate::config::user_dir().as_deref(), crate::config::original_user_dir().as_deref());
+                let multiplier = prefs.get_f64(ntw_sim::campaign::rules::CAMPAIGN_UNIT_MULTIPLIER_KEY).map(|v| v as f32);
+                ntw_campaign::source::open(files, ntw_campaign::source::Start::New(&start.campaign, multiplier), db)
+            }
         }
     };
     let ntw_campaign::source::OpenedCampaign { mut loaded, map } = match opened {
