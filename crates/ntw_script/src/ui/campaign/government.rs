@@ -126,7 +126,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
         // Ministers are keyed by the post's `ministerial_positions` number (CONFIRMED: the record's
         // +0xC int is the key; head_of_government 1, finance 2, justice 3, army 4, navy 5,
         // governors 6.., government_screens.lua reads Ministers[1..5]).
-        let numbers: HashMap<String, i32> = small_table(&inner, "db/ministerial_positions_tables/ministerial_positions", "s,i")
+        let numbers: HashMap<String, i32> = small_table(&inner, &tables::MINISTERIAL_POSITIONS)
             .into_iter()
             .filter_map(|r| Some((r.first()?.as_str()?.to_owned(), r.get(1)?.as_i32()?)))
             .collect();

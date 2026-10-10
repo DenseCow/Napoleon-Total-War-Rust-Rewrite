@@ -198,7 +198,7 @@ fn rivers_are_kind_3_strips() {
         return;
     }
     let vfs = Vfs::open_install(&dir).expect("vfs");
-    let files = GameFiles { vfs: &vfs, data_dir: Some(&dir) };
+    let files = GameFiles { vfs: &vfs };
     for name in MAPS {
         let map = CampaignMap::load(&files, name).expect("map");
         let pm = ntw_campaign::pathing::build_grid(&map).poly.expect("pathfinding.esf");

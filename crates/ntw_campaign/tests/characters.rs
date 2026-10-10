@@ -25,7 +25,7 @@ fn model() -> Option<CampaignModel> {
     }
     let db = GameDatabase::from_install(&dir).expect("DB");
     let vfs = Vfs::open_install(&dir).expect("vfs");
-    let bytes = GameFiles { vfs: &vfs, data_dir: Some(&dir) }.read("campaigns/eur_napoleon/startpos.esf").expect("startpos");
+    let bytes = GameFiles { vfs: &vfs }.read("campaigns/eur_napoleon/startpos.esf").expect("startpos");
     let esf = EsfFile::from_bytes(&bytes).expect("esf");
     let mut l = ntw_campaign::read_esf(&esf, &db).expect("load");
     assert!(l.set_human("france"));
@@ -202,7 +202,7 @@ fn a_dead_monarch_is_succeeded_and_posts_are_refilled() {
         }
     }
     // The save.
-    let bytes = GameFiles { vfs: &Vfs::open_install(&dir).unwrap(), data_dir: Some(&dir) }.read("campaigns/eur_napoleon/startpos.esf").unwrap();
+    let bytes = GameFiles { vfs: &Vfs::open_install(&dir).unwrap() }.read("campaigns/eur_napoleon/startpos.esf").unwrap();
     let src = EsfFile::from_bytes(&bytes).unwrap();
     let out = ntw_campaign::save::write_save(&src, &m, "france", 1).unwrap();
     let back = EsfFile::from_bytes(&out.to_bytes().unwrap()).unwrap();
@@ -263,7 +263,7 @@ fn ministers_are_dismissed_and_appointed() {
         assert!(m.apply(CampaignCommand::AppointMinister { a: new, b: before[0] }).is_err());
     }
     // The save.
-    let bytes = GameFiles { vfs: &Vfs::open_install(&dir).unwrap(), data_dir: Some(&dir) }.read("campaigns/eur_napoleon/startpos.esf").unwrap();
+    let bytes = GameFiles { vfs: &Vfs::open_install(&dir).unwrap() }.read("campaigns/eur_napoleon/startpos.esf").unwrap();
     let src = EsfFile::from_bytes(&bytes).unwrap();
     let out = ntw_campaign::save::write_save(&src, &m, "france", 1).unwrap();
     let back = EsfFile::from_bytes(&out.to_bytes().unwrap()).unwrap();

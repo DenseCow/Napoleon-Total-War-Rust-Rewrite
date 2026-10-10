@@ -42,6 +42,7 @@ impl Season {
 
 /// A campaign date, laid out like the original's `DATE` record. W3 §3.1 (CONFIRMED).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Date {
     /// Calendar year, e.g. 1806.
     pub year: u32,
@@ -62,6 +63,7 @@ impl Date {
 
 /// The campaign calendar record. W3 §3.1 (CONFIRMED layout).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Calendar {
     /// Always 24 in the observed saves.
     pub turns_per_year: u32,

@@ -15,7 +15,7 @@
 //! | treasury | `FACTION_ECONOMICS` #1 | CONFIRMED position |
 //! | characters | `LOCOMOTABLE` #0/#1 position, #8 base and #9 current action points; removed characters' items are dropped | CONFIRMED positions |
 //! | forces | `MILITARY_FORCE` #0/#1, `UNITS_ARRAY` rebuilt from the model (existing unit items kept and patched: `UNIT` #5 men, #6 max men; new units cloned from a template unit item); destroyed forces dropped; new forces cloned from a template `ARMY`/`NAVY` item | CONFIRMED positions; cloning PROVISIONAL |
-//! | regions | `REGION` #20 owner, garrison residence owner, slot buildings, road building, `BUILDING_CONSTRUCTION_ITEM`s (source items kept, repair items kept), the recruitment queues (region and port managers; source items kept) | CONFIRMED layouts from the user's saves |
+//! | regions | `REGION` #20 owner, garrison residence owner, slot buildings, road building, `BUILDING_CONSTRUCTION_ITEM`s (source items kept, repair items kept), the recruitment queues (region and port managers; source items kept), the economy fields (`write_region_economy`), the population state and religion shares (`write_region_population`) | CONFIRMED layouts from the user's saves |
 //! | taxes | every `GOVERNORSHIP_TAXES` | CONFIRMED position (CAMPAIGN_DATA.md §3) |
 //! | stances | `DIPLOMACY_RELATIONSHIP` #4 (old stance to #20) | #4 CONFIRMED, #20 INFERRED |
 //! | script slots | `EPISODIC_RESTRICTIONS/LUA[]` ([`write_save_with`]) | CONFIRMED (CAMPAIGN_DATA.md §4) |
@@ -25,9 +25,9 @@
 //! | pathfinder | character obstacles of characters gone removed, new garrison commanders given a copy (`obstacles.rs`) | SAVE_COMPAT.md §6 |
 //!
 //! An unchanged model wrote every user save back byte for byte (measured once, see SAVE_COMPAT.md; the test was removed), and
-//! every save written passes `save_check` (tests). Not written yet (kept as loaded): population,
-//! GDP, forces' positions inside settlements, character details and government posts (the model
-//! does not change them), `PENDING_BATTLE`.
+//! every save written passes `save_check` (tests). Not written yet (kept as loaded): forces'
+//! positions inside settlements, character details and government posts (the model does not change
+//! them), `PENDING_BATTLE`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -193,27 +193,14 @@ pub fn write_save_with(
     timestamp: u32,
     script_values: Option<&[crate::script_values::ScriptSaveValue]>,
 ) -> Result<EsfFile, SaveError> {
-    write_save_named(source, model, human, timestamp, script_values, None)
-}
-
-/// [`write_save_with`], also naming new characters and unit officers from the faction's name
-/// allocators when `names` is given (SAVE_COMPAT.md §21; without it they keep the template's names).
-pub fn write_save_named(
-    source: &EsfFile,
-    model: &CampaignModel,
-    human: &str,
-    timestamp: u32,
-    script_values: Option<&[crate::script_values::ScriptSaveValue]>,
-    names: Option<&crate::names::NameData>,
-) -> Result<EsfFile, SaveError> {
-    let mut out = write_save_tree(source, model, human, timestamp, names)?;
+    let mut out = write_save_tree(source, model, human, timestamp)?;
     if let Some(v) = script_values {
         crate::script_values::write_script_values(&mut out, v);
     }
     Ok(out)
 }
 
-fn write_save_tree(source: &EsfFile, model: &CampaignModel, human: &str, timestamp: u32, names: Option<&crate::names::NameData>) -> Result<EsfFile, SaveError> {
+fn write_save_tree(source: &EsfFile, model: &CampaignModel, human: &str, timestamp: u32) -> Result<EsfFile, SaveError> {
     let mut out = source.clone();
     out.header.timestamp = timestamp;
     let root = &mut out.root;
@@ -273,22 +260,11 @@ fn write_save_tree(source: &EsfFile, model: &CampaignModel, human: &str, timesta
     // Regiment and ship names of new units, and the name lists' in-use flags (SAVE_COMPAT.md §20).
     let new_units: BTreeSet<i32> = model.world.forces.values().flat_map(|f| f.units.iter()).map(|u| u.id.raw()).filter(|id| !ix.unit_items.contains_key(id)).collect();
     crate::regiments::write_regiment_names(world, model, &new_units);
-    // Names of new characters and unit officers (SAVE_COMPAT.md §21).
-    let mut world_seed = model.rng.state;
-    if let Some(nd) = names {
-        // A new character the model already named (a new faction leader, after the family) keeps it.
-        let new_chars: BTreeSet<i32> = model.world.characters.keys().map(|c| c.raw()).filter(|id| !ix.char_pos.contains_key(id))
-            .filter(|id| model.world.character_details.get(&ntw_sim::campaign::CharacterId(*id)).is_none_or(|d| d.forename.is_empty()))
-            .collect();
-        world_seed = crate::charnames::name_new_objects(world, nd, &new_chars, &new_units, world_seed);
-    }
+    // The model's names of new unit officers and its name decks (SAVE_COMPAT.md §21; new
+    // characters' names go with their details).
+    crate::charnames::write_model_names(world, model, &new_units);
     write_regions(world, model)?;
     write_residences(world, &residences);
-    if world_seed != model.rng.state
-        && let Some(seed) = child_mut(m, "RandSeed")
-    {
-        set(seed, 0, EsfNode::U32(world_seed));
-    }
     drop_dangling_refs(m, model, &ix);
     // The trade routes' accumulated values (SAVE_COMPAT.md §12).
     crate::trade::write_accumulated(m, model);
@@ -771,9 +747,10 @@ fn write_technologies(f: &mut EsfRecord, details: Option<&ntw_sim::campaign::det
 }
 
 /// A new character's `CHARACTER_DETAILS` from the model where the model knows them: #1 / #2 names
-/// (a new faction leader is named after the family's successor; otherwise the names are drawn by
-/// `charnames`), #4 the regnal numeral (a new monarch's; empty for everyone else, so a template
-/// copied from an old monarch does not keep his) and #5 the birth date.
+/// (the names the model gave him when it created him, or after the family for a new faction leader;
+/// a model without the names table leaves the template's), #4 the regnal numeral (a new monarch's;
+/// empty for everyone else, so a template copied from an old monarch does not keep his) and #5 the
+/// birth date.
 fn write_new_details(d: &mut EsfRecord, details: &ntw_sim::campaign::details::CharacterDetails) {
     if d.name != "CHARACTER_DETAILS" {
         return;
@@ -1281,6 +1258,33 @@ fn write_region_economy(r: &mut EsfRecord, region: &Region) {
     set(r, 19, EsfNode::Bool(region.tax_exempt));
 }
 
+/// The region's population fields the model changes each round (`POPULATION/REGION_FACTORS`, the
+/// layout of the reader `0x00A4C340`, CONFIRMED): #0 the growth factors, #2 the population, #3 the
+/// capacity, #4 its base, #5 the growth, #6 the trend, #7 overcrowded, #8 the migrants, and each
+/// `RELIGION_BREAKDOWN` item's share (#1) by religion key. `POPULATION` #1..#4 and the classes' stored
+/// factors are not modelled: kept.
+fn write_region_population(r: &mut EsfRecord, region: &Region) {
+    let Some(f) = child_mut(r, "POPULATION").and_then(|p| child_mut(p, "REGION_FACTORS")) else { return };
+    let p = &region.population_state;
+    set(f, 0, EsfNode::F32Array(p.factors.to_vec()));
+    set(f, 2, EsfNode::U32(region.population));
+    set(f, 3, EsfNode::U32(p.capacity));
+    set(f, 4, EsfNode::U32(p.base_capacity));
+    set(f, 5, EsfNode::F32(p.growth));
+    set(f, 6, EsfNode::U32(p.trend));
+    set(f, 7, EsfNode::Bool(p.overcrowded));
+    set(f, 8, EsfNode::I32(p.migrants));
+    let Some(a) = array_mut(f, "RELIGION_BREAKDOWN") else { return };
+    for item in &mut a.items {
+        let Some(key) = item.first().and_then(EsfNode::as_str).map(str::to_owned) else { continue };
+        if let (Some((_, share)), Some(slot)) = (region.religions.iter().find(|(k, _)| *k == key), item.get_mut(1))
+            && slot.type_code() == EsfNode::F32(0.0).type_code()
+        {
+            *slot = EsfNode::F32(*share);
+        }
+    }
+}
+
 /// Every `GARRISON_RESIDENCE` #0 under `r` that names `old` gets `new`.
 fn hand_over_residences(r: &mut EsfRecord, old: u32, new: u32) {
     if r.name == "GARRISON_RESIDENCE" && r.get_u32(0) == Some(old) {
@@ -1382,6 +1386,7 @@ fn write_region(
     }
     set(r, 20, EsfNode::U32(new_owner));
     write_region_economy(r, region);
+    write_region_population(r, region);
     if let Some(gr) = child_mut(r, "SETTLEMENT")
         .and_then(|s| child_mut(s, "SIEGEABLE_GARRISON_RESIDENCE"))
         .and_then(|g| child_mut(g, "GARRISON_RESIDENCE"))
@@ -1536,10 +1541,10 @@ fn recruitment_unit_key(item: &[EsfNode]) -> Option<&str> {
     first_rec(item)?.children.first()?.as_record()?.child("RECRUITMENT_ITEM")?.get_str(6)
 }
 
-/// Every recruitment manager record of a region, in order: its own (`None`: the first
-/// `REGION_RECRUITMENT_MANAGER` child) and each slot's that holds one (`Some(i)`: `REGION_SLOT_ARRAY`
-/// item `i`, the raw index, as the loader counts it). The one lookup every manager is found by.
-fn manager_records(r: &mut EsfRecord) -> Vec<(Option<usize>, &mut EsfRecord)> {
+/// The two places recruitment managers live in a region, found once for every lookup: its own
+/// (the first `REGION_RECRUITMENT_MANAGER` child) and the `REGION_SLOT_ARRAY` of the first
+/// `REGION_SLOT_MANAGER`, whose item `i` (the raw index, as the loader counts it) may hold one.
+fn manager_places(r: &mut EsfRecord) -> (Option<&mut EsfRecord>, Option<&mut EsfRecordArray>) {
     let (mut own, mut slots) = (None, None);
     for c in &mut r.children {
         let EsfNode::Record(b) = c else { continue };
@@ -1552,20 +1557,33 @@ fn manager_records(r: &mut EsfRecord) -> Vec<(Option<usize>, &mut EsfRecord)> {
             *first = Some(&mut **b);
         }
     }
+    (own, slots.and_then(|sm| array_mut(sm, "REGION_SLOT_ARRAY")))
+}
+
+/// The recruitment manager of slot array item `item`: its first record's `REGION_RECRUITMENT_MANAGER`.
+fn slot_manager(item: &mut [EsfNode]) -> Option<&mut EsfRecord> {
+    child_mut(first_rec_mut(item)?, "REGION_RECRUITMENT_MANAGER")
+}
+
+/// Every recruitment manager record of a region, in order: its own (`None`) and each slot's that
+/// holds one (`Some(i)`). Built from [`manager_places`] and [`slot_manager`], the same rule
+/// [`manager_record`] follows for one.
+fn manager_records(r: &mut EsfRecord) -> Vec<(Option<usize>, &mut EsfRecord)> {
+    let (own, slots) = manager_places(r);
     let mut out: Vec<(Option<usize>, &mut EsfRecord)> = own.into_iter().map(|m| (None, m)).collect();
-    if let Some(array) = slots.and_then(|sm| array_mut(sm, "REGION_SLOT_ARRAY")) {
-        for (i, item) in array.items.iter_mut().enumerate() {
-            if let Some(m) = first_rec_mut(item).and_then(|s| child_mut(s, "REGION_RECRUITMENT_MANAGER")) {
-                out.push((Some(i), m));
-            }
-        }
+    if let Some(array) = slots {
+        out.extend(array.items.iter_mut().enumerate().filter_map(|(i, item)| Some((Some(i), slot_manager(item)?))));
     }
     out
 }
 
-/// A recruitment manager record of a region: its own (`None`) or slot `i`'s.
+/// A recruitment manager record of a region: its own (`None`) or slot `i`'s. Nothing is collected.
 fn manager_record(r: &mut EsfRecord, slot: Option<usize>) -> Option<&mut EsfRecord> {
-    manager_records(r).into_iter().find_map(|(m, rec)| (m == slot).then_some(rec))
+    let (own, slots) = manager_places(r);
+    match slot {
+        None => own,
+        Some(i) => slot_manager(slots?.items.get_mut(i)?),
+    }
 }
 
 /// Every recruitment queue of a region (each manager holding its item array), all at once.
@@ -1868,6 +1886,7 @@ mod tests {
             tax_exempt: false,
             religions: Vec::new(),
             class_bases: Vec::new(),
+            population_state: Default::default(),
             recruitment_queue: Vec::new(),
             construction: Vec::new(),
             garrison: None,

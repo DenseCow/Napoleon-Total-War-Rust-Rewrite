@@ -60,6 +60,10 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Text language: `--language fr`, else our own setting, else the install's language.txt.
     config::apply_language_setting(&args);
+    // Mods: `--no-mods`, `--mods <dir>`, `--user-script <file>`; `--list-mods` prints them and exits.
+    if config::apply_mod_setting(&args) {
+        return;
+    }
     if let Some(viewer_args) = model_viewer::ViewerArgs::parse(&args) {
         model_viewer::run(viewer_args);
         return;

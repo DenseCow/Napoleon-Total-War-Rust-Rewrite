@@ -43,16 +43,14 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
-use ntw_formats::campaign_map::{CampaignMap, GameFiles};
+use ntw_campaign::map_display::MapDisplay;
+use ntw_formats::campaign_map::GameFiles;
 
 use crate::GameMode;
 
 /// The arrow texture in the install (the exe's own path prefix,
 /// `RigidModels/CampaignPieces/Textures/arrow`, plus the extension the loader appends).
 pub const ARROW_TEXTURE: &str = "rigidmodels\\campaignpieces\\textures\\arrow.dds";
-/// The campaign map's arrow mesh, below `campaign_maps\<map>` (CONFIRMED: the file is there for
-/// every map, and its shape is the movement arrow).
-pub const ARROW_MODEL: &str = "display/arrows/arrows.rigid_model";
 
 /// Distance between two arrow heads along the path, in logic map units — one arrow's length.
 /// PROVISIONAL: the original passes this in and its caller is unresolved (module comment).
@@ -128,7 +126,7 @@ impl ArrowAssets {
 pub fn load(
     commands: &mut Commands,
     files: &GameFiles<'_>,
-    map: &CampaignMap,
+    map: &MapDisplay,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
 ) {
@@ -152,9 +150,9 @@ pub fn load(
     let (w, h) = (image.width(), image.height());
     let texture = images.add(image);
     // The map's own arrow mesh, read for the proportion its width comes from (see `ArrowAssets`).
-    let mesh_path = format!("campaign_maps/{}/{}", map.name, ARROW_MODEL);
-    let mesh_size = match files.read(&mesh_path) {
-        Ok(b) => match ntw_formats::rigid_model::RigidModel::read(&b) {
+    let mesh_path = format!("{}'s arrow model", map.key);
+    let mesh_size = match &map.arrow_model {
+        Ok(b) => match ntw_formats::rigid_model::RigidModel::read(b) {
             Ok(m) => {
                 let (length, width) = (m.bbox_max[0] - m.bbox_min[0], m.bbox_max[2] - m.bbox_min[2]);
                 info!("Campaign arrows: the map's {mesh_path} is {length:.3} x {width:.3} in its own units ({} bytes)", b.len());
@@ -390,7 +388,7 @@ pub fn strip(chain: &[(f32, f32)], width: f32, arrow_length: f32, lift: f32, dra
 }
 
 /// One chain's mesh, draped on the terrain. `None` when there is nothing to draw.
-fn chain_mesh(map: &CampaignMap, chain: &[(f32, f32)], width: f32) -> Option<Mesh> {
+fn chain_mesh(map: &MapDisplay, chain: &[(f32, f32)], width: f32) -> Option<Mesh> {
     let drape = |x: f32, z: f32| map.height_at(x, z).max(0.0);
     let (positions, uvs, indices) = strip(chain, width, SPACING, ARROW_LIFT, &drape);
     if indices.is_empty() {
@@ -658,7 +656,7 @@ mod tests {
     fn the_install_has_the_arrow_assets() {
         let dir = crate::config::game_data_dir();
         let Ok(vfs) = ntw_formats::pack::Vfs::open_install(&dir) else { return };
-        let files = GameFiles { vfs: &vfs, data_dir: Some(&dir) };
+        let files = GameFiles { vfs: &vfs };
         let bytes = files.read(ARROW_TEXTURE).expect("the campaign arrow texture");
         let img = arrow_image(&bytes).expect("arrow.dds decodes");
         assert_eq!((img.width(), img.height()), (512, 256), "arrow.dds is one 2:1 arrow");

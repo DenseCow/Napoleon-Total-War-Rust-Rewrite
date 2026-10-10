@@ -10,7 +10,8 @@
 //! ## Order
 //! Factions play in [`World::factions_in_turn_order`](super::World::factions_in_turn_order) (the
 //! startpos `FACTION_ARRAY` order, INFERRED). A *round* is every faction once:
-//! 1. Round start: `FactionRoundStart` for every faction, in turn order (posted by `0x008F1F60`).
+//! 1. Round start: `FactionRoundStart` for every faction, in turn order (posted by `0x008F1F60`, which also
+//!    refreshes every region's population factors, `0x00AAE710`).
 //! 2. For each faction in turn order, the turn start `0x008F2620` (CONFIRMED order of its calls):
 //!    1. Every character (`0x00A24EB0` per character): `CharacterTurnStart` (INFERRED place of the event)
 //!       and the action points refill to the type's base, times [`force_action_point_factor`] for a
@@ -34,10 +35,12 @@
 //!       `UnitTurnEnd` for every unit of every force (forces in id order, units in array order;
 //!       `0x008BD4B0`), the diplomacy manager's turn end (`0x00B29940`, not read), `FactionTurnEnd`.
 //! 3. Round end (CONFIRMED order, 0x00948CF0: when the turn passes the last faction, the economy of
-//!    **every** faction is settled at once, not at each faction's turn start): for every faction in
-//!    turn order, [`TurnStep::Economy`]: income and upkeep are settled (0x00BABE30: treasury +=
-//!    income − expenses, unless the faction cannot pay, see [`economy`](super::economy)) and every
-//!    owned region's town wealth grows (0x00AB4410), then research takes one step
+//!    **every** faction is settled at once, not at each faction's turn start): first every region's
+//!    population factors are refreshed ([`TurnStep::RoundEndRefresh`], `0x008E1030` per faction), then
+//!    for every faction in turn order, [`TurnStep::Economy`]: income and upkeep are settled
+//!    (0x00BABE30: treasury += income − expenses, unless the faction cannot pay, see
+//!    [`economy`](super::economy)), every owned region's town wealth grows (0x00AB4410) and its
+//!    population grows and converts ([`super::population`], 0x00AB4070), then research takes one step
 //!    ([`super::research`]; CONFIRMED place: `0x008BC650` runs the step `0x008DD450`), then the relationships'
 //!    per-turn update ([`super::treaties`], `0x00B29100`, after the regions in `0x008BC650`). Then the calendar advances one half-month
 //!    (that this comes after the economy is our PROVISIONAL choice).
@@ -62,11 +65,15 @@ use crate::fnv::Fnv64;
 
 /// One unit of turn work. See the module docs for the order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TurnStep {
     /// `FactionRoundStart` for every faction.
     RoundStart,
     /// The calendar advances.
     RoundEnd,
+    /// The round end's first pass (`0x00948CF0` → `0x008E1030` for every faction, before any economy):
+    /// every region's population factors are refreshed.
+    RoundEndRefresh,
     /// Start of a faction's turn: queues its phases.
     FactionStart(FactionId),
     /// Round end: the faction's income and upkeep, then its regions' town wealth.
@@ -90,6 +97,7 @@ pub enum TurnStep {
 
 /// Whose turn it is and the work still queued. Part of the state (hashed).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TurnState {
     /// Factions played by humans. Without any, every faction is played by the AI and
     /// [`CampaignModel::end_turn`] plays exactly one round.
@@ -223,9 +231,13 @@ impl CampaignModel {
                 for faction in self.world.factions_in_turn_order() {
                     events.push(CampaignEvent::FactionRoundStart { faction });
                 }
-                // The relationships' computed factors (0x0096C050 → 0x008BAF30 per faction, after the round-start events).
+                // Every faction's regions refresh their population factors (0x0096C050 → 0x008F1F60 → 0x00AAE710;
+                // 0x008F1F60 also posts the round-start events), then the relationships' computed factors
+                // (0x0096C050 → 0x008BAF30 per faction).
+                self.refresh_population_factors();
                 self.refresh_computed_factors();
             }
+            TurnStep::RoundEndRefresh => self.refresh_population_factors(),
             TurnStep::RoundEnd => {
                 // The yearly character pass (natural deaths, expired ancillaries) of the year's last
                 // round end, before the calendar moves on (`0x008A9920`, CONFIRMED order).
@@ -253,8 +265,9 @@ impl CampaignModel {
                 if economy::settle_round(self, f) == (economy::Settlement::CannotPay { first_turn: true }) {
                     events.push(CampaignEvent::PendingBankruptcy { faction: f });
                 }
-                // Each region's religion conversion (0x00A63FE0, in the region update 0x00AB42F0 of the same step).
-                self.religion_round_end(f);
+                // Each region's population growth, then its religion conversion (0x00AB42F0 → 0x00AB4070 →
+                // 0x00A63FE0, in the same step).
+                self.population_round_end(f);
                 // Research (0x008DD450 with (0, 0, 1), called from the round-end economy 0x008BC650: CONFIRMED
                 // place; the saves agree: AI techs started in turn 1 hold one step in the turn-2 save).
                 for technology in self.research_step(f) {
@@ -387,6 +400,7 @@ impl CampaignModel {
                             for &each in order.iter().rev() {
                                 self.turn.queue.push_front(TurnStep::Economy(each));
                             }
+                            self.turn.queue.push_front(TurnStep::RoundEndRefresh);
                         }
                     }
                 }

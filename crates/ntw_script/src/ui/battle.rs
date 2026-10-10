@@ -392,11 +392,12 @@ pub fn update_cards(host: &UiScriptHost) -> mlua::Result<()> {
     let Some(cards) = lua.globals().get::<Option<Table>>("__ntw_battle_cards")? else { return Ok(()) };
     let battle: Table = lua.globals().get("__battle")?;
     let Some(units) = battle.get::<Option<Table>>("units")? else { return Ok(()) };
+    let update_card: Function = lua.globals().get("__ntw_battle_update_card")?;
     for u in units.sequence_values::<Table>() {
         let u = u?;
         let card: Value = cards.get(u.get::<Value>("id")?)?;
         let Some(node) = super::host::node_of(&card) else { continue };
-        super::host::call_entry::<()>(lua, host.inner(), node, "__ntw_battle_update_card", (card, u))?;
+        super::host::call_entry_fn::<()>(host.inner(), node, &update_card, (card, u))?;
     }
     Ok(())
 }

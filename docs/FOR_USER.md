@@ -7,14 +7,42 @@ The morning report from night sessions, newest night first. Two lists per night:
 - **Done tonight:** everything finished, merged or settled. One line each: what, commit, how to see it.
   Claude clears a night's list once the user has read it.
 
-## Day of 2026-10-09 — needs you (batched; any time)
+## Night of 2026-10-09 → 10
 
-- **Debugger sitting, gait (~10 min, next session):** the original under Ghidra's debugger, a custom land battle with line
-  infantry and cavalry. Claude logs two reads while you order cavalry to walk, then infantry walk → run → walk (the
-  reads and breakpoints are at the end of analysis/fidelity/UNITS_TERRAIN_FIDELITY.md §1.10). Settles why our
-  walk-ordered cavalry trots and which code switches infantry walk/run.
+### Usage tonight
 
-## Day of 2026-10-07 — needs you (batched; any time)
+- Night stop at **60.0%** of the week (block cap raised to 61.5% at your request; night mode stops 1.5 below).
+  Then Sat/Sun/Mon at 11 points each leaves ~6 for Tuesday before the Wed 00:00 reset. Start each day around 2 pm.
+
+### Needs you
+
+- **Region details panel, side by side with the original (~3 min):** `cargo run -p napoleon -- --campaign eur_napoleon
+  --campaign-faction france --no-intro`, open a region's details (e.g. Paris): taxes, religion, public order, wealth
+  and growth with their factors, predicted values. Compare with the original's same region on turn 1. Effects and
+  NextTown are still placeholders.
+- **Own save format + map display (quick look, ~3 min):** same command; play two turns, recruit a general, press F5,
+  quit, load that save from the menu: the map looks as before, the general keeps his name, nothing is missing.
+
+### Done tonight
+
+- Gait debugger sitting: walking horses move at ~80% of their walk speed (why ours trot); men's levels via store C.
+  Notes on `work/gait-blend2` `38df2276`.
+- Austria power sitting: the original's per-faction power values (Austria 3rd = "Terrifying"); `ab028f7c`.
+- Plan: modding foundations (one table path + guard test, no engine limits, generic switches) go first in free
+  slots; CLAUDE.md "Modding seams" rule; `e29a33d5`. `$WrapAt = 1.0` committed (`169baff2`).
+- **Mod loading merged** (`b47aff74`): packs, loose files and the `mods\` folder load with the original's precedence;
+  two original-game bugs fixed (a repeated precedence line cancelled itself; an excluded dependency stopped start-up).
+  See it: `cargo run -p napoleon -- --list-mods`.
+- **Polish cleared** (`a7a1eb4c`): six cleanup lines (faster battle unit lookups, no double mod planning, logs once).
+  Nothing visible to check.
+- **Region details panel + population growth merged:** growth and religion conversion now run in the model (checked
+  against all 422 regions of 7 original saves); religion shares no longer lost on save; ORIGINAL BUG fixed
+  (DestroyChildren could loop for ever). See "Needs you" above.
+- **One table path merged** (`cdcf2bd7`): every game table is read through one reader, mods included; a guard test
+  stops new code reading table files directly. Vanilla reads unchanged (35 tables compared). Nothing visible to check.
+- **Campaign source merged:** F5 now writes our own save format; the campaign map display no longer depends on the
+  original's map files (only the importer reads them) — the first step toward custom maps. Character and officer
+  names now live in the model (the exe's historical re-pick ported). See "Needs you".
 
 ## Night of 2026-10-07
 

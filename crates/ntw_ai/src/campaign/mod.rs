@@ -21,7 +21,7 @@
 //!    priority order ([`Node`], [`Action`]).
 //!
 //! Which manager/personality a faction uses is CONFIRMED (round 4): the startpos/save `FACTION`
-//! record stores both keys ([`keys::read_ai_keys`], passed in [`TurnContext::ai_keys`]); without
+//! record stores both keys (the model's `World::ai_keys`, in [`AiFaction::ai_keys`]); without
 //! them a PROVISIONAL naming rule is used, see [`FactionAiConfig::resolve`].
 
 pub mod bdi;
@@ -260,13 +260,6 @@ pub struct TurnContext {
     pub humans: BTreeSet<FactionId>,
     /// Script hints.
     pub hints: ScriptHints,
-    /// Each faction's stored manager / personality keys by faction key ([`keys::read_ai_keys`]
-    /// on the startpos or save). Empty: the PROVISIONAL naming rule.
-    pub ai_keys: BTreeMap<String, keys::FactionAiKeys>,
-    /// The original's stored region base values by region key
-    /// ([`keys::read_region_base_values`] on the startpos or save). Empty: the formula with
-    /// PROVISIONAL inputs.
-    pub region_base_values: BTreeMap<String, i32>,
 }
 
 impl TurnContext {
@@ -278,8 +271,6 @@ impl TurnContext {
             campaign_key: campaign_key.to_string(),
             humans: BTreeSet::new(),
             hints: ScriptHints::default(),
-            ai_keys: BTreeMap::new(),
-            region_base_values: BTreeMap::new(),
         }
     }
 }
@@ -297,7 +288,7 @@ pub fn take_turn_on(world: &AiWorld, data: &CampaignAiData, ctx: &TurnContext, f
     if ctx.humans.contains(&faction) || me.regions == 0 && world.armies.values().all(|a| a.faction != faction) {
         return Vec::new();
     }
-    let cfg = FactionAiConfig::resolve_with(data, &ctx.campaign_key, &me.key, ctx.ai_keys.get(&me.key));
+    let cfg = FactionAiConfig::resolve_with(data, &ctx.campaign_key, &me.key, me.ai_keys.as_ref());
     let mut turn = FactionTurn::new(world, data, ctx, faction, cfg);
     turn.run(rng);
     turn.orders
@@ -310,7 +301,7 @@ pub fn take_turn_with_plan(world: &AiWorld, data: &CampaignAiData, ctx: &TurnCon
     if ctx.humans.contains(&faction) || me.regions == 0 && world.armies.values().all(|a| a.faction != faction) {
         return (Vec::new(), Vec::new());
     }
-    let cfg = FactionAiConfig::resolve_with(data, &ctx.campaign_key, &me.key, ctx.ai_keys.get(&me.key));
+    let cfg = FactionAiConfig::resolve_with(data, &ctx.campaign_key, &me.key, me.ai_keys.as_ref());
     let mut turn = FactionTurn::new(world, data, ctx, faction, cfg);
     turn.run(rng);
     (turn.orders, turn.last_pool)
@@ -786,7 +777,7 @@ impl<'a> FactionTurn<'a> {
     /// The analyser value of a region as the integer the desires use (`0x00A63FD0` on the
     /// composite value analyser 0x56): the CONFIRMED base and composite formulas
     /// ([`region_value`]). The base is the original's own value stored in the startpos / save
-    /// when there is one ([`TurnContext::region_base_values`], CONFIRMED data; it is the value at
+    /// when there is one ([`AiRegion::base_value`], CONFIRMED data; it is the value at
     /// the time the file was written, PROVISIONAL after that); otherwise the formula with
     /// PROVISIONAL inputs (the three settlement fields are runtime values, UNKNOWN: the region's
     /// GDP stands in for `c`, `a = b = 0`). The model has no region groups, so our own regions
@@ -794,8 +785,8 @@ impl<'a> FactionTurn<'a> {
     /// loss-likelihood counts are 0, and the capital / ×3 / +5000 tests are off (PROVISIONAL).
     fn region_value(&self, r: RegionId) -> i32 {
         let reg = &self.world.regions[&r];
-        let base = match self.ctx.region_base_values.get(&reg.key) {
-            Some(&v) => v,
+        let base = match reg.base_value {
+            Some(v) => v,
             None => region_value::base(0, 0, reg.gdp.min(i32::MAX as u32) as i32),
         };
         let m = region_value::Multipliers::from_tunables(|k, d| self.t(k, d));
@@ -1312,6 +1303,7 @@ mod tests {
             tax_exempt: false,
             religions: Vec::new(),
             class_bases: Vec::new(),
+            population_state: Default::default(),
             recruitment_queue: Vec::new(),
             construction: Vec::new(),
             garrison: None,
@@ -1367,7 +1359,7 @@ mod tests {
             },
         );
         // The faction already holds one of the two `test_recruit` its cap allows.
-        let held = CampaignUnit { id: UnitId(7), unit_key: "test_recruit".into(), men: 100, max_men: 100, character: None };
+        let held = CampaignUnit { id: UnitId(7), unit_key: "test_recruit".into(), men: 100, max_men: 100, character: None, officer_name: Default::default() };
         m.world.forces.insert(ForceId(9), MilitaryForce { id: ForceId(9), faction: me, commander: None, units: vec![held], is_navy: false });
         let (data, ctx) = (CampaignAiData::default(), TurnContext::new("test_campaign"));
         let cfg = FactionAiConfig { manager: String::new(), personality: String::new(), behaviours: BTreeMap::new() };

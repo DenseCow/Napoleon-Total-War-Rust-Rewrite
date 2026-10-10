@@ -35,6 +35,7 @@ const FUZZ: f32 = 0.2;
 /// +0x94..+0xA4 damage fractions, +0xA8..+0xB0 crews, +0xB4..+0xBC full crews, +0xC0 guns, +0xC4 sunk,
 /// +0xC8 full guns; the sinking `0x0074FA70` sets every damage to 1, the crews and guns to 0 and the flag).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ShipState {
     /// Five damage fractions 0..1; the resolver uses the pairs (0, 2) and (1, 3) (+0xA4 only on sinking).
     pub damage: [f32; 5],

@@ -14,14 +14,12 @@
 //! sets the `ntw_script::ScriptHost` AI hook so the original scripts see every event in order.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use ntw_script::{ScriptHost, ScriptState};
 use ntw_sim::campaign::{CampaignEvent, CampaignModel, CommandError, FactionId, TurnStep};
 
-use super::keys::FactionAiKeys;
 use super::{AiOrder, CampaignAiData, TurnContext, apply_orders_with_events, take_turn};
 
 /// What one AI faction did in one turn.
@@ -117,27 +115,14 @@ fn run_pending(model: &mut CampaignModel, data: &CampaignAiData, ctx: &TurnConte
 
 /// Installs the campaign AI on a script host: from now on every AI faction's turn in the host's
 /// turn loop is played by [`play_faction`], with the context rebuilt from the script state each
-/// time; `ai_keys` are the factions' stored manager / personality keys
-/// ([`super::keys::read_ai_keys`] on the startpos or save; empty: the PROVISIONAL naming rule).
+/// time. The factions' stored manager / personality keys and the regions' stored base values come
+/// from the model (`World::ai_keys`, `World::region_base_values`).
 /// Returns a shared log of the reports (newest last) for displays and tests.
-pub fn install(host: &mut ScriptHost, data: Arc<CampaignAiData>, ai_keys: BTreeMap<String, FactionAiKeys>) -> Rc<RefCell<Vec<AiTurnReport>>> {
-    install_with(host, data, ai_keys, BTreeMap::new())
-}
-
-/// [`install`] with the original's stored region base values too
-/// ([`super::keys::read_region_base_values`]).
-pub fn install_with(
-    host: &mut ScriptHost,
-    data: Arc<CampaignAiData>,
-    ai_keys: BTreeMap<String, FactionAiKeys>,
-    region_base_values: BTreeMap<String, i32>,
-) -> Rc<RefCell<Vec<AiTurnReport>>> {
+pub fn install(host: &mut ScriptHost, data: Arc<CampaignAiData>) -> Rc<RefCell<Vec<AiTurnReport>>> {
     let log = Rc::new(RefCell::new(Vec::new()));
     let out = log.clone();
     host.set_ai_turn_hook(Box::new(move |state: &mut ScriptState, faction| {
-        let mut ctx = context_from_script(state);
-        ctx.ai_keys = ai_keys.clone();
-        ctx.region_base_values = region_base_values.clone();
+        let ctx = context_from_script(state);
         let (report, events) = play_faction(&mut state.model, &data, &ctx, faction);
         log.borrow_mut().push(report);
         events

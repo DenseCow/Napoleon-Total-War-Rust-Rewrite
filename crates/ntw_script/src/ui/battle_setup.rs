@@ -26,39 +26,35 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use mlua::{Lua, MultiValue, Table, Value};
-use ntw_formats::db::{DbTable, Schema};
+use ntw_formats::db::DbValue;
+use ntw_formats::db_folder::tables;
 
 use super::host::Inner;
 
 /// Times of day in the exe's order (CONFIRMED string table).
 pub const TIMES_OF_DAY: [&str; 5] = ["morning", "midday", "afternoon", "evening", "night"];
 
-fn table(inner: &Inner, path: &str, codes: &str) -> Option<DbTable> {
-    let file = inner.source.find(path)?;
-    DbTable::read(&file.bytes, &Schema::from_codes(codes)?).ok()
-}
-
-fn s(v: &ntw_formats::db::DbValue) -> String {
+fn s(v: &DbValue) -> String {
     v.as_str().unwrap_or_default().to_owned()
 }
 
 /// `wind_levels` keys in their order (see the module docs).
 pub fn wind_levels(inner: &Inner) -> Vec<String> {
-    let Some(t) = table(inner, "db/wind_levels_tables/wind_levels", "s,s,f,f,i") else { return Vec::new() };
-    let mut rows: Vec<(i32, String)> = t.rows.iter().map(|r| (r[4].as_i32().unwrap_or(0), s(&r[0]))).collect();
+    let Some(t) = inner.source.table_rows_shared(&tables::WIND_LEVELS) else { return Vec::new() };
+    let mut rows: Vec<(i32, String)> = t.iter().map(|r| (r[4].as_i32().unwrap_or(0), s(&r[0]))).collect();
     rows.sort_by_key(|r| r.0);
     rows.into_iter().map(|r| r.1).collect()
 }
 
 /// A battle's weathers and time-of-day indices, in first-appearance order.
 pub fn battle_weathers_and_times(inner: &Inner, battle: &str) -> (Vec<String>, Vec<usize>) {
-    let Some(j) = table(inner, "db/battles_to_battle_sky_types_junctions_tables/battles_to_battle_sky_types_junctions", "s,s") else {
+    let Some(j) = inner.source.table_rows_shared(&tables::BATTLES_TO_BATTLE_SKY_TYPES_JUNCTIONS) else {
         return (Vec::new(), Vec::new());
     };
-    let Some(skies) = table(inner, "db/battle_sky_types_tables/battle_sky_types", "s,s,s,s,b,s,s,s") else { return (Vec::new(), Vec::new()) };
-    let sky: BTreeMap<String, (String, String)> = skies.rows.iter().map(|r| (s(&r[0]), (s(&r[2]), s(&r[3])))).collect();
+    let Some(skies) = inner.source.table_rows_shared(&tables::BATTLE_SKY_TYPES) else { return (Vec::new(), Vec::new()) };
+    let sky: BTreeMap<String, (String, String)> = skies.iter().map(|r| (s(&r[0]), (s(&r[2]), s(&r[3])))).collect();
     let (mut weathers, mut times) = (Vec::new(), Vec::new());
-    for r in j.rows.iter().filter(|r| s(&r[0]).eq_ignore_ascii_case(battle)) {
+    for r in j.iter().filter(|r| s(&r[0]).eq_ignore_ascii_case(battle)) {
         let Some((w, t)) = sky.get(&s(&r[1])) else { continue };
         if !w.is_empty() && !weathers.contains(w) {
             weathers.push(w.clone());
@@ -81,7 +77,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Result<(
     })?)?;
     let i = inner.clone();
     t.set("BattleTypeString", lua.create_function(move |lua, kind: String| {
-        let known = table(&i, "db/battle_types_tables/battle_types", "s").is_some_and(|t| t.rows.iter().any(|r| s(&r[0]) == kind));
+        let known = i.source.table_rows_shared(&tables::BATTLE_TYPES).is_some_and(|t| t.iter().any(|r| s(&r[0]) == kind));
         if !known {
             return Ok(MultiValue::new());
         }
@@ -163,7 +159,8 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Result<(
     let i = inner.clone();
     t.set("FactionListForBattles", lua.create_function(move |lua, (naval, _era): (Option<bool>, Option<i64>)| {
         let out = lua.create_table()?;
-        let Some(rows) = factions(&i) else { return Ok(out) };
+        let Some(table) = factions_table(&i) else { return Ok(out) };
+        let rows = table.rows();
         let naval = naval.unwrap_or(false);
         let mut list: Vec<(String, &ntw_data::FactionRecord)> = rows
             .iter()
@@ -194,10 +191,13 @@ pub fn max_units(scale: f32) -> (i32, i32) {
     (20, [6, 8, 10, 20][idx])
 }
 
+/// The `factions` table, loaded once per source.
+fn factions_table(inner: &Inner) -> Option<std::sync::Arc<ntw_data::Table<ntw_data::FactionRecord>>> {
+    inner.source.typed_table::<ntw_data::FactionRecord>()
+}
+
 pub(super) fn factions(inner: &Inner) -> Option<Vec<ntw_data::FactionRecord>> {
-    let path = <ntw_data::FactionRecord as ntw_data::DbRecord>::path();
-    let f = inner.source.find(&path)?;
-    ntw_data::Table::<ntw_data::FactionRecord>::from_bytes(&f.bytes).ok().map(|t| t.rows().to_vec())
+    factions_table(inner).map(|t| t.rows().to_vec())
 }
 
 /// A faction's custom-battle details table (`0x0045C010`: Key, Name, FlagPath, UniformColour,
@@ -225,7 +225,8 @@ fn faction_entry(lua: &Lua, inner: &Inner, f: &ntw_data::FactionRecord) -> mlua:
 pub(super) fn install_faction_details(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Result<()> {
     let i = inner.clone();
     t.set("FactionDetails", lua.create_function(move |lua, (key, _era): (String, Option<i64>)| {
-        let Some(rows) = factions(&i) else { return Ok(None) };
+        let Some(table) = factions_table(&i) else { return Ok(None) };
+        let rows = table.rows();
         match rows.iter().find(|f| f.key == key) {
             Some(f) => faction_entry(lua, &i, f).map(Some),
             None => Ok(None),

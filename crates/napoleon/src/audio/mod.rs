@@ -204,6 +204,8 @@ pub struct SoundData {
     /// The (close, medium) audio-distance bands of each [`ProjectileKind`] (indexed by it), read
     /// once ([`ProjectileKind::bands`]).
     projectile_bands: [(f32, f32); ProjectileKind::BANDS.len()],
+    /// Set once the "no file paths" error was logged: it is said once per build, not per process.
+    missing_paths_logged: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// The land projectile-fire sound kinds of the `AUDIO_DISTANCE_LAND_PROJECTILES_{kind}_CLOSE` /
@@ -299,7 +301,7 @@ impl SoundData {
         }
         let bank_music = lib.vocabulary.bank_type_of("sound_bank_music_states");
         let projectile_bands = ProjectileKind::bands(&lib);
-        Self { lib: Arc::new(lib), vfs: Arc::new(vfs), paths, bank_projectile_fire, bank_music, projectile_bands }
+        Self { lib: Arc::new(lib), vfs: Arc::new(vfs), paths, bank_projectile_fire, bank_music, projectile_bands, missing_paths_logged: Arc::default() }
     }
 }
 
@@ -1109,9 +1111,10 @@ impl Player<'_, '_> {
         let ev = data.lib.events.events.get(event)?;
         let Some(paths) = data.paths.get(event) else {
             // Cannot happen: `SoundData::new` builds one path list per event, and neither changes
-            // after. Logged once (prepare runs on the main thread, never the audio thread).
-            static MISSING: std::sync::Once = std::sync::Once::new();
-            MISSING.call_once(|| error!("sound: event {event} has no file paths (sound data out of step)"));
+            // after. Logged once per build (prepare runs on the main thread, never the audio thread).
+            if !data.missing_paths_logged.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                error!("sound: event {event} has no file paths (sound data out of step)");
+            }
             return None;
         };
         if paths.is_empty() {
@@ -2274,6 +2277,20 @@ mod tests {
         control
     }
 
+
+    /// The "no file paths" error is logged once per sound-data build, not once per process.
+    #[test]
+    fn the_missing_paths_error_is_logged_once_per_build() {
+        let mut world = player_world(&[(&["a.wav"], &[])]);
+        world.resource_mut::<SoundData>().paths = Arc::from(Vec::new());
+        let logged = |w: &World| w.resource::<SoundData>().missing_paths_logged.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(!logged(&world));
+        assert_eq!(with_player(&mut world, |p| p.play(0, None, 0.0)), None);
+        assert!(logged(&world), "the first miss logs");
+        assert_eq!(with_player(&mut world, |p| p.play(0, None, 0.0)), None);
+        let fresh = SoundData::new(world.resource::<SoundData>().lib.as_ref().clone(), Vfs::new());
+        assert!(!fresh.missing_paths_logged.load(std::sync::atomic::Ordering::Relaxed), "a new build logs again");
+    }
     /// Under `max_number_playing_at_once`, the voice to replace is stopped only when the new one
     /// starts: not when its file fails or is still decoding.
     #[test]

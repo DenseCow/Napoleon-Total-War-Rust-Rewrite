@@ -37,6 +37,7 @@ impl PartialEq for Terrain {
 /// `rules` (game data from the DB) and `terrain` (the map's movement grid) are our own additions:
 /// they are data, not state, and are neither saved nor hashed.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CampaignModel {
     /// `CAMPAIGN_CALENDAR` (W3 §3.1, CONFIRMED).
     pub calendar: Calendar,
@@ -55,19 +56,24 @@ pub struct CampaignModel {
     /// at the end of the turn).
     pub pending_capture: Option<super::capture::CapturePreview>,
     /// Game data from the DB (see [`CampaignRules`]).
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub rules: Arc<CampaignRules>,
     /// The map's movement grid, if the map was loaded. Without it, moves are straight lines
     /// (used by unit tests).
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub terrain: Option<Terrain>,
     /// The last autoresolve result (for the battle report and the log). Not state: not saved, not
     /// hashed.
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub last_autoresolve: Option<super::autoresolve::ArOutcome>,
     /// The RNGs of the `effect.trait` / `effect.ancillary` script bindings (see
     /// [`ScriptRngs`](super::characters::ScriptRngs)). Hashed, not saved (the original keeps them
     /// process-wide).
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub script_rngs: super::characters::ScriptRngs,
     /// The campaign negotiation slot (campaign +0xF9C) and its begin / end counts, see
     /// [`super::negotiation::Negotiations`]. Not saved, not hashed.
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub negotiations: super::negotiation::Negotiations,
 }
 
@@ -283,6 +289,21 @@ impl CampaignModel {
             building(&mut h, &r.road);
             building(&mut h, &r.fortification);
             h.u32(r.population);
+            let p = &r.population_state;
+            for f in p.factors {
+                h.u32(f.to_bits());
+            }
+            h.u32(p.capacity);
+            h.u32(p.base_capacity);
+            h.u32(p.growth.to_bits());
+            h.u32(p.trend);
+            h.u32(u32::from(p.overcrowded));
+            h.i32(p.migrants);
+            h.u32(r.religions.len() as u32);
+            for (k, s) in &r.religions {
+                h.str(k);
+                h.u32(s.to_bits());
+            }
             h.u32(r.base_gdp);
             h.u32(r.gdp);
             h.i32(r.wealth_growth_offset);
@@ -373,6 +394,7 @@ impl CampaignModel {
 
 /// The original's `WORLD` record (W3 §3, CONFIRMED). Every collection is keyed by id.
 #[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct World {
     /// `FACTION` records (W3 §3.3).
     pub factions: BTreeMap<FactionId, Faction>,
@@ -490,6 +512,7 @@ pub struct World {
     /// file holds below `0x7fff_0000` ([`World::alloc_id`] starts above them; a file id at or above
     /// that it reaches only after handing out every id in between, see its doc). A link to a record
     /// that no longer matches is written fresh and logged once per save (`ntw_campaign`).
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub recruitment_sources: BTreeMap<RecruitmentItemId, RecruitmentSource>,
     /// Armies aboard a navy: army → the navy carrying it (see [`super::embark`]). An embarked
     /// army's commander stands at the navy's position. The original saves the pair as NAVY #4 (army
@@ -500,10 +523,12 @@ pub struct World {
     /// Agents that used their action this turn (character +0x4CC, set by every agent action and
     /// cleared when the faction's characters start their turn; CONFIRMED use, CHARACTERS_FIDELITY.md
     /// §7). Not saved (UNKNOWN whether the original saves it).
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub agents_acted: std::collections::BTreeSet<CharacterId>,
     /// Forces sabotaged by an agent (force +0xE8, set by `0x008EB660`): at its commander's next turn
     /// start his action points are set to 0 and the mark is cleared (`0x008F2290` → `0x00A2A140`). Not
     /// saved (CONFIRMED: the army loader `0x00870FD0` clears it).
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub sabotaged: std::collections::BTreeSet<ForceId>,
     /// The sight cell grid (`super::visibility`), from the loaded file; `None` when unknown.
     pub sight_grid: Option<super::visibility::SightGrid>,
@@ -533,7 +558,36 @@ pub struct World {
     /// (`0x008F2480`, humans only) the sight disc of every character with `subterfuge` > 0 who
     /// has not moved for 3 turns or more (`0x008B4120`) is listed here (position, radius) and
     /// counts as a sight source until the next turn start. Not saved (rebuilt each turn start).
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub network_sight: NetworkSight,
+    /// Each faction's campaign AI manager and personality keys (the faction's `+0x82C` / `+0x838`,
+    /// CONFIRMED, `analysis/ai/AI_RESEARCH.md` §2.3), filled by the campaign source (the original's
+    /// importer reads them from the `FACTION` record). A faction without an entry uses the AI's
+    /// PROVISIONAL naming rule (`ntw_ai::campaign::FactionAiConfig::resolve`).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ai_keys: BTreeMap<FactionId, FactionAiKeys>,
+    /// Each faction's name allocators in save order (`NAME_ALLOCATION_DETAILS`, [`super::names`]):
+    /// the decks new characters' names are drawn from. Filled by the campaign source.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub name_allocators: BTreeMap<FactionId, Vec<super::names::NameAllocator>>,
+    /// The original's own region base values (the campaign AI's `CAI_REGION_BASE_VALUE` beliefs,
+    /// CONFIRMED layout, `analysis/ai/AI_RESEARCH.md` §4), by region, as the campaign source found
+    /// them. A region without one gets the formula (`ntw_ai`).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub region_base_values: BTreeMap<RegionId, i32>,
+}
+
+/// The campaign AI keys stored with a faction ([`World::ai_keys`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct FactionAiKeys {
+    /// `campaign_ai_managers` key (faction `+0x82C`).
+    pub manager: String,
+    /// `campaign_ai_personalities` key (faction `+0x838`).
+    pub personality: String,
+    /// The two further strings (`+0x844`, `+0x850`; `"default"` in every shipped faction, meaning
+    /// UNKNOWN).
+    pub extra: [String; 2],
 }
 
 /// Each human faction's spy-network sight discs: (position, radius) per character listed at its
@@ -656,6 +710,7 @@ impl World {
 
 /// A faction. W3 §3.3 `FACTION` v18 (CONFIRMED structure; field meanings INFERRED).
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Faction {
     /// Leading i32 object id (W3 §3.3).
     pub id: FactionId,
@@ -685,6 +740,7 @@ pub struct Faction {
 /// A building standing in a region slot. W3 §3.7: each slot has an optional `BUILDING`
 /// {u32 health (100), building level key, faction, government} (CONFIRMED structure).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BuildingRef {
     /// Building level key (FK to `building_levels`, DB_CAMPAIGN_TABLES §4).
     pub level_key: String,
@@ -694,6 +750,7 @@ pub struct BuildingRef {
 
 /// One `REGION_SLOT` of a region (W3 §3.4, CONFIRMED structure).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RegionSlot {
     /// `REGION_SLOT` #3 key, e.g. `settlement:eur_france:paris:settlement_4_slot:0` or
     /// `timber:eur_france:limoges` (CONFIRMED strings).
@@ -720,6 +777,7 @@ pub struct RegionSlot {
 /// A building being built. Saves hold `BUILDING_CONSTRUCTION_ITEM` {u32, bool, u32 turns done
 /// (INFERRED), u32 total turns (INFERRED), u32 cost (INFERRED), utf16 level key (CONFIRMED)}.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ConstructionItem {
     /// The slot being built in.
     pub slot: SlotRef,
@@ -734,6 +792,7 @@ pub struct ConstructionItem {
 /// A settlement. W3 §3.7 `SETTLEMENT` v2/v3 (CONFIRMED structure): position in
 /// `SIEGEABLE_GARRISON_RESIDENCE` (i32 fixed point), key `"settlement:<region>:<town>"`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Settlement {
     /// Settlement key, e.g. `"settlement:<region>:<town>"`.
     pub key: String,
@@ -744,6 +803,7 @@ pub struct Settlement {
 /// A unit being recruited. Saves hold `RECRUITMENT_ITEM` v2 {i32 id, i32, i32, #3 u32 turns
 /// remaining (INFERRED), #4 u32 cost (INFERRED), bool, #6 unit key (CONFIRMED), ...}.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RecruitmentItem {
     /// The item's id (see [`RecruitmentItemId`]): what `CancelRecruitment` names.
     pub id: RecruitmentItemId,
@@ -758,6 +818,7 @@ pub struct RecruitmentItem {
 /// The record a loaded recruitment item came from ([`World::recruitment_sources`]): its region's
 /// recruitment manager and its index in that manager's `REGION_RECRUITMENT_ITEM_ARRAY`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RecruitmentSource {
     /// `None`: the region's own `REGION_RECRUITMENT_MANAGER` (land); `Some(i)`: the manager of
     /// `REGION_SLOT_ARRAY` item `i` (a port, naval).
@@ -768,6 +829,7 @@ pub struct RecruitmentSource {
 
 /// A region. W3 §3.7 `REGION` v5 (CONFIRMED structure).
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Region {
     /// Region id.
     pub id: RegionId,
@@ -789,8 +851,13 @@ pub struct Region {
     /// capture rolls damage on it
     /// ([`capture`](super::capture)).
     pub fortification: Option<BuildingRef>,
-    /// Total population (`POPULATION` totals, W3 §3.7). Population classes and religion are TODO.
+    /// The live population (`POPULATION/REGION_FACTORS` #2, the population object's +0x54 = region +0x7C;
+    /// CONFIRMED: the reader `0x00A4C340`; growth, conversion, garrison repression and the panel read it).
+    /// `POPULATION` #1 differs from it once the population has grown (`orig_fr_may1811`) and is not read.
     pub population: u32,
+    /// The rest of the population state (`REGION_FACTORS`, see [`super::population`]).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub population_state: super::population::PopulationState,
     /// `REGION` #9 u32: the region's base GDP (region +0xB8, CONFIRMED): the start of the GDP sum
     /// (see [`economy::recompute_region`](super::economy::recompute_region)).
     pub base_gdp: u32,
@@ -844,6 +911,7 @@ pub struct Region {
 /// `0x00A4DCB0`). Ordered as the exe walks a region's slots (`0x009B5AF0`: the slot list, then
 /// the walls, then the road; CONFIRMED).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SlotRef {
     /// A slot of [`Region::slots`], by index.
     Slot(usize),
@@ -879,6 +947,7 @@ pub enum SlotRef {
 /// read, so nothing can confirm them. What the game does with a fort (its garrison, its strength,
 /// whether armies inside it can be attacked) is also UNKNOWN here.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Fort {
     /// The item's leading `u32` ([`FortId`]). The exe's id lookup turns it into the fort's object;
     /// whether it is the fort's own id is UNKNOWN.
@@ -894,6 +963,14 @@ pub struct Fort {
 }
 
 impl Region {
+    /// What the region's constructions change when they finish, as the predictions count it: per
+    /// construction item, its slot, the level being built and the building it replaces there
+    /// (`0x00A67490` / `0x00A798F0` for the predicted effect set, `0x00A6AFC0` with its predicted flag
+    /// for each slot).
+    pub fn construction_changes(&self) -> impl Iterator<Item = (SlotRef, &str, Option<&BuildingRef>)> {
+        self.construction.iter().map(|c| (c.slot, c.level_key.as_str(), self.building_at(c.slot)))
+    }
+
     /// The building standing in a slot.
     pub fn building_at(&self, slot: SlotRef) -> Option<&BuildingRef> {
         self.construction_slot(slot).and_then(|(_, b)| b)
@@ -952,6 +1029,7 @@ impl Region {
 
 /// A character. W3 §3.5 `CHARACTER` v12/v14 (CONFIRMED structure).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Character {
     /// i32 id.
     pub id: CharacterId,
@@ -985,6 +1063,7 @@ pub struct Character {
 /// (The DB `government_types` table has 4 rows, DB_CAMPAIGN_TABLES §6; the 4th is not seen in the
 /// startpos and is not modelled.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum GovernmentType {
     /// `GOVERNMENT::ABSOLUTE_MONARCHY` / DB key `gov_absolute_monarchy`.
     AbsoluteMonarchy,
@@ -1043,6 +1122,7 @@ impl GovernmentType {
 /// A diplomatic stance. W3 §3.4 (CONFIRMED strings in `DIPLOMACY_RELATIONSHIP` v14) and
 /// DB_CAMPAIGN_TABLES §9 `stances` (5 rows, matching).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Stance {
     /// `"neutral"`. Also our default when no relationship is stored.
     #[default]
@@ -1098,6 +1178,7 @@ impl Stance {
 /// strings: General, colonel, admiral, captain, minister, gentleman, rake), plus six agent kinds
 /// found in the other campaigns' start positions (`Assassin` .. `Guerilla`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum CharacterKind {
     /// `"General"` (capital G in the ESF).
     General,
@@ -1176,6 +1257,7 @@ impl CharacterKind {
 /// A unit on the campaign map. W3 §3.6 `UNIT` v3 (CONFIRMED structure: unit record key,
 /// i32 unit_id, u32 men, u32 max_men, ...).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CampaignUnit {
     /// i32 unit id.
     pub id: UnitId,
@@ -1189,6 +1271,11 @@ pub struct CampaignUnit {
     /// colonel or captain of a unit raised alone; that character's `CHARACTER` #5 is the unit).
     /// CONFIRMED in the saves (SAVE_COMPAT.md §4).
     pub character: Option<CharacterId>,
+    /// The unit officer's name, (forename, surname) localisation keys (`UNIT` `COMMANDER_DETAILS`
+    /// #0 / #1, CONFIRMED form): a colonel or general who takes the unit over carries it
+    /// ([`super::names`]). Empty when unknown.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub officer_name: (String, String),
 }
 
 /// The full-strength size of a unit of `unit_key`: the value a freshly raised unit's `men` and
@@ -1226,6 +1313,7 @@ pub fn recruited_unit_size(rules: &super::rules::CampaignRules, unit_key: &str) 
 /// An army or navy. W3 §3.6 `ARMY` v2 / `NAVY` v1 → `MILITARY_FORCE`
 /// {u32 force_id, u32 commander_character_id, u32[]} + `UNITS_ARRAY` (CONFIRMED structure).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MilitaryForce {
     /// u32 force id.
     pub id: ForceId,
@@ -1300,6 +1388,7 @@ mod tests {
                     men: 1,
                     max_men: 1,
                     character: None,
+                    officer_name: Default::default(),
                 }],
                 is_navy: false,
             },

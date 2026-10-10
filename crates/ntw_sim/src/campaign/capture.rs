@@ -60,6 +60,7 @@ pub enum CaptureChoice {
 
 /// One option of a capture preview.
 #[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CaptureOutcome {
     /// (slot index, health after) of each building the option damages, in slot order.
     pub buildings: Vec<(usize, u32)>,
@@ -78,6 +79,7 @@ pub struct CaptureOutcome {
 
 /// What the capture screen shows (the report's three option structs).
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CapturePreview {
     /// The region taken.
     pub region: RegionId,

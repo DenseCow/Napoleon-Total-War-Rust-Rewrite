@@ -781,7 +781,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     // (0x009F79B0, CONFIRMED: copies the table's values, sorts them, appends each).
     f!("StateGiftValues", |lua, inner, ui, _a: Variadic<Value>| {
         let mut v: Vec<i32> =
-            small_table(&inner, "db/state_gift_values_tables/state_gift_values", "s,i").iter().filter_map(|r| r.get(1)?.as_i32()).collect();
+            small_table(&inner, &tables::STATE_GIFT_VALUES).iter().filter_map(|r| r.get(1)?.as_i32()).collect();
         v.sort();
         lua.create_sequence_from(v)
     });

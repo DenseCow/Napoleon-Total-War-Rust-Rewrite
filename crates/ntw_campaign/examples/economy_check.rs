@@ -37,7 +37,7 @@ fn main() {
         // Every ship type's full gun count (`SHIP_DAMAGE_INFO` #13) over the given files (`vfs:` start positions
         // or saves), against the naval unit keys of the DB.
         let vfs = ntw_formats::pack::Vfs::open_install(std::path::Path::new(data)).expect("vfs");
-        let gf = ntw_formats::campaign_map::GameFiles { vfs: &vfs, data_dir: Some(std::path::Path::new(data)) };
+        let gf = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
         let mut guns: std::collections::BTreeMap<String, std::collections::BTreeSet<u32>> = std::collections::BTreeMap::new();
         for file in &files[1..] {
             let bytes = match file.strip_prefix("vfs:") {
@@ -71,7 +71,7 @@ fn main() {
         // Each start position's map: the theatres of `regions.esf` `theatres_and_region_keys` and how many
         // region keys each lists, against the start position's regions.
         let vfs = ntw_formats::pack::Vfs::open_install(std::path::Path::new(data)).expect("vfs");
-        let gf = ntw_formats::campaign_map::GameFiles { vfs: &vfs, data_dir: Some(std::path::Path::new(data)) };
+        let gf = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
         for file in &files[1..] {
             let bytes = gf.read(file.trim_start_matches("vfs:")).expect("vfs file");
             let l = ntw_campaign::read_esf(&EsfFile::from_bytes(&bytes).expect("esf"), &db).expect("load");
@@ -95,13 +95,13 @@ fn main() {
         let vfs = ntw_formats::pack::Vfs::open_install(std::path::Path::new(data)).expect("vfs");
         for file in &files[1..] {
             let bytes = match file.strip_prefix("vfs:") {
-                Some(p) => ntw_formats::campaign_map::GameFiles { vfs: &vfs, data_dir: Some(std::path::Path::new(data)) }.read(p).expect("vfs file"),
+                Some(p) => ntw_formats::campaign_map::GameFiles { vfs: &vfs }.read(p).expect("vfs file"),
                 None => std::fs::read(file).expect("read"),
             };
             let esf = EsfFile::from_bytes(&bytes).expect("esf");
             let mut l = ntw_campaign::read_esf(&esf, &db).expect("load");
             {
-                let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs, data_dir: Some(std::path::Path::new(data)) };
+                let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
                 let map = ntw_formats::campaign_map::CampaignMap::load(&files, &l.info.map_key).expect("map");
                 l.model.terrain = Some(ntw_sim::campaign::Terrain(std::sync::Arc::new(ntw_campaign::pathing::build_grid(&map))));
             }
@@ -177,7 +177,7 @@ fn main() {
         let mut l = ntw_campaign::read_file(file, &db).expect("load");
         if std::env::var("ECON_MAP").is_ok() {
             let vfs = ntw_formats::pack::Vfs::open_install(std::path::Path::new(data)).expect("vfs");
-            let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs, data_dir: Some(std::path::Path::new(data)) };
+            let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
             let map = ntw_formats::campaign_map::CampaignMap::load(&files, &l.info.map_key).expect("map");
             l.model.terrain = Some(ntw_sim::campaign::Terrain(std::sync::Arc::new(ntw_campaign::pathing::build_grid(&map))));
             ntw_campaign::trade::attach_map(&mut l.model, &map.regions);
@@ -508,7 +508,7 @@ fn main() {
             // type, faction, rank), the conversion entries of the faction sum and of the region's own buildings.
             let fx = ntw_sim::campaign::effects::Effects::compute(m);
             let vfs = ntw_formats::pack::Vfs::open_install(std::path::Path::new(data)).expect("vfs");
-            let gf = ntw_formats::campaign_map::GameFiles { vfs: &vfs, data_dir: Some(std::path::Path::new(data)) };
+            let gf = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
             let map = ntw_formats::campaign_map::CampaignMap::load(&gf, &l.info.map_key).expect("map");
             let rm = &map.regions;
             // The regions.esf region whose area outlines hold a point (even-odd over all its loops).
@@ -656,6 +656,14 @@ fn main() {
         }
         if std::env::var("ECON_PO").is_ok() {
             po_detail(m, &esf);
+            continue;
+        }
+        if std::env::var("ECON_POPRAW").is_ok() {
+            pop_raw(m, &esf);
+            continue;
+        }
+        if let Ok(next) = std::env::var("ECON_POP") {
+            pop_check(m, &next, &db);
             continue;
         }
         if let Ok(k) = std::env::var("ECON_BUILD") {
@@ -1380,6 +1388,86 @@ pub fn po_detail(m: &ntw_sim::campaign::CampaignModel, esf: &EsfFile) {
                 model.map(|f| f.repression)
             );
         }
+    }
+}
+
+/// `ECON_POP=<next save>`: the population model against the saves. First the growth factors the model
+/// computes now against those this save stores (refreshed at the round start of its turn), then this
+/// save's populations after k model rounds (k = turns between; each round: the factors refreshed, then
+/// one growth step) against the next save's.
+pub fn pop_check(m: &ntw_sim::campaign::CampaignModel, next: &str, db: &GameDatabase) {
+    use ntw_sim::campaign::population;
+    let (mut same, mut differ) = (0, 0);
+    for r in m.world.regions.values() {
+        let set = economy::region_effect_set(m, r);
+        let input = population::FactorInputs { set: &set, hostile_units: population::hostile_units(m, r) };
+        let s = population::growth_factors(m, r, r.population, &r.population_state, &input);
+        if s.factors == r.population_state.factors && s.capacity == r.population_state.capacity && s.overcrowded == r.population_state.overcrowded {
+            same += 1;
+        } else {
+            differ += 1;
+            println!("  factors {} model {:?} cap {} over {} | saved {:?} cap {} over {} (hostile units {})", r.key, s.factors, s.capacity, s.overcrowded, r.population_state.factors, r.population_state.capacity, r.population_state.overcrowded, input.hostile_units);
+            // Every other faction's force whose commander stands in the region (any stance, navies too).
+            for f in m.world.forces.values().filter(|f| f.faction != r.owner) {
+                let Some(c) = f.commander.and_then(|c| m.world.characters.get(&c)) else { continue };
+                if economy::in_region(m, r, c) {
+                    let fk = m.world.factions.get(&f.faction).map_or("?", |x| x.key.as_str());
+                    println!("    force {:?} {fk} navy {} units {} at_war {} garrisoned {:?} kind {:?}", f.id, f.is_navy, f.units.len(), m.at_war(r.owner, f.faction), c.garrisoned_in, c.kind);
+                }
+            }
+        }
+    }
+    println!("  factors: same {same}, different {differ}");
+    let n = ntw_campaign::read_file(next, db).expect("load next");
+    let k = n.model.calendar.turns_elapsed.saturating_sub(m.calendar.turns_elapsed);
+    let mut sim = m.clone();
+    for _ in 0..k {
+        sim.refresh_population_factors();
+        let factions: Vec<_> = sim.world.factions_in_turn_order();
+        for f in factions {
+            sim.population_round_end(f);
+        }
+    }
+    let (mut same, mut differ) = (0, 0);
+    for r in sim.world.regions.values() {
+        let Some(r2) = n.model.world.regions.values().find(|x| x.key == r.key) else { continue };
+        if r.population == r2.population {
+            same += 1;
+        } else {
+            differ += 1;
+            let r0 = &m.world.regions[&r.id];
+            println!("  pop {} start {} model {} next {} (growth {} -> next stored {}) owner {:?} -> {:?}", r.key, r0.population, r.population, r2.population, r.population_state.growth, r2.population_state.growth, m.world.factions.get(&r0.owner).map(|f| f.key.clone()), n.model.world.factions.get(&r2.owner).map(|f| f.key.clone()));
+        }
+    }
+    println!("  k {k}: populations equal {same}, different {differ}");
+}
+
+/// `ECON_POPRAW=1`: each region's stored population state (`POPULATION` #1..#3 and `REGION_FACTORS`
+/// #0 growth factors, #2 population, #3 capacity, #4 base capacity, #5 growth, #6 trend, #7
+/// overcrowded, #8 migrants, #9 policing cost), as saved.
+pub fn pop_raw(m: &ntw_sim::campaign::CampaignModel, esf: &EsfFile) {
+    let regions = esf.root.find_record_array("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD/REGION_MANAGER/REGIONS_ARRAY").expect("regions");
+    for it in &regions.items {
+        let Some(r) = it.first().and_then(EsfNode::as_record) else { continue };
+        let key = r.get_str(0).unwrap_or_default();
+        let owner = m.world.regions.values().find(|x| x.key == key).and_then(|x| m.world.factions.get(&x.owner)).map_or("?", |f| f.key.as_str());
+        let Some(p) = r.child("POPULATION") else { continue };
+        let Some(f) = p.child("REGION_FACTORS") else { continue };
+        let factors = f.get(0).and_then(EsfNode::as_f32_array).map(<[f32]>::to_vec).unwrap_or_default();
+        println!(
+            "{key} {owner} pop#1..3 {:?} {:?} {:?} | f {factors:?} pop {:?} cap {:?} base {:?} g {:?} trend {:?} over {:?} mig {:?} pol {:?}",
+            p.get_u32(1),
+            p.get_u32(2),
+            p.get_u32(3),
+            f.get_u32(2),
+            f.get_u32(3),
+            f.get_u32(4),
+            f.get(5).and_then(EsfNode::as_f32),
+            f.get_u32(6),
+            f.get_bool(7),
+            f.get_i32(8),
+            f.get_i32(9)
+        );
     }
 }
 

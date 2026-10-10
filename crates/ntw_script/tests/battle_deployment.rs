@@ -144,3 +144,35 @@ fn the_orders_bar_is_the_files_first_panel_at_its_own_position() {
         assert_eq!(r.y + r.h, cards.y, "the bar sits on the cards at {w}x{h}");
     }
 }
+
+/// A battle HUD whose facts do not change asks for no redraw (polish: its pulse scripts resize,
+/// re-dock and reorder to the values already there every frame, and each call bumped the redraw
+/// counter, so the HUD was redrawn every frame).
+#[test]
+fn a_steady_battle_hud_asks_for_no_redraw() {
+    let dir = data_dir();
+    if !dir.join("data.pack").is_file() {
+        return;
+    }
+    let source = ScriptSource::from_install(&dir).expect("open packs");
+    let vfs = ntw_formats::pack::Vfs::open_install(&dir).unwrap();
+    let loc = Localisation::from_vfs(&vfs).unwrap();
+    let facts = FrontEndFacts { game_version: "test".into(), ..Default::default() };
+    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0)).unwrap();
+    ui_battle::install(&host, ScriptSource::from_install(&dir).unwrap()).expect("battle engine functions");
+    let bf = BattleHudFacts { phase: HudPhase::Conflict, speed: 1.0, ..Default::default() };
+    ui_battle::set_facts(&host, &bf).unwrap();
+    let _root = ui_battle::load_hud(&host).expect("battle HUD layout");
+    for i in 0..50 {
+        ui_battle::set_facts(&host, &bf).unwrap();
+        host.pulse(f64::from(i) * 100.0);
+    }
+    let mut gens = Vec::new();
+    for i in 50..55 {
+        ui_battle::set_facts(&host, &bf).unwrap();
+        let g0 = host.world().generation;
+        host.pulse(f64::from(i) * 100.0);
+        gens.push(host.world().generation - g0);
+    }
+    assert_eq!(gens, [0; 5], "redraws asked for by steady pulses");
+}

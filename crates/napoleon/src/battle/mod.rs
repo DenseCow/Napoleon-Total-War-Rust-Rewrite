@@ -237,52 +237,11 @@ impl BattleSim {
 
     /// Model unit `id` with its display info.
     pub fn unit_with_info(&self, id: u32) -> Option<(&LandUnit, &UnitInfo)> {
-        let i = self.battle.units.iter().position(|u| u.id == id)?;
+        let i = self.battle.unit_index(id)?;
         Some((&self.battle.units[i], self.info_at(i, id)?))
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ntw_sim::battle::fatigue::KvFatigue;
-    use ntw_sim::battle::morale::KvMorale;
-
-    fn info(id: u32) -> UnitInfo {
-        UnitInfo { id, name: format!("unit {id}"), ..UnitInfo::default() }
-    }
-
-    /// Regression (review of the polish-hotpaths branch): the HUD cards (`hud::refresh_facts`)
-    /// and the volley sounds (`audio::battle::bridge_volleys`) paired `battle.units` with `info`
-    /// by position, but the model inserts a unit in id order while `info` was appended, so a
-    /// reinforcement with a lower id gave every later unit the next unit's info. Both now pair by
-    /// id (`units_with_info`, `unit_with_info`), and `add_unit` keeps the two in one order.
-    #[test]
-    fn a_lower_id_reinforcement_keeps_every_unit_with_its_own_info() {
-        let mut battle = Battle::new(1, KvMorale::default(), KvFatigue::default());
-        battle.add_unit(LandUnit::new(2, 0, 100, (0.0, 0.0)));
-        battle.add_unit(LandUnit::new(3, 1, 100, (0.0, 900.0)));
-        let mut sim = BattleSim::new(battle, 1);
-        sim.info = vec![info(2), info(3)];
-        // Appended out of the model's order (as a bare `info.push` would).
-        sim.battle.add_unit(LandUnit::new(1, 0, 100, (0.0, -50.0)));
-        sim.info.push(info(1));
-        let pairs: Vec<(u32, u32)> = sim.units_with_info().map(|(u, i)| (u.id, i.id)).collect();
-        assert_eq!(pairs, [(1, 1), (2, 2), (3, 3)], "HUD cards");
-        for id in 1..=3 {
-            let (u, i) = sim.unit_with_info(id).unwrap();
-            assert_eq!((u.id, i.id), (id, id), "volley sound of unit {id}");
-        }
-        assert!(sim.unit_with_info(9).is_none());
-        // `add_unit` keeps `info` in the model's order, so the slot lookups stay O(1).
-        let mut sim = BattleSim::new(Battle::new(1, KvMorale::default(), KvFatigue::default()), 1);
-        for id in [2, 4, 1, 3] {
-            sim.add_unit(LandUnit::new(id, 0, 100, (0.0, 0.0)), info(id));
-        }
-        assert_eq!(sim.battle.units.iter().map(|u| u.id).collect::<Vec<_>>(), [1, 2, 3, 4]);
-        assert_eq!(sim.info.iter().map(|i| i.id).collect::<Vec<_>>(), [1, 2, 3, 4]);
-    }
-}
 
 /// Registers everything the battle needs.
 pub struct BattlePlugin;
@@ -469,4 +428,46 @@ fn trace_battle(sim: Res<BattleSim>, mut out: Local<Option<std::io::BufWriter<st
         );
     }
     let _ = w.flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ntw_sim::battle::fatigue::KvFatigue;
+    use ntw_sim::battle::morale::KvMorale;
+
+    fn info(id: u32) -> UnitInfo {
+        UnitInfo { id, name: format!("unit {id}"), ..UnitInfo::default() }
+    }
+
+    /// Regression (review of the polish-hotpaths branch): the HUD cards (`hud::refresh_facts`)
+    /// and the volley sounds (`audio::battle::bridge_volleys`) paired `battle.units` with `info`
+    /// by position, but the model inserts a unit in id order while `info` was appended, so a
+    /// reinforcement with a lower id gave every later unit the next unit's info. Both now pair by
+    /// id (`units_with_info`, `unit_with_info`), and `add_unit` keeps the two in one order.
+    #[test]
+    fn a_lower_id_reinforcement_keeps_every_unit_with_its_own_info() {
+        let mut battle = Battle::new(1, KvMorale::default(), KvFatigue::default());
+        battle.add_unit(LandUnit::new(2, 0, 100, (0.0, 0.0)));
+        battle.add_unit(LandUnit::new(3, 1, 100, (0.0, 900.0)));
+        let mut sim = BattleSim::new(battle, 1);
+        sim.info = vec![info(2), info(3)];
+        // Appended out of the model's order (as a bare `info.push` would).
+        sim.battle.add_unit(LandUnit::new(1, 0, 100, (0.0, -50.0)));
+        sim.info.push(info(1));
+        let pairs: Vec<(u32, u32)> = sim.units_with_info().map(|(u, i)| (u.id, i.id)).collect();
+        assert_eq!(pairs, [(1, 1), (2, 2), (3, 3)], "HUD cards");
+        for id in 1..=3 {
+            let (u, i) = sim.unit_with_info(id).unwrap();
+            assert_eq!((u.id, i.id), (id, id), "volley sound of unit {id}");
+        }
+        assert!(sim.unit_with_info(9).is_none());
+        // `add_unit` keeps `info` in the model's order, so the slot lookups stay O(1).
+        let mut sim = BattleSim::new(Battle::new(1, KvMorale::default(), KvFatigue::default()), 1);
+        for id in [2, 4, 1, 3] {
+            sim.add_unit(LandUnit::new(id, 0, 100, (0.0, 0.0)), info(id));
+        }
+        assert_eq!(sim.battle.units.iter().map(|u| u.id).collect::<Vec<_>>(), [1, 2, 3, 4]);
+        assert_eq!(sim.info.iter().map(|i| i.id).collect::<Vec<_>>(), [1, 2, 3, 4]);
+    }
 }

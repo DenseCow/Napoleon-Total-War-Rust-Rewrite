@@ -25,12 +25,29 @@
 //! [`PackFile`] opens files with [`std::fs::File::open`] (read-only) and has no
 //! method that writes. Only the index is kept in memory. Entry contents are fetched
 //! on demand with a seek and read, so a 4 GB pack never has to fit in RAM.
+//!
+//! # Mods
+//! [`Vfs::open_install`] mounts the vanilla install (packs + loose `data\` files).
+//! [`Vfs::open_with_mods`] adds what the original adds through `user.script.txt`
+//! (`mod "x.pack";` lines) plus our easy `mods\` folder. See `analysis/mods/MOD_LOADING.md`.
 
 mod file;
+mod mods;
+mod precedence;
 mod vfs;
 
 pub use file::{PackEntry, PackFile, PackHeader, PackType};
-pub use vfs::{Vfs, effective_language, install_language, installed_languages, set_language_override};
+pub use precedence::{PackGraph, PairResult};
+pub use mods::{
+    LOAD_ORDER_NAME, ModOptions, ModReport, ScriptCommand, TextEncoding, USER_SCRIPT_NAME, UserScript,
+    UserScriptSetting, decode_script_text, default_user_script_path, list_packs, mod_options, scan_slot_order,
+    set_mod_options,
+};
+pub use vfs::{
+    FolderFile, LOOSE_RANK, Layer, LayerKind, LayerSource, LooseDir, MODS_FOLDER_RANK, Vfs, effective_language,
+    install_language, installed_languages,
+    set_language_override,
+};
 
 use std::fmt;
 

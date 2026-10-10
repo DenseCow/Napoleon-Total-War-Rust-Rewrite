@@ -183,6 +183,54 @@ fn region_economy_is_written() {
     assert!(r.violations.is_empty(), "{:#?}", r.violations);
 }
 
+/// The population state the model changes each round (`POPULATION/REGION_FACTORS` #0, #2..#8) and the
+/// religion shares are written where the original keeps them and read back unchanged, also after a
+/// round's refresh, growth and conversion.
+#[test]
+fn region_population_is_written() {
+    let dir = data_dir();
+    if !dir.is_dir() {
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).unwrap();
+    let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
+    let l = ntw_campaign::read_esf(&esf, &db).unwrap();
+    let mut m = l.model.clone();
+    let ids: Vec<_> = m.world.regions.keys().copied().take(3).collect();
+    for (k, id) in ids.iter().enumerate() {
+        let r = m.world.regions.get_mut(id).unwrap();
+        r.population += 1234 + k as u32;
+        let p = &mut r.population_state;
+        p.factors = [0.29999998, 0.01 * k as f32, -0.37, -0.05, 0.0, 0.0, 0.02];
+        p.capacity += 17 + k as u32;
+        p.base_capacity += 5;
+        p.growth = -0.12 + k as f32;
+        p.trend = 1 + k as u32;
+        p.overcrowded = k == 1;
+        p.migrants = k as i32 - 1;
+        let n = r.religions.len() as f32;
+        for (i, (_, s)) in r.religions.iter_mut().enumerate() {
+            *s = (i as f32 + 1.0) / (n * (n + 1.0) / 2.0);
+        }
+    }
+    let check = |m: &ntw_sim::campaign::CampaignModel| {
+        let out = save::write_save(&esf, m, "france", 1).unwrap();
+        let back = ntw_campaign::read(&out.to_bytes().unwrap(), &db).unwrap();
+        for (id, a) in &m.world.regions {
+            let b = &back.model.world.regions[id];
+            assert_eq!((a.population, &a.population_state, &a.religions), (b.population, &b.population_state, &b.religions), "{}", a.key);
+        }
+        let r = ntw_campaign::save_check::check(&out);
+        assert!(r.violations.is_empty(), "{:#?}", r.violations);
+    };
+    check(&m);
+    m.refresh_population_factors();
+    for f in m.world.factions_in_turn_order() {
+        m.population_round_end(f);
+    }
+    check(&m);
+}
+
 /// The trade routes' accumulated values and the bankrupt-turn counters are read from a save and
 /// written back where the original keeps them (SAVE_COMPAT.md §12).
 #[test]
@@ -506,7 +554,7 @@ fn new_units_get_regiment_names() {
 /// (SAVE_COMPAT.md §21).
 #[test]
 fn new_characters_and_officers_get_names() {
-    use ntw_campaign::names::{self, Allocator, NameData};
+    use ntw_campaign::names::{self, read_allocator, Allocator, NameData};
     let dir = data_dir();
     if !dir.is_dir() {
         return;
@@ -517,6 +565,8 @@ fn new_characters_and_officers_get_names() {
     let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     let mut m = l.model.clone();
+    // The shipping path: the model names what it creates (`names::attach`, as `source::open`).
+    names::attach_data(&mut m, &nd);
     let france = m.faction_by_key("france").unwrap().id;
     // A new colonel-led army (a region without a garrison) and two units joining a garrison.
     let empty = m.world.regions.values().find(|r| r.owner == france && r.garrison.is_none()).unwrap().id;
@@ -528,7 +578,7 @@ fn new_characters_and_officers_get_names() {
     m.spawn_recruited_unit(garrisoned, key.clone());
     m.spawn_recruited_unit(garrisoned, key);
     let new_char = *m.world.characters.keys().find(|c| !before_chars.contains(c)).unwrap();
-    let out = save::write_save_named(&esf, &m, "france", 1, None, Some(&nd)).unwrap();
+    let out = save::write_save(&esf, &m, "france", 1).unwrap();
     let w = out.root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD").unwrap();
     let f = w.record_array("FACTION_ARRAY").unwrap().records().find(|f| f.values().filter_map(EsfNode::as_str).next() == Some("france")).unwrap();
     let group = nd.groups["france"].clone();
@@ -563,8 +613,8 @@ fn new_characters_and_officers_get_names() {
     // The allocators: exactly three draws each (one per name), written back and read again.
     let before: Vec<Allocator> = esf.root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD").unwrap().record_array("FACTION_ARRAY").unwrap().records()
         .find(|f| f.values().filter_map(EsfNode::as_str).next() == Some("france")).unwrap()
-        .children_named("NAME_ALLOCATION_DETAILS").filter_map(Allocator::read).collect();
-    let after: Vec<Allocator> = f.children_named("NAME_ALLOCATION_DETAILS").filter_map(Allocator::read).collect();
+        .children_named("NAME_ALLOCATION_DETAILS").filter_map(read_allocator).collect();
+    let after: Vec<Allocator> = f.children_named("NAME_ALLOCATION_DETAILS").filter_map(read_allocator).collect();
     for p in [names::POOL_MALE_FORENAME, names::POOL_SURNAME] {
         let pool = names::pool_rows(&nd.rows, &group, p).unwrap().len() as u32;
         let mut sim = before[p].clone();
@@ -600,6 +650,7 @@ fn character_changes_and_deaths_are_written() {
     let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     let mut m = l.model.clone();
+    ntw_campaign::names::attach_data(&mut m, &nd);
     let france = m.faction_by_key("france").unwrap().id;
     let (fid, dead) = m.world.forces.values().filter(|f| f.faction == france && !f.is_navy && f.units.len() > 1).map(|f| (f.id, f.commander.unwrap())).next().unwrap();
     let pool_dead = m.world.faction_details[&france].general_pool.0.first().copied();
@@ -625,12 +676,12 @@ fn character_changes_and_deaths_are_written() {
     }
     let colonel = m.world.forces[&fid].commander.unwrap();
     // The colonel joins the unit the original picks (`CampaignModel::commander_unit`), which has
-    // no character of its own here; the save names him after its officer.
+    // no character of its own here; the model names him after its officer.
     let pick = m.world.forces[&fid].units.iter().position(|u| u.character == Some(colonel)).expect("colonel on a unit");
     assert_eq!(m.commander_unit(fid), Some(pick));
     let first_unit = m.world.forces[&fid].units[pick].id;
     assert!(!l.model.world.characters.contains_key(&colonel));
-    let out = save::write_save_named(&esf, &m, "france", 1, None, Some(&nd)).unwrap();
+    let out = save::write_save(&esf, &m, "france", 1).unwrap();
     let bytes = out.to_bytes().unwrap();
     let back_esf = EsfFile::from_bytes(&bytes).unwrap();
     let r = ntw_campaign::save_check::check(&back_esf);
@@ -807,7 +858,7 @@ fn header_territory_map_follows_the_owners() {
     }
     let db = GameDatabase::from_install(&dir).unwrap();
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).unwrap();
-    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs, data_dir: Some(&dir) };
+    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
     let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     let pics: Vec<TheatrePictures> = l.info.header.maps.iter().filter_map(|m| TheatrePictures::load(&files, &db, &l.info.map_key, &m.theatre)).collect();
@@ -831,12 +882,8 @@ fn header_territory_map_follows_the_owners() {
     let back = EsfFile::from_bytes(&out.to_bytes().unwrap()).unwrap();
     let (old, new) = (&header_maps(&esf.root)[0].1, &header_maps(&back.root)[0].1);
     let p = &pics[0];
-    let colour = |k: &str| p.region_colours[k];
-    let region_at = |i: usize| {
-        let ix = p.lookup.indices[i] as usize;
-        let c = p.lookup.palette[ix];
-        [c[0], c[1], c[2]]
-    };
+    let colour = |k: &str| p.region_colour(k).expect("a region colour");
+    let region_at = |i: usize| p.lookup_colour(i);
     let green = |px: u32| ((px >> 8) & 0xFF) > 150 && (px >> 16 & 0xFF) < 100;
     let (mut bav, mut cor) = (0, 0);
     for i in 0..new.len() {

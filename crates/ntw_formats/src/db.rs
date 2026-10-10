@@ -296,6 +296,51 @@ impl DbTable {
         }
         Ok(Self { version: header.version, has_version_marker: header.has_version_marker, flag: header.flag, rows })
     }
+
+    /// Encodes the table back to file bytes, **in memory** (for modding tools and tests;
+    /// nothing is written to disk). Fields absent at this version are not written, so
+    /// `DbTable::read(&t.to_bytes(&s)?, &s)` gives `t` back. Returns `None` if a cell's type
+    /// does not match its schema field or a row has the wrong number of cells.
+    pub fn to_bytes(&self, schema: &Schema) -> Option<Vec<u8>> {
+        let mut b = Vec::new();
+        if self.has_version_marker {
+            b.extend_from_slice(&VERSION_MARKER);
+            b.extend_from_slice(&self.version.to_le_bytes());
+        }
+        b.push(self.flag);
+        b.extend_from_slice(&(self.rows.len() as u32).to_le_bytes());
+        let utf16 = |b: &mut Vec<u8>, s: &str| {
+            let units: Vec<u16> = s.encode_utf16().collect();
+            b.extend_from_slice(&(units.len() as u16).to_le_bytes());
+            for u in units {
+                b.extend_from_slice(&u.to_le_bytes());
+            }
+        };
+        for row in &self.rows {
+            if row.len() != schema.fields.len() {
+                return None;
+            }
+            for (f, v) in schema.fields.iter().zip(row) {
+                if self.version < f.min_version {
+                    continue;
+                }
+                match (f.ty, v) {
+                    (FieldType::Str, DbValue::Str(s)) => utf16(&mut b, s),
+                    (FieldType::OptStr, DbValue::OptStr(None)) => b.push(0),
+                    (FieldType::OptStr, DbValue::OptStr(Some(s))) => {
+                        b.push(1);
+                        utf16(&mut b, s);
+                    }
+                    (FieldType::Bool, DbValue::Bool(x)) => b.push(u8::from(*x)),
+                    (FieldType::I32, DbValue::I32(x)) => b.extend_from_slice(&x.to_le_bytes()),
+                    (FieldType::F32, DbValue::F32(x)) => b.extend_from_slice(&x.to_bits().to_le_bytes()),
+                    (FieldType::U16, DbValue::U16(x)) => b.extend_from_slice(&x.to_le_bytes()),
+                    _ => return None,
+                }
+            }
+        }
+        Some(b)
+    }
 }
 
 fn read_value(c: &mut Cursor<'_>, ty: FieldType) -> Result<DbValue, DbError> {
@@ -438,6 +483,38 @@ mod tests {
         // v2: all three.
         body.push(0);
         assert_eq!(DbTable::read(&table(Some(2), 1, &body), &s).unwrap().rows[0].len(), 3);
+    }
+
+    #[test]
+    fn to_bytes_round_trips() {
+        let s = Schema::new()
+            .field(FieldType::Str)
+            .field(FieldType::OptStr)
+            .field(FieldType::Bool)
+            .field(FieldType::F32)
+            .field_since(FieldType::U16, 1)
+            .field_since_or_copy(FieldType::I32, 2);
+        for (version, marker) in [(0, false), (1, true), (2, true)] {
+            let row = |k: &str, o: Option<&str>| {
+                vec![
+                    DbValue::Str(k.into()),
+                    DbValue::OptStr(o.map(Into::into)),
+                    DbValue::Bool(true),
+                    DbValue::F32(1.5),
+                    DbValue::U16(if version >= 1 { 7 } else { 0 }),
+                    DbValue::I32(if version >= 2 { -3 } else if version >= 1 { 7 } else { 0 }),
+                ]
+            };
+            let t = DbTable { version, has_version_marker: marker, flag: 1, rows: vec![row("é", Some("x")), row("", None)] };
+            let bytes = t.to_bytes(&s).unwrap();
+            let back = DbTable::read(&bytes, &s).unwrap();
+            // Absent columns are filled in by the reader, so compare bytes and the always-present columns.
+            assert_eq!(back.rows.len(), 2);
+            assert_eq!(back.to_bytes(&s).unwrap(), bytes, "v{version}");
+            assert_eq!(back.rows[0][..4], t.rows[0][..4]);
+        }
+        let bad = DbTable { version: 0, has_version_marker: false, flag: 1, rows: vec![vec![DbValue::I32(1)]] };
+        assert!(bad.to_bytes(&s).is_none());
     }
 
     #[test]

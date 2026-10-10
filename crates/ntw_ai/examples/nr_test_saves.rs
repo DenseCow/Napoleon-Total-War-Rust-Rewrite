@@ -56,14 +56,17 @@ impl Install {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data"));
         let db = GameDatabase::from_install(&dir).expect("db");
+        for w in &db.load_warnings {
+            eprintln!("WARN game data: {w}");
+        }
         let vfs = Vfs::open_install(&dir).expect("packs");
         let data = Arc::new(CampaignAiData::load(&vfs, &db).expect("AI tables"));
-        let startpos = GameFiles { vfs: &vfs, data_dir: Some(&dir) }.read(&format!("campaigns/{CAMPAIGN}/startpos.esf")).expect("startpos");
+        let startpos = GameFiles { vfs: &vfs }.read(&format!("campaigns/{CAMPAIGN}/startpos.esf")).expect("startpos");
         let loaded = ntw_campaign::read(&startpos, &db).expect("startpos");
-        let map = CampaignMap::load(&GameFiles { vfs: &vfs, data_dir: Some(&dir) }, &loaded.info.map_key).expect("map");
+        let map = CampaignMap::load(&GameFiles { vfs: &vfs }, &loaded.info.map_key).expect("map");
         let terrain = Terrain(Arc::new(ntw_campaign::pathing::build_grid(&map)));
         let names = ntw_campaign::names::NameData::load(&vfs, &db);
-        let files = GameFiles { vfs: &vfs, data_dir: Some(&dir) };
+        let files = GameFiles { vfs: &vfs };
         let pictures = loaded.info.header.maps.iter().filter_map(|m| ntw_campaign::header_map::TheatrePictures::load(&files, &db, &loaded.info.map_key, &m.theatre)).collect();
         Install { dir, db, data, startpos, terrain, names, pictures }
     }
@@ -75,15 +78,15 @@ impl Install {
         let mut loaded = ntw_campaign::read(&self.startpos, &self.db).expect("startpos");
         assert!(loaded.set_human(HUMAN));
         loaded.model.terrain = Some(self.terrain.clone());
+        if let Some(nd) = &self.names {
+            ntw_campaign::names::attach_data(&mut loaded.model, nd);
+        }
         let source = ScriptSource::from_install(&self.dir).expect("scripts");
         let mut host = ScriptHost::new(loaded.model, HUMAN, source).expect("script host");
         if let Err(e) = host.load_campaign(CAMPAIGN) {
             eprintln!("warning: campaign scripts: {e}");
         }
-        let esf = EsfFile::from_bytes(&self.startpos).expect("esf");
-        let keys = ntw_ai::campaign::keys::read_ai_keys(&esf.root);
-        let values = ntw_ai::campaign::keys::read_region_base_values(&esf.root);
-        driver::install_with(&mut host, self.data.clone(), keys, values);
+        driver::install(&mut host, self.data.clone());
         for name in ["NewSession", "NewCampaignStarted"] {
             let r = host.fire(name, ScriptContext::for_faction(HUMAN));
             for e in r.errors {
@@ -201,7 +204,7 @@ fn save_full(inst: &Install, host: &mut ScriptHost, name: &str, ai: AiBlock, val
     let values = script_values_out(&values);
     let source = EsfFile::from_bytes(&inst.startpos).expect("esf");
     let m = host.model();
-    let mut tree = ntw_campaign::save::write_save_named(&source, &m, HUMAN, now(), Some(&values), inst.names.as_ref()).expect("write");
+    let mut tree = ntw_campaign::save::write_save_with(&source, &m, HUMAN, now(), Some(&values)).expect("write");
     ntw_campaign::header_map::update_maps(&mut tree, &m, HUMAN, &inst.pictures);
     if let AiBlock::Version(v) = ai {
         let cai = tree.root.children.iter_mut().find_map(|c| match c {

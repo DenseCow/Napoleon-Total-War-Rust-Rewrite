@@ -11,7 +11,6 @@ use std::sync::Arc;
 
 use ntw_ai::campaign::CampaignAiData;
 use ntw_ai::campaign::driver;
-use ntw_ai::campaign::keys::read_ai_keys;
 use ntw_data::GameDatabase;
 use ntw_formats::campaign_map::{CampaignMap, GameFiles};
 use ntw_formats::esf::EsfFile;
@@ -33,11 +32,10 @@ fn main() {
     let mut loaded = ntw_campaign::read_esf(&startpos, &db).expect("load");
     loaded.set_human("france");
     let vfs = Vfs::open_install(&dir).expect("packs");
-    let map = CampaignMap::load(&GameFiles { vfs: &vfs, data_dir: Some(&dir) }, &loaded.info.map_key).expect("map");
+    let map = CampaignMap::load(&GameFiles { vfs: &vfs }, &loaded.info.map_key).expect("map");
     let mut m = loaded.model;
     m.terrain = Some(Terrain(Arc::new(ntw_campaign::pathing::build_grid(&map))));
-    let mut ctx = driver::context_for(&m, "eur_napoleon");
-    ctx.ai_keys = read_ai_keys(&startpos.root);
+    let ctx = driver::context_for(&m, "eur_napoleon");
     for _ in 0..turns {
         driver::end_turn(&mut m, &data, &ctx);
     }

@@ -810,24 +810,27 @@ build.save` (= NR-8).
   second derived step and the display text from the first (the original's quirk, kept). The
   callers are agents `0x008DAAB0`, characters `0x008B7340` / `0x008B7070`, and the record-only
   path `0x00878CD0`.
-- **Writer:** `save::write_save_named(..., Some(&NameData))`. `NameData::load` reads the names
-  table, the faction groups and the localised historical names. It names each new CHARACTER
-  (CHARACTER_DETAILS #1/#2), then each new UNIT's officer (`COMMANDER_DETAILS` #0/#1); a unit whose
-  #10 is a new colonel / captain shares his name (as in the original's saves). It writes the
-  advanced allocators 0 and 4 back (size, seed, deck) and, after a re-pick, the new `RandSeed`.
-  An allocator whose stored size is not its pool's (stale startpos sizes) starts with the pool's
-  size and an empty deck (INFERRED from the loader `0x0085EF80`).
-- **Stream: PROVISIONAL.** The names follow the original's rules, but exact names would need the
-  original's random stream and event order (our game draws at save time, the original at spawn
-  time, and other systems also use world +0xFB8).
-- **Used by:** the game's quick save (`CampaignSim::names`, loaded at campaign start) and
-  `nr_test_saves`. `write_save` / `write_save_with` keep the old behaviour (no `NameData`:
-  template names).
+- **Model-owned since 2026-10-10** (`ntw_sim::campaign::names`, analysis/modding/OWN_SAVE_FORMAT.md):
+  the model names a new character when it creates him and a new unit's officer when it raises it
+  (a unit whose #10 is a new colonel / captain shares his name; a colonel, captain or promoted general
+  made from a unit takes its officer's name unless it is a historical character's, then deck draws:
+  colonel `0x008B7EF0`, captain `0x008B7F60`, land promotion `0x008E1C20` through `0x008B7EF0`,
+  naval promotion `0x008E2260` pass unit +0x7c to `0x009940A0`, CONFIRMED), drawing
+  from its own copy of the allocators (imported from the file, saved with the model) and, for a
+  generic name's re-picks, the model's RNG. `ntw_campaign::names::attach`
+  gives it the pools (`NameData::load`: the names table, the faction groups and the localised
+  historical names). An allocator whose stored size is not its pool's (stale startpos sizes)
+  starts with the pool's size and an empty deck (INFERRED from the loader `0x0085EF80`).
+- **Writer:** writes the model's names (`CHARACTER_DETAILS` #1/#2, new units' `COMMANDER_DETAILS`
+  #0/#1) and its allocators; it draws nothing. A model without the names table keeps the template's
+  names.
+- **Stream: PROVISIONAL.** The names follow the original's rules and moment (at spawn), but exact
+  names would need the original's event order (other systems also use world +0xFB8).
 - **Tests:** `new_characters_and_officers_get_names` (save_compat). It covers names from the
   faction's pools, the colonel's unit sharing his name, distinct officers, allocators equal to the
   original's state after the same draws, a byte round-trip, and a clean `save_check`. Also
-  `charnames::tests` (the historical re-pick uses the world state; with no clash the state is
-  untouched).
+  `ntw_sim::campaign::names` tests (the historical re-pick uses the world state; with no clash the
+  state is untouched; sharing and taking over officer names draws nothing).
 
 
 ## 22. Obstacles for new commanders: `grid_obstacle::add_character_obstacle` trial (2026-10-04, morning)

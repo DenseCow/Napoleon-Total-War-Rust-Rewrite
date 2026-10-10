@@ -46,7 +46,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into());
     let vfs = Vfs::open_install(&dir).unwrap();
-    let files = GameFiles { vfs: &vfs, data_dir: Some(std::path::Path::new(&dir)) };
+    let files = GameFiles { vfs: &vfs };
     match args[0].as_str() {
         "tree" => {
             // A path on disk (e.g. a save) is read directly; anything else goes through the game files.

@@ -23,6 +23,7 @@ pub const FIRST_RELATIVE: usize = 6;
 /// One `FAMILY::MONARCHY_INFO_CHARACTER` v2 (CONFIRMED layout and object offsets from the loader
 /// `0x008C2390` and the saver `0x00890490`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FamilyMember {
     /// #0 `CAMPAIGN_LOCALISATION` strings (+0x00 / +0x0C): the name, e.g.
     /// `names_royalty_name_austriaFranz`. A relative slot counts as filled when one is not empty.
@@ -82,6 +83,7 @@ impl FamilyMember {
 
 /// `FACTION` `FAMILY` v2: ten members, the heir index, the ordinal pairs.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Family {
     /// The ten members (see the module docs for the slots).
     pub members: Vec<FamilyMember>,

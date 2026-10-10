@@ -202,6 +202,31 @@ polylines/meshes for borders, roads, rivers, coasts, trade routes, labels, trees
 sea grid, radar/lookup pictures). Saving goes through our own model serialiser, so it works for both
 sources.
 
+### 3.4 Status (branch `work/campaign-source`, 2026-10-10)
+
+Done (code in `ntw_campaign::source`, `map_display`, `own_save`; tests in `own_save_install.rs`):
+- `scene.rs` sequence → one `source::open(files, Start::New | Start::Save, db)`; `OriginalSource` is
+  the one `CampaignSource` so far.
+- Saving → our own format (`OWN_SAVE_FORMAT.md`); the passthrough ESF tree is gone from play.
+- AI keys and region base values → model fields filled by the importer; the game's AI no longer
+  reads the start position. `keys.rs` still holds one ESF reader, `read_difficulties` (each faction's
+  difficulty values, used only by the `campaign_ai` install test); it moves behind the importer when
+  the model gets the difficulty values.
+- Front end and `--campaign list` → `source::campaign_info` / `original_campaigns`.
+- `CampaignMap` in the display → `MapDisplay` (regions, heights with their scale, `MapLine`s in
+  logic units, a `GroundTexture`, coast, trees, the river texture and arrow model bytes); the
+  display reads no map file and knows no map-folder path. The pathfinding and sea-grid files stay
+  with the importer (movement grid).
+- `detail.rs:147` Vfs bypass → fixed by the port: the ground texture reads its tiles by range from
+  wherever `GameFiles::locate` finds `supertexture.stpd` (the winning pack, else the loose file).
+
+Left (separate items): the UI's `theatre_bounds` fallback still parses `regions.esf`
+(`ntw_script/src/ui/campaign/mod.rs`; the game sets the bounds itself, the fallback serves the
+harness); arrows and rivers have no shared default asset when a map lacks them; the radar and
+header pictures, path `CellInput`s and sea grid from a generator; ESF spellings and index orders in
+the model (`esf_name`, `ATTITUDE_FACTORS`, `DIPLOMACY_OPTIONS`); victory options from the
+start-position tree; `army_setup.rs`'s `UNIT_CLASSES` import.
+
 ## 4. Priorities (highest impact first)
 
 1. **Own save format** (§3.2 `play.rs:703`): without it an open-format campaign cannot be saved; it

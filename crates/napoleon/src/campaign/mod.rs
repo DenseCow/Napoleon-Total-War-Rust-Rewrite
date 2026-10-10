@@ -55,16 +55,8 @@ pub fn start_from_args(args: &[String]) -> Option<CampaignStart> {
     if name == "list" {
         match ntw_formats::pack::Vfs::open_install(crate::config::game_data_dir()) {
             Ok(vfs) => {
-                let dir = crate::config::game_data_dir();
-                let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs, data_dir: Some(&dir) };
-                let mut names: Vec<String> = files
-                    .list("campaigns/")
-                    .iter()
-                    .filter(|p| p.ends_with("\\startpos.esf"))
-                    .filter_map(|p| p.split('\\').nth(1).map(str::to_owned))
-                    .collect();
-                names.dedup();
-                names.iter().for_each(|n| println!("{n}"));
+                let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+                ntw_campaign::source::original_campaigns(&files).iter().for_each(|n| println!("{n}"));
             }
             Err(e) => eprintln!("cannot open the install: {e}"),
         }

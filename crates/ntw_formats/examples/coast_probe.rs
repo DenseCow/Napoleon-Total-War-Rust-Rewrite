@@ -9,7 +9,7 @@ fn main() {
     let map = std::env::args().nth(1).unwrap_or_else(|| "nap_europe".into());
     let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into());
     let vfs = Vfs::open_install(&dir).unwrap();
-    let files = GameFiles { vfs: &vfs, data_dir: Some(std::path::Path::new(&dir)) };
+    let files = GameFiles { vfs: &vfs };
     let m = CampaignMap::load(&files, &map).unwrap();
     for (g, c) in m.coast.iter().enumerate() {
         let mut mn = [f32::MAX; 7];

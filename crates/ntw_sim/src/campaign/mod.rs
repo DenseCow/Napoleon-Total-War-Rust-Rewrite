@@ -36,12 +36,14 @@ pub mod effects;
 pub mod characters;
 pub mod embark;
 pub mod family;
+pub mod names;
 pub mod negotiation;
 pub mod movers;
 pub mod naval;
 pub mod events;
 pub mod ids;
 pub mod pathing;
+pub mod population;
 pub mod polypath;
 pub mod polysmooth;
 pub mod rtcut;
@@ -65,7 +67,7 @@ pub use events::CampaignEvent;
 pub use ids::{CharacterId, FactionId, FortId, ForceId, RecruitmentItemId, RegionId, UnitId};
 pub use rules::{BuildingRules, BuildingTable, CampaignRules, TaxClass, UnitAutoresolve, UnitRules};
 pub use turn::{TurnState, TurnStep};
-pub use world::{SlotRef,
+pub use world::{SlotRef, FactionAiKeys,
     BuildingRef, CampaignModel, CampaignUnit, Character, CharacterKind, ConstructionItem, Faction,
     GovernmentType, MilitaryForce, RecruitmentItem, RecruitmentSource, Region, RegionSlot, Settlement, Stance,
     Terrain, World,

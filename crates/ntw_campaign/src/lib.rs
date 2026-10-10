@@ -49,6 +49,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod ai_keys;
 pub mod cai;
 pub mod cai_world;
 pub mod trade;
@@ -57,11 +58,14 @@ pub mod regiments;
 pub mod charnames;
 pub mod header_map;
 pub mod names;
+pub mod own_save;
 mod details;
 mod error;
 mod fields;
 mod obstacles;
 mod rules;
+pub mod map_display;
+pub mod source;
 pub mod shroud;
 pub mod grid_load_check;
 pub mod grid_obstacle;
@@ -92,7 +96,7 @@ pub const STARTPOS_ROOT: &str = "CAMPAIGN_STARTPOS";
 pub const SAVE_ROOT: &str = "CAMPAIGN_SAVE_GAME";
 
 /// Which kind of file was loaded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FileKind {
     /// `startpos.esf` (root `CAMPAIGN_STARTPOS`).
     Startpos,
@@ -101,7 +105,7 @@ pub enum FileKind {
 }
 
 /// `SAVE_GAME_HEADER` (v1/v2): what the load-game screen shows. Present in both file kinds.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SaveHeader {
     /// #0 the player's faction key (the default faction in a startpos).
     pub faction_key: String,
@@ -126,7 +130,7 @@ pub struct SaveHeader {
 /// height pixels (`europe_main` 605 x 300, `spain_main` 337 x 300); pixels 0xAARRGGBB, rows
 /// top-down (INFERRED from the colours). The front end's `GetExtendedSaveGameInfo` hands them to
 /// the load-game page as `Maps[theatre]` (`0x008982C0`, CONFIRMED).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct HeaderMap {
     /// Theatre key (`campaign_map_playable_areas` area), e.g. `europe_main`.
     pub theatre: String,
@@ -156,7 +160,7 @@ impl HeaderMap {
 }
 
 /// One `CAMPAIGN_SETUP/CAMPAIGN_PLAYERS_SETUP/PLAYERS_ARRAY` entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlayerSetup {
     /// #2 faction key.
     pub faction_key: String,
@@ -167,7 +171,7 @@ pub struct PlayerSetup {
 }
 
 /// Facts about the file that are not part of the simulation state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CampaignInfo {
     /// Start position or save.
     pub kind: FileKind,
@@ -236,8 +240,12 @@ pub fn load_save_file(
     load_save(&read_bytes(path.as_ref())?, db)
 }
 
-/// Loads either kind from bytes and returns the model together with header facts and warnings.
+/// Loads a start position, an original save or one of our own saves ([`own_save`]) from bytes and
+/// returns the model together with header facts and warnings.
 pub fn read(bytes: &[u8], db: &GameDatabase) -> Result<LoadedCampaign, LoadError> {
+    if own_save::is_own_save(bytes) {
+        return Ok(own_save::read(bytes, db)?);
+    }
     read_expecting(bytes, db, None)
 }
 
@@ -262,8 +270,12 @@ pub fn read_esf(esf: &EsfFile, db: &GameDatabase) -> Result<LoadedCampaign, Load
 }
 
 /// Reads only the facts the load-game screen shows (header, campaign, map, players) from a
-/// start position or save, without building the campaign model (no database needed).
+/// start position, an original save or one of our own saves, without building the campaign model
+/// (no database needed).
 pub fn read_info(bytes: &[u8]) -> Result<CampaignInfo, LoadError> {
+    if own_save::is_own_save(bytes) {
+        return Ok(own_save::read_info(bytes)?);
+    }
     let esf = EsfFile::from_bytes(bytes)?;
     let root = &esf.root;
     let kind = match root.name.as_str() {
@@ -370,9 +382,7 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
 
     let campaign_key = str_at(setup, 0, &setup_path)?.to_string();
     let mut model = CampaignModel::new(calendar, CaRng::new(seed), loaded.world);
-    let mut rules = rules_from_db(db, &campaign_key);
-    rules::fill_ship_guns(&mut rules, db, &model.world);
-    model.rules = std::sync::Arc::new(rules);
+    attach_rules(&mut model, db, &campaign_key);
     // Movement maximums include the commanders' force factor (CAMPAIGN_FIDELITY.md §Action points).
     model.refresh_movement_maximums();
     // The routes: accumulated values (SAVE_COMPAT.md §12), paths, commodity volumes and prices
@@ -383,6 +393,9 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
     trade::read_network(esf, &mut model);
     // Sight: the grid, the shrouds and the regions' sight shapes (CHARACTERS_FIDELITY.md §10).
     shroud::read(esf, &mut model);
+    // The campaign AI's manager / personality keys and region base values (AI_RESEARCH.md §2.3, §4).
+    ai_keys::fill(root, &mut model);
+    names::fill_allocators(root, &mut model);
     // The historical characters already made and the two episodic force-success switches
     // (CHARACTERS_FIDELITY.md §7, §8).
     (model.world.historical_created, model.world.force_success_for_human) = details::model_extras(model_rec);
@@ -413,6 +426,14 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
         script_values: script_values::read_script_values(esf),
         restricted_units: restrictions.units,
     })
+}
+
+/// Gives the model the campaign's rules from the DB (game data, not state: rebuilt on every load,
+/// whatever the model came from).
+pub fn attach_rules(model: &mut CampaignModel, db: &GameDatabase, campaign_key: &str) {
+    let mut rules = rules_from_db(db, campaign_key);
+    rules::fill_ship_guns(&mut rules, db, &model.world);
+    model.rules = std::sync::Arc::new(rules);
 }
 
 /// The first multiple of 8 above every integer value (and integer array element) of the tree

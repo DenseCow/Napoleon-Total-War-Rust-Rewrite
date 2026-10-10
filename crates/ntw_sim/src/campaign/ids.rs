@@ -15,6 +15,7 @@ macro_rules! campaign_id {
     ($(#[$meta:meta])* $name:ident, $raw:ty) => {
         $(#[$meta])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize), serde(transparent))]
         pub struct $name(pub $raw);
 
         impl $name {

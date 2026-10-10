@@ -21,6 +21,7 @@ pub const INV_16384: f32 = 6.103_609e-5;
 ///
 /// `Clone` lets you copy an RNG (useful in tests); there is no hidden global state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CaRng {
     /// The raw 32-bit LCG state. Public so that saves / desync logs can read and restore it.
     pub state: u32,

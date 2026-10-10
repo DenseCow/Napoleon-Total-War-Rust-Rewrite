@@ -39,7 +39,7 @@ fn fixture() -> Option<&'static Fixture> {
         }
         let db = GameDatabase::from_install(&dir).expect("DB");
         let vfs = Vfs::open_install(&dir).expect("vfs");
-        let files = GameFiles { vfs: &vfs, data_dir: Some(&dir) };
+        let files = GameFiles { vfs: &vfs };
         let bytes = files.read("campaigns/eur_napoleon/startpos.esf").expect("startpos");
         let source = EsfFile::from_bytes(&bytes).expect("esf");
         let loaded = ntw_campaign::read_esf(&source, &db).expect("load");

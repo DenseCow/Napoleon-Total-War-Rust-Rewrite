@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use ntw_data::GameDatabase;
 use ntw_formats::pack::Vfs;
 
-use crate::tables::{self, TableError, col_bool, col_f32, col_i32, col_str, layouts};
+use crate::tables::{self, TableError, col_bool, col_f32, col_i32, col_str, keys, layouts};
 
 /// One row of `cdir_unit_balances` (CONFIRMED layout; column meanings INFERRED from the values).
 #[derive(Debug, Clone, PartialEq)]
@@ -84,6 +84,8 @@ pub struct CampaignAiData {
     pub buildings: BTreeMap<String, AiBuildingInfo>,
     /// Chain key → category (`military`, `money`, `agriculture`, `research`, `happiness`, `government`).
     pub chain_category: BTreeMap<String, String>,
+    /// Mod table files that did not decode and were skipped (one line each; the caller logs them).
+    pub load_warnings: Vec<String>,
 }
 
 impl CampaignAiData {
@@ -97,29 +99,31 @@ impl CampaignAiData {
     /// Loads everything from a mounted VFS and the typed database.
     pub fn load(vfs: &Vfs, db: &GameDatabase) -> Result<Self, TableError> {
         let mut d = CampaignAiData::default();
-        for r in tables::load_raw(vfs, "campaign_ai_personalities", layouts::CAMPAIGN_AI_PERSONALITIES)?.rows {
+        let mut warnings = Vec::new();
+        let w = &mut warnings;
+        for r in tables::load_raw(vfs, "campaign_ai_personalities", layouts::CAMPAIGN_AI_PERSONALITIES, keys::first, w)?.rows {
             let key = col_str(&r, 0).to_string();
             if col_bool(&r, 1) {
                 d.default_personality = key.clone();
             }
             d.personalities.entry(key).or_default();
         }
-        for r in tables::load_raw(vfs, "campaign_ai_personality_junctions", layouts::CAMPAIGN_AI_PERSONALITY_JUNCTIONS)?.rows {
+        for r in tables::load_raw(vfs, "campaign_ai_personality_junctions", layouts::CAMPAIGN_AI_PERSONALITY_JUNCTIONS, keys::junction, w)?.rows {
             d.personalities
                 .entry(col_str(&r, 0).to_string())
                 .or_default()
                 .insert(col_str(&r, 1).to_string(), col_f32(&r, 2));
         }
-        for r in tables::load_raw(vfs, "campaign_ai_managers", layouts::CAMPAIGN_AI_MANAGERS)?.rows {
+        for r in tables::load_raw(vfs, "campaign_ai_managers", layouts::CAMPAIGN_AI_MANAGERS, keys::first, w)?.rows {
             d.managers.entry(col_str(&r, 0).to_string()).or_default();
         }
-        for r in tables::load_raw(vfs, "campaign_ai_manager_behaviour_junctions", layouts::CAMPAIGN_AI_MANAGER_BEHAVIOUR_JUNCTIONS)?.rows {
+        for r in tables::load_raw(vfs, "campaign_ai_manager_behaviour_junctions", layouts::CAMPAIGN_AI_MANAGER_BEHAVIOUR_JUNCTIONS, keys::junction, w)?.rows {
             d.managers
                 .entry(col_str(&r, 0).to_string())
                 .or_default()
                 .insert(col_str(&r, 1).to_string(), col_f32(&r, 2));
         }
-        for r in tables::load_raw(vfs, "cdir_unit_balances", "siisffi")?.rows {
+        for r in tables::load_raw(vfs, "cdir_unit_balances", "siisffi", keys::cdir_unit_balances, w)?.rows {
             d.unit_balances.push(UnitBalance {
                 config: col_str(&r, 0).to_string(),
                 min_units: col_i32(&r, 1),
@@ -131,7 +135,7 @@ impl CampaignAiData {
             });
         }
         let mut quality = BTreeMap::new();
-        for r in tables::load_raw(vfs, "cdir_unit_qualities", layouts::CDIR_UNIT_QUALITIES)?.rows {
+        for r in tables::load_raw(vfs, "cdir_unit_qualities", layouts::CDIR_UNIT_QUALITIES, keys::cdir_unit_qualities, w)?.rows {
             if col_str(&r, 0) == "default" {
                 quality.insert(col_str(&r, 2).to_string(), col_i32(&r, 3));
             }
@@ -154,9 +158,10 @@ impl CampaignAiData {
                 AiBuildingInfo { chain: b.chain.clone(), level: b.level, cost: b.cost, turns: b.construction_turns },
             );
         }
-        for r in tables::load_raw(vfs, "building_chains", layouts::BUILDING_CHAINS)?.rows {
+        for r in tables::load_raw(vfs, "building_chains", layouts::BUILDING_CHAINS, keys::first, w)?.rows {
             d.chain_category.insert(col_str(&r, 0).to_string(), col_str(&r, 3).to_string());
         }
+        d.load_warnings = warnings;
         Ok(d)
     }
 

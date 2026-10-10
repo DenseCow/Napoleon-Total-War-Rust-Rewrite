@@ -572,6 +572,13 @@ fn read_unit(rec: &EsfRecord, path: &str) -> Result<CampaignUnit, LoadError> {
         max_men: u32_at(rec, 6, path)?,
         // #10: the attached character (CONFIRMED, see `CampaignUnit::character`).
         character: rec.get_u32(10).filter(|&c| c != 0).map(|c| CharacterId(c as i32)),
+        // The officer's name: `COMMANDER_DETAILS` #0 / #1 {utf16 localisation key} (CONFIRMED form,
+        // SAVE_COMPAT.md §21); empty when the record is not there.
+        officer_name: {
+            let cd = rec.child("COMMANDER_DETAILS");
+            let name = |i: usize| cd.and_then(|cd| cd.get(i)).and_then(EsfNode::as_record).and_then(|l| l.get_str(0)).unwrap_or("").to_string();
+            (name(0), name(1))
+        },
     })
 }
 
@@ -587,11 +594,34 @@ fn read_region(rec: &EsfRecord, path: &str, check: &mut Checker<'_>) -> Result<(
     // Region id: stored as i32; `RegionId` wraps a u32, so we keep the same 32 bits.
     let id = i32_at(rec, 4, path)? as u32;
     let owner = u32_at(rec, 20, path)? as i32;
-    let population = u32_at(
-        child(rec, "POPULATION", path)?,
-        1,
-        &format!("{path}/POPULATION"),
-    )?;
+    let pop_rec = child(rec, "POPULATION", path)?;
+    let total = u32_at(pop_rec, 1, &format!("{path}/POPULATION"))?;
+    // `REGION_FACTORS` (the reader `0x00A4C340`, CONFIRMED layout): #0 f32[7] growth factors, #2 the live
+    // population, #3 capacity, #4 base capacity, #5 growth, #6 trend, #7 overcrowded, #8 migrants. Without
+    // the record the population is `POPULATION` #1 (equal to #2 until it has grown) and the state starts
+    // empty, as a new population object does (`0x00A4C340`'s defaults: trend 2).
+    let factors_rec = pop_rec.child("REGION_FACTORS");
+    let population = factors_rec.and_then(|f| f.get_u32(2)).unwrap_or(total);
+    let population_state = match factors_rec {
+        Some(f) => {
+            let mut factors = [0.0f32; 7];
+            if let Some(a) = f.get(0).and_then(EsfNode::as_f32_array) {
+                for (d, s) in factors.iter_mut().zip(a) {
+                    *d = *s;
+                }
+            }
+            ntw_sim::campaign::population::PopulationState {
+                factors,
+                capacity: f.get_u32(3).unwrap_or(0),
+                base_capacity: f.get_u32(4).unwrap_or(0),
+                growth: f.get(5).and_then(EsfNode::as_f32).unwrap_or(0.0),
+                trend: f.get_u32(6).unwrap_or(2),
+                overcrowded: f.get_bool(7).unwrap_or(false),
+                migrants: f.get_i32(8).unwrap_or(0),
+            }
+        }
+        None => ntw_sim::campaign::population::PopulationState { trend: 2, ..Default::default() },
+    };
 
     let spath = format!("{path}/SETTLEMENT");
     let settlement = child(rec, "SETTLEMENT", path)?;
@@ -693,6 +723,7 @@ fn read_region(rec: &EsfRecord, path: &str, check: &mut Checker<'_>) -> Result<(
         road,
         fortification,
         population,
+        population_state,
         base_gdp,
         gdp,
         wealth_growth_offset,

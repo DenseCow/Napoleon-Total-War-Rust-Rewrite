@@ -32,8 +32,11 @@ pub struct CampaignSim {
     pub campaign: String,
     /// The human player's faction key.
     pub human: String,
-    /// The file the campaign was loaded from (startpos or save), kept to write saves from.
-    pub source: Arc<Vec<u8>>,
+    /// The facts of the campaign as loaded (key, map, players, header); a save's header is made from
+    /// them (`ntw_campaign::own_save::save_header`).
+    pub info: ntw_campaign::CampaignInfo,
+    /// The rebel faction, if the campaign has one (kept in saves).
+    pub rebel_faction: Option<FactionId>,
     /// Bumped after every change, so displays know when to refresh.
     pub generation: u64,
     /// The selected character.
@@ -56,8 +59,6 @@ pub struct CampaignSim {
     pub last_message: String,
     /// Harness (`--campaign-demo`): a fixed logic (x, z) for the path preview instead of the cursor.
     pub demo_target: Option<(f32, f32)>,
-    /// Names data for naming new characters and unit officers in saves (`None`: template names).
-    pub names: Option<Arc<ntw_campaign::names::NameData>>,
     /// The theatres' base and lookup pictures for the save header's territory maps
     /// (`ntw_campaign::header_map`).
     pub pictures: Arc<Vec<ntw_campaign::header_map::TheatrePictures>>,
@@ -681,31 +682,35 @@ pub fn preview(
 }
 
 /// `F5`: writes the campaign to `<NapoleonRust user folder>\save_games\quick_save.save` (never the
-/// original game's folder).
+/// original game's folder), in our own save format (`ntw_campaign::own_save`).
 pub fn quick_save(sim: &mut CampaignSim) {
-    let Some(dir) = crate::config::user_dir().map(|d| d.join("save_games")) else { return };
+    let Some(dir) = crate::config::user_dir().map(|d| d.join("save_games")) else {
+        sim.last_message = "Save failed: no user folder".to_owned();
+        warn!("Campaign: {}", sim.last_message);
+        return;
+    };
     // The scripts write their `save_value` slots during `SavingGame` (CAMPAIGN_DATA.md §4).
     let (values, report) = sim.host.save_values();
     for e in report.errors {
         warn!("Campaign script SavingGame: {e}");
     }
-    let values = script_values_out(&values);
-    // The scripts' restricted lists (EPISODIC_RESTRICTIONS): without them a loaded game offers
-    // the tutorial and Peninsular buildings again.
-    let restrictions = {
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as u32);
+    let (info, data) = {
         let st = sim.host.state();
-        ntw_campaign::script_values::ScriptRestrictions {
-            buildings: st.model.world.restricted_buildings.iter().cloned().collect(),
-            units: st.restricted_units.iter().cloned().collect(),
-        }
+        let info = ntw_campaign::own_save::save_header(&sim.info, &st.model, &sim.human, ts, &sim.pictures);
+        let data = ntw_campaign::own_save::SaveData {
+            human: sim.human.clone(),
+            model: st.model.clone(),
+            rebel_faction: sim.rebel_faction,
+            script_values: script_values_out(&values),
+            // The scripts' restricted units (EPISODIC_RESTRICTIONS): without them a loaded game
+            // offers the tutorial and Peninsular units again (the levels are in the model).
+            restricted_units: st.restricted_units.iter().cloned().collect(),
+        };
+        (info, data)
     };
     let result = (|| -> Result<std::path::PathBuf, Box<dyn std::error::Error + Send + Sync>> {
-        let source = ntw_formats::esf::EsfFile::from_bytes(&sim.source)?;
-        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as u32);
-        let mut tree = ntw_campaign::save::write_save_named(&source, &sim.model(), &sim.human, ts, Some(&values), sim.names.as_deref())?;
-        ntw_campaign::script_values::write_restrictions(&mut tree, &restrictions);
-        ntw_campaign::header_map::update_maps(&mut tree, &sim.model(), &sim.human, &sim.pictures);
-        let bytes = tree.to_bytes()?;
+        let bytes = ntw_campaign::own_save::write(&info, &data)?;
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("quick_save.save");
         std::fs::write(&path, bytes)?;

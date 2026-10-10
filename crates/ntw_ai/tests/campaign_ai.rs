@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use ntw_ai::campaign::driver::{self, AiTurnReport};
-use ntw_ai::campaign::keys::{FactionAiKeys, read_ai_keys};
+use ntw_ai::campaign::keys::FactionAiKeys;
 use ntw_ai::campaign::world::dist;
 use ntw_ai::campaign::{Node, AiOrder, AiWorld, CampaignAiData, FactionAiConfig};
 use ntw_data::GameDatabase;
@@ -44,10 +44,11 @@ fn fixture() -> Option<&'static Fixture> {
         let mut loaded = ntw_campaign::read_file(&sp, &db).expect("startpos");
         assert!(loaded.set_human("france"));
         let vfs = Vfs::open_install(&dir).expect("packs");
-        let files = GameFiles { vfs: &vfs, data_dir: Some(&dir) };
+        let files = GameFiles { vfs: &vfs };
         let map = CampaignMap::load(&files, &loaded.info.map_key).expect("map");
         loaded.model.terrain = Some(Terrain(Arc::new(ntw_campaign::pathing::build_grid(&map))));
-        let keys = read_ai_keys(&ntw_formats::esf::EsfFile::open(&sp).expect("esf").root);
+        // The model holds them (World::ai_keys, filled by the importer); by faction key for the tests.
+        let keys = loaded.model.world.ai_keys.iter().map(|(id, k)| (loaded.model.world.factions[id].key.clone(), k.clone())).collect();
         Some(Fixture { model: loaded.model, data: Arc::new(data), keys })
     })
     .as_ref()
@@ -61,8 +62,7 @@ fn faction(m: &CampaignModel, key: &str) -> FactionId {
 /// AI turn's report.
 fn play(f: &Fixture, turns: u32) -> (CampaignModel, Vec<AiTurnReport>) {
     let mut m = f.model.clone();
-    let mut ctx = driver::context_for(&m, "eur_napoleon");
-    ctx.ai_keys = f.keys.clone();
+    let ctx = driver::context_for(&m, "eur_napoleon");
     let mut log = Vec::new();
     for _ in 0..turns {
         let (_, reports) = driver::end_turn(&mut m, &f.data, &ctx);
@@ -273,7 +273,7 @@ fn ai_plays_inside_the_script_host() {
     let source = ntw_script::ScriptSource::from_install(data_dir()).expect("scripts");
     let mut host = ntw_script::ScriptHost::new(f.model.clone(), "france", source).expect("host");
     host.load_campaign("eur_napoleon").expect("scripts load");
-    let log = driver::install(&mut host, f.data.clone(), f.keys.clone());
+    let log = driver::install(&mut host, f.data.clone());
     host.fire("NewSession", ntw_script::ScriptContext::for_faction("france"));
     host.fire("NewCampaignStarted", ntw_script::ScriptContext::for_faction("france"));
     host.start_campaign();
@@ -293,7 +293,7 @@ fn ai_plays_inside_the_script_host() {
 }
 
 /// Every faction's manager and personality keys come from its `FACTION` record (CONFIRMED
-/// source, `keys::read_ai_keys`), and they name rows of the AI tables.
+/// source, `ntw_campaign::ai_keys`, held in the model), and they name rows of the AI tables.
 #[test]
 fn ai_keys_come_from_the_startpos() {
     let Some(f) = fixture() else { return };
@@ -323,7 +323,7 @@ fn region_base_values_come_from_the_startpos() {
         eprintln!("skipped: no install");
         return;
     }
-    let v = ntw_ai::campaign::keys::read_region_base_values(&ntw_formats::esf::EsfFile::open(&sp).expect("esf").root);
+    let v = ntw_campaign::ai_keys::read_region_base_values(&ntw_formats::esf::EsfFile::open(&sp).expect("esf").root);
     assert_eq!(v.len(), 72);
     assert_eq!(v["eur_france"], 50450);
     assert_eq!(v["eur_gibraltar"], 16900);
@@ -334,8 +334,7 @@ fn region_base_values_come_from_the_startpos() {
 fn bdi_pool_builds_the_goal_tree() {
     let Some(f) = fixture() else { return };
     let w = AiWorld::from_model(&f.model);
-    let mut ctx = driver::context_for(&f.model, "eur_napoleon");
-    ctx.ai_keys = f.keys.clone();
+    let ctx = driver::context_for(&f.model, "eur_napoleon");
     let austria = faction(&f.model, "austria");
     let mut rng = ntw_sim::rng::CaRng::new(12345);
     let (orders, pool) = ntw_ai::campaign::take_turn_with_plan(&w, &f.data, &ctx, austria, &mut rng);

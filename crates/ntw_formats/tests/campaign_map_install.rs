@@ -18,7 +18,7 @@ fn data_dir() -> PathBuf {
 fn all_maps_load() {
     let dir = data_dir();
     let vfs = Vfs::open_install(&dir).unwrap();
-    let files = GameFiles { vfs: &vfs, data_dir: Some(&dir) };
+    let files = GameFiles { vfs: &vfs };
     for name in ["nap_europe", "nap_italy", "nap_egypt", "nap_spain", "nap_tut"] {
         let m = CampaignMap::load(&files, name).unwrap_or_else(|e| panic!("{name}: {e}"));
         let settlements = m.regions.regions.iter().filter(|r| r.settlement.is_some()).count();
@@ -59,7 +59,7 @@ fn all_maps_load() {
 fn display_scale_matches_region_outlines() {
     let dir = data_dir();
     let vfs = Vfs::open_install(&dir).unwrap();
-    let files = GameFiles { vfs: &vfs, data_dir: Some(&dir) };
+    let files = GameFiles { vfs: &vfs };
     let m = CampaignMap::load(&files, "nap_europe").unwrap();
     let mut grid: std::collections::HashMap<(i32, i32), Vec<(f32, f32)>> = Default::default();
     for &v in &m.regions.vertices {
@@ -95,7 +95,7 @@ fn display_scale_matches_region_outlines() {
 fn the_shipped_border_ribbon_is_geometry_only_and_parses_to_the_byte() {
     let dir = data_dir();
     let vfs = Vfs::open_install(&dir).unwrap();
-    let files = GameFiles { vfs: &vfs, data_dir: Some(&dir) };
+    let files = GameFiles { vfs: &vfs };
     let raw = files.read("testdata\\westerneuborders.rigid_mesh").expect("the ribbon ships");
     assert_eq!(raw.len(), 39_858, "the file's exact length");
 

@@ -88,6 +88,8 @@ fn region(id: u32, owner: FactionId, gdp: u32, slots: usize) -> Region {
         tax_exempt: false,
         religions: Vec::new(),
         class_bases: Vec::new(),
+        // The shipped start positions give every region a base capacity of twice its population.
+        population_state: super::population::PopulationState { base_capacity: gdp * 200, trend: 2, ..Default::default() },
         recruitment_queue: Vec::new(),
         construction: Vec::new(),
         garrison: None,
@@ -114,7 +116,7 @@ fn character(id: i32, faction: FactionId, kind: CharacterKind, mp: i32) -> Chara
 }
 
 fn unit(id: i32) -> CampaignUnit {
-    CampaignUnit { id: UnitId(id), unit_key: "test_unit".into(), men: 80, max_men: 100, character: None }
+    CampaignUnit { id: UnitId(id), unit_key: "test_unit".into(), men: 80, max_men: 100, character: None, officer_name: Default::default() }
 }
 
 /// A small MADE-UP world: 3 factions (turn order B, A, C), 3 regions, 3 characters, 2 forces,
@@ -2698,7 +2700,7 @@ fn religion_conversion_follows_the_exe_formula() {
     let flows = m.conversion_flows(RegionId(10));
     assert_eq!(flows.len(), 1);
     assert!((flows[0].amount - 2064.0).abs() < 0.01, "{flows:?}");
-    m.religion_round_end(A);
+    m.convert_region(RegionId(10));
     let rel = &m.world.regions[&RegionId(10)].religions;
     assert!((rel[0].1 - 0.52064).abs() < 1e-5 && (rel[1].1 - 0.47936).abs() < 1e-5, "{rel:?}");
 }
@@ -3076,7 +3078,7 @@ fn navies_fight_through_the_model() {
     rules.ships.insert("test_ship".into(), ShipRules { crews: [20, 20, 100], hull: 2000.0, sink_weight: 0.45, morale: 9.0, fire: [60, 40], guns: 32, range: 2, ..Default::default() });
     m.rules = Arc::new(rules);
     m.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
-    let ship = |id: i32| CampaignUnit { id: UnitId(id), unit_key: "test_ship".into(), men: 140, max_men: 140, character: None };
+    let ship = |id: i32| CampaignUnit { id: UnitId(id), unit_key: "test_ship".into(), men: 140, max_men: 140, character: None, officer_name: Default::default() };
     for (fid, fac, cid, units, x) in [(2000u32, A, 200, vec![ship(50), ship(51), ship(52)], 0), (2001, B, 201, vec![ship(53)], 1)] {
         let mut c = character(cid, fac, CharacterKind::Admiral, 30);
         c.position = pos(x, 0);
@@ -3892,4 +3894,107 @@ fn exempt_unit_classes_do_not_desert() {
     let (mixed, next_mixed) = run(&["test_guard", "test_cuirassiers", "test_general", "test_elephants", "test_unit"]);
     assert_eq!(mixed, vec![80, 80, 80, 80, alone[0]]);
     assert_eq!(next_mixed, next_alone, "the exempt units drew no random number");
+}
+
+#[test]
+fn population_factors_round_to_hundredths_as_the_exe_stores_them() {
+    use super::effects::EffectSet;
+    use super::population::{growth_factors, hundredths, FactorInputs};
+    // The vanilla saves' stored values: 0.3 → 0.29999998, −0.37 → −0.37, eight hostile units × −0.05 →
+    // −0.39999998 (the product of 0.01f and 40 lies exactly between two floats and rounds to even).
+    assert_eq!(hundredths(0.3).to_bits(), 0.29999998f32.to_bits());
+    assert_eq!(hundredths(-0.37).to_bits(), (-0.37f32).to_bits());
+    assert_eq!(hundredths(8.0 * -0.05).to_bits(), (-0.39999998f32).to_bits());
+    let mut m = test_model();
+    let mut rules = (*m.rules).clone();
+    rules.variables.insert("baseline_pop_growth".into(), 0.3);
+    m.rules = Arc::new(rules);
+    let r = m.world.regions[&RegionId(10)].clone();
+    let set = EffectSet::default();
+    let s = growth_factors(&m, &r, r.population, &r.population_state, &FactorInputs { set: &set, hostile_units: 8 });
+    assert_eq!(s.factors[0].to_bits(), 0.29999998f32.to_bits());
+    assert_eq!(s.factors[3].to_bits(), (-0.39999998f32).to_bits());
+    assert_eq!(s.capacity, r.population_state.base_capacity);
+    assert!(!s.overcrowded);
+    // Above 90% of the capacity: food shortages (0.9 − r) × 10 × (base + buildings + ports).
+    let crowded = growth_factors(&m, &r, r.population_state.base_capacity / 100 * 95, &r.population_state, &FactorInputs { set: &set, hostile_units: 0 });
+    assert!(crowded.overcrowded);
+    assert_eq!(crowded.factors[4], hundredths((0.9 - 0.95f32) * 10.0 * 0.29999998));
+}
+
+#[test]
+fn population_grows_by_its_rounded_share_and_keeps_the_minimum() {
+    use super::population::{grow, PopulationState};
+    let mut m = test_model();
+    let mut rules = (*m.rules).clone();
+    rules.variables.insert("minimum_population".into(), 1000.0);
+    m.rules = Arc::new(rules);
+    let r = m.world.regions[&RegionId(10)].clone();
+    // `auto_nr4_t4` → `orig_over_nr4_0252`, eur_east_prussia: 1296529 at −0.07% → 1295621, down.
+    let state = PopulationState { factors: [0.29999998, 0.0, -0.37, 0.0, 0.0, 0.0, 0.0], trend: 3, ..Default::default() };
+    let (pop, next) = grow(&m, &r, 1_296_529, &state);
+    assert_eq!((pop, next.trend), (1_295_621, 3));
+    // Never below `minimum_population`; unchanged reads as trend 2.
+    assert_eq!(grow(&m, &r, 1000, &state).0, 1000);
+    assert_eq!(grow(&m, &r, 1000, &state).1.trend, 2);
+    let up = PopulationState { factors: [0.29999998, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], ..Default::default() };
+    assert_eq!(grow(&m, &r, 100_000, &up), (100_300, PopulationState { growth: up.factors[0], trend: 1, ..up.clone() }));
+}
+
+#[test]
+fn religion_normalisation_drops_dust_and_leaves_an_empty_breakdown_alone() {
+    use super::population::normalise_religions;
+    let mut shares = vec![("a".to_string(), 0.6f32), ("b".to_string(), 0.3), ("c".to_string(), 0.0004)];
+    normalise_religions(&mut shares);
+    assert_eq!(shares[2].1, 0.0);
+    assert!((shares[0].1 - 0.6 / 0.9).abs() < 1e-6 && (shares[1].1 - 0.3 / 0.9).abs() < 1e-6);
+    // ORIGINAL BUG (0x00AA4860): the exe writes the first share of an empty breakdown through a null list.
+    let mut empty: Vec<(String, f32)> = Vec::new();
+    normalise_religions(&mut empty);
+    assert!(empty.is_empty());
+    let mut zero = vec![("a".to_string(), 0.0f32), ("b".to_string(), 0.0)];
+    normalise_religions(&mut zero);
+    assert_eq!((zero[0].1, zero[1].1), (1.0, 0.0));
+}
+
+#[test]
+fn the_round_end_refreshes_then_grows_every_region() {
+    let mut m = test_model();
+    let mut rules = (*m.rules).clone();
+    rules.variables.insert("baseline_pop_growth".into(), 0.3);
+    m.rules = Arc::new(rules);
+    let before = m.world.regions[&RegionId(10)].population;
+    m.end_turn();
+    m.end_turn();
+    m.end_turn();
+    let r = &m.world.regions[&RegionId(10)];
+    assert!(r.population > before, "{} -> {}", before, r.population);
+    assert_eq!(r.population_state.trend, 1);
+    assert_eq!(r.population_state.factors[0].to_bits(), 0.29999998f32.to_bits());
+}
+
+#[test]
+fn town_wealth_growth_breaks_down_by_factor_and_predicts_constructions() {
+    use super::economy::{region_wealth, wealth_trend};
+    let mut m = test_model();
+    let mut rules = (*m.rules).clone();
+    rules.buildings.get_mut("test_building_level").unwrap().effects.push(("tw_growth_education".into(), 7.0));
+    rules.buildings.get_mut("test_building_level_2").unwrap().effects.push(("tw_growth_roads".into(), 30.0));
+    m.rules = Arc::new(rules);
+    let r = m.world.regions.get_mut(&RegionId(10)).unwrap();
+    r.discontent_growth = -4;
+    let reg = r.clone();
+    let now = region_wealth(&m, None, &reg, false);
+    assert_eq!(now.factors[0], 7, "{now:?}");
+    assert_eq!(now.factors[9], -4);
+    assert_eq!(now.growth, super::economy::recompute_region(&m, &reg).1);
+    // Predicted: the level under construction in the slot's place (the education building upgraded to roads).
+    let r = m.world.regions.get_mut(&RegionId(10)).unwrap();
+    r.construction.push(ConstructionItem { slot: SlotRef::Slot(0), level_key: "test_building_level_2".into(), turns_remaining: 2, cost: 600 });
+    let reg = r.clone();
+    let next = region_wealth(&m, None, &reg, true);
+    assert_eq!((next.factors[0], next.factors[4]), (0, 30), "{next:?}");
+    assert_eq!(region_wealth(&m, None, &reg, false), now);
+    // The trend codes of 0x00AB4410.
+    assert_eq!([21, 20, 1, 0, -1, -20, -21].map(wealth_trend), [0, 1, 1, 2, 3, 3, 4]);
 }

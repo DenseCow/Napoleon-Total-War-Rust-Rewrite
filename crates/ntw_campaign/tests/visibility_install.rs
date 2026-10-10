@@ -25,7 +25,7 @@ fn startpos(campaign: &str) -> Option<(EsfFile, CampaignModel)> {
     }
     let db = GameDatabase::from_install(&dir).expect("DB");
     let vfs = Vfs::open_install(&dir).expect("vfs");
-    let bytes = GameFiles { vfs: &vfs, data_dir: Some(&dir) }.read(&format!("campaigns/{campaign}/startpos.esf")).expect("startpos");
+    let bytes = GameFiles { vfs: &vfs }.read(&format!("campaigns/{campaign}/startpos.esf")).expect("startpos");
     let esf = EsfFile::from_bytes(&bytes).expect("esf");
     let l = ntw_campaign::read_esf(&esf, &db).expect("load");
     Some((esf, l.model))
@@ -127,7 +127,7 @@ fn stealth_rule_matches_the_saved_hidden_flags() {
     }
     let db = GameDatabase::from_install(&dir).expect("DB");
     let vfs = Vfs::open_install(&dir).expect("vfs");
-    let files = GameFiles { vfs: &vfs, data_dir: Some(&dir) };
+    let files = GameFiles { vfs: &vfs };
     let mut checked = 0;
     let mut hidden_seen = 0;
     for name in ["auto_nr4_t4", "auto_after_c8", "orig_fr_t1", "orig_fr_may1811"] {

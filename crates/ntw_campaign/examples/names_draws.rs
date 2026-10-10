@@ -4,7 +4,7 @@
 //! or a unit's officer names (`UNIT/COMMANDER_DETAILS` #0/#1).
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use ntw_campaign::names::{self, Allocator};
+use ntw_campaign::names::{self, read_allocator, Allocator};
 use ntw_data::GameDatabase;
 use ntw_formats::esf::{EsfFile, EsfNode, EsfRecord};
 use ntw_formats::pack::Vfs;
@@ -25,7 +25,7 @@ fn factions(esf: &EsfFile) -> BTreeMap<String, Fac> {
     let mut out = BTreeMap::new();
     for f in w.record_array("FACTION_ARRAY").into_iter().flat_map(|a| a.records()) {
         let key = f.values().filter_map(EsfNode::as_str).next().unwrap_or("").to_string();
-        let allocs = f.children_named("NAME_ALLOCATION_DETAILS").filter_map(Allocator::read).collect();
+        let allocs = f.children_named("NAME_ALLOCATION_DETAILS").filter_map(read_allocator).collect();
         let mut chars = BTreeMap::new();
         for c in f.record_array("CHARACTER_ARRAY").into_iter().flat_map(|a| a.records()).filter(|c| c.name == "CHARACTER") {
             if let Some(d) = c.children.get(1).and_then(EsfNode::as_record) {

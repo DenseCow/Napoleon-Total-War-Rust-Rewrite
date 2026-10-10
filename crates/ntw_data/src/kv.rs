@@ -47,11 +47,6 @@ impl KvTable {
         Schema::new().field(FieldType::Str).field(FieldType::F32)
     }
 
-    /// The path inside the packs, e.g. `db/_kv_morale_tables/_kv_morale`.
-    pub fn path(name: &str) -> String {
-        format!("db/{name}_tables/{name}")
-    }
-
     /// Decodes a kv table file.
     pub fn from_bytes(name: &'static str, bytes: &[u8]) -> Result<Self, DataError> {
         let raw = DbTable::read(bytes, &Self::schema()).map_err(|error| DataError::Db { table: name, error })?;
@@ -72,6 +67,17 @@ impl KvTable {
             index.entry(k.clone()).or_insert(i);
         }
         Self { name, entries, index }
+    }
+
+    /// Merges the files of one kv table by key, with the same rule as
+    /// [`crate::record::Table::merged`].
+    pub fn merged(name: &'static str, files: Vec<Self>, replaces: impl Fn(usize, usize) -> bool) -> Self {
+        let entries = ntw_formats::db_folder::merge_keyed(
+            files.into_iter().map(|t| t.entries).collect(),
+            |(k, _): &(String, f32)| k.as_str(),
+            replaces,
+        );
+        Self::from_entries(name, entries)
     }
 
     /// The stored float, exactly as in the file.

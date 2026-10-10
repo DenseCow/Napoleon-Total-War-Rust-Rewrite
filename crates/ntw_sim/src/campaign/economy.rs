@@ -27,7 +27,7 @@
 use super::ids::{FactionId, ForceId, RegionId};
 use super::effects::{BonusKind, Effects};
 use super::rules::{CampaignRules, TaxClass};
-use super::world::{CampaignModel, Region};
+use super::world::{CampaignModel, Region, SlotRef};
 
 /// One faction's income for one turn, split into its parts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -130,18 +130,49 @@ pub fn region_taxes(model: &CampaignModel, region: &Region) -> i32 {
 /// [`region_taxes`] with the effects already computed. The tax efficiency counts the owner's
 /// `admin_cost_mod` (int effect, CONFIRMED 0x00BC73C0).
 pub fn region_taxes_with(model: &CampaignModel, fx: &Effects, region: &Region) -> i32 {
-    let Some(f) = model.world.factions.get(&region.owner) else { return 0 };
-    if region.tax_exempt {
-        return 0;
-    }
+    let Some(t) = region_tax_rates(model, fx, region) else { return 0 };
+    [t.lower, t.upper].into_iter().map(|rate| class_taxes(rate, region.gdp, region.town_wealth)).sum()
+}
+
+/// The terms of a region's two effective tax rates, as the region details panel lists them
+/// (`0x009AF570`: UpperTaxPercentage ... AdministrationCostPercentage, UpperTax, LowerTax).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct RegionTaxRates {
+    /// The owner's `taxes_levels` rate of the upper class, in percent.
+    pub upper_level: i32,
+    /// The lower class's.
+    pub lower_level: i32,
+    /// [`tax_efficiency`] (`0x00BC73C0`).
+    pub efficiency: f32,
+    /// [`tax_bonuses`] (`0x00BC7580` character / minister, `0x00BC7540` building, `0x00BC75F0`
+    /// technology), in percent.
+    pub bonuses: TaxBonuses,
+    /// The upper class's [`effective_tax_rate`] (a fraction).
+    pub upper: f32,
+    /// The lower class's.
+    pub lower: f32,
+}
+
+/// A region's [`RegionTaxRates`] (`0x00BA4210` per class, CONFIRMED; both rates are 0 for a
+/// tax-exempt region); `None` when its owner is not in the model. The tax efficiency counts the
+/// owner's `admin_cost_mod` (int effect, CONFIRMED 0x00BC73C0).
+pub fn region_tax_rates(model: &CampaignModel, fx: &Effects, region: &Region) -> Option<RegionTaxRates> {
+    let f = model.world.factions.get(&region.owner)?;
     let rules = &model.rules;
     let admin = fx.faction.get(&region.owner).map_or(0, |s| s.get_int("admin_cost_mod"));
-    let efficiency = tax_efficiency(rules, regions_owned(model, region.owner), admin);
-    let bonuses = tax_bonuses(fx, region);
-    [&f.tax_lower, &f.tax_upper]
-        .into_iter()
-        .map(|level| class_taxes(effective_tax_rate(rules.tax_rate(level), efficiency, bonuses), region.gdp, region.town_wealth))
-        .sum()
+    let mut t = RegionTaxRates {
+        upper_level: rules.tax_rate(&f.tax_upper),
+        lower_level: rules.tax_rate(&f.tax_lower),
+        efficiency: tax_efficiency(rules, regions_owned(model, region.owner), admin),
+        bonuses: tax_bonuses(fx, region),
+        upper: 0.0,
+        lower: 0.0,
+    };
+    if !region.tax_exempt {
+        t.upper = effective_tax_rate(t.upper_level, t.efficiency, t.bonuses);
+        t.lower = effective_tax_rate(t.lower_level, t.efficiency, t.bonuses);
+    }
+    Some(t)
 }
 
 /// Sum of one effect over a building level (0 if the level is unknown).
@@ -459,48 +490,129 @@ fn faction_part(model: &CampaignModel, fx: &Effects, region: &Region, engine_key
 /// effects alone (238 of 238 regions, while 82 regions have a non-zero faction-wide `gdp_mod_all` or
 /// `tw_growth_*` that the stored values do not include; `economy_check` ECON_FXGDP).
 pub fn recompute_region_with(model: &CampaignModel, fx: Option<&Effects>, region: &Region) -> (u32, i32) {
+    let w = region_wealth(model, fx, region, false);
+    (w.gdp, w.growth)
+}
+
+/// The town wealth growth factors' keys in their slots (`town_wealth_growth_factors` rows; the key
+/// objects at `0x015C67F8`, set up by `0x0042ED30`, CONFIRMED).
+pub const TOWN_WEALTH_FACTORS: [&str; 10] =
+    ["education", "government", "industry", "port", "roads", "tax", "bankruptcy", "technologies", "ministers", "discontent"];
+
+/// A region's GDP and town wealth growth with the growth's breakdown (`0x00A6AFC0`'s outputs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RegionWealth {
+    /// The GDP.
+    pub gdp: u32,
+    /// The town wealth growth.
+    pub growth: i32,
+    /// The growth by [`TOWN_WEALTH_FACTORS`] slot (`0x00A6AFC0`'s fourth output): the faction-wide growth
+    /// in industry, each building's education / government / industry / port / roads effect in its slot
+    /// (`0x00A6C570`; its home-region effect in none), the technology and home-theatre terms in
+    /// technologies and ministers, the tax term (trunc(growth × modifier) when the growth is not negative,
+    /// then + the fixed part) in tax, −growth × #17 in bankruptcy and #18 in discontent.
+    pub factors: [i32; 10],
+}
+
+/// What the region's constructions change in a per-level value when they finish
+/// ([`Region::construction_changes`]): Σ value(level built) − value(building replaced).
+fn construction_delta(region: &Region, value: impl Fn(&str) -> f32) -> f32 {
+    region.construction_changes().map(|(_, new, old)| value(new) - old.map_or(0.0, |b| value(&b.level_key))).sum()
+}
+
+/// [`recompute_region_with`] with the growth's breakdown; `predicted` gives the values the region
+/// details panel and the wealth trend predict (`0x00A6AFC0` with its last argument 1): the predicted
+/// effect set (`0x00A9B930`, [`super::population::predicted_effect_set`]: buildings under construction
+/// finished, technologies under research researched) and, per slot, the level under construction in
+/// its place, else the building unless it is below full health.
+pub fn region_wealth(model: &CampaignModel, fx: Option<&Effects>, region: &Region, predicted: bool) -> RegionWealth {
     let rules = &model.rules;
-    let extra = |engine: &str| fx.map_or(0.0, |fx| faction_part(model, fx, region, engine));
-    let gdp_factor = (region_effect(model, region, "gdp_mod_all") + extra("gdp_mod_all")) * 0.01 + 1.0;
-    let tw_factor = (region_effect(model, region, "tw_growth_mod_all") + extra("tw_growth_mod_all")) * 0.01 + 1.0;
+    // The predicted set's changes (`0x00A9B930`): the local sets of this region's constructions (DB
+    // effect keys, as `region_effect` reads them), and the owner's faction-wide constructions and
+    // technologies under research (engine keys, as the faction part reads them).
+    let construction_local = |key: &str| construction_delta(region, |level| building_effect(rules, level, key));
+    let faction_change = if predicted { super::population::predicted_faction_change(model, region.owner) } else { super::effects::EffectSet::default() };
+    let local = |key: &str| region_effect(model, region, key) + if predicted { construction_local(key) } else { 0.0 };
+    let extra = |engine: &str| fx.map_or(0.0, |fx| faction_part(model, fx, region, engine)) + faction_change.get(engine);
+    let gdp_factor = (local("gdp_mod_all") + extra("gdp_mod_all")) * 0.01 + 1.0;
+    let tw_factor = (local("tw_growth_mod_all") + extra("tw_growth_mod_all")) * 0.01 + 1.0;
     let mut gdp = i64::from(region.base_gdp);
-    let mut growth: i32 = (region_effect(model, region, "tw_growth_industry_global") + extra("tw_growth_factionwide")).round_ties_even() as i32;
+    let mut f = [0i32; 10];
+    let mut growth: i32 = (local("tw_growth_industry_global") + extra("tw_growth_factionwide")).round_ties_even() as i32;
+    f[2] = growth;
     growth = growth.saturating_add(region.discontent_growth);
+    f[9] = region.discontent_growth;
     // The building chain's own modifiers (`0x00E1EF10(chain, 1 / 2)`: bonus type 2, `mod_gdp` / `mod_tw_growth`,
     // CONFIRMED reader) from the region's set: its buildings plus the owner's faction sum (techs such as
     // `gdp_mod_farms`).
     let chain_mod = |id: &str, chain: &str| -> f32 {
         let key = |s: &super::effects::EffectSet| s.get_qualified(super::effects::BonusKind::Saved(2), id, chain);
-        let local: f32 = region.effect_buildings().filter_map(|b| rules.effects.building_local().get(&b.level_key)).map(key).sum();
+        let mut local: f32 = region.effect_buildings().filter_map(|b| rules.effects.building_local().get(&b.level_key)).map(key).sum();
+        if predicted {
+            local += construction_delta(region, |level| rules.effects.building_local().get(level).map_or(0.0, key));
+        }
         local + fx.map_or(0.0, |fx| fx.faction_qualified(governing_faction(model, region), super::effects::BonusKind::Saved(2), id, chain))
     };
-    for b in region.buildings().filter(|b| b.health >= 100) {
-        let chain = rules.buildings.get(&b.level_key).map_or("", |x| x.chain.as_str());
+    // The slots (`0x00A638E0`: the slot list, then the road): a building at full health; predicted, the
+    // level under construction in its place.
+    let slots = (0..region.slots.len()).map(SlotRef::Slot).chain(std::iter::once(SlotRef::Road));
+    let levels = slots.filter_map(|s| {
+        let target = predicted.then(|| region.construction_changes().find(|(slot, _, _)| *slot == s)).flatten();
+        match target {
+            Some((_, level, _)) => Some(level),
+            None => region.building_at(s).filter(|b| b.health >= 100).map(|b| b.level_key.as_str()),
+        }
+    });
+    for level in levels {
+        let chain = rules.buildings.get(level).map_or("", |x| x.chain.as_str());
         let gdp_f = gdp_factor + chain_mod("1", chain) * 0.01;
         let tw_f = tw_factor + chain_mod("2", chain) * 0.01;
         for key in SLOT_GDP_EFFECTS {
-            gdp += (int_effect(rules, &b.level_key, key) as f32 * gdp_f) as i64;
+            gdp += (int_effect(rules, level, key) as f32 * gdp_f) as i64;
         }
-        for key in SLOT_TW_EFFECTS {
-            growth = growth.saturating_add((int_effect(rules, &b.level_key, key) as f32 * tw_f) as i32);
+        for (key, slot) in SLOT_TW_EFFECTS.iter().zip([Some(0), Some(1), None, Some(2), Some(3), Some(4)]) {
+            let v = (int_effect(rules, level, key) as f32 * tw_f) as i32;
+            growth = growth.saturating_add(v);
+            if let Some(i) = slot {
+                f[i] = f[i].saturating_add(v);
+            }
         }
     }
-    growth = (growth as f32 + region_effect(model, region, "tw_growth_technologies_fixed") + extra("tw_growth_technologies")) as i32;
+    let technologies = local("tw_growth_technologies_fixed") + extra("tw_growth_technologies");
+    growth = (growth as f32 + technologies) as i32;
+    f[7] = technologies as i32;
     // The home-theatre bonus `tw_growth_home_region` (effect 0x36) of the region set once more when the region is in
     // its owner's home theatre (`0x00A8B5C0`; every region of a shipped map is: one theatre each), e.g. the
     // ministers' `tw_growth_ministers_home_theatre`. CONFIRMED reader; the faction part only (the buildings carry
     // none in the shipped data).
-    growth = (growth as f32 + extra("tw_growth_home_region")) as i32;
-    let modifier =
-        if growth >= 0 { region_effect(model, region, "tw_growth_taxes_modifier") + extra("tw_growth_tax_modifier") } else { 0.0 };
-    let fixed = region_effect(model, region, "tw_growth_taxes_fixed") + extra("tw_growth_tax_modifier_fixed");
+    let home = extra("tw_growth_home_region");
+    growth = (growth as f32 + home) as i32;
+    f[8] = home as i32;
+    let modifier = if growth >= 0 { local("tw_growth_taxes_modifier") + extra("tw_growth_tax_modifier") } else { 0.0 };
+    let fixed = local("tw_growth_taxes_fixed") + extra("tw_growth_tax_modifier_fixed");
+    f[5] = ((growth as f32 * modifier) as i32 as f32 + fixed) as i32;
+    f[6] = growth.wrapping_mul(region.wealth_growth_offset).wrapping_neg();
     let scaled = ((modifier - region.wealth_growth_offset as f32) * growth as f32) as i32;
     growth = (scaled.saturating_add(growth) as f32 + fixed) as i32;
-    (gdp.clamp(0, i64::from(u32::MAX)) as u32, growth)
+    RegionWealth { gdp: gdp.clamp(0, i64::from(u32::MAX)) as u32, growth, factors: f }
+}
+
+/// The town wealth trend the region info shows as WealthChange (region +0xC4, set by `0x00AB4410` from
+/// the predicted growth, [`region_wealth`] with `predicted`): 0 above +20, 1 above 0, 2 at 0, 3 down to
+/// −20, 4 below.
+pub fn wealth_trend(predicted_growth: i32) -> u32 {
+    match predicted_growth {
+        g if g > 20 => 0,
+        g if g > 0 => 1,
+        0 => 2,
+        g if g > -21 => 3,
+        _ => 4,
+    }
 }
 
 /// What [`settle_round`] did with a faction's treasury.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Settlement {
     /// Income and upkeep were applied.
     Paid,
@@ -651,7 +763,7 @@ pub fn automated_policing(rules: &CampaignRules, net: f32) -> f32 {
 }
 
 /// The number of units garrisoned in a region's settlement.
-fn garrison_units(model: &CampaignModel, region: &Region) -> u32 {
+pub fn garrison_units(model: &CampaignModel, region: &Region) -> u32 {
     // Every force inside the settlement (its garrison and the armies whose commanders are garrisoned
     // there). A unit counts twice when its record flag +0x136 is set: militia (`infantry_militia`;
     // INFERRED class mapping, it reproduces the garrison factor of the vanilla saves).
@@ -719,13 +831,22 @@ pub fn region_effect_set(model: &CampaignModel, reg: &Region) -> super::effects:
 /// happiness (effects 9 / 10), its upper class the upper ones (11 / 12), and any other class gets no
 /// factors (all 0, as the vanilla saves store them).
 pub fn public_order_factors(model: &CampaignModel, region: RegionId) -> Vec<ClassPublicOrder> {
-    use super::effects::BonusKind;
     let Some(reg) = model.world.regions.get(&region) else { return Vec::new() };
+    public_order_factors_with(model, reg, &region_effect_set(model, reg), &reg.religions, garrison_units(model, reg))
+}
+
+/// [`public_order_factors`] from the inputs `0x008EDF70` takes: the effect set (the region's, or the
+/// predicted one for the panel's projection), the religion breakdown the religion factor reads (the
+/// population object's, a projected copy's for the panel) and the garrison's unit count (`0x008B18F0`'s
+/// argument; −1 there means the garrison's own). The garrison factor's population is always the
+/// region's own (`0x008B18F0` reads region +0x28, not the copy).
+pub fn public_order_factors_with(model: &CampaignModel, reg: &Region, set: &super::effects::EffectSet, religions: &[(String, f32)], garrison_units: u32) -> Vec<ClassPublicOrder> {
+    use super::effects::BonusKind;
+    let region = reg.id;
     if !model.world.factions.contains_key(&reg.owner) {
         return Vec::new();
     }
     let rules = &model.rules;
-    let set = region_effect_set(model, reg);
     let (upper_class, lower_class) = government_classes(model, model.world.governing_faction(region).unwrap_or(reg.owner));
     let int = |b: &str| set.get_int(b);
     let class_int = |b: &str, class: &str| f64::from(set.get_qualified(BonusKind::PopClass, b, class)).round_ties_even() as i32;
@@ -736,10 +857,10 @@ pub fn public_order_factors(model: &CampaignModel, region: RegionId) -> Vec<Clas
     // saves: churches with `conversion_anti_french` leave the stored factor unchanged).
     let local: f32 = reg.effect_buildings().filter_map(|b| rules.effects.building_local().get(&b.level_key)).map(|s| s.get_qualified(BonusKind::Religion, "conversion", &state)).sum();
     let conversion = set.get_qualified(BonusKind::Religion, "conversion", &state) - local;
-    let religion = religion_factor(model, reg, int("happiness_mod_religious_unrest"), conversion) as i32;
+    let religion = religion_factor(model, reg, religions, int("happiness_mod_religious_unrest"), conversion) as i32;
     let gentlemen = gentlemen_factor(model, reg) as i32;
     let hostile = !spa && hostile_in_region(model, reg);
-    let garrison = garrison_repression(rules, garrison_units(model, reg), reg.population) as i32;
+    let garrison = garrison_repression(rules, garrison_units, reg.population) as i32;
     let classes: Vec<(String, i32, i32)> =
         if reg.class_bases.is_empty() { vec![(lower_class.clone(), 0, 0), (upper_class.clone(), 0, 0)] } else { reg.class_bases.clone() };
     classes
@@ -788,11 +909,27 @@ pub fn public_order_factors(model: &CampaignModel, region: RegionId) -> Vec<Clas
 /// See [`PublicOrder`]: the totals of the government's lower and upper classes (see
 /// [`public_order_factors`]).
 pub fn public_order(model: &CampaignModel, region: RegionId) -> PublicOrder {
-    let factors = public_order_factors(model, region);
-    let Some(reg) = model.world.regions.get(&region) else { return PublicOrder::default() };
-    let (upper, lower) = government_classes(model, model.world.governing_faction(region).unwrap_or(reg.owner));
-    let total = |c: &str| factors.iter().find(|f| f.class == c).map_or(0.0, |f| f.total() as f32);
-    PublicOrder { lower: total(&lower), upper: total(&upper) }
+    let (upper, lower) = governed_class_factors(model, region);
+    let total = |c: Option<ClassPublicOrder>| c.map_or(0.0, |f| f.total() as f32);
+    PublicOrder { lower: total(lower), upper: total(upper) }
+}
+
+/// The [`public_order_factors`] of the region's government's upper and lower classes (see
+/// [`government_classes`]; the governing faction's government), in that order; `None` for a class
+/// the region does not have.
+pub fn governed_class_factors(model: &CampaignModel, region: RegionId) -> (Option<ClassPublicOrder>, Option<ClassPublicOrder>) {
+    let Some(reg) = model.world.regions.get(&region) else { return (None, None) };
+    governed_classes(model, reg, public_order_factors(model, region))
+}
+
+/// The government's upper and lower classes out of `factors` (a region's [`public_order_factors`] or
+/// [`public_order_factors_with`]), as [`governed_class_factors`] picks them.
+pub fn governed_classes(model: &CampaignModel, reg: &Region, mut factors: Vec<ClassPublicOrder>) -> (Option<ClassPublicOrder>, Option<ClassPublicOrder>) {
+    let (upper, lower) = government_classes(model, model.world.governing_faction(reg.id).unwrap_or(reg.owner));
+    let mut take = |c: &str| factors.iter().position(|f| f.class == c).map(|i| factors.swap_remove(i));
+    let u = take(&upper);
+    let l = if lower == upper { u.clone() } else { take(&lower) };
+    (u, l)
 }
 
 /// The (upper, lower) population classes of a faction's government type (`government_types` #4 / #5;
@@ -827,12 +964,12 @@ fn hostile_in_region(model: &CampaignModel, reg: &Region) -> bool {
 /// `unrest` = the region set's `happiness_mod_religious_unrest` and `conversion` = the owner's
 /// `conversion` effect for its religion (type 7, the religion-keyed bonus). Reproduces the religion factor of
 /// every population class in the vanilla eur save `auto_nr4_t4` (CAMPAIGN_FIDELITY.md §Public order).
-pub fn religion_factor(model: &CampaignModel, reg: &Region, unrest: i32, conversion: f32) -> f32 {
+/// `religions` is the breakdown it reads (the region's, or the panel's projected copy).
+pub fn religion_factor(model: &CampaignModel, reg: &Region, religions: &[(String, f32)], unrest: i32, conversion: f32) -> f32 {
     let Some(state) = model.world.faction_details.get(&reg.owner).map(|d| d.religion.as_str()).filter(|s| !s.is_empty()) else {
         return 0.0;
     };
-    let sum: f32 = reg
-        .religions
+    let sum: f32 = religions
         .iter()
         .map(|(r, share)| share * 100.0 * model.rules.religion_relations.get(&(r.clone(), state.to_string())).copied().unwrap_or(0.0))
         .sum();

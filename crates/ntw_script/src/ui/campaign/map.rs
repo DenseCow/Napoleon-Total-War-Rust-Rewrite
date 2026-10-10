@@ -167,7 +167,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
         let theatre = theatre.unwrap_or_else(|| theatre_of(&ui.link.campaign).0.to_owned());
         let faction = faction.unwrap_or_else(|| ui.link.human.clone());
         let out = lua.create_table()?;
-        let folder = ui.map_folder(&inner);
+        let folder = ui.map_folder();
         let row = ui.playable_area(&inner, &theatre);
         let mut lookup = None;
         if let Some(row) = &row {
@@ -434,23 +434,9 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
         Ok(out)
     });
     // InitialiseRegionInfoDetails(region) → the region details panel's table (handler
-    // `0x009E69B0`, CONFIRMED name registered at `0x00429075`). The root's ShowRegionInfo opens
-    // `region_info` with it and region_details.lua's InitialiseFromDetails sets the title from
-    // `Name` (`region_details.luac:51`, `region_name:SetStateText(details.Name)`); without this
-    // call the title kept the layout's placeholder " XXX Details".
-    // CONFIRMED: the handler starts from the region info table `0x009AF570`: Address (the region),
-    // Settlement (the settlement's name, its virtual `+0x30`), Name (`0x00A8D5D0`: the region's
-    // name text at +0x29C), Theatre, OwningFactionKey, PopulationNumber (int), Population
-    // (`0x009FB8F0`: `"%d"` of the same number), PopulationChange, UpperOrder, LowerOrder, Wealth,
-    // WealthChange, UpperTax, LowerTax, ReligionKey, ReligionIcon, Taxed, ActiveUpperClass,
-    // ActiveLowerClass, the governor's tax percentages and NextTownName; the handler then adds
-    // Governor, Effects, the UpperOrder / LowerOrder / PopulationGrowth / RegionWealth /
-    // TownWealth pip tables and ReligiousBreakdown.
-    // PROVISIONAL: only Address, Settlement, Name, OwningFactionKey, PopulationNumber and
-    // Population are filled; the panel's script stops at the first field it needs that is
-    // missing (BACKLOG §0-E "Region details panel"). INFERRED: +0x29C holds the
-    // `regions_onscreen_<key>` text ([`region_name`], as the other region tables); the check is a
-    // debugger read of the string `0x00A8D5D0` returns at `0x009AF67C` with the panel opening.
+    // `0x009E69B0`, CONFIRMED name registered at `0x00429075`; the table is
+    // [`region_info::region_info_details`]). The root's ShowRegionInfo opens `region_info` with it
+    // and region_details.lua's InitialiseFromDetails fills the panel from it.
     // With no argument the handler takes the HUD's current region (`g_pCampaignUiManager` +0x74);
     // no shipped script calls it so, and ours answers nil, logged once.
     f!("InitialiseRegionInfoDetails", |lua, inner, ui, a: Option<Value>| {
@@ -460,25 +446,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
             });
             return Ok(Value::Nil);
         };
-        let (key, owner, pop) = {
-            let m = ui.model();
-            let Some(reg) = m.world.regions.get(&r) else {
-                inner.log_once("InitialiseRegionInfoDetails of a missing region", || {
-                    format!("CampaignUI.InitialiseRegionInfoDetails: region {} is not in the campaign, answered nil (logged once)", r.0)
-                });
-                return Ok(Value::Nil);
-            };
-            let owner = m.world.factions.get(&reg.owner).map(|f| f.key.clone()).unwrap_or_default();
-            (reg.key.clone(), owner, reg.population)
-        };
-        let t = lua.create_table()?;
-        t.set("Address", region_value(&ui, r))?;
-        t.set("Settlement", ui.settlement_name(&inner, r))?;
-        t.set("Name", region_name(&inner.loc, &key))?;
-        t.set("OwningFactionKey", owner)?;
-        t.set("PopulationNumber", pop)?;
-        t.set("Population", pop.to_string())?;
-        Ok(Value::Table(t))
+        super::region_info::region_info_details(lua, &inner, &ui, r)
     });
     f!("RetrieveFactionAgentsList", |lua, inner, ui, faction: Option<String>| {
         let key = faction.unwrap_or_else(|| ui.link.human.clone());

@@ -18,7 +18,6 @@ use std::sync::Arc;
 
 use ntw_ai::battle::BattleAi;
 use ntw_ai::campaign::driver;
-use ntw_ai::campaign::keys::read_ai_keys;
 use ntw_ai::campaign::CampaignAiData;
 use ntw_data::GameDatabase;
 use ntw_formats::campaign_map::{CampaignMap, GameFiles};
@@ -108,13 +107,11 @@ fn campaign(turns: u32) -> Option<()> {
     let mut loaded = ntw_campaign::read_file(&sp, &db).ok()?;
     loaded.set_human("france");
     let vfs = Vfs::open_install(&dir).ok()?;
-    let files = GameFiles { vfs: &vfs, data_dir: Some(&dir) };
+    let files = GameFiles { vfs: &vfs };
     let map = CampaignMap::load(&files, &loaded.info.map_key).ok()?;
     loaded.model.terrain = Some(Terrain(Arc::new(ntw_campaign::pathing::build_grid(&map))));
-    let keys = read_ai_keys(&ntw_formats::esf::EsfFile::open(&sp).ok()?.root);
     let mut m = loaded.model;
-    let mut ctx = driver::context_for(&m, "eur_napoleon");
-    ctx.ai_keys = keys;
+    let ctx = driver::context_for(&m, "eur_napoleon");
     println!("turn 0 {:016x}", m.state_hash());
     for t in 1..=turns {
         let (_, reports) = driver::end_turn(&mut m, &data, &ctx);

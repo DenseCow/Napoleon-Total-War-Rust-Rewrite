@@ -42,10 +42,13 @@ fn fixture() -> Option<&'static Fixture> {
         }
         let db = GameDatabase::from_install(&dir).expect("DB");
         let vfs = Vfs::open_install(&dir).expect("vfs");
-        let files = GameFiles { vfs: &vfs, data_dir: Some(&dir) };
+        let files = GameFiles { vfs: &vfs };
         let bytes = files.read("campaigns/eur_napoleon/startpos.esf").expect("startpos");
         let source = EsfFile::from_bytes(&bytes).expect("esf");
         let mut loaded = ntw_campaign::read_esf(&source, &db).expect("load");
+        // As the game opens a campaign: the model names what it creates.
+        let names = ntw_campaign::names::NameData::load(&vfs, &db).expect("names");
+        ntw_campaign::names::attach_data(&mut loaded.model, &names);
         let map = CampaignMap::load(&files, &loaded.info.map_key).expect("map");
         ntw_campaign::trade::attach_map(&mut loaded.model, &map.regions);
         let terrain = Terrain(Arc::new(pathing::build_grid(&map)));

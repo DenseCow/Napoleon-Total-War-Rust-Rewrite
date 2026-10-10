@@ -175,8 +175,10 @@ pub(super) struct Inner {
     /// The screen size or the page rule changed since the last layout (changes inside the tree
     /// mark [`UiWorld::layout_dirty`] instead); see [`lay_out_if_stale`].
     layout_stale: std::cell::Cell<bool>,
-    /// What [`Inner::log_once`] and [`Inner::log_once_for`] have logged in this host.
+    /// What [`Inner::log_once`] has logged in this host.
     logged_once: RefCell<std::collections::HashSet<String>>,
+    /// What [`Inner::log_once_for`] has logged, per `what` (a lookup by `&str` allocates nothing).
+    logged_keys: RefCell<std::collections::HashMap<&'static str, std::collections::HashSet<String>>>,
     /// Engine events' calls into the scripts, made at the start of the next UI frame
     /// ([`Inner::post_call`]).
     posted_calls: RefCell<Vec<PostedCall>>,
@@ -229,7 +231,12 @@ impl Inner {
     /// [`Inner::log_once`] per `key`: logs `text` the first time `what` happens for that key (a
     /// missing loc string is logged once per string, not once per host).
     pub(super) fn log_once_for(&self, what: &'static str, key: &str, text: impl FnOnce() -> String) {
-        if self.logged_once.borrow_mut().insert(format!("{what}\u{0}{key}")) {
+        let first = {
+            let mut seen = self.logged_keys.borrow_mut();
+            let keys = seen.entry(what).or_default();
+            !keys.contains(key) && keys.insert(key.to_owned())
+        };
+        if first {
             log(self, text());
         }
     }
@@ -302,6 +309,11 @@ pub(super) fn running_script_context(inner: &Inner) -> Option<NodeId> {
 /// level per nesting (its limit is 200), as the exe's one `lua_pcall` per nesting does.
 pub(super) fn call_entry<R: mlua::FromLuaMulti>(lua: &Lua, inner: &Inner, id: NodeId, global: &str, args: impl mlua::IntoLuaMulti) -> mlua::Result<R> {
     let f: Function = lua.globals().get(global)?;
+    call_entry_fn(inner, id, &f, args)
+}
+
+/// [`call_entry`] with the global already looked up (a caller making the same call many times).
+pub(super) fn call_entry_fn<R: mlua::FromLuaMulti>(inner: &Inner, id: NodeId, f: &Function, args: impl mlua::IntoLuaMulti) -> mlua::Result<R> {
     let _context = ScriptContext::enter(inner, Some(id));
     f.call(args)
 }
@@ -340,6 +352,7 @@ impl UiScriptHost {
             layouts: std::cell::Cell::new(0),
             layout_stale: std::cell::Cell::new(false),
             logged_once: RefCell::default(),
+            logged_keys: RefCell::default(),
             posted_calls: RefCell::default(),
             script_context: std::cell::Cell::new(None),
             #[cfg(test)]
@@ -878,7 +891,8 @@ fn create_layout(lua: &Lua, inner: &Rc<Inner>, path: &str, id: Option<&str>, par
         _ => &layout.root,
     };
     // The parent's absolute position in the scripts' frame, before the new subtree is added.
-    let base = parent.and_then(|p| script_rect_of(inner, p)).map_or((0.0, 0.0), |r| (r.x, r.y));
+    // Only a derived position needs it, and it forces a layout: skipped when `position` is given.
+    let base = if position.is_some() { (0.0, 0.0) } else { parent.and_then(|p| script_rect_of(inner, p)).map_or((0.0, 0.0), |r| (r.x, r.y)) };
     let mut created = Vec::new();
     let root = inner.world.borrow_mut().instantiate(top, parent, &norm, &mut created);
     if parent.is_some()
@@ -948,6 +962,51 @@ fn adopted(lua: &Lua, inner: &Inner, child: NodeId) {
     let parent = inner.world.borrow().get(child).and_then(|n| n.parent);
     if let Some(p) = parent {
         fire_event(lua, inner, p, "OnAdoptChild", MultiValue::from_vec(vec![addr(child)]));
+    }
+}
+
+/// Takes `child` out of its parent's children; the parent then hears `OnDivorceChild(child)`.
+/// Returns the child's index among the parent's children before it left, or `None` when it had no
+/// parent (nothing happens then). CONFIRMED: `0x01027BA0` removes the child from the parent's list,
+/// clears the child's parent (+0x80) and calls the parent's virtual `+0x3C` (`0x0102DE60`), which
+/// fires event slot 18 (`+0x238`, `OnDivorceChild`) with the child's address unless the parent is
+/// a cached layout template (+0xE4, set by `0x01034860` on template trees only, never on a live
+/// component). `0x01027BA0` runs for UIComponent `Adopt` (`0x01014580`) and `Component.Adopt`
+/// (`0x01018090`) when the child already has a parent (even the same one), for `Divorce`
+/// (`0x01014610`), and for `ScheduleUIComponentDestroy` (`0x01037230`: `Component.Destroy`
+/// `0x01017F63`, `DestroyChildren` `0x01027B20`). No world borrow is held while the handler runs,
+/// so it may adopt, divorce or destroy anything.
+fn divorce(lua: &Lua, inner: &Inner, child: NodeId) -> Option<usize> {
+    let (parent, index) = {
+        let w = inner.world.borrow();
+        let p = w.get(child)?.parent?;
+        (p, w.get(p)?.children.iter().position(|&c| c == child)?)
+    };
+    inner.world.borrow_mut().divorce_from_parent(child);
+    fire_event(lua, inner, parent, "OnDivorceChild", MultiValue::from_vec(vec![addr(child)]));
+    Some(index)
+}
+
+/// `Adopt(child)` (UIComponent `0x01014580`, `Component.Adopt` `0x01018090`): a child that has a
+/// parent leaves it first ([`divorce`], so the old parent hears `OnDivorceChild`), then joins
+/// `parent` last and `parent` hears `OnAdoptChild` ([`adopted`]). A component cannot adopt itself
+/// or a missing one (nothing happens).
+fn adopt(lua: &Lua, inner: &Inner, parent: NodeId, child: NodeId) {
+    let valid = |inner: &Inner| {
+        let w = inner.world.borrow();
+        parent != child && w.get(parent).is_some() && w.get(child).is_some()
+    };
+    if !valid(inner) {
+        return;
+    }
+    divorce(lua, inner, child);
+    // The divorce handler may have destroyed either side.
+    if !valid(inner) {
+        return;
+    }
+    inner.world.borrow_mut().adopt(parent, child);
+    if inner.world.borrow().get(child).is_some_and(|c| c.parent == Some(parent)) {
+        adopted(lua, inner, child);
     }
 }
 
@@ -1728,7 +1787,9 @@ fn component_methods(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
         let v: i64 = arg::<Option<i64>>(lua, &args, 1)?.unwrap_or(0);
         const GRID: [u32; 9] = [4, 6, 5, 1, 3, 2, 7, 9, 8];
         let d = if (3..=5).contains(&v) && (1..=3).contains(&h) { GRID[((h - 1) + (v - 3) * 3) as usize] } else { 0 };
-        if let Some(n) = inner.world.borrow_mut().get_mut(id) {
+        // The same docking again changes nothing (no redraw, no layout).
+        let changed = inner.world.borrow().get(id).is_some_and(|n| n.data.docking != d);
+        if changed && let Some(n) = inner.world.borrow_mut().get_mut(id) {
             n.data.docking = d;
         }
         ret(lua, ())
@@ -1743,6 +1804,10 @@ fn component_methods(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
         // call (`0x010324E0`), ours at the next geometry read.
         {
             let mut world = laid_out_mut(&inner);
+            // Already this size (the battle HUD resizes every frame): nothing to do, so no redraw.
+            if world.get(id).is_some_and(|n| n.resized && n.size_override == Some((w, h)) && (n.rect.w, n.rect.h) == (w, h)) {
+                return ret(lua, ());
+            }
             let old = world.get(id).map(|n| (n.rect.w, n.rect.h, n.children.clone()));
             if let Some(n) = world.get_mut(id) {
                 n.size_override = Some((w, h));
@@ -1906,21 +1971,22 @@ fn component_methods(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
     });
     method!("Adopt", |inner, lua, id, args| {
         if let Some(child) = args.front().and_then(node_of) {
-            inner.world.borrow_mut().adopt(id, child);
-            if inner.world.borrow().get(child).is_some_and(|c| c.parent == Some(id)) {
-                adopted(lua, &inner, child);
-            }
+            adopt(lua, &inner, id, child);
         }
         ret(lua, ())
     });
+    // Divorce(child) → the child's former index among this component's children ([`divorce`]).
+    // CONFIRMED `0x01014610` → `0x01027BA0`, which counts the children it passes: a component that
+    // is not a child (or no component) changes nothing and answers the child count.
     method!("Divorce", |inner, lua, id, args| {
-        if let Some(child) = args.front().and_then(node_of) {
-            let is_child = inner.world.borrow().get(child).is_some_and(|c| c.parent == Some(id));
-            if is_child {
-                inner.world.borrow_mut().divorce_from_parent(child);
-            }
-        }
-        ret(lua, ())
+        let child = args.front().and_then(node_of);
+        let is_child = child.is_some_and(|c| inner.world.borrow().get(c).is_some_and(|n| n.parent == Some(id)));
+        let index = match child {
+            Some(c) if is_child => divorce(lua, &inner, c),
+            _ => None,
+        };
+        let index = index.unwrap_or_else(|| inner.world.borrow().get(id).map_or(0, |n| n.children.len()));
+        ret(lua, index as f64)
     });
     method!("Width", |inner, lua, id, args| ret(lua, script_rect_of(&inner, id).map_or(0.0, |r| r.w)));
     method!("Height", |inner, lua, id, args| ret(lua, script_rect_of(&inner, id).map_or(0.0, |r| r.h)));
@@ -2003,7 +2069,9 @@ fn component_methods(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
         let mut list = Vec::new();
         let mut all_children = true;
         if let Some(Value::Table(t)) = args.front() {
-            let children = inner.world.borrow().get(id).map(|n| n.children.clone()).unwrap_or_default();
+            // Read in place (this runs every frame in battle): nothing below calls a script.
+            let w = inner.world.borrow();
+            let children: &[NodeId] = w.get(id).map_or(&[], |n| &n.children);
             for i in 1..=t.raw_len() {
                 let entry: Value = t.raw_get(i)?;
                 let child = match &entry {
@@ -2159,21 +2227,39 @@ fn component_methods(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
         });
         ret(lua, ())
     });
-    // DestroyChildren(): the children leave the tree at once and are destroyed at the end of the
-    // frame (INFERRED: graphics.lua takes list_box:Find(0) as the row template, destroys the
-    // children, and then copies the template).
+    // DestroyChildren(): the children leave the tree at once and are destroyed later (graphics.lua
+    // takes list_box:Find(0) as the row template, destroys the children, and then copies the
+    // template). CONFIRMED `0x01027B20`: while the component has children, its first child is scheduled for
+    // destruction ([`schedule_destroy`]), so the component hears `OnDivorceChild` for each, in order
+    // (CardGroup.lua's `OnDivorce` takes the card out of its card manager there).
+    // ORIGINAL BUG: a handler that gives a destroyed child back to the component makes `0x01027B20`
+    // loop for ever; ours stops at a child it has already scheduled, logged once. That child stays: the
+    // frame end destroys only the scheduled components that still have no parent (`UiScriptHost::pulse`).
     method!("DestroyChildren", |inner, lua, id, args| {
-        let kids = inner.world.borrow().get(id).map(|n| n.children.clone()).unwrap_or_default();
-        for k in kids {
-            inner.world.borrow_mut().divorce_from_parent(k);
-            inner.pending_destroy.borrow_mut().push(k);
-            // The parent hears about each child leaving (INFERRED: CardGroup.lua's OnDivorce(child)
-            // removes the card from its card manager, so a destroyed card is not reused).
-            call_entry::<bool>(lua, &inner, id, "__ntw_call_if_defined", (addr(id), "OnDivorce", addr(k)))?;
+        let mut done = Vec::new();
+        loop {
+            // Its own statement: the borrow ends before the handler runs.
+            let first = inner.world.borrow().get(id).and_then(|n| n.children.first().copied());
+            let Some(k) = first else { break };
+            if done.contains(&k) {
+                inner.log_once("DestroyChildren re-adopted", || {
+                    format!("DestroyChildren: component {k} came back to {id} from its OnDivorceChild: left in place, a child again, which the frame end does not destroy (logged once)")
+                });
+                break;
+            }
+            done.push(k);
+            schedule_destroy(lua, &inner, k);
         }
         ret(lua, ())
     });
     Ok(t)
+}
+
+/// `ScheduleUIComponentDestroy` (`0x01037230`, CONFIRMED): the component leaves its parent now
+/// ([`divorce`]: the parent hears `OnDivorceChild`) and is destroyed at the end of the frame.
+fn schedule_destroy(lua: &Lua, inner: &Inner, id: NodeId) {
+    divorce(lua, inner, id);
+    inner.pending_destroy.borrow_mut().push(id);
 }
 
 fn destroy(lua: &Lua, inner: &Rc<Inner>, id: NodeId) -> mlua::Result<()> {
@@ -2201,10 +2287,7 @@ fn component_functions(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
     let i3 = i.clone();
     t.set("Adopt", lua.create_function(move |lua, (a, child): (Value, Value)| {
         if let (Some(p), Some(c)) = (node_of(&a), node_of(&child)) {
-            i3.world.borrow_mut().adopt(p, c);
-            if i3.world.borrow().get(c).is_some_and(|n| n.parent == Some(p)) {
-                adopted(lua, &i3, c);
-            }
+            adopt(lua, &i3, p, c);
         }
         Ok(())
     })?)?;
@@ -2215,10 +2298,10 @@ fn component_functions(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
     // `Component.Destroy(panel)` at line 93 and then reads `UIComponent(panel):Id()` at line 103
     // ("Removing panel " .. Id()), and its own log says "Marked for destroy". Destroying at once
     // made that Id nil, the concatenation failed and the close stopped half way (2026-10-06).
-    t.set("Destroy", lua.create_function(move |_lua, (_a, target): (Value, Value)| {
+    // The parent hears `OnDivorceChild` ([`schedule_destroy`], CONFIRMED `0x01017F63`).
+    t.set("Destroy", lua.create_function(move |lua, (_a, target): (Value, Value)| {
         if let Some(c) = node_of(&target) {
-            i4.world.borrow_mut().divorce_from_parent(c);
-            i4.pending_destroy.borrow_mut().push(c);
+            schedule_destroy(lua, &i4, c);
         }
         Ok(())
     })?)?;
@@ -2548,6 +2631,83 @@ pub(crate) mod tests {
         let p: i64 = host.lua().load("return UIComponent(UIComponent(Address):Find('button')):Priority()").set_environment(env.clone()).eval().unwrap();
         assert_eq!(p, -1);
         no_errors(&host);
+    }
+
+    /// A parent hears `OnDivorceChild(child)` whenever a child leaves it (`0x01027BA0` → virtual
+    /// `+0x3C`): Divorce (which answers the child's index, or the child count for a stranger),
+    /// Adopt into another parent (the old parent hears it before the new one hears
+    /// `OnAdoptChild`), Component.Destroy and DestroyChildren (one per child, in order). Bug: it
+    /// never fired, so CardGroup.lua's card managers kept destroyed cards.
+    #[test]
+    fn a_parent_hears_each_child_leave_it() {
+        let root_script = "events = {}\n\
+            UIComponent(Address):SetEventCallback('OnDivorceChild', function(c) table.insert(events, 'divorce:' .. UIComponent(c):Id()) end)\n\
+            UIComponent(Address):SetEventCallback('OnAdoptChild', function(c) table.insert(events, 'adopt:' .. UIComponent(c):Id()) end)";
+        let source = ScriptSource::empty()
+            .with_memory_file("ui/test/page", layout_bytes_with_root(root_script, ""))
+            .with_memory_file("ui/test/label", layout_bytes(""));
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        let root = host.load_root_layout("ui/test/page").unwrap();
+        let env = component_env(&host, root);
+        let run = |code: &str| host.lua().load(code).set_environment(env.clone()).exec().unwrap();
+        for i in 1..=4 {
+            run(&format!("Component.CreateFromLayout('data/ui/test/label', 'l{i}', Address, 0, 0)"));
+        }
+        run("events = {}\n\
+            UIComponent(UIComponent(Address):Find('button')):SetEventCallback('OnAdoptChild', function(c) table.insert(events, 'button adopt:' .. UIComponent(c):Id()) end)");
+        // Divorce answers the index (the button is child 0).
+        let eval = |code: &str| -> f64 { host.lua().load(code).set_environment(env.clone()).eval().unwrap() };
+        assert_eq!(eval("return UIComponent(Address):Divorce(UIComponent(Address):Find('l1'))"), 1.0);
+        // l2 moves under the button: the root hears the divorce, then the button the adoption.
+        run("UIComponent(UIComponent(Address):Find('button')):Adopt(UIComponent(Address):Find('l2'))");
+        // A stranger leaves nothing and the answer is the child count (button, l3, l4).
+        assert_eq!(eval("return UIComponent(Address):Divorce(UIComponent(UIComponent(Address):Find('button')):Find('l2'))"), 3.0);
+        run("Component.Destroy(UIComponent(Address):Find('l3'))");
+        // DestroyChildren of the root: the button then l4, in order.
+        run("UIComponent(Address):DestroyChildren()");
+        let events: Vec<String> = env.get::<Table>("events").unwrap().sequence_values().map(Result::unwrap).collect();
+        assert_eq!(events, ["divorce:l1", "divorce:l2", "button adopt:l2", "divorce:l3", "divorce:button", "divorce:l4"]);
+        assert!(host.world().get(root).unwrap().children.is_empty());
+        no_errors(&host);
+    }
+
+    /// ORIGINAL BUG (`0x01027B20`): a parent whose `OnDivorceChild` adopts the child back makes
+    /// DestroyChildren loop for ever. Ours stops at the child it already scheduled, logs it once, and
+    /// the child, a child again, survives the frame end.
+    #[test]
+    fn destroy_children_stops_at_a_child_adopted_back() {
+        let root_script = "UIComponent(Address):SetEventCallback('OnDivorceChild', function(c) UIComponent(Address):Adopt(c) end)";
+        let source = ScriptSource::empty()
+            .with_memory_file("ui/test/page", layout_bytes_with_root(root_script, ""))
+            .with_memory_file("ui/test/label", layout_bytes(""));
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        let root = host.load_root_layout("ui/test/page").unwrap();
+        let env = component_env(&host, root);
+        host.lua().load("Component.CreateFromLayout('data/ui/test/label', 'l1', Address, 0, 0)").set_environment(env.clone()).exec().unwrap();
+        let before = host.world().get(root).unwrap().children.clone();
+        host.lua().load("UIComponent(Address):DestroyChildren()").set_environment(env).exec().unwrap();
+        assert!(host.inner.logged_once.borrow().iter().any(|k| k.starts_with("DestroyChildren re-adopted")));
+        host.pulse(0.0);
+        let after = host.world().get(root).unwrap().children.clone();
+        assert!(!after.is_empty() && after.iter().all(|c| before.contains(c) && host.world().get(*c).is_some()), "{before:?} -> {after:?}");
+    }
+
+    /// `log_once_for` logs a key's text once per `what`; the text is built only the first time.
+    #[test]
+    fn log_once_for_builds_its_text_once_per_key() {
+        let host = UiScriptHost::new(ScriptSource::empty(), Localisation::new(), facts(), (100.0, 100.0)).unwrap();
+        let built = std::cell::Cell::new(0);
+        for key in ["a", "a", "b", "a"] {
+            host.inner.log_once_for("test what", key, || {
+                built.set(built.get() + 1);
+                format!("test {key}")
+            });
+        }
+        host.inner.log_once_for("other what", "a", || {
+            built.set(built.get() + 1);
+            "test".to_owned()
+        });
+        assert_eq!(built.get(), 3, "a, b and the other `what`'s a");
     }
 
     /// `ReorderChildren(list)` as `0x01031ED0`: the list first, the children it leaves out after
@@ -2903,7 +3063,7 @@ pub(crate) mod tests {
             "ui/test/page",
             layout_bytes_with_root(
                 "function InitState(t) parent_at = layouts() end",
-                "function InitState(t) UIComponent(UIComponent(Address):Parent()):Resize(90, 90) child_at = layouts() end",
+                "function InitState(t) local p = UIComponent(UIComponent(Address):Parent()); p:Resize(p:Width() - 10, 90) child_at = layouts() end",
             ),
         );
         let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0)).unwrap();

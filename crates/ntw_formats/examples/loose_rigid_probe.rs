@@ -14,7 +14,7 @@ fn main() {
     let path = std::env::args().nth(1).expect("path");
     let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into());
     let vfs = Vfs::open_install(&dir).unwrap();
-    let files = GameFiles { vfs: &vfs, data_dir: Some(std::path::Path::new(&dir)) };
+    let files = GameFiles { vfs: &vfs };
     let bytes = files.read(&path).expect("read");
     println!("{} bytes", bytes.len());
     let m = RigidModel::read(&bytes).expect("rigid model");

@@ -4,13 +4,11 @@
 //! written, checked, loaded back, played on and saved again. Skips (passes) without an install.
 //! Override the install with `NTW_DATA_DIR`. Written saves stay in memory (or in the temp folder).
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use ntw_ai::campaign::CampaignAiData;
 use ntw_ai::campaign::driver;
-use ntw_ai::campaign::keys::{FactionAiKeys, read_ai_keys};
 use ntw_data::GameDatabase;
 use ntw_formats::campaign_map::{CampaignMap, GameFiles};
 use ntw_formats::esf::EsfFile;
@@ -29,7 +27,6 @@ struct Fixture {
     model: CampaignModel,
     terrain: Terrain,
     data: Arc<CampaignAiData>,
-    keys: BTreeMap<String, FactionAiKeys>,
 }
 
 fn fixture() -> Option<&'static Fixture> {
@@ -47,19 +44,17 @@ fn fixture() -> Option<&'static Fixture> {
         let mut loaded = ntw_campaign::read_esf(&startpos, &db).expect("startpos");
         assert!(loaded.set_human("france"));
         let vfs = Vfs::open_install(&dir).expect("packs");
-        let files = GameFiles { vfs: &vfs, data_dir: Some(&dir) };
+        let files = GameFiles { vfs: &vfs };
         let map = CampaignMap::load(&files, &loaded.info.map_key).expect("map");
         let terrain = Terrain(Arc::new(ntw_campaign::pathing::build_grid(&map)));
-        let keys = read_ai_keys(&startpos.root);
-        Some(Fixture { db, startpos, model: loaded.model, terrain, data: Arc::new(data), keys })
+        Some(Fixture { db, startpos, model: loaded.model, terrain, data: Arc::new(data) })
     })
     .as_ref()
 }
 
 fn play(f: &Fixture, m: &mut CampaignModel, turns: u32) {
     m.terrain = Some(f.terrain.clone());
-    let mut ctx = driver::context_for(m, "eur_napoleon");
-    ctx.ai_keys = f.keys.clone();
+    let ctx = driver::context_for(m, "eur_napoleon");
     for _ in 0..turns {
         driver::end_turn(m, &f.data, &ctx);
     }

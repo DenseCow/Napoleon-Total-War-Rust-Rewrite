@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use ntw_formats::pack::{PackError, Vfs};
-use ntw_formats::projectile_fx::{ExplosionRow, ExplosionTable, ImpactRow, ImpactTable, TrailRow, TrailTable, PROJECTILE_IMPACTS, PROJECTILE_TRAILS, PROJECTILES_EXPLOSIONS};
+use ntw_formats::db_folder;
+use ntw_formats::pack::{FolderFile, PackError, Vfs};
+use ntw_formats::projectile_fx::{ExplosionRow, ExplosionTable, ImpactRow, ImpactTable, TrailRow, TrailTable};
 use ntw_sim::battle::attributes::{UnitAttributes, UnitCapabilities};
 use ntw_sim::battle::fatigue::KvFatigue;
 use ntw_sim::battle::morale::KvMorale;
@@ -101,6 +102,8 @@ pub struct GameDatabase {
     /// `gun_type_to_projectiles` and `projectiles` ([`index_gun_shots`]); whoever replaces those two
     /// tables rebuilds it (a stale index can only miss or misorder shots, never panic).
     gun_shots: GunShots,
+    /// Problems met while loading (e.g. a mod table that did not decode and was skipped).
+    pub load_warnings: Vec<String>,
 }
 
 /// The gun shot index ([`index_gun_shots`]): per gun type, each shot's `projectiles` row number
@@ -153,15 +156,52 @@ fn index_gun_shots(guns: &Table<GunTypeProjectile>, projectiles: &Table<Projecti
     GunShots { projectiles: projectiles.id(), by_gun }
 }
 
-fn load<T: DbRecord>(vfs: &Vfs) -> Result<Table<T>, DataError> {
-    Table::from_bytes(&vfs.read(&T::path())?)
+/// Reads and decodes every file of one table through the one table reader
+/// ([`db_folder::read_files`]); a table with no file is an error.
+fn read_table_files<R>(
+    vfs: &Vfs,
+    table: &str,
+    warnings: &mut Vec<String>,
+    decode: impl Fn(&[u8]) -> Result<R, DataError>,
+) -> Result<(Vec<FolderFile>, Vec<R>), DataError> {
+    let (files, out) = db_folder::read_files(vfs, table, warnings, decode)?;
+    if out.is_empty() {
+        return Err(DataError::Pack(PackError::NotFound(db_folder::folder(table))));
+    }
+    Ok((files, out))
+}
+
+/// The VFS plus the warnings collected while [`GameDatabase::from_vfs`] loads its tables, so every
+/// table goes through the one merged reader ([`load_table`]) without threading a `&mut Vec`
+/// through ~90 calls. Derefs to the [`Vfs`] for the files that are read whole.
+struct Loader<'a> {
+    vfs: &'a Vfs,
+    warnings: std::cell::RefCell<Vec<String>>,
+}
+
+impl<'a> Loader<'a> {
+    fn new(vfs: &'a Vfs) -> Self {
+        Self { vfs, warnings: Default::default() }
+    }
+}
+
+impl std::ops::Deref for Loader<'_> {
+    type Target = Vfs;
+    fn deref(&self) -> &Vfs {
+        self.vfs
+    }
+}
+
+/// One table through the merged view ([`load_table`]).
+fn load<T: DbRecord>(vfs: &Loader) -> Result<Table<T>, DataError> {
+    load_table(vfs.vfs, &mut vfs.warnings.borrow_mut())
 }
 
 /// Like [`load`] for a table the game can run without (only pictures or text depend on it): a
 /// **missing** table becomes an empty one with a `WARN` line instead of failing the whole
 /// database load. A table that is present but does not read (corrupt, wrong version, a bad mod
 /// override) still fails the load like any other, so a data error is not hidden.
-fn load_optional<T: DbRecord>(vfs: &Vfs) -> Result<Table<T>, DataError> {
+fn load_optional<T: DbRecord>(vfs: &Loader) -> Result<Table<T>, DataError> {
     match load(vfs) {
         Err(DataError::Pack(PackError::NotFound(path))) => {
             eprintln!("WARN ntw_data: optional table {} not found ({path}); using an empty table", T::TABLE);
@@ -171,7 +211,7 @@ fn load_optional<T: DbRecord>(vfs: &Vfs) -> Result<Table<T>, DataError> {
     }
 }
 
-fn load_campaign(vfs: &Vfs) -> Result<crate::campaign::CampaignTables, DataError> {
+fn load_campaign(vfs: &Loader) -> Result<crate::campaign::CampaignTables, DataError> {
     Ok(crate::campaign::CampaignTables {
         variables: load(vfs)?,
         variable_overrides: load(vfs)?,
@@ -245,8 +285,55 @@ fn load_campaign(vfs: &Vfs) -> Result<crate::campaign::CampaignTables, DataError
     })
 }
 
-fn load_kv(vfs: &Vfs, name: &'static str) -> Result<KvTable, DataError> {
-    KvTable::from_bytes(name, &vfs.read(&KvTable::path(name))?)
+fn load_kv(vfs: &Loader, name: &'static str) -> Result<KvTable, DataError> {
+    load_kv_table(vfs.vfs, name, &mut vfs.warnings.borrow_mut())
+}
+
+/// One table through the merged view: every file in `db\<table>_tables\`, merged by key in the
+/// original's order and with its row rule ([`Table::merged`], [`Vfs::db_row_replaces`]). Files
+/// from mods that fail to decode are skipped and described in `warnings`.
+pub fn load_table<T: DbRecord>(vfs: &Vfs, warnings: &mut Vec<String>) -> Result<Table<T>, DataError> {
+    let (files, tables) = read_table_files(vfs, T::TABLE, warnings, Table::from_bytes)?;
+    Ok(Table::merged(tables, |holder, new| vfs.db_row_replaces(&files[holder], &files[new])))
+}
+
+/// Like [`load_table`] for a key-value table such as `_kv_rules`.
+pub fn load_kv_table(vfs: &Vfs, name: &'static str, warnings: &mut Vec<String>) -> Result<KvTable, DataError> {
+    let (files, tables) = read_table_files(vfs, name, warnings, |b| KvTable::from_bytes(name, b))?;
+    Ok(KvTable::merged(name, tables, |holder, new| vfs.db_row_replaces(&files[holder], &files[new])))
+}
+
+/// The rows of a table that has no typed record here (the campaign AI's raw tables), through the
+/// same merged view as [`load_table`]: every file in `db\<table>_tables\` decoded by `decode`, in the
+/// original's order, merged by `key` with its row rule. `key` must be the key the exe's loader for
+/// that table hashes. A table with no file gives no rows; files from mods that fail to decode are
+/// skipped and described in `warnings`.
+pub fn load_merged_rows<R>(
+    vfs: &Vfs,
+    table: &str,
+    warnings: &mut Vec<String>,
+    decode: impl Fn(&[u8]) -> Result<Vec<R>, DataError>,
+    key: impl Fn(&R) -> &str,
+) -> Result<Vec<R>, DataError> {
+    db_folder::merged_rows(vfs, table, warnings, decode, key)
+}
+
+/// A `projectile_fx` table (`projectiles_explosions`, `projectile_impacts`, `projectile_trails`,
+/// cut into rows without a schema) through the same merged view as [`load_table`].
+fn load_fx_table<T, R>(
+    vfs: &Loader,
+    table: &'static str,
+    read: impl Fn(&[u8]) -> Result<T, ntw_formats::projectile_fx::ProjectileFxError>,
+    into_rows: impl Fn(T) -> Vec<R>,
+    from_rows: impl Fn(Vec<R>) -> T,
+    key: impl Fn(&R) -> &str,
+) -> Result<T, DataError> {
+    let decode = |b: &[u8]| read(b).map_err(|error| DataError::ProjectileFx { table, error });
+    let (files, tables) = read_table_files(vfs.vfs, table, &mut vfs.warnings.borrow_mut(), decode)?;
+    let rows = db_folder::merge_keyed(tables.into_iter().map(into_rows).collect(), key, |holder, new| {
+        vfs.db_row_replaces(&files[holder], &files[new])
+    });
+    Ok(from_rows(rows))
 }
 
 impl UnitStatsLandExperienceBonuses {
@@ -268,7 +355,8 @@ impl UnitStatsNavalExperienceBonuses {
 
 impl GameDatabase {
     /// Loads everything from an install's `data` folder (read-only), mounting its packs in
-    /// game load order.
+    /// game load order through [`Vfs::open_install`], with the mods set by
+    /// [`ntw_formats::pack::set_mod_options`] (none by default).
     pub fn from_install(data_dir: impl AsRef<Path>) -> Result<Self, DataError> {
         let data_dir = data_dir.as_ref();
         let vfs = Vfs::open_install(data_dir)?;
@@ -277,8 +365,14 @@ impl GameDatabase {
         Ok(db)
     }
 
-    /// Loads everything from an already-mounted [`Vfs`] (e.g. with extra mod packs).
+    /// Loads everything from an already-mounted [`Vfs`] (e.g. one opened with mods).
+    ///
+    /// Every table goes through the merged view: all files in `db\<table>_tables\` are read
+    /// and merged (see [`Table::merged`]), so a mod can replace the vanilla file (same path)
+    /// or add a differently named file with extra or overriding rows.
     pub fn from_vfs(vfs: &Vfs) -> Result<Self, DataError> {
+        let ld = Loader::new(vfs);
+        let vfs = &ld;
         let kv_rules = KvRules { table: load_kv(vfs, "_kv_rules")? };
         kv_rules.check_complete()?;
         let kv_morale_raw = load_kv(vfs, "_kv_morale")?;
@@ -286,13 +380,31 @@ impl GameDatabase {
         let projectiles: Table<Projectile> = load(vfs)?;
         // The explosion table's row keys are `projectiles.explosion`'s own values, so the rows can
         // be cut without knowing the table's numeric column layout (ntw_formats::projectile_fx).
-        let projectile_explosions = ExplosionTable::read(&vfs.read(PROJECTILES_EXPLOSIONS)?)
-            .map_err(|error| DataError::ProjectileFx { table: "projectiles_explosions", error })?;
-        let projectile_impacts = ImpactTable::read(&vfs.read(PROJECTILE_IMPACTS)?)
-            .map_err(|error| DataError::ProjectileFx { table: "projectile_impacts", error })?;
+        let projectile_explosions = load_fx_table(
+            vfs,
+            "projectiles_explosions",
+            ExplosionTable::read,
+            ExplosionTable::into_rows,
+            ExplosionTable::from_rows,
+            |r: &ExplosionRow| r.key.as_str(),
+        )?;
+        let projectile_impacts = load_fx_table(
+            vfs,
+            "projectile_impacts",
+            ImpactTable::read,
+            ImpactTable::into_rows,
+            ImpactTable::from_rows,
+            |r: &ImpactRow| r.key.as_str(),
+        )?;
         // Regular table: key, blend mode, ten floats, next key (ntw_formats::projectile_fx).
-        let projectile_trails = TrailTable::read(&vfs.read(PROJECTILE_TRAILS)?)
-            .map_err(|error| DataError::ProjectileFx { table: "projectile_trails", error })?;
+        let projectile_trails = load_fx_table(
+            vfs,
+            "projectile_trails",
+            TrailTable::read,
+            TrailTable::into_rows,
+            TrailTable::from_rows,
+            |r: &TrailRow| r.key.as_str(),
+        )?;
         let gun_type_to_projectiles = load(vfs)?;
         let gun_shots = index_gun_shots(&gun_type_to_projectiles, &projectiles);
         Ok(Self {
@@ -326,6 +438,7 @@ impl GameDatabase {
             kv_morale_raw,
             kv_fatigue_raw,
             gun_shots,
+            load_warnings: ld.warnings.take(),
         })
     }
 
@@ -790,6 +903,7 @@ impl GameDatabase {
             kv_morale_raw,
             kv_fatigue_raw,
             gun_shots,
+            load_warnings: Vec::new(),
         }
     }
 }
@@ -804,8 +918,8 @@ mod tests {
     fn a_missing_optional_table_is_empty_not_an_error() {
         use crate::characters::{AgentAttributeRecord, CharacterTables};
         let vfs = Vfs::new();
-        assert!(load::<AgentAttributeRecord>(&vfs).is_err(), "the plain loader fails");
-        let attributes = load_optional::<AgentAttributeRecord>(&vfs).expect("a missing table is not an error");
+        assert!(load::<AgentAttributeRecord>(&Loader::new(&vfs)).is_err(), "the plain loader fails");
+        let attributes = load_optional::<AgentAttributeRecord>(&Loader::new(&vfs)).expect("a missing table is not an error");
         assert!(attributes.is_empty());
         let c = CharacterTables { attributes, ..Default::default() };
         assert_eq!(c.attribute_icon("command_land"), "");
@@ -817,8 +931,8 @@ mod tests {
     fn missing_negotiation_string_tables_are_empty() {
         use crate::campaign::{NegotiationOverrideStringRecord, NegotiationStringRecord};
         let vfs = Vfs::new();
-        assert!(load_optional::<NegotiationStringRecord>(&vfs).expect("optional").is_empty());
-        assert!(load_optional::<NegotiationOverrideStringRecord>(&vfs).expect("optional").is_empty());
+        assert!(load_optional::<NegotiationStringRecord>(&Loader::new(&vfs)).expect("optional").is_empty());
+        assert!(load_optional::<NegotiationOverrideStringRecord>(&Loader::new(&vfs)).expect("optional").is_empty());
     }
 
     #[test]

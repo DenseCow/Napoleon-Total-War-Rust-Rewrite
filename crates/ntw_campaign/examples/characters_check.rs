@@ -41,7 +41,7 @@ fn main() {
     let vfs = ntw_formats::pack::Vfs::open_install(std::path::Path::new(data)).expect("vfs");
     for file in &files {
         let bytes = match file.strip_prefix("vfs:") {
-            Some(p) => ntw_formats::campaign_map::GameFiles { vfs: &vfs, data_dir: Some(std::path::Path::new(data)) }.read(p).expect("vfs file"),
+            Some(p) => ntw_formats::campaign_map::GameFiles { vfs: &vfs }.read(p).expect("vfs file"),
             None => std::fs::read(file).expect("read"),
         };
         let esf = EsfFile::from_bytes(&bytes).expect("esf");

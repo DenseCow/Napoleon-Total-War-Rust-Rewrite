@@ -43,7 +43,7 @@ fn every_settlement_stays_reachable() {
         eprintln!("skipped: no install");
         return;
     };
-    let files = GameFiles { vfs: &vfs, data_dir: Some(&dir) };
+    let files = GameFiles { vfs: &vfs };
     let (mut checked, mut alone) = (0, 0);
     for name in MAPS {
         let Ok(map) = CampaignMap::load(&files, name) else { continue };
@@ -103,7 +103,7 @@ fn closing_kind_7_splits_nothing() {
         eprintln!("skipped: no install");
         return;
     };
-    let files = GameFiles { vfs: &vfs, data_dir: Some(&dir) };
+    let files = GameFiles { vfs: &vfs };
     for name in MAPS {
         let Ok(map) = CampaignMap::load(&files, name) else { continue };
         let Some(pf) = map.pathfinding.as_ref() else { continue };

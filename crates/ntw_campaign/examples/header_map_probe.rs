@@ -25,7 +25,7 @@ fn main() {
         .unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data"));
     let vfs = Vfs::open_install(&dir).expect("install");
     let db = GameDatabase::from_install(&dir).expect("db");
-    let files = GameFiles { vfs: &vfs, data_dir: Some(&dir) };
+    let files = GameFiles { vfs: &vfs };
     let bytes = std::fs::read(&args[0]).expect("read");
     let esf = EsfFile::from_bytes(&bytes).expect("esf");
     let l = ntw_campaign::read_esf(&esf, &db).expect("load");

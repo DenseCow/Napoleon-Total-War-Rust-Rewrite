@@ -12,7 +12,12 @@ use std::path::PathBuf;
 use ntw_data::GameDatabase;
 use ntw_formats::effects::EffectLibrary;
 use ntw_formats::pack::Vfs;
-use ntw_formats::projectile_fx::{ExplosionTable, ImpactTable, TrailTable, PROJECTILES_EXPLOSIONS, PROJECTILE_IMPACTS, PROJECTILE_TRAILS};
+use ntw_formats::projectile_fx::{ExplosionTable, ImpactTable, TrailTable};
+
+// The vanilla files themselves (these tests check what the install ships).
+const PROJECTILES_EXPLOSIONS: &str = "db/projectiles_explosions_tables/projectiles_explosions";
+const PROJECTILE_IMPACTS: &str = "db/projectile_impacts_tables/projectile_impacts";
+const PROJECTILE_TRAILS: &str = "db/projectile_trails_tables/projectile_trails";
 
 const DEFAULT_DATA_DIR: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 

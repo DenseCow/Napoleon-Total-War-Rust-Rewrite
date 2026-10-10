@@ -135,7 +135,7 @@ fn government_relations_are_keyed_on_the_pair() {
     }
     let db = GameDatabase::from_install(&dir).expect("database");
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
-    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs, data_dir: Some(&dir) };
+    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
     let bytes = files.read("campaigns/eur_napoleon/startpos.esf").expect("startpos");
     let esf = EsfFile::from_bytes(&bytes).expect("esf");
     let m = ntw_campaign::read_esf(&esf, &db).expect("loads").model;
@@ -587,7 +587,7 @@ fn trade_node_supply_matches_the_domestic_routes() {
     }
     let db = GameDatabase::from_install(&dir).expect("database");
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
-    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs, data_dir: Some(&dir) };
+    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
     let (mut checked, mut equal) = (0, 0);
     for campaign in ["eur_napoleon", "egy_napoleon", "ita_napoleon", "spa_napoleon"] {
         let Ok(bytes) = files.read(&format!("campaigns/{campaign}/startpos.esf")) else { continue };
@@ -644,7 +644,7 @@ fn commodity_demand_and_prices_match_the_startpos() {
     }
     let db = GameDatabase::from_install(&dir).expect("database");
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
-    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs, data_dir: Some(&dir) };
+    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
     let bytes = files.read("campaigns/eur_napoleon/startpos.esf").expect("startpos");
     let esf = EsfFile::from_bytes(&bytes).expect("esf");
     let mut loaded = ntw_campaign::read_esf(&esf, &db).expect("load");
@@ -676,7 +676,7 @@ fn region_neighbours_come_from_the_map_outlines() {
     }
     let db = GameDatabase::from_install(&dir).expect("database");
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
-    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs, data_dir: Some(&dir) };
+    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
     let bytes = files.read("campaigns/eur_napoleon/startpos.esf").expect("startpos");
     let esf = EsfFile::from_bytes(&bytes).expect("esf");
     let mut loaded = ntw_campaign::read_esf(&esf, &db).expect("load");
@@ -712,7 +712,7 @@ fn tech_availability_rule_keeps_every_start_position_state() {
     }
     let db = GameDatabase::from_install(&dir).expect("database");
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
-    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs, data_dir: Some(&dir) };
+    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
     let mut checked = 0;
     for campaign in ["eur_napoleon", "egy_napoleon", "ita_napoleon", "spa_napoleon"] {
         let Ok(bytes) = files.read(&format!("campaigns/{campaign}/startpos.esf")) else { continue };
@@ -727,4 +727,71 @@ fn tech_availability_rule_keeps_every_start_position_state() {
         }
     }
     assert!(checked > 1000, "{checked}");
+}
+
+/// The population factors (`population::growth_factors`, `0x00AA9C10`) against those the original
+/// stored in the vanilla saves (`REGION_FACTORS` #0, #3, #7; refreshed at the round start of the saved
+/// turn), with the campaign map loaded for the military factor's area test. The saves whose armies
+/// moved after the round start (`orig_fr_t1_b`: rebel bands spawned in eight regions, `orig_fr_may1811`)
+/// are left out; every region of the others must match. Then one growth step (`population::grow`,
+/// `0x00AB4070`) of `auto_nr4_t4` against `orig_over_nr4_0252`, one round later: every region whose
+/// factors the next save also stores unchanged (no army moved, no capture) must reach its population.
+#[test]
+fn population_factors_and_growth_match_the_vanilla_saves() {
+    use ntw_sim::campaign::population;
+    let dir = data_dir();
+    let ev = std::env::var_os("NTW_EVIDENCE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default().join(r"Documents\ntw-evidence\saves"));
+    if !dir.is_dir() || !ev.is_dir() {
+        println!("SKIP: no install at {} or no evidence saves at {}", dir.display(), ev.display());
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).expect("database");
+    let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
+    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+    let mut maps = std::collections::BTreeMap::new();
+    let load = |name: &str, maps: &mut std::collections::BTreeMap<String, ntw_sim::campaign::Terrain>| {
+        let path = ev.join(format!("{name}.save"));
+        if !path.is_file() {
+            return None;
+        }
+        let mut l = ntw_campaign::read_file(&path, &db).expect("save loads");
+        let terrain = maps.entry(l.info.map_key.clone()).or_insert_with(|| {
+            let map = ntw_formats::campaign_map::CampaignMap::load(&files, &l.info.map_key).expect("map");
+            ntw_sim::campaign::Terrain(std::sync::Arc::new(ntw_campaign::pathing::build_grid(&map)))
+        });
+        l.model.terrain = Some(terrain.clone());
+        Some(l.model)
+    };
+    let mut checked = 0;
+    let mut military = 0;
+    for name in ["auto_nr4_t4", "auto_after_c8", "orig_over_nr4_0252", "auto_b2b3_0211", "auto_nr1", "orig_fr_t1", "auto_orig_spa_0245"] {
+        let Some(m) = load(name, &mut maps) else { continue };
+        for r in m.world.regions.values() {
+            let set = economy::region_effect_set(&m, r);
+            let input = population::FactorInputs { set: &set, hostile_units: population::hostile_units(&m, r) };
+            let s = population::growth_factors(&m, r, r.population, &r.population_state, &input);
+            let p = &r.population_state;
+            assert_eq!((s.factors, s.capacity, s.overcrowded), (p.factors, p.capacity, p.overcrowded), "{name} {}", r.key);
+            assert_eq!(s.growth.to_bits(), p.growth.to_bits(), "{name} {}: growth", r.key);
+            military += usize::from(p.factors[3] != 0.0);
+            checked += 1;
+        }
+    }
+    println!("population factors: {checked} regions, {military} with a military factor");
+    assert!(checked > 400 && military >= 4, "{checked} {military}");
+    let (Some(a), Some(b)) = (load("auto_nr4_t4", &mut maps), load("orig_over_nr4_0252", &mut maps)) else { return };
+    let mut grown = 0;
+    for r in a.world.regions.values() {
+        let Some(r2) = b.world.regions.values().find(|x| x.key == r.key) else { continue };
+        let owner = |m: &ntw_sim::campaign::CampaignModel, f| m.world.factions.get(&f).map(|x| x.key.clone());
+        if r2.population_state.factors != r.population_state.factors || owner(&b, r2.owner) != owner(&a, r.owner) {
+            continue;
+        }
+        let (pop, state) = population::grow(&a, r, r.population, &r.population_state);
+        assert_eq!((pop, state.trend), (r2.population, r2.population_state.trend), "{}", r.key);
+        grown += 1;
+    }
+    assert!(grown >= 68, "{grown}");
 }

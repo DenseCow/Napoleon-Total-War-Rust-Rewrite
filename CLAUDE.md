@@ -59,7 +59,7 @@ large: grep for the section you need, and read that file's "Where I am" / "Next"
 - **No engine limits (the one exception to 1:1):** no hardcoded content counts (factions, regions,
   religions, cultures, units, buildings, techs, characters...), army/unit/battle size caps, fixed
   tables or small ID types. Defaults and vanilla data still give the original game exactly;
-  gameplay caps (20-unit army, unit scale, battle cap) become settings defaulting to the original.
+  gameplay caps (20-unit army, unit scale, battle cap) become moddable data values (not player settings; user, 2026-10-10) defaulting to the original.
   Code that lifts a limit states the original's limit. Saves must not cap counts either.
 - **Better where the original is broken (user, 2026-10-09):** the original's outdated systems (fixed tables,
   32-bit or single-thread limits, slow data structures) get our own better design that gives the same
@@ -109,6 +109,9 @@ large: grep for the section you need, and read that file's "Where I am" / "Next"
   design, replace the design instead of patching it.
 - **One source of truth.** A game rule lives once (in the model) and the UI, commands and AI call it;
   never re-implement a lookup or rule in a second place.
+- **Modding seams (user, 2026-10-10).** Game tables are read only through the merged database (mods
+  included), never by a `db/<x>_tables/<x>` path; only the importer reads `.esf` or the original's map
+  files; no new hardcoded content counts, small ID types or Napoleon-specific checks in engine code.
 - **Hot paths stay cheap.** No allocation, file I/O, decoding, locking or freeing of large buffers on
   the audio thread; no per-frame rebuilding of tables, strings or layouts the data didn't change.
   Do heavy work once, off the main thread, and cache it with a clear invalidation rule.
@@ -271,7 +274,7 @@ its base from `debugger_modules` (dynamic = static − 0x400000 + base; `debugge
 static address unchanged on 2026-10-09). Never attach a raw dbgeng/pybag script to the user's running game: a
 failed detach ends the process and loses their progress (it happened 2026-10-07). Launch under Ghidra
 instead, and set breakpoints only right before the action you're watching. Logging breakpoints: run
-`.effmach x86` first, the evaluator is C++ (wrap MASM as `@@masm(poi(...))`), no quotes inside the command
+`.effmach x86` first, the evaluator is C++ (wrap MASM as `@@masm(poi(...))`; write addresses as `0x...`, a bare `00ff50e0` sets a breakpoint at 0), no quotes inside the command
 (`bp <addr> ".catch { r eip,edi; dd @edi+0xd0 L2 }; gc"`, output to `.logopen <file>`), and call
 `ghidradbg.commands.ghidra_trace_sync_disable()` first (each recorded stop costs ~150 ms; re-enable after).
 Even then a site hit by every soldier each frame freezes the game: log only sites the action alone reaches.

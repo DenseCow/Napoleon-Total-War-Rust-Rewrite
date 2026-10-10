@@ -73,7 +73,7 @@ fn start_position_obstacles_are_reproduced() {
         return;
     };
     let db = GameDatabase::from_install(&dir).expect("DB");
-    let files = GameFiles { vfs: &vfs, data_dir: Some(&dir) };
+    let files = GameFiles { vfs: &vfs };
     let bytes = files.read("campaigns/eur_napoleon/startpos.esf").expect("startpos");
     let mut esf = EsfFile::from_bytes(&bytes).expect("esf");
     let loaded = ntw_campaign::read_esf(&esf, &db).expect("load");
@@ -179,7 +179,7 @@ fn new_obstacles_pass_save_check() {
         return;
     };
     let db = GameDatabase::from_install(&dir).expect("DB");
-    let files = GameFiles { vfs: &vfs, data_dir: Some(&dir) };
+    let files = GameFiles { vfs: &vfs };
     let bytes = files.read("campaigns/eur_napoleon/startpos.esf").expect("startpos");
     let mut esf = EsfFile::from_bytes(&bytes).expect("esf");
     let before = ntw_campaign::save_check::check(&esf).all_lines();

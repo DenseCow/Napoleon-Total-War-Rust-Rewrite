@@ -568,8 +568,8 @@ impl CampaignModel {
     /// attached to it (the unit classes' slot +4: `0x008B7EF0` colonel, `0x008B7F60` captain, both
     /// `0x00990EF0` with agent type 2 / 3). The new commander stands where the old one stood
     /// (`0x00963840`). A save never has a force without a commander (CONFIRMED rule of every
-    /// original save, SAVE_COMPAT.md §23); the save writer names a new colonel after his unit's
-    /// officer.
+    /// original save, SAVE_COMPAT.md §23); a new colonel takes his unit's officer's name
+    /// ([`Self::name_new_character`]).
     pub(crate) fn command_vacated(&mut self, old: &super::world::Character) {
         use super::world::{Character, CharacterKind};
         let commanded: Vec<ForceId> = self.world.forces.values().filter(|f| f.commander == Some(old.id)).map(|f| f.id).collect();
@@ -624,6 +624,9 @@ impl CampaignModel {
             let f = self.world.forces.get_mut(&fid).expect("force exists");
             f.commander = Some(id);
             f.units[ui].character = Some(id);
+            // He carries his unit's officer's name (`0x008B7EF0` colonel / `0x008B7F60` captain pass unit
+            // +0x7c to `0x00990EF0`).
+            self.name_new_character(id);
         }
     }
 

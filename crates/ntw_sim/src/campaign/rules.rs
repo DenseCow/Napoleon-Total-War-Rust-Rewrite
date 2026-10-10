@@ -231,6 +231,9 @@ pub struct CampaignRules {
     /// `historical_characters`: the named recruitment-pool candidates, in table order
     /// ([`super::pool`]; CHARACTERS_FIDELITY.md §8).
     pub historical: Vec<HistoricalCandidate>,
+    /// The names new characters are drawn from ([`super::names`]): the `names` table's pools by
+    /// faction and the historical characters' on-screen names, filled by the campaign source.
+    pub names: super::names::NameRules,
     /// `units_to_exclusive_faction_permissions`: unit → factions allowed (only units that
     /// have rows are restricted).
     pub unit_factions: BTreeMap<String, Vec<String>>,

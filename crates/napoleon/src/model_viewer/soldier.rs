@@ -45,6 +45,9 @@ struct ShownPart;
 /// Runs the soldier viewer. `units` are `units` keys.
 pub fn run(lib: SoldierLibrary, units: Vec<String>, screenshot_dir: Option<PathBuf>) {
     let db = ntw_data::GameDatabase::from_vfs(&lib.vfs).ok();
+    for w in db.iter().flat_map(|d| &d.load_warnings) {
+        warn!("Game data: {w}");
+    }
     let keys = units.iter().map(|u| db.as_ref().and_then(|db| db.unit_stats(u)).map(animation_keys)).collect();
     if let Some(dir) = &screenshot_dir {
         let _ = std::fs::create_dir_all(dir);

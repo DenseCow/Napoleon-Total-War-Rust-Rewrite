@@ -84,6 +84,13 @@ impl EffectSet {
         }
     }
 
+    /// Takes every entry of `other` away (`0x00E05090`: equal keys subtracted, missing ones added negated).
+    pub fn subtract(&mut self, other: &EffectSet) {
+        for (k, v) in &other.values {
+            self.add(k.clone(), -*v);
+        }
+    }
+
     /// A basic bonus (0 when absent).
     pub fn get(&self, bonus: &str) -> f32 {
         self.get_qualified(BonusKind::Basic, bonus, "")
@@ -114,6 +121,7 @@ pub const BONUS_NAMES: [&str; 184] = ["agent_research_slots", "building_prestige
 
 /// One saved effect entry (`CAMPAIGN_BONUS_VALUE`: u32 type, i32 bonus id, f32 value, qualifier).
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SavedBonus {
     /// Bonus type (1 = basic, 0 = agent, ...).
     pub kind: u32,

@@ -290,6 +290,38 @@ impl SuperTexture {
     pub fn decode_tile_rgba(&self, raw: &[u8]) -> Vec<u8> {
         crate::dds::decode_blocks_rgba8(crate::dds::DdsFormat::Dxt5, self.tile_size, self.tile_size, raw)
     }
+
+    /// The RGBA8 pixels (north row first, `nx · tile_size` wide) of the `nx` × `ny` tiles of
+    /// `level` from tile (`tx0`, `ty0`). `tile_bytes` gives one tile's own `.stpd` bytes (its
+    /// `size` bytes from its `offset`), so the caller reads the file whole or by range.
+    pub fn window_rgba(
+        &self,
+        level: usize,
+        (tx0, ty0, nx, ny): (u32, u32, u32, u32),
+        mut tile_bytes: impl FnMut(&StpTile) -> Result<Vec<u8>, CampaignMapError>,
+    ) -> Result<Vec<u8>, CampaignMapError> {
+        let lv = self.levels.get(level).ok_or(CampaignMapError::Missing("supertexture level"))?;
+        if tx0.checked_add(nx).is_none_or(|e| e > lv.tiles_x) || ty0.checked_add(ny).is_none_or(|e| e > lv.tiles_y) {
+            return Err(CampaignMapError::Missing("supertexture tiles outside the level"));
+        }
+        let ts = self.tile_size as usize;
+        let w = nx as usize * ts;
+        let mut out = vec![0u8; w * ny as usize * ts * 4];
+        for ty in ty0..ty0 + ny {
+            for tx in tx0..tx0 + nx {
+                let i = (ty * lv.tiles_x + tx) as usize;
+                let tile = lv.tiles.get(i).ok_or(CampaignMapError::Truncated { what: "stpi tiles" })?;
+                let raw = Self::inflate_tile(&tile_bytes(tile)?, &StpTile { offset: 0, ..*tile }, i)?;
+                let px = self.decode_tile_rgba(&raw);
+                let (ox, oy) = ((tx - tx0) as usize * ts, (ty - ty0) as usize * ts);
+                for row in 0..ts {
+                    let dst = ((oy + row) * w + ox) * 4;
+                    out[dst..dst + ts * 4].copy_from_slice(&px[row * ts * 4..(row + 1) * ts * 4]);
+                }
+            }
+        }
+        Ok(out)
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -884,68 +916,85 @@ pub struct CampaignMap {
     pub coast: Vec<CoastMesh>,
 }
 
-/// Where campaign files are read from: the pack [`Vfs`](crate::pack::Vfs) first, then loose
-/// files under the install's `data\` folder. The campaign maps and start positions ship as
-/// loose files (`data\campaign_maps\`, `data\campaigns\`; CONFIRMED: none of the 1,419 loose
-/// files is also in a pack), and the original reads loose files through its VFS ("non_pack").
-/// Once the Vfs itself mounts loose files (the parked `work/mod-loading` branch), the fallback
-/// here simply never triggers.
+/// Where campaign files are read from: the install's [`Vfs`](crate::pack::Vfs), which also
+/// mounts the loose files under `data\` (the campaign maps and start positions ship as loose
+/// files, `data\campaign_maps\`, `data\campaigns\`; the original reads loose files through its
+/// VFS, "non_pack") and the mods, so a mod can replace a map file.
 #[derive(Clone, Copy)]
 pub struct GameFiles<'a> {
-    /// The mounted packs.
+    /// The install's files (packs, loose `data\` files and mods).
     pub vfs: &'a crate::pack::Vfs,
-    /// The install's `data` folder for loose files, if any.
-    pub data_dir: Option<&'a std::path::Path>,
+}
+
+/// A game file's bytes on disk: `len` bytes at `offset` in `file` (a pack, or the loose file at 0).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileSpan {
+    /// The file holding the bytes.
+    pub file: std::path::PathBuf,
+    /// Where they start in it.
+    pub offset: u64,
+    /// How many there are.
+    pub len: u64,
+}
+
+impl FileSpan {
+    /// Reads `len` bytes starting `start` bytes into the span from `file` (this span's file, open);
+    /// an error past the span's end.
+    pub fn read_at(&self, file: &mut std::fs::File, start: u64, len: usize) -> Result<Vec<u8>, String> {
+        use std::io::{Read, Seek, SeekFrom};
+        if start.checked_add(len as u64).is_none_or(|end| end > self.len) {
+            return Err(format!("{}: bytes {start}..+{len} past its end ({})", self.file.display(), self.len));
+        }
+        file.seek(SeekFrom::Start(self.offset + start)).map_err(|e| format!("{}: {e}", self.file.display()))?;
+        let mut buf = vec![0u8; len];
+        file.read_exact(&mut buf).map_err(|e| format!("{}: {e}", self.file.display()))?;
+        Ok(buf)
+    }
 }
 
 impl GameFiles<'_> {
     /// Reads a game path (case-insensitive, `/` or `\`), read-only.
     pub fn read(&self, path: &str) -> Result<Vec<u8>, String> {
-        if let Ok(b) = self.vfs.read(path) {
-            return Ok(b);
+        self.vfs.read(path).map_err(|e| format!("{path}: {e}"))
+    }
+
+    /// Where the winning copy of a game path lies on disk (the copy [`read`](Self::read) gives): a
+    /// pack's file at its entry, or the loose file. For reading parts of a large file (the
+    /// supertexture's tiles) by range without reading all of it, and without holding the Vfs.
+    pub fn locate(&self, path: &str) -> Result<FileSpan, String> {
+        if let Some((pack, entry)) = self.vfs.find(path) {
+            return Ok(FileSpan { file: pack.path().to_owned(), offset: entry.offset, len: u64::from(entry.size) });
         }
-        let rel = crate::pack::normalize_path(path);
-        match self.data_dir {
-            Some(d) => std::fs::read(d.join(&rel)).map_err(|e| format!("{path}: {e}")),
-            None => Err(format!("{path}: not in any pack")),
-        }
+        let file = self.vfs.loose_path(path).ok_or_else(|| format!("{path}: not found"))?;
+        let len = self.vfs.file_size(path).map_err(|e| format!("{path}: {e}"))?;
+        Ok(FileSpan { file, offset: 0, len })
     }
 
     /// All files whose normalized path starts with `prefix` (a folder ending in `/` or `\`),
-    /// from the packs and the loose folder, normalized and sorted.
+    /// normalized and sorted.
     pub fn list(&self, prefix: &str) -> Vec<String> {
-        let prefix = crate::pack::normalize_path(prefix);
-        let mut out: Vec<String> = self.vfs.list(&prefix).into_iter().map(str::to_owned).collect();
-        if let Some(d) = self.data_dir {
-            let mut stack = vec![d.join(prefix.trim_end_matches('\\'))];
-            while let Some(dir) = stack.pop() {
-                let Ok(rd) = std::fs::read_dir(&dir) else { continue };
-                for e in rd.flatten() {
-                    let p = e.path();
-                    if p.is_dir() {
-                        stack.push(p);
-                    } else if let Ok(rel) = p.strip_prefix(d) {
-                        out.push(crate::pack::normalize_path(&rel.to_string_lossy()));
-                    }
-                }
-            }
-        }
-        out.sort();
-        out.dedup();
-        out
+        self.vfs.list(prefix).into_iter().map(str::to_owned).collect()
     }
+}
+
+/// An optional map file: `None` when it is not there; when it is there but does not parse, the
+/// error is logged and the part left out.
+fn optional<T, E: fmt::Display>(files: &GameFiles<'_>, path: &str, parse: impl FnOnce(&[u8]) -> Result<T, E>) -> Option<T> {
+    let bytes = files.read(path).ok()?;
+    parse(&bytes).map_err(|e| log::warn!("Campaign map {path}: {e}; left out")).ok()
 }
 
 impl CampaignMap {
     /// Loads a map folder (`map` = `nap_europe`, or the full `campaign_maps/nap_europe`).
-    /// Missing optional parts (supertexture, a spline folder) are skipped.
+    /// Missing optional parts (supertexture, a spline folder) are skipped; an optional part that
+    /// is there but does not parse is logged (once per load) and left out.
     pub fn load(files: &GameFiles<'_>, map: &str) -> Result<Self, CampaignMapError> {
         let name = map.trim_start_matches("campaign_maps/").trim_start_matches("campaign_maps\\").to_owned();
         let base = format!("campaign_maps/{name}");
         let read = |p: &str| files.read(p).map_err(CampaignMapError::Inner);
         let regions = RegionMap::read(&read(&format!("{base}/regions.esf"))?)?;
         let heightmap = Heightmap::read(&read(&format!("{base}/display/heightmap/heightmap.tga"))?)?;
-        let supertexture = read(&format!("{base}/display/supertexture/supertexture.stpi")).ok().and_then(|b| SuperTexture::read_index(&b).ok());
+        let supertexture = optional(files, &format!("{base}/display/supertexture/supertexture.stpi"), SuperTexture::read_index);
         let mut splines = Vec::new();
         for folder in ["borders", "rivers", "roads", "traderoutes"] {
             let prefix = crate::pack::normalize_path(&format!("{base}/display/{folder}/"));
@@ -954,17 +1003,25 @@ impl CampaignMap {
                 if !path.ends_with(".rigid_spline") || path[prefix.len()..].contains('\\') {
                     continue;
                 }
-                if let Ok(f) = SplineFile::read(&read(&path)?) {
-                    splines.extend(f.splines.into_iter().map(|s| (folder.to_owned(), s)));
+                match SplineFile::read(&read(&path)?) {
+                    Ok(f) => splines.extend(f.splines.into_iter().map(|s| (folder.to_owned(), s))),
+                    Err(e) => log::warn!("Campaign map {path}: {e}; left out"),
                 }
             }
         }
-        let pathfinding = read(&format!("{base}/pathfinding.esf"))
-            .ok()
-            .and_then(|b| crate::campaign_pathfinding::PathfindingFile::read(&b).ok());
-        let sea_grid = read(&format!("{base}/sea_grids.esf")).ok().and_then(|b| crate::campaign_pathfinding::SeaGrid::read(&b).ok());
-        let trees = read(&format!("{base}/display/trees/campaign.rigid_trees")).ok().and_then(|b| RigidTrees::read(&b).ok());
-        let coast = (0..).map_while(|i| read(&format!("{base}/display/coastline/coastline_group{i}.rigid_mesh")).ok().and_then(|b| CoastMesh::read(&b).ok())).collect();
+        let pathfinding = optional(files, &format!("{base}/pathfinding.esf"), crate::campaign_pathfinding::PathfindingFile::read);
+        let sea_grid = optional(files, &format!("{base}/sea_grids.esf"), crate::campaign_pathfinding::SeaGrid::read);
+        let trees = optional(files, &format!("{base}/display/trees/campaign.rigid_trees"), RigidTrees::read);
+        // `coastline_group<n>` for n = 0, 1, … up to the first one that is not there.
+        let mut coast = Vec::new();
+        for i in 0.. {
+            let path = format!("{base}/display/coastline/coastline_group{i}.rigid_mesh");
+            let Ok(bytes) = files.read(&path) else { break };
+            match CoastMesh::read(&bytes) {
+                Ok(m) => coast.push(m),
+                Err(e) => log::warn!("Campaign map {path}: {e}; left out"),
+            }
+        }
         Ok(Self { name, regions, heightmap, supertexture, splines, pathfinding, sea_grid, trees, coast })
     }
 
@@ -982,19 +1039,11 @@ impl CampaignMap {
         let st = self.supertexture.as_ref().ok_or(CampaignMapError::Missing("supertexture"))?;
         let lv = st.levels.get(level).ok_or(CampaignMapError::Missing("supertexture level"))?;
         let stpd = files.read(&format!("campaign_maps/{}/display/supertexture/supertexture.stpd", self.name)).map_err(CampaignMapError::Inner)?;
-        let ts = st.tile_size as usize;
-        let (w, h) = (lv.tiles_x as usize * ts, lv.tiles_y as usize * ts);
-        let mut out = vec![0u8; w * h * 4];
-        for (i, tile) in lv.tiles.iter().enumerate() {
-            let raw = SuperTexture::inflate_tile(&stpd, tile, i)?;
-            let px = st.decode_tile_rgba(&raw);
-            let (tx, ty) = (i % lv.tiles_x as usize, i / lv.tiles_x as usize);
-            for row in 0..ts {
-                let dst = ((ty * ts + row) * w + tx * ts) * 4;
-                out[dst..dst + ts * 4].copy_from_slice(&px[row * ts * 4..(row + 1) * ts * 4]);
-            }
-        }
-        Ok((w as u32, h as u32, out))
+        let out = st.window_rgba(level, (0, 0, lv.tiles_x, lv.tiles_y), |tile| {
+            let start = tile.offset as usize;
+            stpd.get(start..start + tile.size as usize).map(<[u8]>::to_vec).ok_or(CampaignMapError::Truncated { what: "stpd tile" })
+        })?;
+        Ok((lv.tiles_x * st.tile_size, lv.tiles_y * st.tile_size, out))
     }
 }
 
@@ -1091,5 +1140,30 @@ mod tests {
         let tile = SuperTexture::inflate_tile(&stpd, &st.levels[0].tiles[0], 0).unwrap();
         assert_eq!(tile, [7u8; 16]);
         assert!(SuperTexture::read_index(&stpi[..stpi.len() - 1]).is_err());
+    }
+
+    /// `locate` finds a file where `read` would (in the winning pack at its entry, else loose); a
+    /// range read gives the same bytes as `read` and refuses to read past the file.
+    #[test]
+    fn a_located_file_reads_like_read() {
+        use crate::pack::test_util::{build_pack, temp_dir};
+        let dir = temp_dir("campaign_map_locate");
+        std::fs::write(dir.join("a.pack"), build_pack(1, &[("x\\first", b"0123"), ("campaign_maps\\m\\big.bin", b"hello world")])).unwrap();
+        std::fs::create_dir_all(dir.join("campaign_maps").join("m")).unwrap();
+        std::fs::write(dir.join("campaign_maps").join("m").join("loose.bin"), b"loose bytes").unwrap();
+        let mut vfs = crate::pack::Vfs::from_packs(vec![crate::pack::PackFile::open(dir.join("a.pack")).unwrap()]);
+        vfs.mount_dir(&dir, crate::pack::LayerKind::Loose).unwrap();
+        let files = GameFiles { vfs: &vfs };
+        for path in ["campaign_maps/m/big.bin", "campaign_maps/m/loose.bin"] {
+            let span = files.locate(path).unwrap();
+            let whole = files.read(path).unwrap();
+            assert_eq!(span.len, whole.len() as u64);
+            let mut f = std::fs::File::open(&span.file).unwrap();
+            assert_eq!(span.read_at(&mut f, 0, whole.len()).unwrap(), whole);
+            assert_eq!(span.read_at(&mut f, 6, 5).unwrap(), &whole[6..11]);
+            assert!(span.read_at(&mut f, 6, 6).is_err(), "past the end of {path}");
+        }
+        assert!(files.locate("campaign_maps/m/big.bin").unwrap().offset > 0, "inside the pack");
+        assert!(files.locate("campaign_maps/m/missing.bin").is_err());
     }
 }

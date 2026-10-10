@@ -114,7 +114,7 @@ fn enter(world: &mut World) {
         error!("Could not load the front-end layout: {e}");
         return;
     }
-    world.insert_resource(UiAssets::new(vfs).with_loose_files(&dir));
+    world.insert_resource(UiAssets::new(vfs));
     world.insert_non_send(FrontEndUi { host, hovered: None, pressed: None, drawn_generation: u64::MAX, screen, clock_ms: 0.0, cursor: None });
 }
 

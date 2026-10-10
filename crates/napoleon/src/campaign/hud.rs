@@ -75,6 +75,7 @@ pub fn enter(world: &mut World) {
         state: sim.host.shared_state(),
         human: sim.human.clone(),
         campaign: sim.campaign.clone(),
+        map: sim.info.map_key.clone(),
         db,
     }) else {
         warn!("Campaign HUD: no campaign running");
@@ -117,7 +118,7 @@ pub fn enter(world: &mut World) {
     }
     // A 2D camera over the 3D map for the HUD sprites.
     world.spawn((Camera2d, Camera { order: 1, clear_color: ClearColorConfig::None, ..default() }, DespawnOnExit(GameMode::Campaign)));
-    let mut assets = UiAssets::new(vfs).with_loose_files(&dir);
+    let mut assets = UiAssets::new(vfs);
     assets.add_embedded(host.template_images());
     world.insert_resource(assets);
     world.insert_non_send(CampaignHud {

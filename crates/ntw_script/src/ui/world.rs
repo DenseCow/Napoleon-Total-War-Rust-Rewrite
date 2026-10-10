@@ -331,9 +331,14 @@ impl UiWorld {
     /// `list` followed by the children it leaves out, in their current order. It is applied only
     /// when that comes to exactly the parent's child count, so a list with a duplicate or a
     /// component that is not a child changes nothing. Returns whether it was applied. Children
-    /// draw in this order (`0x01027D20` walks them first to last).
+    /// draw in this order (`0x01027D20` walks them first to last). A list that is already the
+    /// first children (the battle HUD's every frame) changes nothing: no allocation, and
+    /// [`generation`](Self::generation) stays, so nothing is redrawn for it.
     pub fn reorder_children(&mut self, parent: NodeId, list: &[NodeId]) -> bool {
         let Some(p) = self.get(parent) else { return false };
+        if p.children.starts_with(list) {
+            return true;
+        }
         let mut order = list.to_vec();
         order.extend(p.children.iter().filter(|c| !list.contains(c)));
         if order.len() != p.children.len() {
@@ -649,6 +654,26 @@ mod tests {
         assert_eq!(w.destroy(other), vec![other]);
         assert_eq!(w.get(r).unwrap().children, vec![b]);
         assert_eq!(w.root_of(b), r);
+    }
+
+    /// A reorder to the order already there asks for no redraw (polish: the battle HUD reorders
+    /// every frame, and each call bumped the redraw counter); a real change does.
+    #[test]
+    fn an_unchanged_reorder_asks_for_no_redraw() {
+        let mut w = UiWorld::new();
+        let r = w.instantiate(&comp("root", 100, 100, (0, 0), 0), None, "x", &mut Vec::new());
+        let a = w.instantiate(&comp("a", 10, 10, (0, 0), 0), None, "y", &mut Vec::new());
+        let b = w.instantiate(&comp("b", 10, 10, (0, 0), 0), None, "y", &mut Vec::new());
+        w.adopt(r, a);
+        w.adopt(r, b);
+        let g = w.generation;
+        assert!(w.reorder_children(r, &[a]));
+        assert!(w.reorder_children(r, &[a, b]));
+        assert_eq!(w.generation, g, "already in this order");
+        assert!(w.reorder_children(r, &[b]));
+        assert!(w.generation > g);
+        assert_eq!(w.get(r).unwrap().children, vec![b, a]);
+        assert!(!w.reorder_children(r, &[b, b]), "a duplicate changes nothing");
     }
 
     /// A component takes its parent's priority when that is higher, except under the root

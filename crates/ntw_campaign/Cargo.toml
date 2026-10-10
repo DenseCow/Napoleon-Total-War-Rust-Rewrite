@@ -7,7 +7,12 @@ publish.workspace = true
 
 [dependencies]
 ntw_formats = { path = "../ntw_formats" }
-ntw_sim = { path = "../ntw_sim" }
+# `serde`: our own save format serialises the model (own_save.rs).
+ntw_sim = { path = "../ntw_sim", features = ["serde"] }
 ntw_data = { path = "../ntw_data" }
 # Warnings the save writer logs (the game routes `log` records into its own log).
 log = "0.4"
+# Our own save format (own_save.rs): RON text (names every field, so the format can grow), deflated.
+serde = { version = "1", features = ["derive"] }
+ron = "0.12"
+flate2 = "1"

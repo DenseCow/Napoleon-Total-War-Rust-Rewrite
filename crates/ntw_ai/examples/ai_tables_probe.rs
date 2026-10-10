@@ -61,14 +61,21 @@ fn main() {
             continue;
         }
         println!("== {name} files={:?}", vfs.list(&format!("db/{name}_tables/")));
-        match tables::load_raw(&vfs, name, codes) {
-            Ok(t) => {
-                println!("   {} rows", t.rows.len());
-                for r in t.rows.iter().take(max) {
-                    println!("   {r:?}");
+        // Each file as it is (a research dump; the game merges them by key: tables::load_raw).
+        for path in vfs.list(&format!("db/{name}_tables/")) {
+            let table = vfs
+                .read(path)
+                .map_err(|e| e.to_string())
+                .and_then(|b| ntw_formats::db::DbTable::read(&b, &tables::schema(codes)).map_err(|e| format!("{e:?}")));
+            match table {
+                Ok(t) => {
+                    println!("   {path}: {} rows", t.rows.len());
+                    for r in t.rows.iter().take(max) {
+                        println!("   {r:?}");
+                    }
                 }
+                Err(e) => println!("   {path}: ERROR {e}"),
             }
-            Err(e) => println!("   ERROR {e}"),
         }
     }
 }

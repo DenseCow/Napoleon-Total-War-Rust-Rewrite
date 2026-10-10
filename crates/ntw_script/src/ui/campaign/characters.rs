@@ -106,7 +106,7 @@ pub(super) fn character_details(lua: &Lua, inner: &Inner, ui: &CampaignUi, c: Ch
     if let Some(post) = post {
         let gov = m.world.factions.get(&ch.faction).map(|f| f.government_key.clone()).unwrap_or_default();
         let rows = ui.post_names.get_or_init(|| {
-            small_table(inner, "db/ministerial_positions_by_gov_types_tables/ministerial_positions_by_gov_types", "s,s,s,s,s")
+            small_table(inner, &tables::MINISTERIAL_POSITIONS_BY_GOV_TYPES)
         });
         let name = rows
             .iter()

@@ -42,7 +42,7 @@ fn setup_as(human: &str) -> Option<Setup> {
     let scripts = ScriptHost::new(loaded.model, human, ScriptSource::from_install(&dir).unwrap()).unwrap();
     let loc = Localisation::from_vfs(&vfs).unwrap();
     let host = UiScriptHost::new(ScriptSource::from_install(&dir).unwrap(), loc, FrontEndFacts::default(), (1280.0, 960.0)).unwrap();
-    host.install_campaign(CampaignLink { state: scripts.shared_state(), human: human.into(), campaign: "eur_napoleon".into(), db: Rc::new(db) })
+    host.install_campaign(CampaignLink { state: scripts.shared_state(), human: human.into(), campaign: "eur_napoleon".into(), map: loaded.info.map_key.clone(), db: Rc::new(db) })
         .unwrap();
     let root = host.load_root_layout("data/ui/campaign ui/layout").unwrap();
     host.campaign_ready();
@@ -1696,23 +1696,72 @@ fn settlement_labels_draw_under_the_diplomatic_relations_panel() {
     assert_eq!(labels, (0..labels.len()).collect::<Vec<_>>(), "the labels are the first children: under the whole HUD");
 }
 
-/// The region details panel's title is the region's name: the root's ShowRegionInfo opens it with
-/// `CampaignUI.InitialiseRegionInfoDetails(region)`, whose `Name` region_details.lua writes into
-/// `region_name`. Bug 2026-10-09: the title kept the layout's " XXX Details".
-/// PROVISIONAL: our table has only the region info's first fields, so the script still stops at
-/// line 124 (`UpperTax`); the rest of the panel is BACKLOG §0-E "Region details panel".
+/// The region details panel shows the region: the root's ShowRegionInfo opens it with
+/// `CampaignUI.InitialiseRegionInfoDetails(region)` and region_details.lua fills it to its end: the
+/// title is the region's name, the tax income is Wealth × (UpperTax + LowerTax) truncated, the rate
+/// their sum in percent, and the public order groups get one pip column per factor (each factor
+/// with its sign's pip picture and text). Bugs 2026-10-09: the title kept the layout's
+/// " XXX Details", then the script stopped at line 124 (`UpperTax`) with the rest of the panel at
+/// the layout's defaults.
 #[test]
-fn region_details_title_is_the_region_name() {
+fn region_details_panel_is_filled_from_the_campaign() {
     let Some(s) = setup() else { return };
     no_errors(&s.host);
     let lua = s.host.lua();
     let row: mlua::Table = lua.load("return CampaignUI.RetrieveFactionRegionList('france')[1]").eval().unwrap();
     let name: String = row.get("Name").unwrap();
+    let address: mlua::Value = row.get("Address").unwrap();
     let show: mlua::Function = s.host.script_env(s.root).unwrap().raw_get("ShowRegionInfo").unwrap();
-    let r = show.call::<()>(row.get::<mlua::Value>("Address").unwrap());
-    let stop = r.expect_err("the script stops at the first missing field").to_string();
-    assert!(stop.contains("region_details.lua:124") && stop.contains("UpperTax"), "{stop}");
+    show.call::<()>(address.clone()).expect("the panel's script runs to its end");
+    no_errors(&s.host);
     let title = find(&s.host, s.root, "region_name").expect("the region details panel is open");
     assert_eq!(text(&s.host, title).trim(), name);
     assert!(!name.is_empty() && !name.contains("XXX"));
+
+    let get = lua.create_function(|lua, a: mlua::Value| lua.load("return CampaignUI.InitialiseRegionInfoDetails(...)").call::<mlua::Table>(a)).unwrap();
+    let d: mlua::Table = get.call(address).unwrap();
+    let (wealth, upper, lower): (f64, f64, f64) = (d.get("Wealth").unwrap(), d.get("UpperTax").unwrap(), d.get("LowerTax").unwrap());
+    assert!(wealth > 0.0 && upper > 0.0 && lower > 0.0, "France pays taxes: {wealth} {upper} {lower}");
+    let treasury = find(&s.host, s.root, "treasury_text").unwrap();
+    assert_eq!(text(&s.host, treasury).trim().parse::<f64>().unwrap(), (wealth * (upper + lower)).trunc());
+    let rate = find(&s.host, s.root, "dy_tax_percent").unwrap();
+    assert_eq!(text(&s.host, rate).trim(), format!("{:.1}%", (upper + lower) * 100.0));
+
+    // The public order tables: the class's total and its factors, each with a pip picture and text.
+    let (po_upper, _): (f64, f64) = lua.load("return CampaignUI.RegionsPublicOrders(...)").call(d.get::<mlua::Value>("Address").unwrap()).unwrap();
+    let order: mlua::Table = d.get("UpperOrder").unwrap();
+    assert_eq!(order.get::<f64>("Total").unwrap(), po_upper);
+    assert!(order.raw_len() > 0, "France's upper class has public order factors");
+    for f in order.sequence_values::<mlua::Table>() {
+        let f = f.unwrap();
+        let pip: String = f.get("Pip").unwrap();
+        assert!(pip.starts_with("data/ui/campaign ui/pips/") && pip.ends_with(".tga"), "{pip}");
+        assert!(!f.get::<String>("Tooltip").unwrap().is_empty());
+        // Predicted is the prediction's magnitude minus the value's (0x009E7064).
+        let (total, change) = (f.get::<f64>("Total").unwrap(), f.get::<f64>("Predicted").unwrap());
+        assert!(total > 0.0 || total + change > 0.0);
+    }
+    let group = find(&s.host, s.root, "upper_public_order").expect("the upper class's pip group");
+    let mut pips = 0;
+    s.host.world().visit_visible(group, &mut |_, node| pips += usize::from(node.data.id.starts_with("pip")));
+    assert!(pips > 0, "the upper class's pips are drawn");
+
+    // Population: the projected trend and the growth factors in percent (the vanilla base growth 0.3%).
+    assert!((1..=3).contains(&d.get::<i64>("PopulationChange").unwrap()));
+    let growth: mlua::Table = d.get("PopulationGrowth").unwrap();
+    assert_eq!((growth.get::<f64>("PipValue").unwrap() as f32, growth.get::<bool>("IsPercentage").unwrap()), (0.01, true));
+    let factors: Vec<mlua::Table> = growth.sequence_values().map(Result::unwrap).collect();
+    let base = factors.first().expect("the base growth factor");
+    assert_eq!(base.get::<f64>("Total").unwrap() as f32, 0.29999998, "30 hundredths, as 0x00A88EF0 stores them");
+    assert!(base.get::<String>("Tooltip").unwrap().contains("0.3%"), "{:?}", base.get::<String>("Tooltip"));
+    let sum: f64 = factors.iter().map(|f| if f.get::<bool>("Positive").unwrap() { 1.0 } else { -1.0 } * f.get::<f64>("Total").unwrap()).sum();
+    assert!((sum - growth.get::<f64>("Total").unwrap()).abs() < 1e-4, "the factors sum to the growth: {sum}");
+    // Town wealth: the trend of the predicted growth and the growth's factors with the table's pictures.
+    assert!((0..=4).contains(&d.get::<i64>("WealthChange").unwrap()));
+    let town: mlua::Table = d.get("TownWealth").unwrap();
+    assert_eq!(town.get::<i64>("PipValue").unwrap(), 50);
+    for f in town.sequence_values::<mlua::Table>() {
+        let pip: String = f.unwrap().get("Pip").unwrap();
+        assert!(pip.starts_with("data/ui/campaign ui/pips/"), "{pip}");
+    }
 }

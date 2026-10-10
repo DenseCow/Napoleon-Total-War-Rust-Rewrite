@@ -106,6 +106,7 @@ fn test_hud_with(db: GameDatabase) -> TestHud {
             tax_exempt: false,
             religions: Vec::new(),
             class_bases: Vec::new(),
+            population_state: Default::default(),
             recruitment_queue: Vec::new(),
             construction: Vec::new(),
             garrison: None,
@@ -123,6 +124,7 @@ fn test_hud_with(db: GameDatabase) -> TestHud {
         state: scripts.shared_state(),
         human: HUMAN.into(),
         campaign: "test_campaign".into(),
+        map: "test_map".into(),
         db: Rc::new(db),
     })
     .unwrap();
@@ -1330,6 +1332,7 @@ fn the_two_agent_menu_percentages_are_the_models_own_success_chances() {
             men: 100,
             max_men: 100,
             character: Some(colonel),
+            officer_name: Default::default(),
         };
         w.forces.insert(force, ntw_sim::campaign::MilitaryForce {
             id: force,
@@ -1443,7 +1446,7 @@ fn the_commander_pool_answers_from_the_model_and_hiring_queues_the_command() {
             base_movement_points: 10,
             garrisoned_in: Some(REGION),
         });
-        let mut u = ntw_sim::campaign::CampaignUnit { id: UnitId(70), unit_key: "test_unit".into(), men: 100, max_men: 100, character: Some(CharacterId(120)) };
+        let mut u = ntw_sim::campaign::CampaignUnit { id: UnitId(70), unit_key: "test_unit".into(), men: 100, max_men: 100, character: Some(CharacterId(120)), officer_name: Default::default() };
         u.men = 100;
         w.forces.insert(force, ntw_sim::campaign::MilitaryForce { id: force, faction: A, commander: Some(CharacterId(120)), units: vec![u], is_navy: false });
         let c = CharacterId(121);
@@ -1557,7 +1560,7 @@ fn the_promote_gate_and_price_come_from_the_model() {
             id: force,
             faction: A,
             commander: Some(CharacterId(120)),
-            units: vec![ntw_sim::campaign::CampaignUnit { id: unit, unit_key: "test_unit".into(), men: 100, max_men: 100, character: Some(CharacterId(120)) }],
+            units: vec![ntw_sim::campaign::CampaignUnit { id: unit, unit_key: "test_unit".into(), men: 100, max_men: 100, character: Some(CharacterId(120)), officer_name: Default::default() }],
             is_navy: false,
         });
         w.faction_details.get_mut(&A).unwrap().bonus_base = vec![SavedBonus { kind: 1, bonus: 64, value: 1.0, qualifier: String::new() }];
@@ -1612,7 +1615,7 @@ fn the_promote_gate_and_price_come_from_the_model() {
                 id: ForceId(4243),
                 faction: A,
                 commander: Some(CharacterId(121)),
-                units: vec![ntw_sim::campaign::CampaignUnit { id: ship, unit_key: "test_ship".into(), men: 10, max_men: 10, character: Some(CharacterId(121)) }],
+                units: vec![ntw_sim::campaign::CampaignUnit { id: ship, unit_key: "test_ship".into(), men: 10, max_men: 10, character: Some(CharacterId(121)), officer_name: Default::default() }],
                 is_navy: true,
             },
         );
@@ -1648,7 +1651,7 @@ fn a_unit_of_the_players_own_force_with_no_commander_is_owned() {
             id: force,
             faction: A,
             commander: None,
-            units: vec![ntw_sim::campaign::CampaignUnit { id: unit, unit_key: "test_unit".into(), men: 10, max_men: 10, character: None }],
+            units: vec![ntw_sim::campaign::CampaignUnit { id: unit, unit_key: "test_unit".into(), men: 10, max_men: 10, character: None, officer_name: Default::default() }],
             is_navy: false,
         });
     }
@@ -1713,7 +1716,7 @@ fn the_spying_data_levels_follow_the_models_sight() {
             id: ForceId(77),
             faction: B,
             commander: Some(FOREIGN_GENTLEMAN),
-            units: vec![ntw_sim::campaign::CampaignUnit { id: UnitId(78), unit_key: "test_unit".into(), men: 10, max_men: 10, character: None }],
+            units: vec![ntw_sim::campaign::CampaignUnit { id: UnitId(78), unit_key: "test_unit".into(), men: 10, max_men: 10, character: None, officer_name: Default::default() }],
             is_navy: false,
         });
     }

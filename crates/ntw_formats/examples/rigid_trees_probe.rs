@@ -11,7 +11,7 @@ fn main() {
     let map = std::env::args().nth(1).unwrap_or_else(|| "nap_europe".into());
     let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into());
     let vfs = Vfs::open_install(&dir).unwrap();
-    let files = GameFiles { vfs: &vfs, data_dir: Some(std::path::Path::new(&dir)) };
+    let files = GameFiles { vfs: &vfs };
     let m = CampaignMap::load(&files, &map).unwrap();
     let t = RigidTrees::read(&files.read(&format!("campaign_maps/{map}/display/trees/campaign.rigid_trees")).unwrap()).unwrap();
     let (mut n, mut sxy, mut sxx, mut sy) = (0f64, 0f64, 0f64, 0f64);

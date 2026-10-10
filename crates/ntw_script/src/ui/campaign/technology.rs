@@ -52,7 +52,7 @@ impl CampaignUi {
     fn tech_links(&self, inner: &Inner) -> &TechLinks {
         self.tech_links.get_or_init(|| {
             let required: Vec<(String, String)> =
-                small_table(inner, "db/technology_required_technology_junctions_tables/technology_required_technology_junctions", "s,s")
+                small_table(inner, &tables::TECHNOLOGY_REQUIRED_TECHNOLOGY_JUNCTIONS)
                     .into_iter()
                     .filter_map(|r| Some((r.first()?.as_str()?.to_owned(), r.get(1)?.as_str()?.to_owned())))
                     .collect();

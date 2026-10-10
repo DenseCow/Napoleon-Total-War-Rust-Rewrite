@@ -70,13 +70,13 @@ impl UnitView {
     /// The model unit this view shows (`units`: `sim.battle.units`): its slot when that still
     /// holds it, else found by id.
     fn unit<'a>(&self, units: &'a [LandUnit]) -> Option<&'a LandUnit> {
-        self.at_slot(units).or_else(|| units.iter().find(|u| u.id == self.id))
+        self.at_slot(units).or_else(|| units.binary_search_by_key(&self.id, |u| u.id).ok().map(|i| &units[i]))
     }
 
     /// [`unit`](Self::unit), keeping the slot it was found at (once per model tick).
     fn observe<'a>(&mut self, units: &'a [LandUnit]) -> Option<&'a LandUnit> {
         if self.at_slot(units).is_none() {
-            self.slot = units.iter().position(|u| u.id == self.id)?;
+            self.slot = units.binary_search_by_key(&self.id, |u| u.id).ok()?;
         }
         units.get(self.slot)
     }
@@ -769,7 +769,7 @@ pub fn spawn_missing_views(
     for info in &sim.info {
         let mut kits = Vec::new();
         let mut bearer = None;
-        if let (Some(lib), Some(unit)) = (soldiers.lib.as_mut(), sim.battle.units.iter().find(|u| u.id == info.id)) {
+        if let (Some(lib), Some(unit)) = (soldiers.lib.as_mut(), find(&sim, info.id)) {
             let faction = if info.faction.is_empty() { sim.side_factions[usize::from(unit.side).min(1)].clone() } else { info.faction.clone() };
             let keys = data.db.unit_stats(&info.key).map(animation_keys);
             let mut assets = KitAssets { meshes: &mut meshes, materials: &mut materials, images: &mut images };
@@ -813,7 +813,7 @@ pub fn spawn_missing_views(
         .iter()
         .zip(&unit_kits)
         .filter(|(_, k)| !k.is_empty())
-        .filter_map(|(i, _)| sim.battle.units.iter().find(|u| u.id == i.id))
+        .filter_map(|(i, _)| find(&sim, i.id))
         .map(|u| (u.men as usize).min(MAX_FIGURES))
         .sum::<usize>()
         // One figure slot each for the standard bearers.
@@ -1388,7 +1388,7 @@ fn frame_bone(atlas: &BoneAtlas, frame: &[u32; 4], bone: usize) -> Option<[f32; 
 }
 
 fn find(sim: &BattleSim, id: u32) -> Option<&LandUnit> {
-    sim.battle.units.iter().find(|u| u.id == id)
+    sim.battle.unit_index(id).map(|i| &sim.battle.units[i])
 }
 
 /// Blue for France (side 0), red for Austria (side 1). Paler as morale drops; grey when

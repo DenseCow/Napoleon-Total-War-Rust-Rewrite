@@ -21,6 +21,7 @@ use super::world::{CampaignModel, CharacterKind};
 
 /// The sight cell grid (world +0xF58).
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SightGrid {
     /// Columns (x).
     pub cols: u32,
@@ -81,6 +82,7 @@ impl SightGrid {
 
 /// A set of sight cells.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CellSet {
     /// Columns.
     pub cols: u32,
@@ -134,6 +136,7 @@ impl CellSet {
 /// A faction's shroud (`CAMPAIGN_SHROUD` v1: three quad trees and a bool, CONFIRMED layout; loader
 /// `0x00AFBFC0`, object +4 / +0x1C / +0x34 and +0x50).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Shroud {
     /// #0: every cell ever seen (a superset of `visible` in every save).
     pub explored: CellSet,
@@ -600,6 +603,7 @@ impl CampaignModel {
 /// (+0x54 list, `LINE_OF_SIGHT` − 3: ids of `INTERNATIONAL_TRADE_ROUTES`) belongs to it or to its
 /// protectorate. Matched exactly: Russia's and Prussia's saved visible sets in a turn-4 save.
 #[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TradeSegmentSight {
     /// The cells the segment sees.
     pub cells: Vec<(u32, u32)>,

@@ -17,9 +17,10 @@ Last updated: 2026-10-09. Main tests at last full run (2026-10-08): `cargo test 
   → push (the hook syncs public #2) → publish in batches. Running work = the BACKLOG `(running: …)`
   markers and `git worktree list`; merged work = `git log`.
 - **Resume points (2026-10-09, block cap 46%):** workers commit and push a checkpoint every ~20 min.
-  1. gait-blend2 (NR-gait-blend2, head `baa65793`, don't merge yet): done except two debugger reads (FOR_USER gait
-     sitting): walk-ordered horses trot (rider vs horse record speed) and infantry at store C. Arrival braking,
-     rider legs, gait by order and ladder timing are CONFIRMED; resume block at the end of UNITS_TERRAIN_FIDELITY.md §1.10.
+  1. gait-blend2 (NR-gait-blend2, head `38df2276`, don't merge yet): the 2026-10-10 sitting settled both reads (end of
+     UNITS_TERRAIN_FIDELITY.md §1.10): cavalry speed is the horse record's, but a walking horse moves at ~80% of its order
+     speed (2.1-2.3 of 2.8 m/s), so it stays in walk; men change levels through store C. Left: trace what lowers the
+     wanted speed `+0x148` in the move state `0x00806D40`, apply it in `ntw_sim`, then review.
   2. mod-loading2 (NR-mod-loading): review round 1 found 2 blocking (precedence must follow the whole graph
      `0x0108EBB0`/`0x0109ECF0`; `ntw_ai` tables.rs:79 `load_raw` must read the merged tables) plus three silent
      failures (unknown script line, `--mods` with no value, mods.rs:734 warning per open). The fix round was cut by
@@ -27,15 +28,21 @@ Last updated: 2026-10-09. Main tests at last full run (2026-10-08): `cargo test 
      cycle (`0x0108E8F0`); the AI's raw tables have no traced key (trace the exe's key reader per table). Then review
      the fix commits only. The unattended start-up debugger run for
      the six open points is MOD_LOADING.md §6 (no user input).
-  3. 0e-panel (NR-0e-panel): region details panel fields (`0x009E69B0`) and `OnDivorceChild`; check its last push.
+  3. 0e-panel (NR-0e-panel, `4937016a`): done: `OnDivorceChild` fires on Adopt, Divorce, Destroy and DestroyChildren
+     (`0x01027BA0` → `0x0102DE60`; ORIGINAL BUG fixed: DestroyChildren could loop for ever), both Polish lines cleared, the
+     region panel script runs to its end. Left: clippy, notes and Ghidra names (FUNCTION_DOC guides), the model's missing
+     panel values (predicted values, growth and wealth factors, Effects, PopulationChange/WealthChange, next town:
+     PROVISIONAL), Name INFERRED. Then review.
   4. campaign-source (NR-campaign-source, `75c2b8c2`): done: versioned RON/deflate own save (`own_save.rs`, F5), AI keys and
      region base values moved into the model, old ESF saves still load, `ntw_campaign::source` seam used by the scene,
      campaign list and UI. Left: the real-install round-trip and seam tests, the full test run + clippy + own-diff check,
      analysis/modding/OWN_SAVE_FORMAT.md, and the display port (`MapData` still wraps `CampaignMap`). Was: our own campaign save format and the `CampaignSource` seam
      (MODDING_AUDIT.md §4 items 1-2); check its last push.
-  5. Then: MODDING_AUDIT.md items 3-4 (after mod-loading2 merges), ui-fixes (front-end UI scale, battle
-     CursorPosition, prelude x/y). `tools/usage_budget.ps1` has a local `$WrapAt = 1.0` (user, 2026-10-09): ask
-     whether to keep and commit it or restore 2.0.
+  5. Then, first free slots (user, 2026-10-10: modding foundations before they get costlier): (a) one table path
+     (BACKLOG §11, with its guard test), (b) no engine limits: data-driven counts and ID types (MODDING_AUDIT.md §2),
+     (c) generic-engine switches (MODDING_AUDIT.md §1). Then MODDING_AUDIT.md items 3-4 (after mod-loading2
+     merges), ui-fixes (front-end UI scale, battle CursorPosition, prelude x/y). The map, Lua, format and tool
+     items of §11 wait.
 - **Disk:** C: filled up on 2026-10-09; 21 merged worktrees were removed (~100 GB back). Remove a
   worktree after its merge; check `df -h /c` before starting builds.
 - **Next:** §0, several workers tracing in parallel under the Ghidra writer lock, plus the §11 modding work alongside it (user, 2026-10-09: mod loading and the audits come early); the unwrap audit last.
@@ -48,13 +55,13 @@ Last updated: 2026-10-09. Main tests at last full run (2026-10-08): `cargo test 
 
 - **Diplomacy screen (§0-E):** diplomacy2 merged (greeting by attitude, diplomat portrait, button lists
   for war / peace+trade / ally, Power and Wealth words, regnal numerals). Still different from the
-  original: Austria's power reads "Mighty" (original "Terrifying"; it ranks 5th behind Prussia and
-  Russia: debugger read at `0x00949630`), the panel creates no `diplomacy_button_*` components from the
+  original: Austria's power reads "Mighty" (original "Terrifying"; ours ranks it 5th; the original's
+  values, read 2026-10-10, put it 3rd: UI_FIDELITY.md power-result row), the panel creates no `diplomacy_button_*` components from the
   lists (ignored test; cause untraced), red cancel texts. Original screens in
   `%USERPROFILE%\Documents\ntw-evidence\screens\`: `2026-10-08_original_diplomacy_negotiation_britain_france.png`,
   `…_britain_ottoman_trade.png`, `…_britain_austria_ally.png`, `2026-10-08_original_diplomatic_relations_britain.png`.
-- **Campaign:** the region details panel shows the region name but its other fields keep the layout's defaults
-  (BACKLOG §0-E); the user couldn't find the demolish button (offered from a building slot via
+- **Campaign:** the region details panel is filled since 2026-10-10 except Effects, NextTown and the selected-army
+  garrison (PROVISIONAL, BACKLOG §0-E); the user couldn't find the demolish button (offered from a building slot via
   `CanDemolishBuilding`: check it shows).
 - **Battle** (`--battle-key NHB_Austerlitz --skip-deployment`):
   - Unit cards hidden ~3 min in Austerlitz only: likely its intro cutscene hides the HUD and we run the
@@ -136,9 +143,10 @@ Base command: `cargo run -p napoleon -- <flags>`.
   `git push origin --delete work/fidelity-campaign-w4`. Same branch on the sandbox.
 - **Raw Ghidra dumps in the private repo's history** (322 + 65, untracked since): they stay unless the
   user wants a history rewrite. The public repo has fresh history and none of them.
-- **Debugger session:** who writes `unit+0xD48`, where `unit_scale` is read, formation radius
-  `+0x670`, garrison cap `+0x6C`; Austria's power ranking input at `0x00949630` (Britain campaign, Early
-  January 1805, Diplomacy → Austria: ours reads "Mighty", the original "Terrifying").
+- **Debugger reads still open (battle):** who writes `unit+0xD48`, formation radius `+0x670`, garrison cap `+0x6C`
+  (`unit_scale` is solved, BATTLE_FIDELITY row 48). Their probe plan `f0a_battle_probe.cdb.txt` was never committed
+  (`.txt` is ignored under `analysis/`): a worker preps the breakpoints statically first; the first two can then run
+  unattended at battle load, the garrison cap needs a siege battle (a short sitting, or a battle launched by flag).
 
 ## Waiting for a worker slot
 

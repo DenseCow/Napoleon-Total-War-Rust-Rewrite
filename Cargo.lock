@@ -3673,10 +3673,13 @@ dependencies = [
 name = "ntw_campaign"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "log",
  "ntw_data",
  "ntw_formats",
  "ntw_sim",
+ "ron",
+ "serde",
 ]
 
 [[package]]
@@ -3691,6 +3694,7 @@ dependencies = [
 name = "ntw_formats"
 version = "0.1.0"
 dependencies = [
+ "log",
  "miniz_oxide 0.8.9",
  "symphonia",
 ]
@@ -3713,6 +3717,7 @@ name = "ntw_sim"
 version = "0.1.0"
 dependencies = [
  "ntw_formats",
+ "serde",
 ]
 
 [[package]]

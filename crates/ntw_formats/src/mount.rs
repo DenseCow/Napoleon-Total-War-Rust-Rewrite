@@ -23,7 +23,8 @@
 
 use std::collections::HashMap;
 
-use crate::db::{DbTable, DbValue, Schema};
+use crate::db::DbValue;
+use crate::db_folder::{TableError, tables};
 use crate::pack::{PackError, Vfs};
 use crate::unit_model::{TextureFiles, texture_files};
 use crate::weighted_mesh::{WeightedMesh, WeightedMeshError, WeightedPiece};
@@ -32,7 +33,7 @@ use crate::weighted_mesh::{WeightedMesh, WeightedMeshError, WeightedPiece};
 #[derive(Debug)]
 pub enum MountError {
     Pack(PackError),
-    Db { table: &'static str, error: crate::db::DbError },
+    Table(TableError),
     UnknownMount(String),
     UnknownModel(String),
     NoLod(String),
@@ -43,7 +44,7 @@ impl std::fmt::Display for MountError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Pack(e) => write!(f, "{e}"),
-            Self::Db { table, error } => write!(f, "{table}: {error}"),
+            Self::Table(e) => write!(f, "{e}"),
             Self::UnknownMount(m) => write!(f, "mount {m} has no mount_variants row"),
             Self::UnknownModel(m) => write!(f, "model {m} has no warscape_animated row"),
             Self::NoLod(m) => write!(f, "model {m} has no warscape_animated_lod rows"),
@@ -60,10 +61,10 @@ impl From<PackError> for MountError {
     }
 }
 
-fn read_table(vfs: &Vfs, table: &'static str, codes: &str) -> Result<DbTable, MountError> {
-    let bytes = vfs.read(&format!("db/{table}_tables/{table}"))?;
-    let schema = Schema::from_codes(codes).expect("valid schema codes");
-    DbTable::read(&bytes, &schema).map_err(|error| MountError::Db { table, error })
+impl From<TableError> for MountError {
+    fn from(e: TableError) -> Self {
+        Self::Table(e)
+    }
 }
 
 fn text(row: &[DbValue], i: usize) -> String {
@@ -103,19 +104,19 @@ pub struct MountIndex {
 impl MountIndex {
     pub fn from_vfs(vfs: &Vfs) -> Result<Self, MountError> {
         let mut variants: HashMap<String, Vec<(String, f32)>> = HashMap::new();
-        for r in read_table(vfs, "mount_variants", "s,s,f")?.rows {
+        for r in tables::MOUNT_VARIANTS.read(vfs)? {
             let w = r.get(2).and_then(DbValue::as_f32).unwrap_or(1.0);
             variants.entry(text(&r, 0).to_ascii_lowercase()).or_default().push((text(&r, 1), w));
         }
         let mut models: HashMap<String, AnimatedModel> = HashMap::new();
-        for r in read_table(vfs, "warscape_animated", "s,s,s")?.rows {
+        for r in tables::WARSCAPE_ANIMATED.read(vfs)? {
             let key = text(&r, 0);
             models.insert(
                 key.to_ascii_lowercase(),
                 AnimatedModel { key, texture_stem: text(&r, 1), kind: text(&r, 2), lods: Vec::new() },
             );
         }
-        for r in read_table(vfs, "warscape_animated_lod", "s,s,f,s")?.rows {
+        for r in tables::WARSCAPE_ANIMATED_LOD.read(vfs)? {
             if let Some(m) = models.get_mut(&text(&r, 3).to_ascii_lowercase()) {
                 m.lods.push((text(&r, 1), r.get(2).and_then(DbValue::as_f32).unwrap_or(0.0)));
             }

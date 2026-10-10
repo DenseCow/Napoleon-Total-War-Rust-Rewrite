@@ -12,7 +12,7 @@
 use ntw_formats::esf::{EsfFile, EsfNode, EsfRecord, EsfRecordArray};
 
 /// One stored value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ScriptSaveValue {
     /// A Lua boolean.
     Bool(bool),

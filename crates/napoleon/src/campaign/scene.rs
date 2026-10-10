@@ -9,11 +9,12 @@ use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerD
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, Face, TextureDimension, TextureFormat};
-use ntw_formats::campaign_map::{CampaignMap, DISPLAY_TO_LOGIC, GameFiles, HEIGHT_SCALE};
+use ntw_campaign::map_display::{LineKind, MapDisplay, level_rgba};
+use ntw_formats::campaign_map::{DISPLAY_TO_LOGIC, GameFiles};
 use ntw_formats::pack::Vfs;
 use ntw_formats::rigid_model::RigidModel;
 use ntw_script::{ScriptContext, ScriptHost, ScriptSource};
-use ntw_sim::campaign::{CampaignModel, CharacterId, CharacterKind, FactionId, RegionId, Terrain};
+use ntw_sim::campaign::{CampaignModel, CharacterId, CharacterKind, FactionId, RegionId};
 
 use super::CampaignStart;
 use super::camera::{self, CampaignCamera};
@@ -25,9 +26,10 @@ use crate::model_viewer::source::{ModelSource, NameFlags, convert_mesh};
 
 use ntw_data::campaign::SLOT_TYPE_SETTLEMENT;
 
-/// The loaded map, for height queries (camera, markers).
+/// The loaded map's display data, for height queries (camera, markers) and the finer ground
+/// texture near the camera.
 #[derive(Resource, Clone)]
-pub struct CampaignGround(pub Arc<CampaignMap>);
+pub struct CampaignGround(pub Arc<MapDisplay>);
 
 /// The settlement **fortification** meshes, and the one settlement slot's walls are currently drawn
 /// with.
@@ -249,29 +251,36 @@ pub fn enter(world: &mut World) {
             return;
         }
     };
-    let files = GameFiles { vfs: &vfs, data_dir: Some(&dir) };
-    let startpos = match &start.save {
-        Some(p) => p.display().to_string(),
-        None => format!("campaigns/{}/startpos.esf", start.campaign),
+    let files = GameFiles { vfs: &vfs };
+    // A save is read from disk (ours or one of the original's, read-only); a new campaign comes
+    // from its campaign source (ntw_campaign::source).
+    let save_bytes = match &start.save {
+        Some(p) => match std::fs::read(p) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                error!("Campaign save {}: {e}", p.display());
+                return;
+            }
+        },
+        None => None,
     };
-    let read = match &start.save {
-        Some(p) => std::fs::read(p).map_err(|e| format!("{}: {e}", p.display())),
-        None => files.read(&startpos),
+    let from = start.save.as_ref().map_or_else(|| start.campaign.clone(), |p| p.display().to_string());
+    let t = std::time::Instant::now();
+    let opened = {
+        let db = &world.resource::<GameData>().db;
+        match &save_bytes {
+            Some(b) => ntw_campaign::source::open(files, ntw_campaign::source::Start::Save(b), db),
+            None => ntw_campaign::source::open(files, ntw_campaign::source::Start::New(&start.campaign), db),
+        }
     };
-    let bytes = match read {
-        Ok(b) => b,
+    let ntw_campaign::source::OpenedCampaign { mut loaded, map } = match opened {
+        Ok(o) => o,
         Err(e) => {
-            error!("Campaign {}: {e}", start.campaign);
+            error!("Campaign {from}: {e}");
             return;
         }
     };
-    let mut loaded = match ntw_campaign::read(&bytes, &world.resource::<GameData>().db) {
-        Ok(l) => l,
-        Err(e) => {
-            error!("Campaign {}: {startpos}: {e}", start.campaign);
-            return;
-        }
-    };
+    info!("Campaign: opened with its map and movement grid in {:.0} ms", t.elapsed().as_secs_f32() * 1000.0);
     // A save names its own campaign.
     let mut start = start;
     if start.save.is_some() {
@@ -291,21 +300,6 @@ pub fn enter(world: &mut World) {
     for w in &loaded.warnings {
         warn!("Campaign load: {w}");
     }
-    // The save header's territory pictures (one per theatre the header has), rebuilt on save.
-    let pictures: Vec<ntw_campaign::header_map::TheatrePictures> = loaded
-        .info
-        .header
-        .maps
-        .iter()
-        .filter_map(|m| ntw_campaign::header_map::TheatrePictures::load(&files, &world.resource::<GameData>().db, &loaded.info.map_key, &m.theatre))
-        .collect();
-    let map = match CampaignMap::load(&files, &loaded.info.map_key) {
-        Ok(m) => Arc::new(m),
-        Err(e) => {
-            error!("Campaign map {}: {e}", loaded.info.map_key);
-            return;
-        }
-    };
     // The human faction: the one the front end chose, else the header's faction (the startpos
     // default, or the save's player; a save is already inside that faction's turn).
     let human = start.faction.clone().unwrap_or_else(|| loaded.info.header.faction_key.clone());
@@ -315,11 +309,7 @@ pub fn enter(world: &mut World) {
         loaded.set_human(&h);
     }
     let human = loaded.model.turn.humans.first().and_then(|f| loaded.model.world.factions.get(f)).map(|f| f.key.clone()).unwrap_or(human);
-    let t = std::time::Instant::now();
-    loaded.model.terrain = Some(Terrain(Arc::new(ntw_campaign::pathing::build_grid(&map))));
-    // The trade nodes' DB rows (their keys come from the map; CAMPAIGN_FIDELITY.md §Trade).
-    ntw_campaign::trade::attach_map(&mut loaded.model, &map.regions);
-    info!("Campaign: movement grid built in {:.0} ms", t.elapsed().as_secs_f32() * 1000.0);
+    let ntw_campaign::source::MapData { display: map, theatre_pictures: pictures, .. } = map;
 
     world.insert_resource(CampaignGround(map.clone()));
     // Faction colours from the `factions` table (primary colour).
@@ -344,9 +334,9 @@ pub fn enter(world: &mut World) {
             world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
                 {
                     let mut commands = world.commands();
-                    spawn_terrain(&mut commands, &files, &map, &mut meshes, &mut materials, &mut images);
+                    spawn_terrain(&mut commands, &map, &mut meshes, &mut materials, &mut images);
                     spawn_lines(&mut commands, &map, &mut meshes, &mut materials);
-                    spawn_rivers(&mut commands, &files, &map, &mut meshes, &mut materials, &mut images);
+                    spawn_rivers(&mut commands, &map, &mut meshes, &mut materials, &mut images);
                     spawn_coast(&mut commands, &files, &map, &mut meshes, &mut materials, &mut images);
                     // The region names painted on the map (`theatres_and_region_keys` label
                     // positions + the loc `regions_onscreen_` names).
@@ -439,7 +429,7 @@ pub fn enter(world: &mut World) {
     }
     host.state_mut().restricted_units.extend(restricted_units);
     // The campaign AI plays the non-human factions in the turn loop (`--campaign-ai on|off`).
-    crate::campaign_ai::attach(world, &mut host, &vfs, &bytes);
+    crate::campaign_ai::attach(world, &mut host, &vfs);
     // INFERRED engine order for a new campaign: NewSession, NewCampaignStarted, then turn 1.
     let first_events: &[&str] = if start.save.is_some() { &["NewSession"] } else { &["NewSession", "NewCampaignStarted"] };
     for &name in first_events {
@@ -462,7 +452,8 @@ pub fn enter(world: &mut World) {
         host,
         campaign: start.campaign.clone(),
         human,
-        source: Arc::new(bytes),
+        info: loaded.info,
+        rebel_faction: loaded.rebel_faction,
         generation: 0,
         selected: None,
         selected_region: None,
@@ -470,7 +461,6 @@ pub fn enter(world: &mut World) {
         moves: Vec::new(),
         last_message: String::new(),
         demo_target: None,
-        names: ntw_campaign::names::NameData::load(&vfs, &world.resource::<GameData>().db).map(Arc::new),
         pictures: Arc::new(pictures),
     };
     if demo {
@@ -488,7 +478,7 @@ fn spawn_static(
     walls: &mut SettlementWalls,
     colours: &HashMap<FactionId, Color>,
     model: &CampaignModel,
-    map: &CampaignMap,
+    map: &MapDisplay,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
@@ -736,7 +726,7 @@ pub fn sync_walls(
 /// eu_city_<n>_slot.rigid_model`, where `<n>` comes from the region's `settlement_<n>_slot`
 /// slot type in `regions.esf`. INFERRED from the names; the culture prefix `eu` is
 /// PROVISIONAL (the `ott`, `ind`, `na` sets exist too).
-fn settlement_template(map: &CampaignMap, region_key: &str) -> Option<String> {
+fn settlement_template(map: &MapDisplay, region_key: &str) -> Option<String> {
     let n = settlement_slot_number(map, region_key)?;
     Some(format!("rigidmodels\\campaignbuildings\\templates\\eu\\{SETTLEMENT_CITY_STEM}_{n}_slot.rigid_model"))
 }
@@ -747,7 +737,7 @@ const SETTLEMENT_CITY_STEM: &str = "eu_city";
 
 /// The `n` of a region's `settlement_<n>_slot` slot type, which numbers every mesh of that
 /// settlement (`eu_city_<n>_slot`, `eu_city_<n>_slot_fortifications_lvl<level>`).
-fn settlement_slot_number(map: &CampaignMap, region_key: &str) -> Option<u32> {
+fn settlement_slot_number(map: &MapDisplay, region_key: &str) -> Option<u32> {
     let region = map.regions.regions.iter().find(|r| r.key == region_key)?;
     region.settlement.as_ref()?.slots.iter().find_map(|s| {
         s.slot_type.strip_prefix("settlement_")?.strip_suffix("_slot")?.parse::<u32>().ok()
@@ -820,55 +810,94 @@ impl ModelCache {
     }
 }
 
+/// The terrain's vertex grid: every [`TERRAIN_STRIDE`]th height sample over the map's bounds. The
+/// terrain mesh and the finer patch near the camera (`detail.rs`) are both cut from it, so the patch
+/// lies exactly on the terrain.
+pub(super) struct TerrainGrid<'a> {
+    map: &'a MapDisplay,
+    /// Vertex columns (west to east) and rows (north to south).
+    pub cols: u32,
+    pub rows: u32,
+    /// Logic units between two columns and two rows.
+    pub sx: f32,
+    pub sz: f32,
+}
+
+/// One vertex of the [`TerrainGrid`].
+pub(super) struct TerrainVertex {
+    /// Its place over the whole map, 0..1 (west to east, north to south).
+    pub u: f32,
+    pub v: f32,
+    /// Its logic (x, z).
+    pub x: f32,
+    pub z: f32,
+}
+
+impl<'a> TerrainGrid<'a> {
+    pub(super) fn new(map: &'a MapDisplay) -> Self {
+        let hm = &map.heightmap;
+        let (mn, mx) = (map.regions.bounds_min, map.regions.bounds_max);
+        let (cols, rows) = (hm.width / TERRAIN_STRIDE + 1, hm.height / TERRAIN_STRIDE + 1);
+        let (sx, sz) = ((mx.0 - mn.0) / (cols - 1) as f32, (mx.1 - mn.1) / (rows - 1) as f32);
+        Self { map, cols, rows, sx, sz }
+    }
+
+    /// The height (logic units) at vertex (`c`, `r`), clamped to the grid.
+    fn height(&self, c: i64, r: i64) -> f32 {
+        let hm = &self.map.heightmap;
+        let (c, r) = (c.clamp(0, self.cols as i64 - 1), r.clamp(0, self.rows as i64 - 1));
+        hm.sample(c as f32 / (self.cols - 1) as f32 * hm.width as f32, r as f32 / (self.rows - 1) as f32 * hm.height as f32) * self.map.height_scale
+    }
+
+    /// The mesh of the vertices in columns `cs` and rows `rs`, with the texture coordinates
+    /// `uv` gives each vertex.
+    pub(super) fn mesh(&self, cs: std::ops::RangeInclusive<i64>, rs: std::ops::RangeInclusive<i64>, uv: impl Fn(&TerrainVertex) -> [f32; 2]) -> Mesh {
+        let (mn, mx) = (self.map.regions.bounds_min, self.map.regions.bounds_max);
+        let (w, h) = ((cs.end() - cs.start() + 1).max(0) as u32, (rs.end() - rs.start() + 1).max(0) as u32);
+        let n = (w * h) as usize;
+        let (mut positions, mut normals, mut uvs) = (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
+        for r in rs {
+            for c in cs.clone() {
+                let (u, v) = (c as f32 / (self.cols - 1) as f32, r as f32 / (self.rows - 1) as f32);
+                let vertex = TerrainVertex { u, v, x: mn.0 + u * (mx.0 - mn.0), z: mx.1 - v * (mx.1 - mn.1) };
+                positions.push(bevy_pos(vertex.x, self.height(c, r), vertex.z).to_array());
+                // Bevy +X = east (columns), +Z = south (rows).
+                let gx = (self.height(c + 1, r) - self.height(c - 1, r)) / (2.0 * self.sx);
+                let gz = (self.height(c, r + 1) - self.height(c, r - 1)) / (2.0 * self.sz);
+                normals.push(Vec3::new(-gx, 1.0, -gz).normalize().to_array());
+                uvs.push(uv(&vertex));
+            }
+        }
+        let mut indices = Vec::with_capacity((w.saturating_sub(1) * h.saturating_sub(1) * 6) as usize);
+        for r in 0..h.saturating_sub(1) {
+            for c in 0..w.saturating_sub(1) {
+                let (a, b, d, e) = (r * w + c, r * w + c + 1, (r + 1) * w + c, (r + 1) * w + c + 1);
+                indices.extend_from_slice(&[a, d, b, b, d, e]);
+            }
+        }
+        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+        mesh.insert_indices(Indices::U32(indices));
+        mesh
+    }
+}
+
 /// The terrain: one grid mesh over the whole map bounds with the supertexture as its colour.
 fn spawn_terrain(
     commands: &mut Commands,
-    files: &GameFiles<'_>,
-    map: &CampaignMap,
+    map: &MapDisplay,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
 ) {
-    let hm = &map.heightmap;
-    let (mn, mx) = (map.regions.bounds_min, map.regions.bounds_max);
-    let (cols, rows) = (hm.width / TERRAIN_STRIDE + 1, hm.height / TERRAIN_STRIDE + 1);
-    let (sx, sz) = ((mx.0 - mn.0) / (cols - 1) as f32, (mx.1 - mn.1) / (rows - 1) as f32);
-    let mut positions = Vec::with_capacity((cols * rows) as usize);
-    let mut normals = Vec::with_capacity(positions.capacity());
-    let mut uvs = Vec::with_capacity(positions.capacity());
-    let height = |c: i64, r: i64| {
-        let (c, r) = (c.clamp(0, cols as i64 - 1), r.clamp(0, rows as i64 - 1));
-        hm.sample(c as f32 / (cols - 1) as f32 * hm.width as f32, r as f32 / (rows - 1) as f32 * hm.height as f32) * HEIGHT_SCALE
-    };
-    for r in 0..rows as i64 {
-        for c in 0..cols as i64 {
-            let (u, v) = (c as f32 / (cols - 1) as f32, r as f32 / (rows - 1) as f32);
-            let x = mn.0 + u * (mx.0 - mn.0);
-            let z = mx.1 - v * (mx.1 - mn.1);
-            positions.push(bevy_pos(x, height(c, r), z).to_array());
-            // Bevy +X = east (columns), +Z = south (rows).
-            let gx = (height(c + 1, r) - height(c - 1, r)) / (2.0 * sx);
-            let gz = (height(c, r + 1) - height(c, r - 1)) / (2.0 * sz);
-            normals.push(Vec3::new(-gx, 1.0, -gz).normalize().to_array());
-            uvs.push([u, v]);
-        }
-    }
-    let mut indices = Vec::with_capacity(((cols - 1) * (rows - 1) * 6) as usize);
-    for r in 0..rows - 1 {
-        for c in 0..cols - 1 {
-            let (a, b, d, e) = (r * cols + c, r * cols + c + 1, (r + 1) * cols + c, (r + 1) * cols + c + 1);
-            indices.extend_from_slice(&[a, d, b, b, d, e]);
-        }
-    }
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    mesh.insert_indices(Indices::U32(indices));
+    let grid = TerrainGrid::new(map);
+    let mesh = grid.mesh(0..=grid.cols as i64 - 1, 0..=grid.rows as i64 - 1, |v| [v.u, v.v]);
 
-    let texture = map.supertexture.as_ref().and_then(|st| {
-        let level = st.levels.iter().position(|l| l.tiles_x * st.tile_size <= MAX_TEXTURE_WIDTH)?;
-        match map.supertexture_rgba(files, level) {
+    let texture = map.ground.as_deref().and_then(|ground| {
+        let level = ground.levels().iter().position(|l| l.0 * ground.tile_size() <= MAX_TEXTURE_WIDTH)?;
+        match level_rgba(ground, level) {
             Ok((w, h, mut rgba)) => {
                 // The alpha channel is a mask of UNKNOWN use; the colour is drawn opaque.
                 rgba.as_chunks_mut::<4>().0.iter_mut().for_each(|p| p[3] = 255);
@@ -903,14 +932,14 @@ const BEZIER_STEPS: usize = 8;
 /// which builds the ribbon from −0.5 to +0.5 times it across the curve (CONFIRMED).
 const RIVER_WIDTH: f32 = 1.5;
 
-/// A campaign spline's points in logic (x, z), evaluated as the cubic Bezier curves they are: every
-/// `.rigid_spline` on the five maps has 3k+1 points, and the river builder reads them as (k)
-/// segments of four control points (`0x0111A080` → `0x005AFED0`, CONFIRMED), scaling display units
-/// by 39.37008 (the exe's own constant, = `DISPLAY_TO_LOGIC`).
-fn bezier_points(points: &[[f32; 3]]) -> Vec<(f32, f32)> {
-    let p: Vec<(f32, f32)> = points.iter().map(|q| (q[0] * DISPLAY_TO_LOGIC, q[2] * DISPLAY_TO_LOGIC)).collect();
+/// A map line's points (logic x, z, [`ntw_campaign::map_display::MapLine`]) evaluated as the cubic
+/// Bezier curves they are: every `.rigid_spline` on the five maps has 3k+1 points, and the river
+/// builder reads them as (k) segments of four control points (`0x0111A080` → `0x005AFED0`,
+/// CONFIRMED), scaling display units by 39.37008 (the exe's own constant, = `DISPLAY_TO_LOGIC`;
+/// the importer applies it).
+fn bezier_points(p: &[(f32, f32)]) -> Vec<(f32, f32)> {
     if p.len() < 4 || !(p.len() - 1).is_multiple_of(3) {
-        return p;
+        return p.to_vec();
     }
     let mut out = vec![p[0]];
     for seg in p.windows(4).step_by(3) {
@@ -962,7 +991,7 @@ fn dds_image(bytes: &[u8]) -> Result<Image, String> {
 fn spawn_coast(
     commands: &mut Commands,
     files: &GameFiles<'_>,
-    map: &CampaignMap,
+    map: &MapDisplay,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
@@ -1035,22 +1064,23 @@ fn spawn_coast(
 /// laid on the terrain (depth-tested, lifted a little) instead of drawn over it at height 0.
 fn spawn_rivers(
     commands: &mut Commands,
-    files: &GameFiles<'_>,
-    map: &CampaignMap,
+    map: &MapDisplay,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
 ) {
-    let texture = files
-        .read(&format!("campaign_maps/{}/display/rivers/textures/river_diffuse.dds", map.name))
-        .and_then(|b| dds_image(&b))
+    let texture = map
+        .river_texture
+        .as_deref()
+        .map_err(String::clone)
+        .and_then(dds_image)
         .map_err(|e| warn!("Campaign river texture: {e}"))
         .ok()
         .map(|i| images.add(i));
     let (mut pos, mut uv, mut col, mut idx) = (Vec::new(), Vec::new(), Vec::new(), Vec::<u32>::new());
     let across = [0.0f32, 0.1, 0.5, 0.9, 1.0];
-    for (_, s) in map.splines.iter().filter(|(f, _)| f == "rivers") {
-        let pts = bezier_points(&s.points);
+    for line in map.lines(LineKind::River) {
+        let pts = bezier_points(&line.points);
         if pts.len() < 2 {
             continue;
         }
@@ -1111,11 +1141,11 @@ fn spawn_rivers(
 
 /// Borders and roads as plain lines along their Bezier curves (PLACEHOLDER styling: the original
 /// draws textured ribbons).
-fn spawn_lines(commands: &mut Commands, map: &CampaignMap, meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>) {
-    for (folder, colour) in [("borders", Color::srgb(0.95, 0.85, 0.55)), ("roads", Color::srgb(0.45, 0.32, 0.18))] {
+fn spawn_lines(commands: &mut Commands, map: &MapDisplay, meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>) {
+    for (kind, name, colour) in [(LineKind::Border, "borders", Color::srgb(0.95, 0.85, 0.55)), (LineKind::Road, "roads", Color::srgb(0.45, 0.32, 0.18))] {
         let mut positions: Vec<[f32; 3]> = Vec::new();
-        for (_, s) in map.splines.iter().filter(|(f, _)| f == folder) {
-            let pts: Vec<Vec3> = bezier_points(&s.points)
+        for line in map.lines(kind) {
+            let pts: Vec<Vec3> = bezier_points(&line.points)
                 .into_iter()
                 .map(|(x, z)| bevy_pos(x, map.height_at(x, z).max(0.0) + LINE_LIFT, z))
                 .collect();
@@ -1132,7 +1162,7 @@ fn spawn_lines(commands: &mut Commands, map: &CampaignMap, meshes: &mut Assets<M
         commands.spawn((
             Mesh3d(meshes.add(mesh)),
             MeshMaterial3d(materials.add(StandardMaterial { base_color: colour, unlit: true, ..default() })),
-            Name::new(format!("campaign {folder}")),
+            Name::new(format!("campaign {name}")),
             DespawnOnExit(GameMode::Campaign),
         ));
     }

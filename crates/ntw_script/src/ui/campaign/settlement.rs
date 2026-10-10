@@ -8,12 +8,8 @@ use super::*;
 /// buildings only and is the fallback), 5 description key (loc
 /// `building_description_texts_*_description_<key>`, CONFIRMED keys); the others UNKNOWN).
 pub fn building_variants(source: &crate::ScriptSource) -> std::collections::BTreeMap<(String, String), (String, String)> {
-    use ntw_formats::db::{DbTable, Schema};
     let mut out = std::collections::BTreeMap::new();
-    let Some(file) = source.find("db/building_culture_variants_tables/building_culture_variants") else { return out };
-    let Some(schema) = Schema::from_codes("s,s,o,o,o,o,o") else { return out };
-    let Ok(t) = DbTable::read(&file.bytes, &schema) else { return out };
-    for r in &t.rows {
+    for r in source.table_rows(&ntw_formats::db_folder::tables::BUILDING_CULTURE_VARIANTS).unwrap_or_default() {
         let s = |i: usize| r.get(i).and_then(|v| v.as_str()).unwrap_or("").to_owned();
         let icon = if s(6).is_empty() { s(3) } else { s(6) };
         out.insert((s(0), s(1)), (icon, s(5)));

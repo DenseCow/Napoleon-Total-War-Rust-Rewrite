@@ -9,6 +9,8 @@ publish.workspace = true
 miniz_oxide = "0.8"
 # Pure-Rust audio decoding for the sound pack: MP3 (music, voices), PCM and IMA-ADPCM WAV (effects).
 symphonia = { version = "0.5.5", default-features = false, features = ["mp3", "wav", "pcm", "adpcm"] }
+# Optional campaign map files that are there but unreadable are logged where they are read.
+log = "0.4"
 
 [features]
 # The in-memory sound test files (`sound::test_files`), for other crates' tests.

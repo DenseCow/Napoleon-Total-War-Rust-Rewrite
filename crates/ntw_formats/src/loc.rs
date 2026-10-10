@@ -20,14 +20,16 @@
 //!
 //! # Overriding
 //! The patch pack contains files at the *same paths* as the release pack, so the
-//! [`Vfs`] already hands you the patched file. [`Localisation::from_vfs`] loads every
-//! visible `text\*.loc` file into one lookup.
+//! [`Vfs`] already hands you the patched file. [`Localisation::from_vfs`] loads the two
+//! files the original opens (`localisation.loc`, `ui.loc`) into one lookup. A mod that
+//! changes text ships the whole file at the same path (whole-file replacement, as in the
+//! original); see `analysis/mods/MOD_LOADING.md`.
 
 use std::collections::HashMap;
 use std::fmt;
 
 use crate::bytes::{Cursor, ReadError};
-use crate::pack::{PackError, Vfs};
+use crate::pack::{LayerKind, PackError, Vfs};
 
 /// The 6 bytes every `.loc` file starts with: a UTF-16LE BOM and `"LOC\0"`.
 pub const LOC_MAGIC: [u8; 6] = [0xFF, 0xFE, b'L', b'O', b'C', 0];
@@ -96,11 +98,36 @@ impl Localisation {
         }
     }
 
-    /// Loads every `.loc` file visible under `text\` in the VFS (patched copies win
-    /// through the VFS). Files are added in sorted path order.
+    /// Loads the game's text the way the original does, through the VFS (so a patch or mod
+    /// copy at the same path replaces the whole file):
+    ///
+    /// 1. `text\localisation.loc`, then `text\ui.loc`. These are the only two paths the
+    ///    original opens (CONFIRMED: both are hard-coded strings in `Napoleon.exe`, and
+    ///    `text/localisation.loc` is referenced by the database loader at `0x00E20760`). A
+    ///    differently named `.loc` in an original-style mod pack is ignored, as in the original.
+    /// 2. Our extension: any other `text\*.loc` that comes from the `mods\` folder layer
+    ///    ([`LayerKind::ModsFolder`]), lowest priority first, so a mod can ship only the
+    ///    strings it changes.
+    ///
+    /// Missing files are skipped (a bare test VFS may have neither).
     pub fn from_vfs(vfs: &Vfs) -> Result<Self, LocFromVfsError> {
+        const FIXED: [&str; 2] = ["text\\localisation.loc", "text\\ui.loc"];
+        let mut paths: Vec<&str> = FIXED.iter().copied().filter(|p| vfs.contains(p)).collect();
+        let mut extra: Vec<(usize, &str)> = vfs
+            .list("text/")
+            .into_iter()
+            .filter(|p| p.ends_with(".loc") && !FIXED.contains(p))
+            .filter_map(|p| {
+                let layer = vfs.origin_index(p)?;
+                (vfs.layers()[layer].kind == LayerKind::ModsFolder).then_some((layer, p))
+            })
+            .collect();
+        // Lowest priority first, so later adds win: in the mods folder the first listed (lowest
+        // layer index) wins ties.
+        extra.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+        paths.extend(extra.into_iter().map(|(_, p)| p));
         let mut loc = Self::new();
-        for path in vfs.list("text/").into_iter().filter(|p| p.ends_with(".loc")) {
+        for path in paths {
             let bytes = vfs.read(path).map_err(LocFromVfsError::Pack)?;
             let file = LocFile::read(&bytes)
                 .map_err(|error| LocFromVfsError::Loc { path: path.to_owned(), error })?;

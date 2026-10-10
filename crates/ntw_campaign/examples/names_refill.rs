@@ -1,6 +1,6 @@
 //! Research helper: allocators whose seed changed between consecutive saves of one game (the
 //! original refilled them in play): is the new deck a tail of our shuffle of the new seed?
-use ntw_campaign::names::Allocator;
+use ntw_campaign::names::{read_allocator, Allocator};
 use ntw_formats::esf::{EsfFile, EsfNode};
 fn allocs(p: &str) -> Vec<(String, usize, Allocator)> {
     let esf = EsfFile::open(p).unwrap();
@@ -9,7 +9,7 @@ fn allocs(p: &str) -> Vec<(String, usize, Allocator)> {
     for f in w.record_array("FACTION_ARRAY").into_iter().flat_map(|a| a.records()) {
         let key = f.values().filter_map(EsfNode::as_str).next().unwrap_or("").to_string();
         for (k, r) in f.children_named("NAME_ALLOCATION_DETAILS").enumerate() {
-            if let Some(a) = Allocator::read(r) {
+            if let Some(a) = read_allocator(r) {
                 out.push((key.clone(), k, a));
             }
         }

@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ntw_formats::db::{DbTable, DbValue, FieldType, Schema};
+use ntw_formats::db_folder::merge_keyed;
 
 use crate::DataError;
 
@@ -96,10 +97,6 @@ pub trait DbRecord: Sized {
     fn from_row(row: &[DbValue]) -> Result<Self, &'static str>;
     /// The row's lookup key (usually column 0).
     fn key(&self) -> &str;
-    /// The table's path inside the packs.
-    fn path() -> String {
-        format!("db/{0}_tables/{0}", Self::TABLE)
-    }
 }
 
 /// All rows of one table plus a key → row index.
@@ -155,6 +152,16 @@ impl<T: DbRecord> Table<T> {
             index.entry(r.key().to_owned()).or_insert(i);
         }
         Self { version, rows, index, id: NEXT_TABLE_ID.fetch_add(1, Ordering::Relaxed) }
+    }
+
+    /// Merges the files of one table, given in the original's read order
+    /// ([`ntw_formats::pack::Vfs::table_files`]), by key ([`merge_keyed`]). `replaces(holder,
+    /// file)` (indexes into `files`) is the original's row rule
+    /// ([`ntw_formats::pack::Vfs::db_row_replaces`]). The version is the first file's.
+    pub fn merged(files: Vec<Self>, replaces: impl Fn(usize, usize) -> bool) -> Self {
+        let version = files.first().map_or(0, |t| t.version);
+        let rows = merge_keyed(files.into_iter().map(|t| t.rows).collect(), |r: &T| r.key(), replaces);
+        Self::from_rows(version, rows)
     }
 
     /// The row with this key (exact, case-sensitive match).
@@ -313,7 +320,6 @@ mod tests {
         assert_eq!(s.fields[4].if_absent, ntw_formats::db::IfAbsent::CopyPrevious);
         assert_eq!(s.fields[5].min_version, 2);
         assert_eq!(s.fields[5].ty, FieldType::F32);
-        assert_eq!(Sample::path(), "db/sample_tables/sample");
     }
 
     #[test]

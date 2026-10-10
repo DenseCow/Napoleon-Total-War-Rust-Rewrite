@@ -35,29 +35,27 @@ fn enabled() -> bool {
     !args.windows(2).any(|w| w[0] == "--campaign-ai" && w[1] == "off")
 }
 
-/// Installs the campaign AI on `host`; `startpos` is the startpos or save the model was read from (called by the campaign scene before turn 1 starts, so AI
-/// factions before the human in turn order play too).
-pub fn attach(world: &mut World, host: &mut ScriptHost, vfs: &Vfs, startpos: &[u8]) {
+/// Installs the campaign AI on `host` (called by the campaign scene before turn 1 starts, so AI
+/// factions before the human in turn order play too). The factions' AI keys and the regions' base
+/// values are in the model (`World::ai_keys`, `World::region_base_values`).
+pub fn attach(world: &mut World, host: &mut ScriptHost, vfs: &Vfs) {
     if !enabled() {
         info!("Campaign AI: off (--campaign-ai off)");
         return;
     }
     let data = match CampaignAiData::load(vfs, &world.resource::<GameData>().db) {
-        Ok(d) => d,
+        Ok(d) => {
+            for w in &d.load_warnings {
+                warn!("Campaign AI tables: {w}");
+            }
+            d
+        }
         Err(e) => {
             warn!("Campaign AI: AI tables unavailable ({e}); AI factions will not act");
             return;
         }
     };
-    // Each faction's manager and personality keys are stored in its FACTION record (CONFIRMED).
-    let (keys, values) = match ntw_formats::esf::EsfFile::from_bytes(startpos) {
-        Ok(esf) => (ntw_ai::campaign::keys::read_ai_keys(&esf.root), ntw_ai::campaign::keys::read_region_base_values(&esf.root)),
-        Err(e) => {
-            warn!("Campaign AI: cannot re-read the startpos for the AI keys ({e}); using the fallback rule");
-            Default::default()
-        }
-    };
-    let reports = driver::install_with(host, Arc::new(data), keys, values);
+    let reports = driver::install(host, Arc::new(data));
     world.insert_non_send(CampaignAiLog { reports, shown: 0, refusals_logged: RefusalKinds::new() });
 }
 

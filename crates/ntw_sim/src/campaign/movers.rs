@@ -42,6 +42,7 @@ use super::polypath::{kind, PolyMap, View};
 
 /// The two type families of the original's movers (module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Family {
     /// Types 0..2 / 6..8: may not step into kind 7 from outside.
     A,

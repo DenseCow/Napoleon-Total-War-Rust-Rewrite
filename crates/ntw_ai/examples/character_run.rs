@@ -13,7 +13,6 @@ use ntw_ai::campaign::driver;
 use ntw_ai::campaign::CampaignAiData;
 use ntw_data::GameDatabase;
 use ntw_formats::campaign_map::{CampaignMap, GameFiles};
-use ntw_formats::esf::EsfFile;
 use ntw_formats::pack::Vfs;
 use ntw_script::{ScriptContext, ScriptHost, ScriptSource};
 use ntw_sim::campaign::{CampaignCommand, Terrain};
@@ -27,8 +26,11 @@ fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data"));
     let db = GameDatabase::from_install(&dir).expect("db");
+    for w in &db.load_warnings {
+        eprintln!("WARN game data: {w}");
+    }
     let vfs = Vfs::open_install(&dir).expect("packs");
-    let files = GameFiles { vfs: &vfs, data_dir: Some(&dir) };
+    let files = GameFiles { vfs: &vfs };
     let data = Arc::new(CampaignAiData::load(&vfs, &db).expect("AI tables"));
     let startpos = files.read(&format!("campaigns/{campaign}/startpos.esf")).expect("startpos");
     let mut loaded = ntw_campaign::read(&startpos, &db).expect("startpos");
@@ -40,10 +42,7 @@ fn main() {
     if let Err(e) = host.load_campaign(&campaign) {
         eprintln!("warning: campaign scripts: {e}");
     }
-    let esf = EsfFile::from_bytes(&startpos).expect("esf");
-    let keys = ntw_ai::campaign::keys::read_ai_keys(&esf.root);
-    let values = ntw_ai::campaign::keys::read_region_base_values(&esf.root);
-    driver::install_with(&mut host, data, keys, values);
+    driver::install(&mut host, data);
     for name in ["NewSession", "NewCampaignStarted"] {
         let _ = host.fire(name, ScriptContext::for_faction(&human));
     }

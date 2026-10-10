@@ -26,7 +26,8 @@ use ntw_data::GameDatabase;
 use ntw_formats::battle_spec::{BattleSpec, SpecUnit};
 use ntw_formats::battle_terrain::{BattleMap, DeploymentArea, DeploymentSetup};
 use ntw_formats::group_formation::{self, GroupUnit, PURPOSE_DEPLOYMENT, Role, Template};
-use ntw_formats::db::{DbTable, DbValue, Schema};
+use ntw_formats::db::DbValue;
+use ntw_formats::db_folder::{self, TableError, tables};
 use ntw_formats::pack::Vfs;
 use ntw_formats::unit_model::BattleTables;
 use ntw_sim::battle::attributes::shot_type_value;
@@ -174,30 +175,39 @@ fn garrison_slots(r: &ntw_formats::models_building::ModelBuilding, radius: f32) 
 /// and the category enum `0x00E4E9A0` makes `fort` 8; CONFIRMED, the record link INFERRED).
 fn battle_buildings(vfs: Option<&Vfs>, map: &BattleMap, radius: f32) -> Vec<ntw_sim::battle::garrison::BattleBuilding> {
     let mut lines = std::collections::HashMap::new();
-    if let Some(vfs) = vfs
-        && let Some(path) = vfs.list("db/models_building_tables").into_iter().next().map(str::to_owned)
-    {
-        match vfs.read(&path).map_err(|e| e.to_string()).and_then(|b| ntw_formats::models_building::read(&b).map_err(|e| e.to_string())) {
-            Ok(rows) => {
+    if let Some(vfs) = vfs {
+        // `models_building` has its own row decoder; merged by column 0 (loader 0x00DC23C0, row
+        // reader 0x00DD2660: the key is the first string read, CONFIRMED).
+        let mut warnings = Vec::new();
+        let decode = |b: &[u8]| {
+            ntw_formats::models_building::read(b).map_err(|error| TableError::Db { table: "models_building", error })
+        };
+        match db_folder::merged_rows(vfs, "models_building", &mut warnings, decode, |r| r.key.as_str()) {
+            Ok(rows) if !rows.is_empty() => {
                 for r in rows {
                     lines.insert(r.key.to_ascii_lowercase(), garrison_slots(&r, radius));
                 }
             }
+            Ok(_) => warn!("models_building: no rows; no building can be garrisoned"),
             Err(e) => warn!("models_building: {e}; no building can be garrisoned"),
+        }
+        for w in warnings {
+            warn!("{w}");
         }
     }
     let mut forts = std::collections::HashSet::new();
-    if let Some(vfs) = vfs
-        && let Some(path) = vfs.list("db/battlefield_buildings_tables").into_iter().next().map(str::to_owned)
-        && let Ok(bytes) = vfs.read(&path)
-        && let Ok(t) = DbTable::read(&bytes, &Schema::from_codes("s,s,s,s,i,o,o,i").expect("valid schema"))
-    {
-        for r in &t.rows {
-            if let (Some(DbValue::Str(k)), Some(DbValue::Str(c))) = (r.first(), r.get(1))
-                && c == "fort"
-            {
-                forts.insert(k.to_ascii_lowercase());
+    if let Some(vfs) = vfs {
+        match tables::BATTLEFIELD_BUILDINGS.read(vfs) {
+            Ok(rows) => {
+                for r in &rows {
+                    if let (Some(DbValue::Str(k)), Some(DbValue::Str(c))) = (r.first(), r.get(1))
+                        && c == "fort"
+                    {
+                        forts.insert(k.to_ascii_lowercase());
+                    }
+                }
             }
+            Err(e) => warn!("battlefield_buildings: {e}; no building is a wall"),
         }
     }
     map.buildings_near
@@ -243,15 +253,8 @@ impl BattleStart {
 
 /// `unit_movement_modifiers` rows (name, 4 floats); schema `s,f,f,f,f` (worker2, 28 rows).
 fn movement_modifiers(vfs: &Vfs) -> Vec<(String, [f32; 4])> {
-    let path = "db/unit_movement_modifiers_tables/unit_movement_modifiers";
-    let Ok(bytes) = vfs.read(path) else {
-        warn!("{path} missing: ground types do not change speed");
-        return Vec::new();
-    };
-    let schema = Schema::from_codes("s,f,f,f,f").expect("valid schema");
-    match DbTable::read(&bytes, &schema) {
-        Ok(t) => t
-            .rows
+    match tables::UNIT_MOVEMENT_MODIFIERS.read(vfs) {
+        Ok(rows) => rows
             .iter()
             .map(|r| {
                 let f = |i: usize| r.get(i).and_then(DbValue::as_f32).unwrap_or(1.0);
@@ -259,7 +262,7 @@ fn movement_modifiers(vfs: &Vfs) -> Vec<(String, [f32; 4])> {
             })
             .collect(),
         Err(e) => {
-            warn!("{path}: {e:?}");
+            warn!("{e}: ground types do not change speed");
             Vec::new()
         }
     }

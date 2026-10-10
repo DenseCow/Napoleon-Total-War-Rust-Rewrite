@@ -47,6 +47,8 @@ pub enum LoadError {
         /// The type found, or `None` if the record has fewer children.
         found: Option<&'static str>,
     },
+    /// One of our own saves ([`crate::own_save`]) could not be read.
+    OwnSave(crate::own_save::FormatError),
 }
 
 impl fmt::Display for LoadError {
@@ -58,6 +60,7 @@ impl fmt::Display for LoadError {
                 write!(f, "ESF root record is {found:?}, expected {expected}")
             }
             Self::MissingRecord { path } => write!(f, "missing record {path}"),
+            Self::OwnSave(e) => write!(f, "NapoleonRust save: {e}"),
             Self::BadField {
                 path,
                 index,
@@ -89,6 +92,7 @@ impl std::error::Error for LoadError {
         match self {
             Self::Io { error, .. } => Some(error),
             Self::Esf(e) => Some(e),
+            Self::OwnSave(e) => Some(e),
             _ => None,
         }
     }

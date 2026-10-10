@@ -43,13 +43,6 @@ use std::collections::BTreeMap;
 
 use crate::db::{DbError, DbHeader};
 
-/// `db\projectiles_explosions_tables\projectiles_explosions` (file version 1, 35 rows).
-pub const PROJECTILES_EXPLOSIONS: &str = r"db\projectiles_explosions_tables\projectiles_explosions";
-/// `db\projectile_impacts_tables\projectile_impacts` (no version marker, 8 rows).
-pub const PROJECTILE_IMPACTS: &str = r"db\projectile_impacts_tables\projectile_impacts";
-/// `db\projectile_trails_tables\projectile_trails` (no version marker, 5 rows).
-pub const PROJECTILE_TRAILS: &str = r"db\projectile_trails_tables\projectile_trails";
-
 /// Everything that can go wrong reading these two tables.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectileFxError {
@@ -184,6 +177,17 @@ pub struct ExplosionTable {
 const ROW_INNER_GAPS: [usize; 3] = [0, 0, 17];
 
 impl ExplosionTable {
+    /// The rows in key order, to merge several files of the table by key
+    /// (`ntw_data`'s DB merge, the original's rule for every table).
+    pub fn into_rows(self) -> Vec<ExplosionRow> {
+        self.rows.into_values().collect()
+    }
+
+    /// A table from rows (a later row with the same key replaces an earlier one).
+    pub fn from_rows(rows: impl IntoIterator<Item = ExplosionRow>) -> Self {
+        Self { rows: rows.into_iter().map(|r| (r.key.clone(), r)).collect() }
+    }
+
     /// Reads the table, cutting it into rows structurally at each 0 / 0 / 0 / 17 run.
     pub fn read(bytes: &[u8]) -> Result<Self, ProjectileFxError> {
         let header = DbHeader::read(bytes).map_err(ProjectileFxError::Header)?;
@@ -301,6 +305,17 @@ pub struct ImpactTable {
 const SIZE_CLASSES: [&str; 3] = ["small", "medium", "large"];
 
 impl ImpactTable {
+    /// The rows in key order, to merge several files of the table by key
+    /// (`ntw_data`'s DB merge, the original's rule for every table).
+    pub fn into_rows(self) -> Vec<ImpactRow> {
+        self.rows.into_values().collect()
+    }
+
+    /// A table from rows (a later row with the same key replaces an earlier one).
+    pub fn from_rows(rows: impl IntoIterator<Item = ImpactRow>) -> Self {
+        Self { rows: rows.into_iter().map(|r| (r.key.clone(), r)).collect() }
+    }
+
     /// Reads the table, cutting it into rows after every size-class word.
     pub fn read(bytes: &[u8]) -> Result<Self, ProjectileFxError> {
         let header = DbHeader::read(bytes).map_err(ProjectileFxError::Header)?;
@@ -431,6 +446,17 @@ pub struct TrailTable {
 }
 
 impl TrailTable {
+    /// The rows in key order, to merge several files of the table by key
+    /// (`ntw_data`'s DB merge, the original's rule for every table).
+    pub fn into_rows(self) -> Vec<TrailRow> {
+        self.rows.into_values().collect()
+    }
+
+    /// A table from rows (a later row with the same key replaces an earlier one).
+    pub fn from_rows(rows: impl IntoIterator<Item = TrailRow>) -> Self {
+        Self { rows: rows.into_iter().map(|r| (r.key.clone(), r)).collect() }
+    }
+
     /// Reads the table. Its schema is `ssffffffffff` and the file is exactly regular — key, blend
     /// mode, ten floats, next key — so a row is cut at every pair of adjacent strings followed by
     /// exactly [`TRAIL_FLOAT_BYTES`], and the row count is checked against the header.

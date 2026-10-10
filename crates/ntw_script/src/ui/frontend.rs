@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use mlua::{Lua, Table, Value};
-use ntw_formats::db::{DbTable, DbValue, Schema};
+use ntw_formats::db::DbValue;
 use ntw_formats::preferences::Preferences;
 
 use crate::ScriptSource;
@@ -69,15 +69,12 @@ pub struct BattleRecord {
     pub year: i32,
 }
 
-/// The `battles` table from the install (mods that replace it apply through the VFS).
+/// The `battles` table from the install, mods included (the merged table reader).
 pub fn read_battles(source: &ScriptSource) -> Vec<BattleRecord> {
-    let Some(file) = source.find("db/battles_tables/battles") else { return Vec::new() };
-    let Some(schema) = Schema::from_codes("s,s,b,s,o,i,i,b,b,b,b,o,i") else { return Vec::new() };
-    let Ok(table) = DbTable::read(&file.bytes, &schema) else { return Vec::new() };
+    let Some(rows) = source.table_rows(&ntw_formats::db_folder::tables::BATTLES) else { return Vec::new() };
     let s = |v: &DbValue| v.as_str().map(str::to_owned);
     let b = |v: &DbValue| v.as_bool().unwrap_or(false);
-    table
-        .rows
+    rows
         .iter()
         .map(|r| BattleRecord {
             key: s(&r[0]).unwrap_or_default(),
@@ -565,7 +562,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Result<(
             e.set("Name", loc(&i, &format!("campaigns_onscreen_name_{key}")))?;
             e.set("Description", loc(&i, &format!("campaigns_description_{key}")))?;
             // StartDate: the start position's year (INFERRED; the exe reads it from the campaign record).
-            let year = i.source.find(&format!("campaigns/{key}/startpos.esf")).and_then(|f| ntw_campaign::read_info(&f.bytes).ok()).map(|c| c.header.date.map_or(c.header.year, |d| d.year));
+            let year = ntw_campaign::source::campaign_info(&|p| i.source.find(p).map(|f| f.bytes), key).map(|c| c.header.date.map_or(c.header.year, |d| d.year));
             e.set("StartDate", year.unwrap_or(0))?;
             // UNKNOWN: the bullet-list text (no matching loc key found).
             e.set("BulletList", "")?;
@@ -751,11 +748,8 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Result<(
     // types (left empty).
     let i = inner.clone();
     t.set("CampaignDetails", lua.create_function(move |lua, (key, _mp): (String, Option<bool>)| {
-        let info = i.source.find(&format!("campaigns/{key}/startpos.esf")).and_then(|f| ntw_campaign::read_info(&f.bytes).ok());
-        let factions_db = i
-            .source
-            .find("db/factions_tables/factions")
-            .and_then(|f| ntw_data::Table::<ntw_data::FactionRecord>::from_bytes(&f.bytes).ok());
+        let info = ntw_campaign::source::campaign_info(&|p| i.source.find(p).map(|f| f.bytes), &key);
+        let factions_db = i.source.typed_table::<ntw_data::FactionRecord>();
         let t = lua.create_table()?;
         t.set("Key", key.as_str())?;
         t.set("Name", loc(&i, &format!("campaigns_onscreen_name_{key}")))?;
@@ -808,7 +802,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Result<(
     let i = inner.clone();
     t.set("TheatreList", lua.create_function(move |lua, key: String| {
         let out = lua.create_table()?;
-        let info = i.source.find(&format!("campaigns/{key}/startpos.esf")).and_then(|f| ntw_campaign::read_info(&f.bytes).ok());
+        let info = ntw_campaign::source::campaign_info(&|p| i.source.find(p).map(|f| f.bytes), &key);
         if let Some(info) = info {
             let theatre = match info.map_key.as_str() {
                 "nap_italy" => "italy_main",
@@ -826,7 +820,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Result<(
     // for that campaign"), from the startpos header.
     let i = inner.clone();
     t.set("OpenMapDataFile", lua.create_function(move |_, key: String| {
-        let info = i.source.find(&format!("campaigns/{key}/startpos.esf")).and_then(|f| ntw_campaign::read_info(&f.bytes).ok());
+        let info = ntw_campaign::source::campaign_info(&|p| i.source.find(p).map(|f| f.bytes), &key);
         Ok(info.map(|c| (c.header.date.map_or(c.header.year, |d| d.year), c.header.season_name)).unzip())
     })?)?;
 

@@ -10,7 +10,7 @@ fn main() {
     let map = std::env::args().nth(1).unwrap_or_else(|| "nap_europe".into());
     let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into());
     let vfs = Vfs::open_install(&dir).unwrap();
-    let files = GameFiles { vfs: &vfs, data_dir: Some(std::path::Path::new(&dir)) };
+    let files = GameFiles { vfs: &vfs };
     let rm = RegionMap::read(&files.read(&format!("campaign_maps/{map}/regions.esf")).unwrap()).unwrap();
     let (mut n, mut worst, mut far) = (0, 0f32, 0);
     for r in &rm.regions {

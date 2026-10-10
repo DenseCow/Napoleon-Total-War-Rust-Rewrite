@@ -18,6 +18,7 @@ use std::rc::Rc;
 
 use mlua::{Function, IntoLuaMulti, LightUserData, Lua, MultiValue, Table, Value, Variadic};
 use ntw_data::GameDatabase;
+use ntw_formats::db_folder::{RawTable, tables};
 use ntw_sim::campaign::{
     CampaignCommand, CampaignModel, CharacterId, CharacterKind, ConstructionOption, ForceId, FactionId, MilitaryForce, RecruitmentItemId, RegionId,
     SlotRef, UnitId, economy, treasury,
@@ -55,6 +56,7 @@ mod characters;
 mod diplomacy;
 mod government;
 mod map;
+mod region_info;
 mod settlement;
 mod tabs;
 mod technology;
@@ -79,6 +81,8 @@ pub struct CampaignLink {
     pub human: String,
     /// Campaign key, e.g. `eur_napoleon`.
     pub campaign: String,
+    /// The campaign's map key, e.g. `nap_europe` (from its campaign source, `ntw_campaign::source`).
+    pub map: String,
     /// The game database (units, buildings, factions).
     pub db: Rc<GameDatabase>,
 }
@@ -264,6 +268,10 @@ pub(super) struct CampaignUi {
     attitude_levels: std::cell::OnceCell<HashMap<String, i32>>,
     /// See `CampaignUi::religion_icon`.
     religion_icons: std::cell::OnceCell<HashMap<String, String>>,
+    /// See `CampaignUi::order_factor_pip`.
+    order_factor_pips: std::cell::OnceCell<HashMap<String, (String, String)>>,
+    /// See `CampaignUi::town_factor_pip`.
+    town_factor_pips: std::cell::OnceCell<HashMap<String, String>>,
     /// See `CampaignUi::culture_fallback`.
     portrait_folders: std::cell::OnceCell<HashMap<String, String>>,
     /// The capture whose screen is open (see `campaign_capture_screen`).
@@ -996,6 +1004,8 @@ impl UiScriptHost {
             radar_view: RefCell::new((None, None)),
             attitude_levels: std::cell::OnceCell::new(),
             religion_icons: std::cell::OnceCell::new(),
+            order_factor_pips: std::cell::OnceCell::new(),
+            town_factor_pips: std::cell::OnceCell::new(),
             portrait_folders: std::cell::OnceCell::new(),
             capture_shown: Cell::new(None),
             negotiation: RefCell::new(NegotiationState::default()),
@@ -1262,17 +1272,12 @@ impl UiScriptHost {
 
 impl CampaignUi {
     /// The campaign map folder as the original's file paths name it: "data/campaign_maps/<map>"
-    /// (the map from the start position's CAMPAIGN_MAP_DATA; INFERRED prefix). Read once.
-    fn map_folder(&self, inner: &Inner) -> String {
+    /// (the campaign's map key, [`CampaignLink::map`], from its campaign source; INFERRED prefix).
+    /// Made once.
+    fn map_folder(&self) -> String {
         self.map_folder
             .get_or_init(|| {
-                let map = inner
-                    .source
-                    .find(&format!("campaigns/{}/startpos.esf", self.link.campaign))
-                    .and_then(|f| ntw_campaign::read_info(&f.bytes).ok())
-                    .map(|i| i.map_key)
-                    .unwrap_or_else(|| format!("nap_{}", theatre_of(&self.link.campaign).1));
-                let map = map.trim_start_matches("campaign_maps/").trim_start_matches("campaign_maps\\").to_owned();
+                let map = self.link.map.trim_start_matches("campaign_maps/").trim_start_matches("campaign_maps\\").to_owned();
                 format!("data/campaign_maps/{map}")
             })
             .clone()
@@ -1282,13 +1287,7 @@ impl CampaignUi {
     /// "europe_main", or the first column). Read once.
     fn playable_area(&self, inner: &Inner, theatre: &str) -> Option<ntw_data::CampaignMapPlayableArea> {
         let rows = self.playable_areas.get_or_init(|| {
-            let path = <ntw_data::CampaignMapPlayableArea as ntw_data::DbRecord>::path();
-            inner
-                .source
-                .find(&path)
-                .and_then(|f| ntw_data::Table::<ntw_data::CampaignMapPlayableArea>::from_bytes(&f.bytes).ok())
-                .map(|t| t.rows().to_vec())
-                .unwrap_or_default()
+            inner.source.typed_table::<ntw_data::CampaignMapPlayableArea>().map(|t| t.rows().to_vec()).unwrap_or_default()
         });
         rows.iter().find(|r| r.area.eq_ignore_ascii_case(theatre) || r.id == theatre).cloned()
     }
@@ -1302,7 +1301,7 @@ impl CampaignUi {
     fn attitude_levels(&self, inner: &Inner) -> HashMap<String, i32> {
         self.attitude_levels
             .get_or_init(|| {
-                small_table(inner, "db/diplomatic_relations_attitudes_tables/diplomatic_relations_attitudes", "s,i")
+                small_table(inner, &tables::DIPLOMATIC_RELATIONS_ATTITUDES)
                     .into_iter()
                     .filter_map(|r| Some((r.first()?.as_str()?.to_owned(), r.get(1)?.as_i32()?)))
                     .collect()
@@ -1310,12 +1309,52 @@ impl CampaignUi {
             .clone()
     }
 
+    /// A public order factor's pip picture for its sign (`public_order_factors` column 1 for a
+    /// positive factor, column 2 for a negative one: the record's `+0xC` / `+0x18`, which
+    /// `0x00887960` copies, CONFIRMED), read once. A key the table lacks has none (the exe logs it
+    /// as not a valid key, `0x008E02E0`), logged once per key.
+    fn order_factor_pip(&self, inner: &Inner, key: &str, positive: bool) -> Option<String> {
+        let pips = self.order_factor_pips.get_or_init(|| {
+            small_table(inner, &tables::PUBLIC_ORDER_FACTORS)
+                .into_iter()
+                .filter_map(|r| {
+                    let s = |i: usize| r.get(i).and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                    Some((r.first()?.as_str()?.to_owned(), (s(1), s(2))))
+                })
+                .collect()
+        });
+        match pips.get(key) {
+            Some((up, down)) => Some(if positive { up } else { down }.clone()),
+            None => {
+                inner.log_once_for("public order factor", key, || format!("UNKNOWN public_order_factors has no {key:?}: no pip (logged once per key)"));
+                None
+            }
+        }
+    }
+
+    /// A town wealth growth factor's pip picture: `town_wealth_growth_factors` column 1 (the record's
+    /// `+0xC`, which `0x00A4E250` copies whatever the factor's sign, CONFIRMED), read once. A key the
+    /// table lacks has none (the exe skips such a factor, `0x00A995A0`), logged once per key.
+    fn town_factor_pip(&self, inner: &Inner, key: &str) -> Option<String> {
+        let pips = self.town_factor_pips.get_or_init(|| {
+            small_table(inner, &tables::TOWN_WEALTH_GROWTH_FACTORS)
+                .into_iter()
+                .filter_map(|r| Some((r.first()?.as_str()?.to_owned(), r.get(1)?.as_str()?.to_owned())))
+                .collect()
+        });
+        let pip = pips.get(key).cloned();
+        if pip.is_none() {
+            inner.log_once_for("town wealth factor", key, || format!("UNKNOWN town_wealth_growth_factors has no {key:?}: factor skipped (logged once per key)"));
+        }
+        pip
+    }
+
     /// A religion's pip picture (`religions` column 2, e.g. "data/ui/campaign ui/pips/animism.tga";
     /// CONFIRMED as the diplomacy list's ReligionIcon), read once.
     fn religion_icon(&self, inner: &Inner, religion: &str) -> Option<String> {
         self.religion_icons
             .get_or_init(|| {
-                small_table(inner, "db/religions_tables/religions", "s,i,s")
+                small_table(inner, &tables::RELIGIONS)
                     .into_iter()
                     .filter_map(|r| Some((r.first()?.as_str()?.to_owned(), r.get(2)?.as_str()?.to_owned())))
                     .collect()
@@ -1331,7 +1370,7 @@ impl CampaignUi {
     fn culture_fallback(&self, inner: &Inner, culture: &str) -> Option<String> {
         self.portrait_folders
             .get_or_init(|| {
-                small_table(inner, "db/cultures_tables/cultures", "s,i,o")
+                small_table(inner, &tables::CULTURES)
                     .into_iter()
                     .filter_map(|r| Some((r.first()?.as_str()?.to_owned(), r.get(2)?.as_str()?.to_owned())))
                     .collect()
@@ -1343,11 +1382,9 @@ impl CampaignUi {
     /// The `slots` table (slot type → its kind flags), read once.
     fn slot_types(&self, inner: &Inner) -> &HashMap<String, ntw_data::SlotTypeRecord> {
         self.slot_types.get_or_init(|| {
-            let path = <ntw_data::SlotTypeRecord as ntw_data::DbRecord>::path();
             inner
                 .source
-                .find(&path)
-                .and_then(|f| ntw_data::Table::<ntw_data::SlotTypeRecord>::from_bytes(&f.bytes).ok())
+                .typed_table::<ntw_data::SlotTypeRecord>()
                 .map(|t| t.rows().iter().map(|r| (r.key.clone(), r.clone())).collect())
                 .unwrap_or_default()
         })
@@ -1384,7 +1421,7 @@ impl CampaignUi {
     /// `theatres_and_region_keys` theatre, CONFIRMED to be the theatre's area there).
     fn theatre_bounds(&self, inner: &Inner) -> Option<TheatreBounds> {
         *self.theatre_bounds.get_or_init(|| {
-            let path = format!("{}/regions.esf", self.map_folder(inner));
+            let path = format!("{}/regions.esf", self.map_folder());
             let bytes = inner.source.find(&path)?.bytes;
             ntw_formats::campaign_map::RegionMap::read(&bytes).ok().map(|m| m.theatre)
         })
@@ -1425,12 +1462,9 @@ impl CampaignUi {
     }
 }
 
-/// The rows of a small DB table read with a generic schema (`ntw_formats::db` codes), empty if
-/// the table is missing or does not match.
-fn small_table(inner: &Inner, path: &str, schema: &str) -> Vec<Vec<ntw_formats::db::DbValue>> {
-    use ntw_formats::db::{DbTable, Schema};
-    let Some(file) = inner.source.find(path) else { return Vec::new() };
-    let Some(schema) = Schema::from_codes(schema) else { return Vec::new() };
-    DbTable::read(&file.bytes, &schema).map(|t| t.rows).unwrap_or_default()
+/// The rows of a small DB table through the merged table reader, empty if the table is missing or
+/// does not read (logged once, `ScriptSource::table_rows`).
+fn small_table(inner: &Inner, table: &RawTable) -> Vec<Vec<ntw_formats::db::DbValue>> {
+    inner.source.table_rows(table).unwrap_or_default()
 }
 

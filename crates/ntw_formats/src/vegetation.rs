@@ -21,7 +21,7 @@
 
 use std::collections::HashMap;
 
-use crate::db::{DbTable, DbValue, Schema};
+use crate::db::DbValue;
 use crate::pack::Vfs;
 
 /// Folder that `warscape_trees` paths are relative to (CONFIRMED: every path resolves there).
@@ -225,13 +225,9 @@ fn file_name(path: &str) -> &str {
 impl VegetationIndex {
     /// Reads `warscape_trees` (schema `s,s,s`, CONFIRMED: 366 rows decode exactly).
     pub fn from_vfs(vfs: &Vfs) -> Result<Self, String> {
-        let path = "db/warscape_trees_tables/warscape_trees";
-        let bytes = vfs.read(path).map_err(|e| format!("{path}: {e}"))?;
-        let schema = Schema::from_codes("s,s,s").expect("valid schema");
-        let table = DbTable::read(&bytes, &schema).map_err(|e| format!("{path}: {e:?}"))?;
+        let rows = crate::db_folder::tables::WARSCAPE_TREES.read(vfs).map_err(|e| e.to_string())?;
         let cell = |r: &[DbValue], i: usize| r.get(i).and_then(DbValue::as_str).unwrap_or_default().to_owned();
-        let trees = table
-            .rows
+        let trees = rows
             .iter()
             .map(|r| WarscapeTree { species: cell(r, 0), season: cell(r, 1), path: cell(r, 2) })
             .collect();

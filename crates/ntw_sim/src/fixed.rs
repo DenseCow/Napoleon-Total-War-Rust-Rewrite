@@ -13,6 +13,7 @@ pub const ONE_RAW: i32 = 1 << FRACTION_BITS;
 ///
 /// The raw value is public so saves can round-trip it bit-exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Fixed20(pub i32);
 
 impl Fixed20 {

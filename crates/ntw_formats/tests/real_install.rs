@@ -1002,3 +1002,19 @@ fn label_and_panel_priorities_are_signed() {
     assert_eq!(top("ui/campaign ui/city_info_bar"), -1);
     assert_eq!(top("ui/campaign ui/diplomatic_relations"), 47);
 }
+
+/// BACKLOG §11 "One table path": every table read through the merged reader
+/// (`ntw_formats::db_folder::tables`) gives on the vanilla install exactly the rows the readers got
+/// before from the table's one file, and its key reader decodes the whole file.
+#[test]
+#[ignore]
+fn merged_raw_tables_equal_the_single_file_read() {
+    use ntw_formats::db_folder::{folder, tables};
+    let vfs = Vfs::open_install(data_dir()).expect("open install");
+    for t in tables::ALL {
+        let file = vfs.read(&format!("db/{0}_tables/{0}", t.name)).unwrap_or_else(|e| panic!("{}: {e}", t.name));
+        let old = DbTable::read(&file, &Schema::from_codes(t.codes).unwrap()).unwrap_or_else(|e| panic!("{}: {e}", t.name)).rows;
+        assert_eq!(vfs.table_files(&folder(t.name)).len(), 1, "{}: vanilla has one file", t.name);
+        assert_eq!(t.read(&vfs).unwrap_or_else(|e| panic!("{e}")), old, "{}", t.name);
+    }
+}

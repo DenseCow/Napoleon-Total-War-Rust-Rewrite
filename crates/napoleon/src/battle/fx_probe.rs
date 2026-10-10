@@ -1388,11 +1388,8 @@ mod tests {
     #[test]
     #[ignore]
     fn the_burst_rises_with_the_pound_count_over_the_shipped_rows() {
-        use ntw_formats::projectile_fx::{ExplosionTable, PROJECTILES_EXPLOSIONS};
         let (_lib, db) = install();
-        let vfs = ntw_formats::pack::Vfs::open_install(crate::config::game_data_dir()).expect("install");
-        let table =
-            ExplosionTable::read(&vfs.read(PROJECTILES_EXPLOSIONS).expect("explosions")).expect("projectiles_explosions");
+        let table = &db.projectile_explosions;
         let radius = |key: &str| {
             table.get(key).unwrap_or_else(|| panic!("no row {key}")).numbers[crate::battle::fx_draw::BURST_RADIUS_COLUMN]
         };

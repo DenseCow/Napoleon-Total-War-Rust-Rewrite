@@ -15,6 +15,7 @@ use crate::calendar::Date;
 
 /// `CHARACTER_DETAILS` v3 (CONFIRMED structure in all 8 startpos files and the user's saves).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CharacterDetails {
     /// #1 `CAMPAIGN_LOCALISATION` forename: a loc key such as `names_name_names_frenchDenis`
     /// (table `names`, field `name`, key `names_frenchDenis`) (CONFIRMED form).
@@ -90,6 +91,7 @@ pub struct CharacterDetails {
     /// Character +0x512 (not saved): wounded in a duel, walking back (`0x008BFD90` sets it with
     /// the `duel_success` message; the flight order's completion `0x0094EA00` clears it with
     /// message 0x46). PROVISIONAL: cleared when the model's flight ends.
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub wounded: bool,
     /// The `historical_characters` key he was made from (CHARACTERS_FIDELITY.md §8), for the
     /// names and portraits of the writer; `None` for a generic character.
@@ -98,6 +100,7 @@ pub struct CharacterDetails {
 
 /// `PORTRAIT_DETAILS` v1: card picture, a second path, info picture, index.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Portrait {
     /// #0 e.g. `ui/portraits/european/Cards/minister/young/062.tga` (CONFIRMED path form).
     pub card: String,
@@ -111,6 +114,7 @@ pub struct Portrait {
 
 /// One trait of a character.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CharacterTrait {
     /// `character_traits` key, e.g. `C_Minister_Upright`.
     pub key: String,
@@ -120,6 +124,7 @@ pub struct CharacterTrait {
 
 /// One `GOVERNMENT/POSTS_ARRAY/CHARACTER_POST` v1 (CONFIRMED structure).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GovernmentPost {
     /// #0 i32 post id (referenced by `CHARACTER` #8).
     pub id: i32,
@@ -134,6 +139,7 @@ pub struct GovernmentPost {
 
 /// `GOVERNORSHIP` v1 (CONFIRMED structure).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Governorship {
     /// #0 `GOVERNORSHIP_TAXES`.
     pub taxes: GovernorshipTaxes,
@@ -152,6 +158,7 @@ pub struct Governorship {
 /// sample). The u32 is the level index in rate order, 0 `tax_minimal` .. 4 `tax_extortionate`
 /// (INFERRED: only level 2 / rate 15 occurs in the shipped files and the user's saves).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GovernorshipTaxes {
     /// Lower classes' level index.
     pub lower: u32,
@@ -179,6 +186,7 @@ impl GovernorshipTaxes {
 
 /// Faction facts that are not part of [`Faction`](super::Faction).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FactionDetails {
     /// `FACTION` plain value 2: display name (`France`; the rebels' `NOT FOR DISPLAY (...)`).
     pub display_name: String,
@@ -311,6 +319,7 @@ pub const DIPLOMACY_OPTIONS: [&str; 14] = [
 /// bool, i32, bool; CONFIRMED meanings from the per-turn update `0x00B290D0` and the attitude sum
 /// `0x00B0DB60`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AttitudeFactor {
     /// Change per turn, added to `value` at each end of turn (e.g. -2 for `war`).
     pub drift: i32,
@@ -343,6 +352,7 @@ impl AttitudeFactor {
 
 /// One `REGULAR_PAYMENTS` item (CONFIRMED layout: reader `0x00AE90E0`, writer `0x00B7A4F0`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RegularPayment {
     /// i32 amount per turn (INFERRED direction: paid by the owner to the target).
     pub amount: i32,
@@ -353,6 +363,7 @@ pub struct RegularPayment {
 /// One `ALLIED_IN_WAR_AGAINST` item (CONFIRMED: added by `0x00B0CCE0` when the owner joins the
 /// target's war).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AlliedWar {
     /// u32 the common enemy's faction id.
     pub enemy: FactionId,
@@ -366,6 +377,7 @@ pub struct AlliedWar {
 /// [`Faction::diplomacy`](super::Faction::diplomacy). Field meanings and evidence:
 /// `analysis/campaign/S1_LEFTOVERS.md` §1. The rules that change them: [`treaties`](super::treaties).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Relationship {
     /// #1 the 24 attitude factors, in [`ATTITUDE_FACTORS`] order (CONFIRMED).
     pub attitudes: Vec<AttitudeFactor>,
@@ -451,6 +463,7 @@ impl Relationship {
 /// A target of a mission: a model object found through the original's global id map, or the
 /// raw saved id when no loaded object has it (forts and ports are not modelled yet).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum MissionTarget<T> {
     /// No target (the saved value was 0).
     None,
@@ -476,6 +489,7 @@ impl<T> MissionTarget<T> {
 /// the faction post-load fix-up `0x008E07F0` → `0x00A18670` → `0x00A186A0` / `0x00A18720`,
 /// lookup `0x0105AC60`); the loader does the same with the model's ids.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CampaignMission {
     /// The script's mission key, e.g. `eur_take_vienna`.
     pub script_key: String,
@@ -569,6 +583,7 @@ mod tests {
 
 /// One technology's research (`FACTION_TECHNOLOGY_MANAGER` `techs[]` #2 / #3, CONFIRMED layout).
 #[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TechResearch {
     /// Research points gathered (#2 f32; the technology's cost once researched).
     pub progress: f32,

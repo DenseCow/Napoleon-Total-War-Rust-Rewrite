@@ -38,9 +38,6 @@ pub struct UiAssets {
     /// Movie pictures drawn over a component's rectangle, by component id (the front end's
     /// `movie_bg`, `crate::video`).
     pub movies: HashMap<String, Handle<Image>>,
-    /// The install's data folder, for picture files outside the packs (the campaign maps' radar
-    /// and lookup pictures are loose files in `data/campaign_maps/<map>/`).
-    data_dir: Option<std::path::PathBuf>,
     /// Textures of the scripts' run-time images (see `ntw_script::ui::RuntimeImage`), by key,
     /// with the image version they were built from.
     runtime: HashMap<String, (u64, Handle<Image>)>,
@@ -48,13 +45,7 @@ pub struct UiAssets {
 
 impl UiAssets {
     pub fn new(vfs: Vfs) -> Self {
-        Self { vfs, textures: HashMap::new(), fonts: HashMap::new(), texts: HashMap::new(), embedded: HashMap::new(), movies: HashMap::new(), data_dir: None, runtime: HashMap::new() }
-    }
-
-    /// Also reads picture files from the install's data folder when the packs do not have them.
-    pub fn with_loose_files(mut self, data_dir: impl Into<std::path::PathBuf>) -> Self {
-        self.data_dir = Some(data_dir.into());
-        self
+        Self { vfs, textures: HashMap::new(), fonts: HashMap::new(), texts: HashMap::new(), embedded: HashMap::new(), movies: HashMap::new(), runtime: HashMap::new() }
     }
 
     /// The texture of a run-time image (`ntw_script::ui::RUNTIME_IMAGE_PREFIX` + key), rebuilt
@@ -129,10 +120,7 @@ impl UiAssets {
     fn load_texture(&self, key: &str) -> Option<Image> {
         let bytes = match self.embedded.get(key) {
             Some(b) => b.clone(),
-            None => match self.vfs.read(key) {
-                Ok(b) => b,
-                Err(_) => std::fs::read(self.data_dir.as_ref()?.join(key.replace('\\', "/"))).ok()?,
-            },
+            None => self.vfs.read(key).ok()?,
         };
         let (w, h, rgba) = if key.ends_with(".dds") {
             let dds = Dds::parse(&bytes).ok()?;

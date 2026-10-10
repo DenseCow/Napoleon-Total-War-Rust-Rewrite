@@ -239,7 +239,7 @@ impl CampaignModel {
 
     /// The rebel faction (no faction record, `0x008CEEF0`): the model's faction with no key, as
     /// [`Self::at_war`] (`IsFactionAtWarWith` `0x008CE9B0`) tells it.
-    fn is_rebel_faction(&self, f: FactionId) -> bool {
+    pub fn is_rebel_faction(&self, f: FactionId) -> bool {
         self.world.factions.get(&f).is_some_and(|x| x.key.is_empty())
     }
 

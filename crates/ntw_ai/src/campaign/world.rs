@@ -39,6 +39,9 @@ pub struct AiFaction {
     /// (`ntw_sim::campaign::research::state`): 0 researched, 2 available, 4 not yet available.
     /// `None`: the snapshot was built without the model's details (then the AI does no research).
     pub technologies: Option<BTreeMap<String, u32>>,
+    /// The faction's stored manager / personality keys (`World::ai_keys`); `None`: the
+    /// PROVISIONAL naming rule ([`super::FactionAiConfig::resolve`]).
+    pub ai_keys: Option<ntw_sim::campaign::FactionAiKeys>,
 }
 
 /// A school: a slot of an owned region whose standing building gives `research_points` and which
@@ -111,6 +114,9 @@ pub struct AiRegion {
     /// owner holds (`ntw_sim::campaign::research`, CONFIRMED the school's own test). `None`: the
     /// snapshot was built without the model's rules, so the AI cannot research here.
     pub schools: Option<Vec<AiSchool>>,
+    /// The original's own stored base value of the region (`World::region_base_values`); `None`:
+    /// the formula.
+    pub base_value: Option<i32>,
 }
 
 /// A unit the region's owner can recruit there now, as the model's recruitable entry: the price the
@@ -325,6 +331,7 @@ impl AiWorld {
                         [po.lower, po.upper]
                     }),
                     schools,
+                    base_value: w.region_base_values.get(&r.id).copied(),
                 },
             );
         }
@@ -341,6 +348,7 @@ impl AiWorld {
                     upkeep: inc.map(|i| i.upkeep),
                     tax: [f.tax_lower.clone(), f.tax_upper.clone()],
                     technologies,
+                    ai_keys: w.ai_keys.get(&f.id).cloned(),
                 },
             );
             for (o, s) in &f.diplomacy {

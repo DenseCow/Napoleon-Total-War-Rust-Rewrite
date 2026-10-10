@@ -19,7 +19,8 @@
 use std::collections::HashMap;
 
 use crate::anim::{mat_mul, transform_point, transform_vector};
-use crate::db::{DbTable, DbValue, Schema};
+use crate::db::DbValue;
+use crate::db_folder::{TableError, tables};
 use crate::pack::{PackError, Vfs};
 use crate::unit_variant::{
     EquipmentPiece, UnitVariant, UnitVariantMeshRef, VariantPartMesh, VariantPartMeshBody,
@@ -93,7 +94,7 @@ pub fn unit_variant_path(variant: &str, role: VariantRole) -> String {
 #[derive(Debug)]
 pub enum UnitModelError {
     Pack(PackError),
-    Db { table: &'static str, error: crate::db::DbError },
+    Table(TableError),
     Variant { path: String, error: crate::unit_variant::UnitVariantError },
     Mesh { path: String, error: crate::unit_variant::VariantPartMeshError },
 }
@@ -102,7 +103,7 @@ impl std::fmt::Display for UnitModelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Pack(e) => write!(f, "{e}"),
-            Self::Db { table, error } => write!(f, "{table}: {error}"),
+            Self::Table(e) => write!(f, "{e}"),
             Self::Variant { path, error } => write!(f, "{path}: {error}"),
             Self::Mesh { path, error } => write!(f, "{path}: {error}"),
         }
@@ -117,10 +118,10 @@ impl From<PackError> for UnitModelError {
     }
 }
 
-fn read_table(vfs: &Vfs, table: &'static str, codes: &str) -> Result<DbTable, UnitModelError> {
-    let bytes = vfs.read(&format!("db/{table}_tables/{table}"))?;
-    let schema = Schema::from_codes(codes).expect("valid schema codes");
-    DbTable::read(&bytes, &schema).map_err(|error| UnitModelError::Db { table, error })
+impl From<TableError> for UnitModelError {
+    fn from(e: TableError) -> Self {
+        Self::Table(e)
+    }
 }
 
 fn cell(row: &[DbValue], i: usize) -> String {
@@ -140,19 +141,19 @@ pub struct UnitModelIndex {
 impl UnitModelIndex {
     /// Loads `uniforms`, `uniform_to_faction_colours` and `faction_uniform_colours`.
     pub fn from_vfs(vfs: &Vfs) -> Result<Self, UnitModelError> {
-        let uniforms = read_table(vfs, "uniforms", "s,s,s,s")?
-            .rows
+        let uniforms = tables::UNIFORMS
+            .read(vfs)?
             .iter()
             .map(|r| UniformRow { uniform: cell(r, 0), faction: cell(r, 1), variant: cell(r, 2), unit: cell(r, 3) })
             .collect();
         let mut uniform_colours = HashMap::new();
-        for r in read_table(vfs, "uniform_to_faction_colours", "s,s,i,i,i,i,i,i,i,i,i")?.rows {
+        for r in tables::UNIFORM_TO_FACTION_COLOURS.read(vfs)? {
             if let Some(c) = UniformColours::from_row(&r[2..]) {
                 uniform_colours.insert((cell(&r, 0).to_ascii_lowercase(), cell(&r, 1).to_ascii_lowercase()), c);
             }
         }
         let mut faction_colours = HashMap::new();
-        for r in read_table(vfs, "faction_uniform_colours", "s,i,i,i,i,i,i,i,i,i")?.rows {
+        for r in tables::FACTION_UNIFORM_COLOURS.read(vfs)? {
             if let Some(c) = UniformColours::from_row(&r[1..]) {
                 faction_colours.insert(cell(&r, 0).to_ascii_lowercase(), c);
             }
@@ -606,7 +607,7 @@ impl EquipmentThemes {
             _ => None,
         };
         let mut themes = HashMap::new();
-        for r in read_table(vfs, "warscape_equipment_themes", "s,o,o,b,o,o")?.rows {
+        for r in tables::WARSCAPE_EQUIPMENT_THEMES.read(vfs)? {
             let t = EquipmentTheme {
                 key: cell(&r, 0),
                 primary: opt(&r, 1),
@@ -618,7 +619,7 @@ impl EquipmentThemes {
             themes.insert(t.key.to_ascii_lowercase(), t);
         }
         let mut items_by_set: HashMap<String, Vec<String>> = HashMap::new();
-        for r in read_table(vfs, "warscape_equipment_items", "s,s")?.rows {
+        for r in tables::WARSCAPE_EQUIPMENT_ITEMS.read(vfs)? {
             items_by_set.entry(cell(&r, 1).to_ascii_lowercase()).or_default().push(cell(&r, 0));
         }
         Ok(Self { themes, items_by_set })
@@ -777,7 +778,7 @@ pub struct BattleTables {
 impl BattleTables {
     pub fn from_vfs(vfs: &Vfs) -> Result<Self, UnitModelError> {
         let mut personalities = HashMap::new();
-        for r in read_table(vfs, "battle_personalities", "s,s,s,s,s")?.rows {
+        for r in tables::BATTLE_PERSONALITIES.read(vfs)? {
             let p = BattlePersonality {
                 key: cell(&r, 0),
                 model_set: cell(&r, 1),
@@ -789,7 +790,7 @@ impl BattleTables {
         }
         let mut entities = HashMap::new();
         let f = |r: &[DbValue], i: usize| r.get(i).and_then(DbValue::as_f32).unwrap_or(0.0);
-        for r in read_table(vfs, "battle_entities", "s,s,s,f,f,f,f,f,f,f,f,f,f,s,f,f,f,f,f,f,i")?.rows {
+        for r in tables::BATTLE_ENTITIES.read(vfs)? {
             let e = BattleEntity {
                 key: cell(&r, 0),
                 class: cell(&r, 1),

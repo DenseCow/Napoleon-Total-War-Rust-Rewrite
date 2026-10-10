@@ -53,6 +53,7 @@ mod bytes;
 pub mod anim;
 pub mod battle_animation;
 pub mod db;
+pub mod db_folder;
 pub mod dds;
 pub mod esf;
 pub mod effects;

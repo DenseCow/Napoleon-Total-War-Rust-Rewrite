@@ -140,7 +140,8 @@ impl CampaignModel {
     /// one (`0x0098F250`): a General or admiral of the faction standing at its capital without a
     /// force, aged 21 + min(19, ⌊next16 × 20 / 65535⌋) (campaign RNG, `0x00A05740`), born that many
     /// years ago, added to the pool. PROVISIONAL: a historical character's age is drawn the same
-    /// way (his record has no birth year); names and portraits are left to the save writer (the
+    /// way (his record has no birth year); a historical character is named like a
+    /// generic one ([`Self::name_new_character`]), not with his own name, and has no portrait (the
     /// key is kept in `CharacterDetails::historical_key`); the appeared turn (+0x4EC, `CHARACTER`
     /// #24) is not kept.
     pub fn create_candidate(&mut self, f: FactionId, kind: PoolKind) -> Option<CharacterId> {
@@ -170,6 +171,7 @@ impl CampaignModel {
         );
         let birth = crate::calendar::Date { year: (self.calendar.date.year as i32 - age).max(0) as u32, ..self.calendar.date };
         self.world.character_details.insert(id, CharacterDetails { birth: Some(birth), historical_key: historical, ..Default::default() });
+        self.name_new_character(id);
         self.update_sight_radius(id);
         self.pool_mut(f, kind)?.0.push(id);
         Some(id)
@@ -356,7 +358,7 @@ impl CampaignModel {
         self.take_candidate(c, PoolKind::General, cost);
         let uid = UnitId(self.world.alloc_id() as i32);
         let men = self.rules.units.get(&unit_key).map_or(1, |u| u.men.max(1));
-        let unit = CampaignUnit { id: uid, unit_key, men, max_men: men, character: Some(c) };
+        let unit = CampaignUnit { id: uid, unit_key, men, max_men: men, character: Some(c), officer_name: Default::default() };
         let fid = match target {
             Some((f, (position, garrisoned_in))) => {
                 if let Some(x) = self.world.characters.get_mut(&c) {
@@ -385,6 +387,7 @@ impl CampaignModel {
                 fid
             }
         };
+        self.name_new_unit(fid, uid);
         self.update_hidden(c);
         Ok(vec![CampaignEvent::CharacterHired { character: c, force: fid, cost }])
     }
@@ -476,6 +479,9 @@ impl CampaignModel {
                 if let Some(x) = self.world.forces.get_mut(&force).and_then(|x| x.units.get_mut(unit)) {
                     x.character = Some(id);
                 }
+                // He carries the unit's officer's name: land `0x008E1C20` through the unit's slot 1
+                // `0x008B7EF0`, naval `0x008E2260` directly, both pass unit +0x7c to `0x00990EF0`.
+                self.name_new_character(id);
                 id
             }
         };

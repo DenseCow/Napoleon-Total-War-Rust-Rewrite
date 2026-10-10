@@ -30,7 +30,7 @@ fn saved_obstacle_boxes_match_the_zone_limits() {
     }
     let db = GameDatabase::from_install(&dir).expect("DB");
     let vfs = Vfs::open_install(&dir).expect("vfs");
-    let files = GameFiles { vfs: &vfs, data_dir: Some(&dir) };
+    let files = GameFiles { vfs: &vfs };
     let bytes = files.read("campaigns/eur_napoleon/startpos.esf").expect("startpos");
     let esf = EsfFile::from_bytes(&bytes).expect("esf");
     let loaded = ntw_campaign::read_esf(&esf, &db).expect("load");

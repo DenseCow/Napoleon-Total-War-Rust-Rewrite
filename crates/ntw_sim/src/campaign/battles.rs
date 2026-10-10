@@ -23,6 +23,7 @@ use super::autoresolve::{resolve, ArUnit, ArVars};
 
 /// A battle waiting to be fought.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PendingBattle {
     /// The attacking force.
     pub attacker: ForceId,

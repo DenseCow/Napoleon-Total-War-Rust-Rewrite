@@ -21,6 +21,7 @@ use crate::fixed::Fixed20;
 
 /// One waypoint of a route (`0x00AFD490`, 0x18 bytes in the exe).
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TradeWaypoint {
     /// The region of the waypoint (the record's i32).
     pub region: RegionId,
@@ -38,6 +39,7 @@ pub struct TradeWaypoint {
 
 /// One international route of an (exporter, importer) pair.
 #[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TradePath {
     /// The waypoints in order.
     pub waypoints: Vec<TradeWaypoint>,
@@ -243,6 +245,7 @@ impl CampaignModel {
 /// An off-map trade node (`CAMPAIGN_TRADE_MANAGER/TRADE_NODES`: position and network node; the
 /// `trade_nodes` DB row found through the map's node key). Static data.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TradeNode {
     /// Network node index.
     pub node: u32,
@@ -255,6 +258,7 @@ pub struct TradeNode {
 /// A `trade_nodes` row: #1 commodity, #2 base volume, #3 per extra ship, #4 cap (CONFIRMED order,
 /// read by `0x00BC9930` at record +0x0C / +0x10 / +0x14 / +0x18).
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TradeNodeInfo {
     /// Commodity index in `COMMODITIES_ORDER`.
     pub commodity: usize,
@@ -283,6 +287,7 @@ pub const NODE_RADIUS: f32 = 1.0;
 /// One leg of the static trade network (`CAMPAIGN_TRADE_MANAGER/TRADE_ROUTES`: from, to, spline
 /// ids, length).
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TradeLeg {
     /// Start node.
     pub from: u32,
@@ -496,6 +501,7 @@ impl CampaignModel {
 
 /// The commodity market of `CAMPAIGN_TRADE_MANAGER` (CONFIRMED layout, see `0x00BCB020`).
 #[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CommodityMarket {
     /// #2 initial prices.
     pub initial: Vec<u32>,

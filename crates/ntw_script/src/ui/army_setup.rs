@@ -40,7 +40,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use mlua::{Lua, Table, Value};
-use ntw_formats::db::{DbTable, Schema};
+use ntw_formats::db::DbValue;
+use ntw_formats::db_folder::{RawTable, tables};
 
 use super::army_file::{ArmySetupFile, BattlePrefsFile, Card, Limit};
 use super::host::Inner;
@@ -83,12 +84,11 @@ pub struct ArmyData {
     preset_units: BTreeMap<i32, Vec<(String, i32)>>,
 }
 
-fn table(inner: &Inner, path: &str, codes: &str) -> Option<DbTable> {
-    let f = inner.source.find(path)?;
-    DbTable::read(&f.bytes, &Schema::from_codes(codes)?).ok()
+fn table(inner: &Inner, table: &RawTable) -> Vec<Vec<DbValue>> {
+    inner.source.table_rows(table).unwrap_or_default()
 }
 
-fn st(v: &ntw_formats::db::DbValue) -> String {
+fn st(v: &DbValue) -> String {
     v.as_str().unwrap_or_default().to_owned()
 }
 
@@ -96,43 +96,31 @@ impl ArmyData {
     /// Reads the tables (missing ones stay empty).
     pub(super) fn load(inner: &Inner) -> ArmyData {
         let mut d = ArmyData::default();
-        let path = <ntw_data::UnitRecord as ntw_data::DbRecord>::path();
-        if let Some(t) = inner.source.find(&path).and_then(|f| ntw_data::Table::<ntw_data::UnitRecord>::from_bytes(&f.bytes).ok()) {
+        if let Some(t) = inner.source.typed_table::<ntw_data::UnitRecord>() {
             d.units = t.rows().iter().map(|u| (u.key.clone(), u.clone())).collect();
         }
-        let path = <ntw_data::UnitStatsLand as ntw_data::DbRecord>::path();
-        if let Some(t) = inner.source.find(&path).and_then(|f| ntw_data::Table::<ntw_data::UnitStatsLand>::from_bytes(&f.bytes).ok()) {
+        if let Some(t) = inner.source.typed_table::<ntw_data::UnitStatsLand>() {
             d.men = t.rows().iter().map(|u| (u.key.clone(), u.num_men)).collect();
         }
-        if let Some(t) = table(inner, "db/uniforms_tables/uniforms", "s,s,s,s") {
-            for r in &t.rows {
-                d.faction_units.entry(st(&r[1])).or_default().push(st(&r[3]));
-            }
+        for r in table(inner, &tables::UNIFORMS) {
+            d.faction_units.entry(st(&r[1])).or_default().push(st(&r[3]));
         }
         // The experience rows by rank; a row whose key is not a rank cannot be looked up as one.
-        let path = <ntw_data::UnitStatsLandExperienceBonuses as ntw_data::DbRecord>::path();
-        if let Some(t) = inner.source.find(&path).and_then(|f| ntw_data::Table::<ntw_data::UnitStatsLandExperienceBonuses>::from_bytes(&f.bytes).ok()) {
+        if let Some(t) = inner.source.typed_table::<ntw_data::UnitStatsLandExperienceBonuses>() {
             d.xp_land = t.rows().iter().filter_map(|r| Some((r.rank.parse().ok()?, r.clone()))).collect();
         }
-        let path = <ntw_data::UnitStatsNavalExperienceBonuses as ntw_data::DbRecord>::path();
-        if let Some(t) = inner.source.find(&path).and_then(|f| ntw_data::Table::<ntw_data::UnitStatsNavalExperienceBonuses>::from_bytes(&f.bytes).ok()) {
+        if let Some(t) = inner.source.typed_table::<ntw_data::UnitStatsNavalExperienceBonuses>() {
             d.xp_naval = t.rows().iter().filter_map(|r| Some((r.rank.parse().ok()?, r.clone()))).collect();
         }
-        if let Some(t) = table(inner, "db/battle_type_setup_limits_tables/battle_type_setup_limits", "s,s,s,s,i,i,i,i,i,i,i") {
-            for r in &t.rows {
-                let n = |i: usize| r[i].as_i32().unwrap_or(0);
-                d.limits.insert((st(&r[0]), st(&r[1]), st(&r[2]), st(&r[3])), ([n(4), n(5), n(6)], n(10)));
-            }
+        for r in table(inner, &tables::BATTLE_TYPE_SETUP_LIMITS) {
+            let n = |i: usize| r[i].as_i32().unwrap_or(0);
+            d.limits.insert((st(&r[0]), st(&r[1]), st(&r[2]), st(&r[3])), ([n(4), n(5), n(6)], n(10)));
         }
-        if let Some(t) = table(inner, "db/battle_type_faction_presets_tables/battle_type_faction_presets", "s,i,i") {
-            for r in &t.rows {
-                d.faction_presets.insert((st(&r[0]), r[1].as_i32().unwrap_or(0)), r[2].as_i32().unwrap_or(0));
-            }
+        for r in table(inner, &tables::BATTLE_TYPE_FACTION_PRESETS) {
+            d.faction_presets.insert((st(&r[0]), r[1].as_i32().unwrap_or(0)), r[2].as_i32().unwrap_or(0));
         }
-        if let Some(t) = table(inner, "db/battle_type_unit_to_faction_presets_tables/battle_type_unit_to_faction_presets", "s,i,s,i") {
-            for r in &t.rows {
-                d.preset_units.entry(r[1].as_i32().unwrap_or(0)).or_default().push((st(&r[2]), r[3].as_i32().unwrap_or(0)));
-            }
+        for r in table(inner, &tables::BATTLE_TYPE_UNIT_TO_FACTION_PRESETS) {
+            d.preset_units.entry(r[1].as_i32().unwrap_or(0)).or_default().push((st(&r[2]), r[3].as_i32().unwrap_or(0)));
         }
         d
     }
@@ -527,9 +515,10 @@ fn install_files(lua: &Lua, inner: &Rc<Inner>, t: &Table, data: &Rc<std::cell::O
     t.set("GenerateShipName", lua.create_function(move |_, (faction, _class): (Option<String>, Value)| {
         let faction = faction.unwrap_or_default();
         let (rows, groups) = names.get_or_init(|| {
-            let rows = table(&i, "db/ship_names_tables/ship_names", "s,s,s,o")
-                .map(|t| t.rows.iter().map(|r| [st(&r[0]), st(&r[1]), st(&r[2]), r[3].as_str().unwrap_or_default().to_owned()]).collect())
-                .unwrap_or_default();
+            let rows = table(&i, &tables::SHIP_NAMES)
+                .iter()
+                .map(|r| [st(&r[0]), st(&r[1]), st(&r[2]), r[3].as_str().unwrap_or_default().to_owned()])
+                .collect();
             let groups = super::battle_setup::factions(&i).unwrap_or_default().into_iter().map(|f| (f.key.clone(), f.secondary_names_group.clone())).collect();
             (rows, groups)
         });

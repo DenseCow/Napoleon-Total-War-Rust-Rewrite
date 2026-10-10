@@ -1571,6 +1571,7 @@ impl CampaignModel {
                 );
                 self.world.forces.insert(f, MilitaryForce { id: f, faction: owner, commander: Some(c), units: Vec::new(), is_navy: naval });
                 self.update_sight_radius(c);
+                self.name_new_character(c);
                 let r = self.world.regions.get_mut(&region).expect("region exists");
                 if naval {
                     r.fleet = Some(f);
@@ -1586,7 +1587,9 @@ impl CampaignModel {
             men,
             max_men: men,
             character,
+            officer_name: Default::default(),
         });
+        self.name_new_unit(force_id, unit_id);
         CampaignEvent::UnitTrained { force: force_id, unit: unit_id }
     }
 }

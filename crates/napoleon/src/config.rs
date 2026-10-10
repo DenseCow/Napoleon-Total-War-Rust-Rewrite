@@ -56,6 +56,59 @@ pub fn nap_unlock() -> u32 {
     value.unwrap_or(1).clamp(1, 4)
 }
 
+/// Our easy-mod folder next to the program: `<exe folder>\mods` (packs and loose folders, with an
+/// optional `load_order.txt`; see `ntw_formats::pack::ModOptions`).
+pub fn default_mods_dir() -> Option<PathBuf> {
+    Some(std::env::current_exe().ok()?.parent()?.join("mods"))
+}
+
+/// The mods the game loads, from the command line:
+/// - `--no-mods`: none (the install alone);
+/// - otherwise the original's `user.script.txt` `mod` lines (`--user-script <file>`, else the
+///   original's own file under `%APPDATA%`, read-only) and our mods folder (`--mods <dir>`, else
+///   [`default_mods_dir`]).
+///
+/// Also returns a warning for each of these flags given without its value (the default is then used).
+pub fn mod_options_from_args(args: &[String]) -> (ntw_formats::pack::ModOptions, Vec<String>) {
+    use ntw_formats::pack::{ModOptions, UserScriptSetting};
+    if args.iter().any(|a| a == "--no-mods") {
+        return (ModOptions::vanilla(), Vec::new());
+    }
+    let mut warnings = Vec::new();
+    let mut value = |flag: &str, what: &str, default: &str| {
+        let i = args.iter().position(|a| a == flag)?;
+        let v = args.get(i + 1).filter(|v| !v.starts_with("--"));
+        if v.is_none() {
+            warnings.push(format!("{flag} needs {what}; using {default}"));
+        }
+        v
+    };
+    let user_script = value("--user-script", "a file", "the original's user.script.txt")
+        .map_or(UserScriptSetting::Default, |p| UserScriptSetting::File(PathBuf::from(p)));
+    let mods_dir = value("--mods", "a folder", "the mods folder next to the program").map(PathBuf::from).or_else(default_mods_dir);
+    (ModOptions { user_script, mods_dir }, warnings)
+}
+
+/// Applies the mod setting ([`mod_options_from_args`]) for every later `Vfs::open_install`. Call
+/// it once at start-up, before anything opens the install. With `--list-mods` it prints what
+/// would load (layers, files from mods, warnings) and returns `true`: the caller then exits.
+pub fn apply_mod_setting(args: &[String]) -> bool {
+    let (options, warnings) = mod_options_from_args(args);
+    for w in &warnings {
+        eprintln!("WARN napoleon: {w}");
+    }
+    if args.iter().any(|a| a == "--list-mods") {
+        let dir = game_data_dir();
+        match ntw_formats::pack::Vfs::open_with_mods(&dir, &options) {
+            Ok((vfs, report)) => print!("{}", report.render(&vfs)),
+            Err(e) => eprintln!("cannot open the install at {}: {e}", dir.display()),
+        }
+        return true;
+    }
+    ntw_formats::pack::set_mod_options(Some(options));
+    false
+}
+
 /// Applies the text language setting: `--language <code>` on the command line, else the code in
 /// NapoleonRust's own `language.txt` (in [`user_dir`]; same one-line form as the install's
 /// `data\language.txt`, e.g. `FR`), else nothing (the install's `language.txt` is used). A code
@@ -75,5 +128,29 @@ pub fn apply_language_setting(args: &[String]) {
             "language {l} is not installed (installed: {:?}); using {effective}",
             ntw_formats::pack::installed_languages(&dir)
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ntw_formats::pack::UserScriptSetting;
+
+    fn args(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// `--mods` / `--user-script` without a value warn and fall back to the defaults.
+    #[test]
+    fn mod_flags_without_a_value_warn() {
+        let (o, w) = mod_options_from_args(&args(&["napoleon", "--mods"]));
+        assert_eq!(o.mods_dir, default_mods_dir());
+        assert_eq!(w, ["--mods needs a folder; using the mods folder next to the program"]);
+        let (o, w) = mod_options_from_args(&args(&["napoleon", "--user-script", "--mods", "m"]));
+        assert_eq!(o.user_script, UserScriptSetting::Default);
+        assert_eq!(o.mods_dir, Some(PathBuf::from("m")));
+        assert_eq!(w.len(), 1);
+        let (_, w) = mod_options_from_args(&args(&["napoleon", "--mods", "m", "--user-script", "u.txt"]));
+        assert!(w.is_empty());
     }
 }

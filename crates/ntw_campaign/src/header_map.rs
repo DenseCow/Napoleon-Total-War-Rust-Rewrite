@@ -22,29 +22,74 @@ use ntw_formats::tga::Tga;
 use ntw_sim::campaign::CampaignModel;
 
 /// The pictures of one theatre: the base map and the region lookup, with the lookup colour of
-/// every region.
+/// every region. Both pictures have the same size and complete pixel data ([`TheatrePictures::new`]
+/// checks it), so rendering never reads past either.
 pub struct TheatrePictures {
-    /// Theatre key, e.g. `europe_main`.
-    pub theatre: String,
-    /// `<x>_map.tga`.
-    pub base: Tga,
-    /// `<x>_lookup.tga`.
-    pub lookup: Tga,
-    /// Region key → lookup colour (`regions` DB colour).
-    pub region_colours: HashMap<String, [u8; 3]>,
+    theatre: String,
+    base: Tga,
+    lookup: Tga,
+    region_colours: HashMap<String, [u8; 3]>,
 }
 
 impl TheatrePictures {
+    /// A theatre's pictures: `base` (`<x>_map.tga`), `lookup` (`<x>_lookup.tga`) and region key →
+    /// lookup colour (`regions` DB colour). An error when the two pictures differ in size or a
+    /// picture's pixel data does not cover it (the original's header writer used only pictures
+    /// of the header picture's size).
+    pub fn new(theatre: &str, base: Tga, lookup: Tga, region_colours: HashMap<String, [u8; 3]>) -> Result<TheatrePictures, String> {
+        let n = base.width as usize * base.height as usize;
+        if (lookup.width, lookup.height) != (base.width, base.height) {
+            return Err(format!("{theatre}: the lookup picture is {}x{}, the map {}x{}", lookup.width, lookup.height, base.width, base.height));
+        }
+        let lookup_complete = if lookup.indices.is_empty() { lookup.rgba.len() >= 4 * n } else { lookup.indices.len() >= n };
+        if base.rgba.len() < 4 * n || !lookup_complete {
+            return Err(format!("{theatre}: a picture has fewer pixels than its size"));
+        }
+        Ok(TheatrePictures { theatre: theatre.to_owned(), base, lookup, region_colours })
+    }
+
     /// Loads a theatre's pictures from the campaign map folder (e.g. `campaign_maps/nap_europe`).
-    /// `None` when a picture is missing.
+    /// `None`, logged (once per load), when a picture is missing, unreadable or the two do not fit
+    /// (the save header then has no picture for that theatre).
     pub fn load(files: &ntw_formats::campaign_map::GameFiles<'_>, db: &ntw_data::GameDatabase, map_key: &str, theatre: &str) -> Option<TheatrePictures> {
         let folder = map_key.trim_start_matches("campaign_maps/").trim_start_matches("campaign_maps\\");
         let x = theatre.trim_end_matches("_main");
-        let read = |name: &str| files.read(&format!("campaign_maps/{folder}/{name}")).ok().and_then(|b| Tga::decode(&b).ok());
+        let read = |name: &str| -> Option<Tga> {
+            let path = format!("campaign_maps/{folder}/{name}");
+            let bytes = files.read(&path).map_err(|e| log::warn!("Save header picture of {theatre}: {e}")).ok()?;
+            Tga::decode(&bytes).map_err(|e| log::warn!("Save header picture {path}: {e:?}")).ok()
+        };
         let base = read(&format!("{x}_map.tga"))?;
         let lookup = read(&format!("{x}_lookup.tga"))?;
         let region_colours = db.regions.rows().iter().map(|r| (r.key.clone(), r.colour())).collect();
-        Some(TheatrePictures { theatre: theatre.to_owned(), base, lookup, region_colours })
+        TheatrePictures::new(theatre, base, lookup, region_colours).map_err(|e| log::warn!("Save header picture of {e}; left out")).ok()
+    }
+
+    /// The theatre key, e.g. `europe_main`.
+    pub fn theatre(&self) -> &str {
+        &self.theatre
+    }
+
+    /// The pictures' width and height.
+    pub fn size(&self) -> (u32, u32) {
+        (self.base.width, self.base.height)
+    }
+
+    /// The lookup picture's colour at pixel `i` (row-major, top row first): the colour of the region
+    /// the pixel belongs to.
+    pub fn lookup_colour(&self, i: usize) -> [u8; 3] {
+        if self.lookup.indices.is_empty() {
+            let p = &self.lookup.rgba[4 * i..4 * i + 3];
+            [p[0], p[1], p[2]]
+        } else {
+            let p = self.lookup.palette.get(self.lookup.indices.get(i).copied().unwrap_or(0) as usize).copied().unwrap_or([0; 4]);
+            [p[0], p[1], p[2]]
+        }
+    }
+
+    /// A region's lookup colour (its `regions` DB colour).
+    pub fn region_colour(&self, key: &str) -> Option<[u8; 3]> {
+        self.region_colours.get(key).copied()
     }
 
     /// The picture for a faction owning `owned` regions: 0xAARRGGBB pixels, rows top-down, alpha
@@ -55,13 +100,7 @@ impl TheatrePictures {
         let mut out = Vec::with_capacity(w * h);
         for i in 0..w * h {
             let b = &self.base.rgba[4 * i..4 * i + 3];
-            let lc = if self.lookup.indices.is_empty() {
-                let p = &self.lookup.rgba[4 * i..4 * i + 3];
-                [p[0], p[1], p[2]]
-            } else {
-                let p = self.lookup.palette.get(self.lookup.indices.get(i).copied().unwrap_or(0) as usize).copied().unwrap_or([0; 4]);
-                [p[0], p[1], p[2]]
-            };
+            let lc = self.lookup_colour(i);
             let [r, g, bl] = if own_colours.contains(&lc) {
                 let t = |v: u8| (v as u32 * 91) / 256;
                 [t(b[0]), ((b[1] as u32 * 91 + 165 * 255) / 256) * 255 / 256, t(b[2])]
@@ -76,12 +115,21 @@ impl TheatrePictures {
     }
 }
 
+/// The keys of the regions `human` (a faction key) owns: the ones its pictures tint. Empty for an
+/// unknown faction.
+pub fn owned_regions(model: &CampaignModel, human: &str) -> HashSet<String> {
+    let Some(hf) = model.faction_by_key(human).map(|f| f.id) else { return HashSet::new() };
+    model.world.regions.values().filter(|r| r.owner == hf).map(|r| r.key.clone()).collect()
+}
+
 /// Rewrites every `MAPS` item of the header whose theatre is in `pictures` (and of the same size)
 /// from the model: the regions the save's faction (`human`) owns are tinted. Returns how many items
 /// were rewritten.
 pub fn update_maps(tree: &mut EsfFile, model: &CampaignModel, human: &str, pictures: &[TheatrePictures]) -> usize {
-    let Some(hf) = model.faction_by_key(human).map(|f| f.id) else { return 0 };
-    let owned: HashSet<String> = model.world.regions.values().filter(|r| r.owner == hf).map(|r| r.key.clone()).collect();
+    if model.faction_by_key(human).is_none() {
+        return 0;
+    }
+    let owned = owned_regions(model, human);
     let Some(header) = tree.root.children.iter_mut().find_map(|c| match c {
         EsfNode::Record(r) if r.name == "SAVE_GAME_HEADER" => Some(&mut **r),
         _ => None,
@@ -122,4 +170,33 @@ pub fn header_maps(root: &EsfRecord) -> Vec<(String, Vec<u32>)> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A true-colour picture of `w` × `h` pixels, all `rgb`.
+    fn picture(w: u32, h: u32, rgb: [u8; 3]) -> Tga {
+        Tga { width: w, height: h, rgba: [rgb[0], rgb[1], rgb[2], 255].repeat((w * h) as usize), indices: Vec::new(), palette: Vec::new() }
+    }
+
+    /// A map mod whose lookup picture is smaller than its map picture (or whose pixel data is short)
+    /// gives no theatre pictures, so the header writer never reads past a picture (it panicked on
+    /// F5 before).
+    #[test]
+    fn pictures_that_do_not_fit_are_refused() {
+        let colours = HashMap::from([("made_up_region".to_string(), [10, 20, 30])]);
+        assert!(TheatrePictures::new("made_up_main", picture(4, 2, [200; 3]), picture(2, 2, [10, 20, 30]), colours.clone()).is_err());
+        let mut short = picture(4, 2, [10, 20, 30]);
+        short.rgba.truncate(12);
+        assert!(TheatrePictures::new("made_up_main", picture(4, 2, [200; 3]), short, colours.clone()).is_err());
+        let p = TheatrePictures::new("made_up_main", picture(4, 2, [200; 3]), picture(4, 2, [10, 20, 30]), colours).expect("pictures that fit");
+        assert_eq!((p.theatre(), p.size()), ("made_up_main", (4, 2)));
+        let owned = HashSet::from(["made_up_region".to_string()]);
+        let px = p.render(&owned, None);
+        assert_eq!(px.len(), 8);
+        // Owned: red and blue ⌊91 · 200 / 256⌋ = 71, green ⌊⌊(91 · 200 + 165 · 255) / 256⌋ · 255 / 256⌋ = 234.
+        assert!(px.iter().all(|&c| c == 0xFF47_EA47), "{px:x?}");
+    }
 }

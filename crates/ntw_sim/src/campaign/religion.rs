@@ -13,14 +13,15 @@
 //!    mod(j, i), 1, 10) with mod = `religion_conversion_mods` (row j, column i); amount = min((`pop_added` +
 //!    `pop_mult` × pool) × `points_mult` × x, pool); i's people += amount, j's −= amount (integer people, each step
 //!    truncated as the exe does through float).
-//! 3. **Shares**: share(k) += people(k) / population, floored at 0 (`0x00AA4860` follows; not read).
+//! 3. **Shares**: share(k) += people(k) / population, floored at 0 (the next refresh normalises them,
+//!    `population::normalise_religions`).
 //!
 //! Tweaks (built-in defaults, `conversion_constants_*`, CONFIRMED values): points_base 1.9, zeal_mult 0.05,
 //! points_mult 2.4, pop_mult 0.004, pop_added 200.
 
-use super::effects::BonusKind;
-use super::ids::{CharacterId, FactionId, RegionId};
-use super::world::{CampaignModel, CharacterKind};
+use super::effects::{BonusKind, EffectSet};
+use super::ids::{CharacterId, RegionId};
+use super::world::{CampaignModel, CharacterKind, Region};
 
 /// `conversion_constants_conversion_points_base` (CONFIRMED default).
 pub const POINTS_BASE: f32 = 1.9;
@@ -75,12 +76,18 @@ impl CampaignModel {
     /// The conversion strength of each religion in `region` (step 1 of the module docs), in the order the
     /// accumulator is built: the missionaries first, then the breakdown's religions with a non-zero effect.
     pub fn religion_strengths(&self, region: RegionId) -> Vec<(String, f32)> {
+        let Some(reg) = self.world.regions.get(&region) else { return Vec::new() };
+        self.religion_strengths_for(reg, &reg.religions, &super::economy::region_effect_set(self, reg))
+    }
+
+    /// [`Self::religion_strengths`] for a breakdown `religions` of `reg` and the effect set `set` the step
+    /// reads (`0x00A63FE0`'s argument).
+    fn religion_strengths_for(&self, reg: &Region, religions: &[(String, f32)], set: &EffectSet) -> Vec<(String, f32)> {
         let mut acc: Vec<(String, f32)> = Vec::new();
         let add = |acc: &mut Vec<(String, f32)>, r: &str, v: f32| match acc.iter_mut().find(|(k, _)| k == r) {
             Some(e) => e.1 += v,
             None => acc.push((r.to_string(), v)),
         };
-        let Some(reg) = self.world.regions.get(&region) else { return acc };
         let mut missionaries: Vec<(CharacterId, String)> = self
             .world
             .characters
@@ -93,8 +100,7 @@ impl CampaignModel {
             let rank = missionary_rank(self, c);
             add(&mut acc, &r, rank as f32);
         }
-        let set = super::economy::region_effect_set(self, reg);
-        for (r, _) in &reg.religions {
+        for (r, _) in religions {
             let v = set.get_qualified(BonusKind::Religion, "conversion", r);
             if v != 0.0 {
                 add(&mut acc, r, v);
@@ -106,16 +112,22 @@ impl CampaignModel {
     /// The conversion flows of `region` this round (steps 1–2), without changing anything.
     pub fn conversion_flows(&self, region: RegionId) -> Vec<Flow> {
         let Some(reg) = self.world.regions.get(&region) else { return Vec::new() };
-        let acc = self.religion_strengths(region);
+        self.conversion_flows_for(reg, reg.population, &reg.religions, &super::economy::region_effect_set(self, reg))
+    }
+
+    /// [`Self::conversion_flows`] of `reg` with population `pop`, breakdown `religions` and effect set `set`
+    /// (the panel's projection runs it on the grown copy, `0x00A727D0`).
+    pub fn conversion_flows_for(&self, reg: &Region, pop: u32, religions: &[(String, f32)], set: &EffectSet) -> Vec<Flow> {
+        let acc = self.religion_strengths_for(reg, religions, set);
         let strength = |r: &str| acc.iter().find(|(k, _)| k == r).map_or(0.0, |x| x.1);
-        let pop = reg.population as f32;
+        let pop = pop as f32;
         let mut out = Vec::new();
-        for (to, _) in &reg.religions {
+        for (to, _) in religions {
             let s = strength(to).clamp(0.0, 9.0);
             if s <= 0.0 {
                 continue;
             }
-            for (from, share) in &reg.religions {
+            for (from, share) in religions {
                 if from == to {
                     continue;
                 }
@@ -133,32 +145,29 @@ impl CampaignModel {
         out
     }
 
-    /// Step 3 for one region: applies the flows to the breakdown (people as truncated integers, shares
-    /// re-derived from them).
+    /// Step 3 for one region: applies the flows to the breakdown ([`apply_conversion`]).
     pub fn convert_region(&mut self, region: RegionId) {
         let flows = self.conversion_flows(region);
         let Some(reg) = self.world.regions.get_mut(&region) else { return };
-        if flows.is_empty() || reg.population == 0 {
-            return;
-        }
-        let mut people: Vec<i32> = vec![0; reg.religions.len()];
-        let index = |r: &str, reg: &super::world::Region| reg.religions.iter().position(|(k, _)| k == r);
-        for f in flows {
-            let (Some(i), Some(j)) = (index(&f.to, reg), index(&f.from, reg)) else { continue };
-            people[i] = (people[i] as f32 + f.amount) as i32;
-            people[j] = (people[j] as f32 - f.amount) as i32;
-        }
-        let pop = reg.population as f32;
-        for ((_, share), p) in reg.religions.iter_mut().zip(people) {
-            *share = (*share + p as f32 / pop).max(0.0);
-        }
+        apply_conversion(&mut reg.religions, &flows, reg.population);
     }
+}
 
-    /// The round-end conversion of every region `faction` owns (from its round-end economy, CONFIRMED place).
-    pub fn religion_round_end(&mut self, faction: FactionId) {
-        let regions: Vec<RegionId> = self.world.regions.values().filter(|r| r.owner == faction).map(|r| r.id).collect();
-        for r in regions {
-            self.convert_region(r);
-        }
+/// Step 3: the flows applied to a breakdown of a region of `pop` people (people as truncated integers,
+/// shares re-derived from them, floored at 0). Nothing changes without flows or people.
+pub fn apply_conversion(religions: &mut [(String, f32)], flows: &[Flow], pop: u32) {
+    if flows.is_empty() || pop == 0 {
+        return;
+    }
+    let mut people: Vec<i32> = vec![0; religions.len()];
+    let index = |r: &str, religions: &[(String, f32)]| religions.iter().position(|(k, _)| k == r);
+    for f in flows {
+        let (Some(i), Some(j)) = (index(&f.to, religions), index(&f.from, religions)) else { continue };
+        people[i] = (people[i] as f32 + f.amount) as i32;
+        people[j] = (people[j] as f32 - f.amount) as i32;
+    }
+    let pop = pop as f32;
+    for ((_, share), p) in religions.iter_mut().zip(people) {
+        *share = (*share + p as f32 / pop).max(0.0);
     }
 }

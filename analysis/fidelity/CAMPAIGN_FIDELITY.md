@@ -693,6 +693,24 @@ Recomputed for every owned region at the round end (then `tw += growth`, 0x00AB4
     INFERRED from the start-position data plus the CONFIRMED reader.
   - Code: `economy::recompute_region_with(model, Some(&fx), region)` at the round end; `recompute_region` (no faction
     part) reproduces the start positions.
+- **Breakdown and predicted mode (round 17, 0e-panel; code `economy::region_wealth`).** `0x00A6AFC0` also fills a
+  14-pair GDP breakdown (`region_wealth_factors` slots at `0x015C5B50`: base_gdp, farm / industry / mine / port gdp
+  (`0x00A6C4E0`: effects 4 / 5 / 6 / 8), the eight trade commodities, town_wealth), a 14-pair "lost" commodity breakdown
+  and a 10-slot growth breakdown (`town_wealth_growth_factors` slots at `0x015C67F8`, set up by `0x0042ED30`:
+  education, government, industry, port, roads, tax, bankruptcy, technologies, ministers, discontent): industry starts
+  with effect 130 (the faction-wide growth), the buildings' education / government / industry / port / roads effects
+  52 / 53 / 55 / 57 / 58 go to their slots (`0x00A6C570`; home_region 54 to none), technologies takes trunc(effect 61),
+  ministers trunc(effect 54) at home, tax trunc(trunc(growth × m) + fixed) (m only when growth ≥ 0), bankruptcy
+  −growth × #17, discontent #18. With its last argument 1 it predicts: the set is `0x00A9B930` (constructions and
+  research done, §Population) and each slot counts the level under construction in its place, else its building unless
+  it is being demolished (item type 3) or below full health without a repair (type 2). Readers: region +0x2A8 / +0x318
+  / +0x388 (the current breakdowns, `0x00AB4410`), the panel's RegionWealth (`0x00A992A0`) and TownWealth (`0x00A995A0`)
+  against a fresh predicted run, and the wealth trend: `0x00AB4410` sets region +0xC4 from a second, predicted
+  recompute's growth (0 above +20, 1 above 0, 2 at 0, 3 down to −20, 4 below; `economy::wealth_trend`). `0x00AB4410(0)`
+  (current breakdowns and the trend, no town wealth step) also runs at the round start (`0x00AAE710`) and from eight
+  other callers (constructions, taxes, ...); the model recomputes GDP and growth only at the round end (BACKLOG §0-E).
+  The panel's RegionWealth lists no factors: a slot needs a `region_wealth_factors` record and the shipped data has
+  no such table (`table_list wealth`).
 
 ## Trade (0x00BB3490 / 0x00B15B50, CONFIRMED; code `economy::trade_routes_value`, `campaign::trade`)
 - Faction trade income (0x00BB3490) = Σ over its international routes of the route total (0x00B79B20). Hard-coded
@@ -998,8 +1016,8 @@ faction and liberation target.
   The card's `reasons_unavailable` list (no slot, unaffordable, population, …, limit at bit 6) matches these bits
   (INFERRED: the generator `0x009FE7B0` was not traced that far); the UI now shows the model's flags.
 - **The recruitable population — not modelled (PROVISIONAL).** The region's population object (region +0x28, saved as
-  `POPULATION`) holds at +0x54 (region +0x7C) the value saved as `REGION_FACTORS` #2; it differs from `POPULATION` #1
-  (the model's `population`) in `orig_fr_may1811` (31 of 31 regions, e.g. 966967 against 969000) and equals it in the two
+  `POPULATION`) holds at +0x54 (region +0x7C) the value saved as `REGION_FACTORS` #2 (the model's `population` since
+  round 17, §Population); it differs from `POPULATION` #1 in `orig_fr_may1811` (31 of 31 regions, e.g. 966967 against 969000) and equals it in the two
   turn-1 saves. Gate: flagged when it is below var 36 `minimum_population_after_recruitment` + var 37
   `recruitment_population_cost` (registration order: key objects at `0x0164B550` + 8 × index, `0x0164B670` /
   `0x0164B678`). Queue charge `0x00AAF190`: subtract var 37 when that leaves at least var 36, else set it to var 36.
@@ -1396,7 +1414,7 @@ Side A = the first alliance (the attacker, INFERRED). The resolver reads the `au
 ## Religion conversion (round 9, manager's addition; code `ntw_sim::campaign::religion`)
 CONFIRMED from the exe unless tagged.
 - **Place:** the round-end region update `0x00AB42F0` (from the faction's round-end economy `0x008BC650`) →
-  `0x00AB3FF0` → `0x00AB4070`: population growth (not modelled: the model's population is static), then the conversion
+  `0x00AB3FF0` → `0x00AB4070`: population growth (§Population), then the conversion
   `0x00A63FE0`, then the town wealth `0x00AB4410(1)`.
 - **Strength per religion:** each character standing in the region (area query `0x00BA6840`) whose agent type is a
   missionary (+0x2C in 6..10, `0x00F9C710`) adds his rank (`0x00A198D0`) to his agent's religion (+0x1A0 = `agents` #9:
@@ -1420,6 +1438,90 @@ CONFIRMED from the exe unless tagged.
   movements over the 3 turns are not in the files. So the spa drift has another driver: open (leads: the region
   PO refresh `0x00AA9C10`, which also calls the breakdown hook `0x00AA4860`; `0x00A4C9B0` from `0x00A46A70`; the
   spa campaign scripts). Missionaries: their religion and the formula are CONFIRMED, the AI's use of them is §6.
+
+## Population (round 17, worker 0e-panel 2026-10-10; code `ntw_sim::campaign::population`)
+CONFIRMED from the exe unless tagged; the Ghidra names below are in the program.
+- **Layout.** The population object sits at region +0x28 (`POPULATION`: #1..#3 = object +8/+0xC/+0x10, #4 an i32;
+  reader `0x00A456D0`, writer `0x00A51C30`); its `REGION_FACTORS` part at object +0x24 = region +0x4C (reader
+  `0x00A4C340`): #0 f32[7] growth factors (+0x04..+0x1C), #1 classes, #2 the **live population** (+0x30 = region
+  +0x7C, what `0x0047B7E0` returns), #3 capacity (+0x34), #4 base capacity (+0x38), #5 growth % (+0x3C), #6 trend
+  (+0x40: 1 up, 2 unchanged, 3 down; a new object holds 2), #7 overcrowded (+0x44), #8 migrants (+0x58), #9 policing
+  cost (+0x5C), #10 a u32 (+0x60), #11 the religion breakdown (+0x50 / +0x54). `POPULATION` #1 (the model's old
+  `population`) is read by none of growth, conversion, garrison repression (`0x008B18F0` reads region +0x28 → +0x54)
+  or the panel; it equals #2 only until the population grows (`orig_fr_may1811`). The model now loads #2 as
+  `Region::population` and the rest as `Region::population_state`, and the save writer writes them back with the
+  religion shares (`save::write_region_population`; the shares the conversion changes were lost on save before).
+- **Factors** (`RefreshRegionPopulationFactors` `0x00AA9C10`; keys `0x00A88F20` → table `0x01458B04`:
+  population_growth_base / _buildings / _taxes / _military / _food_shortages / _migration / _ports, rows of
+  `public_order_factors`). Each is rounded to hundredths (`0x00AA6830` = `0x00A98AD0` (x / 0.01f stored as a float,
+  then FISTP) × 0.01f), in single precision except the x87 sums noted:
+  - capacity = FISTP(f32(base) × (`maxpop_modifier` × 0.01 + f32(0.01 × `pop_maxpop_modifier_tech_mod`) + 1));
+    ratio = pop / capacity (f32); overcrowded = ratio > 0.9;
+  - base = var 14 `baseline_pop_growth` (0.3); military = −0.05 × the units (force vt+8) of the armies standing in
+    the region's area whose faction is not the owner and is the rebels or at war with it (`0x00AAAFD0`, the area
+    query `0x00BA6840`, `0x008CE9B0`); buildings = `pop_growth_tech` + `pop_growth_farm`; ports =
+    `pop_growth_port_fishing`;
+  - s = buildings + base + ports (`0x00A6ABC0`, x87, stored as a float); taxes = `pop_growth_tax_modifier` +
+    f32(`pop_growth_tax_modifier_multiplier` × s);
+  - food shortages when overcrowded: (1 − ratio) × 20 − s at or above the capacity, else (0.9 − ratio) × 10 × s;
+  - migration 0 (set only on the panel's copy); the growth % is their sum (`0x00A6B8C0`). Then the classes' public
+    order (`0x008EDF70`), the policing cost (+0x5C: var 18 × Σ class policing × √pop × max(1 + `policing_cost_mod`%, 0)
+    when the faction's +0x6E0 flag is set; not modelled), the religion normalisation (`0x00AA4860`: shares below
+    0.0005 become 0, the rest are scaled to sum 1 unless they already do, with nothing left the first takes 1) and
+    the worst class (+0x60, `0x00AAA0F0`).
+  - A rebel owner (`0x008CEEF0`, faction +0x514 = its `factions` record, null for the rebels: writers `0x0087AA92` /
+    `0x0087BEE3`): every factor 0, no normalisation, capacity and growth kept.
+  - **When**: at the round start (`0x0096C050` → `0x008F1F60` → `0x00AAE710`, every region of a living faction) and in
+    the round end's first pass (`0x00948CF0` → `0x008E1030` → `0x00AB3E70`, every faction's regions, before any
+    economy). Model: `CampaignModel::refresh_population_factors` in `TurnStep::RoundStart` and in the new
+    `TurnStep::RoundEndRefresh`.
+- **Growth** (`GrowRegionPopulation` `0x00AB4070`, from `0x008BC650` → `0x00AB42F0` → `0x00AB3FF0`), with the stored
+  factors: n = FISTP(f32(f32(pop) × growth) × 0.01f); new = pop + migrants + n; below var 35 `minimum_population`
+  (1000) it becomes var 35; the trend from new − pop; capped at 200,000,000 (unsigned); then the conversion
+  `0x00A63FE0` on the new population and `0x00AAA0F0`. A rebel owner: migrants and growth 0, only the conversion.
+  After it `0x00AB3FF0` checks town emergence (below) and `0x00AB42F0` sets #18 and runs the town wealth
+  `0x00AB4410(1)`. The three public order passes inside `0x00AB4070` (`0x008F9690`, results 5 / 2 / 1 →
+  `0x008B6A40`) are the riot / rebellion checks, not part of the growth.
+- **Migration** (`BuildFactionMigrationTable` `0x00A44DB0` per faction before its regions; entries `0x00A44D70`:
+  capacity `0x00A89830` = round(var 17 × pop %) unless overcrowded at home, weight `0x00A89770` (0 at home or
+  overcrowded), emigrants `0x00A8CC00` = round(pop × min(var 16 × unrest × 1e-4 + `0x00A6BDE0` + `0x00A6B860`, 0.05))
+  at home, keeping var 35). With no weight in the faction nobody moves, and every region of a shipped map is in its
+  owner's home theatre (`0x00A8B5C0`), so migration is 0 in every vanilla campaign. The model (no theatres) does not
+  compute it (BACKLOG §0-E).
+- **Checked** (`tests/economy_fidelity.rs` `population_factors_and_growth_match_the_vanilla_saves`; `economy_check`
+  ECON_POP with ECON_MAP=1): the factors, capacity, overcrowded flag and growth of all 422 regions of 7 vanilla saves
+  (12 with a military factor; −0.39999998 for 8 units: 0.01f × 40 lies exactly between two floats and rounds to even).
+  `auto_nr4_t4` → `orig_over_nr4_0252`: every one of the 70 regions whose factors did not change reaches the next
+  population and trend exactly, and `eur_northern_italy` (an army left during the AI turns) grew by the **refreshed**
+  −0.07 % rather than its stored −0.37 %, which confirms the round end's refresh. `orig_fr_t1_b` differs only where
+  rebel bands spawned after its round start. Without the map the area test falls back to a radius and misses
+  `eur_northern_italy` and `eur_tyrol`.
+- **ORIGINAL BUG** (`0x00AA4860`): with every share below 0.0005 it writes 1.0 to the first item even when the
+  breakdown is empty (a write through a null list); the model leaves an empty breakdown alone (test
+  `religion_normalisation_drops_dust_and_leaves_an_empty_breakdown_alone`).
+- **Town emergence** (not modelled, BACKLOG §0-E): `0x00AB3FF0`, unless model +0xFA8 +0xA9, spawns a town
+  (`0x00AADB00`) when the population reaches round(`POPULATION` #3 × (1 + var 21 `pop_growth_for_spawn`%))
+  (`0x00A8D900`), and #3 becomes that threshold. The panel's next town (`0x00A673A0`) is the region's town slot (region
+  +0x120 list) not yet emerged with the lowest order (+0x214); its turns (`0x00AAFB40`) are ceil((threshold − pop) /
+  (projected pop − pop) − 0.001) while the population grows, else −1.
+- **Projection** (`ProjectRegionPopulationRound` `0x00A727D0`, for the region info table and the region details
+  panel; `this` is region +0x28): copy A = the object refreshed with the region's set and the garrison as it stands
+  (`0x00A72990`); copy B = A grown one step with the faction's migration table (`0x00AB4070`, the region's set), then
+  refreshed with the **predicted set** (`0x00A9B930`) and the garrison count of `0x00A190A0`; both get migration =
+  B's migrants × 100 / A's population (`0x00AAA010`) and their totals (`0x00AB3EA0`); the result holds A at +0 and B
+  at +0x64 (`0x00A4CE00`). Readers: PopulationChange = B's trend (+0xA4); the population growth table (`0x00A99000`:
+  A's and B's factors); the public order tables (`0x00A98F50` / `0x00A98EA0` → `0x008E02E0`: the governed class of A
+  and the same index of B); the religion breakdown (`0x00A99510`: Change = (B share − A share) × 100). The garrison
+  factor reads the region's own population, not the copy's (`0x008B18F0` → region +0x28). Model:
+  `population::project`.
+- **Predicted set** (`0x00A9B930`): the region's set, then for a non-rebel owner its technologies under research
+  (`0x008AFCF0` over the tree: the nodes whose researching school, node +0xC, is set by `0x008EEC90` and cleared on
+  completion by `0x008EED20`; the techs[] loader `0x0087CDA0` keeps (record, researcher id) for that link), the
+  faction-wide change of every construction in the owner's regions (`0x008BF110` → `0x00A798F0`: the level's +0x100 set
+  added, the slot building's taken away, `0x00E05090`) and this region's local change (`0x00A67490`, the +0xE0 sets).
+- **Panel garrison** (PROVISIONAL in `region_info.rs`): `0x00A190A0` adds the units of an army the player has
+  selected to move into the settlement (`0x00B148B0`) or removes those selected to leave (`0x00B14900`); the model's UI
+  uses the garrison as it stands (`0x00B14880`).
 
 ## Turn order (round 9 item 4; code `turn.rs`)
 CONFIRMED from the exe (the calls of each function in order; event posters found by their name getters

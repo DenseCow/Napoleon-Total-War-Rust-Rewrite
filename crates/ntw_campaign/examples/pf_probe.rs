@@ -368,7 +368,7 @@ fn main() {
         "grid" => {
             let data = dir.parent().unwrap().parent().unwrap().to_path_buf();
             let vfs = ntw_formats::pack::Vfs::open_install(&data).unwrap();
-            let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs, data_dir: Some(&data) };
+            let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
             let map = ntw_formats::campaign_map::CampaignMap::load(&files, dir.file_name().unwrap().to_str().unwrap()).unwrap();
             let t = std::time::Instant::now();
             let pg = ntw_campaign::pathing::build_grid(&map);

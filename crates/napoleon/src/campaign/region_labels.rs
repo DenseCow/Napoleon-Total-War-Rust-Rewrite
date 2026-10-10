@@ -24,7 +24,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
-use ntw_formats::campaign_map::CampaignMap;
+use ntw_campaign::map_display::MapDisplay;
 use ntw_formats::font::{CufFont, font_file_for};
 use ntw_formats::loc::Localisation;
 use ntw_formats::pack::Vfs;
@@ -74,7 +74,7 @@ pub struct RegionLabelData {
 
 /// The region labels of a campaign map: every land region the map file gives a label position for,
 /// with its on-screen name. Sea regions and keys with no `regions_onscreen_` text are left out.
-pub fn labels(map: &CampaignMap, loc: &Localisation) -> Vec<RegionLabelData> {
+pub fn labels(map: &MapDisplay, loc: &Localisation) -> Vec<RegionLabelData> {
     let mut out = Vec::with_capacity(map.regions.labels.len());
     for (key, position) in &map.regions.labels {
         if map.regions.regions.iter().any(|r| &r.key == key && r.is_sea) {
@@ -175,7 +175,7 @@ fn composite(atlas: &mut [u8], aw: u32, cell: &Cell, glyph: &[u8], w: u32, h: u3
 }
 
 /// One name's quad mesh: the corners around its own map position, draped on the ground.
-fn quad_mesh(map: &CampaignMap, label: &RegionLabelData, cell: Cell, atlas: (u32, u32)) -> Mesh {
+fn quad_mesh(map: &MapDisplay, label: &RegionLabelData, cell: Cell, atlas: (u32, u32)) -> Mesh {
     let (x, z) = label.position;
     let centre = map.height_at(x, z).max(0.0) + LINE_LIFT;
     let (pos, uv) = quad(cell, atlas, UNITS_PER_PIXEL, &|dx, dz| map.height_at(x + dx, z + dz).max(0.0) - centre);
@@ -192,7 +192,7 @@ fn quad_mesh(map: &CampaignMap, label: &RegionLabelData, cell: Cell, atlas: (u32
 pub fn spawn(
     commands: &mut Commands,
     vfs: &Vfs,
-    map: &CampaignMap,
+    map: &MapDisplay,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
@@ -363,12 +363,17 @@ mod tests {
     #[test]
     fn every_land_region_has_a_label_and_a_name() {
         let Ok(vfs) = Vfs::open_install(crate::config::game_data_dir()) else { return };
-        let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs, data_dir: None };
-        let Ok(map) = CampaignMap::load(&files, "nap_europe") else { return };
+        let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+        let Ok(map) = ntw_formats::campaign_map::CampaignMap::load(&files, "nap_europe") else { return };
+        let map = ntw_campaign::source::original_display(&files, map);
         let Ok(loc) = Localisation::from_vfs(&vfs) else { return };
         let names = labels(&map, &loc);
         eprintln!("{} label positions, {} names", map.regions.labels.len(), names.len());
-        assert_eq!(map.regions.labels.len(), 101, "the European map's theatre region list");
+        // `theatres_and_region_keys` holds one label per land region with a settlement: 72 on
+        // Europe. 101 is every region of regions.esf, sea and settlement-less filler included
+        // (eur_map_west/east, all, eur_lakes, eur_tyrolland); those have no label record.
+        let settled = map.regions.regions.iter().filter(|r| !r.is_sea && r.settlement.is_some()).count();
+        assert_eq!((map.regions.labels.len(), settled), (72, 72), "the European map's theatre region list");
         // No sea region is named, and every name is a region of the map inside its bounds.
         for l in &names {
             let r = map.regions.regions.iter().find(|r| r.key == l.key).expect("label of a real region");

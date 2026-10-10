@@ -312,7 +312,8 @@ fn projectile_effect_names_are_land_battle_groups() {
 #[test]
 #[ignore]
 fn the_projectile_trails_table_reads_whole() {
-    use ntw_formats::projectile_fx::{TrailTable, PROJECTILE_TRAILS};
+    use ntw_formats::projectile_fx::TrailTable;
+    const PROJECTILE_TRAILS: &str = "db/projectile_trails_tables/projectile_trails";
 
     let table =
         TrailTable::read(&vfs().read(PROJECTILE_TRAILS).expect("projectile_trails")).expect("read");

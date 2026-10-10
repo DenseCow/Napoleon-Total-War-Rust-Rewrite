@@ -5,7 +5,8 @@
 
 use std::collections::HashMap;
 
-use ntw_formats::db::{DbTable, Schema};
+use ntw_formats::db::DbValue;
+use ntw_formats::db_folder::{RawTable, tables};
 use ntw_formats::pack::{Vfs, normalize_path};
 use ntw_formats::rigid_model::{Material, Mesh as RigidMesh};
 
@@ -49,15 +50,15 @@ impl ModelSource {
         let mut lod_key = HashMap::new();
         let mut folders = HashMap::new();
         // Column layouts from analysis/worker2/schemas.md (all strings), CONFIRMED by parsing.
-        if let Some(t) = read_table(&vfs, "warscape_rigid_lod", "s,s,s,s") {
-            for row in &t.rows {
+        if let Some(rows) = read_table(&vfs, &tables::WARSCAPE_RIGID_LOD) {
+            for row in &rows {
                 if let (Some(path), Some(key)) = (row[1].as_str(), row[3].as_str()) {
                     lod_key.insert(normalize_path(path), key.to_ascii_lowercase());
                 }
             }
         }
-        if let Some(t) = read_table(&vfs, "warscape_rigid", "s,s,s") {
-            for row in &t.rows {
+        if let Some(rows) = read_table(&vfs, &tables::WARSCAPE_RIGID) {
+            for row in &rows {
                 if let (Some(key), Some(folder)) = (row[0].as_str(), row[1].as_str()) {
                     folders.insert(key.to_ascii_lowercase(), folder.to_owned());
                 }
@@ -137,9 +138,10 @@ impl ModelSource {
     }
 }
 
-fn read_table(vfs: &Vfs, name: &str, codes: &str) -> Option<DbTable> {
-    let bytes = vfs.read(&format!("db/{name}_tables/{name}")).ok()?;
-    DbTable::read(&bytes, &Schema::from_codes(codes)?).ok()
+/// A table through the merged table reader; a missing or unreadable one is logged (the viewer
+/// then guesses textures).
+fn read_table(vfs: &Vfs, table: &RawTable) -> Option<Vec<Vec<DbValue>>> {
+    table.read(vfs).map_err(|e| eprintln!("WARN model viewer: {e}")).ok()
 }
 
 /// Render flags the game derives from the model's **file name** (CONFIRMED, exe 0x011D9D80).

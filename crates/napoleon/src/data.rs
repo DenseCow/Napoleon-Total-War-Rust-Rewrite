@@ -34,6 +34,9 @@ fn load() -> GameData {
     match GameDatabase::from_install(&dir) {
         Ok(db) => {
             info!("Loaded game data from {}", dir.display());
+            for w in &db.load_warnings {
+                warn!("Game data: {w}");
+            }
             GameData {
                 db,
                 source_text: "Data: your Napoleon: Total War install (read-only)".to_string(),

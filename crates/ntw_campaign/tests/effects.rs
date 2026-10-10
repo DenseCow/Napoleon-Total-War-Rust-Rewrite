@@ -25,7 +25,7 @@ fn load() -> Option<(GameDatabase, EsfFile)> {
     }
     let db = GameDatabase::from_install(&dir).expect("DB");
     let vfs = Vfs::open_install(&dir).expect("vfs");
-    let bytes = GameFiles { vfs: &vfs, data_dir: Some(&dir) }.read("campaigns/eur_napoleon/startpos.esf").expect("startpos");
+    let bytes = GameFiles { vfs: &vfs }.read("campaigns/eur_napoleon/startpos.esf").expect("startpos");
     Some((db, EsfFile::from_bytes(&bytes).expect("esf")))
 }
 

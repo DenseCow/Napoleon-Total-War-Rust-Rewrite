@@ -93,7 +93,6 @@ fn versions_of(grid: &[EsfNode], slot: &[u32]) -> Vec<(u32, bool, Vec<u32>)> {
 struct Ctx {
     db: GameDatabase,
     vfs: Vfs,
-    dir: PathBuf,
 }
 
 fn main() {
@@ -101,7 +100,7 @@ fn main() {
     let dir = data_dir();
     let vfs = Vfs::open_install(&dir).expect("install");
     let db = GameDatabase::from_install(&dir).expect("DB");
-    let cx = Ctx { db, vfs, dir };
+    let cx = Ctx { db, vfs };
     match args.first().map(String::as_str) {
         Some("add") => add(&cx, &args[1], args.get(2)),
         Some("compare") => compare(&cx, &args[1]),
@@ -201,7 +200,7 @@ fn add(cx: &Ctx, path: &str, out: Option<&String>) {
     let mut esf = EsfFile::from_bytes(&std::fs::read(path).expect("read")).expect("esf");
     let before = ntw_campaign::save_check::check(&esf);
     let loaded = ntw_campaign::read_esf(&esf, &cx.db).expect("load");
-    let files = GameFiles { vfs: &cx.vfs, data_dir: Some(&cx.dir) };
+    let files = GameFiles { vfs: &cx.vfs };
     let map = CampaignMap::load(&files, &loaded.info.map_key).expect("map");
     let a = &map.pathfinding.as_ref().expect("pathfinding").areas[0];
     let cells = a.grid.expand();
@@ -263,7 +262,7 @@ fn add(cx: &Ctx, path: &str, out: Option<&String>) {
 fn compare(cx: &Ctx, path: &str) {
     let mut esf = EsfFile::from_bytes(&std::fs::read(path).expect("read")).expect("esf");
     let loaded = ntw_campaign::read_esf(&esf, &cx.db).expect("load");
-    let files = GameFiles { vfs: &cx.vfs, data_dir: Some(&cx.dir) };
+    let files = GameFiles { vfs: &cx.vfs };
     let map = CampaignMap::load(&files, &loaded.info.map_key).expect("map");
     let a = &map.pathfinding.as_ref().expect("pathfinding").areas[0];
     let cells = a.grid.expand();
