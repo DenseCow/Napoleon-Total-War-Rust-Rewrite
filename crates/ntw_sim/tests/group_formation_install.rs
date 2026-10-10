@@ -1,6 +1,6 @@
 //! `groupformations.bin` against a real install (read-only). `#[ignore]`d. Run with:
 //! ```text
-//! cargo test -p ntw_formats --test group_formation_install -- --ignored --nocapture
+//! cargo test -p ntw_sim --test group_formation_install -- --ignored --nocapture
 //! ```
 use std::path::PathBuf;
 

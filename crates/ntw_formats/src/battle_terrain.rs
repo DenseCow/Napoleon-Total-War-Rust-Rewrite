@@ -722,23 +722,94 @@ fn read_tree_lists(root: &EsfRecord) -> Result<Vec<TreeList>, String> {
 // Ground types
 // ---------------------------------------------------------------------------------------------
 
-/// `ground_type_map_0.tga`: an 8-bit palette image whose **index** is the ground type of each
-/// cell (CONFIRMED: colour-mapped TGA, 25-entry palette, 512 × 512 on hb_austerlitz). The names
-/// of the indices are UNKNOWN (no DB table lists them; likely an enum in the exe).
+/// The exe's ground-type colour table (`0x0145BF60`, returned by `0x00EC1F90`; stored B,G,R,A with
+/// A = 0xFF), here as RGB: entry `i` is the colour of ground index `i` (the order of the name table
+/// `0x01452520`: 0 `field_ploughed` … 24 `none`). Entry 25 repeats black and can never match
+/// (the search stops at the first hit, entry 6 `road`). CONFIRMED by reading the exe's data.
+pub const GROUND_TYPE_COLOURS: [[u8; 3]; 26] = [
+    [172, 225, 175],
+    [172, 225, 231],
+    [64, 225, 231],
+    [0, 255, 0],
+    [150, 75, 0],
+    [150, 75, 130],
+    [0, 0, 0],
+    [86, 86, 112],
+    [170, 170, 170],
+    [244, 164, 96],
+    [237, 111, 95],
+    [150, 183, 0],
+    [255, 255, 255],
+    [127, 134, 53],
+    [0, 100, 77],
+    [0, 200, 137],
+    [0, 168, 107],
+    [0, 0, 255],
+    [164, 164, 255],
+    [105, 105, 200],
+    [93, 255, 255],
+    [186, 23, 23],
+    [198, 16, 186],
+    [244, 246, 38],
+    [30, 170, 170],
+    [0, 0, 0],
+];
+
+/// The cell value for a colour that matches no [`GROUND_TYPE_COLOURS`] entry: 0x1A, which takes no
+/// movement modifier (CONFIRMED: `0x00EE5E00` stores 0x1A when the search fails; `0x006543D0`
+/// uses factor 1.0 for any index ≥ 25).
+pub const GROUND_TYPE_UNMATCHED: u8 = 26;
+
+/// The exe ground index of one palette colour: the first [`GROUND_TYPE_COLOURS`] entry whose four
+/// bytes equal the colour's (alpha must be 0xFF, as every 24-bit palette entry is), else
+/// [`GROUND_TYPE_UNMATCHED`]. CONFIRMED: `0x00EE5E00` matches with the exact 4-byte compare
+/// `0x00EC1FA0`.
+pub fn ground_index_of_colour(rgba: [u8; 4]) -> u8 {
+    if rgba[3] != 0xFF {
+        return GROUND_TYPE_UNMATCHED;
+    }
+    GROUND_TYPE_COLOURS
+        .iter()
+        .position(|c| c[..] == rgba[..3])
+        .map_or(GROUND_TYPE_UNMATCHED, |i| i as u8)
+}
+
+/// `ground_type_map_0.tga`: an 8-bit colour-mapped image (512 × 512 on every shipped preset) whose
+/// palette **colour** names the ground type of each cell. CONFIRMED (map loader `0x00EC8560` →
+/// `0x00E8B550` → `0x00EE5E00`): the exe takes each pixel's palette colour and looks it up in
+/// [`GROUND_TYPE_COLOURS`]; the palette index itself means nothing. The shipped palettes differ:
+/// 38 presets have 25 entries in table order (index = ground index); 16 (seven `[sa]` maps, the four
+/// Indian and Ottoman forts, `nap_mp_great_plains`, the four naval maps, `empty_flat`) have 24
+/// entries without `field_forest` (index ≥ 2 = ground index + 1); 3 (`nap_mp_grassy_flatlands`,
+/// `welly_map_c`, `western_artillery_fort`) have 256 entries (index 85 = `rock`, 255 = black =
+/// `road`). Every shipped colour is in the table (`tests/battle_terrain_install.rs`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct GroundTypeMap {
     /// Cells per row.
     pub width: u32,
     /// Rows; row 0 = top of the picture (TGA rows are re-ordered top-down by the decoder).
     pub height: u32,
-    /// Ground-type index per cell.
+    /// Exe ground index per cell (0..=24, 25 never, [`GROUND_TYPE_UNMATCHED`] for a colour outside
+    /// the exe table), converted from the palette colour once at load.
     pub cells: Vec<u8>,
-    /// The palette (editor display colours).
+    /// The file's palette (RGBA), kept for display and research.
     pub palette: Vec<[u8; 4]>,
 }
 
 impl GroundTypeMap {
-    /// The ground type index at map position `(x, y)` on a map `world` metres wide, using the
+    /// Builds the map from the TGA's palette indices, converting each to its exe ground index by
+    /// palette colour ([`ground_index_of_colour`]). A pixel index past the palette end has no
+    /// colour and becomes [`GROUND_TYPE_UNMATCHED`] (UNKNOWN what `0x010DBDD0` reads there; no
+    /// shipped file has one).
+    pub fn from_palette_indices(width: u32, height: u32, indices: &[u8], palette: Vec<[u8; 4]>) -> Self {
+        let mut lut = [GROUND_TYPE_UNMATCHED; 256];
+        for (slot, &colour) in lut.iter_mut().zip(&palette) {
+            *slot = ground_index_of_colour(colour);
+        }
+        Self { width, height, cells: indices.iter().map(|&i| lut[i as usize]).collect(), palette }
+    }
+
+    /// The exe ground index at map position `(x, y)` on a map `world` metres wide, using the
     /// same layout as the heightfield (column ↔ x, row 0 = `+y` edge; CONFIRMED statistically).
     pub fn at(&self, x: f32, y: f32, world_width: f32, world_height: f32) -> u8 {
         let c = ((x / world_width + 0.5) * self.width as f32).floor() as i64;
@@ -874,12 +945,8 @@ impl BattleMap {
         let ground_types = if vfs.contains(&gt_path) {
             let bytes = vfs.read(&gt_path).map_err(|e| bad(&gt_path, e))?;
             let tga = Tga::parse(&bytes).map_err(|e| bad(&gt_path, e))?;
-            (!tga.indices.is_empty()).then_some(GroundTypeMap {
-                width: tga.width,
-                height: tga.height,
-                cells: tga.indices,
-                palette: tga.palette,
-            })
+            (!tga.indices.is_empty())
+                .then(|| GroundTypeMap::from_palette_indices(tga.width, tga.height, &tga.indices, tga.palette))
         } else {
             None
         };
@@ -1144,5 +1211,41 @@ mod tests {
             ground_types: None,
             files: Vec::new(),
         }
+    }
+
+    /// The palette as a shipped file stores it: the exe table's colours (alpha 0xFF), optionally
+    /// without entry 2 (`field_forest`), as the 24-entry palettes do.
+    fn palette(skip_field_forest: bool) -> Vec<[u8; 4]> {
+        GROUND_TYPE_COLOURS[..25]
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| !(skip_field_forest && i == 2))
+            .map(|(_, c)| [c[0], c[1], c[2], 0xFF])
+            .collect()
+    }
+
+    /// A 25-entry palette in table order maps every index to itself.
+    #[test]
+    fn ground_types_25_entry_palette_is_identity() {
+        let indices: Vec<u8> = (0..25).collect();
+        let g = GroundTypeMap::from_palette_indices(25, 1, &indices, palette(false));
+        assert_eq!(g.cells, indices);
+    }
+
+    /// Bug fix: on a 24-entry palette (no `field_forest`, e.g. the naval maps) palette index 16 is
+    /// `water_deep` (17) and 13 is `vegetation_dense_forest` (14); the raw index was one type off.
+    #[test]
+    fn ground_types_24_entry_palette_follows_colour_not_index() {
+        let g = GroundTypeMap::from_palette_indices(4, 1, &[0, 1, 13, 16], palette(true));
+        assert_eq!(g.cells, [0, 1, 14, 17]);
+    }
+
+    /// A colour outside the exe table, a non-opaque entry and an index past the palette end take
+    /// no ground type (0x1A); black matches `road` (6), never the duplicate entry 25.
+    #[test]
+    fn ground_types_unmatched_colours() {
+        let pal = vec![[1, 2, 3, 0xFF], [0, 255, 0, 0x80], [0, 0, 0, 0xFF]];
+        let g = GroundTypeMap::from_palette_indices(4, 1, &[0, 1, 2, 9], pal);
+        assert_eq!(g.cells, [GROUND_TYPE_UNMATCHED, GROUND_TYPE_UNMATCHED, 6, GROUND_TYPE_UNMATCHED]);
     }
 }

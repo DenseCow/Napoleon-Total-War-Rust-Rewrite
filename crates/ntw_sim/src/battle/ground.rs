@@ -1,16 +1,17 @@
 //! The battlefield under the units: ground types (movement speed) and heights (slope fatigue).
 //!
-//! Sources (see `analysis/worker5/BATTLE_TERRAIN.md` §10):
-//! - The ground-type map is `ground_type_map_0.tga` of the battle preset: one palette index per
-//!   cell, laid out like the heightfield (column ↔ +x, row 0 = the +y edge; CONFIRMED
-//!   statistically by the terrain worker).
-//! - Index → name: the exe holds a pointer table of 25 names + `end_marker` +
-//!   `invalid_ground_type` (CONFIRMED in the bytes of `Napoleon.exe`, read as data, no
-//!   disassembly), in the order of [`GROUND_TYPE_NAMES`]. CONFIRMED (`0x0061E430`, the "Ground
-//!   State Grid"): the exe looks up one `unit_movement_modifiers` record per name in this table
-//!   order and indexes that list with each grid cell's type byte; the grid is 512 × 512 cells,
-//!   filled from the first byte of each 4-byte pixel of the battle's ground image (INFERRED: the
-//!   ground-type map). See BATTLE_FIDELITY.md §7.
+//! Sources (see `analysis/worker5/BATTLE_TERRAIN.md` §10, `UNITS_TERRAIN_FIDELITY.md` §1.10):
+//! - The ground-type map is `ground_type_map_0.tga` of the battle preset, laid out like the
+//!   heightfield (column ↔ +x, row 0 = the +y edge; CONFIRMED statistically by the terrain
+//!   worker). Each cell holds the exe ground index of its palette **colour** (CONFIRMED: the map
+//!   loader `0x00EC8560` → `0x00EE5E00` matches the colour against the exe table `0x0145BF60`;
+//!   the importer converts, `ntw_formats::battle_terrain::GroundTypeMap`).
+//! - Index → name: the exe holds a pointer table (`0x01452520`) of 25 names + `end_marker` +
+//!   `invalid_ground_type` in the order of [`GROUND_TYPE_NAMES`] (CONFIRMED). CONFIRMED
+//!   (`0x0061E430`, the "Ground State Grid"): the exe looks up one `unit_movement_modifiers`
+//!   record per name in this table order and indexes that list with each grid cell's ground index;
+//!   the grid is 512 × 512 cells of world/512 metres. A soldier's cell is `0x0081AC80`
+//!   (`+0x19C`). See BATTLE_FIDELITY.md §7.
 //! - Speed: `unit_movement_modifiers` (28 rows `name, f×4`) by name; the column per unit type is
 //!   [`MovementClass`] (CONFIRMED, `0x006543D0`).
 //! - Slope: the gradient `+0x1A0` is the height change over the tick's step ahead divided by its
@@ -19,7 +20,8 @@
 //!
 //! Everything is plain `f32` arithmetic in a fixed order, so the model stays deterministic.
 
-/// Ground-type names by map index (CONFIRMED table order in the exe; index mapping INFERRED).
+/// Ground-type names by exe ground index (CONFIRMED: the name table `0x01452520`; the map cells
+/// hold this index, converted from their palette colour at import).
 pub const GROUND_TYPE_NAMES: [&str; 25] = [
     "field_ploughed",
     "field_ploughed_wet",
@@ -129,6 +131,9 @@ impl GroundTypeGrid {
         let s = &self.spec;
         let c = ((x / s.width + 0.5) * s.cols as f32).floor() as i64;
         let r = ((0.5 - y / s.height) * s.rows as f32).floor() as i64;
+        // The exe clamps each index ≤ 511 as unsigned (`0x0081AC80`), so a point off the low edge
+        // reads the far edge; ours clamps to the near edge. Every point on the map gets the same
+        // cell either way, so this is not counted as an ORIGINAL BUG (UNITS_TERRAIN §1.10).
         let c = c.clamp(0, s.cols as i64 - 1) as usize;
         let r = r.clamp(0, s.rows as i64 - 1) as usize;
         self.cells[r * s.cols as usize + c]

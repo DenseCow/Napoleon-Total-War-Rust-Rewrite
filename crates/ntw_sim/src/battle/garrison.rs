@@ -116,7 +116,7 @@ impl Battle {
         u.garrison = Some(target);
         u.garrison_target = None;
         u.position = pos;
-        u.destination = None;
+        u.set_destination(None);
         u.running = false;
         u.hold_position = true;
     }

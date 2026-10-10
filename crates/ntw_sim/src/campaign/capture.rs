@@ -255,7 +255,9 @@ impl CampaignModel {
             }
         }
         if pay && o.money != 0 && let Some(f) = self.world.factions.get_mut(&faction) {
-            f.treasury = f.treasury.saturating_add(o.money);
+            // The option's money +0x10, when not 0, is credited with category 0 (`0x00B541E0` → `0x00BB3810` at
+            // `0x00B5431C`, CONFIRMED): 32-bit wrapping.
+            super::treasury::credit(&mut f.treasury, o.money);
         }
     }
 
@@ -412,7 +414,7 @@ impl CampaignModel {
         let b = self.world.regions[&region].building_at(slot).cloned().expect("checked");
         let f = self.world.factions.get_mut(&owner).ok_or(CommandError::UnknownFaction(owner))?;
         // `0x00B66260` tests no funds and charges only a cost above 0 (signed); the item keeps the cost either way
-        // (`0x00AE7010` → item +0x14), and a cancel credits that stored cost back ([`super::treasury::refund`]).
+        // (`0x00AE7010` → item +0x14), and a cancel credits that stored cost back ([`super::treasury::credit`]).
         if cost > 0 {
             super::treasury::pay(&mut f.treasury, cost);
         }

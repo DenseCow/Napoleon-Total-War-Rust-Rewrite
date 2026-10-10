@@ -5,15 +5,15 @@ const A: FactionId = FactionId(1);
 const B: FactionId = FactionId(2);
 
 
-/// The negotiation appliers (`0x00BB3810` for the money, the treaty appliers for the stance rows),
+/// The negotiation appliers (the payment item `0x00C18A70` for the money, the treaty appliers for the stance rows),
 /// with the row names `BuildOfferAndDemandStrings` reports. Regions and technologies are the
 /// model's records (`CampaignCommand::AcceptDeal`, tested in ntw_sim).
 #[test]
 fn negotiation_rows_map_to_their_appliers() {
-    // The lump sum (0x00BB3810(amount, 3)) is a state gift, the schedule a regular payment.
+    // The lump sum is a one-off payment (0x00C18A70 run once), the schedule a regular payment.
     assert_eq!(
         deal_item_commands(&NegotiationItem::Payment { amount: 500, turns: 0 }, A, B),
-        vec![CampaignCommand::Diplomacy { a: A, b: B, action: D::StateGift(500) }]
+        vec![CampaignCommand::Diplomacy { a: A, b: B, action: D::OneOffPayment(500) }]
     );
     assert_eq!(
         deal_item_commands(&NegotiationItem::Payment { amount: 100, turns: 3 }, A, B),
@@ -1493,7 +1493,10 @@ fn the_commander_pool_answers_from_the_model_and_hiring_queues_the_command() {
         st.model.turn.current = Some(A);
         st.model.world.factions.get_mut(&A).unwrap().treasury = 1;
     }
-    assert!(!ask_gate(force, false), "the treasury cannot pay");
+    assert!(ask_gate(force, false), "the gate tests no money (0x009D1CD0)");
+    let poor = call2("AvailableCommandersForRecruitment", hud.force_addr(force), Value::Boolean(false));
+    let poor_row: Table = poor.as_table().expect("the pool table").get(1).unwrap();
+    assert!(!poor_row.get::<bool>("IsRecruitable").unwrap(), "the row is too dear (0x00A1BB20 bit 1)");
     {
         let mut st = hud._scripts.state_mut();
         st.model.world.factions.get_mut(&A).unwrap().treasury = 1000;
@@ -1834,7 +1837,7 @@ fn negotiation_with_offer(hud: &TestHud) {
 /// items (0x009BF3C0), it accepts nothing.
 #[test]
 fn a_deal_applies_at_most_once() {
-    let gift = CampaignRequest::Command(CampaignCommand::Diplomacy { a: A, b: B, action: D::StateGift(500) });
+    let gift = CampaignRequest::Command(CampaignCommand::Diplomacy { a: A, b: B, action: D::OneOffPayment(500) });
     let accept = CampaignRequest::Command(CampaignCommand::AcceptDeal);
     for script in ["CampaignUI.ProposeDeal() CampaignUI.ProposeDeal()", "CampaignUI.ProposeDeal() CampaignUI.AcceptOffer()"] {
         let hud = test_hud();
@@ -1921,4 +1924,25 @@ fn region_info_details_carry_the_region_name_for_the_title() {
     assert!(hud.errors().is_empty(), "the call is bound, not an UNKNOWN stub");
     let none: Value = lua.load("return CampaignUI.InitialiseRegionInfoDetails()").eval().unwrap();
     assert!(none.is_nil());
+}
+
+/// A character's portrait problem is logged once per problem: drawing his card again logs
+/// nothing, and a new problem (here: he gains details, so the missing allocator shows) is logged
+/// again. Bug: the key was the character alone, so the second problem was never logged.
+#[test]
+fn a_new_portrait_problem_is_logged_again() {
+    let hud = test_hud();
+    hud.host.take_log();
+    let c = CharacterId(77);
+    let draw = || portrait_image(hud.host.inner(), &hud._scripts.state().model, c);
+    let portrait_lines = || hud.host.take_log().into_iter().filter(|l| l.contains("character 77")).collect::<Vec<_>>();
+    draw();
+    draw();
+    let log = portrait_lines();
+    assert!(log.len() == 1 && log[0].contains("no character details"), "{log:?}");
+    hud._scripts.state_mut().model.world.character_details.insert(c, Default::default());
+    draw();
+    draw();
+    let log = portrait_lines();
+    assert!(log.len() == 1 && log[0].contains("no portrait allocator"), "{log:?}");
 }

@@ -252,6 +252,67 @@ extended with missile fire (`shooting`, merged from work/shooting-and-lua); the 
 **`campaign_ai`, `battle::ai`:** simple placeholders ("advance on nearest enemy"). The original uses a BDI architecture
 (CONFIRMED structure) with 30 behaviour modules and per-personality weights in `campaign_ai_*` (W2 §9). Long-term goal.
 
+### 3.3.1 Replaceable systems: rule seams (user, 2026-10-10; BACKLOG §11)
+Goal: a mod changes how a whole system works (how population grows, a new resource, new battle rules)
+without forking the engine, and every system we finish is built that way from the start, so nothing
+needs a refit later. Vanilla runs the original's 1:1 rule. Code: `ntw_sim::seam`,
+`ntw_sim::campaign::{seams, mod_state}`; worked example: `population.grow`.
+
+- **A seam is one rule function**, named `<system>.<rule>` (`population.grow`, later `public_order.factors`,
+  `economy.upkeep`, `recruitment.cost`, `diplomacy.deal_value`, `battle.morale_step`, ...). Its type is a
+  `dyn Fn(&CampaignModel, ..., &mut ModWrites) -> Out + Send + Sync`; a `Seam` holds the rule in use
+  (`Arc<dyn Fn>`) and its chain of implementation keys (`original`, then each mod's). One function per
+  seam, not one trait per system: an extension then has nothing to forward and cannot drop a method by
+  mistake. A system is the set of seams under its prefix. Granularity is where the original computes the
+  rule (per region, per faction, per unit per tick), never per soldier per frame: hot paths batch.
+- **Where it lives:** the model's game data, `CampaignRules::seams` (`CampaignSeams`, one field per seam;
+  battle rules get a `BattleSeams` the same way). Not Bevy systems or schedules: the model is plain Rust,
+  headless and deterministic (§1), and the display only reads it. Not saved: rebuilt on load from the same
+  data, like the rest of `CampaignRules`.
+- **One source of truth:** the model's turn, the UI's projections and the AI call a rule only through its
+  seam (`model.rules.seams.<seam>.rule()(...)`); the original's function (`population::grow`) is reached
+  directly only by the seam's default and by fidelity tests against real saves.
+- **Replace or extend:** a mod's implementation is a `Maker`: given the rule before it, it returns the new
+  rule. Replacing ignores the argument; extending calls it and changes its result. Several mods chain in
+  load order. Implementations are registered by key in a `SeamRegistry` per seam (`CampaignRuleRegistry`):
+  the engine's own, a fork's (in Rust at start-up), later one per Lua rule script. A key is never
+  re-registered, and `original` is reserved.
+- **Selected by data:** a list of `(seam key, implementation key)` rows in load order, resolved once by
+  `CampaignRuleRegistry::seams` when the rules are built; an unknown seam or implementation is warned
+  once and the rule before it kept. Source of the rows (to wire, BACKLOG): a `_rule_seams` table in the
+  merged database (packs and loose `data\` in the mods' order, like `_kv_rules`) and the open campaign
+  format's `campaign.toml` `[rules]`. An implementation's numbers come from the merged database
+  (`campaign_variables`, `_kv_rules`, its own tables), so no separate parameter store.
+- **Lua hook point (design only; the API is BACKLOG §11 "Extended Lua API"):** `ntw_script` registers a
+  `Maker` per rule script a mod declares (key `script:<mod>/<file>`). The rule runs in its own sandboxed
+  Lua 5.1 state owned by the implementation (behind a `Mutex`, since a rule is `Fn + Send + Sync`), not in
+  the campaign script host, which owns the model (no cycle). It gets a read-only view of the model and
+  `prev` as a callable, has no `os`, `io` or clock, and changes state only through `ModWrites`. A script
+  that errors is logged once and the call falls back to `prev`.
+- **New mechanics** (not a changed rule) use the same pieces: their state in `ModState`, their work in a
+  turn or battle phase seam whose original is a no-op (e.g. `turn.region_round_end`), extended by the mod.
+- **Mod-owned state:** `CampaignModel::mod_state` (`ModState`): values (`Bool`, `Int`, `Float`, `Text`,
+  `List`) by `ModKey { owner, scope, name }`, scope = campaign, faction, region, character or force, in a
+  `BTreeMap`. Saved in our own save (missing in an older save: empty), never capped; not written to the
+  original's `.save` format (tools only). A rule never writes the model's mod state itself: it returns its
+  changes in `ModWrites`, which the caller applies in order when the rule runs for real (the round end:
+  after each region, before the next) and drops when it runs for a projection (the region panel), so a
+  preview never changes state. Values of a mod no longer loaded are kept untouched, so re-enabling it
+  resumes; values of a gone entity stay until their owner removes them.
+- **Deterministic for multiplayer:** a rule is a pure function of its inputs; no hash-map iteration, no
+  clock, no threads. Randomness: a seam whose original draws gets the campaign `CaRng` in its arguments;
+  a mod that needs draws where the original has none keeps its own `CaRng` state in `ModState` (an `Int`),
+  so the original's random sequence is not shifted. `state_hash` covers `ModState` in key order (only when
+  it has values, so a vanilla campaign hashes as before); peers compare `CampaignSeams::chains()` with the
+  mod list when a game starts.
+- **Cost in vanilla:** one indirect call per rule use and an empty, unallocated `ModWrites`. Measured
+  (release, `population.grow`, 20M calls): 12.8 ns direct, 15.1 ns through the seam, about 2 ns per call,
+  under 1 µs per round end over a campaign's regions.
+- **Adding a seam (every new or refitted system):** a `<SYSTEM>_<RULE>` key constant and the rule's `dyn Fn`
+  type in `campaign::seams`; a `CampaignSeams` field defaulting to the original's function; a
+  `CampaignRuleRegistry` field and its match arm; an entry in `chains()`; every caller through the seam; a
+  test that the default gives exactly the original's results.
+
 ### 3.4 `napoleon` (Bevy 0.19.1 app, the "display") — vertical slice implemented
 
 **What exists now:**

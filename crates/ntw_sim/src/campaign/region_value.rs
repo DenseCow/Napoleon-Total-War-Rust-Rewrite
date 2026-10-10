@@ -1,5 +1,6 @@
 //! The campaign AI's **region value** (`analysis/ai/AI_RESEARCH.md` §4 "Region value"), CONFIRMED
-//! formulas.
+//! formulas, shared by the AI's desires (`ntw_ai`) and the deal evaluation
+//! ([`super::deal_value`]).
 //!
 //! * The base is belief 0x4D (`0x00A75560`, ctor `0x00A40DF0`, update `0x00ABD5E0`): from three
 //!   integer fields `a = +0xE8`, `b = +0xBC`, `c = +0xCC` of the region's `+0x1A0` object (INFERRED
@@ -9,6 +10,9 @@
 //!   `COMPOSITE_VALUE_ANALYSER_*` personality multipliers by the region group's change state and
 //!   the region's loss likelihood, ×5 for the faction's capital, ×3 for an UNKNOWN test and
 //!   +5000 for another (see [`Composite`]).
+//! * A region's value to a faction in a deal (`0x00AA1E90`, [`faction_value`]): the base with the
+//!   split / merged compounding, ×2 by theatre, ×2 for the faction's listed regions and ×1.5 for
+//!   its last region with slots.
 
 /// `0x00ABD5E0`: the base value from the three settlement fields.
 pub fn base(a: i32, b: i32, c: i32) -> i32 {
@@ -16,6 +20,15 @@ pub fn base(a: i32, b: i32, c: i32) -> i32 {
     let first = (surplus as f32 * 0.12).floor() as i32;
     let second = ((c + b) as f32 * 0.2) as i32;
     (first + second) * 25 + 15000
+}
+
+/// The base value the model uses for a region (belief 0x4D's value, read through `0x00A63FD0`):
+/// the original's own value stored in the startpos / save when there is one
+/// (`World::region_base_values`, CONFIRMED data; it is the value when the file was written,
+/// PROVISIONAL after that), else [`base`] with PROVISIONAL inputs (the three settlement fields
+/// are runtime values, UNKNOWN: the region's gdp stands in for `c`, `a = b = 0`).
+pub fn stored_or_formula(stored: Option<i32>, gdp: u32) -> i32 {
+    stored.unwrap_or_else(|| base(0, 0, gdp.min(i32::MAX as u32) as i32))
 }
 
 /// A region group's change state (`0x00A634D0`: looked up per faction in the group belief's list
@@ -39,15 +52,25 @@ pub enum GroupChange {
 /// The personality's `COMPOSITE_VALUE_ANALYSER_*` multipliers (personality slots `+0x218..+0x240`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Multipliers {
+    /// `REGION_GROUP_LOST`.
     pub lost: f32,
+    /// `REGION_GROUP_REDUCED`.
     pub reduced: f32,
+    /// `REGION_GROUP_SPLIT`.
     pub split: f32,
+    /// `REGION_GROUP_NEW`.
     pub new: f32,
+    /// `REGION_GROUP_INCREASED`.
     pub increased: f32,
+    /// `REGION_GROUP_MERGED`.
     pub merged: f32,
+    /// `REGION_LOSS_CERTAIN`.
     pub loss_certain: f32,
+    /// `REGION_LOSS_VERY_LIKELY`.
     pub loss_very_likely: f32,
+    /// `REGION_LOSS_LIKELY`.
     pub loss_likely: f32,
+    /// `REGION_CAN_WIN`.
     pub can_win: f32,
 }
 
@@ -85,7 +108,9 @@ pub struct Composite {
     /// The region's counts `+0x104→+0x44 / +0x40 / +0x48` (`0x00D7A2F0 / 0x00D7A200 /
     /// 0x00D7A1E0`; UNKNOWN meanings: a level 0..4 and two counts).
     pub level: i32,
+    /// The first count (`+0x40`).
     pub count_a: i32,
+    /// The second count (`+0x48`).
     pub count_b: i32,
     /// The region is the faction's capital (`0x00A8B5A0`: faction `+0x72C`, INFERRED).
     pub capital: bool,
@@ -99,7 +124,7 @@ pub struct Composite {
 /// `1 + ((m − 1) − (m − 1)^(n+1)) / (2 − d)`: the compounding factor of the reduced / split /
 /// increased / merged states (`powf` at `0x01285310`; `d` is `m` for the own states and the
 /// REDUCED multiplier for the other ones, as the exe reads it).
-fn compound(m: f32, d: f32, n: i32) -> f32 {
+pub fn compound(m: f32, d: f32, n: i32) -> f32 {
     let x = m - 1.0;
     (x - x.powf((n + 1) as f32)) / (2.0 - d) + 1.0
 }
@@ -160,6 +185,54 @@ pub fn composite(base: i32, c: &Composite, m: &Multipliers) -> i32 {
     v
 }
 
+/// What `0x00AA1E90` reads about one region for one faction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FactionRegion {
+    /// The "own" branch: the region's owner is the faction (region virtual `+0x8`) and the region
+    /// belongs to a region group (`+0x12C` non-null, read at `0x00AA1F0A`; its group belief is
+    /// `0x00A75460`). Otherwise the "other" branch, an owned region without a group included.
+    pub own_branch: bool,
+    /// The region group's change state for the faction (`0x00A634D0`).
+    pub change: GroupChange,
+    /// `n` of the compounding factor: the region's neighbours (`0x00C3FD10`) owned by its owner.
+    pub owner_neighbours: i32,
+    /// ×2: own branch, the faction owns exactly one region in the region's theatre; other branch,
+    /// it owns none there (`0x00C40570` / `0x00C3E120`).
+    pub theatre_double: bool,
+    /// ×2: the region is in the faction's CAI list `+0x1C0` (`0x00C45CF0`).
+    pub key_region: bool,
+    /// ×1.5: the region has building slots (`+0x128`) and no other region of the faction has any.
+    pub last_with_slots: bool,
+}
+
+/// `0x00AA1E90` (CONFIRMED): a region's value to a faction, as the deal evaluation uses it.
+/// The base is [`stored_or_formula`]; the own branch compounds SPLIT, the other one MERGED
+/// (each against the REDUCED-or-own divisor as in [`composite`]), then the theatre and list
+/// doublings and the last-region-with-slots ×1.5 (`v + (v >> 1)`, unsigned).
+pub fn faction_value(base: i32, r: &FactionRegion, m: &Multipliers) -> i32 {
+    // The exe converts the value as an unsigned integer before scaling.
+    let scale = |v: i32, f: f32| (f * v as u32 as f32) as i32;
+    let mut v = base;
+    if r.own_branch {
+        if r.change == GroupChange::Split {
+            v = scale(v, compound(m.split, m.split, r.owner_neighbours));
+        }
+    } else if r.change == GroupChange::Merged {
+        v = scale(v, compound(m.merged, m.reduced, r.owner_neighbours));
+    }
+    if r.theatre_double {
+        v = v.wrapping_mul(2);
+    }
+    if r.key_region {
+        v = v.wrapping_mul(2);
+    }
+    if r.last_with_slots {
+        let u = v as u32;
+        v = u.wrapping_add(u >> 1) as i32;
+    }
+    v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,5 +278,30 @@ mod tests {
         // Level 3 with count_a 0 and count_b 2 → VERY_LIKELY ×0.8; +5000 bonus.
         let c = Composite { own_group: true, change: GroupChange::New, level: 3, count_b: 2, bonus: true, ..plain() };
         assert_eq!(composite(10000, &c, &m), 13000);
+    }
+
+    #[test]
+    fn faction_value_branches() {
+        let m = defaults();
+        let plain = FactionRegion {
+            own_branch: false,
+            change: GroupChange::New,
+            owner_neighbours: 0,
+            theatre_double: false,
+            key_region: false,
+            last_with_slots: false,
+        };
+        assert_eq!(faction_value(20000, &plain, &m), 20000);
+        // Own SPLIT with n = 1: 1 + (0.4 − 0.16) / 0.6 = 1.4.
+        let r = FactionRegion { own_branch: true, change: GroupChange::Split, owner_neighbours: 1, ..plain };
+        assert!((faction_value(10000, &r, &m) - 14000).abs() <= 1);
+        // Own MERGED is not compounded; other MERGED with n = 1: 1 + 0.24 / 0.7.
+        let r = FactionRegion { own_branch: true, change: GroupChange::Merged, owner_neighbours: 1, ..plain };
+        assert_eq!(faction_value(10000, &r, &m), 10000);
+        let r = FactionRegion { change: GroupChange::Merged, owner_neighbours: 1, ..plain };
+        assert!((faction_value(7000, &r, &m) - 9400).abs() <= 1);
+        // Theatre ×2, list ×2, last with slots ×1.5.
+        let r = FactionRegion { theatre_double: true, key_region: true, last_with_slots: true, ..plain };
+        assert_eq!(faction_value(10001, &r, &m), 40004 + 20002);
     }
 }

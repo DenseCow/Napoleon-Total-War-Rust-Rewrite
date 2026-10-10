@@ -502,7 +502,7 @@ impl Battle {
             if u.skirmish_eval.evading {
                 let u = &mut self.units[idx];
                 u.skirmish_eval.evading = false;
-                u.destination = None;
+                u.set_destination(None);
                 u.running = false;
             }
             return;
@@ -543,12 +543,12 @@ impl Battle {
             let u = &mut self.units[idx];
             u.skirmish_eval.angle = a;
             u.skirmish_eval.evading = true;
-            u.destination = Some(dest);
+            u.set_destination(Some(dest));
             u.running = true;
         } else if u.skirmish_eval.evading {
             let u = &mut self.units[idx];
             u.skirmish_eval.evading = false;
-            u.destination = None;
+            u.set_destination(None);
             u.running = false;
         }
     }

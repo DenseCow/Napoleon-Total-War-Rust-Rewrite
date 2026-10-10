@@ -29,12 +29,13 @@ pub mod data;
 pub mod desires;
 pub mod driver;
 pub mod keys;
-pub mod region_value;
+pub use ntw_sim::campaign::region_value;
 pub mod research;
 pub mod world;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use ntw_sim::campaign::negotiation::NegotiationAction;
 use ntw_sim::campaign::rules::TaxClass;
 use ntw_sim::campaign::{CampaignCommand, CampaignEvent, CampaignModel, CommandError, FactionId, ForceId, RegionId, SlotRef, Stance};
 use ntw_sim::fixed::Fixed20;
@@ -49,26 +50,11 @@ pub use world::{AiArmy, AiFaction, AiRegion, AiSchool, AiWorld};
 pub struct ScriptHints {
     /// `add_restricted_unit_record` keys: never recruited.
     pub restricted_units: BTreeSet<String>,
-    /// `force_diplomacy(a, b, option, offer, accept)`: (a, b, option) → (may offer, may accept).
-    /// Options seen in the shipped scripts include `war`, `peace`, `alliance`, `military access`.
-    pub diplomacy_options: BTreeMap<(String, String, String), (bool, bool)>,
     /// `set_campaign_ai_force_all_factions_boardering_humans_to_have_invasion_behaviour(true)`.
     pub invade_humans: bool,
     /// Faction keys whose armies scripts froze with `disable_movement_for_character` (by faction,
     /// PROVISIONAL granularity: the script call names a character).
     pub frozen_factions: BTreeSet<String>,
-}
-
-impl ScriptHints {
-    /// May `a` offer `option` to `b`? Absent → allowed.
-    pub fn may_offer(&self, a: &str, b: &str, option: &str) -> bool {
-        self.diplomacy_options.get(&(a.to_string(), b.to_string(), option.to_string())).is_none_or(|f| f.0)
-    }
-
-    /// May `b` accept `option` from `a`? Absent → allowed.
-    pub fn may_accept(&self, a: &str, b: &str, option: &str) -> bool {
-        self.diplomacy_options.get(&(a.to_string(), b.to_string(), option.to_string())).is_none_or(|f| f.1)
-    }
 }
 
 /// One AI decision.
@@ -736,14 +722,15 @@ impl<'a> FactionTurn<'a> {
                 if ally_fighting {
                     continue;
                 }
-                // Peace when we are losing badly and the scripts allow it on both sides. The other
+                // Peace when we are losing badly and the scripts allow it on both sides (we may
+                // propose it, they accept it from us: `force_diplomacy`, the model's rule). The other
                 // side accepts unless it is human (no UI here) or would win easily.
                 let easy = self.t("FACTIONAL_NONCACHING_ANALYSER_EASY_WIN_MINIMUM_WINNING_FORCE_MULTIPLIER_ARMIES", 1.5);
                 if my_strength < their * badly_lose
                     && !self.ctx.humans.contains(&other)
                     && their < my_strength * easy * 2.0
-                    && self.ctx.hints.may_offer(&self.key, &o.key, "peace")
-                    && self.ctx.hints.may_accept(&self.key, &o.key, "peace")
+                    && self.world.may_propose(me, other, NegotiationAction::Peace.option())
+                    && self.world.may_accept(other, me, NegotiationAction::Peace.option())
                 {
                     self.orders.push(AiOrder::MakePeace { a: me, b: other });
                 }
@@ -769,7 +756,7 @@ impl<'a> FactionTurn<'a> {
             let attitude: f32 = terms.iter().map(|t| t.0 * t.1).sum::<f32>() / wsum;
             let weak = my_strength * start_war >= their * 2.0;
             if (attitude < enemies_under && weak || invade_human)
-                && self.ctx.hints.may_offer(&self.key, &o.key, "war")
+                && self.world.may_propose(me, other, NegotiationAction::War.option())
             {
                 self.orders.push(AiOrder::DeclareWar { a: me, b: other });
             }
@@ -778,19 +765,13 @@ impl<'a> FactionTurn<'a> {
 
     /// The analyser value of a region as the integer the desires use (`0x00A63FD0` on the
     /// composite value analyser 0x56): the CONFIRMED base and composite formulas
-    /// ([`region_value`]). The base is the original's own value stored in the startpos / save
-    /// when there is one ([`AiRegion::base_value`], CONFIRMED data; it is the value at
-    /// the time the file was written, PROVISIONAL after that); otherwise the formula with
-    /// PROVISIONAL inputs (the three settlement fields are runtime values, UNKNOWN: the region's
-    /// GDP stands in for `c`, `a = b = 0`). The model has no region groups, so our own regions
+    /// ([`region_value`]). The base is [`region_value::stored_or_formula`] of
+    /// [`AiRegion::base_value`] (PROVISIONAL as noted there). The model has no region groups, so our own regions
     /// take the own branch with no change entry and the others the default NEW state; the
     /// loss-likelihood counts are 0, and the capital / ×3 / +5000 tests are off (PROVISIONAL).
     fn region_value(&self, r: RegionId) -> i32 {
         let reg = &self.world.regions[&r];
-        let base = match reg.base_value {
-            Some(v) => v,
-            None => region_value::base(0, 0, reg.gdp.min(i32::MAX as u32) as i32),
-        };
+        let base = region_value::stored_or_formula(reg.base_value, reg.gdp);
         let m = region_value::Multipliers::from_tunables(|k, d| self.t(k, d));
         let own = reg.owner == self.faction;
         let c = region_value::Composite {
@@ -1333,6 +1314,26 @@ mod tests {
         assert_eq!(keys(&m), ["test_building_level_2"]);
         m.world.restricted_buildings.insert("test_building_level_2".into());
         assert_eq!(keys(&m), Vec::<String>::new(), "a script-restricted level is left out by the model's rule");
+    }
+
+    /// The AI's peace and war gates read the model's `force_diplomacy` permissions (one home:
+    /// `Relationship::diplomacy_options`) through its snapshot, with the model's own rule.
+    #[test]
+    fn the_snapshot_carries_the_models_diplomacy_permissions() {
+        let mut m = model(None);
+        let (a, b) = (FactionId(1), FactionId(2));
+        m.world.relationships.entry((a, b)).or_default().diplomacy_options[NegotiationAction::War.option()] = 2;
+        m.world.relationships.entry((b, a)).or_default().diplomacy_options[NegotiationAction::Peace.option()] = 1;
+        m.world.relationships.entry((b, FactionId(3))).or_default();
+        let w = AiWorld::from_model(&m);
+        assert_eq!(w.diplomacy_options.len(), 2, "only relationships with a permission set");
+        for (x, y) in [(a, b), (b, a)] {
+            for o in 0..15 {
+                assert_eq!((w.may_propose(x, y, o), w.may_accept(x, y, o)), (m.may_propose(x, y, o), m.may_accept(x, y, o)));
+            }
+        }
+        assert!(!w.may_propose(a, b, NegotiationAction::War.option()));
+        assert!(!w.may_accept(b, a, NegotiationAction::Peace.option()), "b declines peace from a");
     }
 
     /// Review (0b-recruit): the AI kept its own recruit price (`units` #4 × its handicap) and ignored the unit

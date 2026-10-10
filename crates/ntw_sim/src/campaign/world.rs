@@ -36,7 +36,7 @@ impl PartialEq for Terrain {
 ///
 /// `rules` (game data from the DB) and `terrain` (the map's movement grid) are our own additions:
 /// they are data, not state, and are neither saved nor hashed.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CampaignModel {
     /// `CAMPAIGN_CALENDAR` (W3 §3.1, CONFIRMED).
@@ -58,6 +58,10 @@ pub struct CampaignModel {
     /// updated at each round end ([`super::deal_value::DealInflation::round_end`]), saved.
     #[cfg_attr(feature = "serde", serde(default))]
     pub deal_inflation: super::deal_value::DealInflation,
+    /// The values mods' rules keep ([`super::mod_state`]; DESIGN.md §3.3.1): empty in vanilla, saved
+    /// and hashed (an own save from before the field reads it empty).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub mod_state: super::mod_state::ModState,
     /// A battle waiting to be fought (the original's `PENDING_BATTLE` record, W3 §2; its content
     /// is not decoded). Set by an attack, cleared by autoresolve or a battle result.
     pub pending_battle: Option<PendingBattle>,
@@ -87,6 +91,44 @@ pub struct CampaignModel {
     pub negotiations: super::negotiation::Negotiations,
 }
 
+/// Equality over everything but [`CampaignModel::negotiations`]: the negotiation slot is a UI
+/// session, neither saved nor hashed. Every other field is compared, including `rules`, `terrain` and
+/// `last_autoresolve`, which are also neither saved nor hashed.
+impl PartialEq for CampaignModel {
+    fn eq(&self, other: &Self) -> bool {
+        // Destructured so a new field must be placed here on purpose.
+        let CampaignModel {
+            calendar,
+            rng,
+            world,
+            turn,
+            force_caps,
+            deal_inflation,
+            pending_battle,
+            pending_capture,
+            rules,
+            terrain,
+            last_autoresolve,
+            script_rngs,
+            mod_state,
+            negotiations: _,
+        } = self;
+        *calendar == other.calendar
+            && *rng == other.rng
+            && *world == other.world
+            && *turn == other.turn
+            && *force_caps == other.force_caps
+            && *deal_inflation == other.deal_inflation
+            && *pending_battle == other.pending_battle
+            && *pending_capture == other.pending_capture
+            && *rules == other.rules
+            && *terrain == other.terrain
+            && *last_autoresolve == other.last_autoresolve
+            && *script_rngs == other.script_rngs
+            && *mod_state == other.mod_state
+    }
+}
+
 impl CampaignModel {
     /// Builds a model from its parts with empty rules (no DB data) and no terrain. The turn has
     /// not started yet (see [`CampaignModel::start_campaign`]).
@@ -98,6 +140,7 @@ impl CampaignModel {
             turn: TurnState::default(),
             force_caps: ForceCaps::default(),
             deal_inflation: super::deal_value::DealInflation::default(),
+            mod_state: super::mod_state::ModState::default(),
             pending_battle: None,
             pending_capture: None,
             rules: Arc::new(CampaignRules::default()),
@@ -136,6 +179,10 @@ impl CampaignModel {
         h.u32(self.deal_inflation.factor.to_bits());
         h.u32(self.script_rngs.trait_rng.state);
         h.u32(self.script_rngs.ancillary_rng.state);
+        // Only when a mod keeps values, so a vanilla campaign hashes as before.
+        if !self.mod_state.is_empty() {
+            self.mod_state.hash_into(&mut h);
+        }
         self.turn.hash_into(&mut h);
         match &self.pending_battle {
             None => h.u32(0),
@@ -403,6 +450,11 @@ impl CampaignModel {
             h.u32(army.raw());
             h.u32(navy.raw());
         }
+        h.u32(w.deal_regions_received.len() as u32);
+        for (f, n) in &w.deal_regions_received {
+            h.i32(f.raw());
+            h.u32(*n);
+        }
         h.finish()
     }
 
@@ -614,9 +666,19 @@ pub struct World {
     pub portraits: Vec<super::portraits::CulturePortraits>,
     /// The original's own region base values (the campaign AI's `CAI_REGION_BASE_VALUE` beliefs,
     /// CONFIRMED layout, `analysis/ai/AI_RESEARCH.md` §4), by region, as the campaign source found
-    /// them. A region without one gets the formula (`ntw_ai`).
+    /// them. A region without one gets the formula
+    /// ([`super::region_value::stored_or_formula`]).
     #[cfg_attr(feature = "serde", serde(default))]
     pub region_base_values: BTreeMap<RegionId, i32>,
+    /// The regions each human faction has received in accepted deals (faction `+0x938`, getter
+    /// `0x008E66A0`, raised by `0x008E2B70` from the regions record's accept `0x00C18BF0`; saved
+    /// in the `FACTION` record from version 0xB, reader `0x0087B7EE`, writer `0x00893B22`;
+    /// CONFIRMED). It makes each later region demand of a human dearer
+    /// ([`super::deal_value::human_demand_scaled`]). A faction without an entry has 0.
+    /// PROVISIONAL: not yet read from an original save (the record's child index is not found),
+    /// so a loaded game starts every faction at 0.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub deal_regions_received: BTreeMap<FactionId, u32>,
 }
 
 /// The campaign AI keys stored with a faction ([`World::ai_keys`]).

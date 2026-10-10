@@ -64,6 +64,13 @@ pub(crate) fn fistp(v: f32) -> i32 {
     if (-2_147_483_648.0..2_147_483_648.0).contains(&v) { v as i32 } else { i32::MIN }
 }
 
+/// x87/SSE `cvttss2si` of an f32: truncation toward zero, and the integer indefinite 0x80000000 for a value
+/// out of the int range or NaN (Rust's `as i32` saturates instead).
+pub(crate) fn cvttss2si(v: f32) -> i32 {
+    let v = v.trunc();
+    if (-2_147_483_648.0..2_147_483_648.0).contains(&v) { v as i32 } else { i32::MIN }
+}
+
 /// The chain-keyed cost modifier in a region effect set: bonus type 2, `mod_cost` (id 0), qualified by the
 /// chain (`0x00E1EF10(chain, 0)` → `0x00E23DA0(2, chain, 0, 0)`).
 fn cost_modifier_in(set: &super::effects::EffectSet, chain: &str) -> f32 {
@@ -453,8 +460,8 @@ pub enum CommandError {
     Unsupported(&'static str),
     /// A deal command with no negotiation open.
     NoNegotiation,
-    /// The deal is refused (`CampaignModel::ai_refuses_deal`: the AI evaluation for technologies, the
-    /// PLACEHOLDER rule for a deal with regions).
+    /// The deal is refused (`CampaignModel::ai_refuses_deal`: the AI's evaluation of the regions and
+    /// technology records).
     DealRefused,
     /// A technology key the `technologies` table does not have.
     UnknownTechnology(String),
@@ -1311,7 +1318,7 @@ impl CampaignModel {
         let index = r.recruitment_queue.iter().position(|i| i.id == item).ok_or(CommandError::UnknownRecruitmentItem(item))?;
         let item = self.world.regions.get_mut(&region).expect("checked").recruitment_queue.remove(index);
         // A full refund (CONFIRMED): the cancel command calls the cancel path with 1.
-        self.cancelled_recruitment_items(region, std::slice::from_ref(&item), |_| true);
+        self.cancelled_recruitment_items(region, std::slice::from_ref(&item), |_, _| true);
         Ok(Vec::new())
     }
 
@@ -1321,13 +1328,13 @@ impl CampaignModel {
     /// [`super::population::RecruitmentPopulation::credited`]); each item `refunded` selects (the flag
     /// the caller passes, 1 = refund) has its item vtable +0x1C (`0x00B5C060` land, `0x00B5C0A0` naval)
     /// credit its stored cost (item +0x20, the entry cost the queue command charged, `0x00AF3F80`) as
-    /// income category 3, whose converter passes it unchanged ([`super::treasury::refund`]: 32-bit
+    /// income category 3, whose converter passes it unchanged ([`super::treasury::credit`]: 32-bit
     /// wrapping), to the region's owner (`0x00B2B7C0`: the queue's region +0xF4).
     pub(crate) fn cancelled_recruitment_items(
         &mut self,
         region: RegionId,
         items: &[super::world::RecruitmentItem],
-        refunded: impl Fn(&super::world::RecruitmentItem) -> bool,
+        refunded: impl Fn(&super::rules::CampaignRules, &super::world::RecruitmentItem) -> bool,
     ) {
         let population = super::population::RecruitmentPopulation::of(&self.rules);
         let Some(r) = self.world.regions.get_mut(&region) else {
@@ -1336,12 +1343,12 @@ impl CampaignModel {
         };
         r.population = population.credited(r.population, items.len());
         let owner = r.owner;
-        let refund = items.iter().filter(|i| refunded(i)).fold(0i32, |sum, i| sum.wrapping_add(i.cost));
+        let refund = items.iter().filter(|i| refunded(&self.rules, i)).fold(0i32, |sum, i| sum.wrapping_add(i.cost));
         if refund == 0 {
             return;
         }
         match self.world.factions.get_mut(&owner) {
-            Some(f) => super::treasury::refund(&mut f.treasury, refund),
+            Some(f) => super::treasury::credit(&mut f.treasury, refund),
             None => log::warn!("region {region:?}: its owner {owner:?} has no faction record; a recruitment refund of {refund} was dropped"),
         }
     }
@@ -1639,7 +1646,7 @@ impl CampaignModel {
 
     /// `CCQ_BUILDING_CANCEL_CONSTRUCTION` (handler `0x00931C30` → `0x00B1A790` with the command's refund flag 1,
     /// CONFIRMED): the slot's item is deleted and, when its stored cost (item +0x14) is not 0, that cost is
-    /// credited back ([`super::treasury::refund`]), for a construction and a repair alike, whatever was charged.
+    /// credited back ([`super::treasury::credit`]), for a construction and a repair alike, whatever was charged.
     /// The credit passes the income category-3 converter, which passes it unchanged (CONFIRMED, see treasury.rs).
     fn cancel_construction(&mut self, region: RegionId, slot: SlotRef) -> Result<Vec<CampaignEvent>, CommandError> {
         let r = self.world.regions.get(&region).ok_or(CommandError::UnknownRegion(region))?;
@@ -1648,7 +1655,7 @@ impl CampaignModel {
         let index = r.construction.iter().position(|c| c.slot == slot).ok_or(CommandError::BadSlot(slot))?;
         let item = self.world.regions.get_mut(&region).expect("checked").construction.remove(index);
         if let Some(f) = self.world.factions.get_mut(&owner) {
-            super::treasury::refund(&mut f.treasury, item.cost);
+            super::treasury::credit(&mut f.treasury, item.cost);
         }
         Ok(Vec::new())
     }

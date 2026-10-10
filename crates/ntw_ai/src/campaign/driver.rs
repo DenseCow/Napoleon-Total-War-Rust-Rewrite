@@ -46,13 +46,12 @@ pub fn context_for(model: &CampaignModel, campaign_key: &str) -> TurnContext {
 }
 
 /// A context from the scripts' state: campaign key, humans (the model's, plus the local faction)
-/// and what the scripts told the AI (`add_restricted_unit_record`,
-/// `force_diplomacy`, and the invasion switch; the restricted building levels are the model's own).
+/// and what the scripts told the AI (`add_restricted_unit_record` and the invasion switch;
+/// `force_diplomacy` permissions and the restricted building levels are the model's own).
 pub fn context_from_script(state: &ScriptState) -> TurnContext {
     let mut ctx = context_for(&state.model, &state.campaign);
     ctx.humans.extend(state.faction_id(&state.local_faction));
     ctx.hints.restricted_units = state.restricted_units.clone();
-    ctx.hints.diplomacy_options = state.diplomacy_options.clone();
     // `set_campaign_ai_force_all_factions_boardering_humans_to_have_invasion_behaviour(bool)` is
     // a logging stub in ntw_script; its last call in the log wins (INFERRED: a global switch).
     const INVADE: &str = "set_campaign_ai_force_all_factions_boardering_humans_to_have_invasion_behaviour(";

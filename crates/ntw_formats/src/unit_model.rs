@@ -762,9 +762,18 @@ pub struct BattleEntity {
     pub skeleton: String,
     pub walk_speed: f32,
     pub run_speed: f32,
+    /// Columns 5 and 6: acceleration and deceleration (m/s²; infantry 2.4 / 5, heavy horse
+    /// 2.5 / 6). CONFIRMED: the record builder `0x00E52F40` copies columns 3..11 in order to the
+    /// entity record `+0x1C..+0x3C` (column 5 at `+0x24`, 6 at `+0x28`), the soldier set-up
+    /// (`0x0061CB90` -> `0x007E4FB0`) puts them in the locomotive's `+0x158` / `+0x100`, and the
+    /// locomotion step `0x00819770` bounds each 0.1 s tick's speed change by them
+    /// (UNITS_TERRAIN_FIDELITY.md §1.10).
+    pub acceleration: f32,
+    pub deceleration: f32,
     pub charge_speed: f32,
-    /// Column 12: the entity's radius in metres (men 0.35, horses 2.0, guns 1.5; INFERRED from the
-    /// values; the garrison slot spacing reads it, `0x00E619D0`).
+    /// Column 12: the entity's radius in metres (men 0.35, horses 2.0, guns 1.5). The record
+    /// builder `0x00E52F40` copies it to `+0x4C`, the field the garrison slot spacing reads
+    /// (`0x00E619D0`) and the soldier set-up passes as the locomotive's radius.
     pub radius: f32,
 }
 
@@ -797,6 +806,8 @@ impl BattleTables {
                 skeleton: cell(&r, 2),
                 walk_speed: f(&r, 3),
                 run_speed: f(&r, 4),
+                acceleration: f(&r, 5),
+                deceleration: f(&r, 6),
                 charge_speed: f(&r, 7),
                 radius: f(&r, 12),
             };

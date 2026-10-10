@@ -1005,7 +1005,7 @@ faction and liberation target.
   `an_ai_repair_is_capped_at_the_treasury_and_free_in_debt`, `cancelling_a_repair_credits_its_stored_cost`,
   `walls_round_trip_in_both_slot_shapes`, `a_treasury_below_zero_shows_every_card_affordable_but_the_command_refuses`,
   `a_negative_cost_shows_unaffordable_and_is_paid_out_only_from_a_negative_treasury`.
-- Recruitment, the unit pool, treaties, upkeep and script treasury changes keep their own arithmetic (BACKLOG §0-B).
+- Every other treasury change (the unit pool, treaties, the round settle, the script) is in §Treasury changes.
 - Checked (`ECON_BUILDCOST`): 445 of 452 queued items in the 19 saves of the vanilla set, the same as before the
   change (the saves hold no item of the newly differing cases). The 7 misses are items queued while a timber camp
   counted differently (the cost is fixed when queued), e.g. the Bavarian items of `auto_nr4_t4`.
@@ -1315,6 +1315,52 @@ garrison join. Round 15's read of `0x00B71FB0` (1523 bytes, the queue tick) sett
 - **Open.** The AI's research choice (see AI_RESEARCH.md §7 item 8); the UI's tech availability bit in the construction
   panel (0-E); the save writer must write `techs[]` #1 / #2 / #3 (save-compat). `0x008DD450`'s callers
   (`0x008CDD40` / `0x008CDD50` / `0x008F3C40`) are not read.
+
+## Treasury changes (worker treasury-rules 2026-10-10, static trace, CONFIRMED unless tagged; code `treasury.rs`)
+- **Storage and the two movers.** The treasury is economics (faction +0xAC) +0x3F4, an i32. The charge
+  `ChargeFactionTreasuryAmount` `0x00BAF500(amount, category)` is a plain wrapping `-=`, the credit
+  `CreditFactionTreasuryAmount` `0x00BB3810(amount, category)` a plain wrapping `+=`; the category only feeds the
+  spending/income statistics (its converters are identity). Neither tests the balance: every money test is the
+  caller's. The model's one path: `treasury::pay` / `credit` (wrapping), `script_credit`, `settle_round`; the
+  bankruptcy reset to 0 is the one plain store.
+- **Round end.** The cannot-pay flag `0x00BBC7D0` is `treasury + income < expenses`, 32-bit wrapping sum, signed
+  compare; the settle `0x00BABE30` adds `income − expenses` (wrapping) at `0x00BAC0B3` when the flag is clear.
+  Income `0x00BBE970` and expenses `0x00BBE910` are plain int sums of the economics lines. So a treasury near
+  `i32::MAX` wraps negative in the flag test and the faction is flagged bankrupt (1:1, unreachable in play).
+- **Script `treasury_mod`** (`0x0097BAD0`): the amount is a Lua number read as f32, rounded by `0x010556D0` (FISTP,
+  half to even); `0x00BB3810(amount, 3)` only when the faction is found and the rounded amount is > 0. A negative or
+  zero change is ignored.
+- **Capture money** (`0x00B541E0`): an option with money (+0x10 ≠ 0) credits it at `0x00B5431C` (category 0).
+- **Unit pool.** The hire `0x00A1B8F0` charges `0x00BAF500(cost, 2)` only when the faction is human (+0x6E0); an AI
+  hires free, and neither side is money-tested there. The panel's row flags `0x00A1BB20`: bit 1 = treasury < cost
+  (signed), bit 0 = the faction's generals ≥ its maximum, bit 2 = no room; `IsRecruitable` is flags == 0
+  (`0x009DD3AF`). Bits 0 and 2 are not modelled (PROVISIONAL, BACKLOG). The `CanRecruitCommander` gate
+  `0x009D1CD0` tests no money: false for a faction without a record (the rebels), else true when a byte +0x1B7 of
+  the object reached through force +0x74 is 0 (meaning UNKNOWN; the model keeps its turn + candidate stand-in).
+- **Promotion** in the field (`0x008E1C20`) charges every faction, human or AI, with no money test (the value it
+  charges stays PROVISIONAL, §Unit pool in the code).
+- **State gift** (deal component `0x00C4B440`, vtable entry `0x01381ECC`): charges the giver `0x00BAF500(amount, 3)`
+  (a negative amount charges the other side |amount|), then `0x00B44590` raises the receiver's attitude. **The
+  receiver is credited nothing**: the money leaves the game. No money test in the exe; the original Lua
+  `InitialiseStateGift` (`diplomacy_panel.luac`) greys the values above `MaxPlayerPaymentAllowed`. The model refuses
+  an amount ≤ 0 (the panel offers only `state_gift_values`).
+- **Deal payment** (component `0x00C18A70`, vtable entry `0x01381F18`; amount +0x14, turns +0x18): turns == 1 is the
+  one-off payment, payer charged `0x00BAF500(amount, 3)` and payee credited `0x00BB3810(amount, 1)` (a negative
+  amount runs the other way); any other length adds a regular payment through `0x00B54FC0` (INFERRED: on the payer's
+  relationship record towards the payee, via `0x00B55010(amount, turns)`). When both sides are human the exe also calls
+  `0x008F56C0` on each with ±amount (UNKNOWN, not modelled). Model: `treaties::one_off_payment`; the panel's lump sum
+  (`turns == 0` in `NegotiationItem::Payment`) maps to it (it was a state gift, which credited the receiver).
+- **Regular payments and protectorate tribute** are economy lines summed into the round settle, so the model moves
+  them wrapping (`treaties::diplomacy_money`).
+- **Callers not mapped yet** (BACKLOG): credit `0x00A06050` (mission/event reward, category 3), `0x009DB270`,
+  `0x009DB7C0`, `0x00B1A9F0`, `0x00B1AAB0`, `0x009318B3`, `0x00BB33A0`; charge `0x008EEB70`, `0x00B4E4C0`,
+  `0x00B0A300`.
+- **A queued item whose commander dies** (BACKLOG §0-B). The character destructor `0x0099D2D0` notifies its observer
+  list (+0xD4); a recruitment item queued through a commander observes him, and its listener `0x00B57F40` clears
+  the item's target (+0x18) and the bool +0x24. The item stays in its queue, keeps its cost and turns, and is not
+  refunded; when it finishes, `0x00B71FB0` hands it to the reinforcements only while +0x18 is set, so it spawns in
+  its settlement like an untargeted item. Model: `characters::drop_recruitment_target`, called from
+  `character_dies` and from the admiral hire's captain removal. The +0x24 bool is not modelled (save writes it true).
 
 ## Bankruptcy (0x00BBC7D0 / 0x00BABE30 / 0x00BA2030 / 0x008AE710, CONFIRMED; code `economy::settle_round`)
 - Flag when `treasury + income < expenses` (computed in the round-end pre-pass). A bankrupt faction's treasury is set to
@@ -1723,7 +1769,7 @@ halves; the upper two minus 1): total ≤ −65 hostile (0), ≤ −22 (1), ≤ 
 | Embargo `0x00B28DB0` | trade broken first; #27 = 10 | `trade_embargoed` set | — |
 | Military access `0x00B44550` | #3 = −1 or += turns, #24 = #3, #15 = 10, #25 = 0 | — | — |
 | Cancel access `0x00B67BD0` | #26 += 50 − 10e / 60 − 6e / 70 − 7e/2 / 90 − 5e/2 (granted 5 / 10 / 20 / other, e = #25), #3 = 0; manager +0x20 += a third (`0x00B67B20`) | — | — |
-| State gift `0x00B44590` | — | `state_gift` += trunc((100 − current) × x × 0.01), x = min(100, `state_gift_multiplier_linear` × m + `…_quadratic` × m² / √(GDP sum)) | — |
+| State gift `0x00B44590` | giver charged, no credit to the receiver (`0x00C4B440`, §Treasury changes) | `state_gift` += trunc((100 − current) × x × 0.01), x = min(100, `state_gift_multiplier_linear` × m + `…_quadratic` × m² / √(GDP sum)) | — |
 | Protectorate `0x00B105C0` | stance 4, alliance factor; the protectorate's other ties broken | stance 3; the patron's income line = tribute (`0x00BBCD00` = a faction value / 5, not read) | — |
 
 **Per-turn update** `0x00B29100` → `0x00B29170`, called from the faction's round-end economy `0x008BC650` after its
@@ -1973,6 +2019,52 @@ further here).
   - regular payments move their amount from the payer to the payee each turn (economy line 0);
   - a protectorate pays its patron a fifth of its revenue (`0x00BBCD00` = Σ three economics lines / 5; the three lines
     are INFERRED to be taxes, trade and other). These are economy lines 6 and 2, kept in #8 / #9.
+
+### Scripted diplomacy permissions: `force_diplomacy` (§0-E, 2026-10-10; CONFIRMED by disassembly)
+
+The permissions are the relationship's u32[14] at +0x7EC (save #18; option order = `DIPLOMACY_OPTIONS`). Code:
+`CampaignModel::{set_diplomacy_option, diplomacy_option, may_propose, may_accept}` (ntw_sim negotiation.rs) and the
+bit rules in details.rs. The panel, the deal rules, the AI snapshot and the save all read these.
+
+- **Script handler** `SetDiplomacyOptionFromScript` `0x009792D0` (registered at `0x01458154`). It takes
+  `(a, b, option, offer, accept)`.
+  - Arguments are read last-first: 0x01055840 reads a bool from stack −1 and pops it, so accept is read, then offer;
+    0x01055760 reads the three strings.
+  - A non-boolean or non-string argument is a Lua error, and nothing is stored.
+  - `a` and `b` are looked up by exact key in the campaign's faction map (`+0xF5C`, `0x00955B70`). There is no
+    "all" form and no culture form. An unknown key stores nothing and returns 0.
+  - The value is `!accept + 2·!offer` (`0x009793C8`..`0x009793DE`).
+  - The option is matched exactly against 14 literal keys (case-sensitive, `0x0044F000`). An unknown key stores
+    nothing.
+  - It writes only a's relationship towards b, through a's diplomacy manager (+0x528) and
+    `FindDiplomacyRelationshipByTarget` `0x00B64C50`. It is not symmetric.
+  - The store goes through `SetRelationshipDiplomacyOption` `0x00B28670`, the only writer.
+- **Readers.** All go through `GetRelationshipDiplomacyOption` `0x00B27FE0`:
+  - offer bit (2|3), when the owner may not propose:
+    - the negotiation records are forbidden (`0x00BF5CB3`);
+    - the AI's intention filter (`IsDiplomacyProposalBlockedByScript` `0x00CAD070` / `0x00C73F50`, from
+      `0x00CB8200`);
+    - the trade-agreement UI check at `0x009F33E1`;
+  - peace is possible only when the value is ≤ 1 (`0x00C1A730`);
+  - accept bit (1|3), when the owner declines the option from the target:
+    - the AI deal evaluator (`0x00AA5ED0`);
+    - the counter-offer filter (`IsDiplomacyAcceptanceBlockedByScript` `0x00CAD0E0` / `0x00C74410`, from
+      `0x00CC58C0` / `0x00CE4A30`);
+  - deal goals (`0x00CCB150`) need both: the proposer's offer bit and the recipient's accept bit;
+  - counter-offer items (`0x00C1E770`) go through the action → option table `0x01459080`;
+  - `0x00C561C0` tests == 3.
+- **Pirates.** After loading, `0x00B5BD70` (from `0x008BAF20`) sets every option to 3 on each relationship whose
+  owner passes `IsPiratesFaction` `0x008CEE20` (key == "pirates"), through `0x00B28690`. Ours does this in the
+  importer (`ntw_campaign` world.rs).
+- **ORIGINAL BUG** (`0x00B64C50`): on a miss, the lookup returns the manager's first relationship (stride 0x848).
+  So `force_diplomacy(a, a, …)`, or a `b` with no relationship entry, overwrites the option on an unrelated
+  relationship. Ours refuses it and logs the refusal (`set_diplomacy_option` returns false). Like the exe, ours never creates a relationship there: a pair with none (e.g. an open-format map without the full matrix) is refused too.
+- **Ours.**
+  - The AI's peace gate is `may_propose(me, other, peace) && may_accept(other, me, peace)`, the deal-goal rule.
+    The war gate is `may_propose(me, other, war)`.
+  - The save writes #18 from the model.
+  - Not yet modelled: the AI intention / counter-offer filters as separate passes (`0x00CB8200`, `0x00CC58C0`),
+    `0x00C561C0` (== 3 → `0x008CE140`) and the trade UI check `0x009F33E1`.
 
 **Not modelled / open:** the AI's decisions (accepting deals, joining an ally's war: §6); `allied_with_enemies`
 (`0x00B0CE30`, callers not traced); the spy / sabotage / assassination factors (`0x00B11ED0` .. `0x00B12010`: the agent

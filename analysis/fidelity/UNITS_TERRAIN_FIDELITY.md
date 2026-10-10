@@ -522,7 +522,7 @@ Files this round: `crates/ntw_formats/src/verlet.rs` (new), `crates/ntw_formats/
     the flagpole piece in bone 3's frame.
 - Round 2 done (merged with main at ed48cad; workspace build, test and clippy pass with no new warnings):
   1. `groupformations.bin` reader (`ntw_formats::group_formation`, all 26 templates, install test
-     `group_formation_install`) and the original's default deployment (§5.2): template choice, greedy assignment,
+     `group_formation_install` (now in ntw_sim/tests)) and the original's default deployment (§5.2): template choice, greedy assignment,
      element layout and pull-back into the area. The test armies use it (`setup::deploy_with_templates`); historical
      battles keep their file positions, as the exe does. It does not overlap 0-A's movement or formation work: it only
      sets start positions.
@@ -606,10 +606,10 @@ draw per man in spawn order.
 `0x006611E0` (death while moving, slots `DEATH_MOVING_1..12`) and `0x005B7B20` (mounted attack while moving) loop over a
 slot range; for each slot with clips: clip = getter(slot, `+0x1E0`), its speed = root displacement at t = 0.1 s
 (`0x010F1160`, frame lerp) × 10; keep the slot with the smallest `|clip speed − entity speed|` (entity speed at
-`+0x14C`) and return `rate = entity speed / clip speed`. The walk/run (`WALK_TRAINED_1..5`) code was not found, but
-the clip files are authored at those speeds (`MUS_T_Walk_100/127/173`, `Jog_219/313`), so the same rule is INFERRED.
-Code: `pick_level` per frame from the unit's speed over its last moving model tick(s) (`view::GroundSpeed`, the
-model's equivalent of the entity speed `+0x14C`); the unit's animation clock runs at that rate. Until 2026-10-07 the
+`+0x14C`) and return `rate = entity speed / clip speed`. Walk / run levels do not use this rule: they follow the
+locomotion graph (§1.10: up at midpoints, down at quarter points; `0x007CEAA0` / `0x007CE840`, CONFIRMED).
+Code: each figure's level comes from the unit's speed over its last moving model tick(s) (`view::GroundSpeed`, the
+model's equivalent of the entity speed `+0x14C`), through `view::on_levels` / `on_ladder` (§1.10). Until 2026-10-07 the
 speed was smoothed from the per-frame displacement, which swings every 0.1 s tick because the model only moves units on
 ticks: the men switched level and rate several times a second (the walking jitter, first bad commit `e5c08bcb`).
 Since 2026-10-08 the speed is observed after every model tick (`view::observe_ticks`, `FixedUpdate`), so a frame
@@ -651,7 +651,7 @@ formula (§1.5); alternatives by selection number (§1.3). One-shots keep their 
 replaced by stance 4 when the unit's virtual function `+0x1B0` returns 0 or 1. That function is **still not named**;
 §9.6 closes the value set and refutes the training level from data. Not used in code yet.
 
-### 1.9 Clip changes: the display blend and phase (CONFIRMED rule; gait-blend, 2026-10-08)
+### 1.9 Clip changes: the display blend and phase (CONFIRMED rule; gait-blend, 2026-10-08; gait-blend2, 2026-10-09)
 User report: in battle the walk -> run and run -> walk change snapped from one clip to the other. Traced statically:
 - **Two layers.** The sim entity update (`0x0066CE00`, once per 0.1 s tick) steps a frame counter (`+0x1C0`) through a
   clip sampled at 10 frames/s (the clip object's `+0x50` = round(anim duration x 10), `0x00E4F4D0`) and moves the man
@@ -683,11 +683,36 @@ User report: in battle the walk -> run and run -> walk change snapped from one c
   display scale (`+0xB0`), with no clamp; a transition clip (kind 3, `WALK_TO_RUN` ...) by speed over the lerp of its
   from / to clips' root speeds (clamped by `0x01318048` / `0x01318060`, not read), and at its end the to-slot clip
   follows with no blend.
-- **UNKNOWN (not traced):** which slot the display picks each frame. A state graph on the display (`+0xCC` / `+0xD0`,
-  transitions tested by predicate objects through their vtables) chooses it; the walk / run thresholds and whether and
-  when the vanilla `WALK_TO_RUN` (7 lines) / `RUN_TO_WALK` (8 lines) clips play live there. Debugger sitting: break on
-  `0x007725D0`'s clip-change store (display `+0xD4` written) while a unit is ordered to run then walk, and log old /
-  new slot (clip `+0x04`) and the state node (`+0xD0`).
+- **Which slot the display picks: the locomotion graph (CONFIRMED, gait-blend2 2026-10-09; §1.10).** The graph on the
+  display (`+0xCC` graph, `+0xD0` node) is static data; §1.10 has the nodes, edge rules and slot tables. A **transition
+  clip** (kind 3) is entered in one of two ways: out of the graph's node-0 slot (STAND) at once, from 0 with the line's
+  blend (store `0x00773D18`); from a loop on the frame the loop's cycle wraps (its time mod its length after the
+  frame's advance is at most the one before it; `[ESP + 0x118]` is the time before the advance, `0x00772CC0` /
+  `0x00773CCF`), at the phase past the wrap, drawn at once (store `0x00773D5C`, blend time 0); until then the loop goes
+  on. The wait holds only while the clip shown is the from-loop's (CONFIRMED, round 2 of the gait-blend2 review,
+  2026-10-10): at `0x00773C83` the transition node's from-slot `+0x30` is compared with the shown node's
+  (`[display +0xD4]`) slot `+0x4`; on a mismatch the display takes the generic clip change at once (`0x00773D85`:
+  the same node skips to `0x00774041`, else `+0xDC` / `+0xE0` are zeroed and the clip changes with the usual phase
+  carry and blend). The display keeps one clip node and one clip time; there is no separate graph clock. Ours
+  (`view::on_ladder`): the wait only when the figure's last clip is the from-loop's, else a usual change (the frame a
+  Ready / Melee action loop ends); while an action loop is drawn the ladder skips its transitions and steps between
+  loops (PROVISIONAL, ours: in the exe the graph's clip is the one shown, so the case does not arise there). Its rate is speed over the lerp of its from-
+  and to-slots' root speeds by the fraction played (at least 0.1 m/s), held to 1..10 (the constants `0x01318048` /
+  `0x01318060` the old notes left unread). At its end its to-slot loop follows at the time past the end, drawn at once
+  (store `0x007740A9`, blend 0). Store `0x00773FF7` only ever stored stand and idle clips in the sitting. **Debugger
+  sitting 2026-10-09** (original, custom battle, the user ordering infantry then cavalry walk -> run -> walk; stores
+  A `0x00773D18`, B `0x00773D5C`, C `0x00773FF7`, D `0x007740A9`): horses climbed STAND -> STAND_TO_WALK (A) -> WALK
+  (D) -> WALK_TO_TROT (B) -> TROT (D) -> TROT_TO_CANTER (B) -> CANTER (D) -> CANTER_TO_GALLOP (B) -> GALLOP (D), the
+  node `+0xD0` the same within each pair (static `0x0150CB50`, `0x0150BFBC`, `0x0150CB98`, `0x0150C258` = nodes 1, 4, 8,
+  12). "Some went gallop -> canter_to_gallop again on slowing": the horse table has **no step-down clips** (nodes 7, 11,
+  15 map to no slot), so a slowing horse goes loop to loop with a blend; entering CANTER_TO_GALLOP again needs the
+  speed back above the canter / gallop midpoint (7.72 m/s), e.g. a rider catching up his place; a transition never
+  plays backwards (its rate is at least 1). No infantry or rider locomotion clip reached the four stores: for riders
+  the static trace agrees (a rider display's graphs, `0x007A7120` -> slot tables `0x0133D4E0` / `0x0133D5A8`, have only
+  stand, step and turn slots; what moves a rider's legs with his horse is not traced, ours pairs `RIDER_<mount slot>`);
+  for men it does not (the man display's graphs, `0x007A7190`, carry `WALK(_TRAINED)_1..5` / `RUN(_TRAINED)_1..5` and go
+  through the same function and stores). Next sitting: break on `0x00773D18` and `0x00773D5C` with the display's vtable
+  `0x01341E20` (a man) and log clip `+0x04` / `+0x1C`, during an infantry walk -> run order.
 - Ours (`battle/view.rs` `ClipBlend`, `skin::Fade`): every figure (man, mount pair, standard bearer) keeps its own
   loop clip and clip time, as each exe display does. A loop clip change starts a blend over the new line's blend-in
   time (`FragmentClip::blend_in`, the one place the 1.0 s default lives) from the frame the figure drew last frame,
@@ -695,40 +720,295 @@ User report: in battle the walk -> run and run -> walk change snapped from one c
   clip's own root speed (`Anim::root_speed` > 0.1 m/s; a rider pair carries when either clip moves); else the figure
   restarts at its own phase offset. A figure not drawn the frame before (it or its unit skipped; frame-numbered,
   `SkinState::frame`), or D = 0, snaps, and a skip ends a running cross-fade (the skipped frame drew the slot without
-  it). The mount clip is picked again every frame (in melee the man keeps his idle clip while the horse follows the
-  gait; round-2 review: it used to change only with the man's clip, so a horse walked on its stand clip), and a mount
-  change alone updates the pair's root speed for the next phase carry (round-3 review).
-  PROVISIONAL (ours): (0) a rider and his mount share one blend, so a mount clip changing on its own snaps (the exe
-  blends each display on its own). (1) the GPU keeps at most **two** poses frozen at clip changes, with their
+  it). The rider and the mount blend **each on its own** (`PartFade` per part, each over its own line's blend time,
+  the mount's from the mount fragment): a mount clip changing alone (in melee the man keeps his idle clip while the
+  horse follows the gait) cross-fades the horse only. The pair keeps one clip time (the paired clips have the same
+  frame count). A ladder step (§1.10) can start the clips at a given time, drawn at once or cross-faded
+  (`LoopClip::start`), as the exe's stores do.
+  PROVISIONAL (ours): (1) the GPU keeps at most **two** poses frozen at clip changes per part, with their
   weights, not the previous frame's blended pose, so the new clip's earlier frames do not linger as in the recursive
   blend. A change is never delayed: it freezes the pose drawn last at the old clip's weight (dropped when 0, a change
   on the frame after a change), keeps the older pose, and of three poses drops the lightest and scales the other two
   up (a jump of that weight, only on a third change within one blend time); all are gone one blend time after the
   last change. (An earlier "third change waits" rule stuck for ever after back-to-back changes: round-2 review.)
-  (2) Bone matrices
-  are lerped in model space (no quaternion slerp). (3) **The display-root blend is not implemented**: the exe lerps
-  the display position and heading at e / Dr (Dr 0.5 s, `0x01318038`); our men stand at their formation places, so
-  nothing is blended there. (4) One-shots (fire, reload, melee, deaths) are not blended, and a one-shot drawn ends a
-  running cross-fade. (5) A standard bearer playing the kit's per-gait fallback clip (no levels) snaps. Not done
+  (2) Bone matrices are lerped in model space (no quaternion slerp). Neither showed in the logged runs below as a
+  visible step. (3) The exe also lerps each display's root at e / Dr (Dr 0.5 s, `0x01318038`). Ours has no display
+  root of its own to lerp: a figure stands at its formation place, which moves with the unit's drawn pose
+  (`DrawnPose`); loop clips have their root motion removed, so a clip change moves no root; the root bone's own offset
+  is part of the pose and fades over D (equal to Dr for the 0.5 s vanilla gait lines). (4) One-shots (fire, reload,
+  melee, deaths) are not blended, and a one-shot drawn ends a running cross-fade. (5) A standard bearer playing the
+  kit's per-gait fallback clip (no levels) snaps. Not done
   (Polish/BACKLOG): the gear-window override `0x00E6DB90` for mod clips with `*_FOOT_GEAR_UP_*` events.
   Cost (hot path): the per-frame figure upload stays at 4 words per slot; only fading figures get a 32-byte fade entry,
   written by the render world into the start of a fade buffer (`skin::FadeUpload`, partial `write_buffer`), so a frame
   without a cross-fade uploads nothing extra. Release bench of the upload path (serialise + render-world copy +
   staging copy, best of 5 x 3000, this machine): 13,000 slots (a 20 v 20 unit battle at 160 men, man + mount slots)
   4 words 0.010 ms vs 0.018 ms for the earlier 8-word slots; 52,000 slots 0.065 ms vs 0.447 ms; the fade entries for
-  every slot fading at once 0.011 ms (13,000) / 0.083 ms (52,000), for a tenth of them 0.001 / 0.005 ms. Checked in a
-  debug `--battle` AI run (NAPOLEON_AI_SHOT at 60 s): shaders build, the fade buffer is written (up to 20 KB a frame),
-  the picture is unchanged. A 120 s debug AI run of `NHB_Austerlitz` after the round-2 fixes (`NAPOLEON_AI_SPEED=2`,
-  each unit's man 0 logged by a temporary print): 251 clip changes, 235 cross-fades ended, each on the first frame
-  with e >= D (D 0.25 s on 190, 0.5 s on 41, 1.0 s on 4; debug frames up to 0.5 s of battle time), none ran on. Speed
-  levels flip between neighbours near a level boundary (median 3.7 s between a unit's changes, a tenth under 0.46 s,
-  once 0.08 s; `pick_level` by ground speed; the exe's slot choice is the UNKNOWN state graph above). A foot soldier's unused mount slot reuses
-  the man's fade entry. Tests: `battle::view` (weights 1, 0.75, 0.375, 0.09375, 0 for D 0.5 s at 8 frames/s; 1.0 s
-  fallback; per-alternative blend time; a figure whose clip did not change keeps its time; a change mid-fade keeps
-  the older pose; back-to-back and 3-4 quick changes end on the newest clip within one blend time; the lightest of
-  three poses dropped; the mount clip followed while the man's stays; a mount change alone updates the pair's speed; the phase carries by the old clip's own root
-  speed; a figure not drawn last frame snaps; a skip mid-fade ends the fade; one-shots; fade numbering and the pole bone posed as the shader does) and
+  every slot fading at once 0.011 ms (13,000) / 0.083 ms (52,000), for a tenth of them 0.001 / 0.005 ms. The graph
+  step per figure (§1.10) allocates nothing: a few compares on the level speeds.
+  Tests: `battle::view` (weights 1, 0.75, 0.375, 0.09375, 0 for D 0.5 s at 8 frames/s; 1.0 s fallback;
+  per-alternative blend time; a figure whose clip did not change keeps its time; a change mid-fade keeps the older
+  pose; back-to-back and 3-4 quick changes end on the newest clip within one blend time; the lightest of three poses
+  dropped; the mount clip followed while the man's stays; the mount blends its own changes; a mount change alone
+  updates the pair's speed; the phase carries by the old clip's own root speed; a figure not drawn last frame snaps; a
+  skip mid-fade ends the fade; one-shots; fade numbering and the pole bone posed as the shader does; a horse climbs
+  its ladder through the transition clips; a man changes graph with the order and level with hysteresis) and
   `unit_animation::level_clips_carry_the_lines_blend_in_time`.
+
+### 1.10 Locomotion: speed changes and the locomotion graph (CONFIRMED; gait-blend2, 2026-10-09)
+User report after §1.9: infantry smoother, **cavalry still abrupt**. Cause found: ours changed a unit's speed in one tick
+(a heavy horse 2.6 -> 10 m/s) and picked the closest level, so a horse went from its walk straight to the gallop; the
+exe gathers speed at the entity's acceleration and climbs a ladder of gaits through transition clips.
+- **Speed change (`0x00819770`, the locomotion step, once per 0.1 s tick).** Current speed = the speed measured last tick
+  (`+0x194`, from the move, `0x007F0260`) clamped to 0..max (`+0x10C`); the wanted speed is `+0x148` (set by the
+  locomotive's virtual `+0x84`) times the speed multiplier `+0x1A4` (fatigue and ground column from `0x006543D0`,
+  then the slope factor). Rising, the speed changes by at most `+0x158` x `+0x1A4` x 0.1; falling, by at most `+0x100`
+  x 0.1. The step is that speed x 0.1 along the heading (`+0xD4`, integrated by `0x007F08F0`, which also adds the
+  collision pushes `+0x70` / `+0x74` of `0x0081A790`). `+0x158` / `+0x100` come from the battle entity record
+  `+0x24` / `+0x28` (soldier set-up `0x0061CB90` -> `0x007E4FB0`; the decel through the sub-object `0x007E5130`), which
+  the record builder `0x00E52F40` fills from `battle_entities` **column 5 (acceleration) and 6 (deceleration)**
+  (columns 3..11 in order at `+0x1C..+0x3C`; `+0x18` is an enum of column 2, `+0x4C` column 12, the radius: this makes
+  §44 of BATTLE_FIDELITY.md's garrison radius CONFIRMED, while its "+0x18 is the class" is column 2, the skeleton
+  type). Data: infantry 2.4 / 5, light infantry 3 / 6, heavy horse 2.5 / 6, medium 3 / 8, light 3.5 / 10 m/s².
+  Code: `ntw_sim::battle::model::step_speed`, `LandUnit::acceleration` / `deceleration` / `speed` (set from the
+  entity in `battle::setup`); a unit built without entity data changes speed at once. PROVISIONAL (ours): a unit
+  stops dead when its move ends (how the wanted speed falls at the destination is the untraced `+0x84`); the exe
+  clamps to `+0x10C` (ours has no max apart from the run speed). Logged release run (`--battle --ai off`, side 0 ordered
+  to run at 5 s, to walk at 11 s, temporary prints): heavy horse 2.87 -> 4.6 (0.6 s) -> 7.95 (1.8 s) -> 9.8 m/s
+  (2.5 s); infantry 1.6 -> 3.6 m/s in about 0.6 s; slowing horse 6.3 -> 1.8 m/s in about 0.6 s.
+- **The locomotion graph (static, built by CRT initialisers `0x00413D80..0x00415200`).** One shared graph of 25 nodes
+  (list `0x0150D010`; node constructor `0x00721060`: index at `+4`, which is also its priority, edges at `+0xC..+0x14`;
+  edge constructor `0x007126B0`: from, to, predicate vtable). Node numbers: 0 stand; loops 2, 5, 9, 13, 17; 1 stand ->
+  loop 2, 4 / 8 / 12 / 16 up into loops 5 / 9 / 13 / 17, 7 / 11 / 15 / 19 down into loops 2 / 5 / 9 / 13, 3 / 6 / 10 /
+  14 / 18 loop -> stop; 20..24 steps and turns. A graph instance (`0x00717930`) pairs the node list with a per-entity
+  **slot table** (node -> slot, 8-byte entries): horse `0x0133D738` (STAND, STAND_TO_WALK, WALK_1, WALK_TO_TROT, TROT,
+  TROT_TO_CANTER, CANTER, CANTER_TO_GALLOP, GALLOP; no stop or step-down slots), men's walk / run / walk-trained /
+  run-trained `0x0133C608` / `0x0133C6D0` / `0x0133C798` / `0x0133C860` (`WALK_1..5` ... `RUN_TRAINED_1..5` on the
+  loops, no transitions), artillery horse teams `0x0133D800` (WALK_1, RUN_1, WALK_TO_RUN, RUN_TO_WALK, stops). The
+  display picks the graph by its class (`+0x40`): men by the entity state (`0x007A7190`: walk, run and trained
+  variants), animals one graph (`0x007A72F0` -> `0x00794A70` for horses), riders stand / step only (`0x007A7120`).
+- **Edges (predicate vtables `0x0133EFC8..0x0133EFE8`).** Up (`0x007CEAA0`): into a transition node only if the slot
+  table has a clip for it (else the direct loop edge applies); from the stand when the speed is above 0.01 m/s; from a
+  loop when the speed is above the **midpoint** of its loop's and the next loop's root speeds (anim `+0x60`). Down
+  (`0x007CE840`): to the lower loop when the speed is at most the lower loop's root speed **+ a quarter** of the gap;
+  to the stand at 0.01 m/s (or through a stop clip that can finish within its length). Done (`0x00703100`): a
+  transition node moves to its loop once the clip shown is that loop's. Both up and down also need the heading change
+  under `DAT_0150D054` and a context value above 0.01 (`+0x40` of the display input, not traced); turning figures take
+  the turn nodes (not modelled). With no node (a new graph) the display keeps the highest-numbered node whose entry
+  test passes: a loop whose clip is no faster than the speed (`0x00703120`); transition and stop nodes never pass. The
+  graph is walked until no edge fires. Helper tables: `0x007CEC60` (a transition's lower loop), `0x007CECD0` (its
+  upper loop), `0x00797F40` (is a transition), `0x007947E0` (node has a clip).
+- **Display input.** The display reads the entity through two tick snapshots lerped by the elapsed fraction of the
+  tick (`0x00752A20` position / heading, `0x00752FF0` speeds and orientation): the speed the edges test is the
+  snapshot's `+0x10`. That the exe draws men between ticks this way is a lead for `DrawnPose`'s UNKNOWN (BATTLE_FIDELITY
+  §59): not traced further here.
+- **Ours.** `unit_animation::climb` / `enter` / `transition_rate` / `MOUNT_LADDER`; `soldiers::LadderRung` (each
+  mounted kit's rungs from the horse table, rider on `RIDER_<slot>`); `view::on_ladder` (mounted: one graph, the
+  transition starts and ends as §1.9) and `view::on_levels` (on foot: the walk or run graph of the gait, entered on
+  its fastest level no faster than the man). `GroundSpeed::gait`: stand when still, run when the move runs (the run
+  option or a rout), else walk; a charging man uses the charge graph (`CHARGE`). CONFIRMED: `0x006543D0` sets the
+  state `+0x1B8` from the stance `+0x1D8` and the move kind `+0x220` (0 walk, 1 or 3 run, 2 charge): 8, 0xB, 0xD; the
+  trained stance 9, 0xC; `0x007A7190` maps 1 and 9 to WALK_TRAINED, 0xB to RUN, 0xC to RUN_TRAINED, 0xD to the charge
+  graph (`0x0133D030`, node 2 `CHARGE`), others to WALK; the move kind is the order's run option (`0x0051A9A0`).
+  Logged release run (as above): horses STAND -> STAND_TO_WALK -> WALK -> WALK_TO_TROT -> TROT at a walk order (the
+  heavy horse walks at 2.6 m/s, past the 2.50 m/s walk / trot midpoint of its clips, 1.47 and 3.53 m/s, so a walking
+  heavy horse trots by the traced rule; it drops back to the walk below 1.99 m/s on slopes), then on the run order
+  TROT_TO_CANTER at 4.5 m/s, CANTER, CANTER_TO_GALLOP at 7.95, GALLOP at 9.8, and back to CANTER, TROT, WALK on the
+  walk order; infantry WALK_TRAINED_2 / _3 at a walk, RUN_TRAINED_1 then _2 at a run, and on the walk order entering
+  the walk graph on its fastest level (WALK_TRAINED_5 at 3.16 m/s) and stepping down one level a tick. Screenshot of
+  cavalry mid-transition (`NAPOLEON_BATTLE_ZOOM=30,4`, battle time 2 s): poses whole, riders seated. To check in game:
+  `cargo run -p napoleon --release -- --battle --no-intro --ai off`, order the cavalry to walk, then run, then walk,
+  side by side with the original. Tests: `unit_animation` (ladder thresholds, entry, transition rate), `battle::view`
+  (ladder starts, men's graphs), `ntw_sim::battle::model` (acceleration / deceleration).
+- **Round 2 (gait-blend2): the coordinator's points after the first round.**
+  1. *Walk-ordered horses must stay in walk* (sitting 2026-10-09: on the walk order horses went stand_to_walk <-> walk,
+     walk_to_trot only after the run order), but ours walks a heavy horse at 2.6 m/s, past the 2.50 m/s walk / trot
+     midpoint. The clip speeds are not the difference: the anim loader `0x010CB060` sets anim `+0x60` = root
+     displacement first -> last frame / duration `+0x4C` (as `Anim::root_speed`; with anim flag `0x10000` and a clip
+     over 1 s, the displacement over its first second), so WALK_1 1.47 / TROT 3.53 m/s hold. The display's speed is the
+     entity's interpolated forward speed `+0x14C` (the snapshot writer `0x0079FF50` copies `+0x14C`, `+0x150`, the
+     ground speed and the wanted speed `+0x148` into the display input's tick ring, read back by `0x00752FF0`; the
+     edges' second context value is that wanted speed). A unit's move speed is its formation's first member's record
+     walk `+0x1C` / run `+0x20` (`0x005650E0`, `this` from `0x004B4A50`, members at formation `+0x18` / `+0x1C`), times
+     the group factors `+0x510`->`+0xAF0` x `+0x2780` for a group's lead unit (`0x0055C280`). The soldier set-up
+     `0x0051B7D0` makes the riders with the unit's `+0x60` record and, for a unit with mounts, the mounts with the
+     `+0x8C` record (`0x0059EED0`, 0x69C bytes) and seats `+0x60`-record riders on them (`0x00655B20`). Settled by the
+     2026-10-10 sitting below (a cavalry unit's speed is its horses' record; a walking horse moves at ~0.8 of its order
+     speed) and the static trace after it.
+  2. **Arrival deceleration: done (CONFIRMED).** `+0x84` is only a turn-rate override (`0x00659220`). The wanted speed
+     `+0x148` is set by the locomotive's state machine (`+0xF4`, run by `0x010FC370` from the step; states are
+     static singletons `0x01454168..0x01454194`): the move state (`0x00806D40`) wants the order speed `+0x10C`
+     (times the cosine of the heading error when it must turn), and its check `0x007DE1F0` -> `0x00807410` leaves for
+     the stop state once the distance left `+0x144` is at most max(0.5, 0.5 / decel x speed^2) m; the stop state
+     (`0x00807080`) wants 0, so the step brakes at the deceleration. Ours: `ntw_sim` `arrival_braking`, braking
+     latched by a one-tick look-ahead (the exe stays in its stop state); the unit ends up to 0.5 m short, as the
+     soldier does. Test `a_unit_brakes_to_its_destination`.
+  3. **Rider legs: done (CONFIRMED).** A rider display with a mount display (`+0xCC` of its input, `param_4[0x33]`)
+     skips its own graph: its slot is the rider table's (`+0xE4` -> `+0x60`, an array by mount slot, `0x0079BB10`)
+     entry for the mount display's current slot, RIDER_STAND (427) when the table has none, and for the rider
+     kinds it copies the mount display's clip time (`+0x14` -> `+0xD8`) every frame. Ours already plays
+     `RIDER_<mount slot>` (`unit_animation::rider_slots`) at the shared clip time; fixed now: a mounted action loop
+     without a mount clip (the horse on its gait) no longer leaves the rider on his idle clip, he plays the gait
+     level's rider clip as the map gives.
+  4. **The two PROVISIONALs: done (CONFIRMED)**, above: the men's graph by state (and the charge graph), and the
+     ladder start on the loop's wrap.
+  5. **Infantry clips at the four stores.** Statically a man's walk / run levels are loop nodes of his graph, changed
+     through store C `0x00773FF7` (a loop -> loop change; A, B and D belong to transition clips). Each soldier view
+     holds two display states (`+0x80` + `+0x164` x 0x4C, double-buffered) and `0x007911E0` / `0x00789BD0` update
+     them, so the stores are the same for men. CONFIRMED by the 2026-10-10 sitting below (point 3).
+- **Debugger sitting 2026-10-10 (original, custom desert battle: general, a light cavalry unit, line and light
+  infantry; module base `0x00E90000`).** Settles points 1 and 5 above:
+  1. *A cavalry unit's speed comes from the horse record (CONFIRMED).* `0x005650E0` on a 24-man cavalry unit: first
+     member's record `+0x18` = 1 (horse), walk `+0x1C` 2.7, run `+0x20` 11.0 m/s; that unit always queried it with the run
+     flag, and its horses' `+0x10C` read 11.0 standing and 11.0..15.95 moving (the catch-up factor), wanted 9..12.8 m/s.
+     A line infantry unit (80 men): record `+0x18` 0, walk 1.55, run 4.05 m/s. A walk order to the general or the light
+     cavalry did not call `0x005650E0` in the logged window.
+  2. *A walking horse moves well under its record walk speed (CONFIRMED).* A walk-ordered light cavalry horse (record
+     walk 2.8, run 12.0, `+0x158` acceleration 3.5, `+0x100` deceleration 10.0), three samples over ~6 s on flat sand:
+     `+0x10C` 2.811..2.856, wanted `+0x148` = speed `+0x194` = forward speed `+0x14C` **2.09, 2.27, 2.28 m/s**,
+     multiplier `+0x1A4` 1.0. So the wanted speed was ~75-81 % of the order speed while walking straight: below the
+     2.50 m/s walk / trot midpoint, which is why the original's walk-ordered horses stay in walk and ours (moving at the
+     full record walk) trot. Traced statically below ("Static trace 2026-10-10"): the read can't tell which of two
+     factors did it, so a second sitting read is written there.
+  3. *Men's walk / run level changes go through store C (CONFIRMED).* `0x00773FF7` with clip kind `+0x1C` = 2 and the man
+     display vtable `0x01341E20` logged `mus_irregular_locomotion/mus_walk_100 / _127 / _173 (+ _alt*)`,
+     `mus_jog_313`, `mus_run_407` and the flag bearer's `fla_walk_* / fla_jog_* / fla_run_407` during the infantry walk
+     -> run -> walk orders. The earlier sitting's silence was the filter, not the path.
+- **Static trace 2026-10-10 (gait-blend2 round 3): every factor between the order speed and the wanted speed.**
+  The locomotive state machine is the object at entity `+0xF4` (vtable, `+4` current state, `+8` iteration cap;
+  `0x010FC370` runs `0x010FBBD0` until the state stops changing: state vtable `[0]` check -> next state or null,
+  `[1]` enter, `[2]` update, `[3]` exit, `[4]` id). State fields are entity offsets minus `0xF4` (state `+0x18` =
+  `+0x10C`, `+0x30` = `+0x124`, `+0x54` = `+0x148`). The twelve singletons `0x01454168..0x01454194` have vtables
+  `0x01346994 + 0x14 n`; only two updates want a speed: the move state (`0x00806D40`) and state 7 (`0x00806F70`,
+  wants `+0x10C` with no cosine, 0 within 0.01 m); the others (`0x00806C20`, `0x008069C0`, `0x008070A0`, the stop
+  state `0x00807080`) want 0 and only turn. So, per 0.1 s tick, CONFIRMED:
+  1. *Order speed `+0x10C`* is set by `SetLocomotiveMoveTarget` `0x0080B6E0` (target `+0x160..+0x170`, speed
+     `+0x10C`, flags `+0x110`), called each tick by the soldier's move-order update `0x00659600` (first thing in
+     `0x006543D0`). The speed is the order block's `+0x40C`, except in move states 4 / 5 of `+0x390` with byte
+     `+0x414` = 1 (a timed move): then `0x0063AF40`(v = `+0x40C`, vmax = record run `+0x20` x 1.45 (`0x0063F040`),
+     d = distance to the order's destination `+0x3F4`, t = `+0x410` − elapsed `+0x43C` (+0.1 a tick), keep-v flag =
+     `+0x438` bit 0 clear) = v if t ≤ 0, else min(v + (d − v t) / t, vmax), with d − v t floored at 0 under the flag.
+     With bit 0 set (`+0x3A4` or `+0x408` clear) it is recomputed every tick, so it is plainly d / t: a soldier that
+     falls behind its schedule gets a slowly rising order speed. **That is the 1.004..1.02 of the sitting** (2.811
+     rising to 2.856 over ~6 s fits a horse moving at ~0.8 of d / t with ~80 s left). Not traced: the writer of the
+     order block `+0x3F4..+0x420` (a struct copy; `+0x410` presumably the move's planned duration).
+  2. *Move state `0x00806D40`* wants `+0x10C`, times max(0, cos(heading error `+0x124`)) unless `+0x134` > 0 (the
+     error is the bearing to the step's target minus the heading `+0x64`, set by the step at `0x00819974`; a turn
+     snaps when the error is ≤ 1° (`0x0081BEF0`, `0x0145438C` = 0.01745 rad), else turns by at most the turn rate
+     `+0x104` (from `+0x15C`, 2π in states 0x19 / 0x1A, `0x00659220`) x 0.1). None of this happens in strafe mode
+     (`0x00814AA0`: tweak `LOCOMOTIVE_FORCE_STRAFE` at `0x0150FB48`, flag `+0x110 & 0x40`, or byte `+0x116`): then the
+     wanted speed is `+0x10C` and the entity moves straight at its target.
+  3. *The step `0x00819770`* multiplies the state's wanted speed by `+0x1A4` and stores the product back in `+0x148`
+     (`0x00819D57`). `+0x1A4` is reset to 1.0 by `0x007F0260` after each move, multiplied by the ground column
+     (and the fatigue factor on runs only, `+0x220` > 0) in `0x006543D0` **before** the step, and by the slope factor
+     (gradient `+0x1A0` from `0x005574A0` at the step ahead vs `+0x4C`, the height `0x007F08F0` sets from the same
+     ground) **inside** the step at `0x00819D17`. `+0x1A0` is zeroed on entry. The step target is `+0x160` through
+     `0x0080E9D0` (a moving frame when `+0x170` is set, `0x007F4950`); the path corner pick `0x0080BF70` puts the next
+     visible corner there, so on open ground it is the destination. Nothing else writes `+0x148` on this path
+     (`0x0080B080`, the networked / puppet move of `0x0067A050`, sets it to the tick's displacement and skips the step).
+  So the sitting's 0.75..0.81 is cos(heading error) or the slope factor (or a ground column the `+0x1A4` read could
+  not show, if it was not sand): **the entry read can't separate them**, because at `0x00819770` entry `+0x148` is
+  last tick's product, `+0x1A4` holds ground x fatigue without the slope, and `+0x1A0` is not yet set. Sand's mounted
+  column is 0.9 (`unit_movement_modifiers`), so the `+0x1A4` of 1.0 read also says the horse's cell was not sand (or
+  the mount did not pass the mounted class test `0x0055ABF0`). Ours has no per-soldier heading and no timed move:
+  `placeholder_movement` moves the unit at its record walk x ground x slope, which matches the exe only if the 0.8
+  was the slope. **Not ported** (no guess): resume with the read below.
+  **Debugger read that settles it** (same set-up as the 2026-10-10 sitting, one walk order to a cavalry unit across
+  open, level ground; dynamic = static − 0x400000 + module base; `ghidra_trace_sync_disable()` first): breakpoint at
+  `0x00819D37` (in the step, after the multiplier is final and before it multiplies the wanted speed), condition
+  `poi(poi(@ebx+0x1E8)+0x18) == 1` (a horse), ~20 hits, logging `df @ebx+0x10C L1` (order speed), `df @ebx+0x148 L1`
+  (the state's wanted, before the multiplier), `df @ebx+0x1A4 L1` (multiplier incl. slope), `df @ebx+0x1A0 L1`
+  (gradient), `dw @ebx+0x124 L1` (heading error, 65536 = 2π), `df @ebx+0x134 L1`, `dd @ebx+0x19C L1` (ground index),
+  `dd @ebx+0xF8 L1` (current state: the move state singleton holds vtable `0x013469A8`), `dd @ebx+0x110 L1` (flags),
+  and the timed-move block `df @ebx+0x40C L2`, `db @ebx+0x414 L1`, `df @ebx+0x43C L1`. Reading: `+0x148` ≈ 0.8 x
+  `+0x10C` with `+0x124` ≈ ±6700 means the heading cosine (then the next question is why the heading lags: log
+  `+0x64`, `+0x15C` and the target `+0x11C` / `+0x120` too); `+0x1A4` ≈ 0.8 with `+0x1A0` ≈ 0.08 means the slope
+  (then ours already has the rule, and the walk / trot difference was the map); both ≈ 1 with a slow move means the
+  measurement, not the rule (re-read `+0x194` against `+0x148` at `0x00819E3B`).
+  **Result of that read (user sitting 2026-10-10, CONFIRMED): the ground column, not the heading.** Write watchpoint
+  on one walk-ordered light cavalry horse's `+0x148` over 20 ticks. Per tick: the step zeroes it (`0x008199B7`), the
+  move state writes the wanted = order speed `+0x10C` (`0x00806D57`, `0x00806EE8`; heading error `+0x124` 0 or -1, so
+  the cosine is 1), then the step stores the product (`0x00819D5F`). At the product `+0x1A4` = **0.373** (ground 0.40 x
+  slope 0.93, gradient `+0x1A0` 0.024..0.045) on ground index `+0x19C` = 0xE, so the wanted was 2.68..3.07 x 0.37 =
+  1.0..1.1 m/s; before the step `+0x1A4` read 0.40 (ground column x fatigue, no slope). The order speed rose ~0.035 a
+  tick (the timed move's d / t catch-up) and fell back to 2.69 when the move was re-planned. Polled reads on ground 3
+  showed the wanted at the full order speed (2.81..2.84), on ground 6 ~0.8. So the walk is slowed by the mounted
+  column of `unit_movement_modifiers` per ground index (and the slope). Ours already has ground x slope, so the
+  difference is the ground index a cell gets and the column value per index. Next: map ground indices 0xE and 6 to
+  their `unit_movement_modifiers` rows, compare with our ground lookup for the same cells, and port the timed-move
+  order speed (`0x0063AF40`).
+  **Ground index → row → cell, traced (gait-blend2, 2026-10-10, CONFIRMED unless marked).**
+  - *Index → row.* The name table `0x01452520` holds 25 names (field_ploughed .. none, our `GROUND_TYPE_NAMES`
+    order), then end_marker and invalid_ground_type. The Ground State Grid build `0x0061E430`
+    (BuildBattleGroundStateGrid) looks each name up in `unit_movement_modifiers` in table order, so the ground index
+    is the name's position; `0x006543D0` uses that record for an index < 25 and 1.0 otherwise. 0xE =
+    vegetation_dense_forest, 6 = road.
+  - *Pixel → index: by palette colour, not palette index.* `LoadBattleMapGroundTypeImage` `0x00EC8560` loads the
+    ground TGA (`0x010D2170`), then `0x00E8B550` converts each pixel: `0x00EE5E00` takes its palette colour
+    (`0x010DBDD0`) and compares the 4 bytes exactly (`0x00EC1FA0`) with the 26-entry colour table `0x0145BF60`
+    (B,G,R,A=0xFF; entry 25 a duplicate black that never matches); the first match is the index, none gives 0x1A
+    (factor 1.0). Ours read the raw palette index. A probe of the 57 shipped presets with a TGA (all type 1,
+    bottom-up, 24-bit palette from entry 0): 38 have the 25-entry identity palette, 16 a 24-entry palette without
+    field_forest (every index ≥ 2 is one ground lower than its colour: caribbean, empty_flat, hb_naval, hb_nile,
+    hb_trafalgar, indian/ottoman artillery_fort and great_fortress, the seven nap_mp_*_[sa] maps,
+    nap_mp_great_plains), and 3 a 256-entry palette (nap_mp_grassy_flatlands, welly_map_c, western_artillery_fort:
+    85 is rock, 255 road). No shipped colour is unmatched. So ours gave the wrong ground (and movement column) on 19
+    maps; now fixed: `GroundTypeMap::from_palette_indices` converts through `GROUND_TYPE_COLOURS` /
+    `ground_index_of_colour` (`ntw_formats::battle_terrain`); an index past the palette end gives 26 (what
+    `0x010DBDD0` returns there is UNKNOWN; no shipped map has one).
+  - *Cell.* The grid is a fixed 512 x 512, cell = world size / 512 (ours: the TGA size, 512 on every shipped map).
+    `0x0081AC80` (UpdateSoldierGroundTypeIndex) sets `+0x19C`: a standing-on object (`+0x10`) gives its `+0x5C`;
+    else `+0x18` gives 0x15 (wood); else the cell at 256 + floor(pos x 512 / size) per axis, each clamped ≤ 511 as
+    unsigned. Row 0 is the file's first row = the picture bottom (bottom-up files), which matches ours. Not ported:
+    the object and `+0x18` paths (they do feed `+0x19C` and so the multiplier, but our terrain has no standing-on
+    objects or woods yet; BACKLOG line), and the cell exactly on a border (whether the row axis is z or −z decides
+    the tie; UNKNOWN). *The unsigned clamp, decided: not an ORIGINAL BUG.* A negative index wraps and clamps to 511
+    (the far edge) where ours clamps to 0; every point on the map has both indices in 0..511 and gets the same cell
+    from both, so only an off-map point differs and nothing in the exe's data or intent is contradicted on the map.
+    Comment at `GroundTypeGrid::at`.
+  - *Timed move `0x0063AF40` (ComputeTimedMoveOrderSpeed), ported as `ntw_sim::battle::model::timed_move_speed`.*
+    With time left t = planned `+0x410` − elapsed `+0x43C` (`+0x43C` += 0.1 a tick) > 0: speed v + (d − v·t) / t,
+    the shortfall floored at 0 when the order keeps its speed (`+0x438` bit 0 clear; the bit is set when `+0x3A4` or
+    `+0x408` is clear), capped at the run speed (record `+0x1E8` → `+0x20`) x 1.45 (`0x0063F040`); t ≤ 0 gives v.
+    d is the ground distance from the soldier (`+0x48`, `+0x50`) to the destination `+0x3F4` (`0x0080E9D0`). Called
+    by `0x00659600` (UpdateSoldierMoveOrderTarget) in move states 4/5 of `+0x390` with the timed byte `+0x414` = 1:
+    with keep-speed only on the first moving tick (`+0x440`), else every tick. The order: `0x00659520`
+    (AssignSoldierMoveOrder) copies the destination to `+0x3F4..+0x404` and the speed block to `+0x408..+0x420`
+    (`+0x40C` speed, `+0x410` planned time, `+0x414` timed), sets state 1 and zeroes `+0x43C` / `+0x440`. The timed
+    path is `0x00816900` (vtable `0x01348B44` slot 1; speed / time from the order object's `+0x3C` / `+0x40`, set
+    from its descriptor words 8 / 9 by `0x007E2C80`), reached through `0x00650DC0` (soldier `+0x228`) from
+    `0x005DD450`, a virtual loop over the unit's soldiers (vtable `0x0132BB8C`).
+  - *Where the speed and planned time come from (traced statically, 2026-10-10).* Two order sources reach
+    `0x006533E0` (InstallSoldierTimedMoveOrder, the descriptor → `0x007E2C80` → `0x00659520` step):
+    (a) the unit move order: `0x0051A530` builds it (re-issued every 1.0 s by `0x00581B81`), `0x00584E10`
+    (IssueUnitMoveOrderToSoldiers) fills each soldier's descriptor with v = the gait record's speed (`0x00565030`,
+    GetUnitGaitSpeed) and the time from `0x0054C650` (ComputeUnitMovePlanDistanceAndTime): D = n·k + 2v, t = D / v,
+    with n = (unit `+0x510`)`+0x27C` and k = (unit `+0x510`)`+0x13C`. k has **no writer** in the exe: the ctor
+    `0x00515340` zeroes it (`0x005155A1`), the copy ctor `0x00518230` copies it (`0x005184EC`), and `0x0054C691` is
+    its only reader, so this path gives t = 2 s (INFERRED: a write through an unrecognised pointer cannot be
+    excluded statically). (b) the per-soldier formation follow `0x006DC700`: every 10th tick (counter `+0x3C` % 10)
+    it sends speed `+0x38`, t = 5.0 (`0x40A00000`) and desc[10] = 0, so `+0x438` bit 0 is set (the speed is d / t
+    every tick, no floor) and desc[7] = speed > the record walk speed. *Which one drives a walk order:* the
+    2026-10-10 sitting (horse in forest, multiplier 0.373) saw the order speed start at 2.69, rise ~0.035 a tick and
+    fall back at each re-plan; from d = 5v the d / t recurrence gives +0.034 a tick for t = 5 and +0.084 for t = 2,
+    so the walk follows (b) (INFERRED from that arithmetic).
+  - *Wired (PROVISIONAL), `ntw_sim::battle::model::TimedMove`.* Each moving unit carries a timed order: planned at
+    its gait speed with d = speed × 5 s (`TIMED_MOVE_PLANNED_SECONDS`), re-planned every 10 ticks
+    (`TIMED_MOVE_REPLAN_TICKS`) or when the speed changes, cleared on arrival or stop and on every order install,
+    also one re-issued to the same point (`LandUnit::set_destination`, the one path every order source writes the
+    destination by; `0x00659520` zeroes `+0x43C` on each install). Each tick the wanted speed is
+    `timed_move_speed(v, run × 1.45, d, 5 − elapsed, keep = false)` × the ground/slope multiplier; d shrinks by the
+    distance covered and elapsed grows 0.1 after the speed is computed, as `0x00659600`. Test
+    `walking_cavalry_in_dense_forest_walks_on_its_timed_order` (ground 0xE, mounted 0.4: every plan starts at 2.69
+    and rises 0.03–0.05 a tick, below the 2.50 m/s walk/trot switch, so the horse walks). PROVISIONAL because the
+    source is INFERRED and ours keeps one order per unit, not per soldier (the exe's d is each soldier's own
+    distance to its formation slot, which we don't model).
+  - *Sitting plan (needs the debugger; for `docs/FOR_USER.md`).* (1) Ground 6 ~0.8: on a road cell, log the
+    soldier's `+0x19C`, `+0x10` and `+0x1A4` at `0x0081AC80`'s return and at `0x00819D5F` for a walk-ordered horse,
+    to tell an object ground from the road row value. (2) Order source: break at `0x006533E0` for a walk-ordered
+    horse (the soldier `+0x1E8` → `+0x18` == 1 test of the step-speed sitting), ~20 hits, logging the return address and descriptor words 8 / 9 / 10,
+    plus the soldier's `+0x438` and `+0x408` at `0x00659600`: return addresses in `0x006DC700` with word 9 = 5.0
+    confirm (b); in `0x00584E10` with word 9 = 2.0 confirm (a).
 ## 2. Soldier LOD (CONFIRMED values)
 Tweaks in `VariantModelManager.cpp`: `variant_lod1` 5.0, `variant_lod2` 10.0, `variant_lod3` 15.0,
 `override_variant_lod` true, `variant_lod_skip` 2. The chooser (`0x0125ED60`) with the override on: LOD 3 if

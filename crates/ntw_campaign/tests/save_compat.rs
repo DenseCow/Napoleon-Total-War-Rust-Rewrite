@@ -91,6 +91,37 @@ fn taxes_stances_and_script_values_are_written() {
     assert_eq!(back.script_values, vals);
 }
 
+/// `force_diplomacy` permissions (DIPLOMACY_RELATIONSHIP #18, the u32[14] at relationship +0x7EC)
+/// are written from the model and read back, one direction only; the pirates' all-3 block
+/// (`0x00B5BD70` → `0x00B28690` on load) survives the round trip.
+#[test]
+fn diplomacy_permissions_are_written() {
+    let dir = data_dir();
+    if !dir.is_dir() {
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).unwrap();
+    let bytes = std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap();
+    let esf = EsfFile::from_bytes(&bytes).unwrap();
+    let l = ntw_campaign::read_esf(&esf, &db).unwrap();
+    let mut m = l.model.clone();
+    let france = m.faction_by_key("france").unwrap().id;
+    let austria = m.faction_by_key("austria").unwrap().id;
+    assert!(m.set_diplomacy_option(france, austria, 9, false, true)); // peace: may not propose
+    assert!(m.set_diplomacy_option(france, austria, 3, true, false)); // alliance: declines
+    let out = save::write_save(&esf, &m, "france", 1).unwrap();
+    let back = ntw_campaign::read(&out.to_bytes().unwrap(), &db).unwrap();
+    let b = &back.model;
+    assert_eq!(b.diplomacy_option(france, austria, 9), 2);
+    assert_eq!(b.diplomacy_option(france, austria, 3), 1);
+    assert_eq!(b.diplomacy_option(austria, france, 9), 0);
+    assert!(!b.may_propose(france, austria, 9) && !b.may_accept(france, austria, 3));
+    if let Some(pirates) = b.faction_by_key("pirates").map(|f| f.id) {
+        let rels: Vec<_> = b.world.relationships.iter().filter(|((a, _), _)| *a == pirates).collect();
+        assert!(!rels.is_empty() && rels.iter().all(|(_, r)| r.diplomacy_options == [3; 14]));
+    }
+}
+
 /// Every place outside the AI block where `v` appears as an integer (or array element).
 fn int_sites(nodes: &[EsfNode], v: i64, path: &str, out: &mut Vec<String>) {
     for (i, n) in nodes.iter().enumerate() {

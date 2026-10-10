@@ -16,27 +16,25 @@ Last updated: 2026-10-10. Main tests at last full run (2026-10-08): `cargo test 
   merge, applying the worker's BACKLOG ticks/Polish lines in the merge commit → `bash tools/progress.sh`
   → push (the hook syncs public #2) → publish in batches. Running work = the BACKLOG `(running: …)`
   markers and `git worktree list`; merged work = `git log`.
-- **Resume points (2026-10-10 evening, day mode):** merged today: ui-small, capture-refund, army-recruit-tab, deal-ai,
-  new-portraits. Slots (user, 2026-10-10): 3 Opus workers (reviews take one) + 1 Sonnet worker on Polish only. Open:
-  1. gait-blend2 (NR-gait-blend2, Opus, running; don't merge yet): `5520ce7b` maps battle ground by palette colour as the
-     exe (`0x00EE5E00`, table `0x0145BF60`; ours was wrong on 19 maps; CONFIRMED) and ports `timed_move_speed` (`0x0063AF40`).
-     The worker is now tracing the planned-time source (`0x005DD450` chain) statically and wiring the speed per soldier
-     (test: walking cavalry on ground 0xE walks), then one review. At merge, BACKLOG lines from its report: ground for maps
-     without a TGA (`0x00EDCFC0`); border tie rule; ground paths +0x10/+0x18 (`0x0081AC80`) and the off-map clamp unless
-     it clears them; Polish: 15 renamed Ghidra functions at 0-50%. Check: `cargo run -p napoleon --release -- --battle
-     --no-intro --ai off` on nap_mp_river_[sa], cavalry through forest, side by side. Keep main's FOR_USER.md at merge.
-  2. deal-region (NR-deal-region, Opus, running): the region value in deals (`0x00AA1E90`, `0x00A364B0`, `0x00C4D140`)
-     replaces the region PLACEHOLDER in `ai_refuses_deal`; reuses the round-5 `campaign::region_value`.
-  3. in-game-checks (NR-in-game-checks, Opus): take over the "Needs an in-game check" list (run each with --screenshot
-     against `ntw-evidence\screens`, keep only true side-by-sides for the user). Then: finish the old-worktree triage
-     (campvis, fidelity-battle, s2-*, sittings, w1-campaign-ui, w2-0a, w2-ai2: built on the reverted 10-05 history; delete
-     what main has, BACKLOG lines for real missing work); then §0 items.
-  4. polish1 (NR-polish1, Sonnet): Polish lines with no exe tracing, no rule change and no file overlap with 1-2
-     (portraits cache/message, real_install two-file test, queue-cancel clones and naval checks, detail.rs Vfs, ntw_data
-     logging, duplicate negotiation strings, recruit_travel_cost rebuild + travel_turns_rounded test). Refill on finish.
+- **Tonight (user, 2026-10-10, night mode):** no wrap-up before 71% of the week; at wrap-up, merge what is review-clean and publish main to the public repo (`bash tools/publish_public.sh`).
+- **Resume points (2026-10-10 evening, day mode):** merged today: ui-small, capture-refund, army-recruit-tab, deal-ai, in-game-checks, deal-region,
+  new-portraits, polish1, gait-blend2, polish2, rule-seams, polish3, force-diplo. Slots (user, 2026-10-10): 3 Opus workers (reviews take one)
+  + 1 Sonnet worker on Polish only. §11 (user, 2026-10-10): only framework parts that avoid costly refits later; rule-seams kept (no-rebuild
+  system mods that stack); next §11 step before any refit: the seams macro line in BACKLOG §11. Open:
+  1. ui-fails (NR-ui-fails, Opus, running): the four "Failed in-game checks" in Open bugs; 9a14cfa9 fixed the recruitment tab, then the worker was lost; a new worker is on the other three.
+  2. region-transfer (NR-region-transfer, Opus, running): §0-B `CDIR_INTENTION_TRANSFER_REGION_OWNERSHIP`.
+  3. (slot free: treasury-rules merged)
+  4. (polish4 merged)
+  5. polish5 (NR-polish5, Sonnet): done (3caf8abf + 2ab0345a); review QUEUED. At merge: delete "Own save: header pixels…", "The campaign
+     model addresses building slots…" (stale: SlotRef exists) and the campaign_play.rs temp-file line.
+  6. QUEUED for the next free Opus slot: gait-blend3 (Open bugs "Gait"), then the polish5 review, then the polish4 fix review (e91f9a51), then the polish6 review (93c3d61a); hud-state (Open bugs "Battle HUD") once ui-fails is merged; sea-water (Open bugs "Sea water"); self-checks (Opus: verify without the user, user 2026-10-10: (a) hired and field-promoted generals get a european general portrait on the army card and in the Lists, by harness shot or model test (the Enlist pool portraits show, user screenshot 2026-10-10); (b) agent action success % (Assassinate/Sabotage/Duel) against the exe formula, with tests; (c) fog labels rule (INFERRED) traced in Ghidra and tested; (d) agent attribute icons on the agent card and agents-tab rows, from the UI layouts/.luac and data (ours: ntw-evidence screens/ours/2026-10-10_settlement_agents_tab.png); (e) settlement recruitment prices (data) and card spacing (layout file; ours overlap slightly)).
+  8. polish7 (NR-polish7, Opus in the Polish slot): Ghidra write-up lines (new-portraits, generic-engine, ui-small plate comments, mod-loading2).
+  7. polish6 (NR-polish6, Sonnet): done (93c3d61a: DIPLOMACY_OPTIONS import, deal_value research_need, screenshot-harness port; napoleon tests not run); review QUEUED after item 6. At merge delete its 3 Polish lines (research_need half of the deal-ai line only).
+  Agent ids (SendMessage after /clear): ui-fails a25a2b4692299be04, region-transfer a06771a913587b37f, treasury-rules a2020ea12b9268fd0,
+  polish4 ae9aa0a950d29fed2, polish5 a4298743580337a9a, polish6 a1a3f09dcfb13fda0, gait-blend2 (old) ae00b6132af647320.
 - **Disk:** C: filled up on 2026-10-09; 21 merged worktrees were removed (~100 GB back). Remove a
   worktree after its merge; check `df -h /c` before starting builds.
-- **Next:** §0, several workers tracing in parallel under the Ghidra writer lock, plus the §11 modding work alongside it (user, 2026-10-09: mod loading and the audits come early); the unwrap audit last.
+- **Next:** §0, several workers tracing in parallel under the Ghidra writer lock, §11: only the framework parts that avoid costly refits later (rule-seams running), the rest waits for its turn (user, 2026-10-10); the unwrap audit last.
 - Evidence saves live in `%USERPROFILE%\Documents\ntw-evidence\saves` (never inside a target folder);
   recovered build-folder data in `ntw-evidence\recovered-targets\`.
 - Usage (user plan, 2026-10-07): one 11-point block a day (~12 with the reading lag), until the weekly
@@ -44,6 +42,9 @@ Last updated: 2026-10-10. Main tests at last full run (2026-10-08): `cargo test 
 
 ## Open bugs
 
+- **Gait (user check 2026-10-10, gait-blend2 merged):** infantry and cavalry walk/run look good, but (1) cavalry still move
+  in lockstep: they need the per-soldier offset infantry got so they don't all step at the same time; (2) a slight hiccup/jitter (infantry and cavalry, user 2026-10-10)
+  when switching from running to walking. Queued: gait-blend3 in the next free Opus slot.
 - **Diplomacy screen (§0-E):** diplomacy2 merged (greeting by attitude, diplomat portrait, button lists
   for war / peace+trade / ally, Power and Wealth words, regnal numerals). Still different from the
   original: the panel creates no `diplomacy_button_*` components from the
@@ -67,7 +68,28 @@ Last updated: 2026-10-10. Main tests at last full run (2026-10-08): `cargo test 
     not). Possibly unit dust (fx_draw.rs ~506, emitted per
     unit) drawn with the wrong size/velocity/blend; find which effect emits it, then compare with
     the original.
+  - Battle HUD (user check 2026-10-10, `--battle`): resizing 1920x1080 → 1280x720 scales and centres it like the original;
+    pause and speed buttons work. Wrong: (1) the speed control's selected-state circle doesn't move to the clicked button;
+    (2) selecting a unit (card click or in the world) doesn't highlight its unit card. Queued: hud-state after ui-fails merges
+    (same files).
+  - Sea water (user check 2026-10-10, NHB_Nile, original side by side): ours pale sky-blue and far too bright, original dark
+    grey-green; our waves are long regular stripes, the original small irregular chop; foam on shows no change. Ships, naval
+    HUD and the wind compass are §4 (not started), not this bug. Queued: sea-water (Opus: ocean.fx inputs, reflection/fresnel,
+    wave scale; BACKLOG §2 Water).
   - Shrubs don't sway (trees do); "shrubs sway with the battle wind" is INFERRED and fails in game.
+  - Red/blue boxes round every unit and broken red shapes in empty ground (user screenshot 2026-10-10,
+    snow map; low priority, user): the boxes are our untagged debug outline (`napoleon` battle/view.rs
+    ~1094, `unit_color`), four straight lines joined only at the terrain corners, so they sink into hills;
+    the empty shapes are units with no men drawn that our musketeers still fire at. BACKLOG §7 Battle UI.
+- **Failed in-game checks (2026-10-10, `analysis/fidelity/IN_GAME_CHECKS_2026-10-10.md`), queued for a fix worker:**
+  - Army Recruitment tab lists ~25 overlapping cards including ships (original: 4 land options): an army never
+    filters naval units out (`ntw_sim` commander_recruitment.rs ~139-148); title adds ", Great Britain"; icon
+    `ui\units\icons\cav_light_hussars.tga` missing.
+  - Settlement panel: hovering a construction slot shows an empty dark tooltip frame that stays open after the
+    pointer leaves (`ntw_script` ui/campaign/settlement.rs ~726-812).
+  - Enlist panel traits show raw keys and the columns overlap (`ntw_script` ui/campaign/army.rs ~680-688, PROVISIONAL).
+  - `template.BattleUnitCard.lua:163` "compare number with nil" on NHB_Austerlitz with `--skip-deployment`
+    (`ntw_script` ui/battle_prelude.lua ~425-435, card info field nil).
 - **Original reference shots** still to match (agent options, sabotage, enlist general, settlement tabs):
   `analysis/campaign/CAMPAIGN_UI.md` "Original reference shots".
 
@@ -78,6 +100,7 @@ Napoleon.exe is fully analysed (47,359 functions). Backup:
 functions were renamed without plate comments; `BuildCharacterDetailsInfoTable` `0x009AD250` is at 45
 completeness. Redo that documentation pass, then one worker runs `ORPHANED_CODE_DISCOVERY_WORKFLOW.md`
 and `STRING_LABELING_CONVENTION.md` over the whole exe (back it up first). Setup rules: CLAUDE.md.
+Before any debugger session: `cargo test -p ntw_data --test probe_script` and `cargo test -p ntw_data --test probe_install -- --ignored`; if either fails, don't run the probe.
 
 ## Who works on what
 
@@ -88,49 +111,10 @@ and `STRING_LABELING_CONVENTION.md` over the whole exe (back it up first). Setup
 
 ## Needs an in-game check
 
-Batched for the user. Delete a line once checked and record the result where it belongs.
-Base command: `cargo run -p napoleon -- <flags>`.
-- **New-character portraits (merged new-portraits):** `--campaign eur_napoleon --campaign-faction france --no-intro`,
-  hire a general from the pool, then field-promote a colonel: both show a european general portrait on the army card and in
-  the Lists, not the unit card.
-
-
-
-
-- **Army recruitment tab (merged army-recruit-tab):** `--campaign mp_eur_napoleon --campaign-faction britain --no-intro`,
-  select Wellesley → Recruitment tab: options with "<training>/<march>" turns and a queue; compare
-  `ntw-evidence\screens\2026-10-07_original_wellesley_army_recruitment_tab.png`.
-- **Region labels (merged 0e-labels):** `cargo run -p napoleon -- --campaign eur_napoleon --campaign-faction france
-  --no-intro`, open Diplomatic Relations: the region labels sit under the panel; open a region's details: the
-  title is the region name.
-- **Battle HUD layout (merged with battle-ui2):** `cargo run --release -p napoleon -- --battle` at 1920x1080, then
-  resize the window to 1280x720. The HUD scales to fit like the original at 1920x1080 (deployment panel, unit cards,
-  orders bar on the cards), and clicks land on its buttons at both sizes.
-- **UI side-by-side (merged `53361ec`), British campaign, compare with the original:** `--campaign mp_eur_napoleon --campaign-faction britain --no-intro`, then (1) open Technology: no line across the title; (2) select Wellesley: Army | Recruitment tabs, his portrait first (the Recruitment tab is empty for now: PLACEHOLDER); (3) open Lists: generals show portraits, colonels the unit card, and the panel docks top-right on a wide screen.
-- **Attribute icons (merged `25a6b21`):** an agent's card (spy: spying picture) and the agents-tab
-  recruitment rows, against the original. `--campaign eur_napoleon --campaign-faction france --no-intro`.
-- **Settlement panel:** demolish, fort tab, recruitment prices, agents tab in a town with agents.
-  First `cargo test -p ntw_script --test campaign_ui agents_panel -- --nocapture`.
-- **Agent actions:** agent card → Assassinate / Sabotage / Duel opens a target picker with names,
-  flags and success %. Clicking a row closes it. Compare % with the original. Sabotage Army is a known no-op.
-- **Fog labels (INFERRED):** after a few turns, explored settlements keep their labels when the camera
-  moves away; never-seen ones have none.
-- **Fort selection:** `--campaign eur_napoleon --campaign-faction france --no-intro
-  --campaign-ui-click selectfort:eur_france --screenshot target/tmp/fort.png`.
-- **Promote panel:** select a French army → Promote. The panel is centred over the HUD with its bottom
-  touching the band (CONFIRMED from `Huds.MoveRelativeToHUD`).
-- **Sea battles:** `--battle-key NHB_Nile`; `--battle --battle-map hb_toulon`; Nile again with
-  `$env:NAPOLEON_SEA_FOAM=1`.
-- **Experience:** in Austerlitz, veterans waver later, rout shorter and tire slower.
-- **Battle effects (INFERRED/PROVISIONAL):** in Austerlitz, the 12-pdr muzzle report is larger than the
-  6-pdr's; canister bursts `LandGunFire_canister`; a 12-pdr shrapnel burst is smaller than a round
-  shell; shell scorches are orange; grenade/carcass hits leave no scorch; ground debris stays upright
-  from a low camera; no `FX: no group` lines in the log. One frame:
-  `$env:NAPOLEON_FX_SHOT="target/tmp/fx.png"`; counts: `$env:NAPOLEON_FX_LOG=500`.
-- **Flags:** unchanged since the cloth refactor (`cargo test -p ntw_sim --test flag_install -- --ignored`).
-  Spanish and rebel units fly their own flags, not `flag_default` (PROVISIONAL; compare with the original).
-- **Before any debugger session:** `cargo test -p ntw_data --test probe_script` and
-  `cargo test -p ntw_data --test probe_install -- --ignored`. If either fails, don't run the probe.
+Batched for the user: only what the screenshot harness can't do (a worker ran the rest on 2026-10-10:
+`analysis/fidelity/IN_GAME_CHECKS_2026-10-10.md`; our shots in `ntw-evidence\screens\ours\2026-10-10_*.png`).
+Delete a line once checked and record the result where it belongs. Base command: `cargo run --release -p napoleon -- <flags>`.
+- (none: user 2026-10-10, the rest is verified by workers from data, layouts, the harness and Ghidra; only a look that no file, trace or harness shot can settle comes here)
 
 ## Needs the user
 
@@ -155,3 +139,5 @@ Base command: `cargo run -p napoleon -- <flags>`.
   caller at `0x009D6270` (its own stack params `[esp+0x118]`), what each argument is, then set
   SPACING and the colours. The process ran with the debug heap (`0xBAADF00D` fill): next launch, pass
   `_NO_DEBUG_HEAP=1` through the launcher's Env option.
+- **ui-fails (Opus, after polish1 merges: it shares commander_recruitment.rs):** fix the four "Failed in-game
+  checks" in Open bugs, tracing the exe where the fix depends on it, each with a test or a harness screenshot.

@@ -952,7 +952,7 @@ fn write_faction(
         }
     }
     write_taxes(f, faction, model);
-    write_stances(f, faction);
+    write_stances(f, faction, model);
     write_bonus_values(f, model.world.faction_details.get(&faction.id));
     write_pools(f, model.world.faction_details.get(&faction.id));
     write_technologies(f, model.world.faction_details.get(&faction.id));
@@ -1192,17 +1192,30 @@ fn write_taxes(f: &mut EsfRecord, faction: &Faction, model: &CampaignModel) {
 }
 
 /// The model's stances into `DIPLOMACY_RELATIONSHIP` #4 (CONFIRMED position). When a stance
-/// changes, the stored one moves to #20 (INFERRED "previous stance"). The other fields are kept.
-fn write_stances(f: &mut EsfRecord, faction: &Faction) {
+/// changes, the stored one moves to #20 (INFERRED "previous stance"). #18, the scripted diplomacy
+/// permissions (`Relationship::diplomacy_options`, the u32[14] at relationship +0x7EC that
+/// `force_diplomacy` sets, `0x00B28670`), is written from the model. The other fields are kept.
+fn write_stances(f: &mut EsfRecord, faction: &Faction, model: &CampaignModel) {
     let Some(rels) = child_mut(f, "DIPLOMACY_MANAGER").and_then(|d| array_mut(d, "DIPLOMACY_RELATIONSHIPS_ARRAY")) else { return };
     for item in &mut rels.items {
         let Some(r) = first_rec_mut(item).filter(|r| r.name == "DIPLOMACY_RELATIONSHIP") else { continue };
         let Some(target) = r.get_i32(0) else { continue };
-        let want = faction.diplomacy.get(&ntw_sim::campaign::FactionId(target)).copied().unwrap_or_default().esf_name();
+        let target = ntw_sim::campaign::FactionId(target);
+        let want = faction.diplomacy.get(&target).copied().unwrap_or_default().esf_name();
         let old = r.get_str(4).unwrap_or_default().to_string();
         if old != want {
             set(r, 4, EsfNode::Utf16String(want.to_string()));
             set(r, 20, EsfNode::Utf16String(old));
+        }
+        let Some(rel) = model.world.relationships.get(&(faction.id, target)) else { continue };
+        match r.children.get_mut(18) {
+            Some(EsfNode::U32Array(v)) => *v = rel.diplomacy_options.to_vec(),
+            _ => {
+                static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    log::warn!("save: a DIPLOMACY_RELATIONSHIP has no u32 array at #18; its force_diplomacy permissions are not written (logged once)");
+                }
+            }
         }
     }
 }
@@ -1294,8 +1307,6 @@ fn drop_duplicate_regions(world: &mut EsfRecord) -> Vec<i32> {
 
 fn write_regions(world: &mut EsfRecord, model: &CampaignModel) -> Result<(), SaveError> {
     let gov_of = |f: ntw_sim::campaign::FactionId| model.world.factions.get(&f);
-    let naval_units: std::collections::BTreeSet<&str> =
-        model.rules.units.iter().filter(|(_, u)| u.is_naval).map(|(k, _)| k.as_str()).collect();
     // A BUILDING record to clone for new buildings.
     let mut template: Option<EsfRecord> = None;
     if let Some(a) = world.child("REGION_MANAGER").and_then(|m| m.record_array("REGIONS_ARRAY")) {
@@ -1321,7 +1332,7 @@ fn write_regions(world: &mut EsfRecord, model: &CampaignModel) -> Result<(), Sav
         let Some(id) = r.get_i32(4) else { continue };
         let Some(region) = model.world.regions.get(&ntw_sim::campaign::RegionId(id as u32)) else { continue };
         let owner = gov_of(region.owner);
-        write_region(r, region, owner, template.as_ref(), &naval_units, &mut links, &model.rules)?;
+        write_region(r, region, owner, template.as_ref(), &|k| model.rules.is_naval_unit(k), &mut links, &model.rules)?;
     }
     if links.broken > 0 {
         // Logged once per save: the source tree is not the file the model was loaded from.
@@ -1468,7 +1479,7 @@ fn write_region(
     region: &Region,
     owner: Option<&Faction>,
     template: Option<&EsfRecord>,
-    naval_units: &std::collections::BTreeSet<&str>,
+    is_naval: &dyn Fn(&str) -> bool,
     links: &mut RecruitmentLinks<'_>,
     rules: &ntw_sim::campaign::rules::CampaignRules,
 ) -> Result<(), SaveError> {
@@ -1525,7 +1536,7 @@ fn write_region(
         .zip(&linked)
         .map(|(it, s)| match s {
             Some(s) => QueueDest::Linked(*s),
-            None if !naval_units.contains(it.unit_key.as_str()) => QueueDest::New(None),
+            None if !is_naval(&it.unit_key) => QueueDest::New(None),
             None if port.is_some() => QueueDest::New(port),
             // PROVISIONAL (SAVE_COMPAT.md §32): a ship in a region without a port manager goes to
             // the region's own manager, and loads back from there as a queued ship of the region.
@@ -1543,7 +1554,7 @@ fn write_region(
             links.repaired.push(format!("REGION {}: added {}", region.id.raw(), added.join(", ")));
         }
     }
-    write_recruitment(r, region, &dests, naval_units)
+    write_recruitment(r, region, &dests, is_naval)
 }
 
 /// Writes `region`'s queue to its managers, item `i` to `dests[i]` (the repair has run, so every
@@ -1551,7 +1562,7 @@ fn write_region(
 /// still at its index). Every item's manager and record are resolved into new lists before any
 /// manager is changed, so a failure (a missing manager or record: a `SaveError`) leaves the managers
 /// as they were. A manager's items not in the queue (cancelled, finished) are dropped.
-fn write_recruitment(r: &mut EsfRecord, region: &Region, dests: &[QueueDest], naval_units: &std::collections::BTreeSet<&str>) -> Result<(), SaveError> {
+fn write_recruitment(r: &mut EsfRecord, region: &Region, dests: &[QueueDest], is_naval: &dyn Fn(&str) -> bool) -> Result<(), SaveError> {
     let mut managers = managers_mut(r);
     let mut out: Vec<Vec<Vec<EsfNode>>> = vec![Vec::new(); managers.len()];
     for (it, d) in region.recruitment_queue.iter().zip(dests) {
@@ -1592,7 +1603,7 @@ fn write_recruitment(r: &mut EsfRecord, region: &Region, dests: &[QueueDest], na
                 e
             }
             QueueDest::New(_) => {
-                let naval = naval_units.contains(it.unit_key.as_str());
+                let naval = is_naval(&it.unit_key);
                 vec![EsfNode::Record(Box::new(recruitment_item(region, it, naval)))]
             }
         };
@@ -2083,7 +2094,7 @@ mod tests {
             (RecruitmentItemId(930), at(None, 0)),
         ]);
         let mut links = RecruitmentLinks::new(&sources);
-        write_region(&mut r, &region, None, None, &BTreeSet::from(["ship"]), &mut links, &Default::default()).unwrap();
+        write_region(&mut r, &region, None, None, &|k| k == "ship", &mut links, &Default::default()).unwrap();
         assert_eq!(links.broken, 1, "the ship linked to a foot record is counted (and logged once per save)");
         // (id, unit key, turns, mark) of each record.
         type Fields = (Option<EsfNode>, Option<String>, Option<u32>, Option<u32>);
@@ -2182,7 +2193,7 @@ mod tests {
             let sources = BTreeMap::new();
             let mut links = RecruitmentLinks::new(&sources);
             let region = Region { recruitment_queue: vec![new_item(8, "foot")], ..test_region() };
-            write_region(&mut r, &region, None, None, &BTreeSet::from(["ship"]), &mut links, &Default::default()).unwrap();
+            write_region(&mut r, &region, None, None, &|k| k == "ship", &mut links, &Default::default()).unwrap();
             assert_eq!(unit_keys(&mut r, None), ["foot"]);
             assert_eq!(links.repaired.len(), usize::from(!own_has_array));
             // The expected record: the source with only the region's own manager changed (holding the item).
@@ -2209,11 +2220,11 @@ mod tests {
         // repair never leaves, forced here: slot 4 is not there).
         let region = Region { recruitment_queue: vec![new_item(8, "foot"), new_item(9, "ship")], ..test_region() };
         let dests = [QueueDest::Linked(RecruitmentSource { port_slot: None, index: 0 }), QueueDest::New(Some(4))];
-        assert!(matches!(write_recruitment(&mut r, &region, &dests, &BTreeSet::from(["ship"])), Err(SaveError::Missing(_))));
+        assert!(matches!(write_recruitment(&mut r, &region, &dests, &|k| k == "ship"), Err(SaveError::Missing(_))));
         assert_eq!(r, before, "nothing written");
         // The same with the ship sent to the region's own manager is written.
         let dests = [QueueDest::Linked(RecruitmentSource { port_slot: None, index: 0 }), QueueDest::New(None)];
-        write_recruitment(&mut r, &region, &dests, &BTreeSet::from(["ship"])).unwrap();
+        write_recruitment(&mut r, &region, &dests, &|k| k == "ship").unwrap();
         assert_eq!(unit_keys(&mut r, None), ["foot", "ship"]);
     }
 
@@ -2224,7 +2235,7 @@ mod tests {
     #[test]
     fn new_items_go_to_their_manager_in_any_order() {
         let sources = BTreeMap::new();
-        let ships = BTreeSet::from(["ship"]);
+        let ships = |k: &str| k == "ship";
         let EsfNode::Record(mut bare) = rec("REGION", (0..27).map(|_| EsfNode::U32(7)).collect()) else { unreachable!() };
         let region = Region { recruitment_queue: vec![new_item(8, "foot")], ..test_region() };
         let mut links = RecruitmentLinks::new(&sources);
@@ -2269,7 +2280,7 @@ mod tests {
         let before = r.clone();
         let none = BTreeMap::new();
         let mut links = RecruitmentLinks::new(&none);
-        write_region(&mut r, &test_region(), None, None, &BTreeSet::new(), &mut links, &Default::default()).unwrap();
+        write_region(&mut r, &test_region(), None, None, &|_| false, &mut links, &Default::default()).unwrap();
         assert_eq!(r, before);
         assert!(links.repaired.is_empty());
         // The region's own manager without its array; a ship queued in the port, loaded from there.
@@ -2283,7 +2294,7 @@ mod tests {
         let EsfNode::Record(mut r) = rec("REGION", children) else { unreachable!() };
         let before = r.clone();
         let sources = BTreeMap::from([(RecruitmentItemId(8), RecruitmentSource { port_slot: Some(0), index: 0 })]);
-        let ships = BTreeSet::from(["ship"]);
+        let ships = |k: &str| k == "ship";
         let mut region = Region { recruitment_queue: vec![new_item(8, "ship")], ..test_region() };
         let mut links = RecruitmentLinks::new(&sources);
         write_region(&mut r, &region, None, None, &ships, &mut links, &Default::default()).unwrap();
@@ -2312,7 +2323,7 @@ mod tests {
         let sources = BTreeMap::from([(RecruitmentItemId(8), RecruitmentSource { port_slot: None, index: 0 })]);
         let region = Region { recruitment_queue: vec![new_item(8, "foot")], ..test_region() };
         let mut links = RecruitmentLinks::new(&sources);
-        write_region(&mut r, &region, None, None, &BTreeSet::new(), &mut links, &Default::default()).unwrap();
+        write_region(&mut r, &region, None, None, &|_| false, &mut links, &Default::default()).unwrap();
         assert_eq!((links.broken, links.misplaced), (0, 0));
         assert_eq!(r.child("REGION_RECRUITMENT_MANAGER"), before.child("REGION_RECRUITMENT_MANAGER"), "the linked record is kept as it was");
     }
@@ -2378,7 +2389,7 @@ mod tests {
         assert_eq!(sm, before, "the kept item is written back as it was");
         assert_eq!(read(&sm), loaded);
         let mut treasury = -50;
-        ntw_sim::campaign::treasury::refund(&mut treasury, loaded[0].cost);
+        ntw_sim::campaign::treasury::credit(&mut treasury, loaded[0].cost);
         assert_eq!(treasury, -50);
     }
 

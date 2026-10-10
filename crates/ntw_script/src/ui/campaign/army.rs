@@ -560,6 +560,10 @@ fn pool_kind_of(m: &CampaignModel, force: ForceId) -> Option<(ntw_sim::campaign:
 ///
 /// - the price is the model's hire cost measured at the force ([`CampaignModel::hire_cost_into`],
 ///   the CONFIRMED formula: 400 + 300 × rank + the distance part);
+/// - `IsRecruitable`: the row's flags are all clear (`0x009DD3AF`); the model holds the money bit
+///   (`0x00A1BB20` bit 1, [`treasury::commander_affordable`], CONFIRMED). PROVISIONAL: bit 0
+///   (`CurrentNumGenerals` ≥ `MaxGeneralsAllowed`) and bit 2 (the force has no room, +0x40) are not
+///   modelled (always clear);
 /// - `DistanceToCapital` / `MaxDistanceToTrack`: the force's distance to its capital and
 ///   `character_recruitment_max_distance` (the panel divides them for its bar; INFERRED pair, the
 ///   model's own distance part uses the same maximum);
@@ -627,7 +631,7 @@ fn commanders_for_recruitment(lua: &Lua, inner: &Inner, ui: &CampaignUi, force: 
                     character: c,
                     cost,
                     type_name: character_type_name(inner, ui, c),
-                    recruitable: cost.is_some_and(|c| c <= purse),
+                    recruitable: cost.is_some_and(|c| treasury::commander_affordable(purse, c)),
                     historical: details.and_then(|d| d.historical_key.as_deref()).is_some(),
                     traits: details.map(|d| d.traits.iter().take(4).map(|t| t.key.clone()).collect()).unwrap_or_default(),
                     image: portrait_image(inner, &m, c),

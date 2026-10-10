@@ -268,6 +268,16 @@ pub struct OpenedCampaign {
 
 /// The one entry point: opens a new campaign or a save, with its campaign's map.
 pub fn open(files: GameFiles<'_>, start: Start<'_>, db: &GameDatabase) -> Result<OpenedCampaign, SourceError> {
+    open_from(files, start, db, find)
+}
+
+/// [`open`] with the lookup of a campaign's source given, so a test can supply its own source.
+fn open_from<'a>(
+    files: GameFiles<'a>,
+    start: Start<'_>,
+    db: &GameDatabase,
+    find: impl Fn(GameFiles<'a>, &str) -> Option<Box<dyn CampaignSource + 'a>>,
+) -> Result<OpenedCampaign, SourceError> {
     let (source, mut loaded) = match start {
         Start::New(key, unit_multiplier) => {
             let source = find(files, key).ok_or_else(|| SourceError::NotFound(key.to_owned()))?;
@@ -299,6 +309,67 @@ mod tests {
 
     use super::*;
     use crate::own_save::{self, SaveData};
+
+    /// A source's own features replace the key's; a source without them leaves the rules' as they were.
+    #[test]
+    fn a_sources_features_replace_the_rules_through_open() {
+        use ntw_formats::campaign_map::{Heightmap, RegionMap};
+        use ntw_sim::campaign::pathing::PathGrid;
+
+        struct Fake(Option<CampaignFeatures>);
+        impl CampaignSource for Fake {
+            fn key(&self) -> &str {
+                "made_up_campaign"
+            }
+            fn info(&self) -> Result<CampaignInfo, SourceError> {
+                Ok(own_save::tests::info())
+            }
+            fn new_campaign(&self, _db: &GameDatabase) -> Result<LoadedCampaign, SourceError> {
+                let info = own_save::tests::info();
+                Ok(LoadedCampaign { model: own_save::tests::made_up_model(), info, rebel_faction: None, warnings: Vec::new(), script_values: Vec::new(), restricted_units: Vec::new() })
+            }
+            fn map(&self, _db: &GameDatabase, _info: &CampaignInfo) -> Result<MapData, SourceError> {
+                let regions = RegionMap {
+                    bounds_min: (0.0, 0.0),
+                    bounds_max: (1.0, 1.0),
+                    theatre: ((0.0, 0.0), (1.0, 1.0)),
+                    labels: Vec::new(),
+                    vertices: Vec::new(),
+                    regions: Vec::new(),
+                    trade_nodes: Vec::new(),
+                    ground_types: Vec::new(),
+                };
+                let display = MapDisplay {
+                    key: "made_up_map".into(),
+                    regions,
+                    heightmap: Heightmap { width: 1, height: 1, values: vec![0] },
+                    height_scale: 1.0,
+                    ground: None,
+                    lines: Vec::new(),
+                    coast: Vec::new(),
+                    trees: None,
+                    river_texture: Err("made up".into()),
+                    arrow_model: Err("made up".into()),
+                };
+                Ok(MapData { display: Arc::new(display), terrain: Terrain(Arc::new(PathGrid::new((0.0, 0.0), 1.0, 1, 1))), theatre_pictures: Vec::new() })
+            }
+            fn features(&self) -> Option<CampaignFeatures> {
+                self.0.clone()
+            }
+        }
+
+        let vfs = Vfs::new();
+        let files = GameFiles { vfs: &vfs };
+        let db = GameDatabase::test_fixture();
+        let own = CampaignFeatures { loot_value: (7, 77), ..CampaignFeatures::default() };
+        assert_ne!(own, CampaignFeatures::default());
+        let with = |f: Option<CampaignFeatures>| {
+            open_from(files, Start::New("made_up_campaign", None), &db, move |_, _| Some(Box::new(Fake(f.clone())) as Box<dyn CampaignSource>)).expect("opens")
+        };
+        assert_eq!(with(Some(own.clone())).loaded.model.rules.features, own);
+        let before = own_save::tests::made_up_model().rules.features.clone();
+        assert_eq!(with(None).loaded.model.rules.features, before);
+    }
 
     /// A save names its campaign: when no source has that campaign, opening the save is an error
     /// naming it, not a campaign without a map; bytes that are no save are a load error.

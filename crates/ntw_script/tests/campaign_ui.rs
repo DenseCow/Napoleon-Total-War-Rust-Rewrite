@@ -1737,7 +1737,7 @@ fn negotiation_regions_list_the_tradeable_regions() {
     let (offers, _): (mlua::Table, mlua::Table) = s.host.lua().load("return CampaignUI.TradeableRegions()").eval().unwrap();
     let row: mlua::Table = offers.get(1).unwrap();
     assert!(row.get::<bool>("CurrentlyOffered").unwrap());
-    // Proposing the deal (accepted at once, PLACEHOLDER for the AI's evaluation) hands it over.
+    // Proposing the gift (the AI's evaluation accepts it: all gain) hands it over.
     s.host.lua().load("CampaignUI.ProposeDeal()").exec().unwrap();
     frame(&s, 0.2);
     no_errors(&s.host);
@@ -1751,8 +1751,8 @@ fn negotiation_regions_list_the_tradeable_regions() {
     frame(&s, 0.3);
     no_errors(&s.host);
     assert!(s.scripts.state().model.negotiations.current.as_ref().unwrap().regions.is_empty());
-    // Demanding one of Austria's regions: until the AI's evaluation is ported the AI refuses to
-    // give it (PLACEHOLDER, logged once): the result is "declined" and nothing changes hands.
+    // Demanding one of Austria's regions for nothing: the AI's evaluation refuses (all cost, no
+    // gain): the result is "declined" and nothing changes hands.
     let asked = {
         let st = s.scripts.state();
         let m = &st.model;
@@ -1768,8 +1768,7 @@ fn negotiation_regions_list_the_tradeable_regions() {
     frame(&s, 0.5);
     let finished: Option<bool> = s.host.lua().load("return CampaignUI.Finished()").eval().unwrap();
     assert_eq!(finished, Some(true), "declined is a result");
-    let log = s.host.take_log();
-    assert_eq!(log.iter().filter(|l| l.contains("the AI refuses to give")).count(), 1, "{log:?}");
+    no_errors(&s.host);
     let st = s.scripts.state();
     assert_eq!(st.model.world.regions[&asked].owner, st.model.faction_by_key("austria").unwrap().id);
 }

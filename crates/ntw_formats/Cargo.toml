@@ -15,7 +15,3 @@ log = "0.4"
 [features]
 # The in-memory sound test files (`sound::test_files`), for other crates' tests.
 test-files = []
-
-[dev-dependencies]
-# The exe's class codes for the template tests (`ntw_sim::unit_kind`).
-ntw_sim = { path = "../ntw_sim" }

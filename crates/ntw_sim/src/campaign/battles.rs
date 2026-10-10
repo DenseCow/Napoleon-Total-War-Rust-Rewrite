@@ -341,8 +341,7 @@ impl CampaignModel {
         let Some(r) = self.world.regions.get_mut(&region) else { return };
         let items = std::mem::take(&mut r.recruitment_queue);
         r.construction.clear();
-        let rules = std::sync::Arc::clone(&self.rules);
-        self.cancelled_recruitment_items(region, &items, |i| if rules.is_naval_unit(&i.unit_key) { refund.naval } else { refund.land });
+        self.cancelled_recruitment_items(region, &items, |rules, i| if rules.is_naval_unit(&i.unit_key) { refund.naval } else { refund.land });
     }
 }
 

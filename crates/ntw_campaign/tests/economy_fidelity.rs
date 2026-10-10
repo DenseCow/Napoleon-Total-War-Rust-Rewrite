@@ -411,7 +411,7 @@ fn recruited_unit_size_is_num_men_for_land_and_the_crew_sum_for_ships() {
         }
         let m = ntw_campaign::read_file(&path, &db).expect("save loads").model;
         for u in m.world.forces.values().flat_map(|f| f.units.iter()) {
-            let is_naval = m.rules.units.get(&u.unit_key).is_some_and(|r| r.is_naval);
+            let is_naval = m.rules.is_naval_unit(&u.unit_key);
             if is_naval {
                 naval += 1;
             }
@@ -985,4 +985,60 @@ fn deal_inflation_and_economy_history_round_trip() {
         checked += 1;
     }
     println!("{checked} saves checked");
+}
+
+/// The AI's region deal evaluation (`0x00C131C0` → `0x00A364B0` → `0x00AA1E90`, AI_RESEARCH.md §4
+/// "Region value") on the original's Europe start position, France human: the regions carry the
+/// original's stored base values; a demand for a bordering AI region is refused (all cost, no
+/// gain, a −2500 region goal), a bordering region offered to that AI is accepted (its worth is at
+/// least the base 15000, above the goal's 2500 × 1.05).
+#[test]
+fn region_deals_on_the_europe_start() {
+    use ntw_sim::campaign::{CampaignCommand, FactionId};
+    let dir = data_dir();
+    if !dir.is_dir() {
+        println!("SKIP: no install at {}", dir.display());
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).expect("database");
+    let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
+    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+    let bytes = files.read("campaigns/eur_napoleon/startpos.esf").expect("startpos");
+    let mut loaded = ntw_campaign::read_esf(&EsfFile::from_bytes(&bytes).expect("esf"), &db).expect("loads");
+    let map = ntw_formats::campaign_map::CampaignMap::load(&files, &loaded.info.map_key).expect("map");
+    ntw_campaign::trade::attach_map(&mut loaded.model, &map.regions);
+    let mut m = loaded.model;
+    let human = m.world.factions.values().find(|f| f.key == "france").expect("france").id;
+    m.turn.humans = vec![human];
+    assert!(!m.world.region_base_values.is_empty(), "the start position's region base values");
+    // An AI faction whose diplomacy options let it trade regions with France (record 4 not 1 / 3
+    // either way; the exe refuses the others outright).
+    let open = |ai: FactionId| {
+        let opt = |a: FactionId, b: FactionId| m.world.relationships.get(&(a, b)).map_or(0, |r| r.diplomacy_options[4]);
+        !matches!(opt(ai, human), 1 | 3) && !matches!(opt(human, ai), 1 | 3)
+    };
+    // A human region (not its capital) bordering a non-capital region of such a faction.
+    let capital = m.world.capital(human);
+    let (ours, theirs) = m
+        .world
+        .regions
+        .values()
+        .filter(|r| r.owner == human && Some(r.id) != capital)
+        .find_map(|r| {
+            let n = m.world.region_neighbours.get(&r.id)?;
+            n.iter().find(|x| m.world.regions.get(x).is_some_and(|x| x.owner != human && m.world.capital(x.owner) != Some(x.id) && open(x.owner))).map(|&x| (r.id, x))
+        })
+        .expect("a human region bordering a non-capital AI region open to region deals");
+    let ai = m.world.regions[&theirs].owner;
+    m.apply(CampaignCommand::BeginNegotiation { proposer: human, recipient: ai }).unwrap();
+    m.apply(CampaignCommand::ProposeRegions { clear: false, demanded: vec![theirs], offered: vec![] }).unwrap();
+    let n = m.negotiations.current.clone().unwrap();
+    let v = m.region_deal_value(&n, m.deal_inflation.factor);
+    assert!(v.gain == 0 && v.cost > 0 && v.given > 0, "{v:?}");
+    assert_eq!(m.ai_accepts_deal(), Some(false), "a demand for {theirs:?}: {v:?}");
+    m.apply(CampaignCommand::ProposeRegions { clear: false, demanded: vec![], offered: vec![ours] }).unwrap();
+    let n = m.negotiations.current.clone().unwrap();
+    let v = m.region_deal_value(&n, m.deal_inflation.factor);
+    assert!(v.gain >= 15_000 && v.cost == 0 && v.given == 0, "{v:?}");
+    assert_eq!(m.ai_accepts_deal(), Some(true), "a gift of {ours:?} to {ai:?}: {v:?}");
 }

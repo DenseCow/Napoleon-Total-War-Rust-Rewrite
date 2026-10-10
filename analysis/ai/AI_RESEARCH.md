@@ -5,6 +5,11 @@ reading of the evidence; **UNKNOWN** = not found yet. Our stand-ins are tagged *
 No decompiled code is reproduced here: only specs in our own words.
 
 ## 0. Where I am / what's next (updated with each push)
+- DONE (worker deal-region, 2026-10-10): the **region value of a deal** (§4 "Deal evaluation",
+  "Region value", CONFIRMED formulas) replaces the region PLACEHOLDER of `ai_refuses_deal`:
+  `CampaignModel::{region_deal_value, region_deal_worth}`, `deal_value::human_demand_scaled`,
+  `World::deal_regions_received` (faction `+0x938`); `region_value` moved from ntw_ai to
+  `ntw_sim::campaign::region_value` (one source). Next: the PROVISIONAL inputs listed there.
 - DONE (round 7, sandbox worker ai2, sandbox commit 01b71af; ported to main from sandbox/main 90bfc1c):
   **RESEARCH_TECHNOLOGY** decoded and ported (§4 "RESEARCH_TECHNOLOGY", CONFIRMED structure): the
   behaviour row is in every shipped eur manager at priority 500; the step sorts its candidates by
@@ -1084,8 +1089,8 @@ counter, `+0x646` deploying, `+0x647` first update done, `+0x648` deployed.
 How the AI recipient answers a proposed deal. Ported pieces: `ntw_sim::campaign::deal_value`
 (tests `technology_value_follows_the_traced_formula`, `a_fair_trade_passes_and_a_lopsided_demand_fails`,
 `inflation_is_clamped_and_truncated_when_applied`, and the round-3 tests below). `CampaignModel::ai_refuses_deal`
-answers a deal of technologies as the exe (`ai_accepts_technologies`); a deal with regions keeps the
-PLACEHOLDER rule (the AI gives no region or technology in it) until the region value is traced.
+answers a deal of regions and technologies as the exe (`ai_accepts_deal`, records 4 then 5; worker
+deal-region, 2026-10-10, below "Region value").
 
 - **Entry** `0x00C49BE0` (`CCQ_DIPLOMACY_PROPOSE_DEAL` executor `0x00933690`; the AI's counter-offer
   `0x00CC58C0` calls it with flag 0): unless the recipient (`+0x1C`) is human and `0x00C1E240`
@@ -1138,15 +1143,48 @@ PLACEHOLDER rule (the AI gives no region or technology in it) until the region v
 - **Region value** (record virtual `+0x38` = `0x00C131C0`): from the proposer's side (wrapper ==
   proposer, `0x00898B20`) `0x00A364B0(offered, demanded, proposer)`, × trunc(inflation), then
   `0x00C4D140`: slot 2 × 1.5^(max(m, 1) − 1), m = 0 unless the proposer is human and the peace record
-  is empty, then m = demanded count + proposer faction `+0x938` (UNKNOWN counter). `0x00A364B0`:
-  for each offered region, v = `0x00AA1E90(region, recipient)`; v goes to slot 2 when the region is
-  `0x00C3E0C0` or the strategy's `+0x34` virtual `+0x94` holds, else to slot 0 when `0x00A79050`
-  ≥ 0, or > −6 and the region is in the neighbour list (`+0x20`/`+0x24`) of one of a faction's regions (list `+0x77C`; which faction: not traced)
-; for each demanded region: slot 1 += `0x00AA1E90(region, proposer…)` (unless the
-  same tests), slot 2 += `0x00AA1E90(region, recipient)`. `0x00AA1E90` = belief 0x4D base
-  (`0x00A75560`, ported `region_value::base`) with the group-change and personality factors
-  (virtuals `+0x21C`, `+0x220`, `+0x22C`), ×2 tests, ×1.5 when allied regions are near. INFERRED
-  reading of the branches; NOT ported.
+  is empty, then m = demanded count + proposer faction `+0x938`; slot 2 is read as unsigned, scaled
+  in f32 and truncated (the step runs for every deal). Faction `+0x938` (getter `0x008E66A0`) = the
+  regions a human faction has received in accepted deals, +1 per region by `0x008E2B70` from the
+  regions record's accept `0x00C18BF0`; saved in the `FACTION` record from version 0xB (reader
+  `0x0087B7EE`, writer `0x00893B22`). `0x00A364B0`: for each offered region, v =
+  `0x00AA1E90(region, recipient)`; v goes to slot 2 when the region passes `0x00C3E0C0` (campaign
+  region `+0x22C`, UNKNOWN meaning) or the CAI region's strategy `+0x34` virtual `+0x94` (INFERRED a
+  siege), else to slot 0 when the attitude `0x00A79050` (the region's hypothetical public order
+  under the AI, from its population classes) is ≥ 0, or ≥ −5 with the region in the neighbour list
+  (`+0x20`/`+0x24`) of one of the AI's regions (faction list `+0x77C`), else nowhere; for each
+  demanded region: slot 1 += `0x00AA1E90(region, proposer)` (unless the same two tests), slot 2 +=
+  `0x00AA1E90(region, recipient)`. CONFIRMED (disassembly).
+- **Region worth `0x00AA1E90(region, faction)`** (CONFIRMED, disassembly): the base is belief 0x4D's
+  stored value (`0x00A75560`; the startpos value, else the GDP formula: `region_value::stored_or_formula`).
+  Own branch (the region belongs to a region group, CAI region `+0x12C` non-null, so its group
+  belief 0x52 `0x00A75460` exists, test at `0x00AA1F0A`; and the region's virtual `+8(faction)`
+  holds, the owner check; otherwise the other branch): group state SPLIT → × the compound
+  factor (SPLIT, SPLIT, n); other branch: MERGED → compound (MERGED, REDUCED, n); n = the region's
+  neighbours (`0x00C3FD10`) its owner holds; other states leave the base. The group state comes
+  from `0x00A634D0` (belief 0x52's region-group analysis, via `0x00A63FD0`); the multipliers are
+  the personality's `COMPOSITE_VALUE_ANALYSER_*` slots (virtuals `+0x21C` / `+0x220`). Then ×2 when,
+  own branch, the faction holds exactly one region of the region's theatre, other branch, none
+  (`0x00C40570` / `0x00C3E120` / `0x00C43AD0`); ×2 when the region is in the faction's CAI list
+  `+0x1C0` (`0x00C45CF0`); ×1.5 (`v + (v >> 1)`, unsigned) when the region has building slots
+  (`+0x128`) and no other region of the faction has any (`0x00BECCE0`, `0x00C3C970`). Ported as
+  `region_value::faction_value` + `CampaignModel::region_deal_worth`.
+- **Port (worker deal-region).** `CampaignModel::ai_accepts_deal` evaluates record 4 (regions) then
+  record 5 (technologies), each declined on `diplomacy_options[index]` 1 / 3 and weighted by its
+  goals (`goal_type_weight(4)` = 2500, region goals −1: an offered region in
+  `tradeable_regions(proposer)`, a demanded one in `tradeable_regions(ai)`, both under
+  `deal_goal_allowed(ai, proposer, 4)`). Accepting a deal counts each region a human receives
+  (`World::deal_regions_received`). Tests `the_ai_evaluates_region_deals`,
+  `the_ai_evaluates_regions_and_technologies_together`, and `region_deals_on_the_europe_start`
+  (economy_fidelity, real data). PROVISIONAL inputs: the `+0x22C` and siege tests read false; the
+  attitude is not ported and reads 0 (every offered region is gain; `0x00A79050` = the lower of two
+  population-class results `0x008BDB90` minus 6, or minus floor((1 − x) × 6) for a region in the
+  AI's list `+0x50/+0x54`); every region is taken to have a group (`+0x12C`, region groups not
+  in the model); the peace record is not in the model (taken as empty); the group state is always NEW
+  (belief 0x52 not ported), so the SPLIT / MERGED factors are not reached; the `+0x1C0` list reads
+  false (not imported); several theatres count as one; `+0x938` is not read from original saves
+  (its `FACTION` child index is not found); the base value is the startpos one (its refresh,
+  settlement `+0xE8`, is not traced).
 - **Who scores the goals (round 2, CONFIRMED).** The AI object of the evaluator is the faction's
   manager (`0x00A87F50`); its BDI core is manager `+8` (`0x005D6450`), built by `0x00C8E290`:
   `+0x34` the component list, `+0x90` `0x00C904F0`, `+0x94` `0x00C8FB10`, `+0x98` the **finance
@@ -1274,21 +1312,18 @@ PLACEHOLDER rule (the AI gives no region or technology in it) until the region v
   the pot of the intention's kind (`0x004A5140`): 0/1 → `+0x130`, 2/3 → `+0x138`, 4..7 → `+0x128`,
   8 → `+0x140` (diplomatic), 9 → all four in proportion (all 0 when the cost exceeds their sum), 10 →
   none. Only the AI's own paid diplomatic intentions spend from `+0x140`.
-- **Wired (round 3).** `CampaignModel::ai_refuses_deal` evaluates a deal of technologies as the exe
-  (`ai_accepts_technologies`: the `diplomacy_options` refusal, the goal weights with
-  `research_need` / `technology_spread`, the value at the campaign's inflation, `fair` / `good`).
-  PROVISIONAL there: the budget is taken as ≥ 0 (our AI has no kind-8 intentions); a refused deal is
-  declined where the exe may counter-offer (`0x00CC58C0`); the records the model does not hold
-  (trade, payments, …) are not evaluated; the port-slot mapping above. A deal with regions keeps the
-  PLACEHOLDER rule (the AI gives no region or technology in it).
-- **Resume point:** the region value: `0x00C131C0` → `0x00A755E0` → `0x00A364B0` (per region
-  `0x00AA1E90(region, faction, …)`, the `0x00C3E0C0` / CAI region `+0x12C → +0x34` virtual `+0x94`
-  tests, `0x00A79050` attitude with the neighbour list) and `0x00C4D140` (faction `+0x938`).
-  `0x00AA1E90` reads belief 0x4D (`0x00A75560`, settlement fields `+0xE8`/`+0xBC`/`+0xCC` UNKNOWN),
-  belief `0x00A75460`, `0x00A63FD0`, the group-change state `0x00A634D0`, personality virtuals
-  `+0x21C`/`+0x220`/`+0x22C`, `0x00A2C170`, `0x00C3E120`, `0x00C43AD0`, `0x00C40570` and the ×1.5
-  allied-neighbour test; then evaluate record 4 and drop the PLACEHOLDER. The counter-offer
-  `0x00CC58C0` stays its own item.
+- **Wired (round 3, regions by worker deal-region).** `CampaignModel::ai_refuses_deal` evaluates a
+  deal of regions and technologies as the exe (`ai_accepts_deal`: the `diplomacy_options` refusal,
+  the goal weights with `research_need` / `technology_spread` and the region goals, the values at
+  the campaign's inflation, `fair` / `good`). PROVISIONAL there: the budget is taken as ≥ 0 (our AI
+  has no kind-8 intentions); a refused deal is declined where the exe may counter-offer
+  (`0x00CC58C0`); the records the model does not hold (trade, payments, …) are not evaluated; the
+  port-slot mapping above; the region inputs listed under "Port (worker deal-region)".
+- **Resume point:** the region value's PROVISIONAL inputs: the attitude `0x00A79050`, the
+  `0x00C3E0C0` (`+0x22C`) and siege tests, belief 0x52's region-group analysis (`0x00A634D0` /
+  `0x00A63FD0`), the CAI `+0x1C0` list import, `+0x938` from original saves, the peace record,
+  multi-theatre maps and the base-value refresh (`+0xE8`). The counter-offer `0x00CC58C0` stays its
+  own item.
 
 ## 5. What the campaign scripts tell the AI (CONFIRMED calls, `analysis/worker3/lua_api.txt`)
 - `force_diplomacy(a, b, option, offer, accept)` (714 calls): options `war`, `peace`, `alliance`,

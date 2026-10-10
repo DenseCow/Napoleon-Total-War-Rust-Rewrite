@@ -7,6 +7,24 @@ The morning report from night sessions, newest night first. Two lists per night:
 - **Done tonight:** everything finished, merged or settled. One line each: what, commit, how to see it.
   Claude clears a night's list once the user has read it.
 
+## Night of 2026-10-10 (errands, from ~evening)
+
+### Usage tonight
+
+- Night wrap-up at **71%**, stop at **72%** of the week (block base moved to 62.5 at your request, 2026-10-10).
+
+### Needs you
+
+- (nothing yet)
+
+### Done tonight
+
+- **Treasury rules merged** (`5bd2d229`): money moves as the exe does. A player's pool hire or promotion can go into
+  debt and the AI hires free; a state gift gives the receiver nothing (the exe's own behaviour); a deal's lump sum is a
+  one-off payment (category 3 charge, category 1 credit). All tags cite exe addresses, review clean. Nothing visible to check.
+- ui-fails: the Army Recruitment tab fix is committed (`9a14cfa9` on `work/ui-fails`, not merged yet). That worker was
+  lost at the /clear; a new worker is on the other three failed checks (settlement tooltip, Enlist traits, unit-card nil).
+
 ## Night of 2026-10-09 → 10
 
 ### Usage tonight

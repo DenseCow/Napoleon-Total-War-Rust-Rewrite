@@ -110,12 +110,22 @@ pub struct KitLevel {
     pub blend_in: Vec<f32>,
     /// The mount's alternatives (empty on foot).
     pub mount: Vec<Arc<Anim>>,
+    /// Each of `mount`'s lines' blend-in time (s; the mount fragment's lines, same length and
+    /// order as `mount`): the mount display blends its own clip changes (`view::ClipBlend`).
+    pub mount_blend_in: Vec<f32>,
 }
 
 impl KitLevel {
     /// The blend-in time of the alternative a man with selection number `sel` plays.
     pub fn blend_in_of(&self, sel: u32) -> f32 {
         self.blend_in[ntw_formats::unit_animation::alternative(sel, self.man.len())]
+    }
+
+    /// The blend-in time of the mount alternative a figure with selection number `sel` rides
+    /// (0 on foot).
+    pub fn mount_blend_in_of(&self, sel: u32) -> f32 {
+        let i = ntw_formats::unit_animation::alternative(sel, self.mount.len());
+        self.mount_blend_in.get(i).copied().unwrap_or(0.0)
     }
 }
 
@@ -135,6 +145,17 @@ pub struct FigureKit {
     pub actions: HashMap<String, KitLevel>,
     /// The stand clip is a `_TRAINED` one (trained death families).
     pub trained: bool,
+    /// A mounted figure's gait ladder (`unit_animation::MOUNT_LADDER`), slowest loop first, as
+    /// far as its tables resolve the loops; empty on foot.
+    pub ladder: Vec<LadderRung>,
+}
+
+/// One rung of a mounted figure's gait ladder: its loop, and the transition clip into it from
+/// the rung below (from the stand for the first), when the tables have one.
+#[derive(Clone)]
+pub struct LadderRung {
+    pub into: Option<KitLevel>,
+    pub gait: KitLevel,
 }
 
 /// Bevy asset stores used while building kits.
@@ -231,32 +252,30 @@ impl SoldierLibrary {
             if resolved.is_empty() {
                 continue;
             }
-            let looping = slot == unit_animation::COMBAT_READY || slot.contains("COMBAT_IDLE") || slot == unit_animation::AIM;
+            let looping = slot == unit_animation::COMBAT_READY || slot.contains("COMBAT_IDLE") || slot == unit_animation::AIM || slot == unit_animation::CHARGE;
             let mut speed = 0.0;
+            // The level's speed is its last clip's root speed (loops keep it too: the charge loop
+            // plays at the man's speed over it).
             let mut load = |s: &mut Self, path: &str| -> Option<Arc<Anim>> {
-                if looping {
-                    s.clip(path)
-                } else {
-                    s.clip_raw(path).map(|(a, v)| {
-                        speed = v;
-                        a
-                    })
-                }
+                let (a, v) = if looping { s.clip_entry(path)? } else { s.clip_raw(path)? };
+                speed = v;
+                Some(a)
             };
             let (man, blend_in): (Vec<_>, Vec<_>) = resolved
                 .iter()
                 .filter_map(|c| load(self, &c.clip.filename).map(|a| (a, c.clip.blend_in())))
                 .unzip();
-            let mut mount = Vec::new();
+            let (mut mount, mut mount_blend_in) = (Vec::new(), Vec::new());
             if let (Some(m), Some(ms)) = (&plan.mount, unit_animation::rider_mount_slot(&slot)) {
                 for c in tables.resolve(&m.animation_table, &ms) {
                     if let Some(a) = load(self, &c.clip.filename) {
                         mount.push(a);
+                        mount_blend_in.push(c.clip.blend_in());
                     }
                 }
             }
             if !man.is_empty() {
-                out.insert(slot, KitLevel { speed, man, blend_in, mount });
+                out.insert(slot, KitLevel { speed, man, blend_in, mount, mount_blend_in });
             }
         }
         out
@@ -306,17 +325,19 @@ impl SoldierLibrary {
             for level in found {
                 let (man, blend_in): (Vec<_>, Vec<_>) =
                     level.man.iter().filter_map(|c| self.clip(&c.path).map(|a| (a, c.blend_in_time))).unzip();
-                let mount: Vec<_> = level.mount.iter().flatten().filter_map(|c| self.clip(&c.path)).collect();
+                let (mount, mount_blend_in): (Vec<_>, Vec<_>) =
+                    level.mount.iter().flatten().filter_map(|c| self.clip(&c.path).map(|a| (a, c.blend_in_time))).unzip();
                 if man.is_empty() || (plan.mount.is_some() && mount.is_empty()) {
                     continue;
                 }
-                kit_levels.push(KitLevel { speed: level.speed, man, blend_in, mount });
+                kit_levels.push(KitLevel { speed: level.speed, man, blend_in, mount, mount_blend_in });
             }
             if !kit_levels.is_empty() {
                 levels.push((gait, kit_levels));
             }
         }
         let actions = self.action_clips(&tables, &plan);
+        let ladder = self.ladder(&tables, &plan);
         self.tables = tables;
         if gaits.is_empty() {
             return Err(format!("{unit} {role:?}: no clips in table {}", plan.animation_table));
@@ -333,7 +354,32 @@ impl SoldierLibrary {
             None => None,
         };
         let trained = gaits.iter().any(|(g, a)| *g == Gait::Stand && a.slots.0.contains("TRAINED"));
-        Ok(FigureKit { plan, man, mount, gaits, levels, actions, trained })
+        Ok(FigureKit { plan, man, mount, gaits, levels, actions, trained, ladder })
+    }
+
+    /// The rider's and the mount's clips of mount slot `mount_slot` (the rider's through
+    /// `unit_animation::rider_slots`), in place, with their lines' blend-in times; the level's
+    /// speed is the first mount clip's root speed. None on foot or when either does not resolve.
+    fn mounted_level(&mut self, tables: &AnimationTables, plan: &FigurePlan, mount_slot: &str) -> Option<KitLevel> {
+        let m = plan.mount.as_ref()?;
+        let rider = unit_animation::rider_slots(mount_slot).iter().map(|s| tables.resolve(&plan.animation_table, s)).find(|v| !v.is_empty())?;
+        let horse = tables.resolve(&m.animation_table, mount_slot);
+        let speed = self.clip_entry(&horse.first()?.clip.filename)?.1;
+        let (man, blend_in): (Vec<_>, Vec<_>) = rider.iter().filter_map(|c| self.clip(&c.clip.filename).map(|a| (a, c.clip.blend_in()))).unzip();
+        let (mount, mount_blend_in): (Vec<_>, Vec<_>) = horse.iter().filter_map(|c| self.clip(&c.clip.filename).map(|a| (a, c.clip.blend_in()))).unzip();
+        (!man.is_empty() && !mount.is_empty()).then_some(KitLevel { speed, man, blend_in, mount, mount_blend_in })
+    }
+
+    /// A mounted figure's gait ladder: the rungs of `unit_animation::MOUNT_LADDER` whose loop
+    /// resolves, up to the first that does not.
+    fn ladder(&mut self, tables: &AnimationTables, plan: &FigurePlan) -> Vec<LadderRung> {
+        let mut out = Vec::new();
+        for (into, gait) in unit_animation::MOUNT_LADDER {
+            let Some(gait) = self.mounted_level(tables, plan, gait) else { break };
+            let into = self.mounted_level(tables, plan, into);
+            out.push(LadderRung { into, gait });
+        }
+        out
     }
 
     /// Assembles a mount (`mounts` key) as Bevy meshes with its texture.

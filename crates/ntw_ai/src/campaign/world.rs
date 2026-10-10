@@ -195,6 +195,10 @@ pub struct AiWorld {
     pub armies: BTreeMap<ForceId, AiArmy>,
     /// Stances, both directions as stored.
     pub stances: BTreeMap<(FactionId, FactionId), Stance>,
+    /// The relationships' scripted diplomacy permissions (`Relationship::diplomacy_options`), only
+    /// the relationships with a non-zero value; read through [`AiWorld::may_propose`] /
+    /// [`AiWorld::may_accept`], the model's rule.
+    pub diplomacy_options: BTreeMap<(FactionId, FactionId), [u32; ntw_sim::campaign::details::DIPLOMACY_OPTIONS.len()]>,
     /// Movement points per map unit (`road_level_0_action_point_cost` on `main`).
     pub move_cost_per_unit: f32,
     /// Units an army may hold (the model's [`CampaignModel::max_units`](ntw_sim::campaign::CampaignModel::max_units)).
@@ -305,7 +309,7 @@ impl AiWorld {
                 let used = r
                     .recruitment_queue
                     .iter()
-                    .filter(|i| !m.rules.units.get(&i.unit_key).is_some_and(|u| u.is_naval))
+                    .filter(|i| !m.rules.is_naval_unit(&i.unit_key))
                     .count() as u32;
                 let cap = m.recruitment_points_with(fx.as_ref().expect("has rules"), r.id, false).saturating_sub(used);
                 let entries = if faction.is_none_or(|f| f == r.owner) {
@@ -361,6 +365,11 @@ impl AiWorld {
                 out.stances.insert((f.id, *o), *s);
             }
         }
+        for (pair, r) in &w.relationships {
+            if r.diplomacy_options.iter().any(|v| *v != 0) {
+                out.diplomacy_options.insert(*pair, r.diplomacy_options);
+            }
+        }
         for fo in w.forces.values() {
             let (position, mp) = match fo.commander.and_then(|c| w.characters.get(&c)) {
                 Some(ch) => ((ch.position.0.to_f64(), ch.position.1.to_f64()), ch.movement_points),
@@ -388,6 +397,22 @@ impl AiWorld {
     /// Stance of `a` towards `b` (neutral when nothing is stored).
     pub fn stance(&self, a: FactionId, b: FactionId) -> Stance {
         self.stances.get(&(a, b)).copied().unwrap_or_default()
+    }
+
+    fn diplomacy_option(&self, a: FactionId, b: FactionId, option: usize) -> u32 {
+        self.diplomacy_options.get(&(a, b)).and_then(|o| o.get(option)).copied().unwrap_or(0)
+    }
+
+    /// May `a` propose diplomacy option `option` to `b`? The model's rule
+    /// ([`CampaignModel::may_propose`]) on the snapshot.
+    pub fn may_propose(&self, a: FactionId, b: FactionId, option: usize) -> bool {
+        ntw_sim::campaign::details::option_allows_proposal(self.diplomacy_option(a, b, option))
+    }
+
+    /// Does `a` accept diplomacy option `option` from `b`? The model's rule
+    /// ([`CampaignModel::may_accept`]) on the snapshot.
+    pub fn may_accept(&self, a: FactionId, b: FactionId, option: usize) -> bool {
+        ntw_sim::campaign::details::option_allows_acceptance(self.diplomacy_option(a, b, option))
     }
 
     /// Strength of an army: sum of unit quality (`cdir_unit_qualities`, else the `units` #4 battle cost,

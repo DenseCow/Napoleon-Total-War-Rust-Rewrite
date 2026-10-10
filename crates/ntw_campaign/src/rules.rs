@@ -122,11 +122,22 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
     for t in c.attitude_thresholds.iter() {
         r.attitude_thresholds.insert(t.key.clone(), t.value);
     }
+    // INFERRED: a repeated key keeps the last row (the original's choice between repeated rows in
+    // `0x00BF5A60` / `0x00C55CC0`'s lookup is not traced); each repeat is reported once.
     for s in c.negotiation_strings.iter() {
-        r.negotiation_strings.insert((s.event.clone(), s.culture.clone(), s.government.clone()), s.string.clone());
+        let key = (s.event.clone(), s.culture.clone(), s.government.clone());
+        if let Some(old) = r.negotiation_strings.insert(key, s.string.clone()) {
+            log::warn!("diplomacy_negotiation_strings: ({}, {}, {}) is listed twice; the last row ({}) wins over {old}", s.event, s.culture, s.government, s.string);
+        }
     }
     for s in c.negotiation_override_strings.iter() {
-        r.negotiation_overrides.insert((s.event.clone(), s.culture.clone(), s.government.clone(), s.faction.clone()), s.string.clone());
+        let key = (s.event.clone(), s.culture.clone(), s.government.clone(), s.faction.clone());
+        if let Some(old) = r.negotiation_overrides.insert(key, s.string.clone()) {
+            log::warn!(
+                "diplomacy_negotiation_faction_override_strings: ({}, {}, {}, {}) is listed twice; the last row ({}) wins over {old}",
+                s.event, s.culture, s.government, s.faction, s.string
+            );
+        }
     }
     for f in db.factions.iter() {
         r.faction_subcultures.insert(f.key.clone(), f.subculture.clone());

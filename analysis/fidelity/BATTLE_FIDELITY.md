@@ -1336,10 +1336,11 @@ comment.
 - **Update slot 4 (CONFIRMED, `0x005828A0`).** It decrements the unit's under-fire timers (`+0xC80/+0xC84/+0xC88`) and
   computes a casualty-rate state.
 - **Garrison slot radius (`0x00E619D0`).** It is the largest radius `+0x4C` over the `battle_entities` records (table
-  loaded by `0x00E100B0`, "battle_entities_table") whose `+0x18` is 0. INFERRED:
+  loaded by `0x00E100B0`, "battle_entities_table") whose `+0x18` is 0. CONFIRMED (gait-blend2, 2026-10-09, record builder `0x00E52F40`):
   - the radius is column 12 (men 0.35, horses 2.0, guns 1.5);
-  - `+0x18` is the class with infantry 0;
-  - so the radius is 0.35 m and slots are 0.7 m apart (0.875 m on walls).
+  - `+0x18` is column 2, the skeleton, through `0x00E60EA0`: 0 for "man" and any name outside its table
+    (horse 1, camel 2, elephant 3, artillery 4, gun_train_2 5, gun_train_6 6, ammo_caisson 7);
+  - so the radius is 0.35 m and slots are 0.7 m apart (0.875 m on walls). (Ours filtered on the class column before.)
 
   `setup::garrison_radius` reads it from the data.
 

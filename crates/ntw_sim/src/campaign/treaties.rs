@@ -469,12 +469,15 @@ impl CampaignModel {
     /// `giver` gives `receiver` `amount` money as a state gift (`0x00B44590` → `0x00B446B0`): x = linear ×
     /// amount + quadratic × amount² / √(GDP of both), at most 100; the receiver's `state_gift` factor
     /// towards the giver gets trunc((100 − its current contribution) × x × 0.01) added, drift and limit of
-    /// the `state_gift` event. The money moves from giver to receiver (the caller `0x00C4B440`; INFERRED).
+    /// the `state_gift` event. The money (`0x00C4B440`, CONFIRMED static trace 2026-10-10): the giver is charged
+    /// (`0x00BAF500(amount, 3)`) with no money test (the original Lua `InitialiseStateGift`, `diplomacy_panel.luac`,
+    /// greys a value above `MaxPlayerPaymentAllowed`), and the receiver is credited nothing: the gift buys attitude,
+    /// the money leaves the game. An amount of 0 or below is refused (the panel offers only the `state_gift_values`;
+    /// the exe would charge the receiver for a negative one).
     pub fn state_gift(&mut self, giver: FactionId, receiver: FactionId, amount: i32) -> Result<Vec<CampaignEvent>, CommandError> {
         self.check_diplomacy_pair(giver, receiver)?;
-        let f = self.world.factions.get(&giver).ok_or(CommandError::UnknownFaction(giver))?;
-        if amount <= 0 || f.treasury < amount {
-            return Err(CommandError::InsufficientFunds { needed: amount, available: f.treasury });
+        if amount <= 0 {
+            return Err(CommandError::Unsupported("a state gift of 0 or less"));
         }
         let gdp = super::economy::faction_gdp(self, giver) + super::economy::faction_gdp(self, receiver);
         let lin = self.rules.var("state_gift_multiplier_linear", 0.002);
@@ -487,10 +490,23 @@ impl CampaignModel {
         let add = ((100.0 - current as f32) * x as f32 * 0.01) as i32;
         r.factor_mut("state_gift").add(add, e.drift, e.limit);
         if let Some(g) = self.world.factions.get_mut(&giver) {
-            g.treasury -= amount;
+            super::treasury::pay(&mut g.treasury, amount);
         }
-        if let Some(r) = self.world.factions.get_mut(&receiver) {
-            r.treasury += amount;
+        Ok(Vec::new())
+    }
+
+    /// `payer` pays `payee` `amount` once: a deal's one-off payment (the payment item `0x00C18A70` with a
+    /// length of 1 turn, CONFIRMED static trace 2026-10-10). The payer is charged (`0x00BAF500(amount, 3)`) and
+    /// the payee credited (`0x00BB3810(amount, 1)`), with no money test and no attitude change; a negative amount
+    /// runs the other way, which [`super::treasury::pay`] / [`super::treasury::credit`] give as they stand. When
+    /// both sides are human the exe also calls `0x008F56C0` on each with ±amount (UNKNOWN, not modelled).
+    pub fn one_off_payment(&mut self, payer: FactionId, payee: FactionId, amount: i32) -> Result<Vec<CampaignEvent>, CommandError> {
+        self.check_diplomacy_pair(payer, payee)?;
+        if let Some(f) = self.world.factions.get_mut(&payer) {
+            super::treasury::pay(&mut f.treasury, amount);
+        }
+        if let Some(f) = self.world.factions.get_mut(&payee) {
+            super::treasury::credit(&mut f.treasury, amount);
         }
         Ok(Vec::new())
     }
@@ -694,6 +710,8 @@ pub enum DiplomaticAction {
     CancelMilitaryAccess,
     /// Give money as a state gift.
     StateGift(i32),
+    /// Pay an amount once (a deal's one-off payment).
+    OneOffPayment(i32),
     /// Pay an amount each turn for some turns.
     RegularPayment(i32, u32),
     /// Become the other side's protectorate.
@@ -727,6 +745,7 @@ impl CampaignModel {
                 Ok(Vec::new())
             }
             DiplomaticAction::StateGift(amount) => self.state_gift(a, b, amount),
+            DiplomaticAction::OneOffPayment(amount) => self.one_off_payment(a, b, amount),
             DiplomaticAction::RegularPayment(amount, turns) => self.regular_payment(a, b, amount, turns),
             DiplomaticAction::BecomeProtectorate => self.make_protectorate(a, b),
         }
@@ -875,13 +894,16 @@ impl CampaignModel {
     /// - protectorate tribute: a protectorate pays its patron a fifth of its revenue (`0x00BBCD00` = the sum of
     ///   three economics lines / 5, read as taxes + trade + other), economy lines 6 (protectorate) and 2 (patron),
     ///   kept in #8 / #9.
+    ///
+    /// In the exe both are economy lines summed into the round settle (`0x00BABE30`, 32-bit wrapping), so the model
+    /// moves them with [`super::treasury::pay`] / [`super::treasury::credit`], wrapping as well.
     pub fn diplomacy_money(&mut self, faction: FactionId) {
         let targets: Vec<FactionId> = self.world.relationships.keys().filter(|(o, _)| *o == faction).map(|(_, t)| *t).collect();
         for t in targets {
             if !self.in_the_game(t) {
                 continue;
             }
-            let pay: i32 = self.world.relationships.get(&(faction, t)).map_or(0, |r| r.payments.iter().map(|p| p.amount).sum());
+            let pay = self.world.relationships.get(&(faction, t)).map_or(0, |r| r.payments.iter().fold(0i32, |s, p| s.wrapping_add(p.amount)));
             let tribute = if self.world.stance(faction, t) == Stance::Protectorate {
                 super::economy::faction_income(self, faction).revenue().max(0) / 5
             } else {
@@ -891,13 +913,13 @@ impl CampaignModel {
                 self.relationship_mut(faction, t).protectorate_tribute = tribute;
                 self.relationship_mut(t, faction).protectorate_income = tribute;
             }
-            let total = pay.saturating_add(tribute);
+            let total = pay.wrapping_add(tribute);
             if total != 0 {
                 if let Some(f) = self.world.factions.get_mut(&faction) {
-                    f.treasury = f.treasury.saturating_sub(total);
+                    super::treasury::pay(&mut f.treasury, total);
                 }
                 if let Some(f) = self.world.factions.get_mut(&t) {
-                    f.treasury = f.treasury.saturating_add(total);
+                    super::treasury::credit(&mut f.treasury, total);
                 }
             }
         }

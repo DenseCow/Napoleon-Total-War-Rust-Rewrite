@@ -361,6 +361,85 @@ mod tests {
         assert_eq!(RowKey::Lod { path: 1, middle: 2, last: 3 }.of(&rigid), "models\\x.rigid_model_20_key");
     }
 
+    /// A row of `schema` whose every cell depends on `n` (a bool on its parity), so rows with
+    /// different `n` have different keys under every [`RowKey`].
+    fn sample_row(schema: &Schema, n: i32) -> Vec<DbValue> {
+        use crate::db::FieldType;
+        schema
+            .fields
+            .iter()
+            .map(|f| match f.ty {
+                FieldType::Str => DbValue::Str(format!("s{n}")),
+                FieldType::OptStr => DbValue::OptStr(Some(format!("o{n}"))),
+                FieldType::Bool => DbValue::Bool(n % 2 == 0),
+                FieldType::I32 => DbValue::I32(n),
+                FieldType::F32 => DbValue::F32(n as f32),
+                FieldType::U16 => DbValue::U16(n as u16),
+            })
+            .collect()
+    }
+
+    /// Two mounted packs hold `files`: the vanilla pack (an install pack) and a mod pack.
+    fn two_pack_vfs(test: &str, vanilla: &[(&str, &[u8])], modded: &[(&str, &[u8])]) -> Vfs {
+        let dir = temp_dir(test);
+        std::fs::write(dir.join("rel.pack"), build_pack(1, vanilla)).unwrap();
+        std::fs::write(dir.join("mod.pack"), build_pack(1, modded)).unwrap();
+        let mut vfs = Vfs::new();
+        vfs.mount(PackFile::open(dir.join("rel.pack")).unwrap());
+        vfs.mount(PackFile::open(dir.join("mod.pack")).unwrap());
+        vfs
+    }
+
+    /// For every [`tables::ALL`] table, the key reader tells rows apart: a mod file that repeats
+    /// the vanilla row merges into it (one row), and a row with other key columns is added. A key
+    /// reader that read the wrong columns (or none) would fail one of the two. The vanilla install
+    /// alone cannot show this, its one file per table keeps every row whatever the key.
+    #[test]
+    fn every_raw_table_key_separates_rows_across_two_files() {
+        for t in tables::ALL {
+            let schema = Schema::from_codes(t.codes).unwrap();
+            let encode = |rows: Vec<Vec<DbValue>>| DbTable { version: 0, has_version_marker: false, flag: 1, rows }.to_bytes(&schema).unwrap();
+            let (a, b) = (sample_row(&schema, 1), sample_row(&schema, 2));
+            let vanilla = encode(vec![a.clone()]);
+            let more = encode(vec![a.clone(), b.clone()]);
+            let path = |f: &str| format!("db\\{}_tables\\{f}", t.name);
+            let vfs = two_pack_vfs(
+                &format!("db_folder_keys_{}", t.name),
+                &[(&path(t.name), &vanilla)],
+                &[(&path("more"), &more)],
+            );
+            let rows = t.read(&vfs).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(rows, [a, b], "{}", t.name);
+        }
+    }
+
+    /// A table with its own decoder (`models_building`, the typed tables, the campaign AI's raw
+    /// tables) merges the same way through [`merged_rows`].
+    #[test]
+    fn merged_rows_merges_a_decoded_table_across_two_files() {
+        use crate::bytes::utf16_bytes;
+        let file = |keys: &[&str]| {
+            let mut b = vec![1u8];
+            b.extend((keys.len() as u32).to_le_bytes());
+            for k in keys {
+                b.extend(utf16_bytes(k));
+                b.extend(utf16_bytes("buildings\\x_tech.cs2.parsed"));
+                b.extend(1u32.to_le_bytes());
+                b.extend(0u32.to_le_bytes());
+            }
+            b
+        };
+        let vfs = two_pack_vfs(
+            "db_folder_merged_rows",
+            &[("db\\models_building_tables\\models_building", &file(&["farm"]))],
+            &[("db\\models_building_tables\\more", &file(&["farm", "mill"]))],
+        );
+        let mut warnings = Vec::new();
+        let rows = merged_rows(&vfs, "models_building", &mut warnings, |b| crate::models_building::read(b).map_err(|error| TableError::Db { table: "models_building", error }), |r| r.key.as_str()).unwrap();
+        assert_eq!(rows.iter().map(|r| r.key.as_str()).collect::<Vec<_>>(), ["farm", "mill"]);
+        assert!(warnings.is_empty());
+    }
+
     #[test]
     fn lod_path_keeps_a_leading_double_separator() {
         // The doubled-separator rule starts at the third character (0x00EDEE40).

@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::details::Relationship;
+use super::details::{DIPLOMACY_OPTIONS, Relationship, diplomacy_option_value, option_allows_acceptance, option_allows_proposal};
 use super::ids::{FactionId, RegionId};
 use super::world::{CampaignModel, Stance};
 
@@ -319,6 +319,43 @@ impl CampaignModel {
         self.world.relationships.get(&(a, b))
     }
 
+    /// `a`'s `force_diplomacy` permission value for `option` (a [`DIPLOMACY_OPTIONS`] index)
+    /// towards `b` (`GetRelationshipDiplomacyOption` `0x00B27FE0`); 0 (allowed) without a
+    /// relationship.
+    pub fn diplomacy_option(&self, a: FactionId, b: FactionId, option: usize) -> u32 {
+        self.rel(a, b).and_then(|r| r.diplomacy_options.get(option).copied()).unwrap_or(0)
+    }
+
+    /// May `a` propose `option` to `b` ([`option_allows_proposal`] of `a`'s value towards `b`)?
+    pub fn may_propose(&self, a: FactionId, b: FactionId, option: usize) -> bool {
+        option_allows_proposal(self.diplomacy_option(a, b, option))
+    }
+
+    /// May `a` accept `option` from `b` ([`option_allows_acceptance`] of `a`'s value towards `b`)?
+    pub fn may_accept(&self, a: FactionId, b: FactionId, option: usize) -> bool {
+        option_allows_acceptance(self.diplomacy_option(a, b, option))
+    }
+
+    /// `force_diplomacy(a, b, option, offer, accept)` (`SetDiplomacyOptionFromScript`
+    /// `0x009792D0`): stores [`diplomacy_option_value`] on `a`'s relationship towards `b` only
+    /// (CONFIRMED: `b`'s towards `a` is untouched). Returns false, storing nothing, when `option` is
+    /// not a [`DIPLOMACY_OPTIONS`] index or `a` has no relationship towards `b` (the same faction, a
+    /// faction not in the campaign, or a map without that pair); the caller logs the refusal. The
+    /// exe never creates a relationship here: it only looks one up
+    /// (`FindDiplomacyRelationshipByTarget` `0x00B64C50`).
+    ///
+    /// ORIGINAL BUG: on a miss (`a == b`, or any `b` without a relationship) `0x00B64C50` falls
+    /// back to `a`'s first relationship, so the value lands on an unrelated faction pair; ours
+    /// stores nothing.
+    pub fn set_diplomacy_option(&mut self, a: FactionId, b: FactionId, option: usize, offer: bool, accept: bool) -> bool {
+        if a == b || option >= DIPLOMACY_OPTIONS.len() {
+            return false;
+        }
+        let Some(r) = self.world.relationships.get_mut(&(a, b)) else { return false };
+        r.diplomacy_options[option] = diplomacy_option_value(offer, accept);
+        true
+    }
+
     /// The rebel faction (no faction record, `0x008CEEF0`): the model's faction with no key, as
     /// [`Self::at_war`] (`IsFactionAtWarWith` `0x008CE9B0`) tells it.
     pub fn is_rebel_faction(&self, f: FactionId) -> bool {
@@ -403,7 +440,7 @@ impl CampaignModel {
         let regions_of_r = self.world.regions.values().filter(|x| x.owner == r).count();
         let protector = !self.has_protectorate(p) && !self.has_protectorate(r) && !war && regions_of_r == 1 && !self.is_human(r);
         // Peace (`0x00C1A730`): at war and the peace option allowed (0 or 1).
-        let peace = war && pr.is_none_or(|x| x.diplomacy_options[A::Peace.option()] <= 1);
+        let peace = war && self.diplomacy_option(p, r, A::Peace.option()) <= 1;
         // War (`0x00C1A890`): not at war. PROVISIONAL: the proposer's forced war target (+0x754) is
         // not modelled (no faction has one).
         let declare = !war;
@@ -427,10 +464,8 @@ impl CampaignModel {
             rec(A::BreakTrade, false, break_trade),
             rec(A::BreakAlliance, false, break_alliance),
         ];
-        if let Some(options) = pr.map(|x| x.diplomacy_options) {
-            for a in &mut out {
-                a.forbidden = matches!(options[a.action.option()], 2 | 3);
-            }
+        for a in &mut out {
+            a.forbidden = !self.may_propose(p, r, a.action.option());
         }
         out
     }
@@ -609,27 +644,10 @@ impl CampaignModel {
 
     /// The AI's answer to the open negotiation's deal (`CCQ_DIPLOMACY_PROPOSE_DEAL` → `0x00C49BE0`
     /// → `0x00AA5ED0`, run when the recipient is not human; AI_RESEARCH.md §4 "Deal evaluation"):
-    /// true when it is refused. A deal of technologies is evaluated as the exe does
-    /// ([`Self::ai_accepts_technologies`]). A deal with regions keeps the PLACEHOLDER rule until the
-    /// AI's region value (`0x00A364B0` → `0x00AA1E90`, beliefs) is traced
-    /// ([`Self::ai_deal_needs_region_value`]): an AI side refuses any such deal in which it gives a
-    /// region or a technology; what it is offered it accepts.
+    /// true when it is refused, as the exe evaluates the regions and technology records
+    /// ([`Self::ai_accepts_deal`]). A human recipient answers for itself: never refused here.
     pub fn ai_refuses_deal(&self) -> bool {
-        let Some(n) = self.negotiations.current.as_ref() else { return false };
-        if self.ai_deal_needs_region_value() {
-            let gives = |giver: FactionId, regions: &[RegionId], techs: &[String]| !self.is_human(giver) && (!regions.is_empty() || !techs.is_empty());
-            return gives(n.recipient, &n.regions.demanded, &n.technologies.demanded) || gives(n.proposer, &n.regions.offered, &n.technologies.offered);
-        }
-        self.ai_accepts_technologies() == Some(false)
-    }
-
-    /// True when the open negotiation's deal has a region item and an AI side, so
-    /// [`Self::ai_refuses_deal`] answers it with the PLACEHOLDER rule (the region value is not
-    /// traced).
-    pub fn ai_deal_needs_region_value(&self) -> bool {
-        self.negotiations.current.as_ref().is_some_and(|n| {
-            (!n.regions.demanded.is_empty() || !n.regions.offered.is_empty()) && !(self.is_human(n.recipient) && self.is_human(n.proposer))
-        })
+        self.ai_accepts_deal() == Some(false)
     }
 
     /// `CCQ_DIPLOMACY_ACCEPT_DEAL` (`AcceptCampaignNegotiationDeal` `0x00C114B0`) for the records
@@ -639,7 +657,8 @@ impl CampaignModel {
     /// ([`Negotiation::applied`]; the exe re-applies every record on each accept, which its UI
     /// never asks for, and which would raise the traded counts again).
     /// - regions (`0x00C18BF0`): each demanded region passes to the proposer, then each offered one
-    ///   to the recipient ([`Self::transfer_region`]);
+    ///   to the recipient ([`Self::transfer_region`]), each counted for its receiver
+    ///   ([`Self::count_deal_region_received`]);
     /// - technologies (`0x00C18CF0`): each offered technology is granted to the recipient
     ///   ([`Self::grant_technology`]) and the proposer's traded count goes up by one
     ///   (`0x008F3DD0`); then each demanded one the other way round.
@@ -657,11 +676,11 @@ impl CampaignModel {
         }
         let (proposer, recipient) = (n.proposer, n.recipient);
         let (regions, techs) = (n.regions.clone(), n.technologies.clone());
-        for r in regions.demanded {
-            self.transfer_region(r, proposer);
-        }
-        for r in regions.offered {
-            self.transfer_region(r, recipient);
+        for (list, to) in [(&regions.demanded, proposer), (&regions.offered, recipient)] {
+            for &r in list {
+                self.transfer_region(r, to);
+                self.count_deal_region_received(to);
+            }
         }
         for (techs, to, from) in [(&techs.offered, recipient, proposer), (&techs.demanded, proposer, recipient)] {
             for t in techs {
@@ -670,6 +689,17 @@ impl CampaignModel {
             }
         }
         Ok(Vec::new())
+    }
+
+    /// `0x008E2B70`, from the regions record's accept (`0x00C18C5F` / `0x00C18CD5`): a human
+    /// faction that receives a region in a deal with no peace item counts it
+    /// ([`super::World::deal_regions_received`], faction `+0x938`). CONFIRMED. PROVISIONAL: the
+    /// model does not hold the peace record, so every deal counts as one without peace.
+    fn count_deal_region_received(&mut self, faction: FactionId) {
+        if self.is_human(faction) {
+            let n = self.world.deal_regions_received.entry(faction).or_insert(0);
+            *n = n.wrapping_add(1);
+        }
     }
 
     /// `CCQ_DIPLOMACY_END_NEGOTIATION` (`0x008BC5D0`): the campaign negotiation goes, counted in

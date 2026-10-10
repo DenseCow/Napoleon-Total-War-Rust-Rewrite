@@ -27,7 +27,7 @@ use super::skin::{self, BoneAtlas, ClipSlot, SkinExt, SkinMaterial};
 use super::{BattleSim, UnitInfo, VOLLEY_FX_SECONDS, VolleyFx};
 use crate::data::GameData;
 use crate::soldiers::{FigureKit, KitAssets, SoldierLibrary, animation_keys};
-use ntw_formats::unit_animation::{self, DeathCause, Gait, SelectionRng, alternative, family_pick, pick_level};
+use ntw_formats::unit_animation::{self, DeathCause, Gait, Rung, SelectionRng, alternative, family_pick};
 
 use super::actions::{self, Mode};
 
@@ -97,8 +97,9 @@ impl UnitView {
 /// `0x0057DF40`, CONFIRMED), so a unit drawn at its model position jumps 0.14 m (walking) to over
 /// 1 m (cavalry running) ten times a second, while the frames in between see it still: the
 /// "low-fps walking" of the user's 2026-10-08 report. The original's walking men look smooth, so
-/// its drawing moves them between ticks; how it does that is not traced (UNKNOWN: no render-side
-/// blend was found on the battle update path, BATTLE_FIDELITY.md §59). PROVISIONAL (ours): the
+/// its drawing moves them between ticks. A lead, not traced to the end: each soldier display reads
+/// its entity through the two latest tick snapshots lerped by the elapsed fraction of the tick
+/// (`0x00752A20`, `0x00752FF0`; UNITS_TERRAIN_FIDELITY.md §1.10). PROVISIONAL (ours): the
 /// unit is drawn on the line from its pose before the last tick to its pose after it, at the
 /// fraction of the next tick already elapsed (`Time<Fixed>::overstep_fraction`), so the picture
 /// runs one tick (0.1 s) behind the model. A pose that changed without a moving tick (placed,
@@ -203,23 +204,51 @@ const STILL_TICKS: u32 = 3;
 /// frame time, so the pose shown at the change keeps weight prod(1 - e_k / D) and is gone once
 /// e >= D. With D = 0, or no pose drawn the frame before, the new clip is drawn alone.
 ///
-/// PROVISIONAL (ours): the GPU keeps at most two poses frozen at clip changes, with their weights
-/// (newest first, [`skin::Fade`]), rather than the recursive blended pose, so the new clip's
-/// earlier frames do not linger ([`freeze`]: a change never waits; of three poses within one
-/// blend time the lightest is dropped and the two heaviest kept). A one-shot drawn over the loop is
-/// not blended and ends a running cross-fade (one-shots are not blended yet). The exe also lerps
-/// the display root (position, heading) at e / Dr (Dr = 0.5 s, `0x01318038`); that root blend is
-/// not implemented (our men stand at their formation places).
+/// The rider and his mount are two displays in the exe, each blending its own clip changes over
+/// its own line's blend time (the mount's line is the mount fragment's), and so here: each part
+/// has its own [`PartFade`], so a mount clip changing while the man's stays the same cross-fades
+/// too. A rider plays the clip paired with his mount's (the loop choice in the figure update), so
+/// the mount's clip changes alone only where two levels share the man's clip. The pair shares
+/// one clip time (ours: the paired clips have the same frame count, `unit_animation`), so they
+/// stay in step.
+///
+/// PROVISIONAL (ours): the GPU keeps at most two poses frozen at clip changes per part, with
+/// their weights (newest first, [`skin::Fade`]), rather than the recursive blended pose, so the
+/// new clip's earlier frames do not linger ([`freeze`]: a change never waits; of three poses
+/// within one blend time the lightest is dropped and the two heaviest kept). A one-shot drawn over
+/// the loop is not blended and ends a running cross-fade (one-shots are not blended yet).
+///
+/// The exe also lerps each display's root (position, heading) at e / Dr (Dr = 0.5 s,
+/// `0x01318038`). Ours has no separate display root to lerp: a figure stands at its formation
+/// place, which moves with the unit's drawn pose ([`DrawnPose`]), and loop clips have their root
+/// motion removed, so a clip change moves no root; the root bone's own offset is part of the pose
+/// and fades with it over D (equal to Dr for the 0.5 s vanilla gait lines).
 #[derive(Debug, Clone, Copy, Default)]
 struct ClipBlend {
-    /// The loop clip played (its `Arc` address; 0 before the first frame) and its man's and
-    /// mount's atlas slots.
+    /// The loop clip played (its `Arc` address; 0 before the first frame) and its man's atlas slot.
     clip: usize,
     man: ClipSlot,
+    /// The mount's clip (its `Arc` address; 0 on foot) and atlas slot.
+    mount_clip: usize,
     mount: Option<ClipSlot>,
     /// Its root speed (m/s, [`clip_speed`]) and the figure's time in it (s).
     speed: f32,
     time: f32,
+    /// The man's (0) and the mount's (1) cross-fade.
+    fades: [PartFade; 2],
+    /// The figure's place in its locomotion graph: a mounted figure's ladder ([`on_ladder`]), a
+    /// man's speed level ([`on_levels`]); and the graph (gait) it is in, on foot.
+    rung: Rung,
+    graph: Option<LocoGraph>,
+    /// The man's and mount's frames drawn at the frame numbered `drawn` (`SkinState::frame`; 0 =
+    /// never drawn).
+    shown: [[u32; 4]; 2],
+    drawn: u32,
+}
+
+/// One display's cross-fade out of the poses shown at its last clip changes.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct PartFade {
     /// Up to two poses frozen at clip changes (the two heaviest when a third came within one blend
     /// time, [`freeze`]), newest first (weight 0 = unused); the clip played has the rest of the
     /// weight.
@@ -227,27 +256,59 @@ struct ClipBlend {
     /// Blend time D (s) of the last change, and the time since it e (s).
     blend: f32,
     elapsed: f32,
-    /// The man's and mount's frames drawn at the frame numbered `drawn` (`SkinState::frame`; 0 =
-    /// never drawn).
-    shown: [[u32; 4]; 2],
-    drawn: u32,
 }
 
-/// A pose frozen at a clip change: the man's and mount's clip frames, and its weight.
+impl PartFade {
+    /// A clip change: fade out of `fig` (the frame drawn last frame, if the figure was drawn then
+    /// and no one-shot is drawn) over the new line's `blend_in` s, or draw the new clip at once.
+    fn change(&mut self, fig: Option<[u32; 4]>, blend_in: f32) {
+        match fig.filter(|_| blend_in > 0.0) {
+            Some(fig) => *self = PartFade { frozen: freeze(self.frozen, fig), blend: blend_in, elapsed: 0.0 },
+            None => *self = PartFade::default(),
+        }
+    }
+
+    /// One frame: every frozen pose keeps (1 - e / D) of its weight, then e grows by `dt`.
+    fn advance(&mut self, dt: f32) {
+        if self.fading() {
+            let w = self.elapsed / self.blend;
+            if w >= 1.0 {
+                self.frozen = Default::default();
+            } else {
+                for f in &mut self.frozen {
+                    f.keep *= 1.0 - w;
+                }
+            }
+            self.elapsed += dt;
+        }
+    }
+
+    fn fading(&self) -> bool {
+        self.frozen.iter().any(|f| f.keep > 0.0)
+    }
+}
+
+/// A pose frozen at a clip change: the display's clip frame, and its weight.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct Frozen {
-    figs: [[u32; 4]; 2],
+    fig: [u32; 4],
     keep: f32,
 }
 
-/// The loop clip a figure is to play this frame: its `Arc` address, its man's and mount's atlas
-/// slots, and its line's `blend_in_time` (s).
+/// The loop clip a figure is to play this frame: its man's and mount's clips (`Arc` addresses,
+/// the mount's 0 on foot), their atlas slots, and their lines' `blend_in_time` (s).
 #[derive(Debug, Clone, Copy)]
 struct LoopClip {
     key: usize,
     man: ClipSlot,
-    mount: Option<ClipSlot>,
     blend_in: f32,
+    mount_key: usize,
+    mount: Option<ClipSlot>,
+    mount_blend_in: f32,
+    /// When the clips change: start them at this time (s), cross-fading (`true`) or drawn at
+    /// once (`false`), instead of the phase carry and the lines' blends (a gait ladder's step,
+    /// [`on_ladder`]).
+    start: Option<(f32, bool)>,
 }
 
 impl ClipBlend {
@@ -262,43 +323,35 @@ impl ClipBlend {
         // A one-shot ends a running cross-fade; so does a frame the figure was skipped (its slot
         // was drawn without the fade then, so the frozen poses would come back stale).
         if shot || shown.is_none() {
-            self.frozen = Default::default();
+            self.fades = Default::default();
         }
-        // The mount clip is picked again every frame: in melee the man keeps his idle clip while the
-        // mount's follows the gait. PROVISIONAL (ours): a mount clip changing on its own snaps (the
-        // pair shares one blend; the exe blends each display, rider and mount, on its own).
-        let mount_changed = want.mount != self.mount;
-        self.mount = want.mount;
-        if want.key == self.clip {
-            // The pair's root speed is the faster clip's: a mount change alone changes it too.
-            if mount_changed {
-                self.speed = speed();
-            }
-        } else {
+        // A ladder step drawn at once starts its clips without a cross-fade.
+        let from = shown.filter(|_| !shot && want.start.is_none_or(|(_, fade)| fade));
+        let man_changed = want.key != self.clip;
+        if man_changed {
             let duration = want.man.duration();
-            self.time = carry_phase(self.time, self.man.duration(), self.speed, duration).unwrap_or(offset * duration);
+            self.time = match want.start {
+                Some((t, _)) => t,
+                None => carry_phase(self.time, self.man.duration(), self.speed, duration).unwrap_or(offset * duration),
+            };
             self.clip = want.key;
             self.man = want.man;
-            self.speed = speed();
-            match shown.filter(|_| !shot && want.blend_in > 0.0) {
-                Some(figs) => {
-                    self.frozen = freeze(self.frozen, figs);
-                    self.blend = want.blend_in;
-                    self.elapsed = 0.0;
-                }
-                None => self.frozen = Default::default(),
-            }
+            self.fades[0].change(from.map(|f| f[0]), want.blend_in);
         }
-        if self.fading() {
-            let w = self.elapsed / self.blend;
-            if w >= 1.0 {
-                self.frozen = Default::default();
-            } else {
-                for f in &mut self.frozen {
-                    f.keep *= 1.0 - w;
-                }
-            }
-            self.elapsed += dt;
+        // The mount clip is checked on its own every frame: it may change while the man's stays
+        // (two levels sharing the man's clip).
+        let mount_changed = want.mount_key != self.mount_clip;
+        if mount_changed {
+            self.mount_clip = want.mount_key;
+            self.mount = want.mount;
+            self.fades[1].change(from.filter(|_| want.mount.is_some()).map(|f| f[1]), want.mount_blend_in);
+        }
+        // The pair's root speed is the faster clip's: a mount change alone changes it too.
+        if man_changed || mount_changed {
+            self.speed = speed();
+        }
+        for f in &mut self.fades {
+            f.advance(dt);
         }
         self.time += advance;
     }
@@ -309,9 +362,10 @@ impl ClipBlend {
         (self.drawn != 0 && self.drawn.wrapping_add(1) == frame).then_some(self.shown)
     }
 
-    /// Whether a cross-fade runs.
+    /// Whether a cross-fade runs (the man's or the mount's).
+    #[cfg(test)]
     fn fading(&self) -> bool {
-        self.frozen.iter().any(|f| f.keep > 0.0)
+        self.fades.iter().any(PartFade::fading)
     }
 
     /// The man's and mount's frames to draw: the one-shot's when one is drawn, else the loop's at
@@ -326,20 +380,21 @@ impl ClipBlend {
 
     /// The cross-fade of the man's (`part` 0) or mount's (1) slot, if one runs.
     fn fade(&self, part: usize) -> Option<skin::Fade> {
-        let [a, b] = self.frozen;
-        self.fading().then(|| skin::fade([a.figs[part], b.figs[part]], [a.keep, b.keep]))
+        let f = &self.fades[part];
+        let [a, b] = f.frozen;
+        f.fading().then(|| skin::fade([a.fig, b.fig], [a.keep, b.keep]))
     }
 }
 
-/// The frozen poses after a clip change: the frame drawn last (`figs`) at the weight the old
-/// clip had (1 - the frozen weights), then the poses frozen before, newest first, without the
+/// A display's frozen poses after a clip change: the frame drawn last (`fig`) at the weight the
+/// old clip had (1 - the frozen weights), then the poses frozen before, newest first, without the
 /// ones of weight 0 (a change on the frame after a change: the old clip had none yet). Of three,
 /// the lightest is dropped (the older of equals) and the other two scaled up to its weight
 /// (PROVISIONAL, ours: a small jump of that weight, only on a third change within one blend
 /// time). The weights then add up to 1, the new clip starts at 0, and every pose is gone one
 /// blend time after the last change.
-fn freeze(old: [Frozen; 2], figs: [[u32; 4]; 2]) -> [Frozen; 2] {
-    let live = Frozen { figs, keep: (1.0 - old[0].keep - old[1].keep).max(0.0) };
+fn freeze(old: [Frozen; 2], fig: [u32; 4]) -> [Frozen; 2] {
+    let live = Frozen { fig, keep: (1.0 - old[0].keep - old[1].keep).max(0.0) };
     let mut poses = [live, old[0], old[1]];
     let lightest = (0..3).rev().min_by(|&a, &b| poses[a].keep.total_cmp(&poses[b].keep)).unwrap_or(2);
     let total: f32 = poses.iter().map(|p| p.keep).sum();
@@ -351,6 +406,135 @@ fn freeze(old: [Frozen; 2], figs: [[u32; 4]; 2]) -> [Frozen; 2] {
         *slot = Frozen { keep: pose.keep * scale, ..*pose };
     }
     out
+}
+
+/// A ladder level to play, the clip time to add, and how its clips start ([`LoopClip::start`]).
+type LadderPick<'a> = (&'a crate::soldiers::KitLevel, f32, Option<(f32, bool)>);
+
+/// The level a mounted figure plays on its gait ladder (`kit.ladder`) this frame, the clip time
+/// to add, and how its clips start when this frame steps onto a new rung; `Some(None)` on the
+/// stand rung, `None` without a ladder (on foot). `speed` is the unit's ground speed (0 when it
+/// stands), `duration` a clip's length as drawn, `action` whether a Ready or Melee action loop is
+/// drawn this frame instead of the ladder's clip.
+///
+/// CONFIRMED (`0x007725D0`, the locomotion graph and the debugger sitting of 2026-10-09,
+/// UNITS_TERRAIN_FIDELITY.md §1.9): the rung follows `unit_animation::climb`. A step up from a loop
+/// waits for the loop to finish its cycle: the transition clip starts on the frame the loop's
+/// time wraps (its time mod its length after this frame's advance is at most the one before it,
+/// `[ESP + 0x118]`), at the loop's phase past the wrap, drawn at once (the store at `0x00773D5C`,
+/// blend time 0); out of the stand (the from-slot is the graph's node-0 slot) it starts at once at 0
+/// and cross-fades over its line's blend time (`0x00773D18`). The transition plays at
+/// `unit_animation::transition_rate`; when it reaches its end its loop follows at the time past
+/// the end, drawn at once (`0x007740A9`). A loop plays at speed / its root speed (the clamp to
+/// 0.25..4 is ours, as for every loop). Steps down change loop with the usual phase carry and
+/// cross-fade.
+///
+/// CONFIRMED (`0x00773C83`): the wait applies only while the clip shown is the from-loop's (the
+/// transition's from-slot `+0x30` against the shown node's slot `+0x4`); with another clip shown
+/// (the frame an action loop ends) the transition starts at once as a usual clip change, phase
+/// carry and cross-fade (`0x00773D85`). The display keeps one clip and one clip time, so no graph
+/// clock runs on by itself. PROVISIONAL (ours, not traced: in the exe the graph's clip is the one
+/// shown, so a gait transition under an action loop does not arise there): while an action loop
+/// is drawn the ladder skips its transitions, stepping straight between loops.
+fn on_ladder<'a>(ladder: &'a [crate::soldiers::LadderRung], blend: &mut ClipBlend, speed: f32, dt: f32, action: bool, duration: impl Fn(&std::sync::Arc<Anim>) -> f32) -> Option<Option<LadderPick<'a>>> {
+    if ladder.is_empty() {
+        return None;
+    }
+    let into_len = |i: usize| ladder[i].into.as_ref().and_then(|l| l.man.first()).map_or(0.0, &duration);
+    let old = blend.rung;
+    let done = matches!(old, Rung::Into(i) if action || blend.time >= into_len(i));
+    let mut rung = unit_animation::climb(old, ladder.len(), |i| ladder[i].gait.speed, |i| !action && ladder[i].into.is_some(), speed, done);
+    // A step up from a loop waits for the loop's cycle to wrap this frame; until then the figure
+    // goes on with its loop (the graph node moves on, the clip does not).
+    let mut wrap_phase = None;
+    let mut from_shown = true;
+    if let (Rung::Loop(j), Rung::Into(_)) = (old, rung) {
+        from_shown = ladder[j].gait.man.iter().any(|a| std::sync::Arc::as_ptr(a) as usize == blend.clip);
+        let cycle = blend.man.duration();
+        let next = blend.time + dt * loop_rate(speed, ladder[j].gait.speed);
+        if from_shown && cycle > 0.0 && next.rem_euclid(cycle) > blend.time.rem_euclid(cycle) {
+            rung = old;
+        } else if from_shown {
+            wrap_phase = Some(if cycle > 0.0 { next.rem_euclid(cycle) } else { 0.0 });
+        }
+    }
+    blend.rung = rung;
+    Some(match rung {
+        Rung::Stand => None,
+        Rung::Loop(i) => {
+            let level = &ladder[i].gait;
+            let start = (old == Rung::Into(i) && !action).then(|| ((blend.time - into_len(i)).max(0.0), false));
+            Some((level, dt * loop_rate(speed, level.speed), start))
+        }
+        Rung::Into(i) => {
+            let into = ladder[i].into.as_ref()?;
+            let len = into_len(i);
+            let from = if i == 0 { 0.0 } else { ladder[i - 1].gait.speed };
+            let rate = |played: f32| unit_animation::transition_rate(speed, from, ladder[i].gait.speed, if len > 0.0 { played / len } else { 1.0 });
+            match (old, wrap_phase) {
+                (Rung::Into(j), _) if j == i => Some((into, dt * rate(blend.time), None)),
+                // At the wrap: the transition at the loop's phase past it, which is its time after
+                // this frame (the exe switches after the frame's advance), so nothing is added.
+                (Rung::Loop(_), Some(phase)) => Some((into, 0.0, Some((phase, false)))),
+                // Its from-loop not shown: a usual clip change.
+                (Rung::Loop(_), None) if !from_shown => Some((into, dt * rate(0.0), None)),
+                _ => Some((into, dt * rate(0.0), Some((0.0, true)))),
+            }
+        }
+    })
+}
+
+/// The locomotion graph a man on foot is in. CONFIRMED: the soldier speed update (`0x006543D0`) sets
+/// the entity state `+0x1B8` from its stance `+0x1D8` and its move kind `+0x220` (0 walk, 1 / 3 run,
+/// 2 charge): 8 walk, 0xB run, 0xD charge (stances 0..3), 9 walk / 0xC run (the trained stance 4); the
+/// display picks its graph by that state (`0x007A7190`): the `WALK(_TRAINED)_n` graph, the
+/// `RUN(_TRAINED)_n` graph, or the charge graph whose one loop is `CHARGE` (slot table `0x0133D030`).
+/// The move kind comes from the order's run option (the unit move `0x0051A9A0`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum LocoGraph {
+    Gait(Gait),
+    Charge,
+}
+
+impl From<Gait> for LocoGraph {
+    fn from(g: Gait) -> Self {
+        LocoGraph::Gait(g)
+    }
+}
+
+/// The speed level a man on foot plays this frame in the locomotion graph of `gait` (`levels`,
+/// slowest first), and the clip time to add; None without levels.
+///
+/// CONFIRMED (`0x007725D0`, `0x007A7190`; UNITS_TERRAIN_FIDELITY.md §1.9): a man's graph is a
+/// ladder of speed levels with no transition clips (the men's slot tables `0x0133C608..`),
+/// entered on its fastest level no faster than the man when the graph changes
+/// (`unit_animation::enter`) and climbed by `unit_animation::climb` (up at midpoints, down at
+/// quarter points); the stand rung of a moving gait plays its first level.
+fn on_levels<'a>(levels: &'a [crate::soldiers::KitLevel], blend: &mut ClipBlend, graph: impl Into<LocoGraph>, speed: f32, dt: f32) -> Option<(&'a crate::soldiers::KitLevel, f32)> {
+    let n = levels.len();
+    if n == 0 {
+        return None;
+    }
+    let loops = |i: usize| levels[i].speed;
+    let graph = graph.into();
+    if blend.graph != Some(graph) {
+        blend.graph = Some(graph);
+        blend.rung = unit_animation::enter(n, loops, speed);
+    }
+    blend.rung = unit_animation::climb(blend.rung, n, loops, |_| false, speed, false);
+    let level = match blend.rung {
+        Rung::Loop(i) | Rung::Into(i) => &levels[i.min(n - 1)],
+        Rung::Stand => &levels[0],
+    };
+    Some((level, dt * loop_rate(speed, level.speed)))
+}
+
+/// A loop clip's playback rate: the figure's speed over the clip's root speed (`0x007725D0`,
+/// clip kind 2, CONFIRMED), 1 for a still clip or figure. PROVISIONAL clamp (ours) to 0.25..4: the
+/// exe applies none but a display scale `+0xB0`, not traced.
+fn loop_rate(speed: f32, clip_speed: f32) -> f32 {
+    let rate = if clip_speed > 1e-3 && speed > 1e-3 { speed / clip_speed } else { 1.0 };
+    rate.clamp(0.25, 4.0)
 }
 
 /// Writes a figure slot: the frame drawn and, when it cross-fades, its fade entry's number.
@@ -387,7 +571,7 @@ fn clip_speed(man: &Anim, mount: Option<&Anim>) -> f32 {
     mount.map_or(0.0, Anim::root_speed).max(man.root_speed())
 }
 
-/// A unit's ground speed, which picks its gait and speed level (`unit_animation::pick_level`).
+/// A unit's ground speed, which picks each figure's speed level in its locomotion graph ([`on_levels`], [`on_ladder`]).
 ///
 /// The model moves a unit only on its 0.1 s ticks, so the speed is the distance of a moving tick,
 /// not of a frame: the frames between two ticks see no movement, and a per-frame estimate swings
@@ -460,12 +644,15 @@ impl GroundSpeed {
         self.tick = tick;
     }
 
-    /// The gait: stand once still for [`STILL_TICKS`], run above the walk/run midpoint
-    /// (PROVISIONAL, ours: the exe's walk/run choice is not traced).
-    fn gait(&self, walk_speed: f32, run_speed: f32) -> Gait {
+    /// The gait: stand once still for [`STILL_TICKS`]; else run when the unit's move runs (`runs`:
+    /// its run option, or a rout), else walk. A man on foot plays the gait's locomotion graph
+    /// ([`on_levels`]) chosen by the entity state, which follows the move's kind (CONFIRMED,
+    /// [`LocoGraph`]: walk, run, or the charge graph for a charge). Mounted figures climb their
+    /// ladder whatever the gait ([`on_ladder`]: the animal display has one graph, `0x007A72F0`).
+    fn gait(&self, runs: bool) -> Gait {
         if self.still_ticks >= STILL_TICKS {
             Gait::Stand
-        } else if self.speed > (walk_speed + run_speed) * 0.5 {
+        } else if runs {
             Gait::Run
         } else {
             Gait::Walk
@@ -805,7 +992,8 @@ pub fn spawn_missing_views(
     // 2. The bone atlas of every clip in use, and the figure slots.
     let mut atlas = BoneAtlas::default();
     for kit in unit_kits.iter().flatten().chain(bearer_kits.iter().flatten()) {
-        for level in kit.levels.iter().flat_map(|(_, l)| l).chain(kit.actions.values()) {
+        let ladder = kit.ladder.iter().flat_map(|r| r.into.iter().chain([&r.gait]));
+        for level in kit.levels.iter().flat_map(|(_, l)| l).chain(kit.actions.values()).chain(ladder) {
             for clip in level.man.iter().chain(&level.mount) {
                 atlas.add(clip);
             }
@@ -1113,7 +1301,8 @@ pub fn sync_views(
         figures.last_facing = facing;
         figures.seated = true;
         // The ground speed picks the gait (walk below the walk/run midpoint).
-        let gait = figures.ground.gait(unit.walk_speed, unit.run_speed);
+        let runs = unit.running || unit.morale.is_routing_or_shattered();
+        let gait = figures.ground.gait(runs);
         // What the unit is doing (display only, read from the model; see `actions`).
         let mode = if unit.in_melee {
             Mode::Melee
@@ -1236,15 +1425,10 @@ pub fn sync_views(
                 }
             }
         }
-        // The speed level whose clip speed is closest to the unit's, played at
-        // `speed / clip speed` (`unit_animation::pick_level`). All kits of a unit have the
-        // same clips, so the first kit's levels pick for every man.
-        let Some(levels) = figures.kits.first().and_then(|k| k.gait_levels(gait)) else { continue };
+        // Each figure picks its gait clip in its own locomotion graph from the unit's ground
+        // speed (`on_ladder` / `on_levels`; a placement does not show as a huge speed:
+        // `GroundSpeed` skips the tick a unit is placed in).
         let ground_speed = if gait == Gait::Stand { 0.0 } else { figures.ground.speed };
-        let Some((li, rate)) = pick_level(levels.iter().map(|l| l.speed), ground_speed) else { continue };
-        // PROVISIONAL clamp (ours): the exe's playback-rate limits are not traced. (A placement
-        // does not show as a huge speed: `GroundSpeed` skips the tick a unit is placed in.)
-        let advance = dt * rate.clamp(0.25, 4.0);
         // Every man plays his own alternative clips, with his own clip time (GPU skinning): a
         // one-shot if one runs, else the loop of the unit's mode.
         for i in 0..figures.men.len() {
@@ -1260,18 +1444,42 @@ pub fn sync_views(
                     act.play(now, vec![clips], false);
                 }
             }
-            // The loop: gait level, or the mode's action loop (stand level if the table has none).
-            let Some(level) = kit.gait_levels(gait).and_then(|l| l.get(li)) else { continue };
             let loop_slot = match mode {
                 Mode::Ready { aiming } if aiming && kit.actions.contains_key(unit_animation::AIM) => Some(unit_animation::AIM),
                 Mode::Ready { .. } => Some(unit_animation::COMBAT_READY),
                 Mode::Melee => figures.melee_idle.get(alternative(sel, figures.melee_idle.len().max(1))).map(String::as_str),
                 Mode::Gait(_) => None,
             };
-            // The action loop's man clip and line; its mount clip, else the gait level's.
-            let action = loop_slot.and_then(|s| kit.actions.get(s));
+            // The action loop's man clip and line; its mount clip, else the gait level's. A rider
+            // always plays the clip paired with his mount's (CONFIRMED, `0x007725D0`: a rider display
+            // with a mount takes the slot the rider table `+0xE4`->`+0x60` maps the mount display's
+            // slot to, RIDER_STAND when none, `0x0079BB10`, and copies the mount display's clip
+            // time), so an action loop without a mount clip leaves both on the gait level.
+            let action = loop_slot.and_then(|s| kit.actions.get(s)).filter(|a| kit.mount.is_none() || !a.mount.is_empty());
+            // The loop: gait level (a mounted figure's rung of its gait ladder), or the mode's
+            // action loop (stand level if the table has none).
+            let (level, advance, start) = match on_ladder(&kit.ladder, &mut figures.blends[i], ground_speed, dt, action.is_some(), |a| atlas.slot(a).map_or(0.0, |s| s.duration())) {
+                Some(Some(on)) => on,
+                // On the ladder's stand rung: the stand level.
+                Some(None) => match kit.gait_levels(Gait::Stand).and_then(|l| l.first()) {
+                    Some(level) => (level, dt, None),
+                    None => continue,
+                },
+                None => {
+                    // A charging man runs in the charge graph (`LocoGraph`), when his table has it.
+                    let charge = kit.actions.get(unit_animation::CHARGE).filter(|_| unit.charging && gait != Gait::Stand);
+                    let picked = match charge {
+                        Some(c) => on_levels(std::slice::from_ref(c), &mut figures.blends[i], LocoGraph::Charge, ground_speed, dt),
+                        None => kit.gait_levels(gait).and_then(|l| on_levels(l, &mut figures.blends[i], gait, ground_speed, dt)),
+                    };
+                    match picked {
+                        Some((level, advance)) => (level, advance, None),
+                        None => continue,
+                    }
+                }
+            };
             let man_level = action.unwrap_or(level);
-            let mount_level = action.filter(|a| !a.mount.is_empty()).unwrap_or(level);
+            let mount_level = action.unwrap_or(level);
             let loop_man = &man_level.man[alternative(sel, man_level.man.len())];
             let loop_mount = (!mount_level.mount.is_empty()).then(|| &mount_level.mount[alternative(sel, mount_level.mount.len())]);
             let slot = figures.first_slot + i;
@@ -1286,12 +1494,15 @@ pub fn sync_views(
                 None => (None, None),
             };
             let Some(man_clip) = atlas.slot(loop_man) else { continue };
-            // A paired mount clip has the same frame count: same frame, same blend.
+            // A paired mount clip has the same frame count: same frame; each its own blend.
             let want = LoopClip {
                 key: std::sync::Arc::as_ptr(loop_man) as usize,
                 man: man_clip,
-                mount: loop_mount.and_then(|m| atlas.slot(m)),
                 blend_in: man_level.blend_in_of(sel),
+                mount_key: loop_mount.map_or(0, |m| std::sync::Arc::as_ptr(m) as usize),
+                mount: loop_mount.and_then(|m| atlas.slot(m)),
+                mount_blend_in: mount_level.mount_blend_in_of(sel),
+                start,
             };
             let blend = &mut figures.blends[i];
             let speed = || clip_speed(loop_man, loop_mount.map(|m| &**m));
@@ -1314,16 +1525,18 @@ pub fn sync_views(
             // A stable selection number of his own, from the unit's first man (deterministic, and
             // it only picks which alternative clip of the gait he plays).
             let sel = figures.selections.first().copied().unwrap_or(0);
-            let level = bearer.kit.gait_levels(gait).and_then(|l| l.get(li));
+            let level = bearer.kit.gait_levels(gait).and_then(|l| on_levels(l, blend, gait, ground_speed, dt));
             // Without levels he plays the kit's per-gait clip, whose line is not kept: drawn at
             // once on a change (no blend time known).
-            let clip = level.map(|l| (&l.man[alternative(sel, l.man.len())], l.blend_in_of(sel))).or_else(|| bearer.kit.anims(gait).map(|a| (&a.man, 0.0)));
+            let clip = level.map(|(l, advance)| (&l.man[alternative(sel, l.man.len())], l.blend_in_of(sel), advance)).or_else(|| {
+                bearer.kit.anims(gait).map(|a| (&a.man, 0.0, dt * loop_rate(ground_speed, a.man.root_speed())))
+            });
             let bslot = figures.first_slot + figures.men.len();
-            if let Some((clip, blend_in)) = clip
+            if let Some((clip, blend_in, advance)) = clip
                 && let Some(slot_atlas) = atlas.slot(clip)
                 && bslot * 2 + 1 < skin_data.len()
             {
-                let want = LoopClip { key: std::sync::Arc::as_ptr(clip) as usize, man: slot_atlas, mount: None, blend_in };
+                let want = LoopClip { key: std::sync::Arc::as_ptr(clip) as usize, man: slot_atlas, blend_in, mount_key: 0, mount: None, mount_blend_in: 0.0, start: None };
                 blend.step(&want, shown, || clip.root_speed(), skin::phase(view.id, usize::MAX), advance, dt, false);
                 let [fig, _] = blend.draw(None, None, frame);
                 let fade = blend.fade(0);
@@ -1579,6 +1792,8 @@ mod tests {
     fn frames(speed: f32, frame_dts: &[f32], count: usize) -> Vec<(Gait, usize, f32)> {
         let (mut tick, mut x, mut fixed) = (0u32, 0.0f32, 0.0f32);
         let mut g = GroundSpeed::new(Vec2::ZERO, 0, true);
+        let (walk, run) = (kit_levels(&WALK_LEVELS), kit_levels(&RUN_LEVELS));
+        let mut b = ClipBlend::default();
         let mut out = Vec::new();
         for f in 0..count {
             let dt = frame_dts[f % frame_dts.len()];
@@ -1589,14 +1804,56 @@ mod tests {
                 x += speed * TICK_SECONDS;
                 g.observe(Vec2::new(x, 0.0), tick, true, true);
             }
-            let gait = g.gait(WALK, RUN);
-            let levels: &[f32] = if gait == Gait::Run { &RUN_LEVELS } else { &WALK_LEVELS };
-            let (level, rate) = pick_level(levels.iter().copied(), g.speed).unwrap();
+            let gait = g.gait(speed == RUN);
+            let levels = if gait == Gait::Run { &run } else { &walk };
+            let (_, advance) = on_levels(levels, &mut b, gait, g.speed, 1.0).unwrap();
+            let level = match b.rung {
+                Rung::Loop(i) | Rung::Into(i) => i,
+                Rung::Stand => 0,
+            };
             if tick >= 2 {
-                out.push((gait, level, rate));
+                out.push((gait, level, advance));
             }
         }
         out
+    }
+
+    /// Speed levels with these root speeds (one 1 s clip each).
+    fn kit_levels(speeds: &[f32]) -> Vec<crate::soldiers::KitLevel> {
+        let anim = || std::sync::Arc::new(ntw_formats::anim::Anim { frame_rate: 20.0, duration: 1.0, bones: vec![], frames: vec![], events: vec![] });
+        speeds.iter().map(|&speed| crate::soldiers::KitLevel { speed, man: vec![anim()], blend_in: vec![0.5], mount: vec![], mount_blend_in: vec![] }).collect()
+    }
+
+    /// `0x007A7190` / the locomotion graph on foot: the run order plays the run graph's levels,
+    /// the walk order the walk graph's; switching graph enters the new one on its fastest level
+    /// no faster than the man, then levels step up at midpoints and down at quarter points.
+    #[test]
+    fn a_man_changes_graph_with_the_order_and_level_with_hysteresis() {
+        let (walk, run) = (kit_levels(&WALK_LEVELS), kit_levels(&RUN_LEVELS));
+        let mut b = ClipBlend::default();
+        let level = |b: &ClipBlend| match b.rung {
+            Rung::Loop(i) | Rung::Into(i) => i,
+            Rung::Stand => usize::MAX,
+        };
+        on_levels(&walk, &mut b, Gait::Walk, WALK, 0.1);
+        assert_eq!(level(&b), 1, "1.4 m/s: WALK_TRAINED_2 (1.27)");
+        // Run order: the run graph, entered below its slowest level, climbs to it.
+        on_levels(&run, &mut b, Gait::Run, 1.6, 0.1);
+        assert_eq!(level(&b), 0);
+        // 2.6 m/s is past the 2.19 / 3.13 midpoint (2.66)? No: stays; 2.7 is.
+        on_levels(&run, &mut b, Gait::Run, 2.6, 0.1);
+        assert_eq!(level(&b), 0);
+        on_levels(&run, &mut b, Gait::Run, 2.7, 0.1);
+        assert_eq!(level(&b), 1);
+        // Down only at 2.19 + 0.25 x 0.94 = 2.425 m/s.
+        on_levels(&run, &mut b, Gait::Run, 2.5, 0.1);
+        assert_eq!(level(&b), 1);
+        on_levels(&run, &mut b, Gait::Run, 2.4, 0.1);
+        assert_eq!(level(&b), 0);
+        // Walk order at 3.6 m/s (decelerating): the walk graph on its fastest level, 1.73.
+        on_levels(&run, &mut b, Gait::Run, 3.6, 0.1);
+        on_levels(&walk, &mut b, Gait::Walk, 3.6, 0.1);
+        assert_eq!(level(&b), 2);
     }
 
     /// The walking jitter (2026-10-04 to 10-07): the view took the unit's speed from its
@@ -1627,14 +1884,14 @@ mod tests {
         for tick in 1..=10u32 {
             x += WALK * TICK_SECONDS;
             g.observe(Vec2::new(x, 0.0), tick, true, true);
-            assert_eq!(g.gait(WALK, RUN), Gait::Walk, "tick {tick}");
+            assert_eq!(g.gait(false), Gait::Walk, "tick {tick}");
         }
         for tick in 11..10 + STILL_TICKS {
             g.observe(Vec2::new(x, 0.0), tick, false, true);
-            assert_eq!(g.gait(WALK, RUN), Gait::Walk, "tick {tick}");
+            assert_eq!(g.gait(false), Gait::Walk, "tick {tick}");
         }
         g.observe(Vec2::new(x, 0.0), 10 + STILL_TICKS, false, true);
-        assert_eq!(g.gait(WALK, RUN), Gait::Stand);
+        assert_eq!(g.gait(false), Gait::Stand);
     }
 
     /// One frame that spans several model ticks (low frame rate, fast battle speed) in which the
@@ -1649,14 +1906,14 @@ mod tests {
         for (tick, x, moved) in [(1, 0.0, false), (2, 0.0, false), (3, step, true)] {
             g.observe(Vec2::new(x, 0.0), tick, moved, true);
         }
-        assert_eq!(g.gait(WALK, RUN), Gait::Walk);
+        assert_eq!(g.gait(false), Gait::Walk);
         assert!((g.speed - WALK).abs() < 1e-3, "start: speed {}", g.speed);
         // A stop: a step, then two still ticks in the same frame.
         let mut g = GroundSpeed::new(Vec2::ZERO, 0, true);
         for (tick, x, moved) in [(1, step, true), (2, step, false), (3, step, false)] {
             g.observe(Vec2::new(x, 0.0), tick, moved, true);
         }
-        assert_eq!(g.gait(WALK, RUN), Gait::Walk);
+        assert_eq!(g.gait(false), Gait::Walk);
         assert!((g.speed - WALK).abs() < 1e-3, "stop: speed {}", g.speed);
     }
 
@@ -1686,11 +1943,11 @@ mod tests {
         let u = unit(&b);
         assert!(u.moved && matches!(u.reinforcement, Reinforcement::Arriving { .. }), "placed and moved in one tick");
         g.observe_unit(&u, b.tick);
-        assert_eq!(g.gait(u.walk_speed, u.run_speed), Gait::Stand, "the arrival tick is not a step");
+        assert_eq!(g.gait(false), Gait::Stand, "the arrival tick is not a step");
         b.step();
         let u = unit(&b);
         g.observe_unit(&u, b.tick);
-        assert_eq!(g.gait(u.walk_speed, u.run_speed), Gait::Walk, "speed {}", g.speed);
+        assert_eq!(g.gait(false), Gait::Walk, "speed {}", g.speed);
         assert!(g.speed <= u.walk_speed + 1e-3, "speed {} walk {}", g.speed, u.walk_speed);
     }
 
@@ -1699,7 +1956,7 @@ mod tests {
     fn a_deployment_drag_is_not_walking() {
         let mut g = GroundSpeed::new(Vec2::ZERO, 0, true);
         g.observe(Vec2::new(40.0, 0.0), 0, false, true);
-        assert_eq!(g.gait(WALK, RUN), Gait::Stand);
+        assert_eq!(g.gait(false), Gait::Stand);
     }
 
     /// The tick going back (not expected: a restart rebuilds the views) starts over instead of
@@ -1709,7 +1966,7 @@ mod tests {
         let mut g = GroundSpeed::new(Vec2::ZERO, 0, true);
         g.observe(Vec2::new(0.14, 0.0), 1, true, true);
         g.observe(Vec2::new(50.0, 0.0), 0, false, true);
-        assert_eq!(g.gait(WALK, RUN), Gait::Stand);
+        assert_eq!(g.gait(false), Gait::Stand);
         g.observe(Vec2::new(50.14, 0.0), 1, true, true);
         assert!((g.speed - WALK).abs() < 1e-3, "speed {}", g.speed);
     }
@@ -1738,7 +1995,12 @@ mod tests {
     /// Loop clips (their `Arc` addresses in `sync_views`), each 1 s at 20 frames/s, 1 bone, at
     /// their own place in the bone atlas.
     fn clip(key: usize, blend_in: f32) -> LoopClip {
-        LoopClip { key, man: ClipSlot { base: key as u32, frames: 20, bones: 1, rate: 20.0 }, mount: None, blend_in }
+        LoopClip { key, man: ClipSlot { base: key as u32, frames: 20, bones: 1, rate: 20.0 }, blend_in, mount_key: 0, mount: None, mount_blend_in: 0.0, start: None }
+    }
+    /// `man` ridden on the mount clip at atlas slot `mount` (its key: the slot's base), whose
+    /// line blends over 0.25 s.
+    fn ride(mount: ClipSlot, man: LoopClip) -> LoopClip {
+        LoopClip { mount_key: mount.base as usize, mount: Some(mount), mount_blend_in: 0.25, ..man }
     }
     const A: usize = 0x1000;
     const B: usize = 0x2000;
@@ -1783,15 +2045,15 @@ mod tests {
     fn fade(blend_in: f32, dt: f32) -> Vec<f32> {
         let mut b = Fig::default();
         b.run(&clip(A, blend_in), WALK, dt);
-        assert_eq!(b.frozen[0].keep, 0.0, "the first clip is drawn at once");
+        assert_eq!(b.fades[0].frozen[0].keep, 0.0, "the first clip is drawn at once");
         let shown = b.run(&clip(A, blend_in), WALK, dt);
-        assert_eq!(b.frozen[0].keep, 0.0, "no change");
+        assert_eq!(b.fades[0].frozen[0].keep, 0.0, "no change");
         b.run(&clip(B, blend_in), WALK, dt);
-        assert_eq!(b.frozen[0].figs, shown, "fades out of what was drawn the frame before the change");
-        let mut keeps = vec![b.frozen[0].keep];
+        assert_eq!(b.fades[0].frozen[0].fig, shown[0], "fades out of what was drawn the frame before the change");
+        let mut keeps = vec![b.fades[0].frozen[0].keep];
         while *keeps.last().unwrap() > 0.0 {
             b.run(&clip(B, blend_in), WALK, dt);
-            keeps.push(b.frozen[0].keep);
+            keeps.push(b.fades[0].frozen[0].keep);
             assert!(keeps.len() < 100, "the cross-fade ends");
         }
         keeps
@@ -1825,7 +2087,7 @@ mod tests {
     #[test]
     fn the_blend_time_is_the_played_alternatives_line() {
         let anim = || std::sync::Arc::new(ntw_formats::anim::Anim { frame_rate: 20.0, duration: 1.0, bones: vec![], frames: vec![], events: vec![] });
-        let level = crate::soldiers::KitLevel { speed: 1.4, man: vec![anim(), anim()], blend_in: vec![0.5, 0.25], mount: vec![] };
+        let level = crate::soldiers::KitLevel { speed: 1.4, man: vec![anim(), anim()], blend_in: vec![0.5, 0.25], mount: vec![], mount_blend_in: vec![] };
         assert_eq!([0, 1, 2, 3].map(|sel| level.blend_in_of(sel)), [0.5, 0.25, 0.5, 0.25]);
     }
 
@@ -1835,7 +2097,7 @@ mod tests {
         let mut b = Fig::default();
         b.run(&clip(A, 0.5), WALK, 0.125);
         b.run(&clip(B, 0.0), WALK, 0.125);
-        assert_eq!(b.frozen, [Frozen::default(); 2]);
+        assert_eq!(b.fades[0].frozen, [Frozen::default(); 2]);
         assert_eq!(b.fade(0), None);
     }
 
@@ -1853,7 +2115,7 @@ mod tests {
         changing.run(&clip(B, 0.5), WALK, 0.125);
         steady.run(&clip(A, 0.5), WALK, 0.125);
         assert_eq!(steady.time, before + 0.125, "only the frame's advance");
-        assert_eq!(steady.frozen[0].keep, 0.0, "and no cross-fade");
+        assert_eq!(steady.fades[0].frozen[0].keep, 0.0, "and no cross-fade");
         // 1.25 s into the 1 s walk = a quarter step: B (also 1 s) goes on from there.
         assert_eq!(changing.time, 0.25 + 0.125);
     }
@@ -1867,10 +2129,10 @@ mod tests {
         let at_a = b.run(&clip(A, 0.5), WALK, 0.125);
         b.run(&clip(B, 0.5), WALK, 0.125);
         let at_b = b.run(&clip(B, 0.5), WALK, 0.125);
-        assert_eq!(b.frozen[0].keep, 0.75);
+        assert_eq!(b.fades[0].frozen[0].keep, 0.75);
         // The level changes 0.125 s later: the frame drawn was B at 0.25 and A at 0.75.
         b.run(&clip(C, 0.5), WALK, 0.125);
-        assert_eq!(b.frozen, [Frozen { figs: at_b, keep: 0.25 }, Frozen { figs: at_a, keep: 0.75 }]);
+        assert_eq!(b.fades[0].frozen, [Frozen { fig: at_b[0], keep: 0.25 }, Frozen { fig: at_a[0], keep: 0.75 }]);
         assert_eq!(b.clip, C);
     }
 
@@ -1883,8 +2145,8 @@ mod tests {
         for &k in keys {
             b.run(&clip(k, blend_in), WALK, dt);
             assert_eq!(b.clip, k, "a change never waits");
-            let sum: f32 = b.frozen.iter().map(|f| f.keep).sum();
-            assert!(sum <= 1.0 + 1e-6, "weights {:?}", b.frozen);
+            let sum: f32 = b.fades[0].frozen.iter().map(|f| f.keep).sum();
+            assert!(sum <= 1.0 + 1e-6, "weights {:?}", b.fades[0].frozen);
         }
         let last = *keys.last().unwrap();
         let mut frames = 0;
@@ -1918,40 +2180,152 @@ mod tests {
         let at_a = b.run(&clip(A, 0.5), WALK, 0.125);
         b.run(&clip(B, 0.5), WALK, 0.125);
         b.run(&clip(C, 0.5), WALK, 0.125);
-        assert_eq!(b.frozen, [Frozen { figs: at_a, keep: 1.0 }, Frozen::default()]);
+        assert_eq!(b.fades[0].frozen, [Frozen { fig: at_a[0], keep: 1.0 }, Frozen::default()]);
     }
 
     /// A third pose within one blend time: the lightest of the three is dropped and the other two
     /// scaled up to its weight, so the weights still add up to 1.
     #[test]
     fn a_third_pose_drops_the_lightest() {
-        let pose = |n: u32| [[n, n, 0, 0], [n, n, 0, 0]];
-        let old = [Frozen { figs: pose(1), keep: 0.25 }, Frozen { figs: pose(2), keep: 0.5 }];
+        let pose = |n: u32| [n, n, 0, 0];
+        let old = [Frozen { fig: pose(1), keep: 0.25 }, Frozen { fig: pose(2), keep: 0.5 }];
         // The live clip had 0.25 too: the older 0.25 (the first of the lightest) goes.
         let out = freeze(old, pose(3));
-        assert_eq!(out, [Frozen { figs: pose(3), keep: 1.0 / 3.0 }, Frozen { figs: pose(2), keep: 2.0 / 3.0 }]);
-        let old = [Frozen { figs: pose(1), keep: 0.1 }, Frozen { figs: pose(2), keep: 0.3 }];
+        assert_eq!(out, [Frozen { fig: pose(3), keep: 1.0 / 3.0 }, Frozen { fig: pose(2), keep: 2.0 / 3.0 }]);
+        let old = [Frozen { fig: pose(1), keep: 0.1 }, Frozen { fig: pose(2), keep: 0.3 }];
         let out = freeze(old, pose(3));
-        assert_eq!(out.map(|f| f.figs), [pose(3), pose(2)]);
+        assert_eq!(out.map(|f| f.fig), [pose(3), pose(2)]);
         assert!((out[0].keep + out[1].keep - 1.0).abs() < 1e-6);
     }
 
     /// Manager review: the mount clip is picked again every frame, also when the man's clip does
-    /// not change (in melee the man keeps his idle clip while the horse follows the gait).
+    /// not change (two levels sharing the man's clip).
     #[test]
     fn the_mount_clip_follows_while_the_mans_stays() {
         let mut b = Fig::default();
         let stand = ClipSlot { base: 500, frames: 20, bones: 1, rate: 20.0 };
         let walk = ClipSlot { base: 900, ..stand };
-        b.run(&LoopClip { mount: Some(stand), ..clip(A, 0.5) }, STAND, 0.125);
-        let drawn = b.run(&LoopClip { mount: Some(walk), ..clip(A, 0.5) }, STAND, 0.125);
+        b.run(&ride(stand, clip(A, 0.5)), STAND, 0.125);
+        let drawn = b.run(&ride(walk, clip(A, 0.5)), STAND, 0.125);
         assert_eq!(b.mount, Some(walk));
         assert_eq!(drawn[1], walk.figure(b.time));
     }
 
+    /// Each display blends on its own (`0x007725D0` runs per display): a mount clip changing
+    /// alone cross-fades the mount over the mount line's blend time while the rider, whose clip
+    /// stayed, draws his clip alone; a change of both fades each over its own line's time.
+    #[test]
+    fn the_mount_blends_its_own_clip_changes() {
+        let stand = ClipSlot { base: 500, frames: 20, bones: 1, rate: 20.0 };
+        let walk = ClipSlot { base: 900, ..stand };
+        let mut b = Fig::default();
+        b.run(&ride(stand, clip(A, 0.5)), STAND, 0.125);
+        let before = b.run(&ride(stand, clip(A, 0.5)), STAND, 0.125);
+        b.run(&ride(walk, clip(A, 0.5)), STAND, 0.125);
+        assert_eq!(b.fade(0), None, "the rider's clip did not change");
+        assert_eq!(b.fades[1].frozen[0], Frozen { fig: before[1], keep: 1.0 });
+        // 0.25 s line at 8 frames/s: 1, 0.5, gone.
+        b.run(&ride(walk, clip(A, 0.5)), STAND, 0.125);
+        assert_eq!(b.fades[1].frozen[0].keep, 0.5);
+        b.run(&ride(walk, clip(A, 0.5)), STAND, 0.125);
+        assert!(!b.fading());
+        // Both change: the rider over his 0.5 s, the mount over its 0.25 s.
+        b.run(&ride(stand, clip(B, 0.5)), WALK, 0.125);
+        b.run(&ride(stand, clip(B, 0.5)), WALK, 0.125);
+        assert_eq!((b.fades[0].frozen[0].keep, b.fades[1].frozen[0].keep), (0.75, 0.5));
+    }
+
+    /// The horse's ladder in the view (`on_ladder`, debugger sitting 2026-10-09): out of the
+    /// stand the transition starts at 0 and cross-fades; at its end the loop follows at the time
+    /// past the end, drawn at once; a step up from a loop starts the next transition at the loop's
+    /// phase, drawn at once, and plays it at the transition rate.
+    #[test]
+    fn a_horse_climbs_its_ladder_through_the_transition_clips() {
+        use crate::soldiers::{KitLevel, LadderRung};
+        let anim = |duration: f32| std::sync::Arc::new(ntw_formats::anim::Anim { frame_rate: 20.0, duration, bones: vec![], frames: vec![], events: vec![] });
+        let level = |speed: f32, len: f32| KitLevel { speed, man: vec![anim(len)], blend_in: vec![0.5], mount: vec![anim(len)], mount_blend_in: vec![0.5] };
+        let ladder = vec![
+            LadderRung { into: Some(level(0.6, 3.0)), gait: level(1.47, 1.1) },
+            LadderRung { into: Some(level(2.69, 2.7)), gait: level(3.533, 0.8) },
+        ];
+        let len = |a: &std::sync::Arc<ntw_formats::anim::Anim>| a.duration;
+        let mut b = ClipBlend::default();
+        let dt = 0.1;
+        let (lv, adv, start) = on_ladder(&ladder, &mut b, 0.5, dt, false, len).unwrap().unwrap();
+        assert!(std::ptr::eq(lv, ladder[0].into.as_ref().unwrap()));
+        assert_eq!((b.rung, start), (Rung::Into(0), Some((0.0, true))));
+        assert_eq!(adv, dt * 5.0, "0.5 m/s over the 0.1 m/s floor");
+        // 3.1 s into the 3 s STAND_TO_WALK: the walk at 0.1 s, at once.
+        b.time = 3.1;
+        let (lv, _, start) = on_ladder(&ladder, &mut b, 1.4, dt, false, len).unwrap().unwrap();
+        assert!(std::ptr::eq(lv, &ladder[0].gait));
+        assert_eq!(b.rung, Rung::Loop(0));
+        assert!((start.unwrap().0 - 0.1).abs() < 1e-5 && !start.unwrap().1);
+        // Walking (a 1.1 s clip) 0.3 s into a cycle, the unit at 3 m/s: the walk goes on until its
+        // cycle wraps (`[ESP + 0x118]` test at `0x00773CCF`).
+        b.man = ClipSlot { base: 0, frames: 22, bones: 1, rate: 20.0 };
+        b.clip = std::sync::Arc::as_ptr(&ladder[0].gait.man[0]) as usize;
+        b.time = 2.5;
+        let (lv, _, start) = on_ladder(&ladder, &mut b, 3.0, dt, false, len).unwrap().unwrap();
+        assert!(std::ptr::eq(lv, &ladder[0].gait) && start.is_none() && b.rung == Rung::Loop(0));
+        // 1.05 s into the cycle: this frame (0.204 s of walk at 3 / 1.47) wraps it, WALK_TO_TROT
+        // starts at the 0.154 s past the wrap, at once.
+        b.time = 3.25;
+        let (lv, adv, start) = on_ladder(&ladder, &mut b, 3.0, dt, false, len).unwrap().unwrap();
+        assert!(std::ptr::eq(lv, ladder[1].into.as_ref().unwrap()));
+        assert_eq!(b.rung, Rung::Into(1));
+        let (t, fade) = start.unwrap();
+        let phase = (3.25 + dt * 3.0 / 1.47f32).rem_euclid(1.1);
+        assert!((t - phase).abs() < 1e-4 && !fade && adv == 0.0, "{t} {adv} {phase}");
+        // The next frame plays it at the transition rate.
+        b.time = t;
+        let (_, adv, start) = on_ladder(&ladder, &mut b, 3.0, dt, false, len).unwrap().unwrap();
+        let want = unit_animation::transition_rate(3.0, 1.47, 3.533, t / 2.7);
+        assert!((adv - dt * want).abs() < 1e-6 && start.is_none());
+        // Standing still again: off the ladder's loops, the stand level.
+        assert!(on_ladder(&ladder, &mut b, 0.0, dt, false, len).unwrap().is_none());
+        assert!(on_ladder(&[], &mut b, 3.0, dt, false, len).is_none(), "on foot: no ladder");
+    }
+
+    /// Review round 2 (gait-blend2): a step up waits for a wrap only while its from-loop is the
+    /// clip shown (`0x00773C83`); with an action loop shown it changes clip at once, and under an
+    /// action loop the ladder steps between its loops without the transitions (PROVISIONAL).
+    #[test]
+    fn the_ladder_waits_for_a_wrap_only_when_its_loop_is_shown() {
+        use crate::soldiers::{KitLevel, LadderRung};
+        let anim = |duration: f32| std::sync::Arc::new(ntw_formats::anim::Anim { frame_rate: 20.0, duration, bones: vec![], frames: vec![], events: vec![] });
+        let level = |speed: f32, len: f32| KitLevel { speed, man: vec![anim(len)], blend_in: vec![0.5], mount: vec![anim(len)], mount_blend_in: vec![0.5] };
+        let ladder = vec![
+            LadderRung { into: Some(level(0.6, 3.0)), gait: level(1.47, 1.1) },
+            LadderRung { into: Some(level(2.69, 2.7)), gait: level(3.533, 0.8) },
+        ];
+        let len = |a: &std::sync::Arc<ntw_formats::anim::Anim>| a.duration;
+        let dt = 0.1;
+        // On the walk at 3 m/s with a 2 s action clip shown 0.3 s in (no wrap this frame).
+        let action = ClipBlend { rung: Rung::Loop(0), clip: 7, time: 0.3, man: ClipSlot { base: 0, frames: 40, bones: 1, rate: 20.0 }, ..Default::default() };
+        // Still under the action loop: straight to the trot loop, no transition, phase carried.
+        let mut b = action;
+        let (lv, _, start) = on_ladder(&ladder, &mut b, 3.0, dt, true, len).unwrap().unwrap();
+        assert!(std::ptr::eq(lv, &ladder[1].gait) && start.is_none() && b.rung == Rung::Loop(1));
+        // A transition playing when the action loop starts: on to its loop, phase carried.
+        let mut b = ClipBlend { rung: Rung::Into(1), ..action };
+        let (lv, _, start) = on_ladder(&ladder, &mut b, 3.0, dt, true, len).unwrap().unwrap();
+        assert!(std::ptr::eq(lv, &ladder[1].gait) && start.is_none() && b.rung == Rung::Loop(1));
+        // The action loop just ended: WALK_TO_TROT at once, as a usual change (phase carry,
+        // cross-fade), without waiting for the action clip's or the walk's wrap.
+        let mut b = action;
+        let (lv, adv, start) = on_ladder(&ladder, &mut b, 3.0, dt, false, len).unwrap().unwrap();
+        assert!(std::ptr::eq(lv, ladder[1].into.as_ref().unwrap()) && start.is_none() && b.rung == Rung::Into(1));
+        assert_eq!(adv, dt * unit_animation::transition_rate(3.0, 1.47, 3.533, 0.0));
+        // The same frame with the walk shown waits for its wrap.
+        let mut b = ClipBlend { clip: std::sync::Arc::as_ptr(&ladder[0].gait.man[0]) as usize, man: ClipSlot { base: 0, frames: 22, bones: 1, rate: 20.0 }, ..action };
+        let (lv, _, start) = on_ladder(&ladder, &mut b, 3.0, dt, false, len).unwrap().unwrap();
+        assert!(std::ptr::eq(lv, &ladder[0].gait) && start.is_none() && b.rung == Rung::Loop(0));
+    }
+
     /// Review round 3: a mount clip changing on its own also changes the pair's root speed, so the
-    /// man's next change carries the phase when the horse moves (melee idle, horse walking, melee
-    /// ends) and not when it stopped.
+    /// man's next change carries the phase when the horse moves (the horse walking on, then the
+    /// man's clip changing) and not when it stopped.
     #[test]
     fn a_mount_change_alone_updates_the_pairs_speed() {
         let stand = ClipSlot { base: 500, frames: 20, bones: 1, rate: 20.0 };
@@ -1961,11 +2335,11 @@ mod tests {
         let time_after = |first: ClipSlot, first_speed: f32, then: ClipSlot, speed: f32| {
             let mut b = Fig::default();
             for _ in 0..10 {
-                b.run(&LoopClip { mount: Some(first), ..clip(A, 0.5) }, first_speed, 0.125);
+                b.run(&ride(first, clip(A, 0.5)), first_speed, 0.125);
             }
-            b.run(&LoopClip { mount: Some(then), ..clip(A, 0.5) }, speed, 0.125);
+            b.run(&ride(then, clip(A, 0.5)), speed, 0.125);
             assert_eq!(b.speed, speed);
-            b.run(&LoopClip { mount: Some(then), ..clip(B, 0.5) }, speed, 0.125);
+            b.run(&ride(then, clip(B, 0.5)), speed, 0.125);
             b.time
         };
         // 1.375 s into the 1 s clip: B goes on from 0.375, plus the frame's advance.
@@ -2005,7 +2379,7 @@ mod tests {
         b.frame += 2;
         b.run(&clip(B, 0.5), WALK, 0.125);
         assert_eq!(b.clip, B);
-        assert_eq!(b.frozen[0].keep, 0.0);
+        assert_eq!(b.fades[0].frozen[0].keep, 0.0);
     }
 
     /// Round-2 review: a figure skipped while it cross-fades was drawn without the fade then
@@ -2032,13 +2406,13 @@ mod tests {
         let mut b = Fig::default();
         b.run(&clip(A, 0.5), WALK, 0.125);
         b.run(&clip(B, 0.5), WALK, 0.125);
-        assert_eq!(b.frozen[0].keep, 1.0);
+        assert_eq!(b.fades[0].frozen[0].keep, 1.0);
         let shown = b.next();
         b.step(&clip(C, 0.5), shown, || WALK, 0.0, 0.125, 0.125, true);
         assert_eq!(b.b.draw(Some([7, 8, 0, 0]), None, b.frame)[0], [7, 8, 0, 0]);
-        assert_eq!((b.clip, b.frozen[0].keep), (C, 0.0));
+        assert_eq!((b.clip, b.fades[0].frozen[0].keep), (C, 0.0));
         b.run(&clip(C, 0.5), WALK, 0.125);
-        assert_eq!(b.frozen[0].keep, 0.0);
+        assert_eq!(b.fades[0].frozen[0].keep, 0.0);
     }
 
     /// The GPU side: a fading figure's slot points at its fade entry (1 + index), the others hold

@@ -327,6 +327,33 @@ pub const DIPLOMACY_OPTIONS: [&str; 14] = [
     "break_alliance",
 ];
 
+/// The [`DIPLOMACY_OPTIONS`] index of a `force_diplomacy` option key: an exact, case-sensitive
+/// match (CONFIRMED: `0x009792D0` compares with `0x0044F000`; an unknown key stores nothing).
+pub fn diplomacy_option_index(key: &str) -> Option<usize> {
+    DIPLOMACY_OPTIONS.iter().position(|k| *k == key)
+}
+
+/// The value `force_diplomacy(a, b, option, offer, accept)` stores on `a`'s relationship towards
+/// `b`: 1 when `accept` is false, plus 2 when `offer` is false (CONFIRMED `0x009792D0`: the Lua
+/// arguments are read from the top of the stack, accept first).
+pub fn diplomacy_option_value(offer: bool, accept: bool) -> u32 {
+    u32::from(!accept) + 2 * u32::from(!offer)
+}
+
+/// Whether a relationship's option value lets its owner propose the option to the target: not 2
+/// or 3 (CONFIRMED readers: the negotiation records `0x00BF5CB3`, the AI intentions `0x00CAD070`,
+/// the deal goals `0x00CCB150`).
+pub fn option_allows_proposal(value: u32) -> bool {
+    !matches!(value, 2 | 3)
+}
+
+/// Whether a relationship's option value lets its owner accept the option from the target: not 1
+/// or 3 (CONFIRMED readers: the AI deal evaluator `0x00AA5ED0`, the counter-offers `0x00CAD0E0`,
+/// the deal goals `0x00CCB150`).
+pub fn option_allows_acceptance(value: u32) -> bool {
+    !matches!(value, 1 | 3)
+}
+
 /// One attitude factor (an item of `DIPLOMACY_RELATIONSHIP_ATTITUDES_ARRAY`: i32, i32, i32,
 /// bool, i32, bool; CONFIRMED meanings from the per-turn update `0x00B290D0` and the attitude sum
 /// `0x00B0DB60`).
@@ -432,8 +459,11 @@ pub struct Relationship {
     /// #17 `ALLIED_IN_WAR_AGAINST[]` (CONFIRMED).
     pub allied_in_war_against: Vec<AlliedWar>,
     /// #18 u32[14] `force_diplomacy` permissions per [`DIPLOMACY_OPTIONS`] entry: 0 allowed,
-    /// 3 blocked, one bit per script bool (CONFIRMED; 0 everywhere in the samples).
-    pub diplomacy_options: [u32; 14],
+    /// +1 the owner declines the option from the target, +2 the owner may not propose it
+    /// ([`diplomacy_option_value`]; CONFIRMED; 0 everywhere in the samples). Read through
+    /// [`CampaignModel::may_propose`](super::CampaignModel::may_propose) /
+    /// [`CampaignModel::may_accept`](super::CampaignModel::may_accept).
+    pub diplomacy_options: [u32; DIPLOMACY_OPTIONS.len()],
     /// #19 u32 consecutive turns the military access has been in force (CONFIRMED).
     pub military_access_streak: u32,
     /// #20 utf16 a second stance (INFERRED: the previous stance; written by our save on a change).
@@ -559,6 +589,20 @@ pub type RelationshipMap = BTreeMap<(FactionId, FactionId), Relationship>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `force_diplomacy`'s two booleans (`0x009792D0`: !accept + 2·!offer) and the bits the
+    /// readers test (offer 2|3 at `0x00BF5CB3` / `0x00CAD070`, accept 1|3 at `0x00AA5ED0` / `0x00CAD0E0`).
+    #[test]
+    fn diplomacy_option_bits() {
+        assert_eq!(diplomacy_option_value(true, true), 0);
+        assert_eq!(diplomacy_option_value(true, false), 1);
+        assert_eq!(diplomacy_option_value(false, true), 2);
+        assert_eq!(diplomacy_option_value(false, false), 3);
+        assert_eq!([0, 1, 2, 3].map(option_allows_proposal), [true, true, false, false]);
+        assert_eq!([0, 1, 2, 3].map(option_allows_acceptance), [true, false, true, false]);
+        assert_eq!(diplomacy_option_index("military access"), Some(1));
+        assert_eq!(diplomacy_option_index("Peace"), None, "exact, case-sensitive (0x0044F000)");
+    }
 
     #[test]
     fn tax_levels_and_posts() {

@@ -245,10 +245,13 @@ impl CampaignModel {
                 return Some("his portrait number is negative, so his picture path names no file");
             }
             // A resolve as an agent type without a `CULTURE_PATHS` folder (a promotion, modded
-            // data) left his old pictures in place.
-            return set()
-                .is_some_and(|s| s.path(agent).is_none())
-                .then_some("his culture has no portrait folder for his agent type, so his card keeps his previous picture");
+            // data) left his old pictures in place. At -1 nothing was ever resolved: the card is
+            // the one the start position gave him, not a previous resolve's.
+            return set().is_some_and(|s| s.path(agent).is_none()).then_some(if p.index == -1 {
+                "his culture has no portrait folder for his agent type, so his card keeps the picture the start position gave it"
+            } else {
+                "his culture has no portrait folder for his agent type, so his card keeps his previous picture"
+            });
         }
         if !p.alternative.is_empty() {
             return Some("his custom picture name has no card picture; his card shows no portrait");
@@ -436,8 +439,15 @@ mod tests {
         let mut m = model(30);
         m.world.character_details.get_mut(&CharacterId(5)).unwrap().portrait.card = "ui/portraits/european/Cards/general/young/004.tga".into();
         assert_eq!(m.portrait_problem(CharacterId(5), "General"), None);
-        // Resolved again as a type without a `CULTURE_PATHS` folder: the old pictures stay, reported.
+        // The same gap on a start card never resolved (-1): no previous picture was involved.
         m.world.portraits[0].paths.retain(|(a, _)| a != "General");
+        let mut start = m.clone();
+        start.world.character_details.get_mut(&CharacterId(5)).unwrap().portrait.index = -1;
+        assert_eq!(
+            start.portrait_problem(CharacterId(5), "General"),
+            Some("his culture has no portrait folder for his agent type, so his card keeps the picture the start position gave it")
+        );
+        // Resolved again as a type without a `CULTURE_PATHS` folder (removed above): the old pictures stay, reported.
         m.assign_portrait(CharacterId(5), "General");
         let p = m.world.character_details[&CharacterId(5)].portrait.clone();
         assert_eq!((p.index, p.card.as_str()), (2, "ui/portraits/european/Cards/general/young/004.tga"));

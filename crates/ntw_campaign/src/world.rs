@@ -113,9 +113,18 @@ pub(crate) fn load_world(
                 f.diplomacy = stances;
             }
             for rel in dm.record_array("DIPLOMACY_RELATIONSHIPS_ARRAY").into_iter().flat_map(|a| a.records()) {
-                if let Some((target, r)) = crate::details::relationship(rel)
+                if let Some((target, mut r)) = crate::details::relationship(rel)
                     && faction_ids.contains(&target)
                 {
+                    // After loading, the original blocks every diplomacy option of the faction
+                    // keyed "pirates" (all 14 permissions set to 3: neither proposes nor accepts),
+                    // whatever the file holds: `0x00B5BD70` (called from `0x008BAF20`) tests the
+                    // relationship's owner with `0x008CEE20` (key == "pirates") and calls
+                    // `0x00B28690`. CONFIRMED by disassembly. A rule of the original's import, so
+                    // it lives here, not in the model.
+                    if fkey == "pirates" {
+                        r.diplomacy_options = [3; 14];
+                    }
                     world.relationships.insert((fid, target), r);
                 }
             }

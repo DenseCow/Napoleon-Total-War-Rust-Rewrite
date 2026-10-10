@@ -607,11 +607,18 @@ fn character_name(inner: &Inner, ui: &CampaignUi, c: CharacterId) -> Option<Stri
 /// #0, e.g. `ui/portraits/european/Cards/...`), or empty when the model has none for him (the
 /// army card then keeps its unit picture). Why he has none, or why it is wrong
 /// ([`CampaignModel::portrait_problem`], as the agent type his portrait resolves as), is logged
-/// once per character.
+/// once per character and problem: a new problem (a promotion to an agent type without a folder)
+/// is logged again; a character without one is not remembered.
 fn portrait_image(inner: &Inner, m: &CampaignModel, c: CharacterId) -> String {
     let agent = m.portrait_agent(c);
     if let Some(why) = m.portrait_problem(c, agent) {
-        inner.log_once_for("character portrait", &c.0.to_string(), || {
+        // The id is formatted into a stack buffer: a character with a problem is drawn every frame.
+        let mut buf = [0u8; 20];
+        let mut cursor = std::io::Cursor::new(&mut buf[..]);
+        let _ = std::io::Write::write_fmt(&mut cursor, format_args!("{}", c.0));
+        let len = cursor.position() as usize;
+        let id = std::str::from_utf8(&buf[..len]).unwrap_or_default();
+        inner.log_once_for_pair("character portrait", why, id, || {
             format!("WARN character {} ({agent}): {why} (logged once)", c.0)
         });
     }

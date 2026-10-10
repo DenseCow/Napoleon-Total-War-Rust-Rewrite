@@ -28,4 +28,5 @@ pub mod limits;
 mod fnv;
 pub(crate) mod msvc_sort;
 pub mod rng;
+pub mod seam;
 pub mod unit_kind;

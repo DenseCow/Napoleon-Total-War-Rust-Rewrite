@@ -425,21 +425,16 @@ impl CampaignModel {
         // Recruitment (`0x00B71FB0` with force 0, from the region update `0x00AAE820`, CONFIRMED): first
         // the items whose unit the region can no longer recruit are removed through the cancel path
         // `0x00B1A820` with 1, so each is refunded like a cancel (CONFIRMED: the cancel command's call,
-        // crediting the item's cost; 32-bit wrapping sums, [`super::treasury::refund`]). The cancel path
+        // crediting the item's cost; 32-bit wrapping sums, [`super::treasury::credit`]). The cancel path
         // also gives the region its population back, per item (`0x00A61AA0`,
         // [`super::population::RecruitmentPopulation::credited`]).
         let recruitable = self.recruitable_units(region);
-        let mut removed = Vec::new();
-        if let Some(r) = self.world.regions.get_mut(&region) {
-            r.recruitment_queue.retain(|i| {
-                let keep = recruitable.iter().any(|e| e.unit_key == i.unit_key);
-                if !keep {
-                    removed.push(i.clone());
-                }
-                keep
-            });
-        }
-        self.cancelled_recruitment_items(region, &removed, |_| true);
+        // The items no longer recruitable, in queue order (no allocation when there are none).
+        let removed: Vec<_> = match self.world.regions.get_mut(&region) {
+            Some(r) => r.recruitment_queue.extract_if(.., |i| !recruitable.iter().any(|e| e.unit_key == i.unit_key)).collect(),
+            None => Vec::new(),
+        };
+        self.cancelled_recruitment_items(region, &removed, |_, _| true);
         let reg = &self.world.regions[&region];
         // Capacity (the queue's method 1: `recruitment_points`), read before the queues change.
         let caps = (self.recruitment_points(region, false), self.recruitment_points(region, true));

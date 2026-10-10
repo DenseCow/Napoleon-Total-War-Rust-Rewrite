@@ -45,12 +45,12 @@ pub struct Income {
 impl Income {
     /// Everything earned: taxes + trade + other.
     pub fn revenue(&self) -> i32 {
-        self.taxes.saturating_add(self.trade).saturating_add(self.other)
+        self.taxes.wrapping_add(self.trade).wrapping_add(self.other)
     }
 
     /// Revenue − upkeep.
     pub fn net(&self) -> i32 {
-        self.revenue().saturating_sub(self.upkeep)
+        self.revenue().wrapping_sub(self.upkeep)
     }
 }
 
@@ -382,6 +382,12 @@ pub fn faction_income(model: &CampaignModel, faction: FactionId) -> Income {
 
 /// [`faction_income`] with the effects already computed.
 pub fn faction_income_with(model: &CampaignModel, fx: &Effects, faction: FactionId) -> Income {
+    faction_income_with_upkeep(model, fx, faction, || faction_upkeep_with(model, fx, faction))
+}
+
+/// [`faction_income_with`] with the upkeep supplied (a caller that already has the unit upkeep passes it,
+/// so the forces are walked once). `upkeep` is not called for a faction that does not exist.
+pub fn faction_income_with_upkeep(model: &CampaignModel, fx: &Effects, faction: FactionId, upkeep: impl FnOnce() -> i32) -> Income {
     let Some(f) = model.world.factions.get(&faction) else { return Income::default() };
     let taxes = model.world.regions.values().filter(|r| r.owner == faction).map(|r| region_taxes_with(model, fx, r)).sum();
     // CONFIRMED: the major-power flag (faction +0x524, `FactionDetails::major`) picks the variable.
@@ -398,7 +404,7 @@ pub fn faction_income_with(model: &CampaignModel, fx: &Effects, faction: Faction
         model.rules.var("faction_gdp_other", 0.0) as i32
     };
     let trade = trade_routes_value(model, faction);
-    Income { taxes, trade, other, upkeep: faction_upkeep_with(model, fx, faction) }
+    Income { taxes, trade, other, upkeep: upkeep() }
 }
 
 
@@ -637,7 +643,8 @@ pub enum Settlement {
 }
 
 /// The round-end economy of one faction (0x00BABE30, then the regions' 0x00AB4410): if
-/// `treasury + income >= expenses` the treasury changes by `income − expenses`. Otherwise the
+/// `treasury + income >= expenses` the treasury changes by `income − expenses` (32-bit wrapping sums,
+/// [`super::treasury::cannot_pay`] / [`super::treasury::settle_round`]). Otherwise the
 /// faction is bankrupt ([`Settlement::CannotPay`], CONFIRMED 0x00BABE30 / 0x00BA2030 /
 /// 0x008AE710): the treasury becomes 0, the bankrupt-turn count grows, and the capital region's
 /// [`Region::wealth_growth_offset`] grows by 2 (at most 6; it falls by 1 at each of the faction's
@@ -651,13 +658,13 @@ pub fn settle_round(model: &mut CampaignModel, faction: FactionId) -> Settlement
     // The faction's effects, once for the whole step: nothing below changes their sources, except
     // desertion, after which they are computed again.
     let mut fx = Effects::compute_for(model, faction);
-    let income = faction_income_with(model, &fx, faction);
+    let (land_upkeep, naval_upkeep) = faction_upkeep_split_with(model, &fx, faction);
+    let income = faction_income_with_upkeep(model, &fx, faction, || land_upkeep + naval_upkeep);
     let revenue = income.revenue();
     // The turn's record goes to the history (0x00BABE30); its categories 5..11 are the ranking's
     // Wealth (`0x00BBCC40`). PROVISIONAL: the model's record holds categories 5 (taxes), 7 (trade),
     // 11 (other), 19 / 20 (land / naval upkeep); 6, 8..10, 18, 21..24 and the one-off groups are
     // not modelled (0).
-    let (land_upkeep, naval_upkeep) = faction_upkeep_split_with(model, &fx, faction);
     let mut record = [0i32; 25];
     record[5] = income.taxes;
     record[7] = income.trade;
@@ -671,13 +678,13 @@ pub fn settle_round(model: &mut CampaignModel, faction: FactionId) -> Settlement
     }
     let mut result = Settlement::Paid;
     if let Some(f) = model.world.factions.get_mut(&faction) {
-        if i64::from(f.treasury) + i64::from(revenue) < i64::from(income.upkeep) {
+        if super::treasury::cannot_pay(f.treasury, revenue, income.upkeep) {
             f.treasury = 0;
             let turns = model.world.bankrupt_turns.entry(faction).or_insert(0);
             *turns += 1;
             result = Settlement::CannotPay { first_turn: *turns == 1 };
         } else {
-            f.treasury = f.treasury.saturating_add(revenue.saturating_sub(income.upkeep));
+            super::treasury::settle_round(&mut f.treasury, revenue, income.upkeep);
             model.world.bankrupt_turns.remove(&faction);
         }
     }

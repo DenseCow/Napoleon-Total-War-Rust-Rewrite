@@ -198,8 +198,9 @@ fn dispatch(lua: &Lua, s: &Shared, name: &'static str, args: &MultiValue) -> mlu
         // CONFIRMED name; true until the campaign has been saved and loaded (INFERRED meaning).
         "is_new_game" => return Ok(Value::Boolean(s.borrow().is_new_game)),
 
-        // treasury_mod(faction, amount): INFERRED "add amount to the treasury". The f32 amount is
-        // truncated towards zero into the i32 treasury (INFERRED: a C float→int cast).
+        // treasury_mod(faction, amount): CONFIRMED (`0x0097BAD0`) the amount is rounded (FISTP) and
+        // credited only when above 0; an unknown faction changes nothing
+        // (ntw_sim::campaign::treasury::script_credit).
         "treasury_mod" => {
             let (Some(faction), Some(amount)) = (arg_str(args, 1), arg_f32(args, 2)) else {
                 return bad_args(s, text);
@@ -208,7 +209,7 @@ fn dispatch(lua: &Lua, s: &Shared, name: &'static str, args: &MultiValue) -> mlu
             match st.faction_id(&faction) {
                 Some(id) => {
                     let f = st.model.world.factions.get_mut(&id).expect("id from lookup");
-                    f.treasury = f.treasury.wrapping_add(amount as i32);
+                    ntw_sim::campaign::treasury::script_credit(&mut f.treasury, amount);
                     st.log.push(text);
                 }
                 None => st.log.push(format!("{text}: unknown faction")),
@@ -288,16 +289,29 @@ fn dispatch(lua: &Lua, s: &Shared, name: &'static str, args: &MultiValue) -> mlu
             });
         }
 
-        // force_diplomacy(a, b, option, offer, accept): CONFIRMED argument count (5); INFERRED
-        // meaning "may a offer / accept <option> with b". Stored; the diplomacy AI that would read
-        // it does not exist yet.
+        // force_diplomacy(a, b, option, offer, accept) (`SetDiplomacyOptionFromScript`
+        // `0x009792D0`, CONFIRMED): a and b are exact faction keys (no "all" or culture form), the
+        // option an exact `DIPLOMACY_OPTIONS` key, offer and accept Lua booleans (another type is a
+        // script error there, nothing stored). Sets a's permission towards b only; the model's
+        // negotiation panel, AI and saves read it from there.
         "force_diplomacy" => {
-            let (Some(a), Some(b), Some(option)) = (arg_str(args, 1), arg_str(args, 2), arg_str(args, 3))
-            else {
+            let (Some(a), Some(b), Some(option)) = (arg_str(args, 1), arg_str(args, 2), arg_str(args, 3)) else {
                 return bad_args(s, text);
             };
-            let flags = (arg_bool(args, 4), arg_bool(args, 5));
-            s.borrow_mut().diplomacy_options.insert((a, b, option), flags);
+            let (Some(Value::Boolean(offer)), Some(Value::Boolean(accept))) = (args.get(4), args.get(5)) else {
+                return bad_args(s, text);
+            };
+            let mut st = s.borrow_mut();
+            let (Some(a_id), Some(b_id)) = (st.faction_id(&a), st.faction_id(&b)) else {
+                st.log.push(format!("{text}: unknown faction"));
+                return Ok(Value::Nil);
+            };
+            let Some(index) = ntw_sim::campaign::details::diplomacy_option_index(&option) else {
+                st.log.push(format!("{text}: unknown option"));
+                return Ok(Value::Nil);
+            };
+            let stored = st.model.set_diplomacy_option(a_id, b_id, index, *offer, *accept);
+            st.log.push(if stored { text } else { format!("{text}: refused by the model (same faction, or no relationship between them)") });
         }
 
         // add_time_trigger(name, seconds) / remove_time_trigger(name): fires the `TimeTrigger` event

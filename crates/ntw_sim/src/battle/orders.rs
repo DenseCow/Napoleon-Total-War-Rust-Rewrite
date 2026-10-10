@@ -48,7 +48,7 @@ impl Battle {
     pub fn order_halt(&mut self, id: u32) -> bool {
         let Some(i) = self.unit_index(id) else { return false };
         let u = &mut self.units[i];
-        u.destination = None;
+        u.set_destination(None);
         u.fire_target = None;
         u.hold_position = true;
         u.running = false;
@@ -93,7 +93,7 @@ impl Battle {
             from
         };
         let u = &mut self.units[i];
-        u.destination = (dest != from).then_some(dest);
+        u.set_destination((dest != from).then_some(dest));
         u.fire_target = None;
         u.hold_position = true;
         u.charging = charge;

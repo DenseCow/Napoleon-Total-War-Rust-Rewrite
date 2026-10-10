@@ -210,19 +210,17 @@ impl CampaignModel {
     /// `CanRecruitCommander(force, is_navy)`, `army.lua:708`, CONFIRMED name and arity; the army /
     /// navy panel's Promote button is shown only when it answers true, `army.lua:1058`).
     ///
-    /// PROVISIONAL as a reading of the exe's gate (its handler is not traced): the conditions are
-    /// the model's own -- it is the faction's turn, the matching pool (general pool for an army,
-    /// admiral pool for a navy) holds a candidate, and the treasury can pay for at least one of
-    /// them ([`hire_cost_into`], the cost the hire charges).
+    /// The exe's gate (`0x009D1CD0`, CONFIRMED static trace 2026-10-10) tests no money: it answers
+    /// false for a faction without a record (the rebels) and otherwise true when a byte at +0x1B7 of
+    /// the object reached through the force (+0x74) is clear. PROVISIONAL: that byte's meaning is
+    /// UNKNOWN, so the model keeps its own stand-in -- it is the faction's turn and the matching pool
+    /// (general pool for an army, admiral pool for a navy) holds a candidate. Whether a row is
+    /// affordable is the row's own flag ([`super::treasury::commander_affordable`]).
     pub fn can_recruit_commander(&self, force: ForceId) -> bool {
         let Some(f) = self.world.forces.get(&force) else { return false };
         let kind = if f.is_navy { PoolKind::Admiral } else { PoolKind::General };
         let Some((candidates, _)) = self.pool(f.faction, kind) else { return false };
-        if !self.may_act(f.faction) {
-            return false;
-        }
-        let purse = self.world.factions.get(&f.faction).map_or(0, |x| x.treasury);
-        candidates.iter().any(|&c| self.hire_cost_into(c, force).is_some_and(|cost| cost <= purse))
+        !self.is_rebel_faction(f.faction) && self.may_act(f.faction) && !candidates.is_empty()
     }
 
     /// Whether the force may promote one of its units in the field right now (the interface's
@@ -312,7 +310,10 @@ impl CampaignModel {
     }
 
     /// Takes a candidate out of his pool (`0x00A1B8F0`, CONFIRMED: the timer starts if idle, his
-    /// +0x520 / +0x521 flags are cleared) and pays `cost`.
+    /// +0x520 / +0x521 flags are cleared) and charges `cost` to a human faction only: the hire tests
+    /// the faction's human flag (+0x6E0) and only then charges `0x00BAF500(cost, 2)`, so an AI hires
+    /// free (CONFIRMED). The hire tests no money: a human may hire into debt (the interface greys a
+    /// row the treasury cannot pay, [`super::treasury::commander_affordable`]).
     fn take_candidate(&mut self, c: CharacterId, kind: PoolKind, cost: i32) {
         let faction = self.world.characters[&c].faction;
         let elapsed = self.calendar.turns_elapsed;
@@ -323,8 +324,8 @@ impl CampaignModel {
                 p.1 = elapsed + refill;
             }
         }
-        if let Some(fx) = self.world.factions.get_mut(&faction) {
-            fx.treasury -= cost;
+        if self.is_human(faction) && let Some(fx) = self.world.factions.get_mut(&faction) {
+            super::treasury::pay(&mut fx.treasury, cost);
         }
     }
 
@@ -357,10 +358,6 @@ impl CampaignModel {
         };
         let at = target.map_or(ch.position, |t| t.1 .0);
         let cost = self.hire_cost_at(c, at).expect("checked");
-        let available = self.world.factions[&ch.faction].treasury;
-        if available < cost {
-            return Err(CommandError::InsufficientFunds { needed: cost, available });
-        }
         let unit_key = self.general_unit(ch.faction).cloned().ok_or(CommandError::Unsupported("no general unit for this culture"))?;
         self.take_candidate(c, PoolKind::General, cost);
         let uid = UnitId(self.world.alloc_id() as i32);
@@ -418,10 +415,6 @@ impl CampaignModel {
         let old = force.commander.ok_or(CommandError::UnknownForce(fleet))?;
         let (position, garrisoned_in) = self.world.characters.get(&old).map(|x| (x.position, x.garrisoned_in)).ok_or(CommandError::UnknownCharacter(old))?;
         let cost = self.hire_cost_at(c, position).expect("checked");
-        let available = self.world.factions[&ch.faction].treasury;
-        if available < cost {
-            return Err(CommandError::InsufficientFunds { needed: cost, available });
-        }
         self.take_candidate(c, PoolKind::Admiral, cost);
         if let Some(x) = self.world.characters.get_mut(&c) {
             x.position = position;
@@ -441,6 +434,8 @@ impl CampaignModel {
             self.world.characters.remove(&old);
             self.world.character_details.remove(&old);
             self.world.sight_radius.remove(&old);
+            // His destructor (`0x0099D2D0`) frees the items queued through him, as any character's.
+            self.drop_recruitment_target(old);
         }
         self.update_hidden(c);
         Ok(vec![CampaignEvent::CharacterHired { character: c, force: fleet, cost }])
@@ -455,9 +450,10 @@ impl CampaignModel {
     /// He then commands the force (`0x008CFBE0`). The faction needs the effect
     /// `promote_general_in_field` (army) / `promote_admiral_at_sea` (navy) > 0 (INFERRED from the
     /// bonus names; the interface's `CanPromoteUnit` asks the unit's slot 16, not decoded) and
-    /// the force no General / admiral in command. PROVISIONAL: the cost (the interface shows a
-    /// `PromotionCost`) is taken as the pool's hire formula for his rank and distance from the
-    /// capital; the original's charge is not traced.
+    /// the force no General / admiral in command. The charge: `0x008E1C20` charges the unit class's
+    /// slot +0x44 value through `0x00BAF500` for every faction (human or AI) and tests no money
+    /// first, so a promotion may put the faction into debt (CONFIRMED, static trace 2026-10-10).
+    /// PROVISIONAL: the value charged ([`promotion_cost`](Self::promotion_cost)).
     pub(crate) fn promote_unit(&mut self, force: ForceId, unit: usize) -> Result<Vec<CampaignEvent>, CommandError> {
         let f = self.world.forces.get(&force).cloned().ok_or(CommandError::UnknownForce(force))?;
         if !self.may_act(f.faction) {
@@ -473,6 +469,11 @@ impl CampaignModel {
         }
         let at = self.force_position(force).ok_or(CommandError::UnknownForce(force))?;
         let garrisoned_in = f.commander.and_then(|c| self.world.characters.get(&c)).and_then(|c| c.garrisoned_in);
+        // A naval promotion is free (INFERRED, static trace not kept: the naval class's slot +0x44 is a return-0 stub, so
+        // `0x008E2260` pays `0x00BAF500(0, 2)`); a land one charges the pool hire formula
+        // (PROVISIONAL, see `promotion_cost`), charged whatever the treasury holds.
+        // `promotion_cost` is None only for an unknown force, unit or position, all checked above.
+        let cost = self.promotion_cost(force, unit).expect("force, unit and position were checked above");
         let c = match u.character.filter(|c| self.world.characters.contains_key(c)) {
             Some(c) => c,
             None => {
@@ -504,16 +505,8 @@ impl CampaignModel {
                 id
             }
         };
-        // A naval promotion is free (INFERRED, static trace not kept: the naval class's slot +0x44 is a return-0 stub, so
-        // `0x008E2260` pays `0x00BAF500(0, 2)`); a land one charges the pool hire formula
-        // (PROVISIONAL, see `promotion_cost`).
-        let cost = if f.is_navy { 0 } else { self.hire_cost_at_rank(f.faction, at, super::agents::rank(self, c)) };
-        let available = self.world.factions[&f.faction].treasury;
-        if available < cost {
-            return Err(CommandError::InsufficientFunds { needed: cost, available });
-        }
         if let Some(fx) = self.world.factions.get_mut(&f.faction) {
-            fx.treasury -= cost;
+            super::treasury::pay(&mut fx.treasury, cost);
         }
         if let Some(x) = self.world.characters.get_mut(&c) {
             x.kind = new_kind;
@@ -531,5 +524,63 @@ impl CampaignModel {
         self.update_sight_radius(c);
         self.update_hidden(c);
         Ok(vec![CampaignEvent::CharacterPromoted { character: c }])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::calendar::{Calendar, Date, HALF_EARLY};
+    use crate::campaign::effects::SavedBonus;
+    use crate::campaign::world::{Faction, GovernmentType, World};
+    use crate::campaign::{CampaignCommand, CampaignRules};
+    use crate::rng::CaRng;
+
+    /// The promotion tests no money (`0x008E1C20` charges through `0x00BAF500` unconditionally): an empty
+    /// treasury still promotes, and goes into debt by the cost.
+    #[test]
+    fn a_promotion_is_charged_into_debt() {
+        let a = FactionId(1);
+        let mut w = World::default();
+        w.factions.insert(
+            a,
+            Faction {
+                id: a,
+                key: "test_faction_a".into(),
+                treasury: 0,
+                government: GovernmentType::AbsoluteMonarchy,
+                government_key: String::new(),
+                tax_lower: "tax_normal".into(),
+                tax_upper: "tax_normal".into(),
+                diplomacy: BTreeMap::new(),
+            },
+        );
+        w.turn_order = vec![a];
+        let ch = |id: i32, kind| Character {
+            id: CharacterId(id),
+            faction: a,
+            kind,
+            position: (Fixed20::from_int(0), Fixed20::from_int(0)),
+            movement_points: 25,
+            max_movement_points: 25,
+            base_movement_points: 25,
+            garrisoned_in: None,
+        };
+        w.characters.insert(CharacterId(100), ch(100, CharacterKind::Colonel));
+        let unit = CampaignUnit { id: UnitId(7), unit_key: "test_unit".into(), men: 80, max_men: 100, character: None, officer_name: Default::default() };
+        w.forces.insert(ForceId(1002), MilitaryForce { id: ForceId(1002), faction: a, commander: Some(CharacterId(100)), units: vec![unit], is_navy: false });
+        let start = Date { year: 1805, season: 1, month: 0, half: HALF_EARLY };
+        let mut m = CampaignModel::new(Calendar::new(start, 0), CaRng::new(1), w);
+        m.rules = Arc::new(CampaignRules::test_rules());
+        m.world.faction_details.entry(a).or_default().bonus_base = vec![SavedBonus { kind: 1, bonus: 64, value: 1.0, qualifier: String::new() }];
+        assert!(m.promotion_cost(ForceId(1002), 0).is_some_and(|c| c > 0), "the promotion costs money");
+        let cost = m.promotion_cost(ForceId(1002), 0).expect("a price");
+        m.apply(CampaignCommand::PromoteUnit { force: ForceId(1002), unit: 0 }).unwrap();
+        assert_eq!(m.world.factions[&a].treasury, -cost);
+        let officer = m.world.forces[&ForceId(1002)].units[0].character.expect("an officer was made");
+        assert_eq!(m.world.characters[&officer].kind, CharacterKind::General);
     }
 }

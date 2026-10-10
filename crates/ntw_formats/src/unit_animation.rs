@@ -31,9 +31,10 @@
 //! - a slot keeps up to 5 alternative clips; a figure plays `selection % count`
 //!   ([`alternative`], CONFIRMED) with its own selection number ([`SelectionRng`],
 //!   CONFIRMED arithmetic, PROVISIONAL seed);
-//! - a speed level is the one whose clip root speed is closest to the figure's speed and
-//!   plays at `speed / clip speed` ([`pick_level`]; CONFIRMED for the moving-death and
-//!   mounted-attack families, INFERRED for walk/run).
+//! - in the moving-death and mounted-attack families the level is the one whose clip root
+//!   speed is closest to the figure's speed, played at `speed / clip speed` ([`pick_level`],
+//!   CONFIRMED); walk / run levels follow the locomotion graph instead ([`enter`], [`climb`],
+//!   CONFIRMED: up at midpoints, down at quarter points, a horse through its transition clips).
 //!
 //! Choices still PROVISIONAL (the exe's logic is UNKNOWN):
 //! - the `_TRAINED` slots are preferred when the table has them;
@@ -215,6 +216,97 @@ fn mount_families(gait: Gait) -> Vec<Vec<String>> {
     }
 }
 
+/// A horse's gait ladder: each loop slot, slowest first, with the transition slot that leads into
+/// it from the rung below (from the stand for the first). CONFIRMED: the exe's locomotion graph
+/// (nodes and edges built by static initialisers at `0x00413D80..0x00415200`, edge list
+/// `0x0150D010`) maps its node numbers to slots through a per-entity table; the horse's
+/// (`0x0133D738`) gives node 1 `STAND_TO_WALK`, 2 `WALK_1`, 4 `WALK_TO_TROT`, 5 `TROT`,
+/// 8 `TROT_TO_CANTER`, 9 `CANTER`, 12 `CANTER_TO_GALLOP`, 13 `GALLOP`, and no slot for the stop and
+/// step-down nodes (3, 6, 7, 10, 11, 14, 15), so a horse slows down from loop to loop without a
+/// transition clip. The debugger sitting of 2026-10-09 saw horses climb through exactly these
+/// pairs (transition, then its loop) on a run order. The rider plays the paired `RIDER_` slot
+/// ([`rider_slots`]). UNITS_TERRAIN_FIDELITY.md §1.9.
+pub const MOUNT_LADDER: [(&str, &str); 4] =
+    [("STAND_TO_WALK", "WALK_1"), ("WALK_TO_TROT", "TROT"), ("TROT_TO_CANTER", "CANTER"), ("CANTER_TO_GALLOP", "GALLOP")];
+
+/// Where a figure is on its gait ladder ([`MOUNT_LADDER`]): standing, on loop `i`, or playing
+/// the transition clip into loop `i`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Rung {
+    #[default]
+    Stand,
+    Loop(usize),
+    Into(usize),
+}
+
+/// The ground speed (m/s) above which a figure counts as moving (the graph's `0.01`).
+const LADDER_STILL: f32 = 0.01;
+
+/// The rung a figure enters a locomotion graph on (a new graph: on foot, the walk and the run
+/// orders each have their own, `0x007A7190`): the fastest loop whose root speed is at most
+/// `speed`, else the stand. CONFIRMED: with no node yet the display tries every node's entry
+/// test and keeps the highest-numbered that passes (`0x007725D0`); a loop node passes when its
+/// slot has a clip whose root speed is at most the speed (`0x00703120`), the transition and
+/// stop nodes never (`0x00462E90`). `loops(i)` is loop `i`'s root speed, slowest first.
+pub fn enter(n: usize, loops: impl Fn(usize) -> f32, speed: f32) -> Rung {
+    (0..n).rev().find(|&i| loops(i) <= speed).map_or(Rung::Stand, Rung::Loop)
+}
+
+/// The next rung for a figure on `rung` moving at `speed` m/s. `loops(i)` is loop `i`'s root
+/// speed (`n` loops, slowest first), `has_into(i)` whether the transition into loop `i` has a
+/// clip, and `into_done` whether the transition clip being played has reached its end.
+///
+/// CONFIRMED rules (the locomotion graph's edge predicates): going up (`0x007CEAA0`) from the
+/// stand when the speed is above 0.01 m/s, from loop `i` when it is above the midpoint of loop
+/// `i`'s and loop `i + 1`'s root speeds, into the transition node when its slot has a clip, else
+/// straight to the loop; going down (`0x007CE840`) from loop `i` (or the transition into it) to
+/// loop `i - 1` once the speed is at most loop `i - 1`'s root speed plus a quarter of the gap,
+/// and to the stand at 0.01 m/s or less; a transition node moves on to its loop once the clip
+/// shown is that loop's (`0x00703100`: the transition clip ended and its loop followed). The
+/// graph is walked until no edge fires (`0x007725D0`), so one frame can take several steps but
+/// never past a transition clip still playing. Not modelled (PROVISIONAL): both edges also need
+/// the heading change under a limit (`DAT_0150D054`; turning figures take the turn nodes) and a
+/// second context value above 0.01 (`+0x18` of the display's frame context, not traced).
+pub fn climb(rung: Rung, n: usize, loops: impl Fn(usize) -> f32, has_into: impl Fn(usize) -> bool, speed: f32, into_done: bool) -> Rung {
+    if n == 0 {
+        return Rung::Stand;
+    }
+    // A rung past the graph's loops (a graph with fewer levels): its top loop.
+    let mut rung = match rung {
+        Rung::Loop(i) | Rung::Into(i) if i >= n => Rung::Loop(n - 1),
+        r => r,
+    };
+    let up = |i: usize| if has_into(i) { Rung::Into(i) } else { Rung::Loop(i) };
+    let down_to = |i: usize| speed <= loops(i - 1) + (loops(i) - loops(i - 1)) * 0.25;
+    let mut done = into_done;
+    for _ in 0..2 * n + 2 {
+        let next = match rung {
+            Rung::Stand => if speed > LADDER_STILL { up(0) } else { rung },
+            Rung::Loop(i) if i + 1 < n && speed > (loops(i) + loops(i + 1)) * 0.5 => up(i + 1),
+            Rung::Loop(i) | Rung::Into(i) if i > 0 && down_to(i) => Rung::Loop(i - 1),
+            Rung::Loop(0) | Rung::Into(0) if speed <= LADDER_STILL => Rung::Stand,
+            Rung::Into(i) if done => Rung::Loop(i),
+            _ => rung,
+        };
+        if next == rung {
+            break;
+        }
+        // Only the clip that was shown can have ended.
+        done = false;
+        rung = next;
+    }
+    rung
+}
+
+/// The playback rate of a transition clip (CONFIRMED, `0x007725D0`, clip kind 3): the figure's
+/// speed over the root speed expected at this point of the clip, the lerp from its from-slot's
+/// clip (`from`) to its to-slot's (`to`) by the fraction `u` of the clip played (at most 1), at
+/// least 0.1 m/s; the rate is held between 1 and 10.
+pub fn transition_rate(speed: f32, from: f32, to: f32, u: f32) -> f32 {
+    let expected = (from + (to - from) * u.min(1.0)).max(0.1);
+    (speed / expected).clamp(1.0, 10.0)
+}
+
 /// The rider slots tried for a mount slot. CONFIRMED from the exe's slot table
 /// (`analysis/fidelity/UNITS_TERRAIN_FIDELITY.md` §1.1): every `RIDER_<x>` slot names
 /// the mount slot it plays with, and that is `<x>` itself except for the two numbered
@@ -326,9 +418,9 @@ pub fn gait_levels(
 /// The rule is the engine's for every speed-matched family found so far (CONFIRMED for the
 /// moving-death clips `DEATH_MOVING_1..12`, `0x006611E0`, and the mounted attacks while
 /// moving, `0x005B7B20`: each clip's root displacement over 0.1 s × 10 is compared with
-/// the entity's speed, the closest wins and plays at `speed / clip speed`). For walk/run
-/// the same rule is INFERRED: the locomotion code itself was not found. A stand level (or
-/// a level with no speed) plays at rate 1.
+/// the entity's speed, the closest wins and plays at `speed / clip speed`). Walk / run levels
+/// do not use it: they follow the locomotion graph ([`climb`]). A stand level (or a level with
+/// no speed) plays at rate 1.
 pub fn pick_level(level_speeds: impl IntoIterator<Item = f32>, speed: f32) -> Option<(usize, f32)> {
     let (i, level) = level_speeds
         .into_iter()
@@ -452,10 +544,13 @@ pub const COMBAT_READY: &str = "COMBAT_READY";
 pub const AIM: &str = "AIM";
 pub const FIRE: &str = "FIRE";
 pub const FACE_DOWN_GET_UP: &str = "FACE_DOWN_GET_UP";
+/// The charge loop of a man on foot: the only loop of the charge locomotion graph (CONFIRMED, slot
+/// table `0x0133D030`: node 2 `CHARGE`, picked for the move kind 2 state `0xD`, `0x007A7190`).
+pub const CHARGE: &str = "CHARGE";
 
 /// Every foot action slot the battle view may play.
 pub fn foot_action_slots() -> Vec<String> {
-    let mut v: Vec<String> = [COMBAT_READY, AIM, FIRE, FACE_DOWN_GET_UP].map(String::from).to_vec();
+    let mut v: Vec<String> = [COMBAT_READY, AIM, FIRE, FACE_DOWN_GET_UP, CHARGE].map(String::from).to_vec();
     for f in [
         DEATH_STAND, DEATH_STAND_TRAINED, DEATH_WALK, DEATH_MARCH, DEATH_RELOAD, DEATH_POISED, DEATH_RUN,
         DEATH_RUN_TRAINED, DEATH_CHARGE, DEATH_COMBAT_READY, DEATH_MOVING, KNOCKDOWN, COMBAT_IDLE, ATTACK, RELOAD,
@@ -637,6 +732,65 @@ mod tests {
         let mrun = gait_levels(&t, &mplan, Gait::Run, &mut speed);
         let slots: Vec<_> = mrun.iter().map(|l| (l.mount.as_ref().unwrap()[0].slot.clone(), l.man[0].slot.clone())).collect();
         assert_eq!(slots, [("TROT".to_string(), "RIDER_TROT".to_string()), ("GALLOP".into(), "RIDER_GALLOP".into())]);
+    }
+
+    /// The horse's loops (WALK_1, TROT, CANTER, GALLOP root speeds, `mount_horse`).
+    const HORSE_LOOPS: [f32; 4] = [1.47, 3.533, 5.252, 10.192];
+
+    /// `0x007CEAA0` / `0x007CE840`: up at the midpoint of two loops' speeds, through the
+    /// transition clip when there is one; down at a quarter of the gap above the lower loop.
+    #[test]
+    fn the_gait_ladder_climbs_at_midpoints_and_steps_down_at_a_quarter() {
+        let all = |_| true;
+        // Out of the stand as soon as it moves, through STAND_TO_WALK.
+        assert_eq!(climb(Rung::Stand, 4, |i| HORSE_LOOPS[i], all, 0.005, false), Rung::Stand);
+        assert_eq!(climb(Rung::Stand, 4, |i| HORSE_LOOPS[i], all, 0.5, false), Rung::Into(0));
+        // The transition runs to its end, then its loop.
+        assert_eq!(climb(Rung::Into(0), 4, |i| HORSE_LOOPS[i], all, 2.6, false), Rung::Into(0));
+        assert_eq!(climb(Rung::Into(0), 4, |i| HORSE_LOOPS[i], all, 1.4, true), Rung::Loop(0));
+        // Walk to trot above (1.47 + 3.533) / 2 = 2.50 m/s.
+        assert_eq!(climb(Rung::Loop(0), 4, |i| HORSE_LOOPS[i], all, 2.49, false), Rung::Loop(0));
+        assert_eq!(climb(Rung::Loop(0), 4, |i| HORSE_LOOPS[i], all, 2.51, false), Rung::Into(1));
+        // A transition just ended and the speed is already past the next midpoint (4.39): the
+        // loop, then straight on into the next transition.
+        assert_eq!(climb(Rung::Into(1), 4, |i| HORSE_LOOPS[i], all, 4.5, true), Rung::Into(2));
+        // Down from the gallop at 5.252 + 0.25 x 4.94 = 6.49 m/s, to the canter loop (no
+        // step-down clip in the horse's table).
+        assert_eq!(climb(Rung::Loop(3), 4, |i| HORSE_LOOPS[i], all, 6.6, false), Rung::Loop(3));
+        assert_eq!(climb(Rung::Loop(3), 4, |i| HORSE_LOOPS[i], all, 6.4, false), Rung::Loop(2));
+        // A big drop steps down loop by loop in one frame, to the stand when still.
+        assert_eq!(climb(Rung::Loop(3), 4, |i| HORSE_LOOPS[i], all, 1.0, false), Rung::Loop(0));
+        assert_eq!(climb(Rung::Loop(3), 4, |i| HORSE_LOOPS[i], all, 0.0, false), Rung::Stand);
+        // Slowing during a transition goes back to the loop below.
+        assert_eq!(climb(Rung::Into(2), 4, |i| HORSE_LOOPS[i], all, 3.9, false), Rung::Loop(1));
+        // Without transition clips, straight from loop to loop.
+        assert_eq!(climb(Rung::Loop(0), 4, |i| HORSE_LOOPS[i], |_| false, 9.0, false), Rung::Loop(3));
+        assert_eq!(climb(Rung::Stand, 4, |i| HORSE_LOOPS[i], |_| false, 0.5, false), Rung::Loop(0));
+    }
+
+    /// `0x00703120`: a new graph is entered on the fastest loop no faster than the figure (a man
+    /// switched from his run graph to his walk graph at 3.6 m/s plays WALK_TRAINED_3, 1.73).
+    #[test]
+    fn a_graph_is_entered_on_the_fastest_loop_not_above_the_speed() {
+        let walk = [1.0, 1.27, 1.73];
+        assert_eq!(enter(3, |i| walk[i], 3.6), Rung::Loop(2));
+        assert_eq!(enter(3, |i| walk[i], 1.3), Rung::Loop(1));
+        assert_eq!(enter(3, |i| walk[i], 0.4), Rung::Stand);
+        // From there the climb takes over: 0.4 m/s moves, so the first loop.
+        assert_eq!(climb(Rung::Stand, 3, |i| walk[i], |_| false, 0.4, false), Rung::Loop(0));
+        // A rung past a smaller graph's loops comes down to its top loop.
+        assert_eq!(climb(Rung::Loop(4), 3, |i| walk[i], |_| false, 1.8, false), Rung::Loop(2));
+    }
+
+    /// Clip kind 3's rate: speed over the from-to lerp at the fraction played, floor 0.1 m/s,
+    /// held to 1..10.
+    #[test]
+    fn transition_clips_play_at_the_speed_over_the_lerp() {
+        // WALK_TO_TROT half played at 3 m/s: 3 / (1.47 + 2.063 x 0.5) = 1.20.
+        assert!((transition_rate(3.0, 1.47, 3.533, 0.5) - 3.0 / 2.5015).abs() < 1e-5);
+        assert_eq!(transition_rate(1.0, 1.47, 3.533, 0.0), 1.0, "never slower than authored");
+        assert_eq!(transition_rate(5.0, 0.0, 1.47, 0.0), 10.0, "0.1 m/s floor, rate cap 10");
+        assert_eq!(transition_rate(3.533, 1.47, 3.533, 2.0), 1.0, "past the end counts as the end");
     }
 
     /// Each level clip carries its line's `blend_in_time`, the parser's 1.0 s when the line has

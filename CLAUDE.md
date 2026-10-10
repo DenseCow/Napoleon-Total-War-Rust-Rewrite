@@ -113,6 +113,8 @@ large: grep for the section you need, and read that file's "Where I am" / "Next"
 - **Modding seams (user, 2026-10-10).** Game tables are read only through the merged database (mods
   included), never by a `db/<x>_tables/<x>` path; only the importer reads `.esf` or the original's map
   files; no new hardcoded content counts, small ID types or Napoleon-specific checks in engine code.
+  A rule a mod could want to change is called only through its named seam in `CampaignRules::seams`
+  (DESIGN.md §3.3.1), and state a mod's rule keeps goes in `ModState` (user kept it, 2026-10-10).
 - **Hot paths stay cheap.** No allocation, file I/O, decoding, locking or freeing of large buffers on
   the audio thread; no per-frame rebuilding of tables, strings or layouts the data didn't change.
   Do heavy work once, off the main thread, and cache it with a clear invalidation rule.
@@ -166,8 +168,8 @@ user's machine. (GitHub can't enforce this: branch protection needs Pro on a pri
 the session's hooks and rules. Reviews and workers read a branch from its worktree or with
 `git diff`/`git show`; no checkout, switch, reset or stash there (a review fork did it 2026-10-07).
 
-At most 1 manager + 3 workers (reviews take a worker slot) + 1 Sonnet worker that only clears Polish
-lines (user, 2026-10-10). The manager assigns non-overlapping tasks, reviews results, decides what
+At most 1 manager + 3 workers (reviews take a worker slot) + 1 Polish worker: Sonnet, or Opus when the
+lines left need tracing; never idle (user, 2026-10-10). The manager assigns non-overlapping tasks, reviews results, decides what
 merges, and updates `docs/HANDOFF.md`. Workers inspect existing work before changing it, use
 isolated branches/worktrees when they edit, test, commit, and report what changed and how it was
 verified. No open-ended waits: every background wait has a timeout. Stop every process you started

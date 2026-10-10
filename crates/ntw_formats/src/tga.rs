@@ -21,7 +21,8 @@
 //! then: id field, colour map, pixel data
 //! ```
 //! This decoder always returns rows **top-down** (row 0 = the top of the picture) and, for
-//! palette images, keeps the raw indices as well (the ground-type map's index IS the data).
+//! palette images, keeps the raw indices as well (the ground-type map converts them through its
+//! palette colours, `battle_terrain::GroundTypeMap`).
 
 use std::fmt;
 

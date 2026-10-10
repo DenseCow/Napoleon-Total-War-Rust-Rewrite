@@ -22,6 +22,7 @@
 //! The model has one theatre per map (as [`super::economy`] and [`super::population`] assume: every
 //! shipped campaign has one), so the theatre is the faction's whole map.
 
+use std::cell::OnceCell;
 use std::collections::HashMap;
 
 use super::commands::{ENTRY_QUEUE_FULL, MAX_QUEUE};
@@ -123,7 +124,7 @@ impl CampaignModel {
     /// Per unit, the sources are taken in the merge order (flags, experience, cost, region; experience is
     /// not modelled, every entry has 0). The first is the unit's option. When it is flagged, the option
     /// carries the flags of every source of the unit. Else its path to the commander is measured
-    /// ([`Self::recruit_travel_cost`]; none sets [`ENTRY_UNREACHABLE`]) and each further source replaces it
+    /// (`recruit_travel_cost`; none sets [`ENTRY_UNREACHABLE`]) and each further source replaces it
     /// when the source is unflagged, has a path no longer than the option's (the search is cut at that
     /// cost, unless the option cannot train; a path measured for an earlier unit is reused whatever its
     /// length, as the exe's cache does) and needs fewer training plus travel turns.
@@ -135,7 +136,7 @@ impl CampaignModel {
         let regions: Vec<&Region> = self.world.regions.values().filter(|r| r.owner == faction).filter(|r| !naval || r.slots.iter().any(|s| s.port)).collect();
         let queue: Vec<(RegionId, RecruitmentItemId)> = regions
             .iter()
-            .flat_map(|r| r.recruitment_queue.iter().filter(|i| i.target == Some(commander) && self.unit_is_naval(&i.unit_key) == naval).map(|i| (r.id, i.id)))
+            .flat_map(|r| r.recruitment_queue.iter().filter(|i| i.target == Some(commander) && self.rules.is_naval_unit(&i.unit_key) == naval).map(|i| (r.id, i.id)))
             .collect();
 
         // The priced sources of every region, grouped by unit in the merge order.
@@ -158,6 +159,8 @@ impl CampaignModel {
         }
         sources.sort_by(|a, b| a.unit_key.cmp(b.unit_key).then(a.flags.cmp(&b.flags)).then(a.cost.cmp(&b.cost)).then(a.region.cmp(&b.region)));
 
+        // The road costs of the map's regions and polygon sets: built once for the panel, at its first search.
+        let roads = OnceCell::new();
         // The paths measured so far, per queue: (cost, found) or (the limit the search failed at, false).
         let mut paths: HashMap<QueueKey, (f32, bool)> = HashMap::new();
         let mut travel = |s: &Source<'_>, limit: f32| -> f32 {
@@ -171,7 +174,7 @@ impl CampaignModel {
                 return -1.0;
             }
             let from = self.queue_position(s.region, s.unit.is_naval);
-            let cost = self.recruit_travel_cost(from, goal, naval, limit);
+            let cost = self.recruit_travel_cost(&roads, from, goal, naval, limit);
             *entry = if cost < 0.0 { (limit, false) } else { (cost, true) };
             cost
         };
@@ -233,10 +236,6 @@ impl CampaignModel {
         }
     }
 
-    fn unit_is_naval(&self, unit_key: &str) -> bool {
-        self.rules.units.get(unit_key).is_some_and(|u| u.is_naval)
-    }
-
     /// Where a region's queue of that kind stands (its vtable +8): the settlement's position for the land
     /// queue (`0x00B62010`: region +0xFC, its virtual +0x3C), the port's for a naval one (`0x00B61FF0`: the
     /// port slot +0x5C, its virtual +0x40; the model's first port slot, as the spawn uses).
@@ -263,35 +262,56 @@ impl CampaignModel {
     /// ORIGINAL BUG: `0x00B0F2B0` gives no path when the two points are the same (its start/goal test),
     /// so a general inside a settlement could not recruit that settlement's own units through his panel
     /// (flagged as having no path) although they need no march. Ours: cost 0.
-    pub fn recruit_travel_cost(&self, from: (Fixed20, Fixed20), to: (Fixed20, Fixed20), naval: bool, limit: f32) -> f32 {
+    ///
+    /// The road costs come from `roads`, built at the first search that needs them
+    /// ([`Self::recruit_roads`]) and shared by the panel's other searches.
+    fn recruit_travel_cost(&self, roads: &OnceCell<Option<RecruitRoads>>, from: (Fixed20, Fixed20), to: (Fixed20, Fixed20), naval: bool, limit: f32) -> f32 {
         if from == to {
             return 0.0;
         }
         let (a, b) = ((from.0.to_f32(), from.1.to_f32()), (to.0.to_f32(), to.1.to_f32()));
-        let Some(t) = &self.terrain else {
+        let (Some(t), Some(RecruitRoads { road, by_id })) = (&self.terrain, roads.get_or_init(|| self.recruit_roads())) else {
             let d = ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt() * self.rules.road_cost(0);
             return if d > limit { -1.0 } else { d };
         };
         let grid = &t.0;
-        let road: Vec<f32> = grid.region_keys.iter().map(|k| self.rules.road_cost(self.road_level(k))).collect();
         let Some(pm) = &grid.poly else {
             let min = road.iter().copied().fold(super::rules::OFF_ROAD_COST, f32::min);
             let domain = if naval { super::pathing::Domain::Sea } else { super::pathing::Domain::Land };
             let cost = grid.find_path(a, b, domain, min, |i| if grid.road[i] { road.get(grid.region[i] as usize).copied().unwrap_or(super::rules::OFF_ROAD_COST) } else { super::rules::OFF_ROAD_COST }).and_then(|p| p.costs.last().copied());
             return cost.filter(|&c| c <= limit).unwrap_or(-1.0);
         };
-        let by_id = pm.road_costs(|r| road.get(r).copied().unwrap_or(super::rules::OFF_ROAD_COST), self.rules.road_cost(0));
         let mover = if naval { Mover::Sea } else { Mover::Land };
         let view = pm.view();
         let open7 = super::movers::open_shared(pm, pm.locate(a.0, a.1, mover, 2), pm.locate(b.0, b.1, mover, 2));
         let family = super::movers::Family::of(true);
         let blocked = |q: usize| super::movers::kind7_closed(&view, family, &open7, q);
-        let Some(path) = view.find_path_avoiding(a, b, mover, &by_id, &blocked) else { return -1.0 };
+        let Some(path) = view.find_path_avoiding(a, b, mover, by_id, &blocked) else { return -1.0 };
         if path.costs.last().is_some_and(|&c| c > limit) {
             return -1.0;
         }
-        measure_path(pm, &view, &path, &by_id)
+        measure_path(pm, &view, &path, by_id)
     }
+
+    /// The per-region and per-polygon-set road costs the searches of one panel share; `None` without a
+    /// map. They change only when a region's road level or the map does, so a caller making several
+    /// searches builds them once ([`Self::recruit_travel_cost`]).
+    fn recruit_roads(&self) -> Option<RecruitRoads> {
+        let grid = &self.terrain.as_ref()?.0;
+        let road: Vec<f32> = grid.region_keys.iter().map(|k| self.rules.road_cost(self.road_level(k))).collect();
+        let by_id = grid
+            .poly
+            .as_ref()
+            .map(|pm| pm.road_costs(|r| road.get(r).copied().unwrap_or(super::rules::OFF_ROAD_COST), self.rules.road_cost(0)))
+            .unwrap_or_default();
+        Some(RecruitRoads { road, by_id })
+    }
+}
+
+/// The road costs [`CampaignModel::recruit_roads`] builds: per region, and per polygon set of the map.
+struct RecruitRoads {
+    road: Vec<f32>,
+    by_id: Vec<f32>,
 }
 
 /// entry[3]: the march in turns, the path cost over `units` #9 (`0x00B41F60`). The exe divides by #9
@@ -304,7 +324,7 @@ fn march_turns(cost: f32, unit: &UnitRules) -> f32 {
 /// wait for one of the queue's `capacity` training places ([`queue_wait`]) plus `units` #6; -1 when
 /// the queue trains nothing (`capacity` 0) or is full ([`MAX_QUEUE`] items).
 fn queue_training_turns(m: &CampaignModel, region: &Region, unit: &UnitRules, capacity: u32) -> i32 {
-    let turns: Vec<u32> = region.recruitment_queue.iter().filter(|i| m.unit_is_naval(&i.unit_key) == unit.is_naval).map(|i| i.turns_remaining).collect();
+    let turns: Vec<u32> = region.recruitment_queue.iter().filter(|i| m.rules.is_naval_unit(&i.unit_key) == unit.is_naval).map(|i| i.turns_remaining).collect();
     if capacity == 0 || turns.len() >= MAX_QUEUE as usize {
         return -1;
     }
@@ -430,6 +450,14 @@ mod tests {
             }
         }
         PolyMap::build((0, 0), 2 * U, w, h, &cells, vec![vec![0]])
+    }
+
+    /// `0x00B5AC60`: the card's march rounds up (round to nearest, plus 1 when a positive rest is left).
+    #[test]
+    fn travel_turns_round_up() {
+        let turns = |t: f32| CommanderOption { unit_key: String::new(), region: RegionId(0), cost: 0, flags: 0, training_turns: 0, travel_turns: t }.travel_turns_rounded();
+        assert_eq!([turns(0.0), turns(7.0), turns(7.2), turns(7.6), turns(6.5), turns(7.5)], [0, 7, 8, 8, 7, 8]);
+        assert_eq!(turns(-1.0), -1);
     }
 
     /// `0x00B0F2B0`'s measure: along a straight row it is the search's own cost (start to the first cell

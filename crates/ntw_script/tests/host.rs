@@ -25,8 +25,14 @@ events.FactionTurnStart[#events.FactionTurnStart+1] = function(context)
     if conditions.FactionIsLocal(context) then
         seen[#seen+1] = "local turn " .. conditions.TurnNumber(context)
         game_interface:treasury_mod("france", 250.7)
+        game_interface:treasury_mod("france", -100)  -- ignored: only an amount above 0 is credited
         game_interface:add_time_trigger("pan", 2.5)
         game_interface:force_diplomacy("france", "austria", "peace", false, false)
+        game_interface:force_diplomacy("france", "austria", "war", true, false)
+        game_interface:force_diplomacy("france", "france", "war", false, false) -- same faction: refused
+        game_interface:force_diplomacy("france", "prussia", "war", false, false) -- no relationship: refused
+        game_interface:force_diplomacy("france", "austria", "Peace", false, false) -- exact keys only
+        game_interface:force_diplomacy("france", "austria", "war", "no", false) -- not a boolean
         game_interface:show_shroud(false)            -- the fog of war: now implemented
         game_interface:unveil_black_shroud(true)    -- idem
         game_interface:some_future_method(1, "x")    -- not a known name: still a stub
@@ -49,7 +55,12 @@ end
 
 fn host() -> ScriptHost {
     let src = ScriptSource::empty().with_memory_file("events.lua", EVENTS).with_memory_file("test.lua", SCRIPT);
-    let h = ScriptHost::new(common::tiny_model(), "france", src).unwrap();
+    // Relationships between france and austria only (the model never creates one for a script).
+    let mut model = common::tiny_model();
+    let (fr, au) = (model.faction_by_key("france").unwrap().id, model.faction_by_key("austria").unwrap().id);
+    model.relationship_mut(fr, au);
+    model.relationship_mut(au, fr);
+    let h = ScriptHost::new(model, "france", src).unwrap();
     h.run_file("data/test.lua").unwrap();
     h
 }
@@ -75,12 +86,27 @@ fn game_interface_changes_the_model() {
     h.fire("FactionTurnStart", ScriptContext::for_faction("france"));
     let st = h.state();
     let france = st.model.world.factions.values().find(|f| f.key == "france").unwrap();
-    // 250.7 → f32 → truncated to 250 (INFERRED C cast).
-    assert_eq!(france.treasury, 1250);
-    assert_eq!(
-        st.diplomacy_options.get(&("france".into(), "austria".into(), "peace".into())),
-        Some(&(false, false))
-    );
+    // 250.7 → f32 → rounded to 251 (FISTP, 0x0097BAD0); the -100 is ignored (CONFIRMED, amount > 0 only).
+    assert_eq!(france.treasury, 1251);
+    // force_diplomacy lands in the model (0x009792D0): a's relationship to b only, value
+    // !accept + 2·!offer; the panel and the deal rules read it from there.
+    let (fr, au) = (st.faction_id("france").unwrap(), st.faction_id("austria").unwrap());
+    use ntw_sim::campaign::negotiation::NegotiationAction as A;
+    assert_eq!(st.model.diplomacy_option(fr, au, A::Peace.option()), 3);
+    assert_eq!(st.model.diplomacy_option(fr, au, A::War.option()), 1);
+    assert_eq!(st.model.diplomacy_option(au, fr, A::Peace.option()), 0, "one direction only");
+    assert!(!st.model.world.relationships.contains_key(&(fr, fr)), "same faction refused");
+    let pr = st.faction_id("prussia").unwrap();
+    assert!(!st.model.world.relationships.contains_key(&(fr, pr)), "no relationship: refused, none created");
+    let actions = st.model.negotiation_actions(fr, au);
+    let forbidden = |x: A| actions.iter().find(|r| r.action == x).unwrap().forbidden;
+    assert!(forbidden(A::Peace), "offer bit off: france may not propose peace");
+    assert!(!forbidden(A::War), "offer bit on: france may propose war");
+    assert!(st.model.may_propose(au, fr, A::War.option()), "austria's own side is untouched");
+    assert!(!st.model.deal_goal_allowed(au, fr, A::War.option()), "france declines war from austria");
+    assert!(st.log.iter().any(|l| l.contains("\"france\", \"france\"") && l.contains("refused")));
+    assert!(st.log.iter().any(|l| l.contains("\"Peace\"") && l.contains("unknown option")));
+    assert!(st.log.iter().any(|l| l.contains("\"no\"") && l.contains("unexpected arguments")));
     // The fog of war is implemented (0-G): show_shroud / unveil_black_shroud are no longer stubs,
     // so they are logged as done and leave no UNKNOWN line. The tiny model has no shroud for France,
     // so the call says so instead of doing anything.

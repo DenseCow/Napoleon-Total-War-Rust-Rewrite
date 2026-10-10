@@ -87,6 +87,7 @@ pub(crate) fn made_up_model() -> CampaignModel {
     w.trade_accumulated.insert((A, B), 4321);
     w.ai_keys.insert(A, FactionAiKeys { manager: "made_up_manager".into(), personality: "made_up_personality".into(), extra: ["default".into(), "x".into()] });
     w.region_base_values.insert(RegionId(2), 15_025);
+    w.deal_regions_received.insert(A, 3);
     w.restricted_buildings.insert("made_up_level".into());
     w.next_id = 4096;
     let start = Date { year: 1805, season: 1, month: 3, half: HALF_EARLY };
@@ -135,6 +136,33 @@ fn a_made_up_campaign_round_trips() {
     let (h, back) = read_parts(&bytes).expect("read");
     assert_eq!(h, info());
     assert_eq!(back, data);
+}
+
+/// The values mods' rules keep (DESIGN.md §3.3.1) save and load back value for value, in key order,
+/// with the same state hash; a model without them saves none.
+#[test]
+fn mod_state_round_trips() {
+    use ntw_sim::campaign::mod_state::{ModKey, ModScope, ModValue};
+    let mut model = made_up_model();
+    let values = [
+        (ModKey::new("made_up_mod", ModScope::Region(RegionId(5_000_000)), "famine"), ModValue::Int(i64::MIN)),
+        (ModKey::new("made_up_mod", ModScope::Faction(B), "grain"), ModValue::Float(0.1)),
+        (ModKey::new("another_mod", ModScope::Campaign, "era"), ModValue::Text("meiji".into())),
+        (ModKey::new("another_mod", ModScope::Character(CharacterId(-5)), "list"), ModValue::List(vec![ModValue::Bool(true), ModValue::List(Vec::new())])),
+        (ModKey::new("another_mod", ModScope::Force(ForceId(u32::MAX)), "x"), ModValue::Float(-1.0e300)),
+    ];
+    for (k, v) in values.clone() {
+        model.mod_state.set(k, v);
+    }
+    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+    let (_, back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
+    assert_eq!(back.model.mod_state, data.model.mod_state);
+    assert_eq!(back.model.mod_state.len(), values.len());
+    assert_eq!(back.model.state_hash(), data.model.state_hash());
+    // A vanilla model's save has no mod values and loads with none.
+    let vanilla = SaveData { model: made_up_model(), ..data };
+    let (_, back) = read_parts(&write(&info(), &vanilla).expect("write")).expect("read");
+    assert!(back.model.mod_state.is_empty());
 }
 
 /// The fields the original does not save come back empty (as after the original's own load).

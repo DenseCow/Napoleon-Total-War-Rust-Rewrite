@@ -4,7 +4,7 @@
 //! Layout CONFIRMED from the exe's loader (`0x0068E2D0` table, `0x0068E890` template, field use
 //! in the element constructors `0x0068BF10`/`0x0068BFE0`/`0x0068C050`;
 //! `analysis/fidelity/UNITS_TERRAIN_FIDELITY.md` §5.2) and by reading every shipped template to
-//! the last byte (install test `ntw_formats/tests/group_formation_install.rs`). Little-endian:
+//! the last byte (install test `ntw_sim/tests/group_formation_install.rs`). Little-endian:
 //! ```text
 //! u32 template_count
 //! template:

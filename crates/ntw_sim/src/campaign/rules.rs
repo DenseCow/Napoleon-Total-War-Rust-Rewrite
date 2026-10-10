@@ -265,6 +265,9 @@ pub struct CampaignRules {
     /// The campaign's rule switches (the exe's `spa_napoleon` / `mp_eur_napoleon` rules), filled by the
     /// campaign's source.
     pub features: super::features::CampaignFeatures,
+    /// The rules in use for every rule seam ([`super::seams`]): the original's by default, a mod's
+    /// where data selects one. The model, the UI and the AI call those rules only through these.
+    pub seams: super::seams::CampaignSeams,
     /// `trade_nodes` rows by node key: (commodity key, base volume, per extra ship, cap).
     pub trade_nodes: BTreeMap<String, (String, i32, f32, f32)>,
     /// `diplomatic_relations_religion`: (religion, other religion) → value.

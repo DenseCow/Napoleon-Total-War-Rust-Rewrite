@@ -108,7 +108,7 @@ pub fn mouse(
         {
             let u = &mut sim.battle.units[i];
             u.position = (point_m.x, point_m.y);
-            u.destination = None;
+            u.set_destination(None);
         }
         return;
     }

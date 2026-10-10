@@ -28,8 +28,9 @@ fn main() {
             let slot = if i == 0 { prefix.clone() } else { format!("{prefix}_{i}") };
             let clips = tables.resolve(table, &slot);
             for c in clips {
-                let d = vfs.read(&c.clip.filename).ok().and_then(|b| Anim::read(&b).ok()).map(|a| a.duration);
-                println!("{slot:30} {:60} {:?}", c.clip.filename, d);
+                let a = vfs.read(&c.clip.filename).ok().and_then(|b| Anim::read(&b).ok());
+                let (d, v) = (a.as_ref().map(|a| a.duration), a.as_ref().map(Anim::root_speed));
+                println!("{slot:30} {:60} {d:?} root {v:?} m/s blend-in {} s", c.clip.filename, c.clip.blend_in());
             }
         }
     }

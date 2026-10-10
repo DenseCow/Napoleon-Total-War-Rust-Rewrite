@@ -656,9 +656,6 @@ enum CachedLayer {
 /// loose folders scanned once per process (the original also loads its mods once, at start-up).
 #[derive(Debug)]
 struct CachedPlan {
-    data_dir: PathBuf,
-    language: String,
-    options: ModOptions,
     layers: Vec<CachedLayer>,
     graph: Arc<PackGraph>,
     /// Mod packs that no longer opened when the plan was mounted again, each warned about once.
@@ -677,11 +674,16 @@ impl CachedPlan {
     }
 }
 
-/// The plans resolved so far. Few entries (one per install and language the process opens).
-static PLANS: Mutex<Vec<Arc<CachedPlan>>> = Mutex::new(Vec::new());
+/// What a plan is cached under: data folder, language and mod setting.
+type PlanKey = (PathBuf, String, ModOptions);
 
-/// Held while a missed plan is resolved and stored (see [`Vfs::open_install_language`]).
-static PLAN_BUILD: Mutex<()> = Mutex::new(());
+/// One cache entry: filled once under its own lock, so only callers of the same key wait for each
+/// other while it is resolved (see [`Vfs::open_install_language`]).
+type PlanSlot = Arc<Mutex<Option<Arc<CachedPlan>>>>;
+
+/// The plans resolved (or being resolved) so far. Few entries (one per install and language the
+/// process opens); the list's lock is held only to find or add a slot.
+static PLANS: Mutex<Vec<(PlanKey, PlanSlot)>> = Mutex::new(Vec::new());
 
 /// Test only: the data folder of every plan resolved, to count how often a miss plans.
 #[cfg(test)]
@@ -726,7 +728,7 @@ impl Vfs {
     /// reads, CONFIRMED string in the exe), else English. See [`effective_language`].
     ///
     /// The load order is resolved once per data folder, language and mod setting and cached;
-    /// its warnings (a broken or missing mod pack, ...) are printed once, when it is resolved.
+    /// its warnings (a broken or missing mod pack, ...) are logged once, when it is resolved.
     pub fn open_install(data_dir: impl AsRef<Path>) -> Result<Self, PackError> {
         let data_dir = data_dir.as_ref();
         Self::open_install_language(data_dir, &effective_language(data_dir))
@@ -738,45 +740,57 @@ impl Vfs {
         let data_dir = data_dir.as_ref();
         let language = language.trim().to_ascii_lowercase();
         let options = mod_options();
-        let find = || {
-            PLANS.lock().ok().and_then(|plans| {
-                plans.iter().find(|p| p.data_dir == data_dir && p.language == language && p.options == options).cloned()
-            })
+        let key: PlanKey = (data_dir.to_path_buf(), language, options);
+        let slot = {
+            let mut plans = PLANS.lock().unwrap_or_else(|e| e.into_inner());
+            match plans.iter().find(|(k, _)| *k == key) {
+                Some((_, slot)) => Arc::clone(slot),
+                None => {
+                    let slot = PlanSlot::default();
+                    plans.push((key.clone(), Arc::clone(&slot)));
+                    slot
+                }
+            }
         };
-        if let Some(plan) = find() {
-            return mount_cached(&plan);
-        }
-        // A miss plans under this lock, so two threads never plan (and print warnings) twice: the
-        // second finds the first one's plan once it gets the lock.
-        let _planning = PLAN_BUILD.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(plan) = find() {
-            return mount_cached(&plan);
-        }
-        #[cfg(test)]
-        PLANNED.lock().unwrap().push(data_dir.to_path_buf());
-        let plan = plan_layers(data_dir, &language, &options)?;
-        for w in &plan.report.warnings {
-            eprintln!("WARN ntw_formats: mods: {w}");
-        }
-        let layers = plan
-            .layers
-            .iter()
-            .map(|l| match l {
-                Planned::Pack { pack, kind } => CachedLayer::Pack { path: pack.path().to_path_buf(), kind: *kind },
-                Planned::Dir { dir, kind } => CachedLayer::Dir { dir: Arc::clone(dir), kind: *kind },
-            })
-            .collect();
-        if let Ok(mut plans) = PLANS.lock() {
-            plans.push(Arc::new(CachedPlan {
-                data_dir: data_dir.to_path_buf(),
-                language,
-                options,
-                layers,
-                graph: Arc::clone(&plan.graph),
-                gone: Mutex::new(Vec::new()),
-            }));
-        }
-        Ok(mount_plan(plan.layers, plan.graph))
+        // A miss plans under its key's own lock, so two threads never plan (and warn) twice for one
+        // key: the second finds the first one's plan once it gets the lock. Other keys don't wait.
+        // Mounting (which re-opens every pack) always runs after the lock is released.
+        let fresh = {
+            let mut built = slot.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(plan) = built.clone() {
+                drop(built);
+                return mount_cached(&plan);
+            }
+            #[cfg(test)]
+            PLANNED.lock().unwrap().push(data_dir.to_path_buf());
+            let (_, language, options) = &key;
+            let plan = plan_layers(data_dir, language, options)?;
+            for w in &plan.report.warnings {
+                warn_when_logging(&format!("ntw_formats: mods: {w}"));
+            }
+            let layers = plan
+                .layers
+                .iter()
+                .map(|l| match l {
+                    Planned::Pack { pack, kind } => CachedLayer::Pack { path: pack.path().to_path_buf(), kind: *kind },
+                    Planned::Dir { dir, kind } => CachedLayer::Dir { dir: Arc::clone(dir), kind: *kind },
+                })
+                .collect();
+            *built = Some(Arc::new(CachedPlan { layers, graph: Arc::clone(&plan.graph), gone: Mutex::new(Vec::new()) }));
+            plan
+        };
+        Ok(mount_plan(fresh.layers, fresh.graph))
+    }
+}
+
+/// Reports a mod warning. Plans are resolved by `--campaign` / `--battle-key` runs before Bevy's
+/// `LogPlugin` installs a logger (the `log` max level is still `Off`), where `log::warn!` would be
+/// dropped; those go to stderr, as the other pre-start messages in `main` do.
+fn warn_when_logging(msg: &str) {
+    if log::max_level() == log::LevelFilter::Off {
+        eprintln!("{msg}");
+    } else {
+        log::warn!("{msg}");
     }
 }
 
@@ -806,7 +820,7 @@ fn mount_cached(plan: &CachedPlan) -> Result<Vfs, PackError> {
                 Ok(p) => vfs.mount_as(p, *kind),
                 Err(e) if kind.is_mod() => {
                     if plan.first_failure(path) {
-                        eprintln!("WARN ntw_formats: mods: {}: {e}; skipped", path.display());
+                        warn_when_logging(&format!("ntw_formats: mods: {}: {e}; skipped", path.display()));
                     }
                 }
                 Err(e) => return Err(e),
@@ -1137,9 +1151,6 @@ mod tests {
         let data = fake_install("mods_gone_pack");
         let plan = plan_layers(&data, "en", &opts("mod my_mod.pack")).unwrap();
         let cached = CachedPlan {
-            data_dir: data.clone(),
-            language: "en".into(),
-            options: opts("mod my_mod.pack"),
             layers: plan
                 .layers
                 .iter()

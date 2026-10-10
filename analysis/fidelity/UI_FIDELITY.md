@@ -1388,7 +1388,7 @@ entries); `ProposeDeal` / `AcceptOffer` push `AcceptDeal`; `Cancel` pushes `Clea
 round trip), `negotiation_regions_list_the_tradeable_regions` (OK → record → ProposeDeal → owner).
 Open: the other actions' `Propose` items (state gift, payments, protector, war, lists 13–15) have no
 command yet (PLACEHOLDER, logged once per action); the AI's evaluation (`0x00C49BE0` →
-`0x00AA5ED0`, `0x00C1E240`) is traced in AI_RESEARCH.md §4 "Deal evaluation" (technology value, evaluation and accept tests ported in `campaign::deal_value`; the goal lists and weights traced and a deal of technologies answered as the exe; the region value open, so a deal with regions keeps the PLACEHOLDER rule).
+`0x00AA5ED0`, `0x00C1E240`) is traced in AI_RESEARCH.md §4 "Deal evaluation" (technology value, evaluation and accept tests ported in `campaign::deal_value`; the goal lists and weights traced, and a deal of regions and technologies answered as the exe, `ai_accepts_deal`, with the region inputs PROVISIONAL as listed there).
 
 **Review round 1 (2026-10-10).**
 - The settlement's owner-changed event (+0x24, fired at `0x00B44B31` and by `0x00B2B810`): its
@@ -1407,9 +1407,9 @@ command yet (PLACEHOLDER, logged once per action); the AI's evaluation (`0x00C49
   (`CommandError::DealRefused`).
 - A deal applies once (`Negotiation::applied`, reset by Propose / Clear): ProposeDeal then
   AcceptOffer no longer raises the traded count twice.
-- PLACEHOLDER until the AI's evaluation is ported: an AI side refuses a deal in which it gives a
-  region or a technology (`CampaignModel::ai_refuses_deal`; ProposeDeal's result "declined",
-  logged once); what it is offered it accepts.
+- The AI side answers a deal of regions and technologies as the exe (`CampaignModel::ai_refuses_deal`
+  → `ai_accepts_deal`, AI_RESEARCH.md §4 "Deal evaluation"); ProposeDeal shows "declined" when it
+  refuses.
 - `grant_technology` does not walk record +0x60 (PROVISIONAL, the field's source is not traced; a
   no-op for the deal's technologies). `0x008B4AB0`'s second loop (slot +0xD8 characters →
   `0x008B3580`) has no model counterpart (no per-character research link).
@@ -1486,7 +1486,8 @@ campaign); the source order's queue id = region id (INFERRED); experience 0 (not
 search is the model's (`View::find_path_avoiding`, static map, no zones of control) and the limit cut
 compares its own cost (INFERRED: `0x00AC54C0`'s limit test not traced); `" "` for a card without a
 training estimate (INFERRED: the manager constructor `0x0098C2F0` clears +0xA94 and no writer was
-found). PROVISIONAL: a finished targeted item spawns in its settlement like any recruit. The target
+found). PROVISIONAL: a finished targeted item spawns in its settlement like any recruit (CONFIRMED only once
+its commander has died: `0x00B57F40` clears the target, CAMPAIGN_FIDELITY.md §Treasury changes). The target
 is saved and loaded as `RECRUITMENT_ITEM` #2, a character id like #1's region id (INFERRED from that
 id rule, SAVE_COMPAT.md §3); an id naming no loaded character is dropped with a load warning
 (`DanglingRecruitmentTarget`). `units` #9 below 1 (mod data) is read as 1, reported once per load

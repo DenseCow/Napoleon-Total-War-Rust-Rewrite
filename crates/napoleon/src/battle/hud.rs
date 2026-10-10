@@ -656,7 +656,7 @@ fn order(sim: &mut BattleSim, name: &str, arg: Option<bool>) {
         // PROVISIONAL: 10 m per click and 15° per turn (the original's step sizes are UNKNOWN).
         "Current_Selection_Move_Forwards" | "Current_Selection_Move_Backwards" => {
             let d = if name.ends_with("Forwards") { 10.0 } else { -10.0 };
-            u.destination = Some((u.position.0 + u.facing.cos() * d, u.position.1 + u.facing.sin() * d));
+            u.set_destination(Some((u.position.0 + u.facing.cos() * d, u.position.1 + u.facing.sin() * d)));
         }
         "Current_Selection_Rotate_Left" => u.facing += 15f32.to_radians(),
         "Current_Selection_Rotate_Right" => u.facing -= 15f32.to_radians(),

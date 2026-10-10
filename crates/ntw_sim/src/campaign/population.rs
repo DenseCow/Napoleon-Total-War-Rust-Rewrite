@@ -26,6 +26,7 @@
 
 use super::effects::EffectSet;
 use super::ids::RegionId;
+use super::mod_state::ModWrites;
 use super::world::{CampaignModel, Region};
 
 /// The growth factors' keys in their slots (`0x00A88F20`: the table at `0x01458B04`; rows of
@@ -152,7 +153,8 @@ pub fn total(f: &[f32; 7]) -> f32 {
 /// The population after one round of growth (`0x00AB4070`): pop + migrants + round(pop × growth% ),
 /// raised to `minimum_population` and capped at [`POPULATION_CAP`], with the trend it gives (1 up,
 /// 2 unchanged, 3 down; compared before the cap). A rebel-owned region does not grow (growth 0, trend
-/// kept).
+/// kept). The original's rule of the seam `population.grow` ([`super::seams`]): the model and the panel
+/// call the rule in use, never this directly.
 pub fn grow(model: &CampaignModel, reg: &Region, pop: u32, state: &PopulationState) -> (u32, PopulationState) {
     let mut next = state.clone();
     next.migrants = 0;
@@ -336,7 +338,8 @@ pub fn project(model: &CampaignModel, region: RegionId) -> Option<Projection> {
     if !rebel {
         normalise_religions(&mut current_religions);
     }
-    let (population, grown) = grow(model, reg, reg.population, &current);
+    // The growth rule in use (seam `population.grow`); a projection drops the rule's mod-state writes.
+    let (population, grown) = model.rules.seams.population_grow.rule()(model, reg, reg.population, &current, &mut ModWrites::default());
     let mut religions = current_religions.clone();
     let flows = model.conversion_flows_for(reg, population, &religions, &set);
     super::religion::apply_conversion(&mut religions, &flows, population);
@@ -380,15 +383,19 @@ impl CampaignModel {
 
     /// The round end's population step of `faction`'s regions (`0x00AB42F0` → `0x00AB3FF0` → `0x00AB4070`):
     /// each grows by its stored factors, then its religions convert on the new population (`0x00A63FE0`).
+    /// The growth is the rule in use (seam `population.grow`, [`grow`] in vanilla); its mod-state writes
+    /// apply before the next region grows.
     pub fn population_round_end(&mut self, faction: super::ids::FactionId) {
         let regions: Vec<RegionId> = self.world.regions.values().filter(|r| r.owner == faction).map(|r| r.id).collect();
+        let mut writes = ModWrites::default();
         for id in regions {
             let Some(reg) = self.world.regions.get(&id) else { continue };
-            let (pop, state) = grow(self, reg, reg.population, &reg.population_state);
+            let (pop, state) = self.rules.seams.population_grow.rule()(self, reg, reg.population, &reg.population_state, &mut writes);
             if let Some(r) = self.world.regions.get_mut(&id) {
                 r.population = pop;
                 r.population_state = state;
             }
+            self.mod_state.apply(&mut writes);
             self.convert_region(id);
         }
     }

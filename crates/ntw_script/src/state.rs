@@ -113,8 +113,6 @@ pub struct ScriptState {
     pub values_to_load: VecDeque<ScriptValue>,
     /// `add_restricted_unit_record` keys (units the player may not recruit).
     pub restricted_units: BTreeSet<String>,
-    /// `force_diplomacy(a, b, option, offer, accept)`: the latest flags per (a, b, option).
-    pub diplomacy_options: BTreeMap<(String, String, String), (bool, bool)>,
     /// `other_income_mod(faction, amount)`: summed per faction. UNKNOWN whether the original adds or
     /// replaces, and how it feeds the turn income; not applied to the treasury yet.
     pub other_income: BTreeMap<String, f32>,
@@ -138,7 +136,6 @@ impl ScriptState {
             saved_values: Vec::new(),
             values_to_load: VecDeque::new(),
             restricted_units: BTreeSet::new(),
-            diplomacy_options: BTreeMap::new(),
             other_income: BTreeMap::new(),
             missions: Vec::new(),
             character_log: Vec::new(),

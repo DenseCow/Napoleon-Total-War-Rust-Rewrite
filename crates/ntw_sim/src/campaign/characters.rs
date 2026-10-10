@@ -529,6 +529,12 @@ impl CampaignModel {
     /// A character dies: removed with his details; a post he held gets a new holder
     /// ([`Self::refill_post`]); he leaves the recruitment pools; units he was attached to lose him;
     /// the forces he commanded go to a successor ([`Self::command_vacated`]).
+    ///
+    /// A recruitment item queued through him stays queued, unrefunded, and loses its target (CONFIRMED static
+    /// trace 2026-10-10): the character destructor `0x0099D2D0` notifies the observers on his list (+0xD4), and the
+    /// item's listener (`0x00B57F40`, land and naval alike) clears its target +0x18 and its byte +0x24 when he is
+    /// the item's target; the turn's queue step (`0x00B71FB0`) hands an item to the target's reinforcements only
+    /// while +0x18 is set, so the finished unit appears in its settlement like any recruit.
     pub fn character_dies(&mut self, c: CharacterId) {
         let Some(dead) = self.world.characters.remove(&c) else { return };
         self.world.character_details.remove(&c);
@@ -554,9 +560,20 @@ impl CampaignModel {
                 }
             }
         }
+        self.drop_recruitment_target(c);
         self.command_vacated(&dead);
         for (f, i) in vacated {
             self.refill_post(f, i);
+        }
+    }
+
+    /// The items queued through `c` lose their target (the item listener `0x00B57F40`, run by the character
+    /// destructor `0x0099D2D0`; see [`Self::character_dies`]). For every path that destroys a character.
+    pub(crate) fn drop_recruitment_target(&mut self, c: CharacterId) {
+        for r in self.world.regions.values_mut() {
+            for i in r.recruitment_queue.iter_mut().filter(|i| i.target == Some(c)) {
+                i.target = None;
+            }
         }
     }
 

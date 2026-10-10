@@ -408,7 +408,7 @@ impl Battle {
         }
         let u = &mut self.units[s];
         u.fire_target = Some(target);
-        u.destination = None;
+        u.set_destination(None);
         true
     }
 
@@ -416,7 +416,7 @@ impl Battle {
     pub fn order_move(&mut self, id: u32, dest: (f32, f32)) -> bool {
         let Some(i) = self.unit_index(id) else { return false };
         let u = &mut self.units[i];
-        u.destination = Some(dest);
+        u.set_destination(Some(dest));
         u.fire_target = None;
         true
     }

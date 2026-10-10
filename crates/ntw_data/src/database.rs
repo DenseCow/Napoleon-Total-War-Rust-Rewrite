@@ -136,9 +136,9 @@ pub struct LandUnitView<'a> {
 /// again, so a `projectiles` table replaced later is read as it is (a missing key is skipped) and
 /// never indexed out of bounds. The sort key is the shot type enum value (`ntw_sim`'s one lookup),
 /// an unknown name 0 as the exe's `0x00F59030`.
-fn index_gun_shots(guns: &Table<GunTypeProjectile>, projectiles: &Table<Projectile>) -> GunShots {
+fn index_gun_shots(guns: &Table<GunTypeProjectile>, projectiles: &Table<Projectile>, warnings: &mut Vec<String>) -> GunShots {
     let mut by_gun: HashMap<&str, Vec<(usize, &Projectile)>> = HashMap::new();
-    // `gun_type_to_projectiles` rows naming no `projectiles` row: skipped, logged once per load.
+    // `gun_type_to_projectiles` rows naming no `projectiles` row: skipped, one load warning for them all.
     let mut missing: Vec<&str> = Vec::new();
     for g in guns.iter() {
         match projectiles.get_row(&g.projectile) {
@@ -147,7 +147,7 @@ fn index_gun_shots(guns: &Table<GunTypeProjectile>, projectiles: &Table<Projecti
         }
     }
     if let Some(first) = missing.first() {
-        eprintln!("WARN ntw_data: {} gun_type_to_projectiles rows name no projectile (first: {first}); those shots are skipped", missing.len());
+        warnings.push(format!("{} gun_type_to_projectiles rows name no projectile (first: {first}); those shots are skipped", missing.len()));
     }
     let by_gun = by_gun
         .into_iter()
@@ -201,13 +201,13 @@ fn load<T: DbRecord>(vfs: &Loader) -> Result<Table<T>, DataError> {
 }
 
 /// Like [`load`] for a table the game can run without (only pictures or text depend on it): a
-/// **missing** table becomes an empty one with a `WARN` line instead of failing the whole
+/// **missing** table becomes an empty one with a load warning instead of failing the whole
 /// database load. A table that is present but does not read (corrupt, wrong version, a bad mod
 /// override) still fails the load like any other, so a data error is not hidden.
 fn load_optional<T: DbRecord>(vfs: &Loader) -> Result<Table<T>, DataError> {
     match load(vfs) {
         Err(DataError::Pack(PackError::NotFound(path))) => {
-            eprintln!("WARN ntw_data: optional table {} not found ({path}); using an empty table", T::TABLE);
+            vfs.warnings.borrow_mut().push(format!("optional table {} not found ({path}); using an empty table", T::TABLE));
             Ok(Table::default())
         }
         other => other,
@@ -418,7 +418,7 @@ impl GameDatabase {
             |r: &TrailRow| r.key.as_str(),
         )?;
         let gun_type_to_projectiles = load(vfs)?;
-        let gun_shots = index_gun_shots(&gun_type_to_projectiles, &projectiles);
+        let gun_shots = index_gun_shots(&gun_type_to_projectiles, &projectiles, &mut vfs.warnings.borrow_mut());
         let units: Table<UnitRecord> = load(vfs)?;
         // A category the original's compare chain does not know counts as artillery (`ntw_sim::unit_kind`):
         // reported once per load.
@@ -893,7 +893,7 @@ impl GameDatabase {
 
         let projectiles = Table::from_rows(1, projectiles);
         let gun_type_to_projectiles = Table::from_rows(0, guns);
-        let gun_shots = index_gun_shots(&gun_type_to_projectiles, &projectiles);
+        let gun_shots = index_gun_shots(&gun_type_to_projectiles, &projectiles, &mut Vec::new());
         Self {
             source: DataSource::TestFixture,
             units: Table::from_rows(4, units),
@@ -959,6 +959,9 @@ mod tests {
         let vfs = Vfs::new();
         assert!(load_optional::<NegotiationStringRecord>(&Loader::new(&vfs)).expect("optional").is_empty());
         assert!(load_optional::<NegotiationOverrideStringRecord>(&Loader::new(&vfs)).expect("optional").is_empty());
+        let ld = Loader::new(&vfs);
+        load_optional::<NegotiationStringRecord>(&ld).expect("optional");
+        assert_eq!(ld.warnings.take().len(), 1, "a missing optional table is a load warning");
     }
 
     #[test]
@@ -1000,7 +1003,7 @@ mod tests {
         // Table order: canister (3), round shot (0), shell (1), a second round shot (0).
         db.projectiles = Table::from_rows(1, vec![shot("can", "canister", 150), shot("ball", "round_shot", 600), shot("shell", "explosive_shell", 800), shot("ball2", "round_shot", 500)]);
         db.gun_type_to_projectiles = Table::from_rows(0, vec![row("can"), row("ball"), row("shell"), row("ball2")]);
-        db.gun_shots = index_gun_shots(&db.gun_type_to_projectiles, &db.projectiles);
+        db.gun_shots = index_gun_shots(&db.gun_type_to_projectiles, &db.projectiles, &mut Vec::new());
         let art = db.land_unit("fixture_foot_artillery").unwrap();
         let keys: Vec<&str> = db.gun_projectiles(art.stats).iter().map(|p| p.key.as_str()).collect();
         assert_eq!(keys, ["ball", "ball2", "shell", "can"]);
@@ -1053,7 +1056,10 @@ mod tests {
         let row = |p: &str| GunTypeProjectile { gun_type: "fixture_gun".into(), projectile: p.into(), muzzle_flash: String::new() };
         db.projectiles = Table::from_rows(1, vec![shot("ball", 600), shot("modded", -1)]);
         db.gun_type_to_projectiles = Table::from_rows(0, vec![row("ball"), row("modded")]);
-        db.gun_shots = index_gun_shots(&db.gun_type_to_projectiles, &db.projectiles);
+        db.gun_shots = index_gun_shots(&db.gun_type_to_projectiles, &db.projectiles, &mut Vec::new());
+        let mut warnings = Vec::new();
+        index_gun_shots(&db.gun_type_to_projectiles, &Table::from_rows(1, vec![shot("ball", 600)]), &mut warnings);
+        assert_eq!(warnings.len(), 1, "a row naming no projectile is a load warning: {warnings:?}");
         let art = db.land_unit("fixture_foot_artillery").unwrap();
         assert_eq!(db.unit_card_range(art.stats), u32::MAX);
     }

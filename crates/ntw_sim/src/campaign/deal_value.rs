@@ -3,10 +3,9 @@
 //! (`0x00AA5ED0`, run by `CCQ_DIPLOMACY_PROPOSE_DEAL` → `0x00C49BE0` when the recipient is not
 //! human), for the records the model holds. Ported here: the technology value, the deal inflation,
 //! the evaluation sum and its accept tests, the goal weights of region and technology items (the
-//! research need, the technology spread) and how a record sums them, and the answer to a deal of
-//! technologies ([`CampaignModel::ai_accepts_technologies`]). Not yet: the region value
-//! (`0x00A364B0` → `0x00AA1E90`, AI_RESEARCH.md §4 "Resume point"), so a deal with regions is
-//! still answered by the PLACEHOLDER rule of [`super::CampaignModel::ai_refuses_deal`].
+//! research need, the technology spread) and how a record sums them, the region value
+//! (`0x00C131C0` → `0x00A364B0` → `0x00AA1E90`, then `0x00C4D140`), and the answer to a deal of
+//! regions and technologies ([`CampaignModel::ai_accepts_deal`]).
 //!
 //! A deal item's value is a triple of integers (`0x00518210`): `gain`, what the recipient gets
 //! (slot 0), and `cost` / `given` (slots 1 and 2), two measures of what it gives.
@@ -41,9 +40,20 @@ impl DealValue {
     /// (1..3, [`deal_inflation`]) but is truncated to an integer before it multiplies (CVTTSS2SI at
     /// `0x00C42FB2`), so 1.0..2.99 count as 1 or 2. CONFIRMED (disassembly); kept 1:1.
     pub fn inflated(self, factor: f32) -> DealValue {
-        let k = factor as i32 as u32;
+        let k = super::commands::cvttss2si(factor) as u32;
         DealValue { gain: self.gain.wrapping_mul(k), cost: self.cost.wrapping_mul(k), given: self.given.wrapping_mul(k) }
     }
+}
+
+/// `0x00C4D140`, the last step of the regions record's value (`0x00C131C0`): slot 2 becomes
+/// `trunc(f32(slot 2) × 1.5^(max(m, 1) − 1))` (`powf`, constant `0x0131A7B8` = 1.5; slot 2 read
+/// as unsigned), slots 0 and 1 unchanged. `m` is 0 unless the proposer is human and the deal has
+/// no peace item; then it is the deal's demanded regions plus the regions the proposer has received
+/// in earlier deals ([`super::World::deal_regions_received`]), so a human's demands grow dearer.
+/// CONFIRMED (disassembly). The step runs for every deal, so slot 2 always passes through an f32.
+pub fn human_demand_scaled(v: DealValue, m: u32) -> DealValue {
+    let factor = 1.5f32.powf((m.max(1) - 1) as f32);
+    DealValue { given: super::commands::cvttss2si(v.given as f32 * factor) as u32, ..v }
 }
 
 /// `0x00A36B20`: one technology of a deal. The base is `500 + trunc(10 × cost^1.1)` (`cost` = the
@@ -55,7 +65,7 @@ impl DealValue {
 /// cost slots. CONFIRMED (disassembly `0x00A36B20`; constants `0x01325CF8` = 1.1,
 /// `0x0133BCB4` = −10.0; `0x01285310` = `powf`).
 pub fn technology_value(cost: i32, holders: usize, traded: u32, offered: bool, proposer_human: bool) -> DealValue {
-    let base = 500u32.wrapping_sub(((cost as f32).powf(1.1) * -10.0) as i32 as u32);
+    let base = 500u32.wrapping_sub(super::commands::cvttss2si((cost as f32).powf(1.1) * -10.0) as u32);
     let base = if holders == 1 { base.wrapping_mul(2) } else { base };
     let divisor = if offered || !proposer_human { traded.wrapping_add(1).wrapping_mul(traded.wrapping_add(1)).max(1) } else { 1 };
     let v = base / divisor;
@@ -159,6 +169,14 @@ impl DealEvaluation {
         let limit = self.bonus + self.value.gain as f32;
         self.value.given.wrapping_mul(2) as f32 <= limit && self.value.cost.wrapping_mul(2) as f32 <= limit
     }
+}
+
+/// A faction's region counts, taken once per deal evaluation ([`CampaignModel::region_deal_worth`]).
+struct RegionCensus {
+    /// Regions it owns.
+    held: usize,
+    /// Of those, the ones with building slots.
+    with_slots: usize,
 }
 
 /// The weight of a region goal in either of the AI's goal lists (`0x00CCB810` and `0x00CCB210`
@@ -325,33 +343,40 @@ impl CampaignModel {
         research_need_values(need_from_enemies(enemies), need_from_allies(allies, enemies), need_from_economy(history), p1, p2)
     }
 
-    /// The list-1 weight of `tech` (the AI `faction` receives it): [`received_technology_weight`]
-    /// of its research need for the technology's category ([`technology_category`]).
-    pub fn received_technology_goal_weight(&self, faction: FactionId, tech: &str) -> f32 {
-        technology_category(tech).map_or(0.0, |c| received_technology_weight(self.research_need(faction)[c]))
+    /// The list-1 weight of `tech` (an AI with research need `need` ([`CampaignModel::research_need`]) receives
+    /// it): [`received_technology_weight`] of the need for the technology's category ([`technology_category`]).
+    pub fn received_technology_goal_weight(tech: &str, need: &[f32; 3]) -> f32 {
+        technology_category(tech).map_or(0.0, |c| received_technology_weight(need[c]))
     }
 
     /// `0x00CCB150(a, b, index)`: a deal goal of action record `index` may be built between `a` and
     /// `b`: `a`'s `diplomacy_options` towards `b` is not 2 or 3 and `b`'s towards `a` not 1 or 3.
     /// CONFIRMED (disassembly).
     pub fn deal_goal_allowed(&self, a: FactionId, b: FactionId, index: usize) -> bool {
-        let opt = |x: FactionId, y: FactionId| self.world.relationships.get(&(x, y)).map_or(0, |r| r.diplomacy_options[index]);
-        !matches!(opt(a, b), 2 | 3) && !matches!(opt(b, a), 1 | 3)
+        self.may_propose(a, b, index) && self.may_accept(b, a, index)
     }
 
-    /// The AI recipient's answer to the open negotiation's technology record (the evaluator
-    /// `0x00AA5ED0` for record 5): `None` when there is nothing to answer (no negotiation, a human
-    /// recipient, no technology item), else whether it accepts. The steps, CONFIRMED:
-    /// - decline when the recipient's `diplomacy_options` towards the proposer for record 5 is 1 or
-    ///   3 (`0x00B27FE0`);
-    /// - the record's goal weight ([`record_goal_weight`]): a technology the proposer offers counts
-    ///   when it is one of the AI's list-1 goals ([`Self::is_technology_goal`] from the proposer to
-    ///   the AI and [`Self::deal_goal_allowed`]) with [`Self::received_technology_goal_weight`]; one
-    ///   it demands when it is a list-2 goal (from the AI to the proposer) with
-    ///   [`Self::given_technology_goal_weight`];
-    /// - the evaluation ([`DealEvaluation::add`] of [`Self::technology_deal_value`] at the campaign's
-    ///   inflation factor, scale 1.0); accept when `fair` and the diplomatic budget is at least the
-    ///   payment (0 here), or `good` and the payment is at most the recipient's treasury.
+    /// The AI recipient's answer to the open negotiation's deal (the evaluator `0x00AA5ED0` for
+    /// the records the model holds: 4 regions, then 5 technology): `None` when there is nothing to
+    /// answer (no negotiation, a human recipient, no item), else whether it accepts. For each
+    /// record with items, in record order, CONFIRMED:
+    /// - decline when the recipient's `diplomacy_options` towards the proposer for the record is 1
+    ///   or 3 (`0x00B27FE0`);
+    /// - the record's goal weight ([`record_goal_weight`]):
+    ///   - regions: one the proposer offers counts when it is one of the AI's list-1 goals (a
+    ///     region of [`Self::tradeable_regions`] of the proposer), one it demands when it is a
+    ///     list-2 goal (of the AI's tradeable regions), each [`REGION_GOAL_WEIGHT`], both only
+    ///     when [`Self::deal_goal_allowed`];
+    ///   - technologies: one the proposer offers counts when it is one of the AI's list-1 goals
+    ///     ([`Self::is_technology_goal`] from the proposer to the AI and
+    ///     [`Self::deal_goal_allowed`]) with [`Self::received_technology_goal_weight`]; one it
+    ///     demands when it is a list-2 goal (from the AI to the proposer) with
+    ///     [`Self::given_technology_goal_weight`];
+    /// - [`DealEvaluation::add`] of the record's value ([`Self::region_deal_value`] /
+    ///   [`Self::technology_deal_value`] at the campaign's inflation factor), scale 1.0.
+    ///
+    /// Then accept when `fair` and the diplomatic budget is at least the payment (0 here), or
+    /// `good` and the payment is at most the recipient's treasury.
     ///
     /// PROVISIONAL: the budget (`0x00AAF570`, the finance pot `+0x140` = diplomatic spending bias ×
     /// treasury at its refresh, never negative until the AI's own paid diplomatic intentions (kind
@@ -359,24 +384,54 @@ impl CampaignModel {
     /// the AI would not accept is declined where the exe may first make a counter-offer
     /// (`0x00CC58C0`, fewer than 10 per negotiation); the records the model does not hold (trade,
     /// payments, ...) are not evaluated.
-    pub fn ai_accepts_technologies(&self) -> Option<bool> {
+    pub fn ai_accepts_deal(&self) -> Option<bool> {
+        use super::negotiation::NegotiationAction;
         let n = self.negotiations.current.as_ref()?;
         let (ai, proposer) = (n.recipient, n.proposer);
-        if self.is_human(ai) || (n.technologies.offered.is_empty() && n.technologies.demanded.is_empty()) {
+        let has_regions = !(n.regions.offered.is_empty() && n.regions.demanded.is_empty());
+        let has_techs = !(n.technologies.offered.is_empty() && n.technologies.demanded.is_empty());
+        if self.is_human(ai) || !(has_regions || has_techs) {
             return None;
         }
-        let index = super::negotiation::NegotiationAction::Technology.option();
-        if self.world.relationships.get(&(ai, proposer)).is_some_and(|r| matches!(r.diplomacy_options[index], 1 | 3)) {
-            return Some(false);
-        }
-        let allowed = self.deal_goal_allowed(ai, proposer, index);
-        let weight = record_goal_weight(
-            &n.technologies,
-            |t| (allowed && self.is_technology_goal(t, proposer, ai)).then(|| self.received_technology_goal_weight(ai, t)),
-            |t| (allowed && self.is_technology_goal(t, ai, proposer)).then(|| self.given_technology_goal_weight(t)),
-        );
+        let declines = |index: usize| !self.may_accept(ai, proposer, index);
+        let inflation = self.deal_inflation.factor;
         let mut e = DealEvaluation::default();
-        e.add(index, self.technology_deal_value(n, self.deal_inflation.factor), weight, 1.0);
+        // One record's step (the same for both): decline, else its goal weight when the goals are allowed
+        // and its value, added to the evaluation; false is a decline.
+        let mut step = |action: NegotiationAction, weight: &dyn Fn(bool) -> f32, value: &dyn Fn() -> DealValue| {
+            let index = action.option();
+            if declines(index) {
+                return false;
+            }
+            let weight = weight(self.deal_goal_allowed(ai, proposer, index));
+            e.add(index, value(), weight, 1.0);
+            true
+        };
+        if has_regions {
+            let weight = |allowed: bool| {
+                // One lookup of each side's tradeable regions for the whole record.
+                let (theirs, ours): (Vec<RegionId>, Vec<RegionId>) = (self.tradeable_regions(proposer).collect(), self.tradeable_regions(ai).collect());
+                let goal = |side: &[RegionId], r: &RegionId| (allowed && side.contains(r)).then_some(REGION_GOAL_WEIGHT);
+                record_goal_weight(&n.regions, |r| goal(&theirs, r), |r| goal(&ours, r))
+            };
+            if !step(NegotiationAction::Regions, &weight, &|| self.region_deal_value(n, inflation)) {
+                return Some(false);
+            }
+        }
+        if has_techs {
+            let weight = |allowed: bool| {
+                // The AI's research need does not change between items.
+                let need = self.research_need(ai);
+                record_goal_weight(
+                    &n.technologies,
+                    |t| (allowed && self.is_technology_goal(t, proposer, ai)).then(|| Self::received_technology_goal_weight(t, &need)),
+                    |t| (allowed && self.is_technology_goal(t, ai, proposer)).then(|| self.given_technology_goal_weight(t)),
+                )
+            };
+            if !step(NegotiationAction::Technology, &weight, &|| self.technology_deal_value(n, inflation)) {
+                return Some(false);
+            }
+        }
         let payment = 0;
         let budget_ok = true;
         let treasury = self.world.factions.get(&ai).map_or(0, |f| f.treasury);
@@ -407,6 +462,109 @@ impl CampaignModel {
         offered.chain(demanded).fold(DealValue::default(), |s, v| s + v).inflated(inflation)
     }
 
+    /// The region items of `n` valued for its AI recipient (the regions record's value, virtual
+    /// `+0x38` = `0x00C131C0`; CONFIRMED steps):
+    /// - `0x00A364B0`: each region the proposer offers is worth [`Self::region_deal_worth`] to the
+    ///   AI, added to slot 2 when either of the exe's two tests holds (`0x00C3E0C0`: campaign
+    ///   region `+0x22C`, UNKNOWN meaning; or the CAI region's strategy `+0x34` virtual `+0x94`,
+    ///   INFERRED a siege), else to slot 0 when the AI's attitude to the region (`0x00A79050`) is
+    ///   at least 0, or at least −5 with the region bordering one of the AI's
+    ///   ([`super::World::region_neighbours`]), else nowhere; each region the proposer demands adds
+    ///   its worth to the proposer to slot 1 (unless either test holds) and its worth to the AI to
+    ///   slot 2;
+    /// - the sum times the inflation factor ([`DealValue::inflated`]);
+    /// - [`human_demand_scaled`] with `m` = the demanded regions plus
+    ///   [`super::World::deal_regions_received`] when the proposer is human (0 otherwise).
+    ///
+    /// PROVISIONAL: the two tests read false (sieges are not in the model; `+0x22C` is UNKNOWN);
+    /// the attitude (`0x00A79050`: the lower of two population-class results from `0x008BDB90`,
+    /// minus 6, or minus `floor((1 − x) × 6)` when the region is in the AI's list `+0x50/+0x54`) is
+    /// not ported and reads 0, so every offered region counts as gain; the deal's peace record is
+    /// not in the model, so `m` treats it as empty.
+    pub fn region_deal_value(&self, n: &Negotiation, inflation: f32) -> DealValue {
+        let (ai, proposer) = (n.recipient, n.proposer);
+        // The regions bordering one of the AI's, built once and only if a test needs it.
+        let ai_border = std::cell::OnceCell::new();
+        let borders_ai = |r: RegionId| {
+            ai_border
+                .get_or_init(|| {
+                    let owned = self.world.regions.values().filter(|x| x.owner == ai);
+                    owned.filter_map(|x| self.world.region_neighbours.get(&x.id)).flatten().copied().collect::<std::collections::BTreeSet<RegionId>>()
+                })
+                .contains(&r)
+        };
+        let (ai_census, proposer_census) = (self.region_census(ai), self.region_census(proposer));
+        // PROVISIONAL: the attitude `0x00A79050` is not ported.
+        let attitude = |_: RegionId| 0;
+        let mut v = DealValue::default();
+        for &r in &n.regions.offered {
+            let a = attitude(r);
+            if a >= 0 || (a >= -5 && borders_ai(r)) {
+                v.gain = v.gain.wrapping_add(self.region_deal_worth_with(r, ai, &ai_census));
+            }
+        }
+        for &r in &n.regions.demanded {
+            v.cost = v.cost.wrapping_add(self.region_deal_worth_with(r, proposer, &proposer_census));
+            v.given = v.given.wrapping_add(self.region_deal_worth_with(r, ai, &ai_census));
+        }
+        let m = if self.is_human(proposer) {
+            (n.regions.demanded.len() as u32).wrapping_add(self.world.deal_regions_received.get(&proposer).copied().unwrap_or(0))
+        } else {
+            0
+        };
+        human_demand_scaled(v.inflated(inflation), m)
+    }
+
+    /// `0x00AA1E90`: region `r`'s worth to `faction` in a deal ([`region_value::faction_value`]),
+    /// from its base ([`region_value::stored_or_formula`]). Read from the model, CONFIRMED: `n`
+    /// counts `r`'s neighbours its owner holds; the theatre doubling counts `faction`'s regions
+    /// over the whole map (vanilla campaigns have one theatre holding every region); the ×1.5
+    /// reads the regions' building slots.
+    /// PROVISIONAL: the own branch is `r`'s owner being `faction` and `r` belonging to a region
+    /// group (`+0x12C`); groups are not in the model, so every region is taken to have one
+    /// (INFERRED from the group analysis grouping each faction's regions, not traced); the region
+    /// group's change state is NEW (the group analysis, belief 0x52, is not ported), so the
+    /// personality multipliers are not reached and read their shipped defaults, not the AI
+    /// personality's; the faction's CAI region list `+0x1C0` (`0x00C45CF0`, ×2) is not in the
+    /// model and reads false; a map with several theatres is counted as one.
+    pub fn region_deal_worth(&self, r: RegionId, faction: FactionId) -> u32 {
+        self.region_deal_worth_with(r, faction, &self.region_census(faction))
+    }
+
+    /// How many regions `faction` holds and how many of them have building slots: the two counts every
+    /// [`Self::region_deal_worth_with`] of one evaluation shares.
+    fn region_census(&self, faction: FactionId) -> RegionCensus {
+        let owned = || self.world.regions.values().filter(|x| x.owner == faction);
+        RegionCensus { held: owned().count(), with_slots: owned().filter(|x| !x.slots.is_empty()).count() }
+    }
+
+    /// [`Self::region_deal_worth`] with `faction`'s [`RegionCensus`] already taken.
+    fn region_deal_worth_with(&self, r: RegionId, faction: FactionId, census: &RegionCensus) -> u32 {
+        use super::region_value::{faction_value, stored_or_formula, FactionRegion, GroupChange, Multipliers};
+        // A deal only holds existing regions (`propose_regions` refuses an unknown id).
+        let Some(reg) = self.world.regions.get(&r) else { return 0 };
+        // PROVISIONAL: every region is taken to belong to a region group (`+0x12C` non-null).
+        let grouped = true;
+        let own_branch = reg.owner == faction && grouped;
+        let held = census.held;
+        let owner_neighbours = self
+            .world
+            .region_neighbours
+            .get(&r)
+            .map_or(0, |ns| ns.iter().filter(|x| self.world.regions.get(x).is_some_and(|x| x.owner == reg.owner)).count()) as i32;
+        let fr = FactionRegion {
+            own_branch,
+            change: GroupChange::New,
+            owner_neighbours,
+            theatre_double: if own_branch { held == 1 } else { held == 0 },
+            key_region: false,
+            // No other region of `faction` has slots: its slotted regions are `r` alone (when `r` is its own).
+            last_with_slots: !reg.slots.is_empty() && census.with_slots == usize::from(reg.owner == faction),
+        };
+        let base = stored_or_formula(self.world.region_base_values.get(&r).copied(), reg.gdp);
+        faction_value(base, &fr, &Multipliers::from_tunables(|_, d| d)) as u32
+    }
+
     /// Whether `tech` is a technology goal from `giver` to `receiver` (`0x008F4F10(this = giver,
     /// out, receiver)`, used by both goal lists): the giver has it researched (state 0) and the
     /// receiver has it in state 1, 2 or 3 (`0x008F3AC0`). CONFIRMED.
@@ -425,6 +583,18 @@ impl CampaignModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn float_to_int_casts_give_the_integer_indefinite_out_of_range() {
+        // cvttss2si: 0x80000000 for a value past the int range or NaN, not a saturated value.
+        assert_eq!(super::super::commands::cvttss2si(-2.9), -2);
+        assert_eq!(super::super::commands::cvttss2si(f32::NAN), i32::MIN);
+        assert_eq!(super::super::commands::cvttss2si(3.0e9), i32::MIN);
+        let v = DealValue { gain: 1, cost: 2, given: 3_000_000_000 };
+        assert_eq!(human_demand_scaled(v, 1), DealValue { given: 1u32 << 31, ..v }, "3e9 does not fit an int");
+        assert_eq!(human_demand_scaled(DealValue { given: 100, ..v }, 3).given, 225);
+        // NaN truncates to 0x80000000 (not a saturated 0 or i32::MAX): an odd slot keeps only that bit.
+        assert_eq!(DealValue { gain: 1, cost: 2, given: 3 }.inflated(f32::NAN), DealValue { gain: 0x8000_0000, cost: 0, given: 0x8000_0000 });
+    }
 
     #[test]
     fn technology_value_follows_the_traced_formula() {

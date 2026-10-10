@@ -247,12 +247,12 @@ pub(super) struct DealRow {
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum NegotiationItem {
-    /// A payment: an amount and how many turns it runs for. `turns == 0` is the lump sum the commit
-    /// path runs as **`0x00BB3810(amount, 3)`** (CONFIRMED, the same money mover as the capture loot
-    /// `0x00BB3810(money, 0)`); a positive `turns` is the per-turn schedule, one of the container's
+    /// A payment: an amount and how many turns it runs for. `turns == 0` is the lump sum, the deal's
+    /// payment item `0x00C18A70` run once (CONFIRMED: payer charged `0x00BAF500(amount, 3)`, payee credited
+    /// `0x00BB3810(amount, 1)`); a positive `turns` is the per-turn schedule, one of the container's
     /// two optional single items (`+0x20` / `+0x24`, UNKNOWN which) -- INFERRED that it is the
-    /// payment, since that is what a schedule on the deal would be for. The model has both: a state
-    /// gift (a lump sum, `0x00B44590`) and a regular payment (per turn, `treaties::DiplomaticAction`).
+    /// payment, since that is what a schedule on the deal would be for. The model has both: a one-off
+    /// payment and a regular payment (per turn, `treaties::DiplomaticAction`).
     Payment {
         /// The amount moved.
         amount: i32,
@@ -506,6 +506,7 @@ pub(super) fn negotiation_action_name(item: &NegotiationItem) -> &'static str {
         NegotiationItem::Action(ntw_sim::campaign::treaties::DiplomaticAction::CancelMilitaryAccess) => "cancel_military_access",
         NegotiationItem::Action(ntw_sim::campaign::treaties::DiplomaticAction::StateGift(_)) => "state_gift",
         NegotiationItem::Action(ntw_sim::campaign::treaties::DiplomaticAction::RegularPayment(_, _)) => "payments",
+        NegotiationItem::Action(ntw_sim::campaign::treaties::DiplomaticAction::OneOffPayment(_)) => "payments",
         NegotiationItem::Payment { .. } => "payments",
     }
 }
@@ -523,9 +524,8 @@ pub(super) fn negotiation_action_name(item: &NegotiationItem) -> &'static str {
 ///     (trade), `0x00B29BB0` (break trade), `0x00B28DB0` (embargo), `0x00B44550` (military access),
 ///     `0x00B67BD0` (cancel access), `0x00B44590` (state gift) and `0x00B105C0` (protectorate) —
 ///     CONFIRMED addresses, ported in `treaties.rs`.
-///   - **payments** → `CampaignCommand::Diplomacy` again: the lump sum (`turns == 0`) as a
-///     `StateGift(amount)` (`treaties::state_gift`, `0x00B44590` → `0x00B446B0`), INFERRED as the
-///     stand-in for the money move `0x00BB3810(amount, 3)`; the per-turn schedule as
+///   - **payments** → `CampaignCommand::Diplomacy` again: the lump sum (`turns == 0`) as
+///     `OneOffPayment(amount)` (`treaties::one_off_payment`, `0x00C18A70`, CONFIRMED); the per-turn schedule as
 ///     `RegularPayment(amount, turns)` (INFERRED).
 ///
 /// INFERRED (this file): `ProposeDeal` (CCQ_DIPLOMACY_PROPOSE_DEAL → `0x00C49BE0`, the AI's
@@ -556,11 +556,11 @@ pub(super) fn deal_item_commands(item: &NegotiationItem, actor: FactionId, targe
     use ntw_sim::campaign::treaties::DiplomaticAction;
     match item {
         NegotiationItem::Action(action) => vec![CampaignCommand::Diplomacy { a: actor, b: target, action: *action }],
-        // INFERRED: a lump sum is the CONFIRMED `0x00BB3810(amount, 3)` money move, which the model
-        // applies as a state gift; a schedule is the container's per-turn single item.
+        // A lump sum is the deal's one-off payment (`0x00C18A70`, CONFIRMED); a schedule is the
+        // container's per-turn single item (INFERRED).
         NegotiationItem::Payment { amount, turns } => {
             let action = match *turns {
-                0 => DiplomaticAction::StateGift(*amount),
+                0 => DiplomaticAction::OneOffPayment(*amount),
                 t => DiplomaticAction::RegularPayment(*amount, t),
             };
             vec![CampaignCommand::Diplomacy { a: actor, b: target, action }]
@@ -1085,23 +1085,14 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
         }
         Ok(())
     });
-    // ProposeDeal: the AI's answer (`CampaignModel::ai_refuses_deal`: technologies evaluated as
-    // the exe's `0x00AA5ED0`; a deal with regions still by the PLACEHOLDER rule) — "declined", as
-    // `DeclineOffer` gives, else accepted at once.
+    // ProposeDeal: the AI's answer (`CampaignModel::ai_refuses_deal`: the regions and technology
+    // records evaluated as the exe's `0x00AA5ED0`) — "declined", as `DeclineOffer` gives, else
+    // accepted at once.
     f!("ProposeDeal", |_l, inner, ui, _a: Variadic<Value>| {
         if negotiation_factions(&ui).is_none() {
             return Ok(());
         }
-        let (refused, placeholder) = {
-            let m = ui.model();
-            (m.ai_refuses_deal(), m.ai_deal_needs_region_value())
-        };
-        if refused {
-            if placeholder {
-                inner.log_once("ProposeDeal refused", || {
-                    "PLACEHOLDER negotiation:ProposeDeal: the AI's region value is not traced; the AI refuses to give regions or technologies in a deal with regions (logged once)".into()
-                });
-            }
+        if ui.model().ai_refuses_deal() {
             ui.negotiation.borrow_mut().status = NegotiationStatus::Declined;
             return Ok(());
         }

@@ -67,6 +67,11 @@ fn every_battle_map_parses() {
         for w in map.heightfields.windows(2) {
             assert_eq!(w[1].settings.world_width, 2.0 * w[0].settings.world_width, "{name}");
         }
+        // Every ground-type cell's palette colour is in the exe's colour table (0x0145BF60), so
+        // no shipped cell falls back to "no modifier" (GROUND_TYPE_UNMATCHED).
+        if let Some(g) = &map.ground_types {
+            assert!(g.cells.iter().all(|&c| c < 25), "{name}: a ground-type colour outside the exe table");
+        }
         if let Some(h) = map.ground() {
             assert_eq!(h.settings.world_width, map.definition.base_terrain_width, "{name}: level 0 = base terrain");
             assert!(map.height_at(0.0, 0.0).is_finite());

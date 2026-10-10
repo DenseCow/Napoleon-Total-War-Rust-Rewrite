@@ -144,11 +144,15 @@ impl SetupData {
 const GARRISON_SOLDIER_RADIUS_M: f32 = 0.35;
 
 /// The garrison slot radius `0x00E619D0`: the largest radius (record `+0x4C`) of the
-/// `battle_entities` rows whose `+0x18` is 0. INFERRED: `+0x18` is the class enum with infantry 0, and
-/// the radius is column 12 (men 0.35 m), so slots are 0.7 m apart (0.875 m on walls).
+/// `battle_entities` rows whose `+0x18` is 0. CONFIRMED: the record builder `0x00E52F40` puts column
+/// 12 (men 0.35 m) at `+0x4C` and, at `+0x18`, column 2 (the skeleton) through `0x00E60EA0`, which
+/// gives 0 for "man" and for any name not in its table (`0x013B3DD0`: horse 1, camel 2, elephant 3,
+/// artillery 4, gun_train_2 5, gun_train_6 6, ammo_caisson 7). So slots are 0.7 m apart (0.875 m on
+/// walls).
 fn garrison_radius(entities: Option<&BattleTables>) -> f32 {
+    const NOT_MEN: [&str; 7] = ["horse", "camel", "elephant", "artillery", "gun_train_2", "gun_train_6", "ammo_caisson"];
     entities
-        .map(|t| t.entities().filter(|e| e.class == "infantry").map(|e| e.radius).fold(0.0f32, f32::max))
+        .map(|t| t.entities().filter(|e| !NOT_MEN.contains(&e.skeleton.as_str())).map(|e| e.radius).fold(0.0f32, f32::max))
         .filter(|r| *r > 0.0)
         .unwrap_or(GARRISON_SOLDIER_RADIUS_M)
 }
@@ -952,7 +956,12 @@ fn make_unit(db: &GameDatabase, setup: &SetupData, key: &str, id: u32, side: u8)
     // CAVALRY.md §4): the mount's entity when mounted, else the man's.
     let entity = if mounted { stats.mount_entity.as_deref().unwrap_or_default() } else { stats.man_entity.as_str() };
     match entities.and_then(|t| t.entity(entity)).filter(|e| e.walk_speed > 0.0 && e.run_speed > 0.0) {
-        Some(e) => (u.walk_speed, u.run_speed) = (e.walk_speed, e.run_speed),
+        Some(e) => {
+            (u.walk_speed, u.run_speed) = (e.walk_speed, e.run_speed);
+            // Acceleration / deceleration, columns 5 / 6 (CONFIRMED, `0x00E52F40` -> the
+            // locomotive's `+0x158` / `+0x100`, used by `0x00819770`; `ntw_sim` `step_speed`).
+            (u.acceleration, u.deceleration) = (e.acceleration, e.deceleration);
+        }
         // PLACEHOLDER speeds when the entity is unknown (e.g. on the test fixture).
         None => (u.walk_speed, u.run_speed) = if is_cavalry { (3.0, 9.0) } else { (1.5, 4.0) },
     }
