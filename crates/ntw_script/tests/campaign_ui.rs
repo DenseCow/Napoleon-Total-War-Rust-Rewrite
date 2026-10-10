@@ -227,7 +227,7 @@ fn settlement_recruitment_cards_queue_a_unit() {
     let _ = errors(&s.host);
     let reqs = s.host.take_campaign_requests();
     assert!(
-        reqs.iter().any(|r| matches!(r, CampaignRequest::Command(CampaignCommand::Recruit { region, unit_key }) if *region == paris && unit_key == "Inf_Line_French_Fusiliers")),
+        reqs.iter().any(|r| matches!(r, CampaignRequest::Command(CampaignCommand::Recruit { region, unit_key, target: None }) if *region == paris && unit_key == "Inf_Line_French_Fusiliers")),
         "requests: {reqs:?}"
     );
 }
@@ -650,13 +650,14 @@ fn agents_panel_opens_without_script_errors() {
     assert!(s.host.take_campaign_requests().iter().all(|r| !matches!(r, CampaignRequest::Command(_))), "no model command");
 }
 
-/// A general with no portrait in the model (a recruitment-pool hire: the pool gives him empty
-/// details) keeps his unit card in the army bar and in the Lists (PLACEHOLDER until generated
-/// characters get portraits): no portrait-less character card, no script error. Review 2026-10-07.
+/// A general whose portrait the model drew (as for a recruitment-pool hire or a field promotion,
+/// `ntw_sim::campaign::portraits`) shows it on his army card and his Lists row: no unit-card
+/// stand-in, no script error. Review 2026-10-07 (then a PLACEHOLDER fallback), BACKLOG §0
+/// "portraits of generated characters".
 #[test]
-fn a_general_without_a_portrait_keeps_his_unit_card() {
+fn a_generated_general_shows_his_drawn_portrait() {
     let Some(s) = setup() else { return };
-    let general = {
+    let (general, card) = {
         let mut st = s.scripts.state_mut();
         let m = &mut st.model;
         let f = m.faction_by_key("france").unwrap().id;
@@ -667,8 +668,12 @@ fn a_general_without_a_portrait_keeps_his_unit_card() {
             .filter(|x| x.faction == f && !x.is_navy && !x.units.is_empty())
             .find_map(|x| x.commander.filter(|c| m.world.characters.get(c).is_some_and(|ch| ch.kind == CharacterKind::General)))
             .unwrap();
+        // As the pool makes him: no portrait yet, then one drawn from the european General decks.
         m.world.character_details.entry(g).or_default().portrait = Default::default();
-        g
+        m.assign_portrait(g, "General");
+        let card = m.world.character_details[&g].portrait.card.clone();
+        assert!(card.starts_with("ui/portraits/european/Cards/general/"), "{card}");
+        (g, card)
     };
     s.host.campaign_select(CampaignSelection::Character(general));
     assert!(errors(&s.host).is_empty());
@@ -680,7 +685,8 @@ fn a_general_without_a_portrait_keeps_his_unit_card() {
         .set_environment(env.clone())
         .eval()
         .unwrap();
-    assert!(display_as_unit && portrait.is_empty());
+    assert!(!display_as_unit);
+    assert_eq!(portrait, format!("data/{card}"));
     let row: Option<String> = s
         .host
         .lua()
@@ -694,9 +700,46 @@ fn a_general_without_a_portrait_keeps_his_unit_card() {
         .eval()
         .unwrap();
     let row = row.expect("the general has a row in the Lists");
-    assert_eq!(row, "false true", "the Lists row shows his unit card");
+    assert_eq!(row, "true false", "the Lists row shows him as himself");
     click(&s.host, find(&s.host, s.root, "button_lists").unwrap());
     assert!(errors(&s.host).is_empty(), "the Lists open without a script error");
+}
+
+/// A General the model could not give a portrait (here: no portrait allocator, as in an older own
+/// save) keeps an empty `Portrait`, so his card falls back to its unit picture instead of loading
+/// "data/", and the cause is logged once.
+#[test]
+fn a_general_without_a_portrait_keeps_his_unit_picture() {
+    let Some(s) = setup() else { return };
+    let general = {
+        let mut st = s.scripts.state_mut();
+        let m = &mut st.model;
+        let f = m.faction_by_key("france").unwrap().id;
+        let g = m
+            .world
+            .forces
+            .values()
+            .filter(|x| x.faction == f && !x.is_navy && !x.units.is_empty())
+            .find_map(|x| x.commander.filter(|c| m.world.characters.get(c).is_some_and(|ch| ch.kind == CharacterKind::General)))
+            .unwrap();
+        m.world.portraits.clear();
+        m.world.character_details.entry(g).or_default().portrait = Default::default();
+        m.assign_portrait(g, "General");
+        assert!(m.world.character_details[&g].portrait.card.is_empty());
+        g
+    };
+    let _ = s.host.take_log();
+    s.host.campaign_select(CampaignSelection::Character(general));
+    let env = s.host.script_env(s.root).unwrap();
+    let read = "local u = CampaignUI.ReviewPanelInfo().units_info.Units return u[1].Portrait";
+    for _ in 0..2 {
+        let portrait: String = s.host.lua().load(read).set_environment(env.clone()).eval().unwrap();
+        assert_eq!(portrait, "");
+    }
+    let log = s.host.take_log();
+    let warned = log.iter().filter(|l| l.contains(&format!("WARN character {} (General): the campaign has no portrait allocator", general.0))).count();
+    assert_eq!(warned, 1, "logged once: {log:?}");
+    assert!(!log.iter().any(|l| l.starts_with("ERROR")), "{log:?}");
 }
 
 /// The naval recruitment tab (0-E round N+2): no naval generator exists (CONFIRMED), so
@@ -1945,4 +1988,67 @@ fn toggle_labels_empties_the_visible_settlements() {
     both.sort();
     assert_eq!(both, [0, regions.len()], "one state lists the settlements, the other nothing");
     no_errors(&s.host);
+}
+
+/// A general's recruitment tab is his commander panel (the generator's character path, `0x009FE7B0`;
+/// UI_FIDELITY.md §4.10): the faction's units from all its regions, each card's turns reading
+/// `"<training>/<march>"` (the original's Wellesley shows "2/1"), and a card click recruits the unit
+/// in its source region with the general as the item's target, which then is his queue.
+/// Run on the install: `cargo test -p ntw_script --test campaign_ui generals_recruitment -- --nocapture`.
+#[test]
+fn a_generals_recruitment_tab_lists_the_factions_units_and_recruits_for_him() {
+    let Some(mut s) = setup() else { return };
+    let (france, general) = {
+        let st = s.scripts.state();
+        let m = &st.model;
+        let france = m.faction_by_key("france").unwrap().id;
+        let general = m
+            .world
+            .forces
+            .values()
+            .filter(|f| !f.is_navy && f.faction == france)
+            .filter_map(|f| f.commander)
+            .find(|c| m.world.characters.get(c).is_some_and(|x| x.kind == CharacterKind::General))
+            .expect("a French general with an army");
+        (france, general)
+    };
+    s.host.campaign_select(CampaignSelection::Character(general));
+    assert!(errors(&s.host).is_empty());
+    let tab = find(&s.host, s.root, "recruitment_tab").expect("recruitment tab");
+    click(&s.host, tab);
+    assert!(errors(&s.host).is_empty());
+
+    let rec = s.scripts.state().model.commander_recruitment(france, general);
+    assert!(rec.options.iter().any(|o| o.available()), "France can recruit through its general: {rec:?}");
+    let mut cards = Vec::new();
+    s.host.world().visit_visible(s.root, &mut |n, node| {
+        if node.data.id.split('!').nth(1) == Some("recruitable") {
+            cards.push((n, node.data.id.clone()));
+        }
+    });
+    assert_eq!(cards.len(), rec.options.len(), "one card per option: {cards:?}");
+    // The options come from more than one region (the faction's whole map).
+    let sources: std::collections::BTreeSet<_> = rec.options.iter().map(|o| o.region).collect();
+    assert!(sources.len() > 1, "{sources:?}");
+    // The first available card shows its training and march turns.
+    let (i, o) = rec.options.iter().enumerate().find(|(_, o)| o.available() && o.training_turns > 0).expect("an available option");
+    let badge = format!("{}/{}", o.training_turns, o.travel_turns_rounded());
+    let id = format!("{}!recruitable!{i}", o.unit_key);
+    let (card, _) = *cards.iter().find(|(_, c)| *c == id).expect("the option's card");
+    let mut texts = Vec::new();
+    s.host.world().visit_visible(card, &mut |n, _| texts.push(text(&s.host, n)));
+    assert!(texts.contains(&badge), "card {id} shows {badge}: {texts:?}");
+
+    click(&s.host, card);
+    let _ = errors(&s.host);
+    let reqs = s.host.take_campaign_requests();
+    let wanted = CampaignCommand::Recruit { region: o.region, unit_key: o.unit_key.clone(), target: Some(general) };
+    assert!(reqs.iter().any(|r| matches!(r, CampaignRequest::Command(c) if *c == wanted)), "requests: {reqs:?}");
+    let n = apply_all(&mut s, reqs);
+    assert!(n >= 1);
+    s.host.campaign_select(CampaignSelection::Character(general));
+    let tab = find(&s.host, s.root, "recruitment_tab").expect("recruitment tab");
+    click(&s.host, tab);
+    assert!(errors(&s.host).is_empty());
+    assert!(find_prefix(&s.host, s.root, &format!("{}!enqueued!", o.unit_key)).is_some(), "the item is his queue");
 }

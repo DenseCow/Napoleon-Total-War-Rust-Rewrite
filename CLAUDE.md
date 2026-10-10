@@ -77,7 +77,8 @@ large: grep for the section you need, and read that file's "Where I am" / "Next"
   drop-in overrides. Custom campaign maps (a whole new world, e.g. a Japan map) in our own open format
   (region-colour image, heightmap, text files) next to the original's `startpos.esf` importer: both feed
   one campaign model, so nothing in the model or the map display may depend on `.esf` or the original's
-  map files (docs/DESIGN.md §3.5.1).
+  map files (docs/DESIGN.md §3.5.1). Whole systems are replaceable too (user, 2026-10-10): a game rule
+  lives behind one seam a mod can replace or extend (BACKLOG §11 "Replaceable systems").
 - **Own multiplayer;** no Steam integration.
 
 ## Hard rules
@@ -165,7 +166,8 @@ user's machine. (GitHub can't enforce this: branch protection needs Pro on a pri
 the session's hooks and rules. Reviews and workers read a branch from its worktree or with
 `git diff`/`git show`; no checkout, switch, reset or stash there (a review fork did it 2026-10-07).
 
-At most 1 manager + 3 workers. The manager assigns non-overlapping tasks, reviews results, decides what
+At most 1 manager + 3 workers (reviews take a worker slot) + 1 Sonnet worker that only clears Polish
+lines (user, 2026-10-10). The manager assigns non-overlapping tasks, reviews results, decides what
 merges, and updates `docs/HANDOFF.md`. Workers inspect existing work before changing it, use
 isolated branches/worktrees when they edit, test, commit, and report what changed and how it was
 verified. No open-ended waits: every background wait has a timeout. Stop every process you started
@@ -201,6 +203,12 @@ Token discipline (never at the cost of reviews, tests or in-game checks):
   input order or shape; every state change has one path (open/close, set/reset). This is a quick
   pass, not a `/code-review`: the manager's review still runs.
 - **CI:** check a public-repo run once after it should finish (`gh run list`), don't stream it.
+
+## Compact instructions
+
+Keep: the task in progress and its next step; uncommitted or half-merged state (branch, conflicts,
+tests running); each background worker's id, branch and brief in one line; the user's decisions
+this session. Drop tool output, file contents and finished steps: they are in git and HANDOFF.
 
 ## ghidra-mcp (Napoleon.exe reverse engineering)
 

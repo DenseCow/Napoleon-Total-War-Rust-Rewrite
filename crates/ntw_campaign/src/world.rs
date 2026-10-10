@@ -312,11 +312,9 @@ pub(crate) fn load_world(
         if let Some(n) = rf.record.child("FACTION_ECONOMICS").and_then(|e| e.get_u32(3)).filter(|&n| n != 0) {
             world.bankrupt_turns.insert(rf.faction.id, n);
         }
-        // The last turn's income: categories 5..11 = #1 and #2 of the last ECONOMICS_DATA of
-        // FACTION_ECONOMICS #0 (the saver 0x00B985B0 writes the 25 categories as groups
-        // 5/3/4/1/5/7; `0x00BBCC40` sums 5..11, UI_FIDELITY.md 4.7).
-        if let Some(n) = last_income(rf.record) {
-            world.last_income.insert(rf.faction.id, n);
+        // The economics history: FACTION_ECONOMICS #0, oldest first (the saver 0x00BD46E0).
+        if let Some(h) = economy_history(rf.record) {
+            world.economy_history.insert(rf.faction.id, h);
         }
     }
 
@@ -327,13 +325,33 @@ pub(crate) fn load_world(
     })
 }
 
-/// The last turn's income of a `FACTION`: the sum of `ECONOMICS_DATA` #1 and #2 (categories 5..11)
-/// of the last item of `FACTION_ECONOMICS` #0; `None` without a history.
-fn last_income(faction: &EsfRecord) -> Option<i32> {
-    let last = faction.child("FACTION_ECONOMICS")?.get(0)?.as_record_array()?.items.last()?;
-    let data = first_record(last, "ECONOMICS_DATA")?;
-    let sum = |i: usize| data.get(i).and_then(EsfNode::as_i32_array).map_or(0i32, |a| a.iter().fold(0i32, |s, v| s.wrapping_add(*v)));
-    Some(sum(1).wrapping_add(sum(2)))
+/// The `ECONOMICS_DATA` groups: the saver `0x00B985B0` writes the 25 categories as i32 arrays of
+/// these lengths, in order (CONFIRMED).
+pub(crate) const ECONOMICS_GROUPS: [usize; 6] = [5, 3, 4, 1, 5, 7];
+
+/// A `FACTION`'s economics history (`FACTION_ECONOMICS` #0, one `ECONOMICS_DATA` per item, oldest
+/// first); `None` without the record. An item that does not hold the 25 categories in the
+/// [`ECONOMICS_GROUPS`] layout is left out (logged).
+fn economy_history(faction: &EsfRecord) -> Option<Vec<ntw_sim::campaign::EconomyRecord>> {
+    let items = &faction.child("FACTION_ECONOMICS")?.get(0)?.as_record_array()?.items;
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let record = first_record(item, "ECONOMICS_DATA").and_then(|data| {
+            let mut r = [0i32; 25];
+            let mut at = 0;
+            for (i, &len) in ECONOMICS_GROUPS.iter().enumerate() {
+                let group = data.get(i).and_then(EsfNode::as_i32_array).filter(|a| a.len() == len)?;
+                r[at..at + len].copy_from_slice(group);
+                at += len;
+            }
+            Some(r)
+        });
+        match record {
+            Some(r) => out.push(r),
+            None => log::warn!("FACTION_ECONOMICS: a history item is not an ECONOMICS_DATA of 25 categories; left out"),
+        }
+    }
+    Some(out)
 }
 
 /// The first record in a record-array item, if it has the expected name.
@@ -887,6 +905,10 @@ pub(crate) fn read_recruitment(
             unit_key: key.to_string(),
             turns_remaining: turns,
             cost: inner.get_u32(4).unwrap_or(0) as i32,
+            // #2: the commander the unit was recruited through (item +0x18, `WriteRecruitmentItemToEsf`
+            // `0x00B5C900`), saved as an object id like #1's region (0 = none; INFERRED from that id rule, SAVE_COMPAT.md §3). An id that names no loaded
+            // character is dropped with a warning ([`drop_dangling_recruitment_targets`]).
+            target: inner.get_i32(2).or_else(|| inner.get_u32(2).map(|v| v as i32)).filter(|&v| v != 0).map(CharacterId),
         });
         sources.push(RecruitmentSource { port_slot, index });
     }
@@ -912,6 +934,20 @@ fn keep_recruitment_ids_unique(
                 id: item.id.raw(),
             });
             item.id = RecruitmentItemId(0);
+        }
+    }
+}
+
+/// Clears the target of every recruitment item whose target (#2) names no loaded character, with a
+/// warning each: the item stays queued as a settlement recruit.
+pub(crate) fn drop_dangling_recruitment_targets(world: &mut World, warnings: &mut Vec<LoadWarning>) {
+    let World { regions, characters, .. } = world;
+    for r in regions.values_mut() {
+        for item in &mut r.recruitment_queue {
+            if let Some(c) = item.target.filter(|c| !characters.contains_key(c)) {
+                warnings.push(LoadWarning::DanglingRecruitmentTarget { region: r.key.clone(), unit: item.unit_key.clone(), target: c.raw() });
+                item.target = None;
+            }
         }
     }
 }
@@ -1062,7 +1098,7 @@ mod recruitment_tests {
     #[test]
     fn a_repeated_recruitment_id_is_cleared_with_a_warning() {
         let q = |ids: &[i32]| -> Vec<RecruitmentItem> {
-            ids.iter().map(|&id| RecruitmentItem { id: RecruitmentItemId(id), unit_key: format!("u{id}"), turns_remaining: 1, cost: 0 }).collect()
+            ids.iter().map(|&id| RecruitmentItem { id: RecruitmentItemId(id), unit_key: format!("u{id}"), turns_remaining: 1, cost: 0, target: None }).collect()
         };
         let db = GameDatabase::test_fixture();
         let mut check = Checker { db: &db, warnings: Vec::new() };

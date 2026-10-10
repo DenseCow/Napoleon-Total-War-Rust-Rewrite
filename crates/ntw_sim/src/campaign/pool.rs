@@ -139,11 +139,13 @@ impl CampaignModel {
     /// picks among them, the key joins the created list, `0x0098F880` makes him), else a generic
     /// one (`0x0098F250`): a General or admiral of the faction standing at its capital without a
     /// force, aged 21 + min(19, ⌊next16 × 20 / 65535⌋) (campaign RNG, `0x00A05740`), born that many
-    /// years ago, added to the pool. PROVISIONAL: a historical character's age is drawn the same
-    /// way (his record has no birth year); a historical character is named like a
-    /// generic one ([`Self::name_new_character`]), not with his own name, and has no portrait (the
-    /// key is kept in `CharacterDetails::historical_key`); the appeared turn (+0x4EC, `CHARACTER`
-    /// #24) is not kept.
+    /// years ago, added to the pool; named, then given his portrait ([`Self::assign_portrait`]:
+    /// the details constructor `0x00992E60` runs after the naming routine in both makers; a
+    /// historical character's comes from his #7, [`Self::assign_historical_portrait`]).
+    /// PROVISIONAL: a historical character's age is drawn the same way (his record has no birth
+    /// year); a historical character is named like a generic one ([`Self::name_new_character`]),
+    /// not with his own name (the key is kept in `CharacterDetails::historical_key`); the
+    /// appeared turn (+0x4EC, `CHARACTER` #24) is not kept.
     pub fn create_candidate(&mut self, f: FactionId, kind: PoolKind) -> Option<CharacterId> {
         let capital = self.world.faction_details.get(&f)?.capital?;
         let position = self.world.regions.get(&capital)?.settlement.position;
@@ -156,13 +158,13 @@ impl CampaignModel {
             None
         } else {
             let pick = self.rng.uniform_below(due.len() as u32) as usize;
-            let key = self.rules.historical[due[pick]].key.clone();
+            let row = &self.rules.historical[due[pick]];
+            let (key, note) = (row.key.clone(), row.note.clone());
             let at = self.world.historical_created.binary_search(&key).unwrap_or_else(|x| x);
             self.world.historical_created.insert(at, key.clone());
-            Some(key)
+            Some((key, note))
         };
-        let draw = self.rng.next16();
-        let age = 21 + (draw * 20 / 65535).min(19) as i32;
+        let age = self.draw_new_character_age();
         let mp = self.rules.agent_action_points.get(ckind.esf_name()).copied().unwrap_or(0);
         let id = CharacterId(self.world.alloc_id() as i32);
         self.world.characters.insert(
@@ -170,8 +172,13 @@ impl CampaignModel {
             Character { id, faction: f, kind: ckind, position, movement_points: mp, max_movement_points: mp, base_movement_points: mp, garrisoned_in: None },
         );
         let birth = crate::calendar::Date { year: (self.calendar.date.year as i32 - age).max(0) as u32, ..self.calendar.date };
-        self.world.character_details.insert(id, CharacterDetails { birth: Some(birth), historical_key: historical, ..Default::default() });
+        let historical_key = historical.as_ref().map(|(k, _)| k.clone());
+        self.world.character_details.insert(id, CharacterDetails { birth: Some(birth), historical_key, ..Default::default() });
         self.name_new_character(id);
+        match &historical {
+            Some((_, note)) => self.assign_historical_portrait(id, ckind.esf_name(), note),
+            None => self.assign_portrait(id, ckind.esf_name()),
+        }
         self.update_sight_radius(id);
         self.pool_mut(f, kind)?.0.push(id);
         Some(id)
@@ -475,13 +482,25 @@ impl CampaignModel {
                     id,
                     Character { id, faction: f.faction, kind: new_kind, position: at, movement_points: mp, max_movement_points: mp, base_movement_points: mp, garrisoned_in },
                 );
-                self.world.character_details.insert(id, CharacterDetails::default());
+                // `0x00990EF0` draws his age first (`0x00A05740`, as a candidate's), then names him,
+                // then builds his details as the unit's officer type (land: colonel, through
+                // `0x008B7EF0`; naval: captain, agent type 3 from `0x008E2260`), whose portrait
+                // decks are empty in the shipped data.
+                let age = self.draw_new_character_age();
+                let birth = crate::calendar::Date { year: (self.calendar.date.year as i32 - age).max(0) as u32, ..self.calendar.date };
+                self.world.character_details.insert(id, CharacterDetails { birth: Some(birth), ..Default::default() });
                 if let Some(x) = self.world.forces.get_mut(&force).and_then(|x| x.units.get_mut(unit)) {
                     x.character = Some(id);
                 }
                 // He carries the unit's officer's name: land `0x008E1C20` through the unit's slot 1
                 // `0x008B7EF0`, naval `0x008E2260` directly, both pass unit +0x7c to `0x00990EF0`.
                 self.name_new_character(id);
+                // `0x00990EF0`'s last argument is a guerrilla flag (set: portrait string
+                // "guerrilla", the `guerilla` record, number 0). Both field promotions pass 0
+                // (CONFIRMED: the land force's slot 1 `0x008B7EF0` pushes 0 at `0x008B7F05`, naval
+                // `0x008E2260` at `0x008E2558`), so the officer's portrait string is empty: drawn.
+                let officer = if f.is_navy { CharacterKind::Captain } else { CharacterKind::Colonel };
+                self.assign_portrait(id, officer.esf_name());
                 id
             }
         };
@@ -502,6 +521,10 @@ impl CampaignModel {
             x.base_movement_points = mp;
             x.max_movement_points = x.max_movement_points.max(mp);
         }
+        // `0x00A1A300` resolves his portrait again as the new agent type at his current age: an
+        // officer still at number -1 draws one now (an admiral from the General decks); one who drew
+        // from the colonel or captain deck keeps his number, and only his pictures change folder.
+        self.assign_portrait(c, new_kind.esf_name());
         if let Some(x) = self.world.forces.get_mut(&force) {
             x.commander = Some(c);
         }

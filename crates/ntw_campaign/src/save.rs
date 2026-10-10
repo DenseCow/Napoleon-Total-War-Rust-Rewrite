@@ -73,6 +73,39 @@ fn array_mut<'a>(r: &'a mut EsfRecord, name: &str) -> Option<&'a mut EsfRecordAr
     })
 }
 
+/// `FACTION_ECONOMICS` #0 (`history`) from the model's records, oldest first, each an
+/// `ECONOMICS_DATA` of the version the file already uses (5 in every save) with the categories in
+/// the saver's groups (`0x00BD46E0` → `0x00B985B0`, CONFIRMED layout).
+fn write_economy_history(e: &mut EsfRecord, history: &[ntw_sim::campaign::EconomyRecord]) {
+    let Some(arr) = array_mut(e, "history") else {
+        static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            log::warn!("save: a FACTION_ECONOMICS has no `history` array; its economics history is not written (logged once)");
+        }
+        return;
+    };
+    let version = arr.items.iter().find_map(|i| match i.first() {
+        Some(EsfNode::Record(r)) => Some(r.version),
+        _ => None,
+    });
+    let version = version.unwrap_or(5);
+    arr.items = history
+        .iter()
+        .map(|r| {
+            let mut at = 0;
+            let children = crate::world::ECONOMICS_GROUPS
+                .iter()
+                .map(|&len| {
+                    let g = EsfNode::I32Array(r[at..at + len].to_vec());
+                    at += len;
+                    g
+                })
+                .collect();
+            vec![EsfNode::Record(Box::new(EsfRecord { name: "ECONOMICS_DATA".into(), version, children }))]
+        })
+        .collect();
+}
+
 fn first_rec_mut(item: &mut [EsfNode]) -> Option<&mut EsfRecord> {
     match item.first_mut() {
         Some(EsfNode::Record(b)) => Some(&mut **b),
@@ -245,6 +278,8 @@ fn write_save_tree(source: &EsfFile, model: &CampaignModel, human: &str, timesta
     if let Some(seed) = child_mut(m, "RandSeed") {
         set(seed, 0, EsfNode::U32(model.rng.state));
     }
+    // The portrait decks the model drew from (CHARACTERS_FIDELITY.md §14).
+    crate::portraits::write(m, model);
     if let Some(c) = child_mut(m, "CAMPAIGN_CALENDAR") {
         set(c, 0, EsfNode::U32(cal.turns_per_year));
         set(c, 1, EsfNode::U32(cal.turn_in_year));
@@ -257,6 +292,9 @@ fn write_save_tree(source: &EsfFile, model: &CampaignModel, human: &str, timesta
     // `0x008EBAB0` saves its globals.
     if m.children.get(crate::OSMOSIS_CULTURES_AT).and_then(EsfNode::as_record_array).is_some_and(|a| a.name == "OSMOSIS_CULTURES") {
         let caps = model.force_caps;
+        // #21 / #22: the deal inflation's first net and factor (`0x008EC094` / `0x008EC0DE`).
+        set(m, crate::OSMOSIS_CULTURES_AT + 1, EsfNode::U32(model.deal_inflation.first));
+        set(m, crate::OSMOSIS_CULTURES_AT + 2, EsfNode::F32(model.deal_inflation.factor));
         set(m, crate::OSMOSIS_CULTURES_AT + 3, EsfNode::U32(caps.army));
         set(m, crate::OSMOSIS_CULTURES_AT + 4, EsfNode::U32(caps.navy));
     }
@@ -792,6 +830,29 @@ fn write_new_details(d: &mut EsfRecord, details: &ntw_sim::campaign::details::Ch
     }
 }
 
+/// A character's `CHARACTER_DETAILS` #8 `PORTRAIT_DETAILS` from the model (card, custom name, info,
+/// number): a new character's drawn portrait, a promoted one's new pictures. Only changed values
+/// are written, so a portrait the model never touched stays bit for bit. A character the model
+/// has no portrait for (number -1, no pictures) keeps the record's: a new minister keeps his
+/// template's (the family's PLACEHOLDER, CHARACTERS_FIDELITY.md §5c).
+fn write_portrait(d: &mut EsfRecord, p: &ntw_sim::campaign::details::Portrait) {
+    if d.name != "CHARACTER_DETAILS" || *p == ntw_sim::campaign::details::Portrait::default() {
+        return;
+    }
+    let Some(EsfNode::Record(r)) = d.children.get_mut(8) else { return };
+    if r.name != "PORTRAIT_DETAILS" {
+        return;
+    }
+    for (i, v) in [(0, &p.card), (1, &p.alternative), (2, &p.info)] {
+        if matches!(r.children.get(i), Some(EsfNode::Utf16String(s)) if s != v) {
+            set(r, i, EsfNode::Utf16String(v.clone()));
+        }
+    }
+    if matches!(r.children.get(3), Some(EsfNode::I32(n)) if *n != p.index) {
+        set(r, 3, EsfNode::I32(p.index));
+    }
+}
+
 /// `GOVERNMENT/POSTS_ARRAY` holders (`CHARACTER_POST` #2) from the model, matched by post id (a
 /// post whose holder died has the new holder, CHARACTERS_FIDELITY.md §5c).
 fn write_posts(f: &mut EsfRecord, details: Option<&ntw_sim::campaign::details::FactionDetails>) {
@@ -884,6 +945,11 @@ fn write_faction(
         set(e, 1, EsfNode::I32(faction.treasury));
         // #3: bankrupt turns in a row (economics +0x460, CONFIRMED by its saver 0x00BD46E0).
         set(e, 3, EsfNode::U32(model.world.bankrupt_turns.get(&faction.id).copied().unwrap_or(0)));
+        // #0: the economics history, oldest first, one ECONOMICS_DATA per record in the groups
+        // the saver 0x00B985B0 writes (5/3/4/1/5/7 categories).
+        if let Some(history) = model.world.economy_history.get(&faction.id) {
+            write_economy_history(e, history);
+        }
     }
     write_taxes(f, faction, model);
     write_stances(f, faction);
@@ -960,6 +1026,7 @@ fn write_faction(
                 }
                 if let Some(EsfNode::Record(dr)) = c.children.get_mut(1) {
                     write_traits(dr, d);
+                    write_portrait(dr, &d.portrait);
                     if !have.contains(&id) {
                         write_new_details(dr, d);
                     }
@@ -1509,6 +1576,13 @@ fn write_recruitment(r: &mut EsfRecord, region: &Region, dests: &[QueueDest], na
                     if let Some(slot) = inner.children.first_mut() {
                         *slot = id;
                     }
+                    // #2 the target in the record's own type (a target the loader dropped becomes 0).
+                    let target = it.target.map_or(0, |c| c.raw());
+                    let target = match inner.children.get(2) {
+                        Some(EsfNode::U32(_)) => EsfNode::U32(target as u32),
+                        _ => EsfNode::I32(target),
+                    };
+                    set(inner, 2, target);
                     set(inner, 3, EsfNode::U32(it.turns_remaining));
                     if inner.get_u32(4) != Some(it.cost.max(0) as u32) {
                         set(inner, 4, EsfNode::U32(it.cost.max(0) as u32));
@@ -1704,15 +1778,16 @@ fn write_building_manager(
 /// `RECRUITMENT_ITEM` v2 → `LAND_UNIT_RECRUITMENT_ITEM` v1 {inner `RECRUITMENT_ITEM` v2, u32 0}.
 /// Inner: #0 i32 the item's id (`RecruitmentItem::id`; pointer-like and unique in the original: a new
 /// item's comes from `World::alloc_id`, above every id of the model and the source),
-/// #1 i32 region id (CONFIRMED match), #2 0, #3 turns, #4 cost, #5 true, #6 unit key, #7 cost,
-/// #8 0, #9 false, #10 0, #11 0, #12 true (constants as in every sample; meanings UNKNOWN).
+/// #1 i32 region id (CONFIRMED match), #2 the target commander's id or 0 (INFERRED: an id like #1's; item +0x18,
+/// `0x00B5C900`), #3 turns, #4 cost, #5 true, #6 unit key, #7 cost, #8 0, #9 false, #10 0, #11 0,
+/// #12 true (constants as in every sample; meanings UNKNOWN).
 fn recruitment_item(region: &Region, it: &ntw_sim::campaign::RecruitmentItem, naval: bool) -> EsfRecord {
     let rid = region.id.raw() as i32;
     let mut inner = EsfRecord::new("RECRUITMENT_ITEM", 2);
     inner.children = vec![
         EsfNode::I32(it.id.raw()),
         EsfNode::I32(rid),
-        EsfNode::I32(0),
+        EsfNode::I32(it.target.map_or(0, |c| c.raw())),
         EsfNode::U32(it.turns_remaining),
         EsfNode::U32(it.cost.max(0) as u32),
         EsfNode::Bool(true),
@@ -1992,7 +2067,7 @@ mod tests {
         let EsfNode::Record(mut r) = rec("REGION", vec![manager(own), rec("REGION_SLOT_MANAGER", vec![EsfNode::RecordArray(Box::new(slots))])]) else {
             unreachable!()
         };
-        let q = |id: i32, key: &str, turns: u32| RecruitmentItem { id: RecruitmentItemId(id), unit_key: key.into(), turns_remaining: turns, cost: 300 };
+        let q = |id: i32, key: &str, turns: u32| RecruitmentItem { id: RecruitmentItemId(id), unit_key: key.into(), turns_remaining: turns, cost: 300, target: None };
         // As loaded: ship 700 (port 1), foot 600, foot 700 renumbered 908, the id-less foot 912,
         // foot 800. Then 600 and 800 are cancelled and 920 recruited.
         // 930: a ship whose link names a foot record (a source the model was not loaded from).
@@ -2039,7 +2114,7 @@ mod tests {
     }
 
     fn new_item(id: i32, key: &str) -> ntw_sim::campaign::RecruitmentItem {
-        ntw_sim::campaign::RecruitmentItem { id: ntw_sim::campaign::RecruitmentItemId(id), unit_key: key.into(), turns_remaining: 1, cost: 0 }
+        ntw_sim::campaign::RecruitmentItem { id: ntw_sim::campaign::RecruitmentItemId(id), unit_key: key.into(), turns_remaining: 1, cost: 0, target: None }
     }
 
     /// The array item of a queued unit as a file holds it, with the values of [`new_item`] (1 turn, cost 0).

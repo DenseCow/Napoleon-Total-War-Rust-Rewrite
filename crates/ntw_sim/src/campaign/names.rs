@@ -36,6 +36,28 @@ pub fn lcg_step(s: u32) -> u32 {
     s.wrapping_mul(0x343FD).wrapping_add(0x269EC3)
 }
 
+/// The original's `random_shuffle` of a deck in place from the (already advanced) LCG state
+/// `seed`: the stream starts at its high 16 bits; for each position i ≥ 1 one step (more while
+/// the draw falls in the rejected top range) picks j in 0..=i, swapped with i unless j = i. The
+/// name decks (`0x008EFB70` / `0x0086EA70`) and the portrait decks (`0x00A1E910`) both use it.
+pub fn shuffle_in_place(deck: &mut [u32], seed: u32) {
+    let mut r = seed >> 16;
+    for i in 1..deck.len() {
+        let m = (i + 1) as u32;
+        let pick = loop {
+            r = lcg_step(r);
+            let v = r >> 16;
+            // Reject the top partial range so every residue is equally likely.
+            if u32::MAX / m > v / m || u32::MAX % m == m - 1 {
+                break v % m;
+            }
+        };
+        if pick != m - 1 {
+            deck.swap(i, pick as usize);
+        }
+    }
+}
+
 /// One name allocator: a faction's shuffled deck over one pool (`NAME_ALLOCATION_DETAILS`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -53,21 +75,7 @@ impl NameAllocator {
     /// The full shuffled deck a refill makes from the (already advanced) seed `seed`.
     pub fn shuffled(size: u32, seed: u32) -> Vec<u32> {
         let mut deck: Vec<u32> = (0..size).collect();
-        let mut r = seed >> 16;
-        for i in 1..deck.len() {
-            let m = (i + 1) as u32;
-            let pick = loop {
-                r = lcg_step(r);
-                let v = r >> 16;
-                // Reject the top partial range so every residue is equally likely.
-                if u32::MAX / m > v / m || u32::MAX % m == m - 1 {
-                    break v % m;
-                }
-            };
-            if pick != m - 1 {
-                deck.swap(i, pick as usize);
-            }
-        }
+        shuffle_in_place(&mut deck, seed);
         deck
     }
 

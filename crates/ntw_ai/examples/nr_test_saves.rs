@@ -302,7 +302,7 @@ fn player_actions(host: &mut ScriptHost) {
         };
         for u in land.iter().take(2) {
             println!(" recruit {u} in {key} (garrison: {garrisoned})");
-            if command(host, CampaignCommand::Recruit { region: *id, unit_key: u.clone() }) {
+            if command(host, CampaignCommand::Recruit { region: *id, unit_key: u.clone(), target: None }) {
                 recruited += 1;
                 if *garrisoned {
                     with_garrison = true;
@@ -321,7 +321,7 @@ fn player_actions(host: &mut ScriptHost) {
         };
         for u in naval.iter().take(1) {
             println!(" recruit ship {u} in {key}");
-            if command(host, CampaignCommand::Recruit { region: *id, unit_key: u.clone() }) {
+            if command(host, CampaignCommand::Recruit { region: *id, unit_key: u.clone(), target: None }) {
                 break 'ships;
             }
         }

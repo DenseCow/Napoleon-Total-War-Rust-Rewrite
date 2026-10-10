@@ -675,7 +675,7 @@ impl CampaignModel {
 
 /// The original's unit category number (`UNIT_RECORD` +0x1C, [`crate::unit_kind::category`]) as the
 /// commander pick reads it (elephants, 4, count as 0; artillery and unknown keys are 1).
-fn category_order(category: &str) -> u32 {
+pub(super) fn category_order(category: &str) -> u32 {
     match crate::unit_kind::category(category) {
         crate::unit_kind::Category::Elephants => 0,
         c => u32::from(c.code()),

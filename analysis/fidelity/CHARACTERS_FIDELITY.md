@@ -103,6 +103,7 @@ Effects are read through the effects store (`EFFECTS_FIDELITY.md` §4).
 | vacated posts | CONFIRMED code, trigger INFERRED (§5c): a new minister at once; modelled |
 | recruitment pool (who appears, when) | CONFIRMED (§8, §12), modelled: refill at the faction turn start after the spotting pass, historical candidates first (table rows due by faction / type / year, the created list), generic ones else; `HireGeneral { into }` and `HireAdmiral` with the exe's cost; `PromoteUnit` (cost PROVISIONAL) |
 | new character age, appeared turn | CONFIRMED (§8): age 21..40, +0x4EC = turns elapsed |
+| portraits of new characters (pool hires, field promotions) | CONFIRMED (§14), modelled: the portrait allocator loaded (one campaign-RNG step per deck) and saved, drawn by agent folder and age; builder ORIGINAL BUG (last picture never dealt) recorded, no builder in ours yet; ministers / family / trained agents still from templates |
 | agent actions and success formulas | CONFIRMED (§7, §10, §12): assassination, duel (the loser of an ordinary outcome flees, `CHARACTER` #27), army and building sabotage, spying, technology stealing ported with their script events; diplomatic reactions ported; the episodic force-success switches honoured; conversion with 0-B (region religion); exchange decoded (a forces order, §10) |
 | campaign sight (grid, sources, shroud) | CONFIRMED (§10, §12), modelled: loaded, added to after each walk and at the turn start, rebuilt at the faction's turn end (timing CONFIRMED from the tree ops), the human's spy-network discs as sources; gates hidden obstacles; protectorate sharing CONFIRMED; trade-route lists frozen at load (routes built in play are the trade area's) |
 | hidden characters, exposed lists, spotting | CONFIRMED (§10, §12), modelled: knows / expose, the stealth test (equals all 118 saved commander flags of 4 vanilla saves; a duel loser who fled, `CHARACTER` #27, cannot hide), the hidden flag refresh, the spotting pass; used by pathing and agent actions |
@@ -474,7 +475,8 @@ character within 1 unit of a port slot. Test: `campaign::tests::turn_end_counter
     at turns elapsed + refill time while below the cap;
   - a candidate is a generic General or admiral at the capital without a force, aged 21..40 on the campaign RNG
     (`create_candidate`). PROVISIONAL: historical characters due for the faction are not created; names and
-    portraits are the save writer's (as for new ministers); the appeared turn (#24) is not kept;
+    portraits are the save writer's (as for new ministers); the appeared turn (#24) is not kept.
+    Portraits since 2026-10-10: drawn by the model when the candidate is made (§14);
   - `CampaignCommand::HireGeneral` (`0x00A1B8F0` → `0x00A164C0`): cost CONFIRMED (`0x00A1BB20` + `0x00A1BBE0`):
     `character_recruitment_base_cost` 400 + `character_recruitment_cost_per_command_star` 300 × rank + min(10,
     round(10 × min(distance to the capital, 1000) / 1000)) × 100; the candidate leaves the pool (timer starts if
@@ -1178,3 +1180,87 @@ The cards and panels' `PipPath` / `PrimaryAttributePath` used to be built as
   higher one, tie, empty list, level = rank + 1 clamped to 9, `PLACEHOLDER` → empty path, pips
   keep their own pictures; made-up `agent_attributes` rows) and `ntw_data`
   `a_missing_optional_table_is_empty_not_an_error`.
+
+## 14. Portraits of new characters (2026-10-10, worker new-portraits)
+All CONFIRMED by static trace (Ghidra names applied in this round) unless tagged; specs in our words.
+- **The allocator** (campaign model +0xF94, `PORTRAIT_ALLOCATOR` in every start position and save): per culture
+  `CULTURE_PATHS` {agent type → folder culture} and `PORTRAIT_CATEGORIES`, one per agent type plus `king` / `queen`,
+  each with four decks in the portrait-type order of `BuildPortraitPicturePath` (`0x009CBF40`): Info young, Info old,
+  Cards young, Cards old. A deck (`PORTRAIT_ALLOCATION`) = {count, next position, order}; its own LCG seed (+0x18)
+  is not saved. Save layout from the loader `LoadCulturePortraitPaths` (`0x009942D0`) / `LoadPortraitAllocation`
+  (`0x00999600`) and the writers `SaveCulturePortraitPaths` (`0x009A0C50`) / `SavePortraitAllocation` (`0x009A2190`).
+- **Loading advances the campaign RNG**: the loader steps the campaign RNG (model +0xFB8, the `RandSeed` state; the
+  pointer passed from `0x00872550` through `LoadPortraitAllocator` `0x00999870`) once per deck, in file order, and
+  seeds the deck with the high 16 bits. 4 × 19 × 9 = 684 steps for a vanilla file. Whether any other part of the load
+  draws from +0xFB8 is not traced (our loader draws nothing else).
+- **Drawing** (`DrawNextPortraitNumber` `0x009CA8C0`): count 0 → -1; position ≥ count → position 0 and
+  `ReshufflePortraitDeck` (`0x00A1E910`: one step of the deck's LCG, then the name decks' `random_shuffle` of the
+  numbers in place); returns order[position], position + 1.
+- **Who gets which portrait**: the details constructor `ConstructCharacterDetails` (`0x00992E60`) starts the number
+  (+0x7C) at -1, reads its portrait string (all digits → the number; `guerrilla…` → the `guerilla` agent record and
+  the number after 9 letters, `0x004F3720` parse: empty = 0; anything else → the custom picture name +0x98), then
+  `AssignCharacterPortraitForCulture` (`0x009CB3C0`) → `ResolveCharacterPortraitPictures` (`0x00A05440`) with his
+  faction's culture, the agent record and his age: custom name → `BuildNamedCustomPortraitPath` (`0x009CBD60`); else
+  while the number is -1, draw from the category named by the agent record's portrait folder (+0x1C = `agents` #6,
+  or the key when #6 is empty) if the culture has one, else the agent key's own category (case-sensitive hash
+  `0x0045C1A0`); Info old deck at age > 44, else Info young; then card / info pictures
+  `ui/portraits/<CULTURE_PATHS[agent key]>/{Cards|Info}/<folder lower-cased>/{young|old}/NNN.{tga|jpg}`.
+  So admirals (#6 `General`) draw from the General decks and the missionaries and the gentleman (#6 `minister`)
+  from the minister decks; guerilla (#6 `guerrilla`) and Eastern_Scholar (#6 `scholar`) from their own.
+  The 30 / 50-year pictures do not follow later ageing: nothing re-resolves on age.
+- **Generic characters** (`ConstructGenericCharacter` `0x0098F250`, the pool's): age drawn (`0x00A05740`), named
+  (`0x009940A0`), details with an empty portrait string → drawn. **Historical** (`ConstructHistoricalCharacter`
+  `0x0098F880`): portrait string from `GetHistoricalCharacterPortraitSpec` (`0x00A06430`), the record's +0x3C:
+  `guerrilla#<region>#<NNN>` → "guerrilla" + NNN (11 Peninsular guerrilla leaders); every other row → empty → drawn.
+  That +0x3C is `historical_characters` #7 (note): CONFIRMED by the data, the only column holding `guerrilla#`
+  strings (the builder also puts #7 at 0x3C, DB_BUILDERS.md).
+- **Field promotion**: a unit without a character gets one from `ConstructUnitOfficerCharacter` (`0x00990EF0`):
+  age drawn first, named, details as the officer type (agent index 2 colonel / 3 captain from `0x00F9DB40`, naval
+  `0x008E2260` passes 3) whose decks are empty → number -1; then `ApplyAgentRecordToCharacterDetails`
+  (`0x00A1A300`) with the General / admiral record re-resolves the portrait at his current age: number -1 → drawn
+  now; a kept number is reused with the new folder.
+- **Data check** (`ntw_campaign/tests/portraits_install.rs`): every non-empty deck of the eur, egy, spa and ita start
+  positions has the count the builder's probe gives for its folder (folder rule CONFIRMED); the decks of
+  `PIR_european General`, `middle_east assassin`, `european gentleman` are 0..count shuffled from seeds that are four
+  consecutive chain steps (one chain state found each); `european General` young (cursor 32) is the in-place
+  reshuffle of its first deal (draw semantics CONFIRMED). The start positions were built with older tables: eur's
+  missionaries have empty decks (path "" = european's fallback culture), spa's have the minister counts.
+- **The builder** (start positions; `BuildPortraitAllocator` `0x00999BE0`, `BuildCulturePortraitDecks` `0x00994DC0`,
+  `BuildAgentPortraitDecks` `0x00A1F890`, `FillPortraitDeckFromFolder` `0x00A1F730`): per culture (cultures table
+  order), per agent (agents table order) then king and queen, per type: chain step, deck seed = chain >> 16, count
+  the pictures, deal 0..count-1, shuffle; no pictures → CULTURE_PATHS[agent] = the culture record's +0x14 (fallback)
+  and fill again. Chain start 0x61266 in the start-position path (`0x00876BA0`); a new campaign loads the start
+  position's allocator instead. **ORIGINAL BUG** (`0x00A1F730` / `FindLastPortraitPictureNumber` `0x009DC310`): the
+  count is the LAST picture number found (probes 0, 1, 2, 4, … then halves), so the last picture of every folder is
+  never dealt (96 european General young pictures, decks of 95) and a folder with one picture counts 0. Ours has no
+  builder yet (every source has an allocator); the fix (count = last number + 1) goes with it (BACKLOG).
+- **Model** (`ntw_sim::campaign::portraits`): `World::portraits`, `PortraitDeck::draw` / `reshuffle`,
+  `CampaignModel::assign_portrait` / `assign_historical_portrait`, `draw_new_character_age`; rules
+  `agent_portrait_folders` (`agents` #6, renamed from `base_agent`) and `HistoricalCandidate::note`. Callers:
+  `create_candidate` (generic and historical), `promote_unit` (new officer: age, name, officer-type portrait; then
+  the new type's). The campaign source reads the allocator (`ntw_campaign::portraits::fill`, one RNG step per deck)
+  and the ESF writer writes the decks back and each character's `PORTRAIT_DETAILS` when the model has one; own saves
+  keep the whole allocator (seeds included). `Portrait::default()` has number -1 (the constructor's). The resolve
+  follows `0x00A05440`'s order (CONFIRMED, traced 2026-10-10): `0x009CB3C0` returns with nothing changed when the
+  allocator has no set for the culture; the number is drawn and stored first, then `BuildPortraitPicturePath`
+  (`0x009CBF40`) builds both paths. Its `CULTURE_PATHS` lookup is not checked against the map's end (the builder gives
+  every agent type an entry, so the shipped data never misses one); ours keeps the drawn number and leaves the
+  pictures as they were (empty for a new character, the old agent type's on a promotion). `%03d` is signed, so a negative fixed number (a modded `historical_characters` #7) gives a
+  "-05" path, as ours does; a fixed -1 is drawn over like any -1. The constructor stores a guerrilla leader's number
+  before the resolve, so a custom picture name keeps it. `CampaignModel::portrait_problem` names each gap (no
+  details, no allocator, no culture set, no `CULTURE_PATHS` folder, empty deck, unresolved number, custom name
+  without a card, a number below -1, a card kept from an earlier type) for the app's log, as the agent type his
+  portrait resolves as (`portrait_agent`: `guerilla` for a historical guerrilla leader).
+- **UI**: the army card's `Portrait` and the commander pool row's `InfoImage` are "data/" + the character's card
+  picture (character +0x370 = details +0x80 = `PORTRAIT_DETAILS` #0, CONFIRMED by the writer `SavePortraitDetails`
+  `0x0099F6D0`), both through `portrait_image`; the Lists row shows generals and admirals as themselves
+  (`0x009AD250`). Without a card (no allocator in the source or an older own save, a gap above) the value is empty,
+  so the army card shows its unit picture, and `portrait_image` logs the model's reason once per character.
+- **Field promotion's guerrilla flag** (CONFIRMED, traced 2026-10-10): `ConstructUnitOfficerCharacter`'s last
+  argument; set, the portrait string is "guerrilla" (the `guerilla` record, number 0). Land
+  `PromoteLandUnitCommanderInField` (`0x008E1C20`) makes a force (`0x0087FEA0`, vtable `0x01355494`) whose slot 1
+  `AttachNewColonelToLandForce` (`0x008B7EF0`) pushes 0 (`0x008B7F05`); naval `0x008E2260` pushes 0 (`0x008E2558`),
+  as does `AttachNewCaptainToNavalForce` (`0x008B7F60`, `0x008B7F85`). So a promoted unit's officer always draws.
+- Open: new ministers and family members (`0x008BF310`, `ResolveFamilyMemberPortraitPictures` `0x00A055E0` with the
+  king / queen decks) and agents trained in buildings still take their portraits from the save writer's templates
+  (§5c PLACEHOLDER).

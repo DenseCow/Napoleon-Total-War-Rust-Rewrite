@@ -16,21 +16,24 @@ Last updated: 2026-10-10. Main tests at last full run (2026-10-08): `cargo test 
   merge, applying the worker's BACKLOG ticks/Polish lines in the merge commit → `bash tools/progress.sh`
   → push (the hook syncs public #2) → publish in batches. Running work = the BACKLOG `(running: …)`
   markers and `git worktree list`; merged work = `git log`.
-- **Resume points (2026-10-10 night, stop at 60%):** merged tonight: mod-loading2, polish ×2 + polish-script,
-  0e-panel, table-path, campaign-source, power-rank, no-limits, generic-engine, recruit-pop, diplomacy3, recruit-cost
-  (all three modding foundations are in). Open branches:
-  1. gait-blend2 (NR-gait-blend2, `dd225fb7`, don't merge yet): static trace done (UNITS_TERRAIN_FIDELITY.md §1.10
-     "Static trace 2026-10-10": wanted speed = order speed × cos(heading error) × ground/fatigue/slope); one debugger
-     read separates the factors (FOR_USER sitting), then port into `ntw_sim` and review. Its branch edits FOR_USER.md:
-     keep main's version at merge.
-  2. polish-battle: merged (`88a10376`).
-  3. deal-items: merged (regions/techs in deals; AI refuses to give them until its evaluation is traced).
-  3b. deal-ai (NR-deal-ai, `c0e81d7a`, not reviewed): AI deal evaluator traced (AI_RESEARCH.md §4 "Deal evaluation"),
-     tech value (500 + trunc(10 × cost^1.1), `0x00A36B20`) and accept tests ported in ntw_sim campaign/deal_value.rs, not
-     yet wired. Resume: goal lists `0x00CC13D0` / `0x00CC0280`, region value `0x00AA1E90` / `0x00A364B0`, AI budget
-     (`0x00CBBA80` +0x54), inflation factor in the model/saves; then replace `ai_refuses_deal` and review.
-  4. Next in free slots: §0 items (BACKLOG §0); the §11 follow-ups added tonight (spa_napoleon xrefs, campaign list
-     from data, render caps, AI fallbacks) after §0; Polish when it passes ~20 lines.
+- **Resume points (2026-10-10 evening, day mode):** merged today: ui-small, capture-refund, army-recruit-tab, deal-ai,
+  new-portraits. Slots (user, 2026-10-10): 3 Opus workers (reviews take one) + 1 Sonnet worker on Polish only. Open:
+  1. gait-blend2 (NR-gait-blend2, Opus, running; don't merge yet): `5520ce7b` maps battle ground by palette colour as the
+     exe (`0x00EE5E00`, table `0x0145BF60`; ours was wrong on 19 maps; CONFIRMED) and ports `timed_move_speed` (`0x0063AF40`).
+     The worker is now tracing the planned-time source (`0x005DD450` chain) statically and wiring the speed per soldier
+     (test: walking cavalry on ground 0xE walks), then one review. At merge, BACKLOG lines from its report: ground for maps
+     without a TGA (`0x00EDCFC0`); border tie rule; ground paths +0x10/+0x18 (`0x0081AC80`) and the off-map clamp unless
+     it clears them; Polish: 15 renamed Ghidra functions at 0-50%. Check: `cargo run -p napoleon --release -- --battle
+     --no-intro --ai off` on nap_mp_river_[sa], cavalry through forest, side by side. Keep main's FOR_USER.md at merge.
+  2. deal-region (NR-deal-region, Opus, running): the region value in deals (`0x00AA1E90`, `0x00A364B0`, `0x00C4D140`)
+     replaces the region PLACEHOLDER in `ai_refuses_deal`; reuses the round-5 `campaign::region_value`.
+  3. in-game-checks (NR-in-game-checks, Opus): take over the "Needs an in-game check" list (run each with --screenshot
+     against `ntw-evidence\screens`, keep only true side-by-sides for the user). Then: finish the old-worktree triage
+     (campvis, fidelity-battle, s2-*, sittings, w1-campaign-ui, w2-0a, w2-ai2: built on the reverted 10-05 history; delete
+     what main has, BACKLOG lines for real missing work); then §0 items.
+  4. polish1 (NR-polish1, Sonnet): Polish lines with no exe tracing, no rule change and no file overlap with 1-2
+     (portraits cache/message, real_install two-file test, queue-cancel clones and naval checks, detail.rs Vfs, ntw_data
+     logging, duplicate negotiation strings, recruit_travel_cost rebuild + travel_turns_rounded test). Refill on finish.
 - **Disk:** C: filled up on 2026-10-09; 21 merged worktrees were removed (~100 GB back). Remove a
   worktree after its merge; check `df -h /c` before starting builds.
 - **Next:** §0, several workers tracing in parallel under the Ghidra writer lock, plus the §11 modding work alongside it (user, 2026-10-09: mod loading and the audits come early); the unwrap audit last.
@@ -87,10 +90,16 @@ and `STRING_LABELING_CONVENTION.md` over the whole exe (back it up first). Setup
 
 Batched for the user. Delete a line once checked and record the result where it belongs.
 Base command: `cargo run -p napoleon -- <flags>`.
+- **New-character portraits (merged new-portraits):** `--campaign eur_napoleon --campaign-faction france --no-intro`,
+  hire a general from the pool, then field-promote a colonel: both show a european general portrait on the army card and in
+  the Lists, not the unit card.
 
 
 
 
+- **Army recruitment tab (merged army-recruit-tab):** `--campaign mp_eur_napoleon --campaign-faction britain --no-intro`,
+  select Wellesley → Recruitment tab: options with "<training>/<march>" turns and a queue; compare
+  `ntw-evidence\screens\2026-10-07_original_wellesley_army_recruitment_tab.png`.
 - **Region labels (merged 0e-labels):** `cargo run -p napoleon -- --campaign eur_napoleon --campaign-faction france
   --no-intro`, open Diplomatic Relations: the region labels sit under the panel; open a region's details: the
   title is the region name.

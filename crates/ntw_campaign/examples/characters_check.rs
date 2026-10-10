@@ -72,6 +72,18 @@ fn main() {
             });
             println!("PORTRAIT_DETAILS parents: {parents:?}");
         }
+        if std::env::var_os("PORTRAITS").is_some() {
+            // Per character: agent type, appeared turn (#24), portrait card picture and index
+            // (the portrait allocator, CHARACTERS_FIDELITY.md §14).
+            esf.root.walk(&mut |r: &ntw_formats::esf::EsfRecord| {
+                if r.name == "CHARACTER" {
+                    let p = r.child("CHARACTER_DETAILS").and_then(|d| d.child("PORTRAIT_DETAILS"));
+                    let card = p.and_then(|p| p.get_str(0)).unwrap_or("");
+                    let idx = p.and_then(|p| p.get_i32(3));
+                    println!("  PORTRAIT {:?} appeared {:?} card {card:?} index {idx:?}", r.get(3), r.get(24));
+                }
+            });
+        }
         if std::env::var_os("CHARFIELDS").is_some() {
             let mut dist: BTreeMap<usize, BTreeMap<String, usize>> = BTreeMap::new();
             esf.root.walk(&mut |r: &ntw_formats::esf::EsfRecord| {

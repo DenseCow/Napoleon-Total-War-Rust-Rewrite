@@ -16,11 +16,6 @@ The morning report from night sessions, newest night first. Two lists per night:
 
 ### Needs you
 
-- **Debugger sitting, walking horses (~10 min, one order from you):** a walk-ordered horse moves at ~0.8 of its
-  order speed, from one of two traced factors (heading cosine or slope) that the last read could not separate.
-  Original under the debugger, a battle on level ground with a cavalry unit, one walk order across open ground; the
-  breakpoint (`0x00819D37`) is in `analysis/fidelity/UNITS_TERRAIN_FIDELITY.md` §1.10 on `work/gait-blend2`
-  ("Static trace 2026-10-10"). Claude runs it while you give the order.
 - **New-campaign army cap in the original (~5 min, no debugger):** in the original, set the unit size option to the
   one that writes `campaign_unit_multiplier 0.75` (check `%APPDATA%\The Creative Assembly\Napoleon\scripts\preferences.script.txt`),
   start a new campaign (any faction), save on turn 1, and tell Claude the save's name. Claude reads its army/navy cap
@@ -40,6 +35,7 @@ The morning report from night sessions, newest night first. Two lists per night:
 
 ### Done tonight
 
+- **Walking-horse sitting done (2026-10-10 afternoon):** the walk is slowed by the ground type (0.40 on that ground) and slope, not by turning; notes on `work/gait-blend2` `ab13a8ec`, port next.
 - Gait debugger sitting: walking horses move at ~80% of their walk speed (why ours trot); men's levels via store C.
   Notes on `work/gait-blend2` `38df2276`.
 - Austria power sitting: the original's per-faction power values (Austria 3rd = "Terrifying"); `ab028f7c`.

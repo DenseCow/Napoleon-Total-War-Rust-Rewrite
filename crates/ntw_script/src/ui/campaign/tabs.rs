@@ -42,23 +42,18 @@ pub(super) fn generate_current_tab(lua: &Lua, inner: &Rc<Inner>, ui: &CampaignUi
             CampaignSelection::Settlement(r) => construction_info(lua, inner, ui, r, ConstructionPanel::Settlement).ok(),
             _ => None,
         },
+        // A settlement's recruitment tab is built for its settlement (`0x0098C0C0`, the generator's
+        // settlement path); an army's, and a navy's naval recruitment tab, for its commander
+        // (`0x0098BEA0` from the tab sets `0x009855B0` / `0x009990B0`, the generator's character path:
+        // the faction's regions as sources, UI_FIDELITY.md §4.10).
         Tab::Recruitment => match ui.selection.get() {
-            CampaignSelection::Settlement(r) => recruitment_info(lua, inner, ui, r, false).ok(),
-            // An army's recruitment tab ([`tabs_for`]). The exe's info builder `0x009FE7B0` reads
-            // the tab's own recruitment manager (through the commander, `+0x34` → `+0x124`); what
-            // that manager holds is not traced. PLACEHOLDER: the panel opens with no cards, so
-            // nothing can be recruited through it (BACKLOG §0 "army recruitment tab contents").
-            CampaignSelection::Character(c) => empty_recruitment_info(lua, ui, c).ok(),
+            CampaignSelection::Settlement(r) => recruitment_info(lua, inner, ui, r).ok(),
+            CampaignSelection::Character(c) => commander_recruitment_info(lua, inner, ui, c).ok(),
             _ => None,
         },
-        // The naval recruitment tab sits on a naval character (0-G's trace, §4.3); its manager is
-        // the port the admiral stands in, falling back to the faction's capital (both INFERRED --
-        // which port a navy recruits at is UNKNOWN, and the model keeps one naval queue per
-        // region, so `recruitment_points(region, true)` is that region's whole naval capacity). PROVISIONAL:
-        // the naval tab's manager (`0x009FE7B0`) is untraced, like the land army tab's.
-        Tab::NavalRecruitment => match naval_region(ui) {
-            Some(r) => recruitment_info(lua, inner, ui, r, true).ok(),
-            None => None,
+        Tab::NavalRecruitment => match ui.selection.get() {
+            CampaignSelection::Character(c) => commander_recruitment_info(lua, inner, ui, c).ok(),
+            _ => None,
         },
         Tab::Agents => match ui.selection.get() {
             CampaignSelection::Settlement(r) => agents_info(lua, inner, ui, r).ok(),

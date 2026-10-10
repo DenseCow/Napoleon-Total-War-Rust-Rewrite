@@ -58,6 +58,11 @@ pub struct UnitRules {
     /// `units` #15 (`UNIT_RECORD` +0x68): the most units of this type the faction may hold and have queued
     /// together, 0 = no limit (CONFIRMED: `0x008F68B0`, see [`super::CampaignModel::recruitable_entry_flags`]).
     pub unit_cap: i32,
+    /// `units` #9 (`UNIT_RECORD` +0x40, CONFIRMED: the record builder `0x00E91320` copies builder +0x44 there
+    /// at `0x00E91388`): the path cost a unit recruited through a commander covers per turn on its way to him.
+    /// The commander's recruitment panel divides the path cost from the source settlement by it (`0x00B41F60`,
+    /// [`super::CampaignModel::commander_recruitment`]); 23..55 in the vanilla data. A value below 1 (mod data) is read as 1.
+    pub travel_speed: i32,
 }
 
 /// A land unit's autoresolve inputs, from its `units` / `unit_stats_land` rows.
@@ -199,6 +204,9 @@ pub struct HistoricalCandidate {
     pub faction: String,
     /// The years he may appear in (#5 ..= #6).
     pub years: (i32, i32),
+    /// #7: the Peninsular guerrilla leaders' `guerrilla#<region>#<NNN>` gives their portrait
+    /// ([`super::portraits::historical_portrait`]); the other rows' notes do not matter to it.
+    pub note: String,
 }
 
 /// All game data the campaign rules use. See the module docs.
@@ -227,6 +235,11 @@ pub struct CampaignRules {
     /// `agents` #2: character type → sight radius in map units (character +0x2EC from record +0x10,
     /// CONFIRMED against the saved sight boxes: General 15, colonel 10, admiral 20, rake 18, ...).
     pub agent_sight: BTreeMap<String, i32>,
+    /// `agents` #6 by agent key, where set: the agent type's portrait folder, which also names the
+    /// deck category its new characters draw from ([`super::portraits`]; admiral → `General`,
+    /// missionaries and gentleman → `minister`, guerilla → `guerrilla`, Eastern_Scholar →
+    /// `scholar`). An agent type without one uses its own key.
+    pub agent_portrait_folders: BTreeMap<String, String>,
     /// `campaign_ground_types` keys whose #2 is set: ground an army can hide on (the stealth test,
     /// CHARACTERS_FIDELITY.md §10).
     pub hiding_ground: std::collections::BTreeSet<String>,
@@ -468,11 +481,11 @@ impl CampaignRules {
         }
         r.units.insert(
             "test_unit".into(),
-            UnitRules { cost: 500, upkeep: 10, turns: 2, is_naval: false, men: 100, autoresolve: Some(TEST_AUTORESOLVE), category: "infantry".into(), unit_class: "infantry_line".into(), campaign_cost: 400, flag_21: false, militia: false, campaign_stealth: false, unit_cap: 0 },
+            UnitRules { cost: 500, upkeep: 10, turns: 2, is_naval: false, men: 100, autoresolve: Some(TEST_AUTORESOLVE), category: "infantry".into(), unit_class: "infantry_line".into(), campaign_cost: 400, flag_21: false, militia: false, campaign_stealth: false, unit_cap: 0, travel_speed: 30 },
         );
         r.units.insert(
             "test_recruit".into(),
-            UnitRules { cost: 500, upkeep: 10, turns: 2, is_naval: false, men: 100, autoresolve: Some(TEST_AUTORESOLVE), category: "infantry".into(), unit_class: "infantry_line".into(), campaign_cost: 400, flag_21: false, militia: false, campaign_stealth: false, unit_cap: 0 },
+            UnitRules { cost: 500, upkeep: 10, turns: 2, is_naval: false, men: 100, autoresolve: Some(TEST_AUTORESOLVE), category: "infantry".into(), unit_class: "infantry_line".into(), campaign_cost: 400, flag_21: false, militia: false, campaign_stealth: false, unit_cap: 0, travel_speed: 30 },
         );
         r.buildings.insert(
             "test_building_level".into(),

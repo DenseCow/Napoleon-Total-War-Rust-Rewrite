@@ -28,8 +28,10 @@ pub mod agents;
 pub mod autoresolve;
 pub mod battles;
 pub mod capture;
+pub mod commander_recruitment;
 pub mod commands;
 pub mod details;
+pub mod deal_value;
 pub mod diplomacy;
 pub mod economy;
 pub mod effects;
@@ -57,11 +59,13 @@ pub mod treaties;
 pub mod treasury;
 pub mod turn;
 pub mod pool;
+pub mod portraits;
 pub mod visibility;
 pub mod world;
 
 pub use battles::{BattleResult, PendingBattle};
 pub use capture::{CaptureChoice, CaptureOutcome, CapturePreview};
+pub use commander_recruitment::{CommanderOption, CommanderRecruitment};
 pub use commands::{CampaignCommand, CommandError, CommandQueue, ConstructionOption, PlannedMove};
 pub use details::{CharacterDetails, FactionDetails, GovernmentPost, Governorship, GovernorshipTaxes, Relationship};
 pub use events::CampaignEvent;
@@ -75,6 +79,7 @@ pub use world::{SlotRef, FactionAiKeys,
 };
 pub use visibility::{FogState, Shroud, SightGrid};
 pub use world::Fort;
+pub use world::{EconomyRecord, ECONOMY_HISTORY_LEN};
 
 #[cfg(test)]
 mod tests;

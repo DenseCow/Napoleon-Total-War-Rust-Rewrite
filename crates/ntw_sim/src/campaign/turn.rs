@@ -245,7 +245,10 @@ impl CampaignModel {
                 // The trade update of the round end (0x00BCB020): commodity prices.
                 self.update_commodity_prices();
                 // The calendar moves on (`0x008A98B0`), by the campaign's date step when its data names one.
-                self.calendar.advance_turn(self.rules.features.date_step)
+                self.calendar.advance_turn(self.rules.features.date_step);
+                // Then the deal inflation factor (`0x008A9920`, after the calendar, CONFIRMED order).
+                let net = self.world_net_income();
+                self.deal_inflation.round_end(net);
             }
             TurnStep::FactionStart(f) => {
                 self.turn.current = Some(f);
@@ -512,6 +515,10 @@ impl CampaignModel {
             }
         }
         reg.recruitment_queue = waiting;
+        // PROVISIONAL: an item recruited through a commander (its target, item +0x18) is not spawned like
+        // the others: the queue step hands it to the faction's reinforcement list (`0x00B71FB0` at
+        // `0x00B72207` → `0x00B0A270` → `0x00AE8B10`), whose march to the commander is not traced. Ours spawns
+        // it in the settlement like any recruit (UI_FIDELITY.md §4.10).
         for unit_key in finished {
             let ev = self.spawn_recruited_unit(region, unit_key);
             events.push(ev);

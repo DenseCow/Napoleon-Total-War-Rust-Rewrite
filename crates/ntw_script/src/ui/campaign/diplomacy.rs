@@ -1085,17 +1085,23 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
         }
         Ok(())
     });
-    // ProposeDeal: PLACEHOLDER for the AI's evaluation (see above): the AI refuses a deal in
-    // which it gives a region or a technology (`CampaignModel::ai_refuses_deal`; result "declined",
-    // as `DeclineOffer` gives), else accepts at once.
+    // ProposeDeal: the AI's answer (`CampaignModel::ai_refuses_deal`: technologies evaluated as
+    // the exe's `0x00AA5ED0`; a deal with regions still by the PLACEHOLDER rule) — "declined", as
+    // `DeclineOffer` gives, else accepted at once.
     f!("ProposeDeal", |_l, inner, ui, _a: Variadic<Value>| {
         if negotiation_factions(&ui).is_none() {
             return Ok(());
         }
-        if ui.model().ai_refuses_deal() {
-            inner.log_once("ProposeDeal refused", || {
-                "PLACEHOLDER negotiation:ProposeDeal: no AI evaluation yet; the AI refuses to give regions or technologies (logged once)".into()
-            });
+        let (refused, placeholder) = {
+            let m = ui.model();
+            (m.ai_refuses_deal(), m.ai_deal_needs_region_value())
+        };
+        if refused {
+            if placeholder {
+                inner.log_once("ProposeDeal refused", || {
+                    "PLACEHOLDER negotiation:ProposeDeal: the AI's region value is not traced; the AI refuses to give regions or technologies in a deal with regions (logged once)".into()
+                });
+            }
             ui.negotiation.borrow_mut().status = NegotiationStatus::Declined;
             return Ok(());
         }

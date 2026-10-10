@@ -1048,11 +1048,11 @@ to its command, with a unit test (`negotiation_rows_map_to_their_appliers`):
    0-G hook.
 5. The two unread row keys of `TradeableTechnologies` (string constants 0x009C5B9B / 0x009C5BC0) and
    the action ids other than 6 in `BuildOfferAndDemandStrings`.
-6. Naval recruitment: WIRED (N+2, `naval_recruitment_tab` on a naval character, the generator's own
-   `naval` category and per-card `is_naval` as the selector, PROVISIONAL on the manager's `+0xA4`
-   bool). Still open: the `+0xA4` writer, and `CampaignShipCard`, which **no shipped script names**
-   (CONFIRMED by the N+2 name scan, `ghidra_evidence/0e/luac__name_index.txt`) -- so whether the
-   naval cards use it is UNKNOWN, and so is whether the character panel's tab reaches `0x009FE7B0`.
+6. Naval recruitment: RESOLVED (§4.10): a navy's `naval_recruitment_tab` is the same character
+   recruitment tab as an army's and reaches `0x009FE7B0` by its character path (CONFIRMED); `+0xA4` is
+   the tab set's byte +0x24, not a land/naval selector. Still open: `CampaignShipCard`, which **no
+   shipped script names** (CONFIRMED by the N+2 name scan, `ghidra_evidence/0e/luac__name_index.txt`),
+   so whether the naval cards use it is UNKNOWN.
 7. Fort construction panel: WIRED (N+2): `infrastructure_tab`, `CampaignSelection::Fort`,
    `fort_info` with the `0x009FDFE0` keys and the `0x009C9170` rows, and the fort's build / upgrade /
    repair / cancel / demolish actions on `FORTIFICATION_SLOT`. Left: the `description` row key (we
@@ -1367,7 +1367,7 @@ variants in the settlement vtable (`0x0137CA44..5C`), not deal appliers. All CON
 | Region transfer | `0x00B449F0` → `SetSettlementOwner` `0x00B2B810` (settlement `+0x88`), `TransferRegionToFaction` `0x00A64AC0` (schools stop researching `0x008B4AB0`; constructions cancelled `0x00A6CC10`; recruitment drained `0x00B1A760`; the old owner's capital cleared if it was this region `0x008BA580`; region joins the new owner), `TransferRegionSlotOwners` `0x00B1B300` (a slot with no occupant and no holder passes to the new owner), recruitables / effects / economy refreshed. **No army is moved or destroyed on this path** (the capture variants destroy the garrison first, e.g. `0x00B58A30` deletes settlement virtual `+0x1C`); the campaign's `+0x420` owner-changed hub only has UI subscribers (`0x00906C00`, `0x00907150`, `0x009087C0`) | CONFIRMED for the call chain | as named |
 | Technology item applied | `0x00C18CF0`: each offered technology: the recipient is granted it (`GrantFactionTechnology` `0x008CDCB0(tech, 0, 1, 0)`), the proposer's entry `+0x28` += 1 (`0x008F3DD0`); then each demanded one the other way round | CONFIRMED | `0x00C18CF0` |
 | Grant | `0x008CDCB0`: while the entry's state is 1..4: completion `0x008EED20` (progress = cost, state 0, schools cleared), then the record's single requirement (`+0x60`); then availability `0x008F91F0` and the faction effect sum. A tradeable technology is at state 1..3 for the receiver (`tradeable_technologies`), so its `+0x60` requirement is already researched (availability rule) and the walk grants that one technology | CONFIRMED | `0x008CDCB0`, `0x008F91F0` |
-| Traded count | technology entry `+0x28`, saved as `techs[]` #5 (saver `0x00894430`), read only by the AI's technology value `0x00A36B20` (500 + 10 × cost, ×2 when one faction has it, ÷ (count + 1)²; §6) | CONFIRMED | `0x008F3DD0`, `0x008F4990`, `0x00894430` |
+| Traded count | technology entry `+0x28`, saved as `techs[]` #5 (saver `0x00894430`), read only by the AI's technology value `0x00A36B20` (500 + trunc(10 × cost^1.1), ×2 when exactly one faction has it, ÷ (count + 1)²; AI_RESEARCH.md §4 "Deal evaluation", ported in `deal_value`) | CONFIRMED | `0x008F3DD0`, `0x008F4990`, `0x00894430` |
 
 **Port (work/deal-items).** ntw_sim `negotiation.rs`: `Negotiation::regions` / `technologies`
 (`DealItems`: demanded, offered) are the two records; `CampaignCommand::ProposeRegions` /
@@ -1388,7 +1388,7 @@ entries); `ProposeDeal` / `AcceptOffer` push `AcceptDeal`; `Cancel` pushes `Clea
 round trip), `negotiation_regions_list_the_tradeable_regions` (OK → record → ProposeDeal → owner).
 Open: the other actions' `Propose` items (state gift, payments, protector, war, lists 13–15) have no
 command yet (PLACEHOLDER, logged once per action); the AI's evaluation (`0x00C49BE0` →
-`0x00AA5ED0`, `0x00C1E240`, the technology value `0x00A36B20`) is §6.
+`0x00AA5ED0`, `0x00C1E240`) is traced in AI_RESEARCH.md §4 "Deal evaluation" (technology value, evaluation and accept tests ported in `campaign::deal_value`; the goal lists and weights traced and a deal of technologies answered as the exe; the region value open, so a deal with regions keeps the PLACEHOLDER rule).
 
 **Review round 1 (2026-10-10).**
 - The settlement's owner-changed event (+0x24, fired at `0x00B44B31` and by `0x00B2B810`): its
@@ -1413,6 +1413,100 @@ command yet (PLACEHOLDER, logged once per action); the AI's evaluation (`0x00C49
 - `grant_technology` does not walk record +0x60 (PROVISIONAL, the field's source is not traced; a
   no-op for the deal's technologies). `0x008B4AB0`'s second loop (slot +0xD8 characters →
   `0x008B3580`) has no model counterpart (no per-character research link).
+
+### 4.10 Commander recruitment panel: an army's recruitment tab, a navy's naval recruitment tab (worker army-recruit-tab, 2026-10-10)
+
+Main Ghidra, names and plate comments applied (one locked batch). CONFIRMED unless tagged. Code:
+`ntw_sim::campaign::commander_recruitment` (`CampaignModel::commander_recruitment`), `ntw_script`
+`army.rs::commander_recruitment_info`.
+
+**Which tab, which source.** The recruitment tab class (vtable `0x0136B27C`, generator sub-object at
++0x38 with vtable `0x0136B298`, whose +8 is the info builder `0x009FE7B0`) has three constructors,
+each storing one source: `0x0098C0C0` a settlement (sub-object +0x70; `ConstructSettlementPanelTabs`),
+`0x0098BEA0` a character (+0x74; the army tab set `0x009855B0`, the navy tab set `0x009990B0`, forts,
+agents) and `0x0098BFB0` a port (+0x78; `0x00985F40`). So "commander +0x34 → +0x124" in the BACKLOG
+line was the **settlement** path (settlement virtual +0x34 → its land queue +0x124), and a navy's
+`naval_recruitment_tab` is the same character tab as an army's. The registration's bool (`+0xA4`) is
+the tab set's byte +0x24 (manager +0xA94, passed to every tab by `0x00A20620` / `0x009C97B0`); the
+faction argument is the tab set's +0x1C (manager +0xA90, INFERRED the local player's faction).
+
+**Options (character path, `BuildCommanderRecruitableList` `0x00B72DF0`).**
+- The theatre under the commander (`0x00B1BC90` → `0x00AAF360`, a rectangle test over the theatre
+  records); every region of the faction (faction +0x778 list) in that theatre gives a queue
+  (`0x00B624C0`): its settlement's land queue for an army, each port's naval queue for a navy.
+- Each queue's priced list (vtable +0xC: `BuildPricedLandRecruitableList` / naval `0x00B30E80`, the
+  lists the settlement panel and the queue command use) is merged in order: unit key, flags,
+  experience, cost, queue id (`0x00B09DB0` with `0x00B780E0`). An entry's queue (entry[7]) is the
+  land queue for a land unit and the port's for a ship (`0x00B43CA0`).
+- Per unit (`0x00B113A0` → `0x00B41F60`): the first entry; if it is flagged, its flags become the OR
+  of every entry of the unit. Else its path cost to the commander (entry[2]) is measured; none sets
+  flag **0x100** (the card's ninth reason, "path"); else entry[3] = cost / `units` #9 (`UNIT_RECORD`
+  +0x40, copied from builder +0x44 at `0x00E91388`; 23..55 in vanilla) = turns of march. Each next
+  entry is measured with the search cut at the current best's cost (a cost already measured for the
+  queue, for any unit, is reused whatever it is: per-queue cache) and replaces the best when
+  unflagged, reachable, and the best has no path or a larger total (`0x00B68FE0`); total =
+  training turns + entry[3] (`0x00B61D50`).
+- Training turns (`0x00B61D80` → `0x00B72FC0`): the queue's wait for one of its `capacity`
+  training places (`0x00B73030`: below capacity 0; at capacity the shortest item; above, the first
+  `capacity` items count down a turn at a time, finished ones leave, until the count is at capacity,
+  plus its shortest, or below) plus `units` #6; -1 when capacity is 0 or the queue is full.
+- More than 9 items queued for the commander (`0x00B1BBB0` over `0x00B26020`): every option gets
+  flag 1 (queue full).
+- Sorted (`0x00B70A00`): unit category (`UNIT_RECORD` +0x1C), flags, cost descending, experience
+  descending, march turns ascending.
+
+**The march's path cost** (`0x00B59340`): from the queue's position (vtable +8: land `0x00B62010` =
+region +0xFC's position, i.e. the settlement; naval `0x00B61FF0` = the port's) to the commander's
+building when he is in one (`0x009FB9D0`, mover 9) or his position (mover 6); a navy: mover 8 /
+0xB. `0x00B0F2B0` refuses points off the map, **equal points**, invalid locations and different
+components, runs the search with the limit (`0x00B31320`), then measures the path: start to the first
+node outside the start's cell, cell centre to cell centre at each cell change, the last node outside
+the goal's cell to the goal, each piece times the step multiplier `0x00B204C0` (the same direction
+byte / road cost as the search's `0x00B0B260`); a path inside one cell costs the straight line times
+the start cell's byte picked by the angle atan2(dx, dz) of the start from the goal (eight 45° sectors);
+below 0.001 it is 0.
+
+**The card** (`0x009FE7B0`): status Available when flags are 0 and entry[3] ≥ 0; `turns` is the text
+`"%d/%d"` (training, march rounded up by `0x00B5AC60`) when training > 0, else `"%d"` or `" "` by the
+tab set's byte; `experience` = that byte ? entry[1] : 0; `cost` entry[0]; `reasons_unavailable`
+entry[5]; `record` entry[6]; `manager` entry[7]; `character` the commander. `recruitment_capacity` is
+-1. The queue cards are the items whose target (item +0x18) is the commander, first ten shown
+(`0x009FF0C0`); their status is "Paused" when the item is held back (`IsRecruitmentItemBlocked`),
+else "Enqueued" (both paths). The user's screenshot (Wellesley, "2/1", cost 472, a 10-slot queue)
+fits: 2 turns of training, 1 of march.
+
+**Recruiting.** `RecruitUnit(character, manager, record)` → the `CCQ` command with the commander as
+its third value → `QueueRecruitmentItemForUnit` stores it at item +0x18 (saved as `RECRUITMENT_ITEM`
+#2). When such an item finishes, `ProcessRecruitmentQueueTurn` hands it to the faction's
+reinforcement list (`0x00B72207` → `0x00B0A270` → `0x00AE8B10`) instead of the normal spawn; that
+march is **not traced**.
+
+**Ours.** Model as above, with: the theatre = the faction's whole map (one theatre per shipped
+campaign); the source order's queue id = region id (INFERRED); experience 0 (not modelled); the path
+search is the model's (`View::find_path_avoiding`, static map, no zones of control) and the limit cut
+compares its own cost (INFERRED: `0x00AC54C0`'s limit test not traced); `" "` for a card without a
+training estimate (INFERRED: the manager constructor `0x0098C2F0` clears +0xA94 and no writer was
+found). PROVISIONAL: a finished targeted item spawns in its settlement like any recruit. The target
+is saved and loaded as `RECRUITMENT_ITEM` #2, a character id like #1's region id (INFERRED from that
+id rule, SAVE_COMPAT.md §3); an id naming no loaded character is dropped with a load warning
+(`DanglingRecruitmentTarget`). `units` #9 below 1 (mod data) is read as 1, reported once per load
+(the exe divides unguarded).
+
+**ORIGINAL BUGs fixed.**
+- `0x00B68FE0` takes a source's total of -1 (no training estimate: its queue has no recruitment
+  points) as the smallest, so it is chosen over sources that can train, and never replaced once
+  first; the item then never trains. Ours ranks such a source last, and while the best is such a
+  source the next sources' paths are searched without the cut at its cost (so a nearer untrainable
+  first source cannot win by refusing the farther ones).
+- `0x00B0F2B0` gives no path for equal points, so a general inside a settlement got its units flagged
+  "path". Ours: cost 0.
+
+Tests: `the_queue_wait_counts_down_the_training_places`,
+`a_commander_recruits_each_unit_from_its_quickest_source`,
+`a_source_without_recruitment_points_is_not_chosen`, `items_queued_through_a_commander_are_his_queue`,
+`a_garrisoned_general_recruits_his_settlements_units_without_a_march` (ntw_sim),
+`the_march_is_measured_along_the_paths_cells` (unit), and
+`a_generals_recruitment_tab_lists_the_factions_units_and_recruits_for_him` (campaign_ui, install).
 
 ## 5. Save naming (`ui\campaign ui\load-save_game`), 0-E sandbox 2026-10-04
 

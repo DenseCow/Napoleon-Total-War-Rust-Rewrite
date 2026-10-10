@@ -65,9 +65,9 @@ Code:
   `CreateReviewPanelTabAtPosition` (`layout.root.lua:600-623`) puts tab i at (i-1) × (tab width − overlap): Army left of
   Recruitment, with no test of where the army stands (user side-by-side 2026-10-07 agrees). CONFIRMED: `0x009D1CB0` + user check
   2026-10-07 (Henry Fox, colonel: Army tab only); admirals: `0x009D1CB0` + user statement.
-  Ours: `tabs_for` / `commander_recruits`; the army's recruitment panel content is PROVISIONAL (the builder `0x009FE7B0`
-  reads the tab's own manager through the commander `+0x34` → `+0x124`, not traced: ours shows the settlement he stands
-  in, else an empty panel). No agents or troops aboard in the model, so those tabs never appear.
+  Ours: `tabs_for` / `commander_recruits`; the army's recruitment panel and the navy's naval recruitment panel are the
+  commander panel (`0x009FE7B0`'s character path: the faction's regions as sources, training and march turns, items
+  queued for him; UI_FIDELITY.md §4.10). No agents or troops aboard in the model, so those tabs never appear.
 - A selected agent (`0x009C3FB0` → `FUN_00985F40`): construction (in a settlement), naval recruitment (port), navy,
   recruitment, army, agents.
   Settlement panel (`FUN_0099A200`): construction, recruitment (if the region can recruit), infrastructure (if a fort/port),

@@ -13,7 +13,7 @@ use super::*;
 /// `BuildArmyPanelInfoTable` `0x009FCFB0` clears it (its cards are false), a character's
 /// `CommandedUnit` in `BuildCharacterDetailsInfoTable` `0x009AD250` sets it (true, at
 /// `0x009ADF80`).
-pub(super) fn unit_entry(lua: &Lua, inner: &Inner, ui: &CampaignUi, force: &MilitaryForce, index: usize, mut display_as_unit: bool) -> mlua::Result<Table> {
+pub(super) fn unit_entry(lua: &Lua, inner: &Inner, ui: &CampaignUi, force: &MilitaryForce, index: usize, display_as_unit: bool) -> mlua::Result<Table> {
     let u = &force.units[index];
     let t = lua.create_table()?;
     // Id: a unique component id for the card (INFERRED: ExistingUnitCard matches cards by Id).
@@ -96,18 +96,14 @@ pub(super) fn unit_entry(lua: &Lua, inner: &Inner, ui: &CampaignUi, force: &Mili
         // unit picture when DisplayAsUnit is false, CommanderType is a general or admiral and
         // `string.len(Portrait) > 0`, else its Icon (`template.CampaignUnitCard.lua:66-99`,
         // CONFIRMED from the bytecode, `luac_dump --proto 56`), so an admiral's card always keeps
-        // its unit picture: unlike the Lists rows (`character_details`), it needs no fallback for
-        // a missing portrait. The path is the character's PORTRAIT_DETAILS card picture (INFERRED:
-        // the exe reads the character's `+0x370`; it is the path the character card's CardImage
-        // uses too).
+        // its unit picture. The path is the character's PORTRAIT_DETAILS card picture (CONFIRMED:
+        // the exe reads the character's `+0x370`, his details (+0x2F0) +0x80, which the writer
+        // `0x0099F6D0` saves as PORTRAIT_DETAILS #0). The start position's Generals and the ones
+        // the model makes (`ntw_sim::campaign::portraits`) have one; a General left without (no
+        // portrait allocator in the source or an older own save, a gap in the allocator) keeps
+        // the empty Portrait, so the card shows its unit picture ([`portrait_image`] logs why).
         if kind == Some(CharacterKind::General) {
-            match portrait_card(&ui.model(), c) {
-                Some(card) => t.set("Portrait", format!("data/{card}"))?,
-                // PLACEHOLDER: a general with no portrait in the model (the recruitment pool's
-                // hires and promoted generals get none yet, BACKLOG §0 "portraits of generated
-                // characters") keeps his unit card instead of a portrait-less character card.
-                None => display_as_unit = true,
-            }
+            t.set("Portrait", portrait_image(inner, &ui.model(), c))?;
         }
         t.set("CharacterPtr", character_value(ui, c))?;
         ct = match kind {
@@ -236,15 +232,12 @@ fn card_category(db: &GameDatabase, unit_key: &str) -> &'static str {
 /// tab reuses this one generator (CONFIRMED). Inside it a switch on `[obj+0x8]` (0..13, jump table
 /// 0x00A01F28) picks a category name, and one case pushes `naval` (0x0130CFFC, at 0x00A01217); every
 /// card gets `is_naval` = (`[card+0xA0] != 0`) (0x013305C0, at 0x009FF497, 0x00A004E3, 0x00A00F21).
-/// The generator is registered with a bool at `+0xA4` beside its pointer at `+0xA0` (0x009C7C70),
-/// the likely land/naval selector (INFERRED), and the panel's `naval_recruitment_tab` component is
-/// CONFIRMED (exe string 0x013CC71C, beside `recruitment_tab` 0x013CC70C). The naval half is WIRED
-/// (0-E round N+2): the infrastructure/naval tabs below pass `naval = true`, which asks
-/// `recruitment_points(region, true)` (the modelled `naval_recruitment_points` per port, `0x00B61EE0`
-/// CONFIRMED) and keeps only the cards whose unit category is `naval_*` (`units` #2, the source of the
-/// generator's own per-card `is_naval` = `[card+0xA0] != 0`, CONFIRMED). PROVISIONAL: that `naval`
-/// argument stands in for the manager bool at `+0xA4`, whose writer is UNKNOWN, and the tab is placed
-/// where 0-G's trace of the tab builder `FUN_0099A200` puts it -- see [`Tab::NavalRecruitment`].
+/// The generator is registered with a bool at `+0xA4` beside its pointer at `+0xA0` (0x009C7C70);
+/// that bool is the tab set's byte +0x24 (manager +0xA94, handed to every tab's state change by
+/// `0x00A20620`), not a land/naval selector (CONFIRMED, 2026-10-10). The panel's
+/// `naval_recruitment_tab` is a navy's commander tab ([`commander_recruitment_info`]); `naval = true`
+/// here asks a region's naval capacity and its ships only (`units` #2 category `naval_*`, the source of
+/// the generator's own per-card `is_naval` = `[card+0xA0] != 0`, CONFIRMED), which no tab asks for now.
 /// UNKNOWN: `CampaignShipCard`, a template no shipped script references, so we cannot say whether
 /// the naval cards use it.
 /// A recruitment item's `unit_record`: the unit's details table, which template.RecruitmentCard.lua
@@ -365,25 +358,18 @@ impl UnitDetails {
     }
 }
 
-/// `GenerateRecruitmentPanel(info)` for the recruitment tab. `naval` asks for the naval half of the
-/// same generator (the `naval_recruitment_tab`, see [`Tab::NavalRecruitment`]): the region's naval
-/// recruitment capacity instead of the land one, and only the ships among the region's recruitable
-/// units. See the module note above for what is CONFIRMED and what is PROVISIONAL here.
-pub(super) fn recruitment_info(lua: &Lua, inner: &Inner, ui: &CampaignUi, region: RegionId, naval: bool) -> mlua::Result<Value> {
+/// `GenerateRecruitmentPanel(info)` for a settlement's recruitment tab (the generator's settlement
+/// path): the region's recruitable units, its land recruitment capacity and its queue. See the module
+/// note above for what is CONFIRMED and what is PROVISIONAL here.
+pub(super) fn recruitment_info(lua: &Lua, inner: &Inner, ui: &CampaignUi, region: RegionId) -> mlua::Result<Value> {
     let m = ui.model();
     let Some(r) = m.world.regions.get(&region) else { return Ok(Value::Nil) };
     let owner_key = m.world.factions.get(&r.owner).map(|f| f.key.clone()).unwrap_or_default();
     let treasury = m.world.factions.get(&r.owner).map_or(0, |f| f.treasury);
     let human = m.faction_by_key(&ui.link.human).map(|f| f.id);
-    let capacity = m.recruitment_points(region, naval);
+    let capacity = m.recruitment_points(region, false);
     let recruitable = m.recruitable_units(region);
-    let is_naval = |k: &str| is_ship(&ui.link.db, k);
-    // The naval tab shows the ships only (`units` #2 category, CONFIRMED source of the generator's
-    // own `is_naval`), both among the recruitable units and in the queue.
-    let shown = |k: &str| !naval || is_naval(k);
-    let recruitable: Vec<&ntw_sim::campaign::commands::RecruitableUnit> = recruitable.iter().filter(|e| shown(&e.unit_key)).collect();
-    let queue: Vec<(RecruitmentItemId, String, u32, i32)> =
-        r.recruitment_queue.iter().filter(|q| shown(&q.unit_key)).map(|q| (q.id, q.unit_key.clone(), q.turns_remaining, q.cost)).collect();
+    let queue: Vec<(RecruitmentItemId, String, u32, i32)> = r.recruitment_queue.iter().map(|q| (q.id, q.unit_key.clone(), q.turns_remaining, q.cost)).collect();
     // The price is the region's recruitable entry cost (`0x00B31020` → `0x00B0D220`: `units` #7 with the
     // region's cost effects), the value the queue command charges and the item records, and the reasons are
     // the entry's flags (its building flags and `0x00B69BA0`'s): both come from the model functions the queue command uses, so the
@@ -403,27 +389,14 @@ pub(super) fn recruitment_info(lua: &Lua, inner: &Inner, ui: &CampaignUi, region
     let player_owned = Some(r.owner) == human;
     drop(m);
     ui.forget_finished_queue_items();
-    let db = &ui.link.db;
+    let owner = CardOwner { key: &owner_key, treasury };
     let entry = |key: &str, status: &str, cost: i32, upkeep: i32, turns: u32, card_id: String, slot: Option<usize>| -> mlua::Result<Table> {
-        let e = lua.create_table()?;
-        e.set("manager", region_value(ui, region))?;
-        e.set("record", key)?;
-        e.set("unit_record", unit_details(lua, inner, ui, key)?)?;
-        e.set("is_naval", is_naval(key))?;
+        let e = recruitment_card(lua, inner, ui, &owner, region, key, cost)?;
         e.set("status", status)?;
-        e.set("name", loc(inner, &format!("units_on_screen_name_{key}")).unwrap_or_else(|| key.to_owned()))?;
-        e.set("description", loc(inner, &format!("unit_description_texts_description_text_{key}")).unwrap_or_default())?;
-        e.set("image_path", unit_icon(inner, db, &owner_key, key))?;
-        e.set("cost", cost)?;
+        e.set("card_id", card_id)?;
         e.set("upkeep", upkeep)?;
         e.set("turns", turns)?;
         e.set("turns_to_completion", turns)?;
-        e.set("card_id", card_id)?;
-        e.set("category", card_category(db, key))?;
-        e.set("class", db.unit(key).map(|u| u.unit_class.clone()).unwrap_or_default())?;
-        e.set("experience", 0)?;
-        e.set("faction_key", owner_key.as_str())?;
-        e.set("affordable", treasury::recruitment_affordable(treasury, cost))?;
         if let Some(s) = slot {
             e.set("slot", s)?;
         }
@@ -447,12 +420,42 @@ pub(super) fn recruitment_info(lua: &Lua, inner: &Inner, ui: &CampaignUi, region
         e.set("reasons_unavailable", 0)?;
         enqueued.set(i + 1, e)?;
     }
-    recruitment_table(lua, ui, units, enqueued, &owner_key, capacity, player_owned)
+    recruitment_table(lua, ui, units, enqueued, &owner_key, i64::from(capacity), player_owned)
+}
+
+/// The faction whose cards a recruitment panel shows: its key (unit pictures, `faction_key`) and its
+/// treasury (`affordable`).
+struct CardOwner<'a> {
+    key: &'a str,
+    treasury: i32,
+}
+
+/// The fields every recruitment card carries, on a settlement's panel and a commander's alike:
+/// `manager` (the region whose queue trains the unit), `record`, `unit_record`, `is_naval`, `name`,
+/// `description`, `image_path`, `cost`, `affordable`, `category`, `class`, `experience` and
+/// `faction_key`. The caller adds `status`, `card_id`, `turns` and what its path has of its own.
+fn recruitment_card(lua: &Lua, inner: &Inner, ui: &CampaignUi, owner: &CardOwner<'_>, manager: RegionId, key: &str, cost: i32) -> mlua::Result<Table> {
+    let db = &ui.link.db;
+    let e = lua.create_table()?;
+    e.set("manager", region_value(ui, manager))?;
+    e.set("record", key)?;
+    e.set("unit_record", unit_details(lua, inner, ui, key)?)?;
+    e.set("is_naval", is_ship(db, key))?;
+    e.set("name", loc(inner, &format!("units_on_screen_name_{key}")).unwrap_or_else(|| key.to_owned()))?;
+    e.set("description", loc(inner, &format!("unit_description_texts_description_text_{key}")).unwrap_or_default())?;
+    e.set("image_path", unit_icon(inner, db, owner.key, key))?;
+    e.set("cost", cost)?;
+    e.set("category", card_category(db, key))?;
+    e.set("class", db.unit(key).map(|u| u.unit_class.clone()).unwrap_or_default())?;
+    e.set("experience", 0)?;
+    e.set("faction_key", owner.key)?;
+    e.set("affordable", treasury::recruitment_affordable(owner.treasury, cost))?;
+    Ok(e)
 }
 
 /// The `GenerateRecruitmentPanel` info table around its two card lists: the faction's colours,
-/// the capacity and whether the player owns the manager.
-fn recruitment_table(lua: &Lua, ui: &CampaignUi, units: Table, enqueued: Table, faction_key: &str, capacity: u32, player_owned: bool) -> mlua::Result<Value> {
+/// the capacity (-1 on a commander's panel) and whether the player owns the manager.
+fn recruitment_table(lua: &Lua, ui: &CampaignUi, units: Table, enqueued: Table, faction_key: &str, capacity: i64, player_owned: bool) -> mlua::Result<Value> {
     let t = lua.create_table()?;
     t.set("recruitable_units", units)?;
     t.set("enqueued_units", enqueued)?;
@@ -472,15 +475,63 @@ fn recruitment_table(lua: &Lua, ui: &CampaignUi, units: Table, enqueued: Table, 
     Ok(Value::Table(t))
 }
 
-/// An army's recruitment panel with nothing to recruit (PLACEHOLDER, see `generate_current_tab`):
-/// the army's faction's colours, no cards, capacity 0.
-pub(super) fn empty_recruitment_info(lua: &Lua, ui: &CampaignUi, commander: CharacterId) -> mlua::Result<Value> {
-    let (faction_key, player_owned) = {
-        let m = ui.model();
-        let faction = m.world.characters.get(&commander).and_then(|c| m.world.factions.get(&c.faction));
-        (faction.map(|f| f.key.clone()).unwrap_or_default(), faction.is_some_and(|f| f.key == ui.link.human))
-    };
-    recruitment_table(lua, ui, lua.create_table()?, lua.create_table()?, &faction_key, 0, player_owned)
+/// `GenerateRecruitmentPanel(info)` for a commander's tab: an army's `recruitment_tab` and a navy's
+/// `naval_recruitment_tab` (the generator's character path, `0x009FE7B0` with the tab's character
+/// set by `0x0098BEA0`; UI_FIDELITY.md §4.10). The options and the queue are the model's
+/// ([`ntw_sim::campaign::CampaignModel::commander_recruitment`], as the player's faction sees them:
+/// the panel's faction is the tab set's, INFERRED the player's). Per card, as the generator pushes it
+/// (CONFIRMED): `manager` = the source region (the entry's queue, entry[7]), `character` = the
+/// commander, `cost` = entry[0], `reasons_unavailable` = the flags (bit 0x100: no path, the card's ninth
+/// reason), status "Unavailable" when flagged, and `turns` the text `"<training>/<march>"`
+/// (`"%d/%d"` at `0x009FF262`: the training turns of the source queue, `0x00B61D80`, and the march
+/// rounded up, `0x00B5AC60`) when the training is above 0. Else the exe writes `"%d"` of the training
+/// or `" "`, by the tab set's byte +0x24 (manager +0xA94), which also gates the cards' experience;
+/// ours writes `" "` (INFERRED: the manager's constructor `0x0098C2F0` clears it and no writer was
+/// found). `recruitment_capacity` is -1 on this path (`0x009FE84B`). The queue is the items queued for
+/// the commander, the first ten (`0x009FF0C0`).
+pub(super) fn commander_recruitment_info(lua: &Lua, inner: &Inner, ui: &CampaignUi, commander: CharacterId) -> mlua::Result<Value> {
+    let m = ui.model();
+    let Some(human) = m.faction_by_key(&ui.link.human) else { return Ok(Value::Nil) };
+    let (faction, faction_key, treasury) = (human.id, human.key.clone(), human.treasury);
+    let player_owned = m.world.characters.get(&commander).is_some_and(|c| c.faction == faction);
+    let rec = m.commander_recruitment(faction, commander);
+    let upkeep: Vec<i32> = rec.options.iter().map(|o| m.rules.units.get(&o.unit_key).map_or(0, |u| u.upkeep)).collect();
+    let queue: Vec<(RegionId, RecruitmentItemId, String, u32, i32)> = rec
+        .queue
+        .iter()
+        .take(ntw_sim::campaign::commands::MAX_QUEUE as usize)
+        .filter_map(|&(r, id)| m.world.regions.get(&r)?.recruitment_queue.iter().find(|i| i.id == id).map(|i| (r, id, i.unit_key.clone(), i.turns_remaining, i.cost)))
+        .collect();
+    drop(m);
+    ui.forget_finished_queue_items();
+    let owner = CardOwner { key: &faction_key, treasury };
+    let units = lua.create_table()?;
+    for (i, (o, upkeep)) in rec.options.iter().zip(upkeep).enumerate() {
+        let key = &o.unit_key;
+        let e = recruitment_card(lua, inner, ui, &owner, o.region, key, o.cost)?;
+        e.set("status", if o.available() { "Available" } else { "Unavailable" })?;
+        e.set("card_id", format!("{key}!recruitable!{i}"))?;
+        e.set("upkeep", upkeep)?;
+        let turns = if o.training_turns > 0 { format!("{}/{}", o.training_turns, o.travel_turns_rounded()) } else { " ".to_owned() };
+        e.set("turns", turns)?;
+        e.set("character", character_value(ui, commander))?;
+        e.set("reasons_unavailable", o.flags)?;
+        units.set(i + 1, e)?;
+    }
+    let enqueued = lua.create_table()?;
+    for (i, (region, item, key, turns, cost)) in queue.iter().enumerate() {
+        let e = recruitment_card(lua, inner, ui, &owner, *region, key, *cost)?;
+        e.set("status", "Enqueued")?;
+        e.set("card_id", format!("{key}!enqueued!{i}"))?;
+        e.set("upkeep", 0)?;
+        e.set("turns", *turns)?;
+        e.set("turns_to_completion", *turns)?;
+        e.set("slot", i)?;
+        e.set("item_ptr", ui.entity(TAG_QUEUE_ITEM, item.raw()))?;
+        e.set("reasons_unavailable", 0)?;
+        enqueued.set(i + 1, e)?;
+    }
+    recruitment_table(lua, ui, units, enqueued, &faction_key, -1, player_owned)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -537,7 +588,8 @@ struct CommanderRow {
     historical: bool,
     /// At most four trait keys (CONFIRMED: the entry shows four).
     traits: Vec<String>,
-    card: String,
+    /// The portrait as the panel shows it ([`portrait_image`]).
+    image: String,
 }
 
 fn commanders_for_recruitment(lua: &Lua, inner: &Inner, ui: &CampaignUi, force: ForceId) -> mlua::Result<Value> {
@@ -578,7 +630,7 @@ fn commanders_for_recruitment(lua: &Lua, inner: &Inner, ui: &CampaignUi, force: 
                     recruitable: cost.is_some_and(|c| c <= purse),
                     historical: details.and_then(|d| d.historical_key.as_deref()).is_some(),
                     traits: details.map(|d| d.traits.iter().take(4).map(|t| t.key.clone()).collect()).unwrap_or_default(),
-                    card: portrait_card(&m, c).map(str::to_owned).unwrap_or_default(),
+                    image: portrait_image(inner, &m, c),
                 }
             })
             .collect();
@@ -597,7 +649,7 @@ fn commanders_for_recruitment(lua: &Lua, inner: &Inner, ui: &CampaignUi, force: 
     let (rows, in_command, cap, max_distance, distance, turns) = gathered;
     let t = lua.create_table()?;
     for (i, row_in) in rows.into_iter().enumerate() {
-        let CommanderRow { character: c, cost, type_name, recruitable, historical, traits, card } = row_in;
+        let CommanderRow { character: c, cost, type_name, recruitable, historical, traits, image } = row_in;
         // The character's own name if the model has one (our own save writers keep it), else his type.
         let name = character_name(inner, ui, c).unwrap_or(type_name);
         let row = lua.create_table()?;
@@ -610,7 +662,7 @@ fn commanders_for_recruitment(lua: &Lua, inner: &Inner, ui: &CampaignUi, force: 
         // PROVISIONAL format (the original's is the agent record's pointer); unique per candidate.
         row.set("UniqueId", format!("commander_{}", c.0))?;
         row.set("IsRecruitable", recruitable)?;
-        row.set("InfoImage", if card.is_empty() { String::new() } else { format!("data/{card}") })?;
+        row.set("InfoImage", image)?;
         let traits_table = lua.create_table()?;
         for (j, key) in traits.iter().enumerate() {
             // The entry shows at most four traits (CONFIRMED: `enlist_commander_entry.lua:36`).
@@ -700,11 +752,15 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
         Ok(m.world.forces.values().any(|f| m.can_promote_unit(f.id, f.units.iter().position(|x| x.id == u).unwrap_or(usize::MAX))))
     });
     // RecruitUnit(character, manager, record): queue a unit (CONFIRMED call in
-    // template.RecruitmentCard.lua; the manager is the recruiting region's, the record the unit key,
-    // INFERRED). CancelRecruitment(item_ptr): remove that queue item (CONFIRMED call).
-    f!("RecruitUnit", |_l, inner, ui, (_c, manager, record): (Value, Value, Option<String>)| {
+    // template.RecruitmentCard.lua, which passes back its card's `character`, `manager` and `record`).
+    // The manager is the region whose queue trains the unit, the record the unit key, and the character
+    // the commander whose panel the card is on (nil on a settlement's), the item's target (the `CCQ`
+    // command's third value, `0x00936B90`, CONFIRMED). CancelRecruitment(item_ptr): remove that queue
+    // item (CONFIRMED call).
+    f!("RecruitUnit", |_l, inner, ui, (character, manager, record): (Value, Value, Option<String>)| {
         if let (Some(r), Some(unit_key)) = (entity_of(&manager, TAG_REGION), record) {
-            ui.push(CampaignRequest::Command(CampaignCommand::Recruit { region: RegionId(r as u32), unit_key }));
+            let target = entity_of(&character, TAG_CHARACTER).map(CharacterId);
+            ui.push(CampaignRequest::Command(CampaignCommand::Recruit { region: RegionId(r as u32), unit_key, target }));
         }
         Ok(())
     });

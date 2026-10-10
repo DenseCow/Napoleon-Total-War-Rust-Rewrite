@@ -1080,6 +1080,216 @@ counter, `+0x646` deploying, `+0x647` first update done, `+0x648` deployed.
     group is a connected block of the faction's regions (the composite analyser's LOST / SPLIT /
     MERGED states). Where invasions come from (the mission kinds of `0x00CEEB00`) is UNKNOWN.
 
+### Deal evaluation (worker deal-ai, 2026-10-10)
+How the AI recipient answers a proposed deal. Ported pieces: `ntw_sim::campaign::deal_value`
+(tests `technology_value_follows_the_traced_formula`, `a_fair_trade_passes_and_a_lopsided_demand_fails`,
+`inflation_is_clamped_and_truncated_when_applied`, and the round-3 tests below). `CampaignModel::ai_refuses_deal`
+answers a deal of technologies as the exe (`ai_accepts_technologies`); a deal with regions keeps the
+PLACEHOLDER rule (the AI gives no region or technology in it) until the region value is traced.
+
+- **Entry** `0x00C49BE0` (`CCQ_DIPLOMACY_PROPOSE_DEAL` executor `0x00933690`; the AI's counter-offer
+  `0x00CC58C0` calls it with flag 0): unless the recipient (`+0x1C`) is human and `0x00C1E240`
+  turns a deal without demands into a payment, it stores the flag at negotiation `+0x2B8`, posts the
+  UI message, and when the **recipient is not human** runs the AI's evaluator `0x00AA5ED0(negotiation,
+  flag)` (`this` = the AI object). CONFIRMED.
+- **Records** (negotiation `+0x2A4`, `0x00BF5A60`): 0 trade, 1 access, 2 access cancel, 3 alliance,
+  4 **regions** (`+0x94`, vtable `0x01381DE0`), 5 **technology** (`+0xE0`, vtable `0x01381E34`),
+  6 state gift, 7 payments, 8 protector, 9 peace (`+0x184`), 10 war, 11 join war, 12 break trade,
+  13 break alliance. Record virtual `+0x2C` = has items, `+0x38` = value, `+0x3C` = apply,
+  `+0x44` = propose. CONFIRMED.
+- **Evaluator `0x00AA5ED0`** (CONFIRMED order): (1) builds two lists of the AI's diplomatic goals
+  toward the proposer (`0x00CC13D0` + `0x00CCCCA0`, filtered by `0x00D0C460` and copied through
+  `0x00CF8400`; `0x00CC0280` + `0x00CCB750`; traced below, "Goal lists" and "Weights"); (2) for each record 0..13 with items:
+  `0x00A62400` adds the record's goal to the evaluation (below); for record 7 the payment amount
+  (slot 2 of its value) is kept; if the recipient's `diplomacy_options` toward the proposer for that
+  record index (relationship `+0x528` → `0x00B64C50` → `0x00B27FE0(index)`) is 1 or 3 (accept
+  forbidden; the index equals the option id, map `0x01459080`) → **decline**; (3) `0x00A75CD0` →
+  `0x00465180` always returns 0; (4) **accept** (`AcceptCampaignNegotiationDeal` `0x00C114B0`) when
+  `fair` (`0x00CE5750`) and the AI strategy's budget (`0x00A87F50` object → `0x00CBBA80` virtual `+0x54` = the diplomatic pot, below "Budget") ≥ the
+  payment, or when `good` (`0x00CEFA40`) and the payment ≤ the **recipient's**
+  treasury (`0x004631B0` = `+0x1C`, economy `+0xAC` → `0x00BCAFE0`); (5) else, with flag 0 and
+  `0x00D0C560` false, when fewer than 10 counter-offers were made (`0x00C1EC20`) the counter-offer
+  builder `0x00CC58C0` may re-propose (returns true: no decline); (6) else **decline**
+  (`DeclineCampaignNegotiationDeal` `0x00C1F210`).
+- **Per record `0x00A62400`**: records 2, 6, 10 add nothing; 0, 3, 8, 9 add the matching existing goal
+  (`0x00CB21C0(goal, 1.0)`); 1, 4, 5, 11, 12, 13 build a goal (`0x00C8E210`: type, record copy,
+  weight, …; goal `+0xBC` weight, `+0xC8` value triple) whose **weight = Σ weights of the AI's goals
+  of the same type whose item matches an item of the deal** (first list against one side's items, the
+  second against the other's), value = the record's virtual `+0x38`, then `0x00CB21C0(goal, 1.0)`;
+  7 builds one with weight 0.
+- **Evaluation `0x00CB21C0`** (struct: triple `+0`, bonus `+0x0C`, eagerness `+0x10`, count `+0x14`):
+  triple += goal value; bonus += weight × type weight (`0x00D018B0`: 500 for 0/2/5/12/13, 250 for 1,
+  1000 for 3/8/11, 2500 for 4/9, else 1); eagerness += (w ≥ 0 ? gain × (w + p − 1) : given × (w + 1
+  − p)) × p; count += 1. `fair` (`0x00CE5750`): given ≤ 1.05 × (bonus + gain) and cost ≤ 1.05 ×
+  (bonus + gain) (f32, `0x0137C258`); `good` (`0x00CEFA40`): 2 × given and 2 × cost ≤ bonus + gain.
+  Triple slots are read as unsigned. CONFIRMED (disassembly).
+- **Technology value** (record virtual `+0x38` = `0x00C13360`): Σ offered (flag 1) then demanded
+  (flag 0) of `0x00A36B20`, × trunc(inflation) (`0x00C42FB0`: the float is CVTTSS2SI'd before it
+  multiplies). `0x00A36B20`: 500 + trunc(10 × PointsRequired^1.1) (`powf` `0x01285310`, constants 1.1
+  / −10.0; **the old note "500 + 10 × cost" missed the power**), ×2 when exactly one faction (list
+  campaign `+0x110`, entries with `+0x194` set) has it researched (state 0, `0x008F3DB0`), ÷ (traded
+  + 1)² (proposer's entry `+0x28`, `0x008F4990`) unless demanded by a human proposer (`0x00C3F870`
+  = wrapper `+0x168` → faction `+0x6E0`); offered → (v, 0, 0), demanded → (0, v, v). CONFIRMED.
+- **Inflation** (campaign `+0x1014`, `0x008A9920` at each round end after the calendar moves on):
+  `clamp(net / max(1, first), 1, 3)`, net = Σ factions of last turn's income (categories 5..11,
+  `0x00BBE970`) − expenses (18..24, `0x00BBE910`) (`0x0096D2E0`), read as unsigned; `first`
+  (`+0x1010`) = the first round end's net, set once while 0; ctors write 1.0. CONFIRMED formula; kept by the model
+  (`CampaignModel::deal_inflation`, saved as CAMPAIGN_MODEL #21/#22, below "Inflation in the save").
+- **Region value** (record virtual `+0x38` = `0x00C131C0`): from the proposer's side (wrapper ==
+  proposer, `0x00898B20`) `0x00A364B0(offered, demanded, proposer)`, × trunc(inflation), then
+  `0x00C4D140`: slot 2 × 1.5^(max(m, 1) − 1), m = 0 unless the proposer is human and the peace record
+  is empty, then m = demanded count + proposer faction `+0x938` (UNKNOWN counter). `0x00A364B0`:
+  for each offered region, v = `0x00AA1E90(region, recipient)`; v goes to slot 2 when the region is
+  `0x00C3E0C0` or the strategy's `+0x34` virtual `+0x94` holds, else to slot 0 when `0x00A79050`
+  ≥ 0, or > −6 and the region is in the neighbour list (`+0x20`/`+0x24`) of one of a faction's regions (list `+0x77C`; which faction: not traced)
+; for each demanded region: slot 1 += `0x00AA1E90(region, proposer…)` (unless the
+  same tests), slot 2 += `0x00AA1E90(region, recipient)`. `0x00AA1E90` = belief 0x4D base
+  (`0x00A75560`, ported `region_value::base`) with the group-change and personality factors
+  (virtuals `+0x21C`, `+0x220`, `+0x22C`), ×2 tests, ×1.5 when allied regions are near. INFERRED
+  reading of the branches; NOT ported.
+- **Who scores the goals (round 2, CONFIRMED).** The AI object of the evaluator is the faction's
+  manager (`0x00A87F50`); its BDI core is manager `+8` (`0x005D6450`), built by `0x00C8E290`:
+  `+0x34` the component list, `+0x90` `0x00C904F0`, `+0x94` `0x00C8FB10`, `+0x98` the **finance
+  component** `0x00C8FC20` (id 0xE0, vtable `0x0138AF40`), `+0x9C` WAR_AND_PEACE (`0x00BE6560`),
+  `+0xA0` **DIPLOMACY_MANAGER** (`0x00C7FF80`, vtable `0x0138BEAC`; made from its junction row or by
+  default, so every manager has one), `+0xA4..+0x164` the analysers, `+0xDC` the **diplomatic
+  attitude object** (`0x00D2A270`, vtable `0x0138EBB0`; in `mp_eur_napoleon` France gets
+  `0x00D30180` and Britain `0x00D3E990`, which share every slot used here). `0x00CCCCA0` (list 1)
+  and `0x00CCB750` (list 2) call virtual `+0x38` / `+0x34` of every live component of `+0x34`
+  except the DIPLOMACY_MANAGER, then the DIPLOMACY_MANAGER's. Every behaviour and the other core
+  components have `0x00462B80` (`RET 0xC`, no-op) in both slots (all 30 behaviour vtables and the
+  five components read), so the weights come only from the DIPLOMACY_MANAGER: `+0x38` =
+  `0x00CCB810` (list 1), `+0x34` = `0x00CCB210` (list 2) (both made functions 2026-10-10).
+- **Goal lists (CONFIRMED).** A goal (200 bytes, `0x00C8E210`): `+0` record index, `+4` a deal
+  (`InitNegotiationDeal` layout: `+0x10`/`+0x20` regions demanded/offered, `+0x30`/`+0x40`
+  technologies demanded/offered), `+0xBC` weight (clamped to [−1, 1] when the last argument is
+  set), `+0xC4` / `+0xC5` flags; list 2 elements and the evaluator's copies of list 1 are 0xD4 bytes
+  (`0x00C8E080`: goal + the value triple at `+0xC8`, the value computed on the mirrored deal by
+  `0x00CF8400` → `0x00CC3E00`; the goal keeps its own deal). Each goal is built only when
+  `0x00CCB150(AI, proposer, index)` passes: neither side's `diplomacy_options` for the index forbids
+  it (AI→proposer not 2 or 3, proposer→AI not 1 or 3). All are made with weight 0.
+  - **List 1** (`0x00CC13D0(proposer, out, core)`, what the AI would ask of the proposer): trade,
+    alliance, access (by turns), protector, peace, join war, break trade/alliance as possible; **one
+    region goal per region of the proposer's CAI region list** (CAI faction `+0x114`) that is not its
+    owner's capital (`0x00A8B5A0`, the check `tradeable_regions` uses) and whose CAI region `+0x12C`
+    is set with its `+0x34` object's virtual `+0x94` false (INFERRED the siege test of
+    `0x00C5C040`), region in the goal deal's `+0x10`; **one technology goal per technology the
+    proposer has researched (state 0) and the AI has in state 1, 2 or 3** (`0x008F4F10(this =
+    proposer, out, AI)`; `0x008F3AC0` = tree entry state 1/2/3), technology in `+0x30`.
+  - **List 2** (`0x00CC0280`, what the AI would give): the same with the sides swapped: **the AI's
+    own regions** (same filters) in `+0x20`, **the technologies the AI has researched and the
+    proposer has in state 1/2/3** in `+0x40`.
+- **Weights (CONFIRMED, `0x00CCB810` / `0x00CCB210`, constants read).** Only goals of weight 0 are
+  scored (all of them here: the "types already weighted ≥ 1" filter `0x00CE6430` and the
+  {4,5,6,7}-only rule apply only when a goal already has weight ≥ 1, never from the evaluator).
+  List 1: region **−1**; technology (one item) = attitude `+0x2A4(tech)` (`0x00D63230`), below −1 →
+  −1, then **min(w, 0.5)**; trade = `+0x2A8(proposer)` unless `0x00A89580`, alliance = `+0x2AC`
+  unless `0x00A63A40`, peace = `+0x2B0(proposer, 0)` (these three to [−1, 0.9]); access −1 (flag
+  cleared); state gift and payments 0; the rest −1. List 2: region **−1**; technology (one item) =
+  attitude `+0x2A0(tech)` (`0x00D63120`), below −1 → −1, then **min(w, −0.5)**; protector
+  `+0x29C`, join war / break trade / break alliance `+0x2C4/+0x2C8/+0x2CC(proposer, third)` with
+  caps −0.1 / −0.25 / −0.5 by the third party's relation; the rest as list 1. The region goals'
+  `+0xC5` flag is `0x00CF1410` (not read by the evaluation).
+  - `0x00D63120(tech)` (CONFIRMED): over the CAI world's faction list (`+0x120`, count `+0x11C`),
+    `n` = entries with a technology manager (`+0x194`) that have the technology researched, `t` =
+    all entries / 8 (at least 1); returns `2 × min(n, t) / t − 1` (floats).
+  - `0x00D63230(tech)`: the faction's research-need belief (`0x00A74AD0`, class `0x00A3AFE0`, refresh
+    `0x00ABB340`) array `+0x114` indexed by the technology's category (`0x00C5B950`: "admin" 0,
+    "economy" 1, "military" 2, else 3; 3 categories, `0x004CDC50`). Refresh: five need scores, each a
+    power of two `2^k`, `k` ≤ 8: `M` = 2^min(enemies, 8) (`0x00ABE100`), `D` = allies − enemies,
+    1 when < 0, 256 when > 8, else 2^D (`0x00A98460`) — enemies and allies are the relation
+    belief's (`0x00A74A20`, refresh `0x00ABAFB0`) lists `+0x40` (stance 0, war) and `+0x2C` (stance 2,
+    allied) over the other factions; `E` (`0x00A9B810`, economy history of the faction
+    economy `+4`: count `+0x3E8` (≤ 5), ring index `+0x3EC`, 100-byte turns; 16 when ≤ 2 turns; else
+    `I`, `X` = income / expenses summed over the last count − 2 turns, `s` = trunc(2I × 0.125), `k`
+    = 8 − the steps of `s` needed to reach 2I − X); `P1` (`0x00A64460`: (Σ region `+0x15C` >> 1) +
+    (relation entries with `+0x168` and `+0x160 ≠ 0` >> 2)) and `P2` (`0x00A8D6E0`: (Σ over own
+    regions of their `+0x140` list entries with `0x00C3F480` >> 1) + (entries with `+0x168 == 0`
+    and `+0x160 ≠ 0` >> 2)), each 256 above 8. Then `need[0] = need[1] = D + E`, `need[2] = M +
+    max(P1, P2)`, `h = (Σ need) >> 1` and `value[i] = min(need[i], h) / h`. CONFIRMED formula;
+    the CAI fields `+0x15C`, `+0x140`/`0x00C3F480`, `+0x160`/`+0x168` of the relation list `+0x14C`
+    are UNKNOWN, and the belief is cached (refresh schedule not traced).
+- **Matching (CONFIRMED, `0x00A62400` disassembly).** Regions: weight = Σ weights of the list-1
+  goals whose `+0x10` first region is a region the proposer **offers** (deal `+0x20`) + Σ of the
+  list-2 goals whose `+0x20` first region is one it **demands** (deal `+0x10`); technologies the
+  same with `+0x30`/`+0x40`. So a region either side gives counts −1 each when it is in the giver's
+  goal list, a technology offered to the AI counts its need weight (0..0.5), one asked of it its
+  spread weight (−1..−0.5). The record's value is its virtual `+0x38` (`0x00C60D60`), the goal is
+  added with scale 1.0 and no clamp.
+- **Budget (CONFIRMED `0x00AAF570`).** Finance component `+0x140` = the diplomatic pot. Its refresh
+  (`0x00D10650`, when a compared belief changed): with treasury > 0, the four pots `+0x128`,
+  `+0x130`, `+0x138`, `+0x140` = personality spending biases (`0x00CC2D50`: virtuals `+0x140`,
+  `+0x138`, `+0x13C`, `+0x144`; ×0.6, and +0.4 on `+0x138`, when virtual `+0x218`) × treasury,
+  capped for recently used pots (`+0x164..+0x17C` within 2 turns, limits `+0x168..+0x180`, the
+  excess spread over the others); treasury ≤ 0 → all 0. Spending (`0x00CC53D0`, virtual `+0x40`)
+  takes the cost from the pot of its kind (kind 8 from `+0x140`) and can leave it negative. With
+  no payment in the deal the fair path needs `+0x140 ≥ 0`.
+- **Inflation in the save (CONFIRMED).** `CAMPAIGN_MODEL` #21 u32 = `first` (`+0x1010`) and #22 f32 =
+  the factor (`+0x1014`), just before the force caps #23/#24: the loader `0x00872550` reads both
+  when the record version is above 4 (`0x00873B60`), the writer `0x008EBAB0` writes them as types 8
+  and 0x0A (`0x008EC094`, `0x008EC0DE`). Evidence saves: every Europe save (ours and the
+  original's) has #21 = 113816 and #22 = 1.0 (the startpos value; `first` is set only while 0);
+  every original Spain save (`orig_fr_t1`, `orig_fr_may1811`, `auto_orig_spa_0245`) has #21 =
+  4294948416 (−18880 read as unsigned) and #22 = 1.0. The nets are converted as unsigned (fix-up
+  table `0x01318130`), so a negative world net makes the ratio ~4·10⁹ / first: the factor jumps to
+  3 in a campaign whose `first` is positive (Europe) and stays ~1 for ever in one whose `first` is
+  negative (Spain). **Kept 1:1** (not an ORIGINAL BUG by the rule): the net is produced by a signed
+  subtraction (`0x0096D2E0` returns int), but every reader of it and of `first` (`0x008A9920`, the
+  loader, the writer's ESF type u32) treats it as unsigned; nothing in the exe reads it signed.
+- **Round-end update (CONFIRMED, round 3).** `0x008A9920`, after `UpdateCampaignCalendarToNextTurn`:
+  `net` = `SumFactionsLastTurnNetIncome` (`0x0096D2E0`, `this` = the world at campaign `+0xF5C`): over
+  the world's `+0x2C`/`+0x30` list (`FACTION_ARRAY`; the rebel faction is `+0x1C`, loaded from
+  `REBEL_FACTION` at `0x0090C1E6`), each faction's last economics record (`0x00BABE00`) categories
+  5..11 (`0x00BBE970`) minus 18..24 (`0x00BBE910`); `first` takes it while 0; factor =
+  clamp(net / max(1, first), 1, 3). The economics history: a ring of 10 records of 25 ints
+  (economy `+0x04`, count `+0x3EC`, index `+0x3F0`); `0x00BABE30` adds the turn's record at every
+  round end, also when the faction cannot pay; the saver `0x00BD46E0` writes the newest `count`
+  oldest first. Ported: `World::economy_history` (loaded, saved, replaces `last_income`),
+  `CampaignModel::deal_inflation` (CAMPAIGN_MODEL #21/#22, updated in `TurnStep::RoundEnd`); tests
+  `the_round_end_records_the_economy_history`, `inflation_takes_the_first_net_once`,
+  `deal_inflation_and_economy_history_round_trip` (real saves). PROVISIONAL: our records hold
+  categories 5, 7, 11, 19, 20 only (the model's income and upkeep).
+- **Research-need inputs (round 3).** CAI faction `+0x14C` = `CAI_FACTION` #3, its mobiles; a mobile's
+  `+0x168` = `CAI_RESOURCE_MOBILE` #6 bool, set at creation (`0x00C15370` ← `0x00A8E590` /
+  `0x00A8DC10`) from the force's virtual `+0x38` ≠ 0, the same test that sorts land / naval in
+  `0x008B2150` (so 1 = land; agents' mobiles are made with 1; every save checked: agents true, small
+  fleets false); `+0x160` = the count of its unit list #5. CONFIRMED. CAI region `+0x15C` = the count
+  of `CAI_REGION` #6 (`+0x150` list), filled by `0x00C13A50` from `0x00C140C0`, which the fort mirror
+  builder `0x00A8DB00` calls with the CAI region at the fort's position: **the forts in the region**
+  (CONFIRMED; empty in every save checked). CAI region `+0x140` = the `CAI_REGION` #3 list (the
+  region's slot garrisonables, e.g. Gibraltar 2, Sevilla 3); `0x00C3F480` tests the slot entity's
+  port object `+0x1E4` (the port node test of PATHFINDING_PORTS.md §3): **the port slots**
+  (INFERRED mapping to the model's `RegionSlot::port`). The relation lists: the CAI world's factions
+  except itself, both not the rebels (`IsFactionWithoutRecord`, those go to `+0x48`), the other in
+  the game (`+0x824` clear), sorted by the other's relationship stance (`+0x790 → +0x10`: 2 → `+0x2C`
+  allies, 0 → `+0x40` enemies). The economic need `0x00A9B810`: `I` = categories 0..12
+  (`0x00BC7860`), `X` = 13..24 (`0x00BC7840`) over the newest `min(count, 5) − 2` records. The
+  belief refreshes when read while dirty (`0x00A74AD0` → `0x00CF1170` `+0xF8` → `0x00CCCF70`).
+  A technology's category is its key's prefix (`0x00C5B950` with `0x004F4480` = "starts with"):
+  admin / economy / military → 0 / 1 / 2, else 3 — **ORIGINAL BUG**: 3 indexes past the belief's
+  3-float array (`0x00A3AFE0` allocates `0x004CDC50` = 3) in `0x00A75CC0`; ours gives such a
+  technology no need (no shipped key hits it).
+- **Diplomatic pot spending (CONFIRMED structure).** `0x00CC53D0` (finance virtual `+0x40`) is told
+  of an executed BDI intention (`0x00A6FE10` of its argument) and takes its cost (`0x00948970`) from
+  the pot of the intention's kind (`0x004A5140`): 0/1 → `+0x130`, 2/3 → `+0x138`, 4..7 → `+0x128`,
+  8 → `+0x140` (diplomatic), 9 → all four in proportion (all 0 when the cost exceeds their sum), 10 →
+  none. Only the AI's own paid diplomatic intentions spend from `+0x140`.
+- **Wired (round 3).** `CampaignModel::ai_refuses_deal` evaluates a deal of technologies as the exe
+  (`ai_accepts_technologies`: the `diplomacy_options` refusal, the goal weights with
+  `research_need` / `technology_spread`, the value at the campaign's inflation, `fair` / `good`).
+  PROVISIONAL there: the budget is taken as ≥ 0 (our AI has no kind-8 intentions); a refused deal is
+  declined where the exe may counter-offer (`0x00CC58C0`); the records the model does not hold
+  (trade, payments, …) are not evaluated; the port-slot mapping above. A deal with regions keeps the
+  PLACEHOLDER rule (the AI gives no region or technology in it).
+- **Resume point:** the region value: `0x00C131C0` → `0x00A755E0` → `0x00A364B0` (per region
+  `0x00AA1E90(region, faction, …)`, the `0x00C3E0C0` / CAI region `+0x12C → +0x34` virtual `+0x94`
+  tests, `0x00A79050` attitude with the neighbour list) and `0x00C4D140` (faction `+0x938`).
+  `0x00AA1E90` reads belief 0x4D (`0x00A75560`, settlement fields `+0xE8`/`+0xBC`/`+0xCC` UNKNOWN),
+  belief `0x00A75460`, `0x00A63FD0`, the group-change state `0x00A634D0`, personality virtuals
+  `+0x21C`/`+0x220`/`+0x22C`, `0x00A2C170`, `0x00C3E120`, `0x00C43AD0`, `0x00C40570` and the ×1.5
+  allied-neighbour test; then evaluate record 4 and drop the PLACEHOLDER. The counter-offer
+  `0x00CC58C0` stays its own item.
+
 ## 5. What the campaign scripts tell the AI (CONFIRMED calls, `analysis/worker3/lua_api.txt`)
 - `force_diplomacy(a, b, option, offer, accept)` (714 calls): options `war`, `peace`, `alliance`,
   `break_alliance`, `military access`, `cancel military access`, `trade agreement`, `break_trade`,

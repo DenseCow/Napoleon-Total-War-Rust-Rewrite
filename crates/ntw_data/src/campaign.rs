@@ -256,8 +256,11 @@ db_record! {
         unknown_24: bool,
         /// #5 @0x28 M: model kind, `human` / `ship`.
         model_kind: String,
-        /// #6 @0x34 L: base agent type.
-        base_agent: Option<String>,
+        /// #6 @0x34 L: the portrait folder (`General` for admiral, `minister` for the missionaries
+        /// and gentleman, `guerrilla`, `scholar`, `imam`, `Brahmin`); empty = the key. CONFIRMED:
+        /// the portrait allocator's deck counts in the start positions match these folders'
+        /// pictures (CHARACTERS_FIDELITY.md §14).
+        portrait_folder: Option<String>,
         /// #7 @0x40: UNKNOWN flag.
         unknown_40: bool,
         /// #8 @0x44 M: primary attribute, e.g. `command_land`.

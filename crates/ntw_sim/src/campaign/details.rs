@@ -93,23 +93,34 @@ pub struct CharacterDetails {
     /// message 0x46). PROVISIONAL: cleared when the model's flight ends.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub wounded: bool,
-    /// The `historical_characters` key he was made from (CHARACTERS_FIDELITY.md §8), for the
-    /// names and portraits of the writer; `None` for a generic character.
+    /// The `historical_characters` key he was made from (CHARACTERS_FIDELITY.md §8; the pool
+    /// panel's badge); `None` for a generic character.
     pub historical_key: Option<String>,
 }
 
-/// `PORTRAIT_DETAILS` v1: card picture, a second path, info picture, index.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// `PORTRAIT_DETAILS` v1: card picture, custom picture name, info picture, number (the details'
+/// +0x80, +0x98, +0x8C, +0x7C in that order, CONFIRMED by the writer `0x0099F6D0`). Who sets them:
+/// [`super::portraits`].
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Portrait {
     /// #0 e.g. `ui/portraits/european/Cards/minister/young/062.tga` (CONFIRMED path form).
     pub card: String,
-    /// #1 (empty in the samples; UNKNOWN).
+    /// #1 the custom picture name (`ui/portraits/custom/...`, `0x009CBD60`): when set, the pictures
+    /// come from it instead of the decks (empty for every generated character).
     pub alternative: String,
     /// #2 e.g. `ui/portraits/european/Info/minister/young/062.jpg`.
     pub info: String,
-    /// #3 the picture number (62 above).
+    /// #3 the picture number (62 above); -1 = none yet.
     pub index: i32,
+}
+
+impl Default for Portrait {
+    /// No pictures and number -1, as the details constructor `0x00992E60` starts a character
+    /// (+0x7C = -1, CONFIRMED).
+    fn default() -> Self {
+        Portrait { card: String::new(), alternative: String::new(), info: String::new(), index: -1 }
+    }
 }
 
 /// One trait of a character.

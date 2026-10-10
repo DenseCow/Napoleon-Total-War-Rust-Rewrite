@@ -10,11 +10,11 @@ the original's values. See the Goal section of `CLAUDE.md`.
 
 Generated 2026-10-10 by `bash tools/progress.sh` (from `tools/backlog_count.sh` and `tools/tag_count.sh`); never edit it by hand.
 
-Tags left in the code (done means zero): 1779 (652 PROVISIONAL, 114 PLACEHOLDER, 1013 INFERRED), plus 581 UNKNOWN.
+Tags left in the code (done means zero): 1780 (650 PROVISIONAL, 113 PLACEHOLDER, 1017 INFERRED), plus 575 UNKNOWN.
 
 | Section | Done | Partly done | To do |
 |---|---|---|---|
-| 0. Cross-cutting fidelity | 93 | 0 | 35 |
+| 0. Cross-cutting fidelity | 94 | 0 | 37 |
 | 1. File formats and data | 11 | 0 | 0 |
 | 2. Graphics and rendering | 0 | 11 | 29 |
 | 3. Battle gameplay (land) | 1 | 11 | 22 |
@@ -25,7 +25,7 @@ Tags left in the code (done means zero): 1779 (652 PROVISIONAL, 114 PLACEHOLDER,
 | 8. Video (Bink) | 2 | 1 | 0 |
 | 9. Audio | 0 | 2 | 8 |
 | 10. Multiplayer | 0 | 0 | 5 |
-| 11. Modding (goal: original mods work out of the box, plus easy modding) | 2 | 0 | 11 |
+| 11. Modding (goal: original mods work out of the box, plus easy modding) | 2 | 0 | 12 |
 | 12. Platform, release and quality | 0 | 0 | 6 |
 
 §0 counts individual pieces; the other sections still count whole features, so their numbers move
@@ -97,7 +97,7 @@ first. Evidence and round history live there; the pre-2026-10-07 long form of th
 - [x] Experience-adjusted recruitment cost (recruitment use INFERRED; upkeep untouched)
 - [x] Region transfer in deals (`TransferRegion` rejected: needs the `0x00B449F0` flags)
 - [x] Peace terms: regions and techs as deal items (`0x00B449F0`)
-- [ ] (running: deal-ai) Deals: the AI's evaluation of region/technology items (until then the AI refuses to give them: PLACEHOLDER, `ai_refuses_deal`); `grant_technology` requirement walk (PROVISIONAL); a foreign garrison left by a deal or liberation: what the exe does when the owner's army arrives (ours waits outside), `defenders_of` and recruit spawn (`0x008EF790`) (PROVISIONAL); the capital loss path (`0x008BA580` / `0x008DABC0`)
+- [ ] (running: deal-region) Deals: the AI's evaluation of region/technology items (until then the AI refuses to give them: PLACEHOLDER, `ai_refuses_deal`); `grant_technology` requirement walk (PROVISIONAL); a foreign garrison left by a deal or liberation: what the exe does when the owner's army arrives (ours waits outside), `defenders_of` and recruit spawn (`0x008EF790`) (PROVISIONAL); the capital loss path (`0x008BA580` / `0x008DABC0`)
 - [x] Recruitment details (`0x00AECEE0`, `0x00AED220`): cost from units #7 and region effects, the unit cap (units #15, `0x008F68B0`), the AI handicap and recruit prices from the model (`0x008DD090`)
 - [x] Recruitable population gate and charge (`0x00A89550` / `0x00AAF190` / `0x00A61AA0`, `REGION_FACTORS` #2)
 - [x] Capture refunds a port's naval queue items to the old owner (`0x00B1A760(1)` per port); our `occupy` refunds nothing; `0x00B58A30` is a fourth capture variant missing from the notes
@@ -110,6 +110,7 @@ first. Evidence and round history live there; the pre-2026-10-07 long form of th
 - [x] The 4 desertion-exempt unit classes (`0x008BA1E0` + `0x00EED3E0`: cavalry_heavy, elephants, general, infantry_elite)
 - [ ] Naval PROVISIONAL details: capture share weighting, captured crew base, gun counts of 8 ship models (needs a probe)
 - [ ] Trace the affordability rules of the unit pool and treaties (ours: their own checks in pool.rs ~309/484, treaties.rs ~467), and their charging arithmetic (ours: saturating/plain; overflow behaviour untraced; upkeep economy.rs ~525 and script treasury changes ntw_script game.rs:211 also bypass treasury.rs)
+- [ ] What the exe does with a queued recruitment item whose target commander dies (ours keeps the dead id: `character_dies` characters.rs:532, pool.rs:434, family.rs)
 
 ### 0-C middleware — [analysis/fidelity/MIDDLEWARE_VERIFY.md, BINK.md]
 - [x] Miles mixing rules and loudness (CONFIRMED against the exe); game-speed sfx rule; UI sound kinds
@@ -190,14 +191,16 @@ SpeedTree leftovers are in §2.
 - [x] Fog: one `fog_state_at` definition; explored settlements keep their labels
 - [ ] Promotion price number: one debugger sitting by the user (`analysis/fidelity/debugger/0g_promotion_probe.cdb.txt`)
 - [ ] Field promotion menu (`CCQ_PROMOTE_COMMANDER`): no shipped layout, needs our own context menu
+- [ ] Portrait deck builder `0x00A1F890` for maps without the start-pos portrait allocator (custom maps)
+- [ ] Minister, royal family and agent portraits for new characters (`0x008BF310`, `0x00A055E0`; the family is a PLACEHOLDER, CHARACTERS_FIDELITY.md §5c)
 
 ### Cross-cutting
 - [x] Determinism audit (no hash-map order, clocks, threads or OS randomness in the model crates); twice-run harness identical
 - [x] Comparison harness built: `image_diff`, `NAPOLEON_BATTLE_TRACE`, `docs/COMPARE_WITH_ORIGINAL.md`
 - [ ] First real side-by-side run against the original (needs the user)
 - [x] Battle `B.WindowsTime`: `timeGetTime()*0.001f` as a float (`0x005D4BF0`); the campaign's `0x009FB0B0` truncates to int; one shared clock
-- [ ] (running: new-portraits) Portraits of generated characters: the recruitment pool's hires and promoted generals (`promote_unit`) get empty CHARACTER_DETAILS (ntw_sim pool.rs), so their army card and Lists row keep the unit card (PLACEHOLDER, ntw_script ui/campaign/army.rs `unit_entry` / campaign/characters.rs `character_details`); trace how the exe picks a new character's portrait and give it in the model.
-- [ ] (running: army-recruit-tab) Army recruitment tab contents: `0x009FE7B0` reads the tab's own manager (commander `+0x34` → `+0x124`), not traced; ours opens it empty (PLACEHOLDER, ntw_script ui/campaign/tabs.rs `generate_current_tab`). Evidence: the original's army Recruitment tab in an own region has an Options row (4 cards, a "2/1" badge, cost 472) and a 10-slot Queue (user screenshot `ntw-evidence\screens\2026-10-07_original_wellesley_army_recruitment_tab.png`); the naval tab's port path is untraced too (PROVISIONAL).
+- [x] Portraits of generated characters: pool hires and promoted generals get a portrait in the model as the exe does: the per-folder deck is dealt by `0x00A1F730`, a promoted officer draws only while his number is -1 (`0x00A1A300`), and the draw order follows `0x00A05440`. The guerrilla flag is CONFIRMED 0. ORIGINAL BUG `0x00A1F730`: a folder's last picture was never dealt, fixed (CHARACTERS_FIDELITY.md)
+- [ ] Army recruitment tab follow-ups (tab merged with army-recruit-tab): a finished item targeted at a commander marches to him (`0x00B0A270` / `0x00AE8B10`; ours spawns it in the settlement); the `0x00AC54C0` limit test and zone-of-control cuts of the source search; who writes `+0xA94`; original save #2 = the item's target character id (INFERRED); the naval tab's port path (PROVISIONAL)
 - [x] Battle HUD scripts' frame: CONFIRMED 1280x960 (debugger sitting 2026-10-09, root at manager +0xC4); the battle host uses `UiFrame::ScriptFrame`; CreateFromLayout makes the file root's first child at its own frame position (`0x01027400`, `0x0101E270`)
 - [x] Battle HUD UI scale: the exe's UI scale (`0x0114EB20`) applies to the battle HUD too; ours lays the battle HUD out at window / scale and maps the mouse back
 - [x] Battle `B.Time`: the exe binds it (`0x005D3BB0`): the UI pulse clock, real time capped at 300 ms a frame
@@ -484,7 +487,6 @@ worked on, `[ ]` = not started.
 
 ## 6. AI
 - [ ] **PARTLY DONE:** Battle AI v1 and campaign AI v1, merged. The campaign AI plays at End Turn; the battle AI has the original attack FSM thresholds and think rhythm.
-- (running: ai2) The permanent AI slot works through the items below.
 - [ ] Battle AI in full:
   - artillery use, squares against cavalry, using terrain and buildings;
   - flanking plans, reserves, retreat;
@@ -560,7 +562,7 @@ worked on, `[ ]` = not started.
 - [x] One table path: about 20 readers read only `db/<x>_tables/<x>` and miss additive and `bob_` mod files (ntw_script UI `table`/`small_table`, mount.rs:64, unit_model.rs:121, vegetation.rs:228, names.rs:53, battle/setup.rs:246, model_viewer/source.rs:141); route them through the merged GameDatabase, and add a test that fails when code outside the loader reads a `db/..._tables` path (the guard, CLAUDE.md "Modding seams") (merged 2026-10-10: `ntw_formats` db_folder.rs, guard `napoleon/tests/table_path_guard.rs`)
 - [ ] Check each typed `db_record!` key against its loader in the exe (MOD_LOADING.md §3.2 method)
 - [ ] DB row hash order and in-file duplicate keys (PROVISIONAL; MOD_LOADING.md §6 start-up debugger run)
-- [ ] Optional open formats: glTF models, image heightmaps, hi-res texture overrides.
+- [ ] Optional open formats: glTF models (the one open model format, Blender exports it directly; no FBX or format of our own, user 2026-10-10; FBX import only as a later converter to glTF if modders ask), image heightmaps, hi-res texture overrides.
 - [ ] Modding docs and our own tools (pack editor, DB editor, map tools, a campaign map editor with live preview), so modders don't need the original's closed tools.
 - [ ] **Custom campaign maps** (user, 2026-10-09: a whole new world, e.g. a Japan map; design in docs/DESIGN.md §3.5.1)
   - [ ] Move the `.esf` and original-map coupling behind the importer (main part merged 2026-10-10: own save format, `CampaignSource` seam, `MapDisplay`; the rest in the next line): audit done 2026-10-09
@@ -588,6 +590,7 @@ worked on, `[ ]` = not started.
   - [ ] AI manager/personality fallback; a category behaviour column of our own; `balance_group` against `cdir_unit_balance_groups` (PROVISIONAL)
   - [ ] Era enums from data (shot, ability, drill, ground, weather, muzzle effect); government, agent, research, tax, ship-gun and MP-category tables
   - [ ] An upkeep test against a start position or save (economy_fidelity covers other income only)
+- [ ] **Replaceable systems** (user, 2026-10-10: mods change or add whole systems, e.g. how population works, new mechanics; a fork can become a new game): each model system (growth, public order, economy, recruitment, diplomacy, battle rules) runs through one named rule seam that a mod can replace or extend from data or the extended Lua API, with mod-owned state carried in saves and kept deterministic for multiplayer; vanilla runs the 1:1 rule. Design first (docs/DESIGN.md), then system by system.
 - [ ] **Extended Lua API** (user, 2026-10-09): the original's API stays exact (same names, arguments, results and events, so shipped `.luac` and mod scripts run unchanged on the Lua 5.1 VM); a new namespace adds more on top: read and write any model value, hooks for every game event, new commands and rules, UI built from script, campaign and battle setup for custom campaigns, and no fixed limits. One implementation per rule: the old API calls the same model code as the new one.
 - [ ] **No engine limits** (user, 2026-10-06; see Goal in `CLAUDE.md`). Defaults stay 1:1. Merged 2026-10-10 (`ntw_sim` limits.rs, MODDING_AUDIT.md §2.6): wide ID types, caps as `_kv_rules` data (army/navy #23/#24, custom battle 20 land, ships 6/8/10/20, reinforcements 20), required by `UiScriptHost::new`.
   - [ ] Make the hardcoded counts data-driven: audit done 2026-10-09 (analysis/modding/MODDING_AUDIT.md §2, ~25 sites,
@@ -616,19 +619,25 @@ worked on, `[ ]` = not started.
 
 ## Polish
 Non-blocking review findings, one line each (CLAUDE.md "Done means"). A worker editing a file clears that file's lines.
+- [ ] ntw_sim pool.rs `promote_unit` creates the officer before the funds check (the order should be: check, then create)
+- [ ] (running: polish1) ntw_script ui/campaign mod.rs ~612 and ntw_campaign portraits.rs ~221: each panel build allocates the portrait problem again and searches `rules.historical` linearly (cold path; cache per character)
+- [ ] (running: polish1) ntw_campaign portraits.rs `portrait_problem`: a start card at -1 whose agent type has no folder says "keeps his previous picture", but there was none
+- [ ] Ghidra: the 29 functions new-portraits renamed are at 15-60% completeness, 4 never checked (FUNCTION_DOC_WORKFLOW_V5)
 - [ ] `ntw_formats` has a dev-dependency cycle on `ntw_sim`; test `CampaignSource::features()` through `open`; raise the generic-engine Ghidra functions' completeness
 - [ ] Own save: header pixels stored as RON u32 text (bytes would be smaller and faster); `quick_save` clones the whole model (`SaveData` could borrow it)
-- [ ] real_install.rs:1010 merged-vs-old test can't fail on vanilla (one file per table keeps every row): test the keys with a two-file case; cover the typed tables and `models_building`
+- [ ] (running: polish1) real_install.rs:1010 merged-vs-old test can't fail on vanilla (one file per table keeps every row): test the keys with a two-file case; cover the typed tables and `models_building`
 - [ ] `ntw_formats` mods.rs: plan-cache misses for different install/language keys wait on each other under `PLAN_BUILD`, and `mount_plan` runs under it (cold path)
 - [ ] Ghidra: plate comments for `0x009F4520`, `0x009F9CA0` and the `ui_show_campaign_labels` gate (skipped by ui-small; FUNCTION_DOC_WORKFLOW_V5)
-- [ ] Queue cancel: turn.rs ~433 clones each removed item (partition the taken queue); battles.rs ~344 `Arc::clone(&self.rules)` only for the borrow checker; inline naval checks left in ntw_ai campaign/world.rs:308, ntw_campaign save.rs:1231, economy_fidelity.rs:414 (use `CampaignRules::is_naval_unit`); capture-refund Ghidra functions at 48-63% completeness (struct/this typing)
+- [ ] (running: polish1) Queue cancel: turn.rs ~433 clones each removed item (partition the taken queue); battles.rs ~344 `Arc::clone(&self.rules)` only for the borrow checker; inline naval checks left in ntw_ai campaign/world.rs:308, ntw_campaign save.rs:1231, economy_fidelity.rs:414 (use `CampaignRules::is_naval_unit`); capture-refund Ghidra functions at 48-63% completeness (struct/this typing)
 - [ ] Ghidra: the 12 functions mod-loading2 named (`0x0108E8F0`, `0x0108EBB0`, `0x0109ECF0`, `0x0105E8E0` ...) are at 4-30% completeness: type their variables (FUNCTION_DOC_WORKFLOW_V5)
-- [ ] `napoleon` campaign/detail.rs:93 opens a second Vfs on the main thread; reuse the scene's
+- [ ] (running: polish1) `napoleon` campaign/detail.rs:93 opens a second Vfs on the main thread; reuse the scene's
 - [ ] The campaign model addresses building slots as `Option<usize>` (None = the road/fort slot); replace it with a slot enum so no sentinel values remain (from the walls review; ntw_sim campaign).
-- [ ] Logging is inconsistent: ntw_data reports with `eprintln!` while ntw_campaign uses the `log` crate.
+- [ ] (running: polish1) Logging is inconsistent: ntw_data reports with `eprintln!` while ntw_campaign uses the `log` crate.
 - [ ] `CursorPosition` (ui_prelude.lua ~281) and CampaignUI's label `ScreenPos` (Labels.lua) give screen pixels while the campaign HUD's Position / MoveTo use the 1280x960 scripts' frame; read what the original returns on a wide screen.
 - [ ] `unwrap()` audit on paths that read install or mod data (ntw_formats, ntw_data, pack loading): a malformed file or broken mod must log one error and skip, never panic. Unwraps on the code's own invariants and in tests stay.
 - [ ] `last_income` is not written by the save writer (PROVISIONAL), its meaning changes after `settle_round` (categories 5, 7, 11 only), and `.items.last()` assumes the history ring is saved oldest-first (ntw_sim campaign).
-- [ ] Duplicate negotiation-string rows: the last one wins silently (ntw_data negotiation tables).
+- [ ] (running: polish1) Duplicate negotiation-string rows: the last one wins silently (ntw_data negotiation tables).
 - [ ] `CampaignModel`'s derived `PartialEq` compares `negotiations`, which is neither saved nor hashed (ntw_sim/src/campaign/world.rs ~39).
 - [ ] `CampaignSim::command`: BeginNegotiation / EndNegotiation each bump `generation` and set `last_message` (napoleon campaign play.rs).
+- [ ] (running: polish1) Army recruitment: queue cards never show "Paused" (`0x00A00775`); `recruit_travel_cost` rebuilds `road` / `by_id` per search; no unit test for `travel_turns_rounded`; army-recruit-tab's 34 Ghidra functions at 0-53% completeness
+- [ ] Deals AI: `settle_round` computes upkeep twice; `research_need` recomputed per tech item; deal-ai's 7 Ghidra functions at 0-38% completeness

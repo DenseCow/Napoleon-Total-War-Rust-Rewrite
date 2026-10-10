@@ -52,12 +52,11 @@ pub(super) fn character_details(lua: &Lua, inner: &Inner, ui: &CampaignUi, c: Ch
     // `+0x2C`); otherwise CommandedUnit is his unit's card with DisplayAsUnit true. Soldiers is his
     // force's soldier count (force vfunc `+0x74`, ours the units' men) whenever he has a force. So
     // the Lists rows (`template.row_template_army.lua:65-71`) give generals their portrait card and
-    // colonels their unit's picture. PLACEHOLDER: a general or admiral with no portrait in the
-    // model (pool hires, promoted generals; BACKLOG §0 "portraits of generated characters") keeps his unit card.
+    // colonels their unit's picture (generated generals and admirals have their portraits from the
+    // model, `ntw_sim::campaign::portraits`).
     let force = m.force_of(c).and_then(|f| m.world.forces.get(&f));
     let commanded = force.filter(|f| f.commander == Some(c) && !f.units.is_empty());
-    let show_as_character = commanded.is_none()
-        || (matches!(ch.kind, CharacterKind::General | CharacterKind::Admiral) && portrait_card(&m, c).is_some());
+    let show_as_character = commanded.is_none() || matches!(ch.kind, CharacterKind::General | CharacterKind::Admiral);
     t.set("ShowAsCharacter", show_as_character)?;
     if let Some(f) = &force {
         t.set("Soldiers", f.units.iter().map(|u| u.men).sum::<u32>())?;

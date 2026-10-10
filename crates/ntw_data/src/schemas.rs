@@ -45,7 +45,9 @@ db_record! {
         unknown_3c: i32,
         /// #8 @0x40 M: upkeep.
         upkeep: i32,
-        /// #9 @0x44: UNKNOWN (23..55).
+        /// #9 @0x44: the path cost a unit recruited through a commander covers per turn on its way to him
+        /// (`UNIT_RECORD` +0x40, CONFIRMED by `0x00E91388` and its reader `0x00B41F60`; 23..55;
+        /// `ntw_sim::campaign::UnitRules::travel_speed`).
         unknown_44: i32,
         /// #10 @0x48 L: unit card group / commander type.
         unit_card_group: Option<String>,

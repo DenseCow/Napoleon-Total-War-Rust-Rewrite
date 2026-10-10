@@ -61,6 +61,7 @@ pub mod features;
 pub mod header_map;
 pub mod names;
 pub mod own_save;
+pub mod portraits;
 mod details;
 mod error;
 mod fields;
@@ -389,11 +390,13 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
     // SAVE_COMPAT.md §3).
     loaded.world.next_id = first_free_id(root);
     world::assign_missing_recruitment_ids(&mut loaded.world);
+    world::drop_dangling_recruitment_targets(&mut loaded.world, &mut check.warnings);
     world::link_recruitment_sources(&mut loaded.world, loaded.recruitment_sources);
 
     let campaign_key = str_at(setup, 0, &setup_path)?.to_string();
     let mut model = CampaignModel::new(calendar, CaRng::new(seed), loaded.world);
     model.force_caps = read_force_caps(model_rec, &mut check.warnings);
+    model.deal_inflation = read_deal_inflation(model_rec);
     attach_rules(&mut model, db, &campaign_key);
     // Movement maximums include the commanders' force factor (CAMPAIGN_FIDELITY.md §Action points).
     model.refresh_movement_maximums();
@@ -408,6 +411,9 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
     // The campaign AI's manager / personality keys and region base values (AI_RESEARCH.md §2.3, §4).
     ai_keys::fill(root, &mut model);
     names::fill_allocators(root, &mut model);
+    // The portrait allocator; reading it advances the campaign RNG once per deck, as the
+    // original's loader does (CHARACTERS_FIDELITY.md §14).
+    portraits::fill(root, &mut model);
     // The historical characters already made and the two episodic force-success switches
     // (CHARACTERS_FIDELITY.md §7, §8).
     (model.world.historical_created, model.world.force_success_for_human) = details::model_extras(model_rec);
@@ -453,6 +459,24 @@ fn read_force_caps(model_rec: &EsfRecord, warnings: &mut Vec<LoadWarning>) -> nt
         (true, Some(army), Some(navy)) => ntw_sim::campaign::rules::ForceCaps { army, navy },
         _ => {
             warnings.push(LoadWarning::MissingForceCaps);
+            Default::default()
+        }
+    }
+}
+
+/// `CAMPAIGN_MODEL` #21 u32 / #22 f32, the deal inflation's first net and factor (campaign
+/// `+0x1010` / `+0x1014`, read by `0x00873B60` when the record version is above 4; CONFIRMED
+/// positions, AI_RESEARCH.md §4 "Inflation in the save"). A record without them (not laid out as
+/// the layout puts them) gives the constructors' 0 / 1.0, as the exe's loader leaves them.
+fn read_deal_inflation(model_rec: &EsfRecord) -> ntw_sim::campaign::deal_value::DealInflation {
+    let laid_out = model_rec.get(OSMOSIS_CULTURES_AT).and_then(EsfNode::as_record_array).is_some_and(|a| a.name == "OSMOSIS_CULTURES");
+    match (laid_out, model_rec.get_u32(OSMOSIS_CULTURES_AT + 1), model_rec.get(OSMOSIS_CULTURES_AT + 2)) {
+        (true, Some(first), Some(EsfNode::F32(factor))) => ntw_sim::campaign::deal_value::DealInflation { first, factor: *factor },
+        _ => {
+            static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                log::warn!("load: CAMPAIGN_MODEL #21 / #22 (deal inflation) not found where the layout puts them; using 0 / 1.0 (logged once)");
+            }
             Default::default()
         }
     }

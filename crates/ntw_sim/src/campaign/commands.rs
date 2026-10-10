@@ -226,6 +226,10 @@ pub enum CampaignCommand {
         region: RegionId,
         /// Unit key (FK to `units`).
         unit_key: String,
+        /// The commander the unit is recruited through (his recruitment panel,
+        /// [`CampaignModel::commander_recruitment`]), kept on the item (item +0x18: the `CCQ` command's third
+        /// value, `0x00936B90` → `0x00B58DD0`, CONFIRMED). `None` from a settlement's own panel and the AI.
+        target: Option<CharacterId>,
     },
     /// Remove an item from a region's recruitment queue and refund it.
     CancelRecruitment {
@@ -449,7 +453,8 @@ pub enum CommandError {
     Unsupported(&'static str),
     /// A deal command with no negotiation open.
     NoNegotiation,
-    /// The deal is refused (`CampaignModel::ai_refuses_deal`, PLACEHOLDER for the AI evaluation).
+    /// The deal is refused (`CampaignModel::ai_refuses_deal`: the AI evaluation for technologies, the
+    /// PLACEHOLDER rule for a deal with regions).
     DealRefused,
     /// A technology key the `technologies` table does not have.
     UnknownTechnology(String),
@@ -663,7 +668,7 @@ impl CampaignModel {
             CampaignCommand::DismissMinister { minister } => self.dismiss_minister(minister),
             CampaignCommand::AppointMinister { a, b } => self.appoint_minister(a, b),
             CampaignCommand::SetTaxLevel { faction, class, level } => self.set_tax_level(faction, class, level),
-            CampaignCommand::Recruit { region, unit_key } => self.recruit(region, unit_key),
+            CampaignCommand::Recruit { region, unit_key, target } => self.recruit(region, unit_key, target),
             CampaignCommand::CancelRecruitment { region, item } => self.cancel_recruitment(region, item),
             CampaignCommand::ConstructBuilding { region, slot, level_key } => self.construct(region, slot, level_key),
             CampaignCommand::CancelConstruction { region, slot } => self.cancel_construction(region, slot),
@@ -1244,7 +1249,7 @@ impl CampaignModel {
         UnitTypeCounts { counts, population: super::population::RecruitmentPopulation::of(&self.rules) }
     }
 
-    fn recruit(&mut self, region: RegionId, unit_key: String) -> Result<Vec<CampaignEvent>, CommandError> {
+    fn recruit(&mut self, region: RegionId, unit_key: String, target: Option<CharacterId>) -> Result<Vec<CampaignEvent>, CommandError> {
         if unit_key.is_empty() {
             return Err(CommandError::EmptyUnitKey);
         }
@@ -1288,6 +1293,7 @@ impl CampaignModel {
             unit_key,
             turns_remaining: unit.turns.max(1),
             cost,
+            target,
         });
         Ok(vec![CampaignEvent::RecruitmentItemIssuedByPlayer { region }])
     }

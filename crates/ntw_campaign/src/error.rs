@@ -168,6 +168,16 @@ pub enum LoadWarning {
         /// Raw commander id.
         commander: i32,
     },
+    /// A recruitment queue item whose target (#2, the commander it was recruited through) is not a
+    /// loaded character. The item is kept as a settlement recruit.
+    DanglingRecruitmentTarget {
+        /// The region key.
+        region: String,
+        /// The queued unit key.
+        unit: String,
+        /// The raw target id.
+        target: i32,
+    },
     /// A recruitment queue item whose #0 is missing, not an integer, or 0 (never a real id). The
     /// item is kept with a new id (`World::alloc_id`), so the queue and the save keep it.
     RecruitmentItemWithoutId {
@@ -266,6 +276,9 @@ impl fmt::Display for LoadWarning {
                 )
             }
             Self::DuplicateId { kind, id } => write!(f, "duplicate {kind} id {id} (skipped)"),
+            Self::DanglingRecruitmentTarget { region, unit, target } => {
+                write!(f, "region {region}: recruitment item {unit:?} targets {target}, not a loaded character (kept without a target)")
+            }
             Self::RecruitmentItemWithoutId { region, unit } => {
                 write!(f, "region {region}: recruitment item {unit:?} has no usable id: missing, not an integer, or 0 (kept with a new id)")
             }

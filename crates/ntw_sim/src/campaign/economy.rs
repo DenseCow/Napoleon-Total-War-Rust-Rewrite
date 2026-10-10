@@ -237,14 +237,19 @@ pub fn faction_upkeep(model: &CampaignModel, faction: FactionId) -> i32 {
 
 /// [`faction_upkeep`] with the effects already computed.
 pub fn faction_upkeep_with(model: &CampaignModel, fx: &Effects, faction: FactionId) -> i32 {
-    model
-        .world
-        .forces
-        .values()
-        .filter(|f| f.faction == faction)
-        .flat_map(|f| &f.units)
-        .map(|u| model.rules.units.get(&u.unit_key).map_or(0, |r| unit_upkeep(fx, faction, &model.rules.features, &u.unit_key, r)))
-        .sum()
+    let (land, naval) = faction_upkeep_split_with(model, fx, faction);
+    land + naval
+}
+
+/// [`faction_upkeep_with`] split by force kind into (land, naval): the economics categories 19
+/// and 20 the round end writes (`0x008E1030`: land / naval totals of `0x008B2150`, CONFIRMED).
+pub fn faction_upkeep_split_with(model: &CampaignModel, fx: &Effects, faction: FactionId) -> (i32, i32) {
+    let (mut land, mut naval) = (0i32, 0i32);
+    for f in model.world.forces.values().filter(|f| f.faction == faction) {
+        let sum: i32 = f.units.iter().map(|u| model.rules.units.get(&u.unit_key).map_or(0, |r| unit_upkeep(fx, faction, &model.rules.features, &u.unit_key, r))).sum();
+        if f.is_navy { naval += sum } else { land += sum }
+    }
+    (land, naval)
 }
 
 
@@ -649,9 +654,21 @@ pub fn settle_round(model: &mut CampaignModel, faction: FactionId) -> Settlement
     let income = faction_income_with(model, &fx, faction);
     let revenue = income.revenue();
     // The turn's record goes to the history (0x00BABE30); its categories 5..11 are the ranking's
-    // Wealth (`0x00BBCC40`). PROVISIONAL: the model's revenue holds categories 5 (taxes), 7 (trade)
-    // and 11 (other); 6 and 8..10 are not modelled.
-    model.world.last_income.insert(faction, revenue);
+    // Wealth (`0x00BBCC40`). PROVISIONAL: the model's record holds categories 5 (taxes), 7 (trade),
+    // 11 (other), 19 / 20 (land / naval upkeep); 6, 8..10, 18, 21..24 and the one-off groups are
+    // not modelled (0).
+    let (land_upkeep, naval_upkeep) = faction_upkeep_split_with(model, &fx, faction);
+    let mut record = [0i32; 25];
+    record[5] = income.taxes;
+    record[7] = income.trade;
+    record[11] = income.other;
+    record[19] = land_upkeep;
+    record[20] = naval_upkeep;
+    let history = model.world.economy_history.entry(faction).or_default();
+    history.push(record);
+    if history.len() > super::world::ECONOMY_HISTORY_LEN {
+        history.remove(0);
+    }
     let mut result = Settlement::Paid;
     if let Some(f) = model.world.factions.get_mut(&faction) {
         if i64::from(f.treasury) + i64::from(revenue) < i64::from(income.upkeep) {

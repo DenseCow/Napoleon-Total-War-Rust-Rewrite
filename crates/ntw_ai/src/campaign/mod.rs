@@ -165,7 +165,7 @@ impl AiOrder {
     /// arrival); the model walks as far as the commander's action points reach.
     pub fn to_campaign_command(&self) -> Option<CampaignCommand> {
         Some(match self {
-            AiOrder::Recruit { region, unit_key } => CampaignCommand::Recruit { region: *region, unit_key: unit_key.clone() },
+            AiOrder::Recruit { region, unit_key } => CampaignCommand::Recruit { region: *region, unit_key: unit_key.clone(), target: None },
             AiOrder::Construct { region, slot, level_key } => {
                 CampaignCommand::ConstructBuilding { region: *region, slot: *slot, level_key: level_key.clone() }
             }

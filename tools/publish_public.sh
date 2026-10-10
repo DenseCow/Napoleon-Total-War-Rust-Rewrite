@@ -22,8 +22,8 @@ cd "$(git rev-parse --show-toplevel)"
 # The user's own session setup stays private: the launcher, day/night usage budget, its hooks and
 # status line, the sandbox watchdog and the sandbox agent briefs. Testing and Ghidra tools are kept.
 PRIVATE_ONLY=(
-  start-claude.bat tools/start-claude.ps1 tools/usage_budget.ps1 tools/usage_sim.ps1
-  tools/sandbox_watchdog.ps1 tools/guard_main_push.sh tools/claims_hook.sh .claude/settings.json .opencode
+  start-claude.bat claude-night-session.bat tools/start-claude.ps1 tools/usage_budget.ps1 tools/usage_sim.ps1
+  tools/sandbox_watchdog.ps1 tools/guard_main_push.sh tools/claims_hook.sh tools/session_resume.sh .claude/settings.json .opencode
 )
 # Paths that run code or steer agents on the maintainer's machine: an import that touches them
 # needs a line-by-line review before it merges.

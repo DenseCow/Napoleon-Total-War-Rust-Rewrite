@@ -1785,10 +1785,10 @@ fn character_cards_show_the_main_attribute_and_its_rank() {
 #[test]
 fn finished_queue_items_leave_the_address_store() {
     let hud = test_hud();
-    let item = |id: i32| ntw_sim::campaign::RecruitmentItem { id: RecruitmentItemId(id), unit_key: "x".into(), turns_remaining: 1, cost: 0 };
+    let item = |id: i32| ntw_sim::campaign::RecruitmentItem { id: RecruitmentItemId(id), unit_key: "x".into(), turns_remaining: 1, cost: 0, target: None };
     hud._scripts.state_mut().model.world.regions.get_mut(&REGION).unwrap().recruitment_queue = vec![item(500), item(501)];
     let ui = hud.host.campaign_ui().unwrap();
-    let build = || recruitment_info(hud.host.lua(), hud.host.inner(), &ui, REGION, false).unwrap();
+    let build = || recruitment_info(hud.host.lua(), hud.host.inner(), &ui, REGION).unwrap();
     let held = |id: i32| ui.addresses.borrow().get(&(TAG_QUEUE_ITEM, id)).cloned();
     build();
     let kept = held(501).expect("shown, so interned");

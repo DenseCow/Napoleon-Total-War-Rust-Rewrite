@@ -262,6 +262,33 @@ fn tax_efficiency_matches_the_original() {
     assert_eq!(economy::class_taxes(0.26, 1460, 900), 614);
 }
 
+/// Each round end adds the turn's record to the economics history (`0x00BABE30`, also when the
+/// faction cannot pay), at most 10 kept; the world's net sums the factions' last income minus
+/// expenses, without the rebel faction (`0x0096D2E0`).
+#[test]
+fn the_round_end_records_the_economy_history() {
+    let mut m = test_model();
+    let income = economy::faction_income(&m, A);
+    for _ in 0..12 {
+        economy::settle_round(&mut m, A);
+    }
+    let history = &m.world.economy_history[&A];
+    assert_eq!(history.len(), super::world::ECONOMY_HISTORY_LEN);
+    let last = history.last().unwrap();
+    assert_eq!((last[5], last[7], last[11]), (income.taxes, income.trade, income.other));
+    assert_eq!(last[19] + last[20], income.upkeep);
+    assert_eq!(m.world.last_income(A), income.revenue());
+    assert_eq!(m.world.last_expenses(A), income.upkeep);
+    // Only A has a history: the world's net is A's.
+    assert_eq!(m.world_net_income(), income.revenue() - income.upkeep);
+    // A rebel faction's record does not count.
+    let rebel = m.world.factions.keys().copied().find(|&f| m.is_rebel_faction(f));
+    if let Some(r) = rebel {
+        m.world.economy_history.insert(r, vec![[1000; 25]]);
+        assert_eq!(m.world_net_income(), income.revenue() - income.upkeep);
+    }
+}
+
 #[test]
 fn exemption_town_wealth_and_bankruptcy() {
     let mut m = test_model();
@@ -460,17 +487,17 @@ fn command_validation_errors_leave_model_unchanged() {
             CommandError::UnknownTaxLevel("tax_silly".into()),
         ),
         (
-            CampaignCommand::Recruit { region: RegionId(99), unit_key: "test_unit".into() },
+            CampaignCommand::Recruit { region: RegionId(99), unit_key: "test_unit".into(), target: None },
             CommandError::UnknownRegion(RegionId(99)),
         ),
-        (CampaignCommand::Recruit { region: RegionId(10), unit_key: String::new() }, CommandError::EmptyUnitKey),
+        (CampaignCommand::Recruit { region: RegionId(10), unit_key: String::new(), target: None }, CommandError::EmptyUnitKey),
         (
-            CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_nope".into() },
+            CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_nope".into(), target: None },
             CommandError::UnknownUnit("test_nope".into()),
         ),
         // Region 12 has no building, so nothing can be recruited there.
         (
-            CampaignCommand::Recruit { region: RegionId(12), unit_key: "test_unit".into() },
+            CampaignCommand::Recruit { region: RegionId(12), unit_key: "test_unit".into(), target: None },
             CommandError::UnitNotAvailable("test_unit".into()),
         ),
         (CampaignCommand::MoveForce { force: ForceId(99), to: pos(1, 1) }, CommandError::UnknownForce(ForceId(99))),
@@ -507,7 +534,7 @@ fn command_validation_errors_leave_model_unchanged() {
     m.world.regions.get_mut(&RegionId(10)).unwrap().owner = C;
     let h = m.state_hash();
     assert_eq!(
-        m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_unit".into() }),
+        m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_unit".into(), target: None }),
         Err(CommandError::InsufficientFunds { needed: 400, available: 0 })
     );
     assert_eq!(m.state_hash(), h);
@@ -663,14 +690,14 @@ fn recruited_units_are_sized_by_num_men_or_the_crew_sum() {
 fn recruitment_completes_after_n_turns() {
     let mut m = test_model();
     // MADE-UP rules: campaign cost (#7) 400, 2 turns, 100 men; region 10 has 2 recruitment points.
-    let ev = m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into() }).unwrap();
+    let ev = m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into(), target: None }).unwrap();
     assert_eq!(ev, vec![CampaignEvent::RecruitmentItemIssuedByPlayer { region: RegionId(10) }]);
     assert_eq!(m.world.factions[&A].treasury, 600);
-    m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_unit".into() }).unwrap();
+    m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_unit".into(), target: None }).unwrap();
     assert_eq!(m.world.factions[&A].treasury, 200);
     m.world.factions.get_mut(&A).unwrap().treasury = 10_000;
     // A third item queues too (a queue holds 10, 0x00B62040); it would wait while both points train.
-    m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_unit".into() }).unwrap();
+    m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_unit".into(), target: None }).unwrap();
     assert_eq!(m.world.factions[&A].treasury, 9_600);
     m.apply(CampaignCommand::CancelRecruitment { region: RegionId(10), item: queued(&m, RegionId(10), 2) }).unwrap();
     // Cancelling refunds.
@@ -815,7 +842,7 @@ fn recruiting_charges_the_entry_cost_and_cancelling_refunds_it() {
     let before = m.world.factions[&A].treasury;
     let cost = (unit.campaign_cost as f32 * 0.92).round_ties_even() as i32;
     assert_eq!(economy::recruitment_cost(&m, &m.world.regions[&RegionId(10)], "test_recruit", &unit), cost);
-    m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into() }).unwrap();
+    m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into(), target: None }).unwrap();
     assert_eq!(m.world.factions[&A].treasury, before - cost);
     assert_eq!(m.world.regions[&RegionId(10)].recruitment_queue[0].cost, cost);
     m.apply(CampaignCommand::CancelRecruitment { region: RegionId(10), item: queued(&m, RegionId(10), 0) }).unwrap();
@@ -831,11 +858,11 @@ fn a_faction_in_debt_may_recruit() {
     let cost = m.rules.units["test_recruit"].campaign_cost;
     m.world.factions.get_mut(&A).unwrap().treasury = cost - 1;
     assert_eq!(
-        m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into() }),
+        m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into(), target: None }),
         Err(CommandError::InsufficientFunds { needed: cost, available: cost - 1 })
     );
     m.world.factions.get_mut(&A).unwrap().treasury = -5;
-    m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into() }).unwrap();
+    m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into(), target: None }).unwrap();
     assert_eq!(m.world.factions[&A].treasury, -5 - cost);
 }
 
@@ -849,16 +876,16 @@ fn a_region_without_recruitment_points_still_queues() {
     m.world.faction_details.entry(A).or_default().bonus_base = vec![SavedBonus { kind: 1, bonus: 32, value: -2.0, qualifier: String::new() }];
     assert_eq!(m.recruitment_points(RegionId(10), false), 0);
     m.world.factions.get_mut(&A).unwrap().treasury = 1_000_000;
-    m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into() }).unwrap();
+    m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into(), target: None }).unwrap();
     let turns = m.world.regions[&RegionId(10)].recruitment_queue[0].turns_remaining;
     m.turn.humans = vec![A];
     m.start_campaign();
     assert_eq!(m.world.regions[&RegionId(10)].recruitment_queue[0].turns_remaining, turns);
     while m.world.regions[&RegionId(10)].recruitment_queue.len() < super::commands::MAX_QUEUE as usize {
-        m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into() }).unwrap();
+        m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into(), target: None }).unwrap();
     }
     assert_eq!(
-        m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into() }),
+        m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into(), target: None }),
         Err(CommandError::NoRecruitmentCapacity)
     );
 }
@@ -883,8 +910,9 @@ fn the_unit_cap_counts_the_factions_units_and_queued_items() {
         unit_key: "test_recruit".into(),
         turns_remaining: 2,
         cost: 400,
+        target: None,
     });
-    let order = || CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into() };
+    let order = || CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into(), target: None };
     // 1 held + 0 and then 1 queued are below 3; at 1 + 2 the entry is flagged.
     m.apply(order()).unwrap();
     m.apply(order()).unwrap();
@@ -928,7 +956,7 @@ fn recruiting_takes_population_and_cancelling_gives_it_back() {
     use super::commands::ENTRY_NO_POPULATION;
     let mut m = test_model();
     let r10 = RegionId(10);
-    let order = || CampaignCommand::Recruit { region: r10, unit_key: "test_recruit".into() };
+    let order = || CampaignCommand::Recruit { region: r10, unit_key: "test_recruit".into(), target: None };
     let pop = |m: &CampaignModel| m.world.regions[&r10].population;
     m.world.factions.get_mut(&A).unwrap().treasury = 1_000_000;
     m.world.regions.get_mut(&r10).unwrap().population = 5;
@@ -958,7 +986,7 @@ fn recruiting_takes_population_and_cancelling_gives_it_back() {
 
     // So does the turn start's removal of an item the region can no longer recruit, per item.
     for id in [9001, 9002] {
-        let item = RecruitmentItem { id: RecruitmentItemId(id), unit_key: "gone_unit".into(), turns_remaining: 5, cost: 0 };
+        let item = RecruitmentItem { id: RecruitmentItemId(id), unit_key: "gone_unit".into(), turns_remaining: 5, cost: 0, target: None };
         m.world.regions.get_mut(&r10).unwrap().recruitment_queue.push(item);
     }
     assert!(!m.recruitable_units(r10).iter().any(|e| e.unit_key == "gone_unit"));
@@ -981,7 +1009,7 @@ fn model_with_queued_items() -> CampaignModel {
     m.rules = Arc::new(rules);
     let r = m.world.regions.get_mut(&RegionId(10)).unwrap();
     for (id, unit_key, cost) in [(9001, "test_unit", 300), (9002, "test_ship", 70), (9003, "test_unit", 500), (9004, "test_ship", 110)] {
-        r.recruitment_queue.push(RecruitmentItem { id: RecruitmentItemId(id), unit_key: unit_key.into(), turns_remaining: 2, cost });
+        r.recruitment_queue.push(RecruitmentItem { id: RecruitmentItemId(id), unit_key: unit_key.into(), turns_remaining: 2, cost, target: None });
     }
     r.construction.push(ConstructionItem { slot: SlotRef::Slot(0), level_key: "test_building_level".into(), turns_remaining: 2, cost: 600 });
     m
@@ -1055,7 +1083,7 @@ fn a_population_charged_below_zero_keeps_the_exes_bits() {
     use super::commands::ENTRY_NO_POPULATION;
     let mut m = test_model();
     let r10 = RegionId(10);
-    let order = || CampaignCommand::Recruit { region: r10, unit_key: "test_recruit".into() };
+    let order = || CampaignCommand::Recruit { region: r10, unit_key: "test_recruit".into(), target: None };
     let mut rules = (*m.rules).clone();
     rules.variables.insert("recruitment_population_cost".into(), 300.0);
     rules.variables.insert("minimum_population_after_recruitment".into(), -1000.0);
@@ -1331,7 +1359,7 @@ fn play(m: &mut CampaignModel, turns: u32) {
     for t in 0..turns {
         let cur = m.turn.current.unwrap();
         if cur == A && t % 7 == 0 {
-            let _ = m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_unit".into() });
+            let _ = m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_unit".into(), target: None });
         }
         if cur == A && t % 5 == 0 {
             let _ = m.apply(CampaignCommand::DeclareWar { a: A, b: B });
@@ -2461,10 +2489,10 @@ fn only_the_first_recruitment_points_items_train_and_a_queue_holds_ten() {
     m.world.factions.get_mut(&A).unwrap().treasury = 100_000;
     // Region 10 has 2 recruitment points: queue 10 items, the 11th is refused.
     for _ in 0..10 {
-        m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_unit".into() }).unwrap();
+        m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_unit".into(), target: None }).unwrap();
     }
     assert_eq!(
-        m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_unit".into() }),
+        m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_unit".into(), target: None }),
         Err(CommandError::NoRecruitmentCapacity)
     );
     m.turn.humans = vec![A];
@@ -2651,7 +2679,7 @@ fn foreign_gentlemen_steal_or_are_thrown_out() {
 #[test]
 fn queued_units_the_region_can_no_longer_recruit_are_dropped_and_refunded() {
     let mut m = test_model();
-    m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_unit".into() }).unwrap();
+    m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_unit".into(), target: None }).unwrap();
     let after = m.world.factions[&A].treasury;
     // The building that allows the unit is gone: at the region update the item is removed, refunded.
     m.world.regions.get_mut(&RegionId(10)).unwrap().slots[0].building = None;
@@ -2709,7 +2737,7 @@ fn the_recruitable_list_flags_damaged_and_occupied_buildings_and_missing_technol
     assert_eq!(m.recruitable_units(r10)[1], entry("test_recruit", ENTRY_NO_TECHNOLOGY));
     let treasury = m.world.factions[&A].treasury;
     assert_eq!(
-        m.apply(CampaignCommand::Recruit { region: r10, unit_key: "test_recruit".into() }),
+        m.apply(CampaignCommand::Recruit { region: r10, unit_key: "test_recruit".into(), target: None }),
         Err(CommandError::RecruitmentBlocked { unit_key: "test_recruit".into(), flags: ENTRY_NO_TECHNOLOGY })
     );
     assert_eq!((m.world.factions[&A].treasury, m.world.regions[&r10].recruitment_queue.len()), (treasury, 0));
@@ -2733,7 +2761,7 @@ fn a_unit_enabled_for_other_governments_is_not_recruitable() {
     m.world.factions.get_mut(&A).unwrap().government_key = "gov_absolute_monarchy".into();
     assert!(!listed(&m));
     assert_eq!(
-        m.apply(CampaignCommand::Recruit { region: r10, unit_key: "test_guard".into() }),
+        m.apply(CampaignCommand::Recruit { region: r10, unit_key: "test_guard".into(), target: None }),
         Err(CommandError::UnitNotAvailable("test_guard".into()))
     );
     m.world.factions.get_mut(&A).unwrap().government_key = "gov_republic".into();
@@ -2755,7 +2783,7 @@ fn a_flagged_item_is_held_back_without_taking_a_recruitment_point() {
     let r10 = RegionId(10);
     // Two points (the barracks); the guard first, then two recruits.
     for (id, unit) in [(9001, "test_guard"), (9002, "test_recruit"), (9003, "test_recruit")] {
-        let item = RecruitmentItem { id: RecruitmentItemId(id), unit_key: unit.into(), turns_remaining: 3, cost: 400 };
+        let item = RecruitmentItem { id: RecruitmentItemId(id), unit_key: unit.into(), turns_remaining: 3, cost: 400, target: None };
         m.world.regions.get_mut(&r10).unwrap().recruitment_queue.push(item);
     }
     assert_eq!(m.recruitment_points(r10, false), 2);
@@ -3206,7 +3234,7 @@ fn recruitment_cancels_name_their_item() {
     let mut m = test_model();
     m.world.factions.get_mut(&A).unwrap().treasury = 10_000;
     for _ in 0..3 {
-        m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_unit".into() }).unwrap();
+        m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_unit".into(), target: None }).unwrap();
     }
     let ids: Vec<RecruitmentItemId> = m.world.regions[&RegionId(10)].recruitment_queue.iter().map(|i| i.id).collect();
     assert!(ids[0] != ids[1] && ids[1] != ids[2] && ids[0] != ids[2], "{ids:?}");
@@ -3602,9 +3630,9 @@ fn a_due_historical_character_is_offered_before_a_generic_one() {
     let mut rules = (*m.rules).clone();
     // Two rows for A's generals: one due in 1805, one not yet; one for B.
     rules.historical = vec![
-        HistoricalCandidate { key: "eur_due".into(), male: true, kind: "General".into(), faction: "test_faction_a".into(), years: (1800, 1810) },
-        HistoricalCandidate { key: "eur_later".into(), male: true, kind: "General".into(), faction: "test_faction_a".into(), years: (1808, 1812) },
-        HistoricalCandidate { key: "eur_other".into(), male: true, kind: "General".into(), faction: "test_faction_b".into(), years: (1800, 1810) },
+        HistoricalCandidate { key: "eur_due".into(), male: true, kind: "General".into(), faction: "test_faction_a".into(), years: (1800, 1810), note: String::new() },
+        HistoricalCandidate { key: "eur_later".into(), male: true, kind: "General".into(), faction: "test_faction_a".into(), years: (1808, 1812), note: String::new() },
+        HistoricalCandidate { key: "eur_other".into(), male: true, kind: "General".into(), faction: "test_faction_b".into(), years: (1800, 1810), note: String::new() },
     ];
     m.rules = Arc::new(rules);
     assert_eq!(m.due_historical(A, PoolKind::General), vec![0]);
@@ -3683,11 +3711,25 @@ fn an_admiral_is_hired_onto_a_fleet_and_its_captain_goes() {
 #[test]
 fn promotion_in_the_field_makes_the_colonel_a_general_and_fires_character_promoted() {
     use super::effects::SavedBonus;
+    use super::portraits::{CulturePortraits, PortraitCategory, PortraitDeck};
     let mut m = test_model();
     m.world.faction_details.entry(A).or_default().capital = Some(RegionId(10));
+    // Portraits (CHARACTERS_FIDELITY.md §14): A's culture has General decks, none for colonels.
+    {
+        let rules = Arc::make_mut(&mut m.rules);
+        rules.characters.faction_subculture.insert("test_faction_a".into(), "sc".into());
+        rules.characters.subculture_culture.insert("sc".into(), "european".into());
+        rules.agent_portrait_folders.insert("admiral".into(), "General".into());
+    }
+    let deck = |order: Vec<u32>| PortraitDeck { count: order.len() as u32, cursor: 0, order, seed: 1 };
+    let paths = ["General", "admiral", "colonel", "captain"].map(|a| (a.to_string(), "european".to_string())).to_vec();
+    let general = PortraitCategory { key: "General".into(), decks: vec![deck(vec![4, 3]), deck(vec![7]), deck(vec![0, 1]), deck(vec![0])] };
+    m.world.portraits = vec![CulturePortraits { culture: "european".into(), paths, categories: vec![general] }];
+    let born = |age: i32, m: &CampaignModel| super::details::CharacterDetails { birth: Some(Date { year: (m.calendar.date.year as i32 - age) as u32, ..m.calendar.date }), ..Default::default() };
     let mut col = character(107, A, CharacterKind::Colonel, 25);
     col.position = pos(50, 0);
     m.world.characters.insert(CharacterId(107), col);
+    m.world.character_details.insert(CharacterId(107), born(30, &m));
     let mut u = unit(7);
     u.character = Some(CharacterId(107));
     m.world.forces.insert(ForceId(1002), MilitaryForce { id: ForceId(1002), faction: A, commander: Some(CharacterId(107)), units: vec![u, unit(9)], is_navy: false });
@@ -3698,17 +3740,25 @@ fn promotion_in_the_field_makes_the_colonel_a_general_and_fires_character_promot
     m.world.faction_details.get_mut(&A).unwrap().bonus_base = vec![SavedBonus { kind: 1, bonus: 64, value: 1.0, qualifier: String::new() }];
     // `bonus_with_difficulty` (faction +0x8D4) wins over `bonus_base` when it is not empty.
     m.world.faction_details.get_mut(&A).unwrap().bonus_with_difficulty = Vec::new();
+    // The next number of a European General deck (0 young, 1 old): the turn start's pool
+    // candidate has already drawn from the young one.
+    let next = |m: &CampaignModel, deck: usize| m.world.portraits[0].categories[0].decks[deck].clone().draw().unwrap();
+    let young = next(&m, 0);
     let before = m.world.factions[&A].treasury;
     let ev = m.apply(CampaignCommand::PromoteUnit { force: ForceId(1002), unit: 0 }).unwrap();
     assert_eq!(ev, vec![CampaignEvent::CharacterPromoted { character: CharacterId(107) }]);
     assert_eq!(m.world.characters[&CharacterId(107)].kind, CharacterKind::General);
     assert_eq!(m.world.forces[&ForceId(1002)].commander, Some(CharacterId(107)));
     assert!(m.world.factions[&A].treasury < before);
+    // The colonel had no portrait; as a General (30) he draws the next young number.
+    let p = &m.world.character_details[&CharacterId(107)].portrait;
+    assert_eq!((p.index, p.card.clone()), (young as i32, format!("ui/portraits/european/Cards/general/young/{young:03}.tga")));
     // Once: the force has a General now.
     assert!(!m.can_promote_unit(ForceId(1002), 1));
     assert!(m.apply(CampaignCommand::PromoteUnit { force: ForceId(1002), unit: 1 }).is_err());
     // A naval promotion is free (INFERRED from the static trace; the probe settles it: the naval class's slot +0x44 is a return-0 stub).
     m.world.characters.insert(CharacterId(109), character(109, A, CharacterKind::Captain, 25));
+    m.world.character_details.insert(CharacterId(109), born(50, &m));
     let mut ship = unit(11);
     ship.character = Some(CharacterId(109));
     m.world.forces.insert(ForceId(1005), MilitaryForce { id: ForceId(1005), faction: A, commander: Some(CharacterId(109)), units: vec![ship], is_navy: true });
@@ -3716,16 +3766,21 @@ fn promotion_in_the_field_makes_the_colonel_a_general_and_fires_character_promot
         vec![SavedBonus { kind: 1, bonus: 64, value: 1.0, qualifier: String::new() }, SavedBonus { kind: 1, bonus: 65, value: 1.0, qualifier: String::new() }];
     m.world.faction_details.get_mut(&A).unwrap().bonus_with_difficulty = Vec::new();
     assert_eq!(m.promotion_cost(ForceId(1005), 0), Some(0));
+    let old = next(&m, 1);
     let before = m.world.factions[&A].treasury;
     let ev = m.apply(CampaignCommand::PromoteUnit { force: ForceId(1005), unit: 0 }).unwrap();
     assert!(matches!(ev[0], CampaignEvent::CharacterPromoted { character: CharacterId(109) }));
     assert_eq!(m.world.characters[&CharacterId(109)].kind, CharacterKind::Admiral);
     assert_eq!(m.world.factions[&A].treasury, before, "a naval promotion is free");
+    // An admiral (50) draws from the General old deck (agents #6 of admiral is `General`).
+    let p = &m.world.character_details[&CharacterId(109)].portrait;
+    assert_eq!((p.index, p.card.as_str()), (old as i32, "ui/portraits/european/Cards/general/old/007.tga"));
     // A unit without a character gets a new General made for it.
     let mut u2 = unit(10);
     u2.character = None;
     m.world.forces.insert(ForceId(1004), MilitaryForce { id: ForceId(1004), faction: A, commander: Some(CharacterId(100)), units: vec![u2], is_navy: false });
     m.world.characters.get_mut(&CharacterId(100)).unwrap().kind = CharacterKind::Colonel;
+    let young = next(&m, 0);
     let ev = m.apply(CampaignCommand::PromoteUnit { force: ForceId(1004), unit: 0 }).unwrap();
     let new = match ev[0] {
         CampaignEvent::CharacterPromoted { character } => character,
@@ -3734,6 +3789,11 @@ fn promotion_in_the_field_makes_the_colonel_a_general_and_fires_character_promot
     assert_eq!(m.world.characters[&new].kind, CharacterKind::General);
     assert_eq!(m.world.forces[&ForceId(1004)].units[0].character, Some(new));
     assert_eq!(m.world.forces[&ForceId(1004)].commander, Some(new));
+    // The new officer is 21..40 (`0x00990EF0` draws his age) and draws the next young number.
+    let d = &m.world.character_details[&new];
+    let age = m.calendar.date.year as i32 - d.birth.expect("a birth date").year as i32;
+    assert!((21..=40).contains(&age), "age {age}");
+    assert_eq!((d.portrait.index, d.portrait.info.clone()), (young as i32, format!("ui/portraits/european/Info/general/young/{young:03}.jpg")));
 }
 
 #[test]
@@ -4475,6 +4535,7 @@ fn accepted_regions_change_hands_and_keep_the_old_garrison() {
         unit_key: "u".into(),
         turns_remaining: 2,
         cost: 0,
+        target: None,
     });
     m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
     m.apply(CampaignCommand::ProposeRegions { clear: false, demanded: vec![RegionId(11)], offered: vec![RegionId(12)] }).unwrap();
@@ -4538,8 +4599,121 @@ fn accepted_technologies_are_granted_and_counted() {
     assert!(!m.grant_technology(C, "admin1_a"));
 }
 
-/// PLACEHOLDER for the AI's deal evaluation (`0x00C49BE0` → `0x00AA5ED0`, §6): an AI side refuses
-/// a deal in which it gives a region or a technology; what it is offered it accepts.
+/// The technology record's value for the AI recipient (`0x00C13360` → `0x00A36B20`): each item
+/// from the model's costs, holders and the proposer's traded counts, summed, × trunc(inflation).
+#[test]
+fn technology_deal_value_reads_the_model() {
+    use super::deal_value::{technology_value, DealEvaluation};
+    use super::research::state;
+    use super::rules::TechRules;
+    let mut m = test_model();
+    m.turn.humans = vec![A];
+    let mut rules = (*m.rules).clone();
+    rules.technologies.insert("admin1_a".into(), TechRules { cost: 25, building_level: "test_building_level".into(), requires: vec![] });
+    rules.technologies.insert("mil1".into(), TechRules { cost: 40, building_level: "test_building_level".into(), requires: vec![] });
+    m.rules = Arc::new(rules);
+    m.world.faction_details.entry(A).or_default().technologies = vec![("admin1_a".into(), state::RESEARCHED), ("mil1".into(), state::AVAILABLE)];
+    m.world.faction_details.entry(B).or_default().technologies = vec![("admin1_a".into(), state::AVAILABLE), ("mil1".into(), state::RESEARCHED)];
+    m.world.faction_details.entry(A).or_default().research.entry("admin1_a".into()).or_default().traded = 1;
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    m.apply(CampaignCommand::ProposeTechnologies { clear: false, demanded: vec!["mil1".into()], offered: vec!["admin1_a".into()] }).unwrap();
+    let n = m.negotiations.current.clone().unwrap();
+    // One holder each (doubled); the offered one divided by (1 + 1)²; inflation 2.5 counts as 2.
+    let v = m.technology_deal_value(&n, 2.5);
+    let gain = technology_value(25, 1, 1, true, true).gain;
+    let cost = technology_value(40, 1, 0, false, true).cost;
+    assert_eq!((gain, cost), ((500 + 344) * 2 / 4, (500 + 578) * 2));
+    assert_eq!((v.gain, v.cost, v.given), (gain * 2, cost * 2, cost * 2));
+    // A dear technology demanded for a cheap one: not fair.
+    let mut e = DealEvaluation::default();
+    e.add(5, v, 0.0, 1.0);
+    assert!(!e.fair());
+}
+
+/// The technology goals of the AI's two goal lists (`0x008F4F10`): the giver has it researched and
+/// the receiver has it in state 1, 2 or 3; the weight of one the AI gives follows its spread.
+#[test]
+fn technology_goals_follow_the_research_states() {
+    use super::research::state;
+    let mut m = test_model();
+    m.world.faction_details.entry(A).or_default().technologies =
+        vec![("t1".into(), state::RESEARCHED), ("t2".into(), state::RESEARCHED), ("t3".into(), state::AVAILABLE)];
+    m.world.faction_details.entry(B).or_default().technologies =
+        vec![("t1".into(), state::AVAILABLE), ("t2".into(), state::UNAVAILABLE), ("t3".into(), state::RESEARCHED)];
+    assert!(m.is_technology_goal("t1", A, B), "researched by the giver, available to the receiver");
+    assert!(!m.is_technology_goal("t2", A, B), "not yet available to the receiver (state 4)");
+    assert!(!m.is_technology_goal("t1", B, A), "the giver must have it researched");
+    assert!(m.is_technology_goal("t3", B, A));
+    // Fewer than 8 factions: t = 1, so any holder makes the spread 1 and the weight −0.5.
+    assert_eq!(m.given_technology_goal_weight("t1"), -0.5);
+    assert_eq!(m.given_technology_goal_weight("nobody_has_it"), -1.0);
+}
+
+/// The AI evaluates a deal of technologies as the exe's `0x00AA5ED0` (AI_RESEARCH.md §4): value,
+/// goal weights, `fair` / `good`, and the `diplomacy_options` refusal.
+#[test]
+fn the_ai_evaluates_technology_deals() {
+    use super::research::state;
+    use super::rules::TechRules;
+    let mut m = test_model();
+    m.turn.humans = vec![A];
+    let mut rules = (*m.rules).clone();
+    let tech = |cost| TechRules { cost, building_level: "test_building_level".into(), requires: vec![] };
+    rules.technologies.insert("admin1_a".into(), tech(1000));
+    rules.technologies.insert("military1_b".into(), tech(1000));
+    rules.technologies.insert("economy1_c".into(), tech(100));
+    m.rules = Arc::new(rules);
+    m.world.faction_details.entry(A).or_default().technologies =
+        vec![("admin1_a".into(), state::RESEARCHED), ("military1_b".into(), state::AVAILABLE), ("economy1_c".into(), state::RESEARCHED)];
+    m.world.faction_details.entry(B).or_default().technologies =
+        vec![("admin1_a".into(), state::AVAILABLE), ("military1_b".into(), state::RESEARCHED), ("economy1_c".into(), state::AVAILABLE)];
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    // Nothing proposed: nothing to answer.
+    assert_eq!(m.ai_accepts_technologies(), None);
+    // An even trade (both worth 20452 × 2, one holder each): the AI's need weight for the admin
+    // technology (≤ 0.5 × 500) and the spread weight of the one it gives (−0.5 × 500, one holder of
+    // two factions) leave it fair.
+    m.apply(CampaignCommand::ProposeTechnologies { clear: false, demanded: vec!["military1_b".into()], offered: vec!["admin1_a".into()] }).unwrap();
+    assert_eq!(m.ai_accepts_technologies(), Some(true));
+    assert!(!m.ai_refuses_deal());
+    // A cheap technology for a dear one: refused.
+    m.apply(CampaignCommand::ProposeTechnologies { clear: false, demanded: vec!["military1_b".into()], offered: vec!["economy1_c".into()] }).unwrap();
+    assert_eq!(m.ai_accepts_technologies(), Some(false));
+    assert!(m.ai_refuses_deal());
+    assert_eq!(m.apply(CampaignCommand::AcceptDeal), Err(CommandError::DealRefused));
+    // A gift is accepted.
+    m.apply(CampaignCommand::ProposeTechnologies { clear: false, demanded: vec![], offered: vec!["economy1_c".into()] }).unwrap();
+    assert_eq!(m.ai_accepts_technologies(), Some(true));
+    // The AI's diplomacy options forbid accepting technology deals from A (1 or 3): refused.
+    m.world.relationships.entry((B, A)).or_default().diplomacy_options[5] = 1;
+    assert_eq!(m.ai_accepts_technologies(), Some(false));
+    // A human recipient answers for itself.
+    m.world.relationships.entry((B, A)).or_default().diplomacy_options[5] = 0;
+    m.turn.humans = vec![A, B];
+    assert_eq!(m.ai_accepts_technologies(), None);
+}
+
+/// The research need from the model: enemies / allies, forts and forces (`0x00ABB340`).
+#[test]
+fn the_research_need_reads_the_model() {
+    let mut m = test_model();
+    // No history (16), no enemies or allies (M = 1, D = 1), p1 / p2 from B's forces.
+    let v = m.research_need(B);
+    let land = m.world.forces.values().filter(|f| f.faction == B && !f.is_navy && !f.units.is_empty()).count() as u32;
+    let naval = m.world.forces.values().filter(|f| f.faction == B && f.is_navy && !f.units.is_empty()).count() as u32;
+    let ports = m.world.regions.values().filter(|r| r.owner == B).map(|r| r.slots.iter().filter(|s| s.port).count() as u32).sum::<u32>();
+    let p1 = deal_value::need_power(land >> 2);
+    let p2 = deal_value::need_power((ports >> 1) + (naval >> 2));
+    assert_eq!(v, deal_value::research_need_values(1, 1, 16, p1, p2));
+    // At war with A: one enemy → M = 2.
+    m.world.set_stance(A, B, Stance::War).unwrap();
+    let v = m.research_need(B);
+    assert_eq!(v, deal_value::research_need_values(2, 1, 16, p1, p2));
+}
+
+/// The PLACEHOLDER rule for a deal with regions (the AI region value is not traced, AI_RESEARCH.md
+/// §4): an AI side refuses such a deal when it gives a region or a technology; what it is offered
+/// it accepts. Deals of technologies alone are evaluated (`the_ai_evaluates_technology_deals`).
 #[test]
 fn the_ai_refuses_to_give_regions_or_technologies() {
     let mut m = test_model();
@@ -4556,4 +4730,150 @@ fn the_ai_refuses_to_give_regions_or_technologies() {
     // Between two humans nothing is refused.
     m.turn.humans = vec![A, B];
     assert!(!m.ai_refuses_deal());
+}
+
+/// The world for the commander recruitment tests: A's general 100 (army 1000) stands at (20, 0); A owns
+/// region 10 (settlement at (10, 0), the fixture building: `test_unit` / `test_recruit`, 2 recruitment
+/// points) and a new region 13 at (13, 0) with the same building, so 13 is the nearer source. Without a
+/// map the path cost is the straight line at the off-road cost.
+fn commander_recruitment_model() -> CampaignModel {
+    let mut m = test_model();
+    let r = region(13, A, 1000, 1);
+    m.world.regions.insert(r.id, r);
+    m.world.characters.get_mut(&CharacterId(100)).unwrap().position = pos(20, 0);
+    m.world.factions.get_mut(&A).unwrap().treasury = 1_000_000;
+    m
+}
+
+fn option<'a>(r: &'a super::CommanderRecruitment, unit: &str) -> &'a super::CommanderOption {
+    r.options.iter().find(|o| o.unit_key == unit).unwrap_or_else(|| panic!("no {unit} option: {r:?}"))
+}
+
+/// `0x00B73030`: the wait for a training place, from the queue's turns left.
+#[test]
+fn the_queue_wait_counts_down_the_training_places() {
+    use super::commander_recruitment::queue_wait;
+    // Below capacity: no wait; at capacity: the shortest item.
+    assert_eq!(queue_wait(2, &[]), 0);
+    assert_eq!(queue_wait(2, &[5]), 0);
+    assert_eq!(queue_wait(2, &[5, 3]), 3);
+    // Above: the first two count down; after 2 turns the 2 leaves and the queue is at capacity (4 - 2, 1).
+    assert_eq!(queue_wait(2, &[4, 2, 1]), 2 + 1);
+    // Several leave at once and the queue drops below capacity.
+    assert_eq!(queue_wait(2, &[1, 1, 3]), 1);
+    // Only the first `capacity` items count down: the 9 behind does not until it is first.
+    assert_eq!(queue_wait(1, &[2, 9]), 2 + 9);
+}
+
+/// A commander's options (`0x00B72DF0`): each unit once, from the source with the shortest training plus
+/// march; the march is the path cost over `units` #9; a farther source only competes when it is the first
+/// (the search for the next ones is cut at the first one's path cost).
+#[test]
+fn a_commander_recruits_each_unit_from_its_quickest_source() {
+    let mut m = commander_recruitment_model();
+    let speed = m.rules.units["test_recruit"].travel_speed as f32;
+    let r = m.commander_recruitment(A, CharacterId(100));
+    assert_eq!(r.options.len(), 2, "{r:?}");
+    let o = option(&r, "test_recruit");
+    // Region 10 comes first (merge order: equal flags and cost, lower region); 13 is nearer and as quick.
+    assert_eq!(o.region, RegionId(13));
+    assert_eq!(o.training_turns, m.rules.units["test_recruit"].turns as i32);
+    assert!((o.travel_turns - 7.0 / speed).abs() < 1e-6, "{o:?}");
+    assert!(o.available());
+    // A busy queue in 13 (both places taken for 5 turns): 10's 2 + 10/30 turns beat 13's 5 + 2 + 7/30.
+    for id in [9100, 9101] {
+        m.world.regions.get_mut(&RegionId(13)).unwrap().recruitment_queue.push(RecruitmentItem {
+            id: RecruitmentItemId(id),
+            unit_key: "test_unit".into(),
+            turns_remaining: 5,
+            cost: 0,
+            target: None,
+        });
+    }
+    let r = m.commander_recruitment(A, CharacterId(100));
+    let o = option(&r, "test_recruit");
+    assert_eq!((o.region, o.training_turns), (RegionId(10), 2), "{o:?}");
+    assert!((o.travel_turns - 10.0 / speed).abs() < 1e-6, "{o:?}");
+}
+
+/// ORIGINAL BUG (`0x00B68FE0` over `0x00B61D50`): a source whose queue trains nothing (no recruitment
+/// points) has no training estimate (-1), which the exe takes as the shortest time, so its queue would get
+/// the item and never train it. Ours ranks it after every source that can train.
+#[test]
+fn a_source_without_recruitment_points_is_not_chosen() {
+    let mut m = commander_recruitment_model();
+    let mut rules = (*m.rules).clone();
+    rules.buildings.insert("test_no_points".into(), BuildingRules { chain: "test_chain_2".into(), units_allowed: vec!["test_recruit".into()], ..Default::default() });
+    m.rules = Arc::new(rules);
+    m.world.regions.get_mut(&RegionId(13)).unwrap().slots[0].building = Some(BuildingRef { level_key: "test_no_points".into(), health: 100 });
+    assert_eq!(m.recruitment_points(RegionId(13), false), 0);
+    let r = m.commander_recruitment(A, CharacterId(100));
+    let o = option(&r, "test_recruit");
+    assert_eq!((o.region, o.training_turns), (RegionId(10), 2), "{o:?}");
+}
+
+/// The commander's queue is the items queued for him (item +0x18, `0x00B26020`); ten of them refuse every
+/// option as queue-full (`0x00B1BBB0`), whatever the source queues hold. The recruit command keeps the
+/// target and the panel names the source region as the card's manager.
+#[test]
+fn items_queued_through_a_commander_are_his_queue() {
+    use super::commands::ENTRY_QUEUE_FULL;
+    let mut m = commander_recruitment_model();
+    let general = CharacterId(100);
+    m.apply(CampaignCommand::Recruit { region: RegionId(13), unit_key: "test_recruit".into(), target: Some(general) }).unwrap();
+    m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_unit".into(), target: None }).unwrap();
+    let item = m.world.regions[&RegionId(13)].recruitment_queue[0].clone();
+    assert_eq!(item.target, Some(general));
+    let r = m.commander_recruitment(A, general);
+    assert_eq!(r.queue, vec![(RegionId(13), item.id)]);
+    assert!(r.options.iter().all(|o| o.flags & ENTRY_QUEUE_FULL == 0));
+    // Ten for him, spread over both regions (neither queue is full on its own).
+    for i in 0..9 {
+        let region = if i % 2 == 0 { RegionId(10) } else { RegionId(13) };
+        m.apply(CampaignCommand::Recruit { region, unit_key: "test_recruit".into(), target: Some(general) }).unwrap();
+    }
+    let r = m.commander_recruitment(A, general);
+    assert_eq!(r.queue.len(), 10);
+    assert!(r.options.iter().all(|o| o.flags & ENTRY_QUEUE_FULL != 0 && !o.available()), "{r:?}");
+}
+
+/// ORIGINAL BUG (`0x00B0F2B0` refuses a path whose start is its goal): a general inside a settlement
+/// recruits its units with no march; the exe flagged them as having no path.
+#[test]
+fn a_garrisoned_general_recruits_his_settlements_units_without_a_march() {
+    let mut m = commander_recruitment_model();
+    m.world.characters.get_mut(&CharacterId(100)).unwrap().garrisoned_in = Some(RegionId(10));
+    let r = m.commander_recruitment(A, CharacterId(100));
+    let o = option(&r, "test_recruit");
+    assert_eq!((o.region, o.travel_turns, o.flags), (RegionId(10), 0.0, 0), "{o:?}");
+}
+
+/// The same ORIGINAL BUG in the other order: the untrainable source is the first and the nearer one.
+/// The exe cuts the next source's search at the first one's path cost and so refuses the farther,
+/// trainable region; ours searches without the cut while the best cannot train.
+#[test]
+fn a_nearer_first_source_without_recruitment_points_loses_to_a_farther_one() {
+    let mut m = commander_recruitment_model();
+    m.world.characters.get_mut(&CharacterId(100)).unwrap().position = pos(0, 0);
+    let mut rules = (*m.rules).clone();
+    rules.buildings.insert("test_no_points".into(), BuildingRules { chain: "test_chain_2".into(), units_allowed: vec!["test_recruit".into()], ..Default::default() });
+    m.rules = Arc::new(rules);
+    m.world.regions.get_mut(&RegionId(10)).unwrap().slots[0].building = Some(BuildingRef { level_key: "test_no_points".into(), health: 100 });
+    assert_eq!(m.recruitment_points(RegionId(10), false), 0);
+    let r = m.commander_recruitment(A, CharacterId(100));
+    let o = option(&r, "test_recruit");
+    assert_eq!((o.region, o.training_turns), (RegionId(13), 2), "{o:?}");
+}
+
+/// `units` #9 divides the march (`0x00B41F60`, unguarded in the exe); a mod's 0 is read as 1, not a
+/// division by zero.
+#[test]
+fn a_march_speed_of_zero_is_read_as_one() {
+    let mut m = commander_recruitment_model();
+    let mut rules = (*m.rules).clone();
+    rules.units.get_mut("test_recruit").unwrap().travel_speed = 0;
+    m.rules = Arc::new(rules);
+    let r = m.commander_recruitment(A, CharacterId(100));
+    let o = option(&r, "test_recruit");
+    assert!((o.travel_turns - 7.0).abs() < 1e-6 && o.travel_turns_rounded() == 7, "{o:?}");
 }

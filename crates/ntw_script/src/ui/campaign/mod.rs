@@ -139,14 +139,15 @@ enum Tab {
     Army,
     Navy,
     Recruitment,
-    /// The naval half of the recruitment panel (0-E round N+2). The tab's key is CONFIRMED as the
-    /// exe string `naval_recruitment_tab` (0x013CC71C, beside `recruitment_tab` 0x013CC70C); its
-    /// **generator is PROVISIONAL**: no `GenerateNaval*` registration exists (CONFIRMED, §4.3), so
-    /// this reuses `GenerateRecruitmentPanel` (`0x009FE7B0`), the one generator that carries a
-    /// `naval` category and a per-card `is_naval`. What switches the generator between land and
-    /// naval is the manager bool at `+0xA4` (0x009C7C70), whose writer is UNKNOWN; PROVISIONAL: the
-    /// script global that sets it is the tab itself. UNKNOWN: `CampaignShipCard`, a template no
-    /// shipped script references -- whether the naval cards are drawn with it stays open (§4.5 item 6).
+    /// A navy's recruitment tab. The tab's key is CONFIRMED as the exe string
+    /// `naval_recruitment_tab` (0x013CC71C, beside `recruitment_tab` 0x013CC70C). It is the same
+    /// recruitment tab object as an army's (`0x0098BEA0`, built by the navy tab set `0x009990B0`),
+    /// whose generator `GenerateRecruitmentPanel` (`0x009FE7B0`) takes its commander path: what makes
+    /// it naval is the commander's navy, which picks the ports' queues as sources (`0x00B624C0`;
+    /// UI_FIDELITY.md §4.10). The registration's bool `+0xA4` is not a land/naval selector: it is the
+    /// tab set's byte +0x24 (manager +0xA94), the same for every tab. UNKNOWN: `CampaignShipCard`, a
+    /// template no shipped script references -- whether the naval cards are drawn with it stays open
+    /// (§4.5 item 6).
     NavalRecruitment,
     Agents,
     Construction,
@@ -602,10 +603,22 @@ fn character_name(inner: &Inner, ui: &CampaignUi, c: CharacterId) -> Option<Stri
     (!name.is_empty()).then_some(name)
 }
 
-/// A character's portrait card picture (PORTRAIT_DETAILS #0, e.g.
-/// `ui/portraits/european/Cards/...`), `None` when the model has none for him.
-fn portrait_card(m: &CampaignModel, c: CharacterId) -> Option<&str> {
-    m.world.character_details.get(&c).map(|d| d.portrait.card.as_str()).filter(|p| !p.is_empty())
+/// A character's portrait card as the UI shows it: "data/" + his card picture (PORTRAIT_DETAILS
+/// #0, e.g. `ui/portraits/european/Cards/...`), or empty when the model has none for him (the
+/// army card then keeps its unit picture). Why he has none, or why it is wrong
+/// ([`CampaignModel::portrait_problem`], as the agent type his portrait resolves as), is logged
+/// once per character.
+fn portrait_image(inner: &Inner, m: &CampaignModel, c: CharacterId) -> String {
+    let agent = m.portrait_agent(c);
+    if let Some(why) = m.portrait_problem(c, agent) {
+        inner.log_once_for("character portrait", &c.0.to_string(), || {
+            format!("WARN character {} ({agent}): {why} (logged once)", c.0)
+        });
+    }
+    match m.world.character_details.get(&c).map(|d| d.portrait.card.as_str()) {
+        Some(card) if !card.is_empty() => format!("data/{card}"),
+        _ => String::new(),
+    }
 }
 
 /// An agent type's on-screen name in a culture: loc
@@ -949,20 +962,6 @@ fn fort_region(ui: &CampaignUi, args: &[Value]) -> Option<RegionId> {
         CampaignSelection::Fort(r) => Some(r),
         _ => None,
     }
-}
-
-/// The region whose ports the naval recruitment tab recruits at: the settlement the selected naval
-/// character stands in, else the faction's capital (INFERRED -- the exe's naval recruitment manager
-/// is the region's, but which port a navy uses is UNKNOWN, and `CampaignShipCard` is a template no
-/// shipped script references, §4.5 item 6).
-fn naval_region(ui: &CampaignUi) -> Option<RegionId> {
-    let m = ui.model();
-    let standing = match ui.selection.get() {
-        CampaignSelection::Character(c) => m.world.characters.get(&c).map(|ch| (ch.garrisoned_in, ch.faction)),
-        _ => None,
-    };
-    let (standing, faction) = standing?;
-    standing.or_else(|| m.world.capital(faction))
 }
 
 // ---------------------------------------------------------------------------------------------

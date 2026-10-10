@@ -53,6 +53,11 @@ pub struct CampaignModel {
     /// the field reads 20 / 20, the caps it played with).
     #[cfg_attr(feature = "serde", serde(default))]
     pub force_caps: ForceCaps,
+    /// The deal inflation factor and the net it is measured against (`CAMPAIGN_MODEL` #21 / #22,
+    /// campaign `+0x1010` / `+0x1014`, [`super::deal_value::DealInflation`]): read from the file,
+    /// updated at each round end ([`super::deal_value::DealInflation::round_end`]), saved.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub deal_inflation: super::deal_value::DealInflation,
     /// A battle waiting to be fought (the original's `PENDING_BATTLE` record, W3 §2; its content
     /// is not decoded). Set by an attack, cleared by autoresolve or a battle result.
     pub pending_battle: Option<PendingBattle>,
@@ -92,6 +97,7 @@ impl CampaignModel {
             world,
             turn: TurnState::default(),
             force_caps: ForceCaps::default(),
+            deal_inflation: super::deal_value::DealInflation::default(),
             pending_battle: None,
             pending_capture: None,
             rules: Arc::new(CampaignRules::default()),
@@ -126,6 +132,8 @@ impl CampaignModel {
         h.u32(self.rng.state);
         h.u32(self.force_caps.army);
         h.u32(self.force_caps.navy);
+        h.u32(self.deal_inflation.first);
+        h.u32(self.deal_inflation.factor.to_bits());
         h.u32(self.script_rngs.trait_rng.state);
         h.u32(self.script_rngs.ancillary_rng.state);
         self.turn.hash_into(&mut h);
@@ -175,10 +183,13 @@ impl CampaignModel {
             h.i32(f.raw());
             h.u32(*n);
         }
-        h.u32(w.last_income.len() as u32);
-        for (f, n) in &w.last_income {
+        h.u32(w.economy_history.len() as u32);
+        for (f, records) in &w.economy_history {
             h.i32(f.raw());
-            h.i32(*n);
+            h.u32(records.len() as u32);
+            for v in records.iter().flatten() {
+                h.i32(*v);
+            }
         }
         // The relationship records the diplomacy rules change (attitude factors and counters).
         h.u32(w.relationships.len() as u32);
@@ -335,6 +346,14 @@ impl CampaignModel {
                 h.str(&item.unit_key);
                 h.u32(item.turns_remaining);
                 h.i32(item.cost);
+                // A tag byte, then the commander's id: no sentinel value.
+                match item.target {
+                    None => h.bytes(&[0]),
+                    Some(c) => {
+                        h.bytes(&[1]);
+                        h.i32(c.raw());
+                    }
+                }
             }
             h.u32(r.construction.len() as u32);
             for item in &r.construction {
@@ -483,13 +502,15 @@ pub struct World {
     /// Bankrupt turns in a row of each faction (the economics object's +0x460, CONFIRMED); a faction
     /// that can pay is not listed.
     pub bankrupt_turns: BTreeMap<FactionId, u32>,
-    /// Each faction's income of the last turn: the sum of categories 5..11 of its last economics
-    /// history record (`GetFactionLastTurnIncomeTotal` `0x00BBCC40`, CONFIRMED; the Wealth of
-    /// [`CampaignModel::faction_rankings`]). Loaded from the save's last `ECONOMICS_DATA` (#1 and #2),
-    /// written by [`super::economy::settle_round`]. A faction without an entry has 0. PROVISIONAL:
-    /// the save writer does not write the economics history yet, so a save of ours keeps the record
-    /// it was loaded with.
-    pub last_income: BTreeMap<FactionId, i32>,
+    /// Each faction's economics history (`FACTION_ECONOMICS` #0, the economics object's ring of
+    /// [`ECONOMY_HISTORY_LEN`] records of 25 integer categories at `+0x04`, count `+0x3EC`, current
+    /// index `+0x3F0`), oldest first as the saver `0x00BD46E0` writes it (CONFIRMED). Income is
+    /// categories 5..11 (5 taxes, 7 trade, 11 other), expenses 18..24 (19 land, 20 naval upkeep);
+    /// the rest are one-off spending and refunds (CAMPAIGN_FIDELITY.md "FACTION_ECONOMICS").
+    /// Loaded and saved; [`super::economy::settle_round`] adds a record each round end. A faction
+    /// without an entry has no history.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub economy_history: BTreeMap<FactionId, Vec<EconomyRecord>>,
     /// Each faction's diplomacy manager counters (CONFIRMED uses, not loaded from the file yet: the
     /// `DIPLOMACY_MANAGER` fields are not read): +0x1C the treaties it broke during friendship (the
     /// backstabbing count, `0x00B0E420`) ...
@@ -586,6 +607,11 @@ pub struct World {
     /// the decks new characters' names are drawn from. Filled by the campaign source.
     #[cfg_attr(feature = "serde", serde(default))]
     pub name_allocators: BTreeMap<FactionId, Vec<super::names::NameAllocator>>,
+    /// The portrait allocator, one entry per culture in save order (`PORTRAIT_ALLOCATOR`,
+    /// [`super::portraits`]): the decks new characters' portraits are drawn from. Filled by the
+    /// campaign source; saved with the model, deck seeds included.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub portraits: Vec<super::portraits::CulturePortraits>,
     /// The original's own region base values (the campaign AI's `CAI_REGION_BASE_VALUE` beliefs,
     /// CONFIRMED layout, `analysis/ai/AI_RESEARCH.md` §4), by region, as the campaign source found
     /// them. A region without one gets the formula (`ntw_ai`).
@@ -722,6 +748,37 @@ impl World {
         }
         out
     }
+
+    /// The last record of `faction`'s economics history (record `(current − 1) mod 10`, `0x00BABE00`).
+    pub fn last_economy_record(&self, faction: FactionId) -> Option<&EconomyRecord> {
+        self.economy_history.get(&faction)?.last()
+    }
+
+    /// `faction`'s income of the last turn: the sum of categories 5..11 of its last economics record
+    /// (`GetFactionLastTurnIncomeTotal` `0x00BBCC40` / `0x00BBE970`, CONFIRMED; the Wealth of
+    /// [`CampaignModel::faction_rankings`]); 0 without a history. Integer sums wrap as the exe's.
+    pub fn last_income(&self, faction: FactionId) -> i32 {
+        self.last_economy_record(faction).map_or(0, |r| economy_sum(r, 5..12))
+    }
+
+    /// `faction`'s expenses of the last turn: categories 18..24 of its last record (`0x00BBE910`,
+    /// CONFIRMED); 0 without a history.
+    pub fn last_expenses(&self, faction: FactionId) -> i32 {
+        self.last_economy_record(faction).map_or(0, |r| economy_sum(r, 18..25))
+    }
+}
+
+/// One economics history record: the 25 integer categories of a turn (`ECONOMICS_DATA`, saved as
+/// groups of 5 / 3 / 4 / 1 / 5 / 7).
+pub type EconomyRecord = [i32; 25];
+
+/// The original's economics history depth: a ring of 10 records (the index arithmetic `mod 10` of
+/// `0x00BABE00` / `0x00A9B810` and the saver `0x00BD46E0`, CONFIRMED).
+pub const ECONOMY_HISTORY_LEN: usize = 10;
+
+/// The wrapping sum of categories `range` of a record (`CalculateIntRangeSum`).
+pub fn economy_sum(r: &EconomyRecord, range: std::ops::Range<usize>) -> i32 {
+    r[range].iter().fold(0i32, |s, v| s.wrapping_add(*v))
 }
 
 /// A faction. W3 §3.3 `FACTION` v18 (CONFIRMED structure; field meanings INFERRED).
@@ -838,6 +895,12 @@ pub struct RecruitmentItem {
     pub turns_remaining: u32,
     /// What was paid (refunded on cancel).
     pub cost: i32,
+    /// The commander the unit was recruited through (item +0x18, `RECRUITMENT_ITEM` #2; CONFIRMED:
+    /// `QueueRecruitmentItemForUnit` `0x00B58DD0` stores the `CCQ` command's target there, and a
+    /// commander's recruitment panel lists the items whose +0x18 is he, `0x00B26020`). `None` for a
+    /// settlement's own recruit.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub target: Option<CharacterId>,
 }
 
 /// The record a loaded recruitment item came from ([`World::recruitment_sources`]): its region's

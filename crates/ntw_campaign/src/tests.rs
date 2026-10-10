@@ -673,7 +673,7 @@ fn recruiting_from_a_loaded_campaign_charges_units_7_with_the_region_effects() {
     // FISTP(90 × 99 × 0.01) = FISTP(89.1) = 89.
     let cost = economy::recruitment_cost(&m, &m.world.regions[&RegionId(77)], UNIT, &m.rules.units[UNIT]);
     assert_eq!(cost, 89);
-    m.apply(CampaignCommand::Recruit { region: RegionId(77), unit_key: UNIT.into() }).unwrap();
+    m.apply(CampaignCommand::Recruit { region: RegionId(77), unit_key: UNIT.into(), target: None }).unwrap();
     assert_eq!(m.world.factions[&FactionId(1000)].treasury, 10_000 - cost);
     let item = &m.world.regions[&RegionId(77)].recruitment_queue[0];
     assert_eq!(item.cost, cost);
@@ -740,11 +740,13 @@ fn recruitment_items_keep_their_own_records_over_a_save_and_load() {
     use ntw_formats::esf::EsfFile;
     use ntw_sim::campaign::RecruitmentItemId;
     let db = GameDatabase::test_fixture();
-    // A source item whose trailing u32 is `mark`, naming the record.
-    let item = |id: i32, unit: &str, mark: u32| {
-        let inner = rec("RECRUITMENT_ITEM", 2, vec![EsfNode::I32(id), EsfNode::I32(1), EsfNode::I32(0), EsfNode::U32(2), EsfNode::U32(300), EsfNode::Bool(true), s(unit)]);
+    // A source item whose trailing u32 is `mark`, naming the record, and whose #2 is `target` (the
+    // commander it was recruited through: 11 is the fixture's general, 12345 no character).
+    let item_to = |id: i32, unit: &str, mark: u32, target: i32| {
+        let inner = rec("RECRUITMENT_ITEM", 2, vec![EsfNode::I32(id), EsfNode::I32(1), EsfNode::I32(target), EsfNode::U32(2), EsfNode::U32(300), EsfNode::Bool(true), s(unit)]);
         vec![rec("RECRUITMENT_ITEM", 2, vec![rec("UNIT_RECRUITMENT_ITEM", 1, vec![inner, EsfNode::U32(mark)])])]
     };
+    let item = |id: i32, unit: &str, mark: u32| item_to(id, unit, mark, 0);
     let manager = |items: Vec<Vec<EsfNode>>| rec("REGION_RECRUITMENT_MANAGER", 0, vec![arr("REGION_RECRUITMENT_ITEM_ARRAY", items)]);
     let mut region = region(77, "test_region", 1000, vec![]);
     let EsfNode::Record(b) = &mut region[0] else { unreachable!("region() gives a REGION record") };
@@ -755,14 +757,20 @@ fn recruitment_items_keep_their_own_records_over_a_save_and_load() {
         let EsfNode::Record(port) = &mut slots.items[1][0] else { unreachable!() };
         port.children.push(manager(vec![item(600, "ship", 9)]));
     }
-    b.children.push(manager(vec![item(600, "unit_a", 1), item(600, "unit_b", 2), item(0, "unit_c", 3), item(800, "unit_d", 4)]));
+    b.children.push(manager(vec![item(600, "unit_a", 1), item(600, "unit_b", 2), item_to(0, "unit_c", 3, 12345), item_to(800, "unit_d", 4, 11)]));
     let source = EsfFile::from_bytes(&tiny(STARTPOS_ROOT, tiny_world_with_regions(vec![region]))).unwrap();
-    let mut m = read(&source.to_bytes().unwrap(), &db).unwrap().model;
+    let first = read(&source.to_bytes().unwrap(), &db).unwrap();
+    let mut m = first.model;
     let queue = |m: &ntw_sim::campaign::CampaignModel| m.world.regions[&RegionId(77)].recruitment_queue.clone();
     let loaded = queue(&m);
     let units: Vec<&str> = loaded.iter().map(|i| i.unit_key.as_str()).collect();
     assert_eq!(units, ["ship", "unit_a", "unit_b", "unit_c", "unit_d"]);
     assert_eq!(loaded[0].id, RecruitmentItemId(600), "the ship, read first, keeps 600");
+    // #2: unit_d's target is the general; unit_c's names no character, dropped with a warning.
+    let general = ntw_sim::campaign::CharacterId(11);
+    assert_eq!(loaded[4].target, Some(general));
+    assert_eq!(loaded[3].target, None);
+    assert!(first.warnings.iter().any(|w| matches!(w, LoadWarning::DanglingRecruitmentTarget { target: 12345, .. })), "{:?}", first.warnings);
     // Cancel unit_a, which was renumbered: unit_b must still get its own record. Recruit a new unit_d.
     m.world.regions.get_mut(&RegionId(77)).unwrap().recruitment_queue.remove(1);
     let new_id = RecruitmentItemId(m.world.alloc_id() as i32);
@@ -771,11 +779,19 @@ fn recruitment_items_keep_their_own_records_over_a_save_and_load() {
         unit_key: "unit_d".into(),
         turns_remaining: 3,
         cost: 77,
+        target: Some(general),
     });
     let written = crate::save::write_save(&source, &m, "test_faction", 1).unwrap();
     let back = read(&written.to_bytes().unwrap(), &db).unwrap();
-    assert!(back.warnings.iter().all(|w| !matches!(w, LoadWarning::DuplicateRecruitmentItemId { .. } | LoadWarning::RecruitmentItemWithoutId { .. })), "{:?}", back.warnings);
-    assert_eq!(queue(&back.model), queue(&m), "ids, units, turns and costs come back");
+    assert!(
+        back.warnings.iter().all(|w| !matches!(
+            w,
+            LoadWarning::DuplicateRecruitmentItemId { .. } | LoadWarning::RecruitmentItemWithoutId { .. } | LoadWarning::DanglingRecruitmentTarget { .. }
+        )),
+        "{:?}",
+        back.warnings
+    );
+    assert_eq!(queue(&back.model), queue(&m), "ids, units, turns, costs and targets come back");
     // Every recruitment record of a tree (ports first, then the region's own), as (id, unit, mark).
     let records = |f: &EsfFile| -> Vec<(EsfNode, String, Option<u32>)> {
         let mut out = Vec::new();

@@ -425,6 +425,12 @@ impl GameDatabase {
         for key in ntw_sim::unit_kind::unknown_categories(units.iter().map(|u| u.category.as_str())) {
             ld.warnings.borrow_mut().push(format!("units: category {key:?} is not one of the original's; its units count as artillery (0x00EED2B0)"));
         }
+        // `units` #9 divides a recruit's march to its commander (`0x00B41F60`); the original has no
+        // guard, the model reads a value below 1 as 1 (`UnitRules::travel_speed`): reported once per load.
+        let slow: Vec<&str> = units.iter().filter(|u| u.unknown_44 < 1).map(|u| u.key.as_str()).collect();
+        if let Some(first) = slow.first() {
+            ld.warnings.borrow_mut().push(format!("units: #9 (march speed) below 1 for {} unit(s), e.g. {first:?}; read as 1", slow.len()));
+        }
         Ok(Self {
             source: DataSource::Vfs,
             units,

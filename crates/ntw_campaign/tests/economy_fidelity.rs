@@ -939,3 +939,50 @@ fn a_capture_in_the_vanilla_saves_refunds_the_queued_ships() {
     println!("{items} queued items filed as the saves file them; {captured} captures refunded the queued ships");
     assert!(captured > 0, "some vanilla save holds a queued ship");
 }
+
+/// The deal inflation (`CAMPAIGN_MODEL` #21 / #22) and the economics history (`FACTION_ECONOMICS`
+/// #0) load from the original's saves and round-trip through ours (AI_RESEARCH.md §4 "Inflation in
+/// the save"): Europe saves hold 113816 / 1.0, the original's Spain saves 4294948416 / 1.0.
+#[test]
+fn deal_inflation_and_economy_history_round_trip() {
+    let dir = data_dir();
+    let ev = std::env::var_os("NTW_EVIDENCE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default().join(r"Documents\ntw-evidence\saves"));
+    if !dir.is_dir() || !ev.is_dir() {
+        println!("SKIP: no install at {} or no evidence saves at {}", dir.display(), ev.display());
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).expect("database");
+    let mut checked = 0;
+    for (name, first) in [("auto_nr4_t4", 113_816u32), ("orig_fr_t1", 4_294_948_416u32)] {
+        let p = ev.join(format!("{name}.save"));
+        if !p.is_file() {
+            continue;
+        }
+        let source = EsfFile::open(&p).expect("esf");
+        let m = ntw_campaign::read_esf(&source, &db).expect("loads").model;
+        assert_eq!((m.deal_inflation.first, m.deal_inflation.factor), (first, 1.0), "{name}");
+        // France's last record: the turn-1 figures of the original (UI_FIDELITY.md 4.7 "wealth value").
+        if name == "orig_fr_t1" {
+            let fr = m.world.factions.values().find(|f| f.key == "spa_france").expect("spa_france").id;
+            assert_eq!(m.world.last_income(fr), 12030 + 1856 + 3000, "{name}: France's last income");
+        }
+        let histories = m.world.economy_history.len();
+        assert!(histories > 0, "{name}: no economics history loaded");
+        // Our save writes both back; reading it again gives the same state.
+        let mut changed = m.clone();
+        changed.deal_inflation = ntw_sim::campaign::deal_value::DealInflation { first: 7, factor: 2.5 };
+        // A changed history must come back (a writer that left the source's records would fail).
+        let (&f, h) = changed.world.economy_history.iter_mut().find(|(_, h)| !h.is_empty()).expect("a faction with a history");
+        h.last_mut().expect("a record")[19] = 123_456;
+        h.push([7; 25]);
+        assert_ne!(changed.world.economy_history[&f], m.world.economy_history[&f]);
+        let out = ntw_campaign::save::write_save(&source, &changed, "france", 1).expect("write");
+        let again = ntw_campaign::read_esf(&out, &db).expect("reloads").model;
+        assert_eq!(again.deal_inflation, changed.deal_inflation, "{name}");
+        assert_eq!(again.world.economy_history, changed.world.economy_history, "{name}");
+        checked += 1;
+    }
+    println!("{checked} saves checked");
+}

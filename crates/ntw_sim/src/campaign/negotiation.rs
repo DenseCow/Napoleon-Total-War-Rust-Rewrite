@@ -330,7 +330,7 @@ impl CampaignModel {
         !self.is_rebel_faction(a) && !self.is_rebel_faction(b) && (a == b || allied_like(self.world.stance(a, b)))
     }
 
-    fn is_human(&self, f: FactionId) -> bool {
+    pub(crate) fn is_human(&self, f: FactionId) -> bool {
         self.turn.humans.contains(&f)
     }
 
@@ -607,15 +607,29 @@ impl CampaignModel {
         Ok(())
     }
 
-    /// PLACEHOLDER for the AI's evaluation of a proposed deal (`CCQ_DIPLOMACY_PROPOSE_DEAL` →
-    /// `0x00C49BE0` → `0x00AA5ED0`, with the technology value `0x00A36B20`; AI_RESEARCH.md §6, not
-    /// ported): until it is, an AI side refuses any deal in which it gives a region or a
-    /// technology, so a deal cannot take them for free; what it is offered it accepts. True when
-    /// the open negotiation's deal is refused that way.
+    /// The AI's answer to the open negotiation's deal (`CCQ_DIPLOMACY_PROPOSE_DEAL` → `0x00C49BE0`
+    /// → `0x00AA5ED0`, run when the recipient is not human; AI_RESEARCH.md §4 "Deal evaluation"):
+    /// true when it is refused. A deal of technologies is evaluated as the exe does
+    /// ([`Self::ai_accepts_technologies`]). A deal with regions keeps the PLACEHOLDER rule until the
+    /// AI's region value (`0x00A364B0` → `0x00AA1E90`, beliefs) is traced
+    /// ([`Self::ai_deal_needs_region_value`]): an AI side refuses any such deal in which it gives a
+    /// region or a technology; what it is offered it accepts.
     pub fn ai_refuses_deal(&self) -> bool {
         let Some(n) = self.negotiations.current.as_ref() else { return false };
-        let gives = |giver: FactionId, regions: &[RegionId], techs: &[String]| !self.is_human(giver) && (!regions.is_empty() || !techs.is_empty());
-        gives(n.recipient, &n.regions.demanded, &n.technologies.demanded) || gives(n.proposer, &n.regions.offered, &n.technologies.offered)
+        if self.ai_deal_needs_region_value() {
+            let gives = |giver: FactionId, regions: &[RegionId], techs: &[String]| !self.is_human(giver) && (!regions.is_empty() || !techs.is_empty());
+            return gives(n.recipient, &n.regions.demanded, &n.technologies.demanded) || gives(n.proposer, &n.regions.offered, &n.technologies.offered);
+        }
+        self.ai_accepts_technologies() == Some(false)
+    }
+
+    /// True when the open negotiation's deal has a region item and an AI side, so
+    /// [`Self::ai_refuses_deal`] answers it with the PLACEHOLDER rule (the region value is not
+    /// traced).
+    pub fn ai_deal_needs_region_value(&self) -> bool {
+        self.negotiations.current.as_ref().is_some_and(|n| {
+            (!n.regions.demanded.is_empty() || !n.regions.offered.is_empty()) && !(self.is_human(n.recipient) && self.is_human(n.proposer))
+        })
     }
 
     /// `CCQ_DIPLOMACY_ACCEPT_DEAL` (`AcceptCampaignNegotiationDeal` `0x00C114B0`) for the records
@@ -718,7 +732,7 @@ impl CampaignModel {
         let mut unknown_units = BTreeSet::new();
         let powers = self.faction_powers(&mut unknown_units);
         let power: Vec<f32> = ids.iter().map(|f| powers.get(f).map_or(0, |p| p.total()) as f32).collect();
-        let wealth: Vec<f32> = ids.iter().map(|&f| self.world.last_income.get(&f).copied().unwrap_or(0) as f32).collect();
+        let wealth: Vec<f32> = ids.iter().map(|&f| self.world.last_income(f) as f32).collect();
         let prestige = vec![0.0f32; ids.len()];
         let (p, w, s) = (rank_categories(&power, &out_of_game), rank_categories(&wealth, &out_of_game), rank_categories(&prestige, &out_of_game));
         let ranks = ids.iter().enumerate().map(|(i, &f)| (f, Rankings { power: p[i], wealth: w[i], prestige: s[i] })).collect();

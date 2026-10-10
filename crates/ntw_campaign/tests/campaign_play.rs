@@ -189,12 +189,12 @@ fn province_management_with_db_values() {
     let cost = ntw_sim::campaign::economy::recruitment_cost(&m, &m.world.regions[&paris], &unit, &m.rules.units[&unit]);
     assert!(cost > 0 && cost != m.rules.units[&unit].cost);
     let t0 = m.world.factions[&france].treasury;
-    m.apply(CampaignCommand::Recruit { region: paris, unit_key: unit.clone() }).unwrap();
+    m.apply(CampaignCommand::Recruit { region: paris, unit_key: unit.clone(), target: None }).unwrap();
     assert_eq!(m.world.factions[&france].treasury, t0 - cost);
     // Austrian-only units are refused.
     let austrian = m.rules.unit_factions.iter().find(|(_, f)| f.iter().all(|f| f == "austria") && !f.is_empty()).map(|(u, _)| u.clone());
     if let Some(a) = austrian {
-        assert!(matches!(m.apply(CampaignCommand::Recruit { region: paris, unit_key: a }), Err(CommandError::UnitNotAvailable(_))));
+        assert!(matches!(m.apply(CampaignCommand::Recruit { region: paris, unit_key: a, target: None }), Err(CommandError::UnitNotAvailable(_))));
     }
     // Upgrade the first building that has an upgrade, at the DB cost.
     let (slot, level) = m.world.regions[&paris]
@@ -232,11 +232,11 @@ fn save_round_trip() {
     let france = faction(&m, "france");
     let paris = m.world.regions.values().find(|r| r.key == "eur_france").unwrap().id;
     let unit = m.recruitable_units(paris).into_iter().filter(|e| e.flags == 0).map(|e| e.unit_key).find(|u| !m.rules.units[u].is_naval).unwrap();
-    m.apply(CampaignCommand::Recruit { region: paris, unit_key: unit.clone() }).unwrap();
+    m.apply(CampaignCommand::Recruit { region: paris, unit_key: unit.clone(), target: None }).unwrap();
     m.end_turn();
     m.end_turn();
     m.end_turn(); // the unit is trained into a new garrison force
-    m.apply(CampaignCommand::Recruit { region: paris, unit_key: unit }).unwrap();
+    m.apply(CampaignCommand::Recruit { region: paris, unit_key: unit, target: None }).unwrap();
     let force = m.world.forces.values().find(|x| x.faction == france && !x.is_navy && x.commander.is_some()).unwrap().id;
     let to = {
         let p = m.force_position(force).unwrap();
@@ -262,7 +262,10 @@ fn save_round_trip() {
     let mut r = back.model;
     r.terrain = m.terrain.clone();
     assert_eq!(r.calendar, m.calendar);
-    assert_eq!(r.rng, m.rng);
+    // Reading the save seeds every portrait deck from one campaign-RNG step, as the original's
+    // loader does (CHARACTERS_FIDELITY.md §14).
+    let decks = m.world.portraits.iter().flat_map(|s| &s.categories).map(|c| c.decks.len()).sum::<usize>();
+    assert_eq!(r.rng.state, (0..decks).fold(m.rng.state, |s, _| ntw_sim::campaign::names::lcg_step(s)));
     assert_eq!(r.turn.current, Some(france));
     assert!(r.turn.in_turn);
     for (id, fa) in &m.world.factions {
@@ -276,7 +279,9 @@ fn save_round_trip() {
         assert_eq!(b.recruitment_queue, reg.recruitment_queue, "{}", reg.key);
         assert_eq!(b.construction, reg.construction, "{}", reg.key);
     }
-    // Writing the reloaded model again gives the same bytes (stable writer).
+    // Writing the reloaded model again gives the same bytes (stable writer), its RNG put back to
+    // before the load's deck seeding (`RandSeed` is the one value reading changes).
+    r.rng = m.rng;
     let again = save::write_save(&EsfFile::from_bytes(&bytes).unwrap(), &r, "france", 1_000_000).unwrap().to_bytes().unwrap();
     assert_eq!(again, bytes);
     let _ = std::fs::remove_file(&path);

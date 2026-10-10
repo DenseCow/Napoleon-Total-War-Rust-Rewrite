@@ -41,6 +41,7 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
                 militia: stats.is_some_and(|s| s.unknown_205),
                 campaign_stealth: stats.is_some_and(|s| s.unknown_204),
                 unit_cap: u.unit_cap,
+                travel_speed: u.unknown_44,
             },
         );
     }
@@ -55,6 +56,7 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
             kind: h.agent.clone(),
             faction: h.faction.clone(),
             years: (h.year_from, h.year_to),
+            note: h.note.clone(),
         })
         .collect();
     // `building_chains` #2 parsed as the exe does (`0x004F3720`: an optional '-', digits; empty = 0).
@@ -195,6 +197,9 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
             r.agent_religions.insert(a.key.clone(), rel.clone());
         }
         r.agent_sight.insert(a.key.clone(), a.unknown_1c);
+        if let Some(folder) = a.portrait_folder.as_ref().filter(|s| !s.is_empty()) {
+            r.agent_portrait_folders.insert(a.key.clone(), folder.clone());
+        }
     }
     for p in c.unit_factions.iter() {
         let list = r.unit_factions.entry(p.unit.clone()).or_default();
