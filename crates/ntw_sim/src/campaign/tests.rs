@@ -972,6 +972,62 @@ fn recruiting_takes_population_and_cancelling_gives_it_back() {
     assert_eq!((pop(&m), m.world.regions[&r10].recruitment_queue.len()), (2500, 0));
 }
 
+/// Region 10 (owner A) with two land items (costs 300, 500), two ship items (70, 110) and a construction
+/// (600), each cost as stored when it was paid.
+fn model_with_queued_items() -> CampaignModel {
+    let mut m = test_model();
+    let mut rules = (*m.rules).clone();
+    rules.units.insert("test_ship".into(), UnitRules { is_naval: true, ..rules.units["test_unit"].clone() });
+    m.rules = Arc::new(rules);
+    let r = m.world.regions.get_mut(&RegionId(10)).unwrap();
+    for (id, unit_key, cost) in [(9001, "test_unit", 300), (9002, "test_ship", 70), (9003, "test_unit", 500), (9004, "test_ship", 110)] {
+        r.recruitment_queue.push(RecruitmentItem { id: RecruitmentItemId(id), unit_key: unit_key.into(), turns_remaining: 2, cost });
+    }
+    r.construction.push(ConstructionItem { slot: SlotRef::Slot(0), level_key: "test_building_level".into(), turns_remaining: 2, cost: 600 });
+    m
+}
+
+/// A capture (every capture variant, e.g. `0x00B58A30` / `0x00B58560`) empties the land queue with no refund
+/// (`0x00B1A760(0)` on region +0x124), each port's naval queue with the refund (`0x00B1A760(1)` on slot
+/// +0x1E8: `0x00B5C0A0` credits item +0x20 to the region's owner, still the old one) and every construction
+/// with none (`0x00A6CBE0(0)`), whoever the old owner is.
+#[test]
+fn a_capture_refunds_the_old_owners_queued_ships_only() {
+    for human in [false, true] {
+        let mut m = model_with_queued_items();
+        if human {
+            m.turn.humans = vec![A];
+        }
+        let (a, b) = (m.world.factions[&A].treasury, m.world.factions[&B].treasury);
+        let mut events = Vec::new();
+        m.occupy(RegionId(10), B, None, &mut events);
+        let r = &m.world.regions[&RegionId(10)];
+        assert!(r.recruitment_queue.is_empty() && r.construction.is_empty());
+        assert_eq!(m.world.factions[&A].treasury, a + 70 + 110, "human old owner: {human}");
+        assert_eq!(m.world.factions[&B].treasury, b);
+    }
+}
+
+/// A region handed over without a capture (a deal's region item, a liberation, `grant_faction_handover`:
+/// `0x00B58A10` → `0x00B449F0` with the report flag clear) runs only `0x00A64AC0`'s drain, whose flag is set
+/// when the old owner is not human (faction +0x6E0): an AI old owner gets every queued unit's cost back, land
+/// and naval; a human one gets nothing. Constructions are never refunded.
+#[test]
+fn a_transfer_refunds_an_ai_old_owners_queued_units_and_a_humans_none() {
+    for (human, refund) in [(false, 300 + 70 + 500 + 110), (true, 0)] {
+        let mut m = model_with_queued_items();
+        if human {
+            m.turn.humans = vec![A];
+        }
+        let (a, b) = (m.world.factions[&A].treasury, m.world.factions[&B].treasury);
+        assert!(m.transfer_region(RegionId(10), B));
+        let r = &m.world.regions[&RegionId(10)];
+        assert!(r.recruitment_queue.is_empty() && r.construction.is_empty());
+        assert_eq!(m.world.factions[&A].treasury, a + refund, "human old owner: {human}");
+        assert_eq!(m.world.factions[&B].treasury, b);
+    }
+}
+
 /// The population rules' 32-bit arithmetic (`0x00AAF190`): a charge that would leave less than the minimum
 /// sets the population to the minimum (unreachable through the queue command, which refuses that entry
 /// first); the gate's sum and compare are signed, so a mod's negative cost passes any population.
@@ -2863,7 +2919,9 @@ fn ai_capture_occupies_and_liberation_hands_the_region_over() {
     assert_eq!(m.pending_capture.as_ref().unwrap().liberate, Some(C));
     m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Liberate }).unwrap();
     assert_eq!(m.world.regions[&RegionId(11)].owner, C);
-    assert_eq!(m.world.characters[&CharacterId(100)].garrisoned_in, None);
+    // The liberation (0x00B58A10) moves no army: the capturer's army stays inside, a foreign garrison.
+    assert_eq!(m.world.characters[&CharacterId(100)].garrisoned_in, Some(RegionId(11)));
+    assert_eq!(m.world.regions[&RegionId(11)].garrison, Some(ForceId(1000)));
     // Not offered when the relationship forbids returning regions, nor for the capturer itself.
     let mut m = capture_model(vec![A]);
     m.world.region_rebel_factions.insert(RegionId(11), "test_faction_c".into());
@@ -4335,4 +4393,167 @@ fn tradeable_regions_leave_out_the_capital() {
     m.world.faction_details.entry(A).or_default().capital = Some(RegionId(10));
     let without: Vec<RegionId> = owned.iter().copied().filter(|r| *r != RegionId(10)).collect();
     assert_eq!(m.tradeable_regions(A).collect::<Vec<_>>(), without);
+}
+
+/// The deal's region and technology records (UI_FIDELITY.md §4.9): `ProposeRegions` replaces the
+/// regions record (`0x00933CC0` → `0x00C4B0A0`), two empty lists leave it, `clear` empties it;
+/// `ProposeTechnologies` (`0x009340A0`) clears on two empty lists too; an unknown region or
+/// technology aborts; nothing without a negotiation.
+#[test]
+fn deal_records_follow_the_propose_executors() {
+    use super::rules::TechRules;
+    let mut m = test_model();
+    let mut rules = (*m.rules).clone();
+    rules.technologies.insert("admin1_a".into(), TechRules { cost: 25, building_level: "test_building_level".into(), requires: vec![] });
+    m.rules = Arc::new(rules);
+    let regions = |m: &CampaignModel| m.negotiations.current.as_ref().unwrap().regions.clone();
+    let techs = |m: &CampaignModel| m.negotiations.current.as_ref().unwrap().technologies.clone();
+    let propose = |clear, demanded: &[u32], offered: &[u32]| CampaignCommand::ProposeRegions {
+        clear,
+        demanded: demanded.iter().map(|&r| RegionId(r)).collect(),
+        offered: offered.iter().map(|&r| RegionId(r)).collect(),
+    };
+    assert_eq!(m.apply(propose(false, &[11], &[])), Err(CommandError::NoNegotiation));
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    m.apply(propose(false, &[11], &[12])).unwrap();
+    assert_eq!((regions(&m).demanded, regions(&m).offered), (vec![RegionId(11)], vec![RegionId(12)]));
+    // Replaced, not added to.
+    m.apply(propose(false, &[], &[10])).unwrap();
+    assert_eq!((regions(&m).demanded, regions(&m).offered), (vec![], vec![RegionId(10)]));
+    // Two empty lists leave the regions record; an unknown region aborts.
+    m.apply(propose(false, &[], &[])).unwrap();
+    assert_eq!(regions(&m).offered, vec![RegionId(10)]);
+    assert_eq!(m.apply(propose(false, &[99], &[])), Err(CommandError::UnknownRegion(RegionId(99))));
+    assert_eq!(regions(&m).offered, vec![RegionId(10)]);
+    m.apply(propose(true, &[11], &[])).unwrap();
+    assert!(regions(&m).is_empty());
+    // Technologies: an unknown key aborts; two empty lists clear.
+    let t = |demanded: &[&str], offered: &[&str]| CampaignCommand::ProposeTechnologies {
+        clear: false,
+        demanded: demanded.iter().map(|s| s.to_string()).collect(),
+        offered: offered.iter().map(|s| s.to_string()).collect(),
+    };
+    m.apply(t(&["admin1_a"], &[])).unwrap();
+    assert_eq!(techs(&m).demanded, vec!["admin1_a".to_string()]);
+    assert_eq!(m.apply(t(&["nope"], &[])), Err(CommandError::UnknownTechnology("nope".into())));
+    assert_eq!(techs(&m).demanded, vec!["admin1_a".to_string()]);
+    m.apply(t(&[], &[])).unwrap();
+    assert!(techs(&m).is_empty());
+    // Clear empties both records; a new negotiation starts empty.
+    m.apply(propose(false, &[11], &[])).unwrap();
+    m.apply(CampaignCommand::ClearNegotiation).unwrap();
+    assert!(regions(&m).is_empty());
+    m.apply(propose(false, &[11], &[])).unwrap();
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    assert!(regions(&m).is_empty());
+}
+
+/// Accepting the deal (`0x00C114B0`): the regions record's demanded regions go to the proposer and
+/// the offered ones to the recipient (`0x00C18BF0` → `0x00B449F0`): queues cleared, research at
+/// the region's schools stopped; no army moves (CONFIRMED chain): the old owner's army stays
+/// inside, still selectable, and the new owner's army entering does not merge into it.
+#[test]
+fn accepted_regions_change_hands_and_keep_the_old_garrison() {
+    use super::details::TechResearch;
+    let mut m = test_model();
+    m.turn.humans = vec![A, B];
+    // Region 12 (A) holds A's army and A researches at its school (slot id 55).
+    m.world.regions.get_mut(&RegionId(12)).unwrap().garrison = Some(ForceId(1000));
+    m.world.characters.get_mut(&CharacterId(100)).unwrap().garrisoned_in = Some(RegionId(12));
+    m.world.regions.get_mut(&RegionId(12)).unwrap().slots.push(RegionSlot {
+        key: "school".into(),
+        slot_type: "test_slot".into(),
+        building: None,
+        position: None,
+        port: false,
+        holder: None,
+        id: 55,
+    });
+    m.world.faction_details.entry(A).or_default().research.insert("t".into(), TechResearch { progress: 4.0, researcher: 55, traded: 0 });
+    m.world.regions.get_mut(&RegionId(11)).unwrap().recruitment_queue.push(RecruitmentItem {
+        id: RecruitmentItemId(9),
+        unit_key: "u".into(),
+        turns_remaining: 2,
+        cost: 0,
+    });
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    m.apply(CampaignCommand::ProposeRegions { clear: false, demanded: vec![RegionId(11)], offered: vec![RegionId(12)] }).unwrap();
+    m.apply(CampaignCommand::AcceptDeal).unwrap();
+    assert_eq!(m.world.regions[&RegionId(11)].owner, A);
+    assert_eq!(m.world.regions[&RegionId(12)].owner, B);
+    assert!(m.world.regions[&RegionId(11)].recruitment_queue.is_empty());
+    assert_eq!(m.world.faction_details[&A].research["t"], TechResearch { progress: 4.0, researcher: 0, traded: 0 });
+    // A's army stays inside B's settlement, linked as before (visible and selectable).
+    assert_eq!(m.world.regions[&RegionId(12)].garrison, Some(ForceId(1000)));
+    assert_eq!(m.world.characters[&CharacterId(100)].garrisoned_in, Some(RegionId(12)));
+    assert!(m.force_position(ForceId(1000)).is_some());
+    // B's army marching into its new settlement does not merge into A's army (PROVISIONAL: waits outside).
+    let units_a = m.world.forces[&ForceId(1000)].units.len();
+    m.world.characters.get_mut(&CharacterId(101)).unwrap().position = m.world.regions[&RegionId(12)].settlement.position;
+    let _ = m.apply(CampaignCommand::EnterSettlement { force: ForceId(1001), region: RegionId(12) });
+    assert!(m.world.forces.contains_key(&ForceId(1001)));
+    assert_eq!(m.world.forces[&ForceId(1000)].units.len(), units_a);
+    assert_eq!(m.world.forces[&ForceId(1000)].faction, A);
+    // Accepting again changes nothing (the regions are already theirs: 0x00A64AC0 returns).
+    m.apply(CampaignCommand::AcceptDeal).unwrap();
+    assert_eq!((m.world.regions[&RegionId(11)].owner, m.world.regions[&RegionId(12)].owner), (A, B));
+    // No negotiation, no deal.
+    m.apply(CampaignCommand::EndNegotiation).unwrap();
+    assert_eq!(m.apply(CampaignCommand::AcceptDeal), Err(CommandError::NoNegotiation));
+}
+
+/// Accepted technologies (`0x00C18CF0`): the receiver researches each one it has at state 1..4
+/// (`0x008CDCB0` → `0x008EED20`: progress = cost, no school, then availability), the giver's
+/// traded count (+0x28, `0x008F3DD0`) goes up by one per technology handed over, granted or not.
+#[test]
+fn accepted_technologies_are_granted_and_counted() {
+    use super::research::state;
+    use super::rules::TechRules;
+    let mut m = test_model();
+    m.turn.humans = vec![A, B];
+    let mut rules = (*m.rules).clone();
+    rules.technologies.insert("admin1_a".into(), TechRules { cost: 25, building_level: "test_building_level".into(), requires: vec![] });
+    rules.technologies.insert("mil1".into(), TechRules { cost: 40, building_level: "test_building_level".into(), requires: vec![] });
+    m.rules = Arc::new(rules);
+    m.world.faction_details.entry(A).or_default().technologies = vec![("admin1_a".into(), state::RESEARCHED), ("mil1".into(), state::AVAILABLE)];
+    m.world.faction_details.entry(B).or_default().technologies = vec![("admin1_a".into(), state::AVAILABLE), ("mil1".into(), state::RESEARCHED)];
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    m.apply(CampaignCommand::ProposeTechnologies { clear: false, demanded: vec!["mil1".into()], offered: vec!["admin1_a".into()] }).unwrap();
+    m.apply(CampaignCommand::AcceptDeal).unwrap();
+    assert_eq!(m.tech_state(B, "admin1_a"), Some(state::RESEARCHED));
+    assert_eq!(m.world.faction_details[&B].research["admin1_a"].progress, 25.0);
+    assert_eq!(m.tech_state(A, "mil1"), Some(state::RESEARCHED));
+    assert_eq!(m.world.faction_details[&A].research["mil1"].progress, 40.0);
+    assert_eq!(m.world.faction_details[&A].research["admin1_a"].traded, 1);
+    assert_eq!(m.world.faction_details[&B].research["mil1"].traded, 1);
+    // A deal applies once: accepted again (ProposeDeal then AcceptOffer), nothing changes; after
+    // the deal is proposed anew it applies again (a granted technology is not granted twice, but
+    // the giver's count goes up per hand-over, as 0x008F3DD0).
+    m.apply(CampaignCommand::AcceptDeal).unwrap();
+    assert_eq!(m.world.faction_details[&A].research["admin1_a"].traded, 1);
+    m.apply(CampaignCommand::ProposeTechnologies { clear: false, demanded: vec![], offered: vec!["admin1_a".into()] }).unwrap();
+    m.apply(CampaignCommand::AcceptDeal).unwrap();
+    assert_eq!(m.world.faction_details[&A].research["admin1_a"].traded, 2);
+    // A technology the receiver has no entry for is not granted.
+    assert!(!m.grant_technology(C, "admin1_a"));
+}
+
+/// PLACEHOLDER for the AI's deal evaluation (`0x00C49BE0` → `0x00AA5ED0`, §6): an AI side refuses
+/// a deal in which it gives a region or a technology; what it is offered it accepts.
+#[test]
+fn the_ai_refuses_to_give_regions_or_technologies() {
+    let mut m = test_model();
+    m.turn.humans = vec![A];
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    assert!(!m.ai_refuses_deal(), "an empty deal");
+    m.apply(CampaignCommand::ProposeRegions { clear: false, demanded: vec![], offered: vec![RegionId(12)] }).unwrap();
+    assert!(!m.ai_refuses_deal(), "the human gives");
+    m.apply(CampaignCommand::ProposeRegions { clear: false, demanded: vec![RegionId(11)], offered: vec![] }).unwrap();
+    assert!(m.ai_refuses_deal(), "the AI would give");
+    // The model command enforces it: nothing changes hands.
+    assert_eq!(m.apply(CampaignCommand::AcceptDeal), Err(CommandError::DealRefused));
+    assert_eq!(m.world.regions[&RegionId(11)].owner, B);
+    // Between two humans nothing is refused.
+    m.turn.humans = vec![A, B];
+    assert!(!m.ai_refuses_deal());
 }

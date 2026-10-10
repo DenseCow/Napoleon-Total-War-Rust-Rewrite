@@ -147,7 +147,10 @@ pub(crate) fn faction_details(f: &EsfRecord) -> (FactionDetails, Option<(String,
                 let key = it.first()?.as_str()?.to_string();
                 let progress = it.get(2).and_then(EsfNode::as_f32).unwrap_or(0.0);
                 let researcher = it.get(3).and_then(EsfNode::as_u32).unwrap_or(0);
-                (progress != 0.0 || researcher != 0).then_some((key, ntw_sim::campaign::details::TechResearch { progress, researcher }))
+                // #5 the traded count (entry +0x28, saver 0x00894430).
+                let traded = it.get(5).and_then(EsfNode::as_u32).unwrap_or(0);
+                (progress != 0.0 || researcher != 0 || traded != 0)
+                    .then_some((key, ntw_sim::campaign::details::TechResearch { progress, researcher, traded }))
             })
             .collect();
     }

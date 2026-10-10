@@ -2,7 +2,7 @@
 //! (`UIDiplomacyNegotiation`).
 
 use super::*;
-use ntw_sim::campaign::negotiation::Greeting;
+use ntw_sim::campaign::negotiation::{Greeting, NegotiationAction};
 
 /// The diplomacy panel's negotiation object: the host's stand-in for the exe's
 /// `UIDiplomacyNegotiation` userdata (ctor 0x00A102B0, 0xB4 bytes). The campaign negotiation behind
@@ -227,34 +227,26 @@ impl NegotiationState {
     }
 }
 
-/// One row of the deal: its item and whether it was applied, the row's +0x1E8 flag (CONFIRMED,
-/// see [`accept_deal`]): the appliers skip an applied row, so a row applies at most once.
+/// One row of the deal the UI holds: its item and whether it was applied. `applied` is the host's
+/// own guard, so a row applies at most once, as the model's records do (`Negotiation::applied`);
+/// the "+0x1E8 applied flag" an earlier reading named belongs to the capture variants
+/// (UI_FIDELITY.md §4.9), not to the deal.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct DealRow {
     pub(super) item: NegotiationItem,
     pub(super) applied: bool,
 }
 
-/// One item of the pending deal. The variants are the model's `DiplomaticAction`s plus the region,
-/// payment and technology items (see `accept_deal` for which applier each has).
+/// One item of the pending deal the UI still holds: the model's `DiplomaticAction`s and the
+/// payments (see `accept_deal` for which applier each has). The region and technology items are
+/// the model's (`ntw_sim::campaign::negotiation::Negotiation::regions` / `technologies`, set by
+/// `Propose` through their commands, UI_FIDELITY.md §4.9).
 ///
-/// Nothing constructs an item yet, and that is the traced state of the original, not a gap in the
-/// host: no CONFIRMED method takes the deal in. `BuildOfferAndDemandStrings` (0x009B48B0) reads no
-/// Lua argument and only *reports* the rows, `ProposeDeal` (0x009BFCF0, 142 bytes) is the deal's
-/// validation/error path, and `Propose` (0x009BF3C0, 2285 bytes, 40 callees) does the work on the
-/// engine's own object. In the exe the rows are mutated by the engine when the panel's subpopup
-/// OK buttons run, so the host waits for those callback bodies (UI_FIDELITY.md §4 open item 3)
-/// before it fills the list.
+/// Nothing constructs one of these yet: `Propose` (0x009BF3C0) builds the other actions' items
+/// too (state gift, payments, protector, war, the faction lists), whose commands are not ported.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum NegotiationItem {
-    /// Region keys to hand over (the exe's region-transfer action, id 6 in
-    /// `BuildOfferAndDemandStrings`). The exe's applier is `0x00B449F0` (CONFIRMED address); the
-    /// model has no command for it yet, so the row is dropped (DEFERRED, see `deal_item_commands`).
-    Regions(Vec<String>),
-    /// Technology keys to hand over. Still **UNKNOWN**: no granting address is reachable from the
-    /// deal path, so the row is dropped (see `accept_deal`).
-    Technologies(Vec<String>),
     /// A payment: an amount and how many turns it runs for. `turns == 0` is the lump sum the commit
     /// path runs as **`0x00BB3810(amount, 3)`** (CONFIRMED, the same money mover as the capture loot
     /// `0x00BB3810(money, 0)`); a positive `turns` is the per-turn schedule, one of the container's
@@ -489,20 +481,21 @@ fn payment_cap(inner: &Inner, ui: &CampaignUi, faction: Option<FactionId>, metho
     })
 }
 
-/// Whether a region is already in the deal's offer (`offered`) or demand list.
-fn region_in_deal(ui: &CampaignUi, key: &str, offered: bool) -> bool {
-    let state = ui.negotiation.borrow();
-    let items = if offered { &state.offers } else { &state.demands };
-    items.iter().any(|r| matches!(&r.item, NegotiationItem::Regions(keys) if keys.iter().any(|k| k == key)))
+/// Whether a region is in the deal's offers (`offered`) or demands: the model's regions record
+/// (`0x00C4D3F0` / `0x00C4D250` read the deal's two lists).
+fn region_in_deal(ui: &CampaignUi, region: RegionId, offered: bool) -> bool {
+    let m = ui.model();
+    m.negotiations.current.as_ref().is_some_and(|n| {
+        let list = if offered { &n.regions.offered } else { &n.regions.demanded };
+        list.contains(&region)
+    })
 }
 
-/// The "Action" a deal row reports (CONFIRMED key). The exe's action *ids* are UNKNOWN (only the
-/// region action's 6 is known, from `BuildOfferAndDemandStrings`), so these are the host's names
-/// (INFERRED) except the region action, whose name is fixed by the id.
+
+/// The "Action" a deal row reports (CONFIRMED key). The exe gives the action record; these are the
+/// host's names (INFERRED).
 pub(super) fn negotiation_action_name(item: &NegotiationItem) -> &'static str {
     match item {
-        NegotiationItem::Regions(_) => "transfer_region",
-        NegotiationItem::Technologies(_) => "transfer_technology",
         NegotiationItem::Action(ntw_sim::campaign::treaties::DiplomaticAction::Alliance) => "alliance",
         NegotiationItem::Action(ntw_sim::campaign::treaties::DiplomaticAction::BreakAlliance) => "break_alliance",
         NegotiationItem::Action(ntw_sim::campaign::treaties::DiplomaticAction::TradeAgreement) => "trade_agreement",
@@ -518,62 +511,27 @@ pub(super) fn negotiation_action_name(item: &NegotiationItem) -> &'static str {
 }
 
 /// Accept the pending deal: the campaign negotiation's result becomes "accepted" (+0x28 = 1,
-/// 0x00C114B0) and, the first time only, every offer and demand the model can express becomes a
-/// `CampaignCommand` (the appliers skip a row already marked applied, +0x1E8, so a deal applies
-/// at most once; see [`DealRow`]). Nothing without a counterpart
-/// ([`negotiation_factions`]).
+/// `AcceptCampaignNegotiationDeal` 0x00C114B0), every action record applies its items (virtual
+/// +0x3C, UI_FIDELITY.md §4.9). Nothing without a counterpart ([`negotiation_factions`]).
 ///
-/// The exe's appliers (own Ghidra copy, all CONFIRMED addresses):
-/// - **offer applier** `0x00B58C00(item)` and **demand applier** `0x00B58A30(faction)` walk the
-///   same deal container — the sub-object at `*(vt+0x38)+0x120`, whose `+0x14` is the row count and
-///   `+0x18` the first row, plus two *optional single* items at `+0x20` and `+0x24`. Per row they
-///   test the row's `+0x1E8` "applied" flag, call `0x00B1A760(1)` and then the per-item applier
-///   `0x00A6CBE0(0)`; the two single items go through the same `0x00A6CBE0(0)`.
-///   `0x00B58560` and `0x00B58890` are two more appliers with the same walk (the first also builds
-///   a loc string, id `0xFD`).
-/// - **per-item / commit** `0x00A6CBE0` is an 11-byte forward to **`0x00B1A790(flag)`**, the deal
-///   commit: when `0x00B4E4B0()` and `flag` agree and the pending deal's `+0x14` amount is
-///   non-zero it runs **`0x00BB3810(amount, 3)`** — that is the **payments / tribute applier** — then
-///   frees the pending deal (`0x0126E016(deal, 0x18)`), clears it and notifies two listeners.
-///   `0x00B1A760(flag)` drains the pending list at `+0x4C`/`+0x50` through `0x00B1A820(item, flag)`,
-///   which sets the item's vtable `+0x1C` slot, applies it and erases it from the vector.
-/// - **region transfer** `0x00B449F0(faction, region_item, 1, 1, 0)` is applied *once*, after the
-///   rows, by all four of those appliers; the demand path passes a null `region_item`, the offer
-///   path the region it was handed. `0x00B58A10(faction, a, b)` is the wrapper that calls
-///   `0x00B449F0(faction, 0, 0, a, b)` (the liberate path, CAMPAIGN_FIDELITY.md §Capture).
+/// - **regions and technologies** are the model's records: `CampaignCommand::AcceptDeal` applies
+///   them (`0x00C18BF0` region transfer, `0x00C18CF0` technology grant; `CampaignModel::accept_deal`).
+/// - the rows the UI still holds, the first time only (a row marked applied is skipped, so a row
+///   applies at most once; see [`DealRow`]), become one `CampaignCommand` each:
+///   - **stance / access / gift terms** → `CampaignCommand::Diplomacy`. INFERRED mapping from
+///     `negotiation_action_name` onto `DiplomaticAction`; the per-action appliers are `0x00B55090`
+///     (trade), `0x00B29BB0` (break trade), `0x00B28DB0` (embargo), `0x00B44550` (military access),
+///     `0x00B67BD0` (cancel access), `0x00B44590` (state gift) and `0x00B105C0` (protectorate) —
+///     CONFIRMED addresses, ported in `treaties.rs`.
+///   - **payments** → `CampaignCommand::Diplomacy` again: the lump sum (`turns == 0`) as a
+///     `StateGift(amount)` (`treaties::state_gift`, `0x00B44590` → `0x00B446B0`), INFERRED as the
+///     stand-in for the money move `0x00BB3810(amount, 3)`; the per-turn schedule as
+///     `RegularPayment(amount, turns)` (INFERRED).
 ///
-/// WIRED (0-E round N+2), one `CampaignCommand` per row type that now has an applier:
-/// - **stance / access / gift terms** → `CampaignCommand::Diplomacy`. INFERRED mapping from
-///   `negotiation_action_name` onto `DiplomaticAction`; the exe's own per-row `DiplomaticAction`
-///   appliers are `0x00B55090` (trade), `0x00B29BB0` (break trade), `0x00B28DB0` (embargo),
-///   `0x00B44550` (military access), `0x00B67BD0` (cancel access), `0x00B44590` (state gift) and
-///   `0x00B105C0` (protectorate) — CONFIRMED addresses, already ported by 0-G in `treaties.rs`.
-/// - **payments** → `CampaignCommand::Diplomacy` again: the lump sum (`turns == 0`) as a
-///   `StateGift(amount)`, which is the model's mover for "this faction gives that faction this much
-///   now" (`treaties::state_gift`, `0x00B44590` → `0x00B446B0`) — INFERRED as the stand-in for
-///   **`0x00BB3810(amount, 3)`**, the CONFIRMED lump sum the commit runs, which moves money and also
-///   raises the receiver's `state_gift` factor (the factor's exact contribution on that path is
-///   UNKNOWN). The per-turn schedule becomes `RegularPayment(amount, turns)`, one of the container's
-///   two optional single items (`+0x20` / `+0x24`, UNKNOWN which) — INFERRED that it is the payment.
-///
-/// STILL DROPPED (PLACEHOLDER): **technologies** → UNKNOWN. The rows go through `0x00A6CBE0` →
-/// `0x00B1A790`, which only commits money; the per-row-type work happens behind the row vtable
-/// (`0x00B1A820` calls vtable `+0x1C`) and **no technology-granting address has been traced from the
-/// deal path** — reachable only through that vtable. The model has no `GrantTechnology` command, and
-/// 0-E proved none is reachable, so no address is guessed here. Left open: UI_FIDELITY.md §4.5 item 8.
-///
-/// DEFERRED: **regions** (`0x00B449F0`, CONFIRMED address). The sandbox mapped them onto a
-/// `TransferRegion` command whose effect was INFERRED from the capture path (it left the old owner's
-/// garrison army behind in the settlement); main has no such command, so the rows are dropped until
-/// `0x00B449F0` is decoded.
-///
-/// INFERRED (this file): `Propose` / `ProposeDeal` (whose AI evaluation the model lacks) and
-/// `AcceptOffer` (CCQ_DIPLOMACY_ACCEPT_DEAL → 0x00C114B0) all reach this one applier; the exe
-/// applies a deal from its own engine-side object instead.
-///
-/// Nothing fills the deal from Lua yet (see [`NegotiationItem`]), so in play this applies an empty
-/// deal. Applying a deal leaves it in place (it stays until END) and does not end the negotiation
-/// (only `End()` does).
+/// INFERRED (this file): `ProposeDeal` (CCQ_DIPLOMACY_PROPOSE_DEAL → `0x00C49BE0`, the AI's
+/// evaluation, which the model lacks) and `AcceptOffer` (CCQ_DIPLOMACY_ACCEPT_DEAL → 0x00C114B0)
+/// both reach this applier. Applying a deal leaves it in place (it stays until END) and does not
+/// end the negotiation (only `End()` does).
 fn accept_deal(ui: &CampaignUi) {
     let Some((proposer, recipient)) = negotiation_factions(ui) else { return };
     let mut state = ui.negotiation.borrow_mut();
@@ -588,6 +546,8 @@ fn accept_deal(ui: &CampaignUi) {
             }
         }
     }
+    // The records the model holds (regions, technologies).
+    ui.push(CampaignRequest::Command(CampaignCommand::AcceptDeal));
 }
 
 /// The `CampaignCommand`s one pending deal row becomes: `actor` acts on `target`. Split out of
@@ -605,10 +565,6 @@ pub(super) fn deal_item_commands(item: &NegotiationItem, actor: FactionId, targe
             };
             vec![CampaignCommand::Diplomacy { a: actor, b: target, action }]
         }
-        // DEFERRED: `0x00B449F0` has no model command on main (see `accept_deal`).
-        NegotiationItem::Regions(_) => Vec::new(),
-        // PLACEHOLDER: UNKNOWN, no granting address is reachable. See `accept_deal`.
-        NegotiationItem::Technologies(_) => Vec::new(),
     }
 }
 
@@ -879,26 +835,45 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     // `offer_or_demand_regions` (InitialiseNegotiation reads `offers, demands, regions_text =` and
     // hands each row to AddToOffersDemandsList). `Regions` is set for the region-transfer action
     // (action id 6). INFERRED: `Action` is the host's action name (the exe gives the action
-    // record) and rows carry no `Text`; the host never builds a row yet (see [`NegotiationItem`]).
+    // record) and rows carry no `Text`. The region and technology rows come from the model's two
+    // records (one row per side that has items, `Regions` the region keys), after the UI's rows;
+    // their `Action` is the action's name, our stand-in for the action record everywhere
+    // (`BuildPossibleActions`' `Address`), which the panel hands back to `RemoveAction`
+    // (diplomacy_panel.lua:1024).
     f!("BuildOfferAndDemandStrings", |lua, inner, ui, _a: Variadic<Value>| {
         let state = ui.negotiation.borrow();
         if state.target.is_none() {
             return Ok(mlua::MultiValue::new());
         }
+        let (regions, techs) = {
+            let m = ui.model();
+            let keys = |list: &[RegionId]| -> Vec<String> { list.iter().filter_map(|r| m.world.regions.get(r).map(|x| x.key.clone())).collect() };
+            match m.negotiations.current.as_ref().filter(|n| Some(n.serial) == state.target) {
+                Some(n) => (
+                    [keys(&n.regions.offered), keys(&n.regions.demanded)],
+                    [!n.technologies.offered.is_empty(), !n.technologies.demanded.is_empty()],
+                ),
+                None => Default::default(),
+            }
+        };
         let mut out = Vec::new();
-        for items in [&state.offers, &state.demands] {
+        for (side, items) in [&state.offers, &state.demands].into_iter().enumerate() {
             let list = lua.create_table()?;
-            for (i, DealRow { item, .. }) in items.iter().enumerate() {
+            for DealRow { item, .. } in items {
                 let row = lua.create_table()?;
                 row.set("Action", negotiation_action_name(item))?;
-                if let NegotiationItem::Regions(keys) = item {
-                    let regions = lua.create_table()?;
-                    for (j, r) in keys.iter().enumerate() {
-                        regions.set(j + 1, r.as_str())?;
-                    }
-                    row.set("Regions", regions)?;
-                }
-                list.set(i + 1, row)?;
+                list.push(row)?;
+            }
+            if !regions[side].is_empty() {
+                let row = lua.create_table()?;
+                row.set("Action", NegotiationAction::Regions.name())?;
+                row.set("Regions", lua.create_sequence_from(regions[side].iter().map(String::as_str))?)?;
+                list.push(row)?;
+            }
+            if techs[side] {
+                let row = lua.create_table()?;
+                row.set("Action", NegotiationAction::Technology.name())?;
+                list.push(row)?;
             }
             out.push(Value::Table(list));
         }
@@ -939,7 +914,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
                     });
                     continue;
                 };
-                row.set(if offered { "CurrentlyOffered" } else { "CurrentlyDemanded" }, region_in_deal(&ui, &key, offered))?;
+                row.set(if offered { "CurrentlyOffered" } else { "CurrentlyDemanded" }, region_in_deal(&ui, r, offered))?;
                 list.push(row)?;
             }
             out.push(Value::Table(list));
@@ -1050,27 +1025,83 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     // (0x00932EC0: the deal emptied, the panel re-initialised over hub +0x348), `End` →
     // CCQ_DIPLOMACY_END_NEGOTIATION (see [`end_negotiation`]). None but `End` ends the
     // negotiation. Accepting applies the deal at most once ([`accept_deal`]).
-    // PLACEHOLDER: `Propose` / `ProposeDeal` (0x009BF3C0 / 0x009BFCF0, CCQ_DIPLOMACY_PROPOSE_DEAL →
-    // 0x00933690 → 0x00C49BE0) hand the deal to the AI's evaluation, which the model does not
-    // have; here the AI accepts at once (no reply).
-    // `Propose(offers, demands, action)` from OkRegions / OkTechnologies carries the chosen regions
-    // or technologies (0x009BF3C0 cases 6 / 7 read the two tables into the deal item before
-    // handing it to the campaign negotiation, 0x00C49BD0 → its virtual +0x40). PLACEHOLDER: the
-    // deal is not in the model, so those items are dropped; logged once.
+    // PLACEHOLDER: `ProposeDeal` (0x009BFCF0, CCQ_DIPLOMACY_PROPOSE_DEAL → 0x00933690 →
+    // 0x00C49BE0) hands the deal to the AI's evaluation, which the model does not have; here the
+    // AI accepts at once (no reply).
+    //
+    // `Propose(offers, demands, action)` (0x009BF3C0, UI_FIDELITY.md §4.9) only adds the action's
+    // items to the deal, through the action record's command; it proposes nothing. Regions (OkRegions:
+    // the rows' `Address`) → `CampaignCommand::ProposeRegions`, technologies (OkTechnologies: the
+    // cards' `RecordAddress`, our technology key) → `ProposeTechnologies`. An entry that is not a
+    // region (or a technology key) aborts the command, as an id that does not resolve does in the
+    // executors. PLACEHOLDER: the other actions' items (state gift, payments, protector, war, the
+    // faction lists of 13–15) have no model command yet; logged once per action.
     f!("Propose", |_l, inner, ui, a: Variadic<Value>| {
-        // Called as a method: the object first, then the two lists.
-        if let [_, Value::Table(offers), Value::Table(demands), ..] = a.as_slice() {
-            let (o, d) = (offers.raw_len(), demands.raw_len());
-            if o + d > 0 {
-                inner.log_once("Propose items dropped", || {
-                    format!("PLACEHOLDER negotiation:Propose: the deal is not in the model; {o} offered and {d} demanded items dropped (logged once)")
-                });
+        if negotiation_factions(&ui).is_none() {
+            return Ok(());
+        }
+        // Called as a method: the object, the offers, the demands, the action.
+        let [_, Value::Table(offers), Value::Table(demands), action, ..] = a.as_slice() else {
+            inner.log_once("Propose arguments", || "ERROR negotiation:Propose: expected (offers, demands, action); nothing proposed (logged once)".into());
+            return Ok(());
+        };
+        let action = match action {
+            Value::String(s) => s.to_str().ok().and_then(|s| NegotiationAction::from_name(&s)),
+            _ => None,
+        };
+        let entries = |t: &Table| -> Vec<Value> { t.sequence_values::<Value>().filter_map(Result::ok).collect() };
+        let cmd = match action {
+            Some(NegotiationAction::Regions) => {
+                let ids = |t: &Table| -> Option<Vec<RegionId>> {
+                    entries(t).iter().map(|v| entity_of(v, TAG_REGION).map(|r| RegionId(r as u32))).collect()
+                };
+                match (ids(offers), ids(demands)) {
+                    (Some(offered), Some(demanded)) => Some(CampaignCommand::ProposeRegions { clear: false, demanded, offered }),
+                    _ => None,
+                }
             }
+            Some(NegotiationAction::Technology) => {
+                let keys = |t: &Table| -> Option<Vec<String>> {
+                    entries(t).iter().map(|v| if let Value::String(s) = v { s.to_str().ok().map(|s| s.to_string()) } else { None }).collect()
+                };
+                match (keys(offers), keys(demands)) {
+                    (Some(offered), Some(demanded)) => Some(CampaignCommand::ProposeTechnologies { clear: false, demanded, offered }),
+                    _ => None,
+                }
+            }
+            other => {
+                let name = other.map_or("unknown", NegotiationAction::name);
+                inner.log_once_for("Propose action", name, || {
+                    format!("PLACEHOLDER negotiation:Propose: the {name} action's items have no model command; nothing proposed (logged once per action)")
+                });
+                return Ok(());
+            }
+        };
+        match cmd {
+            Some(cmd) => ui.push(CampaignRequest::Command(cmd)),
+            None => inner.log_once("Propose entries", || {
+                "ERROR negotiation:Propose: an entry is not a region / technology key; nothing proposed (logged once)".into()
+            }),
+        }
+        Ok(())
+    });
+    // ProposeDeal: PLACEHOLDER for the AI's evaluation (see above): the AI refuses a deal in
+    // which it gives a region or a technology (`CampaignModel::ai_refuses_deal`; result "declined",
+    // as `DeclineOffer` gives), else accepts at once.
+    f!("ProposeDeal", |_l, inner, ui, _a: Variadic<Value>| {
+        if negotiation_factions(&ui).is_none() {
+            return Ok(());
+        }
+        if ui.model().ai_refuses_deal() {
+            inner.log_once("ProposeDeal refused", || {
+                "PLACEHOLDER negotiation:ProposeDeal: no AI evaluation yet; the AI refuses to give regions or technologies (logged once)".into()
+            });
+            ui.negotiation.borrow_mut().status = NegotiationStatus::Declined;
+            return Ok(());
         }
         accept_deal(&ui);
         Ok(())
     });
-    f!("ProposeDeal", |_l, inner, ui, _a: Variadic<Value>| { accept_deal(&ui); Ok(()) });
     f!("AcceptOffer", |_l, inner, ui, _a: Variadic<Value>| { accept_deal(&ui); Ok(()) });
     f!("DeclineOffer", |_l, inner, ui, _a: Variadic<Value>| {
         if negotiation_factions(&ui).is_some() {
@@ -1088,6 +1119,8 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
             state.clear_deal();
             state.context
         };
+        // The records the model holds are emptied by the command (executor 0x00932EC0).
+        ui.push(CampaignRequest::Command(CampaignCommand::ClearNegotiation));
         if let Some(context) = context {
             post_negotiation_cleared(lua, &inner, context, is_local_player(&ui, proposer))?;
         }
@@ -1097,14 +1130,37 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
         end_negotiation(&inner, &ui);
         Ok(())
     });
-    // RemoveAction (0x009C0F70 → 0x00C5C780): takes an action out of the deal. PROVISIONAL: no
-    // deal row is built yet (see [`NegotiationItem`]), so there is nothing to remove.
-    f!("RemoveAction", |_l, inner, ui, _a: Variadic<Value>| Ok(()));
+    // RemoveAction(action) (0x009C0F70 → 0x00C5C780 → the action record's virtual +0x4C): takes an
+    // action out of the deal. For regions and technologies that posts the action's own command with
+    // the clear flag set and no items (0x00C5CF20 / 0x00C5CFF0, CONFIRMED). PLACEHOLDER: the other
+    // actions' items are not built (see [`NegotiationItem`]), so there is nothing to remove.
+    f!("RemoveAction", |_l, inner, ui, a: Variadic<Value>| {
+        if negotiation_factions(&ui).is_none() {
+            return Ok(());
+        }
+        let action = match a.last() {
+            Some(Value::String(s)) => s.to_str().ok().and_then(|s| NegotiationAction::from_name(&s)),
+            _ => None,
+        };
+        let cmd = match action {
+            Some(NegotiationAction::Regions) => CampaignCommand::ProposeRegions { clear: true, demanded: Vec::new(), offered: Vec::new() },
+            Some(NegotiationAction::Technology) => CampaignCommand::ProposeTechnologies { clear: true, demanded: Vec::new(), offered: Vec::new() },
+            _ => return Ok(()),
+        };
+        ui.push(CampaignRequest::Command(cmd));
+        Ok(())
+    });
     // CanPropose(): the panel asks before enabling SendOffer. UNKNOWN shape; INFERRED rule: a
-    // deal with at least one item on either side.
+    // deal with at least one item on either side (the UI's rows or the model's records).
     f!("CanPropose", |_l, inner, ui, _a: Variadic<Value>| {
         let state = ui.negotiation.borrow();
-        Ok(!state.offers.is_empty() || !state.demands.is_empty())
+        let modelled = ui
+            .model()
+            .negotiations
+            .current
+            .as_ref()
+            .is_some_and(|n| Some(n.serial) == state.target && !(n.regions.is_empty() && n.technologies.is_empty()));
+        Ok(!state.offers.is_empty() || !state.demands.is_empty() || modelled)
     });
     // CanThreaten(): UNKNOWN shape; INFERRED: any counterparty not already at war.
     f!("CanThreaten", |_l, inner, ui, _a: Variadic<Value>| {

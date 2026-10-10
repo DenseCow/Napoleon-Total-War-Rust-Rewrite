@@ -10,11 +10,11 @@ the original's values. See the Goal section of `CLAUDE.md`.
 
 Generated 2026-10-10 by `bash tools/progress.sh` (from `tools/backlog_count.sh` and `tools/tag_count.sh`); never edit it by hand.
 
-Tags left in the code (done means zero): 1771 (648 PROVISIONAL, 109 PLACEHOLDER, 1014 INFERRED), plus 588 UNKNOWN.
+Tags left in the code (done means zero): 1779 (652 PROVISIONAL, 114 PLACEHOLDER, 1013 INFERRED), plus 581 UNKNOWN.
 
 | Section | Done | Partly done | To do |
 |---|---|---|---|
-| 0. Cross-cutting fidelity | 88 | 0 | 38 |
+| 0. Cross-cutting fidelity | 93 | 0 | 35 |
 | 1. File formats and data | 11 | 0 | 0 |
 | 2. Graphics and rendering | 0 | 11 | 29 |
 | 3. Battle gameplay (land) | 1 | 11 | 22 |
@@ -95,11 +95,13 @@ first. Evidence and round history live there; the pre-2026-10-07 long form of th
 - [x] Recruited unit size (3174/3174 save units), used for new recruits
 - [x] Demolish command (refund PROVISIONAL)
 - [x] Experience-adjusted recruitment cost (recruitment use INFERRED; upkeep untouched)
-- [ ] (running: deal-items) Region transfer in deals (`TransferRegion` rejected: needs the `0x00B449F0` flags)
-- [ ] (running: deal-items) Peace terms: regions and techs as deal items (`0x00B449F0`)
+- [x] Region transfer in deals (`TransferRegion` rejected: needs the `0x00B449F0` flags)
+- [x] Peace terms: regions and techs as deal items (`0x00B449F0`)
+- [ ] (running: deal-ai) Deals: the AI's evaluation of region/technology items (until then the AI refuses to give them: PLACEHOLDER, `ai_refuses_deal`); `grant_technology` requirement walk (PROVISIONAL); a foreign garrison left by a deal or liberation: what the exe does when the owner's army arrives (ours waits outside), `defenders_of` and recruit spawn (`0x008EF790`) (PROVISIONAL); the capital loss path (`0x008BA580` / `0x008DABC0`)
 - [x] Recruitment details (`0x00AECEE0`, `0x00AED220`): cost from units #7 and region effects, the unit cap (units #15, `0x008F68B0`), the AI handicap and recruit prices from the model (`0x008DD090`)
 - [x] Recruitable population gate and charge (`0x00A89550` / `0x00AAF190` / `0x00A61AA0`, `REGION_FACTORS` #2)
-- [ ] Capture refunds a port's naval queue items to the old owner (`0x00B1A760(1)` per port); our `occupy` refunds nothing; `0x00B58A30` is a fourth capture variant missing from the notes
+- [x] Capture refunds a port's naval queue items to the old owner (`0x00B1A760(1)` per port); our `occupy` refunds nothing; `0x00B58A30` is a fourth capture variant missing from the notes
+- [ ] `CDIR_INTENTION_TRANSFER_REGION_OWNERSHIP` (`0x00B93840`, applied via `0x00B58A30` at a faction's round end, destroys the garrison): when the director creates it and its checks `0x00CF0D30` / `0x00BB52E0`; not in the model
 - [ ] 14 recruit-cost save misses: prices are fixed at queue time (traced 2026-10-10); 13 explained by effects changed after queueing; left: Spain priced +49 vs +24 (2×25 − 1, UNKNOWN); trace when `0x008B16C0` refreshes the faction effect sum (18 callers)
 - [x] Trace whether turn.rs:471 should block training of flagged items (`0x00B5AD90`)
 - [ ] Recruitable list: trace the no-entry gates `0x00AA1660` and `0x00A27960` (PROVISIONAL; government gate `0x00EA9810` ported); where construction runs relative to the held-back check (INFERRED); `0x00A6AE40` reads two extra slots (+0x20/+0x24, walls?)
@@ -161,9 +163,9 @@ SpeedTree leftovers are in §2.
   - [ ] `RetrieveFactionRegionList` and `LabelDetails` still show 0 for both changes: use the projection
   - [ ] Migration (needs theatres); a `region_wealth_factors` table from mods; base_capacity 0 drops the population to the minimum (check the exe)
 - [x] `OnDivorceChild` fires on Adopt, Divorce, Destroy and DestroyChildren (`0x01027BA0` → `0x0102DE60`; ORIGINAL BUG `0x01027B20` fixed: DestroyChildren could loop for ever)
-- [ ] (running: ui-small) Does `RetrieveVisibleEnitityDetails` skip settlements behind the HUD (campaign hud.rs `covers`)?
-- [ ] (running: ui-small) `UIComponent:Adopt(child, index)` ignores the optional index `0x01014580` reads
-- [ ] Diplomacy negotiation playable; region exchange rows. Merged diplomacy2: (user check 2026-10-09: the changes work) greeting by attitude through the queued BeginNegotiation (`0x00BF5A60`), diplomat portrait, button lists for all three relationships, power/wealth words (power = raw unit upkeep, CONFIRMED `0x008B2150`), regnal numerals. Austria power now "Terrifying" as the original (power CONFIRMED against the 2026-10-10 debugger values at the Coalition start; prestige PROVISIONAL 0). Merged 2026-10-10: option buttons built (`SetState` returns as `0x01013550`), `FindChildAddress`, treaty lines, tradeable regions and technologies (two lists, `0x009C5770` / `0x00C5C170`); red cancel texts are the original's. Open: Propose drops the chosen regions/techs (PLACEHOLDER, logged once; `0x009BF3C0` → `0x00C49BD0` +0x40), tech list order PROVISIONAL, region-row tooltip empty, our text ~20% wider (a treaty line wraps), deal rows and result still held in the UI until the deal is modelled
+- [x] Does `RetrieveVisibleEnitityDetails` skip settlements behind the HUD (campaign hud.rs `covers`)?
+- [x] `UIComponent:Adopt(child, index)` ignores the optional index `0x01014580` reads
+- [ ] Diplomacy negotiation playable; region exchange rows. Merged diplomacy2: (user check 2026-10-09: the changes work) greeting by attitude through the queued BeginNegotiation (`0x00BF5A60`), diplomat portrait, button lists for all three relationships, power/wealth words (power = raw unit upkeep, CONFIRMED `0x008B2150`), regnal numerals. Austria power now "Terrifying" as the original (power CONFIRMED against the 2026-10-10 debugger values at the Coalition start; prestige PROVISIONAL 0). Merged 2026-10-10: option buttons built (`SetState` returns as `0x01013550`), `FindChildAddress`, treaty lines, tradeable regions and technologies (two lists, `0x009C5770` / `0x00C5C170`); red cancel texts are the original's. Propose builds region/tech deals in the model (2026-10-10; other actions' items PLACEHOLDER). Open: tech list order PROVISIONAL, region-row tooltip empty, our text ~20% wider (a treaty line wraps), deal rows and result still held in the UI until the deal is modelled
 - [ ] Runtime `force_diplomacy` calls reach only the ntw_script state (ntw_script game.rs ~300), so the model and the negotiation panel ignore them; give them one home in the model
 - [ ] Campaign save naming
 - [ ] The five agent options actions via `MoveIntoTarget` (contract known; needs the model's agent order queue)
@@ -194,8 +196,8 @@ SpeedTree leftovers are in §2.
 - [x] Comparison harness built: `image_diff`, `NAPOLEON_BATTLE_TRACE`, `docs/COMPARE_WITH_ORIGINAL.md`
 - [ ] First real side-by-side run against the original (needs the user)
 - [x] Battle `B.WindowsTime`: `timeGetTime()*0.001f` as a float (`0x005D4BF0`); the campaign's `0x009FB0B0` truncates to int; one shared clock
-- [ ] Portraits of generated characters: the recruitment pool's hires and promoted generals (`promote_unit`) get empty CHARACTER_DETAILS (ntw_sim pool.rs), so their army card and Lists row keep the unit card (PLACEHOLDER, ntw_script ui/campaign/army.rs `unit_entry` / campaign/characters.rs `character_details`); trace how the exe picks a new character's portrait and give it in the model.
-- [ ] Army recruitment tab contents: `0x009FE7B0` reads the tab's own manager (commander `+0x34` → `+0x124`), not traced; ours opens it empty (PLACEHOLDER, ntw_script ui/campaign/tabs.rs `generate_current_tab`). Evidence: the original's army Recruitment tab in an own region has an Options row (4 cards, a "2/1" badge, cost 472) and a 10-slot Queue (user screenshot `ntw-evidence\screens\2026-10-07_original_wellesley_army_recruitment_tab.png`); the naval tab's port path is untraced too (PROVISIONAL).
+- [ ] (running: new-portraits) Portraits of generated characters: the recruitment pool's hires and promoted generals (`promote_unit`) get empty CHARACTER_DETAILS (ntw_sim pool.rs), so their army card and Lists row keep the unit card (PLACEHOLDER, ntw_script ui/campaign/army.rs `unit_entry` / campaign/characters.rs `character_details`); trace how the exe picks a new character's portrait and give it in the model.
+- [ ] (running: army-recruit-tab) Army recruitment tab contents: `0x009FE7B0` reads the tab's own manager (commander `+0x34` → `+0x124`), not traced; ours opens it empty (PLACEHOLDER, ntw_script ui/campaign/tabs.rs `generate_current_tab`). Evidence: the original's army Recruitment tab in an own region has an Options row (4 cards, a "2/1" badge, cost 472) and a 10-slot Queue (user screenshot `ntw-evidence\screens\2026-10-07_original_wellesley_army_recruitment_tab.png`); the naval tab's port path is untraced too (PROVISIONAL).
 - [x] Battle HUD scripts' frame: CONFIRMED 1280x960 (debugger sitting 2026-10-09, root at manager +0xC4); the battle host uses `UiFrame::ScriptFrame`; CreateFromLayout makes the file root's first child at its own frame position (`0x01027400`, `0x0101E270`)
 - [x] Battle HUD UI scale: the exe's UI scale (`0x0114EB20`) applies to the battle HUD too; ours lays the battle HUD out at window / scale and maps the mouse back
 - [x] Battle `B.Time`: the exe binds it (`0x005D3BB0`): the UI pulse clock, real time capped at 300 ms a frame
@@ -618,6 +620,8 @@ Non-blocking review findings, one line each (CLAUDE.md "Done means"). A worker e
 - [ ] Own save: header pixels stored as RON u32 text (bytes would be smaller and faster); `quick_save` clones the whole model (`SaveData` could borrow it)
 - [ ] real_install.rs:1010 merged-vs-old test can't fail on vanilla (one file per table keeps every row): test the keys with a two-file case; cover the typed tables and `models_building`
 - [ ] `ntw_formats` mods.rs: plan-cache misses for different install/language keys wait on each other under `PLAN_BUILD`, and `mount_plan` runs under it (cold path)
+- [ ] Ghidra: plate comments for `0x009F4520`, `0x009F9CA0` and the `ui_show_campaign_labels` gate (skipped by ui-small; FUNCTION_DOC_WORKFLOW_V5)
+- [ ] Queue cancel: turn.rs ~433 clones each removed item (partition the taken queue); battles.rs ~344 `Arc::clone(&self.rules)` only for the borrow checker; inline naval checks left in ntw_ai campaign/world.rs:308, ntw_campaign save.rs:1231, economy_fidelity.rs:414 (use `CampaignRules::is_naval_unit`); capture-refund Ghidra functions at 48-63% completeness (struct/this typing)
 - [ ] Ghidra: the 12 functions mod-loading2 named (`0x0108E8F0`, `0x0108EBB0`, `0x0109ECF0`, `0x0105E8E0` ...) are at 4-30% completeness: type their variables (FUNCTION_DOC_WORKFLOW_V5)
 - [ ] `napoleon` campaign/detail.rs:93 opens a second Vfs on the main thread; reuse the scene's
 - [ ] The campaign model addresses building slots as `Option<usize>` (None = the road/fort slot); replace it with a slot enum so no sentinel values remain (from the walls review; ntw_sim campaign).

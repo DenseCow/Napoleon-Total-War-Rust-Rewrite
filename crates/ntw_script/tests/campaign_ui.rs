@@ -1392,7 +1392,7 @@ fn negotiation_screen_closes_from_its_close_button_and_opens_again() {
 /// `End()` posted nothing and diplomacy stayed locked).
 #[test]
 fn the_x_after_a_proposal_ends_the_negotiation_once() {
-    negotiation_ends_once("CampaignUI.Propose()", click_x);
+    negotiation_ends_once("CampaignUI.ProposeDeal()", click_x);
 }
 
 /// A declined offer gives the negotiation a result (`Finished()`, +0x28 = 2, 0x00C1F210) but does
@@ -1674,11 +1674,61 @@ fn negotiation_regions_list_the_tradeable_regions() {
     no_errors(&s.host);
     let selected: Option<bool> = s.host.script_env(panel).unwrap().raw_get::<mlua::Table>("offerable_regions").unwrap().get::<mlua::Table>(1).unwrap().get("Selected").unwrap();
     assert_eq!(selected, Some(true));
-    // OK proposes the selection (`Propose(offers, demands, action)`); the deal is not in the
-    // model yet (PLACEHOLDER), which is logged, not dropped silently.
+    // OK proposes the selection (`Propose(offers, demands, action)`, 0x009BF3C0): the regions
+    // command puts the region in the model's regions record as an offer (UI_FIDELITY.md §4.9), and
+    // the next TradeableRegions marks it CurrentlyOffered. Nothing is accepted yet.
+    let first = {
+        let st = s.scripts.state();
+        let m = &st.model;
+        m.tradeable_regions(m.faction_by_key("britain").unwrap().id).next().unwrap()
+    };
     click(&s.host, find(&s.host, popup, "ok_regions").expect("the regions OK"));
+    frame(&s, 0.1);
+    no_errors(&s.host);
+    {
+        let st = s.scripts.state();
+        let n = st.model.negotiations.current.as_ref().expect("the negotiation is open");
+        assert_eq!((n.regions.offered.clone(), n.regions.demanded.clone()), (vec![first], vec![]));
+        assert_eq!(st.model.world.regions[&first].owner, st.model.faction_by_key("britain").unwrap().id, "proposing gives nothing away");
+    }
+    let (offers, _): (mlua::Table, mlua::Table) = s.host.lua().load("return CampaignUI.TradeableRegions()").eval().unwrap();
+    let row: mlua::Table = offers.get(1).unwrap();
+    assert!(row.get::<bool>("CurrentlyOffered").unwrap());
+    // Proposing the deal (accepted at once, PLACEHOLDER for the AI's evaluation) hands it over.
+    s.host.lua().load("CampaignUI.ProposeDeal()").exec().unwrap();
+    frame(&s, 0.2);
+    no_errors(&s.host);
+    {
+        let st = s.scripts.state();
+        assert_eq!(st.model.world.regions[&first].owner, st.model.faction_by_key("austria").unwrap().id);
+    }
+    // Removing the row's action (the item's `DiplomacyItem`, our action name) posts the regions
+    // command with the clear flag (0x00C5CF20): the record empties.
+    s.host.lua().load("CampaignUI:RemoveAction('regions')").exec().unwrap();
+    frame(&s, 0.3);
+    no_errors(&s.host);
+    assert!(s.scripts.state().model.negotiations.current.as_ref().unwrap().regions.is_empty());
+    // Demanding one of Austria's regions: until the AI's evaluation is ported the AI refuses to
+    // give it (PLACEHOLDER, logged once): the result is "declined" and nothing changes hands.
+    let asked = {
+        let st = s.scripts.state();
+        let m = &st.model;
+        m.tradeable_regions(m.faction_by_key("austria").unwrap().id).next().unwrap()
+    };
+    s.host
+        .lua()
+        .load("local _, demands = CampaignUI.TradeableRegions() CampaignUI:Propose({}, { demands[1].Address }, 'regions')")
+        .exec()
+        .unwrap();
+    frame(&s, 0.4);
+    s.host.lua().load("CampaignUI.ProposeDeal()").exec().unwrap();
+    frame(&s, 0.5);
+    let finished: Option<bool> = s.host.lua().load("return CampaignUI.Finished()").eval().unwrap();
+    assert_eq!(finished, Some(true), "declined is a result");
     let log = s.host.take_log();
-    assert_eq!(log.iter().filter(|l| l.contains("1 offered and 0 demanded items dropped")).count(), 1, "{log:?}");
+    assert_eq!(log.iter().filter(|l| l.contains("the AI refuses to give")).count(), 1, "{log:?}");
+    let st = s.scripts.state();
+    assert_eq!(st.model.world.regions[&asked].owner, st.model.faction_by_key("austria").unwrap().id);
 }
 
 /// `TradeableTechnologies` gives two lists, as `0x009C5AA0` (the panel reads two results), each
@@ -1869,4 +1919,30 @@ fn region_details_panel_is_filled_from_the_campaign() {
         let pip: String = f.unwrap().get("Pip").unwrap();
         assert!(pip.starts_with("data/ui/campaign ui/pips/"), "{pip}");
     }
+}
+
+/// `RetrieveVisibleEnitityDetails` lists nothing while the labels preference is off
+/// (`ui_show_campaign_labels`, index 0x44, read first by `0x009F4520`), and `ToggleLabels`
+/// (`0x009F9CA0`) flips it. Bug: the list ignored the preference and ToggleLabels was missing.
+#[test]
+fn toggle_labels_empties_the_visible_settlements() {
+    let Some(s) = setup() else { return };
+    let regions: Vec<ntw_sim::campaign::RegionId> = {
+        let st = s.scripts.state();
+        let france = st.model.faction_by_key("france").unwrap().id;
+        st.model.world.regions.values().filter(|r| r.owner == france).map(|r| r.id).take(3).collect()
+    };
+    let on_screen = regions.iter().enumerate().map(|(i, r)| (*r, 100.0 + 60.0 * i as f32, 700.0)).collect();
+    s.host.campaign_set_view((1.0, 2.0, 3.0), on_screen, None);
+    let lua = s.host.lua();
+    let count = || -> usize { lua.load("return #CampaignUI.RetrieveVisibleEnitityDetails().Settlements").eval().unwrap() };
+    let before = count();
+    lua.load("CampaignUI.ToggleLabels()").exec().unwrap();
+    let toggled = count();
+    lua.load("CampaignUI.ToggleLabels()").exec().unwrap();
+    assert_eq!(count(), before);
+    let mut both = [before, toggled];
+    both.sort();
+    assert_eq!(both, [0, regions.len()], "one state lists the settlements, the other nothing");
+    no_errors(&s.host);
 }

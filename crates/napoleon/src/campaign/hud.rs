@@ -14,6 +14,7 @@
 use std::rc::Rc;
 
 use bevy::camera::ClearColorConfig;
+use bevy::camera::primitives::{Aabb, Frustum};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use ntw_formats::loc::Localisation;
@@ -47,8 +48,19 @@ pub struct CampaignHud {
 impl CampaignHud {
     /// True if a screen point is over a visible HUD panel.
     pub fn covers(&self, p: Vec2) -> bool {
-        self.panels.iter().any(|r| r.contains(p))
+        panels_cover(&self.panels, p)
     }
+}
+
+/// True if a screen point is inside one of the panel rectangles.
+fn panels_cover(panels: &[Rect], p: Vec2) -> bool {
+    panels.iter().any(|r| r.contains(p))
+}
+
+/// The pointer as the map sees it: none while it is over a HUD panel (a label hidden under a
+/// panel is listed but cannot be the one under the pointer).
+fn map_pointer(panels: &[Rect], cursor: Option<Vec2>) -> Option<Vec2> {
+    cursor.filter(|&c| !panels_cover(panels, c))
 }
 
 /// Called from `scene::enter` once the campaign is running.
@@ -652,24 +664,26 @@ fn click(hud: &mut CampaignHud, id: &str, sounds: &mut MessageWriter<crate::audi
 }
 
 /// Settlement labels: each frame the HUD gets the camera position and the settlements on screen
-/// (projected from their map position), and the original Labels.lua (driven by the root layout's
+/// (`RetrieveVisibleEnitityDetails`, `0x009F4520` → `0x009B0400` per settlement, CONFIRMED): a
+/// settlement is listed when a 6-unit cube around it at height 0 is not wholly outside the view
+/// frustum (`0x009BAA90` → `0x010F6AA0`), whether or not a HUD panel covers it, and its screen
+/// position is the point at height 0 two units south of it, projected and rounded (`0x010EE3B0`,
+/// camera virtual +0x270). The original Labels.lua (driven by the root layout's
 /// pulse) creates and moves the `city_info_bar` labels ("Settlement, Region" in the owner's
 /// colours). The labels draw under every HUD panel: they are root children of priority -1 and
 /// the root's `OnAdoptChild` sorts its children by priority (CONFIRMED, see the host's
-/// `adopted`). PROVISIONAL: the label sits at the settlement's projected ground point;
-/// settlements behind the HUD panels get no label (whether `RetrieveVisibleEnitityDetails` leaves
-/// them out is UNKNOWN); the one under the pointer is the nearest within 24 px.
+/// `adopted`). PROVISIONAL: the one under the pointer is the nearest within 24 px (none while the
+/// pointer is over a HUD panel, [`map_pointer`]).
 /// Also reports the camera target and theatre to the HUD (`CameraTarget`, which the radar
 /// follows) and applies a camera move the HUD asked for (a radar click).
 pub fn labels(
     hud: Option<NonSendMut<CampaignHud>>,
     sim: Option<NonSend<CampaignSim>>,
-    ground: Option<Res<super::scene::CampaignGround>>,
-    camera: Query<(&Camera, &GlobalTransform), With<super::camera::CampaignCamera>>,
+    camera: Query<(&Camera, &GlobalTransform, &Frustum), With<super::camera::CampaignCamera>>,
     mut rig: Query<&mut super::camera::CampaignCamera>,
     window: Query<&Window, With<PrimaryWindow>>,
 ) {
-    let (Some(mut hud), Some(sim), Some(ground), Ok((camera, cam_tf))) = (hud, sim, ground, camera.single()) else { return };
+    let (Some(mut hud), Some(sim), Ok((camera, cam_tf, frustum))) = (hud, sim, camera.single()) else { return };
     if let Ok(mut cam) = rig.single_mut() {
         // The camera works in Bevy x / z, which is map x / -y.
         if let Some(to) = hud.camera_to.take() {
@@ -678,16 +692,18 @@ pub fn labels(
         hud.host.campaign_set_theatre_bounds((cam.min.x, -cam.max.y), (cam.max.x, -cam.min.y));
         hud.host.campaign_set_camera_target(cam.target.x, -cam.target.y, cam.distance);
     }
-    let cursor = window.single().ok().and_then(|w| w.cursor_position());
+    let cursor = map_pointer(&hud.panels, window.single().ok().and_then(|w| w.cursor_position()));
     let mut list = Vec::new();
     let mut over: Option<(ntw_sim::campaign::RegionId, f32)> = None;
     for r in sim.model().world.regions.values() {
-        let (x, z) = (r.settlement.position.0.to_f32(), r.settlement.position.1.to_f32());
-        let pos = Vec3::new(x, ground.0.height_at(x, z).max(0.0), -z);
-        let Ok(p) = camera.world_to_viewport(cam_tf, pos) else { continue };
-        if p.x < 0.0 || p.y < 0.0 || p.x > hud.screen.x || p.y > hud.screen.y || hud.covers(p) {
+        let (x, y) = (r.settlement.position.0.to_f32(), r.settlement.position.1.to_f32());
+        // A 6-unit cube around the settlement at height 0 that is not wholly outside the view
+        // frustum (`0x009BAA90` → `0x010F6AA0`, all six planes); the HUD panels play no part.
+        if !frustum.intersects_obb_identity(&Aabb::from_min_max(Vec3::new(x - 3.0, -3.0, -y - 3.0), Vec3::new(x + 3.0, 3.0, -y + 3.0))) {
             continue;
         }
+        // The point projected is at height 0, 2 units south of the settlement (`0x009B0400`).
+        let Ok(p) = camera.world_to_viewport(cam_tf, Vec3::new(x, 0.0, -(y - 2.0))) else { continue };
         if let Some(c) = cursor {
             let d = c.distance(p);
             if d < 24.0 && over.is_none_or(|(_, best)| d < best) {
@@ -695,7 +711,7 @@ pub fn labels(
             }
         }
         let q = window_to_ui(p, hud.screen);
-        list.push((r.id, q.x.round(), q.y.round()));
+        list.push((r.id, q.x.round_ties_even(), q.y.round_ties_even()));
     }
     let t = cam_tf.translation();
     hud.host.campaign_set_view((t.x, t.y, t.z), list, over.map(|o| o.0));
@@ -777,6 +793,17 @@ mod tests {
     use super::*;
     use bevy::time::{TimePlugin, TimeUpdateStrategy};
     use std::time::Duration;
+
+    /// Settlements behind a HUD panel are listed (`0x009F4520` has no panel test), so the label
+    /// under the pointer must ignore a pointer that is over a panel. Bug: hovering a panel within
+    /// 24 px of a hidden settlement made `ShouldShowLabelBottomRow` report it.
+    #[test]
+    fn a_pointer_over_a_panel_is_not_on_the_map() {
+        let panels = [Rect::new(0.0, 0.0, 100.0, 50.0)];
+        assert_eq!(map_pointer(&panels, Some(Vec2::new(10.0, 10.0))), None);
+        assert_eq!(map_pointer(&panels, Some(Vec2::new(10.0, 80.0))), Some(Vec2::new(10.0, 80.0)));
+        assert_eq!(map_pointer(&panels, None), None);
+    }
 
     #[derive(Resource, Default)]
     struct Clock(f64);

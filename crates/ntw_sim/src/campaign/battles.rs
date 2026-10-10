@@ -228,7 +228,16 @@ impl CampaignModel {
         events.push(CampaignEvent::ForceDestroyed { force });
     }
 
-    /// `faction` takes `region`'s settlement; `by` (if any) moves inside.
+    /// `faction` takes `region`'s settlement ([`Self::change_region_owner`]; the capture variants
+    /// destroy the garrison army first); `by` (if any) moves inside.
+    ///
+    /// Every capture variant (the settlement's virtuals `0x00B58560` +0x44, `0x00B58890` +0x48 and
+    /// `0x00B58C00` +0x5C, and `0x00B58A30`, the campaign director's region transfer) empties the
+    /// queues itself before the owner changes (CONFIRMED, disassembly): the region's land queue
+    /// (region +0x124) with no refund (`0x00B1A760(0)`), each port's naval queue (slot +0x1E8) with
+    /// the refund (`0x00B1A760(1)`), every construction with no refund (`0x00A6CBE0(0)`). So the old
+    /// owner gets its queued ships' cost back but not its land units' ([`Self::clear_region_queues`]);
+    /// the owner change that follows finds the queues empty.
     pub(crate) fn occupy(
         &mut self,
         region: RegionId,
@@ -236,33 +245,15 @@ impl CampaignModel {
         by: Option<ForceId>,
         events: &mut Vec<CampaignEvent>,
     ) {
-        let Some(r) = self.world.regions.get_mut(&region) else { return };
-        // The slots the old owner held pass to the new one (INFERRED; slots held by a third faction stay).
-        let old = r.owner;
-        for s in r.slots.iter_mut().filter(|s| s.holder == Some(old)) {
-            s.holder = None;
+        self.clear_region_queues(region, QueueRefund { land: false, naval: true });
+        if !self.change_region_owner(region, faction) {
+            return;
         }
-        r.owner = faction;
-        // The queues are cleared (CONFIRMED: the capture variants 0x00B58560 / 0x00B58890 / 0x00B58C00 empty the
-        // region's and the ports' recruitment queues, 0x00B1A760, and every slot's construction, 0x00A6CBE0).
-        // Each item leaves through the cancel path `0x00B1A820`, which gives the region its population back
-        // (`0x00A61AA0`, [`super::population::RecruitmentPopulation::credited`]).
-        r.population = super::population::RecruitmentPopulation::of(&self.rules).credited(r.population, r.recruitment_queue.len());
-        r.recruitment_queue.clear();
-        r.construction.clear();
+        let Some(r) = self.world.regions.get_mut(&region) else { return };
+        // The capture variants destroy the garrison army first; the settlement's links go with it.
         r.garrison = None;
         r.fleet = None;
         let pos = r.settlement.position;
-        // The region leaves every governorship and joins the new owner's first one, if it has one
-        // (INFERRED; the governorship supplies the region's faction part, see `World::governing_faction`).
-        for d in self.world.faction_details.values_mut() {
-            for g in d.posts.iter_mut().filter_map(|p| p.governorship.as_mut()) {
-                g.regions.retain(|x| *x != region);
-            }
-        }
-        if let Some(g) = self.world.faction_details.get_mut(&faction).and_then(|d| d.posts.iter_mut().find_map(|p| p.governorship.as_mut())) {
-            g.regions.push(region);
-        }
         if let Some(c) = by.and_then(|f| self.world.forces.get(&f)).and_then(|f| f.commander)
             && let Some(ch) = self.world.characters.get_mut(&c)
         {
@@ -276,6 +267,91 @@ impl CampaignModel {
         }
         events.push(CampaignEvent::SettlementOccupied { region, faction });
     }
+
+    /// A region handed over without a character: the deal's region item (`0x00C18BF0` →
+    /// `0x00B58A10(faction, 1, 0)` → `TransferSettlementOwnership` `0x00B449F0` with no character
+    /// and no capture report). Nothing happens when `faction` already owns it (`0x00A64AC0` returns
+    /// when the old owner is the new one). The owner change itself is [`Self::change_region_owner`],
+    /// the one rule capture, liberation and deals share. Returns false when the region does not
+    /// exist or did not change hands.
+    pub(crate) fn transfer_region(&mut self, region: RegionId, faction: super::FactionId) -> bool {
+        if self.world.regions.get(&region).is_none_or(|r| r.owner == faction) {
+            return false;
+        }
+        self.change_region_owner(region, faction)
+    }
+
+    /// What every change of a region's owner does (`TransferRegionToFaction` `0x00A64AC0` and the
+    /// slots' `0x00B1B300`, reached from the capture variants and the deal alike): research at the
+    /// region's schools stops (`0x008B4AB0` → `0x008B3720`: the technology's researcher cleared,
+    /// its progress kept; its second loop gives each character listed in a slot, slot +0xD8, to
+    /// the old owner's `0x008B3580`, the same call the completion `0x008EED20` makes for a school's
+    /// characters; the model keeps no per-character research link — gentlemen count by position,
+    /// `gentlemen_in` — so there is nothing to clear), the queues are cleared, the slots and the governorship pass to the new
+    /// owner. No army is moved or destroyed (CONFIRMED: `0x00B449F0` → `0x00B2B810` / `0x00A64AC0`
+    /// / `0x00B1B300` move none, and the settlement's owner-changed event, +0x24 fired at
+    /// `0x00B44B31`, has on the campaign side only the siege listener `0x008DB7D0`, sieges not
+    /// being in the model): after a deal or a liberation the old owner's garrison stays inside,
+    /// a foreign garrison (see `defenders_of`, `enter_settlement`, `recruit`). Returns false when
+    /// the region does not exist.
+    fn change_region_owner(&mut self, region: RegionId, faction: super::FactionId) -> bool {
+        let Some(r) = self.world.regions.get_mut(&region) else { return false };
+        let old = r.owner;
+        let schools: Vec<u32> = r.slots.iter().map(|s| s.id).filter(|&id| id != 0).collect();
+        if let Some(d) = self.world.faction_details.get_mut(&old) {
+            for t in d.research.values_mut().filter(|t| schools.contains(&t.researcher)) {
+                t.researcher = 0;
+            }
+        }
+        // The queues are cleared while the region is still the old owner's (CONFIRMED, `0x00A64AC0`: the
+        // constructions `0x00A6CC10` → `0x00A6CBE0(0)`, no refund; then the land queue `0x00B1A760(flag)` and
+        // each port's naval queue `0x00A6CC40(flag)` → `0x00A6CBF0`). The flag is set when the old owner is not
+        // human (faction +0x6E0 clear) or the caller passed the capture-report flag (`0x00B449F0`'s third
+        // argument, set only by the capture variants, which have emptied the queues already: see `occupy`). So
+        // a deal, a liberation or a scripted handover (`0x00B58A10` → report 0) refunds an AI old owner's queued
+        // units, land and naval, and a human old owner's none.
+        let refund = !self.turn.humans.contains(&old);
+        self.clear_region_queues(region, QueueRefund { land: refund, naval: refund });
+        let Some(r) = self.world.regions.get_mut(&region) else { return false };
+        // The slots the old owner held pass to the new one (INFERRED; slots held by a third faction stay).
+        for s in r.slots.iter_mut().filter(|s| s.holder == Some(old)) {
+            s.holder = None;
+        }
+        r.owner = faction;
+        // The region leaves every governorship and joins the new owner's first one, if it has one
+        // (INFERRED; the governorship supplies the region's faction part, see `World::governing_faction`).
+        for d in self.world.faction_details.values_mut() {
+            for g in d.posts.iter_mut().filter_map(|p| p.governorship.as_mut()) {
+                g.regions.retain(|x| *x != region);
+            }
+        }
+        if let Some(g) = self.world.faction_details.get_mut(&faction).and_then(|d| d.posts.iter_mut().find_map(|p| p.governorship.as_mut())) {
+            g.regions.push(region);
+        }
+        true
+    }
+
+    /// Empties `region`'s queues as an owner change does (`0x00B1A760` on the land queue and on each
+    /// port's naval queue, `0x00A6CBE0(0)` on each slot's construction). Each recruitment item leaves
+    /// through the cancel path ([`Self::cancelled_recruitment_items`]) with the flag of its queue; the
+    /// refund goes to the region's owner, still the old one. Constructions are never refunded here
+    /// (`0x00B1A790` credits only with its flag set). Land and naval items share
+    /// [`super::world::Region::recruitment_queue`]; a ship's item is the port's ([`super::rules::CampaignRules::is_naval_unit`]).
+    fn clear_region_queues(&mut self, region: RegionId, refund: QueueRefund) {
+        let Some(r) = self.world.regions.get_mut(&region) else { return };
+        let items = std::mem::take(&mut r.recruitment_queue);
+        r.construction.clear();
+        let rules = std::sync::Arc::clone(&self.rules);
+        self.cancelled_recruitment_items(region, &items, |i| if rules.is_naval_unit(&i.unit_key) { refund.naval } else { refund.land });
+    }
+}
+
+/// Which of a region's recruitment queues an owner change refunds ([`CampaignModel::clear_region_queues`]):
+/// the `0x00B1A760` flag of the land queue and of the ports' naval queues.
+#[derive(Debug, Clone, Copy)]
+struct QueueRefund {
+    land: bool,
+    naval: bool,
 }
 
 impl CampaignModel {

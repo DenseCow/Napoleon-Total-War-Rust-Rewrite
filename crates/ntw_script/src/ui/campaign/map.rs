@@ -229,7 +229,8 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     // only compares them to notice camera moves). RetrieveVisibleEnitityDetails() → {Settlements =
     // {{Address, ScreenPos = {X, Y}}...}, Resources = {...}} (CONFIRMED names read by Labels.lua):
     // the settlements on screen, at the screen position the game reports with
-    // `campaign_set_view`. PROVISIONAL: no resource icons yet.
+    // `campaign_set_view` (`0x009F4520`: the settlements in the view frustum, HUD panels or not;
+    // UI_FIDELITY.md §11.1). PROVISIONAL: no resource icons yet.
     f!("CameraPosition", |_l, inner, ui, _a: Variadic<Value>| Ok(ui.camera.get()));
     // CameraTarget() → the point the camera looks at (map x), the zoom (camera +0x138), the map y,
     // then the key of the theatre holding that point (0x009DFEC0, CONFIRMED order; the radar's
@@ -244,6 +245,13 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     f!("RetrieveVisibleEnitityDetails", |lua, inner, ui, _a: Variadic<Value>| {
         let t = lua.create_table()?;
         let list = lua.create_table()?;
+        // Both tables stay empty while the player has the labels off (`0x009F4520` reads preference
+        // 0x44 first, CONFIRMED).
+        if !campaign_labels_shown(&inner) {
+            t.set("Settlements", list)?;
+            t.set("Resources", lua.create_table()?)?;
+            return Ok(t);
+        }
         // The fog of war: a settlement the player has never seen has no label. This is
         // `CampaignModel::knows` (visible now OR explored), **not** `sees`: the original draws
         // the labels from the shroud's *explored* tree (CHARACTERS_FIDELITY.md §10; INFERRED --
@@ -278,6 +286,14 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
         t.set("Settlements", list)?;
         t.set("Resources", lua.create_table()?)?;
         Ok(t)
+    });
+    // ToggleLabels(): "Toggles that labels under settlements on/off" (CONFIRMED description,
+    // `0x009F9CA0`): flips the preference `ui_show_campaign_labels` (preference index 0x44,
+    // registered at `0x004057E6`, default true), which RetrieveVisibleEnitityDetails reads.
+    f!("ToggleLabels", |_l, inner, _ui, _a: Variadic<Value>| {
+        let shown = campaign_labels_shown(&inner);
+        inner.prefs.borrow_mut().set(CAMPAIGN_LABELS_PREF, if shown { "false" } else { "true" });
+        Ok(())
     });
     // ShouldShowLabelBottomRow(): "Out: Selected settlement, mouse over settlement" (CONFIRMED
     // description): the labels whose bottom row (wealth, population) is shown.
@@ -464,4 +480,13 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
         Ok(out)
     });
     Ok(())
+}
+
+/// The preference that shows the settlement labels (`ui_show_campaign_labels`, index 0x44,
+/// registered at `0x004057E6` with default true, CONFIRMED).
+const CAMPAIGN_LABELS_PREF: &str = "ui_show_campaign_labels";
+
+/// Whether the settlement labels are on (the preference, true when the file lacks it).
+fn campaign_labels_shown(inner: &Inner) -> bool {
+    inner.prefs.borrow().get_bool(CAMPAIGN_LABELS_PREF).unwrap_or(true)
 }

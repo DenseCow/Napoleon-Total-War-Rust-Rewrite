@@ -7,11 +7,12 @@ publish.workspace = true
 
 [features]
 # Serialisation of the campaign state for our own save format (`ntw_campaign::own_save`). Off by
-# default: the model itself stays std only.
+# default: the model itself stays std only (plus the `log` facade, which reports data errors).
 serde = ["dep:serde"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"], optional = true }
+log = "0.4"
 
 [dev-dependencies]
 # The install tests (crates/ntw_sim/tests/flag_install.rs) need the *readers* for the shipped

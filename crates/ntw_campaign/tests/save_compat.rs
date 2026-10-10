@@ -820,7 +820,8 @@ fn technology_research_is_written() {
     // Unchanged: every technology record as stored.
     let same = save::write_save(&esf, &l.model, "france", 1).unwrap();
     assert_eq!(techs(&same), techs(&esf));
-    // France researches one tech to the end and has another under way at a school.
+    // France researches one tech to the end and has another under way at a school, which it has
+    // also handed over in deals 3 times (#5, entry +0x28).
     let mut m = l.model.clone();
     let france = m.faction_by_key("france").unwrap().id;
     let slot = m.world.regions.values().filter(|r| r.owner == france).flat_map(|r| r.slots.iter()).map(|s| s.id).find(|&id| id != 0).unwrap();
@@ -830,8 +831,8 @@ fn technology_research_is_written() {
     for t in d.technologies.iter_mut().filter(|t| t.0 == avail[0]) {
         t.1 = 0;
     }
-    d.research.insert(avail[0].clone(), TechResearch { progress: 1500.0, researcher: 0 });
-    d.research.insert(avail[1].clone(), TechResearch { progress: 37.5, researcher: slot });
+    d.research.insert(avail[0].clone(), TechResearch { progress: 1500.0, researcher: 0, traded: 0 });
+    d.research.insert(avail[1].clone(), TechResearch { progress: 37.5, researcher: slot, traded: 3 });
     let out = save::write_save(&esf, &m, "france", 1).unwrap();
     let back_esf = EsfFile::from_bytes(&out.to_bytes().unwrap()).unwrap();
     let r = ntw_campaign::save_check::check(&back_esf);

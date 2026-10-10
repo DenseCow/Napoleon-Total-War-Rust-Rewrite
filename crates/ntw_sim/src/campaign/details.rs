@@ -582,7 +582,7 @@ mod tests {
     }
 }
 
-/// One technology's research (`FACTION_TECHNOLOGY_MANAGER` `techs[]` #2 / #3, CONFIRMED layout).
+/// One technology's research (`FACTION_TECHNOLOGY_MANAGER` `techs[]` #2 / #3 / #5, CONFIRMED layout).
 #[derive(Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TechResearch {
@@ -590,6 +590,10 @@ pub struct TechResearch {
     pub progress: f32,
     /// The researching school slot (`RegionSlot::id`), 0 when none.
     pub researcher: u32,
+    /// How often the faction handed the technology over in a deal (#5 u32, entry +0x28: raised by
+    /// `0x008F3DD0`, saved by `0x00894430`, read by the AI's deal value `0x00A36B20`).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub traded: u32,
 }
 
 impl Eq for TechResearch {}

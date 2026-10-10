@@ -418,6 +418,12 @@ impl CampaignRules {
         self.unit_governments.get(unit).is_none_or(|list| list.is_empty() || list.iter().any(|g| g == government))
     }
 
+    /// Is `unit` a ship, so that its queued items sit in a port's naval queue (slot +0x1E8) rather than the
+    /// region's land queue (region +0x124)? An unknown key counts as land.
+    pub fn is_naval_unit(&self, unit: &str) -> bool {
+        self.units.get(unit).is_some_and(|u| u.is_naval)
+    }
+
     /// May `faction` recruit `unit` at all (exclusive permissions)?
     pub fn faction_may_recruit(&self, faction: &str, unit: &str) -> bool {
         match self.unit_factions.get(unit) {

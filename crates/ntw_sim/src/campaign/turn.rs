@@ -426,29 +426,21 @@ impl CampaignModel {
         // also gives the region its population back, per item (`0x00A61AA0`,
         // [`super::population::RecruitmentPopulation::credited`]).
         let recruitable = self.recruitable_units(region);
-        let owner = reg.owner;
-        let mut refund = 0i32;
-        let population = super::population::RecruitmentPopulation::of(&self.rules);
+        let mut removed = Vec::new();
         if let Some(r) = self.world.regions.get_mut(&region) {
-            let before = r.recruitment_queue.len();
             r.recruitment_queue.retain(|i| {
                 let keep = recruitable.iter().any(|e| e.unit_key == i.unit_key);
                 if !keep {
-                    refund = refund.wrapping_add(i.cost);
+                    removed.push(i.clone());
                 }
                 keep
             });
-            r.population = population.credited(r.population, before - r.recruitment_queue.len());
         }
-        if refund != 0
-            && let Some(f) = self.world.factions.get_mut(&owner)
-        {
-            super::treasury::refund(&mut f.treasury, refund);
-        }
+        self.cancelled_recruitment_items(region, &removed, |_| true);
         let reg = &self.world.regions[&region];
         // Capacity (the queue's method 1: `recruitment_points`), read before the queues change.
         let caps = (self.recruitment_points(region, false), self.recruitment_points(region, true));
-        let naval: Vec<bool> = reg.recruitment_queue.iter().map(|i| self.rules.units.get(&i.unit_key).is_some_and(|u| u.is_naval)).collect();
+        let naval: Vec<bool> = reg.recruitment_queue.iter().map(|i| self.rules.is_naval_unit(&i.unit_key)).collect();
         // An item whose recruitable entry carries building flags is held back (`0x00B5AD90`, CONFIRMED: the
         // entry of the item's unit in the region's unpriced list, vtable +0x14 = region +0x1A8, has a flag). The
         // list is the one the removal above read: the exe's step reads the same cache, which nothing inside

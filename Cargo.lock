@@ -3717,6 +3717,7 @@ dependencies = [
 name = "ntw_sim"
 version = "0.1.0"
 dependencies = [
+ "log",
  "ntw_formats",
  "serde",
 ]

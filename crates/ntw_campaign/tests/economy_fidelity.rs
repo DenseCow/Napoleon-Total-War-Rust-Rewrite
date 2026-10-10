@@ -887,3 +887,55 @@ fn faction_power_is_the_originals_at_the_coalition_start() {
         assert_eq!((p.land, p.naval), (land, naval), "{key}: land, naval");
     }
 }
+
+/// A capture refunds the old owner its queued ships only (`0x00B1A760(1)` on each port's naval queue, slot
+/// +0x1E8; the land queue, region +0x124, goes with `0x00B1A760(0)`). The model keeps both kinds in one queue
+/// and tells them apart by the unit (`CampaignRules::is_naval_unit`): checked here against where the vanilla
+/// saves file every queued item (a port's `REGION_SLOT_ARRAY` manager or the region's own), then each region
+/// with a ship queued is captured and its old owner's treasury must grow by exactly those ships' stored costs.
+#[test]
+fn a_capture_in_the_vanilla_saves_refunds_the_queued_ships() {
+    let dir = data_dir();
+    let ev = std::env::var_os("NTW_EVIDENCE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default().join(r"Documents\ntw-evidence\saves"));
+    if !dir.is_dir() || !ev.is_dir() {
+        println!("SKIP: no install at {} or no evidence saves at {}", dir.display(), ev.display());
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).expect("database");
+    let mut saves: Vec<PathBuf> = std::fs::read_dir(&ev).expect("evidence dir").filter_map(|e| Some(e.ok()?.path())).filter(|p| p.extension().is_some_and(|x| x == "save")).collect();
+    saves.sort();
+    let (mut items, mut captured) = (0, 0);
+    for path in saves {
+        let model = ntw_campaign::read_file(&path, &db).expect("save loads").model;
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let mut naval_regions = Vec::new();
+        for r in model.world.regions.values() {
+            let mut ships = 0i32;
+            for i in &r.recruitment_queue {
+                let source = model.world.recruitment_sources.get(&i.id).unwrap_or_else(|| panic!("{name}: item {} has its record", i.id.0));
+                let naval = model.rules.is_naval_unit(&i.unit_key);
+                assert_eq!(source.port_slot.is_some(), naval, "{name}: {} {} queued in the {:?}", r.key, i.unit_key, source.port_slot);
+                if naval {
+                    ships = ships.wrapping_add(i.cost);
+                }
+                items += 1;
+            }
+            if ships != 0 {
+                naval_regions.push((r.id, r.owner, ships));
+            }
+        }
+        for (region, owner, ships) in naval_regions {
+            let mut m = model.clone();
+            let Some(capturer) = m.world.factions.keys().copied().find(|f| *f != owner) else { continue };
+            let before = m.world.factions[&owner].treasury;
+            m.capture_by_force(region, capturer, None);
+            assert_eq!(m.world.factions[&owner].treasury, before.wrapping_add(ships), "{name}: region {region:?}");
+            assert!(m.world.regions[&region].recruitment_queue.is_empty());
+            captured += 1;
+        }
+    }
+    println!("{items} queued items filed as the saves file them; {captured} captures refunded the queued ships");
+    assert!(captured > 0, "some vanilla save holds a queued ship");
+}

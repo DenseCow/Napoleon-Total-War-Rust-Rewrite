@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::details::Relationship;
-use super::ids::FactionId;
+use super::ids::{FactionId, RegionId};
 use super::world::{CampaignModel, Stance};
 
 /// The diplomatic actions of a negotiation, by the exe's action id (`+0x0C` of an action record;
@@ -51,6 +51,31 @@ pub enum NegotiationAction {
 }
 
 impl NegotiationAction {
+    /// Every action, by id.
+    pub const ALL: [Self; 16] = [
+        Self::Trade,
+        Self::TradeCancel,
+        Self::Access,
+        Self::AccessCancel,
+        Self::Alliance,
+        Self::AllianceCancel,
+        Self::Regions,
+        Self::Technology,
+        Self::StateGift,
+        Self::Payments,
+        Self::Protector,
+        Self::Peace,
+        Self::War,
+        Self::RequestJoinWar,
+        Self::BreakTrade,
+        Self::BreakAlliance,
+    ];
+
+    /// The action with this name ([`Self::name`]), if any.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|a| a.name() == name)
+    }
+
     /// The action's name (`0x014587F8`).
     pub fn name(self) -> &'static str {
         match self {
@@ -186,12 +211,51 @@ pub struct Negotiation {
     /// The proposer's `approach_<attitude>` line, picked when the recipient is human (hub +0x330);
     /// `None` when the recipient is not human.
     pub approach: Option<Greeting>,
+    /// The regions action record's two lists (UI_FIDELITY.md §4.9): set by
+    /// [`super::CampaignCommand::ProposeRegions`], applied by [`super::CampaignCommand::AcceptDeal`].
+    pub regions: DealItems<RegionId>,
+    /// The technology action record's two lists (technology keys): set by
+    /// [`super::CampaignCommand::ProposeTechnologies`], applied by [`super::CampaignCommand::AcceptDeal`].
+    pub technologies: DealItems<String>,
+    /// The records have been applied since they last changed: a deal applies once (`AcceptDeal`
+    /// again is a no-op until a Propose or Clear changes the deal).
+    pub applied: bool,
+}
+
+/// The two lists of a deal's action record (`0x00C4B0A0` / `0x00C4B560` fill them): `demanded`
+/// (record +0x14) is what the recipient gives the proposer, `offered` (record +0x24) what the
+/// proposer gives the recipient. CONFIRMED (`0x00C18BF0` / `0x00C18CF0` apply them that way round).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DealItems<T> {
+    /// The recipient gives these to the proposer.
+    pub demanded: Vec<T>,
+    /// The proposer gives these to the recipient.
+    pub offered: Vec<T>,
+}
+
+impl<T> Default for DealItems<T> {
+    fn default() -> Self {
+        Self { demanded: Vec::new(), offered: Vec::new() }
+    }
+}
+
+impl<T> DealItems<T> {
+    /// No item on either side.
+    pub fn is_empty(&self) -> bool {
+        self.demanded.is_empty() && self.offered.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.demanded.clear();
+        self.offered.clear();
+    }
 }
 
 /// The campaign's negotiation slot (campaign +0xF9C) and how many negotiations began and ended:
 /// the one source of truth the UI reads. Changed only by the commands
 /// [`super::CampaignCommand::BeginNegotiation`] / [`super::CampaignCommand::EndNegotiation`]
-/// (`CCQ_DIPLOMACY_BEGIN_NEGOTIATION` / `CCQ_DIPLOMACY_END_NEGOTIATION`), so a negotiation and the
+/// (`CCQ_DIPLOMACY_BEGIN_NEGOTIATION` / `CCQ_DIPLOMACY_END_NEGOTIATION`) and the deal's
+/// `ProposeRegions` / `ProposeTechnologies` / `ClearNegotiation`, so a negotiation and the
 /// RNG draw of its greeting go through the command queue like every other command. The counts
 /// stand in for the exe's "started" (hub +0x318) and "ended" (hub +0x378) events: a listener that
 /// has seen fewer begins or ends than these has events due. Not saved, not hashed.
@@ -485,7 +549,113 @@ impl CampaignModel {
         let approach = self.is_human(recipient).then(|| self.diplomat_line("approach", proposer, recipient));
         let n = &mut self.negotiations;
         n.begun += 1;
-        n.current = Some(Negotiation { serial: n.begun, proposer, recipient, greeting, approach });
+        n.current = Some(Negotiation {
+            serial: n.begun,
+            proposer,
+            recipient,
+            greeting,
+            approach,
+            regions: DealItems::default(),
+            technologies: DealItems::default(),
+            applied: false,
+        });
+    }
+
+    /// `CCQ_DIPLOMACY_PROPOSE_REGIONS` (executor `0x00933CC0`): `clear` empties the regions record
+    /// (`0x00C5C730`); otherwise, when either list has a region, the record's two lists are
+    /// replaced by these (`0x00C49AA0` → `0x00C4B0A0`); two empty lists leave it as it is. A region
+    /// that does not exist aborts the command (the exe drops it when an id does not resolve).
+    pub(crate) fn propose_regions(&mut self, clear: bool, demanded: Vec<RegionId>, offered: Vec<RegionId>) -> Result<(), super::CommandError> {
+        if let Some(r) = demanded.iter().chain(&offered).find(|r| !self.world.regions.contains_key(r)) {
+            return Err(super::CommandError::UnknownRegion(*r));
+        }
+        let n = self.negotiations.current.as_mut().ok_or(super::CommandError::NoNegotiation)?;
+        if clear {
+            n.regions.clear();
+            n.applied = false;
+        } else if !demanded.is_empty() || !offered.is_empty() {
+            n.regions = DealItems { demanded, offered };
+            n.applied = false;
+        }
+        Ok(())
+    }
+
+    /// `CCQ_DIPLOMACY_PROPOSE_TECHNOLOGIES` (executor `0x009340A0`): as [`Self::propose_regions`]
+    /// with technology keys (a key the `technologies` table does not have aborts), except that two
+    /// empty lists clear the record too.
+    pub(crate) fn propose_technologies(&mut self, clear: bool, demanded: Vec<String>, offered: Vec<String>) -> Result<(), super::CommandError> {
+        if let Some(t) = demanded.iter().chain(&offered).find(|t| !self.rules.technologies.contains_key(*t)) {
+            return Err(super::CommandError::UnknownTechnology(t.clone()));
+        }
+        let n = self.negotiations.current.as_mut().ok_or(super::CommandError::NoNegotiation)?;
+        if clear || (demanded.is_empty() && offered.is_empty()) {
+            n.technologies.clear();
+        } else {
+            n.technologies = DealItems { demanded, offered };
+        }
+        n.applied = false;
+        Ok(())
+    }
+
+    /// `CCQ_DIPLOMACY_CLEAR_NEGOTIATION` (executor `0x00932EC0`): the deal is emptied. The model
+    /// holds the regions and technology records; the other items are still held by the UI.
+    pub(crate) fn clear_negotiation(&mut self) -> Result<(), super::CommandError> {
+        let n = self.negotiations.current.as_mut().ok_or(super::CommandError::NoNegotiation)?;
+        n.regions.clear();
+        n.technologies.clear();
+        n.applied = false;
+        Ok(())
+    }
+
+    /// PLACEHOLDER for the AI's evaluation of a proposed deal (`CCQ_DIPLOMACY_PROPOSE_DEAL` →
+    /// `0x00C49BE0` → `0x00AA5ED0`, with the technology value `0x00A36B20`; AI_RESEARCH.md §6, not
+    /// ported): until it is, an AI side refuses any deal in which it gives a region or a
+    /// technology, so a deal cannot take them for free; what it is offered it accepts. True when
+    /// the open negotiation's deal is refused that way.
+    pub fn ai_refuses_deal(&self) -> bool {
+        let Some(n) = self.negotiations.current.as_ref() else { return false };
+        let gives = |giver: FactionId, regions: &[RegionId], techs: &[String]| !self.is_human(giver) && (!regions.is_empty() || !techs.is_empty());
+        gives(n.recipient, &n.regions.demanded, &n.technologies.demanded) || gives(n.proposer, &n.regions.offered, &n.technologies.offered)
+    }
+
+    /// `CCQ_DIPLOMACY_ACCEPT_DEAL` (`AcceptCampaignNegotiationDeal` `0x00C114B0`) for the records
+    /// the model holds, each through its virtual +0x3C, in the records' order (regions, then
+    /// technologies). The deal stays (it goes with the negotiation's end), as in the exe; it is
+    /// applied once: accepting it again before a Propose or Clear changes it does nothing
+    /// ([`Negotiation::applied`]; the exe re-applies every record on each accept, which its UI
+    /// never asks for, and which would raise the traded counts again).
+    /// - regions (`0x00C18BF0`): each demanded region passes to the proposer, then each offered one
+    ///   to the recipient ([`Self::transfer_region`]);
+    /// - technologies (`0x00C18CF0`): each offered technology is granted to the recipient
+    ///   ([`Self::grant_technology`]) and the proposer's traded count goes up by one
+    ///   (`0x008F3DD0`); then each demanded one the other way round.
+    ///
+    /// Not ported: `0x00C1E240`, which can turn a deal with no demands into a payment before it is
+    /// applied (the AI's side, AI_RESEARCH.md §6).
+    /// A deal [`Self::ai_refuses_deal`] refuses is not applied (`CommandError::DealRefused`).
+    pub(crate) fn accept_deal(&mut self) -> Result<Vec<super::CampaignEvent>, super::CommandError> {
+        if self.negotiations.current.is_some() && self.ai_refuses_deal() {
+            return Err(super::CommandError::DealRefused);
+        }
+        let n = self.negotiations.current.as_mut().ok_or(super::CommandError::NoNegotiation)?;
+        if std::mem::replace(&mut n.applied, true) {
+            return Ok(Vec::new());
+        }
+        let (proposer, recipient) = (n.proposer, n.recipient);
+        let (regions, techs) = (n.regions.clone(), n.technologies.clone());
+        for r in regions.demanded {
+            self.transfer_region(r, proposer);
+        }
+        for r in regions.offered {
+            self.transfer_region(r, recipient);
+        }
+        for (techs, to, from) in [(&techs.offered, recipient, proposer), (&techs.demanded, proposer, recipient)] {
+            for t in techs {
+                self.grant_technology(to, t);
+                self.count_technology_traded(from, t);
+            }
+        }
+        Ok(Vec::new())
     }
 
     /// `CCQ_DIPLOMACY_END_NEGOTIATION` (`0x008BC5D0`): the campaign negotiation goes, counted in

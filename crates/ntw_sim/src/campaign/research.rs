@@ -8,7 +8,6 @@
 //! tech's building level; they never go back (CONFIRMED writer `0x008F91F0`, see
 //! [`CampaignModel::update_tech_availability`]).
 
-use super::details::TechResearch;
 use super::effects::{EffectSet, Effects};
 use super::ids::{FactionId, RegionId};
 use super::world::CampaignModel;
@@ -201,10 +200,7 @@ impl CampaignModel {
             let Some(t) = d.research.get_mut(&k) else { continue };
             t.progress += gain;
             if t.progress >= cost {
-                *t = TechResearch { progress: cost, researcher: 0 };
-                if let Some(s) = d.technologies.iter_mut().find(|(x, _)| *x == k) {
-                    s.1 = state::RESEARCHED;
-                }
+                self.complete_technology(faction, &k);
                 done.push(k);
                 continue;
             }
@@ -214,6 +210,52 @@ impl CampaignModel {
         }
         self.update_tech_availability(faction);
         done
+    }
+
+    /// A technology is researched (`0x008EED20`): progress = its cost, no school researching it,
+    /// state 0. The traded count stays.
+    fn complete_technology(&mut self, faction: FactionId, tech: &str) {
+        let cost = self.rules.technologies.get(tech).map_or(0.0, |t| t.cost as f32);
+        let Some(d) = self.world.faction_details.get_mut(&faction) else { return };
+        let t = d.research.entry(tech.to_string()).or_default();
+        t.progress = cost;
+        t.researcher = 0;
+        if let Some(s) = d.technologies.iter_mut().find(|(x, _)| x == tech) {
+            s.1 = state::RESEARCHED;
+        }
+    }
+
+    /// A technology handed over in a deal (`GrantFactionTechnology` `0x008CDCB0(tech, 0, 1, 0)`,
+    /// from the deal's `0x00C18CF0`): researched (`0x008EED20`) when the faction has it at state
+    /// 1..4, then availability is updated (`0x008F91F0`); a technology already researched, or one
+    /// the faction has no entry for, is left alone. Returns true when the technology was
+    /// researched by this.
+    ///
+    /// PROVISIONAL: the exe (`0x008CDCB0`) then walks the technology's single requirement (record
+    /// +0x60) the same way, while each is at state 1..4. The record field +0x60 is not loaded (its
+    /// source is not traced), so the walk is not ported. For the deal's technologies it changes
+    /// nothing: they are at state 1..3 for the receiver ([`CampaignModel::tradeable_technologies`]),
+    /// which the availability rule (`0x008F91F0`) only allows once that requirement is researched,
+    /// so the walk stops at once (UI_FIDELITY.md §4.9).
+    pub fn grant_technology(&mut self, faction: FactionId, tech: &str) -> bool {
+        if !self.tech_state(faction, tech).is_some_and(|s| (1..=4).contains(&s)) {
+            return false;
+        }
+        self.complete_technology(faction, tech);
+        self.update_tech_availability(faction);
+        true
+    }
+
+    /// The giver's count of how often it handed `tech` over in a deal goes up by one (technology
+    /// entry +0x28, `0x008F3DD0`; nothing when the faction has no entry for the technology). The
+    /// count is saved ([`super::details::TechResearch::traded`]) and read by the AI's deal value (`0x00A36B20`, §6).
+    pub(crate) fn count_technology_traded(&mut self, faction: FactionId, tech: &str) {
+        if self.tech_state(faction, tech).is_none() {
+            return;
+        }
+        if let Some(d) = self.world.faction_details.get_mut(&faction) {
+            d.research.entry(tech.to_string()).or_default().traded += 1;
+        }
     }
 
     /// State 4 → 2 for every technology whose prerequisites are researched and whose building level

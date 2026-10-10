@@ -1013,11 +1013,12 @@ fn divorce(lua: &Lua, inner: &Inner, child: NodeId) -> Option<usize> {
     Some(index)
 }
 
-/// `Adopt(child)` (UIComponent `0x01014580`, `Component.Adopt` `0x01018090`): a child that has a
-/// parent leaves it first ([`divorce`], so the old parent hears `OnDivorceChild`), then joins
-/// `parent` last and `parent` hears `OnAdoptChild` ([`adopted`]). A component cannot adopt itself
+/// `Adopt(child[, index])` (UIComponent `0x01014580`, `Component.Adopt` `0x01018090`, which always
+/// appends): a child that has a parent leaves it first ([`divorce`], so the old parent hears
+/// `OnDivorceChild`), then joins `parent` at `index` (last when `None`, [`UiWorld::adopt`]) and
+/// `parent` hears `OnAdoptChild` ([`adopted`]). A component cannot adopt itself
 /// or a missing one (nothing happens).
-fn adopt(lua: &Lua, inner: &Inner, parent: NodeId, child: NodeId) {
+fn adopt(lua: &Lua, inner: &Inner, parent: NodeId, child: NodeId, index: Option<usize>) {
     let valid = |inner: &Inner| {
         let w = inner.world.borrow();
         parent != child && w.get(parent).is_some() && w.get(child).is_some()
@@ -1030,7 +1031,7 @@ fn adopt(lua: &Lua, inner: &Inner, parent: NodeId, child: NodeId) {
     if !valid(inner) {
         return;
     }
-    inner.world.borrow_mut().adopt(parent, child);
+    inner.world.borrow_mut().adopt(parent, child, index);
     if inner.world.borrow().get(child).is_some_and(|c| c.parent == Some(parent)) {
         adopted(lua, inner, child);
     }
@@ -2000,9 +2001,25 @@ fn component_methods(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
         let key: String = arg(lua, &args, 0)?;
         ret(lua, inner.world.borrow().get(id).and_then(|n| n.data.properties.iter().find(|(k, _)| *k == key).map(|(_, v)| v.clone())))
     });
+    // Adopt(child[, index]) (`0x01014580`, CONFIRMED): the arguments are taken from the top of the
+    // stack: a number there is popped as the index (stored as a float, rounded to the nearest with
+    // ties to even; -1 when absent), then the child is the value below it. The child joins at that
+    // index among this component's children (0 is first, drawn first), counted once it has left
+    // its old parent; a negative index or one past the child count appends ([`UiWorld::adopt`]).
     method!("Adopt", |inner, lua, id, args| {
-        if let Some(child) = args.front().and_then(node_of) {
-            adopt(lua, &inner, id, child);
+        let mut args: Vec<Value> = args.into_iter().collect();
+        let index = match args.last() {
+            Some(&Value::Integer(n)) => Some(n as f64),
+            Some(&Value::Number(n)) => Some(n),
+            _ => None,
+        };
+        if index.is_some() {
+            args.pop();
+        }
+        // A NaN converts to 0x80000000 in the exe: negative, so it appends.
+        let index = index.map(|n| n as f32).filter(|n| !n.is_nan()).and_then(|n| usize::try_from(n.round_ties_even() as i64).ok());
+        if let Some(child) = args.last().and_then(node_of) {
+            adopt(lua, &inner, id, child, index);
         }
         ret(lua, ())
     });
@@ -2326,7 +2343,7 @@ fn component_functions(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
     let i3 = i.clone();
     t.set("Adopt", lua.create_function(move |lua, (a, child): (Value, Value)| {
         if let (Some(p), Some(c)) = (node_of(&a), node_of(&child)) {
-            adopt(lua, &i3, p, c);
+            adopt(lua, &i3, p, c, None);
         }
         Ok(())
     })?)?;
@@ -2707,6 +2724,48 @@ pub(crate) mod tests {
         let events: Vec<String> = env.get::<Table>("events").unwrap().sequence_values().map(Result::unwrap).collect();
         assert_eq!(events, ["divorce:l1", "divorce:l2", "button adopt:l2", "divorce:l3", "divorce:button", "divorce:l4"]);
         assert!(host.world().get(root).unwrap().children.is_empty());
+        no_errors(&host);
+    }
+
+    /// `Adopt(child, index)` (`0x01014580` → `0x01024F70`) puts the child at that index among the
+    /// children, counted after it left its old place; the number is rounded (ties to even), and a
+    /// negative index or one past the end appends, as does no index. Bug: the index was ignored.
+    #[test]
+    fn adopt_inserts_at_the_index_given() {
+        let source = ScriptSource::empty()
+            .with_memory_file("ui/test/page", layout_bytes_with_root("", ""))
+            .with_memory_file("ui/test/label", layout_bytes(""));
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
+        let root = host.load_root_layout("ui/test/page").unwrap();
+        let env = component_env(&host, root);
+        let run = |code: &str| host.lua().load(code).set_environment(env.clone()).exec().unwrap();
+        for i in 1..=3 {
+            run(&format!("Component.CreateFromLayout('data/ui/test/label', 'l{i}', Address, 0, 0)"));
+        }
+        let order = || -> Vec<String> {
+            let w = host.world();
+            w.get(root).unwrap().children.iter().map(|&c| w.get(c).unwrap().data.id.clone()).collect()
+        };
+        assert_eq!(order(), ["button", "l1", "l2", "l3"]);
+        let adopt = |id: &str, index: &str| run(&format!("UIComponent(Address):Adopt(UIComponent(Address):Find('{id}'){index})"));
+        // l3 to the front.
+        adopt("l3", ", 0");
+        assert_eq!(order(), ["l3", "button", "l1", "l2"]);
+        // 1.5 rounds to 2, counted without l3: button, l1, then l3.
+        adopt("l3", ", 1.5");
+        assert_eq!(order(), ["button", "l1", "l3", "l2"]);
+        // 2.5 rounds to 2 (ties to even); the child count (3) is the end.
+        adopt("button", ", 2.5");
+        assert_eq!(order(), ["l1", "l3", "button", "l2"]);
+        adopt("l1", ", 3");
+        assert_eq!(order(), ["l3", "button", "l2", "l1"]);
+        // Past the end, negative, or no index: last.
+        adopt("l3", ", 9");
+        assert_eq!(order(), ["button", "l2", "l1", "l3"]);
+        adopt("button", ", -1");
+        assert_eq!(order(), ["l2", "l1", "l3", "button"]);
+        adopt("l2", "");
+        assert_eq!(order(), ["l1", "l3", "button", "l2"]);
         no_errors(&host);
     }
 

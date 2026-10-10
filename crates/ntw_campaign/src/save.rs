@@ -720,8 +720,9 @@ fn write_traits(d: &mut EsfRecord, details: &ntw_sim::campaign::details::Charact
 }
 
 /// `FACTION_TECHNOLOGY_MANAGER` `techs[]` {utf16 key, u32 state, f32 progress, u32 researcher,
-/// u32[], u32} (layout CONFIRMED; CAMPAIGN_FIDELITY.md §Research): #1 the state, #2 the progress
-/// and #3 the researching school's slot id from the model, by key. Technologies the model does not
+/// u32[], u32} (layout CONFIRMED; CAMPAIGN_FIDELITY.md §Research): #1 the state, #2 the progress,
+/// #3 the researching school's slot id and #5 the traded count (entry +0x28, saver `0x00894430`)
+/// from the model, by key. Technologies the model does not
 /// list are left as stored. A value equal to the stored one is not rewritten, so an unchanged save
 /// writes back byte for byte (a stored -0.0 stays).
 fn write_technologies(f: &mut EsfRecord, details: Option<&ntw_sim::campaign::details::FactionDetails>) {
@@ -737,7 +738,7 @@ fn write_technologies(f: &mut EsfRecord, details: Option<&ntw_sim::campaign::det
             let Some(key) = it.first().and_then(EsfNode::as_str).map(str::to_owned) else { continue };
             let Some(&state) = states.get(key.as_str()) else { continue };
             let r = d.research.get(&key);
-            let (progress, researcher) = r.map_or((0.0, 0), |r| (r.progress, r.researcher));
+            let (progress, researcher, traded) = r.map_or((0.0, 0, 0), |r| (r.progress, r.researcher, r.traded));
             if it.get(1).and_then(EsfNode::as_u32) != Some(state)
                 && let Some(n) = it.get_mut(1)
             {
@@ -752,6 +753,11 @@ fn write_technologies(f: &mut EsfRecord, details: Option<&ntw_sim::campaign::det
                 && let Some(n) = it.get_mut(3)
             {
                 *n = EsfNode::U32(researcher);
+            }
+            if it.get(5).and_then(EsfNode::as_u32) != Some(traded)
+                && let Some(n) = it.get_mut(5)
+            {
+                *n = EsfNode::U32(traded);
             }
         }
     }

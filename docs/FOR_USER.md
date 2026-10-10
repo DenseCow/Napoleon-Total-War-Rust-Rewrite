@@ -74,6 +74,11 @@ The morning report from night sessions, newest night first. Two lists per night:
 - **Recruit training block merged** (`8cb8f2c4`): a queued unit waits while its building is damaged or occupied or
   its tech is missing (as the exe); the recruit list is sorted as the original's; recruit prices are fixed at queue
   time (13 of 14 save mismatches explained).
+- **Deals with regions and technologies merged** (`1c1e2400`): Propose builds them in the model as the exe; capture,
+  liberation and deals share one owner-change rule (no army moved, as the exe); the AI refuses to give regions/techs
+  until its evaluation is ported (worker on it now). **Polish-battle merged** (`88a10376`).
+- **ui-small merged** (2026-10-10 noon): map labels follow the original's visibility rule and its labels setting; `Adopt` takes the index. deal-ai (the AI's deal valuation) is still being traced (HANDOFF 3b).
+- **Capture refunds merged:** a captured port's queued ships are refunded to the old owner, land units and construction cancelled; a deal or liberation refunds an AI owner's whole queue, a human's nothing (as the exe; 36 captures in 12 original saves match). Nothing visible to check.
 - **Public mirror published** (`28bcc8db`) with all of tonight's merges.
 - **Running when this was written:** no-limits (ID types, counts, caps as moddable data), generic-engine (campaign
   feature table, unit category lists from data, calendar), gait-blend2 (why walking horses trot).

@@ -24,8 +24,11 @@ Last updated: 2026-10-10. Main tests at last full run (2026-10-08): `cargo test 
      read separates the factors (FOR_USER sitting), then port into `ntw_sim` and review. Its branch edits FOR_USER.md:
      keep main's version at merge.
   2. polish-battle: merged (`88a10376`).
-  3. deal-items (NR-deal-items): regions and techs as deal items, Propose wired to the model (`0x009BF3C0` →
-     `0x00C49BD0` +0x40, `0x00B449F0` flags); check its last push and notes for the resume point; then review.
+  3. deal-items: merged (regions/techs in deals; AI refuses to give them until its evaluation is traced).
+  3b. deal-ai (NR-deal-ai, `c0e81d7a`, not reviewed): AI deal evaluator traced (AI_RESEARCH.md §4 "Deal evaluation"),
+     tech value (500 + trunc(10 × cost^1.1), `0x00A36B20`) and accept tests ported in ntw_sim campaign/deal_value.rs, not
+     yet wired. Resume: goal lists `0x00CC13D0` / `0x00CC0280`, region value `0x00AA1E90` / `0x00A364B0`, AI budget
+     (`0x00CBBA80` +0x54), inflation factor in the model/saves; then replace `ai_refuses_deal` and review.
   4. Next in free slots: §0 items (BACKLOG §0); the §11 follow-ups added tonight (spa_napoleon xrefs, campaign list
      from data, render caps, AI fallbacks) after §0; Polish when it passes ~20 lines.
 - **Disk:** C: filled up on 2026-10-09; 21 merged worktrees were removed (~100 GB back). Remove a

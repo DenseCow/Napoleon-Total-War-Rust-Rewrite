@@ -125,9 +125,8 @@ The sandbox notes below are kept as written; where they and main differ, this pa
     contract). Run on the install:
     `cargo test -p ntw_script --test campaign_ui agents_panel -- --nocapture`.
   - `CampaignModel::school` was made public (read-only) for `CharacterInValidEnemyUniversity`.
-- **Not on main:** deal **region** rows → `TransferRegion` (rejected in the campaign
-  port: its effect was INFERRED from the capture path and left the old owner's garrison behind; the
-  rows are dropped, with the technology rows); unit `Experience` stays 0 (no experience in the model).
+- Deal **region** and **technology** items: superseded by §4.9 (the model's records, traced 2026-10-10);
+  unit `Experience` stays 0 (no experience in the model).
 - **Walls (campaign bug 2, branch `work/blocker-walls`, 2026-10-07): the last card of the settlement construction panel, CONFIRMED -- see "Where the walls are built" below.** First cause found:
   the frame's upgrade click calls `UpgradeFort(g_fort_ptr)` with no level and our binding needed a
   string, so it queued nothing.
@@ -579,7 +578,7 @@ tooltips, (3) credits, (4) custom battle setup. The 0-E work before the pause is
 | Lists: tabgroup script (template.<id>.lua rule), IsMergingUnit | resolved (rule INFERRED) | |
 | Diplomacy: treaties, opinions, military access, gift values, minister portrait, character details (0x009AD250) | resolved, parts PROVISIONAL | |
 | Diplomacy screen: Power / Wealth words, option buttons, greeting + diplomat, regnal leader name | traced (§4.7), port in progress | rules CONFIRMED except the trade-route test `0x00BA42E0`, prestige parts; Austria's power word still differs |
-| Negotiation panel (`UIDiplomacyNegotiation` object) | layout mapped (§4), object traced, appliers wired (N+2) | layout fields CONFIRMED; per-shape ledger in A4.1; payments / stance-access-gift become commands (A4.6); **region rows dropped on main** (no `TransferRegion`, `0x00B449F0` not decoded); **the technology row is still UNKNOWN**; nothing fills the deal from Lua yet (open item 1) |
+| Negotiation panel (`UIDiplomacyNegotiation` object) | layout mapped (§4), object traced, appliers wired (N+2) | layout fields CONFIRMED; per-shape ledger in A4.1; payments / stance-access-gift become commands (A4.6); region and technology items in the model (§4.9); nothing fills the deal from Lua yet (open item 1) |
 | Naval recruitment tab | resolved, wired (N+2) | no naval generator exists: `GenerateRecruitmentPanel` (`0x009FE7B0`) carries a `naval` category and a per-card `is_naval`; the selector is PROVISIONAL on the manager's `+0xA4`; the tab is a **character** panel's (A4.3, A4.6) |
 | Fort construction panel (`construction_manager.GenerateFortConstructionPanel`) | resolved, wired (2026-10-07) | a **map fort's** panel only (`fFort`; the settlement walls are the construction panel's last card, CONFIRMED -- see "Where the walls are built"); `0x009C7B50` / `0x009FDFE0`, keys `forts` / `fort_ptr` (the fort object) / `controlable` CONFIRMED; its upgrade card is always greyed and its actions build nothing |
 | Campaign save naming (`load-save_game` screen) | layout mapped (§5), save call open | layout fields CONFIRMED; naming rules CONFIRMED (0-E, 2026-10-06 — see below); `ConfirmSave` / `SaveCampaign` shapes still UNKNOWN |
@@ -865,16 +864,10 @@ appliers walk it. All addresses CONFIRMED in this round's own copy (`e6_appliers
   the pending deal's **`+0x14`** amount is non-zero, it runs **`0x00BB3810(amount, 3)`** (the same
   money mover as the capture loot path, `0x00BB3810(money, 0)`), then frees the deal
   (`0x0126E016(deal, 0x18)`), clears the pointer and notifies two listeners.
-- **Region transfer -- CONFIRMED.** **`0x00B449F0(faction, region_item, 1, 1, 0)`** (797 bytes) is
-  applied once, after the rows, by all four appliers: the demand path passes a null
-  `region_item`, the offer path the region it was handed. Its five callers are those four plus the
-  24-byte wrapper **`0x00B58A10(faction, a, b)`** = `0x00B449F0(faction, 0, 0, a, b)`, which is the
-  liberate path (`0x00B4F090`, CAMPAIGN_FIDELITY.md Capture).
-- **Technologies -- UNKNOWN.** `0x00A6CBE0`/`0x00B1A790` only commits money; the per-row-type work
-  lives behind the row vtable (`0x00B1A820` -> vtable `+0x1C`) and **no technology-granting address
-  has been traced from the deal path**. No script-facing name exists either
-  (`worker3/lua_api.txt` has no technology-transfer entry). The model has no `GrantTechnology`
-  command, so the host drops the row.
+- **SUPERSEDED by §4.9 (2026-10-10):** the "four appliers" above are the settlement's capture
+  variants (settlement vtable `0x0137CA44..5C`), not deal appliers, and `0x00B449F0` is the
+  settlement's change of owner. The deal's region and technology items are applied by the action
+  records' virtual +0x3C (`0x00C18BF0`, `0x00C18CF0`).
 - **Stance / access / gift rows -- CONFIRMED addresses, already ported by 0-G:** trade 0x00B55090,
   break trade 0x00B29BB0, embargo 0x00B28DB0, military access 0x00B44550, cancel access 0x00B67BD0,
   state gift 0x00B44590, protectorate 0x00B105C0 (`treaties.rs`).
@@ -1351,9 +1344,75 @@ model, `Theatre` = the theatre key), region info split into `region_info` (the `
 and the details' additions. Tests: `negotiation_buttons_are_built_on_the_panel` (un-ignored, every
 option, state and colour), `treaty_lines_read_the_opposing_factions_record`,
 `negotiation_regions_list_the_tradeable_regions`, `tradeable_regions_leave_out_the_capital`.
-Review round 1: `TradeableTechnologies` returns the two lists (`CampaignModel::tradeable_technologies`, `0x00C5C170` → `0x008F4F10`: what one side has researched (state 0) and the other has at state 1, 2 or 3; CONFIRMED rule, list order PROVISIONAL), test `negotiation_technologies_are_two_lists`; region rows compute only the info table. Open: the deal (Propose adding items, the offers / demands rows, ProposeDeal → AI evaluation) is
-not in the model (`Propose` logs the dropped region / technology items once, PLACEHOLDER); hovering a region row opens the
+Review round 1: `TradeableTechnologies` returns the two lists (`CampaignModel::tradeable_technologies`, `0x00C5C170` → `0x008F4F10`: what one side has researched (state 0) and the other has at state 1, 2 or 3; CONFIRMED rule, list order PROVISIONAL), test `negotiation_technologies_are_two_lists`; region rows compute only the info table. Open: regions and technologies are in the model since §4.9; the AI evaluation (ProposeDeal) is
+not (§6); hovering a region row opens the
 `dipl_region` tooltip (`SetTooltipMethod`), which shows as an empty dark box (not traced).
+
+### 4.9 Deal items: regions and technologies (worker deal-items, 2026-10-10)
+
+Correction of earlier notes (this file §4 open item, CAMPAIGN_FIDELITY.md §Diplomacy rules): `0x00B449F0`
+is **not** a peace-terms deal applier. It is `TransferSettlementOwnership`, a settlement method
+(`this` = the settlement; `+0x178` its region, `+0x88` its owner), RET 0x14, arguments (new owner,
+character, capture-report flag, a, b). `0x00B58560` / `0x00B58890` / `0x00B58C00` are capture
+variants in the settlement vtable (`0x0137CA44..5C`), not deal appliers. All CONFIRMED (disassembly).
+
+| Step | Behaviour | Tag | Evidence |
+|---|---|---|---|
+| Propose (Lua) | `Propose(offers, demands, action)` reads top-down: the action record (`0x0044D320`), then the **demands** table, then the **offers** table (`0x010558B0` takes index −1 and refs it). It builds a deal (`InitNegotiationDeal` `0x00BF3900`, 0xB8 bytes) by action id (jump table `0x009BFCB0`): 6 regions → deal `+0x10` demanded / `+0x20` offered (region addresses); 7 technologies → `+0x30` / `+0x40` (keys); 8 state gift → `+0x08` = −amount, `+0x0C` = 1; 9 payments; 10 `+0xB1`; 12 `+0xB0`; 13–15 faction lists. Then the action record's virtual `+0x40` posts the action's command with the deal | CONFIRMED | `0x009BF3C0`, `0x00BF3900`, setters `0x00C1F6xx` / `0x00C43Dxx` |
+| Commands | regions → `CCQ_DIPLOMACY_PROPOSE_REGIONS` (`PostProposeRegionsCommand` `0x00C4B3C0`), technologies → `CCQ_DIPLOMACY_PROPOSE_TECHNOLOGIES` (`0x00C4B870`); fields (clear flag = 0, demanded, offered) | CONFIRMED | registration `0x00420E00` / `0x00420F00` |
+| Regions executor | `0x00933CC0`: any region id that does not resolve aborts; clear flag → the regions record is cleared (`0x00C5C730`); else, if either list is non-empty, the record takes the deal (`0x00C49AA0` → record virtual `+0x44` `0x00C4B0A0`): it **replaces** both lists (record `+0x14` demanded, `+0x24` offered) | CONFIRMED | `0x00933CC0`, `0x00C4B0A0` |
+| Technologies executor | `0x009340A0`: same, keys looked up in the technology table (unknown key aborts), but the record is cleared when the flag is set **or both lists are empty** | CONFIRMED | `0x009340A0`, `0x00C4B560` |
+| Accept | `AcceptCampaignNegotiationDeal` `0x00C114B0`: unless `0x00C1E240` (a deal with no demands at all may be turned into a payment; AI, §6), the embedded record `+0x184` then every record of `+0x2A0/+0x2A4` runs its virtual `+0x3C` | CONFIRMED order; `0x00C1E240` not ported | `0x00C114B0` |
+| Region item applied | `0x00C18BF0`: each demanded region (record `+0x14`) goes to the proposer (negotiation `+0x18`), then each offered one (`+0x24`) to the recipient (`+0x1C`), through the settlement's `0x00B58A10(new owner, 1, 0)` = `0x00B449F0(new owner, no character, no report, 1, 0)` | CONFIRMED | `0x00C18BF0`, `0x00B58A10` |
+| Region transfer | `0x00B449F0` → `SetSettlementOwner` `0x00B2B810` (settlement `+0x88`), `TransferRegionToFaction` `0x00A64AC0` (schools stop researching `0x008B4AB0`; constructions cancelled `0x00A6CC10`; recruitment drained `0x00B1A760`; the old owner's capital cleared if it was this region `0x008BA580`; region joins the new owner), `TransferRegionSlotOwners` `0x00B1B300` (a slot with no occupant and no holder passes to the new owner), recruitables / effects / economy refreshed. **No army is moved or destroyed on this path** (the capture variants destroy the garrison first, e.g. `0x00B58A30` deletes settlement virtual `+0x1C`); the campaign's `+0x420` owner-changed hub only has UI subscribers (`0x00906C00`, `0x00907150`, `0x009087C0`) | CONFIRMED for the call chain | as named |
+| Technology item applied | `0x00C18CF0`: each offered technology: the recipient is granted it (`GrantFactionTechnology` `0x008CDCB0(tech, 0, 1, 0)`), the proposer's entry `+0x28` += 1 (`0x008F3DD0`); then each demanded one the other way round | CONFIRMED | `0x00C18CF0` |
+| Grant | `0x008CDCB0`: while the entry's state is 1..4: completion `0x008EED20` (progress = cost, state 0, schools cleared), then the record's single requirement (`+0x60`); then availability `0x008F91F0` and the faction effect sum. A tradeable technology is at state 1..3 for the receiver (`tradeable_technologies`), so its `+0x60` requirement is already researched (availability rule) and the walk grants that one technology | CONFIRMED | `0x008CDCB0`, `0x008F91F0` |
+| Traded count | technology entry `+0x28`, saved as `techs[]` #5 (saver `0x00894430`), read only by the AI's technology value `0x00A36B20` (500 + 10 × cost, ×2 when one faction has it, ÷ (count + 1)²; §6) | CONFIRMED | `0x008F3DD0`, `0x008F4990`, `0x00894430` |
+
+**Port (work/deal-items).** ntw_sim `negotiation.rs`: `Negotiation::regions` / `technologies`
+(`DealItems`: demanded, offered) are the two records; `CampaignCommand::ProposeRegions` /
+`ProposeTechnologies` are the two executors, `ClearNegotiation` the CLEAR executor (`0x00932EC0`),
+`AcceptDeal` applies the records (`CampaignModel::accept_deal`). `battles.rs`: `transfer_region`
+(`0x00B449F0` without a character; armies stay) and `change_region_owner`, the steps every owner
+change shares (now also used by `occupy`, so a capture also stops research at the region's
+schools). `research.rs`: `grant_technology` (`0x008CDCB0`), `count_technology_traded`
+(`0x008F3DD0`), the completion `0x008EED20` shared with the research step;
+`TechResearch::traded` is loaded from and written to `techs[]` #5. ntw_script `diplomacy.rs`:
+`Propose` no longer accepts: it sends the regions command (rows' `Address`) or the technology
+command (cards' `RecordAddress` = our technology key, set as `Record` on the negotiation tech
+entries); `ProposeDeal` / `AcceptOffer` push `AcceptDeal`; `Cancel` pushes `ClearNegotiation`;
+`TradeableRegions`' `CurrentlyOffered` / `CurrentlyDemanded`, `BuildOfferAndDemandStrings` and
+`CanPropose` read the model's records. Tests: `deal_records_follow_the_propose_executors`,
+`accepted_regions_change_hands_and_leave_armies_in_place`,
+`accepted_technologies_are_granted_and_counted`, `technology_research_is_written` (traded count
+round trip), `negotiation_regions_list_the_tradeable_regions` (OK → record → ProposeDeal → owner).
+Open: the other actions' `Propose` items (state gift, payments, protector, war, lists 13–15) have no
+command yet (PLACEHOLDER, logged once per action); the AI's evaluation (`0x00C49BE0` →
+`0x00AA5ED0`, `0x00C1E240`, the technology value `0x00A36B20`) is §6.
+
+**Review round 1 (2026-10-10).**
+- The settlement's owner-changed event (+0x24, fired at `0x00B44B31` and by `0x00B2B810`): its
+  registrants (calls of the register helper `0x005301C0` on `+0x24`) are the siege object built by
+  `0x0088A0D0` (character +0x94, from `0x008AF6A0`; listener `0x008DB7D0`: the siege ends,
+  `0x008BD550`, when the new owner is the besieger's faction or not at war with it) and UI code
+  (`0x00904EF0`, `0x00906DD0`, `0x0095F590`, `0x009C3A40`, `0x009C4260`). CONFIRMED: nothing moves
+  the old owner's garrison. Sieges are not in the model.
+- Round 2: the model's owner change (`change_region_owner`, shared by capture, liberation and
+  deals) moves no army either: after a deal or a liberation (now `transfer_region`, as
+  `0x00B58A10`) the old owner's garrison stays inside, linked and selectable (capture still drops
+  the links: its variants destroy the garrison first). Downstream, PROVISIONAL until traced: an
+  army entering its own settlement never merges into another faction's garrison (it waits
+  outside), `defenders_of` still counts that garrison, a recruit then stands outside (the spawn
+  check `0x008EF790` not traced for it). `AcceptDeal` itself enforces `ai_refuses_deal`
+  (`CommandError::DealRefused`).
+- A deal applies once (`Negotiation::applied`, reset by Propose / Clear): ProposeDeal then
+  AcceptOffer no longer raises the traded count twice.
+- PLACEHOLDER until the AI's evaluation is ported: an AI side refuses a deal in which it gives a
+  region or a technology (`CampaignModel::ai_refuses_deal`; ProposeDeal's result "declined",
+  logged once); what it is offered it accepts.
+- `grant_technology` does not walk record +0x60 (PROVISIONAL, the field's source is not traced; a
+  no-op for the deal's technologies). `0x008B4AB0`'s second loop (slot +0xD8 characters →
+  `0x008B3580`) has no model counterpart (no per-character research link).
 
 ## 5. Save naming (`ui\campaign ui\load-save_game`), 0-E sandbox 2026-10-04
 
@@ -2566,3 +2625,40 @@ cause, CONFIRMED: the host never ran a layout state's `enter_function` / `exit_f
 - Still open: the user's `OnMouseLClickUp of component 1176: error converting Lua boolean to String`
   did not reproduce in the tests or the game harness. The technology panel logs missing `eu_*`
   building icons (`UI texture not found`), a separate issue.
+
+## 11. Settlement label culling and `Adopt`'s index (ui-small, 2026-10-10)
+
+### 11.1 `CampaignUI.RetrieveVisibleEnitityDetails` (`0x009F4520`, CONFIRMED)
+
+Registered at `0x0042A135`. It builds `{Settlements = {...}, Resources = {...}}`; both stay empty
+unless preference 0x44 is on: `ui_show_campaign_labels` (registered at `0x004057E6`, default
+true), which `CampaignUI.ToggleLabels` (`0x009F9CA0`, "Toggles that labels under settlements
+on/off") flips. Ours reads the same preference (`map.rs` `campaign_labels_shown`) and has ToggleLabels.
+It walks the settlement lists with `0x009B0400`, which lists a settlement when `0x009BAA90` passes:
+
+1. if the map's shroud object (`map+0x6F8`) exists and `0x00B11E70` reports the settlement's cell
+   shrouded, it is left out (which grid, explored or currently seen, is not traced here);
+2. a box from (x-3, -3, y-3) to (x+3, 3, y+3) (logic units, height 0) must not be wholly outside
+   the camera frustum (`0x010F6AA0`: 1 outside, 0 inside, 2 straddling, all six planes).
+
+**No HUD panel test**: settlements behind the HUD panels are listed (ours dropped them with
+`CampaignHud::covers`; fixed). Each entry is `{Address, ScreenPos = {X, Y}}`, where the point is
+(x, 0, y - 2) (height 0, two units south of the settlement), projected by `0x010EE3B0` and
+converted to pixels by camera virtual `+0x270`, each coordinate rounded to the nearest (x87,
+ties to even). Ours (`campaign/hud.rs` `labels`) now does the same with the Bevy camera's frustum.
+Since a hidden settlement is listed, ours ignores a pointer over a HUD panel when it picks the
+label under the pointer (`map_pointer`; otherwise `ShouldShowLabelBottomRow` reported it).
+The exe's entries carry no `Selected` / `Over` fields (ours adds them; whether a script reads
+them is not checked here). Resources: per region slot whose record flag `(+0x44)+0x3F` is set and
+that passes the same test, a "slot" entry (not implemented; the region-labels table above).
+
+### 11.2 `UIComponent:Adopt(child[, index])` (`0x01014580`, CONFIRMED)
+
+The index defaults to -1; if the value on top of the Lua stack is a number it is popped as the
+index (read as a float, rounded ties-to-even), then the child is popped from the top. A child with
+a parent leaves it first (`0x01027BA0`, `OnDivorceChild`), then `0x01024F70` inserts it at the
+index when 0 <= index <= child count (counted after it left), and appends otherwise; the parent
+hears `OnAdoptChild`. `Component.Adopt` (`0x01018090`) always passes -1, and it reads only the
+child from the stack: its parent is the running script's own component (context `+8` - 0x18). Ours
+matches: `ui_prelude.lua` binds `Component.Adopt(child)` to the running component's `Address`.
+Ours: `UiWorld::adopt(parent, child, index)`; test `adopt_inserts_at_the_index_given`.

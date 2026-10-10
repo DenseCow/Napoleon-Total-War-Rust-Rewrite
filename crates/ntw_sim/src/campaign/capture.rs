@@ -304,16 +304,15 @@ impl CampaignModel {
             }
             CaptureChoice::Liberate => {
                 let target = p.liberate.expect("checked");
-                // 0x00B58A10: the region passes to the liberated faction. The capturer's army leaves the
-                // settlement (INFERRED). The army the original raises for it (0x00B4F090: units chosen from
-                // what the region's sArmy / rHorse / tGuns buildings allow, a new general) is not modelled.
-                if let Some(g) = self.world.regions.get(&p.region).and_then(|r| r.garrison)
-                    && let Some(c) = self.world.forces.get(&g).and_then(|f| f.commander)
-                    && let Some(ch) = self.world.characters.get_mut(&c)
-                {
-                    ch.garrisoned_in = None;
+                // 0x00B58A10(target, 0, 1): the region passes to the liberated faction through the
+                // shared owner change, which moves no army (`transfer_region`, CONFIRMED there): the
+                // capturer's army stays inside, a foreign garrison. The army the original raises for
+                // the target (0x00B4F090: units chosen from what the region's sArmy / rHorse / tGuns
+                // buildings allow, a new general) is not modelled. The SettlementOccupied event is
+                // kept as before (INFERRED for this path).
+                if self.transfer_region(p.region, target) {
+                    events.push(CampaignEvent::SettlementOccupied { region: p.region, faction: target });
                 }
-                self.occupy(p.region, target, None, events);
                 0
             }
         };

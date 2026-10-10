@@ -368,15 +368,19 @@ impl UiWorld {
         id
     }
 
-    /// Moves `child` under `parent`, last in draw order (CONFIRMED: `Adopt` → `0x01024F70` with
-    /// index -1, which appends).
-    pub fn adopt(&mut self, parent: NodeId, child: NodeId) {
+    /// Moves `child` under `parent` at `index` among the parent's children (draw order), counted
+    /// once `child` has left its old parent; last when `index` is `None` or past the end
+    /// (CONFIRMED: `0x01024F70` inserts at an index from 0 to the child count, appends otherwise).
+    pub fn adopt(&mut self, parent: NodeId, child: NodeId, index: Option<usize>) {
         if self.get(parent).is_none() || self.get(child).is_none() || parent == child {
             return;
         }
         self.divorce_from_parent(child);
         if let Some(p) = self.nodes[parent].as_mut() {
-            p.children.push(child);
+            match index {
+                Some(i) if i <= p.children.len() => p.children.insert(i, child),
+                _ => p.children.push(child),
+            }
         }
         if let Some(c) = self.nodes[child].as_mut() {
             c.parent = Some(parent);
@@ -649,7 +653,7 @@ mod tests {
         assert_eq!(w.hit(r, 15.0, 15.0), Some(b));
         assert_eq!(w.hit(r, 90.0, 90.0), None);
         let other = w.instantiate(&comp("page", 10, 10, (0, 0), 0), None, "y", &mut Vec::new());
-        w.adopt(r, other);
+        w.adopt(r, other, None);
         assert_eq!(w.get(r).unwrap().children, vec![b, other]);
         assert_eq!(w.destroy(other), vec![other]);
         assert_eq!(w.get(r).unwrap().children, vec![b]);
@@ -664,8 +668,8 @@ mod tests {
         let r = w.instantiate(&comp("root", 100, 100, (0, 0), 0), None, "x", &mut Vec::new());
         let a = w.instantiate(&comp("a", 10, 10, (0, 0), 0), None, "y", &mut Vec::new());
         let b = w.instantiate(&comp("b", 10, 10, (0, 0), 0), None, "y", &mut Vec::new());
-        w.adopt(r, a);
-        w.adopt(r, b);
+        w.adopt(r, a, None);
+        w.adopt(r, b, None);
         let g = w.generation;
         assert!(w.reorder_children(r, &[a]));
         assert!(w.reorder_children(r, &[a, b]));

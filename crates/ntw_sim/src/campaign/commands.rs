@@ -332,6 +332,33 @@ pub enum CampaignCommand {
     /// `CCQ_DIPLOMACY_END_NEGOTIATION` (executor `0x00932F20` → `0x008BC5D0`): the campaign
     /// negotiation ends, if there is one.
     EndNegotiation,
+    /// `CCQ_DIPLOMACY_PROPOSE_REGIONS` (posted by the regions action record's `0x00C4B3C0` from
+    /// `negotiation:Propose`, executor `0x00933CC0`): sets the open negotiation's regions record
+    /// (`CampaignModel::propose_regions`). Not a turn action (no turn check traced).
+    ProposeRegions {
+        /// Empty the record instead.
+        clear: bool,
+        /// Regions the recipient is to give the proposer.
+        demanded: Vec<RegionId>,
+        /// Regions the proposer is to give the recipient.
+        offered: Vec<RegionId>,
+    },
+    /// `CCQ_DIPLOMACY_PROPOSE_TECHNOLOGIES` (`0x00C4B870`, executor `0x009340A0`): sets the open
+    /// negotiation's technology record (`CampaignModel::propose_technologies`).
+    ProposeTechnologies {
+        /// Empty the record instead.
+        clear: bool,
+        /// Technology keys the recipient is to give the proposer.
+        demanded: Vec<String>,
+        /// Technology keys the proposer is to give the recipient.
+        offered: Vec<String>,
+    },
+    /// `CCQ_DIPLOMACY_CLEAR_NEGOTIATION` (executor `0x00932EC0`): the open negotiation's deal is
+    /// emptied (`CampaignModel::clear_negotiation`).
+    ClearNegotiation,
+    /// `CCQ_DIPLOMACY_ACCEPT_DEAL` (executor `0x00932E40` → `0x00C114B0`): the deal of the open
+    /// negotiation is applied (`CampaignModel::accept_deal`: its regions and technologies).
+    AcceptDeal,
 }
 
 /// Why a command was rejected. A rejected command leaves the model unchanged.
@@ -420,6 +447,12 @@ pub enum CommandError {
     NoPendingBattle,
     /// Not supported yet (naval battles, merging armies and navies, ...).
     Unsupported(&'static str),
+    /// A deal command with no negotiation open.
+    NoNegotiation,
+    /// The deal is refused (`CampaignModel::ai_refuses_deal`, PLACEHOLDER for the AI evaluation).
+    DealRefused,
+    /// A technology key the `technologies` table does not have.
+    UnknownTechnology(String),
 }
 
 impl fmt::Display for CommandError {
@@ -468,6 +501,9 @@ impl fmt::Display for CommandError {
             CommandError::BattlePending => write!(f, "a battle is pending"),
             CommandError::NoPendingBattle => write!(f, "no battle is pending"),
             CommandError::Unsupported(what) => write!(f, "not supported yet: {what}"),
+            CommandError::NoNegotiation => write!(f, "no negotiation is open"),
+            CommandError::DealRefused => write!(f, "the deal is refused"),
+            CommandError::UnknownTechnology(k) => write!(f, "unknown technology {k}"),
         }
     }
 }
@@ -558,7 +594,17 @@ impl CampaignModel {
     fn apply_inner(&mut self, cmd: CampaignCommand) -> Result<Vec<CampaignEvent>, CommandError> {
         // The negotiation commands touch no battle state: a pending battle must not leave a
         // negotiation open with no way to end it.
-        let exempt = matches!(cmd, CampaignCommand::Autoresolve | CampaignCommand::BeginNegotiation { .. } | CampaignCommand::EndNegotiation);
+        // Proposing or clearing deal items only edits the negotiation; accepting a deal moves
+        // regions, so it waits for the battle like every other command.
+        let exempt = matches!(
+            cmd,
+            CampaignCommand::Autoresolve
+                | CampaignCommand::BeginNegotiation { .. }
+                | CampaignCommand::EndNegotiation
+                | CampaignCommand::ProposeRegions { .. }
+                | CampaignCommand::ProposeTechnologies { .. }
+                | CampaignCommand::ClearNegotiation
+        );
         if self.pending_battle.is_some() && !exempt {
             return Err(CommandError::BattlePending);
         }
@@ -663,6 +709,12 @@ impl CampaignModel {
                 self.end_negotiation();
                 Ok(Vec::new())
             }
+            CampaignCommand::ProposeRegions { clear, demanded, offered } => self.propose_regions(clear, demanded, offered).map(|()| Vec::new()),
+            CampaignCommand::ProposeTechnologies { clear, demanded, offered } => {
+                self.propose_technologies(clear, demanded, offered).map(|()| Vec::new())
+            }
+            CampaignCommand::ClearNegotiation => self.clear_negotiation().map(|()| Vec::new()),
+            CampaignCommand::AcceptDeal => self.accept_deal(),
         }
     }
 
@@ -868,7 +920,8 @@ impl CampaignModel {
     }
 
     /// Forces inside a region's settlement: its garrison and every army whose commander is
-    /// garrisoned there.
+    /// garrisoned there. PROVISIONAL: a garrison of another faction than the owner (left by a deal
+    /// or a liberation) is counted too; whom the exe makes fight then is not traced.
     pub fn defenders_of(&self, region: RegionId) -> Vec<ForceId> {
         let Some(r) = self.world.regions.get(&region) else { return Vec::new() };
         let mut out: Vec<ForceId> = r.garrison.into_iter().filter(|f| self.world.forces.contains_key(f)).collect();
@@ -980,10 +1033,12 @@ impl CampaignModel {
         if !hostile {
             // A settlement holds one garrison army (`SIEGEABLE_GARRISON_RESIDENCE` #12, CONFIRMED):
             // an army entering one that has a garrison joins it (INFERRED; PROVISIONAL when the
-            // garrison is full: the army then waits outside).
+            // garrison is full: the army then waits outside). A garrison of another faction (left
+            // inside by a deal or a liberation, which move no army) is never joined: the army waits
+            // outside (PROVISIONAL: what the exe does then is not traced).
             let held = self.world.regions[&region].garrison.filter(|g| *g != force && self.world.forces.contains_key(g));
             if let Some(g) = held {
-                if self.world.forces[&g].units.len() < self.max_units(self.world.forces[&g].is_navy) {
+                if self.world.forces[&g].faction == fa && self.world.forces[&g].units.len() < self.max_units(self.world.forces[&g].is_navy) {
                     self.merge_units(force, g, &mut events);
                 }
                 return Ok(events);
@@ -1170,7 +1225,7 @@ impl CampaignModel {
     /// How many more items the region's queue of that kind (land or naval) takes: [`MAX_QUEUE`] less the items
     /// it holds (`0x00B62040`), 0 when full ([`ENTRY_QUEUE_FULL`]).
     pub fn recruitment_queue_room(&self, region: &super::world::Region, naval: bool) -> usize {
-        let used = region.recruitment_queue.iter().filter(|i| self.rules.units.get(&i.unit_key).is_some_and(|u| u.is_naval) == naval).count();
+        let used = region.recruitment_queue.iter().filter(|i| self.rules.is_naval_unit(&i.unit_key) == naval).count();
         (MAX_QUEUE as usize).saturating_sub(used)
     }
 
@@ -1248,19 +1303,41 @@ impl CampaignModel {
         let owner = r.owner;
         self.check_turn(owner)?;
         let index = r.recruitment_queue.iter().position(|i| i.id == item).ok_or(CommandError::UnknownRecruitmentItem(item))?;
-        let population = super::population::RecruitmentPopulation::of(&self.rules);
-        let r = self.world.regions.get_mut(&region).expect("checked");
-        let item = r.recruitment_queue.remove(index);
-        // A full refund (CONFIRMED): the cancel path `0x00B1A820` calls the item's slot +0x1c with 1
-        // (`0x00B5C060` land, `0x00B5C0A0` naval), which credits item +0x20 — the entry cost the queue
-        // command charged (`0x00AF3F80`) — as income category 3, whose converter passes it unchanged
-        // ([`super::treasury::refund`]); then it gives the region its population back (`0x00A61AA0`,
-        // [`super::population::RecruitmentPopulation::credited`]).
-        r.population = population.credited(r.population, 1);
-        if let Some(f) = self.world.factions.get_mut(&owner) {
-            super::treasury::refund(&mut f.treasury, item.cost);
-        }
+        let item = self.world.regions.get_mut(&region).expect("checked").recruitment_queue.remove(index);
+        // A full refund (CONFIRMED): the cancel command calls the cancel path with 1.
+        self.cancelled_recruitment_items(region, std::slice::from_ref(&item), |_| true);
         Ok(Vec::new())
+    }
+
+    /// The cancel path `0x00B1A820`, for `items` already taken out of `region`'s queue (the cancel
+    /// command, the turn start's removal of items the region can no longer recruit, an owner change):
+    /// the region gets its population back for every item (`0x00A61AA0`, whatever the flag,
+    /// [`super::population::RecruitmentPopulation::credited`]); each item `refunded` selects (the flag
+    /// the caller passes, 1 = refund) has its item vtable +0x1C (`0x00B5C060` land, `0x00B5C0A0` naval)
+    /// credit its stored cost (item +0x20, the entry cost the queue command charged, `0x00AF3F80`) as
+    /// income category 3, whose converter passes it unchanged ([`super::treasury::refund`]: 32-bit
+    /// wrapping), to the region's owner (`0x00B2B7C0`: the queue's region +0xF4).
+    pub(crate) fn cancelled_recruitment_items(
+        &mut self,
+        region: RegionId,
+        items: &[super::world::RecruitmentItem],
+        refunded: impl Fn(&super::world::RecruitmentItem) -> bool,
+    ) {
+        let population = super::population::RecruitmentPopulation::of(&self.rules);
+        let Some(r) = self.world.regions.get_mut(&region) else {
+            log::warn!("recruitment items of unknown region {region:?} cancelled: their population and refunds were dropped");
+            return;
+        };
+        r.population = population.credited(r.population, items.len());
+        let owner = r.owner;
+        let refund = items.iter().filter(|i| refunded(i)).fold(0i32, |sum, i| sum.wrapping_add(i.cost));
+        if refund == 0 {
+            return;
+        }
+        match self.world.factions.get_mut(&owner) {
+            Some(f) => super::treasury::refund(&mut f.treasury, refund),
+            None => log::warn!("region {region:?}: its owner {owner:?} has no faction record; a recruitment refund of {refund} was dropped"),
+        }
     }
 
     /// Can `level_key` be built in that slot now? Checks the slot type against
@@ -1618,7 +1695,9 @@ impl CampaignModel {
                 });
                 let c = CharacterId(self.world.alloc_id() as i32);
                 let f = ForceId(self.world.alloc_id());
-                // Inside the settlement when it has no garrison (land only).
+                // Inside the settlement when it has no garrison (land only). PROVISIONAL: with a
+                // garrison of another faction inside (a deal or a liberation) the recruit stands
+                // outside; the exe's spawn check `0x008EF790` is not traced for that case.
                 let inside = !naval && self.world.regions[&region].garrison.is_none_or(|g| !self.world.forces.contains_key(&g));
                 self.world.characters.insert(
                     c,

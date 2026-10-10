@@ -18,11 +18,9 @@ region recompute, the pair-keyed `diplomatic_relations_government_type` document
 the sandbox). Also ported from other sandbox workers into the campaign model: 0-G's
 `DemolishBuilding` / `can_demolish`, 0-E's fort options (`fort_levels` / `fort_options` /
 `can_build_fort`), and the AI's `RESEARCH_TECHNOLOGY` (`analysis/ai/AI_RESEARCH.md`).
-**Not on main:** 0-E's `TransferRegion` (deal region step `0x00B449F0`) — its effect is INFERRED
-(it reuses the capture's `occupy`), which leaves the old owner's garrison army standing in the
-handed-over settlement with a stale `garrisoned_in` (the capture path destroys the garrison before
-`occupy`; what the deal does with it is UNKNOWN), and its turn gate on the region's owner refuses
-the demand-side deals the sandbox UI issues; it needs `0x00B449F0`'s flags decoded first. The
+Deal regions and technologies: traced and ported 2026-10-10 (UI_FIDELITY.md §4.9; `0x00B449F0` is
+the settlement's change of owner, not a peace-terms applier; the deal leaves armies in place; no
+turn gate). The
 sandbox's experience-adjusted campaign cost (`0x00ED49A0`, `XpCostTables`) was wrong and is gone: the
 campaign never calls `0x00ED49A0` (§Recruitment cost and money); the UI side of demolish /
 forts / deals (`ntw_script::ui::campaign`) belongs to the UI worker. The round 14/15 Ghidra listings
@@ -277,11 +275,9 @@ exact (sandbox count: 713 tests).
         `ECON_DESERT=1` (class ids of units outside settlements), `ECON_UCOLS=1` (the `units` int columns).
       - Next: (a) the `0x00B1B190` read above; (b) `LAND_UNIT` +0x20; (c) the recruitment spawn path's
         remaining three sub-items (open item 7) - still the largest unmodelled gameplay item in 0-B.
-    - Peace terms: regions and technologies as deal items, region transfer `0x00B449F0`. Round 13 found that
-     `0x00B449F0` is the *terms* applier, not just the region transfer: it is also what runs the
-     government-change item (`0x008BEAA0` -> `0x00B1B100` -> `0x00B1B5A0`, see §Diplomacy rules), and it
-     calls `0x00B2B810` / `0x00A64AC0` / `0x00A1B6C0` / `0x00AB3DF0` for the rest. Next: decode the
-     other deal-item appliers reachable from `0x00B449F0`'s five callers.
+    - Peace terms: regions and technologies as deal items — DONE 2026-10-10 (UI_FIDELITY.md §4.9). The
+     round 13 reading of `0x00B449F0` as a terms applier was wrong: it is the settlement's change of
+     owner (see the correction in §Diplomacy rules).
   - Importer limit (open item 9). `0x00BC0960` builds the (index, value) pairs, sorts them (`0x00B7F790`) and
     runs `0x00BC0DC0` per route source. The split rule in `trade_split` is INFERRED, 358/362. Next: read
     `0x00BC0DC0`'s amount step (`0x00BB5730`) for an importer-side cap.
@@ -851,6 +847,42 @@ Recomputed for every owned region at the round end (then `tw += growth`, 0x00AB4
 ## Capture: occupy, loot, liberate (round 9; code `ntw_sim::campaign::capture`)
 CONFIRMED from the exe unless tagged. The module docs hold the formulas; this is the map of the code.
 
+**Capture variants and the queues (worker capture-refund, 2026-10-10; CONFIRMED by disassembly).** Four settlement
+methods take a settlement by force; all four first empty the queues the same way, then call
+`TransferSettlementOwnership` `0x00B449F0(new owner, character, report flag 1, 1, 0)`:
+| Variant | Reached from | Own steps |
+|---|---|---|
+| `0x00B58560` | settlement vtable `0x0137CA30` slot 5 (+0x44), argument a character | destroys the garrison (virtual +0x1C), undo record `0x00AAA790`, capture report (`0x00885F90`, surrender 0), loc event id `0xFD` |
+| `0x00B58890` | slot 6 (+0x48), a character | no garrison step, no report |
+| `0x00B58C00` | slot 11 (+0x5C), a character | `0x009CB580` on the character's main attribute, report with surrender 1 |
+| `0x00B58A30` | not virtual; only caller `0x00BCA430`, the campaign director's (`CDIR_INTERFACE`, campaign +0xF80) applier of a `CDIR_INTENTION_TRANSFER_REGION_OWNERSHIP` (ctor `0x00B93840`, vtable `0x013801BC`; slot 12 `0x00BAF410` queues (faction, region, faction) in the director's list +0x3C via `0x00BA33A0`). The list is walked at each faction's round end (`0x008A9920` → `0x00BA90E0`): an entry of that faction whose checks pass (`0x00CF0D30`, `0x00BB52E0`: no blocking army, UNKNOWN details) is applied and dropped | argument a faction, no character: destroys the garrison, no report. Not in the model (the director's intentions are not ported; BACKLOG) |
+
+The shared queue step: the land queue (region +0x124) `0x00B1A760(0)`; for each slot of the region's slot manager
+(+0x120, vector +0x18 / count +0x14) with a port recruitment manager (slot +0x1E8) `0x00B1A760(1)`, then the slot's
+construction `0x00A6CBE0(0)`; then the two single slots +0x24 / +0x20 (walls / road) `0x00A6CBE0(0)`.
+- `0x00B1A760(flag)` cancels every item through `0x00B1A820(item, flag)`: the item's virtual +0x1C with the flag
+  (`0x00B5C060` land, `0x00B5C0A0` naval: with the flag, item +0x20, the stored cost, goes to the faction through
+  `0x00BB3810(cost, 3)`; that faction is the queue's region's owner, item +0x10 → manager +0x54 → region +0xF4 via
+  `0x00B2B7C0`, still the old owner here), then the population credit `0x00A620A0` **whatever the flag**.
+- `0x00A6CBE0(0)` → `0x00B1A790(0)`: a construction is refunded only with the flag (and a slot item, cost ≠ 0), so
+  never on an owner change.
+- So a capture gives the old owner back its queued ships' cost and nothing for its land units or buildings.
+- `0x00B449F0` → `0x00A64AC0(new owner, report flag, 0, 0, a, b)` drains again (constructions `0x00A6CC10` with 0;
+  land queue and each port's queue `0x00A6CC40` → `0x00A6CBF0` with `flag = (old owner +0x6E0 clear) or report`),
+  after reading the old owner and before the region joins the new one. After a capture the queues are already
+  empty. A transfer without a capture, `0x00B58A10(owner, a, b)` = `0x00B449F0(owner, 0, 0, a, b)` (the deal's
+  region item `0x00C18BF0` with (1, 0), liberation `0x00B4F090` with (0, 1), `grant_faction_handover` `0x00978950`
+  → `0x008AB6C0`), has report 0: an AI old owner (+0x6E0 = 0, the human flag, SAVE_COMPAT.md) gets every queued
+  unit's cost back, land and naval; a human old owner gets nothing. Not an original bug by the rule (a deliberate
+  branch on the human flag; no data contradicts it).
+- Model: `battles.rs` `occupy` runs the capture variants' drain (`clear_region_queues`, land no / naval yes) before
+  `change_region_owner`, whose own drain refunds both kinds when the old owner is not human (`turn.humans`). Land and
+  naval items share `Region::recruitment_queue`; a ship's item is the port's (`CampaignRules::is_naval_unit`), checked
+  on 478 queued items of the 12 top-level evidence saves against the record they were loaded from (a port's
+  manager or the region's). Tests: `a_capture_refunds_the_old_owners_queued_ships_only`,
+  `a_transfer_refunds_an_ai_old_owners_queued_units_and_a_humans_none` (ntw_sim),
+  `a_capture_in_the_vanilla_saves_refunds_the_queued_ships` (ntw_campaign: 36 captures of regions with queued ships).
+
 **Flow.** A capture (after a won assault, `0x00B58560`; an undefended settlement, PROVISIONAL same variant) changes the
 owner and clears the queues (round 8), then queues a report object (`0x00885F90`, vtable `0x013574DC`; flags +0x98
 pending, +0x99 surrender, +0x9A / +0x9B skip the choice). Its slot 9 `0x008F8D00`:
@@ -1097,7 +1129,7 @@ faction and liberation target.
   - Credit `0x00A61AA0` (via thunk `0x00A620A0`, region +0x28 +0x54): add var 37, called only by
     `CancelRecruitmentItem` `0x00B1A820`, unconditionally (whether or not the money is refunded), once per item. Its
     callers: the cancel command, the turn start's removal of items the region can no longer recruit (`0x00B71FB0`),
-    and the queue clearers `0x00B1A760` (capture variants `0x00B58560` / `0x00B58890` / `0x00B58C00`, the region
+    and the queue clearers `0x00B1A760` (capture variants `0x00B58560` / `0x00B58890` / `0x00B58C00` / `0x00B58A30`, the region
     transfer `0x00A64AC0`) and `0x00A6CBF0` (one port's naval queue; callers `0x0094D4F0`, `0x00A92380`,
     `0x00A924D0`, `0x00A925C0`, `0x00A971B0`, not traced further). A trained item is destroyed by the queue step
     without the cancel path (no credit), and disbanding a unit has no credit.
@@ -1111,10 +1143,8 @@ faction and liberation target.
     that queued new recruits between `auto_nr4_t4` and `orig_over_nr4_0252` (factors and owner unchanged) reach
     their grown population exactly. Synthetic tests: `recruiting_takes_population_and_cancelling_gives_it_back`,
     `the_recruitment_population_rules_are_signed_32_bit`.
-  - Found on the way (money, not ported here): the capture variants cancel the land queue with no refund
-    (`0x00B1A760(0)`, `[[region +0x178] +0x124]`) but each port's naval queue **with** the refund
-    (`0x00B1A760(1)` on slot +0x1E8; `0x00B5C0A0` credits item +0x20 as income category 3 to the queue's owner),
-    before the region changes hands. `battles::occupy` refunds nothing.
+  - The money side of those queue clearers (capture: ships refunded, land not; a transfer: everything refunded
+    to an AI old owner, nothing to a human) is ported: §Capture, "Capture variants and the queues".
 - **Money arithmetic.** Charge and refund pass the faction economics' per-category converter (spending +0x42C,
   income +0x3F8; vtable +4). A new campaign (`ConstructNewFactionEconomics` `0x00B96100`) sets all 13 income and 12
   spending converters to the object at `0x01459050` (vtable `0x0137EA30`, +4 = `0x004A23F0`: returns its argument). The
@@ -1906,6 +1936,16 @@ government change is a **peace-treaty option applied by the deal applier**, not 
 not a Lua binding; there is no engine path that changes a government on its own, which is exactly why
 no vanilla save reaches `0x00B1B5A0`. `0x008BEAA0` also calls `0x00A1B4E0` and `0x009D1E40` in the same
 block, so a deal can bundle the change with other effects.
+
+**Correction (deal-items, 2026-10-10, UI_FIDELITY.md §4.9):** `0x00B449F0` is
+`TransferSettlementOwnership`, a *settlement* method (`this` = the settlement, `+0x178` its region,
+`+0x88` its owner; arguments new owner, character, report flag, a, b); its callers are the capture
+variants (settlement vtable), liberation and the deal's region item (`0x00C18BF0`). `0x008BEAA0` is
+called (disassembly `0x00B44A6A..0x00B44ABA`) when the region's *old* owner is human
+(`0x008CA0B0`) and that owner's `+0x818` is this settlement, with (region, new owner): it reads as
+the human losing that settlement (`+0x818` INFERRED to be its capital settlement), not as a
+peace-treaty option. The government-change trigger above is therefore UNKNOWN again (not traced
+further here).
 
 **Ledger.**
 

@@ -112,10 +112,15 @@ fn tech_entry(lua: &Lua, inner: &Inner, parent_offsets: &HashMap<String, (i32, i
 }
 
 /// The tech entry of `key` for the negotiation's technology lists (`0x009C5AA0` rows); `None`
-/// when the technology is not in the data.
+/// when the technology is not in the data. `Record` is the technology key: the exe pushes the
+/// record's address, which the scripts only hand back (`diplomacy_tech_offer.lua` `RecordAddress`
+/// returns it, the panel passes it to `negotiation:Propose`, whose technology command looks the
+/// record up by key, `0x009340A0`).
 pub(super) fn negotiation_tech_entry(lua: &Lua, inner: &Inner, ui: &CampaignUi, key: &str) -> mlua::Result<Option<Table>> {
     let Some(t) = ui.link.db.technology(key) else { return Ok(None) };
-    tech_entry(lua, inner, &ui.tech_links(inner).parent_offsets, t).map(Some)
+    let e = tech_entry(lua, inner, &ui.tech_links(inner).parent_offsets, t)?;
+    e.set("Record", t.key.as_str())?;
+    Ok(Some(e))
 }
 
 fn technology_details(lua: &Lua, inner: &Inner, ui: &CampaignUi) -> mlua::Result<Value> {

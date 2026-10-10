@@ -5,13 +5,11 @@ const A: FactionId = FactionId(1);
 const B: FactionId = FactionId(2);
 
 
-/// The negotiation appliers (`0x00BB3810` / `0x00B1A790` for the money, the treaty appliers for
-/// the stance rows), with the row names `BuildOfferAndDemandStrings` reports. Region rows
-/// (`0x00B449F0`) and technology rows have no model command and are dropped.
+/// The negotiation appliers (`0x00BB3810` for the money, the treaty appliers for the stance rows),
+/// with the row names `BuildOfferAndDemandStrings` reports. Regions and technologies are the
+/// model's records (`CampaignCommand::AcceptDeal`, tested in ntw_sim).
 #[test]
 fn negotiation_rows_map_to_their_appliers() {
-    // The region rows are DEFERRED: no command is sent for them.
-    assert_eq!(deal_item_commands(&NegotiationItem::Regions(vec!["eur_france".into()]), A, B), Vec::new());
     // The lump sum (0x00BB3810(amount, 3)) is a state gift, the schedule a regular payment.
     assert_eq!(
         deal_item_commands(&NegotiationItem::Payment { amount: 500, turns: 0 }, A, B),
@@ -25,11 +23,7 @@ fn negotiation_rows_map_to_their_appliers() {
     for action in [D::Alliance, D::BreakTrade, D::CancelMilitaryAccess, D::BecomeProtectorate] {
         assert_eq!(deal_item_commands(&NegotiationItem::Action(action), A, B), vec![CampaignCommand::Diplomacy { a: A, b: B, action }]);
     }
-    // Technologies are still dropped: no granting address is reachable (see `accept_deal`).
-    assert_eq!(deal_item_commands(&NegotiationItem::Technologies(vec!["admin1_public_schooling".into()]), A, B), Vec::new());
     // Every row type has a name the panel's rows report.
-    assert_eq!(negotiation_action_name(&NegotiationItem::Regions(vec![])), "transfer_region");
-    assert_eq!(negotiation_action_name(&NegotiationItem::Technologies(vec![])), "transfer_technology");
     assert_eq!(negotiation_action_name(&NegotiationItem::Payment { amount: 1, turns: 0 }), "payments");
     assert_eq!(negotiation_action_name(&NegotiationItem::Payment { amount: 1, turns: 2 }), "payments");
 }
@@ -1833,30 +1827,37 @@ fn negotiation_with_offer(hud: &TestHud) {
     state.offers.push(DealRow { item: NegotiationItem::Payment { amount: 500, turns: 0 }, applied: false });
 }
 
-/// A deal applies at most once (the appliers skip a row marked applied, +0x1E8): proposing
-/// twice, or proposing and then accepting, sends the deal's commands once; each leaves the
-/// result "accepted" (+0x28 = 1, `Finished()`).
+/// A UI-held deal row applies at most once (the host skips a row marked applied):
+/// proposing the deal twice, or proposing and then accepting, sends the row's command once; each
+/// accept also asks the model to apply its records (`AcceptDeal`, the exe applies every record on
+/// each accept) and leaves the result "accepted" (+0x28 = 1, `Finished()`). `Propose` only adds
+/// items (0x009BF3C0), it accepts nothing.
 #[test]
 fn a_deal_applies_at_most_once() {
-    let gift = vec![CampaignRequest::Command(CampaignCommand::Diplomacy { a: A, b: B, action: D::StateGift(500) })];
-    for script in ["CampaignUI.Propose() CampaignUI.Propose()", "CampaignUI.ProposeDeal() CampaignUI.AcceptOffer()"] {
+    let gift = CampaignRequest::Command(CampaignCommand::Diplomacy { a: A, b: B, action: D::StateGift(500) });
+    let accept = CampaignRequest::Command(CampaignCommand::AcceptDeal);
+    for script in ["CampaignUI.ProposeDeal() CampaignUI.ProposeDeal()", "CampaignUI.ProposeDeal() CampaignUI.AcceptOffer()"] {
         let hud = test_hud();
         negotiation_with_offer(&hud);
-        assert_eq!(hud.requests_of(script), gift, "{script}");
+        assert_eq!(hud.requests_of(script), vec![gift.clone(), accept.clone(), accept.clone()], "{script}");
         let finished: Option<bool> = hud.host.lua().load("return CampaignUI.Finished()").eval().unwrap();
         assert_eq!(finished, Some(true), "{script}");
         assert!(hud.errors().is_empty(), "{script}");
     }
-    // Cancel empties the deal (CLEAR): a new deal applies again.
+    // Cancel empties the deal (CLEAR, the model's records through its command): a new deal applies again.
     let hud = test_hud();
     negotiation_with_offer(&hud);
-    assert_eq!(hud.requests_of("CampaignUI.AcceptOffer()"), gift);
-    assert_eq!(hud.requests_of("CampaignUI.Cancel() CampaignUI.AcceptOffer()"), Vec::new(), "the cancelled deal is empty");
+    assert_eq!(hud.requests_of("CampaignUI.AcceptOffer()"), vec![gift.clone(), accept.clone()]);
+    assert_eq!(
+        hud.requests_of("CampaignUI.Cancel() CampaignUI.AcceptOffer()"),
+        vec![CampaignRequest::Command(CampaignCommand::ClearNegotiation), accept.clone()],
+        "the cancelled deal is empty"
+    );
     hud.host.campaign_ui().unwrap().negotiation.borrow_mut().offers.push(DealRow { item: NegotiationItem::Payment { amount: 500, turns: 0 }, applied: false });
-    assert_eq!(hud.requests_of("CampaignUI.AcceptOffer()"), gift, "a new deal after Cancel");
-    // Without a counterpart nothing is applied.
+    assert_eq!(hud.requests_of("CampaignUI.AcceptOffer()"), vec![gift, accept], "a new deal after Cancel");
+    // Without a counterpart nothing is applied or proposed.
     hud.host.campaign_ui().unwrap().negotiation.borrow_mut().release();
-    assert_eq!(hud.requests_of("CampaignUI.AcceptOffer() CampaignUI.Propose()"), Vec::new());
+    assert_eq!(hud.requests_of("CampaignUI.AcceptOffer() CampaignUI.Propose({}, {}, 'regions')"), Vec::new());
 }
 
 /// The payment caps push the treasury (0x00BCAFE0, the HUD's "funds"): MaxPlayer the local
