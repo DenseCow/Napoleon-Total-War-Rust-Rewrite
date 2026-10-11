@@ -228,8 +228,25 @@ impl CampaignModel {
         events.push(CampaignEvent::ForceDestroyed { force });
     }
 
+    /// `faction` takes `region`'s settlement ([`Self::take_settlement`]) and the capture is reported
+    /// (`SettlementOccupied`; the event's constructor `0x00889EE0` is called only by the capture
+    /// variants `0x00B58560`, `0x00B58890` and `0x00B58C00`, CONFIRMED).
+    pub(crate) fn occupy(
+        &mut self,
+        region: RegionId,
+        faction: super::FactionId,
+        by: Option<ForceId>,
+        events: &mut Vec<CampaignEvent>,
+    ) {
+        if self.take_settlement(region, faction, by) {
+            events.push(CampaignEvent::SettlementOccupied { region, faction });
+        }
+    }
+
     /// `faction` takes `region`'s settlement ([`Self::change_region_owner`]; the capture variants
-    /// destroy the garrison army first); `by` (if any) moves inside.
+    /// destroy the garrison army first); `by` (if any) moves inside. Reports nothing: [`Self::occupy`]
+    /// reports a capture, the campaign director's transfer (`0x00B58A30`, [`super::director`]) none.
+    /// Returns false when the region does not exist.
     ///
     /// Every capture variant (the settlement's virtuals `0x00B58560` +0x44, `0x00B58890` +0x48 and
     /// `0x00B58C00` +0x5C, and `0x00B58A30`, the campaign director's region transfer) empties the
@@ -238,18 +255,12 @@ impl CampaignModel {
     /// the refund (`0x00B1A760(1)`), every construction with no refund (`0x00A6CBE0(0)`). So the old
     /// owner gets its queued ships' cost back but not its land units' ([`Self::clear_region_queues`]);
     /// the owner change that follows finds the queues empty.
-    pub(crate) fn occupy(
-        &mut self,
-        region: RegionId,
-        faction: super::FactionId,
-        by: Option<ForceId>,
-        events: &mut Vec<CampaignEvent>,
-    ) {
+    pub(crate) fn take_settlement(&mut self, region: RegionId, faction: super::FactionId, by: Option<ForceId>) -> bool {
         self.clear_region_queues(region, QueueRefund { land: false, naval: true });
         if !self.change_region_owner(region, faction) {
-            return;
+            return false;
         }
-        let Some(r) = self.world.regions.get_mut(&region) else { return };
+        let Some(r) = self.world.regions.get_mut(&region) else { return false };
         // The capture variants destroy the garrison army first; the settlement's links go with it.
         r.garrison = None;
         r.fleet = None;
@@ -265,7 +276,7 @@ impl CampaignModel {
         {
             r.garrison = Some(f);
         }
-        events.push(CampaignEvent::SettlementOccupied { region, faction });
+        true
     }
 
     /// A region handed over without a character: the deal's region item (`0x00C18BF0` →

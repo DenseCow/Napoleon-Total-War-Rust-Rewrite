@@ -136,9 +136,9 @@ test results, `docs/BACKLOG.md`, analysis notes, git history.
 Implemented, builds, tests pass, `/code-review medium` run and its blocking findings fixed, checked in
 game at its tier, findings recorded in the analysis file, BACKLOG item ticked and its Progress table
 updated, committed. Blocking: crashes, wrong or unfaithful behaviour, data loss, silent failures,
-hot-path cost, a rule duplicated in a second place, a comment that is now wrong. The rest (clean-ups,
+hot-path cost, a rule duplicated in a second place, a comment that is now wrong, a function renamed in Ghidra without its V5 write-up (finished in the same branch, not left for Polish; user, 2026-10-11). The rest (clean-ups,
 refactors, cold-path allocations) goes to the BACKLOG "Polish" section, one line each, and doesn't
-hold the merge. A worker editing a file clears that file's polish lines; past ~20 lines, clearing
+hold the merge, except that a fix round the review already forces also fixes the non-blocking notes in files the branch changed that need no new tracing (user, 2026-10-11). A worker editing a file clears that file's polish lines; past ~20 lines, clearing
 the list comes before new features. After the first full review, later rounds review only the fix
 commits. Exe behaviour a fix depends on is traced in Ghidra first, not guessed. Compiling, believing it is right, or resembling the original is not done; for fidelity
 work, behaviour beats compilation. An item stays INFERRED / PROVISIONAL until its in-game check is

@@ -855,7 +855,7 @@ methods take a settlement by force; all four first empty the queues the same way
 | `0x00B58560` | settlement vtable `0x0137CA30` slot 5 (+0x44), argument a character | destroys the garrison (virtual +0x1C), undo record `0x00AAA790`, capture report (`0x00885F90`, surrender 0), loc event id `0xFD` |
 | `0x00B58890` | slot 6 (+0x48), a character | no garrison step, no report |
 | `0x00B58C00` | slot 11 (+0x5C), a character | `0x009CB580` on the character's main attribute, report with surrender 1 |
-| `0x00B58A30` | not virtual; only caller `0x00BCA430`, the campaign director's (`CDIR_INTERFACE`, campaign +0xF80) applier of a `CDIR_INTENTION_TRANSFER_REGION_OWNERSHIP` (ctor `0x00B93840`, vtable `0x013801BC`; slot 12 `0x00BAF410` queues (faction, region, faction) in the director's list +0x3C via `0x00BA33A0`). The list is walked at each faction's round end (`0x008A9920` → `0x00BA90E0`): an entry of that faction whose checks pass (`0x00CF0D30`, `0x00BB52E0`: no blocking army, UNKNOWN details) is applied and dropped | argument a faction, no character: destroys the garrison, no report. Not in the model (the director's intentions are not ported; BACKLOG) |
+| `0x00B58A30` | not virtual; only caller `0x00BCA430`, the campaign director's (`CDIR_INTERFACE`, campaign +0xF80) applier of a `CDIR_INTENTION_TRANSFER_REGION_OWNERSHIP` (ctor `0x00B93840`, vtable `0x013801BC`; slot 12 `0x00BAF410` queues (faction, region, faction) in the director's list +0x3C via `0x00BA33A0`). The list is walked at each turn handover (`0x008A9920` → `0x00BA90E0`): an entry for the starting faction whose region still has its queued owner and is still transferable (`0x00BB52E0`) is applied; every such entry is dropped | argument a faction, no character: destroys the garrison, no report. Code: `director::director_transfer` (§Campaign director below) |
 
 The shared queue step: the land queue (region +0x124) `0x00B1A760(0)`; for each slot of the region's slot manager
 (+0x120, vector +0x18 / count +0x14) with a port recruitment manager (slot +0x1E8) `0x00B1A760(1)`, then the slot's
@@ -882,6 +882,19 @@ construction `0x00A6CBE0(0)`; then the two single slots +0x24 / +0x20 (walls / r
   manager or the region's). Tests: `a_capture_refunds_the_old_owners_queued_ships_only`,
   `a_transfer_refunds_an_ai_old_owners_queued_units_and_a_humans_none` (ntw_sim),
   `a_capture_in_the_vanilla_saves_refunds_the_queued_ships` (ntw_campaign: 36 captures of regions with queued ships).
+- Ghidra pass (polish9, 2026-10-11; disassembly): `TransferSettlementOwnership` compares the character's army's
+  faction (character +0x98 → +0x34) with the region's current owner (region +0xF4, `0x006649C0`) at
+  `0x00B44A3A`–`0x00B44A67`, never the new-owner argument. When they match it skips `0x00B44AC7`–`0x00B44B7F`
+  (`0x00B2B810`, the drain `0x00A64AC0`, the owner-change signals, `0x00B1B300`) but does not return: the +0x730 step
+  at `0x00B44B84` still runs. With no character (`0x00B58A10`: deals, liberation, handover) there is no skip. Every
+  capture path takes a region its capturer does not own, so the model, which has no such test, gives the same result
+  on the paths it has. `CancelRecruitmentItem` ends by firing the manager's multicast signal (+0x24, vtable
+  `0x0137CBD8`, slot +8 `0x008DBAC0`: each subscriber's vtable +4 with an item pointer) after the refund, population
+  credit, delete and count; the pointer is the item now in the cancelled one's place, or the freed item when it
+  was the last. Subscribers register at runtime: UNKNOWN (a debugger breakpoint at `0x008DBB59` while cancelling
+  settles whether any reads it; an ORIGINAL BUG only if one does). Completeness of the nine capture-refund
+  functions 7–66 → 76–97 (new structs `RecruitmentQueueItem`, `RecruitmentManager`, `RegionSlotManager`,
+  `CampaignSettlement`, `SlotConstructionItem`, `SlotSnapshotVector`; faction +0x72C labelled `pCapitalRegion`, its meaning still INFERRED).
 
 **Flow.** A capture (after a won assault, `0x00B58560`; an undefended settlement, PROVISIONAL same variant) changes the
 owner and clears the queues (round 8), then queues a report object (`0x00885F90`, vtable `0x013574DC`; flags +0x98
@@ -2181,6 +2194,117 @@ The difference is the **difficulty handicap**; nothing is wrong:
   the human, and the same basic set for every AI faction. The human-Britain game run (about +700) agrees.
 - The old +200 came from the plain upkeep, before the effects store was wired.
 - Not wired yet: `gdp_mod_all` (+10 for the AI at normal; item 4 below).
+
+## Campaign director (worker region-transfer 2026-10-11, static trace, CONFIRMED unless tagged; code `ntw_sim::campaign::director`)
+
+`CDIR_INTERFACE` (campaign +0xF80) steers the campaign around the humans. Ported: its one map
+change, `CDIR_INTENTION_TRANSFER_REGION_OWNERSHIP` (ctor `0x00B93840`), behind the seam
+`director.region_transfer`. Its other desires and intentions are not.
+
+- **When** (`AdvanceFactionTurn` `0x008A9920`, our `TurnStep::Handover`): first the transfers queued
+  for the starting faction (`0x00BA90E0`). Then, when the ending faction is human and the starting
+  one is not (`0x00BC6DF0`), the director pool runs (`0x00BA9220` via `0x008F1F40`, loop
+  `0x00BBC880`): the rival-score beliefs are refreshed, then the desire takes one step (`0x00BAE0A0`).
+- **RNG:** the director's own, +0x60; the constructor seeds `0x61266`, but the loader then sets it
+  from the file (below), so a new eur_napoleon campaign starts from the start position's 37138.
+  Draws are the MSVC LCG (×0x343FD + 0x269EC3) scaled to a float range (`0x00BBD6E0`).
+- **In the files** (loader `0x00B94170`, writer `0x00B9D6E0`, run by the model loader `0x00872550`
+  at `0x00873F3D` for start positions and saves alike, after the portrait allocator `0x008733CB`):
+  `CAMPAIGN_MODEL/CAMPAIGN_DIRECTOR` is a record array of one item holding `CDIR_INTERFACE`, v3
+  (written as 3, `0x004CDC50`): #0 u32 pool component id (+0x1C → +0x18; the load fails without it);
+  `CDIR_INTERFACE_AUTORESOLVER_MODIFIERS[]` {u32, u32} (+0x34); `CDIR_INTERFACE_REGION_OWNERSHIP_CHANGES[]`
+  {receiver, region, queued owner} ids (+0x3C list, count +0x48, data +0x4C, entry ctor `0x00518210`;
+  read from v1); `CDIR_INTERFACE_UBER_FACTIONS[]` {u32} (+0x54; read from v3); u32 RNG (+0x60; read
+  from v2; below v2 one campaign-RNG step (+0xFB8), RNG = state >> 16). The desire's counter (+0xFC)
+  is `CDIR_DESIRE_TRANSFER_REGION_OWNERSHIP` #0 u32 (vtable `0x0137FEB4`; loader `0x00B90210`,
+  writer `0x00B9B6C0`) under `CAI_INTERFACE/CAI_INTERFACE_DIRECTOR_BDI_POOL/CAI_BDI_POOL/CAI_BDI_POOL_DESIRES`.
+  Values: eur start position v3, pool 4000, RNG 37138, counter 0; `orig_fr_may1811` RNG 3875805033,
+  counter 3 (tests `ai_areas_on_the_europe_start`, `director_state_in_an_original_save`). Code:
+  `ntw_campaign` director.rs reads and writes the RNG, queue and counter; the modifiers and uber
+  factions (not modelled) are kept from the file. Our own save keeps `DirectorState`.
+- **Step** (`0x00BAE0A0`): chance = `BASE_CHANCE + EXTRA_CHANCE_PER_TURN × counter` (f32, clamped to
+  [0, 1]; `cdir_configs`, lookup `0x00BD2A40`, as float `0x00BD29B0`). A roll above it adds 1 to the
+  counter. Otherwise the candidates are gathered (`0x00BA2B90`); with none nothing changes; else a
+  second roll in [0, total] picks one; the transfer (receiver, region, the region's owner now) is
+  queued (`0x00BAF410` → `0x00BA33A0`, list +0x48/+0x4C) and the counter goes to 0.
+- **Candidates** (`0x00BA2B90`): for each transferable area, in area order, each linked area's owner
+  that is another faction, a major power (+0x524, `0x00C3FB20`), not human and at war with the
+  owner, in link order (a receiver bordering twice is listed twice), weighted by its rival score,
+  times `UBER_FACTION_MODIFIER` for the `CDIR_CVN_UBER_FACTION` faction.
+- **Transferable** (`0x00BB52E0`), in order: the area has a game region with an owner (CAI region
+  vt+0xC; seas and theatres have none); not under siege (`0x00C3E1E0`: CAI region +0x12C, its +0x34
+  interface, vtable `0x01382C20` built by `0x00BEDE70` from the loader `0x00BF0130`, slot +0x94 =
+  thunk `0x00C402D0` → [this+0x138] → `0x00A63FD0` (game region +0xFC, the settlement) → settlement
+  vt+0x98, the `IsUnderSiege` slot of `0x008A1FF0` / `0x00C5C040`; never true in ours until sieges
+  exist, BACKLOG "Sieges on the campaign map"); the owner is neither major nor human (`0x00BB51B0`);
+  no human mobile in the area (`0x00C42DC0`/`0x00C42DD0`, the area's mobiles +0x18C as the loader
+  `0x00BECCE0` reads them); for each link (`0x00C43560`/`0x00C43570`, other side `0x00C1BCE0`) the
+  far area is not a human's and holds no human mobile; and no human sees the settlement or its other
+  slots (`0x00BB55A0`: per human with a shroud, `0x00BB5640` / `0x00C3C920` positions, our
+  `sees_fully`, exe `0x00B7A1D0`).
+- **Apply** (`0x00BA90E0` → `0x00BCA430` → `0x00B58A30`): each entry for the starting faction leaves
+  the list; it is carried out when the region's owner id still equals the queued one (`0x00CF0D30`
+  compares the +0x18 ids) and the region is still transferable: the garrison is destroyed and the
+  region changes hands like a capture, with no capture report.
+- **Rival score** (`0x00BD21B0`, belief +0x100): max over the humans of `m × (RELATION_PCT × (1 −
+  relation) + VICTORY_REGIONS_PCT × b + PROXIMITY_PCT × c)`, capped at 1; relation from `0x00A7A2E0`
+  (attitude mapped to [0, 1] plus allied / access / trade / peace weights); `b` the share of its
+  regions the human's victory conditions name (imported from the start position's victory option,
+  `ntw_campaign::victory::fill`); `c` the share of its regions' linked areas the human owns (seas
+  count in the denominator only); `m` 1 for a major power else `MINOR_FACTION_WEIGHT`. 0 for the
+  rebels, the listed no-rival keys (`pirates`, `0x00C3FD50`, set by the importer
+  `ntw_campaign::rules_from_db`), humans and factions out of the game.
+- **The relation is a stored copy** (`0x00A74A20`, entry +8 of the faction's +0x100 list found by
+  `0x00A89E00`), refreshed by `0x00ABAFB0` only when read while dirty (`0x00CCCF70`). The CAI update
+  (`0x00A761F0`, each frame from `0x008F4120`) marks the ended turn's faction core dirty when the
+  active faction changes (`0x00CF7F60` → `0x00CF0AB0`), which reaches every relation belief
+  (`0x00A96CB0`). The pool runs in the handover, before that frame, so it reads the copy last made
+  at the human's turn start or at a later read: computing it fresh matches unless something read it
+  mid-turn. PROVISIONAL: the AI's evaluation of a human's deal proposal reads it
+  (`0x00CCB810` / `0x00CCB210` → `0x00A74A20`), so a war declared after a proposal in the same turn
+  is unseen until the next turn change; not modelled (no proposal step, no stored copy), and the
+  +0x6DC re-mark flag's setter is not found. BACKLOG §0 "Stored CAI relation belief".
+- **Victory options:** `victory::fill` gives every faction with options option 0 in a start position
+  (the human is not known yet); `LoadedCampaign::set_human` keeps only the human's, as the other
+  factions keep the empty default (the Coalition saves).
+- **Map areas:** the CAI world's `CAI_WORLD_REGIONS[]` (loader `0x00BF0130` appends them to its list
+  +0x130/+0x134 in file order; saver `0x00C09400`), imported as `World::ai_areas` (key + links). The
+  eur start position has 101 (72 land regions, the seas, the theatres and `all`); 52 of the 72 land
+  regions have the same neighbour set as `regions.esf`, 18 the same order; seas link to land and every
+  link is two-way (test `ai_areas_on_the_europe_start`). A map without them uses its regions in id
+  order and `region_neighbours`.
+
+ORIGINAL BUGs (fixed in ours, no toggle):
+1. `0x00A7A2E0`: the attitude mapping has branches for < 0 and > 0 but none for exactly 0, which
+   falls through to 0 ("hostile") instead of the 0.5 both branches meet at. Ours gives 0.5.
+2. `0x00BD21B0`: for the excluded factions it writes 0, then computes the score anyway and
+   overwrites it. Ours keeps 0.
+3. `0x00BD23F8`, `0x00BD24C0`: the two neighbour lists' "already listed" tests are inverted (a region
+   is appended only when already present), so both lists stay empty, the proximity share is always 0
+   and `PROXIMITY_PCT` is dead. Ours lists each linked area once.
+4. `0x00BAE1F5`..`0x00BAE230`: the pick loop drops the front candidate while the roll is above 0,
+   subtracting its weight, then takes the new front, so each candidate is picked with the previous
+   one's weight (the first only on a roll of 0). Ours gives each candidate its own weight.
+
+Open (PROVISIONAL in code): the siege test is never true (no sieges in the model; BACKLOG "Sieges on
+the campaign map"); the stored relation copy above; a human's fleets at sea are not found in a sea
+area (the path grid gives sea cells no region), so a sea link never blocks; the director's other users of its RNG
+(`0x00BAC560`, `0x00BAC9C0`, `0x00BC06E0`, `0x00BD4A60`, code at `0x00BAED7A` / `0x00BAEE24`) are not
+modelled, so the sequence matches the original's only until one of them draws.
+
+Ghidra names (V5 write-ups in the program): `DrawDirectorRandomFloat` `0x00BBD6E0`,
+`GetCdirConfigFloat` `0x00BD29B0`, `FindCdirConfigValue` `0x00BD2A40`, `HasCaiRegionSettlement`
+`0x00C3E1E0` (CAI region +0x12C; the siege test goes through that object), `IsSameComponentId`
+`0x00CF0D30`, `GetBoundaryOtherRegion` `0x00C1BCE0`, `GetCaiRegionBoundariesBegin` / `End`
+`0x00C43560` / `0x00C43570`, `IsFactionInHumanList` `0x00BB51B0` (the human list +0x14/+0x18; the
+major-power test is `0x00C3FB20`), `IsRegionSeenByAnyHuman` `0x00BB55A0`,
+`IsRegionTransferableByDirector` `0x00BB52E0`, `ComputeDirectorRelationValue` `0x00A7A2E0`,
+`StepTransferRegionOwnershipDesire` `0x00BAE0A0`, `CollectRegionTransferCandidates` `0x00BA2B90`,
+`UpdatePlayerRivalScoreBelief` `0x00BD21B0`. Their completeness scores (44.8 to 89.4) lose points only to
+void * parameters, x87 float locals and register locals whose committed type re-splits on every retype.
+Plates only (not renamed): `0x00B94170` / `0x00B9D6E0` (CDIR_INTERFACE load / save), `0x00B90210` /
+`0x00B9B6C0` (transfer desire load / save), `0x00FCD150` / `0x00FCBD50` (cdir_configs row reader /
+loader); `0x00B58A30`'s plate now names the handover queue applier.
 
 ## Resolved / open
 | question | answer | tag | code |

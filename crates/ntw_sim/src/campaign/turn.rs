@@ -34,6 +34,10 @@
 //!       (`0x009DA210`), every region (`0x00A786C0`: `RegionTurnEnd`, then its bankruptcy offset −1),
 //!       `UnitTurnEnd` for every unit of every force (forces in id order, units in array order;
 //!       `0x008BD4B0`), the diplomacy manager's turn end (`0x00B29940`, not read), `FactionTurnEnd`.
+//!    6. The handover ([`TurnStep::Handover`], `0x008A9920`, CONFIRMED order): right after the next
+//!       faction's turn start (after the round end and the next round start when the round wraps),
+//!       the campaign director's queued region transfers and, from a human to an AI faction, its
+//!       step ([`super::director`]).
 //! 3. Round end (CONFIRMED order, 0x00948CF0: when the turn passes the last faction, the economy of
 //!    **every** faction is settled at once, not at each faction's turn start): first every region's
 //!    population factors are refreshed ([`TurnStep::RoundEndRefresh`], `0x008E1030` per faction), then
@@ -93,6 +97,10 @@ pub enum TurnStep {
     FactionEnd(FactionId),
     /// Move on to the next faction after this one (and to a new round after the last).
     Advance(FactionId),
+    /// The turn handover from the ending faction to the starting one, after the starting one's turn
+    /// start (`0x008A9920`): the campaign director's queued region transfers and, from a human to an
+    /// AI faction, its step ([`CampaignModel::director_handover`]).
+    Handover(FactionId, FactionId),
 }
 
 /// Whose turn it is and the work still queued. Part of the state (hashed).
@@ -386,19 +394,22 @@ impl CampaignModel {
                 // updates during the turn only added). CHARACTERS_FIDELITY.md §10.
                 self.refresh_shroud(f, true);
             }
+            TurnStep::Handover(ending, starting) => self.director_handover(ending, starting, &mut events),
             TurnStep::Advance(f) => {
                 let order = self.world.factions_in_turn_order();
                 let pos = order.iter().position(|&x| x == f).unwrap_or(order.len());
                 match order.get(pos + 1) {
                     Some(&next) => {
-                        self.turn.queue.push_front(TurnStep::Decide(next));
-                        self.turn.queue.push_front(TurnStep::FactionStart(next));
+                        // The next faction's turn start, then the handover (`0x008A9920`, CONFIRMED order).
+                        for s in [TurnStep::Decide(next), TurnStep::Handover(f, next), TurnStep::FactionStart(next)] {
+                            self.turn.queue.push_front(s);
+                        }
                     }
                     None => {
                         if let Some(&first) = order.first() {
                             // Round end (every faction's economy, then the calendar), then a new
                             // round; pushed to the front in reverse order.
-                            for s in [TurnStep::Decide(first), TurnStep::FactionStart(first), TurnStep::RoundStart, TurnStep::RoundEnd] {
+                            for s in [TurnStep::Decide(first), TurnStep::Handover(f, first), TurnStep::FactionStart(first), TurnStep::RoundStart, TurnStep::RoundEnd] {
                                 self.turn.queue.push_front(s);
                             }
                             for &each in order.iter().rev() {

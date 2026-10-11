@@ -100,6 +100,45 @@ data +0xc).
 - Code: `pack/precedence.rs` (`PackGraph`), `Vfs::beats` takes each pack layer's node position at
   mount time; `ModResolver::add` uses `PackGraph::mount_order`.
 
+### 2.2 Ghidra documentation pass (polish7, 2026-10-10)
+
+Prototypes, `this` types, plate comments and local names set; completeness (score / effective)
+before → after. New structs: `PackPrecedencePair` (0x20), `PackPrecedencePairList`, `PackNameList`,
+`PackPrecedenceGraph` (0x40), `PackScanMap` (0x18) / `PackScanSlot` (0x40) / `PackScanValue` (0x30).
+
+| Function | Before | After |
+|---|---|---|
+| `VFS_AddPackPrecedencePair` 0x0108E8F0 | 30 / 43 | 90 / 93 |
+| `VFS_SortPacksByPrecedenceWithDependencies` 0x0109ECF0 | 19 / 36 | 68 / 87 |
+| `VFS_ComparePackPrecedenceGraph` 0x0108EBB0 | 2 / 17 | 64 / 78 |
+| `VFS_SortPackPrecedencePairsTopologically` 0x0105E8E0 | 4 / 21 | 76 / 91 |
+| `VFS_ErasePackPrecedencePairAt` 0x0106BBB0 | 37 / 45 | 92 / 100 |
+| `VFS_PackScanMapInsert` 0x010970D0 | 3 / 18 | 69 / 86 |
+| `Console_CmdImportAllMods` 0x010782F0 | 44 / 44 | 100 / 100 |
+| `String_FormatUInt32Decimal` 0x004F2FC0 | 0 / 7 | 79 / 79 |
+| `Console_CmdAddWorkingDirectory` 0x0105C780 | 12 / 17 | 69 / 69 |
+| `VFS_ListLooseFilesInWorkingDirs` 0x010430C0 | 0 / 0 | 43 / 59 |
+| `Console_ExecuteCommandStream` 0x00DB80F0 | 0 / 0 | 41 / 55 |
+| `DB_LoadTableFolderMergedByKey` 0x00E778A0 | 0 / 13 | 0 / 21 (very large; the rest is structural) |
+
+Findings: `add_working_directory` reads an optional bool after the folder (stream `>> bool`) and
+passes it to `VFS_AddWorkingDirectory` (meaning not traced). `DB_LoadTableFolderMergedByKey` is the
+table loader's constructor. The vtable it writes first, 0x01320F24, is not the agent attributes
+loader's (its old label `g_pAgentAttributesTableLoaderVtable`): it is the one vtable of every DB
+table object (CONFIRMED, polish9: 1304 write sites; `DB_LoadTableFolderMergedByKey`,
+`DB_LoadJunctionFolderMergedBySemicolonKey` `0x00DC6B67`, `LoadAgentAttributesTableRows`
+`0x00F94C42` and the per-table constructors, copy constructors (e.g. `0x00E3B8C0`) and
+destructors (e.g. `0x0073A910`) store it at `+0`; in the sites read, no other vtable follows it).
+Renamed `g_pDbTableVtable`.
+Globals labelled: `g_bImportAllMods`, `g_WorkingDirectoryList` / `g_dwWorkingDirectoryCount`,
+`g_pConsoleCommandMap`, `g_strCommandStreamEnd` (value not traced), `g_dwDbTableLoadVersion`,
+`g_szDbFolderPrefix`, `g_wszBobFilePrefix`.
+Re-check (polish9, 2026-10-11): `VFS_PackScanMapInsert` 69 / 86, `Console_CmdAddWorkingDirectory`
+69 / 69, `VFS_ListLooseFilesInWorkingDirs` 43 / 59, unchanged. What is left needs types not yet
+built: the VFS object (`g_WorkingDirectoryList` 0x01767D40 is really the VFS object passed as `this`
+to the `VFS_*` methods, with the folder count at +8 and the folder array at +0xC), the console
+argument stream and the scan map key; plus register-only temporaries the API cannot rename.
+
 ## 3. DB tables (CONFIRMED, `DB_LoadTableFolderMergedByKey` 0x00e778a0)
 - Every file of `db\<table>_tables\` is read, in `VFS_ListFolderFiles` 0x01042c80 order: first the
   **loose** files found in the working directories (0x010430c0, first directory wins per name), then
@@ -125,6 +164,7 @@ priority calls). Its row reader returns the record; what is hashed:
 | campaign_ai_personality_junctions, campaign_ai_manager_behaviour_junctions | 0xdc6b50 | 0xdd22a0 | `col0;col1` built by the loader (0x00dc74cd, `;` at 0x013305f8) |
 | cdir_unit_qualities | 0xfc6570 | 0xfc7970 | `col0_col1_col2` built by the reader into record+0 |
 | cdir_unit_balances | 0xfca150 | 0xfcb550 | `col0_<u32 col1>_<u32 col2>_col3` at record+0x2c (u32 decimal writer 0x004f2fc0) |
+| cdir_configs | 0xfcbd50 | 0xfcd150 | `col0_col1_col2` (campaign_faction_variable; `_` at 0x013ea700, absent faction "") at record+0x30; ours `CdirConfigRecord::row_key` (ntw_data) |
 Code: `ntw_ai::tables::keys`, read through `ntw_data::load_merged_rows` (same files, order and row
 rule as every typed table). Vanilla has one file per table, so the rows are unchanged there.
 

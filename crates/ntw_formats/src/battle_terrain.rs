@@ -248,6 +248,53 @@ pub struct Lighting {
     pub sky_colour: Option<[f32; 3]>,
     /// `SKYGEN sky_colour_scale` (the sky's own brightness, separate from `ambient_cube_scale`).
     pub sky_colour_scale: f32,
+    /// The rest of `SKYGEN`, the procedural sky `sky.fx` draws, if the file has one.
+    pub skygen: Option<Skygen>,
+}
+
+/// `SKYGEN`: the parameters of `sky.fx`'s `CalcSkyColour` apart from the sky colour itself, which is
+/// [`Lighting::sky_colour`] × [`Lighting::sky_colour_scale`] (CONFIRMED attribute names, e.g. the
+/// `HB_Nile` `evening_cloudy_1.environment`). Each colour is kept already multiplied by its
+/// `*_scale`, which is how the shader uses every one of them. The decays are the file's numbers as
+/// written (positive in the shipped files, while the shader's own defaults are negative; see the
+/// user of this struct).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Skygen {
+    /// `circumsolar_colour` × `circumsolar_colour_scale`.
+    pub circumsolar: [f32; 3],
+    /// `circumsolar_decay`.
+    pub circumsolar_decay: f32,
+    /// `horizon_colour` × `horizon_colour_scale`.
+    pub horizon: [f32; 3],
+    /// `horizon_opposite_colour` × `horizon_opposite_colour_scale`.
+    pub horizon_opposite: [f32; 3],
+    /// `horizon_decay`.
+    pub horizon_decay: f32,
+    /// `backscatter_colour` × `backscatter_colour_scale`.
+    pub backscatter: [f32; 3],
+    /// `backscatter_decay`.
+    pub backscatter_decay: f32,
+}
+
+impl Skygen {
+    /// Reads a `SKYGEN` element. A missing colour is black and a missing scale or decay is the
+    /// `sky.fx` default (scale 1; decays -0.84 / -0.07 / 1.0).
+    pub fn from_xml(s: &XmlElement) -> Self {
+        let colour = |name: &str| {
+            let c = tuple3(s.attr(name)).unwrap_or_default();
+            let k = s.attr_f32(&format!("{name}_scale")).unwrap_or(1.0);
+            [c[0] * k, c[1] * k, c[2] * k]
+        };
+        Self {
+            circumsolar: colour("circumsolar_colour"),
+            circumsolar_decay: s.attr_f32("circumsolar_decay").unwrap_or(-0.84),
+            horizon: colour("horizon_colour"),
+            horizon_opposite: colour("horizon_opposite_colour"),
+            horizon_decay: s.attr_f32("horizon_decay").unwrap_or(-0.07),
+            backscatter: colour("backscatter_colour"),
+            backscatter_decay: s.attr_f32("backscatter_decay").unwrap_or(1.0),
+        }
+    }
 }
 
 /// Parses `name(a,b,c[,d])` into its numbers.
@@ -273,6 +320,7 @@ impl Lighting {
             ambient_cube_scale: l.attr_f32("ambient_cube_scale").unwrap_or(1.0),
             sky_colour: scene.find("SKYGEN").and_then(|s| tuple3(s.attr("sky_colour"))),
             sky_colour_scale: scene.find("SKYGEN").and_then(|s| s.attr_f32("sky_colour_scale")).unwrap_or(1.0),
+            skygen: scene.find("SKYGEN").map(Skygen::from_xml),
         })
     }
 }
@@ -1159,7 +1207,8 @@ mod tests {
     fn lighting_tuples() {
         let scene = xml::parse(
             "<SCENE><LIGHTING light_direction='euler(0.5,-1.0,0)' light_colour='rgb(1,0.5,0.25)' light_colour_scale='2'/>\
-             <X><SKYGEN sky_colour='rgb(0.1,0.2,0.3)' sky_colour_scale='2'/></X></SCENE>",
+             <X><SKYGEN sky_colour='rgb(0.1,0.2,0.3)' sky_colour_scale='2' horizon_colour='rgb(1,0.5,0)' \
+             horizon_colour_scale='0.5' horizon_decay='0.2'/></X></SCENE>",
         )
         .unwrap();
         let l = Lighting::from_scene(&scene).unwrap();
@@ -1167,6 +1216,10 @@ mod tests {
         assert_eq!(l.light_colour, [1.0, 0.5, 0.25]);
         assert_eq!(l.sky_colour, Some([0.1, 0.2, 0.3]));
         assert_eq!(l.sky_colour_scale, 2.0);
+        let s = l.skygen.unwrap();
+        assert_eq!(s.horizon, [0.5, 0.25, 0.0]);
+        assert_eq!(s.horizon_decay, 0.2);
+        assert_eq!((s.circumsolar, s.circumsolar_decay, s.backscatter_decay), ([0.0; 3], -0.84, 1.0));
     }
 
     /// A flat heightfield entirely below the sea is all sea; one above it is none (`SEA_LEVEL`).

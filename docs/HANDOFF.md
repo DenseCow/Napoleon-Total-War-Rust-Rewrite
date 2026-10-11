@@ -5,7 +5,7 @@ Old session logs are in `docs/archive/`.
 
 Last updated: 2026-10-10. Main tests at last full run (2026-10-08): `cargo test --workspace` passes on the install.
 
-## Resume here (2026-10-10)
+## Resume here (2026-10-11)
 
 - **Repos:** work happens in the private repo (origin, `…-Private`). The public repo
   `DenseCow/Napoleon-Total-War-Rust-Rewrite` is a snapshot mirror for contributors: publish after a
@@ -16,22 +16,20 @@ Last updated: 2026-10-10. Main tests at last full run (2026-10-08): `cargo test 
   merge, applying the worker's BACKLOG ticks/Polish lines in the merge commit → `bash tools/progress.sh`
   → push (the hook syncs public #2) → publish in batches. Running work = the BACKLOG `(running: …)`
   markers and `git worktree list`; merged work = `git log`.
-- **Tonight (user, 2026-10-10, night mode):** no wrap-up before 71% of the week; at wrap-up, merge what is review-clean and publish main to the public repo (`bash tools/publish_public.sh`).
-- **Resume points (2026-10-10 evening, day mode):** merged today: ui-small, capture-refund, army-recruit-tab, deal-ai, in-game-checks, deal-region,
-  new-portraits, polish1, gait-blend2, polish2, rule-seams, polish3, force-diplo. Slots (user, 2026-10-10): 3 Opus workers (reviews take one)
-  + 1 Sonnet worker on Polish only. §11 (user, 2026-10-10): only framework parts that avoid costly refits later; rule-seams kept (no-rebuild
-  system mods that stack); next §11 step before any refit: the seams macro line in BACKLOG §11. Open:
-  1. ui-fails (NR-ui-fails, Opus, running): the four "Failed in-game checks" in Open bugs; 9a14cfa9 fixed the recruitment tab, then the worker was lost; a new worker is on the other three.
-  2. region-transfer (NR-region-transfer, Opus, running): §0-B `CDIR_INTENTION_TRANSFER_REGION_OWNERSHIP`.
-  3. (slot free: treasury-rules merged)
-  4. (polish4 merged)
-  5. polish5 (NR-polish5, Sonnet): done (3caf8abf + 2ab0345a); review QUEUED. At merge: delete "Own save: header pixels…", "The campaign
-     model addresses building slots…" (stale: SlotRef exists) and the campaign_play.rs temp-file line.
-  6. QUEUED for the next free Opus slot: gait-blend3 (Open bugs "Gait"), then the polish5 review, then the polish4 fix review (e91f9a51), then the polish6 review (93c3d61a); hud-state (Open bugs "Battle HUD") once ui-fails is merged; sea-water (Open bugs "Sea water"); self-checks (Opus: verify without the user, user 2026-10-10: (a) hired and field-promoted generals get a european general portrait on the army card and in the Lists, by harness shot or model test (the Enlist pool portraits show, user screenshot 2026-10-10); (b) agent action success % (Assassinate/Sabotage/Duel) against the exe formula, with tests; (c) fog labels rule (INFERRED) traced in Ghidra and tested; (d) agent attribute icons on the agent card and agents-tab rows, from the UI layouts/.luac and data (ours: ntw-evidence screens/ours/2026-10-10_settlement_agents_tab.png); (e) settlement recruitment prices (data) and card spacing (layout file; ours overlap slightly)).
-  8. polish7 (NR-polish7, Opus in the Polish slot): Ghidra write-up lines (new-portraits, generic-engine, ui-small plate comments, mod-loading2).
-  7. polish6 (NR-polish6, Sonnet): done (93c3d61a: DIPLOMACY_OPTIONS import, deal_value research_need, screenshot-harness port; napoleon tests not run); review QUEUED after item 6. At merge delete its 3 Polish lines (research_need half of the deal-ai line only).
-  Agent ids (SendMessage after /clear): ui-fails a25a2b4692299be04, region-transfer a06771a913587b37f, treasury-rules a2020ea12b9268fd0,
-  polish4 ae9aa0a950d29fed2, polish5 a4298743580337a9a, polish6 a1a3f09dcfb13fda0, gait-blend2 (old) ae00b6132af647320.
+- **Resume points (2026-10-11 wrap-up, usage 80%):** merged 2026-10-11: polish9, polish10, region-transfer, sea-water (47cade7a),
+  gait-jitter (f48faac9). Rule (user, 2026-10-11): a forced fix round also fixes the review's local notes (CLAUDE.md). Every branch
+  below is pushed; resume each with a fresh worker (brief points at its branch + this line):
+  1. ui-fails (NR-ui-fails, 0e787e73): round-2 review: fix first, one blocking: ntw_data campaign.rs:294 `UnitGroupingPermission`
+     merges on `unit` alone (added by this branch, 9a14cfa9); the exe loader 0x00DC11A0 (via 0x00E86820) keys col0+col1
+     (MOD_LOADING.md §3.2), so merge on unit+grouping. Then review that fix commit only, merge (BACKLOG: Enlist tick; Polish line
+     `pflNextValue` 0x00F859A0; 0x00F72B80's 3 void* row locals need row structs). Then hud-state.
+  2. self-checks (NR-self-checks, 2d7a21c6, partial): (a) settled (hire/promotion portraits, test), (b) agent chances fixed (duel
+     0x009C2340, building sabotage 5% 0x00922D6A), (c) fog labels CONFIRMED (0x009BAA90). Left: (d) agent icons, (e) recruit prices +
+     card spacing, analysis notes, workspace tests, clippy; then review. Queue after: (f) diplomacy negotiation shot vs the original's,
+     (g) region details panel vs data/saves, (h) own save F5 round trip + map shot, (i) ForceCaps::new_campaign traced in Ghidra.
+  3. polish11 (NR-polish11, 51b7b044, partial, Opus): field-promotion gate CONFIRMED constant-false (slot +0x40 = 0x00462CB0 in both
+     vtables; no vanilla table grants the bonus). Left: item 1 (pool.rs/commands.rs/events.rs docs, turns 0→1 cite, i32 wrap) and
+     items 2-4 (treasury, new-portraits, deal V5 write-ups; 3 treasury plates at 47-56). Decision in FOR_USER (mod-granted promotion).
 - **Disk:** C: filled up on 2026-10-09; 21 merged worktrees were removed (~100 GB back). Remove a
   worktree after its merge; check `df -h /c` before starting builds.
 - **Next:** §0, several workers tracing in parallel under the Ghidra writer lock, §11: only the framework parts that avoid costly refits later (rule-seams running), the rest waits for its turn (user, 2026-10-10); the unwrap audit last.
@@ -42,9 +40,6 @@ Last updated: 2026-10-10. Main tests at last full run (2026-10-08): `cargo test 
 
 ## Open bugs
 
-- **Gait (user check 2026-10-10, gait-blend2 merged):** infantry and cavalry walk/run look good, but (1) cavalry still move
-  in lockstep: they need the per-soldier offset infantry got so they don't all step at the same time; (2) a slight hiccup/jitter (infantry and cavalry, user 2026-10-10)
-  when switching from running to walking. Queued: gait-blend3 in the next free Opus slot.
 - **Diplomacy screen (§0-E):** diplomacy2 merged (greeting by attitude, diplomat portrait, button lists
   for war / peace+trade / ally, Power and Wealth words, regnal numerals). Still different from the
   original: the panel creates no `diplomacy_button_*` components from the
@@ -74,8 +69,7 @@ Last updated: 2026-10-10. Main tests at last full run (2026-10-08): `cargo test 
     (same files).
   - Sea water (user check 2026-10-10, NHB_Nile, original side by side): ours pale sky-blue and far too bright, original dark
     grey-green; our waves are long regular stripes, the original small irregular chop; foam on shows no change. Ships, naval
-    HUD and the wind compass are §4 (not started), not this bug. Queued: sea-water (Opus: ocean.fx inputs, reflection/fresnel,
-    wave scale; BACKLOG §2 Water).
+    HUD and the wind compass are §4 (not started), not this bug.
   - Shrubs don't sway (trees do); "shrubs sway with the battle wind" is INFERRED and fails in game.
   - Red/blue boxes round every unit and broken red shapes in empty ground (user screenshot 2026-10-10,
     snow map; low priority, user): the boxes are our untagged debug outline (`napoleon` battle/view.rs
@@ -114,7 +108,10 @@ Before any debugger session: `cargo test -p ntw_data --test probe_script` and `c
 Batched for the user: only what the screenshot harness can't do (a worker ran the rest on 2026-10-10:
 `analysis/fidelity/IN_GAME_CHECKS_2026-10-10.md`; our shots in `ntw-evidence\screens\ours\2026-10-10_*.png`).
 Delete a line once checked and record the result where it belongs. Base command: `cargo run --release -p napoleon -- <flags>`.
-- (none: user 2026-10-10, the rest is verified by workers from data, layouts, the harness and Ghidra; only a look that no file, trace or harness shot can settle comes here)
+- (user 2026-10-10: the rest is verified by workers from data, layouts, the harness and Ghidra; only a look that no file, trace or harness shot can settle comes here)
+- **Gait (gait-blend3 + gait-jitter 2026-10-11, motion needs eyes; FOR_USER):** `--battle --no-intro --ai off`; order cavalry and infantry to walk, run, then walk.
+  Check: cavalry no longer step in lockstep (each display has its own 0.95-1.05 gait speed, `0x0078B8A0`), and no hiccup at
+  the run → walk change. Known left: a unit setting off from a stand still takes its first step together (BACKLOG §3).
 
 ## Needs the user
 

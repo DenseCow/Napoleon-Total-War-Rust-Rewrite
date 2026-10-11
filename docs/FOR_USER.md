@@ -7,6 +7,38 @@ The morning report from night sessions, newest night first. Two lists per night:
 - **Done tonight:** everything finished, merged or settled. One line each: what, commit, how to see it.
   Claude clears a night's list once the user has read it.
 
+## 2026-10-11 (store run, night mode until you're back)
+
+### Needs you
+
+- **Cavalry gait** (now on main): check the hitch is gone; walk → run → walk with cavalry, also through a forest.
+  The small speed rise and drop on slow ground every ~11 ticks is the original's own (traced, 0x00581AE0).
+  `cargo run -p napoleon --release -- --battle --no-intro --ai off`
+- **Battle sea** (now on main): dark grey-green with small chop, compare with the original's Nile.
+  `cargo run -p napoleon --release -- --battle-key NHB_Nile --skip-deployment`
+  (foam: set `$env:NAPOLEON_SEA_FOAM='1'` first). No fog and a stand-in sky yet, so the far horizon won't match.
+- **Decision:** the original never field-promotes a captain to general (its check is hard-wired to "no", 0x00462CB0),
+  and no vanilla table grants that bonus, so vanilla plays the same either way. Ours promotes if a mod grants the bonus.
+  Keep that (mods can turn it on), or make it never promote like the exe? Until you say, it stays as it is.
+
+### Done
+
+- **Sea merged** (`47cade7a`): the battle sea uses the game's own wave pictures and sea tables, and reflects the sky
+  colour; see "Battle sea" above.
+- **Cavalry gait merged** (`f48faac9`): three animation hitches fixed (a loop ran one frame too long, a change drew one
+  frame past its end, the stride restarted on each change); see "Cavalry gait" above.
+- **Wrapped up at 80%** (block cap). Pushed, not merged (HANDOFF "Resume points"): ui-fails (one small fix left after
+  its second review: a mod's unit row must not wipe the unit's other rows), self-checks (3 of 5 settled: portraits
+  correct; agent chances fixed for duels and building sabotage; fog labels confirmed), polish11 (partial).
+- **Polish batch 9 merged** (`e7b96fcf`): Ghidra write-ups for the deal, region-deal and capture-refund functions;
+  the exe checks no region owners in deals, so ours stays as is. Nothing visible.
+- **Polish batch 10 merged** (`295505da`): one screenshot helper (a failed save now exits as an error), a clear type
+  for port recruitment queues (save bytes unchanged). Nothing visible.
+- **Region transfer merged** (`1eaf844a`): the campaign director that hands regions between factions now runs in
+  the model as the original does (its save data is read and written too), with 4 bugs of the original fixed.
+  Nothing to look at yet; the parts still PROVISIONAL are on the BACKLOG.
+- New rule (yours): a fix round a review forces also fixes that review's small notes in the branch's own files (CLAUDE.md, `0dc70d12`).
+
 ## Night of 2026-10-10 (errands, from ~evening)
 
 ### Usage tonight
@@ -22,8 +54,13 @@ The morning report from night sessions, newest night first. Two lists per night:
 - **Treasury rules merged** (`5bd2d229`): money moves as the exe does. A player's pool hire or promotion can go into
   debt and the AI hires free; a state gift gives the receiver nothing (the exe's own behaviour); a deal's lump sum is a
   one-off payment (category 3 charge, category 1 credit). All tags cite exe addresses, review clean. Nothing visible to check.
-- ui-fails: the Army Recruitment tab fix is committed (`9a14cfa9` on `work/ui-fails`, not merged yet). That worker was
-  lost at the /clear; a new worker is on the other three failed checks (settlement tooltip, Enlist traits, unit-card nil).
+- **Polish batch 4 merged** (`a15e21ac`): small clean-ups (one file system reused, no per-card allocation). Nothing visible.
+- **Public mirror published** (`901c2e39`) with both merges.
+- **Wrapped up at 71%.** Pushed but not merged yet (HANDOFF "Resume points" says how each continues): ui-fails (3 of 4
+  failed checks fixed: recruitment tab, slot tooltip, unit-card error; the Enlist panel left), region-transfer (the AI's region hand-over: the campaign director
+  is in the model with 4 original bugs fixed; tests and notes left), polish5 and polish6 (one review fix each),
+  polish7 (Ghidra write-ups: mod loading and map labels done, generic engine partly).
+- New rule (yours): the Polish slot never sits idle; when no Sonnet work is left it runs Opus (CLAUDE.md, `9eb742bb`).
 
 ## Night of 2026-10-09 → 10
 
@@ -33,24 +70,7 @@ The morning report from night sessions, newest night first. Two lists per night:
   Then Sat/Sun/Mon at 11 points each leaves ~6 for Tuesday before the Wed 00:00 reset. Start each day around 2 pm.
 
 ### Needs you
-
-- **New-campaign army cap in the original (~5 min, no debugger):** in the original, set the unit size option to the
-  one that writes `campaign_unit_multiplier 0.75` (check `%APPDATA%\The Creative Assembly\Napoleon\scripts\preferences.script.txt`),
-  start a new campaign (any faction), save on turn 1, and tell Claude the save's name. Claude reads its army/navy cap
-  fields (CAMPAIGN_MODEL #23/#24; expected 20 / 10) to settle `ForceCaps::new_campaign` (PROVISIONAL, MODDING_AUDIT §2.6).
-- **Decision to confirm (taken tonight, reversible):** trading regions/technologies is being wired into deals, but the
-  AI's evaluation of such deals isn't traced yet. Until it is, the AI refuses any deal in which it would give away a
-  region or technology (logged; you can still give yours). Say if you'd rather it be different.
-- **Diplomacy negotiation (~3 min, side by side with the original):** `cargo run -p napoleon -- --campaign
-  mp_eur_napoleon --campaign-faction britain --no-intro`, Diplomacy → Austria → Open Negotiations: the option buttons
-  now appear; Regions and Technologies list both sides. Proposing regions/techs is not in the model yet (dropped, logged).
-- **Region details panel, side by side with the original (~3 min):** `cargo run -p napoleon -- --campaign eur_napoleon
-  --campaign-faction france --no-intro`, open a region's details (e.g. Paris): taxes, religion, public order, wealth
-  and growth with their factors, predicted values. Compare with the original's same region on turn 1. Effects and
-  NextTown are still placeholders.
-- **Own save format + map display (quick look, ~3 min):** same command; play two turns, recruit a general, press F5,
-  quit, load that save from the menu: the map looks as before, the general keeps his name, nothing is missing.
-
+- Moved to Claude's self-checks (2026-10-10): diplomacy negotiation, region details panel, own save + map display, and the new-campaign army cap (traced in Ghidra first). The regions/techs decision is settled (deal-region, deal-ai merged).
 ### Done tonight
 
 - **Walking-horse sitting done (2026-10-10 afternoon):** the walk is slowed by the ground type (0.40 on that ground) and slope, not by turning; notes on `work/gait-blend2` `ab13a8ec`, port next.

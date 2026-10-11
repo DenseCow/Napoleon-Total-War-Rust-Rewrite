@@ -62,6 +62,11 @@ pub struct CampaignModel {
     /// and hashed (an own save from before the field reads it empty).
     #[cfg_attr(feature = "serde", serde(default))]
     pub mod_state: super::mod_state::ModState,
+    /// The campaign director's state (`CDIR_INTERFACE`, campaign +0xF80; [`super::director`]): its
+    /// RNG, the region-transfer desire's counter and the queued transfers. Saved and hashed (an own
+    /// save from before the field reads a new campaign's).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub director: super::director::DirectorState,
     /// A battle waiting to be fought (the original's `PENDING_BATTLE` record, W3 §2; its content
     /// is not decoded). Set by an attack, cleared by autoresolve or a battle result.
     pub pending_battle: Option<PendingBattle>,
@@ -111,6 +116,7 @@ impl PartialEq for CampaignModel {
             last_autoresolve,
             script_rngs,
             mod_state,
+            director,
             negotiations: _,
         } = self;
         *calendar == other.calendar
@@ -126,6 +132,7 @@ impl PartialEq for CampaignModel {
             && *last_autoresolve == other.last_autoresolve
             && *script_rngs == other.script_rngs
             && *mod_state == other.mod_state
+            && *director == other.director
     }
 }
 
@@ -141,6 +148,7 @@ impl CampaignModel {
             force_caps: ForceCaps::default(),
             deal_inflation: super::deal_value::DealInflation::default(),
             mod_state: super::mod_state::ModState::default(),
+            director: super::director::DirectorState::default(),
             pending_battle: None,
             pending_capture: None,
             rules: Arc::new(CampaignRules::default()),
@@ -455,6 +463,15 @@ impl CampaignModel {
             h.i32(f.raw());
             h.u32(*n);
         }
+        h.u32(w.victory_regions.len() as u32);
+        for (f, regions) in &w.victory_regions {
+            h.i32(f.raw());
+            h.u32(regions.len() as u32);
+            for r in regions {
+                h.u32(r.raw());
+            }
+        }
+        self.director.hash_into(&mut h);
         h.finish()
     }
 
@@ -551,6 +568,13 @@ pub struct World {
     /// (`regions.esf` outline `connectivity`). Empty when the map is not attached. Static data, not
     /// hashed.
     pub region_neighbours: BTreeMap<RegionId, Vec<RegionId>>,
+    /// The campaign AI's map areas (`CAI_WORLD_REGIONS`, the AI world's list +0x130/+0x134, in its
+    /// order): the game regions, the seas and the theatre areas, each with its links. The campaign
+    /// director walks them ([`super::director`]). Empty for a file or map without them; the director
+    /// then uses the game regions in id order and [`World::region_neighbours`]. Static data, not
+    /// hashed.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ai_areas: Vec<AiArea>,
     /// Bankrupt turns in a row of each faction (the economics object's +0x460, CONFIRMED); a faction
     /// that can pay is not listed.
     pub bankrupt_turns: BTreeMap<FactionId, u32>,
@@ -679,6 +703,25 @@ pub struct World {
     /// so a loaded game starts every faction at 0.
     #[cfg_attr(feature = "serde", serde(default))]
     pub deal_regions_received: BTreeMap<FactionId, u32>,
+    /// The regions each faction's campaign victory conditions name (`CAMPAIGN_VICTORY_CONDITIONS` #0
+    /// `REGION_KEYS`: the `FACTION`'s own record, else its `CAMPAIGN_PLAYER_SETUP`'s). The CAI region's
+    /// victory list (CAI region #13, read by `0x00C40540`) holds the factions naming the region; the
+    /// campaign director's rival score reads it for the humans ([`super::director`]). Static after
+    /// the import (nothing in play changes the conditions); hashed so a desync check notices a file
+    /// that loaded a different set. A faction without an entry names none.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub victory_regions: BTreeMap<FactionId, std::collections::BTreeSet<RegionId>>,
+}
+
+/// One of the campaign AI's map areas ([`World::ai_areas`]): a `CAI_REGION`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct AiArea {
+    /// `CAI_REGION` #10: the map region's key (a game region's key, or a sea's or theatre's).
+    pub key: String,
+    /// `CAI_REGION` #7 (+0x170/+0x174): its boundaries (`CAI_REGION_BOUNDARY` #0/#1, the two areas),
+    /// in order, as the indexes in [`World::ai_areas`] of the areas on their other side.
+    pub links: Vec<usize>,
 }
 
 /// The campaign AI keys stored with a faction ([`World::ai_keys`]).
@@ -965,14 +1008,24 @@ pub struct RecruitmentItem {
     pub target: Option<CharacterId>,
 }
 
+/// Which recruitment manager of a region holds a queue: the region's own (land) or the one of a
+/// port slot (naval). Ordered as our own `manager_records` (ntw_campaign save.rs) walks them: the region's own first, then the ports by slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum RecruitmentManager {
+    /// The region's own `REGION_RECRUITMENT_MANAGER` (land units).
+    Region,
+    /// The manager of `REGION_SLOT_ARRAY` item `i` (a port, naval units).
+    Port(usize),
+}
+
 /// The record a loaded recruitment item came from ([`World::recruitment_sources`]): its region's
 /// recruitment manager and its index in that manager's `REGION_RECRUITMENT_ITEM_ARRAY`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RecruitmentSource {
-    /// `None`: the region's own `REGION_RECRUITMENT_MANAGER` (land); `Some(i)`: the manager of
-    /// `REGION_SLOT_ARRAY` item `i` (a port, naval).
-    pub port_slot: Option<usize>,
+    /// The manager that held the item.
+    pub manager: RecruitmentManager,
     /// The item's index in the manager's array (every array item counts).
     pub index: usize,
 }

@@ -54,7 +54,8 @@ pub mod layouts {
     pub const CAMPAIGN_AI_MANAGERS: &str = "s";
     /// `campaign_ai_manager_behaviour_junctions` (reader 0xDD22A0): manager, behaviour, priority.
     pub const CAMPAIGN_AI_MANAGER_BEHAVIOUR_JUNCTIONS: &str = "ssf";
-    /// `cdir_configs` (reader 0xFCD150): key, opt string, string, opt string.
+    /// `cdir_configs` (reader 0xFCD150): campaign, opt faction, variable, opt value; merge key
+    /// `campaign_faction_variable` (record +0x30, loader 0xFCBD50; `ntw_data` `CdirConfigRecord`).
     pub const CDIR_CONFIGS: &str = "soso";
     /// `cdir_desire_priorities` (reader 0xFCF410).
     pub const CDIR_DESIRE_PRIORITIES: &str = "ssi";

@@ -420,11 +420,11 @@ impl CampaignModel {
         }
         if has_techs {
             let weight = |allowed: bool| {
-                // The AI's research need does not change between items.
-                let need = self.research_need(ai);
+                // The AI's research need does not change between items; only needed when allowed.
+                let need = allowed.then(|| self.research_need(ai));
                 record_goal_weight(
                     &n.technologies,
-                    |t| (allowed && self.is_technology_goal(t, proposer, ai)).then(|| Self::received_technology_goal_weight(t, &need)),
+                    |t| need.as_ref().filter(|_| self.is_technology_goal(t, proposer, ai)).map(|need| Self::received_technology_goal_weight(t, need)),
                     |t| (allowed && self.is_technology_goal(t, ai, proposer)).then(|| self.given_technology_goal_weight(t)),
                 )
             };

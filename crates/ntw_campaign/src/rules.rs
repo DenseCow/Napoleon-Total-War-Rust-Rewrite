@@ -8,6 +8,10 @@ use ntw_sim::campaign::{BuildingRules, CampaignRules, UnitAutoresolve, UnitRules
 use ntw_sim::campaign::rules::TechRules;
 use ntw_sim::unit_kind::Category;
 
+/// The faction key whose director rival score is always 0, besides the rebels: `0x00C3FD50` compares
+/// the faction's key with this literal (CONFIRMED).
+const NO_RIVAL_FACTION: &str = "pirates";
+
 /// Copies every table the campaign rules use, with `campaign`'s per-campaign variable overrides
 /// (`campaigns_campaign_variables_junctions`) applied and the exe's rule switches for the key
 /// ([`crate::features::original`]; a source with its own sets them in [`crate::source::open`]).
@@ -122,6 +126,18 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
     for t in c.attitude_thresholds.iter() {
         r.attitude_thresholds.insert(t.key.clone(), t.value);
     }
+    // The campaign director's variables, in table order (its lookup takes the first match).
+    r.director.configs = c
+        .cdir_configs
+        .iter()
+        .map(|x| ntw_sim::campaign::director::CdirConfig {
+            campaign: x.campaign.clone(),
+            faction: x.faction.clone().unwrap_or_default(),
+            variable: x.variable.clone(),
+            value: x.value.clone().unwrap_or_default(),
+        })
+        .collect();
+    r.director.no_rival_keys = vec![NO_RIVAL_FACTION.to_owned()];
     // INFERRED: a repeated key keeps the last row (the original's choice between repeated rows in
     // `0x00BF5A60` / `0x00C55CC0`'s lookup is not traced); each repeat is reported once.
     for s in c.negotiation_strings.iter() {

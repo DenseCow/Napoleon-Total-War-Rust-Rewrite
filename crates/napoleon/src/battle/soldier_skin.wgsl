@@ -18,12 +18,11 @@
 // x, y: first matrix of frames A and B, z: bitcast blend A->B, w: 0 or 1 + the index of the
 // figure's cross-fade in `fades` (battle/skin.rs `Figure`).
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var<storage, read> figures: array<vec4<u32>>;
-// A figure's cross-fade out of a clip change: up to two frozen poses, newest first (x, y, z as a
-// figure; w: bitcast weight, 0 = unused); the figure's own frame has the rest of the weight
-// (battle/skin.rs `Fade`, view.rs `ClipBlend`).
+// A figure's cross-fade out of a clip change: up to `FROZEN` (4) frozen poses, newest first (x, y,
+// z as a figure; w: bitcast weight, 0 = unused, and so are the ones after it); the figure's own
+// frame has the rest of the weight (battle/skin.rs `Fade`, view.rs `ClipBlend`).
 struct Fade {
-    a: vec4<u32>,
-    b: vec4<u32>,
+    poses: array<vec4<u32>, 4>,
 }
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var<storage, read> fades: array<Fade>;
 
@@ -57,11 +56,15 @@ fn bone(fig: vec4<u32>, fade: Fade, j: u32) -> mat4x4<f32> {
     if fig.w == 0u {
         return m;
     }
-    let ka = bitcast<f32>(fade.a.w);
-    let kb = bitcast<f32>(fade.b.w);
-    var out = m * (1.0 - ka - kb) + frame(fade.a, j) * ka;
-    if kb > 0.0 {
-        out += frame(fade.b, j) * kb;
+    // now + (frozen - now) x weight, per pose (view.rs `bone_at` does the same on the CPU).
+    var poses = fade.poses;
+    var out = m;
+    for (var k = 0u; k < 4u; k++) {
+        let keep = bitcast<f32>(poses[k].w);
+        if keep <= 0.0 {
+            break;
+        }
+        out += (frame(poses[k], j) - m) * keep;
     }
     return out;
 }

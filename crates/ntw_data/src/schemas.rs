@@ -814,6 +814,82 @@ db_record! {
 }
 
 db_record! {
+    /// One row of `sea_surfaces` (5 rows, `wind_level_0`..`wind_level_4`; reader `0x00F3FE40`): the
+    /// battle sea's look at one wind strength. The battle picks its row by key
+    /// (`BattleSpec::sea_surface`, lookup `0x006AB800`; an unknown key falls back to row 0). The
+    /// twelve floats from #7 on are copied in order to the sea settings at `+0x5C` that the per-draw
+    /// setter `0x0119E830` reads (CONFIRMED for the fields it hands to `ocean.fx`, named below).
+    pub struct SeaSurface in "sea_surfaces", key = key {
+        /// #0: key (`wind_level_2`).
+        key: String,
+        /// #1: UNKNOWN (1.95..6.6; wave generation).
+        unknown_1: f32,
+        /// #2: UNKNOWN (1.9e-5..4.5e-5).
+        unknown_2: f32,
+        /// #3: UNKNOWN (0.5..1.45).
+        unknown_3: f32,
+        /// #4: UNKNOWN (6.86..11.27).
+        unknown_4: f32,
+        /// #5: UNKNOWN (a large integer, a random seed?).
+        unknown_5: i32,
+        /// #6: UNKNOWN flag.
+        unknown_6: bool,
+        /// #7 (settings `+0x5C`): UNKNOWN (0.5).
+        unknown_7: f32,
+        /// #8 (`+0x60`): UNKNOWN (0.3).
+        unknown_8: f32,
+        /// #9 (`+0x64`): UNKNOWN (0.075..0.085).
+        unknown_9: f32,
+        /// #10 (`+0x68`): `g_froth_value`, the foam level above which foam is froth (0.7).
+        froth_value: f32,
+        /// #11 (`+0x6C`): `g_froth_distortion_speed` (0.35).
+        froth_distortion_speed: f32,
+        /// #12 (`+0x70`): `g_froth_distortion_amount` (0.05).
+        froth_distortion_amount: f32,
+        /// #13 (`+0x74`): UNKNOWN (0.25).
+        unknown_13: f32,
+        /// #14 (`+0x78`): UNKNOWN (10).
+        unknown_14: f32,
+        /// #15 (`+0x7C`): UNKNOWN (2).
+        unknown_15: f32,
+        /// #16 (`+0x80`): `g_sea_shininess` (200, 1000, 378, 1000, 1000).
+        shininess: f32,
+        /// #17 (`+0x84`): `g_sea_decay`, the chop fade per metre of view depth (0.0006).
+        decay: f32,
+        /// #18 (`+0x88`): `g_reflection_flattening_factor` is 1 minus this (0.5); only the
+        /// reflection render target uses it.
+        reflection_flattening: f32,
+    }
+}
+
+db_record! {
+    /// One row of `sea_climate_details` (33 rows, one per climate, all identical in the shipped
+    /// data; reader `0x00F3FCF0`). The battle picks its row by climate key (an unknown key falls
+    /// back to row 0); `0x0119E830` sets `g_sea_deep_colour` from the first colour (CONFIRMED). The
+    /// other three are not handed to the non-ultra `ocean.fx` path.
+    pub struct SeaClimateDetail in "sea_climate_details", key = climate {
+        /// #0: climate key (`lc_am_desert`, `lc_eu_central_humid`, ...).
+        climate: String,
+        /// #1..#3: `g_sea_deep_colour` (0.02, 0.032, 0.035).
+        deep_r: f32,
+        deep_g: f32,
+        deep_b: f32,
+        /// #4..#6: UNKNOWN colour (0.022, 0.063, 0.083).
+        colour_2_r: f32,
+        colour_2_g: f32,
+        colour_2_b: f32,
+        /// #7..#9: UNKNOWN colour (1, 1, 1).
+        colour_3_r: f32,
+        colour_3_g: f32,
+        colour_3_b: f32,
+        /// #10..#12: UNKNOWN colour (0.49, 0.54, 0.65).
+        colour_4_r: f32,
+        colour_4_g: f32,
+        colour_4_b: f32,
+    }
+}
+
+db_record! {
     /// One row of `battle_climate_weather_descriptions` (660 rows; reader 0x00E54260): one weather of a
     /// climate in a season, with its pick weight. The campaign-battle weather pick `0x00F5B4D0` filters
     /// these and draws one by weight (BATTLE_FIDELITY.md §52 (3)).

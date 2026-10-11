@@ -219,16 +219,18 @@ impl Anim {
     }
 
     /// Like [`Self::world_matrices`] but blends two neighbouring frames (`time` in seconds,
-    /// looping). Rotations are nlerped (PROVISIONAL: the game's interpolation is UNKNOWN).
+    /// looping). Rotations are nlerped (PROVISIONAL: the game's interpolation is UNKNOWN). The loop
+    /// runs over the n - 1 intervals from the first frame to the last, the same pose in a closed
+    /// loop (CONFIRMED, `0x010DA030`: frame floor(t x rate) mod (n - 1), blended with the next).
     pub fn world_matrices_at(&self, time: f32) -> Vec<[f32; 16]> {
         let n = self.frames.len();
-        if n == 0 {
-            return Vec::new();
+        if n < 2 {
+            return self.world_matrices(0);
         }
         let rate = if self.frame_rate > 0.0 { self.frame_rate } else { 20.0 };
-        let f = (time * rate).rem_euclid(n as f32);
-        let (a, t) = (f.floor() as usize % n, f.fract());
-        let b = (a + 1) % n;
+        let f = (time * rate).rem_euclid((n - 1) as f32);
+        let a = (f.floor() as usize).min(n - 2);
+        let (b, t) = (a + 1, f - a as f32);
         let mut out: Vec<[f32; 16]> = Vec::with_capacity(self.bones.len());
         for (i, (ka, kb)) in self.frames[a].iter().zip(&self.frames[b]).enumerate() {
             let local = ka.lerp(kb, t).matrix();

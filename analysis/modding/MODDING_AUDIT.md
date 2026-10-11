@@ -130,6 +130,20 @@ Done:
   original's own `auto_save` of a Europe campaign at Early March 1805 holds season 2 "Spring" (the
   start position: Winter), which confirms it; the save header's season name (#4, "Summer" /
   "Winter" / "Spring" / "Autumn") is now written from the calendar by both writers.
+- **Ghidra documentation pass** (polish7, 2026-10-10): the naval upkeep method `0x008F9D00` is now
+  a function (`GetNavalUnitUpkeepWithEffects`; it was not one). Both upkeep methods are unit vtable
+  slots (land 0x013554D0, naval 0x01355568), `__thiscall` on the unit with one stack argument, the
+  effect set (the land prototype had a spurious extra argument). Completeness before → after:
+  land 0x008F9B10 28 / 49 → 50 / 65; naval new → 41 / 56. `GetCharacterRank` (`0x00A198D0`) is the
+  rank function; the `spain_main` zeal theatre check is one step inside it (name kept). The other
+  generic-engine functions (`0x004F0F50`, `0x004F1F30`, `0x00880670`, `0x00881DB0`, `0x008A98B0`,
+  `0x008EDC80`, `0x00B0D220`, `0x00EED2B0`, `0x00EED3E0`) are not raised yet.
+  Re-check (polish9, 2026-10-11): the unit-key suffix local is typed `UniString`, the locals that have
+  storage are named (`ldAllUnitsMod`, `nCategoryMod`, `fIsSpaNapoleon`, `strSuffix`, `nEffectId`) and
+  the naval constants have EOL comments (effect 0x3F, `spa_napoleon`, `_Guerrilla` / 0x90,
+  `_Auxiliary` / 0x94): land 50 → 58, naval 41 → 57 (effective 73 / 70). Left: three register-only
+  temporaries (not renameable through the API), `this` as `void *` (no unit struct yet) and three
+  referenced globals still unnamed (e.g. the float constants 100.0 at 0x01318064, 0.01 at 0x01318034).
 - **Theatres** (§1.2): `theatre_of` (campaign-key prefix, PROVISIONAL) and `TheatreList`'s map-key
   match → the campaign header's theatres (`CampaignInfo::theatres`, tested on the 8 start
   positions: the tutorial's is `europe_main`).

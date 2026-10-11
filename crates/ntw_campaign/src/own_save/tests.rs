@@ -165,6 +165,44 @@ fn mod_state_round_trips() {
     assert!(back.model.mod_state.is_empty());
 }
 
+/// The campaign director's state (its RNG, counter and queued transfers), the victory regions and
+/// the CAI map areas save and load back, with the same state hash; a save from before these fields
+/// loads a new campaign's director and none of the others.
+#[test]
+fn director_victory_regions_and_ai_areas_round_trip() {
+    use ntw_sim::campaign::AiArea;
+    use ntw_sim::campaign::director::{DirectorState, PendingTransfer};
+    let mut model = made_up_model();
+    let mut rng = CaRng::new(0x0006_1266);
+    rng.float_range(0.0, 1.0);
+    model.director = DirectorState {
+        rng,
+        transfer_counter: u32::MAX,
+        pending: vec![
+            PendingTransfer { receiver: A, region: RegionId(2), queued_owner: B },
+            PendingTransfer { receiver: B, region: RegionId(5_000_000), queued_owner: A },
+        ],
+    };
+    model.world.victory_regions.insert(A, [RegionId(2), RegionId(5_000_000)].into());
+    model.world.ai_areas = vec![
+        AiArea { key: "made_up_region_1".into(), links: vec![1, 2] },
+        AiArea { key: "made_up_sea".into(), links: vec![0] },
+        AiArea { key: "made_up_region_2".into(), links: vec![0, 0] },
+    ];
+    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+    let (_, back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
+    assert_eq!(back.model.director, data.model.director);
+    assert_eq!(back.model.world.victory_regions, data.model.world.victory_regions);
+    assert_eq!(back.model.world.ai_areas, data.model.world.ai_areas);
+    assert_eq!(back.model.state_hash(), data.model.state_hash());
+    assert_eq!(back, data);
+    // The made-up model has none of them: they load back as a new campaign's.
+    let plain = SaveData { model: made_up_model(), ..data };
+    let (_, back) = read_parts(&write(&info(), &plain).expect("write")).expect("read");
+    assert_eq!(back.model.director, DirectorState::default());
+    assert!(back.model.world.victory_regions.is_empty() && back.model.world.ai_areas.is_empty());
+}
+
 /// The fields the original does not save come back empty (as after the original's own load).
 #[test]
 fn fields_the_original_does_not_save_are_not_saved() {
@@ -207,4 +245,16 @@ fn the_save_header_follows_the_calendar_and_keeps_the_theatres() {
     assert_eq!(info.theatres().collect::<Vec<_>>(), ["made_up_main"]);
     assert_eq!((info.header.maps[0].width, info.header.maps[0].height), (0, 0), "no picture");
     assert!(info.header.maps[0].pixels.is_empty());
+}
+
+/// A save written from a borrowed model reads back equal to one written from an owned model.
+#[test]
+fn a_save_written_from_a_borrowed_model_equals_one_from_an_owned_model() {
+    use ntw_sim::campaign::mod_state::{ModKey, ModScope, ModValue};
+    let mut model = made_up_model();
+    model.mod_state.set(ModKey::new("made_up_mod", ModScope::Faction(B), "grain"), ModValue::Float(0.1));
+    model.mod_state.set(ModKey::new("another_mod", ModScope::Campaign, "era"), ModValue::Text("meiji".into()));
+    let owned = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: Some(B), script_values: Vec::new(), restricted_units: Vec::new() };
+    let borrowed = SaveDataRef { human: "made_up_a", model: &model, rebel_faction: Some(B), script_values: Vec::new(), restricted_units: Vec::new() };
+    assert_eq!(write(&info(), &owned).expect("owned"), write(&info(), &borrowed).expect("borrowed"));
 }

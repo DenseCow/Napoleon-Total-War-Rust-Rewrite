@@ -56,6 +56,22 @@ pub struct SaveData {
     pub restricted_units: Vec<String>,
 }
 
+/// The same body as [`SaveData`] with the model borrowed, for writing without cloning it (both
+/// serialise to identical text, so [`read_parts`] reads what [`write`] wrote from either).
+#[derive(Debug, Serialize)]
+pub struct SaveDataRef<'a> {
+    /// See [`SaveData::human`].
+    pub human: &'a str,
+    /// See [`SaveData::model`].
+    pub model: &'a CampaignModel,
+    /// See [`SaveData::rebel_faction`].
+    pub rebel_faction: Option<FactionId>,
+    /// See [`SaveData::script_values`].
+    pub script_values: Vec<ScriptSaveValue>,
+    /// See [`SaveData::restricted_units`].
+    pub restricted_units: Vec<String>,
+}
+
 /// Why a save in this format could not be read or written.
 #[derive(Debug)]
 pub enum FormatError {
@@ -146,7 +162,7 @@ fn decode<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, FormatError> 
 
 /// Writes a save: `info` is the header (the caller has filled it for this save: turn, date,
 /// territory pictures, timestamp), `data` the body.
-pub fn write(info: &CampaignInfo, data: &SaveData) -> Result<Vec<u8>, FormatError> {
+pub fn write<D: Serialize>(info: &CampaignInfo, data: &D) -> Result<Vec<u8>, FormatError> {
     let header = encode(info)?;
     let body = encode(data)?;
     let len = u32::try_from(header.len()).map_err(|_| FormatError::Encode(format!("header of {} bytes", header.len())))?;

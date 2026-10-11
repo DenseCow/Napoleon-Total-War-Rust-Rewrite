@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use ntw_sim::campaign::rules::TaxClass;
 use ntw_sim::campaign::commands::UnitTypeCounts;
+use ntw_sim::campaign::details::DIPLOMACY_OPTIONS;
 use ntw_sim::campaign::{CampaignModel, CharacterId, FactionId, ForceId, RegionId, SlotRef, Stance};
 
 use super::data::{AiUnitInfo, CampaignAiData};
@@ -198,7 +199,7 @@ pub struct AiWorld {
     /// The relationships' scripted diplomacy permissions (`Relationship::diplomacy_options`), only
     /// the relationships with a non-zero value; read through [`AiWorld::may_propose`] /
     /// [`AiWorld::may_accept`], the model's rule.
-    pub diplomacy_options: BTreeMap<(FactionId, FactionId), [u32; ntw_sim::campaign::details::DIPLOMACY_OPTIONS.len()]>,
+    pub diplomacy_options: BTreeMap<(FactionId, FactionId), [u32; DIPLOMACY_OPTIONS.len()]>,
     /// Movement points per map unit (`road_level_0_action_point_cost` on `main`).
     pub move_cost_per_unit: f32,
     /// Units an army may hold (the model's [`CampaignModel::max_units`](ntw_sim::campaign::CampaignModel::max_units)).

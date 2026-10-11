@@ -195,7 +195,8 @@ impl Plugin for TerrainPlugin {
                 OnEnter(crate::GameMode::Battle),
                 (
                     spawn_terrain,
-                    water::spawn_sea,
+                    // After the battle setup: the sea reads the battle's sea surface and climate.
+                    water::spawn_sea.after(crate::battle::setup::start_battle),
                     objects::spawn_buildings,
                     trees::spawn_trees,
                     speedtree::setup_near_trees,
@@ -211,7 +212,7 @@ impl Plugin for TerrainPlugin {
                 )
                     .run_if(in_state(crate::GameMode::Battle)),
             )
-            .add_systems(OnExit(crate::GameMode::Battle), speedtree::clear_near_trees);
+            .add_systems(OnExit(crate::GameMode::Battle), (speedtree::clear_near_trees, water::remove_sea));
         if !self.load_at_start {
             return;
         }

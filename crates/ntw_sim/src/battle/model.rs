@@ -653,31 +653,44 @@ pub fn timed_move_speed(speed: f32, cap: f32, distance: f32, time_left: f32, kee
     if cap > v { v } else { cap }
 }
 
-/// Planned time (s) of the timed-move orders a moving soldier is given: descriptor word 9 =
-/// 5.0 (`0x40A00000`) in `0x006DC700`. Which order source drives a player's walk order is
-/// INFERRED, see [`TimedMove`].
+/// Planned time (s) of the timed-move order a moving soldier is given (descriptor word 9).
+/// INFERRED: the unit move order (`0x00584E10`, the source, see [`TimedMove`]) plans t = D / v with
+/// D = n·k + 2v (`0x0054C650`), where k (the unit's `+0x510` → `+0x13C`) has no static writer, which
+/// would give 2 s; the 2026-10-10 sitting's order speed rose ~0.035 a tick from 2.69 at multiplier
+/// 0.373, which d / t fits only with t ≈ 5 s (t = 2 gives +0.089 a tick). Settled by reading n and k
+/// at `0x0054C691` on a walk order.
 pub const TIMED_MOVE_PLANNED_SECONDS: f32 = 5.0;
 
-/// A new timed-move order every this many ticks of a move: `0x006DC700` re-issues on its tick
-/// counter (`+0x3C`) % 10 == 0 (CONFIRMED there; INFERRED to be the walk order's source, see
-/// [`TimedMove`]).
-pub const TIMED_MOVE_REPLAN_TICKS: u32 = 10;
+/// A new timed-move order every this many ticks of a move. CONFIRMED: the unit move order's update
+/// (vtable method `0x00581AE0`) re-issues the soldiers' orders (`0x00581B81` → `0x00584E10`) when
+/// a tick count (order `+0x14` → `+8` → `+0x58`, u32) × 0.1f (`0x0131A7B0`) is strictly above the last
+/// issue time `+0x2C` + 1.0f (`0x01318048`; `COMISS`/`JBE` at `0x00581B73`). In f32, 10 ticks × 0.1 almost
+/// always rounds to exactly 1.0, so the order is re-issued on the 11th tick. PROVISIONAL (not modelled):
+/// the rare 10-tick period where the rounding falls the other way at the same `0x00581B73` compare (4 in
+/// a 200 000-tick f32 run from 0, at ticks 21, 42, 1284 and 20 489); it needs the counter `+0x58` traced
+/// (what it counts and where it starts), BACKLOG §0.
+pub const TIMED_MOVE_REPLAN_TICKS: u32 = 11;
 
 /// The timed-move order block of the unit's soldier (`+0x40C` speed, `+0x410` planned time,
 /// `+0x43C` time since the order) and the distance left to the order's point.
 ///
-/// PROVISIONAL (the source of the order is INFERRED, UNITS_TERRAIN_FIDELITY §1.10): two order
-/// sources reach the soldier's timed move. The unit move order (`0x0051A530` → `0x00584E10`,
-/// re-issued when 1.0 s has passed, `0x00581B81`) plans D = n·k + 2v ahead in t = D / v
-/// (`0x0054C650`), where k (the unit's `+0x510` → `+0x13C`) has no writer in the exe besides its
-/// zeroing constructor (`0x005155A1`) and a copy (`0x005184EC`), so t = 2 s; the soldier
-/// behaviour `0x006DC700` re-issues every 10 ticks with t = 5 s and word 10 = 0 (so `+0x408` = 0,
-/// `+0x438` bit 0 set: d / t every tick). The 2026-10-10 sitting (a walk-ordered light cavalry
-/// horse in forest, multiplier 0.373) saw the order speed start each plan at the walk speed 2.69 and
-/// rise ~0.035 a tick: d / t from d = 5v gives 0.627·v / 5 / 10 = 0.034 a tick, while t = 2 would
-/// give 0.084. So ours follows the 5 s, 10-tick order, planned to a point 5v ahead (the restart at
-/// v), recomputed every tick without keeping the speed. Ours moves whole units, so the unit stands
-/// for one soldier (no per-soldier slots yet).
+/// The source (CONFIRMED): a moving unit's move order re-issues every soldier's timed move every
+/// [`TIMED_MOVE_REPLAN_TICKS`] (`0x00581B81` → `0x00584E10` → `0x006533E0`), with the order speed
+/// (descriptor word 8, `0x005855C7`) = the gait speed `0x00565030` before any ground or slope
+/// factor, the planned time from `0x0054C650` (word 9, `0x005855F2`), and the face flag (word 10)
+/// clear for a walk, so `+0x438` bit 0 is set and `0x00659600` recomputes d / t every tick
+/// (`0x0063AF40`), neither held nor smoothed: the ground column and slope multiply only the wanted
+/// speed in the step (`+0x1A4`, `0x00819D5F`), whose limits (acceleration 3.5 × multiplier,
+/// deceleration 10 m/s² for the horse of the sitting) pass both the rise and the drop at once. So
+/// on slowed ground the soldier falls behind its plan, d / t rises, and each re-issue restarts it
+/// at the gait speed: a sawtooth. The 2026-10-10 sitting measured it in the original (light cavalry
+/// horse in forest, ground 0xE, `+0x1A4` 0.373: order speed `+0x10C` 2.69 rising ~0.035 a tick to
+/// 3.07, back to 2.69 at the re-issue; wanted 1.0..1.1 m/s). The per-soldier formation follow
+/// `0x006DC700` (every 10th call, t = 5) is not this source: it is the artillery crew following
+/// its gun (its update `0x006D7720` is in the six artillery-piece vtables, ctor `0x0068F610`).
+/// Ours moves whole units, so the unit stands for one soldier at its slot (d is the unit's
+/// distance to a point [`TIMED_MOVE_PLANNED_SECONDS`] of travel ahead); the planned time stays
+/// INFERRED there.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TimedMove {
     /// The order's speed `+0x40C`: the move's gait speed when it was planned.
@@ -1067,7 +1080,7 @@ impl Battle {
         // The slope (`0x00819770`, CONFIRMED): the gradient `+0x1A0` is the height change over this
         // tick's step ahead (at least 0.01 m) divided by its length; uphill the speed is multiplied by
         // `1 / (1 + 3g)`, downhill by `min(1 − g, 1.5)`.
-        // The timed-move order (`TimedMove`, PROVISIONAL source): the order speed the soldier heads
+        // The timed-move order (`TimedMove`, the unit move order re-issued every 11 ticks): the order speed the soldier heads
         // for before the multiplier, from the move's gait speed.
         let timed = TimedMove::next(self.units[idx].timed_move, speed);
         let order_speed = timed.order_speed(self.units[idx].run_speed);
@@ -2002,10 +2015,10 @@ mod tests {
         assert!((speeds[0] - 2.85).abs() < 1e-4, "{speeds:?}");
         assert!(speeds[10] > 5.0 && speeds[10] < 5.4, "about 1.1 s in it canters: {speeds:?}");
         // Run speed after ~3 s. Behind its timed-move schedule while it gathered speed, the order
-        // speed is above the run speed, so it passes 10 by one step before the next plan (tick 30,
+        // speed is above the run speed, so it passes 10 (10.1, then 10.15) until the next plan (tick 33,
         // `TIMED_MOVE_REPLAN_TICKS`) asks for 10 again.
-        assert!((speeds[29] - 10.1).abs() < 1e-4 && (speeds[39] - 10.0).abs() < 1e-4, "run speed after ~3 s: {speeds:?}");
-        assert!(speeds[..30].windows(2).all(|w| w[1] >= w[0]), "{speeds:?}");
+        assert!((speeds[29] - 10.1).abs() < 1e-4 && speeds[33..].iter().all(|s| (s - 10.0).abs() < 1e-4), "run speed after ~3 s: {speeds:?}");
+        assert!(speeds[..33].windows(2).all(|w| w[1] >= w[0]), "{speeds:?}");
         // The walk order brings it back at the deceleration, 0.6 m/s a tick.
         b.units[0].running = false;
         b.step();
@@ -2100,7 +2113,7 @@ mod tests {
         b
     }
 
-    /// Metres a unit covers in `ticks` ticks (one plan, ≤ 10) of a timed move at gait speed `v`
+    /// Metres a unit covers in `ticks` ticks (one plan, ≤ 11) of a timed move at gait speed `v`
     /// under a constant speed multiplier `m`, speed changes at once: the order's point is 5·v
     /// ahead and the order speed is d / t every tick (`TimedMove`).
     fn timed_walk(v: f32, m: f32, ticks: u32) -> f32 {
@@ -2152,7 +2165,9 @@ mod tests {
     /// The 2026-10-10 sitting: a walk-ordered light cavalry horse in dense forest (ground 0xE,
     /// mounted column 0.40, slope 0.93) walks at 0.373 × an order speed that starts each plan at its
     /// walk 2.69 m/s and rises ~0.035 a tick; it never reaches the trot (the horse's walk / trot
-    /// switch is at (1.47 + 3.53) / 2 = 2.50 m/s, the clips' root speeds).
+    /// switch is at (1.47 + 3.53) / 2 = 2.50 m/s, the clips' root speeds). The surge over a re-plan
+    /// is the original's (CONFIRMED, `TimedMove`): back to the walk speed every 11 ticks
+    /// (`0x00581B73`), never above the sitting's peak.
     #[test]
     fn walking_cavalry_in_dense_forest_walks_on_its_timed_order() {
         let mut b = Battle::new(0, kv_morale(), kv_fatigue());
@@ -2168,7 +2183,7 @@ mod tests {
         b.add_unit(u);
         let mut orders = Vec::new();
         let mut speeds = Vec::new();
-        for _ in 0..30 {
+        for _ in 0..33 {
             orders.push(b.units[0].timed_move.map_or(2.69, |t| t.order_speed(7.0)));
             b.step();
             speeds.push(b.units[0].speed);
@@ -2176,13 +2191,15 @@ mod tests {
         // Each tick it walks at 0.40 × the order speed it was given.
         let given: Vec<f32> = speeds.iter().map(|s| s / 0.4).collect();
         assert!((given[0] - 2.69).abs() < 1e-4, "{given:?}");
-        for plan in given.chunks(10) {
+        for plan in given.chunks(11) {
             assert!((plan[0] - 2.69).abs() < 1e-4, "each plan starts at the walk speed: {given:?}");
             for w in plan.windows(2) {
                 let rise = w[1] - w[0];
                 assert!(rise > 0.03 && rise < 0.05, "rises ~0.035 a tick (the sitting): {given:?}");
             }
+            assert!(plan.iter().all(|&s| s < 3.07 + 0.05), "peaks at the sitting's 3.07: {given:?}");
         }
+        assert!(given[10] > 2.69 + 0.3, "no re-plan after 10 ticks: {given:?}");
         assert!(speeds.iter().all(|&s| s < 2.5), "walks, never trots: {speeds:?}");
         assert!((orders[1] - given[1]).abs() < 1e-4);
     }

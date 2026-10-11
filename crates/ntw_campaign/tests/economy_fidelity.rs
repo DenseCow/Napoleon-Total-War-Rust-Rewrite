@@ -916,7 +916,7 @@ fn a_capture_in_the_vanilla_saves_refunds_the_queued_ships() {
             for i in &r.recruitment_queue {
                 let source = model.world.recruitment_sources.get(&i.id).unwrap_or_else(|| panic!("{name}: item {} has its record", i.id.0));
                 let naval = model.rules.is_naval_unit(&i.unit_key);
-                assert_eq!(source.port_slot.is_some(), naval, "{name}: {} {} queued in the {:?}", r.key, i.unit_key, source.port_slot);
+                assert_eq!(matches!(source.manager, ntw_sim::campaign::RecruitmentManager::Port(_)), naval, "{name}: {} {} queued in the {:?}", r.key, i.unit_key, source.manager);
                 if naval {
                     ships = ships.wrapping_add(i.cost);
                 }
@@ -1041,4 +1041,68 @@ fn region_deals_on_the_europe_start() {
     let v = m.region_deal_value(&n, m.deal_inflation.factor);
     assert!(v.gain >= 15_000 && v.cost == 0 && v.given == 0, "{v:?}");
     assert_eq!(m.ai_accepts_deal(), Some(true), "a gift of {ours:?} to {ai:?}: {v:?}");
+}
+
+/// The CAI map areas the campaign director walks (`CAI_WORLD_REGIONS[]`, loader `0x00BF0130`): in
+/// the eur start position, 101 areas; every land region of the model is one of them; the seas link
+/// to land regions; every link is two-way.
+#[test]
+fn ai_areas_on_the_europe_start() {
+    let dir = data_dir();
+    if !dir.is_dir() {
+        println!("SKIP: no install at {}", dir.display());
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).expect("database");
+    let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
+    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+    let bytes = files.read("campaigns/eur_napoleon/startpos.esf").expect("startpos");
+    let mut loaded = ntw_campaign::read_esf(&EsfFile::from_bytes(&bytes).expect("esf"), &db).expect("loads");
+    // The director's state comes from the start position's CDIR_INTERFACE (v3, RNG 37138) and its
+    // region-transfer desire (counter 0), not the constructor's seed.
+    assert_eq!((loaded.model.director.rng.state, loaded.model.director.transfer_counter), (37_138, 0));
+    assert!(loaded.model.director.pending.is_empty());
+    // Every faction with victory options gets option 0 until the human is picked; then only it.
+    assert!(loaded.model.world.victory_regions.len() > 1);
+    assert!(loaded.set_human("france"));
+    let france = loaded.model.faction_by_key("france").expect("france").id;
+    assert_eq!(loaded.model.world.victory_regions.keys().copied().collect::<Vec<_>>(), [france]);
+    let m = loaded.model;
+    let areas = &m.world.ai_areas;
+    assert_eq!(areas.len(), 101);
+    let land: Vec<bool> = areas.iter().map(|a| m.world.regions.values().any(|r| r.key == a.key)).collect();
+    assert!(m.world.regions.values().all(|r| areas.iter().any(|a| a.key == r.key)), "every land region is an area");
+    let sea_to_land = areas.iter().zip(&land).any(|(a, &l)| !l && a.links.iter().any(|&n| land[n]));
+    assert!(sea_to_land, "some sea links to a land region");
+    for (i, a) in areas.iter().enumerate() {
+        assert!(a.links.iter().all(|&n| areas[n].links.contains(&i)), "{} links one way", a.key);
+    }
+}
+
+/// The campaign director's state in the original's own save (CDIR_INTERFACE v3, loader
+/// `0x00B94170`; the region-transfer desire's counter, `0x00B90210`): `orig_fr_may1811` holds RNG
+/// 3875805033 and counter 3. Our save writes a changed state back, and reading it again gives it.
+#[test]
+fn director_state_in_an_original_save() {
+    let dir = data_dir();
+    let ev = std::env::var_os("NTW_EVIDENCE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default().join(r"Documents\ntw-evidence\saves"));
+    let p = ev.join("orig_fr_may1811.save");
+    if !dir.is_dir() || !p.is_file() {
+        println!("SKIP: no install at {} or no {}", dir.display(), p.display());
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).expect("database");
+    let source = EsfFile::open(&p).expect("esf");
+    let m = ntw_campaign::read_esf(&source, &db).expect("loads").model;
+    assert_eq!((m.director.rng.state, m.director.transfer_counter), (3_875_805_033, 3));
+    let mut changed = m.clone();
+    changed.director.rng.state = 12_345;
+    changed.director.transfer_counter = 9;
+    let (region, owner) = m.world.regions.values().map(|r| (r.id, r.owner)).next().expect("a region");
+    changed.director.pending.push(ntw_sim::campaign::director::PendingTransfer { receiver: owner, region, queued_owner: owner });
+    let out = ntw_campaign::save::write_save(&source, &changed, "france", 1).expect("write");
+    let again = ntw_campaign::read_esf(&out, &db).expect("reloads").model;
+    assert_eq!(again.director, changed.director);
 }

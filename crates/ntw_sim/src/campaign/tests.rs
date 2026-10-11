@@ -4507,6 +4507,10 @@ fn deal_records_follow_the_propose_executors() {
     m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
     m.apply(propose(false, &[11], &[12])).unwrap();
     assert_eq!((regions(&m).demanded, regions(&m).offered), (vec![RegionId(11)], vec![RegionId(12)]));
+    // Owners are not checked (0x00933CC0, 0x00C4B0A0): a demanded region the proposer A owns
+    // and an offered one of the recipient B are kept as given.
+    m.apply(propose(false, &[12], &[11])).unwrap();
+    assert_eq!((regions(&m).demanded, regions(&m).offered), (vec![RegionId(12)], vec![RegionId(11)]));
     // Replaced, not added to.
     m.apply(propose(false, &[], &[10])).unwrap();
     assert_eq!((regions(&m).demanded, regions(&m).offered), (vec![], vec![RegionId(10)]));

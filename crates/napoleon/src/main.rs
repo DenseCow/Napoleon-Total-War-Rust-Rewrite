@@ -30,6 +30,7 @@ mod config;
 mod data;
 mod frontend;
 mod model_viewer;
+mod screenshot;
 mod soldiers;
 mod terrain;
 mod video;
@@ -137,7 +138,7 @@ fn main() {
         app.insert_resource(frontend::UiClicks { ids: ids.split(',').map(str::to_owned).collect(), secs: 0.0 });
     }
     if let Some(path) = screenshot {
-        app.insert_resource(frontend::AutoScreenshot { path, secs: 0.0, taken: false });
+        app.insert_resource(frontend::AutoScreenshot { path, secs: 0.0, taken: false, outcome: default() });
     }
     app.run();
 }

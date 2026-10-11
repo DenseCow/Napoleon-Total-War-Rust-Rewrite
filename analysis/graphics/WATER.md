@@ -13,18 +13,21 @@ Tools (both read-only, both in this repo):
 - `cargo run -p ntw_formats --example water_probe -- [name]` — per battle preset: the level-0
   heightfield range, the ground-type histogram with each index's **editor palette colour**, and the
   share of the map under y = 0. Everything in §2 comes out of this.
-- `cargo run -p ntw_formats --example sea_probe -- header <path>` — the header of the engine's own
-  texture container (§3).
+- `cargo run -p ntw_formats --example sea_probe -- header <path>`: the header of the engine's own
+  texture container (§3). The full decoder is `ntw_formats::sea_waves`.
 - `cargo run -p ntw_formats --example pack_probe -- extract-prefix "fx\" <scratch dir>` — the
   shipped shader sources, into a scratch dir only.
 
 ## Where I am / what's next
-- **DONE, this slice: the battle-map sea surface** (§4, §5). One flat sea plane at the confirmed sea
-  level, a port of `fx\ocean.fx`, a camera-centred ring grid, the sea-bed depth blend, the shipped
-  foam texture. Proof in-game on `hb_nile` and `hb_toulon`.
-- **NEXT, in this order** (§7): the shoreline/surf blend (`seainteraction.fx`, `filterfoam.fx`, the
-  `ocean.fx` foam and stencil passes), then planar reflections, then the campaign map's river and
-  sea shading.
+- **DONE: the battle-map sea surface** (§4, §5). One flat sea plane at the confirmed sea level, a
+  port of `fx\ocean.fx`, a camera-centred ring grid, the sea-bed depth blend, the shipped foam texture.
+- **DONE 2026-10-11 (sea-water, after the user check of 2026-10-10: pale, too bright, long stripes,
+  no foam):** the `sea\sea` / `sea\swell` container is decoded and animated (§3); every value the
+  exe hands `ocean.fx` is traced to the per-draw setter `0x0119E830` and the two db tables (§4); the
+  sky reflection evaluates the map's SKYGEN model (§4, PROVISIONAL).
+- **NEXT, in this order** (§8): the original's CPU-displaced sea mesh (`0x01123820`), the sky cube,
+  the shoreline/surf blend and the foam pass choice, then planar reflections, then the campaign map's
+  river and sea shading.
 
 ---
 
@@ -84,88 +87,168 @@ and `nap_mp_coastal_[sa]`, whose maps have no water types at all but 26 %, 5 % a
 ground below 0). It is a placeholder, so on those maps the height rule alone decides, and the basins
 read as sea. The original draws one plane, so it very likely floods them too — but that is untested.
 
-## 3. `sea\sea` and `sea\swell` — the wave textures — BLOCKED (clean negative)
+## 3. `sea\sea` and `sea\swell`, the wave textures: CONFIRMED (decoded 2026-10-11)
 
 The sea's two wave textures are the only files in the install's `sea\` folder without an extension:
 
-| file | bytes | header (u32 magic 0x12345678, u32 version 1) |
-|---|---|---|
-| `sea\sea` | 32,771,262 | u32 **256**, f32 **70.0**, f32 **10.0**, … |
-| `sea\swell` | 2,951,102 | u32 **128**, f32 **800.0**, f32 **30.0**, … |
-| `wind_level_0..4_sea` | 32,771,262 each | same first 20 bytes as `sea\sea`, different payload |
+| file | bytes | size | tile metres | loop period s | frames | angle range lo (x, z) / hi (x, z) |
+|---|---|---|---|---|---|---|
+| `sea\sea` | 32,771,262 | 256 | 70 | 10 | 100 | (0x6754, 0x6614) / (0x98AA, 0x99EA) |
+| `sea\swell` | 2,951,102 | 128 | 800 | 30 | 60 | (0x7A5B, 0x7A3F) / (0x85A3, 0x85BF) |
+| `wind_level_0..4_sea` | 32,771,262 each | same header as `sea\sea`, other frames | | | | no reader found (UNKNOWN who loads them) |
 
-This is the engine's **own** texture container (magic `0x12345678`, version 1 — the same family as
-`.rigid_model` and `.weighted_mesh`), not a DDS: the payload after the header is a mix of
-compressed-looking and 8-bit runs whose block layout did not fall out of the bytes (no self-similar
-chunk chain lands on the file length, and the colours are not valid DXT1/DXT5). **Decoding it needs
-the engine's texture loader in the exe** — i.e. Ghidra — which this slot did not have. Recorded as
-**BLOCKED**, not guessed.
+**The container** (loader `0x010D25C0`; both files decode to their exact length, test
+`ntw_formats/tests/sea_waves_install.rs`; layout in the module doc of `ntw_formats::sea_waves`):
+magic `0x12345678`, version 1, size, tile metres, loop period, frame count, two flag bytes, the
+height range, the 16-bit range of the two angle channels, the displacement range, the frame count
+again. Then per frame: a heights image (1 byte per texel), the angle image (2 bytes per texel, x and
+z interleaved), a horizontal-displacement image (2 bytes per texel; empty in the swell), and two
+item lists (empty in the shipped files).
 
-What *is* usable from the header, used in the code and tagged **INFERRED**:
-- **256** and **128** are the resolutions of `sea\sea` and `sea\swell`.
-- **70.0** and **800.0** are the tile sizes in metres (0.27 m and 6.25 m per texel — a plausible
-  short-chop/long-swell pair), so `g_sea_uv_scale = 1/70` and `g_swell_uv_scale = 1/800`. The
-  alternative reading (70× and 800× tiling, i.e. 1 m tiles) is what makes the shipped foam tile every
-  metre, which was measured to look wrong (§4).
-- **10.0** and **30.0** are the wave amplitudes in metres, which the sea *mesh* would use for its
-  "chop" displacement. Our mesh is flat, so they are unused.
+The earlier reading was wrong in one place: **10 and 30 are the loop periods in seconds**, not wave
+amplitudes. 70 and 800 are the tile sizes in metres, CONFIRMED by the setter (§4).
 
-Until the container is decoded, `terrain::water::wave_map` generates tiling slope maps with the same
-layout (**PLACEHOLDER**): red and green hold the two slope angles as `0.5 + slope / 2PI`, blue the
-slope magnitude. They are the exact gradients of a fixed table of sine waves with whole-number wave
-numbers, so they are seamless and reproducible from the table alone — no RNG, no external state.
+**The animation** (CONFIRMED):
+- `0x010E21F0` rebuilds the shader's texture every frame from two neighbouring frames:
+  `f = fmod(t, period) · frames / period`, frames `a = floor(f)` and `b = (a + 1) mod frames`,
+  weight `w = round((f − a) · 256)` (a lerp in 1/256 steps). The update is driven from `0x010E0A80`.
+- `0x010E3140` expands each stored byte to 16 bits: `trunc(byte · (hi − lo) / 255 + lo)`. The shader
+  sees that value over 65535, and `convert_to_angle` turns it into radians; every shipped angle stays
+  within a quarter turn of flat.
+- The heights and the displacement drive the original's CPU-displaced sea mesh (`0x01123820`, a grid
+  around the camera). We do not build it: our mesh stays flat (**PROVISIONAL**, §5).
+
+**Ours** uploads every frame once as a layer of an `Rg8Unorm` texture array. The shader does the
+frame blend and the dequantisation per texel. Both steps are linear, so the texels match the
+original's apart from its 16-bit rounding. Two parts are **PROVISIONAL**:
+- Each layer's mip chain is our own box filter. Whether the original's per-frame texture has mips,
+  and how they are built, is not traced; `ocean.fx` samples it with `MipFilter = LINEAR`.
+- The clock is Bevy's elapsed time. Which clock the original's sea runs on, and whether it pauses,
+  is not traced.
+
+A container that is missing or fails to decode logs one warning, and that layer is drawn flat. So does
+a container with more frames than the GPU's `max_texture_array_layers` (one layer per frame). The
+original has no frame limit (it rebuilds one 2D texture per frame); the shipped files have 100 and 60.
+
+The chop, swell and foam textures are decoded and uploaded on the first sea battle and kept for the
+session (`SeaTextures`; the install does not change while the game runs). Each battle adds only its
+material and sea-bed depth texture, both freed when it ends (`remove_sea`). The decode runs on the
+main thread: the first sea battle needs it in the frame it starts. It takes 21 ms in a release
+build (73 ms in debug), once per session (2026-10-11, `NHB_Nile`).
 
 `sea\combined_foam.tga` is **not** in that container: it is a plain 32-bit uncompressed 256² TGA with a
-26-byte TGA extension area after the pixels, and it is read straight from the install.
+26-byte TGA extension area after the pixels, and it is read straight from the install. `ocean.fx`
+samples it with `MipFilter = NONE`, so ours has one level.
 
-## 4. The surface shader — `crates/napoleon/src/terrain/water.wgsl`
+## 4. The surface shader: `crates/napoleon/src/terrain/water.wgsl`
 
-A port of `ocean.fx`'s non-refraction path (`render_vertex` + the `!USE_ULTRA_SEA` half of
-`render_pixel_ps3`, which is the branch that runs when `ENABLE_REFLECTION` and `ENABLE_REFRACTION`
-are both undefined). Everything below is CONFIRMED as the shipped source unless marked otherwise.
+A port of `ocean.fx`'s non-refraction path: `render_vertex` plus the `!USE_ULTRA_SEA` half of
+`render_pixel_ps3`, the branch that runs when `ENABLE_REFLECTION` and `ENABLE_REFRACTION` are both
+undefined. Everything below is CONFIRMED as the shipped source unless marked otherwise.
+
+### Where the values come from: CONFIRMED (per-draw setter `0x0119E830`)
+
+The constants written in the shader file are only defaults. The per-draw setter `0x0119E830`
+overwrites them from the battle's sea settings object:
+
+| shader constant | value the exe sets | source |
+|---|---|---|
+| `g_fresnel_R0` | **0.02037** (float constant `0x3CA6D903`) | the exe |
+| `g_sea_uv_scale`, `g_swell_uv_scale` | 1/70, 1/800 | 1 / the containers' tile metres |
+| `g_sea_deep_colour` | (0.02, 0.032, 0.035), dark grey-green | `sea_climate_details`, first colour |
+| `g_froth_value`, `g_froth_distortion_speed`, `g_froth_distortion_amount` | 0.7, 0.35, 0.05 | `sea_surfaces` |
+| `g_sea_shininess` | 200 / 1000 / **378** / 1000 / 1000 (wind levels 0..4) | `sea_surfaces` |
+| `g_sea_decay` | 0.0006 per metre (the chop fades out by 1.7 km) | `sea_surfaces` |
+| `g_reflection_flattening_factor` | 0.5 (no code on the non-ultra path reads it) | `sea_surfaces` |
+
+The settings object holds the climate record's four colours first, then the `sea_surfaces` floats in
+field order. Both tables are read through the merged database (`ntw_data::schemas::{SeaSurface,
+SeaClimateDetail}`, row readers `0x00F3FE40` / `0x00F3FCF0`; test `ntw_data/tests/sea_install.rs`).
+The leading fields of `sea_surfaces` (e.g. `wind_level_0`: 1.95, 1.9e-5, 0.5, 6.86, a seed) feed the
+wave generator and are UNKNOWN. All 33 `sea_climate_details` rows are identical.
+
+**Which row** (CONFIRMED):
+- The lookup `0x006AB800` takes the climate key and the sea-surface key, and falls back to the first
+  row when a key is not in its table.
+- For a historical battle the sea-surface key comes from the battle XML (parser `0x00511210`): first
+  `weather/wind_level` (read at `0x00511E86`, from the `weather` child found at `0x00511D3F`),
+  otherwise the top-level `sea_surface_name` (`0x00511F28`). Both fill the same field, which
+  `0x0059482F` hands to the lookup.
+- `NHB_Nile` names `wind_level_2`, so its shininess is 378.
+- From the campaign, `0x00535B30` (called from `0x008C4E50`) picks the wind level from a random roll
+  against the thresholds 0.58317894 / 0.68722874 / 0.82029885 / 0.91646695. Historical battles don't
+  need it, so it is not ported yet.
+- Ours: `BattleSpec::sea_surface` and `BattleSpec::climate`. An unknown key takes the first row, as the
+  lookup does. A battle with no sea-surface key (a campaign battle) also takes the first row,
+  **PROVISIONAL** until the roll above is ported; where a battle without a climate key gets its
+  climate is not traced (UNKNOWN; all rows are equal, so nothing visible depends on it). Each fallback
+  is logged once per battle. The two tables load as optional: without them the sea is not drawn,
+  logged once.
+
+So the measured failures of the first slice (`g_sea_decay` 0.2 gave a flat mirror, `g_sea_shininess`
+1 gave a white screen) came from the shader's defaults. Our hand-picked stand-ins (1/400 m, exponent
+8) are gone. The pale-blue, too-bright sea of the 2026-10-10 user check came from R0 0.5 (a mirror at
+every angle) and the shader's default deep colour (0, 0.1, 0.5). The long regular stripes came from
+the generated sine PLACEHOLDER, now replaced by the shipped frames.
+
+### The steps
 
 | `ocean.fx` | what we do |
 |---|---|
-| `convert_to_angle(texel) = (texel - 0.5) · 2PI` | as written |
-| `uv_sea_swell = position.xz · g_sea_uv_scale`, `.zw = · g_swell_uv_scale` | as written, scale per §3 |
-| `sea_scale.x = max(1 - g_sea_decay · position.w, 0)` | as written, `position.w` = the clip w (the fragment stage's `@builtin(position).w` is its reciprocal) |
-| `surface_angle = swell_angle + sea_angle · sea_attenuation` | as written; `sea_attenuation` is a per-vertex attribute in the original (source **UNKNOWN**), ours is the sea-bed depth below the surface over 12 m (**INFERRED**) |
+| `convert_to_angle(texel) = (texel − 0.5) · 2PI` | as written, on the blended, dequantised value (§3) |
+| `uv_sea_swell = position.xz · g_sea_uv_scale`, `.zw = · g_swell_uv_scale` | as written |
+| `sea_scale.x = max(1 − g_sea_decay · position.w, 0)` | as written; the vertex's clip w is passed to the fragment |
+| `surface_angle = swell_angle + sea_angle · sea_attenuation` | as written. `sea_attenuation` is a per-vertex attribute in the original (source **UNKNOWN**); ours is the sea-bed depth below the surface over 12 m (**INFERRED**) |
 | `sincos`: `n.xz = sin(angle)`, `n.y = cos(x)cos(y)`, normalised | as written |
-| `water = g_sea_deep_colour · (dot(n, -light_direction) + 0.5)` | as written, `g_sea_deep_colour = (0, 0.1, 0.5)` |
-| `reflect(view_vec, n)`, then `y = abs(y)`, looked up in the sky cube | vector as written; **PROVISIONAL** the map's `SKYGEN sky_colour · sky_colour_scale` stands in for the cube map |
-| `fresnel = saturate(R0 + (1-R0)(1 - dot(view, -n))^5)`, `R0 = g_fresnel_R0 = 0.5` | as written |
-| `blinn_phong(-view_vec, n, g_sea_shininess · 0.7)` | as written |
-| foam branch: `foam_value` = red, `foam_froth` = green × 0.7, `foam_tendril` = blue, `g_foam_uv_scale = 15`, `g_froth_value = 0.75`, `pow(t, 3)` ramp, `MAX_FOAM_DIST = 300`, `distorted_uv` = alpha as a signed scroll | all as written; **off by default**, see below |
-| `apply_fog(…, true)` + `hdr_encode` | **not ported** — `terrain.wgsl` applies neither and the water has to match the terrain |
+| `water = g_sea_deep_colour · (dot(n, −light_direction) + 0.5)` | as written |
+| `reflect(view_vec, n)`, then `y = abs(y)`, looked up in the sky cube | vector as written; we render no cube, see below |
+| `fresnel = saturate(R0 + (1 − R0)(1 − dot(view, −n))^5)` | as written |
+| `blinn_phong(−view_vec, n, g_sea_shininess · 0.7)` | as written |
+| foam branch (non-ultra): `foam_value` = red, faded over `MAX_FOAM_DIST` 300 m of view distance (`view_vec.w`); `foam_froth` = green × 0.7 (a literal in the shader, not `g_froth_value`) at `distorted_uv(uv_sea · 15)`; `g_froth_value` (0.7 from `sea_surfaces`, setter `0x0119E830`) is only the threshold: at or above it the white amount is `foam_value · foam_froth`; below it, `foam_tendril` = blue at `uv_sea · 15`, `t = (foam_value / g_froth_value)³`, white amount `lerp(foam_tendril, foam_froth, t) · foam_value` | as written; **off by default**, see below |
+| `distorted_uv(uv)`: `uv.y += g_time · speed`, offset `(alpha · 2 − 1) · amount` | as written, with the setter's 0.35 / 0.05 |
+| `apply_fog(…, true)` + `hdr_encode` | **not ported**: `terrain.wgsl` applies neither, and the water has to match the terrain. The colour is written as computed (**PROVISIONAL** colour space, with the fog/HDR item) |
 | shadow-map occlusion on `light_frac` and the specular | **not ported** |
 | the colour overlay decal, `g_rain_ripples_texture` | **not ported** |
 
-### Two constants in the shipped file cannot be used as shipped — CONFIRMED by measurement; that the engine overrides them is INFERRED
+Two fixes against the first port:
+- The foam fade used the clip w; the original uses the view distance.
+- `g_froth_value` was the shader's default 0.75; the exe sets 0.7.
 
-Both were rendered in front of the install before being changed, so the failure is measured, not
-guessed. That the engine sets other values at runtime is INFERRED (no setter traced in the exe):
+### The sky reflection: SKYGEN stands in for the cube map (PROVISIONAL)
 
-- **`g_sea_decay = 0.2f`.** The shader multiplies it by `position.w`, which is the clip w **in
-  metres**, so 0.2 puts the short chop out **within 5 m of the camera** — the sea renders as a flat
-  mirror. Like `g_time = 1.0f` and `g_sea_uv_scale = 1.0f` it is a default the engine replaces.
-  **UNKNOWN** what it sets; **PROVISIONAL** `1/400 m` here.
-- **`g_sea_shininess = 1.0f`**, used as `g_sea_shininess · 0.7` = an exponent of **0.7**, i.e.
-  *below* Lambert: `pow(saturate(dot(n, halfway)), 0.7)` is ≈ 1 over the whole sea, so the sun colour
-  drowns it and `hb_nile` rendered as a white screen. Same story. **PROVISIONAL** exponent **8** here
-  (half-width `acos(8^(-1/8))` = 0.41 rad, a broad band; at 28 the glitter broke into hard speckle,
-  also measured).
+`get_sky_reflection_color` samples `s_sky_reflection_texture`, a cube map the engine renders. We
+render none. Instead, `water.wgsl` evaluates the original's own sky model for the reflection vector:
+- the map's `.environment` `SKYGEN` element holds the parameters of `fx\sky.fx`'s
+  `skygen_get_sky_color` / `CalcSkyColour`, the model the original paints its sky with;
+- ours reads them into `Skygen` in `battle_terrain.rs`, apart from the sky colour, which is kept once,
+  in `Lighting::sky_colour` × `sky_colour_scale` (the battle's clear colour reads it too).
 
-**Not the same kind of thing:** `g_fresnel_R0 = 0.5` is used **exactly as shipped**. Real water is
-0.02, so the original's sea is a strong mirror at every angle, and that is what we render.
+The shipped files store the circumsolar and horizon decays as **positive** numbers (`HB_Nile`:
+circumsolar 0.3495, horizon 0.1956, backscatter 0.6893), but `sky.fx`'s defaults are negative
+(−0.84, −0.07; backscatter +1.0). With a positive decay, `exp(decay · angle)` saturates to 1 and the
+whole sky takes the circumsolar colour, so the engine must negate them when it loads them.
 
-### Foam is off by default — PROVISIONAL
+This is **INFERRED**. The setter is not traced: the name at `0x0142512C` is referenced only from the
+name table at `0x01469884`. So the two negations are **PROVISIONAL**. The backscatter decay is used
+as written.
 
-`ocean.fx` compiles foam into the pixel shader but the engine picks **per draw** between
-`sm_render_sm3` (no foam), `sm_render_foam_sm3` (foam) and the four `sm_render_sea_stenciling_*`
-variants, which clip it to where the sea meets something. Those techniques are CONFIRMED to exist;
-**UNKNOWN** which pass each region gets. One surface and one pass here, so there is nothing to choose
-by, and with foam always on it covered `hb_toulon`'s whole bay in whitecaps (measured).
-`NAPOLEON_SEA_FOAM=1` turns it on. The branch is implemented and readable in `water.wgsl`.
+### Foam is off by default (PROVISIONAL)
+
+`ocean.fx` compiles foam into the pixel shader, but the engine picks **per draw** between:
+- `sm_render_sm3` (no foam);
+- `sm_render_foam_sm3` (foam);
+- the four `sm_render_sea_stenciling_*` variants, which clip it to where the sea meets something.
+
+Those techniques are CONFIRMED to exist. Which pass each region gets is **UNKNOWN**. With foam always
+on, it covered `hb_toulon`'s whole bay in whitecaps (measured). `NAPOLEON_SEA_FOAM=1` draws the
+foam pass over the whole surface.
+
+Why `NAPOLEON_SEA_FOAM=1` showed nothing on 2026-10-10:
+- the foam is white, and the sea under it was itself near-white (R0 0.5 reflecting a bright sky);
+- the froth distortion ran at the shader's default speed and amount, 1.0, which offsets the lookup by
+  a whole texture and smears the froth.
+
+With the exe's values the foam is easier to see against the dark sea (§7 shots).
 
 ## 5. The mesh and the depth blend — `crates/napoleon/src/terrain/water.rs`
 
@@ -178,6 +261,9 @@ by, and with foam always on it covered `hb_toulon`'s whole bay in whitecaps (mea
   64 is a band's width in cells; our 32-cell rings reach the same order of detail. **INFERRED** — the
   ring builder is in the exe and was not disassembled.
 - **The entity follows the camera**, snapped to the innermost cell so the ring pattern does not crawl.
+- **The mesh stays flat (PROVISIONAL).** The original builds its own grid around the camera and moves
+  each vertex on the CPU by the containers' heights and horizontal displacement (`0x01123820`, §3).
+  Ours only shades the chop; the surface does not rise and fall.
 - **`sea_attenuation`** comes from a 512² R8 sea-bed depth texture over the level-0 heightfield
   (`0..12 m`), sampled in the fragment shader by world xz. This is what damps the chop in the shallows
   and leaves the shoreline calm. **INFERRED**.
@@ -196,39 +282,55 @@ by, and with foam always on it covered `hb_toulon`'s whole bay in whitecaps (mea
 | 2 | one flat plane, no per-body mesh | **CONFIRMED** | `ocean.fx` techniques, no lake/river mesh on a battle map |
 | 3 | `ocean.fx` ported (angles, decay, sincos, water, Schlick, Blinn-Phong, foam) | **CONFIRMED** | the shipped source, ported step by step (§4) |
 | 4 | `sea\combined_foam.tga` read from the install | **CONFIRMED** | plain 32-bit 256² TGA |
-| 5 | `g_sea_decay` and `g_sea_shininess` cannot be used as shipped; engine-overridden | **CONFIRMED** unusable (measured white screen / flat mirror); the override is **INFERRED** | measurement; no setter traced |
-| 6 | `g_fresnel_R0 = 0.5` used as shipped | **CONFIRMED** | source |
-| 7 | `g_sea_uv_scale = 1/70`, `g_swell_uv_scale = 1/800` | **INFERRED** | the container's header floats (§3) |
-| 8 | the wave-slope textures | **PLACEHOLDER** (generated) | container **BLOCKED** (§3) |
-| 9 | the sky reflection cube map | **PROVISIONAL** (the map's sky colour) | we render no sky cube |
+| 5 | `g_sea_decay`, `g_sea_shininess`, froth values, deep colour from `sea_surfaces` / `sea_climate_details` | **CONFIRMED** | setter `0x0119E830`, lookup `0x006AB800`, XML key `0x00511210` (§4) |
+| 6 | `g_fresnel_R0 = 0.02037` | **CONFIRMED** | constant `0x3CA6D903` in `0x0119E830` (§4) |
+| 7 | `g_sea_uv_scale = 1/70`, `g_swell_uv_scale = 1/800` | **CONFIRMED** | `0x0119E830`, the containers' tile metres (§3) |
+| 8 | the wave-slope textures: shipped frames, blended and dequantised as the exe does | **CONFIRMED**; per-layer box mips and the clock **PROVISIONAL** | `0x010D25C0`, `0x010E21F0`, `0x010E3140` (§3) |
+| 9 | the sky reflection cube map | **PROVISIONAL** (the map's SKYGEN model; the two decay negations **INFERRED**) | we render no sky cube; the SKYGEN setter is not traced (§4) |
 | 10 | `sea_attenuation` from the sea-bed depth | **INFERRED** | the attribute's own source is unknown |
 | 11 | the ring grid's sizes | **INFERRED** | `ocean.fx`'s band constants |
 | 12 | foam off by default | **PROVISIONAL** | the per-draw pass choice is unknown |
-| 13 | `sea\sea` / `sea\swell` container layout | **BLOCKED** | needs the engine's loader in Ghidra (§3) |
+| 13 | `sea\sea` / `sea\swell` container layout | **CONFIRMED** | loader `0x010D25C0`; both files decode to their exact length (§3) |
 | 14 | `sea_attenuation`'s real source | **UNKNOWN** | exe not disassembled |
 | 15 | inland water bodies at their own level | **UNKNOWN** | no map file records it (§2) |
 | 16 | how the sea is clipped to the map | **UNKNOWN** | stencil techniques only hint at it |
 | 17 | fog and HDR on the water | **not ported** | `terrain.wgsl` has neither; one change must cover both |
 | 18 | reflection / refraction / sea-bed visibility | **not ported** | needs render targets; `USE_ULTRA_SEA`'s shallow/deep blend with them |
+| 19 | the CPU-displaced sea mesh | **not ported** (flat mesh, PROVISIONAL) | `0x01123820` builds and displaces it (§3, §5) |
+| 20 | campaign wind-level roll | **CONFIRMED**, not ported (campaign battles take the first row, **PROVISIONAL**) | `0x00535B30`, thresholds in §4 |
+| 21 | who reads `wind_level_0..4_sea` | **UNKNOWN** | no reader found |
 
 ## 7. Proof in-game
 
-Screenshots go in the worker's own `target/tmp` (never committed). The commands:
+Screenshots go in `%USERPROFILE%\Documents\ntw-evidence\screens\ours\` (never committed, never
+inside a `target` folder). Add `--skip-deployment` to the `--battle-key` runs to get past the
+deployment banner.
+
+**2026-10-11 shots** (`2026-10-11_sea_nile.png`, `_nile_foam.png`, `_toulon.png`, against the
+`2026-10-10_*` ones): the sea is now dark grey (it was pale sky-blue); the chop is small and
+irregular (it was long regular stripes); with `NAPOLEON_SEA_FOAM=1`, foam patches show within
+300 m of the camera (before, nothing changed). No shot of the original was taken: the user's
+description of 2026-10-10 is the comparison. A side-by-side with the original is still needed
+(PROVISIONAL sky stand-in and flat mesh). The log line now also prints the db row values in use.
+
+The commands:
 
 ```
+$shots = "$env:USERPROFILE\Documents\ntw-evidence\screens\ours"
+
 # the whole sea: hb_nile's level 0 is a flat -100 m bed, so the surface is all of it
-cargo run -p napoleon -- --battle-key NHB_Nile --screenshot target/tmp/sea_proof/nile.png
+cargo run -p napoleon -- --battle-key NHB_Nile --screenshot $shots\<date>_sea_nile.png --skip-deployment
 
 # the coastline: hb_toulon's bay fills to the shore and the land is untouched
 $env:NAPOLEON_BATTLE_CAMERA="0,0,900,0,0.55"
-cargo run -p napoleon -- --battle --battle-map hb_toulon --screenshot target/tmp/sea_proof/toulon.png
+cargo run -p napoleon -- --battle --battle-map hb_toulon --screenshot $shots\<date>_sea_toulon.png
 
 # a land battle is unchanged (0 % water, no surface spawned)
-cargo run -p napoleon -- --battle-key NHB_Waterloo --screenshot target/tmp/sea_proof/waterloo.png
+cargo run -p napoleon -- --battle-key NHB_Waterloo --screenshot $shots\<date>_sea_waterloo.png --skip-deployment
 
 # the foam branch
 $env:NAPOLEON_SEA_FOAM=1
-cargo run -p napoleon -- --battle-key NHB_Nile --screenshot target/tmp/sea_proof/nile_foam.png
+cargo run -p napoleon -- --battle-key NHB_Nile --screenshot $shots\<date>_sea_nile_foam.png --skip-deployment
 ```
 
 The log line `Battle sea: N% of <map> is below the sea level, drawing the surface` is the switch that
@@ -236,6 +338,9 @@ says a surface was spawned, and its number is `BattleMap::sea_coverage()`.
 
 ## 8. What is next, in order
 
+0. **The sea's remaining PROVISIONALs** (2026-10-11): the CPU-displaced mesh (`0x01123820`, item
+   19); the sky reflection cube (or trace the SKYGEN decay setter, item 9); the sea's clock and the
+   per-frame texture's mips (§3); the campaign wind-level roll (`0x00535B30`, item 20).
 1. **Shoreline / surf blending** (`WATER.md` next slot). The pieces are identified: `ocean.fx`'s foam
    passes and the `sm_render_sea_stenciling_*` techniques, `seainteraction.fx` (two scrolling diffuse
    cards, alpha-blended, on a decal plane), `filterfoam.fx` (the foam generator). `g_decal_projection`

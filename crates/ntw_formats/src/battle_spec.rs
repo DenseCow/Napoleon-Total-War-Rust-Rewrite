@@ -51,6 +51,12 @@ pub struct BattleSpec {
     pub climate: Option<String>,
     /// `Season/name`, e.g. `season_summer`.
     pub season: Option<String>,
+    /// The `sea_surfaces` row the sea uses, e.g. `wind_level_2`: `weather/wind_level` when present,
+    /// otherwise the top-level `sea_surface_name` (CONFIRMED parser `0x00511210`: `wind_level` at
+    /// `0x00511E86` from the `weather` child found at `0x00511D3F`, `sea_surface_name` at
+    /// `0x00511F28` from the root only when it is absent; both fill the same field, which
+    /// `0x0059482F` hands to the sea's settings lookup `0x006AB800`).
+    pub sea_surface: Option<String>,
     /// `skip_deployment` present (uncommented) at the top level.
     pub skip_deployment: bool,
 }
@@ -189,6 +195,8 @@ impl BattleSpec {
         spec.prevailing_wind = root.child("weather").and_then(|w| w.child("prevailing_wind")).and_then(xy);
         spec.climate = text(root.child("Climate").and_then(|c| c.child("name")));
         spec.season = text(root.child("Season").and_then(|c| c.child("name")));
+        spec.sea_surface = text(root.child("weather").and_then(|w| w.child("wind_level")))
+            .or_else(|| text(root.child("sea_surface_name")));
         spec.skip_deployment = root.child("skip_deployment").is_some();
         Ok(spec)
     }
@@ -362,5 +370,15 @@ mod tests {
         assert_eq!(s.playable_area, Some((1400.0, (-200.0, -100.0))));
         assert_eq!(s.player_army(), Some((0, 0)));
         assert!(!s.is_naval());
+    }
+
+    #[test]
+    fn sea_surface_prefers_weather_wind_level() {
+        // The shape of `mp_historical_battles\nile_1v1\nile_battle.xml`: only the root name.
+        let nile = r#"<battle><weather><prevailing_wind x="0" y="5"/></weather><sea_surface_name>wind_level_2</sea_surface_name></battle>"#;
+        assert_eq!(BattleSpec::parse(nile.as_bytes()).unwrap().sea_surface.as_deref(), Some("wind_level_2"));
+        let both = r#"<battle><weather><wind_level>wind_level_4</wind_level></weather><sea_surface_name>wind_level_2</sea_surface_name></battle>"#;
+        assert_eq!(BattleSpec::parse(both.as_bytes()).unwrap().sea_surface.as_deref(), Some("wind_level_4"));
+        assert_eq!(BattleSpec::parse(SAMPLE.as_bytes()).unwrap().sea_surface, None);
     }
 }

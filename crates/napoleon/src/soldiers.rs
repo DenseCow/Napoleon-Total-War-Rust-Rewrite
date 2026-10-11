@@ -91,6 +91,8 @@ pub struct MountKit {
 #[derive(Clone)]
 pub struct GaitAnims {
     pub man: Arc<Anim>,
+    /// The man clip's root speed (m/s) as read: `man` loops in place ([`in_place`]), so its own is 0.
+    pub speed: f32,
     pub mount: Option<Arc<Anim>>,
     /// Slot names, for logs (`RIDER_TROT` / `TROT`).
     pub slots: (String, Option<String>),
@@ -309,11 +311,11 @@ impl SoldierLibrary {
             if gait == Gait::Stand {
                 display = chosen.man.equipment_display.clone();
             }
-            let man = self.clip(&chosen.man.path);
+            let man = self.clip_entry(&chosen.man.path);
             let mount = chosen.mount.as_ref().and_then(|m| self.clip(&m.path));
-            if let Some(man) = man {
+            if let Some((man, speed)) = man {
                 let slots = (chosen.man.slot.clone(), chosen.mount.as_ref().map(|m| m.slot.clone()));
-                gaits.push((gait, GaitAnims { man, mount, slots }));
+                gaits.push((gait, GaitAnims { man, speed, mount, slots }));
             }
         }
         // Every level and alternative, for the battle's per-man / per-frame choice.
@@ -507,7 +509,7 @@ impl SoldierLibrary {
 
 /// Removes the clip's forward drift from its root bones so a looping walk stays in place
 /// (the unit's own movement carries the man). Bones without a parent are the roots.
-fn in_place(mut anim: Anim) -> Anim {
+pub(crate) fn in_place(mut anim: Anim) -> Anim {
     let n = anim.frames.len();
     if n < 2 {
         return anim;

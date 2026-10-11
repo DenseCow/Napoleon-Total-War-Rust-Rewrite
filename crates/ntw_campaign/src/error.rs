@@ -207,8 +207,8 @@ pub enum LoadWarning {
     RecruitmentManagerWithoutItems {
         /// The region key.
         region: String,
-        /// `None`: the region's own manager; `Some(i)`: the manager of `REGION_SLOT_ARRAY` item `i` (a port).
-        port_slot: Option<usize>,
+        /// The region's own manager, or the one of a port slot.
+        manager: ntw_sim::campaign::RecruitmentManager,
     },
     /// A `REGION` without its own `REGION_RECRUITMENT_MANAGER` (#27 in every region of the shipped
     /// files): its own queue is read as empty (the save adds the manager only when a new item is
@@ -288,8 +288,11 @@ impl fmt::Display for LoadWarning {
             Self::UnreadableRecruitmentItem { region } => {
                 write!(f, "region {region}: recruitment item without turns or unit key (skipped)")
             }
-            Self::RecruitmentManagerWithoutItems { region, port_slot } => {
-                let manager = port_slot.map_or_else(|| "its own recruitment manager".to_owned(), |i| format!("the recruitment manager of port slot {i}"));
+            Self::RecruitmentManagerWithoutItems { region, manager } => {
+                let manager = match manager {
+                    ntw_sim::campaign::RecruitmentManager::Region => "its own recruitment manager".to_owned(),
+                    ntw_sim::campaign::RecruitmentManager::Port(i) => format!("the recruitment manager of port slot {i}"),
+                };
                 write!(f, "region {region}: {manager} has no item array (read as an empty queue)")
             }
             Self::RegionWithoutRecruitmentManager { region } => {

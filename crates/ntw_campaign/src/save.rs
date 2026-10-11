@@ -32,7 +32,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use ntw_formats::esf::{EsfFile, EsfNode, EsfRecord, EsfRecordArray};
-use ntw_sim::campaign::{BuildingRef, CampaignModel, CampaignUnit, Faction, MilitaryForce, Region, SlotRef};
+use ntw_sim::campaign::{BuildingRef, CampaignModel, CampaignUnit, Faction, MilitaryForce, RecruitmentManager, Region, SlotRef};
 
 use crate::{SAVE_ROOT, STARTPOS_ROOT};
 
@@ -280,6 +280,8 @@ fn write_save_tree(source: &EsfFile, model: &CampaignModel, human: &str, timesta
     }
     // The portrait decks the model drew from (CHARACTERS_FIDELITY.md §14).
     crate::portraits::write(m, model);
+    // The campaign director: its RNG, queued region transfers and region-transfer counter.
+    crate::director::write(m, model);
     if let Some(c) = child_mut(m, "CAMPAIGN_CALENDAR") {
         set(c, 0, EsfNode::U32(cal.turns_per_year));
         set(c, 1, EsfNode::U32(cal.turn_in_year));
@@ -1435,8 +1437,8 @@ fn empty_recruitment_array() -> EsfNode {
 }
 
 /// Repairs a malformed `REGION` record in the save's copy of its source (SAVE_COMPAT.md §32), so the
-/// writer can count on the managers it writes new items to: `targets` names them (`None` the region's
-/// own, `Some(i)` the manager of port slot `i`, which exists: a port is a slot holding one).
+/// writer can count on the managers it writes new items to: `targets` names them (the region's
+/// own, or the manager of port slot `i`, which exists: a port is a slot holding one).
 /// [`write_region`] runs it only for a region that has a new item to write (one without a valid load
 /// link), before writing any item, and only on the managers those items go to; every other manager,
 /// and a record no new item needs, is left as it is, so a file saved untouched keeps its bytes. Every
@@ -1449,9 +1451,9 @@ fn empty_recruitment_array() -> EsfNode {
 /// added manager's bool is false (as in every file) and its i32, a unique object id referenced
 /// nowhere else and not read by our loader, is 0 (no id). Returns what was added, for the one log
 /// line of the save.
-fn repair_recruitment_managers(r: &mut EsfRecord, targets: &BTreeSet<Option<usize>>) -> Vec<&'static str> {
+fn repair_recruitment_managers(r: &mut EsfRecord, targets: &BTreeSet<RecruitmentManager>) -> Vec<&'static str> {
     let mut added = Vec::new();
-    if targets.contains(&None) && r.child("REGION_RECRUITMENT_MANAGER").is_none() {
+    if targets.contains(&RecruitmentManager::Region) && r.child("REGION_RECRUITMENT_MANAGER").is_none() {
         let mut m = EsfRecord::new("REGION_RECRUITMENT_MANAGER", 1);
         m.children = vec![empty_recruitment_array(), EsfNode::Bool(false), EsfNode::I32(0)];
         r.children.push(EsfNode::Record(Box::new(m)));
@@ -1462,7 +1464,7 @@ fn repair_recruitment_managers(r: &mut EsfRecord, targets: &BTreeSet<Option<usiz
             && m.record_array("REGION_RECRUITMENT_ITEM_ARRAY").is_none()
         {
             m.children.push(empty_recruitment_array());
-            added.push(if target.is_some() { "port REGION_RECRUITMENT_ITEM_ARRAY" } else { "REGION_RECRUITMENT_ITEM_ARRAY" });
+            added.push(if target == RecruitmentManager::Region { "REGION_RECRUITMENT_ITEM_ARRAY" } else { "port REGION_RECRUITMENT_ITEM_ARRAY" });
         }
     }
     added
@@ -1471,7 +1473,7 @@ fn repair_recruitment_managers(r: &mut EsfRecord, targets: &BTreeSet<Option<usiz
 /// Where a queued item is written: back to the record it was loaded from, or as a new record to a manager.
 enum QueueDest {
     Linked(ntw_sim::campaign::RecruitmentSource),
-    New(Option<usize>),
+    New(RecruitmentManager),
 }
 
 fn write_region(
@@ -1523,31 +1525,33 @@ fn write_region(
         .iter()
         .map(|it| {
             let s = *links.sources.get(&it.id)?;
-            let e = manager(r, s.port_slot)?.items.get(s.index)?;
+            let e = manager(r, s.manager)?.items.get(s.index)?;
             (recruitment_unit_key(e) == Some(it.unit_key.as_str())).then_some(s)
         })
         .collect();
     links.broken += region.recruitment_queue.iter().zip(&linked).filter(|(it, s)| s.is_none() && links.sources.contains_key(&it.id)).count();
     // The first port: the first slot holding a recruitment manager (as the loader marks a port).
-    let port = manager_records(r).into_iter().find_map(|(m, _)| m);
+    let port = manager_records(r).into_iter().map(|(m, _)| m).find(|m| matches!(m, RecruitmentManager::Port(_)));
     let dests: Vec<QueueDest> = region
         .recruitment_queue
         .iter()
         .zip(&linked)
         .map(|(it, s)| match s {
             Some(s) => QueueDest::Linked(*s),
-            None if !is_naval(&it.unit_key) => QueueDest::New(None),
-            None if port.is_some() => QueueDest::New(port),
-            // PROVISIONAL (SAVE_COMPAT.md §32): a ship in a region without a port manager goes to
-            // the region's own manager, and loads back from there as a queued ship of the region.
-            // The original has no such state to copy.
-            None => {
-                links.misplaced += 1;
-                QueueDest::New(None)
-            }
+            None if !is_naval(&it.unit_key) => QueueDest::New(RecruitmentManager::Region),
+            None => match port {
+                Some(p) => QueueDest::New(p),
+                // PROVISIONAL (SAVE_COMPAT.md §32): a ship in a region without a port manager goes to
+                // the region's own manager, and loads back from there as a queued ship of the region.
+                // The original has no such state to copy.
+                None => {
+                    links.misplaced += 1;
+                    QueueDest::New(RecruitmentManager::Region)
+                }
+            },
         })
         .collect();
-    let targets: BTreeSet<Option<usize>> = dests.iter().filter_map(|d| if let QueueDest::New(m) = d { Some(*m) } else { None }).collect();
+    let targets: BTreeSet<RecruitmentManager> = dests.iter().filter_map(|d| if let QueueDest::New(m) = d { Some(*m) } else { None }).collect();
     if !targets.is_empty() {
         let added = repair_recruitment_managers(r, &targets);
         if !added.is_empty() {
@@ -1567,7 +1571,7 @@ fn write_recruitment(r: &mut EsfRecord, region: &Region, dests: &[QueueDest], is
     let mut out: Vec<Vec<Vec<EsfNode>>> = vec![Vec::new(); managers.len()];
     for (it, d) in region.recruitment_queue.iter().zip(dests) {
         let slot = match d {
-            QueueDest::Linked(s) => s.port_slot,
+            QueueDest::Linked(s) => s.manager,
             QueueDest::New(m) => *m,
         };
         let mi = managers.iter().position(|(m, _)| *m == slot).ok_or(SaveError::Missing("REGION_RECRUITMENT_ITEM_ARRAY"))?;
@@ -1679,34 +1683,34 @@ fn slot_manager(item: &mut [EsfNode]) -> Option<&mut EsfRecord> {
     child_mut(first_rec_mut(item)?, "REGION_RECRUITMENT_MANAGER")
 }
 
-/// Every recruitment manager record of a region, in order: its own (`None`) and each slot's that
-/// holds one (`Some(i)`). Built from [`manager_places`] and [`slot_manager`], the same rule
+/// Every recruitment manager record of a region, in order: its own and each slot's that
+/// holds one. Built from [`manager_places`] and [`slot_manager`], the same rule
 /// [`manager_record`] follows for one.
-fn manager_records(r: &mut EsfRecord) -> Vec<(Option<usize>, &mut EsfRecord)> {
+fn manager_records(r: &mut EsfRecord) -> Vec<(RecruitmentManager, &mut EsfRecord)> {
     let (own, slots) = manager_places(r);
-    let mut out: Vec<(Option<usize>, &mut EsfRecord)> = own.into_iter().map(|m| (None, m)).collect();
+    let mut out: Vec<(RecruitmentManager, &mut EsfRecord)> = own.into_iter().map(|m| (RecruitmentManager::Region, m)).collect();
     if let Some(array) = slots {
-        out.extend(array.items.iter_mut().enumerate().filter_map(|(i, item)| Some((Some(i), slot_manager(item)?))));
+        out.extend(array.items.iter_mut().enumerate().filter_map(|(i, item)| Some((RecruitmentManager::Port(i), slot_manager(item)?))));
     }
     out
 }
 
-/// A recruitment manager record of a region: its own (`None`) or slot `i`'s. Nothing is collected.
-fn manager_record(r: &mut EsfRecord, slot: Option<usize>) -> Option<&mut EsfRecord> {
+/// A recruitment manager record of a region (its own or a port slot's). Nothing is collected.
+fn manager_record(r: &mut EsfRecord, slot: RecruitmentManager) -> Option<&mut EsfRecord> {
     let (own, slots) = manager_places(r);
     match slot {
-        None => own,
-        Some(i) => slot_manager(slots?.items.get_mut(i)?),
+        RecruitmentManager::Region => own,
+        RecruitmentManager::Port(i) => slot_manager(slots?.items.get_mut(i)?),
     }
 }
 
 /// Every recruitment queue of a region (each manager holding its item array), all at once.
-fn managers_mut(r: &mut EsfRecord) -> Vec<(Option<usize>, &mut EsfRecordArray)> {
+fn managers_mut(r: &mut EsfRecord) -> Vec<(RecruitmentManager, &mut EsfRecordArray)> {
     manager_records(r).into_iter().filter_map(|(m, rec)| Some((m, array_mut(rec, "REGION_RECRUITMENT_ITEM_ARRAY")?))).collect()
 }
 
-/// A recruitment queue of a region: its own (`None`) or slot `i`'s.
-fn manager(r: &mut EsfRecord, slot: Option<usize>) -> Option<&mut EsfRecordArray> {
+/// A recruitment queue of a region (its own or a port slot's).
+fn manager(r: &mut EsfRecord, slot: RecruitmentManager) -> Option<&mut EsfRecordArray> {
     array_mut(manager_record(r, slot)?, "REGION_RECRUITMENT_ITEM_ARRAY")
 }
 
@@ -2084,21 +2088,21 @@ mod tests {
         // 930: a ship whose link names a foot record (a source the model was not loaded from).
         let queue = vec![q(700, "ship", 1), q(908, "foot", 2), q(912, "foot", 3), q(920, "foot", 1), q(930, "ship", 1)];
         let region = Region { recruitment_queue: queue, ..test_region() };
-        let at = |port_slot: Option<usize>, index: usize| RecruitmentSource { port_slot, index };
+        let at = |manager: RecruitmentManager, index: usize| RecruitmentSource { manager, index };
         let sources = BTreeMap::from([
-            (RecruitmentItemId(700), at(Some(1), 0)),
-            (RecruitmentItemId(600), at(None, 0)),
-            (RecruitmentItemId(908), at(None, 1)),
-            (RecruitmentItemId(912), at(None, 2)),
-            (RecruitmentItemId(800), at(None, 3)),
-            (RecruitmentItemId(930), at(None, 0)),
+            (RecruitmentItemId(700), at(RecruitmentManager::Port(1), 0)),
+            (RecruitmentItemId(600), at(RecruitmentManager::Region, 0)),
+            (RecruitmentItemId(908), at(RecruitmentManager::Region, 1)),
+            (RecruitmentItemId(912), at(RecruitmentManager::Region, 2)),
+            (RecruitmentItemId(800), at(RecruitmentManager::Region, 3)),
+            (RecruitmentItemId(930), at(RecruitmentManager::Region, 0)),
         ]);
         let mut links = RecruitmentLinks::new(&sources);
         write_region(&mut r, &region, None, None, &|k| k == "ship", &mut links, &Default::default()).unwrap();
         assert_eq!(links.broken, 1, "the ship linked to a foot record is counted (and logged once per save)");
         // (id, unit key, turns, mark) of each record.
         type Fields = (Option<EsfNode>, Option<String>, Option<u32>, Option<u32>);
-        let fields = |m: Option<usize>, r: &mut EsfRecord| -> Vec<Fields> {
+        let fields = |m: RecruitmentManager, r: &mut EsfRecord| -> Vec<Fields> {
             manager_items(r, m)
                 .iter()
                 .map(|e| {
@@ -2108,19 +2112,19 @@ mod tests {
                 })
                 .collect()
         };
-        let own = fields(None, &mut r);
+        let own = fields(RecruitmentManager::Region, &mut r);
         let foot = Some("foot".to_owned());
         assert_eq!(own[..2], [(Some(EsfNode::I32(908)), foot.clone(), Some(2), Some(2)), (Some(EsfNode::I32(912)), foot.clone(), Some(3), Some(3))]);
         assert_eq!((own.len(), &own[2].1), (3, &foot));
         assert!(own[2].3 != Some(1) && own[2].3 != Some(4), "the new recruit is built, not given a cancelled item's record");
-        let port0 = fields(Some(0), &mut r);
+        let port0 = fields(RecruitmentManager::Port(0), &mut r);
         assert_eq!(port0.iter().map(|f| f.1.as_deref()).collect::<Vec<_>>(), [Some("ship")], "the mismatched ship is built fresh");
         assert_eq!(links.misplaced, 0);
-        assert_eq!(fields(Some(1), &mut r), vec![(Some(EsfNode::U32(700)), Some("ship".to_owned()), Some(1), Some(5))], "the ship keeps its own record and type");
+        assert_eq!(fields(RecruitmentManager::Port(1), &mut r), vec![(Some(EsfNode::U32(700)), Some("ship".to_owned()), Some(1), Some(5))], "the ship keeps its own record and type");
     }
 
     /// The unit keys of a manager's items.
-    fn unit_keys(r: &mut EsfRecord, slot: Option<usize>) -> Vec<String> {
+    fn unit_keys(r: &mut EsfRecord, slot: RecruitmentManager) -> Vec<String> {
         manager_items(r, slot).iter().filter_map(|e| recruitment_unit_key(e).map(str::to_owned)).collect()
     }
 
@@ -2150,13 +2154,13 @@ mod tests {
     fn a_malformed_region_record_is_repaired_once() {
         for len in [26, 27, 30] {
             let EsfNode::Record(mut r) = rec("REGION", (0..len).map(|_| EsfNode::U32(7)).collect()) else { unreachable!() };
-            assert_eq!(repair_recruitment_managers(&mut r, &BTreeSet::from([None])), ["REGION_RECRUITMENT_MANAGER"], "len {len}");
+            assert_eq!(repair_recruitment_managers(&mut r, &BTreeSet::from([RecruitmentManager::Region])), ["REGION_RECRUITMENT_MANAGER"], "len {len}");
             assert_eq!(r.children.len(), len + 1);
             assert_eq!(r.children.iter().filter(|c| matches!(c, EsfNode::U32(7))).count(), len, "no field replaced");
             let m = r.children[len].as_record().unwrap();
             assert_eq!((m.name.as_str(), m.version, m.get_bool(1), m.get_i32(2)), ("REGION_RECRUITMENT_MANAGER", 1, Some(false), Some(0)));
             assert!(m.record_array("REGION_RECRUITMENT_ITEM_ARRAY").is_some());
-            assert!(repair_recruitment_managers(&mut r, &BTreeSet::from([None])).is_empty(), "once repaired, nothing more to add");
+            assert!(repair_recruitment_managers(&mut r, &BTreeSet::from([RecruitmentManager::Region])).is_empty(), "once repaired, nothing more to add");
         }
         // A manager without its array (holding its bool and i32, or empty in a port slot).
         let mut slots = EsfRecordArray::new("REGION_SLOT_ARRAY", 0);
@@ -2164,13 +2168,13 @@ mod tests {
         let own = rec("REGION_RECRUITMENT_MANAGER", vec![EsfNode::Bool(false), EsfNode::I32(5)]);
         let EsfNode::Record(mut r) = rec("REGION", vec![own, rec("REGION_SLOT_MANAGER", vec![EsfNode::RecordArray(Box::new(slots))])]) else { unreachable!() };
         // Only the managers named are repaired: the region's own first, the port's when a ship goes there.
-        assert_eq!(repair_recruitment_managers(&mut r, &BTreeSet::from([None])), ["REGION_RECRUITMENT_ITEM_ARRAY"]);
-        assert!(manager(&mut r, Some(0)).is_none(), "the port is not touched");
-        assert_eq!(repair_recruitment_managers(&mut r, &BTreeSet::from([None, Some(0)])), ["port REGION_RECRUITMENT_ITEM_ARRAY"]);
+        assert_eq!(repair_recruitment_managers(&mut r, &BTreeSet::from([RecruitmentManager::Region])), ["REGION_RECRUITMENT_ITEM_ARRAY"]);
+        assert!(manager(&mut r, RecruitmentManager::Port(0)).is_none(), "the port is not touched");
+        assert_eq!(repair_recruitment_managers(&mut r, &BTreeSet::from([RecruitmentManager::Region, RecruitmentManager::Port(0)])), ["port REGION_RECRUITMENT_ITEM_ARRAY"]);
         let m = r.child("REGION_RECRUITMENT_MANAGER").unwrap();
         assert_eq!((m.get_bool(0), m.get_i32(1), m.children.len()), (Some(false), Some(5), 3), "appended after the fields");
         assert_eq!(r.children.iter().filter(|c| c.as_record().is_some_and(|x| x.name == "REGION_RECRUITMENT_MANAGER")).count(), 1, "no second manager");
-        assert!(manager(&mut r, None).is_some() && manager(&mut r, Some(0)).is_some());
+        assert!(manager(&mut r, RecruitmentManager::Region).is_some() && manager(&mut r, RecruitmentManager::Port(0)).is_some());
     }
 
     /// Polish: one new land item made the repair add an item array to every port manager without one
@@ -2194,13 +2198,13 @@ mod tests {
             let mut links = RecruitmentLinks::new(&sources);
             let region = Region { recruitment_queue: vec![new_item(8, "foot")], ..test_region() };
             write_region(&mut r, &region, None, None, &|k| k == "ship", &mut links, &Default::default()).unwrap();
-            assert_eq!(unit_keys(&mut r, None), ["foot"]);
+            assert_eq!(unit_keys(&mut r, RecruitmentManager::Region), ["foot"]);
             assert_eq!(links.repaired.len(), usize::from(!own_has_array));
             // The expected record: the source with only the region's own manager changed (holding the item).
             let mut expected = before.clone();
-            *manager_record(&mut expected, None).unwrap() = manager_record(&mut r, None).unwrap().clone();
+            *manager_record(&mut expected, RecruitmentManager::Region).unwrap() = manager_record(&mut r, RecruitmentManager::Region).unwrap().clone();
             assert_eq!(r, expected, "own array: {own_has_array}");
-            assert!(manager(&mut r, Some(0)).is_none() && manager(&mut r, Some(2)).is_none(), "no port gets an array");
+            assert!(manager(&mut r, RecruitmentManager::Port(0)).is_none() && manager(&mut r, RecruitmentManager::Port(2)).is_none(), "no port gets an array");
         }
     }
 
@@ -2219,13 +2223,13 @@ mod tests {
         // A linked item, then a new ship sent to a port manager that does not exist (a state the
         // repair never leaves, forced here: slot 4 is not there).
         let region = Region { recruitment_queue: vec![new_item(8, "foot"), new_item(9, "ship")], ..test_region() };
-        let dests = [QueueDest::Linked(RecruitmentSource { port_slot: None, index: 0 }), QueueDest::New(Some(4))];
+        let dests = [QueueDest::Linked(RecruitmentSource { manager: RecruitmentManager::Region, index: 0 }), QueueDest::New(RecruitmentManager::Port(4))];
         assert!(matches!(write_recruitment(&mut r, &region, &dests, &|k| k == "ship"), Err(SaveError::Missing(_))));
         assert_eq!(r, before, "nothing written");
         // The same with the ship sent to the region's own manager is written.
-        let dests = [QueueDest::Linked(RecruitmentSource { port_slot: None, index: 0 }), QueueDest::New(None)];
+        let dests = [QueueDest::Linked(RecruitmentSource { manager: RecruitmentManager::Region, index: 0 }), QueueDest::New(RecruitmentManager::Region)];
         write_recruitment(&mut r, &region, &dests, &|k| k == "ship").unwrap();
-        assert_eq!(unit_keys(&mut r, None), ["foot", "ship"]);
+        assert_eq!(unit_keys(&mut r, RecruitmentManager::Region), ["foot", "ship"]);
     }
 
     /// A region with a new item gets its malformed record repaired before any item is written, so no
@@ -2241,7 +2245,7 @@ mod tests {
         let mut links = RecruitmentLinks::new(&sources);
         write_region(&mut bare, &region, None, None, &ships, &mut links, &Default::default()).unwrap();
         assert_eq!(links.repaired, ["REGION 1: added REGION_RECRUITMENT_MANAGER"]);
-        assert_eq!(unit_keys(&mut bare, None), ["foot"]);
+        assert_eq!(unit_keys(&mut bare, RecruitmentManager::Region), ["foot"]);
         for with_port in [false, true] {
             for order in [["foot", "ship"], ["ship", "foot"]] {
                 let mut slots = EsfRecordArray::new("REGION_SLOT_ARRAY", 0);
@@ -2253,13 +2257,13 @@ mod tests {
                 let mut links = RecruitmentLinks::new(&sources);
                 write_region(&mut r, &region, None, None, &ships, &mut links, &Default::default()).unwrap();
                 if with_port {
-                    assert_eq!((unit_keys(&mut r, None), unit_keys(&mut r, Some(0)), links.misplaced), (vec!["foot".to_string()], vec!["ship".to_string()], 0));
+                    assert_eq!((unit_keys(&mut r, RecruitmentManager::Region), unit_keys(&mut r, RecruitmentManager::Port(0)), links.misplaced), (vec!["foot".to_string()], vec!["ship".to_string()], 0));
                 } else {
-                    assert_eq!((unit_keys(&mut r, None), links.misplaced), (order.map(String::from).to_vec(), 1), "{order:?}");
+                    assert_eq!((unit_keys(&mut r, RecruitmentManager::Region), links.misplaced), (order.map(String::from).to_vec(), 1), "{order:?}");
                     let (mut queue, mut read) = (Vec::new(), Vec::new());
                     let db = ntw_data::GameDatabase::test_fixture();
                     let mut check = crate::world::Checker { db: &db, warnings: Vec::new() };
-                    crate::world::read_recruitment(r.child("REGION_RECRUITMENT_MANAGER").unwrap(), "test_region", None, &mut queue, &mut read, &mut check);
+                    crate::world::read_recruitment(r.child("REGION_RECRUITMENT_MANAGER").unwrap(), "test_region", ntw_sim::campaign::RecruitmentManager::Region, &mut queue, &mut read, &mut check);
                     assert_eq!(queue.iter().map(|i| i.unit_key.as_str()).collect::<Vec<_>>(), order, "our loader reads both back");
                 }
             }
@@ -2293,7 +2297,7 @@ mod tests {
         children.push(rec("REGION_RECRUITMENT_MANAGER", vec![EsfNode::Bool(false), EsfNode::I32(5)]));
         let EsfNode::Record(mut r) = rec("REGION", children) else { unreachable!() };
         let before = r.clone();
-        let sources = BTreeMap::from([(RecruitmentItemId(8), RecruitmentSource { port_slot: Some(0), index: 0 })]);
+        let sources = BTreeMap::from([(RecruitmentItemId(8), RecruitmentSource { manager: RecruitmentManager::Port(0), index: 0 })]);
         let ships = |k: &str| k == "ship";
         let mut region = Region { recruitment_queue: vec![new_item(8, "ship")], ..test_region() };
         let mut links = RecruitmentLinks::new(&sources);
@@ -2305,7 +2309,7 @@ mod tests {
         let mut links = RecruitmentLinks::new(&sources);
         write_region(&mut r, &region, None, None, &ships, &mut links, &Default::default()).unwrap();
         assert_eq!(links.repaired, ["REGION 1: added REGION_RECRUITMENT_ITEM_ARRAY"]);
-        assert_eq!((unit_keys(&mut r, None), unit_keys(&mut r, Some(0))), (vec!["foot".to_string()], vec!["ship".to_string()]));
+        assert_eq!((unit_keys(&mut r, RecruitmentManager::Region), unit_keys(&mut r, RecruitmentManager::Port(0))), (vec!["foot".to_string()], vec!["ship".to_string()]));
     }
 
     /// A well-formed record holding a linked item: the repair adds nothing and the item keeps its record.
@@ -2318,9 +2322,9 @@ mod tests {
         children.push(rec("REGION_RECRUITMENT_MANAGER", vec![EsfNode::RecordArray(Box::new(items)), EsfNode::Bool(false), EsfNode::I32(5)]));
         let EsfNode::Record(mut r) = rec("REGION", children) else { unreachable!() };
         let before = r.clone();
-        assert!(repair_recruitment_managers(&mut r, &BTreeSet::from([None])).is_empty());
+        assert!(repair_recruitment_managers(&mut r, &BTreeSet::from([RecruitmentManager::Region])).is_empty());
         assert_eq!(r, before);
-        let sources = BTreeMap::from([(RecruitmentItemId(8), RecruitmentSource { port_slot: None, index: 0 })]);
+        let sources = BTreeMap::from([(RecruitmentItemId(8), RecruitmentSource { manager: RecruitmentManager::Region, index: 0 })]);
         let region = Region { recruitment_queue: vec![new_item(8, "foot")], ..test_region() };
         let mut links = RecruitmentLinks::new(&sources);
         write_region(&mut r, &region, None, None, &|_| false, &mut links, &Default::default()).unwrap();
@@ -2360,7 +2364,7 @@ mod tests {
         let ids: Vec<Option<i32>> = items.iter().map(|it| first_rec(it).and_then(|r| r.get_i32(4))).collect();
         assert_eq!(ids, [Some(1), Some(2)], "the first record of each id, in file order");
         let first = first_rec_mut(&mut items[0]).unwrap();
-        assert_eq!((first.get_u32(20), unit_keys(first, None)), (Some(5), vec!["foot".to_string()]));
+        assert_eq!((first.get_u32(20), unit_keys(first, RecruitmentManager::Region)), (Some(5), vec!["foot".to_string()]));
     }
 
     /// Polish: saves written before the cost was stored bit for bit (commit 317f02e4) hold a negative
@@ -2393,7 +2397,7 @@ mod tests {
         assert_eq!(treasury, -50);
     }
 
-    fn manager_items(r: &mut EsfRecord, slot: Option<usize>) -> Vec<Vec<EsfNode>> {
+    fn manager_items(r: &mut EsfRecord, slot: RecruitmentManager) -> Vec<Vec<EsfNode>> {
         manager(r, slot).map(|a| a.items.clone()).unwrap_or_default()
     }
 }

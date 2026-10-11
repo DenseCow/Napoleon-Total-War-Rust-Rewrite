@@ -253,7 +253,7 @@ fn save_round_trip() {
     // Our own folder under the system temp dir; never the game's save folder.
     let dir = std::env::temp_dir().join("napoleonrust_tests");
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("round_trip.save");
+    let path = dir.join(format!("round_trip_{}.save", std::process::id()));
     std::fs::write(&path, &bytes).unwrap();
 
     let back = ntw_campaign::read_file(&path, &f.db).expect("reload");

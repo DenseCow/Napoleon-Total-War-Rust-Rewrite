@@ -19,13 +19,17 @@
 //! that id (item value #2) to the region key (`CAI_REGION #10`). In the shipped eur startpos all
 //! 72 values have the form `15000 + 25 k`, as the decoded formula gives.
 //!
+//! **Map areas** (CONFIRMED, `analysis/fidelity/CAMPAIGN_FIDELITY.md` §Campaign director): the CAI
+//! world's areas (`CAI_WORLD_REGIONS[]`: the land regions, the seas, the theatres and `all`) with
+//! their links, in the order the campaign director walks them ([`read_ai_areas`]).
+//!
 //! [`World::ai_keys`]: ntw_sim::campaign::World::ai_keys
 //! [`World::region_base_values`]: ntw_sim::campaign::World::region_base_values
 
 use std::collections::BTreeMap;
 
 use ntw_formats::esf::{EsfNode, EsfRecord};
-use ntw_sim::campaign::{CampaignModel, FactionAiKeys};
+use ntw_sim::campaign::{AiArea, CampaignModel, FactionAiKeys};
 
 /// Reads the AI keys of one `FACTION` record: the four strings right before its first
 /// `FACTION_FLAG_AND_COLOURS` child (two strings for record versions below 15, the others then
@@ -96,14 +100,64 @@ pub fn read_region_base_values(root: &EsfRecord) -> BTreeMap<String, i32> {
     out
 }
 
-/// Puts the file's AI keys and region base values into the model, by the ids of the model's
-/// factions and regions with those keys (entries naming no faction or region are left out).
+/// The campaign AI's map areas in a startpos or save ([`World::ai_areas`](ntw_sim::campaign::World::ai_areas)):
+/// `CAI_WORLD/CAI_WORLD_REGIONS[]` in file order (the order the CAI world loader `0x00BF0130`
+/// appends them to its list +0x130/+0x134, and the saver `0x00C09400` writes them back), each
+/// `CAI_REGION` key (#10) with its boundaries (#7, `CAI_REGION_BOUNDARY` components of
+/// `CAI_WORLD_REGION_BOUNDARIES[]`, whose #0/#1 are the two areas' component ids) as the indexes of
+/// the areas on their other side. A boundary naming an unknown area is left out. Empty when the
+/// file has no CAI state.
+pub fn read_ai_areas(root: &EsfRecord) -> Vec<AiArea> {
+    let Some(world) = root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL/CAI_INTERFACE/CAI_WORLD") else { return Vec::new() };
+    fn class<'a>(item: &'a [EsfNode], name: &str) -> Option<&'a EsfRecord> {
+        item.iter().filter_map(EsfNode::as_record).find(|r| r.name == name)
+    }
+    // A component's id: its item's first plain value (after the property records).
+    let id = |item: &[EsfNode]| item.iter().find(|n| !matches!(n, EsfNode::Record(_) | EsfNode::RecordArray(_))).and_then(EsfNode::as_u32);
+    let mut boundaries: BTreeMap<u32, (u32, u32)> = BTreeMap::new();
+    for item in world.record_array("CAI_WORLD_REGION_BOUNDARIES").map_or(&[][..], |a| a.items.as_slice()) {
+        let (Some(c), Some(b)) = (id(item), class(item, "CAI_REGION_BOUNDARY")) else { continue };
+        if let (Some(x), Some(y)) = (b.get(0).and_then(EsfNode::as_u32), b.get(1).and_then(EsfNode::as_u32)) {
+            boundaries.insert(c, (x, y));
+        }
+    }
+    let regions: Vec<(u32, &EsfRecord)> = world
+        .record_array("CAI_WORLD_REGIONS")
+        .map_or(&[][..], |a| a.items.as_slice())
+        .iter()
+        .filter_map(|item| Some((id(item)?, class(item, "CAI_REGION")?)))
+        .collect();
+    let index: BTreeMap<u32, usize> = regions.iter().enumerate().map(|(i, (id, _))| (*id, i)).collect();
+    let mut dropped = 0usize;
+    let areas = regions
+        .iter()
+        .map(|(me, r)| {
+            let mut links = Vec::new();
+            for b in r.get(7).and_then(EsfNode::as_u32_array).unwrap_or_default() {
+                match boundaries.get(b).and_then(|&(x, y)| index.get(if x == *me { &y } else { &x })) {
+                    Some(&i) => links.push(i),
+                    None => dropped += 1,
+                }
+            }
+            AiArea { key: r.get(10).and_then(EsfNode::as_str).unwrap_or_default().to_string(), links }
+        })
+        .collect();
+    if dropped > 0 {
+        log::warn!("load: {dropped} CAI region links name no known boundary or area; left out");
+    }
+    areas
+}
+
+/// Puts the file's AI keys, region base values and map areas into the model, by the ids of the model's
+/// factions and regions with those keys (keys and values naming no faction or region are left out;
+/// the areas are kept whole).
 pub fn fill(root: &EsfRecord, model: &mut CampaignModel) {
     let keys = read_ai_keys(root);
     let values = read_region_base_values(root);
     let w = &mut model.world;
     w.ai_keys = w.factions.values().filter_map(|f| Some((f.id, keys.get(&f.key)?.clone()))).collect();
     w.region_base_values = w.regions.values().filter_map(|r| Some((r.id, *values.get(&r.key)?))).collect();
+    w.ai_areas = read_ai_areas(root);
 }
 
 #[cfg(test)]

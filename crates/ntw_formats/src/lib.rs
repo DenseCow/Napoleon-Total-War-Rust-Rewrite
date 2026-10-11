@@ -31,6 +31,7 @@
 //! | [`ui_layout`] | binary UI layouts (`"VersionNNN"`) | menus, HUD, every screen |
 //! | [`font`] | `.cuf` bitmap fonts + `fontcategories.fc` | all UI text |
 //! | [`vegetation`] | `warscape_trees` -> `.spt`, `data.tree_model`, `*_compositemap.txt` | battle trees |
+//! | [`sea_waves`] | `sea\sea`, `sea\swell` animated wave-angle containers | the battle sea surface |
 //! | [`effects`] | `effects\landbattle.xml` + `effects\unit_dust_parameters.txt` | battle particles: smoke, muzzle flashes, dust |
 //! | [`projectile_fx`] | `db\projectiles_explosions`, `db\projectile_impacts` | the groups an explosion and an impact play |
 //! | [`verlet`] | `RigidModels\VerletItems\*.logic` | the standard bearer's flag cloth |
@@ -66,6 +67,7 @@ pub mod pack;
 pub mod preferences;
 pub mod projectile_fx;
 pub mod rigid_model;
+pub mod sea_waves;
 pub mod sound;
 pub mod speedtree;
 pub mod tga;

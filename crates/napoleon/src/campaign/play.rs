@@ -695,22 +695,22 @@ pub fn quick_save(sim: &mut CampaignSim) {
         warn!("Campaign script SavingGame: {e}");
     }
     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as u32);
-    let (info, data) = {
+    let saved = {
         let st = sim.host.state();
         let info = ntw_campaign::own_save::save_header(&sim.info, &st.model, &sim.human, ts, &sim.pictures);
-        let data = ntw_campaign::own_save::SaveData {
-            human: sim.human.clone(),
-            model: st.model.clone(),
+        let data = ntw_campaign::own_save::SaveDataRef {
+            human: &sim.human,
+            model: &st.model,
             rebel_faction: sim.rebel_faction,
             script_values: script_values_out(&values),
             // The scripts' restricted units (EPISODIC_RESTRICTIONS): without them a loaded game
             // offers the tutorial and Peninsular units again (the levels are in the model).
             restricted_units: st.restricted_units.iter().cloned().collect(),
         };
-        (info, data)
+        ntw_campaign::own_save::write(&info, &data)
     };
     let result = (|| -> Result<std::path::PathBuf, Box<dyn std::error::Error + Send + Sync>> {
-        let bytes = ntw_campaign::own_save::write(&info, &data)?;
+        let bytes = saved?;
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("quick_save.save");
         std::fs::write(&path, bytes)?;

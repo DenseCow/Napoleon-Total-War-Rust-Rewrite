@@ -651,6 +651,8 @@ fn the_loader_takes_the_campaign_cost_from_units_7() {
     let rules = rules_from_db(&db, "test_campaign");
     let land = &rules.units[UNIT];
     assert_eq!((land.cost, land.campaign_cost, land.unit_cap), (111, 99, 4));
+    // The director's rival score skips the original's pirates (`0x00C3FD50`), set here, not in the model.
+    assert_eq!(rules.director.no_rival_keys, ["pirates"]);
 }
 
 /// All the way through a **loaded campaign**: `read` runs `rules_from_db`, and the recruitment command
@@ -715,7 +717,7 @@ fn a_recruitment_id_repeated_across_regions_gets_a_new_id() {
     let b = id_of(&m, 78);
     assert!(b.iter().all(|&i| i.raw() != 0 && i.raw() != 500) && b[0] != b[1], "new, distinct ids: {b:?}");
     // Every item is linked to the record it was read from, renumbered ones too.
-    let src = |i: usize| ntw_sim::campaign::RecruitmentSource { port_slot: None, index: i };
+    let src = |i: usize| ntw_sim::campaign::RecruitmentSource { manager: ntw_sim::campaign::RecruitmentManager::Region, index: i };
     assert_eq!(m.world.recruitment_sources[&RecruitmentItemId(500)], src(0));
     assert_eq!((m.world.recruitment_sources[&b[0]], m.world.recruitment_sources[&b[1]]), (src(0), src(1)));
     assert_eq!(m.world.recruitment_sources.len(), 3);

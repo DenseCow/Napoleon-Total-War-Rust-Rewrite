@@ -1228,6 +1228,13 @@ deal-region, 2026-10-10, below "Region value").
   `+0x29C`, join war / break trade / break alliance `+0x2C4/+0x2C8/+0x2CC(proposer, third)` with
   caps −0.1 / −0.25 / −0.5 by the third party's relation; the rest as list 1. The region goals'
   `+0xC5` flag is `0x00CF1410` (not read by the evaluation).
+  - Ghidra pass (polish9, 2026-10-11): the {4,5,6,7}-only rule fires when the goal already weighted
+    ≥ 1 is a region goal; every other weight-0 goal then gets −1 and is left out. The list 2
+    third-party caps by relation are −0.1 same component, −0.25 allied, else −0.5. The ten deal-AI
+    functions (`0x00AA5ED0`, `0x00A36B20`, `0x00A62400`, `0x00ABB340`, `0x00CC13D0`, `0x00CC0280`,
+    `0x00CCB810`, `0x00CCB210`, `0x00D63120`, `0x00CF8400`) have V5 plates, labels and typed
+    constants: effective completeness 0–32 → 55–88. What is left needs structs (`this`, raw vtable
+    offsets, register-only variables).
   - `0x00D63120(tech)` (CONFIRMED): over the CAI world's faction list (`+0x120`, count `+0x11C`),
     `n` = entries with a technology manager (`+0x194`) that have the technology researched, `t` =
     all entries / 8 (at least 1); returns `2 × min(n, t) / t − 1` (floats).
@@ -1319,6 +1326,29 @@ deal-region, 2026-10-10, below "Region value").
   has no kind-8 intentions); a refused deal is declined where the exe may counter-offer
   (`0x00CC58C0`); the records the model does not hold (trade, payments, …) are not evaluated; the
   port-slot mapping above; the region inputs listed under "Port (worker deal-region)".
+- **Who checks the owners (CONFIRMED, polish9).** Nothing on the propose or accept path reads a
+  region's owner. The panel's Lua `Propose` `0x009BF3C0` builds the deal (`0x00BF3900`), puts the
+  demanded regions at deal `+0x10` (`0x00C1F6C0`) and the offered ones at `+0x20` (`0x00C43D60`) and
+  posts the command; the executor `0x00933CC0` only resolves each id (an unknown one aborts) and hands
+  the lists to the record's setter `0x00C4B0A0`, which replaces `+0x14` / `+0x24`. On accept
+  `0x00C18BF0` gives each demanded region to the proposer and each offered one to the recipient
+  through `0x00B58A10` (`0x00B449F0` with owner, 0, 0, 1, 0), again without an owner test. The lists
+  are correct only because their sources are: the panel's rows come from `TradeableRegions`
+  `0x009C5770` → `0x00C5C040` (the side's own regions, minus its capital and minus besieged ones), and
+  the AI's goal lists hold only each side's own regions. Not an ORIGINAL BUG (no reachable path gives
+  a wrong list); ours is kept 1:1: `propose_regions` checks no owner either, its rows come from
+  `CampaignModel::tradeable_regions`, and `deal_records_follow_the_propose_executors` asserts that
+  swapped lists are kept as given.
+- **Ghidra pass, deal-region set (polish9, 2026-10-11).** The nine functions (`0x008E2B70`,
+  `0x008E66A0`, `0x00A364B0`, `0x00A79050`, `0x00AA1E90`, `0x00C131C0`, `0x00C4D140`, `0x00C18BF0`,
+  `0x00A634D0`) have V5 plates; raw completeness 0–62 → 50–100 (what is left: the CAI, belief,
+  deal-record and AI-context objects have no struct, faction +0x938 / +0x77C lie past the typed
+  0x738-byte `CampaignFaction`). Read again, all as the model has them: `0x00A79050`'s penalty is
+  `floor((1 − share) × 6)`; `0x00C4D140`'s `max(m, 1)` is an unsigned compare; in `0x00AA1E90` only
+  state 1 SPLIT (own branch, `0x00AA1F2A`: all three constants SPLIT `+0x220`) and state 4 MERGED
+  (other branch, `0x00AA20A6`: MERGED `+0x22C`, divisor `2 − REDUCED` `+0x21C`) change the value;
+  states 0 and 3 only reach analyser 0x56 (`0x00AB8BC0`); `0x00A364B0` builds an offered region's
+  factors from campaign region `+0x28`.
 - **Resume point:** the region value's PROVISIONAL inputs: the attitude `0x00A79050`, the
   `0x00C3E0C0` (`+0x22C`) and siege tests, belief 0x52's region-group analysis (`0x00A634D0` /
   `0x00A63FD0`), the CAI `+0x1C0` list import, `+0x938` from original saves, the peace record,

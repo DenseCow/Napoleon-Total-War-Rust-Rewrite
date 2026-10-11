@@ -15,7 +15,7 @@ use ntw_data::GameDatabase;
 use ntw_formats::esf::{EsfNode, EsfRecord};
 use ntw_sim::campaign::{
     BuildingRef, CampaignUnit, Character, CharacterId, CharacterKind, ConstructionItem, Faction,
-    FactionId, Fort, FortId, ForceId, GovernmentType, MilitaryForce, RecruitmentItem, RecruitmentItemId, RecruitmentSource,
+    FactionId, Fort, FortId, ForceId, GovernmentType, MilitaryForce, RecruitmentItem, RecruitmentItemId, RecruitmentManager, RecruitmentSource,
     Region, RegionId, RegionSlot, Settlement, SlotRef, Stance, UnitId, World,
 };
 use ntw_sim::campaign::rules::DEFAULT_TAX_LEVEL;
@@ -692,7 +692,7 @@ fn read_region(rec: &EsfRecord, path: &str, check: &mut Checker<'_>) -> Result<(
                 id: slot.get_u32(2).unwrap_or(0) });
             // Port slots have their own (naval) recruitment queue.
             if let Some(m) = slot.child("REGION_RECRUITMENT_MANAGER") {
-                read_recruitment(m, &key, Some(i), &mut recruitment_queue, &mut recruitment_sources, check);
+                read_recruitment(m, &key, RecruitmentManager::Port(i), &mut recruitment_queue, &mut recruitment_sources, check);
             }
         }
     }
@@ -708,7 +708,7 @@ fn read_region(rec: &EsfRecord, path: &str, check: &mut Checker<'_>) -> Result<(
         read_construction(slot, SlotRef::Walls, &mut construction);
     }
     match rec.child("REGION_RECRUITMENT_MANAGER") {
-        Some(m) => read_recruitment(m, &key, None, &mut recruitment_queue, &mut recruitment_sources, check),
+        Some(m) => read_recruitment(m, &key, RecruitmentManager::Region, &mut recruitment_queue, &mut recruitment_sources, check),
         None => check.warnings.push(LoadWarning::RegionWithoutRecruitmentManager { region: key.clone() }),
     }
     // REGION #10 GDP, #12 town wealth, #15 town wealth growth, #19 tax exempt (CONFIRMED from the
@@ -886,13 +886,13 @@ pub(crate) fn read_construction(slot: &EsfRecord, index: SlotRef, out: &mut Vec<
 pub(crate) fn read_recruitment(
     manager: &EsfRecord,
     region: &str,
-    port_slot: Option<usize>,
+    which: RecruitmentManager,
     queue: &mut Vec<RecruitmentItem>,
     sources: &mut Vec<RecruitmentSource>,
     check: &mut Checker<'_>,
 ) {
     let Some(items) = manager.record_array("REGION_RECRUITMENT_ITEM_ARRAY") else {
-        check.warnings.push(LoadWarning::RecruitmentManagerWithoutItems { region: region.to_owned(), port_slot });
+        check.warnings.push(LoadWarning::RecruitmentManagerWithoutItems { region: region.to_owned(), manager: which });
         return;
     };
     for (index, item) in items.items.iter().enumerate() {
@@ -919,7 +919,7 @@ pub(crate) fn read_recruitment(
             // character is dropped with a warning ([`drop_dangling_recruitment_targets`]).
             target: inner.get_i32(2).or_else(|| inner.get_u32(2).map(|v| v as i32)).filter(|&v| v != 0).map(CharacterId),
         });
-        sources.push(RecruitmentSource { port_slot, index });
+        sources.push(RecruitmentSource { manager: which, index });
     }
 }
 
@@ -1073,7 +1073,7 @@ mod recruitment_tests {
         let db = GameDatabase::test_fixture();
         let mut check = Checker { db: &db, warnings: Vec::new() };
         let mut queue = Vec::new();
-        read_recruitment(&manager, "r", None, &mut queue, &mut Vec::new(), &mut check);
+        read_recruitment(&manager, "r", RecruitmentManager::Region, &mut queue, &mut Vec::new(), &mut check);
         assert_eq!(queue.iter().map(|i| (i.id.raw(), i.unit_key.as_str())).collect::<Vec<_>>(), vec![(500, "a"), (600, "b"), (0, "c")]);
         assert_eq!(check.warnings, vec![LoadWarning::RecruitmentItemWithoutId { region: "r".into(), unit: "c".into() }]);
     }
@@ -1087,14 +1087,14 @@ mod recruitment_tests {
         let db = GameDatabase::test_fixture();
         let mut check = Checker { db: &db, warnings: Vec::new() };
         let (mut queue, mut sources) = (Vec::new(), Vec::new());
-        read_recruitment(&manager, "r", None, &mut queue, &mut sources, &mut check);
-        read_recruitment(&manager, "r", Some(2), &mut queue, &mut sources, &mut check);
+        read_recruitment(&manager, "r", RecruitmentManager::Region, &mut queue, &mut sources, &mut check);
+        read_recruitment(&manager, "r", RecruitmentManager::Port(2), &mut queue, &mut sources, &mut check);
         assert!(queue.is_empty() && sources.is_empty());
         assert_eq!(
             check.warnings,
             vec![
-                LoadWarning::RecruitmentManagerWithoutItems { region: "r".into(), port_slot: None },
-                LoadWarning::RecruitmentManagerWithoutItems { region: "r".into(), port_slot: Some(2) },
+                LoadWarning::RecruitmentManagerWithoutItems { region: "r".into(), manager: RecruitmentManager::Region },
+                LoadWarning::RecruitmentManagerWithoutItems { region: "r".into(), manager: RecruitmentManager::Port(2) },
             ]
         );
         assert_eq!(check.warnings[1].to_string(), "region r: the recruitment manager of port slot 2 has no item array (read as an empty queue)");

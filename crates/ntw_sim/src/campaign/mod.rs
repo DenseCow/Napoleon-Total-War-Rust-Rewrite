@@ -33,6 +33,7 @@ pub mod commands;
 pub mod details;
 pub mod deal_value;
 pub mod diplomacy;
+pub mod director;
 pub mod economy;
 pub mod effects;
 pub mod characters;
@@ -75,9 +76,9 @@ pub use events::CampaignEvent;
 pub use ids::{CharacterId, FactionId, FortId, ForceId, RecruitmentItemId, RegionId, UnitId};
 pub use rules::{BuildingRules, BuildingTable, CampaignRules, TaxClass, UnitAutoresolve, UnitRules};
 pub use turn::{TurnState, TurnStep};
-pub use world::{SlotRef, FactionAiKeys,
+pub use world::{SlotRef, FactionAiKeys, AiArea,
     BuildingRef, CampaignModel, CampaignUnit, Character, CharacterKind, ConstructionItem, Faction,
-    GovernmentType, MilitaryForce, RecruitmentItem, RecruitmentSource, Region, RegionSlot, Settlement, Stance,
+    GovernmentType, MilitaryForce, RecruitmentItem, RecruitmentManager, RecruitmentSource, Region, RegionSlot, Settlement, Stance,
     Terrain, World,
 };
 pub use visibility::{FogState, Shroud, SightGrid};

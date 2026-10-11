@@ -70,6 +70,10 @@ pub struct GameDatabase {
     pub battle_weather_types: Table<BattleWeatherType>,
     /// `battle_climate_weather_descriptions`.
     pub battle_climate_weather: Table<BattleClimateWeather>,
+    /// `sea_surfaces` (the battle sea per wind level).
+    pub sea_surfaces: Table<SeaSurface>,
+    /// `sea_climate_details` (the battle sea per climate).
+    pub sea_climate_details: Table<SeaClimateDetail>,
     /// `fatigue_effects` (several rows per threshold).
     pub fatigue_effects: Table<FatigueEffect>,
     /// `unit_stats_land_experience_bonuses` (10 rows, one per experience level).
@@ -223,6 +227,7 @@ fn load_campaign(vfs: &Loader) -> Result<crate::campaign::CampaignTables, DataEr
         building_upgrades: load(vfs)?,
         government_relations: load(vfs)?,
         attitude_thresholds: load(vfs)?,
+        cdir_configs: load(vfs)?,
         // Only the diplomat's greeting reads them (no line → "Missing String", as the exe).
         negotiation_strings: load_optional(vfs)?,
         negotiation_override_strings: load_optional(vfs)?,
@@ -447,6 +452,9 @@ impl GameDatabase {
             effect_shot_types: load(vfs)?,
             battle_weather_types: load(vfs)?,
             battle_climate_weather: load(vfs)?,
+            // Only the battle sea reads them (no rows: it is not drawn, logged once there).
+            sea_surfaces: load_optional(vfs)?,
+            sea_climate_details: load_optional(vfs)?,
             fatigue_effects: load(vfs)?,
             unit_stats_land_experience_bonuses: load(vfs)?,
             unit_stats_naval_experience_bonuses: load(vfs)?,
@@ -912,6 +920,8 @@ impl GameDatabase {
             effect_shot_types: Table::from_rows(0, Vec::new()),
             battle_weather_types: Table::from_rows(0, Vec::new()),
             battle_climate_weather: Table::from_rows(0, Vec::new()),
+            sea_surfaces: Table::from_rows(0, Vec::new()),
+            sea_climate_details: Table::from_rows(0, Vec::new()),
             fatigue_effects: Table::from_rows(0, Vec::new()),
             unit_stats_land_experience_bonuses: Table::from_rows(0, experience_bonuses),
             unit_stats_naval_experience_bonuses: Table::from_rows(0, naval_experience_bonuses),

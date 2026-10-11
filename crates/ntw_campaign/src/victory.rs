@@ -152,3 +152,36 @@ pub fn met_at_once(esf: &EsfFile) -> Vec<String> {
     }
     out
 }
+
+/// The region keys a conditions record names (`REGION_KEYS`, one string per item).
+fn region_keys(r: &EsfRecord) -> impl Iterator<Item = &str> {
+    r.record_array("REGION_KEYS").into_iter().flat_map(|a| a.items.iter()).filter_map(|it| it.first().and_then(EsfNode::as_str))
+}
+
+/// Fills [`World::victory_regions`](ntw_sim::campaign::World::victory_regions) from a start
+/// position or save (`root` = the file's root record): for each faction, the regions its tested
+/// record names (the `FACTION`'s own, else its `CAMPAIGN_PLAYER_SETUP`'s). A start position holds
+/// only the empty default, so there a faction with options gets its [`DEFAULT_OPTION`]'s regions,
+/// as the front end gives a new campaign's human (the module notes give the evidence and its tag);
+/// [`crate::LoadedCampaign::set_human`] then keeps the human's alone.
+/// Region keys the world does not have are skipped.
+pub fn fill(root: &EsfRecord, model: &mut ntw_sim::campaign::CampaignModel) {
+    let Some(world) = root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD") else { return };
+    let region_ids: std::collections::HashMap<&str, ntw_sim::campaign::RegionId> = model.world.regions.values().map(|r| (r.key.as_str(), r.id)).collect();
+    let mut out = std::collections::BTreeMap::new();
+    for f in world.record_array("FACTION_ARRAY").into_iter().flat_map(|a| a.records()).filter(|r| r.name == "FACTION") {
+        let Some(key) = f.values().nth(1).and_then(EsfNode::as_str) else { continue };
+        let Some(id) = model.faction_by_key(key).map(|x| x.id) else { continue };
+        let tested = f.child(RECORD).or_else(|| f.child("CAMPAIGN_PLAYER_SETUP").and_then(|p| p.child(RECORD)));
+        let mut regions: std::collections::BTreeSet<_> = tested.into_iter().flat_map(region_keys).filter_map(|k| region_ids.get(k).copied()).collect();
+        if regions.is_empty()
+            && let Some(opt) = options(root, key).and_then(|o| o.into_iter().nth(DEFAULT_OPTION))
+        {
+            regions = region_keys(&opt).filter_map(|k| region_ids.get(k).copied()).collect();
+        }
+        if !regions.is_empty() {
+            out.insert(id, regions);
+        }
+    }
+    model.world.victory_regions = out;
+}

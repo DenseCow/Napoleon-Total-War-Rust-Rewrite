@@ -87,6 +87,25 @@ pub fn take<T: Column>(cell: Option<&DbValue>, field: &'static str) -> Result<T,
     cell.and_then(T::from_value).ok_or(field)
 }
 
+/// A string column as one part of a joined row key (`db_record!`'s `key = <field>: joined(..)`):
+/// an absent optional string is `""`, as the exe's row readers store it.
+#[doc(hidden)]
+pub trait KeyPart {
+    fn key_part(&self) -> &str;
+}
+
+impl KeyPart for String {
+    fn key_part(&self) -> &str {
+        self
+    }
+}
+
+impl KeyPart for Option<String> {
+    fn key_part(&self) -> &str {
+        self.as_deref().unwrap_or("")
+    }
+}
+
 /// A struct that mirrors one DB table's rows. Implemented by `db_record!`.
 pub trait DbRecord: Sized {
     /// The table name, e.g. `"units"`. The file is `db\<TABLE>_tables\<TABLE>`.
@@ -276,6 +295,55 @@ macro_rules! db_record {
                 Ok(Self {
                     $( $f: $crate::record::take::<$t>(cells.next(), stringify!($f))?, )*
                 })
+            }
+
+            fn key(&self) -> &str {
+                &self.$key
+            }
+        }
+    };
+    // A key the exe's row reader builds by joining columns (e.g. `cdir_configs`, 0x00FCD150): it is
+    // kept in the extra field `$key` (not a column), filled by `from_row`.
+    (
+        $(#[$sm:meta])*
+        pub struct $name:ident in $table:literal, key = $key:ident : joined($sep:literal $(, $part:ident)+) {
+            $(
+                $(#[$fm:meta])*
+                $f:ident : $t:ty $( => since $v:literal $( $copy:ident )? )?
+            ),* $(,)?
+        }
+    ) => {
+        $(#[$sm])*
+        #[derive(Debug, Clone, PartialEq, Default)]
+        pub struct $name {
+            $( $(#[$fm])* pub $f: $t, )*
+            #[doc = concat!("The merge key: ", $( "`", stringify!($part), "` ", )+ "joined by `", $sep, "` (not a column).")]
+            pub $key: String,
+        }
+
+        impl $crate::record::DbRecord for $name {
+            const TABLE: &'static str = $table;
+
+            fn schema() -> ::ntw_formats::db::Schema {
+                ::ntw_formats::db::Schema {
+                    fields: vec![$(
+                        ::ntw_formats::db::FieldDef {
+                            ty: <$t as $crate::record::Column>::FIELD,
+                            min_version: 0 $( + $v )?,
+                            if_absent: $crate::__db_absent!($( $( $copy )? )?),
+                        }
+                    ),*],
+                }
+            }
+
+            fn from_row(row: &[::ntw_formats::db::DbValue]) -> Result<Self, &'static str> {
+                let mut cells = row.iter();
+                let mut record = Self {
+                    $( $f: $crate::record::take::<$t>(cells.next(), stringify!($f))?, )*
+                    $key: String::new(),
+                };
+                record.$key = [$( $crate::record::KeyPart::key_part(&record.$part) ),+].join($sep);
+                Ok(record)
             }
 
             fn key(&self) -> &str {

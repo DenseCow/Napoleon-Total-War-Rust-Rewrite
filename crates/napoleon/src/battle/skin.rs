@@ -207,18 +207,28 @@ pub struct ClipSlot {
 
 impl ClipSlot {
     /// `[frame A offset, frame B offset, blend bits, 0]` for `time` seconds into the loop.
+    ///
+    /// CONFIRMED (`0x010DA030`, the anim's frame pair at a time): a looping clip of n frames runs
+    /// over its n - 1 intervals, frame a = floor(time x rate) mod (n - 1) blended with a + 1, so
+    /// the last frame, which a closed loop keys as its first pose again (every vanilla gait loop,
+    /// UNITS_TERRAIN_FIDELITY.md §1.9), meets frame 0 at the wrap instead of blending into it for
+    /// an extra frame. A one-frame clip holds its frame.
     pub fn figure(&self, time: f32) -> [u32; 4] {
-        let n = self.frames.max(1);
-        let f = (time * self.rate).rem_euclid(n as f32);
-        let a = (f.floor() as u32).min(n - 1);
-        let b = (a + 1) % n;
+        let intervals = self.frames.saturating_sub(1);
+        if intervals == 0 {
+            return [self.base, self.base, 0f32.to_bits(), 0];
+        }
+        let f = (time * self.rate).rem_euclid(intervals as f32);
+        let a = (f.floor() as u32).min(intervals - 1);
         let t = f - a as f32;
-        [self.base + a * self.bones, self.base + b * self.bones, t.to_bits(), 0]
+        [self.base + a * self.bones, self.base + (a + 1) * self.bones, t.to_bits(), 0]
     }
 
-    /// Loop length in seconds.
+    /// The clip's length in seconds, first frame to last: (n - 1) / rate, the anim's own duration
+    /// (`+0x4C`, CONFIRMED `0x010CB060`: key k sits at k / (n - 1) of it). A loop's cycle and a
+    /// one-shot's play.
     pub fn duration(&self) -> f32 {
-        self.frames as f32 / self.rate.max(1e-3)
+        self.frames.saturating_sub(1) as f32 / self.rate.max(1e-3)
     }
 
     /// Like [`Self::figure`] for a one-shot: holds the first frame before 0 and the last after
@@ -230,11 +240,6 @@ impl ClipSlot {
         let b = (a + 1).min(n - 1);
         let t = f - a as f32;
         [self.base + a * self.bones, self.base + b * self.bones, t.to_bits(), 0]
-    }
-
-    /// One-shot length in seconds (first to last frame).
-    pub fn play_length(&self) -> f32 {
-        self.frames.saturating_sub(1) as f32 / self.rate.max(1e-3)
     }
 }
 
@@ -281,15 +286,21 @@ impl BoneAtlas {
 /// `fade` is 0, or 1 + the index of the figure's [`Fade`] in the frame's fade entries.
 pub type Figure = [u32; 4];
 
+/// How many poses frozen at clip changes a figure part cross-fades out of at once (ours, a GPU
+/// stand-in for the exe's recursive blend, `view::ClipBlend`): enough for a run -> walk, which
+/// changes clip about once a model tick for 0.4 s (the walk graph entered on its fastest level,
+/// then down a level a tick as the man slows; UNITS_TERRAIN_FIDELITY.md §1.9).
+pub const FROZEN: usize = 4;
+
 /// A figure's cross-fade out of the poses frozen at its last loop-clip changes (`view::ClipBlend`,
-/// UNITS_TERRAIN_FIDELITY.md §1.9): up to two clip frames, newest first, each
-/// `[frame A, frame B, blend A->B bits, weight bits]` (weight 0 = unused); the figure's own frame
-/// has the rest of the weight. Only fading figures have one, so the per-frame upload of the
-/// figure slots stays at four words per slot.
-pub type Fade = [[u32; 4]; 2];
+/// UNITS_TERRAIN_FIDELITY.md §1.9): up to [`FROZEN`] clip frames, newest first, each
+/// `[frame A, frame B, blend A->B bits, weight bits]` (weight 0 = unused, and so are the ones
+/// after it); the figure's own frame has the rest of the weight. Only fading figures have one, so
+/// the per-frame upload of the figure slots stays at four words per slot.
+pub type Fade = [[u32; 4]; FROZEN];
 
 /// The [`Fade`] of frozen frames `frames` (each a [`ClipSlot::figure`]) at weights `keeps`.
-pub fn fade(frames: [[u32; 4]; 2], keeps: [f32; 2]) -> Fade {
+pub fn fade(frames: [[u32; 4]; FROZEN], keeps: [f32; FROZEN]) -> Fade {
     std::array::from_fn(|k| {
         let [a, b, t, _] = frames[k];
         [a, b, t, keeps[k].to_bits()]
@@ -376,10 +387,29 @@ mod tests {
     fn clip_slot_frames_loop_and_blend() {
         let s = ClipSlot { base: 100, frames: 4, bones: 10, rate: 20.0 };
         assert_eq!(s.figure(0.0)[..2], [100, 110]);
-        let f = s.figure(0.175); // frame 3.5: 3 -> 0, blend 0.5
-        assert_eq!(f[..2], [130, 100]);
+        let f = s.figure(0.125); // frame 2.5: 2 -> 3, blend 0.5
+        assert_eq!(f[..2], [120, 130]);
         assert!((f32::from_bits(f[2]) - 0.5).abs() < 1e-4);
-        assert!((s.duration() - 0.2).abs() < 1e-6);
+        // Three intervals of 0.05 s: 0.175 s is frame 0.5 of the next cycle.
+        assert_eq!(s.figure(0.175)[..2], [100, 110]);
+        assert!((s.duration() - 0.15).abs() < 1e-6);
+        let one = ClipSlot { frames: 1, ..s };
+        assert_eq!(one.figure(3.3), [100, 100, 0f32.to_bits(), 0]);
+        assert_eq!(one.duration(), 0.0);
+    }
+
+    /// gait-jitter (2026-10-11): a loop ran over n intervals, blending its last frame back into
+    /// frame 0; a closed gait loop keys the same pose at both, so every cycle held that pose for
+    /// one frame time (50 ms) and ran n / (n - 1) slow (a horse walk 1.15 s for 1.10 s). The exe
+    /// (`0x010DA030`) loops over n - 1 intervals: the last frame is reached, never blended from.
+    #[test]
+    fn a_loop_never_blends_its_last_frame_into_its_first() {
+        let s = ClipSlot { base: 0, frames: 23, bones: 1, rate: 20.0 };
+        assert!((s.duration() - 1.1).abs() < 1e-6, "horse_walk: 22 intervals at 20 frames/s");
+        for k in 0..2000 {
+            let f = s.figure(k as f32 * 0.0013);
+            assert_eq!(f[1], f[0] + 1, "time {}: frame {} -> {}", k as f32 * 0.0013, f[0], f[1]);
+        }
     }
 
     #[test]

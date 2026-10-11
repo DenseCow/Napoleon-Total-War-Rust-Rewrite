@@ -63,6 +63,7 @@ pub mod names;
 pub mod own_save;
 pub mod portraits;
 mod details;
+mod director;
 mod error;
 mod fields;
 mod obstacles;
@@ -410,10 +411,15 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
     shroud::read(esf, &mut model);
     // The campaign AI's manager / personality keys and region base values (AI_RESEARCH.md §2.3, §4).
     ai_keys::fill(root, &mut model);
+    // The regions each faction's victory conditions name (the campaign director's rival score).
+    victory::fill(root, &mut model);
     names::fill_allocators(root, &mut model);
     // The portrait allocator; reading it advances the campaign RNG once per deck, as the
     // original's loader does (CHARACTERS_FIDELITY.md §14).
     portraits::fill(root, &mut model);
+    // The campaign director: its RNG (seeded from the campaign RNG in a record older than version 2,
+    // after the portrait steps), its queued region transfers and the region-transfer counter.
+    director::fill(root, &mut model);
     // The historical characters already made and the two episodic force-success switches
     // (CHARACTERS_FIDELITY.md §7, §8).
     (model.world.historical_created, model.world.force_success_for_human) = details::model_extras(model_rec);
@@ -594,6 +600,10 @@ impl LoadedCampaign {
             // playable faction, the vanilla saves of a new campaign keep only the human's;
             // CHARACTERS_FIDELITY.md §10).
             self.model.world.shrouds.retain(|f, _| *f == id);
+            // Only the human gets the default victory option ([`victory::fill`] gives it to every
+            // faction with options, as the human is not known yet); the other factions keep the start
+            // position's empty default (CONFIRMED: the Coalition saves, victory.rs module notes).
+            self.model.world.victory_regions.retain(|f, _| *f == id);
         }
         true
     }

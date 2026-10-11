@@ -90,7 +90,8 @@ fn run_ai(
 /// - `NAPOLEON_AI_SPEED=<x>` runs the battle clock x times faster (Bevy caps a frame at 0.25 s);
 /// - `NAPOLEON_AI_SHOT=<file.png>@<seconds>` saves a screenshot at that battle time and quits;
 /// - `NAPOLEON_AI_TRACE=<seconds>` logs, every that many battle seconds, each side's centre,
-///   the closest enemy distance, units firing / in melee / running, men left and the AI's state.
+///   the closest enemy distance, units firing / in melee / running, men left and the AI's state;
+/// - `NAPOLEON_AI_EXIT_AT_END=1` quits 2 real seconds after the battle is decided.
 #[allow(clippy::too_many_arguments)] // Bevy system parameters
 fn ai_harness(
     sim: Option<Res<BattleSim>>,
@@ -98,11 +99,20 @@ fn ai_harness(
     mut time: ResMut<Time<Virtual>>,
     mut last: Local<Option<f32>>,
     mut shot: Local<Option<f32>>,
+    saved: Local<crate::screenshot::ShotOutcome>,
+    mut over_at: Local<Option<f32>>,
     real: Res<Time<Real>>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
 ) {
     let Some(sim) = sim else { return };
+    if sim.phase == crate::battle::BattlePhase::Finished && std::env::var_os("NAPOLEON_AI_EXIT_AT_END").is_some() {
+        let t = *over_at.get_or_insert(real.elapsed_secs());
+        if real.elapsed_secs() > t + 2.0 {
+            info!("Harness: battle decided, exiting (NAPOLEON_AI_EXIT_AT_END)");
+            exit.write(AppExit::Success);
+        }
+    }
     // Runs after the battle input system (Update) has set the clock speed for this frame.
     if let Some(x) = std::env::var("NAPOLEON_AI_SPEED").ok().and_then(|s| s.parse::<f32>().ok()) {
         time.set_relative_speed(x.max(0.1));
@@ -114,15 +124,17 @@ fn ai_harness(
     {
         match *shot {
             None if sim.battle.time_seconds() >= secs => {
-                commands
-                    .spawn(bevy::render::view::screenshot::Screenshot::primary_window())
-                    .observe(bevy::render::view::screenshot::save_to_disk(std::path::PathBuf::from(file)));
+                saved.request(&mut commands, std::path::PathBuf::from(file));
                 *shot = Some(real.elapsed_secs());
             }
-            Some(t) if real.elapsed_secs() > t + 1.5 => {
-                exit.write(AppExit::Success);
+            // Quit once the picture is on disk; a failed write or 15 real seconds without a
+            // picture exit with an error so a harness run does not look like a success.
+            Some(t) => {
+                if let Some(e) = saved.exit(real.elapsed_secs() - t, "NAPOLEON_AI_SHOT", std::path::Path::new(file)) {
+                    exit.write(e);
+                }
             }
-            _ => {}
+            None => {}
         }
     }
     let Some(every) = std::env::var("NAPOLEON_AI_TRACE").ok().and_then(|s| s.parse::<f32>().ok()) else { return };

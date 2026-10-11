@@ -354,18 +354,20 @@ fn redraw(
 #[derive(Resource)]
 pub struct AutoScreenshot {
     pub path: std::path::PathBuf,
+    /// Real seconds (not the battle clock, which `NAPOLEON_AI_SPEED` runs faster).
     pub secs: f32,
     pub taken: bool,
+    /// Filled once the GPU read-back arrived and the file was written (or failed to write).
+    pub outcome: crate::screenshot::ShotOutcome,
 }
 
 fn auto_screenshot(
     mut commands: Commands,
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     shot: Option<ResMut<AutoScreenshot>>,
     clicks: Option<Res<UiClicks>>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    use bevy::render::view::screenshot::{Screenshot, save_to_disk};
     let Some(mut shot) = shot else { return };
     shot.secs += time.delta_secs();
     let settle = match &clicks {
@@ -377,11 +379,16 @@ fn auto_screenshot(
         None => 4.0,
     };
     if !shot.taken && shot.secs >= settle {
-        commands.spawn(Screenshot::primary_window()).observe(save_to_disk(shot.path.clone()));
+        shot.outcome.request(&mut commands, shot.path.clone());
         shot.taken = true;
     }
-    if shot.taken && shot.secs >= settle + 1.0 {
-        exit.write(AppExit::Success);
+    // Quit once the picture is on disk (the read-back takes a few real frames; a fixed delay on the
+    // virtual clock quit too early at battle speed 8). A failed write, or 15 real seconds without a
+    // saved picture, exits with an error so a harness run does not look like a success.
+    if shot.taken
+        && let Some(e) = shot.outcome.exit(shot.secs - settle, "--screenshot", &shot.path)
+    {
+        exit.write(e);
     }
 }
 

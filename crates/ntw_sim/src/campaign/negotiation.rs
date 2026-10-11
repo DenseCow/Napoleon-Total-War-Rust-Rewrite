@@ -600,6 +600,11 @@ impl CampaignModel {
     /// (`0x00C5C730`); otherwise, when either list has a region, the record's two lists are
     /// replaced by these (`0x00C49AA0` → `0x00C4B0A0`); two empty lists leave it as it is. A region
     /// that does not exist aborts the command (the exe drops it when an id does not resolve).
+    /// Who owns the regions is not checked, here or on accept, as in the exe (CONFIRMED: neither
+    /// the panel's `Propose` `0x009BF3C0`, the executor, the record's setter `0x00C4B0A0` nor its
+    /// accept `0x00C18BF0` reads an owner): the sides' lists come from the panel's
+    /// [`Self::tradeable_regions`] rows and the AI's goal lists, which hold only each side's own
+    /// regions (AI_RESEARCH.md §4 "Who checks the owners").
     pub(crate) fn propose_regions(&mut self, clear: bool, demanded: Vec<RegionId>, offered: Vec<RegionId>) -> Result<(), super::CommandError> {
         if let Some(r) = demanded.iter().chain(&offered).find(|r| !self.world.regions.contains_key(r)) {
             return Err(super::CommandError::UnknownRegion(*r));

@@ -523,6 +523,26 @@ db_record! {
 }
 
 db_record! {
+    /// `cdir_configs` (`soso`; reader `0xFCD150`): the campaign director's tunables, per campaign
+    /// and faction. The lookup `0x00BD2A40` scans the rows in table order, first match wins, for
+    /// (campaign, faction, variable), then (campaign, `all`, variable), then (`all`, `all`, variable)
+    /// (CONFIRMED). Vanilla rows are all (`all`, `all`) plus one (`mp_eur_napoleon`, `france`).
+    /// Merge key: the row reader builds `campaign_faction_variable` (`_` = 0x013EA700, an absent
+    /// faction as `""`) into record +0x30, which the table loader 0x00FCBD50 hashes (CONFIRMED), so a
+    /// mod row for one campaign or faction leaves the other rows for that variable in place.
+    pub struct CdirConfigRecord in "cdir_configs", key = row_key: joined("_", campaign, faction, variable) {
+        /// #0 H: campaign key, or `all`.
+        campaign: String,
+        /// #1: faction key, or `all`.
+        faction: Option<String>,
+        /// #2 H: variable, e.g. `CDIR_CVN_TRANSFER_REGION_OWNERSHIP_BASE_CHANCE`.
+        variable: String,
+        /// #3: value as text (a float, or `0`/`1` for a flag).
+        value: Option<String>,
+    }
+}
+
+db_record! {
     /// `building_chains` (`sooo`, 48 rows): a building chain. Row reader `0x00E550D0`: #2 is also
     /// parsed as an integer into record +0x18 (CONFIRMED from the reader; empty → 0). The capture
     /// preview `0x00B14930` damages on occupation only the buildings whose chain has 0 there
@@ -811,6 +831,8 @@ pub struct CampaignTables {
     pub government_relations: Table<GovernmentRelationRecord>,
     /// `diplomatic_relations_attitudes`.
     pub attitude_thresholds: Table<AttitudeThresholdRecord>,
+    /// `cdir_configs`.
+    pub cdir_configs: Table<CdirConfigRecord>,
     /// `diplomacy_negotiation_strings`.
     pub negotiation_strings: Table<NegotiationStringRecord>,
     /// `diplomacy_negotiation_faction_override_strings`.
@@ -954,7 +976,40 @@ impl SlotTemplateModelRecord {
 
 #[cfg(test)]
 mod tests {
-    use super::{SLOT_FORTIFICATIONS_SUFFIX, SLOT_TYPE_SETTLEMENT, SlotTemplateModelRecord};
+    use super::{CdirConfigRecord, SLOT_FORTIFICATIONS_SUFFIX, SLOT_TYPE_SETTLEMENT, SlotTemplateModelRecord};
+    use crate::record::{DbRecord, Table};
+    use ntw_formats::db::DbValue;
+
+    fn cdir_row(campaign: &str, faction: Option<&str>, variable: &str, value: &str) -> CdirConfigRecord {
+        let row = [
+            DbValue::Str(campaign.into()),
+            DbValue::OptStr(faction.map(Into::into)),
+            DbValue::Str(variable.into()),
+            DbValue::OptStr(Some(value.into())),
+        ];
+        CdirConfigRecord::from_row(&row).unwrap()
+    }
+
+    /// `cdir_configs` merges on campaign + faction + variable (reader 0x00FCD150, loader 0x00FCBD50):
+    /// a mod row for one faction adds to the vanilla `all` row of that variable; a mod row with the
+    /// same three columns replaces it.
+    #[test]
+    fn a_cdir_config_mod_row_keeps_the_other_rows_of_its_variable() {
+        const V: &str = "CDIR_CVN_TRANSFER_REGION_OWNERSHIP_BASE_CHANCE";
+        let vanilla = || Table::from_rows(0, vec![cdir_row("all", Some("all"), V, "0.05"), cdir_row("all", None, V, "0.07")]);
+        assert_eq!(vanilla().rows()[0].row_key, format!("all_all_{V}"));
+        assert_eq!(vanilla().rows()[1].row_key, format!("all__{V}"));
+
+        let added = Table::from_rows(0, vec![cdir_row("all", Some("france"), V, "0.5")]);
+        let merged = Table::merged(vec![added, vanilla()], |_, _| false);
+        let values: Vec<_> = merged.iter().map(|r| (r.faction.as_deref(), r.value.as_deref())).collect();
+        assert_eq!(values, [(Some("france"), Some("0.5")), (Some("all"), Some("0.05")), (None, Some("0.07"))]);
+
+        let replacing = Table::from_rows(0, vec![cdir_row("all", Some("all"), V, "0.9")]);
+        let merged = Table::merged(vec![replacing, vanilla()], |_, _| false);
+        let values: Vec<_> = merged.iter().map(|r| r.value.as_deref()).collect();
+        assert_eq!(values, [Some("0.9"), Some("0.07")]);
+    }
 
     /// The two names `0x00B42B90` builds, spelled the way the shipped files are spelled: the
     /// template's own mesh, and that same name with the literal suffix and the level appended.

@@ -8,9 +8,12 @@
 //! Seams so far (one per rule function; the systems still to be moved behind seams are BACKLOG
 //! §11 "Replaceable systems" lines):
 //! - [`POPULATION_GROW`]: a region's round-end growth ([`super::population::grow`]).
+//! - [`DIRECTOR_REGION_TRANSFER`]: the campaign director's region-transfer step at a handover from
+//!   a human to an AI faction ([`super::director::region_transfer_step`]).
 
 use std::sync::Arc;
 
+use super::director::DirectorState;
 use super::mod_state::ModWrites;
 use super::population::PopulationState;
 use super::world::{CampaignModel, Region};
@@ -19,30 +22,44 @@ use crate::seam::{Seam, SeamRegistry};
 /// Seam key of a region's population growth for one round ([`PopulationGrow`]).
 pub const POPULATION_GROW: &str = "population.grow";
 
+/// Seam key of the campaign director's region-transfer step ([`DirectorRegionTransfer`]).
+pub const DIRECTOR_REGION_TRANSFER: &str = "director.region_transfer";
+
 /// A region's population after one round of growth: given the model, the region, its population
 /// and its population state, the new population and state. The original's is
 /// [`super::population::grow`]. Its mod-state changes go to the [`ModWrites`].
 pub type PopulationGrow = dyn Fn(&CampaignModel, &Region, u32, &PopulationState, &mut ModWrites) -> (u32, PopulationState) + Send + Sync;
+
+/// The campaign director's region-transfer step: given the model (the director's state in
+/// [`CampaignModel::director`]), its state after the step; a transfer it queues
+/// ([`DirectorState::pending`]) is carried out at its receiver's next turn start. The original's is
+/// [`super::director::region_transfer_step`]. Its mod-state changes go to the [`ModWrites`].
+pub type DirectorRegionTransfer = dyn Fn(&CampaignModel, &mut ModWrites) -> DirectorState + Send + Sync;
 
 /// The campaign rules in use, one field per seam (see the module docs).
 #[derive(Clone, Debug, PartialEq)]
 pub struct CampaignSeams {
     /// [`POPULATION_GROW`].
     pub population_grow: Seam<PopulationGrow>,
+    /// [`DIRECTOR_REGION_TRANSFER`].
+    pub director_region_transfer: Seam<DirectorRegionTransfer>,
 }
 
 impl Default for CampaignSeams {
     /// The original game's rules.
     fn default() -> Self {
-        CampaignSeams { population_grow: Seam::original(Arc::new(|m: &CampaignModel, r: &Region, pop: u32, s: &PopulationState, _: &mut ModWrites| super::population::grow(m, r, pop, s))) }
+        CampaignSeams {
+            population_grow: Seam::original(Arc::new(|m: &CampaignModel, r: &Region, pop: u32, s: &PopulationState, _: &mut ModWrites| super::population::grow(m, r, pop, s))),
+            director_region_transfer: Seam::original(Arc::new(|m: &CampaignModel, _: &mut ModWrites| super::director::region_transfer_step(m))),
+        }
     }
 }
 
 impl CampaignSeams {
     /// Every seam's key and implementation chain, in a fixed order (for the multiplayer handshake
     /// and the log).
-    pub fn chains(&self) -> [(&'static str, &[String]); 1] {
-        [(POPULATION_GROW, self.population_grow.chain())]
+    pub fn chains(&self) -> [(&'static str, &[String]); 2] {
+        [(POPULATION_GROW, self.population_grow.chain()), (DIRECTOR_REGION_TRANSFER, self.director_region_transfer.chain())]
     }
 }
 
@@ -53,6 +70,8 @@ impl CampaignSeams {
 pub struct CampaignRuleRegistry {
     /// [`POPULATION_GROW`] implementations.
     pub population_grow: SeamRegistry<PopulationGrow>,
+    /// [`DIRECTOR_REGION_TRANSFER`] implementations.
+    pub director_region_transfer: SeamRegistry<DirectorRegionTransfer>,
 }
 
 impl CampaignRuleRegistry {
@@ -64,6 +83,7 @@ impl CampaignRuleRegistry {
         for (seam, key) in selection {
             let applied = match seam.as_str() {
                 POPULATION_GROW => self.population_grow.apply(&mut seams.population_grow, key),
+                DIRECTOR_REGION_TRANSFER => self.director_region_transfer.apply(&mut seams.director_region_transfer, key),
                 _ => {
                     warnings.push(format!("rule seam {seam}: no such seam; {key} is ignored"));
                     continue;
@@ -131,7 +151,8 @@ mod tests {
         assert!(warnings.is_empty());
         assert_eq!(seams, CampaignSeams::default());
         assert!(seams.population_grow.is_original());
-        assert_eq!(seams.chains(), [(POPULATION_GROW, &["original".to_owned()][..])]);
+        let original = ["original".to_owned()];
+        assert_eq!(seams.chains(), [(POPULATION_GROW, &original[..]), (DIRECTOR_REGION_TRANSFER, &original[..])]);
         // The round end through the seam gives exactly what the original's function gives.
         let before = run(CampaignSeams::default(), 0);
         let after = run(CampaignSeams::default(), 1);

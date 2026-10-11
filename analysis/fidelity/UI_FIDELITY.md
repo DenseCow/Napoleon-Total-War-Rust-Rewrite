@@ -2757,3 +2757,15 @@ hears `OnAdoptChild`. `Component.Adopt` (`0x01018090`) always passes -1, and it 
 child from the stack: its parent is the running script's own component (context `+8` - 0x18). Ours
 matches: `ui_prelude.lua` binds `Component.Adopt(child)` to the running component's `Address`.
 Ours: `UiWorld::adopt(parent, child, index)`; test `adopt_inserts_at_the_index_given`.
+
+### 11.3 Ghidra documentation pass (polish7, 2026-10-10)
+
+The `ui_show_campaign_labels` gate: a static initializer at `0x004057C0` (now a function,
+`InitPrefUiShowCampaignLabels`, from the CRT init table entry `0x01307960`) registers preference
+slot 0x44 with help text "Show/hide the labels under settlements" and default true.
+`CampaignUI.ToggleLabels` at `0x009F9CA0` is now a function (`HandleToggleLabelsLuaCall`): it reads
+the slot's bool through the settings object's virtual +0x1C and writes back its negation, returning
+no Lua values. `RetrieveVisibleEnitityDetails` returns the table built under the name "Entities".
+Completeness (score / effective) before → after: `HandleRetrieveVisibleEntityDetailsLuaCall`
+0x009F4520 15 / 32 → 31 / 46; `HandleToggleLabelsLuaCall` new → 79 / 92;
+`InitPrefUiShowCampaignLabels` new → 70 / 70.

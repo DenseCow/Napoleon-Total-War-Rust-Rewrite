@@ -300,6 +300,26 @@ impl CampaignModel {
         s.visible.get(x, z) && !s.hidden.get(x, z)
     }
 
+    /// Whether `faction` sees a map position *and the four cells around it* (`0x00B7A1D0`, CONFIRMED):
+    /// true without a shroud, with the shroud off or without a sight grid (as [`Self::sees`]); else
+    /// the position's cell and its neighbours at x ± 1 and z ± 1 must each be visible and not hidden;
+    /// a cell off the grid fails. The campaign director's "no human sees it" test uses it
+    /// ([`super::director`]).
+    pub fn sees_fully(&self, faction: FactionId, p: (f32, f32)) -> bool {
+        let Some(s) = self.world.shrouds.get(&faction) else { return true };
+        if !s.active {
+            return true;
+        }
+        let Some(grid) = self.world.sight_grid else { return true };
+        let Some((x, z)) = grid.cell_of(p) else { return false };
+        let seen = |x: Option<u32>, z: Option<u32>| matches!((x, z), (Some(x), Some(z)) if s.visible.get(x, z) && !s.hidden.get(x, z));
+        seen(Some(x), Some(z))
+            && seen(x.checked_sub(1), Some(z))
+            && seen(x.checked_add(1), Some(z))
+            && seen(Some(x), z.checked_sub(1))
+            && seen(Some(x), z.checked_add(1))
+    }
+
     /// What `faction` knows about a map position, in the three states a renderer needs to tell
     /// apart: **never seen** (under the shroud, out of sight — the original paints it black),
     /// **explored** (seen at some point, not now — the original paints it dimmed), and **visible**
