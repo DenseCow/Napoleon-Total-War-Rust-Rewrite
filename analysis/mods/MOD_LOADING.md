@@ -138,6 +138,19 @@ Re-check (polish9, 2026-10-11): `VFS_PackScanMapInsert` 69 / 86, `Console_CmdAdd
 built: the VFS object (`g_WorkingDirectoryList` 0x01767D40 is really the VFS object passed as `this`
 to the `VFS_*` methods, with the folder count at +8 and the folder array at +0xC), the console
 argument stream and the scan map key; plus register-only temporaries the API cannot rename.
+Static trace (polish13, 2026-10-12; Ghidra types not applied yet, saving was blocked):
+- `DB_LoadTableFolderMergedByKey` is not generic: its only caller is `0x00E86AA0` ("units_tables", row
+  reader `0x00EDC6B0`), so it is the units_tables instance of the loader template; rows are 0xB4 bytes,
+  built by `0x00E3C510`. Loader object (0x5C): vtable +0, row vector capacity +8 / count +0xC / rows +0x10, key map
+  +0x14 (slots +0x14, slot count +0x18, 13 at start), folder path +0x2C, file list +0x3C/+0x40/+0x44, row block
+  list +0x4C/+0x50/+0x54. Key slot 0x1C: key string +0, row index +0xC, pack name +0x10. File entry 0x18: name
+  +0, pack name +0xC. VFS vtable: +0x3C list folder, +0x64 file info, +0x68 higher-priority pack, +0x84 open
+  pack file, +0x8C open loose file. Its decompilation has a broken stack frame (`this`, `pVfs` and the row
+  reader show as stack temporaries), which caps the score.
+- Pack names are 0x10-byte strings (allocator +8, whose vtable +4 frees unless the data is the shared empty
+  buffer; data +0xC), stride 0x10 in `PackNameList`; pairs are 0x20 bytes.
+- Console command map: 0x10-byte slots (name +0, handler object +0xC whose first dword is the function), hash
+  `0x0045C1A0` modulo the capacity (+4), linear probing.
 
 ## 3. DB tables (CONFIRMED, `DB_LoadTableFolderMergedByKey` 0x00e778a0)
 - Every file of `db\<table>_tables\` is read, in `VFS_ListFolderFiles` 0x01042c80 order: first the

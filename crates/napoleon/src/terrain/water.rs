@@ -203,7 +203,7 @@ impl SeaTextures {
 
     /// Whether these were decoded from `vfs` (the same open packs), so they are still the right ones.
     fn is_for(&self, vfs: &Arc<Vfs>) -> bool {
-        Weak::ptr_eq(&self.vfs, &Arc::downgrade(vfs))
+        std::ptr::eq(self.vfs.as_ptr(), Arc::as_ptr(vfs))
     }
 }
 
@@ -228,14 +228,15 @@ struct SeaSettings {
 }
 
 /// Picks the rows the exe's lookup `0x006AB800` picks: the row with the given key, or the first
-/// row when the key is not in the table (CONFIRMED, `WATER.md` §4, `0x006AB800`). `None` only when a table
+/// row when the key is not in the table (CONFIRMED, `WATER.md` §4). `None` only when a table
 /// is empty. Logs once per call (once per battle) when it falls back.
 ///
 /// A battle with **no** sea surface key is a campaign battle: its XML names none, and the original
 /// rolls a wind level for it instead (`0x00535B30`, called from `0x008C4E50`, four thresholds over
 /// one random draw; `WATER.md` §4). That roll is not ported, so such a battle gets the first row
-/// (`wind_level_0`): **PROVISIONAL** (only this no-key case; a key missing from the table is CONFIRMED above). Where a battle without a climate key takes its climate from is
-/// not traced (UNKNOWN); every shipped `sea_climate_details` row has the same deep colour.
+/// (`wind_level_0`): **PROVISIONAL** (only this no-key case; a key missing from the table is
+/// CONFIRMED above). Where a battle without a climate key takes its climate from is not traced
+/// (UNKNOWN); every shipped `sea_climate_details` row has the same deep colour.
 fn sea_settings(
     surfaces: &Table<SeaSurface>,
     climates: &Table<SeaClimateDetail>,

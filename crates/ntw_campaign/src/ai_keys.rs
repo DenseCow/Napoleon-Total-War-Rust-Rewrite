@@ -29,7 +29,7 @@
 use std::collections::BTreeMap;
 
 use ntw_formats::esf::{EsfNode, EsfRecord};
-use ntw_sim::campaign::{AiArea, CampaignModel, FactionAiKeys};
+use ntw_sim::campaign::{AiArea, CampaignModel, FactionAiKeys, FactionId};
 
 /// Reads the AI keys of one `FACTION` record: the four strings right before its first
 /// `FACTION_FLAG_AND_COLOURS` child (two strings for record versions below 15, the others then
@@ -148,16 +148,27 @@ pub fn read_ai_areas(root: &EsfRecord) -> Vec<AiArea> {
     areas
 }
 
-/// Puts the file's AI keys, region base values and map areas into the model, by the ids of the model's
-/// factions and regions with those keys (keys and values naming no faction or region are left out;
-/// the areas are kept whole).
+/// The campaign AI's factions in a startpos or save ([`World::ai_factions`](ntw_sim::campaign::World::ai_factions)):
+/// `CAI_WORLD/CAI_WORLD_FACTIONS[]` in file order (the CAI world's list +0x11C/+0x120), each by its
+/// `CAI_FACTION` #6 (the `FACTION` #8 id), kept when the model has that faction. Empty when the
+/// file has no CAI state.
+pub fn read_ai_factions(root: &EsfRecord, model: &CampaignModel) -> Vec<FactionId> {
+    let Some(cai) = root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL/CAI_INTERFACE") else { return Vec::new() };
+    crate::cai::faction_components(cai).into_iter().map(|(f, _)| FactionId(f as i32)).filter(|f| model.world.factions.contains_key(f)).collect()
+}
+
+/// Puts the file's AI keys, region base values, map areas and AI faction order into the model,
+/// by the ids of the model's factions and regions with those keys (keys and values naming no
+/// faction or region are left out; the areas are kept whole).
 pub fn fill(root: &EsfRecord, model: &mut CampaignModel) {
+    let factions = read_ai_factions(root, model);
     let keys = read_ai_keys(root);
     let values = read_region_base_values(root);
     let w = &mut model.world;
     w.ai_keys = w.factions.values().filter_map(|f| Some((f.id, keys.get(&f.key)?.clone()))).collect();
     w.region_base_values = w.regions.values().filter_map(|r| Some((r.id, *values.get(&r.key)?))).collect();
     w.ai_areas = read_ai_areas(root);
+    w.ai_factions = factions;
 }
 
 #[cfg(test)]

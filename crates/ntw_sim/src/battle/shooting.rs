@@ -64,11 +64,13 @@ pub fn effective_drill(u: &LandUnit) -> u8 {
 }
 
 impl LandUnit {
-    /// Men in one rank ([`LandUnit::formation_files`]); unknown → the start men over
+    /// Men in one rank ([`LandUnit::formation_files`]), capped at the start men as the line shape's
+    /// callers cap the files `0x00642C90` computes at the block's men (`0x0061CAB0`, `0x00646B00`,
+    /// `0x0065A410`, CONFIRMED); unknown → the start men over
     /// [`super::abilities::FORMATION_RANKS`] (PROVISIONAL).
     pub fn files(&self) -> u32 {
         if self.formation_files > 0 {
-            self.formation_files
+            self.formation_files.min(self.max_men.max(1))
         } else {
             ((self.max_men.max(1) as f32 / super::abilities::FORMATION_RANKS).ceil() as u32).max(1)
         }

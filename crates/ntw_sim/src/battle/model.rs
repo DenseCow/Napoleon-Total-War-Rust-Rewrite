@@ -126,6 +126,9 @@ pub struct LandUnit {
     /// The timed-move order the unit's soldier follows ([`TimedMove`]); `None` when it is not
     /// moving.
     pub timed_move: Option<TimedMove>,
+    /// Each man's own move in the unit's march (his lag behind his place and his speed), see
+    /// [`super::march`].
+    pub march: super::march::MenMarch,
     /// `+0x170`: melee attack (unit_stats_land col 34, W1 §12.9). Game-data input.
     pub melee_attack: i32,
     /// `+0x174`: charge bonus (col 35). Game-data input.
@@ -266,13 +269,17 @@ pub struct LandUnit {
     /// `+0x2E8`: set by the script call `set_invincible` (`BCQ_UNIT_SET_INVINCIBLE`, handler
     /// `0x005C2B80`, CONFIRMED): the hit test skips its soldiers (`0x00679B20`).
     pub invincible: bool,
-    /// The formation's width and depth in metres (formation `+0x24` and its depth; set from the unit's
-    /// files, ranks and spacing). 0 = unknown: [`super::abilities::frontage_m`] stands in.
+    /// The formation's width in metres (formation `+0x24`; set from the unit's files and spacing).
+    /// 0 = unknown: [`super::abilities::frontage_m`] stands in.
     pub formation_width: f32,
-    /// See [`LandUnit::formation_width`].
-    pub formation_depth: f32,
+    /// Metres between the formation's ranks (close order, `spacing_rank_close`). Its depth is this
+    /// times the ranks of [`LandUnit::formation_grid`] ([`LandUnit::depth`]), so the depth and the
+    /// men's places always come from the one grid. 0 = unknown:
+    /// [`super::abilities::FILE_SPACING_M`] stands in.
+    pub formation_rank_spacing: f32,
     /// Men in one rank of the formation (its files): the line shape's vfunc `+0x10`, `0x00642D00` →
-    /// `0x00642C90`: `floor((width + 0.001 − 2r) / file spacing) + 1`, capped at the men (CONFIRMED). Set
+    /// `0x00642C90`: `floor((width + 0.001 − 2r) / file spacing) + 1`, which its callers (`0x0061CAB0`,
+    /// `0x00646B00`, `0x0065A410`) cap at the men (CONFIRMED; [`LandUnit::files`] applies the cap). Set
     /// by the battle setup from the drawn block (files × spacing gives the same count). 0 = unknown:
     /// [`LandUnit::files`] falls back to the start men over [`super::abilities::FORMATION_RANKS`].
     pub formation_files: u32,
@@ -315,6 +322,7 @@ impl LandUnit {
             deceleration: f32::INFINITY,
             speed: 0.0,
             timed_move: None,
+            march: Default::default(),
             melee_attack: 0,
             charge_bonus: 0,
             armour: 0,
@@ -374,7 +382,7 @@ impl LandUnit {
             shot_options: Vec::new(),
             invincible: false,
             formation_width: 0.0,
-            formation_depth: 0.0,
+            formation_rank_spacing: 0.0,
             formation_files: 0,
             garrison: None,
             garrison_target: None,
@@ -617,6 +625,29 @@ pub fn arrival_braking(speed: f32, decel: f32) -> f32 {
     if decel.is_finite() && decel > 0.0 { (0.5 / decel * speed * speed).max(0.5) } else { 0.0 }
 }
 
+/// The slope factor of the speed multiplier `+0x1A4` for a gradient `g` (the height change over
+/// the tick's step ahead, at least 0.01 m, divided by its length): uphill `1 / (1 + 3g)`, downhill
+/// `min(1 − g, 1.5)`, level 1. CONFIRMED (`0x00819770`). The unit's move and each man's
+/// (`super::march`) use this one rule.
+pub fn slope_multiplier(gradient: f32) -> f32 {
+    if gradient > 0.0 {
+        1.0 / (gradient * 3.0 + 1.0)
+    } else if gradient < 0.0 {
+        (1.0 - gradient).min(1.5)
+    } else {
+        1.0
+    }
+}
+
+/// Whether a soldier `left` metres from his destination at `speed` m/s brakes this tick
+/// ([`arrival_braking`]; never without a finite positive deceleration `decel`). The exe stays in its
+/// stop state once there; ours keeps braking by looking one tick ahead (the braking distance
+/// shrinks as he slows, so a bare test would let go of the brake). The unit's move and each man's
+/// (`super::march`) use this one rule.
+pub fn brakes_for(left: f32, speed: f32, decel: f32) -> bool {
+    decel.is_finite() && decel > 0.0 && left <= arrival_braking(speed, decel) + speed * TICK_SECONDS
+}
+
 /// The cap on a soldier's timed-move order speed: its battle entity's run speed (record `+0x20`)
 /// times this. CONFIRMED (`0x0063F040`).
 pub const TIMED_MOVE_SPEED_CAP: f32 = 1.45;
@@ -658,7 +689,8 @@ pub fn timed_move_speed(speed: f32, cap: f32, distance: f32, time_left: f32, kee
 /// D = n·k + 2v (`0x0054C650`), where k (the unit's `+0x510` → `+0x13C`) has no static writer, which
 /// would give 2 s; the 2026-10-10 sitting's order speed rose ~0.035 a tick from 2.69 at multiplier
 /// 0.373, which d / t fits only with t ≈ 5 s (t = 2 gives +0.089 a tick). Settled by reading n and k
-/// at `0x0054C691` on a walk order.
+/// at `0x0054C691` on a walk order. The same D is how far ahead the men's places are laid out at
+/// each issue (`0x007F0790`, [`super::march`]), so D = v · t either way.
 pub const TIMED_MOVE_PLANNED_SECONDS: f32 = 5.0;
 
 /// A new timed-move order every this many ticks of a move. CONFIRMED: the unit move order's update
@@ -688,9 +720,19 @@ pub const TIMED_MOVE_REPLAN_TICKS: u32 = 11;
 /// 3.07, back to 2.69 at the re-issue; wanted 1.0..1.1 m/s). The per-soldier formation follow
 /// `0x006DC700` (every 10th call, t = 5) is not this source: it is the artillery crew following
 /// its gun (its update `0x006D7720` is in the six artillery-piece vtables, ctor `0x0068F610`).
-/// Ours moves whole units, so the unit stands for one soldier at its slot (d is the unit's
-/// distance to a point [`TIMED_MOVE_PLANNED_SECONDS`] of travel ahead); the planned time stays
-/// INFERRED there.
+/// Ours: the unit's own move is the reference soldier's (d is the unit's distance to the issue
+/// point, [`TIMED_MOVE_PLANNED_SECONDS`] of travel ahead or the path's end, [`issue_point`]), and
+/// each man follows the same order at his own speed from his own place ([`super::march`]); the
+/// planned time stays INFERRED there.
+///
+/// At the path's end (CONFIRMED, `0x00584E10`): once the issue point reaches the end (`0x007FF1C0`
+/// on the carried cursor, order `+0x3C`), descriptor word 10 (`+0x28` of the descriptor) is set
+/// for an order whose `+0x28` byte is set, as every order of ours ([`issue_point`]); the soldier's
+/// `+0x408` takes it, and `0x00659980..0x00659A00` then leaves `+0x438` bit 0 clear, so the order
+/// keeps its speed: d / t computed once on the first moving tick (`+0x440`) and floored at v. Without
+/// it a soldier would slow as d / t to his point at the end. PROVISIONAL: the bit stays clear only
+/// when the soldier's byte `+0x3A4` is set too, whose writer is not traced (not in the order block
+/// `0x00659520` copies); ours takes it as set. Ours computes the kept speed on the issue tick.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TimedMove {
     /// The order's speed `+0x40C`: the move's gait speed when it was planned.
@@ -701,29 +743,94 @@ pub struct TimedMove {
     pub elapsed: f32,
     /// Ticks since the move's last plan.
     pub ticks: u32,
+    /// The issue point reached the path's end (the unit move order's `+0x3C`): the order keeps
+    /// its speed (see the type's note) and a re-issue skips the men whose move finished.
+    pub at_end: bool,
+    /// The move's first issue (`0x0051A8FD`, `0x00584E10` with 1: every man is issued), not a
+    /// re-issue (`0x00581B81`, with 0: gated, [`super::march`]).
+    pub first: bool,
+    /// The kept order speed once computed (`+0x440`), for an order at the path's end: the unit's
+    /// own soldier's (each man keeps his own, [`super::march::ManMarch::kept`]).
+    pub kept: Option<f32>,
+    /// The enemy position the order was built to reach, for a move that follows an enemy unit (the
+    /// advance on it, the approach to a fire target); `None` for an ordered destination or a rout. A
+    /// target that moves is a new order: [`TimedMove::next`].
+    pub target: Option<(f32, f32)>,
+}
+
+/// The issue point of a unit move order: the metres from the reference soldier's place on the path
+/// to the point the cursor is carried to, and whether that point is the path's end. CONFIRMED
+/// (`0x00584E10`): the cursor is carried `ahead` metres (D = v · t) along the path by `0x007F0790`,
+/// which past the last node either extrapolates beyond the end or stops at it; its flag (computed
+/// at `0x00584E54..0x00584E7B`) stops it only for an order with no destination layout (order
+/// `+0x20` = 0) and its `+0x28` byte set. The order takes them from its descriptor's `+8` and
+/// `+0x10`: the plain move's descriptor (`0x0051A970`, also called at `0x00565576` and
+/// `0x005810FC`) has `+8` = 0 and `+0x10` = 1, and `0x0065D740` builds it when its command has no
+/// heading (`+0x40` clear); with a heading it builds `0x0051A910` (`+8` = the layout from
+/// `0x00649B30`, `+0x10` = 1), which extrapolates past the end. Ours has orders without a
+/// destination layout only, so the point stops at the end: at most `path_left`. PROVISIONAL: which
+/// of our order sources maps to which descriptor is not traced, and `0x0051A940` (`+0x10` from its
+/// caller `0x0054D9F0`) would extrapolate with a 0 there. Then `0x007FF1C0` on the carried cursor
+/// (the last segment, fraction ≥ 1) is the "at the end" flag (`+0x3C`).
+pub fn issue_point(ahead: f32, path_left: f32) -> (f32, bool) {
+    if ahead < path_left { (ahead, false) } else { (path_left.max(0.0), true) }
 }
 
 impl TimedMove {
-    /// A new order at `speed`, its point [`TIMED_MOVE_PLANNED_SECONDS`] of travel ahead.
-    pub fn plan(speed: f32) -> Self {
-        TimedMove { speed, distance: speed * TIMED_MOVE_PLANNED_SECONDS, elapsed: 0.0, ticks: 0 }
+    /// A new order at `speed` (following `target`, if any) on a path with `path_left` metres left:
+    /// its point [`TIMED_MOVE_PLANNED_SECONDS`] of travel ahead, or the path's end ([`issue_point`]).
+    /// A first issue; [`TimedMove::next`] marks a re-issue.
+    pub fn plan(speed: f32, path_left: f32, target: Option<(f32, f32)>) -> Self {
+        let (distance, at_end) = issue_point(speed * TIMED_MOVE_PLANNED_SECONDS, path_left);
+        TimedMove { speed, distance, elapsed: 0.0, ticks: 0, at_end, first: true, kept: None, target }
     }
 
-    /// The order to follow this tick for a move at `speed`: this one, or a new plan when there is
-    /// none (a new move order clears it, [`LandUnit::set_destination`]), the move's speed changed
-    /// (a new gait) or [`TIMED_MOVE_REPLAN_TICKS`] have passed.
-    pub fn next(current: Option<TimedMove>, speed: f32) -> Self {
+    /// The order to follow this tick for a move at `speed` following `target` (if any) with
+    /// `path_left` metres left: this one, or a new plan when there is none (a new move order clears
+    /// it, [`LandUnit::set_destination`]: a first issue), its target moved (a first issue, below), the
+    /// move's speed changed (a new gait) or [`TIMED_MOVE_REPLAN_TICKS`] have passed (a re-issue).
+    ///
+    /// A moved target (CONFIRMED mechanism): the exe's order never re-targets itself (`0x00581AE0`
+    /// keeps its path); a state that follows a target (update `0x0054D9F0`) re-reads the target
+    /// every tick (its object `+0x28`, vfunc `+4`) and, when that differs from the last read
+    /// (`+0x38`), builds a new unit move order (`0x0051A940` descriptor, `BuildUnitMoveOrder`
+    /// `0x0051A530`), which issues every man afresh (`0x00584E10` with 1) and restarts the issue time
+    /// `+0x2C`. PROVISIONAL: the value compared is an int whose meaning (how far the target must move
+    /// to count) is not traced; ours compares the enemy's position itself.
+    ///
+    /// PROVISIONAL: a gait change counts as a re-issue; whether the run toggle (`0x005600C0`)
+    /// rebuilds the unit move order (a first issue) is not traced.
+    pub fn next(current: Option<TimedMove>, speed: f32, path_left: f32, target: Option<(f32, f32)>) -> Self {
         match current {
+            Some(t) if t.target != target => TimedMove::plan(speed, path_left, target),
             Some(t) if t.speed == speed && t.ticks < TIMED_MOVE_REPLAN_TICKS => t,
-            _ => TimedMove::plan(speed),
+            Some(_) => TimedMove { first: false, ..TimedMove::plan(speed, path_left, target) },
+            None => TimedMove::plan(speed, path_left, target),
         }
     }
 
-    /// This tick's order speed (m/s), capped at `run_speed` × [`TIMED_MOVE_SPEED_CAP`]: d / t, not
-    /// keeping the speed (see the type's note).
-    pub fn order_speed(&self, run_speed: f32) -> f32 {
+    /// This tick's order speed (m/s) for a soldier `distance` metres from his point who has kept
+    /// `kept` (his own, for an order at the path's end), capped at `run_speed` ×
+    /// [`TIMED_MOVE_SPEED_CAP`]: d / t, kept and floored at v at the path's end (see the type's
+    /// note). The unit's own soldier and each man ([`super::march`]) use this one rule.
+    pub fn speed_for(&self, run_speed: f32, distance: f32, kept: &mut Option<f32>) -> f32 {
+        if let Some(k) = *kept {
+            return k;
+        }
         let time_left = TIMED_MOVE_PLANNED_SECONDS - self.elapsed;
-        timed_move_speed(self.speed, run_speed * TIMED_MOVE_SPEED_CAP, self.distance, time_left, false)
+        let v = timed_move_speed(self.speed, run_speed * TIMED_MOVE_SPEED_CAP, distance, time_left, self.at_end);
+        if self.at_end {
+            *kept = Some(v);
+        }
+        v
+    }
+
+    /// The unit's own soldier's order speed this tick ([`TimedMove::speed_for`]).
+    pub fn order_speed(&mut self, run_speed: f32) -> f32 {
+        let mut kept = self.kept;
+        let v = self.speed_for(run_speed, self.distance, &mut kept);
+        self.kept = kept;
+        v
     }
 
     /// After the tick's step of `covered` metres: the point is that much nearer and 0.1 s passed.
@@ -1057,6 +1164,8 @@ impl Battle {
     fn placeholder_movement(&mut self, idx: usize) {
         // Arriving reinforcements walk in before they count as on the field.
         let arriving = matches!(self.units[idx].reinforcement, Reinforcement::Arriving { .. });
+        // An inactive unit that is not arriving is destroyed or has left the field (`update_unit`)
+        // and never moves again: its men's march stays as it is (none of them is drawn).
         if !self.units[idx].active && !arriving {
             return;
         }
@@ -1069,6 +1178,8 @@ impl Battle {
             self.units[idx].running = false;
             self.units[idx].speed = 0.0;
             self.units[idx].timed_move = None;
+            // The men still behind their places walk the rest (`march`).
+            self.march_men(idx, None, None);
             return;
         };
         let dx = goal.0 - pos.0;
@@ -1077,38 +1188,32 @@ impl Battle {
         // Ground type under the unit scales its speed (`unit_movement_modifiers`, see `ground`).
         let modifier = self.ground.speed_modifier(pos.0, pos.1, self.units[idx].movement_class);
         let ground = std::sync::Arc::clone(&self.ground);
-        // The slope (`0x00819770`, CONFIRMED): the gradient `+0x1A0` is the height change over this
-        // tick's step ahead (at least 0.01 m) divided by its length; uphill the speed is multiplied by
-        // `1 / (1 + 3g)`, downhill by `min(1 − g, 1.5)`.
         // The timed-move order (`TimedMove`, the unit move order re-issued every 11 ticks): the order speed the soldier heads
-        // for before the multiplier, from the move's gait speed.
-        let timed = TimedMove::next(self.units[idx].timed_move, speed);
+        // for before the multiplier, from the move's gait speed, to a point at most the path's end.
+        // A move that follows an enemy unit (the advance, the fire-target approach) is a new order
+        // when the enemy moved (`TimedMove::next`); an ordered destination is fixed, and a rout's
+        // point moves with the unit itself.
+        let target = (!is_order && !self.units[idx].morale.is_routing_or_shattered()).then_some(goal);
+        let mut timed = TimedMove::next(self.units[idx].timed_move, speed, len, target);
         let order_speed = timed.order_speed(self.units[idx].run_speed);
+        let planned_order = timed;
         // The fatigue speed multiplier (`0x006543D0`, `FatigueEffects::speed`).
         let speed = speed * self.units[idx].fatigue_effect().speed;
         let planned = (speed * modifier * TICK_SECONDS).max(0.01);
+        // The slope (`0x00819770`, CONFIRMED, `slope_multiplier`): the gradient `+0x1A0` is the
+        // height change over this tick's step ahead (at least 0.01 m) divided by its length.
         let gradient = if len > 0.0 {
             let ahead = (pos.0 + dx / len * planned, pos.1 + dy / len * planned);
             (ground.height(ahead.0, ahead.1) - ground.height(pos.0, pos.1)) / planned
         } else {
             0.0
         };
-        let slope = if gradient > 0.0 {
-            1.0 / (gradient * 3.0 + 1.0)
-        } else if gradient < 0.0 {
-            (1.0 - gradient).min(1.5)
-        } else {
-            1.0
-        };
         // The speed multiplier (the soldier's `+0x1A4`: fatigue and ground from `0x006543D0`, then
         // the slope) scales both the speed the unit heads for and how fast it gets there.
-        let multiplier = self.units[idx].fatigue_effect().speed * modifier * slope;
+        let multiplier = self.units[idx].fatigue_effect().speed * modifier * slope_multiplier(gradient);
         let u = &self.units[idx];
-        // Braking for an ordered destination (`arrival_braking`): the wanted speed drops to 0. The
-        // exe stays in its stop state once there; ours keeps braking by looking one tick ahead (the
-        // braking distance shrinks as the unit slows, so a bare test would let go of the brake).
-        let brakes = u.deceleration.is_finite() && u.deceleration > 0.0;
-        let braking = is_order && brakes && len <= arrival_braking(u.speed, u.deceleration) + u.speed * TICK_SECONDS;
+        // Braking for an ordered destination (`brakes_for`): the wanted speed drops to 0.
+        let braking = is_order && brakes_for(len, u.speed, u.deceleration);
         let wanted = if braking { 0.0 } else { order_speed * multiplier };
         let moving = step_speed(u.speed, wanted, u.acceleration * multiplier, u.deceleration);
         let step = moving * TICK_SECONDS;
@@ -1129,6 +1234,8 @@ impl Battle {
             if d.stops_charges() {
                 u.charging = false;
             }
+            // Its men walk what is left of their lags (`march`).
+            self.march_men(idx, None, None);
             return;
         }
         let u = &mut self.units[idx];
@@ -1136,7 +1243,6 @@ impl Battle {
         // The speed is what the unit covered (the soldier's `+0x194` is measured from its move,
         // `0x007F0260`): short of `moving` when it arrives.
         u.speed = len.min(step) / TICK_SECONDS;
-        let mut timed = timed;
         timed.advance(len.min(step));
         u.timed_move = Some(timed);
         if len <= step {
@@ -1153,6 +1259,12 @@ impl Battle {
             u.moved = true;
             u.gradient = gradient;
         }
+        // Its men follow the same order, each at his own speed (`march`), laid out at the unit's
+        // facing after the step (the drawn one).
+        let dir = if len > 0.0 { (dx / len, dy / len) } else { (0.0, 0.0) };
+        let (facing, fatigue) = (self.units[idx].facing, self.units[idx].fatigue_effect().speed);
+        let unit_step = super::march::UnitStep { pos, facing, dir, len, covered: len.min(step), is_order, fatigue };
+        self.march_men(idx, Some(unit_step), Some(planned_order));
     }
 
     /// The enemy unit that unit `idx` is in melee contact with (nearest active enemy with men,
@@ -1671,6 +1783,35 @@ impl Battle {
             h.u32(u.max_men);
             h.u32(u.position.0.to_bits());
             h.u32(u.position.1.to_bits());
+            for m in &u.march.men {
+                h.u32(m.lag.to_bits());
+                h.u32(m.speed.to_bits());
+                h.u32(m.distance.to_bits());
+                h.u32(m.finished as u32);
+                h.u32(m.kept.map_or(u32::MAX, f32::to_bits));
+            }
+            h.u32(u.march.kind as u32);
+            // The men's order and the unit's own (the reference soldier's). The men keep their own
+            // kept speeds, and the order's target is the unit's: both only for the unit's own.
+            for (plan, own) in [(u.march.plan, false), (u.timed_move, true)] {
+                match plan {
+                    None => h.u32(0),
+                    Some(p) => {
+                        h.u32(1);
+                        h.u32(p.speed.to_bits());
+                        h.u32(p.distance.to_bits());
+                        h.u32(p.elapsed.to_bits());
+                        h.u32(p.ticks);
+                        h.u32(p.at_end as u32 | (p.first as u32) << 1);
+                        if own {
+                            h.u32(p.kept.map_or(u32::MAX, f32::to_bits));
+                            let (x, y) = p.target.unwrap_or((f32::NAN, f32::NAN));
+                            h.u32(x.to_bits());
+                            h.u32(y.to_bits());
+                        }
+                    }
+                }
+            }
             h.u32(u.facing.to_bits());
             h.u32(u.active as u32);
             h.u32(u.script_controlled as u32);
@@ -1944,6 +2085,19 @@ mod tests {
         assert_eq!(b.units[0].destination, None);
     }
 
+    /// The slope factor and the braking test the unit and each man share (`0x00819770`,
+    /// `arrival_braking`).
+    #[test]
+    fn slope_and_braking_rules() {
+        assert_eq!(slope_multiplier(0.0), 1.0);
+        assert!((slope_multiplier(0.5) - 0.4).abs() < 1e-6);
+        assert!((slope_multiplier(-0.2) - 1.2).abs() < 1e-6);
+        assert_eq!(slope_multiplier(-2.0), 1.5);
+        // 2 m/s with 10 m/s²: braking distance max(0.2, 0.5) = 0.5 m, plus a tick's 0.2 m.
+        assert!(brakes_for(0.7, 2.0, 10.0) && !brakes_for(0.71, 2.0, 10.0));
+        assert!(!brakes_for(0.0, 2.0, 0.0) && !brakes_for(0.0, 2.0, f32::INFINITY));
+    }
+
     #[test]
     fn timed_move_speed_catches_up_with_the_schedule() {
         let cap = 2.0 * TIMED_MOVE_SPEED_CAP; // run 2.0 m/s
@@ -2184,7 +2338,7 @@ mod tests {
         let mut orders = Vec::new();
         let mut speeds = Vec::new();
         for _ in 0..33 {
-            orders.push(b.units[0].timed_move.map_or(2.69, |t| t.order_speed(7.0)));
+            orders.push(b.units[0].timed_move.map_or(2.69, |mut t| t.order_speed(7.0)));
             b.step();
             speeds.push(b.units[0].speed);
         }
@@ -2223,7 +2377,7 @@ mod tests {
             for _ in 0..5 {
                 b.step();
             }
-            let old = b.units[0].timed_move.expect("moving");
+            let mut old = b.units[0].timed_move.expect("moving");
             assert!(old.order_speed(7.0) > 2.69 + 0.1, "the old plan is catching up: {old:?}");
             assert!(b.order_move(0, dest));
             b.step();
@@ -2518,7 +2672,7 @@ mod combatant_fatigue_tests {
         r.reinforcement = Reinforcement::Waiting;
         r.walk_speed = 1.5;
         r.formation_width = 20.0;
-        r.formation_depth = 6.0;
+        r.formation_rank_spacing = 2.0;
         b.add_unit(r);
         // Entering at the south edge, facing north.
         b.reinforcement_entries.push(((0, 1), (0.0, -500.0), std::f32::consts::FRAC_PI_2));
@@ -2538,7 +2692,7 @@ mod combatant_fatigue_tests {
         b.playable_area = Some([-100.0, -100.0, 100.0, 100.0]);
         let mut r = LandUnit::new(1, 0, 60, (0.0, -95.0));
         r.formation_width = 20.0;
-        r.formation_depth = 6.0;
+        r.formation_rank_spacing = 2.0;
         r.run_speed = 4.0;
         r.morale.behaviour = MoraleBehaviour::Routing;
         b.add_unit(r);

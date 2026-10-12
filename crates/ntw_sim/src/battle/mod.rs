@@ -14,6 +14,7 @@
 //!   from the bearer's pole bone. Display state, but a stateful `f32` integrator, so it lives in
 //!   the model crate; the reader is `ntw_formats::verlet`.
 //! - [`unit_scale`]: the unit-size option's four steps and the men it leaves a unit with.
+//! - [`march`]: each man's own timed move in his unit's march (his lag, speed and ground).
 //! - [`attributes`]: the unit attribute flags (`unit_stats_land` boolean columns).
 //! - [`strength`]: unit strength as the morale code reads it (rally test).
 //! - [`rules`]: the `kv_rules` table and C-style arithmetic helpers.
@@ -28,6 +29,7 @@ pub mod casualties;
 pub mod cloth;
 pub mod fatigue;
 pub mod garrison;
+pub mod march;
 pub mod ground;
 pub mod melee;
 pub mod missile;

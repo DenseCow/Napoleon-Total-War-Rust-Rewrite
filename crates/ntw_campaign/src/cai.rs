@@ -34,8 +34,8 @@ pub struct ManagerType {
     pub manager: Option<u32>,
 }
 
-/// Faction id → CAI component id, from `CAI_WORLD/CAI_WORLD_FACTIONS[]`.
-fn faction_components(cai: &EsfRecord) -> Vec<(u32, u32)> {
+/// Faction id → CAI component id, from `CAI_WORLD/CAI_WORLD_FACTIONS[]`, in file order.
+pub(crate) fn faction_components(cai: &EsfRecord) -> Vec<(u32, u32)> {
     let Some(a) = cai.child("CAI_WORLD").and_then(|w| w.record_array("CAI_WORLD_FACTIONS")) else { return Vec::new() };
     a.items
         .iter()

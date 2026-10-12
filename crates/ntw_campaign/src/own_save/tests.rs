@@ -182,7 +182,10 @@ fn director_victory_regions_and_ai_areas_round_trip() {
             PendingTransfer { receiver: A, region: RegionId(2), queued_owner: B },
             PendingTransfer { receiver: B, region: RegionId(5_000_000), queued_owner: A },
         ],
+        autoresolver_pairs: vec![(B, A), (A, B)],
+        xp_counters: [(A, 0), (B, u32::MAX)].into(),
     };
+    model.world.ai_factions = vec![B, A];
     model.world.victory_regions.insert(A, [RegionId(2), RegionId(5_000_000)].into());
     model.world.ai_areas = vec![
         AiArea { key: "made_up_region_1".into(), links: vec![1, 2] },

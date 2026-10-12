@@ -1288,6 +1288,13 @@ All CONFIRMED by static trace (Ghidra names applied in this round) unless tagged
     `0x00A1A300` and the ESF loaders and savers.
   - What keeps them low: engine string temporaries, unnamed shared helpers (`0x004F0800` and similar) and the
     character's vtable globals.
+  - polish13 (2026-10-12; a modal script dialog blocked saving; the manager saved these edits after it
+    closed): `0x004F0800` → `UniString::ConstructUniStringFromAnsi` (2.5 → 96.9), `0x004EF860` →
+    `AssignUniStringFromAnsiRange`, `0x004F0040` → `WidenAnsiRangeToUtf16`; `UniString` fields `dwLength`,
+    `dwCapacity`, `pPwszData`; `0x014A2F50` → `g_wszEmptyUniStringBuffer`. Widening sign-extends bytes ≥ 0x80
+    with no code-page conversion, and every empty string shares that one buffer, never freed. The CampaignCharacter
+    vtables (`0x0136A62C`, 12 slots; the +0xC8 thunk, 1; eight sub-object vtables, 3 each) are shared by the four
+    constructors and the destructor. The four constructors and `0x00A1A300` are still at 13–26 (not started).
 - **Types created:**
   - `PortraitDeck` (0x1C): pictures +0, order capacity +8, count +0xC, order +0x10, next position +0x14,
     seed +0x18.

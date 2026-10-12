@@ -586,6 +586,12 @@ pub struct World {
     /// hashed.
     #[cfg_attr(feature = "serde", serde(default))]
     pub ai_areas: Vec<AiArea>,
+    /// The campaign AI's factions in its order (`CAI_WORLD_FACTIONS`, the AI world's list
+    /// +0x11C/+0x120, in file order): the order the campaign director walks the factions in
+    /// ([`super::director`]). Empty for a file or map without them; the director then uses the
+    /// factions in id order. Static data, not hashed.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ai_factions: Vec<FactionId>,
     /// Bankrupt turns in a row of each faction (the economics object's +0x460, CONFIRMED); a faction
     /// that can pay is not listed.
     pub bankrupt_turns: BTreeMap<FactionId, u32>,

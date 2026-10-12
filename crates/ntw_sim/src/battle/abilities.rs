@@ -208,25 +208,32 @@ pub fn defence_pieces(u: &super::model::LandUnit, kind: u8) -> Vec<Defence> {
 
 impl super::model::LandUnit {
     /// The formation's width in metres: [`super::model::LandUnit::formation_width`] when known,
-    /// else the PROVISIONAL [`frontage_m`].
+    /// narrowed with the files [`super::model::LandUnit::files`] caps at the men (a block of fewer
+    /// men than its files is only as wide as its men, so they do not spread out), else the
+    /// PROVISIONAL [`frontage_m`].
     pub fn width(&self) -> f32 {
-        if self.formation_width > 0.0 { self.formation_width } else { frontage_m(self.men) }
+        if self.formation_width <= 0.0 {
+            return frontage_m(self.men);
+        }
+        if self.formation_files > 0 {
+            self.formation_width * self.files() as f32 / self.formation_files as f32
+        } else {
+            self.formation_width
+        }
     }
 
-    /// The formation's depth in metres (else the PROVISIONAL [`depth_m`]).
+    /// The formation's depth in metres: the ranks of [`super::model::LandUnit::formation_grid`] (the
+    /// one layout the men's places use) times
+    /// [`super::model::LandUnit::formation_rank_spacing`], else the PROVISIONAL [`FILE_SPACING_M`].
     pub fn depth(&self) -> f32 {
-        if self.formation_depth > 0.0 { self.formation_depth } else { depth_m() }
+        let spacing = if self.formation_rank_spacing > 0.0 { self.formation_rank_spacing } else { FILE_SPACING_M };
+        self.formation_grid().1 as f32 * spacing
     }
 }
 
 /// PROVISIONAL formation width of a unit of `men` (see [`FORMATION_RANKS`]).
 pub fn frontage_m(men: u32) -> f32 {
     (men as f32 / FORMATION_RANKS).max(1.0) * FILE_SPACING_M
-}
-
-/// PROVISIONAL formation depth (see [`FORMATION_RANKS`]).
-pub fn depth_m() -> f32 {
-    FORMATION_RANKS * FILE_SPACING_M
 }
 
 /// The 16-bit angle of a direction `(x, y)` (y = the map's z): `atan2(x, y) × 65536 / 2π`, as

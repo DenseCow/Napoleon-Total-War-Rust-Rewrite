@@ -6,6 +6,8 @@
 //! must give the same value for every faction of every campaign. The ranking power is checked against
 //! the values the original computed at the Coalition start (read in the debugger).
 
+mod common;
+
 use std::path::PathBuf;
 
 use ntw_data::GameDatabase;
@@ -181,9 +183,7 @@ fn government_relations_are_keyed_on_the_pair() {
 #[test]
 fn gdp_and_growth_match_the_vanilla_saves() {
     let dir = data_dir();
-    let ev = std::env::var_os("NTW_EVIDENCE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default().join(r"Documents\ntw-evidence\saves"));
+    let ev = common::evidence_dir();
     if !dir.is_dir() || !ev.is_dir() {
         println!("SKIP: no install at {} or no evidence saves at {}", dir.display(), ev.display());
         return;
@@ -383,9 +383,7 @@ fn set_governor(model: &mut ntw_sim::campaign::CampaignModel, region: ntw_sim::c
 #[test]
 fn recruited_unit_size_is_num_men_for_land_and_the_crew_sum_for_ships() {
     let dir = data_dir();
-    let ev = std::env::var_os("NTW_EVIDENCE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default().join(r"Documents\ntw-evidence\saves"));
+    let ev = common::evidence_dir();
     if !dir.is_dir() || !ev.is_dir() {
         println!("SKIP: no install at {} or no evidence saves at {}", dir.display(), ev.display());
         return;
@@ -451,9 +449,7 @@ fn recruited_unit_size_is_num_men_for_land_and_the_crew_sum_for_ships() {
 #[test]
 fn tax_exemption_and_governorship_hold_for_every_region_and_faction_pair() {
     let dir = data_dir();
-    let ev = std::env::var_os("NTW_EVIDENCE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default().join(r"Documents\ntw-evidence\saves"));
+    let ev = common::evidence_dir();
     if !dir.is_dir() || !ev.is_dir() {
         println!("SKIP: no install at {} or no evidence saves at {}", dir.display(), ev.display());
         return;
@@ -741,9 +737,7 @@ fn tech_availability_rule_keeps_every_start_position_state() {
 fn population_factors_and_growth_match_the_vanilla_saves() {
     use ntw_sim::campaign::population;
     let dir = data_dir();
-    let ev = std::env::var_os("NTW_EVIDENCE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default().join(r"Documents\ntw-evidence\saves"));
+    let ev = common::evidence_dir();
     if !dir.is_dir() || !ev.is_dir() {
         println!("SKIP: no install at {} or no evidence saves at {}", dir.display(), ev.display());
         return;
@@ -806,9 +800,7 @@ fn population_factors_and_growth_match_the_vanilla_saves() {
 fn recruiting_takes_no_population_in_the_vanilla_saves() {
     use ntw_sim::campaign::population::{self, RecruitmentPopulation};
     let dir = data_dir();
-    let ev = std::env::var_os("NTW_EVIDENCE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default().join(r"Documents\ntw-evidence\saves"));
+    let ev = common::evidence_dir();
     let (a, b) = (ev.join("auto_nr4_t4.save"), ev.join("orig_over_nr4_0252.save"));
     if !dir.is_dir() || !a.is_file() || !b.is_file() {
         println!("SKIP: no install at {} or no evidence saves at {}", dir.display(), ev.display());
@@ -896,9 +888,7 @@ fn faction_power_is_the_originals_at_the_coalition_start() {
 #[test]
 fn a_capture_in_the_vanilla_saves_refunds_the_queued_ships() {
     let dir = data_dir();
-    let ev = std::env::var_os("NTW_EVIDENCE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default().join(r"Documents\ntw-evidence\saves"));
+    let ev = common::evidence_dir();
     if !dir.is_dir() || !ev.is_dir() {
         println!("SKIP: no install at {} or no evidence saves at {}", dir.display(), ev.display());
         return;
@@ -948,9 +938,7 @@ fn a_capture_in_the_vanilla_saves_refunds_the_queued_ships() {
 #[test]
 fn deal_inflation_and_economy_history_round_trip() {
     let dir = data_dir();
-    let ev = std::env::var_os("NTW_EVIDENCE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default().join(r"Documents\ntw-evidence\saves"));
+    let ev = common::evidence_dir();
     if !dir.is_dir() || !ev.is_dir() {
         println!("SKIP: no install at {} or no evidence saves at {}", dir.display(), ev.display());
         return;
@@ -1087,9 +1075,7 @@ fn ai_areas_on_the_europe_start() {
 #[test]
 fn director_state_in_an_original_save() {
     let dir = data_dir();
-    let ev = std::env::var_os("NTW_EVIDENCE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default().join(r"Documents\ntw-evidence\saves"));
+    let ev = common::evidence_dir();
     let p = ev.join("orig_fr_may1811.save");
     if !dir.is_dir() || !p.is_file() {
         println!("SKIP: no install at {} or no {}", dir.display(), p.display());
@@ -1099,6 +1085,17 @@ fn director_state_in_an_original_save() {
     let source = EsfFile::open(&p).expect("esf");
     let m = ntw_campaign::read_esf(&source, &db).expect("loads").model;
     assert_eq!((m.director.rng.state, m.director.transfer_counter), (3_875_805_033, 3));
+    // The army XP desire's counters name CAI components 213, 216 and 222, each 3: the three AI
+    // factions it serves.
+    let xp: Vec<(String, u32)> = m.director.xp_counters.iter().map(|(f, &n)| (m.world.factions[f].key.clone(), n)).collect();
+    assert_eq!(xp.len(), 3);
+    assert!(xp.iter().all(|x| x.1 == 3));
+    assert!(m.director.xp_counters.keys().all(|f| m.world.ai_factions.contains(f)));
+    // Its autoresolver modifiers: components 213, 216 and 222 each beat 225 (the model faction with an
+    // empty key; 219 is the human spa_france, served by neither desire).
+    let key = |f: &ntw_sim::campaign::FactionId| m.world.factions.get(f).map_or("?", |x| x.key.as_str());
+    let pairs: Vec<(&str, &str)> = m.director.autoresolver_pairs.iter().map(|(w, l)| (key(w), key(l))).collect();
+    assert_eq!(pairs, [("spa_britain", ""), ("spa_portugal", ""), ("spa_spain", "")]);
     let mut changed = m.clone();
     changed.director.rng.state = 12_345;
     changed.director.transfer_counter = 9;
@@ -1107,4 +1104,43 @@ fn director_state_in_an_original_save() {
     let out = ntw_campaign::save::write_save(&source, &changed, "france", 1).expect("write");
     let again = ntw_campaign::read_esf(&out, &db).expect("reloads").model;
     assert_eq!(again.director, changed.director);
+}
+
+/// Every vanilla `cdir_configs` row of a variable the director reads as a float (the merged
+/// database, through the campaign rules) reads with the exe's float parser `0x004F38A0`, which
+/// needs a `.` ("10" fails and reads as 0): no shipped value relies on that failure.
+#[test]
+fn vanilla_director_floats_all_parse() {
+    use ntw_sim::campaign::director as d;
+    let dir = data_dir();
+    if !dir.is_dir() {
+        println!("SKIP: no install at {}", dir.display());
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).expect("database");
+    let rules = ntw_campaign::rules_from_db(&db, "eur_napoleon");
+    let floats = [
+        d::RIVAL_RELATION_PCT,
+        d::RIVAL_VICTORY_REGIONS_PCT,
+        d::RIVAL_PROXIMITY_PCT,
+        d::RIVAL_MINOR_FACTION_WEIGHT,
+        d::TRANSFER_BASE_CHANCE,
+        d::TRANSFER_EXTRA_CHANCE_PER_TURN,
+        d::TRANSFER_UBER_FACTION_MODIFIER,
+        d::BOOST_PERCENTAGE,
+        d::REPLENISH_FACTION_ARMY_ALLOWED,
+        d::REPLENISH_MOBILE_ARMY_ALLOWED,
+        d::REPLENISH_UNIT_ARMY_ALLOWED,
+        d::REPLENISH_ARMY_MIN_PCT,
+        d::REPLENISH_ARMY_MAX_PCT,
+        d::XP_ARMY_BASE_CHANCE,
+        d::XP_ARMY_EXTRA_CHANCE_PER_TURN,
+    ];
+    let rows: Vec<&d::CdirConfig> = rules.director.configs.iter().filter(|c| floats.contains(&c.variable.as_str())).collect();
+    for c in &rows {
+        println!("{} {} {} = {:?}", c.campaign, c.faction, c.variable, c.value);
+    }
+    assert!(!rows.is_empty());
+    let failing: Vec<_> = rows.iter().filter(|c| d::parse_cdir_float(&c.value).is_none()).map(|c| (&c.campaign, &c.faction, &c.variable, &c.value)).collect();
+    assert!(failing.is_empty(), "rows the exe reads as 0: {failing:?}");
 }

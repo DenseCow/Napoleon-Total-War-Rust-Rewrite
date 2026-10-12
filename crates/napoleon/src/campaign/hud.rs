@@ -345,7 +345,8 @@ pub struct Harness {
 /// settlement and `--campaign-ui-click id,...` clicks HUD components (one per second of real time,
 /// the clock the HUD's UI clock runs on, see `advance_ui_clock`; a
 /// `selectfort:<region key>` step selects that region's fort instead, `selectchar:<name>` one of the
-/// player's characters). `--campaign-quick-save`
+/// player's characters; a `shot:<name>` step writes a screenshot to the `--campaign-ui-proof`
+/// folder, default `target/tmp/ui_proof`). `--campaign-quick-save`
 /// writes the F5 quick save after all that (for testing our saves in the original game). All only
 /// run with `--screenshot`.
 pub fn harness(
@@ -366,15 +367,18 @@ pub fn harness(
         let mut clicks: Vec<String> = opt("--campaign-ui-click").map(|s| s.split(',').map(str::to_owned).collect()).unwrap_or_default();
         if proof {
             clicks = PROOF_STEPS.iter().map(|s| (*s).to_owned()).collect();
-            let _ = std::fs::create_dir_all(&proof_dir);
         }
         if args.iter().any(|a| a == "--campaign-browser-proof") {
             clicks.extend(BROWSER_PROOF_STEPS.iter().map(|s| (*s).to_owned()));
-            let _ = std::fs::create_dir_all(&proof_dir);
         }
         if args.iter().any(|a| a == "--campaign-capture-proof") {
             clicks.extend(CAPTURE_PROOF_STEPS.iter().map(|s| (*s).to_owned()));
-            let _ = std::fs::create_dir_all(&proof_dir);
+        }
+        // Any `shot:` step (also from `--campaign-ui-click`) writes into the proof folder.
+        if clicks.iter().any(|c| c.starts_with("shot:"))
+            && let Err(e) = std::fs::create_dir_all(&proof_dir)
+        {
+            warn!("Harness: cannot create {proof_dir}: {e}");
         }
         Harness {
             end_turns: opt("--campaign-end-turn").and_then(|s| s.parse().ok()).unwrap_or(0),

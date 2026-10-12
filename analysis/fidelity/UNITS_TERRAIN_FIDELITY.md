@@ -680,7 +680,7 @@ User report: in battle the walk -> run and run -> walk change snapped from one c
   the same way at e / Dr. So the pose at the switch keeps weight prod(1 - e_k / D) over the frames: the first frame
   still shows it whole, and it is gone once e >= D. Frame-rate dependent in the original too.
 - **Playback rate:** a locomotion clip (kind 2) advances by frame time x speed / its root speed (anim `+0x60`) x the
-  display's playback scale (`+0xB0`, below), with no clamp; a transition clip (kind 3, `WALK_TO_RUN` ...) by speed over the lerp of its
+  display's playback scale (`+0xB0`, below), with no clamp or zero guard (other kinds: "Clip advance by slot kind", below); a transition clip (kind 3, `WALK_TO_RUN` ...) by speed over the lerp of its
   from / to clips' root speeds (clamped by `0x01318048` / `0x01318060`, not read), and at its end the to-slot clip
   follows with no blend.
 - **Per-display playback scale `+0xB0` (CONFIRMED, gait-blend3 2026-10-11).** The display constructor `0x007179B0`
@@ -695,7 +695,7 @@ User report: in battle the walk -> run and run -> walk change snapped from one c
   2026-10-10: "every horse steps at the same time"). The seed's origin is UNKNOWN (no write to manager `+0x8` found in
   the traced code). Ours (`view::playback_scale`, `display_scale`, one per figure in spawn order: men, then the
   bearer): one discarded draw for `+0xD0`, then the scale, multiplied only into a moving gait loop's advance
-  (`gait_scale`: `on_levels` on a graph other than `Gait::Stand`, `on_ladder`'s loop rung and wrap test, the bearer's
+  (`loop_advance` with `LoopKind::Gait`: `on_levels` on a graph other than `Gait::Stand`, `on_ladder`'s loop rung and wrap test, the bearer's
   fallback loop off the stand), never while an action loop is shown over the gait, nor into stands or transitions; the
   seed is ours (`display_seed`, a stream of the battle seed). The rider copies the mount display's clip time, so a
   pair keeps one scale. Still not as the exe: the exe's per-soldier speeds and start times (each man's sim speed, his
@@ -810,6 +810,51 @@ User report: in battle the walk -> run and run -> walk change snapped from one c
   Checked and not a cause: rider and mount share one clip time and one advance, so the playback scale
   (`0x0078B8A0`) is applied to both alike. The once-a-second
   surge on slowed ground is in the movement, not the animation (§1.10, "Measured surge").
+- **Clip advance by slot kind (CONFIRMED, gait-infantry 2026-10-12).** The update `0x007725D0` switches on the
+  shown slot's kind (record `+4`, slot table `0x013AEBE4`) before it advances the clip time:
+  - kind 2 (`0x00772E19`..`0x00772E65`): t += speed / anim `+0x60` x display `+0xB0` x frame time, with no clamp
+    and no zero guard (a standing man on a moving graph gets rate 0);
+  - kind 4, and 0xC / 0xD through `0x007730BC`: speed / root speed, without the scale;
+  - kind 3: the transition rule above;
+  - kinds 0, 1, 0xE and 0x20 (`0x00773086`): t += frame time (rate 1, no scale);
+  - every other kind (the melee idles 0xF, 0x11, 0x17 ...): no advance in this switch (`0x00773080` jumps to
+    `0x00773237`). Where those clips advance is UNKNOWN.
+  The men's graph slot tables name the stand rung's clip: `0x0133C608` (walk graph) and `0x0133D030` (charge graph)
+  both map node 0 to `STAND` (slot 1, kind 0); the charge graph's node 2 is `CHARGE` (slot 125, kind 2). So a
+  moving graph that has dropped to its stand rung plays the stand clip at rate 1, not the walk level slowed down.
+  Ours: `view::LoopKind` (`Gait` = kind 2, `Plain` = kinds 0 / 1 / 0xE / 0x20) and `view::loop_advance`, the one
+  helper every loop calls (`on_levels`, `on_ladder`'s loop rung and wrap test, `bearer_loop`'s fallback); the rate
+  is `loop_rate` = speed / the level's read root speed, no clamp (1 only for a level with no read root speed). An
+  action loop shown over the gait advances as `Plain`. PROVISIONAL (ours): the melee idles advance at rate 1 too,
+  until their advance site is found.
+- **Infantry hitch (gait-infantry, 2026-10-12).** The user (2026-10-11) still saw a slight hitch on infantry after
+  gait-jitter (cavalry passed). Probe: release `--battle --ai off`, two line infantry units ordered to walk, run
+  (10 s), walk (16 s) and stop (26 s); one log line per figure per frame (clip, level, phase, rate, speed), ~28k
+  frames.
+  - *Unit 1, flat ground: smooth.* Rate 1.13-1.14 on the 1.27 m/s level, the phase carried across every level
+    change (gait-jitter's carry holds for men), no wrap pop beyond the clip's own data.
+  - *Unit 2, uneven ground: the hitch.* The unit speed steps at the 11-tick re-plans (§1.10) and the ground
+    multiplier steps: 17.2 s 1.406 → 1.519 m/s; 19.3-19.4 s 1.463 → 1.588 → 1.665; 20.6 s 1.593 → 1.388;
+    22.0 s 1.383 → 1.212 (multiplier step). Each step changes all 160 men's cadence in one frame, and the larger
+    ones cross the 1.27 ↔ 1.73 level midpoints, so the whole unit swaps level at once, each swap with the line's
+    0.5 s blend (the pose at the switch fading out). That is the hitch seen. The exe moves each soldier by his own
+    distance and his own ground multiplier (`+0x1A4`), so its speed steps and level swaps fall on different frames
+    per man; ours moved the unit as one. Fixed in the model: each man's own timed move (§1.10, "Each man's timed
+    move").
+  - *Walk → run:* the jog plays at about 0.46 rate while the unit accelerates; the exe does the same (kind 2, speed
+    over root speed). Not a cause.
+  - *Loop closure:* some infantry loops' last key differs from key 0 by 0.06-0.34 rad (bones not identified). The
+    exe plays loops over n − 1 intervals (`0x010DA030`) as ours does, so it shows the same pop at the wrap: data,
+    1:1, left as is.
+  - *Fixed (fidelity, not the hitch):* (1) a moving graph's stand rung played the walk level at its slowed rate;
+    it now plays the kit's stand level at rate 1 (`0x0133C608` / `0x0133D030`, `0x00773086`). (2) `loop_rate`
+    clamped to 0.25..4, which the exe does not (`0x00772E22`); removed (it bit on 6 of the ~28k probe frames).
+    (3) An action loop shown over the gait advanced at the gait rate; it now advances
+    at rate 1 (kind 0). (4) One helper, `loop_advance`, replaces the copies of the kind-2 rule
+    (`gait_scale`, `gait_clip_rate`). Tests `view::a_moving_graphs_stand_rung_plays_the_stand_and_levels_are_unclamped`,
+    `view::only_moving_gait_loops_take_the_playback_scale`, `view::the_bearers_gait_clip_plays_by_its_read_root_speed`.
+    Before / after: the movement is untouched, so unit 2's speed steps and the level swaps they cause stay as
+    measured above; the per-man fix is in §1.10, "Each man's timed move".
 
 ### 1.10 Locomotion: speed changes and the locomotion graph (CONFIRMED; gait-blend2, 2026-10-09)
 User report after §1.9: infantry smoother, **cavalry still abrupt**. Cause found: ours changed a unit's speed in one tick
@@ -1086,9 +1131,8 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
     multiplier; d shrinks by the distance covered and elapsed grows 0.1 after the speed is computed, as
     `0x00659600`. Test `walking_cavalry_in_dense_forest_walks_on_its_timed_order` (ground 0xE, mounted 0.4: every
     11-tick plan starts at 2.69, rises 0.03–0.05 a tick, peaks below the sitting's 3.07 + 0.05, no re-plan at tick
-    10, below the 2.50 m/s walk/trot switch). Still ours: one order per unit, not per soldier (the exe's d is each
-    soldier's own distance to its formation slot, which we don't model), so `TimedMove` keeps a PROVISIONAL note
-    for the per-unit d and the INFERRED t.
+    10, below the 2.50 m/s walk/trot switch). The unit's order is its reference soldier's; each man's own d is in
+    "Each man's timed move" below. `TimedMove` keeps the INFERRED t.
   - *Debugger read left (for `docs/FOR_USER.md` only if the night debugger can't reach it).* Break at `0x0054C691`
     for a walk-ordered horse and infantry and log n = (unit `+0x510`)`+0x27C`, k = `+0x13C` and the returned t
     (expect t ≈ 5). Also, for ground 6 ~0.8: on a road cell, log the soldier's `+0x19C`, `+0x10` and `+0x1A4` at
@@ -1100,6 +1144,148 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
     slowing down once a second: the original's shape (above), now on its 11-tick period. Terrain also swings it
     (walk 2.44 → 3.0 → 1.6, run up to 6.1, down to 2.7, up to 8.5) through the ground/slope multipliers and the
     6 m/s² braking, as traced in §1.4.
+- **Each man's timed move (CONFIRMED mechanism; gait-infantry, 2026-10-12).** How the exe gives each soldier of a
+  moving unit his own speed and start, traced from the unit move order:
+  - *Cursor.* Every tick the order's path cursor (`+0x34` node, `+0x38` fraction) is set to the reference soldier's
+    projection on the path (`0x00531A70` → `0x007F05F0`: a forward search over the segments, never back on the
+    same segment).
+  - *Issue* (when the order is built, `0x0051A8FD` with argument 1, and every 11 ticks, `0x00581B81` with 0; these
+    are `0x00584E10`'s only callers): v = the gait speed (`0x00565030`); (D, t) from `0x0054C650` (D = n·k + 2v,
+    t = D / v; D = 2v, t = 2 when n = 0; D = v·t always); a copy of the cursor is carried D along the path
+    (`0x007F0790`); the formation layout (engine `+0x628`, vfunc `+0x24`) lays the unit out there, one 0x24-byte
+    slot per man, and names the reference soldier (order `+0x30`; `0x00572B00` raises it to (unit
+    `+0x510`)`+0x27C` and clamps it to count − 1); then each issued man gets `0x006533E0` with his slot, the
+    heading, v and t.
+  - *Clamp at the path end.* `0x007F0790` past the last node extrapolates beyond the end unless its flag is set;
+    `0x00584E10` sets it (`0x00584E54..0x00584E7B`) only when the order's `+0x20` (from its descriptor's `+8`, the
+    destination layout) is 0 and its `+0x28` byte (descriptor `+0x10`) is set. The plain move descriptor
+    `0x0051A970` (`+8` = 0, `+0x10` = 1; also built at `0x00565576`, `0x005810FC`) is what `0x0065D740` builds
+    for a command without a heading (`+0x40` clear), so it clamps; with a heading it builds `0x0051A910` (`+8` =
+    the layout from `0x00649B30`), which extrapolates. `0x007FF1C0` on the carried cursor (last segment,
+    fraction ≥ 1) then sets order `+0x3C` (at the end), and descriptor word 10 = `+0x3C` and `+0x28`: the
+    soldier's `+0x408`, which makes `0x00659980..0x00659A00` leave `+0x438` bit 0 clear (keep speed: d / t
+    computed once on the first moving tick, `+0x440`, floored at v) when his byte `+0x3A4` is set too.
+  - *Who is issued.* Argument 1: every man. Argument 0: a man for whom `0x0063E290` is false (his timed move still
+    runs), unless he started an action this tick (`+0x224`) of a kind table `0x00811890` maps to true (1, 2, 13,
+    14, 17..20), and a finished man only when `0x00658C20` holds (his slot's order `+0x1C` = 1, written by
+    `0x008056D0` from his locomotive's result `+0x18` at the move's end) and order `+0x3C` is 0. An issued man
+    gets the timed move only when `0x005516D0` on the cursor copy is false and his slot allows it (else
+    `0x0057AC10` → soldier vfunc `+0xB8`, or `0x006527B0`).
+  - *The stop.* Nothing is issued at the reference soldier's stop. The order's done flag `+0xC` is `0x00531B70`,
+    true once `0x0063E290` holds for every soldier; until then the 11-tick re-issues go on for the men still
+    walking. The issue point reaches the end at least D − 1.1 v before the stop, so every man's point at the stop
+    is already his place at the end: d = what the reference soldier has left + his lag.
+  - *No spread.* No random generator is reachable from `0x00584E10` (to depth 5), and the issued men get it in
+    the same loop, with no delay. A man's order speed is his own d / (t − e) (`0x0063AF40`, capped at 1.45 × run),
+    his speed that times his own multiplier `+0x1A4` (ground under him, slope ahead, fatigue), stepped by
+    acceleration × multiplier and by deceleration. So men differ only by where they stand: a man on slower
+    ground falls behind, the next issue's d = D + his lag speeds him up, and his speed (and so his gait level)
+    changes on his own frames, not the unit's.
+  - *Cursor step.* After the reference soldier's install, while `+0x3C` = 0, the cursor is carried v further
+    (`0x005856F2`) when `0x00658C20` holds or his distance² is under (0.25·D)². Not modelled (see below).
+  - *t.* Still INFERRED ≈ 5 s (`TIMED_MOVE_PLANNED_SECONDS`): the 2026-10-10 sitting fits t ≈ 5.26, so k is
+    probably nonzero at runtime; the debugger read above settles it.
+  - *Ours* (`ntw_sim::battle::march`, called from `Battle::placeholder_movement`): the unit's own move is the
+    reference soldier's (`TimedMove`, its point `issue_point`: D ahead or the path's end, with `at_end`, `first`
+    and the kept speed); each man (`LandUnit::march`, `ManMarch`) keeps his lag behind his place along the unit's
+    facing, his speed, his d, `finished` and his kept speed. At an issue each man the gate passes (`reissued`)
+    gets d = the issue point's distance + his lag. After the unit's move ends the same order goes on, re-issued
+    every 11 ticks with D = 0, until every man has finished (reached his place at the end or braked to a stop for
+    it). Each tick he samples the ground and slope at his own place (laid out on the unit's facing after the
+    step) and steps with the unit's own rules (`TimedMove::speed_for`, `slope_multiplier`, `step_speed`,
+    `brakes_for`: one function each for the unit and the men). On even ground every man repeats the unit's
+    arithmetic exactly (test). The places come from one layout, `LandUnit::formation` (the grid
+    `formation_grid`: files = the front rank `LandUnit::files`, the men who fire; size `width()` × `depth()`, the
+    depth being the grid's ranks × the rank spacing `formation_rank_spacing`), computed once per tick for the men
+    still walking, and used by the model, the view's men, its standard bearer (front rank) and its charge
+    knock-downs (`man_rank` 0). The view plays a man's gait from his own speed (`view::MenDrawn`).
+  - *Layout grid (review round 2).* `0x00642C90` computes the files only (`floor((W + 0.001 − a) / b) + 1`, at
+    least 1); its callers cap them at the men (`0x0061CAB0` with its men argument, `0x00646B00` with its fifth,
+    `0x0065A410` with its argument's `+0x20`, CONFIRMED by a read in review round 3). The ranks are
+    ceil(men / files) (`0x00619E60` steps the slot counter through each rank of `files` slots, CONFIRMED). So the
+    depth and the places come from one grid: a battle file's `num_soldiers` without a width gets ranks from its
+    own men (was the stats' default ranks, so its ranks were spaced wrongly), and a front rank wider than the
+    men is capped (was off-centre). The cap lives once, in `LandUnit::files`, and `LandUnit::width` narrows the
+    width with it (`formation_width × files / formation_files`, round 3), so men of a capped block keep their file
+    pitch everywhere, not only at setup (test `the_depth_and_the_places_come_from_one_grid`). The drawn block
+    (`setup::drawn_size`: outline box, deployment spacing) keeps the old 2 m least depth, PROVISIONAL (ours, no
+    such floor is known in the exe); the model's depth (the men's rank pitch) has none. `UnitInfo.ranks` (unused) is gone. The
+    first rank's placement `0x00619EB0` alternates sides by slot parity (filled from its anchor outward); not
+    decoded, so the place within a rank, a partial rank's, the rank pitch and the anchor stay ours.
+  - *A moved target (review round 2).* A move that follows a unit (the advance, the fire-target approach) runs a
+    follow state (`0x0054D9F0`, entered at `0x0054D900`, left at `0x0054D9A0`; callback table
+    `0x0131EAB4..0x0131EAD0`) that each tick re-reads the target (object `+0x28`, vfunc `+4` with `+0x24`, `+0x2C`)
+    and compares it with an int it keeps at `+0x38`; on a change it builds a new move order (descriptor
+    `0x0051A940`, `BuildUnitMoveOrder` `0x0051A530`), i.e. a first issue `0x00584E10(1)` to every man. The first
+    build waits for its path request (`+0x30`) to reach state 3 with byte `+0x18` set. Ours: `TimedMove::next`
+    starts a new order (first) when the followed position changed, so men finished under an order at the end are
+    issued again. The compared int is not traced: PROVISIONAL, how far the target must move (ours: any change).
+  - *The follow state's order frames (review round 3, CONFIRMED by disassembly).* The three state callbacks
+    are reached through thunks `0x004F9AE0` / `0x004F9B00` / `0x004F9B20` (each `this − 0x18`, null-safe) in the
+    secondary table at `0x0131EAB4` (the sub-object at state `+0x18`). State `+8` is the unit's state stack
+    (`UnitStateStack`, `0x45C` bytes: a `0x400`-byte arena, 8 frames `{state, bytes}` at `+0x400`, count `+0x440`,
+    used `+0x444`, free `+0x448`, pending `+0x44C`, pop-allowed `+0x450`, popped `+0x451`, active index `+0x454`).
+    `PushUnitStateStackFrame` `0x00522D70` (cdecl) records a frame at arena + used and returns its memory (no
+    bounds check, never null); `0x80` is the byte size of the move-order state `BuildUnitMoveOrder` constructs in
+    it, and the null test after the push is the compiler's placement-new check, not a permission flag (an earlier
+    Ghidra comment said so; corrected). `InitializeMoveDescriptor` `0x0051A940` (thiscall, `RET 0xC`) fills the
+    20-byte descriptor: request `+0`, `g_wDefaultZeroWord` `+4` (a static initializer stores 0), 0 at `+8`, the
+    target key `+0xC`, the key source's vfunc `+0xC` flag `+0x10`. Before the first build the frames above the
+    active one are popped (`0x005359A0`); on a key change, when pop-allowed is set and the active index is below
+    count − 1, it sets popped and calls `0x0056D990(index + 1)`, which destroys the top frames (their vfunc 0 with 1)
+    and gives their bytes back; so the old child order is replaced, not stacked. The entry `0x0054D900` fills a
+    `0x54`-byte path query through the path source `+0x24` (vfunc `+4`, the owner's `+0x510` → `+0x384` entry's
+    `+0x24` float and twice `+0x2EC`) and submits it to the path finder (`0x008020B0`, ECX = state `+0x14` → `+8`
+    → `+0xB4`), keeping the request at `+0x30`. Ours has no state stack: a new order replaces the unit's
+    `TimedMove`, the same result.
+  - *The settling man (review round 2).* While a soldier's locomotive moves (`+0x118` = 1 and flags `+0x110` bit 0
+    or `+0x117` = 0), `0x006543D0` sets his entity state `+0x1B8` from his stance `+0x1D8` and move kind `+0x220`
+    (plain stances 0..3: walk 8, run 0xB, charge 0xD; stance 4: 9 / 0xC; stance 5: 0xA; `+0x114` → 0x17,
+    `+0x115` → 0x18), and the display picks his locomotion graph by that state (`0x007A7190`). `+0x220` is written
+    by `StartSoldierTimedMoveOrder` `0x00816900` from the order's `+0x38` through `0x00662E50` (other writers
+    `0x00665910` (2), `0x00665D40`, `0x00816080`, `0x008163C0`, `0x00805AC0` (0), `0x00806070` (0)). So a man
+    still moving to his place plays the locomotion of the move he was issued (walk, run or charge), not his unit's
+    mode loop: CONFIRMED; ours keeps the issued kind (`MenMarch::kind`, `march::MoveKind`) and the view plays it.
+    Whether a moving soldier starts a melee attack is not traced (the gate's action kinds, table `0x00811890`,
+    show some actions start while moving): ours starts none, PROVISIONAL.
+  - *The `+0x3A4` lead (review round 2).* `0x0080DA94` (in `0x0080BF70`) writes the locomotive's `+0x10`, not
+    soldier `+0x3A4`; no byte write of `+0x3A4` exists in `0x00500000..0x00830000`, only reads (`0x0065965D`,
+    `0x006597A5`, `0x0065998D`, all in `0x00659600`). It may be a field of the order object at soldier `+0x2CC`
+    (its `+0xD8`); not traced. The tag stays.
+  - *PROVISIONAL (ours):* the reference soldier is the block's centre and the places within a rank are the drawn
+    block (the layout vfunc and `0x00619EB0` are not traced); the lag is along the facing only; which of our order
+    sources maps to which descriptor (all ours clamp) and `0x0051A940`'s `+0x10` (from `0x0054D9F0`); the int
+    `0x0054D9F0` compares (how far a followed target must move); a moving man's melee attack; the `+0x3A4` byte
+    (keep speed) has no traced writer, ours takes it as set; the 0.25·D cursor step (`0x005856F2`/`0x00658C20`) is not
+    modelled; the gate's action-kind skip (ours has no per-man actions), the locomotive result behind
+    `0x00658C20` (ours: 1, which only matters short of the end, where no man of ours finishes), and the
+    `0x005516D0` / `0x006527B0` alternatives (ours always gives the timed move); after a braked stop short of the
+    destination (≤ 0.5 m) ours re-issues at the unit's stop, the exe's points stay at the end; a man left ahead of
+    his place at a stop stays there; a march in which no man moved over a tick after the unit's move ended ends
+    (the exe would wait); a gait change re-issues as a re-issue (whether `0x005600C0` rebuilds the order is not
+    traced).
+  - *Tests:* `march::tests::on_even_ground_every_man_keeps_his_place_and_the_unit_speed`,
+    `a_man_in_the_mud_falls_behind_and_is_caught_up_by_each_reissue` (lag levels off near 2 m instead of growing
+    0.4 m/s), `at_the_stop_each_mans_distance_is_his_lag`, `the_issue_point_stops_at_the_end_and_keeps_the_speed`,
+    `the_reissue_gate_skips_finished_men_at_the_end`, `behind_men_walk_to_their_places_after_the_unit_stops`,
+    `the_front_rank_is_the_units_files`, `a_formation_of_unknown_size_spreads_its_men`,
+    `the_state_hash_covers_the_march`, `places_and_frame_match_the_drawn_block`,
+    `the_depth_and_the_places_come_from_one_grid`, `a_moved_target_is_a_first_issue`,
+    `finished_men_follow_an_enemy_that_moves_off`;
+    `model::tests::slope_and_braking_rules`; `view::tests::men_are_drawn_where_the_model_walks_them`,
+    `a_man_walks_to_his_place_after_his_unit_stands`.
+  - *Cost* (release, 20 units × 160 men on a 64 × 64 height grid and a ground-type grid): `march_men` 0.16 ms per
+    tick for 3,200 men (~50 ns a man), within a 0.33 ms battle tick; after the fix round (gate, kept speed, one
+    layout) 0.13 ms; after round 2 (the layout once per tick, none for finished men) 0.12 ms
+    (`march::tests::march_cost`, ignored: `cargo test -p ntw_sim --release -- --ignored march_cost --nocapture`).
+  - *Hitch before / after.* Before: the §1.9 probe's unit-wide steps (all 160 men's cadence in one frame, level
+    swaps at once). After: each man's speed and multiplier are his own, so the swaps spread over the men; the
+    probe is not re-run here (in-game check in HANDOFF).
+  - *Melee idles (kinds 0xF, 0x11, 0x17), still UNKNOWN:* not in `0x007725D0`'s advance switch. The function's
+    other writes of the clip time `+0xD8` are the clip-change start (`0x00773E3C`..`0x00773F17`, the fmod carry)
+    and the end-of-clip handling (`0x00774024`..`0x007740FE`, which treats kinds 0xF, 0x16, 0x17, 0x19, 0x1A and
+    0x1D apart). Next lead: writers of display `+0xD8` outside `0x007725D0`. `view::LoopKind` keeps them at rate 1,
+    PROVISIONAL.
 ## 2. Soldier LOD (CONFIRMED values)
 Tweaks in `VariantModelManager.cpp`: `variant_lod1` 5.0, `variant_lod2` 10.0, `variant_lod3` 15.0,
 `override_variant_lod` true, `variant_lod_skip` 2. The chooser (`0x0125ED60`) with the override on: LOD 3 if

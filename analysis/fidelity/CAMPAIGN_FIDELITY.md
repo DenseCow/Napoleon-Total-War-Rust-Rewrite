@@ -898,8 +898,16 @@ construction `0x00A6CBE0(0)`; then the two single slots +0x24 / +0x20 (walls / r
   `CampaignSettlement`, `SlotConstructionItem`, `SlotSnapshotVector`; faction +0x72C labelled `pCapitalRegion`). Reconciled (polish11, 2026-10-11): the rules that read +0x72C are
   CONFIRMED (`0x00A8B5A0` region == its owner's +0x72C, used by the deal's region list `0x00C5C040`; the bankruptcy hit
   `0x008AE710`; `AddRegionToFaction` `0x008AE270` stores it when the faction has none, when the region is its +0x730
-  home region, or on its make-capital flag), so +0x72C is the capital. What stays INFERRED is that the save's capital,
-  which the model's `World::capital` reads, is the value loaded into +0x72C (the loader is not traced).
+  home region, or on its make-capital flag), so +0x72C is the capital. **Save → +0x72C (CONFIRMED, polish13,
+  2026-10-12, disassembly):** the faction loader `0x0087A190` (called after `0x0090BEB0` allocates the faction at
+  `0x0090C0A4`) checks for the optional `FORT_UPGRADE_MANAGER` block (`0x00B02530` returns that block name,
+  tested at `0x0087B1D3`; the manager goes to +0x728 at `0x0087B1F7`), then reads one i32 (−1 when the read
+  fails) at `0x0087B20C` and stores it to +0x72C at `0x0087B217`; the next i32 goes to +0x730 (home region,
+  `0x0087B23C`). After loading, `0x008E07F0` (`0x008E0816` / `0x008E0829`) turns the saved id into the region
+  through the saved-id map `0x0105AC60`. Our importer reads the capital as the i32 right after the
+  `FORT_UPGRADE_MANAGER` record (`crates/ntw_campaign/src/details.rs`, `faction_details`): the same position.
+  Difference: the exe reads the capital even when the manager block is absent, ours then sets none (BACKLOG
+  line proposed; whether any vanilla faction record lacks the block is UNKNOWN).
 
 **Flow.** A capture (after a won assault, `0x00B58560`; an undefended settlement, PROVISIONAL same variant) changes the
 owner and clears the queues (round 8), then queues a report object (`0x00885F90`, vtable `0x013574DC`; flags +0x98
@@ -1384,8 +1392,14 @@ garrison join. Round 15's read of `0x00B71FB0` (1523 bytes, the queue tick) sett
   (amount negated). Otherwise it stores the turns: `0x00C1F6D0` at `0x009BF6E7`, demanded `0x00C43D70` at
   `0x009BF6AC`. So a one-turn schedule also runs once; `deal_item_commands` maps turns 0 and 1 to `OneOffPayment`
   (test `negotiation_rows_map_to_their_appliers`). The panel note that the schedule was one of the deal's two optional
-  items (+0x20 / +0x24) was wrong. The copy from the deal's pair into the item's +0x14 / +0x18 is not located
-  (INFERRED; `0x00C11CA0` writes the item back to the deal).
+  items (+0x20 / +0x24) was wrong. **Deal → item copy (CONFIRMED, polish13, 2026-10-12, disassembly):** the
+  payment item's vtable starts at `0x01381EDC` (set by its constructor `0x00BF3C90` at `0x00BF3CA5`, amount and
+  turns zeroed); slot +0x44 (`0x01381F20` → `0x00C4AB20`) takes the deal's pair and stores the amount (pair +0x08)
+  to +0x14 at `0x00C4AB38` and the turns (pair +0x0C) to +0x18 at `0x00C4AB42`; slot 0 `0x00C11CA0` writes them
+  back. **Rule not in the model:** the same function (`0x00C4AB4E`–`0x00C4AB82`) caps a demanded one-off payment
+  (turns == 1, amount < 0) at the paying side's treasury; offered amounts and regular payments are not capped. A
+  negative treasury turns the capped amount around (a possible ORIGINAL BUG, not traced far enough to say).
+  `deal_item_commands` / `one_off_payment` do not cap (BACKLOG line proposed).
 - **Regular payments and protectorate tribute** are economy lines summed into the round settle, so the model moves
   them through `pay` / `credit` (saturating, above); `treaties::diplomacy_money` sums the lines 1:1.
 - **Callers not mapped yet** (BACKLOG): credit `0x00A06050` (mission/event reward, category 3), `0x009DB270`,
@@ -2232,7 +2246,9 @@ The difference is the **difficulty handicap**; nothing is wrong:
 
 `CDIR_INTERFACE` (campaign +0xF80) steers the campaign around the humans. Ported: its one map
 change, `CDIR_INTENTION_TRANSFER_REGION_OWNERSHIP` (ctor `0x00B93840`), behind the seam
-`director.region_transfer`. Its other desires and intentions are not.
+`director.region_transfer`. The other desires' RNG draws and rules are ported behind the seam
+`director.desires` ("Desires" below, worker director-rng 2026-10-12); the effects they hand to
+systems the model lacks stay PROVISIONAL.
 
 - **When** (`AdvanceFactionTurn` `0x008A9920`, our `TurnStep::Handover`): first the transfers queued
   for the starting faction (`0x00BA90E0`). Then, when the ending faction is human and the starting
@@ -2253,8 +2269,19 @@ change, `CDIR_INTENTION_TRANSFER_REGION_OWNERSHIP` (ctor `0x00B93840`), behind t
   writer `0x00B9B6C0`) under `CAI_INTERFACE/CAI_INTERFACE_DIRECTOR_BDI_POOL/CAI_BDI_POOL/CAI_BDI_POOL_DESIRES`.
   Values: eur start position v3, pool 4000, RNG 37138, counter 0; `orig_fr_may1811` RNG 3875805033,
   counter 3 (tests `ai_areas_on_the_europe_start`, `director_state_in_an_original_save`). Code:
-  `ntw_campaign` director.rs reads and writes the RNG, queue and counter; the modifiers and uber
-  factions (not modelled) are kept from the file. Our own save keeps `DirectorState`.
+  `ntw_campaign` director.rs reads and writes the RNG, queue, counter, autoresolver modifiers and
+  the army XP counters; the uber factions (not modelled) are kept from the file. Our own save keeps
+  `DirectorState`.
+- **Save ids** (CONFIRMED on `orig_fr_may1811.save`): the queue, the modifiers and the XP counters
+  hold CAI component ids, not faction or region indices. A faction's is the first plain value of
+  its `CAI_WORLD_FACTIONS` item, whose `CAI_FACTION` field #6 is the model faction; a region's is
+  the first plain value of its `CAI_WORLD_REGIONS` item, whose `CAI_REGION` field #10 is the region
+  key. Our importer read the queue as raw indices before; it now maps both ways and logs the
+  unmapped ids once. The XP counters are the `CAI_BDI_DESIRE_FACTION_EXPERIENCE` record whose first
+  bool is true (army; false is the navy desire), {faction id, count} written in CAI faction order.
+  may1811 (Peninsular campaign; components 213 spa_britain, 216 spa_portugal, 219 spa_france
+  (human), 222 spa_spain, 225 a faction with an empty key): XP counters {britain 3, portugal 3,
+  spain 3}; modifier pairs britain, portugal and spain each over 225.
 - **Step** (`0x00BAE0A0`): chance = `BASE_CHANCE + EXTRA_CHANCE_PER_TURN × counter` (f32, clamped to
   [0, 1]; `cdir_configs`, lookup `0x00BD2A40`, as float `0x00BD29B0`). A roll above it adds 1 to the
   counter. Otherwise the candidates are gathered (`0x00BA2B90`); with none nothing changes; else a
@@ -2307,6 +2334,72 @@ change, `CDIR_INTENTION_TRANSFER_REGION_OWNERSHIP` (ctor `0x00B93840`), behind t
   link is two-way (test `ai_areas_on_the_europe_start`). A map without them uses its regions in id
   order and `region_neighbours`.
 
+### Desires (worker director-rng 2026-10-12, static trace, CONFIRMED unless tagged)
+
+- **Pool order** (`0x00BBC880`, by score; may1811's pool holds one army desire of each): uber 11000
+  and teleport 10000 (no draws), region transfer 9000 (above), at war 8000, boost 7000, force-minimum
+  6000, unit balancer 5000, unit upgrader 4000, XP 3000, replenish 2000, trade-theatre filler 1000
+  (state 2 in the vanilla pool, which the pool skips). Ours: the rival scores once, then the ported
+  steps behind `director.desires` (`director_desires`).
+- **Served** (`0x00BB5160` / `0x00BB50D0`, used by boost, XP and replenish): not human (`0x00BB51B0`),
+  still in the game (faction +0x824), not the rebels, not the pirates (`0x00C3FD50`). Factions are
+  walked in the CAI faction list's order (`0x006E9F70` → `0x006F0690` → vt+0x14 → `0x00B2B7B0`, list
+  +0x88 = `CAI_WORLD_FACTIONS`), imported as `World::ai_factions` (a map without it: id order).
+- **RNG draws:** float range `0x00BBD6E0`, int range `0x00BBD6A0` (both on +0x60).
+- **At war** (`0x00BAC560`): for each faction `f` (not human, in the game, not rebels/pirates), each
+  `g` of f's enemy list (not human, in the game; the step has no `g == f` or rebel/pirate test on
+  `g`), each unordered pair once per step (`0x00898B20`): rebels or pirates (`g`) lose without a
+  draw; else a roll in [0, score(g) + score(f)] above score(f) makes `g` the
+  winner. (winner, loser) replaces the first entry naming the same two in either order and is
+  appended (`0x00BC5240`, list +0x34). PROVISIONAL: the autoresolver's use of the pairs
+  (`CDIR_CVN_AUTORESOLVER_MODIFIER_*`) is not modelled.
+  The enemy list (fix round, CONFIRMED by `0x00ABAFB0`): f's CAI relation belief (`0x00A74A20`, the
+  info object of ctor `0x00A44C50`) list `+0x40` (count `+0x4C`, data `+0x50`; `0x00A649A0` /
+  `0x00A649C0`), built from the CAI world's faction list (`0x00B2B7B0` → `+0x110`, count `+0x11C`,
+  data `+0x120`: `World::ai_factions`) in its order, skipping `f`: when `f` or the other is the
+  rebels (`0x00C3FE80`, `IsFactionWithoutRecord`) the other is appended (and to `+0x7C` when it is
+  the rebels); else, when the other is in the game (`+0x824` clear), f's stance record towards it
+  (`f +0x528` → `0x00B64C50`, `+0x790 → +0x10`) sorts it: 2 → `+0x2C`, 0 (war) → `+0x40`; `+0x78C` →
+  `+0x54`, `+0x788` → `+0x68`, `0x00B16570` → `+0x7C`, `0x00B5DCC0` → `+0x94`, `0x00B5DCB0` → `+0x90`.
+  So the list is `at_war(f, g)` in `ai_factions` order, ours (test
+  `the_at_war_desire_walks_a_factions_enemies_in_the_cai_order`). The save loader `0x00A39F90`
+  reads the same list in file order. PROVISIONAL: the belief is a stored copy refreshed only when
+  read while dirty; ours reads the current stances (same caveat as the rival score's relation,
+  BACKLOG §0 "Stored CAI relation belief").
+- **Boost** (`0x00BAC310`): the served factions sorted by rival score, highest first (MSVC
+  `std::sort`); the first `min(max(floor(n × PERCENTAGE), MIN), MAX)` get their `AMOUNT` (faction
+  int) credited to the treasury. No draw.
+- **XP for armies** (`0x00BAE910`): every served faction has a counter (find or insert 0,
+  `0x00BAE9AE`..`0x00BAEAA9`); chance `BASE_CHANCE + EXTRA_CHANCE_PER_TURN × counter` (lookups
+  `0x00BAECBE` / `0x00BAED13`, clamped as the transfer's), roll at `0x00BAED7A`; above it the counter
+  goes up by 1 (`0x00BAF0F1`). Else the armies with units no human sees are gathered (`0x00BA30B0` →
+  `0x00BB5270`), weighted `n² − (rank sum / n)⁴` (integer mean, kept above 0); none: nothing changes
+  (counter kept); else a roll in [0, total] (`0x00BAEE24`) picks one, each unit draws its rank's steps
+  (`0x00BA3240` → `0x00BD4A60`: (min, max) table `0x01380978` {(0,3), (0,2), (0,1) ×7, (0,0)}, chance
+  table `0x0138098C` {0.7, 0.6, 0.6, 0.5, 0.4, 0.2, 0.15, 0.1, 0.05, 0}; the first `min` steps count,
+  each other draws a roll and counts when ≤ the chance) and the counter goes to 0 (`0x00BAF0C0`).
+  PROVISIONAL: no unit experience in the model, so every rank is 0, and the steps are not applied.
+- **Replenish for armies** (`0x00BADA40`): faction / army / unit allowances from
+  `REPLENISH_UNITS_FACTION_ / MOBILE_ / UNIT_ARMY_ALLOWED` (floats of the faction or owner). Per served
+  faction with allowance ≥ 1: the units needing it (`0x00BC0800`: men < `floor(max × ARMY_MIN_PCT)`,
+  army not aboard a navy) with unit allowance ≥ 1, of its unseen armies with allowance ≥ 1
+  (`0x00BA2A00`), are listed; then list-length times while the faction allowance ≥ 1, a unit is drawn
+  (`int_range(0, len − 1)`), queued when its army's and its own allowances are ≥ 1 (all three −1) and
+  taken off the list. After every faction, each queued unit still in need (`0x00BC06E0`) draws a
+  fraction in [MIN_PCT, MAX_PCT] and gets `floor(max × fraction)` men. PROVISIONAL: the allowances'
+  carry-over and save, MAX below MIN (setter `0x008AABB0`), the navy half.
+- **Transfer garrison** (`0x00BA8400`): after a director transfer the receiver's new garrison size
+  is `int_range(a + 3, 4a + 6)`, `a` = 1 for an AI receiver (4 to 10 units). PROVISIONAL: the army is
+  not raised, and the exe skips the draw and spawn when `0x00C3B7A0` (`+0xFC` non-zero, CONFIRMED)
+  holds for the `+0x34` member of the transferred entity's `0x008CF5F0` object (`+0x12C`; what
+  those are is not traced).
+- **Config parsers** (`cdir_configs` text values): float `0x004F38A0` (a `.` is required: `"10"`
+  fails and reads as 0; `e`/`E` exponent with optional `-`, no `+`, no spaces), uint `0x004F37B0`
+  (digits only, wrapping; `all` int lookup `0x00BD2920`), int `0x004F3720` (optional `-`; faction int
+  lookup `0x00BD29F0`); faction float lookup `0x00BD2960`.
+  Every vanilla row of a float variable has a `.` (merged database, test
+  `vanilla_director_floats_all_parse`; e.g. `1.0`, `10.0`, `0.125`), so none relies on the parser's failure.
+
 ORIGINAL BUGs (fixed in ours, no toggle):
 1. `0x00A7A2E0`: the attitude mapping has branches for < 0 and > 0 but none for exactly 0, which
    falls through to 0 ("hostile") instead of the 0.5 both branches meet at. Ours gives 0.5.
@@ -2318,12 +2411,18 @@ ORIGINAL BUGs (fixed in ours, no toggle):
 4. `0x00BAE1F5`..`0x00BAE230`: the pick loop drops the front candidate while the roll is above 0,
    subtracting its weight, then takes the new front, so each candidate is picked with the previous
    one's weight (the first only on a roll of 0). Ours gives each candidate its own weight.
+5. `0x00BAEE3F`..`0x00BAEEDA` (XP desire `0x00BAE910`): the same pick loop over the armies. Ours
+   gives each army its own weight.
 
 Open (PROVISIONAL in code): the siege test is never true (no sieges in the model; BACKLOG "Sieges on
-the campaign map"); the stored relation copy above; a human's fleets at sea are not found in a sea
-area (the path grid gives sea cells no region), so a sea link never blocks; the director's other users of its RNG
-(`0x00BAC560`, `0x00BAC9C0`, `0x00BC06E0`, `0x00BD4A60`, code at `0x00BAED7A` / `0x00BAEE24`) are not
-modelled, so the sequence matches the original's only until one of them draws.
+the campaign map"); the stored relation copy above (`0x00A89E00` / `0x00ABAFB0`, not modelled); a
+human's fleets at sea are not found in a sea area (the path grid gives sea cells no region), so a sea
+link never blocks; the desires' unmodelled effects above (autoresolver pairs, XP steps, replenish
+allowances and navy half, the transfer's garrison); the teleport desire's effect
+(`CDIR_CVN_TELEPORT_GENERALS_TO_FRONT`) and the force-minimum, balancer and upgrader gathers are not
+traced, so they draw nothing in ours (the RNG caller `0x00BAC9C0` is not traced either), and the
+desire states are not read from the file. The RNG sequence matches the original's until one of
+those draws.
 
 Ghidra names (V5 write-ups in the program): `DrawDirectorRandomFloat` `0x00BBD6E0`,
 `GetCdirConfigFloat` `0x00BD29B0`, `FindCdirConfigValue` `0x00BD2A40`, `HasCaiRegionSettlement`
@@ -2338,6 +2437,18 @@ void * parameters, x87 float locals and register locals whose committed type re-
 Plates only (not renamed): `0x00B94170` / `0x00B9D6E0` (CDIR_INTERFACE load / save), `0x00B90210` /
 `0x00B9B6C0` (transfer desire load / save), `0x00FCD150` / `0x00FCBD50` (cdir_configs row reader /
 loader); `0x00B58A30`'s plate now names the handover queue applier.
+Desires: Ghidra not yet updated (names and plates for the next writer-lock batch, V5 with them):
+`StepAtWarDesire` `0x00BAC560`, `StepBoostPlayerRivalsDesire` `0x00BAC310`, `SetAutoresolverModifierPair`
+`0x00BC5240`, `StepReplenishUnitsDesire` `0x00BADA40`, `StepUnitXpUpgradeDesire` `0x00BAE910` (needs
+create_function), `IsDirectorServedFaction` `0x00BB5160`, `CollectXpUpgradeArmies` `0x00BA30B0`,
+`CollectReplenishUnits` `0x00BA2A00`, `UnitNeedsReplenish` `0x00BC0800`, `ApplyReplenishUnit`
+`0x00BC06E0`, `QueueUnitXpUpgrade` `0x00BA3240`, `DrawUnitXpSteps` `0x00BD4A60`, `SpawnTransferGarrison`
+`0x00BA8400`, `DrawDirectorRandomInt` `0x00BBD6A0`, `GetCdirConfigFactionFloat` / `Uint` / `FactionInt`
+`0x00BD2960` / `0x00BD2920` / `0x00BD29F0`, `ParseFloatStrict` / `ParseUint` / `ParseInt`
+`0x004F38A0` / `0x004F37B0` / `0x004F3720`; also `0x00BB50D0`, `0x00BB51E0`, `0x00BB5530`, `0x00BB5270`.
+Fix round: `BuildCaiRelationBelief` `0x00ABAFB0`, `GetCaiRelationBelief` `0x00A74A20`,
+`CaiRelationBeliefInfo_ctor` `0x00A44C50`, `GetCaiWorld` `0x00B2B7B0`, `GetCaiWorldFactionList` `0x0047B520`,
+`PtrVectorPushBack` `0x00483D40`.
 
 ## Resolved / open
 | question | answer | tag | code |

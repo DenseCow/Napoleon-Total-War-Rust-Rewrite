@@ -1,8 +1,9 @@
 //! The campaign director (`CDIR_INTERFACE`, campaign +0xF80): the original's background rules that
-//! steer the campaign around the human players. Modelled so far: its one action that changes the
-//! map, `CDIR_INTENTION_TRANSFER_REGION_OWNERSHIP` (`0x00B93840`): a minor faction's region far from
-//! any human's eyes is handed to a major AI power at war with it, the garrison destroyed. Its other
-//! desires are not modelled (CAMPAIGN_FIDELITY.md §Campaign director).
+//! steer the campaign around the human players. Its one action that changes the map is
+//! `CDIR_INTENTION_TRANSFER_REGION_OWNERSHIP` (`0x00B93840`): a minor faction's region far from any
+//! human's eyes is handed to a major AI power at war with it, the garrison destroyed. Its other
+//! desires (at war, boost, XP, replenish; [`director_desires`]) draw from the same RNG, so their
+//! draws are ported even where their effect is not (CAMPAIGN_FIDELITY.md §Campaign director).
 //!
 //! ## When it runs (CONFIRMED, `AdvanceFactionTurn` `0x008A9920`)
 //! At each turn handover, after the starting faction's turn start, [`CampaignModel::director_handover`]
@@ -13,9 +14,10 @@
 //!    leaves the queue either way;
 //! 2. when the ending faction is human and the starting one is not (`0x00BC6DF0`), the director's
 //!    pool runs (`0x00BA9220` via `0x008F1F40`, loop `0x00BBC880`): the beliefs (each faction's
-//!    rival score, [`rival_score`]) are refreshed, then the desires; the region-transfer desire takes
-//!    one step ([`region_transfer_step`], `0x00BAE0A0`), through the seam
-//!    [`super::seams::DIRECTOR_REGION_TRANSFER`].
+//!    rival score, [`rival_score`]) are refreshed, then the desires in score order; the
+//!    region-transfer desire takes one step ([`region_transfer_step`], `0x00BAE0A0`) through the
+//!    seam [`super::seams::DIRECTOR_REGION_TRANSFER`], then the others ([`director_desires`])
+//!    through [`super::seams::DIRECTOR_DESIRES`].
 //!
 //! ## The desire step (`0x00BAE0A0`, CONFIRMED)
 //! The chance is `BASE_CHANCE + EXTRA_CHANCE_PER_TURN × counter` (f32, clamped to [0, 1]; the counter
@@ -30,15 +32,16 @@
 //! imported as [`super::World::ai_areas`]. In the Europe start position they differ from the map's
 //! region neighbours (`regions.esf` connectivity): 52 of the 72 land regions have the same set,
 //! 18 the same order, and seas link to land (test `ai_areas_on_the_europe_start`). A map without them (a custom map) uses its regions in
-//! id order with [`super::World::region_neighbours`].
+//! id order with [`super::World::region_neighbours`]. The factions are walked in the CAI world's
+//! order ([`super::World::ai_factions`]; a map without it uses faction id order).
 //!
 //! Evidence tags: CONFIRMED unless marked. PROVISIONAL: a human's fleets in a sea area are not
 //! seen by the transferable test ([`human_inside`]); its siege test is never true (no sieges in
 //! the model, [`transferable_at`]); the relation is not the AI's stored copy after a deal proposal
-//! ([`rival_score`]); the director's other desires and intentions
-//! draw from the same RNG (`0x00BBD6E0` is also called by `0x00BAC560`, `0x00BAC9C0`,
-//! `0x00BC06E0`, `0x00BD4A60` and code at `0x00BAED7A`) and are not modelled, so the RNG's
-//! sequence matches the original's only until one of them draws.
+//! ([`rival_score`]); the effects the model has no system for (the autoresolver modifiers, unit
+//! experience, the transfer's new army, the teleport desire) and the desires whose gathers are not
+//! traced ([`director_desires`]), so the RNG's sequence matches the original's only until one of
+//! those draws.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -73,6 +76,105 @@ pub const TRANSFER_EXTRA_CHANCE_PER_TURN: &str = "CDIR_CVN_TRANSFER_REGION_OWNER
 pub const TRANSFER_UBER_FACTION_MODIFIER: &str = "CDIR_CVN_TRANSFER_REGION_OWNERSHIP_UBER_FACTION_MODIFIER";
 /// `CDIR_CVN_UBER_FACTION`: the flag that puts a faction on the director's uber list (`0x00BAE300`).
 pub const UBER_FACTION: &str = "CDIR_CVN_UBER_FACTION";
+/// `CDIR_CVN_BOOST_PLAYER_RIVALS_PERCENTAGE` (cv 0x28, float).
+pub const BOOST_PERCENTAGE: &str = "CDIR_CVN_BOOST_PLAYER_RIVALS_PERCENTAGE";
+/// `CDIR_CVN_BOOST_PLAYER_RIVALS_MIN` (cv 0x29, unsigned).
+pub const BOOST_MIN: &str = "CDIR_CVN_BOOST_PLAYER_RIVALS_MIN";
+/// `CDIR_CVN_BOOST_PLAYER_RIVALS_MAX` (cv 0x2A, unsigned).
+pub const BOOST_MAX: &str = "CDIR_CVN_BOOST_PLAYER_RIVALS_MAX";
+/// `CDIR_CVN_BOOST_PLAYER_RIVALS_AMOUNT` (cv 0x2B, a faction's signed int).
+pub const BOOST_AMOUNT: &str = "CDIR_CVN_BOOST_PLAYER_RIVALS_AMOUNT";
+/// `CDIR_CVN_REPLENISH_UNITS_FACTION_ARMY_ALLOWED` (cv 0x36, a faction's float).
+pub const REPLENISH_FACTION_ARMY_ALLOWED: &str = "CDIR_CVN_REPLENISH_UNITS_FACTION_ARMY_ALLOWED";
+/// `CDIR_CVN_REPLENISH_UNITS_MOBILE_ARMY_ALLOWED` (cv 0x38, a faction's float).
+pub const REPLENISH_MOBILE_ARMY_ALLOWED: &str = "CDIR_CVN_REPLENISH_UNITS_MOBILE_ARMY_ALLOWED";
+/// `CDIR_CVN_REPLENISH_UNITS_UNIT_ARMY_ALLOWED` (cv 0x3A, a faction's float).
+pub const REPLENISH_UNIT_ARMY_ALLOWED: &str = "CDIR_CVN_REPLENISH_UNITS_UNIT_ARMY_ALLOWED";
+/// `CDIR_CVN_REPLENISH_UNITS_ARMY_MIN_PCT` (cv 0x3C, a faction's float).
+pub const REPLENISH_ARMY_MIN_PCT: &str = "CDIR_CVN_REPLENISH_UNITS_ARMY_MIN_PCT";
+/// `CDIR_CVN_REPLENISH_UNITS_ARMY_MAX_PCT` (cv 0x3D, a faction's float).
+pub const REPLENISH_ARMY_MAX_PCT: &str = "CDIR_CVN_REPLENISH_UNITS_ARMY_MAX_PCT";
+/// `CDIR_CVN_UNIT_XP_UPGRADE_ARMY_BASE_CHANCE` (cv 0x40, float).
+pub const XP_ARMY_BASE_CHANCE: &str = "CDIR_CVN_UNIT_XP_UPGRADE_ARMY_BASE_CHANCE";
+/// `CDIR_CVN_UNIT_XP_UPGRADE_ARMY_EXTRA_CHANCE_PER_TURN` (cv 0x42, float).
+pub const XP_ARMY_EXTRA_CHANCE_PER_TURN: &str = "CDIR_CVN_UNIT_XP_UPGRADE_ARMY_EXTRA_CHANCE_PER_TURN";
+
+/// The XP desire's draws per unit rank (`0x00BD4A60`): the (min, max) table at `0x01380978` (ranks
+/// 0..=9: the first `min` of `max` steps always count, each other one counts when a roll in [0, 1]
+/// is at most the rank's chance, [`XP_RANK_CHANCE`]).
+const XP_RANK_STEPS: [(u32, u32); 10] = [(0, 3), (0, 2), (0, 1), (0, 1), (0, 1), (0, 1), (0, 1), (0, 1), (0, 1), (0, 0)];
+/// The chance per rank at `0x0138098C`.
+const XP_RANK_CHANCE: [f32; 10] = [0.7, 0.6, 0.6, 0.5, 0.4, 0.2, 0.15, 0.1, 0.05, 0.0];
+
+/// Reads a `cdir_configs` float as the exe does (`0x004F38A0`, both float lookups; CONFIRMED): an
+/// optional leading `-`; integer digits (`v = v × 10 + d`, f32); a `.` is required (without one the
+/// read fails: `"10"` reads as 0); fraction digits (`f = f × 0.1`, `v = d × f + v`); then an
+/// optional `e` / `E`, an optional `-` (no `+`) and digits, `v` multiplied by 0.1 (after `-`) or
+/// 10 that many times; the text must end there (no spaces). `None` when it does not read.
+pub fn parse_cdir_float(s: &str) -> Option<f32> {
+    let b = s.as_bytes();
+    let mut i = 0;
+    let neg = b.first() == Some(&b'-');
+    if neg {
+        i = 1;
+    }
+    let digit = |i: usize| b.get(i).filter(|c| c.is_ascii_digit()).map(|c| (c - b'0') as f32);
+    let mut v = 0.0f32;
+    while let Some(d) = digit(i) {
+        v = v * 10.0 + d;
+        i += 1;
+    }
+    if b.get(i) != Some(&b'.') {
+        return None;
+    }
+    i += 1;
+    let mut f = 1.0f32;
+    while let Some(d) = digit(i) {
+        f *= 0.1;
+        v += d * f;
+        i += 1;
+    }
+    if matches!(b.get(i), Some(b'e' | b'E')) {
+        i += 1;
+        let neg_exp = b.get(i) == Some(&b'-');
+        if neg_exp {
+            i += 1;
+        }
+        let mut exp = 0u32;
+        while let Some(c) = b.get(i).filter(|c| c.is_ascii_digit()) {
+            exp = exp.wrapping_mul(10).wrapping_add((c - b'0') as u32);
+            i += 1;
+        }
+        let step = if neg_exp { 0.1f32 } else { 10.0 };
+        for _ in 0..exp {
+            // Once 0 or infinite it stays so: the rest of the loop changes nothing.
+            if v == 0.0 || v.is_infinite() {
+                break;
+            }
+            v *= step;
+        }
+    }
+    if i != b.len() {
+        return None;
+    }
+    Some(if neg { -v } else { v })
+}
+
+/// Reads a `cdir_configs` unsigned int as the exe does (`0x004F37B0`, the `all` int lookup
+/// `0x00BD2920`; CONFIRMED): digits only (no sign, no spaces), wrapping at 32 bits; an empty text
+/// reads as 0. `None` when another character is found.
+pub fn parse_cdir_uint(s: &str) -> Option<u32> {
+    s.bytes().try_fold(0u32, |v, c| c.is_ascii_digit().then(|| v.wrapping_mul(10).wrapping_add((c - b'0') as u32)))
+}
+
+/// Reads a `cdir_configs` signed int as the exe does (`0x004F3720`, a faction's int lookup
+/// `0x00BD29F0`; CONFIRMED): an optional leading `-`, then [`parse_cdir_uint`]'s digits, negated.
+pub fn parse_cdir_int(s: &str) -> Option<i32> {
+    match s.strip_prefix('-') {
+        Some(rest) => parse_cdir_uint(rest).map(|v| (v as i32).wrapping_neg()),
+        None => parse_cdir_uint(s).map(|v| v as i32),
+    }
+}
 
 /// One `cdir_configs` row. A missing faction or value reads as an empty string.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -142,9 +244,26 @@ impl DirectorRules {
     }
 
     /// A float variable (`0x00BD29B0`: always looked up with faction [`ALL`]); 0 when there is no
-    /// row or its value does not read as a number.
+    /// row or its value does not read ([`parse_cdir_float`]).
     pub fn float(&self, campaign: &str, variable: &str) -> f32 {
-        self.value(campaign, ALL, variable).and_then(|v| v.trim().parse().ok()).unwrap_or(0.0)
+        self.faction_float(campaign, ALL, variable)
+    }
+
+    /// A faction's float variable (`0x00BD2960`), read as [`DirectorRules::float`].
+    pub fn faction_float(&self, campaign: &str, faction: &str, variable: &str) -> f32 {
+        self.value(campaign, faction, variable).and_then(parse_cdir_float).unwrap_or(0.0)
+    }
+
+    /// An unsigned int variable (`0x00BD2920`: faction [`ALL`]); 0 when there is no row or its
+    /// value does not read ([`parse_cdir_uint`]).
+    pub fn uint(&self, campaign: &str, variable: &str) -> u32 {
+        self.value(campaign, ALL, variable).and_then(parse_cdir_uint).unwrap_or(0)
+    }
+
+    /// A faction's signed int variable (`0x00BD29F0`); 0 when there is no row or its value does
+    /// not read ([`parse_cdir_int`]).
+    pub fn faction_int(&self, campaign: &str, faction: &str, variable: &str) -> i32 {
+        self.value(campaign, faction, variable).and_then(parse_cdir_int).unwrap_or(0)
     }
 
     /// A flag variable for a faction (`0x00BD2870`): true only for the value `1`.
@@ -176,12 +295,20 @@ pub struct DirectorState {
     pub transfer_counter: u32,
     /// +0x48: the queued transfers, in queue order.
     pub pending: Vec<PendingTransfer>,
+    /// +0x34 (`CDIR_INTERFACE_AUTORESOLVER_MODIFIERS`): the (winner, loser) pairs the at-war desire
+    /// ([`at_war_step`]) picked, at most one per pair of factions, in list order.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub autoresolver_pairs: Vec<(FactionId, FactionId)>,
+    /// The XP desire's failed rolls per faction since its last upgrade ([`xp_step`];
+    /// `CDIR_DESIRE_UNIT_XP_UPGRADER_FACTION_COUNT`). A faction not listed has 0.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub xp_counters: BTreeMap<FactionId, u32>,
 }
 
 impl Default for DirectorState {
     /// A new campaign's.
     fn default() -> Self {
-        DirectorState { rng: CaRng::new(RNG_SEED), transfer_counter: 0, pending: Vec::new() }
+        DirectorState { rng: CaRng::new(RNG_SEED), transfer_counter: 0, pending: Vec::new(), autoresolver_pairs: Vec::new(), xp_counters: BTreeMap::new() }
     }
 }
 
@@ -194,6 +321,16 @@ impl DirectorState {
             h.i32(p.receiver.raw());
             h.u32(p.region.raw());
             h.i32(p.queued_owner.raw());
+        }
+        h.u32(self.autoresolver_pairs.len() as u32);
+        for (w, l) in &self.autoresolver_pairs {
+            h.i32(w.raw());
+            h.i32(l.raw());
+        }
+        h.u32(self.xp_counters.len() as u32);
+        for (f, n) in &self.xp_counters {
+            h.i32(f.raw());
+            h.u32(*n);
         }
     }
 }
@@ -384,7 +521,13 @@ fn seen_by_a_human(model: &CampaignModel, reg: &Region) -> bool {
     let to_f32 = |p: (crate::fixed::Fixed20, crate::fixed::Fixed20)| (p.0.to_f32(), p.1.to_f32());
     let mut positions = std::iter::once(to_f32(reg.settlement.position))
         .chain(reg.slots.iter().filter(|s| !s.key.starts_with("settlement:")).filter_map(|s| s.position.map(to_f32)));
-    positions.any(|p| model.turn.humans.iter().any(|&h| model.world.shrouds.contains_key(&h) && model.sees_fully(h, p)))
+    positions.any(|p| seen_at(model, p))
+}
+
+/// Whether any human with a shroud sees the position in full (`0x00BB5640` per human, a human
+/// without a shroud skipped; [`CampaignModel::sees_fully`], `0x00B7A1D0`).
+fn seen_at(model: &CampaignModel, p: (f32, f32)) -> bool {
+    model.turn.humans.iter().any(|&h| model.world.shrouds.contains_key(&h) && model.sees_fully(h, p))
 }
 
 /// Whether the director may hand the area's region to another faction (`0x00BB52E0`), in the
@@ -457,11 +600,35 @@ pub fn candidates(model: &CampaignModel) -> (Vec<Candidate>, f32) {
 /// with the weight of the one before it and the first only when the roll is 0. Ours gives each
 /// candidate its own weight.
 pub fn pick(candidates: &[Candidate], roll: f32) -> Option<&Candidate> {
+    pick_index(candidates.iter().map(|c| c.weight), roll).map(|i| &candidates[i])
+}
+
+/// The index a roll in [0, total] picks among the weights: the first whose running (f32) sum
+/// reaches the roll, else the last; `None` for no weights. Both of the director's weighted picks
+/// ([`pick`], [`xp_step`]) use it.
+fn pick_index(weights: impl IntoIterator<Item = f32>, roll: f32) -> Option<usize> {
     let mut sum = 0.0f32;
-    candidates.iter().find(|c| {
-        sum += c.weight;
-        sum >= roll
-    }).or(candidates.last())
+    let mut last = None;
+    for (i, w) in weights.into_iter().enumerate() {
+        sum += w;
+        if sum >= roll {
+            return Some(i);
+        }
+        last = Some(i);
+    }
+    last
+}
+
+/// A chance clamped to [0, 1] as the director's desires clamp it: NaN becomes 1, as the exe's
+/// comparisons give.
+fn clamp_chance(chance: f32) -> f32 {
+    if chance.is_nan() || chance >= 1.0 {
+        1.0
+    } else if chance <= 0.0 {
+        0.0
+    } else {
+        chance
+    }
 }
 
 /// The original's region-transfer desire step (`0x00BAE0A0`; see the module docs): the director's
@@ -472,13 +639,7 @@ pub fn region_transfer_step(model: &CampaignModel) -> DirectorState {
     let campaign = model.rules.campaign.as_str();
     let base = rules.float(campaign, TRANSFER_BASE_CHANCE);
     let extra = rules.float(campaign, TRANSFER_EXTRA_CHANCE_PER_TURN);
-    let mut chance = base + extra * state.transfer_counter as f32;
-    // NaN becomes 1, as the exe's comparisons give.
-    if chance.is_nan() || chance >= 1.0 {
-        chance = 1.0;
-    } else if chance <= 0.0 {
-        chance = 0.0;
-    }
+    let chance = clamp_chance(base + extra * state.transfer_counter as f32);
     let roll = state.rng.float_range(0.0, 1.0);
     // Neither is NaN here (chance is clamped, the roll comes from a 16-bit draw).
     if chance < roll {
@@ -499,16 +660,314 @@ pub fn region_transfer_step(model: &CampaignModel) -> DirectorState {
     state
 }
 
+/// The CAI world's factions in its order ([`super::World::ai_factions`]), those the model has; the
+/// model's factions in id order without them (a custom map, or a file without CAI state).
+fn ai_order(model: &CampaignModel) -> Vec<FactionId> {
+    let w = &model.world;
+    let listed: Vec<FactionId> = w.ai_factions.iter().copied().filter(|f| w.factions.contains_key(f)).collect();
+    if listed.is_empty() { w.factions.keys().copied().collect() } else { listed }
+}
+
+/// A faction the director treats as the pirates (the importer's [`DirectorRules::no_rival_keys`],
+/// tested by `0x00C3FD50`).
+fn is_pirate(model: &CampaignModel, f: FactionId) -> bool {
+    model.world.factions.get(&f).is_some_and(|x| model.rules.director.no_rival_keys.contains(&x.key))
+}
+
+/// A faction the boost, XP and replenish desires serve (`0x00BB5160`, `0x00BB50D0`): not human,
+/// still in the game, neither the rebels nor the pirates.
+fn served(model: &CampaignModel, f: FactionId) -> bool {
+    !model.is_human(f) && model.in_the_game(f) && !model.is_rebel_faction(f) && !is_pirate(model, f)
+}
+
+/// A mobile's position (CAI mobile, the CAI world's mobiles of a faction: its forces, garrisons
+/// included): its commander's; PROVISIONAL: a garrison without a commander stands at its
+/// settlement, and a force with neither has no position and so is never seen. The CAI faction's
+/// mobile list (#3) is walked in force-id order (PROVISIONAL: the exe's list order is not read
+/// from the file).
+fn mobile_position(model: &CampaignModel, force: &super::MilitaryForce) -> Option<(f32, f32)> {
+    let to_f32 = |p: (crate::fixed::Fixed20, crate::fixed::Fixed20)| (p.0.to_f32(), p.1.to_f32());
+    if let Some(c) = force.commander.and_then(|c| model.world.characters.get(&c)) {
+        return Some(to_f32(c.position));
+    }
+    model.world.regions.values().find(|r| r.garrison == Some(force.id)).map(|r| to_f32(r.settlement.position))
+}
+
+/// Whether any human sees the mobile ([`seen_at`] of [`mobile_position`]).
+fn mobile_seen(model: &CampaignModel, force: &super::MilitaryForce) -> bool {
+    mobile_position(model, force).is_some_and(|p| seen_at(model, p))
+}
+
+/// The faction's key, for its config lookups ("" for a faction the model lacks).
+fn key_of(model: &CampaignModel, f: FactionId) -> &str {
+    model.world.factions.get(&f).map_or("", |x| x.key.as_str())
+}
+
+/// The at-war desire's step (`0x00BAC560`, CONFIRMED): for each faction `f` in the CAI world's
+/// order ([`ai_order`]) that is not human, still in the game and neither the rebels nor the
+/// pirates, each faction `g` of `f`'s enemy list that is not human and still in the game, unless
+/// this step already took the pair in either order: the pair's winner is drawn. The enemy list is
+/// `f`'s CAI relation belief's `+0x40` list (count `+0x4C`, data `+0x50`; read through
+/// `0x00A74A20`, iterated by `0x00A649A0` / `0x00A649C0`), built by `0x00ABAFB0` from the CAI
+/// world's faction list (CAI world `+0x110`: count `+0x11C`, data `+0x120`, the order
+/// [`ai_order`] reads from the file) in its order, without `f`: the rebels (`0x00C3FE80`) always,
+/// any other faction when it is in the game (`+0x824` clear) and `f`'s stance towards it is war
+/// (`0x00B64C50` record `+0x790 → +0x10` = 0). That is [`CampaignModel::at_war`] in the CAI
+/// world's order (CONFIRMED, `0x00ABAFB0`). With `a` = `f`, `b` = `g`: the pirates or rebels
+/// (`b`) lose without a draw; else a roll in [0, score(b) + score(a)] on the director's RNG
+/// ([`rival_score`], computed once for the pool) above score(a) makes `b` the winner, else `a`.
+/// Each (winner, loser) replaces the first [`DirectorState::autoresolver_pairs`] entry naming the
+/// same two factions in either order and is appended (`0x00BC5240`).
+///
+/// PROVISIONAL: the list is the stored relation belief, refreshed only when read while dirty;
+/// the model reads the current stances, which differ only in the cases [`rival_score`] lists
+/// (BACKLOG §0 "Stored CAI relation belief").
+///
+/// PROVISIONAL: the autoresolver reads the pairs (`CDIR_INTERFACE_AUTORESOLVER_MODIFIERS`, the
+/// `CDIR_CVN_AUTORESOLVER_MODIFIER_*` rows) to tilt a battle between the two; that use is not
+/// modelled (BACKLOG §0 "Director autoresolver modifiers").
+pub fn at_war_step(model: &mut CampaignModel, order: &[FactionId], scores: &BTreeMap<FactionId, f32>) {
+    let score = |f: FactionId| scores.get(&f).copied().unwrap_or(0.0);
+    let mut taken: Vec<(FactionId, FactionId)> = Vec::new();
+    for &f in order {
+        if model.is_human(f) || !model.in_the_game(f) || model.is_rebel_faction(f) || is_pirate(model, f) {
+            continue;
+        }
+        for &g in order {
+            if g == f || !model.at_war(f, g) || model.is_human(g) || !model.in_the_game(g) {
+                continue;
+            }
+            if taken.iter().any(|&p| p == (f, g) || p == (g, f)) {
+                continue;
+            }
+            taken.push((f, g));
+            // `f` (`a`) is never the rebels or the pirates here: the outer loop skipped them.
+            let pair = if model.is_rebel_faction(g) || is_pirate(model, g) {
+                (f, g)
+            } else {
+                let roll = model.director.rng.float_range(0.0, score(g) + score(f));
+                if score(f) < roll { (g, f) } else { (f, g) }
+            };
+            let pairs = &mut model.director.autoresolver_pairs;
+            if let Some(i) = pairs.iter().position(|&(w, l)| (w, l) == pair || (l, w) == pair) {
+                pairs.remove(i);
+            }
+            pairs.push(pair);
+        }
+    }
+}
+
+/// The boost desire's step (`0x00BAC310`, CONFIRMED): the factions it [serves](served), in the CAI
+/// world's order, sorted by rival score, highest first (the exe's `std::sort`,
+/// [`crate::msvc_sort`]); the first `min(max(floor(n × PERCENTAGE), MIN), MAX)` of the `n` each
+/// get their `AMOUNT` (a faction's int) credited to the treasury. No RNG draw.
+pub fn boost_step(model: &mut CampaignModel, order: &[FactionId], scores: &BTreeMap<FactionId, f32>) {
+    let rules = std::sync::Arc::clone(&model.rules);
+    let (d, campaign) = (&rules.director, rules.campaign.as_str());
+    let mut list: Vec<FactionId> = order.iter().copied().filter(|&f| served(model, f)).collect();
+    let score = |f: &FactionId| scores.get(f).copied().unwrap_or(0.0);
+    crate::msvc_sort::sort_by(&mut list, |a, b| score(a) > score(b));
+    let share = (list.len() as f32 * d.float(campaign, BOOST_PERCENTAGE)).floor() as u32;
+    let count = share.max(d.uint(campaign, BOOST_MIN)).min(d.uint(campaign, BOOST_MAX)) as usize;
+    for f in list.into_iter().take(count) {
+        let amount = d.faction_int(campaign, key_of(model, f), BOOST_AMOUNT);
+        if let Some(x) = model.world.factions.get_mut(&f) {
+            super::treasury::credit(&mut x.treasury, amount);
+        }
+    }
+}
+
+/// The XP desire's step for armies (`0x00BAE910`, CONFIRMED): for each faction it
+/// [serves](served), in the CAI world's order, the chance `BASE_CHANCE + EXTRA_CHANCE_PER_TURN ×
+/// counter` ([`DirectorState::xp_counters`], added at 0 on first use; clamped as the transfer's) against a roll in [0, 1]:
+/// above it, the counter goes up by one. Else its armies with units that no human sees are
+/// weighed `n² − (rank sum / n)⁴` (`n` units, the integer mean rank; kept above 0, `0x00BA30B0`
+/// → `0x00BB5270`); with none, nothing changes; else a roll in [0, total] picks one
+/// ([`pick_index`]), each of its units draws its rank's steps (`0x00BA3240` → `0x00BD4A60`: of
+/// [`XP_RANK_STEPS`] `(min, max)`, the first `min` count, each other one draws a roll in [0, 1]
+/// and counts when it is at most [`XP_RANK_CHANCE`]) and the counter goes back to 0.
+///
+/// ORIGINAL BUG (the pick loop at `0x00BAEE3F`..`0x00BAEEDA` in `0x00BAE910`): as the transfer's
+/// ([`pick`]), it drops the front army while the roll is above 0, so each army is picked with the
+/// weight of the one before it. Ours gives each its own weight.
+///
+/// PROVISIONAL: the campaign model has no unit experience yet, so every rank is 0 (weights `n²`,
+/// three draws per unit at 0.7), and the counted steps (the intention `0x00BA3240` queues, raising
+/// the units' experience) are not applied (BACKLOG §0 "Director XP upgrade").
+pub fn xp_step(model: &mut CampaignModel, order: &[FactionId]) {
+    let rules = std::sync::Arc::clone(&model.rules);
+    let (d, campaign) = (&rules.director, rules.campaign.as_str());
+    let (base, extra) = (d.float(campaign, XP_ARMY_BASE_CHANCE), d.float(campaign, XP_ARMY_EXTRA_CHANCE_PER_TURN));
+    for &f in order {
+        if !served(model, f) {
+            continue;
+        }
+        // Every served faction gets a counter (find or insert 0, `0x00BAE9AE`..`0x00BAEAA9`).
+        let counter = *model.director.xp_counters.entry(f).or_insert(0);
+        let chance = clamp_chance(base + extra * counter as f32);
+        if chance < model.director.rng.float_range(0.0, 1.0) {
+            model.director.xp_counters.insert(f, counter.wrapping_add(1));
+            continue;
+        }
+        let mut armies: Vec<(super::ids::ForceId, f32)> = Vec::new();
+        let mut total = 0.0f32;
+        for force in model.world.forces.values().filter(|x| x.faction == f && !x.is_navy && !x.units.is_empty()) {
+            if mobile_seen(model, force) {
+                continue;
+            }
+            let n = force.units.len() as u32;
+            let rank_sum = 0u32; // PROVISIONAL: no unit experience in the model.
+            let weight = (n as f32) * (n as f32) - ((rank_sum / n) as f32).powi(4);
+            if weight > 0.0 {
+                total += weight;
+                armies.push((force.id, weight));
+            }
+        }
+        if armies.is_empty() {
+            continue;
+        }
+        let roll = model.director.rng.float_range(0.0, total);
+        let Some(i) = pick_index(armies.iter().map(|a| a.1), roll) else { continue };
+        let units = model.world.forces.get(&armies[i].0).map_or(0, |x| x.units.len());
+        for _ in 0..units {
+            let rank = 0usize; // PROVISIONAL: as above.
+            let (min, max) = XP_RANK_STEPS[rank];
+            let mut _steps = 0u32;
+            for step in 0..max {
+                if step < min || model.director.rng.float_range(0.0, 1.0) <= XP_RANK_CHANCE[rank] {
+                    _steps += 1;
+                }
+            }
+        }
+        model.director.xp_counters.insert(f, 0);
+    }
+}
+
+/// Whether a unit needs replenishing (`0x00BC0800`, CONFIRMED for an army): fewer men than
+/// `floor(max men × ARMY_MIN_PCT)` (the owner's float), and its army is not aboard a navy.
+/// PROVISIONAL: a navy's test is not traced; the desire gathers armies only, so a navy never
+/// needs it here.
+fn needs_replenish(model: &CampaignModel, force: &super::MilitaryForce, unit: &super::CampaignUnit) -> bool {
+    if force.is_navy {
+        return false;
+    }
+    let min_pct = model.rules.director.faction_float(&model.rules.campaign, key_of(model, force.faction), REPLENISH_ARMY_MIN_PCT);
+    i64::from(unit.men) < ((unit.max_men as f32) * min_pct).floor() as i64 && !model.world.embarked.contains_key(&force.id)
+}
+
+/// The replenish desire's step for armies (`0x00BADA40`, CONFIRMED): the faction, army and unit
+/// allowances start at the `FACTION_` / `MOBILE_` / `UNIT_ARMY_ALLOWED` floats of the faction (of
+/// the owner for an army or unit). For each faction it [serves](served) with a faction allowance
+/// of at least 1, in the CAI world's order, the units that [need it](needs_replenish) with a unit
+/// allowance of at least 1, of its armies with units, unseen by the humans, with an army
+/// allowance of at least 1 (`0x00BA2A00`; in army, then unit, order) are listed; then, as many
+/// times as the list was long, while the faction allowance is at least 1: a unit is drawn
+/// (`int_range(0, len − 1)` on the director's RNG), queued when its army's and its own allowances
+/// are still at least 1 (each of the three allowances then goes down by 1), and taken off the list.
+/// After every faction, each queued unit still in need (`0x00BC06E0`) draws a fraction in
+/// [`ARMY_MIN_PCT`, `ARMY_MAX_PCT`] (the owner's floats) and is brought to `floor(max men ×
+/// fraction)` men.
+///
+/// PROVISIONAL: the allowances are this step's own (the exe keeps them in the desire, their
+/// carry-over between passes and their save are not traced); with `MAX_PCT` below `MIN_PCT` or
+/// above 1 (no vanilla row) the men are kept within [men, max men], as the intention's setter
+/// `0x008AABB0` is not traced; the navy half (`*_NAVY_*` rows) is not traced (BACKLOG §0
+/// "Director replenish").
+pub fn replenish_step(model: &mut CampaignModel, order: &[FactionId]) {
+    use super::ids::{ForceId, UnitId};
+    let rules = std::sync::Arc::clone(&model.rules);
+    let (d, campaign) = (&rules.director, rules.campaign.as_str());
+    let mut faction_allowed: BTreeMap<FactionId, f32> = BTreeMap::new();
+    let mut army_allowed: BTreeMap<ForceId, f32> = BTreeMap::new();
+    let mut unit_allowed: BTreeMap<UnitId, f32> = BTreeMap::new();
+    let mut queued: Vec<(ForceId, UnitId)> = Vec::new();
+    for &f in order {
+        let key = key_of(model, f);
+        let allowed = |var: &str| d.faction_float(campaign, key, var);
+        let fa = *faction_allowed.entry(f).or_insert_with(|| allowed(REPLENISH_FACTION_ARMY_ALLOWED));
+        if !served(model, f) || fa < 1.0 {
+            continue;
+        }
+        let mut list: Vec<(ForceId, UnitId)> = Vec::new();
+        for force in model.world.forces.values().filter(|x| x.faction == f && !x.is_navy && !x.units.is_empty()) {
+            let aa = *army_allowed.entry(force.id).or_insert_with(|| allowed(REPLENISH_MOBILE_ARMY_ALLOWED));
+            if aa < 1.0 || mobile_seen(model, force) {
+                continue;
+            }
+            for unit in &force.units {
+                let ua = *unit_allowed.entry(unit.id).or_insert_with(|| allowed(REPLENISH_UNIT_ARMY_ALLOWED));
+                if needs_replenish(model, force, unit) && ua >= 1.0 {
+                    list.push((force.id, unit.id));
+                }
+            }
+        }
+        for _ in 0..list.len() {
+            if faction_allowed[&f] < 1.0 {
+                break;
+            }
+            let i = model.director.rng.int_range(0, list.len() as i32 - 1) as usize;
+            let (force, unit) = list[i];
+            // The army's and unit's other gates cannot change within the step: only the
+            // allowances are tested again.
+            if army_allowed[&force] >= 1.0 && unit_allowed[&unit] >= 1.0 {
+                queued.push((force, unit));
+                for a in [faction_allowed.get_mut(&f), army_allowed.get_mut(&force), unit_allowed.get_mut(&unit)].into_iter().flatten() {
+                    *a -= 1.0;
+                }
+            }
+            list.remove(i);
+        }
+    }
+    for (force_id, unit_id) in queued {
+        let Some(force) = model.world.forces.get(&force_id) else { continue };
+        let Some(unit) = force.units.iter().find(|u| u.id == unit_id) else { continue };
+        if !needs_replenish(model, force, unit) {
+            continue;
+        }
+        let key = key_of(model, force.faction);
+        let (lo, hi) = (d.faction_float(campaign, key, REPLENISH_ARMY_MIN_PCT), d.faction_float(campaign, key, REPLENISH_ARMY_MAX_PCT));
+        let fraction = model.director.rng.float_range(lo, hi);
+        if let Some(u) = model.world.forces.get_mut(&force_id).and_then(|x| x.units.iter_mut().find(|u| u.id == unit_id)) {
+            let target = ((u.max_men as f32) * fraction).floor();
+            u.men = u.men.max((target.max(0.0) as u32).min(u.max_men));
+        }
+    }
+}
+
+/// The director's desires after the region transfer, in the pool's score order (`0x00BBC880`; the
+/// may 1811 save's pool holds one army desire of each), the original's rule behind the seam
+/// [`super::seams::DIRECTOR_DESIRES`]: the rival scores ([`rival_score`]) once, then
+/// [`at_war_step`] (8000), [`boost_step`] (7000), [`xp_step`] (3000) and [`replenish_step`] (2000).
+/// The uber (11000) and teleport (10000) desires draw nothing.
+///
+/// PROVISIONAL (BACKLOG §0 "Director desires"): the teleport desire's effect (generals moved to
+/// the front, `CDIR_CVN_TELEPORT_GENERALS_TO_FRONT`), the force-minimum desire (6000) and the
+/// unit balancer (5000) and upgrader (4000) desires' gathers are not traced, so they draw nothing
+/// here; the trade-theatre filler (1000) is in state 2 in the vanilla pool, which the pool skips,
+/// and the desire states are not read from the file.
+pub fn director_desires(model: &mut CampaignModel, _writes: &mut ModWrites) {
+    let order = ai_order(model);
+    let scores: BTreeMap<FactionId, f32> = {
+        let areas = areas(model);
+        order.iter().map(|&f| (f, rival_score_in(model, &areas, f))).collect()
+    };
+    at_war_step(model, &order, &scores);
+    boost_step(model, &order, &scores);
+    xp_step(model, &order);
+    replenish_step(model, &order);
+}
+
 impl CampaignModel {
     /// The director's part of a turn handover from `ending` to `starting` (see the module docs):
     /// the transfers queued for `starting` are carried out, then, from a human to an AI faction, the
-    /// region-transfer desire steps (through its seam).
+    /// region-transfer desire steps and the other desires run (each through its seam).
     pub fn director_handover(&mut self, ending: FactionId, starting: FactionId, events: &mut Vec<CampaignEvent>) {
         self.apply_region_transfers(starting, events);
         if self.is_human(ending) && !self.is_human(starting) {
             let mut writes = ModWrites::default();
             let rules = std::sync::Arc::clone(&self.rules);
             self.director = rules.seams.director_region_transfer.rule()(self, &mut writes);
+            rules.seams.director_desires.rule()(self, &mut writes);
             self.mod_state.apply(&mut writes);
         }
     }
@@ -532,12 +991,22 @@ impl CampaignModel {
     /// The director's transfer of a region (`0x00B58A30`): the garrison army is destroyed, the fleet
     /// link cleared and the region changes hands as a capture does ([`Self::take_settlement`]: the
     /// queues emptied, the land units and constructions without refund, the ships with), but no
-    /// capture is reported (no `SettlementOccupied`).
+    /// capture is reported (no `SettlementOccupied`). Then the receiver's new garrison's size is
+    /// drawn (`0x00BA8400`, CONFIRMED draw): `int_range(a + 3, 4a + 6)` on the director's RNG, `a`
+    /// 1 for an AI receiver, 0 for a human (4 to 10 units for an AI).
+    ///
+    /// PROVISIONAL: the army it raises from that count is not modelled, and the exe skips the
+    /// draw and the spawn when `0x00C3B7A0` holds (`+0xFC` non-zero, CONFIRMED) for the `+0x34`
+    /// member of the object the transferred entity's `0x008CF5F0` returns (its `+0x12C`; what that
+    /// object and field are is not traced), where this always draws (BACKLOG §0 "Director
+    /// transfer garrison").
     fn director_transfer(&mut self, region: RegionId, receiver: FactionId, events: &mut Vec<CampaignEvent>) {
         if let Some(garrison) = self.world.regions.get(&region).and_then(|r| r.garrison) {
             self.destroy_force(garrison, events);
         }
         self.take_settlement(region, receiver, None);
+        let ai = i32::from(!self.is_human(receiver));
+        let _units = self.director.rng.int_range(ai + 3, ai * 4 + 6);
     }
 }
 
@@ -569,7 +1038,7 @@ mod tests {
             row(ALL, ALL, RIVAL_MINOR_FACTION_WEIGHT, "0.33"),
             row(ALL, ALL, TRANSFER_BASE_CHANCE, base_chance),
             row(ALL, ALL, TRANSFER_EXTRA_CHANCE_PER_TURN, "0.01"),
-            row(ALL, ALL, TRANSFER_UBER_FACTION_MODIFIER, "10"),
+            row(ALL, ALL, TRANSFER_UBER_FACTION_MODIFIER, "10.0"),
             row(ALL, ALL, UBER_FACTION, "0"),
         ]
     }
@@ -602,16 +1071,17 @@ mod tests {
     #[test]
     fn the_config_lookup_takes_the_first_row_of_each_pass() {
         let r = DirectorRules {
-            configs: vec![row(ALL, ALL, "V", "1"), row("camp", ALL, "V", "2"), row("camp", "f", "V", "3"), row("camp", "f", "V", "4"), row(ALL, ALL, "W", "x")],
+            configs: vec![row(ALL, ALL, "V", "1"), row("camp", ALL, "V", "2.0"), row("camp", "f", "V", "3"), row("camp", "f", "V", "4"), row(ALL, ALL, "W", "x")],
             ..Default::default()
         };
         assert_eq!(r.value("camp", "f", "V"), Some("3"));
-        assert_eq!(r.value("camp", "g", "V"), Some("2"));
+        assert_eq!(r.value("camp", "g", "V"), Some("2.0"));
         assert_eq!(r.value("other", "f", "V"), Some("1"));
         assert_eq!(r.value(ALL, "f", "V"), Some("1"));
         assert_eq!(r.value("camp", "f", "missing"), None);
-        // A float is always read with faction `all`; an unreadable value and a missing row read 0.
-        assert_eq!((r.float("camp", "V"), r.float("camp", "W"), r.float("camp", "missing")), (2.0, 0.0, 0.0));
+        // A float is always read with faction `all`; an unreadable value (no `.`: "1") and a
+        // missing row read 0.
+        assert_eq!((r.float("camp", "V"), r.float("camp", "W"), r.float("camp", "missing"), r.float("other", "V")), (2.0, 0.0, 0.0, 0.0));
         // A flag is true only for the text `1`.
         assert!(r.flag("other", "f", "V") && !r.flag("camp", "g", "V") && !r.flag("camp", "f", "W"));
     }
@@ -647,7 +1117,7 @@ mod tests {
         assert!((rival_score(&m, C) - 0.33 * (0.2 * a + 0.4)).abs() < 1e-6);
         // Capped at 1.
         let mut capped = m.clone();
-        with_rows(&mut capped, |r| r.insert(0, row(ALL, ALL, RIVAL_VICTORY_REGIONS_PCT, "5")));
+        with_rows(&mut capped, |r| r.insert(0, row(ALL, ALL, RIVAL_VICTORY_REGIONS_PCT, "5.0")));
         assert_eq!(rival_score(&capped, B), 1.0);
         // 0 for a human, a listed key, a faction out of the game, and with no humans (ORIGINAL BUG
         // fixed: the exe overwrites its 0 with the computed score).
@@ -790,7 +1260,7 @@ mod tests {
     #[test]
     fn the_desire_step_counts_failed_rolls_and_queues_a_transfer() {
         // Chance 0: the roll (above 0) fails, the counter goes up; one draw.
-        let mut m = world("0");
+        let mut m = world("0.0");
         with_rows(&mut m, |r| r.retain(|r| r.variable != TRANSFER_EXTRA_CHANCE_PER_TURN));
         let s = region_transfer_step(&m);
         let mut one = CaRng::new(RNG_SEED);
@@ -798,7 +1268,7 @@ mod tests {
         assert_eq!((s.transfer_counter, s.rng, s.pending.len()), (1, one, 0));
         // Chance 1: a transfer to B is queued with the current owner and the counter goes back to
         // 0; two draws.
-        let mut m = world("1");
+        let mut m = world("1.0");
         m.director.transfer_counter = 7;
         let s = region_transfer_step(&m);
         let mut two = one;
@@ -813,7 +1283,7 @@ mod tests {
 
     #[test]
     fn a_due_transfer_destroys_the_garrison_and_reports_no_capture() {
-        let mut m = world("1");
+        let mut m = world("1.0");
         m.world.forces.insert(ForceId(2000), MilitaryForce { id: ForceId(2000), faction: C, commander: None, units: Vec::new(), is_navy: false });
         m.world.regions.get_mut(&RegionId(12)).unwrap().garrison = Some(ForceId(2000));
         let stale = PendingTransfer { receiver: B, region: RegionId(10), queued_owner: C };
@@ -830,13 +1300,17 @@ mod tests {
         // The stale entry (10 is A's, not C's) left the queue without a transfer; C's entry stays.
         assert_eq!(m.world.regions[&RegionId(10)].owner, A);
         assert_eq!(m.director.pending, vec![later]);
-        assert_eq!(m.director.rng, CaRng::new(RNG_SEED), "no step between two AI factions");
+        // No step between two AI factions: the one draw is the new garrison's size (4 to 10 for B).
+        let mut one = CaRng::new(RNG_SEED);
+        let size = one.int_range(4, 10);
+        assert!((4..=10).contains(&size));
+        assert_eq!(m.director.rng, one);
     }
 
     #[test]
     fn the_turn_loop_steps_after_a_human_turn_and_transfers_at_the_receivers_turn_start() {
         let run = || {
-            let mut m = world("1");
+            let mut m = world("1.0");
             m.start_campaign();
             assert_eq!(m.turn.current, Some(A));
             // A's end, C's start and the step (12 queued for B), C's turn, the round end, B's start
@@ -858,11 +1332,230 @@ mod tests {
 
     #[test]
     fn without_config_rows_nothing_is_transferred() {
-        let mut m = world("0");
+        let mut m = world("0.0");
         with_rows(&mut m, Vec::clear);
         m.start_campaign();
         m.apply(CampaignCommand::EndTurn).unwrap();
         assert_eq!(m.world.regions[&RegionId(12)].owner, C);
         assert_eq!(m.director.transfer_counter, 1);
+    }
+
+    #[test]
+    fn the_config_numbers_read_as_the_exes_parsers_read_them() {
+        let f = parse_cdir_float;
+        assert_eq!([f("0.125"), f("-0.5"), f("1."), f(".5"), f("1.5e2"), f("2.0E-1")], [Some(0.125), Some(-0.5), Some(1.0), Some(0.5), Some(150.0), Some(2.0 * 0.1)]);
+        // A `.` is required; no `+`, no spaces, nothing after the number.
+        for bad in ["10", "1e2", "+1.0", " 1.0", "1.0 ", "1.0x", "1.0e+2", ""] {
+            assert_eq!(f(bad), None, "{bad:?}");
+        }
+        assert_eq!([parse_cdir_uint("1500"), parse_cdir_uint(""), parse_cdir_uint("4294967296")], [Some(1500), Some(0), Some(0)]);
+        assert_eq!([parse_cdir_uint("-1"), parse_cdir_uint("1.0"), parse_cdir_uint(" 1")], [None, None, None]);
+        assert_eq!([parse_cdir_int("-20"), parse_cdir_int("7"), parse_cdir_int("-")], [Some(-20), Some(7), Some(0)]);
+        assert_eq!(parse_cdir_int("+7"), None);
+    }
+
+    fn at_war_with_scores(m: &mut CampaignModel) {
+        let (o, s) = (ai_order(m), scores(m));
+        at_war_step(m, &o, &s);
+    }
+
+    fn boost_with_scores(m: &mut CampaignModel) {
+        let (o, s) = (ai_order(m), scores(m));
+        boost_step(m, &o, &s);
+    }
+
+    fn xp_step_in_order(m: &mut CampaignModel) {
+        let o = ai_order(m);
+        xp_step(m, &o);
+    }
+
+    fn replenish_step_in_order(m: &mut CampaignModel) {
+        let o = ai_order(m);
+        replenish_step(m, &o);
+    }
+
+    /// The pool's rival scores, as [`director_desires`] computes them.
+    fn scores(m: &CampaignModel) -> BTreeMap<FactionId, f32> {
+        m.world.factions.keys().map(|&f| (f, rival_score(m, f))).collect()
+    }
+
+    #[test]
+    fn the_at_war_desire_draws_each_warring_pair_once() {
+        let mut m = world("0.01");
+        let (sb, sc) = (rival_score(&m, B), rival_score(&m, C));
+        assert!(sb > 0.0 && sc > 0.0);
+        m.director.autoresolver_pairs = vec![(C, B), (A, B)];
+        at_war_with_scores(&mut m);
+        // B meets C first (B, C at war; A is human): one draw over both scores, B wins when the
+        // roll is at most its score. The old (C, B) entry gives way.
+        let mut rng = CaRng::new(RNG_SEED);
+        let roll = rng.float_range(0.0, sc + sb);
+        let pair = if sb < roll { (C, B) } else { (B, C) };
+        assert_eq!((m.director.rng, m.director.autoresolver_pairs.clone()), (rng, vec![(A, B), pair]));
+        // The CAI world's order puts C first: C is `a`.
+        let mut m = world("0.01");
+        m.world.ai_factions = vec![C, B, FactionId(99)];
+        at_war_with_scores(&mut m);
+        let pair = if sc < roll { (B, C) } else { (C, B) };
+        assert_eq!((m.director.rng, m.director.autoresolver_pairs.clone()), (rng, vec![pair]));
+        // The pirates lose without a draw.
+        let mut m = world("0.01");
+        Arc::make_mut(&mut m.rules).director.no_rival_keys = vec!["test_faction_c".into()];
+        at_war_with_scores(&mut m);
+        assert_eq!((m.director.rng, m.director.autoresolver_pairs.clone()), (CaRng::new(RNG_SEED), vec![(B, C)]));
+    }
+
+    /// The at-war desire walks each faction's own enemy list (the relation belief's `+0x40` list,
+    /// `0x00ABAFB0`): the CAI world's factions in order, the rebels always, the others at war with
+    /// it. B has two enemies, C and D, and the rebels R: B draws against C, then against D (R
+    /// loses without a draw); C and D find their pair with B taken. In the reversed order D and C
+    /// each draw against B first, as `a`.
+    #[test]
+    fn the_at_war_desire_walks_a_factions_enemies_in_the_cai_order() {
+        const D: FactionId = FactionId(4);
+        const R: FactionId = FactionId(5);
+        let mut m = world("0.01");
+        for (id, key) in [(D, "test_faction_d"), (R, "")] {
+            let mut f = m.world.factions[&C].clone();
+            (f.id, f.key, f.diplomacy) = (id, key.into(), BTreeMap::new());
+            m.world.factions.insert(id, f);
+            let force = MilitaryForce { id: ForceId(2000 + id.0 as u32), faction: id, commander: None, units: Vec::new(), is_navy: false };
+            m.world.forces.insert(force.id, force);
+        }
+        m.world.set_stance(B, D, Stance::War).unwrap();
+        assert!(!m.at_war(C, D) && m.at_war(B, R) && m.at_war(C, R));
+        let s: BTreeMap<FactionId, f32> = [(B, 0.5), (C, 0.25), (D, 0.75)].into();
+        let draw = |rng: &mut CaRng, a: FactionId, b: FactionId| {
+            let roll = rng.float_range(0.0, s[&b] + s[&a]);
+            if s[&a] < roll { (b, a) } else { (a, b) }
+        };
+        let mut n = m.clone();
+        at_war_step(&mut n, &[B, C, D, R], &s);
+        let mut rng = CaRng::new(RNG_SEED);
+        let (bc, bd) = (draw(&mut rng, B, C), draw(&mut rng, B, D));
+        assert_eq!((n.director.rng, n.director.autoresolver_pairs), (rng, vec![bc, bd, (B, R), (C, R), (D, R)]));
+        let mut n = m.clone();
+        at_war_step(&mut n, &[R, D, C, B], &s);
+        let mut rng = CaRng::new(RNG_SEED);
+        let (db, cb) = (draw(&mut rng, D, B), draw(&mut rng, C, B));
+        assert_eq!((n.director.rng, n.director.autoresolver_pairs), (rng, vec![(D, R), db, (C, R), cb, (B, R)]));
+    }
+
+    #[test]
+    fn the_boost_desire_pays_the_highest_rivals() {
+        let mut m = world("0.01");
+        let campaign = m.rules.campaign.clone();
+        with_rows(&mut m, |r| {
+            r.extend([row(ALL, ALL, BOOST_PERCENTAGE, "0.125"), row(ALL, ALL, BOOST_MIN, "5"), row(ALL, ALL, BOOST_MAX, "1"), row(ALL, ALL, BOOST_AMOUNT, "1500")]);
+            r.push(row(&campaign, "test_faction_c", BOOST_AMOUNT, "-20"));
+        });
+        assert!(rival_score(&m, B) > rival_score(&m, C));
+        let treasuries = |m: &CampaignModel| [A, B, C].map(|f| m.world.factions[&f].treasury);
+        // MAX 1: only the highest score; the human is never served.
+        let mut one = m.clone();
+        boost_with_scores(&mut one);
+        assert_eq!(treasuries(&one), [1000, 2500, 0]);
+        // MAX 5: both, each its own amount; no draw.
+        with_rows(&mut m, |r| r.insert(0, row(ALL, ALL, BOOST_MAX, "5")));
+        boost_with_scores(&mut m);
+        assert_eq!(treasuries(&m), [1000, 2500, -20]);
+        assert_eq!(m.director.rng, CaRng::new(RNG_SEED));
+    }
+
+    #[test]
+    fn the_xp_desire_counts_failed_rolls_and_draws_per_unit() {
+        // Chance 1: B's army (two units, weight 4) is picked and each unit draws three steps; C,
+        // without an army, draws only its chance roll; its counter is added at 0.
+        let mut m = world("0.01");
+        with_rows(&mut m, |r| r.push(row(ALL, ALL, XP_ARMY_BASE_CHANCE, "1.0")));
+        m.director.xp_counters.insert(B, 6);
+        xp_step_in_order(&mut m);
+        let mut rng = CaRng::new(RNG_SEED);
+        rng.float_range(0.0, 1.0);
+        rng.float_range(0.0, 4.0);
+        for _ in 0..6 {
+            rng.float_range(0.0, 1.0);
+        }
+        rng.float_range(0.0, 1.0);
+        assert_eq!((m.director.rng, m.director.xp_counters.clone()), (rng, [(B, 0), (C, 0)].into()));
+        // Chance 0: each served faction's counter goes up, one draw each.
+        let mut m = world("0.01");
+        with_rows(&mut m, |r| r.push(row(ALL, ALL, XP_ARMY_EXTRA_CHANCE_PER_TURN, "0.0")));
+        m.director.xp_counters.insert(C, 2);
+        xp_step_in_order(&mut m);
+        assert_eq!(m.director.xp_counters, [(B, 1), (C, 3)].into());
+        let mut two = CaRng::new(RNG_SEED);
+        two.float_range(0.0, 1.0);
+        two.float_range(0.0, 1.0);
+        assert_eq!(m.director.rng, two);
+    }
+
+    #[test]
+    fn the_xp_pick_gives_each_army_its_own_weight() {
+        assert_eq!([0.0, 4.0, 4.5, 13.0, 20.0].map(|r| pick_index([4.0, 9.0], r)), [Some(0), Some(0), Some(1), Some(1), Some(1)]);
+        assert_eq!(pick_index(std::iter::empty(), 1.0), None);
+    }
+
+    fn replenish_rows(m: &mut CampaignModel) {
+        with_rows(m, |r| {
+            for v in [REPLENISH_FACTION_ARMY_ALLOWED, REPLENISH_MOBILE_ARMY_ALLOWED, REPLENISH_UNIT_ARMY_ALLOWED] {
+                r.push(row(ALL, ALL, v, "1.0"));
+            }
+            r.extend([row(ALL, ALL, REPLENISH_ARMY_MIN_PCT, "0.85"), row(ALL, ALL, REPLENISH_ARMY_MAX_PCT, "0.95")]);
+        });
+    }
+
+    #[test]
+    fn the_replenish_desire_tops_up_one_drawn_unit_per_allowance() {
+        // B's two units (80 of 100 men, below 85) both need it; the faction allowance of 1 lets one
+        // be drawn, then it gets floor(100 × a fraction in [0.85, 0.95]) men.
+        let mut m = world("0.01");
+        replenish_rows(&mut m);
+        replenish_step_in_order(&mut m);
+        let mut rng = CaRng::new(RNG_SEED);
+        let i = rng.int_range(0, 1) as usize;
+        let men = (100.0 * rng.float_range(0.85, 0.95)).floor() as u32;
+        assert!((85..=95).contains(&men));
+        let mut want = [80, 80];
+        want[i] = men;
+        assert_eq!(m.world.forces[&ForceId(1001)].units.iter().map(|u| u.men).collect::<Vec<_>>(), want);
+        assert_eq!(m.director.rng, rng);
+        // Allowances of 2 serve both.
+        let mut m = world("0.01");
+        replenish_rows(&mut m);
+        with_rows(&mut m, |r| {
+            r.insert(0, row(ALL, ALL, REPLENISH_MOBILE_ARMY_ALLOWED, "2.0"));
+            r.insert(0, row(ALL, ALL, REPLENISH_FACTION_ARMY_ALLOWED, "2.0"));
+        });
+        replenish_step_in_order(&mut m);
+        assert!(m.world.forces[&ForceId(1001)].units.iter().all(|u| (85..=95).contains(&u.men)));
+        // An army aboard a navy, or with enough men, draws nothing.
+        let mut m = world("0.01");
+        replenish_rows(&mut m);
+        m.world.embarked.insert(ForceId(1001), ForceId(5));
+        replenish_step_in_order(&mut m);
+        assert_eq!(m.director.rng, CaRng::new(RNG_SEED));
+        let mut m = world("0.01");
+        replenish_rows(&mut m);
+        with_rows(&mut m, |r| r.insert(0, row(ALL, ALL, REPLENISH_ARMY_MIN_PCT, "0.8")));
+        replenish_step_in_order(&mut m);
+        assert_eq!(m.director.rng, CaRng::new(RNG_SEED));
+    }
+
+    #[test]
+    fn a_human_to_ai_handover_runs_the_desires_and_hashes_their_state() {
+        let mut m = world("0.0");
+        with_rows(&mut m, |r| r.extend([row(ALL, ALL, BOOST_MIN, "1"), row(ALL, ALL, BOOST_MAX, "1"), row(ALL, ALL, BOOST_AMOUNT, "1500")]));
+        let mut events = Vec::new();
+        m.director_handover(A, C, &mut events);
+        assert_eq!(m.world.factions[&B].treasury, 2500);
+        assert_eq!(m.director.autoresolver_pairs.len(), 1);
+        assert_eq!(m.director.xp_counters.len(), 2);
+        let mut other = m.clone();
+        other.director.xp_counters.insert(B, 9);
+        assert_ne!(other.state_hash(), m.state_hash());
+        let mut other = m.clone();
+        other.director.autoresolver_pairs[0] = (C, A);
+        assert_ne!(other.state_hash(), m.state_hash());
     }
 }

@@ -16,14 +16,25 @@ Last updated: 2026-10-12. Main tests at last full run (2026-10-08): `cargo test 
   merge, applying the worker's BACKLOG ticks/Polish lines in the merge commit → `bash tools/progress.sh`
   → push (the hook syncs public #2) → publish in batches. Running work = the BACKLOG `(running: …)`
   markers and `git worktree list`; merged work = `git log`.
-- **Resume points (2026-10-11 wrap-up, usage 80%):** merged 2026-10-11: polish9, polish10, region-transfer, sea-water (47cade7a),
-  gait-jitter (f48faac9). Rule (user, 2026-10-11): a forced fix round also fixes the review's local notes (CLAUDE.md). Every branch
+- **Resume points (2026-10-12 wrap-up, usage 90%):** merged 2026-10-12: ui-fails, self-checks, self-checks2, hud-state,
+  polish11-14, gait-infantry, director-rng (a3edf975); user checks passed: infantry/cavalry gait, battle HUD. Every branch
   below is pushed; resume each with a fresh worker (brief points at its branch + this line):
-  1. ui-fails, hud-state and polish11 merged 2026-10-12 (speed ring, card highlight; treasury saturates as ORIGINAL BUG fix, field promotion constant-false CONFIRMED).
-  2. self-checks (a)-(i) all merged 2026-10-12 (results in analysis/fidelity/IN_GAME_CHECKS_2026-10-10.md).
-  3. gait-infantry (NR-gait-infantry, Opus): each man his own timed move (per-soldier speed and lag), path-end clamp, one
-     layout; review round 2 fixes running (formation grid vs depth, finished men under a moving goal, settling man);
-     then trace its leftover PROVISIONAL (UNITS_TERRAIN_FIDELITY.md §1.9).
+  1. payment-capital (`dded18bb`, worker done): review stopped early, no blocking findings yet (ORIGINAL BUG 0x00C4AB7E
+     confirmed, cap lives once behind `diplomacy.demanded_payment`). Rerun the review: tests, and compare main vs branch
+     capitals on all 8 startpos (18 eur / 18 mp_eur / 5 ita / 2 mp_ita factions show none). Notes so far: treaties.rs ~721
+     and seams.rs ~44 say "when proposed" but ours caps at accept; the exe also uses the capped amount in the row text
+     (0x00C4AB85). Worker's BACKLOG lines: tick §0 payment cap + capital; trim polish line ~687 ("deal → item copy site not
+     found", "save capital → +0x72C INFERRED"); add "payments Propose rows and the AI's payment evaluation call `demanded_payment`".
+  2. polish15 (`647140e9`, fix round partial): blocking #1 left: model the re-lay gate (`0x00581200`, re-lays when +0x20 >
+     men × 0.5; resume from UNITS_TERRAIN_FIDELITY.md "When the men are re-laid" Open list), plus `0x0051A530` 0x80 order
+     struct / vtable `0x01325470` naming (completeness 62). Then fix-commit review. At merge: tick its four polish lines; add
+     BACKLOG "view: re-place the living men after losses (view.rs ~1375-1379, ~1653 cache spawn places; exe re-slots via
+     shape vfuncs +0x30/+0x34)".
+  3. gait-trace (`46b276d8`, partial): line 223 done (+0x58 counter, re-plan on the exe's f32 rule, CONFIRMED 0x00581B73);
+     run `cargo test --workspace` (state hash now has the issue time). Left: 224 (decompile 0x005307E0 / 0x00574E90 for n
+     +0x27C, else debugger at 0x0054C691), 225-226 (view.rs), Ghidra name 0x00506C00 ConstructBattleModel. New line:
+     "Battle tick counts the deployment ticks (exe Battle Model +0x58)" (PROVISIONAL on `Battle::tick`).
+  4. treasury2: WIP after a session crash (`e285f8e3` + the wrap-up commit), unreviewed; resume from its commit message.
 - **Disk:** C: filled up on 2026-10-09; 21 merged worktrees were removed (~100 GB back). Remove a
   worktree after its merge; check `df -h /c` before starting builds.
 - **Next:** §0, several workers tracing in parallel under the Ghidra writer lock, §11: only the framework parts that avoid costly refits later (rule-seams running), the rest waits for its turn (user, 2026-10-10); the unwrap audit last.
@@ -51,10 +62,6 @@ Last updated: 2026-10-12. Main tests at last full run (2026-10-08): `cargo test 
     not). Possibly unit dust (fx_draw.rs ~506, emitted per
     unit) drawn with the wrong size/velocity/blend; find which effect emits it, then compare with
     the original.
-  - Battle HUD (user check 2026-10-10, `--battle`): resizing 1920x1080 → 1280x720 scales and centres it like the original;
-    pause and speed buttons work. Wrong: (1) the speed control's selected-state circle doesn't move to the clicked button;
-    (2) selecting a unit (card click or in the world) doesn't highlight its unit card. Queued: hud-state after ui-fails merges
-    (same files).
   - Sea water (user check 2026-10-10, NHB_Nile, original side by side): ours pale sky-blue and far too bright, original dark
     grey-green; our waves are long regular stripes, the original small irregular chop; foam on shows no change. Ships, naval
     HUD and the wind compass are §4 (not started), not this bug.
@@ -88,13 +95,6 @@ Batched for the user: only what the screenshot harness can't do (a worker ran th
 `analysis/fidelity/IN_GAME_CHECKS_2026-10-10.md`; our shots in `ntw-evidence\screens\ours\2026-10-10_*.png`).
 Delete a line once checked and record the result where it belongs. Base command: `cargo run --release -p napoleon -- <flags>`.
 - (user 2026-10-10: the rest is verified by workers from data, layouts, the harness and Ghidra; only a look that no file, trace or harness shot can settle comes here)
-- **Gait (gait-blend3 + gait-jitter 2026-10-11, motion needs eyes; FOR_USER):** `--battle --no-intro --ai off`; order cavalry and infantry to walk, run, then walk.
-  Check: cavalry no longer step in lockstep (each display has its own 0.95-1.05 gait speed, `0x0078B8A0`), and no hiccup at
-  the run → walk change. Known left: a unit setting off from a stand still takes its first step together (BACKLOG §3).
-
-- **Battle HUD (hud-state, 2026-10-12, one quick look):** `--battle --no-intro --ai off`; change the speed
-  (buttons, Space, Tab): the ring sits on the current speed. Click a unit card: it lights up, also under
-  the pointer. Our shot: `ntw-evidence\screens\ours\2026-10-12_battle_hud_ffwd_selected_card.png`.
 
 ## Needs the user
 

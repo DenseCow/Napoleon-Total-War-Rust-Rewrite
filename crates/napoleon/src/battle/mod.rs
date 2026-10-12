@@ -68,9 +68,6 @@ pub struct UnitInfo {
     pub size_m: Vec2,
     /// `units` key (for the soldier models).
     pub key: String,
-    /// Ranks in the drawn formation (`unit_stats_land` #43, or from the battle file's frontage;
-    /// INFERRED, see setup).
-    pub ranks: u32,
     /// Faction key of the unit's army (uniforms, unit-card folder), e.g. `ita_french_republic`.
     pub faction: String,
     /// True for the human player's units (selectable, take orders).
@@ -94,7 +91,6 @@ impl Default for UnitInfo {
             name: String::new(),
             size_m: Vec2::new(5.0, 2.0),
             key: String::new(),
-            ranks: 1,
             faction: String::new(),
             controllable: false,
             army: (0, 0),

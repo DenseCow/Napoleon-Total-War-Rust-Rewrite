@@ -10,11 +10,11 @@ the original's values. See the Goal section of `CLAUDE.md`.
 
 Generated 2026-10-12 by `bash tools/progress.sh` (from `tools/backlog_count.sh` and `tools/tag_count.sh`); never edit it by hand.
 
-Tags left in the code (done means zero): 1760 (666 PROVISIONAL, 102 PLACEHOLDER, 992 INFERRED), plus 597 UNKNOWN.
+Tags left in the code (done means zero): 1776 (684 PROVISIONAL, 102 PLACEHOLDER, 990 INFERRED), plus 598 UNKNOWN.
 
 | Section | Done | Partly done | To do |
 |---|---|---|---|
-| 0. Cross-cutting fidelity | 97 | 0 | 48 |
+| 0. Cross-cutting fidelity | 97 | 0 | 50 |
 | 1. File formats and data | 11 | 0 | 0 |
 | 2. Graphics and rendering | 0 | 11 | 32 |
 | 3. Battle gameplay (land) | 1 | 11 | 23 |
@@ -102,8 +102,8 @@ first. Evidence and round history live there; the pre-2026-10-07 long form of th
 - [x] Recruitable population gate and charge (`0x00A89550` / `0x00AAF190` / `0x00A61AA0`, `REGION_FACTORS` #2)
 - [x] Capture refunds a port's naval queue items to the old owner (`0x00B1A760(1)` per port); our `occupy` refunds nothing; `0x00B58A30` is a fourth capture variant missing from the notes
 - [ ] `CDIR_INTENTION_TRANSFER_REGION_OWNERSHIP` (`0x00B93840`, applied via `0x00B58A30`): merged 2026-10-11 (region-transfer: campaign director in the model behind seam `director.region_transfer`, TurnStep::Handover, cdir_configs keyed campaign_faction_variable `0x00FCD150`, CDIR_INTERFACE + counter in .esf `0x00B94170`/`0x00B9D6E0`/`0x00B9B6C0`, startpos director RNG, 4 ORIGINAL BUGs fixed; CAMPAIGN_FIDELITY.md). Left (PROVISIONAL): the stored relation copy `rival_score` reads (next line), the siege test (§5 "Sieges on the campaign map"), sea mobiles, the director's other RNG users (below)
-- [ ] (running: director-rng) Stored CAI relation belief (`0x00A89E00` faction +0x100 list +8, written by `0x00ABAFB0`): when the copy is refreshed (deal proposals; the setter of the +0x6DC re-mark flag); the director's `rival_score` reads it
-- [ ] (running: director-rng) Director: the other desires that draw on the director RNG (`0x00BAC560`, `0x00BAC9C0`, `0x00BC06E0`, `0x00BD4A60`, `0x00BAED7A`), so the RNG sequence stays 1:1
+- [ ] Stored CAI relation belief (`0x00A89E00` faction +0x100 list +8, written by `0x00ABAFB0`): when the copy is refreshed (deal proposals; the setter of the +0x6DC re-mark flag); the director's `rival_score` reads it
+- [ ] Director: the other desires that draw on the director RNG (`0x00BAC560`, `0x00BAC9C0`, `0x00BC06E0`, `0x00BD4A60`, `0x00BAED7A`): merged 2026-10-12 (director-rng: at-war, boost, XP, replenish draws; at-war order `0x00ABAFB0` CONFIRMED; garrison skip `0x00C3B7A0` +0xFC CONFIRMED). Left: the garrison object chain +0x12C→+0x34 (PROVISIONAL, ntw_sim director.rs)
 - [ ] Path grid: sea cells carry their sea region (`0x00BB52E0`), used by the director's transfer checks
 - [ ] Trace: does a region transfer eject the old owner's agents (and where to)
 - [ ] 14 recruit-cost save misses: prices are fixed at queue time (traced 2026-10-10); 13 explained by effects changed after queueing; left: Spain priced +49 vs +24 (2×25 − 1, UNKNOWN); trace when `0x008B16C0` refreshes the faction effect sum (18 callers)
@@ -119,6 +119,8 @@ first. Evidence and round history live there; the pre-2026-10-07 long form of th
 - [ ] (running: treasury2) Gate byte +0x1B7 (`0x009D1CD0`) is not modelled
 - [ ] (running: treasury2) Map the remaining treasury charge/credit callers (CAMPAIGN_FIDELITY.md §Treasury changes); queue item +0x24 is not modelled
 - [ ] (running: treasury2) `0x008F56C0` (paid when both sides are human) is not modelled
+- [ ] (running: payment-capital) Diplomacy: cap a demanded one-off payment at the payer's treasury (`0x00C4AB4E`–`0x00C4AB82`; `deal_item_commands` / `one_off_payment` do not cap; check the negative-treasury case for an ORIGINAL BUG; CAMPAIGN_FIDELITY.md deal → item copy)
+- [ ] (running: payment-capital) Importer: read the capital even when the faction has no `FORT_UPGRADE_MANAGER` block, as the exe does (`0x0087B1DA`; `crates/ntw_campaign/src/details.rs` `faction_details`)
 
 ### 0-C middleware — [analysis/fidelity/MIDDLEWARE_VERIFY.md, BINK.md]
 - [x] Miles mixing rules and loudness (CONFIRMED against the exe); game-speed sfx rule; UI sound kinds
@@ -218,10 +220,10 @@ SpeedTree leftovers are in §2.
 - [ ] `battle_prelude.lua:72` drops CreateFromLayout's x, y: root.luac's pip_frame and xp_bling and the esc_menu options (all 0,0) land at their file offsets
 - [ ] Trace the campaign `Time` counter (`0x00A0EB80`; pulse `0x009D5F31`) against the main-loop clock; if it is the same struct, share the battle `advance_ui_clock` (campaign's is uncapped and fractional, PROVISIONAL)
 - [ ] Port the campaign battle wind-level roll (`0x00535B30`): a campaign sea battle takes the first sea_surfaces row for now (PROVISIONAL, napoleon terrain/water.rs `sea_settings`).
-- [ ] Gait: trace counter +0x58 at `0x00581B73` (the rare 10-tick re-plan; `TIMED_MOVE_REPLAN_TICKS` PROVISIONAL, ntw_sim battle model.rs).
-- [ ] Gait: read n and k at `0x0054C691` (loop frame count).
-- [ ] Gait: the alternative clip's own root speed for carry and playback rate (napoleon battle/view.rs ~1636).
-- [ ] Gait: the stride phase carried out of a transition left early (napoleon battle/view.rs ~678).
+- [ ] (running: gait-trace) Gait: trace counter +0x58 at `0x00581B73` (the rare 10-tick re-plan; `TIMED_MOVE_REPLAN_TICKS` PROVISIONAL, ntw_sim battle model.rs).
+- [ ] (running: gait-trace) Gait: read n and k at `0x0054C691` (loop frame count).
+- [ ] (running: gait-trace) Gait: the alternative clip's own root speed for carry and playback rate (napoleon battle/view.rs ~1636).
+- [ ] (running: gait-trace) Gait: the stride phase carried out of a transition left early (napoleon battle/view.rs ~678).
 
 AI (§6) is paused by the user's section order; its open questions stay in `analysis/ai/AI_RESEARCH.md` §7.
 
@@ -414,11 +416,12 @@ the input; how it is drawn is ours. Items below that say "as the original" mean 
 - [ ] **PARTLY DONE:** Region and settlement labels, selection effects, movement arrows and zone-of-control display. Done (sandbox port 06d6a7e, not checked in game): region labels (names/positions CONFIRMED, rendering PROVISIONAL), movement arrows with the original's assets (layout INFERRED, spacing/colours PROVISIONAL). Open: settlement labels, selection effects, zone of control.
 
 ## 3. Battle gameplay (land)
-- [ ] Gait change blend: merged 2026-10-10 (gait-blend2: mount blend, locomotion ladder with transition clips, acceleration and braking, timed move order, ground by palette colour; UNITS_TERRAIN_FIDELITY.md §1.9-§1.10). Waits for the side-by-side check (HANDOFF). Left:
+- [ ] Gait change blend: merged 2026-10-10 (gait-blend2: mount blend, locomotion ladder with transition clips, acceleration and braking, timed move order, ground by palette colour; UNITS_TERRAIN_FIDELITY.md §1.9-§1.10). User check 2026-10-12: soldiers look good. Left:
   - [ ] Ground for maps without a TGA (`0x00EDCFC0`); the border tie rule; object ground +0x10/+0x18 (`0x0081AC80`)
   - [ ] Debugger sitting at `0x006533E0` to confirm the order source `0x006DC700` (INFERRED; plan in UNITS_TERRAIN_FIDELITY §1.10; also FOR_USER)
   - [ ] Per-soldier timed orders
-  - [ ] (running: gait-infantry) User check 2026-10-11: cavalry now good; infantry may still hitch a little (investigate, same causes as gait-jitter?). Earlier (cavalry lockstep, run → walk hiccup; 2026-10-11 hitch + surge): gait-jitter merged 2026-10-11 (loops over n−1 intervals 0x010DA030, transition end frame, stride phase carried; 11-tick re-plan 0x00581B73, the surge is the original's own); earlier fixed in gait-blend3 (per-display playback scale `0x0078B8A0` on moving gait loops only, frozen poses + speed lerp at the run → walk change); waits for the user's look (HANDOFF). Left: per-soldier speed and start time, so a unit setting off from a stand does not take its first step together
+  - [x] User check 2026-10-11: cavalry now good; infantry may still hitch a little (investigate, same causes as gait-jitter?). Earlier (cavalry lockstep, run → walk hiccup; 2026-10-11 hitch + surge): gait-jitter merged 2026-10-11 (loops over n−1 intervals 0x010DA030, transition end frame, stride phase carried; 11-tick re-plan 0x00581B73, the surge is the original's own); earlier fixed in gait-blend3 (per-display playback scale `0x0078B8A0` on moving gait loops only, frozen poses + speed lerp at the run → walk change); waits for the user's look (HANDOFF). gait-infantry merged 2026-10-12: each man his own timed move (per-soldier speed and lag), path-end clamp, one formation grid; user check 2026-10-12: soldiers look good
+  - [ ] Trace what the follow state's int target key measures (`0x0054D9F0`, key source vfunc +4): model.rs ~1195 re-issues a first issue every tick for a marching enemy (PROVISIONAL); the 2 m least drawn depth `setup::drawn_size` is ours (PROVISIONAL)
   - [ ] Ladder transitions under an action loop (PROVISIONAL); whether one-shots (shot overlay) move the exe's shown node
 - [ ] Battle controls are ours, not the original's (PLACEHOLDER, napoleon/src/battle/input.rs): R restarts with a new seed, F toggles fire at will, arrow keys / Q / E move the camera. Replace them with the original's battle key set read from the shipped key bindings (find the file and the exe's defaults first); keep any restart only behind a test flag (user, 2026-10-08: R is not in the original).
 **Battle rules from §0-A** (moved 2026-10-07; notes in analysis/fidelity/BATTLE_FIDELITY.md)
@@ -671,19 +674,19 @@ Non-blocking review findings, one line each (CLAUDE.md "Done means"). A worker e
 - [ ] Gait (gait-blend3, view.rs): melee idle on a moving unit plays at `loop_rate(ground_speed, gait level)`, but the exe plays kind 0xF at its own rate (trace in `0x007725D0`); `on_levels` scales the Stand rung of a moving graph (kind 0 would be unscaled: trace what node 0 plays); the kind-2 test is decided at three call sites (one helper keyed on the shown clip)
 - [ ] Raise the generic-engine Ghidra functions' completeness: upkeep done (polish7), 9 functions left (analysis/modding/MODDING_AUDIT.md; FUNCTION_DOC_WORKFLOW_V5)
 - [ ] Two-file key tests: which same-key row survives is covered (polish8); still unchecked: that each typed ntw_data table's `key()` is the key the exe merges by
-- [ ] (running: polish13) Ghidra: the 12 functions mod-loading2 named (`0x0108E8F0`, `0x0108EBB0`, `0x0109ECF0`, `0x0105E8E0` ...) are at 4-30% completeness: type their variables; polish7 raised some, `DB_LoadTableFolderMergedByKey` still 0/21 (FUNCTION_DOC_WORKFLOW_V5)
+- [ ] Ghidra: the 12 functions mod-loading2 named (`0x0108E8F0`, `0x0108EBB0`, `0x0109ECF0`, `0x0105E8E0` ...) are at 4-30% completeness: type their variables; polish7 raised some, `DB_LoadTableFolderMergedByKey` still 0/21 (FUNCTION_DOC_WORKFLOW_V5)
 - [ ] `CursorPosition` (ui_prelude.lua ~281) and CampaignUI's label `ScreenPos` (Labels.lua) give screen pixels while the campaign HUD's Position / MoveTo use the 1280x960 scripts' frame; read what the original returns on a wide screen.
 - [ ] `unwrap()` audit on paths that read install or mod data (ntw_formats, ntw_data, pack loading): a malformed file or broken mod must log one error and skip, never panic. Unwraps on the code's own invariants and in tests stay.
 - [ ] `last_income` is not written by the save writer (PROVISIONAL), its meaning changes after `settle_round` (categories 5, 7, 11 only), and `.items.last()` assumes the history ring is saved oldest-first (ntw_sim campaign).
 - [ ] Trace which repeated negotiation-string row the exe picks (`0x00BF5A60` / `0x00C55CC0`); ours keeps the last and warns (ntw_data negotiation tables)
 - [ ] Army recruitment: queue cards never show "Paused" (`0x00A00775`); army-recruit-tab's 34 Ghidra functions at 0-53% completeness
-- [ ] Trace `add_working_directory`'s optional bool argument in `VFS_AddWorkingDirectory` `0x0105CA70`; ours drops the 2nd argument (ntw_data mods.rs ~227)
+- [ ] (running: polish15) Trace `add_working_directory`'s optional bool argument in `VFS_AddWorkingDirectory` `0x0105CA70`; ours drops the 2nd argument (ntw_data mods.rs ~227)
 - [ ] Debugger: who subscribes to the signal at the end of CancelRecruitmentItem (breakpoint `0x008DBB59`); it passes the already-freed item when the cancelled one was last (ORIGINAL BUG only once a listener reads it)
 - [ ] Director (ntw_sim director.rs): queued transfers whose receiver is dead stay in the queue (whether the exe purges them is untraced); `areas()` runs `human_inside` for every area even when only `rival_score` needs areas; ntw_campaign director.rs `fill`: the old-version RNG step's place among the fills is unverified (no vanilla file uses it)
-- [ ] (running: polish13) Ghidra: `pflNextValue` `0x00F859A0` (name/plate); `0x00F72B80`'s 3 void* row locals need row structs
-- [ ] Harness `shot:` without `--campaign-ui-proof` never creates `target/tmp/ui_proof` (napoleon campaign/hud.rs ~442); campaign_ui tests' `setup()` skips the start handicaps (self-checks)
-- [ ] (running: polish13) Ghidra (polish11): portrait constructors/ESF loaders still 13-33% (`0x00992E60`, `0x0098F250`, `0x0098F880`, `0x00990EF0`, `0x00A1A300`; shared helper `0x004F0800` unnamed); deal batch minimum 42; the deal → item copy site not found; the save capital → +0x72C link INFERRED
-- [ ] Sea (water.rs ~237): over-long doc line; `SeaTextures::is_for` could compare `as_ptr()` instead of making a temporary `Weak` (polish12 review)
+- [ ] (running: polish15) Ghidra: `pflNextValue` `0x00F859A0` (name/plate); `0x00F72B80`'s 3 void* row locals need row structs
+- [ ] Ghidra (polish11): portrait constructors/ESF loaders still 13-33% (`0x00992E60`, `0x0098F250`, `0x0098F880`, `0x00990EF0`, `0x00A1A300`; shared helper `0x004F0800` unnamed); deal batch minimum 42; the deal → item copy site not found; the save capital → +0x72C link INFERRED
 - [ ] Diplomacy relations list (self-checks2): grey header with ▲ sort arrow and column divider; alternating row bands
-- [ ] Tests: the evidence-folder lookup is copied 6 times (economy_fidelity.rs ×4, visibility_install.rs, campaign_ui.rs): one shared test helper; campaign_ui region-panel test should print which evidence saves it skipped
+- [ ] Ghidra (director-rng): apply the proposed names listed in CAMPAIGN_FIDELITY.md (director desires section) with their V5 write-ups; `vanilla_director_floats_all_parse` (ntw_campaign economy_fidelity.rs) prints every row
 - [ ] Battle HUD (hud-state): draw the `set_greyscale_t0` / `red_pulse_t0` / `unitcard_burning_t0` UI techniques (UI material); text shaders per state (`+0x12C`, `0x01014FB0`; layout default untraced); `time_request_changed` `is_multiplayer` PROVISIONAL until multiplayer battles; the R reset key rebuilds the sim without telling the speed ring
+- [ ] (running: polish15) Ghidra (gait-infantry): name and V5-document the state-stack pops `0x0056D990` and `0x005359A0`; V5 plate for BuildUnitMoveOrder `0x0051A530`; cite the other files caps `0x00646C70`, `0x00646D40`, `0x0065A6D0` next to `0x0061CAB0`
+- [ ] (running: polish15) Battle (abilities.rs ~216): `width()` with no width set uses the current men (`frontage_m(self.men)`) while `files()` uses `max_men` (gait-infantry review)

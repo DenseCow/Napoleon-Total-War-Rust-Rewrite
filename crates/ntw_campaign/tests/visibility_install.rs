@@ -3,6 +3,8 @@
 //! and the sight the model computes covers what the original saved as visible. Skipped without an
 //! install.
 
+mod common;
+
 use std::path::PathBuf;
 
 use ntw_data::GameDatabase;
@@ -106,13 +108,6 @@ fn shroud_follows_the_turns_and_hides_far_armies() {
     assert!(s.visible.cells().all(|(x, z)| s.explored.get(x, z)));
 }
 
-/// The vanilla saves (read-only evidence copies; `NTW_EVIDENCE_DIR`), if present.
-fn evidence_dir() -> PathBuf {
-    std::env::var_os("NTW_EVIDENCE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default().join(r"Documents\ntw-evidence\saves"))
-}
-
 /// The stealth test (`0x009D1010`) gives every saved hidden flag (`CHARACTER` #22) of the vanilla
 /// saves: armies on light forest ground, or made only of units that can hide (an Austrian colonel
 /// with one hussar unit on grassland), are hidden; the others are not. Rebels are left out (their
@@ -120,7 +115,7 @@ fn evidence_dir() -> PathBuf {
 #[test]
 fn stealth_rule_matches_the_saved_hidden_flags() {
     let dir = data_dir();
-    let ev = evidence_dir();
+    let ev = common::evidence_dir();
     if !dir.is_dir() || !ev.is_dir() {
         eprintln!("skipped: no install or no evidence saves");
         return;

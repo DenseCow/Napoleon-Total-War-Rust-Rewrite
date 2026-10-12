@@ -2,6 +2,9 @@
 //! (read-only) against the eur_napoleon start position, with our `CampaignUI` functions. Skipped when
 //! the install is not there. Log: `cargo test -p ntw_script --test campaign_ui -- --nocapture`.
 
+#[path = "../../ntw_campaign/tests/common/mod.rs"]
+mod common;
+
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -48,13 +51,6 @@ fn open_install(dir: &std::path::Path) -> (ntw_formats::pack::Vfs, Rc<ntw_data::
     (vfs, db)
 }
 
-/// The vanilla saves (read-only evidence copies; `NTW_EVIDENCE_DIR`), if present.
-fn evidence_dir() -> PathBuf {
-    std::env::var_os("NTW_EVIDENCE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default().join(r"Documents\ntw-evidence\saves"))
-}
-
 /// The HUD over the campaign `load` reads (a start position or a save), as `(campaign, human)`, or
 /// for a save without it, as its own campaign and human player.
 fn setup_loaded(dir: &std::path::Path, (vfs, db): &(ntw_formats::pack::Vfs, Rc<ntw_data::GameDatabase>), load: impl FnOnce(&ntw_data::GameDatabase) -> ntw_campaign::LoadedCampaign, played: Option<(&str, &str)>) -> Setup {
@@ -64,6 +60,10 @@ fn setup_loaded(dir: &std::path::Path, (vfs, db): &(ntw_formats::pack::Vfs, Rc<n
         None => (loaded.info.campaign_key.clone(), loaded.info.players.iter().find(|p| p.is_human).expect("a human player").faction_key.clone()),
     };
     loaded.set_human(&human);
+    if played.is_some() {
+        // A start position gets the handicaps a new campaign adds (`0x008DD090`), as the game's turn-1 start does; a save keeps its own.
+        ntw_sim::campaign::effects::apply_start_handicaps(&mut loaded.model);
+    }
     let scripts = ScriptHost::new(loaded.model, &human, ScriptSource::from_install(dir).unwrap()).unwrap();
     let loc = Localisation::from_vfs(vfs).unwrap();
     let host = UiScriptHost::new(ScriptSource::from_install(dir).unwrap(), loc, FrontEndFacts::default(), (1280.0, 960.0), ntw_sim::limits::GameLimits::default()).unwrap();
@@ -2268,12 +2268,12 @@ fn region_details_panel_is_filled_from_the_campaign() {
 fn region_details_panel_shows_the_vanilla_saves_values() {
     use ntw_sim::campaign::population;
     let dir = data_dir();
-    let ev = evidence_dir();
-    let saves: Vec<(&str, PathBuf)> = ["orig_fr_t1", "orig_fr_may1811", "auto_orig_spa_0245", "auto_nr4_t4", "auto_after_c8", "orig_over_nr4_0252"]
-        .into_iter()
-        .map(|name| (name, ev.join(format!("{name}.save"))))
-        .filter(|(_, p)| p.is_file())
-        .collect();
+    let ev = common::evidence_dir();
+    let wanted = ["orig_fr_t1", "orig_fr_may1811", "auto_orig_spa_0245", "auto_nr4_t4", "auto_after_c8", "orig_over_nr4_0252"];
+    let (saves, missing): (Vec<(&str, PathBuf)>, Vec<_>) = wanted.into_iter().map(|name| (name, ev.join(format!("{name}.save")))).partition(|(_, p)| p.is_file());
+    if !missing.is_empty() {
+        eprintln!("skipped evidence saves (not in {}): {:?}", ev.display(), missing.iter().map(|m| m.0).collect::<Vec<_>>());
+    }
     if !dir.join("data.pack").is_file() || saves.is_empty() {
         eprintln!("skipped: no install at {} or no evidence saves in {}", dir.display(), ev.display());
         return;
@@ -2606,9 +2606,7 @@ fn settlement_recruitment_card_price_is_the_regions_entry_cost() {
     let Some(s) = setup() else { return };
     let paris = s.scripts.state().model.world.regions.values().find(|r| r.key == "eur_france").unwrap().id;
     let (base, all, cost) = {
-        let mut st = s.scripts.state_mut();
-        // The handicaps a new campaign adds (`0x008DD090`), as the game's turn-1 start does.
-        ntw_sim::campaign::effects::apply_start_handicaps(&mut st.model);
+        let st = s.scripts.state();
         let m = &st.model;
         let r = m.world.regions.get(&paris).unwrap();
         let set = ntw_sim::campaign::economy::region_effect_set(m, r);

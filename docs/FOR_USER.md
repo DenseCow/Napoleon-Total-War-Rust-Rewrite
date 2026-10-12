@@ -11,7 +11,7 @@ The morning report from night sessions, newest night first. Two lists per night:
 
 ### Needs you
 
-- **Infantry gait:** you saw a slight hitch on infantry still; a worker investigates next session (cavalry and sea passed, 2026-10-11).
+- Nothing open.
 
 ### Done
 
@@ -39,6 +39,8 @@ The morning report from night sessions, newest night first. Two lists per night:
 
 ### Needs you
 
+- Nothing open.
+
 - (nothing yet)
 
 ### Done tonight
@@ -62,6 +64,8 @@ The morning report from night sessions, newest night first. Two lists per night:
   Then Sat/Sun/Mon at 11 points each leaves ~6 for Tuesday before the Wed 00:00 reset. Start each day around 2 pm.
 
 ### Needs you
+
+- Nothing open.
 - Moved to Claude's self-checks (2026-10-10): diplomacy negotiation, region details panel, own save + map display (still queued). The new-campaign army cap is traced and CONFIRMED (2026-10-12). The regions/techs decision is settled (deal-region, deal-ai merged).
 ### Done tonight
 
@@ -112,6 +116,8 @@ The morning report from night sessions, newest night first. Two lists per night:
 ## Night of 2026-10-07
 
 ### Needs you
+
+- Nothing open.
 
 Base command: `cargo run -p napoleon -- <flags>`. The full check list is under HANDOFF "Needs an in-game check".
 

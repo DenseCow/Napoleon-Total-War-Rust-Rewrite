@@ -199,6 +199,21 @@ pixels. Still open (the tabs, portraits, Lists docking and the technology title 
   tables (built at 0x00E14105): `trait_level_effects` (summed into +0x48), `trait_ability_effects` (+0x68),
   `trait_attribute_effects` (+0x78, the AttributeEffects list) and `trait_attribute_situation_effects` (+0x88);
   the trait row shows only the first and third.
+  Row records (polish13, 2026-10-12, static trace; struct types created in Ghidra; saved by the manager after the blocking dialog closed):
+  - `TraitLevelEffectRecord` (0x24, init `0x00F0DD60`): level key +0, `TraitEffectEntry` +0x0C.
+  - `TraitAbilityEffectRecord` (0x18, init `0x00F0D8F0`): level key +0, ability index +0x0C (`0x00F9C230`,
+    12 keys at `0x0145D9B0`; 12 = unknown key, and `0x00F21510` skips such rows), value +0x10 (DB row +0x18),
+    the ability record's +0x14 at +0x14.
+  - `TraitAttributeEffectRecord` (0x20, `InitTraitAttributeEffect 0x00F0D990`): level key +0, attribute
+    **index** +0x0C (`0x00F9C3E0` over the 14 `g_apszAgentAttributeKeys`; 14 = unknown key, still stored; the
+    plate's "attribute pointer" is wrong), integer value +0x10, formatted description +0x14.
+  - `TraitAttributeSituationEffectRecord` (0x20, init `0x00F0DA60`): level key +0, situation index +0x0C
+    (`0x00F9C370`, one key, "dummy"), value +0x10, an empty string +0x14.
+  - The tables argument also holds the effects table at +0. Table getters: character_trait_levels `0x00E14070`
+    (db +0x5E0), effects `0x00E1B6B0` (+0x2D0), and `0x00E30190` (+0x5D0), `0x00E2FD80` (+0x5DC), `0x00E2FE50`
+    (+0x5D8), `0x00E2FF20` (+0x5D4) for the four effect tables.
+  - `FormatEffectTextWithValues 0x00F859A0` already has its name, plate and `pflNextValue` (4th parameter);
+    only its char-pointer local is untyped.
 - o6 Research and Technology: Educational Buildings (Oxford); Civil / Military / Industrial columns.
 
 ## UIEd template library (`uied.templates`)

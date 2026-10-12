@@ -462,7 +462,7 @@ fn historical_armies(db: &GameDatabase, setup: &SetupData, key: &str, spec: &Bat
 }
 
 /// What a battle file says about one unit: men (`num_soldiers`), place, facing, frontage
-/// (drawn width; ranks = men / files, INFERRED), experience and general.
+/// (the files; the ranks follow from the men, `LandUnit::formation_grid`), experience and general.
 fn apply_spec_unit(db: &GameDatabase, key: &str, su: &SpecUnit, unit: &mut LandUnit, info: &mut UnitInfo) {
     if let Some(n) = su.num_soldiers.filter(|&n| n > 0) {
         // The file's number is the card's men as is: the parser 0x0050CAE0 hands num_soldiers to the card
@@ -473,14 +473,14 @@ fn apply_spec_unit(db: &GameDatabase, key: &str, su: &SpecUnit, unit: &mut LandU
     // Battle-file orientation: 0 = +y, π/2 = +x (install test `armies_face_each_other`).
     unit.facing = std::f32::consts::FRAC_PI_2 - su.orientation;
     if let (Some(width), Some(stats)) = (su.width.filter(|w| *w > 0.0), db.unit_stats(key)) {
-        let files = (width / stats.spacing_file_close.max(0.1)).round().max(1.0);
-        let ranks = (unit.men.max(1) as f32 / files).ceil().max(1.0);
-        info.ranks = ranks as u32;
-        info.size_m = Vec2::new(width, (ranks * stats.spacing_rank_close).max(2.0));
-        (unit.formation_width, unit.formation_depth) = (info.size_m.x, info.size_m.y);
         // The front rank: the men who fire with the default drill (`shooting::volley_plan`).
-        unit.formation_files = files as u32;
+        unit.formation_files = (width / stats.spacing_file_close.max(0.1)).round().max(1.0) as u32;
+        unit.formation_width = width;
+        unit.formation_rank_spacing = stats.spacing_rank_close;
     }
+    // The drawn block: the model's one grid (`LandUnit::formation`), with or without a width; the
+    // model caps the files, and the width with them, at the men (`LandUnit::files`).
+    info.size_m = drawn_size(unit);
     info.experience = su.experience.unwrap_or(0);
     // Byte `unit+0xD48` is the experience level (CONFIRMED: exposed as "Experience" by `0x005ABF40`
     // and `0x005CD340`; read by the waver/rout timers `0x0053E4D0`/`0x0053A720`). The battle file's
@@ -966,7 +966,8 @@ fn make_unit(db: &GameDatabase, setup: &SetupData, key: &str, id: u32, side: u8)
         None => (u.walk_speed, u.run_speed) = if is_cavalry { (3.0, 9.0) } else { (1.5, 4.0) },
     }
 
-    // Drawn size from the real formation depth and spacing (close order).
+    // The formation from the real ranks and spacing (close order): the files the default ranks
+    // give, the front rank (the men who fire with the default drill, `shooting::volley_plan`).
     let ranks = if stats.default_ranks > 0 {
         stats.default_ranks as u32
     } else if is_cavalry {
@@ -975,16 +976,25 @@ fn make_unit(db: &GameDatabase, setup: &SetupData, key: &str, id: u32, side: u8)
         FALLBACK_RANKS.0
     };
     let files = (stats.num_men.max(1) as f32 / ranks as f32).ceil();
-    let size_m = Vec2::new(
-        (files * stats.spacing_file_close).max(5.0),
-        (ranks as f32 * stats.spacing_rank_close).max(2.0),
-    );
-    // The model's formation size (skirmish strips, defence pieces): the drawn block.
-    (u.formation_width, u.formation_depth) = (size_m.x, size_m.y);
-    // The front rank: the men who fire with the default drill (`shooting::volley_plan`).
     u.formation_files = files as u32;
-    let info = UnitInfo { id, name: record.dev_name.clone(), size_m, key: key.to_owned(), ranks, category: record.category.clone(), ..Default::default() };
+    // The model's formation size (skirmish strips, defence pieces) and the drawn block: one grid
+    // (`LandUnit::formation`), its depth the grid's ranks times the rank spacing.
+    u.formation_width = (files * stats.spacing_file_close).max(5.0);
+    u.formation_rank_spacing = stats.spacing_rank_close;
+    let size_m = drawn_size(&u);
+    let info = UnitInfo { id, name: record.dev_name.clone(), size_m, key: key.to_owned(), category: record.category.clone(), ..Default::default() };
     (u, info)
+}
+
+/// PROVISIONAL (ours, not traced: no such floor is known in the exe): the least depth of a unit's
+/// drawn block (its outline box, deployment spacing), so a one-rank line still shows as a strip.
+/// The model's depth ([`LandUnit::depth`], the men's rank pitch) keeps no floor.
+const MIN_DRAWN_DEPTH_M: f32 = 2.0;
+
+/// The drawn block of a unit: the model's width and depth (one grid), the depth at least
+/// [`MIN_DRAWN_DEPTH_M`].
+fn drawn_size(u: &LandUnit) -> Vec2 {
+    Vec2::new(u.width(), u.depth().max(MIN_DRAWN_DEPTH_M))
 }
 
 #[cfg(test)]
