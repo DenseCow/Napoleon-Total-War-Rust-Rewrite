@@ -203,7 +203,6 @@ pub fn pointer(
                 crate::frontend::ui_event_sound(&hud.host, new, crate::audio::UiEvent::MouseOn, &mut sounds);
             }
             hud.hovered = hit;
-            hud.host.campaign_hover(hit);
         }
         if mouse.just_released(MouseButton::Right)
             && let Some(h) = hit
@@ -646,7 +645,6 @@ fn click(hud: &mut CampaignHud, id: &str, sounds: &mut MessageWriter<crate::audi
         if let Some((n, r)) = t {
             hud.host.set_cursor_position(r.x + r.w / 2.0, r.y + r.h / 2.0);
             hud.host.pointer(n, PointerEvent::Enter);
-            hud.host.campaign_hover(Some(n));
             info!("Harness: hovering {hover}");
         }
         return;

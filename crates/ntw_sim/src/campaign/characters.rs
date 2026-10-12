@@ -27,7 +27,7 @@ pub struct TraitRule {
     pub no_going_back_level: i32,
     /// `character_traits` #3: eviction priority.
     pub priority: i32,
-    /// `character_traits` #2 (INFERRED hidden).
+    /// `character_traits` #2 hidden: left out of the character's trait list in the UI (CONFIRMED, `0x008C65A0`).
     pub hidden: bool,
     /// Traits that lose points when this one is gained (`trait_to_antitraits` rows (this, x)).
     pub antitraits: Vec<String>,

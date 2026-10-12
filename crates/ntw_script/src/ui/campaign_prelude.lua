@@ -51,8 +51,6 @@ function __ntw_campaign_ready(root)
     end
 end
 
--- Tooltips: the shared `__ntw_tooltip` (ui_prelude.lua); the campaign HUD's name for it.
-__ntw_campaign_tooltip = function(...) return __ntw_tooltip(...) end
 
 -- CampaignSettlement(address): the engine's settlement handle (CONFIRMED class name in the exe and
 -- template.city_info_bar.lua's calls: Settlement(), LabelDetails(), Release()).

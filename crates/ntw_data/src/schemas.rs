@@ -51,9 +51,13 @@ db_record! {
         unknown_44: i32,
         /// #10 @0x48 L: unit card group / commander type.
         unit_card_group: Option<String>,
-        /// #11 @0x54 M: campaign model.
+        /// #11 @0x54 M: campaign model; also the card picture of a unit without a uniform for its faction
+        /// (`UNIT_RECORD` +0x48, `data/ui/units/icons/%S` in `0x00EC2A40`, CONFIRMED: every value names a file
+        /// there, e.g. `placeholder_cavalry`, `dhow`): [`crate::GameDatabase::unit_icon`].
         campaign_model: String,
-        /// #12 @0x60 M: second model.
+        /// #12 @0x60 M: second model; also the info picture of a unit without a uniform for its faction
+        /// (`UNIT_RECORD` +0x54, `data/ui/units/info/%S` in `0x00EC2DD0`, CONFIRMED: every value names a file
+        /// there, e.g. `steamer`): [`crate::GameDatabase::unit_info_picture`].
         model_2: String,
         /// #13 @0x6C H: icon / info key.
         info_key: String,
@@ -82,6 +86,25 @@ db_record! {
         ai_role: Option<String> => since 3,
         /// #24 @0xB0 {v>=4}: UNKNOWN flag.
         unknown_b0: bool => since 4,
+    }
+}
+
+db_record! {
+    /// One row of `uniforms` (`ssss`, 1120 rows): a unit's look for one faction. Lookups stay on #0 (the uniform
+    /// key), but a mod merge keys on faction + unit like the exe (loader `0x00FC05B0`, join at `0x00FC1014`,
+    /// record `+0xC` and `+0x24`; `MOD_LOADING.md` §3.2), so a mod uniform with a new #0 still overrides its unit
+    /// and faction.
+    pub struct UniformRecord in "uniforms", key = uniform, merge = faction + unit {
+        /// #0 H: uniform key, e.g. `Britain_Cav_Light_Dutch_Light_Dragoons`.
+        uniform: String,
+        /// #1 H: faction key.
+        faction: String,
+        /// #2 @0x18: the variant whose pictures the unit shows: `ui/units/icons/<variant>_icon` and
+        /// `ui/units/info/<variant>_info` (`0x00EC2A40` / `0x00EC2DD0`; CONFIRMED: all 1120 name an icon file),
+        /// e.g. `United_Netherlands_Cav_Light_Light_Dragoons`.
+        variant: String,
+        /// #3 H: unit key.
+        unit: String,
     }
 }
 

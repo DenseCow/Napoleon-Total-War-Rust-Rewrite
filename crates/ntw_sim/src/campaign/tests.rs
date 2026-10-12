@@ -2432,6 +2432,18 @@ fn duel_and_assassination_chances_follow_the_exe() {
     m.world.character_details.get_mut(&CharacterId(105)).unwrap().attributes[0].1 = 1;
     assert_eq!(duel_chance(&m, CharacterId(104), CharacterId(105), Weapon::Pistols), Some(75));
     assert_eq!(duel_chance(&m, CharacterId(103), CharacterId(105), Weapon::Pistols), None);
+    // The picker's weapon (0xE in `0x00922940`): the target's better one by his clamped skills,
+    // pistols on a tie (105: pistols 1, swords 1).
+    use super::agents::duel_quoted_weapon;
+    assert_eq!(duel_quoted_weapon(&m, CharacterId(105)), Weapon::Pistols);
+    m.world.character_details.get_mut(&CharacterId(105)).unwrap().attributes[1].1 = 2;
+    assert_eq!(duel_quoted_weapon(&m, CharacterId(105)), Weapon::Swords);
+    // Clamped to 0..=9 first: 12 and 9 tie, so pistols.
+    m.world.character_details.get_mut(&CharacterId(105)).unwrap().attributes[1].1 = 12;
+    m.world.character_details.get_mut(&CharacterId(105)).unwrap().attributes[0].1 = 9;
+    assert_eq!(duel_quoted_weapon(&m, CharacterId(105)), Weapon::Pistols);
+    let a = &mut m.world.character_details.get_mut(&CharacterId(105)).unwrap().attributes;
+    (a[0].1, a[1].1) = (1, 1);
     // The rake (skill 1 + 2 = 3) against B's gentleman (rank 2 in research): 76.92308 / 5 × 3.5.
     assert_eq!(assassination_chance(&m, CharacterId(103), CharacterId(105)), Some(53));
     // Against a colonel: impossible; a gentleman cannot assassinate.
@@ -2639,6 +2651,11 @@ fn building_sabotage_damages_the_building() {
     // S = rank 2; k = 3 (chain number 0): 2 / (round((level + 1) × 3) + 2) × 100.
     let expect = ((2.0 / (((level + 1) as f32 * 3.0).round() + 2.0)) * 100.0) as i32;
     assert_eq!(building_sabotage_chance(&m, CharacterId(103), RegionId(11), slot), Some(expect.clamp(5, 95)));
+    // S = 0: the floor, 5, not "no chance" (`0x00922C90` jumps to its return-5 at `0x00922D6A`),
+    // so the building stays a target in the picker.
+    agent_details(&mut m, 103, &[("can_sabotage", 1, "subterfuge")], &[("subterfuge", 0)]);
+    assert_eq!(building_sabotage_chance(&m, CharacterId(103), RegionId(11), slot), Some(5));
+    agent_details(&mut m, 103, &[("can_sabotage", 1, "subterfuge")], &[("subterfuge", 2)]);
     let ev = m.apply(CampaignCommand::SabotageBuilding { agent: CharacterId(103), region: RegionId(11), slot }).unwrap();
     let outcome = ev.iter().find_map(|e| match e {
         CampaignEvent::AgentActionResolved { outcome, .. } => Some(*outcome),
@@ -2696,6 +2713,7 @@ fn model_with_a_depot() -> CampaignModel {
     let mut rules = (*m.rules).clone();
     let guard = rules.units["test_recruit"].clone();
     rules.units.insert("test_guard".into(), guard);
+    rules.allow_unit_for_all("test_guard");
     rules.buildings.insert(
         "test_depot".into(),
         super::rules::BuildingRules { chain: "test_chain".into(), units_allowed: vec!["test_guard".into(), "test_recruit".into()], ..Default::default() },
@@ -4057,28 +4075,34 @@ fn the_fog_cell_primitive_agrees_with_the_position_query_and_covers_the_whole_ma
         }
     }
 
-    // 3. `knows` is the labels layer's test and must NOT be `sees`: an explored-but-not-visible
-    //    position is still drawn and still labelled, so `knows` is true where `sees` is false.
+    // 3. The labels layer's test is the hide set alone (`0x009BAA90` → `0x00B11E70`), not `sees`
+    //    nor "seen once": explored, in sight and never seen all keep their labels; only the
+    //    hidden cell (10, 10) loses it, though it is also visible.
     let explored_at = m.cell_centre(3, 4).unwrap();
-    assert!(m.knows(A, explored_at), "seen once: still labelled");
+    assert!(!m.hides_map_label(A, explored_at), "seen once: labelled");
     assert!(!m.sees(A, explored_at), "...but not currently in sight");
-    assert!(m.knows(A, m.cell_centre(60, 45).unwrap()) && m.sees(A, m.cell_centre(60, 45).unwrap()), "in sight now");
-    assert!(!m.knows(A, m.cell_centre(0, 0).unwrap()), "never seen: no label");
-    assert!(m.knows(B, m.cell_centre(0, 0).unwrap()), "a faction with no shroud knows the whole map");
+    assert!(!m.hides_map_label(A, m.cell_centre(60, 45).unwrap()), "in sight now: labelled");
+    assert!(!m.hides_map_label(A, m.cell_centre(0, 0).unwrap()), "never seen: still labelled");
+    assert!(m.hides_map_label(A, m.cell_centre(10, 10).unwrap()), "in the hide set: no label");
+    assert!(!m.hides_map_label(A, (1.0e6, -1.0e6)), "off the grid: the tree lookup fails, labelled");
+    assert!(!m.hides_map_label(B, m.cell_centre(10, 10).unwrap()), "no shroud: the test is skipped");
+    m.world.shrouds.get_mut(&A).unwrap().active = false;
+    assert!(!m.hides_map_label(A, m.cell_centre(10, 10).unwrap()), "shroud off (+0x50 clear): labelled");
+    m.world.shrouds.get_mut(&A).unwrap().active = true;
 
     // 4. `fog_state == Visible` is exactly `sees` -- on the grid, off it, with and without a
-    //    shroud -- so `knows` can never be false where `sees` is true.
+    //    shroud.
     let probes = [m.cell_centre(3, 4).unwrap(), m.cell_centre(60, 45).unwrap(), m.cell_centre(10, 10).unwrap(), (0.0, 0.0), (1.0e6, -1.0e6)];
     for f in [A, B] {
         for p in probes {
             assert_eq!(m.fog_state(f, p) == FogState::Visible, m.sees(f, p), "{f:?} at {p:?}");
-            assert!(!m.sees(f, p) || m.knows(f, p), "{f:?} at {p:?}: seen but not known");
         }
     }
-    assert!(m.sees(B, (1.0e6, -1.0e6)) && m.knows(B, (1.0e6, -1.0e6)), "no shroud: even off the grid");
+    assert!(m.sees(B, (1.0e6, -1.0e6)), "no shroud: even off the grid");
     m.world.sight_grid = None;
     assert_eq!(m.cell_centre(0, 0), None, "no grid: no cell, and no panic");
     assert_eq!(m.fog_state(A, (0.0, 0.0)), FogState::Visible, "no grid: like `sees`");
+    assert!(!m.hides_map_label(A, (0.0, 0.0)), "no grid: no cell, labelled");
 }
 
 #[test]
@@ -5037,4 +5061,41 @@ fn model_equality_ignores_the_unsaved_negotiation_slot() {
     assert_eq!(a.state_hash(), b.state_hash());
     b.deal_inflation.first += 1;
     assert_ne!(a, b, "saved state still counts");
+}
+
+/// An army's options hold no ships and a navy's no land units: each queue's list is cut to its kind
+/// (`0x00AE5110`, the land list by `0x00B64E00`, the port's by `0x00B64DD0`), even where one building
+/// allows both.
+#[test]
+fn an_army_is_offered_no_ships() {
+    let mut m = commander_recruitment_model();
+    let mut rules = (*m.rules).clone();
+    let mut ship = rules.units["test_recruit"].clone();
+    ship.is_naval = true;
+    rules.units.insert("test_ship".into(), ship);
+    rules.allow_unit_for_all("test_ship");
+    rules.buildings.get_mut("test_building_level").unwrap().units_allowed.push("test_ship".into());
+    m.rules = Arc::new(rules);
+    assert!(m.recruitable_units(RegionId(13)).iter().any(|e| e.unit_key == "test_ship"));
+    let r = m.commander_recruitment(A, CharacterId(100));
+    let mut units: Vec<&str> = r.options.iter().map(|o| o.unit_key.as_str()).collect();
+    units.sort_unstable();
+    assert_eq!(units, ["test_recruit", "test_unit"], "{r:?}");
+}
+
+/// A faction's unit set (`0x00F74CB0`): its grouping's units plus its `allowed` rows, each denied row taking
+/// out one copy; a unit no row names is not in it, and a faction without a set recruits nothing.
+#[test]
+fn a_factions_unit_set_is_its_grouping_and_rows_minus_one_copy_per_denial() {
+    let set = super::rules::faction_unit_set(
+        ["grouped", "grouped_denied", "twice"],
+        [("own", true), ("twice", true), ("twice", false), ("grouped_denied", false), ("never", false)],
+    );
+    let got: Vec<&str> = set.iter().map(String::as_str).collect();
+    assert_eq!(got, ["grouped", "own", "twice"]);
+    let mut rules = CampaignRules::default();
+    rules.faction_units.insert("f".into(), set);
+    assert!(rules.faction_may_recruit("f", "own"));
+    assert!(!rules.faction_may_recruit("f", "unnamed"));
+    assert!(!rules.faction_may_recruit("other", "own"));
 }

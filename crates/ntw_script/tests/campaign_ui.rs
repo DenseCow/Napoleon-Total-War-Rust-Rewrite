@@ -21,6 +21,8 @@ struct Setup {
     scripts: ScriptHost,
     host: UiScriptHost,
     root: NodeId,
+    /// The player's faction key.
+    human: String,
 }
 
 fn setup() -> Option<Setup> {
@@ -35,20 +37,42 @@ fn setup_in(campaign: &str, human: &str) -> Option<Setup> {
         eprintln!("skipped: no install at {}", dir.display());
         return None;
     }
-    let vfs = ntw_formats::pack::Vfs::open_install(&dir).unwrap();
-    let db = ntw_data::GameDatabase::from_vfs(&vfs).unwrap();
     let bytes = std::fs::read(dir.join(format!("campaigns/{campaign}/startpos.esf"))).unwrap();
-    let mut loaded = ntw_campaign::read(&bytes, &db).unwrap();
-    loaded.set_human(human);
-    let scripts = ScriptHost::new(loaded.model, human, ScriptSource::from_install(&dir).unwrap()).unwrap();
-    let loc = Localisation::from_vfs(&vfs).unwrap();
-    let host = UiScriptHost::new(ScriptSource::from_install(&dir).unwrap(), loc, FrontEndFacts::default(), (1280.0, 960.0), ntw_sim::limits::GameLimits::default()).unwrap();
-    host.install_campaign(CampaignLink { state: scripts.shared_state(), human: human.into(), campaign: campaign.into(), map: loaded.info.map_key.clone(), theatres: loaded.info.theatres().map(str::to_owned).collect(), db: Rc::new(db) })
+    Some(setup_loaded(&dir, &open_install(&dir), |db| ntw_campaign::read(&bytes, db).unwrap(), Some((campaign, human))))
+}
+
+/// The install's packs and game database, parsed once for [`setup_loaded`] to reuse.
+fn open_install(dir: &std::path::Path) -> (ntw_formats::pack::Vfs, Rc<ntw_data::GameDatabase>) {
+    let vfs = ntw_formats::pack::Vfs::open_install(dir).unwrap();
+    let db = Rc::new(ntw_data::GameDatabase::from_vfs(&vfs).unwrap());
+    (vfs, db)
+}
+
+/// The vanilla saves (read-only evidence copies; `NTW_EVIDENCE_DIR`), if present.
+fn evidence_dir() -> PathBuf {
+    std::env::var_os("NTW_EVIDENCE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default().join(r"Documents\ntw-evidence\saves"))
+}
+
+/// The HUD over the campaign `load` reads (a start position or a save), as `(campaign, human)`, or
+/// for a save without it, as its own campaign and human player.
+fn setup_loaded(dir: &std::path::Path, (vfs, db): &(ntw_formats::pack::Vfs, Rc<ntw_data::GameDatabase>), load: impl FnOnce(&ntw_data::GameDatabase) -> ntw_campaign::LoadedCampaign, played: Option<(&str, &str)>) -> Setup {
+    let mut loaded = load(db);
+    let (campaign, human) = match played {
+        Some((c, h)) => (c.to_owned(), h.to_owned()),
+        None => (loaded.info.campaign_key.clone(), loaded.info.players.iter().find(|p| p.is_human).expect("a human player").faction_key.clone()),
+    };
+    loaded.set_human(&human);
+    let scripts = ScriptHost::new(loaded.model, &human, ScriptSource::from_install(dir).unwrap()).unwrap();
+    let loc = Localisation::from_vfs(vfs).unwrap();
+    let host = UiScriptHost::new(ScriptSource::from_install(dir).unwrap(), loc, FrontEndFacts::default(), (1280.0, 960.0), ntw_sim::limits::GameLimits::default()).unwrap();
+    host.install_campaign(CampaignLink { state: scripts.shared_state(), human: human.clone(), campaign, map: loaded.info.map_key.clone(), theatres: loaded.info.theatres().map(str::to_owned).collect(), db: Rc::clone(db) })
         .unwrap();
     let root = host.load_root_layout("data/ui/campaign ui/layout").unwrap();
     host.campaign_ready();
     host.campaign_update_funds("Early May");
-    Some(Setup { scripts, host, root })
+    Setup { scripts, host, root, human }
 }
 
 fn errors(host: &UiScriptHost) -> Vec<String> {
@@ -123,8 +147,9 @@ fn selecting_an_army_shows_its_unit_cards() {
     let group = find(&s.host, s.root, "UnitCardGroup").unwrap();
     let cards = s.host.world().get(group).unwrap().children.len();
     assert_eq!(cards, units);
+    // The selection bar names the general alone (`0x009C2AF0`), not "<name>, <faction>".
     let selector = find(&s.host, s.root, "selector").unwrap();
-    assert!(text(&s.host, selector).contains(", "));
+    assert!(!text(&s.host, selector).contains(", "));
 
     // Clicking a card selects it and it stays "Selected" (campaign card selection, a regression
     // check for the event-before-transition order): the click event runs first and the card
@@ -242,11 +267,11 @@ fn click(host: &UiScriptHost, n: NodeId) {
 fn hud_buttons_show_their_tooltips() {
     let Some(s) = setup() else { return };
     let end_turn = find(&s.host, s.root, "button_end_turn").unwrap();
-    s.host.campaign_hover(Some(end_turn));
+    s.host.pointer(end_turn, PointerEvent::Enter);
     assert!(errors(&s.host).is_empty());
     let tip = find(&s.host, s.root, "Tooltip").expect("tooltip shown");
     assert!(!text(&s.host, tip).is_empty());
-    s.host.campaign_hover(None);
+    s.host.pointer(end_turn, PointerEvent::Leave);
     assert!(find(&s.host, s.root, "Tooltip").is_none(), "tooltip hidden");
 }
 
@@ -650,6 +675,41 @@ fn agents_panel_opens_without_script_errors() {
     assert!(s.host.take_campaign_requests().iter().all(|r| !matches!(r, CampaignRequest::Command(_))), "no model command");
 }
 
+/// An agents-tab card shows the agent type's main-attribute picture: `GenerateAgentsPanel` calls
+/// `CreateCharacterCard(..., ShowAttributes = true)` (`Agents.lua:234`), whose card adds the image
+/// `{CharacterAttribute:1}` + `Attributes.PrimaryAttributePath` (`Utilities.lua:122-123`), CONFIRMED in
+/// ui/agents.luac and ui/utilities.luac. A rake's main attribute is `subterfuge` (`agents` #8), whose
+/// `agent_attributes` picture is the loose file `pips/skill_spying.tga` (in-game check (d), 2026-10-10).
+#[test]
+fn agents_tab_cards_show_the_main_attribute_picture() {
+    let Some(s) = setup() else { return };
+    let (paris, rake) = {
+        let mut st = s.scripts.state_mut();
+        let m = &mut st.model;
+        let france = m.faction_by_key("france").unwrap().id;
+        let paris = m.world.regions.values().find(|r| r.key == "eur_france").unwrap().id;
+        // A copy of a French rake, stationed in Paris.
+        let mut c = m.world.characters.values().find(|c| c.faction == france && c.kind == CharacterKind::Rake).cloned().expect("a French rake");
+        let details = m.world.character_details.get(&c.id).cloned().unwrap_or_default();
+        c.id = ntw_sim::campaign::CharacterId(m.world.characters.keys().map(|k| k.0).max().unwrap_or(0) + 1);
+        c.garrisoned_in = Some(paris);
+        c.position = m.world.regions[&paris].settlement.position;
+        m.world.character_details.insert(c.id, details);
+        let id = c.id;
+        m.world.characters.insert(id, c);
+        (paris, id)
+    };
+    s.host.campaign_select(CampaignSelection::Settlement(paris));
+    let tab = find(&s.host, s.root, "agents_tab").expect("the agents tab is listed");
+    click(&s.host, tab);
+    assert!(errors(&s.host).is_empty(), "{:?}", errors(&s.host));
+    let card = find(&s.host, s.root, &format!("agent_{}", rake.0)).expect("the rake's card");
+    let mut pictures = Vec::new();
+    s.host.world().visit_visible(card, &mut |_, node| pictures.extend(node.data.images.iter().map(|i| i.path.clone())));
+    assert!(pictures.iter().any(|p| p.ends_with("pips/skill_spying.tga")), "the card's pictures: {pictures:?}");
+}
+
+
 /// A general whose portrait the model drew (as for a recruitment-pool hire or a field promotion,
 /// `ntw_sim::campaign::portraits`) shows it on his army card and his Lists row: no unit-card
 /// stand-in, no script error. Review 2026-10-07 (then a PLACEHOLDER fallback), BACKLOG §0
@@ -701,6 +761,81 @@ fn a_generated_general_shows_his_drawn_portrait() {
         .unwrap();
     let row = row.expect("the general has a row in the Lists");
     assert_eq!(row, "true false", "the Lists row shows him as himself");
+    click(&s.host, find(&s.host, s.root, "button_lists").unwrap());
+    assert!(errors(&s.host).is_empty(), "the Lists open without a script error");
+}
+
+/// The army card and the Lists row of a General `g`: his card's `Portrait` and whether the Lists
+/// show him as himself.
+fn general_card_and_row(s: &Setup, g: ntw_sim::campaign::CharacterId) -> (String, bool) {
+    s.host.campaign_select(CampaignSelection::Character(g));
+    assert!(errors(&s.host).is_empty());
+    let env = s.host.script_env(s.root).unwrap();
+    let portrait: String = s
+        .host
+        .lua()
+        .load(
+            "for _, u in ipairs(CampaignUI.ReviewPanelInfo().units_info.Units) do\n\
+             if not u.DisplayAsUnit then return u.Portrait end end\n\
+             return ''",
+        )
+        .set_environment(env.clone())
+        .eval()
+        .unwrap();
+    let as_himself: bool = s
+        .host
+        .lua()
+        .load(
+            "local me = CampaignUI.ReviewPanelInfo().commander\n\
+             for _, r in ipairs(CampaignUI.RetrieveFactionMilitaryForceLists('france', true)) do\n\
+             if r.Address == me then return r.ShowAsCharacter == true and r.CommandedUnit == nil end end\n\
+             return false",
+        )
+        .set_environment(env)
+        .eval()
+        .unwrap();
+    (portrait, as_himself)
+}
+
+/// The real commands, not a simulated draw: a General hired from France's pool into an army
+/// (`HireGeneral`, `0x00A1B8F0`) and a colonel promoted in the field (`PromoteUnit`, `0x008E1C20`)
+/// each show a european General portrait on their army card and are listed as themselves.
+/// Settles in-game check (a) of 2026-10-10 (analysis/fidelity/IN_GAME_CHECKS_2026-10-10.md).
+#[test]
+fn a_hired_and_a_field_promoted_general_show_european_general_portraits() {
+    use ntw_sim::campaign::effects::SavedBonus;
+    use ntw_sim::campaign::pool::PoolKind;
+    let Some(s) = setup() else { return };
+    let (hired, promoted) = {
+        let mut st = s.scripts.state_mut();
+        let m = &mut st.model;
+        let f = m.faction_by_key("france").unwrap().id;
+        let mut armies: Vec<_> = m.world.forces.values().filter(|x| x.faction == f && !x.is_navy && !x.units.is_empty() && x.commander.is_some()).map(|x| x.id).collect();
+        armies.sort();
+        // Hire: a fresh candidate into the first French army.
+        let c = m.create_candidate(f, PoolKind::General).expect("a candidate");
+        m.apply(CampaignCommand::HireGeneral { character: c, into: Some(armies[0]) }).expect("the hire applies");
+        // Promotion: a second army made colonel-led (no General, no portrait yet), with the
+        // faction's `promote_general_in_field` bonus (id 64) set.
+        let army = armies[1];
+        let officer = m.world.forces[&army].commander.unwrap();
+        let unit = m.world.forces[&army].units.iter().position(|u| u.character == Some(officer)).expect("the commander's unit");
+        m.world.characters.get_mut(&officer).unwrap().kind = CharacterKind::Colonel;
+        m.world.character_details.entry(officer).or_default().portrait = Default::default();
+        let d = m.world.faction_details.entry(f).or_default();
+        d.bonus_base.push(SavedBonus { kind: 1, bonus: 64, value: 1.0, qualifier: String::new() });
+        d.bonus_with_difficulty.clear();
+        m.apply(CampaignCommand::PromoteUnit { force: army, unit }).expect("the promotion applies");
+        assert_eq!(m.world.characters[&officer].kind, CharacterKind::General);
+        (c, officer)
+    };
+    for g in [hired, promoted] {
+        let card = s.scripts.state_mut().model.world.character_details[&g].portrait.card.clone();
+        assert!(card.starts_with("ui/portraits/european/Cards/general/"), "{card}");
+        let (portrait, as_himself) = general_card_and_row(&s, g);
+        assert_eq!(portrait, format!("data/{card}"), "his army card shows his drawn portrait");
+        assert!(as_himself, "the Lists row shows him as himself");
+    }
     click(&s.host, find(&s.host, s.root, "button_lists").unwrap());
     assert!(errors(&s.host).is_empty(), "the Lists open without a script error");
 }
@@ -879,6 +1014,96 @@ fn enlist_commander_panel_opens_and_lists_a_candidate() {
         }
     });
     assert!(!rows.is_empty(), "at least one commander row: {rows:?}");
+}
+
+/// The enlist panel's traits show their on-screen names, not their keys (the 2026-10-10 in-game check
+/// failed on raw keys too wide for `tx_enables`, so the columns overlapped), and each tooltip carries
+/// the level's effects as the exe builds them (0x009AFD60; `traits_table` in `ui/campaign/characters.rs`).
+/// `C_General_Brave` at 16 points is level 5 (`character_trait_levels`): "Popular Hero";
+/// `trait_level_effects` gives `morale_bonus` 4 (priority 1, shown) and `prestige_military_generic` 1
+/// (priority 0, left out); `trait_attribute_effects` gives `command_land` -1. `C_General_Attacker_Bad`
+/// at 0 points is below its first level (4), so it is not shown.
+///
+/// Run on the install: `cargo test -p ntw_script --test campaign_ui enlist_traits -- --nocapture`.
+#[test]
+fn enlist_traits_show_their_names_and_effects() {
+    use ntw_sim::campaign::details::CharacterTrait;
+    let Some(s) = setup() else { return };
+    let general = {
+        let mut st = s.scripts.state_mut();
+        let m = &mut st.model;
+        let f = m.faction_by_key("france").unwrap().id;
+        let pool = m.world.faction_details[&f].general_pool.0.clone();
+        for c in pool {
+            m.world.character_details.entry(c).or_default().traits = vec![
+                CharacterTrait { key: "C_General_Attacker_Bad".into(), points: 0 },
+                CharacterTrait { key: "C_General_Brave".into(), points: 16 },
+            ];
+        }
+        m.world.forces.values().filter(|x| x.faction == f && !x.is_navy).find_map(|x| x.commander).unwrap()
+    };
+    s.host.campaign_select(CampaignSelection::Character(general));
+    assert!(errors(&s.host).is_empty());
+    click(&s.host, find(&s.host, s.root, "army_promote").expect("the promote button"));
+    assert!(errors(&s.host).is_empty(), "the enlist-commander panel opens without a script error");
+    let mut names = Vec::new();
+    let mut tooltips = Vec::new();
+    s.host.world().visit_visible(s.root, &mut |n, node| {
+        if node.data.id == "tx_enables" {
+            names.push(n);
+        }
+    });
+    let shown: Vec<String> = names.iter().map(|&n| text(&s.host, n)).collect();
+    println!("trait names: {shown:?}");
+    assert!(!shown.is_empty(), "the candidates show their traits");
+    assert!(shown.iter().all(|t| t == "Popular Hero"), "only the Brave level 5 name, once per candidate: {shown:?}");
+    s.host.world().visit_visible(s.root, &mut |n, _| tooltips.push(n));
+    let tips: Vec<String> = tooltips.into_iter().filter_map(|n| s.host.tooltip_text(n)).filter(|t| t.contains("morale")).collect();
+    println!("trait tooltips: {tips:?}");
+    let tip = tips.first().expect("a trait tooltip with the level's effects");
+    assert!(tip.contains("-1 to Command in land battles."), "{tip}");
+    assert!(tip.contains("+4 to morale in battles"), "{tip}");
+    assert!(!tip.contains("Prestige"), "a priority-0 effect is left out: {tip}");
+}
+
+/// Review fix: the trait tooltip shows the level's effects as the model applies them
+/// (`EffectRules::trait_level_rows`, summed once at load, 0x00F84220), not a second sum of the raw
+/// table: when a mod's rules change a level's effects, the panel and the applied effects agree.
+///
+/// Run on the install: `cargo test -p ntw_script --test campaign_ui trait_tooltip_follows -- --nocapture`.
+#[test]
+fn trait_tooltip_follows_the_models_level_effects() {
+    use ntw_sim::campaign::details::CharacterTrait;
+    let Some(s) = setup() else { return };
+    let (general, level_key) = {
+        let mut st = s.scripts.state_mut();
+        let m = &mut st.model;
+        let level_key = m.rules.effects.trait_level_row("C_General_Brave", 16).expect("Brave level 5").2.clone();
+        // A rule change: morale_bonus twice (summed to 7), in place of the level's table rows.
+        std::sync::Arc::make_mut(&mut m.rules).effects.insert_trait_level(level_key.clone(), [("morale_bonus", 2.0), ("morale_bonus", 5.0)]);
+        let f = m.faction_by_key("france").unwrap().id;
+        let pool = m.world.faction_details[&f].general_pool.0.clone();
+        for c in pool {
+            m.world.character_details.entry(c).or_default().traits = vec![CharacterTrait { key: "C_General_Brave".into(), points: 16 }];
+        }
+        let general = m.world.forces.values().filter(|x| x.faction == f && !x.is_navy).find_map(|x| x.commander).unwrap();
+        (general, level_key)
+    };
+    {
+        let st = s.scripts.state_mut();
+        let rules = &st.model.rules.effects;
+        assert_eq!(rules.trait_level_rows(&level_key), [("morale_bonus".to_string(), 7.0)], "the model sums the rows once");
+        assert!(rules.trait_level_set(&level_key).is_some(), "and applies that set");
+    }
+    s.host.campaign_select(CampaignSelection::Character(general));
+    click(&s.host, find(&s.host, s.root, "army_promote").expect("the promote button"));
+    assert!(errors(&s.host).is_empty(), "the enlist-commander panel opens without a script error");
+    let mut nodes = Vec::new();
+    s.host.world().visit_visible(s.root, &mut |n, _| nodes.push(n));
+    let tips: Vec<String> = nodes.into_iter().filter_map(|n| s.host.tooltip_text(n)).filter(|t| t.contains("morale")).collect();
+    let tip = tips.first().expect("a trait tooltip with the level's effects");
+    assert!(tip.contains("+7 to morale in battles"), "the panel shows the model's summed value: {tip}");
+    assert!(!tip.contains("+4 to morale"), "not the raw table's row: {tip}");
 }
 
 /// A card's own left click reaches its card group (`ui\templates\cards.luac`'s `OnLeftClickUp`,
@@ -1608,6 +1833,76 @@ fn faction_rankings_are_the_originals_words() {
     }
 }
 
+/// Public opinion (`SetPublicOpinionStrings`, `RetrieveDiplomaticOpinions` 0x009F2830): the
+/// player's column ("towards them") shows Britain's attitude towards the other side, the other
+/// column ("towards us") the other side's towards Britain. The original's Ottoman negotiation
+/// (2026-10-08 shot, IN_GAME_CHECKS_2026-10-10.md (f)): Britain's column Indifferent, the
+/// Ottomans' Friendly. Bug 2026-10-12: the two were swapped.
+#[test]
+fn public_opinion_shows_each_sides_attitude_in_its_own_column() {
+    let Some((s, panel)) = britain_negotiates("ottomans") else { return };
+    let opinion = |column: &str| {
+        let c = find(&s.host, panel, column).unwrap_or_else(|| panic!("no {column}"));
+        text(&s.host, find(&s.host, c, "public_opinion_dy").unwrap_or_else(|| panic!("no opinion in {column}")))
+    };
+    assert_eq!(opinion("faction_left"), loc_text("diplomacy_strings_string_relationship_neutral"), "Britain towards the Ottomans");
+    assert_eq!(opinion("faction_right"), loc_text("diplomacy_strings_string_relationship_friendly"), "the Ottomans towards Britain");
+}
+
+/// The relations panel's map, "Other nation's attitudes towards selected nation" (mode
+/// `diplomacy_attitude_faction`, reading `FactionAttitudeTowardsOwner` of `RegionsInTheatre`,
+/// set at 0x009F0C3D), colours each region by its owner's attitude towards the selected nation; the
+/// other mode (`OwnerAttitude`) by the selected nation's towards the owner (0x009F0B2A..0x009F0C44).
+/// Bug 2026-10-12 (IN_GAME_CHECKS_2026-10-10.md (f)): the two attitudes were swapped.
+#[test]
+fn relations_map_shows_the_owners_attitude_towards_the_selected_nation() {
+    let Some(s) = setup_in("mp_eur_napoleon", "britain") else { return };
+    let rows: Vec<(String, Option<i32>, Option<i32>)> = s
+        .host
+        .lua()
+        .load(
+            "local out = {} for _, r in ipairs(CampaignUI.RegionsInTheatre(nil, 'france', nil, 1)) do \
+             out[#out + 1] = {r.OwnerKey, r.FactionAttitudeTowardsOwner, r.OwnerAttitude} end return out",
+        )
+        .eval::<Vec<mlua::Table>>()
+        .unwrap()
+        .into_iter()
+        .map(|t| (t.get(1).unwrap(), t.get(2).unwrap(), t.get(3).unwrap()))
+        .collect();
+    let st = s.scripts.state();
+    let m = &st.model;
+    let france = m.faction_by_key("france").unwrap().id;
+    let total = |from, to| m.world.relationships.get(&(from, to)).map(|r| r.attitude_total());
+    for (owner, towards_france, france_towards) in &rows {
+        if owner == "france" {
+            continue;
+        }
+        let o = m.faction_by_key(owner).unwrap().id;
+        assert_eq!(*towards_france, total(o, france), "{owner}'s attitude towards France");
+        assert_eq!(*france_towards, total(france, o), "France's attitude towards {owner}");
+    }
+    // The original's map: Prussia deep red, the Ottomans' lands a lighter red.
+    let shown = |owner: &str| rows.iter().find(|r| r.0 == owner).and_then(|r| r.1).unwrap_or(0);
+    assert!(shown("prussia") < shown("ottomans") && shown("ottomans") < 0, "{rows:?}");
+}
+
+/// `RetrieveRemainingMilitaryAccessTurns(a, b)` (0x009F4380) gives the access a gives b first (a's
+/// relationship record about b, `+0x78C`), then b's to a: the panel's "offer_access" buttons get
+/// the first. Bug 2026-10-12: the two were swapped.
+#[test]
+fn military_access_turns_come_giver_first() {
+    let Some((s, _panel)) = britain_negotiates("austria") else { return };
+    {
+        let mut st = s.scripts.state_mut();
+        let m = &mut st.model;
+        let (b, a) = (m.faction_by_key("britain").unwrap().id, m.faction_by_key("austria").unwrap().id);
+        m.world.relationships.entry((b, a)).or_default().military_access_turns = 7;
+        m.world.relationships.entry((a, b)).or_default().military_access_turns = 3;
+    }
+    let turns: (i32, i32) = s.host.lua().load("return CampaignUI.RetrieveRemainingMilitaryAccessTurns('britain', 'austria')").eval().unwrap();
+    assert_eq!(turns, (7, 3), "Britain gives Austria 7 turns, Austria gives Britain 3");
+}
+
 /// The panel's two lists as (State, Active) pairs.
 type Buttons = Vec<(String, bool)>;
 
@@ -1963,6 +2258,85 @@ fn region_details_panel_is_filled_from_the_campaign() {
     }
 }
 
+/// The region details panel against what the original stored in its own vanilla saves (read-only
+/// evidence copies, `NTW_EVIDENCE_DIR`; IN_GAME_CHECKS_2026-10-10.md (g)): for every owned region,
+/// the population, the wealth (GDP + town wealth), the town wealth growth, the population growth
+/// with its factors (`REGION_FACTORS`, regions without an army in them: the map's area test is not
+/// loaded here) and the religious breakdown are the saved values. Public order is checked against
+/// the saved class factors by `economy_check` (CAMPAIGN_FIDELITY.md round 6).
+#[test]
+fn region_details_panel_shows_the_vanilla_saves_values() {
+    use ntw_sim::campaign::population;
+    let dir = data_dir();
+    let ev = evidence_dir();
+    let saves: Vec<(&str, PathBuf)> = ["orig_fr_t1", "orig_fr_may1811", "auto_orig_spa_0245", "auto_nr4_t4", "auto_after_c8", "orig_over_nr4_0252"]
+        .into_iter()
+        .map(|name| (name, ev.join(format!("{name}.save"))))
+        .filter(|(_, p)| p.is_file())
+        .collect();
+    if !dir.join("data.pack").is_file() || saves.is_empty() {
+        eprintln!("skipped: no install at {} or no evidence saves in {}", dir.display(), ev.display());
+        return;
+    }
+    let install = open_install(&dir);
+    for (name, path) in &saves {
+        let (mut regions, mut growths) = (0, 0);
+        let s = setup_loaded(&dir, &install, |db| ntw_campaign::read_file(path, db).expect("save loads"), None);
+        no_errors(&s.host);
+        let lua = s.host.lua();
+        let rows: Vec<mlua::Table> =
+            lua.load(format!("return CampaignUI.RegionsInTheatre(nil, '{}', nil, 1)", s.human)).eval::<Vec<mlua::Table>>().unwrap();
+        let details = lua.create_function(|lua, a: mlua::Value| lua.load("return CampaignUI.InitialiseRegionInfoDetails(...)").call::<mlua::Table>(a)).unwrap();
+        for row in rows {
+            let key: String = row.get("Key").unwrap();
+            let d: mlua::Table = details.call(row.get::<mlua::Value>("Address").unwrap()).unwrap();
+            let st = s.scripts.state();
+            let m = &st.model;
+            let r = m.world.regions.values().find(|r| r.key == key).unwrap();
+            if m.world.factions.get(&r.owner).is_none_or(|f| f.key.is_empty()) {
+                continue;
+            }
+            assert_eq!(d.get::<u32>("PopulationNumber").unwrap(), r.population, "{name} {key}: population");
+            assert_eq!(d.get::<i64>("Wealth").unwrap(), i64::from(r.gdp) + i64::from(r.town_wealth), "{name} {key}: wealth");
+            let town: mlua::Table = d.get("TownWealth").unwrap();
+            assert_eq!(town.get::<i32>("Total").unwrap(), r.town_wealth_growth, "{name} {key}: town wealth growth");
+            // The breakdown lists each religion with a share, in the region's order, as percentages.
+            let sum: f32 = r.religions.iter().map(|x| x.1).sum();
+            let saved: Vec<(&str, f32)> = r.religions.iter().filter(|x| x.1 > 0.0).map(|x| (x.0.as_str(), x.1 / sum * 100.0)).collect();
+            let shown: Vec<(String, f32)> = d
+                .get::<mlua::Table>("ReligiousBreakdown")
+                .unwrap()
+                .sequence_values::<mlua::Table>()
+                .map(|e| e.unwrap())
+                .map(|e| (e.get("Key").unwrap(), e.get("Percentage").unwrap()))
+                .collect();
+            assert_eq!(shown.len(), saved.len(), "{name} {key}: religions {shown:?} {saved:?}");
+            for ((k, p), (sk, sp)) in shown.iter().zip(&saved) {
+                assert!(k == sk && (p - sp).abs() < 1e-3, "{name} {key}: religion {k} {p} vs saved {sk} {sp}");
+            }
+            regions += 1;
+            let p = &r.population_state;
+            if p.factors[3] != 0.0 || population::hostile_units(m, r) != 0 {
+                continue;
+            }
+            let growth: mlua::Table = d.get("PopulationGrowth").unwrap();
+            assert_eq!(growth.get::<f32>("Total").unwrap().to_bits(), p.growth.to_bits(), "{name} {key}: population growth");
+            // Each shown factor is the saved one with the same hundredths, in order (the panel omits zero factors; negative ones are signed by `Positive`).
+            let shown: Vec<i32> = growth
+                .sequence_values::<mlua::Table>()
+                .map(|e| e.unwrap())
+                .map(|e| if e.get::<bool>("Positive").unwrap() { 1 } else { -1 } * population::as_hundredths(e.get::<f32>("Total").unwrap()))
+                .collect();
+            let saved: Vec<i32> = p.factors.iter().map(|f| population::as_hundredths(*f)).filter(|h| *h != 0).collect();
+            assert_eq!(shown, saved, "{name} {key}: the growth factors");
+            growths += 1;
+        }
+        no_errors(&s.host);
+        eprintln!("region details {name}: {regions} regions, {growths} with the growth factors compared");
+        assert!(regions > 0 && growths > 0, "{name}: {regions} regions, {growths} growths");
+    }
+}
+
 /// `RetrieveVisibleEnitityDetails` lists nothing while the labels preference is off
 /// (`ui_show_campaign_labels`, index 0x44, read first by `0x009F4520`), and `ToggleLabels`
 /// (`0x009F9CA0`) flips it. Bug: the list ignored the preference and ToggleLabels was missing.
@@ -1986,6 +2360,40 @@ fn toggle_labels_empties_the_visible_settlements() {
     let mut both = [before, toggled];
     both.sort();
     assert_eq!(both, [0, regions.len()], "one state lists the settlements, the other nothing");
+    no_errors(&s.host);
+}
+
+/// The labels' fog test is the shroud's hide set alone (`0x009BAA90` → `0x00B11E70`): a settlement
+/// France has never seen keeps its label, as its own do; putting its cell in the hide set drops it.
+/// The INFERRED rule this replaces ("seen once") dropped the never-seen ones.
+#[test]
+fn a_never_seen_settlement_keeps_its_label_and_a_hidden_cell_loses_it() {
+    use ntw_sim::campaign::visibility::FogState;
+    let Some(s) = setup() else { return };
+    let (own, unseen, cell) = {
+        let st = s.scripts.state();
+        let m = &st.model;
+        let france = m.faction_by_key("france").unwrap().id;
+        let at = |r: &ntw_sim::campaign::world::Region| (r.settlement.position.0.to_f32(), r.settlement.position.1.to_f32());
+        let mut regions: Vec<_> = m.world.regions.values().collect();
+        regions.sort_by_key(|r| r.id);
+        let own = regions.iter().find(|r| r.owner == france).unwrap();
+        let unseen = regions.iter().find(|r| m.fog_state(france, at(r)) == FogState::NeverSeen).expect("a settlement France has never seen");
+        let grid = m.world.sight_grid.unwrap();
+        let cell = grid.cell_of(at(unseen)).unwrap();
+        assert_ne!(grid.cell_of(at(own)).unwrap(), cell, "hiding the unseen cell must leave the own settlement visible");
+        (own.id, unseen.id, cell)
+    };
+    s.host.campaign_set_view((1.0, 2.0, 3.0), vec![(own, 100.0, 700.0), (unseen, 300.0, 700.0)], None);
+    let lua = s.host.lua();
+    let count = || -> usize { lua.load("return #CampaignUI.RetrieveVisibleEnitityDetails().Settlements").eval().unwrap() };
+    assert_eq!(count(), 2, "the never-seen settlement is labelled too");
+    {
+        let mut st = s.scripts.state_mut();
+        let france = st.model.faction_by_key("france").unwrap().id;
+        st.model.world.shrouds.get_mut(&france).unwrap().hidden.set(cell.0, cell.1);
+    }
+    assert_eq!(count(), 1, "its cell in the hide set: no label");
     no_errors(&s.host);
 }
 
@@ -2013,12 +2421,18 @@ fn a_generals_recruitment_tab_lists_the_factions_units_and_recruits_for_him() {
     };
     s.host.campaign_select(CampaignSelection::Character(general));
     assert!(errors(&s.host).is_empty());
+    // The selection bar names the general alone (`0x009C2AF0`), not "<name>, <faction>".
+    let selector = find(&s.host, s.root, "selector").unwrap();
+    let title = text(&s.host, selector);
+    assert!(!title.is_empty() && !title.contains(", "), "{title:?}");
     let tab = find(&s.host, s.root, "recruitment_tab").expect("recruitment tab");
     click(&s.host, tab);
     assert!(errors(&s.host).is_empty());
 
     let rec = s.scripts.state().model.commander_recruitment(france, general);
     assert!(rec.options.iter().any(|o| o.available()), "France can recruit through its general: {rec:?}");
+    // An army is offered land units only (`0x00B64E00`), though French ports build ships.
+    assert!(rec.options.iter().all(|o| !s.scripts.state().model.rules.is_naval_unit(&o.unit_key)), "{rec:?}");
     let mut cards = Vec::new();
     s.host.world().visit_visible(s.root, &mut |n, node| {
         if node.data.id.split('!').nth(1) == Some("recruitable") {
@@ -2050,4 +2464,163 @@ fn a_generals_recruitment_tab_lists_the_factions_units_and_recruits_for_him() {
     click(&s.host, tab);
     assert!(errors(&s.host).is_empty());
     assert!(find_prefix(&s.host, s.root, &format!("{}!enqueued!", o.unit_key)).is_some(), "the item is his queue");
+}
+
+/// In-game check 2026-10-10: Britain's generals at the 1805 start are offered the four land units the
+/// original shows (its faction unit set, 0x00F74CB0: the military grouping's units plus its permission
+/// rows; no ships, no unit without a row such as the Brunswick Hussars).
+#[test]
+fn britains_generals_are_offered_the_four_land_units_of_the_original() {
+    let Some(s) = setup_in("eur_napoleon", "britain") else { return };
+    let st = s.scripts.state();
+    let m = &st.model;
+    let britain = m.faction_by_key("britain").unwrap().id;
+    let want = ["Art_Foot_British_6_lber", "Cav_Light_British_Light_Dragoons", "Inf_Line_British_Foot", "Inf_Militia_British_Fencibles"];
+    let mut generals = 0;
+    for f in m.world.forces.values().filter(|f| !f.is_navy && f.faction == britain) {
+        let Some(c) = f.commander else { continue };
+        let rec = m.commander_recruitment(britain, c);
+        let mut got: Vec<&str> = rec.options.iter().map(|o| o.unit_key.as_str()).collect();
+        got.sort_unstable();
+        assert_eq!(got, want, "general {c:?}");
+        generals += 1;
+    }
+    assert!(generals > 0);
+}
+
+/// Regression (in-game check 2026-10-10): hovering a construction slot left an empty dark
+/// "Tooltip" frame on screen after the pointer left. The slot's mouse off switches the root back
+/// to the "standard" tooltip method, which creates the visible, empty "Tooltip" template; the
+/// engine's mouse off then hands the root's SetTooltip handler an empty text (`0x0102EB40` →
+/// `0x01035D20`), whose SetText hides it. Mouse on shows the building tooltip.
+#[test]
+fn a_building_slots_tooltip_goes_when_the_pointer_leaves() {
+    let Some(s) = setup() else { return };
+    let paris = s.scripts.state().model.world.regions.values().find(|r| r.key == "eur_france").unwrap().id;
+    s.host.campaign_select(CampaignSelection::Settlement(paris));
+    let slot = find(&s.host, s.root, "Building1").expect("slot");
+    s.host.pointer(slot, PointerEvent::Enter);
+    assert!(errors(&s.host).is_empty(), "{:?}", errors(&s.host));
+    assert!(find(&s.host, s.root, "TechTreeItem_Tooltip").is_some(), "building tooltip shown");
+    s.host.pointer(slot, PointerEvent::Leave);
+    assert!(errors(&s.host).is_empty(), "{:?}", errors(&s.host));
+    for tip in ["TechTreeItem_Tooltip", "Tooltip"] {
+        assert!(find(&s.host, s.root, tip).is_none(), "{tip} still shown");
+    }
+    // A whole click leaves nothing behind either.
+    click(&s.host, slot);
+    for tip in ["TechTreeItem_Tooltip", "Tooltip"] {
+        assert!(find(&s.host, s.root, tip).is_none(), "{tip} still shown after a click");
+    }
+    // The slot asks for the details as (building, faction, region, slot)
+    // (template.BuildingFrame.lua:392); regression: the region and faction were swapped.
+    let (region, slot_key): (String, String) = s
+        .host
+        .lua()
+        .load("local d = CampaignUI.BuildingDetails('gov_magistrate', 'france', 'eur_france', 'slot_x') return d.region_key, d.slot_key")
+        .eval()
+        .unwrap();
+    assert_eq!((region.as_str(), slot_key.as_str()), ("eur_france", "slot_x"));
+}
+
+/// A component under the pointer that is destroyed takes its tooltip down (`0x0102F3F0` sends it
+/// its mouse off): the selection change rebuilds the HUD buttons under the pointer.
+#[test]
+fn a_destroyed_component_under_the_pointer_takes_its_tooltip_down() {
+    let Some(s) = setup() else { return };
+    let paris = s.scripts.state().model.world.regions.values().find(|r| r.key == "eur_france").unwrap().id;
+    s.host.campaign_select(CampaignSelection::Settlement(paris));
+    let slot = find(&s.host, s.root, "Building1").expect("slot");
+    s.host.pointer(slot, PointerEvent::Enter);
+    assert!(find(&s.host, s.root, "TechTreeItem_Tooltip").is_some(), "building tooltip shown");
+    s.host.campaign_select(CampaignSelection::None);
+    s.host.pulse(0.0);
+    assert!(s.host.world().get(slot).is_none(), "the slot was destroyed");
+    for tip in ["TechTreeItem_Tooltip", "Tooltip"] {
+        assert!(find(&s.host, s.root, tip).is_none(), "{tip} still shown");
+    }
+    // The app's late mouse off for the destroyed slot does nothing.
+    s.host.pointer(slot, PointerEvent::Leave);
+    assert!(errors(&s.host).is_empty(), "{:?}", errors(&s.host));
+}
+
+/// Settlement recruitment cards fan out exactly as the original's `Recruitment.lua`
+/// `RecrutmentCardPositions_OSX` places them (CONFIRMED, ui/recruitment.luac; the only placement
+/// function its `SelectRecruitmentCard` calls): the selected card is `trunc(76 * 0.9)` = 68 px wide,
+/// the others `trunc(68 * 0.9)` = 61 px at a pitch of `trunc(61 * 0.75)` = 45 px (narrowed by
+/// `ceil((total - area) / count)` when the row is wider than the area), and the row is centred in the
+/// area right of the queue's left edge. So the cards overlap by design (in-game check (e), 2026-10-10).
+#[test]
+fn settlement_recruitment_cards_fan_like_the_original() {
+    let Some(s) = setup() else { return };
+    let paris = s.scripts.state().model.world.regions.values().find(|r| r.key == "eur_france").unwrap().id;
+    s.host.campaign_select(CampaignSelection::Settlement(paris));
+    let tab = find(&s.host, s.root, "recruitment_tab").expect("recruitment tab");
+    click(&s.host, tab);
+    // Cards slide into place through their target states.
+    for i in 0..40 {
+        s.host.pulse(f64::from(i) * 50.0);
+    }
+    assert!(errors(&s.host).is_empty(), "{:?}", errors(&s.host));
+    let rect = |id: &str| s.host.world().get(find(&s.host, s.root, id).expect(id)).unwrap().rect;
+    let group = rect("RecruitmentCardGroup");
+    let queue0 = rect("queue_0");
+    let mut cards = Vec::new();
+    s.host.world().visit_visible(s.root, &mut |_, node| {
+        if node.data.id.contains("!recruitable!") {
+            cards.push(node.rect);
+        }
+    });
+    assert!(cards.len() >= 3, "Paris recruits several units: {cards:?}");
+    cards.sort_by(|a, b| a.x.total_cmp(&b.x));
+    let selected: Vec<_> = cards.iter().filter(|c| c.w == 68.0).collect();
+    assert_eq!(selected.len(), 1, "one selected card 68 px wide: {cards:?}");
+    assert!(cards.iter().filter(|c| c.w != 68.0).all(|c| c.w == 61.0), "side cards 61 px wide: {cards:?}");
+    let n = cards.len() as f32;
+    let offset = queue0.x - group.x;
+    let area = group.w - offset;
+    let mut pitch = 45.0_f32;
+    let mut total = 68.0 + (n - 1.0) * pitch;
+    if total > area {
+        pitch -= ((total - area) / n).ceil();
+        total = 68.0 + (n - 1.0) * pitch;
+    }
+    let start = group.x + (offset + (area - total) * 0.5).trunc();
+    assert_eq!(cards[0].x, start, "row centred in the area: {cards:?}");
+    // Each slot advances one pitch from the row start.
+    for (i, c) in cards.iter().enumerate() {
+        let want = start + i as f32 * pitch;
+        assert_eq!(c.x, want, "card {i} at slot x: {cards:?}");
+    }
+}
+
+/// The settlement recruitment card's price is the region's recruitable entry cost (in-game check
+/// (e), 2026-10-10), checked against the vanilla data: Paris's first card, the 6-lber foot battery,
+/// costs `units` #7 = 610 scaled by Paris's `recruitment_mod_cost_land_all` of -16 (the iron mine's
+/// local -3, the war minister's ministerial effectiveness at level 6: -8, and the campaign start's
+/// normal-difficulty human handicap row: -5), `fistp(84 * 610 / 100)` = 512 (`0x00B31020` ->
+/// `0x00B0D220`, CONFIRMED), the price the harness shot shows on turn 1. The card shows the model's
+/// value, never its own.
+#[test]
+fn settlement_recruitment_card_price_is_the_regions_entry_cost() {
+    let Some(s) = setup() else { return };
+    let paris = s.scripts.state().model.world.regions.values().find(|r| r.key == "eur_france").unwrap().id;
+    let (base, all, cost) = {
+        let mut st = s.scripts.state_mut();
+        // The handicaps a new campaign adds (`0x008DD090`), as the game's turn-1 start does.
+        ntw_sim::campaign::effects::apply_start_handicaps(&mut st.model);
+        let m = &st.model;
+        let r = m.world.regions.get(&paris).unwrap();
+        let set = ntw_sim::campaign::economy::region_effect_set(m, r);
+        let u = m.rules.units.get("Art_Foot_French_6_lber").expect("6-lber in vanilla");
+        (u.campaign_cost, set.get_int("recruitment_mod_cost_land_all"), ntw_sim::campaign::economy::recruitment_cost_in(&m.rules, &set, "Art_Foot_French_6_lber", u))
+    };
+    assert_eq!((base, all, cost), (610, -16, 512));
+    s.host.campaign_select(CampaignSelection::Settlement(paris));
+    let tab = find(&s.host, s.root, "recruitment_tab").expect("recruitment tab");
+    click(&s.host, tab);
+    assert!(errors(&s.host).is_empty(), "{:?}", errors(&s.host));
+    let first = find_prefix(&s.host, s.root, "Art_Foot_French_6_lber!recruitable!").expect("6-lber card");
+    let price = find(&s.host, first, "Cost").expect("selected card's Cost text");
+    assert_eq!(text(&s.host, price), "512");
 }

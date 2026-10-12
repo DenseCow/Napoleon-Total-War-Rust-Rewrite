@@ -30,16 +30,10 @@ pub(super) fn unit_entry(lua: &Lua, inner: &Inner, ui: &CampaignUi, force: &Mili
     let name = loc(inner, &format!("units_on_screen_name_{}", u.unit_key)).unwrap_or_else(|| rec.map(|r| r.dev_name.clone()).unwrap_or_default());
     t.set("Name", name)?;
     t.set("Description", loc(inner, &format!("unit_description_texts_description_text_{}", u.unit_key)).unwrap_or_default())?;
-    // Unit card picture: `ui/units/icons/<faction>_<unit>_icon.tga` (CONFIRMED file names, e.g.
-    // `france_inf_line_french_fusiliers_icon.tga`; INFERRED: the owning faction's key, else the
-    // bare info key as some generic cards are named). The card script appends ".tga" (CONFIRMED).
+    // Unit card picture: the owning faction's uniform, else the unit's own (`GameDatabase::unit_icon`,
+    // CONFIRMED 0x00EC2A40). The card script appends ".tga" (CONFIRMED).
     let faction = ui.model().world.factions.get(&force.faction).map(|f| f.key.clone()).unwrap_or_default();
-    let info = rec.map(|r| r.info_key.clone()).unwrap_or_else(|| u.unit_key.clone());
-    let icon = [format!("{faction}_{}_icon", u.unit_key), format!("{faction}_{info}_icon"), info.clone()]
-        .into_iter()
-        .find(|p| inner.source.find(&format!("ui/units/icons/{p}.tga")).is_some())
-        .unwrap_or(info);
-    t.set("Icon", format!("data/ui/units/icons/{icon}"))?;
+    t.set("Icon", ui.link.db.unit_icon(&u.unit_key, &faction))?;
     t.set("Men", u.men)?;
     t.set("Max", u.max_men)?;
     let pct = if u.max_men > 0 { (u.men * 100) as f32 / u.max_men as f32 } else { 0.0 };
@@ -170,17 +164,6 @@ pub(super) fn force_info(lua: &Lua, inner: &Inner, ui: &CampaignUi, force: Force
 
 // ---------------------------------------------------------------------------------------------
 pub(super) const TAG_QUEUE_ITEM: usize = 5 << 40;
-
-/// The unit card picture's path without ".tga": `ui/units/icons/<faction>_<unit>_icon`
-/// (CONFIRMED file names), else the bare info key (INFERRED fallback).
-fn unit_icon(inner: &Inner, db: &GameDatabase, faction: &str, unit_key: &str) -> String {
-    let info = db.unit(unit_key).map(|r| r.info_key.clone()).unwrap_or_else(|| unit_key.to_owned());
-    let icon = [format!("{faction}_{unit_key}_icon"), format!("{faction}_{info}_icon"), info.clone()]
-        .into_iter()
-        .find(|p| inner.source.find(&format!("ui/units/icons/{p}.tga")).is_some())
-        .unwrap_or(info);
-    format!("data/ui/units/icons/{icon}")
-}
 
 /// Is `key` a ship? CONFIRMED structure: a naval unit has no `unit_stats_land` row (its stats are in
 /// `unit_stats_naval`), and the `units` #2 category is `naval_*` for the war-ships. Both are used so
@@ -443,7 +426,7 @@ fn recruitment_card(lua: &Lua, inner: &Inner, ui: &CampaignUi, owner: &CardOwner
     e.set("is_naval", is_ship(db, key))?;
     e.set("name", loc(inner, &format!("units_on_screen_name_{key}")).unwrap_or_else(|| key.to_owned()))?;
     e.set("description", loc(inner, &format!("unit_description_texts_description_text_{key}")).unwrap_or_default())?;
-    e.set("image_path", unit_icon(inner, db, owner.key, key))?;
+    e.set("image_path", db.unit_icon(key, owner.key))?;
     e.set("cost", cost)?;
     e.set("category", card_category(db, key))?;
     e.set("class", db.unit(key).map(|u| u.unit_class.clone()).unwrap_or_default())?;
@@ -590,8 +573,9 @@ struct CommanderRow {
     type_name: String,
     recruitable: bool,
     historical: bool,
-    /// At most four trait keys (CONFIRMED: the entry shows four).
-    traits: Vec<String>,
+    /// The candidate's traits, all of them: [`traits_table`] picks the shown ones and the entry
+    /// draws the first four (`enlist_commander_entry.lua:36`, CONFIRMED).
+    traits: Vec<ntw_sim::campaign::details::CharacterTrait>,
     /// The portrait as the panel shows it ([`portrait_image`]).
     image: String,
 }
@@ -633,7 +617,7 @@ fn commanders_for_recruitment(lua: &Lua, inner: &Inner, ui: &CampaignUi, force: 
                     type_name: character_type_name(inner, ui, c),
                     recruitable: cost.is_some_and(|c| treasury::commander_affordable(purse, c)),
                     historical: details.and_then(|d| d.historical_key.as_deref()).is_some(),
-                    traits: details.map(|d| d.traits.iter().take(4).map(|t| t.key.clone()).collect()).unwrap_or_default(),
+                    traits: details.map(|d| d.traits.clone()).unwrap_or_default(),
                     image: portrait_image(inner, &m, c),
                 }
             })
@@ -667,32 +651,10 @@ fn commanders_for_recruitment(lua: &Lua, inner: &Inner, ui: &CampaignUi, force: 
         row.set("UniqueId", format!("commander_{}", c.0))?;
         row.set("IsRecruitable", recruitable)?;
         row.set("InfoImage", image)?;
-        let traits_table = lua.create_table()?;
-        for (j, key) in traits.iter().enumerate() {
-            // The entry shows at most four traits (CONFIRMED: `enlist_commander_entry.lua:36`).
-            // `ui\templates\character_trait_entry.luac` then hands each row to `InitialiseTrait`
-            // (the proto at line 5: `Name` into `tx_enables`, `IconFilename` into `effect_icon`)
-            // and `SetTraitTooltip` (the proto at line 17), which calls
-            // `Utilities.GetEffectList(row.Effects, row.AttributeEffects)`. That function takes
-            // `#attribute_effects` on its *second* argument first (utilities.lua:182, pc 2), so
-            // **both fields must be tables or the panel raises** -- which is exactly what stopped
-            // the enlist-commander panel: the click reached `PanelManager.OpenPanel`, built every
-            // row, then died inside the first trait's tooltip, so no commander could be picked.
-            // CONFIRMED: the two field names, that they are lists, and the four the tooltip also
-            // reads (`ColourText`, `ExplanationText`, `RemovalText`).
-            // PROVISIONAL: the lists are empty and the three texts empty -- the effect
-            // descriptions behind a trait come from a table we do not load.
-            let e = lua.create_table()?;
-            e.set("Name", key.as_str())?;
-            e.set("IconFilename", String::new())?;
-            e.set("Effects", lua.create_table()?)?;
-            e.set("AttributeEffects", lua.create_table()?)?;
-            e.set("ColourText", String::new())?;
-            e.set("ExplanationText", String::new())?;
-            e.set("RemovalText", String::new())?;
-            traits_table.set(j + 1, e)?;
-        }
-        row.set("Traits", traits_table)?;
+        // The trait rows the character details carry ([`traits_table`]: 0x009AFD60, the only builder of a
+        // trait row, called from the details builder 0x009AD250; CONFIRMED). `character_trait_entry.luac`
+        // needs `Effects` and `AttributeEffects` to be lists (its tooltip takes `#` of both).
+        row.set("Traits", traits_table(lua, inner, ui, &ui.model(), &traits)?)?;
         // A historical candidate is badged (the model's `historical_key`, CONFIRMED kept).
         row.set("IsHistorical", historical)?;
         t.set(i + 1, row)?;

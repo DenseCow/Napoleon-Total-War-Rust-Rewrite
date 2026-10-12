@@ -441,16 +441,19 @@ impl CampaignModel {
         Ok(vec![CampaignEvent::CharacterHired { character: c, force: fleet, cost }])
     }
 
-    /// Promotes a unit's commander in the field (the unit classes' slot 20: `0x008E1C20` land,
+    /// Promotes a unit's commander in the field (the unit vtables' slot +0x4C: `0x008E1C20` land,
     /// `0x008E2260` naval; the player's `PromoteUnits` / `CCQ_PROMOTE_COMMANDER`, the console's
     /// `promote_unit_commander`, the AI's `CAI_BDI_PROMOTE_UNIT`; CONFIRMED structure): the unit's
     /// character gets the General (land) / admiral (naval) agent record through `0x00A1A2E0` →
     /// `0x00A1A300`, which copies the record's attributes and abilities, fires `CharacterPromoted`
     /// and re-sums his effects; a unit without a character gets a new one first (`0x00990EF0`).
-    /// He then commands the force (`0x008CFBE0`). The faction needs the effect
-    /// `promote_general_in_field` (army) / `promote_admiral_at_sea` (navy) > 0 (INFERRED from the
-    /// bonus names; the interface's `CanPromoteUnit` asks the unit's slot 16, not decoded) and
-    /// the force no General / admiral in command. The charge: `0x008E1C20` charges the unit class's
+    /// He then commands the force (`0x008CFBE0`). The gate: in the original it never runs, because
+    /// slot +0x40, which `CanPromoteUnit` `0x009E0AF0`, the console and the executors ask, is `0x00462CB0`
+    /// (constant false) in both unit vtables (CONFIRMED, CHARACTERS_FIDELITY.md §12, field promotion gate). Ours
+    /// gates on the effect `promote_general_in_field` (army) / `promote_admiral_at_sea` (navy) > 0 and
+    /// the force having no General / admiral in command. No vanilla table grants either bonus (db scan),
+    /// so vanilla never promotes, as the original; a mod that grants one promotes (user decision,
+    /// 2026-10-11: mod makers decide, no toggle). The charge: `0x008E1C20` charges the unit class's
     /// slot +0x44 value through `0x00BAF500` for every faction (human or AI) and tests no money
     /// first, so a promotion may put the faction into debt (CONFIRMED, static trace 2026-10-10).
     /// PROVISIONAL: the value charged ([`promotion_cost`](Self::promotion_cost)).

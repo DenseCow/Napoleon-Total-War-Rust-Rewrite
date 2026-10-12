@@ -258,3 +258,77 @@ fn install_with_synthetic_mod_pack() {
     let text = Localisation::from_vfs(&vfs).unwrap();
     assert_eq!(text.get(&loc_key), Some("MODDED TEXT"));
 }
+
+/// A `uniforms` table with the given (uniform, faction, variant, unit) rows.
+fn uniforms(rows: &[(&str, &str, &str, &str)]) -> Vec<u8> {
+    let rows = rows.iter().map(|r| [r.0, r.1, r.2, r.3].iter().map(|s| DbValue::Str((*s).into())).collect()).collect();
+    DbTable { version: 1, has_version_marker: true, flag: 1, rows }.to_bytes(&ntw_data::UniformRecord::schema()).unwrap()
+}
+
+/// Review fix: a mod `uniforms` row under a new uniform key replaces the vanilla row of the same unit and
+/// faction, because the table merges on faction + unit (the exe loader's key, `0x00FC05B0`), not on #0.
+#[test]
+fn mod_uniform_with_a_new_key_overrides_the_unit_picture() {
+    let root = temp_dir("uniforms");
+    let data = root.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let vanilla = uniforms(&[("Britain_A", "britain", "Vanilla_A", "unit_a"), ("Britain_B", "britain", "Vanilla_B", "unit_b")]);
+    std::fs::write(data.join("data.pack"), pack(1, &[("db\\uniforms_tables\\uniforms", vanilla)])).unwrap();
+    let modded = uniforms(&[("Britain_A_Modded", "britain", "Mod_A", "unit_a")]);
+    std::fs::write(data.join("row_mod.pack"), pack(3, &[("db\\uniforms_tables\\!row_mod", modded)])).unwrap();
+
+    let (vfs, _) = Vfs::open_with_mods(&data, &script("", None)).unwrap();
+    let pictures = ntw_data::UnitPictures::load(&vfs, &mut Vec::new()).unwrap();
+    assert_eq!(pictures.icon(None, "unit_a", "britain"), "data/ui/units/icons/Vanilla_A_icon");
+
+    let (vfs, _) = Vfs::open_with_mods(&data, &script("mod row_mod.pack;", None)).unwrap();
+    let mut warnings = Vec::new();
+    let pictures = ntw_data::UnitPictures::load(&vfs, &mut warnings).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(pictures.icon(None, "unit_a", "britain"), "data/ui/units/icons/Mod_A_icon", "the mod row wins");
+    assert_eq!(pictures.icon(None, "unit_b", "britain"), "data/ui/units/icons/Vanilla_B_icon", "other rows stay");
+
+    // No uniforms at all: every unit falls back to its own model, with one warning.
+    let empty = root.join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    std::fs::write(empty.join("data.pack"), pack(1, &[])).unwrap();
+    let (vfs, _) = Vfs::open_with_mods(&empty, &script("", None)).unwrap();
+    let mut warnings = Vec::new();
+    let pictures = ntw_data::UnitPictures::load(&vfs, &mut warnings).unwrap();
+    assert_eq!(pictures.icon(None, "unit_a", "britain"), "");
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+}
+
+/// A `units_to_groupings_military_permissions` table with the given (unit, grouping) rows.
+fn unit_groupings(rows: &[(&str, &str)]) -> Vec<u8> {
+    let rows = rows.iter().map(|r| vec![DbValue::Str(r.0.into()), DbValue::Str(r.1.into())]).collect();
+    let schema = ntw_data::campaign::UnitGroupingPermission::schema();
+    DbTable { version: 0, has_version_marker: false, flag: 1, rows }.to_bytes(&schema).unwrap()
+}
+
+/// Review fix: `units_to_groupings_military_permissions` merges on unit + grouping (the loader `0x00DC11A0`
+/// hashes #0 with #1 appended), so a mod row for a unit already in another grouping adds a row instead of
+/// replacing the unit's rows, and a repeated unit + grouping overrides that one row.
+#[test]
+fn mod_unit_grouping_rows_merge_on_unit_and_grouping() {
+    let root = temp_dir("unit_groupings");
+    let data = root.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let table = "db\\units_to_groupings_military_permissions_tables\\";
+    let vanilla = unit_groupings(&[("unit_a", "euro_group"), ("unit_a", "ottoman_group"), ("unit_b", "euro_group")]);
+    std::fs::write(data.join("data.pack"), pack(1, &[(&format!("{table}units_to_groupings_military_permissions"), vanilla)])).unwrap();
+    let modded = unit_groupings(&[("unit_a", "euro_group"), ("unit_a", "eastern_group")]);
+    std::fs::write(data.join("row_mod.pack"), pack(3, &[(&format!("{table}!row_mod"), modded)])).unwrap();
+
+    let (vfs, _) = Vfs::open_with_mods(&data, &script("mod row_mod.pack;", None)).unwrap();
+    let mut warnings = Vec::new();
+    let t = load_table::<ntw_data::campaign::UnitGroupingPermission>(&vfs, &mut warnings).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let rows: Vec<(&str, &str)> = t.iter().map(|r| (r.unit.as_str(), r.grouping.as_str())).collect();
+    assert_eq!(
+        rows,
+        [("unit_a", "euro_group"), ("unit_a", "ottoman_group"), ("unit_b", "euro_group"), ("unit_a", "eastern_group")],
+        "both groupings of unit_a survive, the repeated pair is one row, the mod's new pair is added"
+    );
+    assert_eq!(t.get("unit_a").map(|r| r.grouping.as_str()), Some("euro_group"), "lookups stay on the unit");
+}

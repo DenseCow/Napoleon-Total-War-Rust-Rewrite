@@ -415,20 +415,13 @@ fn target_candidates(ui: &CampaignUi, inner: &Inner, action: &str, agent: Charac
         "duel" => duel_targets(&m, agent, own)
             .into_iter()
             .map(|c| {
-                // The chance the model's duel is actually rolled at. `CampaignModel::duel` fights with
-                // `duel_weapon` (`0x00AAAC30`, CONFIRMED rule): the target picks the weapon with the
-                // *lower* chance for the challenger, a coin flip on a tie -- so the number is the
-                // smaller of the two `duel_chance`s (`0x00922940`, CONFIRMED), whichever way the
-                // flip goes. (Review 0-E: this used to show the pistols chance alone, which is not
-                // the number the duel is rolled at whenever swords are worse for the challenger.)
-                // INFERRED that the original's row shows the same number: the row carries one
-                // `Chance` and the shipped pane does not say which weapon it is for.
-                use ntw_sim::campaign::agents::{Weapon, duel_chance};
-                let chance = duel_chance(&m, agent, c, Weapon::Pistols)
-                    .into_iter()
-                    .chain(duel_chance(&m, agent, c, Weapon::Swords))
-                    .min()
-                    .unwrap_or(0);
+                // The original's row (CONFIRMED, `0x009C2340`): `0x00922940` with weapon 0xE, the
+                // target's better weapon by his own skills (`duel_quoted_weapon`). That is not
+                // always the weapon the duel is then fought with: an AI target picks the one with
+                // the lower chance for the challenger (`duel_weapon`, `0x00AAAC30`), so the shown
+                // number can be higher than the roll's, as in the original.
+                use ntw_sim::campaign::agents::{duel_chance, duel_quoted_weapon};
+                let chance = duel_chance(&m, agent, c, duel_quoted_weapon(&m, c)).unwrap_or(0);
                 TargetRow {
                     name: character_name(inner, ui, c).unwrap_or_else(|| character_type_name(inner, ui, c)),
                     address: character_value(ui, c),

@@ -643,8 +643,8 @@ pub enum Settlement {
 }
 
 /// The round-end economy of one faction (0x00BABE30, then the regions' 0x00AB4410): if
-/// `treasury + income >= expenses` the treasury changes by `income − expenses` (32-bit wrapping sums,
-/// [`super::treasury::cannot_pay`] / [`super::treasury::settle_round`]). Otherwise the
+/// `treasury + income >= expenses` the treasury changes by `income − expenses` ([`super::treasury::cannot_pay`] /
+/// [`super::treasury::settle_round`], without the exe's 32-bit wrap: ORIGINAL BUG, `treasury` module docs). Otherwise the
 /// faction is bankrupt ([`Settlement::CannotPay`], CONFIRMED 0x00BABE30 / 0x00BA2030 /
 /// 0x008AE710): the treasury becomes 0, the bankrupt-turn count grows, and the capital region's
 /// [`Region::wealth_growth_offset`] grows by 2 (at most 6; it falls by 1 at each of the faction's

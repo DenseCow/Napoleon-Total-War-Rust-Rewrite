@@ -60,7 +60,7 @@ there. Its README is the reference if a step below fails.
 
 Optional:
 - **Debugger sessions** (watching the original run) use Ghidra's own debugger with Windows'
-  `dbgeng`. The exact launch settings are in the ghidra-mcp section of [`CLAUDE.md`](CLAUDE.md).
+  `dbgeng`. The exact launch settings are in [`docs/GHIDRA_MCP.md`](docs/GHIDRA_MCP.md).
 - `.py` Ghidra scripts need the Jython extension (**File > Install Extensions**); prefer the `.java`
   scripts, which work as they are.
 

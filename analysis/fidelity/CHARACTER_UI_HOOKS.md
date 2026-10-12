@@ -346,7 +346,7 @@ never called -- so the *display* of the price is the panel's or the tooltip's bu
 - `CampaignCommand::PromoteUnit { force, unit }` — `commands.rs:146`
   (docs `commands.rs:143-145`); dispatched at `commands.rs:503` to
   `CampaignModel::promote_unit` (`pool.rs:348`).
-- Exe sites (CONFIRMED, §12): unit classes' slot 20 `0x008E1C20` (land) /
+- Exe sites (CONFIRMED, §12): unit classes' slot +0x4C `0x008E1C20` (land) /
   `0x008E2260` (naval); record set `0x00A1A2E0` → `0x00A1A300` (copies agent
   record 0/1 attributes+abilities, fires `CharacterPromoted`, re-sums
   effects `0x009CDF10`); entries: player `PromoteUnits` `0x009EF360` /
@@ -642,15 +642,14 @@ on a new campaign, INFERRED):
   `the_spying_data_levels_follow_the_models_sight`.
 - The character cards' and unit rows' `spying_data_level` + `knowledge_mask` come from the same
   answer instead of the old constant 3 / 15.
-- `RetrieveVisibleEnitityDetails` leaves out a settlement the player's shroud has not seen (the
-  labels; INFERRED), and `RetrieveFactionMilitaryForceLists` leaves out a foreign force whose
-  commander the player does not know. `RetrieveFactionRegionList` lists only the player's own
-  regions, so it needed nothing.
-- Round 3 changed the label filter from `CampaignModel::sees` to `CampaignModel::knows` (visible
-  OR explored), so a settlement seen once keeps its label. **INFERRED** (2026-10-06 review): the
-  exe's label handler is not traced and nothing was checked in game; it is in the in-game list.
-  Since the review, `fog_state == Visible` is exactly `sees`, so `knows` is never false where
-  `sees` is true (before, a faction with no shroud "knew" nothing off the grid).
+- `RetrieveVisibleEnitityDetails` leaves out a settlement whose cell the player's shroud hides
+  (`CampaignModel::hides_map_label`, the labels), and `RetrieveFactionMilitaryForceLists` leaves
+  out a foreign force whose commander the player does not know. `RetrieveFactionRegionList` lists
+  only the player's own regions, so it needed nothing.
+- The label filter was `sees`, then (round 3) `knows` (visible OR explored), both INFERRED.
+  Superseded 2026-10-12 (CHARACTERS_FIDELITY.md §15 (c)): the exe's label pass `0x009BAA90` →
+  `0x00B11E70` drops a label only for a cell in the hide set (#2), so a never-seen settlement keeps
+  its label; ours is `hides_map_label` (CONFIRMED) and `knows` is gone.
 - **Review finding for the binding owner (not fixed here, `campaign.rs` is 0-E's):**
   `spying_level_unit` answers `PASSIVE` for a unit whose force has no commander, even when the
   force is the player's own; it should answer `OWNED` when `owner.faction == human` before

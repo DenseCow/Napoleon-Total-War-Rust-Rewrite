@@ -931,7 +931,9 @@ fn a_capture_in_the_vanilla_saves_refunds_the_queued_ships() {
             let Some(capturer) = m.world.factions.keys().copied().find(|f| *f != owner) else { continue };
             let before = m.world.factions[&owner].treasury;
             m.capture_by_force(region, capturer, None);
-            assert_eq!(m.world.factions[&owner].treasury, before.wrapping_add(ships), "{name}: region {region:?}");
+            let mut expected = before;
+            ntw_sim::campaign::treasury::credit(&mut expected, ships);
+            assert_eq!(m.world.factions[&owner].treasury, expected, "{name}: region {region:?}");
             assert!(m.world.regions[&region].recruitment_queue.is_empty());
             captured += 1;
         }

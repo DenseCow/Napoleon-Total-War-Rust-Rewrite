@@ -3,7 +3,7 @@
 Keep this file short. It holds what is true now: replace finished items rather than appending logs.
 Old session logs are in `docs/archive/`.
 
-Last updated: 2026-10-10. Main tests at last full run (2026-10-08): `cargo test --workspace` passes on the install.
+Last updated: 2026-10-12. Main tests at last full run (2026-10-08): `cargo test --workspace` passes on the install.
 
 ## Resume here (2026-10-11)
 
@@ -19,17 +19,11 @@ Last updated: 2026-10-10. Main tests at last full run (2026-10-08): `cargo test 
 - **Resume points (2026-10-11 wrap-up, usage 80%):** merged 2026-10-11: polish9, polish10, region-transfer, sea-water (47cade7a),
   gait-jitter (f48faac9). Rule (user, 2026-10-11): a forced fix round also fixes the review's local notes (CLAUDE.md). Every branch
   below is pushed; resume each with a fresh worker (brief points at its branch + this line):
-  1. ui-fails (NR-ui-fails, 0e787e73): round-2 review: fix first, one blocking: ntw_data campaign.rs:294 `UnitGroupingPermission`
-     merges on `unit` alone (added by this branch, 9a14cfa9); the exe loader 0x00DC11A0 (via 0x00E86820) keys col0+col1
-     (MOD_LOADING.md §3.2), so merge on unit+grouping. Then review that fix commit only, merge (BACKLOG: Enlist tick; Polish line
-     `pflNextValue` 0x00F859A0; 0x00F72B80's 3 void* row locals need row structs). Then hud-state.
-  2. self-checks (NR-self-checks, 2d7a21c6, partial): (a) settled (hire/promotion portraits, test), (b) agent chances fixed (duel
-     0x009C2340, building sabotage 5% 0x00922D6A), (c) fog labels CONFIRMED (0x009BAA90). Left: (d) agent icons, (e) recruit prices +
-     card spacing, analysis notes, workspace tests, clippy; then review. Queue after: (f) diplomacy negotiation shot vs the original's,
-     (g) region details panel vs data/saves, (h) own save F5 round trip + map shot, (i) ForceCaps::new_campaign traced in Ghidra.
-  3. polish11 (NR-polish11, 51b7b044, partial, Opus): field-promotion gate CONFIRMED constant-false (slot +0x40 = 0x00462CB0 in both
-     vtables; no vanilla table grants the bonus). Left: item 1 (pool.rs/commands.rs/events.rs docs, turns 0→1 cite, i32 wrap) and
-     items 2-4 (treasury, new-portraits, deal V5 write-ups; 3 treasury plates at 47-56). Decision in FOR_USER (mod-granted promotion).
+  1. ui-fails, hud-state and polish11 merged 2026-10-12 (speed ring, card highlight; treasury saturates as ORIGINAL BUG fix, field promotion constant-false CONFIRMED).
+  2. self-checks (a)-(i) all merged 2026-10-12 (results in analysis/fidelity/IN_GAME_CHECKS_2026-10-10.md).
+  3. gait-infantry (NR-gait-infantry, Opus): each man his own timed move (per-soldier speed and lag), path-end clamp, one
+     layout; review round 2 fixes running (formation grid vs depth, finished men under a moving goal, settling man);
+     then trace its leftover PROVISIONAL (UNITS_TERRAIN_FIDELITY.md §1.9).
 - **Disk:** C: filled up on 2026-10-09; 21 merged worktrees were removed (~100 GB back). Remove a
   worktree after its merge; check `df -h /c` before starting builds.
 - **Next:** §0, several workers tracing in parallel under the Ghidra writer lock, §11: only the framework parts that avoid costly refits later (rule-seams running), the rest waits for its turn (user, 2026-10-10); the unwrap audit last.
@@ -40,12 +34,6 @@ Last updated: 2026-10-10. Main tests at last full run (2026-10-08): `cargo test 
 
 ## Open bugs
 
-- **Diplomacy screen (§0-E):** diplomacy2 merged (greeting by attitude, diplomat portrait, button lists
-  for war / peace+trade / ally, Power and Wealth words, regnal numerals). Still different from the
-  original: the panel creates no `diplomacy_button_*` components from the
-  lists (ignored test; cause untraced), red cancel texts. Original screens in
-  `%USERPROFILE%\Documents\ntw-evidence\screens\`: `2026-10-08_original_diplomacy_negotiation_britain_france.png`,
-  `…_britain_ottoman_trade.png`, `…_britain_austria_ally.png`, `2026-10-08_original_diplomatic_relations_britain.png`.
 - **Campaign:** the region details panel is filled since 2026-10-10 except Effects, NextTown and the selected-army
   garrison (PROVISIONAL, BACKLOG §0-E); the user couldn't find the demolish button (offered from a building slot via
   `CanDemolishBuilding`: check it shows).
@@ -75,15 +63,6 @@ Last updated: 2026-10-10. Main tests at last full run (2026-10-08): `cargo test 
     snow map; low priority, user): the boxes are our untagged debug outline (`napoleon` battle/view.rs
     ~1094, `unit_color`), four straight lines joined only at the terrain corners, so they sink into hills;
     the empty shapes are units with no men drawn that our musketeers still fire at. BACKLOG §7 Battle UI.
-- **Failed in-game checks (2026-10-10, `analysis/fidelity/IN_GAME_CHECKS_2026-10-10.md`), queued for a fix worker:**
-  - Army Recruitment tab lists ~25 overlapping cards including ships (original: 4 land options): an army never
-    filters naval units out (`ntw_sim` commander_recruitment.rs ~139-148); title adds ", Great Britain"; icon
-    `ui\units\icons\cav_light_hussars.tga` missing.
-  - Settlement panel: hovering a construction slot shows an empty dark tooltip frame that stays open after the
-    pointer leaves (`ntw_script` ui/campaign/settlement.rs ~726-812).
-  - Enlist panel traits show raw keys and the columns overlap (`ntw_script` ui/campaign/army.rs ~680-688, PROVISIONAL).
-  - `template.BattleUnitCard.lua:163` "compare number with nil" on NHB_Austerlitz with `--skip-deployment`
-    (`ntw_script` ui/battle_prelude.lua ~425-435, card info field nil).
 - **Original reference shots** still to match (agent options, sabotage, enlist general, settlement tabs):
   `analysis/campaign/CAMPAIGN_UI.md` "Original reference shots".
 
@@ -113,6 +92,10 @@ Delete a line once checked and record the result where it belongs. Base command:
   Check: cavalry no longer step in lockstep (each display has its own 0.95-1.05 gait speed, `0x0078B8A0`), and no hiccup at
   the run → walk change. Known left: a unit setting off from a stand still takes its first step together (BACKLOG §3).
 
+- **Battle HUD (hud-state, 2026-10-12, one quick look):** `--battle --no-intro --ai off`; change the speed
+  (buttons, Space, Tab): the ring sits on the current speed. Click a unit card: it lights up, also under
+  the pointer. Our shot: `ntw-evidence\screens\ours\2026-10-12_battle_hud_ffwd_selected_card.png`.
+
 ## Needs the user
 
 - **Stray branch to delete:** `origin/work/fidelity-campaign-w4` is superseded (main has later
@@ -136,5 +119,3 @@ Delete a line once checked and record the result where it belongs. Base command:
   caller at `0x009D6270` (its own stack params `[esp+0x118]`), what each argument is, then set
   SPACING and the colours. The process ran with the debug heap (`0xBAADF00D` fill): next launch, pass
   `_NO_DEBUG_HEAP=1` through the launcher's Env option.
-- **ui-fails (Opus, after polish1 merges: it shares commander_recruitment.rs):** fix the four "Failed in-game
-  checks" in Open bugs, tracing the exe where the fix depends on it, each with a test or a harness screenshot.

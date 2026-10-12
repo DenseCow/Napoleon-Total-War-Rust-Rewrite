@@ -4,7 +4,7 @@
 //! Coordinates: the UI works in window pixels with the origin at the top-left and y down (like
 //! the original). The 2D camera has its origin in the centre with y up, so we convert.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageSampler, ImageSamplerDescriptor};
@@ -41,11 +41,13 @@ pub struct UiAssets {
     /// Textures of the scripts' run-time images (see `ntw_script::ui::RuntimeImage`), by key,
     /// with the image version they were built from.
     runtime: HashMap<String, (u64, Handle<Image>)>,
+    /// The UI shader techniques met that [`shaded_color`] does not draw yet (each logged once).
+    undrawn_shaders: HashSet<String>,
 }
 
 impl UiAssets {
     pub fn new(vfs: Vfs) -> Self {
-        Self { vfs, textures: HashMap::new(), fonts: HashMap::new(), texts: HashMap::new(), embedded: HashMap::new(), movies: HashMap::new(), runtime: HashMap::new() }
+        Self { vfs, textures: HashMap::new(), fonts: HashMap::new(), texts: HashMap::new(), embedded: HashMap::new(), movies: HashMap::new(), runtime: HashMap::new(), undrawn_shaders: HashSet::new() }
     }
 
     /// The texture of a run-time image (`ntw_script::ui::RUNTIME_IMAGE_PREFIX` + key), rebuilt
@@ -209,6 +211,39 @@ fn argb_color(argb: u32) -> Color {
     Color::srgba_u8(r, g, b, a)
 }
 
+/// An image's colour (ARGB) under its state's shader technique (`UiState::shader` and
+/// `shader_vars`; per state, CONFIRMED: ShaderTechniqueSet 0x01014D50 writes state +0x118). The
+/// techniques are `data.pack`'s `sprite.fx`:
+/// - `brighten_t0` scales the drawn colour's RGB by 1 + x and clamps it (the battle unit card's
+///   Default state darkens by 0.3, Selected doubles). The original blends in gamma space, so the
+///   factor goes on the sRGB colour, which may exceed 1: Bevy multiplies the linear texel by its
+///   linear value and the target clamps, which equals the original's gamma-space product for a
+///   power-law curve. INFERRED: the sRGB curve's linear toe makes very dark texels differ slightly.
+/// - `normal_t0` (and no technique) draws the image as it is.
+/// - PROVISIONAL: every other technique (`set_greyscale_t0`, `red_pulse_t0`,
+///   `unitcard_burning_t0`, ...) needs a UI material and is drawn as `normal_t0`, logged once per
+///   name.
+fn shaded_color(argb: u32, state: &ntw_formats::ui_layout::UiState, undrawn: &mut HashSet<String>) -> Color {
+    let color = argb_color(argb);
+    match state.shader.as_str() {
+        "" | "normal_t0" => color,
+        "brighten_t0" => {
+            // Never below 0 (x < -1): the target clamps the product to 0..1 both ways, and the
+            // colour is >= 0, so only the factor can take it negative.
+            let k = (1.0 + state.shader_vars[0]).max(0.0);
+            let c = color.to_srgba();
+            Color::srgba(c.red * k, c.green * k, c.blue * k, c.alpha)
+        }
+        other => {
+            if !undrawn.contains(other) {
+                warn!("UI shader technique {other:?} is not drawn yet; drawn as normal_t0 (logged once)");
+                undrawn.insert(other.to_owned());
+            }
+            color
+        }
+    }
+}
+
 /// The original's UI scale for a window (0x0114EB20, CONFIRMED): min(1, width / 1280, height / 960),
 /// the same on both axes. Normal (DrawMode 0) components are laid out in a virtual screen of
 /// window / scale and drawn scaled by it (0x011617C0 sizes, 0x011881C0 positions: scale ×
@@ -337,7 +372,7 @@ pub fn spawn_world(world: &UiWorld, root: NodeId, commands: &mut Commands, asset
             let mut sprite = Sprite {
                 image: handle,
                 custom_size: Some(Vec2::new(rect.w, rect.h)),
-                color: argb_color(m.colour),
+                color: shaded_color(m.colour, state, &mut assets.undrawn_shaders),
                 flip_x: m.x_flipped,
                 flip_y: m.y_flipped,
                 ..default()
@@ -409,5 +444,34 @@ mod tests {
         assert_eq!(ui_scale(big), 1.0);
         assert_eq!(ui_virtual_screen(big), big);
         assert_eq!(window_to_ui(Vec2::new(5.0, 6.0), big), Vec2::new(5.0, 6.0));
+    }
+
+    /// brighten_t0 scales the sRGB colour by 1 + x (past 1 when brightening); normal_t0 and no
+    /// technique leave it; any other technique is drawn as normal_t0 and noted once.
+    #[test]
+    fn brighten_scales_the_srgb_colour_and_other_techniques_are_noted_once() {
+        use ntw_formats::ui_layout::UiState;
+        let mut undrawn = HashSet::new();
+        let state = |shader: &str, x: f32| UiState { shader: shader.into(), shader_vars: [x, 0.0, 0.0, 0.0], ..Default::default() };
+        let grey = 0xFF80_8080;
+        let rgb = |c: Color| {
+            let c = c.to_srgba();
+            [c.red, c.green, c.blue, c.alpha]
+        };
+        let base = rgb(argb_color(grey));
+        let dark = rgb(shaded_color(grey, &state("brighten_t0", -0.3), &mut undrawn));
+        let bright = rgb(shaded_color(grey, &state("brighten_t0", 1.0), &mut undrawn));
+        for i in 0..3 {
+            assert!((dark[i] - base[i] * 0.7).abs() < 1e-5);
+            assert!((bright[i] - base[i] * 2.0).abs() < 1e-5);
+        }
+        assert_eq!(dark[3], 1.0);
+        let black = rgb(shaded_color(grey, &state("brighten_t0", -2.0), &mut undrawn));
+        assert_eq!(black, [0.0, 0.0, 0.0, 1.0], "x < -1 gives black, never a negative colour");
+        assert_eq!(rgb(shaded_color(grey, &state("normal_t0", 5.0), &mut undrawn)), base);
+        assert_eq!(rgb(shaded_color(grey, &state("", 5.0), &mut undrawn)), base);
+        assert!(undrawn.is_empty());
+        assert_eq!(rgb(shaded_color(grey, &state("red_pulse_t0", 1.0), &mut undrawn)), base);
+        assert!(undrawn.contains("red_pulse_t0"));
     }
 }

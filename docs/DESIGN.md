@@ -453,6 +453,39 @@ File-format research that feeds this section, done outside that worker:
 - `analysis/worker5/BATTLE_TERRAIN.md`: battleterrain.pack structure.
 - `analysis/worker3/CAMPAIGN_MAP_GRAPHICS.md`: campaign map display files, rigid_spline, heightmap and region data.
 
+### 3.7.1 Platform renderer: modern look, data-driven (user, 2026-10-11)
+The renderer is our own modern design, not a port of the original's DirectX 9 one: vanilla Napoleon, with its original
+models, should look like a game from 2020 onwards, and a total-conversion mod (another era, another universe) with modern
+assets gets the same renderer with no engine change. One renderer only: no "classic look" switch and no ray tracing (user).
+
+- **Stays 1:1:** gameplay, data, UI layouts, and anything the rules can see (line of sight, visibility, what is on screen
+  to select). The *meaning* of the original's data is still traced in Ghidra: texture channels and masks, faction colours,
+  terrain blend rules, each map's sun, fog, sky and water values, LOD and unit-detail choices. That data is the input
+  and the art direction, so vanilla still looks like Napoleon.
+- **Our own:** how it is drawn. Physically based materials (the original's specular/gloss materials go through one
+  translation layer, which a mod can override; baked-in texture shading compensated per material), clustered/deferred
+  lights, high-quality cascaded shadows, ambient occlusion, screen-space reflections, probe-based indirect light,
+  atmospheric sky, volumetric fog, weather, modern tonemapping, colour grading and anti-aliasing. Bevy provides much
+  of this; the crowd system, terrain, foliage (our SpeedTree replacement) and light probes are ours.
+- **Crowd system:** a rewrite of the original's (per-man animation, level-of-detail by distance `0x0125ED60`, the
+  unit-detail option, tree LODs), so the same picture at much lower cost: GPU skinning and per-man phase (in,
+  `battle/skin.rs`), instancing, GPU culling, LOD, and far stand-ins only if measurement shows heavy mod models need them.
+- **No fixed unit kinds:** a unit is not one of a list (man, rider, vehicle, flyer); it is composed in data from
+  general building blocks: model parts attached at points, each with its own animations (man + horse, hull + turret +
+  crew, body + drill); a movement height relative to the ground as a number (above = flying, below = underground)
+  with what it may cross and what hides it; stats and abilities through rule seams and mod scripts (§3.3.1), state in
+  `ModState`. New general engine abilities a mod can then combine (user's digger example, 2026-10-11): terrain that
+  changes during a battle (trenches, craters, tunnels) in the model, pathfinding, line of sight and the renderer, and
+  units below ground. They are built once for every mod, never per mod.
+- **Data-driven, nothing Napoleon-specific in the renderer:** what a unit is made of, weapon and impact effects (they may emit light), per-map lighting and weather, materials,
+  shaders and LOD distances all come from data that mods override; a mod can add materials and shaders without
+  rebuilding, as rule seams do for rules (§3.3.1). Napoleon's values are the defaults.
+- **Checks:** a graphics change is checked for "right and modern" with the original's data visibly respected (sun,
+  fog, colours), not matched pixel for pixel. Performance: big battles at 60 fps on a mid-range GPU, measured on
+  release builds.
+- Already merged work that ports original shading (e.g. the battle sea, `terrain/water.rs`) keeps its data decoding; its
+  shading is redone when the renderer reaches it (BACKLOG §2).
+
 ## 4. Vertical slice (Phase 5) — done
 
 `cargo run -p napoleon` plays France vs Austria with real unit stats and kv tables from the install.

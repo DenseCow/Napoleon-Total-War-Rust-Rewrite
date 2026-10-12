@@ -558,13 +558,14 @@ impl CampaignUi {
         self.settlement_names.get(&r.settlement.key).cloned().unwrap_or_else(|| region_name(&inner.loc, &r.key))
     }
 
-    /// The text the selection bar shows: `"<a>, <b>"` (CONFIRMED: the engine joins two names with
-    /// ", " (`DAT_01315ff0`), and `SetSelectedEntity` cuts at the comma when the text does not fit
-    /// one line). For a settlement: settlement, region (INFERRED from the region getter used);
-    /// for a character: PROVISIONAL "<agent type>, <faction>" until character names are read
-    /// from the save (the model does not keep them yet). A fort: PROVISIONAL, its settlement and
-    /// region like the settlement's (the model's only fort is the settlement's fortification, which
-    /// has no name of its own; the original's `campaign_fort` naming is UNKNOWN).
+    /// The text the selection bar shows (`SetSelectedEntity`'s argument). For a settlement:
+    /// `"<settlement>, <region>"` (CONFIRMED: `HandleSettlementSelected` joins the two with ", "
+    /// (`DAT_01315ff0`), and `SetSelectedEntity` cuts at the comma when the text does not fit one
+    /// line; the second name INFERRED from the region getter used). For a character: his name alone
+    /// (CONFIRMED: the character handler `0x009C2AF0` passes the display name `0x00A0FDA0` with no
+    /// second part). A fort: PROVISIONAL, its settlement and region like the settlement's (the model's
+    /// only fort is the settlement's fortification, which has no name of its own; the original's
+    /// `campaign_fort` naming is UNKNOWN).
     fn selection_name(&self, inner: &Inner, sel: CampaignSelection) -> String {
         match sel {
             CampaignSelection::None => String::new(),
@@ -573,17 +574,11 @@ impl CampaignUi {
                 format!("{}, {}", self.settlement_name(inner, r), region_name(&inner.loc, &region_key))
             }
             CampaignSelection::Character(c) => {
-                let faction = {
-                    let m = self.model();
-                    let faction = m.world.characters.get(&c).and_then(|ch| m.world.factions.get(&ch.faction));
-                    faction.map_or_else(String::new, |f| faction_name(inner, &self.link.db, &f.key))
-                };
-                if faction.is_empty() {
+                if !self.model().world.characters.contains_key(&c) {
                     return String::new();
                 }
                 // The character's own name when the model has it, else his agent type's name.
-                let name = character_name(inner, self, c).unwrap_or_else(|| character_type_name(inner, self, c));
-                format!("{name}, {faction}")
+                character_name(inner, self, c).unwrap_or_else(|| character_type_name(inner, self, c))
             }
         }
     }
@@ -1152,12 +1147,11 @@ impl UiScriptHost {
     ///
     /// The tab kept on a refresh is found by its identity (`previous`, same selection only),
     /// never by its position (INFERRED: the exe's tab builders `FUN_00985F40` / `FUN_0099A200`
-    /// take the tab to select from their caller). Ours hides the tooltip first: the components
-    /// under the pointer are rebuilt (the pointer shows it again on the new component).
+    /// take the tab to select from their caller). A rebuilt component under the pointer takes its
+    /// tooltip down when it is destroyed ([`UiScriptHost::pulse`], `0x0102F3F0`).
     pub fn campaign_select(&self, sel: CampaignSelection) {
         let Some(ui) = self.campaign_ui() else { return };
         let (lua, inner) = (self.lua(), self.inner());
-        self.hover(None);
         let previous = (ui.selection.get() == sel)
             .then(|| ui.tabs.borrow().get(ui.current_tab.get().wrapping_sub(1)).copied())
             .flatten();

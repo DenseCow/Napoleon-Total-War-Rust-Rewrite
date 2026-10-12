@@ -281,7 +281,7 @@ fn front_end_tooltips_show_and_fit_the_text() {
     });
     let back = back.expect("back button");
     host.set_cursor_position(40.0, 900.0);
-    host.hover(Some(back));
+    host.pointer(back, PointerEvent::Enter);
     no_errors(&host);
     let w = host.world();
     let tip = w.find(root, "Tooltip").and_then(|t| w.get(t)).expect("tooltip created");
@@ -294,7 +294,7 @@ fn front_end_tooltips_show_and_fit_the_text() {
     let t = tip.children.iter().filter_map(|&c| w.get(c)).find(|c| c.data.id == "t").unwrap();
     assert_eq!((t.rect.x, t.rect.w), (tip.rect.x + 8.0, tip.rect.w - 16.0));
     drop(w);
-    host.hover(None);
+    host.pointer(back, PointerEvent::Leave);
     let w = host.world();
     assert!(!w.find(root, "Tooltip").and_then(|t| w.get(t)).unwrap().visible);
 }

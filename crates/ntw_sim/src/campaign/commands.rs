@@ -194,7 +194,8 @@ pub enum CampaignCommand {
         fleet: ForceId,
     },
     /// Promote a unit's commander in the field to General (army) or admiral (navy) (the unit
-    /// classes' slot 20, `0x008E1C20` / `0x008E2260`, the player's `PromoteUnits` /
+    /// vtables' slot +0x4C, `0x008E1C20` / `0x008E2260`; never reached in the original, whose gate is constant
+    /// false; ours needs a mod-granted bonus, see `promote_unit`; the player's `PromoteUnits` /
     /// `CCQ_PROMOTE_COMMANDER`; [`CampaignModel::promote_unit`](super::CampaignModel::promote_unit)).
     PromoteUnit {
         /// The force.
@@ -1328,8 +1329,8 @@ impl CampaignModel {
     /// [`super::population::RecruitmentPopulation::credited`]); each item `refunded` selects (the flag
     /// the caller passes, 1 = refund) has its item vtable +0x1C (`0x00B5C060` land, `0x00B5C0A0` naval)
     /// credit its stored cost (item +0x20, the entry cost the queue command charged, `0x00AF3F80`) as
-    /// income category 3, whose converter passes it unchanged ([`super::treasury::credit`]: 32-bit
-    /// wrapping), to the region's owner (`0x00B2B7C0`: the queue's region +0xF4).
+    /// income category 3, whose converter passes it unchanged ([`super::treasury::credit`], saturating
+    /// where the exe's 32-bit add wraps: ORIGINAL BUG, `treasury` module docs), to the region's owner (`0x00B2B7C0`: the queue's region +0xF4).
     pub(crate) fn cancelled_recruitment_items(
         &mut self,
         region: RegionId,
@@ -1343,7 +1344,7 @@ impl CampaignModel {
         };
         r.population = population.credited(r.population, items.len());
         let owner = r.owner;
-        let refund = items.iter().filter(|i| refunded(&self.rules, i)).fold(0i32, |sum, i| sum.wrapping_add(i.cost));
+        let refund = items.iter().filter(|i| refunded(&self.rules, i)).fold(0i32, |sum, i| sum.saturating_add(i.cost));
         if refund == 0 {
             return;
         }

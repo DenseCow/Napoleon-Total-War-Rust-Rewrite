@@ -808,8 +808,8 @@ Tests: `a_general_hired_into_an_army_takes_its_command_there`, `an_admiral_is_hi
 **`CharacterPromoted` (CONFIRMED).** The event class vtable `0x0136A97C` is built in exactly one place:
 `0x00A1A300` (this = the character details), which copies an agent record's attributes and abilities into the
 details, sets +0x1AC, fires the event, looks the record up in a table and re-sums the effects (`0x009CDF10`);
-`0x00A1A2E0` calls it and stores the record. Its callers are the unit classes' slot 20 (`0x008E1C20` land, vtable
-`0x01355494` = `0x0135536C` + 0x128; `0x008E2260` naval, vtable `0x01355528`): the field promotion of a unit's
+`0x00A1A2E0` calls it and stores the record. Its callers are the unit classes' slot +0x4C (`0x008E1C20` land, vtable
+`0x01355494` = `0x0135536C` + 0x128; `0x008E2260` naval, vtable `0x0135552C`): the field promotion of a unit's
 commander to General (agent record 0) / admiral (record 1), making a character for a unit without one
 (`0x00990EF0`) and a new force when needed (`0x0087FEA0`). Ways in: the player's `PromoteUnits` (`0x009EF360`,
 `CanPromoteUnit` `0x009E0AF0` asks the unit's slot 16) / `CCQ_PROMOTE_COMMANDER` (`0x00936C70` → slot 0x4C of the
@@ -1011,15 +1011,13 @@ the hire formula and BACKLOG 0-G's Open list loses its last item.
 **The model side, completed this round (no `crates/napoleon` file touched; `scene.rs` is 0-D's).**
 `CampaignModel::fog_state_at(faction, col, row)` is now the single definition of the three-way fog
 test, with `fog_state` (per map position) and `fog_states` (per cell, `row * cols + col`) both
-deferring to it, so a renderer and the labels layer cannot shade a cell differently from the way
-it is filtered; `cell_centre` is the inverse of `SightGrid::cell_of`. `fog_states` is confirmed to
+deferring to it; `cell_centre` is the inverse of `SightGrid::cell_of`. `fog_states` is confirmed to
 cover the **whole map grid** (`world.sight_grid`, the same grid the shroud's saved
-`QUAD_TREE_BIT_ARRAY` uses), not just the regions. New `CampaignModel::knows(faction, pos)` is the
-labels layer's test and is deliberately **not** `sees`. **Fixed a real bug:** the campaign labels
-(`RetrieveVisibleEnitityDetails` in `ntw_script/src/ui/campaign.rs`) filtered with `sees`, so a
-settlement that had been seen and was now only explored lost its label while the terrain renderer
-would still be drawing it dimmed; it now filters with `knows`. The exact tint is still PROVISIONAL
-/ INFERRED — the cell sets are CONFIRMED, the shading is not read from the exe.
+`QUAD_TREE_BIT_ARRAY` uses), not just the regions. The labels layer's test was first `sees`, then
+(round 3) a `knows` (visible or explored); **superseded 2026-10-12 (§15 (c)):** the exe's label pass
+reads only the hide set, so ours is `CampaignModel::hides_map_label` and `knows` is gone. The exact
+tint is still PROVISIONAL / INFERRED — the cell sets are CONFIRMED, the shading is not read from the
+exe.
 
 **Tightened from PROVISIONAL to a CONFIRMED negative (data).** `CurrentNumGenerals` /
 `MaxGeneralsAllowed`: there is **no general limit in the shipped data at all**.
@@ -1044,12 +1042,12 @@ address with a kept decompile). 0-G's Ghidra output was kept only in the sandbox
 - **Kept CONFIRMED:** the hire's script surface `CampaignUI.PromoteUnits(force, candidate)` and
   its argument order (bytecode read on the install and described, `enlist_commander.luac:106`);
   the shroud's three cell sets and `0x00B7A150`'s test (save-checked).
-- **The label change is INFERRED:** filtering the settlement labels with `knows` (visible or
-  explored) instead of `sees` keeps an explored settlement's label. Nothing in the exe or in game
-  has shown the original does that; it is the consistent reading of the explored set, and it is
-  the one visible behaviour change of round 3 — check it in game.
+- **The label change (superseded 2026-10-12, §15 (c)):** round 3 filtered the settlement labels
+  with `knows` (visible or explored) instead of `sees`, INFERRED. The exe's label pass
+  (`0x009BAA90` → `0x00B11E70`) reads neither: it drops a label only for a cell in the hide set,
+  so a never-seen settlement keeps its label too. Ours is now `hides_map_label` (CONFIRMED).
 - **Fixed in the model:** `fog_state` answered `NeverSeen` off the grid even for a faction with
-  no shroud (while `sees` answered true), so `knows` could be false where `sees` was true;
+  no shroud (while `sees` answered true), so the then label test could fail where `sees` passed;
   `fog_state_at` answered `Visible` outside the grid while `fog_state` answered `NeverSeen`;
   `cell_centre` panicked without a grid (now `Option`). `fog_state == Visible` is now exactly
   `sees`, tested on and off the grid, and the turn-end transition Visible → Explored is tested.
@@ -1075,7 +1073,25 @@ are in our words, no decompiled code stored. Targets and findings:
   no rank or distance input. Naval slot +0x44 is a return-0 stub (naval promotion charges 0 through
   the treasury spend). The neighbouring slots +0x38 / +0x3c read as a value pair (naval
   `0x008E27B0` / `0x008E2A60`).
-- Gate (UNKNOWN): the base tables hold a return-0 stub at slot +0x40 (`CanPromoteUnit` `0x009E0AF0`
+- Gate: **CONFIRMED** (static trace and byte search, polish11, 2026-10-11): the field promotion never
+  runs in the shipped exe. `0x008E1C20` sits only at `0x013554E0`, which is slot +0x4C (not slot 20) of
+  the land vtable `0x01355494`. That vtable is stored by the constructors `0x0087FB30`, `0x0087FC70`,
+  `0x0087FDA0`, `0x0087FEA0`, `0x0087FFA0`, `0x008800B0`, `0x008801C0` and `0x0088EAF0`; nothing
+  references `0x01355490`. The naval twin `0x008E2260` sits only at `0x01355578`, slot +0x4C of
+  vtable `0x0135552C` (not `0x01355528`), whose constructors are `0x0088EEA0`, `0x00881740`,
+  `0x008818C0`, `0x00881AC0` and `0x00881BF0`. In **both** vtables, slot +0x40 (`0x013554D4` /
+  `0x0135556C`) is `0x00462CB0` (`XOR AL,AL; RET`, constant false). +0x44 is `0x008E2770` / `0x008E27B0`
+  and +0x48 is `0x008E2A20` / `0x008E2A60`. `CanPromoteUnit` `0x009E0AF0` and the console
+  `promote_unit_commander` `0x00961430` both ask slot +0x40, so they always answer no. The only
+  callers of `0x00A1A2E0` are those two executors, so `CharacterPromoted` never fires. A scan of
+  every install `db` table (latin1 and UTF-16) finds no `promote_general_in_field` or
+  `promote_admiral_at_sea`, so with vanilla data the model's effect gate in `pool.rs`
+  `can_promote_unit` never passes either: vanilla behaviour matches. This reads as a design choice
+  (field promotion switched off), not an ORIGINAL BUG. The promotion-price debugger sitting can
+  find nothing, because the original never reaches the price. Decision (user, 2026-10-11): a mod that grants the bonus
+  still promotes (mod makers decide, no toggle); vanilla grants none, so it matches the original. The
+  `pool.rs` / `commands.rs` / `events.rs` docs now say slot +0x4C and the constant-false gate.
+- Superseded by the line above: the base tables hold a return-0 stub at slot +0x40 (`CanPromoteUnit` `0x009E0AF0`
   reads it), so a promotable unit's concrete gate value cannot be read statically; the executor
   returns early on 0. The end-of-path `0x008F35E0` spend against field +0x6c (via `0x0047B940`) is
   present in both promotion executors and both hire placements and is not the treasury move.
@@ -1264,3 +1280,79 @@ All CONFIRMED by static trace (Ghidra names applied in this round) unless tagged
 - Open: new ministers and family members (`0x008BF310`, `ResolveFamilyMemberPortraitPictures` `0x00A055E0` with the
   king / queen decks) and agents trained in buildings still take their portraits from the save writer's templates
   (§5c PLACEHOLDER).
+
+**V5 write-up (polish11, 2026-10-12, static trace; applied in Ghidra):**
+- **30 functions** documented: names, prototypes, plates and EOL comments on every constant. Completeness:
+  minimum 13 and average 61 (effective: minimum 33, average 72).
+  - The low ones are the four character constructors (`0x00992E60`, `0x0098F250`, `0x0098F880`, `0x00990EF0`),
+    `0x00A1A300` and the ESF loaders and savers.
+  - What keeps them low: engine string temporaries, unnamed shared helpers (`0x004F0800` and similar) and the
+    character's vtable globals.
+- **Types created:**
+  - `PortraitDeck` (0x1C): pictures +0, order capacity +8, count +0xC, order +0x10, next position +0x14,
+    seed +0x18.
+  - `PortraitHashMap` (0x1C): bucket count +0xC, buckets +0x10 (stride 0x14), size +0x14, max load +0x18.
+    A deck sits at node +0x14.
+  - `CulturePortraitSet` (0x38): `CULTURE_PATHS` map +0, `PORTRAIT_CATEGORIES` map +0x1C.
+  - `HashMapIterator` (0xC): map, bucket, node. The find helper is `0x008C05B0`.
+  - `CharacterName` (0x18): the by-value name argument.
+- **Labels:** 26 string labels (`szFmtPath_PortraitJpgNumber` `0x0136AF14` … `szKey_GuerillaAgent`
+  `0x01358114`). `0x0146D890` is `g_dwEmptyNarrowStringBuffer`, the twin of `g_dwEmptyStringBuffer` `0x0146D894`.
+- **Calling conventions** (from RET n):
+  - thiscall: the load and build functions, `0x00A1F730`, `0x00A1F890` and `0x009DC310`
+    (`FindLastPortraitPictureNumber`, RET 0x10). The members sit in class namespaces `PortraitDeck`,
+    `PortraitHashMap` and `CulturePortraitSet`.
+  - stdcall: `0x009D2F00` only.
+  - cdecl: the three Save* functions and `0x009AD250`.
+  - The deck is in ECX with no stack arguments: `0x009CA8C0` and `0x00A1E910`.
+  - `0x009942D0` (`LoadCulturePortraitPaths`) is thiscall (RET 8) and returns this.
+  - `0x008E1C20` is thiscall, plain RET.
+- **Reads:**
+  - A historical character's age is the current calendar year − record +0x34 + 20 (`0x0098FBD0`).
+  - A portrait counts as "old" from age 45 (`0x00A05440`).
+  - A minister made by script (`0x009ED8A0` → `0x009C1300`) gets Cards young #001 at age 25.
+  - `0x00A1A2E0` is a thiscall wrapper: it calls `0x00A1A300` on this +0x2F0, then stores the record at +0x1AC.
+- **Unchecked lookups** (not ORIGINAL BUGs: both are unreachable):
+  - `0x00A05440` uses its second category lookup without checking it against the end (`0x00A05531`).
+  - A `CULTURE_PATHS` miss in `BuildAgentPortraitDecks` would write through null + 0x14 (`0x00A1FE47`).
+  - The builder inserts every agent's entry first, so neither happens.
+
+## 15. Self-checks (2026-10-12, worker self-checks)
+
+The 2026-10-10 in-game checks (`IN_GAME_CHECKS_2026-10-10.md`) that data, layouts, tests and Ghidra can
+settle without a person.
+
+- **(a) New-character portraits:** settled by test. `ntw_script/tests/campaign_ui.rs`
+  `a_hired_and_a_field_promoted_general_show_european_general_portraits` hires a General from the pool and
+  field-promotes a colonel through the real commands; both show european General portraits on the army card
+  and in the Lists (§14).
+- **(b) Agent action chances:**
+  - Duel row: the target picker (`0x009C2340`) asks the chance function `0x00922940` with weapon `0xE`,
+    which resolves at `0x009229FD` to the target's better weapon by his own skills, pistols on a tie. Ours
+    showed the lower of the two weapons' chances; now `duel_quoted_weapon` (`ntw_sim/src/campaign/agents.rs`).
+    That is the number shown, not always the weapon an AI target then fights with (`duel_weapon`,
+    `0x00AAAC30`), as in the original. CONFIRMED.
+  - Building sabotage: `0x00922C90` returns 5 (%) at `0x00922D6A` when the strength S ≤ 0. Ours returned
+    no chance there, which dropped the target from the picker. CONFIRMED.
+  - Tests `duel_and_assassination_chances_follow_the_exe`, `building_sabotage_damages_the_building`.
+- **(c) Fog labels:** the label pass `0x009BAA90` asks `0x00B11E70`, which drops a settlement label only
+  when its cell is in the shroud hide set (#2); a settlement the faction has never seen keeps its label.
+  Ours: `hides_map_label` replaced `knows()` (`ntw_sim/src/campaign/visibility.rs`); test
+  `a_never_seen_settlement_keeps_its_label_and_a_hidden_cell_loses_it`. INFERRED → CONFIRMED.
+- **(d) Main attribute on agent cards:** the agents tab builds its cards with
+  `CreateCharacterCard(..., ShowAttributes = true)` (Agents.lua:234); Utilities.lua:122-123 then sets
+  `{CharacterAttribute:1}` to `PrimaryAttributePath`, so the original shows the main attribute's picture there.
+  - The main attribute comes from `agents` #8 (record `+0x44`, `GetCharacterMainAttributeIndex`
+    `0x00A198C0`). `agents::main_attribute` read a hardcoded match by agent type; it now reads
+    `CampaignRules::agent_primary_attributes`, filled from the merged `agents` table (so a mod's agent
+    type or changed attribute works). An empty #8 means no main attribute: the exe fills the Primary
+    fields only for a valid index (< 14), and ours leaves the name and path empty.
+  - Tests: `agents_tab_cards_show_the_main_attribute_picture` (a rake's card in Paris carries
+    `pips/skill_spying.tga`), `ntw_campaign/tests/characters.rs` `vanilla_agent_main_attributes` (all 13
+    vanilla agent types against the install), `character_cards_show_the_main_attribute_and_its_rank` (a
+    mod's main attribute, and none). Shot `ntw-evidence\screens\ours\2026-10-12_settlement_agents_tab.png`.
+    CONFIRMED.
+- **(e)** Recruitment card spacing and prices: CAMPAIGN_UI.md "Settlement panels". CONFIRMED.
+- Seen, not changed (no scope widening): a target whose own subterfuge beats every other candidate's is his
+  own protector, so the protector rule can take him out of the assassination targets. Traced as it stands
+  in our model only; the exe's protector choice is a BACKLOG trace item.

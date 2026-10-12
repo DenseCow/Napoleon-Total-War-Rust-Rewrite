@@ -270,3 +270,30 @@ fn ministers_are_dismissed_and_appointed() {
     let r = ntw_campaign::save_check::check(&back);
     assert!(r.violations.is_empty(), "{:?}", r.violations);
 }
+
+/// The character types' main attributes come from the merged `agents` table's #8 (record +0x44, read by
+/// `0x00A198C0`): the vanilla rows give each type the attribute its rank and its cards' primary picture
+/// use (CHARACTERS_FIDELITY.md §13). The `ntw_sim` rules fixture copies these values.
+#[test]
+fn vanilla_agent_main_attributes() {
+    use ntw_sim::campaign::agents::main_attribute;
+    use ntw_sim::campaign::CharacterKind as K;
+    let Some(m) = model() else { return };
+    for (kind, main) in [
+        (K::General, "command_land"),
+        (K::Colonel, "command_land"),
+        (K::Admiral, "command_sea"),
+        (K::Captain, "command_sea"),
+        (K::Gentleman, "research"),
+        (K::EasternScholar, "research"),
+        (K::Minister, "management"),
+        (K::Rake, "subterfuge"),
+        (K::Assassin, "subterfuge"),
+        (K::Guerilla, "subterfuge"),
+        (K::CatholicMissionary, "zeal"),
+        (K::OrthodoxMissionary, "zeal"),
+        (K::ProtestantMissionary, "zeal"),
+    ] {
+        assert_eq!(main_attribute(&m.rules, kind), main, "{kind:?}");
+    }
+}

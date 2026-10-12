@@ -126,6 +126,8 @@ spying_data_level, Portrait, hull_health_l/r.
 | Slot hover (BuildingFrame OnMouseOn → SelectPassive, no delay) shows the slot's cards with a transition: the leading card slides down from under the slot over `g_time_down` 0.15 s; the others are shown at start + 0.8 × 0.15 × `g_time_scalar` (1) = 0.12 s and slide sideways over `g_time_out` 0.25 s (fade-in 0.2 s, fade-out 0.15 s constants). Start times come from `CampaignUI.Time()` (s); OnUpdate gets `OnUpdatePulse`'s ms and multiplies by 0.001 | template.buildingframe.luac (`luac_dump`), protos at lines 77, 181, 329, 341, 352 | CONFIRMED |
 | UI clock: the root's per-frame update `0x0102F4F0` (UI root vtable +0x30) takes a u32 time, stores it in `0x0176591C`, calls each registered listener's vtable +0x30 with it and fires the root's `OnUpdatePulse` (event 11, handler at component +0x1E4/+0x1EC) with it as a float. `CampaignUI.Time` = `0x009F9B80` → vtable +0x30 of the campaign UI manager's `+0x18` part = `0x00A0EB80`: `(float)(u32)[[this+0x9E4]+0x90] * 0.001` (a ms counter of the object at manager `+0x9FC`). The campaign UI frame (`0x009D5F08`..`0x009D5F31`) calls that same getter, × 1000, truncates to int and passes it via `0x00DB2AE0` (manager `+0xAC` = UI root, vtable +0x30) to `0x0102F4F0`: `OnUpdatePulse(ms)` and `Time()` are one clock. `WindowsTime` = `0x009FB0B0`: `(int)((float)timeGetTime() * 0.001f)`: the u32 to a 32-bit float, times `0.001f`, truncated to an int (whole seconds). Ours: `OnUpdatePulse` and `Time()` share one clock: the HUD's ms clock (`CampaignHud::clock_ms`, fractional), advanced by real time (`Time<Real>`, so a battle's pause or speed does not carry over; no per-frame cap; PROVISIONAL) and floored to whole ms by `UiScriptHost::pulse` for both; `WindowsTime()` calls `timeGetTime()` itself (winmm) and computes as the exe, float then truncate (`host::windows_time_secs`; the battle binding `0x005D4BF0` is the same float without the truncation, see BATTLE_FLOW.md). (Before: `Time()` was a separate wall clock and delayed the drop-down by 0.4 s at start, growing ~0.3-0.5 s per end turn, bug 2026-10-07.) | exe | formulas and the shared clock CONFIRMED; what advances the `+0x90` counter (pause, turn processing) UNKNOWN |
 | Technology tree links: an entry's `ParentXoffset` / `ParentYoffset` (`0x009ABB50`: record `+0x88` / `+0x84`; ChainPosition `+0x18`, PointsRequired `+0x1C`) are computed at load by the technology link step `0x00F21A30`: per `technology_required_technology_junctions` row (T requires R, table order, a later row overwrites) with R in T's tree column (records `+0x90`/`+0x94` equal, from the building chain through the building level): X = R.pos % 4 − T.pos % 4, Y = (2·T.level + (T.pos > 3)) − (2·R.level + (R.pos > 3)); other requirements go to the record's list `+0x68..` and draw nothing. `template.tech_entry.lua:47-94` draws a horizontal link (icon width + x spacing) × \|X\| and a vertical one (icon height + y spacing) × \|Y\| from the slot's centre. Ours: `technology_parent_offsets` (was columns 6/7: a 640 px stray line over the title, bug 2026-10-07) | exe | formula CONFIRMED; "same column" = same chain and the level field = `building_levels.level` INFERRED |
+| Recruitment card row (self-check 2026-10-12): Recruitment.lua `RecrutmentCardPositions_OSX` places the cards, the selected one 68 px wide and the others 61 px, at a 45-px pitch, so they overlap (the original's own fan, not a bug); when the row is wider than the area the pitch shrinks by ceil((total − area) / N); start = group.x + trunc(offset + (area − total) / 2), offset = queue_0.x − group.x, area = group.w − offset. `RecruitableCardPosition` / `ScalePosition` in the same file are never called | Recruitment.lua; test `settlement_recruitment_cards_fan_like_the_original`; shot `ntw-evidence\screens\ours\2026-10-12_settlement_recruitment.png` | CONFIRMED |
+| Recruitment card price: units #7 cost × (100 + `recruitment_mod_cost_land_all` + category and class cost mods) / 100, rounded (`0x00B31020` → `0x00B0D220`). Paris at the campaign start: land_all −16 = iron mine −3, war minister level 6 −8, difficulty-0 human handicap −5 (`apply_start_handicaps`, `0x008DD090`); the French 6-lber shows 610 × 84 % = 512 | units #7, effect data; test `settlement_recruitment_card_price_is_the_regions_entry_cost`; same shot | CONFIRMED |
 
 ## Labels, tooltips, lists (findings)
 | Rule | Evidence | Tag |
@@ -179,6 +181,24 @@ pixels. Still open (the tabs, portraits, Lists docking and the technology title 
 - o5 the star button = **Enlist New General** (centred, x 650-1270, y 62-776): "Generals enlisted 3/6",
   distance-from-capital bar, 3 candidates (portrait, name, stars, traits, cost), OK/X. Its bottom is ~55 px above
   the HUD band.
+- Trait rows (CONFIRMED, Ghidra 2026-10-11; used by the Enlist panel and character details): the list holds
+  every trait whose `character_traits` hidden flag is 0 and whose level is above 0, in the character's list order
+  (`CollectVisibleCharacterTraits 0x008C65A0`). Each row (`BuildCharacterTraitLuaRow 0x009AFD60`):
+  `Name` = loc `character_trait_levels_onscreen_name_<level>`, `IconFilename` = the trait's `trait_categories`
+  icon, `ExplanationText` / `RemovalText` / `ColourText` = the level's loc texts (empty when missing; vanilla has
+  no explanation or removal texts), `Effects` = one {IconFilename, Description, Priority} per
+  `trait_level_effects` effect in table order, repeats of one effect summed into its first entry
+  (`0x00F84220`), effects with `effects` priority 0 or less left out; Description = loc
+  `effects_description_<effect>` with %n / %+n filled by the value (%+n adds "+" when >= 0, %% = %), printed
+  with 0 decimals when within 0.005 of a whole number, else 1 when value x10 is, else 2
+  (`0x00F859A0`, `0x00F85560`, `0x00F85720`, `0x004F3140`). `AttributeEffects` = one string per
+  `trait_attribute_effects` row: the attribute's loc `agent_attributes_effect_text_<attribute>` filled the
+  same way with the integer value (`0x00F0D990`). Ours: `traits_table` in
+  `crates/ntw_script/src/ui/campaign/characters.rs`.
+  The level record (0x98 bytes, `InitTraitLevelRecord 0x00F72B80`) gathers its rows by level key from four
+  tables (built at 0x00E14105): `trait_level_effects` (summed into +0x48), `trait_ability_effects` (+0x68),
+  `trait_attribute_effects` (+0x78, the AttributeEffects list) and `trait_attribute_situation_effects` (+0x88);
+  the trait row shows only the first and third.
 - o6 Research and Technology: Educational Buildings (Oxford); Civil / Military / Industrial columns.
 
 ## UIEd template library (`uied.templates`)

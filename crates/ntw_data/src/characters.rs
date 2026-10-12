@@ -13,13 +13,26 @@ db_record! {
         /// #1 @0x0C the no-going-back level: once reached, falling points never take the trait below it
         /// (CONFIRMED, `0x008B5380`).
         no_going_back_level: i32,
-        /// #2 @0x10 bool (INFERRED hidden).
+        /// #2 @0x10 hidden: the character's trait list in the UI leaves the trait out (CONFIRMED, the list
+        /// builder 0x008C65A0 keeps only traits with this false and a current level above 0).
         hidden: bool,
         /// #3 @0x14 eviction priority: with the trait list full, the held trait with the lowest value (then
         /// the fewest points) makes way (CONFIRMED use, `0x008C2D30` / `0x00898EC0`).
         priority: i32,
-        /// #4 category, e.g. `Naval`, `Character Quirk`.
+        /// #4 @0x18 category, e.g. `Naval`, `Character Quirk` (a `trait_categories` key).
         category: String,
+    }
+}
+
+db_record! {
+    /// `trait_categories` (`so`, 12 rows): a trait category and its picture, the `IconFilename` of every
+    /// trait in it on the character and enlist panels (CONFIRMED, 0x008C9C70 reads trait record +0x18 →
+    /// category record +0x0C).
+    pub struct TraitCategoryRecord in "trait_categories", key = category {
+        /// #0 category key, e.g. `Military`.
+        category: String,
+        /// #1 the picture, e.g. `data/ui/campaign ui/pips/effect_army.tga`.
+        icon: Option<String>,
     }
 }
 
@@ -126,6 +139,7 @@ db_record! {
 pub struct CharacterTables {
     pub attributes: Table<AgentAttributeRecord>,
     pub traits: Table<CharacterTraitRecord>,
+    pub trait_categories: Table<TraitCategoryRecord>,
     pub trait_info: Table<TraitInfo>,
     pub antitraits: Table<TraitAntitrait>,
     pub trait_agents: Table<TraitIncludedAgent>,

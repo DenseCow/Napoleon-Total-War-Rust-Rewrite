@@ -338,7 +338,7 @@ impl CampaignModel {
     ///
     /// The checks run in the same order as [`sees`](Self::sees) (no shroud, shroud off, no grid:
     /// visible; off the grid: never seen), so `fog_state(f, p) == Visible` is exactly
-    /// `sees(f, p)` and `knows` is never false where `sees` is true.
+    /// `sees(f, p)`. The map labels use neither: [`hides_map_label`](Self::hides_map_label).
     pub fn fog_state(&self, faction: FactionId, p: (f32, f32)) -> FogState {
         let Some(s) = self.world.shrouds.get(&faction) else { return FogState::Visible };
         if !s.active {
@@ -391,15 +391,20 @@ impl CampaignModel {
         }
     }
 
-    /// Whether `faction` knows this position **at all** — visible now, or seen at some point.
-    ///
-    /// This is the test the **labels layer** uses, and it is deliberately *not*
-    /// [`sees`](Self::sees): `sees` is false for a settlement that has been seen and is now
-    /// merely explored. **INFERRED** that the original keeps such a settlement's label (the
-    /// label handler `RetrieveVisibleEnitityDetails` is not traced in the exe, and nothing has
-    /// been checked in game); the cell sets themselves are CONFIRMED.
-    pub fn knows(&self, faction: FactionId, p: (f32, f32)) -> bool {
-        self.fog_state(faction, p) != FogState::NeverSeen
+    /// Whether `faction`'s shroud hides the map label at a position (CONFIRMED, the labels layer's
+    /// only fog test): its cell is in the hide set (#2, shroud +0x34). The label handler
+    /// (`0x009F4520` → `0x009B0400`) asks `0x009BAA90` per settlement, which skips the test when the
+    /// faction has no shroud and drops the label only when `0x00B11E70` is true: the shroud is on
+    /// (+0x50) and the cell, from `0x00B5B5A0`, is in the hide set (`0x00E25280`, false off the
+    /// grid). Neither the visible (#1) nor the explored (#0) set is read, so a settlement never
+    /// seen keeps its label, as one in sight does; the hide set is empty in every vanilla save.
+    pub fn hides_map_label(&self, faction: FactionId, p: (f32, f32)) -> bool {
+        let Some(s) = self.world.shrouds.get(&faction) else { return false };
+        if !s.active {
+            return false;
+        }
+        let Some((x, z)) = self.world.sight_grid.and_then(|g| g.cell_of(p)) else { return false };
+        s.hidden.get(x, z)
     }
 
     /// The same three states as [`fog_state`](Self::fog_state), but per sight cell — for a caller

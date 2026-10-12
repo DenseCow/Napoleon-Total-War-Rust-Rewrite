@@ -168,7 +168,7 @@ db_record! {
 db_record! {
     /// `building_culture_variants` (`ssooooo`, 264 rows): a building level one culture
     /// (`cultures_subcultures` #1, e.g. `european`, `egy_middle_east`) may build, with its pictures.
-    pub struct BuildingCultureVariant in "building_culture_variants", key = building {
+    pub struct BuildingCultureVariant in "building_culture_variants", key = building + culture {
         /// #0 H: the building level key.
         building: String,
         /// #1 H: the culture variant.
@@ -188,7 +188,7 @@ db_record! {
 
 db_record! {
     /// `technology_required_technology_junctions` (`ss`, 19 rows): a technology and one technology it needs.
-    pub struct TechnologyRequirementRecord in "technology_required_technology_junctions", key = technology {
+    pub struct TechnologyRequirementRecord in "technology_required_technology_junctions", key = technology + required {
         /// #0 H: the technology.
         technology: String,
         /// #1 H: the technology it requires.
@@ -275,9 +275,9 @@ db_record! {
 }
 
 db_record! {
-    /// `units_to_exclusive_faction_permissions` (`ssb`, 1012 rows): a unit limited to factions.
-    /// INFERRED rule: a unit with rows here may be recruited only by the factions whose row
-    /// holds `true`.
+    /// `units_to_exclusive_faction_permissions` (`ssb`, 1012 rows): a faction's own units. Each row adds the
+    /// unit to the faction's unit set (`allowed`) or takes one copy of it out (CONFIRMED, `0x00F74CB0`, see
+    /// `CampaignRules::faction_units`).
     pub struct UnitFactionPermission in "units_to_exclusive_faction_permissions", key = unit {
         /// #0 H: unit key.
         unit: String,
@@ -285,6 +285,19 @@ db_record! {
         faction: String,
         /// #2 M: allowed.
         allowed: bool,
+    }
+}
+
+db_record! {
+    /// `units_to_groupings_military_permissions` (`ss`, 207 rows): the units a military grouping (`factions`
+    /// #34) gives every faction in it, the start of the faction's unit set (CONFIRMED, `0x00F74CB0`). The files
+    /// merge on unit + grouping: the loader `0x00DC11A0` (reached from `0x00E86820`) hashes #0 with #1 appended
+    /// (`0x004F1200` at `0x00DC1B21`, CONFIRMED), so a unit keeps one row per grouping.
+    pub struct UnitGroupingPermission in "units_to_groupings_military_permissions", key = unit + grouping {
+        /// #0 H: unit key.
+        unit: String,
+        /// #1 H: `groupings_military` key, e.g. `euro_group`.
+        grouping: String,
     }
 }
 
@@ -857,6 +870,8 @@ pub struct CampaignTables {
     pub agents: Table<AgentRecord>,
     /// `units_to_exclusive_faction_permissions`.
     pub unit_factions: Table<UnitFactionPermission>,
+    /// `units_to_groupings_military_permissions`.
+    pub unit_groupings: Table<UnitGroupingPermission>,
     /// `units_to_gov_type_permissions`.
     pub unit_governments: Table<UnitGovernmentPermission>,
     /// `campaign_map_slots`.
@@ -976,7 +991,7 @@ impl SlotTemplateModelRecord {
 
 #[cfg(test)]
 mod tests {
-    use super::{CdirConfigRecord, SLOT_FORTIFICATIONS_SUFFIX, SLOT_TYPE_SETTLEMENT, SlotTemplateModelRecord};
+    use super::{CdirConfigRecord, SLOT_FORTIFICATIONS_SUFFIX, SLOT_TYPE_SETTLEMENT, SlotTemplateModelRecord, TechnologyRequirementRecord};
     use crate::record::{DbRecord, Table};
     use ntw_formats::db::DbValue;
 
@@ -988,6 +1003,24 @@ mod tests {
             DbValue::OptStr(Some(value.into())),
         ];
         CdirConfigRecord::from_row(&row).unwrap()
+    }
+
+    /// `technology_required_technology_junctions` merges on technology + required technology (loader
+    /// 0x00DC11A0, MOD_LOADING.md §3.2): a mod adding a requirement keeps the vanilla ones, and a mod
+    /// row repeating a vanilla pair replaces only that row.
+    #[test]
+    fn a_mod_technology_requirement_keeps_the_vanilla_ones() {
+        let row = |tech: &str, needs: &str| {
+            TechnologyRequirementRecord::from_row(&[DbValue::Str(tech.into()), DbValue::Str(needs.into())]).unwrap()
+        };
+        let vanilla = || Table::from_rows(0, vec![row("tech_b", "tech_a"), row("tech_b", "tech_x")]);
+        let added = Table::from_rows(0, vec![row("tech_b", "tech_new")]);
+        let merged = Table::merged(vec![added, vanilla()], |_, _| false);
+        let pairs: Vec<_> = merged.iter().map(|r| (r.technology.as_str(), r.required.as_str())).collect();
+        assert_eq!(pairs, [("tech_b", "tech_new"), ("tech_b", "tech_a"), ("tech_b", "tech_x")]);
+        let repeated = Table::from_rows(0, vec![row("tech_b", "tech_a")]);
+        let merged = Table::merged(vec![repeated, vanilla()], |_, _| false);
+        assert_eq!(merged.rows().len(), 2);
     }
 
     /// `cdir_configs` merges on campaign + faction + variable (reader 0x00FCD150, loader 0x00FCBD50):

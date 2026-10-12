@@ -107,6 +107,22 @@ db_record! {
 }
 
 db_record! {
+    /// `effects` (`soi`, 412 rows; exe record init 0x00F74510): an effect's key, its picture and its UI
+    /// priority. Its description is the loc entry `effects_description_<key>` (CONFIRMED, loader
+    /// 0x00F87360).
+    pub struct EffectRecord in "effects", key = key {
+        /// #0 @0x00 effect key, e.g. `admin_cost_mod`.
+        key: String,
+        /// #1 @0x0C the picture, e.g. `data/ui/campaign ui/pips/effect_economy.tga`.
+        icon: Option<String>,
+        /// #2 @0x18 UI priority: a trait's effect gets a row in the character's trait list only when it is
+        /// above 0, and rows are shown highest first (CONFIRMED, 0x00F88950 and `utilities.lua`
+        /// `GetEffectList`).
+        priority: i32,
+    }
+}
+
+db_record! {
     /// `character_trait_levels` (`sisi`, 475 rows): level key, level 1..n, trait, threshold points.
     pub struct TraitLevel in "character_trait_levels", key = level_key {
         level_key: String,
@@ -198,6 +214,7 @@ pub struct EffectTables {
     pub religion_conversion: Table<ReligionConversionMod>,
     pub technology: Table<TechnologyEffect>,
     pub building_factionwide: Table<BuildingFactionwideEffect>,
+    pub effects: Table<EffectRecord>,
     pub trait_levels: Table<TraitLevel>,
     pub trait_level: Table<TraitLevelEffect>,
     pub ancillary: Table<AncillaryEffect>,

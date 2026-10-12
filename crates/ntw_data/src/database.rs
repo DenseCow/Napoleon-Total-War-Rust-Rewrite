@@ -109,8 +109,74 @@ pub struct GameDatabase {
     /// `gun_type_to_projectiles` and `projectiles` ([`index_gun_shots`]); whoever replaces those two
     /// tables rebuilds it (a stale index can only miss or misorder shots, never panic).
     gun_shots: GunShots,
+    /// The merged `uniforms` table as the unit picture rule reads it ([`Self::unit_icon`]).
+    pub unit_pictures: UnitPictures,
     /// Problems met while loading (e.g. a mod table that did not decode and was skipped).
     pub load_warnings: Vec<String>,
+}
+
+/// The unit picture rule (CONFIRMED, `0x00EC2A40` / its twin `0x008C9CF0` for the card picture, `0x00EC2DD0` /
+/// `0x008CA1B0` for the info picture): the exe looks up the `uniforms` row of the unit and faction (key `%S%S`,
+/// unit then faction) and shows its variant's pictures; a unit with no row for that faction (every ship, and
+/// a unit a faction recruits without a uniform of its own) shows the picture named by its `units` row. Built
+/// once from the merged `uniforms` rows; the one place the rule lives (campaign cards, the custom battle's
+/// army page and the battle HUD all call it).
+#[derive(Debug, Default, Clone)]
+pub struct UnitPictures {
+    /// unit → faction → variant (`uniforms` #2), the first row of a pair as the merged table holds it.
+    variants: HashMap<String, HashMap<String, String>>,
+}
+
+impl UnitPictures {
+    /// Indexes merged `uniforms` rows as [`db_folder::tables::UNIFORMS`] reads them (uniform, faction,
+    /// variant, unit). That view merges the files by faction + unit, the key the exe's loader hashes
+    /// (`0x00FC05B0`, CONFIRMED, MOD_LOADING.md §3.2), so a mod row with a new uniform key still replaces
+    /// the pair's row by the merged-DB override order; repeated pairs inside one file keep the first.
+    pub fn from_rows<'a>(uniforms: impl IntoIterator<Item = &'a Vec<ntw_formats::db::DbValue>>) -> Self {
+        let col = |r: &'a Vec<ntw_formats::db::DbValue>, i: usize| r.get(i).and_then(|v| v.as_str()).unwrap_or_default();
+        let mut variants: HashMap<String, HashMap<String, String>> = HashMap::new();
+        for r in uniforms {
+            let (faction, variant, unit) = (col(r, 1), col(r, 2), col(r, 3));
+            variants.entry(unit.to_owned()).or_default().entry(faction.to_owned()).or_insert_with(|| variant.to_owned());
+        }
+        UnitPictures { variants }
+    }
+
+    /// The pictures of `vfs`'s merged `uniforms` ([`Self::from_rows`]). Only pictures depend on the table: a
+    /// missing one gives no uniforms (every unit shows its `units` model) and a warning; a file that does not
+    /// read fails like any other table.
+    pub fn load(vfs: &Vfs, warnings: &mut Vec<String>) -> Result<Self, DataError> {
+        match db_folder::tables::UNIFORMS.read_with(vfs, warnings) {
+            Ok(rows) => Ok(Self::from_rows(rows.iter())),
+            Err(db_folder::TableError::Missing(t)) => {
+                warnings.push(format!("optional table {t} not found ({}); using an empty table", db_folder::folder(t)));
+                Ok(Self::default())
+            }
+            Err(db_folder::TableError::Pack(e)) => Err(DataError::Pack(e)),
+            Err(db_folder::TableError::Db { table, error }) => Err(DataError::Db { table, error }),
+        }
+    }
+
+    /// The card picture of unit `key` (its `units` row `unit`) in `faction`'s service, without ".tga" (the card
+    /// scripts append it): `data/ui/units/icons/<variant>_icon`, else `data/ui/units/icons/<campaign model>`
+    /// (`UNIT_RECORD` +0x48, `units` #11). Empty for an unknown unit with no uniform.
+    pub fn icon(&self, unit: Option<&UnitRecord>, key: &str, faction: &str) -> String {
+        self.picture(unit, key, faction, "icons", "icon", |u| &u.campaign_model)
+    }
+
+    /// The info picture, without ".tga": `data/ui/units/info/<variant>_info`, else `data/ui/units/info/<second
+    /// model>` (`UNIT_RECORD` +0x54, `units` #12). Empty for an unknown unit with no uniform.
+    pub fn info(&self, unit: Option<&UnitRecord>, key: &str, faction: &str) -> String {
+        self.picture(unit, key, faction, "info", "info", |u| &u.model_2)
+    }
+
+    fn picture(&self, unit: Option<&UnitRecord>, key: &str, faction: &str, folder: &str, suffix: &str, fallback: fn(&UnitRecord) -> &String) -> String {
+        match (self.variants.get(key).and_then(|f| f.get(faction)), unit) {
+            (Some(variant), _) => format!("data/ui/units/{folder}/{variant}_{suffix}"),
+            (None, Some(u)) => format!("data/ui/units/{folder}/{}", fallback(u)),
+            (None, None) => String::new(),
+        }
+    }
 }
 
 /// The gun shot index ([`index_gun_shots`]): per gun type, each shot's `projectiles` row number
@@ -241,6 +307,7 @@ fn load_campaign(vfs: &Loader) -> Result<crate::campaign::CampaignTables, DataEr
         government_effects: load(vfs)?,
         agents: load(vfs)?,
         unit_factions: load(vfs)?,
+        unit_groupings: load(vfs)?,
         unit_governments: load(vfs)?,
         map_slots: load(vfs)?,
         map_towns: load(vfs)?,
@@ -270,6 +337,7 @@ fn load_campaign(vfs: &Loader) -> Result<crate::campaign::CampaignTables, DataEr
             religion_conversion: load(vfs)?,
             technology: load(vfs)?,
             building_factionwide: load(vfs)?,
+            effects: load(vfs)?,
             trait_levels: load(vfs)?,
             trait_level: load(vfs)?,
             ancillary: load(vfs)?,
@@ -282,6 +350,7 @@ fn load_campaign(vfs: &Loader) -> Result<crate::campaign::CampaignTables, DataEr
         characters: crate::characters::CharacterTables {
             attributes: load_optional(vfs)?,
             traits: load(vfs)?,
+            trait_categories: load(vfs)?,
             trait_info: load(vfs)?,
             antitraits: load(vfs)?,
             trait_agents: load(vfs)?,
@@ -425,6 +494,8 @@ impl GameDatabase {
         let gun_type_to_projectiles = load(vfs)?;
         let gun_shots = index_gun_shots(&gun_type_to_projectiles, &projectiles, &mut vfs.warnings.borrow_mut());
         let units: Table<UnitRecord> = load(vfs)?;
+        // Only pictures depend on it.
+        let unit_pictures = UnitPictures::load(vfs.vfs, &mut vfs.warnings.borrow_mut())?;
         // A category the original's compare chain does not know counts as artillery (`ntw_sim::unit_kind`):
         // reported once per load.
         for key in ntw_sim::unit_kind::unknown_categories(units.iter().map(|u| u.category.as_str())) {
@@ -471,6 +542,7 @@ impl GameDatabase {
             kv_morale_raw,
             kv_fatigue_raw,
             gun_shots,
+            unit_pictures,
             load_warnings: ld.warnings.take(),
         })
     }
@@ -488,6 +560,16 @@ impl GameDatabase {
     /// The `units` row for `key`.
     pub fn unit(&self, key: &str) -> Option<&UnitRecord> {
         self.units.get(key)
+    }
+
+    /// The card picture of `unit` in `faction`'s service, without ".tga" ([`UnitPictures::icon`]).
+    pub fn unit_icon(&self, unit: &str, faction: &str) -> String {
+        self.unit_pictures.icon(self.unit(unit), unit, faction)
+    }
+
+    /// The info picture of `unit` in `faction`'s service, without ".tga" ([`UnitPictures::info`]).
+    pub fn unit_info_picture(&self, unit: &str, faction: &str) -> String {
+        self.unit_pictures.info(self.unit(unit), unit, faction)
     }
 
     /// The `unit_stats_land` row for `key` (the same key as in `units`).
@@ -939,6 +1021,7 @@ impl GameDatabase {
             kv_morale_raw,
             kv_fatigue_raw,
             gun_shots,
+            unit_pictures: UnitPictures::default(),
             load_warnings: Vec::new(),
         }
     }

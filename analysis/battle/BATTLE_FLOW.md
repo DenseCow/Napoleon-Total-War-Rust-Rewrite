@@ -71,7 +71,7 @@ the layouts' authored size). The game writes `BattleHudFacts` every frame and ap
 
 Engine functions given to the scripts (names CONFIRMED in the scripts / binding table `0x59EB40`; behaviour ours):
 `BattleDetails() → {IsMultiplayer, NavalBattle, TotalTime (s, -1 = none), FlagPath, Name}`; `ElapsedBattleTime`, `Time`,
-`TickPeriod` (speed multiplier); `Pause/Slow/Play/Fwd/Ffwd/CycleBattleSpeed` → model speed;
+`TickPeriod` (the speed's name, "pause" ... "ffwd", see "Speed ring" below); `Pause/Slow/Play/Fwd/Ffwd/CycleBattleSpeed` → model speed;
 `Current_Selection_*` / formation / fire names → orders; `SelectAll{Infantry,Cavalry,Artillery}`;
 `UnitListForBattleIds → {Land={}, Naval={}}` (no floating unit ids yet); `GetHealthStatus` (player share of men alive,
 INFERRED); `LocalisationString`; `PostBattleInfo` (see §4); `UICardManager` (Lua class: AddCard, RemoveCard, Selected,
@@ -143,15 +143,27 @@ drawn scaled, the mouse mapped back.
 Cards: the engine calls review_DY.lua `CreateCards(list, state)` with `{CardID="card_<unit id>", Portrait}` per player
 unit (Portrait = `data/ui/units/icons/<faction unit_icon_path>_<key>_icon`, the script adds `.tga`; CONFIRMED file
 names, prefix rule INFERRED), then each card's `SetInitialState` (arguments below) and every
-frame `Update(info)` with `{Men, NumMen, Guns, NumGuns, IsArtillery, HasAmmo, AmmoRemainingAsPercent, Experience,
+frame `Update(info, time)` with `{Men, NumMen, Guns, NumGuns, IsArtillery, HasAmmo, AmmoRemainingAsPercent, Experience,
 RoutingState, WaveringState, WalkingState, RunningState, FiringState, MeleeState, UnderFireState, Inactive, ...}`
-(field names CONFIRMED in template.battleunitcard.lua). `Update(info)` never keeps
+(field names CONFIRMED in template.battleunitcard.lua). The `time` (traced 2026-10-10, CONFIRMED): the battle UI's
+frame update `0x005E2AD0` calls `0x0058E3D0` (land; `0x0058E280` naval), which calls review_DY.lua
+`UpdateCards(units, time)` with 2 arguments: `units` = one table per unit built by `0x005ABF40` (land: CardID,
+Inactive, the nine *State flags, Garrisoned, Hidden, IsArtillery + Guns for artillery, Experience, Men, HasAmmo,
+AmmoRemainingAsPercent, UniformColour {r,g,b}) or `0x005ABBD0` (naval: IsNaval, HullStrength, HullHealth_l/_r,
+SailHealth, SailDamage, Repairing, ...), and `time` = the frame struct's third field pushed as a float
+(`0x00587D50`): `ProcessMVCManagerFrameTick`'s `+0xB8` total ms × 0.001f, the value `0x005F5530` stores as
+`BattleUI.Time`. UpdateCards (source line 227) forwards both to each card's `Update`; its `UpdateStateIcon(time)`
+(line 152) cycles the state icons once per `delaySeconds` (1) by comparing `nextShowTime <= time` (line 163). Ours
+passed no time, so any unit with a state raised "compare number with nil" every frame; fixed (`ui_battle::update_cards`
+passes `ui_time_secs`, set before the cards as `0x005F5530` does; test
+`a_firing_units_card_updates_without_script_errors`). Not yet compared: our info table's extra NumMen/NumGuns and
+missing UniformColour against the exe's (BACKLOG §7 Battle UI). `Update(info)` never keeps
 its argument: it reads the fields and copies the ones it compares into its own `previous_details` upvalue (CONFIRMED,
 bytecode of `Update`, source line 297: only GETTABLE on the argument), so we make one info table per card and refresh it
 in place. `SetInitialState`'s first parameter is the card's naval flag (CONFIRMED, bytecode at source line 55: it is
 stored as `m_naval` and given to `ship_damage:PropagateVisibility`); our prelude passes the info table there (BACKLOG
 §7 Battle UI: trace what the engine passes). Selected cards get the
-template's `Selected` state (PROVISIONAL). A click on a card selects its unit (shift adds; the model holds one
+template's `Selected` state by the card manager's rules (CONFIRMED, see "Speed ring and selected cards" below). A click on a card selects its unit (shift adds; the model holds one
 selected unit, PROVISIONAL).
 
 Order buttons: the engine sets their states with root.lua `SetOrderButtonState(id, state)` (Inactive / Unselected /
@@ -199,6 +211,57 @@ child, offset = file offset − the parent's absolute frame position, or the giv
 wrapper when it had two or more children, and the battle prelude moved it to (0, 0), hid the second panel and
 forwarded calls to the first; a single child was placed at its file offset relative to the parent.
 
+**Speed ring and selected cards (traced 2026-10-12, CONFIRMED; user check 2026-10-10 found both broken).**
+- *Speed ring.* `BattleUI.TickPeriod` (`0x005D3AA0`) returns a string, not the multiplier: "pause", "slow",
+  "play", "fwd", "ffwd" for 0, 0.4, 1, 2, 4, and nil for any other speed. root.lua uses these strings (line 737's
+  pause toggle, line 790's `pre_pause_speed`, line 810 `ChangeDisplayFor(period)`, which sets the matching button
+  "selected" and the rest "normal"). The speed buttons only ask for a speed; the ring moves when the engine grants a
+  time request and calls root.lua `TimeRequestChanged(is_mp, request)` (`0x005E79A0`, a vtable method; skipped when
+  handler +0x281F0 is set (replays); `is_mp` = handler +0x281E4 != 0). The request table is built by `0x005ABB60`:
+  `alliance_index`, `army_index`, `player_multiplier`, `overall_multiplier`. In single player, line 838 then calls
+  `ChangeDisplayFor(TickPeriod())`. Before: our TickPeriod returned the number and nothing called
+  `TimeRequestChanged`, so the ring stayed on "play". Ours: `battle_prelude.lua` TickPeriod (the five strings,
+  1e-6 tolerance); `ui::battle::time_request_changed` (the player's alliance and army from the setup, both
+  multipliers = the battle's; `is_mp` false, PROVISIONAL until multiplayer battles), called by `battle::hud::frame`
+  once for the time requests granted since the last frame (`BattleSim::set_speed`, the speed's only writer; never at
+  battle start), and only after the facts were written. Test: `the_speed_ring_follows_the_battle_speed`.
+- *Card selection.* The card manager's select (`SelectCardList` `0x01019000`) sets a card "Selected" through
+  `SetState` (`0x010358B0` → `0x01035B30`), unless its state is "UnSelectable" or "Routing", or its current state
+  is not interactive (+0x114) or is disabled (+0x115), or the card is already in the list. Deselect (`0x010245D0`)
+  sets "Default" from any state but "UnSelectable" and "Routing" (no other check). Both run only when a card joins
+  or leaves the selection, never while it stays: a selected unit that routs and rallies keeps the state its card's
+  Update gave it. So a card under the pointer ("roll") becomes "Selected" too. Before: ours only moved Default →
+  Selected. Ours: `__ntw_battle_update_card` applies these rules when the unit's selected flag changes
+  (`card_selected` stands in for the manager's list), with `__CurrentStateSelectable` for the interactive and
+  disabled check. Test: `a_rallied_selected_card_is_not_reselected_and_deselect_goes_default_from_roll`.
+- *The highlight is a per-state pixel shader.* BattleUnitCard's states differ only by shader: Default `brighten_t0`
+  -0.3, Selected `brighten_t0` +1.0, roll `normal_t0`, UnSelectable `set_greyscale_t0` (1, 1), Routing `red_pulse_t0`
+  0. All five states are interactive. The transitions are Default Enter → roll and roll Leave → Default; Selected has
+  none. The technique is state +0x118 and its vars x..w are +0x11C..+0x128. The text copy is +0x12C..+0x13C.
+  - `ShaderTechniqueGet` (`0x01014E40`) and `ShaderVarsGet` (`0x01014BD0`) read the current state (component +0xAC).
+  - `ShaderTechniqueSet(name, all_states, text_too)` (`0x01014D50`) and `ShaderVarsSet(x, y, z, w, all_states,
+    text_too)` (`0x01014C50`) write the current state, or every state (`0x010360F0` / `0x010361D0`). They also write
+    the text copy (`0x01036B70` / `0x01036C60`) unless text_too is false.
+  - ShaderVarsSet takes its booleans off the top of the Lua stack, then pops numbers into w, z, y, x until the stack
+    is empty. A nil skips its slot. Any other non-number (a numeric string too) is a script error "Trying to retrieve
+    type number, found type <t>" (`0x01055700` checks lua_type == number, `0x01095090` raises); the slots popped
+    before it stay written. Test: `shader_vars_set_refuses_a_string_with_a_script_error`.
+  - `Component.ShaderVarsGet()` (`0x01018280`) reads the running component's current state.
+
+  The card script caches every state's pair at creation and puts it back after its burning or sinking effect, which
+  sets `unitcard_burning_t0` on all states. `sprite.fx` in data.pack (behaviour, not code):
+  - `brighten_t0`: RGB × (1 + x), clamped.
+  - `set_greyscale_t0`: lerp to luminance by x, alpha × y.
+  - `red_pulse_t0`: lerp red toward 1 by x.
+
+  Before: the script shader methods were Lua stubs on the component, and the renderer drew no shader. Ours: the
+  methods are host methods on the current state or all states (tests `shader_methods_read_and_write_the_current_state_or_all_states`,
+  `shader_vars_set_fills_from_w_back`). `frontend::render::shaded_color` draws `brighten_t0` as an sRGB colour
+  multiply (INFERRED: equal to the original's gamma-space product for a power-law curve). Every other technique is
+  drawn as `normal_t0`, logged once (PROVISIONAL, needs a UI material); x < -1 gives black, never a negative colour.
+  Text shaders are stored per component, not per state, and not drawn (PROVISIONAL, ui_prelude.lua). Test:
+  `a_selected_units_card_lights_up_even_under_the_pointer`.
+
 ## 4. Victory, defeat and results (task 4)
 | Rule | Evidence | Tag |
 |---|---|---|
@@ -227,7 +290,8 @@ on entering deployment, `music_land_battle` at Start Battle, `music_land_battle_
 - Results screen: the losing team's row is hidden behind the winner's list background (draw order / clipping);
   the translucent backdrop is not drawn.
 - Radar (minimap) hidden; floating unit ids (`lb_unit_id`) not created; escape menu untested; tooltips; card
-  drag/grouping; multi-selection; `UIComponent:DockingPoint`, shader effects on cards (UNKNOWN stubs).
+  drag/grouping; multi-selection; `UIComponent:DockingPoint`; UI shader techniques other than `brighten_t0` / `normal_t0` (greyscale,
+  red pulse, burning) and text shaders are not drawn (§3).
 - Flags: `FlagPath` = `data/` + the factions flag folder; the republic factions (ita_/egy_french_republic) show the
   checkered placeholder (their folder rule UNKNOWN).
 - Return to the campaign via `CampaignModel::pending_battle` / `apply_battle_result`.

@@ -804,8 +804,9 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     // TriggerBuildingCardSelectedEvent(building_key) (0x009FA0D0): posts a UI event with the key
     // (event vtable 0x0136C30C, INFERRED for the advisor). No listener in our game: a no-op.
     f!("TriggerBuildingCardSelectedEvent", |_l, inner, ui, _a: Variadic<Value>| Ok(()));
-    // BuildingDetails(building_key, region_key, faction_key, slot_key) → the building tooltip's
-    // details: {Key, Name, ShortDescription, Level, MaxLevel, ...} (CONFIRMED names read by
+    // BuildingDetails(building_key, faction_key, region_key, slot_key) (CONFIRMED order: the call
+    // at template.BuildingFrame.lua:392) → the building tooltip's details: {Key, Name,
+    // ShortDescription, Level, MaxLevel, ...} (CONFIRMED names read by
     // template.TechTreeItem_Tooltip.lua; "initialises a table of details about the building",
     // CONFIRMED description). Level and MaxLevel are 0-based: the chain level index and the highest
     // index in the chain, as the browser's `level` / `max_level`. CONFIRMED from the tooltip's pip
@@ -815,7 +816,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     // arguments to Level / MaxLevel is INFERRED (the caller was not dumped).
     // BuildingEffects / TechEffects → effect lists; PROVISIONAL: empty (the effect texts are not
     // built yet).
-    f!("BuildingDetails", |lua, inner, ui, (key, region_key, _f, slot_key): (Option<String>, Value, Value, Value)| {
+    f!("BuildingDetails", |lua, inner, ui, (key, _f, region_key, slot_key): (Option<String>, Value, Value, Value)| {
         let Some(key) = key else { return Ok(Value::Nil) };
         let (level, max) = ui.model().rules.chain_levels(&key).unwrap_or((0, 0));
         let t = lua.create_table()?;

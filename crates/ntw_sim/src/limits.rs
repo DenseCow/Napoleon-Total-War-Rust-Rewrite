@@ -31,7 +31,8 @@ pub const KEY_MAX_REINFORCEMENT_UNITS: &str = "max_reinforcement_units";
 
 /// Land units per army at any unit scale: 20. The exe's land function is folded into a shared
 /// `return 20` (`0x00851550`), called with the scale by the custom battle army setup
-/// (`0x0045CB50`) and the new campaign setup (`0x00485B90`; CONFIRMED).
+/// (`0x0045CB50`) and the new campaign setup (from the front end `0x00488720`, call at `0x0048890E`;
+/// from the command line `0x00485B90`, at `0x00486BE8`; both hand it to `0x00878060`; CONFIRMED).
 pub const ORIGINAL_MAX_LAND_UNITS: u32 = 20;
 /// Ships per fleet by unit-size index: `MaxUnitsFromUnitScaleFactor` `0x00DACE60` returns
 /// 6 / 8 / 10 / 20 (CONFIRMED; the same two callers as [`ORIGINAL_MAX_LAND_UNITS`]).
@@ -106,7 +107,8 @@ impl GameLimits {
 
     /// Units at unit scale `scale`: (land units per army, ships per fleet). The custom battle
     /// army setup (`0x0045CB50`: land or naval by the army) and a new campaign's caps
-    /// (`0x00485B90`, with the `campaign_unit_multiplier` preference) both use it.
+    /// (`0x00488720` from the front end, `0x00485B90` from the command line, with the
+    /// `campaign_unit_multiplier` preference) both use it.
     pub fn max_units(&self, scale: f32) -> (u32, u32) {
         let i = self.unit_scale_index(scale);
         let naval = &self.max_naval_units;

@@ -290,6 +290,9 @@ pub fn enter(world: &mut World) {
     let mut start = start;
     if start.save.is_some() {
         start.campaign = loaded.info.campaign_key.clone();
+        // The state as the save holds it, before the LoadingGame handlers use the live RNGs. The
+        // script RNGs are not saved, so this is the hash `quick_save` logs when it writes one.
+        info!("Campaign: save state hash {:016x}", loaded.model.saved_state_hash());
     }
     info!(
         "Campaign {}: map {}, {} factions, {} regions, {} characters, {} forces ({} warnings)",

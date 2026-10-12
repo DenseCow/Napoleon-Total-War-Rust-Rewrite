@@ -224,15 +224,18 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
             r.agent_religions.insert(a.key.clone(), rel.clone());
         }
         r.agent_sight.insert(a.key.clone(), a.unknown_1c);
+        if !a.primary_attribute.is_empty() {
+            r.agent_primary_attributes.insert(a.key.clone(), a.primary_attribute.clone());
+        }
         if let Some(folder) = a.portrait_folder.as_ref().filter(|s| !s.is_empty()) {
             r.agent_portrait_folders.insert(a.key.clone(), folder.clone());
         }
     }
-    for p in c.unit_factions.iter() {
-        let list = r.unit_factions.entry(p.unit.clone()).or_default();
-        if p.allowed {
-            list.push(p.faction.clone());
-        }
+    // Each faction's unit set (`0x00F74CB0`): its grouping's units, then its own permission rows in table order.
+    for f in &db.factions {
+        let grouping = c.unit_groupings.iter().filter(|g| g.grouping == f.faction_group).map(|g| g.unit.as_str());
+        let rows = c.unit_factions.iter().filter(|p| p.faction == f.key).map(|p| (p.unit.as_str(), p.allowed));
+        r.faction_units.insert(f.key.clone(), ntw_sim::campaign::rules::faction_unit_set(grouping, rows));
     }
     // Only `enabled` rows link a government type to the unit (`0x00E91320`: status 0, `0x00ED5710`).
     for p in c.unit_governments.iter().filter(|p| p.status == "enabled") {

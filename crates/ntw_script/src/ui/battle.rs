@@ -394,8 +394,16 @@ pub fn create_cards(host: &UiScriptHost) -> mlua::Result<()> {
 /// each unit with a card, run as that card's script (`call_entry`), so the card's `LuaCall` of its
 /// own `Update` is a plain call: no context switch and no MultiValue per card per frame. Each
 /// card's info table is made once and refreshed in place (`__ntw_battle_update_card`).
+///
+/// Each card's `Update` gets the UI pulse clock in seconds as its second argument, as the engine
+/// gives review_DY.lua `UpdateCards(units, time)`, which forwards it to every card (CONFIRMED:
+/// `0x0058E3D0` land / `0x0058E280` naval push it as a float through `0x00587D50`; their caller
+/// `0x005E2AD0` passes the frame struct's third field, the `+0xB8` total ms × 0.001f built by
+/// `ProcessMVCManagerFrameTick` `0x0048A650`, the value `0x005F5530` stores for `BattleUI.Time`).
+/// The card's `UpdateStateIcon` compares it with `nextShowTime` (template.BattleUnitCard.lua:163).
 pub fn update_cards(host: &UiScriptHost) -> mlua::Result<()> {
     let lua = host.lua();
+    let time = host.inner().ui_time_secs();
     let Some(cards) = lua.globals().get::<Option<Table>>("__ntw_battle_cards")? else { return Ok(()) };
     let battle: Table = lua.globals().get("__battle")?;
     let Some(units) = battle.get::<Option<Table>>("units")? else { return Ok(()) };
@@ -404,7 +412,7 @@ pub fn update_cards(host: &UiScriptHost) -> mlua::Result<()> {
         let u = u?;
         let card: Value = cards.get(u.get::<Value>("id")?)?;
         let Some(node) = super::host::node_of(&card) else { continue };
-        super::host::call_entry_fn::<()>(host.inner(), node, &update_card, (card, u))?;
+        super::host::call_entry_fn::<()>(host.inner(), node, &update_card, (card, u, time))?;
     }
     Ok(())
 }
@@ -415,6 +423,28 @@ pub fn update_cards(host: &UiScriptHost) -> mlua::Result<()> {
 /// Returns false when no component defines it.
 pub fn call_event(host: &UiScriptHost, name: &str) -> mlua::Result<bool> {
     call_global(host, name, |_| Ok(mlua::MultiValue::new()))
+}
+
+/// Tells the HUD the battle speed changed: root.lua's `TimeRequestChanged(is_multiplayer,
+/// request)`, which the engine calls on every time request it grants (CONFIRMED 0x005E79A0, not
+/// in replays: handler +0x281F0). The request table is `{alliance_index, army_index,
+/// player_multiplier, overall_multiplier}` (CONFIRMED 0x005ABB60). In single player root.lua then
+/// calls `ChangeDisplayFor(BattleUI.TickPeriod())`, which sets every speed button "normal" and
+/// the current one "selected" (the ring); the speed buttons themselves only ask for the speed.
+/// `army` is the requesting player's (alliance, army) in the battle setup, and their multiplier
+/// is the battle's. PROVISIONAL: `is_multiplayer` is always false and `overall_multiplier` the
+/// player's own, because our battles are single player only (multiplayer battles are not built
+/// yet; how the exe combines the players' requests and numbers their armies is traced with them).
+/// Single-player root.lua reads neither.
+pub fn time_request_changed(host: &UiScriptHost, army: (usize, usize), multiplier: f32) -> mlua::Result<bool> {
+    call_global(host, "TimeRequestChanged", |lua| {
+        let request = lua.create_table()?;
+        request.set("alliance_index", army.0)?;
+        request.set("army_index", army.1)?;
+        request.set("player_multiplier", multiplier)?;
+        request.set("overall_multiplier", multiplier)?;
+        mlua::IntoLuaMulti::into_lua_multi((false, request), lua)
+    })
 }
 
 /// Sets the order buttons' states from the current selection (each frame; only changes are sent),

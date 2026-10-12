@@ -95,17 +95,11 @@ pub fn ability(model: &CampaignModel, c: CharacterId, ability: &str) -> i32 {
     level + Effects::character_attribute(model, c, attr).unwrap_or(0).max(0)
 }
 
-/// The main attribute of a character type (`agents` column 8, CONFIRMED data), which his rank is
-/// read from.
-pub fn main_attribute(kind: CharacterKind) -> &'static str {
-    match kind {
-        CharacterKind::General | CharacterKind::Colonel => "command_land",
-        CharacterKind::Admiral | CharacterKind::Captain => "command_sea",
-        CharacterKind::Gentleman | CharacterKind::EasternScholar => "research",
-        CharacterKind::Minister => "management",
-        CharacterKind::Rake | CharacterKind::Assassin | CharacterKind::Guerilla => "subterfuge",
-        CharacterKind::CatholicMissionary | CharacterKind::OrthodoxMissionary | CharacterKind::ProtestantMissionary => "zeal",
-    }
+/// The main attribute of a character type, which his rank is read from: the merged `agents` table's
+/// #8 for the type ([`super::rules::CampaignRules::agent_primary_attributes`], the `0x00A198C0` read,
+/// CONFIRMED data), so a mod's agent table decides it. "" for a type without one (no rank).
+pub fn main_attribute(rules: &super::rules::CampaignRules, kind: CharacterKind) -> &str {
+    rules.agent_primary_attributes.get(kind.esf_name()).map_or("", String::as_str)
 }
 
 /// A character's rank (`0x00A198D0`): his main attribute plus situation bonuses, at least −1 and at
@@ -114,7 +108,7 @@ pub fn main_attribute(kind: CharacterKind) -> &'static str {
 /// (theatre zeal) and ministers (their post) are not added here.
 pub fn rank(model: &CampaignModel, c: CharacterId) -> i32 {
     let Some(ch) = model.world.characters.get(&c) else { return -1 };
-    let v = Effects::character_attribute(model, c, main_attribute(ch.kind)).unwrap_or(-1);
+    let v = Effects::character_attribute(model, c, main_attribute(&model.rules, ch.kind)).unwrap_or(-1);
     v.clamp(-1, 9)
 }
 
@@ -246,6 +240,17 @@ pub fn duel_chance(model: &CampaignModel, challenger: CharacterId, target: Chara
         return Some(50);
     }
     Some(((p as f32 / (p + q) as f32 * 100.0) as i32).clamp(5, 95))
+}
+
+/// The weapon the duel picker quotes its chance for (CONFIRMED): the target's better weapon, swords
+/// when his `duelling_pistols` (0..=9) is below his `duelling_swords` (0..=9), else pistols. The
+/// picker (`0x009C2340`) calls [`duel_chance`]'s `0x00922940` with weapon 0xE, which resolves to
+/// this at `0x009229FD` before the formula. It is the number the player is shown, not the weapon an
+/// AI target then picks ([`duel_weapon`]).
+pub fn duel_quoted_weapon(model: &CampaignModel, target: CharacterId) -> Weapon {
+    let pistols = attribute(model, target, PISTOLS).clamp(0, 9);
+    let swords = attribute(model, target, SWORDS).clamp(0, 9);
+    if pistols < swords { Weapon::Swords } else { Weapon::Pistols }
 }
 
 /// The weapon an AI target chooses (`0x00AAAC30`, CONFIRMED rule): the one with the lower chance for
@@ -766,10 +771,12 @@ fn building_protector(model: &CampaignModel, region: RegionId) -> Option<Charact
 }
 
 /// The chance in percent that `agent` sabotages the building in `slot` of `region`
-/// (`0x00922C90`, CONFIRMED): S = his rank + `subterfuge_sabotage`, 0..=9 (no chance at 0); C =
+/// (`0x00922C90`, CONFIRMED): S = his rank + `subterfuge_sabotage`, 0..=9 (at 0 the chance is 5,
+/// the floor, at `0x00922D6A`, so the building stays a target); C =
 /// the protector's rank + `subterfuge_counterspying`, 0..=9; k = 3 for chain number 0 (most chains:
 /// an empty `building_chains` #2 parses as 0), 1 for 1 or 2, 0.5 otherwise; S / (round((level + 1)
-/// × k) + S + C) × 100, then 5..=95. `None` without `can_sabotage`, without a building, or when S is 0.
+/// × k) + S + C) × 100, then 5..=95. `None` without `can_sabotage` (the exe registers this chance
+/// only for ability 4, `0x00951F80`) or without a building.
 pub fn building_sabotage_chance(model: &CampaignModel, agent: CharacterId, region: RegionId, slot: usize) -> Option<i32> {
     if ability(model, agent, ABILITIES[4]) < 1 {
         return None;
@@ -783,7 +790,7 @@ pub fn building_sabotage_chance(model: &CampaignModel, agent: CharacterId, regio
     };
     let s = (rank(model, agent) + own_bonus(model, agent, "subterfuge_sabotage")).clamp(0, 9);
     if s <= 0 {
-        return None;
+        return Some(5);
     }
     let c = building_protector(model, region).map_or(0, |p| (rank(model, p) + own_bonus(model, p, "subterfuge_counterspying")).clamp(0, 9));
     let den = (((rules.level + 1) as f32 * k).round_ties_even() as i32 + s + c) as f32;

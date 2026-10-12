@@ -116,6 +116,12 @@ pub trait DbRecord: Sized {
     fn from_row(row: &[DbValue]) -> Result<Self, &'static str>;
     /// The row's lookup key (usually column 0).
     fn key(&self) -> &str;
+    /// The key the exe's loader hashes to merge the table's files, when it is more than [`key`](Self::key):
+    /// the columns joined with nothing between (`key = a + b` in `db_record!`; the loader's string
+    /// concatenation 0x004f1200, MOD_LOADING.md §3.2). `None`: the files merge on [`key`](Self::key).
+    fn joined_key(&self) -> Option<String> {
+        None
+    }
 }
 
 /// All rows of one table plus a key → row index.
@@ -176,11 +182,14 @@ impl<T: DbRecord> Table<T> {
     /// Merges the files of one table, given in the original's read order
     /// ([`ntw_formats::pack::Vfs::table_files`]), by key ([`merge_keyed`]). `replaces(holder,
     /// file)` (indexes into `files`) is the original's row rule
-    /// ([`ntw_formats::pack::Vfs::db_row_replaces`]). The version is the first file's.
+    /// ([`ntw_formats::pack::Vfs::db_row_replaces`]). The version is the first file's. The merge key is
+    /// [`DbRecord::joined_key`] where the table has one, else [`DbRecord::key`]; [`get`](Self::get) still
+    /// looks rows up by [`DbRecord::key`].
     pub fn merged(files: Vec<Self>, replaces: impl Fn(usize, usize) -> bool) -> Self {
         let version = files.first().map_or(0, |t| t.version);
-        let rows = merge_keyed(files.into_iter().map(|t| t.rows).collect(), |r: &T| r.key(), replaces);
-        Self::from_rows(version, rows)
+        let files = files.into_iter().map(|t| t.rows.into_iter().map(|r| (r.joined_key(), r)).collect()).collect();
+        let rows = merge_keyed(files, |(joined, r): &(Option<String>, T)| joined.as_deref().unwrap_or_else(|| r.key()), replaces);
+        Self::from_rows(version, rows.into_iter().map(|(_, r)| r).collect())
     }
 
     /// The row with this key (exact, case-sensitive match).
@@ -245,6 +254,29 @@ macro_rules! __db_absent {
     };
 }
 
+/// The `joined_key` of a record keyed on several columns (`key = a + b`): their text joined with nothing
+/// between. A record keyed on one column keeps the trait's default (`None`).
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __db_joined_key {
+    // `merge = x + y`: the merge key is named apart from the lookup key.
+    ($key:ident $( + $more:ident )* ; $first:ident $( + $rest:ident )*) => {
+        fn joined_key(&self) -> Option<String> {
+            let mut key = self.$first.clone();
+            $( key.push_str(&self.$rest); )*
+            Some(key)
+        }
+    };
+    ($key:ident ;) => {};
+    ($key:ident $( + $more:ident )+ ;) => {
+        fn joined_key(&self) -> Option<String> {
+            let mut key = self.$key.clone();
+            $( key.push_str(&self.$more); )+
+            Some(key)
+        }
+    };
+}
+
 /// Defines a record struct together with its schema. See the module docs.
 ///
 /// ```ignore
@@ -259,10 +291,15 @@ macro_rules! __db_absent {
 ///     }
 /// }
 /// ```
+///
+/// `key = a + b` merges the table's files on columns `a` and `b` joined (the key the exe's loader
+/// hashes), while lookups ([`Table::get`]) stay on `a`. `key = a, merge = b + c` looks rows up on `a` but
+/// merges on `b` and `c` joined. A table that is also a raw table (`ntw_formats::db_folder::tables`) must
+/// merge on the same key in both; the `merge_key_agreement` test checks it.
 macro_rules! db_record {
     (
         $(#[$sm:meta])*
-        pub struct $name:ident in $table:literal, key = $key:ident {
+        pub struct $name:ident in $table:literal, key = $key:ident $( + $more:ident )* $( , merge = $m1:ident $( + $m:ident )* )? {
             $(
                 $(#[$fm:meta])*
                 $f:ident : $t:ty $( => since $v:literal $( $copy:ident )? )?
@@ -300,6 +337,8 @@ macro_rules! db_record {
             fn key(&self) -> &str {
                 &self.$key
             }
+
+            $crate::__db_joined_key!($key $( + $more )* ; $( $m1 $( + $m )* )?);
         }
     };
     // A key the exe's row reader builds by joining columns (e.g. `cdir_configs`, 0x00FCD150): it is
@@ -439,5 +478,45 @@ mod tests {
         assert_eq!(a.clone().id(), a.id());
         assert_eq!(a, b);
         assert_eq!(a.get_row("k").map(|(i, r)| (i, r.count)), Some((0, 1)));
+    }
+}
+
+/// A table that is declared both as a [`DbRecord`] (`key = a + b`) and as a raw table
+/// (`ntw_formats::db_folder::tables`, [`RowKey`]) must merge on the same key in both readers.
+#[cfg(test)]
+mod merge_key_agreement {
+    use super::*;
+    use ntw_formats::db_folder::{RawTable, tables};
+
+    /// A row of `raw`'s columns holding distinct text, read both ways: the raw table's key and the
+    /// record's merge key must be the same string.
+    fn agree<T: DbRecord>(raw: RawTable) {
+        assert_eq!(T::TABLE, raw.name);
+        let schema = Schema::from_codes(raw.codes).unwrap();
+        assert_eq!(schema.fields.len(), T::schema().fields.len(), "{}: column count", raw.name);
+        let row: Vec<DbValue> = schema
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(i, f)| match f.ty {
+                FieldType::Str => DbValue::Str(format!("s{i}")),
+                FieldType::OptStr => DbValue::OptStr(Some(format!("o{i}"))),
+                FieldType::Bool => DbValue::Bool(true),
+                FieldType::I32 => DbValue::I32(i as i32 + 1),
+                FieldType::F32 => DbValue::F32(i as f32 + 1.0),
+                FieldType::U16 => DbValue::U16(i as u16 + 1),
+            })
+            .collect();
+        let record = T::from_row(&row).unwrap();
+        let record_key = record.joined_key().unwrap_or_else(|| record.key().to_owned());
+        assert_eq!(record_key, raw.key.of(&row), "{}: the record and the raw table merge on different keys", raw.name);
+    }
+
+    #[test]
+    fn records_and_raw_tables_merge_on_the_same_key() {
+        agree::<crate::campaign::TechnologyRequirementRecord>(tables::TECHNOLOGY_REQUIRED_TECHNOLOGY_JUNCTIONS);
+        agree::<crate::campaign::BuildingCultureVariant>(tables::BUILDING_CULTURE_VARIANTS);
+        agree::<crate::campaign::AttitudeThresholdRecord>(tables::DIPLOMATIC_RELATIONS_ATTITUDES);
+        agree::<crate::schemas::UniformRecord>(tables::UNIFORMS);
     }
 }

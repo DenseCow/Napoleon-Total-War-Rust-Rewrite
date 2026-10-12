@@ -1,6 +1,7 @@
 //! Character details tables and their attributes (character cards, the Lists rows, the government's ministers).
 
 use super::*;
+use ntw_sim::campaign::details::CharacterTrait;
 
 /// A character's details table as the exe builds it for character cards and panels
 /// (0x009AD250, CONFIRMED key names; used by FactionDetails' Leader, the government ministers,
@@ -10,8 +11,8 @@ use super::*;
 /// Location, FactionColour / UniformColour {r, g, b}, Attributes {PrimaryLevel,
 /// PrimaryAttributePath, PrimaryAttributeName, [i] = {Value, PipPath, AttributeName}}, Traits,
 /// Ancillaries, plus spying_data_level (read by Utilities.CreateCharacterCard).
-/// PROVISIONAL: Title empty, Traits / Ancillaries / PostEffects as key lists only, spying_data_level
-/// 3 (everything known). The attribute pictures are `agent_attributes`' ([`attribute_icon`]). The card
+/// Traits are [`traits_table`]'s rows. PROVISIONAL: Title empty, Ancillaries / PostEffects as key
+/// lists only, spying_data_level 3 (everything known). The attribute pictures are `agent_attributes`' ([`attribute_icon`]). The card
 /// template also reads ShowAttributes, ShowFlag and TechImage (CONFIRMED reads); they are not given
 /// (UNKNOWN values).
 pub(super) fn character_details(lua: &Lua, inner: &Inner, ui: &CampaignUi, c: CharacterId) -> mlua::Result<Value> {
@@ -75,11 +76,7 @@ pub(super) fn character_details(lua: &Lua, inner: &Inner, ui: &CampaignUi, c: Ch
         t.set("UniformColour", colour(r.secondary_colour())?)?;
     }
     t.set("Attributes", attributes_table(lua, inner, ui, Some(c), Pips::With)?)?;
-    let traits = lua.create_table()?;
-    for (i, tr) in d.map(|d| d.traits.as_slice()).unwrap_or_default().iter().enumerate() {
-        traits.set(i + 1, tr.key.as_str())?;
-    }
-    t.set("Traits", traits)?;
+    t.set("Traits", traits_table(lua, inner, ui, &m, d.map(|d| d.traits.as_slice()).unwrap_or_default())?)?;
     let anc = lua.create_table()?;
     for (i, a) in d.map(|d| d.ancillaries.as_slice()).unwrap_or_default().iter().enumerate() {
         anc.set(i + 1, a.as_str())?;
@@ -151,6 +148,136 @@ fn attribute_name(inner: &Inner, key: &str) -> String {
     loc(inner, &format!("agent_attributes_onscreen_name_{key}")).unwrap_or_else(|| key.to_owned())
 }
 
+/// A character's `Traits` list as the exe hands it to the UI scripts: the character details
+/// (0x009AD250) and each enlist-panel candidate (`enlist_commander_entry.lua`, which shows the first
+/// four). `ui\templates\character_trait_entry.luac` puts `Name` into `tx_enables` and `IconFilename`
+/// into `effect_icon`; its tooltip joins `Utilities.GetEffectList(Effects, AttributeEffects)` with the
+/// three texts. All CONFIRMED (2026-10-11):
+///
+/// - which traits (0x008C65A0): the character's traits in his list order, leaving out a trait whose
+///   `character_traits` row is hidden or that has no current level, or a level number of 0;
+/// - one row (0x009AFD60): `Name` = loc `character_trait_levels_onscreen_name_<level>` (level record
+///   +0x24, 0x008DCAC0); `IconFilename` = the trait's `trait_categories` picture (0x008C9C70);
+///   `ColourText` / `ExplanationText` / `RemovalText` = loc `character_trait_levels_colour_text_` /
+///   `_explanation_text_` / `_removal_text_<level>` (+0x30 / +0x34 / +0x38, empty when the text table
+///   has none, as for every vanilla explanation and removal text);
+/// - `Effects` (0x008BBD20 → 0x00F88950): the level's `trait_level_effects` rows in table order, one
+///   per effect with a repeated effect's values summed (0x00F84220; read from the model's
+///   `EffectRules::trait_level_rows`, the rows it applies), only effects whose `effects`
+///   priority is above 0, each `{IconFilename, Description, Priority}` with `Description` =
+///   [`effect_text`] of loc `effects_description_<effect>`;
+/// - `AttributeEffects`: the level's `trait_attribute_effects` rows in table order, each the string
+///   [`effect_text`] of loc `agent_attributes_effect_text_<attribute>` (record +0x14, 0x00F0D990).
+pub(super) fn traits_table(lua: &Lua, inner: &Inner, ui: &CampaignUi, m: &CampaignModel, traits: &[CharacterTrait]) -> mlua::Result<Table> {
+    let db = &ui.link.db.campaign;
+    let t = lua.create_table()?;
+    let mut n = 0;
+    for tr in traits {
+        if m.rules.characters.traits.get(&tr.key).is_some_and(|r| r.hidden) {
+            continue;
+        }
+        let Some((_, level, level_key)) = m.rules.effects.trait_level_row(&tr.key, tr.points) else { continue };
+        if *level <= 0 {
+            continue;
+        }
+        let row = lua.create_table()?;
+        row.set("Name", loc_required(inner, &format!("character_trait_levels_onscreen_name_{level_key}")))?;
+        let category = db.characters.traits.get(&tr.key).map(|r| r.category.as_str());
+        let icon = category.and_then(|c| db.characters.trait_categories.get(c)).and_then(|c| c.icon.clone());
+        if icon.is_none() {
+            inner.log_once_for("trait category picture", &tr.key, || {
+                format!("UNKNOWN trait {:?}: category {category:?} has no trait_categories picture; its icon is blank (logged once per trait)", tr.key)
+            });
+        }
+        row.set("IconFilename", icon.unwrap_or_default())?;
+        for (field, text) in [("ColourText", "colour_text"), ("ExplanationText", "explanation_text"), ("RemovalText", "removal_text")] {
+            row.set(field, loc(inner, &format!("character_trait_levels_{text}_{level_key}")).unwrap_or_default())?;
+        }
+        // The level's effects as the model applies them (summed rows, in table order).
+        let effects = lua.create_table()?;
+        let mut k = 0;
+        for (key, value) in m.rules.effects.trait_level_rows(level_key) {
+            let (key, value) = (key.as_str(), *value);
+            let Some(rec) = db.effects.effects.get(key) else {
+                inner.log_once_for("trait level effect", key, || {
+                    format!("UNKNOWN trait level {level_key:?}: effect {key:?} is not in the effects table; left out (logged once per effect)")
+                });
+                continue;
+            };
+            if rec.priority <= 0 {
+                continue;
+            }
+            let e = lua.create_table()?;
+            e.set("IconFilename", rec.icon.clone().unwrap_or_default())?;
+            e.set("Description", effect_text(&loc_required(inner, &format!("effects_description_{key}")), value))?;
+            e.set("Priority", rec.priority)?;
+            k += 1;
+            effects.set(k, e)?;
+        }
+        row.set("Effects", effects)?;
+        let attributes = lua.create_table()?;
+        for (i, (attribute, value)) in m.rules.effects.trait_attribute.get(level_key).into_iter().flatten().enumerate() {
+            let text = loc_required(inner, &format!("agent_attributes_effect_text_{attribute}"));
+            attributes.set(i + 1, effect_text(&text, *value as f32))?;
+        }
+        row.set("AttributeEffects", attributes)?;
+        n += 1;
+        t.set(n, row)?;
+    }
+    Ok(t)
+}
+
+/// An effect description with its value filled in, as the exe formats it (0x00F88560 → 0x00F859A0,
+/// CONFIRMED 2026-10-11): `%%` gives `%`; `%n` gives the value and `%+n` the value with a `+` in front
+/// when it is 0 or more (a negative value carries its own `-`); any other `%` is kept as written. The
+/// value has the fewest decimals (0, 1 or 2) that leave it within 0.005 of a whole number at that
+/// precision (0x00F85560 / 0x00F85720): `2`, `0.5`, `-0.25`.
+pub(super) fn effect_text(text: &str, v: f32) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut rest = text;
+    while let Some(i) = rest.find('%') {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+        if let Some(r) = after.strip_prefix('%') {
+            out.push('%');
+            rest = r;
+        } else if let Some(r) = after.strip_prefix('n') {
+            out.push_str(&effect_number(v));
+            rest = r;
+        } else if let Some(r) = after.strip_prefix("+n") {
+            if v >= 0.0 {
+                out.push('+');
+            }
+            out.push_str(&effect_number(v));
+            rest = r;
+        } else {
+            out.push('%');
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// [`effect_text`]'s number: no decimals when the value is within 0.005 of a whole number (single
+/// precision, rounded to nearest even as the x87 does, 0x00F85720), else one when ten times it is,
+/// else two. The decimals are printed rounded half away from zero (0x004F3140 through `_fcvt_s`).
+fn effect_number(v: f32) -> String {
+    let whole = |x: f32| (x - x.round_ties_even()).abs() < 0.005;
+    let decimals = if whole(v) {
+        return format!("{}", v.round_ties_even() as i64);
+    } else if whole(v * 10.0) {
+        1
+    } else {
+        2
+    };
+    let scale = 10f64.powi(decimals);
+    let n = (f64::from(v).abs() * scale).round() as u64;
+    let unit = 10u64.pow(decimals as u32);
+    let sign = if v < 0.0 && n != 0 { "-" } else { "" };
+    format!("{sign}{}.{:0width$}", n / unit, n % unit, width = decimals as usize)
+}
+
 /// Whether an [`attributes_table`] carries the per-attribute pips or only the `Primary*` fields.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Pips {
@@ -176,19 +303,22 @@ pub(super) enum Pips {
 ///
 /// `character` is `None` for rows that are not a character (sabotage targets), and a character id
 /// with no record has no type: PROVISIONAL empty `Primary*` values so the card's unguarded reads still
-/// find strings (the exe always has the record, so it never takes this path).
+/// find strings (the exe always has the record, so it never takes this path). A type whose `agents` row
+/// names no main attribute (only a mod's table can do that: every vanilla row has one) takes the same
+/// empty values where the exe leaves the fields unset.
 ///
 /// PROVISIONAL: the exe's per-attribute part is all 14 attributes keyed by attribute key (its loop
 /// `0x009AE87D..`, value from `0x009CB560`, not traced, so whether it is the base or the effective
 /// level is UNKNOWN); ours is the character's own attribute list (base values) as an array.
 pub(super) fn attributes_table(lua: &Lua, inner: &Inner, ui: &CampaignUi, character: Option<CharacterId>, pips: Pips) -> mlua::Result<Table> {
     let attrs = lua.create_table()?;
+    let m = ui.model();
     let (primary, list) = match character {
         Some(c) => {
-            let m = ui.model();
-            let primary = m.world.characters.get(&c).map(|ch| {
+            let primary = m.world.characters.get(&c).and_then(|ch| {
+                let key = ntw_sim::campaign::agents::main_attribute(&m.rules, ch.kind);
                 let level = (ntw_sim::campaign::agents::rank(&m, c) + 1).min(9);
-                (ntw_sim::campaign::agents::main_attribute(ch.kind), level)
+                (!key.is_empty()).then_some((key, level))
             });
             let list = if pips == Pips::With { character_attributes(&m, c) } else { Vec::new() };
             (primary, list)

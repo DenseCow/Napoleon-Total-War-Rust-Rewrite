@@ -56,6 +56,7 @@ large: grep for the section you need, and read that file's "Where I am" / "Next"
   for field. Screens are built from the original layout files (`Version039` layouts, `.twui`, `.cuf`,
   UI `.luac`), never redrawn by hand. No placeholder menus or substitute screens (test harnesses like
   `--view-model` are fine). Anything not yet matched is marked `PROVISIONAL` or `PLACEHOLDER` in code.
+- **Graphics are our own (user, 2026-10-11):** the renderer is a modern design, not a port of the original's: vanilla looks like a recent game with its original models, and every visual (materials, shaders, lighting, effects, what a unit is drawn from) comes from moddable data, so any Total War game can be built on it. Gameplay, data, UI layouts and visibility stay 1:1; the original's graphics data is still traced as the input (docs/DESIGN.md §3.7.1).
 - **No engine limits (the one exception to 1:1):** no hardcoded content counts (factions, regions,
   religions, cultures, units, buildings, techs, characters...), army/unit/battle size caps, fixed
   tables or small ID types. Defaults and vanilla data still give the original game exactly;
@@ -180,6 +181,10 @@ When the manager assigns BACKLOG work to a worker, it marks the item (or `###`/`
 push hook then syncs the public pinned claim issue (`tools/claims.sh sync`).
 
 Token discipline (never at the cost of reviews, tests or in-game checks):
+- **Fresh worker per follow-up (user, 2026-10-12):** a worker's whole context is re-sent on every step,
+  so a long one costs most. A review fix round or the next part of a "partial" task goes to a fresh
+  worker briefed with the findings and the branch, not back to the old one. A worker mid-trace keeps
+  going, and independent sub-items go to separate workers.
 - **Worker reports ≤150 words, this shape:** status (done / partial / blocked); commit hash; files
   changed; tests run and result; tag changes (e.g. INFERRED → CONFIRMED); open issues. No narration,
   no pasted code. The manager reads the diff when it needs detail.
@@ -225,12 +230,6 @@ up yourself, don't ask the user:
    far lower, run `reanalyze` (it times out on the call but finishes in Ghidra) and `save_program`.
 3. If no ghidra-mcp tools exist at all, the server didn't load: ask the user to approve it in `/mcp`.
 
-Updating (branch `dev`): `exit_ghidra`, `git pull` in the install folder, then
-`.venv\Scripts\python.exe -m tools.setup build` and `... deploy --ghidra-path $env:USERPROFILE\OneDrive\Desktop\RE`
-(it restarts Ghidra; check `/mcp/health` shows the new build). Its settings are in that folder's
-`.env`; Maven, `JAVA_HOME` and `GHIDRA_MCP_ALLOW_SCRIPTS=1` are user environment variables. Then ask
-the user to reconnect ghidra-mcp in `/mcp` (the bridge is an editable install).
-
 Use everything ghidra-mcp offers (all of it is allowed, including `run_script_inline` /
 `run_ghidra_script` at any time). To save tokens, `.mcp.json` loads only the `listing`, `function`,
 `program`, `xref`, `comment` and `symbol` groups at start; every other tool (datatype, analysis,
@@ -261,37 +260,14 @@ then the one for the task:
 
 Every worker brief that may touch the exe lists all of these, and the worker's report says which it applied.
 
-The 95 scripts in `C:\ghidra-mcp-setup\ghidra-mcp\ghidra_scripts\` run with `run_ghidra_script` by
-absolute path. The `.py` ones need Ghidra's Jython extension, so prefer the `.java` versions.
-Dynamic checks: `emulate_function`, `analyze_dataflow`. Live debugging uses Ghidra's own debugger
-(`debugger_launch_offers`), which needs Window > Debugger opened once in the CodeBrowser. Launch the
-original with `debugger_launch`, offer `dbgeng extra options` with `cwd` = the install folder
-(`dbgeng (.bat)` has no working directory, so the game crashes on the loading screen at
-`0x0118757E` when a shader fails to load; plain `dbgeng` fails),
-`python_executable=C:\ghidra-mcp-setup\dbg-venv\Scripts\python.exe` (a venv holding Ghidra's bundled
-wheels; never pip-install them globally), and `windbg_dir=C:\Windows\System32`. At the first loader
-stop, make exceptions second-chance only: `run_script_inline` finds the Debugger tool's
-`DebuggerTraceManagerService` target (`getCurrent().getTarget()`, by reflection) and passes Python to
-`Target.execute(src, true)`: `__import__('ghidradbg.util', fromlist=['dbg']).dbg.cmd('sxd av')` (also `ld ud ct
-et eh ch dz gp ii sov`, `sxi out`); `dbg.read(addr, n)` reads live memory (Ghidra's own memory reads can be
-stale). It stops twice at the loader: resume both times.
-The debugger holds the game open after it quits (Task Manager can't end it): end the session by
-stopping the two `python.exe ... local-dbgeng*.py` processes, then the game if it is still there.
-Night sessions may run the debugger alone, only when no `Napoleon.exe` is running, and only for
-what needs no player input (start-up, loading, the main menu, tables in memory). Anything that needs
-clicks in the original goes in `docs/FOR_USER.md` as a debugger sitting. The module is `napoleon.retail.exe`, rebased: take
-its base from `debugger_modules` (dynamic = static − 0x400000 + base; `debugger_static_to_dynamic` returned the
-static address unchanged on 2026-10-09). Never attach a raw dbgeng/pybag script to the user's running game: a
-failed detach ends the process and loses their progress (it happened 2026-10-07). Launch under Ghidra
-instead, and set breakpoints only right before the action you're watching. Logging breakpoints: run
-`.effmach x86` first, the evaluator is C++ (wrap MASM as `@@masm(poi(...))`; write addresses as `0x...`, a bare `00ff50e0` sets a breakpoint at 0), no quotes inside the command
-(`bp <addr> ".catch { r eip,edi; dd @edi+0xd0 L2 }; gc"`, output to `.logopen <file>`), and call
-`ghidradbg.commands.ghidra_trace_sync_disable()` first (each recorded stop costs ~150 ms; re-enable after).
-Even then a site hit by every soldier each frame freezes the game: log only sites the action alone reaches.
-To break in while such breakpoints run, loop `dbg._protected_base._control.SetInterrupt(0)` until `dbg.cmd`
-stops raising; leftover interrupts leave break-instruction stops to resume. The
-WinDbg proxy on port 8099 isn't part of this setup. `.luac` scripts still go through `luac_dump`.
-Findings go into the analysis notes as described behaviour. Ghidra holds the names and comments.
+`.luac` scripts go through `luac_dump`. Dynamic checks: `emulate_function`, `analyze_dataflow`.
+Updating ghidra-mcp, its scripts and live debugging (Ghidra's debugger on the original): read
+`docs/GHIDRA_MCP.md` first. Safety rules that always apply: never attach a raw dbgeng/pybag script to
+the user's running game (a failed detach ends it and loses their progress, 2026-10-07): launch under
+Ghidra instead. Night sessions may run the debugger alone, only when no `Napoleon.exe` is running, and only
+for what needs no player input (start-up, loading, the main menu, tables in memory); anything that needs
+clicks in the original goes in `docs/FOR_USER.md` as a debugger sitting. Findings go into the analysis
+notes as described behaviour; Ghidra holds the names and comments.
 
 ## Where things are
 

@@ -247,16 +247,19 @@ pub(super) struct DealRow {
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum NegotiationItem {
-    /// A payment: an amount and how many turns it runs for. `turns == 0` is the lump sum, the deal's
-    /// payment item `0x00C18A70` run once (CONFIRMED: payer charged `0x00BAF500(amount, 3)`, payee credited
-    /// `0x00BB3810(amount, 1)`); a positive `turns` is the per-turn schedule, one of the container's
-    /// two optional single items (`+0x20` / `+0x24`, UNKNOWN which) -- INFERRED that it is the
-    /// payment, since that is what a schedule on the deal would be for. The model has both: a one-off
-    /// payment and a regular payment (per turn, `treaties::DiplomaticAction`).
+    /// A payment: an amount and how many turns it runs for. `Propose`'s payments case (`0x009BF3C0`, action 9)
+    /// puts both kinds in the deal's one payment pair (+0x08 amount, negated for a demand; +0x0C turns): when the
+    /// panel's regular flag is clear (`turns == 0` here, the lump sum) or its turns are below 2, it stores turns 1
+    /// (`0x00C1F6F0` at `0x009BF6FC`, demand `0x00C43D90` at `0x009BF6C1`), else the turns (`0x00C1F6D0` at
+    /// `0x009BF6E7`, demand `0x00C43D70` at `0x009BF6AC`); CONFIRMED. The deal's payment item `0x00C18A70` runs
+    /// turns 1 once (payer charged `0x00BAF500(amount, 3)`, payee credited `0x00BB3810(amount, 1)`) and any other
+    /// length as a regular payment (`0x00B54FC0`); that the item reads the deal's pair is INFERRED (its writer
+    /// back to the deal, `0x00C11CA0`, is the mirror). The model has both: a one-off payment and a regular payment
+    /// (per turn, `treaties::DiplomaticAction`).
     Payment {
         /// The amount moved.
         amount: i32,
-        /// How many turns it runs for; 0 for the lump sum.
+        /// How many turns it runs for; 0 for the lump sum (0 and 1 both run once, as turns 1).
         turns: u32,
     },
     /// A diplomatic action with a model command (`DiplomaticAction`).
@@ -524,9 +527,10 @@ pub(super) fn negotiation_action_name(item: &NegotiationItem) -> &'static str {
 ///     (trade), `0x00B29BB0` (break trade), `0x00B28DB0` (embargo), `0x00B44550` (military access),
 ///     `0x00B67BD0` (cancel access), `0x00B44590` (state gift) and `0x00B105C0` (protectorate) —
 ///     CONFIRMED addresses, ported in `treaties.rs`.
-///   - **payments** → `CampaignCommand::Diplomacy` again: the lump sum (`turns == 0`) as
-///     `OneOffPayment(amount)` (`treaties::one_off_payment`, `0x00C18A70`, CONFIRMED); the per-turn schedule as
-///     `RegularPayment(amount, turns)` (INFERRED).
+///   - **payments** → `CampaignCommand::Diplomacy` again: the lump sum and a schedule shorter than 2 turns
+///     as `OneOffPayment(amount)` (`Propose` stores turns 1 for both, `0x009BF6FC`; `treaties::one_off_payment`,
+///     `0x00C18A70`, CONFIRMED); a longer schedule as `RegularPayment(amount, turns)` (INFERRED, see
+///     [`NegotiationItem::Payment`]).
 ///
 /// INFERRED (this file): `ProposeDeal` (CCQ_DIPLOMACY_PROPOSE_DEAL → `0x00C49BE0`, the AI's
 /// evaluation, which the model lacks) and `AcceptOffer` (CCQ_DIPLOMACY_ACCEPT_DEAL → 0x00C114B0)
@@ -556,11 +560,11 @@ pub(super) fn deal_item_commands(item: &NegotiationItem, actor: FactionId, targe
     use ntw_sim::campaign::treaties::DiplomaticAction;
     match item {
         NegotiationItem::Action(action) => vec![CampaignCommand::Diplomacy { a: actor, b: target, action: *action }],
-        // A lump sum is the deal's one-off payment (`0x00C18A70`, CONFIRMED); a schedule is the
-        // container's per-turn single item (INFERRED).
+        // Turns below 2 are stored as 1, the deal's one-off payment (`0x009BF6FC`, `0x00C18A70`, CONFIRMED); a
+        // longer schedule is a regular payment (INFERRED).
         NegotiationItem::Payment { amount, turns } => {
             let action = match *turns {
-                0 => DiplomaticAction::OneOffPayment(*amount),
+                0 | 1 => DiplomaticAction::OneOffPayment(*amount),
                 t => DiplomaticAction::RegularPayment(*amount, t),
             };
             vec![CampaignCommand::Diplomacy { a: actor, b: target, action }]
@@ -673,15 +677,20 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     // The campaign's theatre is its header's (`CampaignLink::theatres`; each Napoleon map has one).
     // RetrieveExistingTreaties(a, b) → see `existing_treaties`.
     f!("RetrieveExistingTreaties", |_l, inner, ui, (a, b): (String, String)| Ok(existing_treaties(&inner, &ui, &a, &b)));
-    // RetrieveDiplomaticOpinions(a, b) → two attitude texts (0x009F2830, CONFIRMED: two
-    // `relationship_<level>` strings, one per direction; order INFERRED: b's opinion of a, then
-    // a's opinion of b).
+    // RetrieveDiplomaticOpinions(a, b) → a's attitude towards b, then b's towards a, each a
+    // `relationship_<level>` text (0x009F2830, CONFIRMED: the argument reader 0x01055760 takes
+    // the top of the stack, so its first read is b; the first result is 0x00B64CC0 on a's
+    // relationship list (+0x528) about b, the second on b's about a). The panel shows the first
+    // under the player ("towards them"), as the original's Ottoman negotiation shows
+    // (IN_GAME_CHECKS_2026-10-10.md (f)).
     f!("RetrieveDiplomaticOpinions", |_l, inner, ui, (a, b): (String, String)| {
-        Ok((attitude_text(&inner, &ui, &b, &a), attitude_text(&inner, &ui, &a, &b)))
+        Ok((attitude_text(&inner, &ui, &a, &b), attitude_text(&inner, &ui, &b, &a)))
     });
     // RetrieveRemainingMilitaryAccessTurns(a, b) → two numbers, one per direction: the
-    // relationship's military access turns (+0x78C), or -1 when the stance is 4 (protector)
-    // (0x009F4380, CONFIRMED; order INFERRED as b → a, then a → b; our Patron stance = 4).
+    // relationship's military access turns (+0x78C), or -1 when the stance is 4 (protector):
+    // first a's record about b (the access a gives b, which the panel's "offer_access" buttons
+    // show), then b's about a (0x009F4380, CONFIRMED, the same argument order as
+    // `RetrieveDiplomaticOpinions`; our Patron stance = 4).
     f!("RetrieveRemainingMilitaryAccessTurns", |_l, inner, ui, (a, b): (String, String)| {
         let m = ui.model();
         let (Some(fa), Some(fb)) = (m.faction_by_key(&a), m.faction_by_key(&b)) else { return Ok((None, None)) };
@@ -692,7 +701,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
                 m.world.relationships.get(&(x.id, y.id)).map_or(0, |r| r.military_access_turns)
             }
         };
-        Ok((Some(turns(fb, fa)), Some(turns(fa, fb))))
+        Ok((Some(turns(fa, fb)), Some(turns(fb, fa))))
     });
     // RetrieveDiplomaticStanceString(a, b): the stance string for a relationship, CONFIRMED one call
     // site and UNKNOWN shape (no argument reads, no literal string in the wrapper). The value here

@@ -9,7 +9,7 @@
 //! `units_to_exclusive_faction_permissions`, `factions`, `unit_stats_land`).
 //!
 //! It is game data, not state: it is not saved and not part of [`CampaignModel::state_hash`].
-//! [`CampaignRules::test_rules`] holds MADE-UP numbers for tests (never game data).
+//! [`CampaignRules::test_rules`] holds rules for tests: mostly MADE-UP, plus a few vanilla rows.
 //!
 //! [`CampaignModel::state_hash`]: super::CampaignModel::state_hash
 
@@ -235,6 +235,11 @@ pub struct CampaignRules {
     /// `agents` #2: character type → sight radius in map units (character +0x2EC from record +0x10,
     /// CONFIRMED against the saved sight boxes: General 15, colonel 10, admiral 20, rake 18, ...).
     pub agent_sight: BTreeMap<String, i32>,
+    /// `agents` #8 (record +0x44) by agent key: the type's main attribute, which its rank and the cards'
+    /// primary attribute picture are read from (`0x00A198C0`, CONFIRMED data: General and colonel
+    /// `command_land`, admiral and captain `command_sea`, rake `subterfuge`, ...). A type without one has
+    /// no rank.
+    pub agent_primary_attributes: BTreeMap<String, String>,
     /// `agents` #6 by agent key, where set: the agent type's portrait folder, which also names the
     /// deck category its new characters draw from ([`super::portraits`]; admiral → `General`,
     /// missionaries and gentleman → `minister`, guerilla → `guerrilla`, Eastern_Scholar →
@@ -251,9 +256,10 @@ pub struct CampaignRules {
     /// The names new characters are drawn from ([`super::names`]): the `names` table's pools by
     /// faction and the historical characters' on-screen names, filled by the campaign source.
     pub names: super::names::NameRules,
-    /// `units_to_exclusive_faction_permissions`: unit → factions allowed (only units that
-    /// have rows are restricted).
-    pub unit_factions: BTreeMap<String, Vec<String>>,
+    /// Faction → the units it may recruit at all (`FACTION_RECORD` +0x1AC, built by `0x00F74CB0` from its
+    /// military grouping and its `units_to_exclusive_faction_permissions` rows: [`faction_unit_set`]). A unit
+    /// outside the set is never recruitable (`0x00B43CA0`), and a faction with no entry recruits nothing.
+    pub faction_units: BTreeMap<String, std::collections::BTreeSet<String>>,
     /// `units_to_gov_type_permissions`: unit → the government types its `enabled` rows name (`UNIT_RECORD`
     /// +0xDC). A unit listed here is recruitable only under one of them ([`Self::government_may_recruit`]).
     pub unit_governments: BTreeMap<String, Vec<String>>,
@@ -391,11 +397,14 @@ impl ForceCaps {
     /// A new campaign's caps: the units per army and per fleet
     /// ([`crate::limits::GameLimits::max_units`]) at the `campaign_unit_multiplier` preference
     /// (`None`: its default 0.75), i.e. 20 and 6 / 8 / 10 / 20 by the multiplier's unit-size step.
-    /// INFERRED: the new-campaign path `0x00485B90` builds a setup part from exactly these
-    /// (`0x00878060` with `return 20` `0x00851550` and `MaxUnitsFromUnitScaleFactor` `0x00DACE60`
-    /// of preference `0x6D`); that this part is the setup's `+0x48` / `+0x4C` is not traced through
-    /// the stack (at multiplier 1 both readings give 20 / 20, which the saves confirm). PROVISIONAL
-    /// until a new original campaign at multiplier 0.75 is saved (MODDING_AUDIT.md §2.6).
+    /// CONFIRMED (traced through the stack): the front end's `StartCampaign` script call
+    /// (`0x00478840`) builds the campaign setup in `0x00488720`: `0x00878060` fills the setup's
+    /// part at `+0x1C` with `return 20` (`0x00851550`) at part `+0x2C` and
+    /// `MaxUnitsFromUnitScaleFactor` (`0x00DACE60`) of preference `0x6D` at part `+0x30`, i.e. the
+    /// setup's `+0x48` / `+0x4C`, which `0x00872310` copies (`0x00877DB0`) and the loader writes to
+    /// the caps (`0x00873BD2`). The command-line `campaign` start (`0x00485B90`) builds the same.
+    /// The multiplayer lobby's campaign (`0x004AA900`, game type 3) passes a fixed 20 / 14 instead,
+    /// at the lobby's unit scale (not modelled: no multiplayer campaign yet).
     pub fn new_campaign(limits: &crate::limits::GameLimits, campaign_unit_multiplier: Option<f32>) -> Self {
         let (army, navy) = limits.max_units(campaign_unit_multiplier.unwrap_or(CAMPAIGN_UNIT_MULTIPLIER_DEFAULT));
         ForceCaps { army, navy }
@@ -405,6 +414,33 @@ impl ForceCaps {
 /// MADE-UP autoresolve data for the test units (infantry, 1 potential per man plus 50).
 pub const TEST_AUTORESOLVE: UnitAutoresolve =
     UnitAutoresolve { melee_per_man: 1.0, melee_base: 50.0, missile_per_man: 0.0, missile_base: 0.0, morale: 8.0, category: 2 };
+
+/// A faction's unit set (`FACTION_RECORD` +0x1AC, CONFIRMED, `0x00F74CB0`): the list starts as the faction's
+/// military grouping's units (`units_to_groupings_military_permissions`, grouping = `factions` #34), each
+/// `units_to_exclusive_faction_permissions` row of the faction then appends its unit when `allowed`, else
+/// queues it as denied, and each denied unit removes its first copy from the list (`0x00EA38C0`); what is
+/// left becomes the set. So a unit no row names is not recruitable, and a unit both in the grouping and
+/// allowed once survives one denied row.
+pub fn faction_unit_set<'a>(
+    grouping_units: impl IntoIterator<Item = &'a str>,
+    faction_rows: impl IntoIterator<Item = (&'a str, bool)>,
+) -> std::collections::BTreeSet<String> {
+    let mut allowed: Vec<&str> = grouping_units.into_iter().collect();
+    let mut denied = Vec::new();
+    for (unit, ok) in faction_rows {
+        if ok {
+            allowed.push(unit);
+        } else {
+            denied.push(unit);
+        }
+    }
+    for unit in denied {
+        if let Some(i) = allowed.iter().position(|u| *u == unit) {
+            allowed.remove(i);
+        }
+    }
+    allowed.into_iter().map(str::to_owned).collect()
+}
 
 impl CampaignRules {
     /// A `campaign_variables` value, or `default` if the table has no such row.
@@ -442,16 +478,14 @@ impl CampaignRules {
         self.units.get(unit).is_some_and(|u| u.is_naval)
     }
 
-    /// May `faction` recruit `unit` at all (exclusive permissions)?
+    /// May `faction` recruit `unit` at all: is it in the faction's unit set ([`Self::faction_units`])? The
+    /// recruitable list's first gate (`0x00B43CA0` looks the unit up in faction +0x1AC, CONFIRMED).
     pub fn faction_may_recruit(&self, faction: &str, unit: &str) -> bool {
-        match self.unit_factions.get(unit) {
-            Some(list) => list.iter().any(|f| f == faction),
-            None => true,
-        }
+        self.faction_units.get(faction).is_some_and(|set| set.contains(unit))
     }
 
-    /// MADE-UP rules for unit tests. Not game data: every key starts with `test_` and the
-    /// numbers are round.
+    /// Rules for unit tests. Mostly MADE-UP (round numbers, `test_` keys); the `agents` #8 main
+    /// attributes are a copy of the vanilla rows.
     pub fn test_rules() -> Self {
         Self::test_rules_with([])
     }
@@ -515,6 +549,25 @@ impl CampaignRules {
             r.tax_levels.insert(k.into(), v);
         }
         r.agent_action_points.insert("General".into(), 30);
+        // A copy of the vanilla `agents` #8 values; ntw_campaign's `vanilla_agent_main_attributes`
+        // asserts the same pairs against the install's merged database (not against this copy).
+        for (agent, main) in [
+            ("General", "command_land"),
+            ("colonel", "command_land"),
+            ("admiral", "command_sea"),
+            ("captain", "command_sea"),
+            ("gentleman", "research"),
+            ("Eastern_Scholar", "research"),
+            ("minister", "management"),
+            ("rake", "subterfuge"),
+            ("assassin", "subterfuge"),
+            ("guerilla", "subterfuge"),
+            ("catholic_missionary", "zeal"),
+            ("orthodox_missionary", "zeal"),
+            ("Protestant_Missionary", "zeal"),
+        ] {
+            r.agent_primary_attributes.insert(agent.into(), main.into());
+        }
         // A MADE-UP effect mapping in the shape of `effect_bonus_value_*_junction` (DB key → engine
         // bonus): the fixture's own keys (the test buildings' local effects and the tax bundle below)
         // plus the test's `extra` keys. The mapping is fixed once the rules are built, so a test
@@ -540,7 +593,21 @@ impl CampaignRules {
             r.effects.insert_building_local(b.into(), rows);
         }
         r.effects.set_tax_bundle("lower_classes", "tax_high", vec![("happy_active_lower_tax".into(), -10.0)]);
+        // The test world's factions (and the AI tests' `test_faction`) may recruit every fixture unit (one `allowed`
+        // row each).
+        for f in ["test_faction_a", "test_faction_b", "test_faction_c", "test_faction"] {
+            let set = faction_unit_set([], r.units.keys().map(|u| (u.as_str(), true)));
+            r.faction_units.insert(f.into(), set);
+        }
         r
+    }
+
+    /// Test helper: lets every faction that has a unit set recruit `unit` too (a unit a test adds to the
+    /// fixture after [`Self::test_rules`]).
+    pub fn allow_unit_for_all(&mut self, unit: &str) {
+        for set in self.faction_units.values_mut() {
+            set.insert(unit.to_owned());
+        }
     }
 }
 

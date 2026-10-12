@@ -30,7 +30,6 @@
 //!
 //! PROVISIONAL:
 //! - the faction's unit list is the `uniforms` table (the exe reads the faction record's unit map);
-//! - the uniform pictures (`uniforms_table` InfoPic) are not used for Icon / InfoPic;
 //! - Command, the extra game-mode filter (`+0x94`) and the preset sort before the cut are not
 //!   reproduced;
 //! - the era index 0 / 1 / 2 = early / middle / late (INFERRED: the pages pass 2 by default;
@@ -73,6 +72,8 @@ pub struct ArmyData {
     men: BTreeMap<String, i32>,
     /// faction → its units (`uniforms`).
     faction_units: BTreeMap<String, Vec<String>>,
+    /// The unit picture rule over the same `uniforms` rows.
+    pictures: ntw_data::UnitPictures,
     /// `unit_stats_land_experience_bonuses` rows by rank (0..9).
     xp_land: BTreeMap<u8, ntw_data::UnitStatsLandExperienceBonuses>,
     /// `unit_stats_naval_experience_bonuses` rows by rank.
@@ -105,9 +106,11 @@ impl ArmyData {
         if let Some(t) = inner.source.typed_table::<ntw_data::UnitStatsLand>() {
             d.men = t.rows().iter().map(|u| (u.key.clone(), u.num_men)).collect();
         }
-        for r in table(inner, &tables::UNIFORMS).iter() {
+        let uniforms = table(inner, &tables::UNIFORMS);
+        for r in uniforms.iter() {
             d.faction_units.entry(st(&r[1])).or_default().push(st(&r[3]));
         }
+        d.pictures = ntw_data::UnitPictures::from_rows(uniforms.iter());
         // The experience rows by rank; a row whose key is not a rank cannot be looked up as one.
         if let Some(t) = inner.source.typed_table::<ntw_data::UnitStatsLandExperienceBonuses>() {
             d.xp_land = t.rows().iter().filter_map(|r| Some((r.rank.parse().ok()?, r.clone()))).collect();
@@ -168,18 +171,10 @@ fn unit_details(lua: &Lua, inner: &Inner, d: &ArmyData, faction: &str, key: &str
     t.set("UpkeepCost", u.map_or(0, |u| u.upkeep))?;
     t.set("MPCost", d.mp_cost(key, late))?;
     t.set("MPCategory", u.map_or(0, |u| mp_category(&u.mp_category)))?;
-    // Pictures: `<faction>_<unit>_icon` in ui/units/icons (and _info in ui/units/info), else the
-    // bare info key (the same rule as the campaign's unit cards; the exe takes them from
-    // `uniforms_table`, PROVISIONAL).
-    let info = u.map(|u| u.info_key.clone()).unwrap_or_else(|| key.to_owned());
-    let pick = |folder: &str, suffix: &str| {
-        [format!("{faction}_{key}_{suffix}"), format!("{faction}_{info}_{suffix}"), info.clone()]
-            .into_iter()
-            .find(|p| inner.source.find(&format!("ui/units/{folder}/{p}.tga")).is_some())
-            .unwrap_or_else(|| info.clone())
-    };
-    t.set("Icon", format!("data/ui/units/icons/{}", pick("icons", "icon")))?;
-    t.set("InfoPic", format!("data/ui/units/info/{}", pick("info", "info")))?;
+    // Pictures: the faction's uniform, else the unit's own (`ntw_data::UnitPictures`, CONFIRMED
+    // 0x008C9CF0 / 0x008CA1B0, the same rule as the campaign's cards).
+    t.set("Icon", d.pictures.icon(u, key, faction))?;
+    t.set("InfoPic", d.pictures.info(u, key, faction))?;
     t.set("Experience", xp)?;
     t.set("Cap", u.map_or(0, |u| u.unit_cap))?;
     t.set("Command", 0)?;

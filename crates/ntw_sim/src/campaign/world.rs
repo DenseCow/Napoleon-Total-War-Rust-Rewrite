@@ -171,6 +171,17 @@ impl CampaignModel {
     /// tests (our own tool, like `Battle::state_hash`). Collections are hashed in id order.
     /// Rules and terrain are not hashed (they are game data, not state).
     pub fn state_hash(&self) -> u64 {
+        self.hash_with_script_rngs(&self.script_rngs)
+    }
+
+    /// [`Self::state_hash`] of this state as a save of it loads: the script RNGs are not saved
+    /// (`ntw_campaign::own_save` "What is saved"), so a loaded model starts them at
+    /// [`super::characters::SCRIPT_RNG_SEED`]. A save / load round trip keeps this hash.
+    pub fn saved_state_hash(&self) -> u64 {
+        self.hash_with_script_rngs(&super::characters::ScriptRngs::default())
+    }
+
+    fn hash_with_script_rngs(&self, script_rngs: &super::characters::ScriptRngs) -> u64 {
         let mut h = Fnv64::new();
         let c = &self.calendar;
         h.u32(c.turns_per_year);
@@ -185,8 +196,8 @@ impl CampaignModel {
         h.u32(self.force_caps.navy);
         h.u32(self.deal_inflation.first);
         h.u32(self.deal_inflation.factor.to_bits());
-        h.u32(self.script_rngs.trait_rng.state);
-        h.u32(self.script_rngs.ancillary_rng.state);
+        h.u32(script_rngs.trait_rng.state);
+        h.u32(script_rngs.ancillary_rng.state);
         // Only when a mod keeps values, so a vanilla campaign hashes as before.
         if !self.mod_state.is_empty() {
             self.mod_state.hash_into(&mut h);

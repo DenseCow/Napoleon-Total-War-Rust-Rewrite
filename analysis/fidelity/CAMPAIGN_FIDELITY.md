@@ -887,14 +887,19 @@ construction `0x00A6CBE0(0)`; then the two single slots +0x24 / +0x20 (walls / r
   `0x00B44A3A`–`0x00B44A67`, never the new-owner argument. When they match it skips `0x00B44AC7`–`0x00B44B7F`
   (`0x00B2B810`, the drain `0x00A64AC0`, the owner-change signals, `0x00B1B300`) but does not return: the +0x730 step
   at `0x00B44B84` still runs. With no character (`0x00B58A10`: deals, liberation, handover) there is no skip. Every
-  capture path takes a region its capturer does not own, so the model, which has no such test, gives the same result
-  on the paths it has. `CancelRecruitmentItem` ends by firing the manager's multicast signal (+0x24, vtable
+  capture path takes a region its capturer does not own. The model's same-owner test is the deal path's
+  (`transfer_region` returns early when the region is already the faction's, as the drain `0x00A64AC0` does when the old
+  owner is the new one); the capture paths need none, so the model gives the same result on the paths it has. `CancelRecruitmentItem` ends by firing the manager's multicast signal (+0x24, vtable
   `0x0137CBD8`, slot +8 `0x008DBAC0`: each subscriber's vtable +4 with an item pointer) after the refund, population
   credit, delete and count; the pointer is the item now in the cancelled one's place, or the freed item when it
   was the last. Subscribers register at runtime: UNKNOWN (a debugger breakpoint at `0x008DBB59` while cancelling
   settles whether any reads it; an ORIGINAL BUG only if one does). Completeness of the nine capture-refund
   functions 7–66 → 76–97 (new structs `RecruitmentQueueItem`, `RecruitmentManager`, `RegionSlotManager`,
-  `CampaignSettlement`, `SlotConstructionItem`, `SlotSnapshotVector`; faction +0x72C labelled `pCapitalRegion`, its meaning still INFERRED).
+  `CampaignSettlement`, `SlotConstructionItem`, `SlotSnapshotVector`; faction +0x72C labelled `pCapitalRegion`). Reconciled (polish11, 2026-10-11): the rules that read +0x72C are
+  CONFIRMED (`0x00A8B5A0` region == its owner's +0x72C, used by the deal's region list `0x00C5C040`; the bankruptcy hit
+  `0x008AE710`; `AddRegionToFaction` `0x008AE270` stores it when the faction has none, when the region is its +0x730
+  home region, or on its make-capital flag), so +0x72C is the capital. What stays INFERRED is that the save's capital,
+  which the model's `World::capital` reads, is the value loaded into +0x72C (the loader is not traced).
 
 **Flow.** A capture (after a won assault, `0x00B58560`; an undefended settlement, PROVISIONAL same variant) changes the
 owner and clears the queues (round 8), then queues a report object (`0x00885F90`, vtable `0x013574DC`; flags +0x98
@@ -1001,7 +1006,7 @@ faction and liberation target.
   unless the modifier is about −50 or below, which brings the product back into range (a large finite cost). No
   repair starts there (`0x00B1A6B0`: health < 100, unsigned).
 - **Paying (CONFIRMED, module `campaign::treasury`: construction and repair only).** Charging is `0x00BAF500`:
-  faction +0x3F4 minus the amount, plain 32-bit (wraps; `pay` uses `wrapping_sub`; the category converter
+  faction +0x3F4 minus the amount, plain 32-bit (wraps; `pay` saturates instead, ORIGINAL BUG in §Treasury changes; the category converter
   `0x00BA8CD0` taken as identity, INFERRED). Construction: `can_pay_construction` = the unsigned card test and
   treasury ≥ cost signed. Repair: `0x00B16430` (the panel's `can_afford_repair`, and the AI's `0x00AA4910`) is
   repair cost ≤ treasury, signed, on the cost that `0x00B66410` caps at the treasury for an AI faction, so an AI
@@ -1011,7 +1016,7 @@ faction and liberation target.
 - **Cancel refund (CONFIRMED).** `CCQ_BUILDING_CANCEL_CONSTRUCTION` (registered by `0x0041F500`, handler
   `0x00931C30`) calls `0x00B1A790` with the command's flag (the panel's `CancelConstruction` `0x009E0F10` sends 1):
   when the slot's item stores a cost other than 0 (item +0x14), `0x00BB3810(cost, 3)` credits it, faction +0x3F4
-  plus the amount, plain 32-bit (`refund`, `wrapping_add`; category 3 converter `0x00BA8CE0` taken as identity,
+  plus the amount, plain 32-bit (`refund`; ours saturates, ORIGINAL BUG in §Treasury changes; category 3 converter `0x00BA8CE0` taken as identity,
   INFERRED). The stored cost is credited whatever was charged: cancelling a free 0x80000000 repair credits
   0x80000000, an AI debt repair's −20 credits −20. Saves keep the cost bit for bit (`BUILDING_CONSTRUCTION_ITEM`
   #4, u32). Tests: `treasury` module, `a_repair_costing_i32_min_is_queued_and_charges_nothing`,
@@ -1334,12 +1339,22 @@ garrison join. Round 15's read of `0x00B71FB0` (1523 bytes, the queue tick) sett
   `ChargeFactionTreasuryAmount` `0x00BAF500(amount, category)` is a plain wrapping `-=`, the credit
   `CreditFactionTreasuryAmount` `0x00BB3810(amount, category)` a plain wrapping `+=`; the category only feeds the
   spending/income statistics (its converters are identity). Neither tests the balance: every money test is the
-  caller's. The model's one path: `treasury::pay` / `credit` (wrapping), `script_credit`, `settle_round`; the
+  caller's. The model's one path: `treasury::pay` / `credit` (saturating, below), `script_credit`, `settle_round`; the
   bankruptcy reset to 0 is the one plain store.
 - **Round end.** The cannot-pay flag `0x00BBC7D0` is `treasury + income < expenses`, 32-bit wrapping sum, signed
   compare; the settle `0x00BABE30` adds `income − expenses` (wrapping) at `0x00BAC0B3` when the flag is clear.
   Income `0x00BBE970` and expenses `0x00BBE910` are plain int sums of the economics lines. So a treasury near
-  `i32::MAX` wraps negative in the flag test and the faction is flagged bankrupt (1:1, unreachable in play).
+  `i32::MAX` wraps negative in the flag test and the faction is flagged bankrupt.
+- **ORIGINAL BUG: the 32-bit wrap (decided polish11, 2026-10-11, disassembly).** The movers wrap (`0x00BAF500` SUB,
+  `0x00BB3810` ADD), the flag adds treasury + income at `0x00BBC817` and compares signed (SETL `0x00BBC81B`), the settle
+  adds at `0x00BAC0B3`, none with an overflow check. The exe's own intent contradicts the wrap: when the flag is set,
+  `0x00BBC7D0` passes the shortfall expenses − income − treasury (`0x00BBC85F`) to `0x00B0E580`, which cuts regular
+  payments to cover a deficit, so the flag means "cannot cover expenses"; a rich treasury that wraps is flagged, its
+  treasury zeroed and its payments cut. This is a 32-bit limit under CLAUDE.md "Better where the original is broken".
+  Ours keeps the i32 treasury (saves unchanged) but `pay` / `credit` / the cancel refund saturate, `cannot_pay` sums
+  in 64 bits and `settle_round` clamps to i32. Identical for every reachable value (vanilla treasuries stay far below
+  2^31); tests `paying_saturates_where_the_exe_wraps`, `the_round_settles_without_overflow`. The income and expense
+  sums (`0x00BBE970` / `0x00BBE910`, `diplomacy_money`) still wrap 1:1: each line is far below the limit.
 - **Script `treasury_mod`** (`0x0097BAD0`): the amount is a Lua number read as f32, rounded by `0x010556D0` (FISTP,
   half to even); `0x00BB3810(amount, 3)` only when the faction is found and the rounded amount is > 0. A negative or
   zero change is ignored.
@@ -1359,12 +1374,20 @@ garrison join. Round 15's read of `0x00B71FB0` (1523 bytes, the queue tick) sett
   an amount ≤ 0 (the panel offers only `state_gift_values`).
 - **Deal payment** (component `0x00C18A70`, vtable entry `0x01381F18`; amount +0x14, turns +0x18): turns == 1 is the
   one-off payment, payer charged `0x00BAF500(amount, 3)` and payee credited `0x00BB3810(amount, 1)` (a negative
-  amount runs the other way); any other length adds a regular payment through `0x00B54FC0` (INFERRED: on the payer's
-  relationship record towards the payee, via `0x00B55010(amount, turns)`). When both sides are human the exe also calls
+  amount runs the other way); any other length adds a regular payment through `0x00B54FC0` (on the payer's
+  relationship record towards the payee, via `0x00B55010(amount, turns)`; CONFIRMED by polish11's V5 pass). When both sides are human the exe also calls
   `0x008F56C0` on each with ±amount (UNKNOWN, not modelled). Model: `treaties::one_off_payment`; the panel's lump sum
   (`turns == 0` in `NegotiationItem::Payment`) maps to it (it was a state gift, which credited the receiver).
+  **Turns 0 → 1 (CONFIRMED, polish11, disassembly):** the script `Propose` handler `0x009BF3C0`, action 9 (payments),
+  writes the deal's one payment pair, +0x08 amount and +0x0C turns. When the panel's regular flag is clear or its
+  turns are below 2 it stores turns 1: offered `0x00C1F6F0` at `0x009BF6FC`, demanded `0x00C43D90` at `0x009BF6C1`
+  (amount negated). Otherwise it stores the turns: `0x00C1F6D0` at `0x009BF6E7`, demanded `0x00C43D70` at
+  `0x009BF6AC`. So a one-turn schedule also runs once; `deal_item_commands` maps turns 0 and 1 to `OneOffPayment`
+  (test `negotiation_rows_map_to_their_appliers`). The panel note that the schedule was one of the deal's two optional
+  items (+0x20 / +0x24) was wrong. The copy from the deal's pair into the item's +0x14 / +0x18 is not located
+  (INFERRED; `0x00C11CA0` writes the item back to the deal).
 - **Regular payments and protectorate tribute** are economy lines summed into the round settle, so the model moves
-  them wrapping (`treaties::diplomacy_money`).
+  them through `pay` / `credit` (saturating, above); `treaties::diplomacy_money` sums the lines 1:1.
 - **Callers not mapped yet** (BACKLOG): credit `0x00A06050` (mission/event reward, category 3), `0x009DB270`,
   `0x009DB7C0`, `0x00B1A9F0`, `0x00B1AAB0`, `0x009318B3`, `0x00BB33A0`; charge `0x008EEB70`, `0x00B4E4C0`,
   `0x00B0A300`.
@@ -1374,6 +1397,16 @@ garrison join. Round 15's read of `0x00B71FB0` (1523 bytes, the queue tick) sett
   refunded; when it finishes, `0x00B71FB0` hands it to the reinforcements only while +0x18 is set, so it spawns in
   its settlement like an untargeted item. Model: `characters::drop_recruitment_target`, called from
   `character_dies` and from the admiral hire's captain removal. The +0x24 bool is not modelled (save writes it true).
+- **Plate corrections (polish11 V5 pass, 2026-10-11, disassembly).** Applied in Ghidra on 2026-10-12 with the
+  V5 write-up of the 11 treasury functions. Completeness: minimum 78 and average 84 (effective: minimum 86,
+  average 93). The corrections:
+  `0x009D1CD0` CanForceRecruitCommander takes one argument, the force (stdcall, RET 4). The "is_navy"
+  argument on its plate does not exist. `0x00BBC7D0` returns void: it stores the cannot-pay flag at
+  faction +0x464 and, when the flag is set, cuts the regular payments (`0x00B0E580`), so its old name
+  `IsFactionUnableToPayExpenses` was wrong (now `ComputeFactionCannotPayFlag`). In `0x00BAF500` the decompiler shows the amount as the
+  bucket index, but the disassembly at `0x00BAF5F2` indexes by the category. `0x008F56C0` does
+  faction +0x954 += n. `0x00B54FC0` books the payment on the payer's relationship record toward the
+  payee, which is CONFIRMED.
 
 ## Bankruptcy (0x00BBC7D0 / 0x00BABE30 / 0x00BA2030 / 0x008AE710, CONFIRMED; code `economy::settle_round`)
 - Flag when `treasury + income < expenses` (computed in the round-end pre-pass). A bankrupt faction's treasury is set to

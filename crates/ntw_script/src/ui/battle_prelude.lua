@@ -112,8 +112,19 @@ B.Time = __ntw_battle_time
 -- "Returns the current time in seconds" (CONFIRMED 0x005D4BF0): timeGetTime() * 0.001f as a float,
 -- fractional, unlike CampaignUI.WindowsTime (whole seconds); see host.rs `battle_windows_time`.
 B.WindowsTime = __ntw_battle_windows_time
--- "Returns the current time multiplier of the battle".
-B.TickPeriod = function() return __battle.speed or 1 end
+-- "Returns the current time multiplier of the battle", as the speed button's name (CONFIRMED
+-- 0x005D3AA0): "pause" for 0, "slow" for 0.4, "play" for 1, "fwd" for 2, "ffwd" for 4 (exact float
+-- compares in the exe), nil for any other rate. root.lua passes it to ChangeDisplayFor (the speed
+-- ring, from TimeRequestChanged) and keeps it as the speed to restore after a pause. Our
+-- `__battle.speed` is the f32 multiplier read back as a double, hence the small tolerance.
+local tick_periods = { { 0, "pause" }, { 0.4, "slow" }, { 1, "play" }, { 2, "fwd" }, { 4, "ffwd" } }
+B.TickPeriod = function()
+    local s = __battle.speed or 1
+    for _, p in ipairs(tick_periods) do
+        if math.abs(s - p[1]) < 1e-6 then return p[2] end
+    end
+    return nil
+end
 B.ScreenSize = function() return FrontEnd.ScreenSize() end
 B.NumHumansRequestingNextPhase = function() return 0 end
 B.UISkin = function() return "" end
@@ -384,6 +395,10 @@ end
 -- bytecode of template.BattleUnitCard.lua's Update, source line 297: only GETTABLE on the
 -- argument, SETTABLE into the upvalue; no SETUPVAL or SETGLOBAL of it).
 local card_infos = {}
+-- Each card's unit's selected flag as last seen (by unit id; nil: not selected), standing in for
+-- the card manager's selection list: the manager sets a card's state only when the card joins or
+-- leaves that list, never while it stays in it.
+local card_selected = {}
 
 -- Engine steps -------------------------------------------------------------------------------
 
@@ -398,6 +413,7 @@ function __ntw_battle_create_cards()
     __ntw_battle_call_global("CreateCards", list, {})
     __ntw_battle_cards = {}
     card_infos = {}
+    card_selected = {}
     for _, entry in ipairs(list) do
         local u
         for _, x in ipairs(__battle.units or {}) do
@@ -420,10 +436,19 @@ function __ntw_battle_create_cards()
 end
 
 -- Every frame, for each unit with a card (the host runs this as that card's script, ui/battle.rs
--- `update_cards`, so its LuaCall is a plain call): the card's Update(info) with its unit's state
--- (CONFIRMED field names), and the Selected / Default state from the selection (PROVISIONAL: how
--- the engine marks selected cards is UNKNOWN; the template has a "Selected" state).
-function __ntw_battle_update_card(addr, u)
+-- `update_cards`, so its LuaCall is a plain call): the card's Update(info, time) with its unit's
+-- state (CONFIRMED field names) and the UI clock in seconds (CONFIRMED: review_DY.lua
+-- UpdateCards(units, time) forwards the engine's time to each card; see `update_cards`), then
+-- the card manager's selection states (CONFIRMED), only when the unit's selected flag changes:
+-- selecting a card that is not yet in the manager's list (UICardManager SelectCardList,
+-- 0x01019000) sets "Selected" on it unless its state is "UnSelectable" or "Routing", or is not
+-- interactive or disabled (state +0x114 / +0x115); deselecting it (0x010245D0) sets "Default"
+-- from any state but "UnSelectable" and "Routing". Nothing is set while the selection stays, so
+-- a selected unit that routs and rallies keeps the state its card's Update gave it. A hovered
+-- card ("roll") becomes "Selected" too, and the shader of that state (brighten_t0, host.rs
+-- ShaderTechniqueGet) is what highlights it. Our selection lives in the battle model, so
+-- `card_selected` stands in for the manager's own list.
+function __ntw_battle_update_card(addr, u, time)
     local c = UIComponent(addr)
     local info = card_infos[u.id]
     if info == nil then
@@ -432,15 +457,19 @@ function __ntw_battle_update_card(addr, u)
     else
         fill_card_info(info, u)
     end
-    c:LuaCall("Update", info)
-    local st = c:CurrentState()
+    c:LuaCall("Update", info, time)
     -- Only on a change, never every frame: SetState runs the state's enter function each time
     -- (CONFIRMED, 0x01035B30), and BattleUnitCard's "Selected" / "Default" states have the enter
     -- functions Selected / Unselected.
-    if u.selected and st == "Default" then
-        c:SetState("Selected")
-    elseif not u.selected and st == "Selected" then
+    local selected = u.selected == true
+    if selected == (card_selected[u.id] == true) then return end
+    card_selected[u.id] = selected or nil
+    local st = c:CurrentState()
+    if st == "UnSelectable" or st == "Routing" then return end
+    if not selected then
         c:SetState("Default")
+    elseif c:__CurrentStateSelectable() then
+        c:SetState("Selected")
     end
 end
 

@@ -54,7 +54,6 @@ pub struct BattleHud {
     shown: Option<BattlePhase>,
     /// Screen rectangles of the HUD panels (clicks there do not reach the battlefield).
     panels: Vec<Rect>,
-    vfs: Vfs,
     /// Battle name (loc) for the results.
     battle_name: String,
     loc: Localisation,
@@ -69,6 +68,7 @@ struct FrameErrors {
     facts: bool,
     cards: bool,
     orders: bool,
+    speed: bool,
 }
 
 /// Logs `result`'s error for the per-frame step `step` once: only when `logged` is not set yet,
@@ -173,7 +173,6 @@ pub fn enter(world: &mut World) {
         spare_facts: None,
         shown: None,
         panels: Vec::new(),
-        vfs,
         battle_name,
         loc,
         frame_errors: FrameErrors::default(),
@@ -225,40 +224,14 @@ fn log_errors(host: &UiScriptHost) {
     }
 }
 
-/// The card portrait of a unit: `ui/units/icons/<faction icon folder>_<key>_icon.tga` (CONFIRMED
-/// file names, e.g. `french_rep_ita_inf_line_french_fusiliers_icon.tga`), with the faction's
-/// `unit_icon_path` as the prefix (INFERRED), else any icon of that unit. Worked out once per
-/// faction and unit key and kept in `portraits` (faction → key → path), looked up by `&str`.
-fn portrait<'a>(portraits: &'a mut HashMap<String, HashMap<String, String>>, vfs: &Vfs, db: &ntw_data::GameDatabase, faction: &str, key: &str) -> &'a str {
+/// The card portrait of a unit: its faction's uniform picture, else the unit's own
+/// ([`ntw_data::GameDatabase::unit_icon`], CONFIRMED 0x008C9CF0). Worked out once per faction and unit
+/// key and kept in `portraits` (faction → key → path), looked up by `&str`.
+fn portrait<'a>(portraits: &'a mut HashMap<String, HashMap<String, String>>, db: &ntw_data::GameDatabase, faction: &str, key: &str) -> &'a str {
     if !portraits.get(faction).is_some_and(|m| m.contains_key(key)) {
-        let path = find_portrait(vfs, db, faction, key);
-        portraits.entry(faction.to_owned()).or_default().insert(key.to_owned(), path);
+        portraits.entry(faction.to_owned()).or_default().insert(key.to_owned(), db.unit_icon(key, faction));
     }
     portraits.get(faction).and_then(|m| m.get(key)).map_or("", String::as_str)
-}
-
-/// [`portrait`]'s search, without the cache.
-fn find_portrait(vfs: &Vfs, db: &ntw_data::GameDatabase, faction: &str, key: &str) -> String {
-    let lower = key.to_ascii_lowercase();
-    let mut prefixes: Vec<String> = Vec::new();
-    if let Some(f) = db.faction(faction) {
-        let p = f.unit_icon_path.replace('\\', "/");
-        prefixes.push(p.trim_matches('/').rsplit('/').next().unwrap_or_default().to_ascii_lowercase());
-    }
-    prefixes.push(faction.to_ascii_lowercase());
-    let mut found = prefixes
-        .iter()
-        .filter(|p| !p.is_empty())
-        .map(|p| format!("ui/units/icons/{p}_{lower}_icon"))
-        .find(|p| vfs.read(&format!("{p}.tga")).is_ok());
-    if found.is_none() {
-        let suffix = format!("_{lower}_icon.tga");
-        found = vfs.list("ui/units/icons/").into_iter().find(|p| p.to_ascii_lowercase().ends_with(&suffix)).map(|p| {
-            let p = p.replace('\\', "/");
-            p[..p.len() - 4].to_owned()
-        });
-    }
-    found.map(|p| format!("data/{p}")).unwrap_or_default()
 }
 
 /// A faction's flag folder as the HUD scripts use it (`FlagPath` .. `/HUD_right.tga`): the
@@ -327,7 +300,7 @@ fn refresh_facts(out: &mut BattleHudFacts, hud: &mut BattleHud, sim: &BattleSim,
         set_str(key, &info.key);
         set_str(name, info.general.as_deref().unwrap_or(&info.name));
         *kills = u.kills;
-        set_str(portrait_path, portrait(&mut hud.portraits, &hud.vfs, db, &info.faction, &info.key));
+        set_str(portrait_path, portrait(&mut hud.portraits, db, &info.faction, &info.key));
         *men = u.men;
         *max_men = u.max_men;
         *guns = stats.map_or(0, |s| s.num_guns.max(0) as u32);
@@ -372,7 +345,7 @@ fn refresh_facts(out: &mut BattleHudFacts, hud: &mut BattleHud, sim: &BattleSim,
     };
     *elapsed_s = b.time_seconds();
     *total_s = sim.victory.time_limit_s.unwrap_or(0.0);
-    *speed = sim.speed.multiplier();
+    *speed = sim.speed().multiplier();
     *naval = false;
     *player_won = sim.outcome.is_over().then(|| sim.outcome.winner() == Some(0));
     set_str(battle_name, &hud.battle_name);
@@ -419,17 +392,33 @@ pub fn frame(
         let virt = ui_virtual_screen(size);
         hud.host.set_screen(virt.x, virt.y);
     }
+    // The frame's UI time first: the cards' Update gets it (`ui_battle::update_cards`) before the
+    // root's pulse, as in the exe (`0x005F5530` stores it, then `0x005E2AD0` runs both).
+    hud.clock_ms = advance_ui_clock(hud.clock_ms, time.delta());
+    let t = hud.clock_ms;
+    hud.host.set_time(f64::from(t));
     // Model → HUD.
     let player_won = {
         let hud = &mut *hud;
         let written = write_facts(hud, &sim, &data.db);
+        let facts_written = written.is_ok();
         log_once(&mut hud.frame_errors.facts, "facts", written);
         log_once(&mut hud.frame_errors.cards, "unit cards", ui_battle::update_cards(&hud.host));
         log_once(&mut hud.frame_errors.orders, "order buttons", ui_battle::update_orders(&hud.host));
+        // A granted time request (`BattleSim::set_speed`): the engine calls root.lua's
+        // `TimeRequestChanged` once it has set the speed (0x005E79A0), never at battle start. Only
+        // after the facts are written, so `BattleUI.TickPeriod` reads the new speed (until then the
+        // request stays noted); requests granted in one frame are told once, with the last speed
+        // (root.lua only redraws the ring from it). A failure is logged once, not retried.
+        if facts_written && sim.take_speed_change() {
+            // The player's army: the one whose units take orders (the setup marks them); (0, 0),
+            // the setup's own default player, if none was placed.
+            let army = sim.infos().iter().find(|i| i.controllable).map_or((0, 0), |i| i.army);
+            let told = ui_battle::time_request_changed(&hud.host, army, sim.speed().multiplier()).map(drop);
+            log_once(&mut hud.frame_errors.speed, "speed display", told);
+        }
         hud.written_facts.as_ref().or(hud.spare_facts.as_ref()).and_then(|f| f.player_won)
     };
-    hud.clock_ms = advance_ui_clock(hud.clock_ms, time.delta());
-    let t = hud.clock_ms;
     hud.host.pulse(f64::from(t));
     // Phase popups (the engine's calls into root.lua) and the music of each phase.
     if hud.shown != Some(sim.phase) {
@@ -539,12 +528,15 @@ fn apply(hud: &mut BattleHud, sim: &mut BattleSim, r: BattleUiRequest, next: &mu
     match r {
         BattleUiRequest::SetSpeed(m) => {
             let s = BattleSpeed::ALL.into_iter().min_by(|a, b| (a.multiplier() - m).abs().total_cmp(&(b.multiplier() - m).abs())).unwrap_or_default();
-            if s == BattleSpeed::Paused && sim.speed != BattleSpeed::Paused {
-                sim.speed_before_pause = sim.speed;
+            if s == BattleSpeed::Paused && sim.speed() != BattleSpeed::Paused {
+                sim.speed_before_pause = sim.speed();
             }
-            sim.speed = s;
+            sim.set_speed(s);
         }
-        BattleUiRequest::CycleSpeed => sim.speed = sim.speed.cycle(),
+        BattleUiRequest::CycleSpeed => {
+            let next = sim.speed().cycle();
+            sim.set_speed(next);
+        }
         BattleUiRequest::DeploymentFinished => {
             if sim.phase == BattlePhase::Deployment {
                 info!("Battle: deployment finished, the battle starts");

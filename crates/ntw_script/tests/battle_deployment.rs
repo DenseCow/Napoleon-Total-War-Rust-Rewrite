@@ -176,3 +176,178 @@ fn a_steady_battle_hud_asks_for_no_redraw() {
     }
     assert_eq!(gens, [0; 5], "redraws asked for by steady pulses");
 }
+
+/// A card's `Update` gets the UI time as its second argument, as review_DY.lua's
+/// `UpdateCards(units, time)` gives it (the engine's float, `0x0058E3D0`). Without it a unit that
+/// fires raised "attempt to compare number with nil" in `UpdateStateIcon`
+/// (template.BattleUnitCard.lua:163) every frame (in-game check of 2026-10-10, NHB_Austerlitz).
+#[test]
+fn a_firing_units_card_updates_without_script_errors() {
+    let dir = data_dir();
+    if !dir.join("data.pack").is_file() {
+        return;
+    }
+    let source = ScriptSource::from_install(&dir).expect("open packs");
+    let vfs = ntw_formats::pack::Vfs::open_install(&dir).unwrap();
+    let loc = Localisation::from_vfs(&vfs).unwrap();
+    let facts = FrontEndFacts { game_version: "test".into(), ..Default::default() };
+    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0), ntw_sim::limits::GameLimits::default()).unwrap();
+    ui_battle::install(&host, ScriptSource::from_install(&dir).unwrap()).expect("battle engine functions");
+    let unit = ui_battle::HudUnit {
+        id: 7,
+        key: "test_unit".into(),
+        name: "Test".into(),
+        men: 100,
+        max_men: 120,
+        has_ammo: true,
+        ammo_percent: 80.0,
+        firing: true,
+        under_fire: true,
+        ..Default::default()
+    };
+    let bf = BattleHudFacts { phase: HudPhase::Conflict, speed: 1.0, units: vec![unit], ..Default::default() };
+    ui_battle::set_facts(&host, &bf).unwrap();
+    ui_battle::load_hud(&host).expect("battle HUD layout");
+    ui_battle::create_cards(&host).unwrap();
+    let _ = host.take_log();
+    for i in 0..40 {
+        host.set_time(f64::from(i) * 100.0);
+        ui_battle::set_facts(&host, &bf).unwrap();
+        ui_battle::update_cards(&host).expect("card update");
+        host.pulse(f64::from(i) * 100.0);
+    }
+    // Every script error the card updates and pulses raise (the host logs each as `ERROR ...`), not only
+    // those naming the card component.
+    let errors: Vec<String> = host.take_log().into_iter().filter(|l| l.starts_with("ERROR")).collect();
+    assert!(errors.is_empty(), "script errors: {errors:?}");
+}
+
+/// A battle HUD with one player unit (id 7) and its card, at `speed`.
+fn hud_with_one_card(dir: &std::path::Path) -> (UiScriptHost, ntw_script::ui::NodeId, BattleHudFacts) {
+    let source = ScriptSource::from_install(dir).expect("open packs");
+    let vfs = ntw_formats::pack::Vfs::open_install(dir).unwrap();
+    let loc = Localisation::from_vfs(&vfs).unwrap();
+    let facts = FrontEndFacts { game_version: "test".into(), ..Default::default() };
+    let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0), ntw_sim::limits::GameLimits::default()).unwrap();
+    ui_battle::install(&host, ScriptSource::from_install(dir).unwrap()).expect("battle engine functions");
+    let unit = ui_battle::HudUnit { id: 7, key: "test_unit".into(), name: "Test".into(), men: 100, max_men: 120, category: "infantry".into(), ..Default::default() };
+    let bf = BattleHudFacts { phase: HudPhase::Conflict, speed: 1.0, units: vec![unit], ..Default::default() };
+    ui_battle::set_facts(&host, &bf).unwrap();
+    let root = ui_battle::load_hud(&host).expect("battle HUD layout");
+    ui_battle::create_cards(&host).unwrap();
+    (host, root, bf)
+}
+
+fn find(host: &UiScriptHost, root: ntw_script::ui::NodeId, id: &str) -> ntw_script::ui::NodeId {
+    let mut found = None;
+    host.world().visit_visible(root, &mut |n, node| {
+        if found.is_none() && node.data.id == id {
+            found = Some(n);
+        }
+    });
+    found.unwrap_or_else(|| panic!("no visible {id}"))
+}
+
+fn state(host: &UiScriptHost, id: ntw_script::ui::NodeId) -> String {
+    host.world().get(id).unwrap().state_name().to_owned()
+}
+
+/// The speed ring (the "selected" state) moves to the button of the speed the battle runs at:
+/// the engine tells root.lua `TimeRequestChanged` (0x005E79A0), which asks `BattleUI.TickPeriod`
+/// (0x005D3AA0: "pause" / "slow" / "play" / "fwd" / "ffwd") and selects that button.
+#[test]
+fn the_speed_ring_follows_the_battle_speed() {
+    let dir = data_dir();
+    if !dir.join("data.pack").is_file() {
+        return;
+    }
+    let (host, root, mut bf) = hud_with_one_card(&dir);
+    let buttons = ["pause", "slow_mo", "play", "fwd", "ffwd"];
+    for (speed, ring) in [(1.0, "play"), (4.0, "ffwd"), (2.0, "fwd"), (0.4, "slow_mo"), (0.0, "pause"), (1.0, "play")] {
+        bf.speed = speed;
+        ui_battle::set_facts(&host, &bf).unwrap();
+        assert!(ui_battle::time_request_changed(&host, (0, 0), speed).unwrap(), "root.lua defines TimeRequestChanged");
+        for b in buttons {
+            let want = if b == ring { "selected" } else { "normal" };
+            assert_eq!(state(&host, find(&host, root, b)), want, "{b} at speed {speed}");
+        }
+    }
+    let errors: Vec<String> = host.take_log().into_iter().filter(|l| l.starts_with("ERROR")).collect();
+    assert!(errors.is_empty(), "script errors: {errors:?}");
+}
+
+/// A selected unit's card goes to "Selected" (brighten_t0 +1.0) from "Default" and from the
+/// pointer's "roll", and back to "Default" (brighten_t0 -0.3) when deselected: the card manager's
+/// rules (0x01019000 / 0x010245D0).
+#[test]
+fn a_selected_units_card_lights_up_even_under_the_pointer() {
+    let dir = data_dir();
+    if !dir.join("data.pack").is_file() {
+        return;
+    }
+    let (host, root, mut bf) = hud_with_one_card(&dir);
+    let card = find(&host, root, "card_7");
+    let shader = |host: &UiScriptHost| {
+        let w = host.world();
+        let s = w.get(card).unwrap().current().unwrap();
+        (s.shader.clone(), s.shader_vars[0])
+    };
+    let mut select = |selected: bool| {
+        bf.units[0].selected = selected;
+        ui_battle::set_facts(&host, &bf).unwrap();
+        ui_battle::update_cards(&host).unwrap();
+    };
+    assert_eq!(state(&host, card), "Default");
+    assert_eq!(shader(&host), ("brighten_t0".to_owned(), -0.3));
+    select(true);
+    assert_eq!(state(&host, card), "Selected");
+    assert_eq!(shader(&host), ("brighten_t0".to_owned(), 1.0));
+    select(false);
+    assert_eq!(state(&host, card), "Default");
+    // Under the pointer the card is "roll"; selecting it there still lights it up.
+    host.pointer(card, PointerEvent::Enter);
+    assert_eq!(state(&host, card), "roll");
+    select(true);
+    assert_eq!(state(&host, card), "Selected");
+    host.pointer(card, PointerEvent::Leave);
+    assert_eq!(state(&host, card), "Selected", "Selected has no Leave transition");
+    select(false);
+    assert_eq!(state(&host, card), "Default");
+    let log = host.take_log();
+    assert!(!log.iter().any(|l| l.starts_with("ERROR") || l.contains("UNKNOWN UIComponent:Shader")), "{log:?}");
+}
+
+/// The card manager sets a card's state only when its unit joins or leaves the selection
+/// (0x01019000 / 0x010245D0), never while it stays: a selected unit that routs and rallies keeps
+/// the state its card's Update gave it (not "Selected" again), and deselecting it sets "Default"
+/// from any state but "UnSelectable" / "Routing" (here "roll").
+#[test]
+fn a_rallied_selected_card_is_not_reselected_and_deselect_goes_default_from_roll() {
+    let dir = data_dir();
+    if !dir.join("data.pack").is_file() {
+        return;
+    }
+    let (host, root, mut bf) = hud_with_one_card(&dir);
+    let card = find(&host, root, "card_7");
+    let mut step = |selected: bool, routing: bool| {
+        bf.units[0].selected = selected;
+        bf.units[0].routing = routing;
+        ui_battle::set_facts(&host, &bf).unwrap();
+        ui_battle::update_cards(&host).unwrap();
+    };
+    step(true, false);
+    assert_eq!(state(&host, card), "Selected");
+    step(true, true);
+    assert_eq!(state(&host, card), "Routing");
+    step(true, false);
+    let rallied = state(&host, card);
+    assert_ne!(rallied, "Selected", "a rallied card is not selected again while the selection stays");
+    step(true, false);
+    assert_eq!(state(&host, card), rallied, "nothing changes while the selection stays");
+    host.pointer(card, PointerEvent::Enter);
+    assert_eq!(state(&host, card), "roll");
+    step(false, false);
+    assert_eq!(state(&host, card), "Default", "deselect sets Default from roll");
+    let errors: Vec<String> = host.take_log().into_iter().filter(|l| l.starts_with("ERROR")).collect();
+    assert!(errors.is_empty(), "script errors: {errors:?}");
+}

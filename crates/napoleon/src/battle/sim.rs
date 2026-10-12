@@ -12,8 +12,10 @@ use ntw_sim::battle::victory::{Outcome, VictoryRules};
 pub struct BattleSim {
     /// The model. Only `tick_battle` advances it; `input` only sets orders.
     pub battle: Battle,
-    /// Current battle speed (CONFIRMED set and cycle order).
-    pub speed: BattleSpeed,
+    /// Current battle speed (CONFIRMED set and cycle order); [`Self::set_speed`] is its only writer.
+    speed: BattleSpeed,
+    /// A time request was granted since the HUD last told root.lua (see [`Self::set_speed`]).
+    speed_changed: bool,
     /// Speed to return to when un-pausing.
     pub speed_before_pause: BattleSpeed,
     /// Display info for every unit, in the same order as `battle.units` (private: [`Self::add_unit`] is the only writer).
@@ -71,6 +73,7 @@ impl BattleSim {
         Self {
             battle,
             speed: BattleSpeed::Normal,
+            speed_changed: false,
             speed_before_pause: BattleSpeed::Normal,
             info: Vec::new(),
             side_names: [String::new(), String::new()],
@@ -89,6 +92,25 @@ impl BattleSim {
             wind: [0.0; 3],
             build: next_build(),
         }
+    }
+
+    /// The current battle speed.
+    pub fn speed(&self) -> BattleSpeed {
+        self.speed
+    }
+
+    /// Grants a time request: sets the speed and notes it for the HUD, which tells root.lua's
+    /// `TimeRequestChanged` once per granted request (CONFIRMED 0x005E79A0; never at battle start,
+    /// and also when the speed asked for is the current one).
+    pub fn set_speed(&mut self, speed: BattleSpeed) {
+        self.speed = speed;
+        self.speed_changed = true;
+    }
+
+    /// Whether a time request was granted since the last call (and clears it), for the HUD's
+    /// `TimeRequestChanged` call.
+    pub fn take_speed_change(&mut self) -> bool {
+        std::mem::take(&mut self.speed_changed)
     }
 
     /// Display info of every unit, in `battle.units` order.

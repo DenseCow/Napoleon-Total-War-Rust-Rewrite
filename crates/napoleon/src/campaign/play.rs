@@ -695,8 +695,10 @@ pub fn quick_save(sim: &mut CampaignSim) {
         warn!("Campaign script SavingGame: {e}");
     }
     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as u32);
-    let saved = {
+    let (saved, hash) = {
         let st = sim.host.state();
+        // The hash the load logs ("save state hash"): equal when the save keeps the state.
+        let hash = st.model.saved_state_hash();
         let info = ntw_campaign::own_save::save_header(&sim.info, &st.model, &sim.human, ts, &sim.pictures);
         let data = ntw_campaign::own_save::SaveDataRef {
             human: &sim.human,
@@ -707,7 +709,7 @@ pub fn quick_save(sim: &mut CampaignSim) {
             // offers the tutorial and Peninsular units again (the levels are in the model).
             restricted_units: st.restricted_units.iter().cloned().collect(),
         };
-        ntw_campaign::own_save::write(&info, &data)
+        (ntw_campaign::own_save::write(&info, &data), hash)
     };
     let result = (|| -> Result<std::path::PathBuf, Box<dyn std::error::Error + Send + Sync>> {
         let bytes = saved?;
@@ -720,7 +722,7 @@ pub fn quick_save(sim: &mut CampaignSim) {
         Ok(p) => format!("Saved {} to {}", sim.campaign, p.display()),
         Err(e) => format!("Save failed: {e}"),
     };
-    info!("Campaign: {}", sim.last_message);
+    info!("Campaign: {} (state hash {hash:016x})", sim.last_message);
 }
 
 /// A save's `save_value` slots as script values (`load_value` returns integers as numbers).

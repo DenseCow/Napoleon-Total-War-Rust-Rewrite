@@ -28,7 +28,7 @@
 //!   `SkyModel`), shoreline foam passes, planar reflections, refraction, rain ripples, wakes,
 //!   fog and HDR post-processing, and inland water at its own level. All listed in `WATER.md`.
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
@@ -164,13 +164,17 @@ struct WaveHeaders {
     swell: SeaWaves,
 }
 
-/// The install's chop, swell and foam textures, decoded and uploaded on the first sea battle and
-/// reused by every later one. Invalidation: none, the install's files do not change while the game
-/// runs (and the images are render-world only, so after the upload the main world keeps no copy).
+/// The chop, swell and foam textures, decoded and uploaded on a sea battle. Invalidation: they are
+/// kept only while `vfs` is the same open packs (a map pack may override `sea\*`), compared by pointer
+/// through a `Weak` so the packs are not kept alive. `load_battle_map` opens a new [`TerrainVfs`] per
+/// battle, so in practice every sea battle reloads (once, cold path); the cache only spares a repeat
+/// setup on the same packs. The images are
+/// render-world only, so after the upload the main world keeps no copy.
 /// Decoded on the main thread: the first sea battle needs them in the frame it starts, so a task
 /// would only be waited on (21 ms in release, `WATER.md` §3).
 #[derive(Resource, Clone)]
 pub struct SeaTextures {
+    vfs: Weak<Vfs>,
     waves: Arc<WaveHeaders>,
     sea: Handle<Image>,
     swell: Handle<Image>,
@@ -179,10 +183,11 @@ pub struct SeaTextures {
 
 impl SeaTextures {
     /// Decodes the three files; `max_layers` is the GPU's texture-array limit.
-    fn load(vfs: &Vfs, max_layers: u32, images: &mut Assets<Image>) -> Self {
+    fn load(vfs: &Arc<Vfs>, max_layers: u32, images: &mut Assets<Image>) -> Self {
         let started = std::time::Instant::now();
         let (mut sea, mut swell) = (wave_container(vfs, SEA_PATH, max_layers), wave_container(vfs, SWELL_PATH, max_layers));
         let textures = Self {
+            vfs: Arc::downgrade(vfs),
             sea: images.add(angle_array(&sea)),
             swell: images.add(angle_array(&swell)),
             foam: images.add(foam_texture(vfs)),
@@ -194,6 +199,11 @@ impl SeaTextures {
         };
         info!("Battle sea: wave and foam textures decoded in {:.0} ms", started.elapsed().as_secs_f64() * 1000.0);
         textures
+    }
+
+    /// Whether these were decoded from `vfs` (the same open packs), so they are still the right ones.
+    fn is_for(&self, vfs: &Arc<Vfs>) -> bool {
+        Weak::ptr_eq(&self.vfs, &Arc::downgrade(vfs))
     }
 }
 
@@ -218,13 +228,13 @@ struct SeaSettings {
 }
 
 /// Picks the rows the exe's lookup `0x006AB800` picks: the row with the given key, or the first
-/// row when the key is missing or not in the table (CONFIRMED fallback). `None` only when a table
+/// row when the key is not in the table (CONFIRMED, `WATER.md` §4, `0x006AB800`). `None` only when a table
 /// is empty. Logs once per call (once per battle) when it falls back.
 ///
 /// A battle with **no** sea surface key is a campaign battle: its XML names none, and the original
 /// rolls a wind level for it instead (`0x00535B30`, called from `0x008C4E50`, four thresholds over
 /// one random draw; `WATER.md` §4). That roll is not ported, so such a battle gets the first row
-/// (`wind_level_0`): **PROVISIONAL**. Where a battle without a climate key takes its climate from is
+/// (`wind_level_0`): **PROVISIONAL** (only this no-key case; a key missing from the table is CONFIRMED above). Where a battle without a climate key takes its climate from is
 /// not traced (UNKNOWN); every shipped `sea_climate_details` row has the same deep colour.
 fn sea_settings(
     surfaces: &Table<SeaSurface>,
@@ -281,14 +291,16 @@ pub fn spawn_sea(
         return;
     }
     let spec = setup.as_ref().and_then(|s| s.battle.as_ref()).map(|(_, spec)| spec.clone());
-    let settings = data.as_ref().and_then(|d| {
-        sea_settings(
-            &d.db.sea_surfaces,
-            &d.db.sea_climate_details,
-            spec.as_ref().and_then(|s| s.sea_surface.as_deref()),
-            spec.as_ref().and_then(|s| s.climate.as_deref()),
-        )
-    });
+    let Some(data) = data else {
+        warn!("Battle sea: GameData is not loaded, the sea is not drawn");
+        return;
+    };
+    let settings = sea_settings(
+        &data.db.sea_surfaces,
+        &data.db.sea_climate_details,
+        spec.as_ref().and_then(|s| s.sea_surface.as_deref()),
+        spec.as_ref().and_then(|s| s.climate.as_deref()),
+    );
     let Some(settings) = settings else {
         warn!("Battle sea: no sea_surfaces / sea_climate_details rows in the database, the sea is not drawn");
         return;
@@ -297,8 +309,8 @@ pub fn spawn_sea(
     let (sun_dir, sun, ambient) = lighting_params(&map);
     let sky = SkyModel::of(&map, ambient);
     let textures = match cache {
-        Some(t) => t.clone(),
-        None => {
+        Some(t) if t.is_for(&vfs.0) => t.clone(),
+        _ => {
             // wgpu's default when there is no device (nothing is drawn then anyway).
             let max_layers = device.map_or(256, |d| d.limits().max_texture_array_layers);
             let t = SeaTextures::load(&vfs.0, max_layers, &mut images);
@@ -739,6 +751,17 @@ mod tests {
         assert!(sea_settings(&Table::from_rows(0, Vec::new()), &climates, None, None).is_none());
     }
 
+    /// A battle on the same open packs keeps the decoded textures; one that opened new packs (a map
+    /// pack may override `sea\*`) does not.
+    #[test]
+    fn the_textures_are_reused_only_for_the_same_packs() {
+        let vfs = Arc::new(Vfs::new());
+        let waves = Arc::new(WaveHeaders { sea: flat_waves(), swell: flat_waves() });
+        let t = SeaTextures { vfs: Arc::downgrade(&vfs), waves, sea: Handle::default(), swell: Handle::default(), foam: Handle::default() };
+        assert!(t.is_for(&vfs));
+        assert!(!t.is_for(&Arc::new(Vfs::new())));
+    }
+
     /// Leaving a battle drops the `Sea` (and with it the last handle to its material), so the next
     /// battle does not update a stale material; the session's `SeaTextures` stay for the next one.
     #[test]
@@ -747,7 +770,7 @@ mod tests {
         let mut world = World::new();
         let waves = Arc::new(WaveHeaders { sea: flat_waves(), swell: flat_waves() });
         world.insert_resource(Sea { entity: Entity::PLACEHOLDER, material: Handle::default(), waves: waves.clone() });
-        world.insert_resource(SeaTextures { waves, sea: Handle::default(), swell: Handle::default(), foam: Handle::default() });
+        world.insert_resource(SeaTextures { vfs: Weak::new(), waves, sea: Handle::default(), swell: Handle::default(), foam: Handle::default() });
         world.run_system_once(remove_sea).unwrap();
         assert!(!world.contains_resource::<Sea>());
         assert!(world.contains_resource::<SeaTextures>());

@@ -895,8 +895,9 @@ impl CampaignModel {
     ///   three economics lines / 5, read as taxes + trade + other), economy lines 6 (protectorate) and 2 (patron),
     ///   kept in #8 / #9.
     ///
-    /// In the exe both are economy lines summed into the round settle (`0x00BABE30`, 32-bit wrapping), so the model
-    /// moves them with [`super::treasury::pay`] / [`super::treasury::credit`], wrapping as well.
+    /// In the exe both are economy lines summed into the round settle (`0x00BABE30`), so the model moves them with
+    /// [`super::treasury::pay`] / [`super::treasury::credit`], which saturate where the exe's 32-bit sum wraps
+    /// (ORIGINAL BUG, `treasury` module docs).
     pub fn diplomacy_money(&mut self, faction: FactionId) {
         let targets: Vec<FactionId> = self.world.relationships.keys().filter(|(o, _)| *o == faction).map(|(_, t)| *t).collect();
         for t in targets {

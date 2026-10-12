@@ -34,7 +34,7 @@ pub fn keyboard(
 ) {
     // Harness runs ignore the live keyboard (repeatable captures, `view::camera_harness_run`).
     if super::view::camera_harness_run() {
-        apply_speed(sim.speed, &mut time);
+        apply_speed(sim.speed(), &mut time);
         return;
     }
     if keys.just_pressed(KeyCode::KeyR) {
@@ -42,15 +42,17 @@ pub fn keyboard(
         *sim = setup::build_battle(&data.db, &setup_data, seed);
     }
     if keys.just_pressed(KeyCode::Space) {
-        if sim.speed == BattleSpeed::Paused {
-            sim.speed = sim.speed_before_pause;
+        if sim.speed() == BattleSpeed::Paused {
+            let resume = sim.speed_before_pause;
+            sim.set_speed(resume);
         } else {
-            sim.speed_before_pause = sim.speed;
-            sim.speed = BattleSpeed::Paused;
+            sim.speed_before_pause = sim.speed();
+            sim.set_speed(BattleSpeed::Paused);
         }
     }
     if keys.just_pressed(KeyCode::Tab) {
-        sim.speed = sim.speed.cycle();
+        let next = sim.speed().cycle();
+        sim.set_speed(next);
     }
     if keys.just_pressed(KeyCode::KeyF)
         && let Some(id) = sim.selected
@@ -61,7 +63,7 @@ pub fn keyboard(
         let on = unit.fire_at_will;
         sim.script_events.push(super::ScriptEvent::Command { name: "Fire At Will", unit: Some(id), bool1: on });
     }
-    apply_speed(sim.speed, &mut time);
+    apply_speed(sim.speed(), &mut time);
 }
 
 /// Scales Bevy's virtual clock. `FixedUpdate` (= model ticks) follows the virtual clock, so

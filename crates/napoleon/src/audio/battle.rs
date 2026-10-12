@@ -105,7 +105,7 @@ pub(super) fn bridge_volleys(
 
 /// Copies the battle speed into [`super::GameSpeed`] for the sound manager's game-speed rule.
 pub(super) fn track_speed(sim: Option<Res<BattleSim>>, mut speed: ResMut<super::GameSpeed>) {
-    let s = sim.map_or(1.0, |s| s.speed.multiplier());
+    let s = sim.map_or(1.0, |s| s.speed().multiplier());
     if speed.0 != s {
         speed.0 = s;
     }

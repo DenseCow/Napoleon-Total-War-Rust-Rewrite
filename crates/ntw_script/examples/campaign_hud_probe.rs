@@ -185,7 +185,9 @@ fn main() {
                 }
             });
             println!("== hover {id} ({target:?})");
-            host.campaign_hover(target);
+            if let Some(t) = target {
+                host.pointer(t, PointerEvent::Enter);
+            }
         } else if a == "labels" {
             let regs: Vec<_> = scripts.state().model.world.regions.values().take(3).map(|r| r.id).collect();
             let list = regs.iter().enumerate().map(|(i, r)| (*r, 300.0 + 200.0 * i as f32, 300.0)).collect();

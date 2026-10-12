@@ -450,13 +450,16 @@ fn mission_managers_read_and_write_back() {
     assert!(managers > 0, "no CAMPAIGN_MISSION_MANAGER found");
 }
 
-/// The model's recruit permission (`units_to_exclusive_faction_permissions`, `CampaignRules::faction_may_recruit`)
-/// on the real data: France's own line infantry is France's alone. (Ported from the AI's deleted copy of the
-/// rule, 0b-recruit review round 2.)
+/// The model's recruit permission (the faction unit set, `0x00F74CB0`, `CampaignRules::faction_may_recruit`)
+/// on the real data: France's own line infantry is France's alone; Britain gets the Armed Citizenry from its
+/// grouping (`great_britain_group`), and the Brunswick Hussars, which no row names, from nowhere (the original's
+/// Wellesley army list has no hussars).
 #[test]
 fn recruit_permissions_from_the_real_data() {
     let Some(db) = db() else { return };
     let rules = ntw_campaign::rules_from_db(db, "eur_napoleon");
     assert!(rules.faction_may_recruit("france", "Inf_Line_French_Fusiliers"));
     assert!(!rules.faction_may_recruit("austria", "Inf_Line_French_Fusiliers"));
+    assert!(rules.faction_may_recruit("britain", "Inf_Mob_Armed_Citizenry"));
+    assert!(!rules.faction_may_recruit("britain", "Cav_Light_Brunswick_Hussars"));
 }

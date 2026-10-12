@@ -436,7 +436,7 @@ impl CampaignModel {
         // Recruitment (`0x00B71FB0` with force 0, from the region update `0x00AAE820`, CONFIRMED): first
         // the items whose unit the region can no longer recruit are removed through the cancel path
         // `0x00B1A820` with 1, so each is refunded like a cancel (CONFIRMED: the cancel command's call,
-        // crediting the item's cost; 32-bit wrapping sums, [`super::treasury::credit`]). The cancel path
+        // crediting the item's cost; [`super::treasury::credit`], saturating where the exe wraps). The cancel path
         // also gives the region its population back, per item (`0x00A61AA0`,
         // [`super::population::RecruitmentPopulation::credited`]).
         let recruitable = self.recruitable_units(region);

@@ -260,7 +260,7 @@ fn main() {
                     let Some(h) = p.holder else { continue };
                     let c = &m.world.characters[&h];
                     let attrs = m.world.character_details.get(&h).map(|x| x.attributes.clone()).unwrap_or_default();
-                    let main = ntw_sim::campaign::effects::Effects::character_attribute(m, h, ntw_sim::campaign::agents::main_attribute(c.kind));
+                    let main = ntw_sim::campaign::effects::Effects::character_attribute(m, h, ntw_sim::campaign::agents::main_attribute(&m.rules, c.kind));
                     println!("  {key} {} holder {:?} {:?} gov {} main {main:?} attrs {attrs:?}", p.key, h, c.kind, f.government_key);
                 }
             }

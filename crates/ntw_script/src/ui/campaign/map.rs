@@ -8,14 +8,6 @@ pub(super) fn theatre_name(inner: &Inner, row: &ntw_data::CampaignMapPlayableAre
     loc(inner, &format!("campaign_map_playable_areas_onscreen_name_{}", row.id)).unwrap_or_else(|| row.area.clone())
 }
 
-
-impl UiScriptHost {
-    /// The campaign HUD's [`UiScriptHost::hover`].
-    pub fn campaign_hover(&self, node: Option<NodeId>) {
-        self.hover(node);
-    }
-}
-
 impl UiScriptHost {
     /// The game's view of the map for the settlement labels: the camera position (any values that
     /// change when the view changes), the settlements on screen with their screen positions, and
@@ -143,9 +135,15 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     //   0x00A9D850), Key, Name, Address, Owner (faction name), OwnerKey, TaxExempt (region +0xE4,
     //   CONFIRMED 0x00AAF270); modes 0 and 4 add OwnerRGB {r, g, b} (the owner's colour × 255,
     //   CONFIRMED; the primary colour INFERRED); mode 1, for regions the faction does not own,
-    //   OwnerAttitude (the owner's attitude total towards the faction) and
-    //   FactionAttitudeTowardsOwner (the faction's towards the owner) (CONFIRMED total 0x00B0DB60,
-    //   direction INFERRED from the names); mode 3 adds OrderRGB {r, g, b, a} and PublicOrder.
+    //   OwnerAttitude and FactionAttitudeTowardsOwner, attitude totals (0x00B0DB60) whose
+    //   direction is the opposite of their names (CONFIRMED 0x009F0B2A..0x009F0C44: OwnerAttitude
+    //   is the total of the faction's relationship record about the owner, `0x00B64C50` on
+    //   [faction +0x528], so the faction's attitude towards the owner; FactionAttitudeTowardsOwner
+    //   the owner's record about the faction, the owner's attitude towards the faction). The
+    //   relations panel's default map, "Other nation's attitudes towards selected nation"
+    //   (diplomatic_relations scroll.lua state `other_nations`), reads the second, and the
+    //   original's map shows it (IN_GAME_CHECKS_2026-10-10.md (f)); mode 3 adds OrderRGB
+    //   {r, g, b, a} and PublicOrder.
     // PROVISIONAL: every region of the model is in the (single) theatre of a Napoleon campaign
     // map; the exe also drops regions a position test hides (0x008E0500, UNKNOWN). Mode 1's
     // OwnerStatus / *RelationshipDetails texts and mode 3's Lower / Upper detail tables are not
@@ -201,10 +199,10 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
                 && let Some(me) = me
                 && me != r.owner
             {
-                if let Some(rel) = m.world.relationships.get(&(r.owner, me)) {
+                if let Some(rel) = m.world.relationships.get(&(me, r.owner)) {
                     e.set("OwnerAttitude", rel.attitude_total())?;
                 }
-                if let Some(rel) = m.world.relationships.get(&(me, r.owner)) {
+                if let Some(rel) = m.world.relationships.get(&(r.owner, me)) {
                     e.set("FactionAttitudeTowardsOwner", rel.attitude_total())?;
                 }
             }
@@ -252,24 +250,23 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
             t.set("Resources", lua.create_table()?)?;
             return Ok(t);
         }
-        // The fog of war: a settlement the player has never seen has no label. This is
-        // `CampaignModel::knows` (visible now OR explored), **not** `sees`: the original draws
-        // the labels from the shroud's *explored* tree (CHARACTERS_FIDELITY.md §10; INFERRED --
-        // no Ghidra output for it was kept, review 0-G), so a
-        // settlement that has been seen and is now only explored keeps its label while the
-        // terrain renderer dims it. Filtering with `sees` dropped those, leaving dimmed ground
-        // with no label on it. INFERRED, from the name and the explored tree.
+        // The fog of war (CONFIRMED): `0x009F4520` → `0x009B0400` asks `0x009BAA90` per settlement
+        // with the player's faction (campaign UI +0x9FC, +0xB0), which drops a label only when the
+        // settlement's cell is in the shroud's hide set (`CampaignModel::hides_map_label`). Neither
+        // the visible nor the explored cells are read: a settlement never seen keeps its label,
+        // as one in sight does (CHARACTERS_FIDELITY.md §10). Its second test, the camera frustum,
+        // is `ui.visible`.
         let human = ui.model().faction_by_key(&ui.link.human).map(|h| h.id);
         let mut n = 0;
         for (r, x, y) in ui.visible.borrow().iter() {
-            let seen = human.is_none_or(|h| {
+            let hidden = human.is_some_and(|h| {
                 ui.model()
                     .world
                     .regions
                     .get(r)
-                    .is_some_and(|reg| ui.model().knows(h, (reg.settlement.position.0.to_f32(), reg.settlement.position.1.to_f32())))
+                    .is_some_and(|reg| ui.model().hides_map_label(h, (reg.settlement.position.0.to_f32(), reg.settlement.position.1.to_f32())))
             });
-            if !seen {
+            if hidden {
                 continue;
             }
             let e = lua.create_table()?;

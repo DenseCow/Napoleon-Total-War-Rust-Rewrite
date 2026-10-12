@@ -166,6 +166,9 @@ pub type TraitLevelRow = (i32, i32, String);
 /// One tax bundle: its DB rows and their compiled set ([`EffectRules::set_tax_bundle`]).
 type TaxBundle = (Vec<(String, f32)>, EffectSet);
 
+/// One trait level's effects: its summed rows and their compiled set ([`EffectRules::insert_trait_level`]).
+type TraitLevelEffects = (Vec<(String, f32)>, EffectSet);
+
 /// Each effect source's compiled set (built from the DB by `ntw_campaign::rules_from_db`). The mapping
 /// is fixed when the rules are built, and every compiled set is read-only and inserted only through
 /// this type's `insert_*` methods, which compile its rows through that mapping: no set can disagree
@@ -189,8 +192,9 @@ pub struct EffectRules {
     government: BTreeMap<String, EffectSet>,
     /// Trait → its levels, sorted by threshold.
     pub trait_levels: BTreeMap<String, Vec<TraitLevelRow>>,
-    /// Trait level key → effects.
-    trait_level: BTreeMap<String, EffectSet>,
+    /// Trait level key → its effect rows (summed, in table order) and their compiled set. Set only
+    /// through [`Self::insert_trait_level`], so rows and set always agree.
+    trait_level: BTreeMap<String, TraitLevelEffects>,
     /// Trait level key → agent attribute bonuses (`trait_attribute_effects`).
     pub trait_attribute: BTreeMap<String, Vec<(String, i32)>>,
     /// Ancillary → agent attribute bonuses (`ancillary_to_attribute_effects`).
@@ -231,7 +235,6 @@ compiled_sets! {
     building_local, insert_building_local, String;
     building_factionwide, insert_building_factionwide, String;
     government, insert_government, String;
-    trait_level, insert_trait_level, String;
     ancillary, insert_ancillary, String;
     ministerial, insert_ministerial, (String, i32);
     difficulty, insert_difficulty, (i32, bool);
@@ -281,13 +284,45 @@ impl EffectRules {
         self.tax.get(class)?.get(level).map(|(_, set)| set)
     }
 
+    /// Sets the effects of trait level `key` to `rows` (DB effect key, value) in table order, a
+    /// repeated effect summed into its first row as the exe builds the level's list (0x00F84220,
+    /// CONFIRMED 2026-10-11), and their set compiled through the mapping. The character sums and the
+    /// UI's trait rows both read these, so what is shown is what applies.
+    pub fn insert_trait_level<'a>(&mut self, key: String, rows: impl IntoIterator<Item = (&'a str, f32)>) {
+        let mut summed: Vec<(String, f32)> = Vec::new();
+        for (effect, value) in rows {
+            match summed.iter_mut().find(|(k, _)| k == effect) {
+                Some((_, v)) => *v += value,
+                None => summed.push((effect.to_owned(), value)),
+            }
+        }
+        let set = self.compile(summed.iter().map(|(e, v)| (e.as_str(), *v)));
+        self.trait_level.insert(key, (summed, set));
+    }
+
+    /// The summed effect rows of trait level `key`, in table order ([`Self::insert_trait_level`]).
+    pub fn trait_level_rows(&self, key: &str) -> &[(String, f32)] {
+        self.trait_level.get(key).map_or(&[], |(rows, _)| rows.as_slice())
+    }
+
+    /// The compiled set of trait level `key`.
+    pub fn trait_level_set(&self, key: &str) -> Option<&EffectSet> {
+        self.trait_level.get(key).map(|(_, set)| set)
+    }
+
     /// The level a trait is at with `points`: the highest level whose threshold ≤ max(points, 0), none
     /// below the first threshold (CONFIRMED, `0x008B5380`). Not modelled: when
     /// points fall, the level does not drop below the trait's no-going-back level once reached, and a
     /// trait whose points fall below 1 is removed (`0x008D21B0`); the model never lowers trait points yet.
     pub fn trait_level_key(&self, trait_key: &str, points: i32) -> Option<&str> {
+        self.trait_level_row(trait_key, points).map(|(_, _, k)| k.as_str())
+    }
+
+    /// The whole `character_trait_levels` row of [`Self::trait_level_key`]'s level (threshold, level
+    /// number, level key).
+    pub fn trait_level_row(&self, trait_key: &str, points: i32) -> Option<&TraitLevelRow> {
         let levels = self.trait_levels.get(trait_key)?;
-        levels.iter().rev().find(|(t, _, _)| points >= *t).map(|(_, _, k)| k.as_str())
+        levels.iter().rev().find(|(t, _, _)| points >= *t)
     }
 }
 
@@ -318,7 +353,7 @@ impl Effects {
             let mut s = EffectSet::default();
             for t in &d.traits {
                 if let Some(level) = rules.trait_level_key(&t.key, t.points)
-                    && let Some(set) = rules.trait_level.get(level)
+                    && let Some(set) = rules.trait_level_set(level)
                 {
                     s.merge(set);
                 }
@@ -568,7 +603,7 @@ fn character_set(rules: &EffectRules, d: Option<&super::details::CharacterDetail
     let Some(d) = d else { return s };
     for t in &d.traits {
         if let Some(level) = rules.trait_level_key(&t.key, t.points)
-            && let Some(set) = rules.trait_level.get(level)
+            && let Some(set) = rules.trait_level_set(level)
         {
             s.merge(set);
         }
@@ -623,7 +658,7 @@ fn faction_set(
             // The raw saved level of the type's main attribute (trait and ancillary attribute bonuses do not count here:
             // with them Spain's head of government would be one level too high in every vanilla save).
             let base = w.characters.get(&holder).zip(w.character_details.get(&holder)).and_then(|(c, d)| {
-                let main = super::agents::main_attribute(c.kind);
+                let main = super::agents::main_attribute(&model.rules, c.kind);
                 d.attributes.iter().find(|(k, _)| k == main).map(|(_, v)| *v)
             }).unwrap_or(0);
             let level = minister_level(rules, &f.government_key, &post.key, base, &ch);

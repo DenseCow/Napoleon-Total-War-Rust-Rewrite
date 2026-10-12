@@ -224,6 +224,16 @@ path has). Real-install check (`merged_raw_tables_equal_the_single_file_read`, n
 single-file read. `Vfs::table_files` now lists a `db\` folder from an index built at mount time
 instead of scanning the ~87k-path index per table.
 
+Typed tables (`db_record!`) whose loader joins columns declare it as `key = a + b` (`DbRecord::joined_key`,
+used only by `Table::merged`; `Table::get` stays on `a`). `units_to_groupings_military_permissions`
+(CONFIRMED, 2026-10-12): constructor 0x00e86820 calls loader 0x00dc11a0 with thunk 0x00de2650 (reader
+0x00dd2620: col0 at record+0, col1 at +0xC); the loader calls 0x004f1200 with this = record+0 and arg =
+record+0xC at 0x00dc1b21 and hashes the result (0x0045c1a0), so the key is col0+col1 (unit + grouping).
+Test: `mod_unit_grouping_rows_merge_on_unit_and_grouping` (ntw_data `mods`). The same loader serves
+technology_required_technology_junctions (§3.2 table). Three typed records are re-keyed this way: `uniforms`
+(`UniformRecord`, faction + unit), `building_culture_variants` (`BuildingCultureVariant`, building + culture) and
+`technology_required_technology_junctions` (`TechnologyRequirementRecord`, technology + required).
+
 ## 4. Text (.loc) (CONFIRMED)
 The exe opens only `text/localisation.loc` (0x013a85c0, opened at 0x00e20760) and `text/ui.loc`
 (0x01395cb8), by fixed path through the VFS: the §2 winner replaces the whole file; other `.loc` names

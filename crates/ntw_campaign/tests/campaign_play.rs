@@ -192,7 +192,7 @@ fn province_management_with_db_values() {
     m.apply(CampaignCommand::Recruit { region: paris, unit_key: unit.clone(), target: None }).unwrap();
     assert_eq!(m.world.factions[&france].treasury, t0 - cost);
     // Austrian-only units are refused.
-    let austrian = m.rules.unit_factions.iter().find(|(_, f)| f.iter().all(|f| f == "austria") && !f.is_empty()).map(|(u, _)| u.clone());
+    let austrian = m.rules.faction_units.get("austria").and_then(|set| set.iter().find(|u| !m.rules.faction_may_recruit("france", u))).cloned();
     if let Some(a) = austrian {
         assert!(matches!(m.apply(CampaignCommand::Recruit { region: paris, unit_key: a, target: None }), Err(CommandError::UnitNotAvailable(_))));
     }

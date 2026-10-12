@@ -7,8 +7,8 @@
 //! are `0x00B72DF0`:
 //! - every region of the faction in the theatre the commander stands in (`0x00B624C0` over the faction's
 //!   region list; `0x00B1BC90` finds the theatre by the commander's position) gives its queue's priced
-//!   recruitable list (the land queue's for an army, each port's for a navy; the list the settlement's
-//!   own panel shows, [`CampaignModel::recruitable_units`] priced and flagged as the queue command does);
+//!   recruitable list (the land queue's for an army, each port's for a navy: [`CampaignModel::recruitable_units`]
+//!   cut to the queue's kind, land units or ships, and priced and flagged as the queue command does);
 //! - the lists are merged by unit (`0x00B09DB0`, ordered by unit key, then flags, experience, cost and
 //!   queue), and each unit keeps one source (`0x00B113A0` → `0x00B41F60`): the first; when it is flagged,
 //!   the unit's flags are those of all its sources together; else the source with the shortest
@@ -148,7 +148,11 @@ impl CampaignModel {
             let capacity = [self.recruitment_points_with(&fx, r.id, false), self.recruitment_points_with(&fx, r.id, true)];
             for e in self.recruitable_units(r.id) {
                 let Some((unit_key, unit)) = self.rules.units.get_key_value(&e.unit_key) else { continue };
-                if naval && !unit.is_naval {
+                // The queue's list holds only units of its kind: the land list drops every ship (the region's
+                // list +0x1A8 is cut by `0x00B64E00`), the port's every land unit (`0x00B64DD0`); both are
+                // `0x00AE5110`, which removes the entries whose unit +0x9C (set for land units) differs from
+                // the kind.
+                if unit.is_naval != naval {
                     continue;
                 }
                 let cost = super::economy::recruitment_cost_in(&self.rules, &set, unit_key, unit);

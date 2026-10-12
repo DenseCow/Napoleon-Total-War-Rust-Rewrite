@@ -15,6 +15,11 @@ fn negotiation_rows_map_to_their_appliers() {
         deal_item_commands(&NegotiationItem::Payment { amount: 500, turns: 0 }, A, B),
         vec![CampaignCommand::Diplomacy { a: A, b: B, action: D::OneOffPayment(500) }]
     );
+    // A one-turn schedule is stored as turns 1 like the lump sum (0x009BF6FC), so it too runs once.
+    assert_eq!(
+        deal_item_commands(&NegotiationItem::Payment { amount: 200, turns: 1 }, A, B),
+        vec![CampaignCommand::Diplomacy { a: A, b: B, action: D::OneOffPayment(200) }]
+    );
     assert_eq!(
         deal_item_commands(&NegotiationItem::Payment { amount: 100, turns: 3 }, A, B),
         vec![CampaignCommand::Diplomacy { a: A, b: B, action: D::RegularPayment(100, 3) }]
@@ -862,7 +867,6 @@ fn a_generator_asking_for_a_tab_during_a_tab_change_gets_it_inside_that_change()
         ["clear", "init 1=1", "init 2=2", "gen 2", "clear", "init 2=1", "init 1=2", "gen 1", "end 1", "end 2"]
     );
     assert_eq!(hud.host.campaign_ui().unwrap().current_tab.get(), 1);
-    hud.host.hover(None);
     assert!(take_tab_calls(&hud).is_empty(), "nothing pending at the event's end");
     assert!(hud.errors().is_empty(), "{:?}", hud.errors());
 }
@@ -1069,20 +1073,23 @@ fn the_agent_action_calls_answer_the_model_and_queue_its_commands() {
     assert_eq!(duels.as_table().unwrap().raw_len(), 1);
     let row: Table = duels.as_table().unwrap().get(1).unwrap();
     assert_eq!(entity_of(&row.get::<Value>("Address").unwrap(), TAG_CHARACTER), Some(OWN_GENTLEMAN.0));
-    // The duel row's `Chance` is the number the model's duel is rolled at: the target picks the
-    // weapon worse for the challenger (`duel_weapon`), so the smaller of the two chances. Give
-    // the challenger pistols skill only: pistols would read 95, swords reads 50, the row 50.
-    hud._scripts.state_mut().model.world.character_details.entry(FOREIGN_GENTLEMAN).or_default().attributes =
-        vec![("duelling_pistols".into(), 6)];
-    let row: Table = call2("RequestDuelTargets", hud.char_addr(FOREIGN_GENTLEMAN), hud.char_addr(OWN_GENTLEMAN)).as_table().unwrap().get(1).unwrap();
-    {
-        use ntw_sim::campaign::agents::{Weapon, duel_chance};
-        let m = &hud._scripts.state().model;
-        let pistols = duel_chance(m, FOREIGN_GENTLEMAN, OWN_GENTLEMAN, Weapon::Pistols).unwrap();
-        let swords = duel_chance(m, FOREIGN_GENTLEMAN, OWN_GENTLEMAN, Weapon::Swords).unwrap();
-        assert!(pistols > swords, "the fixture must make the weapons differ: {pistols} vs {swords}");
-        assert_eq!(row.get::<i64>("Chance").unwrap(), i64::from(swords), "the weapon the target would pick");
-    }
+    // The duel row's `Chance` is the original picker's (`0x009C2340`): `0x00922940` with weapon 0xE,
+    // the target's better weapon by his own skills, pistols on a tie (`duel_quoted_weapon`).
+    // Challenger pistols 6, swords 2. Target swords 4 > pistols 1: swords, 2 / (2 + 4) = 33.
+    // Target 4 and 4: pistols, 6 / (6 + 4) = 60, though swords (33) would be lower for the challenger.
+    let set = |c: ntw_sim::campaign::CharacterId, pistols: i32, swords: i32| {
+        hud._scripts.state_mut().model.world.character_details.entry(c).or_default().attributes =
+            vec![("duelling_pistols".into(), pistols), ("duelling_swords".into(), swords)];
+    };
+    let duel_row = || -> i64 {
+        let row: Table = call2("RequestDuelTargets", hud.char_addr(FOREIGN_GENTLEMAN), hud.char_addr(OWN_GENTLEMAN)).as_table().unwrap().get(1).unwrap();
+        row.get::<i64>("Chance").unwrap()
+    };
+    set(FOREIGN_GENTLEMAN, 6, 2);
+    set(OWN_GENTLEMAN, 1, 4);
+    assert_eq!(duel_row(), 33, "the target's swords");
+    set(OWN_GENTLEMAN, 4, 4);
+    assert_eq!(duel_row(), 60, "pistols on a tie, not the challenger's worse weapon");
     // No building to sabotage in this settlement: an empty list.
     let sab = call2("RequestSabotageTargets", hud.char_addr(RAKE), hud.char_addr(FOREIGN_GENTLEMAN));
     assert_eq!(sab.as_table().unwrap().raw_len(), 0);
@@ -1746,6 +1753,16 @@ fn character_cards_show_the_main_attribute_and_its_rank() {
     let hud = test_hud_with(db);
     hud.add_character(RAKE, A, CharacterKind::Rake, Some(REGION), &[("can_assassinate", 2)]);
     hud.add_character(FOREIGN_GENTLEMAN, B, CharacterKind::Gentleman, Some(REGION), &[("can_duel", 1)]);
+    // The main attribute is the merged `agents` table's #8 (vanilla: gentleman -> research).
+    let set_main = |main: Option<&str>| {
+        let mut st = hud._scripts.state_mut();
+        let rules = std::sync::Arc::make_mut(&mut st.model.rules);
+        match main {
+            Some(m) => rules.agent_primary_attributes.insert("gentleman".into(), m.into()),
+            None => rules.agent_primary_attributes.remove("gentleman"),
+        };
+    };
+    set_main(Some("research"));
     let attributes = |target: CharacterId| -> Table {
         let lua = hud.host.lua();
         let f: Function = lua.load("return function(a, b) return CampaignUI.RequestAssassinationTargets(a, b) end").eval().unwrap();
@@ -1779,6 +1796,18 @@ fn character_cards_show_the_main_attribute_and_its_rank() {
     let a = attributes(FOREIGN_GENTLEMAN);
     assert_eq!(a.get::<String>("PrimaryAttributeName").unwrap(), "research");
     assert_eq!(a.get::<i64>("PrimaryLevel").unwrap(), 0);
+    // A mod's `agents` row decides it: a gentleman whose row names pistols shows the pistols picture.
+    set_main(Some("duelling_pistols"));
+    set_attributes(vec![("research".into(), 6), ("duelling_pistols".into(), 2)]);
+    let a = attributes(FOREIGN_GENTLEMAN);
+    assert_eq!(a.get::<String>("PrimaryAttributeName").unwrap(), "duelling_pistols");
+    assert_eq!(a.get::<String>("PrimaryAttributePath").unwrap(), "made/up/pistols.tga");
+    assert_eq!(a.get::<i64>("PrimaryLevel").unwrap(), 3);
+    // A row naming no main attribute: no primary (the exe fills the fields only for a valid index).
+    set_main(None);
+    let a = attributes(FOREIGN_GENTLEMAN);
+    assert_eq!(a.get::<String>("PrimaryAttributeName").unwrap(), "");
+    assert_eq!(a.get::<String>("PrimaryAttributePath").unwrap(), "");
     assert!(hud.errors().is_empty(), "{:?}", hud.errors());
 }
 
@@ -1945,4 +1974,23 @@ fn a_new_portrait_problem_is_logged_again() {
     draw();
     let log = portrait_lines();
     assert!(log.len() == 1 && log[0].contains("no portrait allocator"), "{log:?}");
+}
+
+/// The effect-text formatter (0x00F859A0): `%%`, `%n`, `%+n`, other `%` kept, and the number with
+/// the fewest decimals within 0.005 (0x00F85560), printed half away from zero (0x004F3140).
+#[test]
+fn effect_text_fills_in_the_value_as_the_exe_does() {
+    assert_eq!(effect_text("%+n to morale in battles", 4.0), "+4 to morale in battles");
+    assert_eq!(effect_text("%+n to Command in land battles.", -1.0), "-1 to Command in land battles.");
+    assert_eq!(effect_text("%+n %% to siege works points.", 10.0), "+10 % to siege works points.");
+    assert_eq!(effect_text("%n", 0.0), "0");
+    assert_eq!(effect_text("%+n", 0.0), "+0");
+    assert_eq!(effect_text("%n", 0.5), "0.5");
+    assert_eq!(effect_text("%n", -0.25), "-0.25");
+    assert_eq!(effect_text("%+n", 1.125), "+1.13");
+    assert_eq!(effect_text("%n", 2.004), "2");
+    assert_eq!(effect_text("%n", 2.5), "2.5");
+    assert_eq!(effect_text("Reduces administration costs", 3.0), "Reduces administration costs");
+    assert_eq!(effect_text("100%x and %", 1.0), "100%x and %");
+    assert_eq!(effect_text("%+x", 1.0), "%+x");
 }

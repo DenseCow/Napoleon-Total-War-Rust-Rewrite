@@ -117,26 +117,16 @@ end
 function methods:GetProperty(key, as_bool) return get_property(rawget(self, "__addr"), key, as_bool) end
 function methods:SetProperty(key, value) set_property(rawget(self, "__addr"), key, value) end
 
--- Shaders: ShaderTechniqueSet(name, ...) picks a component's pixel effect (e.g. "grey_over_time_t0",
--- "glow_pulse_t0") and ShaderVarsSet(a, b, c, d) / Component.ShaderVarsGet() its four variables
--- (CONFIRMED usage: template.RecruitmentCard.lua reads them back as start/end greyscale and
--- start/end time). INFERRED: the values are only stored; PROVISIONAL: our renderer draws no shader
--- effects yet.
+-- Shaders: UIComponent:ShaderTechniqueGet / ShaderVarsGet / ShaderTechniqueSet / ShaderVarsSet
+-- are host.rs methods on the current state's shader (a per-state property, CONFIRMED there), and
+-- Component.ShaderVarsGet() reads the running component's (CONFIRMED 0x01018280; usage:
+-- template.RecruitmentCard.lua reads them back as start/end greyscale and start/end time).
+-- TextShaderTechniqueSet(name) / TextShaderVarsSet(a, b, c, d) set the state's text shader
+-- (CONFIRMED calls in objectives_screens.lua; 0x01014FB0 writes state +0x12C, taking a name or a
+-- technique index and an optional all_states flag). PROVISIONAL: kept per component here, not
+-- per state, and never drawn or read back (our text is drawn without shaders; the per-state copy,
+-- its layout default and ShaderTechniqueSet's text_too copy come with drawn text shaders).
 __ntw_shader = {}
-function methods:ShaderTechniqueSet(name, ...)
-    local a = rawget(self, "__addr")
-    local s = __ntw_shader[a] or { vars = { 0, 0, 0, 0 } }
-    s.technique = name
-    __ntw_shader[a] = s
-end
-function methods:ShaderVarsSet(a1, a2, a3, a4)
-    local a = rawget(self, "__addr")
-    local s = __ntw_shader[a] or { vars = { 0, 0, 0, 0 } }
-    s.vars = { a1 or 0, a2 or 0, a3 or 0, a4 or 0 }
-    __ntw_shader[a] = s
-end
--- TextShaderTechniqueSet(name) / TextShaderVarsSet(a, b, c, d): the same for the component's text
--- (CONFIRMED calls in objectives_screens.lua); stored, not drawn (PROVISIONAL).
 function methods:TextShaderTechniqueSet(name, ...)
     local a = rawget(self, "__addr")
     local s = __ntw_shader[a] or { vars = { 0, 0, 0, 0 } }
@@ -148,11 +138,6 @@ function methods:TextShaderVarsSet(a1, a2, a3, a4)
     local s = __ntw_shader[a] or { vars = { 0, 0, 0, 0 } }
     s.text_vars = { a1 or 0, a2 or 0, a3 or 0, a4 or 0 }
     __ntw_shader[a] = s
-end
-function __ntw_shader_vars(a)
-    local s = __ntw_shader[a]
-    if s == nil then return 0, 0, 0, 0 end
-    return s.vars[1], s.vars[2], s.vars[3], s.vars[4]
 end
 -- Engine state the mouse UI does not use: drag-and-drop permission and input priorities
 -- (CONFIRMED method names; no visible effect in our renderer).
@@ -285,9 +270,12 @@ local function component_set_property(address, path, value)
     if target ~= nil then set_property(target, segs[#segs], value) end
 end
 local component_lua = {
-    ShaderVarsGet = function(address) return __ntw_shader_vars(address) end,
-    -- Component.RegisterTooltipObject(c): the component the engine shows as the tooltip (CONFIRMED
-    -- call in the campaign root's SetTooltipMethod; INFERRED: the engine then shows and hides it).
+    ShaderVarsGet = function(address) return ui.ShaderVarsGet(address) end,
+    -- Component.RegisterTooltipObject(c): the component the engine draws as the tooltip (CONFIRMED
+    -- 0x010188C0: it only stores it; the scripts show and hide it, template.tooltip.lua's SetText,
+    -- from the SetTooltip event UiScriptHost::pointer sends). The exe draws it after everything
+    -- else (0x01027D20) and forgets it when it is destroyed (0x0102F3F0); PROVISIONAL: ours only
+    -- keeps the address and draws it in tree order.
     RegisterTooltipObject = function(address, obj)
         if type(obj) == "table" then obj = rawget(obj, "__addr") end
         __ntw_tooltip_object = obj
@@ -418,30 +406,6 @@ function __ntw_call_if_defined(address, name, ...)
     if type(f) ~= "function" then return false end
     call_in(address, f, ...)
     return true
-end
-
--- Tooltips (INFERRED engine side; the root scripts' part CONFIRMED in the front end's and the
--- campaign's root.lua): when the pointer rests on a component with tooltip text, the engine passes
--- it to the root layout's SetTooltipText(component, text), which creates the "Tooltip" template
--- once (Component.CreateComponentFromTemplate), registers it (Component.RegisterTooltipObject),
--- places it (Utilities.PositionTooltip) and has it show the text (its SetText). The engine then
--- shows the registered object and hides it when the pointer leaves.
-function __ntw_tooltip(root, owner, text)
-    local tip = __ntw_tooltip_object
-    if text == nil or text == "" then
-        if tip ~= nil then __ui.SetVisible(tip, false) end
-        return
-    end
-    __ntw_call_if_defined(root, "SetTooltipText", owner, text)
-    tip = __ntw_tooltip_object
-    if tip == nil then return end
-    __ui.SetVisible(tip, true)
-    for k, v in pairs(package.loaded) do
-        if type(k) == "string" and string.lower(k) == "utilities" and type(v) == "table" and v.PositionTooltip then
-            call_in(root, v.PositionTooltip, tip)
-            break
-        end
-    end
 end
 
 -- Like __ntw_call_if_defined, and returns the function's first result.

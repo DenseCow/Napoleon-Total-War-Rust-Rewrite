@@ -157,6 +157,10 @@ pub(super) struct Inner {
     stolen_keys: RefCell<Vec<(NodeId, String)>>,
     /// The component that last called `StealInputFocus`.
     focus: RefCell<Option<NodeId>>,
+    /// The component under the pointer (the exe's hovered component): set by
+    /// [`UiScriptHost::pointer`] on `Enter`, cleared on `Leave`; destroying it dispatches its
+    /// `Leave` first (CONFIRMED `0x0102F3F0`, see [`UiScriptHost::pulse`]).
+    hovered: std::cell::Cell<Option<NodeId>>,
     /// Components to destroy at the end of the frame (`DestroyChildren`).
     pending_destroy: RefCell<Vec<NodeId>>,
     /// Destroyed components whose scripts stay callable until the end of the frame (INFERRED:
@@ -368,6 +372,7 @@ impl UiScriptHost {
             requests: RefCell::new(Vec::new()),
             stolen_keys: RefCell::new(Vec::new()),
             focus: RefCell::new(None),
+            hovered: std::cell::Cell::new(None),
             fonts: RefCell::new(std::collections::HashMap::new()),
             templates: RefCell::new(None),
             campaign_mode: std::cell::Cell::new(false),
@@ -471,7 +476,19 @@ impl UiScriptHost {
     /// elsewhere is `0x0102E340`'s other branch, transition only). A state with the +0x115 flag gets
     /// no press or click event, but its transition still applies (CONFIRMED, same handlers); that
     /// flag is our `disabled` (INFERRED mapping).
+    ///
+    /// After the transition, mouse on hands the component's tooltip text to the tooltip handler
+    /// and mouse off hands it an empty text (CONFIRMED: `0x0102EBC0` → `0x010363B0`, `0x0102EB40`
+    /// → `0x01035D20` with an empty string; see [`Self::notify_tooltip`]). The scripts show and
+    /// hide the tooltip from there. PROVISIONAL: shown at once (the hover delay is UNKNOWN).
+    /// A destroyed component gets nothing (its `Leave` already ran when it was destroyed).
     pub fn pointer(&self, id: NodeId, event: PointerEvent) {
+        if self.inner.world.borrow().get(id).is_none() {
+            return;
+        }
+        if matches!(event, PointerEvent::Enter) {
+            self.inner.hovered.set(Some(id));
+        }
         let disabled = self.inner.world.borrow().get(id).and_then(|n| n.current()).is_some_and(|s| s.disabled);
         let click = matches!(event, PointerEvent::LeftDown | PointerEvent::LeftUp);
         let name = match event {
@@ -511,6 +528,50 @@ impl UiScriptHost {
         if let Some(old) = left {
             state_transitioned(&self.lua, &self.inner, id, old);
         }
+        match event {
+            PointerEvent::Enter => {
+                let text = self.tooltip_text(id).unwrap_or_default();
+                self.notify_tooltip(id, &text);
+            }
+            PointerEvent::Leave => {
+                if self.inner.hovered.get() == Some(id) {
+                    self.inner.hovered.set(None);
+                }
+                self.notify_tooltip(id, "");
+            }
+            _ => {}
+        }
+    }
+
+    /// The tooltip handler hears that `id` shows `text` (empty: nothing): the `SetTooltip` layout
+    /// event of the nearest component, from `id` up, that binds one, else of the top root, with
+    /// `(component, text)` (CONFIRMED `0x01035D20`; the fallback is the root
+    /// `LoadUIManagerRootLayout` stores). The front end's, campaign's and battle's root layouts
+    /// bind it to their `SetTooltipText`, which creates the method's template and passes the text
+    /// on (template.tooltip.lua's `SetText` shows it, or hides it on an empty text).
+    fn notify_tooltip(&self, id: NodeId, text: &str) {
+        let handler = {
+            let w = self.inner.world.borrow();
+            let mut at = Some(id);
+            let mut found = None;
+            while let Some((i, n)) = at.and_then(|i| w.get(i).map(|n| (i, n))) {
+                if n.data.event("SetTooltip").is_some() {
+                    found = Some(i);
+                    break;
+                }
+                at = n.parent;
+            }
+            found.or_else(|| self.root())
+        };
+        let Some(handler) = handler else { return };
+        let args = match self.lua.create_string(text) {
+            Ok(s) => MultiValue::from_vec(vec![addr(id), Value::String(s)]),
+            Err(e) => {
+                log(&self.inner, format!("ERROR passing a tooltip text: {e}"));
+                return;
+            }
+        };
+        fire_event(&self.lua, &self.inner, handler, "SetTooltip", args);
     }
 
     /// Typed text: each character goes to the focused component's `CharacterInput(c)` when its
@@ -575,6 +636,15 @@ impl UiScriptHost {
         })
     }
 
+    /// Sets the UI clock the `Time` bindings read (whole ms, floored) without running a frame, and
+    /// returns it. The battle sets it before its card updates, as the exe stores the frame's time
+    /// (`0x005F5530`) before its UI update calls `UpdateCards` and then the root (`0x005E2AD0`).
+    pub fn set_time(&self, time_ms: f64) -> f64 {
+        let time_ms = time_ms.floor();
+        self.inner.ui_time_ms.set(time_ms);
+        time_ms
+    }
+
     /// One UI frame: fires `OnUpdatePulse(time_ms)` on every shown component that listens for it
     /// (bound in its layout or with `SetEventCallback`). The argument is the time in milliseconds
     /// (template.heading.lua slides a heading in over `(t - t0) / 750`). CONFIRMED in the exe: the
@@ -589,11 +659,10 @@ impl UiScriptHost {
     /// seconds, `t * 0.001`, and measures it against start times taken from `CampaignUI.Time()`):
     /// a second clock lets the two drift apart and delays every scripted transition by the gap.
     ///
-    /// The time is kept in whole milliseconds (floored here, for every host): the exe's root update
+    /// The time is kept in whole milliseconds (floored in [`Self::set_time`]): the exe's root update
     /// takes a u32, and the campaign frame truncates `(int)(Time() * 1000)`.
     pub fn pulse(&self, time_ms: f64) {
-        let time_ms = time_ms.floor();
-        self.inner.ui_time_ms.set(time_ms);
+        let time_ms = self.set_time(time_ms);
         // End of the previous frame: the destroyed components' scripts go, and what
         // DestroyChildren detached is destroyed.
         let dead = std::mem::take(&mut *self.inner.dead_envs.borrow_mut());
@@ -605,6 +674,13 @@ impl UiScriptHost {
         let doomed = std::mem::take(&mut *self.inner.pending_destroy.borrow_mut());
         for d in doomed {
             if self.inner.world.borrow().get(d).is_some_and(|n| n.parent.is_none()) {
+                // The component under the pointer hears its mouse off before it goes, so its
+                // tooltip is taken down (CONFIRMED: the destroy recursion `0x0102F3F0` dispatches
+                // `0x0102EB40` for the hovered component).
+                // (`d` is detached, so it is the top of every component it takes along.)
+                if let Some(h) = self.inner.hovered.get().filter(|&h| self.inner.world.borrow().root_of(h) == d) {
+                    self.pointer(h, PointerEvent::Leave);
+                }
                 let _ = destroy(&self.lua, &self.inner, d);
             }
         }
@@ -1641,6 +1717,19 @@ fn move_to(inner: &Inner, id: NodeId, x: f32, y: f32) {
     }
 }
 
+/// Applies `edit` to the shader of node `id`'s current state, or of every state when `all`
+/// (`ShaderTechniqueSet` / `ShaderVarsSet`); a redraw only if something changed.
+fn set_state_shader(inner: &Inner, id: NodeId, all: bool, mut edit: impl FnMut(&mut ntw_formats::ui_layout::UiState) -> bool) {
+    inner.world.borrow_mut().update_appearance(id, |n| {
+        if all {
+            n.data.states.iter_mut().fold(false, |changed, s| edit(s) | changed)
+        } else {
+            let i = n.state;
+            n.data.states.get_mut(i).is_some_and(edit)
+        }
+    });
+}
+
 /// `UIComponent` methods implemented in Rust; each takes the component's address first.
 fn component_methods(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
     let t = lua.create_table()?;
@@ -2242,6 +2331,71 @@ fn component_methods(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
         });
         ret(lua, ())
     });
+    // The pixel shader is a property of each state, not of the component (CONFIRMED): the layout
+    // gives every state a technique and four variables (`UiState::shader` / `shader_vars`), and
+    // the script methods read and write the *current* state's (state +0x118 technique,
+    // +0x11C..+0x128 x..w; `ShaderTechniqueGet` 0x01014E40 and `ShaderVarsGet` 0x01014BD0 read
+    // the current state, component +0xAC). `ShaderTechniqueSet(name, all_states, text_too)`
+    // (0x01014D50) and `ShaderVarsSet(x, y, z, w, all_states, text_too)` (0x01014C50) write the
+    // current state, or every state when `all_states` is true (0x010360F0 / 0x010361D0 loop over
+    // the state array +0xA8), and also the state's text shader unless `text_too` is false
+    // (0x01036B70 / 0x01036C60, state +0x12C..+0x13C; our text is drawn without shaders, so
+    // that copy is not kept). The variables are taken from the last number argument backwards
+    // into w, z, y, x; a nil skips its slot. BattleUnitCard caches each state's pair at
+    // creation (SetState, then these getters) and restores them after its burning / sinking
+    // effects; its Default / Selected / roll states differ only by shader (brighten_t0 -0.3 /
+    // +1.0 / normal_t0), which is how a selected card stands out.
+    method!("ShaderTechniqueGet", |inner, lua, id, args| ret(lua, inner.world.borrow().get(id).and_then(|n| n.current().map(|s| s.shader.clone()))));
+    method!("ShaderVarsGet", |inner, lua, id, args| {
+        let v = inner.world.borrow().get(id).and_then(|n| n.current().map(|s| s.shader_vars)).unwrap_or_default();
+        ret(lua, (v[0], v[1], v[2], v[3]))
+    });
+    method!("ShaderTechniqueSet", |inner, lua, id, args| {
+        let name: String = arg(lua, &args, 0)?;
+        let all = matches!(args.get(1), Some(Value::Boolean(true)));
+        set_state_shader(&inner, id, all, |s| set_changed(&mut s.shader, name.clone()));
+        ret(lua, ())
+    });
+    method!("ShaderVarsSet", |inner, lua, id, args| {
+        // Numbers first, then the optional booleans (all_states, text_too).
+        let n = args.iter().take_while(|v| !matches!(v, Value::Boolean(_))).count();
+        let all = matches!(args.get(n), Some(Value::Boolean(true)));
+        // Each value must be a Lua number: anything else (a numeric string too, no coercion) is
+        // the exe's script error "Trying to retrieve type number, found type <t>" (0x01055700
+        // checks lua_type == number, 0x01095090 raises it); the slots popped before it stay set.
+        let mut vars: [Option<f32>; 4] = [None; 4];
+        let mut wrong = None;
+        for (slot, v) in (0..4).rev().zip(args.iter().take(n).rev()) {
+            match v {
+                Value::Nil => {}
+                Value::Integer(i) => vars[slot] = Some(*i as f32),
+                Value::Number(x) => vars[slot] = Some(*x as f32),
+                other => {
+                    wrong = Some(other.type_name());
+                    break;
+                }
+            }
+        }
+        set_state_shader(&inner, id, all, |s| {
+            let mut changed = false;
+            for (dst, v) in s.shader_vars.iter_mut().zip(vars) {
+                if let Some(v) = v {
+                    changed |= set_changed(dst, v);
+                }
+            }
+            changed
+        });
+        match wrong {
+            Some(t) => Err(mlua::Error::runtime(format!("Trying to retrieve type number, found type {t}"))),
+            None => ret(lua, ()),
+        }
+    });
+    // __CurrentStateSelectable(): whether the current state is interactive and not disabled
+    // (state +0x114 / +0x115), the test the card manager's selection makes before it sets a
+    // card's "Selected" state (CONFIRMED 0x01019000; battle_prelude.lua __ntw_battle_update_card).
+    method!("__CurrentStateSelectable", |inner, lua, id, args| {
+        ret(lua, inner.world.borrow().get(id).and_then(|n| n.current()).is_some_and(|s| s.interactive && !s.disabled))
+    });
     // __ImageMetricsList() → { {x, y, w, h, colour argb}, ... } of the current state (for the
     // prelude's CurrentStateUI():ImageMetrics() objects).
     method!("__ImageMetricsList", |inner, lua, id, args| {
@@ -2328,10 +2482,11 @@ fn component_functions(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
     let i = inner.clone();
     t.set("Address", lua.create_function(move |_, a: Value| Ok(node_of(&a).map(addr).unwrap_or(Value::Nil)))?)?;
     let i2 = i.clone();
-    t.set("Root", lua.create_function(move |_, a: Value| {
-        let id = node_of(&a);
-        Ok(id.map(|id| addr(i2.world.borrow().root_of(id))))
-    })?)?;
+    // Root() → the UI manager's top root, whichever component runs (CONFIRMED: binding
+    // `0x01017FE0` returns the global `0x01765920` that `LoadUIManagerRootLayout` sets; it never
+    // walks the parents). A detached component still reaches the HUD root: a construction slot
+    // destroyed under the pointer switches the root's tooltip method back in its mouse off.
+    t.set("Root", lua.create_function(move |_, _a: Value| Ok((*i2.root.borrow()).map(addr)))?)?;
     // FindChildAddress(id) → the address of the running component itself when its id matches,
     // else the first match of a depth-first search of its children in order, or nil (CONFIRMED:
     // binding `0x01018020` → `0x01029960`). The `diplomacy_button` template's NotifySelected
@@ -2512,20 +2667,6 @@ impl UiScriptHost {
             if s.is_empty() { n.data.tooltip_text.clone() } else { s }
         });
         (!t.is_empty()).then_some(t)
-    }
-
-    /// The pointer now rests on `node` (or on nothing): the root layout's `SetTooltipText` shows
-    /// that component's tooltip text in the original "Tooltip" template, or the tooltip is hidden
-    /// (`__ntw_tooltip`, ui_prelude.lua). Used by the front end and the campaign HUD. The original
-    /// draws the registered tooltip object after everything else (`0x01027D20` skips it in the
-    /// tree and draws it last, CONFIRMED). PROVISIONAL: shown at once (the hover delay is
-    /// UNKNOWN). `campaign_select` hides the tooltip with it before it changes the selection.
-    pub fn hover(&self, node: Option<NodeId>) {
-        let Some(root) = self.root() else { return };
-        let text = node.and_then(|n| self.tooltip_text(n));
-        if let Err(e) = call_entry::<()>(&self.lua, &self.inner, root, "__ntw_tooltip", (addr(root), node.map(addr), text)) {
-            log(&self.inner, format!("ERROR showing a tooltip: {e}"));
-        }
     }
 }
 
@@ -2997,7 +3138,7 @@ pub(crate) mod tests {
         let count = host.layout_counter();
         let before = count();
         host.key("ESCAPE");
-        host.hover(Some(button));
+        host.pointer(button, PointerEvent::Enter);
         host.pointer(button, PointerEvent::LeftUp);
         host.lua.load("local b = ...; for i = 1, 3 do UIComponent(b):SetVisible(i % 2 == 1) end").into_function().unwrap().call::<()>(addr(button)).unwrap();
         assert_eq!(count() - before, 0, "no read, no layout");
@@ -3558,6 +3699,73 @@ pub(crate) mod tests {
         assert!(log.iter().any(|l| l == "UNKNOWN FrontEnd.SomethingNew"), "{log:?}");
         assert!(log.iter().any(|l| l == "UNKNOWN UIComponent:SomeMethod"), "{log:?}");
         assert!(log.iter().any(|l| l == "UNKNOWN Component.Whatever"), "{log:?}");
+    }
+
+    /// The shader methods work on the current state, or on every state when `all_states` is true
+    /// (0x01014D50 / 0x01014C50), and `ShaderVarsSet` fills its slots from the last number back.
+    #[test]
+    fn shader_methods_read_and_write_the_current_state_or_all_states() {
+        let script = "function OnLeftClickUp()\n\
+            local c = UIComponent(Address)\n\
+            c:ShaderTechniqueSet('brighten_t0')\n\
+            c:ShaderVarsSet(0.5, 0.25, 0.75, 0.125)\n\
+            t1 = c:ShaderTechniqueGet(); x1, y1, z1, w1 = c:ShaderVarsGet()\n\
+            c:SetState('down')\n\
+            t2 = c:ShaderTechniqueGet()\n\
+            c:ShaderTechniqueSet('red_pulse_t0', true)\n\
+            c:ShaderVarsSet(1, 2, 3, 4, true)\n\
+            cx, cy, cz, cw = Component.ShaderVarsGet()\n\
+            end";
+        let source = ScriptSource::empty().with_memory_file("ui/test/page", layout_bytes(script));
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
+        let root = host.load_root_layout("ui/test/page").unwrap();
+        let button = host.world().find(root, "button").unwrap();
+        host.fire(button, "OnMouseLClickUp");
+        let env = component_env(&host, button);
+        assert_eq!(env.get::<String>("t1").unwrap(), "brighten_t0");
+        let got: Vec<f32> = ["x1", "y1", "z1", "w1"].iter().map(|k| env.get::<f32>(*k).unwrap()).collect();
+        assert_eq!(got, [0.5, 0.25, 0.75, 0.125]);
+        assert_eq!(env.get::<String>("t2").unwrap(), "", "the other state keeps its own technique");
+        let running: Vec<f32> = ["cx", "cy", "cz", "cw"].iter().map(|k| env.get::<f32>(*k).unwrap()).collect();
+        assert_eq!(running, [1.0, 2.0, 3.0, 4.0], "Component.ShaderVarsGet reads the running component's state");
+        let log = host.take_log();
+        assert!(!log.iter().any(|l| l.starts_with("UNKNOWN") || l.starts_with("ERROR")), "{log:?}");
+        let world = host.world();
+        for s in &world.get(button).unwrap().data.states {
+            assert_eq!(s.shader, "red_pulse_t0", "{}", s.name);
+            assert_eq!(s.shader_vars, [1.0, 2.0, 3.0, 4.0], "{}", s.name);
+        }
+    }
+
+    /// `ShaderVarsSet` pops from the top of the Lua stack into w, z, y, x and stops when the stack
+    /// is empty (0x01014C50): one number writes only w, a nil skips its slot.
+    #[test]
+    fn shader_vars_set_fills_from_w_back() {
+        let script = "function OnLeftClickUp() local c = UIComponent(Address); c:ShaderVarsSet(1, 2, 3, 4); c:ShaderVarsSet(9); c:ShaderVarsSet(7, nil, 8) end";
+        let source = ScriptSource::empty().with_memory_file("ui/test/page", layout_bytes(script));
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
+        let root = host.load_root_layout("ui/test/page").unwrap();
+        let button = host.world().find(root, "button").unwrap();
+        host.fire(button, "OnMouseLClickUp");
+        let world = host.world();
+        let node = world.get(button).unwrap();
+        assert_eq!(node.current().unwrap().shader_vars, [1.0, 7.0, 3.0, 8.0]);
+        assert_eq!(node.data.states[1].shader_vars, [0.0; 4], "the other state is untouched");
+    }
+
+    /// A non-number `ShaderVarsSet` value, a numeric string too, is the exe's script error
+    /// (0x01055700 / 0x01095090, no coercion); the slots popped before it stay set.
+    #[test]
+    fn shader_vars_set_refuses_a_string_with_a_script_error() {
+        let script = "function OnLeftClickUp() local c = UIComponent(Address); c:ShaderVarsSet(1, 2, 3, 4); c:ShaderVarsSet('5', 6) end";
+        let source = ScriptSource::empty().with_memory_file("ui/test/page", layout_bytes(script));
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
+        let root = host.load_root_layout("ui/test/page").unwrap();
+        let button = host.world().find(root, "button").unwrap();
+        host.fire(button, "OnMouseLClickUp");
+        assert_eq!(host.world().get(button).unwrap().current().unwrap().shader_vars, [1.0, 2.0, 3.0, 6.0]);
+        let log = host.take_log();
+        assert!(log.iter().any(|l| l.starts_with("ERROR") && l.contains("found type string")), "{log:?}");
     }
 
     /// MoveTo on a divorced component lands it where asked however often it is called (a divorced

@@ -89,7 +89,9 @@ fn main() {
                 if let Some(r) = target.and_then(|t| host.world().get(t).map(|n| n.rect)) {
                     host.set_cursor_position(r.x + r.w / 2.0, r.y + r.h / 2.0);
                 }
-                host.hover(target);
+                if let Some(t) = target {
+                    host.pointer(t, PointerEvent::Enter);
+                }
             } else if let Some(t) = target {
                 for e in [PointerEvent::Enter, PointerEvent::LeftDown, PointerEvent::LeftUp, PointerEvent::Leave] {
                     host.pointer(t, e);

@@ -265,6 +265,31 @@ fn agent_attribute_icons_exist() {
     }
 }
 
+/// The trait rows' pictures and effect rows (the character and enlist panels' `Traits`): every
+/// `character_traits` category is a `trait_categories` row with a picture the install has, and every
+/// `trait_level_effects` effect is an `effects` row.
+#[test]
+#[ignore = "needs the game installed"]
+fn trait_categories_and_effects_resolve() {
+    let dir = data_dir();
+    let db = GameDatabase::from_install(&dir).unwrap();
+    let vfs = Vfs::open_install(&dir).unwrap();
+    let c = &db.campaign.characters;
+    let e = &db.campaign.effects;
+    assert_eq!(c.trait_categories.len(), 12);
+    assert_eq!(e.effects.len(), 412);
+    assert_eq!(e.effects.get("morale_bonus").map(|r| r.priority), Some(1));
+    assert_eq!(e.effects.get("prestige_military_generic").map(|r| r.priority), Some(0));
+    for t in &c.traits {
+        let icon = c.trait_categories.get(&t.category).and_then(|r| r.icon.as_deref()).unwrap_or_else(|| panic!("{} -> {}", t.key, t.category));
+        let rel = icon.strip_prefix("data/").unwrap_or(icon);
+        assert!(vfs.contains(rel) || dir.join(rel).is_file(), "{} -> {icon} is not in the install", t.key);
+    }
+    for r in &e.trait_level {
+        assert!(e.effects.get(&r.effect).is_some(), "{} -> {}", r.level_key, r.effect);
+    }
+}
+
 #[test]
 #[ignore]
 fn experience_bonus_table() {
@@ -358,4 +383,27 @@ fn climate_weather_pick_on_the_real_table() {
     assert_eq!(p.row.climate, climate);
     assert!(p.row.weight > 0);
     println!("{} → {} (flag {})", climate, p.row.weather, p.flag);
+}
+
+/// The unit picture rule (`UnitPictures`, 0x00EC2A40 / 0x00EC2DD0): a faction's uniform names the
+/// variant, a unit with none for that faction shows its `units` model, and every picture the rule can
+/// give names a file in the install.
+#[test]
+#[ignore]
+fn unit_pictures_follow_the_uniforms_and_name_real_files() {
+    let vfs = Vfs::open_install(data_dir()).unwrap();
+    let db = GameDatabase::from_vfs(&vfs).unwrap();
+    assert_eq!(db.unit_icon("Cav_Light_British_Light_Dragoons", "britain"), "data/ui/units/icons/Britain_Cav_Light_British_Light_Dragoons_icon");
+    assert_eq!(db.unit_icon("Cav_Light_Dutch_Light_Dragoons", "britain"), "data/ui/units/icons/United_Netherlands_Cav_Light_Light_Dragoons_icon");
+    assert_eq!(db.unit_icon("Trade_Ship_Dhow", "britain"), "data/ui/units/icons/dhow");
+    assert_eq!(db.unit_icon("no_such_unit", "britain"), "");
+    let exists = |p: &str| vfs.read(&format!("{}.tga", p.trim_start_matches("data/"))).is_ok();
+    let factions: Vec<&str> = db.factions.iter().map(|f| f.key.as_str()).collect();
+    for u in db.units.iter() {
+        for f in &factions {
+            let (icon, info) = (db.unit_icon(&u.key, f), db.unit_info_picture(&u.key, f));
+            assert!(exists(&icon), "{} / {f}: {icon}", u.key);
+            assert!(exists(&info), "{} / {f}: {info}", u.key);
+        }
+    }
 }

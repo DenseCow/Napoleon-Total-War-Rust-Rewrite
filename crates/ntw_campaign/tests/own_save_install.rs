@@ -131,6 +131,8 @@ fn a_played_campaign_round_trips_through_our_own_save() {
     let grid = |m: &CampaignModel| m.terrain.as_ref().map(|t| t.0.clone());
     assert!(grid(&back.loaded.model).is_some() && grid(&back.loaded.model) == grid(m), "the movement grid differs");
     assert!(saved_part(&back.loaded.model) == saved_part(m), "the loaded model differs from the saved one");
+    // The hash the game logs at an F5 save and at its load (IN_GAME_CHECKS_2026-10-10.md (h)).
+    assert_eq!(back.loaded.model.state_hash(), m.saved_state_hash(), "the loaded state hash differs from the saved one");
     for c in &new {
         assert_eq!(back.loaded.model.world.character_details[c].forename, m.world.character_details[c].forename, "{c:?} keeps his name");
     }

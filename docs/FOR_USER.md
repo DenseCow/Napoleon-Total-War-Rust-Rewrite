@@ -11,15 +11,7 @@ The morning report from night sessions, newest night first. Two lists per night:
 
 ### Needs you
 
-- **Cavalry gait** (now on main): check the hitch is gone; walk → run → walk with cavalry, also through a forest.
-  The small speed rise and drop on slow ground every ~11 ticks is the original's own (traced, 0x00581AE0).
-  `cargo run -p napoleon --release -- --battle --no-intro --ai off`
-- **Battle sea** (now on main): dark grey-green with small chop, compare with the original's Nile.
-  `cargo run -p napoleon --release -- --battle-key NHB_Nile --skip-deployment`
-  (foam: set `$env:NAPOLEON_SEA_FOAM='1'` first). No fog and a stand-in sky yet, so the far horizon won't match.
-- **Decision:** the original never field-promotes a captain to general (its check is hard-wired to "no", 0x00462CB0),
-  and no vanilla table grants that bonus, so vanilla plays the same either way. Ours promotes if a mod grants the bonus.
-  Keep that (mods can turn it on), or make it never promote like the exe? Until you say, it stays as it is.
+- **Infantry gait:** you saw a slight hitch on infantry still; a worker investigates next session (cavalry and sea passed, 2026-10-11).
 
 ### Done
 
@@ -70,7 +62,7 @@ The morning report from night sessions, newest night first. Two lists per night:
   Then Sat/Sun/Mon at 11 points each leaves ~6 for Tuesday before the Wed 00:00 reset. Start each day around 2 pm.
 
 ### Needs you
-- Moved to Claude's self-checks (2026-10-10): diplomacy negotiation, region details panel, own save + map display, and the new-campaign army cap (traced in Ghidra first). The regions/techs decision is settled (deal-region, deal-ai merged).
+- Moved to Claude's self-checks (2026-10-10): diplomacy negotiation, region details panel, own save + map display (still queued). The new-campaign army cap is traced and CONFIRMED (2026-10-12). The regions/techs decision is settled (deal-region, deal-ai merged).
 ### Done tonight
 
 - **Walking-horse sitting done (2026-10-10 afternoon):** the walk is slowed by the ground type (0.40 on that ground) and slope, not by turning; notes on `work/gait-blend2` `ab13a8ec`, port next.

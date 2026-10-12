@@ -620,7 +620,13 @@ at once, so a nil return was the error.
   - mode 1, when the owner is not the faction: `OwnerAttitude` (attitude total 0x00B0DB60),
     `OwnerStatus`, `OwnerRelationshipDetails`, `FactionAttitudeTowardsOwner`,
     `FactionStatusTowardsOwner`, `FactionRelationshipDetailsTowardsOwner` (key strings at
-    0x0136C92C..0x0136C99C). Direction of each attitude INFERRED from the names.
+    0x0136C92C..0x0136C99C). The direction is the opposite of the names (CONFIRMED
+    0x009F0B2A..0x009F0C44, 2026-10-12): `OwnerAttitude` is the total of the faction's record about
+    the owner (0x00B64C50 on [faction+0x528]), `FactionAttitudeTowardsOwner` the owner's record
+    about the faction. The relations panel's default map mode (`diplomacy_attitude_faction`,
+    "Other nation's attitudes towards selected nation", scroll.luac) reads
+    `FactionAttitudeTowardsOwner`; the original's France map then matches ours (IN_GAME_CHECKS (f)).
+    Test `relations_map_shows_the_owners_attitude_towards_the_selected_nation`.
 - Checked against the install: all 72 eur_napoleon regions find their `regions` DB colour in
   `europe_lookup.tga`'s palette, each at a different index (test
   `radar_map_gets_its_pictures_and_region_colours`).
@@ -798,7 +804,9 @@ OnDestroyed; close goes through `ParentPopup` LuaCall `ClosedByCloseButton`.
 Why the screen is still mostly unwired: the reads it needs are already in
 `crates/ntw_script/src/ui/campaign.rs` (RetrieveFactionListForDiplomacy,
 RetrieveDiplomacyDetails, RetrieveExistingTreaties, RetrieveDiplomaticOpinions,
-RetrieveRemainingMilitaryAccessTurns, StateGiftValues, MinisterPortraitPath) and the
+RetrieveRemainingMilitaryAccessTurns, StateGiftValues, MinisterPortraitPath; the opinions and
+the access turns give the first faction's record about the second first, CONFIRMED 0x009F2830 /
+0x009F4380 with the Lua argument reader 0x01055760 popping the last argument first, 2026-10-12) and the
 mechanisms (LuaCall, `Parent("id")`, sliders, ClipChildren, tooltips, text entry for the
 payment amounts) are proven by the settlement/front-end patterns. What is left is the
 panel-script side: the LuaCall bodies (SendOffer, AcceptOffer, OkDeclareWar, ... in
@@ -2769,3 +2777,34 @@ no Lua values. `RetrieveVisibleEnitityDetails` returns the table built under the
 Completeness (score / effective) before → after: `HandleRetrieveVisibleEntityDetailsLuaCall`
 0x009F4520 15 / 32 → 31 / 46; `HandleToggleLabelsLuaCall` new → 79 / 92;
 `InitPrefUiShowCampaignLabels` new → 70 / 70.
+
+## 12. Tooltips: the engine side (ui-fails, 2026-10-10)
+
+Failed check: a settlement building slot's tooltip frame stayed open after the pointer left. Cause:
+ours showed and hid tooltips from a host-side `hover()` that the slot's own script never heard, so
+the BuildingFrame's `OnMouseOff` (which switches the root back to the standard tooltip) did not run in
+order with the hide. The exe path, all CONFIRMED:
+
+- Mouse on (`0x0102EBC0`): the event and state transition, then `0x010363B0` takes the text of the
+  current state's tooltip, else the component's, and calls `0x01035D20(component, text)`.
+- Mouse off (`0x0102EB40`): the event and transition, then `0x01035D20(component, "")`.
+- `0x01035D20` fires the `SetTooltip` layout event of the nearest ancestor that binds one, else of
+  the top root (global `0x01765920` `g_pUIRootComponent`, set when the root layout loads, cleared by
+  the component destructor `0x01023AD0`). The front-end, campaign and
+  battle roots all bind `SetTooltip -> SetTooltipText`; the root scripts create, show and hide the
+  tooltip template themselves (`template.tooltip.lua` `SetText(comp, "")` hides it).
+- Destroying a component (`0x0102F3F0`) sends mouse off to the hovered component it takes along and
+  clears the registered tooltip object.
+- `RegisterTooltipObject` (`0x010188C0`) only stores the object; the exe draws it last (`0x01027D20`).
+- `Component.Root` (`0x01017FE0`) returns the global top root, never the component's own ancestor
+  (ours returned the detached subtree's top, so a destroyed slot's `OnMouseOff` missed the HUD root).
+- `CampaignUI.BuildingDetails(building_key, faction_key, region_key, slot_key)`: argument order from
+  the call at `template.BuildingFrame.lua:392` (ours had region and faction swapped).
+
+Ours: `UiScriptHost::pointer` sends `SetTooltip` on Enter/Leave through `notify_tooltip`; `pulse`
+sends Leave before destroying a subtree that holds the hovered node; the prelude's tooltip wrappers
+and `hover()` are gone. Tests: `a_building_slots_tooltip_goes_when_the_pointer_leaves`,
+`a_destroyed_component_under_the_pointer_takes_its_tooltip_down` (campaign_ui.rs).
+Not modelled yet: `SetTooltipText` (`0x01036E10`) re-notifies (empty, then the new text) while the
+component is hovered; the registered tooltip is drawn in tree order, not last (PROVISIONAL in
+`ui_prelude.lua`); the hover delay is UNKNOWN (shown at once).

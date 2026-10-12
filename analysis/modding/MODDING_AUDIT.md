@@ -253,7 +253,7 @@ and the UI script host (a required argument of `UiScriptHost::new`) carry that o
 | Cap | Original (where) | Ours | Key |
 |---|---|---|---|
 | Units per army / navy in the campaign | Globals `0x014576B0` / `0x014576B4`, returned by the army's / navy's capacity virtual `+0x48` (`0x008D3920` / `0x008D3930`); loader `0x00872550` reads `CAMPAIGN_MODEL` #23 / #24 (20 / 20 for files below v6) and, given a campaign setup (new game `0x008B8930`; a loaded game `0x008B8A60` gives none), overwrites them from setup `+0x48` / `+0x4C`; writer `0x008EBAB0` saves them. Shipped start positions hold **20 / 14** (the builder `0x008742C0` writes 20 / 14); every original save, turn-0 saves included, holds 20 / 20 (CONFIRMED) | `CampaignModel::force_caps` read / written at #23 / #24; `CampaignModel::max_units` is the one check (merge, garrison join, recruit join, boarding, AI merge). A new campaign sets them with `ForceCaps::new_campaign` | via `max_land_units` / `max_naval_units_<i>` |
-| New campaign's values | INFERRED: `0x00485B90` builds a setup part (`0x00878060`) from `return 20` (`0x00851550`) and `MaxUnitsFromUnitScaleFactor` (`0x00DACE60`) of preference `0x6D` = `campaign_unit_multiplier` (float, default 0.75, `0x004032F0`); not traced that this part is setup `+0x48` / `+0x4C` (at the user's multiplier 1 both readings give 20 / 20) | `ForceCaps::new_campaign(limits, multiplier)` (PROVISIONAL until the check below) | — |
+| New campaign's values | CONFIRMED (stack traced 2026-10-12): the front end's `StartCampaign` script call (`0x00478840`, registered at `0x0040288A`) builds the setup in `0x00488720`; `0x00878060` fills the setup's part at `+0x1C` with army = `return 20` (`0x00851550`) at part `+0x2C` and navy = `MaxUnitsFromUnitScaleFactor` (`0x00DACE60`) of preference `0x6D` = `campaign_unit_multiplier` (float, default 0.75, `0x004032F0`) at part `+0x30`, i.e. setup `+0x48` / `+0x4C`; `0x00872310` copies the setup (`0x00877DB0`) and the loader writes both to the caps (`0x00873BD2`..`0x00873BDD`). The command-line `campaign` start `0x00485B90` builds the same. Other builders of that part: the multiplayer lobby's campaign (`0x004AA900`, game type 3) passes a fixed 20 / 14 at the lobby's unit scale (`0x004A6540`); the start-position preprocessor `0x00A19350` and orphan code at `0x00482860` pass 20 / 14 at 1.0 (the shipped start positions' values) | `ForceCaps::new_campaign(limits, multiplier)`; the multiplayer campaign's fixed 20 / 14 is not modelled (no multiplayer campaign yet) | — |
 | Units per side in a custom battle | land: `return 20` (`0x00851550`); fleet: `MaxUnitsFromUnitScaleFactor` 6 / 8 / 10 / 20 by unit-size index (`0x0045CB50`; `0x00DAFBC0` = first step not below the scale) | `GameLimits::max_units(scale)` (same rule as the campaign) | `max_land_units`, `max_naval_units_<i>` |
 | Saved army setup validation | literal 20 for land and sea (`0x00479A79` / `0x00479EE7` in `ValidateArmySetup` `0x00479690`) | `GameLimits::max_setup_units` (largest allowed army / fleet; 20 / 20 by default) | — |
 | Custom battle funds | `0x0131A190` land {5000, 10000, 14000}, `0x0131A19C` sea {5000, 14000, 24000}, size clamped 0..2 (`0x004A2910`) | `GameLimits::custom_battle_funds` | `custom_battle_funds_land_<i>`, `custom_battle_funds_naval_<i>` |
@@ -268,11 +268,10 @@ The units-per-army preset/default `20` literals in `army_setup.rs` and the three
 `unit_size_option_thins_the_men` (a 1.5 step gives 240 men from 160), real-install `check_details`
 (20 / 14 in every shipped start position).
 
-**In-game check (PROVISIONAL `ForceCaps::new_campaign`):** in the original, set
-`campaign_unit_multiplier 0.75;` in `preferences.script.txt`, start a new Grand Campaign, save on
-turn 1, and dump `CAMPAIGN_ENV/CAMPAIGN_MODEL` #24 (`cargo run -p ntw_campaign --example esf_dump --
-tree <save> CAMPAIGN_ENV/CAMPAIGN_MODEL 1 1`): 10 confirms the rule, 20 means the navy cap does not
-follow the multiplier. Restore the preference afterwards.
+**`ForceCaps::new_campaign`: settled by the stack trace above (2026-10-12), no in-game check needed.**
+A turn-1 save at `campaign_unit_multiplier 0.75;` should hold 10 at `CAMPAIGN_ENV/CAMPAIGN_MODEL` #24
+(`cargo run -p ntw_campaign --example esf_dump -- tree <save> CAMPAIGN_ENV/CAMPAIGN_MODEL 1 1`) if
+anyone wants to see it.
 
 **§2.2 left:** `MAX_PARTICLES`, `MAX_SPECIES`, `MAX_TEXTURE_WIDTH`, `MAX_VOICES`, `MAX_STEPS` (render
 and engine limits of ours, no gameplay effect). §2.1 left: `MAX_QUEUE` 10, `road_level` 0..=3,

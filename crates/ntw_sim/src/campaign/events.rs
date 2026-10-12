@@ -65,10 +65,11 @@ pub enum CampaignEvent {
     /// Script event `CharacterPromoted` (CONFIRMED name; 30 handlers in `export_triggers.lua` give a
     /// new General or admiral his first traits). CONFIRMED trigger point: `0x00A1A300` fires it when
     /// a character's agent type is set through `0x00A1A2E0`, which only the field promotion of a
-    /// unit's commander does (the unit classes' slot 20, `0x008E1C20` land / `0x008E2260` naval:
+    /// unit's commander does (the unit vtables' slot +0x4C, `0x008E1C20` land / `0x008E2260` naval:
     /// the player's `PromoteUnits` / `CCQ_PROMOTE_COMMANDER`, the console `promote_unit_commander`
     /// and the AI's `CAI_BDI_PROMOTE_UNIT`). Hiring from the pool (`0x00A164C0`) does not fire
-    /// it. Model: [`CampaignCommand::PromoteUnit`](super::commands::CampaignCommand::PromoteUnit).
+    /// it. The original never fires it: the promotion's gate (slot +0x40) is `0x00462CB0`, constant false
+    /// (CHARACTERS_FIDELITY.md §12, field promotion gate); ours fires it only when a mod grants the promotion bonus. Model: [`CampaignCommand::PromoteUnit`](super::commands::CampaignCommand::PromoteUnit).
     CharacterPromoted {
         /// The character.
         character: CharacterId,
@@ -296,7 +297,9 @@ pub enum CampaignEvent {
         character: CharacterId,
         /// His new army.
         force: ForceId,
-        /// What it cost.
+        /// His hire cost at the place he joins (`hire_cost_at`). Only a human faction is charged it: the hire
+        /// `0x00A1B8F0` charges `0x00BAF500(cost, 2)` only when faction +0x6E0 is set, so an AI faction pays
+        /// nothing although the event still carries the cost (CONFIRMED, CAMPAIGN_FIDELITY.md §Treasury changes).
         cost: i32,
     },
     /// Project event: a human took a settlement by force; the occupy / loot / liberate choice waits in

@@ -169,9 +169,8 @@ fn pointer(
             ui.host.pointer(new, PointerEvent::Enter);
             ui_event_sound(&ui.host, new, crate::audio::UiEvent::MouseOn, &mut sounds);
         }
+        // (Enter and Leave also show and hide the tooltip: `UiScriptHost::pointer`.)
         ui.hovered = hit;
-        // The tooltip of the component under the pointer (root.lua's SetTooltipText).
-        ui.host.hover(hit);
     }
     if mouse.just_released(MouseButton::Right)
         && let Some(h) = hit
@@ -452,7 +451,6 @@ fn scripted_clicks(
                 }
                 info!("Test hover on {hover}: {:?}", ui.host.tooltip_text(n));
                 ui.host.pointer(n, PointerEvent::Enter);
-                ui.host.hover(Some(n));
             }
             None => warn!("--ui-click: no visible component {hover}"),
         }

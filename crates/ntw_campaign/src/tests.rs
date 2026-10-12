@@ -606,9 +606,18 @@ fn oddities_become_warnings() {
 
 /// The fixture plus the campaign rows that turn the fixture's barracks level into somewhere the
 /// fixture infantry can be raised, and the effect junction row that gives a building a recruitment
-/// cost effect. Everything stays MADE-UP — the shapes are the shipped ones.
+/// cost effect, and the player faction that may recruit it. Everything stays MADE-UP — the shapes are the shipped ones.
 fn db_with_a_barracks() -> GameDatabase {
     let mut db = GameDatabase::test_fixture();
+    // The tiny world's player faction, whose unit set (`0x00F74CB0`) holds the fixture infantry through a
+    // permission row.
+    let mut player = db.factions.rows()[0].clone();
+    player.key = "test_a".into();
+    db.factions = Table::from_rows(0, db.factions.rows().iter().cloned().chain([player]).collect());
+    db.campaign.unit_factions = Table::from_rows(
+        0,
+        vec![ntw_data::campaign::UnitFactionPermission { unit: UNIT.into(), faction: "test_a".into(), allowed: true }],
+    );
     db.campaign.building_units = Table::from_rows(
         0,
         vec![BuildingUnitAllowed { building: BARRACKS.into(), unit: UNIT.into(), ..Default::default() }],

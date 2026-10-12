@@ -1354,6 +1354,14 @@ deal-region, 2026-10-10, below "Region value").
   `0x00A63FD0`), the CAI `+0x1C0` list import, `+0x938` from original saves, the peace record,
   multi-theatre maps and the base-value refresh (`+0xE8`). The counter-offer `0x00CC58C0` stays its
   own item.
+- **Ghidra V5 write-up (polish11, 2026-10-12, applied).** Plates, prototypes and EOL comments on the 14
+  deal functions: `0x00C114B0`, `0x00C1F210`, `0x00C13360`, `0x00C42FB0`, `0x00CB21C0`, `0x00CE5750`,
+  `0x00CEFA40`, `0x00D018B0`, `0x00CCB150`, `0x00933690`, `0x008A9920`, `0x008BB010`, `0x00C0DF90` and
+  `0x00518210`.
+  - Structs: `CampaignNegotiation` (0x2BC), `DealEvaluation` (0x18) and `TechnologyDealRecord` (0x34). Each
+    covers the fields read.
+  - Completeness: minimum 42 and average 75 (effective: minimum 63, average 84).
+  - The low scores come from the shared engine helpers and the unsigned-to-double fix-up temporaries.
 
 ## 5. What the campaign scripts tell the AI (CONFIRMED calls, `analysis/worker3/lua_api.txt`)
 - `force_diplomacy(a, b, option, offer, accept)` (714 calls): options `war`, `peace`, `alliance`,
