@@ -878,7 +878,7 @@ pub(crate) fn read_construction(slot: &EsfRecord, index: SlotRef, out: &mut Vec<
 /// {LAND|NAVAL}_UNIT_RECRUITMENT_ITEM/RECRUITMENT_ITEM` (saves only; startpos queues are empty).
 /// Inner `RECRUITMENT_ITEM` v2: #0 i32 the item's id (`RecruitmentItemId`), #3 u32 turns
 /// remaining (INFERRED: values 1..6, counting down),
-/// #4 u32 cost (INFERRED: repeated at #7), #6 utf16 unit key (CONFIRMED). An item whose #0 is not
+/// #4 u32 cost (INFERRED: repeated at #7), #5 bool target still alive (CONFIRMED, item +0x24), #6 utf16 unit key (CONFIRMED). An item whose #0 is not
 /// an integer (i32, or u32 taken bit for bit) or is 0 is kept with id 0 and a warning; the loader
 /// gives it a new id ([`assign_missing_recruitment_ids`]). An item without turns or unit key is
 /// skipped with a warning (UNKNOWN shape). A manager without its array (malformed: every manager of
@@ -918,6 +918,9 @@ pub(crate) fn read_recruitment(
             // `0x00B5C900`), saved as an object id like #1's region (0 = none; INFERRED from that id rule, SAVE_COMPAT.md §3). An id that names no loaded
             // character is dropped with a warning ([`drop_dangling_recruitment_targets`]).
             target: inner.get_i32(2).or_else(|| inner.get_u32(2).map(|v| v as i32)).filter(|&v| v != 0).map(CharacterId),
+            // #5: the item's +0x24, 0 once its commander was destroyed (CONFIRMED, `RecruitmentItem::target_lost`;
+            // read by `LoadRecruitmentItemFromEsf` `0x00AF3E66`). Not a bool: kept as the constructor's 1.
+            target_lost: matches!(inner.children.get(5), Some(EsfNode::Bool(false))),
         });
         sources.push(RecruitmentSource { manager: which, index });
     }
@@ -1107,7 +1110,7 @@ mod recruitment_tests {
     #[test]
     fn a_repeated_recruitment_id_is_cleared_with_a_warning() {
         let q = |ids: &[i32]| -> Vec<RecruitmentItem> {
-            ids.iter().map(|&id| RecruitmentItem { id: RecruitmentItemId(id), unit_key: format!("u{id}"), turns_remaining: 1, cost: 0, target: None }).collect()
+            ids.iter().map(|&id| RecruitmentItem { id: RecruitmentItemId(id), unit_key: format!("u{id}"), turns_remaining: 1, cost: 0, target: None, target_lost: false }).collect()
         };
         let db = GameDatabase::test_fixture();
         let mut check = Checker { db: &db, warnings: Vec::new() };

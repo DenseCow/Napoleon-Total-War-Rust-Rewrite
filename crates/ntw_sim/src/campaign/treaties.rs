@@ -499,7 +499,10 @@ impl CampaignModel {
     /// length of 1 turn, CONFIRMED static trace 2026-10-10). The payer is charged (`0x00BAF500(amount, 3)`) and
     /// the payee credited (`0x00BB3810(amount, 1)`), with no money test and no attitude change; a negative amount
     /// runs the other way, which [`super::treasury::pay`] / [`super::treasury::credit`] give as they stand. When
-    /// both sides are human the exe also calls `0x008F56C0` on each with ±amount (UNKNOWN, not modelled).
+    /// both sides are human the exe also adds ±amount to the faction's multiplayer results counter
+    /// (`0x008F56C0`, FACTION +0x954), which only the results report of a multiplayer campaign reads
+    /// (getter `0x008D9DB0`, CONFIRMED 2026-10-12): no gameplay effect, so it is not modelled here; the save
+    /// keeps the field as loaded.
     pub fn one_off_payment(&mut self, payer: FactionId, payee: FactionId, amount: i32) -> Result<Vec<CampaignEvent>, CommandError> {
         self.check_diplomacy_pair(payer, payee)?;
         if let Some(f) = self.world.factions.get_mut(&payer) {
@@ -687,6 +690,43 @@ impl CampaignModel {
         let gdp = |f: FactionId| super::economy::faction_gdp(self, f);
         let wealth = ((gdp(owner) + (all_owner - all_target) - gdp(target)) / 2500).clamp(-10, 10) as i32;
         (regions, wealth)
+    }
+}
+
+/// The original's cap on a demanded payment (the seam [`super::seams::DEMANDED_PAYMENT`]): `payer` is the
+/// side asked to pay `amount` for `turns` turns (0 for the lump sum). A one-off payment (turns 0 or 1)
+/// asks at most what the payer holds; an amount at or below that, or a regular payment (turns 2 and up),
+/// stays as it is. An unknown payer keeps the amount (the command then refuses the pair).
+///
+/// CONFIRMED (static trace, CAMPAIGN_FIDELITY.md §Diplomacy "Payment cap"): the payment item's deal copy
+/// (vtable `0x01381EDC` slot +0x44, `0x00C4AB20`) runs when the deal is proposed (`0x00C49AA0`, from the
+/// propose commands and the AI's evaluation), before anything applies. For turns 1 and a demand (the
+/// pair's amount negative) it reads the payer's treasury (`0x00BCAFE0`) and, when the demand is above
+/// it (signed), sets the demand to the treasury (`0x00C4AB4E`–`0x00C4AB82`).
+///
+/// ORIGINAL BUG: a negative treasury turns the demand around: the stored amount becomes −treasury,
+/// positive, so the demanding side pays the indebted one (`0x00C4AB7E`–`0x00C4AB82`). The panel's own
+/// check (`diplomacy_panel.luac` `CheckMaxPayment` / `SetMaxPayment`, against
+/// `MaxOppositionPaymentAllowed`) never accepts a demand above the payer's treasury, so the intent is
+/// "never more than the payer has": ours caps at 0, and a payment of 0 moves nothing.
+pub fn demanded_payment(model: &CampaignModel, payer: FactionId, amount: i32, turns: u32) -> i32 {
+    if turns > 1 {
+        return amount;
+    }
+    match model.world.factions.get(&payer) {
+        Some(f) => amount.min(f.treasury.max(0)),
+        None => amount,
+    }
+}
+
+impl CampaignModel {
+    /// What `payer` is asked to pay when a deal demands `amount` for `turns` turns (0 for the lump sum):
+    /// the rule seam [`super::seams::DEMANDED_PAYMENT`] (the original's is [`demanded_payment`]). The
+    /// deal applies it once, in `accept_deal`, against the treasuries before the deal. The exe caps it at
+    /// proposal (0x00C4AB45-0x00C4AB82; its row text shows the capped amount, 0x00C4AB85); the cap moves
+    /// to Propose once Propose builds payment rows.
+    pub fn demanded_payment(&self, payer: FactionId, amount: i32, turns: u32) -> i32 {
+        self.rules.seams.demanded_payment.rule()(self, payer, amount, turns)
     }
 }
 

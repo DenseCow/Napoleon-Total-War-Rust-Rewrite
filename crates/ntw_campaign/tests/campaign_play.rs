@@ -86,6 +86,13 @@ fn turn_loop_from_the_startpos() {
     // DB values reached the rules.
     assert_eq!(m.rules.var("road_level_0_action_point_cost", 0.0), 0.67);
     assert_eq!(m.rules.agent_action_points.get("General"), Some(&26));
+    // agents #11 / #10 (`0x009D1E00`): the General 4, the admiral 3, the rake held to 12.
+    assert_eq!(m.rules.agent_caps.get("General"), Some(&(4, 0)));
+    assert_eq!(m.rules.agent_caps.get("admiral"), Some(&(3, 0)));
+    assert_eq!(m.rules.agent_caps.get("rake"), Some(&(0, 12)));
+    // France starts with the cap bonus: 6 Generals and 4 admirals at most.
+    assert_eq!(m.commanders_max(france, ntw_sim::campaign::pool::PoolKind::General), 6);
+    assert_eq!(m.commanders_max(france, ntw_sim::campaign::pool::PoolKind::Admiral), 4);
     assert_eq!(m.rules.tax_rate("tax_normal"), 15);
 
     let income = economy::faction_income(&m, france);

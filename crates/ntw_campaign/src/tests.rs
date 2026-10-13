@@ -791,7 +791,10 @@ fn recruitment_items_keep_their_own_records_over_a_save_and_load() {
         turns_remaining: 3,
         cost: 77,
         target: Some(general),
+        target_lost: false,
     });
+    // #5 (+0x24): unit_c's commander is gone (its +0x18 was cleared too).
+    m.world.regions.get_mut(&RegionId(77)).unwrap().recruitment_queue[2].target_lost = true;
     let written = crate::save::write_save(&source, &m, "test_faction", 1).unwrap();
     let back = read(&written.to_bytes().unwrap(), &db).unwrap();
     assert!(
@@ -802,7 +805,8 @@ fn recruitment_items_keep_their_own_records_over_a_save_and_load() {
         "{:?}",
         back.warnings
     );
-    assert_eq!(queue(&back.model), queue(&m), "ids, units, turns, costs and targets come back");
+    assert_eq!(queue(&back.model), queue(&m), "ids, units, turns, costs, targets and lost targets come back");
+    assert!(queue(&back.model)[2].target_lost && !queue(&back.model)[3].target_lost);
     // Every recruitment record of a tree (ports first, then the region's own), as (id, unit, mark).
     let records = |f: &EsfFile| -> Vec<(EsfNode, String, Option<u32>)> {
         let mut out = Vec::new();
@@ -924,4 +928,26 @@ fn the_loader_fills_the_restricted_building_levels() {
     // A file without the record restricts nothing.
     let plain = read(&tiny(STARTPOS_ROOT, tiny_world()), &db).unwrap();
     assert!(plain.model.world.restricted_buildings.is_empty() && plain.restricted_units.is_empty());
+}
+
+/// The capital is the first of the two i32 values right before `EXPOSED_CHARACTERS`, with or
+/// without the optional `FORT_UPGRADE_MANAGER` block before them (the faction loader `0x0087A190`
+/// reads it at `0x0087B20C` either way).
+#[test]
+fn faction_capital_read_with_or_without_fort_upgrade_manager() {
+    let faction = |fum: bool| {
+        let mut children = vec![EsfNode::I32(7), s("france"), s("France"), EsfNode::Bool(true)];
+        if fum {
+            children.push(rec("FORT_UPGRADE_MANAGER", 0, vec![EsfNode::I32(99)]));
+        }
+        children.extend([EsfNode::I32(12), EsfNode::I32(13), arr("EXPOSED_CHARACTERS", vec![])]);
+        let mut r = EsfRecord::new("FACTION", 18);
+        r.children = children;
+        r
+    };
+    for fum in [false, true] {
+        let (d, _) = details::faction_details(&faction(fum));
+        assert_eq!(d.capital, Some(RegionId(12)), "FORT_UPGRADE_MANAGER present: {fum}");
+        assert_eq!(d.capital_2, Some(RegionId(13)), "FORT_UPGRADE_MANAGER present: {fum}");
+    }
 }

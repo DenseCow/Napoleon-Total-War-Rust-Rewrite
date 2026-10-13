@@ -32,7 +32,7 @@ pub(super) struct NegotiationState {
     /// The "Offers" rows.
     pub(super) offers: Vec<DealRow>,
     /// The "Demands" rows.
-    demands: Vec<DealRow>,
+    pub(super) demands: Vec<DealRow>,
     /// The script context that constructed the object (+0xB0, set from 0x01058750 by
     /// `InitializeUIDiplomacyNegotiationListeners` 0x0099AF70): the component whose globals the
     /// engine's events are LuaCalled in. `None` once `End()` unregistered the listeners.
@@ -530,7 +530,9 @@ pub(super) fn negotiation_action_name(item: &NegotiationItem) -> &'static str {
 ///   - **payments** → `CampaignCommand::Diplomacy` again: the lump sum and a schedule shorter than 2 turns
 ///     as `OneOffPayment(amount)` (`Propose` stores turns 1 for both, `0x009BF6FC`; `treaties::one_off_payment`,
 ///     `0x00C18A70`, CONFIRMED); a longer schedule as `RegularPayment(amount, turns)` (INFERRED, see
-///     [`NegotiationItem::Payment`]).
+///     [`NegotiationItem::Payment`]). A demanded payment first goes through the model's cap
+///     (`CampaignModel::demanded_payment`, the rule seam; [`demanded_item`]), read from the treasuries
+///     before any row of the deal applies, as the exe caps it when the deal is proposed (`0x00C4AB20`).
 ///
 /// INFERRED (this file): `ProposeDeal` (CCQ_DIPLOMACY_PROPOSE_DEAL → `0x00C49BE0`, the AI's
 /// evaluation, which the model lacks) and `AcceptOffer` (CCQ_DIPLOMACY_ACCEPT_DEAL → 0x00C114B0)
@@ -541,17 +543,29 @@ fn accept_deal(ui: &CampaignUi) {
     let mut state = ui.negotiation.borrow_mut();
     let state = &mut *state;
     state.status = NegotiationStatus::Accepted;
+    let model = ui.model();
     // An offer is the proposer acting on the recipient; a demand is the other way round.
-    for (rows, actor, target) in [(&mut state.offers, proposer, recipient), (&mut state.demands, recipient, proposer)] {
+    for (rows, actor, target, demanded) in [(&mut state.offers, proposer, recipient, false), (&mut state.demands, recipient, proposer, true)] {
         for row in rows.iter_mut().filter(|r| !r.applied) {
             row.applied = true;
-            for cmd in deal_item_commands(&row.item, actor, target) {
+            let item = if demanded { demanded_item(&model, &row.item, actor) } else { row.item.clone() };
+            for cmd in deal_item_commands(&item, actor, target) {
                 ui.push(CampaignRequest::Command(cmd));
             }
         }
     }
     // The records the model holds (regions, technologies).
     ui.push(CampaignRequest::Command(CampaignCommand::AcceptDeal));
+}
+
+/// A demanded row as the deal applies it: a payment `payer` is asked for becomes what the model's
+/// rule lets it ask (`CampaignModel::demanded_payment`, the seam `diplomacy.demanded_payment`: a
+/// one-off demand at most the payer's treasury, `0x00C4AB20`); any other row is unchanged.
+fn demanded_item(model: &CampaignModel, item: &NegotiationItem, payer: FactionId) -> NegotiationItem {
+    match *item {
+        NegotiationItem::Payment { amount, turns } => NegotiationItem::Payment { amount: model.demanded_payment(payer, amount, turns), turns },
+        ref other => other.clone(),
+    }
 }
 
 /// The `CampaignCommand`s one pending deal row becomes: `actor` acts on `target`. Split out of

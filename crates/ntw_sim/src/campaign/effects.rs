@@ -38,7 +38,8 @@ pub enum BonusKind {
     UnitClass,
     /// Qualified by a population class (`_population_class_junction`; exe type 6).
     PopClass,
-    /// Qualified by an agent type (`_agent_junction`; exe type 0).
+    /// Qualified by an agent type (`_agent_junction`; exe type 0) under a bonus name outside the
+    /// exe's agent table: the names in it compile to `Saved(0)` ([`agent_bonus_key`]).
     Agent,
     /// Qualified by a religion (`_religion_junction`; exe type 7): `conversion` per religion.
     Religion,
@@ -118,6 +119,18 @@ impl EffectSet {
 /// The engine bonus names by id (the table at `0x0145B4A8`, CONFIRMED; ids 0..183). Saved basic
 /// entries (type 1) carry the id.
 pub const BONUS_NAMES: [&str; 184] = ["agent_research_slots", "building_prestige", "commodity_export_vol", "education_happy_mod", "gdp_farm", "gdp_industry", "gdp_mine", "gdp_mod_all", "gdp_port_trade", "happiness_active_lower_gov_type", "happiness_active_lower_tax", "happiness_active_upper_gov_type", "happiness_active_upper_tax", "happiness_character_trait_or_ancillary", "happiness_events_factional", "happiness_events_regional", "happiness_ministerial_position", "happiness_mod_religious_unrest", "happy_war_results_home_region", "maxpop_modifier", "mod_research_rate", "naval_recruitment_points", "policing_cost_mod", "pop_growth_farm", "pop_growth_government", "pop_growth_port_fishing", "pop_growth_tax_modifier", "pop_growth_tax_modifier_multiplier", "pop_growth_tech", "pop_maxpop_modifier_tech_mod", "recruitment_mod_cost_land_all", "recruitment_mod_cost_naval_all", "recruitment_points", "recruitment_points_home_region", "region_turns_to_surrender", "repression_gov_building", "repression_gov_type", "repression_ministers", "repression_policing_cap", "research_points", "research_points_military", "research_points_industry", "research_points_enlightenment", "research_rate_mod", "research_rate_mod_army_tech", "research_rate_mod_navy_tech", "tax_bonus_building", "tax_bonus_character", "tax_cap", "tech_prestige", "trade_route_all_mod_growth_rate", "tw_growth", "tw_growth_education", "tw_growth_government", "tw_growth_home_region", "tw_growth_industry", "tw_growth_mod_all", "tw_growth_port", "tw_growth_roads", "tw_growth_tax_modifier", "tw_growth_tax_modifier_fixed", "tw_growth_technologies", "upkeep_cost_mod_land_all", "upkeep_cost_mod_naval_all", "promote_general_in_field", "promote_admiral_at_sea", "trade_route_cap_land", "trade_route_cap_sea", "enable_gov_republic", "enable_gov_constitutional_monarchy", "enable_top_gallants", "charge_bonus_for_bayonet_units", "mod_ship_movement_campaign", "mod_ship_movement_campaign_top_gallants", "mod_ship_movement_battle", "mod_ship_movement_battle_top_gallants", "mod_reload_land", "mod_misfire_land", "mod_reload_naval", "mod_misfire_naval", "campaign_map_stealth", "prestige_faction_leader", "diplomacy_bonus_faction_leader", "sea_command_attack", "sea_command_defence", "land_command_attack", "land_command_defence", "land_command_ambush", "land_command_siege_attack", "land_command_siege_defence", "land_command_america", "land_command_europe", "land_command_india", "management_army", "management_navy", "management_finance", "management_justice", "subterfuge_spying", "subterfuge_assassination", "subterfuge_counterspying", "security_versus_assassination", "morale", "hates_ottomans", "zeal_america", "zeal_europe", "zeal_india", "diplomatic_negotiation", "subterfuge_sabotage", "morale_land", "morale_naval", "tax_bonus_minister", "command_land_artillery", "command_land_cavalry", "command_land_infantry", "command_naval_frigates", "command_naval_ships_of_the_line", "character_death_chance_turn_end", "hates_europeans", "prestige_enlightenment_generic", "prestige_military_generic", "character_recruitment_general_refill_1", "character_recruitment_general_refill_2", "character_recruitment_admiral_refill_1", "character_recruitment_admiral_refill_2", "tax_bonus_technology", "admin_cost_mod", "diplomacy_bonus_enlightenment", "replenishment_percentage_bonus", "general_admiral_action_point_bonus", "gentleman_happiness_bonus", "tw_growth_factionwide", "reinforcement_distance", "line_of_sight_extension", "observation_balloon", "attrition_increase", "looting_increase", "ship_repair_increase", "mod_land_movement_campaign", "ai_region_resistance_modifier", "attrition_difficulty_addition", "guerrilla_reward_units_count_mod", "guerrilla_experience_mod", "guerrilla_replenishment_percentage_bonus", "guerrilla_cost_mod", "guerrilla_upkeep_mod", "auxiliary_experience_mod", "auxiliary_replenishment_percentage_bonus", "auxiliary_cost_mod", "auxiliary_upkeep_mod", "trade_node_supply_mod", "hates_british", "hates_french", "mod_cost", "mod_gdp", "mod_tw_growth", "mod_commodity_production", "production", "demand", "happiness_character", "happiness_clamour_for_reform", "happiness_culture", "happiness_entertainment", "happiness_government", "happiness_industry", "happiness_tax", "happiness", "damage", "reload_mod", "enable", "happiness", "conversion", "production", "enable", "cost_mod", "upkeep_mod", "melee_attack_mod", "movement_mod", "training_mod", "land_command", "sea_command", "cost_mod", "upkeep_mod", "melee_attack_mod", "experience_mod"];
+
+/// The agent bonus names by id (exe bonus type 0, the qualifier being the agent key): the table at
+/// `0x0145B498` (CONFIRMED, read by `0x00E222B0`). Saved type-0 entries carry the id.
+pub const AGENT_BONUS_NAMES: [&str; 3] = ["spawn_rate", "spawn_rate_mod", "cap"];
+
+/// The key of an agent-keyed bonus (`effect_bonus_value_agent_junction`): exe type 0 under the id of
+/// [`AGENT_BONUS_NAMES`], the same key [`SavedBonus::key`] gives a saved entry, so DB and saved
+/// sources add up; `None` for a name outside the table.
+pub fn agent_bonus_key(bonus: &str, agent: &str) -> Option<EffectKey> {
+    let id = AGENT_BONUS_NAMES.iter().position(|b| *b == bonus)?;
+    Some(EffectKey { kind: BonusKind::Saved(0), bonus: id.to_string(), qualifier: agent.to_string() })
+}
 
 /// One saved effect entry (`CAMPAIGN_BONUS_VALUE`: u32 type, i32 bonus id, f32 value, qualifier).
 #[derive(Debug, Clone, Default)]
@@ -682,6 +695,16 @@ mod tests {
         ]));
         r.trait_levels.insert("T".into(), vec![(4, 1, "T_1".into()), (8, 2, "T_2".into()), (16, 3, "T_3".into())]);
         r
+    }
+
+    /// A DB agent bonus and a saved type-0 entry of the same name and agent share one key
+    /// (`0x0145B498`), so they add up; a name outside the table has none.
+    #[test]
+    fn an_agent_bonus_from_the_db_adds_to_the_saved_one() {
+        let saved = SavedBonus { kind: 0, bonus: 2, value: 1.0, qualifier: "General".into() };
+        assert_eq!(agent_bonus_key("cap", "General"), Some(saved.key()));
+        assert_eq!(agent_bonus_key("spawn_rate", "spy").map(|k| k.bonus), Some("0".into()));
+        assert_eq!(agent_bonus_key("not_an_agent_bonus", "spy"), None);
     }
 
     #[test]

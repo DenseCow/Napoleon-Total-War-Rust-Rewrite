@@ -1463,6 +1463,8 @@ fn the_commander_pool_answers_from_the_model_and_hiring_queues_the_command() {
             garrisoned_in: None,
         });
         w.faction_details.get_mut(&A).unwrap().general_pool = (vec![c], elapsed + 2);
+        // The vanilla General row: `agents` #11 4, #10 0.
+        std::sync::Arc::make_mut(&mut st.model.rules).agent_caps.insert("General".into(), (4, 0));
     }
     hud.host.take_log();
     let call2 = |name: &str, a: Value, b: Value| -> Value {
@@ -1494,7 +1496,7 @@ fn the_commander_pool_answers_from_the_model_and_hiring_queues_the_command() {
         let mut st = hud._scripts.state_mut();
         st.model.turn.current = Some(B);
     }
-    assert!(!ask_gate(force, false), "not A's turn");
+    assert!(ask_gate(force, false), "the gate tests no turn either (0x009D1CD0)");
     {
         let mut st = hud._scripts.state_mut();
         st.model.turn.current = Some(A);
@@ -1519,7 +1521,8 @@ fn the_commander_pool_answers_from_the_model_and_hiring_queues_the_command() {
     assert!(row.get::<bool>("IsRecruitable").unwrap(), "the treasury can pay");
     assert_eq!(t.get::<i32>("TurnsToNextPoolFill").unwrap(), 2);
     assert!(t.get::<f32>("MaxDistanceToTrack").unwrap() > 0.0);
-    assert!(t.get::<i32>("MaxGeneralsAllowed").unwrap() > t.get::<i32>("CurrentNumGenerals").unwrap());
+    assert_eq!(t.get::<i32>("MaxGeneralsAllowed").unwrap(), 4, "agents #11");
+    assert!(t.get::<i32>("CurrentNumGenerals").unwrap() < 4, "the candidate is not counted");
     // No force, no table.
     assert!(call2("AvailableCommandersForRecruitment", hud.force_addr(ForceId(999)), Value::Boolean(false)).is_nil());
 
@@ -1817,7 +1820,7 @@ fn character_cards_show_the_main_attribute_and_its_rank() {
 #[test]
 fn finished_queue_items_leave_the_address_store() {
     let hud = test_hud();
-    let item = |id: i32| ntw_sim::campaign::RecruitmentItem { id: RecruitmentItemId(id), unit_key: "x".into(), turns_remaining: 1, cost: 0, target: None };
+    let item = |id: i32| ntw_sim::campaign::RecruitmentItem { id: RecruitmentItemId(id), unit_key: "x".into(), turns_remaining: 1, cost: 0, target: None, target_lost: false };
     hud._scripts.state_mut().model.world.regions.get_mut(&REGION).unwrap().recruitment_queue = vec![item(500), item(501)];
     let ui = hud.host.campaign_ui().unwrap();
     let build = || recruitment_info(hud.host.lua(), hud.host.inner(), &ui, REGION).unwrap();
@@ -1890,6 +1893,30 @@ fn a_deal_applies_at_most_once() {
     // Without a counterpart nothing is applied or proposed.
     hud.host.campaign_ui().unwrap().negotiation.borrow_mut().release();
     assert_eq!(hud.requests_of("CampaignUI.AcceptOffer() CampaignUI.Propose({}, {}, 'regions')"), Vec::new());
+}
+
+/// A demanded payment goes through the model's cap (`CampaignModel::demanded_payment`, `0x00C4AB20`)
+/// before it applies: B, asked by A for a 500 lump sum with 300 in its treasury, pays 300; a regular
+/// demand is not capped, and the offered lump sum is A's to pay in full.
+#[test]
+fn a_demanded_lump_sum_is_capped_at_the_payers_treasury() {
+    let hud = test_hud();
+    negotiation_with_offer(&hud);
+    let ui = hud.host.campaign_ui().unwrap();
+    for item in [NegotiationItem::Payment { amount: 500, turns: 0 }, NegotiationItem::Payment { amount: 500, turns: 3 }] {
+        ui.negotiation.borrow_mut().demands.push(DealRow { item, applied: false });
+    }
+    let pay = |a, b, action| CampaignRequest::Command(CampaignCommand::Diplomacy { a, b, action });
+    assert_eq!(
+        hud.requests_of("CampaignUI.AcceptOffer()"),
+        vec![
+            pay(A, B, D::OneOffPayment(500)),
+            pay(B, A, D::OneOffPayment(300)),
+            pay(B, A, D::RegularPayment(500, 3)),
+            CampaignRequest::Command(CampaignCommand::AcceptDeal),
+        ]
+    );
+    assert!(hud.errors().is_empty());
 }
 
 /// The payment caps push the treasury (0x00BCAFE0, the HUD's "funds"): MaxPlayer the local

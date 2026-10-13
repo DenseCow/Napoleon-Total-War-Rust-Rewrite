@@ -220,6 +220,7 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
     }
     for a in &c.agents {
         r.agent_action_points.insert(a.key.clone(), a.action_points);
+        r.agent_caps.insert(a.key.clone(), (a.cap_base, a.cap_ceiling));
         if let Some(rel) = a.unknown_50.as_ref().filter(|s| !s.is_empty()) {
             r.agent_religions.insert(a.key.clone(), rel.clone());
         }
@@ -271,8 +272,14 @@ pub fn effect_rules_from_db(db: &GameDatabase) -> ntw_sim::campaign::effects::Ef
     for m in &t.bonus_pop_class {
         map(&m.effect, BonusKind::PopClass, &m.bonus, &m.class);
     }
+    // The agent-keyed bonuses: exe bonus type 0 with the agent bonus enum's id (`0x0145B498`), the same keys as
+    // the saved entries, so DB and saved sources add up ([`ntw_sim::campaign::effects::agent_bonus_key`]); a
+    // bonus name outside that enum keeps its name (nothing in the exe reads one).
     for m in &t.bonus_agent {
-        map(&m.effect, BonusKind::Agent, &m.bonus, &m.agent);
+        match ntw_sim::campaign::effects::agent_bonus_key(&m.bonus, &m.agent) {
+            Some(k) => map(&m.effect, k.kind, &k.bonus, &k.qualifier),
+            None => map(&m.effect, BonusKind::Agent, &m.bonus, &m.agent),
+        }
     }
     for m in &t.bonus_religion {
         map(&m.effect, BonusKind::Religion, &m.bonus, &m.religion);

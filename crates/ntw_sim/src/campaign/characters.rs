@@ -567,12 +567,14 @@ impl CampaignModel {
         }
     }
 
-    /// The items queued through `c` lose their target (the item listener `0x00B57F40`, run by the character
-    /// destructor `0x0099D2D0`; see [`Self::character_dies`]). For every path that destroys a character.
+    /// The items queued through `c` lose their target and mark it lost (the item listener `0x00B57F40`
+    /// clears +0x18 and +0x24, run by the character destructor `0x0099D2D0`; see
+    /// [`Self::character_dies`]). For every path that destroys a character.
     pub(crate) fn drop_recruitment_target(&mut self, c: CharacterId) {
         for r in self.world.regions.values_mut() {
             for i in r.recruitment_queue.iter_mut().filter(|i| i.target == Some(c)) {
                 i.target = None;
+                i.target_lost = true;
             }
         }
     }

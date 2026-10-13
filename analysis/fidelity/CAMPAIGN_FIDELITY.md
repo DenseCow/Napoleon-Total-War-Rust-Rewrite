@@ -904,10 +904,16 @@ construction `0x00A6CBE0(0)`; then the two single slots +0x24 / +0x20 (walls / r
   tested at `0x0087B1D3`; the manager goes to +0x728 at `0x0087B1F7`), then reads one i32 (−1 when the read
   fails) at `0x0087B20C` and stores it to +0x72C at `0x0087B217`; the next i32 goes to +0x730 (home region,
   `0x0087B23C`). After loading, `0x008E07F0` (`0x008E0816` / `0x008E0829`) turns the saved id into the region
-  through the saved-id map `0x0105AC60`. Our importer reads the capital as the i32 right after the
-  `FORT_UPGRADE_MANAGER` record (`crates/ntw_campaign/src/details.rs`, `faction_details`): the same position.
-  Difference: the exe reads the capital even when the manager block is absent, ours then sets none (BACKLOG
-  line proposed; whether any vanilla faction record lacks the block is UNKNOWN).
+  through the saved-id map `0x0105AC60`. **Loader order around it (CONFIRMED, payment-capital, 2026-10-12,
+  disassembly):** a bool (`0x0087B19A`); when set, a 0x9C object holding a `REGION_KEYS` array (`0x00903DA0`) →
+  +0x724; the optional `FORT_UPGRADE_MANAGER` (`0x0087B1DA` skips it when absent); the capital i32 (`0x0087B20C`);
+  the home-region i32 (`0x0087B23C`); then the `EXPOSED_CHARACTERS` array, opened unconditionally at `0x0087B254`.
+  So the capital is always the second i32 before `EXPOSED_CHARACTERS` and the home region the one right before
+  it, with or without the manager block. Our importer (`crates/ntw_campaign/src/details.rs`, `faction_details`)
+  now anchors on `EXPOSED_CHARACTERS` the same way (it used to read after the last `FORT_UPGRADE_MANAGER` and set
+  none without one); 0 and negative ids (the loader's default is −1) mean none. Test
+  `faction_capital_read_with_or_without_fort_upgrade_manager`; the real-save capital checks in
+  `tests/real_install.rs` still hold.
 
 **Flow.** A capture (after a won assault, `0x00B58560`; an undefended settlement, PROVISIONAL same variant) changes the
 owner and clears the queues (round 8), then queues a report object (`0x00885F90`, vtable `0x013574DC`; flags +0x98
@@ -1370,9 +1376,22 @@ garrison join. Round 15's read of `0x00B71FB0` (1523 bytes, the queue tick) sett
 - **Unit pool.** The hire `0x00A1B8F0` charges `0x00BAF500(cost, 2)` only when the faction is human (+0x6E0); an AI
   hires free, and neither side is money-tested there. The panel's row flags `0x00A1BB20`: bit 1 = treasury < cost
   (signed), bit 0 = the faction's generals ≥ its maximum, bit 2 = no room; `IsRecruitable` is flags == 0
-  (`0x009DD3AF`). Bits 0 and 2 are not modelled (PROVISIONAL, BACKLOG). The `CanRecruitCommander` gate
-  `0x009D1CD0` tests no money: false for a faction without a record (the rebels), else true when a byte +0x1B7 of
-  the object reached through force +0x74 is 0 (meaning UNKNOWN; the model keeps its turn + candidate stand-in).
+  (`0x009DD3AF`). **Bits 0 and 2 (treasury2, 2026-10-12, static trace, CONFIRMED; code `pool::commander_row_flags`):**
+  bit 0 compares the commanders in service (`0x009D52A0`, the faction's characters of the pool's kind, candidates
+  left out) with the maximum `0x009D1E00`: agents #11 (`+0x1A8`, vanilla General 4, admiral 3) plus the faction's
+  `cap` bonus (bonus type 0, id 2; the agent key goes through `effects::agent_bonus_key`), rounded half to even
+  (FISTP), then held to agents #10 (`+0x1A4`, the ceiling, 12 for the other agents, 0 = none) when it is nonzero.
+  **ORIGINAL BUG:** a negative sum (a cap bonus below −#11) is compared unsigned at `0x009D1E21` and `0x00A1BB87`, so a
+  faction with a negative maximum may hire without limit; ours clamps the maximum to 0 (test
+  `the_most_commanders_a_faction_may_have_add_the_cap_bonus_up_to_the_ceiling`). Bit 2: a General needs a free unit
+  slot in the force (`0x009FB660`); an admiral needs a ship with no character or a non-admiral one (`0x009FB640` →
+  `0x00A278D0`). `hire_admiral` boards that ship (`pool::admiral_ship`, `0x00A278B0`); a captain it displaces dies
+  (`character_dies`) and command is re-picked. Test `a_pool_row_flags_the_maximum_the_purse_and_the_room`.
+  **The `CanRecruitCommander` gate** `0x009D1CD0` tests no money, turn or pool: false for a faction without a record
+  (the rebels), else true when the force's commander (force +0x74) has byte +0x1B7 clear. That byte is the
+  commander's "moving" flag: set at `0x00A28B50` when a move starts, cleared at `0x00A285E0` (argument 1) when it
+  ends; the model's moves are instant, so it is always clear between commands and the gate is "commander present and
+  not rebel" (`pool::can_recruit_commander`, test `the_interface_gate_for_hiring_a_commander_refuses_only_the_rebels`).
 - **Promotion** in the field (`0x008E1C20`) charges every faction, human or AI, with no money test (the value it
   charges stays PROVISIONAL, §Unit pool in the code).
 - **State gift** (deal component `0x00C4B440`, vtable entry `0x01381ECC`): charges the giver `0x00BAF500(amount, 3)`
@@ -1384,7 +1403,12 @@ garrison join. Round 15's read of `0x00B71FB0` (1523 bytes, the queue tick) sett
   one-off payment, payer charged `0x00BAF500(amount, 3)` and payee credited `0x00BB3810(amount, 1)` (a negative
   amount runs the other way); any other length adds a regular payment through `0x00B54FC0` (on the payer's
   relationship record towards the payee, via `0x00B55010(amount, turns)`; CONFIRMED by polish11's V5 pass). When both sides are human the exe also calls
-  `0x008F56C0` on each with ±amount (UNKNOWN, not modelled). Model: `treaties::one_off_payment`; the panel's lump sum
+  `0x008F56C0` on each with ±amount: FACTION +0x954 += n, a multiplayer results counter (CONFIRMED treasury2,
+  2026-10-12). Its one reader is the getter `0x008D9DB0`, which feeds the external MP results listener
+  `0x009C7660` (campaign +0xD9C, vfunc +0x50) when a human faction of an MP campaign (+0x1034) is destroyed
+  (`0x008AB6C0`) or the campaign ends (`0x0096CD10`); no rule reads it. It is saved as the FACTION i32 written at
+  `0x00893E8B` (after +0x94C and the +0x950 bool), which our save keeps as loaded (template tree), so it is not
+  modelled until our own multiplayer has a results report (BACKLOG line proposed). Model: `treaties::one_off_payment`; the panel's lump sum
   (`turns == 0` in `NegotiationItem::Payment`) maps to it (it was a state gift, which credited the receiver).
   **Turns 0 → 1 (CONFIRMED, polish11, disassembly):** the script `Propose` handler `0x009BF3C0`, action 9 (payments),
   writes the deal's one payment pair, +0x08 amount and +0x0C turns. When the panel's regular flag is clear or its
@@ -1396,21 +1420,67 @@ garrison join. Round 15's read of `0x00B71FB0` (1523 bytes, the queue tick) sett
   payment item's vtable starts at `0x01381EDC` (set by its constructor `0x00BF3C90` at `0x00BF3CA5`, amount and
   turns zeroed); slot +0x44 (`0x01381F20` → `0x00C4AB20`) takes the deal's pair and stores the amount (pair +0x08)
   to +0x14 at `0x00C4AB38` and the turns (pair +0x0C) to +0x18 at `0x00C4AB42`; slot 0 `0x00C11CA0` writes them
-  back. **Rule not in the model:** the same function (`0x00C4AB4E`–`0x00C4AB82`) caps a demanded one-off payment
-  (turns == 1, amount < 0) at the paying side's treasury; offered amounts and regular payments are not capped. A
-  negative treasury turns the capped amount around (a possible ORIGINAL BUG, not traced far enough to say).
-  `deal_item_commands` / `one_off_payment` do not cap (BACKLOG line proposed).
+  back. **Payment cap (CONFIRMED, payment-capital, 2026-10-12, disassembly):** the same function
+  (`0x00C4AB4E`–`0x00C4AB82`) caps a demanded one-off payment: when the turns are 1 and the amount is negative (a
+  demand) it reads the treasury (`GetFactionEconomyTreasury` `0x00BCAFE0`) of the item's second side (item +0x4 →
+  `0x00C4BC20`), and when the demand is above it (a signed compare) stores minus the treasury as the amount
+  (`0x00C4AB82`). That side is the payer: the applier `0x00C18A70` charges the `0x00C4CE90` side for a positive
+  amount and the `0x00C4BC20` side for a negative one. Offered amounts and regular payments (turns 2 and up) are not
+  capped. **When:** the item copies the deal through `ApplyDealToNegotiationRecord` `0x00C49AA0`, which the propose
+  commands (`0x00933CC0`, `0x009340A0`), the AI's evaluation (`0x00AA5ED0` → `0x00CC58C0`) and `0x00C1E240` run; so
+  the cap uses the treasuries when the deal is proposed, before any item applies. The payment item is built only
+  by the negotiation constructor `0x00BF5A60` (constructor `0x00BF3C90`). **ORIGINAL BUG (`0x00C4AB7E`–
+  `0x00C4AB82`):** with a negative treasury the stored amount, minus the treasury, is positive, so the demand turns
+  around and the demanding side pays the indebted one. The panel shows the intent: `diplomacy_panel.luac`
+  `CheckMaxPayment` (line 1498) and `SetMaxPayment` (line 1521) disable OK for a demand above
+  `MaxOppositionPaymentAllowed` (the payer's treasury), so a negative treasury allows no demand at all ("never more
+  than the payer has"). Ours: `treaties::demanded_payment` caps a one-off demand at max(treasury, 0), so an indebted
+  payer is asked 0 and nothing moves (the applier skips 0). It is the rule seam `diplomacy.demanded_payment`
+  (`CampaignModel::demanded_payment`); the UI's `accept_deal` caps each demanded row through it before any row's
+  command is pushed (the treasuries before the deal; tests `a_demanded_one_off_payment_is_capped_at_the_payers_treasury`,
+  `a_demanded_lump_sum_is_capped_at_the_payers_treasury`). Not yet: the UI builds no payment rows (payments
+  `Propose` PLACEHOLDER) and our AI evaluation does not weigh payments; both call the seam when they come.
 - **Regular payments and protectorate tribute** are economy lines summed into the round settle, so the model moves
   them through `pay` / `credit` (saturating, above); `treaties::diplomacy_money` sums the lines 1:1.
-- **Callers not mapped yet** (BACKLOG): credit `0x00A06050` (mission/event reward, category 3), `0x009DB270`,
-  `0x009DB7C0`, `0x00B1A9F0`, `0x00B1AAB0`, `0x009318B3`, `0x00BB33A0`; charge `0x008EEB70`, `0x00B4E4C0`,
-  `0x00B0A300`.
+- **The other charge / credit callers (treasury2, 2026-10-12, static trace, CONFIRMED unless tagged).** Every xref
+  of `0x00BAF500`, `0x00BB3810` and the refund mover `0x00BAF660` is now mapped:
+  - `0x008EEB70` unit retraining toggle (UI `0x00AA90F0`, cancel-all `0x008B36D0`): charges `0x008EA2F0` =
+    round(unit record +0x38 × clamp(`0x008F6590`, 0, 0.5)), category 2; cancelling refunds it through `0x00BAF660`.
+    **Not modelled** (BACKLOG line proposed).
+  - `0x008E2260` naval promotion: already mapped (§Promotion), pays 0.
+  - `0x00B4E4C0` map-fort repair (from `0x00AA49A0` ← `0x00CE9C40`; gates `0x00B4D500`, `0x00B16460`, `0x00B4D3F0`):
+    charges round(level cost × (1 − health)), category 1. Not modelled: our map forts have no health, and no vanilla
+    startpos or save holds a fort (the fort UI calls are PLACEHOLDER no-ops, `settlement.rs`). Its cancel
+    `0x00B1A940` (CCQ_CANCEL_REPAIR_FORT, executor `0x00932270`) refunds item +4,
+    category 1.
+  - `0x00B1AAB0` CCQ_CANCEL_UPGRADE_FORT (via `0x008B3680`, executor `0x00932360`): refunds
+    (int)(rec +0x24 / rec +0x20 × (rec +0x20 − item +0xC)), through the mover (category 1) when item +0xC is 0, else
+    as a credit (category 3). Unreachable in vanilla: the fort upgrade is constant-false.
+  - `0x00B0A300` CCQ_REPLENISH_UNIT (`0x00937080`) / CCQ_TOGGLE_REPLENISH_UNIT (`0x009387F0`): dead, its first test is
+    `GetConstantFalseStdcallOneArg` (the cost would be `0x00B64920`, category 2); its cancel `0x00B1A9F0` (from the
+    merge `0x008D93D0`) is never reached either.
+  - `0x00A06050` mission rewards (caller `0x00A26600`): money (+0x64) credited, category 3; also the takeover
+    (+0x68 → `0x008AB6C0`) and the unit, agent, experience and recruitment grants. Belongs to the missions item
+    (BACKLOG §0 missions line).
+  - `0x009DB270` / `0x009DB7C0` post-battle state 6: a unit that cannot be placed is credited (category 2)
+    `0x008E1BC0` = trunc((1 − 0.25 × the sum of the four floats unit +0x130..+0x13C) × unit record +0x38). The four
+    floats are UNKNOWN; not modelled (§Autoresolve "After the battle", state 6; BACKLOG line proposed).
+  - `0x009318B3` in the undefined function `0x00931860`, CCQ_ADJUST_FACTION_TREASURY (registered at `0x0041F200`):
+    category 3, sent only by the dev console's `adjust_treasury` (`0x008A9770`). Not modelled (a developer command).
+  - `0x00BB33A0` from `0x00BAF200`, a campaign-director element (vtable `0x013800AC`, built by `0x00B930D0` /
+    `0x00BAC310`, cdir config 0x28–0x2B): credits its +0x10C, category 4. Belongs to the director item (BACKLOG §0
+    director line).
 - **A queued item whose commander dies** (BACKLOG §0-B). The character destructor `0x0099D2D0` notifies its observer
   list (+0xD4); a recruitment item queued through a commander observes him, and its listener `0x00B57F40` clears
   the item's target (+0x18) and the bool +0x24. The item stays in its queue, keeps its cost and turns, and is not
   refunded; when it finishes, `0x00B71FB0` hands it to the reinforcements only while +0x18 is set, so it spawns in
   its settlement like an untargeted item. Model: `characters::drop_recruitment_target`, called from
-  `character_dies` and from the admiral hire's captain removal. The +0x24 bool is not modelled (save writes it true).
+  `character_dies` and from the admiral hire's captain removal. **The +0x24 bool (treasury2, 2026-10-12,
+  CONFIRMED):** it is RECRUITMENT_ITEM field #5 (`WriteRecruitmentItemToEsf` `0x00B5C900`, written at `0x00B5CA99`,
+  read back at `0x00AF3E66`), set to 1 by the constructor (`0x00AF4019`) and cleared only by the listener
+  (`0x00B57F40`, reached through the thunks `0x00B57F29` / `0x00B57F31` with ECX = item +0x5C); nothing else reads it,
+  so it has no gameplay effect. Modelled as `RecruitmentItem::target_lost` (saved as `!target_lost`), so a save
+  written after a commander's death keeps the original's value (test in `ntw_campaign` save round-trip).
 - **Plate corrections (polish11 V5 pass, 2026-10-11, disassembly).** Applied in Ghidra on 2026-10-12 with the
   V5 write-up of the 11 treasury functions. Completeness: minimum 78 and average 84 (effective: minimum 86,
   average 93). The corrections:

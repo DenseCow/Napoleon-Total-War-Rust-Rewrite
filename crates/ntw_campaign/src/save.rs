@@ -1599,6 +1599,8 @@ fn write_recruitment(r: &mut EsfRecord, region: &Region, dests: &[QueueDest], is
                     };
                     set(inner, 2, target);
                     set(inner, 3, EsfNode::U32(it.turns_remaining));
+                    // #5 the item's +0x24 (CONFIRMED, `RecruitmentItem::target_lost`).
+                    set(inner, 5, EsfNode::Bool(!it.target_lost));
                     if inner.get_u32(4) != Some(it.cost.max(0) as u32) {
                         set(inner, 4, EsfNode::U32(it.cost.max(0) as u32));
                         set(inner, 7, EsfNode::U32(it.cost.max(0) as u32));
@@ -1805,7 +1807,7 @@ fn recruitment_item(region: &Region, it: &ntw_sim::campaign::RecruitmentItem, na
         EsfNode::I32(it.target.map_or(0, |c| c.raw())),
         EsfNode::U32(it.turns_remaining),
         EsfNode::U32(it.cost.max(0) as u32),
-        EsfNode::Bool(true),
+        EsfNode::Bool(!it.target_lost),
         EsfNode::Utf16String(it.unit_key.clone()),
         EsfNode::U32(it.cost.max(0) as u32),
         EsfNode::U32(0),
@@ -2082,7 +2084,7 @@ mod tests {
         let EsfNode::Record(mut r) = rec("REGION", vec![manager(own), rec("REGION_SLOT_MANAGER", vec![EsfNode::RecordArray(Box::new(slots))])]) else {
             unreachable!()
         };
-        let q = |id: i32, key: &str, turns: u32| RecruitmentItem { id: RecruitmentItemId(id), unit_key: key.into(), turns_remaining: turns, cost: 300, target: None };
+        let q = |id: i32, key: &str, turns: u32| RecruitmentItem { id: RecruitmentItemId(id), unit_key: key.into(), turns_remaining: turns, cost: 300, target: None, target_lost: false };
         // As loaded: ship 700 (port 1), foot 600, foot 700 renumbered 908, the id-less foot 912,
         // foot 800. Then 600 and 800 are cancelled and 920 recruited.
         // 930: a ship whose link names a foot record (a source the model was not loaded from).
@@ -2129,7 +2131,7 @@ mod tests {
     }
 
     fn new_item(id: i32, key: &str) -> ntw_sim::campaign::RecruitmentItem {
-        ntw_sim::campaign::RecruitmentItem { id: ntw_sim::campaign::RecruitmentItemId(id), unit_key: key.into(), turns_remaining: 1, cost: 0, target: None }
+        ntw_sim::campaign::RecruitmentItem { id: ntw_sim::campaign::RecruitmentItemId(id), unit_key: key.into(), turns_remaining: 1, cost: 0, target: None, target_lost: false }
     }
 
     /// The array item of a queued unit as a file holds it, with the values of [`new_item`] (1 turn, cost 0).

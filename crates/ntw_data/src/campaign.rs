@@ -267,10 +267,14 @@ db_record! {
         primary_attribute: String,
         /// #9 @0x50: the religion a missionary converts to (`rel_*`, or an alignment in spa; agent record +0x1A0, read by the conversion step `0x00A63FE0`, CONFIRMED use).
         unknown_50: Option<String>,
-        /// #10 @0x5C: UNKNOWN.
-        unknown_5c: i32,
-        /// #11 @0x60 {v>=1}: UNKNOWN.
-        unknown_60: i32 => since 1,
+        /// #10 @0x5C: the ceiling on the number of characters of the type a faction may have, its
+        /// `cap` bonus included; 0 = none (agent record +0x1A4, CONFIRMED: copied at `0x00F931A7`,
+        /// applied by `0x009D1E00`). Vanilla: 12 for the spies and missionaries, else 0.
+        cap_ceiling: i32,
+        /// #11 @0x60 {v>=1}: the base number of characters of the type a faction may have, before
+        /// its `cap` bonus (agent record +0x1A8, CONFIRMED: read by `0x009D1E00`). Vanilla: General
+        /// 4, admiral 3, else 0.
+        cap_base: i32 => since 1,
     }
 }
 

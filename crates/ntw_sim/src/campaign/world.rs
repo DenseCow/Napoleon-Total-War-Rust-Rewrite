@@ -1005,7 +1005,7 @@ pub struct Settlement {
 }
 
 /// A unit being recruited. Saves hold `RECRUITMENT_ITEM` v2 {i32 id, i32, i32, #3 u32 turns
-/// remaining (INFERRED), #4 u32 cost (INFERRED), bool, #6 unit key (CONFIRMED), ...}.
+/// remaining (INFERRED), #4 u32 cost (INFERRED), #5 bool (+0x24, [`Self::target_lost`]), #6 unit key (CONFIRMED), ...}.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RecruitmentItem {
@@ -1023,6 +1023,13 @@ pub struct RecruitmentItem {
     /// settlement's own recruit.
     #[cfg_attr(feature = "serde", serde(default))]
     pub target: Option<CharacterId>,
+    /// The commander the unit was queued through has been destroyed since: the item's byte +0x24
+    /// (`RECRUITMENT_ITEM` #5) is 1 from its construction (`0x00AF4019`) and cleared, with +0x18,
+    /// only by the item's character listener (`0x00B57F40`, `CampaignModel::drop_recruitment_target`).
+    /// CONFIRMED saved (`0x00B5CA99`) and loaded (`0x00AF3E66`) and read nowhere else: no gameplay
+    /// effect, kept so a save writes the byte the original would (`false` = the exe's 1).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub target_lost: bool,
 }
 
 /// Which recruitment manager of a region holds a queue: the region's own (land) or the one of a

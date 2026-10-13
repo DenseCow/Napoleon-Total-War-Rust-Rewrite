@@ -12,10 +12,12 @@
 //!   a human to an AI faction ([`super::director::region_transfer_step`]).
 //! - [`DIRECTOR_DESIRES`]: the campaign director's other desires after it
 //!   ([`super::director::director_desires`]).
+//! - [`DEMANDED_PAYMENT`]: the cap on a payment a deal demands ([`super::treaties::demanded_payment`]).
 
 use std::sync::Arc;
 
 use super::director::DirectorState;
+use super::ids::FactionId;
 use super::mod_state::ModWrites;
 use super::population::PopulationState;
 use super::world::{CampaignModel, Region};
@@ -29,6 +31,8 @@ pub const DIRECTOR_REGION_TRANSFER: &str = "director.region_transfer";
 
 /// Seam key of the campaign director's other desires ([`DirectorDesires`]).
 pub const DIRECTOR_DESIRES: &str = "director.desires";
+/// Seam key of the cap on a payment a deal demands ([`DemandedPayment`]).
+pub const DEMANDED_PAYMENT: &str = "diplomacy.demanded_payment";
 
 /// A region's population after one round of growth: given the model, the region, its population
 /// and its population state, the new population and state. The original's is
@@ -46,6 +50,12 @@ pub type DirectorRegionTransfer = dyn Fn(&CampaignModel, &mut ModWrites) -> Dire
 /// original's is [`super::director::director_desires`]. Its mod-state changes go to the
 /// [`ModWrites`].
 pub type DirectorDesires = dyn Fn(&mut CampaignModel, &mut ModWrites) + Send + Sync;
+/// What a deal's demanded payment becomes: ours applies it in `accept_deal` (the exe caps it at
+/// proposal, 0x00C4AB45-0x00C4AB82, and its row text shows the capped amount, the absolute value, at
+/// 0x00C4AB85; the cap moves to Propose once Propose builds payment rows). Given the model (the treasuries before
+/// the deal), the paying faction, the amount asked and the turns (0 for the lump sum), the amount it
+/// pays. The original's is [`super::treaties::demanded_payment`]. A query: it changes no state.
+pub type DemandedPayment = dyn Fn(&CampaignModel, FactionId, i32, u32) -> i32 + Send + Sync;
 
 /// The campaign rules in use, one field per seam (see the module docs).
 #[derive(Clone, Debug, PartialEq)]
@@ -56,6 +66,8 @@ pub struct CampaignSeams {
     pub director_region_transfer: Seam<DirectorRegionTransfer>,
     /// [`DIRECTOR_DESIRES`].
     pub director_desires: Seam<DirectorDesires>,
+    /// [`DEMANDED_PAYMENT`].
+    pub demanded_payment: Seam<DemandedPayment>,
 }
 
 impl Default for CampaignSeams {
@@ -65,6 +77,7 @@ impl Default for CampaignSeams {
             population_grow: Seam::original(Arc::new(|m: &CampaignModel, r: &Region, pop: u32, s: &PopulationState, _: &mut ModWrites| super::population::grow(m, r, pop, s))),
             director_region_transfer: Seam::original(Arc::new(|m: &CampaignModel, _: &mut ModWrites| super::director::region_transfer_step(m))),
             director_desires: Seam::original(Arc::new(|m: &mut CampaignModel, w: &mut ModWrites| super::director::director_desires(m, w))),
+            demanded_payment: Seam::original(Arc::new(super::treaties::demanded_payment)),
         }
     }
 }
@@ -72,8 +85,13 @@ impl Default for CampaignSeams {
 impl CampaignSeams {
     /// Every seam's key and implementation chain, in a fixed order (for the multiplayer handshake
     /// and the log).
-    pub fn chains(&self) -> [(&'static str, &[String]); 3] {
-        [(POPULATION_GROW, self.population_grow.chain()), (DIRECTOR_REGION_TRANSFER, self.director_region_transfer.chain()), (DIRECTOR_DESIRES, self.director_desires.chain())]
+    pub fn chains(&self) -> [(&'static str, &[String]); 4] {
+        [
+            (POPULATION_GROW, self.population_grow.chain()),
+            (DIRECTOR_REGION_TRANSFER, self.director_region_transfer.chain()),
+            (DIRECTOR_DESIRES, self.director_desires.chain()),
+            (DEMANDED_PAYMENT, self.demanded_payment.chain()),
+        ]
     }
 }
 
@@ -88,6 +106,8 @@ pub struct CampaignRuleRegistry {
     pub director_region_transfer: SeamRegistry<DirectorRegionTransfer>,
     /// [`DIRECTOR_DESIRES`] implementations.
     pub director_desires: SeamRegistry<DirectorDesires>,
+    /// [`DEMANDED_PAYMENT`] implementations.
+    pub demanded_payment: SeamRegistry<DemandedPayment>,
 }
 
 impl CampaignRuleRegistry {
@@ -101,6 +121,7 @@ impl CampaignRuleRegistry {
                 POPULATION_GROW => self.population_grow.apply(&mut seams.population_grow, key),
                 DIRECTOR_REGION_TRANSFER => self.director_region_transfer.apply(&mut seams.director_region_transfer, key),
                 DIRECTOR_DESIRES => self.director_desires.apply(&mut seams.director_desires, key),
+                DEMANDED_PAYMENT => self.demanded_payment.apply(&mut seams.demanded_payment, key),
                 _ => {
                     warnings.push(format!("rule seam {seam}: no such seam; {key} is ignored"));
                     continue;
@@ -169,7 +190,15 @@ mod tests {
         assert_eq!(seams, CampaignSeams::default());
         assert!(seams.population_grow.is_original());
         let original = ["original".to_owned()];
-        assert_eq!(seams.chains(), [(POPULATION_GROW, &original[..]), (DIRECTOR_REGION_TRANSFER, &original[..]), (DIRECTOR_DESIRES, &original[..])]);
+        assert_eq!(
+            seams.chains(),
+            [
+                (POPULATION_GROW, &original[..]),
+                (DIRECTOR_REGION_TRANSFER, &original[..]),
+                (DIRECTOR_DESIRES, &original[..]),
+                (DEMANDED_PAYMENT, &original[..]),
+            ]
+        );
         // The round end through the seam gives exactly what the original's function gives.
         let before = run(CampaignSeams::default(), 0);
         let after = run(CampaignSeams::default(), 1);
@@ -180,6 +209,28 @@ mod tests {
         }
         assert_ne!(after.world.regions[&RegionId(10)].population, before.world.regions[&RegionId(10)].population);
         assert!(after.mod_state.is_empty());
+    }
+
+    /// The original's demanded-payment cap (`0x00C4AB20`), through the model's seam: a one-off demand
+    /// asks at most the payer's treasury, a regular payment is not capped, and an indebted payer is
+    /// asked 0 (ORIGINAL BUG fix: the exe turns the demand around, `0x00C4AB7E`–`0x00C4AB82`).
+    #[test]
+    fn a_demanded_one_off_payment_is_capped_at_the_payers_treasury() {
+        let mut m = test_model();
+        let a = FactionId(1); // test_model's faction A
+        let treasury = |m: &mut CampaignModel, t: i32| m.world.factions.get_mut(&a).expect("faction A").treasury = t;
+        treasury(&mut m, 1500);
+        assert_eq!(m.demanded_payment(a, 5000, 0), 1500, "lump sum above the treasury");
+        assert_eq!(m.demanded_payment(a, 5000, 1), 1500, "one turn above the treasury");
+        assert_eq!(m.demanded_payment(a, 1000, 1), 1000, "within the treasury");
+        assert_eq!(m.demanded_payment(a, 5000, 2), 5000, "a regular payment is not capped");
+        treasury(&mut m, -300);
+        assert_eq!(m.demanded_payment(a, 5000, 1), 0, "an indebted payer is asked nothing");
+        assert_eq!(m.demanded_payment(FactionId(99), 5000, 1), 5000, "an unknown payer keeps the amount");
+        // The model's method is the seam, and the default seam is the original's function.
+        for (amount, turns) in [(5000, 0), (200, 1), (5000, 3)] {
+            assert_eq!(m.demanded_payment(a, amount, turns), super::super::treaties::demanded_payment(&m, a, amount, turns));
+        }
     }
 
     #[test]

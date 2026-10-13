@@ -16,15 +16,9 @@ Last updated: 2026-10-12. Main tests at last full run (2026-10-08): `cargo test 
   merge, applying the worker's BACKLOG ticks/Polish lines in the merge commit → `bash tools/progress.sh`
   → push (the hook syncs public #2) → publish in batches. Running work = the BACKLOG `(running: …)`
   markers and `git worktree list`; merged work = `git log`.
-- **Resume points (2026-10-12 wrap-up, usage 90%):** merged 2026-10-12: ui-fails, self-checks, self-checks2, hud-state,
+- **Resume points (2026-10-12 wrap-up, usage 90%; treasury2 and payment-capital merged 2026-10-13):** merged 2026-10-12: ui-fails, self-checks, self-checks2, hud-state,
   polish11-14, gait-infantry, director-rng (a3edf975); user checks passed: infantry/cavalry gait, battle HUD. Every branch
   below is pushed; resume each with a fresh worker (brief points at its branch + this line):
-  1. payment-capital (`dded18bb`, worker done): review stopped early, no blocking findings yet (ORIGINAL BUG 0x00C4AB7E
-     confirmed, cap lives once behind `diplomacy.demanded_payment`). Rerun the review: tests, and compare main vs branch
-     capitals on all 8 startpos (18 eur / 18 mp_eur / 5 ita / 2 mp_ita factions show none). Notes so far: treaties.rs ~721
-     and seams.rs ~44 say "when proposed" but ours caps at accept; the exe also uses the capped amount in the row text
-     (0x00C4AB85). Worker's BACKLOG lines: tick §0 payment cap + capital; trim polish line ~687 ("deal → item copy site not
-     found", "save capital → +0x72C INFERRED"); add "payments Propose rows and the AI's payment evaluation call `demanded_payment`".
   2. polish15 (`647140e9`, fix round partial): blocking #1 left: model the re-lay gate (`0x00581200`, re-lays when +0x20 >
      men × 0.5; resume from UNITS_TERRAIN_FIDELITY.md "When the men are re-laid" Open list), plus `0x0051A530` 0x80 order
      struct / vtable `0x01325470` naming (completeness 62). Then fix-commit review. At merge: tick its four polish lines; add
@@ -34,7 +28,6 @@ Last updated: 2026-10-12. Main tests at last full run (2026-10-08): `cargo test 
      run `cargo test --workspace` (state hash now has the issue time). Left: 224 (decompile 0x005307E0 / 0x00574E90 for n
      +0x27C, else debugger at 0x0054C691), 225-226 (view.rs), Ghidra name 0x00506C00 ConstructBattleModel. New line:
      "Battle tick counts the deployment ticks (exe Battle Model +0x58)" (PROVISIONAL on `Battle::tick`).
-  4. treasury2: WIP after a session crash (`e285f8e3` + the wrap-up commit), unreviewed; resume from its commit message.
 - **Disk:** C: filled up on 2026-10-09; 21 merged worktrees were removed (~100 GB back). Remove a
   worktree after its merge; check `df -h /c` before starting builds.
 - **Next:** §0, several workers tracing in parallel under the Ghidra writer lock, §11: only the framework parts that avoid costly refits later (rule-seams running), the rest waits for its turn (user, 2026-10-10); the unwrap audit last.

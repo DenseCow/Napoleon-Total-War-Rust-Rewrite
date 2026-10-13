@@ -115,11 +115,19 @@ pub(crate) fn faction_details(f: &EsfRecord) -> (FactionDetails, Option<(String,
             d.posts.push(GovernmentPost { id: p.get_i32(0).unwrap_or(0), key: s(p.get(1)), holder, governorship });
         }
     }
-    // Capital: the i32 values right after the last FORT_UPGRADE_MANAGER (see FactionDetails).
-    if let Some(last) = f.children.iter().rposition(|c| c.record_name() == Some("FORT_UPGRADE_MANAGER")) {
-        let region = |i: usize| f.get(i).and_then(EsfNode::as_i32).filter(|&v| v != 0).map(|v| RegionId(v as u32));
-        d.capital = region(last + 1);
-        d.capital_2 = region(last + 2);
+    // Capital and home region: the two i32 values right before EXPOSED_CHARACTERS, which the exe's
+    // faction loader always opens next; the FORT_UPGRADE_MANAGER before them is optional (0x0087A190:
+    // capital 0x0087B20C, home 0x0087B23C, EXPOSED_CHARACTERS 0x0087B254; see FactionDetails). The
+    // loader's default is -1, so 0 and negative values mean none.
+    // No vanilla faction lacks the FORT_UPGRADE_MANAGER block (checked on all 8 vanilla startpos: the
+    // old and new reads give identical capitals; factions with no capital have the block with 0/0
+    // values), so reading by position from EXPOSED_CHARACTERS only matters for records without it.
+    if let Some(exposed) = f.children.iter().position(|c| c.record_name() == Some("EXPOSED_CHARACTERS")) {
+        let region = |i: Option<usize>| {
+            i.and_then(|i| f.get(i)).and_then(EsfNode::as_i32).filter(|&v| v > 0).map(|v| RegionId(v as u32))
+        };
+        d.capital = region(exposed.checked_sub(2));
+        d.capital_2 = region(exposed.checked_sub(1));
     }
     d.religion = f.values().filter_map(EsfNode::as_str).find(|v| v.starts_with("rel_") || v.starts_with("align_")).unwrap_or_default().to_string();
     // Trade income of the last ECONOMICS_DATA record (category 7 = #1[2], CAMPAIGN_FIDELITY.md).

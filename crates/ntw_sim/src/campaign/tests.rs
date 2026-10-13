@@ -911,6 +911,7 @@ fn the_unit_cap_counts_the_factions_units_and_queued_items() {
         turns_remaining: 2,
         cost: 400,
         target: None,
+        target_lost: false,
     });
     let order = || CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into(), target: None };
     // 1 held + 0 and then 1 queued are below 3; at 1 + 2 the entry is flagged.
@@ -986,7 +987,7 @@ fn recruiting_takes_population_and_cancelling_gives_it_back() {
 
     // So does the turn start's removal of an item the region can no longer recruit, per item.
     for id in [9001, 9002] {
-        let item = RecruitmentItem { id: RecruitmentItemId(id), unit_key: "gone_unit".into(), turns_remaining: 5, cost: 0, target: None };
+        let item = RecruitmentItem { id: RecruitmentItemId(id), unit_key: "gone_unit".into(), turns_remaining: 5, cost: 0, target: None, target_lost: false };
         m.world.regions.get_mut(&r10).unwrap().recruitment_queue.push(item);
     }
     assert!(!m.recruitable_units(r10).iter().any(|e| e.unit_key == "gone_unit"));
@@ -1009,7 +1010,7 @@ fn model_with_queued_items() -> CampaignModel {
     m.rules = Arc::new(rules);
     let r = m.world.regions.get_mut(&RegionId(10)).unwrap();
     for (id, unit_key, cost) in [(9001, "test_unit", 300), (9002, "test_ship", 70), (9003, "test_unit", 500), (9004, "test_ship", 110)] {
-        r.recruitment_queue.push(RecruitmentItem { id: RecruitmentItemId(id), unit_key: unit_key.into(), turns_remaining: 2, cost, target: None });
+        r.recruitment_queue.push(RecruitmentItem { id: RecruitmentItemId(id), unit_key: unit_key.into(), turns_remaining: 2, cost, target: None, target_lost: false });
     }
     r.construction.push(ConstructionItem { slot: SlotRef::Slot(0), level_key: "test_building_level".into(), turns_remaining: 2, cost: 600 });
     m
@@ -2801,7 +2802,7 @@ fn a_flagged_item_is_held_back_without_taking_a_recruitment_point() {
     let r10 = RegionId(10);
     // Two points (the barracks); the guard first, then two recruits.
     for (id, unit) in [(9001, "test_guard"), (9002, "test_recruit"), (9003, "test_recruit")] {
-        let item = RecruitmentItem { id: RecruitmentItemId(id), unit_key: unit.into(), turns_remaining: 3, cost: 400, target: None };
+        let item = RecruitmentItem { id: RecruitmentItemId(id), unit_key: unit.into(), turns_remaining: 3, cost: 400, target: None, target_lost: false };
         m.world.regions.get_mut(&r10).unwrap().recruitment_queue.push(item);
     }
     assert_eq!(m.recruitment_points(r10, false), 2);
@@ -3893,43 +3894,158 @@ fn the_interface_gates_and_prices_the_field_promotion() {
     assert_eq!(m.world.factions[&A].treasury, before - shown, "shown == charged for a unit made a character");
 }
 
-#[test]
-fn the_interface_gate_for_hiring_a_commander_follows_the_pool_and_the_purse() {
-    use super::pool::PoolKind;
+/// A made-up world for the commander pool: A's army 1002 (a colonel, one unit) and fleet 1003 (a
+/// captain on its only ship), A's capital at region 10, a General unit for every culture, the
+/// vanilla `agents` #11 of the General (4) and the admiral (3).
+fn pool_model() -> CampaignModel {
     let mut m = test_model();
     m.world.faction_details.entry(A).or_default().capital = Some(RegionId(10));
     let mut rules = (*m.rules).clone();
     rules.general_units.insert(String::new(), "test_unit".into());
+    rules.agent_caps.insert("General".into(), (4, 0));
+    rules.agent_caps.insert("admiral".into(), (3, 0));
     m.rules = Arc::new(rules);
-    let mut col = character(107, A, CharacterKind::Colonel, 25);
-    col.position = pos(50, 0);
-    m.world.characters.insert(CharacterId(107), col);
+    m.world.characters.insert(CharacterId(107), character(107, A, CharacterKind::Colonel, 25));
     m.world.forces.insert(ForceId(1002), MilitaryForce { id: ForceId(1002), faction: A, commander: Some(CharacterId(107)), units: vec![unit(7)], is_navy: false });
     m.world.characters.insert(CharacterId(108), character(108, A, CharacterKind::Captain, 25));
-    m.world.forces.insert(ForceId(1003), MilitaryForce { id: ForceId(1003), faction: A, commander: Some(CharacterId(108)), units: vec![unit(8)], is_navy: true });
+    let mut ship = unit(8);
+    ship.character = Some(CharacterId(108));
+    m.world.forces.insert(ForceId(1003), MilitaryForce { id: ForceId(1003), faction: A, commander: Some(CharacterId(108)), units: vec![ship], is_navy: true });
+    m
+}
+
+/// `0x009D1CD0`: the gate tests neither the pool, the purse nor the turn; only the rebels (and a
+/// force without a commander, whose byte +0x1B7 the exe reads) are refused.
+#[test]
+fn the_interface_gate_for_hiring_a_commander_refuses_only_the_rebels() {
+    let mut m = pool_model();
+    let elapsed = m.calendar.turns_elapsed;
+    m.world.faction_details.get_mut(&A).unwrap().general_pool = (Vec::new(), elapsed + 100);
+    m.world.faction_details.get_mut(&A).unwrap().admiral_pool = (Vec::new(), elapsed + 100);
+    m.turn.humans = vec![A];
+    m.start_campaign();
+    assert!(m.can_recruit_commander(ForceId(1002)), "an empty pool still opens the panel");
+    assert!(m.can_recruit_commander(ForceId(1003)));
+    m.world.factions.get_mut(&A).unwrap().treasury = -5;
+    m.turn.current = Some(B);
+    assert!(m.can_recruit_commander(ForceId(1002)), "neither debt nor another faction's turn closes it");
+    assert!(!m.can_recruit_commander(ForceId(9999)), "no such force");
+    m.world.forces.get_mut(&ForceId(1002)).unwrap().commander = None;
+    assert!(!m.can_recruit_commander(ForceId(1002)), "no commander");
+    m.world.factions.get_mut(&A).unwrap().key = String::new();
+    assert!(!m.can_recruit_commander(ForceId(1003)), "the rebels");
+}
+
+/// `0x009D52A0`: the faction's characters of the pool's type less the pool's own candidates.
+#[test]
+fn commanders_in_service_leave_out_the_candidates() {
+    use super::pool::PoolKind;
+    let mut m = pool_model();
+    let generals = |m: &CampaignModel| m.world.characters.values().filter(|c| c.faction == A && c.kind == CharacterKind::General).count() as u32;
+    let before = generals(&m);
+    assert_eq!(m.commanders_in_service(A, PoolKind::General), before);
     let elapsed = m.calendar.turns_elapsed;
     m.world.faction_details.get_mut(&A).unwrap().general_pool = (Vec::new(), elapsed);
     m.world.faction_details.get_mut(&A).unwrap().admiral_pool = (Vec::new(), elapsed + 100);
-    // An empty admiral pool: an army may hire, a fleet may not.
-    assert_eq!(m.pool_tick(A).len(), 1);
-    assert_eq!(m.world.faction_details[&A].admiral_pool.0.len(), 0);
+    let c = m.pool_tick(A)[0];
+    assert_eq!(generals(&m), before + 1, "the candidate is a General of the faction");
+    assert_eq!(m.commanders_in_service(A, PoolKind::General), before, "but not in service");
+    m.world.faction_details.get_mut(&A).unwrap().general_pool.0.retain(|&x| x != c);
+    assert_eq!(m.commanders_in_service(A, PoolKind::General), before + 1);
+    assert_eq!(m.commanders_in_service(A, PoolKind::Admiral), 0);
+}
+
+/// `0x009D1E00`: `agents` #11 plus the `cap` bonus (type 0, id 2, rounded half to even), held to
+/// `agents` #10 when that is not 0; a negative sum is 0 (ORIGINAL BUG: read unsigned there).
+#[test]
+fn the_most_commanders_a_faction_may_have_add_the_cap_bonus_up_to_the_ceiling() {
+    use super::effects::SavedBonus;
+    use super::pool::PoolKind;
+    let mut m = pool_model();
+    assert_eq!(m.commanders_max(A, PoolKind::General), 4);
+    assert_eq!(m.commanders_max(A, PoolKind::Admiral), 3);
+    let cap = |v: f32, agent: &str| SavedBonus { kind: 0, bonus: 2, value: v, qualifier: agent.into() };
+    m.world.faction_details.entry(A).or_default().bonus_base = vec![cap(2.0, "General")];
+    assert_eq!(m.commanders_max(A, PoolKind::General), 6, "the majors' agent_cap_general +2");
+    assert_eq!(m.commanders_max(A, PoolKind::Admiral), 3, "qualified by the agent key");
+    assert_eq!(m.commanders_max(B, PoolKind::General), 4, "per faction");
+    m.world.faction_details.entry(A).or_default().bonus_base = vec![cap(2.5, "General")];
+    assert_eq!(m.commanders_max(A, PoolKind::General), 6, "2.5 rounds half to even");
+    m.world.faction_details.entry(A).or_default().bonus_base = vec![cap(-10.0, "General")];
+    assert_eq!(m.commanders_max(A, PoolKind::General), 0, "a negative sum lifts no limit");
+    m.world.faction_details.entry(A).or_default().bonus_base = vec![cap(9.0, "General")];
+    Arc::make_mut(&mut m.rules).agent_caps.insert("General".into(), (4, 12));
+    assert_eq!(m.commanders_max(A, PoolKind::General), 12, "held to the ceiling");
+    Arc::make_mut(&mut m.rules).agent_caps.clear();
+    assert_eq!(m.commanders_max(A, PoolKind::General), 9, "a type without a row has base 0");
+}
+
+/// `0x00A1BB20`: a row's flags, bit 0 at the maximum, bit 1 too dear, bit 2 no room; the row is
+/// recruitable only when all are clear. The room (`0x009FB660` / `0x009FB640`): a free unit slot
+/// for a General, a ship without an admiral for an admiral.
+#[test]
+fn a_pool_row_flags_the_maximum_the_purse_and_the_room() {
+    use super::pool::{PoolKind, ROW_AT_MAXIMUM, ROW_NO_ROOM, ROW_TOO_DEAR};
+    let mut m = pool_model();
+    let elapsed = m.calendar.turns_elapsed;
+    m.world.faction_details.get_mut(&A).unwrap().general_pool = (Vec::new(), elapsed);
+    m.world.faction_details.get_mut(&A).unwrap().admiral_pool = (Vec::new(), elapsed);
+    let made = m.pool_tick(A);
+    let g = *made.iter().find(|&&c| m.world.characters[&c].kind == CharacterKind::General).unwrap();
+    let a = *made.iter().find(|&&c| m.world.characters[&c].kind == CharacterKind::Admiral).unwrap();
+    assert_eq!(m.commander_row_flags(g, ForceId(1002)), Some(0));
+    assert_eq!(m.commander_row_flags(a, ForceId(1003)), Some(0));
+    assert_eq!(m.commander_row_flags(a, ForceId(1002)), None, "an army lists the General pool");
+    assert_eq!(m.commander_row_flags(CharacterId(107), ForceId(1002)), None, "not a candidate");
+    // Bit 0: as many in service as allowed.
+    Arc::make_mut(&mut m.rules).agent_caps.insert("General".into(), (0, 0));
+    assert_eq!(m.commander_row_flags(g, ForceId(1002)), Some(ROW_AT_MAXIMUM));
+    Arc::make_mut(&mut m.rules).agent_caps.insert("General".into(), (4, 0));
+    // Bit 1: the treasury cannot pay.
+    m.world.factions.get_mut(&A).unwrap().treasury = 0;
+    assert_eq!(m.commander_row_flags(g, ForceId(1002)), Some(ROW_TOO_DEAR));
+    m.world.factions.get_mut(&A).unwrap().treasury = 100_000;
+    // Bit 2: a full army; a fleet whose every ship has an admiral.
+    m.force_caps.army = 1;
+    assert!(!m.has_commander_room(ForceId(1002), PoolKind::General));
+    assert_eq!(m.commander_row_flags(g, ForceId(1002)), Some(ROW_NO_ROOM));
+    assert!(!m.has_commander_room(ForceId(1002), PoolKind::Admiral), "an army has no ship");
+    assert!(m.has_commander_room(ForceId(1003), PoolKind::Admiral), "the captain's ship");
+    m.world.characters.get_mut(&CharacterId(108)).unwrap().kind = CharacterKind::Admiral;
+    assert_eq!(m.commander_row_flags(a, ForceId(1003)), Some(ROW_NO_ROOM));
+}
+
+/// `0x00A278B0`: the admiral boards the fleet's first ship without an admiral, replacing its
+/// character; then the command is picked again (`0x008B8E50`), so an admiral aboard may keep it.
+/// A fleet of admirals only is refused.
+#[test]
+fn a_hired_admiral_boards_the_first_ship_without_an_admiral() {
+    use super::pool::PoolKind;
+    let mut m = pool_model();
+    m.world.characters.insert(CharacterId(109), character(109, A, CharacterKind::Admiral, 25));
+    let mut flagship = unit(9);
+    flagship.character = Some(CharacterId(109));
+    let fleet = m.world.forces.get_mut(&ForceId(1003)).unwrap();
+    fleet.units.insert(0, flagship);
+    fleet.commander = Some(CharacterId(109));
+    let elapsed = m.calendar.turns_elapsed;
+    m.world.faction_details.get_mut(&A).unwrap().general_pool = (Vec::new(), elapsed + 100);
+    m.world.faction_details.get_mut(&A).unwrap().admiral_pool = (Vec::new(), elapsed);
+    let c = m.pool_tick(A)[0];
     m.turn.humans = vec![A];
     m.start_campaign();
-    assert!(m.can_recruit_commander(ForceId(1002)), "a General candidate is in the pool");
-    assert!(!m.can_recruit_commander(ForceId(1003)), "no admiral candidate");
-    assert!(!m.can_recruit_commander(ForceId(9999)), "no such force");
-    // The gate tests no money (`0x009D1CD0`): a faction in debt may still open the pool.
-    m.world.factions.get_mut(&A).unwrap().treasury = -5;
-    assert!(m.can_recruit_commander(ForceId(1002)));
-    // Another faction's turn.
-    m.turn.current = Some(B);
-    assert!(!m.can_recruit_commander(ForceId(1002)));
-    // With an admiral in the pool the fleet may hire too.
-    m.turn.current = Some(A);
-    m.world.faction_details.get_mut(&A).unwrap().admiral_pool = (Vec::new(), elapsed);
-    assert_eq!(m.pool_tick(A).len(), 1);
-    assert_eq!(m.pool_refill_time(A, PoolKind::Admiral), 4);
-    assert!(m.can_recruit_commander(ForceId(1003)));
+    m.apply(CampaignCommand::HireAdmiral { character: c, fleet: ForceId(1003) }).unwrap();
+    let f = &m.world.forces[&ForceId(1003)];
+    assert_eq!(f.units[0].character, Some(CharacterId(109)), "the flagship keeps its admiral");
+    assert_eq!(f.units[1].character, Some(c), "the new admiral replaces the captain");
+    assert!(!m.world.characters.contains_key(&CharacterId(108)), "the captain is destroyed");
+    let lead = m.commander_unit(ForceId(1003)).and_then(|i| f.units[i].character);
+    assert!(lead == Some(CharacterId(109)) || lead == Some(c));
+    assert_eq!(f.commander, lead, "the command is picked again among the admirals");
+    assert!(!m.has_commander_room(ForceId(1003), PoolKind::Admiral));
+    m.world.faction_details.get_mut(&A).unwrap().admiral_pool = (Vec::new(), m.calendar.turns_elapsed);
+    let d = m.pool_tick(A)[0];
+    assert!(m.apply(CampaignCommand::HireAdmiral { character: d, fleet: ForceId(1003) }).is_err(), "every ship has an admiral");
 }
 
 #[test]
@@ -4594,6 +4710,7 @@ fn accepted_regions_change_hands_and_keep_the_old_garrison() {
         turns_remaining: 2,
         cost: 0,
         target: None,
+        target_lost: false,
     });
     m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
     m.apply(CampaignCommand::ProposeRegions { clear: false, demanded: vec![RegionId(11)], offered: vec![RegionId(12)] }).unwrap();
@@ -4943,6 +5060,7 @@ fn a_commander_recruits_each_unit_from_its_quickest_source() {
             turns_remaining: 5,
             cost: 0,
             target: None,
+            target_lost: false,
         });
     }
     let r = m.commander_recruitment(A, CharacterId(100));
@@ -5005,7 +5123,10 @@ fn a_dead_commanders_queued_items_stay_and_lose_their_target() {
     let mut item = m.world.regions[&RegionId(13)].recruitment_queue[0].clone();
     m.character_dies(general);
     assert_eq!(m.world.regions[&RegionId(10)].recruitment_queue, own, "an untargeted item is untouched");
+    assert!(!item.target_lost);
+    // Both +0x18 and +0x24 are cleared (`0x00B57F40`).
     item.target = None;
+    item.target_lost = true;
     assert_eq!(m.world.regions[&RegionId(13)].recruitment_queue, vec![item]);
     assert_eq!(m.world.factions[&A].treasury, treasury, "no refund");
 }

@@ -524,14 +524,6 @@ pub(super) fn commander_recruitment_info(lua: &Lua, inner: &Inner, ui: &Campaign
 // g_panel_is_navy, g_military_force)`), which asks the engine for the candidates and the pool state
 // and then the player picks one.
 
-/// The pool a force recruits from: admirals for a navy, generals for an army (the panel's own
-/// `SetAsRecruitmentType(is_navy)` switch, CONFIRMED).
-fn pool_kind_of(m: &CampaignModel, force: ForceId) -> Option<(ntw_sim::campaign::pool::PoolKind, FactionId)> {
-    use ntw_sim::campaign::pool::PoolKind;
-    let f = m.world.forces.get(&force)?;
-    Some((if f.is_navy { PoolKind::Admiral } else { PoolKind::General }, f.faction))
-}
-
 /// `CampaignUI.AvailableCommandersForRecruitment(force, is_navy)`: the pool of the faction the force
 /// belongs to. CONFIRMED names and arity (2: the force's address, `is_navy`) from
 /// `enlist_commander.lua:38`, which reads `CurrentNumGenerals`, `MaxGeneralsAllowed`,
@@ -543,28 +535,15 @@ fn pool_kind_of(m: &CampaignModel, force: ForceId) -> Option<(ntw_sim::campaign:
 ///
 /// - the price is the model's hire cost measured at the force ([`CampaignModel::hire_cost_into`],
 ///   the CONFIRMED formula: 400 + 300 × rank + the distance part);
-/// - `IsRecruitable`: the row's flags are all clear (`0x009DD3AF`); the model holds the money bit
-///   (`0x00A1BB20` bit 1, [`treasury::commander_affordable`], CONFIRMED). PROVISIONAL: bit 0
-///   (`CurrentNumGenerals` ≥ `MaxGeneralsAllowed`) and bit 2 (the force has no room, +0x40) are not
-///   modelled (always clear);
+/// - `IsRecruitable`: the row's flags are all clear (`0x009DD3AF`), [`CampaignModel::commander_row_flags`]
+///   (`0x00A1BB20`, CONFIRMED): at the maximum, too dear, no room in the force;
 /// - `DistanceToCapital` / `MaxDistanceToTrack`: the force's distance to its capital and
 ///   `character_recruitment_max_distance` (the panel divides them for its bar; INFERRED pair, the
 ///   model's own distance part uses the same maximum);
 /// - `TurnsToNextPoolFill`: the pool timer's turns;
-/// - `CurrentNumGenerals` / `MaxGeneralsAllowed`: the faction's commanders of that kind in the world
-///   and that count plus the pool's cap (`character_recruitment_pool_cap`).
-///
-///   **PROVISIONAL, and the absence is now a checked negative rather than a gap.** The shipped
-///   data contains no general limit to read: `db\campaign_variables_tables\campaign_variables`
-///   holds exactly ten `character_recruitment*` keys (base cost, cost per command star, max
-///   distance, pool cap, and six refill rates) and **none** of them is a cap on the number of
-///   generals; `db\effect_bonus_value_basic_junction_tables\effect_bonus_value_basic_junction`
-///   has four `character_recruitment*` rows and none grants such a bonus either; and no key
-///   containing `generals` or `num_generals` exists in any of the 86,977 files in `data.pack`.
-///   So **there is no data-level general limit in the vanilla game**, and whatever the original
-///   shows here is either a fixed constant, a difficulty setting or something not in the DB.
-///   Ours answers "commanders of that kind in the world" and "that plus the pool cap"; the panel
-///   only uses the pair for its "3 / 5" label, so the number is cosmetic.
+/// - `CurrentNumGenerals` / `MaxGeneralsAllowed`: [`CampaignModel::commanders_in_service`]
+///   (`0x009D52A0`) and [`CampaignModel::commanders_max`] (`0x009D1E00`), both CONFIRMED: the
+///   faction's characters of the type less the candidates, and `agents` #11 plus the `cap` bonus.
 ///
 /// One row of the commander pool panel (`enlist_commander_entry.lua`), gathered from the model.
 struct CommanderRow {
@@ -585,13 +564,8 @@ fn commanders_for_recruitment(lua: &Lua, inner: &Inner, ui: &CampaignUi, force: 
     // dropped before the tables are built).
     let gathered = {
         let m = ui.model();
-        let Some((kind, faction)) = pool_kind_of(&m, force) else { return Ok(Value::Nil) };
-        let list = m.world.faction_details.get(&faction).map(|d| match kind {
-            ntw_sim::campaign::pool::PoolKind::General => &d.general_pool,
-            ntw_sim::campaign::pool::PoolKind::Admiral => &d.admiral_pool,
-        });
-        let (candidates, timer) = list.cloned().unwrap_or_default();
-        let purse = m.world.factions.get(&faction).map_or(0, |f| f.treasury);
+        let Some((kind, faction)) = m.pool_kind_of(force) else { return Ok(Value::Nil) };
+        let (candidates, timer) = m.pool(faction, kind).cloned().unwrap_or_default();
         let at = m.force_position(force);
         let capital = m.world.faction_details.get(&faction).and_then(|d| d.capital);
         let distance = match (at, capital) {
@@ -615,26 +589,16 @@ fn commanders_for_recruitment(lua: &Lua, inner: &Inner, ui: &CampaignUi, force: 
                     character: c,
                     cost,
                     type_name: character_type_name(inner, ui, c),
-                    recruitable: cost.is_some_and(|c| treasury::commander_affordable(purse, c)),
+                    recruitable: m.commander_row_flags(c, force) == Some(0),
                     historical: details.and_then(|d| d.historical_key.as_deref()).is_some(),
                     traits: details.map(|d| d.traits.clone()).unwrap_or_default(),
                     image: portrait_image(inner, &m, c),
                 }
             })
             .collect();
-        let in_command = m
-            .world
-            .characters
-            .values()
-            .filter(|c| c.faction == faction)
-            .filter(|c| match kind {
-                ntw_sim::campaign::pool::PoolKind::General => c.kind == CharacterKind::General,
-                ntw_sim::campaign::pool::PoolKind::Admiral => c.kind == CharacterKind::Admiral,
-            })
-            .count();
-        (rows, in_command, m.pool_cap(), m.rules.var("character_recruitment_max_distance", 1000.0), distance, timer.saturating_sub(m.calendar.turns_elapsed))
+        (rows, m.commanders_in_service(faction, kind), m.commanders_max(faction, kind), m.rules.var("character_recruitment_max_distance", 1000.0), distance, timer.saturating_sub(m.calendar.turns_elapsed))
     };
-    let (rows, in_command, cap, max_distance, distance, turns) = gathered;
+    let (rows, in_service, max, max_distance, distance, turns) = gathered;
     let t = lua.create_table()?;
     for (i, row_in) in rows.into_iter().enumerate() {
         let CommanderRow { character: c, cost, type_name, recruitable, historical, traits, image } = row_in;
@@ -659,8 +623,8 @@ fn commanders_for_recruitment(lua: &Lua, inner: &Inner, ui: &CampaignUi, force: 
         row.set("IsHistorical", historical)?;
         t.set(i + 1, row)?;
     }
-    t.set("CurrentNumGenerals", in_command)?;
-    t.set("MaxGeneralsAllowed", in_command + cap)?;
+    t.set("CurrentNumGenerals", in_service)?;
+    t.set("MaxGeneralsAllowed", max)?;
     t.set("MaxDistanceToTrack", max_distance)?;
     t.set("DistanceToCapital", distance)?;
     t.set("TurnsToNextPoolFill", turns)?;

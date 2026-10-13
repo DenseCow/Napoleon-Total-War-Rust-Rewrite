@@ -35,6 +35,14 @@ pub enum PoolKind {
     Admiral,
 }
 
+/// A pool row's flag (`0x00A1BB20`, CONFIRMED): the faction has as many characters of the type as it may
+/// ([`CampaignModel::commanders_max`]).
+pub const ROW_AT_MAXIMUM: u32 = 1;
+/// A pool row's flag: the treasury cannot pay the hire ([`super::treasury::commander_affordable`]).
+pub const ROW_TOO_DEAR: u32 = 2;
+/// A pool row's flag: the force has no place for him ([`CampaignModel::has_commander_room`]).
+pub const ROW_NO_ROOM: u32 = 4;
+
 impl CampaignModel {
     /// The unit a general of `faction` leads: `agent_culture_details` #3 of the `General` row for
     /// the faction's culture (`rules.general_units`); `None` for a culture without one (`indian`,
@@ -45,7 +53,8 @@ impl CampaignModel {
         self.rules.general_units.get(self.rules.characters.culture(key))
     }
 
-    fn pool(&self, f: FactionId, kind: PoolKind) -> Option<&(Vec<CharacterId>, u32)> {
+    /// A faction's pool of `kind`: its candidates and the turn of its next refill.
+    pub fn pool(&self, f: FactionId, kind: PoolKind) -> Option<&(Vec<CharacterId>, u32)> {
         let d = self.world.faction_details.get(&f)?;
         Some(match kind {
             PoolKind::General => &d.general_pool,
@@ -149,10 +158,7 @@ impl CampaignModel {
     pub fn create_candidate(&mut self, f: FactionId, kind: PoolKind) -> Option<CharacterId> {
         let capital = self.world.faction_details.get(&f)?.capital?;
         let position = self.world.regions.get(&capital)?.settlement.position;
-        let ckind = match kind {
-            PoolKind::General => CharacterKind::General,
-            PoolKind::Admiral => CharacterKind::Admiral,
-        };
+        let ckind = Self::pool_character_kind(kind);
         let due = self.due_historical(f, kind);
         let historical = if due.is_empty() {
             None
@@ -210,17 +216,116 @@ impl CampaignModel {
     /// `CanRecruitCommander(force, is_navy)`, `army.lua:708`, CONFIRMED name and arity; the army /
     /// navy panel's Promote button is shown only when it answers true, `army.lua:1058`).
     ///
-    /// The exe's gate (`0x009D1CD0`, CONFIRMED static trace 2026-10-10) tests no money: it answers
-    /// false for a faction without a record (the rebels) and otherwise true when a byte at +0x1B7 of
-    /// the object reached through the force (+0x74) is clear. PROVISIONAL: that byte's meaning is
-    /// UNKNOWN, so the model keeps its own stand-in -- it is the faction's turn and the matching pool
-    /// (general pool for an army, admiral pool for a navy) holds a candidate. Whether a row is
-    /// affordable is the row's own flag ([`super::treasury::commander_affordable`]).
+    /// The exe's gate (`0x009D1CD0`, CONFIRMED disassembly `0x009D1CD5..0x009D1D02`) tests neither
+    /// money, the turn nor the pool: it answers false for the rebels (`0x008CEEF0` on the force's
+    /// faction) and otherwise true while the force's commander (+0x74) is not in the middle of a
+    /// move (his byte +0x1B7). That byte (CONFIRMED) is set when a move starts (`0x00A28B50`,
+    /// character vtable +0x1C) and cleared only when the move finishes (`0x00A285E0`, vtable +0x20,
+    /// with argument 1; the step mover `0x00972CA0` passes 0 or 2 between steps). The model's walks
+    /// are whole (each one ends finished, CHARACTERS_FIDELITY.md §10), so between commands no
+    /// commander is mid-move. Which candidates the panel lists and which of them may be hired are
+    /// the rows' own flags ([`commander_row_flags`](Self::commander_row_flags)).
     pub fn can_recruit_commander(&self, force: ForceId) -> bool {
+        self.world.forces.get(&force).is_some_and(|f| f.commander.is_some() && !self.is_rebel_faction(f.faction))
+    }
+
+    /// The pool a force hires from: admirals for a navy, Generals for an army (the panel's own
+    /// `SetAsRecruitmentType(is_navy)` switch, CONFIRMED).
+    pub fn pool_kind_of(&self, force: ForceId) -> Option<(PoolKind, FactionId)> {
+        let f = self.world.forces.get(&force)?;
+        Some((if f.is_navy { PoolKind::Admiral } else { PoolKind::General }, f.faction))
+    }
+
+    /// The character type a pool holds.
+    fn pool_character_kind(kind: PoolKind) -> CharacterKind {
+        match kind {
+            PoolKind::General => CharacterKind::General,
+            PoolKind::Admiral => CharacterKind::Admiral,
+        }
+    }
+
+    /// The panel's `CurrentNumGenerals` (`0x009D52A0`, CONFIRMED): the faction's characters of the
+    /// pool's type (`0x008DBEC0` counts the faction's character list +0x764 by agent record) less the
+    /// pool's candidates (the manager's list +0xC). `0x008DBEC0` skips a character whose byte +0x54C
+    /// is set, which only the Peninsular campaign's guerrilla spawn (`0x00A0E1F0` from `0x00B4F090`)
+    /// sets; the model has no such spawn, so it has none to skip.
+    pub fn commanders_in_service(&self, faction: FactionId, kind: PoolKind) -> u32 {
+        let ck = Self::pool_character_kind(kind);
+        let all = self.world.characters.values().filter(|c| c.faction == faction && c.kind == ck).count();
+        let candidates = self.pool(faction, kind).map_or(0, |p| p.0.len());
+        // u32: the exe's count; a faction never has 4 billion characters.
+        all.saturating_sub(candidates) as u32
+    }
+
+    /// The panel's `MaxGeneralsAllowed` (`0x009D1E00`, CONFIRMED): the type's `agents` #11 plus the
+    /// faction's `cap` bonus for it (its effects +0x6FC, bonus type 0 id 2 qualified by the agent key,
+    /// rounded half to even by `0x00E1EFF0`), held to `agents` #10 when that is not 0 (an unsigned
+    /// minimum). Vanilla: a General 4 (6 for the majors' `agent_cap_general` +2), an admiral 3.
+    ///
+    /// ORIGINAL BUG (`0x009D1E21`, `0x00A1BB87`): a sum below 0 (a mod's negative `cap`) is compared
+    /// unsigned, so it reads as about 4 billion and lifts the limit; ours holds it at 0.
+    pub fn commanders_max(&self, faction: FactionId, kind: PoolKind) -> u32 {
+        let key = Self::pool_character_kind(kind).esf_name();
+        let (base, ceiling) = self.rules.agent_caps.get(key).copied().unwrap_or((0, 0));
+        let id = super::effects::AGENT_BONUS_NAMES.iter().position(|b| *b == "cap").expect("in the table");
+        let bonus = super::effects::Effects::faction_sum(self, faction).get_qualified(super::effects::BonusKind::Saved(0), &id.to_string(), key);
+        let sum = i64::from(base) + f64::from(bonus).round_ties_even() as i64;
+        let max = sum.clamp(0, i64::from(u32::MAX)) as u32;
+        // The ceiling is compared unsigned too (`CMOVNC` at `0x009D1E31`); 0 means none.
+        match ceiling as u32 {
+            0 => max,
+            c => max.min(c),
+        }
+    }
+
+    /// Whether `force` has a place for a new commander from `kind`'s pool (the pool's slot +0x40,
+    /// CONFIRMED): a General (`0x009FB660`) needs a free unit slot (the force's unit count below
+    /// [`max_units`](Self::max_units)); an admiral (`0x009FB640` → `0x00A278D0`) needs a navy with a
+    /// ship whose character is missing or not an admiral (agent record type +0x2C ≠ 1), the ship he
+    /// boards ([`hire_admiral`](Self::hire_admiral)). An army never has one for an admiral.
+    pub fn has_commander_room(&self, force: ForceId, kind: PoolKind) -> bool {
         let Some(f) = self.world.forces.get(&force) else { return false };
-        let kind = if f.is_navy { PoolKind::Admiral } else { PoolKind::General };
-        let Some((candidates, _)) = self.pool(f.faction, kind) else { return false };
-        !self.is_rebel_faction(f.faction) && self.may_act(f.faction) && !candidates.is_empty()
+        match kind {
+            PoolKind::General => f.units.len() < self.max_units(f.is_navy),
+            PoolKind::Admiral => f.is_navy && self.admiral_ship(force).is_some(),
+        }
+    }
+
+    /// The ship a new admiral boards (`0x00A278B0` → `0x00A278D0`, CONFIRMED): the navy's first unit
+    /// (in its unit order, navy +0xA4) whose character is missing or not an admiral.
+    fn admiral_ship(&self, fleet: ForceId) -> Option<usize> {
+        let f = self.world.forces.get(&fleet)?;
+        f.units.iter().position(|u| !u.character.and_then(|c| self.world.characters.get(&c)).is_some_and(|c| c.kind == CharacterKind::Admiral))
+    }
+
+    /// The flags of a candidate's row in the pool panel for `force` (`0x00A1BB20`, CONFIRMED
+    /// `0x00A1BB7B..0x00A1BBC2`), `None` when he is not a candidate; the row's `IsRecruitable` is
+    /// "all clear" (`0x009DD3AF`). Bit 0 ([`ROW_AT_MAXIMUM`]): [`commanders_in_service`] ≥
+    /// [`commanders_max`]; bit 1 ([`ROW_TOO_DEAR`]): the treasury cannot pay his cost into the force
+    /// ([`super::treasury::commander_affordable`]); bit 2 ([`ROW_NO_ROOM`]): the force has no place
+    /// for him ([`has_commander_room`]). The hire itself tests none of them (`0x00A1B8F0`).
+    ///
+    /// [`commanders_in_service`]: Self::commanders_in_service
+    /// [`commanders_max`]: Self::commanders_max
+    /// [`has_commander_room`]: Self::has_commander_room
+    pub fn commander_row_flags(&self, c: CharacterId, force: ForceId) -> Option<u32> {
+        let (kind, faction) = self.pool_kind_of(force)?;
+        if !self.pool(faction, kind).is_some_and(|p| p.0.contains(&c)) {
+            return None;
+        }
+        let cost = self.hire_cost_into(c, force)?;
+        let mut flags = 0;
+        if self.commanders_in_service(faction, kind) >= self.commanders_max(faction, kind) {
+            flags |= ROW_AT_MAXIMUM;
+        }
+        let purse = self.world.factions.get(&faction).map_or(0, |f| f.treasury);
+        if !super::treasury::commander_affordable(purse, cost) {
+            flags |= ROW_TOO_DEAR;
+        }
+        if !self.has_commander_room(force, kind) {
+            flags |= ROW_NO_ROOM;
+        }
+        Some(flags)
     }
 
     /// Whether the force may promote one of its units in the field right now (the interface's
@@ -398,8 +503,13 @@ impl CampaignModel {
 
     /// Hires an admiral from his faction's pool onto `fleet`, a navy of his faction (`0x00A1B8F0` →
     /// `0x00A16110`, CONFIRMED structure): the cost is the General's formula measured at the fleet
-    /// (`0x00A1BBE0` is the pool's shared cost slot), he moves to the fleet and takes command
-    /// (`0x008EDE20`, `0x008D2FA0`); a captain commanding it is removed (`0x00A0C6F0(1)`).
+    /// (`0x00A1BBE0` is the pool's shared cost slot). He boards the fleet's first ship whose character
+    /// is missing or not an admiral (`0x00A278B0`, the room test [`has_commander_room`](Self::has_commander_room)):
+    /// an empty ship takes him (`0x008EDE20`), otherwise he replaces its character (`0x008B3B00` →
+    /// `0x008CFBD0`), who is destroyed (`0x00A0C6F0(1)`). Then the fleet's commander is picked again
+    /// (`0x008D2FA0` / `0x008B8E50` → `0x008ED2C0`, [`commander_unit`](Self::commander_unit)), so an
+    /// admiral already aboard with a higher `command_sea` keeps command. A fleet with no such ship
+    /// (all admirals) is refused: the exe would use a null ship there; its interface never offers it.
     pub(crate) fn hire_admiral(&mut self, c: CharacterId, fleet: ForceId) -> Result<Vec<CampaignEvent>, CommandError> {
         let ch = self.world.characters.get(&c).cloned().ok_or(CommandError::UnknownCharacter(c))?;
         if !self.may_act(ch.faction) {
@@ -412,30 +522,26 @@ impl CampaignModel {
         if force.faction != ch.faction || !force.is_navy {
             return Err(CommandError::Unsupported("an admiral joins a navy of his own faction"));
         }
-        let old = force.commander.ok_or(CommandError::UnknownForce(fleet))?;
-        let (position, garrisoned_in) = self.world.characters.get(&old).map(|x| (x.position, x.garrisoned_in)).ok_or(CommandError::UnknownCharacter(old))?;
+        let lead = force.commander.ok_or(CommandError::UnknownForce(fleet))?;
+        let (position, garrisoned_in) = self.world.characters.get(&lead).map(|x| (x.position, x.garrisoned_in)).ok_or(CommandError::UnknownCharacter(lead))?;
+        let ship = self.admiral_ship(fleet).ok_or(CommandError::Unsupported("every ship of the fleet has an admiral"))?;
         let cost = self.hire_cost_at(c, position).expect("checked");
         self.take_candidate(c, PoolKind::Admiral, cost);
         if let Some(x) = self.world.characters.get_mut(&c) {
             x.position = position;
             x.garrisoned_in = garrisoned_in;
         }
-        if let Some(f) = self.world.forces.get_mut(&fleet) {
-            f.commander = Some(c);
-        }
-        // A captain in command goes (he was made for the ship; a General or admiral riding along
-        // would be another matter, UNKNOWN).
-        if self.world.characters.get(&old).is_some_and(|x| x.kind == CharacterKind::Captain) {
-            for u in self.world.forces.get_mut(&fleet).map(|f| f.units.iter_mut()).into_iter().flatten() {
-                if u.character == Some(old) {
-                    u.character = None;
-                }
+        let f = self.world.forces.get_mut(&fleet).expect("checked");
+        let old = f.units[ship].character.replace(c).filter(|o| self.world.characters.contains_key(o));
+        if let Some(ui) = self.commander_unit(fleet) {
+            let next = self.world.forces[&fleet].units[ui].character;
+            if let Some(f) = self.world.forces.get_mut(&fleet) {
+                f.commander = next.or(f.commander);
             }
-            self.world.characters.remove(&old);
-            self.world.character_details.remove(&old);
-            self.world.sight_radius.remove(&old);
-            // His destructor (`0x0099D2D0`) frees the items queued through him, as any character's.
-            self.drop_recruitment_target(old);
+        }
+        // The replaced character goes the way of any destroyed character (posts, pools, queued items).
+        if let Some(old) = old {
+            self.character_dies(old);
         }
         self.update_hidden(c);
         Ok(vec![CampaignEvent::CharacterHired { character: c, force: fleet, cost }])

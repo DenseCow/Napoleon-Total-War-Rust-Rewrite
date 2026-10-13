@@ -230,6 +230,12 @@ pub struct CampaignRules {
     pub government_effects: BTreeMap<String, Vec<(String, f32)>>,
     /// `agents` #1: character type (ESF string) → base action points.
     pub agent_action_points: BTreeMap<String, i32>,
+    /// `agents` #11 / #10 by agent key: (the base number of characters of the type a faction may
+    /// have, the ceiling on it with its `cap` bonus added, 0 = none). Agent record +0x1A8 / +0x1A4,
+    /// CONFIRMED copied by the row reader at `0x00F931A7` and read by `0x009D1E00` (the pool's
+    /// `MaxGeneralsAllowed`, [`super::world::CampaignModel::commanders_max`]). Vanilla: General
+    /// (4, 0), admiral (3, 0), the spies and missionaries (0, 12). A type without a row has none.
+    pub agent_caps: BTreeMap<String, (i32, i32)>,
     /// `agents` #9 by agent key: the religion a missionary converts to (see [`super::religion`]).
     pub agent_religions: BTreeMap<String, String>,
     /// `agents` #2: character type → sight radius in map units (character +0x2EC from record +0x10,

@@ -1302,6 +1302,7 @@ impl CampaignModel {
             turns_remaining: unit.turns.max(1),
             cost,
             target,
+            target_lost: false,
         });
         Ok(vec![CampaignEvent::RecruitmentItemIssuedByPlayer { region }])
     }

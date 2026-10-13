@@ -206,11 +206,14 @@ pub struct FactionDetails {
     pub government_id: i32,
     /// `GOVERNMENT/POSTS_ARRAY`, in file order.
     pub posts: Vec<GovernmentPost>,
-    /// The first i32 after the second `FORT_UPGRADE_MANAGER`: the capital region's id
-    /// (CONFIRMED: France's is `eur_france`, Paris; INFERRED meaning "capital").
+    /// The capital region's id: the first of the two i32 values right before `EXPOSED_CHARACTERS`
+    /// (CONFIRMED: the faction loader `0x0087A190` reads it at `0x0087B20C` into faction +0x72C, the
+    /// capital, whether or not the optional `FORT_UPGRADE_MANAGER` before it is present; France's is
+    /// `eur_france`, Paris).
     pub capital: Option<RegionId>,
-    /// The i32 after it (equal to the capital in every startpos; UNKNOWN, INFERRED original
-    /// capital).
+    /// The i32 after it, faction +0x730 (`0x0087B23C`): the home region, which `AddRegionToFaction`
+    /// `0x008AE270` makes the capital again when the faction gains it (CONFIRMED; equal to the capital
+    /// in every startpos).
     pub capital_2: Option<RegionId>,
     /// The utf16 religion key after `FACTION`'s u32[1] and bool (`rel_catholic`).
     pub religion: String,

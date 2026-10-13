@@ -8,13 +8,13 @@ the original's values. See the Goal section of `CLAUDE.md`.
 
 ## Progress
 
-Generated 2026-10-12 by `bash tools/progress.sh` (from `tools/backlog_count.sh` and `tools/tag_count.sh`); never edit it by hand.
+Generated 2026-10-13 by `bash tools/progress.sh` (from `tools/backlog_count.sh` and `tools/tag_count.sh`); never edit it by hand.
 
-Tags left in the code (done means zero): 1776 (684 PROVISIONAL, 102 PLACEHOLDER, 990 INFERRED), plus 598 UNKNOWN.
+Tags left in the code (done means zero): 1771 (681 PROVISIONAL, 102 PLACEHOLDER, 988 INFERRED), plus 592 UNKNOWN.
 
 | Section | Done | Partly done | To do |
 |---|---|---|---|
-| 0. Cross-cutting fidelity | 97 | 0 | 50 |
+| 0. Cross-cutting fidelity | 103 | 0 | 46 |
 | 1. File formats and data | 11 | 0 | 0 |
 | 2. Graphics and rendering | 0 | 11 | 32 |
 | 3. Battle gameplay (land) | 1 | 11 | 23 |
@@ -102,7 +102,7 @@ first. Evidence and round history live there; the pre-2026-10-07 long form of th
 - [x] Recruitable population gate and charge (`0x00A89550` / `0x00AAF190` / `0x00A61AA0`, `REGION_FACTORS` #2)
 - [x] Capture refunds a port's naval queue items to the old owner (`0x00B1A760(1)` per port); our `occupy` refunds nothing; `0x00B58A30` is a fourth capture variant missing from the notes
 - [ ] `CDIR_INTENTION_TRANSFER_REGION_OWNERSHIP` (`0x00B93840`, applied via `0x00B58A30`): merged 2026-10-11 (region-transfer: campaign director in the model behind seam `director.region_transfer`, TurnStep::Handover, cdir_configs keyed campaign_faction_variable `0x00FCD150`, CDIR_INTERFACE + counter in .esf `0x00B94170`/`0x00B9D6E0`/`0x00B9B6C0`, startpos director RNG, 4 ORIGINAL BUGs fixed; CAMPAIGN_FIDELITY.md). Left (PROVISIONAL): the stored relation copy `rival_score` reads (next line), the siege test (§5 "Sieges on the campaign map"), sea mobiles, the director's other RNG users (below)
-- [ ] Stored CAI relation belief (`0x00A89E00` faction +0x100 list +8, written by `0x00ABAFB0`): when the copy is refreshed (deal proposals; the setter of the +0x6DC re-mark flag); the director's `rival_score` reads it
+- [ ] (running: cai-belief) Stored CAI relation belief (`0x00A89E00` faction +0x100 list +8, written by `0x00ABAFB0`): when the copy is refreshed (deal proposals; the setter of the +0x6DC re-mark flag); the director's `rival_score` reads it
 - [ ] Director: the other desires that draw on the director RNG (`0x00BAC560`, `0x00BAC9C0`, `0x00BC06E0`, `0x00BD4A60`, `0x00BAED7A`): merged 2026-10-12 (director-rng: at-war, boost, XP, replenish draws; at-war order `0x00ABAFB0` CONFIRMED; garrison skip `0x00C3B7A0` +0xFC CONFIRMED). Left: the garrison object chain +0x12C→+0x34 (PROVISIONAL, ntw_sim director.rs)
 - [ ] Path grid: sea cells carry their sea region (`0x00BB52E0`), used by the director's transfer checks
 - [ ] Trace: does a region transfer eject the old owner's agents (and where to)
@@ -115,12 +115,14 @@ first. Evidence and round history live there; the pre-2026-10-07 long form of th
 - [ ] Naval PROVISIONAL details: capture share weighting, captured crew base, gun counts of 8 ship models (needs a probe)
 - [x] Trace the affordability rules of the unit pool and treaties (ours: their own checks in pool.rs ~309/484, treaties.rs ~467), and their charging arithmetic (ours: saturating/plain; overflow behaviour untraced; upkeep economy.rs ~525 and script treasury changes ntw_script game.rs:211 also bypass treasury.rs)
 - [x] What the exe does with a queued recruitment item whose target commander dies (ours keeps the dead id: `character_dies` characters.rs:532, pool.rs:434, family.rs)
-- [ ] (running: treasury2) IsRecruitable bits 0 and 2 (generals maximum, no room) are not modelled (treasury-rules, CAMPAIGN_FIDELITY.md §Treasury changes)
-- [ ] (running: treasury2) Gate byte +0x1B7 (`0x009D1CD0`) is not modelled
-- [ ] (running: treasury2) Map the remaining treasury charge/credit callers (CAMPAIGN_FIDELITY.md §Treasury changes); queue item +0x24 is not modelled
-- [ ] (running: treasury2) `0x008F56C0` (paid when both sides are human) is not modelled
-- [ ] (running: payment-capital) Diplomacy: cap a demanded one-off payment at the payer's treasury (`0x00C4AB4E`–`0x00C4AB82`; `deal_item_commands` / `one_off_payment` do not cap; check the negative-treasury case for an ORIGINAL BUG; CAMPAIGN_FIDELITY.md deal → item copy)
-- [ ] (running: payment-capital) Importer: read the capital even when the faction has no `FORT_UPGRADE_MANAGER` block, as the exe does (`0x0087B1DA`; `crates/ntw_campaign/src/details.rs` `faction_details`)
+- [x] IsRecruitable bits 0 and 2 (generals maximum, no room) are not modelled (treasury-rules, CAMPAIGN_FIDELITY.md §Treasury changes)
+- [x] Gate byte +0x1B7 (`0x009D1CD0`) is not modelled
+- [x] Map the remaining treasury charge/credit callers (CAMPAIGN_FIDELITY.md §Treasury changes); queue item +0x24 is not modelled
+- [x] `0x008F56C0` (paid when both sides are human) is not modelled
+- [ ] Treasury callers not yet modelled (treasury2, CAMPAIGN_FIDELITY.md §Treasury changes): retraining `0x008EEB70`, the state-6 refund `0x008E1BC0`, missions credit, director credit `0x00BAF200`, the MP results counter FACTION +0x954 (`0x008F56C0`; second caller `0x00B298F0` not in the notes)
+- [x] Diplomacy: cap a demanded one-off payment at the payer's treasury (`0x00C4AB4E`–`0x00C4AB82`; `deal_item_commands` / `one_off_payment` do not cap; check the negative-treasury case for an ORIGINAL BUG; CAMPAIGN_FIDELITY.md deal → item copy)
+- [x] Importer: read the capital even when the faction has no `FORT_UPGRADE_MANAGER` block, as the exe does (`0x0087B1DA`; `crates/ntw_campaign/src/details.rs` `faction_details`)
+- [ ] Diplomacy: the payments Propose rows and the AI's payment evaluation call `demanded_payment` (the exe caps at proposal and shows the capped amount in the row text, `0x00C4AB85`; ours caps in `accept_deal`) (payment-capital)
 
 ### 0-C middleware — [analysis/fidelity/MIDDLEWARE_VERIFY.md, BINK.md]
 - [x] Miles mixing rules and loudness (CONFIRMED against the exe); game-speed sfx rule; UI sound kinds
@@ -684,9 +686,11 @@ Non-blocking review findings, one line each (CLAUDE.md "Done means"). A worker e
 - [ ] Debugger: who subscribes to the signal at the end of CancelRecruitmentItem (breakpoint `0x008DBB59`); it passes the already-freed item when the cancelled one was last (ORIGINAL BUG only once a listener reads it)
 - [ ] Director (ntw_sim director.rs): queued transfers whose receiver is dead stay in the queue (whether the exe purges them is untraced); `areas()` runs `human_inside` for every area even when only `rival_score` needs areas; ntw_campaign director.rs `fill`: the old-version RNG step's place among the fills is unverified (no vanilla file uses it)
 - [ ] (running: polish15) Ghidra: `pflNextValue` `0x00F859A0` (name/plate); `0x00F72B80`'s 3 void* row locals need row structs
-- [ ] Ghidra (polish11): portrait constructors/ESF loaders still 13-33% (`0x00992E60`, `0x0098F250`, `0x0098F880`, `0x00990EF0`, `0x00A1A300`; shared helper `0x004F0800` unnamed); deal batch minimum 42; the deal → item copy site not found; the save capital → +0x72C link INFERRED
+- [ ] Ghidra (polish11): portrait constructors/ESF loaders still 13-33% (`0x00992E60`, `0x0098F250`, `0x0098F880`, `0x00990EF0`, `0x00A1A300`; shared helper `0x004F0800` unnamed); deal batch minimum 42
 - [ ] Diplomacy relations list (self-checks2): grey header with ▲ sort arrow and column divider; alternating row bands
 - [ ] Ghidra (director-rng): apply the proposed names listed in CAMPAIGN_FIDELITY.md (director desires section) with their V5 write-ups; `vanilla_director_floats_all_parse` (ntw_campaign economy_fidelity.rs) prints every row
 - [ ] Battle HUD (hud-state): draw the `set_greyscale_t0` / `red_pulse_t0` / `unitcard_burning_t0` UI techniques (UI material); text shaders per state (`+0x12C`, `0x01014FB0`; layout default untraced); `time_request_changed` `is_multiplayer` PROVISIONAL until multiplayer battles; the R reset key rebuilds the sim without telling the speed ring
 - [ ] (running: polish15) Ghidra (gait-infantry): name and V5-document the state-stack pops `0x0056D990` and `0x005359A0`; V5 plate for BuildUnitMoveOrder `0x0051A530`; cite the other files caps `0x00646C70`, `0x00646D40`, `0x0065A6D0` next to `0x0061CAB0`
 - [ ] (running: polish15) Battle (abilities.rs ~216): `width()` with no width set uses the current men (`frontage_m(self.men)`) while `files()` uses `max_men` (gait-infantry review)
+- [ ] Recruit pool (treasury2, pool.rs ~270): the `cap` bonus lookup, its string and a full `faction_sum` run per panel row; compute once per panel. pool.rs ~527: the no-ship refusal is a crash guard (the exe dereferences a null ship at `0x00A161A1`): label it so. Ghidra: create functions at `0x009FB640`, `0x009FB660`, `0x00B57F40`
+- [ ] Flaky test: `video::tests::plays_a_stub_movie_to_the_end` (napoleon video/mod.rs ~750) depends on wall-clock sleeps and fails under load (failed once in a full run 2026-10-13 while 3 workers built, passes alone); drive the movie clock deterministically
