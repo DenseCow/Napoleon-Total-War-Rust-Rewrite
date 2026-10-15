@@ -906,7 +906,7 @@ impl AllianceAi {
                     && line_ids
                         .iter()
                         .filter_map(|id| b.unit_index(*id))
-                        .all(|i| b.units[i].destination.is_none());
+                        .all(|i| b.units[i].destination().is_none());
                 if !self.stop_and_shoot_keeps(b, line_ids) {
                     // The planner drops STOP_AND_SHOOT when its keep test (`0x0075ECA0`) fails;
                     // the auction then gives the units to ATTACK_BATTLEGROUP: in with the bayonet.
@@ -1504,10 +1504,10 @@ impl AllianceAi {
                             .entry(id)
                             .or_insert_with(|| sub(u.position, scale(dir, p.fall_back_distance)));
                         if dist(u.position, rally) > p.slot_tolerance * 0.5 {
-                            if u.destination.is_none_or(|d| dist(d, rally) > 1.0) {
+                            if u.destination().is_none_or(|d| dist(d, rally) > 1.0) {
                                 b.order_move(id, rally);
                             }
-                        } else if u.destination.is_some() {
+                        } else if u.destination().is_some() {
                             b.order_halt(id);
                         }
                         b.order_end_charge(id);
@@ -1552,7 +1552,7 @@ impl AllianceAi {
                 let in_range = (line_holding && role(&u) == Role::Infantry)
                     || self.enemies(b).any(|e| !e.morale.is_routing_or_shattered() && dist(u.position, e.position) <= range);
                 if in_range {
-                    if u.destination.is_some() || u.fire_target.is_some() {
+                    if u.destination().is_some() || u.fire_target.is_some() {
                         b.order_halt(id);
                     }
                     self.tasks.insert(id, UnitTask::StopAndShoot);
@@ -1565,10 +1565,10 @@ impl AllianceAi {
                 // so its infantry goes all the way to the slot (PROVISIONAL tolerance).
                 let tolerance = if follows_line { p.line_move_tolerance } else { p.slot_tolerance * 0.5 };
                 if dist(u.position, slot) > tolerance {
-                    if u.destination.is_none_or(|d| dist(d, slot) > 1.0) {
+                    if u.destination().is_none_or(|d| dist(d, slot) > 1.0) {
                         b.order_move(id, slot);
                     }
-                } else if u.destination.is_some() {
+                } else if u.destination().is_some() {
                     b.order_halt(id);
                 }
             }

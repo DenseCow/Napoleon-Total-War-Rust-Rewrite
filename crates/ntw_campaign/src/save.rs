@@ -1488,7 +1488,8 @@ fn write_region(
     // A captured region: the original hands every residence of the old owner in it (settlement
     // and slots: ports, forts, towns, roads) to the new owner (CONFIRMED: in its saves every
     // residence names the region's owner, apart from a slot another faction holds; our NR-5 had
-    // the slots left with the old owner, SAVE_COMPAT.md §17).
+    // the slots left with the old owner, SAVE_COMPAT.md §17). The slots then get the model's holders
+    // (`write_slot_manager`), so a slot another faction holds names that faction.
     let new_owner = region.owner.raw() as u32;
     if let Some(old) = r.get_u32(20).filter(|&o| o != new_owner) {
         hand_over_residences(r, old, new_owner);
@@ -1621,7 +1622,7 @@ fn write_recruitment(r: &mut EsfRecord, region: &Region, dests: &[QueueDest], is
     Ok(())
 }
 
-/// The buildings and construction items of a region's `REGION_SLOT_MANAGER`: every slot of its
+/// The buildings, construction items and holders of a region's `REGION_SLOT_MANAGER`: every slot of its
 /// `REGION_SLOT_ARRAY`, the road and the walls (`ROAD_SLOT` / `FORTIFICATION_SLOT`, each found
 /// as the reader finds it, [`crate::world::wrapped_slot`]).
 fn write_slot_manager(
@@ -1638,15 +1639,33 @@ fn write_slot_manager(
             let Some(model_slot) = region.slots.get(i) else { continue };
             let c = region.construction.iter().find(|c| c.slot == SlotRef::Slot(i));
             write_building_manager(slot, model_slot.building.as_ref(), c, faction, government, template, rules)?;
+            write_slot_holder(slot, region, model_slot.holder);
         }
     }
-    for (name, slot_ref, building) in [("ROAD_SLOT", SlotRef::Road, &region.road), ("FORTIFICATION_SLOT", SlotRef::Walls, &region.fortification)] {
+    for (name, slot_ref, building, holder) in [
+        ("ROAD_SLOT", SlotRef::Road, &region.road, region.road_holder),
+        ("FORTIFICATION_SLOT", SlotRef::Walls, &region.fortification, region.fortification_holder),
+    ] {
         if let Some(slot) = wrapped_slot_mut(sm, name) {
             let c = region.construction.iter().find(|c| c.slot == slot_ref);
             write_building_manager(slot, building.as_ref(), c, faction, government, template, rules)?;
+            write_slot_holder(slot, region, holder);
         }
     }
     Ok(())
+}
+
+/// A `REGION_SLOT`'s holder, where the reader finds it (#0 `SIEGEABLE_GARRISON_RESIDENCE` #0
+/// `GARRISON_RESIDENCE` #0, [`crate::world`]'s `slot_holder`; CONFIRMED): the model's holder, or the region's
+/// owner when it has none (the original's saves name the owner there, SAVE_COMPAT.md "Captured regions").
+/// A residence that stores 0 (the reader's "none") keeps it while the model has no holder, so a loaded
+/// slot is written back as it was. A slot without the record is left alone.
+fn write_slot_holder(slot: &mut EsfRecord, region: &Region, holder: Option<ntw_sim::campaign::FactionId>) {
+    let Some(gr) = child_mut(slot, "SIEGEABLE_GARRISON_RESIDENCE").and_then(|s| child_mut(s, "GARRISON_RESIDENCE")) else { return };
+    if holder.is_none() && gr.get_u32(0) == Some(0) {
+        return;
+    }
+    set(gr, 0, EsfNode::U32(holder.unwrap_or(region.owner).raw() as u32));
 }
 
 /// [`crate::world::wrapped_slot`], to write: the `name` child's `REGION_SLOT`, or the child itself
@@ -1746,45 +1765,64 @@ fn write_building_manager(
         }
         children.push(EsfNode::Record(Box::new(rec)));
     }
-    // A repair item ({u32 2, bool, u32, u32 turns, u32 cost, u32 health}, no key: CONFIRMED shape
-    // in the user's saves, under damaged buildings) is not modelled: keep it as stored.
-    let repair = old_item.clone().filter(|o| construction.is_none() && o.get_str(5).is_none());
-    if let Some(o) = repair {
-        children.push(EsfNode::Bool(true));
-        children.push(EsfNode::Record(Box::new(o)));
+    children.push(EsfNode::Bool(construction.is_some()));
+    let Some(c) = construction else {
         bm.children = children;
         return Ok(());
-    }
-    children.push(EsfNode::Bool(construction.is_some()));
-    // The same item as in the source: keep its record (all its fields), only advance the turns.
-    let kept = construction.and_then(|c| {
-        let mut o = old_item.clone().filter(|o| o.get_str(5) == Some(c.level_key.as_str()))?;
+    };
+    use ntw_sim::campaign::ConstructionKind;
+    // #0 the item type (vtable +4, CONFIRMED: 0 upgrade, 1 new building, 2 repair, 3 demolish, see
+    // `crate::world::read_construction`); the type's own tail at #5 (`0x00B256C0` reads it): a build's level key, a
+    // repair's health per turn (+0x18, `0x00B7A4A0`), nothing for a demolition.
+    let item_type = c.kind.esf_type(building.is_some());
+    let tail = match c.kind {
+        ConstructionKind::Build => Some(EsfNode::Utf16String(c.level_key.clone())),
+        ConstructionKind::Repair { health_per_turn, .. } => Some(EsfNode::U32(health_per_turn)),
+        ConstructionKind::Demolish => None,
+    };
+    // The same item as in the source (a build of the same level, or a repair / demolition of the same type): keep
+    // its record (all its fields), only set the active byte and advance the turns (and set a repair's step).
+    let same = |o: &EsfRecord| match c.kind {
+        ConstructionKind::Build => o.get_str(5) == Some(c.level_key.as_str()),
+        _ => o.get_u32(0) == Some(item_type),
+    };
+    let kept = old_item.filter(same).and_then(|mut o| {
         let total = o.get_u32(3)?;
+        set(&mut o, 1, EsfNode::Bool(c.active));
         if total >= c.turns_remaining {
             set(&mut o, 2, EsfNode::U32(total - c.turns_remaining));
         } else {
             set(&mut o, 2, EsfNode::U32(0));
             set(&mut o, 3, EsfNode::U32(c.turns_remaining));
         }
+        if let (ConstructionKind::Repair { .. }, Some(t)) = (c.kind, &tail) {
+            set(&mut o, 5, t.clone());
+        }
         Some(o)
     });
     if let Some(o) = kept {
         children.push(EsfNode::Record(Box::new(o)));
-    } else if let Some(c) = construction {
-        // #2 turns done / #3 total (CONFIRMED pattern in the original's saves: done counts up to
-        // the level's build time). The total is the level's `building_levels` time.
-        let total = rules.buildings.get(&c.level_key).map_or(0, |b| b.turns).max(c.turns_remaining).max(1);
+    } else {
+        // #2 turns done / #3 total (CONFIRMED pattern in the original's saves: done counts up to the total). The
+        // total is the level's `building_levels` time for a build, the repair's own length, 1 for a demolition
+        // (`0x00AE6ED0`).
+        let total = match c.kind {
+            ConstructionKind::Build => rules.buildings.get(&c.level_key).map_or(0, |b| b.turns),
+            ConstructionKind::Repair { turns, .. } => turns,
+            ConstructionKind::Demolish => 1,
+        }
+        .max(c.turns_remaining)
+        .max(1);
         let mut rec = EsfRecord::new("BUILDING_CONSTRUCTION_ITEM", 1);
         rec.children = vec![
-            // #0: 1 for a new building in an empty slot, 0 for an upgrade (INFERRED from the
-            // user's saves); #1 true in every sample.
-            EsfNode::U32(u32::from(building.is_none())),
-            EsfNode::Bool(true),
+            EsfNode::U32(item_type),
+            // #1 the active byte (+0x8, `ConstructionItem::active`).
+            EsfNode::Bool(c.active),
             EsfNode::U32(total - c.turns_remaining.min(total)),
             EsfNode::U32(total),
             EsfNode::U32(c.cost as u32),
-            EsfNode::Utf16String(c.level_key.clone()),
         ];
+        rec.children.extend(tail);
         children.push(EsfNode::Record(Box::new(rec)));
     }
     bm.children = children;
@@ -1873,9 +1911,11 @@ pub fn save_bytes(source: &EsfFile, model: &CampaignModel, human: &str, timestam
 /// `FACTION` #55 (the second `CAMPAIGN_BONUS_VALUES`, faction +0x8D4 = base + difficulty handicap,
 /// EFFECTS_FIDELITY.md §1) from the model, when it differs from the source: one
 /// `CAMPAIGN_BONUS_VALUE_BLOCK` item per entry holding `CAMPAIGN_BONUS_VALUE` {u32 type, i32 bonus, f32
-/// value} plus the qualifier string for non-basic types (as the original writes: type 0 agent caps
-/// carry it, type 1 entries do not; other types INFERRED). Record versions are taken from the source.
+/// value} plus the type's qualifier strings, as the original's writer `0x00E02F80` switches on the type
+/// (CONFIRMED: two for type 7, population class then religion, none for type 1 and types outside its
+/// switch, one for the rest; `SavedBonus::qualifier_count`). Record versions are taken from the source.
 fn write_bonus_values(f: &mut EsfRecord, details: Option<&ntw_sim::campaign::FactionDetails>) {
+    use ntw_sim::campaign::effects::SavedBonus;
     let Some(d) = details else { return };
     if d.bonus_with_difficulty.is_empty() {
         return;
@@ -1885,19 +1925,7 @@ fn write_bonus_values(f: &mut EsfRecord, details: Option<&ntw_sim::campaign::Fac
         _ => None,
     }).nth(1) else { return };
     let Some(arr) = array_mut(rec, "CAMPAIGN_BONUS_VALUE_BLOCK") else { return };
-    let current: Vec<ntw_sim::campaign::effects::SavedBonus> = arr
-        .items
-        .iter()
-        .filter_map(|it| {
-            let v = first_rec(it)?;
-            Some(ntw_sim::campaign::effects::SavedBonus {
-                kind: v.get_u32(0)?,
-                bonus: v.get_i32(1)?,
-                value: v.get_f32(2)?,
-                qualifier: v.get_str(3).unwrap_or_default().to_string(),
-            })
-        })
-        .collect();
+    let current: Vec<SavedBonus> = arr.items.iter().filter_map(|it| crate::details::saved_bonus(first_rec(it)?)).collect();
     if current == d.bonus_with_difficulty {
         return;
     }
@@ -1908,9 +1936,8 @@ fn write_bonus_values(f: &mut EsfRecord, details: Option<&ntw_sim::campaign::Fac
         .map(|b| {
             let mut v = EsfRecord::new("CAMPAIGN_BONUS_VALUE", version);
             v.children.extend([EsfNode::U32(b.kind), EsfNode::I32(b.bonus), EsfNode::F32(b.value)]);
-            if b.kind != 1 {
-                v.children.push(EsfNode::Utf16String(b.qualifier.clone()));
-            }
+            let qualifiers = [&b.qualifier, &b.qualifier2];
+            v.children.extend(qualifiers.into_iter().take(SavedBonus::qualifier_count(b.kind)).map(|q| EsfNode::Utf16String(q.clone())));
             vec![EsfNode::Record(Box::new(v))]
         })
         .collect();
@@ -1997,6 +2024,8 @@ mod tests {
             slots: Vec::new(),
             road: None,
             fortification: None,
+            road_holder: None,
+            fortification_holder: None,
             population: 0,
             base_gdp: 0,
             gdp: 0,
@@ -2007,6 +2036,7 @@ mod tests {
             tax_exempt: false,
             religions: Vec::new(),
             class_bases: Vec::new(),
+            unit_resources: Vec::new(),
             population_state: Default::default(),
             recruitment_queue: Vec::new(),
             construction: Vec::new(),
@@ -2023,7 +2053,7 @@ mod tests {
         use ntw_sim::campaign::ConstructionItem;
         let mut region = Region {
             fortification: Some(BuildingRef { level_key: "test_walls_1".into(), health: 100 }),
-            construction: vec![ConstructionItem { slot: SlotRef::Walls, level_key: "test_walls_2".into(), turns_remaining: 2, cost: 300 }],
+            construction: vec![ConstructionItem { slot: SlotRef::Walls, level_key: "test_walls_2".into(), turns_remaining: 2, cost: 300, kind: ntw_sim::campaign::ConstructionKind::Build, active: true }],
             ..test_region()
         };
         let EsfNode::Record(template) = rec("BUILDING", vec![EsfNode::U32(100), EsfNode::Utf16String(String::new()), EsfNode::Utf16String(String::new()), EsfNode::Utf16String(String::new())]) else {
@@ -2040,10 +2070,64 @@ mod tests {
             let slot = crate::world::wrapped_slot(&sm, "FORTIFICATION_SLOT").unwrap();
             let building = slot.child("BUILDING_MANAGER").and_then(|m| m.child("BUILDING")).and_then(|b| b.get_str(1));
             assert_eq!(building, Some("test_walls_1"), "wrapped: {wrapped}");
-            let mut items = Vec::new();
-            crate::world::read_construction(slot, SlotRef::Walls, &mut items);
+            let items: Vec<_> = crate::world::read_construction(slot, SlotRef::Walls, region.fortification.as_ref()).unwrap().into_iter().collect();
             assert_eq!(items, region.construction, "wrapped: {wrapped}");
         }
+    }
+
+    /// construction2: every item type keeps its kind over a save (`0x00AFBA90` writes #0 the type, then the
+    /// type's tail; `0x00B256C0` reads it back): an upgrade #0 0 and its key, a repair #0 2 and its health per
+    /// turn (`0x00B7A4A0`), a demolition #0 3 and no tail; and its #1 active byte (+0x8), written into a new
+    /// record and into the source's kept one. An item whose fields do not fit its type is not read.
+    #[test]
+    fn construction_items_keep_their_type_over_a_save() {
+        use ntw_sim::campaign::{ConstructionItem, ConstructionKind};
+        let standing = BuildingRef { level_key: "test_walls_1".into(), health: 40 };
+        let item = |level_key: &str, kind| ConstructionItem { slot: SlotRef::Walls, level_key: level_key.into(), turns_remaining: 2, cost: 30, kind, active: true };
+        let cases = [
+            (item("test_walls_2", ConstructionKind::Build), 0, Some(EsfNode::Utf16String("test_walls_2".into()))),
+            (item("test_walls_1", ConstructionKind::Repair { health_per_turn: 20, turns: 3 }), 2, Some(EsfNode::U32(20))),
+            (ConstructionItem { cost: 0, ..item("", ConstructionKind::Demolish) }, 3, None),
+            (ConstructionItem { active: false, ..item("test_walls_2", ConstructionKind::Build) }, 0, Some(EsfNode::Utf16String("test_walls_2".into()))),
+        ];
+        for (c, item_type, tail) in cases {
+            let region = Region { fortification: Some(standing.clone()), construction: vec![c.clone()], ..test_region() };
+            let manager = rec("BUILDING_MANAGER", vec![EsfNode::Bool(false), EsfNode::Bool(false)]);
+            let EsfNode::Record(mut sm) = rec("REGION_SLOT_MANAGER", vec![rec("FORTIFICATION_SLOT", vec![rec("REGION_SLOT", vec![manager])])]) else { unreachable!() };
+            let EsfNode::Record(template) = rec("BUILDING", vec![EsfNode::U32(100), EsfNode::Utf16String(String::new()), EsfNode::Utf16String(String::new()), EsfNode::Utf16String(String::new())]) else {
+                unreachable!()
+            };
+            write_slot_manager(&mut sm, &region, "test_faction", "test_gov", Some(&template), &Default::default()).unwrap();
+            let slot = crate::world::wrapped_slot(&sm, "FORTIFICATION_SLOT").unwrap();
+            let written = slot.child("BUILDING_MANAGER").and_then(|m| m.child("BUILDING_CONSTRUCTION_ITEM")).unwrap();
+            assert_eq!(written.get_u32(0), Some(item_type), "{c:?}");
+            assert_eq!(written.children.get(5), tail.as_ref(), "{c:?}");
+            assert_eq!(written.children.len(), 5 + usize::from(tail.is_some()), "{c:?}");
+            assert_eq!(crate::world::read_construction(slot, SlotRef::Walls, Some(&standing)), Ok(Some(c.clone())));
+            // Written again with #1 flipped: the source's record is kept and only its active byte changes.
+            let flipped = ConstructionItem { active: !c.active, ..c.clone() };
+            let region = Region { construction: vec![flipped.clone()], ..region };
+            write_slot_manager(&mut sm, &region, "test_faction", "test_gov", Some(&template), &Default::default()).unwrap();
+            let slot = crate::world::wrapped_slot(&sm, "FORTIFICATION_SLOT").unwrap();
+            assert_eq!(crate::world::read_construction(slot, SlotRef::Walls, Some(&standing)), Ok(Some(flipped)));
+        }
+        // A type the reader does not know, and a repair with nothing standing: not read (a load warning).
+        let odd = |item_type: u32| {
+            let item = rec("BUILDING_CONSTRUCTION_ITEM", vec![EsfNode::U32(item_type), EsfNode::Bool(true), EsfNode::U32(0), EsfNode::U32(2), EsfNode::U32(0), EsfNode::U32(5)]);
+            let EsfNode::Record(slot) = rec("FORTIFICATION_SLOT", vec![rec("BUILDING_MANAGER", vec![EsfNode::Bool(true), item])]) else { unreachable!() };
+            slot
+        };
+        assert_eq!(crate::world::read_construction(&odd(7), SlotRef::Walls, Some(&standing)), Err(Some(7)));
+        assert_eq!(crate::world::read_construction(&odd(2), SlotRef::Walls, None), Err(Some(2)));
+        assert_eq!(crate::world::read_construction(&odd(0), SlotRef::Walls, None), Err(Some(0)), "no key at #5");
+        // #1 active (+0x8): false is read as an inactive item; not a bool, the item is not read.
+        let with_active = |active: EsfNode| {
+            let item = rec("BUILDING_CONSTRUCTION_ITEM", vec![EsfNode::U32(3), active, EsfNode::U32(0), EsfNode::U32(1), EsfNode::U32(0)]);
+            let EsfNode::Record(slot) = rec("FORTIFICATION_SLOT", vec![rec("BUILDING_MANAGER", vec![EsfNode::Bool(true), item])]) else { unreachable!() };
+            slot
+        };
+        assert!(matches!(crate::world::read_construction(&with_active(EsfNode::Bool(false)), SlotRef::Walls, None), Ok(Some(ConstructionItem { active: false, .. }))));
+        assert_eq!(crate::world::read_construction(&with_active(EsfNode::U32(0)), SlotRef::Walls, None), Err(Some(3)));
     }
 
     #[test]
@@ -2383,9 +2467,9 @@ mod tests {
         let manager = rec("BUILDING_MANAGER", vec![EsfNode::Bool(true), building, EsfNode::Bool(true), item]);
         let EsfNode::Record(mut sm) = rec("REGION_SLOT_MANAGER", vec![rec("FORTIFICATION_SLOT", vec![rec("REGION_SLOT", vec![manager])])]) else { unreachable!() };
         let read = |sm: &EsfRecord| {
-            let mut items = Vec::new();
-            crate::world::read_construction(crate::world::wrapped_slot(sm, "FORTIFICATION_SLOT").unwrap(), SlotRef::Walls, &mut items);
-            items
+            let standing = BuildingRef { level_key: "test_walls_1".into(), health: 100 };
+            let item = crate::world::read_construction(crate::world::wrapped_slot(sm, "FORTIFICATION_SLOT").unwrap(), SlotRef::Walls, Some(&standing));
+            item.unwrap().into_iter().collect::<Vec<_>>()
         };
         let loaded = read(&sm);
         assert_eq!(loaded.iter().map(|c| (c.level_key.as_str(), c.turns_remaining, c.cost)).collect::<Vec<_>>(), [("test_walls_2", 2, 0)]);
@@ -2401,5 +2485,61 @@ mod tests {
 
     fn manager_items(r: &mut EsfRecord, slot: RecruitmentManager) -> Vec<Vec<EsfNode>> {
         manager(r, slot).map(|a| a.items.clone()).unwrap_or_default()
+    }
+
+    /// construction: the writer stores each slot's holder where the loader reads it (`REGION_SLOT` #0
+    /// `SIEGEABLE_GARRISON_RESIDENCE` #0 `GARRISON_RESIDENCE` #0): another faction's hold names that faction, the
+    /// owner's names the owner, and a residence that stored 0 keeps it while the model has no holder.
+    #[test]
+    fn slot_holders_are_written_where_the_loader_reads_them() {
+        use ntw_sim::campaign::FactionId;
+        let residence = |f: u32| rec("SIEGEABLE_GARRISON_RESIDENCE", vec![rec("GARRISON_RESIDENCE", vec![EsfNode::U32(f)])]);
+        let EsfNode::Record(mut sm) = rec(
+            "REGION_SLOT_MANAGER",
+            vec![rec("ROAD_SLOT", vec![rec("REGION_SLOT", vec![residence(0)])]), rec("FORTIFICATION_SLOT", vec![rec("REGION_SLOT", vec![residence(1)])])],
+        ) else {
+            unreachable!()
+        };
+        let holders = |sm: &EsfRecord| {
+            let get = |n| crate::world::wrapped_slot(sm, n).and_then(|s| crate::world::slot_holder(s, 1));
+            (get("ROAD_SLOT"), get("FORTIFICATION_SLOT"))
+        };
+        let region = Region { fortification_holder: Some(FactionId(7)), ..test_region() };
+        write_slot_manager(&mut sm, &region, "test_faction", "test_gov", None, &Default::default()).unwrap();
+        assert_eq!(holders(&sm), (None, Some(FactionId(7))));
+        let region = Region { road_holder: Some(FactionId(7)), ..test_region() };
+        write_slot_manager(&mut sm, &region, "test_faction", "test_gov", None, &Default::default()).unwrap();
+        assert_eq!(holders(&sm), (Some(FactionId(7)), None), "no holder: the owner");
+    }
+
+    /// polish20: `FACTION` #55 entries carry the qualifier strings of their type, as the original's
+    /// writer `0x00E02F80` writes them (type 7 two: population class, then religion; type 1 none;
+    /// type 0 one), and the reader (`0x00DF0D10`) reads both of type 7 back.
+    #[test]
+    fn bonus_values_write_and_read_each_types_qualifiers() {
+        use ntw_sim::campaign::effects::SavedBonus;
+        let block = |entries: Vec<Vec<EsfNode>>| {
+            let mut values = EsfRecord::new("CAMPAIGN_BONUS_VALUES", 0);
+            let mut arr = EsfRecordArray::new("CAMPAIGN_BONUS_VALUE_BLOCK", 0);
+            arr.items = entries;
+            values.children.push(EsfNode::RecordArray(Box::new(arr)));
+            EsfNode::Record(Box::new(values))
+        };
+        let mut f = EsfRecord::new("FACTION", 0);
+        f.children = vec![block(Vec::new()), block(Vec::new())];
+        let entries = vec![
+            SavedBonus { kind: 0, bonus: 2, value: 1.0, qualifier: "General".into(), ..Default::default() },
+            SavedBonus { kind: 1, bonus: 64, value: 2.0, ..Default::default() },
+            SavedBonus { kind: 7, bonus: 0, value: 3.0, qualifier: "upper".into(), qualifier2: "rel_catholic".into() },
+        ];
+        let details = ntw_sim::campaign::FactionDetails { bonus_with_difficulty: entries.clone(), ..Default::default() };
+        write_bonus_values(&mut f, Some(&details));
+        let EsfNode::Record(values) = &f.children[1] else { panic!("no #55") };
+        let EsfNode::RecordArray(arr) = &values.children[0] else { panic!("no block array") };
+        let strings: Vec<Vec<&str>> =
+            arr.items.iter().map(|it| first_rec(it).unwrap().children.iter().filter_map(EsfNode::as_str).collect()).collect();
+        assert_eq!(strings, vec![vec!["General"], vec![], vec!["upper", "rel_catholic"]]);
+        let read: Vec<SavedBonus> = arr.items.iter().filter_map(|it| crate::details::saved_bonus(first_rec(it)?)).collect();
+        assert_eq!(read, entries);
     }
 }

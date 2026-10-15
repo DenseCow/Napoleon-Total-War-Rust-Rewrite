@@ -24,7 +24,7 @@ use crate::record::db_record;
 db_record! {
     /// One row of `units` (exe reader 0x00E85B20, 25 columns, file v4).
     /// The general, campaign-side description of every land and naval unit.
-    pub struct UnitRecord in "units", key = key {
+    pub struct UnitRecord in "units", key = key, checked_by = crate::database::drop_units_with_unknown_resource {
         /// #0 @0x00 H: unit key (foreign key target for `unit_stats_land.key`).
         key: String,
         /// #1 @0x0C H: English development name, e.g. "German Fusiliers".
@@ -61,7 +61,11 @@ db_record! {
         model_2: String,
         /// #13 @0x6C H: icon / info key.
         info_key: String,
-        /// #14 @0x78 L: recruitment scope ("global").
+        /// #14 @0x78: the region unit resource the unit needs (FK `region_unit_resources`, e.g. `global`,
+        /// `horses`; empty = none). CONFIRMED: the row builder `0x00EDC000` resolves it into `UNIT_RECORD`
+        /// +0x98 and `0x00AA1660` lists the unit only in regions whose `RESOURCES_ARRAY` holds it
+        /// (`ntw_sim::campaign::UnitRules::unit_resource`). A row naming no `region_unit_resources` key is
+        /// dropped from every `units` read, as that builder drops it (`crate::load_table`, CONFIRMED).
         recruitment_scope: Option<String>,
         /// #15 @0x84: the most units of this type a faction may hold and have queued together, 0 = no limit
         /// (`UNIT_RECORD` +0x68, copied by `0x00E91320`; the campaign test `0x008F68B0`, CONFIRMED; 142 of the
@@ -1045,5 +1049,18 @@ db_record! {
         control: f32,
         /// #5: melee attack change.
         attack: f32,
+    }
+}
+
+db_record! {
+    /// One row of `entity_training_levels` (6 rows; row reader `0x00F08360`, CONFIRMED): a training
+    /// level and its float (builder `+0xC`). The battle reads the float as a unit's in-place
+    /// tolerance (`0x0057E1F0`: the row of the level enum at battle unit `+0x194`, metres added to
+    /// the idle in-place check's 1 m, 2.5 m mounted; UNITS_TERRAIN_FIDELITY.md §1.10).
+    pub struct EntityTrainingLevel in "entity_training_levels", key = key {
+        /// #0: the level (`mob`, `rabble`, `poorly_trained`, `trained`, `well_trained`, `elite`).
+        key: String,
+        /// #1: the in-place tolerance (metres).
+        tolerance: f32,
     }
 }

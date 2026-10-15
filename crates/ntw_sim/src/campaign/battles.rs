@@ -4,7 +4,8 @@
 //! The battle is then settled in one of two ways:
 //! - **Autoresolve** ([`CampaignModel::autoresolve`], command `Autoresolve`): ports the original's
 //!   stat-based resolver ([`super::autoresolve`]) with the campaign RNG; it sets every unit's men,
-//!   then [`CampaignModel::apply_battle_result`] settles the rest with zero extra casualties.
+//!   then [`CampaignModel::apply_battle_result`] settles the rest with zero extra casualties (the naval
+//!   autoresolve shares its settling step).
 //! - **Real-time battle (hook, not wired yet):** the display reads the pending battle, launches
 //!   `GameMode::Battle` with the two sides' units, and afterwards calls
 //!   [`CampaignModel::apply_battle_result`] with the casualties. Autoresolve uses the same function,
@@ -17,7 +18,7 @@
 
 use super::events::CampaignEvent;
 use super::ids::{CharacterId, ForceId, RegionId};
-use super::world::CampaignModel;
+use super::world::{CampaignModel, MilitaryForce};
 use super::CommandError;
 use super::autoresolve::{resolve, ArUnit, ArVars};
 
@@ -102,6 +103,13 @@ impl CampaignModel {
     /// real-time battle's result. Returns no events if no battle is pending.
     pub fn apply_battle_result(&mut self, result: BattleResult) -> Vec<CampaignEvent> {
         let Some(battle) = self.pending_battle.take() else { return Vec::new() };
+        self.settle_battle(&battle, result, true)
+    }
+
+    /// The battle's outcome ([`Self::apply_battle_result`]) for `battle`, already taken off the model. `undock`: the
+    /// post-battle undock is still to run, after the casualties ([`Self::undock_after_battle`]); the naval
+    /// autoresolve runs it itself, before its captures, and passes false, so every battle undocks once.
+    fn settle_battle(&mut self, battle: &PendingBattle, result: BattleResult, undock: bool) -> Vec<CampaignEvent> {
         let mut events = Vec::new();
         let attacker_faction = self.world.forces.get(&battle.attacker).map(|f| f.faction);
         let commanders: Vec<_> = std::iter::once(battle.attacker)
@@ -111,6 +119,9 @@ impl CampaignModel {
         self.apply_casualties(battle.attacker, result.attacker_casualties, &mut events);
         for &d in &battle.defenders {
             self.apply_casualties(d, result.defender_casualties, &mut events);
+        }
+        if undock {
+            self.undock_after_battle(battle);
         }
         // Defenders of a settlement that lose are destroyed (CONFIRMED for the garrison army: the capture
         // 0x00B58560 deletes the settlement's garrison army before the region changes hands).
@@ -148,6 +159,16 @@ impl CampaignModel {
         events
     }
 
+    /// The post-battle placement (`0x008F7880`) undocks each force of the battle still standing ([`Self::undock`]):
+    /// a docked navy's repair orders end, refunded at the ships' new cost (`0x008B36D0`). A ship lost in the battle
+    /// takes its order with it (no refund). PROVISIONAL: when the placement runs against the naval captures is not
+    /// traced; the naval autoresolve undocks before them, so the refund goes to the faction that paid.
+    pub(crate) fn undock_after_battle(&mut self, battle: &PendingBattle) {
+        for f in std::iter::once(battle.attacker).chain(battle.defenders.iter().copied()) {
+            self.undock(f);
+        }
+    }
+
     fn apply_casualties(&mut self, force: ForceId, fraction: f32, events: &mut Vec<CampaignEvent>) {
         let min_strength = self.rules.var("unit_minimum_strength", 0.05);
         let Some(f) = self.world.forces.get_mut(&force) else { return };
@@ -177,7 +198,7 @@ impl CampaignModel {
     /// (`CHARACTER` #34, +0x52C, §5b; CONFIRMED from the destructor `0x0099D2D0`): a copy of him
     /// (`0x0098FE60`: the same faction, details with traits and ancillaries, sight radius, appeared
     /// turn, duel counters and +0x52C; the idle turns +0x4C8, the hidden flag +0x4E0 and the duel
-    /// wound +0x512 cleared) is linked to his force when it still has units (`0x008B02E0`,
+    /// wound +0x512 cleared) is linked to his force when it still has units (an unlink `0x008B02E0`, then
     /// `0x008CF9D0`: a rider, not its commander) and enters the world where he stood
     /// (`0x009D3B60(0, old)`); the force then gets a successor as usual. The "wounded" message is
     /// `0x00A0B980` / `0x009D2240`. Model: he keeps his id, stands where he fell, leaves his unit
@@ -210,12 +231,26 @@ impl CampaignModel {
     /// Removes a force; its commander and every character attached to its units fall with it
     /// (see [`Self::character_falls`]).
     pub(crate) fn destroy_force(&mut self, force: ForceId, events: &mut Vec<CampaignEvent>) {
-        let Some(f) = self.world.forces.remove(&force) else { return };
+        let port = self.docked_port(force);
+        let Some(f) = self.remove_force(force, port) else { return };
         self.tidy_embarked();
         let mut fallen: Vec<CharacterId> = f.commander.into_iter().collect();
         fallen.extend(f.units.iter().filter_map(|u| u.character).filter(|c| Some(*c) != f.commander));
         for c in fallen {
             self.character_falls(c);
+        }
+        events.push(CampaignEvent::ForceDestroyed { force });
+    }
+
+    /// The one path a force leaves the world: the regions' garrison and fleet links to it go, and a navy docked in
+    /// a port (`port`, [`Self::docked_port`] looked up by the caller while the force still stands on the map) hands
+    /// the slot back to the region's owner, as the navy's destructor does (`0x0088EF90` → `0x00A8D830` on the
+    /// navy's port handle +0xE0, CONFIRMED polish21; skipped there only while the campaign is torn down, campaign
+    /// +0xFC5). Its repair orders are not refunded: the ships go with it.
+    pub(crate) fn remove_force(&mut self, force: ForceId, port: Option<(RegionId, usize)>) -> Option<MilitaryForce> {
+        let f = self.world.forces.remove(&force)?;
+        if let Some((region, slot)) = port {
+            self.restore_port_holder(region, slot);
         }
         for r in self.world.regions.values_mut() {
             if r.garrison == Some(force) {
@@ -225,12 +260,15 @@ impl CampaignModel {
                 r.fleet = None;
             }
         }
-        events.push(CampaignEvent::ForceDestroyed { force });
+        Some(f)
     }
 
     /// `faction` takes `region`'s settlement ([`Self::take_settlement`]) and the capture is reported
     /// (`SettlementOccupied`; the event's constructor `0x00889EE0` is called only by the capture
-    /// variants `0x00B58560`, `0x00B58890` and `0x00B58C00`, CONFIRMED).
+    /// variants `0x00B58560`, `0x00B58890` and `0x00B58C00`, CONFIRMED). A capture that ends the old
+    /// owner reports `FactionDestroyed` (fired inside the owner change `0x00A64AC0`) before
+    /// `SettlementOccupied`: INFERRED, where those variants build the event relative to their owner
+    /// change is not traced (BACKLOG).
     pub(crate) fn occupy(
         &mut self,
         region: RegionId,
@@ -238,7 +276,7 @@ impl CampaignModel {
         by: Option<ForceId>,
         events: &mut Vec<CampaignEvent>,
     ) {
-        if self.take_settlement(region, faction, by) {
+        if self.take_settlement(region, faction, by, events) {
             events.push(CampaignEvent::SettlementOccupied { region, faction });
         }
     }
@@ -255,10 +293,30 @@ impl CampaignModel {
     /// the refund (`0x00B1A760(1)`), every construction with no refund (`0x00A6CBE0(0)`). So the old
     /// owner gets its queued ships' cost back but not its land units' ([`Self::clear_region_queues`]);
     /// the owner change that follows finds the queues empty.
-    pub(crate) fn take_settlement(&mut self, region: RegionId, faction: super::FactionId, by: Option<ForceId>) -> bool {
+    ///
+    /// Every one of them also sets the owner change's capture flag, and `TransferRegionToFaction`
+    /// (`0x00A64AC0`) with it set, neither side the rebels (`0x00C3FE80`) and the owner a different
+    /// faction, fires the diplomacy-changed event through `0x00B62120`
+    /// ([`Self::diplomacy_changed`]; CONFIRMED). A deal's or a liberation's handover
+    /// ([`Self::transfer_region`], `0x00B58A10`) leaves the flag clear and fires nothing.
+    ///
+    /// The owner change's first flag is set too (a capture, the director's transfer): an old owner
+    /// left without a capital leaves the game ([`Self::end_if_capital_lost`], `0x00A64AC0`), its
+    /// events in `events`.
+    pub(crate) fn take_settlement(
+        &mut self,
+        region: RegionId,
+        faction: super::FactionId,
+        by: Option<ForceId>,
+        events: &mut Vec<CampaignEvent>,
+    ) -> bool {
+        let Some(old) = self.world.regions.get(&region).map(|r| r.owner) else { return false };
         self.clear_region_queues(region, QueueRefund { land: false, naval: true });
         if !self.change_region_owner(region, faction) {
             return false;
+        }
+        if old != faction && !self.is_rebel_faction(old) && !self.is_rebel_faction(faction) {
+            self.diplomacy_changed();
         }
         let Some(r) = self.world.regions.get_mut(&region) else { return false };
         // The capture variants destroy the garrison army first; the settlement's links go with it.
@@ -266,15 +324,18 @@ impl CampaignModel {
         r.fleet = None;
         let pos = r.settlement.position;
         if let Some(c) = by.and_then(|f| self.world.forces.get(&f)).and_then(|f| f.commander)
-            && let Some(ch) = self.world.characters.get_mut(&c)
+            && self.world.characters.contains_key(&c)
         {
-            ch.position = pos;
-            ch.garrisoned_in = Some(region);
+            self.move_character(c, pos);
+            self.world.characters.get_mut(&c).expect("checked").garrisoned_in = Some(region);
         }
         if let Some(f) = by.filter(|f| self.world.forces.get(f).is_some_and(|f| !f.is_navy && f.commander.is_some()))
             && let Some(r) = self.world.regions.get_mut(&region)
         {
             r.garrison = Some(f);
+        }
+        if old != faction {
+            self.end_if_capital_lost(old, events);
         }
         true
     }
@@ -283,8 +344,10 @@ impl CampaignModel {
     /// `0x00B58A10(faction, 1, 0)` → `TransferSettlementOwnership` `0x00B449F0` with no character
     /// and no capture report). Nothing happens when `faction` already owns it (`0x00A64AC0` returns
     /// when the old owner is the new one). The owner change itself is [`Self::change_region_owner`],
-    /// the one rule capture, liberation and deals share. Returns false when the region does not
-    /// exist or did not change hands.
+    /// the one rule capture, liberation and deals share. Neither the old owner's end (a deal's caller
+    /// runs [`Self::end_if_capital_lost`] for its first flag) nor a liberated faction's return
+    /// ([`Self::liberate_region`]) happens here. Returns false when the region does not exist or did
+    /// not change hands.
     pub(crate) fn transfer_region(&mut self, region: RegionId, faction: super::FactionId) -> bool {
         if self.world.regions.get(&region).is_none_or(|r| r.owner == faction) {
             return false;
@@ -299,12 +362,15 @@ impl CampaignModel {
     /// the old owner's `0x008B3580`, the same call the completion `0x008EED20` makes for a school's
     /// characters; the model keeps no per-character research link — gentlemen count by position,
     /// `gentlemen_in` — so there is nothing to clear), the queues are cleared, the slots and the governorship pass to the new
-    /// owner. No army is moved or destroyed (CONFIRMED: `0x00B449F0` → `0x00B2B810` / `0x00A64AC0`
-    /// / `0x00B1B300` move none, and the settlement's owner-changed event, +0x24 fired at
-    /// `0x00B44B31`, has on the campaign side only the siege listener `0x008DB7D0`, sieges not
-    /// being in the model): after a deal or a liberation the old owner's garrison stays inside,
-    /// a foreign garrison (see `defenders_of`, `enter_settlement`, `recruit`). Returns false when
-    /// the region does not exist.
+    /// owner. No army is moved or destroyed here (the settlement's owner-changed event, +0x24 fired
+    /// at `0x00B44B31`, has on the campaign side only the siege listener `0x008DB7D0`, sieges not
+    /// being in the model), so after a deal or a liberation the old owner's garrison stays inside,
+    /// a foreign garrison (see `defenders_of`, `enter_settlement`, `recruit`). PROVISIONAL:
+    /// `0x00A64AC0` with its fourth argument 0 (every `0x00B449F0` handover) expels the other
+    /// factions' land armies in the region, and their docked navies when not at war with the new
+    /// owner (`ExpelFactionForcesFromRegion` `0x008D9DC0`; placement `0x008DCB30` untraced), not
+    /// modelled yet. Returns false when
+    /// the region does not exist. The capitals move with it ([`Self::capital_after_owner_change`]).
     fn change_region_owner(&mut self, region: RegionId, faction: super::FactionId) -> bool {
         let Some(r) = self.world.regions.get_mut(&region) else { return false };
         let old = r.owner;
@@ -323,11 +389,19 @@ impl CampaignModel {
         // units, land and naval, and a human old owner's none.
         let refund = !self.turn.humans.contains(&old);
         self.clear_region_queues(region, QueueRefund { land: refund, naval: refund });
+        // The ports a navy is docked in (the port's +0x60, [`Self::docked_port`]; whoever's navy).
+        let docked: Vec<usize> = self.world.forces.keys().filter_map(|&x| self.docked_port(x)).filter(|&(r, _)| r == region).map(|(_, i)| i).collect();
         let Some(r) = self.world.regions.get_mut(&region) else { return false };
-        // The slots the old owner held pass to the new one (INFERRED; slots held by a third faction stay).
-        for s in r.slots.iter_mut().filter(|s| s.holder == Some(old)) {
-            s.holder = None;
+        // Then the slots pass to the new owner (`0x00B1B300`, CONFIRMED): each town / port slot goes to it
+        // (`0x00B2B810(new, 0)` sets the holder whoever held it before, a third faction too), except a slot with a
+        // garrison (slot virtual +0x1C, `0x00A64440`, the handle at slot +0xC0; not in the model) or a port with a
+        // navy docked (its holder stays, so a slot the old owner held stays the old owner's). The road and the walls always pass. (`None` = the owner's.)
+        for (i, s) in r.slots.iter_mut().enumerate() {
+            let kept = s.holder.or(Some(old));
+            s.holder = if docked.contains(&i) && kept != Some(faction) { kept } else { None };
         }
+        r.road_holder = None;
+        r.fortification_holder = None;
         r.owner = faction;
         // The region leaves every governorship and joins the new owner's first one, if it has one
         // (INFERRED; the governorship supplies the region's faction part, see `World::governing_faction`).
@@ -338,6 +412,9 @@ impl CampaignModel {
         }
         if let Some(g) = self.world.faction_details.get_mut(&faction).and_then(|d| d.posts.iter_mut().find_map(|p| p.governorship.as_mut())) {
             g.regions.push(region);
+        }
+        if old != faction {
+            self.capital_after_owner_change(region, old, faction);
         }
         true
     }
@@ -376,7 +453,8 @@ impl CampaignModel {
 
     /// The naval autoresolve ([`super::naval`]): the attacker's navy against the defending navies. The ships'
     /// states and men (the crew total) are written back; sunk ships and ships without crew are removed; a navy
-    /// left without ships is destroyed. Then [`Self::apply_battle_result`] settles the rest.
+    /// left without ships is destroyed. Then the rest is settled as [`Self::apply_battle_result`] does, its undock run
+    /// once here, before the captures ([`Self::undock_after_battle`]).
     pub(crate) fn autoresolve_naval(&mut self, battle: &PendingBattle) -> Vec<CampaignEvent> {
         use super::naval::{resolve, NavalUnit, NavalVars};
         let collect = |m: &CampaignModel, forces: &[ForceId]| -> Vec<(ForceId, usize, NavalUnit)> {
@@ -404,8 +482,13 @@ impl CampaignModel {
             let Some(unit) = self.world.forces.get_mut(fid).and_then(|f| f.units.get_mut(*i)) else { continue };
             unit.men = if u.state.sunk { 0 } else { u.state.crew() };
             let id = unit.id;
-            self.world.ship_states.insert(id, u.state);
+            let mut state = u.state;
+            // A ship lost (sunk or without crew, removed below) takes its repair order with it: no refund.
+            state.repairing &= unit.men > 0;
+            self.world.ship_states.insert(id, state);
         }
+        // The post-battle undock, before any ship changes hands (PROVISIONAL order, see the function).
+        self.undock_after_battle(battle);
         // Captured ships join the captor's force (`0x007CD570` marks the card with its captor; CAMPAIGN_FIDELITY.md
         // §Naval autoresolve). The captain attached to the ship, if any, stays behind.
         let (losers, winners): (&[(ForceId, usize, NavalUnit)], Vec<ForceId>) =
@@ -437,7 +520,8 @@ impl CampaignModel {
         for fid in emptied {
             self.destroy_force(fid, &mut events);
         }
-        let mut rest = self.apply_battle_result(BattleResult { attacker_won: o.a_won, attacker_casualties: 0.0, defender_casualties: 0.0 });
+        self.pending_battle = None;
+        let mut rest = self.settle_battle(battle, BattleResult { attacker_won: o.a_won, attacker_casualties: 0.0, defender_casualties: 0.0 }, false);
         events.append(&mut rest);
         events
     }

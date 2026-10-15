@@ -217,9 +217,33 @@ pub struct Negotiation {
     /// The technology action record's two lists (technology keys): set by
     /// [`super::CampaignCommand::ProposeTechnologies`], applied by [`super::CampaignCommand::AcceptDeal`].
     pub technologies: DealItems<String>,
+    /// The payment record (record 7): set by [`super::CampaignCommand::ProposePayment`], applied by
+    /// [`super::CampaignCommand::AcceptDeal`].
+    pub payment: DealPayment,
     /// The records have been applied since they last changed: a deal applies once (`AcceptDeal`
     /// again is a no-op until a Propose or Clear changes the deal).
     pub applied: bool,
+}
+
+/// A deal's payment record (record 7, vtable `0x01381EDC`): `amount` (`+0x14`) for `turns` turns
+/// (`+0x18`). A positive amount is a demand, paid by the recipient to the proposer; a negative one an
+/// offer, the proposer paying its negation (the applier `0x00C18A70`; the panel's offer setters
+/// `0x00C43D70` / `0x00C43D90` negate, the demand setters `0x00C1F6D0` / `0x00C1F6F0` do not). 0 is no
+/// payment (the record's has-items `0x00C12640` is amount ≠ 0). Turns 1 is paid once, anything else
+/// each turn (`0x00C18A70`). CONFIRMED (disassembly).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DealPayment {
+    /// Positive: demanded from the recipient; negative: offered by the proposer.
+    pub amount: i32,
+    /// 1: once; otherwise each turn for that many turns.
+    pub turns: u32,
+}
+
+impl DealPayment {
+    /// The record has an item (`0x00C12640`: amount ≠ 0).
+    pub fn has_items(&self) -> bool {
+        self.amount != 0
+    }
 }
 
 /// The two lists of a deal's action record (`0x00C4B0A0` / `0x00C4B560` fill them): `demanded`
@@ -592,6 +616,7 @@ impl CampaignModel {
             approach,
             regions: DealItems::default(),
             technologies: DealItems::default(),
+            payment: DealPayment::default(),
             applied: false,
         });
     }
@@ -637,27 +662,67 @@ impl CampaignModel {
         Ok(())
     }
 
+    /// `CCQ_DIPLOMACY_PROPOSE_PAYMENT` (executor `0x00933AD0`): `clear` empties the payment record
+    /// (`0x00C5C730`); otherwise the record becomes `amount` for `turns` turns ([`DealPayment`]'s
+    /// sign). The executor hands a positive amount to the demand setter (`0x00C1F6D0`) and any other
+    /// to the offer setter with its negation (`0x00C43D70`, which negates it back), so the record is
+    /// replaced (`0x00C11B80` → `0x00C49AA0`) by the amount as given, through the record's copy
+    /// (`0x00C4AB20`), which caps an offered one-off payment at the proposer's treasury:
+    /// [`CampaignModel::proposed_payment`], the rule seam. The capped amount is what the panel's
+    /// row shows, what the AI evaluates and what the deal pays. CONFIRMED (disassembly).
+    /// `i32::MIN` is refused: its negation does not exist (the exe would keep it and pay it as is).
+    pub(crate) fn propose_payment(&mut self, clear: bool, amount: i32, turns: u32) -> Result<(), super::CommandError> {
+        let proposer = self.negotiations.current.as_ref().ok_or(super::CommandError::NoNegotiation)?.proposer;
+        let payment = if clear {
+            DealPayment::default()
+        } else if amount == i32::MIN {
+            return Err(super::CommandError::Unsupported("payment amount out of range"));
+        } else {
+            DealPayment { amount: self.proposed_payment(proposer, amount, turns), turns }
+        };
+        let n = self.negotiations.current.as_mut().ok_or(super::CommandError::NoNegotiation)?;
+        n.payment = payment;
+        n.applied = false;
+        Ok(())
+    }
+
     /// `CCQ_DIPLOMACY_CLEAR_NEGOTIATION` (executor `0x00932EC0`): the deal is emptied. The model
-    /// holds the regions and technology records; the other items are still held by the UI.
+    /// holds the regions, technology and payment records; the other items are still held by the UI.
     pub(crate) fn clear_negotiation(&mut self) -> Result<(), super::CommandError> {
         let n = self.negotiations.current.as_mut().ok_or(super::CommandError::NoNegotiation)?;
         n.regions.clear();
         n.technologies.clear();
+        n.payment = DealPayment::default();
         n.applied = false;
         Ok(())
     }
 
     /// The AI's answer to the open negotiation's deal (`CCQ_DIPLOMACY_PROPOSE_DEAL` → `0x00C49BE0`
     /// → `0x00AA5ED0`, run when the recipient is not human; AI_RESEARCH.md §4 "Deal evaluation"):
-    /// true when it is refused, as the exe evaluates the regions and technology records
+    /// true when it is refused, as the exe evaluates the regions, technology and payment records
     /// ([`Self::ai_accepts_deal`]). A human recipient answers for itself: never refused here.
     pub fn ai_refuses_deal(&self) -> bool {
         self.ai_accepts_deal() == Some(false)
     }
 
+    /// `CCQ_DIPLOMACY_PROPOSE_DEAL` (executor `0x00933690` → `0x00C49BE0`): when the recipient is
+    /// not human its evaluation (`0x00AA5ED0`) reads the recipient's relation belief
+    /// (`0x00CCB810` / `0x00CCB210` → `GetCaiRelationBelief` `0x00A74A20`), which keeps it: a dirty
+    /// one is rebuilt and stays clean until the next diplomacy change or turn change
+    /// ([`Self::refresh_relation_belief`]). The answer is [`Self::ai_refuses_deal`]; nothing else
+    /// changes. Fails with no open negotiation.
+    pub(crate) fn propose_deal(&mut self) -> Result<(), super::CommandError> {
+        let n = self.negotiations.current.as_ref().ok_or(super::CommandError::NoNegotiation)?;
+        let recipient = n.recipient;
+        if !self.is_human(recipient) {
+            self.refresh_relation_belief(recipient);
+        }
+        Ok(())
+    }
+
     /// `CCQ_DIPLOMACY_ACCEPT_DEAL` (`AcceptCampaignNegotiationDeal` `0x00C114B0`) for the records
-    /// the model holds, each through its virtual +0x3C, in the records' order (regions, then
-    /// technologies). The deal stays (it goes with the negotiation's end), as in the exe; it is
+    /// the model holds, each through its virtual +0x3C, in the records' order (regions,
+    /// technologies, then the payment). The deal stays (it goes with the negotiation's end), as in the exe; it is
     /// applied once: accepting it again before a Propose or Clear changes it does nothing
     /// ([`Negotiation::applied`]; the exe re-applies every record on each accept, which its UI
     /// never asks for, and which would raise the traded counts again).
@@ -666,24 +731,46 @@ impl CampaignModel {
     ///   ([`Self::count_deal_region_received`]);
     /// - technologies (`0x00C18CF0`): each offered technology is granted to the recipient
     ///   ([`Self::grant_technology`]) and the proposer's traded count goes up by one
-    ///   (`0x008F3DD0`); then each demanded one the other way round.
+    ///   (`0x008F3DD0`); then each demanded one the other way round;
+    /// - payment (`0x00C18A70`): a positive amount is paid by the recipient to the proposer, a
+    ///   negative one's negation by the proposer to the recipient; over 1 turn once
+    ///   ([`Self::pay_once`]), else each turn ([`Self::pay_regularly`]); 0 pays nothing. The
+    ///   amount was capped when it was proposed ([`Self::propose_payment`]): not capped again here.
     ///
     /// Not ported: `0x00C1E240`, which can turn a deal with no demands into a payment before it is
     /// applied (the AI's side, AI_RESEARCH.md §6).
-    /// A deal [`Self::ai_refuses_deal`] refuses is not applied (`CommandError::DealRefused`).
+    /// A deal [`Self::ai_refuses_deal`] refuses is not applied (`CommandError::DealRefused`); nor is
+    /// one whose payment names an invalid faction pair (checked before any record is applied).
     pub(crate) fn accept_deal(&mut self) -> Result<Vec<super::CampaignEvent>, super::CommandError> {
         if self.negotiations.current.is_some() && self.ai_refuses_deal() {
             return Err(super::CommandError::DealRefused);
         }
-        let n = self.negotiations.current.as_mut().ok_or(super::CommandError::NoNegotiation)?;
-        if std::mem::replace(&mut n.applied, true) {
+        let n = self.negotiations.current.as_ref().ok_or(super::CommandError::NoNegotiation)?;
+        if n.applied {
             return Ok(Vec::new());
         }
-        let (proposer, recipient) = (n.proposer, n.recipient);
+        let (proposer, recipient, payment) = (n.proposer, n.recipient, n.payment);
         let (regions, techs) = (n.regions.clone(), n.technologies.clone());
+        // The deal applies whole or not at all: the payment's only failure (the faction pair) is
+        // checked before any record is applied, so an error leaves the deal unapplied (the caller
+        // logs it). The payment has no money test (0x00BAF500): it cannot fail on its amount.
+        if payment.has_items() {
+            self.check_diplomacy_pair(proposer, recipient)?;
+        }
+        if let Some(n) = self.negotiations.current.as_mut() {
+            n.applied = true;
+        }
+        let mut ended = Vec::new();
         for (list, to) in [(&regions.demanded, proposer), (&regions.offered, recipient)] {
             for &r in list {
-                self.transfer_region(r, to);
+                let old = self.world.regions.get(&r).map(|x| x.owner);
+                if self.transfer_region(r, to)
+                    && let Some(old) = old
+                {
+                    // A deal sets the owner change's first flag (`0x00B58A10(faction, 1, 0)`): losing the
+                    // capital with the last region ends the giver (`0x00A64AC0`, CONFIRMED).
+                    self.end_if_capital_lost(old, &mut ended);
+                }
                 self.count_deal_region_received(to);
             }
         }
@@ -693,7 +780,16 @@ impl CampaignModel {
                 self.count_technology_traded(from, t);
             }
         }
-        Ok(Vec::new())
+        if payment.has_items() {
+            // `propose_payment` refuses i32::MIN, so the negation exists. The pair was checked above.
+            let (payer, payee, amount) = if payment.amount > 0 { (recipient, proposer, payment.amount) } else { (proposer, recipient, -payment.amount) };
+            if payment.turns == 1 {
+                self.pay_once(payer, payee, amount);
+            } else {
+                self.pay_regularly(payer, payee, amount, payment.turns);
+            }
+        }
+        Ok(ended)
     }
 
     /// `0x008E2B70`, from the regions record's accept (`0x00C18C5F` / `0x00C18CD5`): a human

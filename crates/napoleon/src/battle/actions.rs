@@ -106,7 +106,7 @@ pub fn death(kit: &FigureKit, cause: DeathCause, speed: f32, sel: u32, rng: &mut
     if speed > 0.5 {
         let moving = present(kit, unit_animation::DEATH_MOVING, rider);
         let levels: Vec<&KitLevel> = moving.iter().filter_map(|s| kit.actions.get(s)).collect();
-        if let Some((i, _)) = pick_level(levels.iter().map(|l| l.speed), speed) {
+        if let Some((i, _)) = pick_level(levels.iter().map(|l| l.speed_of(sel)), speed) {
             return Some(pair(levels[i], sel));
         }
     }

@@ -540,8 +540,7 @@ fn construction_delta(region: &Region, value: impl Fn(&str) -> f32) -> f32 {
 /// [`recompute_region_with`] with the growth's breakdown; `predicted` gives the values the region
 /// details panel and the wealth trend predict (`0x00A6AFC0` with its last argument 1): the predicted
 /// effect set (`0x00A9B930`, [`super::population::predicted_effect_set`]: buildings under construction
-/// finished, technologies under research researched) and, per slot, the level under construction in
-/// its place, else the building unless it is below full health.
+/// finished, technologies under research researched) and, per slot, [`Region::predicted_slot_level`].
 pub fn region_wealth(model: &CampaignModel, fx: Option<&Effects>, region: &Region, predicted: bool) -> RegionWealth {
     let rules = &model.rules;
     // The predicted set's changes (`0x00A9B930`): the local sets of this region's constructions (DB
@@ -570,14 +569,15 @@ pub fn region_wealth(model: &CampaignModel, fx: Option<&Effects>, region: &Regio
         }
         local + fx.map_or(0.0, |fx| fx.faction_qualified(governing_faction(model, region), super::effects::BonusKind::Saved(2), id, chain))
     };
-    // The slots (`0x00A638E0`: the slot list, then the road): a building at full health; predicted, the
-    // level under construction in its place.
+    // The slots (`0x00A638E0`: the slot list, then the road): a building at full health; predicted,
+    // [`Region::predicted_slot_level`] (the level being built, nothing for a demolition, the building
+    // under repair).
     let slots = (0..region.slots.len()).map(SlotRef::Slot).chain(std::iter::once(SlotRef::Road));
     let levels = slots.filter_map(|s| {
-        let target = predicted.then(|| region.construction_changes().find(|(slot, _, _)| *slot == s)).flatten();
-        match target {
-            Some((_, level, _)) => Some(level),
-            None => region.building_at(s).filter(|b| !b.is_damaged()).map(|b| b.level_key.as_str()),
+        if predicted {
+            region.predicted_slot_level(s)
+        } else {
+            region.building_at(s).filter(|b| !b.is_damaged()).map(|b| b.level_key.as_str())
         }
     });
     for level in levels {
@@ -992,7 +992,7 @@ fn hostile_in_region(model: &CampaignModel, reg: &Region) -> bool {
 /// (Σ share × 100 × value − conversion))` over the region's religions, with `value` =
 /// `diplomatic_relations_religion` #3 for (region religion, state religion) (0 for a missing pair),
 /// `unrest` = the region set's `happiness_mod_religious_unrest` and `conversion` = the owner's
-/// `conversion` effect for its religion (type 7, the religion-keyed bonus). Reproduces the religion factor of
+/// `conversion` effect for its religion (bonus type 10, the religion-keyed one; type 7 is population class × religion). Reproduces the religion factor of
 /// every population class in the vanilla eur save `auto_nr4_t4` (CAMPAIGN_FIDELITY.md §Public order).
 /// `religions` is the breakdown it reads (the region's, or the panel's projected copy).
 pub fn religion_factor(model: &CampaignModel, reg: &Region, religions: &[(String, f32)], unrest: i32, conversion: f32) -> f32 {

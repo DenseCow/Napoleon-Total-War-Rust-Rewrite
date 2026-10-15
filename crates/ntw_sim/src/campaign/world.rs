@@ -283,6 +283,7 @@ impl CampaignModel {
             }
             h.u32(s.guns);
             h.u32(s.sunk as u32);
+            h.u32(s.repairing as u32);
         }
         for m in [&w.treaty_breaks, &w.alliances_broken, &w.access_cancel_marks] {
             h.u32(m.len() as u32);
@@ -296,6 +297,13 @@ impl CampaignModel {
         for k in &w.restricted_buildings {
             h.str(k);
         }
+        // ... and which units may be recruited.
+        h.u32(w.restricted_units.len() as u32);
+        for k in &w.restricted_units {
+            h.str(k);
+        }
+        // ... and whose shroud the AI may not shop under.
+        h.i32(w.ai_shopping_shroud.map_or(i32::MIN, FactionId::raw));
         // The forts are static file data (`World::forts`; nothing changes one), hashed so a
         // desync check still notices a file that loaded a different set.
         h.u32(w.forts.len() as u32);
@@ -358,6 +366,7 @@ impl CampaignModel {
             h.u32(*p);
         }
         h.u32(w.regions.len() as u32);
+        let holder = |h: &mut Fnv64, f: Option<FactionId>| h.i32(f.map_or(0, FactionId::raw));
         let building = |h: &mut Fnv64, b: &Option<BuildingRef>| match b {
             None => h.u32(0),
             Some(b) => {
@@ -378,9 +387,12 @@ impl CampaignModel {
                 h.str(&slot.key);
                 h.str(&slot.slot_type);
                 building(&mut h, &slot.building);
+                holder(&mut h, slot.holder);
             }
             building(&mut h, &r.road);
             building(&mut h, &r.fortification);
+            holder(&mut h, r.road_holder);
+            holder(&mut h, r.fortification_holder);
             h.u32(r.population);
             let p = &r.population_state;
             for f in p.factors {
@@ -404,6 +416,10 @@ impl CampaignModel {
             h.u32(r.town_wealth);
             h.i32(r.town_wealth_growth);
             h.u32(u32::from(r.tax_exempt));
+            h.u32(r.unit_resources.len() as u32);
+            for k in &r.unit_resources {
+                h.str(k);
+            }
             h.u32(r.garrison.map_or(u32::MAX, ForceId::raw));
             h.u32(r.fleet.map_or(u32::MAX, ForceId::raw));
             h.u32(r.recruitment_queue.len() as u32);
@@ -435,6 +451,16 @@ impl CampaignModel {
                 h.str(&item.level_key);
                 h.u32(item.turns_remaining);
                 h.i32(item.cost);
+                match item.kind {
+                    ConstructionKind::Build => h.bytes(&[0]),
+                    ConstructionKind::Repair { health_per_turn, turns } => {
+                        h.bytes(&[1]);
+                        h.u32(health_per_turn);
+                        h.u32(turns);
+                    }
+                    ConstructionKind::Demolish => h.bytes(&[2]),
+                }
+                h.bytes(&[u8::from(item.active)]);
             }
         }
         h.u32(w.characters.len() as u32);
@@ -630,6 +656,16 @@ pub struct World {
     /// ([`CampaignModel::map_fort_next_level`]) reject these levels, so the panels, the commands
     /// and the AI all read this one list. Saved in `EPISODIC_RESTRICTIONS` (`ntw_campaign`).
     pub restricted_buildings: std::collections::BTreeSet<String>,
+    /// The units the scripts restricted (`add_restricted_unit_record` /
+    /// `remove_restricted_unit_record`): the restricted set's other list (model `+0xFA8` → `+0x20`
+    /// count / `+0x24` items, CONFIRMED: `0x00A27960` `CheckUnitNotScriptRestricted` scans it and the
+    /// recruitable list `0x00A6AE40` and the queue step's held-back check `0x00B77F90` call it). One
+    /// campaign-wide set like [`Self::restricted_buildings`]: [`CampaignModel::recruitable_units`]
+    /// leaves these units out, so the panels, the commands, the queue step and the AI read this one
+    /// list. Saved in `EPISODIC_RESTRICTIONS` (`ntw_campaign`); an own save from before the field
+    /// reads it empty (the save's legacy list is merged in by the loader).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub restricted_units: std::collections::BTreeSet<String>,
     /// The next id [`World::alloc_id`] hands out. The original keeps one global id → object map
     /// for every kind of object (SAVE_COMPAT.md §3, CONFIRMED in the exe), so new ids must not
     /// collide with any id in the loaded file: the loader sets this above every integer of the
@@ -683,6 +719,14 @@ pub struct World {
     /// assassination / settlement spying gets outcome 1 without a roll (`0x0094ACB0`,
     /// `0x0094CCB0`). Both false in every vanilla save; only the tutorial scripts set them.
     pub force_success_for_human: (bool, bool),
+    /// The faction whose shroud keeps the AI from shopping under it: the script's
+    /// `disable_shopping_for_ai_under_shroud` (`0x00AA9B40`, CAI interface +0x618, CONFIRMED), set
+    /// by [`CampaignModel::set_ai_shopping_shroud`] and read by
+    /// [`CampaignModel::ai_shopping_hidden`]. `None` in every vanilla start position; only the
+    /// tutorial scripts set it. Saved in our own save format (an own save from before the field reads
+    /// `None`); the original save's `CAI_INTERFACE` flag is not read.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ai_shopping_shroud: Option<FactionId>,
     /// The human factions' spy-network sight (the faction sight object +0x800, its +0x20 list of
     /// shapes; CONFIRMED structure, CHARACTERS_FIDELITY.md §10): at the faction's turn start
     /// (`0x008F2480`, humans only) the sight disc of every character with `subterfuge` > 0 who
@@ -978,19 +1022,75 @@ pub struct RegionSlot {
     pub id: u32,
 }
 
-/// A building being built. Saves hold `BUILDING_CONSTRUCTION_ITEM` {u32, bool, u32 turns done
-/// (INFERRED), u32 total turns (INFERRED), u32 cost (INFERRED), utf16 level key (CONFIRMED)}.
+/// A slot's construction item: a building being built, repaired or demolished. Saves hold
+/// `BUILDING_CONSTRUCTION_ITEM` {#0 u32 item type, #1 bool active, #2 u32 turns done, #3 u32 total turns,
+/// #4 u32 cost, then the type's own tail} (CONFIRMED: writer `0x00AFBA90`, reader `0x00B256C0`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ConstructionItem {
     /// The slot being built in.
     pub slot: SlotRef,
-    /// The building level being built.
+    /// The building level being built (#5 of a build). For a repair, the standing building's level
+    /// (the item itself has no key); empty for a demolition.
     pub level_key: String,
     /// End-of-turns left until it is finished.
     pub turns_remaining: u32,
     /// The cost stored with the item (`BUILDING_CONSTRUCTION_ITEM` #4): the construction or repair cost.
     pub cost: i32,
+    /// What the item does when it steps and when it finishes. Saves of our own from before it was kept
+    /// read a build; the loader turns an older save's repair (an item of the standing level) into one.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub kind: ConstructionKind,
+    /// The item's active byte (+0x8, `BUILDING_CONSTRUCTION_ITEM` #1): `StepSlotConstructionItem` `0x00B78800`
+    /// steps only an active item (CONFIRMED, `0x00B7880E`). Every item the exe makes is active (`0x00AE6E80`);
+    /// an inactive one comes only from a save. Own saves from before it was kept read active.
+    #[cfg_attr(feature = "serde", serde(default = "item_active_default"))]
+    pub active: bool,
+}
+
+/// [`ConstructionItem::active`] of an own save from before it was kept: every item the exe makes is active.
+#[cfg(feature = "serde")]
+fn item_active_default() -> bool {
+    true
+}
+
+/// What a construction item does, by its type (`BUILDING_CONSTRUCTION_ITEM` #0, the item vtable's +4;
+/// each type's step is its vtable +0xC, CONFIRMED):
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ConstructionKind {
+    /// Types 0 (upgrade, step `0x00B78560`) and 1 (new building, step `0x00B78230`): when the
+    /// turns run out, the level stands in the slot at full health (`BuildingCompleted`). Steps only
+    /// while the region's owner holds the slot (`0x00B78800`).
+    #[default]
+    Build,
+    /// Type 2 (step `0x00B78490`, item `0x1C` bytes): each turn that does not finish it raises the
+    /// building's health by `health_per_turn` (item +0x18, ESF #5: (100 − health) / turns in `u32`,
+    /// `0x00B66260`) through `0x00B452A0`, which posts `CampaignBuildingDamaged` while the health is
+    /// below 100; the last turn sets 100 (no `BuildingCompleted`). Steps whoever holds the slot.
+    Repair {
+        /// The health added per turn (item +0x18).
+        health_per_turn: u32,
+        /// The repair's length in turns (item +0x10, ESF #3), fixed when it is queued.
+        turns: u32,
+    },
+    /// Type 3 (step at `0x00B781B0`, item `0x18` bytes, no ESF tail): one turn, cost 0
+    /// (`0x00AE6ED0` from `0x00B286C0`); when it finishes the slot's school stops researching and the
+    /// building is removed. Steps whoever holds the slot.
+    Demolish,
+}
+
+impl ConstructionKind {
+    /// The item type the saves store (`BUILDING_CONSTRUCTION_ITEM` #0) for a build: 0 upgrades a
+    /// standing building, 1 builds in an empty slot.
+    pub fn esf_type(self, slot_has_building: bool) -> u32 {
+        match self {
+            ConstructionKind::Build if slot_has_building => 0,
+            ConstructionKind::Build => 1,
+            ConstructionKind::Repair { .. } => 2,
+            ConstructionKind::Demolish => 3,
+        }
+    }
 }
 
 /// A settlement. W3 §3.7 `SETTLEMENT` v2/v3 (CONFIRMED structure): position in
@@ -1072,12 +1172,27 @@ pub struct Region {
     /// sets the road level of the region's roads (see `CampaignModel::road_level`).
     pub road: Option<BuildingRef>,
     /// The building in `REGION_SLOT_MANAGER/FORTIFICATION_SLOT`: the settlement's walls / fort (a `building_levels` key;
-    /// the map draws `<city template>_fortifications_lvl<level + 1>`). `None` without walls. Its effects are not
-    /// counted ([`Region::effect_buildings`]: the exe's effect walk `0x00A62380` reads the slot array; INFERRED). It is
+    /// the map draws `<city template>_fortifications_lvl<level + 1>`). `None` without walls. Its effects count like
+    /// any slot's ([`Region::effect_buildings`], CONFIRMED: `0x00A6AE40` merges the walls slot, manager +0x24, after
+    /// the road slot, +0x20, through the same `0x00A62380`). It is
     /// built, upgraded and repaired through [`SlotRef::Walls`] (slot type `settlement_fortification`); a
     /// capture rolls damage on it
     /// ([`capture`](super::capture)).
     pub fortification: Option<BuildingRef>,
+    /// The faction holding the road slot and the walls slot: each slot's `SIEGEABLE_GARRISON_RESIDENCE`
+    /// `GARRISON_RESIDENCE` #0, as [`RegionSlot::holder`] (`None` = the region owner). Both are slots of the same
+    /// class as the town slots (`LoadRegionSlotManager` `0x00A4DCB0` builds all three with `0x00A4D4F0`), so
+    /// `0x00A91FC0` tests them the same way: held by another faction, their building gives no effects and
+    /// flags its units occupied (CONFIRMED: `0x00A6AE40` passes them to `0x00A62380`), and their construction does
+    /// not advance (CONFIRMED: `0x00B78800` steps a slot's construction item only when the owner holds the slot).
+    /// The saves have such regions: `eur_bavaria` in `auto_after_c8` (owner Austria, its road, walls and four of
+    /// its five slots held by Bavaria; also `orig_over_nr4_0252`). An own save before format version 3 takes them
+    /// from the campaign's start (`ntw_campaign::own_save::read_with_start`).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub road_holder: Option<FactionId>,
+    /// The faction holding the walls slot (see [`Self::road_holder`]).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub fortification_holder: Option<FactionId>,
     /// The live population (`POPULATION/REGION_FACTORS` #2, the population object's +0x54 = region +0x7C;
     /// CONFIRMED: the reader `0x00A4C340`; growth, conversion, garrison repression and the panel read it).
     /// `POPULATION` #1 differs from it once the population has grown (`orig_fr_may1811`) and is not read.
@@ -1118,6 +1233,20 @@ pub struct Region {
     /// Per population class (`upper` / `lower` / `middle`): the stored base of the education factor
     /// (class +0x70, `POPULATION_CLASS` #11) and of the war-results factor (class +0x74, #12).
     pub class_bases: Vec<(String, i32, i32)>,
+    /// `REGION/RESOURCES_ARRAY`: the region's unit resources (`region_unit_resources` keys, e.g.
+    /// `global`, `horses`), region `+0x270` count / `+0x274` list (CONFIRMED: filled by the region
+    /// loader `0x00A45950` at `0x00A467BE`, written back by `0x00A51E30`). A unit with a
+    /// [`UnitRules::unit_resource`](super::rules::UnitRules::unit_resource) is recruitable only in a
+    /// region that lists it (`0x00AA1660`, [`CampaignModel::recruitable_units`]). The exe stores an
+    /// unknown key as null (never matches); keeping the string gives the same list while every unit's
+    /// resource is a `region_unit_resources` key, which holds for vanilla (CONFIRMED: test
+    /// `unit_resources_with_vanilla_data`, every units #14 and eur_napoleon `RESOURCES_ARRAY` value is one
+    /// of its 37 rows), and for mod data too: the units loader `0x00EDC000` drops a `units` row naming an
+    /// unknown one, as `ntw_data::GameDatabase` does (CONFIRMED). Every own save of format
+    /// version 2 on writes it; `serde(default)` only reads a version-1 save, whose loader then fills it
+    /// from the campaign's start (`ntw_campaign::own_save::read_with_start`).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub unit_resources: Vec<String>,
     /// Units being recruited here, in the order they were issued (W3 §4).
     pub recruitment_queue: Vec<RecruitmentItem>,
     /// Buildings being built here, in the order they were issued.
@@ -1190,12 +1319,29 @@ pub struct Fort {
 }
 
 impl Region {
-    /// What the region's constructions change when they finish, as the predictions count it: per
-    /// construction item, its slot, the level being built and the building it replaces there
-    /// (`0x00A67490` / `0x00A798F0` for the predicted effect set, `0x00A6AFC0` with its predicted flag
-    /// for each slot).
+    /// What the region's builds change when they finish, as the predicted effect set counts it: per
+    /// build item, its slot, the level being built and the building it replaces there (`0x00A67490` /
+    /// `0x00A798F0`, CONFIRMED: they count an item's level only when the item has one, item vtable +0x18
+    /// non-null, which a repair or a demolition has not).
     pub fn construction_changes(&self) -> impl Iterator<Item = (SlotRef, &str, Option<&BuildingRef>)> {
-        self.construction.iter().map(|c| (c.slot, c.level_key.as_str(), self.building_at(c.slot)))
+        self.construction
+            .iter()
+            .filter(|c| c.kind == ConstructionKind::Build)
+            .map(|c| (c.slot, c.level_key.as_str(), self.building_at(c.slot)))
+    }
+
+    /// The level a slot counts in the predicted slot values (`0x00A6AFC0` with its predicted flag,
+    /// CONFIRMED): the level being built there; none while the building is being demolished; the
+    /// standing building while it is being repaired, whatever its health; else the standing building
+    /// unless it is damaged.
+    pub fn predicted_slot_level(&self, slot: SlotRef) -> Option<&str> {
+        let standing = self.building_at(slot);
+        match self.construction.iter().find(|c| c.slot == slot).map(|c| (c, c.kind)) {
+            Some((c, ConstructionKind::Build)) => Some(c.level_key.as_str()),
+            Some((_, ConstructionKind::Demolish)) => None,
+            Some((_, ConstructionKind::Repair { .. })) => standing.map(|b| b.level_key.as_str()),
+            None => standing.filter(|b| !b.is_damaged()).map(|b| b.level_key.as_str()),
+        }
     }
 
     /// The building standing in a slot.
@@ -1227,19 +1373,26 @@ impl Region {
         }
     }
 
-    /// Is `slot` held by the region's owner? A town / port slot can be held by another faction
-    /// (`RegionSlot::holder`); the walls and the road always are the owner's.
+    /// Is `slot` held by the region's owner (`0x00A91FC0` false)? Any slot can be held by another
+    /// faction: a town / port slot ([`RegionSlot::holder`]), the road and the walls
+    /// ([`Self::road_holder`], [`Self::fortification_holder`]).
     pub fn slot_held(&self, slot: SlotRef) -> bool {
         match slot {
             SlotRef::Slot(i) => self.slots.get(i).is_some_and(|s| !self.slot_occupied(s)),
-            SlotRef::Walls | SlotRef::Road => true,
+            SlotRef::Road => !self.held_by_other(self.road_holder),
+            SlotRef::Walls => !self.held_by_other(self.fortification_holder),
         }
     }
 
     /// Is the slot `s` (one of this region's) held by another faction than the region's owner (`0x00A91FC0`,
     /// CONFIRMED)? Such a slot's building gives no effects and flags its units (recruitable flag 0x10).
     pub fn slot_occupied(&self, s: &RegionSlot) -> bool {
-        s.holder.is_some_and(|h| h != self.owner)
+        self.held_by_other(s.holder)
+    }
+
+    /// `0x00A91FC0` for a slot whose holder is `holder` (`None` = the owner).
+    fn held_by_other(&self, holder: Option<FactionId>) -> bool {
+        holder.is_some_and(|h| h != self.owner)
     }
 
     /// Every building standing in the region (slots and road), in slot order.
@@ -1247,15 +1400,18 @@ impl Region {
         self.slots.iter().filter_map(|s| s.building.as_ref()).chain(self.road.as_ref())
     }
 
-    /// The buildings whose effects count (`0x00A62380`, CONFIRMED): at full health (> 99) in a slot the
-    /// region owner holds (`0x00A91FC0`: the slot's faction = the region's owner). The road slot has no
-    /// holder of its own here and always counts (INFERRED).
+    /// The buildings whose effects count, in the exe's order (CONFIRMED: `0x00A6AE40` walks the slot array,
+    /// then the road slot, then the walls slot, each through `0x00A62380`): at full health (> 99) in a slot
+    /// the region owner holds (`0x00A91FC0`: the slot's faction = the region's owner).
     pub fn effect_buildings(&self) -> impl Iterator<Item = &BuildingRef> {
+        let road = self.road.as_ref().filter(|_| self.slot_held(SlotRef::Road));
+        let walls = self.fortification.as_ref().filter(|_| self.slot_held(SlotRef::Walls));
         self.slots
             .iter()
             .filter(|s| !self.slot_occupied(s))
             .filter_map(|s| s.building.as_ref())
-            .chain(self.road.as_ref())
+            .chain(road)
+            .chain(walls)
             .filter(|b| !b.is_damaged())
     }
 }

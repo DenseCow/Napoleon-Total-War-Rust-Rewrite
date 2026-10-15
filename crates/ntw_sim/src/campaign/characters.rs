@@ -598,15 +598,9 @@ impl CampaignModel {
                 f.commander = None;
             }
             if empty {
-                self.world.forces.remove(&fid);
-                for r in self.world.regions.values_mut() {
-                    if r.garrison == Some(fid) {
-                        r.garrison = None;
-                    }
-                    if r.fleet == Some(fid) {
-                        r.fleet = None;
-                    }
-                }
+                // He has left the map already: the force stood where he stood.
+                let port = self.docked_port_at(fid, old.position);
+                self.remove_force(fid, port);
                 continue;
             }
             let Some(ui) = self.commander_unit(fid) else { continue };
@@ -721,10 +715,7 @@ impl CampaignModel {
         let home = region == Some(ch.faction);
         let naval = matches!(ch.kind, super::world::CharacterKind::Admiral | super::world::CharacterKind::Captain)
             || self.force_of(c).and_then(|f| self.world.forces.get(&f)).is_some_and(|f| f.is_navy);
-        let in_port = self.world.regions.values().flat_map(|r| r.slots.iter()).filter(|s| s.port).filter_map(|s| s.position).any(|p| {
-            let (dx, dz) = (p.0.to_f32() - ch.position.0.to_f32(), p.1.to_f32() - ch.position.1.to_f32());
-            dx * dx + dz * dz < 1.0
-        });
+        let in_port = self.port_at(ch.position).is_some();
         let acted = ch.movement_points != ch.max_movement_points || self.world.agents_acted.contains(&c);
         let Some(d) = self.world.character_details.get_mut(&c) else { return };
         d.turns_in_enemy_lands = if enemy { d.turns_in_enemy_lands + 1 } else { 0 };

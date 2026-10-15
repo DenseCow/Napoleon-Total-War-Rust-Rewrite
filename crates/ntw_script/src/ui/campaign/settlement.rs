@@ -1,6 +1,7 @@
 //! The settlement panel: building slots, construction, forts, the building browser and tree.
 
 use super::*;
+use ntw_sim::campaign::ConstructionKind;
 
 /// `building_culture_variants` rows: (building level, culture) → (icon, description key)
 /// (schema s,s,o,o,o,o,o reads all 264 rows to the end; columns 0 level, 1 culture, 6 icon
@@ -23,8 +24,10 @@ struct SlotInfo {
     key: String,
     /// The standing building: (level, health).
     standing: Option<(String, u32)>,
-    /// The slot's construction item: (level, turns left, total turns, is a repair).
+    /// The slot's build or repair item: (level, turns left, total turns, is a repair).
     building: Option<(String, u32, u32, bool)>,
+    /// The turns left of the slot's demolition, if one is queued (the standing building's row shows it).
+    dismantling: Option<u32>,
     /// Construction options (`0x00B43300`).
     options: Vec<ConstructionOption>,
     can_repair: bool,
@@ -41,13 +44,17 @@ fn slot_info(m: &CampaignModel, region: RegionId, slot: SlotRef, key: String) ->
     let r = m.world.regions.get(&region)?;
     let (_, standing) = r.construction_slot(slot)?;
     let standing = standing.map(|b| (b.level_key.clone(), b.health));
-    let building = r.construction.iter().find(|c| c.slot == slot).map(|c| {
-        // A repair is an item of the standing level; its length is the repair's own
-        // ([`CampaignModel::repair_turns`]), not the level's build time.
-        let repair = standing.as_ref().is_some_and(|(l, _)| *l == c.level_key);
-        let full = if repair { m.repair_turns(region, slot) } else { m.rules.buildings.get(&c.level_key).map_or(c.turns_remaining, |b| b.turns.max(1)) };
-        (c.level_key.clone(), c.turns_remaining, full.max(c.turns_remaining), repair)
+    let item = r.construction.iter().find(|c| c.slot == slot);
+    let building = item.and_then(|c| match c.kind {
+        // A repair's length is its own ([`CampaignModel::repair_turns`] when it was queued), not the level's build time.
+        ConstructionKind::Repair { turns, .. } => Some((c.level_key.clone(), c.turns_remaining, turns.max(c.turns_remaining), true)),
+        ConstructionKind::Build => {
+            let full = m.rules.buildings.get(&c.level_key).map_or(c.turns_remaining, |b| b.turns.max(1));
+            Some((c.level_key.clone(), c.turns_remaining, full.max(c.turns_remaining), false))
+        }
+        ConstructionKind::Demolish => None,
     });
+    let dismantling = item.filter(|c| c.kind == ConstructionKind::Demolish).map(|c| c.turns_remaining);
     // The model repairs slots and the walls, not the road ([`CampaignModel::can_repair`]). The
     // original offers no road repair either: the road is only on the infrastructure panel, whose
     // `infrastructure` flag hides the repair / demolish buttons (`Construction.lua:408`, `:429`),
@@ -62,7 +69,7 @@ fn slot_info(m: &CampaignModel, region: RegionId, slot: SlotRef, key: String) ->
     // building under repair, or the road, still shows what repairing its damage costs.
     let can_repair = m.can_repair(region, slot);
     let repair_cost = m.repair_cost(region, slot);
-    Some(SlotInfo { key, standing, building, options, can_repair, repair_cost })
+    Some(SlotInfo { key, standing, building, dismantling, options, can_repair, repair_cost })
 }
 
 /// The `slot_key` prefix of a region's fortification (walls) slot. PROVISIONAL format: the exe's
@@ -137,7 +144,7 @@ pub(super) enum ConstructionPanel {
 /// exist in every `REGION_SLOT_MANAGER` of all eight shipped startpos files (CONFIRMED,
 /// `esf_find` on the install: 72/72 eur, 30/30 egy, 25/25 ita, 31/31 spa, 8/8 tut, mp alike); the
 /// model keeps no empty slot, so a mod region without one still gets them (PROVISIONAL).
-/// PROVISIONAL: technologies empty, no alternative chains or dismantling.
+/// PROVISIONAL: technologies empty, no alternative chains.
 pub(super) fn construction_info(lua: &Lua, inner: &Inner, ui: &CampaignUi, region: RegionId, panel: ConstructionPanel) -> mlua::Result<Value> {
     let m = ui.model();
     let Some(r) = m.world.regions.get(&region) else { return Ok(Value::Nil) };
@@ -179,7 +186,9 @@ pub(super) fn construction_info(lua: &Lua, inner: &Inner, ui: &CampaignUi, regio
         e.set("can_repair", on_slot && s.can_repair)?;
         e.set("can_afford_repair", on_slot && ntw_sim::campaign::treasury::can_pay_repair(treasury, s.repair_cost))?;
         e.set("repair_cost", if on_slot { s.repair_cost } else { 0 })?;
-        e.set("dismantling", false)?;
+        // A standing building's row (type 1) says whether the slot's item is a demolition (`0x009C8320` →
+        // `0x00B4D5A0`: the item's type is 3, CONFIRMED).
+        e.set("dismantling", kind == 1 && s.dismantling.is_some())?;
         e.set("alternate_chain", false)?;
         e.set("availability", availability)?;
         e.set("cost", cost)?;
@@ -198,7 +207,8 @@ pub(super) fn construction_info(lua: &Lua, inner: &Inner, ui: &CampaignUi, regio
                 let done = total.saturating_sub(*left) as f32 / (*total).max(1) as f32 * 100.0;
                 buildings.raw_push(entry(level, 2, s, 0, *left, done, 3)?)?;
             }
-            (None, Some((level, _))) => buildings.raw_push(entry(level, 1, s, 0, 0, 100.0, 3)?)?,
+            // The row's turns are its item's turns left, 0 with none (`0x009C8320`: total − done, CONFIRMED).
+            (None, Some((level, _))) => buildings.raw_push(entry(level, 1, s, 0, s.dismantling.unwrap_or(0), 100.0, 3)?)?,
             (None, None) => {
                 for o in &s.options {
                     buildings.raw_push(entry(&o.level_key, 3, s, o.cost, o.turns, 0.0, availability(o))?)?;
@@ -207,7 +217,7 @@ pub(super) fn construction_info(lua: &Lua, inner: &Inner, ui: &CampaignUi, regio
         }
         st.set("buildings", buildings)?;
         let upgrades = lua.create_table()?;
-        if s.building.is_none() && s.standing.as_ref().is_some_and(|(_, h)| *h > 99) {
+        if s.building.is_none() && s.dismantling.is_none() && s.standing.as_ref().is_some_and(|(_, h)| *h > 99) {
             for o in &s.options {
                 upgrades.raw_push(entry(&o.level_key, 4, s, o.cost, o.turns, 0.0, availability(o))?)?;
             }

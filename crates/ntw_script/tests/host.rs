@@ -185,3 +185,19 @@ fn end_turn_forwards_model_events() {
     let seen: Vec<String> = h.lua().load("return seen").eval().unwrap();
     assert!(seen.iter().any(|s| s.starts_with("local turn")), "{seen:?}");
 }
+
+#[test]
+fn disable_shopping_for_ai_under_shroud_stores_the_one_humans_shroud() {
+    // 0x00AA9B40: on → the single human's shroud (france here), off → none.
+    let src = ScriptSource::empty().with_memory_file("events.lua", EVENTS).with_memory_file("test.lua", SCRIPT);
+    let mut model = common::tiny_model();
+    let fr = model.faction_by_key("france").unwrap().id;
+    model.turn.humans = vec![fr];
+    let h = ScriptHost::new(model, "france", src).unwrap();
+    h.run_file("data/test.lua").unwrap();
+    h.fire("NewSession", ScriptContext::default());
+    h.lua().load("game_interface:disable_shopping_for_ai_under_shroud(true)").exec().unwrap();
+    assert_eq!(h.model().world.ai_shopping_shroud, Some(fr));
+    h.lua().load("game_interface:disable_shopping_for_ai_under_shroud(false)").exec().unwrap();
+    assert_eq!(h.model().world.ai_shopping_shroud, None);
+}

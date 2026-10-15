@@ -388,8 +388,9 @@ pub struct MoraleInputs {
     pub morale_stat: i32,
     /// `+0x18A`: impetuous allowed (needed for Eager → Impetuous).
     pub impetuous_allowed: bool,
-    /// `+0x194`: formation/type class used by the front-attack adjust and fighting-cavalry scaling.
-    pub formation_class: u8,
+    /// `+0x194`: the training level ([`super::model::LandUnit::training_level`]), used by the
+    /// front-attack adjust, the fighting-cavalry scaling and the fatigue concern.
+    pub training_level: u8,
     /// `+0xD08`: morale-modifier category 1..7 (meaning UNKNOWN, W1 §10.6).
     pub category: i32,
     /// `+0xC84`: under projectile fire.
@@ -438,8 +439,10 @@ pub struct MoraleInputs {
     /// Sub-evaluator `0x0053B970`: an active enemy unit with the "frightens enemy" attribute (unit
     /// `+0x18C`, `unit_stats_land` col 74) is within 100 m (see [`near_100m`]). CONFIRMED test.
     pub enemy_frightens_near: bool,
-    /// Same, an enemy with "frightens horses" (`+0x18B`, col 73) while this unit passes
-    /// `FUN_0055C2A0` (INFERRED: it is cavalry and not in unit state 0xF).
+    /// Same, an enemy with "frightens horses" (`+0x18B`, col 73) while this unit rides and is not
+    /// dismounted (`0x0055C2A0`, CONFIRMED static: the mounted test `0x0055ABF0` holds and the
+    /// `dismount` ability, 15, is not active). The caller uses [`super::strength::mounted`], which
+    /// differs only for a cavalry or camel unit with `dismount` active.
     pub horses_frightened: bool,
     /// Same, a friendly unit (not this one) with "inspires" (`+0x18D`, col 75) within 100 m.
     pub friend_inspires_near: bool,
@@ -807,10 +810,19 @@ pub mod fear_effect_id {
 
 /// The "within N m" test of the unit lists `0x00701310` (enemies) and `0x006C9E40` (friends,
 /// skipping the unit itself), CONFIRMED: centre distance (x, z plane) `< r_self + N + r_other`, with
-/// `r` = the formation object's `+0x670` (INFERRED: the formation's radius). Strict `<`.
+/// the centres the squads' measured box centres (summary `+0xB0`, the copy of the box centre
+/// `+0x18`, read through `0x0053FBE0`) and `r` their radius `+0x670` (summary `+0x44`, written by
+/// `0x0053C3D0`: the box centre to the farthest man). See [`super::march::SquadBox`]. Strict `<`.
 pub fn near(dist_sq: f32, r_self: f32, r_other: f32, n: f32) -> bool {
     let reach = r_self + n + r_other;
     dist_sq < reach * reach
+}
+
+/// [`near`] between two units, from their measured boxes ([`super::model::LandUnit::squad_box`]).
+pub fn near_units(a: &super::model::LandUnit, b: &super::model::LandUnit, n: f32) -> bool {
+    let (ba, bb) = (a.squad_box(), b.squad_box());
+    let (dx, dz) = (ba.centre.0 - bb.centre.0, ba.centre.1 - bb.centre.1);
+    near(dx * dx + dz * dz, ba.radius, bb.radius, n)
 }
 
 /// [`near`] with N = 100 m (the fear and inspiration range, `0x42C80000`).
@@ -857,7 +869,7 @@ pub fn sub_fatigue(c: &mut MoraleComponent, kv: &KvMorale, i: &MoraleInputs) {
     if v == 0 {
         return;
     }
-    match i.formation_class {
+    match i.training_level {
         4 => c.add_effect(id, v / 2),
         5 => c.add_effect(id, 0),
         _ => c.add_effect(id, v),
@@ -1017,12 +1029,13 @@ fn blood_bonus(kv: &KvMorale, ratio: f32) -> Option<i32> {
     }
 }
 
-/// Fighting-cavalry value scaled by the unit class. W1 §12.4 (CONFIRMED):
-/// class 0/1 → full, 2 → `/2`, 3 → `/4` (**signed shift**, so −5 >> 1 = −3), 4/5 → none.
-/// Classes above 5 are not described; we treat them as "none" (INFERRED).
-pub fn fighting_cavalry_value(kv: &KvMorale, formation_class: u8) -> Option<i32> {
+/// Fighting-cavalry value scaled by the training level. W1 §12.4 (CONFIRMED):
+/// `mob`/`rabble` (0/1) → full, `poorly_trained` (2) → `/2`, `trained` (3) → `/4` (**signed
+/// shift**, so −5 >> 1 = −3), `well_trained`/`elite` (4/5) → none. Level 6 (a key outside the
+/// exe's enum, `0x00EED960`) → none (INFERRED).
+pub fn fighting_cavalry_value(kv: &KvMorale, training_level: u8) -> Option<i32> {
     let v = kv.fighting_cavalry;
-    match formation_class {
+    match training_level {
         0 | 1 => Some(v),
         2 => Some(v >> 1),
         3 => Some(v >> 2),
@@ -1031,10 +1044,10 @@ pub fn fighting_cavalry_value(kv: &KvMorale, formation_class: u8) -> Option<i32>
 }
 
 /// Formation adjust added to the front-attack value. W1 §12.4 (CONFIRMED numbers):
-/// class 0/1 → −4, class 2 → −2, otherwise +2 "under another condition" (UNKNOWN condition,
+/// training level 0/1 → −4, level 2 → −2, otherwise +2 "under another condition" (UNKNOWN condition,
 /// supplied as [`Attacker::plus_two_condition`]).
-fn front_formation_adjust(formation_class: u8, plus_two_condition: bool) -> i32 {
-    match formation_class {
+fn front_formation_adjust(training_level: u8, plus_two_condition: bool) -> i32 {
+    match training_level {
         0 | 1 => -4,
         2 => -2,
         _ if plus_two_condition => 2,
@@ -1075,7 +1088,7 @@ pub fn modifiers(c: &mut MoraleComponent, kv: &KvMorale, i: &MoraleInputs) {
             v = v.wrapping_mul(2);
         }
         v = v.wrapping_add(front_formation_adjust(
-            i.formation_class,
+            i.training_level,
             a.plus_two_condition,
         ));
         c.add_effect(effect_id::ATTACKED_FRONT, v);
@@ -1094,7 +1107,7 @@ pub fn modifiers(c: &mut MoraleComponent, kv: &KvMorale, i: &MoraleInputs) {
     }
 
     if i.fighting_cavalry
-        && let Some(v) = fighting_cavalry_value(kv, i.formation_class)
+        && let Some(v) = fighting_cavalry_value(kv, i.training_level)
     {
         c.add_effect(effect_id::FIGHTING_CAVALRY, v);
     }
@@ -1813,7 +1826,7 @@ mod tests {
         let mut a = attacker(AttackDirection::Front);
         a.doubles_front_value = true;
         let i = MoraleInputs {
-            formation_class: 2,
+            training_level: 2,
             attackers: vec![
                 a,
                 attacker(AttackDirection::Flank),
@@ -1828,7 +1841,7 @@ mod tests {
 
         // Class 0 -> -4; class 4 with the "other condition" -> +2; excluded attackers do nothing.
         let i = MoraleInputs {
-            formation_class: 0,
+            training_level: 0,
             attackers: vec![attacker(AttackDirection::Front)],
             ..Default::default()
         };
@@ -1836,14 +1849,14 @@ mod tests {
         let mut a = attacker(AttackDirection::Front);
         a.plus_two_condition = true;
         let i = MoraleInputs {
-            formation_class: 4,
+            training_level: 4,
             attackers: vec![a],
             ..Default::default()
         };
         assert_eq!(run_mods(&i).effect(effect_id::ATTACKED_FRONT), Some(-8));
         a.excluded = true;
         let i = MoraleInputs {
-            formation_class: 4,
+            training_level: 4,
             attackers: vec![a],
             ..Default::default()
         };
@@ -1861,7 +1874,7 @@ mod tests {
         assert_eq!(fighting_cavalry_value(&k, 5), None);
         let i = MoraleInputs {
             fighting_cavalry: true,
-            formation_class: 2,
+            training_level: 2,
             ..Default::default()
         };
         assert_eq!(run_mods(&i).effect(effect_id::FIGHTING_CAVALRY), Some(-3));
@@ -2014,11 +2027,11 @@ mod tests {
         i.fatigue_level = 5;
         sub_fatigue(&mut c, &k, &i);
         assert_eq!(c.effect(fatigue_effect_id::EXHAUSTED), Some(-7));
-        i.formation_class = 4;
+        i.training_level = 4;
         i.fatigue_level = 4;
         sub_fatigue(&mut c, &k, &i);
         assert_eq!(c.effect(fatigue_effect_id::VERY_TIRED), Some(-2));
-        i.formation_class = 5;
+        i.training_level = 5;
         i.fatigue_level = 3;
         sub_fatigue(&mut c, &k, &i);
         assert_eq!(c.effect(fatigue_effect_id::TIRED), Some(0));

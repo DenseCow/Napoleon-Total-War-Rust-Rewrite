@@ -431,7 +431,7 @@ fn building_browser_entry_shows_the_slot_tree() {
 
 /// The settlement panel's demolish button (0-E round N+2): `CanDemolishBuilding` (`0x009E0930` ->
 /// `0x009B7920`) answers from the model's `can_demolish` (ported by 0-G) and `DemolishBuilding`
-/// (`0x009E2380` -> queue id `0x84`) queues the command; applying it removes the building.
+/// (`0x009E2380` -> queue id `0x84`) queues the command; applying it queues the slot's demolition (`0x00B286C0`), which the round end carries out.
 #[test]
 fn demolish_button_removes_a_standing_building() {
     let Some(mut s) = setup() else { return };
@@ -468,7 +468,13 @@ fn demolish_button_removes_a_standing_building() {
     );
     assert_eq!(apply_all(&mut s, reqs), 1, "the command applies");
     s.host.campaign_select(sel);
-    assert!(s.scripts.state().model.world.regions[&region].slots.iter().all(|x| x.key != slot_key || x.building.is_none()));
+    {
+        let st = s.scripts.state();
+        let r = &st.model.world.regions[&region];
+        let index = r.slots.iter().position(|x| x.key == slot_key).unwrap();
+        assert!(r.slots[index].building.is_some(), "queued, not done");
+        assert!(r.construction.iter().any(|c| c.slot == ntw_sim::campaign::SlotRef::Slot(index) && c.kind == ntw_sim::campaign::ConstructionKind::Demolish));
+    }
     assert!(errors(&s.host).is_empty());
 }
 
@@ -823,7 +829,7 @@ fn a_hired_and_a_field_promoted_general_show_european_general_portraits() {
         m.world.characters.get_mut(&officer).unwrap().kind = CharacterKind::Colonel;
         m.world.character_details.entry(officer).or_default().portrait = Default::default();
         let d = m.world.faction_details.entry(f).or_default();
-        d.bonus_base.push(SavedBonus { kind: 1, bonus: 64, value: 1.0, qualifier: String::new() });
+        d.bonus_base.push(SavedBonus { kind: 1, bonus: 64, value: 1.0, qualifier: String::new(), ..Default::default() });
         d.bonus_with_difficulty.clear();
         m.apply(CampaignCommand::PromoteUnit { force: army, unit }).expect("the promotion applies");
         assert_eq!(m.world.characters[&officer].kind, CharacterKind::General);

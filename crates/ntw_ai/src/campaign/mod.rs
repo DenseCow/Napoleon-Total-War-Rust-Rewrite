@@ -48,8 +48,6 @@ pub use world::{AiArmy, AiFaction, AiRegion, AiSchool, AiWorld};
 /// What the campaign scripts told the AI (see `ntw_script::ScriptState`; filled by the caller).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ScriptHints {
-    /// `add_restricted_unit_record` keys: never recruited.
-    pub restricted_units: BTreeSet<String>,
     /// `set_campaign_ai_force_all_factions_boardering_humans_to_have_invasion_behaviour(true)`.
     pub invade_humans: bool,
     /// Faction keys whose armies scripts froze with `disable_movement_for_character` (by faction,
@@ -461,7 +459,7 @@ impl<'a> FactionTurn<'a> {
             let opts: Vec<(String, i32)> = r
                 .recruitable
                 .iter()
-                .filter(|e| e.flags == 0 && e.cost > 0 && !self.ctx.hints.restricted_units.contains(&e.unit_key))
+                .filter(|e| e.flags == 0 && e.cost > 0)
                 .map(|e| (e.unit_key.clone(), e.cost))
                 .collect();
             if opts.is_empty() {
@@ -973,7 +971,7 @@ impl<'a> FactionTurn<'a> {
             let mut best: Option<(f32, String, i32, i32)> = None;
             for e in &r.recruitable {
                 let (unit, cost) = (&e.unit_key, e.cost);
-                if e.flags != 0 || self.ctx.hints.restricted_units.contains(unit) || self.no_room_for(rid, unit) {
+                if e.flags != 0 || self.no_room_for(rid, unit) {
                     continue;
                 }
                 let Some(info) = self.data.units.get(unit) else { continue };
@@ -1276,6 +1274,8 @@ mod tests {
             slots: vec![slot],
             road: None,
             fortification: None,
+            road_holder: None,
+            fortification_holder: None,
             population: 0,
             base_gdp: 0,
             gdp: 0,
@@ -1286,6 +1286,7 @@ mod tests {
             tax_exempt: false,
             religions: Vec::new(),
             class_bases: Vec::new(),
+            unit_resources: Vec::new(),
             population_state: Default::default(),
             recruitment_queue: Vec::new(),
             construction: Vec::new(),

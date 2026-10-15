@@ -447,7 +447,9 @@ Files this round: `crates/ntw_formats/src/verlet.rs` (new), `crates/ntw_formats/
     - CONFIRMED: the class carries **both** `+0xA8` (soldier -> parent) and `+0x1B0`; `0x006A7DD0`
       (soldier slot 42) walks `this+0x670[]` calling each sub-object's `+0xA8`, and `0x0065B0A0` /
       `0x0065B0E0` walk the same `+0x66C`/`+0x670` array through `+0x98` / `+0x9C`.
-    - CONFIRMED negative: **the exe has no string enum** for `training_level`, `drill_set`,
+    - Superseded for `training_level` (§9.1, formation4): its parser `0x00EED960` maps the six keys to 0..5
+      (6 otherwise), and `0x0057E1F0` reads the level's `entity_training_levels` row. Round 6 claimed:
+      CONFIRMED negative: **the exe has no string enum** for `training_level`, `drill_set`,
       `melee_animation_category` or `man_animation_type` -- `nwbytes:well_trained`,
       `drill_set_infantry_line`, `foot_bayonet`, `man_musket`, `rider_musket_sabre` are all **not found**
       in `Napoleon.exe`. Those names live only in the DB, so `+0x1B0` cannot be a direct index into one.
@@ -579,7 +581,8 @@ pikemen. Only one function reads the names (`0x00E5FA30`, name → index for the
 - `kind`: 0 stationary loop, 2 locomotion loop, 3 transition, 5 turn, 7 step, 0xC/0xD turn-to-walk, 0xE moving
   one-shot, 0xF combat, 0x11 action, 0x12 stationary one-shot, 0x14/0x15 death (stand / moving), 0x16 rider one-shot,
   0x17 rider combat, 0x18 rider loop, 0x19 rider turn, 0x1B rider action, 0x1C rider state, 0x1D/0x1F jump deaths
-  (INFERRED names from the slot names).
+  (INFERRED names from the slot names). The 864 kinds themselves are read from the table (CONFIRMED, polish16
+  2026-10-14) into `battle_animation::SLOT_KINDS` (test `slot_kinds_match_the_exe_table_for_the_slots_the_display_plays`).
 - `family`: index of the family's base slot (`WALK_2`'s is `WALK_1`).
 - `mount_slot`: for a `RIDER_*` slot, the mount slot it plays with. All are `RIDER_<x>` ↔ `<x>`, except
   `RIDER_WALK` ↔ `WALK_1` and `RIDER_RUN` ↔ `RUN_1`.
@@ -669,10 +672,14 @@ User report: in battle the walk -> run and run -> walk change snapped from one c
   when D is the clip's own `blend_in_time`, else D. Elapsed e = 0. Vanilla data (`real_install::gait_blend_survey`):
   **no clip under `animations/` has gear markers**, so a vanilla gait change blends over the new clip's
   `blend_in_time`: `WALK_n` / `RUN_n` / `*_TRAINED_n` lines say 0.5 s (most) or 0.25 s, 1.0 s when absent.
-- **Start time of the new clip:** when the new anim loops (anim `+0x44` bit 2, the bit that also exempts a clip from
+- **Start time of the new clip:** when the new anim loops (anim `+0x44` mask 0x2, the flag that also exempts a clip from
   the end-of-clip test) and the old clip's root speed (anim `+0x60`) is above 0.1 m/s (`0x0131A7B0`): new time =
   (old time mod old duration) / old duration x new duration (CRT fmod `0x01285DD0`), so the step phase carries over.
-  Otherwise 0 (deaths and transition kinds have their own cases).
+  Otherwise 0 (deaths and transition kinds have their own cases). The loop flag is set by slot kind when the anim
+  is bound (`0x00E4F4D0`, CONFIRMED polish16 2026-10-14): mask 0x2 for kinds 1, 2, 4, 6, 7, 8, 0xA, 0xE, 0x18 and
+  0x1C, so a stand (kind 0) or a transition (kind 3) starts at 0. Ours: `view::start_time` with
+  `battle_animation::kind_loops` (the kinds in `SLOT_KINDS`); PROVISIONAL: a figure's first clip, a looping clip
+  the phase does not carry into and the sim-clocked kinds (below) start at the figure's own offset (`skin::phase`).
 - **Every frame:** w = e / D. If D > 0, w < 1 and a previous output pose exists, the drawn pose is the per-bone blend
   (`0x010CDB20`: translations lerped, rotations nlerp or slerp by a mode) of the **previous frame's drawn pose** and
   the new clip's pose at weight w; else the new clip alone. The result is kept as the next frame's previous pose
@@ -690,13 +697,14 @@ User report: in battle the walk -> run and run -> walk change snapped from one c
   `0x007725D0` reads it once (`0x00772E3D`), for clip kind 2 only, and multiplies it into that advance. Kind 2 is the
   moving gait loops (slot table `0x013AEBE4`, kind at record `+4`: `WALK_1` 10, `TROT` 28, `CANTER` 33, `GALLOP` 38,
   `CHARGE` 125); stands (`STAND` 1, kind 0), action loops (`COMBAT_READY` 88, `AIM` 126: kind 0; the combat loops
-  `0xF` / `0x11` / `0x17`) and transitions (kind 3) play at the plain rate. So the men and horses of one unit on one
+  `0xF` / `0x11` on the soldier's clip clock; the rider's `0x17` takes the mount's clip time) and transitions (kind 3) do
+  not take it. So the men and horses of one unit on one
   loop drift apart by up to 10 % of the clip rate, which is what keeps a cavalry unit out of lockstep (user check
   2026-10-10: "every horse steps at the same time"). The seed's origin is UNKNOWN (no write to manager `+0x8` found in
   the traced code). Ours (`view::playback_scale`, `display_scale`, one per figure in spawn order: men, then the
   bearer): one discarded draw for `+0xD0`, then the scale, multiplied only into a moving gait loop's advance
-  (`loop_advance` with `LoopKind::Gait`: `on_levels` on a graph other than `Gait::Stand`, `on_ladder`'s loop rung and wrap test, the bearer's
-  fallback loop off the stand), never while an action loop is shown over the gait, nor into stands or transitions; the
+  (`loop_advance` with `LoopKind::Gait`, keyed on the kind of the clip shown: `on_levels`, `on_ladder`'s loop rung
+  and wrap test, the bearer's fallback loop), never while an action loop is shown over the gait, nor into stands or transitions; the
   seed is ours (`display_seed`, a stream of the battle seed). The rider copies the mount display's clip time, so a
   pair keeps one scale. Still not as the exe: the exe's per-soldier speeds and start times (each man's sim speed, his
   own STAND_TO_WALK start) are one unit speed in ours, so a unit setting off from standing takes its first step
@@ -786,7 +794,7 @@ User report: in battle the walk -> run and run -> walk change snapped from one c
   env-gated per-figure probe (since removed; 42,450 frame lines, 2 cavalry units, walk → run → walk) found three
   causes, all fixed:
   1. *Loops over n intervals (CONFIRMED, `0x010DA030` GetAnimFramePairAtTime).* The exe's frame pair on a looping
-     anim (flag `+0x44` bit 1) is floor(t·rate) mod (n − 1) and the next key, over the n − 1 intervals of the
+     anim (flag `+0x44` mask 0x2) is floor(t·rate) mod (n − 1) and the next key, over the n − 1 intervals of the
      anim's length `+0x4C` = (n − 1)/rate. Ours ran over n, blending the last key back into key 0: a closed gait
      loop keys the same pose at both ends, so every cycle held that pose for one frame time (50 ms) and ran
      n/(n − 1) slow (horse walk 1.15 s for 1.10, trot 0.85 for 0.80, canter 0.65 for 0.60, gallop 0.55 for 0.50,
@@ -807,6 +815,34 @@ User report: in battle the walk -> run and run -> walk change snapped from one c
      0.925 → 0.276). It now tests the level's root speed as read (`carry_speed`, `KitLevel::speed`; probe after:
      Loop1 → Loop0 0.156 → 0.165, Loop2 → Loop1 0.655 → 0.666). Test
      `view::a_level_change_carries_the_stride_by_the_levels_own_root_speed`.
+  4. *Whose root speed: the figure's own alternative (CONFIRMED, gait-trace 2026-10-13).* A slot holds up to 5
+     alternatives; `0x00E5F760` (the fragment slot's clip getter) returns alternative `selection % count` (a 0x18-byte
+     row: 5 clip pointers, the count at `+0x14 + slot × 0x18`; an empty slot falls back to slot 0's alternatives,
+     which ours skips, §1.2). Every clip lookup of the update `0x007725D0` passes the display's own selection, and the
+     graph context's `+0xC` is the same value, so the rate (`0x00772E2B`), the carry at a clip change (`0x00773E2E`,
+     `0x00773E85`..`0x00773E94`), the graph's up / down edges (`0x007CEAA0` / `0x007CE840`) and its entry test
+     (`0x00703120`) all read the anim `+0x60` of the figure's own alternative, and the transition rate lerps its
+     from / to slots' clips through the same getter (`+0x30` / `+0x34`, same selection). A rider copies his mount
+     display's clip time (`0x0079BB10`), so the mount's alternative rules a mounted pair. The moving deaths
+     (`0x006611E0`) measure each slot's clip through `0x00E5F760` with the entity's `+0x1E0` selection too. Ours took
+     the first clip's speed for the whole level (`KitLevel::speed`, the last one's for actions); now every
+     alternative keeps its own (`KitLevel::speeds` / `mount_speeds`) and `KitLevel::speed_of(sel)` feeds the rate,
+     carry, climb / entry edges, the transition rate (`on_ladder`) and the moving-death pick (`actions::death`).
+     Not changed: our levels are ordered by their first clip's speed, the exe's graph by its node order (the shipped
+     tables agree). Test `view::each_figure_goes_by_its_own_alternatives_root_speed`.
+  5. *A transition left early (CONFIRMED, gait-trace 2026-10-13): no rule of its own.* When the graph leaves a
+     kind-3 transition before its end (a down edge `0x007CE840` or a new order), the display takes the generic
+     change at `0x00773D85`: `+0xDC` / `+0xE0` zeroed; if the old clip's anim `+0x60` > 0.1 (`0x0131A7B0`) and the new
+     clip loops (anim `+0x44` mask 0x2, `0x00773E73`), the new time is fmod(t, old length) / old length × new length
+     (`0x00773EB4`..`0x00773EF3`), else 0 (`0x00773F17`; kinds 0x14..0x16 aside). The two holds before it do not
+     apply to a transition: `0x00773C12`..`0x00773C63` keeps the shown clip to its end only while the display's
+     stop flag `+0x114` is set (last frame's `[ESP+0x1F]`, written at `0x007743A5`, from `0x007946D0`, the
+     stop / arrive clip pick: moving within 6.5 m of the target, 1.0 for slot 0x12 or the clip's `+0x74`, ×0.01 when
+     above 50; the new clip then starts at `[ESP+0x14]`, `0x00773EA1`), and `0x00773BAA`..`0x00773C0E` only when the
+     shown clip is kind 0xC / 0xD. So the stride carries out of a transition by the transition clip's own root speed
+     and length, which ours already does (`ClipBlend::step` through `carry_speed` of the level shown, now the
+     figure's alternative, item 4). The stop clip pick (`0x007946D0`) is not modelled (no stop / arrive slots in
+     ours yet).
   Checked and not a cause: rider and mount share one clip time and one advance, so the playback scale
   (`0x0078B8A0`) is applied to both alike. The once-a-second
   surge on slowed ground is in the movement, not the animation (§1.10, "Measured surge").
@@ -814,19 +850,74 @@ User report: in battle the walk -> run and run -> walk change snapped from one c
   shown slot's kind (record `+4`, slot table `0x013AEBE4`) before it advances the clip time:
   - kind 2 (`0x00772E19`..`0x00772E65`): t += speed / anim `+0x60` x display `+0xB0` x frame time, with no clamp
     and no zero guard (a standing man on a moving graph gets rate 0);
-  - kind 4, and 0xC / 0xD through `0x007730BC`: speed / root speed, without the scale;
+  - 0xC / 0xD (the turns into a walk) through `0x007730BC`: the same forward speed (display input `+0x0`,
+    `[ESP+0xA0]`) / root speed, without the scale;
+  - kind 4 (`PUSH_ENGINE_*_BACKWARDS`, `ENGINE_LIMBERED_BACKWARDS`) at `0x00772E6A`: a different speed / root
+    speed, without the scale (corrected polish16-fix 2026-10-14; it was grouped with 0xC / 0xD). XMM1 there still
+    holds display input `+0x8` (`[ESP+0xA8]`, loaded at `0x00772C71` after `0x00752FF0`, a `__thiscall` that pops
+    its two arguments; nothing on the path from there writes XMM1). The snapshot `0x0079FF50` stores in that slot
+    (ring `+0x34`, read back as ring `+0x18`) the length of the entity's `(+0x8C, +0x94)`, whose atan2 it keeps as a
+    heading (ring `+0x3C`): a horizontal speed whatever the facing, which stays positive for these backward moves
+    where the forward speed `+0x14C` would not. `(+0x8C, +0x90, +0x94)` is the entity's measured velocity
+    (CONFIRMED polish17 2026-10-14): the motion integrator `0x007F08F0` adds the tick's displacement `+0xD4..+0xDC`
+    to the position `+0x48..+0x50` and then stores that displacement x 10 there (`0x007F12AD`..`0x007F12F2`, the
+    0.1 s tick), and the placing move `0x0080BAC0` stores (new position - old) x 10 (`0x0080BAEC`..`0x0080BB30`).
+    A tick without a displacement skips the add: `BL` is set only when the squared length of `+0xD4..+0xDC` is
+    above 0 (`0x007F0DF3`..`0x007F0DFB`), and `0x007F0E26` jumps on `BL != 1` past the add and the move tests to
+    the bounds check at `0x007F102C`, which still reaches the store (`0x007F1083` -> `0x007F129B` -> `0x007F12AD`):
+    the velocity is then that zero displacement x 10, 0, the same as the add path would give (CONFIRMED polish18
+    2026-10-14). Ours: a man that did not move over the tick has ground speed 0.
+    So kind 4 divides the distance the man moved over the last tick, per second. Ours feeds the same quantity, the
+    ground speed (distance moved over a tick, [`GroundSpeed`] in `view.rs`, each man's own through `MenDrawn`), to
+    both kinds (CONFIRMED for kind 4; no kit shows a kind-4 clip, so there is nothing to look at in game);
   - kind 3: the transition rule above;
   - kinds 0, 1, 0xE and 0x20 (`0x00773086`): t += frame time (rate 1, no scale);
   - every other kind (the melee idles 0xF, 0x11, 0x17 ...): no advance in this switch (`0x00773080` jumps to
-    `0x00773237`). Where those clips advance is UNKNOWN.
+    `0x00773237`). Kinds 0xF..0x13 (CONFIRMED polish16 2026-10-14) take their time from the soldier's clip
+    clock instead, set each frame at `0x0077430C`: the entity's clip frame count (`+0x1C0`, copied by the
+    snapshot `0x0079FF50` into the display input, `0x00752FF0`) x 0.1 s plus the in-tick time (`+0x28230` ms x
+    0.001, `0x005F5530`), and 0.1 s more for kind 0xF. So they play at rate 1 (no speed, no playback scale) from
+    the start the sim sets. The same second switch (`0x00774274`, byte table `0x00775430`, jump table
+    `0x00775420`: kinds 0xF..0x13 to the clock `0x0077430C`, 0x16..0x1A to `0x00774282`, 0x1D to `0x007742C0`,
+    0x14 / 0x15 / 0x1B / 0x1C to the exit `0x00774398`, where the out-of-range kinds go too) sends the rider's
+    kinds 0x16..0x1A (his refusals, gait transitions, steps, combat idles, stand idles, deaths, mount and dismount
+    = 0x16, `RIDER_COMBAT_n` / `RIDER_MOUNT_ATTACK_n` = 0x17, gait loops and jumps = 0x18, turns = 0x19 / 0x1A) to
+    `0x00774282`, which copies the mount display's (`[ESI+0xCC]` -> `+0x14`) clip time (`+0xD8`) and flag `+0x115`
+    (CONFIRMED polish16-fix 2026-10-14): so kind 0x17 plays the mount's clip time. Kind 0x1D (the rider's jump
+    and chevaux-de-frise deaths) goes to `0x007742C0`, which copies the same clip time and `+0x115` and also the
+    mount's `+0x11C` (`[ESI+0xCC]` -> `+0x11C`, at `0x007742E1`..`0x007742ED`) (CONFIRMED polish17 2026-10-14).
+    Ours already shares one clip time between rider and mount and keys a mounted level on the mount's slot
+    (`soldiers::level_kind`).
+    Checks before that switch (`0x00774228`..`0x0077425D`, CONFIRMED polish17 2026-10-14), on the entity's state
+    (`+0x1B8`, the snapshot ring's `+0x24` via `0x0079FF50` / `0x00752A20`, `[ESP+0x5C]`) and requested slot
+    (`+0x1C4`, ring `+0x30`, `[ESP+0x68]`): state 0x15 or 0x16 sets the clip time to the shown clip's end (the clip
+    object's `+0x44` -> anim length `+0x4C`, `0x00774386`..`0x00774392`) and skips the switch; else a slot in
+    0x2FA..0x301 (`DEATH_JUMP_1`..`_8`, kind 0x1F) skips it with the time untouched; else state 0x2A, 0x4B or 0x17
+    goes to `0x007742A8` instead of the switch: kinds 0x16..0x1A copy the mount's clip time without the `+0x115`
+    flag (`0x007742F8`, stored at `0x00774392`), kind 0x1D goes to `0x007742C0`, and every other kind (kind 2's
+    gait loops too) takes the clip clock `0x0077430C`. Ours: `battle_animation::display_time` holds the whole
+    rule, these checks and the kind switch after them (`JUMP_DEATH_SLOTS` = 0x2FA..0x301; byte table `0x00775430` =
+    0xF..0x13 clock, 0x14 / 0x15 exit, 0x16..0x1A mount time and flag, 0x1B / 0x1C exit, 0x1D mount time, flag and
+    `+0x11C`; clock constants 0.1 at `0x0131A7B0`, 0.001 at `0x01318030`; CONFIRMED polish18 2026-10-14, test
+    `display_time_follows_the_pre_switch_checks_then_the_kind_switch`). The battle view has no entity anim state
+    (`+0x1B8`), so it does not call it yet. What the states stand for is open: 0x17 (and 0x18) are written by
+    `UpdateSoldierSpeedMultiplierAndState` (`0x00654518`..`0x00654590`, when `+0x118` == 1: 0x17 with `+0x114` == 1,
+    slot `+0x44C`, frame `+0x450` + 1), 0x2A / 0x4B by `0x00653A10` (`0x00653F0B`..`0x00653F39`, slot 0x360 = none,
+    by the thresholds at `0x014521C8` / `0x014521CC`), 0x2A also by `0x0066CE00`, `0x00679300` and `0x00679F50`;
+    0x15 / 0x16 come only from data, through `+0x630` (`0x00662E90`, copied to the state by `0x0067A050`; callers
+    `0x00672580`, `0x006735E0`, `0x00672B80`, `0x00672F40`), and no instruction stores or compares them at `+0x1B8`
+    directly (byte search, polish18).
   The men's graph slot tables name the stand rung's clip: `0x0133C608` (walk graph) and `0x0133D030` (charge graph)
   both map node 0 to `STAND` (slot 1, kind 0); the charge graph's node 2 is `CHARGE` (slot 125, kind 2). So a
   moving graph that has dropped to its stand rung plays the stand clip at rate 1, not the walk level slowed down.
-  Ours: `view::LoopKind` (`Gait` = kind 2, `Plain` = kinds 0 / 1 / 0xE / 0x20) and `view::loop_advance`, the one
-  helper every loop calls (`on_levels`, `on_ladder`'s loop rung and wrap test, `bearer_loop`'s fallback); the rate
-  is `loop_rate` = speed / the level's read root speed, no clamp (1 only for a level with no read root speed). An
-  action loop shown over the gait advances as `Plain`. PROVISIONAL (ours): the melee idles advance at rate 1 too,
-  until their advance site is found.
+  Ours: `view::LoopKind` (`Gait` = kind 2, `Paced` = kinds 4 / 0xC / 0xD, `Plain` = the rest) and
+  `view::loop_advance` / `advance_by`, the one helper every loop calls (`on_levels`, `on_ladder`'s loop rung and wrap
+  test, `bearer_loop`'s fallback), keyed on the kind of the clip shown (`KitLevel::kind` / `GaitAnims::kind` from
+  `battle_animation::SLOT_KINDS`, the mount's slot for a mounted level): an action loop shown over the gait advances
+  by its own kind, and a moving graph's stand rung plays `STAND` (kind 0) at rate 1. The rate is `loop_rate` =
+  speed / the level's read root speed, no clamp (1 only for a level with no read root speed). The melee idles
+  (`COMBAT_IDLE_n`, kind 0x11) play at rate 1 (CONFIRMED, `0x0077430C` above); their start is the figure's own
+  offset (PROVISIONAL: ours keeps no per-soldier clip clock).
 - **Infantry hitch (gait-infantry, 2026-10-12).** The user (2026-10-11) still saw a slight hitch on infantry after
   gait-jitter (cavalry passed). Probe: release `--battle --ai off`, two line infantry units ordered to walk, run
   (10 s), walk (16 s) and stop (26 s); one log line per figure per frame (clip, level, phase, rate, speed), ~28k
@@ -1089,14 +1180,31 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
     `COMISS`/`JBE` at `0x00581B73`/`0x00581B76`, store and call `0x00584E10` at `0x00581B81`; the tick count is the u32
     at order `+0x14` → `+8` → `+0x58`. In f32, 10 ticks × 0.1 almost always rounds to exactly 1.0 (not above it), so
     the re-issue comes every **11 ticks** (an f32 run from 0 over 200 000 ticks: 18 178 periods of 11, 4 of 10, at
-    ticks 21, 42, 1284, 20 489; ours keeps 11, PROVISIONAL: the counter `+0x58` and its zero are not traced; BACKLOG §0 line to trace it). `0x00584E10` (IssueUnitMoveOrderToSoldiers) fills each soldier's descriptor
+    ticks 21, 42, 1284, 20 489). **The counter is traced (gait-trace 2026-10-12, CONFIRMED):** order `+0x14` → `+8` is the Battle Model (ctor `0x00506C00`, "Battle Model" profiling strings), whose `+0x58` the ctor zeroes at `0x00506C85`; `0x0057DF40` (StepBattleModelIfTickDue) runs one model tick and then increments it at `0x0057E0BC`. Ours ports the rule itself (`timed_move_issue_time` / `timed_move_reissue_due` in `ntw_sim::battle::model`, order `issued` = `+0x2C`), so from tick 0 the 10-tick periods fall at issue ticks 11, 32, 1274 and 20 479. Left PROVISIONAL on `Battle::tick`: the model also ticks during deployment (AI deployment phase `0x00583820` runs from tick 8), so the exe's count at the conflict's start is the deployment's ticks, while ours starts at 0 at the conflict; the f32 schedule (and any rule keyed on the count) depends on that base until our model counts deployment ticks too. `0x00584E10` (IssueUnitMoveOrderToSoldiers) fills each soldier's descriptor
     (`+0xA4`): words 0–4 the soldier's own slot point, word 5 the heading, word 7 order `+0x24`, word 8 v = the gait
     record's speed (`0x00565030` GetUnitGaitSpeed, no ground or slope factor), word 9 t from `0x0054C650`
     (ComputeUnitMovePlanDistanceAndTime), word 10 low byte = `0x007FF1C0` && order `+0x28` (clear for a walk), and
     installs it at `0x00585602`. `0x0054C650`: D = n·k + 2v, t = D / v, n = (unit `+0x510`)`+0x27C`, k = (unit
-    `+0x510`)`+0x13C` (read at `0x0054C691`); n = 0 gives t = 2.0 (`0x40000000`). k has no static writer (ctor
-    `0x00515340` zeroes it at `0x005155A1`, copy ctor `0x00518230` copies it at `0x005184EC`), but the runtime slope
-    below needs t ≈ 5 s (n·k ≈ 3v): t stays INFERRED until n and k are read at `0x0054C691`.
+    `+0x510`)`+0x13C` (read at `0x0054C691`); n = 0 gives t = 2.0 (`0x40000000`). **n and k named statically (gait-trace
+    2026-10-13, CONFIRMED):** unit `+0x510` is the unit body (0xE38 bytes, ctor `0x0051B7D0`, allocated by `0x00531320`
+    from `0x00505B00` ← `0x005055E0` ← `0x00544A70` ← `0x00515340`; `0x00565030` GetUnitGaitSpeed reads its `+0xAF0`
+    speed multiplier and `+0x384` record through the same pointer). n = the body's living-soldier count: `0x005307E0`
+    (called once from the body ctor) creates one soldier object per `+0x48` entry and pushes it into the `+0x278` /
+    `+0x27C` / `+0x280` array (count++ at `0x00530AE1`); `0x00574E90` swap-removes one (count-- at `0x005751DF`).
+    k = `unit_stats_land` column 45 `spacing_rank_close` (the rank spacing of the close order, m): the body ctor
+    copies the holder's LAND_UNIT_RECORD into `body+0x20` (`0x0051B841` → `0x00564790` → `0x00514FB0`, member-wise;
+    record `+0x11C` copied at `0x00515169`), so `body+0x13C` = record `+0x11C`, and the record builder `0x00E8CFF0`
+    fills `+0x114..+0x130` from the `unit_stats_land` row `+0x1C0..+0x1DC` (`+0x11C` ← row `+0x1C8`; the repo schema
+    `ntw_data::schemas` puts #43 default_ranks at 0x1C0, #44 spacing_file_close 0x1C4, #45 spacing_rank_close 0x1C8;
+    `+0x134` ← row `+0x1E0` is_artillery confirms the alignment). Earlier class notes here were wrong: `0x00515340`
+    (0x2DF8 bytes, "Manager", battle model `+0xB0`) is a battle-level manager, `0x00518230` copies a different layout
+    (the recruitment-panel holder), and `0x005181E0` / `0x00518DC0` build a 0x514-byte class, none of them the unit.
+    **Open contradiction:** with n living men and k the rank spacing, a full unit (160 × ~1.5 m) plans t = n·k/v + 2 of
+    tens to hundreds of seconds, while the 2026-10-10 sitting's slope (order speed rising ~0.035 a tick from 2.69 under
+    `0x00659600`'s d / (t − elapsed)) needs t ≈ 5 s (n·k ≈ 3v). Not resolvable statically (the array `+0x27C` may be
+    counted differently at order time, or `0x00659600` may not use t as read): `TIMED_MOVE_PLANNED_SECONDS` stays
+    INFERRED 5 s until the debugger read at `0x0054C691` (below) logs n, k and t, and `0x00659600`'s use of word 9 is
+    re-read against the logged values.
     **(b) `0x006DC700` (IssueArtilleryCrewFollowMove) is the artillery crew following its gun, not a walk order (CONFIRMED).** Its caller chain is
     `0x006D7720` → `0x006E0410` → `0x006D9A40` → `0x006DC700`, and `0x006D7720` is slot 105 of the six artillery-piece
     vtables (ctor `0x0068F610` picks the grape / chain / shot_rifled / improved_grape variant). The follow record it
@@ -1123,8 +1231,8 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
     falling back to 2.69 at the re-plan, with the wanted speed 1.0..1.1 m/s at `0x00819D5F`. So the speed-up /
     slow-down once a second on slowed ground is 1:1 and kept.
   - *Wired, `ntw_sim::battle::model::TimedMove`.* Each moving unit carries a timed order: planned at its gait speed
-    with d = speed × 5 s (`TIMED_MOVE_PLANNED_SECONDS`, INFERRED, above), re-planned every 11 ticks
-    (`TIMED_MOVE_REPLAN_TICKS`, CONFIRMED `0x00581B73`; was 10 before gait-jitter) or when the speed changes, cleared
+    with d = speed × 5 s (`TIMED_MOVE_PLANNED_SECONDS`, INFERRED, above), re-planned on the exe's f32 rule
+    (`timed_move_reissue_due`, CONFIRMED `0x00581B73`: mostly every 11 ticks, 10 at the f32 edges) or when the speed changes, cleared
     on arrival or stop and on every order install, also one re-issued to the same point (`LandUnit::set_destination`,
     the one path every order source writes the destination by; `0x00659520` zeroes `+0x43C` on each install). Each
     tick the wanted speed is `timed_move_speed(v, run × 1.45, d, 5 − elapsed, keep = false)` × the ground/slope
@@ -1135,8 +1243,18 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
     "Each man's timed move" below. `TimedMove` keeps the INFERRED t.
   - *Debugger read left (for `docs/FOR_USER.md` only if the night debugger can't reach it).* Break at `0x0054C691`
     for a walk-ordered horse and infantry and log n = (unit `+0x510`)`+0x27C`, k = `+0x13C` and the returned t
-    (expect t ≈ 5). Also, for ground 6 ~0.8: on a road cell, log the soldier's `+0x19C`, `+0x10` and `+0x1A4` at
-    `0x0081AC80`'s return and at `0x00819D5F`, to tell an object ground from the road row value.
+    (the static read above says n = living men, k = rank spacing, which gives t far above the sitting's ≈ 5 s: the
+    log settles which is used). Sitting plan: launch the original under Ghidra's debugger (never attach to a running
+    game), walk-order one cavalry and one infantry unit; at `0x0054C691` log the unit body pointer, n and k, and on
+    return D and t; then watch `0x00659600` read the move descriptor's word 9 (`+0xA4 + 0x24`) to see which t the
+    timed move uses.
+  - *Gait-trace state (2026-10-13, final).* Done: BACKLOG 223 (tick counter, re-plan rule); 224's static part (n, k
+    above, CONFIRMED); 225 and 226 (§1.9 items 4 and 5); the Ghidra batch (`0x00506C00` ConstructBattleModel, V5
+    write-up, globals `g_flBattleMapCentreX/Y`, `g_szWindScopeName`; `0x0054C650` plate fixed to n = living men /
+    k = `unit_stats_land` #45). Left: the debugger read above (224's `TIMED_MOVE_PLANNED_SECONDS`, INFERRED), and
+    `Battle::tick` counting the deployment ticks (PROVISIONAL, its own BACKLOG line); an empty slot's fallback to
+    slot 0 (§1.2), not modelled. Also, for ground 6 ~0.8: on a road cell, log the soldier's `+0x19C`, `+0x10` and
+    `+0x1A4` at `0x0081AC80`'s return and at `0x00819D5F`, to tell an object ground from the road row value.
   - *Measured surge in ours (gait-jitter, 2026-10-11; env-gated per-tick probe, since removed, `hb_austerlitz`, AI
     off, our 2 cavalry walk → run → walk).* On open flat ground the unit's speed is steady (2.44–2.47 m/s walk,
     ±1%). On slowed ground (multiplier ~0.65) the re-plan gave a 1 s sawtooth: 1.58 → 1.71 m/s (+8%) over 10 ticks,
@@ -1212,6 +1330,306 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
     such floor is known in the exe); the model's depth (the men's rank pitch) has none. `UnitInfo.ranks` (unused) is gone. The
     first rank's placement `0x00619EB0` alternates sides by slot parity (filled from its anchor outward); not
     decoded, so the place within a rank, a partial rank's, the rank pitch and the anchor stay ours.
+  - *Which men the files cap reads (polish15, CONFIRMED static).* Every caller of the line shape's files
+    (`0x0061CAB0` its third argument, `0x00646B00` / `0x00646C70` / `0x00646D40` their fifth, `0x0065A410` /
+    `0x0065A6D0` their argument's `+0x20`) caps at the count it is passed. The fire step's `0x005694D0` passes the
+    unit's soldier count `+0x18` (with the width of the owner's `+0x510` → `+0x384` entry `+0x24`) and caps at it;
+    `+0x18` is the live count: `0x00575580` / `0x005755D0` take a dying soldier out of the vector at `+0x1C` and
+    lower it, and the reform `0x00581200` lays `+0x18` men out over the slots. So the files and the ranks follow
+    the living men, not the starting men. Ours had `files()` and the grid's ranks on `max_men` and the
+    no-width fallback `width()` on `men`; now all three read `men` (`files()` caps at it, `formation_grid` takes
+    ceil(men / files), the fallback width is those files × the file spacing), so the depth and width shrink as
+    the unit loses men (test `the_files_the_width_and_the_grid_follow_the_living_men`). (The view now re-places the living men whenever
+    the model lays the formation out again; see "The shape kinds" below.)
+  - *When the men are re-laid (polish15-fix, CONFIRMED static).* The review found the grid reflows every tick in
+    ours, but `0x00581200` re-lays only behind a gate. Traced: `0x00581200` is vfunc `+4` (the
+    per-tick update) of the fire-order base, vtable `0x013239B0` (drill vtables `0x013239F0` volley, `0x01323A30`,
+    `0x01323A70`, `0x01323AB0`, `0x01323AF0` share it), and is also called once from `0x0066EC20` (first tick,
+    guard `+0x24`, states with vtables `0x013339E0` / `0x01333A20` / `0x01333A60`). The base ctor `0x0051A230`
+    sets `+0x18` = a slot object (`0x007F2680`, 0x3C bytes, freed in `0x00521ED0`), `+0x1C` = the width (owner
+    `+0x510` → `+0x384` → `+0x24`), `+0x20` = 0. The update: when `0x00569410` (unit `+0x1F4` → `+0x10`) is 0 and
+    men (`+0x18`) × 0.5 < `+0x20`, it zeroes `+0x20`, calls the shape (`+0x628`) vfunc `+0x24` (out: 0x24-byte
+    slots; the slot object, the width, the men), and sends each soldier `i` farther than `0x0057E1F0` + 1.5 m
+    from slot `i` there (soldier vfunc `+0xB8`); then vfunc `+0x38` true → done `+0xC` = 1, else tail-call the
+    fire step `+0x3C`. `+0x20`'s only writer found: `0x00539910` (vfunc `+0x34`, the candidate gather) adds 1
+    per call per candidate `i < 0x005694D0` that is ready (`0x0063E290`) and whose current behaviour (soldier
+    `+0x2D4`, present flag `+0x35B`, `0x007FF390`) has vfunc `+0x34` true and result `+0x1C` == 0
+    (`0x008056D0` copies the motion task's result `+0x18` once the task is done, `+8`: 0 or 1). The gather runs
+    every fire-order tick: the volley step `0x0055EB30` (tail-called from the update's end) calls vfunc `+0x34`
+    into the global vector `0x01450DD0` each call and waits for max(1, round(men × 0.025)) candidates; no other
+    writer of `+0x20` was found. The result: `+0x18` = 1 is written when the entity's motion state (`+0x390`)
+    reaches 7 (`0x00818834`, `0x0081936B`; `0x008185C3` also when the entity's `+0x13C` is 1); the task ends with
+    it left 0 when it finishes by the state-6 path (`0x00818810`, via `0x0062DF10`; `0x00819310` with `+0x44`),
+    i.e. a move that ended short of its goal, so the counter counts, per tick, the front-rank men standing on
+    an ended-short move, and the re-lay sends the ones far from their slots back. The counter re-lay does not
+    re-grid: the slots it lays are the shape's over the living men, and only men farther than `0x0057E1F0()` +
+    1.5 m from slot `i` move (`0x0057E1F0`: 1.5 if `0x0055C9A0(4)`, else the row float at `0x00F88300` + `+0x194`
+    → `+0xC`). The update's periodic block (tick % 10 == unit id % 10, `DAT_014A35D0` = 10 from `0x00407740`)
+    only stamps `+0x2784` (the in-formation tick) through `0x00557BC0` / `0x00557C20` / `0x00557C80`.
+    *The re-slot after losses is a different mechanism:* `0x005755D0` (dying soldier removal) sets unit `+0x278C`
+    = 1 and `+0x2788` = 20 (when soldier `+0xEC` is clear and shape vfunc `+0x30` is true), pulls the men behind
+    forward along the shape's vfunc `+0x34` chain and compacts the soldier vector; `SQUAD::update` `0x00580A30`
+    runs the state update (`0x00580990`, under `+0x278D` / `+0x278E` clear) and then decrements `+0x2788` once per
+    tick; each order update found checks `+0x278C && +0x2788 == 0` (`0x00581200`, `UpdateUnitMoveOrderReissue`
+    `0x00581AE0`, `0x00583150` / `0x005732B0` / `0x005735A0` through the this-adjust thunks `0x004F9DF0` /
+    `0x004F7C60` / `0x004F8790` (`this − 0x18`, null-safe; the states they serve: see "The thunks" below), and `0x0066E9B0`)
+    and calls `0x0057AFC0(slot, width, 1, -1)` → `0x00555CA0`: shape vfunc `+0x24` layout with the living men,
+    nearest-slot assignment `0x005373F0` (`0x00502770`, threshold 16.0 or FLT_MAX), the soldier vector rebuilt in
+    slot order, `+0x278C` cleared, then the in-place check `0x00557C80` with tolerance 4.0 (`+0x2784` = tick when
+    the mean distance is under it, else 0). The unit ctor `0x00518DC0` starts with `+0x2784` = 0, `+0x2788` = 0,
+    `+0x278C` = 1 (a re-slot at the first update). Other `+0x278C` setters: `0x00521F80`, `0x00531680`,
+    `0x005380A0`, `0x0057B0E0`, `0x005819B0` (not traced; not losses). A move's issue or re-issue
+    (`IssueUnitMoveOrderToSoldiers` `0x00584E10`) assigns no slots (review round 3, CONFIRMED static): its shape
+    `+0x628` vfunc `+0x24` with `+0x18` only computes the slot points the men are issued to; the one assignment
+    inside it, `0x0057AC10` (when `0x005516D0` holds for a man), runs once per order (order byte `+0x44`).
+    `0x00576B30` has two callers only: `BuildUnitMoveOrder` (`0x0051A8E3`, an order behind the front) and
+    `0x00581AE0` (below).
+    *The move order lays out every tick short of the end (review round 2, CONFIRMED static).*
+    `UpdateUnitMoveOrderReissue` `0x00581AE0` calls `LayOutUnitMoveOrderSlots` `0x00576B30(due)` (due = `+0x278C` set and `+0x2788` = 0)
+    every tick while the order's at-end flag `+0x3C` is clear, and only when due once it is set. `0x00576B30`
+    takes the slot buffer (`0x007F2D70` on order `+0x34`); at the order's first update (byte `+0x7C` `bFirstUpdateDone` clear, then
+    set; `BuildUnitMoveOrder` `0x0051A530` makes that first call for an order behind the front, else the
+    first update does, short of the end or when due) it runs `0x0057AFC0(slots, width, due, -1)`;
+    later only while `0x00532360` holds (no man on a building structure, squad `+0x734`) with the anchor `+0x30`.
+    `0x0057AFC0` lays the shape out over the living men; with `due` set it is the full re-slot (`0x00555CA0`,
+    clearing `+0x278C`), so the pending flag is cleared only by a due call. A moving unit short of its end
+    therefore re-lays at the tick after a loss; at the end it waits the 20 ticks.
+    *Which removals start the countdown (CONFIRMED static).* `RemoveSoldierFromSquadSlots` `0x005755D0` (squad vtable `0x013211D8` slot `+4`)
+    always sets `+0x278C`; it sets `+0x2788` = 20 and pulls the men behind forward along the shape's vfunc `+0x34`
+    chain (args: index, the formation width at battle unit `+0x384` → `+0x24` as a float, the men; the line
+    shape's `+0x34` is `0x00646F40` in vtable `0x01333AA8`, which passes the width and its spacings `+0x08` /
+    `+0x10` to `0x00646D40`; the earlier Ghidra plate's "file count" was wrong) only when the soldier's
+    byte `+0xEC` is clear and the shape's vfunc `+0x30` is true; otherwise it swap-removes the soldier with the
+    last. Its only caller is `0x00575560` (clears soldier `+0x388`, the squad, then the squad's `+4`), reached
+    from a unit's remove-soldier `0x005756D0` (`0x00574E90` calls it after taking the soldier off the unit's
+    lists) and `0x0057E260` (move a soldier to another squad, 22 callers: re-squadding). A death is the soldier's
+    vfunc `+0x104` `0x00653A10` (every soldier vtable, e.g. `0x01333714`; `0x006D5C40` is the slot in the
+    `0x0132B7D8` family): it clears `+0xEC`, then removes the soldier from his unit (`0x00563040` →
+    `0x00574E90`), so every death restarts the countdown. `+0xEC` is set only by the soldier's reset
+    `0x00660AB0` (vfunc `+0xF8`, which also clears `+0x388` and leaves the battle's live lists). The shape:
+    kind from the unit's active special ability (see "The shape kinds" below; `0x00579780` stores the shape
+    parameters at unit `+0x2F0`..`+0x2FC` and re-creates each squad's shape; the earlier note here that unit
+    `+0x2F8` is the kind was wrong: `0x00531630` passes the kind and those four parameters), built by the
+    factory `0x00531680` (via `0x00531630`): 0 the line (`0x00620ED0`, vtable `0x01333AA8`; layout
+    `+0x24` `0x0062FD60` → `0x00620850` → `0x0065A6D0`, ranks by `0x00619E60`; files `+0x10` `0x00642D00`),
+    1 (`0x00620F20`, `0x01333AEC`), 2 (`0x00621120`, `0x01333BEC`), 3 (`0x00621140`, `0x01333C28`), 4
+    (`0x006211A0`, `0x01333C64`), 5 (`0x006211D0`, `0x01333B30`), 6 (`0x006210D0`, `0x01333BB0`), plus
+    `0x00620F70` (`0x01333B6C`, from `0x005196F0`). Vfunc `+0x30` is `0x00447880` (true) for all but kinds 1 and
+    2 (`0x00462CB0`, false). 
+    *The shape kinds (formation worker, CONFIRMED static).* `0x005498D0` picks the kind from the unit's special
+    abilities: it asks `0x0055C9A0(ability)` in the order 6, 0, 1, 2, 3, 4 and the first active one gives kind 3,
+    2, 4, 5, 1, 6 respectively; none gives 0, the line. The ability switch `0x00578860` (through `0x005315A0`)
+    and `0x00579780` re-create the shape when an ability starts or stops. So kinds 1 and 2 (vfunc `+0x30` false)
+    are the shapes of abilities 3 and 0: a loss there makes the re-slot pending (`+0x278C`) without restarting
+    the countdown, which then falls due at the first tick it is out. Ours: `march::SHAPE_KINDS`,
+    `LandUnit::shape_kind` and `reslot_tick` (test `a_loss_in_shape_kind_1_or_2_keeps_the_countdown`).
+    PROVISIONAL: every kind is still laid out as the line (the layouts of kinds 1-6 are not traced) and ours
+    never clears an active ability.
+    *The shape parameters (formation4, CONFIRMED static).* Every shape stores the squad's `+4` at `[1]`; the line
+    ctor `0x00620ED0(a, p1, p2, p3, p4)` (through `0x00620EB0`) stores p1..p4 at `[2]`..`[5]`. Kind 6
+    `0x006210D0(a, p1, p2)` is the line with p3 = 3.5 and p4 = 2.0 fixed; kind 3 `0x00621140` is the line with
+    p3 = p4 = 1.0 plus p1, p2 again at `[6]`, `[7]`. `0x00579780` stores the unit's four (p1 → `+0x2F8`, p2 →
+    `+0x2FC`, p3 → `+0x2F0`, p4 → `+0x2F4`); its callers pass p1 = p2 = an entity's `+0x4C` (or twice it), p3 the
+    unit's file spacing (`+0x138` / `+0x148`), p4 `+0x13C` / `+0x14C`; `fire_and_advance` (ability 7, in
+    `0x00578860`) passes p3 = `0x00557570()` while on, `+0x138` when off. The line (vtable `0x01333AA8`): files
+    `+0x10` (`0x00642D00` → `0x00642C90`) = floor((width + 0.001 − p1) / p3) + 1, capped; width `+0x14`
+    (`0x00642B50`) = p1 + p3 × (files − 1); `+0x18` (`0x00642A60`) the width of ceil(men / files) files. Kind 6
+    (vtable `0x01333BB0`, light infantry): files `+0x10` (`0x00642E10`) = min(`0x00642D90`, cap) with `0x00642D90`
+    = floor((width + 0.001 − p3/2 − p1) / p3) + 1; width `+0x14` (`0x00642BA0`) = p1 + p3 × (files − 1) + p3/2;
+    layout `+0x24` `0x006302E0`. The line generator (`0x00620850`, vtable `0x01333AA0`) holds width, p1, p2, p4,
+    the slots, `[1]` and p3; its first rank (`0x0065A410`) takes files from (min(row length, width), p1, p3),
+    capped at the row's slot cap, placed by `0x00619EB0` alternating sides by parity at spacing p3; later ranks
+    (`0x0065A6D0`, `0x00619E60`) only advance the slot counter. Kind 6's generator (`0x00620920`, vtable
+    `0x01333BA8`; `0x0065A4F0` / `0x0065A790`) uses `0x00642D90` and shifts a rank's start by half a pitch: plus
+    when the generator's `+0x18` bit 0 is set, minus when the previous rank's files were odd and this rank's even
+    (the stagger). `0x00659E70` walks the anchor's rank objects (`0x00555DF0`; list `+0x14`, count `+0x10`;
+    row start `+8`/`+0xC`, direction `+0x10`/`+0x14`, length `+0x18`, slot cap `+0x20`). Turning light infantry
+    on (`0x00578860` case 4 → `0x0052ED80`, task `0x00515210`, vtable `0x013247C8`) keeps the files (old shape
+    `+0x10` of the width), takes kind 6's width of them and re-forms at the mean of old and new widths
+    (`0x00537FA0`); `fire_and_advance` keeps the files and re-forms at the new shape's width (`0x00537E40`).
+    Ours: no change yet (`march::SHAPE_KINDS` records these). Still PROVISIONAL: the anchor's row classes and
+    `0x00619EB0` in full, the layouts of kinds 1, 2, 4, 5 (`0x0062FDC0`, `0x00630390`, `0x00631560`,
+    `0x006316B0`), the stagger and the width task's later updates, and what p4 does.
+    *The backward order `+0x8C` (CONFIRMED static).* The path request builder `0x008102F0` sets the request's
+    `+0x8C` (at `0x00810D3F`) when the goal minus the summary's front centre (`+0x9C`) has a negative dot product
+    with the summary's front (`+0x34`), i.e. the goal lies behind the men's front. `BuildUnitMoveOrder`
+    `0x0051A530` then lays out with the re-slot argument (`0x00576B30(1)`), a full re-slot that clears the
+    pending `+0x278C`. The test runs only when the request's `+0x28` sub-object's first dword is 0; its meaning
+    is untraced, and ours takes it as 0 for every order (PROVISIONAL). Ours: the issue in `march_men` (test
+    `an_order_behind_the_front_clears_the_pending_reslot`).
+    *The thunks (CONFIRMED static).* `0x004F9DF0` → `0x00583150` is the attack state's update; `0x004F7C60` →
+    `0x005732B0` the reform state's entry for the fire-at-target task group; `0x004F8790` → `0x005735A0` the reform
+    state's entry for the idle group (the idle state `0x01450BDC`, reload, reform, ready), which sets the task's
+    `+0x2C` to 1. An idle unit enters the reform state only when `0x00573770` holds: never when the squad's
+    vfunc `+0xB4` check fails or `0x0057ABD0` holds; always when the task's `+0x2C` is 0; otherwise only when
+    the men were not found in place (`0x00557BA0`: the stamp `+0x2784` older than 20 ticks). The idle update
+    `0x005577C0` runs the in-place check `0x00557BC0` → `0x00557C20` (tolerance `0x0057E1F0()` + 2.5 m when
+    `0x0055ABF0` holds, else 1 m), which stamps `+0x2784`, every `[0x014A35D0]` ticks (10), staggered by unit.
+    *The idle reform gate (formation4, CONFIRMED static).* The squad tick `0x00580A30` pushes a new idle task when
+    the task stack is empty (`0x0051A3A0`: `+0x2C` = 0, `+0x28` = the width) and the state machine's pass
+    `0x010FBBD0` runs the idle state's check (`0x00573770`) before its update, so a unit whose order ended reforms
+    in its next tick. `0x00557BA0` (disassembled) is `stamp ≠ 0 && stamp + 20 > tick`, unsigned; a stamp of 0
+    reads as none (ours: a stamp at our tick 0 reforms again at tick 1; the exe's first tick is not traced). The stamp
+    `+0x2784` is cleared by the ctor `0x00518DC0`, written by `0x00557C80`, and set to the tick by `0x00557D80`,
+    called from the reform state's update `0x00581CA0` (slot 1 of vtable `0x01325428`, the object built by
+    `0x0051B350` for `0x005735A0`, `0x005732B0`, `0x005733C0`, `0x005734C0` and `0x0066E9B0`) when
+    `ProcessLocomotiveStateMachine` reports every move done (it then sets done `+0xC`), and from `0x00580DD0`
+    (vtable `0x0132509C`, built by `0x00519C20` from `0x0053FD30`; it stamps while `+0x1C` is set and `+0x10` <
+    0x2D; its task is not traced). So the reform's end stamps the men in place and the gate stays shut for 20
+    ticks. The idle update `0x005577C0` runs the check when tick % `[0x014A35D0]` (10) equals the battle unit's
+    vfunc `+0x10` (its serial) % 10, with the anchor `0x00555DF0()` and the task's width `+0x28`.
+    `0x00557C20` lays the shape out over the living men; `0x00557C80` takes the mean of `sqrt` distances from
+    each counted soldier (`+0x1A8` clear; `+0x48`/`+0x50`) to his slot k: with a count > 0 and tolerance ≤ mean
+    the stamp is 0, else the tick. The tolerance is `0x0057E1F0()` + 2.5 m when `0x0055ABF0` (mounted: category
+    0 or 5, or 3 without ability 15 `dismount` active; `0x0055C2A0` is that with `dismount` inactive) holds, else
+    1 m. `0x0057E1F0` is 1.5 while ability 4 (`light_infantry_behaviour`) is active, else the float `+0xC` of the
+    `entity_training_levels` row of the unit's training level (unit `+0x194`, `0x00EED960`), through
+    `0x00F88300` (`this + 0x5C + level × 4`, an array of six row pointers; level 6, an unknown key, reads past
+    it). Unit `+0x194` is the stat block's `+0x3C` (CONFIRMED static: the record builder `0x00E8F1D0` stores
+    `0x00EED960`'s result there at `0x00E8F3CC`, and the battle unit's stat block at `+0x158` is the record's copy),
+    so the morale rules that read `+0x194` (front-attack adjust, fighting-cavalry scaling, fatigue concern; ours
+    `MoraleInputs::training_level`, formerly `formation_class` and always 0) now get the unit's real training level.
+    ORIGINAL LIMIT, lifted: the exe's six levels are hardcoded (`0x00EED960`) and their rows are read by that enum,
+    so a mod-added level has none. Ours keeps the enum for the morale rules (a mod-added key is 6, as in the exe)
+    but reads the tolerance from the key's own row in the merged database, so a mod-added level keeps its row
+    (`setup.rs` `training_of`, test `a_mod_added_training_level_keeps_its_row`); a key with no row gets no tolerance
+    and is logged once per key. The shipped tolerances: mob 1.7, rabble 0.5,
+    poorly_trained 0.38, trained 0.2, well_trained 0.1, elite 0.13 (real-install test
+    `entity_training_levels_give_the_drill_tolerances`). The full re-slot's own in-place check (tolerance 4.0)
+    is left out: every path ours models (the reform's end, the idle check) overwrites its stamp first.
+    Ours (`march.rs`): `LandUnit::idle_gate`, `in_place_check`, `drill_tolerance`, `MenMarch::in_place_at`
+    and `idle_reformed`; `reslot_tick` runs the reform entry for a standing unit when the gate holds (laying
+    out in full when a re-slot is due, else keeping each man's slot) and the check otherwise; `march_men`
+    stamps the men at the reform's end. Tests: `the_idle_gate_holds_for_a_new_task_or_an_old_stamp`,
+    `a_unit_reforms_once_after_its_orders_end`, `the_in_place_check_measures_the_mean_offset`,
+    `the_drill_tolerance_follows_the_training_level`, `a_due_reslot_walks_a_standing_units_men_to_their_slots`,
+    `mounted_follows_the_category_and_dismount`, `training_levels_follow_the_exes_order`.
+    PROVISIONAL (ours): every standing unit is idle (the fire-at-target group's reform entry `0x005732B0` and
+    its gate are not traced); no controller veto (vfunc `+0xB4` of the controller stack `+0xADC`) and no
+    stored-move veto (`0x0057ABD0`, soldier `+0x619`: ours issues the reform's moves at once); the check counts
+    every living man (soldier `+0x1A8` not traced); the serial is the unit's id (the exe's is drawn from the
+    battle model's counter `+0xBC`, which other battle objects may share; a debugger sitting).
+    Ghidra names (formation4, V5 scores): `UpdateIdleStateInPlaceCheck` `0x005577C0` (78.5),
+    `CheckIdleSquadMenInPlace` `0x00557BC0` (70.7), `LayOutShapeAndStampMenInPlace` `0x00557C20` (79.0),
+    `StampSquadMenInPlaceByMeanOffset` `0x00557C80` (82.5),
+    `IsSquadInPlaceStampRecent` `0x00557BA0` (89.4), `StampSquadMenInPlaceNow` `0x00557D80` (89.4),
+    `UpdateReformStateUntilMenStand` `0x00581CA0` (83.6), `GetTrainingLevelRow` `0x00F88300` (89.4),
+    `GetUnitDrillTolerance` `0x0057E1F0` (84.7), `IsUnitMounted` `0x0055ABF0` (88.6), `IsUnitRidingAndNotDismounted`
+    `0x0055C2A0` (91.4), `ParseTrainingLevelKey` `0x00EED960` (93.3); the period global
+    `g_dwInPlaceCheckPeriod` `0x014A35D0` (10, set from 10.0 by `0x00407740`).
+    *The slot assignment and the reform walk (formation3, CONFIRMED static).* `LayOutSlotsAndAssignSoldiers` `0x00555CA0` (the full re-slot,
+    also the partial lay-out with its re-slot argument clear) lays the shape out (vfunc `+0x24`), then
+    `AssignSoldiersToNearestSlots` `0x005373F0` pairs soldiers and slots and the soldier vector is rebuilt in
+    pair order, then the in-place check `0x00557C80` (tolerance 4.0). The assignment starts from the identity
+    (the k-th soldier in the vector to the k-th slot; soldiers whose vfunc `+0xF4` object has `+0xA8` set, and a
+    soldier the layout names, are paired in fixed slots and left out of the swaps: first, or after the swaps in the
+    last slots when `0x0054C8B0` on the squad's `+0x510` returns 1), each pair costed by
+    `ComputeSoldierSlotAssignmentCost` `0x005281D0`: the squared distance c from the soldier (`+0x48`/`+0x50`) to the slot, plus, when c > 0,
+    (1 − min(f · d̂, 1)) × 0.5 with d̂ the unit direction to the slot and f the soldier's facing (`dir16` of
+    `+0x64`), so a slot behind him costs up to 1 more than one as far ahead. The 2-opt `AssignSlotsTwoOpt` `0x00502770` then runs
+    over a list of eligible pairs with a cost limit: FLT_MAX and no round limit for a re-slot, 16.0 and one
+    round otherwise. Each round takes the eligible pair of largest cost below the limit (strictly larger
+    replaces, so the first wins a tie); none left ends it. Unlimited: the first other eligible pair in list order
+    with its cost below the limit whose two swapped costs sum strictly below the present sum is swapped with it
+    (`SwapSlotPairSoldiersAndRecost` `0x0057CBC0` swaps the soldiers and recomputes both costs); without one the pair leaves the list
+    (swap-remove). Limited: of the other eligible pairs below the limit, the one whose swap lowers the sum most
+    (strictly below 0, the first on a tie) is swapped. The costs' defaults are 0 for a pair without a soldier
+    and FLT_MAX for one without a slot (the caller's stack pair at `0x0053741C`, passed as the 2-opt's `this`). The slots are laid at the order's path cursor
+    (`LayOutUnitMoveOrderSlots` `0x00576B30` takes the point from `0x007F2D70` → `0x0080AEA0`, a lerp along a path
+    segment by the cursor's fraction). The reform state's entry `EnterReformStateMoveMenToSlots` `0x005736B0` runs
+    the full re-slot (`0x0057B000`) when its byte `+0x35` is set, then for each soldier `MoveSoldierToSlotIfOutOfPlace` `0x0055F160(slot pos,
+    slot heading, 0.0625, 910)`: a soldier strictly farther than 0.0625 m² from his slot, or turned more than
+    910/65536 of a turn (the float 65536/72, 5 degrees, rounded) from its heading, gets a plain move there (`0x00653560`). In battle `0x00653560` stores the target at soldier `+0x5FC` and the
+    soldier's update `0x00658C50` issues it once (`0x007E2040`), at the run speed (the entity record's `+0x20`)
+    and the run kind when the distance² is strictly above 25 (the float at `0x01325D54`, compared at
+    `0x00658D07`), else at the walk speed (`+0x1C`) and the walk kind. In deployment (`0x0055AD60`: the battle
+    state `+0x14` at most 1) `0x00653560` instead builds a move descriptor from the slot and hands it to the soldier's
+    vfunc `+0xB8`; INFERRED: that vfunc puts the soldier
+    at his slot at once (it is not traced). The plain move runs the same locomotive as the timed move, so it
+    brakes for its point (`arrival_braking`): a soldier within the 0.5 m minimum braking distance stops at once.
+    Ours (`march.rs`): `slot_cost`, `assign_slots` (`PARTIAL_ASSIGN_MAX_COST`), `LandUnit::relay` (the men stay
+    where they stand: each man's offset from his slot is `ManMarch::side` and `lag`, kept in slot order with his
+    `figure` number), `LandUnit::send_men_to_slots` (`REFORM_MOVE_SQ`, `REFORM_RUN_SQ`, `ManMarch::walk` and
+    `kind`), and `march_men` walks each man straight to his slot in two dimensions. A re-slot (and the first
+    lay-out, the exe's pending one from the constructor) assigns in full; the every-tick lay-out short of the end is
+    partial; a new order's first issue lays out (in full for an order behind the front, partially for one short of
+    its end; none for one at its end) only when the tick's lay-out step did not, or did so partially for an order
+    behind the front, so the men are assigned once per tick as the order's update does (`0x00581AE0` →
+    `0x00576B30`; test `a_reissue_tick_assigns_the_men_once`); a re-issue lays out nothing (test
+    `an_at_end_reissue_does_not_reassign`). INFERRED: a new order built in a tick whose lay-out step already laid
+    out (the previous order short of its end) adds no partial round; the order of `BuildUnitMoveOrder` and the
+    squad update within one tick is not traced. A standing unit sends its men through the idle reform (see
+    "The idle reform gate" above). Tests: `a_slot_behind_costs_more_than_one_as_far_ahead`,
+    `the_full_assignment_untangles_and_the_partial_one_swaps_once`, `a_reslot_keeps_every_man_where_he_stands`,
+    `the_reform_walks_near_men_and_runs_far_ones`, `a_due_reslot_walks_a_standing_units_men_to_their_slots`.
+    PROVISIONAL: the lay-out point (ours: the unit's position, INFERRED to be where the cursor puts the
+    reference soldier's slot); no special soldiers; every man faces the unit's facing, so the heading test of
+    `0x0055F160` never holds and the cost's facing term uses the unit's facing.
+    *Width and depth: the exe measures the men (CONFIRMED static).* Every reader takes the squad summary at squad
+    `+0x62C`: width `+0x650` (summary `+0x24`), depth `+0x654` (`+0x28`), radius `+0x670` (`+0x44`). `0x0053C180`
+    refreshes it on alternate ticks: `0x00519150` builds one 0x1C-byte record per soldier (soldier, x `+0x48`,
+    y `+0x50`, heading `+0x64`, radius `+0x620`, `+0x10`, `+0x18`); `0x0053A390` the centroid (`+0x0C`/`+0x10`),
+    a 7-sample moving average of its change (`+0x4C`/`+0x50`) and the speed `+0x94` (|velocity| × 10 / ticks
+    elapsed); `0x0053A1D0` the dominant heading from a 256-bin histogram of the soldiers' headings; `0x0053D1A0`
+    the box: one soldier gives width = depth = his radius; otherwise the principal axis from the 2×2 covariance,
+    the extents along both axes over the soldiers with 0 < distance < mean + 2σ, each plus twice the largest
+    soldier radius, the box centre (`+0x18`/`+0x1C`), and the width/depth naming by the axis nearer the
+    previous heading (`+0x20`) with a 65% majority test over four heading buckets; debug lines when battle
+    `+0xB0` → `+0x2B44` is set. `0x0053C3D0` then writes `+0x44` = the distance from the box centre to the
+    farthest soldier and the nearest soldiers to the box's corners. So the width and the depth are one measured
+    box, not a layout. Detail (formation worker): the axis is the eigenvector (−Sxy, Sxx − λ) of the larger
+    eigenvalue λ of the covariance sums centred on the mean, normalised, falling back to +x when its length is at
+    most 1e-4 or both components at most 0.001; the spans start at 0 (so they hold the mean); the four candidate
+    headings are ±A, ±B as 16-bit angles (atan2 × 10430.378, rounded to even); each man votes for the nearest
+    (a later candidate only when strictly nearer), the most votes win (the first on a tie) unless they are fewer
+    than round(0.65 n), when the candidate nearest the previous heading wins; facing ±A the width is the B extent.
+    The radius `+0x44` (squad `+0x670`) is the farthest man from the box centre, without his radius; the front
+    centre `+0x9C` is the centre plus the front × depth / 2, and `+0xC4` / `+0xD8` the front corners. `+0xB0` is
+    a copy of the centre (the unit-list range tests `0x00701310` / `0x006C9E40` read it through `0x0053FBE0`).
+    Ours: `march::measure_squad_box`, measured at the start of each battle unit tick by `LandUnit::refresh_summary`
+    (before `reslot_tick`) from the men where they stand (each at his slot plus his `side` and `lag`), with
+    `LandUnit::man_radius` (column 12 of the man's `battle_entities` record, set in setup.rs); `width()`,
+    `depth()` and `radius()` read it, and `morale::near_units` uses its centre and radius. *The refresh's
+    schedule (formation3, CONFIRMED static):* `SQUAD::update` `0x00580A30` runs `0x0053C180` at `0x00580A7C` when
+    the squad has men; in battle (`0x0055AD60` false: the battle state `+0xB0` → `+0x14` past 1) it measures only on
+    the ticks whose parity is the summary stamp's (`+8`), every tick in deployment. Ours measures on the ticks whose
+    parity is the unit id's (test `the_box_is_measured_on_alternate_ticks`). PROVISIONAL: the stamp is the unit
+    body's serial (`0x00518E3C` reads it through `0x0057E910`, numbered by the battle's counter at `0x0051B816`),
+    ours the unit id, and the exe tick's parity against ours is not traced; the radius enlargement for attached
+    members (`0x00607540`) is not modelled. `evade_room` (`0x0057A6F0`) takes
+    max(radius, speed × 3 s) as its strip's length and starts it at the front centre `+0x9C` (`0x0053FBD0` at
+    `0x0057A753`; test `the_evade_strip_runs_the_squad_radius_from_the_front_centre`); the skirmish strips start at
+    the front centres too and test the boxes with the oriented-box overlap `0x0055A1B0` (BATTLE_FIDELITY.md
+    "Skirmish"). The box is also measured when a unit joins the battle (`Battle::add_unit`) and when it is put down
+    without a tick (deployment, reinforcement entry, garrison entry: `LandUnit::place_at`). In deployment that is the
+    exe's every-tick refresh; placements also force one (`0x0054FDD0`, called from the best-heading placement
+    `0x0056DEB0` and the group merge `0x0057B0E0`, CONFIRMED static). PROVISIONAL: whether the building and
+    reinforcement entries refresh at once is not traced. The first "previous heading" for the width/depth naming
+    is 0: the constructor `0x00518FA0` copies the summary's `+0x20` from the zero word `0x014A3498` (set by
+    `0x00407A10`; CONFIRMED static); later refreshes take the last box's heading. The leave/arrive test
+    `0x005857A0` reads each soldier's circle, so ours tests the men (`men_inside`), not the box.
+    Release cost (formation3, 20 units of 160 men, `march_cost`): `measure_box` 0.061 ms per tick, `march_men`
+    with the two-dimensional walks 0.136 ms per tick.
+    Ghidra names (V5 write-ups): `UpdateSquadSummary` `0x0053C180`, `MeasureSquadSummaryBox` `0x0053D1A0`,
+    `ComputeSquadSummaryRadiusAndCorners` `0x0053C3D0`, `GetSquadSummaryCentre` `0x0053FBE0`,
+    `FindEnemyUnitsWithinRange` `0x00701310`, `GetFormationShapeKindFromAbilities` `0x005498D0`,
+    `IsSpecialAbilityActive` `0x0055C9A0`, `CreateSquadFormationShape` `0x00531630`,
+    `SetUnitFormationShapeParams` `0x00579780`, `CheckIdleUnitCanEnterReform` `0x00573770`; globals
+    `g_dwSquadSummaryManRecordsHeader` `0x014A3ED8` (the man-record vector), `g_pSquadSummaryDistances`
+    `0x014A3ED0`, `g_wHeadingHalfTurn` `0x014A3A1C` (0x8000, set at start-up by `0x004079D0`).
+    Ours (`march.rs`): `MenMarch::laid` holds the formation; `LandUnit::reslot_tick` (every active unit's tick,
+    `placeholder_movement`) restarts a 20-tick countdown at each loss, lays out every tick while the unit's own
+    order (`TimedMove`) is short of its end, re-lays when the countdown runs out and clears the pending re-slot
+    only then (a death in tick T re-slots in T + 20, the exe's order with the death before the squad update);
+    `march_men` re-lays at a new order's first issue (behind the front, or short of its end), never at a
+    re-issue; the first tick lays out. The structure gate is always open in ours (a
+    garrison leaves its building on any move). The counter re-lay is not modelled: ours has no collision pushes
+    and no move that ends short, so no man is ever that far from his slot (see `LandUnit::formation`). Tests:
+    `a_move_short_of_its_end_re_lays_every_tick`, `a_moving_unit_re_lays_after_a_loss_at_once`,
+    `the_men_keep_their_slots_until_the_reslot`. The view (`view.rs`, `MenDrawn`) draws each figure from
+    his own model entry (the entry whose `ManMarch::figure` is his; a re-slot moves him to another entry, so he
+    walks from where he stands to his new slot, as the exe's nearest-slot assignment `0x005373F0` does; test
+    `each_figure_follows_his_own_man_through_a_reslot`).
   - *A moved target (review round 2).* A move that follows a unit (the advance, the fire-target approach) runs a
     follow state (`0x0054D9F0`, entered at `0x0054D900`, left at `0x0054D9A0`; callback table
     `0x0131EAB4..0x0131EAD0`) that each tick re-reads the target (object `+0x28`, vfunc `+4` with `+0x24`, `+0x2C`)
@@ -1231,9 +1649,15 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
     Ghidra comment said so; corrected). `InitializeMoveDescriptor` `0x0051A940` (thiscall, `RET 0xC`) fills the
     20-byte descriptor: request `+0`, `g_wDefaultZeroWord` `+4` (a static initializer stores 0), 0 at `+8`, the
     target key `+0xC`, the key source's vfunc `+0xC` flag `+0x10`. Before the first build the frames above the
-    active one are popped (`0x005359A0`); on a key change, when pop-allowed is set and the active index is below
-    count − 1, it sets popped and calls `0x0056D990(index + 1)`, which destroys the top frames (their vfunc 0 with 1)
-    and gives their bytes back; so the old child order is replaced, not stacked. The entry `0x0054D900` fills a
+    active one are popped (`PopStatesAboveActiveFrame` `0x005359A0`, ECX = the state, bare `RET`); on a key
+    change, when pop-allowed is set and the active index is below count − 1, it sets popped and calls
+    `TruncateUnitStateStack` `0x0056D990(index + 1)` (thiscall, `RET 4`): with the guard set it clears it, pops
+    frames while count > the kept count (each state's vfunc 0 with 1 destroys it; used −= bytes, free += bytes),
+    then sets the guard again; so the old child order is replaced, not stacked. `BuildUnitMoveOrder` (V5 plate,
+    polish15) copies the descriptor's `+8` to order `+0x20`, and its layout block (resize the `+0x5C` slot vector
+    to the unit's `+0x510` → `+0xBF4`, shape vfunc `+0x24` with the living men `+0x18`, front width from vfunc
+    `+0x08`, the `+0x40` projection) runs only when that word is non-zero: the follow path's descriptor leaves it
+    0, so a follow order skips it (CONFIRMED static). The entry `0x0054D900` fills a
     `0x54`-byte path query through the path source `+0x24` (vfunc `+4`, the owner's `+0x510` → `+0x384` entry's
     `+0x24` float and twice `+0x2EC`) and submits it to the path finder (`0x008020B0`, ECX = state `+0x14` → `+8`
     → `+0xB4`), keeping the request at `+0x30`. Ours has no state stack: a new order replaces the unit's
@@ -1281,11 +1705,10 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
   - *Hitch before / after.* Before: the §1.9 probe's unit-wide steps (all 160 men's cadence in one frame, level
     swaps at once). After: each man's speed and multiplier are his own, so the swaps spread over the men; the
     probe is not re-run here (in-game check in HANDOFF).
-  - *Melee idles (kinds 0xF, 0x11, 0x17), still UNKNOWN:* not in `0x007725D0`'s advance switch. The function's
-    other writes of the clip time `+0xD8` are the clip-change start (`0x00773E3C`..`0x00773F17`, the fmod carry)
-    and the end-of-clip handling (`0x00774024`..`0x007740FE`, which treats kinds 0xF, 0x16, 0x17, 0x19, 0x1A and
-    0x1D apart). Next lead: writers of display `+0xD8` outside `0x007725D0`. `view::LoopKind` keeps them at rate 1,
-    PROVISIONAL.
+  - *Melee idles (kinds 0xF..0x13), CONFIRMED (polish16, 2026-10-14):* not in `0x007725D0`'s advance switch; their
+    clip time is set each frame at `0x0077430C` from the soldier's clip clock (clip advance by slot kind, §1.9), so
+    they play at rate 1. Ours plays them at rate 1 (`view::LoopKind::Plain`); the start is still the figure's own
+    offset (PROVISIONAL). Kind 0x17 (rider combat) copies the mount's clip time (`0x00774282`, §1.9).
 ## 2. Soldier LOD (CONFIRMED values)
 Tweaks in `VariantModelManager.cpp`: `variant_lod1` 5.0, `variant_lod2` 10.0, `variant_lod3` 15.0,
 `override_variant_lod` true, `variant_lod_skip` 2. The chooser (`0x0125ED60`) with the override on: LOD 3 if

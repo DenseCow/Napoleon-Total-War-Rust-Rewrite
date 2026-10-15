@@ -26,6 +26,7 @@ fn data_dir() -> PathBuf {
 
 struct Fixture {
     db: GameDatabase,
+    vfs: Vfs,
     source: EsfFile,
     loaded: LoadedCampaign,
     terrain: Terrain,
@@ -52,7 +53,7 @@ fn fixture() -> Option<&'static Fixture> {
         let map = CampaignMap::load(&files, &loaded.info.map_key).expect("map");
         ntw_campaign::trade::attach_map(&mut loaded.model, &map.regions);
         let terrain = Terrain(Arc::new(pathing::build_grid(&map)));
-        Some(Fixture { db, source, loaded, terrain })
+        Some(Fixture { db, vfs, source, loaded, terrain })
     })
     .as_ref()
 }
@@ -229,6 +230,62 @@ fn province_management_with_db_values() {
     }
     assert!(trained);
     assert_eq!(m.world.regions[&paris].slots[slot].building.as_ref().unwrap().level_key, level);
+}
+
+/// recruit-gates: the region unit resource gate (`0x00AA1660`) with vanilla data. Units #14 names the
+/// resource a unit needs (`region_unit_resources`), and the startpos gives each region its
+/// `RESOURCES_ARRAY`; prints both.
+#[test]
+fn unit_resources_with_vanilla_data() {
+    use std::collections::BTreeMap;
+    let Some(f) = fixture() else { return };
+    let m = model(f);
+    let mut needed: BTreeMap<&str, usize> = BTreeMap::new();
+    for u in m.rules.units.values() {
+        if let Some(r) = &u.unit_resource {
+            *needed.entry(r.as_str()).or_default() += 1;
+        }
+    }
+    let mut held: BTreeMap<&str, usize> = BTreeMap::new();
+    for r in m.world.regions.values() {
+        for res in &r.unit_resources {
+            *held.entry(res.as_str()).or_default() += 1;
+        }
+    }
+    println!("units #14 values (units each): {needed:?}");
+    println!("RESOURCES_ARRAY values (regions each): {held:?}");
+    // CONFIRMED by reading eur_napoleon's startpos (recruit-gates, 2026-10-13): 102 items over 72 regions.
+    assert_eq!(held.values().sum::<usize>(), 102);
+    assert_eq!(m.world.regions.values().filter(|r| !r.unit_resources.is_empty()).count(), 72);
+    assert!(!needed.is_empty(), "units #14 names region unit resources");
+
+    // The keys both sides are resolved against: `region_unit_resources` from the merged database
+    // (key column 0 = record +0, the string `0x00E29830` hashes and the region writer `0x00A51E30`
+    // writes back). The units loader `0x00EDC000` drops a row whose #14 is not a key (so does every
+    // `ntw_data::load_table` read of `units`), and the region loader `0x00A45950` stores an unknown
+    // RESOURCES_ARRAY string as null.
+    let keys: std::collections::BTreeSet<&str> = f.db.campaign.region_unit_resources.iter().map(|r| r.key.as_str()).collect();
+    println!("region_unit_resources keys: {keys:?}");
+    // The `units` rows as the files hold them, before the resource check (`load_table` runs it).
+    let mut warnings = Vec::new();
+    let raw = ntw_data::load_merged_rows(
+        &f.vfs,
+        "units",
+        &mut warnings,
+        |b| Ok(ntw_data::Table::<ntw_data::UnitRecord>::from_bytes(b)?.rows().to_vec()),
+        |u: &ntw_data::UnitRecord| u.key.as_str(),
+    )
+    .expect("units");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    // CONFIRMED (recruit-gates, 2026-10-14): vanilla has 37 rows, and every units #14 value and every
+    // eur_napoleon RESOURCES_ARRAY value is one of them, so the exe drops no vanilla unit (nor does our
+    // loader) and stores no null resource.
+    assert_eq!(keys.len(), 37);
+    let unknown_units: Vec<_> = raw.iter().filter_map(|u| u.recruitment_scope.as_deref()).filter(|k| !k.is_empty() && !keys.contains(k)).collect();
+    assert!(unknown_units.is_empty(), "units #14 values with no region_unit_resources row: {unknown_units:?}");
+    assert_eq!(f.db.units.len(), raw.len(), "the resource check drops no vanilla unit");
+    let unknown_regions: Vec<_> = held.keys().filter(|k| !keys.contains(*k)).collect();
+    assert!(unknown_regions.is_empty(), "RESOURCES_ARRAY values with no region_unit_resources row: {unknown_regions:?}");
 }
 
 #[test]

@@ -351,9 +351,9 @@ fn dispatch(lua: &Lua, s: &Shared, name: &'static str, args: &MultiValue) -> mlu
             let Some(key) = arg_str(args, 1) else { return bad_args(s, text) };
             let mut st = s.borrow_mut();
             if name.starts_with("add") {
-                st.restricted_units.insert(key);
+                st.model.world.restricted_units.insert(key);
             } else {
-                st.restricted_units.remove(&key);
+                st.model.world.restricted_units.remove(&key);
             }
             st.log.push(text);
         }
@@ -365,6 +365,16 @@ fn dispatch(lua: &Lua, s: &Shared, name: &'static str, args: &MultiValue) -> mlu
             } else {
                 st.model.world.restricted_buildings.remove(&key);
             }
+            st.log.push(text);
+        }
+
+        // disable_shopping_for_ai_under_shroud(on): CONFIRMED (binding at `0x00979910`, one boolean,
+        // then `0x00AA9B40` on the CAI interface): the one human's shroud holds the AI's shopping
+        // back where it hides (ntw_sim `CampaignModel::set_ai_shopping_shroud`). Tutorial only.
+        "disable_shopping_for_ai_under_shroud" => {
+            let on = arg_bool(args, 1);
+            let mut st = s.borrow_mut();
+            st.model.set_ai_shopping_shroud(on);
             st.log.push(text);
         }
 

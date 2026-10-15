@@ -20,7 +20,7 @@
 //! `pathfinding.esf` (or if it does not read) the old raster of `regions.esf` triangles and road
 //! splines is used instead, with our PROVISIONAL raster A*.
 
-use ntw_formats::campaign_map::{CampaignMap, DISPLAY_TO_LOGIC};
+use ntw_formats::campaign_map::{CampaignMap, MapRegion, DISPLAY_TO_LOGIC};
 use ntw_formats::campaign_pathfinding::{point_in_polygon, GridCell, PathfindingArea, PathfindingFile, PolygonKind};
 use ntw_sim::campaign::pathing::{CellKind, PathGrid};
 use ntw_sim::campaign::polypath::{CellInput, PolyInput, PolyMap};
@@ -112,6 +112,21 @@ pub fn grid_from_pathfinding(pf: &PathfindingFile, map: &CampaignMap) -> Option<
             }
         }
     }
+    // Sea cells: the sea region under the cell's centre (the pathfinding sets name land regions
+    // only). The original situates a fleet in the `regions.esf` region under it, sea included
+    // (CAI_SITUATED #2 in its saves, test `mobiles_are_situated_in_the_region_under_them`), and the
+    // director's transfer test (`0x00BB52E0`) reads a sea area's fleets from that. Edge: only sea
+    // regions are filled, so a Water cell whose centre `regions.esf` puts in a land region keeps no
+    // region (unless a sea triangle also holds it), where by the saves' rule above the original
+    // would situate a fleet there in that land region.
+    for (ri, region) in rm.regions.iter().enumerate().filter(|(_, r)| r.is_sea) {
+        rasterise_region(&mut g, map, region, |g, i| {
+            // The first region holding the centre, as `RegionMap::region_at`.
+            if g.kind[i] == CellKind::Sea as u8 && g.region[i] == u32::MAX {
+                g.region[i] = region_index(ri);
+            }
+        });
+    }
     g.poly = Some(poly_map(area, &cells, &sets));
     Some(g)
 }
@@ -191,30 +206,12 @@ pub fn build_grid_from_regions(map: &CampaignMap) -> PathGrid {
     let mut g = PathGrid::new(mn, CELL_SIZE, width, height);
     g.region_keys = rm.regions.iter().map(|r| r.key.clone()).collect();
 
-    let v = |i: u32| rm.vertices.get(i as usize).copied().unwrap_or_default();
     for (ri, region) in rm.regions.iter().enumerate() {
         let kind = if region.is_sea { CellKind::Sea } else { CellKind::Land } as u8;
-        for area in &region.areas {
-            for t in area.faces.as_chunks::<3>().0.iter() {
-                let (a, b, c) = (v(t[0]), v(t[1]), v(t[2]));
-                let lo = (a.0.min(b.0).min(c.0), a.1.min(b.1).min(c.1));
-                let hi = (a.0.max(b.0).max(c.0), a.1.max(b.1).max(c.1));
-                let c0 = (((lo.0 - mn.0) / CELL_SIZE).floor().max(0.0)) as u32;
-                let r0 = (((lo.1 - mn.1) / CELL_SIZE).floor().max(0.0)) as u32;
-                let c1 = (((hi.0 - mn.0) / CELL_SIZE).floor() as u32).min(width - 1);
-                let r1 = (((hi.1 - mn.1) / CELL_SIZE).floor() as u32).min(height - 1);
-                for row in r0..=r1 {
-                    for col in c0..=c1 {
-                        let i = (row * width + col) as usize;
-                        let (x, z) = g.centre(i);
-                        if inside(a, b, c, x, z) {
-                            g.kind[i] = kind;
-                            g.region[i] = region_index(ri);
-                        }
-                    }
-                }
-            }
-        }
+        rasterise_region(&mut g, map, region, |g, i| {
+            g.kind[i] = kind;
+            g.region[i] = region_index(ri);
+        });
     }
 
     // Roads: every spline of the map's `roads` folder, in logic units (display x 39.37).
@@ -239,6 +236,37 @@ pub fn build_grid_from_regions(map: &CampaignMap) -> PathGrid {
         }
     }
     g
+}
+
+/// Calls `f` for every grid cell whose centre lies in one of the region's `regions.esf` triangles
+/// (a cell in several of its triangles once per triangle).
+fn rasterise_region(g: &mut PathGrid, map: &CampaignMap, region: &MapRegion, mut f: impl FnMut(&mut PathGrid, usize)) {
+    let rm = &map.regions;
+    let v = |i: u32| rm.vertices.get(i as usize).copied().unwrap_or_default();
+    let (width, height) = (g.width, g.height);
+    if width == 0 || height == 0 {
+        return;
+    }
+    for area in &region.areas {
+        for t in area.faces.as_chunks::<3>().0.iter() {
+            let (a, b, c) = (v(t[0]), v(t[1]), v(t[2]));
+            let lo = (a.0.min(b.0).min(c.0), a.1.min(b.1).min(c.1));
+            let hi = (a.0.max(b.0).max(c.0), a.1.max(b.1).max(c.1));
+            let c0 = (((lo.0 - g.origin.0) / g.cell).floor().max(0.0)) as u32;
+            let r0 = (((lo.1 - g.origin.1) / g.cell).floor().max(0.0)) as u32;
+            let c1 = (((hi.0 - g.origin.0) / g.cell).floor().max(0.0) as u32).min(width - 1);
+            let r1 = (((hi.1 - g.origin.1) / g.cell).floor().max(0.0) as u32).min(height - 1);
+            for row in r0..=r1 {
+                for col in c0..=c1 {
+                    let i = (row * width + col) as usize;
+                    let (x, z) = g.centre(i);
+                    if inside(a, b, c, x, z) {
+                        f(g, i);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Point-in-triangle (either winding), as `RegionMap::region_at`.

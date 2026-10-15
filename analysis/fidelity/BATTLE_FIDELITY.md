@@ -196,6 +196,8 @@ Tags: CONFIRMED (code/bytes), INFERRED, UNKNOWN. Addresses are `Napoleon.exe` VA
     stack slots. New readers via `unit+0xADC`: `0x0075BE30`, `0x0057BEB0` (float radius, as `0x00701310` /
     `0x006C9E40`). Rect overlap `0x0055B220` / `0x005774A0` do NOT read [11]: early-out uses `min(w,h)/2 + N`.
     Consistent with always-0 (tests then use N only) but not proven — still UNKNOWN; `FORMATION_RADIUS = 0` stays.
+    **Resolved (2026-10-14, formation worker):** the writer is `0x0053C3D0`, through the squad summary's `this`
+    (squad `+0x62C`, field `+0x44`); see §6.1 and UNITS_TERRAIN_FIDELITY.md "Squad summary box".
     Next lead: debugger write-watchpoint on a live formation's `+0x670` (the §52 (2) probe plan).
   - garrison cap: `0x008554F0` body CONFIRMED (`min(slot count via 0x006F22C0, (building+4)->+0x54 -> +0x6C)`;
     0 without `+0x1E8`); callers CONFIRMED (`0x00855560` capped add, `0x00855520` remaining = cap − `0x008554E0`,
@@ -296,7 +298,7 @@ Tags: CONFIRMED (code/bytes), INFERRED, UNKNOWN. Addresses are `Napoleon.exe` VA
 | 43 | Charge flag duration | §48: the impact only (soldier action 0xD) | CONFIRMED rule, INFERRED unit-level mapping | `LandUnit::charging_now` |
 | 44 | Battle weather | §48: preset `max_weather_type_key`, all `dry` | INFERRED cap | `setup::apply_weather` |
 | 45 | `fatigue_effects` columns | §48: speed, charge, control, attack | CONFIRMED readers, INFERRED `1 + value` | `fatigue::FatigueEffects` |
-| 46 | Units leaving the field | §49 (`0x005857A0` state 2) | CONFIRMED rule, unit-level rectangle | `Battle::leave_step` |
+| 46 | Units leaving the field | §49 (`0x005857A0` state 2) | CONFIRMED rule, per-man circles (radius INFERRED) | `Battle::leave_step` |
 | 47 | Campaign-battle weather pick | §52 (3), `0x00F5B4D0` | CONFIRMED static (flag meaning INFERRED) | `ntw_data::weather::pick_climate_weather` (not wired: no campaign battles yet) |
 | 48 | Formation `+0x670`, garrison `+0x6C`, unit_scale reader | §52 (2) + sandbox 0-A follow-up | unit_scale **SOLVED** (§18a: `0x004A67E5` `MULSS`, truncated, into card `+0xC8`); formation `+0x670` and garrison `+0x6C` still UNKNOWN (§54 (3) corrects the object chain of §53 (4): the cap's `+0x54` is the **slot block's**, not the building's) | `unit_scale::scaled_men`, `Battle::unit_scale` |
 | 49 | Experience / chevrons | §2.1, §52 (4), §19a, §54 (1) | CONFIRMED (timers, the `+0x20` fatigue term, and the `+0x24`/`+0x28` XP cost pair: the battle army setup's veteran price, not a campaign cost, §19a; land + naval tables decoded) | `LandUnit::experience`, `morale::waver_timeout`/`rout_timeout`, `fatigue::experience_bonuses`, `UnitStatsLandExperienceBonuses::adjusted_cost`, `GameDatabase::*experience_adjusted_cost`, `ntw_script` army setup `XpAdjustedCost` |
@@ -498,7 +500,9 @@ The unit card (`unit+0x1C`) is UNKNOWN (INFERRED: the campaign unit with its upg
 ### 6.1 Unit-list range tests (CONFIRMED)
 `0x00701310` (enemies) and `0x006C9E40` (friends; skips the unit itself by id) keep a unit when the centre distance in the
 x/z plane is `< r_self + N + r_other`, `r` = formation object (`unit+0xADC`) `+0x670`. N = 100 m for fear/inspiration, 80 m
-for the rally test. The radius writer was not found (UNKNOWN); the model uses `FORMATION_RADIUS = 0` (PROVISIONAL).
+for the rally test, 160 m for the neighbour list. The centres are the squad summary's `+0xB0` (read through `0x0053FBE0`),
+a copy of the measured box centre; `+0x670` is the summary's `+0x44`, written by `0x0053C3D0` as the distance from the box
+centre to the farthest man (CONFIRMED static; ours `morale::near_units`, `march::measure_squad_box`).
 The validity test `FUN_0055CBD0` = active state not 0 or 2 and `unit+0x2CC != 0`. `FUN_0055C2A0` (horses frightened) =
 category cavalry or camels, or dragoons not in unit state 0xF (INFERRED: dismounted).
 
@@ -1021,8 +1025,21 @@ units can change) and `change_shot_type` swaps the weapon.
   unless a friendly non-skirmisher nearer that enemy stands on the strip's centre line (`0x00559E20`). Danger gives 1
   if there is room to evade, else 2. Otherwise, if the unit is moving, a strip along its own movement (its width,
   missile range capped at 50 m) that reaches an enemy other than its target gives 2.
-- Room (`0x0057A6F0`): a strip along the evade direction, the unit's width wide, `max(depth, speed × 3 s)` long; all
-  four corners inside the playable area (battle `+0x84..+0x90`).
+- Geometry (CONFIRMED static, 2026-10-15): every strip (built by `0x006995D0` from start, direction, width, length;
+  its centre is start + direction × length / 2) starts at its unit's front centre (squad summary `+0x9C`, read through
+  `0x0053FBD0`) and is its unit's summary width (`+0x650`) wide. The enemy strip's start is read at `0x0054CB4A`; the
+  unit's own strip, at its front centre, is tested against the enemy's box. "Reaches" is the oriented-box overlap
+  `0x0055A1B0` (at `0x0054CC1E` and `0x0054CE77`): corners inside, else edges crossing; ours a separating-axis test with
+  touching counted as overlap. The friend blocker: its box centre no farther from the enemy's box centre than the
+  unit's box centre (the summary centre copy `+0xB0`, `0x0053FBE0`) is from the enemy's front centre (squared, `<=`,
+  `0x0054CD16`), and the centre line crossing its box (`0x00559E20` → `0x00559E50` → `0x00501A60`; the last, an edge
+  test, is untraced, ours a box overlap: INFERRED). The friends come from the list query `0x006C9C60` (untraced; ours
+  150 m around the unit, PROVISIONAL), filtered on `+0xD9C` clear. The enemy scan is `0x00701310` with 150 m (at
+  `0x0054CAB9`), the edge-gap test of §6.1 (`morale::near_units`).
+- Room (`0x0057A6F0`): a strip from the unit's front centre (summary `+0x9C`, `0x0053FBD0` at `0x0057A753`) along the
+  evade direction, the summary width wide, `max(radius +0x670, speed × 3 s)` long; all four corners inside the playable
+  area (battle `+0x84..+0x90`). The function returns 0 when all are inside and 1 otherwise; the caller turns that into
+  the result `(returned ≠ 0) + 1` (`0x0054CDB9` / `0x0054CDC3`), so room gives 1 and no room 2.
 - Evade direction (`0x00533BA0`, `0x005341F0`, `0x0054C010`): 32 sectors. Each enemy within 150 m adds `1 − d/150`
   (× 1.5 under 30 m, × 1.5 if it has more than twice the men) to the sectors its formation covers. The histogram is
   smoothed with the kernel `k[n] = 1/2^min(n, 32−n)` (`0x00514BE0`; constant 1.0 at `0x01318048`). The lowest sector
@@ -1030,8 +1047,8 @@ units can change) and `change_shot_type` swaps the weapon.
 - Evading state (`0x005859D0`): while the result is 1, run 5000 m along the evade direction (kept while the new one is
   within 0xCCD ≈ 18° of it); otherwise stop.
 - Sector of a direction (`0x00586B40`): `floor(atan2(x, z) mod 2π × 32/2π)`, at most 31.
-- PROVISIONAL: the formation shapes (unit-level model: width `men / 3` m, depth 3 m); the enemy list order (nearest
-  first); how a unit enters the evading state (only without a move order of its own).
+- PROVISIONAL: the enemy list order (nearest box centre first); the friend query's range; how a unit enters the
+  evading state (only without a move order of its own).
 - The default (`0x005357B0`, called by the unit constructor and later): `+0xD9C` = col 53 ("may skirmish", unit
   `+0x1A5`) && `0x0055C230` && `(unit+0x2C)+0x20 == 2`. `0x0055C230` tests the deployable, `(unit+0x2C)+0x1C == 1` and
   the unlimber ability; what `unit+0x2C` points at is UNKNOWN, so the default stays off (PROVISIONAL). The Borodino
@@ -1103,8 +1120,8 @@ Placement (CONFIRMED). The unit's facing is `(sin a, cos a)` in (x, z), the form
   3.4 m in front. Each piece is 5.35 m deep and 4.6 m wide (`0x0059B120` corners ±2.675 / ±2.3).
 - **Gabionade** (`0x005F19C0`): one emplacement per gun. The model has no gun positions, so it uses one
   earthwork-sized piece per gun across the front (PROVISIONAL).
-- The width is the formation's `+0x24`. The model now carries `formation_width` / `formation_depth` (from the drawn
-  block: files × file spacing, ranks × rank spacing). The skirmish strips use it too.
+- The width is the formation's `+0x24`. The model reads the squad box measured from the men where they stand
+  (`LandUnit::squad_box`, width `+0x650`; see §6.1), as the skirmish strips do.
 - At the end of deployment (`0x00551BA0`) the selected defence is built from its placement data
   (`0x00546B40` / `0x00546C80` / `0x00546CC0`). The pieces are physical battle objects (`0x0059BB70`; size arguments
   `0.5, 1.0, 4.0` for chevaux and `0.5, 1.48, 4.0` for earthworks, not decoded).
@@ -1216,9 +1233,9 @@ Port (`abilities::Battle::defence_contact`, called when a move runs into an enem
   the commander unit's soldiers through a command. The flag is set once at construction and never cleared, so
   "commander dead" comes from the commanding unit's state. That is how `Battle::general_status` already works (the
   general's unit with men left).
-- **Formation radius `+0x670`:** the skirmish room test `0x0057A6F0` uses formation `+0x670` as a length beside
-  `+0x650` (width) and `+0x654` (depth). The writers found (`0x0059EC50`, `0x0068C750`, `0x0071FC80`) are other
-  classes. Still UNKNOWN; `FORMATION_RADIUS` stays 0 (PROVISIONAL).
+- **Formation radius `+0x670`:** the skirmish room test `0x0057A6F0` uses formation `+0x670` as the least strip length
+  beside the width `+0x650`. Resolved 2026-10-14: written by `0x0053C3D0`, the distance from the measured box centre
+  to the farthest man (§6.1); `FORMATION_RADIUS` is gone.
 - **Movement modifiers and the slope gradient:** not reached in the time box; leads as §24.
 
 ### Round 8 checks
@@ -1299,12 +1316,12 @@ round; the rest keep their lead.
 | S4 | Melee frontage and exchange rate (`model.rs` 77, melee doc) | high | **Round 11:** exchange every 5 s (INFERRED from the fight object `+0xA8`). Round 12: the musket clips (attack 2.0–2.9 s, combat idle 1.0–9.3 s) fit a cycle of about 5 s (§47). Pairing still open. |
 | S5 | Chance-to-hit control / visibility / angle factors 1.0 (`shooting.rs` 50) | medium | **Done (round 12, §47):** control, visibility, angle judgement, woods cover and the army level terms are ported. Still open: the `fatigue_effects` column read as the control base (1.0). |
 | S6 | Under-fire memory 50 ticks (`shooting.rs` 45, `model.rs` 581) | medium (morale) | Slot 4 `0x005828A0` (CONFIRMED) counts the unit's `+0xC78` timers `+0xC80/+0xC84/+0xC88` down by 1 per tick and computes a casualty-rate state. The start value (the setter) was not found; the model's 50 stays. |
-| S7 | Reinforcement entry point and walk-on (`model.rs` 46/449/1070/1104, `setup.rs` 358) | medium | **Done:** a reinforcement joins (`+0xAA0` = 1) when its whole formation is inside the playable area (`0x005857A0`, §44). The edge spawn point and the 40 m spread stay PROVISIONAL. |
+| S7 | Reinforcement entry point and walk-on (`model.rs` 46/449/1070/1104, `setup.rs` 358) | medium | **Done:** a reinforcement joins (`+0xAA0` = 1) when every man's circle is inside the playable area (`0x005857A0`, §44; the man radius as the soldier's `+0x58` is INFERRED). The edge spawn point and the 40 m spread stay PROVISIONAL. |
 | S8 | General "died recently" 600 ticks (`model.rs` 42, 1033) | medium (morale) | Army `+0x1B0` resolved (§39); the `+0x1B4/+0x1B8` start values were not found. |
-| S9 | Formation shapes in the unit-level model (`abilities.rs` 19/51/222/227, `FORMATION_RADIUS`) | medium | Width and depth now come from the drawn block (files × spacing). `+0x670` was not found (§42). |
+| S9 | Formation shapes in the unit-level model (`abilities.rs` 19/51/222/227) | medium | Width, depth and radius are the squad box measured from the men (`0x0053D1A0`, `0x0053C3D0`, §6.1); the shapes of kinds 1-6 are still laid as the line. |
 | S10 | Defences: obstacle rule, cover zone 10 m, chevaux depth, gabion pieces per gun, stakes strip (`abilities.rs` 154–204, 631, 652) | medium | Placement CONFIRMED (§33); the contact kill is CONFIRMED (§40). Obstacle and cover are unit-level stand-ins for the physics. |
 | S11 | Garrisons: one unit per building, 15 m entry, cover from every side, `+0x6C` cap (`garrison.rs`) | medium | Data and slots CONFIRMED (§42). **Done:** slot radius from `battle_entities` (§44). |
-| S12 | Skirmish geometry and enemy order (`abilities.rs` 300/321/411) | low–medium | Structure CONFIRMED (§27). |
+| S12 | Skirmish geometry and enemy order (`abilities.rs` 300/321/411) | low–medium | Structure and geometry CONFIRMED (§27: front-centre strips, box overlap `0x0055A1B0`); the enemy order, the friend query `0x006C9C60` and the segment test `0x00501A60` are untraced. |
 | S13 | Morale bookkeeping: recent losses, kill ratio, extended casualty ratio, flank slots (`model.rs` 149/151/613/928/985/986, `morale.rs` 791) | medium (morale) | **Done (rounds 11–12):** the casualty rings (§46); the per-tick counter clear is CONFIRMED in slot 4 (§47). |
 | S14 | Unit retirement at 0 men (`model.rs` 575) | low | — |
 | S15 | Strength category mapping, start-men as card count (`strength.rs`) | low | Category enum CONFIRMED by the AI worker (`ntw_ai::battle::classes`); the mapping could use it. |
@@ -1332,7 +1349,9 @@ comment.
   - Applied in the movement; the fatigue gradient multipliers read the same gradient.
 - **On the field (CONFIRMED, `0x005857A0`, update slot 2).** Unit `+0xAA0` becomes 1 once every soldier's circle
   (position, radius `+0x58`) is inside the playable area (battle `+0x84..+0x8C`). It becomes 2 when a leaving unit
-  has a soldier outside. Reinforcements now join that way.
+  has a soldier outside. Reinforcements now join that way, and leaving units leave that way (`Battle::leave_step`): ours
+  tests each man's standing place with the man radius (unit `+0x620`); that the soldier's `+0x58` holds the same value is
+  INFERRED (both are the unit's man size; not traced). The bounds are inclusive (`CMPLEPS` at `0x0058582D` / `0x00585831`).
 - **Update slot 4 (CONFIRMED, `0x005828A0`).** It decrements the unit's under-fire timers (`+0xC80/+0xC84/+0xC88`) and
   computes a casualty-rate state.
 - **Garrison slot radius (`0x00E619D0`).** It is the largest radius `+0x4C` over the `battle_entities` records (table
@@ -1679,7 +1698,7 @@ by what was found.
   - `0x0053EA00` (also requires morale state ≠ 7) and `0x0055CB50`.
 
 The model:
-- a routing or shattered unit whose formation rectangle is no longer fully inside the area gets `left_field`. It is
+- a routing or shattered unit with a man whose circle (his place, the man radius) is no longer fully inside the area (inclusive bounds, `0x0058582D`) gets `left_field`. It is
   not active, has no orders, and keeps its men;
 - inactive units were already excluded from contact, targets, morale neighbours and fear;
 - the rally test now also skips departed enemies (`can_rally`);
@@ -1696,6 +1715,7 @@ Not modelled: leaving by order (withdraw). The meaning of `0x0055C480` (INFERRED
     `[3]`, `[4]` width and depth, `[7]`, `[8]` the axis;
   - so `+0x670` is its field `[11]`, presumably a bounding radius (INFERRED).
   - The writer was not found, so `FORMATION_RADIUS` stays 0 (PROVISIONAL).
+  - Resolved 2026-10-14: written by `0x0053C3D0` (§6.1).
 - **Type `+0x6C` (garrison cap, `0x008554F0`):**
   - the building's `+0x54` is not the `battlefield_buildings` record, whose builder ends at `0x5C`;
   - not found.

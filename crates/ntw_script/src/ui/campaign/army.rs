@@ -580,6 +580,8 @@ fn commanders_for_recruitment(lua: &Lua, inner: &Inner, ui: &CampaignUi, force: 
                 .unwrap_or(0.0),
             _ => 0.0,
         };
+        // Counted once for the panel: the same for every row, and the maximum runs the faction's effect sum.
+        let (in_service, max) = (m.commanders_in_service(faction, kind), m.commanders_max(faction, kind));
         let rows: Vec<CommanderRow> = candidates
             .iter()
             .map(|&c| {
@@ -589,14 +591,14 @@ fn commanders_for_recruitment(lua: &Lua, inner: &Inner, ui: &CampaignUi, force: 
                     character: c,
                     cost,
                     type_name: character_type_name(inner, ui, c),
-                    recruitable: m.commander_row_flags(c, force) == Some(0),
+                    recruitable: m.commander_row_flags_with(c, force, in_service, max) == Some(0),
                     historical: details.and_then(|d| d.historical_key.as_deref()).is_some(),
                     traits: details.map(|d| d.traits.clone()).unwrap_or_default(),
                     image: portrait_image(inner, &m, c),
                 }
             })
             .collect();
-        (rows, m.commanders_in_service(faction, kind), m.commanders_max(faction, kind), m.rules.var("character_recruitment_max_distance", 1000.0), distance, timer.saturating_sub(m.calendar.turns_elapsed))
+        (rows, in_service, max, m.rules.var("character_recruitment_max_distance", 1000.0), distance, timer.saturating_sub(m.calendar.turns_elapsed))
     };
     let (rows, in_service, max, max_distance, distance, turns) = gathered;
     let t = lua.create_table()?;

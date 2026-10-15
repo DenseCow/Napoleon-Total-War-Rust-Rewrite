@@ -100,6 +100,7 @@ impl ArmyData {
     /// Reads the tables (missing ones stay empty).
     pub(super) fn load(inner: &Inner) -> ArmyData {
         let mut d = ArmyData { game_limits: inner.limits.clone(), ..ArmyData::default() };
+        // Through `ntw_data::load_table`, so without the units the original's builder drops (`0x00EDC000`).
         if let Some(t) = inner.source.typed_table::<ntw_data::UnitRecord>() {
             d.units = t.rows().iter().map(|u| (u.key.clone(), u.clone())).collect();
         }

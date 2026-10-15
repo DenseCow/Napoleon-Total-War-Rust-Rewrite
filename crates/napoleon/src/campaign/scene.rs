@@ -409,9 +409,8 @@ pub fn enter(world: &mut World) {
     // The scripts: the original campaign Lua runs against the model from here on.
     // The scripts' own `save_value` slots of a save (EPISODIC_RESTRICTIONS/LUA[]).
     let saved_script_values = super::play::script_values_in(&loaded.script_values);
-    let restricted_units = loaded.restricted_units;
     let model = loaded.model;
-    let saved_restricted_levels = model.world.restricted_buildings.len();
+    let saved_restrictions = (model.world.restricted_buildings.len(), model.world.restricted_units.len());
     let source = match ScriptSource::from_install(&dir) {
         Ok(s) => s,
         Err(e) => {
@@ -429,13 +428,12 @@ pub fn enter(world: &mut World) {
     if let Err(e) = host.load_campaign(&start.campaign) {
         warn!("Campaign scripts of {}: {e}", start.campaign);
     }
-    // A save's restricted units (EPISODIC_RESTRICTIONS): the scripts set them only on a new game
-    // (InitialiseCampaign at UICreated); the save keeps them. The restricted building levels are
-    // already in the loaded model. Logged for a save only, with the save's own counts.
+    // A save's restricted building levels and units (EPISODIC_RESTRICTIONS): the scripts set them only on
+    // a new game (InitialiseCampaign at UICreated); the save keeps them in the loaded model. Logged for a
+    // save only, with the save's own counts.
     if start.save.is_some() {
-        info!("Campaign: {saved_restricted_levels} restricted building levels and {} units from the save", restricted_units.len());
+        info!("Campaign: {} restricted building levels and {} units from the save", saved_restrictions.0, saved_restrictions.1);
     }
-    host.state_mut().restricted_units.extend(restricted_units);
     // The campaign AI plays the non-human factions in the turn loop (`--campaign-ai on|off`).
     crate::campaign_ai::attach(world, &mut host, &vfs);
     // INFERRED engine order for a new campaign: NewSession, NewCampaignStarted, then turn 1.

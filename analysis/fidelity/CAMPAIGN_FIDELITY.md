@@ -411,7 +411,7 @@ pathing / zoc / embark, characters.rs and names), ranked by gameplay impact.
 | 14 | World bookkeeping: new id allocation (world.rs:387, :396), data loaded for the UI (:347), embark link (:358), id step (:365). | low | id allocator (save-compat) |
 | 15 | Others' areas: CAI beliefs (cai_world.rs:20, AI); grid obstacle shapes (grid_obstacle.rs:31, :82, pathing); government type for an unknown key (error.rs:132, world.rs:338); S1 leftovers (details.rs:323). | low | their owners |
 | 16 | Region religion: **conversion ported round 9**; spa looting shift round 10. Left: the spa drift with no source in the only vanilla pair (3 turns). No script or other breakdown writer was found: `0x00A4C9B0` is the population constructor and `0x00AA9C10` only renormalises. Population growth is also left. | low | more spa saves over consecutive turns |
-| 17 | Repairs (round 9, §Capture): the repair item's per-turn health step and the cancel refund are INFERRED; the model saves a repair as an ordinary construction item of the same level (the original's item type 2, `0x00AE7010`; save-compat). | low | `0x00AE7010` (vtable of the repair item) |
+| 17 | Repairs (round 9, §Capture): **done 2026-10-15** (§Recruitment and construction queues, item types): the repair item's step and its ESF tail are CONFIRMED and modelled. Left: the walls' damage-object restore when a repair finishes (vtable +0xC0). | low | `0x00B78490` |
 | 18 | Fortifications: loaded (round 9), **built, upgraded and repaired round 10** through `FORTIFICATION_SLOT` (slot type `settlement_fortification`, repair cost from the fort branch of `0x00B66410`: round(cost × (1 − strength))). Left: their effects, the save writer (save-compat). No vanilla file has one. | low | — |
 
 ## How the exe holds `campaign_variables` (CONFIRMED)
@@ -445,7 +445,7 @@ policing_cost_mod and pop_growth_* → 0x00AA9C10; upkeep_cost_mod_land_all → 
 recruitment_points(_home_region) → 0x00B61F30; general_admiral_action_point_bonus → 0x008C3170.
 
 ## Economy (CONFIRMED unless tagged)
-**REGION fields** (writer 0x00A51E30, child index → region offset): #9 +0xB8 base GDP, #10 +0xBC GDP, #11 +0xC0,
+**REGION fields** (writer 0x00A51E30 SaveRegionRecord, child index → region offset): #9 +0xB8 base GDP, #10 +0xBC GDP, #11 +0xC0,
 #12 +0xCC town wealth, #13 +0xD0 town wealth at the last wealth level, #14 +0xD4 stored town wealth, #15 +0xD8 town
 wealth growth (i32), #16 +0xE0 wealth level count, #17 +0xEC, #18 +0xF0 (= −town_wealth_growth_discontent_reduction
 while the region has unrest, i32), #19 +0xE4 tax exempt (bool).
@@ -535,7 +535,7 @@ test `religion_gentlemen_war_and_education_in_public_order`).
   them everywhere.
 - **Religion** [3] (CONFIRMED on the vanilla eur save, round 6): `−round(max(0, 100 + happiness_mod_religious_unrest)
   / 100 × (Σ share × 100 × value − conversion))`, with `value` = `diplomatic_relations_religion` #3 for (region religion,
-  state religion). A missing pair counts 0. The `conversion` effect (type 7) is not modelled.
+  state religion). A missing pair counts 0. The `conversion` effect (religion-keyed, bonus type 10, id 1; EFFECTS_FIDELITY.md §1) is the owner's faction-level value for its state religion, without the region's own buildings (the vanilla spa saves: churches with `conversion_anti_french` leave the stored factor unchanged); `economy.rs` `public_order_factors_with` reads it.
 - **Gentlemen** [12] (CONFIRMED formula; skill INFERRED): each gentleman in the region gives
   `ceil(research attribute / gentleman_happiness_divisor) + gentleman_happiness_bonus`.
   - The sign is positive for the owner's own gentlemen and negative for others'.
@@ -570,8 +570,13 @@ eur `auto_nr4_t4`, `auto_after_c8` and `auto_b2b3_0211` 144/144, `auto_nr1` and 
   if its health is > 99 and the faction holding its slot (`REGION_SLOT` #0 `GARRISON_RESIDENCE` #0, a faction id) is
   the region's owner. Loaded as `RegionSlot::holder`; `Region::effect_buildings`. Evidence: `eur_bavaria` in
   `auto_after_c8`, owned by Austria, keeps four slots held by Bavaria; its tax office (`repression_gov_building` 1)
-  is missing from the stored factors, while the Austrian-held town's gentlemen's club counts. On capture the
-  slots the old owner held pass to the new one (INFERRED).
+  is missing from the stored factors, while the Austrian-held town's gentlemen's club counts. On an owner change
+  (CONFIRMED, `TransferRegionSlotOwners` `0x00B1B300`) every slot passes to the new owner through
+  `SetSettlementOwner` `0x00B2B810(new, 0)`, a third faction's hold included, except a slot with an occupant (slot
+  virtual +0x1C, the slot garrison; not modelled) or a port with a navy docked (+0x1E4), which keep their holder;
+  the walls (+0x24) and road (+0x20) always pass. Model: `change_region_owner` (test
+  `an_owner_change_hands_every_slot_over_but_a_port_with_a_navy_docked`); the docked check inherits
+  `docked_port`'s PROVISIONAL position test (the occupant, `GetSlotGarrison` `0x00A64440`, and the exe's docked test are BACKLOG items).
 - **Governing faction** (INFERRED, one region): the region's faction part (government, ministers, technologies, tax
   levels) comes from the faction whose governorship lists the region (`GOVERNORSHIP` #2), normally the owner. The
   same `eur_bavaria` is still in the dead Bavaria's governorship and shows Bavaria's government and none of Austria's
@@ -940,7 +945,8 @@ a liberation; `0x008C0310(2)` loots when +0x94 is 0.
 - liberation (grand campaign path): region +0x10C = the rebel-faction record (`REGION` #24 key, e.g. `poland_lithuania`,
   `italy`, `ireland`; in the eur start position 39 of 72 regions name a campaign faction and 22 of those a faction without land), record +0x4C clear, campaign flag +0x124
   clear, the faction exists (`0x00955B30`) and is not the capturer, then either the faction's +0x824 is set
-  (INFERRED: out of the game — modelled as "holds no region") or (+0x72C = this region and a count of 1: not decoded,
+  (the out-of-game flag, CONFIRMED: set by the destruction `0x008AB6C0`, cleared by the re-emergence
+  `0x008AE6E0`; ours `FactionDetails::out_of_game`, see §Destruction and re-emergence) or (+0x72C = this region and a count of 1: not decoded,
   not offered); finally the capturer's relationship #28 `allows_region_return`.
 - Variables: 87 `settlement_looting_pct_region_gdp` 0.15, 88 `…_pct_region_gdp_reduction` 0.8, 106 `…_base_loot` 0,
   108 `…_publicorder_reduction` 10, 109 `…_surrender_publicorder_reduction` 20.
@@ -1060,16 +1066,17 @@ faction and liberation target.
   `_Guerrilla`, else `auxiliary_cost_mod` for one ending in `_Auxiliary` (case-sensitive); `mod` clamped at −100; cost =
   FISTP((mod + 100) × `units` #7 × 0.01) in f32 (half to even). The base is #7 (`UNIT_RECORD` +0x38, copied by
   `0x00E91320`), not #4. The same function adds the experience effects to entry[1] and puts the upkeep (`0x008B21D0`)
-  in entry[4]. Data: `economy_check` `ECON_RECRUITCOST` matches **392 of 406** queued items in the saves the original
-  wrote (`auto_after_c8` 90/97, `auto_nr1` 46/47, `auto_nr4_t4` 98/99, `orig_fr_may1811` and `orig_fr_t1_b` 13/14 each,
+  in entry[4]. Data: `economy_check` `ECON_RECRUITCOST` matches **394 of 406** queued items in the saves the original
+  wrote (`auto_after_c8` 90/97, `auto_nr1` 46/47, `auto_nr4_t4` 98/99, `orig_fr_may1811` and `orig_fr_t1_b` 14/14 each,
   `orig_over_nr4_0252` 132/135; `nr2`/`nr3` are our own saves, charged #4 by the old code).
-- **The 14 misses are effects that changed after the AI queued the item (worker recruit-cost 2026-10-10).**
+- **The 12 misses are effects that changed after the AI queued the item (worker recruit-cost 2026-10-10; Spain's two
+  were our own key gap, fixed by recruit-cost2 2026-10-14, below).**
   - The price is taken once (CONFIRMED). `0x00AF3F80` copies entry[0] to item +0x20 (and +0x28) at queue time.
     The count-down (land item vtable `0x0137CB1C` +0x18 → `0x006009F0`) touches only +0x1C. Nothing re-prices an
     item: the Naples items stay at 551 from `auto_after_c8` to `orig_over_nr4_0252` while the faction reads +1.
   - What it is priced from (CONFIRMED): the region effect set `0x00A67530`: the region's cached +0x188, its
-    +0x1DC, and `0x008AFB50` over the faction's cached sum +0x6FC. That sum is rebuilt only by `0x008B16C0` (18
-    callers, not traced one by one). It is a copy of +0x8D4 (saved base + difficulty), plus the owned regions'
+    +0x1DC, and `0x008AFB50` over the faction's cached sum +0x6FC. That sum is rebuilt only by `0x008B16C0` (when, below).
+    It is a copy of +0x8D4 (saved base + difficulty), plus the owned regions'
     faction-wide building sets (+0x198), plus the technology set (+0x7C4 → +0x18), plus the government part
     `0x008AFAB0`. That part is the government set, and for each non-governor post with a holder, the post level's
     `ministerial_positions_to_effects` set (`0x008D9D40`) and the holder's own set (+0x48C).
@@ -1084,14 +1091,41 @@ faction and liberation target.
       upkeep goes 3870 → 4268 (+10.3 %) at the end of the round the items were queued in.
     - Saxony (2 items, `auto_nr1`, `auto_nr4_t4`): priced at −5 (the government's). The save adds −5 from a trait
       of the navy minister (his +0x48C), gained after the item was queued.
-    - Spain (2 copies of one merchantman, `orig_fr_may1811` = `orig_fr_t1_b`): priced at +49. The save reads +24
-      (saved bonus +25, navy level 3 −1), so +25 more at queue time: 49 = 2 × 25 − 1. `bonus_base` and
-      `bonus_with_difficulty` both hold the +25. What gave it twice for a while is UNKNOWN; no save of that
-      campaign between turn 0 and the queueing holds a queued item.
-  - So the misses are not a pricing error, and no save can be matched without the state at queue time. The model
-    prices from its state at its own queue time, as the exe does. Whether the exe's cached sum +0x6FC can lag
-    behind a minister or trait change (`0x008B16C0`'s callers) is a separate question for the effects system: it
-    would change every reader of the sum, not only recruitment.
+    - Spain (2 copies of one merchantman, `orig_fr_may1811` = `orig_fr_t1_b`): priced at +49 = the basic
+      `recruitment_mod_cost_naval_all` +24 (saved +25, navy level 3 −1) + a unit-category `cost_mod` +25 on
+      `naval_merchant`. CONFIRMED (recruit-cost2 2026-10-14): every `spa_napoleon` faction's saved base #54 (and #55)
+      holds a `CAMPAIGN_BONUS_VALUE` {type 0xE, bonus 0, +25, `naval_merchant`}; `0x00B0D220` adds the type-0xE id-0
+      sum keyed by the unit's category (unit +0x24, thunk `0x00E1F0F0` → `0x00E23E10`) and the type-0xD id-0 sum
+      keyed by its class (+0x28, `0x00E1F110`). The ids are the indices of `g_apszUnitCategoryBonusNames`
+      `0x0145B75C` (7: cost_mod, upkeep_mod, melee_attack_mod, movement_mod, training_mod, land_command, sea_command;
+      `FindUnitCategoryBonusId` `0x00E22570`, from the junction key builder `0x00F74450`) and
+      `g_apszUnitClassBonusNames` `0x0145B778` (4: cost_mod, upkeep_mod, melee_attack_mod, experience_mod;
+      `FindUnitClassBonusId` `0x00E225B0`, builder `0x00F744E0`). Ours kept saved types 0xE / 0xD under raw
+      `Saved(n)` keys the DB junction keys never met; `SavedBonus::key` now maps them to `UnitCategory` / `UnitClass`
+      by those tables (and `add_saved` back), test `the_spanish_merchantmen_price_takes_the_saved_unit_category_cost_mod`.
+      Our own mapping gap, not an exe bug. Saved type 6 (population class) and type 10 (religion) now map the same way, and type 7
+      (population class × religion) stays a raw key but now reads and writes both its qualifiers (class, then
+      religion; reader `0x00DF0D10`, writer `0x00E02F80`, CONFIRMED, polish20); type map and name slices in
+      EFFECTS_FIDELITY.md §1 (polish18).
+  - So the other misses are not a pricing error, and no save can be matched without the state at queue time. The
+    model prices from its state at its own queue time, as the exe does.
+  - **When `RebuildFactionEffectSum` `0x008B16C0` runs** (its 15 callers, CONFIRMED by xrefs, recruit-cost2
+    2026-10-14): each faction's turn start (`AdvanceFactionTurn` `0x008F4120` → `0x0096C050` → `0x008F1F60`, skipped
+    while faction +0x824 is set); the round end over every faction (`0x00A06050` → `0x00A1D3B0`); a region or
+    settlement changing hands (`TransferRegionToFaction` `0x00A64AC0` via `0x008AE6E0` / `0x008E4420`,
+    `TransferSettlementOwnership` `0x00B449F0` via `0x008BEAA0`; the capture options `0x00B541E0`, `0x00B582E0`);
+    a technology granted (`GrantFactionTechnology` `0x008CDCB0` unless its param_2 is set; `0x00948A40`, `0x00948AD0`);
+    the script functions `0x00977500` / `0x00977570` (loop over factions); `0x0095FF00` (from `0x00872550`); and three
+    command handlers near `0x00936530` (`0x008F3760`, `0x008C9C50`, `0x008EB9D0`; which commands is UNKNOWN). None is
+    on a trait or minister-level change, so a sum reader can see a stale +0x6FC until the next of these. Ours
+    sums on demand. Whether any reader observably lags is a question for the effects system (every reader of the
+    sum, not only recruitment); the remaining 12 misses are explained without it.
+- **`units_to_groupings_military_permissions` is read** (CONFIRMED, recruit-cost2 2026-10-14, BACKLOG §0-B): the
+  table constructor `0x00E86820` loads it through `0x00DC11A0` keyed by unit + grouping (analysis/mods/MOD_LOADING.md),
+  and the faction unit-set builder `0x00F74CB0` (`FACTION_RECORD` +0x1AC) starts each faction's list from its grouping's
+  (`factions` #34) units before the `units_to_exclusive_faction_permissions` rows. Ours: `faction_unit_set`
+  (ntw_sim campaign rules) fed from the merged `unit_groupings` table in `rules_from_db`
+  (ntw_campaign rules.rs), mods included; no `db/...` path read.
 - **The `0x00ED49A0` experience-adjusted cost is not the campaign's**: the queue charges entry[0], which both list
   builders set through `0x00B0D220` on every entry just before flagging them. `0x00ED49A0`'s callers are `0x0045D170` (from the army setup generator `0x004765F0`,
   `0x0045CB50` and `0x00461790`), `0x004C2770` and the unit info "XpAdjustedCost" `0x005CD340`, none on the queue
@@ -1129,10 +1163,127 @@ faction and liberation target.
       51 rows over 17 guard units: the Republican Guards are enabled only for `gov_republic`, the others only for
       the two monarchies. So France (`gov_empire`) gets none of them. What `destroyed` / `converted_to` do on a
       change of government is not traced.
-    - `0x00AA1660` (PROVISIONAL, not ported). When unit +0x98 is set, the slot's region must hold it in its list
-      +0x270. The sources of both are not traced; it may be the region unit resources.
-    - `0x00A27960` (PROVISIONAL, not ported). The unit must not be in a campaign-wide list (model +0xFA8 → +0x24,
-      count +0x20; objects written by `0x00872550` / `0x008742C0`). What fills that list is not traced.
+    - `0x00AA1660` `CheckUnitRegionResourceAvailable(pUnitRecord, pRegion)` (CONFIRMED, traced 2026-10-13;
+      ported in `recruitable_units` as `UnitRules::unit_resource` ∈ `Region::unit_resources`). True when `UNIT_RECORD` +0x98 is null; else that pointer must be in
+      the region's list +0x274 (count +0x270). Sources, both CONFIRMED: +0x98 is set by the units row builder
+      `0x00EDC000` from units column #14 (builder +0x78, our `UnitRecord::recruitment_scope`, e.g. `global`): a
+      non-empty value is looked up in `region_unit_resources_table` (`0x00E29830`), an unknown key drops the row
+      (returns 0), and the record ctor `0x00E91320` stores the found record at +0x98 (its param 7). The region's
+      list +0x274 is filled by the region ESF loader `0x00A45950` at `0x00A467BE` from `RESOURCES_ARRAY` (each
+      string resolved against `region_unit_resources_table`; unknown → logged, stored as null, never matches),
+      and the region writer `0x00A51E30` writes `RESOURCES_ARRAY` back from it (string = record +0, the key).
+      So the gate is: a unit with a `recruitment_scope` is listed only in a region whose `RESOURCES_ARRAY` names
+      it (vanilla values per WORKER3_REPORT: `global`, `horses`, ...; 37 `region_unit_resources` rows).
+      Mod data (CONFIRMED, recruit-followups 2026-10-14): every `units` read through `ntw_data::load_table`
+      (the `GameDatabase`, `ScriptSource::typed_table` for army setup, tools) runs the table's row check
+      (`DbRecord::checked`, `checked_by = drop_units_with_unknown_resource`), which loads `region_unit_resources`
+      (merged, mods included) and drops a `units` row whose non-empty #14 is not one of its keys, one warning
+      per dropped row, as `0x00EDC000` does (tests `a_unit_with_an_unknown_unit_resource_is_dropped_with_a_warning`,
+      `load_table_drops_units_naming_an_unknown_unit_resource`). Its caller `0x00E9B700` (units load loop,
+      `__thiscall`, RET 0x10) rewinds the record slot (−0xFC) and normally goes on with the next row
+      (INFERRED): for each table the builder blamed (`0x00EDC000` pushes the `region_unit_resources` table into
+      its error list on a miss), it reads that table's pack-name list (DATABASE_TABLE +0x38, size +0x40, data
+      +0x44, through vfunc 0 `0x00542E90`) and returns at once (`0x00E9BD95`, returning the current slot − 0xFC,
+      an interior pointer, so the remaining rows are never built) when a name is already in the shared
+      bad-pack list (its param 4, DB manager +0x6FC). Otherwise it adds the row's own pack name (or "Invalid
+      key"), reports the list through the global at `0x010A40E0` vfunc +0x6C and appends the newest name to
+      the bad-pack list. Both table constructors traced (`0x00E6DF60`, `0x00F24BB0`) leave +0x38 empty and no
+      writer is known, which would make the early return unreachable; left to trace (BACKLOG line). `0x00EDC000` also drops
+      a row whose on-screen name text comes back null (`0x00EDC298`) or whose `unit_class` / `category` is unknown; those are not modelled
+      (BACKLOG line). Vanilla is unaffected (CONFIRMED, recruit-gates 2026-10-14,
+      test `unit_resources_with_vanilla_data` reading `region_unit_resources` through the merged view, layout
+      `ss`): its 37 rows hold all 33 distinct units #14 values and all 12 eur_napoleon `RESOURCES_ARRAY` values,
+      so the exe drops no vanilla unit and stores no null resource. Own saves are format version 2 (they write
+      the list); a version-1 save takes its regions' unit resources from the campaign's start
+      (`own_save::read_with_start`, called by `source::open`) and errors without it (tests `a_version_1_save_*`).
+      Vanilla `eur_napoleon` (test `unit_resources_with_vanilla_data`): every one of the 72 regions holds
+      `global` (375 units need it), plus `horses` 11, `cossacks` 4, `balkans` 3, `ottoman_elite` 5 and one
+      each of `hungary`, `norway`, `poland`, `scotland`, `silesia`, `switzerland`, `tyrol` (102 items). Units
+      needing `spain`, `portugal`, `france`, `bedouin`, `guerilla_*`, `lombardy`, ... match no region there, so
+      the gate now leaves them out of that campaign (before, any building allowing them offered them).
+    - `0x00A27960` `CheckUnitNotScriptRestricted(this = model +0xFA8, pUnitRecord)` (CONFIRMED, traced 2026-10-13;
+      ported as `World::restricted_units`, filled by the loader from `UNIT_RESTRICTIONS` and by the script
+      calls, saved with the world; the old `ScriptState` / AI-hint copies are gone). False when the unit is in the list +0x24 (count +0x20) = the scripts' `UNIT_RESTRICTIONS`
+      (`EPISODIC_RESTRICTIONS`, loaded by the ctor `0x009968A0`; `add_restricted_unit_record` /
+      `remove_restricted_unit_record`). Its sibling +0x10/+0x14 is `BUILDING_RESTRICTIONS` (gate `0x009CDA90`,
+      modelled as `World::restricted_buildings`): restricted units get the same home, `World::restricted_units`.
+    - `0x00B77F90` `CheckQueuedUnitStillRecruitable(item, faction, region, pFaction)` (CONFIRMED; called from
+      `0x00AAFD40` in the queue step `0x00B71FB0`'s removal): permission mask (unit +0x94 & faction +0x30 → +0x44),
+      the faction's unit set (hash at faction +0x1B0), technology, government, `0x00AA1660`, `0x00A27960`; no
+      building flags. `0x00B43FC0` (a per-slot list, called by `0x00A799A0` for each slot with a standing
+      building) runs the same gates plus a land-stats test and no `0x00A27960` call. The test is unit +0x9C ≠ 0:
+      +0x9C is `UnitRecord.pLandUnitRecord`, the unit_stats_land row, zeroed by the UNIT_RECORD ctor `0x00E91320` and
+      set only by the land record ctor `0x00E8CFF0` (CONFIRMED, polish20), so that list holds land units only.
+      `0x00A799A0` itself also appends the global units with +0x9C ≠ 0 that pass the permission, technology and
+      resource tests. `BuildSlotBuildingRecruitableList` `0x00B43CA0` uses the same field to pick each entry's queue
+      (land: the region's recruitment manager; otherwise the port queue).
+    - `0x00A6AE40` `RebuildRegionRecruitablesAndEffects` reads the slot container's +0x20 and +0x24 besides the
+      slot array: CONFIRMED from `LoadRegionSlotManager` `0x00A4DCB0`, +0x20 = `ROAD_SLOT` and +0x24 =
+      `FORTIFICATION_SLOT`, both ordinary 0x254-byte slots built by `0x00A4D4F0` (`ConstructRegionSlotFromEsf`; the REGION_SLOT record version, reader +0x2C, gates two fields: below 3 one extra bool is read and dropped, 2 or more reads +0x220). So the fortification's building
+      is a recruitable source like the road: `recruitable_units` now reads the slots, then `road`, then
+      `fortification` (test `the_walls_building_is_a_recruitable_source`). The same function also merges the two
+      slots' effects into region +0x188 (local) / +0x198 (faction-wide) through the same `0x00A62380`, after the
+      slot array, road then walls, each only when the slot is not held by another faction (`0x00A91FC0`) and
+      its building is at health > 99 (recruit-followups 2026-10-14, CONFIRMED at `0x00A6AEE3` / `0x00A6AEFA`).
+      Readers of +0x188: `BuildRegionEffectSet` `0x00A67530` (construction options `0x00B43880`, repair cost
+      `0x00B66410`, public order `0x008EDF70`), our `economy::region_effect_set` and the effect sets.
+      `Region::effect_buildings` now yields the slots, the road, then the walls (the walls' effects counted
+      for the first time; before, INFERRED not counted). The road and walls slots have holders like any slot
+      (same ctor `0x00A4D4F0`): the ESF loader reads `Region::road_holder` / `fortification_holder` from their
+      `GARRISON_RESIDENCE` #0, and `slot_held` uses them for effects, the recruitable flag 0x10 (now also on
+      the road and walls), construction progress and repair. Evidence: `eur_bavaria` in `auto_after_c8` and
+      `orig_over_nr4_0252` (original-written) is Austria's with Bavaria holding its road, walls and four of
+      five slots; in every region of those saves the road / walls holder is the owner or holds another of its
+      slots (test `the_road_and_walls_holders_load_from_the_vanilla_saves`). An owner change hands the road and
+      walls to the new owner (CONFIRMED, `0x00B1B300`, see "Slot holders"). Own saves are format version 3; an
+      older one takes the holders from the campaign's start, kept while that faction still holds one of the
+      region's slots (or, holding none, still owns it) (test `a_version_2_save_takes_its_road_and_walls_holders_from_the_start`).
+      The ESF save writer now writes every slot's holder (array slots, road, walls) to `GARRISON_RESIDENCE` #0,
+      the owner when `None` (test `slot_holders_are_written_where_the_loader_reads_them`); the loader maps the
+      owner's id back to `None`.
+    - Construction vs the queue step (CONFIRMED): construction (`0x00AB3DA0` → `0x00B78800` per slot, including
+      +0x20 and +0x24; a completion rebuilds the cache through `0x00A682F0`) runs in the round-end economy
+      `0x008BC650`, before the next faction's turn-start region update `0x00AAE820` → queue step `0x00B71FB0`.
+      So the removal and the held-back check read the post-construction list. The model runs it in the round-end
+      economy (`construction_round_end`, `TurnStep::Economy`), so it is done before the next turn start's
+      region update (test `a_building_finished_this_turn_counts_for_the_queue_step`).
+    - Tests: `restricted_units_and_units_without_their_region_resource_are_not_recruitable` (ntw_sim),
+      `unit_resources_with_vanilla_data` (ntw_campaign, real install: the units #14 values and the regions'
+      `RESOURCES_ARRAY`), `a_legacy_restricted_unit_list_loads_into_the_model` (own save: the old top-level
+      list is merged into the world on read).
+    - Ghidra (V5, `analyze_function_completeness` 2026-10-13, effective scores): `0x00AA1660` 86,
+      `0x00A27960` 88, `0x00B77F90` 64, `0x009FB640` / `0x009FB660` / `0x00B57F40` 88 each. What is left is
+      struct typing (UNIT_RECORD, region, faction, recruitment item as `void *`, no struct defined yet) and
+      register-only locals, which the API cannot type. 2026-10-14: `0x00A6AE40` RebuildRegionRecruitablesAndEffects
+      91 (was 14) and `0x00B43CA0` BuildSlotBuildingRecruitableList 77 (was 31; polish17: the register-only
+      locals typed, `pRegion` = `CampaignRegion *` (not `RegionSlotManager *`: it is the BuildingSlot's
+      vtable +0x34 result, whose +0x124 is the RecruitmentManager), `pSlotObject` = `BuildingSlot *`
+      (`0x00B6D260`), `pEntryQueue` = `RecruitmentManager *`. Left: every retype splits the register-only
+      locals into new generic SSA instances (structural), and the unit record, faction, owner object and
+      out-list stay `void *`, no struct defined yet); RegionSlotManager +0x20 `pRoadSlot`,
+      +0x24 `pFortificationSlot` (CONFIRMED, LoadRegionSlotManager `0x00A4DCB0`).
+    - Struct sizes and typing (polish19, 2026-10-14, STRUCT_RESIZE_WORKFLOW; sizes CONFIRMED from the
+      allocations): `CampaignRegion` 492 → 0x3B0 bytes (`push 0x3B0` before the ctor `0x00A45950` at
+      `0x00A4CF12`), fields +0x270 unit resource count / +0x274 unit resource list (the ctor resolves
+      `RESOURCES_ARRAY`); `BuildingSlot` 492 → 0x254 bytes (three `push 0x254` in `0x00A4DCB0` at
+      `0x00A4DDB1` / `0x00A4DECC` / `0x00A4DF62`; the region-slot class built by `0x00A4D4F0`, whose `this`
+      is now `BuildingSlot *`), fields +0x1D8 parent, +0x1E4 port object (0x78 bytes, `0x00A45860`), +0x20C
+      the byte that gates the two port objects. New structs `UnitRecord` (0xFC, the row size of
+      `0x00E9B700`: +0x38 price, +0x94 permission bits, +0x98 required unit resource) and
+      `RecruitableEntry` (0x20, the entry `0x00B43CA0` builds). `0x00AA1660` now takes
+      `(UnitRecord *, CampaignRegion *)`; in `0x00B43CA0` the temporary list, the lookup key and the entry
+      unit are typed. The raw +0x124 read in `0x00B43CA0` stays: the register holds the hash-set node, then
+      the region (structural). Effective scores after: `0x00AA1660` 100, `0x00B43CA0` 81, `0x00E9B700` 54
+      (register temporaries named; the rest is unnamed callees), `0x00A4D4F0` 46 (sub-object vtables and the
+      intrusive lists between +0xC and +0x1D4 are untyped bytes).
+    - The commander pool around the queue (recruit-gates, 2026-10-13, Ghidra functions created):
+      `0x009FB640` `CheckNavyHasShipForAdmiral` (= `0x00A278D0(force) != 0`, pool vtable `0x0136AEC4` slot +0x40),
+      `0x009FB660` `CheckForceHasFreeUnitSlotForGeneral` (vfunc +0x8 count < vfunc +0x48 max, unsigned; vtable
+      `0x0136AE7C`), `0x00B57F40` `HandleRecruitmentItemTargetCharacterDestroyed` (this = item +0x5C; clears item
+      +0x18 and +0x24 when the destroyed character matches). Pool code: the panel counts the commanders in service
+      and the maximum once (`commander_row_flags_with`; the exe recounts per row at `0x00A1BB7B`, same result),
+      and `hire_admiral`'s refusal without a ship is labelled a crash guard: the exe passes the null ship from
+      `0x00A278B0` on and reads its +0xF4 (`0x00A161A1` → `0x006649C0`); its interface never offers that hire.
   - `MergeRecruitableEntrySorted` `0x00B08E30` joins the entries of one unit from several buildings. An unflagged
     entry replaces a flagged one; an unflagged one stays; two flagged ones OR their flags. So a unit is unflagged
     when any building allowing it is. Between two unflagged entries, `0x00B780E0` keeps the lower experience,
@@ -1217,13 +1368,12 @@ faction and liberation target.
        back an item that is already queued.
      - Ported in `region_turn` (test `a_flagged_item_is_held_back_without_taking_a_recruitment_point`). The step
        reads the list the turn start's removal read: the cache is not rebuilt inside `0x00B71FB0`.
-     - INFERRED: that this is the list from before the turn's construction step. Construction (`0x00A78670`, from
-       `0x00AB3DA0`) is not in the region update. A slot whose construction finishes rebuilds the cache
-       (`0x00A682F0` from `0x00B78800`). Whether that runs before or after the queue step is not traced; the model
-       runs construction between the removal and the countdown.
-     - `RebuildRegionRecruitablesAndEffects` `0x00A6AE40` also reads the settlement container's two extra slots
-       (+0x20 / +0x24, possibly the walls and the road). world.rs says the walls slot is not read (BACKLOG trace
-       line).
+     - CONFIRMED (recruit-gates 2026-10-13): that list already holds the buildings finished by construction
+       (`0x00A78670` from `0x00AB3DA0`, in the round-end economy `0x008BC650`; a finished slot rebuilds the cache
+       through `0x00A682F0` from `0x00B78800`), which runs before the turn-start region update. The model steps
+       construction in the round-end economy (§Recruitment cost and money, "Construction vs the queue step").
+     - `RebuildRegionRecruitablesAndEffects` `0x00A6AE40` also reads the settlement container's two extra slots:
+       CONFIRMED +0x20 = the road, +0x24 = the walls (fortification); both are recruitable sources in the model.
   4. Finished items are trained.
   - Flag +0x54 is set on every queued item by `0x00A78620`, called from the faction's round-end economy
     `0x008BC650`. So an item counts down only after a round end has passed since it was queued.
@@ -1232,8 +1382,47 @@ faction and liberation target.
     changing: an instant-complete path (cheat or script).
 - **Construction** (`0x00A78670`, a virtual): `0x00B78800` for every slot of the settlement container (the slot list
   plus the two extra slots). Each slot steps its own construction item (item method +0xC) when the slot's holder is
-  the region's owner (or the item's state is 2 / 3), so items progress side by side. The model skips items in slots
-  held by another faction. That this runs in the same region update is INFERRED.
+  the region's owner (or the item type is 2 repair / 3 demolish; `StepSlotConstructionItem` `0x00B78800`), so
+  items progress side by side. Order: the slot list in index order, then the road (+0x20), then the walls (+0x24).
+  It does not run in the region update: CONFIRMED in the round-end economy `RunFactionRoundEndEconomy` `0x008BC650`
+  → `StepRegionConstructionAtRoundEnd` `0x00AB3DA0`, per region of the faction's region list (faction +0x778 count /
+  +0x77C data, loop at `0x008BC873`), not for the rebels (`0x008CEEF0`), then the queue flag `0x00A78620`, before
+  diplomacy `0x00B29100` and research `0x008F3C40`. Model: `construction_round_end` in `TurnStep::Economy` (tests
+  `a_repair_counts_down_in_a_slot_another_faction_holds`, `the_rebels_construction_does_not_count_down`), through the
+  seam `construction.step` (`turn::construction_step`). Regions go in id order, not list order: each region's step
+  reads and writes only that region's slots, its school's research entry and its owner's records (completion
+  events, the recruitable cache), so the order changes no result, only the order of the events (CONFIRMED by the
+  callees below). The event order is PROVISIONAL: the list's order (as a startpos or a save builds it, and as
+  gains and losses reorder it in play) is not traced, so the model's id order stands in for it.
+- **Item types** (CONFIRMED; vtable +4 the type, +0xC the step, `0x00B781A0` the shared count: done + 1, finished
+  at done ≥ total):
+  - 0 upgrade (loader `0x00AE7040`, step `0x00B78560`) and 1 new building (loader `0x00AE6EF0`, step `0x00B78230`): the level at
+    full health, `BuildingCompleted`.
+  - 2 repair (loader `0x00AE6FE0`; made by `0x00AE7010` with +0x18 = (100 − health) / turns in u32 and +0x10 = max(1,
+    floor((100 − health) × 0.01 × level turns))): `0x00B78490` raises the health by +0x18 each step that does not
+    finish, through `SetBuildingHealth` `0x00B452A0`, which posts `CampaignBuildingDamaged` while it is below 100;
+    the last step sets 100 (no `BuildingCompleted`; for the walls it also restores the fortification's damage
+    object, vtable +0xC0, not modelled). Model: `ConstructionKind::Repair` (test above).
+  - 3 demolish (loader `0x00AE6EB0`; made by `0x00AE6ED0`: one turn, cost 0), queued by `QueueSlotDemolition` `0x00B286C0`
+    (the `DemolishBuilding` command): it first cancels the slot's item with its refund, then tests `0x00B16540`
+    (not the road, the slot held by the owner, a building standing); an item in the slot does not block it. Its
+    step `0x00B781B0` stops the slot's school (`0x00AA4BF0`, research progress kept), sets slot +0x1EC (UNKNOWN),
+    clears the slot (`0x00B146A0`) and posts an event through +0xBA0 (UNKNOWN, not modelled). Model:
+    `demolish_building`, `ConstructionKind::Demolish` (test `buildings_and_forts_are_demolished`). The panel's
+    standing-building row (`0x009C8320`) sets `dismantling` from `0x00B4D5A0` (the slot's item is type 3) and its
+    turns from the item (total − done).
+- **Item record** (CONFIRMED, `WriteConstructionItemToEsf` `0x00AFBA90` / `ReadConstructionItemFromEsf`
+  `0x00B256C0`): #0 type, #1 active, #2 done, #3 total, #4 cost (bit for bit), then the type's tail (vtable +0):
+  types 0 / 1 #5 the utf16 level key, type 2 #5 the u32 health per turn (`0x00B7A4A0`), type 3 nothing. Model: read by
+  type (`world::read_construction`; an item that does not fit its type is skipped with
+  `UnreadableConstructionItem`), written by type (`save::write_building_manager`). #1 is the active byte (+0x8):
+  `0x00B78800` steps only an active item (CONFIRMED, `0x00B7880E`), every item the exe makes is active
+  (`0x00AE6E80`), and what clears it is UNKNOWN (a BACKLOG trace line). Model: `ConstructionItem::active`, read from #1
+  and written back (a kept source record gets it too), kept by own saves (format 4; older ones read active), and an
+  inactive item does not step (`turn::construction_step`; test `an_inactive_construction_item_is_not_stepped`). Older saves of ours stored a repair as a build of
+  the standing level; `CampaignModel::convert_legacy_repairs` turns it into a repair at load (own saves before format
+  4, and the ESF load). Construction options (`BuildSlotConstructionOptionsWithCost` `0x00B43300`, `0x00B4333B` →
+  `0x00A91FC0`): a slot another faction holds offers nothing (test `a_slot_another_faction_holds_offers_no_construction`).
 - **Saves agree:** Cleves (1 point) 1 started and 5 waiting; Gibraltar (6) 6 of 10; several construction items per
   region progressing together; AI items queued in round 1 untouched in the round-2 saves.
 
@@ -1404,49 +1593,66 @@ garrison join. Round 15's read of `0x00B71FB0` (1523 bytes, the queue tick) sett
   amount runs the other way); any other length adds a regular payment through `0x00B54FC0` (on the payer's
   relationship record towards the payee, via `0x00B55010(amount, turns)`; CONFIRMED by polish11's V5 pass). When both sides are human the exe also calls
   `0x008F56C0` on each with ±amount: FACTION +0x954 += n, a multiplayer results counter (CONFIRMED treasury2,
-  2026-10-12). Its one reader is the getter `0x008D9DB0`, which feeds the external MP results listener
+  2026-10-12). Its second caller (treasury3, 2026-10-14, CONFIRMED by decompilation) is `0x00B298F0` (from
+  `0x00B29170` at `0x00B2971F`), a regular payment's per-turn tick: when both sides are human (+0x6E0 of each) it adds
+  ±amount to the same counter, then lowers the turns left (+0x14) by 1; the money itself moves in the economy lines.
+  Its one reader is the getter `0x008D9DB0`, which feeds the external MP results listener
   `0x009C7660` (campaign +0xD9C, vfunc +0x50) when a human faction of an MP campaign (+0x1034) is destroyed
   (`0x008AB6C0`) or the campaign ends (`0x0096CD10`); no rule reads it. It is saved as the FACTION i32 written at
   `0x00893E8B` (after +0x94C and the +0x950 bool), which our save keeps as loaded (template tree), so it is not
-  modelled until our own multiplayer has a results report (BACKLOG line proposed). Model: `treaties::one_off_payment`; the panel's lump sum
-  (`turns == 0` in `NegotiationItem::Payment`) maps to it (it was a state gift, which credited the receiver).
-  **Turns 0 → 1 (CONFIRMED, polish11, disassembly):** the script `Propose` handler `0x009BF3C0`, action 9 (payments),
-  writes the deal's one payment pair, +0x08 amount and +0x0C turns. When the panel's regular flag is clear or its
-  turns are below 2 it stores turns 1: offered `0x00C1F6F0` at `0x009BF6FC`, demanded `0x00C43D90` at `0x009BF6C1`
-  (amount negated). Otherwise it stores the turns: `0x00C1F6D0` at `0x009BF6E7`, demanded `0x00C43D70` at
-  `0x009BF6AC`. So a one-turn schedule also runs once; `deal_item_commands` maps turns 0 and 1 to `OneOffPayment`
-  (test `negotiation_rows_map_to_their_appliers`). The panel note that the schedule was one of the deal's two optional
-  items (+0x20 / +0x24) was wrong. **Deal → item copy (CONFIRMED, polish13, 2026-10-12, disassembly):** the
-  payment item's vtable starts at `0x01381EDC` (set by its constructor `0x00BF3C90` at `0x00BF3CA5`, amount and
-  turns zeroed); slot +0x44 (`0x01381F20` → `0x00C4AB20`) takes the deal's pair and stores the amount (pair +0x08)
-  to +0x14 at `0x00C4AB38` and the turns (pair +0x0C) to +0x18 at `0x00C4AB42`; slot 0 `0x00C11CA0` writes them
-  back. **Payment cap (CONFIRMED, payment-capital, 2026-10-12, disassembly):** the same function
-  (`0x00C4AB4E`–`0x00C4AB82`) caps a demanded one-off payment: when the turns are 1 and the amount is negative (a
-  demand) it reads the treasury (`GetFactionEconomyTreasury` `0x00BCAFE0`) of the item's second side (item +0x4 →
-  `0x00C4BC20`), and when the demand is above it (a signed compare) stores minus the treasury as the amount
-  (`0x00C4AB82`). That side is the payer: the applier `0x00C18A70` charges the `0x00C4CE90` side for a positive
-  amount and the `0x00C4BC20` side for a negative one. Offered amounts and regular payments (turns 2 and up) are not
-  capped. **When:** the item copies the deal through `ApplyDealToNegotiationRecord` `0x00C49AA0`, which the propose
-  commands (`0x00933CC0`, `0x009340A0`), the AI's evaluation (`0x00AA5ED0` → `0x00CC58C0`) and `0x00C1E240` run; so
-  the cap uses the treasuries when the deal is proposed, before any item applies. The payment item is built only
-  by the negotiation constructor `0x00BF5A60` (constructor `0x00BF3C90`). **ORIGINAL BUG (`0x00C4AB7E`–
-  `0x00C4AB82`):** with a negative treasury the stored amount, minus the treasury, is positive, so the demand turns
-  around and the demanding side pays the indebted one. The panel shows the intent: `diplomacy_panel.luac`
-  `CheckMaxPayment` (line 1498) and `SetMaxPayment` (line 1521) disable OK for a demand above
-  `MaxOppositionPaymentAllowed` (the payer's treasury), so a negative treasury allows no demand at all ("never more
-  than the payer has"). Ours: `treaties::demanded_payment` caps a one-off demand at max(treasury, 0), so an indebted
-  payer is asked 0 and nothing moves (the applier skips 0). It is the rule seam `diplomacy.demanded_payment`
-  (`CampaignModel::demanded_payment`); the UI's `accept_deal` caps each demanded row through it before any row's
-  command is pushed (the treasuries before the deal; tests `a_demanded_one_off_payment_is_capped_at_the_payers_treasury`,
-  `a_demanded_lump_sum_is_capped_at_the_payers_treasury`). Not yet: the UI builds no payment rows (payments
-  `Propose` PLACEHOLDER) and our AI evaluation does not weigh payments; both call the seam when they come.
+  modelled until our own multiplayer has a results report (BACKLOG line proposed). Model: the deal's payment
+  record `negotiation::DealPayment` (amount, turns), applied by `accept_deal` as `treaties::one_off_payment` (turns 1)
+  or a regular payment (other turns). The applier has no money test and no failure (`0x00BAF500` charges as is), so
+  the model's only payment error is its own faction-pair check (a negotiation of a faction with itself); `accept_deal`
+  makes it before any record is applied, so a refused deal applies nothing (deals-fix2, test
+  `a_deal_with_a_failing_payment_applies_nothing`).
+  **Sign and turns (CONFIRMED, deals-fix, 2026-10-14, disassembly `0x009BF64C`–`0x009BF701`; corrects polish11,
+  which had offer and demand swapped):** the script `Propose` handler `0x009BF3C0`, action 9 (payments), is called
+  `Propose(offer, amount, turns, regular, action)` and reads the action, the regular flag (bool reader `0x01055840`,
+  Lua type 1 or a type error), the turns and the amount (number reader `0x010556D0` → `0x01055700`: Lua type 3, read
+  as a float and rounded to the nearest, ties to even, by the x87 default), then the offer flag. It writes the
+  deal's one payment pair (+0x08 amount, +0x0C turns): an offer through `0x00C43D70` (turns) / `0x00C43D90` (turns 1),
+  which negate the amount; a demand through `0x00C1F6D0` / `0x00C1F6F0`, which store it. Turns are the panel's when
+  the regular flag is set and the turns are above 1 (signed), else 1. So the record's amount is **negative for an
+  offer** (the proposer pays) and **positive for a demand** (the recipient pays); the applier `0x00C18A70` charges
+  the `0x00C4BC20` side (the proposer) for a negative amount and the `0x00C4CE90` side for a positive one. The panel
+  note that the schedule was one of the deal's two optional items (+0x20 / +0x24) was wrong.
+  **Deal → record copy (CONFIRMED, polish13, 2026-10-12, disassembly):** the payment record's vtable starts at
+  `0x01381EDC` (constructor `0x00BF3C90` at `0x00BF3CA5`, amount and turns zeroed); slot +0x44 (`0x01381F20` →
+  `0x00C4AB20`) stores the pair's amount to +0x14 at `0x00C4AB38` and the turns to +0x18 at `0x00C4AB42`; slot 0
+  `0x00C11CA0` writes them back. **Payment cap (CONFIRMED, deals-fix, 2026-10-14, disassembly; the 2026-10-12
+  reading called it a demand cap):** the same function (`0x00C4AB4E`–`0x00C4AB82`) caps an **offered** one-off
+  payment: when the turns are 1 and the amount is negative it reads the treasury (`GetFactionEconomyTreasury`
+  `0x00BCAFE0`) of the record's `0x00C4BC20` side, the proposer, and when the offer is above it (signed) stores minus
+  the treasury (`0x00C4AB82`). Demands and regular payments are not capped (the panel limits a demand itself:
+  `diplomacy_panel.luac` `CheckMaxPayment` line 1498 / `SetMaxPayment` line 1521, against
+  `MaxOppositionPaymentAllowed`). Then (`0x00C4AB85`) it builds the row text from the capped record: turns 1
+  `diplomacy_strings_string_offer_or_demand_single_payment` ("Single payment: %d"), else `…_regular_payment`
+  ("Regular payment: %d. Turns: %d"), both with |amount|. **When:** the record copies the deal through
+  `ApplyDealToNegotiationRecord` `0x00C49AA0`, from the propose commands (`0x00933CC0`, `0x009340A0`), the AI's
+  evaluation (`0x00AA5ED0` → `0x00CC58C0`) and `0x00C1E240`; so the cap uses the proposer's treasury when the payment
+  is proposed, and the panel row, the AI's value and the applied deal all read the capped record. The slot-0x14 offer
+  text getter `0x00C123F0` returns the text for a negative amount, the slot-0x4 demand text getter `0x00C11F20` for a
+  positive one; slot +0x2C `0x00C12640` reports items while the amount is not 0; slot +0x4C `0x00C5CBC0`
+  (`RemoveAction`) posts the propose command (descriptor `0x013879FC`, via `0x00C4AD60`) with the clear flag and zeros.
+  **ORIGINAL BUG (`0x00C4AB7E`–`0x00C4AB82`):** with a negative treasury the stored amount, minus the treasury, is
+  positive, so the offer turns into a demand on the recipient, against the cap's own intent ("never more than the
+  proposer has"). Ours: `treaties::proposed_payment` caps a one-off offer at max(treasury, 0), so an indebted
+  proposer offers 0 and nothing moves (the applier skips 0). It is the rule seam `diplomacy.proposed_payment`
+  (`CampaignModel::proposed_payment`, renamed from `diplomacy.demanded_payment`), called once by
+  `CampaignModel::propose_payment` (command `ProposePayment`) when the record is set; the UI's `Propose` /
+  `RemoveAction` post that command and the row text reads the record (tests
+  `an_offered_one_off_payment_is_capped_at_the_proposers_treasury`,
+  `a_proposed_payment_is_capped_when_proposed_and_paid_on_accept`,
+  `a_proposed_payment_is_capped_once_and_its_row_shows_the_capped_amount`). The AI's value of the record:
+  AI_RESEARCH.md §Deal evaluation, record 7. Ghidra names (deals-fix): `CopyDealPaymentAndBuildRowText` (`0x00C4AB20`),
+  `PostProposeDealPaymentCommand` (`0x00C4AD60`), descriptor `g_pfnProposePaymentsCommandPost` (`0x013879FC`).
 - **Regular payments and protectorate tribute** are economy lines summed into the round settle, so the model moves
   them through `pay` / `credit` (saturating, above); `treaties::diplomacy_money` sums the lines 1:1.
 - **The other charge / credit callers (treasury2, 2026-10-12, static trace, CONFIRMED unless tagged).** Every xref
   of `0x00BAF500`, `0x00BB3810` and the refund mover `0x00BAF660` is now mapped:
-  - `0x008EEB70` unit retraining toggle (UI `0x00AA90F0`, cancel-all `0x008B36D0`): charges `0x008EA2F0` =
-    round(unit record +0x38 × clamp(`0x008F6590`, 0, 0.5)), category 2; cancelling refunds it through `0x00BAF660`.
-    **Not modelled** (BACKLOG line proposed).
+  - `0x008EEB70` is the **ship repair in port** order (treasury3, 2026-10-14; it was read as a unit retraining):
+    charges `0x008EA2F0`, category 2; cancelling refunds through `0x00BAF660`. Modelled, see §Ship repair in port.
   - `0x008E2260` naval promotion: already mapped (§Promotion), pays 0.
   - `0x00B4E4C0` map-fort repair (from `0x00AA49A0` ← `0x00CE9C40`; gates `0x00B4D500`, `0x00B16460`, `0x00B4D3F0`):
     charges round(level cost × (1 − health)), category 1. Not modelled: our map forts have no health, and no vanilla
@@ -1461,15 +1667,32 @@ garrison join. Round 15's read of `0x00B71FB0` (1523 bytes, the queue tick) sett
     merge `0x008D93D0`) is never reached either.
   - `0x00A06050` mission rewards (caller `0x00A26600`): money (+0x64) credited, category 3; also the takeover
     (+0x68 → `0x008AB6C0`) and the unit, agent, experience and recruitment grants. Belongs to the missions item
-    (BACKLOG §0 missions line).
-  - `0x009DB270` / `0x009DB7C0` post-battle state 6: a unit that cannot be placed is credited (category 2)
-    `0x008E1BC0` = trunc((1 − 0.25 × the sum of the four floats unit +0x130..+0x13C) × unit record +0x38). The four
-    floats are UNKNOWN; not modelled (§Autoresolve "After the battle", state 6; BACKLOG line proposed).
+    (BACKLOG §0 missions line). **treasury4 (2026-10-14): partial, not modelled.** The model has no mission
+    completion, so nothing would call an applier; the credit itself is `treasury::credit` (category 3) when the
+    missions item models `0x00A06050` whole (BACKLOG line).
+  - `0x009DB270` / `0x009DB7C0` post-battle state 6: a unit that cannot be placed is credited (category 2) with
+    `0x008E1BC0` (CalculateNavalUnitSaleValue, which only computes; `0x009DB7C0` credits) = trunc((1 − 0.25 × the sum of the four floats unit +0x130..+0x13C) × unit record +0x38). The four
+    floats are the ship's damage d0..d3 (`SHIP_DAMAGE_INFO` #0..#3; treasury3, CONFIRMED: the repair share
+    `0x008F6590` and the repair `0x00576890` read and zero the same words), so state 6 is a captured ship that finds no
+    free spot (`0x00B38F10`) and is sold at its undamaged share of the `units` #7 price. Not modelled: ours puts a
+    captured ship into the captor's force whatever its size (BACKLOG line proposed). **treasury4 (2026-10-14):
+    still not modelled.** The sale is one branch of the state-6 force rebuild (`0x008EB330` → `0x008EB370` →
+    `0x009DB270` per side, §Battles "After the battle"): a unit whose force is gone gets a new force on a free spot
+    within 3 map units of the previous entry (`0x00B38F10`); only a ship that finds none is sold. The model has no
+    such rebuild (its units always belong to a force, and a captured ship joins the captor's force), no
+    commanderless navy and no free-spot search, so the sale needs that rebuild first (BACKLOG line).
   - `0x009318B3` in the undefined function `0x00931860`, CCQ_ADJUST_FACTION_TREASURY (registered at `0x0041F200`):
     category 3, sent only by the dev console's `adjust_treasury` (`0x008A9770`). Not modelled (a developer command).
   - `0x00BB33A0` from `0x00BAF200`, a campaign-director element (vtable `0x013800AC`, built by `0x00B930D0` /
-    `0x00BAC310`, cdir config 0x28–0x2B): credits its +0x10C, category 4. Belongs to the director item (BACKLOG §0
-    director line).
+    `0x00BAC310`, cdir config 0x28–0x2B): credits its +0x10C, category 4. **Modelled (treasury4, 2026-10-14, CONFIRMED):** the
+    boost desire's step `0x00BAC310` builds one such intention per chosen faction (`0x00B930D0(weight 0.0, CAI faction, amount)`);
+    its action `0x00BAF200` → `0x00BB33A0` credits the amount (`0x00BB3810(amount, 4)`), and the intention loop
+    `0x00BBC880` runs it right after the step, so `director::boost_step` credits at once (same treasury changes,
+    same order; test `the_boost_desire_pays_the_highest_rivals`).
+  - **The MP results counter** (FACTION +0x954, `0x008F56C0` / `0x00B298F0`, above under Deal payment) moves no
+    treasury; treasury4 found no other writer or rule reader (readers: the getter `0x008D9DB0` for the MP results
+    listener, from `0x0096CD10` and the takeover `0x008AB6C0`). Not modelled until our multiplayer has a results
+    report (BACKLOG line).
 - **A queued item whose commander dies** (BACKLOG §0-B). The character destructor `0x0099D2D0` notifies its observer
   list (+0xD4); a recruitment item queued through a commander observes him, and its listener `0x00B57F40` clears
   the item's target (+0x18) and the bool +0x24. The item stays in its queue, keeps its cost and turns, and is not
@@ -1491,6 +1714,146 @@ garrison join. Round 15's read of `0x00B71FB0` (1523 bytes, the queue tick) sett
   bucket index, but the disassembly at `0x00BAF5F2` indexes by the category. `0x008F56C0` does
   faction +0x954 += n. `0x00B54FC0` books the payment on the payer's relationship record toward the
   payee, which is CONFIRMED.
+
+## Ship repair in port (treasury3, 2026-10-14, static trace, CONFIRMED unless tagged; code `ship_repair.rs`)
+
+- **The flag:** `NAVAL_UNIT` #3 (ESF `NAVAL_UNIT` v1 = {record key, `UNIT`, u32, bool #3, bool #4,
+  `SHIP_DAMAGE_INFO`}) is unit +0x168, "ordered to repair" (written by the saver `0x00895640`). Model:
+  `ShipState::repairing`, loaded by `read_ship_states`, hashed in the world hash.
+- **Ship memory (naval unit, vtable `0x0135552C`):** `SHIP_DAMAGE_INFO` at +0x130: damage f32 ×5 (+0x130..+0x140),
+  crews i32 ×3 (+0x144), max crews (+0x150), guns (+0x15C), sunk (+0x160), max guns (+0x164). The ESF writes the
+  three crews in the reverse order of memory; the sums below do not care, a per-index use would (BACKLOG check line).
+  Record at +0x48 (`units` #7 price at record +0x38), force link +0x11C. Vtable: +0x38 `0x008C92F0` = in a force
+  (+0x11C non-null), +0x40 `GetConstantFalseCdecl`, +0x4C `0x008E2260` (promotion).
+- **Needs a repair** `0x0055ACC0`: any crew below its maximum, else any of damage d0..d3 above 0 (d4 not tested).
+- **Repair share** `0x008F6590`: ((Σmax − Σcrews) IDIV Σmax) as a float + ((d3 + d2) + (d1 + d0)) × 0.25 (that
+  summing order, SSE). The crew term is an **integer** divide, so it is 0 unless every man is gone (then 1) or the
+  crew reaches twice the max (then −1, one less per further max crew; the cost clamps a negative total to 0): a
+  half-manned ship costs only its hull damage. `ECX` is the naval unit itself (the plate said +0x130; fixed). **Settled 1:1 (treasury3-merge, 2026-10-14, disassembly):** the sums
+  are `0x0057E1E0` ([+8] + [+4] + [+0], wrapping ADDs; Σcrews from +0x144, Σmax from +0x150), the quotient is
+  `SUB EDI,ESI; CDQ; IDIV ECX` (`0x008F65E4`–`0x008F65F0`: signed, truncating toward 0, the remainder dropped), then
+  `CVTDQ2PS` + `ADDSS` with the damage term (constant `0x01325CAC` = 0.25). Ours (`ShipState::repair_fraction`) uses
+  `wrapping_add` / `wrapping_div` / `as f32`, the same results bit for bit. No traced contradiction of the exe's
+  intent: the share's only other consumer, the navy vtable slot +0x58 `0x008F66A0` (vtable entry `0x0135570C`: the
+  mean of 1 − share over the navy's ships, divided by its vtable +0x8 count), uses the same integer quotient, so the
+  exe is self-consistent and the rule stays 1:1 (not an ORIGINAL BUG). **ORIGINAL BUG:** Σmax = 0 divides by zero
+  (an integer fault); ours takes the crew term as 0.
+- **Cost** `0x008EA2F0`: share clamped with `if 0 > f {0} else MINSS(f, 0.5)` (a NaN gives 0.5), f32(price) × it,
+  rounded by FISTP (half to even). Model `ship_repair_cost`.
+- **Order** `0x008EEB70(on)`: on: needs a repair, cost < treasury (signed, strict), the force is a navy docked in a
+  port (navy +0xE0) whose slot can repair (`0x00A894D0` → the port manager's slot +0x18 `0x00B44E50`: a building in
+  the slot and its recruitable list `0x00B43CA0` not empty); then `0x00BAF500(cost, 2)` and flag = 1. The flag is
+  not tested here. Off: the cost is computed **again**; when the flag is set and the cost > 0, `0x00BAF660(cost, 2)`;
+  then flag = 0. **Settled (treasury3-merge, 2026-10-14, disassembly):** the off branch (`0x008EEC4E`) calls
+  `0x008EA2F0` first and passes its result (ESI) to `0x00BAF660` at `0x008EEC7A`; the on branch (`0x008EEC2F`–
+  `0x008EEC42`) charges and stores only the flag byte (+0x168), and `NAVAL_UNIT` saves no cost, so no paid cost
+  exists to refund: the refund is the cost recomputed from the ship's state at cancel time, which can differ from
+  what was paid (more after new damage, nothing when the recomputed cost is 0). Ours does the same (tests
+  `ordering_charges_once_and_cancelling_refunds_the_cost_now`, `a_cancel_refunds_nothing_when_the_cost_now_is_zero`).
+  `0x008E1BC0` (the state-6 sale value) is not on this path. Model `set_ship_repair`.
+- **The panel's and AI's test** `0x008B3120` (callers `0x008DF820` UI, `0x00AA90F0` AI): flag clear, in a force,
+  the order's tests, and the port slot's building health > 99. Model `can_repair_ship`.
+- **Commands:** `CCQ_REPAIR_NAVAL_UNIT` (executor `0x00937040`) orders; `CCQ_TOGGLE_REPAIR_NAVAL_UNIT`
+  (`0x009387A0`) cancels a flagged ship or orders. The executors only test that the unit is a ship; ours also run
+  `can_repair_ship` (what every issuer tests first), so a repeated command does not charge twice.
+- **Cancel-all** `0x008B36D0`: the order off for every flagged ship of a navy. Callers: after a unit transfer
+  (`0x008D5F10`, `0x008D47B0`, `0x008F04C0`) for each of the two forces that is a navy outside a port; the undock
+  `0x00A8C0B0` (from a move, the post-battle placement `0x008F7880` and the war kick-out `0x008DA179` inside
+  `ExpelFactionForcesFromRegion` `0x008D9DC0`). The undock is a method of the port (`SlotPortObject`, 0x78 bytes,
+  vtable `0x01376950`, hanging off `BuildingSlot` +0x1E4) and takes the character as its argument (CONFIRMED,
+  polish20). It cancels only when that character is the navy docked there (`GetPortDockedNavyCharacter`
+  `0x00A84990`, the port's +0x60 handle); then it clears that handle (`UnlinkHandle` `0x008B02E0`), hands the port
+  slot back to the region's owner when the slot's vfunc +0x1C test returns 0 (`RestorePortSlotHolderToRegionOwner`
+  `0x00A8D830`: SetSettlementOwner(slot, region owner +0xF4, false); the test returns the slot's garrison handle
+  +0xC0, CONFIRMED polish21) and sends three notifications. The navy's destructor `0x0088EF90` runs the same restore
+  on its port handle (navy +0xE0) unless the campaign is being torn down (campaign +0xFC5), without a repair refund.
+  Model: `undock` cancels and restores (`restore_port_holder`; no garrison in the model, so the slot always passes
+  back), every removal of a force goes through `remove_force` (destroyed, emptied when its commander goes, merged
+  away), which restores a docked navy's port (test `a_navy_leaving_its_port_hands_the_slot_back_to_the_owner`). The
+  notifications are not modelled (BACKLOG).
+  Model: `undock` (docked navies only), on
+  every navy move through `move_character` (walk, the fleet sailing to land an army, a force taking a settlement)
+  and once per battle result through `undock_after_battle` (after the casualties for `apply_battle_result`; the
+  naval autoresolve runs it after the ships' states are written, before captures: PROVISIONAL order; a ship lost
+  in the battle drops its flag unrefunded); `merge_units` (both forces).
+- **Turn end:** the navy's turn-end slot (vtable `0x013556B4` +0x2C = `0x008BD430`, from the faction turn end
+  `0x008BD0F0`) first repairs each flagged ship through `0x008EA2A0` = `0x00576890` (damage 0, crews and guns to
+  max, sunk cleared) + men = max men + flag 0 (+ notifications), then runs the units' `UnitTurnEnd`. Model
+  `repair_ships`, before the `UnitTurnEnd` events.
+- **The AI's repair (treasury4, 2026-10-14, static trace, CONFIRMED unless tagged):** the intention
+  `CAI_BDIM_REPAIR_NAVY` (vtable `0x01389E60`) acts through slot 12 `0x00CD24A0` → `0x00AA90F0`. That function
+  first asks `0x00A8B2D0` whether the AI may shop at the navy's position; when it may, it walks the CAI force's
+  unit list (+0x164) and, for every ship that needs a repair (`0x008CE990` → `0x0055ACC0`) and passes
+  `0x008B3120`, calls the order `0x008EEB70(1)` directly (no command is queued), so each order is charged before
+  the next ship is tested. **The shopping gate:** CAI interface +0x618 holds a shroud pointer, set only by the
+  script's `disable_shopping_for_ai_under_shroud(on)` (binding `0x00979910` → `0x00AA9B40`): off stores 0; on
+  stores the shroud (faction +0x6F8) of the one human faction, or 0 when there is not exactly one. `0x00A8B2D0`
+  is false with no pointer, else the shroud's hidden test `0x00B11E70` (hidden set +0x34 while the shroud is
+  active, +0x50), the same test as our map labels. The pointer is saved as a bool (CAI_INTERFACE v6 and up, read
+  at `0x00A3E505`) and re-applied through `0x00AA9B40` on load (`0x00A3EF07`). Only the tutorial scripts call it.
+  Model: `World::ai_shopping_shroud`, `CampaignModel::set_ai_shopping_shroud` / `ai_shopping_hidden`,
+  `ai_repair_navy` (tests `the_ai_orders_each_ship_it_can_pay_for_in_unit_order`,
+  `the_ai_does_not_repair_under_the_scripted_shroud`; script test
+  `disable_shopping_for_ai_under_shroud_stores_the_one_humans_shroud`). **INFERRED:** the CAI unit list is taken
+  in the force's unit order (its fill order is not traced). **Not modelled (BACKLOG):** the goal that creates the
+  intention (code at `0x00CDD540`, no function defined there): our AI has no naval goals, so nothing calls
+  `ai_repair_navy` yet; the CAI_INTERFACE bool is not read from or written to an ESF save (ours keeps it in our
+  own save); the same gate guards 11 other AI purchase functions (callers of `0x00A8B2D0`, the construction twin
+  `0x00A67890` among them). **The AI's building repair** (`TryAiRepairSlotBuilding` `0x00AA4910`, our
+  `ai_repairs`) has the gate, CONFIRMED at `0x00AA491D..0x00AA4945`: when the CAI slot's +0x104 object exists
+  (getter `0x0047B090`), its position (vtable +0x40) is tested and a hidden one is refused (refusal counter
+  +0x81C); the CAI slot's +0xFC is the game building slot (getter `0x00A63FD0`). Modelled with the slot's own
+  position (none = no gate) and the settlement's for the walls (test
+  `the_ai_does_not_repair_a_building_under_the_scripted_shroud`); **INFERRED:** that position, since the +0x104
+  object's type is not traced (BACKLOG). **Ghidra (V5, treasury4 fix round; completeness / effective):**
+  IsPositionUnderAiShoppingShroud `0x00A8B2D0` 97/100 (structural deductions only), SetAiShoppingShroud
+  `0x00AA9B40` 88/98, OrderAiNavyShipRepairs `0x00AA90F0` 80/93, BuildDirectorBoostIntention `0x00B930D0` (CAI
+  faction +0x108, amount +0x10C) 91/94, ExecuteRepairNavyIntention `0x00CD24A0` 87/91,
+  ExecuteDirectorBoostIntention `0x00BAF200` 88/91, CreditDirectorBoostToFactionTreasury `0x00BB33A0` (stdcall,
+  returns true) 100/100. New types `CaiFaction` (+0x168 its campaign faction, read through the shared getter
+  `0x00C3C330`) and `CaiRepairNavyIntention` (+0xFC status, +0x120 CAI force); boost vtables typed. What
+  remains: register-only temporaries the API cannot rename (three in `0x00AA90F0`, two in
+  `0x00AA9B40`); the phantom stack argument of `0x00AA9B40`; the unit's vtable calls
+  +0x28/+0x2C in `0x00AA90F0` (unit class not typed); the attribute temporaries of `0x00B930D0` and the
+  intention loop's `pContext` in the two Execute functions (layouts not traced); the +0x6F8 shroud read on the
+  result of the unnamed getter `0x00C3C330`.
+- **PROVISIONAL (BACKLOG line):** the model has no dock link (navy +0xE0); a navy is docked at the port slot within 1
+  map unit of it (the same test the turns-at-sea counter uses, now `port_at`).
+- **Ghidra (V5 plates, completeness 42-93; the rest is struct typing of the unit, navy and faction):**
+  SetNavalUnitRepairOrder `0x008EEB70`, CalculateNavalUnitRepairCost `0x008EA2F0`, CalculateShipRepairShare
+  `0x008F6590`, CheckShipDamageNeedsRepair `0x0055ACC0`, ApplyNavalUnitRepair `0x008EA2A0`, ResetShipDamageInfoToFull
+  `0x00576890`, CanOrderNavalUnitRepair `0x008B3120`, CancelNavyShipRepairOrders `0x008B36D0`,
+  ProcessNavyTurnEndRepairsAndUnits `0x008BD430`, CalculateNavalUnitSaleValue `0x008E1BC0`,
+  ProcessRegularPaymentTurnTick `0x00B298F0`, ApplyFactionTreasuryRefund `0x00BAF660`, CanPortSlotRepairShips
+  `0x00A894D0`. Added by polish19 (2026-10-14; functions created where none existed): ExecuteRepairNavalUnitCommand
+  `0x00937040` and FlipNavalUnitRepairOrderCommand `0x009387A0`, the two command executors;
+  CheckPortSlotHasRecruitableUnits `0x00B44E50`; IsNavalUnitInForce `0x008C92F0` (91); UndockCharacterFromPort
+  `0x00A8C0B0`; PlacePostBattleShipsOrSellUnplaced `0x009DB7C0` (walks the 0x4C-byte naval battle result
+  entries, copies each entry's ship state into the unit at +0x130, and for a ship that changes hands (state 2) places
+  it in a force of the given side or sells it). Polished by polish20 (2026-10-15; scores now): the executors 85 / 85
+  (the unit handle and naval unit have no struct yet); CheckPortSlotHasRecruitableUnits 85 (struct
+  RecruitableEntryList, 16 bytes, also the return and out type of BuildSlotBuildingRecruitableList `0x00B43CA0`, 71);
+  UndockCharacterFromPort 81 (this/argument swap fixed: the port is `this`); PlacePostBattleShipsOrSellUnplaced 44
+  (effective 62; structs NavalBattleResult and PostBattleSideForce {side id, force}; the context `this` and the
+  12-byte position stay untyped). Named by polish20: GetPortDockedNavyCharacter `0x00A84990` (77), UnlinkHandle
+  `0x008B02E0` (89), RestorePortSlotHolderToRegionOwner `0x00A8D830` (73), ExpelFactionForcesFromRegion `0x008D9DC0`
+  (64, effective 83: plate, locals and inline comments; the force vfuncs +0x54 / +0x90 not traced; EndProtectorateTie
+  `0x00B64B10` 77, effective 87), ConstructCampaignRegionFromEsf `0x00A45950` (6, prototype and plate only); struct
+  EsfRecordReader grown to 0x48 (+0x44 an owned child: `0x00DE8BD0` returns it, `0x00DE8C60` frees it, size 0x48); struct SlotPortObject
+  (0x78 bytes, `BuildingSlot.pPortObject` +0x1E4), the BuildingSlot sub-object vtable fields (+0x0C, +0x24, +0xE0,
+  +0xEC, +0xF0 vbtable, +0x154, list vtables +0x160 / +0x178 / +0x190 / +0x1A8) and `UnitRecord.pLandUnitRecord` +0x9C.
+  polish21 (2026-10-15): 0x009DB7C0's third argument is the campaign model (its +0xF64 free-spot finder 0x00B38F10,
+  its +0x8E8 placed-unit listener), not an unused value, so `NavalBattleResult` shrinks to the 0x14 bytes it reads
+  (+0 side count, +0xC entry count, +0x10 entries); 0x00A51E30 is `SaveRegionRecord` (V5: write order in its plate);
+  `this` typed `DealPaymentItem` on 0x00C4AB20 / 0x00C4AD60, locals named in 0x00C12EE0 (the deal and context
+  arguments stay untyped: their classes are not traced). Fix round: struct `CampaignModel` (0xF68: +0x5E8 / +0x8E8
+  embedded listeners, +0xF64 free-spot finder) types 0x009DB7C0's model argument (whether it is the object
+  `CampaignWorld` describes is not traced); `DealValue` {gain, cost, given} types 0x00C12EE0's out value, whose last
+  argument is the proposing side (an offer resolves its payer from it at 0x00C12FE8), not unused; `g_flPointEight`
+  0x0131A7B4; `EsfWriter` (0x10: stream, name, flags +0xC block open / +0xD skip errors / +0xE writable) and
+  `EsfOutputStream` (+0x54 error reported, +0x56 block refused) type `SaveRegionRecord`, whose fort array holds handles
+  (two loads before the vfunc call at 0x00A527AE). Completeness: 0x00C4AB20 80, 0x00C4AD60 74, 0x00C12EE0 73,
+  0x009DB7C0 67, 0x00A51E30 78; the rest of each is register-only variables and untraced struct pointers.
 
 ## Bankruptcy (0x00BBC7D0 / 0x00BABE30 / 0x00BA2030 / 0x008AE710, CONFIRMED; code `economy::settle_round`)
 - Flag when `treasury + income < expenses` (computed in the round-end pre-pass). A bankrupt faction's treasury is set to
@@ -1604,7 +1967,9 @@ Side A = the first alliance (the attacker, INFERRED). The resolver reads the `au
   - `fB < 0.5 && fB + 0.2 < fA` → `fA − fB`;
   - else 0.
 - **Pair query** (0x0078F460 → 0x0071A1F0):
-  - level = range class A − B (`+0x9C`; artillery 2, others 1, INFERRED). Then −1 if adv ≥ 0.5, +1 if adv ≤ −0.5, and
+  - level = range class A − B (resolver unit `+0x9C`, not the `UnitRecord` +0x9C land stats row: table `0x0070D370` by
+    category code copied in `0x007CA330` via `0x0070D4E0` / `0x0070D580` → `0x0070D740`; artillery 2, line of battle 3,
+    frigate and galley 2, others 1; CONFIRMED polish21, `unit_kind::Category::range_class`). Then −1 if adv ≥ 0.5, +1 if adv ≤ −0.5, and
     −1 if B is infantry with `+0xE4` set (UNKNOWN flag, taken as clear).
   - men = card men × (1 − mean of the unit's previous casualty means). This is 0 at the start, so men = card men.
   - kill rates 0x0078D200 with r = adv and r2. adv is 0 at query time, because setup runs before the advantage is
@@ -1864,8 +2229,8 @@ CONFIRMED from the exe (the calls of each function in order; event posters found
   `0x008ABF50`.
 
 The model now follows (a)–(r) for what it models: characters (`CharacterTurnStart`, action points) → regions (slots,
-construction, land queue, `RegionTurnStart`) → research availability → `FactionTurnStart`; and at the end
-`CharacterTurnEnd` → `RegionTurnEnd` (+ offset) → `UnitTurnEnd` → `FactionTurnEnd`. Before, `FactionTurnStart` came
+land queue, `RegionTurnStart`) → research availability → `FactionTurnStart`; and at the end
+`CharacterTurnEnd` → `RegionTurnEnd` (+ offset) → `UnitTurnEnd` → `FactionTurnEnd`; construction runs in the round-end economy, before diplomacy and research, as the exe's. Before, `FactionTurnStart` came
 first and `RegionTurnEnd` closed each region update. Not modelled: (a)–(d), (g), (i)–(q) and `0x00A249A0`.
 
 ## Diplomacy rules (round 9 item 3; code `ntw_sim::campaign::treaties`)
@@ -1896,15 +2261,16 @@ halves; the upper two minus 1): total ≤ −65 hostile (0), ≤ −22 (1), ≤ 
 | Break alliance `0x00B13840` | `alliance` set from `break_alliance` (0, −2, 0), stance neutral, #6 = 0, access from #17 restored | `alliance` reset to 0, `alliance_broken` set (−40, +2, 0), stance neutral, protectorate lines cleared | while #6 runs: same subculture as either, `cultural_alliance_broken` value −#6 − 5k, limit −5k (k = alliances broken, manager +0x14) |
 | Trade `0x00B55090` | `trade` set, #2 true | the same | — |
 | Break trade `0x00B29BB0` | `trade_broken` set from `break_trade` (no effect), `trade` cleared, #2 false | `trade` cleared, `trade_broken` set (−20, +2, 0), #2 false | — |
-| Embargo `0x00B28DB0` | trade broken first; #27 = 10 | `trade_embargoed` set | — |
+| Embargo `0x00B28DB0` (A embargoes X at B's request) | A–X trade broken first; A→X #27 = 10 | X→B (the requester, not A) `trade_embargoed` set | — |
 | Military access `0x00B44550` | #3 = −1 or += turns, #24 = #3, #15 = 10, #25 = 0 | — | — |
 | Cancel access `0x00B67BD0` | #26 += 50 − 10e / 60 − 6e / 70 − 7e/2 / 90 − 5e/2 (granted 5 / 10 / 20 / other, e = #25), #3 = 0; manager +0x20 += a third (`0x00B67B20`) | — | — |
 | State gift `0x00B44590` | giver charged, no credit to the receiver (`0x00C4B440`, §Treasury changes) | `state_gift` += trunc((100 − current) × x × 0.01), x = min(100, `state_gift_multiplier_linear` × m + `…_quadratic` × m² / √(GDP sum)) | — |
-| Protectorate `0x00B105C0` | stance 4, alliance factor; the protectorate's other ties broken | stance 3; the patron's income line = tribute (`0x00BBCD00` = a faction value / 5, not read) | — |
+| Protectorate `0x00B105C0` | its old ties settled first (`0x00B104E0`: a patron's tie ended, `0x00B64B10`; a protectorate passed on); stance 4, alliance factor; then its alliances broken (`0x00B13840`) | stance 3; the patron's income line = tribute (`0x00BBCD00` = a faction value / 5, not read) | — |
 
 **Per-turn update** `0x00B29100` → `0x00B29170`, called from the faction's round-end economy `0x008BC650` after its
-regions (CONFIRMED place). Skipped when the owner or the target is out of the game (+0x824; INFERRED: no regions
-and no forces). Order: factors drift; #6 −1; access: timed −1 with #25 and #19 +1, indefinite #19 +1, none #19 = 0;
+regions (CONFIRMED place). Skipped when the owner or the target is out of the game (+0x824, CONFIRMED;
+ours `CampaignModel::in_the_game` reads the flag, and only an own save from before the flag falls back to "holds a
+region or a force"). Order: factors drift; #6 −1; access: timed −1 with #25 and #19 +1, indefinite #19 +1, none #19 = 0;
 #17 items of dead factions dropped, their turns −1; #15 −1, then 10 while allied or given access; at war #10 / #11
 (armies in the other's regions, GDP and army balance: `CampaignModel::war_balances`, army value PROVISIONAL) and
 #12 / #13 +1; #7 toward 0 (−2 / +1); protectorate tribute and patron income lines; payments: turns −1, finished
@@ -2368,8 +2734,12 @@ systems the model lacks stay PROVISIONAL.
   vt+0x98, the `IsUnderSiege` slot of `0x008A1FF0` / `0x00C5C040`; never true in ours until sieges
   exist, BACKLOG "Sieges on the campaign map"); the owner is neither major nor human (`0x00BB51B0`);
   no human mobile in the area (`0x00C42DC0`/`0x00C42DD0`, the area's mobiles +0x18C as the loader
-  `0x00BECCE0` reads them); for each link (`0x00C43560`/`0x00C43570`, other side `0x00C1BCE0`) the
-  far area is not a human's and holds no human mobile; and no human sees the settlement or its other
+  `0x00BECCE0` reads them: the mobiles situated in the area, i.e. whose `CAI_SITUATED` #2 names it,
+  `cai_audit mirror_loc`; in the original's save every mobile's #2 is the `regions.esf` region
+  under its position, sea included, test `mobiles_are_situated_in_the_region_under_them`, so a sea
+  area holds the fleets at sea in it; ours finds them on the path grid, whose sea cells carry their
+  sea region, director2 2026-10-15); for each link (`0x00C43560`/`0x00C43570`, other side
+  `0x00C1BCE0`) the far area is not a human's and holds no human mobile; and no human sees the settlement or its other
   slots (`0x00BB55A0`: per human with a shroud, `0x00BB5640` / `0x00C3C920` positions, our
   `sees_fully`, exe `0x00B7A1D0`).
 - **Apply** (`0x00BA90E0` → `0x00BCA430` → `0x00B58A30`): each entry for the starting faction leaves
@@ -2384,16 +2754,121 @@ systems the model lacks stay PROVISIONAL.
   count in the denominator only); `m` 1 for a major power else `MINOR_FACTION_WEIGHT`. 0 for the
   rebels, the listed no-rival keys (`pirates`, `0x00C3FD50`, set by the importer
   `ntw_campaign::rules_from_db`), humans and factions out of the game.
-- **The relation is a stored copy** (`0x00A74A20`, entry +8 of the faction's +0x100 list found by
-  `0x00A89E00`), refreshed by `0x00ABAFB0` only when read while dirty (`0x00CCCF70`). The CAI update
-  (`0x00A761F0`, each frame from `0x008F4120`) marks the ended turn's faction core dirty when the
-  active faction changes (`0x00CF7F60` → `0x00CF0AB0`), which reaches every relation belief
-  (`0x00A96CB0`). The pool runs in the handover, before that frame, so it reads the copy last made
-  at the human's turn start or at a later read: computing it fresh matches unless something read it
-  mid-turn. PROVISIONAL: the AI's evaluation of a human's deal proposal reads it
-  (`0x00CCB810` / `0x00CCB210` → `0x00A74A20`), so a war declared after a proposal in the same turn
-  is unseen until the next turn change; not modelled (no proposal step, no stored copy), and the
-  +0x6DC re-mark flag's setter is not found. BACKLOG §0 "Stored CAI relation belief".
+- **The relation is a stored copy** (worker cai-belief 2026-10-13/14, CONFIRMED by decompile and
+  disassembly unless tagged): `0x00A74A20` (entry +8 of the faction's +0x100 list found by
+  `0x00A89E00`) refreshes it by `0x00ABAFB0` only when read while dirty (`0x00CF1170`, then
+  `0x00CCCF70`). Ours keeps the copy too: `DirectorState::beliefs` (director.rs) holds each clean
+  belief (relation per faction and the enemy list, saved and hashed); a faction not listed is
+  dirty, and a read uses the stored value or what a rebuild would give (`relation_belief_value`,
+  `believes_at_war`). The AI's evaluation of a proposed deal (`CampaignCommand::ProposeDeal`,
+  `0x00933690` → `0x00C49BE0`; the read `0x00CCB810` / `0x00CCB210` → `0x00A74A20` is the
+  recipient's, below) stores the recipient's belief (`refresh_relation_belief`).
+  PROVISIONAL: the exe's other 184 readers of `0x00A74A20` are not modelled, so a belief one of
+  them would have stored during a human's turn is rebuilt later in ours.
+  - **Dirty on every diplomacy change.** The model's diplomacy-changed event (model +0x3A8; an event
+    object whose vt+8 Broadcast `0x008DBAC0` calls each listener's vt+4) is fired by war
+    (`0x00B26700`), the treaty, gift and payment changes and each in-game faction's round-end drift
+    (`0x00948CF0` → per faction `0x008BC650` → `0x00B29100`). The CAI interface registers ~50
+    model listeners (`0x00A6FE40`, called from the ctors `0x00A3CE70` / `0x00AAE5C0`; iface +0x61C is
+    the campaign model, faction → model is `[faction+0xA8]+8`); its +0x3A8 listener (iface +0x24C,
+    vtable `0x01377AA8`, slot 4 `0x00A8F320` → `0x00A88CE0`) marks every relation belief of the
+    registry (+0x124/+0x128) dirty. Ours: `CampaignModel::diplomacy_changed` clears every stored
+    belief at each modelled broadcaster: war, joining a war, peace, alliance and its break, trade
+    and its break, access grant and cancel (command and abuse), state gift, regular payment,
+    protectorate, government change, round-end drift, a capture, and an agent's misdeed (detected:
+    `0x00B0D870` / `0x00B67FD0` / `0x00B71CF0`; blamed: `0x00B0D700` / `0x00B67E60`; each skips
+    everything, the broadcast included, only when the victim is the rebels, `0x008CEEF0`; fix round
+    cai-belief-fix2, disassembly). Not broadcasters: an embargo without a trade agreement (below),
+    the one-off payment, the round start's computed factors, a deal's region handover (test
+    `which_changes_mark_the_relation_beliefs_dirty`). The exe's broadcast sites (`ADD ECX,0x3A8`
+    then `CALL [EAX+8]`, script over the whole listing, 2026-10-14): 23 functions; the 20 above are
+    modelled (count re-checked by cai-broadcasters: the 3 below are the only others). The other three
+    (cai-broadcasters 2026-10-14, CONFIRMED by decompile):
+    - `0x00B1B4E0` (`SetupAllReligionAttitudeFactors`): resets the religion factor (slot 15, +0x260;
+      `0x00B1B540`, ours `setup_relationship_factors`) of every record, then broadcasts. Its only caller
+      `0x00B45EA0` builds the diplomacy records from the start position (`0x00B0A3A0` per startpos item),
+      ← `0x008CB820` ← `0x0090C4A0` ← `0x008742C0`: campaign setup, before any belief is read. Nothing
+      to clear in ours.
+    - `0x00B64B10` (`EndProtectorateTie`, flag 0 from both callers): stance neutral both ways (`0x00B64C10`
+      on the protectorate→patron record clears the tribute +0x7AC; `0x00B54530` on patron→protectorate
+      clears the income +0x7BC), the patron's characters moved out of every one of the protectorate's
+      regions (`0x008D9DC0` per region, patron in ECX; not modelled yet, BACKLOG), both factions' region
+      and visibility lists refreshed, then the broadcast. No attitude factor. Callers: the alliance break's patron side `0x00B0CA20` (stance 4 inside
+      `0x00B13840`; ours `break_alliance` gives the same end state and broadcasts) and `0x00B104E0`
+      (`SettleProtectorateTiesAndJoinPatron`, inside make protectorate `0x00B105C0`): for each of the new
+      protectorate O's records, stance 4 (O is X's protectorate) → `0x00B64B10`; stance 3 (O is X's
+      patron) → X becomes the new patron P's protectorate (`0x00B105C0` recursively, deal flag 0); then
+      O→P `0x00B29DA0` unless allied, stance 4, tribute line `0x00BBCD00`. `0x00B105C0` then breaks every
+      other alliance of O (stance 2, target ≠ P, `0x00B13840`) and broadcasts. Ours ran a full alliance
+      break (alliance / alliance_broken / cultural factors) on O's old ties and documented the patron's
+      alliances as breaking; now `end_protectorate_tie`, the recursion, and O's alliances break (tests
+      `a_new_protectorate_settles_its_old_ties`, `which_changes_mark_the_relation_beliefs_dirty`). Not
+      modelled: `0x00B105C0`'s deal flag (param_3, deal record +0x16): an AI X (+0x6E0 clear) at war
+      with O whose `0x00B0CDF0` towards P holds makes peace with O (`0x00B262C0`) (BACKLOG).
+    - `0x00B73430` (`BreakTradeBothWays`): trade broken on both records, then the broadcast. Callers:
+      faction destruction `0x008AB6C0` → `0x00B2B8B0` → `0x00B2B920`, only on the dead faction's record
+      towards its killer (§Destruction and re-emergence: the model's destruction has no killer, so it
+      breaks no trade this way), and a lost trade route: `0x00BB9410` / `0x00BB9B90` / `0x00BBE1A0` when
+      the route check `0x00BA42E0` fails (← `0x00A64AC0`, the owner change). The route loss is not in the
+      model (BACKLOG).
+  - **Capture.** Every capture variant sets the owner change's capture flag (`0x00B58560`,
+    `0x00B58890`, `0x00B58C00`, `0x00B58A30`); `0x00A64AC0` with it set, neither side the rebels
+    (`0x00C3FE80`) and the owner a different faction, fires the event through `0x00B62120`. A deal's
+    or a liberation's handover `0x00B58A10` leaves the flag clear (battles.rs `take_settlement`).
+  - **+0x6DC re-mark flag.** Not only file-loaded: the CAI round-end listener (iface +0xA8, vtable
+    `0x013779F4`, slot 1 `0x00A8F830`; on model +0xA8, fired at `0x008A9A25` in `0x008A9920`) sets
+    it to 1, also propagates the CAI world +0x1EC object's dirty state (vt+0x30 `0x00BCED30` →
+    `0x00CF0B10`; object ctor `0x00BEEEC0`, vtable `0x01382DBC`, stored by the world loader
+    `0x00BF0130` at `0x00BF16BA`) and calls `0x00A41890` / `0x00A77CC0` (+0x73C) / `0x00A502E0`. The
+    CAI frame update `0x00A761F0` clears it and calls `0x00CF7F60` on the current core (BDI
+    processing `0x00CCCE90` only for an AI faction; the human's per-frame path is `0x00A658C0`).
+  - **Turn change (INFERRED).** `0x00CF7F60` marks [W+0xF0] (W = core vt+0x14 `0x006E9F70`,
+    [core+0x84]) with a NULL source. The refresh `0x00CCCF70` clears the dirty flag and the source
+    list; a NULL source (the registry sweep `0x00A88CE0`, this mark) always rebuilds through vt+0x24
+    (= `0x00ABAFB0`, vtable `0x01378434`+0x24), a non-NULL source (propagated from a dependency,
+    `0x00CF0B10`) only when that source's own refresh returns 1. Relation beliefs get the turn
+    change's mark only by propagation, so whether they rebuild needs the debugger; ours marks every
+    belief dirty at the handover (`director_handover`). It matters only with two humans or a read
+    after the pool.
+  - **The one change without a broadcast before the pool.** Round start (`0x0096C050` at
+    `0x008A9AFE`) resets the computed factors per faction (`0x008BAF30` → `0x00B71E90` →
+    `0x00B71EC0`: faction_leader slot 21, enlightenment slot 22) without a broadcast, in the same
+    `0x008A9920` call after the round-end broadcasts; no function between them reaches a belief read
+    (`0x00A74A20` / `0x00CCCF70` / `0x00ABAFB0`, direct-call search to depth 7-8 from every step and
+    from `0x00A8F830`), so the beliefs are still dirty and the pool's read (`0x00BD21B0`) refreshes.
+  - **The embargo.** `0x00B28DB0` (`EmbargoFactionTradeForRequester`) broadcasts only through `0x00B29BB0` (break trade, which ends with
+    the broadcast) when +0x788 is set; otherwise it only writes +0x840 = 10 (`0x00B28E00`) and the
+    attitude (`0x00B734E0` → `0x00B69640`, a plain store). So a proposal to Z followed by an embargo
+    of Z with no trade agreement leaves Z's belief stale, in the exe and in ours (`CampaignModel::embargo`;
+    test `an_embargo_after_a_proposal_is_not_seen_by_the_rival_score`). In a deal (loop `0x00C18800`,
+    lists +0x2C/+0x30 and +0x1C/+0x20) it runs with this = side A's diplomacy (+0x528), X from the
+    list and the deal's other side B, so X's record towards B gets `trade_embargoed` (CONFIRMED, deals-fix 2026-10-14: the list loop
+    passes the deal's other side as the third argument); ours matches (`CampaignModel::embargo(a, x, requester)`,
+    `DiplomaticAction::Embargo(x)`; test `a_deal_embargo_makes_the_embargoed_faction_resent_the_requester`).
+  - **Attitude writes without a broadcast** (callers of the setters `0x00B69640` / `0x00B69620` /
+    `0x00B02CB0` / `0x00B69B90`; cai-broadcasters 2026-10-14, CONFIRMED by decompile):
+    - `0x00B544F0` (`AddAbandonedAllyFactorUnlessAtWar`): on a record whose stance is not war, `0x00B02CB0` adds
+      the value to `abandoned_ally_in_war` (slot 11, +0x1C0) with event 0's drift 2 and limit 0
+      (`0x00B27FF0`). Callers, both `spa_napoleon` only: the loot option `0x00B541E0` (loot = choice 0 of
+      `0x008C0310`, or 2 with no liberation target): the region's rebel key (+0x10C) `spa_portugal` /
+      `portugese_rebels` → `spa_portugal`, `spa_spain` → `spa_spain`; that faction (by key, `0x00955B70`),
+      when it is not the looter (`0x00898B80`) and the looter is not `spa_france`, gets −50 towards the
+      looter, no broadcast. Ours: `CampaignFeatures::loot_resentment` (the importer fills it for
+      `spa_napoleon`), applied in `resolve_capture`; tests `looting_a_homeland_region_angers_its_faction`
+      and `which_changes_mark_the_relation_beliefs_dirty`. The other caller `0x00AAB440` (−20, a region
+      revolt or handover in `spa_napoleon`; meaning INFERRED) belongs to region revolts, not in the model
+      (BACKLOG).
+    - `threatened` (slot 20, +0x328, event 22: 0, 3, −30): `0x00B72F00` adds it to the recipient's record
+      towards the proposer when the deal's threat flag (+0x2B8) is set, on accept `0x00C114B0` and decline
+      `0x00C1F210`; no broadcast. Ours has no threat flag and no decline step (BACKLOG).
+    - Re-emergence: `0x00A64AC0` → `0x008AE6E0` → `0x00B2BB00` (a faction coming back into the game) resets
+      its records both ways (`0x00B2BC10` / `0x00B72AC0`, which reset the religion factor through `0x00B1B540`), no
+      broadcast of its own; in `spa_napoleon` a re-emerging `spa_spain` or `spa_portugal` (the liberation flag clear) then
+      grants `spa_britain` military access with no end (`0x00B444B0`, -1 turns; the grant broadcasts). It
+      does not when the region's previous owner (the second argument, region +0xF4, read by `TransferRegionToFaction`
+      `0x00A64AC0` through `0x006649C0` before `AddRegionToFaction`) is `spa_britain`. The liberation path is
+      modelled (§Destruction and re-emergence); this revolt-path step is not (BACKLOG).
+    - The loaders `0x00B0A3A0` / `0x00B30A20`.
 - **Victory options:** `victory::fill` gives every faction with options option 0 in a start position
   (the human is not known yet); `LoadedCampaign::set_human` keeps only the human's, as the other
   factions keep the empty default (the Coalition saves).
@@ -2433,9 +2908,9 @@ systems the model lacks stay PROVISIONAL.
   `+0x54`, `+0x788` → `+0x68`, `0x00B16570` → `+0x7C`, `0x00B5DCC0` → `+0x94`, `0x00B5DCB0` → `+0x90`.
   So the list is `at_war(f, g)` in `ai_factions` order, ours (test
   `the_at_war_desire_walks_a_factions_enemies_in_the_cai_order`). The save loader `0x00A39F90`
-  reads the same list in file order. PROVISIONAL: the belief is a stored copy refreshed only when
-  read while dirty; ours reads the current stances (same caveat as the rival score's relation,
-  BACKLOG §0 "Stored CAI relation belief").
+  reads the same list in file order. The belief is a stored copy refreshed only when read while
+  dirty; ours keeps it too (`DirectorState::beliefs`, `believes_at_war`: the stored list while
+  clean, else the current stances; "The relation is a stored copy" above).
 - **Boost** (`0x00BAC310`): the served factions sorted by rival score, highest first (MSVC
   `std::sort`); the first `min(max(floor(n × PERCENTAGE), MIN), MAX)` get their `AMOUNT` (faction
   int) credited to the treasury. No draw.
@@ -2459,10 +2934,61 @@ systems the model lacks stay PROVISIONAL.
   fraction in [MIN_PCT, MAX_PCT] and gets `floor(max × fraction)` men. PROVISIONAL: the allowances'
   carry-over and save, MAX below MIN (setter `0x008AABB0`), the navy half.
 - **Transfer garrison** (`0x00BA8400`): after a director transfer the receiver's new garrison size
-  is `int_range(a + 3, 4a + 6)`, `a` = 1 for an AI receiver (4 to 10 units). PROVISIONAL: the army is
-  not raised, and the exe skips the draw and spawn when `0x00C3B7A0` (`+0xFC` non-zero, CONFIRMED)
-  holds for the `+0x34` member of the transferred entity's `0x008CF5F0` object (`+0x12C`; what
-  those are is not traced).
+  is `int_range(a + 3, 4a + 6)`, `a` = 1 for an AI receiver (4 to 10 units). It returns at once
+  unless the region's owner is the receiver, and skips the draw and spawn while the region still
+  has a garrison (CONFIRMED, director2 2026-10-15). CAI region `+0x12C` (`0x008CF5F0`) is its
+  settlement object, one of two classes the loader `0x00BF0130` builds (ctors `0x00BF6F00` and
+  `0x00BEDE70`); both build their `+8` part with `0x00BF8140`, which puts the `CAI_GARRISONABLE`
+  (`0x00BF5160`, vtable `0x0138297C`) at `+0x34`. Its `+0xFC` is the garrison army's CAI mobile and
+  `+0x100` a navy garrison (setters `0x00C543C0` / `0x00C54410`; the mobile's back link `+0x134`
+  is set by `0x00C54470`, which with 0 clears the garrisonable's field); `0x00C3B7A0` tests `+0xFC`.
+  The game keeps the CAI links in step through listeners the CAI interface registers on the
+  model's broadcasters (`0x00A6FE40`); a broadcaster's vt+8 is called directly, so each update is
+  synchronous. In `0x00B58A30` the garrison army is deleted, then its commander (`0x00A0C6F0` →
+  vt+4 → `DestroyCampaignCharacter` `0x0099D2D0`), which fires model `+0x948` unconditionally; the
+  CAI interface's `+0x1C` listener (`0x00A8DE80`) removes the CAI mobile (`0x00C4E930` →
+  `0x00C4F6D0`, which first calls `0x00C54470(0)`). So by `0x00BA8400` the old garrison's link is
+  gone and the skip never holds on the director path; ours tests `region.garrison` after the
+  capture. Other listeners: a fort/slot removal (`0x00A8DF40`, fired by the fort destructor
+  `0x00AF71C0` on model `+0x78` unless model flag `+0xFC5`), an army's garrison change
+  (`0x00A8E320` → `0x00A79EA0`). The army it raises (CONFIRMED from the disassembly, director2
+  2026-10-15; PROVISIONAL in ours: not raised): candidates are the 32-byte entries of the region's
+  unit list (`0x00C3C340`, `+0x1B4` entries, `+0x1B0` count) whose record (`+0x18`) has a non-zero
+  unit key (`+0x9C`) and passes `0x00BAF9A0`(receiver, region, record), sorted by `0x00B7F510`;
+  each of the N units is built by `0x0087FEA0`(campaign faction, key, 0, 0, 1) cycling through the
+  sorted candidates; the army is created by `0x008D25F0`(campaign faction, units, settlement
+  position from `0x00C3C920`, 1, 0, 1, 1); its character (army `+0x74` via `0x00898E80`) is put
+  in the settlement through `0x00C1BEF0`(settlement) vt+0x88 (character, 0, 0, 1, 1, 0), then
+  `0x009D3B60`(character, 0, 0), then the `+0x5E8` broadcaster of the object at the director's `+0` is told of the army.
+  `0x00C3C330` is the `CaiFaction` → `CampaignFaction` getter (`+0x168`).
+- **Transfer and the old owner's forces** (director2 2026-10-15, CONFIRMED): the settlement
+  handover `TransferSettlementOwnership` `0x00B449F0` (assault `0x00B58560`, deal and liberation
+  `0x00B58A10`, the director `0x00B58A30`) calls `TransferRegionToFaction` `0x00A64AC0` with its
+  fourth argument 0. With that argument 0, for each faction of the world's list (campaign
+  `+0xF5C`) other than the new owner (`0x00898B80`), with a capital (`+0x72C`) and
+  still in the game (`+0x824`), it calls `ExpelFactionForcesFromRegion` `0x008D9DC0`(faction,
+  region). That moves only the faction's land armies standing in the region (`0x009D3A40`, the character's `+0x2A8` holder vt+0x3C; position
+  `0x00A06D80` → `0x00A17D60`, region test `0x00A075B0` → `0x00B4D7B0`) and its navies docked in
+  the region's port when not at war with the new owner (`0x009D3A80` vt+0x44, undocked by
+  `UndockCharacterFromPort` `0x00A8C0B0`, `0x00B377E0`); access (`0x00B16570`: military access,
+  a protectorate tie or a neutral stance) only silences the move notice. **Agents are not ejected**:
+  a character without an army or navy stays where it is (ours: test
+  `a_transfer_leaves_the_old_owners_agents_in_place`; our agents never stand in a settlement).
+  Not modelled: the expulsion itself; where the armies go is not traced (candidates `0x008DCB30`,
+  then `0x00B35570` / `0x00B37670` → `0x00B35640` with a 100.0 radius). Other callers of
+  `0x008D9DC0`: deals `0x00C114B0` (4 sites), `EndProtectorateTie` `0x00B64B10`, `0x00B0CA20`,
+  `0x00B13A30`, `0x00B0D0C0`, `0x00B67BD0`, `0x00B29170`, `0x00B4F090` (2), `0x00936B37` /
+  `0x00936B76`. So the "moves no army" claims of `battles.rs` (`change_region_owner`), `capture.rs`
+  (liberation), `commands.rs` (entering a foreign garrison) and the tests pinning them do not hold:
+  all are now PROVISIONAL, pointing at `0x008D9DC0` (director2 fix round), as is `director_transfer`.
+- **CAI save writer and sea regions** (director2 2026-10-15): with the path grid's sea cells now
+  carrying their sea region, the CAI writer (`crates/ntw_campaign/src/cai_world.rs`, the mobiles'
+  `CAI_SITUATED`) writes a moved fleet's sea region into `CAI_SITUATED` #2 (and its theatres into
+  #3), as the original's saves do (test `mobiles_are_situated_in_the_region_under_them`); before,
+  a fleet at sea got no region there. Edge: the sea fill (`grid_from_pathfinding`) gives a region
+  only to Water cells whose centre lies in a sea region's `regions.esf` triangles; a Water cell
+  that `regions.esf` puts in a land region keeps no region, where the original would situate a
+  fleet there in that land region.
 - **Config parsers** (`cdir_configs` text values): float `0x004F38A0` (a `.` is required: `"10"`
   fails and reads as 0; `e`/`E` exponent with optional `-`, no `+`, no spaces), uint `0x004F37B0`
   (digits only, wrapping; `all` int lookup `0x00BD2920`), int `0x004F3720` (optional `-`; faction int
@@ -2485,9 +3011,9 @@ ORIGINAL BUGs (fixed in ours, no toggle):
    gives each army its own weight.
 
 Open (PROVISIONAL in code): the siege test is never true (no sieges in the model; BACKLOG "Sieges on
-the campaign map"); the stored relation copy above (`0x00A89E00` / `0x00ABAFB0`, not modelled); a
-human's fleets at sea are not found in a sea area (the path grid gives sea cells no region), so a sea
-link never blocks; the desires' unmodelled effects above (autoresolver pairs, XP steps, replenish
+the campaign map"); the transfer does not expel the other factions' armies and docked navies
+(`0x00A64AC0` → `0x008D9DC0`, placement `0x008DCB30` untraced; the same for deals and liberation);
+the desires' unmodelled effects above (autoresolver pairs, XP steps, replenish
 allowances and navy half, the transfer's garrison); the teleport desire's effect
 (`CDIR_CVN_TELEPORT_GENERALS_TO_FRONT`) and the force-minimum, balancer and upgrader gathers are not
 traced, so they draw nothing in ours (the RNG caller `0x00BAC9C0` is not traced either), and the
@@ -2507,6 +3033,32 @@ void * parameters, x87 float locals and register locals whose committed type re-
 Plates only (not renamed): `0x00B94170` / `0x00B9D6E0` (CDIR_INTERFACE load / save), `0x00B90210` /
 `0x00B9B6C0` (transfer desire load / save), `0x00FCD150` / `0x00FCBD50` (cdir_configs row reader /
 loader); `0x00B58A30`'s plate now names the handover queue applier.
+Stored relation belief (worker cai-belief, V5 write-ups; completeness 78 to 80, the rest is void *
+`this` with no struct): `OnCaiDiplomacyChangedMarkRelationsDirty` `0x00A8F320`, `MarkAllCaiRelationBeliefsDirty`
+`0x00A88CE0`, `OnCaiRoundEndSetRemarkFlag` `0x00A8F830`, `BroadcastModelEventToListeners` `0x008DBAC0`,
+`PropagateCaiWorldBeliefDirty` `0x00BCED30`, `MarkBeliefDirty` `0x00CF0AB0`,
+`PropagateBeliefDirtyToDependents` `0x00CF0B10`, `IsBeliefDirty` `0x00CF1170`, `SetBeliefDirtyFlag`
+`0x00D09730`, `FindCaiRelationEntryForFaction` `0x00A89E00`, `GetCaiRelationBelief` `0x00A74A20`,
+`FindCaiRelationBeliefInRegistry` `0x00A87130`, `ApplyThreatenedAttitudeFactor` `0x00B72EC0`,
+`ApplyThreatenedFactorTowardsFaction` `0x00B72F00`, `RefreshRoundStartRelationFactors` `0x00B71EC0`,
+`UpdateComputedFactorsForAllRelations` `0x00B71E90`, `UpdateFactionComputedRelationFactors` `0x008BAF30`,
+`ApplyRoundEndDriftAndBroadcastDiplomacy` `0x00B29100`; globals `g_bCaiWriteHistoryHtmlLog` /
+`g_bCaiWriteHistoryXmlLog` `0x015C5748` / `0x015C5749`, the shared node pool `g_pSharedNodePoolFreeHead` /
+`g_pSharedNodePoolBlocks` / `g_dwSharedNodePoolBlockSize` `0x0145925C` / `0x01459260` / `0x01459264` (10000).
+Broadcasting diplomacy writes (worker cai-broadcasters, V5 write-ups, 2026-10-14; completeness per
+function, the rest of each score is `void *` `this` / relation records with no struct and register
+locals that re-split on retype): `BreakTradeBothWays` `0x00B73430` 95, `IsStanceProtectorate`
+`0x00B5DCC0` 91, `IsStancePatron` `0x00B5DCB0` 91, `SettleProtectorateTiesAndJoinPatron` `0x00B104E0`
+86, `SetupAllReligionAttitudeFactors` `0x00B1B4E0` 86, `MakeProtectorateOfPatron` `0x00B105C0` 84,
+`ResetRelationsOnFactionReemergence` `0x00B2BB00` 84, `SetPatronStanceAndIncome` `0x00B10480` 84,
+`ClearProtectorateStanceAndTribute` `0x00B64C10` 83, `ClearPatronStanceAndIncome` `0x00B54530` 83,
+`EndProtectorateTie` `0x00B64B10` 87 (polish19: `CampaignFaction` grown to its allocation size 0xA24,
+`push 0xA24` at `0x0090C0A4` before the faction loader `0x0087A190`; fields +0x764 / +0x768 force-handle list
+(count / data, as `0x008B4330` reads them), +0x778 / +0x77C region list, +0x820 prestige, +0x824 out-of-game
+byte (read by `0x008D9DC0`, not by `0x00B64B10` itself); the patron is now typed `CampaignFaction *`),
+`AddAbandonedAllyFactorUnlessAtWar`
+`0x00B544F0` 82; strings `szGame_FactionSpaSpain` / `szGame_FactionSpaPortugal` beside the existing
+`szGame_FactionSpaBritain`.
 Desires: Ghidra not yet updated (names and plates for the next writer-lock batch, V5 with them):
 `StepAtWarDesire` `0x00BAC560`, `StepBoostPlayerRivalsDesire` `0x00BAC310`, `SetAutoresolverModifierPair`
 `0x00BC5240`, `StepReplenishUnitsDesire` `0x00BADA40`, `StepUnitXpUpgradeDesire` `0x00BAE910` (needs
@@ -2516,9 +3068,89 @@ create_function), `IsDirectorServedFaction` `0x00BB5160`, `CollectXpUpgradeArmie
 `0x00BA8400`, `DrawDirectorRandomInt` `0x00BBD6A0`, `GetCdirConfigFactionFloat` / `Uint` / `FactionInt`
 `0x00BD2960` / `0x00BD2920` / `0x00BD29F0`, `ParseFloatStrict` / `ParseUint` / `ParseInt`
 `0x004F38A0` / `0x004F37B0` / `0x004F3720`; also `0x00BB50D0`, `0x00BB51E0`, `0x00BB5530`, `0x00BB5270`.
-Fix round: `BuildCaiRelationBelief` `0x00ABAFB0`, `GetCaiRelationBelief` `0x00A74A20`,
-`CaiRelationBeliefInfo_ctor` `0x00A44C50`, `GetCaiWorld` `0x00B2B7B0`, `GetCaiWorldFactionList` `0x0047B520`,
-`PtrVectorPushBack` `0x00483D40`.
+Fix round (V5 write-ups, completeness re-scored 2026-10-14): `BuildCaiRelationBelief` `0x00ABAFB0`
+(60.2; labels `push_to_stance_list` `0x00ABB0EE`, `append_entry_without_attitude` `0x00ABB212`),
+`CaiRelationBeliefInfo::InitializeCaiRelationBeliefInfo` `0x00A44C50` (80.9),
+`GetCaiWorldFromInterface` `0x00B2B7B0` (89.4), `GetCaiWorldFactionList` `0x0047B520` (89.4),
+`PtrVector::PushBackPointerVector` `0x00483D40` (77.7), `ModelEventBroadcaster::BroadcastModelEventToListeners`
+`0x008DBAC0` (83.3, was 66.7). Structs: `PtrVector` (0x14: vtable, +4, capacity +8, count +C, data
++10), `CaiRelationBeliefInfo` (0xAC: entries +8..+10, allies +2C, enemies +40, access +54, trade +68,
++7C, +90, +94, enemy-majority flag +A8), `ModelListenerNode` (0xC: prev, next, listener),
+`ModelEventBroadcaster` (0x10: vtable, +4, first node +8, end node +C). The rest of the deductions
+are x87 / register locals whose committed type re-splits on every retype and `void *` parameters.
+
+## Destruction and re-emergence (broadcasters2, 2026-10-15)
+
+Ours: `ntw_sim::campaign::destruction` (`capital_after_owner_change`, `end_if_capital_lost`,
+`destroy_faction`, `liberate_region`, `reemerge_faction`), the flag `FactionDetails::out_of_game`
+(faction +0x824, read from the start position and the save by the importer; `in_the_game` reads it).
+
+- **Owner change** `TransferRegionToFaction` `0x00A64AC0` (CONFIRMED): with its second (liberation)
+  flag and the gainer out of the game, the gainer comes back first (`0x00A64C98`..`0x00A64CB9`,
+  below). The loser's side is `0x008BA580`: its capital (+0x72C) cleared when it is the region, the
+  region removed, then `0x008DABC0` picks a new capital: over the loser's regions in its home theatre
+  (+0x734), the squared single-precision distance from the lost capital's settlement; the nearest
+  region whose settlement has at least 4 building slots (settlement +0x1A8), else the nearest other,
+  else none; strict `<`, first wins a tie. Neither step runs for the rebels. The gainer's side
+  (`0x008AE270`) makes the region its capital when it has none or it is its home region.
+- **End of a faction** (`0x00A651D5`..`0x00A65208`, CONFIRMED): when the first flag is set (a capture,
+  the director's transfer, a deal `0x00C18BF0` → `0x00B58A10(faction, 1, 0)`), the loser is not the
+  rebels, has no capital left and is in the game, `0x008AB6C0` ends it: +0x824 set,
+  `0x00B2B8B0` resets each record both ways (`0x00B2B920` on its own, which first breaks trade both ways
+  `0x00B73430` only towards its killer; `0x00B72900` on the other's: trade, access, payments, income,
+  counters cleared, stance neutral; attitudes, options and the start attitude kept). An AI faction loses
+  its forces and characters; a human one keeps them. Event `FactionDestroyed` (exe event +0x108).
+  Tests `capturing_the_last_region_ends_an_ai_faction`, `a_human_faction_out_of_the_game_keeps_its_forces`,
+  `a_deal_giving_away_the_last_region_ends_the_giver`, `a_lost_capital_moves_to_the_nearest_town_and_back_home`.
+- **Re-emergence** `0x008AE6E0` (CONFIRMED): `0x00B2BB00` on its diplomacy manager, then +0x824
+  cleared, then `RebuildFactionEffectSum` (ours derives effects when read). For each of its records,
+  `0x00B2BC10` resets its own record and `0x00B72AC0` the other faction's record towards it:
+  attitude = the record's start attitude (+0x830), stance neutral; the pirates on either side: war,
+  attitude + the `war` event (−140); else when the pair's other faction is the previous owner (the
+  record's target on the own side, its owner on the other side): with the liberation flag protectorate
+  (own) / patron (other); without it, an AI previous owner costs 50 (own) / 25 (other) attitude, a
+  human one means war + the `war` value. Then `0x00B45A40`: `initial_modifier` = the attitude, the caps
+  of the two `declared_war_against_*` factors from the `war_against_*` events, the twin links of the
+  two factor arrays, the `war` factor for a war, the `alliance` factor for an alliance or a
+  protectorate, the government factor; `0x00B1B540` the religion factor; `0x00B45C20`: a held trade
+  agreement re-checked (`0x00BB33C0`, remade through `0x00B55090` when the route check `0x00BA42E0`
+  passes both ways), a war reset to neutral and declared through `0x00B268B0`, an alliance through
+  `0x00B29C60`, a protectorate through `MakeProtectorateOfPatron` `0x00B105C0` (no peace step). Ours
+  models the liberation path (`liberate_region`, from the capture choice). Tests
+  `a_liberation_brings_the_faction_back_as_the_liberators_protectorate`,
+  `a_returning_faction_is_at_war_with_the_pirates`,
+  `a_return_from_an_ai_owner_costs_attitude_and_from_a_human_means_war`,
+  `in_the_game_follows_the_out_of_game_flag`.
+- **PROVISIONAL** (in `reemergence_record`): the attitude adjustment `0x00B30A50` after the setup (not
+  traced to its field); the record's second factor array (+0x3C8, the model holds one); a war set
+  directly as the stance with its factor instead of the declaration `0x00B268B0` (its declaration step
+  not traced). **INFERRED** (in `destruction.rs`): the settlement's slots read as the slots whose key
+  starts with `settlement:`; the owner of a town slot read through the slot's +0x38 object; the tie
+  order (region ids instead of the gain order).
+- **Not modelled** (BACKLOG): the revolt path (`0x00AAB440`: a re-emergence without the liberation flag,
+  the rebel-record redirect, the `spa_napoleon` access grant `0x00B444B0`, the multiplayer case); the
+  lost-route trade break; the destruction's handing out of regions in other theatres (never reached
+  on a one-theatre map); the human campaign-over flag `0x008C30A0`; in `0x008AB6C0`, the killer path
+  (regions to the killer, killer +0x924, the hand-off `0x00BA80E0`) and the multiplayer report
+  (`0x009C7660`, event +0x120).
+- **Ghidra (V5, TOOL_USAGE guide):** renamed with prototypes and plate comments:
+  `HandleFactionReemergence` `0x008AE6E0` (95.0 effective), `ResetRelationsOnFactionReemergence`
+  `0x00B2BB00` (83.9), `ResetOwnRecordOnReemergence` `0x00B2BC10` (91.6),
+  `ResetOtherRecordOnReemergence` `0x00B72AC0` (91.6), `InitializeRelationshipRecordFactors`
+  `0x00B45A40` (95.0), `ApplyRecordStanceAfterSetup` `0x00B45C20` (81.7),
+  `ResetRelationsOnFactionDestruction` `0x00B2B8B0` (83.8), `ResetOwnRecordOnDestruction` `0x00B2B920`
+  (93.1), `ResetOtherRecordOnDestruction` `0x00B72900` (93.1), `RemoveRegionFromFactionAndMoveCapital`
+  `0x008BA580` (80.9), `FindNearestCapitalRegion` `0x008DABC0` (79.0) and, in the fix round,
+  `CampaignFaction::DestroyFactionAndResetRelations` `0x008AB6C0` (90.0): the destruction itself (out
+  of game +0x824, +0x754 cleared, relations reset, characters deleted for an AI faction, regions to the
+  best neighbour or to the killer, town slots returned, FactionDestroyed). New structs:
+  `DiplomacyRelationRecord` (the 0x848-byte relationship record) and `DiplomaticStanceRecord` (20
+  bytes, stance id at +0x10). Globals named: the stance keys (neutral `0x0137D714`, protectorate
+  `0x0136CC60`, patron `0x0137D74C`, war `0x0136D47C`), the two database key error formats
+  (`0x0137E010`, `0x0137E758`) and the key separator `0x013305F8`. The `0x00B2BB00` plate now reads the
+  transfer flag's low byte as the liberation flag (the resets take it as such) and says what ours models.
+  The remaining deductions are register-only locals and the diplomacy manager (faction +0x528), which
+  has no struct yet.
 
 ## Resolved / open
 | question | answer | tag | code |
@@ -2556,8 +3188,8 @@ Round 9 (diplomacy): the model now changes the relationship records (factors #1,
 `access_cancel_marks` +0x20 of `DIPLOMACY_MANAGER`); `save.rs` writes only the stances, so a save keeps the loaded
 values.
 
-Round 9: capture damage changes `BUILDING` #0 health and a repair is a construction item of the building's own level
-(the original writes its repair item, type 2 `0x00AE7010`, in the slot's `BUILDING_MANAGER`); loot changes `REGION` #12 / #14
+Round 9: capture damage changes `BUILDING` #0 health and a repair is a construction item
+(our writer and the original write it as item type 2, `0x00AE7010`, in the slot's `BUILDING_MANAGER`); loot changes `REGION` #12 / #14
 and the classes' #12 war-results base.
 
 The model now changes `REGION` #10 (GDP), #12 and #14 (town wealth), #15 (growth) and #17 (bankruptcy offset) every

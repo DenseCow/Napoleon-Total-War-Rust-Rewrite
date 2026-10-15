@@ -286,6 +286,14 @@ fn open_from<'a>(
             loaded.model.force_caps = ntw_sim::campaign::rules::ForceCaps::new_campaign(&loaded.model.rules.limits, unit_multiplier);
             (source, loaded)
         }
+        Start::Save(bytes) if crate::own_save::is_own_save(bytes) => {
+            // The header names the campaign; its source gives the start an older save converts from.
+            let key = crate::own_save::read_info(bytes).map_err(LoadError::from)?.campaign_key;
+            let source = find(files, &key).ok_or(SourceError::NotFound(key))?;
+            let start = || source.new_campaign(db).map(|l| l.model).map_err(|e| e.to_string());
+            let loaded = crate::own_save::read_with_start(bytes, db, start).map_err(LoadError::from)?;
+            (source, loaded)
+        }
         Start::Save(bytes) => {
             let loaded = crate::read(bytes, db)?;
             let key = &loaded.info.campaign_key;
@@ -294,7 +302,7 @@ fn open_from<'a>(
         }
     };
     if let Some(features) = source.features() {
-        Arc::make_mut(&mut loaded.model.rules).features = features;
+        Arc::make_mut(&mut loaded.model.rules).features = features.validated();
     }
     let map = source.map(db, &loaded.info)?;
     map.attach(&mut loaded.model);
@@ -310,65 +318,104 @@ mod tests {
     use super::*;
     use crate::own_save::{self, SaveData};
 
+    /// A MADE-UP source: the campaign `made_up_campaign` whose start is `.1`, with the features `.0`.
+    struct Fake(Option<CampaignFeatures>, CampaignModel);
+    impl CampaignSource for Fake {
+        fn key(&self) -> &str {
+            "made_up_campaign"
+        }
+        fn info(&self) -> Result<CampaignInfo, SourceError> {
+            Ok(own_save::tests::info())
+        }
+        fn new_campaign(&self, _db: &GameDatabase) -> Result<LoadedCampaign, SourceError> {
+            let info = own_save::tests::info();
+            Ok(LoadedCampaign { model: self.1.clone(), info, rebel_faction: None, warnings: Vec::new(), script_values: Vec::new() })
+        }
+        fn map(&self, _db: &GameDatabase, _info: &CampaignInfo) -> Result<MapData, SourceError> {
+            use ntw_formats::campaign_map::{Heightmap, RegionMap};
+            use ntw_sim::campaign::pathing::PathGrid;
+            let regions = RegionMap {
+                bounds_min: (0.0, 0.0),
+                bounds_max: (1.0, 1.0),
+                theatre: ((0.0, 0.0), (1.0, 1.0)),
+                labels: Vec::new(),
+                vertices: Vec::new(),
+                regions: Vec::new(),
+                trade_nodes: Vec::new(),
+                ground_types: Vec::new(),
+            };
+            let display = MapDisplay {
+                key: "made_up_map".into(),
+                regions,
+                heightmap: Heightmap { width: 1, height: 1, values: vec![0] },
+                height_scale: 1.0,
+                ground: None,
+                lines: Vec::new(),
+                coast: Vec::new(),
+                trees: None,
+                river_texture: Err("made up".into()),
+                arrow_model: Err("made up".into()),
+            };
+            Ok(MapData { display: Arc::new(display), terrain: Terrain(Arc::new(PathGrid::new((0.0, 0.0), 1.0, 1, 1))), theatre_pictures: Vec::new() })
+        }
+        fn features(&self) -> Option<CampaignFeatures> {
+            self.0.clone()
+        }
+    }
+
     /// A source's own features replace the key's; a source without them leaves the rules' as they were.
     #[test]
     fn a_sources_features_replace_the_rules_through_open() {
-        use ntw_formats::campaign_map::{Heightmap, RegionMap};
-        use ntw_sim::campaign::pathing::PathGrid;
-
-        struct Fake(Option<CampaignFeatures>);
-        impl CampaignSource for Fake {
-            fn key(&self) -> &str {
-                "made_up_campaign"
-            }
-            fn info(&self) -> Result<CampaignInfo, SourceError> {
-                Ok(own_save::tests::info())
-            }
-            fn new_campaign(&self, _db: &GameDatabase) -> Result<LoadedCampaign, SourceError> {
-                let info = own_save::tests::info();
-                Ok(LoadedCampaign { model: own_save::tests::made_up_model(), info, rebel_faction: None, warnings: Vec::new(), script_values: Vec::new(), restricted_units: Vec::new() })
-            }
-            fn map(&self, _db: &GameDatabase, _info: &CampaignInfo) -> Result<MapData, SourceError> {
-                let regions = RegionMap {
-                    bounds_min: (0.0, 0.0),
-                    bounds_max: (1.0, 1.0),
-                    theatre: ((0.0, 0.0), (1.0, 1.0)),
-                    labels: Vec::new(),
-                    vertices: Vec::new(),
-                    regions: Vec::new(),
-                    trade_nodes: Vec::new(),
-                    ground_types: Vec::new(),
-                };
-                let display = MapDisplay {
-                    key: "made_up_map".into(),
-                    regions,
-                    heightmap: Heightmap { width: 1, height: 1, values: vec![0] },
-                    height_scale: 1.0,
-                    ground: None,
-                    lines: Vec::new(),
-                    coast: Vec::new(),
-                    trees: None,
-                    river_texture: Err("made up".into()),
-                    arrow_model: Err("made up".into()),
-                };
-                Ok(MapData { display: Arc::new(display), terrain: Terrain(Arc::new(PathGrid::new((0.0, 0.0), 1.0, 1, 1))), theatre_pictures: Vec::new() })
-            }
-            fn features(&self) -> Option<CampaignFeatures> {
-                self.0.clone()
-            }
-        }
-
         let vfs = Vfs::new();
         let files = GameFiles { vfs: &vfs };
         let db = GameDatabase::test_fixture();
         let own = CampaignFeatures { loot_value: (7, 77), ..CampaignFeatures::default() };
         assert_ne!(own, CampaignFeatures::default());
         let with = |f: Option<CampaignFeatures>| {
-            open_from(files, Start::New("made_up_campaign", None), &db, move |_, _| Some(Box::new(Fake(f.clone())) as Box<dyn CampaignSource>)).expect("opens")
+            open_from(files, Start::New("made_up_campaign", None), &db, move |_, _| Some(Box::new(Fake(f.clone(), own_save::tests::made_up_model())) as Box<dyn CampaignSource>)).expect("opens")
         };
         assert_eq!(with(Some(own.clone())).loaded.model.rules.features, own);
         let before = own_save::tests::made_up_model().rules.features.clone();
         assert_eq!(with(None).loaded.model.rules.features, before);
+    }
+
+    /// recruit-gates review: an own save written before format version 2 (no region unit resources) opens
+    /// with every region's resources from its campaign's start, so a queued unit that needs one stays
+    /// recruitable and survives the first turn start (without them the queue step removes and refunds it).
+    #[test]
+    fn a_version_1_save_opens_with_its_resources_and_keeps_its_queue() {
+        use ntw_sim::campaign::{BuildingRef, BuildingRules, RecruitmentItem, RecruitmentItemId, RegionId, UnitRules};
+        let r1 = RegionId(1);
+        let mut start = own_save::tests::made_up_model();
+        start.world.regions.get_mut(&r1).unwrap().unit_resources = vec!["made_up_horses".into()];
+        // The save: the campaign some turns on, the walls of region 1 training a cavalry unit.
+        let mut model = start.clone();
+        let r = model.world.regions.get_mut(&r1).unwrap();
+        r.fortification = Some(BuildingRef { level_key: "made_up_stables".into(), health: 100 });
+        r.recruitment_queue.push(RecruitmentItem { id: RecruitmentItemId(9001), unit_key: "made_up_cavalry".into(), turns_remaining: 3, cost: 400, target: None, target_lost: false });
+        let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+        let old = own_save::tests::as_version_1(&own_save::write(&own_save::tests::info(), &data).expect("write"));
+        let vfs = Vfs::new();
+        let files = GameFiles { vfs: &vfs };
+        let db = GameDatabase::test_fixture();
+        let opened = open_from(files, Start::Save(&old), &db, |_, _| Some(Box::new(Fake(None, start.clone())) as Box<dyn CampaignSource>)).expect("opens");
+        let mut m = opened.loaded.model;
+        assert_eq!(m.world.regions[&r1].unit_resources, ["made_up_horses"]);
+        let rules = Arc::make_mut(&mut m.rules);
+        rules.units.insert("made_up_cavalry".into(), UnitRules { unit_resource: Some("made_up_horses".into()), ..Default::default() });
+        rules.buildings.insert("made_up_stables".into(), BuildingRules { units_allowed: vec!["made_up_cavalry".into()], ..Default::default() });
+        rules.faction_units.entry("made_up_a".into()).or_default().insert("made_up_cavalry".into());
+        assert!(m.recruitable_units(r1).iter().any(|e| e.unit_key == "made_up_cavalry"));
+        m.turn.humans = vec![own_save::tests::A];
+        // The same model without the resources loses the item at the turn start: what the conversion prevents.
+        let mut without = m.clone();
+        without.world.regions.get_mut(&r1).unwrap().unit_resources.clear();
+        without.start_campaign();
+        assert!(without.world.regions[&r1].recruitment_queue.is_empty());
+        m.start_campaign();
+        assert_eq!(m.world.regions[&r1].recruitment_queue.iter().map(|i| i.id).collect::<Vec<_>>(), [RecruitmentItemId(9001)]);
+        // Opened without a source for the campaign: not found, never loaded with empty resources.
+        assert!(matches!(open_from(files, Start::Save(&old), &db, |_, _| None), Err(SourceError::NotFound(k)) if k == "made_up_campaign"));
     }
 
     /// A save names its campaign: when no source has that campaign, opening the save is an error

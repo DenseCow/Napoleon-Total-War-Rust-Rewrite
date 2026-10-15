@@ -12,7 +12,8 @@
 //!   a human to an AI faction ([`super::director::region_transfer_step`]).
 //! - [`DIRECTOR_DESIRES`]: the campaign director's other desires after it
 //!   ([`super::director::director_desires`]).
-//! - [`DEMANDED_PAYMENT`]: the cap on a payment a deal demands ([`super::treaties::demanded_payment`]).
+//! - [`PROPOSED_PAYMENT`]: the cap on a payment a deal proposes ([`super::treaties::proposed_payment`]).
+//! - [`CONSTRUCTION_STEP`]: one round of a region's construction item ([`super::turn::construction_step`]).
 
 use std::sync::Arc;
 
@@ -20,7 +21,8 @@ use super::director::DirectorState;
 use super::ids::FactionId;
 use super::mod_state::ModWrites;
 use super::population::PopulationState;
-use super::world::{CampaignModel, Region};
+use super::turn::ConstructionStep;
+use super::world::{CampaignModel, ConstructionItem, Region};
 use crate::seam::{Seam, SeamRegistry};
 
 /// Seam key of a region's population growth for one round ([`PopulationGrow`]).
@@ -31,8 +33,10 @@ pub const DIRECTOR_REGION_TRANSFER: &str = "director.region_transfer";
 
 /// Seam key of the campaign director's other desires ([`DirectorDesires`]).
 pub const DIRECTOR_DESIRES: &str = "director.desires";
-/// Seam key of the cap on a payment a deal demands ([`DemandedPayment`]).
-pub const DEMANDED_PAYMENT: &str = "diplomacy.demanded_payment";
+/// Seam key of the cap on a payment a deal proposes ([`ProposedPayment`]).
+pub const PROPOSED_PAYMENT: &str = "diplomacy.proposed_payment";
+/// Seam key of one round of a construction item ([`ConstructionStepRule`]).
+pub const CONSTRUCTION_STEP: &str = "construction.step";
 
 /// A region's population after one round of growth: given the model, the region, its population
 /// and its population state, the new population and state. The original's is
@@ -50,12 +54,18 @@ pub type DirectorRegionTransfer = dyn Fn(&CampaignModel, &mut ModWrites) -> Dire
 /// original's is [`super::director::director_desires`]. Its mod-state changes go to the
 /// [`ModWrites`].
 pub type DirectorDesires = dyn Fn(&mut CampaignModel, &mut ModWrites) + Send + Sync;
-/// What a deal's demanded payment becomes: ours applies it in `accept_deal` (the exe caps it at
-/// proposal, 0x00C4AB45-0x00C4AB82, and its row text shows the capped amount, the absolute value, at
-/// 0x00C4AB85; the cap moves to Propose once Propose builds payment rows). Given the model (the treasuries before
-/// the deal), the paying faction, the amount asked and the turns (0 for the lump sum), the amount it
-/// pays. The original's is [`super::treaties::demanded_payment`]. A query: it changes no state.
-pub type DemandedPayment = dyn Fn(&CampaignModel, FactionId, i32, u32) -> i32 + Send + Sync;
+/// What a deal's payment record holds when a payment is proposed, applied once when the record is set
+/// (the record's copy `0x00C4AB20`): the panel's row text (`0x00C4AB85`), the AI's evaluation and the
+/// accepted deal all read the result. Given the model, the proposing faction, the amount in the
+/// record's sign (positive: demanded from the recipient; negative: offered by the proposer) and the
+/// turns (1: paid once), the amount the record holds. The original's is
+/// [`super::treaties::proposed_payment`]. A query: it changes no state.
+pub type ProposedPayment = dyn Fn(&CampaignModel, FactionId, i32, u32) -> i32 + Send + Sync;
+/// One round of a construction item at its region's round end: given the model, the region and the item, what
+/// the round does to it ([`ConstructionStep`]: it waits, steps, or finishes with a result); the model applies
+/// the result before the next slot steps (`construction_round_end`). The original's is
+/// [`super::turn::construction_step`]. Its mod-state changes go to the [`ModWrites`].
+pub type ConstructionStepRule = dyn Fn(&CampaignModel, &Region, &ConstructionItem, &mut ModWrites) -> ConstructionStep + Send + Sync;
 
 /// The campaign rules in use, one field per seam (see the module docs).
 #[derive(Clone, Debug, PartialEq)]
@@ -66,8 +76,10 @@ pub struct CampaignSeams {
     pub director_region_transfer: Seam<DirectorRegionTransfer>,
     /// [`DIRECTOR_DESIRES`].
     pub director_desires: Seam<DirectorDesires>,
-    /// [`DEMANDED_PAYMENT`].
-    pub demanded_payment: Seam<DemandedPayment>,
+    /// [`PROPOSED_PAYMENT`].
+    pub proposed_payment: Seam<ProposedPayment>,
+    /// [`CONSTRUCTION_STEP`].
+    pub construction_step: Seam<ConstructionStepRule>,
 }
 
 impl Default for CampaignSeams {
@@ -77,7 +89,8 @@ impl Default for CampaignSeams {
             population_grow: Seam::original(Arc::new(|m: &CampaignModel, r: &Region, pop: u32, s: &PopulationState, _: &mut ModWrites| super::population::grow(m, r, pop, s))),
             director_region_transfer: Seam::original(Arc::new(|m: &CampaignModel, _: &mut ModWrites| super::director::region_transfer_step(m))),
             director_desires: Seam::original(Arc::new(|m: &mut CampaignModel, w: &mut ModWrites| super::director::director_desires(m, w))),
-            demanded_payment: Seam::original(Arc::new(super::treaties::demanded_payment)),
+            proposed_payment: Seam::original(Arc::new(super::treaties::proposed_payment)),
+            construction_step: Seam::original(Arc::new(|m: &CampaignModel, r: &Region, i: &ConstructionItem, _: &mut ModWrites| super::turn::construction_step(m, r, i))),
         }
     }
 }
@@ -85,12 +98,13 @@ impl Default for CampaignSeams {
 impl CampaignSeams {
     /// Every seam's key and implementation chain, in a fixed order (for the multiplayer handshake
     /// and the log).
-    pub fn chains(&self) -> [(&'static str, &[String]); 4] {
+    pub fn chains(&self) -> [(&'static str, &[String]); 5] {
         [
             (POPULATION_GROW, self.population_grow.chain()),
             (DIRECTOR_REGION_TRANSFER, self.director_region_transfer.chain()),
             (DIRECTOR_DESIRES, self.director_desires.chain()),
-            (DEMANDED_PAYMENT, self.demanded_payment.chain()),
+            (PROPOSED_PAYMENT, self.proposed_payment.chain()),
+            (CONSTRUCTION_STEP, self.construction_step.chain()),
         ]
     }
 }
@@ -106,8 +120,10 @@ pub struct CampaignRuleRegistry {
     pub director_region_transfer: SeamRegistry<DirectorRegionTransfer>,
     /// [`DIRECTOR_DESIRES`] implementations.
     pub director_desires: SeamRegistry<DirectorDesires>,
-    /// [`DEMANDED_PAYMENT`] implementations.
-    pub demanded_payment: SeamRegistry<DemandedPayment>,
+    /// [`PROPOSED_PAYMENT`] implementations.
+    pub proposed_payment: SeamRegistry<ProposedPayment>,
+    /// [`CONSTRUCTION_STEP`] implementations.
+    pub construction_step: SeamRegistry<ConstructionStepRule>,
 }
 
 impl CampaignRuleRegistry {
@@ -121,7 +137,8 @@ impl CampaignRuleRegistry {
                 POPULATION_GROW => self.population_grow.apply(&mut seams.population_grow, key),
                 DIRECTOR_REGION_TRANSFER => self.director_region_transfer.apply(&mut seams.director_region_transfer, key),
                 DIRECTOR_DESIRES => self.director_desires.apply(&mut seams.director_desires, key),
-                DEMANDED_PAYMENT => self.demanded_payment.apply(&mut seams.demanded_payment, key),
+                PROPOSED_PAYMENT => self.proposed_payment.apply(&mut seams.proposed_payment, key),
+                CONSTRUCTION_STEP => self.construction_step.apply(&mut seams.construction_step, key),
                 _ => {
                     warnings.push(format!("rule seam {seam}: no such seam; {key} is ignored"));
                     continue;
@@ -196,7 +213,8 @@ mod tests {
                 (POPULATION_GROW, &original[..]),
                 (DIRECTOR_REGION_TRANSFER, &original[..]),
                 (DIRECTOR_DESIRES, &original[..]),
-                (DEMANDED_PAYMENT, &original[..]),
+                (PROPOSED_PAYMENT, &original[..]),
+                (CONSTRUCTION_STEP, &original[..]),
             ]
         );
         // The round end through the seam gives exactly what the original's function gives.
@@ -211,25 +229,28 @@ mod tests {
         assert!(after.mod_state.is_empty());
     }
 
-    /// The original's demanded-payment cap (`0x00C4AB20`), through the model's seam: a one-off demand
-    /// asks at most the payer's treasury, a regular payment is not capped, and an indebted payer is
-    /// asked 0 (ORIGINAL BUG fix: the exe turns the demand around, `0x00C4AB7E`–`0x00C4AB82`).
+    /// The original's proposed-payment cap (`0x00C4AB20`), through the model's seam: an offered one-off
+    /// payment (negative) offers at most the proposer's treasury; a demand (positive), a regular
+    /// payment and turns other than 1 are not capped; an indebted proposer offers 0 (ORIGINAL BUG
+    /// fix: the exe turns the offer into a demand, `0x00C4AB7E`–`0x00C4AB82`).
     #[test]
-    fn a_demanded_one_off_payment_is_capped_at_the_payers_treasury() {
+    fn an_offered_one_off_payment_is_capped_at_the_proposers_treasury() {
         let mut m = test_model();
         let a = FactionId(1); // test_model's faction A
         let treasury = |m: &mut CampaignModel, t: i32| m.world.factions.get_mut(&a).expect("faction A").treasury = t;
         treasury(&mut m, 1500);
-        assert_eq!(m.demanded_payment(a, 5000, 0), 1500, "lump sum above the treasury");
-        assert_eq!(m.demanded_payment(a, 5000, 1), 1500, "one turn above the treasury");
-        assert_eq!(m.demanded_payment(a, 1000, 1), 1000, "within the treasury");
-        assert_eq!(m.demanded_payment(a, 5000, 2), 5000, "a regular payment is not capped");
+        assert_eq!(m.proposed_payment(a, -5000, 1), -1500, "an offer above the treasury");
+        assert_eq!(m.proposed_payment(a, -1000, 1), -1000, "within the treasury");
+        assert_eq!(m.proposed_payment(a, -1500, 1), -1500, "exactly the treasury");
+        assert_eq!(m.proposed_payment(a, 5000, 1), 5000, "a demand is not capped");
+        assert_eq!(m.proposed_payment(a, -5000, 2), -5000, "a regular payment is not capped");
+        assert_eq!(m.proposed_payment(a, -5000, 0), -5000, "only turns 1 is capped");
         treasury(&mut m, -300);
-        assert_eq!(m.demanded_payment(a, 5000, 1), 0, "an indebted payer is asked nothing");
-        assert_eq!(m.demanded_payment(FactionId(99), 5000, 1), 5000, "an unknown payer keeps the amount");
+        assert_eq!(m.proposed_payment(a, -5000, 1), 0, "an indebted proposer offers nothing");
+        assert_eq!(m.proposed_payment(FactionId(99), -5000, 1), -5000, "an unknown proposer keeps the amount");
         // The model's method is the seam, and the default seam is the original's function.
-        for (amount, turns) in [(5000, 0), (200, 1), (5000, 3)] {
-            assert_eq!(m.demanded_payment(a, amount, turns), super::super::treaties::demanded_payment(&m, a, amount, turns));
+        for (amount, turns) in [(-5000, 1), (200, 1), (-5000, 3)] {
+            assert_eq!(m.proposed_payment(a, amount, turns), super::super::treaties::proposed_payment(&m, a, amount, turns));
         }
     }
 

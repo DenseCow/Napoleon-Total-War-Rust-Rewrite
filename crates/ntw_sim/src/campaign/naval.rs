@@ -14,7 +14,11 @@
 //! `(#20 + #21) × (guns >> 1) × 3` (× 1.5 for bomb ketches and rocket ships), the morale #1 against the highest #1
 //! of all types, and the range classes (line of battle 3, frigate and galley 2, others 1). The battle record
 //! behind them was read with the debugger in a vanilla session (CAMPAIGN_FIDELITY.md §Naval autoresolve).
-//! Not modelled: ship captures (`0x007CD570`, through the captives step `0x0074F710` / `0x0075C090`).
+//! Ship captures are shared out by the captives step (`0x0074F710` / `0x0075C090`, [`captives`]). Not modelled: the
+//! post-battle force rebuild (state 6, `0x009DB270`), which places a unit whose force is gone on a free spot
+//! within 3 map units (`0x00B38F10`) and sells a ship that finds none for `0x008E1BC0` (credit, category 2,
+//! `0x009DB7C0`; CAMPAIGN_FIDELITY.md §Treasury changes); ours joins the captured ship to the captor's force
+//! whatever its size.
 
 use crate::rng::{CaRng, INV_65535};
 
@@ -49,12 +53,50 @@ pub struct ShipState {
     pub sunk: bool,
     /// Full guns.
     pub max_guns: u32,
+    /// Ordered to repair in port: `NAVAL_UNIT` #3 (unit +0x168, CONFIRMED by the saver `0x00895640`), not part
+    /// of `SHIP_DAMAGE_INFO`; kept here so it lives and dies with the ship's state ([`super::ship_repair`]).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub repairing: bool,
 }
 
 impl ShipState {
     /// The crew total.
     pub fn crew(&self) -> u32 {
         self.crews.iter().map(|&c| c.max(0) as u32).sum()
+    }
+
+    /// Does the ship need a repair (`0x0055ACC0`, CONFIRMED): a crew below its full crew, else one of the first
+    /// four damage fractions above 0 (the fifth is not tested).
+    pub fn needs_repair(&self) -> bool {
+        self.crews.iter().zip(self.max_crews).any(|(&c, m)| c < m) || self.damage[..4].iter().any(|&d| d > 0.0)
+    }
+
+    /// The share of a ship's price a repair costs before its clamp (`0x008F6590`, CONFIRMED):
+    /// `(Σfull crews − Σcrews) / Σfull crews` in integers (1 for a ship with no man left, 0 for a crew above none
+    /// and below twice the full crew, −1 from twice the full crew on, one less per further full crew: the exe
+    /// computes the same, and the cost `0x008EA2F0` clamps a negative total to 0), plus a quarter of the first four
+    /// damage fractions. The quotient is the exe's signed `IDIV` (`0x008F65F0`,
+    /// truncating toward 0) after wrapping sums (`0x0057E1E0`), kept 1:1: the exe's other use of the share
+    /// (`0x008F66A0`) takes the same integer quotient.
+    ///
+    /// ORIGINAL BUG: the exe divides by Σfull crews unguarded (IDIV), so a ship type with no crew crashes it
+    /// (#DE); ours takes the crew term as 0 then. No vanilla ship has a full crew of 0.
+    pub fn repair_fraction(&self) -> f32 {
+        let sum = |a: &[i32; 3]| a.iter().fold(0i32, |s, &c| s.wrapping_add(c));
+        let (crew, full) = (sum(&self.crews), sum(&self.max_crews));
+        let lost = if full == 0 { 0 } else { full.wrapping_sub(crew).wrapping_div(full) };
+        let d = &self.damage;
+        // The SSE order: (d3 + d2) + (d1 + d0), then × 0.25.
+        lost as f32 + ((d[3] + d[2]) + (d[1] + d[0])) * 0.25
+    }
+
+    /// The repair (`0x00576890`, CONFIRMED): every damage fraction to 0, the crews and guns to full, not sunk.
+    /// The order flag is the caller's ([`super::ship_repair`]).
+    pub fn repair(&mut self) {
+        self.damage = [0.0; 5];
+        self.crews = self.max_crews;
+        self.guns = self.max_guns;
+        self.sunk = false;
     }
 }
 
@@ -77,8 +119,8 @@ pub struct ShipRules {
     /// CONFIRMED). Not a DB column: filled from the ships of the loaded file (0 = unknown, then the ship's own
     /// saved full guns count).
     pub guns: u32,
-    /// The range class (unit +0x9C, table `0x0070D370` by `units` category, CONFIRMED): line of battle 3,
-    /// frigate and galley 2, every other ship 1.
+    /// The range class of the type's `units` category ([`crate::unit_kind::Category::range_class`], resolver unit
+    /// +0x9C, CONFIRMED): line of battle 3, frigate and galley 2, every other ship 1.
     pub range: i32,
     /// `naval_bomb_ketch` and `naval_rocket_ship` classes: the potential × 1.5 (`0x00758950`, classes 0x18 / 0x26).
     pub bombard: bool,

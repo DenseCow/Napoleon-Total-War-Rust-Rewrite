@@ -170,6 +170,51 @@ fn synthetic_mod_overrides_row_and_string() {
     assert!(warnings[0].contains("broken"));
 }
 
+/// Every `load_table` read of `units` (the database, the frontend's army setup, tools) leaves out a
+/// row whose #14 names no `region_unit_resources` key, with one warning (`0x00EDC000`); a known,
+/// empty or absent #14 keeps the row. A #14 with no `region_unit_resources` table fails the read.
+#[test]
+fn load_table_drops_units_naming_an_unknown_unit_resource() {
+    let schema = UnitRecord::schema();
+    // `units` #14 (`recruitment_scope`) set per row.
+    let units_with = |rows: &[(&str, Option<&str>)]| {
+        let names: Vec<(&str, &str)> = rows.iter().map(|(k, _)| (*k, *k)).collect();
+        let mut t = DbTable::read(&units(&names), &schema).unwrap();
+        for (row, (_, scope)) in t.rows.iter_mut().zip(rows) {
+            row[14] = DbValue::OptStr(scope.map(Into::into));
+        }
+        t.to_bytes(&schema).unwrap()
+    };
+    let resources = {
+        let schema = ntw_data::campaign::RegionUnitResourceRecord::schema();
+        let rows = vec![vec![DbValue::Str("horses".into()), DbValue::Str("Horses".into())]];
+        DbTable { version: 0, has_version_marker: false, flag: 1, rows }.to_bytes(&schema).unwrap()
+    };
+    let rows = [("known", Some("horses")), ("typo", Some("hroses")), ("none", None), ("empty", Some(""))];
+    let root = temp_dir("unit_resource");
+    let data = root.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(
+        data.join("data.pack"),
+        pack(1, &[("db\\units_tables\\units", units_with(&rows)), ("db\\region_unit_resources_tables\\region_unit_resources", resources)]),
+    )
+    .unwrap();
+    let (vfs, _) = Vfs::open_with_mods(&data, &script("", None)).unwrap();
+    let mut warnings = Vec::new();
+    let t = load_table::<UnitRecord>(&vfs, &mut warnings).unwrap();
+    assert_eq!(t.iter().map(|u| u.key.as_str()).collect::<Vec<_>>(), ["known", "none", "empty"]);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("\"typo\"") && warnings[0].contains("\"hroses\""), "{warnings:?}");
+
+    // No `region_unit_resources`: a #14 cannot be checked, so the read fails (no row is kept unchecked).
+    let bare = root.join("bare");
+    std::fs::create_dir_all(&bare).unwrap();
+    std::fs::write(bare.join("data.pack"), pack(1, &[("db\\units_tables\\units", units_with(&rows))])).unwrap();
+    let (vfs, _) = Vfs::open_with_mods(&bare, &script("", None)).unwrap();
+    assert!(load_table::<UnitRecord>(&vfs, &mut Vec::new()).is_err());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 fn install_data_dir() -> PathBuf {
     std::env::var_os("NTW_DATA_DIR")
         .map(PathBuf::from)
@@ -257,6 +302,24 @@ fn install_with_synthetic_mod_pack() {
     assert_eq!(modded.unit_stats_land, vanilla.unit_stats_land);
     let text = Localisation::from_vfs(&vfs).unwrap();
     assert_eq!(text.get(&loc_key), Some("MODDED TEXT"));
+}
+
+/// polish19: the game database reads `region_unit_resources` once (the
+/// campaign tables and the `units` resource check `0x00EDC000` share it), so a mod's broken file of
+/// that table is one load warning, not one per read.
+#[test]
+#[ignore]
+fn broken_mod_unit_resource_file_warns_once() {
+    let data = install_data_dir();
+    let root = temp_dir("install_broken_resources");
+    let mod_pack = root.join("broken_resources.pack");
+    std::fs::write(&mod_pack, pack(3, &[("db\\region_unit_resources_tables\\!broken_resources", b"not a table".to_vec())])).unwrap();
+    let (vfs, _) = Vfs::open_with_mods(&data, &script(&format!("mod \"{}\";", mod_pack.display()), None)).unwrap();
+    let db = GameDatabase::from_vfs(&vfs).unwrap();
+    let broken: Vec<&String> = db.load_warnings.iter().filter(|w| w.contains("!broken_resources")).collect();
+    assert_eq!(broken.len(), 1, "{:?}", db.load_warnings);
+    assert!(!db.campaign.region_unit_resources.is_empty(), "the vanilla file still reads");
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// A `uniforms` table with the given (uniform, faction, variant, unit) rows.

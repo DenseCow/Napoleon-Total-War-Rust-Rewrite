@@ -1144,3 +1144,116 @@ fn vanilla_director_floats_all_parse() {
     let failing: Vec<_> = rows.iter().filter(|c| d::parse_cdir_float(&c.value).is_none()).map(|c| (&c.campaign, &c.faction, &c.variable, &c.value)).collect();
     assert!(failing.is_empty(), "rows the exe reads as 0: {failing:?}");
 }
+
+/// Every Spanish faction's saved effect base (#54) holds a unit-category (type 0xE) `cost_mod` +25 on
+/// `naval_merchant`, which the exe's recruit price (`0x00B0D220`: the int `recruitment_mod_cost_naval_all`
+/// plus the type-0xE `cost_mod` of the unit's category plus the type-0xD `cost_mod` of its class) adds on top of
+/// the basic +25 and the navy level's −1: Seville's queued Merchantmen in `orig_fr_may1811` were priced
+/// with +49 and stored 745, the plain cost being 500.
+#[test]
+fn the_spanish_merchantmen_price_takes_the_saved_unit_category_cost_mod() {
+    let dir = data_dir();
+    let path = common::evidence_dir().join("orig_fr_may1811.save");
+    if !dir.is_dir() || !path.is_file() {
+        println!("SKIP: no install at {} or no {}", dir.display(), path.display());
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).expect("database");
+    let m = ntw_campaign::read_file(&path, &db).expect("save loads").model;
+    let mut checked = 0;
+    for r in m.world.regions.values() {
+        for it in &r.recruitment_queue {
+            let unit = m.rules.units.get(&it.unit_key).unwrap_or_else(|| panic!("{} is a unit", it.unit_key));
+            let set = ntw_sim::campaign::economy::region_effect_set(&m, r);
+            assert_eq!(ntw_sim::campaign::economy::recruitment_cost_in(&m.rules, &set, &it.unit_key, unit), it.cost, "{} {}", r.key, it.unit_key);
+            checked += 1;
+        }
+    }
+    let seville = m.world.regions.values().find(|r| r.key == "spa_sevilla").expect("Seville");
+    assert!(seville.recruitment_queue.iter().any(|i| i.unit_key == "Trade_Ship_Merchantmen" && i.cost == 745), "the Merchantmen is queued in Seville at 745");
+    assert!(checked > 1);
+}
+
+/// recruit-followups: the road and walls slots carry a holder like any slot (`0x00A4DCB0` builds them with
+/// `0x00A4D4F0`), and the original's saves have regions whose road and walls another faction holds:
+/// `eur_bavaria` (Austria's) with Bavaria holding its road, its walls and four of its five slots. Held
+/// so, neither counts (`0x00A6AE40` → `0x00A62380` → `0x00A91FC0`).
+#[test]
+fn the_road_and_walls_holders_load_from_the_vanilla_saves() {
+    use ntw_sim::campaign::SlotRef;
+    let dir = data_dir();
+    let ev = common::evidence_dir();
+    if !dir.is_dir() || !ev.is_dir() {
+        println!("SKIP: no install at {} or no evidence saves at {}", dir.display(), ev.display());
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).expect("database");
+    let mut checked = 0;
+    for name in ["auto_after_c8", "orig_over_nr4_0252"] {
+        let path = ev.join(format!("{name}.save"));
+        if !path.is_file() {
+            continue;
+        }
+        let m = ntw_campaign::read_file(&path, &db).expect("save loads").model;
+        let r = m.world.regions.values().find(|r| r.key == "eur_bavaria").expect("eur_bavaria");
+        let holder = r.road_holder.expect("a road holder");
+        assert_ne!(holder, r.owner, "{name}");
+        assert_eq!(r.fortification_holder, Some(holder), "{name}");
+        assert_eq!(r.slots.iter().filter(|s| s.holder == Some(holder)).count(), 4, "{name}");
+        assert!(!r.slot_held(SlotRef::Road) && !r.slot_held(SlotRef::Walls), "{name}");
+        // Every other region's road and walls holder holds one of its slots too, or owns it.
+        for r in m.world.regions.values() {
+            for h in [r.road_holder, r.fortification_holder].into_iter().flatten() {
+                assert!(h == r.owner || r.slots.iter().any(|s| s.holder == Some(h)), "{name} {}", r.key);
+            }
+        }
+        checked += 1;
+    }
+    println!("road and walls holders checked in {checked} saves");
+}
+
+/// The director's sea areas hold the fleets at sea in them (`0x00BB52E0`'s human-mobile test reads
+/// the area's mobiles, CAI_REGION #9, which list exactly the mobiles whose CAI_SITUATED #2 names
+/// the area, `cai_audit mirror_loc`): in the original's own save every mobile's CAI_SITUATED #2 is
+/// the `regions.esf` region (land or sea) under its position, and the path grid gives the same
+/// region at that position, sea cells included.
+#[test]
+fn mobiles_are_situated_in_the_region_under_them() {
+    let dir = data_dir();
+    let p = common::evidence_dir().join("orig_fr_may1811.save");
+    if !dir.is_dir() || !p.is_file() {
+        println!("SKIP: no install at {} or no {}", dir.display(), p.display());
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).expect("database");
+    let source = EsfFile::open(&p).expect("esf");
+    let loaded = ntw_campaign::read_esf(&source, &db).expect("loads");
+    let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
+    let map = ntw_formats::campaign_map::CampaignMap::load(&ntw_formats::campaign_map::GameFiles { vfs: &vfs }, &loaded.info.map_key).expect("map");
+    let grid = ntw_campaign::pathing::build_grid(&map);
+    let world = source.root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL/CAI_INTERFACE/CAI_WORLD").expect("CAI_WORLD");
+    let items = |list: &str| -> Vec<Vec<EsfNode>> { world.record_array(list).into_iter().flat_map(|a| a.items.iter().cloned()).collect() };
+    let component = |it: &[EsfNode]| it.iter().find(|n| !matches!(n, EsfNode::Record(_) | EsfNode::RecordArray(_))).and_then(EsfNode::as_u32);
+    let rec = |it: &[EsfNode], name: &str| it.iter().filter_map(EsfNode::as_record).find(|r| r.name == name).cloned();
+    let region_key: std::collections::BTreeMap<u32, String> = items("CAI_WORLD_REGIONS")
+        .iter()
+        .filter_map(|it| Some((component(it)?, rec(it, "CAI_REGION")?.get_str(10)?.to_string())))
+        .collect();
+    let (mut sea, mut land, mut grid_ok, mut mismatched) = (0, 0, 0, Vec::new());
+    for it in items("CAI_WORLD_RESOURCE_MOBILES") {
+        let Some(s) = rec(&it, "CAI_SITUATED") else { continue };
+        let scale = (1u32 << 20) as f32;
+        let (x, z) = (s.get_i32(0).unwrap_or(0) as f32 / scale, s.get_i32(1).unwrap_or(0) as f32 / scale);
+        let saved = s.get_u32(2).and_then(|c| region_key.get(&c)).map(String::as_str);
+        let Some(under) = map.regions.region_at(x, z) else { continue };
+        if under.is_sea { sea += 1 } else { land += 1 }
+        if saved != Some(under.key.as_str()) {
+            mismatched.push((under.key.clone(), saved.map(str::to_string)));
+        }
+        grid_ok += usize::from(grid.region_at(x, z) == Some(under.key.as_str()));
+    }
+    println!("sea {sea}, land {land}, grid matches {grid_ok}, mismatched {mismatched:?}");
+    assert!(sea > 0 && land > 0);
+    assert!(mismatched.is_empty(), "{mismatched:?}");
+    assert_eq!(grid_ok, sea + land);
+}

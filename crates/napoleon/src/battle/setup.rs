@@ -905,6 +905,31 @@ pub fn ballistics_of(p: &ntw_data::Projectile) -> ntw_sim::battle::missile::Ball
     }
 }
 
+/// The training level enum and drill tolerance of a unit record's `training_level` key.
+///
+/// The enum is the exe's (`0x00EED960`: the six vanilla keys to 0..5, any other key to 6; the
+/// morale rules branch on it). The tolerance is the key's own `entity_training_levels` row in the
+/// merged database (mods included). ORIGINAL LIMIT: the exe reads that row by the enum, through
+/// the table's per-level rows (`0x00F88300`), so only its six levels have one; a mod-added level
+/// here keeps its row (morale still sees enum 6, as the exe does). `None` only when the key has no
+/// row at all.
+fn training_of(levels: &ntw_data::Table<ntw_data::EntityTrainingLevel>, key: &str) -> (u8, Option<f32>) {
+    let level = ntw_sim::battle::model::training_level_of(key)
+        .unwrap_or(ntw_sim::battle::model::TRAINING_LEVELS.len() as u8);
+    (level, levels.get(key).map(|row| row.tolerance))
+}
+
+/// Warns, once per training level key, that a unit's level has no `entity_training_levels` row
+/// (the unit gets no drill tolerance).
+fn warn_missing_training_row(unit: &str, level: &str) {
+    static WARNED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let mut warned = WARNED.lock().unwrap_or_else(|e| e.into_inner());
+    if !warned.iter().any(|l| l == level) {
+        warned.push(level.to_owned());
+        warn!("unit {unit}: training level {level:?} has no entity_training_levels row; no drill tolerance");
+    }
+}
+
 /// Builds one model unit (position not set) and its display info from its database rows.
 fn make_unit(db: &GameDatabase, setup: &SetupData, key: &str, id: u32, side: u8) -> (LandUnit, UnitInfo) {
     let entities = setup.entities.as_ref();
@@ -926,6 +951,13 @@ fn make_unit(db: &GameDatabase, setup: &SetupData, key: &str, id: u32, side: u8)
     // We follow the data evidence: no shields in this era, so shield = col 37 (= 0).
     u.shield = stats.unknown_188;
     u.morale_stat = stats.morale; // col 42
+    // The training level (col 41) and its drill tolerance (`entity_training_levels`, `0x0057E1F0`).
+    let (level, tolerance) = training_of(&db.entity_training_levels, &stats.training_level);
+    u.training_level = level;
+    match tolerance {
+        Some(t) => u.training_tolerance = t,
+        None => warn_missing_training_row(key, &stats.training_level),
+    }
     u.attributes = GameDatabase::unit_attributes(stats);
     // The card's capability block from the DB (battle files replace it with their own list).
     u.capabilities = db.unit_capabilities_with(key, &record.unit_class, researched);
@@ -965,6 +997,15 @@ fn make_unit(db: &GameDatabase, setup: &SetupData, key: &str, id: u32, side: u8)
         // PLACEHOLDER speeds when the entity is unknown (e.g. on the test fixture).
         None => (u.walk_speed, u.run_speed) = if is_cavalry { (3.0, 9.0) } else { (1.5, 4.0) },
     }
+    // Each man's radius (soldier `+0x620`): column 12 of the man's `battle_entities` record (unit
+    // `+0x60`), the margin the squad box adds around the men (`LandUnit::man_radius`, CONFIRMED).
+    // Without the tables (the test fixture) it stays 0: the box spans the men's centres.
+    if let Some(t) = entities {
+        match t.entity(&stats.man_entity) {
+            Some(e) => u.man_radius = e.radius,
+            None => warn!("unit {key}: no battle_entities record {:?} for the man's radius", stats.man_entity),
+        }
+    }
 
     // The formation from the real ranks and spacing (close order): the files the default ranks
     // give, the front rank (the men who fire with the default drill, `shooting::volley_plan`).
@@ -977,8 +1018,8 @@ fn make_unit(db: &GameDatabase, setup: &SetupData, key: &str, id: u32, side: u8)
     };
     let files = (stats.num_men.max(1) as f32 / ranks as f32).ceil();
     u.formation_files = files as u32;
-    // The model's formation size (skirmish strips, defence pieces) and the drawn block: one grid
-    // (`LandUnit::formation`), its depth the grid's ranks times the rank spacing.
+    // The laid grid ([`LandUnit::formation`]) the men stand in, so the squad box measured from them
+    // (skirmish strips, defence pieces, the drawn block): files by the file spacing, ranks by the rank spacing.
     u.formation_width = (files * stats.spacing_file_close).max(5.0);
     u.formation_rank_spacing = stats.spacing_rank_close;
     let size_m = drawn_size(&u);
@@ -988,11 +1029,11 @@ fn make_unit(db: &GameDatabase, setup: &SetupData, key: &str, id: u32, side: u8)
 
 /// PROVISIONAL (ours, not traced: no such floor is known in the exe): the least depth of a unit's
 /// drawn block (its outline box, deployment spacing), so a one-rank line still shows as a strip.
-/// The model's depth ([`LandUnit::depth`], the men's rank pitch) keeps no floor.
+/// The model's depth ([`LandUnit::depth`], the squad box measured from the men) keeps no floor.
 const MIN_DRAWN_DEPTH_M: f32 = 2.0;
 
-/// The drawn block of a unit: the model's width and depth (one grid), the depth at least
-/// [`MIN_DRAWN_DEPTH_M`].
+/// The drawn block of a unit: the model's width and depth (the squad box measured from the men
+/// where they stand, [`LandUnit::squad_box`]), the depth at least [`MIN_DRAWN_DEPTH_M`].
 fn drawn_size(u: &LandUnit) -> Vec2 {
     Vec2::new(u.width(), u.depth().max(MIN_DRAWN_DEPTH_M))
 }
@@ -1001,6 +1042,24 @@ fn drawn_size(u: &LandUnit) -> Vec2 {
 mod tests {
     use super::*;
     use ntw_sim::battle::model::BattleResult;
+
+    /// A mod-added training level keeps its own `entity_training_levels` row (tolerance) while
+    /// morale sees the exe's "other" enum 6; a vanilla level keeps its enum; no row gives `None`.
+    #[test]
+    fn a_mod_added_training_level_keeps_its_row() {
+        use ntw_data::{EntityTrainingLevel, Table};
+        let levels = Table::from_rows(
+            0,
+            vec![
+                EntityTrainingLevel { key: "elite".into(), tolerance: 0.13 },
+                EntityTrainingLevel { key: "veteran_guard".into(), tolerance: 0.05 },
+            ],
+        );
+        assert_eq!(training_of(&levels, "veteran_guard"), (6, Some(0.05)));
+        assert_eq!(training_of(&levels, "elite"), (5, Some(0.13)));
+        assert_eq!(training_of(&levels, "mob"), (0, None));
+        assert_eq!(training_of(&levels, "unknown"), (6, None));
+    }
 
     /// The real France vs Austria slice, run headless (no window) from the player's install.
     /// Skipped (passes) when the game is not installed. Checks that the musket units really

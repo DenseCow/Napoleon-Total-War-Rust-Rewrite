@@ -32,17 +32,26 @@ use super::world::CampaignModel;
 pub enum BonusKind {
     /// No qualifier (`effect_bonus_value_basic_junction`; exe type 1).
     Basic,
-    /// Qualified by a unit category (`_unit_category_junction`; exe type 0xE).
+    /// Qualified by a unit category (`_unit_category_junction`; exe type 0xE, bonus ids
+    /// [`UNIT_CATEGORY_BONUS_NAMES`]).
     UnitCategory,
-    /// Qualified by a unit class (`_unit_class_junction`).
+    /// Qualified by a unit class (`_unit_class_junction`; exe type 0xD, bonus ids
+    /// [`UNIT_CLASS_BONUS_NAMES`]).
     UnitClass,
-    /// Qualified by a population class (`_population_class_junction`; exe type 6).
+    /// Qualified by a population class (`_population_class_junction`; exe type 6, bonus ids
+    /// [`POP_CLASS_BONUS_NAMES`]).
     PopClass,
     /// Qualified by an agent type (`_agent_junction`; exe type 0) under a bonus name outside the
     /// exe's agent table: the names in it compile to `Saved(0)` ([`agent_bonus_key`]).
     Agent,
-    /// Qualified by a religion (`_religion_junction`; exe type 7): `conversion` per religion.
+    /// Qualified by a religion (`_religion_junction`; exe type 10, bonus ids
+    /// [`RELIGION_BONUS_NAMES`]): `conversion` per religion.
     Religion,
+    /// Qualified by a population class and a religion (`_population_class_and_religion_junction`;
+    /// exe type 7, bonus ids [`POP_CLASS_RELIGION_BONUS_NAMES`]): the qualifier holds both keys, built
+    /// by [`EffectKey::pop_class_religion`] (the save reader `0x00DF0D10` reads the class, then the
+    /// religion).
+    PopClassReligion,
     /// A saved entry of another exe bonus type (the number); its bonus is the raw id as text.
     Saved(u32),
 }
@@ -62,6 +71,13 @@ impl EffectKey {
     /// A basic (unqualified) key.
     pub fn basic(bonus: &str) -> Self {
         Self { kind: BonusKind::Basic, bonus: bonus.to_string(), qualifier: String::new() }
+    }
+
+    /// A population class × religion key (exe type 7): both qualifiers joined, class first
+    /// ([`TYPE7_QUALIFIER_SEPARATOR`]), so keys that differ only in religion stay apart, as the exe's
+    /// key (type, class, religion, id) keeps them.
+    pub fn pop_class_religion(bonus: &str, class: &str, religion: &str) -> Self {
+        Self { kind: BonusKind::PopClassReligion, bonus: bonus.to_string(), qualifier: format!("{class}{TYPE7_QUALIFIER_SEPARATOR}{religion}") }
     }
 }
 
@@ -116,13 +132,53 @@ impl EffectSet {
     }
 }
 
-/// The engine bonus names by id (the table at `0x0145B4A8`, CONFIRMED; ids 0..183). Saved basic
-/// entries (type 1) carry the id.
+/// The engine bonus names by id: every type's name table in one block (`0x0145B4A8`, CONFIRMED; ids
+/// 0..183). The basic names (type 1) are the first [`BASIC_BONUS_COUNT`]; the rest are the other
+/// types' tables (chain `0x98..0x9C`, population class [`POP_CLASS_BONUS_NAMES`] at 158, religion
+/// [`RELIGION_BONUS_NAMES`] at 169, unit category and class from 173). Saved basic entries carry the id.
 pub const BONUS_NAMES: [&str; 184] = ["agent_research_slots", "building_prestige", "commodity_export_vol", "education_happy_mod", "gdp_farm", "gdp_industry", "gdp_mine", "gdp_mod_all", "gdp_port_trade", "happiness_active_lower_gov_type", "happiness_active_lower_tax", "happiness_active_upper_gov_type", "happiness_active_upper_tax", "happiness_character_trait_or_ancillary", "happiness_events_factional", "happiness_events_regional", "happiness_ministerial_position", "happiness_mod_religious_unrest", "happy_war_results_home_region", "maxpop_modifier", "mod_research_rate", "naval_recruitment_points", "policing_cost_mod", "pop_growth_farm", "pop_growth_government", "pop_growth_port_fishing", "pop_growth_tax_modifier", "pop_growth_tax_modifier_multiplier", "pop_growth_tech", "pop_maxpop_modifier_tech_mod", "recruitment_mod_cost_land_all", "recruitment_mod_cost_naval_all", "recruitment_points", "recruitment_points_home_region", "region_turns_to_surrender", "repression_gov_building", "repression_gov_type", "repression_ministers", "repression_policing_cap", "research_points", "research_points_military", "research_points_industry", "research_points_enlightenment", "research_rate_mod", "research_rate_mod_army_tech", "research_rate_mod_navy_tech", "tax_bonus_building", "tax_bonus_character", "tax_cap", "tech_prestige", "trade_route_all_mod_growth_rate", "tw_growth", "tw_growth_education", "tw_growth_government", "tw_growth_home_region", "tw_growth_industry", "tw_growth_mod_all", "tw_growth_port", "tw_growth_roads", "tw_growth_tax_modifier", "tw_growth_tax_modifier_fixed", "tw_growth_technologies", "upkeep_cost_mod_land_all", "upkeep_cost_mod_naval_all", "promote_general_in_field", "promote_admiral_at_sea", "trade_route_cap_land", "trade_route_cap_sea", "enable_gov_republic", "enable_gov_constitutional_monarchy", "enable_top_gallants", "charge_bonus_for_bayonet_units", "mod_ship_movement_campaign", "mod_ship_movement_campaign_top_gallants", "mod_ship_movement_battle", "mod_ship_movement_battle_top_gallants", "mod_reload_land", "mod_misfire_land", "mod_reload_naval", "mod_misfire_naval", "campaign_map_stealth", "prestige_faction_leader", "diplomacy_bonus_faction_leader", "sea_command_attack", "sea_command_defence", "land_command_attack", "land_command_defence", "land_command_ambush", "land_command_siege_attack", "land_command_siege_defence", "land_command_america", "land_command_europe", "land_command_india", "management_army", "management_navy", "management_finance", "management_justice", "subterfuge_spying", "subterfuge_assassination", "subterfuge_counterspying", "security_versus_assassination", "morale", "hates_ottomans", "zeal_america", "zeal_europe", "zeal_india", "diplomatic_negotiation", "subterfuge_sabotage", "morale_land", "morale_naval", "tax_bonus_minister", "command_land_artillery", "command_land_cavalry", "command_land_infantry", "command_naval_frigates", "command_naval_ships_of_the_line", "character_death_chance_turn_end", "hates_europeans", "prestige_enlightenment_generic", "prestige_military_generic", "character_recruitment_general_refill_1", "character_recruitment_general_refill_2", "character_recruitment_admiral_refill_1", "character_recruitment_admiral_refill_2", "tax_bonus_technology", "admin_cost_mod", "diplomacy_bonus_enlightenment", "replenishment_percentage_bonus", "general_admiral_action_point_bonus", "gentleman_happiness_bonus", "tw_growth_factionwide", "reinforcement_distance", "line_of_sight_extension", "observation_balloon", "attrition_increase", "looting_increase", "ship_repair_increase", "mod_land_movement_campaign", "ai_region_resistance_modifier", "attrition_difficulty_addition", "guerrilla_reward_units_count_mod", "guerrilla_experience_mod", "guerrilla_replenishment_percentage_bonus", "guerrilla_cost_mod", "guerrilla_upkeep_mod", "auxiliary_experience_mod", "auxiliary_replenishment_percentage_bonus", "auxiliary_cost_mod", "auxiliary_upkeep_mod", "trade_node_supply_mod", "hates_british", "hates_french", "mod_cost", "mod_gdp", "mod_tw_growth", "mod_commodity_production", "production", "demand", "happiness_character", "happiness_clamour_for_reform", "happiness_culture", "happiness_entertainment", "happiness_government", "happiness_industry", "happiness_tax", "happiness", "damage", "reload_mod", "enable", "happiness", "conversion", "production", "enable", "cost_mod", "upkeep_mod", "melee_attack_mod", "movement_mod", "training_mod", "land_command", "sea_command", "cost_mod", "upkeep_mod", "melee_attack_mod", "experience_mod"];
+
+/// The number of basic (type 1) bonus names: the exe's basic lookup `0x00E222F0` searches only the
+/// first 0x98 entries of [`BONUS_NAMES`] (CONFIRMED), so a name past them is another type's.
+pub const BASIC_BONUS_COUNT: usize = 0x98;
 
 /// The agent bonus names by id (exe bonus type 0, the qualifier being the agent key): the table at
 /// `0x0145B498` (CONFIRMED, read by `0x00E222B0`). Saved type-0 entries carry the id.
 pub const AGENT_BONUS_NAMES: [&str; 3] = ["spawn_rate", "spawn_rate_mod", "cap"];
+
+/// The unit-category bonus names by id (exe bonus type 0xE, the qualifier being the category key):
+/// the table at `0x0145B75C` (CONFIRMED, read by `0x00E22570`). Saved type-0xE entries carry the id.
+pub const UNIT_CATEGORY_BONUS_NAMES: [&str; 7] =
+    ["cost_mod", "upkeep_mod", "melee_attack_mod", "movement_mod", "training_mod", "land_command", "sea_command"];
+
+/// The unit-class bonus names by id (exe bonus type 0xD, the qualifier being the class key): the
+/// table at `0x0145B778` (CONFIRMED, read by `0x00E225B0`). Saved type-0xD entries carry the id.
+pub const UNIT_CLASS_BONUS_NAMES: [&str; 4] = ["cost_mod", "upkeep_mod", "melee_attack_mod", "experience_mod"];
+
+/// The population-class bonus names by id (exe bonus type 6, the qualifier being the class key): the
+/// table at `0x0145B720` (CONFIRMED, read by the population-class lookup `0x00E223B0` for the
+/// `effect_bonus_value_population_class_junction` rows; the getter `0x00E1F050` reads type 6 ids 0, 2
+/// and 5 in `0x008EDF70`). Saved type-6 entries carry the id.
+pub const POP_CLASS_BONUS_NAMES: [&str; 7] = [
+    "happiness_character",
+    "happiness_clamour_for_reform",
+    "happiness_culture",
+    "happiness_entertainment",
+    "happiness_government",
+    "happiness_industry",
+    "happiness_tax",
+];
+
+/// The population class × religion bonus names by id (exe bonus type 7, qualified by both): the one-name
+/// table at `0x0145B73C` (CONFIRMED, read by `0x00E223F0` for the
+/// `effect_bonus_value_population_class_and_religion_junction` rows, record ctor `0x00F74050`). Saved
+/// type-7 entries carry the id.
+pub const POP_CLASS_RELIGION_BONUS_NAMES: [&str; 1] = ["happiness"];
+
+/// The religion bonus names by id (exe bonus type 10, the qualifier being the religion key): the table
+/// at `0x0145B74C` (CONFIRMED, read by the religion lookup `0x00E224B0` for the
+/// `effect_bonus_value_religion_junction` rows). Saved type-10 entries carry the id.
+pub const RELIGION_BONUS_NAMES: [&str; 2] = ["happiness", "conversion"];
 
 /// The key of an agent-keyed bonus (`effect_bonus_value_agent_junction`): exe type 0 under the id of
 /// [`AGENT_BONUS_NAMES`], the same key [`SavedBonus::key`] gives a saved entry, so DB and saved
@@ -132,34 +188,84 @@ pub fn agent_bonus_key(bonus: &str, agent: &str) -> Option<EffectKey> {
     Some(EffectKey { kind: BonusKind::Saved(0), bonus: id.to_string(), qualifier: agent.to_string() })
 }
 
-/// One saved effect entry (`CAMPAIGN_BONUS_VALUE`: u32 type, i32 bonus id, f32 value, qualifier).
+/// One saved effect entry (`CAMPAIGN_BONUS_VALUE`: u32 type, i32 bonus id, f32 value, then the
+/// qualifier strings its type has: [`SavedBonus::qualifier_count`]).
 #[derive(Debug, Clone, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SavedBonus {
     /// Bonus type (1 = basic, 0 = agent, ...).
     pub kind: u32,
-    /// Bonus id (for type 1 an index of [`BONUS_NAMES`]).
+    /// Bonus id: an index of the type's own name table ([`BONUS_NAMES`] for type 1,
+    /// [`AGENT_BONUS_NAMES`] for 0, [`POP_CLASS_BONUS_NAMES`] for 6, [`RELIGION_BONUS_NAMES`] for 10,
+    /// [`UNIT_CLASS_BONUS_NAMES`] for 0xD, [`UNIT_CATEGORY_BONUS_NAMES`] for 0xE, and so on).
     pub bonus: i32,
     /// The value.
     pub value: f32,
-    /// The qualifier (agent type etc.; "" when none).
+    /// The qualifier (agent type, population class etc.; "" when none).
     pub qualifier: String,
+    /// The second qualifier: type 7's religion (its [`SavedBonus::qualifier`] is the population
+    /// class); "" for every other type.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub qualifier2: String,
 }
 
 // Compared bit for bit (the value is stored exactly), so details holding it stay `Eq`.
 impl PartialEq for SavedBonus {
     fn eq(&self, o: &Self) -> bool {
-        self.kind == o.kind && self.bonus == o.bonus && self.value.to_bits() == o.value.to_bits() && self.qualifier == o.qualifier
+        self.kind == o.kind
+            && self.bonus == o.bonus
+            && self.value.to_bits() == o.value.to_bits()
+            && self.qualifier == o.qualifier
+            && self.qualifier2 == o.qualifier2
     }
 }
 impl Eq for SavedBonus {}
 
+/// Joins type 7's two qualifiers in its [`EffectKey`] qualifier (class, then religion), so entries
+/// that differ only in religion stay apart, as the exe's key (type, qualifier 1, qualifier 2, id)
+/// keeps them; neither key holds a `|`. [`add_saved`] splits it back.
+const TYPE7_QUALIFIER_SEPARATOR: char = '|';
+
 impl SavedBonus {
-    /// The key this entry adds to: type 1 by its engine name, other types kept raw.
+    /// How many qualifier strings follow the value in a `CAMPAIGN_BONUS_VALUE` of type `kind`
+    /// (CONFIRMED: the reader `0x00DF0D10` and the writer `0x00E02F80` switch on the type alike): two
+    /// for 7 (population class, then religion), one for 0, 2, 3, 6 and 8..=0xE, none for 1 and any
+    /// other type.
+    pub fn qualifier_count(kind: u32) -> usize {
+        match kind {
+            7 => 2,
+            0 | 2 | 3 | 6 | 8..=0xE => 1,
+            _ => 0,
+        }
+    }
+
+    /// The key this entry adds to: type 1 by its engine name, type 6 (population class), 7
+    /// (population class × religion, [`EffectKey::pop_class_religion`]), 10 (religion), 0xD (unit
+    /// class) and 0xE (unit category) by their bonus names, the key the DB junctions compile to, so
+    /// saved and DB sources add up (the exe's `PriceRecruitableEntry` `0x00B0D220` reads the saved
+    /// type-0xE `cost_mod`); other types, and ids outside a table, kept raw (type 7 with both
+    /// qualifiers).
     pub fn key(&self) -> EffectKey {
-        match usize::try_from(self.bonus).ok().and_then(|i| BONUS_NAMES.get(i)) {
-            Some(name) if self.kind == 1 => EffectKey::basic(name),
-            _ => EffectKey { kind: BonusKind::Saved(self.kind), bonus: self.bonus.to_string(), qualifier: self.qualifier.clone() },
+        let named = |names: &[&'static str]| usize::try_from(self.bonus).ok().and_then(|i| names.get(i).copied());
+        let (kind, name) = match self.kind {
+            1 => (BonusKind::Basic, named(&BONUS_NAMES[..BASIC_BONUS_COUNT])),
+            6 => (BonusKind::PopClass, named(&POP_CLASS_BONUS_NAMES)),
+            7 => (BonusKind::PopClassReligion, named(&POP_CLASS_RELIGION_BONUS_NAMES)),
+            10 => (BonusKind::Religion, named(&RELIGION_BONUS_NAMES)),
+            0xE => (BonusKind::UnitCategory, named(&UNIT_CATEGORY_BONUS_NAMES)),
+            0xD => (BonusKind::UnitClass, named(&UNIT_CLASS_BONUS_NAMES)),
+            _ => (BonusKind::Saved(self.kind), None),
+        };
+        match name {
+            Some(name) if kind == BonusKind::Basic => EffectKey::basic(name),
+            Some(name) if kind == BonusKind::PopClassReligion => EffectKey::pop_class_religion(name, &self.qualifier, &self.qualifier2),
+            Some(name) => EffectKey { kind, bonus: name.to_string(), qualifier: self.qualifier.clone() },
+            None if self.kind == 7 => EffectKey {
+                kind: BonusKind::Saved(7),
+                bonus: self.bonus.to_string(),
+                qualifier: format!("{}{TYPE7_QUALIFIER_SEPARATOR}{}", self.qualifier, self.qualifier2),
+            },
+            None => EffectKey { kind: BonusKind::Saved(self.kind), bonus: self.bonus.to_string(), qualifier: self.qualifier.clone() },
         }
     }
 }
@@ -570,6 +676,7 @@ pub fn apply_start_handicaps(model: &mut CampaignModel) {
     let humans = model.turn.humans.clone();
     let player = humans.first().and_then(|h| model.world.faction_details.get(h)).map_or(0, |d| d.difficulty);
     let rules = &model.rules.effects;
+    let mut outside = std::collections::BTreeSet::new();
     for (id, d) in &mut model.world.faction_details {
         let human = humans.contains(id);
         if !human {
@@ -578,35 +685,69 @@ pub fn apply_start_handicaps(model: &mut CampaignModel) {
         let mut entries = d.bonus_base.clone();
         if let Some(set) = rules.difficulty.get(&(d.difficulty.clamp(-2, 2), human)) {
             for (k, v) in &set.values {
-                add_saved(&mut entries, k, *v);
+                if add_saved(&mut entries, k, *v) != SavedAdd::Named {
+                    outside.insert(k);
+                }
             }
         }
         d.bonus_with_difficulty = entries;
     }
+    // Logged once per key, not once per faction.
+    for k in outside {
+        log::warn!("difficulty handicap bonus {k:?} is not in the exe's bonus-name table for its type: saved under the table's count as its id, as the exe's compiler does (0x00E222F0, 0x00E22570), or left out if a raw key has no numeric id");
+    }
+}
+
+/// How [`add_saved`] stored a key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SavedAdd {
+    /// Under its name's id in its type's table.
+    Named,
+    /// Under the table's count as its id: a name outside its type's table.
+    OutsideTable,
+    /// Not at all: a raw key whose id is not a number (no source makes one).
+    NoId,
 }
 
 /// Adds `value` under `key` to saved entries (the exe's add-one, `0x00E04BC0`): an existing entry of
-/// the same key grows, else a new one goes in after the last entry with a smaller (type, id). Keys
-/// that have no saved form (qualified kinds other than [`BonusKind::Saved`]) are skipped (PROVISIONAL:
-/// the handicap rows only map to basic bonuses).
-fn add_saved(entries: &mut Vec<SavedBonus>, key: &EffectKey, value: f32) {
-    let (kind, bonus, qualifier) = match key.kind {
-        BonusKind::Basic => match BONUS_NAMES.iter().position(|n| *n == key.bonus) {
-            Some(i) => (1, i as i32, String::new()),
-            None => return,
-        },
-        BonusKind::Saved(t) => match key.bonus.parse() {
-            Ok(b) => (t, b, key.qualifier.clone()),
-            Err(_) => return,
-        },
-        _ => return,
+/// the same key grows, else a new one goes in after the last entry with a smaller (type, id): the
+/// inverse of [`SavedBonus::key`]. A name outside its type's table (an agent-keyed name outside
+/// [`AGENT_BONUS_NAMES`] included) goes in under the table's count as its id, as the exe's compiler
+/// stores it: each bonus-name lookup returns the count for an unknown name and its key builder keeps
+/// it (`0x00E222F0` basic, `0x00E222B0` agent, `0x00E223B0` population class, `0x00E223F0` population
+/// class × religion, `0x00E224B0` religion, `0x00E22570` unit category, `0x00E225B0` unit class;
+/// CONFIRMED). No getter reads that id, so it only shows in the saved list. The caller logs anything but [`SavedAdd::Named`].
+#[must_use]
+fn add_saved(entries: &mut Vec<SavedBonus>, key: &EffectKey, value: f32) -> SavedAdd {
+    // Type 7 carries its two qualifiers joined ([`EffectKey::pop_class_religion`]); every other type one.
+    let (q1, q2) = match key.qualifier.split_once(TYPE7_QUALIFIER_SEPARATOR) {
+        Some((class, religion)) if matches!(key.kind, BonusKind::PopClassReligion | BonusKind::Saved(7)) => (class, religion),
+        _ => (key.qualifier.as_str(), ""),
     };
-    if let Some(e) = entries.iter_mut().find(|e| e.kind == kind && e.bonus == bonus && e.qualifier == qualifier) {
+    let named = |kind: u32, names: &[&str]| {
+        let (i, how) = names.iter().position(|n| *n == key.bonus).map_or((names.len(), SavedAdd::OutsideTable), |i| (i, SavedAdd::Named));
+        Some((kind, i32::try_from(i).ok()?, how))
+    };
+    let saved = match key.kind {
+        BonusKind::Basic => named(1, &BONUS_NAMES[..BASIC_BONUS_COUNT]),
+        BonusKind::Agent => named(0, &AGENT_BONUS_NAMES),
+        BonusKind::PopClass => named(6, &POP_CLASS_BONUS_NAMES),
+        BonusKind::PopClassReligion => named(7, &POP_CLASS_RELIGION_BONUS_NAMES),
+        BonusKind::Religion => named(10, &RELIGION_BONUS_NAMES),
+        BonusKind::UnitClass => named(0xD, &UNIT_CLASS_BONUS_NAMES),
+        BonusKind::UnitCategory => named(0xE, &UNIT_CATEGORY_BONUS_NAMES),
+        BonusKind::Saved(t) => key.bonus.parse().ok().map(|b| (t, b, SavedAdd::Named)),
+    };
+    let Some((kind, bonus, how)) = saved else { return SavedAdd::NoId };
+    // Type 1 has no qualifier.
+    let (qualifier, qualifier2) = if kind == 1 { (String::new(), String::new()) } else { (q1.to_string(), q2.to_string()) };
+    if let Some(e) = entries.iter_mut().find(|e| e.kind == kind && e.bonus == bonus && e.qualifier == qualifier && e.qualifier2 == qualifier2) {
         e.value += value;
-        return;
+        return how;
     }
     let at = entries.iter().rposition(|e| (e.kind, e.bonus) <= (kind, bonus)).map_or(0, |i| i + 1);
-    entries.insert(at, SavedBonus { kind, bonus, value, qualifier });
+    entries.insert(at, SavedBonus { kind, bonus, value, qualifier, qualifier2 });
+    how
 }
 
 
@@ -701,10 +842,106 @@ mod tests {
     /// (`0x0145B498`), so they add up; a name outside the table has none.
     #[test]
     fn an_agent_bonus_from_the_db_adds_to_the_saved_one() {
-        let saved = SavedBonus { kind: 0, bonus: 2, value: 1.0, qualifier: "General".into() };
+        let saved = SavedBonus { kind: 0, bonus: 2, value: 1.0, qualifier: "General".into(), ..Default::default() };
         assert_eq!(agent_bonus_key("cap", "General"), Some(saved.key()));
         assert_eq!(agent_bonus_key("spawn_rate", "spy").map(|k| k.bonus), Some("0".into()));
         assert_eq!(agent_bonus_key("not_an_agent_bonus", "spy"), None);
+    }
+
+    /// A saved unit-category (type 0xE) or unit-class (type 0xD) entry reads under the DB junction's
+    /// key (`0x0145B75C`, `0x0145B778`), so the recruit price sees the saved Spanish `cost_mod` +25 on
+    /// `naval_merchant` (the evidence save's Spain miss); `add_saved` writes it back unchanged.
+    #[test]
+    fn a_saved_unit_category_or_class_bonus_reads_under_the_db_key() {
+        let cat = SavedBonus { kind: 0xE, bonus: 0, value: 25.0, qualifier: "naval_merchant".into(), ..Default::default() };
+        let class = SavedBonus { kind: 0xD, bonus: 3, value: 2.0, qualifier: "infantry".into(), ..Default::default() };
+        let set = saved_set(&[cat.clone(), class.clone()]);
+        assert_eq!(set.get_qualified(BonusKind::UnitCategory, "cost_mod", "naval_merchant"), 25.0);
+        assert_eq!(set.get_qualified(BonusKind::UnitClass, "experience_mod", "infantry"), 2.0);
+        // An id outside the table stays raw.
+        let odd = SavedBonus { kind: 0xE, bonus: 7, value: 1.0, qualifier: "x".into(), ..Default::default() };
+        assert_eq!(odd.key().kind, BonusKind::Saved(0xE));
+        let mut entries = Vec::new();
+        for e in [&class, &cat] {
+            assert_eq!(add_saved(&mut entries, &e.key(), e.value), SavedAdd::Named);
+        }
+        assert_eq!(entries, vec![class, cat]);
+        // The name tables are the tail of the shared bonus-name memory.
+        assert_eq!(BONUS_NAMES[173..180], UNIT_CATEGORY_BONUS_NAMES);
+        assert_eq!(BONUS_NAMES[180..], UNIT_CLASS_BONUS_NAMES);
+    }
+
+    /// Saved types 6 (population class) and 10 (religion) read under the DB keys and write back
+    /// unchanged; type 7 (population class × religion, two qualifiers) reads under both (`0x00DF0D10`).
+    #[test]
+    fn a_saved_population_class_or_religion_bonus_reads_under_the_db_key() {
+        let pop = SavedBonus { kind: 6, bonus: 6, value: -2.0, qualifier: "upper".into(), ..Default::default() };
+        let rel = SavedBonus { kind: 10, bonus: 1, value: 0.5, qualifier: "rel_catholic".into(), ..Default::default() };
+        let set = saved_set(&[pop.clone(), rel.clone()]);
+        assert_eq!(set.get_qualified(BonusKind::PopClass, "happiness_tax", "upper"), -2.0);
+        assert_eq!(set.get_qualified(BonusKind::Religion, "conversion", "rel_catholic"), 0.5);
+        let both = SavedBonus { kind: 7, bonus: 0, value: 1.0, qualifier: "upper".into(), qualifier2: "rel_catholic".into() };
+        assert_eq!(both.key(), EffectKey::pop_class_religion("happiness", "upper", "rel_catholic"));
+        let mut entries = Vec::new();
+        for e in [&rel, &pop] {
+            assert_eq!(add_saved(&mut entries, &e.key(), e.value), SavedAdd::Named);
+        }
+        assert_eq!(entries, vec![pop, rel]);
+        // Each table is its slice of the shared bonus-name memory.
+        assert_eq!(BONUS_NAMES[158..165], POP_CLASS_BONUS_NAMES);
+        assert_eq!(BONUS_NAMES[165..166], POP_CLASS_RELIGION_BONUS_NAMES);
+        assert_eq!(BONUS_NAMES[169..171], RELIGION_BONUS_NAMES);
+    }
+
+    /// polish20: a saved type-7 entry keeps both qualifiers (population class, then religion; the
+    /// exe's reader `0x00DF0D10` and writer `0x00E02F80`): two entries that differ only in religion
+    /// stay apart in the set, and adding their keys back gives the same entries.
+    #[test]
+    fn a_saved_population_class_and_religion_bonus_keeps_both_qualifiers() {
+        let catholic = SavedBonus { kind: 7, bonus: 0, value: 1.0, qualifier: "upper".into(), qualifier2: "rel_catholic".into() };
+        let protestant = SavedBonus { kind: 7, bonus: 0, value: 3.0, qualifier: "upper".into(), qualifier2: "rel_protestant".into() };
+        let set = saved_set(&[catholic.clone(), protestant.clone()]);
+        assert_eq!(set.values.len(), 2, "{set:?}");
+        assert_eq!(set.values.get(&catholic.key()), Some(&1.0));
+        assert_eq!(set.values.get(&protestant.key()), Some(&3.0));
+        let mut entries = Vec::new();
+        for e in [&catholic, &protestant] {
+            assert_eq!(add_saved(&mut entries, &e.key(), e.value), SavedAdd::Named);
+        }
+        assert_eq!(entries, vec![catholic.clone(), protestant]);
+        // Adding to an existing entry grows it, matched on both qualifiers.
+        assert_eq!(add_saved(&mut entries, &catholic.key(), 2.0), SavedAdd::Named);
+        assert_eq!(entries[0].value, 3.0);
+        assert_eq!(entries.len(), 2);
+        // polish21: the DB junction's key (`effect_bonus_value_population_class_and_religion_junction`,
+        // record ctor `0x00F74050`) is the saved entry's, so both sources add up; a bonus outside the
+        // one-name table goes in under id 1, as `0x00E223F0` returns.
+        assert_eq!(add_saved(&mut entries, &EffectKey::pop_class_religion("happiness", "upper", "rel_protestant"), 1.0), SavedAdd::Named);
+        assert_eq!((entries[1].value, entries.len()), (4.0, 2));
+        assert_eq!(add_saved(&mut entries, &EffectKey::pop_class_religion("nonsense", "lower", "rel_sikh"), 1.0), SavedAdd::OutsideTable);
+        assert_eq!((entries[2].kind, entries[2].bonus, entries[2].qualifier.as_str(), entries[2].qualifier2.as_str()), (7, 1, "lower", "rel_sikh"));
+        // The qualifier counts of the exe's reader and writer.
+        assert_eq!([0, 1, 2, 3, 4, 5, 6, 7, 8, 0xC, 0xE, 0xF].map(SavedBonus::qualifier_count), [1, 0, 1, 1, 0, 0, 1, 2, 1, 1, 1, 0]);
+    }
+
+    /// A name outside its type's table goes in under the table's count, as the exe's compiler stores
+    /// it (`0x00E22570`, `0x00E222F0`); a basic name is looked up only in the first 0x98 names.
+    #[test]
+    fn a_name_outside_its_table_is_saved_under_the_table_count() {
+        let mut entries = Vec::new();
+        let cat = EffectKey { kind: BonusKind::UnitCategory, bonus: "nonsense".into(), qualifier: "naval_merchant".into() };
+        assert_eq!(add_saved(&mut entries, &cat, 1.0), SavedAdd::OutsideTable);
+        assert_eq!(entries[0], SavedBonus { kind: 0xE, bonus: 7, value: 1.0, qualifier: "naval_merchant".into(), ..Default::default() });
+        // `conversion` is a religion name (id 170), not a basic one.
+        assert_eq!(add_saved(&mut entries, &EffectKey::basic("conversion"), 2.0), SavedAdd::OutsideTable);
+        assert_eq!((entries[0].kind, entries[0].bonus), (1, 0x98));
+        assert_eq!(SavedBonus { kind: 1, bonus: 0x98, value: 0.0, qualifier: String::new(), ..Default::default() }.key().kind, BonusKind::Saved(1));
+        let agent = EffectKey { kind: BonusKind::Agent, bonus: "nonsense".into(), qualifier: "spy".into() };
+        assert_eq!(add_saved(&mut entries, &agent, 3.0), SavedAdd::OutsideTable);
+        assert_eq!((entries[0].kind, entries[0].bonus), (0, 3));
+        let raw = EffectKey { kind: BonusKind::Saved(2), bonus: "x".into(), qualifier: String::new() };
+        assert_eq!(add_saved(&mut entries, &raw, 1.0), SavedAdd::NoId);
+        assert_eq!(entries.len(), 3);
     }
 
     #[test]

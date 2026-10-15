@@ -346,7 +346,8 @@ impl ScriptHost {
             CampaignEvent::ResearchCompleted { faction, .. } => c.faction = faction_of(*faction),
             CampaignEvent::BattleCompleted { attacker_faction, .. } => c.faction = faction_of(*attacker_faction),
             CampaignEvent::BuildingConstructionIssuedByPlayer { region }
-            | CampaignEvent::BuildingCompleted { region, .. } => {
+            | CampaignEvent::BuildingCompleted { region, .. }
+            | CampaignEvent::CampaignBuildingDamaged { region, .. } => {
                 if let Some(r) = w.regions.get(region) {
                     c.region = Some(r.key.clone());
                     c.settlement = Some(r.settlement.key.clone());
@@ -396,7 +397,9 @@ impl ScriptHost {
                 c.faction = w.characters.get(agent).and_then(|ch| faction_of(ch.faction));
             }
             CampaignEvent::StanceChanged { .. } => {}
-            CampaignEvent::GovernmentChanged { .. } | CampaignEvent::ConstructionItemDropped { .. } => {}
+            CampaignEvent::GovernmentChanged { .. }
+            | CampaignEvent::ConstructionItemDropped { .. }
+            | CampaignEvent::FactionDestroyed { .. } => {}
         }
         c
     }

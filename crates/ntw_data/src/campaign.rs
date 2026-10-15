@@ -323,6 +323,19 @@ db_record! {
 }
 
 db_record! {
+    /// `region_unit_resources` (`ss`, 37 rows): the unit resources a region can hold (`REGION/RESOURCES_ARRAY`)
+    /// and a unit can need (`units` #14). The units loader `0x00EDC000` looks each units #14 up in this table
+    /// and drops the unit when it is not a key (every `units` read through [`crate::load_table`] does the same, CONFIRMED).
+    pub struct RegionUnitResourceRecord in "region_unit_resources", key = key {
+        /// #0 H: resource key, e.g. `global`, `horses` (the string `0x00E29830` hashes).
+        key: String,
+        /// #1 M: English development name, e.g. "Worldwide" (the game shows
+        /// `region_unit_resources_string_<key>` from the text files).
+        dev_name: String,
+    }
+}
+
+db_record! {
     /// `campaign_map_slots` (`sssib`, 145 rows): resource slots on the map.
     pub struct MapSlotRecord in "campaign_map_slots", key = key {
         /// #0 H: slot key, the ESF `REGION_SLOT` #3 string, e.g. `gold:eur_austria:rauris`.
@@ -878,6 +891,8 @@ pub struct CampaignTables {
     pub unit_groupings: Table<UnitGroupingPermission>,
     /// `units_to_gov_type_permissions`.
     pub unit_governments: Table<UnitGovernmentPermission>,
+    /// `region_unit_resources`.
+    pub region_unit_resources: Table<RegionUnitResourceRecord>,
     /// `campaign_map_slots`.
     pub map_slots: Table<MapSlotRecord>,
     /// `campaign_map_towns_and_ports`.

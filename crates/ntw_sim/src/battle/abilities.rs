@@ -14,13 +14,15 @@
 //! | `change_shot_type(s)` | `0x00614090` → `0x00645170` | (shot type enum `0x00F59030`) | not followed |
 //! | `defend_building(b, run)` | `0x00613460` → `0x00645350` | order `0x005990D0` | not followed |
 //!
-//! CONFIRMED: the bindings, the commands, the fields and the skirmish check below. The model is
-//! unit-level (no soldiers, no formation shapes), so the formation geometry the checks use is a
-//! PROVISIONAL stand-in ([`frontage_m`], [`depth_m`]).
+//! CONFIRMED: the bindings, the commands, the fields and the skirmish check below. The checks use
+//! the squads' boxes measured from the men ([`super::model::LandUnit::squad_box`]), the men laid
+//! out with the spacing the battle setup sets, else a PROVISIONAL stand-in ([`FORMATION_RANKS`],
+//! [`FILE_SPACING_M`]).
 
 use std::f32::consts::TAU;
 
 use super::attributes::{ability, shot_type_value};
+use super::march::SquadBox;
 use super::model::{Battle, dist2};
 use super::morale::{self, ScriptMorale};
 
@@ -45,18 +47,20 @@ pub const SKIRMISH_KEEP_ANGLE: u16 = 0x0CCD;
 /// The evade destination is this far along the evade direction (`0x005859D0`: 5000.0,
 /// CONFIRMED), then kept inside the playable area (INFERRED from the path call `0x007FCFF0`).
 pub const SKIRMISH_EVADE_DISTANCE_M: f32 = 5000.0;
-/// The room-to-evade test looks this many seconds of the unit's speed ahead, at least the
-/// formation depth (`0x0057A6F0`: 3.0, CONFIRMED).
+/// The room-to-evade test looks this many seconds of the unit's speed ahead (`0x0057A6F0`: 3.0,
+/// CONFIRMED), at least the formation radius (squad summary `+0x670`, [`Battle::evade_room`]).
 pub const SKIRMISH_EDGE_LOOKAHEAD_S: f32 = 3.0;
-/// PROVISIONAL stand-in for the formation shape (`+0x650` width / `+0x670` depth of the unit's
-/// formation object): the model has no soldiers, so a unit is `men / 3` files 1 m apart, 3 ranks
-/// deep.
+/// PROVISIONAL stand-in for the formation shape (width `+0x650` / depth `+0x654` of the squad
+/// summary at squad `+0x62C`) when the battle setup set none: a unit is `ceil(men / 3)` files 1 m
+/// apart, 3 ranks deep.
 pub const FORMATION_RANKS: f32 = 3.0;
 /// See [`FORMATION_RANKS`] (PROVISIONAL).
 pub const FILE_SPACING_M: f32 = 1.0;
 
 /// Ability enum values used here (`0x0131C3A0`, CONFIRMED; see [`super::attributes::ABILITY_NAMES`]).
 pub mod ability_ids {
+    /// `light_infantry_behaviour`.
+    pub const LIGHT_INFANTRY_BEHAVIOUR: u8 = 4;
     /// `fougasse_basic`.
     pub const FOUGASSE_BASIC: u8 = 9;
     /// `fougasse_improved`.
@@ -69,6 +73,8 @@ pub mod ability_ids {
     pub const EARTHWORKS: u8 = 13;
     /// `gabionade`.
     pub const GABIONADE: u8 = 14;
+    /// `dismount`.
+    pub const DISMOUNT: u8 = 15;
     /// `unlimber`.
     pub const UNLIMBER: u8 = 16;
 }
@@ -207,13 +213,22 @@ pub fn defence_pieces(u: &super::model::LandUnit, kind: u8) -> Vec<Defence> {
 }
 
 impl super::model::LandUnit {
-    /// The formation's width in metres: [`super::model::LandUnit::formation_width`] when known,
-    /// narrowed with the files [`super::model::LandUnit::files`] caps at the men (a block of fewer
-    /// men than its files is only as wide as its men, so they do not spread out), else the
-    /// PROVISIONAL [`frontage_m`].
+    /// The formation's width in metres: the squad summary's (`+0x650`), measured from the men where
+    /// they stand ([`super::model::LandUnit::squad_box`], `0x0053D1A0`, CONFIRMED static): the
+    /// box across the men's heading, plus twice the largest man radius.
     pub fn width(&self) -> f32 {
+        self.squad_box().width
+    }
+
+    /// The width of a formation laid out now over the living men: the unit's
+    /// [`super::model::LandUnit::formation_width`] when known, narrowed with the files
+    /// [`super::model::LandUnit::files`] caps at the living men (a block of fewer men than its files
+    /// is only as wide as its men, so they do not spread out), else those files at the PROVISIONAL
+    /// [`FILE_SPACING_M`]. Both read the one count the exe's files cap reads (the living men, unit
+    /// `+0x18`), so a fresh layout's width and grid agree.
+    pub(super) fn fresh_width(&self) -> f32 {
         if self.formation_width <= 0.0 {
-            return frontage_m(self.men);
+            return self.files() as f32 * FILE_SPACING_M;
         }
         if self.formation_files > 0 {
             self.formation_width * self.files() as f32 / self.formation_files as f32
@@ -222,18 +237,24 @@ impl super::model::LandUnit {
         }
     }
 
-    /// The formation's depth in metres: the ranks of [`super::model::LandUnit::formation_grid`] (the
-    /// one layout the men's places use) times
-    /// [`super::model::LandUnit::formation_rank_spacing`], else the PROVISIONAL [`FILE_SPACING_M`].
-    pub fn depth(&self) -> f32 {
-        let spacing = if self.formation_rank_spacing > 0.0 { self.formation_rank_spacing } else { FILE_SPACING_M };
-        self.formation_grid().1 as f32 * spacing
+    /// The rank pitch in metres: [`super::model::LandUnit::formation_rank_spacing`], else the
+    /// PROVISIONAL [`FILE_SPACING_M`].
+    pub fn rank_spacing(&self) -> f32 {
+        if self.formation_rank_spacing > 0.0 { self.formation_rank_spacing } else { FILE_SPACING_M }
     }
-}
 
-/// PROVISIONAL formation width of a unit of `men` (see [`FORMATION_RANKS`]).
-pub fn frontage_m(men: u32) -> f32 {
-    (men as f32 / FORMATION_RANKS).max(1.0) * FILE_SPACING_M
+    /// The formation's depth in metres: the squad summary's (`+0x654`), measured as
+    /// [`super::model::LandUnit::width`] along the men's heading.
+    pub fn depth(&self) -> f32 {
+        self.squad_box().depth
+    }
+
+    /// The formation's radius in metres: the squad summary's (`+0x670`, `0x0053C3D0`, CONFIRMED
+    /// static), the distance from the measured box's centre to the farthest man (no man radius
+    /// added).
+    pub fn radius(&self) -> f32 {
+        self.squad_box().radius
+    }
 }
 
 /// The 16-bit angle of a direction `(x, y)` (y = the map's z): `atan2(x, y) × 65536 / 2π`, as
@@ -269,14 +290,24 @@ struct Strip {
 }
 
 impl Strip {
-    /// Distance from `p` to the rectangle (0 inside).
-    fn distance(&self, p: (f32, f32)) -> f32 {
-        let v = (p.0 - self.start.0, p.1 - self.start.1);
-        let along = v.0 * self.dir.0 + v.1 * self.dir.1;
-        let across = (self.dir.0 * v.1 - self.dir.1 * v.0).abs();
-        let dx = (-along).max(along - self.length).max(0.0);
-        let dy = (across - self.width * 0.5).max(0.0);
-        (dx * dx + dy * dy).sqrt()
+    /// Whether the strip and the squad box `b` (summary `+0x18`: centre, heading, width across,
+    /// depth along) overlap, edges included: `0x0055A1B0` (CONFIRMED static: a corner of either
+    /// inside the other, else an edge of one crossing an edge of the other), here as the
+    /// separating-axis test over the four edge normals, which gives the same answer for two
+    /// rectangles.
+    fn overlaps(&self, b: &SquadBox) -> bool {
+        let (f1, f2) = (self.dir, b.front());
+        let half = (self.length * 0.5, self.width * 0.5);
+        let c1 = (self.start.0 + f1.0 * half.0, self.start.1 + f1.1 * half.0);
+        let d = (b.centre.0 - c1.0, b.centre.1 - c1.1);
+        let dot = |a: (f32, f32), v: (f32, f32)| a.0 * v.0 + a.1 * v.1;
+        let perp = |a: (f32, f32)| (-a.1, a.0);
+        let reach = |f: (f32, f32), (along, across): (f32, f32), axis: (f32, f32)| {
+            along * dot(f, axis).abs() + across * dot(perp(f), axis).abs()
+        };
+        [f1, perp(f1), f2, perp(f2)].into_iter().all(|axis| {
+            dot(d, axis).abs() <= reach(f1, half, axis) + reach(f2, (b.depth * 0.5, b.width * 0.5), axis)
+        })
     }
 
     /// The four corners.
@@ -325,32 +356,47 @@ impl Battle {
     }
 
     /// Enemies of unit `idx` that the checks look at: active, with men, not routing, within
-    /// [`SKIRMISH_SCAN_RANGE_M`], nearest first (PROVISIONAL order: the original walks a spatial
-    /// query `0x00701310`).
+    /// [`SKIRMISH_SCAN_RANGE_M`] of its box's edge (the query `0x00701310`, called at `0x0054CAB9`:
+    /// [`morale::near_units`]), nearest box centre first (PROVISIONAL order: the original walks
+    /// the query's spatial grid).
     fn skirmish_enemies(&self, idx: usize) -> Vec<usize> {
         let me = &self.units[idx];
-        let r2 = SKIRMISH_SCAN_RANGE_M * SKIRMISH_SCAN_RANGE_M;
+        let centre = me.squad_box().centre;
         let mut v: Vec<(f32, usize)> = self
             .units
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.side != me.side && e.active && e.men > 0 && !e.morale.is_routing_or_shattered())
-            .map(|(j, e)| (dist2(me.position, e.position), j))
-            .filter(|(d, _)| *d <= r2)
+            .filter(|(_, e)| {
+                e.side != me.side
+                    && e.active
+                    && e.men > 0
+                    && !e.morale.is_routing_or_shattered()
+                    && morale::near_units(me, e, SKIRMISH_SCAN_RANGE_M)
+            })
+            .map(|(j, e)| (dist2(centre, e.squad_box().centre), j))
             .collect();
         v.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
         v.into_iter().map(|(_, j)| j).collect()
     }
 
-    /// The skirmish check `0x0054C9D0` (CONFIRMED structure and constants; unit-level geometry):
-    /// 1. An enemy moving within 150 m projects a strip along its movement, its width wide and its
-    ///    speed × 8 s long (13 s if the last result was 1). If the strip reaches the unit and no
-    ///    friendly non-skirmishing unit that is nearer that enemy stands on the strip's centre
-    ///    line, the result is 1 when the unit has room to evade ([`Battle::evade_room`]), else 2.
-    /// 2. Otherwise, if the unit itself is moving, a strip along its own movement (its width, its
-    ///    missile range capped at 50 m long) that reaches an enemy other than its fire target
-    ///    gives 2.
+    /// The skirmish check `0x0054C9D0` (CONFIRMED structure, constants and geometry; the boxes are
+    /// the squads' measured boxes, [`super::model::LandUnit::squad_box`]):
+    /// 1. An enemy moving within 150 m projects a strip from its box's front centre (`+0x9C`)
+    ///    along its movement, its width wide and its speed × 8 s long (13 s if the last result was
+    ///    1). If the strip overlaps the unit's box ([`Strip::overlaps`], `0x0054CC1E`) and no
+    ///    friendly non-skirmishing unit whose box centre is no farther from the enemy's box centre
+    ///    than the unit's box centre is from the strip's start (`0x0054CD16`) has its box on the
+    ///    strip's centre line (`0x0054CD7E`), the result is 1 when the unit has room to evade
+    ///    ([`Battle::evade_room`]), else 2.
+    /// 2. Otherwise, if the unit itself is moving, a strip from its own box's front centre along
+    ///    its movement (its width, its missile range capped at 50 m long) that overlaps the box of
+    ///    an enemy other than its fire target gives 2 (`0x0054CE77`).
     /// 3. Otherwise 0.
+    ///
+    /// PROVISIONAL: the friends looked at are those within [`SKIRMISH_SCAN_RANGE_M`] of the unit's
+    /// box centre (the exe's query `0x006C9C60` is not traced). INFERRED: the centre line meets a
+    /// friend's box when it overlaps it; the exe's segment test `0x00559E20` → `0x00501A60` checks
+    /// the box's four edges, whose handling of a line wholly inside the box is not traced.
     pub fn skirmish_check(&self, idx: usize) -> u8 {
         if !self.skirmish_gate(idx) {
             return 0;
@@ -360,25 +406,30 @@ impl Battle {
         let range = me.missile_range(self.kv_rules.fire_on_walls_range_modifier).min(SKIRMISH_RANGE_CAP_M);
         let own = self.moving_dir(idx);
         let target = me.fire_target;
-        let my_half = me.width() * 0.5;
+        let mine = me.squad_box();
         for j in self.skirmish_enemies(idx) {
             let e = &self.units[j];
+            let theirs = e.squad_box();
             if let Some((edir, espeed)) = self.moving_dir(j) {
                 let len = espeed * look;
-                let strip = Strip { start: e.position, dir: edir, length: len, width: e.width() };
-                if strip.distance(me.position) <= my_half {
+                let strip = Strip { start: theirs.front_centre(), dir: edir, length: len, width: theirs.width };
+                if strip.overlaps(&mine) {
                     let line = Strip { width: 0.0, ..strip };
-                    let d_me = dist2(me.position, e.position);
+                    let d_me = dist2(mine.centre, strip.start);
                     let blocked = self.units.iter().enumerate().any(|(k, f)| {
-                        k != idx
-                            && f.side == me.side
-                            && f.active
-                            && f.men > 0
-                            && !f.morale.is_routing_or_shattered()
-                            && !f.skirmish
-                            && dist2(f.position, me.position) <= SKIRMISH_SCAN_RANGE_M * SKIRMISH_SCAN_RANGE_M
-                            && dist2(f.position, e.position) <= d_me
-                            && line.distance(f.position) <= f.width() * 0.5
+                        if k == idx
+                            || f.side != me.side
+                            || !f.active
+                            || f.men == 0
+                            || f.morale.is_routing_or_shattered()
+                            || f.skirmish
+                        {
+                            return false;
+                        }
+                        let fb = f.squad_box();
+                        dist2(fb.centre, mine.centre) <= SKIRMISH_SCAN_RANGE_M * SKIRMISH_SCAN_RANGE_M
+                            && dist2(fb.centre, theirs.centre) <= d_me
+                            && line.overlaps(&fb)
                     });
                     if !blocked {
                         let a = self.evade_angle(idx);
@@ -389,8 +440,8 @@ impl Battle {
             if let Some((dir, _)) = own
                 && target != Some(e.id)
             {
-                let strip = Strip { start: me.position, dir, length: range, width: me.width() };
-                if strip.distance(e.position) <= e.width() * 0.5 {
+                let strip = Strip { start: mine.front_centre(), dir, length: range, width: mine.width };
+                if strip.overlaps(&theirs) {
                     return 2;
                 }
             }
@@ -480,17 +531,21 @@ impl Battle {
         (best * 2048 + 1024) as u16
     }
 
-    /// The room-to-evade test `0x0057A6F0` (CONFIRMED): a strip along the evade direction, the
-    /// unit's width wide and `max(depth, speed × 3 s)` long, must lie inside the playable area
-    /// (all four corners). Always true without a playable area.
+    /// The room-to-evade test `0x0057A6F0` (CONFIRMED): a strip from the squad box's front centre
+    /// (summary `+0x9C`, read through `0x0053FBD0` at `0x0057A753`,
+    /// [`SquadBox::front_centre`]) along the evade direction, the unit's width wide
+    /// (squad summary `+0x650`) and `max(r, speed × 3 s)` long, must lie inside the playable area
+    /// (all four corners; the exe returns 1 when one is outside, which its caller turns into the
+    /// result 2 at `0x0054CDC3`); `r` is the summary's `+0x670` ([`super::model::LandUnit::radius`]).
+    /// Always true without a playable area.
     pub fn evade_room(&self, idx: usize, angle: u16) -> bool {
         let Some([x0, y0, x1, y1]) = self.playable_area else { return true };
         let u = &self.units[idx];
         let speed = u.move_speed();
         let strip = Strip {
-            start: u.position,
+            start: u.squad_box().front_centre(),
             dir: dir16(angle),
-            length: u.depth().max(speed * SKIRMISH_EDGE_LOOKAHEAD_S),
+            length: u.radius().max(speed * SKIRMISH_EDGE_LOOKAHEAD_S),
             width: u.width(),
         };
         strip.corners().iter().all(|c| x0 <= c.0 && y0 <= c.1 && c.0 < x1 && c.1 < y1)
@@ -568,7 +623,7 @@ impl Battle {
     /// is horse artillery, so every unit starts with skirmish off.
     pub fn skirmish_default(&self, idx: usize) -> bool {
         let u = &self.units[idx];
-        let dismounted = u.active_abilities & (1 << 15) != 0;
+        let dismounted = u.active_abilities & (1 << ability_ids::DISMOUNT) != 0;
         let unlimbered = u.active_abilities & (1 << ability_ids::UNLIMBER) != 0;
         u.attributes.skirmisher
             && !dismounted

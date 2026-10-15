@@ -498,7 +498,7 @@ fn main() {
                 let key = m.world.factions.get(f).map_or("?".to_string(), |x| x.key.clone());
                 let saved = if d.bonus_with_difficulty.is_empty() { &d.bonus_base } else { &d.bonus_with_difficulty };
                 for s in saved.iter().filter(|s| s.kind == 7 || s.qualifier.contains("align") || s.qualifier.contains("rel_")) {
-                    println!("  {key} kind {} bonus {} value {} qualifier {}", s.kind, s.bonus, s.value, s.qualifier);
+                    println!("  {key} kind {} bonus {} value {} qualifier {} {}", s.kind, s.bonus, s.value, s.qualifier, s.qualifier2);
                 }
             }
             continue;
@@ -1237,7 +1237,7 @@ pub fn rgrowth_detail(m: &ntw_sim::campaign::CampaignModel, filter: &str) {
             r.discontent_growth,
             f.map(|f| (f.tax_lower.as_str(), f.tax_upper.as_str())),
         );
-        let holders = r.slots.iter().map(|s| (s.building.as_ref(), s.holder)).chain(std::iter::once((r.road.as_ref(), None)));
+        let holders = r.slots.iter().map(|s| (s.building.as_ref(), s.holder)).chain([(r.road.as_ref(), r.road_holder), (r.fortification.as_ref(), r.fortification_holder)]);
         for (bld, holder) in holders {
             let level = bld.map_or("", |b| b.level_key.as_str());
             let health = bld.map_or(0, |b| b.health);

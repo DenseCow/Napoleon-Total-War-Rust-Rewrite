@@ -18,7 +18,16 @@
 //! `#[serde(default)]` loads from an older save without a version change. A change an old save
 //! cannot express that way (a renamed or reshaped field) bumps [`FORMAT_VERSION`] and adds a step to
 //! [`read`] that converts the older text before it is decoded. A save from a newer version gives
-//! [`FormatError::Newer`].
+//! [`FormatError::Newer`]. A field an old save lacks and no default can stand in for (data the
+//! campaign's start holds) bumps the version too: the older save is converted from the campaign's
+//! start ([`read_with_start`]), and read without it is an error ([`FormatError::NeedsStart`]).
+//!
+//! | version | change |
+//! |---|---|
+//! | 1 | the first |
+//! | 2 | regions keep their unit resources (`Region::unit_resources`, `REGION/RESOURCES_ARRAY`); a version-1 save takes them from the campaign's start |
+//! | 3 | regions keep their road and walls holders (`Region::road_holder`, `Region::fortification_holder`); an older save takes them from the campaign's start |
+//! | 4 | construction items keep their kind (`ConstructionItem::kind`: build, repair, demolish) and their active byte (`ConstructionItem::active`, read active from an older save); an older save's repair, stored as a build of the standing level, is converted (`CampaignModel::convert_legacy_repairs`), and a version 1 or 2 save made mid-round gets back the construction step the turn start ran then (see [`read_with_start`]) |
 //!
 //! **What is saved.** The whole [`CampaignModel`] except the fields marked `serde(skip)` in
 //! `ntw_sim`: game data rebuilt on load (`rules` from the DB, `terrain` from the map), fields the
@@ -39,7 +48,7 @@ use crate::{CampaignInfo, LoadError, LoadedCampaign};
 /// The first bytes of every save in this format.
 pub const MAGIC: &[u8; 16] = b"NAPOLEONRUST\0SAV";
 /// The format version this build writes and the newest it reads.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 4;
 
 /// Everything a save holds besides its header.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -52,7 +61,10 @@ pub struct SaveData {
     pub rebel_faction: Option<FactionId>,
     /// The scripts' `save_value` slots, in order (the values `load_value` gives back).
     pub script_values: Vec<ScriptSaveValue>,
-    /// The scripts' restricted units (the restricted building levels are in the model).
+    /// Legacy: the scripts' restricted units as saves written before `World::restricted_units` kept them
+    /// (read only; [`read`] merges them into the model, which holds them now). Written only when not empty,
+    /// so a save from [`SaveDataRef`] and one from this struct stay identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub restricted_units: Vec<String>,
 }
 
@@ -68,8 +80,6 @@ pub struct SaveDataRef<'a> {
     pub rebel_faction: Option<FactionId>,
     /// See [`SaveData::script_values`].
     pub script_values: Vec<ScriptSaveValue>,
-    /// See [`SaveData::restricted_units`].
-    pub restricted_units: Vec<String>,
 }
 
 /// Why a save in this format could not be read or written.
@@ -82,6 +92,14 @@ pub enum FormatError {
         /// The save's format version.
         found: u32,
     },
+    /// The save is from an older format version that needs the campaign's start to convert
+    /// ([`read_with_start`]), and the start was not given or could not be used.
+    NeedsStart {
+        /// The save's format version.
+        found: u32,
+        /// Why the conversion could not be made.
+        reason: String,
+    },
     /// A section is not valid compressed RON for its type.
     Decode(String),
     /// The data could not be encoded (a value RON cannot represent).
@@ -93,6 +111,9 @@ impl std::fmt::Display for FormatError {
         match self {
             Self::Truncated => write!(f, "the save is truncated"),
             Self::Newer { found } => write!(f, "the save has format version {found}; this NapoleonRust reads up to {FORMAT_VERSION}"),
+            Self::NeedsStart { found, reason } => {
+                write!(f, "the save has format version {found}, which is converted from its campaign's start: {reason}")
+            }
             Self::Decode(e) => write!(f, "the save is damaged: {e}"),
             Self::Encode(e) => write!(f, "cannot encode the save: {e}"),
         }
@@ -175,48 +196,166 @@ pub fn write<D: Serialize>(info: &CampaignInfo, data: &D) -> Result<Vec<u8>, For
     Ok(out)
 }
 
-/// The header and body sections of a save, after the version check.
-fn sections(bytes: &[u8]) -> Result<(&[u8], &[u8]), FormatError> {
+/// The header and body sections of a save and its format version, after the version check.
+fn sections(bytes: &[u8]) -> Result<(u32, &[u8], &[u8]), FormatError> {
     let rest = bytes.strip_prefix(MAGIC.as_slice()).ok_or(FormatError::Truncated)?;
     let word = |b: &[u8]| -> Option<u32> { Some(u32::from_le_bytes(b.get(..4)?.try_into().ok()?)) };
     let version = word(rest).ok_or(FormatError::Truncated)?;
     if version > FORMAT_VERSION {
         return Err(FormatError::Newer { found: version });
     }
-    // Version 1 is the first: older versions to convert do not exist yet.
     let len = word(&rest[4..]).ok_or(FormatError::Truncated)? as usize;
     let rest = &rest[8..];
     if rest.len() < len {
         return Err(FormatError::Truncated);
     }
-    Ok(rest.split_at(len))
+    let (header, body) = rest.split_at(len);
+    Ok((version, header, body))
 }
 
-/// Reads only the header (for the Load Game page).
+/// Reads only the header (for the Load Game page). The header has not changed between versions.
 pub fn read_info(bytes: &[u8]) -> Result<CampaignInfo, FormatError> {
-    decode(sections(bytes)?.0)
+    decode(sections(bytes)?.1)
 }
 
-/// The header and the body exactly as stored (the model without rules).
+/// The header and the body exactly as stored (the model without rules), with the save's format
+/// version. A body older than [`FORMAT_VERSION`] is not converted: it lacks what [`read_with_start`]
+/// adds (a version-1 save's regions have no unit resources here).
+pub fn read_stored(bytes: &[u8]) -> Result<(u32, CampaignInfo, SaveData), FormatError> {
+    let (version, header, body) = sections(bytes)?;
+    Ok((version, decode(header)?, decode(body)?))
+}
+
+/// The header and the body of a save of the current [`FORMAT_VERSION`], exactly as stored (the
+/// model without rules). An older save is [`FormatError::NeedsStart`]: read it with
+/// [`read_with_start`].
 pub fn read_parts(bytes: &[u8]) -> Result<(CampaignInfo, SaveData), FormatError> {
-    let (header, body) = sections(bytes)?;
-    Ok((decode(header)?, decode(body)?))
+    match read_stored(bytes)? {
+        (FORMAT_VERSION, info, data) => Ok((info, data)),
+        (found, ..) => Err(FormatError::NeedsStart { found, reason: "convert it with read_with_start".into() }),
+    }
 }
 
-/// Reads a whole save. The rules are rebuilt from `db` (they are game data, not saved); the map's
-/// movement grid and region links come from the campaign's map as for any load.
+/// Reads a whole save of the current [`FORMAT_VERSION`]. The rules are rebuilt from `db` (they are
+/// game data, not saved); the map's movement grid and region links come from the campaign's map as
+/// for any load. An older save that needs its campaign's start to convert is
+/// [`FormatError::NeedsStart`]; [`crate::source::open`] reads it with [`read_with_start`].
 pub fn read(bytes: &[u8], db: &GameDatabase) -> Result<LoadedCampaign, FormatError> {
-    let (info, data) = read_parts(bytes)?;
+    read_with_start(bytes, db, || Err("no start given (open the save through source::open)".into()))
+}
+
+/// [`read`], converting a save older than [`FORMAT_VERSION`] from `start`, the campaign at its start
+/// (its source's [`new_campaign`](crate::source::CampaignSource::new_campaign) model), called only
+/// for a save older than version 3:
+/// * version 1 → 2: every region takes the unit resources (`RESOURCES_ARRAY`) of the start's region
+///   of the same key. Nothing in the campaign changes a region's resources, so the start's are the
+///   ones the save would hold. A region the start does not have fails the load: never a region left
+///   without its resources (which would drop every unit needing one from its recruitable list and
+///   refund its queued ones at the turn start).
+/// * version 2 → 3: every region takes the road and walls holders of the start's region of the same
+///   key, kept only while that faction still holds one of the save region's slots. A holder changes
+///   only when its faction loses the region (`CampaignModel::change_region_owner` clears it with every
+///   slot that faction holds), so this is exact whenever the start's holder also held a slot there
+///   (or was the start's owner, kept while it still owns the region); any other holder is kept and logged.
+/// * version 3 → 4, with no start: a repair stored as a build of the standing building's level becomes a
+///   repair item (`CampaignModel::convert_legacy_repairs`, once the rules are attached). A version 1 or 2
+///   save also predates construction at the round end: its factions stepped construction at their own turn
+///   start, so those up to the one whose turn it is (the save is made in it) have run this round's step
+///   already, and the round end would run it again. Each item such a faction's turn start stepped (a build
+///   in a slot its region's owner holds, or a repair; never the rebels', which no longer step) gets that
+///   turn back, once. A version 3 save written by a build of the hour before the round-end change has the
+///   same extra step but cannot be told from a later one, and is read as it is.
+pub fn read_with_start(bytes: &[u8], db: &GameDatabase, start: impl FnOnce() -> Result<CampaignModel, String>) -> Result<LoadedCampaign, FormatError> {
+    let (version, info, data) = read_stored(bytes)?;
     let mut model = data.model;
+    if version < 3 {
+        let fail = |reason: String| FormatError::NeedsStart { found: version, reason };
+        let start = start().map_err(fail)?;
+        convert_from_start(version, &mut model, &start).map_err(fail)?;
+        give_back_turn_start_construction(&mut model);
+    }
+    model.world.restricted_units.extend(data.restricted_units);
     crate::attach_rules(&mut model, db, &info.campaign_key);
+    if version < 4 {
+        let n = model.convert_legacy_repairs();
+        if n > 0 {
+            log::info!("Own save format version {version}: {n} repairs stored as builds of the standing level converted");
+        }
+    }
     Ok(LoadedCampaign {
         model,
         info,
         rebel_faction: data.rebel_faction,
         warnings: Vec::new(),
         script_values: data.script_values,
-        restricted_units: data.restricted_units,
     })
+}
+
+/// The [`read_with_start`] steps from `version` to 3, from `start` (the campaign at
+/// its start); an error names what the start lacks.
+fn convert_from_start(version: u32, model: &mut CampaignModel, start: &CampaignModel) -> Result<(), String> {
+    let by_key: std::collections::HashMap<&str, &ntw_sim::campaign::Region> = start.world.regions.values().map(|r| (r.key.as_str(), r)).collect();
+    let mut unheld = 0;
+    for r in model.world.regions.values_mut() {
+        let s = by_key.get(r.key.as_str()).ok_or_else(|| format!("the campaign's start has no region {}", r.key))?;
+        if version < 2 {
+            r.unit_resources.clone_from(&s.unit_resources);
+        }
+        // version < 3 here (the caller converts only older saves).
+        let holds_slot = |slots: &[ntw_sim::campaign::RegionSlot], h: FactionId| slots.iter().any(|slot| slot.holder == Some(h));
+        for (start_holder, holder) in [(s.road_holder, &mut r.road_holder), (s.fortification_holder, &mut r.fortification_holder)] {
+            *holder = start_holder.filter(|&h| {
+                if holds_slot(&s.slots, h) {
+                    // Cleared together with that faction's slots.
+                    holds_slot(&r.slots, h)
+                } else if h == s.owner {
+                    // Cleared when the start's owner loses the region; while it owns it, kept or not
+                    // reads the same (held by the owner).
+                    r.owner == h
+                } else {
+                    // Cleared only if that faction took the region and lost it since: unknown here.
+                    unheld += 1;
+                    true
+                }
+            });
+        }
+    }
+    let regions = model.world.regions.len();
+    if version < 2 {
+        log::info!("Own save format version {version}: unit resources of {regions} regions taken from the campaign's start");
+    }
+    log::info!("Own save format version {version}: road and walls holders of {regions} regions taken from the campaign's start");
+    if unheld > 0 {
+        log::warn!("Own save format version {version}: {unheld} road or walls holders of the campaign's start hold no other slot of their region and do not own it; kept as at the start");
+    }
+    Ok(())
+}
+
+/// The version 1 / 2 → 3 construction step (see [`read_with_start`]): every item the turn starts already run
+/// this round stepped gets one turn back. Runs before the legacy repairs are converted, so a repair is
+/// still a build of the standing level here.
+fn give_back_turn_start_construction(model: &mut CampaignModel) {
+    let Some(current) = model.turn.current else { return };
+    let order = model.world.factions_in_turn_order();
+    let Some(at) = order.iter().position(|&f| f == current) else { return };
+    let stepped: Vec<FactionId> = order[..=at].iter().copied().filter(|&f| !model.is_rebel_faction(f)).collect();
+    let mut n = 0;
+    for reg in model.world.regions.values_mut().filter(|r| stepped.contains(&r.owner)) {
+        let steps: Vec<bool> = reg
+            .construction
+            .iter()
+            .map(|i| reg.slot_held(i.slot) || reg.building_at(i.slot).is_some_and(|b| b.level_key == i.level_key))
+            .collect();
+        for (item, step) in reg.construction.iter_mut().zip(steps) {
+            if step {
+                item.turns_remaining += 1;
+                n += 1;
+            }
+        }
+    }
+    if n > 0 {
+        log::info!("Own save format version below 3: {n} construction items stepped at their faction's turn start this round get that turn back");
+    }
 }
 
 impl From<FormatError> for LoadError {

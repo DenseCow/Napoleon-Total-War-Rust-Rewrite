@@ -69,8 +69,8 @@ campaign_id!(
 );
 
 campaign_id!(
-    /// A fort's id. `REGION/FORT_ARRAY[]`'s leading u32 (the one field the region's reader
-    /// `0x00A51E30` reads itself, CONFIRMED); **what the number identifies is UNKNOWN** -- the
+    /// A fort's id. `REGION/FORT_ARRAY[]`'s leading integer (the one field the region's writer
+    /// `0x00A51E30` writes itself, as ESF type 4 (`i32`), CONFIRMED); **what the number identifies is UNKNOWN** -- the
     /// loader hands it straight to the exe's id-to-object lookup (`0x0105AC60`) as the fort's
     /// object, so it is an id in the model's global id space like every other object
     /// (SAVE_COMPAT.md §3), not necessarily the fort's own. 0 when the record has none.

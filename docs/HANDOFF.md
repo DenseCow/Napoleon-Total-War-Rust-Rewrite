@@ -3,7 +3,7 @@
 Keep this file short. It holds what is true now: replace finished items rather than appending logs.
 Old session logs are in `docs/archive/`.
 
-Last updated: 2026-10-12. Main tests at last full run (2026-10-08): `cargo test --workspace` passes on the install.
+Last updated: 2026-10-13. Main tests at last full run (2026-10-08): `cargo test --workspace` passes on the install.
 
 ## Resume here (2026-10-11)
 
@@ -16,25 +16,19 @@ Last updated: 2026-10-12. Main tests at last full run (2026-10-08): `cargo test 
   merge, applying the worker's BACKLOG ticks/Polish lines in the merge commit → `bash tools/progress.sh`
   → push (the hook syncs public #2) → publish in batches. Running work = the BACKLOG `(running: …)`
   markers and `git worktree list`; merged work = `git log`.
-- **Resume points (2026-10-12 wrap-up, usage 90%; treasury2 and payment-capital merged 2026-10-13):** merged 2026-10-12: ui-fails, self-checks, self-checks2, hud-state,
-  polish11-14, gait-infantry, director-rng (a3edf975); user checks passed: infantry/cavalry gait, battle HUD. Every branch
-  below is pushed; resume each with a fresh worker (brief points at its branch + this line):
-  2. polish15 (`647140e9`, fix round partial): blocking #1 left: model the re-lay gate (`0x00581200`, re-lays when +0x20 >
-     men × 0.5; resume from UNITS_TERRAIN_FIDELITY.md "When the men are re-laid" Open list), plus `0x0051A530` 0x80 order
-     struct / vtable `0x01325470` naming (completeness 62). Then fix-commit review. At merge: tick its four polish lines; add
-     BACKLOG "view: re-place the living men after losses (view.rs ~1375-1379, ~1653 cache spawn places; exe re-slots via
-     shape vfuncs +0x30/+0x34)".
-  3. gait-trace (`46b276d8`, partial): line 223 done (+0x58 counter, re-plan on the exe's f32 rule, CONFIRMED 0x00581B73);
-     run `cargo test --workspace` (state hash now has the issue time). Left: 224 (decompile 0x005307E0 / 0x00574E90 for n
-     +0x27C, else debugger at 0x0054C691), 225-226 (view.rs), Ghidra name 0x00506C00 ConstructBattleModel. New line:
-     "Battle tick counts the deployment ticks (exe Battle Model +0x58)" (PROVISIONAL on `Battle::tick`).
+- **Resume points:** the debugger sittings in docs/FOR_USER.md (gait 224, AI turn-change). Running work: BACKLOG markers.
+- **Stopped 2026-10-15 on the block cap (week 20%).** Worktrees to resume, each with its BACKLOG marker:
+  `NR-broadcasters3` (2 commits: trade route loss, threat/decline; ended without a report: check uncommitted changes, then a first full review);
+  `NR-transfer3` (notes commit 15bccb85; the implementation worker stopped early: relaunch it from the same brief);
+  `NR-polish22` (10f55e21; review asked a fix round: raise 0x010430C0, 0x00DB80F0, 0x00E778A0 to raw V5 ≥70 and fix the MOD_LOADING.md globals lines; not started);
+  `NR-formation5` (no commits yet: shape layouts, horses_frightened, soldier flags). New BACKLOG item to add: our DB reader doesn't port flag byte 0 (a file with flag 0 and rows drops the rows loaded before it; ntw_formats db.rs:10/:224, db_folder.rs:62).
 - **Disk:** C: filled up on 2026-10-09; 21 merged worktrees were removed (~100 GB back). Remove a
   worktree after its merge; check `df -h /c` before starting builds.
 - **Next:** §0, several workers tracing in parallel under the Ghidra writer lock, §11: only the framework parts that avoid costly refits later (rule-seams running), the rest waits for its turn (user, 2026-10-10); the unwrap audit last.
 - Evidence saves live in `%USERPROFILE%\Documents\ntw-evidence\saves` (never inside a target folder);
   recovered build-folder data in `ntw-evidence\recovered-targets\`.
-- Usage (user plan, 2026-10-07): one 11-point block a day (~12 with the reading lag), until the weekly
-  reset Wed 2026-10-14 00:00; `BlockPercent` in tools/usage_budget.ps1.
+- Usage (user plan, 2026-10-14): 21 points on Wed 2026-10-14, then one 12-point block a day (~13 with the reading lag) until the weekly
+  reset Wed 2026-10-21 00:00; `BlockPercent` in tools/usage_budget.ps1.
 
 ## Open bugs
 

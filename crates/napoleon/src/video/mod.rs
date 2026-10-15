@@ -708,11 +708,14 @@ mod tests {
     }
 
     /// The player in a minimal app: frames reach the texture in order, and the movie ends with
-    /// a `MovieFinished`.
+    /// a `MovieFinished`. The movie clock (`Time<Real>`) steps a little over one frame (30 fps)
+    /// per update, so frame timing does not depend on the machine's load; only the decoder
+    /// thread runs on its own, waited for under a deadline.
     #[test]
     fn plays_a_stub_movie_to_the_end() {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(std::time::Duration::from_micros(33_400)))
             .init_asset::<Image>()
             .add_message::<PlayMovieAudio>()
             .add_message::<MovieFinished>()
@@ -726,7 +729,9 @@ mod tests {
         app.world_mut().spawn(movie);
         let mut seen = Vec::new();
         let mut audio_started = 0;
-        for _ in 0..2000 {
+        let mut finished = false;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
             app.update();
             if let Some(m) = app.world_mut().query::<&Movie>().iter(app.world()).next()
                 && let Some(f) = m.frame()
@@ -741,10 +746,13 @@ mod tests {
             let done: Vec<MovieFinished> = app.world_mut().resource_mut::<Messages<MovieFinished>>().drain().collect();
             if let Some(d) = done.first() {
                 assert!(!d.skipped);
+                finished = true;
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            // Lets the decoder thread run; the movie clock does not depend on this.
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
+        assert!(finished, "the movie ended within the deadline (frames {seen:?})");
         assert_eq!(audio_started, 1, "the sound starts once, with frame 0");
         assert_eq!(seen.first(), Some(&0));
         assert_eq!(seen.last(), Some(&4));

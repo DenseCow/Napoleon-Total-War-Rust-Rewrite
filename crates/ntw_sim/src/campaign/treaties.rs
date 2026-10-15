@@ -128,7 +128,7 @@ impl AttitudeFactor {
 }
 
 impl Relationship {
-    fn factor_mut(&mut self, key: &str) -> &mut AttitudeFactor {
+    pub(crate) fn factor_mut(&mut self, key: &str) -> &mut AttitudeFactor {
         if self.attitudes.len() < ATTITUDE_FACTORS.len() {
             self.attitudes.resize(ATTITUDE_FACTORS.len(), AttitudeFactor::default());
         }
@@ -263,6 +263,7 @@ impl CampaignModel {
                 _ => {}
             }
         }
+        self.diplomacy_changed();
         Ok(events)
     }
 
@@ -293,6 +294,7 @@ impl CampaignModel {
         self.cancel_military_access(owner, a);
         let e = event("abused_military_access");
         self.relationship_mut(owner, a).factor_mut("abused_military_access").add(e.value + ABUSED_ACCESS_STEP * count, e.drift, e.limit);
+        self.diplomacy_changed();
     }
 
     /// `a` and `b` make peace (`0x00B262C0` → `0x00B26590` on both records):
@@ -325,6 +327,7 @@ impl CampaignModel {
                 }
             }
         }
+        self.diplomacy_changed();
         Ok(events)
     }
 
@@ -338,6 +341,7 @@ impl CampaignModel {
             r.alliance_commitment_turns = ALLIANCE_COMMITMENT;
             r.friendship_turns = 10;
         }
+        self.diplomacy_changed();
         Ok(vec![CampaignEvent::StanceChanged { a, b, stance: Stance::Allied }])
     }
 
@@ -383,6 +387,7 @@ impl CampaignModel {
             restore(r);
         }
         self.world.set_stance(a, b, Stance::Neutral)?;
+        self.diplomacy_changed();
         Ok(vec![CampaignEvent::StanceChanged { a, b, stance: Stance::Neutral }])
     }
 
@@ -396,6 +401,7 @@ impl CampaignModel {
             r.set_factor("trade", event("trade"));
             r.trade_agreement = true;
         }
+        self.diplomacy_changed();
         Ok(Vec::new())
     }
 
@@ -419,19 +425,25 @@ impl CampaignModel {
         }
         self.world.trade_paths.remove(&(a, b));
         self.world.trade_paths.remove(&(b, a));
+        self.diplomacy_changed();
         Ok(Vec::new())
     }
 
-    /// `a` embargoes `b` (`0x00B28DB0`): a trade agreement is broken first; `a`'s embargo turns (#27) are
-    /// 10 (`0x00B28E00`, S1_LEFTOVERS.md); `b`'s `trade_embargoed` factor is set from its event (value −40,
-    /// drift −2, limit 0: with the original's clamp the value is 0 after one turn — as the exe does it).
-    pub fn embargo(&mut self, a: FactionId, b: FactionId) -> Result<Vec<CampaignEvent>, CommandError> {
-        self.check_diplomacy_pair(a, b)?;
-        if self.world.relationships.get(&(a, b)).is_some_and(|r| r.trade_agreement) {
-            self.break_trade(a, b)?;
+    /// `a` embargoes `x`'s trade at the request of `requester`, the deal's other side (`0x00B28DB0`,
+    /// called only by the deal loop `0x00C18800`: list `+0x2C` on the proposer with the recipient as
+    /// requester, list `+0x1C` on the recipient with the proposer): `a`'s trade agreement with `x` is
+    /// broken first (`0x00B29BB0`); `a`'s embargo turns (#27) towards `x` are 10 (`0x00B28E00`,
+    /// S1_LEFTOVERS.md); `x`'s `trade_embargoed` factor towards `requester` is set from its event (value
+    /// −40, drift −2, limit 0: with the original's clamp the value is 0 after one turn — as the exe does
+    /// it): the embargoed faction resents the side that asked for it, not the embargoer. CONFIRMED.
+    pub fn embargo(&mut self, a: FactionId, x: FactionId, requester: FactionId) -> Result<Vec<CampaignEvent>, CommandError> {
+        self.check_diplomacy_pair(a, x)?;
+        self.check_diplomacy_pair(x, requester)?;
+        if self.world.relationships.get(&(a, x)).is_some_and(|r| r.trade_agreement) {
+            self.break_trade(a, x)?;
         }
-        self.relationship_mut(a, b).trade_embargo_turns = 10;
-        self.relationship_mut(b, a).set_factor("trade_embargoed", event("trade_embargoed"));
+        self.relationship_mut(a, x).trade_embargo_turns = 10;
+        self.relationship_mut(x, requester).set_factor("trade_embargoed", event("trade_embargoed"));
         Ok(Vec::new())
     }
 
@@ -444,6 +456,7 @@ impl CampaignModel {
         r.military_access_granted = r.military_access_turns;
         r.friendship_turns = 10;
         r.military_access_elapsed = 0;
+        self.diplomacy_changed();
         Ok(Vec::new())
     }
 
@@ -492,6 +505,7 @@ impl CampaignModel {
         if let Some(g) = self.world.factions.get_mut(&giver) {
             super::treasury::pay(&mut g.treasury, amount);
         }
+        self.diplomacy_changed();
         Ok(Vec::new())
     }
 
@@ -505,43 +519,63 @@ impl CampaignModel {
     /// keeps the field as loaded.
     pub fn one_off_payment(&mut self, payer: FactionId, payee: FactionId, amount: i32) -> Result<Vec<CampaignEvent>, CommandError> {
         self.check_diplomacy_pair(payer, payee)?;
+        self.pay_once(payer, payee, amount);
+        Ok(Vec::new())
+    }
+
+    /// The money of [`Self::one_off_payment`], for a caller that has checked the faction pair.
+    pub(super) fn pay_once(&mut self, payer: FactionId, payee: FactionId, amount: i32) {
         if let Some(f) = self.world.factions.get_mut(&payer) {
             super::treasury::pay(&mut f.treasury, amount);
         }
         if let Some(f) = self.world.factions.get_mut(&payee) {
             super::treasury::credit(&mut f.treasury, amount);
         }
-        Ok(Vec::new())
     }
 
     /// `payer` agrees to pay `payee` `amount` a turn for `turns` turns: a `REGULAR_PAYMENTS` item on the payer's
     /// record (direction INFERRED), and the friendship raised to min(turns, 10) (S1_LEFTOVERS.md #15).
     pub fn regular_payment(&mut self, payer: FactionId, payee: FactionId, amount: i32, turns: u32) -> Result<Vec<CampaignEvent>, CommandError> {
         self.check_diplomacy_pair(payer, payee)?;
-        let r = self.relationship_mut(payer, payee);
-        r.payments.push(RegularPayment { amount, turns });
-        r.friendship_turns = r.friendship_turns.max(turns.min(10));
+        self.pay_regularly(payer, payee, amount, turns);
         Ok(Vec::new())
     }
 
-    /// `protectorate` becomes the protectorate of `patron` (`0x00B105C0`): the protectorate breaks its
-    /// other protectorate and patron ties first (`0x00B104E0`); `protectorate`→`patron` stance 4 with the
-    /// alliance factor set (`0x00B29DA0` unless already allied), `patron`→`protectorate` stance 3 likewise
-    /// (`0x00B10480`); the patron's other alliances break (the alliances of `patron` with stance 2,
-    /// `0x00B13840`, when not the protectorate). Tribute: `0x00BBCD00` = a faction value / 5 (the value,
-    /// `0x00B803A0`, is not read: the tribute line is left at 0, PROVISIONAL).
+    /// The record of [`Self::regular_payment`], for a caller that has checked the faction pair.
+    pub(super) fn pay_regularly(&mut self, payer: FactionId, payee: FactionId, amount: i32, turns: u32) {
+        let r = self.relationship_mut(payer, payee);
+        r.payments.push(RegularPayment { amount, turns });
+        r.friendship_turns = r.friendship_turns.max(turns.min(10));
+        self.diplomacy_changed();
+    }
+
+    /// `protectorate` becomes the protectorate of `patron` (`0x00B105C0`, CONFIRMED):
+    /// - its own ties first (`0x00B104E0`, over the protectorate's records): a faction it is already the
+    ///   protectorate of gets the tie ended ([`Self::end_protectorate_tie`], `0x00B64B10`); a faction it is the
+    ///   patron of becomes the protectorate of `patron` in turn (`0x00B105C0` on that faction). The patron
+    ///   itself is skipped for the second case (the exe would make `patron` its own protectorate; a patron
+    ///   cannot ask to become its own protectorate's protectorate, so the case does not arise in play);
+    /// - `protectorate`→`patron` stance 4 with the alliance factor set (`0x00B29DA0` unless already allied),
+    ///   `patron`→`protectorate` stance 3 likewise (`0x00B10480`);
+    /// - every other alliance of the protectorate (stance 2, not with `patron`) breaks ([`Self::break_alliance`],
+    ///   `0x00B13840`), then the relation-change broadcast.
+    ///
+    /// Not modelled: the deal's peace step (`param_3`, from the deal record's +0x16 flag: an AI faction at war
+    /// with the protectorate makes peace with it when its own `0x00B0CDF0` check towards the patron holds,
+    /// `0x00B262C0`; BACKLOG). Tribute: `0x00BBCD00` = a faction value / 5 (the value, `0x00B803A0`, is not
+    /// read: the tribute line is left at 0, PROVISIONAL).
     pub fn make_protectorate(&mut self, protectorate: FactionId, patron: FactionId) -> Result<Vec<CampaignEvent>, CommandError> {
         self.check_diplomacy_pair(protectorate, patron)?;
         let mut events = Vec::new();
-        let ties: Vec<FactionId> = self
-            .world
-            .factions
-            .keys()
-            .copied()
-            .filter(|&x| x != protectorate && x != patron && matches!(self.world.stance(protectorate, x), Stance::Protectorate | Stance::Patron))
-            .collect();
-        for x in ties {
-            events.extend(self.break_alliance(protectorate, x)?);
+        let others: Vec<FactionId> = self.world.factions.keys().copied().filter(|&x| x != protectorate).collect();
+        for x in others {
+            // The stance is read when the record is reached: an earlier step may have changed it (0x00B104E0).
+            if self.world.stance(protectorate, x) == Stance::Protectorate {
+                events.extend(self.end_protectorate_tie(protectorate, x)?);
+            }
+            if x != patron && self.world.stance(protectorate, x) == Stance::Patron {
+                events.extend(self.make_protectorate(x, patron)?);
+            }
         }
         for (x, y) in [(protectorate, patron), (patron, protectorate)] {
             let allied = self.world.stance(x, y) == Stance::Allied;
@@ -554,10 +588,39 @@ impl CampaignModel {
         }
         self.world.set_stance(protectorate, patron, Stance::Protectorate)?;
         events.push(CampaignEvent::StanceChanged { a: protectorate, b: patron, stance: Stance::Protectorate });
+        let allies: Vec<FactionId> = self
+            .world
+            .factions
+            .keys()
+            .copied()
+            .filter(|&x| x != protectorate && x != patron)
+            .collect();
+        for x in allies {
+            if self.world.stance(protectorate, x) == Stance::Allied {
+                events.extend(self.break_alliance(protectorate, x)?);
+            }
+        }
+        self.diplomacy_changed();
         Ok(events)
     }
 
-    fn check_diplomacy_pair(&self, a: FactionId, b: FactionId) -> Result<(), CommandError> {
+    /// Ends `protectorate`'s tie to `patron` (`0x00B64B10` with flag 0, CONFIRMED): the stance neutral both
+    /// ways (`0x00B64C10` / `0x00B54530`), the tribute (`protectorate`→`patron`) and income
+    /// (`patron`→`protectorate`) lines cleared, then the relation-change broadcast. No attitude factor, no
+    /// `alliance_broken`, no commitment change (unlike [`Self::break_alliance`]). The exe then moves
+    /// the patron's characters out of every one of the protectorate's regions (`0x00B64B10` →
+    /// `0x008D9DC0` per region): not modelled yet. It also refreshes both factions' region and visibility
+    /// lists (`0x00A0B570`, `0x00B795A0`, `0x00B67490`), which the model derives from the stances.
+    pub fn end_protectorate_tie(&mut self, protectorate: FactionId, patron: FactionId) -> Result<Vec<CampaignEvent>, CommandError> {
+        self.world.set_stance(protectorate, patron, Stance::Neutral)?;
+        self.relationship_mut(protectorate, patron).protectorate_tribute = 0;
+        self.relationship_mut(patron, protectorate).protectorate_income = 0;
+        self.diplomacy_changed();
+        Ok(vec![CampaignEvent::StanceChanged { a: protectorate, b: patron, stance: Stance::Neutral }])
+    }
+
+    /// Both factions exist and differ: the model's argument check for a two-faction diplomacy action.
+    pub(super) fn check_diplomacy_pair(&self, a: FactionId, b: FactionId) -> Result<(), CommandError> {
         for id in [a, b] {
             if !self.world.factions.contains_key(&id) {
                 return Err(CommandError::UnknownFaction(id));
@@ -587,14 +650,13 @@ impl CampaignModel {
     /// Then the manager's own counter (+0x20, [`World::access_cancel_marks`](super::World::access_cancel_marks)) −1.
     pub fn diplomacy_round_end(&mut self, faction: FactionId) {
         let targets: Vec<FactionId> = self.world.relationships.keys().filter(|(o, _)| *o == faction).map(|(_, t)| *t).collect();
-        let alive = |m: &CampaignModel, f: FactionId| m.world.regions.values().any(|r| r.owner == f) || m.world.forces.values().any(|x| x.faction == f);
-        // A faction out of the game updates nothing (0x00B29100 tests the owner's +0x824 first; INFERRED meaning:
-        // no regions and no forces). The vanilla saves agree: such factions' records do not drift.
-        if !alive(self, faction) {
+        // A faction out of the game updates nothing (0x00B29100 tests the owner's +0x824 first, [`Self::in_the_game`]).
+        // The vanilla saves agree: such factions' records do not drift.
+        if !self.in_the_game(faction) {
             return;
         }
         for t in targets {
-            if !alive(self, t) {
+            if !self.in_the_game(t) {
                 continue;
             }
             let at_war = self.world.stance(faction, t) == Stance::War;
@@ -605,7 +667,7 @@ impl CampaignModel {
                 .world
                 .relationships
                 .get(&(faction, t))
-                .map(|r| r.allied_in_war_against.iter().map(|w| w.enemy).filter(|&e| !alive(self, e)).collect())
+                .map(|r| r.allied_in_war_against.iter().map(|w| w.enemy).filter(|&e| !self.in_the_game(e)).collect())
                 .unwrap_or_default();
             let Some(r) = self.world.relationships.get_mut(&(faction, t)) else { continue };
             for f in &mut r.attitudes {
@@ -648,6 +710,7 @@ impl CampaignModel {
         if let Some(n) = self.world.access_cancel_marks.get_mut(&faction) {
             *n = n.saturating_sub(1);
         }
+        self.diplomacy_changed();
     }
 
     /// The two war balances of `owner` against `target` (#10, #11 of the per-turn update, `0x00B29170`):
@@ -693,40 +756,39 @@ impl CampaignModel {
     }
 }
 
-/// The original's cap on a demanded payment (the seam [`super::seams::DEMANDED_PAYMENT`]): `payer` is the
-/// side asked to pay `amount` for `turns` turns (0 for the lump sum). A one-off payment (turns 0 or 1)
-/// asks at most what the payer holds; an amount at or below that, or a regular payment (turns 2 and up),
-/// stays as it is. An unknown payer keeps the amount (the command then refuses the pair).
+/// The original's cap on a proposed payment (the seam [`super::seams::PROPOSED_PAYMENT`]): the payment
+/// record's copy (vtable `0x01381EDC` slot +0x44, `0x00C4AB20`), run when the record is set
+/// ([`CampaignModel::propose_payment`]; the exe's `0x00C11B80` → `0x00C49AA0`, from the propose
+/// command), before the panel's row text is built from the result (`0x00C4AB85`). `amount` is
+/// in the record's sign ([`super::negotiation::DealPayment`]: negative, offered by `proposer`), for
+/// `turns` turns. An offer paid once (turns 1, amount negative) offers at most what the proposer
+/// holds: when its negation is above the proposer's treasury (signed, `0x00BCAFE0`) it becomes minus
+/// the treasury (`0x00C4AB4E`–`0x00C4AB82`). A demand, a regular payment, or turns other than 1 stays
+/// as it is (the panel limits a demand itself: `diplomacy_panel.luac` `CheckMaxPayment`). An unknown
+/// proposer keeps the amount. CONFIRMED (disassembly).
 ///
-/// CONFIRMED (static trace, CAMPAIGN_FIDELITY.md §Diplomacy "Payment cap"): the payment item's deal copy
-/// (vtable `0x01381EDC` slot +0x44, `0x00C4AB20`) runs when the deal is proposed (`0x00C49AA0`, from the
-/// propose commands and the AI's evaluation), before anything applies. For turns 1 and a demand (the
-/// pair's amount negative) it reads the payer's treasury (`0x00BCAFE0`) and, when the demand is above
-/// it (signed), sets the demand to the treasury (`0x00C4AB4E`–`0x00C4AB82`).
-///
-/// ORIGINAL BUG: a negative treasury turns the demand around: the stored amount becomes −treasury,
-/// positive, so the demanding side pays the indebted one (`0x00C4AB7E`–`0x00C4AB82`). The panel's own
-/// check (`diplomacy_panel.luac` `CheckMaxPayment` / `SetMaxPayment`, against
-/// `MaxOppositionPaymentAllowed`) never accepts a demand above the payer's treasury, so the intent is
-/// "never more than the payer has": ours caps at 0, and a payment of 0 moves nothing.
-pub fn demanded_payment(model: &CampaignModel, payer: FactionId, amount: i32, turns: u32) -> i32 {
-    if turns > 1 {
+/// ORIGINAL BUG: a negative treasury turns the offer around: the stored amount becomes −treasury,
+/// positive, a demand on the recipient (`0x00C4AB7E`–`0x00C4AB82`), which the cap's own intent ("never
+/// more than the proposer has") contradicts. Ours caps at max(treasury, 0): an indebted proposer offers
+/// 0, which pays nothing.
+pub fn proposed_payment(model: &CampaignModel, proposer: FactionId, amount: i32, turns: u32) -> i32 {
+    if turns != 1 || amount >= 0 {
         return amount;
     }
-    match model.world.factions.get(&payer) {
-        Some(f) => amount.min(f.treasury.max(0)),
-        None => amount,
+    match model.world.factions.get(&proposer) {
+        Some(f) if amount.wrapping_neg() > f.treasury => -(f.treasury.max(0)),
+        _ => amount,
     }
 }
 
 impl CampaignModel {
-    /// What `payer` is asked to pay when a deal demands `amount` for `turns` turns (0 for the lump sum):
-    /// the rule seam [`super::seams::DEMANDED_PAYMENT`] (the original's is [`demanded_payment`]). The
-    /// deal applies it once, in `accept_deal`, against the treasuries before the deal. The exe caps it at
-    /// proposal (0x00C4AB45-0x00C4AB82; its row text shows the capped amount, 0x00C4AB85); the cap moves
-    /// to Propose once Propose builds payment rows.
-    pub fn demanded_payment(&self, payer: FactionId, amount: i32, turns: u32) -> i32 {
-        self.rules.seams.demanded_payment.rule()(self, payer, amount, turns)
+    /// What a deal's payment record holds when `proposer` proposes `amount` for `turns` turns (the
+    /// record's sign, [`super::negotiation::DealPayment`]): the rule seam
+    /// [`super::seams::PROPOSED_PAYMENT`] (the original's is [`proposed_payment`]). Called once, when
+    /// the record is set ([`Self::propose_payment`]): the panel's row, the AI's evaluation and the
+    /// accepted deal all read the record.
+    pub fn proposed_payment(&self, proposer: FactionId, amount: i32, turns: u32) -> i32 {
+        self.rules.seams.proposed_payment.rule()(self, proposer, amount, turns)
     }
 }
 
@@ -742,8 +804,9 @@ pub enum DiplomaticAction {
     TradeAgreement,
     /// Break the trade agreement.
     BreakTrade,
-    /// Embargo the other side's trade.
-    Embargo,
+    /// Embargo a third faction's trade at the other side's request (a deal item, `0x00B28DB0`): the
+    /// embargoed faction resents the other side.
+    Embargo(FactionId),
     /// Give the other side military access for some turns (−1: indefinitely).
     GrantMilitaryAccess(i32),
     /// Withdraw the military access given to the other side.
@@ -775,13 +838,14 @@ impl CampaignModel {
             }
             DiplomaticAction::TradeAgreement => self.trade_agreement(a, b),
             DiplomaticAction::BreakTrade => self.break_trade(a, b),
-            DiplomaticAction::Embargo => self.embargo(a, b),
+            DiplomaticAction::Embargo(x) => self.embargo(a, x, b),
             DiplomaticAction::GrantMilitaryAccess(turns) => self.grant_military_access(a, b, turns),
             DiplomaticAction::CancelMilitaryAccess => {
                 self.check_diplomacy_pair(a, b)?;
                 // 0x00B67B20: a third of the grievance stays on the canceller's manager (+0x20).
                 let g = self.cancel_military_access(a, b);
                 *self.world.access_cancel_marks.entry(a).or_insert(0) += (g / 3).max(0) as u32;
+                self.diplomacy_changed();
                 Ok(Vec::new())
             }
             DiplomaticAction::StateGift(amount) => self.state_gift(a, b, amount),
@@ -916,6 +980,7 @@ impl CampaignModel {
                 .factor_mut("government_type")
                 .set(AttitudeEvent { limit, drift, value });
         }
+        self.diplomacy_changed();
         Ok(vec![CampaignEvent::GovernmentChanged {
             faction,
             old_government: old_government_key,
@@ -923,9 +988,14 @@ impl CampaignModel {
         }])
     }
 
-    /// A faction still in the game (the exe's faction +0x824 clear; INFERRED: it holds a region or a force).
+    /// A faction still in the game: the exe's faction +0x824 clear ([`super::details::FactionDetails::out_of_game`],
+    /// CONFIRMED). An own save from before the flag was kept lacks it; then, INFERRED: the faction holds a
+    /// region or a force.
     pub fn in_the_game(&self, f: FactionId) -> bool {
-        self.world.regions.values().any(|r| r.owner == f) || self.world.forces.values().any(|x| x.faction == f)
+        match self.world.faction_details.get(&f).and_then(|d| d.out_of_game) {
+            Some(out) => !out,
+            None => self.world.regions.values().any(|r| r.owner == f) || self.world.forces.values().any(|x| x.faction == f),
+        }
     }
 
     /// The money of treaties at `faction`'s round-end economy (PROVISIONAL place; INFERRED direction):
@@ -1027,6 +1097,8 @@ impl CampaignModel {
             }
             r.military_access_turns = -1;
         }
-        self.world.declare_war(x, enemy)
+        let events = self.world.declare_war(x, enemy)?;
+        self.diplomacy_changed();
+        Ok(events)
     }
 }

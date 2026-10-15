@@ -1135,6 +1135,18 @@ deal-region, 2026-10-10, below "Region value").
   campaign `+0x110`, entries with `+0x194` set) has it researched (state 0, `0x008F3DB0`), ÷ (traded
   + 1)² (proposer's entry `+0x28`, `0x008F4990`) unless demanded by a human proposer (`0x00C3F870`
   = wrapper `+0x168` → faction `+0x6E0`); offered → (v, 0, 0), demanded → (0, v, v). CONFIRMED.
+- **Payment value** (record 7, virtual `+0x38` = `0x00C12EE0`, deals-fix 2026-10-14, CONFIRMED by
+  disassembly; not inflated). The record's amount `a` is negative for an offer (the proposer pays) and
+  positive for a demand, already capped when proposed (CAMPAIGN_FIDELITY.md "Payment cap"); `t` its
+  turns (signed). `t` ≤ 1: (max(−a, 0), max(a, 0), max(a, 0)). Else the payer F (the recipient for a
+  demand, the proposer for an offer) can pay at most cap = f32(treasury(F) + max(t × (last turn's
+  income − expenses of F), 0)) × 0.8 (`0x00BCAFE0`, `0x00BBE970`, `0x00BBE910`; wrapping int sums;
+  constant `0x0131A7B4`), the series is worth k = (0.9^t − 1) × −10.0 times one payment (`powf`,
+  constants `0x01325CEC`, `0x01318048`, `0x0133BCB4`); a demand is (0, trunc(min(f64(k) × f64(a)
+  as f32, cap)), a × t), an offer (trunc(min(k × f32(−a), cap)), 0, 0), trunc = CVTTSS2SI. Slot 2 is
+  the payment the accept tests compare. Ported: `deal_value::payment_deal_value`, weighed with weight 0
+  in `ai_accepts_deal` (test `the_ai_values_a_payment_as_the_exe`); the budget pot (below) is still
+  PROVISIONAL (taken as enough).
 - **Inflation** (campaign `+0x1014`, `0x008A9920` at each round end after the calendar moves on):
   `clamp(net / max(1, first), 1, 3)`, net = Σ factions of last turn's income (categories 5..11,
   `0x00BBE970`) − expenses (18..24, `0x00BBE910`) (`0x0096D2E0`), read as unsigned; `first`

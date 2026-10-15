@@ -1,7 +1,7 @@
 //! The data the scripting layer keeps: the campaign model the scripts drive, plus everything that
-//! only scripts use (time triggers, restricted units, missions, saved values, the log).
+//! only scripts use (time triggers, missions, saved values, the log).
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 
 use mlua::{UserData, UserDataFields};
 use ntw_sim::campaign::{CampaignModel, FactionId};
@@ -111,8 +111,6 @@ pub struct ScriptState {
     pub saved_values: Vec<ScriptValue>,
     /// Values waiting to be read by `load_value` (filled before `LoadingGame`).
     pub values_to_load: VecDeque<ScriptValue>,
-    /// `add_restricted_unit_record` keys (units the player may not recruit).
-    pub restricted_units: BTreeSet<String>,
     /// `other_income_mod(faction, amount)`: summed per faction. UNKNOWN whether the original adds or
     /// replaces, and how it feeds the turn income; not applied to the treasury yet.
     pub other_income: BTreeMap<String, f32>,
@@ -135,7 +133,6 @@ impl ScriptState {
             time_triggers: Vec::new(),
             saved_values: Vec::new(),
             values_to_load: VecDeque::new(),
-            restricted_units: BTreeSet::new(),
             other_income: BTreeMap::new(),
             missions: Vec::new(),
             character_log: Vec::new(),

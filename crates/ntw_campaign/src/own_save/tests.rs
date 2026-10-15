@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use ntw_sim::calendar::{Calendar, Date, HALF_EARLY};
 use ntw_sim::campaign::{
     CampaignModel, CampaignUnit, Character, CharacterId, CharacterKind, Faction, FactionAiKeys, FactionId, ForceId, GovernmentType,
-    MilitaryForce, PendingBattle, Region, RegionId, Settlement, Stance, UnitId, World,
+    MilitaryForce, PendingBattle, Region, RegionId, RegionSlot, Settlement, Stance, UnitId, World,
 };
 use ntw_sim::fixed::Fixed20;
 use ntw_sim::rng::CaRng;
@@ -11,7 +11,7 @@ use ntw_sim::rng::CaRng;
 use super::*;
 use crate::{FileKind, HeaderMap, PlayerSetup, SaveHeader};
 
-const A: FactionId = FactionId(7);
+pub(crate) const A: FactionId = FactionId(7);
 const B: FactionId = FactionId(-3);
 
 fn faction(id: FactionId, key: &str, other: FactionId) -> Faction {
@@ -36,6 +36,8 @@ fn region(id: u32, owner: FactionId) -> Region {
         slots: Vec::new(),
         road: None,
         fortification: None,
+        road_holder: None,
+        fortification_holder: None,
         population: 123_456,
         population_state: Default::default(),
         base_gdp: 900,
@@ -47,6 +49,7 @@ fn region(id: u32, owner: FactionId) -> Region {
         tax_exempt: true,
         religions: Vec::new(),
         class_bases: Vec::new(),
+        unit_resources: Vec::new(),
         recruitment_queue: Vec::new(),
         construction: Vec::new(),
         garrison: None,
@@ -122,12 +125,14 @@ pub(crate) fn info() -> CampaignInfo {
 /// model, script slots and restricted units.
 #[test]
 fn a_made_up_campaign_round_trips() {
+    let mut model = made_up_model();
+    model.world.restricted_units.insert("made_up_unit".into());
     let data = SaveData {
         human: "made_up_a".into(),
-        model: made_up_model(),
+        model,
         rebel_faction: Some(B),
         script_values: vec![ScriptSaveValue::Bool(true), ScriptSaveValue::Int(-12)],
-        restricted_units: vec!["made_up_unit".into()],
+        restricted_units: Vec::new(),
     };
     let bytes = write(&info(), &data).expect("write");
     assert!(is_own_save(&bytes));
@@ -136,6 +141,18 @@ fn a_made_up_campaign_round_trips() {
     let (h, back) = read_parts(&bytes).expect("read");
     assert_eq!(h, info());
     assert_eq!(back, data);
+}
+
+/// recruit-gates: the scripts' restricted units moved from the save body into the model
+/// (`World::restricted_units`); a save written before that, with the list beside the model, loads with
+/// it merged into the model.
+#[test]
+fn a_legacy_restricted_unit_list_loads_into_the_model() {
+    let mut model = made_up_model();
+    model.world.restricted_units.insert("made_up_kept".into());
+    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: vec!["made_up_legacy".into()] };
+    let loaded = read(&write(&info(), &data).expect("write"), &ntw_data::GameDatabase::test_fixture()).expect("read");
+    assert_eq!(loaded.model.world.restricted_units.iter().map(String::as_str).collect::<Vec<_>>(), ["made_up_kept", "made_up_legacy"]);
 }
 
 /// The values mods' rules keep (DESIGN.md §3.3.1) save and load back value for value, in key order,
@@ -171,7 +188,7 @@ fn mod_state_round_trips() {
 #[test]
 fn director_victory_regions_and_ai_areas_round_trip() {
     use ntw_sim::campaign::AiArea;
-    use ntw_sim::campaign::director::{DirectorState, PendingTransfer};
+    use ntw_sim::campaign::director::{DirectorState, PendingTransfer, RelationBelief};
     let mut model = made_up_model();
     let mut rng = CaRng::new(0x0006_1266);
     rng.float_range(0.0, 1.0);
@@ -184,6 +201,7 @@ fn director_victory_regions_and_ai_areas_round_trip() {
         ],
         autoresolver_pairs: vec![(B, A), (A, B)],
         xp_counters: [(A, 0), (B, u32::MAX)].into(),
+        beliefs: [(A, RelationBelief { relations: vec![(B, 0.25)], enemies: vec![B] })].into(),
     };
     model.world.ai_factions = vec![B, A];
     model.world.victory_regions.insert(A, [RegionId(2), RegionId(5_000_000)].into());
@@ -258,6 +276,198 @@ fn a_save_written_from_a_borrowed_model_equals_one_from_an_owned_model() {
     model.mod_state.set(ModKey::new("made_up_mod", ModScope::Faction(B), "grain"), ModValue::Float(0.1));
     model.mod_state.set(ModKey::new("another_mod", ModScope::Campaign, "era"), ModValue::Text("meiji".into()));
     let owned = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: Some(B), script_values: Vec::new(), restricted_units: Vec::new() };
-    let borrowed = SaveDataRef { human: "made_up_a", model: &model, rebel_faction: Some(B), script_values: Vec::new(), restricted_units: Vec::new() };
+    let borrowed = SaveDataRef { human: "made_up_a", model: &model, rebel_faction: Some(B), script_values: Vec::new() };
     assert_eq!(write(&info(), &owned).expect("owned"), write(&info(), &borrowed).expect("borrowed"));
+}
+
+/// `bytes` (a save of the current format) as a format-version-1 save wrote it: see [`as_version`].
+pub(crate) fn as_version_1(bytes: &[u8]) -> Vec<u8> {
+    as_version(bytes, 1)
+}
+
+/// `bytes` (a save of the current format) as a save of format `version` wrote it: that version word,
+/// without the region fields later versions added (2: `unit_resources`, 3: `road_holder` and
+/// `fortification_holder`). A list value ends at its first `]` (the made-up keys hold none), an
+/// `Option` of a faction id at its first `,`.
+pub(crate) fn as_version(bytes: &[u8], version: u32) -> Vec<u8> {
+    let (_, header, body) = sections(bytes).expect("sections");
+    let mut text = String::new();
+    flate2::read::ZlibDecoder::new(body).read_to_string(&mut text).expect("inflate");
+    let added: [(u32, &str, char); 3] = [(2, "unit_resources:[", ']'), (3, "road_holder:", ','), (3, "fortification_holder:", ',')];
+    for (_, field, end_char) in added.into_iter().filter(|&(v, ..)| v > version) {
+        let mut old = String::with_capacity(text.len());
+        let mut rest = text.as_str();
+        while let Some(at) = rest.find(field) {
+            old.push_str(&rest[..at]);
+            let end = at + rest[at..].find(end_char).expect("value end") + 1;
+            rest = if end_char == ']' { rest[end..].strip_prefix(',').unwrap_or(&rest[end..]) } else { &rest[end..] };
+        }
+        old.push_str(rest);
+        assert!(old.len() < text.len() && !old.contains(field), "no {field} to strip");
+        text = old;
+    }
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    z.write_all(text.as_bytes()).expect("deflate");
+    let body = z.finish().expect("deflate");
+    let mut out = Vec::new();
+    out.extend_from_slice(MAGIC);
+    out.extend_from_slice(&version.to_le_bytes());
+    out.extend_from_slice(&(header.len() as u32).to_le_bytes());
+    out.extend_from_slice(header);
+    out.extend_from_slice(&body);
+    out
+}
+
+/// recruit-gates review: format version 2 added the regions' unit resources. A version-1 save takes them
+/// from the campaign's start, region by key; read without a start, or with a start missing one of its
+/// regions, it is an error, never a load with regions left without resources.
+#[test]
+fn a_version_1_save_takes_its_unit_resources_from_the_start() {
+    let mut start = made_up_model();
+    for (i, r) in start.world.regions.values_mut().enumerate() {
+        r.unit_resources = vec!["global".into(), format!("made_up_resource_{i}")];
+    }
+    let data = SaveData { human: "made_up_a".into(), model: start.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+    let old = as_version_1(&write(&info(), &data).expect("write"));
+    let (version, _, stored) = read_stored(&old).expect("stored");
+    assert_eq!(version, 1);
+    assert!(stored.model.world.regions.values().all(|r| r.unit_resources.is_empty()));
+    let db = ntw_data::GameDatabase::test_fixture();
+    assert!(matches!(read(&old, &db), Err(FormatError::NeedsStart { found: 1, .. })));
+    assert!(matches!(read_parts(&old), Err(FormatError::NeedsStart { found: 1, .. })));
+    assert!(matches!(read_with_start(&old, &db, || Err("no start".into())), Err(FormatError::NeedsStart { found: 1, .. })));
+    let loaded = read_with_start(&old, &db, || Ok(start.clone())).expect("converted");
+    for (id, r) in &loaded.model.world.regions {
+        assert_eq!(r.unit_resources, start.world.regions[id].unit_resources);
+    }
+    // The start lacks one of the save's regions: an error naming it.
+    let mut short = start.clone();
+    short.world.regions.retain(|id, _| id.0 != 2);
+    match read_with_start(&old, &db, || Ok(short)) {
+        Err(e @ FormatError::NeedsStart { .. }) => assert!(e.to_string().contains("made_up_region_2"), "{e}"),
+        other => panic!("loaded without region 2's resources: {:?}", other.map(|l| l.info.campaign_key)),
+    }
+    // The current version never calls the start.
+    let current = write(&info(), &data).expect("write");
+    let loaded = read_with_start(&current, &db, || panic!("start read for a current save")).expect("read");
+    assert_eq!(loaded.model.world.regions, start.world.regions);
+}
+
+/// recruit-followups: format version 3 added the regions' road and walls holders (`0x00A4DCB0` builds
+/// those slots like any other, `0x00A6AE40` merges their effects only when held by the owner). An older
+/// save takes them from the campaign's start, kept while the start's holder still holds one of the
+/// region's slots, or, holding none, while the start's owner still owns the region.
+#[test]
+fn a_version_2_save_takes_its_road_and_walls_holders_from_the_start() {
+    let slot = |holder: Option<FactionId>| RegionSlot { key: "made_up_slot".into(), slot_type: "made_up".into(), building: None, position: None, port: false, holder, id: 1 };
+    let (r1, r2, r3) = (RegionId(1), RegionId(2), RegionId(5_000_000));
+    let mut start = made_up_model();
+    {
+        let regions = &mut start.world.regions;
+        // Region 1 (A's): B holds a slot, the road and the walls, as Bavaria in Austria's eur_bavaria.
+        let r = regions.get_mut(&r1).unwrap();
+        r.slots = vec![slot(Some(B)), slot(None)];
+        (r.road_holder, r.fortification_holder) = (Some(B), Some(B));
+        // Region 2 (B's) and region 3 (A's): the owner holds the road and walls, and no slot.
+        let r = regions.get_mut(&r2).unwrap();
+        (r.road_holder, r.fortification_holder) = (Some(B), None);
+        let r = regions.get_mut(&r3).unwrap();
+        (r.road_holder, r.fortification_holder) = (Some(A), Some(A));
+    }
+    // The save, some turns on: region 1 still as at the start; region 2 taken by A (B's holds cleared);
+    // region 3 unchanged.
+    let mut model = start.clone();
+    let r = model.world.regions.get_mut(&r2).unwrap();
+    (r.owner, r.road_holder) = (A, None);
+    let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+    let current = write(&info(), &data).expect("write");
+    let old = as_version(&current, 2);
+    let (version, _, stored) = read_stored(&old).expect("stored");
+    assert_eq!(version, 2);
+    assert!(stored.model.world.regions.values().all(|r| r.road_holder.is_none() && r.fortification_holder.is_none()));
+    let db = ntw_data::GameDatabase::test_fixture();
+    assert!(matches!(read(&old, &db), Err(FormatError::NeedsStart { found: 2, .. })));
+    let loaded = read_with_start(&old, &db, || Ok(start.clone())).expect("converted");
+    assert_eq!(loaded.model.world.regions, model.world.regions);
+    // Region 1 after B lost its slot there: the road and walls go with it.
+    let mut lost = model.clone();
+    lost.world.regions.get_mut(&r1).unwrap().slots[0].holder = None;
+    let data = SaveData { model: lost, ..data };
+    let loaded = read_with_start(&as_version(&write(&info(), &data).expect("write"), 2), &db, || Ok(start.clone())).expect("converted");
+    let r = &loaded.model.world.regions[&r1];
+    assert_eq!((r.road_holder, r.fortification_holder), (None, None));
+    // The current version keeps them as written.
+    let loaded = read_with_start(&current, &db, || panic!("start read for a current save")).expect("read");
+    assert_eq!(loaded.model.world.regions, model.world.regions);
+}
+
+/// construction2: format version 4 keeps each construction item's kind. An older save stored a repair as a
+/// build of the standing level, which loads as a repair item (`CampaignModel::convert_legacy_repairs`); a
+/// version 1 or 2 save, made when construction stepped at each faction's turn start, gives the items the turn
+/// starts already ran this round their turn back (the round end steps them now), once.
+#[test]
+fn older_saves_get_their_repairs_and_this_rounds_construction_step_back() {
+    use ntw_sim::campaign::{BuildingRef, ConstructionItem, ConstructionKind, SlotRef, TurnState};
+    let build = |slot, level_key: &str, turns_remaining| ConstructionItem { slot, level_key: level_key.into(), turns_remaining, cost: 0, kind: ConstructionKind::Build, active: true };
+    let mut model = made_up_model();
+    {
+        // Region 1 (A's): walls being repaired (stored the old way) and a road upgrade.
+        let r = model.world.regions.get_mut(&RegionId(1)).unwrap();
+        r.fortification = Some(BuildingRef { level_key: "made_up_walls".into(), health: 40 });
+        r.road = Some(BuildingRef { level_key: "made_up_road".into(), health: 100 });
+        r.construction = vec![build(SlotRef::Walls, "made_up_walls", 1), build(SlotRef::Road, "made_up_road_2", 2)];
+        // Region 2 (B's): a road upgrade in a road A holds, which no turn start stepped.
+        let r = model.world.regions.get_mut(&RegionId(2)).unwrap();
+        r.road_holder = Some(A);
+        r.construction = vec![build(SlotRef::Road, "made_up_road_2", 3)];
+    }
+    let db = ntw_data::GameDatabase::test_fixture();
+    let load = |model: &CampaignModel, current: FactionId, version: u32| {
+        let mut model = model.clone();
+        model.turn = TurnState::in_turn_of(current, vec![A]);
+        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+        let bytes = as_version(&write(&info(), &data).expect("write"), version);
+        let loaded = read_with_start(&bytes, &db, || Ok(model.clone())).expect("read").model;
+        let items = |id| loaded.world.regions[&RegionId(id)].construction.iter().map(|c| (c.slot, c.turns_remaining, c.kind)).collect::<Vec<_>>();
+        (items(1), items(2), loaded.world.regions[&RegionId(1)].fortification.as_ref().map(|b| b.health))
+    };
+    // No level turns in the fixture: the repair is max(1, floor(0.6 × 1)) = 1 turn of 60.
+    let repair = |health_per_turn, turns| ConstructionKind::Repair { health_per_turn, turns };
+    let (one, two, health) = load(&model, A, 3);
+    assert_eq!(one, vec![(SlotRef::Walls, 1, repair(60, 1)), (SlotRef::Road, 2, ConstructionKind::Build)]);
+    assert_eq!(two, vec![(SlotRef::Road, 3, ConstructionKind::Build)]);
+    assert_eq!(health, Some(40));
+    // Version 2 in A's turn (order B, A): both turn starts ran; A's items take their turn back, B's road (held by
+    // A) was never stepped. The repair keeps the length it now has left.
+    let (one, two, health) = load(&model, A, 2);
+    assert_eq!(one, vec![(SlotRef::Walls, 2, repair(30, 2)), (SlotRef::Road, 3, ConstructionKind::Build)]);
+    assert_eq!(two, vec![(SlotRef::Road, 3, ConstructionKind::Build)]);
+    assert_eq!(health, Some(40));
+    // In B's turn, A's turn start has not run yet.
+    let (one, ..) = load(&model, B, 2);
+    assert_eq!(one, vec![(SlotRef::Walls, 1, repair(60, 1)), (SlotRef::Road, 2, ConstructionKind::Build)]);
+    // The current version reads its items as written.
+    let (one, ..) = load(&model, A, FORMAT_VERSION);
+    assert_eq!(one, vec![(SlotRef::Walls, 1, ConstructionKind::Build), (SlotRef::Road, 2, ConstructionKind::Build)]);
+}
+
+/// construction2: format version 4 keeps each construction item's active byte (`ConstructionItem::active`,
+/// ESF #1, +0x8; `0x00B7880E` steps only an active item). An older save has no such field: its items read
+/// active, as every item the exe makes is (`0x00AE6E80`).
+#[test]
+fn construction_items_keep_their_active_byte_and_older_saves_read_active() {
+    use ntw_sim::campaign::{ConstructionItem, ConstructionKind, SlotRef};
+    let item = ConstructionItem { slot: SlotRef::Road, level_key: "made_up_road_2".into(), turns_remaining: 2, cost: 0, kind: ConstructionKind::Build, active: false };
+    let mut model = made_up_model();
+    model.world.regions.get_mut(&RegionId(1)).unwrap().construction = vec![item.clone()];
+    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+    let db = ntw_data::GameDatabase::test_fixture();
+    let loaded = read(&write(&info(), &data).expect("write"), &db).expect("read");
+    assert_eq!(loaded.model.world.regions[&RegionId(1)].construction, vec![item.clone()]);
+    // An item as an older build wrote it: no `active` field.
+    let text = ron::to_string(&ConstructionItem { active: true, ..item.clone() }).expect("encode");
+    let older = text.replace("active:true", "");
+    assert_ne!(older, text, "the field is in the text");
+    let read_back: ConstructionItem = ron::from_str(&older).expect("decode");
+    assert_eq!(read_back, ConstructionItem { active: true, ..item });
 }

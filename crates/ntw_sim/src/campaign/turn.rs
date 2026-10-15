@@ -17,12 +17,11 @@
 //!       and the action points refill to the type's base, times [`force_action_point_factor`] for a
 //!       force's commander (CONFIRMED factor; trait, ancillary and technology movement effects are not
 //!       modelled).
-//!    2. Every owned region, in id order (`0x00AAE820`): the slots (`SlotTurnStart` each, `0x00AAE8D0`,
-//!       with a port's naval queue right after its slot), construction counts down (`BuildingCompleted`;
-//!       `0x00A78670`, every slot in one pass, CONFIRMED, caller not traced: INFERRED here), the land
-//!       queue counts down (`UnitTrained`; `0x00B71FB0`, CONFIRMED), then `RegionTurnStart` (posted at
-//!       the end of the region update, CONFIRMED). An item takes part only after a round end has
-//!       flagged it (`0x00A78620` from the round-end economy `0x008BC650`, CONFIRMED); the saves agree.
+//!    2. Every owned region, in id order, the region update `0x00AAE820`: the slots (`SlotTurnStart` each, `0x00AAE8D0`, with a port's naval queue right
+//!       after its slot), the land queue counts down (`UnitTrained`; `0x00B71FB0`, CONFIRMED), then
+//!       `RegionTurnStart` (posted at the end of the region update, CONFIRMED). An item takes part only
+//!       after a round end has flagged it (`0x00A78620` from the round-end economy `0x008BC650`,
+//!       CONFIRMED); the saves agree.
 //!       Not modelled in the region update: building-driven spawns `0x00A249A0` (a campaign-RNG roll).
 //!    3. The faction-level updates: research availability (`0x008F91F0`, CONFIRMED place), then the
 //!       other calls of `0x008F2620` not modelled (character pools `0x00A24C90`, pending orders resumed
@@ -44,10 +43,14 @@
 //!    for every faction in turn order, [`TurnStep::Economy`]: income and upkeep are settled
 //!    (0x00BABE30: treasury += income − expenses, unless the faction cannot pay, see
 //!    [`economy`](super::economy)), every owned region's town wealth grows (0x00AB4410) and its
-//!    population grows and converts ([`super::population`], 0x00AB4070), then research takes one step
-//!    ([`super::research`]; CONFIRMED place: `0x008BC650` runs the step `0x008DD450`), then the relationships'
-//!    per-turn update ([`super::treaties`], `0x00B29100`, after the regions in `0x008BC650`). Then the calendar advances one half-month
-//!    (that this comes after the economy is our PROVISIONAL choice).
+//!    population grows and converts ([`super::population`], 0x00AB4070), then (not for the rebels) every owned
+//!    region's construction steps (`BuildingCompleted`, `CampaignBuildingDamaged`; `0x00AB3DA0` → `0x00A78670`,
+//!    every slot in one pass; regions in id order where the exe walks the faction's region list
+//!    (PROVISIONAL order), with the same results, see `construction_round_end`), then the
+//!    relationships' per-turn update ([`super::treaties`], `0x00B29100`), then research takes one step
+//!    ([`super::research`], `0x008F3C40` → `0x008DD450`); CONFIRMED order of `0x008BC650`. So the queue
+//!    step of the next turn start reads the list with the buildings finished here. Then the calendar
+//!    advances one half-month (that this comes after the economy is our PROVISIONAL choice).
 //!
 //! A start position is loaded *before* turn 1 has begun: [`CampaignModel::start_campaign`] runs
 //! the first round start and the factions up to the first human one. A save is loaded *inside* the
@@ -64,7 +67,8 @@ use std::collections::VecDeque;
 use super::economy;
 use super::events::CampaignEvent;
 use super::ids::{FactionId, RegionId};
-use super::world::{BuildingRef, CampaignModel};
+use super::mod_state::ModWrites;
+use super::world::{BuildingRef, CampaignModel, ConstructionItem, Region};
 use crate::fnv::Fnv64;
 
 /// One unit of turn work. See the module docs for the order.
@@ -280,14 +284,17 @@ impl CampaignModel {
                 // Each region's population growth, then its religion conversion (0x00AB42F0 → 0x00AB4070 →
                 // 0x00A63FE0, in the same step).
                 self.population_round_end(f);
-                // Research (0x008DD450 with (0, 0, 1), called from the round-end economy 0x008BC650: CONFIRMED
-                // place; the saves agree: AI techs started in turn 1 hold one step in the turn-2 save).
+                // Then, unless the faction is the rebels, `0x008BC650` steps each owned region's construction
+                // (`0x00AB3DA0`, [`Self::construction_round_end`]) and flags its queued recruits (`0x00A78620`, which
+                // the turn order gives already, see `region_turn`), then the relationships' per-turn update
+                // (`0x00B29100`), then research (`0x008F3C40` → `0x008DD450` with (0, 0, 1)); CONFIRMED order from
+                // the listing.
+                self.construction_round_end(f, &mut events);
+                self.diplomacy_round_end(f);
+                // The saves agree on research's place: AI techs started in turn 1 hold one step in the turn-2 save.
                 for technology in self.research_step(f) {
                     events.push(CampaignEvent::ResearchCompleted { faction: f, technology });
                 }
-                // The relationships' per-turn update (0x00B29100, from the same round-end step 0x008BC650,
-                // after the regions; CONFIRMED place).
-                self.diplomacy_round_end(f);
             }
             TurnStep::Region(r) => self.region_turn(r, &mut events),
             TurnStep::FactionReady(f) => {
@@ -384,6 +391,8 @@ impl CampaignModel {
                 }
                 let forces: Vec<_> = self.world.forces.values().filter(|x| x.faction == f).map(|x| x.id).collect();
                 for force in forces {
+                    // A navy's turn end (`0x008BD430`) first repairs its ships ordered to repair (`super::ship_repair`).
+                    self.repair_ships(force);
                     for unit in self.world.forces[&force].units.iter().map(|u| u.id) {
                         events.push(CampaignEvent::UnitTurnEnd { force, unit });
                     }
@@ -425,8 +434,125 @@ impl CampaignModel {
         Some(events)
     }
 
+    /// The construction step of `faction`'s round-end economy (`0x008BC650` → `0x00AB3DA0` per owned region,
+    /// CONFIRMED place and order). The exe walks the faction's region list (faction +0x778 count / +0x77C data,
+    /// `0x008BC873`: appended as the faction gains a region,`AddRegionToFaction` `0x008AE270`, and erased in place as it loses one,
+    /// `0x008BA580` → `0x008B0210`, both from `0x00A64AC0`); the model walks its owned regions in id order. The
+    /// results are the same: a region's step reads and changes only that region, its owner's treasury is not
+    /// touched and a demolition clears only the researcher of its own school; only the order of the events
+    /// differs. PROVISIONAL: the id order stands in for the list's order, which is not traced (the order a
+    /// startpos or a save builds it in, and how gains and losses in play reorder it), so the events
+    /// (`BuildingCompleted`, `CampaignBuildingDamaged`) can come out in a different order from the original's. Each region steps its slots in one
+    /// pass (`0x00A78670`: the town / port slots in index order, then the road, then the walls, each through
+    /// `0x00B78800`), one item at a time through the [`construction.step`](super::seams::CONSTRUCTION_STEP) seam
+    /// ([`construction_step`] in the original game), each result applied before the next slot steps
+    /// ([`Self::apply_construction_step`]). The rebel faction steps nothing (`0x008BC650` skips the whole block
+    /// when the faction has no record, `0x008CEEF0`; a faction out of the game owns no region). The saves
+    /// agree: Brandenburg farm 3/4 and supply post 1/3.
+    fn construction_round_end(&mut self, faction: FactionId, events: &mut Vec<CampaignEvent>) {
+        if self.is_rebel_faction(faction) {
+            return;
+        }
+        // `0x00A78670`'s order: the town / port slots, the road (+0x20), the walls (+0x24).
+        let order = |s: super::SlotRef| match s {
+            super::SlotRef::Slot(i) => (0, i),
+            super::SlotRef::Road => (1, 0),
+            super::SlotRef::Walls => (2, 0),
+        };
+        // PROVISIONAL: id order, not the faction's region list order (+0x778 / +0x77C, not traced; see above).
+        let regions: Vec<RegionId> = self.world.regions.values().filter(|r| r.owner == faction && !r.construction.is_empty()).map(|r| r.id).collect();
+        let mut writes = ModWrites::default();
+        for region in regions {
+            let Some(reg) = self.world.regions.get_mut(&region) else { continue };
+            // An item whose slot does not exist could never finish and would leave the region
+            // `constructing` for good, so it is dropped here, at its first step (no refund). The
+            // loader and the commands only make items for existing slots (`ConstructBuilding` checks
+            // `construction_slot`), so only code that edits `World` directly can make one. Each drop
+            // is reported once ([`CampaignEvent::ConstructionItemDropped`], logged by the app, not sent
+            // to the scripts). The original cannot reach this state: its item lives in the slot's own
+            // `BUILDING_MANAGER`, so it has no drop or refund path to match (PROVISIONAL handling).
+            let (kept, dropped): (Vec<super::ConstructionItem>, Vec<super::ConstructionItem>) =
+                std::mem::take(&mut reg.construction).into_iter().partition(|i| reg.construction_slot(i.slot).is_some());
+            events.extend(dropped.into_iter().map(|i| CampaignEvent::ConstructionItemDropped { region, slot: i.slot, level_key: i.level_key }));
+            reg.construction = kept;
+            // Stepped in slot order, one item per slot (a slot holds one, `BUILDING_MANAGER`); the list keeps its
+            // own order.
+            let mut slots: Vec<super::SlotRef> = reg.construction.iter().map(|i| i.slot).collect();
+            slots.sort_by_key(|&s| order(s));
+            slots.dedup();
+            for slot in slots {
+                let reg = &self.world.regions[&region];
+                let Some(item) = reg.construction.iter().find(|i| i.slot == slot) else { continue };
+                let step = self.rules.seams.construction_step.rule()(self, reg, item, &mut writes);
+                self.mod_state.apply(&mut writes);
+                self.apply_construction_step(region, slot, step, events);
+            }
+        }
+    }
+
+    /// Applies one item's [`ConstructionStep`] to the region (`0x00B78800`, CONFIRMED): a waiting item is left
+    /// as it is; a step stores the turns left and, for a repair, the building's new health
+    /// ([`Self::set_building_health`], which fires `CampaignBuildingDamaged` below 100); a finished item leaves
+    /// the slot (`0x00B78800` frees it) and its result stands: a build's level (`BuildingCompleted`, posted by
+    /// the build steps `0x00B78230` / `0x00B78560`), a repair's health ([`Self::set_building_health`]: 100,
+    /// no event), or a demolition's empty slot, whose school stops researching first (`0x00B781B0` →
+    /// `0x00AA4BF0`: the technology's researcher cleared, its progress kept, as an owner change does).
+    fn apply_construction_step(&mut self, region: RegionId, slot: super::SlotRef, step: ConstructionStep, events: &mut Vec<CampaignEvent>) {
+        let Some(reg) = self.world.regions.get_mut(&region) else { return };
+        let Some(index) = reg.construction.iter().position(|i| i.slot == slot) else { return };
+        match step {
+            ConstructionStep::Waits => {}
+            ConstructionStep::Steps { turns_remaining, health } => {
+                reg.construction[index].turns_remaining = turns_remaining.max(1);
+                if let Some(h) = health {
+                    self.set_building_health(region, slot, h, events);
+                }
+            }
+            ConstructionStep::Finishes(result) => {
+                reg.construction.remove(index);
+                match result {
+                    ConstructionResult::Built(level_key) => {
+                        if let Some(b) = reg.building_mut(slot) {
+                            *b = Some(BuildingRef { level_key, health: 100 });
+                        }
+                        events.push(CampaignEvent::BuildingCompleted { region, slot });
+                    }
+                    ConstructionResult::Repaired(health) => self.set_building_health(region, slot, health, events),
+                    ConstructionResult::Demolished => {
+                        let (holder, id) = match slot {
+                            super::SlotRef::Slot(i) => reg.slots.get(i).map_or((None, 0), |s| (s.holder, s.id)),
+                            _ => (None, 0),
+                        };
+                        let faction = holder.unwrap_or(reg.owner);
+                        if let Some(b) = reg.building_mut(slot) {
+                            *b = None;
+                        }
+                        if let Some(d) = self.world.faction_details.get_mut(&faction).filter(|_| id != 0) {
+                            for t in d.research.values_mut().filter(|t| t.researcher == id) {
+                                t.researcher = 0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Sets the health of the building in `slot` (`SetBuildingHealth` `0x00B452A0`, CONFIRMED): below 100 it posts
+    /// `CampaignBuildingDamaged` for the slot (vtable `0x0137CE30`). A slot with no building is left as it is.
+    pub(crate) fn set_building_health(&mut self, region: RegionId, slot: super::SlotRef, health: u32, events: &mut Vec<CampaignEvent>) {
+        let Some(Some(b)) = self.world.regions.get_mut(&region).and_then(|r| r.building_mut(slot)) else { return };
+        b.health = health;
+        if health < 100 {
+            events.push(CampaignEvent::CampaignBuildingDamaged { region, slot });
+        }
+    }
+
     fn region_turn(&mut self, region: RegionId, events: &mut Vec<CampaignEvent>) {
-        let Some(reg) = self.world.regions.get(&region) else { return };
+        if !self.world.regions.contains_key(&region) {
+            return;
+        }
+        let reg = &self.world.regions[&region];
         // The region update 0x00AAE820 (CONFIRMED order): the slots (`SlotTurnStart` each, 0x00AAE8D0, a port's naval
         // queue right after it), the land queue (0x00B71FB0), then `RegionTurnStart` (posted at its end).
         for slot in 0..reg.slots.len() as u32 {
@@ -453,51 +579,12 @@ impl CampaignModel {
         // An item whose recruitable entry carries building flags is held back (`0x00B5AD90`, CONFIRMED: the
         // entry of the item's unit in the region's unpriced list, vtable +0x14 = region +0x1A8, has a flag). The
         // list is the one the removal above read: the exe's step reads the same cache, which nothing inside
-        // `0x00B71FB0` rebuilds. INFERRED: that it is the list from before this turn's construction step. The
-        // exe's construction (`0x00A78670`, from `0x00AB3DA0`) is not part of the region update, and a slot
-        // whose construction finishes rebuilds the cache (`0x00A682F0`); whether that happens before or after
-        // the queue step is not traced (the model runs construction between the removal and the countdown).
+        // `0x00B71FB0` rebuilds, and which already holds this turn's finished buildings (the construction of the round end before).
         let blocked: Vec<bool> = reg
             .recruitment_queue
             .iter()
             .map(|i| recruitable.iter().find(|e| e.unit_key == i.unit_key).is_none_or(|e| e.flags != 0))
             .collect();
-
-        // Construction: every item counts down one turn; finished items replace the slot's
-        // building. Every slot advances its own item in the same pass (CONFIRMED: `0x00A78670` runs
-        // `0x00B78800` for each slot of the settlement container, which steps the slot's construction item
-        // when the region's owner holds the slot; the saves agree: Brandenburg farm 3/4 and supply post 1/3).
-        let reg = self.world.regions.get_mut(&region).expect("region exists");
-        // An item whose slot does not exist could never finish and would leave the region
-        // `constructing` for good, so it is dropped here, at its first turn (no refund). The
-        // loader and the commands only make items for existing slots (`ConstructBuilding` checks
-        // `construction_slot`), so only code that edits `World` directly can make one. Each drop
-        // is reported once ([`CampaignEvent::ConstructionItemDropped`], logged by the app, not sent
-        // to the scripts). The original cannot reach this state: its item lives in the slot's own
-        // `BUILDING_MANAGER`, so it has no drop or refund path to match (PROVISIONAL handling).
-        let (kept, dropped): (Vec<super::ConstructionItem>, Vec<super::ConstructionItem>) =
-            std::mem::take(&mut reg.construction).into_iter().partition(|i| reg.construction_slot(i.slot).is_some());
-        reg.construction = kept;
-        events.extend(dropped.into_iter().map(|i| CampaignEvent::ConstructionItemDropped { region, slot: i.slot, level_key: i.level_key }));
-        let mut done = Vec::new();
-        let held: Vec<bool> = reg.construction.iter().map(|i| reg.slot_held(i.slot)).collect();
-        for (item, held) in reg.construction.iter_mut().zip(held) {
-            if !held {
-                continue;
-            }
-            item.turns_remaining = item.turns_remaining.saturating_sub(1);
-            if item.turns_remaining == 0 {
-                done.push(item.clone());
-            }
-        }
-        reg.construction.retain(|i| i.turns_remaining > 0);
-        for item in done {
-            let building = Some(BuildingRef { level_key: item.level_key.clone(), health: 100 });
-            if let Some(b) = reg.building_mut(item.slot) {
-                *b = building;
-            }
-            events.push(CampaignEvent::BuildingCompleted { region, slot: item.slot });
-        }
 
         // Then, in queue order, items count down (item method +0x18) until `recruitment_points` of
         // them have (CONFIRMED, `0x00B71FB0`); the rest wait. The land and naval queues are separate
@@ -505,6 +592,7 @@ impl CampaignModel {
         // was queued (flag +0x54, set by `0x00A78620` at the faction's round-end economy), which the
         // turn order here gives already. A held-back item neither counts down nor takes one of the
         // `recruitment_points`. Items reaching zero finish, in queue order.
+        let reg = self.world.regions.get_mut(&region).expect("region exists");
         let mut finished = Vec::new();
         let mut waiting = Vec::with_capacity(reg.recruitment_queue.len());
         let (mut land_n, mut naval_n) = (0u32, 0u32);
@@ -564,4 +652,62 @@ impl CampaignModel {
             c.max_movement_points = (c.base_movement_points as f32 * f).round_ties_even() as i32;
         }
     }
+}
+
+/// What one round does to a construction item ([`construction_step`], seam
+/// [`construction.step`](super::seams::CONSTRUCTION_STEP)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConstructionStep {
+    /// The item does not step this round: an inactive item (`0x00B7880E`), or a build or upgrade in a slot another
+    /// faction holds (`0x00B78800`).
+    Waits,
+    /// The item steps and stays.
+    Steps {
+        /// The item's turns left after this step.
+        turns_remaining: u32,
+        /// For a repair, the standing building's new health (set through `0x00B452A0`).
+        health: Option<u32>,
+    },
+    /// The item is finished and leaves the slot with this result.
+    Finishes(ConstructionResult),
+}
+
+/// What a finished construction item leaves in its slot ([`ConstructionStep::Finishes`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConstructionResult {
+    /// A new building or an upgrade: this level at full health.
+    Built(String),
+    /// A repair: the standing building at this health.
+    Repaired(u32),
+    /// A demolition: the slot is empty.
+    Demolished,
+}
+
+/// The original game's step of one construction item at its region's round end (`StepSlotConstructionItem`
+/// `0x00B78800`, CONFIRMED). An inactive item ([`ConstructionItem::active`] false) does not step
+/// (`0x00B7880E`). A build or upgrade (ESF types 0 / 1) steps only when the region's owner holds the
+/// slot; a repair and a demolition (types 2 / 3) step whoever holds it. Each step counts one turn
+/// (`0x00B781A0`: elapsed + 1, done once the total is reached):
+/// - a build finishes as its level at full health (`0x00B78230` / `0x00B78560`);
+/// - a repair (`0x00B78490`) raises the standing building's health by its step each turn and finishes at 100
+///   (for the walls the exe also restores the fortification's damage object, vtable +0xC0, not in the model);
+/// - a demolition (`0x00B781B0`, one turn) finishes as an empty slot.
+pub fn construction_step(_model: &CampaignModel, reg: &Region, item: &ConstructionItem) -> ConstructionStep {
+    use super::ConstructionKind::{Build, Demolish, Repair};
+    if !item.active || (item.kind == Build && !reg.slot_held(item.slot)) {
+        return ConstructionStep::Waits;
+    }
+    let left = item.turns_remaining.saturating_sub(1);
+    if left > 0 {
+        let health = match item.kind {
+            Repair { health_per_turn, .. } => Some(reg.building_at(item.slot).map_or(0, |b| b.health).saturating_add(health_per_turn)),
+            Build | Demolish => None,
+        };
+        return ConstructionStep::Steps { turns_remaining: left, health };
+    }
+    ConstructionStep::Finishes(match item.kind {
+        Build => ConstructionResult::Built(item.level_key.clone()),
+        Repair { .. } => ConstructionResult::Repaired(100),
+        Demolish => ConstructionResult::Demolished,
+    })
 }

@@ -17,7 +17,7 @@ All integers little-endian.
 | Bytes | Content |
 |---|---|
 | 16 | magic `NAPOLEONRUST\0SAV` |
-| 4 | format version (`FORMAT_VERSION`, now 1) |
+| 4 | format version (`FORMAT_VERSION`, now 4; the version table is in `own_save.rs`) |
 | 4 | `n`: byte length of the header section |
 | n | header: zlib of the RON text of `CampaignInfo` |
 | rest | body: zlib of the RON text of `SaveData` |
@@ -97,7 +97,9 @@ write error (`FormatError::Encode`), never a truncated file.
   change (RON names fields, so a missing field takes its default).
 - A change an older save cannot express that way (a renamed or reshaped field) bumps
   `FORMAT_VERSION` and adds a conversion step in `own_save::sections` / `read` that rewrites the
-  older text before decoding. Version 1 is the first, so no step exists yet.
+  older text before decoding. Each version and its step is in the table at the top of `own_save.rs`
+  (version 4: construction items keep their kind and their active byte, `ConstructionItem::active`;
+  an older save's items read active, through the field's serde default).
 - A save from a newer version is `FormatError::Newer { found }`; truncated or damaged bytes are
   `Truncated` / `Decode` errors. None of them panics (`own_save/tests.rs::bad_saves_are_errors`).
 

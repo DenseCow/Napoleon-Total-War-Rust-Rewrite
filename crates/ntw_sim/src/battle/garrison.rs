@@ -115,7 +115,7 @@ impl Battle {
         let u = &mut self.units[idx];
         u.garrison = Some(target);
         u.garrison_target = None;
-        u.position = pos;
+        u.place_at(pos, u.facing);
         u.set_destination(None);
         u.running = false;
         u.hold_position = true;

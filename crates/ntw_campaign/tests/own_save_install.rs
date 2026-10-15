@@ -109,7 +109,7 @@ fn a_played_campaign_round_trips_through_our_own_save() {
         model: m.clone(),
         rebel_faction: opened.loaded.rebel_faction,
         script_values: opened.loaded.script_values.clone(),
-        restricted_units: vec!["made_up_restricted_unit".into()],
+        restricted_units: Vec::new(),
     };
     let t = std::time::Instant::now();
     let bytes = own_save::write(&info, &data).expect("write");
@@ -124,7 +124,8 @@ fn a_played_campaign_round_trips_through_our_own_save() {
     assert_eq!(back.loaded.info, info);
     assert_eq!(back.loaded.rebel_faction, data.rebel_faction);
     assert_eq!(back.loaded.script_values, data.script_values);
-    assert_eq!(back.loaded.restricted_units, data.restricted_units);
+    // The model keeps the restricted units now (the legacy list is covered by the own_save unit tests).
+    assert_eq!(back.loaded.model.world.restricted_units, m.world.restricted_units);
     assert!(back.loaded.warnings.is_empty(), "{:?}", back.loaded.warnings);
     // Rebuilt, not saved: the same rules and the same grid.
     assert_eq!(back.loaded.model.rules, m.rules);

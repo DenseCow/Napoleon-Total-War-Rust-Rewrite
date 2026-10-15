@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use ntw_formats::db::{DbTable, DbValue, FieldType, Schema};
 use ntw_formats::db_folder::merge_keyed;
+use ntw_formats::pack::Vfs;
 
 use crate::DataError;
 
@@ -121,6 +122,14 @@ pub trait DbRecord: Sized {
     /// concatenation 0x004f1200, MOD_LOADING.md §3.2). `None`: the files merge on [`key`](Self::key).
     fn joined_key(&self) -> Option<String> {
         None
+    }
+    /// The check the exe's row builder makes after the merge, run by [`crate::load_table`] so every
+    /// reader of the table (the game database, the frontend's army setup, tools) gets the same rows:
+    /// a row the original's builder refuses is left out with a load warning (`checked_by = f` in
+    /// `db_record!`; `units` drops a row naming an unknown unit resource, `0x00EDC000`). The default
+    /// keeps every row.
+    fn checked(table: Table<Self>, _vfs: &Vfs, _warnings: &mut Vec<String>) -> Result<Table<Self>, DataError> {
+        Ok(table)
     }
 }
 
@@ -296,10 +305,11 @@ macro_rules! __db_joined_key {
 /// hashes), while lookups ([`Table::get`]) stay on `a`. `key = a, merge = b + c` looks rows up on `a` but
 /// merges on `b` and `c` joined. A table that is also a raw table (`ntw_formats::db_folder::tables`) must
 /// merge on the same key in both; the `merge_key_agreement` test checks it.
+/// `, checked_by = f` (after the key) runs `f(table, vfs, warnings)` as the table's [`DbRecord::checked`].
 macro_rules! db_record {
     (
         $(#[$sm:meta])*
-        pub struct $name:ident in $table:literal, key = $key:ident $( + $more:ident )* $( , merge = $m1:ident $( + $m:ident )* )? {
+        pub struct $name:ident in $table:literal, key = $key:ident $( + $more:ident )* $( , merge = $m1:ident $( + $m:ident )* )? $( , checked_by = $check:path )? {
             $(
                 $(#[$fm:meta])*
                 $f:ident : $t:ty $( => since $v:literal $( $copy:ident )? )?
@@ -339,6 +349,16 @@ macro_rules! db_record {
             }
 
             $crate::__db_joined_key!($key $( + $more )* ; $( $m1 $( + $m )* )?);
+
+            $(
+                fn checked(
+                    table: $crate::record::Table<Self>,
+                    vfs: &::ntw_formats::pack::Vfs,
+                    warnings: &mut Vec<String>,
+                ) -> Result<$crate::record::Table<Self>, $crate::DataError> {
+                    $check(table, vfs, warnings)
+                }
+            )?
         }
     };
     // A key the exe's row reader builds by joining columns (e.g. `cdir_configs`, 0x00FCD150): it is

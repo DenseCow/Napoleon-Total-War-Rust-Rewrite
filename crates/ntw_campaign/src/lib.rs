@@ -220,11 +220,6 @@ pub struct LoadedCampaign {
     /// The scripts' `save_value` slots (`EPISODIC_RESTRICTIONS/LUA[]`), in order; empty for a
     /// start position. Give them to the script host before `LoadingGame` fires.
     pub script_values: Vec<script_values::ScriptSaveValue>,
-    /// The scripts' restricted units (`EPISODIC_RESTRICTIONS/UNIT_RESTRICTIONS`); empty for a
-    /// start position. Give them to the script state before the campaign UI is created. The
-    /// restricted building levels of the same record are already in
-    /// `model.world.restricted_buildings`.
-    pub restricted_units: Vec<String>,
 }
 
 /// Loads a start position from bytes (root must be `CAMPAIGN_STARTPOS`).
@@ -254,7 +249,10 @@ pub fn load_save_file(
 }
 
 /// Loads a start position, an original save or one of our own saves ([`own_save`]) from bytes and
-/// returns the model together with header facts and warnings.
+/// returns the model together with header facts and warnings. An own save older than
+/// version 3 (see [`own_save::read_with_start`]) fails here with [`LoadError::OwnSave`]
+/// ([`own_save::FormatError::NeedsStart`]): it needs the campaign's start to convert, so open it
+/// through [`source::open`].
 pub fn read(bytes: &[u8], db: &GameDatabase) -> Result<LoadedCampaign, LoadError> {
     if own_save::is_own_save(bytes) {
         return Ok(own_save::read(bytes, db)?);
@@ -399,6 +397,12 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
     model.force_caps = read_force_caps(model_rec, &mut check.warnings);
     model.deal_inflation = read_deal_inflation(model_rec);
     attach_rules(&mut model, db, &campaign_key);
+    // A repair our ESF writer stored as an upgrade to the standing level before it wrote item type 2 (an
+    // original save holds none: [`CampaignModel::convert_legacy_repairs`]).
+    let repairs = model.convert_legacy_repairs();
+    if repairs > 0 {
+        log::info!("{repairs} repairs stored as upgrades to the standing level converted to repair items");
+    }
     // Movement maximums include the commanders' force factor (CAMPAIGN_FIDELITY.md §Action points).
     model.refresh_movement_maximums();
     // The routes: accumulated values (SAVE_COMPAT.md §12), paths, commodity volumes and prices
@@ -423,10 +427,11 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
     // The historical characters already made and the two episodic force-success switches
     // (CHARACTERS_FIDELITY.md §7, §8).
     (model.world.historical_created, model.world.force_success_for_human) = details::model_extras(model_rec);
-    // The scripts' restricted building levels (EPISODIC_RESTRICTIONS): the scripts set them only
-    // on a new game (InitialiseCampaign at UICreated), so a save carries them.
+    // The scripts' restricted building levels and units (EPISODIC_RESTRICTIONS): the scripts set them
+    // only on a new game (InitialiseCampaign at UICreated), so a save carries them.
     let restrictions = script_values::read_restrictions(esf);
     model.world.restricted_buildings = restrictions.buildings.into_iter().collect();
+    model.world.restricted_units = restrictions.units.into_iter().collect();
     if kind == FileKind::Save {
         // A save is made inside the human player's turn (INFERRED); the header names that faction.
         if let Some(f) = model.faction_by_key(&header.faction_key).map(|f| f.id) {
@@ -448,7 +453,6 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
         rebel_faction: loaded.rebel_faction,
         warnings: check.warnings,
         script_values: script_values::read_script_values(esf),
-        restricted_units: restrictions.units,
     })
 }
 

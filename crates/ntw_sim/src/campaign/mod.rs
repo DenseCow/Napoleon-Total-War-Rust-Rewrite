@@ -32,6 +32,7 @@ pub mod commander_recruitment;
 pub mod commands;
 pub mod details;
 pub mod deal_value;
+pub mod destruction;
 pub mod diplomacy;
 pub mod director;
 pub mod economy;
@@ -45,6 +46,7 @@ pub mod negotiation;
 pub mod movers;
 pub mod mod_state;
 pub mod naval;
+pub mod ship_repair;
 pub mod events;
 pub mod ids;
 pub mod pathing;
@@ -77,7 +79,7 @@ pub use ids::{CharacterId, FactionId, FortId, ForceId, RecruitmentItemId, Region
 pub use rules::{BuildingRules, BuildingTable, CampaignRules, TaxClass, UnitAutoresolve, UnitRules};
 pub use turn::{TurnState, TurnStep};
 pub use world::{SlotRef, FactionAiKeys, AiArea,
-    BuildingRef, CampaignModel, CampaignUnit, Character, CharacterKind, ConstructionItem, Faction,
+    BuildingRef, CampaignModel, CampaignUnit, Character, CharacterKind, ConstructionItem, ConstructionKind, Faction,
     GovernmentType, MilitaryForce, RecruitmentItem, RecruitmentManager, RecruitmentSource, Region, RegionSlot, Settlement, Stance,
     Terrain, World,
 };

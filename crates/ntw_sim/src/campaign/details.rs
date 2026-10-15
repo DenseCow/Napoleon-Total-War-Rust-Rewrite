@@ -255,6 +255,13 @@ pub struct FactionDetails {
     /// ([`super::agents::knows_character`]). France holds one hidden Spanish general in a vanilla
     /// Peninsular save.
     pub exposed: Vec<CharacterId>,
+    /// The `FACTION` bool faction +0x824: the faction is out of the game (CONFIRMED: the loader
+    /// reads it at `0x0087B4CC`..`0x0087B4D5`, right before the u32 +0x828; the destruction
+    /// `0x008AB6C0` sets it, [`CampaignModel::destroy_faction`](super::CampaignModel::destroy_faction)).
+    /// Set at the start for the factions that only emerge later. `None` when not loaded (an own
+    /// save from before the flag was kept).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub out_of_game: Option<bool>,
 }
 
 impl FactionDetails {

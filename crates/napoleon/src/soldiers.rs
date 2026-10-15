@@ -96,6 +96,39 @@ pub struct GaitAnims {
     pub mount: Option<Arc<Anim>>,
     /// Slot names, for logs (`RIDER_TROT` / `TROT`).
     pub slots: (String, Option<String>),
+    /// The slot kind the clip plays by ([`slot_kind`]: the mount's slot when mounted).
+    pub kind: u8,
+}
+
+/// The kind of action slot `slot` (`battle_animation::SLOT_KINDS`), which picks how the display
+/// advances a clip of it and whether a change into it carries the phase (`view::ClipBlend`). The
+/// slots the kit asks for are the exe's own, so a name outside the table is a bug in our lists:
+/// logged once per name (every kit build asks again), and played as kind 0 (frame time, no
+/// phase carry).
+fn slot_kind(slot: &str) -> u8 {
+    /// The names already logged (cold path: kit builds only; a few names at most).
+    static LOGGED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    ntw_formats::battle_animation::slot_kind(slot).unwrap_or_else(|| {
+        // A poisoned lock only loses the dedup: log again rather than not at all.
+        let first = LOGGED.lock().map_or(true, |mut logged| {
+            let first = !logged.iter().any(|s| s == slot);
+            if first {
+                logged.push(slot.to_owned());
+            }
+            first
+        });
+        if first {
+            warn!("animation slot {slot} is not in the exe's slot table; played as kind 0");
+        }
+        0
+    })
+}
+
+/// The slot kind of a figure's level ([`slot_kind`]): the mount's slot when it has one, as the
+/// rider copies his mount display's clip time (`0x0079BB10`; the rider's own kinds 0x16..0x1A,
+/// his refusals, combat, loops and turns, copy it at `0x00774282`), else the man's.
+fn level_kind(man_slot: &str, mount_slot: Option<&str>) -> u8 {
+    slot_kind(mount_slot.unwrap_or(man_slot))
 }
 
 /// Every alternative clip of one speed level of a gait (see
@@ -103,21 +136,38 @@ pub struct GaitAnims {
 /// alternative by each man's selection number.
 #[derive(Clone)]
 pub struct KitLevel {
-    /// Root speed (m/s) of the level's first clip (the mount's when mounted).
-    pub speed: f32,
     /// The man's (rider's) alternatives.
     pub man: Vec<Arc<Anim>>,
+    /// Each of `man`'s clips' root speed (m/s, `Anim::root_speed`, the exe's anim `+0x60`), read
+    /// before its drift was removed (same length and order as `man`).
+    pub speeds: Vec<f32>,
     /// Each of `man`'s fragment lines' blend-in time (s, `FragmentClip::blend_in`; same length
     /// and order as `man`): how long a change into that clip cross-fades (`view::ClipBlend`).
     pub blend_in: Vec<f32>,
     /// The mount's alternatives (empty on foot).
     pub mount: Vec<Arc<Anim>>,
+    /// Each of `mount`'s clips' root speed (m/s; same length and order as `mount`).
+    pub mount_speeds: Vec<f32>,
     /// Each of `mount`'s lines' blend-in time (s; the mount fragment's lines, same length and
     /// order as `mount`): the mount display blends its own clip changes (`view::ClipBlend`).
     pub mount_blend_in: Vec<f32>,
+    /// The slot kind the level's clips play by ([`level_kind`]: the mount's slot when mounted).
+    pub kind: u8,
 }
 
 impl KitLevel {
+    /// The root speed (m/s) of the clip a figure with selection number `sel` plays from this
+    /// level: its own alternative's (the mount's when mounted, as the rider copies his mount
+    /// display's clip time, `0x0079BB10`), 0 for a level without clips. CONFIRMED (`0x007725D0`):
+    /// the playback rate (`0x00772E2B`), the phase carry at a clip change (`0x00773E85`..
+    /// `0x00773E94`) and the locomotion graph's up / down edges and entry test (`0x007CEAA0`,
+    /// `0x007CE840`, `0x00703120`) all read the anim `+0x60` of the display's own clip, the slot's
+    /// alternative `selection % count` (`0x00E5F760`), never the slot's first clip's.
+    pub fn speed_of(&self, sel: u32) -> f32 {
+        let speeds = if self.mount.is_empty() { &self.speeds } else { &self.mount_speeds };
+        speeds.get(ntw_formats::unit_animation::alternative(sel, speeds.len())).copied().unwrap_or(0.0)
+    }
+
     /// The blend-in time of the alternative a man with selection number `sel` plays.
     pub fn blend_in_of(&self, sel: u32) -> f32 {
         self.blend_in[ntw_formats::unit_animation::alternative(sel, self.man.len())]
@@ -238,8 +288,27 @@ impl SoldierLibrary {
             let speed = a.root_speed();
             (Arc::new(a), speed)
         });
+        if loaded.is_none() {
+            warn!("animation clip {path} could not be read");
+        }
         self.clips.insert(key, loaded.clone());
         loaded
+    }
+
+    /// A level's alternative clips (`(path, blend-in time)`, fragment order) with their own root
+    /// speeds and blend-in times, the three lists in the same order; a clip that does not read is
+    /// left out (logged once by the clip cache). `looping` clips loop in place
+    /// ([`Self::clip`]), the others keep their root motion ([`Self::clip_raw`]).
+    fn alternatives<'p>(&mut self, clips: impl IntoIterator<Item = (&'p str, f32)>, looping: bool) -> (Vec<Arc<Anim>>, Vec<f32>, Vec<f32>) {
+        let (mut anims, mut speeds, mut blend_in) = (Vec::new(), Vec::new(), Vec::new());
+        for (path, blend) in clips {
+            if let Some((a, speed)) = if looping { self.clip_entry(path) } else { self.clip_raw(path) } {
+                anims.push(a);
+                speeds.push(speed);
+                blend_in.push(blend);
+            }
+        }
+        (anims, speeds, blend_in)
     }
 
     /// The action clips (fire, reload, melee, death, knock-down) of a planned figure: every
@@ -254,30 +323,21 @@ impl SoldierLibrary {
             if resolved.is_empty() {
                 continue;
             }
+            // Each clip keeps its own root speed (loops too: the charge loop plays at the man's
+            // speed over it, `KitLevel::speed_of`).
             let looping = slot == unit_animation::COMBAT_READY || slot.contains("COMBAT_IDLE") || slot == unit_animation::AIM || slot == unit_animation::CHARGE;
-            let mut speed = 0.0;
-            // The level's speed is its last clip's root speed (loops keep it too: the charge loop
-            // plays at the man's speed over it).
-            let mut load = |s: &mut Self, path: &str| -> Option<Arc<Anim>> {
-                let (a, v) = if looping { s.clip_entry(path)? } else { s.clip_raw(path)? };
-                speed = v;
-                Some(a)
-            };
-            let (man, blend_in): (Vec<_>, Vec<_>) = resolved
-                .iter()
-                .filter_map(|c| load(self, &c.clip.filename).map(|a| (a, c.clip.blend_in())))
-                .unzip();
-            let (mut mount, mut mount_blend_in) = (Vec::new(), Vec::new());
-            if let (Some(m), Some(ms)) = (&plan.mount, unit_animation::rider_mount_slot(&slot)) {
-                for c in tables.resolve(&m.animation_table, &ms) {
-                    if let Some(a) = load(self, &c.clip.filename) {
-                        mount.push(a);
-                        mount_blend_in.push(c.clip.blend_in());
-                    }
+            let (man, speeds, blend_in) = self.alternatives(resolved.iter().map(|c| (c.clip.filename.as_str(), c.clip.blend_in())), looping);
+            let mount_slot = plan.mount.as_ref().and(unit_animation::rider_mount_slot(&slot));
+            let (mount, mount_speeds, mount_blend_in) = match (&plan.mount, &mount_slot) {
+                (Some(m), Some(ms)) => {
+                    let horse = tables.resolve(&m.animation_table, ms);
+                    self.alternatives(horse.iter().map(|c| (c.clip.filename.as_str(), c.clip.blend_in())), looping)
                 }
-            }
+                _ => Default::default(),
+            };
             if !man.is_empty() {
-                out.insert(slot, KitLevel { speed, man, blend_in, mount, mount_blend_in });
+                let kind = level_kind(&slot, mount_slot.as_deref().filter(|_| !mount.is_empty()));
+                out.insert(slot, KitLevel { man, speeds, blend_in, mount, mount_speeds, mount_blend_in, kind });
             }
         }
         out
@@ -315,7 +375,7 @@ impl SoldierLibrary {
             let mount = chosen.mount.as_ref().and_then(|m| self.clip(&m.path));
             if let Some((man, speed)) = man {
                 let slots = (chosen.man.slot.clone(), chosen.mount.as_ref().map(|m| m.slot.clone()));
-                gaits.push((gait, GaitAnims { man, speed, mount, slots }));
+                gaits.push((gait, GaitAnims { man, speed, mount, kind: level_kind(&slots.0, slots.1.as_deref()), slots }));
             }
         }
         // Every level and alternative, for the battle's per-man / per-frame choice.
@@ -325,14 +385,14 @@ impl SoldierLibrary {
             let found = gait_levels(&tables, &plan, gait, &mut speed_of);
             let mut kit_levels = Vec::new();
             for level in found {
-                let (man, blend_in): (Vec<_>, Vec<_>) =
-                    level.man.iter().filter_map(|c| self.clip(&c.path).map(|a| (a, c.blend_in_time))).unzip();
-                let (mount, mount_blend_in): (Vec<_>, Vec<_>) =
-                    level.mount.iter().flatten().filter_map(|c| self.clip(&c.path).map(|a| (a, c.blend_in_time))).unzip();
+                let (man, speeds, blend_in) = self.alternatives(level.man.iter().map(|c| (c.path.as_str(), c.blend_in_time)), true);
+                let (mount, mount_speeds, mount_blend_in) = self.alternatives(level.mount.iter().flatten().map(|c| (c.path.as_str(), c.blend_in_time)), true);
                 if man.is_empty() || (plan.mount.is_some() && mount.is_empty()) {
                     continue;
                 }
-                kit_levels.push(KitLevel { speed: level.speed, man, blend_in, mount, mount_blend_in });
+                // `man` read a clip, so the level has one: its kind is its first line's slot's.
+                let kind = level_kind(&level.man[0].slot, level.mount.as_ref().and_then(|m| m.first()).map(|m| m.slot.as_str()));
+                kit_levels.push(KitLevel { man, speeds, blend_in, mount, mount_speeds, mount_blend_in, kind });
             }
             if !kit_levels.is_empty() {
                 levels.push((gait, kit_levels));
@@ -360,16 +420,15 @@ impl SoldierLibrary {
     }
 
     /// The rider's and the mount's clips of mount slot `mount_slot` (the rider's through
-    /// `unit_animation::rider_slots`), in place, with their lines' blend-in times; the level's
-    /// speed is the first mount clip's root speed. None on foot or when either does not resolve.
+    /// `unit_animation::rider_slots`), in place, with their lines' blend-in times and their own
+    /// root speeds. None on foot or when either does not resolve.
     fn mounted_level(&mut self, tables: &AnimationTables, plan: &FigurePlan, mount_slot: &str) -> Option<KitLevel> {
         let m = plan.mount.as_ref()?;
         let rider = unit_animation::rider_slots(mount_slot).iter().map(|s| tables.resolve(&plan.animation_table, s)).find(|v| !v.is_empty())?;
         let horse = tables.resolve(&m.animation_table, mount_slot);
-        let speed = self.clip_entry(&horse.first()?.clip.filename)?.1;
-        let (man, blend_in): (Vec<_>, Vec<_>) = rider.iter().filter_map(|c| self.clip(&c.clip.filename).map(|a| (a, c.clip.blend_in()))).unzip();
-        let (mount, mount_blend_in): (Vec<_>, Vec<_>) = horse.iter().filter_map(|c| self.clip(&c.clip.filename).map(|a| (a, c.clip.blend_in()))).unzip();
-        (!man.is_empty() && !mount.is_empty()).then_some(KitLevel { speed, man, blend_in, mount, mount_blend_in })
+        let (man, speeds, blend_in) = self.alternatives(rider.iter().map(|c| (c.clip.filename.as_str(), c.clip.blend_in())), true);
+        let (mount, mount_speeds, mount_blend_in) = self.alternatives(horse.iter().map(|c| (c.clip.filename.as_str(), c.clip.blend_in())), true);
+        (!man.is_empty() && !mount.is_empty()).then_some(KitLevel { man, speeds, blend_in, mount, mount_speeds, mount_blend_in, kind: slot_kind(mount_slot) })
     }
 
     /// A mounted figure's gait ladder: the rungs of `unit_animation::MOUNT_LADDER` whose loop

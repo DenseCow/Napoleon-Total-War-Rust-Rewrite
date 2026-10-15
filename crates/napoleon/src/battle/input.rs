@@ -109,7 +109,7 @@ pub fn mouse(
             && sim.deployment_area.as_ref().is_none_or(|a| setup::area_contains(a, (point_m.x, point_m.y)))
         {
             let u = &mut sim.battle.units[i];
-            u.position = (point_m.x, point_m.y);
+            u.place_at((point_m.x, point_m.y), u.facing);
             u.set_destination(None);
         }
         return;

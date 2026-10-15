@@ -30,9 +30,36 @@ decompiled code is stored. Temp files: `target\tmp`.
   id), f32 value}; lookups binary-search the key (`0x00DEE380`) and return the value or 0 (`0x00E23DA0` float,
   `0x00E23E10` int rounded with FISTP). Adding a container merges sorted entries and sums equal keys (`0x00E04760`);
   adding one entry: `0x00E04BC0`.
-- Bonus types (first key word) and their getter wrappers: 1 basic (`0x00E1EFD0` float, `0x00E1F130` int), 6
-  population-class keyed (`0x00E1F050`), 0xE unit-category keyed (`0x00E1F0F0`), others for agent, building chain,
-  commodity, religion, resource, shot type, ability, unit class (the `effect_bonus_value_*_junction` tables).
+- Bonus types (first key word; CONFIRMED by the saved-entry reader `0x00DF0D10`, which switches on the type to read its
+  qualifier strings, polish18 2026-10-14): 0 agent, 1 basic (no qualifier), 2 building chain, 3 commodity, 6 population
+  class, 7 population class × religion (two qualifiers: class, then religion), 8 projectile, 9 shot type, 10 religion,
+  11 resource, 12 unit ability, 13 (0xD) unit class, 14 (0xE) unit category; 0xF marks an invalid entry, skipped.
+  Getter wrappers: 1 basic (`0x00E1EFD0` float, `0x00E1F130` int), 6 (`0x00E1F050`, called with ids 0, 2, 5 in
+  `0x008EDF70`), 0xE (`0x00E1F0F0`), 0xD (`0x00E1F110`).
+- Each type's bonus names are a slice of the 184-entry block at `0x0145B4A8`, searched by its own lookup that returns
+  the slice's count for an unknown name, which the junction key builder stores anyway (e.g. `0x00F740F0` for type 6):
+  basic ids 0..0x97 (`0x00E222F0` searches only these 0x98), chain 0x98..0x9B, commodity 156..157 (`0x00E22370`), population
+  class 158..164 (`0x00E223B0`, 7 names), population class × religion 165 (`happiness`, `0x00E223F0`), 166..167 (damage,
+  reload_mod, `0x00E22430`), 168 (enable, `0x00E22470`), religion 169..170 (happiness, conversion, `0x00E224B0`), 171
+  (production, `0x00E224F0`), 172 (enable, `0x00E22530`), unit category 173..179 (`0x00E22570`), unit class 180..183
+  (`0x00E225B0`); agent is a separate 3-name table at `0x0145B498` (`0x00E222B0`). Ours: `effects::BONUS_NAMES`,
+  `BASIC_BONUS_COUNT` and the per-type tables; `SavedBonus::key` reads types 1, 6, 7, 10, 0xD, 0xE under the DB keys and
+  `add_saved` writes them back, an unknown name under the slice's count as the exe does (tests
+  `a_saved_population_class_or_religion_bonus_reads_under_the_db_key`, `a_name_outside_its_table_is_saved_under_the_table_count`).
+  Qualifiers per saved type (CONFIRMED: reader `0x00DF0D10`, writer `0x00E02F80`, polish20): type 7 (population
+  class × religion) carries two utf16 strings, the class (`0x00E293E0`) then the religion (`0x008E4D80`); types 0, 2, 3,
+  6, 8, 9 and 0xA..0xE carry one; the rest none. Ours: `SavedBonus::qualifier` / `qualifier2` and
+  `SavedBonus::qualifier_count`, read by `details::saved_bonus` and written by `save.rs` `write_bonus_values` (test
+  `bonus_values_write_and_read_each_types_qualifiers`). Type 7 reads under the DB key (`EffectKey::pop_class_religion`,
+  "class|religion") and the DB junction `effect_bonus_value_population_class_and_religion_junction` (30 rows, all
+  `happiness` × lower/middle/upper × 10 religions) compiles to the same key, so DB and saved sources add up (CONFIRMED,
+  polish21: row builder `0x00F86F00` resolves #2 in the population classes and #3 in the religions and drops a row
+  with either unknown; record ctor `0x00F74050` takes the bonus id from the one-name table at `0x0145B73C` through
+  `0x00E223F0`, `happiness` 0 = BONUS_NAMES 165; tests `a_saved_population_class_and_religion_bonus_keeps_both_qualifiers`,
+  ntw_campaign `effect_tables_and_start_sums`, real_install `population_class_and_religion_junction_rows`). No exe reader
+  of a type-7 sum is traced yet (`0x008EDF70` does not read type 7; BACKLOG line), so
+  ours compiles it and nothing reads it. None of the 53
+  evidence saves holds a type-7 entry (economy_check `ECON_SAVED7` scan, 2026-10-15), so the real-file check waits for one.
 - The bonus ids are the engine enum at `0x0145B4A8` (see CAMPAIGN_FIDELITY.md "Effect ids"); the DB maps each effect key
   to (bonus type, bonus, qualifier) through `effect_bonus_value_basic_junction` (effect → bonus name) and the other
   `effect_bonus_value_*_junction` tables (effect → bonus name + unit category / class / pop class / ...).
@@ -40,7 +67,7 @@ decompiled code is stored. Temp files: `target\tmp`.
   type, minister level, difficulty) gets its own compiled container (`0x00F88590`: each junction row's value under the
   key its effect maps to).
 - Saved: only the faction's base containers (ESF `FACTION` #54 = faction +0x8C4, #55 = +0x8D4, `CAMPAIGN_BONUS_VALUES` →
-  `CAMPAIGN_BONUS_VALUE_BLOCK[]` {u32 type, i32 bonus, f32 value, utf16 qualifier}; reader `0x00DF14C0`). In every shipped
+  `CAMPAIGN_BONUS_VALUE_BLOCK[]` {u32 type, i32 bonus, f32 value, then the type's qualifiers (above)}; reader `0x00DF14C0`). In every shipped
   start position they hold only the agent caps (type 0, bonus 2: rake, admiral, General, gentleman); in saves #54 also
   holds scripted / event bonuses and #55 adds the difficulty handicap (§5.2). The exe builds +0x8D4 only at campaign
   start (`0x008DD090`: a faction with a player slot copies the slot's human flag +0xA8 and difficulty block +0xAC into

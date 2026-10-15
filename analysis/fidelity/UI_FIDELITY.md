@@ -51,19 +51,21 @@ The sandbox notes below are kept as written; where they and main differ, this pa
   - **CONFIRMED (data):** `FORT_ARRAY` is a child of `REGION` (after
     `RELIGIOUS_MISSION_BUILDING_ARRAY`, before `RESOURCES_ARRAY`) and holds **0 items in all eight
     `campaigns/*/startpos.esf` and all ten vanilla saves**. Two independent checks: the region's
-    reader `0x00A51E30` walks it there, and reading the install
+    writer `0x00A51E30` (SaveRegionRecord) writes it there, and reading the install
     (`cargo run -p ntw_formats --example esf_find -- "<startpos>" FORT_ARRAY`) prints the path of
     every one. So no shipped file exercises the loader and `World::forts` is empty in every game we
     can start -- a fort selection still comes only from the HUD or the `selectfort:` harness step.
     Nothing in the model *creates* a fort either: `BuildFort` / `UpgradeFort` address the
     settlement's `FORTIFICATION_SLOT`, which is a different thing.
-  - **CONFIRMED (exe; kept decompiles of the region reader `0x00A51E30`, the fort loader
-    `0x00AEB190` and the fort entity `0x00965550`):** the array's place in `REGION`; that per item
-    the region's reader reads **one `u32` itself** and then lets the fort object read the rest; that
-    the fort object then reads a **map position** (two `f32`, put at fort +0x120) and a **string**
-    (fort +0x188), plus a second string when the record's version byte says 2 and a third when it
-    says 4; that the fort registers itself in the campaign model beside the region, i.e. it is a
-    garrison residence of its own.
+  - **CONFIRMED (exe, writer; the region writer `0x00A51E30` (SaveRegionRecord), its fort loop at
+    `0x00A527AE`–`0x00A527FF`):** the array's place in `REGION`; that per item the region writer
+    puts **one integer itself** (ESF type 4, `i32`: the fort's vfunc +0x10; our `FortId` is a
+    `u32`) and then lets the fort object write the rest (`0x00AFD010`).
+  - **CONFIRMED (exe, reader; kept decompiles of the fort loader `0x00AEB190` and the fort entity
+    `0x00965550`):** the fort object reads a **map position** (two `f32`, put at fort +0x120) and a
+    **string** (fort +0x188), plus a second string when the record's version byte says 2 and a
+    third when it says 4; the fort registers itself in the campaign model beside the region, i.e.
+    it is a garrison residence of its own.
   - **UNKNOWN / PROVISIONAL:** what the leading `u32` identifies, what the strings are, the version
     byte, a fort's garrison and level (no `level` field is visible in the record at all -- see
     `Fort`), the original's clickable size for a fort, and **which model a fort draws — now closed
@@ -1031,13 +1033,14 @@ reads `info.can_build_fort_status` -> `g_fort_building_status` and `info.build_f
 `g_fort_cost`. Our `force_info` fills both keys with `FBS_UNABLE` (1) and -1, the constants the
 exe's army info builder `0x009FCFB0` writes (CONFIRMED 2026-10-07, see the fort section).
 
-**The deal appliers (A4.2, closed for three of four row types).** `deal_item_commands` maps each row
+**The deal appliers (A4.2, closed for three of four row types).** `deal_item_command` maps each row
 to its command, with a unit test (`negotiation_rows_map_to_their_appliers`):
 - regions -> `CampaignCommand::TransferRegion` (**`0x00B449F0`**, the model's new command: the
   settlement changes hands exactly as a capture does, because the four deal appliers *are* the
   capture appliers);
-- payments -> `StateGift(amount)` for the lump sum (`0x00BB3810(amount, 3)`) and
-  `RegularPayment(amount, turns)` for the schedule;
+- payments are not a row any more: they are the model's payment record (`Negotiation::payment`, set by
+  `ProposePayment`, capped once when proposed, applied by `AcceptDeal`; deals-fix 2026-10-14, see the
+  payments rows of §4.9);
 - stance / access / gift -> `Diplomacy` as before;
 - **technologies still dropped**: no granting address is reachable, so no address is invented.
 
@@ -1292,6 +1295,7 @@ implementation).
 | (3) greeting text | the campaign negotiation, when the proposer is human, builds the event key `receive_<attitude>`, attitude = `0x00B0DBA0` on the **recipient's** relationship to the proposer (names table `0x015F2910`: hostile, unfriendly, neutral, friendly, very_friendly), and looks it up by (event, recipient culture, recipient government key) in `diplomacy_negotiation_strings`, giving a `diplomacy_strings` key; loc `diplomacy_strings_string_<key>` | CONFIRMED (code + data: France → `european_monarchy_receive_hostile`, Ottomans → `middle_east_monarchy_receive_friendly`, Austria → `european_monarchy_receive_very_friendly`, the three screenshot texts) | `0x00BF5A60`, `0x00B0DBA0` |
 | (3) where the pick happens | in the negotiation's constructor `0x00BF5A60` itself (built by `0x008AF620` on `CCQ_DIPLOMACY_BEGIN_NEGOTIATION`), after the 14 action records and the forbidden loop: when the proposer (`+0x18`) is human, the recipient's `receive_` line (recipient's diplomacy manager `+0x528` → relationship to the proposer → attitude; recipient's culture and government), resolved with the recipient and posted to hub `+0x318`; then, when the recipient (`+0x1C`) is human, the **proposer's** `approach_` line towards the recipient (proposer's culture / government, resolved with the proposer), posted to hub `+0x330` with a flag (proposer human or the constructor's 4th argument). Each resolve may draw the RNG once. Ours: the queued command `CampaignCommand::BeginNegotiation` (as the exe queues `CCQ_DIPLOMACY_BEGIN_NEGOTIATION`) runs `begin_negotiation`, which makes both picks and stores them (`Negotiation::greeting` / `approach`) in `CampaignModel::negotiations`, the one record of the negotiation; `EndNegotiation` ends it. The UI only reads it: its begin / end counts become the "started" / "ended" calls at the next UI frame (`sync_negotiation`) | CONFIRMED | `0x00BF5A60` (`0x00BF5D2C`, `0x00BF5E3F`, `0x00BF5E96`, `0x00BF5FBC`) |
 | (3) faction override | `ResolveDiplomacyNegotiationString` (`0x00C55CC0`): if `diplomacy_negotiation_faction_override_strings` has a row for (event, culture, government, recipient faction key), one campaign-RNG draw (state at campaign `+0xFB8`, x = x × 0x343FD + 0x269EC3; (x >> 16) / 65535 < 0.5) picks the override's string; no row → no draw and the generic row; no generic row → "Missing String" | CONFIRMED | `0x00C55CC0` |
+| (3) a repeated row | the table build (`0x00F7AA60`; overrides `0x00F7A6E0`, same template) keeps every row in its row array and inserts each row index into the key map with `0x007C7A60`, an open-addressing insert that overwrites the stored index when the key is already there; the lookups read only that map, so the **last** of repeated (event, culture, government[, faction]) rows wins. Ours keeps the last and warns once per repeat (`ntw_campaign` rules, test `a_repeated_negotiation_line_keeps_the_last_row`) | CONFIRMED | `0x00F7AA60`, `0x007C7A60` |
 | (3) culture / government | culture = faction record (`+0x514`) → subculture → culture key (the `diplomacy_negotiation_strings` culture column: european, egy_european, middle_east, egy_middle_east, indian, tribal); government = the faction's government type key (`+0x70C` → `+0xB0`, e.g. `gov_empire` for France 1805) | CONFIRMED fields; the subculture→culture step is the same chain as `CharacterCultureType` (INFERRED identical) | `0x008F3490`, `0x008B9DE0` |
 | (3) diplomat portrait | `MinisterPortraitPath(faction)` = `ui/portraits/<folder>/Cards/minister/young/001.tga` (agent type 13 = `minister` from `0x0145D9E0`, age 25 → young card, index 1), folder = a map lookup (`0x008C05B0`, value at node +0x14, filler not traced) giving `european` / `middle_east` for the screens. Correction: the `cultures` third column is NOT the folder (vanilla: egy_european → european, egy_middle_east → middle_east, european empty, indian → middle_east, middle_east → indian, PIR_* / tribal → european); ours uses the culture key, then that column when the picture is missing (INFERRED). No "data/" prefix: the script adds it. The european and middle_east `001` pictures are the two diplomats in the screenshots | CONFIRMED (code + pictures); folder map filler UNKNOWN | `0x009ED8A0`, `0x009C1300`, `0x009CBF40` |
 | (4) leader name | `BuildCharacterDetailsInfoTable` `Name` = `0x00A0FE80` on the character's name object (`+0x2F0`): forename, then " " + surname when not empty, then " " + the third part (character `+0x33C`) when not empty | CONFIRMED | `0x009AD427`, `0x00A0FE80` |
@@ -1370,6 +1374,8 @@ variants in the settlement vtable (`0x0137CA44..5C`), not deal appliers. All CON
 | Commands | regions → `CCQ_DIPLOMACY_PROPOSE_REGIONS` (`PostProposeRegionsCommand` `0x00C4B3C0`), technologies → `CCQ_DIPLOMACY_PROPOSE_TECHNOLOGIES` (`0x00C4B870`); fields (clear flag = 0, demanded, offered) | CONFIRMED | registration `0x00420E00` / `0x00420F00` |
 | Regions executor | `0x00933CC0`: any region id that does not resolve aborts; clear flag → the regions record is cleared (`0x00C5C730`); else, if either list is non-empty, the record takes the deal (`0x00C49AA0` → record virtual `+0x44` `0x00C4B0A0`): it **replaces** both lists (record `+0x14` demanded, `+0x24` offered) | CONFIRMED | `0x00933CC0`, `0x00C4B0A0` |
 | Technologies executor | `0x009340A0`: same, keys looked up in the technology table (unknown key aborts), but the record is cleared when the flag is set **or both lists are empty** | CONFIRMED | `0x009340A0`, `0x00C4B560` |
+| Propose payments (deals-fix, 2026-10-14) | action 9 is called `Propose(offer, amount, turns, regular, action)`; read top-down: the action, `regular` (bool reader `0x01055840`: Lua type 1, else a type error `0x01095090` and nothing proposed), `turns` and `amount` (number reader `0x010556D0` → `0x01055700`: Lua type 3, a float rounded to the nearest, ties to even; out of range gives the x87 integer indefinite, 0x80000000), `offer`. An offer stores −amount (`0x00C43D70` / `0x00C43D90`), a demand amount (`0x00C1F6D0` / `0x00C1F6F0`); turns = the panel's when `regular` and turns > 1 (signed), else 1. The record's virtual `+0x40` (`0x00C4AD60`) posts the payments command (descriptor `0x013879FC`, clear flag 0) | CONFIRMED (disassembly `0x009BF64C`–`0x009BF701`) | `0x009BF3C0` |
+| Payments executor and row | the record copies the pair and caps an offered one-off payment at the proposer's treasury (`0x00C4AB20`, CAMPAIGN_FIDELITY.md §Treasury changes "Payment cap"), then builds its row text from the capped amount (`0x00C4AB85`): turns 1 `diplomacy_strings_string_offer_or_demand_single_payment`, else `…_regular_payment`, with \|amount\| (and the turns). `BuildOfferAndDemandStrings` `0x009B48B0` adds a record's offers row when its offer-text getter (vtable `+0x14`, payments `0x00C123F0`: amount < 0) returns text and its demands row when the demand getter (`+0x4`, `0x00C11F20`: amount > 0) does. `RemoveAction('payments')` (record `+0x4C`, `0x00C5CBC0`) posts the same command with the clear flag and zeros | CONFIRMED | `0x00C4AB20`, `0x009B48B0`, `0x00C5CBC0` |
 | Accept | `AcceptCampaignNegotiationDeal` `0x00C114B0`: unless `0x00C1E240` (a deal with no demands at all may be turned into a payment; AI, §6), the embedded record `+0x184` then every record of `+0x2A0/+0x2A4` runs its virtual `+0x3C` | CONFIRMED order; `0x00C1E240` not ported | `0x00C114B0` |
 | Region item applied | `0x00C18BF0`: each demanded region (record `+0x14`) goes to the proposer (negotiation `+0x18`), then each offered one (`+0x24`) to the recipient (`+0x1C`), through the settlement's `0x00B58A10(new owner, 1, 0)` = `0x00B449F0(new owner, no character, no report, 1, 0)` | CONFIRMED | `0x00C18BF0`, `0x00B58A10` |
 | Region transfer | `0x00B449F0` → `SetSettlementOwner` `0x00B2B810` (settlement `+0x88`), `TransferRegionToFaction` `0x00A64AC0` (schools stop researching `0x008B4AB0`; constructions cancelled `0x00A6CC10`; recruitment drained `0x00B1A760`; the old owner's capital cleared if it was this region `0x008BA580`; region joins the new owner), `TransferRegionSlotOwners` `0x00B1B300` (a slot with no occupant and no holder passes to the new owner), recruitables / effects / economy refreshed. **No army is moved or destroyed on this path** (the capture variants destroy the garrison first, e.g. `0x00B58A30` deletes settlement virtual `+0x1C`); the campaign's `+0x420` owner-changed hub only has UI subscribers (`0x00906C00`, `0x00907150`, `0x009087C0`) | CONFIRMED for the call chain | as named |
@@ -1394,7 +1400,12 @@ entries); `ProposeDeal` / `AcceptOffer` push `AcceptDeal`; `Cancel` pushes `Clea
 `accepted_regions_change_hands_and_leave_armies_in_place`,
 `accepted_technologies_are_granted_and_counted`, `technology_research_is_written` (traded count
 round trip), `negotiation_regions_list_the_tradeable_regions` (OK → record → ProposeDeal → owner).
-Open: the other actions' `Propose` items (state gift, payments, protector, war, lists 13–15) have no
+Payments (deals-fix, 2026-10-14): `Negotiation::payment` (`DealPayment`, the record's sign: negative
+offered) is set by `CampaignCommand::ProposePayment` (`CampaignModel::propose_payment`, the cap through
+the seam `diplomacy.proposed_payment` once); `Propose` and `RemoveAction` post it, the offers / demands
+row reads the record (`payment_row_text`), `CanPropose` counts it and `AcceptDeal` pays it. Test
+`a_proposed_payment_is_capped_once_and_its_row_shows_the_capped_amount`.
+Open: the other actions' `Propose` items (state gift, protector, war, lists 13–15) have no
 command yet (PLACEHOLDER, logged once per action); the AI's evaluation (`0x00C49BE0` →
 `0x00AA5ED0`, `0x00C1E240`) is traced in AI_RESEARCH.md §4 "Deal evaluation" (technology value, evaluation and accept tests ported in `campaign::deal_value`; the goal lists and weights traced, and a deal of regions and technologies answered as the exe, `ai_accepts_deal`, with the region inputs PROVISIONAL as listed there).
 

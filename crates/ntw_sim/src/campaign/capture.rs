@@ -37,7 +37,8 @@
 use super::effects::Effects;
 use super::events::CampaignEvent;
 use super::ids::{FactionId, ForceId, RegionId};
-use super::world::{CampaignModel, ConstructionItem, SlotRef};
+use super::treaties::AttitudeEvent;
+use super::world::{CampaignModel, ConstructionItem, ConstructionKind, SlotRef, Stance};
 use super::CommandError;
 use crate::rng::CaRng;
 
@@ -136,14 +137,14 @@ impl CampaignModel {
 
     /// The faction a capture of `region` by `faction` may liberate (`0x00B14930`'s third option, grand
     /// campaign path). CONFIRMED: the region's rebel-faction record names a campaign faction, other than the
-    /// capturer, and the capturer's relationship to it allows regions back (#28, default true). INFERRED: the
-    /// faction's +0x824 flag read as "out of the game" — we offer it when the faction holds no region (the
-    /// branch for a faction still holding land, +0x72C / a count of 1, is not decoded: not offered). Not
+    /// capturer, and the capturer's relationship to it allows regions back (#28, default true), and the faction is out of the game
+    /// (+0x824 set, [`Self::in_the_game`]; CONFIRMED meaning: the destruction `0x008AB6C0` sets it). The
+    /// branch for a faction still in the game (+0x72C / a count of 1) is not decoded: not offered. Not
     /// modelled: a campaign-wide switch (+0x124) and a flag of the faction record (+0x4C), both UNKNOWN.
     pub fn liberation_target(&self, region: RegionId, faction: FactionId) -> Option<FactionId> {
         let key = self.world.region_rebel_factions.get(&region)?;
         let target = self.world.factions.values().find(|f| &f.key == key)?.id;
-        if target == faction || self.world.regions.values().any(|r| r.owner == target) {
+        if target == faction || self.in_the_game(target) {
             return None;
         }
         let allows = self.world.relationships.get(&(faction, target)).is_none_or(|r| r.allows_region_return);
@@ -261,6 +262,28 @@ impl CampaignModel {
         }
     }
 
+    /// The campaign's [`LootResentment`](super::features::LootResentment) after `looter` loots `region`
+    /// (`0x00B541E0`, CONFIRMED, after the alignment shift `0x00AAA580`): the region's rebel faction key (region
+    /// +0x10C) picks the resentful homeland faction (the first matching row, found by key, `0x00955B70`); unless it
+    /// is the looter itself (`0x00898B80`) or the looter is exempt, its record towards the looter adds `value` to
+    /// the factor (`0x00B544F0`: only when the two are not at war; then `0x00B02CB0` with the factor event's drift
+    /// and limit, `0x00B27FF0`). No relation-change broadcast follows (CONFIRMED: neither function makes one), so
+    /// the AI's stored relation belief keeps its old value ([`super::director`]).
+    fn loot_resentment(&mut self, region: RegionId, looter: FactionId) {
+        let Some(rule) = &self.rules.features.loot_resentment else { return };
+        let Some(rebels) = self.world.region_rebel_factions.get(&region) else { return };
+        let Some((_, homeland)) = rule.homelands.iter().find(|(r, _)| r == rebels) else { return };
+        let Some(resentful) = self.world.factions.values().find(|f| &f.key == homeland).map(|f| f.id) else { return };
+        let exempt = rule.exempt_looter.is_some() && self.world.factions.get(&looter).map(|f| f.key.as_str()) == rule.exempt_looter.as_deref();
+        if resentful == looter || exempt || self.world.stance(resentful, looter) == Stance::War {
+            return;
+        }
+        // A row with an unknown factor was logged and dropped when the rules loaded (`CampaignFeatures::validated`).
+        let Some(e) = rule.event() else { return };
+        let (factor, value) = (rule.factor.clone(), rule.value);
+        self.relationship_mut(resentful, looter).add_factor(&factor, AttitudeEvent { value, ..e });
+    }
+
     /// After a capture by force: builds the preview, then lets the AI choose at once or leaves the choice to a
     /// human ([`CampaignModel::pending_capture`], answered with `ChooseCapture`).
     pub(crate) fn settle_capture(&mut self, region: RegionId, faction: FactionId, by: Option<ForceId>, surrender: bool, events: &mut Vec<CampaignEvent>) {
@@ -298,6 +321,7 @@ impl CampaignModel {
         let money = match choice {
             CaptureChoice::Loot => {
                 self.apply_outcome(p.region, p.faction, &p.loot, true);
+                self.loot_resentment(p.region, p.faction);
                 p.loot.money
             }
             CaptureChoice::Occupy => {
@@ -306,13 +330,16 @@ impl CampaignModel {
             }
             CaptureChoice::Liberate => {
                 let target = p.liberate.expect("checked");
-                // 0x00B58A10(target, 0, 1): the region passes to the liberated faction through the
-                // shared owner change, which moves no army (`transfer_region`, CONFIRMED there): the
-                // capturer's army stays inside, a foreign garrison. The army the original raises for
+                // 0x00B58A10(target, 0, 1): the liberated faction comes back if it was out of the game,
+                // then the region passes to it through the shared owner change (`liberate_region` →
+                // `transfer_region`), which in ours moves no army: the capturer's army stays inside, a
+                // foreign garrison. PROVISIONAL: the original's owner change (0x00A64AC0, fourth
+                // argument 0) expels the other factions' armies from the region (0x008D9DC0), not
+                // modelled yet. The army the original raises for
                 // the target (0x00B4F090: units chosen from what the region's sArmy / rHorse / tGuns
                 // buildings allow, a new general) is not modelled. The SettlementOccupied event is
                 // kept as before (INFERRED for this path).
-                if self.transfer_region(p.region, target) {
+                if self.liberate_region(p.region, target, events) {
                     events.push(CampaignEvent::SettlementOccupied { region: p.region, faction: target });
                 }
                 0
@@ -386,9 +413,9 @@ impl CampaignModel {
 
     /// Command `RepairBuilding` (`0x00B66260`): charges the repair cost when it is above 0 and queues the
     /// repair, with no affordability test (its callers make it: the panel's `can_afford_repair` and the AI,
-    /// [`super::treasury::can_pay_repair`]). The repair is a
-    /// construction item of the building's own level (it ends with health 100); its length is
-    /// max(1, floor((100 − health) × 0.01 × level turns)).
+    /// [`super::treasury::can_pay_repair`]). The repair is a construction item
+    /// ([`ConstructionKind::Repair`], ESF type 2) that raises the building's health each turn and ends at 100
+    /// ([`super::turn::construction_step`]); its length is max(1, floor((100 − health) × 0.01 × level turns)).
     pub(crate) fn repair_building(&mut self, region: RegionId, slot: SlotRef) -> Result<Vec<CampaignEvent>, CommandError> {
         let owner = self.world.regions.get(&region).ok_or(CommandError::UnknownRegion(region))?.owner;
         self.check_turn(owner)?;
@@ -396,8 +423,8 @@ impl CampaignModel {
     }
 
     /// How many turns repairing the building in `slot` takes: max(1, floor((100 − health) × 0.01 ×
-    /// level turns)) (0 when nothing stands there). The building keeps its health while it is being
-    /// repaired, so this is also the length of a repair already queued.
+    /// level turns)) (0 when nothing stands there), from the building's health now (`0x00AE7010`; a queued repair
+    /// keeps its own length, [`ConstructionKind::Repair`]).
     pub fn repair_turns(&self, region: RegionId, slot: SlotRef) -> u32 {
         let Some(b) = self.world.regions.get(&region).and_then(|r| r.building_at(slot)) else { return 0 };
         let level_turns = self.rules.buildings.get(&b.level_key).map_or(1, |x| x.turns);
@@ -411,6 +438,8 @@ impl CampaignModel {
         }
         let cost = self.repair_cost(region, slot);
         let turns = self.repair_turns(region, slot);
+        // The step per turn (`0x00AE7010` → item +0x18, CONFIRMED): what the building lacks, divided by the turns
+        // (unsigned, the remainder dropped); the last turn sets health 100 (`0x00B78490`).
         let b = self.world.regions[&region].building_at(slot).cloned().expect("checked");
         let f = self.world.factions.get_mut(&owner).ok_or(CommandError::UnknownFaction(owner))?;
         // `0x00B66260` tests no funds and charges only a cost above 0 (signed); the item keeps the cost either way
@@ -423,41 +452,75 @@ impl CampaignModel {
             level_key: b.level_key,
             turns_remaining: turns,
             cost,
+            kind: ConstructionKind::Repair { health_per_turn: (100u32.saturating_sub(b.health)) / turns.max(1), turns },
+            active: true,
         });
         Ok(Vec::new())
     }
 
-    /// Whether the building in `slot` can be demolished now: standing, held by the owner, and
-    /// nothing being built or repaired there (mirrors [`Self::can_repair`]). The original's
-    /// `CanDemolishBuilding` (`0x009B7920`, CONFIRMED: slot resolve `0x009BB6E0` shared with
-    /// cancel/repair, not the `settlement_road` slot, `0x00A91FC0`, selected item present)
-    /// excludes the road, and so does this ([`SlotRef::Road`] is never demolished).
+    /// Turns the repairs of a save written before items kept their [`ConstructionKind`] into repair items,
+    /// and returns how many it converted. Such saves (our own format before version 4, and our ESF writer
+    /// before it wrote item types 2 and 3) stored a repair as a build of the standing building's own level,
+    /// and the building kept the health it had when the repair was queued (the step left it alone). So the
+    /// length and step are those [`Self::queue_repair`] gives from that health, and the health gets the
+    /// steps already run (`0x00B78490`). An original save never holds a build of the standing level (an
+    /// upgrade names the next level), so this changes nothing in one. Needs the rules (the level's turns):
+    /// run it after they are attached.
+    pub fn convert_legacy_repairs(&mut self) -> usize {
+        let mut found = Vec::new();
+        for (&region, reg) in &self.world.regions {
+            for (k, item) in reg.construction.iter().enumerate() {
+                if item.kind == ConstructionKind::Build && reg.building_at(item.slot).is_some_and(|b| b.level_key == item.level_key) {
+                    found.push((region, k));
+                }
+            }
+        }
+        for &(region, k) in &found {
+            let slot = self.world.regions[&region].construction[k].slot;
+            let turns = self.repair_turns(region, slot);
+            let reg = self.world.regions.get_mut(&region).expect("found above");
+            let remaining = reg.construction[k].turns_remaining;
+            let stepped = turns.saturating_sub(remaining);
+            let turns = turns.max(remaining);
+            if let Some(Some(b)) = reg.building_mut(slot) {
+                let health_per_turn = 100u32.saturating_sub(b.health) / turns;
+                b.health = b.health.saturating_add(health_per_turn.saturating_mul(stepped)).min(100);
+                reg.construction[k].kind = ConstructionKind::Repair { health_per_turn, turns };
+            }
+        }
+        found.len()
+    }
+
+    /// Whether the building in `slot` can be demolished now: not the road, held by the owner, and a building
+    /// standing (`0x00B16540`, CONFIRMED; the panel's `CanDemolishBuilding` `0x009B7920` tests the same: slot
+    /// resolve `0x009BB6E0` shared with cancel/repair, not the `settlement_road` slot, `0x00A91FC0`). An item
+    /// queued in the slot does not block it: the demolition cancels it ([`Self::demolish_building`]).
     pub fn can_demolish(&self, region: RegionId, slot: SlotRef) -> bool {
         if slot == SlotRef::Road {
             return false;
         }
         let Some(r) = self.world.regions.get(&region) else { return false };
         let held = r.slot_held(slot);
-        r.building_at(slot).is_some()
-            && held
-            && !r.construction.iter().any(|c| c.slot == slot)
+        r.building_at(slot).is_some() && held
     }
 
     /// Command `DemolishBuilding` (exe `DemolishBuilding` `0x009E2380` → `0x009B9590` → queue id
     /// `0x84`; fort `DemolishFort` `0x009E23D0` → `0x009BA250` → queue id `0x89`; both CONFIRMED):
-    /// removes the standing building at once, with no refund (PROVISIONAL: the original's
-    /// resolution — refund, timing — is UNKNOWN beyond the queued ids). Fires no script event
-    /// (none known, like [`CampaignCommand::CancelConstruction`]).
+    /// the handler (`QueueSlotDemolition` `0x00B286C0`, CONFIRMED) cancels any item queued in the slot, crediting
+    /// its stored cost back as [`CampaignCommand::CancelConstruction`] does, then, when the building can be
+    /// demolished (`0x00B16540`), queues a demolition: a one-turn item that costs nothing
+    /// ([`ConstructionKind::Demolish`], `0x00AE6ED0`, ESF type 3). It empties the slot at the round end
+    /// ([`super::turn::construction_step`]). Fires no script event.
     pub(crate) fn demolish_building(&mut self, region: RegionId, slot: SlotRef) -> Result<Vec<CampaignEvent>, CommandError> {
         let owner = self.world.regions.get(&region).ok_or(CommandError::UnknownRegion(region))?.owner;
         self.check_turn(owner)?;
         if !self.can_demolish(region, slot) {
             return Err(CommandError::CannotBuild("nothing to demolish in that slot".into()));
         }
-        let r = self.world.regions.get_mut(&region).expect("checked");
-        if let Some(b) = r.building_mut(slot) {
-            *b = None;
-        }
+        // The exe cancels before it tests; the test does not depend on the item, so testing first (no change on
+        // a refused command) gives the same result for every command its panel can send.
+        self.cancel_slot_item(region, slot);
+        self.world.regions.get_mut(&region).expect("checked").construction.push(ConstructionItem { slot, level_key: String::new(), turns_remaining: 1, cost: 0, kind: ConstructionKind::Demolish, active: true });
         Ok(Vec::new())
     }
 
@@ -466,8 +529,12 @@ impl CampaignModel {
     /// repair cost; an AI faction's cost is capped at its treasury, so the test always passes and is not repeated
     /// here, CONFIRMED)): at an AI faction's turn start, every damaged building, the settlement walls included (an
     /// ordinary building slot in the exe, CONFIRMED). This is what lets a damaged AI building be upgraded again:
-    /// upgrades need full health ([`Self::can_build`]). The other gates of `0x00AA4910` (`0x0047B090` /
-    /// `0x00A8B2D0`) are not modelled.
+    /// upgrades need full health ([`Self::can_build`]). No repair where the AI may not shop
+    /// ([`Self::ai_shopping_hidden`]; the gate is CONFIRMED at `0x00AA491D..0x00AA4945`: when the CAI slot's
+    /// `+0x104` object exists, its position is tested with `0x00A8B2D0` and a hidden one is skipped). The
+    /// position is INFERRED: the slot's own position ([`super::world::RegionSlot::position`], none = no gate,
+    /// as the exe's null object), the settlement's for the walls; what the CAI slot's `+0x104` object is
+    /// is not traced.
     pub(crate) fn ai_repairs(&mut self, faction: FactionId) {
         if self.turn.humans.contains(&faction) {
             return;
@@ -476,6 +543,14 @@ impl CampaignModel {
         for region in regions {
             let n = self.world.regions[&region].slots.len();
             for slot in (0..n).map(SlotRef::Slot).chain([SlotRef::Walls]) {
+                let r = &self.world.regions[&region];
+                let position = match slot {
+                    SlotRef::Slot(i) => r.slots[i].position,
+                    _ => Some(r.settlement.position),
+                };
+                if position.is_some_and(|p| self.ai_shopping_hidden(p)) {
+                    continue;
+                }
                 if self.can_repair(region, slot) {
                     let _ = self.queue_repair(region, slot);
                 }

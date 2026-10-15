@@ -128,8 +128,10 @@ pub enum ScriptCommand {
     Precedence(String, String),
     /// `set_pack_file_dependency <lhs> <rhs>`: "lhs will be loaded first and used by rhs pack".
     Dependency(String, String),
-    /// `add_working_directory <directory name>`: "Redirect the non-pack (and mod pack) file search".
-    WorkingDirectory(String),
+    /// `add_working_directory <directory name> [0|1]`: "Redirect the non-pack (and mod pack) file
+    /// search". The folder, then the word after it in the same statement, if any: the exe reads it
+    /// as an optional bool (`>> bool`, 0x0105C780), see [`plan_layers`].
+    WorkingDirectory(String, Option<String>),
     /// Any other statement (graphics settings, `batch`, comments, a loading command without its
     /// arguments, ...): the command word. Not used for loading.
     Other(String),
@@ -224,7 +226,7 @@ impl UserScript {
                     ("exclude_pack_file", Some(a), _) => ScriptCommand::ExcludePack(a),
                     ("set_pack_file_precedence", Some(a), Some(b)) => ScriptCommand::Precedence(a, b),
                     ("set_pack_file_dependency", Some(a), Some(b)) => ScriptCommand::Dependency(a, b),
-                    ("add_working_directory", Some(a), _) => ScriptCommand::WorkingDirectory(a),
+                    ("add_working_directory", Some(a), b) => ScriptCommand::WorkingDirectory(a, b),
                     _ => ScriptCommand::Other(cmd.clone()),
                 };
                 out.push(c);
@@ -502,7 +504,26 @@ fn plan_layers(data_dir: &Path, language: &str, options: &ModOptions) -> Result<
                     )),
                 }
             }
-            ScriptCommand::WorkingDirectory(d) => {
+            // The word after the folder is the exe's optional bool (0x0105C780 reads it with
+            // `>> bool` unless the script stream is at its end; default 1, a word read as a number
+            // that is 0 or 1, CONFIRMED 0x010E0180). 1 normalizes the folder (`/`→`\`, lowercase,
+            // repeated `\` collapsed, a trailing `\` added; 0x0105CA70 → 0x00EDEE40); 0 keeps the
+            // text as written. Windows ignores case and accepts `/`, so both give the same folder
+            // here. ORIGINAL BUG (fixed): with 0 and no trailing `\`, the exe glues names straight
+            // onto the folder text (the scan looks for `<folder>*.pack`, 0x01095100), i.e. it
+            // searches the parent folder for names starting with the folder's name; we always use
+            // the folder. ORIGINAL BUG (fixed): the script is one stream (0x00DB7D74), so with no
+            // bool on its line the exe reads the next statement's first word as the bool; a word
+            // that is not a number fails the stream and the runner silently drops every later line
+            // (0x00DB80F0 stops on the fail state), though the folder is still added. Our statements
+            // end at the line, so later lines always run.
+            ScriptCommand::WorkingDirectory(d, flag) => {
+                if let Some(w) = flag.as_deref().filter(|w| !matches!(w.parse::<i64>(), Ok(0 | 1))) {
+                    report.warnings.push(format!(
+                        "add_working_directory {d:?} {w:?}: the word after the folder must be 0 or 1 (the original \
+                         stops reading the script here); ignored, the folder is still added"
+                    ));
+                }
                 let p = root.join(d.replace('/', "\\"));
                 if p.is_dir() {
                     add_dir(&mut work_dirs, p);
@@ -946,7 +967,7 @@ mod tests {
                 ScriptCommand::ExcludePack("media.pack".into()),
                 ScriptCommand::Precedence("a.pack".into(), "b.pack".into()),
                 ScriptCommand::Dependency("c.pack".into(), "d.pack".into()),
-                ScriptCommand::WorkingDirectory("extra".into()),
+                ScriptCommand::WorkingDirectory("extra".into(), None),
                 // Command words are case-sensitive; a missing argument loads nothing.
                 ScriptCommand::Other("MOD".into()),
                 ScriptCommand::Other("mod".into()),
@@ -1188,6 +1209,38 @@ mod tests {
         assert_eq!(vfs.read("y.txt").unwrap(), b"extra mod");
         assert_eq!(vfs.read("only_loose.txt").unwrap(), b"only loose", "data\\ is searched first");
         assert_eq!(vfs.read("extra_loose.txt").unwrap(), b"extra loose");
+    }
+
+    /// add_working_directory's optional bool (0x0105C780): 0 and 1 give the same folder (with 0 and
+    /// no trailing `\` the exe would search `<folder>*.pack` in the parent: ORIGINAL BUG, fixed); a
+    /// word that is not 0 or 1 warns (the original stops reading the script there) and later lines
+    /// still run.
+    #[test]
+    fn working_directory_flag() {
+        assert_eq!(
+            UserScript::parse_str("add_working_directory extra 0\nadd_working_directory b"),
+            vec![
+                ScriptCommand::WorkingDirectory("extra".into(), Some("0".into())),
+                ScriptCommand::WorkingDirectory("b".into(), None),
+            ]
+        );
+        let data = fake_install("mods_workdir_flag");
+        let root = data.parent().unwrap();
+        for (dir, pack) in [("extra", "extra_mod.pack"), ("second", "second_mod.pack")] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+            std::fs::write(root.join(dir).join(pack), build_pack(3, &[(&format!("{dir}.txt"), b"x")])).unwrap();
+        }
+        // A pack in the parent whose name starts with the folder's name: the original's 0 flag
+        // without a trailing `\` would scan it instead.
+        std::fs::write(root.join("extra_sibling.pack"), build_pack(3, &[("sibling.txt", b"x")])).unwrap();
+        let script = "add_working_directory extra 0\nadd_working_directory second yes\nmod extra_mod.pack\nmod second_mod.pack\n\
+                      mod extra_sibling.pack";
+        let (vfs, report) = Vfs::open_with_mods(&data, &opts(script)).unwrap();
+        assert!(vfs.contains("extra.txt") && vfs.contains("second.txt"), "both folders added, later lines run");
+        assert!(!vfs.contains("sibling.txt"), "the folder is a folder, not a name prefix");
+        let flag_warnings: Vec<_> = report.warnings.iter().filter(|w| w.contains("must be 0 or 1")).collect();
+        assert_eq!(flag_warnings.len(), 1, "{:?}", report.warnings);
+        assert!(flag_warnings[0].contains("\"yes\""), "{flag_warnings:?}");
     }
 
     #[test]

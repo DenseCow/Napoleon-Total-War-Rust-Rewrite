@@ -5,32 +5,18 @@ const A: FactionId = FactionId(1);
 const B: FactionId = FactionId(2);
 
 
-/// The negotiation appliers (the payment item `0x00C18A70` for the money, the treaty appliers for the stance rows),
-/// with the row names `BuildOfferAndDemandStrings` reports. Regions and technologies are the
-/// model's records (`CampaignCommand::AcceptDeal`, tested in ntw_sim).
+/// The negotiation appliers (the treaty appliers for the stance rows), with the row names
+/// `BuildOfferAndDemandStrings` reports. Regions, technologies and the payment are the model's
+/// records (`CampaignCommand::AcceptDeal`, tested in ntw_sim).
 #[test]
 fn negotiation_rows_map_to_their_appliers() {
-    // The lump sum is a one-off payment (0x00C18A70 run once), the schedule a regular payment.
-    assert_eq!(
-        deal_item_commands(&NegotiationItem::Payment { amount: 500, turns: 0 }, A, B),
-        vec![CampaignCommand::Diplomacy { a: A, b: B, action: D::OneOffPayment(500) }]
-    );
-    // A one-turn schedule is stored as turns 1 like the lump sum (0x009BF6FC), so it too runs once.
-    assert_eq!(
-        deal_item_commands(&NegotiationItem::Payment { amount: 200, turns: 1 }, A, B),
-        vec![CampaignCommand::Diplomacy { a: A, b: B, action: D::OneOffPayment(200) }]
-    );
-    assert_eq!(
-        deal_item_commands(&NegotiationItem::Payment { amount: 100, turns: 3 }, A, B),
-        vec![CampaignCommand::Diplomacy { a: A, b: B, action: D::RegularPayment(100, 3) }]
-    );
     // The stance / access / gift rows pass straight through.
     for action in [D::Alliance, D::BreakTrade, D::CancelMilitaryAccess, D::BecomeProtectorate] {
-        assert_eq!(deal_item_commands(&NegotiationItem::Action(action), A, B), vec![CampaignCommand::Diplomacy { a: A, b: B, action }]);
+        assert_eq!(deal_item_command(&NegotiationItem::Action(action), A, B), CampaignCommand::Diplomacy { a: A, b: B, action });
     }
     // Every row type has a name the panel's rows report.
-    assert_eq!(negotiation_action_name(&NegotiationItem::Payment { amount: 1, turns: 0 }), "payments");
-    assert_eq!(negotiation_action_name(&NegotiationItem::Payment { amount: 1, turns: 2 }), "payments");
+    assert_eq!(negotiation_action_name(&NegotiationItem::Action(D::OneOffPayment(1))), "payments");
+    assert_eq!(negotiation_action_name(&NegotiationItem::Action(D::Embargo(B))), "embargo");
 }
 
 // ----- A campaign HUD host without the install: a MADE-UP one-region world and a made-up root
@@ -95,6 +81,8 @@ fn test_hud_with(db: GameDatabase) -> TestHud {
             slots: Vec::new(),
             road: None,
             fortification: Some(BuildingRef { level_key: FORT_LEVEL.into(), health: 100 }),
+            road_holder: None,
+            fortification_holder: None,
             population: 1000,
             base_gdp: 100,
             gdp: 100,
@@ -105,6 +93,7 @@ fn test_hud_with(db: GameDatabase) -> TestHud {
             tax_exempt: false,
             religions: Vec::new(),
             class_bases: Vec::new(),
+            unit_resources: Vec::new(),
             population_state: Default::default(),
             recruitment_queue: Vec::new(),
             construction: Vec::new(),
@@ -318,8 +307,8 @@ fn a_repair_card_counts_the_repair_length() {
         std::sync::Arc::make_mut(&mut st.model.rules).buildings.get_mut(FORT_LEVEL).unwrap().turns = 10;
         let r = st.model.world.regions.get_mut(&REGION).unwrap();
         r.fortification.as_mut().unwrap().health = 50;
-        // floor(0.5 × 10) = 5 turns of repair, 3 of them left.
-        r.construction.push(ntw_sim::campaign::ConstructionItem { slot: SlotRef::Walls, level_key: FORT_LEVEL.into(), turns_remaining: 3, cost: 0 });
+        // floor(0.5 × 10) = 5 turns of repair (the item keeps its length), 3 of them left.
+        r.construction.push(ntw_sim::campaign::ConstructionItem { slot: SlotRef::Walls, level_key: FORT_LEVEL.into(), turns_remaining: 3, cost: 0, kind: ntw_sim::campaign::ConstructionKind::Repair { health_per_turn: 10, turns: 5 }, active: true });
     }
     let slots = slots_of(&hud.construction(ConstructionPanel::Settlement));
     let card: Table = slots.last().unwrap().get::<Table>("buildings").unwrap().get(1).unwrap();
@@ -332,6 +321,29 @@ fn a_repair_card_counts_the_repair_length() {
     let cost = hud._scripts.state().model.repair_cost(REGION, SlotRef::Walls);
     assert!(cost > 0);
     assert_eq!(card.get::<i32>("repair_cost").unwrap(), cost);
+    assert!(hud.errors().is_empty(), "{:?}", hud.errors());
+}
+
+/// construction2: a slot being demolished keeps its standing building's row (type 1) with `dismantling` set
+/// (`0x009C8320` → `0x00B4D5A0`, true when the slot's item is type 3) and the item's turns left, and offers
+/// no upgrades.
+#[test]
+fn a_slot_being_demolished_shows_its_row_dismantling() {
+    let hud = test_hud();
+    hud.with_fort_chain();
+    {
+        let mut st = hud._scripts.state_mut();
+        let r = st.model.world.regions.get_mut(&REGION).unwrap();
+        r.fortification.as_mut().unwrap().health = 100;
+        r.construction.push(ntw_sim::campaign::ConstructionItem { slot: SlotRef::Walls, level_key: String::new(), turns_remaining: 1, cost: 0, kind: ntw_sim::campaign::ConstructionKind::Demolish, active: true });
+    }
+    let slots = slots_of(&hud.construction(ConstructionPanel::Settlement));
+    let walls = slots.last().unwrap();
+    let card: Table = walls.get::<Table>("buildings").unwrap().get(1).unwrap();
+    assert_eq!(card.get::<u32>("type").unwrap(), 1);
+    assert!(card.get::<bool>("dismantling").unwrap());
+    assert_eq!(card.get::<u32>("turns_to_completion").unwrap(), 1);
+    assert_eq!(walls.get::<Table>("upgrades").unwrap().raw_len(), 0);
     assert!(hud.errors().is_empty(), "{:?}", hud.errors());
 }
 
@@ -1571,7 +1583,7 @@ fn the_promote_gate_and_price_come_from_the_model() {
             units: vec![ntw_sim::campaign::CampaignUnit { id: unit, unit_key: "test_unit".into(), men: 100, max_men: 100, character: Some(CharacterId(120)), officer_name: Default::default() }],
             is_navy: false,
         });
-        w.faction_details.get_mut(&A).unwrap().bonus_base = vec![SavedBonus { kind: 1, bonus: 64, value: 1.0, qualifier: String::new() }];
+        w.faction_details.get_mut(&A).unwrap().bonus_base = vec![SavedBonus { kind: 1, bonus: 64, value: 1.0, qualifier: String::new(), ..Default::default() }];
         st.model.turn.humans = vec![A];
         st.model.start_campaign();
     }
@@ -1631,7 +1643,7 @@ fn the_promote_gate_and_price_come_from_the_model() {
         // difficulty handicap (faction +0x8D4) would otherwise win over the base list.
         let d = w.faction_details.get_mut(&A).unwrap();
         d.bonus_with_difficulty = Vec::new();
-        d.bonus_base.push(ntw_sim::campaign::effects::SavedBonus { kind: 1, bonus: 65, value: 1.0, qualifier: String::new() });
+        d.bonus_base.push(ntw_sim::campaign::effects::SavedBonus { kind: 1, bonus: 65, value: 1.0, qualifier: String::new(), ..Default::default() });
     }
     assert!(hud.host.lua().load("return function(u) return CampaignUI.CanPromoteUnit(u) end").eval::<Function>().unwrap().call::<bool>(hud.unit_addr(ship)).unwrap());
     hud.host.campaign_select(CampaignSelection::Character(CharacterId(121)));
@@ -1835,7 +1847,7 @@ fn finished_queue_items_leave_the_address_store() {
 }
 
 /// The human (A) in a negotiation with a MADE-UP second faction B (treasury 300) that A
-/// proposed, the counterpart set as the "started" event leaves it, and a 500 lump sum offered.
+/// proposed, the counterpart set as the "started" event leaves it, and a 500 state gift offered.
 fn negotiation_with_offer(hud: &TestHud) {
     use ntw_sim::campaign::{Faction, GovernmentType};
     hud._scripts.state_mut().model.world.factions.insert(
@@ -1859,22 +1871,28 @@ fn negotiation_with_offer(hud: &TestHud) {
     let mut state = ui.negotiation.borrow_mut();
     (state.seen_begun, state.seen_ended) = (n.begun, n.ended);
     state.target = n.current.map(|c| c.serial);
-    state.offers.push(DealRow { item: NegotiationItem::Payment { amount: 500, turns: 0 }, applied: false });
+    state.offers.push(DealRow { item: NegotiationItem::Action(D::StateGift(500)), applied: false });
 }
 
 /// A UI-held deal row applies at most once (the host skips a row marked applied):
 /// proposing the deal twice, or proposing and then accepting, sends the row's command once; each
 /// accept also asks the model to apply its records (`AcceptDeal`, the exe applies every record on
-/// each accept) and leaves the result "accepted" (+0x28 = 1, `Finished()`). `Propose` only adds
+/// each accept) and leaves the result "accepted" (+0x28 = 1, `Finished()`). Each `ProposeDeal`
+/// first sends the proposal (`ProposeDeal`, CCQ_DIPLOMACY_PROPOSE_DEAL). `Propose` only adds
 /// items (0x009BF3C0), it accepts nothing.
 #[test]
 fn a_deal_applies_at_most_once() {
-    let gift = CampaignRequest::Command(CampaignCommand::Diplomacy { a: A, b: B, action: D::OneOffPayment(500) });
+    let gift = CampaignRequest::Command(CampaignCommand::Diplomacy { a: A, b: B, action: D::StateGift(500) });
     let accept = CampaignRequest::Command(CampaignCommand::AcceptDeal);
-    for script in ["CampaignUI.ProposeDeal() CampaignUI.ProposeDeal()", "CampaignUI.ProposeDeal() CampaignUI.AcceptOffer()"] {
+    let propose = CampaignRequest::Command(CampaignCommand::ProposeDeal);
+    let cases = [
+        ("CampaignUI.ProposeDeal() CampaignUI.ProposeDeal()", vec![propose.clone(), gift.clone(), accept.clone(), propose.clone(), accept.clone()]),
+        ("CampaignUI.ProposeDeal() CampaignUI.AcceptOffer()", vec![propose.clone(), gift.clone(), accept.clone(), accept.clone()]),
+    ];
+    for (script, expected) in cases {
         let hud = test_hud();
         negotiation_with_offer(&hud);
-        assert_eq!(hud.requests_of(script), vec![gift.clone(), accept.clone(), accept.clone()], "{script}");
+        assert_eq!(hud.requests_of(script), expected, "{script}");
         let finished: Option<bool> = hud.host.lua().load("return CampaignUI.Finished()").eval().unwrap();
         assert_eq!(finished, Some(true), "{script}");
         assert!(hud.errors().is_empty(), "{script}");
@@ -1888,33 +1906,51 @@ fn a_deal_applies_at_most_once() {
         vec![CampaignRequest::Command(CampaignCommand::ClearNegotiation), accept.clone()],
         "the cancelled deal is empty"
     );
-    hud.host.campaign_ui().unwrap().negotiation.borrow_mut().offers.push(DealRow { item: NegotiationItem::Payment { amount: 500, turns: 0 }, applied: false });
+    hud.host.campaign_ui().unwrap().negotiation.borrow_mut().offers.push(DealRow { item: NegotiationItem::Action(D::StateGift(500)), applied: false });
     assert_eq!(hud.requests_of("CampaignUI.AcceptOffer()"), vec![gift, accept], "a new deal after Cancel");
     // Without a counterpart nothing is applied or proposed.
     hud.host.campaign_ui().unwrap().negotiation.borrow_mut().release();
     assert_eq!(hud.requests_of("CampaignUI.AcceptOffer() CampaignUI.Propose({}, {}, 'regions')"), Vec::new());
 }
 
-/// A demanded payment goes through the model's cap (`CampaignModel::demanded_payment`, `0x00C4AB20`)
-/// before it applies: B, asked by A for a 500 lump sum with 300 in its treasury, pays 300; a regular
-/// demand is not capped, and the offered lump sum is A's to pay in full.
+/// The payments `Propose(offer, amount, turns, regular, action)` (`0x009BF3C0`) becomes the payment
+/// command: an offer negated, turns 1 unless regular and above 1, numbers rounded as the exe's
+/// float read. The model caps it once (`CampaignModel::proposed_payment`, `0x00C4AB20`), and the
+/// row `BuildOfferAndDemandStrings` gives shows that stored amount; accepting leaves the payment to
+/// the model's `AcceptDeal`, and `RemoveAction` clears it (`0x00C5CBC0`).
 #[test]
-fn a_demanded_lump_sum_is_capped_at_the_payers_treasury() {
+fn a_proposed_payment_is_capped_once_and_its_row_shows_the_capped_amount() {
     let hud = test_hud();
     negotiation_with_offer(&hud);
-    let ui = hud.host.campaign_ui().unwrap();
-    for item in [NegotiationItem::Payment { amount: 500, turns: 0 }, NegotiationItem::Payment { amount: 500, turns: 3 }] {
-        ui.negotiation.borrow_mut().demands.push(DealRow { item, applied: false });
-    }
-    let pay = |a, b, action| CampaignRequest::Command(CampaignCommand::Diplomacy { a, b, action });
+    let pay = |amount, turns| vec![CampaignRequest::Command(CampaignCommand::ProposePayment { clear: false, amount, turns })];
+    assert_eq!(hud.requests_of("CampaignUI.Propose(true, 5000, 1, false, 'payments')"), pay(-5000, 1));
+    assert_eq!(hud.requests_of("CampaignUI.Propose(false, 50, 5, true, 'payments')"), pay(50, 5));
+    assert_eq!(hud.requests_of("CampaignUI.Propose(false, 50, 5, false, 'payments')"), pay(50, 1));
+    assert_eq!(hud.requests_of("CampaignUI.Propose(false, 2.5, 1, true, 'payments')"), pay(2, 1));
+    assert!(hud.errors().is_empty());
+    assert_eq!(hud.requests_of("CampaignUI.Propose(true, 'x', 1, false, 'payments')"), Vec::new());
+    assert_eq!(hud.errors().len(), 1, "a wrong argument type is logged");
+
+    // A (1000) offers 5000 once: the model stores −1000, which the offers row shows.
+    hud._scripts.state_mut().model.apply(CampaignCommand::ProposePayment { clear: false, amount: -5000, turns: 1 }).unwrap();
+    let stored = hud._scripts.state().model.negotiations.current.as_ref().unwrap().payment;
+    assert_eq!(fill_payment_text("Single payment: %d", stored), "Single payment: 1000");
+    let (action, demands): (String, usize) =
+        hud.host.lua().load("local o, d = CampaignUI.BuildOfferAndDemandStrings() return o[#o].Action, #d").eval().unwrap();
+    assert_eq!((action.as_str(), demands), ("payments", 0));
+    // A regular demand is a demands row with its turns.
+    hud._scripts.state_mut().model.apply(CampaignCommand::ProposePayment { clear: false, amount: 50, turns: 5 }).unwrap();
+    let stored = hud._scripts.state().model.negotiations.current.as_ref().unwrap().payment;
+    assert_eq!(fill_payment_text("Regular payment: %d. Turns: %d", stored), "Regular payment: 50. Turns: 5");
+    let (offers, action): (usize, String) =
+        hud.host.lua().load("local o, d = CampaignUI.BuildOfferAndDemandStrings() return #o, d[1].Action").eval().unwrap();
+    assert_eq!((offers, action.as_str()), (1, "payments"));
+
+    let gift = CampaignRequest::Command(CampaignCommand::Diplomacy { a: A, b: B, action: D::StateGift(500) });
+    assert_eq!(hud.requests_of("CampaignUI.AcceptOffer()"), vec![gift, CampaignRequest::Command(CampaignCommand::AcceptDeal)]);
     assert_eq!(
-        hud.requests_of("CampaignUI.AcceptOffer()"),
-        vec![
-            pay(A, B, D::OneOffPayment(500)),
-            pay(B, A, D::OneOffPayment(300)),
-            pay(B, A, D::RegularPayment(500, 3)),
-            CampaignRequest::Command(CampaignCommand::AcceptDeal),
-        ]
+        hud.requests_of("CampaignUI.RemoveAction('payments')"),
+        vec![CampaignRequest::Command(CampaignCommand::ProposePayment { clear: true, amount: 0, turns: 0 })]
     );
     assert!(hud.errors().is_empty());
 }

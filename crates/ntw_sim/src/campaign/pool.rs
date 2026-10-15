@@ -310,12 +310,24 @@ impl CampaignModel {
     /// [`has_commander_room`]: Self::has_commander_room
     pub fn commander_row_flags(&self, c: CharacterId, force: ForceId) -> Option<u32> {
         let (kind, faction) = self.pool_kind_of(force)?;
+        self.commander_row_flags_with(c, force, self.commanders_in_service(faction, kind), self.commanders_max(faction, kind))
+    }
+
+    /// [`commander_row_flags`](Self::commander_row_flags) with the pool's [`commanders_in_service`]
+    /// and [`commanders_max`] already counted, for a panel that lists many rows: both are the same for
+    /// every row of one panel (the exe counts them again per row, `0x00A1BB7B`), and the maximum runs
+    /// the faction's whole effect sum, so the panel counts them once.
+    ///
+    /// [`commanders_in_service`]: Self::commanders_in_service
+    /// [`commanders_max`]: Self::commanders_max
+    pub fn commander_row_flags_with(&self, c: CharacterId, force: ForceId, in_service: u32, max: u32) -> Option<u32> {
+        let (kind, faction) = self.pool_kind_of(force)?;
         if !self.pool(faction, kind).is_some_and(|p| p.0.contains(&c)) {
             return None;
         }
         let cost = self.hire_cost_into(c, force)?;
         let mut flags = 0;
-        if self.commanders_in_service(faction, kind) >= self.commanders_max(faction, kind) {
+        if in_service >= max {
             flags |= ROW_AT_MAXIMUM;
         }
         let purse = self.world.factions.get(&faction).map_or(0, |f| f.treasury);
@@ -509,7 +521,9 @@ impl CampaignModel {
     /// `0x008CFBD0`), who is destroyed (`0x00A0C6F0(1)`). Then the fleet's commander is picked again
     /// (`0x008D2FA0` / `0x008B8E50` → `0x008ED2C0`, [`commander_unit`](Self::commander_unit)), so an
     /// admiral already aboard with a higher `command_sea` keeps command. A fleet with no such ship
-    /// (all admirals) is refused: the exe would use a null ship there; its interface never offers it.
+    /// (all admirals) is refused: a crash guard, not a rule of the original (`0x00A278B0` returns null
+    /// there and the hire reads the ship's +0xF4 through it, `0x00A161A1` → `0x006649C0`); its
+    /// interface never offers that hire ([`ROW_NO_ROOM`]).
     pub(crate) fn hire_admiral(&mut self, c: CharacterId, fleet: ForceId) -> Result<Vec<CampaignEvent>, CommandError> {
         let ch = self.world.characters.get(&c).cloned().ok_or(CommandError::UnknownCharacter(c))?;
         if !self.may_act(ch.faction) {
@@ -524,6 +538,7 @@ impl CampaignModel {
         }
         let lead = force.commander.ok_or(CommandError::UnknownForce(fleet))?;
         let (position, garrisoned_in) = self.world.characters.get(&lead).map(|x| (x.position, x.garrisoned_in)).ok_or(CommandError::UnknownCharacter(lead))?;
+        // Crash guard, not a rule of the original: the exe hands the null ship on (`0x00A161A1`).
         let ship = self.admiral_ship(fleet).ok_or(CommandError::Unsupported("every ship of the fleet has an admiral"))?;
         let cost = self.hire_cost_at(c, position).expect("checked");
         self.take_candidate(c, PoolKind::Admiral, cost);
@@ -684,7 +699,7 @@ mod tests {
         let start = Date { year: 1805, season: 1, month: 0, half: HALF_EARLY };
         let mut m = CampaignModel::new(Calendar::new(start, 0), CaRng::new(1), w);
         m.rules = Arc::new(CampaignRules::test_rules());
-        m.world.faction_details.entry(a).or_default().bonus_base = vec![SavedBonus { kind: 1, bonus: 64, value: 1.0, qualifier: String::new() }];
+        m.world.faction_details.entry(a).or_default().bonus_base = vec![SavedBonus { kind: 1, bonus: 64, value: 1.0, qualifier: String::new(), ..Default::default() }];
         assert!(m.promotion_cost(ForceId(1002), 0).is_some_and(|c| c > 0), "the promotion costs money");
         let cost = m.promotion_cost(ForceId(1002), 0).expect("a price");
         m.apply(CampaignCommand::PromoteUnit { force: ForceId(1002), unit: 0 }).unwrap();

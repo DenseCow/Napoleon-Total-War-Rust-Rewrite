@@ -19,7 +19,7 @@ const NO_RIVAL_FACTION: &str = "pirates";
 /// add rows are picked up).
 pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
     let c = &db.campaign;
-    let mut r = CampaignRules { campaign: campaign.to_string(), limits: db.limits.clone(), features: crate::features::original(campaign), ..Default::default() };
+    let mut r = CampaignRules { campaign: campaign.to_string(), limits: db.limits.clone(), features: crate::features::original(campaign).validated(), ..Default::default() };
     for v in &c.variables {
         r.variables.insert(v.key.clone(), v.value);
     }
@@ -46,6 +46,7 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
                 campaign_stealth: stats.is_some_and(|s| s.unknown_204),
                 unit_cap: u.unit_cap,
                 travel_speed: u.unknown_44,
+                unit_resource: u.recruitment_scope.clone().filter(|s| !s.is_empty()),
             },
         );
     }
@@ -138,8 +139,10 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
         })
         .collect();
     r.director.no_rival_keys = vec![NO_RIVAL_FACTION.to_owned()];
-    // INFERRED: a repeated key keeps the last row (the original's choice between repeated rows in
-    // `0x00BF5A60` / `0x00C55CC0`'s lookup is not traced); each repeat is reported once.
+    // A repeated key keeps the last row, as the original: its table build (`0x00F7AA60`, overrides
+    // `0x00F7A6E0`) keeps every row and inserts each row index into the key map with `0x007C7A60`, which
+    // overwrites the index of a key already there; the lookups (`0x00BF5A60` / `0x00C55CC0`) read that
+    // map. Each repeat is reported once.
     for s in c.negotiation_strings.iter() {
         let key = (s.event.clone(), s.culture.clone(), s.government.clone());
         if let Some(old) = r.negotiation_strings.insert(key, s.string.clone()) {
@@ -184,11 +187,7 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
                 morale: s.c1 as f32,
                 fire: [s.c20, s.c21],
                 guns: 0,
-                range: match category {
-                    Category::NavalLineOfBattle => 3,
-                    Category::NavalFrigate | Category::NavalGalley => 2,
-                    _ => 1,
-                },
+                range: category.range_class(),
                 bombard: matches!(class, "naval_bomb_ketch" | "naval_rocket_ship"),
                 merchant: category == Category::NavalMerchant,
             },
@@ -283,6 +282,14 @@ pub fn effect_rules_from_db(db: &GameDatabase) -> ntw_sim::campaign::effects::Ef
     }
     for m in &t.bonus_religion {
         map(&m.effect, BonusKind::Religion, &m.bonus, &m.religion);
+    }
+    // The population class × religion bonuses (exe type 7): the same key as the saved entries, so DB and saved
+    // sources add up. The exe's row builder (`0x00F86F00`) drops, with a log, a row whose class or religion is
+    // not a key; ours keeps it, as for every junction here (the class and religion tables are not loaded; every
+    // vanilla row resolves: `real_install` `population_class_and_religion_junction_rows`).
+    for m in &t.bonus_pop_class_religion {
+        let k = EffectKey::pop_class_religion(&m.bonus, &m.class, &m.religion);
+        map(&m.effect, k.kind, &k.bonus, &k.qualifier);
     }
     // The chain-keyed bonuses: exe bonus type 2, the same keys as the saved entries (`mod_cost` 0, `mod_gdp` 1,
     // `mod_tw_growth` 2, `mod_commodity_production` 3; BONUS_NAMES 0x98..0x9B), so DB and saved sources add up.

@@ -35,10 +35,6 @@ use crate::rng::CaRng;
 
 /// PLACEHOLDER: distance (metres) at which two units are "in melee contact".
 pub const MELEE_CONTACT_RANGE: f32 = 10.0;
-/// PROVISIONAL: the formation radius (`formation+0x670`) that the unit-list range tests add to
-/// both sides (`morale::near`). Its writer is not found yet (UNKNOWN), so the tests use centre
-/// distances.
-pub const FORMATION_RADIUS: f32 = 0.0;
 /// PROVISIONAL: how long a destroyed general counts as "died recently" (army `+0x1B4` countdown,
 /// one per tick; its start value was not found). 600 ticks = 60 s.
 pub const GENERAL_DIED_RECENTLY_TICKS: u32 = 600;
@@ -109,7 +105,7 @@ pub struct LandUnit {
     pub facing: f32,
     /// Ordered destination, if any. Written through [`LandUnit::set_destination`] (it restarts the
     /// timed move).
-    pub destination: Option<(f32, f32)>,
+    pub(crate) destination: Option<(f32, f32)>,
     /// Walking speed in m/s (unit stat input; no game data hard-coded).
     pub walk_speed: f32,
     /// Running speed in m/s (unit stat input).
@@ -120,6 +116,11 @@ pub struct LandUnit {
     pub acceleration: f32,
     /// Deceleration in m/s² (column 6, locomotive `+0x100`), as [`LandUnit::acceleration`].
     pub deceleration: f32,
+    /// Each man's radius in metres: the soldier's `+0x620`, which the soldier set-up `0x0061CB90`
+    /// sets from `+0x58`, column 12 of the `battle_entities` record his unit builds its men from
+    /// (unit `+0x60`, pushed at `0x0051C09B`; men 0.35). CONFIRMED. The measured box adds twice the
+    /// largest to each extent ([`super::march::SquadBox`]). Unit stat input; 0 without entity data.
+    pub man_radius: f32,
     /// The ground speed (m/s) the unit moved at in its last tick (the soldier's `+0x194`): the
     /// speed the next tick's change starts from ([`step_speed`]). 0 when it stopped.
     pub speed: f32,
@@ -170,8 +171,13 @@ pub struct LandUnit {
     /// The unit card's capability block (battle-file `unit_capabilities`), see
     /// [`super::attributes::UnitCapabilities`].
     pub capabilities: super::attributes::UnitCapabilities,
-    /// `+0x194`: formation/type class.
-    pub formation_class: u8,
+    /// `+0x194`: the training level, the exe enum of `0x00EED960` over the unit record's
+    /// `training_level` (0 `mob`, 1 `rabble`, 2 `poorly_trained`, 3 `trained`, 4 `well_trained`,
+    /// 5 `elite`, 6 any other; CONFIRMED static, [`training_level_of`]).
+    pub training_level: u8,
+    /// The in-place tolerance of the training level: its `entity_training_levels` float (row
+    /// `+0xC`, read by `0x0057E1F0` through the table's per-level rows `0x00F88300`), in metres.
+    pub training_tolerance: f32,
     /// `+0xD08`: morale-modifier category.
     pub category: i32,
     /// The unit's morale component.
@@ -270,7 +276,8 @@ pub struct LandUnit {
     /// `0x005C2B80`, CONFIRMED): the hit test skips its soldiers (`0x00679B20`).
     pub invincible: bool,
     /// The formation's width in metres (formation `+0x24`; set from the unit's files and spacing).
-    /// 0 = unknown: [`super::abilities::frontage_m`] stands in.
+    /// 0 = unknown: [`LandUnit::fresh_width`] falls back to the files at
+    /// [`super::abilities::FILE_SPACING_M`].
     pub formation_width: f32,
     /// Metres between the formation's ranks (close order, `spacing_rank_close`). Its depth is this
     /// times the ranks of [`LandUnit::formation_grid`] ([`LandUnit::depth`]), so the depth and the
@@ -279,9 +286,11 @@ pub struct LandUnit {
     pub formation_rank_spacing: f32,
     /// Men in one rank of the formation (its files): the line shape's vfunc `+0x10`, `0x00642D00` →
     /// `0x00642C90`: `floor((width + 0.001 − 2r) / file spacing) + 1`, which its callers (`0x0061CAB0`,
-    /// `0x00646B00`, `0x0065A410`) cap at the men (CONFIRMED; [`LandUnit::files`] applies the cap). Set
-    /// by the battle setup from the drawn block (files × spacing gives the same count). 0 = unknown:
-    /// [`LandUnit::files`] falls back to the start men over [`super::abilities::FORMATION_RANKS`].
+    /// `0x00646B00`, `0x00646C70`, `0x00646D40`, `0x0065A410`, `0x0065A6D0`) cap at the men they are
+    /// passed; the fire step (`0x005694D0`) passes the living men, unit `+0x18` (CONFIRMED;
+    /// [`LandUnit::files`] applies the cap). Set by the battle setup from the drawn block (files ×
+    /// spacing gives the same count). 0 = unknown: [`LandUnit::files`] falls back to the living men
+    /// over [`super::abilities::FORMATION_RANKS`].
     pub formation_files: u32,
     /// The building (index into [`Battle::buildings`]) the unit is in (unit `+0x11C`), see
     /// [`super::garrison`].
@@ -304,6 +313,11 @@ impl LandUnit {
         self.timed_move = None;
     }
 
+    /// The ordered destination, if any (written only through [`LandUnit::set_destination`]).
+    pub fn destination(&self) -> Option<(f32, f32)> {
+        self.destination
+    }
+
     /// A new unit with neutral placeholder stats. Speeds and morale stat are inputs the caller
     /// should set from the unit's game data.
     pub fn new(id: u32, side: u8, men: u32, position: (f32, f32)) -> Self {
@@ -320,6 +334,7 @@ impl LandUnit {
             run_speed: 2.0,
             acceleration: f32::INFINITY,
             deceleration: f32::INFINITY,
+            man_radius: 0.0,
             speed: 0.0,
             timed_move: None,
             march: Default::default(),
@@ -341,7 +356,8 @@ impl LandUnit {
             morale_stat: 0,
             attributes: UnitAttributes::default(),
             capabilities: Default::default(),
-            formation_class: 0,
+            training_level: 0,
+            training_tolerance: 0.0,
             category: 0,
             morale: MoraleComponent::default(),
             fatigue: 0,
@@ -513,7 +529,12 @@ pub enum BattleResult {
 /// The land battle model.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Battle {
-    /// Tick counter (`battle+0x58`, W1 §8). Battle time = `tick * 0.1 s`.
+    /// Tick counter (`battle+0x58`, W1 §8). Battle time = `tick * 0.1 s`. The exe's is the battle
+    /// model's (ctor `0x00506C00` zeroes it at `0x00506C85`; `0x0057DF40` adds 1 after each model tick
+    /// at `0x0057E0BC`). PROVISIONAL: the exe's model ticks in deployment too (its phase `0x00583820`
+    /// runs from tick 8 on, analysis/ai/AI_RESEARCH.md), so its count at the conflict's start is the
+    /// deployment's ticks; ours starts at 0 there. Every rule keyed on the count depends on the
+    /// base, e.g. the timed move's rare 10-tick periods ([`timed_move_reissue_due`]).
     pub tick: u32,
     /// Battle-wide RNG (`battle+0x50`, W1 §8).
     pub rng: CaRng,
@@ -584,17 +605,27 @@ pub struct Battle {
     pub buildings: Vec<super::garrison::BattleBuilding>,
 }
 
-/// True if the formation rectangle of `u` (its width across the facing, depth along it) lies inside
-/// the area `[min x, min y, max x, max y]`.
-fn formation_inside(u: &LandUnit, a: [f32; 4]) -> bool {
-    let f = (u.facing.cos(), u.facing.sin());
-    let s = (-f.1, f.0);
-    let (hw, hd) = (u.width() * 0.5, u.depth() * 0.5);
-    [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)].iter().all(|(i, j)| {
-        let x = u.position.0 + f.0 * hd * i + s.0 * hw * j;
-        let y = u.position.1 + f.1 * hd * i + s.1 * hw * j;
-        a[0] <= x && x <= a[2] && a[1] <= y && y <= a[3]
+/// True if every living man of `u` where he stands ([`LandUnit::men_standing`]) has his circle
+/// inside the area `[min x, min y, max x, max y]`, edges included: the soldier test of `0x005857A0`
+/// (CONFIRMED: `min ≤ p − r` and `p + r ≤ max` on both axes, `0x0058582D` / `0x00585831`). True
+/// without men, as the exe's empty loop. INFERRED: the soldier's circle radius (`+0x58`) is the man
+/// radius the squad box reads ([`LandUnit::man_radius`], soldier `+0x620`).
+fn men_inside(u: &LandUnit, a: [f32; 4]) -> bool {
+    u.men_standing().all(|m| {
+        let r = m.radius;
+        a[0] <= m.pos.0 - r && m.pos.0 + r <= a[2] && a[1] <= m.pos.1 - r && m.pos.1 + r <= a[3]
     })
+}
+
+/// The training levels in the exe's enum order (`0x00EED960`, CONFIRMED static: the unit
+/// record's `training_level` string mapped to 0..5, any other to 6): the index is
+/// [`LandUnit::training_level`].
+pub const TRAINING_LEVELS: [&str; 6] = ["mob", "rabble", "poorly_trained", "trained", "well_trained", "elite"];
+
+/// The training level enum of a unit record's `training_level` key (`0x00EED960`): its index in
+/// [`TRAINING_LEVELS`], `None` for any other key (the exe's 6).
+pub fn training_level_of(key: &str) -> Option<u8> {
+    TRAINING_LEVELS.iter().position(|k| *k == key).map(|i| i as u8)
 }
 
 /// The speed (m/s) a unit moves at this tick, from the speed it moved at last tick (`current`)
@@ -686,30 +717,45 @@ pub fn timed_move_speed(speed: f32, cap: f32, distance: f32, time_left: f32, kee
 
 /// Planned time (s) of the timed-move order a moving soldier is given (descriptor word 9).
 /// INFERRED: the unit move order (`0x00584E10`, the source, see [`TimedMove`]) plans t = D / v with
-/// D = n·k + 2v (`0x0054C650`), where k (the unit's `+0x510` → `+0x13C`) has no static writer, which
-/// would give 2 s; the 2026-10-10 sitting's order speed rose ~0.035 a tick from 2.69 at multiplier
-/// 0.373, which d / t fits only with t ≈ 5 s (t = 2 gives +0.089 a tick). Settled by reading n and k
-/// at `0x0054C691` on a walk order. The same D is how far ahead the men's places are laid out at
-/// each issue (`0x007F0790`, [`super::march`]), so D = v · t either way.
+/// D = n·k + 2v (`0x0054C650`). Statically (CONFIRMED, UNITS_TERRAIN_FIDELITY.md "n and k named")
+/// n = the unit body's living-soldier count (`+0x510` → `+0x27C`, filled by `0x005307E0`, reduced by
+/// `0x00574E90`) and k = the body's record copy of `unit_stats_land` column 45 `spacing_rank_close`
+/// (`+0x13C`, record `+0x11C` from `0x00E8CFF0`), which for a full unit gives tens of seconds; but
+/// the 2026-10-10 sitting's order speed rose ~0.035 a tick from 2.69 at multiplier 0.373, which
+/// d / t fits only with t ≈ 5 s (t = 2 gives +0.089 a tick). Settled by reading n, k and t at
+/// `0x0054C691` on a walk order and re-reading how `0x00659600` uses word 9. The same D is how far
+/// ahead the men's places are laid out at each issue (`0x007F0790`, [`super::march`]), so D = v · t
+/// either way.
 pub const TIMED_MOVE_PLANNED_SECONDS: f32 = 5.0;
 
-/// A new timed-move order every this many ticks of a move. CONFIRMED: the unit move order's update
-/// (vtable method `0x00581AE0`) re-issues the soldiers' orders (`0x00581B81` → `0x00584E10`) when
-/// a tick count (order `+0x14` → `+8` → `+0x58`, u32) × 0.1f (`0x0131A7B0`) is strictly above the last
-/// issue time `+0x2C` + 1.0f (`0x01318048`; `COMISS`/`JBE` at `0x00581B73`). In f32, 10 ticks × 0.1 almost
-/// always rounds to exactly 1.0, so the order is re-issued on the 11th tick. PROVISIONAL (not modelled):
-/// the rare 10-tick period where the rounding falls the other way at the same `0x00581B73` compare (4 in
-/// a 200 000-tick f32 run from 0, at ticks 21, 42, 1284 and 20 489); it needs the counter `+0x58` traced
-/// (what it counts and where it starts), BACKLOG §0.
-pub const TIMED_MOVE_REPLAN_TICKS: u32 = 11;
+/// The issue time (s) of a unit move order issued at battle tick `tick`: the order's `+0x2C`.
+/// CONFIRMED: the order's build (`BuildUnitMoveOrder` `0x0051A530`) and each re-issue (`0x00581B7C`)
+/// store the battle model's tick count (`+0x58`, u32, read through order `+0x14` → `+8`) converted
+/// to f32 (exact u32 → double, then rounded to float) times 0.1f (`0x0131A7B0`), in f32.
+pub fn timed_move_issue_time(tick: u32) -> f32 {
+    tick as f32 * TICK_SECONDS
+}
+
+/// Whether a unit move order last issued at `issued` ([`timed_move_issue_time`]) is re-issued at
+/// battle tick `tick`. CONFIRMED: the order's update (vtable method `0x00581AE0`) re-issues the
+/// soldiers' orders (`0x00581B81` → `0x00584E10`) when the tick's issue time is strictly above
+/// `issued` + 1.0f (`0x01318048`, an f32 add; `COMISS`/`JBE` at `0x00581B73`/`0x00581B76`). In f32 the
+/// 10-tick difference almost always rounds to exactly 1.0 (not above it), so an order is re-issued
+/// on the 11th tick, and on the 10th for a few issue ticks (11, 32, 1274, 20 479 in a chain of
+/// issues from tick 0). The counter is the battle model's (`StepBattleModelIfTickDue` `0x0057DF40`
+/// adds 1 after each model tick's update, at `0x0057E0BC`; the model's ctor `0x00506C00` zeroes it
+/// at `0x00506C85`), our [`Battle::tick`].
+pub fn timed_move_reissue_due(issued: f32, tick: u32) -> bool {
+    timed_move_issue_time(tick) > issued + 1.0
+}
 
 /// The timed-move order block of the unit's soldier (`+0x40C` speed, `+0x410` planned time,
 /// `+0x43C` time since the order) and the distance left to the order's point.
 ///
-/// The source (CONFIRMED): a moving unit's move order re-issues every soldier's timed move every
-/// [`TIMED_MOVE_REPLAN_TICKS`] (`0x00581B81` → `0x00584E10` → `0x006533E0`), with the order speed
-/// (descriptor word 8, `0x005855C7`) = the gait speed `0x00565030` before any ground or slope
-/// factor, the planned time from `0x0054C650` (word 9, `0x005855F2`), and the face flag (word 10)
+/// The source (CONFIRMED): a moving unit's move order re-issues every soldier's timed move about
+/// every 11 ticks ([`timed_move_reissue_due`]; `0x00581B81` → `0x00584E10` → `0x006533E0`), with the
+/// order speed (descriptor word 8, `0x005855C7`) = the gait speed `0x00565030` before any ground or
+/// slope factor, the planned time from `0x0054C650` (word 9, `0x005855F2`), and the face flag (word 10)
 /// clear for a walk, so `+0x438` bit 0 is set and `0x00659600` recomputes d / t every tick
 /// (`0x0063AF40`), neither held nor smoothed: the ground column and slope multiply only the wanted
 /// speed in the step (`+0x1A4`, `0x00819D5F`), whose limits (acceleration 3.5 × multiplier,
@@ -743,6 +789,8 @@ pub struct TimedMove {
     pub elapsed: f32,
     /// Ticks since the move's last plan.
     pub ticks: u32,
+    /// The issue time of the last plan (`+0x2C`, [`timed_move_issue_time`]).
+    pub issued: f32,
     /// The issue point reached the path's end (the unit move order's `+0x3C`): the order keeps
     /// its speed (see the type's note) and a re-issue skips the men whose move finished.
     pub at_end: bool,
@@ -779,16 +827,17 @@ pub fn issue_point(ahead: f32, path_left: f32) -> (f32, bool) {
 impl TimedMove {
     /// A new order at `speed` (following `target`, if any) on a path with `path_left` metres left:
     /// its point [`TIMED_MOVE_PLANNED_SECONDS`] of travel ahead, or the path's end ([`issue_point`]).
-    /// A first issue; [`TimedMove::next`] marks a re-issue.
-    pub fn plan(speed: f32, path_left: f32, target: Option<(f32, f32)>) -> Self {
+    /// A first issue at battle tick `tick`; [`TimedMove::next`] marks a re-issue.
+    pub fn plan(speed: f32, path_left: f32, target: Option<(f32, f32)>, tick: u32) -> Self {
         let (distance, at_end) = issue_point(speed * TIMED_MOVE_PLANNED_SECONDS, path_left);
-        TimedMove { speed, distance, elapsed: 0.0, ticks: 0, at_end, first: true, kept: None, target }
+        let issued = timed_move_issue_time(tick);
+        TimedMove { speed, distance, elapsed: 0.0, ticks: 0, issued, at_end, first: true, kept: None, target }
     }
 
-    /// The order to follow this tick for a move at `speed` following `target` (if any) with
+    /// The order to follow at battle tick `tick` for a move at `speed` following `target` (if any) with
     /// `path_left` metres left: this one, or a new plan when there is none (a new move order clears
     /// it, [`LandUnit::set_destination`]: a first issue), its target moved (a first issue, below), the
-    /// move's speed changed (a new gait) or [`TIMED_MOVE_REPLAN_TICKS`] have passed (a re-issue).
+    /// move's speed changed (a new gait) or it is due again ([`timed_move_reissue_due`]: a re-issue).
     ///
     /// A moved target (CONFIRMED mechanism): the exe's order never re-targets itself (`0x00581AE0`
     /// keeps its path); a state that follows a target (update `0x0054D9F0`) re-reads the target
@@ -800,12 +849,12 @@ impl TimedMove {
     ///
     /// PROVISIONAL: a gait change counts as a re-issue; whether the run toggle (`0x005600C0`)
     /// rebuilds the unit move order (a first issue) is not traced.
-    pub fn next(current: Option<TimedMove>, speed: f32, path_left: f32, target: Option<(f32, f32)>) -> Self {
+    pub fn next(current: Option<TimedMove>, speed: f32, path_left: f32, target: Option<(f32, f32)>, tick: u32) -> Self {
         match current {
-            Some(t) if t.target != target => TimedMove::plan(speed, path_left, target),
-            Some(t) if t.speed == speed && t.ticks < TIMED_MOVE_REPLAN_TICKS => t,
-            Some(_) => TimedMove { first: false, ..TimedMove::plan(speed, path_left, target) },
-            None => TimedMove::plan(speed, path_left, target),
+            Some(t) if t.target != target => TimedMove::plan(speed, path_left, target, tick),
+            Some(t) if t.speed == speed && !timed_move_reissue_due(t.issued, tick) => t,
+            Some(_) => TimedMove { first: false, ..TimedMove::plan(speed, path_left, target, tick) },
+            None => TimedMove::plan(speed, path_left, target, tick),
         }
     }
 
@@ -929,8 +978,11 @@ impl Battle {
             .collect()
     }
 
-    /// Adds a unit, keeping `units` sorted by id (so the update order is deterministic).
-    pub fn add_unit(&mut self, unit: LandUnit) {
+    /// Adds a unit, keeping `units` sorted by id (so the update order is deterministic), with its
+    /// box measured where it stands ([`LandUnit::remeasure`]), so a unit that does not tick yet (a
+    /// waiting reinforcement) is not measured again at every read.
+    pub fn add_unit(&mut self, mut unit: LandUnit) {
+        unit.remeasure();
         let pos = self.units.partition_point(|u| u.id < unit.id);
         self.units.insert(pos, unit);
     }
@@ -1169,6 +1221,11 @@ impl Battle {
         if !self.units[idx].active && !arriving {
             return;
         }
+        // The squad summary's refresh, then the men's re-slot after losses (`SQUAD::update`
+        // `0x00580A30`, `march`).
+        let tick = self.tick;
+        self.units[idx].refresh_summary(tick);
+        self.units[idx].reslot_tick(tick);
         let pos = self.units[idx].position;
         let Some((goal, speed, is_order)) = self.movement_goal(idx) else {
             // No move left: the run option went with it (it belongs to the move, `0x005600C0`).
@@ -1188,13 +1245,13 @@ impl Battle {
         // Ground type under the unit scales its speed (`unit_movement_modifiers`, see `ground`).
         let modifier = self.ground.speed_modifier(pos.0, pos.1, self.units[idx].movement_class);
         let ground = std::sync::Arc::clone(&self.ground);
-        // The timed-move order (`TimedMove`, the unit move order re-issued every 11 ticks): the order speed the soldier heads
+        // The timed-move order (`TimedMove`, the unit move order re-issued about every 11 ticks): the order speed the soldier heads
         // for before the multiplier, from the move's gait speed, to a point at most the path's end.
         // A move that follows an enemy unit (the advance, the fire-target approach) is a new order
         // when the enemy moved (`TimedMove::next`); an ordered destination is fixed, and a rout's
         // point moves with the unit itself.
         let target = (!is_order && !self.units[idx].morale.is_routing_or_shattered()).then_some(goal);
-        let mut timed = TimedMove::next(self.units[idx].timed_move, speed, len, target);
+        let mut timed = TimedMove::next(self.units[idx].timed_move, speed, len, target, self.tick);
         let order_speed = timed.order_speed(self.units[idx].run_speed);
         let planned_order = timed;
         // The fatigue speed multiplier (`0x006543D0`, `FatigueEffects::speed`).
@@ -1413,7 +1470,7 @@ impl Battle {
                 e.side != u.side
                     && e.men > 0
                     && !e.left_field
-                    && morale::near(dist2(u.position, e.position), FORMATION_RADIUS, FORMATION_RADIUS, 80.0)
+                    && morale::near_units(u, e, 80.0)
             })
             .map(super::strength::strength)
             .collect();
@@ -1464,7 +1521,7 @@ impl Battle {
             if j == idx
                 || !e.active
                 || e.men == 0
-                || !morale::near_100m(dist2(u.position, e.position), FORMATION_RADIUS, FORMATION_RADIUS)
+                || !morale::near_units(u, e, 100.0)
             {
                 continue;
             }
@@ -1480,7 +1537,7 @@ impl Battle {
             active_state: i32::from(u.active),
             morale_stat: u.morale_stat,
             impetuous_allowed: u.attributes.impetuous,
-            formation_class: u.formation_class,
+            training_level: u.training_level,
             category: u.category,
             under_projectile_fire: u.under_fire_ticks > 0,
             under_artillery_fire: u.under_artillery_fire_ticks > 0,
@@ -1576,9 +1633,8 @@ impl Battle {
     /// - the rally test `0x0055C500` rejects it (`+0xAA0 == 2`);
     /// - `0x0053EA00` and `0x0055CB50` no longer count it (state 2).
     ///
-    /// Unit-level: a routing or shattered unit whose formation rectangle is no longer fully inside
-    /// the area (INFERRED equivalent of "a soldier outside") leaves: `left_field`, not active, no
-    /// order. Its men are not killed. Without a playable area nobody leaves. The order-based
+    /// A routing or shattered unit with a man whose circle is not inside the area ([`men_inside`])
+    /// leaves: `left_field`, not active, no order. Its men are not killed. Without a playable area nobody leaves. The order-based
     /// leaving (withdraw) is not modelled.
     fn leave_step(&mut self, idx: usize) {
         let Some(area) = self.playable_area else { return };
@@ -1586,7 +1642,7 @@ impl Battle {
         if u.left_field || !u.active || u.men == 0 || u.reinforcement != Reinforcement::None {
             return;
         }
-        if u.morale.is_routing_or_shattered() && !formation_inside(u, area) {
+        if u.morale.is_routing_or_shattered() && !men_inside(u, area) {
             u.left_field = true;
             u.active = false;
             u.set_destination(None);
@@ -1608,13 +1664,12 @@ impl Battle {
         // Units walking in. The exe's slot-2 update `0x005857A0` (CONFIRMED) sets unit `+0xAA0` to 1
         // (on the field: our `active`) once every soldier's circle (`+0x48/+0x50`, radius `+0x58`) lies
         // inside the battle's playable area (`+0x84..+0x8C`), and to 2 when a leaving unit has a soldier
-        // outside. Unit-level: the formation rectangle inside the area (INFERRED equivalent). Without
-        // an area, a PROVISIONAL walk-on time.
+        // outside ([`men_inside`]). Without an area, a PROVISIONAL walk-on time.
         let area = self.playable_area;
         for u in &mut self.units {
             if let Reinforcement::Arriving { ticks_left } = u.reinforcement {
                 let arrived = match area {
-                    Some(a) => formation_inside(u, a),
+                    Some(a) => men_inside(u, a),
                     None => ticks_left <= 1,
                 };
                 u.reinforcement = if arrived {
@@ -1652,8 +1707,7 @@ impl Battle {
                 let slot = if k % 2 == 1 { (k + 1) / 2 } else { -(k / 2) } as f32;
                 let (sx, sy) = (-facing.sin(), facing.cos());
                 let p = (pos.0 + sx * slot * REINFORCEMENT_SPACING_M, pos.1 + sy * slot * REINFORCEMENT_SPACING_M);
-                self.units[i].position = p;
-                self.units[i].facing = facing;
+                self.units[i].place_at(p, facing);
             }
             self.units[i].active = false;
             self.units[i].reinforcement = Reinforcement::Arriving { ticks_left: REINFORCEMENT_WALK_ON_TICKS };
@@ -1722,7 +1776,7 @@ impl Battle {
         let (mut friends, mut enemies) = (Vec::new(), Vec::new());
         for (j, e) in self.units.iter().enumerate() {
             let d2 = dist2(u.position, e.position);
-            if j == idx || !e.active || e.men == 0 || !morale::near(d2, FORMATION_RADIUS, FORMATION_RADIUS, 160.0) {
+            if j == idx || !e.active || e.men == 0 || !morale::near_units(u, e, 160.0) {
                 continue;
             }
             let (dx, dy) = (e.position.0 - u.position.0, e.position.1 - u.position.1);
@@ -1789,8 +1843,43 @@ impl Battle {
                 h.u32(m.distance.to_bits());
                 h.u32(m.finished as u32);
                 h.u32(m.kept.map_or(u32::MAX, f32::to_bits));
+                h.u32(m.side.to_bits());
+                h.u32(m.figure);
+                h.u32(m.kind as u32);
+                h.u32(m.walk.map_or(u32::MAX, f32::to_bits));
             }
             h.u32(u.march.kind as u32);
+            h.u32(u.march.reforming as u32);
+            // The laid formation and the re-slot after losses (`march`): the men's places.
+            match u.march.laid {
+                None => h.u32(0),
+                Some(f) => {
+                    h.u32(1);
+                    h.u32(f.files as u32);
+                    h.u32(f.ranks as u32);
+                    h.u32(f.width.to_bits());
+                    h.u32(f.depth.to_bits());
+                }
+            }
+            h.u32(u.march.last_men);
+            h.u32(u.march.reslot as u32);
+            h.u32(u.march.reslot_in);
+            // The idle reform gate's state (`march::LandUnit::idle_gate`).
+            h.u32(u.march.in_place_at);
+            h.u32(u.march.idle_reformed as u32);
+            // The box measured from the men (`march::SquadBox`, squad summary `+0x62C`).
+            match u.march.measured {
+                None => h.u32(0),
+                Some(b) => {
+                    h.u32(1);
+                    h.u32(b.centre.0.to_bits());
+                    h.u32(b.centre.1.to_bits());
+                    h.u32(b.heading as u32);
+                    h.u32(b.width.to_bits());
+                    h.u32(b.depth.to_bits());
+                    h.u32(b.radius.to_bits());
+                }
+            }
             // The men's order and the unit's own (the reference soldier's). The men keep their own
             // kept speeds, and the order's target is the unit's: both only for the unit's own.
             for (plan, own) in [(u.march.plan, false), (u.timed_move, true)] {
@@ -1802,6 +1891,7 @@ impl Battle {
                         h.u32(p.distance.to_bits());
                         h.u32(p.elapsed.to_bits());
                         h.u32(p.ticks);
+                        h.u32(p.issued.to_bits());
                         h.u32(p.at_end as u32 | (p.first as u32) << 1);
                         if own {
                             h.u32(p.kept.map_or(u32::MAX, f32::to_bits));
@@ -1850,6 +1940,15 @@ impl Battle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `0x00EED960`: the six training keys in the exe's order; any other key has no level.
+    #[test]
+    fn training_levels_follow_the_exes_order() {
+        assert_eq!(training_level_of("mob"), Some(0));
+        assert_eq!(training_level_of("elite"), Some(5));
+        assert_eq!(training_level_of("trained"), Some(3));
+        assert_eq!(training_level_of("veteran"), None);
+    }
 
     /// OBVIOUSLY MADE-UP placeholder morale data (NOT game data).
     fn kv_morale() -> KvMorale {
@@ -2115,6 +2214,47 @@ mod tests {
         assert_eq!(timed_move_speed(f32::NAN, cap, 10.0, 1.0, false), cap);
     }
 
+    /// The re-issue schedule of `0x00581AE0` from tick 0: the f32 compare at `0x00581B73` gives
+    /// 11-tick periods but for a few issue ticks, whose period is 10.
+    #[test]
+    fn the_timed_move_reissues_on_the_exes_f32_schedule() {
+        let (mut issued, mut short) = (0u32, Vec::new());
+        for tick in 1..200_000u32 {
+            if timed_move_reissue_due(timed_move_issue_time(issued), tick) {
+                let period = tick - issued;
+                assert!(period == 10 || period == 11, "period {period} at {issued}");
+                if period == 10 {
+                    short.push(issued);
+                }
+                issued = tick;
+            }
+        }
+        assert_eq!(short, [11, 32, 1274, 20_479]);
+        assert!(!timed_move_reissue_due(timed_move_issue_time(0), 10) && timed_move_reissue_due(timed_move_issue_time(0), 11));
+        assert!(timed_move_reissue_due(timed_move_issue_time(11), 21));
+    }
+
+    /// A walking unit's plan is re-issued on the battle tick's schedule, so a move planned at tick 11
+    /// gets its next plan 10 ticks later and one planned at tick 21 11 ticks later.
+    #[test]
+    fn a_walk_replans_on_the_battle_ticks_schedule() {
+        for (start, period) in [(11, 10), (21, 11)] {
+            let mut b = walker(0.0, (500.0, 0.0), MovementClass::Infantry);
+            b.tick = start;
+            b.step();
+            let plan = b.units[0].timed_move.expect("moving");
+            assert!(plan.first && plan.issued == timed_move_issue_time(start), "{plan:?}");
+            let mut replanned = None;
+            for k in 1..=12 {
+                b.step();
+                if replanned.is_none() && b.units[0].timed_move.is_some_and(|t| !t.first && t.ticks == 1) {
+                    replanned = Some(k);
+                }
+            }
+            assert_eq!(replanned, Some(period), "planned at {start}");
+        }
+    }
+
     #[test]
     fn speed_changes_by_the_entity_acceleration_and_deceleration() {
         // `0x00819770`: up by at most accel × 0.1 per tick, down by at most decel × 0.1.
@@ -2169,10 +2309,10 @@ mod tests {
         assert!((speeds[0] - 2.85).abs() < 1e-4, "{speeds:?}");
         assert!(speeds[10] > 5.0 && speeds[10] < 5.4, "about 1.1 s in it canters: {speeds:?}");
         // Run speed after ~3 s. Behind its timed-move schedule while it gathered speed, the order
-        // speed is above the run speed, so it passes 10 (10.1, then 10.15) until the next plan (tick 33,
-        // `TIMED_MOVE_REPLAN_TICKS`) asks for 10 again.
-        assert!((speeds[29] - 10.1).abs() < 1e-4 && speeds[33..].iter().all(|s| (s - 10.0).abs() < 1e-4), "run speed after ~3 s: {speeds:?}");
-        assert!(speeds[..33].windows(2).all(|w| w[1] >= w[0]), "{speeds:?}");
+        // speed is above the run speed, so it passes 10 (10.1, then 10.2) until the next plan (tick 32 on the
+        // schedule from tick 0, 0, 11, 21, 32: `timed_move_reissue_due`) asks for 10 again.
+        assert!((speeds[29] - 10.1).abs() < 1e-4 && speeds[32..].iter().all(|s| (s - 10.0).abs() < 1e-4), "run speed after ~3 s: {speeds:?}");
+        assert!(speeds[..32].windows(2).all(|w| w[1] >= w[0]), "{speeds:?}");
         // The walk order brings it back at the deceleration, 0.6 m/s a tick.
         b.units[0].running = false;
         b.step();
@@ -2320,8 +2460,8 @@ mod tests {
     /// mounted column 0.40, slope 0.93) walks at 0.373 × an order speed that starts each plan at its
     /// walk 2.69 m/s and rises ~0.035 a tick; it never reaches the trot (the horse's walk / trot
     /// switch is at (1.47 + 3.53) / 2 = 2.50 m/s, the clips' root speeds). The surge over a re-plan
-    /// is the original's (CONFIRMED, `TimedMove`): back to the walk speed every 11 ticks
-    /// (`0x00581B73`), never above the sitting's peak.
+    /// is the original's (CONFIRMED, `TimedMove`): back to the walk speed at each re-issue
+    /// (`0x00581B73`, mostly 11 ticks apart), never above the sitting's peak.
     #[test]
     fn walking_cavalry_in_dense_forest_walks_on_its_timed_order() {
         let mut b = Battle::new(0, kv_morale(), kv_fatigue());
@@ -2345,7 +2485,9 @@ mod tests {
         // Each tick it walks at 0.40 × the order speed it was given.
         let given: Vec<f32> = speeds.iter().map(|s| s / 0.4).collect();
         assert!((given[0] - 2.69).abs() < 1e-4, "{given:?}");
-        for plan in given.chunks(11) {
+        // The plans from tick 0 on the exe's f32 schedule (`timed_move_reissue_due`): ticks 0, 11, 21
+        // (a 10-tick period), 32.
+        for plan in [&given[..11], &given[11..21], &given[21..32]] {
             assert!((plan[0] - 2.69).abs() < 1e-4, "each plan starts at the walk speed: {given:?}");
             for w in plan.windows(2) {
                 let rise = w[1] - w[0];
@@ -2354,6 +2496,7 @@ mod tests {
             assert!(plan.iter().all(|&s| s < 3.07 + 0.05), "peaks at the sitting's 3.07: {given:?}");
         }
         assert!(given[10] > 2.69 + 0.3, "no re-plan after 10 ticks: {given:?}");
+        assert!((given[32] - 2.69).abs() < 1e-4, "the fourth plan: {given:?}");
         assert!(speeds.iter().all(|&s| s < 2.5), "walks, never trots: {speeds:?}");
         assert!((orders[1] - given[1]).abs() < 1e-4);
     }
@@ -2522,7 +2665,8 @@ mod combatant_fatigue_tests {
 
     #[test]
     fn fear_and_inspiration_inputs() {
-        // 0x0053B970: attribute holders within 100 m (strict), the unit itself skipped.
+        // 0x0053B970: attribute holders within 100 m (strict) of the squads' box edges (centre
+        // distance < r + 100 + r, the radius +0x670), the unit itself skipped.
         let mut b = Battle::new(1, KvMorale::default(), KvFatigue::default());
         let mut hussars = LandUnit::new(0, 0, 120, (0.0, 0.0));
         hussars.unit_category = "cavalry".into();
@@ -2534,15 +2678,19 @@ mod combatant_fatigue_tests {
         let mut camels = LandUnit::new(2, 1, 120, (0.0, 99.5));
         camels.attributes.frightens_horses = true;
         b.add_unit(camels);
+        // The same men facing the same way: their boxes sit alike on their positions.
+        let r = b.units[0].radius();
+        assert!(r > 1.0 && (b.units[1].radius() - r).abs() < 1e-3, "radius {r}");
+        { let u = &mut b.units[1]; u.place_at((99.5 + 2.0 * r, 0.0), u.facing); }
         let i = b.morale_inputs(0);
         assert!(i.enemy_frightens_near && i.horses_frightened && !i.friend_inspires_near);
-        // Exactly 100 m is not "within" (strict <).
-        b.units[1].position = (100.0, 0.0);
-        b.units[2].position = (0.0, 100.0);
+        // Past 100 m between the edges is not "within".
+        { let u = &mut b.units[1]; u.place_at((100.01 + 2.0 * r, 0.0), u.facing); }
+        { let u = &mut b.units[2]; u.place_at((0.0, 100.01 + 2.0 * r), u.facing); }
         let i = b.morale_inputs(0);
         assert!(!i.enemy_frightens_near && !i.horses_frightened);
         // Infantry is not frightened by camels; a friend's inspiration counts.
-        b.units[2].position = (60.0, 0.0);
+        { let u = &mut b.units[2]; u.place_at((60.0, 0.0), u.facing); }
         let mut c = b.morale_inputs(1);
         assert!(!c.horses_frightened);
         b.units[1].attributes.inspires = false;

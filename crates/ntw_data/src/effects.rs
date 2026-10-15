@@ -47,6 +47,20 @@ db_record! {
 }
 
 db_record! {
+    /// `effect_bonus_value_population_class_and_religion_junction` (`ssss`, 30 rows): effect → (bonus,
+    /// population class, religion), exe bonus type 7. CONFIRMED (row builder `0x00F86F00`: #2 resolved in the
+    /// population classes, #3 in the religions, a row with either unknown dropped with a log; record ctor
+    /// `0x00F74050` takes the bonus id from the one-name table at `0x0145B73C`, `happiness` 0, through
+    /// `0x00E223F0`).
+    pub struct EffectBonusPopClassReligion in "effect_bonus_value_population_class_and_religion_junction", key = effect {
+        effect: String,
+        bonus: String,
+        class: String,
+        religion: String,
+    }
+}
+
+db_record! {
     /// `effect_bonus_value_religion_junction` (`sss`, 12 rows): effect → (bonus, religion), e.g.
     /// `conversion_catholic` → (`conversion`, `rel_catholic`); spa also keys the alignments (`align_pro_french`).
     pub struct EffectBonusReligion in "effect_bonus_value_religion_junction", key = effect {
@@ -210,6 +224,7 @@ pub struct EffectTables {
     pub bonus_pop_class: Table<EffectBonusPopClass>,
     pub bonus_agent: Table<EffectBonusAgent>,
     pub bonus_religion: Table<EffectBonusReligion>,
+    pub bonus_pop_class_religion: Table<EffectBonusPopClassReligion>,
     pub bonus_chain: Table<EffectBonusChain>,
     pub religion_conversion: Table<ReligionConversionMod>,
     pub technology: Table<TechnologyEffect>,

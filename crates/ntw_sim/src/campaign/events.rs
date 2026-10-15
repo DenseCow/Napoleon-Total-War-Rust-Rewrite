@@ -214,6 +214,18 @@ pub enum CampaignEvent {
         /// The slot built in.
         slot: super::world::SlotRef,
     },
+    /// Script event `CampaignBuildingDamaged` (CONFIRMED name, string `0x0134FF84`, event vtable
+    /// `0x0137CE30`): a building's health was set below 100 (`SetBuildingHealth` `0x00B452A0` posts it for
+    /// any value below 100). Fired by a repair's turns that do not finish it. Its context accessors are
+    /// `BuildingCompleted`'s (vtable `0x0137CEEC`) less +0x1C and +0x64 (that event's entry of the slot's list at +0xD8 and
+    /// its level), the rest read from the slot at event +0x10 in both (CONFIRMED), so the host gives it
+    /// the same region, settlement and faction.
+    CampaignBuildingDamaged {
+        /// The region.
+        region: RegionId,
+        /// The building's slot.
+        slot: super::world::SlotRef,
+    },
     /// Script event `CampaignArmiesMerge` (CONFIRMED name): units moved from one force into another.
     CampaignArmiesMerge {
         /// The force that gave its units.
@@ -274,6 +286,12 @@ pub enum CampaignEvent {
         character: CharacterId,
         /// Points walked, from the old position to the new one.
         path: Vec<(f32, f32)>,
+    },
+    /// Project event: a faction left the game ([`super::CampaignModel::destroy_faction`]; the exe
+    /// posts its event +0x108 there, whose script name is not traced).
+    FactionDestroyed {
+        /// The faction.
+        faction: FactionId,
     },
     /// Project event: a force lost all its units and was removed.
     ForceDestroyed {
@@ -397,6 +415,7 @@ impl CampaignEvent {
             CampaignEvent::ResearchCompleted { .. } => "ResearchCompleted",
             CampaignEvent::BuildingConstructionIssuedByPlayer { .. } => "BuildingConstructionIssuedByPlayer",
             CampaignEvent::BuildingCompleted { .. } => "BuildingCompleted",
+            CampaignEvent::CampaignBuildingDamaged { .. } => "CampaignBuildingDamaged",
             CampaignEvent::CampaignArmiesMerge { .. } => "CampaignArmiesMerge",
             CampaignEvent::CharacterEntersGarrison { .. } => "CharacterEntersGarrison",
             CampaignEvent::PreBattle { .. } => "PreBattle",
@@ -412,6 +431,7 @@ impl CampaignEvent {
             | CampaignEvent::CharacterHired { .. }
             | CampaignEvent::CharacterMoved { .. }
             | CampaignEvent::ForceDestroyed { .. }
+            | CampaignEvent::FactionDestroyed { .. }
             | CampaignEvent::GovernmentChanged { .. }
             | CampaignEvent::ConstructionItemDropped { .. } => return None,
         })

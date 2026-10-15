@@ -704,10 +704,8 @@ pub fn quick_save(sim: &mut CampaignSim) {
             human: &sim.human,
             model: &st.model,
             rebel_faction: sim.rebel_faction,
+            // The scripts' restricted building levels and units are in the model.
             script_values: script_values_out(&values),
-            // The scripts' restricted units (EPISODIC_RESTRICTIONS): without them a loaded game
-            // offers the tutorial and Peninsular units again (the levels are in the model).
-            restricted_units: st.restricted_units.iter().cloned().collect(),
         };
         (ntw_campaign::own_save::write(&info, &data), hash)
     };

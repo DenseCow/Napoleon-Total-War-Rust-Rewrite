@@ -24,6 +24,7 @@ use crate::battle::autoresolve::{kill_rates, AutoresolveQuery, AutoresolveTweaks
 use crate::rng::{CaRng, INV_65535};
 
 use super::rules::{CampaignRules, UnitAutoresolve};
+use crate::unit_kind::{Category, FALLBACK_CATEGORY};
 
 /// One unit in an autoresolved battle.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -427,9 +428,10 @@ fn missile_modifier(n_a: usize, art_a: usize, n_b: usize, art_b: usize) -> f32 {
     0.0
 }
 
-/// The range class (unit `+0x9C`): artillery 2, other land units 1 (INFERRED).
+/// The unit's range class (resolver unit `+0x9C`, [`Category::range_class`]); the code always comes from
+/// [`crate::unit_kind::category`], so the fallback never applies.
 fn range_class(u: &ArUnit) -> i32 {
-    if u.data.category == 1 { 2 } else { 1 }
+    Category::of_code(u.data.category).unwrap_or(FALLBACK_CATEGORY).range_class()
 }
 
 /// The pair query `0x0078F460` → `0x0071A1F0` → `0x0078E8A0` with fuzz on: 64 engagements with

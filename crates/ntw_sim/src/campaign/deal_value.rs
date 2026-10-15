@@ -357,7 +357,7 @@ impl CampaignModel {
     }
 
     /// The AI recipient's answer to the open negotiation's deal (the evaluator `0x00AA5ED0` for
-    /// the records the model holds: 4 regions, then 5 technology): `None` when there is nothing to
+    /// the records the model holds: 4 regions, 5 technology, then 7 payment): `None` when there is nothing to
     /// answer (no negotiation, a human recipient, no item), else whether it accepts. For each
     /// record with items, in record order, CONFIRMED:
     /// - decline when the recipient's `diplomacy_options` towards the proposer for the record is 1
@@ -372,25 +372,29 @@ impl CampaignModel {
     ///     [`Self::deal_goal_allowed`]) with [`Self::received_technology_goal_weight`]; one it
     ///     demands when it is a list-2 goal (from the AI to the proposer) with
     ///     [`Self::given_technology_goal_weight`];
+    ///   - payment: 0 (`0x00A62400` builds its goal with weight 0);
     /// - [`DealEvaluation::add`] of the record's value ([`Self::region_deal_value`] /
-    ///   [`Self::technology_deal_value`] at the campaign's inflation factor), scale 1.0.
+    ///   [`Self::technology_deal_value`] at the campaign's inflation factor,
+    ///   [`Self::payment_deal_value`] as it is), scale 1.0.
     ///
-    /// Then accept when `fair` and the diplomatic budget is at least the payment (0 here), or
-    /// `good` and the payment is at most the recipient's treasury.
+    /// Then accept when `fair` and the diplomatic budget is at least the payment (slot 2 of the
+    /// payment record's value, 0 without one), or `good` and the payment is at most the recipient's
+    /// treasury (signed).
     ///
     /// PROVISIONAL: the budget (`0x00AAF570`, the finance pot `+0x140` = diplomatic spending bias ×
     /// treasury at its refresh, never negative until the AI's own paid diplomatic intentions (kind
-    /// 8, `0x00CC53D0`) spend from it, which our AI does not have) is taken as at least 0; a deal
-    /// the AI would not accept is declined where the exe may first make a counter-offer
-    /// (`0x00CC58C0`, fewer than 10 per negotiation); the records the model does not hold (trade,
-    /// payments, ...) are not evaluated.
+    /// 8, `0x00CC53D0`) spend from it, which our AI does not have) is not ported: the `fair` test
+    /// takes it as covering any payment; a deal the AI would not accept is declined where the exe
+    /// may first make a counter-offer (`0x00CC58C0`, fewer than 10 per negotiation); the records the
+    /// model does not hold (trade, alliance, peace, ...) are not evaluated.
     pub fn ai_accepts_deal(&self) -> Option<bool> {
         use super::negotiation::NegotiationAction;
         let n = self.negotiations.current.as_ref()?;
         let (ai, proposer) = (n.recipient, n.proposer);
         let has_regions = !(n.regions.offered.is_empty() && n.regions.demanded.is_empty());
         let has_techs = !(n.technologies.offered.is_empty() && n.technologies.demanded.is_empty());
-        if self.is_human(ai) || !(has_regions || has_techs) {
+        let has_payment = n.payment.has_items();
+        if self.is_human(ai) || !(has_regions || has_techs || has_payment) {
             return None;
         }
         let declines = |index: usize| !self.may_accept(ai, proposer, index);
@@ -432,10 +436,53 @@ impl CampaignModel {
                 return Some(false);
             }
         }
-        let payment = 0;
+        // Record 7: weight 0 (0x00A62400); its value's slot 2 is the payment the accept tests read.
+        let payment = if has_payment {
+            let value = self.payment_deal_value(n);
+            if !step(NegotiationAction::Payments, &|_| 0.0, &|| value) {
+                return Some(false);
+            }
+            value.given as i32
+        } else {
+            0
+        };
         let budget_ok = true;
         let treasury = self.world.factions.get(&ai).map_or(0, |f| f.treasury);
         Some((e.fair() && budget_ok) || (e.good() && payment <= treasury))
+    }
+
+    /// The payment record of `n` valued for its AI recipient (virtual `+0x38` = `0x00C12EE0`; not
+    /// inflated), with `a` the record's amount ([`super::negotiation::DealPayment`]'s sign) and `t`
+    /// its turns (compared signed, as the exe's int). CONFIRMED (disassembly):
+    /// - `t` ≤ 1: (max(−a, 0), max(a, 0), max(a, 0)): the AI gains an offered amount and gives a
+    ///   demanded one;
+    /// - else the payer `F` (the recipient for a demand, `a` ≥ 0; the proposer for an offer) can pay at
+    ///   most `cap` = f32(treasury(F) + max(t × (last income − last expenses of F), 0)) × 0.8
+    ///   (`0x00BCAFE0`, `0x00BBE970`, `0x00BBE910`; wrapping int sums; constant `0x0131A7B4`), and the
+    ///   payments are worth `k` = (0.9^t − 1) × −10.0 times one (`powf`, constants `0x01325CEC`,
+    ///   `0x01318048`, `0x0133BCB4`); a demand is (0, trunc(min(f32(f64(k) × f64(a)), cap)), a × t),
+    ///   an offer (trunc(min(k × f32(−a), cap)), 0, 0). `trunc` is CVTTSS2SI.
+    pub fn payment_deal_value(&self, n: &Negotiation) -> DealValue {
+        let (a, t) = (n.payment.amount, n.payment.turns as i32);
+        if t <= 1 {
+            let (gain, cost) = (a.wrapping_neg().max(0) as u32, a.max(0) as u32);
+            return DealValue { gain, cost, given: cost };
+        }
+        let payer = if a >= 0 { n.recipient } else { n.proposer };
+        let w = &self.world;
+        let future = t.wrapping_mul(w.last_income(payer).wrapping_sub(w.last_expenses(payer))).max(0);
+        let treasury = w.factions.get(&payer).map_or(0, |f| f.treasury);
+        let cap = treasury.wrapping_add(future) as f32 * 0.8;
+        let k = (0.9f32.powf(t as f32) - 1.0) * -10.0;
+        // MINSS: the value unless it is not below the cap.
+        let min = |v: f32| if v < cap { v } else { cap };
+        if a >= 0 {
+            let v = super::commands::cvttss2si(min((f64::from(k) * f64::from(a)) as f32));
+            DealValue { gain: 0, cost: v as u32, given: a.wrapping_mul(t) as u32 }
+        } else {
+            let v = super::commands::cvttss2si(min(k * a.wrapping_neg() as f32));
+            DealValue { gain: v as u32, cost: 0, given: 0 }
+        }
     }
 
     /// The factions that have `tech` researched (state 0).

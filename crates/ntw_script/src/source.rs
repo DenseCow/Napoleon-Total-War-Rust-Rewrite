@@ -132,7 +132,7 @@ impl ScriptSource {
         self.table_rows_shared(table).unwrap_or_default()
     }
 
-    /// A typed game table through the merged view (`ntw_data::load_table`), loaded once per
+    /// A typed game table through the merged view and its row check (`ntw_data::load_table`), loaded once per
     /// source. `None` as for [`table_rows_shared`](Self::table_rows_shared).
     pub fn typed_table<T: ntw_data::DbRecord + Send + Sync + 'static>(&self) -> Option<Arc<ntw_data::Table<T>>> {
         let vfs = self.vfs.as_ref()?;

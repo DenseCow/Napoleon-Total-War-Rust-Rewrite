@@ -217,6 +217,17 @@ pub enum LoadWarning {
         /// The region key.
         region: String,
     },
+    /// A `BUILDING_CONSTRUCTION_ITEM` whose fields do not fit its type (#0): no u32 turns or cost, an unknown type,
+    /// a build without its level key at #5, a repair without its step at #5 or without a building to repair. The
+    /// item is skipped (the slot is free to build in).
+    UnreadableConstructionItem {
+        /// The region key.
+        region: String,
+        /// The slot.
+        slot: ntw_sim::campaign::SlotRef,
+        /// The item type (#0), if it is a u32.
+        item_type: Option<u32>,
+    },
     /// `CAMPAIGN_MODEL` #23 / #24 (units per army / navy) are not two u32 after
     /// `OSMOSIS_CULTURES`: the original's 20 / 20 are used, as its loader does for old files.
     MissingForceCaps,
@@ -297,6 +308,9 @@ impl fmt::Display for LoadWarning {
             }
             Self::RegionWithoutRecruitmentManager { region } => {
                 write!(f, "region {region}: no recruitment manager of its own (read as an empty queue)")
+            }
+            Self::UnreadableConstructionItem { region, slot, item_type } => {
+                write!(f, "region {region}: construction item in slot {slot:?} (type {item_type:?}) has unreadable fields (skipped)")
             }
             Self::MissingForceCaps => write!(f, "CAMPAIGN_MODEL #23 / #24 (units per army / navy) not found; using 20 / 20"),
         }

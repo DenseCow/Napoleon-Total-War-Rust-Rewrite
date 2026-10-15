@@ -1,6 +1,6 @@
 //! The original's treasury money rules (CAMPAIGN_FIDELITY.md §Construction cost, §Recruitment, §Treasury
 //! changes): the affordability tests and the one path every treasury change takes. Every write to a faction's
-//! treasury goes through [`pay`] (the exe's charge `0x00BAF500`), [`credit`] (its credit `0x00BB3810`),
+//! treasury goes through [`pay`] (the exe's charge `0x00BAF500`), [`credit`] (its credit `0x00BB3810`), [`refund`] (`0x00BAF660`),
 //! [`settle_round`] (the round's settle `0x00BABE30`) or [`script_credit`] (the script's `treasury_mod`),
 //! all of them saturating where the exe's 32-bit arithmetic wraps (ORIGINAL BUG below); the bankruptcy reset
 //! to 0 is the one plain store (`economy::settle_round`). CONFIRMED callers (static trace, 2026-10-10):
@@ -8,10 +8,19 @@
 //! - charge: construction and repair (category 0), recruitment (2, `0x00B58DD0`), a hired pool candidate
 //!   (2, `0x00A1B8F0`, a human faction only), a promotion in the field (`0x008E1C20` → slot +0x44 →
 //!   `0x00BAF500`, every faction), a one-off treaty payment's payer (3, `0x00C18A70`) and a state gift's
-//!   giver (3, `0x00C4B440`);
+//!   giver (3, `0x00C4B440`), a ship repair ordered in port (2, `0x008EEB70`, [`super::ship_repair`]), by the
+//!   player or by the AI's repair intention (`0x00AA90F0`, `CampaignModel::ai_repair_navy`);
 //! - credit: a cancelled construction, repair or recruitment item (3), a one-off treaty payment's payee
 //!   (1, `0x00C18A70`), a capture option's money (0, `0x00B541E0` → `0x00BB3810` at `0x00B5431C`), the
-//!   script's `treasury_mod` (3, `0x0097BAD0`) and the console (4).
+//!   script's `treasury_mod` (3, `0x0097BAD0`), the director's boost (4, `0x00BAF200` → `0x00BB33A0`,
+//!   [`super::director::boost_step`]) and the console (4);
+//! - refund: a cancelled ship repair (2, `0x008EEB70` → `0x00BAF660`).
+//!
+//! Callers not modelled yet (CAMPAIGN_FIDELITY.md §Treasury changes): the sale of a captured ship that finds no
+//! free spot (credit 2, `0x008E1BC0`, from the post-battle step `0x009DB7C0`; the model has no state-6 force
+//! rebuild) and a mission's money (credit 3, `0x00A06050`; the model has no mission completion). The
+//! multiplayer results counter (FACTION +0x954, `0x008F56C0` / `0x00B298F0`) is not the treasury and no rule
+//! reads it.
 //!
 //! Every charge and credit passes the faction economics' per-category converter (spending `+0x42C`,
 //! `0x00BA8CD0`; income `+0x3F8`, `0x00BA8CE0`; vtable +4). CONFIRMED identity for every category of a game
@@ -79,6 +88,14 @@ pub fn pay(treasury: &mut i32, amount: i32) {
 /// (`0x00B5C060` / `0x00B5C0A0`, item +0x20) credits its stored cost back with category 3.
 pub fn credit(treasury: &mut i32, amount: i32) {
     *treasury = treasury.saturating_add(amount);
+}
+
+/// Refunds `amount` of a charge (`0x00BAF660(amount, category)`, CONFIRMED): the spending converter's amount is
+/// taken off the turn record's spending category and added to the treasury, so the treasury moves as a
+/// [`credit`] does (saturating, ORIGINAL BUG in the module docs); the per-category record is not modelled, as
+/// for [`pay`]. Its one caller is the cancelled ship repair (category 2, [`super::ship_repair`]).
+pub fn refund(treasury: &mut i32, amount: i32) {
+    credit(treasury, amount);
 }
 
 /// The script's `treasury_mod(faction, amount)` (`0x0097BAD0`, CONFIRMED): the Lua number is read as an f32 and

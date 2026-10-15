@@ -1500,6 +1500,134 @@ pub const SLOT_NAMES: [&str; ACTION_SLOT_COUNT] = [
     "PIKEMEN_CHARGED_FRONT_LEFT_45", "PIKEMEN_CHARGED_FRONT_RIGHT_45", "PIKEMEN_CHARGED_FRONT_THRUST_1", "PIKEMEN_CHARGED_FRONT_THRUST_2",
 ];
 
+/// Every action slot's kind, in slot order: `SLOT_KINDS[i]` is the kind of slot `i`
+/// ([`SLOT_NAMES`]), entry `+0x08` of the same exe table (`0x013AEBE0`, stride `0x18`;
+/// CONFIRMED, transcribed from the exe). The clip object keeps it (`+0x1C`, `0x00E4F4D0`),
+/// which sets the clip's flags by it ([`kind_loops`]), and the display update `0x007725D0`
+/// advances a clip by it (UNITS_TERRAIN_FIDELITY.md §1.9 "Clip advance by slot kind"). By the
+/// slots that hold each: 0 the stands and action loops, 1 lying down, 2 the moving gait loops, 3
+/// the gait transitions, 4 the backward engine moves (`PUSH_ENGINE_*_BACKWARDS`,
+/// `ENGINE_LIMBERED_BACKWARDS`), 5 / 6 the turns in place (6 the limbered engine's), 7 the
+/// steps, 8..0xB the climbs (ladders, stairs, rigging, ropes), 0xC / 0xD the turns into a walk
+/// (left / right), 0xE the combat-ready steps and jumps, 0xF..0x13 the melee and one-shot actions
+/// (0x10 the knockdowns, 0x11 the ready / stand changes and melee idles, 0x12 the other stance
+/// changes, 0x13 the engine-push starts), 0x14 / 0x15 the deaths standing / moving, 0x16..0x1C
+/// the riders' slots (0x16 the refusals, the gait transitions except those out of the gallop
+/// (so `RIDER_RUN_TO_GALLOP` and `RIDER_CANTER_TO_GALLOP` too), steps, combat and stand idles,
+/// standing / moving deaths, obstacle crossing and mount / dismount; 0x17 the melee
+/// (`RIDER_COMBAT_n`, `RIDER_MOUNT_ATTACK_n`); 0x18 the gait loops, jumps, the transitions out
+/// of the gallop (`RIDER_GALLOP_TO_*`) and synched charge; 0x19 the turns in place; 0x1A the
+/// turns into a walk; 0x1B the attacks, blocks, charge attacks, shoot / reload changes, fire,
+/// `RIDER_DEATH_ATTACHED_TRANSITION_1` and the three `RIDER_*PLAY_INSTRUMENT*` slots; 0x1C
+/// carry, combat and shoot ready, charge, reload and the attached stationary / moving deaths), 0x1D the riders' jump and
+/// chevaux-de-frise deaths, 0x1E the wounded, 0x1F the jump deaths (`DEATH_JUMP_n`).
+#[rustfmt::skip]
+pub const SLOT_KINDS: [u8; ACTION_SLOT_COUNT] = [
+    0, 0, 0, 3, 17, 18, 18, 18, 18, 18, 2, 2, 2, 2, 2, 3, 3, 3, 2, 2, 2, 2, 2, 2, 3, 3, 3, 2, 2, 3, 3, 3,
+    2, 2, 3, 3, 3, 2, 2, 3, 3, 3, 2, 7, 7, 7, 7, 5, 5, 5, 5, 5, 5, 12, 13, 12, 13, 12, 13, 0, 0, 17, 2, 2,
+    2, 2, 2, 2, 2, 2, 2, 2, 7, 7, 7, 7, 5, 5, 5, 5, 5, 5, 12, 13, 12, 13, 12, 13, 0, 17, 17, 18, 18, 18, 18, 18,
+    2, 14, 14, 14, 5, 5, 5, 5, 5, 5, 0, 18, 18, 18, 18, 0, 2, 14, 14, 14, 5, 5, 5, 5, 5, 5, 0, 18, 18, 2, 0, 18,
+    0, 18, 18, 17, 0, 18, 0, 0, 18, 0, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 0, 18, 18, 2,
+    7, 7, 7, 7, 5, 5, 5, 5, 5, 5, 12, 13, 12, 13, 12, 13, 18, 18, 18, 18, 18, 0, 0, 18, 18, 2, 2, 7, 7, 7, 7, 5,
+    5, 5, 5, 5, 5, 12, 13, 12, 13, 12, 13, 18, 18, 18, 18, 18, 0, 18, 18, 18, 18, 18, 18, 0, 18, 18, 18, 18, 18, 18, 0, 18,
+    18, 18, 18, 18, 18, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 17,
+    17, 17, 17, 17, 17, 17, 17, 17, 17, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17,
+    17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 19, 19, 0, 2, 4, 0, 2, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 18, 18, 18,
+    17, 17, 0, 18, 17, 17, 17, 0, 18, 18, 17, 0, 18, 18, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 22, 22, 22, 22, 17, 17,
+    17, 17, 22, 22, 22, 22, 18, 18, 18, 18, 18, 24, 22, 24, 22, 22, 22, 24, 24, 22, 22, 22, 24, 24, 22, 22, 22, 24, 24, 22, 22, 22,
+    24, 24, 24, 24, 24, 24, 24, 22, 22, 22, 22, 25, 25, 25, 25, 25, 25, 26, 26, 26, 26, 26, 26, 23, 23, 23, 23, 23, 23, 23, 23, 23,
+    23, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 23, 23, 23, 23, 23, 27, 27, 27, 27, 27, 27,
+    27, 27, 27, 27, 28, 28, 28, 28, 27, 28, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 29, 29,
+    29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 27, 28, 28, 22, 22, 22, 22, 22, 27,
+    27, 27, 0, 0, 0, 2, 4, 6, 6, 17, 18, 18, 18, 0, 18, 18, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 7, 7, 7,
+    7, 5, 5, 5, 5, 5, 12, 13, 12, 13, 12, 13, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 17, 17, 17, 14, 14, 14, 14, 14, 14,
+    14, 14, 14, 17, 17, 20, 14, 14, 14, 14, 14, 14, 18, 18, 18, 18, 18, 18, 18, 18, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
+    20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
+    20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
+    20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 31, 31, 31, 31, 31, 31,
+    31, 31, 20, 20, 20, 20, 20, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 8, 8, 8, 8, 10, 10, 11, 11, 11, 11, 8, 8, 9,
+    9, 9, 9, 8, 8, 17, 17, 17, 17, 17, 16, 16, 16, 16, 16, 14, 21, 30, 30, 30, 30, 30, 30, 30, 30, 30, 16, 16, 16, 16, 17, 17,
+    1, 1, 0, 2, 7, 7, 7, 7, 5, 5, 18, 18, 0, 2, 7, 7, 7, 7, 5, 5, 18, 18, 0, 2, 7, 7, 7, 7, 5, 5, 18, 18,
+];
+
+/// The kind of action slot `name` ([`SLOT_KINDS`]), or `None` for a name the table does not
+/// hold ([`action_slot`]).
+pub fn slot_kind(name: &str) -> Option<u8> {
+    action_slot(name).map(|i| SLOT_KINDS[i])
+}
+
+/// Whether a clip of slot kind `kind` loops: the flags the clip-object maker `0x00E4F4D0` passes
+/// by kind (through `0x00E5FF20` into the anim's `+0x44`) have mask `0x2` for kinds 1, 2, 4, 6,
+/// 7, 8, 0xA, 0xE, 0x18 and 0x1C, and not for the others (CONFIRMED; kind 0, the stands, has
+/// flags 4). The display update `0x007725D0` carries the old clip's phase into a new clip only
+/// when the new anim has it (`0x00773E73`), and restarts a clip without it at its end.
+pub fn kind_loops(kind: u8) -> bool {
+    matches!(kind, 1 | 2 | 4 | 6 | 7 | 8 | 0xA | 0xE | 0x18 | 0x1C)
+}
+
+/// The jump-death slots `DEATH_JUMP_1`..`DEATH_JUMP_8` (kind 0x1F), which the display update
+/// leaves out of its clip-time rule ([`display_time`]; `0x0077423E`..`0x0077424A`: the slot
+/// minus 0x2FA, unsigned, at most 7).
+pub const JUMP_DEATH_SLOTS: std::ops::RangeInclusive<usize> = 0x2FA..=0x301;
+
+/// Where the display update `0x007725D0` takes a clip's time from once the clip has advanced
+/// ([`display_time`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisplayTime {
+    /// The time the clip's own advance gave (the exit `0x00774398`).
+    Advanced,
+    /// The shown clip's end: the clip object's anim (`+0x44`) length (`+0x4C`), at
+    /// `0x00774386`..`0x00774392`.
+    ClipEnd,
+    /// The mount display's clip time (`[ESI+0xCC]` -> `+0x14` -> `+0xD8`); `with_flag` also
+    /// copies the mount's `+0x115` (`0x00774282`), else the time alone (`0x007742F8`).
+    MountTime { with_flag: bool },
+    /// The mount's clip time, its `+0x115` and its `+0x11C` (`0x007742C0`).
+    MountTimeAndPose,
+    /// The clip clock (`0x0077430C`): the entity's clip frame count x 0.1 s plus the in-tick time
+    /// (ms x 0.001); `lead` (kind 0xF) adds 0.1 s more (`0x0077436C`..`0x0077437C`).
+    Clock { lead: bool },
+}
+
+/// The display update's clip-time rule for an entity in anim state `state` (`+0x1B8`, the
+/// snapshot ring's `+0x24`) showing action slot `slot` (`+0x1C4`) of kind `kind`
+/// ([`SLOT_KINDS`]) (CONFIRMED `0x00774228`..`0x00774398`, byte table `0x00775430`, jump table
+/// `0x00775420`):
+/// - states 0x15 and 0x16 pin the clip at its end;
+/// - else a jump-death slot ([`JUMP_DEATH_SLOTS`]) keeps its advanced time;
+/// - else states 0x2A, 0x4B and 0x17 take kinds 0x16..0x1A from the mount without its flag,
+///   kind 0x1D from the mount with its flag and `+0x11C`, and every other kind from the clock;
+/// - else the kind switch: kinds 0xF..0x13 from the clock, 0x16..0x1A from the mount with its
+///   flag, 0x1D from the mount with its flag and `+0x11C`, and the rest (0x14, 0x15, 0x1B, 0x1C
+///   and the kinds outside 0xF..0x1D) keep their advanced time.
+///
+/// What states 0x15 / 0x16 / 0x17 / 0x2A / 0x4B stand for is not traced yet: the battle view has
+/// no entity anim state, so it does not call this yet (BACKLOG Polish).
+pub fn display_time(state: u32, slot: usize, kind: u8) -> DisplayTime {
+    let clock = DisplayTime::Clock { lead: kind == 0xF };
+    if matches!(state, 0x15 | 0x16) {
+        return DisplayTime::ClipEnd;
+    }
+    if JUMP_DEATH_SLOTS.contains(&slot) {
+        return DisplayTime::Advanced;
+    }
+    if matches!(state, 0x2A | 0x4B | 0x17) {
+        return match kind {
+            0x16..=0x1A => DisplayTime::MountTime { with_flag: false },
+            0x1D => DisplayTime::MountTimeAndPose,
+            _ => clock,
+        };
+    }
+    match kind {
+        0xF..=0x13 => clock,
+        0x16..=0x1A => DisplayTime::MountTime { with_flag: true },
+        0x1D => DisplayTime::MountTimeAndPose,
+        _ => DisplayTime::Advanced,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1600,6 +1728,41 @@ mod tests {
         assert_eq!(word & FLAG_DEFENSIVE, 0);
         assert_eq!(word & SpecialUsage::CannonBall.bit(), 0);
         assert_eq!(ON_OFF, ["on", "off"]);
+    }
+
+    #[test]
+    fn slot_kinds_match_the_exe_table_for_the_slots_the_display_plays() {
+        // Kinds as the exe's slot table holds them (`0x013AEBE0` entry `+0x08`).
+        for (slot, kind) in [
+            ("STAND", 0),
+            ("COMBAT_READY", 0),
+            ("AIM", 0),
+            ("WALK_1", 2),
+            ("RUN_5", 2),
+            ("CHARGE", 2),
+            ("TROT", 2),
+            ("GALLOP", 2),
+            ("STAND_TO_WALK", 3),
+            ("COMBAT_1", 0xF),
+            ("KNOCKDOWN_1", 0x10),
+            ("COMBAT_IDLE_1", 0x11),
+            ("COMBAT_IDLE_10", 0x11),
+            ("RIDER_TROT", 0x18),
+            ("ENGINE_LIMBERED_BACKWARDS", 4),
+            ("TURN_LEFT_TO_WALK_45", 0xC),
+            ("TURN_RIGHT_TO_WALK_45", 0xD),
+            ("RIDER_COMBAT_1", 0x17),
+            ("RIDER_DEATH_JUMP_1", 0x1D),
+            ("WOUNDED_FRONT_IDLE", 0x1E),
+            ("DEATH_JUMP_1", 0x1F),
+        ] {
+            assert_eq!(slot_kind(slot), Some(kind), "{slot}");
+        }
+        assert_eq!(slot_kind("NOT_A_SLOT"), None);
+        // Only the moving loops and the riders' locomotion carry the loop flag; the stands
+        // (kind 0), transitions (3) and melee kinds do not.
+        assert!(kind_loops(2) && kind_loops(0x18) && kind_loops(1));
+        assert!(!kind_loops(0) && !kind_loops(3) && !kind_loops(0xF) && !kind_loops(0x11));
     }
 
     #[test]
@@ -2876,5 +3039,47 @@ mod tests {
         let reached_and_named = states.iter().filter(|s| named.contains(s)).count();
         assert_eq!(reached_and_named, 10);
         assert_eq!(states.len() - reached_and_named, 53);
+    }
+
+    #[test]
+    fn display_time_follows_the_pre_switch_checks_then_the_kind_switch() {
+        use DisplayTime::*;
+        // The jump-death range is DEATH_JUMP_1..DEATH_JUMP_8, all kind 0x1F.
+        assert_eq!(SLOT_NAMES[*JUMP_DEATH_SLOTS.start()], "DEATH_JUMP_1");
+        assert_eq!(SLOT_NAMES[*JUMP_DEATH_SLOTS.end()], "DEATH_JUMP_8");
+        assert!(JUMP_DEATH_SLOTS.clone().all(|s| SLOT_KINDS[s] == 0x1F));
+        let melee = action_slot("RIDER_COMBAT_1").unwrap();
+        let stand = action_slot("STAND").unwrap();
+        let jump = *JUMP_DEATH_SLOTS.start();
+        // States 0x15 / 0x16 pin the clip end before anything else, jump deaths included.
+        for state in [0x15, 0x16] {
+            assert_eq!(display_time(state, jump, 0x1F), ClipEnd);
+            assert_eq!(display_time(state, stand, 0), ClipEnd);
+        }
+        // A jump death keeps its advanced time in every other state, 0x2A included.
+        for state in [0, 0x17, 0x2A, 0x4B] {
+            assert_eq!(display_time(state, jump, 0x1F), Advanced);
+        }
+        // States 0x2A / 0x4B / 0x17: the mount's time without its flag, the pose copy for 0x1D,
+        // the clock for every other kind (a gait loop too).
+        for state in [0x2A, 0x4B, 0x17] {
+            assert_eq!(display_time(state, melee, 0x17), MountTime { with_flag: false });
+            assert_eq!(display_time(state, stand, 0x1D), MountTimeAndPose);
+            assert_eq!(display_time(state, stand, 2), Clock { lead: false });
+            assert_eq!(display_time(state, stand, 0x1B), Clock { lead: false });
+            assert_eq!(display_time(state, stand, 0xF), Clock { lead: true });
+        }
+        // Any other state: the kind switch (byte table 0x00775430).
+        let switch: Vec<DisplayTime> = (0xEu8..=0x1E).map(|k| display_time(0, stand, k)).collect();
+        let mount = MountTime { with_flag: true };
+        let clock = Clock { lead: false };
+        assert_eq!(
+            switch,
+            [
+                Advanced, Clock { lead: true }, clock, clock, clock, clock, Advanced, Advanced,
+                mount, mount, mount, mount, mount, Advanced, Advanced, MountTimeAndPose, Advanced,
+            ]
+        );
+        assert_eq!(display_time(0, stand, 2), Advanced);
     }
 }

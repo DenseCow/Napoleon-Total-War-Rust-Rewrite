@@ -9,7 +9,7 @@ use ntw_data::GameDatabase;
 use ntw_formats::campaign_map::GameFiles;
 use ntw_formats::esf::EsfFile;
 use ntw_formats::pack::Vfs;
-use ntw_sim::campaign::effects::{apply_start_handicaps, saved_set, Effects, TECH_RESEARCHED};
+use ntw_sim::campaign::effects::{apply_start_handicaps, saved_set, EffectKey, Effects, TECH_RESEARCHED};
 
 fn data_dir() -> PathBuf {
     std::env::var_os("NTW_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| {
@@ -67,6 +67,14 @@ fn effect_tables_and_start_sums() {
     }
     // Characters with traits get trait effects.
     assert!(fx.character.values().any(|s| !s.is_empty()));
+
+    // A population class × religion effect (exe type 7) compiles to the saved entries' key, so DB and saved
+    // sources add up (`SavedBonus::key`).
+    let row = t.bonus_pop_class_religion.iter().next().expect("type-7 rows");
+    let mut fx_rules = rules.clone();
+    fx_rules.insert_technology("test".into(), [(row.effect.as_str(), 2.0)]);
+    let k = EffectKey::pop_class_religion(&row.bonus, &row.class, &row.religion);
+    assert_eq!(fx_rules.technology()["test"].get_qualified(k.kind, &k.bonus, &k.qualifier), 2.0);
 }
 
 #[test]

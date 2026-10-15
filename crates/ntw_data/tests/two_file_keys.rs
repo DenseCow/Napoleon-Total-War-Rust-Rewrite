@@ -137,6 +137,7 @@ fn every_typed_table_decodes_and_merges_across_two_files() {
     two_files::<ntw_data::effects::EffectBonusUnitClass>();
     two_files::<ntw_data::effects::EffectBonusPopClass>();
     two_files::<ntw_data::effects::EffectBonusReligion>();
+    two_files::<ntw_data::effects::EffectBonusPopClassReligion>();
     two_files::<ntw_data::effects::EffectBonusChain>();
     two_files::<ntw_data::effects::ReligionConversionMod>();
     two_files::<ntw_data::effects::EffectBonusAgent>();

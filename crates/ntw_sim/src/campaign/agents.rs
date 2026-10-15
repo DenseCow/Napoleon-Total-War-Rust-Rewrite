@@ -381,12 +381,6 @@ impl CampaignModel {
         }
     }
 
-    /// A faction counts as alive (the exe's destroyed flag, `0x008CEEF0`): PROVISIONAL stand-in, it
-    /// owns a region.
-    fn faction_alive(&self, f: FactionId) -> bool {
-        self.world.regions.values().any(|r| r.owner == f)
-    }
-
     /// `victim` spots `agent` (`0x008A8B30`, CONFIRMED): a character with `subterfuge` ≥ 1 is added
     /// to its exposed list (`FACTION` `EXPOSED_CHARACTERS`) even when already there (the exe does not
     /// look); one flagged hidden (`CHARACTER` #22) only when not there yet; anyone else is not added
@@ -404,12 +398,14 @@ impl CampaignModel {
         }
     }
 
-    /// A detected attempt (`0x00B0D870` assassination, `0x00B67FD0` sabotage, CONFIRMED): the
-    /// victim's attitude towards the agent's faction takes the misdeed's victim values, every other
-    /// faction's (neither victim nor culprit) the third-party values. Nothing when the victim is
-    /// gone.
+    /// A detected attempt (`0x00B0D870` assassination, `0x00B67FD0` sabotage, `0x00B71CF0`
+    /// spying; CONFIRMED): the victim's attitude towards the agent's faction takes the misdeed's
+    /// victim values, every other faction's (neither victim nor culprit) the third-party values,
+    /// then the diplomacy-changed broadcast ([`Self::diplomacy_changed`], `CALL [[model+0x3A8]+8]`
+    /// at `0x00B0D92F` / `0x00B6808F` / `0x00B71DAF`). Nothing at all when the victim is the rebels
+    /// (no faction record, `0x008CEEF0`; [`Self::is_rebel_faction`]).
     pub fn detected_misdeed(&mut self, culprit: FactionId, victim: FactionId, m: Misdeed) {
-        if !self.faction_alive(victim) {
+        if self.is_rebel_faction(victim) {
             return;
         }
         self.set_attitude(victim, culprit, m.factor(), m.victim());
@@ -417,18 +413,23 @@ impl CampaignModel {
         for f in others {
             self.set_attitude(f, culprit, m.factor(), m.third_party());
         }
+        self.diplomacy_changed();
     }
 
     /// An unseen success (`0x00B0D700` assassination, `0x00B67E60` sabotage; outcome 0): the victim
-    /// blames the faction it likes least (its lowest attitude total, `0x00B0DB60`; ties go to the
-    /// lower id; the culprit itself is passed over unless it is the first one looked at), which gets
-    /// the victim values; then every faction other than the culprit and the blamed one gives the
-    /// blamed one the third-party values (the victim too, overwriting its own: CONFIRMED order). The
-    /// victim's relationships are taken in target id order (PROVISIONAL: the original keeps the file
-    /// order, which matters only for the first one looked at). Which faction's list is searched is
-    /// INFERRED (the decompiled call loses the object).
+    /// searches its own relationships (`0x00B0D740`: the list at victim +0x528) for the faction it
+    /// likes least (its lowest attitude total, `0x00B0DB60`; ties go to the lower id; the culprit
+    /// itself is passed over unless it is the first one looked at), which gets the victim values;
+    /// then every faction other than the victim and the blamed one (`0x00B0D800`: the loop compares
+    /// with the victim, not the culprit) gives the blamed one the third-party values, the culprit
+    /// included; then the diplomacy-changed broadcast (`0x00B0D861` / `0x00B67FC1`), also when no
+    /// one is blamed. CONFIRMED (disassembly). Nothing at all when the victim is the rebels
+    /// (`0x008CEEF0`). The victim's relationships are taken in target id order (PROVISIONAL: the
+    /// original keeps the file order, which matters only for the first one looked at). A victim
+    /// with no relationships blames no one here; the exe would index the empty list (`0x00B64C50`
+    /// returns the list start when nothing matches), which no campaign reaches.
     pub fn blamed_misdeed(&mut self, culprit: FactionId, victim: FactionId, m: Misdeed) {
-        if !self.faction_alive(victim) {
+        if self.is_rebel_faction(victim) {
             return;
         }
         let mut blamed: Option<(FactionId, i32)> = None;
@@ -446,12 +447,14 @@ impl CampaignModel {
                 }
             }
         }
-        let Some((scapegoat, _)) = blamed else { return };
-        self.set_attitude(victim, scapegoat, m.factor(), m.victim());
-        let others: Vec<FactionId> = self.world.factions.keys().copied().filter(|f| *f != culprit && *f != scapegoat).collect();
-        for f in others {
-            self.set_attitude(f, scapegoat, m.factor(), m.third_party());
+        if let Some((scapegoat, _)) = blamed {
+            self.set_attitude(victim, scapegoat, m.factor(), m.victim());
+            let others: Vec<FactionId> = self.world.factions.keys().copied().filter(|f| *f != victim && *f != scapegoat).collect();
+            for f in others {
+                self.set_attitude(f, scapegoat, m.factor(), m.third_party());
+            }
         }
+        self.diplomacy_changed();
     }
 
     /// The agent walks to `to` and acts on arrival, once per turn (character +0x4CC, set by every

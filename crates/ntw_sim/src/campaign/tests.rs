@@ -78,6 +78,8 @@ fn region(id: u32, owner: FactionId, gdp: u32, slots: usize) -> Region {
         slots: s,
         road: None,
         fortification: None,
+        road_holder: None,
+        fortification_holder: None,
         population: gdp * 100,
         base_gdp: gdp,
         gdp,
@@ -88,6 +90,7 @@ fn region(id: u32, owner: FactionId, gdp: u32, slots: usize) -> Region {
         tax_exempt: false,
         religions: Vec::new(),
         class_bases: Vec::new(),
+        unit_resources: Vec::new(),
         // The shipped start positions give every region a base capacity of twice its population.
         population_state: super::population::PopulationState { base_capacity: gdp * 200, trend: 2, ..Default::default() },
         recruitment_queue: Vec::new(),
@@ -838,7 +841,7 @@ fn recruiting_charges_the_entry_cost_and_cancelling_refunds_it() {
     let mut m = test_model();
     let unit = m.rules.units["test_recruit"].clone();
     assert_ne!(unit.cost, unit.campaign_cost, "the fixture tells the two costs apart");
-    m.world.faction_details.entry(A).or_default().bonus_base = vec![SavedBonus { kind: 1, bonus: 30, value: -8.0, qualifier: String::new() }];
+    m.world.faction_details.entry(A).or_default().bonus_base = vec![SavedBonus { kind: 1, bonus: 30, value: -8.0, qualifier: String::new(), ..Default::default() }];
     let before = m.world.factions[&A].treasury;
     let cost = (unit.campaign_cost as f32 * 0.92).round_ties_even() as i32;
     assert_eq!(economy::recruitment_cost(&m, &m.world.regions[&RegionId(10)], "test_recruit", &unit), cost);
@@ -873,7 +876,7 @@ fn a_faction_in_debt_may_recruit() {
 fn a_region_without_recruitment_points_still_queues() {
     let mut m = test_model();
     // The region's building gives 2 points; a faction effect of −2 takes them away.
-    m.world.faction_details.entry(A).or_default().bonus_base = vec![SavedBonus { kind: 1, bonus: 32, value: -2.0, qualifier: String::new() }];
+    m.world.faction_details.entry(A).or_default().bonus_base = vec![SavedBonus { kind: 1, bonus: 32, value: -2.0, qualifier: String::new(), ..Default::default() }];
     assert_eq!(m.recruitment_points(RegionId(10), false), 0);
     m.world.factions.get_mut(&A).unwrap().treasury = 1_000_000;
     m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into(), target: None }).unwrap();
@@ -1012,7 +1015,7 @@ fn model_with_queued_items() -> CampaignModel {
     for (id, unit_key, cost) in [(9001, "test_unit", 300), (9002, "test_ship", 70), (9003, "test_unit", 500), (9004, "test_ship", 110)] {
         r.recruitment_queue.push(RecruitmentItem { id: RecruitmentItemId(id), unit_key: unit_key.into(), turns_remaining: 2, cost, target: None, target_lost: false });
     }
-    r.construction.push(ConstructionItem { slot: SlotRef::Slot(0), level_key: "test_building_level".into(), turns_remaining: 2, cost: 600 });
+    r.construction.push(ConstructionItem { slot: SlotRef::Slot(0), level_key: "test_building_level".into(), turns_remaining: 2, cost: 600, kind: ConstructionKind::Build, active: true });
     m
 }
 
@@ -1976,12 +1979,13 @@ fn construction_cost_takes_the_local_and_chain_cost_effects() {
     assert_eq!(m.construction_cost(RegionId(10), "test_building_level_2"), 540);
     // The owner's chain-keyed entry (saved type 2, id 0) adds up: −10 − 50 = −60 %.
     m.world.faction_details.entry(A).or_default().bonus_base =
-        vec![SavedBonus { kind: 2, bonus: 0, value: -50.0, qualifier: "test_chain".into() }];
+        vec![SavedBonus { kind: 2, bonus: 0, value: -50.0, qualifier: "test_chain".into(), ..Default::default() }];
     assert_eq!(m.construction_cost(RegionId(10), "test_building_level_2"), 240);
     // A slot held by another faction drops the local effect.
     m.world.regions.get_mut(&RegionId(10)).unwrap().slots[0].holder = Some(B);
     assert_eq!(m.construction_cost(RegionId(10), "test_building_level_2"), 300);
-    assert_eq!(m.can_build(RegionId(10), SlotRef::Slot(0), "test_building_level_2"), Ok(300));
+    // That slot itself offers nothing to build (`0x00B4333B`).
+    assert!(matches!(m.can_build(RegionId(10), SlotRef::Slot(0), "test_building_level_2"), Err(CommandError::CannotBuild(_))));
 }
 
 #[test]
@@ -2087,7 +2091,7 @@ fn an_undamaged_building_costs_nothing_to_repair_whatever_the_modifier() {
     use super::effects::SavedBonus;
     let mut m = test_model();
     m.world.faction_details.entry(A).or_default().bonus_base =
-        vec![SavedBonus { kind: 2, bonus: 0, value: 50.0, qualifier: "test_chain".into() }];
+        vec![SavedBonus { kind: 2, bonus: 0, value: 50.0, qualifier: "test_chain".into(), ..Default::default() }];
     assert_eq!(m.repair_cost_uncapped(RegionId(10), SlotRef::Slot(0)), 0);
     m.world.regions.get_mut(&RegionId(10)).unwrap().slots[0].building.as_mut().unwrap().health = 50;
     // 300 × 50 × 0.01 = 150, × 150 × 0.01 = 225.
@@ -2146,6 +2150,47 @@ fn an_ai_repair_is_capped_at_the_treasury_and_free_in_debt() {
     assert_eq!(ai(1000), 850);
     // In debt the capped cost is negative and `0x00B66260` charges nothing.
     assert_eq!(ai(-20), -20);
+}
+
+/// `0x00AA4910` skips a repair where the AI may not shop (`0x00A8B2D0`): at the slot's position, at the
+/// settlement's for the walls.
+#[test]
+fn the_ai_does_not_repair_a_building_under_the_scripted_shroud() {
+    use super::visibility::{CellSet, Shroud, SightGrid};
+    let mut m = test_model();
+    m.turn.humans = vec![B];
+    let slot_at = pos(3, 3);
+    let town = {
+        let r = m.world.regions.get_mut(&RegionId(10)).unwrap();
+        r.slots[0].position = Some(slot_at);
+        r.slots[0].building.as_mut().unwrap().health = 50;
+        let mut walls = r.slots[0].building.clone();
+        walls.as_mut().unwrap().health = 50;
+        r.fortification = walls;
+        r.settlement.position
+    };
+    let grid = SightGrid::centred(64, 64, 64);
+    let cell = |p: (Fixed20, Fixed20)| grid.cell_of((p.0.to_f32(), p.1.to_f32())).unwrap();
+    let mut hidden = CellSet::new(64, 64);
+    let (x, z) = cell(slot_at);
+    hidden.set(x, z);
+    assert_ne!(cell(slot_at), cell(town));
+    m.world.sight_grid = Some(grid);
+    m.world.shrouds.insert(B, Shroud { explored: CellSet::new(64, 64), visible: CellSet::new(64, 64), hidden, active: true });
+    m.set_ai_shopping_shroud(true);
+    let queued = |m: &CampaignModel| m.world.regions[&RegionId(10)].construction.iter().map(|c| c.slot).collect::<Vec<_>>();
+    m.ai_repairs(A);
+    assert_eq!(queued(&m), vec![SlotRef::Walls], "the hidden slot is not repaired");
+    // Hiding the settlement holds the walls back too; the script's off lets the slot through.
+    let mut m2 = m.clone();
+    m2.world.regions.get_mut(&RegionId(10)).unwrap().construction.clear();
+    let (x, z) = cell(town);
+    m2.world.shrouds.get_mut(&B).unwrap().hidden.set(x, z);
+    m2.ai_repairs(A);
+    assert!(queued(&m2).is_empty());
+    m.set_ai_shopping_shroud(false);
+    m.ai_repairs(A);
+    assert_eq!(queued(&m), vec![SlotRef::Walls, SlotRef::Slot(0)]);
 }
 
 #[test]
@@ -2558,14 +2603,32 @@ fn misdeeds_set_the_attitude_factors_from_the_config() {
     let f = &m.world.relationships[&(C, A)].attitudes[14];
     assert_eq!((f.value, f.drift), (-5, 1));
     assert_eq!(m.world.relationships[&(A, B)].attitudes[14].value, 0);
-    // An unseen sabotage of B by A: B blames the faction it likes least other than A (C), and every
-    // faction but A and C gives C the third-party values (B's own victim value overwritten).
+    // An unseen sabotage of B by A: B blames the faction it likes least other than A (C), which gets
+    // the victim values; every faction but the victim B and the blamed C (so the culprit A too) gives
+    // C the third-party values (`0x00B0D800` compares with the victim).
     let mut m = agents_model();
     with_relationships(&mut m, &[((B, A), -10), ((B, C), -100)]);
     m.blamed_misdeed(A, B, Misdeed::Sabotage);
-    assert_eq!(m.world.relationships[&(B, C)].attitudes[18].value, -2);
-    assert_eq!(m.world.relationships[&(A, C)].attitudes[18].value, 0);
+    let f = &m.world.relationships[&(B, C)].attitudes[18];
+    assert_eq!((f.value, f.drift), (-20, 2));
+    let f = &m.world.relationships[&(A, C)].attitudes[18];
+    assert_eq!((f.value, f.drift), (-2, 1));
     assert_eq!(m.world.relationships[&(B, A)].attitudes[18].value, 0);
+}
+
+#[test]
+fn misdeeds_against_the_rebels_change_nothing() {
+    use super::agents::Misdeed;
+    // The rebels (no faction record, `0x008CEEF0`) as the victim: no attitude change, no broadcast.
+    let mut m = agents_model();
+    with_relationships(&mut m, &[]);
+    m.world.factions.get_mut(&B).unwrap().key.clear();
+    m.director.beliefs.insert(C, Default::default());
+    m.detected_misdeed(A, B, Misdeed::Assassination);
+    m.blamed_misdeed(A, B, Misdeed::Assassination);
+    assert_eq!(m.world.relationships[&(B, A)].attitudes[14].value, 0);
+    assert_eq!(m.world.relationships[&(C, A)].attitudes[14].value, 0);
+    assert!(m.director.beliefs.contains_key(&C), "no diplomacy-changed broadcast");
 }
 
 #[test]
@@ -2793,6 +2856,85 @@ fn a_unit_enabled_for_other_governments_is_not_recruitable() {
     assert!(listed(&m));
 }
 
+/// recruit-gates: the two no-entry gates of `0x00B43CA0` / `0x00B77F90`. A unit the scripts restricted
+/// (`0x00A27960`, the model's `UNIT_RESTRICTIONS` list) and a unit whose region unit resource (units #14,
+/// `0x00AA1660`) the region's `RESOURCES_ARRAY` does not name get no entry; the queue step's removal reuses the
+/// list, so a queued one is removed and refunded at the turn start.
+#[test]
+fn restricted_units_and_units_without_their_region_resource_are_not_recruitable() {
+    let mut m = model_with_a_depot();
+    let r10 = RegionId(10);
+    let listed = |m: &CampaignModel, k: &str| m.recruitable_units(r10).iter().any(|e| e.unit_key == k);
+    assert!(listed(&m, "test_guard"));
+    m.world.restricted_units.insert("test_guard".into());
+    assert!(!listed(&m, "test_guard") && listed(&m, "test_recruit"));
+    assert_eq!(
+        m.apply(CampaignCommand::Recruit { region: r10, unit_key: "test_guard".into(), target: None }),
+        Err(CommandError::UnitNotAvailable("test_guard".into()))
+    );
+    m.world.restricted_units.clear();
+    // A unit resource the region does not have: no entry; once the region names it, listed again.
+    let mut rules = (*m.rules).clone();
+    rules.units.get_mut("test_guard").unwrap().unit_resource = Some("made_up_horses".into());
+    m.rules = Arc::new(rules);
+    assert!(!listed(&m, "test_guard") && listed(&m, "test_recruit"));
+    m.world.regions.get_mut(&r10).unwrap().unit_resources = vec!["made_up_iron".into(), "made_up_horses".into()];
+    assert!(listed(&m, "test_guard"));
+    // Queued, then restricted: removed at the turn start and refunded like a cancel.
+    m.apply(CampaignCommand::Recruit { region: r10, unit_key: "test_guard".into(), target: None }).unwrap();
+    let after = m.world.factions[&A].treasury;
+    let cost = m.world.regions[&r10].recruitment_queue[0].cost;
+    m.world.restricted_units.insert("test_guard".into());
+    m.turn.humans = vec![A];
+    m.start_campaign();
+    assert!(m.world.regions[&r10].recruitment_queue.is_empty());
+    assert_eq!(m.world.factions[&A].treasury, after + cost);
+}
+
+/// recruit-gates: `0x00A6AE40` reads the settlement container's `FORTIFICATION_SLOT` (+0x24) like the road
+/// (+0x20), so the walls' building is a recruitable source, flagged when damaged.
+#[test]
+fn the_walls_building_is_a_recruitable_source() {
+    use super::commands::ENTRY_DAMAGED;
+    let mut m = test_model();
+    let r10 = RegionId(10);
+    let mut rules = (*m.rules).clone();
+    let guard = rules.units["test_recruit"].clone();
+    rules.units.insert("test_guard".into(), guard);
+    rules.allow_unit_for_all("test_guard");
+    rules.buildings.insert("test_walls".into(), super::rules::BuildingRules { chain: "test_walls_chain".into(), units_allowed: vec!["test_guard".into()], ..Default::default() });
+    m.rules = Arc::new(rules);
+    let guard = |m: &CampaignModel| m.recruitable_units(r10).into_iter().find(|e| e.unit_key == "test_guard").map(|e| e.flags);
+    assert_eq!(guard(&m), None);
+    m.world.regions.get_mut(&r10).unwrap().fortification = Some(BuildingRef { level_key: "test_walls".into(), health: 100 });
+    assert_eq!(guard(&m), Some(0));
+    m.world.regions.get_mut(&r10).unwrap().fortification.as_mut().unwrap().health = 40;
+    assert_eq!(guard(&m), Some(ENTRY_DAMAGED));
+}
+
+/// recruit-gates: construction runs before the queue step (the original's round-end economy `0x008BC650` →
+/// `0x00AB3DA0` steps it, and a completion rebuilds the recruitable cache, before the turn-start region update
+/// `0x00AAE820` → `0x00B71FB0`). So a building finishing at the round end already allows its units at the next
+/// turn start: an item of its unit is neither removed nor held back, and counts down.
+#[test]
+fn a_building_finished_this_turn_counts_for_the_queue_step() {
+    let mut m = model_with_a_depot();
+    let r10 = RegionId(10);
+    m.turn.humans = vec![A];
+    m.start_campaign();
+    let r = m.world.regions.get_mut(&r10).unwrap();
+    r.slots[1].building = None;
+    r.construction.push(ConstructionItem { slot: SlotRef::Slot(1), level_key: "test_depot".into(), turns_remaining: 1, cost: 0, kind: ConstructionKind::Build, active: true });
+    r.recruitment_queue.push(RecruitmentItem { id: RecruitmentItemId(9001), unit_key: "test_guard".into(), turns_remaining: 3, cost: 400, target: None, target_lost: false });
+    let ev = m.end_turn();
+    let r = &m.world.regions[&r10];
+    assert_eq!(r.slots[1].building.as_ref().map(|b| b.level_key.as_str()), Some("test_depot"));
+    assert_eq!(r.recruitment_queue.iter().map(|i| (i.id.0, i.turns_remaining)).collect::<Vec<_>>(), vec![(9001, 2)]);
+    let done = ev.iter().position(|e| *e == CampaignEvent::BuildingCompleted { region: r10, slot: SlotRef::Slot(1) }).unwrap();
+    let start = ev.iter().position(|e| *e == CampaignEvent::FactionRoundStart { faction: A }).unwrap();
+    assert!(done < start, "construction finishes in the round end, before the next round starts");
+}
+
 /// The queue step holds back an item whose recruitable entry is flagged (`0x00B5AD90`): it neither counts down
 /// nor takes one of the `recruitment_points`, so the items behind it train in its place; it is not removed or
 /// refunded, and counts down again once its building is repaired.
@@ -2966,7 +3108,9 @@ fn ai_capture_occupies_and_liberation_hands_the_region_over() {
     assert_eq!(m.pending_capture.as_ref().unwrap().liberate, Some(C));
     m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Liberate }).unwrap();
     assert_eq!(m.world.regions[&RegionId(11)].owner, C);
-    // The liberation (0x00B58A10) moves no army: the capturer's army stays inside, a foreign garrison.
+    // Pins the current, PROVISIONAL behaviour until the expulsion is modelled: ours moves no army,
+    // so the capturer's army stays inside, a foreign garrison. The original's liberation (0x00B58A10
+    // → 0x00A64AC0, fourth argument 0) expels it from the region (0x008D9DC0).
     assert_eq!(m.world.characters[&CharacterId(100)].garrisoned_in, Some(RegionId(11)));
     assert_eq!(m.world.regions[&RegionId(11)].garrison, Some(ForceId(1000)));
     // Not offered when the relationship forbids returning regions, nor for the capturer itself.
@@ -3033,6 +3177,20 @@ fn war_peace_and_third_parties_change_the_relationships() {
     assert_eq!(m.world.treaty_breaks[&A], 3);
 }
 
+/// A deal's embargo item (`0x00C18800` → `0x00B28DB0`): A embargoes B at C's request. A's embargo
+/// turns towards B are 10, and B resents C, the side that asked for it; B's attitude to A is untouched.
+#[test]
+fn a_deal_embargo_makes_the_embargoed_faction_resent_the_requester() {
+    use super::treaties::{slot, DiplomaticAction as D};
+    let mut m = test_model();
+    m.apply(CampaignCommand::Diplomacy { a: A, b: C, action: D::Embargo(B) }).unwrap();
+    assert_eq!(m.world.relationships[&(A, B)].trade_embargo_turns, 10);
+    let e = m.world.relationships[&(B, C)].attitudes[slot("trade_embargoed")];
+    assert_eq!((e.value, e.drift, e.limit), (-40, -2, 0));
+    let towards_embargoer = m.world.relationships.get(&(B, A)).map_or(0, |r| r.attitudes[slot("trade_embargoed")].value);
+    assert_eq!(towards_embargoer, 0);
+}
+
 #[test]
 fn treaties_and_the_per_turn_update() {
     use super::treaties::{slot, DiplomaticAction as D};
@@ -3062,7 +3220,7 @@ fn treaties_and_the_per_turn_update() {
     act(&mut m, A, B, D::BreakTrade);
     let tb = m.world.relationships[&(B, A)].attitudes[slot("trade_broken")];
     assert_eq!((tb.value, m.world.relationships[&(B, A)].trade_agreement), (-20, false));
-    act(&mut m, A, B, D::Embargo);
+    act(&mut m, A, C, D::Embargo(B));
     assert_eq!(m.world.relationships[&(A, B)].trade_embargo_turns, 10);
     // Military access for 10 turns, cancelled after 2: grievance 60 − 6 × 2.
     act(&mut m, A, B, D::GrantMilitaryAccess(10));
@@ -3102,6 +3260,40 @@ fn treaties_and_the_per_turn_update() {
     // Protectorate: B becomes A's protectorate.
     act(&mut m, B, A, D::BecomeProtectorate);
     assert_eq!((m.world.stance(B, A), m.world.stance(A, B)), (Stance::Protectorate, Stance::Patron));
+}
+
+/// Becoming a protectorate (`0x00B105C0`) settles the new protectorate's own ties first (`0x00B104E0`): a patron
+/// it had loses it with no alliance grievance (`0x00B64B10`), a protectorate it had passes to the new patron; then
+/// its remaining alliances break (`0x00B13840`).
+#[test]
+fn a_new_protectorate_settles_its_old_ties() {
+    use super::treaties::slot;
+    let broken = |m: &CampaignModel, a: FactionId, b: FactionId| m.world.relationships.get(&(a, b)).map_or(0, |r| r.attitudes[slot("alliance_broken")].value);
+    // C was B's protectorate: the tie ends (both neutral, tribute and income cleared, no grievance).
+    let mut m = test_model();
+    m.make_protectorate(C, B).unwrap();
+    m.relationship_mut(C, B).protectorate_tribute = 40;
+    m.relationship_mut(B, C).protectorate_income = 40;
+    m.make_protectorate(C, A).unwrap();
+    assert_eq!((m.world.stance(C, A), m.world.stance(C, B), m.world.stance(B, C)), (Stance::Protectorate, Stance::Neutral, Stance::Neutral));
+    assert_eq!((m.world.relationships[&(C, B)].protectorate_tribute, m.world.relationships[&(B, C)].protectorate_income), (0, 0));
+    assert_eq!((broken(&m, B, C), broken(&m, C, B)), (0, 0), "no alliance grievance");
+    // C was B's patron: B passes to A as its protectorate, and B's tie to C ends.
+    let mut m = test_model();
+    m.make_protectorate(B, C).unwrap();
+    m.make_protectorate(C, A).unwrap();
+    assert_eq!((m.world.stance(C, A), m.world.stance(B, A), m.world.stance(B, C)), (Stance::Protectorate, Stance::Protectorate, Stance::Neutral));
+    assert_eq!((broken(&m, B, C), broken(&m, C, B)), (0, 0));
+    // C was B's ally: the protectorate's alliance breaks (B holds the grievance), the patron's would not.
+    let mut m = test_model();
+    m.form_alliance(C, B).unwrap();
+    m.make_protectorate(C, A).unwrap();
+    assert_eq!((m.world.stance(C, A), m.world.stance(C, B)), (Stance::Protectorate, Stance::Neutral));
+    assert!(broken(&m, B, C) < 0, "B holds the broken alliance against C");
+    let mut m = test_model();
+    m.form_alliance(A, B).unwrap();
+    m.make_protectorate(C, A).unwrap();
+    assert_eq!(m.world.stance(A, B), Stance::Allied, "the patron's alliances stay");
 }
 
 #[test]
@@ -3237,13 +3429,13 @@ fn a_road_is_not_repaired() {
 }
 
 /// A construction item for a slot the region does not have (review: it never progressed, kept the
-/// region `constructing` for good and the AI skipped the region) is dropped at the region's turn,
+/// region `constructing` for good and the AI skipped the region) is dropped at the owner's construction step,
 /// while the items of real slots go on. The drop is reported once (a diagnostic event the app logs, never
 /// sent to the scripts; review: it was silent).
 #[test]
 fn a_construction_item_for_a_missing_slot_is_dropped() {
     let mut m = test_model();
-    let item = |slot| ConstructionItem { slot, level_key: "test_building_level".into(), turns_remaining: 3, cost: 0 };
+    let item = |slot| ConstructionItem { slot, level_key: "test_building_level".into(), turns_remaining: 3, cost: 0, kind: ConstructionKind::Build, active: true };
     m.world.regions.get_mut(&RegionId(10)).unwrap().construction = vec![item(SlotRef::Slot(99)), item(SlotRef::Slot(1))];
     let events = m.end_turn();
     let left: Vec<(SlotRef, u32)> = m.world.regions[&RegionId(10)].construction.iter().map(|c| (c.slot, c.turns_remaining)).collect();
@@ -3283,7 +3475,7 @@ fn the_state_hash_tells_construction_slots_apart() {
     let m = test_model();
     let hash = |slot| {
         let mut m = m.clone();
-        let item = ConstructionItem { slot, level_key: "test_building_level".into(), turns_remaining: 1, cost: 0 };
+        let item = ConstructionItem { slot, level_key: "test_building_level".into(), turns_remaining: 1, cost: 0, kind: ConstructionKind::Build, active: true };
         m.world.regions.get_mut(&RegionId(10)).unwrap().construction = vec![item];
         m.state_hash()
     };
@@ -3295,71 +3487,60 @@ fn the_state_hash_tells_construction_slots_apart() {
     let mut walled = m.clone();
     walled.world.regions.get_mut(&RegionId(10)).unwrap().fortification = Some(BuildingRef { level_key: "test_building_level".into(), health: 100 });
     assert_ne!(walled.state_hash(), m.state_hash());
+    // So does the item's active byte (review: it was left out of the hash).
+    let active = |on| {
+        let mut m = m.clone();
+        let item = ConstructionItem { slot: SlotRef::Walls, level_key: "test_building_level".into(), turns_remaining: 1, cost: 0, kind: ConstructionKind::Build, active: on };
+        m.world.regions.get_mut(&RegionId(10)).unwrap().construction = vec![item];
+        m.state_hash()
+    };
+    assert_ne!(active(true), active(false));
 }
 
-/// `DemolishBuilding` / `DemolishFort` (exe queue ids `0x84` / `0x89`) and the
-/// `CanDemolishBuilding` guard (`0x009B7920`): a standing building of the owner's, nothing queued
-/// in the slot. No refund (PROVISIONAL).
+/// construction2: `DemolishBuilding` / `DemolishFort` (exe queue ids `0x84` / `0x89`) queue a demolition
+/// (`0x00B286C0` → `0x00AE6ED0`: one turn, cost 0), after cancelling the slot's item with its refund; the guard
+/// (`0x00B16540`) wants a standing building in a slot the owner holds, not the road. At the round end the
+/// demolition (`0x00B781B0`) empties the slot and stops its school's research.
 #[test]
 fn buildings_and_forts_are_demolished() {
     let mut m = test_model();
     m.turn = TurnState::in_turn_of(A, vec![A]);
-    // Region 10 slot 0 holds test_building_level: demolishing removes it with no refund.
-    assert!(m.can_demolish(RegionId(10), SlotRef::Slot(0)));
-    let t = m.world.factions[&A].treasury;
-    assert_eq!(m.apply(CampaignCommand::DemolishBuilding { region: RegionId(10), slot: SlotRef::Slot(0) }).unwrap(), Vec::new());
-    assert!(m.world.regions[&RegionId(10)].slots[0].building.is_none());
-    assert_eq!(m.world.factions[&A].treasury, t);
-    // Nothing left to demolish there; B's region refuses on A's turn.
-    assert!(!m.can_demolish(RegionId(10), SlotRef::Slot(0)));
-    assert_eq!(
-        m.apply(CampaignCommand::DemolishBuilding { region: RegionId(10), slot: SlotRef::Slot(0) }),
-        Err(CommandError::CannotBuild("nothing to demolish in that slot".into()))
-    );
-    assert_eq!(
-        m.apply(CampaignCommand::DemolishBuilding { region: RegionId(11), slot: SlotRef::Slot(0) }),
-        Err(CommandError::NotYourTurn(B))
-    );
-    assert_eq!(
-        m.apply(CampaignCommand::DemolishBuilding { region: RegionId(99), slot: SlotRef::Slot(0) }),
-        Err(CommandError::UnknownRegion(RegionId(99)))
-    );
-    // A slot with queued work refuses while it is busy: damage slot 0, queue its repair,
-    // then demolish is blocked until the repair item is cancelled.
-    m.world.regions.get_mut(&RegionId(10)).unwrap().slots[0].building =
-        Some(BuildingRef { level_key: "test_building_level".into(), health: 40 });
-    m.world.factions.get_mut(&A).unwrap().treasury = 5000;
-    m.apply(CampaignCommand::RepairBuilding { region: RegionId(10), slot: SlotRef::Slot(0) }).unwrap();
-    assert!(!m.can_demolish(RegionId(10), SlotRef::Slot(0)), "being repaired");
-    assert_eq!(
-        m.apply(CampaignCommand::DemolishBuilding { region: RegionId(10), slot: SlotRef::Slot(0) }),
-        Err(CommandError::CannotBuild("nothing to demolish in that slot".into()))
-    );
-    m.apply(CampaignCommand::CancelConstruction { region: RegionId(10), slot: SlotRef::Slot(0) }).unwrap();
-    assert!(m.can_demolish(RegionId(10), SlotRef::Slot(0)));
-    // Fort path (exe `DemolishFort`): build walls, finish them, demolish via SlotRef::Walls.
-    let mut rules = (*m.rules).clone();
-    rules.buildings.insert("test_walls".into(), BuildingRules { chain: "test_fort".into(), level: 0, cost: 1000, turns: 2, ..Default::default() });
-    rules.chain_slots.insert("test_fort".into(), vec!["settlement_fortification".into()]);
-    m.rules = Arc::new(rules);
-    m.turn = TurnState::in_turn_of(A, vec![A]);
-    m.world.factions.get_mut(&A).unwrap().treasury = 5000;
-    m.apply(CampaignCommand::ConstructBuilding { region: RegionId(10), slot: SlotRef::Walls, level_key: "test_walls".into() }).unwrap();
-    for _ in 0..8 {
-        if m.world.regions[&RegionId(10)].fortification.is_some() {
-            break;
-        }
-        m.end_turn();
+    let r10 = RegionId(10);
+    {
+        let r = m.world.regions.get_mut(&r10).unwrap();
+        r.slots[0].building.as_mut().unwrap().health = 40;
+        r.slots[0].id = 77;
+        r.fortification = Some(BuildingRef { level_key: "test_building_level".into(), health: 100 });
+        r.road = Some(BuildingRef { level_key: "test_building_level".into(), health: 100 });
     }
-    assert_eq!(m.world.regions[&RegionId(10)].fortification.as_ref().map(|b| b.level_key.as_str()), Some("test_walls"));
-    m.turn = TurnState::in_turn_of(A, vec![A]);
-    m.turn.humans = vec![A];
-    let t = m.world.factions[&A].treasury;
-    assert!(m.can_demolish(RegionId(10), SlotRef::Walls));
-    m.apply(CampaignCommand::DemolishBuilding { region: RegionId(10), slot: SlotRef::Walls }).unwrap();
-    assert!(m.world.regions[&RegionId(10)].fortification.is_none());
-    assert_eq!(m.world.factions[&A].treasury, t, "PROVISIONAL: no refund");
-    assert!(!m.can_demolish(RegionId(10), SlotRef::Walls));
+    m.world.faction_details.entry(A).or_default().research.insert("made_up_tech".into(), super::details::TechResearch { progress: 5.0, researcher: 77, traded: 0 });
+    m.world.factions.get_mut(&A).unwrap().treasury = 5000;
+    // A repair is queued and paid; the demolition cancels it with its refund, then queues itself.
+    m.apply(CampaignCommand::RepairBuilding { region: r10, slot: SlotRef::Slot(0) }).unwrap();
+    assert!(m.world.factions[&A].treasury < 5000);
+    assert!(m.can_demolish(r10, SlotRef::Slot(0)), "an item in the slot does not block it");
+    assert_eq!(m.apply(CampaignCommand::DemolishBuilding { region: r10, slot: SlotRef::Slot(0) }).unwrap(), Vec::new());
+    assert_eq!(m.world.factions[&A].treasury, 5000);
+    m.apply(CampaignCommand::DemolishBuilding { region: r10, slot: SlotRef::Walls }).unwrap();
+    let demolish = |slot| ConstructionItem { slot, level_key: String::new(), turns_remaining: 1, cost: 0, kind: ConstructionKind::Demolish, active: true };
+    assert_eq!(m.world.regions[&r10].construction, vec![demolish(SlotRef::Slot(0)), demolish(SlotRef::Walls)]);
+    assert!(m.world.regions[&r10].slots[0].building.is_some(), "queued, not done");
+    // The road, an empty slot, another faction's region, an unknown region.
+    assert!(!m.can_demolish(r10, SlotRef::Road));
+    m.world.regions.get_mut(&r10).unwrap().slots[1].building = None;
+    assert_eq!(
+        m.apply(CampaignCommand::DemolishBuilding { region: r10, slot: SlotRef::Slot(1) }),
+        Err(CommandError::CannotBuild("nothing to demolish in that slot".into()))
+    );
+    assert_eq!(m.apply(CampaignCommand::DemolishBuilding { region: RegionId(11), slot: SlotRef::Slot(0) }), Err(CommandError::NotYourTurn(B)));
+    assert_eq!(m.apply(CampaignCommand::DemolishBuilding { region: RegionId(99), slot: SlotRef::Slot(0) }), Err(CommandError::UnknownRegion(RegionId(99))));
+    // The round end: both slots empty, the school's research stopped with its progress kept.
+    let events = m.end_turn();
+    let r = &m.world.regions[&r10];
+    assert!(r.slots[0].building.is_none() && r.fortification.is_none() && r.construction.is_empty());
+    assert!(r.road.is_some());
+    assert_eq!(m.world.faction_details[&A].research["made_up_tech"], super::details::TechResearch { progress: 5.0, researcher: 0, traded: 0 });
+    assert!(!events.iter().any(|e| matches!(e, CampaignEvent::BuildingCompleted { .. })));
 }
 
 /// The walls card's options: the land option rule (`0x00B43300`) on the fortification slot, an
@@ -3529,6 +3710,46 @@ fn spa_looting_turns_the_region_against_the_looter() {
     m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Loot }).unwrap();
     let rel = &m.world.regions[&RegionId(11)].religions;
     assert!((rel[0].1 - 0.1).abs() < 1e-6 && (rel[1].1 - 0.9).abs() < 1e-6, "{rel:?}");
+}
+
+/// Peninsular loot resentment (`0x00B541E0` → `0x00B544F0`): looting a region whose rebel key names a homeland faction
+/// adds −50 to that faction's `abandoned_ally_in_war` factor towards the looter, unless the two are at war, the looter
+/// is exempt or is the homeland itself; occupying never does.
+#[test]
+fn looting_a_homeland_region_angers_its_faction() {
+    use super::capture::CaptureChoice;
+    use super::features::LootResentment;
+    use super::treaties::slot;
+    let run = |homeland: &str, exempt: Option<&str>, c_at_war: bool, choice: CaptureChoice| {
+        let mut m = capture_model(vec![A]);
+        let mut rules = (*m.rules).clone();
+        rules.features.loot_resentment = Some(LootResentment {
+            homelands: vec![("other_rebels".into(), "test_faction_b".into()), ("homeland_rebels".into(), homeland.into())],
+            exempt_looter: exempt.map(str::to_owned),
+            factor: "abandoned_ally_in_war".into(),
+            value: -50,
+        });
+        m.rules = Arc::new(rules);
+        m.world.region_rebel_factions.insert(RegionId(11), "homeland_rebels".into());
+        if c_at_war {
+            m.world.set_stance(C, A, Stance::War).unwrap();
+        }
+        m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+        m.apply(CampaignCommand::ChooseCapture { choice }).unwrap();
+        m.world.relationships.get(&(C, A)).map(|r| r.attitudes[slot("abandoned_ally_in_war")])
+    };
+    let f = run("test_faction_c", Some("test_faction_b"), false, CaptureChoice::Loot).expect("C's record towards A");
+    // The event's drift 2 and limit 0 (`abandoned_ally_in_war`, event 0).
+    assert_eq!((f.value, f.drift, f.limit, f.limited), (-50, 2, 0, true));
+    for (homeland, exempt, war, choice, why) in [
+        ("test_faction_c", Some("test_faction_a"), false, CaptureChoice::Loot, "an exempt looter"),
+        ("test_faction_c", None, true, CaptureChoice::Loot, "at war"),
+        ("test_faction_c", None, false, CaptureChoice::Occupy, "an occupation"),
+        ("test_faction_a", None, false, CaptureChoice::Loot, "the looter's own homeland"),
+    ] {
+        let v = run(homeland, exempt, war, choice).map_or(0, |f| f.value);
+        assert_eq!(v, 0, "{why} angers no one");
+    }
 }
 
 /// The looting shift is the campaign's feature, not its key: another campaign names its own two alignments, and a
@@ -3789,7 +4010,7 @@ fn promotion_in_the_field_makes_the_colonel_a_general_and_fires_character_promot
     m.start_campaign();
     // Without `promote_general_in_field` the faction cannot promote.
     assert!(m.apply(CampaignCommand::PromoteUnit { force: ForceId(1002), unit: 0 }).is_err());
-    m.world.faction_details.get_mut(&A).unwrap().bonus_base = vec![SavedBonus { kind: 1, bonus: 64, value: 1.0, qualifier: String::new() }];
+    m.world.faction_details.get_mut(&A).unwrap().bonus_base = vec![SavedBonus { kind: 1, bonus: 64, value: 1.0, qualifier: String::new(), ..Default::default() }];
     // `bonus_with_difficulty` (faction +0x8D4) wins over `bonus_base` when it is not empty.
     m.world.faction_details.get_mut(&A).unwrap().bonus_with_difficulty = Vec::new();
     // The next number of a European General deck (0 young, 1 old): the turn start's pool
@@ -3815,7 +4036,7 @@ fn promotion_in_the_field_makes_the_colonel_a_general_and_fires_character_promot
     ship.character = Some(CharacterId(109));
     m.world.forces.insert(ForceId(1005), MilitaryForce { id: ForceId(1005), faction: A, commander: Some(CharacterId(109)), units: vec![ship], is_navy: true });
     m.world.faction_details.get_mut(&A).unwrap().bonus_base =
-        vec![SavedBonus { kind: 1, bonus: 64, value: 1.0, qualifier: String::new() }, SavedBonus { kind: 1, bonus: 65, value: 1.0, qualifier: String::new() }];
+        vec![SavedBonus { kind: 1, bonus: 64, value: 1.0, qualifier: String::new(), ..Default::default() }, SavedBonus { kind: 1, bonus: 65, value: 1.0, qualifier: String::new(), ..Default::default() }];
     m.world.faction_details.get_mut(&A).unwrap().bonus_with_difficulty = Vec::new();
     assert_eq!(m.promotion_cost(ForceId(1005), 0), Some(0));
     let old = next(&m, 1);
@@ -3865,7 +4086,7 @@ fn the_interface_gates_and_prices_the_field_promotion() {
     m.turn.humans = vec![A];
     m.start_campaign();
     assert!(!m.can_promote_unit(ForceId(1002), 0), "no promote_general_in_field yet");
-    m.world.faction_details.get_mut(&A).unwrap().bonus_base = vec![SavedBonus { kind: 1, bonus: 64, value: 1.0, qualifier: String::new() }];
+    m.world.faction_details.get_mut(&A).unwrap().bonus_base = vec![SavedBonus { kind: 1, bonus: 64, value: 1.0, qualifier: String::new(), ..Default::default() }];
     assert!(m.can_promote_unit(ForceId(1002), 0));
     assert!(m.can_promote_unit(ForceId(1002), 1), "a unit without a character is promoted too");
     // The price the interface shows is the price the promotion charges (PROVISIONAL value).
@@ -3964,7 +4185,7 @@ fn the_most_commanders_a_faction_may_have_add_the_cap_bonus_up_to_the_ceiling() 
     let mut m = pool_model();
     assert_eq!(m.commanders_max(A, PoolKind::General), 4);
     assert_eq!(m.commanders_max(A, PoolKind::Admiral), 3);
-    let cap = |v: f32, agent: &str| SavedBonus { kind: 0, bonus: 2, value: v, qualifier: agent.into() };
+    let cap = |v: f32, agent: &str| SavedBonus { kind: 0, bonus: 2, value: v, qualifier: agent.into(), ..Default::default() };
     m.world.faction_details.entry(A).or_default().bonus_base = vec![cap(2.0, "General")];
     assert_eq!(m.commanders_max(A, PoolKind::General), 6, "the majors' agent_cap_general +2");
     assert_eq!(m.commanders_max(A, PoolKind::Admiral), 3, "qualified by the agent key");
@@ -4000,6 +4221,11 @@ fn a_pool_row_flags_the_maximum_the_purse_and_the_room() {
     // Bit 0: as many in service as allowed.
     Arc::make_mut(&mut m.rules).agent_caps.insert("General".into(), (0, 0));
     assert_eq!(m.commander_row_flags(g, ForceId(1002)), Some(ROW_AT_MAXIMUM));
+    // The panel counts the pool once and passes the counts in (`commander_row_flags_with`): same flags.
+    let (in_service, max) = (m.commanders_in_service(A, PoolKind::General), m.commanders_max(A, PoolKind::General));
+    assert_eq!(max, 0);
+    assert_eq!(m.commander_row_flags_with(g, ForceId(1002), in_service, max), Some(ROW_AT_MAXIMUM));
+    assert_eq!(m.commander_row_flags_with(g, ForceId(1002), 0, 1), Some(0));
     Arc::make_mut(&mut m.rules).agent_caps.insert("General".into(), (4, 0));
     // Bit 1: the treasury cannot pay.
     m.world.factions.get_mut(&A).unwrap().treasury = 0;
@@ -4603,7 +4829,7 @@ fn town_wealth_growth_breaks_down_by_factor_and_predicts_constructions() {
     assert_eq!(now.growth, super::economy::recompute_region(&m, &reg).1);
     // Predicted: the level under construction in the slot's place (the education building upgraded to roads).
     let r = m.world.regions.get_mut(&RegionId(10)).unwrap();
-    r.construction.push(ConstructionItem { slot: SlotRef::Slot(0), level_key: "test_building_level_2".into(), turns_remaining: 2, cost: 600 });
+    r.construction.push(ConstructionItem { slot: SlotRef::Slot(0), level_key: "test_building_level_2".into(), turns_remaining: 2, cost: 600, kind: ConstructionKind::Build, active: true });
     let reg = r.clone();
     let next = region_wealth(&m, None, &reg, true);
     assert_eq!((next.factors[0], next.factors[4]), (0, 30), "{next:?}");
@@ -4684,8 +4910,10 @@ fn deal_records_follow_the_propose_executors() {
 
 /// Accepting the deal (`0x00C114B0`): the regions record's demanded regions go to the proposer and
 /// the offered ones to the recipient (`0x00C18BF0` → `0x00B449F0`): queues cleared, research at
-/// the region's schools stopped; no army moves (CONFIRMED chain): the old owner's army stays
-/// inside, still selectable, and the new owner's army entering does not merge into it.
+/// the region's schools stopped. The army part pins the current, PROVISIONAL behaviour until the
+/// expulsion is modelled: ours moves no army, so the old owner's army stays inside, still
+/// selectable, and the new owner's army entering does not merge into it; the original's owner
+/// change (`0x00A64AC0`, fourth argument 0) expels it (`0x008D9DC0`).
 #[test]
 fn accepted_regions_change_hands_and_keep_the_old_garrison() {
     use super::details::TechResearch;
@@ -4803,6 +5031,117 @@ fn technology_deal_value_reads_the_model() {
     let mut e = DealEvaluation::default();
     e.add(5, v, 0.0, 1.0);
     assert!(!e.fair());
+}
+
+/// The payment record (`CCQ_DIPLOMACY_PROPOSE_PAYMENT`, executor `0x00933AD0`): an offered one-off
+/// payment is capped at the proposer's treasury when it is proposed (`0x00C4AB20`), not again when the
+/// deal is accepted; the applier (`0x00C18A70`) has the recipient pay a demand and the proposer an
+/// offer, once over 1 turn, else as a regular payment.
+#[test]
+fn a_proposed_payment_is_capped_when_proposed_and_paid_on_accept() {
+    use super::details::RegularPayment;
+    use super::negotiation::DealPayment;
+    let mut m = test_model();
+    m.turn.humans = vec![A, B];
+    let propose = |m: &mut CampaignModel, amount, turns| m.apply(CampaignCommand::ProposePayment { clear: false, amount, turns }).unwrap();
+    let treasuries = |m: &CampaignModel| (m.world.factions[&A].treasury, m.world.factions[&B].treasury);
+    assert_eq!(m.apply(CampaignCommand::ProposePayment { clear: false, amount: 10, turns: 1 }), Err(CommandError::NoNegotiation));
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    // A offers 5000 once with 1000: the record holds −1000.
+    propose(&mut m, -5000, 1);
+    assert_eq!(m.negotiations.current.as_ref().unwrap().payment, DealPayment { amount: -1000, turns: 1 });
+    // The treasury falls before the accept: the stored amount is paid as it is.
+    m.world.factions.get_mut(&A).unwrap().treasury = 200;
+    m.apply(CampaignCommand::AcceptDeal).unwrap();
+    assert_eq!(treasuries(&m), (-800, 2000));
+    // A demands 300 once: B pays A.
+    propose(&mut m, 300, 1);
+    m.apply(CampaignCommand::AcceptDeal).unwrap();
+    assert_eq!(treasuries(&m), (-500, 1700));
+    // A demands 50 a turn for 5 turns: a regular payment of B to A; nothing moves now.
+    propose(&mut m, 50, 5);
+    m.apply(CampaignCommand::AcceptDeal).unwrap();
+    assert_eq!(treasuries(&m), (-500, 1700));
+    assert_eq!(m.world.relationships[&(B, A)].payments, vec![RegularPayment { amount: 50, turns: 5 }]);
+    // Clearing empties the record; i32::MIN is refused.
+    m.apply(CampaignCommand::ProposePayment { clear: true, amount: 0, turns: 0 }).unwrap();
+    assert!(!m.negotiations.current.as_ref().unwrap().payment.has_items());
+    propose(&mut m, 70, 1);
+    m.apply(CampaignCommand::ClearNegotiation).unwrap();
+    assert!(!m.negotiations.current.as_ref().unwrap().payment.has_items());
+    assert!(m.apply(CampaignCommand::ProposePayment { clear: false, amount: i32::MIN, turns: 1 }).is_err());
+}
+
+/// A deal whose payment fails is not applied at all: no region moves, no money, and the deal stays
+/// unapplied (a later accept of a valid deal still applies it).
+#[test]
+fn a_deal_with_a_failing_payment_applies_nothing() {
+    use super::research::state;
+    use super::rules::TechRules;
+    let mut m = test_model();
+    m.turn.humans = vec![A, B];
+    let mut rules = (*m.rules).clone();
+    rules.technologies.insert("mil1".into(), TechRules { cost: 40, building_level: "test_building_level".into(), requires: vec![] });
+    m.rules = Arc::new(rules);
+    m.world.faction_details.entry(A).or_default().technologies = vec![("mil1".into(), state::AVAILABLE)];
+    let owner = m.world.regions[&RegionId(11)].owner;
+    assert_ne!(owner, A);
+    let treasury = m.world.factions[&A].treasury;
+    // A negotiation of A with itself: the payment's faction pair is refused.
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: A }).unwrap();
+    m.apply(CampaignCommand::ProposeRegions { clear: false, demanded: vec![RegionId(11)], offered: vec![] }).unwrap();
+    m.apply(CampaignCommand::ProposeTechnologies { clear: false, demanded: vec![], offered: vec!["mil1".into()] }).unwrap();
+    m.apply(CampaignCommand::ProposePayment { clear: false, amount: 300, turns: 1 }).unwrap();
+    assert_eq!(m.apply(CampaignCommand::AcceptDeal), Err(CommandError::SameFaction(A)));
+    assert_eq!(m.world.regions[&RegionId(11)].owner, owner);
+    assert_eq!(m.tech_state(A, "mil1"), Some(state::AVAILABLE));
+    assert!(!m.world.faction_details[&A].research.contains_key("mil1"));
+    assert_eq!(m.world.factions[&A].treasury, treasury);
+    assert!(!m.negotiations.current.as_ref().unwrap().applied);
+    // Without the payment the same regions and technology records apply.
+    m.apply(CampaignCommand::ProposePayment { clear: true, amount: 0, turns: 0 }).unwrap();
+    m.apply(CampaignCommand::AcceptDeal).unwrap();
+    assert_eq!(m.world.regions[&RegionId(11)].owner, A);
+    assert_eq!(m.tech_state(A, "mil1"), Some(state::RESEARCHED));
+    assert_eq!(m.world.faction_details[&A].research["mil1"].traded, 1);
+}
+
+/// The payment record's value for the AI recipient (`0x00C12EE0`) and its part in the answer
+/// (`0x00AA5ED0`: weight 0, slot 2 is the payment the accept tests read).
+#[test]
+fn the_ai_values_a_payment_as_the_exe() {
+    let mut m = test_model();
+    m.turn.humans = vec![A];
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    let value = |m: &mut CampaignModel, amount, turns| {
+        m.apply(CampaignCommand::ProposePayment { clear: false, amount, turns }).unwrap();
+        let v = m.payment_deal_value(m.negotiations.current.as_ref().unwrap());
+        (v.gain, v.cost, v.given)
+    };
+    // Once: the AI gains an offer, gives a demand.
+    assert_eq!(value(&mut m, -700, 1), (700, 0, 0));
+    assert_eq!(value(&mut m, 400, 1), (0, 400, 400));
+    // Regular: worth (0.9^t − 1) × −10 payments, at most 0.8 × the payer's treasury and future net
+    // income. B (1000, no history) pays 105 for 2 turns: 1.9 × 105 = 199.5 → 199; 1000 for 3 turns:
+    // 2710 capped at 800; given = amount × turns.
+    assert_eq!(value(&mut m, 105, 2), (0, 199, 210));
+    assert_eq!(value(&mut m, 1000, 3), (0, 800, 3000));
+    // An offer is capped by the proposer's means: A has 0 and a net income of 60 a turn.
+    m.world.factions.get_mut(&A).unwrap().treasury = 0;
+    let mut record = [0; 25];
+    (record[5], record[18]) = (100, 40);
+    m.world.economy_history.insert(A, vec![record]);
+    assert_eq!(value(&mut m, -1000, 3), (144, 0, 0));
+    // A one-off offer from an empty treasury is capped to nothing: no record, no AI answer.
+    value(&mut m, -100, 1);
+    assert_eq!(m.ai_accepts_deal(), None);
+    // The answer: an offered gift is accepted; a demand for nothing is not.
+    m.world.factions.get_mut(&A).unwrap().treasury = 1000;
+    value(&mut m, -100, 1);
+    assert_eq!(m.ai_accepts_deal(), Some(true));
+    value(&mut m, 500, 1);
+    assert_eq!(m.ai_accepts_deal(), Some(false));
+    assert!(m.apply(CampaignCommand::AcceptDeal).is_err());
 }
 
 /// The technology goals of the AI's two goal lists (`0x008F4F10`): the giver has it researched and
@@ -5219,4 +5558,486 @@ fn a_factions_unit_set_is_its_grouping_and_rows_minus_one_copy_per_denial() {
     assert!(rules.faction_may_recruit("f", "own"));
     assert!(!rules.faction_may_recruit("f", "unnamed"));
     assert!(!rules.faction_may_recruit("other", "own"));
+}
+
+/// recruit-followups: the road and the walls are slots like the others (`0x00A4DCB0` builds them with the
+/// same constructor, holder and all), merged after the ordinary slots by `0x00A6AE40` through `0x00A62380`:
+/// their effects count and their units are listed only while the region's owner holds them, a held-by-other
+/// one flagging its units occupied (`0x00B43CA0`). An owner change passes the old owner's holds to the new
+/// one, theirs included.
+#[test]
+fn the_road_and_walls_count_only_while_the_owner_holds_them() {
+    use super::commands::{RecruitableUnit, ENTRY_OCCUPIED};
+    use super::world::SlotRef;
+    let mut m = model_with_a_depot();
+    let r10 = RegionId(10);
+    let entry = |k: &str, flags: u32| RecruitableUnit { unit_key: k.into(), flags };
+    let walls = BuildingRef { level_key: "test_depot".into(), health: 100 };
+    {
+        let r = m.world.regions.get_mut(&r10).unwrap();
+        r.slots[1].building = None;
+        r.fortification = Some(walls.clone());
+        r.road = Some(BuildingRef { level_key: "test_road".into(), health: 100 });
+    }
+    let effect_keys = |m: &CampaignModel| m.world.regions[&r10].effect_buildings().map(|b| b.level_key.clone()).collect::<Vec<_>>();
+    // Slots first, then the road, then the walls (the order `0x00A6AE40` merges them in).
+    assert_eq!(effect_keys(&m), ["test_building_level", "test_road", "test_depot"]);
+    assert_eq!(m.recruitable_units(r10), vec![entry("test_guard", 0), entry("test_recruit", 0), entry("test_unit", 0)]);
+    // B holds the walls and the road: neither counts, and the walls' own unit is flagged.
+    {
+        let r = m.world.regions.get_mut(&r10).unwrap();
+        (r.road_holder, r.fortification_holder) = (Some(B), Some(B));
+        assert!(!r.slot_held(SlotRef::Road) && !r.slot_held(SlotRef::Walls));
+    }
+    assert_eq!(effect_keys(&m), ["test_building_level"]);
+    assert_eq!(m.recruitable_units(r10), vec![entry("test_guard", ENTRY_OCCUPIED), entry("test_recruit", 0), entry("test_unit", 0)]);
+    // Holding one's own road and walls is no occupation.
+    {
+        let r = m.world.regions.get_mut(&r10).unwrap();
+        (r.road_holder, r.fortification_holder) = (Some(A), Some(A));
+    }
+    assert_eq!(effect_keys(&m), ["test_building_level", "test_road", "test_depot"]);
+    // The region passes to C: the road and the walls always pass to the new owner, B's hold too (`0x00B1B300`).
+    m.world.regions.get_mut(&r10).unwrap().fortification_holder = Some(B);
+    assert!(m.transfer_region(r10, C));
+    let r = &m.world.regions[&r10];
+    assert_eq!((r.road_holder, r.fortification_holder), (None, None));
+    assert!(r.slot_held(SlotRef::Road) && r.slot_held(SlotRef::Walls));
+}
+
+/// recruit-followups: walls another faction holds (`0x00A91FC0`) can be neither repaired (`0x00B1A6B0`) nor
+/// demolished (`0x009B7920`), and a construction item in the road or the walls stands still while another
+/// faction holds that slot (`0x00B78800` steps an item only in a slot the region's owner holds). The owner's
+/// own hold changes nothing.
+#[test]
+fn walls_and_road_held_by_another_faction_are_not_repaired_demolished_or_built() {
+    let mut m = test_model();
+    let r10 = RegionId(10);
+    {
+        let r = m.world.regions.get_mut(&r10).unwrap();
+        r.fortification = Some(BuildingRef { level_key: "test_building_level".into(), health: 50 });
+        r.fortification_holder = Some(B);
+    }
+    assert!(!m.can_repair(r10, SlotRef::Walls) && !m.can_demolish(r10, SlotRef::Walls));
+    m.world.regions.get_mut(&r10).unwrap().fortification_holder = Some(A);
+    assert!(m.can_repair(r10, SlotRef::Walls) && m.can_demolish(r10, SlotRef::Walls));
+
+    // Builds, not repairs (a repair, an item of the standing level, steps whoever holds the slot).
+    let item = |slot| ConstructionItem { slot, level_key: "test_building_level_2".into(), turns_remaining: 3, cost: 0, kind: ConstructionKind::Build, active: true };
+    {
+        let r = m.world.regions.get_mut(&r10).unwrap();
+        (r.road_holder, r.fortification_holder) = (Some(B), Some(B));
+        r.construction = vec![item(SlotRef::Road), item(SlotRef::Walls), item(SlotRef::Slot(1))];
+    }
+    let left = |m: &CampaignModel| m.world.regions[&r10].construction.iter().map(|c| (c.slot, c.turns_remaining)).collect::<Vec<_>>();
+    m.end_turn();
+    assert_eq!(left(&m), vec![(SlotRef::Road, 3), (SlotRef::Walls, 3), (SlotRef::Slot(1), 2)]);
+    // Back in the owner's hands (its own faction named as holder): both advance again.
+    {
+        let r = m.world.regions.get_mut(&r10).unwrap();
+        (r.road_holder, r.fortification_holder) = (Some(A), None);
+    }
+    m.end_turn();
+    assert_eq!(left(&m), vec![(SlotRef::Road, 2), (SlotRef::Walls, 2), (SlotRef::Slot(1), 1)]);
+}
+
+/// construction: a repair (item type 2) counts down whoever holds its slot,
+/// while a build in a slot another faction holds stands still (`0x00B78800` steps item types 2 and 3 in any
+/// slot, the others only when the region's owner holds it). Both run at the round end (`0x008BC650` →
+/// `0x00AB3DA0`), not at the owner's turn start.
+#[test]
+fn a_repair_counts_down_in_a_slot_another_faction_holds() {
+    let mut m = test_model();
+    let r10 = RegionId(10);
+    m.turn.humans = vec![A];
+    m.start_campaign();
+    {
+        let r = m.world.regions.get_mut(&r10).unwrap();
+        r.slots[0].building.as_mut().unwrap().health = 50;
+        (r.slots[0].holder, r.slots[1].holder) = (Some(B), Some(B));
+        r.construction = vec![
+            ConstructionItem { slot: SlotRef::Slot(0), level_key: "test_building_level".into(), turns_remaining: 2, cost: 0, kind: ConstructionKind::Repair { health_per_turn: 25, turns: 2 }, active: true },
+            ConstructionItem { slot: SlotRef::Slot(1), level_key: "test_building_level".into(), turns_remaining: 2, cost: 0, kind: ConstructionKind::Build, active: true },
+        ];
+    }
+    let left = |m: &CampaignModel| m.world.regions[&r10].construction.iter().map(|c| (c.slot, c.turns_remaining)).collect::<Vec<_>>();
+    // Nothing moves before the round end: A's turn end and C's turn pass first (turn order B, A, C).
+    m.begin_end_turn();
+    while m.turn.queue.front().is_some_and(|s| !matches!(s, super::turn::TurnStep::Economy(_))) {
+        m.step();
+    }
+    assert_eq!(left(&m), vec![(SlotRef::Slot(0), 2), (SlotRef::Slot(1), 2)]);
+    // A step that does not finish adds the repair's step to the health (`0x00B78490`), and `0x00B452A0` posts
+    // `CampaignBuildingDamaged` while it is below 100.
+    let ev = m.run_pending();
+    assert_eq!(left(&m), vec![(SlotRef::Slot(0), 1), (SlotRef::Slot(1), 2)]);
+    assert_eq!(m.world.regions[&r10].slots[0].building.as_ref().map(|b| b.health), Some(75));
+    assert!(ev.contains(&CampaignEvent::CampaignBuildingDamaged { region: r10, slot: SlotRef::Slot(0) }));
+    // The last step sets 100: no `BuildingCompleted` (only the build steps post it), no damage event.
+    let ev = m.end_turn();
+    assert!(!ev.iter().any(|e| matches!(e, CampaignEvent::BuildingCompleted { .. } | CampaignEvent::CampaignBuildingDamaged { .. })));
+    assert_eq!(m.world.regions[&r10].slots[0].building.as_ref().map(|b| b.health), Some(100));
+    assert_eq!(left(&m), vec![(SlotRef::Slot(1), 2)]);
+}
+
+/// construction: the rebels' regions build nothing (`0x008BC650` skips the construction step for a faction with
+/// no record, `0x008CEEF0`), while every other faction's items count down at the round end.
+#[test]
+fn the_rebels_construction_does_not_count_down() {
+    let mut m = test_model();
+    m.world.factions.get_mut(&C).unwrap().key = String::new();
+    assert!(m.is_rebel_faction(C));
+    m.world.regions.get_mut(&RegionId(12)).unwrap().owner = C;
+    let item = |slot| ConstructionItem { slot, level_key: "test_building_level_2".into(), turns_remaining: 3, cost: 0, kind: ConstructionKind::Build, active: true };
+    m.world.regions.get_mut(&RegionId(12)).unwrap().construction = vec![item(SlotRef::Walls)];
+    m.world.regions.get_mut(&RegionId(10)).unwrap().construction = vec![item(SlotRef::Walls)];
+    m.end_turn();
+    assert_eq!(m.world.regions[&RegionId(12)].construction[0].turns_remaining, 3);
+    assert_eq!(m.world.regions[&RegionId(10)].construction[0].turns_remaining, 2);
+}
+
+/// construction2: an inactive item (`ConstructionItem::active` false, ESF #1, +0x8) is not stepped
+/// (`0x00B78800` tests the byte at `0x00B7880E`): it keeps its turns and its result never stands, while an
+/// active item in the same region counts down and finishes.
+#[test]
+fn an_inactive_construction_item_is_not_stepped() {
+    let mut m = test_model();
+    let r10 = RegionId(10);
+    let item = |slot, kind, active| ConstructionItem { slot, level_key: "test_building_level_2".into(), turns_remaining: 1, cost: 0, kind, active };
+    {
+        let r = m.world.regions.get_mut(&r10).unwrap();
+        r.slots[0].building.as_mut().unwrap().health = 50;
+        r.construction = vec![
+            item(SlotRef::Slot(0), ConstructionKind::Repair { health_per_turn: 25, turns: 2 }, false),
+            item(SlotRef::Slot(1), ConstructionKind::Build, false),
+            item(SlotRef::Walls, ConstructionKind::Build, true),
+        ];
+    }
+    let slot1 = m.world.regions[&r10].slots[1].building.clone();
+    let ev = m.end_turn();
+    let r = &m.world.regions[&r10];
+    assert_eq!(r.construction.iter().map(|c| (c.slot, c.turns_remaining)).collect::<Vec<_>>(), vec![(SlotRef::Slot(0), 1), (SlotRef::Slot(1), 1)]);
+    assert_eq!(r.slots[0].building.as_ref().map(|b| b.health), Some(50));
+    assert_eq!(r.slots[1].building, slot1);
+    assert_eq!(r.fortification.as_ref().map(|b| b.level_key.as_str()), Some("test_building_level_2"));
+    let completed: Vec<_> = ev.iter().filter(|e| matches!(e, CampaignEvent::BuildingCompleted { .. })).collect();
+    assert_eq!(completed, vec![&CampaignEvent::BuildingCompleted { region: r10, slot: SlotRef::Walls }]);
+}
+
+/// construction: a slot another faction holds offers no construction option and refuses the command
+/// (`0x00B43300` exits at `0x00B4333B` when `0x00A91FC0` says the slot is held by another faction).
+#[test]
+fn a_slot_another_faction_holds_offers_no_construction() {
+    let mut m = test_model();
+    let r10 = RegionId(10);
+    assert!(!m.construction_options(r10, SlotRef::Slot(1)).is_empty());
+    m.world.regions.get_mut(&r10).unwrap().slots[1].holder = Some(B);
+    assert!(m.construction_options(r10, SlotRef::Slot(1)).is_empty());
+    let cmd = CampaignCommand::ConstructBuilding { region: r10, slot: SlotRef::Slot(1), level_key: "test_building_level".into() };
+    assert!(matches!(m.apply(cmd.clone()), Err(CommandError::CannotBuild(_))));
+    m.world.regions.get_mut(&r10).unwrap().slots[1].holder = Some(A);
+    assert!(m.apply(cmd).is_ok());
+}
+
+/// construction: on an owner change every town / port slot passes to the new owner, a third faction's hold too,
+/// except a port a navy is docked in, whose holder stays (`0x00B1B300`: `0x00B2B810(new, 0)` per slot unless
+/// garrisoned or docked).
+#[test]
+fn an_owner_change_hands_every_slot_over_but_a_port_with_a_navy_docked() {
+    let mut m = test_model();
+    let r10 = RegionId(10);
+    {
+        let r = m.world.regions.get_mut(&r10).unwrap();
+        (r.slots[0].port, r.slots[0].position) = (true, Some(pos(5, 5)));
+        r.slots[1].holder = Some(B);
+    }
+    // B's navy docked at the port.
+    let admiral = Character { id: CharacterId(109), faction: B, kind: CharacterKind::Admiral, position: pos(5, 5), movement_points: 0, max_movement_points: 0, base_movement_points: 0, garrisoned_in: None };
+    m.world.characters.insert(admiral.id, admiral);
+    m.world.forces.insert(ForceId(1005), MilitaryForce { id: ForceId(1005), faction: B, commander: Some(CharacterId(109)), units: vec![unit(9)], is_navy: true });
+    assert!(m.transfer_region(r10, C));
+    let r = &m.world.regions[&r10];
+    assert_eq!((r.slots[0].holder, r.slots[1].holder), (Some(A), None), "the docked port stays the old owner's; B's slot passes");
+    // Without the navy, a later change hands the port over too.
+    m.world.forces.remove(&ForceId(1005));
+    assert!(m.transfer_region(r10, B));
+    let r = &m.world.regions[&r10];
+    assert_eq!((r.slots[0].holder, r.slots[1].holder), (None, None));
+}
+
+/// Faction facts for the destruction tests: `f`'s capital (and home) and whether it is out of the game.
+fn set_details(m: &mut CampaignModel, f: FactionId, capital: Option<u32>, out_of_game: bool) {
+    let d = m.world.faction_details.entry(f).or_default();
+    d.capital = capital.map(RegionId);
+    d.capital_2 = capital.map(RegionId);
+    d.out_of_game = Some(out_of_game);
+}
+
+/// The capital through owner changes (`0x008BA580` → `0x008DABC0`, `0x008AE270`): the loser picks the
+/// nearest region whose settlement has 4 building slots before any nearer smaller one; regaining the
+/// home region makes it the capital again; a gainer with a capital keeps it.
+#[test]
+fn a_lost_capital_moves_to_the_nearest_town_and_back_home() {
+    let mut m = test_model();
+    let mut town = region(13, A, 1000, 4);
+    for (i, s) in town.slots.iter_mut().enumerate() {
+        s.key = format!("settlement:test_region_13:town:test_slot:{i}");
+    }
+    town.settlement.position = pos(100, 0);
+    m.world.regions.insert(town.id, town);
+    set_details(&mut m, A, Some(10), false);
+    set_details(&mut m, B, Some(11), false);
+    assert!(m.transfer_region(RegionId(10), B));
+    // Region 12 (2 away, no settlement slot) is nearer than region 13 (90 away, 4 slots).
+    assert_eq!(m.world.capital(A), Some(RegionId(13)));
+    assert_eq!(m.world.capital(B), Some(RegionId(11)));
+    assert!(m.transfer_region(RegionId(10), A));
+    assert_eq!(m.world.capital(A), Some(RegionId(10)), "the home region is the capital again");
+    // Without a town of 4 slots the nearest region is taken.
+    m.world.regions.remove(&RegionId(13));
+    assert!(m.transfer_region(RegionId(10), B));
+    assert_eq!(m.world.capital(A), Some(RegionId(12)));
+}
+
+/// A capture that takes an AI faction's last region ends it (`0x00A64AC0` → `0x008AB6C0`): out of the
+/// game, its forces and characters gone, its relationships reset both ways and neutral, and the
+/// event; it no longer counts as in the game.
+#[test]
+fn capturing_the_last_region_ends_an_ai_faction() {
+    let mut m = capture_model(Vec::new());
+    set_details(&mut m, A, Some(10), false);
+    set_details(&mut m, B, Some(11), false);
+    m.relationship_mut(A, B).trade_agreement = true;
+    m.relationship_mut(B, C).military_access_turns = 3;
+    m.world.set_stance(B, C, Stance::Allied).unwrap();
+    let ev = m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+    assert!(ev.contains(&CampaignEvent::FactionDestroyed { faction: B }), "{ev:?}");
+    assert_eq!(m.world.faction_details[&B].out_of_game, Some(true));
+    assert!(!m.in_the_game(B));
+    assert!(!m.world.forces.contains_key(&ForceId(1001)));
+    assert!(!m.world.characters.contains_key(&CharacterId(101)));
+    assert_eq!((m.world.stance(A, B), m.world.stance(B, C), m.world.stance(C, B)), (Stance::Neutral, Stance::Neutral, Stance::Neutral));
+    assert!(!m.world.relationships[&(A, B)].trade_agreement);
+    assert_eq!(m.world.relationships[&(B, C)].military_access_turns, 0);
+    assert_eq!(m.world.capital(B), None);
+    // The capturer's capital is kept.
+    assert_eq!(m.world.capital(A), Some(RegionId(10)));
+}
+
+/// A human faction that loses its last region is out of the game but keeps its forces and
+/// characters (`0x008AB6C0` deletes them for an AI faction only).
+#[test]
+fn a_human_faction_out_of_the_game_keeps_its_forces() {
+    use super::capture::CaptureChoice;
+    let mut m = capture_model(vec![A, B]);
+    set_details(&mut m, B, Some(11), false);
+    m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+    let ev = m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Occupy }).unwrap();
+    assert!(!ev.iter().any(|e| matches!(e, CampaignEvent::FactionDestroyed { .. })), "ended at the capture, before the choice");
+    assert_eq!(m.world.faction_details[&B].out_of_game, Some(true));
+    assert!(m.world.forces.contains_key(&ForceId(1001)));
+    assert!(m.world.characters.contains_key(&CharacterId(101)));
+}
+
+/// A deal that hands over the giver's last region ends it (`0x00C18BF0` → `0x00B58A10(faction, 1, 0)`).
+#[test]
+fn a_deal_giving_away_the_last_region_ends_the_giver() {
+    let mut m = test_model();
+    // Both human: the recipient answers for itself (no AI refusal).
+    m.turn.humans = vec![A, B];
+    set_details(&mut m, B, Some(11), false);
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    m.apply(CampaignCommand::ProposeRegions { clear: false, demanded: vec![RegionId(11)], offered: vec![] }).unwrap();
+    let ev = m.apply(CampaignCommand::AcceptDeal).unwrap();
+    assert!(ev.contains(&CampaignEvent::FactionDestroyed { faction: B }), "{ev:?}");
+    assert_eq!(m.world.faction_details[&B].out_of_game, Some(true));
+}
+
+/// A liberation never ends the old owner and brings an out-of-game faction back
+/// (`0x00A64AC0` with its second flag → `0x008AE6E0`): in the game again, the liberator's
+/// protectorate, neutral to the others, each record's `initial_modifier` from its start attitude,
+/// the alliance factor on its side only (the liberator's record is reset after the protectorate
+/// is made, `0x00B2BB00`), the war caps set, and the region its capital.
+#[test]
+fn a_liberation_brings_the_faction_back_as_the_liberators_protectorate() {
+    use super::capture::CaptureChoice;
+    let mut m = capture_model(vec![A]);
+    set_details(&mut m, A, Some(10), false);
+    set_details(&mut m, C, None, true);
+    m.world.region_rebel_factions.insert(RegionId(11), "test_faction_c".into());
+    m.relationship_mut(C, A).start_attitude = 20;
+    m.relationship_mut(A, C).start_attitude = 10;
+    m.relationship_mut(C, B).start_attitude = 5;
+    m.relationship_mut(C, A).factor_mut("trade").reset(7);
+    m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+    assert_eq!(m.pending_capture.as_ref().unwrap().liberate, Some(C));
+    let ev = m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Liberate }).unwrap();
+    assert!(!ev.iter().any(|e| matches!(e, CampaignEvent::FactionDestroyed { faction } if *faction == A)));
+    assert_eq!(m.world.regions[&RegionId(11)].owner, C);
+    assert_eq!(m.world.faction_details[&C].out_of_game, Some(false));
+    assert!(m.in_the_game(C));
+    assert_eq!((m.world.stance(C, A), m.world.stance(A, C)), (Stance::Protectorate, Stance::Patron));
+    assert_eq!(m.world.stance(C, B), Stance::Neutral);
+    let factor = |m: &CampaignModel, a, b, k| m.world.relationships[&(a, b)].factor(k).copied().unwrap_or_default();
+    assert_eq!(factor(&m, C, A, "initial_modifier").value, 20);
+    assert_eq!(factor(&m, A, C, "initial_modifier").value, 10);
+    assert_eq!(factor(&m, C, B, "initial_modifier").value, 5);
+    assert_eq!(factor(&m, C, A, "trade").value, 0, "every factor cleared first");
+    assert_eq!(factor(&m, C, A, "alliance").value, 30);
+    assert_eq!(factor(&m, A, C, "alliance").value, 0);
+    let cap = factor(&m, C, B, "declared_war_against_enemies");
+    assert_eq!((cap.cap, cap.capped), (15, true));
+    let cap = factor(&m, A, C, "declared_war_against_friends");
+    assert_eq!((cap.cap, cap.capped), (-15, true));
+    assert_eq!(m.world.capital(C), Some(RegionId(11)));
+}
+
+/// The pirates on either side of a returning faction's record mean war (`0x00B2BC10`, `0x00B72AC0`).
+#[test]
+fn a_returning_faction_is_at_war_with_the_pirates() {
+    let mut m = test_model();
+    Arc::make_mut(&mut m.rules).director.no_rival_keys = vec!["test_faction_b".into()];
+    set_details(&mut m, C, None, true);
+    m.world.regions.get_mut(&RegionId(11)).unwrap().owner = A;
+    let mut ev = Vec::new();
+    assert!(m.liberate_region(RegionId(11), C, &mut ev));
+    assert_eq!((m.world.stance(C, B), m.world.stance(B, C)), (Stance::War, Stance::War));
+    let f = m.world.relationships[&(C, B)].factor("war").copied().unwrap();
+    assert_eq!((f.value, f.drift, f.limit), (-140, -2, -200));
+    assert_eq!(m.world.relationships[&(C, B)].factor("initial_modifier").unwrap().value, -140);
+}
+
+/// `in_the_game` follows the out-of-game flag (faction +0x824) when it is known, and the old rule
+/// (a region or a force) for an own save from before the flag was kept.
+#[test]
+fn in_the_game_follows_the_out_of_game_flag() {
+    let mut m = test_model();
+    assert!(m.in_the_game(A) && !m.in_the_game(C));
+    set_details(&mut m, A, Some(10), true);
+    set_details(&mut m, C, None, false);
+    assert!(!m.in_the_game(A) && m.in_the_game(C));
+}
+
+/// A return without the liberation flag (`0x00B2BC10` / `0x00B72AC0`): an AI previous owner costs 50
+/// attitude on the returning faction's record and 25 on its own; a human previous owner means war.
+#[test]
+fn a_return_from_an_ai_owner_costs_attitude_and_from_a_human_means_war() {
+    let mut m = test_model();
+    set_details(&mut m, C, None, true);
+    m.relationship_mut(C, A).start_attitude = 20;
+    m.relationship_mut(A, C).start_attitude = 10;
+    m.reemerge_faction(C, A, false, &mut Vec::new());
+    let value = |m: &CampaignModel, a, b| m.world.relationships[&(a, b)].factor("initial_modifier").unwrap().value;
+    assert_eq!((value(&m, C, A), value(&m, A, C)), (-30, -15));
+    assert_eq!((m.world.stance(C, A), m.world.stance(A, C)), (Stance::Neutral, Stance::Neutral));
+    assert_eq!(value(&m, C, B), 0, "only the previous owner's pair");
+    assert!(m.in_the_game(C));
+    m.turn.humans = vec![A];
+    m.reemerge_faction(C, A, false, &mut Vec::new());
+    assert_eq!((m.world.stance(C, A), m.world.stance(A, C)), (Stance::War, Stance::War));
+    assert_eq!((value(&m, C, A), value(&m, A, C)), (20 - 140, 10 - 140));
+}
+
+/// A returning faction sets up no pair with the rebels (`0x00B2BB00` walks its diplomacy records; the
+/// rebel faction has no `DIPLOMACY_MANAGER`, so it holds none): no record and no stance either way.
+#[test]
+fn a_returning_faction_sets_up_nothing_with_the_rebels() {
+    let mut m = test_model();
+    m.world.factions.get_mut(&B).unwrap().key.clear();
+    m.world.relationships.retain(|(a, b), _| *a != B && *b != B);
+    for f in m.world.factions.values_mut() {
+        f.diplomacy.remove(&B);
+    }
+    m.world.factions.get_mut(&B).unwrap().diplomacy.clear();
+    set_details(&mut m, C, None, true);
+    m.reemerge_faction(C, A, true, &mut Vec::new());
+    assert!(m.in_the_game(C));
+    assert!(!m.world.relationships.contains_key(&(C, B)) && !m.world.relationships.contains_key(&(B, C)));
+    assert!(!m.world.factions[&C].diplomacy.contains_key(&B) && !m.world.factions[&B].diplomacy.contains_key(&C));
+    assert_eq!(m.world.stance(C, A), Stance::Protectorate, "the other pairs are set up");
+}
+
+/// construction2: a repair an older save stored as a build of the standing level becomes a repair item of the
+/// length and step `queue_repair` gives from the building's health (unchanged while such a repair ran), with
+/// the steps already run added to the health; a build of another level is left alone.
+#[test]
+fn a_repair_stored_as_a_build_of_the_standing_level_converts() {
+    let mut m = test_model();
+    Arc::make_mut(&mut m.rules).buildings.get_mut("test_building_level").unwrap().turns = 10;
+    let r10 = RegionId(10);
+    {
+        let r = m.world.regions.get_mut(&r10).unwrap();
+        r.slots[0].building.as_mut().unwrap().health = 40;
+        r.slots[1].building = Some(BuildingRef { level_key: "test_building_level".into(), health: 100 });
+        let item = |slot, level_key: &str| ConstructionItem { slot, level_key: level_key.into(), turns_remaining: 4, cost: 0, kind: ConstructionKind::Build, active: true };
+        r.construction = vec![item(SlotRef::Slot(0), "test_building_level"), item(SlotRef::Slot(1), "test_building_level_2")];
+    }
+    // floor(60 × 0.01 × 10) in f32 (5.9999…) = 5 turns of (100 − 40) / 5 = 12; 4 left, so 1 ran: health 52.
+    assert_eq!(m.convert_legacy_repairs(), 1);
+    let r = &m.world.regions[&r10];
+    assert_eq!(r.construction[0].kind, ConstructionKind::Repair { health_per_turn: 12, turns: 5 });
+    assert_eq!((r.construction[0].turns_remaining, r.slots[0].building.as_ref().unwrap().health), (4, 52));
+    assert_eq!(r.construction[1].kind, ConstructionKind::Build);
+    assert_eq!(m.convert_legacy_repairs(), 0, "converted once");
+}
+
+/// construction2: the predicted slot values (`0x00A6AFC0` with its predicted flag) count the level being
+/// built, nothing for a slot being demolished, the standing building while it is repaired, and otherwise
+/// the standing building only at full health.
+#[test]
+fn the_predicted_slot_level_follows_the_slot_item() {
+    let mut m = test_model();
+    let r = m.world.regions.get_mut(&RegionId(10)).unwrap();
+    r.slots[0].building.as_mut().unwrap().health = 40;
+    let s0 = SlotRef::Slot(0);
+    assert_eq!(r.predicted_slot_level(s0), None, "damaged");
+    let item = |level_key: &str, kind| ConstructionItem { slot: s0, level_key: level_key.into(), turns_remaining: 1, cost: 0, kind, active: true };
+    r.construction = vec![item("test_building_level", ConstructionKind::Repair { health_per_turn: 60, turns: 1 })];
+    assert_eq!(r.predicted_slot_level(s0), Some("test_building_level"));
+    r.construction = vec![item("", ConstructionKind::Demolish)];
+    assert_eq!(r.predicted_slot_level(s0), None);
+    r.construction = vec![item("test_building_level_2", ConstructionKind::Build)];
+    assert_eq!(r.predicted_slot_level(s0), Some("test_building_level_2"));
+    assert_eq!(r.construction_changes().count(), 1);
+    r.construction = vec![item("", ConstructionKind::Demolish)];
+    assert_eq!(r.construction_changes().count(), 0, "a demolition has no level");
+}
+
+/// polish21: a docked navy leaving its port, by sailing (the undock `0x00A8C0B0`) or by going (its destructor
+/// `0x0088EF90`), hands the port slot back to the region's owner (`0x00A8D830`); a navy elsewhere changes nothing.
+#[test]
+fn a_navy_leaving_its_port_hands_the_slot_back_to_the_owner() {
+    let setup = || {
+        let mut m = test_model();
+        let r10 = RegionId(10);
+        {
+            let r = m.world.regions.get_mut(&r10).unwrap();
+            (r.slots[0].port, r.slots[0].position) = (true, Some(pos(5, 5)));
+        }
+        let admiral = Character { id: CharacterId(109), faction: B, kind: CharacterKind::Admiral, position: pos(5, 5), movement_points: 0, max_movement_points: 0, base_movement_points: 0, garrisoned_in: None };
+        m.world.characters.insert(admiral.id, admiral);
+        m.world.forces.insert(ForceId(1005), MilitaryForce { id: ForceId(1005), faction: B, commander: Some(CharacterId(109)), units: vec![unit(9)], is_navy: true });
+        // The owner changes while the navy lies there: the port stays A's.
+        assert!(m.transfer_region(r10, C));
+        assert_eq!(m.world.regions[&r10].slots[0].holder, Some(A));
+        m
+    };
+    // Sailing away.
+    let mut m = setup();
+    m.move_character(CharacterId(109), pos(9, 9));
+    assert_eq!(m.world.regions[&RegionId(10)].slots[0].holder, None, "the port is C's again");
+    // A move at sea leaves a held port alone.
+    m.world.regions.get_mut(&RegionId(10)).unwrap().slots[0].holder = Some(A);
+    m.move_character(CharacterId(109), pos(9, 12));
+    assert_eq!(m.world.regions[&RegionId(10)].slots[0].holder, Some(A));
+    // Destroyed in port.
+    let mut m = setup();
+    m.destroy_force(ForceId(1005), &mut Vec::new());
+    assert_eq!(m.world.regions[&RegionId(10)].slots[0].holder, None);
+    // Its commander dies and no unit is left: the empty navy goes where he stood.
+    let mut m = setup();
+    m.world.forces.get_mut(&ForceId(1005)).unwrap().units.clear();
+    m.character_dies(CharacterId(109));
+    assert!(!m.world.forces.contains_key(&ForceId(1005)));
+    assert_eq!(m.world.regions[&RegionId(10)].slots[0].holder, None);
 }

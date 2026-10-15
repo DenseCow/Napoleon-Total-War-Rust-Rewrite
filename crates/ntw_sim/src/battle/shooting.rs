@@ -64,15 +64,18 @@ pub fn effective_drill(u: &LandUnit) -> u8 {
 }
 
 impl LandUnit {
-    /// Men in one rank ([`LandUnit::formation_files`]), capped at the start men as the line shape's
-    /// callers cap the files `0x00642C90` computes at the block's men (`0x0061CAB0`, `0x00646B00`,
-    /// `0x0065A410`, CONFIRMED); unknown → the start men over
-    /// [`super::abilities::FORMATION_RANKS`] (PROVISIONAL).
+    /// Men in one rank ([`LandUnit::formation_files`]), capped at the living men as the line
+    /// shape's callers cap the files `0x00642C90` computes at the men they are passed (`0x0061CAB0`,
+    /// `0x00646B00`, `0x00646C70`, `0x00646D40`, `0x0065A410`, `0x0065A6D0`), and the fire step's
+    /// `0x005694D0` passes and caps at the unit's soldier count (`+0x18`, which `0x00575580` /
+    /// `0x005755D0` lower as each soldier dies), so the files shrink with the losses (CONFIRMED);
+    /// unknown → the living men over [`super::abilities::FORMATION_RANKS`] (PROVISIONAL).
     pub fn files(&self) -> u32 {
+        let men = self.men.max(1);
         if self.formation_files > 0 {
-            self.formation_files.min(self.max_men.max(1))
+            self.formation_files.min(men)
         } else {
-            ((self.max_men.max(1) as f32 / super::abilities::FORMATION_RANKS).ceil() as u32).max(1)
+            ((men as f32 / super::abilities::FORMATION_RANKS).ceil() as u32).max(1)
         }
     }
 }
@@ -109,7 +112,7 @@ pub fn volley_plan(u: &LandUnit) -> VolleyPlan {
     if super::strength::mounted(u) || u.attributes.skirmisher {
         return all;
     }
-    let files = u.files().min(men.max(1));
+    let files = u.files();
     match effective_drill(u) {
         1 => all,
         2..=4 => VolleyPlan { shooters: men.div_ceil(DRILL_GROUPS), groups: DRILL_GROUPS },
@@ -809,7 +812,7 @@ mod tests {
         u.capabilities.firing_drill = 0;
         u.attributes.skirmisher = true;
         assert_eq!(plan(&u), (120, 1));
-        // Unknown files: the start men over three ranks.
+        // Unknown files: the living men over three ranks.
         let v = LandUnit::new(2, 0, 100, (0.0, 0.0));
         assert_eq!(v.files(), 34);
     }

@@ -710,6 +710,21 @@ impl CampaignModel {
         Some(PlannedMove { path, reachable })
     }
 
+    /// Puts `character` at `pos`: the one path a force commander's move takes (a walk, a fleet sailing towards a
+    /// landing, a force taking a settlement). A navy that moves leaves the port it lies in first ([`Self::undock`],
+    /// `0x00A8C0B0`: its repair orders cancelled and refunded) and carries its embarked armies along
+    /// ([`Self::sync_passengers`]).
+    pub(crate) fn move_character(&mut self, character: CharacterId, pos: (Fixed20, Fixed20)) {
+        let Some(old) = self.world.characters.get(&character).map(|c| c.position) else { return };
+        if old != pos
+            && let Some(force) = self.force_of(character)
+        {
+            self.undock(force);
+        }
+        self.world.characters.get_mut(&character).expect("checked").position = pos;
+        self.sync_passengers(character);
+    }
+
     /// Moves the commanders of the armies aboard the navy `character` commands to its position.
     pub(crate) fn sync_passengers(&mut self, character: CharacterId) {
         let Some(navy) = self.force_of(character) else { return };
@@ -821,16 +836,15 @@ impl CampaignModel {
         }
         let mut events = Vec::new();
         if fleet_end > 0 {
+            self.move_character(nc, to_fixed(plan.points[fleet_end]));
             let ch = self.world.characters.get_mut(&nc).expect("checked");
             let used = ((plan.costs[fleet_end] - plan.costs[0]) * ch.max_movement_points as f32).ceil() as i32;
             let had = ch.movement_points;
             ch.movement_points = (ch.movement_points - used).max(0);
-            ch.position = to_fixed(plan.points[fleet_end]);
             events.push(CampaignEvent::CharacterMoved { character: nc, path: plan.points[..=fleet_end].to_vec() });
             if had > 0 && ch.movement_points == 0 {
                 events.push(CampaignEvent::MovementPointsExhausted { character: nc });
             }
-            self.sync_passengers(nc);
         }
         if let Some(l) = landing
             && lands
@@ -853,7 +867,7 @@ impl CampaignModel {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::campaign::polypath::{CellInput, PolyInput};
 
@@ -885,7 +899,7 @@ mod tests {
 
     /// Sea in x 0..9, a 1-unit coastal strip at x 9..10 (the east half of column 4), land from
     /// x 10 (column 5).
-    fn coast_map() -> PolyMap {
+    pub(crate) fn coast_map() -> PolyMap {
         split_map(10, 6, |c, _| match c {
             0..=3 => vec![(kind::SEA, 2)],
             4 => vec![(kind::SEA, 1), (2, 1)],

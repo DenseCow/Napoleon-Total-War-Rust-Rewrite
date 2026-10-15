@@ -50,9 +50,25 @@ Names below are the ones now set in Ghidra.
   only when no slot is free it grows to 2n+1 and re-inserts in old slot order. Iteration is slot
   order. Our `scan_slot_order` reproduces this.
 - **Working directories** (`g_pWorkingDirectories` 0x01767d4c): `data\` first;
-  `add_working_directory` (0x0105c780 → `VFS_AddWorkingDirectory` 0x0105ca70) appends a folder,
-  used as written (relative to the process folder, i.e. the install root). Its packs join the scan
-  (release/patch/movie load automatically) and its loose files are searched after `data\`'s.
+  `add_working_directory` (0x0105c780 → `VFS_AddWorkingDirectory` 0x0105ca70) appends a folder
+  (relative to the process folder, i.e. the install root) unless the same text is already listed.
+  Its packs join the scan (release/patch/movie load automatically) and its loose files are searched
+  after `data\`'s.
+- **`add_working_directory <folder> [bool]`** (CONFIRMED, polish15 static trace): after the folder
+  word the handler reads `>> bool` unless the stream is at its end (state bit 2 = eof); the bool
+  defaults to 1. The user script is one file stream with default flags (built at 0x00db7d74, no
+  boolalpha), so the number parser (0x010e0180) accepts a number that is 0 or 1; anything else sets
+  the fail bit (4) and leaves the bool at 1. 1: the folder is normalized (0x00edee40: `/`→`\`, ASCII
+  lowercase, repeated `\` collapsed except at the start) and gets a trailing `\` if it lacks one. 0:
+  the text is kept as written. Lookups concatenate the folder text with names (`VFS_ScanPackFiles`
+  searches `<folder>*.pack`), so on Windows (case-blind, `/` accepted) 0 and 1 differ only for a
+  folder without a trailing `\`.
+  - ORIGINAL BUG (fixed): with 0 and no trailing `\`, the scan looks for `<folder>*.pack`, i.e. packs
+    in the parent folder whose names start with the folder's name. Ours always treats it as a folder.
+  - ORIGINAL BUG (fixed): with no bool on its line, `>> bool` reads the next statement's first word
+    (the script is one stream); a word like `mod` fails the stream and `Console_ExecuteCommandStream`
+    (0x00db80f0, stops on state & 0xC) silently drops every later line. The folder itself is still
+    added. Ours ends statements at the line; a second word that is not 0 or 1 warns.
 - **`mod` line** (`Console_CmdMod` 0x01085910 → `VFS_AddModToStartupList` 0x0105c4c0): the name is
   normalized (`/`→`\`, ASCII lowercase, repeated `\` collapsed, 0x00edee40); an absolute `X:\...`
   path adds its folder as a working directory and keeps the file name. `VFS_MountPack` 0x01082690
@@ -122,7 +138,7 @@ before → after. New structs: `PackPrecedencePair` (0x20), `PackPrecedencePairL
 | `DB_LoadTableFolderMergedByKey` 0x00E778A0 | 0 / 13 | 0 / 21 (very large; the rest is structural) |
 
 Findings: `add_working_directory` reads an optional bool after the folder (stream `>> bool`) and
-passes it to `VFS_AddWorkingDirectory` (meaning not traced). `DB_LoadTableFolderMergedByKey` is the
+passes it to `VFS_AddWorkingDirectory` (traced by polish15: §2 "add_working_directory"). `DB_LoadTableFolderMergedByKey` is the
 table loader's constructor. The vtable it writes first, 0x01320F24, is not the agent attributes
 loader's (its old label `g_pAgentAttributesTableLoaderVtable`): it is the one vtable of every DB
 table object (CONFIRMED, polish9: 1304 write sites; `DB_LoadTableFolderMergedByKey`,

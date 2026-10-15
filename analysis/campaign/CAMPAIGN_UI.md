@@ -212,8 +212,11 @@ pixels. Still open (the tabs, portraits, Lists docking and the technology title 
   - The tables argument also holds the effects table at +0. Table getters: character_trait_levels `0x00E14070`
     (db +0x5E0), effects `0x00E1B6B0` (+0x2D0), and `0x00E30190` (+0x5D0), `0x00E2FD80` (+0x5DC), `0x00E2FE50`
     (+0x5D8), `0x00E2FF20` (+0x5D4) for the four effect tables.
-  - `FormatEffectTextWithValues 0x00F859A0` already has its name, plate and `pflNextValue` (4th parameter);
-    only its char-pointer local is untyped.
+  - `FormatEffectTextWithValues 0x00F859A0`: name, plate and `pflNextValue` (4th parameter); its character
+    local is typed `ushort *` (polish15). In `InitTraitLevelRecord 0x00F72B80` the row locals are typed
+    `TraitAttributeEffectRecord *` and `TraitAttributeSituationEffectRecord *`; the third stays `void *`
+    because one register walks both the level-effect rows (0x24 bytes) and the ability rows (0x18), as its
+    plate says.
 - o6 Research and Technology: Educational Buildings (Oxford); Civil / Military / Industrial columns.
 
 ## UIEd template library (`uied.templates`)

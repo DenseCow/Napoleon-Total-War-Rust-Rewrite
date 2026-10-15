@@ -355,14 +355,19 @@ character within 1 unit of a port slot. Test: `campaign::tests::turn_end_counter
   (0, 1, −30), alliance (80, 1, 30), ...); the agent ones: assassination (0, 2, −50), sabotage (0, 2, −20), spying (0,
   2, −20), third_party_assassination (0, 1, −5), third_party_sabotage (0, 1, −2), third_party_spying (0, 1, −2).
   Factors: 14 `assasination_attempt`, 18 `sabotage_attempt`, 19 `spying_attempt` (relationship +8 + 0x28 × index).
-  - Detected attempt (outcomes 2 and 3; `0x00B0D870` assassination, `0x00B67FD0` sabotage): unless the victim is
-    destroyed, the victim's attitude to the culprit gets the victim triple; every other faction (neither) gets the
-    third-party triple towards the culprit.
+  - Detected attempt (outcomes 2 and 3; `0x00B0D870` assassination, `0x00B67FD0` sabotage, `0x00B71CF0` spying):
+    unless the victim is the rebels (`0x008CEEF0`: faction +0x514, the `factions` record, is null; not "destroyed"),
+    the victim's attitude to the culprit gets the victim triple; every other faction (neither) gets the third-party
+    triple towards the culprit; then the model's diplomacy-changed broadcast (`0x00B0D92F` / `0x00B6808F` /
+    `0x00B71DAF`; CAMPAIGN_FIDELITY.md "The relation is a stored copy").
   - Unseen critical success (outcome 0; `0x00B0D700`, `0x00B67E60`): the victim blames the faction it likes least
-    (lowest attitude total `0x00B0DB60`, ties to the lower id, the culprit skipped unless it is the first looked at),
-    which gets the victim triple; then every faction but the culprit and the blamed one gives the blamed one the
-    third-party triple (the victim included, overwriting). Whose list is searched is INFERRED (the decompiled call
-    loses the object). Outcome 1 has no reaction.
+    in its own list (`0x00B0D740`: victim +0x528; lowest attitude total `0x00B0DB60`, ties to the lower id, the
+    culprit skipped unless it is the first looked at), which gets the victim triple; then every faction but the
+    victim and the blamed one (the culprit included) gives the blamed one the third-party triple; then the broadcast
+    (`0x00B0D861` / `0x00B67FC1`). Same rebel skip. Corrected 2026-10-14 from the disassembly (cai-belief-fix2):
+    the third-party loop compares with the victim (EBP, reloaded from the argument), not the culprit, so the
+    earlier "victim included, overwriting" was wrong, and the searched list is the victim's (was INFERRED).
+    Outcome 1 has no reaction.
   - Detected agents are also added to the victim's `EXPOSED_CHARACTERS` (`0x008A8B30`, when their subterfuge ≥ 1 or a
     flag +0x4E0): modelled since round 6 (§10).
   - The "trait events" of round 4 are messages: `0x00A245A0` posts message 0x13D / 0x13F, `0x00A15A70` 246 / 248.

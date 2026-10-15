@@ -76,6 +76,8 @@ pub struct GameDatabase {
     pub sea_climate_details: Table<SeaClimateDetail>,
     /// `fatigue_effects` (several rows per threshold).
     pub fatigue_effects: Table<FatigueEffect>,
+    /// `entity_training_levels` (one row per training level).
+    pub entity_training_levels: Table<EntityTrainingLevel>,
     /// `unit_stats_land_experience_bonuses` (10 rows, one per experience level).
     pub unit_stats_land_experience_bonuses: Table<UnitStatsLandExperienceBonuses>,
     /// `unit_stats_naval_experience_bonuses` (the naval twin of the table above, same ranks).
@@ -284,6 +286,58 @@ fn load_optional<T: DbRecord>(vfs: &Loader) -> Result<Table<T>, DataError> {
     }
 }
 
+/// The units row builder's resource check (`0x00EDC000`, CONFIRMED), run by [`load_table`] as
+/// `units`' [`DbRecord::checked`], so every reader of `units` (the frontend's army setup, tools; the
+/// game database runs the same [`drop_units_naming_unknown`] against the `region_unit_resources` it
+/// already loaded) gets the same rows: a row whose #14 (`recruitment_scope`, builder +0x78) is not empty
+/// and not a `region_unit_resources` key is not built, so no building, script or start position can
+/// name it. Every vanilla #14 is a key (test `unit_resources_with_vanilla_data`), so only mod data loses
+/// rows; each dropped row is one load warning. `region_unit_resources` is read only when some row
+/// names a resource, and a missing or unreadable one fails the load like any required table.
+///
+/// INFERRED: the later rows are still built. The exe's row loop `0x00E9B700` reports a refused row
+/// (with the pack it came from) and goes on with the next, except at `0x00E9BD95`: when a name the
+/// failed dependency table lists (its +0x38 list, read through its vtable[0] `0x00542E90`) is already
+/// in the database manager's bad-pack list (+0x6FC), it stops there and builds no later row. Both
+/// table constructors traced (`0x00E6DF60`, `0x00F24BB0`) leave that list empty and no writer of it
+/// is known, which would make the stop unreachable. Left to trace: a writer of a table's +0x38 list.
+pub(crate) fn drop_units_with_unknown_resource(
+    units: Table<UnitRecord>,
+    vfs: &Vfs,
+    warnings: &mut Vec<String>,
+) -> Result<Table<UnitRecord>, DataError> {
+    if !units.iter().any(|u| u.recruitment_scope.as_deref().is_some_and(|s| !s.is_empty())) {
+        return Ok(units);
+    }
+    let resources = load_table::<crate::campaign::RegionUnitResourceRecord>(vfs, warnings)?;
+    Ok(drop_units_naming_unknown(units, &resources, warnings))
+}
+
+/// [`drop_units_with_unknown_resource`] against a loaded `region_unit_resources`.
+fn drop_units_naming_unknown(
+    units: Table<UnitRecord>,
+    resources: &Table<crate::campaign::RegionUnitResourceRecord>,
+    warnings: &mut Vec<String>,
+) -> Table<UnitRecord> {
+    fn unknown<'a>(u: &'a UnitRecord, resources: &Table<crate::campaign::RegionUnitResourceRecord>) -> Option<&'a str> {
+        u.recruitment_scope.as_deref().filter(|s| !s.is_empty() && resources.get(s).is_none())
+    }
+    if !units.iter().any(|u| unknown(u, resources).is_some()) {
+        return units;
+    }
+    let mut kept = Vec::with_capacity(units.len());
+    for u in units.iter() {
+        match unknown(u, resources) {
+            Some(scope) => warnings.push(format!(
+                "units: {:?} dropped: its unit resource (#14) {scope:?} is not a region_unit_resources key, as the original's loader drops it (0x00EDC000)",
+                u.key
+            )),
+            None => kept.push(u.clone()),
+        }
+    }
+    Table::from_rows(units.version(), kept)
+}
+
 fn load_campaign(vfs: &Loader) -> Result<crate::campaign::CampaignTables, DataError> {
     Ok(crate::campaign::CampaignTables {
         variables: load(vfs)?,
@@ -309,6 +363,7 @@ fn load_campaign(vfs: &Loader) -> Result<crate::campaign::CampaignTables, DataEr
         unit_factions: load(vfs)?,
         unit_groupings: load(vfs)?,
         unit_governments: load(vfs)?,
+        region_unit_resources: load(vfs)?,
         map_slots: load(vfs)?,
         map_towns: load(vfs)?,
         slot_art: load(vfs)?,
@@ -333,6 +388,7 @@ fn load_campaign(vfs: &Loader) -> Result<crate::campaign::CampaignTables, DataEr
             bonus_pop_class: load(vfs)?,
             bonus_agent: load(vfs)?,
             bonus_religion: load(vfs)?,
+            bonus_pop_class_religion: load(vfs)?,
             bonus_chain: load(vfs)?,
             religion_conversion: load(vfs)?,
             technology: load(vfs)?,
@@ -369,8 +425,17 @@ fn load_kv(vfs: &Loader, name: &'static str) -> Result<KvTable, DataError> {
 
 /// One table through the merged view: every file in `db\<table>_tables\`, merged by key in the
 /// original's order and with its row rule ([`Table::merged`], [`Vfs::db_row_replaces`]). Files
-/// from mods that fail to decode are skipped and described in `warnings`.
+/// from mods that fail to decode are skipped and described in `warnings`. The table's row check
+/// ([`DbRecord::checked`]) runs last, so every reader gets the rows the original's builder keeps.
 pub fn load_table<T: DbRecord>(vfs: &Vfs, warnings: &mut Vec<String>) -> Result<Table<T>, DataError> {
+    let merged = load_table_unchecked(vfs, warnings)?;
+    T::checked(merged, vfs, warnings)
+}
+
+/// [`load_table`] without the row check, for a caller that runs the check itself against tables it
+/// already holds: the game database checks `units` against its own `region_unit_resources`
+/// ([`drop_units_naming_unknown`]), so that table is read, and a bad mod file of it reported, once.
+fn load_table_unchecked<T: DbRecord>(vfs: &Vfs, warnings: &mut Vec<String>) -> Result<Table<T>, DataError> {
     let (files, tables) = read_table_files(vfs, T::TABLE, warnings, Table::from_bytes)?;
     Ok(Table::merged(tables, |holder, new| vfs.db_row_replaces(&files[holder], &files[new])))
 }
@@ -493,7 +558,12 @@ impl GameDatabase {
         )?;
         let gun_type_to_projectiles = load(vfs)?;
         let gun_shots = index_gun_shots(&gun_type_to_projectiles, &projectiles, &mut vfs.warnings.borrow_mut());
-        let units: Table<UnitRecord> = load(vfs)?;
+        let campaign = load_campaign(vfs)?;
+        // Without the units naming an unknown unit resource (`units`' `DbRecord::checked`, `0x00EDC000`),
+        // checked against the campaign's own `region_unit_resources` so that table is read once.
+        // Two statements: the warnings are borrowed once each.
+        let units = load_table_unchecked::<UnitRecord>(vfs.vfs, &mut vfs.warnings.borrow_mut())?;
+        let units = drop_units_naming_unknown(units, &campaign.region_unit_resources, &mut vfs.warnings.borrow_mut());
         // Only pictures depend on it.
         let unit_pictures = UnitPictures::load(vfs.vfs, &mut vfs.warnings.borrow_mut())?;
         // A category the original's compare chain does not know counts as artillery (`ntw_sim::unit_kind`):
@@ -527,13 +597,14 @@ impl GameDatabase {
             sea_surfaces: load_optional(vfs)?,
             sea_climate_details: load_optional(vfs)?,
             fatigue_effects: load(vfs)?,
+            entity_training_levels: load(vfs)?,
             unit_stats_land_experience_bonuses: load(vfs)?,
             unit_stats_naval_experience_bonuses: load(vfs)?,
             factions: load(vfs)?,
             regions: load(vfs)?,
             building_levels: load(vfs)?,
             technologies: load(vfs)?,
-            campaign: load_campaign(vfs)?,
+            campaign,
             limits,
             kv_rules_sim: SimKvRules::try_from(&kv_rules)?,
             kv_rules,
@@ -1005,6 +1076,7 @@ impl GameDatabase {
             sea_surfaces: Table::from_rows(0, Vec::new()),
             sea_climate_details: Table::from_rows(0, Vec::new()),
             fatigue_effects: Table::from_rows(0, Vec::new()),
+            entity_training_levels: Table::from_rows(0, Vec::new()),
             unit_stats_land_experience_bonuses: Table::from_rows(0, experience_bonuses),
             unit_stats_naval_experience_bonuses: Table::from_rows(0, naval_experience_bonuses),
             factions: Table::from_rows(3, factions),
@@ -1055,6 +1127,35 @@ mod tests {
         let ld = Loader::new(&vfs);
         load_optional::<NegotiationStringRecord>(&ld).expect("optional");
         assert_eq!(ld.warnings.take().len(), 1, "a missing optional table is a load warning");
+    }
+
+    /// `0x00EDC000`: a unit naming a unit resource that `region_unit_resources` lacks (a mod's typo, or
+    /// a mod that removed the row) is left out of `units` with one warning per row; a known resource,
+    /// none or an empty one keeps the unit.
+    #[test]
+    fn a_unit_with_an_unknown_unit_resource_is_dropped_with_a_warning() {
+        use crate::campaign::RegionUnitResourceRecord;
+        let unit = |key: &str, scope: Option<&str>| UnitRecord { key: key.into(), recruitment_scope: scope.map(Into::into), ..Default::default() };
+        let units = Table::from_rows(4, vec![
+            unit("known", Some("horses")),
+            unit("typo", Some("hroses")),
+            unit("none", None),
+            unit("empty", Some("")),
+            unit("typo_too", Some("camelz")),
+        ]);
+        let resources = Table::from_rows(0, vec![RegionUnitResourceRecord { key: "horses".into(), dev_name: "Horses".into() }]);
+        let mut warnings = Vec::new();
+        let kept = drop_units_naming_unknown(units, &resources, &mut warnings);
+        assert_eq!(kept.iter().map(|u| u.key.as_str()).collect::<Vec<_>>(), ["known", "none", "empty"]);
+        assert_eq!(kept.version(), 4);
+        assert!(kept.get("typo").is_none() && kept.get("known").is_some());
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].contains("\"typo\"") && warnings[0].contains("\"hroses\""), "{warnings:?}");
+        // Nothing to drop: the table is returned as it is, with no warning.
+        let mut none = Vec::new();
+        let same = drop_units_naming_unknown(kept.clone(), &resources, &mut none);
+        assert!(none.is_empty());
+        assert_eq!(same.len(), 3);
     }
 
     #[test]

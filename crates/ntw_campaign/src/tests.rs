@@ -664,6 +664,34 @@ fn the_loader_takes_the_campaign_cost_from_units_7() {
     assert_eq!(rules.director.no_rival_keys, ["pirates"]);
 }
 
+/// A negotiation line listed twice keeps the last row, generic and faction override alike: the
+/// original's table build inserts each row index into its key map with `0x007C7A60`, which overwrites
+/// the index already stored for the key (`0x00F7AA60`, `0x00F7A6E0`).
+#[test]
+fn a_repeated_negotiation_line_keeps_the_last_row() {
+    use ntw_data::campaign::{NegotiationOverrideStringRecord, NegotiationStringRecord};
+    let mut db = db_with_a_barracks();
+    let line = |string: &str| NegotiationStringRecord {
+        event: "receive_hostile".into(),
+        culture: "european".into(),
+        government: "gov_empire".into(),
+        string: string.into(),
+    };
+    db.campaign.negotiation_strings = Table::from_rows(0, vec![line("first"), line("last")]);
+    let own = |string: &str| NegotiationOverrideStringRecord {
+        event: "receive_hostile".into(),
+        culture: "european".into(),
+        government: "gov_empire".into(),
+        faction: "france".into(),
+        string: string.into(),
+    };
+    db.campaign.negotiation_override_strings = Table::from_rows(0, vec![own("first"), own("last")]);
+    let rules = rules_from_db(&db, "test_campaign");
+    let key = ("receive_hostile".to_owned(), "european".to_owned(), "gov_empire".to_owned());
+    assert_eq!(rules.negotiation_strings[&key], "last");
+    assert_eq!(rules.negotiation_overrides[&(key.0, key.1, key.2, "france".to_owned())], "last");
+}
+
 /// All the way through a **loaded campaign**: `read` runs `rules_from_db`, and the recruitment command
 /// then charges the region's entry cost — `units` #7 with the region's building effects (the
 /// barracks' −10 `recruitment_mod_cost_land_all`, compiled through the junction) — keeps it on the
@@ -893,7 +921,7 @@ fn a_region_without_a_recruitment_manager_warns_once() {
 
 /// Review (round 12): the scripts' restricted building levels of a save were copied into the
 /// model by the game's scene setup, a second place for the rule; the loader now fills
-/// `World::restricted_buildings` itself and hands only the restricted units on.
+/// `World::restricted_buildings` itself, and `World::restricted_units` too (recruit-gates: the model holds both).
 #[test]
 fn the_loader_fills_the_restricted_building_levels() {
     let db = GameDatabase::test_fixture();
@@ -924,10 +952,10 @@ fn the_loader_fills_the_restricted_building_levels() {
     model_rec.children.push(episodic);
     let loaded = read(&esf.to_bytes().unwrap(), &db).unwrap();
     assert_eq!(loaded.model.world.restricted_buildings.iter().map(String::as_str).collect::<Vec<_>>(), vec!["level_a", "level_b"]);
-    assert_eq!(loaded.restricted_units, vec!["unit_x".to_owned()]);
+    assert_eq!(loaded.model.world.restricted_units.iter().map(String::as_str).collect::<Vec<_>>(), vec!["unit_x"]);
     // A file without the record restricts nothing.
     let plain = read(&tiny(STARTPOS_ROOT, tiny_world()), &db).unwrap();
-    assert!(plain.model.world.restricted_buildings.is_empty() && plain.restricted_units.is_empty());
+    assert!(plain.model.world.restricted_buildings.is_empty() && plain.model.world.restricted_units.is_empty());
 }
 
 /// The capital is the first of the two i32 values right before `EXPOSED_CHARACTERS`, with or

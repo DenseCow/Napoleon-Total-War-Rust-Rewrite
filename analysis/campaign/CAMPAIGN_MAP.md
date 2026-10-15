@@ -129,8 +129,8 @@ frontend page only needs to insert `CampaignStart { campaign }` and enter `GameM
     `ntw_campaign::world` reads it (`Region::fortification`).
   - `FORT_ARRAY` is a **child of `REGION`** (between `RELIGIOUS_MISSION_BUILDING_ARRAY` and
     `RESOURCES_ARRAY`), **CONFIRMED from the shipped data**: it is there in every shipped file.
-    (The region reader `0x00A51E30` walking it there is the free model's reading; review 0-E found
-    no kept decompile of it.) It holds **0 items in all eight `campaigns/*/startpos.esf` and all ten
+    (The region writer `0x00A51E30`, SaveRegionRecord, writes it there: CONFIRMED by decompile,
+    polish21 2026-10-15.) It holds **0 items in all eight `campaigns/*/startpos.esf` and all ten
     vanilla saves**, so nothing in the shipped data shows a fort.
   - Per item, the region reader reads one `u32` and then lets the fort object read a map position
     (two f32, fort +0x120) and a string (fort +0x188), plus two more version-gated strings

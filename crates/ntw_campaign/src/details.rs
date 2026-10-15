@@ -128,6 +128,16 @@ pub(crate) fn faction_details(f: &EsfRecord) -> (FactionDetails, Option<(String,
         };
         d.capital = region(exposed.checked_sub(2));
         d.capital_2 = region(exposed.checked_sub(1));
+        // The out-of-game flag (faction +0x824, read at 0x0087B4CC): the bool right before the u32
+        // +0x828, which is right before the first bool array after EXPOSED_CHARACTERS (anchored on the array, so
+        // the PRESTIGE record between them does not shift it; checked on the eur_napoleon startpos).
+        let after = exposed + 1;
+        if let Some(arr) = f.children[after..].iter().position(|c| matches!(c, EsfNode::BoolArray(_))).map(|i| after + i)
+            && arr >= after + 2
+            && f.children[arr - 1].as_u32().is_some()
+        {
+            d.out_of_game = f.children[arr - 2].as_bool();
+        }
     }
     d.religion = f.values().filter_map(EsfNode::as_str).find(|v| v.starts_with("rel_") || v.starts_with("align_")).unwrap_or_default().to_string();
     // Trade income of the last ECONOMICS_DATA record (category 7 = #1[2], CAMPAIGN_FIDELITY.md).
@@ -288,19 +298,22 @@ pub(crate) fn relationship(r: &EsfRecord) -> Option<(FactionId, Relationship)> {
 }
 
 /// `CAMPAIGN_BONUS_VALUES` → its entries (`CAMPAIGN_BONUS_VALUE_BLOCK[]` items each holding one
-/// `CAMPAIGN_BONUS_VALUE` {u32 type, i32 bonus, f32 value, utf16 qualifier (optional)}; reader `0x00DF14C0`).
+/// `CAMPAIGN_BONUS_VALUE`; reader `0x00DF14C0`, entry reader [`saved_bonus`]).
 fn saved_bonuses(r: &EsfRecord) -> Vec<ntw_sim::campaign::effects::SavedBonus> {
-    items(r, "CAMPAIGN_BONUS_VALUE_BLOCK")
-        .filter_map(|it| {
-            let v = it.first()?.as_record()?;
-            Some(ntw_sim::campaign::effects::SavedBonus {
-                kind: v.get_u32(0)?,
-                bonus: v.get_i32(1)?,
-                value: v.get_f32(2)?,
-                qualifier: v.get_str(3).unwrap_or_default().to_string(),
-            })
-        })
-        .collect()
+    items(r, "CAMPAIGN_BONUS_VALUE_BLOCK").filter_map(|it| saved_bonus(it.first()?.as_record()?)).collect()
+}
+
+/// One `CAMPAIGN_BONUS_VALUE` {u32 type, i32 bonus, f32 value, then the type's qualifier strings:
+/// type 7 has two, population class then religion, most types one, type 1 none} (CONFIRMED: entry
+/// reader `0x00DF0D10`, writer `0x00E02F80`; `SavedBonus::qualifier_count`). A missing string reads "".
+pub(crate) fn saved_bonus(v: &EsfRecord) -> Option<ntw_sim::campaign::effects::SavedBonus> {
+    Some(ntw_sim::campaign::effects::SavedBonus {
+        kind: v.get_u32(0)?,
+        bonus: v.get_i32(1)?,
+        value: v.get_f32(2)?,
+        qualifier: v.get_str(3).unwrap_or_default().to_string(),
+        qualifier2: v.get_str(4).unwrap_or_default().to_string(),
+    })
 }
 
 /// The strings of a `CAMPAIGN_LOCALISATION` record (one or two).

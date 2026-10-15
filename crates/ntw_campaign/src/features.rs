@@ -2,7 +2,7 @@
 //! [`CampaignFeatures`] the exe hard-codes for them (MODDING_AUDIT.md §1.1). The model reads the
 //! table, never the key, so a campaign of another source sets its own.
 
-use ntw_sim::campaign::features::{CampaignFeatures, UnitKeyEffects};
+use ntw_sim::campaign::features::{CampaignFeatures, LootResentment, UnitKeyEffects};
 
 /// The Peninsular campaign's key: the exe's switches below test it (each CONFIRMED at the address the
 /// feature's field names).
@@ -26,6 +26,14 @@ pub fn original(key: &str) -> CampaignFeatures {
         f.home_trade_faction = Some("spa_france".into());
         f.node_supply_mod = true;
         f.fixed_commodity_prices = true;
+        f.loot_resentment = Some(LootResentment {
+            homelands: [("spa_portugal", "spa_portugal"), ("portugese_rebels", "spa_portugal"), ("spa_spain", "spa_spain")]
+                .map(|(r, f)| (r.to_owned(), f.to_owned()))
+                .to_vec(),
+            exempt_looter: Some("spa_france".into()),
+            factor: "abandoned_ally_in_war".into(),
+            value: -50,
+        });
     }
     if key == MP_EUROPE {
         f.ai_recruitment_points = vec![("france".into(), 1)];
@@ -51,6 +59,9 @@ mod tests {
         assert_eq!(spa.effects_of_unit("Inf_Spanish_guerrilla"), None, "case-sensitive");
         assert_eq!(spa.effects_of_unit("Inf_British_Auxiliary").map(|e| e.upkeep.as_str()), Some("auxiliary_upkeep_mod"));
         assert!(spa.alignment_public_order && spa.faction_zeal && spa.node_supply_mod && spa.fixed_commodity_prices);
+        let lr = spa.loot_resentment.as_ref().expect("loot resentment");
+        assert_eq!(lr.homelands.iter().map(|(_, f)| f.as_str()).collect::<Vec<_>>(), ["spa_portugal", "spa_portugal", "spa_spain"]);
+        assert_eq!((lr.exempt_looter.as_deref(), lr.factor.as_str(), lr.value), (Some("spa_france"), "abandoned_ally_in_war", -50));
         let mp = original("mp_eur_napoleon");
         assert_eq!(mp.ai_recruitment_bonus("france"), 1);
         assert_eq!(mp.ai_recruitment_bonus("britain"), 0);
@@ -67,5 +78,16 @@ mod tests {
         assert_eq!(f.ai_recruitment_bonus("oda"), 2);
         assert!(!f.faction_zeal, "fields left out keep the default");
         assert_eq!(ron::from_str::<CampaignFeatures>(&ron::to_string(&original("spa_napoleon")).unwrap()).unwrap(), original("spa_napoleon"));
+    }
+
+    /// A loot resentment row naming an unknown attitude factor is dropped once, when the rules load; the
+    /// Peninsular row is kept.
+    #[test]
+    fn an_unknown_loot_resentment_factor_is_dropped_at_load() {
+        let spa = original("spa_napoleon");
+        assert_eq!(spa.clone().validated(), spa);
+        let mut bad = spa.clone();
+        bad.loot_resentment.as_mut().unwrap().factor = "made_up_factor".into();
+        assert_eq!(bad.validated(), CampaignFeatures { loot_resentment: None, ..spa });
     }
 }

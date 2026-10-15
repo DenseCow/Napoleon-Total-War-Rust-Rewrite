@@ -407,6 +407,27 @@ impl CampaignModel {
         s.hidden.get(x, z)
     }
 
+    /// The script's `disable_shopping_for_ai_under_shroud(on)` (CONFIRMED, `0x00AA9B40`; the
+    /// binding is registered at `0x0145818C`): off clears the CAI interface's shroud (+0x618); on
+    /// stores the shroud of the one human faction (faction +0x6F8), or none when no faction or more
+    /// than one is human. The exe keeps the shroud object and saves only whether it is set
+    /// (`CAI_INTERFACE`, version 6 and later), resolving it again on load (`0x00A3EF07`); ours keeps
+    /// the faction ([`World::ai_shopping_shroud`](super::world::World::ai_shopping_shroud)).
+    pub fn set_ai_shopping_shroud(&mut self, on: bool) {
+        self.world.ai_shopping_shroud = match (on, self.turn.humans.as_slice()) {
+            (true, [human]) => Some(*human),
+            _ => None,
+        };
+    }
+
+    /// Whether the AI may not shop at a position (CONFIRMED, `0x00A8B2D0`): a shroud is set
+    /// ([`Self::set_ai_shopping_shroud`]) and it hides the position's cell (`0x00B11E70`, the test
+    /// of [`Self::hides_map_label`]). The AI's ship repair asks it for the navy's position
+    /// ([`Self::ai_repair_navy`]), its building repair for the slot's ([`Self::ai_repairs`]).
+    pub fn ai_shopping_hidden(&self, p: (crate::fixed::Fixed20, crate::fixed::Fixed20)) -> bool {
+        self.world.ai_shopping_shroud.is_some_and(|f| self.hides_map_label(f, (p.0.to_f32(), p.1.to_f32())))
+    }
+
     /// The same three states as [`fog_state`](Self::fog_state), but per sight cell — for a caller
     /// that walks the grid once (a terrain mesh build, a fog texture) instead of per map position.
     ///

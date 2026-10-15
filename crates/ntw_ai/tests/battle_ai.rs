@@ -227,7 +227,7 @@ fn cavalry_charges_an_engaged_enemy_in_the_flank() {
     assert_eq!(c.kind, ObjectiveKind::Melee);
     assert_eq!(c.target, Some(1));
     // Within 60 m the order is a charge.
-    assert!(b.units[b.unit_index(14).unwrap()].destination.is_some());
+    assert!(b.units[b.unit_index(14).unwrap()].destination().is_some());
 }
 
 #[test]
@@ -257,7 +257,7 @@ fn trace_ai_v_ai() {
             for u in &b.units {
                 eprintln!(
                     "  u{} s{} men {} pos ({:.0},{:.0}) dest {:?} fire {:?} melee {} morale {:?} ammo {} task {:?}",
-                    u.id, u.side, u.men, u.position.0, u.position.1, u.destination.map(|d| (d.0 as i32, d.1 as i32)),
+                    u.id, u.side, u.men, u.position.0, u.position.1, u.destination().map(|d| (d.0 as i32, d.1 as i32)),
                     u.fire_target, u.in_melee, u.morale.state, u.ammunition,
                     ai.alliance(u.side).and_then(|a| a.tasks.get(&u.id))
                 );

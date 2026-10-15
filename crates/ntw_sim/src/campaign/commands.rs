@@ -203,6 +203,22 @@ pub enum CampaignCommand {
         /// Index into the force's units.
         unit: usize,
     },
+    /// Order a ship of a navy in port to repair, paying its cost now (`CCQ_REPAIR_NAVAL_UNIT`, executor `0x00937040`;
+    /// [`CampaignModel::order_ship_repair`](super::CampaignModel::order_ship_repair), [`super::ship_repair`]).
+    RepairShip {
+        /// The navy.
+        force: ForceId,
+        /// Index into the force's units.
+        unit: usize,
+    },
+    /// Cancel a ship's repair order with a refund, or order it (`CCQ_TOGGLE_REPAIR_NAVAL_UNIT`, executor `0x009387A0`;
+    /// [`CampaignModel::toggle_ship_repair`](super::CampaignModel::toggle_ship_repair)).
+    ToggleShipRepair {
+        /// The navy.
+        force: ForceId,
+        /// Index into the force's units.
+        unit: usize,
+    },
     /// Dismiss a minister (`0x008EB9D0`; see [`super::family`]): he leaves, the post is refilled.
     DismissMinister {
         /// The post holder.
@@ -287,10 +303,9 @@ pub enum CampaignCommand {
         /// The slot (a region slot or the walls; the model has no road repair).
         slot: SlotRef,
     },
-    /// Demolish a standing building: the slot's building is removed at once, with no refund
-    /// (PROVISIONAL: the original queues it — building `0x009B9590` → id `0x84`, fort
-    /// `0x009BA250` → id `0x89`, CONFIRMED — and its resolution refund/timing is UNKNOWN).
-    /// `slot` is a region slot or the walls; roads cannot be demolished (the original's `CanDemolishBuilding`
+    /// Demolish a standing building (building `0x009B9590` → id `0x84`, fort `0x009BA250` → id `0x89`,
+    /// CONFIRMED): any item in the slot is cancelled with its refund and a one-turn demolition is queued, which
+    /// empties the slot at the round end (`0x00B286C0`; see [`capture`](super::capture)). `slot` is a region slot or the walls; roads cannot be demolished (the original's `CanDemolishBuilding`
     /// `0x009B7920` excludes the `settlement_road` slot, CONFIRMED).
     DemolishBuilding {
         /// The region.
@@ -365,11 +380,28 @@ pub enum CampaignCommand {
         /// Technology keys the proposer is to give the recipient.
         offered: Vec<String>,
     },
+    /// `CCQ_DIPLOMACY_PROPOSE_PAYMENT` (from `negotiation:Propose` for the payments row, `0x009BF3C0`;
+    /// executor `0x00933AD0`): sets the open negotiation's payment record
+    /// (`CampaignModel::propose_payment`; the offered one-off payment is capped there).
+    ProposePayment {
+        /// Empty the record instead.
+        clear: bool,
+        /// The amount in the record's sign: positive, a demand (the recipient pays the proposer);
+        /// negative, an offer (the proposer pays the recipient its negation).
+        amount: i32,
+        /// 1: paid once; more: paid each turn for that many turns.
+        turns: u32,
+    },
     /// `CCQ_DIPLOMACY_CLEAR_NEGOTIATION` (executor `0x00932EC0`): the open negotiation's deal is
     /// emptied (`CampaignModel::clear_negotiation`).
     ClearNegotiation,
+    /// `CCQ_DIPLOMACY_PROPOSE_DEAL` (executor `0x00933690` → `0x00C49BE0`): the open negotiation's
+    /// deal is proposed; an AI recipient evaluates it (`0x00AA5ED0`), which reads and keeps its
+    /// relation belief (`CampaignModel::propose_deal`). The answer itself is
+    /// `CampaignModel::ai_refuses_deal`.
+    ProposeDeal,
     /// `CCQ_DIPLOMACY_ACCEPT_DEAL` (executor `0x00932E40` → `0x00C114B0`): the deal of the open
-    /// negotiation is applied (`CampaignModel::accept_deal`: its regions and technologies).
+    /// negotiation is applied (`CampaignModel::accept_deal`: its regions, technologies and payment).
     AcceptDeal,
 }
 
@@ -607,7 +639,8 @@ impl CampaignModel {
     fn apply_inner(&mut self, cmd: CampaignCommand) -> Result<Vec<CampaignEvent>, CommandError> {
         // The negotiation commands touch no battle state: a pending battle must not leave a
         // negotiation open with no way to end it.
-        // Proposing or clearing deal items only edits the negotiation; accepting a deal moves
+        // Proposing or clearing deal items, or proposing the deal (which only stores the
+        // recipient's relation belief), edits no battle state; accepting a deal moves
         // regions, so it waits for the battle like every other command.
         let exempt = matches!(
             cmd,
@@ -616,7 +649,9 @@ impl CampaignModel {
                 | CampaignCommand::EndNegotiation
                 | CampaignCommand::ProposeRegions { .. }
                 | CampaignCommand::ProposeTechnologies { .. }
+                | CampaignCommand::ProposePayment { .. }
                 | CampaignCommand::ClearNegotiation
+                | CampaignCommand::ProposeDeal
         );
         if self.pending_battle.is_some() && !exempt {
             return Err(CommandError::BattlePending);
@@ -673,6 +708,8 @@ impl CampaignModel {
             CampaignCommand::HireGeneral { character, into } => self.hire_general(character, into),
             CampaignCommand::HireAdmiral { character, fleet } => self.hire_admiral(character, fleet),
             CampaignCommand::PromoteUnit { force, unit } => self.promote_unit(force, unit),
+            CampaignCommand::RepairShip { force, unit } => self.order_ship_repair(force, unit),
+            CampaignCommand::ToggleShipRepair { force, unit } => self.toggle_ship_repair(force, unit),
             CampaignCommand::DismissMinister { minister } => self.dismiss_minister(minister),
             CampaignCommand::AppointMinister { a, b } => self.appoint_minister(a, b),
             CampaignCommand::SetTaxLevel { faction, class, level } => self.set_tax_level(faction, class, level),
@@ -726,7 +763,9 @@ impl CampaignModel {
             CampaignCommand::ProposeTechnologies { clear, demanded, offered } => {
                 self.propose_technologies(clear, demanded, offered).map(|()| Vec::new())
             }
+            CampaignCommand::ProposePayment { clear, amount, turns } => self.propose_payment(clear, amount, turns).map(|()| Vec::new()),
             CampaignCommand::ClearNegotiation => self.clear_negotiation().map(|()| Vec::new()),
+            CampaignCommand::ProposeDeal => self.propose_deal().map(|()| Vec::new()),
             CampaignCommand::AcceptDeal => self.accept_deal(),
         }
     }
@@ -874,15 +913,14 @@ impl CampaignModel {
         let new_pos = (Fixed20::from_f64(pts[end].0 as f64), Fixed20::from_f64(pts[end].1 as f64));
         let path: Vec<(f32, f32)> = pts[..=end].to_vec();
         self.leave_garrison(character);
+        // A navy leaves its port and carries its embarked armies along.
+        self.move_character(character, new_pos);
         let ch = self.world.characters.get_mut(&character).expect("checked");
         ch.movement_points -= spent;
-        ch.position = new_pos;
         let mut events = vec![CampaignEvent::CharacterMoved { character, path }];
         if available > 0 && ch.movement_points <= 0 {
             events.push(CampaignEvent::MovementPointsExhausted { character });
         }
-        // A navy carries its embarked armies along.
-        self.sync_passengers(character);
         // The mover's faction sees from his new place (`0x00A27F10` → `0x00B1B8B0`; the model
         // recomputes the whole set, CHARACTERS_FIDELITY.md §10).
         // The hidden flag after a move (`0x00A285E0` → `0x009D3000`), for the mover and any army he
@@ -991,24 +1029,21 @@ impl CampaignModel {
         let to_pos = self.force_position(into);
         self.world.forces.get_mut(&into).expect("checked").units.extend(moved);
         if empty {
+            // Looked up while the commander still stands where the force lay.
+            let port = self.docked_port(force);
             if let Some(c) = commander {
                 self.leave_garrison(c);
                 if let (Some(ch), Some(p)) = (self.world.characters.get_mut(&c), to_pos) {
                     ch.position = p;
                 }
             }
-            self.world.forces.remove(&force);
+            self.remove_force(force, port);
             self.tidy_embarked();
-            for r in self.world.regions.values_mut() {
-                if r.garrison == Some(force) {
-                    r.garrison = None;
-                }
-                if r.fleet == Some(force) {
-                    r.fleet = None;
-                }
-            }
             events.push(CampaignEvent::ForceDestroyed { force });
         }
+        // After a unit transfer, a navy outside a port loses its repair orders (`0x008B36D0` from the transfers).
+        self.cancel_undocked_repairs(force);
+        self.cancel_undocked_repairs(into);
         events.push(CampaignEvent::CampaignArmiesMerge { force, into });
     }
 
@@ -1047,8 +1082,9 @@ impl CampaignModel {
             // A settlement holds one garrison army (`SIEGEABLE_GARRISON_RESIDENCE` #12, CONFIRMED):
             // an army entering one that has a garrison joins it (INFERRED; PROVISIONAL when the
             // garrison is full: the army then waits outside). A garrison of another faction (left
-            // inside by a deal or a liberation, which move no army) is never joined: the army waits
-            // outside (PROVISIONAL: what the exe does then is not traced).
+            // inside by a deal or a liberation, which in ours move no army; PROVISIONAL: the original
+            // expels it, 0x008D9DC0, not modelled yet) is never joined: the army waits outside
+            // (PROVISIONAL: what the exe does then is not traced).
             let held = self.world.regions[&region].garrison.filter(|g| *g != force && self.world.forces.contains_key(g));
             if let Some(g) = held {
                 if self.world.forces[&g].faction == fa && self.world.forces[&g].units.len() < self.max_units(self.world.forces[&g].is_navy) {
@@ -1144,11 +1180,33 @@ impl CampaignModel {
         pts.max(0) as u32
     }
 
+    /// The units one building of the region `r` offers (`BuildSlotBuildingRecruitableList` `0x00B43CA0`, the
+    /// gates that leave a unit out; the availability flags are the caller's): its level's `units_allowed` that
+    /// exist, that the region owner's faction and government may recruit, that the region has the resource for
+    /// (`0x00AA1660`) and that the scripts have not restricted (`0x00A27960`). [`Self::recruitable_units`] merges
+    /// them over the region; a port's ship repair needs its own building's list to be non-empty
+    /// ([`Self::port_can_repair`](super::CampaignModel::port_can_repair)).
+    pub(crate) fn building_units<'a>(&'a self, r: &'a super::world::Region, b: &super::world::BuildingRef) -> impl Iterator<Item = &'a String> + 'a {
+        let (fkey, government) = self.world.factions.get(&r.owner).map_or(("", ""), |f| (f.key.as_str(), f.government_key.as_str()));
+        self.rules.buildings.get(&b.level_key).map_or(&[][..], |b| b.units_allowed.as_slice()).iter().filter(move |u| {
+            let Some(unit) = self.rules.units.get(*u) else { return false };
+            self.rules.faction_may_recruit(fkey, u)
+                && self.rules.government_may_recruit(government, u)
+                // `0x00AA1660`: a unit needing a resource only where the region has it (CONFIRMED).
+                && unit.unit_resource.as_ref().is_none_or(|res| r.unit_resources.contains(res))
+                // `0x00A27960`: not a unit the scripts restricted (CONFIRMED).
+                && !self.world.restricted_units.contains(*u)
+        })
+    }
+
     /// The region's recruitable list (region +0x1A8, built by `RebuildRegionRecruitablesAndEffects`
-    /// `0x00A6AE40` from each slot's building, `BuildSlotBuildingRecruitableList` `0x00B43CA0`; CONFIRMED but for
-    /// the two gates tagged PROVISIONAL in the body): the units a building in the region allows
-    /// (`building_units_allowed`) that its owner may recruit (`units_to_exclusive_faction_permissions`, and
-    /// [`super::rules::CampaignRules::government_may_recruit`]), one entry per unit, sorted by unit key, each with
+    /// `0x00A6AE40` from the building of each slot, then of the road slot (slot manager +0x20) and of the walls
+    /// slot (+0x24), `BuildSlotBuildingRecruitableList` `0x00B43CA0`; CONFIRMED): the units a building in the
+    /// region allows (`building_units_allowed`) that its owner may recruit (`units_to_exclusive_faction_permissions`,
+    /// [`super::rules::CampaignRules::government_may_recruit`]), that the region has the resource for
+    /// (`0x00AA1660`: [`super::rules::UnitRules::unit_resource`], when set, in
+    /// [`super::world::Region::unit_resources`]) and that the scripts have not restricted (`0x00A27960`:
+    /// [`super::world::World::restricted_units`]), one entry per unit, sorted by unit key, each with
     /// the building flags that make it unavailable:
     /// * [`ENTRY_DAMAGED`] when the building's health is below 100;
     /// * [`ENTRY_OCCUPIED`] when the slot is held by another faction than the region's owner (`0x00A91FC0`);
@@ -1160,26 +1218,22 @@ impl CampaignModel {
     /// A unit allowed by several buildings keeps one entry (`MergeRecruitableEntrySorted` `0x00B08E30`): an
     /// unflagged one replaces a flagged one, an unflagged one stays, and flagged ones OR their flags. The queue
     /// command refuses a flagged entry, and the queue step holds back an item whose entry is flagged
-    /// ([`Self::recruitable_entry_flags`], `region_turn`). The road counts as a slot of the owner (as in
-    /// [`super::world::Region::effect_buildings`]).
+    /// ([`Self::recruitable_entry_flags`], `region_turn`). The road and the walls are slots like the others,
+    /// flagged when another faction holds them ([`super::world::Region::slot_held`], `0x00A6AE40`).
+    /// The merge keeps an unflagged entry when any source gives one and ORs the flags otherwise, so the order of the sources does not change the list.
     pub fn recruitable_units(&self, region: RegionId) -> Vec<RecruitableUnit> {
         let Some(r) = self.world.regions.get(&region) else { return Vec::new() };
-        let (fkey, government) = self.world.factions.get(&r.owner).map_or(("", ""), |f| (f.key.as_str(), f.government_key.as_str()));
         let flag = |on: bool, flag: u32| if on { flag } else { 0 };
         let sources = r
             .slots
             .iter()
             .filter_map(|s| s.building.as_ref().map(|b| (b, flag(b.is_damaged(), ENTRY_DAMAGED) | flag(r.slot_occupied(s), ENTRY_OCCUPIED))))
-            .chain(r.road.as_ref().map(|b| (b, flag(b.is_damaged(), ENTRY_DAMAGED))));
+            .chain([(SlotRef::Road, &r.road), (SlotRef::Walls, &r.fortification)].into_iter().filter_map(|(slot, b)| {
+                b.as_ref().map(|b| (b, flag(b.is_damaged(), ENTRY_DAMAGED) | flag(!r.slot_held(slot), ENTRY_OCCUPIED)))
+            }));
         let mut out: Vec<RecruitableUnit> = Vec::new();
         for (b, building_flags) in sources {
-            for u in self.rules.buildings.get(&b.level_key).map(|b| b.units_allowed.as_slice()).unwrap_or(&[]) {
-                // PROVISIONAL: two more gates leave a unit out (`0x00B43CA0`), not ported: `0x00AA1660` (unit
-                // +0x98, when set, must be in the region's list +0x270) and `0x00A27960` (the unit must not be in
-                // the campaign-wide list model +0xFA8 → +0x24). Their sources are not traced.
-                if !self.rules.units.contains_key(u) || !self.rules.faction_may_recruit(fkey, u) || !self.rules.government_may_recruit(government, u) {
-                    continue;
-                }
+            for u in self.building_units(r, b) {
                 let flags = building_flags | if self.unit_tech_ok(r.owner, u) { 0 } else { ENTRY_NO_TECHNOLOGY };
                 match out.iter_mut().find(|e| e.unit_key == *u) {
                     Some(e) if e.flags == 0 => {}
@@ -1390,13 +1444,19 @@ impl CampaignModel {
         if r.construction.iter().any(|c| c.slot == slot) {
             return Err(CommandError::SlotBusy);
         }
+        // A slot another faction holds offers nothing (`0x00B4333B` → `0x00A91FC0`, see [`Self::construction_options`]).
+        if !r.slot_held(slot) {
+            return Err(cannot());
+        }
         let treasury = self.world.factions.get(&r.owner).map_or(0, |f| f.treasury);
         let set = super::economy::region_effect_set(self, r);
         self.slot_option(r.owner, treasury, slot_type, level_key, &set).ok_or_else(cannot)
     }
 
     /// The construction options of a slot as the original lists them (`0x00B43300`, CONFIRMED
-    /// structure): nothing while the slot has a construction item; for a standing building the
+    /// structure): nothing while the slot has a construction item or another faction than the owner holds
+    /// it (`0x00B4333B` → `0x00A91FC0`, [`Region::slot_held`](super::world::Region::slot_held): an empty list
+    /// in every mode); for a standing building the
     /// levels it upgrades to (`building_upgrades_junction` data order), for an empty slot every
     /// level 0 (key order); each kept when its chain may stand in the slot type
     /// (`building_chain_to_slots`) and the owner may build it ([`Self::building_permitted`]).
@@ -1460,7 +1520,7 @@ impl CampaignModel {
         set: &mut Option<super::effects::EffectSet>,
     ) -> Vec<ConstructionOption> {
         let Some((slot_type, standing)) = r.construction_slot(slot) else { return Vec::new() };
-        if r.construction.iter().any(|c| c.slot == slot) {
+        if r.construction.iter().any(|c| c.slot == slot) || !r.slot_held(slot) {
             return Vec::new();
         }
         let candidates = self.slot_candidates(slot_type, standing, new_levels);
@@ -1642,6 +1702,8 @@ impl CampaignModel {
             level_key,
             turns_remaining: turns,
             cost,
+            kind: super::ConstructionKind::Build,
+            active: true,
         });
         Ok(vec![CampaignEvent::BuildingConstructionIssuedByPlayer { region }])
     }
@@ -1654,12 +1716,24 @@ impl CampaignModel {
         let r = self.world.regions.get(&region).ok_or(CommandError::UnknownRegion(region))?;
         let owner = r.owner;
         self.check_turn(owner)?;
-        let index = r.construction.iter().position(|c| c.slot == slot).ok_or(CommandError::BadSlot(slot))?;
-        let item = self.world.regions.get_mut(&region).expect("checked").construction.remove(index);
+        if !r.construction.iter().any(|c| c.slot == slot) {
+            return Err(CommandError::BadSlot(slot));
+        }
+        self.cancel_slot_item(region, slot);
+        Ok(Vec::new())
+    }
+
+    /// Deletes the item queued in `slot`, if any, crediting its stored cost to the region's owner (`0x00B1A790`
+    /// with the refund flag, CONFIRMED; see [`Self::cancel_construction`]). The demolition command cancels this
+    /// way too ([`Self::demolish_building`]).
+    pub(crate) fn cancel_slot_item(&mut self, region: RegionId, slot: SlotRef) {
+        let Some(r) = self.world.regions.get_mut(&region) else { return };
+        let Some(index) = r.construction.iter().position(|c| c.slot == slot) else { return };
+        let item = r.construction.remove(index);
+        let owner = r.owner;
         if let Some(f) = self.world.factions.get_mut(&owner) {
             super::treasury::credit(&mut f.treasury, item.cost);
         }
-        Ok(Vec::new())
     }
 
     /// Places a finished unit as the original does (SAVE_COMPAT.md §4, CONFIRMED from its saves

@@ -56,7 +56,8 @@ pub struct PathGrid {
     pub kind: Vec<u8>,
     /// True if a road spline crosses the cell.
     pub road: Vec<bool>,
-    /// Index into [`PathGrid::region_keys`] per cell (`u32::MAX` = none). `u32` so a map may have
+    /// Index into [`PathGrid::region_keys`] per cell: its land or sea region (`u32::MAX` = none;
+    /// the director finds a human's fleets in a sea area by it). `u32` so a map may have
     /// any number of regions (the original's `pathfinding.esf` stores 10-bit ids per polygon).
     pub region: Vec<u32>,
     /// Region keys (e.g. `eur_france`) indexed by [`PathGrid::region`].

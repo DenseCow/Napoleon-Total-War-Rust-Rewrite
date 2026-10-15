@@ -31,10 +31,16 @@ pub fn category(u: &LandUnit) -> Category {
     }
 }
 
-/// `FUN_0055C2A0` / `FUN_0055ABF0` (CONFIRMED): the unit rides — category cavalry or camels, or
-/// dragoons — and is not in unit state 0xF (INFERRED: dismounted; the model never dismounts).
+/// `0x0055ABF0` (CONFIRMED static): the unit rides: category cavalry (0) or camels (5), or
+/// dragoons (3) without the `dismount` ability (15) active. (`0x0055C2A0` is this with `dismount`
+/// inactive for every category: the two differ only for a cavalry or camel unit with `dismount`
+/// active.)
 pub fn mounted(u: &LandUnit) -> bool {
-    matches!(category(u), Category::Cavalry | Category::Camels | Category::Dragoons)
+    match category(u) {
+        Category::Cavalry | Category::Camels => true,
+        Category::Dragoons => u.active_abilities & (1 << super::abilities::ability_ids::DISMOUNT) == 0,
+        _ => false,
+    }
 }
 
 /// True if the strength functions count this unit (not shattered, CONFIRMED tests).
@@ -242,6 +248,24 @@ mod tests {
         u.morale_stat = 8;
         u.missile = Some(musket());
         u
+    }
+
+    /// `0x0055ABF0`: cavalry and camels ride; dragoons ride unless dismounted; the rest walk.
+    #[test]
+    fn mounted_follows_the_category_and_dismount() {
+        let mut u = line(100);
+        assert!(!mounted(&u));
+        for key in ["cavalry", "cavalry_camels"] {
+            u.unit_category = key.into();
+            u.active_abilities = 1 << super::super::abilities::ability_ids::DISMOUNT;
+            assert!(mounted(&u), "{key}");
+        }
+        u.unit_category = "dragoons".into();
+        assert!(!mounted(&u), "dismounted dragoons");
+        u.active_abilities = 0;
+        assert!(mounted(&u));
+        u.unit_category = "elephants".into();
+        assert!(!mounted(&u));
     }
 
     #[test]

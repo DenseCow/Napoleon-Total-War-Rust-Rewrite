@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use ntw_data::GameDatabase;
 use ntw_formats::esf::{EsfNode, EsfRecord};
 use ntw_sim::campaign::{
-    BuildingRef, CampaignUnit, Character, CharacterId, CharacterKind, ConstructionItem, Faction,
+    BuildingRef, CampaignUnit, Character, CharacterId, CharacterKind, ConstructionItem, ConstructionKind, Faction,
     FactionId, Fort, FortId, ForceId, GovernmentType, MilitaryForce, RecruitmentItem, RecruitmentItemId, RecruitmentManager, RecruitmentSource,
     Region, RegionId, RegionSlot, Settlement, SlotRef, Stance, UnitId, World,
 };
@@ -583,6 +583,8 @@ fn read_ship_states(rec: &EsfRecord, out: &mut std::collections::BTreeMap<UnitId
                 guns: n(11) as u32,
                 sunk: d.get_bool(12).unwrap_or(false),
                 max_guns: n(13) as u32,
+                // `NAVAL_UNIT` #3: ordered to repair in port (unit +0x168, the saver `0x00895640`).
+                repairing: u.get_bool(3).unwrap_or(false),
             },
         );
     }
@@ -677,18 +679,12 @@ fn read_region(rec: &EsfRecord, path: &str, check: &mut Checker<'_>) -> Result<(
             let spath = format!("{smpath}/REGION_SLOT_ARRAY[{i}]/REGION_SLOT");
             let slot_key = slot.get_str(3).unwrap_or_default().to_string();
             let building = read_building(slot, &spath, &key, check)?;
-            read_construction(slot, SlotRef::Slot(slots.len()), &mut construction);
+            push_construction(slot, SlotRef::Slot(slots.len()), building.as_ref(), &key, check, &mut construction);
             slots.push(RegionSlot { slot_type: slot_type(&slot_key, check.db), key: slot_key, building,
                 // #6/#7: map position (CONFIRMED, see `RegionSlot::position`).
                 position: slot.get_i32(6).zip(slot.get_i32(7)).map(|(x, z)| (Fixed20::from_raw(x), Fixed20::from_raw(z))),
                 port: slot.child("REGION_RECRUITMENT_MANAGER").is_some(),
-                // #0 SIEGEABLE_GARRISON_RESIDENCE #0 GARRISON_RESIDENCE #0: the holding faction's id.
-                holder: slot
-                    .child("SIEGEABLE_GARRISON_RESIDENCE")
-                    .and_then(|s| s.child("GARRISON_RESIDENCE"))
-                    .and_then(|g| g.get_u32(0))
-                    .filter(|&f| f != 0)
-                    .map(|f| FactionId(f as i32)),
+                holder: slot_holder(slot, owner),
                 id: slot.get_u32(2).unwrap_or(0) });
             // Port slots have their own (naval) recruitment queue.
             if let Some(m) = slot.child("REGION_RECRUITMENT_MANAGER") {
@@ -696,16 +692,18 @@ fn read_region(rec: &EsfRecord, path: &str, check: &mut Checker<'_>) -> Result<(
             }
         }
     }
-    let mut road = None;
+    let (mut road, mut road_holder) = (None, None);
     if let Some(slot) = wrapped_slot(sm, "ROAD_SLOT") {
         road = read_building(slot, &format!("{smpath}/ROAD_SLOT"), &key, check)?;
-        read_construction(slot, SlotRef::Road, &mut construction);
+        road_holder = slot_holder(slot, owner);
+        push_construction(slot, SlotRef::Road, road.as_ref(), &key, check, &mut construction);
     }
     // FORTIFICATION_SLOT: the settlement's fortification building (a REGION_SLOT like the road slot, CONFIRMED structure).
-    let mut fortification = None;
+    let (mut fortification, mut fortification_holder) = (None, None);
     if let Some(slot) = wrapped_slot(sm, "FORTIFICATION_SLOT") {
         fortification = read_building(slot, &format!("{smpath}/FORTIFICATION_SLOT"), &key, check)?;
-        read_construction(slot, SlotRef::Walls, &mut construction);
+        fortification_holder = slot_holder(slot, owner);
+        push_construction(slot, SlotRef::Walls, fortification.as_ref(), &key, check, &mut construction);
     }
     match rec.child("REGION_RECRUITMENT_MANAGER") {
         Some(m) => read_recruitment(m, &key, RecruitmentManager::Region, &mut recruitment_queue, &mut recruitment_sources, check),
@@ -735,6 +733,14 @@ fn read_region(rec: &EsfRecord, path: &str, check: &mut Checker<'_>) -> Result<(
         .flat_map(|a| a.records())
         .filter_map(|c| Some((c.get_str(0)?.to_string(), c.get_i32(11).unwrap_or(0), c.get_i32(12).unwrap_or(0))))
         .collect();
+    // `RESOURCES_ARRAY`: one utf16 key per item (CONFIRMED shape: 102 items over the 72 regions of
+    // `eur_napoleon`), the region's unit resources (`0x00A45950` at `0x00A467BE`).
+    let unit_resources: Vec<String> = rec
+        .record_array("RESOURCES_ARRAY")
+        .into_iter()
+        .flat_map(|a| a.items.iter())
+        .filter_map(|it| Some(it.first()?.as_str()?.to_string()))
+        .collect();
 
     if check.db.region(&key).is_none() {
         check
@@ -749,6 +755,8 @@ fn read_region(rec: &EsfRecord, path: &str, check: &mut Checker<'_>) -> Result<(
         slots,
         road,
         fortification,
+        road_holder,
+        fortification_holder,
         population,
         population_state,
         base_gdp,
@@ -760,6 +768,7 @@ fn read_region(rec: &EsfRecord, path: &str, check: &mut Checker<'_>) -> Result<(
         tax_exempt,
         religions,
         class_bases,
+        unit_resources,
         recruitment_queue,
         construction,
         // SIEGEABLE_GARRISON_RESIDENCE #12: the garrisoned army (CONFIRMED, SAVE_COMPAT.md §4);
@@ -779,9 +788,10 @@ fn read_region(rec: &EsfRecord, path: &str, check: &mut Checker<'_>) -> Result<(
 ///
 /// **The per-item layout is INFERRED** (review 0-E: the free model's notes cite read-only decompiles
 /// of `0x00A51E30` and `0x00AEB190`, but no decompile of either is kept in the evidence folder, and
-/// no shipped file has an item to check it against). As recorded: per item the region's reader
-/// (`0x00A51E30`) reads **one `u32` itself** and then lets the fort object read the rest
-/// (`FUN_00AFD010`); the fort object's loader `FUN_00AEB190` reads a map position -- two `f32`,
+/// no shipped file has an item to check it against). The region's writer (`0x00A51E30`, decompiled
+/// 2026-10-15) writes **one integer itself** (ESF type 4, `i32`) per item and then lets the fort object
+/// write the rest (`0x00AFD010`); as recorded, the reader does the same in reverse; the fort
+/// object's loader `FUN_00AEB190` reads a map position -- two `f32`,
 /// stored at fort +0x120 -- and then a string (fort +0x188), plus a second string when the record's
 /// version byte says 2 and a third when it says 4. Those version-gated strings are not read here.
 /// PROVISIONAL: only the item's top-level nodes are searched; if the fort object's fields sit in a
@@ -834,6 +844,18 @@ pub(crate) fn wrapped_slot<'a>(sm: &'a EsfRecord, name: &str) -> Option<&'a EsfR
     slot.child("REGION_SLOT").or(Some(slot))
 }
 
+/// The faction holding a `REGION_SLOT` (#0 SIEGEABLE_GARRISON_RESIDENCE #0 GARRISON_RESIDENCE #0,
+/// CONFIRMED), `None` when it stores none or names the region's `owner` (the model's "the owner's", so a
+/// later owner change, which hands such slots over, needs no stored name). The road and walls slots carry
+/// one like any slot (`0x00A4DCB0` builds all three kinds with `0x00A4D4F0`, CONFIRMED).
+pub(crate) fn slot_holder(slot: &EsfRecord, owner: i32) -> Option<FactionId> {
+    slot.child("SIEGEABLE_GARRISON_RESIDENCE")
+        .and_then(|s| s.child("GARRISON_RESIDENCE"))
+        .and_then(|g| g.get_u32(0))
+        .filter(|&f| f != 0 && f as i32 != owner)
+        .map(|f| FactionId(f as i32))
+}
+
 /// The building in a slot record's `BUILDING_MANAGER`, if any.
 fn read_building(
     slot: &EsfRecord,
@@ -855,22 +877,48 @@ fn read_building(
     Ok(Some(BuildingRef { level_key, health: u32_at(b, 0, &bpath)? }))
 }
 
-/// `BUILDING_MANAGER/BUILDING_CONSTRUCTION_ITEM` (saves): {u32, bool, #2 u32 turns done,
-/// #3 u32 total turns, #4 u32 cost, #5 utf16 level key}. #4 is the item's stored cost (+0x14), kept bit for bit (the
-/// refund credits exactly it, CONFIRMED in `0x00B1A790`); which save field holds which member is INFERRED from the user's
-/// saves (#2 < #3 always; #4 near the `building_levels` cost).
-pub(crate) fn read_construction(slot: &EsfRecord, index: SlotRef, out: &mut Vec<ConstructionItem>) {
+/// `BUILDING_MANAGER/BUILDING_CONSTRUCTION_ITEM` (saves): {#0 u32 item type, #1 bool active, #2 u32 turns done,
+/// #3 u32 total turns, #4 u32 cost, then the type's own fields}. CONFIRMED from the item writer `0x00AFBA90`
+/// (vtable +4, then +0x8, +0xC, +0x10, +0x14, then the type's own writer, vtable +0) and its reader `0x00B256C0`,
+/// which makes the item by #0 (`0x00AE7040` upgrade, `0x00AE6EF0` new building, `0x00AE6FE0` repair, `0x00AE6EB0`
+/// demolish) and reads its tail: 0 upgrade and 1 new building, #5 the utf16 level key; 2 repair, #5 the u32 health
+/// it adds per turn (+0x18, `0x00B7A4A0` writes it); 3 demolish, nothing. #4 is the item's stored cost (+0x14),
+/// kept bit for bit (the refund credits exactly it, `0x00B1A790`). A repair's level is the standing building's
+/// (`standing`) and its length is #3. #1 is the item's active byte (+0x8, [`ConstructionItem::active`]):
+/// `StepSlotConstructionItem` `0x00B78800` steps only an active item (CONFIRMED, `0x00B7880E`).
+///
+/// `Ok(None)` when the slot has no item; `Err(type)` when the item's fields do not fit its type.
+pub(crate) fn read_construction(slot: &EsfRecord, index: SlotRef, standing: Option<&BuildingRef>) -> Result<Option<ConstructionItem>, Option<u32>> {
     let Some(item) = slot.child("BUILDING_MANAGER").and_then(|m| m.child("BUILDING_CONSTRUCTION_ITEM")) else {
-        return;
+        return Ok(None);
     };
-    if let (Some(done), Some(total), Some(cost), Some(key)) = (item.get_u32(2), item.get_u32(3), item.get_u32(4), item.get_str(5)) {
-        out.push(ConstructionItem {
-            slot: index,
-            level_key: key.to_string(),
-            turns_remaining: total.saturating_sub(done).max(1),
-            // The item's int cost (+0x14), taken bit for bit: a negative cost survives the round trip.
-            cost: cost as i32,
-        });
+    let item_type = item.get_u32(0);
+    let (Some(active), Some(done), Some(total), Some(cost)) = (item.get_bool(1), item.get_u32(2), item.get_u32(3), item.get_u32(4)) else { return Err(item_type) };
+    let (level_key, kind) = match item_type {
+        Some(0 | 1) => (item.get_str(5).ok_or(item_type)?.to_string(), ConstructionKind::Build),
+        Some(2) => {
+            let health_per_turn = item.get_u32(5).ok_or(item_type)?;
+            (standing.ok_or(item_type)?.level_key.clone(), ConstructionKind::Repair { health_per_turn, turns: total.max(1) })
+        }
+        Some(3) => (String::new(), ConstructionKind::Demolish),
+        _ => return Err(item_type),
+    };
+    Ok(Some(ConstructionItem {
+        slot: index,
+        level_key,
+        turns_remaining: total.saturating_sub(done).max(1),
+        // The item's int cost (+0x14), taken bit for bit: a negative cost survives the round trip.
+        cost: cost as i32,
+        kind,
+        active,
+    }))
+}
+
+/// [`read_construction`] into `out`, an unreadable item skipped with a warning.
+fn push_construction(slot: &EsfRecord, index: SlotRef, standing: Option<&BuildingRef>, region: &str, check: &mut Checker<'_>, out: &mut Vec<ConstructionItem>) {
+    match read_construction(slot, index, standing) {
+        Ok(item) => out.extend(item),
+        Err(item_type) => check.warnings.push(LoadWarning::UnreadableConstructionItem { region: region.to_string(), slot: index, item_type }),
     }
 }
 

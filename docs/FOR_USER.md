@@ -7,6 +7,51 @@ The morning report from night sessions, newest night first. Two lists per night:
 - **Done tonight:** everything finished, merged or settled. One line each: what, commit, how to see it.
   Claude clears a night's list once the user has read it.
 
+## 2026-10-14 (night mode, 21-point block)
+
+### Needs you
+
+- **AI turn-change debugger sitting (~5 min):** settles whether a turn change refreshes the AI's remembered relations (INFERRED `0x00CF7F60` → `0x00CF0B10`). Claude launches the original under Ghidra's debugger; you load any campaign and end one turn.
+- **Gait debugger sitting** (still open, see 2026-10-13 below).
+
+### Done
+
+- **recruit-gates merged** (`87acfa1f`): which units a region can recruit now follows the game's two hidden checks (regional unit resources, script restrictions); old saves still load. Nothing visible beyond the recruit list.
+- **recruit-cost2 merged** (`6e277c42`): Spain's recruit prices now match the original (a saved +25 unit-category price bonus was being lost); 394 of 406 prices in your saves match, up from 392.
+- **cai-belief merged** (`e9beb1a0`): the AI judges its rivals from its own remembered view of relations, refreshed only when the original refreshes it (deals, wars, captures, spy/assassination/sabotage missions). Nothing visible; shows in AI decisions.
+- **polish16 merged** (`090d14b0`): a unit's men now start their stand, ready and aim animations together, as the original does (exe-confirmed). Quick look: `cargo run --release -- --battle-key NHB_Austerlitz --skip-deployment`, select a line unit and watch the men stand and aim in step.
+- **treasury3 merged** (`d2e6598b`): fleets can repair damaged ships in port for gold, as in the original; moving, landing troops or fighting cancels the repair and refunds it. Nothing visible yet: the repair button is not wired to our UI (BACKLOG).
+- **polish17 merged** (`109ba0a7`): Ghidra write-ups and notes; one battle animation input confirmed from the exe. Nothing visible.
+- **recruit-followups merged** (`8ffe051e`): a mod unit naming an unknown resource is left out of every list, as in the original; walls effects on a region now count. Nothing visible in vanilla.
+- **cai-broadcasters merged** (`33fbcc74`): making a faction a protectorate now ends its old ties and alliances as the original does; the Napoleon campaign's loot-resentment rule (abandoned ally, -50) now applies, read from data. Shows in diplomacy after a protectorate deal.
+- **polish18 merged** (`2ac7fa83`): saved bonuses naming an unknown entry now resolve as the original does; Ghidra write-ups. Nothing visible.
+- **treasury4 merged** (`67d58909`): the AI repairs its damaged fleets in port as the original does, and buys nothing while the tutorial's scripted shroud is on. Nothing visible directly.
+- **polish19 merged** (`8f72788b`): a ship-repair test, Ghidra struct sizes, review leftovers. Nothing visible.
+- **construction merged** (`f379268c`): buildings now finish at the end of the round, before diplomacy and research, as in the original; you can't queue a building in a slot something else holds; a captured region's slots pass to the new owner by the original's rule; saves keep slot holders. Quick look: queue a building, end turn, it completes on the right turn.
+- **deals-fix merged** (`9af968b3`): a trade embargo in a deal now falls on the right side, as in the original; a payment you propose is capped to what the payer can afford and the row shows the capped amount; fixed an original bug where a faction in debt turned a capped offer into a demand. Quick look: in diplomacy, offer more money than you have; the row shows your treasury.
+- **formation merged** (`6f89b634`): battle units close up their ranks after losing men, and a unit's width and depth come from where its men stand, as in the original. Quick look: `cargo run --release -- --battle-key NHB_Austerlitz --skip-deployment`, let a line unit take casualties and watch the gaps close.
+- **polish20 merged** (`bc1dc7bf`): saved religion-and-class bonuses keep both of their values, as in the original; Ghidra write-ups. Nothing visible in vanilla saves.
+- **broadcasters2 merged** (`172815ea`): a faction that loses its capital moves it to another settlement; with none left the faction is destroyed, and liberating one of its regions brings it back, as in the original. See it: take a small faction's last settlement in a campaign, then liberate it.
+- **formation3 merged** (`90fa3a76`): when a unit re-forms or moves, each soldier walks to the nearest free spot in the formation instead of jumping into place; units reform at a walk or a run as in the original. Quick look: `cargo run --release -- --battle-key NHB_Austerlitz --skip-deployment`, order a line unit to turn or move and watch the men walk to their places.
+- **construction2 merged** (`dccf6500`): damaged buildings repair over turns and buildings can be demolished, as in the original; repairs and demolitions in original saves now load. Our own saves are now version 4; a version-3 save made mid-turn between 22:51 and 23:51 on 2026-10-14 finishes its buildings one turn early (nothing lost). Quick look: load a campaign save with a damaged building and press repair, or demolish a building in a settlement.
+- **polish21 merged** (`4a54c4cc`): when a fleet leaves port (sails off, is destroyed, or its admiral dies), the port goes back to the region's owner, as in the original. Deal payments, repeated negotiation text and Ghidra notes were also tidied. Logic only, covered by tests; nothing to look at.
+- **director2 merged** (`4cd620ea`): the campaign AI now sees fleets at sea in their sea region, as the original does, and its region hand-overs keep agents in place (traced). Logic only, covered by tests; nothing to look at.
+- **formation4 merged** (`e421bc5a`): idle units re-form only when the original's rule says so, and a unit's training level now feeds its morale and drill as in the original; a mod can add training levels. Quick look (optional): `cargo run --release -- --battle-key NHB_Austerlitz --skip-deployment`, leave a line idle after a move and see it settle into its ranks.
+- Night stopped on the block cap (week 20%). Left unfinished, to resume next session: broadcasters3, transfer3, formation5, polish22 (docs/HANDOFF.md "Resume points"). Nothing needs you beyond the debugger sittings above.
+
+## 2026-10-13 (usage stop at the weekly cap)
+
+### Needs you
+
+- **Gait debugger sitting (~10 min, BACKLOG "Gait: read n and k"):** Claude launches the original under Ghidra's
+  debugger; you give one cavalry and one infantry unit a walk order in any custom battle. It breaks at `0x0054C691`
+  and logs n, k, D, t, then watches `0x00659600` read descriptor word 9. Settles `TIMED_MOVE_PLANNED_SECONDS`.
+
+### Done
+
+- **Merged and pushed:** treasury2 (`ed17736a`), payment-capital (`321e584d`), polish15 (`a1f306e4`), gait-trace.
+  Nothing new to look at in game (battle and campaign rules under the hood).
+
 ## 2026-10-11 (store run, night mode until you're back)
 
 ### Needs you

@@ -315,6 +315,15 @@ fn loads_all_eight_startpos() {
         }
         println!("    {checked} region owners cross-checked with CAMPAIGN_PREOPEN_MAP_INFO");
         assert!(checked > 0, "{c}: ownership cross-check found nothing");
+
+        // The out-of-game flag (faction +0x824) is read for every faction of every campaign, and a
+        // faction holding a region at the start is in the game.
+        assert!(w.faction_details.values().all(|d| d.out_of_game.is_some()), "{c}: every faction has its flag");
+        let out = w.faction_details.iter().filter(|(_, d)| d.out_of_game == Some(true)).map(|(f, _)| *f);
+        for f in out {
+            assert!(!w.regions.values().any(|r| r.owner == f), "{c}: {} is out of the game holding a region", w.factions[&f].key);
+        }
+        println!("    {c}: {} factions out of the game", w.faction_details.values().filter(|d| d.out_of_game == Some(true)).count());
     }
 }
 
@@ -399,6 +408,15 @@ fn europe_startpos_exact_counts() {
     let gov = fd.governorship().expect("governor_europe");
     assert_eq!(gov.regions.len(), w.regions.values().filter(|r| r.owner == france.id).count());
     assert_eq!((france.tax_lower.as_str(), gov.taxes.lower_rate), ("tax_normal", 15));
+    // The out-of-game flag (faction +0x824) is read for every faction: set exactly for the factions
+    // that hold no region at the start (they emerge later), clear for France.
+    assert!(w.faction_details.values().all(|d| d.out_of_game.is_some()), "every faction has its flag");
+    assert_eq!(fd.out_of_game, Some(false));
+    let out: BTreeSet<_> = w.faction_details.iter().filter(|(_, d)| d.out_of_game == Some(true)).map(|(f, _)| *f).collect();
+    let landless: BTreeSet<_> = w.factions.keys().filter(|f| !w.regions.values().any(|r| r.owner == **f)).copied().collect();
+    println!("eur out of game: {} of {} factions, {} landless", out.len(), w.faction_details.len(), landless.len());
+    assert_eq!(out.len(), 18, "the eur_napoleon factions out of the game at the start");
+    assert!(out.is_subset(&landless), "a faction out of the game holds no region");
     // Stances are stored on both sides; report (not assert) whether they all mirror.
     println!("eur diplomacy symmetric: {}", w.diplomacy_is_symmetric());
 

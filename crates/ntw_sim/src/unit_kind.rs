@@ -133,6 +133,23 @@ impl Category {
     pub fn of_key(key: &str) -> Option<Category> {
         ORIGINAL_CATEGORIES.iter().find(|(k, _)| *k == key).map(|(_, c)| *c)
     }
+
+    /// The category of a code (`UNIT_RECORD` +0x1C), `None` past the last.
+    pub fn of_code(code: u8) -> Option<Category> {
+        ORIGINAL_CATEGORIES.get(usize::from(code)).map(|(_, c)| *c)
+    }
+
+    /// The autoresolve range class (resolver unit +0x9C): the 13-entry `i32` table (4 bytes per entry)
+    /// that the ctor `0x0070D370` fills at +0x40, by category code, copied into the unit by `0x007CA330`
+    /// through the ctors `0x0070D4E0` / `0x0070D580` → `0x0070D740` (CONFIRMED, polish21): artillery 2,
+    /// line of battle 3, frigate and galley 2, every other category 1. The land and naval pair queries' range level (`0x0078F5A0`) is A's minus B's.
+    pub fn range_class(self) -> i32 {
+        match self {
+            Category::NavalLineOfBattle => 3,
+            Category::Artillery | Category::NavalFrigate | Category::NavalGalley => 2,
+            _ => 1,
+        }
+    }
 }
 
 /// The category of a `units` category key: the original's chain, an unknown key artillery (see the
@@ -179,5 +196,17 @@ mod tests {
         assert_eq!(class_code("naval_transport"), 0x2D);
         assert_eq!(class_code("samurai_archers"), 0, "unknown: 0, as the exe");
         assert_eq!(unknown_categories(["infantry", "ashigaru", "cavalry", "ashigaru", "samurai"]), ["ashigaru", "samurai"]);
+    }
+
+    /// The range class by category code is the 13-entry `i32` table (4 bytes per entry) that the ctor
+    /// `0x0070D370` fills at +0x40 (read 2026-10-15).
+    #[test]
+    fn range_class_is_the_exe_table() {
+        let table = [1, 2, 1, 1, 1, 1, 3, 2, 2, 1, 1, 1, 1];
+        for (i, (key, c)) in ORIGINAL_CATEGORIES.iter().enumerate() {
+            assert_eq!(c.range_class(), table[i], "{key}");
+            assert_eq!(Category::of_code(i as u8), Some(*c));
+        }
+        assert_eq!(Category::of_code(13), None);
     }
 }

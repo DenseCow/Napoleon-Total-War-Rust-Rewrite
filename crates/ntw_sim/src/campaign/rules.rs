@@ -63,6 +63,13 @@ pub struct UnitRules {
     /// The commander's recruitment panel divides the path cost from the source settlement by it (`0x00B41F60`,
     /// [`super::CampaignModel::commander_recruitment`]); 23..55 in the vanilla data. A value below 1 (mod data) is read as 1.
     pub travel_speed: i32,
+    /// `units` #14 (`recruitment_scope`, `UNIT_RECORD` +0x98): the `region_unit_resources` key the unit
+    /// needs, `None` when empty. CONFIRMED: the `units` row builder `0x00EDC000` looks a non-empty value
+    /// up in `region_unit_resources` and the record ctor `0x00E91320` stores the found record at +0x98;
+    /// `0x00AA1660` then lists the unit only in a region whose `RESOURCES_ARRAY`
+    /// ([`super::world::Region::unit_resources`]) holds it (vanilla: `global`, `horses`, ...). A unit whose
+    /// value is not a key never reaches the rules: the loader drops its row, as `0x00EDC000` does.
+    pub unit_resource: Option<String>,
 }
 
 /// A land unit's autoresolve inputs, from its `units` / `unit_stats_land` rows.
@@ -526,11 +533,11 @@ impl CampaignRules {
         }
         r.units.insert(
             "test_unit".into(),
-            UnitRules { cost: 500, upkeep: 10, turns: 2, is_naval: false, men: 100, autoresolve: Some(TEST_AUTORESOLVE), category: "infantry".into(), unit_class: "infantry_line".into(), campaign_cost: 400, flag_21: false, militia: false, campaign_stealth: false, unit_cap: 0, travel_speed: 30 },
+            UnitRules { cost: 500, upkeep: 10, turns: 2, is_naval: false, men: 100, autoresolve: Some(TEST_AUTORESOLVE), category: "infantry".into(), unit_class: "infantry_line".into(), campaign_cost: 400, flag_21: false, militia: false, campaign_stealth: false, unit_cap: 0, travel_speed: 30, unit_resource: None },
         );
         r.units.insert(
             "test_recruit".into(),
-            UnitRules { cost: 500, upkeep: 10, turns: 2, is_naval: false, men: 100, autoresolve: Some(TEST_AUTORESOLVE), category: "infantry".into(), unit_class: "infantry_line".into(), campaign_cost: 400, flag_21: false, militia: false, campaign_stealth: false, unit_cap: 0, travel_speed: 30 },
+            UnitRules { cost: 500, upkeep: 10, turns: 2, is_naval: false, men: 100, autoresolve: Some(TEST_AUTORESOLVE), category: "infantry".into(), unit_class: "infantry_line".into(), campaign_cost: 400, flag_21: false, militia: false, campaign_stealth: false, unit_cap: 0, travel_speed: 30, unit_resource: None },
         );
         r.buildings.insert(
             "test_building_level".into(),

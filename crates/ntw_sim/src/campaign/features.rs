@@ -50,6 +50,9 @@ pub struct CampaignFeatures {
     /// turns a year). `None`: the exe's step for the calendar's `turns_per_year`
     /// ([`crate::calendar::original_date_step`]).
     pub date_step: Option<u32>,
+    /// Looting turns the region's homeland faction against the looter (`0x00B541E0` → `0x00B544F0`, CONFIRMED
+    /// in `spa_napoleon`; applied when a capture is resolved, [`super::capture`]). `None`: no change.
+    pub loot_resentment: Option<LootResentment>,
 }
 
 impl Default for CampaignFeatures {
@@ -65,6 +68,7 @@ impl Default for CampaignFeatures {
             fixed_commodity_prices: false,
             ai_recruitment_points: Vec::new(),
             date_step: None,
+            loot_resentment: None,
         }
     }
 }
@@ -79,6 +83,46 @@ impl CampaignFeatures {
     pub fn ai_recruitment_bonus(&self, faction_key: &str) -> i32 {
         self.ai_recruitment_points.iter().filter(|(k, _)| k == faction_key).map(|(_, p)| *p).sum()
     }
+
+    /// Checks the rows the model looks up by key, once, when a campaign's rules load (the importer and a
+    /// source's own features): a [`Self::loot_resentment`] whose factor names no attitude factor or event is
+    /// logged and dropped, so looting then changes no attitude.
+    pub fn validated(mut self) -> Self {
+        if let Some(lr) = &self.loot_resentment
+            && lr.event().is_none()
+        {
+            log::warn!("loot resentment: no attitude factor or event {:?}; looting will change no attitude", lr.factor);
+            self.loot_resentment = None;
+        }
+        self
+    }
+}
+
+impl LootResentment {
+    /// The factor's attitude event (its drift and limit, `0x00B27FF0`), or `None` when [`Self::factor`] names no
+    /// attitude factor or event ([`CampaignFeatures::validated`] drops such a row when the rules load).
+    pub fn event(&self) -> Option<super::treaties::AttitudeEvent> {
+        if !super::details::ATTITUDE_FACTORS.contains(&self.factor.as_str()) {
+            return None;
+        }
+        super::treaties::ATTITUDE_EVENTS.iter().find(|(k, _)| *k == self.factor).map(|(_, e)| *e)
+    }
+}
+
+/// The attitude a looted region's homeland faction takes towards the looter ([`CampaignFeatures::loot_resentment`]).
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct LootResentment {
+    /// (the region's rebel faction key, the faction that resents the looting), tested in order, the first match
+    /// only (CONFIRMED: `spa_portugal` and `portugese_rebels` → `spa_portugal`, `spa_spain` → `spa_spain`).
+    pub homelands: Vec<(String, String)>,
+    /// A looter that causes no resentment (CONFIRMED: `spa_france`).
+    pub exempt_looter: Option<String>,
+    /// The attitude factor changed, by its key; its event gives the drift and limit (CONFIRMED:
+    /// `abandoned_ally_in_war`, `0x00B27FF0` event 0, record +0x1C0).
+    pub factor: String,
+    /// The value added to the factor (CONFIRMED: −50).
+    pub value: i32,
 }
 
 /// The extra effects of the units whose key ends in `suffix` ([`CampaignFeatures::unit_key_effects`]).

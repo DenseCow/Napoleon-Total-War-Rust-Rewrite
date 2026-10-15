@@ -35,13 +35,18 @@
 //! id order with [`super::World::region_neighbours`]. The factions are walked in the CAI world's
 //! order ([`super::World::ai_factions`]; a map without it uses faction id order).
 //!
-//! Evidence tags: CONFIRMED unless marked. PROVISIONAL: a human's fleets in a sea area are not
-//! seen by the transferable test ([`human_inside`]); its siege test is never true (no sieges in
-//! the model, [`transferable_at`]); the relation is not the AI's stored copy after a deal proposal
-//! ([`rival_score`]); the effects the model has no system for (the autoresolver modifiers, unit
-//! experience, the transfer's new army, the teleport desire) and the desires whose gathers are not
-//! traced ([`director_desires`]), so the RNG's sequence matches the original's only until one of
-//! those draws.
+//! Evidence tags: CONFIRMED unless marked. PROVISIONAL: the transferable test's siege test is never
+//! true (no sieges in the model, [`transferable_at`]); the effects the model has no system for
+//! (the autoresolver modifiers, unit experience, the transfer's new army, the teleport desire) and
+//! the desires whose gathers are not traced ([`director_desires`]), so the RNG's sequence matches
+//! the original's only until one of those draws. PROVISIONAL: of the exe's many readers of the
+//! relation belief (`GetCaiRelationBelief` `0x00A74A20`, 185 callers) the model has only the
+//! AI's evaluation of a proposed deal ([`CampaignModel::refresh_relation_belief`]), so a belief
+//! another reader would have stored during a human's turn is rebuilt later in ours, possibly from
+//! newer stances ([`DirectorState::beliefs`]). PROVISIONAL: the transfer does not expel the other
+//! factions' armies and docked navies from the region (`0x00A64AC0` → `0x008D9DC0`, the placement
+//! `0x008DCB30` untraced; `director_transfer`). INFERRED: the turn change's mark
+//! of every belief ([`CampaignModel::director_handover`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -284,8 +289,23 @@ pub struct PendingTransfer {
     pub queued_owner: FactionId,
 }
 
+/// A faction's CAI relation belief (entry `+8` of the faction's `+0x100` list, found by
+/// `0x00A89E00`, read through `0x00A74A20`), as `BuildCaiRelationBelief` `0x00ABAFB0` builds it
+/// ([`build_relation_belief`]). CONFIRMED.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct RelationBelief {
+    /// The relation value ([`relation_value`]) towards each other faction of the CAI world, in
+    /// [`ai_order`].
+    pub relations: Vec<(FactionId, f32)>,
+    /// The enemy list (count `+0x4C`, data `+0x50`): the CAI world's factions in [`ai_order`],
+    /// without the owner, that are the rebels or in the game and at war with it
+    /// ([`CampaignModel::at_war`]).
+    pub enemies: Vec<FactionId>,
+}
+
 /// The director's state (`CDIR_INTERFACE`): saved and hashed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DirectorState {
     /// +0x60: the director's own RNG (read from the start position or save; [`RNG_SEED`] without one;
@@ -303,12 +323,28 @@ pub struct DirectorState {
     /// `CDIR_DESIRE_UNIT_XP_UPGRADER_FACTION_COUNT`). A faction not listed has 0.
     #[cfg_attr(feature = "serde", serde(default))]
     pub xp_counters: BTreeMap<FactionId, u32>,
+    /// The clean CAI relation beliefs ([`RelationBelief`]; the exe keeps them in the CAI, not in
+    /// `CDIR_INTERFACE`, and the director reads them): a faction listed has a clean belief, stored
+    /// by a read ([`CampaignModel::refresh_relation_belief`]); a faction not listed has a dirty one,
+    /// which the next read rebuilds ([`relation_belief_value`], [`believes_at_war`]). Every
+    /// diplomacy change empties it ([`CampaignModel::diplomacy_changed`]), and so does each turn
+    /// change ([`CampaignModel::director_handover`]). An original save's beliefs are not read: all
+    /// start dirty (INFERRED: the CAI file's belief records are not imported).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub beliefs: BTreeMap<FactionId, RelationBelief>,
 }
 
 impl Default for DirectorState {
     /// A new campaign's.
     fn default() -> Self {
-        DirectorState { rng: CaRng::new(RNG_SEED), transfer_counter: 0, pending: Vec::new(), autoresolver_pairs: Vec::new(), xp_counters: BTreeMap::new() }
+        DirectorState {
+            rng: CaRng::new(RNG_SEED),
+            transfer_counter: 0,
+            pending: Vec::new(),
+            autoresolver_pairs: Vec::new(),
+            xp_counters: BTreeMap::new(),
+            beliefs: BTreeMap::new(),
+        }
     }
 }
 
@@ -331,6 +367,19 @@ impl DirectorState {
         for (f, n) in &self.xp_counters {
             h.i32(f.raw());
             h.u32(*n);
+        }
+        h.u32(self.beliefs.len() as u32);
+        for (f, b) in &self.beliefs {
+            h.i32(f.raw());
+            h.u32(b.relations.len() as u32);
+            for (g, v) in &b.relations {
+                h.i32(g.raw());
+                h.u32(v.to_bits());
+            }
+            h.u32(b.enemies.len() as u32);
+            for g in &b.enemies {
+                h.i32(g.raw());
+            }
         }
     }
 }
@@ -393,6 +442,47 @@ pub fn relation_value(model: &CampaignModel, f: FactionId, x: FactionId) -> f32 
     v / (w.attitude + w.allied + w.access + w.trade + w.peace)
 }
 
+/// `f`'s CAI relation belief as `BuildCaiRelationBelief` `0x00ABAFB0` builds it from the CAI
+/// world's faction list (CAI world `+0x110`: count `+0x11C`, data `+0x120`; [`ai_order`]): the
+/// relation value towards each other faction ([`relation_value`]) and the enemy list
+/// ([`on_enemy_list`]). CONFIRMED.
+pub fn build_relation_belief(model: &CampaignModel, f: FactionId) -> RelationBelief {
+    let order = ai_order(model);
+    let others = || order.iter().copied().filter(move |&g| g != f);
+    RelationBelief {
+        relations: others().map(|g| (g, relation_value(model, f, g))).collect(),
+        enemies: others().filter(|&g| on_enemy_list(model, f, g)).collect(),
+    }
+}
+
+/// Whether a rebuild of `f`'s relation belief puts `g` (not `f`) on its enemy list (`0x00ABAFB0`):
+/// the rebels (`0x00C3FE80`) always; any other faction when it is in the game (`+0x824` clear,
+/// [`CampaignModel::in_the_game`]) and `f`'s stance towards it is war (`0x00B64C50` record
+/// `+0x790 → +0x10` = 0, [`CampaignModel::at_war`]). CONFIRMED.
+fn on_enemy_list(model: &CampaignModel, f: FactionId, g: FactionId) -> bool {
+    model.is_rebel_faction(g) || (model.in_the_game(g) && model.at_war(f, g))
+}
+
+/// `f`'s relation towards `x` as a read of `f`'s relation belief gets it (`0x00A74A20`): the stored
+/// value while the belief is clean ([`DirectorState::beliefs`]), else the value the read's rebuild
+/// gives ([`relation_value`], what [`build_relation_belief`] stores). The pool's reads keep
+/// nothing: the turn change after the pool marks every belief dirty anyway
+/// ([`CampaignModel::director_handover`]).
+pub fn relation_belief_value(model: &CampaignModel, f: FactionId, x: FactionId) -> f32 {
+    let stored = model.director.beliefs.get(&f).and_then(|b| b.relations.iter().find(|e| e.0 == x));
+    stored.map_or_else(|| relation_value(model, f, x), |e| e.1)
+}
+
+/// Whether `g` is on `f`'s relation belief's enemy list (`0x00A649F0` on the belief
+/// `0x00A74A20` returns): the stored list while the belief is clean, else what the read's rebuild
+/// lists ([`on_enemy_list`]). False for `g` = `f`.
+pub fn believes_at_war(model: &CampaignModel, f: FactionId, g: FactionId) -> bool {
+    match model.director.beliefs.get(&f) {
+        Some(b) => b.enemies.contains(&g),
+        None => g != f && on_enemy_list(model, f, g),
+    }
+}
+
 /// A faction's player rival score (`0x00BD21B0`, the belief stored at +0x100): how much of a rival
 /// to the human players it is, the highest over the humans of
 /// `m × (RELATION_PCT × (1 − relation) + VICTORY_REGIONS_PCT × b + PROXIMITY_PCT × c)`, capped at
@@ -401,22 +491,26 @@ pub fn relation_value(model: &CampaignModel, f: FactionId, x: FactionId) -> f32 
 /// major power, else `MINOR_FACTION_WEIGHT`. 0 for the rebels, the [`DirectorRules::no_rival_keys`],
 /// a human and a faction out of the game, and with no humans.
 ///
-/// The relation is read from the faction's CAI relation belief (`0x00A74A20`, entry `+8` of the
-/// list at `+0x100` found by `0x00A89E00`), a stored copy that `0x00ABAFB0` refreshes only when it
-/// is read while dirty (`0x00CCCF70`). CONFIRMED: the belief depends on its own faction's and
-/// every CAI world faction's BDI core (`0x00A96CB0`), and the CAI update (`0x00A761F0`, every frame
-/// from `0x008F4120`) marks the core of the faction whose turn just ended dirty when the active
-/// faction changes (`0x00CF7F60` → `0x00CF0AB0`), which reaches every relation belief. The pool
-/// runs in the handover (`0x008A9920`), before that frame, so the copy it reads was last marked at
-/// the human's turn start: computing the relation now gives the same value whenever nothing else
-/// read the belief during the human's turn (a war the human declares mid-turn is seen; test
-/// `a_war_declared_mid_turn_counts_for_the_rival_score`).
-/// PROVISIONAL: the AI's evaluation of a human's deal proposal reads (refreshes) the recipient's
-/// belief (`0x00CCB810` / `0x00CCB210` → `0x00A74A20`), so in the exe a later change in the same
-/// turn (a war declared after a proposal) is not seen until the next turn change; the model's
-/// proposal is no model step and keeps no copy, and the other dirty marks (the CAI interface's
-/// re-mark flag `+0x6DC`, whose setter is not found) are not traced. BACKLOG §0 "Stored CAI
-/// relation belief".
+/// The relation is read from the faction's CAI relation belief ([`relation_belief_value`]), a
+/// stored copy that `0x00ABAFB0` rebuilds only when it is read while dirty (`0x00CCCF70`;
+/// CONFIRMED). The model's diplomacy-changed event (`+0x3A8`, `0x008DBAC0`) marks every belief
+/// dirty through its CAI listener (`0x00A8F320` → `0x00A88CE0`); the model fires it at each
+/// broadcaster of the exe it models ([`CampaignModel::diplomacy_changed`] lists them: war, peace,
+/// the treaties, gifts and payments, a government change, a capture, an agent's detected or blamed
+/// misdeed, each faction's round-end drift `0x00B29100`), so a war the human declares mid-turn is
+/// seen (test `a_war_declared_mid_turn_counts_for_the_rival_score`). A change
+/// without the broadcast leaves a clean belief stale: an embargo without a trade agreement
+/// (`0x00B28DB0`) after a deal proposal stored the belief ([`CampaignModel::propose_deal`]) is not
+/// seen (test `an_embargo_after_a_proposal_is_not_seen_by_the_rival_score`). The round start's
+/// computed factors (`0x00B71EC0`) also skip it, but come after the round-end broadcasts with no
+/// read between them, so the pool's read still rebuilds. The Peninsular loot resentment
+/// (`0x00B541E0` → `0x00B544F0`) skips it too and is modelled so. The exe's other attitude writes
+/// without the broadcast belong to events the model lacks: the threatened factor on a threatening
+/// deal's answer (`0x00B72F00`) and `0x00AAB440` → `0x00B544F0` (a region revolt or handover,
+/// INFERRED: the caller is not traced). A faction's re-emergence (`0x00B2BB00` → `0x00B2BC10` /
+/// `0x00B72AC0`, [`CampaignModel::reemerge_faction`]) resets its records without it too and is
+/// modelled so; only the protectorate a liberation makes broadcasts, through
+/// [`CampaignModel::make_protectorate`] (CAMPAIGN_FIDELITY.md "The relation is a stored copy").
 ///
 /// ORIGINAL BUG (`0x00BD21B0`): for those factions it writes 0, then computes the score anyway
 /// and overwrites it. Ours keeps 0.
@@ -445,7 +539,7 @@ fn rival_score_in(model: &CampaignModel, areas: &[Area], f: FactionId) -> f32 {
     let neighbours: BTreeSet<usize> = areas.iter().filter(|a| a.region.is_some_and(|r| r.owner == f)).flat_map(|a| a.links.iter().copied()).collect();
     let mut best = 0.0f32;
     for &h in &model.turn.humans {
-        let a = 1.0 - relation_value(model, f, h);
+        let a = 1.0 - relation_belief_value(model, f, h);
         let b = match model.world.victory_regions.get(&h) {
             Some(named) if !mine.is_empty() => mine.iter().filter(|r| named.contains(r)).count() as f32 / mine.len() as f32,
             _ => 0.0,
@@ -485,11 +579,16 @@ fn areas(model: &CampaignModel) -> Vec<Area<'_>> {
     let w = &model.world;
     if !w.ai_areas.is_empty() {
         let by_key: BTreeMap<&str, &Region> = w.regions.values().map(|r| (r.key.as_str(), r)).collect();
+        let at_sea = human_grid_regions(model);
         return w.ai_areas
             .iter()
             .map(|a| {
                 let region = by_key.get(a.key.as_str()).copied();
-                Area { region, links: a.links.clone(), human: region.is_some_and(|r| human_inside(model, r)) }
+                let human = match region {
+                    Some(r) => human_inside(model, r),
+                    None => at_sea.contains(a.key.as_str()),
+                };
+                Area { region, links: a.links.clone(), human }
             })
             .collect();
     }
@@ -507,10 +606,23 @@ fn areas(model: &CampaignModel) -> Vec<Area<'_>> {
 /// Whether a human has a mobile in the area (`0x00BB51B0` over the CAI region's mobiles, #9
 /// +0x18C, as the loader `0x00BECCE0` reads them): the mobiles are the forces (at their leader) and
 /// the agents situated in it (`cai_world.rs`; matches the original's saves). A land area holds the
-/// characters [`super::economy::in_region`] places in its region. PROVISIONAL: a sea area's
-/// mobiles (the fleets at sea in it) are not found, as the path grid gives sea cells no region.
+/// characters [`super::economy::in_region`] places in its region; a sea area, see [`human_grid_regions`].
 fn human_inside(model: &CampaignModel, reg: &Region) -> bool {
     model.world.characters.values().any(|c| model.is_human(c.faction) && super::economy::in_region(model, reg, c))
+}
+
+/// The path grid's region keys under the humans' characters not in a garrison, in one pass over the
+/// characters: a sea area (an area without a game region) holds a human's mobile when its key is
+/// in the set. The original situates a mobile in the `regions.esf` region under it, sea included
+/// (its saves' CAI_SITUATED #2, test `mobiles_are_situated_in_the_region_under_them`), and the
+/// grid's sea cells carry that region. A theatre or `all` has no cells, and without the map the set
+/// is empty.
+fn human_grid_regions(model: &CampaignModel) -> BTreeSet<&str> {
+    let Some(t) = &model.terrain else { return BTreeSet::new() };
+    model.world.characters.values()
+        .filter(|c| model.is_human(c.faction) && c.garrisoned_in.is_none())
+        .filter_map(|c| t.0.region_at(c.position.0.to_f32(), c.position.1.to_f32()))
+        .collect()
 }
 
 /// Whether any human sees the region's settlement or one of its other slots (`0x00BB55A0`): each
@@ -565,7 +677,8 @@ pub fn transferable(model: &CampaignModel, region: RegionId) -> bool {
 
 /// The region-transfer candidates (`0x00BA2B90`) and their total weight (an f32 sum): for each
 /// [transferable] area, in the areas' order, each linked area's owner that is another faction, a
-/// major power, not human and at war with the region's owner, in link order, weighted by its
+/// major power, not human and on the region owner's relation belief's enemy list
+/// ([`believes_at_war`]; `0x00A649F0` on the owner's belief `0x00A74A20`), in link order, weighted by its
 /// [`rival_score`], times `UBER_FACTION_MODIFIER` for an [uber](is_uber) faction. A receiver
 /// bordering the region twice is listed twice, as in the original.
 pub fn candidates(model: &CampaignModel) -> (Vec<Candidate>, f32) {
@@ -578,7 +691,7 @@ pub fn candidates(model: &CampaignModel) -> (Vec<Candidate>, f32) {
         let Some(reg) = area.region.filter(|_| transferable_at(model, &areas, i)) else { continue };
         for n in area.links.iter().filter_map(|&j| areas.get(j)?.region) {
             let o = n.owner;
-            if o == reg.owner || !model.world.factions.contains_key(&o) || !is_major(model, o) || model.is_human(o) || !model.at_war(reg.owner, o) {
+            if o == reg.owner || !model.world.factions.contains_key(&o) || !is_major(model, o) || model.is_human(o) || !believes_at_war(model, reg.owner, o) {
                 continue;
             }
             let mut weight = *scores.entry(o).or_insert_with(|| rival_score_in(model, &areas, o));
@@ -670,7 +783,7 @@ fn ai_order(model: &CampaignModel) -> Vec<FactionId> {
 
 /// A faction the director treats as the pirates (the importer's [`DirectorRules::no_rival_keys`],
 /// tested by `0x00C3FD50`).
-fn is_pirate(model: &CampaignModel, f: FactionId) -> bool {
+pub(crate) fn is_pirate(model: &CampaignModel, f: FactionId) -> bool {
     model.world.factions.get(&f).is_some_and(|x| model.rules.director.no_rival_keys.contains(&x.key))
 }
 
@@ -707,21 +820,19 @@ fn key_of(model: &CampaignModel, f: FactionId) -> &str {
 /// order ([`ai_order`]) that is not human, still in the game and neither the rebels nor the
 /// pirates, each faction `g` of `f`'s enemy list that is not human and still in the game, unless
 /// this step already took the pair in either order: the pair's winner is drawn. The enemy list is
-/// `f`'s CAI relation belief's `+0x40` list (count `+0x4C`, data `+0x50`; read through
-/// `0x00A74A20`, iterated by `0x00A649A0` / `0x00A649C0`), built by `0x00ABAFB0` from the CAI
-/// world's faction list (CAI world `+0x110`: count `+0x11C`, data `+0x120`, the order
-/// [`ai_order`] reads from the file) in its order, without `f`: the rebels (`0x00C3FE80`) always,
-/// any other faction when it is in the game (`+0x824` clear) and `f`'s stance towards it is war
-/// (`0x00B64C50` record `+0x790 → +0x10` = 0). That is [`CampaignModel::at_war`] in the CAI
-/// world's order (CONFIRMED, `0x00ABAFB0`). With `a` = `f`, `b` = `g`: the pirates or rebels
+/// `f`'s CAI relation belief's enemy list (count `+0x4C`, data `+0x50`; read through
+/// `0x00A74A20`, iterated by `0x00A649A0` / `0x00A649C0`; [`build_relation_belief`]), in the CAI
+/// world's order ([`believes_at_war`]: the stored list while the belief is clean, else
+/// [`CampaignModel::at_war`]). With `a` = `f`, `b` = `g`: the pirates or rebels
 /// (`b`) lose without a draw; else a roll in [0, score(b) + score(a)] on the director's RNG
 /// ([`rival_score`], computed once for the pool) above score(a) makes `b` the winner, else `a`.
 /// Each (winner, loser) replaces the first [`DirectorState::autoresolver_pairs`] entry naming the
 /// same two factions in either order and is appended (`0x00BC5240`).
 ///
-/// PROVISIONAL: the list is the stored relation belief, refreshed only when read while dirty;
-/// the model reads the current stances, which differ only in the cases [`rival_score`] lists
-/// (BACKLOG §0 "Stored CAI relation belief").
+/// The list is the stored relation belief, rebuilt only when read while dirty; every stance change
+/// the model makes broadcasts and so marks it dirty (see [`rival_score`]), so the list a clean
+/// belief keeps differs from the current stances only after a change the model makes without the
+/// broadcast.
 ///
 /// PROVISIONAL: the autoresolver reads the pairs (`CDIR_INTERFACE_AUTORESOLVER_MODIFIERS`, the
 /// `CDIR_CVN_AUTORESOLVER_MODIFIER_*` rows) to tilt a battle between the two; that use is not
@@ -734,7 +845,7 @@ pub fn at_war_step(model: &mut CampaignModel, order: &[FactionId], scores: &BTre
             continue;
         }
         for &g in order {
-            if g == f || !model.at_war(f, g) || model.is_human(g) || !model.in_the_game(g) {
+            if g == f || !believes_at_war(model, f, g) || model.is_human(g) || !model.in_the_game(g) {
                 continue;
             }
             if taken.iter().any(|&p| p == (f, g) || p == (g, f)) {
@@ -761,6 +872,12 @@ pub fn at_war_step(model: &mut CampaignModel, order: &[FactionId], scores: &BTre
 /// world's order, sorted by rival score, highest first (the exe's `std::sort`,
 /// [`crate::msvc_sort`]); the first `min(max(floor(n × PERCENTAGE), MIN), MAX)` of the `n` each
 /// get their `AMOUNT` (a faction's int) credited to the treasury. No RNG draw.
+///
+/// The exe credits through an intention (treasury4, 2026-10-14, CONFIRMED): the step builds one per
+/// chosen faction (`0x00B930D0(desire, faction, amount)`, vtable `0x013800AC`, faction at +0x108, amount at +0x10C), whose
+/// action `0x00BAF200` → `0x00BB33A0` is the credit `0x00BB3810(amount, 4)` (the director's
+/// category). The intention loop `0x00BBC880` runs a desire's new intentions right after its step,
+/// so crediting here is the same order of treasury changes.
 pub fn boost_step(model: &mut CampaignModel, order: &[FactionId], scores: &BTreeMap<FactionId, f32>) {
     let rules = std::sync::Arc::clone(&model.rules);
     let (d, campaign) = (&rules.director, rules.campaign.as_str());
@@ -960,7 +1077,16 @@ pub fn director_desires(model: &mut CampaignModel, _writes: &mut ModWrites) {
 impl CampaignModel {
     /// The director's part of a turn handover from `ending` to `starting` (see the module docs):
     /// the transfers queued for `starting` are carried out, then, from a human to an AI faction, the
-    /// region-transfer desire steps and the other desires run (each through its seam).
+    /// region-transfer desire steps and the other desires run (each through its seam). Then every
+    /// relation belief is marked dirty ([`DirectorState::beliefs`]).
+    ///
+    /// INFERRED, the turn change's mark: the CAI frame update after the handover (`0x00A761F0` →
+    /// `0x00CF7F60`) marks the BDI core's `[W+0xF0]` dirty with no source, and the relation beliefs
+    /// get it only by propagation (`0x00CF0B10`), where a belief with a source rebuilds only when
+    /// that source's own rebuild returns 1 (`0x00CCCF70`); whether it does is not settled statically
+    /// (it needs the debugger). It matters only with two humans or a read after the pool: the
+    /// pool runs before it (`0x008A9920`), and each round-end drift (`0x00B29100`) marks every
+    /// belief dirty anyway.
     pub fn director_handover(&mut self, ending: FactionId, starting: FactionId, events: &mut Vec<CampaignEvent>) {
         self.apply_region_transfers(starting, events);
         if self.is_human(ending) && !self.is_human(starting) {
@@ -969,6 +1095,40 @@ impl CampaignModel {
             self.director = rules.seams.director_region_transfer.rule()(self, &mut writes);
             rules.seams.director_desires.rule()(self, &mut writes);
             self.mod_state.apply(&mut writes);
+        }
+        self.director.beliefs.clear();
+    }
+
+    /// The model's diplomacy-changed event (model `+0x3A8`, `BroadcastModelEventToListeners`
+    /// `0x008DBAC0`): its CAI listener (`OnCaiDiplomacyChangedMarkRelationsDirty` `0x00A8F320` →
+    /// `MarkAllCaiRelationBeliefsDirty` `0x00A88CE0`) marks every relation belief dirty. CONFIRMED.
+    /// Fired where the exe fires it: war (`0x00B26700`, also joining one), peace (`0x00B262C0`),
+    /// an alliance (`0x00B29C60`) and its break (`0x00B13840`), a protectorate (`0x00B105C0`) and
+    /// the end of an old protectorate tie (`0x00B64B10`, [`Self::end_protectorate_tie`]), a
+    /// trade agreement (`0x00B55090`) and its break (`0x00B29BB0`), military access granted
+    /// (`0x00B444B0`) or cancelled (`0x00B67B20`, `0x00B0DA90`), a state gift (`0x00B44590`), a
+    /// regular payment (`0x00B54FC0`), a government change (`0x00B1B100`), a capture
+    /// (`0x00B62120`, [`Self::take_settlement`]), an agent's detected misdeed (`0x00B0D870`,
+    /// `0x00B67FD0`, `0x00B71CF0`) or blamed one (`0x00B0D700`, `0x00B67E60`; both unless the
+    /// victim is the rebels) and each in-game faction's round-end drift (`0x00B29100`). Not fired
+    /// by an embargo without a trade agreement (`0x00B28DB0`), a one-off payment or the round
+    /// start's computed factors (`0x00B71EC0`). The exe's three other broadcasters: the religion
+    /// factors set while the start position's diplomacy records are built (`0x00B45EA0` →
+    /// `0x00B1B4E0`; [`Self::setup_relationship_factors`]), before any belief exists, so nothing to clear,
+    /// and a trade break both ways (`0x00B73430`) towards the killer of a destroyed faction or on a lost
+    /// trade route: the model's destruction ([`Self::destroy_faction`]) has no killer, so it posts
+    /// none, and the route loss is not in the model (BACKLOG §0-B).
+    pub(crate) fn diplomacy_changed(&mut self) {
+        self.director.beliefs.clear();
+    }
+
+    /// A read of `f`'s relation belief that keeps it (`GetCaiRelationBelief` `0x00A74A20`): a
+    /// dirty belief is rebuilt ([`build_relation_belief`]) and stored clean (`0x00CCCF70` →
+    /// `0x00ABAFB0`); a clean one stays as it is. CONFIRMED.
+    pub(crate) fn refresh_relation_belief(&mut self, f: FactionId) {
+        if !self.director.beliefs.contains_key(&f) {
+            let belief = build_relation_belief(self, f);
+            self.director.beliefs.insert(f, belief);
         }
     }
 
@@ -995,16 +1155,28 @@ impl CampaignModel {
     /// drawn (`0x00BA8400`, CONFIRMED draw): `int_range(a + 3, 4a + 6)` on the director's RNG, `a`
     /// 1 for an AI receiver, 0 for a human (4 to 10 units for an AI).
     ///
-    /// PROVISIONAL: the army it raises from that count is not modelled, and the exe skips the
-    /// draw and the spawn when `0x00C3B7A0` holds (`+0xFC` non-zero, CONFIRMED) for the `+0x34`
-    /// member of the object the transferred entity's `0x008CF5F0` returns (its `+0x12C`; what that
-    /// object and field are is not traced), where this always draws (BACKLOG §0 "Director
-    /// transfer garrison").
+    /// The draw and the spawn need the receiver to own the region and the region to have no
+    /// garrison (CONFIRMED): the exe tests the CAI region's settlement (`+0x12C`, `0x008CF5F0`,
+    /// constructor `0x00BF6F00`), whose `+0x34` member is its `CAI_GARRISONABLE` (`0x00BF5160`) and
+    /// `+0xFC` that garrison's CAI mobile (`0x00C3B7A0`). The link is cleared within the destroy
+    /// above: the commander's destruction (`0x00A0C6F0` → `DestroyCampaignCharacter` `0x0099D2D0`)
+    /// fires the model's character-removed broadcaster (`+0x948`) directly, and its CAI listener
+    /// (`0x00A8DE80` → `0x00C4E930` → `0x00C4F6D0` → `0x00C54470(0)`) clears `+0xFC`. So the skip
+    /// holds only for a garrison the capture itself left, which the model never does.
+    ///
+    /// PROVISIONAL: the army it raises from that count is not modelled. PROVISIONAL: the handover
+    /// (`0x00B449F0` → `TransferRegionToFaction` `0x00A64AC0` with its fourth argument 0) expels
+    /// every other faction's land armies in the region, and its navies docked in the port when not
+    /// at war with the receiver (`ExpelFactionForcesFromRegion` `0x008D9DC0`; where they go,
+    /// `0x008DCB30`, is untraced); ours moves none of them.
     fn director_transfer(&mut self, region: RegionId, receiver: FactionId, events: &mut Vec<CampaignEvent>) {
         if let Some(garrison) = self.world.regions.get(&region).and_then(|r| r.garrison) {
             self.destroy_force(garrison, events);
         }
-        self.take_settlement(region, receiver, None);
+        self.take_settlement(region, receiver, None, events);
+        if !self.world.regions.get(&region).is_some_and(|r| r.owner == receiver && r.garrison.is_none()) {
+            return;
+        }
         let ai = i32::from(!self.is_human(receiver));
         let _units = self.director.rng.int_range(ai + 3, ai * 4 + 6);
     }
@@ -1135,18 +1307,144 @@ mod tests {
         assert_eq!(rival_score(&m, B), 0.0);
     }
 
-    /// The relation belief the rival score reads was last marked dirty at the human's turn start,
-    /// so the pool's read at the handover refreshes it: a war the human declares mid-turn counts.
+    /// The human proposes a deal to B: B's evaluation keeps its relation belief (`0x00A74A20`).
+    fn proposed_to_b(m: &mut CampaignModel) {
+        m.turn = super::super::turn::TurnState::in_turn_of(A, vec![A]);
+        m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+        m.apply(CampaignCommand::ProposeDeal).unwrap();
+        m.apply(CampaignCommand::EndNegotiation).unwrap();
+        assert_eq!(m.director.beliefs.get(&B), Some(&build_relation_belief(m, B)));
+    }
+
+    /// A declaration of war marks every relation belief dirty (`0x00A8F320` → `0x00A88CE0`), so the
+    /// pool's read at the handover rebuilds it: a war the human declares mid-turn counts, even
+    /// after a deal proposal kept B's belief.
     #[test]
     fn a_war_declared_mid_turn_counts_for_the_rival_score() {
         let mut m = world("0.01");
         let at_peace = rival_score(&m, B);
-        m.turn = super::super::turn::TurnState::in_turn_of(A, vec![A]);
-        m.apply(super::super::CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
+        proposed_to_b(&mut m);
+        m.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
+        assert!(m.director.beliefs.is_empty(), "the war marks every belief dirty");
         let a = 1.0 - relation_value(&m, B, A);
         assert_eq!(m.world.stance(B, A), Stance::War);
         assert!((rival_score(&m, B) - (0.2 * a + 0.4 + 0.4 * 0.5)).abs() < 1e-6);
         assert!(rival_score(&m, B) > at_peace);
+        assert!(believes_at_war(&m, B, A));
+    }
+
+    /// C embargoing B at A's request without a trade agreement (`0x00B28DB0`) lowers B's attitude to A with no
+    /// diplomacy-changed broadcast, so the belief B's deal evaluation kept stays clean and the
+    /// handover's pool reads the relation from before the embargo; the turn change then marks it
+    /// dirty. With a C–B trade agreement the embargo breaks it first (`0x00B29BB0`), which broadcasts.
+    #[test]
+    fn an_embargo_after_a_proposal_is_not_seen_by_the_rival_score() {
+        let mut m = world("0.01");
+        let before = rival_score(&m, B);
+        proposed_to_b(&mut m);
+        drop(m.embargo(C, B, A).unwrap());
+        let live = 0.2 * (1.0 - relation_value(&m, B, A)) + 0.4 + 0.4 * 0.5;
+        assert!(live > before + 1e-3, "the embargo lowers B's relation to A");
+        assert!(m.director.beliefs.contains_key(&B), "no broadcast: the belief stays clean");
+        assert_eq!(rival_score(&m, B), before, "the pool's read is stale");
+        m.director_handover(A, B, &mut Vec::new());
+        assert!(m.director.beliefs.is_empty(), "the turn change marks every belief dirty");
+        assert!((rival_score(&m, B) - live).abs() < 1e-6);
+
+        // Control: with a trade agreement the embargo breaks it, which broadcasts.
+        let mut m = world("0.01");
+        m.trade_agreement(C, B).unwrap();
+        proposed_to_b(&mut m);
+        drop(m.embargo(C, B, A).unwrap());
+        assert!(m.director.beliefs.is_empty(), "the trade break marks every belief dirty");
+        let live = 0.2 * (1.0 - relation_value(&m, B, A)) + 0.4 + 0.4 * 0.5;
+        assert!((rival_score(&m, B) - live).abs() < 1e-6);
+    }
+
+    /// A named change to a model, for the tables of [`which_changes_mark_the_relation_beliefs_dirty`].
+    type NamedChange = (&'static str, fn(&mut CampaignModel));
+
+    /// The model's diplomacy-changed broadcasters mark every belief dirty; an embargo without a
+    /// trade agreement, a one-off payment and the round start's computed factors do not; a capture
+    /// marks it unless a side is the rebels, a deal's handover never; the Peninsular loot resentment does not,
+    /// ending a protectorate tie does.
+    #[test]
+    fn which_changes_mark_the_relation_beliefs_dirty() {
+        let kept = |m: &CampaignModel| m.director.beliefs.contains_key(&B);
+        let mut base = world("0.01");
+        proposed_to_b(&mut base);
+        let marks: [NamedChange; 14] = [
+            ("peace", |m| drop(m.make_peace_rules(B, C).unwrap())),
+            ("alliance", |m| drop(m.form_alliance(A, B).unwrap())),
+            ("trade", |m| drop(m.trade_agreement(A, B).unwrap())),
+            ("access", |m| drop(m.grant_military_access(A, B, 5).unwrap())),
+            ("cancel access", |m| {
+                let d = super::super::treaties::DiplomaticAction::CancelMilitaryAccess;
+                drop(m.apply_diplomatic_action(A, B, d).unwrap());
+            }),
+            ("gift", |m| drop(m.state_gift(A, B, 100).unwrap())),
+            ("regular payment", |m| drop(m.regular_payment(A, B, 100, 5).unwrap())),
+            ("protectorate", |m| drop(m.make_protectorate(C, A).unwrap())),
+            ("join war", |m| drop(m.join_war(A, C, B).unwrap())),
+            ("round end", |m| m.diplomacy_round_end(B)),
+            ("capture", |m| assert!(m.take_settlement(RegionId(12), A, None, &mut Vec::new()))),
+            ("break alliance", |m| {
+                m.form_alliance(A, B).unwrap();
+                m.refresh_relation_belief(B);
+                drop(m.break_alliance(A, B).unwrap());
+            }),
+            ("detected misdeed", |m| m.detected_misdeed(A, C, super::super::agents::Misdeed::Assassination)),
+            ("blamed misdeed", |m| m.blamed_misdeed(A, C, super::super::agents::Misdeed::Sabotage)),
+        ];
+        for (what, change) in marks {
+            let mut m = base.clone();
+            change(&mut m);
+            assert!(!kept(&m), "{what} marks the beliefs dirty");
+        }
+        let keeps: [NamedChange; 4] = [
+            ("embargo", |m| drop(m.embargo(C, B, A).unwrap())),
+            ("one-off payment", |m| drop(m.one_off_payment(A, B, 100).unwrap())),
+            ("computed factors", CampaignModel::refresh_computed_factors),
+            ("deal handover", |m| assert!(m.transfer_region(RegionId(12), A))),
+        ];
+        for (what, change) in keeps {
+            let mut m = base.clone();
+            change(&mut m);
+            assert!(kept(&m), "{what} leaves the beliefs clean");
+        }
+        // A capture from or by the rebels (here C, made the rebels) fires nothing.
+        let mut rebel_c = base.clone();
+        rebel_c.world.factions.get_mut(&C).unwrap().key.clear();
+        let mut m = rebel_c.clone();
+        assert!(m.take_settlement(RegionId(12), A, None, &mut Vec::new()));
+        assert!(kept(&m), "a capture from the rebels leaves the beliefs clean");
+        let mut m = rebel_c;
+        assert!(m.take_settlement(RegionId(11), C, None, &mut Vec::new()));
+        assert!(kept(&m), "a capture by the rebels leaves the beliefs clean");
+        // The Peninsular loot resentment (`0x00B541E0` → `0x00B544F0`) lowers B's attitude to the looter A with no
+        // broadcast: the belief rebuilt after the capture's own broadcast stays clean.
+        let mut m = base.clone();
+        let mut rules = (*m.rules).clone();
+        rules.features.loot_resentment = Some(super::super::features::LootResentment {
+            homelands: vec![("homeland_rebels".into(), "test_faction_b".into())],
+            exempt_looter: None,
+            factor: "abandoned_ally_in_war".into(),
+            value: -50,
+        });
+        m.rules = Arc::new(rules);
+        m.world.region_rebel_factions.insert(RegionId(12), "homeland_rebels".into());
+        drop(m.capture_by_force(RegionId(12), A, None));
+        m.refresh_relation_belief(B);
+        let before = relation_value(&m, B, A);
+        m.apply(CampaignCommand::ChooseCapture { choice: super::super::capture::CaptureChoice::Loot }).unwrap();
+        assert!(relation_value(&m, B, A) < before, "the looting lowers B's attitude to A");
+        assert!(kept(&m), "loot resentment leaves the beliefs clean");
+        // Ending a protectorate tie (`0x00B64B10`) broadcasts.
+        let mut m = base.clone();
+        m.make_protectorate(C, A).unwrap();
+        m.refresh_relation_belief(B);
+        m.end_protectorate_tie(C, A).unwrap();
+        assert!(!kept(&m), "ending a protectorate tie marks the beliefs dirty");
     }
 
     #[test]
@@ -1239,6 +1537,19 @@ mod tests {
         // B's 11 links 12, 13, A's 10 and the sea: A holds 1 of 4 (the sea counts in the share).
         let a = 1.0 - relation_value(&m, B, A);
         assert!((w - (0.2 * a + 0.4 + 0.4 * 0.25)).abs() < 1e-6);
+        // A human's fleet at sea in the sea area (the path grid's sea cell carries the area's key)
+        // blocks both minor regions it links; the same character in a garrison does not.
+        let mut at_sea = m.clone();
+        let mut grid = super::super::pathing::PathGrid::new((0.0, 0.0), 1.0, 1, 1);
+        grid.kind[0] = super::super::pathing::CellKind::Sea as u8;
+        grid.region[0] = 0;
+        grid.region_keys = vec!["sea".into()];
+        at_sea.terrain = Some(super::super::world::Terrain(Arc::new(grid)));
+        let admiral = at_sea.world.characters.get_mut(&CharacterId(100)).unwrap();
+        (admiral.position, admiral.garrisoned_in) = ((Fixed20::from_int(0), Fixed20::from_int(0)), None);
+        assert!(candidates(&at_sea).0.is_empty());
+        at_sea.world.characters.get_mut(&CharacterId(100)).unwrap().garrisoned_in = Some(RegionId(10));
+        assert_eq!(candidates(&at_sea).0.len(), 2);
         // A region the areas do not hold is never transferable.
         m.world.ai_areas.remove(0);
         for a in &mut m.world.ai_areas {
@@ -1305,6 +1616,28 @@ mod tests {
         let size = one.int_range(4, 10);
         assert!((4..=10).contains(&size));
         assert_eq!(m.director.rng, one);
+    }
+
+    /// A transfer moves none of the old owner's agents (`0x00A64AC0` → `0x008D9DC0` moves only
+    /// armies and docked navies): C's gentleman beside the settlement stays where he is, C's.
+    #[test]
+    fn a_transfer_leaves_the_old_owners_agents_in_place() {
+        let mut m = world("1.0");
+        // C keeps a capital (a MADE-UP region 13), so it stays in the game.
+        let mut r13 = m.world.regions[&RegionId(12)].clone();
+        (r13.id, r13.key) = (RegionId(13), "test_region_13".into());
+        m.world.regions.insert(r13.id, r13);
+        m.world.faction_details.entry(C).or_default().capital = Some(RegionId(13));
+        let mut agent = m.world.characters[&CharacterId(102)].clone();
+        (agent.id, agent.faction, agent.kind) = (CharacterId(103), C, super::super::world::CharacterKind::Gentleman);
+        agent.position = m.world.regions[&RegionId(12)].settlement.position;
+        let pos = agent.position;
+        m.world.characters.insert(agent.id, agent);
+        m.director.pending = vec![PendingTransfer { receiver: B, region: RegionId(12), queued_owner: C }];
+        m.director_handover(C, B, &mut Vec::new());
+        assert_eq!(m.world.regions[&RegionId(12)].owner, B);
+        let agent = &m.world.characters[&CharacterId(103)];
+        assert_eq!((agent.faction, agent.position, agent.garrisoned_in), (C, pos, None));
     }
 
     #[test]

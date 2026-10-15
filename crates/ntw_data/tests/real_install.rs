@@ -407,3 +407,39 @@ fn unit_pictures_follow_the_uniforms_and_name_real_files() {
         }
     }
 }
+
+/// `effect_bonus_value_population_class_and_religion_junction` (exe bonus type 7): every row's bonus is the
+/// exe's one name (`happiness`, `0x0145B73C`), its class is a population class and its religion one the religion
+/// junction also keys (the religions table is not loaded; the row builder `0x00F86F00`
+/// drops a row whose class or religion is not a key).
+#[test]
+#[ignore = "needs the game installed"]
+fn population_class_and_religion_junction_rows() {
+    let db = GameDatabase::from_install(data_dir()).unwrap();
+    let fx = &db.campaign.effects;
+    let t = &fx.bonus_pop_class_religion;
+    assert_eq!(t.len(), 30);
+    // The religion keys the religion junction (type 10) uses: the same religions table.
+    let religions: std::collections::HashSet<&str> = fx.bonus_religion.iter().map(|r| r.religion.as_str()).collect();
+    for r in t.iter() {
+        assert_eq!(r.bonus, "happiness", "{}", r.effect);
+        assert!(["lower", "middle", "upper"].contains(&r.class.as_str()), "{}: {}", r.effect, r.class);
+        assert!(religions.contains(r.religion.as_str()), "{}: {}", r.effect, r.religion);
+    }
+}
+
+/// The drill tolerance per training level (`entity_training_levels`, read by `0x0057E1F0` through
+/// the training level's row, `0x00F88300`): the shipped values.
+#[test]
+#[ignore = "needs the game installed"]
+fn entity_training_levels_give_the_drill_tolerances() {
+    let db = GameDatabase::from_install(data_dir()).unwrap();
+    let t = &db.entity_training_levels;
+    for (key, tolerance) in
+        [("mob", 1.7f32), ("rabble", 0.5), ("poorly_trained", 0.38), ("trained", 0.2), ("well_trained", 0.1), ("elite", 0.13)]
+    {
+        let row = t.get(key).unwrap_or_else(|| panic!("{key}: no row"));
+        assert!((row.tolerance - tolerance).abs() < 1e-6, "{key}: {}", row.tolerance);
+    }
+    assert_eq!(t.len(), 6);
+}

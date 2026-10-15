@@ -396,6 +396,12 @@ impl CampaignModel {
         use super::world::{Character, CharacterKind};
         let Some(gov) = self.world.factions.get(&faction).map(|f| f.government) else { return };
         let Some(details) = self.world.faction_details.get(&faction) else { return };
+        // A faction out of the game gets no new holder: its destruction kills its characters until
+        // its list is empty (`0x008AB6C0`, the loop on `0x008BC550`), which a new minister joining
+        // it at each death would never end (INFERRED; where the exe stops the refill is not traced).
+        if details.out_of_game == Some(true) {
+            return;
+        }
         let Some(p) = details.posts.get(post) else { return };
         if p.holder.is_some() {
             return;
