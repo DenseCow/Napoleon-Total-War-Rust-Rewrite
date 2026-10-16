@@ -1092,7 +1092,7 @@ How the AI recipient answers a proposed deal. Ported pieces: `ntw_sim::campaign:
 answers a deal of regions and technologies as the exe (`ai_accepts_deal`, records 4 then 5; worker
 deal-region, 2026-10-10, below "Region value").
 
-- **Entry** `0x00C49BE0` (`CCQ_DIPLOMACY_PROPOSE_DEAL` executor `0x00933690`; the AI's counter-offer
+- **Entry** `ProcessNegotiationDealProposal 0x00C49BE0` (`CCQ_DIPLOMACY_PROPOSE_DEAL` executor `0x00933690`; the AI's counter-offer
   `0x00CC58C0` calls it with flag 0): unless the recipient (`+0x1C`) is human and `0x00C1E240`
   turns a deal without demands into a payment, it stores the flag at negotiation `+0x2B8`, posts the
   UI message, and when the **recipient is not human** runs the AI's evaluator `0x00AA5ED0(negotiation,
@@ -1102,7 +1102,7 @@ deal-region, 2026-10-10, below "Region value").
   6 state gift, 7 payments, 8 protector, 9 peace (`+0x184`), 10 war, 11 join war, 12 break trade,
   13 break alliance. Record virtual `+0x2C` = has items, `+0x38` = value, `+0x3C` = apply,
   `+0x44` = propose. CONFIRMED.
-- **Evaluator `0x00AA5ED0`** (CONFIRMED order): (1) builds two lists of the AI's diplomatic goals
+- **Evaluator `EvaluateProposedNegotiationDealAI 0x00AA5ED0`** (CONFIRMED order): (1) builds two lists of the AI's diplomatic goals
   toward the proposer (`0x00CC13D0` + `0x00CCCCA0`, filtered by `0x00D0C460` and copied through
   `0x00CF8400`; `0x00CC0280` + `0x00CCB750`; traced below, "Goal lists" and "Weights"); (2) for each record 0..13 with items:
   `0x00A62400` adds the record's goal to the evaluation (below); for record 7 the payment amount

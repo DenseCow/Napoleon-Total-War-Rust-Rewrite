@@ -285,7 +285,7 @@ impl CampaignModel {
             h.u32(s.sunk as u32);
             h.u32(s.repairing as u32);
         }
-        for m in [&w.treaty_breaks, &w.alliances_broken, &w.access_cancel_marks] {
+        for m in [&w.treaty_breaks, &w.access_abuses, &w.alliances_broken, &w.access_cancel_marks] {
             h.u32(m.len() as u32);
             for (f, n) in m {
                 h.i32(f.raw());
@@ -343,6 +343,7 @@ impl CampaignModel {
                 for v in &p.volumes {
                     h.u32(*v);
                 }
+                h.u32(p.capital_port as u32);
             }
         }
         h.u32(w.domestic_trade.len() as u32);
@@ -630,10 +631,17 @@ pub struct World {
     /// without an entry has no history.
     #[cfg_attr(feature = "serde", serde(default))]
     pub economy_history: BTreeMap<FactionId, Vec<EconomyRecord>>,
-    /// Each faction's diplomacy manager counters (CONFIRMED uses, not loaded from the file yet: the
-    /// `DIPLOMACY_MANAGER` fields are not read): +0x1C the treaties it broke during friendship (the
+    /// Each faction's diplomacy manager counters, the four u32 after the relationships in
+    /// `DIPLOMACY_MANAGER` (#1 +0x14, #2 +0x18, #3 +0x1C, #4 +0x20; read by `0x00AE8E10`, written by
+    /// `0x00AFC160`, CONFIRMED). A faction without an entry has the constructors' values
+    /// ([`TREATY_BREAKS_START`] here, 0 in the others; `0x00AE8DD0` / `0x00AE8E10`): read this one
+    /// through [`World::treaty_breaks_of`]. +0x1C the treaties it broke during friendship (the
     /// backstabbing count, `0x00B0E420`) ...
     pub treaty_breaks: BTreeMap<FactionId, u32>,
+    /// ... +0x18 the times it abused a military access it held (`0x00B0DA90`: read as the `count` of
+    /// the `abused_military_access` factor, then +1) ...
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub access_abuses: BTreeMap<FactionId, u32>,
     /// Each ship's damage state (`NAVAL_UNIT/SHIP_DAMAGE_INFO`, see [`super::naval::ShipState`]), by unit. A ship
     /// without an entry is undamaged with its type's crews.
     pub ship_states: BTreeMap<super::ids::UnitId, super::naval::ShipState>,
@@ -803,6 +811,12 @@ pub struct FactionAiKeys {
 pub type NetworkSight = BTreeMap<FactionId, Vec<((f32, f32), f32)>>;
 
 impl World {
+    /// `faction`'s treaty-break count (diplomacy manager +0x1C): its entry, else the constructors'
+    /// preset [`TREATY_BREAKS_START`].
+    pub fn treaty_breaks_of(&self, faction: FactionId) -> u32 {
+        self.treaty_breaks.get(&faction).copied().unwrap_or(TREATY_BREAKS_START)
+    }
+
     /// A new object id (characters, forces, units), unique among the ids of the loaded file and
     /// every id handed out before. Ids step by 8 like the original's pointer-like ids
     /// (SAVE_COMPAT.md §3; the step is our choice, PROVISIONAL). Ids at or above `0x7fff_0000`
@@ -937,6 +951,12 @@ impl World {
 /// One economics history record: the 25 integer categories of a turn (`ECONOMICS_DATA`, saved as
 /// groups of 5 / 3 / 4 / 1 / 5 / 7).
 pub type EconomyRecord = [i32; 25];
+
+/// The diplomacy manager's preset treaty-break count (+0x1C): both constructors, `0x00AE8DD0` (a new
+/// manager) and `0x00AE8E10` (the save reader, before it reads the block), set it to 1 and the other
+/// three counters to 0 (CONFIRMED; every faction of every vanilla save holds 1). So a faction's
+/// first backstab already carries the `peace_treaty` penalty of `0x00B0E420`.
+pub const TREATY_BREAKS_START: u32 = 1;
 
 /// The original's economics history depth: a ring of 10 records (the index arithmetic `mod 10` of
 /// `0x00BABE00` / `0x00A9B810` and the saver `0x00BD46E0`, CONFIRMED).

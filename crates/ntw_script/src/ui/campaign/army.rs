@@ -40,7 +40,22 @@ pub(super) fn unit_entry(lua: &Lua, inner: &Inner, ui: &CampaignUi, force: &Mili
     t.set("MenAsPercent", pct)?;
     t.set("EstimatedMenAsUnary", pct / 100.0)?;
     t.set("ReplenishmentLevel", 0)?;
-    t.set("Replenished", false)?;
+    // The port repair fields the navy panel's repair button reads (`army.lua:907/937/1269`), written by
+    // the card writer `0x009AA5E0` (`WriteUnitCardSnapshotToLuaTable`) from the card info (CONFIRMED): `Replenished` +0xE5, `Replenishable`
+    // +0xE6, `RepairCost` +0xE8, `NeedsRepair` +0xEC. A ship's info (`0x008DF820`) fills them from the
+    // ship's repair order (unit +0x168), `0x008B3120`, `0x008EA2F0` and `0x0055ACC0`, the model's rules
+    // here; a land unit's (`0x008DF190`) clears all four (CONFIRMED).
+    let (replenished, replenishable, repair_cost, needs_repair) = if force.is_navy {
+        let m = ui.model();
+        let s = m.ship_state(u);
+        (s.repairing, m.can_repair_ship(force.id, index), m.ship_repair_cost(u), s.needs_repair())
+    } else {
+        (false, false, 0, false)
+    };
+    t.set("Replenished", replenished)?;
+    t.set("Replenishable", replenishable)?;
+    t.set("RepairCost", repair_cost)?;
+    t.set("NeedsRepair", needs_repair)?;
     t.set("SufferingAttrition", false)?;
     // PROVISIONAL: the unit's chevrons (`unit+0xD48`, printed as "Experience" by `0x005CD340`) are
     // not in the model: the ESF index for a loaded chevron count is UNKNOWN.
@@ -682,6 +697,45 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
         let m = ui.model();
         let Some(u) = entity_of(&unit, TAG_UNIT).map(UnitId) else { return Ok(false) };
         Ok(m.world.forces.values().any(|f| m.can_promote_unit(f.id, f.units.iter().position(|x| x.id == u).unwrap_or(usize::MAX))))
+    });
+    // ToggleReplenishUnit(unit card address) → the card's new repair state: what the navy panel's
+    // repair button (`navy_repair`, its click → `Army.ReplenishUnits`, `army.lua:591`) calls for each
+    // selected card (handler `0x009F9D60`, CONFIRMED). The branch is the unit's own type, not its
+    // force's: the exe asks the unit's vtable slot +0x20, which returns the unit itself in the land
+    // unit vtable `0x01355494` (`0x004470B0`) and null in the naval one `0x0135552C` (`0x00461180`)
+    // (CONFIRMED); ours asks the unit record's `is_naval` (`CampaignRules::is_naval_unit`). A ship
+    // queues `CCQ_TOGGLE_REPAIR_NAVAL_UNIT` (our `ToggleShipRepair`, deferred like the exe's command stream) and returns its repair order
+    // flipped, read before the command runs (unit +0x168 == 0).
+    // PROVISIONAL: a land unit queues `CCQ_TOGGLE_REPLENISH_UNIT` and returns `0x00B78090(..) == 0`;
+    // land replenishment is not modelled (BACKLOG "Recruitment pools, replenishment"), so it is
+    // logged once and answers false. The vanilla panel never asks it for a land unit: a land card's
+    // `Replenishable` and `Replenished` are always false (`0x008DF190`), so `ReplenishUnits` selects none.
+    f!("ToggleReplenishUnit", |_l, inner, ui, unit: Value| {
+        let found = {
+            let m = ui.model();
+            entity_of(&unit, TAG_UNIT).map(UnitId).and_then(|id| {
+                m.world.forces.values().find_map(|f| {
+                    let i = f.units.iter().position(|x| x.id == id)?;
+                    Some((f.id, i, m.rules.is_naval_unit(&f.units[i].unit_key), m.ship_state(&f.units[i]).repairing))
+                })
+            })
+        };
+        match found {
+            Some((force, unit, true, repairing)) => {
+                ui.push(CampaignRequest::Command(CampaignCommand::ToggleShipRepair { force, unit }));
+                Ok(!repairing)
+            }
+            Some((_, _, false, _)) => {
+                inner.log_once("land ToggleReplenishUnit", || {
+                    "CampaignUI.ToggleReplenishUnit on a land unit: land replenishment (CCQ_TOGGLE_REPLENISH_UNIT) is not modelled".to_string()
+                });
+                Ok(false)
+            }
+            None => {
+                inner.log_once("ToggleReplenishUnit no unit", || "CampaignUI.ToggleReplenishUnit: the argument is not a unit in a force".to_string());
+                Ok(false)
+            }
+        }
     });
     // RecruitUnit(character, manager, record): queue a unit (CONFIRMED call in
     // template.RecruitmentCard.lua, which passes back its card's `character`, `manager` and `record`).

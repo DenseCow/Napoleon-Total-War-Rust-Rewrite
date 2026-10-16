@@ -113,7 +113,12 @@ fn faction(
                             s(stance),
                         ],
                     )]],
-                )],
+                ),
+                // #1..#4: the manager counters as vanilla holds them (0x00AE8E10).
+                EsfNode::U32(0),
+                EsfNode::U32(0),
+                EsfNode::U32(1),
+                EsfNode::U32(0)],
             ),
             rec(
                 "GOVERNMENT",

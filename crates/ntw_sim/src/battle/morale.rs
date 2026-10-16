@@ -2,7 +2,8 @@
 //!
 //! - [`evaluate`] is the full morale evaluation, W1 §12.3, `0x00584020` (CONFIRMED structure).
 //! - [`modifiers`] is the casualty / attack-direction modifier pass, W1 §12.4, `0x0053C720`
-//!   (thresholds CONFIRMED, key names INFERRED from the threshold numbers).
+//!   (thresholds and the attack-direction logic CONFIRMED; the casualty key names INFERRED from
+//!   the threshold numbers).
 //! - [`light_update`] runs on the ticks where the full evaluation does not (`0x00585BE0`); its
 //!   contents are UNKNOWN, so it is a placeholder.
 //!
@@ -25,7 +26,8 @@ pub mod effect_id {
     pub const CHARGE: i32 = 0x0E;
     /// Negative category penalty (−4 / −8). W1 §12.4 (CONFIRMED).
     pub const CATEGORY_PENALTY: i32 = 0x17;
-    /// Attacked in the front (per attacker). W1 §12.4 (CONFIRMED).
+    /// A new attacker (one per attacker, the first evaluation it attacks in): the front, flank or
+    /// rear `was_attacked_in_*` value by its direction (`0x0053C7ED`–`0x0053C873`, CONFIRMED).
     pub const ATTACKED_FRONT: i32 = 0x18;
     /// Attacked in a flank. W1 §12.4 (CONFIRMED).
     pub const ATTACKED_FLANK: i32 = 0x19;
@@ -170,6 +172,11 @@ pub struct MoraleComponent {
     /// rally), both cleared by `morale_behavior_default` (`0x00555970`, CONFIRMED writes; see
     /// [`set_script_morale`]). `+0x57` is UNKNOWN.
     pub skip_flags: [bool; 3],
+    /// `[0x3..0x5]` (`+0xC` capacity, `+0x10` count, `+0x14` data): the attackers already seen by
+    /// [`modifiers`] (unit ids; the exe keeps unit pointers). Insert-unique `0x0054ED20` (CONFIRMED);
+    /// freed only by the component destructor `0x00522690`, no other writer found, so it lasts the
+    /// battle (INFERRED).
+    pub attackers_seen: Vec<u32>,
     /// byte `+0x5A`: number of times this unit has routed (wraps at 255 like a C++ byte).
     pub times_routed: u8,
     /// byte `+0x54`: set when the unit rallies (`0x00572AC0`), cleared when its state improves to
@@ -196,6 +203,7 @@ impl Default for MoraleComponent {
             charge_timer: -1,
             suppress_shaken_clamp: false,
             skip_flags: [false; 3],
+            attackers_seen: Vec::new(),
             times_routed: 0,
             rally_flag: false,
         }
@@ -353,8 +361,9 @@ pub struct KvMorale {
 // Per-evaluation inputs from the unit
 // ---------------------------------------------------------------------------------------------
 
-/// Direction an attacker hits this unit from. W1 §12.4 (the three effects are CONFIRMED; how the
-/// original classifies a direction is UNKNOWN, the caller decides).
+/// Direction an attacker hits this unit from. W1 §12.4 (the three effects are CONFIRMED; the
+/// original classifies it with `0x0057F310`, 0 front / 1 flank / 2 rear, and the caller decides
+/// how: model.rs still uses its own angle test, PLACEHOLDER there).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AttackDirection {
     /// From the front.
@@ -365,17 +374,20 @@ pub enum AttackDirection {
     Rear,
 }
 
-/// One enemy unit currently attacking this unit (input to [`modifiers`]).
+/// One enemy unit currently attacking this unit (an entry of the list at `unit+0xADC → +0x74C`,
+/// input to [`modifiers`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Attacker {
-    /// Where the attack comes from.
+    /// The attacking unit's id: the key of [`MoraleComponent::attackers_seen`].
+    pub id: u32,
+    /// Where the attack comes from (`0x0057F310`: 0 front, 1 flank, 2 rear).
     pub direction: AttackDirection,
-    /// The attacker is in the original's "excluded set" (UNKNOWN which units; W1 §12.4).
-    pub excluded: bool,
-    /// Result of `FUN_0055AC20()`, which doubles the front value. UNKNOWN meaning (W1 §12.4).
-    pub doubles_front_value: bool,
-    /// The "another condition" that gives +2 in the formation adjust. UNKNOWN meaning (W1 §12.4).
-    pub plus_two_condition: bool,
+    /// The attacker's charge test `0x0055AC20` on its `+0xADC` (the same test as
+    /// [`MoraleInputs::charging`]): doubles its new-attacker value (CONFIRMED at `0x0053C81B`).
+    pub charging: bool,
+    /// The attacker rides ([`super::strength::riding`], `0x0055C2A0`, CONFIRMED at `0x0053C82B`
+    /// and `0x0053C8B6`).
+    pub riding: bool,
 }
 
 /// Everything [`evaluate`] reads from the land unit (W1 §8 "Land unit" table), plus the results of
@@ -407,8 +419,12 @@ pub struct MoraleInputs {
     pub kill_ratio: f32,
     /// Enemies attacking this unit (in a deterministic order chosen by the caller).
     pub attackers: Vec<Attacker>,
-    /// The unit is fighting cavalry.
-    pub fighting_cavalry: bool,
+    /// The unit rides ([`super::strength::riding`], `0x0055C2A0`, CONFIRMED at `0x0053C836`,
+    /// `0x0053C85E` and `0x0053C8AB`).
+    pub riding: bool,
+    /// `square_formation` or `pike_square_formation` is active ([`super::strength::square_active`]):
+    /// blocks the fighting-cavalry effect (CONFIRMED at `0x0053C881`–`0x0053C8A1`).
+    pub square_formation: bool,
     /// Result of `FUN_0053E980()`: if false, the suppress flag is cleared. CONFIRMED formula:
     /// `!unit_state(1) && !unit flag +0x189` (see [`shock_persists`]).
     pub shock_persists: bool,
@@ -440,9 +456,8 @@ pub struct MoraleInputs {
     /// `+0x18C`, `unit_stats_land` col 74) is within 100 m (see [`near_100m`]). CONFIRMED test.
     pub enemy_frightens_near: bool,
     /// Same, an enemy with "frightens horses" (`+0x18B`, col 73) while this unit rides and is not
-    /// dismounted (`0x0055C2A0`, CONFIRMED static: the mounted test `0x0055ABF0` holds and the
-    /// `dismount` ability, 15, is not active). The caller uses [`super::strength::mounted`], which
-    /// differs only for a cavalry or camel unit with `dismount` active.
+    /// dismounted (`0x0055C2A0` at `0x0053BA0F`, CONFIRMED: [`super::strength::riding`]; a cavalry
+    /// or camel unit with `dismount` active is not frightened).
     pub horses_frightened: bool,
     /// Same, a friendly unit (not this one) with "inspires" (`+0x18D`, col 75) within 100 m.
     pub friend_inspires_near: bool,
@@ -1029,40 +1044,60 @@ fn blood_bonus(kv: &KvMorale, ratio: f32) -> Option<i32> {
     }
 }
 
-/// Fighting-cavalry value scaled by the training level. W1 §12.4 (CONFIRMED):
-/// `mob`/`rabble` (0/1) → full, `poorly_trained` (2) → `/2`, `trained` (3) → `/4` (**signed
-/// shift**, so −5 >> 1 = −3), `well_trained`/`elite` (4/5) → none. Level 6 (a key outside the
-/// exe's enum, `0x00EED960`) → none (INFERRED).
+/// Fighting-cavalry value scaled by the training level. W1 §12.4 (CONFIRMED,
+/// `0x0053C94C`–`0x0053C986`): `mob`/`rabble` (0/1) → full, `poorly_trained` (2) → `/2`, `trained`
+/// (3) → `/4`, both C division rounding toward zero (`CDQ`/`SUB`/`SAR 1` and `CDQ`/`AND 3`/`SAR 2`,
+/// so −5 → −2 and −1), `well_trained`/`elite` (4/5) → none. Any other level (6, a key outside the
+/// exe's enum, `0x00EED960`) falls through the compares to the full value (CONFIRMED).
 pub fn fighting_cavalry_value(kv: &KvMorale, training_level: u8) -> Option<i32> {
     let v = kv.fighting_cavalry;
     match training_level {
-        0 | 1 => Some(v),
-        2 => Some(v >> 1),
-        3 => Some(v >> 2),
-        _ => None,
+        2 => Some(v / 2),
+        3 => Some(v / 4),
+        4 | 5 => None,
+        _ => Some(v),
     }
 }
 
-/// Formation adjust added to the front-attack value. W1 §12.4 (CONFIRMED numbers):
-/// training level 0/1 → −4, level 2 → −2, otherwise +2 "under another condition" (UNKNOWN condition,
-/// supplied as [`Attacker::plus_two_condition`]).
-fn front_formation_adjust(training_level: u8, plus_two_condition: bool) -> i32 {
-    match training_level {
-        0 | 1 => -4,
-        2 => -2,
-        _ if plus_two_condition => 2,
-        _ => 0,
+/// Adjust added to a new attacker's value (`0x0053C826`–`0x0053C867`, CONFIRMED): a riding
+/// attacker against this unit on foot gives −4 at training level 0/1, −2 at level 2, 0 otherwise;
+/// failing that, this unit riding gives +2.
+fn new_attacker_adjust(self_riding: bool, attacker_riding: bool, training_level: u8) -> i32 {
+    if attacker_riding && !self_riding {
+        match training_level {
+            0 | 1 => -4,
+            2 => -2,
+            _ => 0,
+        }
+    } else if self_riding {
+        2
+    } else {
+        0
     }
 }
 
-/// The morale-modifier pass, `0x0053C720`. W1 §12.4.
+/// Adds effect `id` with `value` unless the value is 0: the exe tests the value before each of these
+/// `add_effect` calls (`TEST`/`JZ` at `0x0053C86A`, `0x0053C988`, `0x0053CA0C`, `0x0053CAB3`,
+/// `0x0053CB37`, `0x0053CB94`, CONFIRMED). The flank and rear effects are added even at 0.
+fn add_nonzero(c: &mut MoraleComponent, id: i32, value: i32) {
+    if value != 0 {
+        c.add_effect(id, value);
+    }
+}
+
+/// The morale-modifier pass, `0x0053C720` (CONFIRMED from its disassembly). W1 §12.4.
 ///
-/// Adds, in this order: category effect, front attacks, flank, rear, fighting cavalry,
-/// total / recent / extended casualties, blood. Also sets the shock (suppress) flag when the
-/// recent casualty ratio reaches `recent_casualties_shock_threshold * 0.01`.
+/// Adds, in this order: category effect; for each attacker, in list order, a new-attacker effect
+/// (below); flank; rear; fighting cavalry; total / recent / extended casualties; blood. Also sets
+/// the shock (suppress) flag when the recent casualty ratio reaches
+/// `recent_casualties_shock_threshold * 0.01`. All ratios are compared as `f32` (`COMISS`).
 ///
-/// INFERRED details: the per-attacker front logic is applied to `Front` attackers only; the class
-/// used by the formation adjust is this unit's own `+0x194`; all ratios are compared as `f32`.
+/// Per attacker: a flank attacker sets the flank flag and a rear attacker the rear flag. An attacker
+/// not yet in [`MoraleComponent::attackers_seen`] (insert-unique `0x0054ED20`) adds
+/// [`effect_id::ATTACKED_FRONT`] with the `was_attacked_in_*` value of its direction, doubled when
+/// it is charging, plus [`new_attacker_adjust`] (skipped at 0), and sets the suppress flag. An
+/// attacker already seen sets the fighting-cavalry flag when it rides, this unit does not
+/// (a dismounted cavalry unit counts as on foot) and this unit is not in a square.
 pub fn modifiers(c: &mut MoraleComponent, kv: &KvMorale, i: &MoraleInputs) {
     // Category (+0xD08): hard-coded values, CONFIRMED.
     match i.category {
@@ -1074,46 +1109,43 @@ pub fn modifiers(c: &mut MoraleComponent, kv: &KvMorale, i: &MoraleInputs) {
         _ => {}
     }
 
-    // Front attackers: one effect per attacker; they all count (add_effect does not de-duplicate).
-    for a in i
-        .attackers
-        .iter()
-        .filter(|a| a.direction == AttackDirection::Front)
-    {
-        if a.excluded {
-            continue;
+    // Attackers (0x0053C77C-0x0053C8EA).
+    let (mut flank, mut rear, mut fighting_cavalry) = (false, false, false);
+    for a in &i.attackers {
+        match a.direction {
+            AttackDirection::Flank => flank = true,
+            AttackDirection::Rear => rear = true,
+            AttackDirection::Front => {}
         }
-        let mut v = kv.was_attacked_in_front;
-        if a.doubles_front_value {
-            v = v.wrapping_mul(2);
+        if !c.attackers_seen.contains(&a.id) {
+            c.attackers_seen.push(a.id);
+            let mut v = match a.direction {
+                AttackDirection::Front => kv.was_attacked_in_front,
+                AttackDirection::Flank => kv.was_attacked_in_flank,
+                AttackDirection::Rear => kv.was_attacked_in_rear,
+            };
+            if a.charging {
+                v = v.wrapping_mul(2);
+            }
+            v = v.wrapping_add(new_attacker_adjust(i.riding, a.riding, i.training_level));
+            add_nonzero(c, effect_id::ATTACKED_FRONT, v);
+            c.suppress_shaken_clamp = true;
+        } else if a.riding && !i.riding && !i.square_formation {
+            fighting_cavalry = true;
         }
-        v = v.wrapping_add(front_formation_adjust(
-            i.training_level,
-            a.plus_two_condition,
-        ));
-        c.add_effect(effect_id::ATTACKED_FRONT, v);
     }
-    if i.attackers
-        .iter()
-        .any(|a| a.direction == AttackDirection::Flank)
-    {
+    if flank {
         c.add_effect(effect_id::ATTACKED_FLANK, kv.was_attacked_in_flank);
     }
-    if i.attackers
-        .iter()
-        .any(|a| a.direction == AttackDirection::Rear)
-    {
+    if rear {
         c.add_effect(effect_id::ATTACKED_REAR, kv.was_attacked_in_rear);
     }
-
-    if i.fighting_cavalry
-        && let Some(v) = fighting_cavalry_value(kv, i.training_level)
-    {
-        c.add_effect(effect_id::FIGHTING_CAVALRY, v);
+    if fighting_cavalry && let Some(v) = fighting_cavalry_value(kv, i.training_level) {
+        add_nonzero(c, effect_id::FIGHTING_CAVALRY, v);
     }
 
     if let Some(v) = total_casualty_penalty(kv, i.total_casualty_ratio) {
-        c.add_effect(effect_id::TOTAL_CASUALTIES, v);
+        add_nonzero(c, effect_id::TOTAL_CASUALTIES, v);
     }
 
     // Recent casualties: shock flag first, then the ladder.
@@ -1121,15 +1153,15 @@ pub fn modifiers(c: &mut MoraleComponent, kv: &KvMorale, i: &MoraleInputs) {
         c.suppress_shaken_clamp = true;
     }
     if let Some(v) = recent_casualty_penalty(kv, i.recent_casualty_ratio) {
-        c.add_effect(effect_id::RECENT_CASUALTIES, v);
+        add_nonzero(c, effect_id::RECENT_CASUALTIES, v);
     }
 
     if let Some(v) = extended_casualty_penalty(kv, i.extended_casualty_ratio) {
-        c.add_effect(effect_id::EXTENDED_CASUALTIES, v);
+        add_nonzero(c, effect_id::EXTENDED_CASUALTIES, v);
     }
 
     if let Some(v) = blood_bonus(kv, i.kill_ratio) {
-        c.add_effect(effect_id::BLOOD, v);
+        add_nonzero(c, effect_id::BLOOD, v);
     }
 }
 
@@ -1812,72 +1844,116 @@ mod tests {
         }
     }
 
-    fn attacker(direction: AttackDirection) -> Attacker {
-        Attacker {
-            direction,
-            excluded: false,
-            doubles_front_value: false,
-            plus_two_condition: false,
-        }
+    fn attacker(id: u32, direction: AttackDirection) -> Attacker {
+        Attacker { id, direction, charging: false, riding: false }
+    }
+
+    /// Every value of effect `id`, in the component's order.
+    fn effects(c: &MoraleComponent, id: i32) -> Vec<i32> {
+        c.active_effects.iter().filter(|e| e.id == id).map(|e| e.value).collect()
     }
 
     #[test]
     fn attack_directions() {
-        let mut a = attacker(AttackDirection::Front);
-        a.doubles_front_value = true;
+        // Each new attacker gives 0x18 with its direction's value; flank and rear add 0x19 / 0x1A.
+        let mut a = attacker(1, AttackDirection::Front);
+        a.charging = true;
         let i = MoraleInputs {
             training_level: 2,
-            attackers: vec![
-                a,
-                attacker(AttackDirection::Flank),
-                attacker(AttackDirection::Rear),
-            ],
+            attackers: vec![a, attacker(2, AttackDirection::Flank), attacker(3, AttackDirection::Rear)],
             ..Default::default()
         };
         let c = run_mods(&i);
-        assert_eq!(c.effect(effect_id::ATTACKED_FRONT), Some(-10 * 2 - 2));
+        let mut new = effects(&c, effect_id::ATTACKED_FRONT);
+        new.sort_unstable();
+        assert_eq!(new, vec![-30, -20, -20]); // -10 doubled, -20, -30; nobody rides
         assert_eq!(c.effect(effect_id::ATTACKED_FLANK), Some(-20));
         assert_eq!(c.effect(effect_id::ATTACKED_REAR), Some(-30));
-
-        // Class 0 -> -4; class 4 with the "other condition" -> +2; excluded attackers do nothing.
-        let i = MoraleInputs {
-            training_level: 0,
-            attackers: vec![attacker(AttackDirection::Front)],
-            ..Default::default()
-        };
-        assert_eq!(run_mods(&i).effect(effect_id::ATTACKED_FRONT), Some(-14));
-        let mut a = attacker(AttackDirection::Front);
-        a.plus_two_condition = true;
-        let i = MoraleInputs {
-            training_level: 4,
-            attackers: vec![a],
-            ..Default::default()
-        };
-        assert_eq!(run_mods(&i).effect(effect_id::ATTACKED_FRONT), Some(-8));
-        a.excluded = true;
-        let i = MoraleInputs {
-            training_level: 4,
-            attackers: vec![a],
-            ..Default::default()
-        };
-        assert_eq!(run_mods(&i).effect(effect_id::ATTACKED_FRONT), None);
+        assert!(c.suppress_shaken_clamp);
+        assert_eq!(c.attackers_seen, vec![1, 2, 3]);
     }
 
     #[test]
-    fn fighting_cavalry_signed_shift() {
+    fn new_attacker_adjust_by_riding() {
+        // Riding attacker on foot self: level 0/1 -> -4, 2 -> -2, 3 -> 0; self riding -> +2.
+        let mut rider = attacker(7, AttackDirection::Front);
+        rider.riding = true;
+        for (level, self_riding, a, want) in [
+            (0, false, rider, Some(-14)),
+            (1, false, rider, Some(-14)),
+            (2, false, rider, Some(-12)),
+            (3, false, rider, Some(-10)),
+            (0, true, rider, Some(-8)),
+            (0, true, attacker(7, AttackDirection::Front), Some(-8)),
+            (0, false, attacker(7, AttackDirection::Front), Some(-10)),
+        ] {
+            let i = MoraleInputs { training_level: level, riding: self_riding, attackers: vec![a], ..Default::default() };
+            assert_eq!(run_mods(&i).effect(effect_id::ATTACKED_FRONT), want, "{level} {self_riding} {a:?}");
+        }
+        // A value of 0 adds no effect, but the attacker still sets the suppress flag.
+        let mut k = kv();
+        k.was_attacked_in_front = 2;
+        let mut c = MoraleComponent::default();
+        let i = MoraleInputs { training_level: 2, attackers: vec![rider], ..Default::default() };
+        modifiers(&mut c, &k, &i);
+        assert_eq!(c.effect(effect_id::ATTACKED_FRONT), None);
+        assert!(c.suppress_shaken_clamp);
+    }
+
+    #[test]
+    fn seen_attacker_counts_once() {
+        let i = MoraleInputs { attackers: vec![attacker(4, AttackDirection::Flank)], ..Default::default() };
+        let mut c = MoraleComponent::default();
+        modifiers(&mut c, &kv(), &i);
+        c.active_effects.clear();
+        c.suppress_shaken_clamp = false;
+        modifiers(&mut c, &kv(), &i);
+        assert_eq!(c.effect(effect_id::ATTACKED_FRONT), None);
+        assert_eq!(c.effect(effect_id::ATTACKED_FLANK), Some(-20)); // the flag is per evaluation
+        assert!(!c.suppress_shaken_clamp);
+    }
+
+    /// Two evaluations of `i` on one component; the second's effects.
+    fn second_eval(i: &MoraleInputs) -> MoraleComponent {
+        let mut c = MoraleComponent::default();
+        modifiers(&mut c, &kv(), i);
+        c.active_effects.clear();
+        modifiers(&mut c, &kv(), i);
+        c
+    }
+
+    #[test]
+    fn fighting_cavalry_on_foot_against_riders() {
+        // A dismounted cavalry unit (riding false) attacked by riding cavalry: the effect comes on
+        // the second evaluation, once the attacker is in the seen set (0x0053C8AB / 0x0053C8B6).
+        let mut rider = attacker(9, AttackDirection::Front);
+        rider.riding = true;
+        let on_foot = MoraleInputs { training_level: 0, attackers: vec![rider], ..Default::default() };
+        assert_eq!(run_mods(&on_foot).effect(effect_id::FIGHTING_CAVALRY), None);
+        assert_eq!(second_eval(&on_foot).effect(effect_id::FIGHTING_CAVALRY), Some(-5));
+        // Self riding, a dismounted attacker, or a square: no effect.
+        let riding = MoraleInputs { riding: true, ..on_foot.clone() };
+        assert_eq!(second_eval(&riding).effect(effect_id::FIGHTING_CAVALRY), None);
+        let walker = MoraleInputs { attackers: vec![attacker(9, AttackDirection::Front)], ..on_foot.clone() };
+        assert_eq!(second_eval(&walker).effect(effect_id::FIGHTING_CAVALRY), None);
+        let square = MoraleInputs { square_formation: true, ..on_foot.clone() };
+        assert_eq!(second_eval(&square).effect(effect_id::FIGHTING_CAVALRY), None);
+        // Scaled by the training level.
+        let poorly = MoraleInputs { training_level: 2, ..on_foot };
+        assert_eq!(second_eval(&poorly).effect(effect_id::FIGHTING_CAVALRY), Some(-2));
+    }
+
+    #[test]
+    fn fighting_cavalry_signed_division() {
+        // 0x0053C960-0x0053C979: CDQ/SUB/SAR and CDQ/AND 3/SAR, division rounding toward zero.
         let k = kv(); // fighting_cavalry = -5 (made up)
         assert_eq!(fighting_cavalry_value(&k, 0), Some(-5));
         assert_eq!(fighting_cavalry_value(&k, 1), Some(-5));
-        assert_eq!(fighting_cavalry_value(&k, 2), Some(-3)); // -5 >> 1 = -3, not -2
-        assert_eq!(fighting_cavalry_value(&k, 3), Some(-2)); // -5 >> 2 = -2, not -1
+        assert_eq!(fighting_cavalry_value(&k, 2), Some(-2));
+        assert_eq!(fighting_cavalry_value(&k, 3), Some(-1));
         assert_eq!(fighting_cavalry_value(&k, 4), None);
         assert_eq!(fighting_cavalry_value(&k, 5), None);
-        let i = MoraleInputs {
-            fighting_cavalry: true,
-            training_level: 2,
-            ..Default::default()
-        };
-        assert_eq!(run_mods(&i).effect(effect_id::FIGHTING_CAVALRY), Some(-3));
+        assert_eq!(fighting_cavalry_value(&k, 6), Some(-5));
     }
 
     fn total(r: f32) -> Option<i32> {

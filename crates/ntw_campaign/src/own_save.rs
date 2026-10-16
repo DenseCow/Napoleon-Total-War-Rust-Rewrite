@@ -28,6 +28,8 @@
 //! | 2 | regions keep their unit resources (`Region::unit_resources`, `REGION/RESOURCES_ARRAY`); a version-1 save takes them from the campaign's start |
 //! | 3 | regions keep their road and walls holders (`Region::road_holder`, `Region::fortification_holder`); an older save takes them from the campaign's start |
 //! | 4 | construction items keep their kind (`ConstructionItem::kind`: build, repair, demolish) and their active byte (`ConstructionItem::active`, read active from an older save); an older save's repair, stored as a build of the standing level, is converted (`CampaignModel::convert_legacy_repairs`), and a version 1 or 2 save made mid-round gets back the construction step the turn start ran then (see [`read_with_start`]) |
+//! | 5 | trade routes keep their capital port flag (`TradePath::capital_port`); an older save's routes that leave by sea from their exporter's capital get it (see [`read_with_start`]) |
+//! | 6 | the diplomacy manager's treaty-break counts start at 1 (`TREATY_BREAKS_START`, the exe's preset) and the access-abuse counts are kept (`World::access_abuses`); an older save's treaty-break entries, counted from 0, get 1 added, and it has no access-abuse counts (none were kept, read 0) (see [`read_with_start`]) |
 //!
 //! **What is saved.** The whole [`CampaignModel`] except the fields marked `serde(skip)` in
 //! `ntw_sim`: game data rebuilt on load (`rules` from the DB, `terrain` from the map), fields the
@@ -48,7 +50,7 @@ use crate::{CampaignInfo, LoadError, LoadedCampaign};
 /// The first bytes of every save in this format.
 pub const MAGIC: &[u8; 16] = b"NAPOLEONRUST\0SAV";
 /// The format version this build writes and the newest it reads.
-pub const FORMAT_VERSION: u32 = 4;
+pub const FORMAT_VERSION: u32 = 6;
 
 /// Everything a save holds besides its header.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -265,6 +267,14 @@ pub fn read(bytes: &[u8], db: &GameDatabase) -> Result<LoadedCampaign, FormatErr
 ///   in a slot its region's owner holds, or a repair; never the rebels', which no longer step) gets that
 ///   turn back, once. A version 3 save written by a build of the hour before the round-end change has the
 ///   same extra step but cannot be told from a later one, and is read as it is.
+/// * version 4 → 5, with no start: each trade route whose first hop is a sea hop from its exporter's capital
+///   is a capital port route (`TradePath::capital_port`), as every route of the original's saves shows
+///   (INFERRED for a capital that moved after the route was made).
+/// * version 5 → 6, with no start: every stored treaty-break count (diplomacy manager +0x1C) gets 1 added: older
+///   builds counted it from 0 where the exe presets 1 (`0x00AE8DD0` / `0x00AE8E10`), and a faction with no
+///   entry already reads the preset. The access-abuse counts (+0x18) were not kept (`World::access_abuses`
+///   reads 0, the exe's preset, as older builds charged every abuse at count 0); the other two counters
+///   already started at the exe's 0.
 pub fn read_with_start(bytes: &[u8], db: &GameDatabase, start: impl FnOnce() -> Result<CampaignModel, String>) -> Result<LoadedCampaign, FormatError> {
     let (version, info, data) = read_stored(bytes)?;
     let mut model = data.model;
@@ -282,6 +292,14 @@ pub fn read_with_start(bytes: &[u8], db: &GameDatabase, start: impl FnOnce() -> 
             log::info!("Own save format version {version}: {n} repairs stored as builds of the standing level converted");
         }
     }
+    if version < 5 {
+        let n = derive_capital_port_routes(&mut model);
+        log::info!("Own save format version {version}: {n} trade routes leaving by sea from their exporter's capital marked as capital port routes");
+    }
+    if version < 6 {
+        let n = migrate_treaty_breaks(&mut model);
+        log::info!("Own save format version {version}: {n} treaty-break counts counted from 0 moved to the preset start of 1");
+    }
     Ok(LoadedCampaign {
         model,
         info,
@@ -289,6 +307,29 @@ pub fn read_with_start(bytes: &[u8], db: &GameDatabase, start: impl FnOnce() -> 
         warnings: Vec::new(),
         script_values: data.script_values,
     })
+}
+
+/// The version 5 → 6 step of [`read_with_start`]: adds the preset start [`TREATY_BREAKS_START`](ntw_sim::campaign::TREATY_BREAKS_START)
+/// to every stored treaty-break count, which older builds counted from 0 (wrapping, as the exe's u32 does); returns how many.
+fn migrate_treaty_breaks(model: &mut CampaignModel) -> usize {
+    for n in model.world.treaty_breaks.values_mut() {
+        *n = n.wrapping_add(ntw_sim::campaign::TREATY_BREAKS_START);
+    }
+    model.world.treaty_breaks.len()
+}
+
+/// The version 4 → 5 step of [`read_with_start`]: marks the capital port routes; returns how many.
+fn derive_capital_port_routes(model: &mut CampaignModel) -> usize {
+    let capitals: std::collections::BTreeMap<FactionId, ntw_sim::campaign::RegionId> =
+        model.world.faction_details.iter().filter_map(|(f, d)| d.capital.map(|c| (*f, c))).collect();
+    let mut n = 0;
+    for ((exporter, _), paths) in model.world.trade_paths.iter_mut() {
+        for p in paths {
+            p.capital_port = p.waypoints.first().is_some_and(|w| w.sea && capitals.get(exporter) == Some(&w.region));
+            n += usize::from(p.capital_port);
+        }
+    }
+    n
 }
 
 /// The [`read_with_start`] steps from `version` to 3, from `start` (the campaign at

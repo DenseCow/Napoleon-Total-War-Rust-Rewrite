@@ -389,9 +389,8 @@ impl CampaignModel {
     /// shipped tables on the (agent type, culture) axis, `db\agents_tables\agents` and
     /// `db\agent_culture_details_tables\agent_culture_details`, were read on the install and hold
     /// strings only (CONFIRMED shipped data, 0-G round 3), and no static writer of the hash was
-    /// found. The probe is the way in: `analysis/fidelity/debugger/0G_PROMOTION_PROBE_2026-10-05.md`,
-    /// self-checked by `cargo test -p ntw_data --test probe_script` and
-    /// `cargo test -p ntw_data --test probe_install -- --ignored`.
+    /// found. The debugger read is step 2a of `analysis/fidelity/debugger/SITTING_SHEET.md`
+    /// (breakpoint `0x008E2799` in slot +0x44; selecting a land army is enough, no promotion).
     ///
     /// The `units` column #7 `unknown_3c` as the price: **INFERRED unlikely**, not refuted. It
     /// tracks each unit's own recruitment cost (ratio 0.698..4.857 over 438 rows, CONFIRMED shipped

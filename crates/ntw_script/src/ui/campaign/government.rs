@@ -331,13 +331,13 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     // "trade_info_table"; routes from 0x00A299D0 with key, name, type, value, pips = {pip = {type,
     // tooltip, icon}}; prices / price_changes per commodity from 0x00A28FB0; CONFIRMED names).
     // government_screens.lua lists `supply` as imports and `export` as exports, `type` indexing
-    // {Sea, Land, Blockaded, SeaRaided, Piracy, LandRaided, Banditry}. PROVISIONAL: every trade
-    // partner (`economy::trade_partners`) is listed in both lists as a sea route worth the pair's
+    // {Sea, Land, Blockaded, SeaRaided, Piracy, LandRaided, Banditry}. PROVISIONAL: every importer
+    // the player has a route to (`economy::trade_route_importers`) is listed in both lists as a sea route worth the pair's
     // trade value, without pips; commodity prices are not given.
     f!("TradeInfo", |lua, inner, ui, _a: Variadic<Value>| {
         let m = ui.model();
         let Some(me) = m.faction_by_key(&ui.link.human).map(|f| f.id) else { return Ok(Value::Nil) };
-        let partners: Vec<(String, i32)> = ntw_sim::campaign::economy::trade_partners(&m, me)
+        let partners: Vec<(String, i32)> = ntw_sim::campaign::economy::trade_route_importers(&m, me)
             .into_iter()
             .filter_map(|p| Some((m.world.factions.get(&p)?.key.clone(), ntw_sim::campaign::economy::trade_pair_value(&m, me, p))))
             .collect();

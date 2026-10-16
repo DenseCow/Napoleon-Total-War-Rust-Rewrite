@@ -3,9 +3,9 @@
 Keep this file short. It holds what is true now: replace finished items rather than appending logs.
 Old session logs are in `docs/archive/`.
 
-Last updated: 2026-10-13. Main tests at last full run (2026-10-08): `cargo test --workspace` passes on the install.
+Last updated: 2026-10-16. Main tests at last full run (2026-10-08): `cargo test --workspace` passes on the install.
 
-## Resume here (2026-10-11)
+## Resume here (2026-10-15)
 
 - **Repos:** work happens in the private repo (origin, `…-Private`). The public repo
   `DenseCow/Napoleon-Total-War-Rust-Rewrite` is a snapshot mirror for contributors: publish after a
@@ -16,15 +16,15 @@ Last updated: 2026-10-13. Main tests at last full run (2026-10-08): `cargo test 
   merge, applying the worker's BACKLOG ticks/Polish lines in the merge commit → `bash tools/progress.sh`
   → push (the hook syncs public #2) → publish in batches. Running work = the BACKLOG `(running: …)`
   markers and `git worktree list`; merged work = `git log`.
-- **Resume points:** the debugger sittings in docs/FOR_USER.md (gait 224, AI turn-change). Running work: BACKLOG markers.
-- **Stopped 2026-10-15 on the block cap (week 20%).** Worktrees to resume, each with its BACKLOG marker:
-  `NR-broadcasters3` (2 commits: trade route loss, threat/decline; ended without a report: check uncommitted changes, then a first full review);
-  `NR-transfer3` (notes commit 15bccb85; the implementation worker stopped early: relaunch it from the same brief);
-  `NR-polish22` (10f55e21; review asked a fix round: raise 0x010430C0, 0x00DB80F0, 0x00E778A0 to raw V5 ≥70 and fix the MOD_LOADING.md globals lines; not started);
-  `NR-formation5` (no commits yet: shape layouts, horses_frightened, soldier flags). New BACKLOG item to add: our DB reader doesn't port flag byte 0 (a file with flag 0 and rows drops the rows loaded before it; ntw_formats db.rs:10/:224, db_folder.rs:62).
+- **Resume points:** the one debugger sitting sheet at the top of docs/FOR_USER.md. Running work: BACKLOG markers.
+- **Night 2026-10-15 (stopped at the block cap, 2026-10-16 ~01:40; no resume scheduled):** Merged tonight: polish22–25, broadcasters3, transfer3, the sitting sheet, formation5, polish26, director3, polish27–30, tradebreak, layoutxy, formation6, polish31, horsefright, leftroutes, polish32, dipcounters, polish33, fightcav, shiprepair, polish34, polish35. **Resume next session (each branch pushed, its BACKLOG marker kept; a fresh worker per branch):**
+  - `work/routeacc` (7fe10e47, worktree NR-routeacc): code done, tests pass, own save v7. Left: Ghidra V5 for 0x00B15B50, 0x00B83C30, 0x00B60A40, 0x00B61780, 0x00BAC2A0, 0x00B981D0 + the 0x00B79B20 plate; then the first full review. On merge: tick "Trade per-route accumulated value"; add §0 "Trade raiding (commerce raids): route +0x58 list, 0x00B83C30 / 0x00B60A40 / 0x00B79B20; not modelled".
+  - `work/attackers` (f28f389c, NR-attackers): code done, tests pass. Left: rename + V5 the three functions §10.2 of UNITS_TERRAIN_FIDELITY.md already names (0x0052EDB0, 0x00551A40, 0x0057F310), rerun self_check; then review. Don't tick (INFERRED on sitting sheet 3k/3l); Polish: 0x0054F070 (main attacker) not ported.
+  - `work/savename` (f4e202ea, NR-savename): trace only, no code. Next: the code plan at the end of UI_FIDELITY.md §5.1 (save flag [+0xFA8]+0x115 = disable_saving_game 0x0097B840; single-player ConfirmSave shows no dialog), V5 for its addresses (create a function at 0x009E4BB0 first) and 0x0097B840 / 0x009EE550.
+  - `work/polish36` (bcc99e57, NR-polish36): notes only. 0x00B67B20, 0x00B0E420, 0x00B13840 done (≥73); left: V5 for 0x00AFC160 (46.7) and 0x00AE8E10 (0.5), then self_check (fails on those two until then). On merge narrow the Polish line to those two.
+  Every brief names `tools/self_check.sh` and holds one item. §11: framework parts only; the unwrap audit last.
 - **Disk:** C: filled up on 2026-10-09; 21 merged worktrees were removed (~100 GB back). Remove a
   worktree after its merge; check `df -h /c` before starting builds.
-- **Next:** §0, several workers tracing in parallel under the Ghidra writer lock, §11: only the framework parts that avoid costly refits later (rule-seams running), the rest waits for its turn (user, 2026-10-10); the unwrap audit last.
 - Evidence saves live in `%USERPROFILE%\Documents\ntw-evidence\saves` (never inside a target folder);
   recovered build-folder data in `ntw-evidence\recovered-targets\`.
 - Usage (user plan, 2026-10-14): 21 points on Wed 2026-10-14, then one 12-point block a day (~13 with the reading lag) until the weekly
@@ -90,10 +90,7 @@ Delete a line once checked and record the result where it belongs. Base command:
   `git push origin --delete work/fidelity-campaign-w4`. Same branch on the sandbox.
 - **Raw Ghidra dumps in the private repo's history** (322 + 65, untracked since): they stay unless the
   user wants a history rewrite. The public repo has fresh history and none of them.
-- **Debugger reads still open (battle):** who writes `unit+0xD48`, formation radius `+0x670`, garrison cap `+0x6C`
-  (`unit_scale` is solved, BATTLE_FIDELITY row 48). Their probe plan `f0a_battle_probe.cdb.txt` was never committed
-  (`.txt` is ignored under `analysis/`): a worker preps the breakpoints statically first; the first two can then run
-  unattended at battle load, the garrison cap needs a siege battle (a short sitting, or a battle launched by flag).
+- **Debugger reads still open:** all in the one sitting sheet (docs/FOR_USER.md top, `analysis/fidelity/debugger/SITTING_SHEET.md`).
 
 ## Waiting for a worker slot
 

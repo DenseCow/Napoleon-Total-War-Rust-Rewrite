@@ -955,6 +955,7 @@ fn write_faction(
     }
     write_taxes(f, faction, model);
     write_stances(f, faction, model);
+    write_diplomacy_counters(f, faction.id, &model.world);
     write_bonus_values(f, model.world.faction_details.get(&faction.id));
     write_pools(f, model.world.faction_details.get(&faction.id));
     write_technologies(f, model.world.faction_details.get(&faction.id));
@@ -1219,6 +1220,26 @@ fn write_stances(f: &mut EsfRecord, faction: &Faction, model: &CampaignModel) {
                 }
             }
         }
+    }
+}
+
+/// The diplomacy manager's four counters into `DIPLOMACY_MANAGER` #1..#4 (the writer `0x00AFC160`
+/// writes all four, CONFIRMED; the loader is `world::read_diplomacy_counters`). A faction without an
+/// entry writes the constructors' values (`World::treaty_breaks_of`, 0 for the others). A faction
+/// without the block (the rebels) has no manager and nothing is written.
+fn write_diplomacy_counters(f: &mut EsfRecord, faction: ntw_sim::campaign::FactionId, w: &ntw_sim::campaign::World) {
+    let Some(dm) = child_mut(f, "DIPLOMACY_MANAGER") else { return };
+    let zero = |m: &BTreeMap<ntw_sim::campaign::FactionId, u32>| m.get(&faction).copied().unwrap_or(0);
+    let values = [zero(&w.alliances_broken), zero(&w.access_abuses), w.treaty_breaks_of(faction), zero(&w.access_cancel_marks)];
+    for (i, v) in values.into_iter().enumerate() {
+        if !matches!(dm.children.get(i + 1), Some(EsfNode::U32(_))) {
+            static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                log::warn!("save: a DIPLOMACY_MANAGER has no u32 at #{}; its counters are not all written (logged once)", i + 1);
+            }
+            continue;
+        }
+        set(dm, i + 1, EsfNode::U32(v));
     }
 }
 

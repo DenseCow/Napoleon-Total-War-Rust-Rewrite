@@ -19,12 +19,18 @@
 //! out with the spacing the battle setup sets, else a PROVISIONAL stand-in ([`FORMATION_RANKS`],
 //! [`FILE_SPACING_M`]).
 
+use std::cell::RefCell;
 use std::f32::consts::TAU;
 
 use super::attributes::{ability, shot_type_value};
 use super::march::SquadBox;
 use super::model::{Battle, dist2};
 use super::morale::{self, ScriptMorale};
+
+thread_local! {
+    /// Scratch for [`Battle::skirmish_enemies`], reused across checks.
+    static SKIRMISH_SCRATCH: RefCell<Vec<(f32, usize)>> = const { RefCell::new(Vec::new()) };
+}
 
 /// Enemies within this distance are looked at by the skirmish check and weigh on the evade
 /// direction (`0x0054C9D0` / `0x0054C980`: 150.0, CONFIRMED).
@@ -358,25 +364,26 @@ impl Battle {
     /// Enemies of unit `idx` that the checks look at: active, with men, not routing, within
     /// [`SKIRMISH_SCAN_RANGE_M`] of its box's edge (the query `0x00701310`, called at `0x0054CAB9`:
     /// [`morale::near_units`]), nearest box centre first (PROVISIONAL order: the original walks
-    /// the query's spatial grid).
-    fn skirmish_enemies(&self, idx: usize) -> Vec<usize> {
+    /// the query's spatial grid; ties by unit index). Fills `out` (cleared first) with
+    /// `(squared distance, unit index)`, so a caller reuses one buffer instead of allocating.
+    fn skirmish_enemies(&self, idx: usize, out: &mut Vec<(f32, usize)>) {
         let me = &self.units[idx];
         let centre = me.squad_box().centre;
-        let mut v: Vec<(f32, usize)> = self
-            .units
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| {
-                e.side != me.side
-                    && e.active
-                    && e.men > 0
-                    && !e.morale.is_routing_or_shattered()
-                    && morale::near_units(me, e, SKIRMISH_SCAN_RANGE_M)
-            })
-            .map(|(j, e)| (dist2(centre, e.squad_box().centre), j))
-            .collect();
-        v.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-        v.into_iter().map(|(_, j)| j).collect()
+        out.clear();
+        out.extend(
+            self.units
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| {
+                    e.side != me.side
+                        && e.active
+                        && e.men > 0
+                        && !e.morale.is_routing_or_shattered()
+                        && morale::near_units(me, e, SKIRMISH_SCAN_RANGE_M)
+                })
+                .map(|(j, e)| (dist2(centre, e.squad_box().centre), j)),
+        );
+        out.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
     }
 
     /// The skirmish check `0x0054C9D0` (CONFIRMED structure, constants and geometry; the boxes are
@@ -401,13 +408,23 @@ impl Battle {
         if !self.skirmish_gate(idx) {
             return 0;
         }
+        // One scratch per thread, taken out while in use (no allocation after the first check).
+        let mut scratch = SKIRMISH_SCRATCH.with(|s| s.take());
+        self.skirmish_enemies(idx, &mut scratch);
+        let r = self.skirmish_scan(idx, &scratch);
+        SKIRMISH_SCRATCH.with(|s| s.replace(scratch));
+        r
+    }
+
+    /// The body of [`Self::skirmish_check`]: walks `enemies` in order, the first hit wins.
+    fn skirmish_scan(&self, idx: usize, enemies: &[(f32, usize)]) -> u8 {
         let me = &self.units[idx];
         let look = if me.skirmish_eval.result == 1 { SKIRMISH_LOOKAHEAD_EVADING_S } else { SKIRMISH_LOOKAHEAD_S };
         let range = me.missile_range(self.kv_rules.fire_on_walls_range_modifier).min(SKIRMISH_RANGE_CAP_M);
         let own = self.moving_dir(idx);
         let target = me.fire_target;
         let mine = me.squad_box();
-        for j in self.skirmish_enemies(idx) {
+        for &(_, j) in enemies {
             let e = &self.units[j];
             let theirs = e.squad_box();
             if let Some((edir, espeed)) = self.moving_dir(j) {
@@ -623,7 +640,7 @@ impl Battle {
     /// is horse artillery, so every unit starts with skirmish off.
     pub fn skirmish_default(&self, idx: usize) -> bool {
         let u = &self.units[idx];
-        let dismounted = u.active_abilities & (1 << ability_ids::DISMOUNT) != 0;
+        let dismounted = super::strength::dismount_active(u);
         let unlimbered = u.active_abilities & (1 << ability_ids::UNLIMBER) != 0;
         u.attributes.skirmisher
             && !dismounted
@@ -718,6 +735,8 @@ impl Battle {
         if u.defence_contact {
             return;
         }
+        // INFERRED predicate: the exe asks each soldier (vfunc `+0xF0`), not the unit, so neither
+        // `0x0055ABF0` nor `0x0055C2A0` is called here; the unit-level test keeps `0x0055ABF0`.
         let rider = super::strength::mounted(u);
         let kills = match d.kind {
             ability_ids::CHEVAUX_DE_FRISE => rider,
@@ -917,6 +936,20 @@ mod tests {
         assert_eq!(b.skirmish_check(1), 0);
         b.units[2].skirmish = true; // a skirmisher does not block
         assert_eq!(b.skirmish_check(1), 1);
+    }
+
+    #[test]
+    fn skirmish_enemies_nearest_first_ties_by_index() {
+        let mut b = battle();
+        b.add_unit(unit(1, 0, (0.0, 0.0)));
+        b.add_unit(unit(2, 1, (0.0, 60.0)));
+        b.add_unit(unit(3, 1, (0.0, 30.0)));
+        b.add_unit(unit(4, 1, (0.0, -30.0))); // same distance as index 2
+        b.add_unit(unit(5, 0, (0.0, 10.0))); // friend: excluded
+        let mut out = vec![(9.0, 9)]; // stale content is cleared
+        b.skirmish_enemies(0, &mut out);
+        let order: Vec<usize> = out.iter().map(|&(_, j)| j).collect();
+        assert_eq!(order, vec![2, 3, 1]);
     }
 
     #[test]

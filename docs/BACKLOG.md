@@ -8,24 +8,24 @@ the original's values. See the Goal section of `CLAUDE.md`.
 
 ## Progress
 
-Generated 2026-10-15 by `bash tools/progress.sh` (from `tools/backlog_count.sh` and `tools/tag_count.sh`); never edit it by hand.
+Generated 2026-10-16 by `bash tools/progress.sh` (from `tools/backlog_count.sh` and `tools/tag_count.sh`); never edit it by hand.
 
-Tags left in the code (done means zero): 1779 (697 PROVISIONAL, 101 PLACEHOLDER, 981 INFERRED), plus 589 UNKNOWN.
+Tags left in the code (done means zero): 1790 (699 PROVISIONAL, 102 PLACEHOLDER, 989 INFERRED), plus 584 UNKNOWN.
 
 | Section | Done | Partly done | To do |
 |---|---|---|---|
-| 0. Cross-cutting fidelity | 123 | 0 | 60 |
+| 0. Cross-cutting fidelity | 134 | 0 | 28 |
 | 1. File formats and data | 11 | 0 | 0 |
-| 2. Graphics and rendering | 0 | 11 | 32 |
-| 3. Battle gameplay (land) | 1 | 11 | 23 |
-| 4. Naval battles | 0 | 1 | 5 |
-| 5. Campaign gameplay | 4 | 13 | 12 |
-| 6. AI | 0 | 1 | 6 |
-| 7. User interface | 1 | 7 | 10 |
-| 8. Video (Bink) | 2 | 1 | 0 |
-| 9. Audio | 0 | 2 | 8 |
+| 2. Graphics and rendering | 0 | 11 | 36 |
+| 3. Battle gameplay (land) | 2 | 11 | 27 |
+| 4. Naval battles | 0 | 1 | 7 |
+| 5. Campaign gameplay | 4 | 13 | 29 |
+| 6. AI | 0 | 1 | 10 |
+| 7. User interface | 1 | 7 | 13 |
+| 8. Video (Bink) | 2 | 1 | 1 |
+| 9. Audio | 0 | 2 | 11 |
 | 10. Multiplayer | 0 | 0 | 6 |
-| 11. Modding (goal: original mods work out of the box, plus easy modding) | 2 | 0 | 12 |
+| 11. Modding (goal: original mods work out of the box, plus easy modding) | 2 | 0 | 16 |
 | 12. Platform, release and quality | 0 | 0 | 6 |
 
 §0 counts individual pieces; the other sections still count whole features, so their numbers move
@@ -50,6 +50,8 @@ more slowly. Split a big item into sub-checkboxes when work on it starts.
 
 **Reserved by the maintainer** (listed in the public pinned issue #2): contributors don't claim §0
 work while this line is here. To open §0 up, delete this line (or move it under single `###` headers).
+
+**Exit bar (user, 2026-10-15):** §0 keeps only open items that change what the player sees or plays. Deep traces, debugger-only reads and Ghidra tidy-ups go to their feature section ("From §0" blocks) or Polish.
 
 Each area keeps a notes file with a resolved/open table (question, answer, tag, code); read its "Where I am"
 first. Evidence and round history live there; the pre-2026-10-07 long form of this section is in
@@ -101,41 +103,37 @@ first. Evidence and round history live there; the pre-2026-10-07 long form of th
 - [x] Recruitment details (`0x00AECEE0`, `0x00AED220`): cost from units #7 and region effects, the unit cap (units #15, `0x008F68B0`), the AI handicap and recruit prices from the model (`0x008DD090`)
 - [x] Recruitable population gate and charge (`0x00A89550` / `0x00AAF190` / `0x00A61AA0`, `REGION_FACTORS` #2)
 - [x] Capture refunds a port's naval queue items to the old owner (`0x00B1A760(1)` per port); our `occupy` refunds nothing; `0x00B58A30` is a fourth capture variant missing from the notes
-- [ ] `CDIR_INTENTION_TRANSFER_REGION_OWNERSHIP` (`0x00B93840`, applied via `0x00B58A30`): merged 2026-10-11 (region-transfer: campaign director in the model behind seam `director.region_transfer`, TurnStep::Handover, cdir_configs keyed campaign_faction_variable `0x00FCD150`, CDIR_INTERFACE + counter in .esf `0x00B94170`/`0x00B9D6E0`/`0x00B9B6C0`, startpos director RNG, 4 ORIGINAL BUGs fixed; CAMPAIGN_FIDELITY.md). Left (PROVISIONAL): the stored relation copy `rival_score` reads (next line), the siege test (§5 "Sieges on the campaign map"), sea mobiles, the director's other RNG users (below)
-- [ ] Stored CAI relation belief (`0x00A89E00` faction +0x100 list +8, written by `0x00ABAFB0`): merged 2026-10-14 (cai-belief: belief store + dirty mark in the director state, per-broadcaster marks CONFIRMED `0x00A8F320` → `0x00A88CE0`, capture `0x00A64AC0`/`0x00B62120`, misdeeds `0x00B0D870`/`0x00B67FD0`/`0x00B0D700`/`0x00B67E60`). Left: the turn-change mark (INFERRED, `0x00CF7F60`, propagation `0x00CF0B10`: debugger sitting); the other 184 readers of `0x00A74A20` (PROVISIONAL); the +0xA8 enemy-majority flag
 - [x] Diplomacy-changed broadcasters (cai-broadcasters): make_protectorate follows `0x00B105C0`/`0x00B104E0` (ends old patron ties via `0x00B64B10`, hands on its protectorates, breaks the protectorate's other alliances); spa_napoleon loot resentment (`0x00B541E0` → `0x00B544F0`) as a CampaignFeatures row
 - [x] Faction destruction and re-emergence (broadcasters2): the capital moves on capture, deal or director transfer (`0x008BA580`, `0x008DABC0`); a faction left with no capital ends (`0x008AB6C0` DestroyFactionAndResetRelations, `0x00B2B920` resets, `0x00B73430` trade break); liberation brings it back (`0x008AE6E0` → `0x00B2BB00`, records reset `0x00B2BC10` / `0x00B72AC0`, no pair with the rebels)
-- [ ] (running: broadcasters3) Broadcasters left (broadcasters2): route-loss trade break (`0x00BA42E0` → `0x00B73430`); threat flag / decline `0x00C1F210` → `0x00B72F00`; the revolt path `0x00AAB440` (INFERRED meaning; spa_britain access `0x00B444B0`; multiplayer); protectorate peace step (`0x00B105C0`); the tribute stays PROVISIONAL; PROVISIONAL `0x00B30A50`, the second factor array, `0x00B268B0`; INFERRED settlement slots, slot owner, tie order
-- [ ] Trace faction +0x754, which `0x008AB6C0` clears (two candidate meanings, broadcasters2 notes); model the clear
-- [ ] Trace when a re-emerged faction's posts get holders (ours leaves them empty, INFERRED)
-- [ ] Trace the SettlementOccupied events (`0x00B58560` / `0x00B58890` / `0x00B58C00`) against FactionDestroyed (`0x00A64AC0`): ours sends FactionDestroyed first (INFERRED)
-- [ ] `0x008AB6C0` parts not modelled: the killer path (+0x924, `0x00BA80E0`), the multiplayer report (`0x009C7660`, event +0x120)
-- [ ] Ending a protectorate tie (`0x00B64B10`) moves the patron's characters out of each of the protectorate's regions (`0x008D9DC0` ExpelFactionForcesFromRegion); `end_protectorate_tie` doesn't model it (polish20)
+- [ ] Broadcasters left (broadcasters3): the revolt path `0x00AAB440` → `0x00B544F0` (INFERRED meaning; spa_britain access `0x00B444B0`; multiplayer); protectorate peace step (`0x00B105C0`); the tribute stays PROVISIONAL; PROVISIONAL `0x00B30A50`, the second factor array, `0x00B268B0`; INFERRED settlement slots, slot owner, tie order; listeners `0x00BB9410` / `0x00BB9B90`; pair-cache refresh `0x00BBDBA0` / `0x00BAC0D0`; mid-turn prices `0x00BCB020`; route rebuild `0x00BA0490`; CanThreaten; PROVISIONAL combined cap in `build_trade_route`; INFERRED port-full gap (an exporter-map entry the exe keeps empty, `0x00BB4F80`)
+- [x] Ending a protectorate tie (`0x00B64B10`) moves the patron's characters out of each of the protectorate's regions (`0x008D9DC0` per region): modelled by transfer3 (`end_protectorate_tie` → `expel_from_region`, test in campaign/tests/transfer.rs)
 - [x] Deal embargo direction CONFIRMED: the embargoed faction gets `trade_embargoed` towards the deal's other side (`0x00C18800` → `0x00B28DB0`) (deals-fix)
 - [x] Director: the other desires that draw on the director RNG (`0x00BAC560`, `0x00BAC9C0`, `0x00BC06E0`, `0x00BD4A60`, `0x00BAED7A`): merged 2026-10-12 (director-rng: at-war, boost, XP, replenish draws; at-war order `0x00ABAFB0` CONFIRMED; garrison skip `0x00C3B7A0` +0xFC CONFIRMED). Left: the garrison object chain +0x12C→+0x34 (PROVISIONAL, ntw_sim director.rs)
 - [x] Path grid: sea cells carry their sea region (`0x00BB52E0`), used by the director's transfer checks
 - [x] Trace: does a region transfer eject the old owner's agents (and where to)
-- [ ] (running: transfer3) Director transfer: raise the army `0x00BA8400` builds from the garrison count (steps in CAMPAIGN_FIDELITY.md, director section; director2)
-- [ ] (running: transfer3) Model the region-transfer expulsion: `0x00A64AC0` (4th arg 0) → `0x008D9DC0` expels other factions' land armies and, when not at war, docked navies; covers deals, liberation, likely EndProtectorateTie; placement `0x008DCB30` untraced (director2)
+- [x] Director transfer garrison (director3): the count drawn first, the region's recruitable list filtered by the receiver's land recruitment beliefs (`0x00BAF9A0`, `0x00D9C9D0` / `0x00D9CD60`), sorted by category (`0x00B7F510`), raised round and round into one garrisoned army (`0x00BA8400`, placement as `0x008ECAD0`) CONFIRMED and tested; the belief-cache freshness left (§5)
+- [ ] Region-transfer expulsion left (transfer3; rule `0x008D9DC0` modelled behind `region.expulsion`): PROVISIONAL placement stand-ins (outline point `0x008AF750`, flood `0x00B35640`, footprints, faction gain order, unstable sort); INFERRED embarked army never counts (shared-polygon lists `0x00B4D800` +0x140 / +0x154 and the carrier position `0x00A99A60` untraced); PROVISIONAL one theatre per map (a no-op on every shipped map)
+- [ ] Access-loss expulsions not modelled: `0x00B29170`, `0x00B67BD0`, `0x00B0CA20`, `0x00B13A30`, `0x00B0D0C0` (transfer3)
+- [ ] The deal's peace-record pass (+0x184) after a region exchange is not modelled (PROVISIONAL in negotiation.rs; transfer3)
+- [x] (tradebreak) Breaking trade removes every route of the pair: `break_trade` and `break_trade_both_ways` (treaties.rs ~408-445); the exe removes only the first exporter→importer route each way (`0x00B73430` → `0x00B13C30` ×2 → `0x00BC0120`; `0x00B29BB0` → `0x00B733B0` → `0x00BC0120`), and its lookup creates an empty exporter entry (polish26)
+- [ ] (running: routeacc) Trade per-route accumulated value (leftroutes, PROVISIONAL `accumulate_trade`): the exe keeps it per route (`0x00B05CC0` +0x3C, erased by `0x00BAC2A0`), ours per pair; and the `0x00B79B20` +0x60 deduction vector is not modelled
+- [ ] Diplomacy backstab penalty (polish36 trace): the other-faction penalty (`0x00B0E540`) goes to factions of the declarer's subculture (`ApplyBackstabbingPenalties` `0x00B0E420` compares at `0x00B0E446`), not the victim's as treaties.rs `same_subculture(x, b)` does; the CAMPAIGN_FIDELITY backstab row also says "target"
+- [x] (leftroutes) Trade routes left after a break (tradebreak review): the exe keeps earning on routes that outlive their agreement (`0x00BB3490`, `0x00BBD870`) while ours counts only `trade_partners`, and `trade_home_value` (trade.rs ~255) keeps subtracting their stale loaded volumes; trace and match
+- [ ] `trade_port_full` no-entry rule (tradebreak, PROVISIONAL in trade_check.rs): the split `0x00BC26D0` (operator[] `0x00BC3699`) gives every faction an exporter entry, so a 0-cap port reads full in the exe and not in ours; `0x00B73430` never calls the price update `0x00BCB020`, so the entry `0x00BC0120` creates lasts until the next split
+- [x] (dipcounters) Diplomacy manager counters (polish31 review): load DIPLOMACY_MANAGER #1–#4 (+0x14/+0x18/+0x1C/+0x20) into `World`; a faction without the block starts `treaty_breaks` at 1 (both constructors, `0x00AE8DD0`; vanilla saves hold 1 for every faction); ours starts at 0, so a first backstab has no `peace_treaty` penalty (`0x00B0E420`, treaties.rs ~276)
+- [ ] The expulsion's move notice `0x009FB680` (message 0x119) is not sent (transfer3)
+- [ ] UNKNOWN: which command calls the transfer path at `0x00936B37` (transfer3)
 - [x] 14 recruit-cost save misses: prices fixed at queue time (traced 2026-10-10); Spain +49 was a saved type-0xE (unit category) `cost_mod` +25 on `naval_merchant` that `0x00B0D220` adds and our saved-bonus key never reached (recruit-cost2, CONFIRMED by name tables `0x0145B75C`/`0x0145B778`; 394/406 save prices match); `0x008B16C0` callers in CAMPAIGN_FIDELITY.md
 - [x] Trace whether turn.rs:471 should block training of flagged items (`0x00B5AD90`)
 - [x] Recruitable list, no-entry gates (recruit-gates: gates `0x00AA1660` (units #14 vs RESOURCES_ARRAY) and `0x00A27960` (scripts UNIT_RESTRICTIONS) CONFIRMED, construction before the queue step, +0x20/+0x24 = road/fortification slots)
 - [x] Construction at round end (`0x008BC650` → `0x00AB3DA0`, before diplomacy `0x00B29100` and research `0x008F3C40`) (construction)
 - [x] The DB loader drops units rows with an unknown region_unit_resources key (`0x00EDC000`, recruit-followups): every units reader goes through the dropping path; `Region::unit_resources` PROVISIONAL removed
 - [x] Walls/road effects on region +0x188/+0x198 (`0x00A6AEE3`/`0x00A6AEFA` via `0x00A62380`, recruit-followups): walls effects count; slot holders on `Region`, own save v3
-- [ ] Model `0x00EDC000`'s other drops: a null on-screen name and an unknown unit_class / category (recruit-followups)
-- [ ] Trace a writer of DATABASE_TABLE +0x38 / whether the early return `0x00E9BD95` is reachable (`0x00E9B700` "goes on with the next row" INFERRED, ntw_data database.rs ~296)
 - [x] Construction options check the slot holder (`0x00B4333B` → `0x00A91FC0`); owner-change holder rule CONFIRMED `0x00B1B300`; the save writer writes slot holders; ESF construction item read CONFIRMED `0x00AFBA90` / `0x00B256C0` (construction)
 - [x] Construction follow-ups (construction2): repair health per turn (`0x00B78490`, SetBuildingHealth); demolish items (type 3: StepDemolish, CanDemolish, QueueSlotDemolition, refund); the ESF item tails (per-type loaders from `0x00B256C0`: 0 upgrade `0x00AE7040`, 1 new building `0x00AE6EF0`, 2 repair `0x00AE6FE0`, 3 demolish `0x00AE6EB0`; tail writer vtable +0); inactive items wait (`0x00B7880E`); a construction-step seam in `CampaignRules::seams`; own save v4 (kind and active byte)
-- [ ] Construction left (construction2): slot garrisons (`0x00A64440`, slot +0xC0); port blockade (`0x00A784E0`); slot +0x1EC; the other SetBuildingHealth callers (`0x00B541E0`); BuildingCompleted posted per list entry (`0x00B78230`); the +0xBA0 event; what clears an item's active byte (+8); the walls damage-object restore; research stopping on an upgrade to another building (`0x00B4D4D0`); `docked_port` PROVISIONAL
-- [ ] Trace the faction region-list order (+0x778 / +0x77C) at startpos, at load and on gains and losses, so the round end walks regions in the original's order (ours: id order, PROVISIONAL, ntw_sim turn.rs; construction2)
-- [ ] Trace whether GDP (`0x00A6AFC0`) reads the walls (recruit-followups)
-- [ ] Map callers of the recruit gates `0x00AA1660`/`0x00A27960`: `0x00A87640`, `0x00AAB440`, `0x00A799A0` → `0x00B43FC0`, `0x009B74E0`, `0x009DF476`
 - [x] The exe reads `units_to_groupings_military_permissions` (`0x00F74CB0`); already modelled through the merged DB (recruit-cost2)
-- [ ] Recruit cost: which commands the three handlers near `0x00936530` are (UNKNOWN, recruit-cost2)
 - [x] The importer limit (`0x00BB5730`): none; the split `0x00BC26D0` ported (352/352 route volumes)
 - [x] The 4 desertion-exempt unit classes (`0x008BA1E0` + `0x00EED3E0`: cavalry_heavy, elephants, general, infantry_elite)
-- [ ] Naval PROVISIONAL details: capture share weighting, captured crew base, gun counts of 8 ship models (needs a probe)
 - [x] Trace the affordability rules of the unit pool and treaties (ours: their own checks in pool.rs ~309/484, treaties.rs ~467), and their charging arithmetic (ours: saturating/plain; overflow behaviour untraced; upkeep economy.rs ~525 and script treasury changes ntw_script game.rs:211 also bypass treasury.rs)
 - [x] What the exe does with a queued recruitment item whose target commander dies (ours keeps the dead id: `character_dies` characters.rs:532, pool.rs:434, family.rs)
 - [x] IsRecruitable bits 0 and 2 (generals maximum, no room) are not modelled (treasury-rules, CAMPAIGN_FIDELITY.md §Treasury changes)
@@ -144,24 +142,17 @@ first. Evidence and round history live there; the pre-2026-10-07 long form of th
 - [x] `0x008F56C0` (paid when both sides are human) is not modelled
 - [x] Ship repair in port (`0x008EEB70`, treasury3): order/toggle charge, cancels refund the recomputed cost, turn-end repair, one undock path for every navy move (`0x00A8C0B0`)
 - [x] AI navy repair `0x00AA90F0` gated by the scripted shopping shroud (`0x00A8B2D0` / `0x00AA9B40`, script `disable_shopping_for_ai_under_shroud`); director credit `0x00BAF200` → `0x00BB33A0` traced, matches `boost_step` (treasury4)
-- [ ] Treasury callers still not modelled (treasury4 traced): missions credit `0x00A06050` (needs mission completion); captured-ship sale / placement (`0x00B38F10`, needs the state-6 force rebuild); MP results counter FACTION +0x954 (`0x008F56C0` / `0x00B298F0`, with MP results)
-- [ ] AI shopping shroud (treasury4): the naval goal that creates CAI_BDIM_REPAIR_NAVY (`0x00CDD540`; `ai_repair_navy` has no runtime caller yet); the gate `0x00A8B2D0` on its 11 other callers (incl. `0x00A67890`); trace CAI slot +0x104 (the gate's position, INFERRED at capture.rs ~472); the CAI unit-list order (INFERRED); the ESF CAI_INTERFACE bool is neither read nor written (no load warning)
-- [ ] Undock: `0x00A8C0B0`'s three notifications are not modelled (the handle clear and port slot hand-back are, polish21); the war kick-out of docked navies (`0x008DA179`) and the port order caller `0x0094D4F0`; docking within 1 map unit and the battle undock before captures are PROVISIONAL (treasury3)
-- [ ] Campaign UI: wire the port ship-repair button(s) to `RepairShip` / `ToggleShipRepair` (ntw_sim commands.rs; treasury3 modelled the rule, no UI calls it yet); trace which layout/.luac element the original uses
+- [ ] Land unit replenish toggle (shiprepair, PROVISIONAL in ntw_script ui/campaign/army.rs: logs once, returns false): `CCQ_TOGGLE_REPLENISH_UNIT`, state `0x00B78090`; vanilla scripts never call it
+- [ ] navy_repair calls the undefined `Army.OnRepairButtonDestroyed` once the host sends OnDestroyed; handle it (shiprepair). Trace the `repair_navy` console command (`0x00426A40`)
+- [x] (shiprepair) Campaign UI: wire the port ship-repair button(s) to `RepairShip` / `ToggleShipRepair` (ntw_sim commands.rs; treasury3 modelled the rule, no UI calls it yet); trace which layout/.luac element the original uses
 - [x] Diplomacy: cap a demanded one-off payment at the payer's treasury (`0x00C4AB4E`–`0x00C4AB82`; `deal_item_commands` / `one_off_payment` do not cap; check the negative-treasury case for an ORIGINAL BUG; CAMPAIGN_FIDELITY.md deal → item copy)
 - [x] Importer: read the capital even when the faction has no `FORT_UPGRADE_MANAGER` block, as the exe does (`0x0087B1DA`; `crates/ntw_campaign/src/details.rs` `faction_details`)
 - [x] Diplomacy: payments Propose rows and the AI's payment evaluation use the capped offer (seam `diplomacy.proposed_payment`, `0x00C4AB45`–`0x00C4AB85`, row text shows the capped amount); ORIGINAL BUG fixed: a negative treasury turned a capped offer into a demand (`0x00C4AB7E`); a deal applies all or nothing (deals-fix)
-- [ ] Trace the AI diplomatic budget pot (CAI +0x140, `0x00AAF570`; PROVISIONAL in the AI's payment evaluation, deals-fix)
 
 ### 0-C middleware — [analysis/fidelity/MIDDLEWARE_VERIFY.md, BINK.md]
 - [x] Miles mixing rules and loudness (CONFIRMED against the exe); game-speed sfx rule; UI sound kinds
 - [x] Bink intro: order, once per start, full-screen sizing
 - [x] Battle animation ACTION table contract (CONFIRMED against the dumps)
-- [ ] The sound bank query: reopened 2026-10-09 (the entry reader `0x00E28DF0` is reached through vtable slot `0x013A9944` from `0x00E256D0`); next a main-menu debugger watchpoint (MIDDLEWARE_VERIFY.md §3 round 14)
-- [ ] Animation cue → slot dispatch (INFERRED): the round-9 "dead" proof is void (the play paths are vtable slots); needs a user debugger sitting in a battle
-- [ ] The movie skip rule: trigger CONFIRMED (Escape key-up while the intro queue plays, `0x0048A650`; user check 2026-10-09: Escape skips in ours); the can-stop flag `+0x58` still INFERRED
-- [ ] The headphones multiplier: CONFIRMED from the `sound_provider` pref and Miles' speaker setup (`0x01004390`, `0x01006600`); left INFERRED: which speaker setups Miles opens on a machine (a failed one shifts a saved index)
-- [ ] `EnumerateSoundProviders` (ntw_script ui_prelude.lua:869) returns `{}`; it should list the providers from `0x00DA1270`
 
 SpeedTree leftovers are in §2.
 
@@ -174,11 +165,6 @@ SpeedTree leftovers are in §2.
 - [x] Standard bearers draw their flag: cloth geometry, pole and bone CONFIRMED; verlet solve in `ntw_sim::battle::cloth`
 - [x] `slots_art` / `slots_templates_models` load; region fort model `fFort` level n → `fort_lvl<n+1>`
 - [x] Dependent factions' flag key = last segment of `factions.flag_path` (77/77; the exe call PROVISIONAL)
-- [ ] Tree scale byte decode `u8 / 128`, clamp 0.5–1.4 (PROVISIONAL after review)
-- [ ] The enum behind `unit->+0x1B0` (value set INFERRED; static attempt closed)
-- [ ] Flag wind speed and solver substep / iteration / damping constants (PROVISIONAL)
-- [ ] What string names a flag record (`+0x38`; needs a debugger watchpoint)
-- [ ] Whether the bearer's cloth reads `flags.tai` (UNKNOWN); the exe's limp-flag shape; then a side-by-side look at Spanish and rebel units' flags (moved from HANDOFF, user 2026-10-10: trace first)
 
 ### 0-E campaign map, campaign UI, front end — [analysis/fidelity/UI_FIDELITY.md, analysis/campaign/CAMPAIGN_MAP.md §10]
 - [x] UI scale for 720-high windows (CONFIRMED)
@@ -196,24 +182,19 @@ SpeedTree leftovers are in §2.
 - [x] Panels can't be closed: merged `8aad50d`, checked in game by the user 2026-10-07
 - [x] Side-by-side UI fixes (user screenshots 2026-10-07), merged `53361ec`: technology links from the exe's link step (no line over the title); Army | Recruitment tabs by the exe's rule (generals and admirals; colonels none, CONFIRMED by the user); general portraits in the army bar and Lists; Lists docking in the scripts' 1280x960 frame (debugger sitting, CONFIRMED at 1920x1080). Open parts are their own §0 items (generated-character portraits, army recruitment contents)
 - [x] Wall building: merged `28471b5`, checked in game by the user 2026-10-07 (the walls are the last construction card; they appear on the map when finished)
-- [ ] Map forts (the `fFort` chain, separate from settlement walls): `BuildFort`/`UpgradeFort` levels PROVISIONAL; nothing in the shipped exe builds a map fort (UI_FIDELITY.md)
-- [ ] Agent attribute icons: merged `25a6b21` (`agent_attributes` icons, main attribute, `PrimaryLevel` CONFIRMED);
-  waits for its in-game check (HANDOFF). Left: rank PROVISIONAL for non-agents, UI skin folders not modelled
 - [x] Region labels under the HUD (CONFIRMED: parents sort children by signed Priority on `OnAdoptChild`, `0x01016BD0` / `0x01024F70`; labels -1)
 - [ ] Region details panel: filled from `0x009E69B0` / `0x009AF570` (merged 2026-10-10: taxes, religion, classes, governor, public order, wealth/growth with factors, predicted values from a one-round projection, PopulationChange/WealthChange; Name CONFIRMED). Left, PROVISIONAL: Effects (region `+0x1CC` list, writer untraced), NextTown (town emergence `0x00AB3FF0`/`0x00AADB00` not modelled), the predicted garrison for a selected army (`0x00A190A0`)
   - [ ] The round-start GDP/growth/`+0xC4` refresh `0x00AB4410(0)` (also on construction and tax events) is not modelled, so the TownWealth total can differ from the live factors; WealthChange is computed live, not the exe's stored `+0xC4`
   - [ ] `RetrieveFactionRegionList` and `LabelDetails` still show 0 for both changes: use the projection
-  - [ ] Migration (needs theatres); a `region_wealth_factors` table from mods; base_capacity 0 drops the population to the minimum (check the exe)
 - [x] `OnDivorceChild` fires on Adopt, Divorce, Destroy and DestroyChildren (`0x01027BA0` → `0x0102DE60`; ORIGINAL BUG `0x01027B20` fixed: DestroyChildren could loop for ever)
 - [x] Does `RetrieveVisibleEnitityDetails` skip settlements behind the HUD (campaign hud.rs `covers`)?
 - [x] `UIComponent:Adopt(child, index)` ignores the optional index `0x01014580` reads
 - [ ] Diplomacy negotiation playable; region exchange rows. Merged diplomacy2: (user check 2026-10-09: the changes work) greeting by attitude through the queued BeginNegotiation (`0x00BF5A60`), diplomat portrait, button lists for all three relationships, power/wealth words (power = raw unit upkeep, CONFIRMED `0x008B2150`), regnal numerals. Austria power now "Terrifying" as the original (power CONFIRMED against the 2026-10-10 debugger values at the Coalition start; prestige PROVISIONAL 0). Merged 2026-10-10: option buttons built (`SetState` returns as `0x01013550`), `FindChildAddress`, treaty lines, tradeable regions and technologies (two lists, `0x009C5770` / `0x00C5C170`); red cancel texts are the original's. Propose builds region/tech deals in the model (2026-10-10; other actions' items PLACEHOLDER). Open: tech list order PROVISIONAL, region-row tooltip empty, our text ~20% wider (a treaty line wraps), deal rows and result still held in the UI until the deal is modelled
 - [x] Runtime `force_diplomacy` calls have one home in the model (relationship field #18, merged 2026-10-10)
 - [ ] Scripted diplomacy permissions (#18) not yet read by: the AI intention filter `0x00CB8200`, the counter-offer filter `0x00CC58C0`, `0x00C561C0`, the trade UI check `0x009F33E1` (CAMPAIGN_FIDELITY "Scripted diplomacy permissions")
-- [ ] Campaign save naming
+- [ ] (running: savename) Campaign save naming
 - [ ] The five agent options actions via `MoveIntoTarget` (contract known; needs the model's agent order queue)
 - [ ] `AgentRogueSabotageArmy` (no army target list)
-- [ ] Fort as its own selection
 
 ### 0-F effects system — [analysis/fidelity/EFFECTS_FIDELITY.md]
 - [x] Techs, buildings, traits (CONFIRMED level rule), ancillaries, government, ministers, difficulty; query API wired into the economy
@@ -231,9 +212,8 @@ SpeedTree leftovers are in §2.
 - [x] Promotion price key: agent type + the human faction's subculture (CONFIRMED); naval promotion free
 - [x] No general limit in the vanilla data (CONFIRMED negative)
 - [x] Fog: one `fog_state_at` definition; explored settlements keep their labels
-- [ ] Promotion price number: one debugger sitting by the user (`analysis/fidelity/debugger/0g_promotion_probe.cdb.txt`)
+- [ ] Promotion price number: debugger sitting step 2a (`analysis/fidelity/debugger/SITTING_SHEET.md`; slot +0x44 at `0x009AC5FF` settled statically)
 - [ ] Field promotion menu (`CCQ_PROMOTE_COMMANDER`): no shipped layout, needs our own context menu
-- [ ] Portrait deck builder `0x00A1F890` for maps without the start-pos portrait allocator (custom maps); port its Fill ORIGINAL BUG (count = last + 1) with it (polish11, CHARACTERS_FIDELITY §14)
 - [ ] Minister, royal family and agent portraits for new characters (`0x008BF310`, `0x00A055E0`; the family is a PLACEHOLDER, CHARACTERS_FIDELITY.md §5c)
 
 ### Cross-cutting
@@ -247,19 +227,18 @@ SpeedTree leftovers are in §2.
 - [x] Battle HUD UI scale: the exe's UI scale (`0x0114EB20`) applies to the battle HUD too; ours lays the battle HUD out at window / scale and maps the mouse back
 - [x] Battle `B.Time`: the exe binds it (`0x005D3BB0`): the UI pulse clock, real time capped at 300 ms a frame
 - [ ] The front end still draws at UI scale 1 (the exe's `0x0114EB20` applies to every HUD)
-- [ ] The battle HUD never calls `set_cursor_position`: `Component.CursorPosition` returns nil x, y in battle
-- [ ] `battle_prelude.lua:72` drops CreateFromLayout's x, y: root.luac's pip_frame and xp_bling and the esc_menu options (all 0,0) land at their file offsets
-- [ ] Trace the campaign `Time` counter (`0x00A0EB80`; pulse `0x009D5F31`) against the main-loop clock; if it is the same struct, share the battle `advance_ui_clock` (campaign's is uncapped and fractional, PROVISIONAL)
-- [ ] Port the campaign battle wind-level roll (`0x00535B30`): a campaign sea battle takes the first sea_surfaces row for now (PROVISIONAL, napoleon terrain/water.rs `sea_settings`).
-- [ ] Gait: read n and k at `0x0054C691` (loop frame count; `TIMED_MOVE_PLANNED_SECONDS` INFERRED): debugger sitting, docs/FOR_USER.md.
-- [ ] Battle tick counts the deployment ticks (exe Battle Model +0x58; PROVISIONAL on `Battle::tick`, ntw_sim battle model.rs).
+- [x] (layoutxy) `battle_prelude.lua:72` drops CreateFromLayout's x, y: root.luac's pip_frame and xp_bling and the esc_menu options (all 0,0) land at their file offsets
 - [x] Battle formation (formation): units re-place their living men after losses; width/depth/radius measured from the men (`0x0053D1A0`, `0x0053C3D0`), evade room from the box front centre (`0x0057A6F0` → `0x0053FBD0`), shape kinds (`0x005498D0`, `0x0057A6F0`), skirmish strips with the box overlap test (`0x0055A1B0`), leave/arrive per-man circles (`0x005857A0`) CONFIRMED
 - [x] Battle formation (formation3): men walk to the nearest free slot instead of the view snap (`0x005373F0`, `0x00502770`, `0x005281D0`); reform walk/run (`0x005736B0`, `0x0055F160`, run beyond 25 m² `0x00658C50`, tolerance 910); the box refreshes on alternate ticks (`0x0053C180`); the first previous heading is 0 (`0x014A3498`); the place_at deployment refresh (`0x0054FDD0`); slots are reassigned only by a first order (`0x0051A8E3` / `0x00581AE0`, not a re-issue `0x00584E10`)
 - [x] Battle formation (formation4): the idle reform gate (`0x00573770` / `0x00557C20`) and the in-place check (`0x00557C80`) CONFIRMED and tested; shape parameters traced (line, kind 3, kind 6 light infantry); morale uses the unit's real training level (+0x194)
-- [ ] (running: formation5) Battle formation left (formation4): the alternate-tick parity uses our unit id, the exe a serial (PROVISIONAL; debugger sitting); the attached-member radius (`0x00607540`); request +0x28; building and reinforcement place_at; special soldiers; shape layouts: the anchor rows, `0x00619EB0`, the layouts of kinds 1, 2, 4 and 5, the light-infantry stagger, task `0x00515210`, what p4 does; soldier +0x1A8; fire-group gate `0x005732B0`; controller +0xB4 veto; the `0x00580DD0` task
-- [ ] (running: formation5) Soldier flags +0x35B / +0x35C, cleared by `0x005577C0` (formation4), are not modelled
-- [ ] (running: formation5) `horses_frightened` (ntw_sim battle morale.rs) tests `strength::mounted`, the exe `0x0055C2A0` (riding and not dismounted): they differ for a cavalry or camel unit with `dismount` active; check which strength callers use `0x0055C2A0` and which `0x0055ABF0` (formation4)
-- [ ] Battle formation traces (formation3): the friend query range `0x006C9C60` (PROVISIONAL; likely strip-based, not 150 m); the segment test `0x00501A60` and soldier +0x58 = man radius (INFERRED); `evade_angle` (`0x00533BA0`) uses positions, not box centres; soldier vfunc +0xB8 (from `0x00653560`) in deployment: are men put at their slots at once (INFERRED); the men's own headings (soldier +0x64) against the unit facing in `slot_cost` and `0x0055F160` (PROVISIONAL); the in-tick order of BuildUnitMoveOrder `0x0051A530` vs the squad's layout step (`0x00580A30` → `0x00581AE0`) (INFERRED); `0x0057AC10` assignment on a re-issue where `0x005516D0` holds (not modelled)
+- [ ] Battle formation left (formation4): the alternate-tick parity uses our unit id, the exe a serial (PROVISIONAL; debugger sitting); the attached-member radius (`0x00607540`); request +0x28; building and reinforcement place_at; special soldiers; task `0x00515210` (kind 6 files); soldier +0x1A8; fire-group gate `0x005732B0`; controller +0xB4 veto; the `0x00580DD0` task
+- [x] Battle formation shape layouts (formation5): rows (`0x00619EB0`, p4 apart `0x00659F00`), diamond (`0x0062FDC0`, `0x0061A260`), wedge (`0x00620990`, `0x00619B60`), kind 6 p3 3.5 / p4 2.0 (`0x006210D0`) and the light-infantry stagger (`0x0065A4F0`) CONFIRMED and tested
+- [x] (formation6) Battle formation shape layouts: squares, kinds 2 and 4 (`0x00630390`, `0x00631560`, template table `0x014D0690`); pike wall, kind 3 (`0x006311B0`); the kinds 1/5 anchor (`0x007FC920` measures)
+- [ ] Battle formation shapes left (formation6, PROVISIONAL in march.rs): the arcs along the path (`0x007F2DA0`, vfuncs +0x14/+0x18, builder from `0x00815F80`); pike-wall width and p1 (`0x00578860` / `0x00579780`) and its pose word (5/4/3); slot headings are not applied
+- [ ] Soldier flags +0x35B / +0x35C, cleared by `0x005577C0` (formation4), are not modelled
+- [ ] (running: attackers) Battle morale attackers (fightcav, PLACEHOLDER in model.rs): build the attacker list and direction from the exe's list (+0xADC → +0x74C) and `0x0057F310`; the per-unit seen set lives until the destructor `0x00522690` (INFERRED; debugger)
+- [x] (fightcav) Wire `fighting_cavalry` (`0x0053C720`) to the riding test `strength::riding` (`0x0055C2A0`) (horsefright)
+- [x] (horsefright) `horses_frightened` (ntw_sim battle morale.rs) tests `strength::mounted`, the exe `0x0055C2A0` (riding and not dismounted): they differ for a cavalry or camel unit with `dismount` active; check which strength callers use `0x0055C2A0` and which `0x0055ABF0` (formation4)
 
 AI (§6) is paused by the user's section order; its open questions stay in `analysis/ai/AI_RESEARCH.md` §7.
 
@@ -451,10 +430,16 @@ the input; how it is drawn is ours. Items below that say "as the original" mean 
 - [ ] Fog of war, seasons (winter snow), and campaign weather.
 - [ ] **PARTLY DONE:** Region and settlement labels, selection effects, movement arrows and zone-of-control display. Done (sandbox port 06d6a7e, not checked in game): region labels (names/positions CONFIRMED, rendering PROVISIONAL), movement arrows with the original's assets (layout INFERRED, spacing/colours PROVISIONAL). Open: settlement labels, selection effects, zone of control.
 
+**From §0 (exit bar, 2026-10-15)**
+- [ ] Tree scale byte decode `u8 / 128`, clamp 0.5–1.4 (PROVISIONAL after review)
+- [ ] Flag wind speed and solver substep / iteration / damping constants (PROVISIONAL)
+- [ ] What string names a flag record (`+0x38`; needs a debugger watchpoint)
+- [ ] Whether the bearer's cloth reads `flags.tai` (UNKNOWN); the exe's limp-flag shape; then a side-by-side look at Spanish and rebel units' flags (moved from HANDOFF, user 2026-10-10: trace first)
+
 ## 3. Battle gameplay (land)
 - [ ] Gait change blend: merged 2026-10-10 (gait-blend2: mount blend, locomotion ladder with transition clips, acceleration and braking, timed move order, ground by palette colour; UNITS_TERRAIN_FIDELITY.md §1.9-§1.10). User check 2026-10-12: soldiers look good. Left:
   - [ ] Ground for maps without a TGA (`0x00EDCFC0`); the border tie rule; object ground +0x10/+0x18 (`0x0081AC80`)
-  - [ ] Debugger sitting at `0x006533E0` to confirm the order source `0x006DC700` (INFERRED; plan in UNITS_TERRAIN_FIDELITY §1.10; also FOR_USER)
+  - [x] The order source `0x006DC700`: CONFIRMED statically (sitting-sheet, 2026-10-15): only `0x00585602` and `0x006DC7AF` call `0x006533E0`, and `0x006D9A22` reaches it through `0x006DC700` (UNITS_TERRAIN_FIDELITY §1.10)
   - [ ] Per-soldier timed orders
   - [x] User check 2026-10-11: cavalry now good; infantry may still hitch a little (investigate, same causes as gait-jitter?). Earlier (cavalry lockstep, run → walk hiccup; 2026-10-11 hitch + surge): gait-jitter merged 2026-10-11 (loops over n−1 intervals 0x010DA030, transition end frame, stride phase carried; 11-tick re-plan 0x00581B73, the surge is the original's own); earlier fixed in gait-blend3 (per-display playback scale `0x0078B8A0` on moving gait loops only, frozen poses + speed lerp at the run → walk change); waits for the user's look (HANDOFF). gait-infantry merged 2026-10-12: each man his own timed move (per-soldier speed and lag), path-end clamp, one formation grid; user check 2026-10-12: soldiers look good
   - [ ] Trace what the follow state's int target key measures (`0x0054D9F0`, key source vfunc +4): model.rs ~1195 re-issues a first issue every tick for a marching enemy (PROVISIONAL); the 2 m least drawn depth `setup::drawn_size` is ours (PROVISIONAL)
@@ -464,9 +449,9 @@ the input; how it is drawn is ours. Items below that say "as the original" mean 
 - [ ] `volley_plan` runtime confirmation in the battle probe
 - [ ] Campaign-battle weather pick: ported, connect once campaign battles start from the map
 - [ ] `unit_scale`: decoder done (exe default 0.75); where it is applied is UNKNOWN, not wired
-- [ ] Who writes `unit+0xD48` (debugger write watchpoint); a ready step plan for it, the flag record `+0x38` name and the cue reads is on branch `work/sittings` `1d08e25c` (not in main)
-- [ ] Formation radius `+0x670` (probe written)
-- [ ] Garrison cap `+0x6C`
+- [ ] Who writes `unit+0xD48` (debugger write watchpoint): sitting sheet step 3b (`analysis/fidelity/debugger/SITTING_SHEET.md`)
+- [x] Formation radius `+0x670`: settled (BATTLE_FIDELITY §6.1; sitting-sheet review 2026-10-15)
+- [ ] Garrison cap `+0x6C`: sitting sheet step 3j (Aosta Valley farmhouses, `analysis/fidelity/debugger/SITTING_SHEET.md`)
 - [ ] The `--battle --screenshot` "closed channel" capture
 - [ ] Battle restart (R) keeps the same unit ids, so views survive with old corpses and `acts.dead` (napoleon/src/battle/view.rs ~426).
 - [ ] Units drawn between model ticks (ours, PROVISIONAL `view::DrawnPose`, 2026-10-08); the exe's render blend is UNKNOWN: debugger sitting in BATTLE_FIDELITY.md §59.
@@ -509,6 +494,13 @@ the input; how it is drawn is ours. Items below that say "as the original" mean 
 - [ ] Battle replays (save and watch).
 
 - [ ] Floating unit banners as in the original (trace in Ghidra: banner model/texture, when names/men/morale show), replacing the PLACEHOLDER text labels (napoleon battle/labels.rs; user check 2026-10-10: they overlap when units stand close).
+**From §0 (exit bar, 2026-10-15)**
+- [ ] Animation cue → slot dispatch (INFERRED): the round-9 "dead" proof is void (the play paths are vtable slots); needs a user debugger sitting in a battle
+- [ ] The enum behind `unit->+0x1B0` (value set INFERRED; static attempt closed)
+- [ ] Gait: read n and k at `0x0054C691` (loop frame count; `TIMED_MOVE_PLANNED_SECONDS` INFERRED): debugger sitting, docs/FOR_USER.md.
+- [ ] Battle tick counts the deployment ticks (exe Battle Model +0x58; PROVISIONAL on `Battle::tick`, ntw_sim battle model.rs).
+- [ ] Battle formation traces (formation3): the friend query range `0x006C9C60` (PROVISIONAL; likely strip-based, not 150 m); the segment test `0x00501A60` and soldier +0x58 = man radius (INFERRED); `evade_angle` (`0x00533BA0`) uses positions, not box centres; soldier vfunc +0xB8 (from `0x00653560`) in deployment: are men put at their slots at once (INFERRED); the men's own headings (soldier +0x64) against the unit facing in `slot_cost` and `0x0055F160` (PROVISIONAL); the in-tick order of BuildUnitMoveOrder `0x0051A530` vs the squad's layout step (`0x00580A30` → `0x00581AE0`) (INFERRED); `0x0057AC10` assignment on a re-issue where `0x005516D0` holds (not modelled)
+
 ## 4. Naval battles
 - [ ] Ship models, sails, rigging, and damage models (hull, sails, crew).
 - [ ] Ammunition types (round, chain, grape), broadsides and reloading.
@@ -516,6 +508,10 @@ the input; how it is drawn is ours. Items below that say "as the original" mean 
 - [ ] Boarding, capture, surrender, sinking and fire/explosions.
 - [ ] Naval battle UI, deployment and results.
 - [ ] **PARTLY DONE:** Naval autoresolve and the campaign fleet hook. Done (0-B round 10): ported and running in the campaign (engagement, kill rates, damage, sinking, capture; SHIP_DAMAGE_INFO CONFIRMED). Open: ship potential, morale and range level from the runtime ship record (PROVISIONAL), ship captures, saving ship damage states (save writer queue).
+
+**From §0 (exit bar, 2026-10-15)**
+- [ ] Naval PROVISIONAL details: capture share weighting, captured crew base, gun counts of 8 ship models (needs a probe)
+- [ ] Port the campaign battle wind-level roll (`0x00535B30`): a campaign sea battle takes the first sea_surfaces row for now (PROVISIONAL, napoleon terrain/water.rs `sea_settings`).
 
 ## 5. Campaign gameplay
 **Turn and economy**
@@ -537,6 +533,8 @@ the input; how it is drawn is ours. Items below that say "as the original" mean 
 - [ ] **PARTLY DONE:** Recruitment pools, replenishment, unit upgrades and experience. Done: the recruitment queue (CONFIRMED), character recruitment pools loaded and saved. Character pools run: refill timers and bonuses (CONFIRMED), HireGeneral (0-G). Open: replenishment, unit upgrades, experience, the pool step's phase (PROVISIONAL).
 - [ ] Sieges on the campaign map: turns until surrender, and assaults.
 - [x] Occupy, sack and liberate options after capture: the model (preview, damage roll, apply, liberation; CONFIRMED) and the capture screen (0-E).
+- [ ] Capture previews: trace which class the public-order previews at CaptureOption +0x18 / +0x1C belong to (`0x00A61400` picks it by a faction test, `0x00A610C0`) against capture.rs:77 lower/upper (polish26 review)
+- [ ] Director transfer garrison (director3): which changes mark a region recruitment belief dirty (`MarkBeliefDirty` `0x00CF0AB0`, 147 sites, `0x00CF0B10` propagation); ours rebuilds the belief each time (INFERRED in director.rs `land_recruitment_belief`)
 - [ ] **PARTLY DONE:** Navies: fleets, naval movement, embarking and disembarking armies (done: Embark / Disembark with the
       original's landing rules, PATHFINDING_PORTS.md; open: fleet capacity, AI transport, naval invasions, naval battles).
 - [ ] The campaign → real-time battle → campaign loop (the hook exists: `pending_battle` / `apply_battle_result`).
@@ -562,6 +560,23 @@ the input; how it is drawn is ours. Items below that say "as the original" mean 
 - [ ] Restricted units (`add_restricted_unit_record`, saved in `EPISODIC_RESTRICTIONS/UNIT_RESTRICTIONS`) live only in the script state (loader → napoleon/src/campaign/scene.rs → `ScriptState::restricted_units`); the AI reads them, the model's recruit command and the recruitment panel don't. Trace where the exe checks them (as `0x009CDA90` for building levels), then give them one home, a `World::restricted_units` that model, UI and AI read (ntw_campaign/src/lib.rs ~210).
 - [ ] A save's restricted building levels reach the model before the campaign scripts load (they are in the loaded `World`); the exe's order of restrictions vs. script load is not traced (napoleon/src/campaign/scene.rs ~430).
 
+**From §0 (exit bar, 2026-10-15)**
+- [ ] `CDIR_INTENTION_TRANSFER_REGION_OWNERSHIP` (`0x00B93840`, applied via `0x00B58A30`): merged 2026-10-11 (region-transfer: campaign director in the model behind seam `director.region_transfer`, TurnStep::Handover, cdir_configs keyed campaign_faction_variable `0x00FCD150`, CDIR_INTERFACE + counter in .esf `0x00B94170`/`0x00B9D6E0`/`0x00B9B6C0`, startpos director RNG, 4 ORIGINAL BUGs fixed; CAMPAIGN_FIDELITY.md). Left (PROVISIONAL): the stored relation copy `rival_score` reads (next line), the siege test (§5 "Sieges on the campaign map"), sea mobiles, the director's other RNG users (below)
+- [ ] Trace faction +0x754, which `0x008AB6C0` clears (two candidate meanings, broadcasters2 notes); model the clear
+- [ ] Trace when a re-emerged faction's posts get holders (ours leaves them empty, INFERRED)
+- [ ] Trace the SettlementOccupied events (`0x00B58560` / `0x00B58890` / `0x00B58C00`) against FactionDestroyed (`0x00A64AC0`): ours sends FactionDestroyed first (INFERRED)
+- [ ] `0x008AB6C0` parts not modelled: the killer path (+0x924, `0x00BA80E0`), the multiplayer report (`0x009C7660`, event +0x120)
+- [ ] Construction left (construction2): slot garrisons (`0x00A64440`, slot +0xC0); port blockade (`0x00A784E0`); slot +0x1EC; the other SetBuildingHealth callers (`0x00B541E0`); BuildingCompleted posted per list entry (`0x00B78230`); the +0xBA0 event; what clears an item's active byte (+8); the walls damage-object restore; research stopping on an upgrade to another building (`0x00B4D4D0`); `docked_port` PROVISIONAL
+- [ ] Trace the faction region-list order (+0x778 / +0x77C) at startpos, at load and on gains and losses, so the round end walks regions in the original's order (ours: id order, PROVISIONAL, ntw_sim turn.rs; construction2)
+- [ ] Trace whether GDP (`0x00A6AFC0`) reads the walls (recruit-followups)
+- [ ] Map callers of the recruit gates `0x00AA1660`/`0x00A27960`: `0x00A87640`, `0x00AAB440`, `0x00A799A0` → `0x00B43FC0`, `0x009B74E0`, `0x009DF476`
+- [ ] Recruit cost: which commands the three handlers near `0x00936530` are (UNKNOWN, recruit-cost2)
+- [ ] Treasury callers still not modelled (treasury4 traced): missions credit `0x00A06050` (needs mission completion); captured-ship sale / placement (`0x00B38F10`, needs the state-6 force rebuild); MP results counter FACTION +0x954 (`0x008F56C0` / `0x00B298F0`, with MP results)
+- [ ] Undock: `0x00A8C0B0`'s three notifications are not modelled (the handle clear and port slot hand-back are, polish21); the war kick-out of docked navies (`0x008DA179`) and the port order caller `0x0094D4F0`; docking within 1 map unit and the battle undock before captures are PROVISIONAL (treasury3)
+- [ ] Map forts (the `fFort` chain, separate from settlement walls): `BuildFort`/`UpgradeFort` levels PROVISIONAL; nothing in the shipped exe builds a map fort (UI_FIDELITY.md)
+- [ ] Region details: Migration (needs theatres); a `region_wealth_factors` table from mods; base_capacity 0 drops the population to the minimum (check the exe)
+- [ ] Fort as its own selection
+
 ## 6. AI
 - [ ] Our campaign AI's Austria attacks in its first turn, so the diplomacy screen's Power reads Mighty instead of the original's Terrifying (self-checks2 (f), IN_GAME_CHECKS_2026-10-10.md); trace the original's turn-1 AI choice
 - [ ] **PARTLY DONE:** Battle AI v1 and campaign AI v1, merged. The campaign AI plays at End Turn; the battle AI has the original attack FSM thresholds and think rhythm.
@@ -576,6 +591,12 @@ the input; how it is drawn is ours. Items below that say "as the original" mean 
 - [ ] The original's tactic state transitions, think rates and priority constants (Ghidra) [AI_RESEARCH.md §7]
 - [ ] Difficulty levels (campaign and battle) and AI handicaps, as the original applies them.
 - [ ] Scripted AI controls (`release_control`, scripted battle units, frozen armies).
+- [ ] Battle AI mounted tests (horsefright, INFERRED in ntw_ai battle): the skirmisher arm (`0x007D2CF0`, class 0x16) uses the on-foot test `0x0055C1C0`; trace the mounted-share builder (+0x78/+0x84); defence contact uses the per-soldier vfunc +0xF0
+
+**From §0 (exit bar, 2026-10-15)**
+- [ ] Stored CAI relation belief (`0x00A89E00` faction +0x100 list +8, written by `0x00ABAFB0`): merged 2026-10-14 (cai-belief: belief store + dirty mark in the director state, per-broadcaster marks CONFIRMED `0x00A8F320` → `0x00A88CE0`, capture `0x00A64AC0`/`0x00B62120`, misdeeds `0x00B0D870`/`0x00B67FD0`/`0x00B0D700`/`0x00B67E60`). Left: the turn-change mark (INFERRED, `0x00CF7F60`, propagation `0x00CF0B10`: debugger sitting); the other 184 readers of `0x00A74A20` (PROVISIONAL); the +0xA8 enemy-majority flag
+- [ ] AI shopping shroud (treasury4): the naval goal that creates CAI_BDIM_REPAIR_NAVY (`0x00CDD540`; `ai_repair_navy` has no runtime caller yet); the gate `0x00A8B2D0` on its 11 other callers (incl. `0x00A67890`); trace CAI slot +0x104 (the gate's position, INFERRED at capture.rs ~472); the CAI unit-list order (INFERRED); the ESF CAI_INTERFACE bool is neither read nor written (no load warning)
+- [ ] Trace the AI diplomatic budget pot (CAI +0x140, `0x00AAF570`; PROVISIONAL in the AI's payment evaluation, deals-fix)
 
 ## 7. User interface
 **Front end**
@@ -606,11 +627,20 @@ the input; how it is drawn is ours. Items below that say "as the original" mean 
 - [ ] The unit cards' `SetInitialState` gets our info table where template.BattleUnitCard.lua takes its naval flag (`m_naval`, bytecode at its line 55; analysis/battle/BATTLE_FLOW.md "Cards"): trace what the engine passes (both arguments) and pass that (ntw_script/src/ui/battle_prelude.lua `__ntw_battle_create_cards`).
 - [ ] Battle unit outlines (user screenshot 2026-10-10): `napoleon` battle/view.rs ~1094 draws a red/blue debug box round every unit (untagged; the original shows no such box: replace it with the original's unit markers/selection from its UI and effect data, or tag it PLACEHOLDER), its edges are straight lines that sink into hills, and units whose men aren't drawn still show the box and are fired at: find why their figures are missing (not loaded, hidden by line of sight, or off-field).
 
+**From §0 (exit bar, 2026-10-15)**
+- [ ] Agent attribute icons: merged `25a6b21` (`agent_attributes` icons, main attribute, `PrimaryLevel` CONFIRMED);
+  waits for its in-game check (HANDOFF). Left: rank PROVISIONAL for non-agents, UI skin folders not modelled
+- [ ] The battle HUD never calls `set_cursor_position`: `Component.CursorPosition` returns nil x, y in battle
+- [ ] Trace the campaign `Time` counter (`0x00A0EB80`; pulse `0x009D5F31`) against the main-loop clock; if it is the same struct, share the battle `advance_ui_clock` (campaign's is uncapped and fractional, PROVISIONAL)
+
 ## 8. Video (Bink)
 - [x] A Bink 1 (`.bik`) decoder recreated as our own pure-Rust code from the format spec and Ghidra (73/73 movies, 229 audio tracks; see §1) (the game ships `binkw32.dll`; we
       don't use it).
 - [ ] **PARTLY DONE:** Intro videos, the front-end background movie (`Frontend2.bik`), campaign and battle cutscenes, loading movies. Done: intro order (CONFIRMED), front-end movie, full-screen sizing. Open: campaign/battle cutscenes, loading movies, the skip rule.
 - [x] Movie audio routed through our audio system with the original movie volumes (merged d5251e6, BINK.md) [AUDIO_FORMAT.md]
+
+**From §0 (exit bar, 2026-10-15)**
+- [ ] The movie skip rule: trigger CONFIRMED (Escape key-up while the intro queue plays, `0x0048A650`; user check 2026-10-09: Escape skips in ours); the can-stop flag `+0x58` still INFERRED
 
 ## 9. Audio
 - [ ] **PARTLY DONE:** Sound banks, decoding, front-end music, UI clicks and hover sounds, 3D volleys, the music state machine, the Miles mixing (0-C), battle music looping without restarting (merged `d6c843b`, user-checked 2026-10-07). Open: bank selection, the anim cue dispatch [AUDIO_FORMAT.md §7, MIDDLEWARE_VERIFY.md §3].
@@ -623,6 +653,11 @@ the input; how it is drawn is ours. Items below that say "as the original" mean 
 - [ ] The bank selection rule (Ghidra).
 - [ ] Trace in Ghidra the exe's sound start-rule order (repeat limit, probability, at-once, then file/pitch/delay RNG draws); ours is the round-13 order, untraced.
 - [ ] Whether the exe's at-once / voice limits count finished one-shots not yet freed and voices fading out (ours: `Player::live` counts both; untraced).
+
+**From §0 (exit bar, 2026-10-15)**
+- [ ] The sound bank query: reopened 2026-10-09 (the entry reader `0x00E28DF0` is reached through vtable slot `0x013A9944` from `0x00E256D0`); next a main-menu debugger watchpoint (MIDDLEWARE_VERIFY.md §3 round 14)
+- [ ] The headphones multiplier: CONFIRMED from the `sound_provider` pref and Miles' speaker setup (`0x01004390`, `0x01006600`); left INFERRED: which speaker setups Miles opens on a machine (a failed one shifts a saved index)
+- [ ] `EnumerateSoundProviders` (ntw_script ui_prelude.lua:869) returns `{}`; it should list the providers from `0x00DA1270`
 
 ## 10. Multiplayer
 - **Decided (user, 2026-10-03): multiplayer is only between copies of NapoleonRust.** No protocol compatibility with the original
@@ -642,6 +677,7 @@ the input; how it is drawn is ours. Items below that say "as the original" mean 
 - [x] One table path: about 20 readers read only `db/<x>_tables/<x>` and miss additive and `bob_` mod files (ntw_script UI `table`/`small_table`, mount.rs:64, unit_model.rs:121, vegetation.rs:228, names.rs:53, battle/setup.rs:246, model_viewer/source.rs:141); route them through the merged GameDatabase, and add a test that fails when code outside the loader reads a `db/..._tables` path (the guard, CLAUDE.md "Modding seams") (merged 2026-10-10: `ntw_formats` db_folder.rs, guard `napoleon/tests/table_path_guard.rs`)
 - [ ] Check each typed `db_record!` key against its loader in the exe (MOD_LOADING.md §3.2 method): junction tables keyed by one column (e.g. `BuildingEffect`, `BuildingUnitAllowed` by `building`) collapse a mod's added rows (polish4 review)
 - [ ] DB row hash order and in-file duplicate keys (PROVISIONAL; MOD_LOADING.md §6 start-up debugger run)
+- [ ] Our DB reader does not port the header flag byte 0: a mod file with flag 0 and rows drops the rows loaded before it in the original, ours keeps them (`ntw_formats` db.rs:10/:224, db_folder.rs:62; trace the exe reader first)
 - [ ] Optional open formats: glTF models (the one open model format, Blender exports it directly; no FBX or format of our own, user 2026-10-10; FBX import only as a later converter to glTF if modders ask), image heightmaps, hi-res texture overrides.
 - [ ] Modding docs and our own tools (pack editor, DB editor, map tools, a campaign map editor with live preview), so modders don't need the original's closed tools.
 - [ ] **Custom campaign maps** (user, 2026-10-09: a whole new world, e.g. a Japan map; design in docs/DESIGN.md §3.5.1)
@@ -694,6 +730,11 @@ the input; how it is drawn is ours. Items below that say "as the original" mean 
   - [ ] Test with a synthetic mod that goes past every limit (e.g. 300 factions, 1,000 regions, 40-unit armies,
         1,000-man units).
 
+**From §0 (exit bar, 2026-10-15)**
+- [ ] Model `0x00EDC000`'s other drops: a null on-screen name and an unknown unit_class / category (recruit-followups)
+- [ ] Trace a writer of DATABASE_TABLE +0x38 / whether the early return `0x00E9BD95` is reachable (`0x00E9B700` "goes on with the next row" INFERRED, ntw_data database.rs ~296)
+- [ ] Portrait deck builder `0x00A1F890` for maps without the start-pos portrait allocator (custom maps); port its Fill ORIGINAL BUG (count = last + 1) with it (polish11, CHARACTERS_FIDELITY §14)
+
 ## 12. Platform, release and quality
 - [ ] Find the install automatically (Steam library folders) and ask if it's not found. Never write into it.
 - **Decided (user, 2026-10-03): no Steam features** (no achievements, no Steam API, no Steam overlay). Ownership: players must own the
@@ -706,24 +747,31 @@ the input; how it is drawn is ours. Items below that say "as the original" mean 
 
 ## Polish
 Non-blocking review findings, one line each (CLAUDE.md "Done means"). A worker editing a file clears that file's lines.
+- [ ] tools/self_check.sh (polish27): a rename by another worker sharing Ghidra still FAILs this branch; a function named in notes without its address is not checked (no name-to-address source)
+- [ ] napoleon battle/setup.rs ~975 (horsefright review): a unit flagged `is_cavalry` whose category is not mounted gets `MovementClass::Mounted`, where `0x006543D0` keys on the category alone; no vanilla unit hits it
+- [ ] trade.rs ~267 (leftroutes review): `trade_home_value` builds each importer's routes with `trade_routes_of`, then `trade_pair_value_with` builds them again; compute once. The home term also applies with no domestic map entry, where the exe needs one
 - [ ] Ghidra (formation3): V5 for 0x00653560, 0x0055AD60, 0x0054FDD0, 0x0057B000 once named; 0x005373F0 / 0x00502770 / 0x005281D0 deductions are structural (void* this, split register vars)
 - [ ] Ghidra (formation4): the BattleUnit, BattleUnitTypeInfo and UnitSpecialAbilitySet structs are minimal; type their fields
-- [ ] Ghidra (broadcasters2): name the relationship record struct; name `0x00B2BB00`'s callees `0x008E5060`, `0x00955B70`, `0x00B444B0` (5 V5 points)
+- [ ] ntw_script ui/campaign/army.rs `unit_entry` ~48/63 (polish35): the repair fields and `IsNaval` use `force.is_navy`; trace which unit virtual picks `0x008DF820` vs `0x008DF190` and use the unit's own type
+- [ ] Campaign HUD date (savename trace): the "Early/Late month" text can use the loc keys `random_localisation_strings_string_round_id_*` (analysis/fidelity/UI_FIDELITY.md §5.1)
+- [ ] ntw_sim battle (fightcav review): model.rs ~1512 says "CONFIRMED in 0x0053C720" while passing `e.charging`, whose link to `0x0055AC20` is INFERRED (morale.rs ~439): tag the comment; morale.rs ~134 `ATTACKED_FRONT` also holds flank and rear values: rename
+- [ ] (running: polish36) Ghidra (dipcounters): V5 write-ups for the diplomacy manager reader `0x00AE8E10`, writer `0x00AFC160`, `0x00B0E420`, `0x00B13840`, `0x00B67B20`
+- [ ] Ghidra (polish31): `GrantMilitaryAccessToFaction` `0x00B444B0`'s refresh calls `0x00B795A0` and `0x00B67490` are unnamed; the faction registry `this` of `FindCampaignFactionByKey` `0x00955B70` has no struct
 - [ ] Gait (gait-blend2): 6 Ghidra functions at 0-37% completeness, `0x005DD450` unnamed; merge `man_level` and `mount_level`; tree/water probes index the palette by ground; `fatigue_effect` runs twice per tick; tga.rs cmap padding maps to road
 - [ ] Raise the generic-engine Ghidra functions' completeness: upkeep done (polish7), 9 functions left (analysis/modding/MODDING_AUDIT.md; FUNCTION_DOC_WORKFLOW_V5)
 - [ ] Two-file key tests: which same-key row survives is covered (polish8); still unchecked: that each typed ntw_data table's `key()` is the key the exe merges by
-- [ ] (running: polish22) Ghidra: the 12 functions mod-loading2 named (`0x0108E8F0`, `0x0108EBB0`, `0x0109ECF0`, `0x0105E8E0` ...) are at 4-30% completeness: type their variables; polish7 raised some, `DB_LoadTableFolderMergedByKey` still 0/21 (FUNCTION_DOC_WORKFLOW_V5)
 - [ ] `CursorPosition` (ui_prelude.lua ~281) and CampaignUI's label `ScreenPos` (Labels.lua) give screen pixels while the campaign HUD's Position / MoveTo use the 1280x960 scripts' frame; read what the original returns on a wide screen.
 - [ ] `unwrap()` audit on paths that read install or mod data (ntw_formats, ntw_data, pack loading): a malformed file or broken mod must log one error and skip, never panic. Unwraps on the code's own invariants and in tests stay.
 - [ ] `last_income` is not written by the save writer (PROVISIONAL), its meaning changes after `settle_round` (categories 5, 7, 11 only), and `.items.last()` assumes the history ring is saved oldest-first (ntw_sim campaign).
 - [ ] Army recruitment: queue cards never show "Paused" (`0x00A00775`); army-recruit-tab's 34 Ghidra functions at 0-53% completeness
 - [ ] Debugger: who subscribes to the signal at the end of CancelRecruitmentItem (breakpoint `0x008DBB59`); it passes the already-freed item when the cancelled one was last (ORIGINAL BUG only once a listener reads it)
-- [ ] Director (ntw_sim director.rs): queued transfers whose receiver is dead stay in the queue (whether the exe purges them is untraced); `areas()` runs `human_inside` for every area even when only `rival_score` needs areas; ntw_campaign director.rs `fill`: the old-version RNG step's place among the fills is unverified (no vanilla file uses it)
-- [ ] (running: polish22) Ghidra (polish11): portrait constructors/ESF loaders still 13-33% (`0x00992E60`, `0x0098F250`, `0x0098F880`, `0x00990EF0`, `0x00A1A300`; shared helper `0x004F0800` unnamed); deal batch minimum 42
+- [ ] Director (ntw_sim director.rs): queued transfers whose receiver is dead stay in the queue (whether the exe purges them is untraced); ntw_campaign director.rs `fill`: the old-version RNG step's place among the fills is unverified (no vanilla file uses it)
+- [ ] director3 follow-ups: `PORT_SLOT_TYPE` "port" is hardcoded as in the exe (`0x00BE6EF0`), a data value if a mod needs another port slot type; Ghidra V5 for `0x008AAB60` CheckUnitRequiredTechnologiesResearched (44.7) and `0x00A91FC0` IsSlotHeldByOtherThanRegionOwner (54.4); CAMPAIGN_FIDELITY director3 notes: the type is at `CAI_BUILDING_SLOT` +0x100 (ctor writes [0x40], +0xFC = model slot), `0x00C1BF00` → `0x00A63FD0` reads +0xFC not the type; the belief doc omits the siege flag 0x20 (never set)
+- [ ] host.rs CreateFromComponent (polish32): trace how `0x01026F90`'s list reader treats a non-string image entry (UNKNOWN; ours skips it and logs once)
 - [ ] Diplomacy relations list (self-checks2): grey header with ▲ sort arrow and column divider; alternating row bands
 - [ ] Ghidra (director-rng): apply the proposed names listed in CAMPAIGN_FIDELITY.md (director desires section) with their V5 write-ups; `vanilla_director_floats_all_parse` (ntw_campaign economy_fidelity.rs) prints every row
 - [ ] Battle HUD (hud-state): draw the `set_greyscale_t0` / `red_pulse_t0` / `unitcard_burning_t0` UI techniques (UI material); text shaders per state (`+0x12C`, `0x01014FB0`; layout default untraced); `time_request_changed` `is_multiplayer` PROVISIONAL until multiplayer battles; the R reset key rebuilds the sim without telling the speed ring
 - [ ] polish21 follow-ups: trace the exe reader of the saved bonus type-7 sums (the junction table is compiled; no evidence save has a type 7); FORT_ARRAY id: the save writes an ESF i32 but our `FortId` is u32 (check reader `0x00AEB190` and our save writer); type the deal and context argument classes of `0x00C4AB20` / `0x00C12EE0`; Ghidra `0x009DB7C0` V5 at 67
 - [ ] A navy merged into another at the same port hands the port slot back while the survivor stays docked; the exe does the same (destructor `0x0088EF90` calls `0x00A8D830` on the +0xE0 port handle). Not traced: whether a merge path re-docks the survivor (polish21)
-- [ ] formation review: `skirmish_enemies` allocates a Vec per check (ntw_sim battle); Ghidra V5 left on register temps for `0x0053D1A0` (9/29), `0x0053C3D0` (41/61), `0x0053C180` (48/55)
+- [ ] formation review: Ghidra V5 left on register temps for `0x0053D1A0` (9/29), `0x0053C3D0` (41/61), `0x0053C180` (48/55)
 - [ ] Battle view (polish18): the view has no entity anim state (+0x1B8), so ntw_formats `display_time` (the pre-switch checks, `0x00774228..0x0077425D`) is not called yet (PROVISIONAL on `LoopKind`); the meaning of states 0x15/0x16 (from data via +0x630) is untraced

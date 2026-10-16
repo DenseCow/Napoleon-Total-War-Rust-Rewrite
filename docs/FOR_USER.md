@@ -7,12 +7,61 @@ The morning report from night sessions, newest night first. Two lists per night:
 - **Done tonight:** everything finished, merged or settled. One line each: what, commit, how to see it.
   Claude clears a night's list once the user has read it.
 
-## 2026-10-14 (night mode, 21-point block)
+## Debugger sitting sheet (one sitting covers every open read; updated 2026-10-15)
+
+One session, about 30 minutes, when you have time. Claude launches the original under Ghidra's debugger with every
+breakpoint set (never attached to a game you are playing) and logs the values; you only click. The breakpoint list
+is ready: `analysis/fidelity/debugger/SITTING_SHEET.md`. Steps in order:
+
+1. **Start-up and main menu (no clicks):** sound bank query watchpoint; DB row hash order. Claude may run this part alone at night.
+2. **Campaign:** load any campaign, select a land army led by a general (its unit panel computes the promotion price;
+   no promotion needed), then end one turn (settles whether a turn change refreshes the AI's remembered relations).
+3. **Custom land battle:** Single Player → Play Battle → Land, map **Aosta Valley**, either side. On the armies page
+   keep one cavalry and one infantry unit a side and give every unit one chevron. In the battle: walk order to the
+   cavalry, then the infantry; run order to the infantry for ~3 s, then walk; let the infantry fire a few volleys; then
+   select the infantry, hover one of the farmhouses in the middle of the map and right-click it to send the men inside.
+   Settles: gait n and k (`TIMED_MOVE_PLANNED_SECONDS`), who writes unit experience `+0xD48`, the flag record name,
+   animation cue dispatch, the soldiers per volley, drawing between ticks, the formation refresh serial, and the
+   building garrison cap `+0x6C` (no siege battle needed).
+
+Side-by-side looks (no debugger): the first full side-by-side run, once step 3 is done.
+
+## 2026-10-15 (night mode)
 
 ### Needs you
 
-- **AI turn-change debugger sitting (~5 min):** settles whether a turn change refreshes the AI's remembered relations (INFERRED `0x00CF7F60` → `0x00CF0B10`). Claude launches the original under Ghidra's debugger; you load any campaign and end one turn.
-- **Gait debugger sitting** (still open, see 2026-10-13 below).
+- Nothing new beyond the debugger sitting sheet above (its breakpoint list is still being prepared).
+
+### Done tonight
+
+- **Section 0 sorted to its exit bar** (`97d48483`): 22 items that change play stay; 40 deep traces, debugger reads and tidy-ups moved to their feature sections. See docs/BACKLOG.md "From §0" blocks.
+- **One debugger sitting sheet** (`91302c98`): every open debugger read in one ~30-minute session, top of this file.
+- **Pre-report self-check** (`2f78f587`): `bash tools/self_check.sh` catches functions renamed in Ghidra without a write-up and stale comments before a branch is reviewed. Nothing visible in game.
+- **Mod-loading functions written up in Ghidra** (`2715a3b4`): the functions that load mods and the character constructors are fully documented; a wrong description of one global in analysis/campaign/MOD_LOADING.md was fixed. Nothing visible in game.
+- **Trade routes break when a port changes hands, and threats/declines count in diplomacy** (`68f6a79b`): a captured port cuts the old owner's trade route; a threatened faction remembers it when it accepts or declines a deal. Visible in a campaign: take an enemy trade port and watch its route vanish from the trade overlay.
+- **Two speed-ups** (`polish24`, `polish25` merges): battle skirmishers no longer build a new list every tick; the campaign director checks for human armies only where it needs to. Nothing changes in play.
+- **Debugger sitting sheet ready** (`abc61cc7`): every open read in one ~30-minute session (start-up, campaign, one custom land battle on Aosta Valley; no siege needed). Top of this file; details in `analysis/fidelity/debugger/SITTING_SHEET.md`. Two reads were settled from the exe without a sitting.
+- **Armies leave a region that changes hands** (`b1ff0c35`): when a region is handed over (deal, liberation, a battle capture, the end of a protectorate), other factions' armies there are moved out as in the original, and docked navies when not at war. Visible in a campaign: give a region with a foreign army in it away in a deal and watch the army step outside the border.
+- **Battle formations laid out like the original** (`389fa114`): units march and stand in rows filled from the centre outwards the way the exe does it, with the diamond and wedge shapes and the light-infantry stagger. Visible in battle: `cargo run --release -p napoleon -- --battle-key NHB_Austerlitz --skip-deployment`, order a line or a cavalry wedge.
+- **Campaign tests split by topic** (merge after `81e0b236`): the 6,100-line campaign test file is now 12 topic files; nothing to see in game.
+- **Trade and diplomacy functions named in Ghidra** (`031c972b`): notes and Ghidra only; found that breaking trade should drop only the first route each way (BACKLOG §0).
+- **A region the director hands over gets its garrison army** (`c93ea6a8`): when the director transfers a region, the new owner gets the army the original raises from the garrison count (units picked from what the region and its neighbours can recruit, infantry first). Visible in a campaign when a region is transferred by the director.
+- **Breaking trade drops only the oldest route each way** (`9c6853cf`): war, an embargo or breaking trade now removes only the first trade route in each direction, as the original does; any other routes stay. Visible in the trade panel after breaking a deal with a faction you have two routes to.
+- **Three small tidy-ups** (`polish28`, `polish29`, `polish30` merges): campaign notes re-wrapped; armies pushed out of a region after it changes hands no longer scan the whole map each. Nothing changes in game.
+- **Scripted UI pieces land where the script puts them** (`67ab1350`): CreateFromLayout now uses the x, y a script passes (battle pip frame, xp bling, escape-menu options were stuck at their file offsets); a script passing a wrong type gets nil and a log line. Fixes a bug in the original where one bad call silently broke every later call on that panel.
+- **Squares and pike formations shaped like the original** (`c8ab2e98`): infantry squares and pike walls/squares now lay their men as the exe does; also fixes the original's squares sitting 1 m off-centre. Quick look: `cargo run --release -p napoleon -- --battle-key NHB_Austerlitz --skip-deployment`, order a line infantry unit into square.
+- **Dismounted cavalry no longer counts as riding** (`0ac37bf4`): frightened horses, drill and ground speed now use the exe's "riding now" test, everything else its "mounted" test. Logic only, covered by tests.
+- **Script image lists that mix styled and plain entries work like the original** (`91f2f632`): CreateFromComponent hands each image the list's current first entry. Logic only, covered by tests.
+- **Port ship-repair button works** (`1c620ba0`): the navy panel's repair button, from the original script, now orders and cancels repairs through the model. Quick look: `cargo run --release -p napoleon`, load a campaign with a damaged fleet docked in a port, select it and click repair.
+- **Charging cavalry frightens units as in the original** (`4560ad25`): the fighting-cavalry morale effect counts each attacker once, by direction, and only while it is riding. Logic only, covered by tests.
+- **A first backstab now costs the peace-treaty penalty, as in the original** (`a6e10ca6`): the treaty-break counter starts at 1 and military-access abuse is counted; our save format goes to v6 and older saves are migrated. Logic only, covered by tests.
+- **Trade routes left after a treaty break keep earning** (`c338f20c`), as in the original; one function now feeds income, accumulation and the trade panel. Logic only, covered by tests.
+- **Port repair button checks each unit** (`53380b60`): a land unit inside a navy takes the land path, as in the original. Logic only, covered by tests.
+- **Stopped at the block cap (week 30% of the 32% this block allows), 2026-10-16 ~01:40: no resume scheduled.** You start the next session; unfinished branches are listed in docs/HANDOFF.md "Resume here".
+
+## 2026-10-14 (night mode, 21-point block)
+
+
 
 ### Done
 
@@ -40,12 +89,6 @@ The morning report from night sessions, newest night first. Two lists per night:
 - Night stopped on the block cap (week 20%). Left unfinished, to resume next session: broadcasters3, transfer3, formation5, polish22 (docs/HANDOFF.md "Resume points"). Nothing needs you beyond the debugger sittings above.
 
 ## 2026-10-13 (usage stop at the weekly cap)
-
-### Needs you
-
-- **Gait debugger sitting (~10 min, BACKLOG "Gait: read n and k"):** Claude launches the original under Ghidra's
-  debugger; you give one cavalry and one infantry unit a walk order in any custom battle. It breaks at `0x0054C691`
-  and logs n, k, D, t, then watches `0x00659600` read descriptor word 9. Settles `TIMED_MOVE_PLANNED_SECONDS`.
 
 ### Done
 

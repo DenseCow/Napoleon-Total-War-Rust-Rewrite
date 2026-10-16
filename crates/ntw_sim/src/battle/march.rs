@@ -49,12 +49,16 @@
 //!
 //! PROVISIONAL (ours, until traced):
 //! - the reference soldier: ours is the formation's centre; the exe's is the man the layout names
-//!   (order `+0x30`, raised to `(unit +0x510) +0x27C` by `0x00572B00`), and the layout vfunc is not
-//!   traced;
-//! - the places: the grid is the exe's (files the front rank capped at the men, ranks
-//!   `ceil(men / files)`, CONFIRMED, [`LandUnit::formation_grid`]), the place within a rank, the
-//!   rank pitch and the anchor are ours ([`formation_place`]); a man's lag is along the unit's
-//!   facing only (ours moves straight, so the places do not wheel);
+//!   (order `+0x30`, raised to `(unit +0x510) +0x27C` by `0x00572B00`), not traced;
+//! - the places: every kind's slots and its measured centre are the exe's (CONFIRMED,
+//!   [`Formation`]); the anchor is ours: the slots are centred on the unit at that centre and laid
+//!   straight back along its facing, as the open-ground anchor is (`0x007F2680`, one straight
+//!   piece sized by the kind's own measure, vfunc `+0xC` through `0x007FC920`), where the exe lays
+//!   them from the order's path cursor along the planned path (`0x007F2DA0`: its first piece
+//!   through the anchor builder's vfunc `+0x18` with the order point `0x0080E9D0`, the later ones
+//!   through `+0x14`; not traced: those vfuncs of the path piece classes, the builder `0x00815F80`
+//!   hands out, and how an arc piece lays its rows); a man's lag is along the unit's facing only
+//!   (ours moves straight, so the places do not wheel);
 //! - a move that follows an enemy (the advance, the fire-target approach) is a new order, a first
 //!   issue to every man, whenever the enemy's position changed (`0x0054D9F0` re-reads it each tick
 //!   and builds a new move order, `0x0051A940` → `0x0051A530`, on a change, CONFIRMED); the value it
@@ -402,11 +406,18 @@ pub const LIGHT_INFANTRY_TOLERANCE_M: f32 = 1.5;
 /// them (`0x005498D0`, CONFIRMED static): the first active one wins, kind 0 (the line) without
 /// any. (Ability enum value, shape kind.) The shape factory `0x00531680` builds the kind's shape
 /// (via `0x00531630`); `0x00579780` and the ability switch `0x00578860` (through `0x005315A0`)
-/// re-create it. PROVISIONAL: every kind is laid out as the line. Traced so far (notes, "The
-/// shape parameters"): kind 6 (light infantry) is the line with file spacing 3.5 and a half-pitch
-/// wider front (`0x00642BA0`) whose ranks stagger by half a pitch (`0x0065A4F0`); kind 3 is the
-/// line with spacings 1.0; the layouts of kinds 1, 2, 4 and 5 are not traced.
+/// re-create it. Laid out by [`Formation`] (CONFIRMED static): the line (kind 0), the diamond
+/// (kind 1, `0x0062FDC0`), the wedge (kind 5, `0x006316B0`), light infantry's staggered line
+/// (kind 6, `0x006302E0`), the pike square (kind 2, `0x00630390`), the pike wall (kind 3,
+/// `0x006311B0`) and the square (kind 4, `0x00631560`, from the template table `0x014D0690`).
 pub const SHAPE_KINDS: [(u8, u8); 6] = [(6, 3), (0, 2), (1, 4), (2, 5), (3, 1), (4, 6)];
+
+/// Metres between the men of a light-infantry row (kind 6's p3, fixed by its ctor `0x006210D0`,
+/// CONFIRMED static).
+pub const LIGHT_INFANTRY_SPACING_M: f32 = 3.5;
+
+/// Metres between light-infantry rows (kind 6's p4, fixed by `0x006210D0`, CONFIRMED static).
+pub const LIGHT_INFANTRY_PITCH_M: f32 = 2.0;
 
 /// The largest cost a pair may have to take part in a partial assignment (`0x005373F0` passes
 /// 16.0 to `0x00502770` when not re-slotting, `f32::MAX` when it does; CONFIRMED static): a man
@@ -428,8 +439,9 @@ pub const REFORM_RUN_SQ: f32 = 25.0;
 /// when `c > 0`, `(1 − min(f · d̂, 1)) / 2` with `d̂` the unit direction from him to the slot and `f`
 /// the way he faces (`dir16` of his heading `+0x64`): a slot behind him costs up to 1 more than
 /// one as far ahead. PROVISIONAL (ours): every man faces his unit's facing, straight ahead in its
-/// frame; the men's own headings (soldier `+0x64`) are not modelled, and how the exe's differ from
-/// the unit's while men walk or turn is not traced.
+/// frame; the men's own headings (soldier `+0x64`) are not modelled, so the squares' slot headings
+/// ([`Formation::slot_heading`]) are not applied to them, and how the exe's differ from the
+/// unit's while men walk or turn is not traced.
 pub fn slot_cost(man: (f32, f32), slot: (f32, f32)) -> f32 {
     let d = (slot.0 - man.0, slot.1 - man.1);
     let c = d.0 * d.0 + d.1 * d.1;
@@ -534,20 +546,49 @@ pub fn reissued(order: &TimedMove, finished: bool) -> bool {
     order.first || !finished || !order.at_end
 }
 
-/// Man `i`'s place in a block of `files` × `ranks`, `width` × `depth` metres, in the unit's own
-/// frame: (to his right, back from the front), from the block's centre. Man `i` stands in file
-/// `i % files` of rank `i / files`, rank 0 in front: the exe's line shape fills one rank of `files`
-/// slots after another (`0x00619E60` steps the slot counter through a rank, CONFIRMED).
-/// PROVISIONAL (ours, the drawn block; see the module note): the first rank's placement
-/// `0x00619EB0` puts the men on alternate sides by slot parity (a rank filled from its anchor
-/// outward) and was not decoded, so the place within a rank (and a partial last rank's, ours from
-/// the left), the rank pitch and the anchor are ours. The view draws the men here and the model
-/// walks them from here, both through [`Formation::place`].
-pub fn formation_place(i: usize, files: usize, ranks: usize, width: f32, depth: f32) -> (f32, f32) {
-    let (files, ranks) = (files.max(1), ranks.max(1));
-    let (dx, dz) = (width / files as f32, depth / ranks as f32);
-    let (file, rank) = (i % files, i / files);
-    ((file as f32 - (files - 1) as f32 * 0.5) * dx, (rank as f32 - (ranks - 1) as f32 * 0.5) * dz)
+/// The row of a triangle of rows holding 1, 2, 3, … slots that slot `i` falls in (the exe's slot
+/// table `0x014D05B4`, filled by `0x00622780` with 0, 1, 1, 2, 2, 2, …, CONFIRMED static). The
+/// exe's table holds 400 entries (a wedge or diamond of more than 400 men reads past it); ours
+/// computes the row, so there is no limit.
+fn triangle_row(i: usize) -> usize {
+    let mut r = ((((8 * i + 1) as f64).sqrt() - 1.0) * 0.5) as usize;
+    while r * (r + 1) / 2 > i {
+        r -= 1;
+    }
+    while (r + 1) * (r + 2) / 2 <= i {
+        r += 1;
+    }
+    r
+}
+
+/// The diamond's half `A` over `men` men (`0x006209F0` → `0x0063C010`, CONFIRMED static): the
+/// single-precision square root rounded to nearest, plus one when the root is above that, i.e.
+/// `ceil(sqrt(men))`. Its rows hold 1, 2, …, A, …, 2, 1 slots (A² in all).
+fn diamond_half(men: usize) -> usize {
+    let root = (men as f32).sqrt();
+    let near = root.round_ties_even();
+    near as usize + usize::from(root - near > 0.0)
+}
+
+/// The place of slot `i` along its row, to the row's right (CONFIRMED static, the row placement
+/// `0x00619EB0`, and `0x00619B60` / `0x0061A260` for the wedge and the diamond): a row of `n`
+/// slots whose first is slot `first` (the layout's running slot count) puts its first slot on
+/// the row's centre when `n` is odd, else half a `spacing` to the left when `first` is odd and to
+/// the right when it is even; each later slot goes one `spacing` beyond the last one on the left
+/// when its index is odd, on the right when it is even. A row is so always centred.
+fn row_offset(i: usize, first: usize, n: usize, spacing: f32) -> f32 {
+    let start = if n % 2 == 1 {
+        0.0
+    } else if first % 2 == 1 {
+        -spacing * 0.5
+    } else {
+        spacing * 0.5
+    };
+    if i % 2 == 1 {
+        start - (i.div_ceil(2) - first.div_ceil(2)) as f32 * spacing
+    } else {
+        start + (i / 2 - first / 2) as f32 * spacing
+    }
 }
 
 /// The model-plane offset (x, y) of a point `(right, back)` metres in the frame of a unit facing
@@ -557,45 +598,450 @@ pub fn unit_frame_offset(facing: f32, (right, back): (f32, f32)) -> (f32, f32) {
     (right * s - back * c, -right * c - back * s)
 }
 
-/// A unit's formation laid out once: its grid and size ([`LandUnit::formation`]).
+/// `floor(sqrt(men))` as the exe takes it (`0x00630390`, `0x006311B0`, `0x00643B50`, CONFIRMED
+/// static): the single-precision square root rounded to nearest, less one when the root is below
+/// that.
+fn floor_sqrt(men: usize) -> usize {
+    let root = (men as f32).sqrt();
+    let near = root.round_ties_even();
+    (near as usize).saturating_sub(usize::from(root - near < 0.0))
+}
+
+/// Metres between the men and between the rows of the pike square, the pike wall and the square
+/// (kinds 2, 3 and 4), whatever the unit's own spacing (CONFIRMED static): the pike square's and
+/// the pike wall's layouts (`0x00630390`, `0x006311B0`) step by the unit's heading vectors
+/// themselves, and the square's template table is built at 1.0 by 1.0 (`0x00621F00` →
+/// `0x00621D10`); the pike wall's ctor (`0x00621140`) also sets its p3 = p4 = 1.0.
+pub const SQUARE_SPACING_M: f32 = 1.0;
+
+/// The square's (kind 4) smallest template: `n` men to a side (CONFIRMED static). The exe's
+/// template table (`0x014D0690`, built by `0x00621F00`) holds the sides 7 to 51: from 7 on, until
+/// the last one added holds 400 men or more on its rings. Each template `n` takes `8n − 8` to
+/// `8n − 1` men, and the lookup (`0x00661690`) falls back to the first (7) for any other count,
+/// so a square of more than 407 men lays its men past its template's 55 slots. Ours computes
+/// the side, `max(7, men / 8 + 1)`, which is the table's pick for 1 to 407 men, with no limit.
+pub const SQUARE_MIN_SIDE: usize = 7;
+
+/// The square's centre block (`0x00629E40` with 7 men from (0, 0) along (0, 1), CONFIRMED
+/// static): (to the right, ahead) of the template's middle, in its slot order.
+const SQUARE_CENTRE: [(f32, f32); 7] = [(0.0, 0.0), (-1.0, 0.0), (1.0, 0.0), (0.0, 1.0), (-1.0, 1.0), (1.0, 1.0), (0.0, -1.0)];
+
+/// A heading turned this far from the facing, in the exe's units (65536 to a turn, + to the
+/// right): an eighth, a quarter, three eighths and a half turn (`g_wHeadingEighthTurn`
+/// `0x014D0844`, `g_wHeadingQuarterTurn` `0x014D05AC`, `g_wHeadingThreeEighthsTurn` `0x014D05A8`,
+/// `g_wHeadingHalfTurn` `0x014D0650`, CONFIRMED static).
+const TURN_EIGHTH: i16 = 0x2000;
+const TURN_QUARTER: i16 = 0x4000;
+const TURN_THREE_EIGHTHS: i16 = 0x6000;
+const TURN_HALF: i16 = i16::MIN;
+
+/// The heading of a man of the pike square's block (`0x00630390`, CONFIRMED static), from his
+/// place `x` to the right of and `y` behind the block's middle: a man on a diagonal (|x| = |y|,
+/// not the middle) faces out along it, the others out from the side whose sector holds them
+/// (left of `|y|`, right of it, behind `|x|`), the rest (the front sector and the middle) ahead.
+fn pike_square_block_heading(x: f32, y: f32) -> i16 {
+    if x.abs() == y.abs() && x != 0.0 {
+        match (x > 0.0, y > 0.0) {
+            (true, false) => TURN_EIGHTH,
+            (true, true) => TURN_THREE_EIGHTHS,
+            (false, true) => -TURN_THREE_EIGHTHS,
+            (false, false) => -TURN_EIGHTH,
+        }
+    } else if x < -y.abs() {
+        -TURN_QUARTER
+    } else if x > y.abs() {
+        TURN_QUARTER
+    } else if y > x.abs() {
+        TURN_HALF
+    } else {
+        0
+    }
+}
+
+/// The place (to the right, back from the front) and heading of the pike square's man `m` past
+/// its block of `k × k` (`0x00630390`, CONFIRMED static). The first four stand on the corners
+/// of a ring one metre outside the block, facing out along its diagonals (front left, front
+/// right, back right, back left; the first is laid even with no man past the block, so with
+/// fewer than four past it one corner more than they is laid, [`Formation::laid_slots`]); the
+/// rest go round that ring from its corners by eight walks in turn (each step one metre farther
+/// along its own walk), facing out from their side.
+fn pike_square_extra(k: usize, m: usize) -> ((f32, f32), i16) {
+    let half = (k + 1) as f32 * 0.5;
+    let back = k as f32;
+    let corners = [((-half, -1.0), -TURN_EIGHTH), ((half, -1.0), TURN_EIGHTH), ((half, back), TURN_THREE_EIGHTHS), ((-half, back), -TURN_THREE_EIGHTHS)];
+    if let Some(&c) = corners.get(m) {
+        return c;
+    }
+    // (corner, step to the right and back, heading), in the order the walks are taken.
+    const WALKS: [(usize, (f32, f32), i16); 8] = [
+        (0, (0.0, 1.0), -TURN_QUARTER),
+        (0, (1.0, 0.0), 0),
+        (1, (-1.0, 0.0), 0),
+        (1, (0.0, 1.0), TURN_QUARTER),
+        (2, (0.0, -1.0), TURN_QUARTER),
+        (2, (-1.0, 0.0), TURN_HALF),
+        (3, (1.0, 0.0), TURN_HALF),
+        (3, (0.0, -1.0), -TURN_QUARTER),
+    ];
+    let q = m - corners.len();
+    let (corner, step, heading) = WALKS[q % WALKS.len()];
+    let t = (q / WALKS.len() + 1) as f32;
+    let ((x, y), _) = corners[corner];
+    ((x + step.0 * t, y + step.1 * t), heading)
+}
+
+/// The place (to the right, ahead of the middle) and heading of the square's slot `i` of side
+/// `n` (CONFIRMED static, the template `0x00621D10`): four sides, front, right, back, left
+/// (`0x006361C0` with the directions (1, 0), (0, −1), (−1, 0), (0, 1)), each an outer row of `n`
+/// men one metre out from its inner row of `n − 2`, starting half a metre before the inner row's
+/// corner; every man faces out from his side, the first of each inner row out along the corner's
+/// diagonal (an eighth of a turn left of his side's). Then the centre's 7
+/// ([`SQUARE_CENTRE`]), facing ahead. `None` past the template's `8n − 1` slots.
+///
+/// ORIGINAL BUG (`0x00621D10`): the exe starts the front side at the corner `(−n/2, n/2)`, the
+/// box's, which `0x006361C0` takes as its inner row's: both rings come out 1 m to the left of and
+/// 1 m ahead of the template's middle, where its measured box (`0x0063A660`, centred on it, `n`
+/// wide and deep) and its centre block (`0x00629E40`, centred on it) stand, so the front outer
+/// row stands 1 m ahead of the order point and the centre block off the rings' middle. Ours
+/// starts at the inner corner `(−(n/2 − 1), n/2 − 1)`: the rings are centred, the outer one `n`
+/// wide and deep as the box.
+fn square_slot(n: usize, i: usize) -> Option<((f32, f32), i16)> {
+    let side_slots = 2 * n - 2;
+    let sides = 4 * side_slots;
+    if i >= sides {
+        return SQUARE_CENTRE.get(i - sides).map(|&p| (p, 0));
+    }
+    let h = n as f32 * 0.5 - 1.0;
+    // (inner corner, direction along the side, the side's heading), in the template's order.
+    let (corner, dir, heading) = [
+        ((-h, h), (1.0, 0.0), 0),
+        ((h, h), (0.0, -1.0), TURN_QUARTER),
+        ((h, -h), (-1.0, 0.0), TURN_HALF),
+        ((-h, -h), (0.0, 1.0), -TURN_QUARTER),
+    ][i / side_slots];
+    let j = i % side_slots;
+    Some(if j < n {
+        // Outward is the direction turned a quarter left: (−dir.y, dir.x).
+        let along = j as f32 - 0.5;
+        ((corner.0 + dir.0 * along - dir.1, corner.1 + dir.1 * along + dir.0), heading)
+    } else {
+        let along = (j - n) as f32;
+        let heading = if j == n { heading.wrapping_sub(TURN_EIGHTH) } else { heading };
+        ((corner.0 + dir.0 * along, corner.1 + dir.1 * along), heading)
+    })
+}
+
+/// A unit's formation laid out once ([`LandUnit::formation`]): its shape kind's slots over its
+/// men. The shape's layout vfunc `+0x24` places them (CONFIRMED static):
+/// - the line (kinds 0, 6), the diamond (1) and the wedge (5) fill rows: the anchor walk
+///   `0x00659E70` hands each of its rank objects the men left, a straight piece (`0x00659F00`)
+///   lays a row every p4 metres along its length, and each row asks the shape's generator how
+///   many of the men left it holds (capped at them) and places them across itself
+///   ([`row_offset`]);
+/// - the pike square (kind 2, `0x00630390`), the pike wall (3, `0x006311B0`) and the square (4,
+///   `0x00631560`) place every man themselves from the order point, the front centre, at 1 m
+///   ([`SQUARE_SPACING_M`]).
+///
+/// The places are relative to the centre of the shape's measured box (its vfunc `+0xC`), which
+/// lies [`Formation::front`] behind the front. On open ground the anchor is one straight piece from
+/// the front centre straight back along the facing (`0x007F2680`, sized by that box); ours lays
+/// every kind that way (PROVISIONAL, see the module note: the exe anchors at the order's path
+/// cursor and lays the rows along the planned path, `0x007F2DA0`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Formation {
-    /// Men in the front rank.
+    /// The shape kind laid ([`LandUnit::shape_kind`]).
+    pub kind: u8,
+    /// The men laid out (the unit's soldier count `+0x18` at the lay-out).
+    pub men: usize,
+    /// Men in a full rank of the line kinds (0, 6) and of the pike wall (3); the widest row of
+    /// the diamond and the wedge; the side `k` of the pike square's block; the square's side `n`.
     pub files: usize,
-    /// Ranks the living men fill ([`LandUnit::formation_grid`]).
+    /// The rows the men fill: the pike square's block rows (`k`); the square's rings and centre
+    /// (3, [`Formation::rank_of`]).
     pub ranks: usize,
-    /// Width in metres.
+    /// Metres between the men of a row (the shape's p3).
+    pub spacing: f32,
+    /// Metres between rows (the shape's p4, the straight piece's row pitch `0x00659F00`).
+    pub pitch: f32,
+    /// Width in metres: the widest row's men times the spacing; for kinds 2 to 4 the measured
+    /// box's less the men's own extent (`0x0063A590`: `k` for the pike square and the pike wall;
+    /// `0x0063A660`: the square's side `n`).
     pub width: f32,
-    /// Depth in metres.
+    /// Depth in metres: the rows times the pitch; for kinds 2 to 4 as the width.
     pub depth: f32,
+    /// Metres from the measured box's centre forward to the front (the order point): its depth
+    /// less a man's, halved (CONFIRMED static, each kind's measure vfunc `+0xC`):
+    /// - the line kinds (`0x0063A1D0` → `0x0063A9D0`): `(ranks − 1) × pitch / 2`;
+    /// - the diamond (`0x0063A2F0`): `(A − 1) × pitch`, A from [`diamond_half`] (its full
+    ///   `2A − 1` rows, even when the men leave the last ones empty);
+    /// - the wedge (`0x0063A750`): `(T[men] + 1) × pitch / 2`, T the triangle table
+    ///   [`triangle_row`] at the men (one row more than a full last row holds);
+    /// - the pike square and the pike wall (`0x0063A590` → `0x00643B50`): `floor(sqrt(men)) / 2`
+    ///   metres (the pike wall's too, however wide its rows);
+    /// - the square (`0x0063A660`): its side `n / 2` metres.
+    pub front: f32,
 }
 
 impl Formation {
-    /// Man `i`'s place in the unit's frame ([`formation_place`]).
+    /// Lays out `men` men in shape `kind`, `files` to a full rank of the line kinds and of the
+    /// pike wall, `spacing` and `pitch` metres apart (kinds 2 to 4 always 1 m).
+    pub fn new(kind: u8, men: usize, files: usize, spacing: f32, pitch: f32) -> Self {
+        let men = men.max(1);
+        let mut f = Formation { kind, men, files: files.max(1), ranks: 1, spacing, pitch, width: 0.0, depth: 0.0, front: 0.0 };
+        match kind {
+            2..=4 => {
+                (f.spacing, f.pitch) = (SQUARE_SPACING_M, SQUARE_SPACING_M);
+                let root = floor_sqrt(men).max(1);
+                let side = match kind {
+                    2 => {
+                        (f.files, f.ranks) = (root, root);
+                        root
+                    }
+                    3 => {
+                        f.files = f.files.min(men);
+                        f.ranks = men.div_ceil(f.files);
+                        root
+                    }
+                    _ => {
+                        f.files = (men / 8 + 1).max(SQUARE_MIN_SIDE);
+                        f.ranks = 3;
+                        f.files
+                    }
+                };
+                (f.width, f.depth, f.front) = (side as f32, side as f32, side as f32 * 0.5);
+            }
+            _ => {
+                f.ranks = f.row(men - 1).0 + 1;
+                if matches!(kind, 1 | 5) {
+                    f.files = (0..f.ranks).map(|r| f.row(f.row_first(r)).2).max().unwrap_or(1);
+                }
+                (f.width, f.depth) = (f.files as f32 * spacing, f.ranks as f32 * pitch);
+                f.front = match kind {
+                    1 => (diamond_half(men) - 1) as f32 * pitch,
+                    5 => (triangle_row(men) + 1) as f32 * pitch * 0.5,
+                    _ => (f.ranks - 1) as f32 * pitch * 0.5,
+                };
+            }
+        }
+        f
+    }
+
+    /// The first slot of row `r`.
+    fn row_first(&self, r: usize) -> usize {
+        match self.kind {
+            5 => r * (r + 1) / 2,
+            1 => {
+                let a = diamond_half(self.men);
+                if r < a {
+                    r * (r + 1) / 2
+                } else {
+                    // The rows from `r` to the last (`2A − 2`) hold `2A − 1 − r` down to 1.
+                    let below = (2 * a).saturating_sub(1 + r);
+                    (a * a).saturating_sub(below * (below + 1) / 2)
+                }
+            }
+            _ => r * self.files,
+        }
+    }
+
+    /// Slot `i`'s row: (row, the row's first slot, the slots it holds). CONFIRMED static, the
+    /// generators' row counts, each capped at the men left (the anchor row's slot cap `+0x20`):
+    /// - the line kinds (`0x0065A410`, kind 6 `0x0065A4F0`): the files, at least 1;
+    /// - kind 1, the diamond (`0x0065A490` → `0x00660D50`): row `r` holds `r + 1` up to row
+    ///   `A − 1`, then one fewer per row (`2(A − 1) − r + 1`), A from [`diamond_half`];
+    /// - kind 5, the wedge (`0x0065A690`): row `r` holds `r + 1`, at least 1.
+    ///
+    /// The row placements stop a row early when a slot's row (by the files, the triangle
+    /// [`triangle_row`], or the diamond's mirrored triangle split at `0x006209F0`'s `+4`) is not
+    /// the first slot's; with every row but the last full this never happens, so the rows here
+    /// are the generators' counts. A slot past the laid men (a man added after the lay-out; the
+    /// exe lays the slots over its soldier count) gets a row of its own behind (ours).
+    fn row(&self, i: usize) -> (usize, usize, usize) {
+        let (r, cap) = match self.kind {
+            5 => {
+                let r = triangle_row(i);
+                (r, r + 1)
+            }
+            1 => {
+                let a = diamond_half(self.men);
+                if i < a * (a + 1) / 2 {
+                    let r = triangle_row(i);
+                    (r, r + 1)
+                } else if let Some(j) = (a * a).checked_sub(i + 1) {
+                    let r = 2 * a - 2 - triangle_row(j);
+                    (r, 2 * a - 1 - r)
+                } else {
+                    return (2 * a - 1 + i - a * a, i, 1);
+                }
+            }
+            _ => (i / self.files, self.files),
+        };
+        let first = self.row_first(r);
+        (r, first, cap.min(self.men.saturating_sub(first)).max(1))
+    }
+
+    /// Man `i`'s rank, 0 the front one: his row; the pike square's block row (its men outside
+    /// the block 0); the square's outer ring 0, inner ring 1 and centre 2 (the template slot's
+    /// field `+8`, `0x006361C0` / `0x00629E40`). A slot past the laid ones
+    /// ([`Formation::laid_slots`]) is behind them all.
+    pub fn rank_of(&self, i: usize) -> usize {
+        let laid = self.laid_slots();
+        match self.kind {
+            2..=4 if i >= laid => self.ranks + i - laid,
+            2 => if i < self.files * self.files { i / self.files } else { 0 },
+            3 => i / self.files,
+            4 => {
+                let sides = 8 * self.files - 8;
+                if i >= sides { 2 } else { usize::from(i % (2 * self.files - 2) >= self.files) }
+            }
+            _ => self.row(i).0,
+        }
+    }
+
+    /// Man `i`'s place in the unit's frame: (to his right, back), from the measured box's centre
+    /// ([`Formation::front`] behind the front). The view draws the men here and the model walks
+    /// them from here. CONFIRMED static:
+    /// - the row kinds: row `r` lies `r × pitch` behind the front row (`0x00659F00`) and its men
+    ///   across it by [`row_offset`]; kind 6, light infantry, staggers its rows (`0x0065A4F0`):
+    ///   a row whose index is odd moves half a spacing to the right, else a row holding an even
+    ///   count after a row holding an odd one half a spacing to the left;
+    /// - the pike square (`0x00630390`): a block of `k × k` (`k` = [`floor_sqrt`] of the men),
+    ///   row after row from the front left; the men left over (fewer than `2k + 1`) on a ring
+    ///   round it ([`pike_square_extra`]), one corner more with 0 to 3 of them
+    ///   ([`Formation::laid_slots`]);
+    /// - the pike wall (`0x006311B0`): full rows of its files from the front left, the men left
+    ///   over in one more row, starting `(files − left) / 2` places in (rounded down);
+    /// - the square (`0x00631560` → `0x0066AE60`): its template's slot ([`square_slot`]).
+    ///
+    /// For kinds 2 to 4 a slot past the laid ones ([`Formation::laid_slots`]) gets a place of its
+    /// own behind them (ours).
     pub fn place(&self, i: usize) -> (f32, f32) {
-        formation_place(i, self.files, self.ranks, self.width, self.depth)
+        self.slot(i).0
+    }
+
+    /// Man `i`'s slot heading, turned from the unit's facing in the exe's units (65536 to a turn,
+    /// positive to the right; CONFIRMED static): the pike square's block men face out by their
+    /// sector, see [`pike_square_block_heading`], and its ring men out from their corner or side,
+    /// see [`pike_square_extra`]; the square's men out from their side, see [`square_slot`]; the pike
+    /// wall's men all ahead (`0x006311B0`). The row kinds give every slot its row's heading
+    /// (`0x00619EB0` copies the row's `+0x1C`): 0 here, the facing. Ours does not turn the men to
+    /// these headings (see [`slot_cost`]).
+    pub fn slot_heading(&self, i: usize) -> i16 {
+        self.slot(i).1
+    }
+
+    /// The slots the shape's layout lays over the men (CONFIRMED static): one each, but the pike
+    /// square (`0x00630390`) always lays its first ring corner and then takes one corner per man
+    /// left past its block, so with 0 to 3 men past `k × k` it lays one corner more than the men
+    /// (the remainder at `[EBX+0x14]`: `CMP 0` / `JL` at `0x006308D4`, then `SUB 1` / `JS` after
+    /// each corner from `0x006309F0`). That slot, `men`, stays empty: the assignment
+    /// (`0x00555CA0` → `0x005373F0`) pairs soldier `k` with slot `k` for the men only and its
+    /// 2-opt (`0x00502770`) swaps soldiers between those pairs, so the soldier vector is rebuilt
+    /// over slots `0` to `men − 1`.
+    pub fn laid_slots(&self) -> usize {
+        match self.kind {
+            2 if self.men - self.files * self.files < 4 => self.men + 1,
+            _ => self.men,
+        }
+    }
+
+    /// Man `i`'s place and slot heading ([`Formation::place`], [`Formation::slot_heading`]).
+    fn slot(&self, i: usize) -> ((f32, f32), i16) {
+        let laid = self.laid_slots();
+        let ((right, back), heading) = match self.kind {
+            2..=4 if i >= laid => {
+                let last = match self.kind {
+                    2 => self.files as f32,
+                    3 => (self.ranks - 1) as f32,
+                    _ => self.files as f32,
+                };
+                ((0.0, last + 1.0 + (i - laid) as f32), 0)
+            }
+            2 => {
+                let k = self.files;
+                if i < k * k {
+                    let c = (k - 1) as f32 * 0.5;
+                    let (x, y) = ((i % k) as f32 - c, (i / k) as f32);
+                    ((x, y), pike_square_block_heading(x, y - c))
+                } else {
+                    pike_square_extra(k, i - k * k)
+                }
+            }
+            3 => {
+                let f = self.files;
+                let (r, j) = (i / f, i % f);
+                let left = self.men % f;
+                let start = if r == self.men / f { ((f - left) >> 1) as f32 } else { 0.0 };
+                ((start + j as f32 - (f - 1) as f32 * 0.5, r as f32), 0)
+            }
+            4 => match square_slot(self.files, i) {
+                // The template's (right, ahead of its middle), which lies `front` behind the front.
+                Some(((x, y), heading)) => ((x, self.front - y), heading),
+                // Never: the side picked holds every man ([`SQUARE_MIN_SIDE`]).
+                None => ((0.0, self.files as f32 + 1.0), 0),
+            },
+            _ => {
+                let (r, first, n) = self.row(i);
+                let mut right = row_offset(i, first, n, self.spacing);
+                if self.kind == 6 {
+                    let previous = if r > 0 { self.row(first - 1).2 } else { 0 };
+                    if r % 2 == 1 {
+                        right += self.spacing * 0.5;
+                    } else if previous % 2 == 1 && n % 2 == 0 {
+                        right -= self.spacing * 0.5;
+                    }
+                }
+                ((right, r as f32 * self.pitch), 0)
+            }
+        };
+        ((right, back - self.front), heading)
     }
 }
 
 impl LandUnit {
-    /// The formation's files and ranks over its living men: the files are the front rank
-    /// ([`LandUnit::files`], the men who fire with the default drill, capped at the living men as
-    /// the callers of `0x00642C90` cap them), the ranks as many as the living men fill
+    /// The formation's files and ranks over its living men: for the line the files are the front
+    /// rank ([`LandUnit::files`], the men who fire with the default drill, capped at the living men
+    /// as the callers of `0x00642C90` cap them), the ranks as many as the living men fill
     /// (`ceil(men / files)`: `0x00581200` lays the unit's soldier count `+0x18` out over the slots,
-    /// slot `i` in rank `i / files`, `0x00619E60`, CONFIRMED). The one grid the men's places come
-    /// from: the laid one ([`LandUnit::formation`]).
+    /// slot `i` in rank `i / files`, CONFIRMED); the diamond's and the wedge's are their widest row
+    /// and their rows, the pike wall's its files and rows, the pike square's its block's side
+    /// twice and the square's its side and 3 ([`Formation::new`]). The one grid the men's places
+    /// come from: the laid one ([`LandUnit::formation`]).
     pub fn formation_grid(&self) -> (usize, usize) {
         let f = self.formation();
         (f.files, f.ranks)
     }
 
-    /// The formation laid out fresh over the living men: the grid of [`LandUnit::formation_grid`]
-    /// over [`LandUnit::fresh_width`], the ranks at [`LandUnit::rank_spacing`] (the shape's layout
-    /// vfunc `+0x24` run with the unit's soldier count `+0x18`).
+    /// The formation laid out fresh over the living men in the unit's shape kind
+    /// ([`LandUnit::shape_kind`]; the shape's layout vfunc `+0x24` run with the unit's soldier
+    /// count `+0x18`): the files of [`LandUnit::files`], the spacing of [`LandUnit::fresh_width`]
+    /// over them (the unit's p3) and the pitch [`LandUnit::rank_spacing`] (its p4), which the
+    /// shape factory `0x00531680` hands the line and kinds 1 and 5 alike (CONFIRMED static).
+    /// Kind 6 has its own: [`LIGHT_INFANTRY_SPACING_M`] and [`LIGHT_INFANTRY_PITCH_M`]
+    /// (`0x006210D0`; its layout `0x006302E0` builds its generator from the shape's p1..p4,
+    /// CONFIRMED static). Kinds 2 to 4 stand 1 m apart ([`SQUARE_SPACING_M`]); the pike wall's
+    /// files are its vfunc `+0x10` (`0x00642EE0` → `0x00642C90` at a 1 m spacing, CONFIRMED
+    /// static): `floor(width + 0.001 − p1) + 1`, capped at the men.
+    /// PROVISIONAL: kind 6 keeps the line's files (the exe's come from `0x00642D90` over the width
+    /// the light-infantry task `0x00515210` re-forms to, not traced); the pike wall's width is
+    /// ours, [`LandUnit::fresh_width`] (the width the ability switch `0x00578860` re-forms it to
+    /// is not traced), and its p1 (shape `+0x18`, from the entity's `+0x4C` its callers pass to
+    /// `0x00579780`) ours, twice [`LandUnit::man_radius`] as the line's.
     fn fresh_formation(&self) -> Formation {
+        let kind = self.shape_kind();
+        let men = self.men as usize;
         let files = (self.files() as usize).max(1);
-        let ranks = (self.men as usize).div_ceil(files).max(1);
-        Formation { files, ranks, width: self.fresh_width(), depth: ranks as f32 * self.rank_spacing() }
+        let (files, spacing, pitch) = match kind {
+            6 => (files, LIGHT_INFANTRY_SPACING_M, LIGHT_INFANTRY_PITCH_M),
+            2 | 4 => (files, SQUARE_SPACING_M, SQUARE_SPACING_M),
+            3 => {
+                let room = self.fresh_width() + 0.001 - 2.0 * self.man_radius;
+                let wall = (room / SQUARE_SPACING_M).floor().max(0.0) as usize + 1;
+                (wall.min(men).max(1), SQUARE_SPACING_M, SQUARE_SPACING_M)
+            }
+            _ => (files, self.fresh_width() / files as f32, self.rank_spacing()),
+        };
+        Formation::new(kind, men, files, spacing, pitch)
     }
 
     /// The formation the men hold their slots on: the one layout the model and the view share
@@ -754,6 +1200,7 @@ impl LandUnit {
     /// PROVISIONAL (ours): the exe counts only the men whose soldier `+0x1A8` is clear (not traced),
     /// ours every living man.
     pub fn in_place_check(&mut self, tick: u32) {
+        // Mounted (`0x0055ABF0` at `0x00557BCA`).
         let mounted = if super::strength::mounted(self) { IN_PLACE_MOUNTED_M } else { IN_PLACE_FOOT_M };
         let tolerance = self.drill_tolerance() + mounted;
         let (old, fresh) = (self.formation(), self.fresh_formation());
@@ -826,8 +1273,9 @@ impl LandUnit {
     /// static): in battle `0x00653560` stores the target at soldier `+0x5FC` and the soldier's
     /// update (`0x00658C50`) issues the move once (`0x007E2040`), at the run speed and as a run
     /// beyond 5 m ([`REFORM_RUN_SQ`]), else at the walk speed as a walk. The heading test (a man
-    /// turned more than 910 / 65536 of a turn from his slot's heading also moves) never holds for
-    /// ours: every man faces his unit's facing (see [`slot_cost`]).
+    /// turned more than 910 / 65536 of a turn from his slot's heading also moves) is not applied:
+    /// ours has every man face his unit's facing, and the squares' slot headings
+    /// ([`Formation::slot_heading`]) are not given to the men (PROVISIONAL, see [`slot_cost`]).
     pub fn send_men_to_slots(&mut self) {
         let alive = (self.men as usize).min(self.march.men.len());
         let (walk, run) = (self.walk_speed, self.run_speed);
@@ -848,8 +1296,7 @@ impl LandUnit {
 
     /// The formation shape kind (`0x005498D0`, [`SHAPE_KINDS`]): that of the first of the unit's
     /// active special abilities in the exe's order, 0 (the line) without any. PROVISIONAL (ours):
-    /// every kind is laid out as the line (the other shapes' layouts are not traced), and an
-    /// ability stays active once performed.
+    /// an ability stays active once performed.
     pub fn shape_kind(&self) -> u8 {
         SHAPE_KINDS.iter().find(|(ability, _)| self.active_abilities & (1u32 << ability) != 0).map_or(0, |&(_, kind)| kind)
     }
@@ -919,7 +1366,7 @@ impl LandUnit {
 
     /// Man `i`'s rank (0 = the front rank), as [`LandUnit::man_place`] lays him out.
     pub fn man_rank(&self, i: usize) -> usize {
-        i / self.formation_grid().0
+        self.formation().rank_of(i)
     }
 }
 
@@ -956,7 +1403,7 @@ impl Battle {
         let tick = self.tick;
         let u = &mut self.units[idx];
         u.march.ensure_men(u.max_men as usize);
-        let (class, run_speed, accel, decel) = (u.movement_class, u.run_speed, u.acceleration, u.deceleration);
+        let (class, run_speed, accel, decel) = (super::strength::movement_class(u), u.run_speed, u.acceleration, u.deceleration);
         // The order: the unit's while it moves; after it, the same order, re-issued on the same
         // schedule with the issue point where the unit stands (no path left: D = 0, at the end).
         // The men's copy keeps no kept speed (each man keeps his own) and no target (the unit's).
@@ -1133,13 +1580,208 @@ mod tests {
 
     #[test]
     fn places_and_frame_match_the_drawn_block() {
-        assert_eq!(formation_place(0, 20, 2, 20.0, 2.0), (-9.5, -0.5));
-        assert_eq!(formation_place(39, 20, 2, 20.0, 2.0), (9.5, 0.5));
+        // 40 men, 20 files: rank 0's first slot (an even count, slot 0 even) half a pitch right
+        // of the centre, then left and right in turn (`0x00619EB0`); the ranks centred, 1 m apart.
+        let f = Formation::new(0, 40, 20, 1.0, 1.0);
+        assert_eq!((f.files, f.ranks, f.width, f.depth), (20, 2, 20.0, 2.0));
+        assert_eq!([0, 1, 2, 18, 19].map(|i| f.place(i)), [(0.5, -0.5), (-0.5, -0.5), (1.5, -0.5), (9.5, -0.5), (-9.5, -0.5)]);
+        assert_eq!([20, 39].map(|i| f.place(i)), [(0.5, 0.5), (-9.5, 0.5)]);
         // Facing +x the right hand is −y and the back −x; facing +y the right hand is +x.
         let near = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6;
         assert!(near(unit_frame_offset(0.0, (1.0, 0.0)), (0.0, -1.0)));
         assert!(near(unit_frame_offset(0.0, (0.0, 1.0)), (-1.0, 0.0)));
         assert!(near(unit_frame_offset(std::f32::consts::FRAC_PI_2, (1.0, 0.0)), (1.0, 0.0)));
+    }
+
+    /// The line's rows (`0x0065A410` → `0x00619EB0`): an odd row starts on its centre, the side a
+    /// later slot takes is its index's parity, so a rank whose first slot is odd fills right
+    /// first; a partial last rank is centred (two men from slot 5: odd, so the first half a pitch
+    /// left).
+    #[test]
+    fn line_rows_alternate_by_slot_parity_and_stay_centred() {
+        let f = Formation::new(0, 10, 5, 1.0, 1.0);
+        let right = |f: &Formation, r: std::ops::Range<usize>| r.map(|i| f.place(i).0).collect::<Vec<_>>();
+        assert_eq!(right(&f, 0..5), [0.0, -1.0, 1.0, -2.0, 2.0]);
+        assert_eq!(right(&f, 5..10), [0.0, 1.0, -1.0, 2.0, -2.0]);
+        let f = Formation::new(0, 7, 5, 1.0, 1.0);
+        assert_eq!((f.ranks, right(&f, 5..7)), (2, vec![-0.5, 0.5]));
+        assert_eq!([f.rank_of(4), f.rank_of(5)], [0, 1]);
+    }
+
+    /// Kind 1, the diamond (`0x0062FDC0`): A = ceil(sqrt(men)) (`0x006209F0`), rows of 1, 2, …,
+    /// A, …, 2, 1 men, each centred (`0x0061A260`), the last cut at the men left.
+    #[test]
+    fn the_diamond_rows_grow_to_a_then_shrink() {
+        assert_eq!([1, 2, 4, 5, 9, 10, 16, 17].map(diamond_half), [1, 2, 2, 3, 3, 4, 4, 5]);
+        let f = Formation::new(1, 9, 30, 1.0, 1.0);
+        assert_eq!((f.files, f.ranks, f.width, f.depth), (3, 5, 3.0, 5.0));
+        let places: Vec<_> = (0..9).map(|i| f.place(i)).collect();
+        let expected = [(0.0, -2.0), (-0.5, -1.0), (0.5, -1.0), (0.0, 0.0), (1.0, 0.0), (-1.0, 0.0), (0.5, 1.0), (-0.5, 1.0), (0.0, 2.0)];
+        assert_eq!(places, expected);
+        // 10 men fill A = 4's top half; an 11th stands alone in row 4.
+        let f = Formation::new(1, 10, 30, 1.0, 1.0);
+        assert_eq!((f.files, f.ranks), (4, 4));
+        // The measured centre (`0x0063A2F0`) is A − 1 rows back, the middle of the full 2A − 1
+        // rows, though the 10 men fill only the first 4.
+        assert_eq!((f.front, f.place(0).1, f.place(9).1), (3.0, -3.0, 0.0));
+        let f = Formation::new(1, 11, 30, 1.0, 1.0);
+        assert_eq!((f.ranks, f.rank_of(10), f.place(10).0), (5, 4, 0.0));
+    }
+
+    /// Kind 5, the wedge (`0x006316B0`): row `r` holds `r + 1` men (`0x0065A690`), centred
+    /// (`0x00619B60`), whatever the files.
+    #[test]
+    fn the_wedge_adds_a_man_per_row() {
+        let f = Formation::new(5, 8, 30, 1.0, 1.0);
+        assert_eq!((f.files, f.ranks), (3, 4));
+        let right: Vec<_> = (0..8).map(|i| f.place(i).0).collect();
+        assert_eq!(right, [0.0, -0.5, 0.5, 0.0, 1.0, -1.0, 0.5, -0.5]);
+        assert_eq!((0..8).map(|i| f.rank_of(i)).collect::<Vec<_>>(), [0, 1, 1, 2, 2, 2, 3, 3]);
+        // The measured centre (`0x0063A750`) is (T[8] + 1) / 2 = 2 rows back, not 1.5.
+        assert_eq!([0, 7].map(|i| f.place(i).1), [-2.0, 1.0]);
+        assert_eq!(Formation::new(5, 10, 30, 1.0, 2.0).front, 5.0);
+        assert_eq!((0..210).map(triangle_row).filter(|&r| r == 19).count(), 20);
+    }
+
+    /// Kind 2, the pike square (`0x00630390`): a block of floor(sqrt(men)) squared, its men
+    /// facing out by their sector, the rest on a ring round it; the centre floor(sqrt(men)) / 2
+    /// behind the front (`0x0063A590`).
+    #[test]
+    fn the_pike_square_faces_out_from_its_block_and_ring() {
+        assert_eq!([1, 3, 4, 8, 9, 15, 16, 99, 100].map(floor_sqrt), [1, 1, 2, 2, 3, 3, 4, 9, 10]);
+        let f = Formation::new(2, 9, 30, 2.0, 2.0);
+        assert_eq!((f.files, f.ranks, f.spacing, f.front), (3, 3, 1.0, 1.5));
+        let places: Vec<_> = (0..9).map(|i| f.place(i)).collect();
+        let expected = [(-1.0, -1.5), (0.0, -1.5), (1.0, -1.5), (-1.0, -0.5), (0.0, -0.5), (1.0, -0.5), (-1.0, 0.5), (0.0, 0.5), (1.0, 0.5)];
+        assert_eq!(places, expected);
+        let headings: Vec<_> = (0..9).map(|i| f.slot_heading(i)).collect();
+        assert_eq!(headings, [-0x2000, 0, 0x2000, -0x4000, 0, 0x4000, -0x6000, i16::MIN, 0x6000]);
+        // 15 men: 6 past the block, on the ring's four corners, then down its left side from the
+        // front left corner and along its front.
+        let f = Formation::new(2, 15, 30, 1.0, 1.0);
+        let extras: Vec<_> = (9..15).map(|i| (f.place(i), f.slot_heading(i))).collect();
+        let expected = [
+            ((-2.0, -2.5), -0x2000),
+            ((2.0, -2.5), 0x2000),
+            ((2.0, 1.5), 0x6000),
+            ((-2.0, 1.5), -0x6000),
+            ((-2.0, -1.5), -0x4000),
+            ((-1.0, -2.5), 0),
+        ];
+        assert_eq!(extras, expected);
+        assert_eq!((f.rank_of(4), f.rank_of(7), f.rank_of(12)), (1, 2, 0));
+        // 0 to 3 men past the block lay one corner more (`0x006308D4`, `0x006309F0`): slot `men`
+        // is that corner, left empty, and only the slots past it go behind.
+        assert_eq!([9, 10, 12, 13, 14, 15].map(|m| Formation::new(2, m, 1, 1.0, 1.0).laid_slots()), [10, 11, 13, 13, 14, 15]);
+        let f = Formation::new(2, 9, 30, 1.0, 1.0);
+        assert_eq!((f.place(9), f.slot_heading(9), f.rank_of(9)), ((-2.0, -2.5), -0x2000, 0));
+        assert_eq!((f.place(10), f.rank_of(10)), ((0.0, 2.5), 3));
+        let f = Formation::new(2, 12, 30, 1.0, 1.0);
+        assert_eq!((f.place(12), f.slot_heading(12)), ((-2.0, 1.5), -0x6000));
+        assert_eq!(Formation::new(2, 13, 30, 1.0, 1.0).place(13), (0.0, 2.5));
+        for men in 1..=300 {
+            assert_distinct(&Formation::new(2, men, 1, 1.0, 1.0));
+        }
+    }
+
+    /// Kind 3, the pike wall (`0x006311B0`): full rows of its files from the front left, 1 m
+    /// apart, the rest in one more row starting (files − rest) / 2 places in, every man facing
+    /// ahead; its files from the width at 1 m (`0x00642EE0`); its centre floor(sqrt(men)) / 2
+    /// behind the front, whatever its rows (`0x0063A590`).
+    #[test]
+    fn the_pike_wall_fills_rows_from_the_left() {
+        let f = Formation::new(3, 10, 4, 2.0, 2.0);
+        assert_eq!((f.files, f.ranks, f.spacing, f.pitch, f.front), (4, 3, 1.0, 1.0, 1.5));
+        let places: Vec<_> = (0..10).map(|i| f.place(i)).collect();
+        let expected = [
+            (-1.5, -1.5),
+            (-0.5, -1.5),
+            (0.5, -1.5),
+            (1.5, -1.5),
+            (-1.5, -0.5),
+            (-0.5, -0.5),
+            (0.5, -0.5),
+            (1.5, -0.5),
+            (-0.5, 0.5),
+            (0.5, 0.5),
+        ];
+        assert_eq!(places, expected);
+        assert!((0..10).all(|i| f.slot_heading(i) == 0));
+        assert_eq!((0..10).map(|i| f.rank_of(i)).collect::<Vec<_>>(), [0, 0, 0, 0, 1, 1, 1, 1, 2, 2]);
+        // Three left over start (4 − 3) >> 1 = 0 places in.
+        let f = Formation::new(3, 11, 4, 1.0, 1.0);
+        assert_eq!([8, 9, 10].map(|i| f.place(i).0), [-1.5, -0.5, 0.5]);
+        // A slot past the laid men stands behind them.
+        assert_eq!((f.place(11).1, f.rank_of(11)), (3.0 - 1.5, 3));
+        // The ability lays it: a width of 4 m less p1 = 2 × 0.35 m holds 4 files.
+        let mut u = LandUnit::new(0, 0, 10, (0.0, 0.0));
+        (u.formation_files, u.formation_width, u.formation_rank_spacing, u.man_radius) = (4, 4.0, 1.5, 0.35);
+        u.active_abilities = 1 << 6;
+        assert_eq!(u.shape_kind(), 3);
+        assert_eq!(u.formation(), Formation::new(3, 10, 4, 1.0, 1.0));
+    }
+
+    /// Kind 4, the square (`0x00631560`): the template of side max(7, men / 8 + 1)
+    /// (`0x00661690`), its four sides of an outer and an inner row, then a centre of 7, every man
+    /// facing out from his side; centred on the measured box (ours, the original's rings stand
+    /// 1 m left and ahead, `0x00621D10`).
+    #[test]
+    fn the_square_lays_its_template_rings() {
+        let side = |men| Formation::new(4, men, 1, 1.0, 1.0).files;
+        assert_eq!([1, 47, 48, 55, 56, 400, 407, 408, 1000].map(side), [7, 7, 7, 7, 8, 51, 51, 52, 126]);
+        let f = Formation::new(4, 55, 30, 2.0, 2.0);
+        assert_eq!((f.files, f.ranks, f.spacing, f.width, f.depth, f.front), (7, 3, 1.0, 7.0, 7.0, 3.5));
+        let at = |i: usize| (f.place(i), f.slot_heading(i), f.rank_of(i));
+        // The front side: its outer row on the order point, its inner row's first on the corner.
+        assert_eq!(at(0), ((-3.0, -3.5), 0, 0));
+        assert_eq!(at(6), ((3.0, -3.5), 0, 0));
+        assert_eq!(at(7), ((-2.5, -2.5), -0x2000, 1));
+        assert_eq!(at(11), ((1.5, -2.5), 0, 1));
+        // The right side, then the back and the left.
+        assert_eq!(at(12), ((3.5, -3.0), 0x4000, 0));
+        assert_eq!(at(19), ((2.5, -2.5), 0x2000, 1));
+        assert_eq!(at(24), ((3.0, 3.5), i16::MIN, 0));
+        assert_eq!(at(31), ((2.5, 2.5), 0x6000, 1));
+        assert_eq!(at(36), ((-3.5, 3.0), -0x4000, 0));
+        assert_eq!(at(43), ((-2.5, 2.5), -0x6000, 1));
+        // The centre's 7.
+        assert_eq!(at(48), ((0.0, 0.0), 0, 2));
+        assert_eq!(at(54), ((0.0, 1.0), 0, 2));
+        // Centred: the men span the box, 3.5 m each way.
+        let places: Vec<_> = (0..55).map(|i| f.place(i)).collect();
+        let span = |g: fn(&(f32, f32)) -> f32| places.iter().map(g).fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)));
+        assert_eq!((span(|p| p.0), span(|p| p.1)), ((-3.5, 3.5), (-3.5, 3.5)));
+        for men in 1..=500 {
+            assert_distinct(&Formation::new(4, men, 1, 1.0, 1.0));
+        }
+        let mut u = LandUnit::new(0, 0, 60, (0.0, 0.0));
+        (u.formation_files, u.formation_width, u.formation_rank_spacing) = (20, 30.0, 1.5);
+        u.active_abilities = 1 << 1;
+        assert_eq!((u.shape_kind(), u.formation_grid()), (4, (8, 3)));
+    }
+
+    /// No two of a formation's laid slots, nor the two past them, share a place.
+    fn assert_distinct(f: &Formation) {
+        let places: Vec<_> = (0..f.laid_slots() + 2).map(|i| f.place(i)).collect();
+        for (i, p) in places.iter().enumerate() {
+            assert!(places[..i].iter().all(|q| (q.0 - p.0).abs() + (q.1 - p.1).abs() > 0.25), "{f:?}: man {i} at {p:?}");
+        }
+    }
+
+    /// Kind 6, light infantry (`0x006302E0` → `0x0065A4F0`): 3.5 m between men, 2 m between
+    /// rows; an odd row moves half a spacing right, an even row of an even count after an odd one
+    /// half a spacing left; a unit with the ability active lays it out.
+    #[test]
+    fn light_infantry_rows_stagger() {
+        let f = Formation::new(6, 8, 3, LIGHT_INFANTRY_SPACING_M, LIGHT_INFANTRY_PITCH_M);
+        let places: Vec<_> = (0..8).map(|i| f.place(i)).collect();
+        let expected = [(0.0, -2.0), (-3.5, -2.0), (3.5, -2.0), (1.75, 0.0), (5.25, 0.0), (-1.75, 0.0), (0.0, 2.0), (-3.5, 2.0)];
+        assert_eq!(places, expected);
+        let mut u = LandUnit::new(0, 0, 8, (0.0, 0.0));
+        (u.formation_files, u.formation_width, u.formation_rank_spacing) = (3, 3.0, 1.0);
+        u.active_abilities = 1 << 4;
+        assert_eq!(u.shape_kind(), 6);
+        assert_eq!(u.formation(), f);
     }
 
     /// One layout: the front rank the view draws (`man_rank` 0) is the unit's files, the men who
@@ -1419,15 +2061,15 @@ mod tests {
         for _ in 0..200 {
             b.step();
         }
-        let (mud, grass) = (lag(&b, 0), lag(&b, 39));
+        let (mud, grass) = (lag(&b, 39), lag(&b, 38));
         assert!(grass.abs() < 1e-3, "on the unit's ground: {grass}");
         assert!(mud > 0.5, "behind in the mud: {mud}");
         // His speeds differ from the unit's (and so do his clips), man by man.
-        assert!((b.units[0].march.men[0].speed - b.units[0].speed).abs() > 1e-3);
+        assert!((b.units[0].march.men[39].speed - b.units[0].speed).abs() > 1e-3);
         for _ in 0..200 {
             b.step();
         }
-        let later = lag(&b, 0);
+        let later = lag(&b, 39);
         assert!((later - mud).abs() < 0.2 && later < 4.0, "levelled off: {mud} then {later}");
     }
 
@@ -1492,13 +2134,13 @@ mod tests {
         for _ in 0..400 {
             b.step();
             if at_stop.is_none() && b.units[0].destination.is_none() {
-                at_stop = Some(b.units[0].march.men[0].lag);
+                at_stop = Some(b.units[0].march.men[39].lag);
             }
         }
         let at_stop = at_stop.expect("the unit arrived");
         let u = &b.units[0];
         assert!(at_stop > 0.5, "behind at the stop: {at_stop}");
-        assert!(u.march.men[0].lag < at_stop && u.march.men[0].lag <= 0.5 + 0.2, "walked to his place (short by the 0.5 m minimum braking and a step): {:?}", u.march.men[0]);
+        assert!(u.march.men[39].lag < at_stop && u.march.men[39].lag <= 0.5 + 0.2, "walked to his place (short by the 0.5 m minimum braking and a step): {:?}", u.march.men[39]);
         assert!(u.march.plan.is_none() && u.march.men.iter().all(|m| m.speed == 0.0 && m.finished), "every man stands");
     }
 
@@ -1589,7 +2231,8 @@ mod tests {
         assert!(!u.march.reslot && u.march.reslot_in == 0);
         u.men = 70;
         u.reslot_tick(0);
-        assert!(!u.march.reslot && u.formation_grid() == (40, 2), "{:?}", u.march);
+        // Laid as the diamond: A = ceil(√70) = 9, rows 1..9 then 8, 7, 6 and the last 4.
+        assert!(!u.march.reslot && u.formation_grid() == (9, 13), "{:?}", u.march);
         // Without an ability the line (kind 0); the exe's order of the abilities picks the kind.
         u.active_abilities = (1 << 4) | (1 << 6);
         assert_eq!(u.shape_kind(), 3);

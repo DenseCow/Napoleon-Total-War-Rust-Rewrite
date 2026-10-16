@@ -234,7 +234,9 @@ pub struct LandUnit {
     pub under_fire_ticks: u32,
     /// Ticks left during which the unit counts as under artillery fire (morale flag `+0xC80`).
     pub under_artillery_fire_ticks: u32,
-    /// Which `unit_movement_modifiers` column this unit uses (PROVISIONAL, see `ground`).
+    /// The `unit_movement_modifiers` class set at unit setup. Not the column used each tick: a
+    /// mounted unit that is not riding takes the infantry column, so read
+    /// `strength::movement_class` (exe `0x006543D0`, riding test at `0x006544AB`) instead.
     pub movement_class: MovementClass,
     /// Gradient of this tick's move (height gained / distance; 0 when it did not move).
     pub gradient: f32,
@@ -1243,7 +1245,7 @@ impl Battle {
         let dy = goal.1 - pos.1;
         let len = (dx * dx + dy * dy).sqrt();
         // Ground type under the unit scales its speed (`unit_movement_modifiers`, see `ground`).
-        let modifier = self.ground.speed_modifier(pos.0, pos.1, self.units[idx].movement_class);
+        let modifier = self.ground.speed_modifier(pos.0, pos.1, super::strength::movement_class(&self.units[idx]));
         let ground = std::sync::Arc::clone(&self.ground);
         // The timed-move order (`TimedMove`, the unit move order re-issued about every 11 ticks): the order speed the soldier heads
         // for before the multiplier, from the move's gait speed, to a point at most the path's end.
@@ -1507,11 +1509,13 @@ impl Battle {
                 MeleeDir::FlankLeft | MeleeDir::FlankRight => AttackDirection::Flank,
                 MeleeDir::Rear => AttackDirection::Rear,
             };
+            // The attacker's charge test and riding test (`0x0055AC20`, `0x0055C2A0`, CONFIRMED
+            // in `0x0053C720`).
             attackers.push(Attacker {
+                id: e.id,
                 direction,
-                excluded: false,
-                doubles_front_value: false,
-                plus_two_condition: false,
+                charging: e.charging,
+                riding: super::strength::riding(e),
             });
         }
         // Sub-evaluator 0x0053B970 inputs (CONFIRMED): units within 100 m (`morale::near_100m`)
@@ -1527,7 +1531,8 @@ impl Battle {
             }
             if e.side != u.side {
                 fear.0 |= e.attributes.frightens_enemy;
-                fear.1 |= e.attributes.frightens_horses && super::strength::mounted(u);
+                // Riding and not dismounted (`0x0055C2A0` at `0x0053BA0F`).
+                fear.1 |= e.attributes.frightens_horses && super::strength::riding(u);
             } else {
                 fear.2 |= e.attributes.inspires;
             }
@@ -1546,7 +1551,8 @@ impl Battle {
             extended_casualty_ratio: u.casualty_log.extended_ratio,
             kill_ratio: u.casualty_log.kill_ratio,
             attackers,
-            fighting_cavalry: false,
+            riding: super::strength::riding(u),
+            square_formation: super::strength::square_active(u),
             // 0x0053E980 (CONFIRMED formula): the model has no unit state 1 (UNKNOWN which).
             shock_persists: morale::shock_persists(false, u.attributes.steadfast),
             // 0x00532370: true outside the scripted battle-wide condition (INFERRED).
@@ -1794,6 +1800,7 @@ impl Battle {
                 friends.push(n);
             } else {
                 n.blocks_hill = own_h < self.ground.height(e.position.0, e.position.1) + 5.0;
+                // Mounted (`0x0055ABF0` at `0x0053CE77`).
                 n.halved = super::strength::mounted(u) && u.run_speed > e.run_speed;
                 enemies.push(n);
             }
@@ -2473,6 +2480,7 @@ mod tests {
         let mut u = LandUnit::new(0, 0, 60, (0.0, 0.0));
         (u.walk_speed, u.run_speed) = (2.69, 7.0);
         u.movement_class = MovementClass::Mounted;
+        u.unit_category = "cavalry".into(); // riding (`0x0055C2A0`), so the mounted column
         u.destination = Some((150.0, 0.0));
         b.add_unit(u);
         let mut orders = Vec::new();
@@ -2515,6 +2523,7 @@ mod tests {
             let mut u = LandUnit::new(0, 0, 60, (0.0, 0.0));
             (u.walk_speed, u.run_speed) = (2.69, 7.0);
             u.movement_class = MovementClass::Mounted;
+            u.unit_category = "cavalry".into(); // riding (`0x0055C2A0`), so the mounted column
             u.destination = Some((150.0, 0.0));
             b.add_unit(u);
             for _ in 0..5 {
@@ -2684,6 +2693,12 @@ mod combatant_fatigue_tests {
         { let u = &mut b.units[1]; u.place_at((99.5 + 2.0 * r, 0.0), u.facing); }
         let i = b.morale_inputs(0);
         assert!(i.enemy_frightens_near && i.horses_frightened && !i.friend_inspires_near);
+        // Dismounted cavalry is still mounted (`0x0055ABF0`) but not riding (`0x0055C2A0` at
+        // `0x0053BA0F`): its horses are not frightened.
+        b.units[0].active_abilities = 1 << crate::battle::abilities::ability_ids::DISMOUNT;
+        assert!(crate::battle::strength::mounted(&b.units[0]));
+        assert!(!b.morale_inputs(0).horses_frightened);
+        b.units[0].active_abilities = 0;
         // Past 100 m between the edges is not "within".
         { let u = &mut b.units[1]; u.place_at((100.01 + 2.0 * r, 0.0), u.facing); }
         { let u = &mut b.units[2]; u.place_at((0.0, 100.01 + 2.0 * r), u.facing); }
@@ -2697,6 +2712,39 @@ mod combatant_fatigue_tests {
         b.units[2].attributes.inspires = true;
         c = b.morale_inputs(1);
         assert!(c.friend_inspires_near);
+    }
+
+    #[test]
+    fn dismounted_cavalry_fights_cavalry() {
+        // 0x0053C720: a dismounted cavalry unit is on foot for the riding test (`0x0055C2A0` at
+        // `0x0053C8AB`), so riding cavalry it has already seen gives it the fighting-cavalry effect.
+        use crate::battle::abilities::ability_ids::DISMOUNT;
+        use crate::battle::morale::{effect_id, modifiers};
+        let mut b = Battle::new(1, KvMorale::default(), KvFatigue::default());
+        let mut dragoons = LandUnit::new(0, 0, 120, (0.0, 0.0));
+        dragoons.unit_category = "cavalry".into();
+        dragoons.active_abilities = 1 << DISMOUNT;
+        b.add_unit(dragoons);
+        let mut hussars = LandUnit::new(1, 1, 120, (0.0, 5.0));
+        hussars.unit_category = "cavalry".into();
+        b.add_unit(hussars);
+        let i = b.morale_inputs(0);
+        assert!(!i.riding && !i.square_formation);
+        assert_eq!(i.attackers.len(), 1);
+        assert!(i.attackers[0].riding && i.attackers[0].id == 1);
+        let kv = KvMorale { fighting_cavalry: -6, ..KvMorale::default() };
+        let mut c = MoraleComponent::default();
+        modifiers(&mut c, &kv, &i);
+        assert_eq!(c.effect(effect_id::FIGHTING_CAVALRY), None); // a new attacker first
+        c.active_effects.clear();
+        modifiers(&mut c, &kv, &i);
+        assert_eq!(c.effect(effect_id::FIGHTING_CAVALRY), Some(-6));
+        // Mounted again (riding), it no longer counts; dismounted hussars do not frighten.
+        b.units[0].active_abilities = 0;
+        assert!(b.morale_inputs(0).riding);
+        b.units[0].active_abilities = 1 << DISMOUNT;
+        b.units[1].active_abilities = 1 << DISMOUNT;
+        assert!(!b.morale_inputs(0).attackers[0].riding);
     }
 
     #[test]

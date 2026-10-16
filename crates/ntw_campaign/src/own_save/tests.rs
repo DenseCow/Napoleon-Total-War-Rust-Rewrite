@@ -5,6 +5,7 @@ use ntw_sim::campaign::{
     CampaignModel, CampaignUnit, Character, CharacterId, CharacterKind, Faction, FactionAiKeys, FactionId, ForceId, GovernmentType,
     MilitaryForce, PendingBattle, Region, RegionId, RegionSlot, Settlement, Stance, UnitId, World,
 };
+use ntw_sim::campaign::trade::{TradePath, TradeWaypoint};
 use ntw_sim::fixed::Fixed20;
 use ntw_sim::rng::CaRng;
 
@@ -88,6 +89,16 @@ pub(crate) fn made_up_model() -> CampaignModel {
     w.forces.insert(ForceId(3), MilitaryForce { id: ForceId(3), faction: B, commander: Some(CharacterId(102)), units: vec![unit(60)], is_navy: false });
     w.embarked.insert(ForceId(1), ForceId(2));
     w.trade_accumulated.insert((A, B), 4321);
+    // A route leaving by sea from A's capital (a capital port route) and a land route.
+    w.faction_details.entry(A).or_default().capital = Some(RegionId(1));
+    let hop = |region: u32, sea: bool| TradeWaypoint { region: RegionId(region), from: 3, to: 4, sea, from_pos: None, to_pos: None };
+    w.trade_paths.insert(
+        (A, B),
+        vec![
+            TradePath { waypoints: vec![hop(1, true), hop(2, false)], capital_port: true, volumes: vec![5, 0] },
+            TradePath { waypoints: vec![hop(1, false), hop(2, false)], capital_port: false, volumes: vec![1, 2] },
+        ],
+    );
     w.ai_keys.insert(A, FactionAiKeys { manager: "made_up_manager".into(), personality: "made_up_personality".into(), extra: ["default".into(), "x".into()] });
     w.region_base_values.insert(RegionId(2), 15_025);
     w.deal_regions_received.insert(A, 3);
@@ -172,7 +183,7 @@ fn mod_state_round_trips() {
         model.mod_state.set(k, v);
     }
     let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
-    let (_, back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
+    let (_, mut back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
     assert_eq!(back.model.mod_state, data.model.mod_state);
     assert_eq!(back.model.mod_state.len(), values.len());
     assert_eq!(back.model.state_hash(), data.model.state_hash());
@@ -211,7 +222,7 @@ fn director_victory_regions_and_ai_areas_round_trip() {
         AiArea { key: "made_up_region_2".into(), links: vec![0, 0] },
     ];
     let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
-    let (_, back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
+    let (_, mut back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
     assert_eq!(back.model.director, data.model.director);
     assert_eq!(back.model.world.victory_regions, data.model.world.victory_regions);
     assert_eq!(back.model.world.ai_areas, data.model.world.ai_areas);
@@ -231,7 +242,7 @@ fn fields_the_original_does_not_save_are_not_saved() {
     model.world.sabotaged.insert(ForceId(3));
     model.world.agents_acted.insert(CharacterId(100));
     let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
-    let (_, back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
+    let (_, mut back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
     assert!(back.model.world.sabotaged.is_empty() && back.model.world.agents_acted.is_empty());
     assert_eq!(back.model.world.factions, data.model.world.factions);
 }
@@ -287,20 +298,27 @@ pub(crate) fn as_version_1(bytes: &[u8]) -> Vec<u8> {
 
 /// `bytes` (a save of the current format) as a save of format `version` wrote it: that version word,
 /// without the region fields later versions added (2: `unit_resources`, 3: `road_holder` and
-/// `fortification_holder`). A list value ends at its first `]` (the made-up keys hold none), an
+/// `fortification_holder`), the route field (5: `capital_port`) and the world's access-abuse counts (6: `access_abuses`).
+/// A list or map value ends at its first `]` / `}` (the made-up keys hold none), an
 /// `Option` of a faction id at its first `,`.
 pub(crate) fn as_version(bytes: &[u8], version: u32) -> Vec<u8> {
     let (_, header, body) = sections(bytes).expect("sections");
     let mut text = String::new();
     flate2::read::ZlibDecoder::new(body).read_to_string(&mut text).expect("inflate");
-    let added: [(u32, &str, char); 3] = [(2, "unit_resources:[", ']'), (3, "road_holder:", ','), (3, "fortification_holder:", ',')];
+    let added: [(u32, &str, char); 5] = [
+        (2, "unit_resources:[", ']'),
+        (3, "road_holder:", ','),
+        (3, "fortification_holder:", ','),
+        (5, "capital_port:", ','),
+        (6, "access_abuses:{", '}'),
+    ];
     for (_, field, end_char) in added.into_iter().filter(|&(v, ..)| v > version) {
         let mut old = String::with_capacity(text.len());
         let mut rest = text.as_str();
         while let Some(at) = rest.find(field) {
             old.push_str(&rest[..at]);
             let end = at + rest[at..].find(end_char).expect("value end") + 1;
-            rest = if end_char == ']' { rest[end..].strip_prefix(',').unwrap_or(&rest[end..]) } else { &rest[end..] };
+            rest = if matches!(end_char, ']' | '}') { rest[end..].strip_prefix(',').unwrap_or(&rest[end..]) } else { &rest[end..] };
         }
         old.push_str(rest);
         assert!(old.len() < text.len() && !old.contains(field), "no {field} to strip");
@@ -470,4 +488,74 @@ fn construction_items_keep_their_active_byte_and_older_saves_read_active() {
     assert_ne!(older, text, "the field is in the text");
     let read_back: ConstructionItem = ron::from_str(&older).expect("decode");
     assert_eq!(read_back, ConstructionItem { active: true, ..item });
+}
+
+/// broadcasters3: format version 5 keeps each trade route's capital port flag (`TradePath::capital_port`). An
+/// older save has none: its routes that leave by sea from their exporter's capital get it, the others not.
+#[test]
+fn trade_routes_keep_their_capital_port_flag_and_older_saves_derive_it() {
+    let db = ntw_data::GameDatabase::test_fixture();
+    let model = made_up_model();
+    let load = |model: &CampaignModel, version: u32| {
+        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+        let bytes = as_version(&write(&info(), &data).expect("write"), version);
+        let loaded = read_with_start(&bytes, &db, || Ok(model.clone())).expect("read").model;
+        loaded.world.trade_paths[&(A, B)].iter().map(|p| p.capital_port).collect::<Vec<_>>()
+    };
+    assert_eq!(load(&model, 4), [true, false]);
+    // The current version reads the flag as written, whatever the route.
+    let mut flipped = model.clone();
+    for p in flipped.world.trade_paths.get_mut(&(A, B)).unwrap() {
+        p.capital_port = !p.capital_port;
+    }
+    assert_eq!(load(&flipped, FORMAT_VERSION), [false, true]);
+    assert_eq!(load(&flipped, 4), [true, false]);
+}
+
+/// dipcounters review: format version 6 counts treaty breaks from the exe's preset 1 (`0x00AE8DD0` /
+/// `0x00AE8E10`) and keeps the access-abuse counts. A version-5 save's treaty-break entries, counted
+/// from 0, get 1 added; a faction without one reads the preset; it has no access-abuse counts (read 0).
+#[test]
+fn a_version_5_save_moves_its_treaty_break_counts_to_the_preset_start() {
+    let db = ntw_data::GameDatabase::test_fixture();
+    let mut model = made_up_model();
+    model.world.treaty_breaks = BTreeMap::from([(A, 3)]);
+    model.world.access_abuses = BTreeMap::from([(A, 2)]);
+    let load = |version: u32| {
+        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+        let bytes = as_version(&write(&info(), &data).expect("write"), version);
+        read_with_start(&bytes, &db, || Ok(model.clone())).expect("read").model.world
+    };
+    let old = load(5);
+    assert_eq!(old.treaty_breaks, BTreeMap::from([(A, 4)]), "a stored count, from 0, gets the preset added");
+    assert_eq!(old.treaty_breaks_of(B), ntw_sim::campaign::TREATY_BREAKS_START, "no entry reads the preset");
+    assert!(old.access_abuses.is_empty(), "a version-5 save kept no access-abuse counts");
+    // The current version reads both as written.
+    let now = load(FORMAT_VERSION);
+    assert_eq!((now.treaty_breaks[&A], now.access_abuses[&A]), (3, 2));
+}
+
+/// leftroutes: the route a broken agreement leaves (`0x00BC0120` removes only the first each way) is saved
+/// and still earns after a load (`0x00BB3490` sums every route of the exporter).
+#[test]
+fn a_route_left_after_a_broken_agreement_still_earns_after_a_load() {
+    use ntw_sim::campaign::economy;
+    let mut model = made_up_model();
+    let mut rules = (*model.rules).clone();
+    rules.variables.insert("trade_route_value_combined_gdp_proportion".into(), 2.2);
+    model.rules = std::sync::Arc::new(rules);
+    model.relationship_mut(A, B).trade_agreement = true;
+    model.relationship_mut(B, A).trade_agreement = true;
+    model.break_trade(A, B).expect("break");
+    assert_eq!(model.world.trade_paths[&(A, B)].len(), 1);
+    assert!(economy::trade_partners(&model, A).is_empty());
+    let value = economy::trade_routes_value(&model, A);
+    assert!(value > 0, "the leftover route earns its GDP part");
+    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+    let (_, mut back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
+    // The rules come from the data, not the save.
+    back.model.rules = data.model.rules.clone();
+    assert_eq!(back.model.world.trade_paths, data.model.world.trade_paths);
+    assert_eq!(economy::trade_route_importers(&back.model, A), vec![B]);
+    assert_eq!(economy::trade_routes_value(&back.model, A), value);
 }

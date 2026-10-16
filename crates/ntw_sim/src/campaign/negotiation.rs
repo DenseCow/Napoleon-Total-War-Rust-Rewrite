@@ -223,6 +223,11 @@ pub struct Negotiation {
     /// The records have been applied since they last changed: a deal applies once (`AcceptDeal`
     /// again is a no-op until a Propose or Clear changes the deal).
     pub applied: bool,
+    /// The deal was proposed as a threat (+0x2B8, stored by each `CCQ_DIPLOMACY_PROPOSE_DEAL`,
+    /// `0x00C49BE0`; the panel's `ThreatOfForce` calls `ProposeDeal(true)`, `SendOffer`
+    /// `ProposeDeal(false)`, diplomacy_panel.lua:1566 / :635): accepting or declining the deal then
+    /// gives the recipient the `threatened` factor towards the proposer ([`CampaignModel::apply_threatened`]).
+    pub threat: bool,
 }
 
 /// A deal's payment record (record 7, vtable `0x01381EDC`): `amount` (`+0x14`) for `turns` turns
@@ -618,6 +623,7 @@ impl CampaignModel {
             technologies: DealItems::default(),
             payment: DealPayment::default(),
             applied: false,
+            threat: false,
         });
     }
 
@@ -697,8 +703,8 @@ impl CampaignModel {
         Ok(())
     }
 
-    /// The AI's answer to the open negotiation's deal (`CCQ_DIPLOMACY_PROPOSE_DEAL` → `0x00C49BE0`
-    /// → `0x00AA5ED0`, run when the recipient is not human; AI_RESEARCH.md §4 "Deal evaluation"):
+    /// The AI's answer to the open negotiation's deal (`CCQ_DIPLOMACY_PROPOSE_DEAL` → `ProcessNegotiationDealProposal 0x00C49BE0`
+    /// → `EvaluateProposedNegotiationDealAI 0x00AA5ED0`, run when the recipient is not human; AI_RESEARCH.md §4 "Deal evaluation"):
     /// true when it is refused, as the exe evaluates the regions, technology and payment records
     /// ([`Self::ai_accepts_deal`]). A human recipient answers for itself: never refused here.
     pub fn ai_refuses_deal(&self) -> bool {
@@ -709,10 +715,13 @@ impl CampaignModel {
     /// not human its evaluation (`0x00AA5ED0`) reads the recipient's relation belief
     /// (`0x00CCB810` / `0x00CCB210` → `GetCaiRelationBelief` `0x00A74A20`), which keeps it: a dirty
     /// one is rebuilt and stays clean until the next diplomacy change or turn change
-    /// ([`Self::refresh_relation_belief`]). The answer is [`Self::ai_refuses_deal`]; nothing else
-    /// changes. Fails with no open negotiation.
-    pub(crate) fn propose_deal(&mut self) -> Result<(), super::CommandError> {
-        let n = self.negotiations.current.as_ref().ok_or(super::CommandError::NoNegotiation)?;
+    /// ([`Self::refresh_relation_belief`]). The proposal stores `threat` ([`Negotiation::threat`],
+    /// +0x2B8). The answer is [`Self::ai_refuses_deal`]; the caller then accepts
+    /// ([`Self::accept_deal`]) or declines ([`Self::decline_deal`]), as the evaluator calls
+    /// `0x00C114B0` / `0x00C1F210`. Fails with no open negotiation.
+    pub(crate) fn propose_deal(&mut self, threat: bool) -> Result<(), super::CommandError> {
+        let n = self.negotiations.current.as_mut().ok_or(super::CommandError::NoNegotiation)?;
+        n.threat = threat;
         let recipient = n.recipient;
         if !self.is_human(recipient) {
             self.refresh_relation_belief(recipient);
@@ -737,6 +746,14 @@ impl CampaignModel {
     ///   ([`Self::pay_once`]), else each turn ([`Self::pay_regularly`]); 0 pays nothing. The
     ///   amount was capped when it was proposed ([`Self::propose_payment`]): not capped again here.
     ///
+    /// Then the expulsions (`0x008D9DC0`, [`Self::expel_from_region`]): the proposer's forces leave
+    /// each offered region, then the recipient's each demanded one. A deal with a peace record first
+    /// expels each side from all of the other's regions (record `+0x184`); PROVISIONAL: the model's
+    /// deal holds no peace record, so that pass is not run (BACKLOG).
+    ///
+    /// Then, for a threat ([`Negotiation::threat`]), the recipient gets the `threatened` factor
+    /// towards the proposer ([`Self::apply_threatened`], `0x00C11671`).
+    ///
     /// Not ported: `0x00C1E240`, which can turn a deal with no demands into a payment before it is
     /// applied (the AI's side, AI_RESEARCH.md §6).
     /// A deal [`Self::ai_refuses_deal`] refuses is not applied (`CommandError::DealRefused`); nor is
@@ -749,7 +766,7 @@ impl CampaignModel {
         if n.applied {
             return Ok(Vec::new());
         }
-        let (proposer, recipient, payment) = (n.proposer, n.recipient, n.payment);
+        let (proposer, recipient, payment, threat) = (n.proposer, n.recipient, n.payment, n.threat);
         let (regions, techs) = (n.regions.clone(), n.technologies.clone());
         // The deal applies whole or not at all: the payment's only failure (the faction pair) is
         // checked before any record is applied, so an error leaves the deal unapplied (the caller
@@ -789,7 +806,42 @@ impl CampaignModel {
                 self.pay_regularly(payer, payee, amount, payment.turns);
             }
         }
+        // After every record: the proposer's forces leave each offered region, then the recipient's
+        // each demanded one (`0x00C114B0` → `0x008D9DC0`, CONFIRMED).
+        for (list, f) in [(&regions.offered, proposer), (&regions.demanded, recipient)] {
+            for &r in list {
+                self.expel_from_region(f, r);
+            }
+        }
+        // After the expulsions, `0x00C43520` and result 1, the threat (`0x00C11655`).
+        if threat {
+            self.apply_threatened(recipient, proposer);
+        }
         Ok(ended)
+    }
+
+    /// `CCQ_DIPLOMACY_DECLINE_DEAL` (`DeclineCampaignNegotiationDeal` `0x00C1F210`; also the AI
+    /// evaluator's refusal, `0x00AA5ED0`): the result becomes "declined" (+0x28 = 2, held by the
+    /// panel) and, for a threat ([`Negotiation::threat`]), the recipient gets the `threatened`
+    /// factor towards the proposer ([`Self::apply_threatened`]). The reply strings are the panel's.
+    /// Nothing else changes: the deal stays until the negotiation ends. A repeated decline adds the
+    /// factor again (the command `0x00932F00` and `0x00C1F210` keep no record of an earlier answer;
+    /// CONFIRMED). Fails with no open negotiation.
+    pub(crate) fn decline_deal(&mut self) -> Result<(), super::CommandError> {
+        let n = self.negotiations.current.as_ref().ok_or(super::CommandError::NoNegotiation)?;
+        let (proposer, recipient, threat) = (n.proposer, n.recipient, n.threat);
+        if threat {
+            self.apply_threatened(recipient, proposer);
+        }
+        Ok(())
+    }
+
+    /// `ApplyThreatenedFactorTowardsFaction` `0x00B72F00` → `ApplyThreatenedAttitudeFactor`
+    /// `0x00B72EC0`: `recipient`'s record towards `proposer` adds the `threatened` event (slot 20,
+    /// +0x328; event 22: limit 0, drift 3, value −30) through `0x00B02CB0` (add, set drift and
+    /// limit, clamp). No diplomacy broadcast: the stored relation beliefs stay as they are.
+    pub(crate) fn apply_threatened(&mut self, recipient: FactionId, proposer: FactionId) {
+        self.relationship_mut(recipient, proposer).add_factor("threatened", super::treaties::event("threatened"));
     }
 
     /// `0x008E2B70`, from the regions record's accept (`0x00C18C5F` / `0x00C18CD5`): a human

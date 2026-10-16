@@ -21,7 +21,7 @@
 
 use super::details::{AttitudeFactor, RegularPayment, Relationship, ATTITUDE_FACTORS};
 use super::events::CampaignEvent;
-use super::ids::FactionId;
+use super::ids::{FactionId, RegionId};
 use super::world::{CampaignModel, GovernmentType, Stance};
 use super::CommandError;
 
@@ -251,7 +251,7 @@ impl CampaignModel {
             r.military_access_turns != 0
         };
         if gave_access {
-            self.abuse_access(b, a, 0);
+            self.abuse_access(b, a);
         }
         events.extend(self.world.declare_war(a, b)?);
         // The allies of both sides are called (0x00B268B0).
@@ -268,12 +268,14 @@ impl CampaignModel {
     }
 
     /// `0x00B0E420`: `a` broke `b`'s trust during `turns` friendship turns. With `n` = the treaties `a`
-    /// has broken so far (manager +0x1C): `b`'s `peace_treaty` factor is set to value −3·n·turns, drift of
-    /// the `backstabbing` event, limit −5·n (`0x00B0E500`), every other faction of `b`'s subculture
-    /// (other than `a`) gets value −5n·turns, limit −25n (`0x00B0E540`); then n grows by 1 (by 3 when
-    /// `turns` is 10).
+    /// has broken so far (manager +0x1C, [`World::treaty_breaks_of`](super::World::treaty_breaks_of):
+    /// it starts at 1, so the first backstab is already penalised): `b`'s `peace_treaty` factor is set
+    /// to value −3·n·turns, drift of the `backstabbing` event, limit −5·n (`0x00B0E500`), every other
+    /// faction of `b`'s subculture (other than `a`) gets value −5n·turns, limit −25n (`0x00B0E540`);
+    /// then n grows by 1 (by 3 when `turns` is 10).
     fn backstab(&mut self, a: FactionId, b: FactionId, turns: u32) {
-        let n = self.world.treaty_breaks.get(&a).copied().unwrap_or(0) as i32;
+        let count = self.world.treaty_breaks_of(a);
+        let n = count as i32;
         let t = turns as i32;
         let drift = event("backstabbing").drift;
         self.relationship_mut(b, a).factor_mut("peace_treaty").set(ev(n * -5, drift, n * t * -3));
@@ -283,17 +285,20 @@ impl CampaignModel {
                 self.relationship_mut(x, a).factor_mut("peace_treaty").set(ev(m * -5, drift, -(m * t)));
             }
         }
-        *self.world.treaty_breaks.entry(a).or_insert(0) += if turns == 10 { 3 } else { 1 };
+        self.world.treaty_breaks.insert(a, count.wrapping_add(if turns == 10 { 3 } else { 1 }));
     }
 
     /// `0x00B0DA90` / `0x00B0DAF0`: `a` (who had military access from `owner`) abused it: `owner`'s access
     /// to `a` ends with the cancel grievance (`0x00B67BD0`, [`Self::cancel_military_access`]), and
-    /// `owner`'s `abused_military_access` factor gets the event's value + `count` × (−10)
-    /// (`count` = `0x004CE450`, UNKNOWN: 0 here).
-    fn abuse_access(&mut self, owner: FactionId, a: FactionId, count: i32) {
+    /// `owner`'s `abused_military_access` factor gets the event's value + `count` × (−10), `count` =
+    /// the times `a` abused an access before (`a`'s manager +0x18, read by `0x004CE450`; 0 when it has
+    /// no entry); then that count +1 (`0x00B0DABA`). CONFIRMED by disassembly.
+    fn abuse_access(&mut self, owner: FactionId, a: FactionId) {
         self.cancel_military_access(owner, a);
+        let count = self.world.access_abuses.get(&a).copied().unwrap_or(0);
         let e = event("abused_military_access");
-        self.relationship_mut(owner, a).factor_mut("abused_military_access").add(e.value + ABUSED_ACCESS_STEP * count, e.drift, e.limit);
+        self.relationship_mut(owner, a).factor_mut("abused_military_access").add(e.value + ABUSED_ACCESS_STEP * count as i32, e.drift, e.limit);
+        self.world.access_abuses.insert(a, count.wrapping_add(1));
         self.diplomacy_changed();
     }
 
@@ -364,7 +369,9 @@ impl CampaignModel {
                     r.factor_mut("cultural_alliance_broken").set(ev(BROKEN_ALLIANCE_STEP * k + e.limit, e.drift, BROKEN_ALLIANCE_STEP * k - commitment));
                 }
             }
-            *self.world.alliances_broken.entry(a).or_insert(0) += 1;
+            // The manager's u32 counter (+0x14) wraps like the exe's.
+            let n = self.world.alliances_broken.entry(a).or_insert(0);
+            *n = n.wrapping_add(1);
         }
         let restore = |r: &mut Relationship| {
             r.alliance_commitment_turns = 0;
@@ -405,9 +412,11 @@ impl CampaignModel {
         Ok(Vec::new())
     }
 
-    /// `a` breaks its trade agreement with `b` (`0x00B29BB0`): `a`→`b` (`0x00B13C30`) `trade_broken` set from
-    /// the `break_trade` event and `trade` cleared; `b`→`a` (`0x00B733B0`) `trade` cleared and `trade_broken`
-    /// set from the `trade_broken` event; the flag cleared on both.
+    /// `a` breaks its trade agreement with `b` (`BreakTradeAgreementWithFaction 0x00B29BB0`): `a`→`b` (`CancelTradeAgreementOnRelation 0x00B13C30`) `trade_broken` set from
+    /// the `break_trade` event and `trade` cleared; `b`→`a` (`EndTradeAgreementForBrokenPartner 0x00B733B0`) `trade` cleared and `trade_broken`
+    /// set from the `trade_broken` event; the flag cleared on both. Each side then removes only its first route
+    /// to the other ([`Self::remove_first_trade_route`]: `RemoveFirstTradeRouteToImporter 0x00BC0120`, once from
+    /// `0x00B13C30` and once from `0x00B733B0`); any further routes of the pair stay. CONFIRMED.
     pub fn break_trade(&mut self, a: FactionId, b: FactionId) -> Result<Vec<CampaignEvent>, CommandError> {
         self.check_diplomacy_pair(a, b)?;
         let zero = ev(0, 0, 0);
@@ -423,10 +432,30 @@ impl CampaignModel {
             r.set_factor("trade_broken", event("trade_broken"));
             r.trade_agreement = false;
         }
-        self.world.trade_paths.remove(&(a, b));
-        self.world.trade_paths.remove(&(b, a));
+        self.remove_first_trade_route(a, b);
+        self.remove_first_trade_route(b, a);
         self.diplomacy_changed();
         Ok(Vec::new())
+    }
+
+    /// The trade agreement of `a` and `b` ends because their routes were lost (`0x00B73430`, from the route
+    /// loss [`Self::trade_routes_after_region_lost`]): on both records (`0x00B13C30` each way) the
+    /// `trade_broken` factor is set from the `break_trade` event, `trade` cleared and the agreement flag
+    /// cleared, and the first route each way is removed (`RemoveFirstTradeRouteToImporter 0x00BC0120`, called once per
+    /// direction by `0x00B13C30`, [`Self::remove_first_trade_route`]; any further routes of the pair stay).
+    /// Unlike [`Self::break_trade`], neither
+    /// side gets the `trade_broken` event: both get the breaker's. Then the diplomacy refresh (the record's
+    /// +0x3A8). Not modelled: the message to both sides (`0x00A26F30`, 0x10B) and the trade-changed flag
+    /// (model +0x840). CONFIRMED.
+    pub(crate) fn break_trade_both_ways(&mut self, a: FactionId, b: FactionId) {
+        for (x, y) in [(a, b), (b, a)] {
+            let r = self.relationship_mut(x, y);
+            r.set_factor("trade_broken", event("break_trade"));
+            r.set_factor("trade", ev(0, 0, 0));
+            r.trade_agreement = false;
+            self.remove_first_trade_route(x, y);
+        }
+        self.diplomacy_changed();
     }
 
     /// `a` embargoes `x`'s trade at the request of `requester`, the deal's other side (`0x00B28DB0`,
@@ -447,7 +476,7 @@ impl CampaignModel {
         Ok(Vec::new())
     }
 
-    /// `a` gives `b` military access for `turns` turns (−1: indefinitely) (`0x00B444B0` → `0x00B44550`):
+    /// `a` gives `b` military access for `turns` turns (−1: indefinitely) (`GrantMilitaryAccessToFaction` `0x00B444B0` → `0x00B44550`):
     /// #3 becomes −1, or grows by `turns`; #24 the granted length; friendship 10; #25 elapsed 0.
     pub fn grant_military_access(&mut self, a: FactionId, b: FactionId, turns: i32) -> Result<Vec<CampaignEvent>, CommandError> {
         self.check_diplomacy_pair(a, b)?;
@@ -607,14 +636,20 @@ impl CampaignModel {
     /// Ends `protectorate`'s tie to `patron` (`0x00B64B10` with flag 0, CONFIRMED): the stance neutral both
     /// ways (`0x00B64C10` / `0x00B54530`), the tribute (`protectorate`→`patron`) and income
     /// (`patron`→`protectorate`) lines cleared, then the relation-change broadcast. No attitude factor, no
-    /// `alliance_broken`, no commitment change (unlike [`Self::break_alliance`]). The exe then moves
-    /// the patron's characters out of every one of the protectorate's regions (`0x00B64B10` →
-    /// `0x008D9DC0` per region): not modelled yet. It also refreshes both factions' region and visibility
-    /// lists (`0x00A0B570`, `0x00B795A0`, `0x00B67490`), which the model derives from the stances.
+    /// `alliance_broken`, no commitment change (unlike [`Self::break_alliance`]). Before the broadcast
+    /// (unless its skip flag is set, which neither caller sets) the patron's forces leave each of the
+    /// protectorate's regions (`0x008D9DC0` per region of its list, [`Self::expel_from_region`]; the
+    /// region ids stand in for the list's gain order). It also refreshes both factions' region and
+    /// visibility lists (`0x00A0B570`, `0x00B795A0`, `0x00B67490`), which the model derives from the
+    /// stances.
     pub fn end_protectorate_tie(&mut self, protectorate: FactionId, patron: FactionId) -> Result<Vec<CampaignEvent>, CommandError> {
         self.world.set_stance(protectorate, patron, Stance::Neutral)?;
         self.relationship_mut(protectorate, patron).protectorate_tribute = 0;
         self.relationship_mut(patron, protectorate).protectorate_income = 0;
+        let regions: Vec<RegionId> = self.world.regions.values().filter(|r| r.owner == protectorate).map(|r| r.id).collect();
+        for r in regions {
+            self.expel_from_region(patron, r);
+        }
         self.diplomacy_changed();
         Ok(vec![CampaignEvent::StanceChanged { a: protectorate, b: patron, stance: Stance::Neutral }])
     }
@@ -844,7 +879,8 @@ impl CampaignModel {
                 self.check_diplomacy_pair(a, b)?;
                 // 0x00B67B20: a third of the grievance stays on the canceller's manager (+0x20).
                 let g = self.cancel_military_access(a, b);
-                *self.world.access_cancel_marks.entry(a).or_insert(0) += (g / 3).max(0) as u32;
+                let m = self.world.access_cancel_marks.entry(a).or_insert(0);
+                *m = m.wrapping_add((g / 3).max(0) as u32);
                 self.diplomacy_changed();
                 Ok(Vec::new())
             }

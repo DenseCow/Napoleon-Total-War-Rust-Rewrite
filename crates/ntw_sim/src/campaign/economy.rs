@@ -260,21 +260,42 @@ pub fn faction_gdp(model: &CampaignModel, faction: FactionId) -> i64 {
     other + model.world.regions.values().filter(|r| r.owner == faction).map(|r| i64::from(r.gdp)).sum::<i64>()
 }
 
-/// The factions `faction` has a trade route to: every faction it has a trade agreement with
+/// The factions `faction` trades with by agreement, the ones the supply split shares to
+/// ([`CampaignModel::trade_split`]): every faction it has a trade agreement with
 /// (`DIPLOMACY_RELATIONSHIP` #2) and is not at war with. PROVISIONAL: the original also needs a
 /// land or sea path between the two (the route builder 0x00BC0960 / 0x00BC0DC0, with the
 /// `trade_route_cap_land/sea` limits) and drops routes that are blockaded (0x00B12050); every
 /// agreement of the shipped start positions has a route (their stored trade figures match).
+/// The factions a route of `faction` earns from are [`trade_route_importers`].
 pub fn trade_partners(model: &CampaignModel, faction: FactionId) -> Vec<FactionId> {
-    model
+    model.world.relationships.keys().filter(|(a, b)| *a == faction && is_trade_partner(model, *a, *b)).map(|(_, b)| *b).collect()
+}
+
+/// Whether `b` is one of `a`'s [`trade_partners`].
+pub fn is_trade_partner(model: &CampaignModel, a: FactionId, b: FactionId) -> bool {
+    model.world.relationships.get(&(a, b)).is_some_and(|r| r.trade_agreement)
+        && model.world.factions.contains_key(&b)
+        && model.world.stance(a, b) != super::Stance::War
+}
+
+/// The importers `faction`'s routes earn from (`0x00BB3490`, CONFIRMED): the exe sums every route in
+/// the exporter's entry (trade manager map +0x11C), with no agreement or war check. So besides its
+/// [`trade_partners`] (each with its stored routes or, without one, a built route), this lists every
+/// importer it still has a stored route to: a broken agreement removes only the first route each way
+/// (`0x00BC0120`), and the rest stay and keep earning (their volumes are 0, as the split clears every
+/// route and shares only to partners, [`CampaignModel::trade_path_volumes`]). Sorted, no repeats.
+pub fn trade_route_importers(model: &CampaignModel, faction: FactionId) -> Vec<FactionId> {
+    let mut out: Vec<FactionId> = model
         .world
-        .relationships
-        .iter()
-        .filter(|((a, b), r)| {
-            *a == faction && r.trade_agreement && model.world.factions.contains_key(b) && model.world.stance(*a, *b) != super::Stance::War
-        })
+        .trade_paths
+        .range((faction, FactionId(i32::MIN))..=(faction, FactionId(i32::MAX)))
+        .filter(|(_, p)| !p.is_empty())
         .map(|((_, b), _)| *b)
-        .collect()
+        .collect();
+    out.extend(trade_partners(model, faction));
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// The GDP part of a trade route's value (0x00B3F8F0, CONFIRMED):
@@ -322,7 +343,7 @@ pub fn trade_pair_value_with(model: &CampaignModel, split: Option<&Split>, a: Fa
             let mut open = false;
             for p in paths.iter().filter(|p| !model.trade_path_blockaded(a, p)) {
                 open = true;
-                let value = model.trade_commodity_value(&model.trade_path_volumes(split, b, p));
+                let value = model.trade_commodity_value(&model.trade_path_volumes(split, a, b, p));
                 total = total.saturating_add(value).saturating_add(trade_path_gdp_value(model, a, b, p));
             }
             if open { total.saturating_add(acc) } else { 0 }
@@ -330,21 +351,26 @@ pub fn trade_pair_value_with(model: &CampaignModel, split: Option<&Split>, a: Fa
     }
 }
 
-/// The value of all of a faction's trade routes for one turn (0x00BB3490 over the routes,
-/// CONFIRMED structure): the sum of [`trade_pair_value`] over its [`trade_partners`], plus the
-/// commodities it brings home but does not export (the `spa_france` special case, [`CampaignModel::trade_home_value`]).
+/// The value of all of a faction's trade routes for one turn (`GetFactionInternationalTradeIncome`
+/// 0x00BB3490, CONFIRMED): the sum of [`trade_pair_value`] over every importer its routes go to
+/// ([`trade_route_importers`]: the exe adds up every route of the exporter, with or without an
+/// agreement), plus the commodities it brings home but does not export (the `spa_france` special case,
+/// [`CampaignModel::trade_home_value`]).
 pub fn trade_routes_value(model: &CampaignModel, faction: FactionId) -> i32 {
     let split = model.trade_split(faction);
-    trade_partners(model, faction)
-        .into_iter()
-        .map(|b| trade_pair_value_with(model, split.as_ref(), faction, b))
-        .fold(model.trade_home_value(faction), i32::saturating_add)
+    let importers = trade_route_importers(model, faction);
+    let home = model.trade_home_value(faction, split.as_ref(), &importers);
+    importers.into_iter().map(|b| trade_pair_value_with(model, split.as_ref(), faction, b)).fold(home, i32::saturating_add)
 }
 
 /// Round end: every open trade route of the faction accumulates
 /// `trunc((1 + trade_route_all_mod_growth_rate/100) × trade_route_value_accumulator_proportion × value)`
-/// with `value` = commodity + resource + GDP part (0x00B05CC0, CONFIRMED; the growth-rate effect is
-/// a faction effect, not modelled: 0).
+/// with `value` = commodity + resource + GDP part (`AccumulateTradeRouteValue` 0x00B05CC0, CONFIRMED),
+/// over the same routes that earn ([`trade_route_importers`]: a route left after a broken agreement
+/// keeps its GDP part, as `RecomputeAllInternationalTradeRoutes` 0x00BBD870 recomputes every route).
+/// The exe keeps the accumulated value per route (+0x3C) and an erased route (`0x00BAC2A0`) loses it;
+/// the model keeps it per pair (`World::trade_accumulated`), so the route a broken agreement removes
+/// leaves its share with the pair's other routes (PROVISIONAL, BACKLOG).
 pub fn accumulate_trade(model: &mut CampaignModel, faction: FactionId) {
     let fx = Effects::compute_for(model, faction);
     accumulate_trade_with(model, &fx, faction);
@@ -356,7 +382,7 @@ pub fn accumulate_trade_with(model: &mut CampaignModel, fx: &Effects, faction: F
     let p = (growth * 0.01 + 1.0) * model.rules.var("trade_route_value_accumulator_proportion", 0.0);
     let mut adds: Vec<(FactionId, i32)> = Vec::new();
     let split = model.trade_split(faction);
-    for b in trade_partners(model, faction) {
+    for b in trade_route_importers(model, faction) {
         let gdp = trade_route_gdp_value(model, faction, b);
         let add = match model.trade_routes_of(faction, b) {
             None if !model.world.trade_network.is_empty() => 0,
@@ -364,7 +390,7 @@ pub fn accumulate_trade_with(model: &mut CampaignModel, fx: &Effects, faction: F
             Some(paths) => paths
                 .iter()
                 .filter(|path| !model.trade_path_blockaded(faction, path))
-                .map(|path| (p * model.trade_commodity_value(&model.trade_path_volumes(split.as_ref(), b, path)).saturating_add(trade_path_gdp_value(model, faction, b, path)) as f32) as i32)
+                .map(|path| (p * model.trade_commodity_value(&model.trade_path_volumes(split.as_ref(), faction, b, path)).saturating_add(trade_path_gdp_value(model, faction, b, path)) as f32) as i32)
                 .fold(0i32, i32::saturating_add),
         };
         adds.push((b, add));

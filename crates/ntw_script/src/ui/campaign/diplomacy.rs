@@ -515,7 +515,7 @@ pub(super) fn negotiation_action_name(item: &NegotiationItem) -> &'static str {
 ///   `0x00B44590` (state gift) and `0x00B105C0` (protectorate) — CONFIRMED addresses, ported in
 ///   `treaties.rs`.
 ///
-/// INFERRED (this file): `ProposeDeal` (CCQ_DIPLOMACY_PROPOSE_DEAL → `0x00C49BE0`, when the AI
+/// INFERRED (this file): `ProposeDeal` (CCQ_DIPLOMACY_PROPOSE_DEAL → `ProcessNegotiationDealProposal 0x00C49BE0`, when the AI
 /// accepts: `CampaignModel::ai_refuses_deal`) and `AcceptOffer` (CCQ_DIPLOMACY_ACCEPT_DEAL → 0x00C114B0)
 /// both reach this applier. Applying a deal leaves it in place (it stays until END) and does not
 /// end the negotiation (only `End()` does).
@@ -533,6 +533,14 @@ fn accept_deal(ui: &CampaignUi) {
     }
     // The records the model holds (regions, technologies, the payment).
     ui.push(CampaignRequest::Command(CampaignCommand::AcceptDeal));
+}
+
+/// Decline the pending deal (`DeclineCampaignNegotiationDeal` 0x00C1F210): the result becomes
+/// "declined" (+0x28 = 2) and the model applies a threat's `threatened` factor
+/// (`CampaignCommand::DeclineDeal`, `CampaignModel::decline_deal`). The caller checks the counterpart.
+fn decline_deal(ui: &CampaignUi) {
+    ui.negotiation.borrow_mut().status = NegotiationStatus::Declined;
+    ui.push(CampaignRequest::Command(CampaignCommand::DeclineDeal));
 }
 
 /// The `CampaignCommand` one pending deal row becomes: `actor` acts on `target`. Split out of
@@ -1023,9 +1031,10 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
         Ok(payment_cap(&inner, &ui, other, "MaxOppositionPaymentAllowed"))
     });
 
-    // ProposerId(): CONFIRMED one value out, the proposer's faction (the native wraps the faction
-    // userdata, FUN_008E5060; we have no userdata, so the faction key string is returned instead —
-    // INFERRED). Nothing without a counterpart (CONFIRMED guard).
+    // ProposerId(): CONFIRMED one value out, the proposer's faction key as a string: the native
+    // (0x009BFD80) takes the key from `CampaignFaction::GetFactionKeyOrRebels` (0x008E5060) and pushes
+    // it as a Lua string (0x00FE95E0 → 0x00FE9560); it wraps no userdata, so ours matches. Nothing
+    // without a counterpart (CONFIRMED guard, +0xAC).
     f!("ProposerId", |_l, inner, ui, _a: Variadic<Value>| {
         Ok(negotiation_factions(&ui).and_then(|(proposer, _)| ui.model().world.factions.get(&proposer).map(|f| f.key.clone())))
     });
@@ -1118,17 +1127,27 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
         }
         Ok(())
     });
-    // ProposeDeal: the AI's answer (`CampaignModel::ai_refuses_deal`: the regions, technology and payment
-    // records evaluated as the exe's `0x00AA5ED0`) — "declined", as `DeclineOffer` gives, else
-    // accepted at once. The proposal itself is a command (`CampaignCommand::ProposeDeal`): the
-    // AI recipient's evaluation keeps its relation belief, which the campaign director reads later.
-    f!("ProposeDeal", |_l, inner, ui, _a: Variadic<Value>| {
+    // ProposeDeal(threat): the AI's answer (`CampaignModel::ai_refuses_deal`: the regions, technology
+    // and payment records evaluated as the exe's `EvaluateProposedNegotiationDealAI 0x00AA5ED0`) — declined as `DeclineOffer` does
+    // (the evaluator calls `0x00C1F210`), else accepted at once (`0x00C114B0`). The proposal itself
+    // is a command (`CampaignCommand::ProposeDeal`): it stores the threat flag (+0x2B8), and the AI
+    // recipient's evaluation keeps its relation belief, which the campaign director reads later.
+    // The argument, the top of the stack, is a boolean (`0x01055840`: `SendOffer` passes false,
+    // `ThreatOfForce` true, diplomacy_panel.lua:635 / :1566); any other type is a script error in
+    // the exe (`0x01095090`): ours logs once and proposes nothing.
+    f!("ProposeDeal", |_l, inner, ui, a: Variadic<Value>| {
         if negotiation_factions(&ui).is_none() {
             return Ok(());
         }
-        ui.push(CampaignRequest::Command(CampaignCommand::ProposeDeal));
+        let Some(&Value::Boolean(threat)) = a.last() else {
+            inner.log_once("ProposeDeal argument", || {
+                "ERROR negotiation:ProposeDeal: the argument is not a boolean (the threat flag); nothing proposed (logged once)".into()
+            });
+            return Ok(());
+        };
+        ui.push(CampaignRequest::Command(CampaignCommand::ProposeDeal { threat }));
         if ui.model().ai_refuses_deal() {
-            ui.negotiation.borrow_mut().status = NegotiationStatus::Declined;
+            decline_deal(&ui);
             return Ok(());
         }
         accept_deal(&ui);
@@ -1137,7 +1156,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     f!("AcceptOffer", |_l, inner, ui, _a: Variadic<Value>| { accept_deal(&ui); Ok(()) });
     f!("DeclineOffer", |_l, inner, ui, _a: Variadic<Value>| {
         if negotiation_factions(&ui).is_some() {
-            ui.negotiation.borrow_mut().status = NegotiationStatus::Declined;
+            decline_deal(&ui);
         }
         Ok(())
     });

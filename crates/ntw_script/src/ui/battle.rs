@@ -611,4 +611,56 @@ mod tests {
         set_facts(&host, &f2).unwrap();
         assert!(check("not rawequal(first_unit, __battle.units[1]) and __battle.units[1].key == 'unit_1'"), "nothing written before: all new");
     }
+
+    /// The battle scripts' `Component.CreateFromLayout` call shapes place the new component as the
+    /// exe does (`0x01016BD0` → `0x01027400`, CONFIRMED): x, y are its offset in the parent and
+    /// replace the layout file's own offset (0, 0 = the parent's top-left), rounded to whole pixels
+    /// ties-to-even; without them the component keeps its file position. The battle prelude's
+    /// wrapper dropped x, y, so root.luac's pip_frame and esc_menu_battle.luac's options panels
+    /// landed at their file offsets.
+    #[test]
+    fn created_layouts_land_at_the_scripts_x_y_not_their_file_offset() {
+        use crate::ui::host::tests::{component_env, with_button_offset};
+        let page = with_button_offset(layout_bytes_with_root("loaded = true", ""), 10, 15);
+        let made = with_button_offset(layout_bytes_with_root("", ""), 30, 40);
+        let source = ScriptSource::empty()
+            .with_memory_file("ui/test/page", page)
+            .with_memory_file("ui/battle ui/pip_frame", made.clone())
+            .with_memory_file("ui/battle ui/options_game", made);
+        let host = UiScriptHost::new(source, ntw_formats::loc::Localisation::new(), facts(), (1280.0, 960.0), ntw_sim::limits::GameLimits::default()).unwrap();
+        install(&host, ScriptSource::empty()).unwrap();
+        let root = host.load_root_layout("ui/test/page").unwrap();
+        let env = component_env(&host, root);
+        let at = |args: &str| -> (f32, f32) {
+            let code = format!("local panel = UIComponent(Address):Find('button')\nlocal c = Component.CreateFromLayout({args})\nreturn UIComponent(c):Position()");
+            host.lua().load(code).set_environment(env.clone()).eval().unwrap_or_else(|e| panic!("{args}: {e}\n{:#?}", host.take_log()))
+        };
+        // battle root.luac (line 146): into the root at 0, 0.
+        assert_eq!(at(r"'ui\\battle ui\\pip_frame','pip_frame', Address, 0, 0"), (0.0, 0.0), "pip_frame at the root's top-left, not (30, 40)");
+        // esc_menu_battle.luac (line 113): an options panel into Component.Root() at 0, 0.
+        assert_eq!(at("'data/ui/battle ui/options_game', 'options_game', Component.Root(), 0, 0"), (0.0, 0.0));
+        // Relative to the parent (the page's button at (10, 15)), replacing the file offset.
+        assert_eq!(at("'ui/battle ui/pip_frame', 'p1', panel, 0, 0"), (10.0, 15.0));
+        assert_eq!(at("'ui/battle ui/pip_frame', 'p2', panel, 5, 6"), (15.0, 21.0));
+        // Rounded ties-to-even (0x010556D0 under the RC_NEAR control word 0x010F4670 sets).
+        assert_eq!(at("'ui/battle ui/pip_frame', 'p3', Address, 2.5, 3.5"), (2.0, 4.0));
+        // No x, y (3 arguments; battle_hud.luac's images table): the file position, wherever the parent is.
+        assert_eq!(at("'ui/battle ui/pip_frame', 'p4', panel"), (30.0, 40.0));
+        assert_eq!(at("'ui/battle ui/pip_frame', 'p5', Address, {}"), (30.0, 40.0));
+        // character_information.luac (line 93): x, y, then the images table.
+        assert_eq!(at("'ui/battle ui/pip_frame', 'p6', Address, 7, 8, {}"), (7.0, 8.0));
+        crate::ui::test_support::no_errors(&host);
+        // y without a number x: the exe logs the type error (0x01055700 → 0x01095090), skips the
+        // remaining reads, creates nothing and returns nil; the script keeps running.
+        let bad = |id: &str| -> mlua::Value {
+            let code = format!("return Component.CreateFromLayout('ui/battle ui/pip_frame', '{id}', Address, nil, 5)");
+            host.lua().load(code).set_environment(env.clone()).eval().unwrap_or_else(|e| panic!("{id}: {e}"))
+        };
+        assert!(bad("p7").is_nil(), "nil, not an error");
+        assert!(bad("p8").is_nil());
+        let none = host.lua().load("local r = UIComponent(Address); return r:Find('p7') == nil and r:Find('p8') == nil").set_environment(env.clone()).eval::<bool>().unwrap();
+        assert!(none, "nothing created");
+        let log = host.take_log();
+        assert_eq!(log.iter().filter(|l| l.contains("found type nil")).count(), 1, "logged once: {log:#?}");
+    }
 }

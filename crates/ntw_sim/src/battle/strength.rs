@@ -14,6 +14,7 @@
 //! makes this the same number). Terms the model cannot feed are left at 0 and listed in the
 //! function docs (UNKNOWN fields of the unit card, and two unit-level switches).
 
+use super::ground::MovementClass;
 use super::model::LandUnit;
 use super::morale::{MoraleBehaviour, MoraleState};
 
@@ -32,14 +33,48 @@ pub fn category(u: &LandUnit) -> Category {
 }
 
 /// `0x0055ABF0` (CONFIRMED static): the unit rides: category cavalry (0) or camels (5), or
-/// dragoons (3) without the `dismount` ability (15) active. (`0x0055C2A0` is this with `dismount`
-/// inactive for every category: the two differ only for a cavalry or camel unit with `dismount`
-/// active.)
+/// dragoons (3) without the `dismount` ability (15) active. Its callers in ours: the in-place
+/// check (`0x00557BC0`, march.rs), the neighbour weight halving (`0x0053CBD0`, model.rs), the
+/// all-men volley (`0x005694D0`, shooting.rs) and the battle AI (`0x007A4EB0`, `0x007536C0`,
+/// `0x007D33B0`, `0x007D34A0`). [`riding`] is the other predicate.
 pub fn mounted(u: &LandUnit) -> bool {
     match category(u) {
         Category::Cavalry | Category::Camels => true,
-        Category::Dragoons => u.active_abilities & (1 << super::abilities::ability_ids::DISMOUNT) == 0,
+        Category::Dragoons => !dismount_active(u),
         _ => false,
+    }
+}
+
+/// `0x0055C2A0` (CONFIRMED static): [`mounted`] and the `dismount` ability (15) not active, for
+/// every category. It differs from [`mounted`] only for a cavalry or camel unit with `dismount`
+/// active. Its callers in ours: frightened horses (`0x0053B970`, model.rs), the morale
+/// attack-direction pass (`0x0053C720`: the front adjust and fighting cavalry, model.rs), the firing
+/// drill (`0x00554920`, shooting.rs) and the ground column (`0x006543D0`, [`movement_class`]).
+pub fn riding(u: &LandUnit) -> bool {
+    mounted(u) && !dismount_active(u)
+}
+
+/// The `dismount` ability (15) is active (`IsSpecialAbilityActive(+0xDAC, 15)`, CONFIRMED).
+pub fn dismount_active(u: &LandUnit) -> bool {
+    u.active_abilities & (1 << super::abilities::ability_ids::DISMOUNT) != 0
+}
+
+/// The `square_formation` (1) or `pike_square_formation` (0) ability is active
+/// (`IsSpecialAbilityActive(+0xDAC, 1)` then `(+0xDAC, 0)`, CONFIRMED at `0x0053C881`–`0x0053C8A1`,
+/// where it blocks the fighting-cavalry effect; the attack-direction test `0x0057F310` asks the same
+/// pair).
+pub fn square_active(u: &LandUnit) -> bool {
+    use super::attributes::ability::{PIKE_SQUARE_FORMATION, SQUARE_FORMATION};
+    u.active_abilities & ((1 << SQUARE_FORMATION) | (1 << PIKE_SQUARE_FORMATION)) != 0
+}
+
+/// The `unit_movement_modifiers` column the unit's men use this tick (`0x006543D0`, CONFIRMED):
+/// the class set at setup, except that a mounted unit that is not [`riding`] (`0x006544AB`) takes
+/// the infantry column 3, like a unit on foot.
+pub fn movement_class(u: &LandUnit) -> MovementClass {
+    match u.movement_class {
+        MovementClass::Mounted if !riding(u) => MovementClass::Infantry,
+        class => class,
     }
 }
 
@@ -266,6 +301,36 @@ mod tests {
         assert!(mounted(&u));
         u.unit_category = "elephants".into();
         assert!(!mounted(&u));
+    }
+
+    /// `0x0055C2A0`: mounted and not dismounted, so cavalry and camels with `dismount` active are
+    /// mounted (`0x0055ABF0`) but not riding.
+    #[test]
+    fn riding_excludes_every_dismounted_unit() {
+        let dismount = 1 << super::super::abilities::ability_ids::DISMOUNT;
+        let mut u = line(100);
+        assert!(!riding(&u));
+        for key in ["cavalry", "cavalry_camels", "dragoons"] {
+            u.unit_category = key.into();
+            u.active_abilities = 0;
+            assert!(riding(&u), "{key}");
+            u.active_abilities = dismount;
+            assert!(!riding(&u), "dismounted {key}");
+        }
+    }
+
+    /// `0x006543D0`: a horse unit takes the riders' ground column only while riding (`0x006544AB`);
+    /// dismounted it walks on the infantry column.
+    #[test]
+    fn movement_class_follows_riding() {
+        let mut u = line(100);
+        u.unit_category = "cavalry".into();
+        u.movement_class = MovementClass::Mounted;
+        assert_eq!(movement_class(&u), MovementClass::Mounted);
+        u.active_abilities = 1 << super::super::abilities::ability_ids::DISMOUNT;
+        assert_eq!(movement_class(&u), MovementClass::Infantry);
+        u.movement_class = MovementClass::FootArtillery;
+        assert_eq!(movement_class(&u), MovementClass::FootArtillery, "only the mounted column changes");
     }
 
     #[test]

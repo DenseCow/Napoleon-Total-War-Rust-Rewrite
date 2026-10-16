@@ -409,6 +409,8 @@ The state names follow the `ums_*` key prefixes (INFERRED). The timer formulas (
 
 ### 12.4 Morale modifiers, 0x0053C720 (thresholds CONFIRMED; key names INFERRED from the threshold numbers)
 
+Superseded for the attacker logic (the "excluded set" is the seen set, the "+2 condition" is the unit riding, the scaling is a signed division, not a shift): see `analysis/fidelity/UNITS_TERRAIN_FIDELITY.md` §10.1.
+
 - **Category `unit+0xD08`**: 1 → effect 5 = +6; 2 → +4; 3 → +2; 6 → effect 0x17 = −4; 7 → −8. These are hard-coded.
 - **Per attacker**:
   - If the attacker is not in the excluded set: `v = slot(was_attacked_in_front)`, doubled if `FUN_55ac20()`.

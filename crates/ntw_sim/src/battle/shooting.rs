@@ -56,11 +56,12 @@ pub struct VolleyPlan {
 }
 
 /// The firing drill a unit's fire order uses (`0x00554920`, CONFIRMED): the card's drill (`+0x78`),
-/// except 0 when the unit rides (`0x0055C2A0`) or is in a building (PROVISIONAL: the garrison's order
+/// except 0 when the unit rides and is not dismounted (`0x0055C2A0` at `0x00554944`,
+/// [`super::strength::riding`]) or is in a building (PROVISIONAL: the garrison's order
 /// class `DEFEND_AND_FIRE_STATE` was not decoded). The same value is the order's vfunc `+0x30` that
 /// the reload formula's drill switch reads (`0x005498B0`; the six order classes return 0..5, CONFIRMED).
 pub fn effective_drill(u: &LandUnit) -> u8 {
-    if super::strength::mounted(u) || u.garrison.is_some() { 0 } else { u.capabilities.firing_drill }
+    if super::strength::riding(u) || u.garrison.is_some() { 0 } else { u.capabilities.firing_drill }
 }
 
 impl LandUnit {
@@ -109,6 +110,7 @@ impl LandUnit {
 pub fn volley_plan(u: &LandUnit) -> VolleyPlan {
     let men = u.men;
     let all = VolleyPlan { shooters: men, groups: 1 };
+    // Mounted (`0x0055ABF0` at `0x005694E7`): every man fires.
     if super::strength::mounted(u) || u.attributes.skirmisher {
         return all;
     }
@@ -815,6 +817,18 @@ mod tests {
         // Unknown files: the living men over three ranks.
         let v = LandUnit::new(2, 0, 100, (0.0, 0.0));
         assert_eq!(v.files(), 34);
+    }
+
+    /// `0x00554920`: a riding unit fires with drill 0; dismounted cavalry is still mounted
+    /// (`0x0055ABF0`) but not riding (`0x0055C2A0` at `0x00554944`), so it keeps the card's drill.
+    #[test]
+    fn riding_units_fire_with_drill_zero() {
+        let mut u = LandUnit::new(1, 0, 60, (0.0, 0.0));
+        u.unit_category = "cavalry".into();
+        u.capabilities.firing_drill = 1;
+        assert_eq!(effective_drill(&u), 0);
+        u.active_abilities = 1 << super::super::abilities::ability_ids::DISMOUNT;
+        assert_eq!(effective_drill(&u), 1);
     }
 
     #[test]

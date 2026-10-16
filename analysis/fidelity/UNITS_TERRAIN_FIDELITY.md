@@ -1213,6 +1213,15 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
     slot + 5 × speed along the heading (tables `0x0176CFF8` / `0x0176CFFC`, negated in state 0x1D), counter `+0x3C`
     += 1 (`0x006F4FA5`); every 10th it sends speed `+0x38`, t = 5.0 (`0x40A00000`) and word 10 = 0. The 2026-10-10
     note that the walk follows (b) (from the t = 5 arithmetic alone) was wrong.
+    **Only these two sources exist (static, sitting-sheet prep 2026-10-15, CONFIRMED by xrefs):** `0x006533E0` has
+    exactly two callers, `0x00585602` (in `0x00584E10`, source (a)) and `0x006DC7AF` (in `0x006DC700`, source (b)), so
+    the planned debugger sitting at `0x006533E0` is not needed. `0x006DC700` itself has a second, uncatalogued
+    caller: `0x006D9A22` in `0x006D9A10` (ECX = this + 0x20, argument from `0x006C2F60([[this+0x14]+4])`, the same
+    shape as the `0x006D9A40` call at `0x006D9BA5`), reached through `0x006CB6F0` (and the thunk right after it) from two
+    adapter stubs with no Ghidra function, `0x0067BCB0` and `0x0067B2F0` (each subtracts 0x98 from its argument, a
+    base-class adjust), whose addresses sit in a listener table at `0x01336A18`, `0x01336CBC`, `0x01336CE0` and
+    `0x01336CE4`. The owning class is UNKNOWN; it still only issues crew-follow moves (the body of `0x006DC700`), so
+    the walk's source is unchanged.
     Ghidra (gait-jitter 2026-10-11): the record is typed `ArtilleryCrewFollowRecord` (0x68 bytes known; both functions
     are its members), the direction table is `g_aHeadingDirectionTable` (65536 x {x, y}, BSS, component order INFERRED),
     `0x01325C60` = `g_flHeadingToRadians` (pi / 32768), `0x01508EF0` = the "cannon_crew_validity" debug log channel.
@@ -1328,8 +1337,8 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
     pitch everywhere, not only at setup (test `the_depth_and_the_places_come_from_one_grid`). The drawn block
     (`setup::drawn_size`: outline box, deployment spacing) keeps the old 2 m least depth, PROVISIONAL (ours, no
     such floor is known in the exe); the model's depth (the men's rank pitch) has none. `UnitInfo.ranks` (unused) is gone. The
-    first rank's placement `0x00619EB0` alternates sides by slot parity (filled from its anchor outward); not
-    decoded, so the place within a rank, a partial rank's, the rank pitch and the anchor stay ours.
+    row placement `0x00619EB0` and the rank pitch p4 are decoded in *The shape layouts (formation5)* below (ours
+    now places every row the exe's way); the anchor along the path stays ours.
   - *Which men the files cap reads (polish15, CONFIRMED static).* Every caller of the line shape's files
     (`0x0061CAB0` its third argument, `0x00646B00` / `0x00646C70` / `0x00646D40` their fifth, `0x0065A410` /
     `0x0065A6D0` their argument's `+0x20`) caps at the count it is passed. The fire step's `0x005694D0` passes the
@@ -1423,8 +1432,8 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
     are the shapes of abilities 3 and 0: a loss there makes the re-slot pending (`+0x278C`) without restarting
     the countdown, which then falls due at the first tick it is out. Ours: `march::SHAPE_KINDS`,
     `LandUnit::shape_kind` and `reslot_tick` (test `a_loss_in_shape_kind_1_or_2_keeps_the_countdown`).
-    PROVISIONAL: every kind is still laid out as the line (the layouts of kinds 1-6 are not traced) and ours
-    never clears an active ability.
+    Every kind's layout is traced (formation5 and formation6 below). PROVISIONAL: ours never clears an active
+    ability.
     *The shape parameters (formation4, CONFIRMED static).* Every shape stores the squad's `+4` at `[1]`; the line
     ctor `0x00620ED0(a, p1, p2, p3, p4)` (through `0x00620EB0`) stores p1..p4 at `[2]`..`[5]`. Kind 6
     `0x006210D0(a, p1, p2)` is the line with p3 = 3.5 and p4 = 2.0 fixed; kind 3 `0x00621140` is the line with
@@ -1438,8 +1447,9 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
     = floor((width + 0.001 − p3/2 − p1) / p3) + 1; width `+0x14` (`0x00642BA0`) = p1 + p3 × (files − 1) + p3/2;
     layout `+0x24` `0x006302E0`. The line generator (`0x00620850`, vtable `0x01333AA0`) holds width, p1, p2, p4,
     the slots, `[1]` and p3; its first rank (`0x0065A410`) takes files from (min(row length, width), p1, p3),
-    capped at the row's slot cap, placed by `0x00619EB0` alternating sides by parity at spacing p3; later ranks
-    (`0x0065A6D0`, `0x00619E60`) only advance the slot counter. Kind 6's generator (`0x00620920`, vtable
+    capped at the row's slot cap, placed by `0x00619EB0` alternating sides by parity at spacing p3; every row
+    is laid this way, not only the first (corrected in formation5: `0x0065A6D0` / `0x00619E60` are the line's
+    counting pass, which only advances the slot counter, not its later ranks). Kind 6's generator (`0x00620920`, vtable
     `0x01333BA8`; `0x0065A4F0` / `0x0065A790`) uses `0x00642D90` and shifts a rank's start by half a pitch: plus
     when the generator's `+0x18` bit 0 is set, minus when the previous rank's files were odd and this rank's even
     (the stagger). `0x00659E70` walks the anchor's rank objects (`0x00555DF0`; list `+0x14`, count `+0x10`;
@@ -1447,9 +1457,130 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
     on (`0x00578860` case 4 → `0x0052ED80`, task `0x00515210`, vtable `0x013247C8`) keeps the files (old shape
     `+0x10` of the width), takes kind 6's width of them and re-forms at the mean of old and new widths
     (`0x00537FA0`); `fire_and_advance` keeps the files and re-forms at the new shape's width (`0x00537E40`).
-    Ours: no change yet (`march::SHAPE_KINDS` records these). Still PROVISIONAL: the anchor's row classes and
-    `0x00619EB0` in full, the layouts of kinds 1, 2, 4, 5 (`0x0062FDC0`, `0x00630390`, `0x00631560`,
-    `0x006316B0`), the stagger and the width task's later updates, and what p4 does.
+    Ours: `march::SHAPE_KINDS` records these; the layouts are in formation5 and formation6 below. Still
+    PROVISIONAL: the width task's later updates (which set kind 6's files).
+    *The shape layouts (formation5, CONFIRMED static).* The factory `0x00531680` gives kinds 0, 1 and 5 the
+    unit's p1..p4; p3 is the spacing between the men of a row, p4 the pitch between rows (a straight anchor
+    piece `0x00659F00` lays a row every p4 metres along its length). Each layout vfunc `+0x24` builds its
+    shape's generator, then the anchor walk `0x00659E70` hands each rank object the men left; a row asks the
+    generator how many it holds (capped at the row's slot cap, the men left) and places them across itself.
+    - *Row placement `0x00619EB0`.* A row of n slots whose first is the layout's running slot count c: the
+      first slot sits on the row centre when n is odd; when n is even, half a spacing to the left if c is odd,
+      to the right if c is even. Each later slot steps one spacing past the last one on its side: an odd slot
+      index to the left, an even one to the right. So every row is centred. The row direction is (dirY, −dirX)
+      of the anchor's direction, the unit's right hand (`0x007F2680`, `0x0063A1D0`). The placement stops a row
+      early when a slot's rank (slot / files for the line) differs from the first slot's; with every row but
+      the last full this never happens.
+    - *Open-ground anchor `0x007F2680`.* One straight piece from the front centre straight back along the
+      facing, its length the shape's measured depth: `0x007FC920` calls the shape's measure (vtable `+0xC`),
+      which is each kind's own (formation6, CONFIRMED static, this settles the old "kinds 1/5 anchor sizing"
+      line): the line (kinds 0, 6) `0x0063A1D0` → `0x0063A9D0`, depth (ceil(men / files) − 1) × p4 + p2, centre
+      at front − facing × (ranks − 1) × p4 / 2; the diamond `0x0063A2F0`, centre (A − 1) × p4 behind the front
+      (A = ceil √men); the wedge `0x0063A750`, centre (T(men) + 1) × p4 / 2 behind (T the triangle row of the
+      last man); kinds 2 and 3 `0x0063A590` → `0x00643B50`, a k × k box with k = floor √men (see below), centre
+      k/2 behind; kind 4 `0x0063A660`, the template's n × n plus the shape's p1 (`+8`) wide and p2 (`+0xC`) deep,
+      centre n/2 behind (the box depth halved less p2 halved). Ours: `Formation::front`, the distance
+      from the measured centre to the front, per kind (tests in `march.rs`). Ours lays every order this way;
+      the exe lays a moving order's rows along its planned path from the path cursor, wheeling on its arcs
+      (`0x007F2DA0`): PROVISIONAL in ours. Missing: what the path piece classes' vfuncs `+0x14` / `+0x18`
+      return, the path builder reached from `0x00815F80`, and how an arc piece lays its rows.
+    - *Kind 1, the diamond.* Layout `0x0062FDC0` builds generator `0x006208B0` (vtable `0x01333AE4`), whose
+      `+0x20..+0x28` come from `0x006209F0(men)`: A = `0x0063C010` = the single-precision square root rounded
+      to nearest plus one when the root is above it, i.e. ceil(√men); B = A/2 + A²/2 rounded half to even
+      (truncated); C = A² − B; `+0x2C` the shape's `+4`, `+0x30` p3, rows p4 apart. Its row count
+      `0x0065A490` → `0x00660D50(A, r, cap)` = min(r′ + 1, cap) with r′ = r for r ≤ A − 1, else 2(A − 1) − r:
+      rows of 1, 2, …, A, …, 2, 1. Placement `0x0061A260` is `0x00619EB0` with the rank read from the
+      triangle table, mirrored past B (rank = 2A − T[A² − 1 − c] − 2). B is one short for odd A (the banker's
+      rounding), harmless: T[A(A − 1)/2] = A − 1 either way. Counting pass `0x0061A1C0`.
+    - *Kind 5, the wedge.* Generator ctor `0x00620990` (vtable `0x01333B28`; its row function `0x0065A690` is
+      not a defined function in the database): `+0x20` the shape's `+4`, `+0x24` p3; row r holds
+      clamp(r + 1, 1, cap). Placement `0x00619B60` is `0x00619EB0` with the rank from the triangle table.
+      Counting pass `0x00619B10`.
+    - *The triangle table* `0x014D05B4`, filled by `0x00622780` (called at `0x00410B8A`) with 0, 1, 1, 2, 2,
+      2, …: slot c's row in a triangle of rows of 1, 2, 3, … slots. It holds 400 entries (`0x190`), so a wedge
+      or diamond past 400 men reads past it (an engine limit; ours computes the row, `triangle_row`).
+    - *Kind 6, light infantry.* Ctor `0x006210D0` fixes p3 = 3.5, p4 = 2.0; layout `0x006302E0` builds
+      generator `0x00620920` from the shape's getters (`0x00647050` p1, `0x00646BC0` p2, `0x0064CA30` p3,
+      `0x00679B00` p4). Its row `0x0065A4F0` stagger: an odd row index shifts the row's start half a spacing
+      to the right; otherwise, when the previous row held an odd count and this one an even, half a spacing
+      to the left. Its files are `0x00642D90` over the layout width, which the width task `0x00515210` sets
+      (not traced, BACKLOG "Battle formation left"): ours takes the unit's files, PROVISIONAL.
+    *The squares and the pike wall (formation6, CONFIRMED static).* Kinds 2, 3 and 4 have no generator: their
+    layout vfunc `+0x24` places every man itself from the order point P (the front centre) along the unit's
+    heading vectors (heading h → θ = h·π/32768, front F = (sin θ, cos θ), right R = (F.y, −F.x)), at 1 m
+    whatever the unit's spacing. Each slot record (0x18 bytes, set up by `0x00620A90`) gets a place, a heading
+    short at `+0xC` (65536 to a turn, positive to the right, added to the unit's) and pose flags. The turn
+    constants are `0x014D0844` (0x2000), `0x014D05AC` (0x4000), `0x014D05A8` (0x6000), `0x014D0650` (0x8000).
+    The exe's floor √men (in `0x00630390`, `0x006311B0`, `0x00643B50`) is the float root rounded to nearest,
+    less one when the root is below that. The earlier note that kind 3's layout is `0x0062FE20` was wrong: its
+    vtable `0x01333C28` slot `+0x24` is `0x006311B0`.
+    - *Kind 2, the pike square `0x00630390`.* k = floor √men. A block of k × k, row by row from the front left,
+      1 m apart (row 0 on P's line). A block man faces by his sector from the block's middle: on a diagonal
+      (|x| = |y|, not the middle) out along it (±0x2000 in front, ±0x6000 behind, + on the right); else left of
+      |y| −0x4000, right of it +0x4000, behind |x| 0x8000, otherwise ahead. The men past k² stand on a ring
+      half = (k + 1)/2 out from the block's middle across and one metre outside it front and back: first its
+      four corners, (−half, 1 ahead) −0x2000, (half, 1 ahead) 0x2000, (half, k behind) 0x6000, (−half, k
+      behind) −0x6000; then eight walks in turn from the corners, step t = q/8 + 1 metres along each: from the
+      front left back (−0x4000) and right (0), from the front right left (0) and back (0x4000), from the back
+      right forward (0x4000) and left (0x8000), from the back left right (0x8000) and forward (−0x4000). Its
+      box (`0x0063A590` → `0x00643B50`) is k wide and k deep. The ring's corners are laid by the remainder
+      r = men − k² (kept at `[EBX+0x14]`): the first whenever r ≥ 0 (`CMP 0` / `JL` at `0x006308D4`, always
+      true), then after each corner `SUB 1` / `JS` (from `0x006309F0`) stops when r − 1 goes negative, and past
+      the four r − 4 > 0 runs the walks. So with r = 0 to 3 the layout lays men + 1 slots, one corner more
+      (r = 0: corner 0 alone; r = 3: all four). That slot, index men, is never held (CONFIRMED static):
+      `AssignSoldiersToNearestSlots` `0x005373F0` makes one pair per soldier, the k-th with slot k, so only
+      slots 0 to men − 1 are paired, and `AssignSlotsTwoOpt` `0x00502770` swaps soldiers between those pairs;
+      `LayOutSlotsAndAssignSoldiers` `0x00555CA0` rebuilds the soldier vector from the pairs and
+      `0x00557C80` checks the soldier count's slots only. The square `0x00631560` lays exactly its men (its
+      loop runs to nMen). Ours: `Formation::laid_slots` (march.rs) counts the extra corner and puts it at slot
+      men; only the slots past it (a man added after the lay-out, ours) stand behind.
+    - *Kind 3, the pike wall `0x006311B0`.* Full rows of `files` from the left, 1 m apart, the remainder row
+      starting at (files − rem) >> 1 slots in; every heading 0. files = `0x00642EE0` = min(`0x00642C90`(width,
+      p1, 1.0), men) = min(floor(width + 0.001 − p1) + 1, men). Its box is the pike square's k × k (the shared
+      measure `0x0063A590`), not its own rows. Ours takes the width as the unit's fresh width and p1 as two man
+      radii: PROVISIONAL. Missing: the re-form width the ability switch `0x00578860` gives it, and which
+      entity's `+0x4C` reaches p1 through `0x00579780` (shape `+0x18`).
+    - *Kind 4, the square `0x00631560`.* The template table `0x014D0690` (0x20-byte entries: side `+8`, slot
+      array `+0x1C` of 0x18-byte records), built once by `0x00621F00`, holds templates of side n = 7, 8, … ,
+      51, adding sides until the last holds 400 slots or more. `0x00661690` picks the template whose 8n − 8 to
+      8n − 1 men fit, else the first (7): an engine limit of 407 men (ours lifts it; n = max(7, men/8 + 1),
+      the table's pick for 1 to 407). Template n (`0x00621D10`): four sides front, right, back, left
+      (`0x006361C0`, directions (1, 0), (0, −1), (−1, 0), (0, 1)), each an outer row of n men one metre out from
+      an inner row of n − 2, the outer starting half a metre before the inner corner; every man faces out
+      from his side (0, 0x4000, 0x8000, −0x4000), the first of each inner row an eighth turn left of that;
+      then the centre's 7 (`0x00629E40`): (0, 0), (−1, 0), (1, 0), (0, 1), (−1, 1), (1, 1), (0, −1), facing
+      ahead. `0x0066AE60` turns a template slot into the unit's frame from the template's middle, which
+      `0x0063A660` (an n × n box) puts n/2 behind P. ORIGINAL BUG (`0x00621D10`): the template starts the
+      front side at the box's corner (−n/2, n/2) and `0x006361C0` takes it as the inner row's, so both rings
+      sit 1 m left of and 1 m ahead of the template's middle while the box and the centre block are centred
+      on it: the front row stands 1 m ahead of the order point and the centre block off the rings' middle.
+      Ours starts at the inner corner (−(n/2 − 1), n/2 − 1): rings centred, the outer n wide and deep.
+    - *Not modelled.* The slot headings are recorded (`Formation::slot_heading`) but ours does not turn the
+      men to them nor weigh them in the slot cost (PROVISIONAL, see `slot_cost`); the slot pose word (FormationSlot
+      `+0x14`) is not modelled: the pike wall `0x006311B0` writes 5 for its first row, 4 for its second, 3 for the
+      rest and its remainder row (CONFIRMED static); what the men do with it is untraced. A slot past a square's laid men (more slots than the shape places) gets a place of its own
+      behind the shape (ours).
+    Ours: `march::Formation` (`row`, `row_first`, `place`, `slot_heading`, `front`), `row_offset`,
+    `triangle_row`, `diamond_half`, `floor_sqrt`, `pike_square_block_heading`, `pike_square_extra`,
+    `square_slot`, `SQUARE_SPACING_M`, `SQUARE_MIN_SIDE`, `LIGHT_INFANTRY_SPACING_M` / `LIGHT_INFANTRY_PITCH_M`;
+    tests `places_and_frame_match_the_drawn_block`, `line_rows_alternate_by_slot_parity_and_stay_centred`,
+    `the_diamond_rows_grow_to_a_then_shrink`, `the_wedge_adds_a_man_per_row`, `light_infantry_rows_stagger`,
+    `the_pike_square_faces_out_from_its_block_and_ring`, `the_pike_wall_fills_rows_from_the_left`,
+    `the_square_lays_its_template_rings`. The diamond's and the wedge's measured centres moved to the exe's
+    (formation6). Ghidra names (V5): `CalcCeilSqrtInt` `0x0063C010`, `InitDiamondDims` `0x006209F0`,
+    `CountDiamondRowSlots` `0x00660D50`, `PlaceDiamondRow` `0x0065A490`, `InitTriangleRowTable` `0x00622780`;
+    formation6 (each analyze_function_completeness ≥ 70): `BuildSquareTemplateTable` `0x00621F00`,
+    `BuildSquareTemplateForSide` `0x00621D10`, `AddSquareTemplateSide` `0x006361C0`, `AddSquareTemplateCentre`
+    `0x00629E40`, `FindSquareTemplateForMen` `0x00661690`, `GetSquareTemplateSide` `0x00642F20`,
+    `PlaceSquareTemplateSlot` `0x0066AE60`, `LayOutSquareFormation` `0x00631560`, `InitFormationSlotRecord`
+    `0x00620A90`, `CalcSqrtShapeFiles` `0x00642E70`, `CalcPikeWallFiles` `0x00642EE0`, `MeasureSqrtShapeBox`
+    `0x0063A590`; structs `SquareTemplateTable`, `SquareTemplate`, `SquareSlotRecord`, `FormationBox` (the
+    measure's 0x24-byte box), `FormationLayoutResult`, `FormationAnchor`, and `FormationShape` grown to
+    0x18 (`+4` the squad's `+4`, p1..p4 at `+8..+0x14`); globals `g_SquareTemplateTable`,
+    `g_wHeadingEighthTurn` / `QuarterTurn` / `ThreeEighthsTurn` / `HalfTurn`. Names in these notes only:
+    `MeasureSquareShapeBox` `0x0063A660` (prototype and plate applied; 65.9, held under 70 by register-only
+    locals and shared globals), `LayOutPikeWallFormation` `0x006311B0` and `LayOutPikeSquareFormation`
+    `0x00630390` (not yet given a V5 pass).
     *The backward order `+0x8C` (CONFIRMED static).* The path request builder `0x008102F0` sets the request's
     `+0x8C` (at `0x00810D3F`) when the goal minus the summary's front centre (`+0x9C`) has a negative dot product
     with the summary's front (`+0x34`), i.e. the goal lies behind the men's front. `BuildUnitMoveOrder`
@@ -1676,8 +1807,9 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
     soldier `+0x3A4`; no byte write of `+0x3A4` exists in `0x00500000..0x00830000`, only reads (`0x0065965D`,
     `0x006597A5`, `0x0065998D`, all in `0x00659600`). It may be a field of the order object at soldier `+0x2CC`
     (its `+0xD8`); not traced. The tag stays.
-  - *PROVISIONAL (ours):* the reference soldier is the block's centre and the places within a rank are the drawn
-    block (the layout vfunc and `0x00619EB0` are not traced); the lag is along the facing only; which of our order
+  - *PROVISIONAL (ours):* the reference soldier is the block's centre and the rows are laid straight back from
+    it (the places within a row are the exe's, `0x00619EB0`, formation5; the anchor along the path,
+    `0x007F2DA0`, is not); the lag is along the facing only; which of our order
     sources maps to which descriptor (all ours clamp) and `0x0051A940`'s `+0x10` (from `0x0054D9F0`); the int
     `0x0054D9F0` compares (how far a followed target must move); a moving man's melee attack; the `+0x3A4` byte
     (keep speed) has no traced writer, ours takes it as set; the 0.25·D cursor step (`0x005856F2`/`0x00658C20`) is not
@@ -2141,3 +2273,91 @@ not re-run). **Verdict: CLOSED-ATTEMPTED. No code changed; `_TRAINED` stays pref
 To reopen it, the productive lead is no longer the name but the **writer** of the value — the DB column whose
 row produces a hole at 4 — and, failing that, `FUN_006CFCC0` (the gate shared by the value-2 and value-3
 predicates, called from only three places) and `FUN_005B27C0` / `FUN_00531E40` in `0x00653A10`'s callee list.
+
+## 10. Mounted and riding: the two unit predicates (2026-10-16, horsefright)
+
+The exe has two "is mounted" tests on a battle unit, both already named and plated in Ghidra (no renames
+this round; read-only static trace):
+
+- **`0x0055ABF0` IsUnitMounted** (CONFIRMED static): category cavalry (0) or camels (5) → true;
+  dragoons (3) → true unless ability 15 (`dismount`) is active; everything else false. ~93 call sites.
+  Ours: `ntw_sim::battle::strength::mounted`.
+- **`0x0055C2A0` IsUnitRidingAndNotDismounted** (CONFIRMED static): IsUnitMounted and `dismount` not
+  active, for every category. It differs from the first only for cavalry or camels with `dismount`
+  active. 11 callers. Ours: `strength::riding`.
+- A third, **`0x0055C1C0`** "on foot": infantry (2), or artillery (1) whose guns object (`+0x1F4 → +0x10`)
+  is 0, or `dismount` active. Not in ours yet.
+
+Our callers, each mapped to the exe caller (address = the call site), one function per predicate:
+
+| Ours | Exe caller | Predicate |
+|---|---|---|
+| frightened horses, `Battle::morale_inputs` (model.rs) | `0x0053B970` at `0x0053BA0F` | riding |
+| new-attacker adjust, `morale::modifiers` (attacker / self riding, from model.rs) | `0x0053C720` at `0x0053C82B`, `0x0053C836`, `0x0053C85E` | riding |
+| fighting cavalry, `morale::modifiers` (self / attacker riding, from model.rs) | `0x0053C720` at `0x0053C8AB`, `0x0053C8B6` | riding |
+| firing drill `effective_drill` (shooting.rs) | `0x00554920` at `0x00554944` | riding |
+| ground column `strength::movement_class` (model.rs unit speed, march.rs men) | `0x006543D0` at `0x006544AB` | riding |
+| all-men volley `volley_plan` (shooting.rs) | `0x005694D0` at `0x005694E7` | mounted |
+| in-place check (march.rs) | `0x00557BC0` at `0x00557BCA` | mounted |
+| neighbour weight halving (model.rs) | `0x0053CBD0` at `0x0053CE77` | mounted |
+| AI strength block (ntw_ai battle/mod.rs) | `0x007CE410` → `0x007A4EB0` at `0x007A4EDE` | mounted |
+| AI enemy composition (ntw_ai battle/mod.rs) | `0x007536C0` at `0x0075376F` | mounted |
+| AI wing filters (ntw_ai battle/mod.rs) | `0x007D33B0` / `0x007D34A0` | mounted |
+
+The ground column (`0x006543D0`): artillery with guns (`0x0055AB90`) takes column 0 or 1 by class; else a
+mounted unit takes column 2 while riding, column 3 when not; else an on-foot unit (`0x0055C1C0`) column 3;
+else no modifier. Ours now reads the column per tick (`strength::movement_class`), so dismounted cavalry
+walks on the infantry column; before, the static setup class kept it on the riders' column.
+
+`ntw_ai::battle::classes::is_mounted` (by category code, dragoons always mounted) was a second copy of
+`0x0055ABF0`; it is gone and the AI calls `strength::mounted`, so dismounted dragoons now count as on foot
+there too, as in the exe.
+
+Left INFERRED, each with a reason in the code:
+- AI missile class factor `0x007D2CF0`, skirmisher arm (class 0x16): the exe tests `0x0055C1C0` (on foot)
+  on the attacker; ours tests not mounted, the same for infantry-category skirmishers.
+- AI wing bidder's mounted share (`+0x78` / `+0x84`): its builder is not traced; read as mounted.
+- Defence contact (`abilities.rs`, chevaux de frise / stakes `0x006E94E0` / `0x006E9160`): the exe asks
+  each soldier (vfunc `+0xF0`), not either unit predicate; ours keeps the unit-level mounted test.
+
+### 10.1 Morale attack pass `0x0053C720` and fighting cavalry (2026-10-16, fightcav)
+
+Traced from the disassembly (CONFIRMED static); named `BattleUnitMoraleComponent::ApplyMoraleAttackAndCasualtyModifiers` in Ghidra (V5, completeness 77), with `BattleUnit` fields `nTrainingLevel` +0x194, the casualty ratios +0xCB4/+0xCBC/+0xCC0/+0xCC4 and `nMoraleCategory` +0xD08. `0x0053C720` is a sub-evaluator of the full morale
+evaluation `0x00584020` (its only caller, at `0x00584099`, after the suppress flag `+0x51` is cleared). Its
+`this` is the morale component (unit `+0xC00`; `+0x4` the unit, `+0x6C` the kv_morale block). Order:
+
+1. Category `+0xD08` (jump table `0x0053CBA8`): effect 5 (+6/+4/+2) or 0x17 (−4/−8), unchanged.
+2. For each entry of the attacker list (unit `+0xADC → +0x74C`; count `0x004CE450`, entry `0x0054EE00`,
+   the entry is the attacking unit): direction `0x0057F310` (0 front, 1 flank, 2 rear; 0 when this unit
+   has ability 1 or 0 active, or the centres are under 2 m apart). Flank sets a flank flag, rear a rear flag.
+   Then the insert-unique `0x0054ED20` into the component's set (`+0xC` capacity, `+0x10` count, `+0x14`
+   data) says whether the attacker was already seen:
+   - **New**: v = `was_attacked_in_front` / `_flank` / `_rear` by its direction (kv slots `+0x15D0`,
+     `+0x1630`, `+0x1690`), doubled when the attacker's `+0xADC` passes `0x0055AC20` (charging). If the
+     attacker rides and this unit does not, v −4 at training level (`+0x194`) 0/1, −2 at 2; otherwise, if
+     this unit rides, v +2. Effect 0x18 with v unless v = 0; the suppress flag `+0x51` is set either way.
+   - **Already seen**: if this unit does not ride, the attacker rides, and this unit has neither ability 1
+     (`square_formation`) nor 0 (`pike_square_formation`) active (`0x0055C9A0` on `+0xDAC`), the
+     fighting-cavalry flag is set.
+3. Flank flag: effect 0x19 with `was_attacked_in_flank`; rear flag: 0x1A with `was_attacked_in_rear` (both
+   even at 0). Fighting-cavalry flag: kv `fighting_cavalry` (`+0x16F0`) at level 0/1 in full, at 2 halved,
+   at 3 quartered, at 4/5 none, any other level in full; the halving and quartering are C division rounding
+   toward zero (`0x0053C960`–`0x0053C979`: `CDQ`/`SUB`/`SAR 1`, `CDQ`/`AND 3`/`SAR 2`), so −5 gives −2 and
+   −1. Effect 0x25 unless 0.
+4. Casualty ladders and blood, unchanged, each skipped at a value of 0 (`TEST`/`JZ` before each add).
+
+Ours (`morale::modifiers`): "riding" in both places is `strength::riding`, so a dismounted cavalry unit is
+on foot here and riding cavalry it has seen gives it the fighting-cavalry effect (test
+`dismounted_cavalry_fights_cavalry`, model.rs). Fixed against the old code: the per-attacker logic ran
+for front attackers only with the front value; its three UNKNOWN inputs were the seen set, the charge test
+and "self riding"; `fighting_cavalry` was always false; the level-2/3 scaling used an arithmetic shift
+(−5 → −3 / −2) where the exe divides; zero values were added. The seen set is `MoraleComponent::
+attackers_seen` (unit ids). INFERRED: it lasts the battle; the only free found is the component destructor
+`0x00522690` (from `0x00522130`), and no writer clears `+0x10` in `0x0053A000`–`0x0053F000`,
+`0x0054E000`–`0x0054F200`, `0x00580000`–`0x00587000` or the unit constructor `0x0051D0F0`. Still
+PLACEHOLDER in model.rs: the attacker list (enemies within melee contact range) and the direction (our angle
+test, not `0x0057F310`).
+
+Found, not changed (one item each): the soldier-pair callers of `0x0055C2A0` (`0x0081D8E0`, `0x00820040`, `0x00821B90`, `0x00822940`,
+`0x008261A0`, gated on type class 10), `0x00532320` (melee class factor gate in `0x007D23E0`) and
+`0x0053EFE0` have no counterpart in ours yet.

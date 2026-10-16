@@ -39,6 +39,7 @@ pub mod economy;
 pub mod effects;
 pub mod characters;
 pub mod embark;
+pub mod expulsion;
 pub mod family;
 pub mod features;
 pub mod names;
@@ -60,6 +61,7 @@ pub mod research;
 pub mod rules;
 pub mod seams;
 pub mod trade;
+pub mod trade_check;
 pub mod treaties;
 pub mod treasury;
 pub mod turn;
@@ -85,7 +87,7 @@ pub use world::{SlotRef, FactionAiKeys, AiArea,
 };
 pub use visibility::{FogState, Shroud, SightGrid};
 pub use world::Fort;
-pub use world::{EconomyRecord, ECONOMY_HISTORY_LEN};
+pub use world::{EconomyRecord, ECONOMY_HISTORY_LEN, TREATY_BREAKS_START};
 
 #[cfg(test)]
 mod tests;

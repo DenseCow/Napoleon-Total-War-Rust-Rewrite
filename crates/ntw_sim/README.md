@@ -71,11 +71,11 @@ Tags used below:
 | Waver timer 0x0053E4D0 | `morale::waver_timeout` | PLACEHOLDER (returns `waver_base_timeout`, which it is confirmed to read) |
 | Rout timer 0x0053A720 | `morale::rout_timeout` | PLACEHOLDER (returns `broken_finish_base_timeout`) |
 | Sub-evaluators 0x53BC70, 0x53CBD0, 0x53E450, 0x53BB40, 0x53B970, 0x53B7B0, 0x53BC20 | `morale::sub_*` | PLACEHOLDER (no-ops) |
-| FUN_0053E980, FUN_00532370, FUN_0055AC20 | `MoraleInputs::shock_persists`, `may_break`, `Attacker::doubles_front_value` | UNKNOWN, supplied by the caller |
+| FUN_0053E980, FUN_00532370 | `MoraleInputs::shock_persists`, `may_break` | UNKNOWN, supplied by the caller |
 | Light update 0x00585BE0 | `morale::light_update` | PLACEHOLDER (counts timers down by 1 per tick) |
 | W1 §12.4 category table (+6/+4/+2/−4/−8) | `morale::modifiers` | CONFIRMED |
-| W1 §12.4 front/flank/rear and formation adjust | `morale::modifiers` | CONFIRMED values; applying the front logic to front attackers only, and which unit's class is used, are INFERRED |
-| W1 §12.4 fighting cavalry signed shift | `morale::fighting_cavalry_value` | CONFIRMED |
+| W1 §12.4 new-attacker effect (by direction, charge doubling, riding adjust), flank/rear, seen set `0x0054ED20` | `morale::modifiers` | CONFIRMED (`0x0053C720` disassembly); the seen set lasting the battle INFERRED |
+| W1 §12.4 fighting cavalry (riding attacker already seen, self on foot, no square; level scaling by signed division) | `morale::modifiers`, `morale::fighting_cavalry_value` | CONFIRMED |
 | W1 §12.4 total (>), recent/extended/blood (>=) ladders and shock flag | `morale::modifiers` | CONFIRMED |
 | W1 §12.5 fatigue state machine | `fatigue::next_state` | CONFIRMED |
 | W1 §12.5 gradient ladder and `(m*delta)/100` | `fatigue::gradient_multiplier`, `apply_gradient` | CONFIRMED |
@@ -131,7 +131,7 @@ Tags used below:
 ## Remaining placeholders (to replace as the reverse engineering progresses)
 
 1. The waver and rout timer formulas, the 7 unknown morale sub-evaluators, the light morale update, and morale mode 4.
-2. The unknown predicates FUN_0053E980, FUN_00532370 and FUN_0055AC20, the front-attack "excluded set" and the "+2 condition".
+2. The unknown predicates FUN_0053E980 and FUN_00532370.
 3. The fatigue action-enum mapping and climate terms, and per-soldier simulation (a unit is currently one representative soldier).
 4. Movement, attack-direction classification (0x006AD890), and the definitions of the recent, extended and kill ratios.
    Melee's soldier-level details: who fights whom and how often, the non-lethal blow effects, and the fatigue-effect multipliers and army level.

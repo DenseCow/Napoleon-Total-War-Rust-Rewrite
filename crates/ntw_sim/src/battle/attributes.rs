@@ -57,6 +57,8 @@ pub struct UnitAttributes {
 /// Special abilities a unit card lists (`unit_capabilities/special_ability`), by the exe's enum
 /// (`0x0057C950`, name table `0x0131C3A0`, CONFIRMED values) — the ones the strength code reads.
 pub mod ability {
+    /// `pike_square_formation`.
+    pub const PIKE_SQUARE_FORMATION: u8 = 0;
     /// `square_formation`.
     pub const SQUARE_FORMATION: u8 = 1;
     /// `fire_and_advance`.

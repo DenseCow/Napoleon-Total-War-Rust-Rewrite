@@ -43,8 +43,22 @@ pub struct TradeWaypoint {
 pub struct TradePath {
     /// The waypoints in order.
     pub waypoints: Vec<TradeWaypoint>,
+    /// The route uses one of the exporter's capital port routes (+0x14, the record's bool after the
+    /// waypoints): it counts against the capital's cap, not the sea cap ([`CampaignModel::trade_route_check`]).
+    /// CONFIRMED in the vanilla saves: every flagged route starts at its exporter's capital with a sea
+    /// hop, and no other route does (`auto_nr4_t4` 23 of 72 routes, `auto_after_c8` 23 of 76,
+    /// `orig_fr_may1811` 2 of 6).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub capital_port: bool,
     /// Commodity volumes in `COMMODITIES_ORDER` (+0x24).
     pub volumes: Vec<u32>,
+}
+
+impl TradePath {
+    /// The route has a sea hop: it counts against a sea cap unless it is a capital port route.
+    pub fn uses_sea(&self) -> bool {
+        self.waypoints.iter().any(|w| w.sea)
+    }
 }
 
 /// How close a hostile navy has to be to a sea hop's port to block it (map units).
@@ -200,18 +214,23 @@ impl CampaignModel {
         demand.iter().any(|d| *d > 0).then(|| demand.into_iter().map(|d| d.max(0) as u32).collect())
     }
 
-    /// The volumes a route of the pair (`faction`, `importer`) carries this turn: the
+    /// The volumes a route of the pair (`exporter`, `importer`) carries this turn: the
     /// importer's share of [`Self::trade_split`] (the exe adds it to every route of the pair, `0x00BC26D0`
-    /// → `0x00B08880`, CONFIRMED), or the loaded volumes when the supply is unknown. `split` is
-    /// `trade_split(faction)` (passed in to compute it once per faction).
+    /// → `0x00B08880`, CONFIRMED), or the loaded volumes when the supply is unknown. A route whose
+    /// importer is not a trade partner ([`super::economy::is_trade_partner`]: one left after a broken
+    /// agreement) carries nothing either way: the split first clears every international route
+    /// (`ClearTradeRouteVolumes` 0x00B1C1A0) and shares only to partners (CONFIRMED). `split` is
+    /// `trade_split(exporter)` (passed in to compute it once per faction).
     pub fn trade_path_volumes(
         &self,
         split: Option<&std::collections::BTreeMap<FactionId, Vec<u32>>>,
+        exporter: FactionId,
         importer: FactionId,
         path: &TradePath,
     ) -> Vec<u32> {
         match split {
-            None => path.volumes.clone(),
+            None if super::economy::is_trade_partner(self, exporter, importer) => path.volumes.clone(),
+            None => vec![0; path.volumes.len()],
             Some(s) => s.get(&importer).cloned().unwrap_or_else(|| vec![0; self.world.commodity_prices.len()]),
         }
     }
@@ -219,8 +238,16 @@ impl CampaignModel {
     /// The hard-coded extra of `0x00BB3490` (CONFIRMED; the campaign's [`home_trade_faction`](super::features::CampaignFeatures::home_trade_faction)): in `spa_napoleon` the faction
     /// `spa_france` also earns `Σ domestic volume × price` over its domestic routes (those whose last
     /// waypoint is in the faction's capital: `0x00A8B5A0`, region == faction `+0x72C`) minus
-    /// `Σ volume × price` over its international routes. 0 for every other faction.
-    pub fn trade_home_value(&self, faction: FactionId) -> i32 {
+    /// `Σ current volume × price` (`0x008AFAA0`) over every international route of the faction, blockaded
+    /// or not, with or without an agreement: the routes to `importers` ([`super::economy::trade_route_importers`])
+    /// with this turn's volumes ([`Self::trade_path_volumes`]; `split` is `trade_split(faction)`), so a route
+    /// left after a broken agreement takes off nothing. 0 for every other faction.
+    pub fn trade_home_value(
+        &self,
+        faction: FactionId,
+        split: Option<&std::collections::BTreeMap<FactionId, Vec<u32>>>,
+        importers: &[FactionId],
+    ) -> i32 {
         let Some(home) = self.rules.features.home_trade_faction.as_deref() else { return 0 };
         if self.world.factions.get(&faction).is_none_or(|f| f.key != home) {
             return 0;
@@ -237,8 +264,11 @@ impl CampaignModel {
             .filter(|r| r.waypoints.last().is_some_and(|w| Some(w.region) == self.world.capital(faction)))
             .map(|r| value(&r.volumes))
             .sum();
-        let exported: i64 =
-            self.world.trade_paths.iter().filter(|((a, _), _)| *a == faction).flat_map(|(_, p)| p).map(|p| value(&p.volumes)).sum();
+        let exported: i64 = importers
+            .iter()
+            .flat_map(|b| self.trade_routes_of(faction, *b).into_iter().flatten().map(move |p| (*b, p)))
+            .map(|(b, p)| value(&self.trade_path_volumes(split, faction, b, &p)))
+            .sum();
         (home - exported).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
     }
 }
@@ -340,36 +370,41 @@ impl CampaignModel {
 }
 
 impl CampaignModel {
+    /// The region's route cap: Σ over its slots' buildings of the level's compiled `trade_route_cap_sea`
+    /// bonus (effect 0x43, from `trade_routes_mod_max_sea` in vanilla; `GetSlotBuildingSeaRouteCapBonus 0x00AAF770`: any building, whole
+    /// numbers; the road and walls slots are not read). CONFIRMED.
+    pub fn region_trade_route_cap(&self, region: &super::Region) -> i32 {
+        region.slots.iter().filter_map(|s| s.building.as_ref()).map(|b| self.building_local_bonus(&b.level_key, "trade_route_cap_sea") as i32).sum()
+    }
+
+    /// A building level's own-region bonus, compiled through the effect mapping (the exe's per-building
+    /// effect read by id, e.g. `0x00A797B0`); 0 for a level without effects.
+    pub fn building_local_bonus(&self, level: &str, bonus: &str) -> f32 {
+        self.rules.effects.building_local().get(level).map_or(0.0, |s| s.get(bonus))
+    }
+
     /// The faction's sea route cap (`0x008DC150`, CONFIRMED): a breadth-first walk from its capital over
     /// land neighbours ([`super::World::region_neighbours`]) that the faction owns; every region it
-    /// reaches adds the `trade_routes_mod_max_sea` of its slots' buildings (`0x00AAF770`: any building,
-    /// whole numbers). The capital counts too (INFERRED: read literally, the walk starts with faction
-    /// +0x72C marked visited and never adds it, but every vanilla save needs the capital's ports:
-    /// Britain keeps 7 sea routes with all its trading ports in England, so the start entry is likely
-    /// not the region object itself). No capital: 0. Without the map's neighbours (not attached) every owned region counts
-    /// (PROVISIONAL fallback).
+    /// reaches adds its [`Self::region_trade_route_cap`]. The capital itself is not added (the walk starts
+    /// with it marked visited): its ports give the capital port routes instead
+    /// ([`Self::capital_port_route_cap`], `0x008DC360`). No capital: 0. Without the map's neighbours (not
+    /// attached) every owned region but the capital counts (PROVISIONAL fallback).
     pub fn sea_route_cap(&self, faction: FactionId) -> i32 {
         let w = &self.world;
-        let cap_of = |r: &super::Region| -> i32 {
-            r.slots
-                .iter()
-                .filter_map(|s| s.building.as_ref())
-                .map(|b| super::economy::building_effect(&self.rules, &b.level_key, "trade_routes_mod_max_sea") as i32)
-                .sum()
-        };
+        let capital = w.capital(faction);
         if w.region_neighbours.is_empty() {
-            return w.regions.values().filter(|r| r.owner == faction).map(cap_of).sum();
+            return w.regions.values().filter(|r| r.owner == faction && Some(r.id) != capital).map(|r| self.region_trade_route_cap(r)).sum();
         }
-        let Some(capital) = w.capital(faction) else { return 0 };
+        let Some(capital) = capital else { return 0 };
         let mut visited = vec![capital];
-        let mut total = w.regions.get(&capital).filter(|r| r.owner == faction).map_or(0, cap_of);
+        let mut total = 0;
         let mut i = 0;
         while i < visited.len() {
             for n in w.region_neighbours.get(&visited[i]).map(Vec::as_slice).unwrap_or_default() {
                 let Some(r) = w.regions.get(n).filter(|r| r.owner == faction) else { continue };
                 if !visited.contains(n) {
                     visited.push(*n);
-                    total += cap_of(r);
+                    total += self.region_trade_route_cap(r);
                 }
             }
             i += 1;
@@ -377,13 +412,25 @@ impl CampaignModel {
         total
     }
 
+    /// The faction's capital port route cap (`0x008DC360`, CONFIRMED): the capital's
+    /// [`Self::region_trade_route_cap`] when the capital has an export port
+    /// ([`Self::region_has_export_port`]), else 0; 0 without a capital. Routes flagged
+    /// [`TradePath::capital_port`] count against it.
+    pub fn capital_port_route_cap(&self, faction: FactionId) -> i32 {
+        let Some(r) = self.world.capital(faction).and_then(|c| self.world.regions.get(&c)) else { return 0 };
+        if self.region_has_export_port(r) { self.region_trade_route_cap(r) } else { 0 }
+    }
+
     /// A route for a trade agreement that has no loaded route (made in play): the cheapest path over
     /// the static trade network from any port or settlement of `a` to any of `b`. Land legs (one end a
     /// settlement) cost their length, sea legs (ports and nodes) their length × `trade_route_land_sea_bias`
     /// (the cost terms of 0x00BC0DC0, CONFIRMED); trade nodes are not passed through; the sea legs
-    /// together may not exceed `trade_route_internat_sea_length_limit` when it is set. PROVISIONAL:
-    /// the original's candidate set, port capacities and route caps (0x00BC0960 / 0x00BC0DC0) are not
-    /// ported. `None` when the network is not loaded or no path exists.
+    /// together may not exceed `trade_route_internat_sea_length_limit` when it is set. Once `a`'s routes
+    /// with a sea hop reach its sea and capital port caps together ([`Self::sea_route_cap`] +
+    /// [`Self::capital_port_route_cap`]), the new route may not use the sea. PROVISIONAL: the
+    /// original's candidate set, full ports and per-network route caps (0x00BC0960 / 0x00BC0DC0, the
+    /// network chosen by [`super::trade_check::trade_route_check`]'s code) are not ported; the combined
+    /// cap is ours. `None` when the network is not loaded or no path exists.
     pub fn build_trade_route(&self, a: FactionId, b: FactionId) -> Option<TradePath> {
         use std::cmp::Ordering;
         use std::collections::{BTreeMap, BinaryHeap};
@@ -395,8 +442,8 @@ impl CampaignModel {
         let settlement = |node: u32| w.trade_node_regions.get(&node).is_some_and(|(_, port)| !port);
         let is_node = |node: u32| !w.trade_node_regions.contains_key(&node);
         let bias = self.rules.var("trade_route_land_sea_bias", 1.0);
-        // With the sea route cap reached, the new route may not use the sea.
-        let cap = self.sea_route_cap(a) as f32;
+        // With the sea route caps reached (sea and capital port together), the new route may not use the sea.
+        let cap = (self.sea_route_cap(a) + self.capital_port_route_cap(a)) as f32;
         let sea_routes = w.trade_paths.iter().filter(|((x, _), _)| *x == a).flat_map(|(_, p)| p).filter(|p| p.waypoints.iter().any(|w| w.sea)).count();
         let sea_allowed = (sea_routes as f32) < cap;
         let sea_limit = self.rules.var("trade_route_internat_sea_length_limit", 0.0);
@@ -471,7 +518,9 @@ impl CampaignModel {
             .map(|&(from, to, sea)| TradeWaypoint { region: region(from), from, to, sea, from_pos: self.trade_node_pos(from), to_pos: self.trade_node_pos(to) })
             .collect();
         waypoints.push(TradeWaypoint { region: region(goal), from: u32::MAX, to: u32::MAX, sea: false, from_pos: None, to_pos: None });
-        Some(TradePath { waypoints, volumes: vec![0; w.commodity_prices.len()] })
+        // A route leaving by sea from the capital uses its port (PROVISIONAL, as the saves' routes show it).
+        let capital_port = waypoints.first().is_some_and(|p| p.sea && Some(p.region) == w.capital(a));
+        Some(TradePath { waypoints, volumes: vec![0; w.commodity_prices.len()], capital_port })
     }
 }
 

@@ -264,7 +264,7 @@ impl CampaignModel {
 
     /// The campaign's [`LootResentment`](super::features::LootResentment) after `looter` loots `region`
     /// (`0x00B541E0`, CONFIRMED, after the alignment shift `0x00AAA580`): the region's rebel faction key (region
-    /// +0x10C) picks the resentful homeland faction (the first matching row, found by key, `0x00955B70`); unless it
+    /// +0x10C) picks the resentful homeland faction (the first matching row, found by key, `FindCampaignFactionByKey` `0x00955B70`); unless it
     /// is the looter itself (`0x00898B80`) or the looter is exempt, its record towards the looter adds `value` to
     /// the factor (`0x00B544F0`: only when the two are not at war; then `0x00B02CB0` with the factor event's drift
     /// and limit, `0x00B27FF0`). No relation-change broadcast follows (CONFIRMED: neither function makes one), so
@@ -332,10 +332,9 @@ impl CampaignModel {
                 let target = p.liberate.expect("checked");
                 // 0x00B58A10(target, 0, 1): the liberated faction comes back if it was out of the game,
                 // then the region passes to it through the shared owner change (`liberate_region` →
-                // `transfer_region`), which in ours moves no army: the capturer's army stays inside, a
-                // foreign garrison. PROVISIONAL: the original's owner change (0x00A64AC0, fourth
-                // argument 0) expels the other factions' armies from the region (0x008D9DC0), not
-                // modelled yet. The army the original raises for
+                // `transfer_region`), which expels the other factions' armies from the region
+                // (0x00A64AC0 with its fourth argument 0 → 0x008D9DC0, `expel_after_owner_change`):
+                // the capturer's army is put out of the settlement. The army the original raises for
                 // the target (0x00B4F090: units chosen from what the region's sArmy / rHorse / tGuns
                 // buildings allow, a new general) is not modelled. The SettlementOccupied event is
                 // kept as before (INFERRED for this path).

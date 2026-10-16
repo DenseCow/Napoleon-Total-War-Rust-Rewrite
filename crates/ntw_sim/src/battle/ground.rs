@@ -56,7 +56,8 @@ pub const GROUND_TYPE_NAMES: [&str; 25] = [
 ///   (`+0xC`) for class `artillery_foot` (1), column 1 (`+0x10`) for `artillery_horse` (2), else no
 ///   modifier (1.0, e.g. `artillery_fixed`);
 /// - mounted (`0x0055ABF0`: category cavalry 0, camels 5, or dragoons 3 not dismounted): column 2
-///   (`+0x14`), or column 3 when dismounted (`0x0055C2A0`);
+///   (`+0x14`) while it also rides and is not dismounted (`0x0055C2A0` at `0x006544AB`), else
+///   column 3 (see [`super::strength::movement_class`]);
 /// - infantry, gun crews without guns and dismounted units (`0x0055C1C0`): column 3 (`+0x18`);
 /// - anything else, or a ground index ≥ 25: 1.0.
 ///
@@ -68,7 +69,8 @@ pub enum MovementClass {
     FootArtillery,
     /// `artillery_horse` with its guns: column 1.
     HorseArtillery,
-    /// Cavalry, camels, mounted dragoons: column 2.
+    /// Cavalry, camels, mounted dragoons: column 2 while riding (column 3 when not, see
+    /// [`super::strength::movement_class`]).
     Mounted,
     /// Infantry (and dismounted units, crews without guns): column 3.
     #[default]

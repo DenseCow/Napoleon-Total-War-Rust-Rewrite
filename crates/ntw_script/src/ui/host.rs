@@ -15,6 +15,7 @@
 //!   callback set with `SetEventCallback` (CONFIRMED names; dispatch INFERRED).
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 use mlua::{Function, LightUserData, Lua, MultiValue, Table, Value, Variadic};
@@ -1202,6 +1203,20 @@ fn finish_created(
                 n.offset = (x, y);
             }
         }
+    }
+    apply_created_lists(inner, new, texts, images)?;
+    init_new(lua, inner, new);
+    Ok(())
+}
+
+/// The image and text lists a script gives when it creates a component, applied to the new
+/// subtree before its components are initialised. CONFIRMED: `CreateFromLayout` (`0x01027400`),
+/// `CreateComponentFromTemplate` (`0x010276D0`) and `CreateFromComponent` (`0x010273C0`) all hand
+/// the two lists to `0x01026F90`, which builds the component with the images and then applies
+/// the texts (`ApplyCreatedComponentStateTexts` `0x01032010`); `0x01034210` initialises it after.
+fn apply_created_lists(inner: &Inner, new: NodeId, texts: Option<Table>, images: &Value) -> mlua::Result<()> {
+    let mut w = inner.world.borrow_mut();
+    {
         // The texts table, as `ApplyCreatedComponentStateTexts` (0x01032010, CONFIRMED) applies it:
         // a NUMBER key is the empty name (`CreateUIComponentFromTemplateFromScript` 0x010171A0),
         // whose texts go to the states in order (state i gets the i-th) of the new component and,
@@ -1262,32 +1277,102 @@ fn finish_created(
                 }
             }
         }
-        // The 6th argument: image replacements "{<component id>:<n>}<path>" (CONFIRMED string
-        // shape: Recruitment.lua passes {"{" .. card_id .. ":1}" .. image_path .. ".tga"} for the
-        // card it creates; INFERRED: n is 1-based in the component's image list).
+        // The image list, CONFIRMED (disassembly, 2026-10-16). `0x01026F90` first picks the list
+        // the builder gets: when the script's first entry contains a '{' anywhere (a substring
+        // search, `0x004F32C0`) the list is passed through as given; otherwise (`0x01026E30`) it
+        // is every image path of the new subtree in build order, with the script's entries laid
+        // over it in order, an empty entry keeping the image's own path and entries beyond the
+        // last image dropped. The builder (`0x0101FC20`, reached through the manager's +0x28
+        // callback `0x00DA9340` → `0x00DA68E0`) then walks each new component's images with a
+        // counter starting at 1 and tests '{' on the list's CURRENT first entry only, per image:
+        // - first entry starts with '{' (string shape CONFIRMED: Recruitment.lua passes
+        //   {"{" .. card_id .. ":1}" .. image_path .. ".tga"}): formats the key "{%S:%d}" from
+        //   the component's id and the image's 1-based index, takes the first entry longer than
+        //   the key that starts with it, uses the rest as the image path and removes that entry.
+        //   So "{id:0}" and a non-canonical number ("{id:01}") never match, an entry with no path
+        //   is never used, the first of two entries for one image wins, and an image with no
+        //   match keeps its path and leaves the list as it was;
+        // - any other first entry (an empty one too: index 0 of an empty string reads NUL): the
+        //   image takes it as its path (empty = an untextured image) and it is removed;
+        // - an empty list: the image keeps its own path.
+        // So in a mixed list such as {'{a:1}x', 'plain'} the plain entry goes to the image built
+        // right after the one that used the keyed entry. The builder runs per component, its own
+        // images first and then its children in order (`0x00DA68E0` builds them through
+        // `0x01029480` over the children at +0x8C/+0x90, handing on the same list), so the
+        // components are visited in pre-order (the order `0x01026E30` lists the paths in) and,
+        // since a used entry is removed, two components with the same id take successive
+        // entries for the same key.
         if let Value::Table(list) = images {
+            let mut given: Vec<String> = Vec::new();
             for v in list.sequence_values::<String>() {
-                let Ok(s) = v else { continue };
-                let Some((head, path)) = s.strip_prefix('{').and_then(|r| r.split_once('}')) else { continue };
-                if path.is_empty() {
-                    continue;
+                match v {
+                    Ok(s) => given.push(s),
+                    // UNKNOWN: how the exe's list reader treats a non-string entry is untraced;
+                    // we skip it, so the entries after it move up one slot.
+                    Err(e) => inner.log_once("created-component image entry skipped", || {
+                        format!("UNKNOWN created-component image list entry that is not a string skipped; later entries move up one slot ({e}; logged once)")
+                    }),
                 }
-                let Some((cid, n)) = head.rsplit_once(':') else { continue };
-                let Ok(n) = n.trim().parse::<usize>() else { continue };
-                let target = if w.get(new).is_some_and(|x| x.data.id == cid) { Some(new) } else { w.find(new, cid) };
-                if let Some(t) = target {
-                    w.update_appearance(t, |node| {
-                        let Some(img) = n.checked_sub(1).and_then(|i| node.data.images.get_mut(i)) else { return false };
-                        img.path = path.strip_prefix("data/").unwrap_or(path).to_owned();
-                        node.painted = true;
-                        true
+            }
+            // The new components in build order (pre-order).
+            let mut order = Vec::new();
+            let mut stack = if given.is_empty() { Vec::new() } else { vec![new] };
+            while let Some(c) = stack.pop() {
+                let Some(node) = w.get(c) else { continue };
+                stack.extend(node.children.iter().rev());
+                order.push(c);
+            }
+            // Each entry with whether the script supplied it (false = the image's own path
+            // handed back by the overlay below).
+            let mut entries: VecDeque<(String, bool)> = if given.first().is_some_and(|s| s.contains('{')) {
+                given.into_iter().map(|s| (s, true)).collect()
+            } else {
+                // Laid over the subtree's own paths: with no script entry left, the builder
+                // hands every image its own path back, so the overlay is all that changes.
+                let mut slots: Vec<(String, bool)> = order.iter().filter_map(|&c| w.get(c)).flat_map(|n| n.data.images.iter().map(|i| (i.path.clone(), false))).collect();
+                for (slot, entry) in slots.iter_mut().zip(given) {
+                    if !entry.is_empty() {
+                        *slot = (entry, true);
+                    }
+                }
+                slots.into()
+            };
+            for c in order {
+                let Some(node) = w.get(c) else { continue };
+                let (id, count) = (node.data.id.clone(), node.data.images.len());
+                for n in 1..=count {
+                    let Some((first, _)) = entries.front() else { break };
+                    let (path, supplied) = if first.starts_with('{') {
+                        let key = format!("{{{id}:{n}}}");
+                        let Some(at) = entries.iter().position(|(e, _)| e.len() > key.len() && e.starts_with(&key)) else { continue };
+                        let Some((entry, supplied)) = entries.remove(at) else { continue };
+                        (strip_data_prefix(&entry[key.len()..]).to_owned(), supplied)
+                    } else {
+                        let Some((entry, supplied)) = entries.pop_front() else { break };
+                        (strip_data_prefix(&entry).to_owned(), supplied)
+                    };
+                    // INFERRED (our `UiNode::painted` model): an image the script supplied an
+                    // entry for is painted even when its path is unchanged, as `__SetImagePath`
+                    // does; an image handed its own path back is not.
+                    w.update_appearance(c, |node| {
+                        let Some(img) = node.data.images.get_mut(n - 1) else { return false };
+                        set_changed(&mut img.path, path) | (supplied && set_changed(&mut node.painted, true))
                     });
+                }
+                if entries.is_empty() {
+                    break;
                 }
             }
         }
     }
-    init_new(lua, inner, new);
     Ok(())
+}
+
+/// `path` without a leading `data/` (any case, either slash): image paths are kept relative to
+/// the data folder.
+fn strip_data_prefix(path: &str) -> &str {
+    let b = path.as_bytes();
+    if b.len() >= 5 && b[..4].eq_ignore_ascii_case(b"data") && matches!(b[4], b'/' | b'\\') { &path[5..] } else { path }
 }
 
 /// Initialises newly created components the way the exe's component initialiser `0x01034210`
@@ -2473,8 +2558,60 @@ fn destroy(lua: &Lua, inner: &Rc<Inner>, id: NodeId) -> mlua::Result<()> {
 
 /// The arguments of `Component.CreateFromComponent` / `CreateComponentFromTemplate`: the
 /// `Component` table, the source (`S`: a component address or a template name), id, parent, x, y,
-/// the format table and the texts table.
+/// the image list and the text list.
 type CreateArgs<S> = (Value, S, Option<String>, Value, Option<f32>, Option<f32>, Value, Option<Table>);
+
+/// The tail of a `Component.CreateFromLayout` call: the position (x, y), the image list and the text list.
+type LayoutCallTail = (Option<(f32, f32)>, Value, Option<Table>);
+
+/// The optional arguments of `Component.CreateFromLayout` after `path, id, parent`, read from the
+/// end the way `0x01016BD0` reads its Lua stack (CONFIRMED, disassembly): a table on top is the
+/// image list, unless the value below it is a table too, and then the top one is the text list
+/// and the one below the image list; after the tables, a number on top is y and the value below
+/// it x (each read by `0x010556D0`: rounded to an integer, ties to even, since the exe's FPU
+/// control word is RC_NEAR: `0x010F4670` sets `_controlfp_s(0xA001F)`).
+/// x, y are then the new component's offset in its parent, replacing the layout file's own
+/// offset: 0, 0 is the parent's top-left corner. Only without them is the file's absolute
+/// position kept (`0x01027400`'s no-position branch; see [`create_layout`]).
+///
+/// A non-number x below a number y is `Err` with x's type name. The exe raises no Lua error
+/// there (CONFIRMED): the number reader `0x01055700` logs "Trying to retrieve type number, found
+/// type %s" (`0x01095090` → the script error logger `0x0106BD10`, which returns) and clears the
+/// reader's ok flag, so the parent, id and path reads (`0x0044D320`, `0x01055760`) are skipped,
+/// `0x01027400` gets an empty path and a null parent and creates nothing, and the binding returns
+/// nil (`0x01085B30` → pushnil `0x00FE95A0`). The script keeps running.
+fn layout_call_tail(rest: &[Value]) -> Result<LayoutCallTail, &'static str> {
+    let mut end = rest.len();
+    let (mut images, mut texts) = (Value::Nil, None);
+    if let Some(Value::Table(top)) = end.checked_sub(1).map(|i| &rest[i]) {
+        match end.checked_sub(2).map(|i| &rest[i]) {
+            Some(below @ Value::Table(_)) => {
+                texts = Some(top.clone());
+                images = below.clone();
+                end -= 2;
+            }
+            _ => {
+                images = Value::Table(top.clone());
+                end -= 1;
+            }
+        }
+    }
+    let number = |v: Option<&Value>| match v {
+        Some(Value::Number(n)) => Some(*n as f32),
+        Some(Value::Integer(n)) => Some(*n as f32),
+        _ => None,
+    };
+    let position = match number(end.checked_sub(1).map(|i| &rest[i])) {
+        Some(y) => {
+            let below = end.checked_sub(2).map(|i| &rest[i]);
+            // Nothing below y in `rest` means the exe's next read is the parent argument.
+            let x = number(below).ok_or_else(|| below.map_or("userdata", Value::type_name))?;
+            Some((x.round_ties_even(), y.round_ties_even()))
+        }
+        None => None,
+    };
+    Ok((position, images, texts))
+}
 
 /// `Component.*` functions (act on the running component, whose address comes first).
 fn component_functions(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
@@ -2517,12 +2654,33 @@ fn component_functions(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
         Ok(())
     })?)?;
     let i5 = i.clone();
-    // CreateFromLayout(path, id, parent) → address. CONFIRMED call shape in root.lua's TransitionTo.
-    // Optional x, y (CONFIRMED 5-argument calls in Labels.lua): the new component's offset in its
-    // parent (CONFIRMED: `0x01027400` passes them in the slot its no-position branch fills with the
-    // computed offset; see `create_layout`).
-    t.set("CreateFromLayout", lua.create_function(move |lua, (_a, path, id, parent, x, y): (Value, String, Option<String>, Value, Value, Value)| {
-        let position = x.as_f64().zip(y.as_f64()).map(|(x, y)| (x as f32, y as f32));
+    // CreateFromLayout(path, id, parent [, x, y] [, images [, texts]]) → address; the optional
+    // arguments are read as [`layout_call_tail`] reads them. CONFIRMED shapes: root.lua's
+    // TransitionTo (3 arguments), Labels.lua and battle root.luac (x, y), battle_hud.luac
+    // (images), character_information.luac (x, y, images).
+    t.set("CreateFromLayout", lua.create_function(move |lua, (_a, path, id, parent, rest): (Value, String, Option<String>, Value, Variadic<Value>)| {
+        let (position, images, texts) = match layout_call_tail(&rest) {
+            Ok(tail) => tail,
+            Err(found) => {
+                // ORIGINAL BUG: one type error silences later reads (`0x01055700`). The exe's
+                // argument reader is the calling component's script context (`0x01058750`), made
+                // once per component (`0x010586B0` on +0x18, constructors `0x01050940` /
+                // `0x01050980`, the only writers that set its ok flag [ctx+4]). The readers clear
+                // the flag on a type error (`0x01055700`, `0x01055760`, `0x010557E0`,
+                // `0x01055840`, `0x010558B0`, `0x0044D320`) and nothing resets it, so after one
+                // type error every later argument read by every binding called from that
+                // component's script is skipped for the component's life (each binding then
+                // runs on its defaults: CreateFromLayout gets an empty path and a null parent and
+                // returns nil), with no further log. The readers check the flag first only to stop
+                // reading the rest of one call's arguments, and the logger (`0x01095090` →
+                // `0x0106BD10`) returns so the script keeps running; ours fails just this call
+                // and logs once.
+                i5.log_once("CreateFromLayout x type", || {
+                    format!("CreateFromLayout: Trying to retrieve type number, found type {found} (x below a number y); nothing created, nil returned (logged once)")
+                });
+                return Ok(None);
+            }
+        };
         match create_layout(lua, &i5, &path, id.as_deref(), node_of(&parent), position) {
             Ok(new) => {
                 if position.is_some()
@@ -2531,6 +2689,7 @@ fn component_functions(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
                     n.keep_size = true;
                     n.size_override = None;
                 }
+                apply_created_lists(&i5, new, texts, &images)?;
                 init_new(lua, &i5, new);
                 adopted(lua, &i5, new);
                 Ok(Some(addr(new)))
@@ -2543,10 +2702,10 @@ fn component_functions(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
     })?)?;
     // CreateFromComponent(source, id, parent, x, y, {...}, {child_id = text, ...}) → address.
     // CONFIRMED call shape (sp_load_game.lua copies its hidden "row_example" per save); INFERRED:
-    // x, y = offset in the parent, the last table sets the texts of the copy's named children;
-    // the 6th table (e.g. {"{icon:1}"}) is UNKNOWN and ignored.
+    // x, y = offset in the parent. The two tables are the image and text lists
+    // ([`apply_created_lists`], CONFIRMED: `0x010273C0` hands them to `0x01026F90`).
     let i6 = i.clone();
-    t.set("CreateFromComponent", lua.create_function(move |lua, (_a, src, id, parent, x, y, _fmt, texts): CreateArgs<Value>| {
+    t.set("CreateFromComponent", lua.create_function(move |lua, (_a, src, id, parent, x, y, images, texts): CreateArgs<Value>| {
         let Some(src) = node_of(&src) else { return Ok(None) };
         let mut created = Vec::new();
         let new = i6.world.borrow_mut().clone_subtree(src, node_of(&parent), &mut created);
@@ -2554,14 +2713,14 @@ fn component_functions(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
         for &c in &created {
             run_component_scripts(lua, &i6, c, None);
         }
-        finish_created(lua, &i6, new, id.as_deref(), (x, y), texts, &_fmt)?;
+        finish_created(lua, &i6, new, id.as_deref(), (x, y), texts, &images)?;
         adopted(lua, &i6, new);
         Ok(Some(addr(new)))
     })?)?;
     // CreateComponentFromTemplate(template, id, parent, x, y, {...}, {...}) → address: the same,
     // built from the layout `ui/templates/<template>` (40 such layouts ship; INFERRED).
     let i7 = i.clone();
-    t.set("CreateComponentFromTemplate", lua.create_function(move |lua, (_a, template, id, parent, x, y, _fmt, texts): CreateArgs<String>| {
+    t.set("CreateComponentFromTemplate", lua.create_function(move |lua, (_a, template, id, parent, x, y, images, texts): CreateArgs<String>| {
         let path = format!("ui/templates/{}", template.to_ascii_lowercase());
         // A template layout file, else the UIEd template library (INFERRED order; e.g. the
         // campaign HUD's ReviewPanelTab exists only in the library).
@@ -2601,7 +2760,7 @@ fn component_functions(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
         for &c in &created {
             run_component_scripts(lua, &i7, c, None);
         }
-        finish_created(lua, &i7, new, id.as_deref(), (x, y), texts, &_fmt)?;
+        finish_created(lua, &i7, new, id.as_deref(), (x, y), texts, &images)?;
         adopted(lua, &i7, new);
         Ok(Some(addr(new)))
     })?)?;
@@ -2772,6 +2931,15 @@ pub(crate) mod tests {
         let mut b = b"Version033".to_vec();
         comp(&mut b, 1, "root", root_script, &[], &["NewState"], &[(2, "button", script)]);
         b
+    }
+
+    /// [`layout_bytes_with_root`] with the "button" child at file offset (x, y) in the root.
+    pub(crate) fn with_button_offset(mut bytes: Vec<u8>, x: i32, y: i32) -> Vec<u8> {
+        let id = b"\x06\x00button";
+        let at = bytes.windows(id.len()).position(|w| w == id).expect("the test layout's button") + id.len();
+        bytes[at..at + 4].copy_from_slice(&x.to_le_bytes());
+        bytes[at + 4..at + 8].copy_from_slice(&y.to_le_bytes());
+        bytes
     }
 
     #[test]
@@ -3813,5 +3981,129 @@ pub(crate) mod tests {
         host.pulse(1.0);
         assert_eq!(env.get::<String>("seen").unwrap(), "14", "made once");
         no_errors(&host);
+    }
+
+    /// A created component's image list matches the exe's builder (`0x0101FC20`, CONFIRMED): the
+    /// key "{id:n}" uses the image's 1-based index, so "{id:0}" and "{id:01}" match nothing; the
+    /// first entry for an image wins; an entry with no path is never used.
+    #[test]
+    fn created_component_image_keys_are_1_based_and_the_first_entry_wins() {
+        let source = ScriptSource::empty().with_memory_file("ui/test/page", layout_bytes_with_root("", ""));
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
+        let root = host.load_root_layout("ui/test/page").unwrap();
+        let button = host.world().find(root, "button").unwrap();
+        let set_images = || {
+            let img = |path: &str| ntw_formats::ui_layout::UiImage { path: path.to_owned(), ..Default::default() };
+            host.inner.world.borrow_mut().get_mut(button).unwrap().data.images = vec![img("a.tga"), img("b.tga")];
+        };
+        let paths = || host.world().get(button).unwrap().data.images.iter().map(|i| i.path.clone()).collect::<Vec<_>>();
+        let apply = |code: &str| {
+            let list: Value = host.lua().load(code).eval().unwrap();
+            apply_created_lists(&host.inner, root, None, &list).unwrap();
+        };
+        set_images();
+        apply("return {'{button:0}zero.tga', '{button:01}lead.tga', '{button:2}'}");
+        assert_eq!(paths(), ["a.tga", "b.tga"], "index 0, a non-canonical index and an empty path match nothing");
+        apply("return {'{button:2}first.tga', '{button:2}second.tga', '{button:1}data/ui/one.tga'}");
+        assert_eq!(paths(), ["ui/one.tga", "first.tga"], "1-based; the first entry for an image wins");
+        no_errors(&host);
+    }
+
+    /// The positional and mixed image lists, CONFIRMED (`0x01026F90`, `0x01026E30`,
+    /// `0x0101FC20`): a first entry with no '{' anywhere lays the entries over the subtree's own
+    /// image paths in build order (an empty entry keeps the image's path, extra entries are
+    /// dropped); otherwise the list is used as given. Per image the builder tests '{' on the
+    /// list's current first entry only: keyed lookup when it starts with '{', else the image
+    /// takes that entry (an empty one leaves it untextured).
+    #[test]
+    fn created_component_image_list_tests_the_current_first_entry_per_image() {
+        let source = ScriptSource::empty().with_memory_file("ui/test/page", layout_bytes_with_root("", ""));
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
+        let root = host.load_root_layout("ui/test/page").unwrap();
+        let button = host.world().find(root, "button").unwrap();
+        let reset = || {
+            let img = |path: &str| ntw_formats::ui_layout::UiImage { path: path.to_owned(), ..Default::default() };
+            let mut w = host.inner.world.borrow_mut();
+            let r = w.get_mut(root).unwrap();
+            r.data.id = "card".to_owned();
+            r.data.images = vec![img("r.tga")];
+            w.get_mut(button).unwrap().data.images = vec![img("a.tga"), img("b.tga")];
+        };
+        let paths = |c| host.world().get(c).unwrap().data.images.iter().map(|i| i.path.clone()).collect::<Vec<_>>();
+        let apply = |code: &str| {
+            reset();
+            let list: Value = host.lua().load(code).eval().unwrap();
+            apply_created_lists(&host.inner, root, None, &list).unwrap();
+            (paths(root), paths(button))
+        };
+        let (r, b) = apply("return {'{button:1}x.tga', 'plain.tga'}");
+        assert_eq!((r, b), (vec!["r.tga".to_owned()], vec!["x.tga".to_owned(), "plain.tga".to_owned()]), "mixed: the plain entry goes to the next image");
+        let (r, b) = apply("return {'data/ui/p1.tga', '', 'p3.tga', 'extra.tga'}");
+        assert_eq!((r, b), (vec!["ui/p1.tga".to_owned()], vec!["a.tga".to_owned(), "p3.tga".to_owned()]), "positional: an empty entry keeps the path");
+        let (r, b) = apply("return {'p1.tga', '{button:2}k.tga'}");
+        assert_eq!((r, b), (vec!["p1.tga".to_owned()], vec!["a.tga".to_owned(), "k.tga".to_owned()]), "a keyed entry reached in a positional list");
+        let (r, b) = apply("return {'a{b.tga', ''}");
+        assert_eq!((r, b), (vec!["a{b.tga".to_owned()], vec![String::new(), "b.tga".to_owned()]), "a '{{' not at the start passes the list through");
+        no_errors(&host);
+    }
+
+    /// Only images the script supplied an entry for are painted (our INFERRED `UiNode::painted`
+    /// model, as `__SetImagePath` paints even when the path is unchanged): an image handed its
+    /// own path back (an empty positional entry, past the list's end, no keyed match) is not.
+    /// A non-string entry is skipped and logged once.
+    #[test]
+    fn created_component_image_list_paints_only_supplied_entries() {
+        let source = ScriptSource::empty().with_memory_file("ui/test/page", layout_bytes_with_root("", ""));
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
+        let root = host.load_root_layout("ui/test/page").unwrap();
+        let button = host.world().find(root, "button").unwrap();
+        let painted = |c| host.world().get(c).unwrap().painted;
+        let apply = |code: &str| {
+            {
+                let img = |path: &str| ntw_formats::ui_layout::UiImage { path: path.to_owned(), ..Default::default() };
+                let mut w = host.inner.world.borrow_mut();
+                let r = w.get_mut(root).unwrap();
+                r.data.id = "card".to_owned();
+                r.data.images = vec![img("r.tga")];
+                r.painted = false;
+                let b = w.get_mut(button).unwrap();
+                b.data.images = vec![img("a.tga"), img("b.tga")];
+                b.painted = false;
+            }
+            let list: Value = host.lua().load(code).eval().unwrap();
+            apply_created_lists(&host.inner, root, None, &list).unwrap();
+            (painted(root), painted(button))
+        };
+        assert_eq!(apply("return {'', 'a.tga'}"), (false, true), "positional: pass-through does not paint; a supplied same path does");
+        assert_eq!(apply("return {'{button:1}a.tga'}"), (false, true), "keyed: an unmatched image is not painted");
+        assert_eq!(apply("return {''}"), (false, false), "an empty positional entry is pass-through");
+        no_errors(&host);
+        apply("return {'p1.tga', {}, 'p2.tga'}");
+        assert_eq!(host.world().get(button).unwrap().data.images[0].path, "p2.tga", "the non-string entry is skipped");
+        apply("return {{}}");
+        let log = host.take_log();
+        assert_eq!(log.iter().filter(|l| l.contains("image list entry that is not a string")).count(), 1, "logged once: {log:#?}");
+    }
+
+    /// Two new components with the same id take successive entries for the same key: the exe's
+    /// builder (`0x0101FC20`, CONFIRMED) removes each entry it uses and builds a component's own
+    /// images before its children (pre-order), so the parent gets the first entry and the child
+    /// the next.
+    #[test]
+    fn created_component_image_entries_are_used_up_in_build_order() {
+        let source = ScriptSource::empty().with_memory_file("ui/test/page", layout_bytes_with_root("", ""));
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
+        let root = host.load_root_layout("ui/test/page").unwrap();
+        let button = host.world().find(root, "button").unwrap();
+        for c in [root, button] {
+            let mut w = host.inner.world.borrow_mut();
+            let n = w.get_mut(c).unwrap();
+            n.data.id = "card".to_owned();
+            n.data.images = vec![ntw_formats::ui_layout::UiImage { path: "old.tga".to_owned(), ..Default::default() }];
+        }
+        let list: Value = host.lua().load("return {'{card:1}first.tga', '{card:1}second.tga', '{card:1}third.tga'}").eval().unwrap();
+        apply_created_lists(&host.inner, root, None, &list).unwrap();
+        let path = |c| host.world().get(c).unwrap().data.images[0].path.clone();
+        assert_eq!((path(root), path(button)), ("first.tga".to_owned(), "second.tga".to_owned()));
     }
 }

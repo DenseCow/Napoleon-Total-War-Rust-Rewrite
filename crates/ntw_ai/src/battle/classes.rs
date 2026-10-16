@@ -81,12 +81,6 @@ pub fn codes(u: &LandUnit) -> (u8, u8) {
     }
 }
 
-/// `0x0055ABF0` (CONFIRMED): mounted = category cavalry or camels, or dragoons not using
-/// ability 0xF (INFERRED: dismounted; the model has no abilities, so dragoons count as mounted).
-pub fn is_mounted(cat: u8) -> bool {
-    matches!(cat, category::CAVALRY | category::CAMELS | category::DRAGOONS)
-}
-
 /// True when `t` faces towards `from` (its facing vector · (from − t) > 0). INFERRED direction:
 /// the only reading under which light cavalry's ×0.1 / ×1.5 rule avoids frontal charges.
 pub fn faces(t: &LandUnit, from: (f32, f32)) -> bool {
@@ -168,7 +162,10 @@ pub fn missile_class_factor(att: &LandUnit, tgt: &LandUnit, units_near_target: u
             if dot < 0.0 { 0.0 } else { 1.0 }
         }
         class::INFANTRY_LINE if line_target => 2.0,
-        class::INFANTRY_SKIRMISHERS if !is_mounted(acat) => {
+        // INFERRED predicate: the exe tests `0x0055C1C0` here (on foot: infantry, artillery without
+        // guns, or `dismount` active), which ours does not have; not mounted (`0x0055ABF0`) gives the
+        // same for every infantry-category skirmisher.
+        class::INFANTRY_SKIRMISHERS if !ntw_sim::battle::strength::mounted(att) => {
             if line_target { 4.0 } else { 2.0 }
         }
         _ => 1.0,

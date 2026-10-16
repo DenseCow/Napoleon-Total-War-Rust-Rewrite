@@ -1051,7 +1051,7 @@ pub fn trade_detail(m: &ntw_sim::campaign::CampaignModel) {
         let model = ntw_sim::campaign::economy::trade_routes_value(m, f.id);
         let tag = if stored == Some(model) { "OK" } else { "DIFF" };
         if stored != Some(model) {
-            for b in ntw_sim::campaign::economy::trade_partners(m, f.id) {
+            for b in ntw_sim::campaign::economy::trade_route_importers(m, f.id) {
                 let key = m.world.factions.get(&b).map_or("?", |x| x.key.as_str());
                 let loaded = m.world.trade_paths.get(&(f.id, b)).map(|p| p.iter().map(|x| (x.waypoints.iter().any(|w| w.sea), x.volumes.clone(), m.trade_path_blockaded(f.id, x))).collect::<Vec<_>>());
                 println!("    {key}: pair {} loaded {:?} built {}", ntw_sim::campaign::economy::trade_pair_value(m, f.id, b), loaded, m.build_trade_route(f.id, b).is_some());
@@ -1331,7 +1331,8 @@ pub fn prices_detail(m: &ntw_sim::campaign::CampaignModel, esf: &EsfFile) {
 }
 
 /// `ECON_CAPS=1`: per faction, its international routes with / without a sea hop next to the sea
-/// cap of its capital's buildings (`trade_routes_mod_max_sea`) and of all its regions.
+/// cap of its capital's buildings (`trade_routes_mod_max_sea`) and of all its regions, and its capital port and sea
+/// route counts against their caps (`0x008DC360` / `0x008DC150`).
 #[allow(dead_code)]
 pub fn caps_detail(m: &ntw_sim::campaign::CampaignModel) {
     use ntw_sim::campaign::economy::building_effect;
@@ -1344,7 +1345,10 @@ pub fn caps_detail(m: &ntw_sim::campaign::CampaignModel) {
         let cap_of = |r: &ntw_sim::campaign::Region| -> f32 { r.buildings().map(|b| building_effect(&m.rules, &b.level_key, "trade_routes_mod_max_sea")).sum() };
         let capital = m.world.capital(f.id).and_then(|c| m.world.regions.get(&c)).map_or(0.0, cap_of);
         let all: f32 = m.world.regions.values().filter(|r| r.owner == f.id).map(cap_of).sum();
-        println!("{:<24} routes {} sea {} land {} | sea cap capital {capital} all regions {all} bfs {} {}", f.key, routes.len(), sea, routes.len() - sea, m.sea_route_cap(f.id), if sea as i32 > m.sea_route_cap(f.id) { "OVER" } else { "" });
+        let (cap_routes, sea_routes) = m.trade_route_counts(f.id);
+        let (cap_cap, sea_cap) = (m.capital_port_route_cap(f.id) as u32, m.sea_route_cap(f.id) as u32);
+        let over = if cap_routes > cap_cap || sea_routes > sea_cap { "OVER" } else { "" };
+        println!("{:<24} routes {} sea {} land {} | sea cap capital {capital} all regions {all} | capital port {cap_routes}/{cap_cap} sea {sea_routes}/{sea_cap} {over}", f.key, routes.len(), sea, routes.len() - sea);
     }
 }
 
@@ -1624,7 +1628,7 @@ pub fn split_check(m: &ntw_sim::campaign::CampaignModel) {
             }
             for (i, p) in paths.iter().enumerate() {
                 n += 1;
-                let model = m.trade_path_volumes(split.as_ref(), *b, p);
+                let model = m.trade_path_volumes(split.as_ref(), a, *b, p);
                 if model == p.volumes {
                     ok += 1;
                 } else {

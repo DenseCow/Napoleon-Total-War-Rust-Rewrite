@@ -37,43 +37,8 @@ Component = setmetatable({}, {
     end,
 })
 
--- Image lists given to CreateComponentFromTemplate (6th argument) and CreateFromLayout (4th):
--- "{<component id>:<n>}<path>" (CONFIRMED forms: review_DY.lua "{" .. CardID .. ":1}" .. Portrait
--- .. ".tga"; battle_hud.lua "{flagR_dy:1}" .. FlagPath .. "/HUD_right.tga"). INFERRED: <path>
--- replaces image <n> (1-based) of the component with that id in the new subtree.
-local function find_in(a, id)
-    local c = UIComponent(a)
-    if c == nil then return nil end
-    if c:Id() == id then return a end
-    local f = c:Find(id)
-    return f
-end
-local function apply_images(new, images)
-    if new == nil or type(images) ~= "table" then return end
-    for _, spec in ipairs(images) do
-        local id, n, path = nil, nil, nil
-        if type(spec) == "string" then id, n, path = string.match(spec, "^{([^:}]*):(%d+)}(.+)$") end
-        if path then
-            local target = find_in(new, id)
-            if target ~= nil then
-                path = string.gsub(path, "^[Dd][Aa][Tt][Aa][/\\]", "")
-                __ui.__SetImagePath(addr_of(target), math.max(tonumber(n) - 1, 0), path)
-            end
-        end
-    end
-end
-local create_from_template = __comp.CreateComponentFromTemplate
-__comp.CreateComponentFromTemplate = function(a, template, id, parent, x, y, images, texts)
-    local new = create_from_template(a, template, id, parent, x, y, images, texts)
-    apply_images(new, images)
-    return new
-end
-local create_from_layout = __comp.CreateFromLayout
-__comp.CreateFromLayout = function(a, path, id, parent, images)
-    local new = create_from_layout(a, path, id, parent)
-    apply_images(new, images)
-    return new
-end
+-- Component.CreateFromLayout / CreateComponentFromTemplate take their x, y and image and text
+-- lists in the host (crates/ntw_script/src/ui/host.rs, layout_call_tail / apply_created_lists).
 
 -- Calls a global function of whichever component environment defines it.
 function __ntw_battle_call_global(name, ...)

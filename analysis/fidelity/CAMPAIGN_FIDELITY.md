@@ -832,13 +832,20 @@ Recomputed for every owned region at the round end (then `tw += growth`, 0x00AB4
 - **Sea route cap** (0x008DC150; code `CampaignModel::sea_route_cap`, used by `build_trade_route`): a breadth-first walk
   from the capital (faction +0x72C) over the region neighbour list (game region +0x20 count / +0x24 array) through
   regions the faction owns (neighbour +0xF4 owner = faction). Each region reached adds Σ over its slots (region +0x128)
-  of `trade_routes_mod_max_sea` (effect 0x43) of the slot's building (0x00AAF770: any building, integer; trading ports
+  of `trade_routes_mod_max_sea` (effect 0x43) of the slot's building (GetSlotBuildingSeaRouteCapBonus 0x00AAF770: any building, integer; trading ports
   3 / 4 / 5). CONFIRMED walk.
-  - **The capital counts** (INFERRED, against the literal reading): the listing starts the walk with +0x72C already
-    visited, so the capital would add nothing. But every vanilla save needs it: Britain keeps 7 sea routes with all
-    its trading ports in England, and Denmark, Portugal, Sweden, the Netherlands and Mecklenburg fit only with their
-    capital's port. With the capital, no faction of the 8 vanilla saves is over its cap (`ECON_CAPS`). The land walk and
-    the all-regions sum give the same cap for every faction in these saves.
+  - **The capital has its own cap** (broadcasters3, CONFIRMED): the walk starts with +0x72C already visited, so
+    0x008DC150 leaves the capital out (code `sea_route_cap`). The capital's port has a separate cap, 0x008DC360
+    (code `capital_port_route_cap`): the capital region's cap (0x00AAF770) when it has an export port (HasRegionExportPort 0x00A6CA70),
+    else 0. Routes out of the capital's port count against it, the others with a sea hop against the sea cap
+    (0x00BA42E0's counts; `TradePath::capital_port`, saved since own-save format 5, derived for older saves). The
+    old reading (capital included in one sea cap) fitted the saves only because the two caps add up: with the split,
+    no faction of the 8 vanilla saves is over either cap (`economy_check` `caps_detail`).
+  - **Compiled bonuses, not DB keys** (CONFIRMED): 0x00AAF770 reads compiled basic bonus `trade_route_cap_sea`
+    (effect 0x43; DB key `trade_routes_mod_max_sea` in vanilla), and the export port test 0x00A6CA70 → 0x00A797B0
+    reads `commodity_export_vol` (effect 2; DB key `export_capacity_port`), both through
+    `effect_bonus_value_basic_junction`. Code `CampaignModel::building_local_bonus`: a mod mapping another key to
+    these bonuses works.
   - **Neighbours** (round 6) come from `regions.esf`: every outline edge run has a `connectivity` triple {u32 region
     index << 16 | area index, first vertex, last vertex}. Self references, 0xFFFF and non-game regions (seas, the
     river region `all`, `eur_lakes`, the map edges) drop out. `World::region_neighbours`, loaded by
@@ -846,8 +853,109 @@ Recomputed for every owned region at the round end (then `tw += growth`, 0x00AB4
     neighbours, islands have none, and the lists are symmetric. Without the map every owned region counts
     (PROVISIONAL fallback).
   - A new route may use the sea only below the cap. No land cap was found: France holds 5 land routes with no cap
-    effect. Other callers of 0x008DC150 (0x00BCB020 prices, 0x00BA0490, 0x00BA42E0, 0x00BBA4F0, 0x00BC7910) are not
-    read.
+    effect. Other callers of 0x008DC150 (0x00BCB020 prices, 0x00BA0490, 0x00BBA4F0, 0x00BC7910) are not read;
+    0x00BA42E0 is (below).
+- **Route check** (0x00BA42E0, broadcasters3, CONFIRMED; code `trade_check::trade_route_check`, seam
+  `trade.route_check`): 0 when either side has no capital; 1 for a land path; 3 for a capital-port path while the
+  capital-port count is under 0x008DC360; 2 for a sea path while the sea count is under 0x008DC150; with both full, the
+  swaps 4 / 6 / 5 / 7 (an open sea or capital-port route whose importer is also reached by land frees its slot).
+  - Path search FindTradePathBetweenCapitals 0x00BB1260 with neighbours GetTradePathNeighbourNodes 0x00BB0240 (a node
+    is a region plus a sea-hop flag; it is started on network g_dwTradePathTypeSeaLeg 0x015F1670, capital port, start
+    node flagged as a sea hop; g_dwTradePathTypeLandLeg 0x015F1674, sea; or 0x015F1AF8, land only): land neighbours
+    owned by `b`, or by `a` except `a`'s capital on 0x015F1670 (0x015F1674 and 0x015F1AF8 let land paths re-enter it).
+    Sea hops (none on 0x015F1AF8) leave only a region with an export port: to every other port of `a` that is not full
+    (IsTradePortFull) and, on 0x015F1674, is not `a`'s capital; and to every port of `b` except its capital whose cap
+    less `b`'s own routes leaving that port is not 0, or `b` has no exporter entry. All hops are within
+    `trade_route_internat_sea_length_limit` (1e8 in vanilla). `b`'s capital is entered only over land.
+  - Port full IsTradePortFull 0x00BB4F80: the owner (region +0xF4) is looked up in the exporter map (+0x11C, find 0x00BB0980); no
+    entry → not full, even with a cap of 0. Else the region cap as a u32, less one per owner route whose first sea
+    hop leaves it, is 0; an over-full port wraps and is not full. Entries are made by operator[] 0x00B9E480 (loader
+    0x00B89270, 0x00BA0490, 0x00BC0120, 0x00BC02B0, 0x00BC26D0) and never erased (none seen); the model's map drops
+    a pair with no route, so "no entry" is "exports no route" here (the rebels included). Gap (tradebreak,
+    CONFIRMED in the exe, not fixed in ours): the supply split 0x00BC26D0 ends with operator[] (at 0x00BC3699) for
+    every faction of the world faction list, so after any split every world faction has an entry and "no entry → not
+    full" no longer happens for them; a 0-cap export port with no routes reads full in the exe, not here. Vanilla's
+    export ports all have caps of 3-5 (pTrade1-3, pSupplySpain1-3, pTradeTutorial1), so only a mod sees it (BACKLOG).
+  - The counts are compared with the caps unsigned (JC/JNC at 0x00BA4439, 0x00BA4485, 0x00BA461F, 0x00BA4718; the
+    equality tests at 0x00BA462D, 0x00BA4727): a negative cap (a mod's negative bonus) is never reached. Counts stay
+    0 when the exporter has no entry (0x00898B40 at 0x00BA43D1). Test `route_check_negative_cap_is_never_reached`.
+  - The capital-port (g_dwTradePathTypeSeaLeg 0x015F1670) and sea (g_dwTradePathTypeLandLeg 0x015F1674) networks
+    differ in the start node's sea flag and in `a`'s capital: on 0x015F1670 it is not re-entered over land but is a
+    sea target; on 0x015F1674 it is re-entered over land but is never a sea target (0x00BB0240). Each rule bars only
+    the capital node that is not the start node (0x00B85160 / 0x00B849C0 match nodes by region and flag), so both reach
+    the same regions; the per-hop cost (0x00BC9FB0, its type picked from the hop at 0x00B84AE7–0x00B84B16, not from the
+    network) is the same on both. In the model they are one search and codes 5 / 7 never come back (INFERRED to agree
+    in practice; the original's cached pair entries can differ).
+- **Route loss** (0x00BBE1A0 ← owner change 0x00A64E87 when the old owner is not the rebels, broadcasters3,
+  CONFIRMED; code `trade_routes_after_region_lost`, called from `change_region_owner`): every route with a waypoint
+  in the region costs its pair one route each way (0x00BC02B0 remove-first; the partner is the old owner when the
+  route ends there, else the importer). Then for each pair: route check 0 either way, both in the game and still
+  trading → `BreakTradeBothWays` 0x00B73430 (the `break_trade` broadcast); else a new route each way (0x00BA0490; the
+  model builds routes when trade is valued, PROVISIONAL). Tests in `trade_check.rs`.
+  - **ORIGINAL BUG** (0x00BBE1A0): a route ending in the region whose importer is not the old owner, with no route
+    to remove in either direction, is found again forever (the game hangs). Ours removes that route itself.
+  - The third argument is the OLD owner: the caller reads region +0xF4 (0x006649C0 at 0x00A64D06,
+    reloaded at 0x00A64E28) before the transfer and pushes it at 0x00A64E7C; inside 0x00BBE1A0 the
+    region's 0x006649C0 is the new owner. So step 1 (no capital → listener +0x38) and the partner
+    for a route ending in the region use the old owner; the pair cache and the final refresh
+    (0x00BAC0D0, 0x00BBDBA0) cover both. Ghidra's parameter and plate were corrected to
+    pOldOwnerFaction (fix round).
+  - Scan order: the exe walks its exporter hash map; the model goes by faction id (INFERRED; only the event order
+    differs).
+  - Not modelled (BACKLOG): the price update 0x00BCB020 the exe runs at once (the model at the round end); the
+    pair-path cache 0x00BBDBA0 / 0x00BAC0D0; the listener handlers 0x00BB9410 and 0x00BB9B90 (vtables
+    0x0137FA44..0x0137FA74, set by 0x00B89270 / 0x00B8E190 / 0x00B976B0; events not identified). 0x00BB9410 takes a
+    faction F: it removes one route each way with every importer partner (RemoveFirstTradeRouteToImporter 0x00BC0120), and when F has a capital
+    re-checks each pair with 0x00BA42E0, breaking (0x00B73430) or rebuilding (0x00BA0490) as above.
+- **Agreement breaks remove one route each way** (tradebreak, CONFIRMED; code `break_trade`, `break_trade_both_ways`,
+  both through `remove_first_trade_route`; tests `breaking_trade_*` in `trade_check.rs`):
+  - `break_trade` = BreakTradeAgreementWithFaction 0x00B29BB0 (callers: 0x00B27070, EmbargoFactionTradeForRequester
+    0x00B28DB0, 0x00C18DE5): a→b CancelTradeAgreementOnRelation 0x00B13C30, b→a EndTradeAgreementForBrokenPartner
+    0x00B733B0 (as 0x00B13C30 but the record's trade_broken comes from the `trade_broken` event), each calling
+    RemoveFirstTradeRouteToImporter 0x00BC0120 once; then the price update 0x00BCB020(0), 0x00A26E90, events +0x840 and +0x3A8.
+    `break_trade_both_ways` = BreakTradeBothWays 0x00B73430: 0x00B13C30 on both records.
+  - "First" route: 0x00BC0120 walks the exporter's vector (map +0x11C; count +8, data +0xC, 0x84 bytes) from index 0
+    and erases the first route whose importer (0x00B27680(1)) matches, with the order-keeping erase 0x00BAC2A0; routes
+    are appended by the loader 0x00B89270 (file order) and the builder 0x00BA0490. Ours: the pair's `Vec` in the same
+    order, `remove(0)`. The erase then runs 0x00BD1020, the route-change event (+0x8C → +8 → +0x498, slot +8) and
+    0x00BBDBA0(exporter) (pair cache, not kept in ours).
+  - Routes left behind stay in the exporter's vector until a later break (oldest first), the route loss 0x00BBE1A0,
+    or the listeners 0x00BB9410 / 0x00BB9B90. They keep earning in the exe: the split 0x00BC26D0 (via 0x00BBD870)
+    shares supply only to partners with the agreement (+0x788), but 0x00BBD870 recomputes every route with 0x00B15B50
+    (accumulated + commodity, 0 here, + resource + GDP part 0x00B3F8F0; 0 when blockaded), and the income 0x00BB3490
+    sums every route of the exporter (0x00B79B20); the accumulation 0x00B05CC0 (from 0x00BCB020 at 0x00BCC5DA) walks
+    every route too. Ours now does the same (leftroutes, below).
+- **Routes left after a break keep earning** (leftroutes, CONFIRMED; code `economy::trade_route_importers`,
+  `trade_routes_value`, `accumulate_trade_with`, `CampaignModel::trade_path_volumes`, `trade_home_value`; tests
+  `a_route_left_after_a_broken_agreement_keeps_earning` (ntw_sim), `..._still_earns_after_a_load` (own save)):
+  - GetFactionInternationalTradeIncome 0x00BB3490 (economics category 2, caller 0x00BBD7C0): finds the exporter's
+    entry in the trade manager map +0x11C (0x00BB0980) and sums GetTradeRouteNetValue 0x00B79B20 over every route in
+    it (count +0x14, data +0x18, 0x84 bytes); no agreement, war or importer check. 0x00B79B20: 0 when blockaded
+    (0x00B12050), else route +0x28 (value) minus the second dword of each 8-byte entry of the vector +0x60/+0x64.
+  - Home term, only for campaign `spa_napoleon` and faction `spa_france` (strings compared in 0x00BB3490): plus each
+    domestic route ending in the capital (map +0x104, 0x68 bytes, filter 0x00A8B5A0): volume (0x00B1D1C0) × price
+    (trade manager +0xBC, count +0xB8); minus Σ current volume (0x008AFAA0) × price over every international route of
+    the exporter, blockaded or not (an SSE4 pmulld loop when g_nIsaAvailable > 1, same result).
+  - RecomputeAllInternationalTradeRoutes 0x00BBD870: the split 0x00BC26D0 (first ClearTradeRouteVolumes 0x00B1C1A0
+    on every route, then shares only to partners with +0x788), 0x00B67300 on every route, then 0x00B15B50 on every
+    route. So a leftover route has volume 0 and commodity part 0 but keeps its GDP part and its accumulated value;
+    AccumulateTradeRouteValue 0x00B05CC0 adds trunc((effect 0x32 × 0.01 + 1) × var 4 × (+0x2C + +0x30 + +0x34)) to
+    its +0x3C each round. Nothing in the split, the price update 0x00BCB020 or the turn pass prunes routes without
+    an agreement.
+  - Ours: `trade_route_importers(a)` = every importer with a stored route from `a`, plus the `trade_partners` (built
+    route or test fallback), is the one list income, accumulation, the home term and the TradeInfo UI walk. A
+    non-partner's route volumes are 0 also without a known supply (`trade_path_volumes` takes the exporter). The home
+    term subtracts this turn's volumes over those routes (was: the loaded volumes of the stored routes).
+  - Divergence kept: the accumulated value is per pair (`World::trade_accumulated`), per route (+0x3C) in the exe; an
+    erased route (0x00BAC2A0) loses its share there, here the pair keeps it (PROVISIONAL in `accumulate_trade`,
+    BACKLOG). The 0x00B79B20 deduction vector (+0x60) is not modelled (its writers are not traced; BACKLOG).
+  - Checked: `ECON_TRADE` over the 12 evidence saves unchanged line for line (336 OK, 20 DIFF in our own nr* saves as
+    before); `trade_check` finds no saved pair with more than one route, so no save holds a leftover route yet.
+  - No ORIGINAL BUG: earning on leftover routes is the exe's consistent behaviour, not a contradiction of its data.
+  - The empty exporter entry 0x00BC0120's lookup (operator[] 0x00B9E480) can create is observable only through the `trade_port_full` gap (see "Port full" above): route counts
+    and income read it as no routes; 0x00B29BB0's price update 0x00BCB020 reaches 0x00BBD870 on every path (call at
+    0x00BCC52F; 0x00BD1020 at 0x00BCC5F8 likewise) and its split gives every world faction an entry anyway (see
+    "Port full" above). Not modelled.
 
 ## Capture: occupy, loot, liberate (round 9; code `ntw_sim::campaign::capture`)
 CONFIRMED from the exe unless tagged. The module docs hold the formulas; this is the map of the code.
@@ -929,9 +1037,10 @@ pending, +0x99 surrender, +0x9A / +0x9B skip the choice). Its slot 9 `0x008F8D00
   the screen fills `SettlementLootingOptions` (`0x00A13DB0` → `0x009AB1B0`);
 - otherwise choice 1; then `0x008C0310(choice)`.
 
-**Option structs** (report +0x14, +0x40, +0x6C; 0x2C bytes each): {+0 cap, +4 count, +8 (building, value) list, +0xC
-money, +0x10 town wealth after, +0x14 / +0x18 public order previews (`0x00A61400` / `0x00A610C0` on a copy of the region
-after `0x00AAA5B0`), +0x1C public-order reduction, +0x20 flag}. The third struct's flag (+0x90) and faction (+0x94) mark
+**Option structs** (report +0x14, +0x40, +0x6C; 0x2C bytes each): {+0 vector header, +4 capacity, +8 count, +0xC
+(building, value) list, +0x10 money, +0x14 town wealth after, +0x18 / +0x1C public order previews (`0x00A61400` /
+`0x00A610C0` on a copy of the region after `0x00AAA5B0`), +0x20 public-order reduction, +0x24 flag, +0x28 liberation
+faction}. The third struct's flag (+0x90) and faction (+0x94) mark
 a liberation; `0x008C0310(2)` loots when +0x94 is 0.
 
 **Preview `0x00B14930`:**
@@ -1630,7 +1739,7 @@ garrison join. Round 15's read of `0x00B71FB0` (1523 bytes, the queue tick) sett
   `diplomacy_strings_string_offer_or_demand_single_payment` ("Single payment: %d"), else `…_regular_payment`
   ("Regular payment: %d. Turns: %d"), both with |amount|. **When:** the record copies the deal through
   `ApplyDealToNegotiationRecord` `0x00C49AA0`, from the propose commands (`0x00933CC0`, `0x009340A0`), the AI's
-  evaluation (`0x00AA5ED0` → `0x00CC58C0`) and `0x00C1E240`; so the cap uses the proposer's treasury when the payment
+  evaluation (`EvaluateProposedNegotiationDealAI 0x00AA5ED0` → `0x00CC58C0`) and `0x00C1E240`; so the cap uses the proposer's treasury when the payment
   is proposed, and the panel row, the AI's value and the applied deal all read the capped record. The slot-0x14 offer
   text getter `0x00C123F0` returns the text for a negative amount, the slot-0x4 demand text getter `0x00C11F20` for a
   positive one; slot +0x2C `0x00C12640` reports items while the amount is not 0; slot +0x4C `0x00C5CBC0`
@@ -1756,6 +1865,26 @@ garrison join. Round 15's read of `0x00B71FB0` (1523 bytes, the queue tick) sett
 - **Commands:** `CCQ_REPAIR_NAVAL_UNIT` (executor `0x00937040`) orders; `CCQ_TOGGLE_REPAIR_NAVAL_UNIT`
   (`0x009387A0`) cancels a flagged ship or orders. The executors only test that the unit is a ship; ours also run
   `can_repair_ship` (what every issuer tests first), so a repeated command does not charge twice.
+- **The UI (shiprepair, 2026-10-16, static trace, CONFIRMED unless tagged):** the button is `navy_repair` in
+  `ui/campaign ui/layout`; its script `layout.navy_repair.luac` calls `Army.ReplenishUnits()` on a click unless the
+  state is "inactive" (army.lua:591: `CampaignUI.ToggleReplenishUnit(card.Address)` for every selected card). Shown by
+  `ShowNavyButtons` (army.lua:1172) when the player controls the force; "inactive" when nothing is selected, or when
+  no selected card needs it (army.lua:937: some card `Replenishable` and not `Replenished`) and not all selected are
+  already ordered (army.lua:907: every card `Replenished`); the tooltip (army.lua:1269) sums `RepairCost` and asks
+  `CampaignUI.PlayerHasFunds`. Handler `0x009F9D60` (`HandleCampaignUIToggleReplenishUnit`, registered `0x0042A950`):
+  a ship (the unit's own type, CONFIRMED: vtable slot +0x20 returns the unit in the land vtable `0x01355494` and null in
+  the naval one `0x0135552C`) appends `CCQ_TOGGLE_REPAIR_NAVAL_UNIT` (id `g_dwCcqToggleRepairNavalUnitId` `0x015C3744`) and returns
+  unit +0x168 == 0; a land unit appends `CCQ_TOGGLE_REPLENISH_UNIT` (`0x015C3750`) and returns the replenish query
+  `0x00B78090` == 0. The card fields come from the ship snapshot `0x008DF820` (+0xE5 = unit +0x168, +0xE6 =
+  `0x008B3120`, +0xE8 = cost `0x008EA2F0`, +0xEC = `0x008CE990` → `0x0055ACC0`); the land snapshot `0x008DF190`
+  zeroes all four; the card writer `WriteUnitCardSnapshotToLuaTable` `0x009AA5E0` names them `Replenished`, `Replenishable`, `RepairCost`,
+  `NeedsRepair`. Ours: `unit_entry` (ntw_script `ui/campaign/army.rs`) fills the four from `ship_state`,
+  `can_repair_ship` and `ship_repair_cost` for a navy, false/0 for an army; `CampaignUI.ToggleReplenishUnit` pushes
+  `ToggleShipRepair` for a unit whose own record is naval (`CampaignRules::is_naval_unit`) and returns the flag's inverse (test
+  `the_repair_button_reads_the_models_repair_state_and_toggles_the_order`). The land branch (land replenishment) is
+  not modelled: it logs once and returns false (PROVISIONAL; vanilla never calls it, the land card's fields being 0).
+  `layout.navy_repair`'s OnDestroyed calls `army_manager.OnRepairButtonDestroyed`, which army.lua never defines (an
+  original script error; our host does not dispatch OnDestroyed yet).
 - **Cancel-all** `0x008B36D0`: the order off for every flagged ship of a navy. Callers: after a unit transfer
   (`0x008D5F10`, `0x008D47B0`, `0x008F04C0`) for each of the two forces that is a navy outside a port; the undock
   `0x00A8C0B0` (from a move, the post-battle placement `0x008F7880` and the war kick-out `0x008DA179` inside
@@ -2275,7 +2404,36 @@ region or a force"). Order: factors drift; #6 −1; access: timed −1 with #25 
 (armies in the other's regions, GDP and army balance: `CampaignModel::war_balances`, army value PROVISIONAL) and
 #12 / #13 +1; #7 toward 0 (−2 / +1); protectorate tribute and patron income lines; payments: turns −1, finished
 removed (`0x00B298F0` also adds to faction +0x954, a counter, only between two humans); #26 −2; #27 −1. Then the
-manager's +0x20 −1.
+manager's +0x20 −1 (only while above 0: `test eax,eax; jz` at `0x00B29139`, CONFIRMED; ours `saturating_sub`).
+
+- **Diplomacy manager counters** (CONFIRMED, 2026-10-16). The manager (faction +0x528, 0x24 bytes; null for the
+  rebels, which have no `DIPLOMACY_MANAGER`) holds four u32 after its relationships, saved as `DIPLOMACY_MANAGER`
+  v3 #1..#4 (reader `0x00AE8E10`, called by the faction loader `0x0087A190`; writer `0x00AFC160`, called by
+  `0x00892A80`, writes all four). Both constructors (`0x00AE8DD0`, the new-faction path `0x0087BD70`, and the
+  reader before it reads) preset +0x14 = 0, +0x18 = 0, **+0x1C = 1**, +0x20 = 0; the reader reads #3 only when the
+  block version > 1 and #4 only when > 2. Every faction of every vanilla save and startpos holds #2 = 0, #3 = 1,
+  #4 = 0; #1 is 0 except one faction at 1 in `original\auto_save.save`. Users (decompile scan of 0x860000–0xCC0000;
+  no destruction or re-emergence reset touches them):
+  - +0x14 alliances broken while committed: `0x00B13840` reads k, then +1 (ours `World::alliances_broken`).
+  - +0x18 access abuses: the war path `0x00B26700` → `0x00B27250` → `0x00B0DA90` reads the *abuser's* count
+    (`mov ecx,[edi+0x528]` at `0x00B0DA9F`, getter `0x004CE450`), passes it as `count` to `0x00B0DAF0`
+    (`abused_military_access` += −30 + count × (−10), clamped ≤ 0), then `inc [eax+0x18]` at `0x00B0DABA` (ours
+    `World::access_abuses`, new; it replaces the `count` = 0 we had, UNKNOWN before).
+  - +0x1C treaties broken: backstab `0x00B0E420` reads n, then +1 (+3 at 10 friendship turns). Ours started at 0, so
+    a faction's first backstab set `peace_treaty` to 0; it now starts at `TREATY_BREAKS_START` = 1
+    (`World::treaty_breaks_of`), so the first backstab costs −3·turns, limit −5.
+  - +0x20 access cancel marks: `0x00B67B20` adds a third of the grievance; `0x00B29100` −1 a turn.
+  Ours loads all four (`ntw_campaign::world::read_diplomacy_counters`, version-gated like the reader) and writes
+  them back (`save::write_diplomacy_counters`); a faction without an entry has the constructors' values. Own saves
+  are format 6 (`own_save::FORMAT_VERSION`): an older one holds treaty-break entries only for backstabbers, counted
+  from 0 (one lower than the exe's), so its load adds 1 to each (`own_save::migrate_treaty_breaks`; the rest read
+  the preset 1), and it has no `access_abuses` (read 0; older builds charged every abuse at count 0). Tests:
+  `war_reads_and_bumps_the_diplomacy_manager_counters` (ntw_sim), `diplomacy_counter_tests`,
+  `tests/diplomacy_counters.rs` (vanilla saves, startpos round trip) and
+  `a_version_5_save_moves_its_treaty_break_counts_to_the_preset_start` (own save). No ORIGINAL BUG. Ghidra (V5): struct field
+  +0x18 `nUnknown18` → `nAccessAbuses`; `0x00AE8DD0` `FactionDiplomacyManager::InitializeForFaction` (89.4 raw),
+  `0x00B0DA90` `FactionDiplomacyManager::ChargeMilitaryAccessAbuse` (77.0 raw); the reader `0x00AE8E10`, the writer
+  `0x00AFC160`, `0x00B0E420`, `0x00B13840` and `0x00B67B20` are left unnamed (BACKLOG Polish).
 
 **Checked against the vanilla saves** (`economy_check` `ECON_DIPLO=<next save>`): for the pairs whose stance did
 not change, every factor of the next save equals this save's after one drift step, except where an action of that
@@ -2809,8 +2967,9 @@ systems the model lacks stay PROVISIONAL.
       faction destruction `0x008AB6C0` → `0x00B2B8B0` → `0x00B2B920`, only on the dead faction's record
       towards its killer (§Destruction and re-emergence: the model's destruction has no killer, so it
       breaks no trade this way), and a lost trade route: `0x00BB9410` / `0x00BB9B90` / `0x00BBE1A0` when
-      the route check `0x00BA42E0` fails (← `0x00A64AC0`, the owner change). The route loss is not in the
-      model (BACKLOG).
+      the route check `0x00BA42E0` fails (← `0x00A64AC0`, the owner change). The owner-change path
+      `0x00BBE1A0` is modelled (§Trade, Route loss); the listener handlers `0x00BB9410` / `0x00BB9B90`
+      are not (BACKLOG).
   - **Capture.** Every capture variant sets the owner change's capture flag (`0x00B58560`,
     `0x00B58890`, `0x00B58C00`, `0x00B58A30`); `0x00A64AC0` with it set, neither side the rebels
     (`0x00C3FE80`) and the owner a different faction, fires the event through `0x00B62120`. A deal's
@@ -2860,7 +3019,27 @@ systems the model lacks stay PROVISIONAL.
       (BACKLOG).
     - `threatened` (slot 20, +0x328, event 22: 0, 3, −30): `0x00B72F00` adds it to the recipient's record
       towards the proposer when the deal's threat flag (+0x2B8) is set, on accept `0x00C114B0` and decline
-      `0x00C1F210`; no broadcast. Ours has no threat flag and no decline step (BACKLOG).
+      `0x00C1F210`; no broadcast. CONFIRMED and modelled (`CampaignModel::apply_threatened`, tests
+      `a_threat_leaves_the_threatened_factor_on_accept_and_decline`,
+      `propose_deal_carries_the_threat_flag_and_decline_reaches_the_model`):
+      - The flag: negotiation +0x2B8 is stored by every propose `ProcessNegotiationDealProposal 0x00C49BE0` from the command's argument.
+        Lua `negotiation:ProposeDeal(bool)` (`0x009BFCF0`) reads it with `0x01055840` (top of the
+        stack, a boolean; any other type is the script error `0x01095090`, ours logs once and proposes
+        nothing). diplomacy_panel.lua `SendOffer` (:634) passes false, `ThreatOfForce` (:1565) true.
+      - Accept `0x00C114B0` applies the records (`0x00C43520`), sets result +0x28 = 1, then (at
+        `0x00C11671`) calls `0x00B72F00` on the recipient (+0x1C) faction's diplomacy (+0x528) towards
+        the proposer (+0x18). Decline `0x00C1F210` sets result 2, calls `0x00B72F00` the same way,
+        then the listener (vfunc +0x38) and posts the reply strings.
+      - A repeated decline adds the event again: the executor `0x00932F00` checks only command byte
+        +4 and tail-jumps to `0x00C1F210`, which keeps no record of an earlier answer; `0x00B02CB0`
+        caps the value only from above at limit 0 (drift 3 > 0), so two declines give −60. Ours
+        matches (test `a_repeated_decline_adds_the_threat_again`).
+      - `0x00B72F00` → `0x00B72EC0` → `0x00B02CB0` adds the config's event 22 (+0x110 value, +0x10C
+        drift, +0x108 limit) to slot 20.
+      - The AI evaluator `0x00AA5ED0` itself calls accept or decline; the flag there only suppresses
+        the counter-offer. Executors: DECLINE_DEAL `0x00932F00`, ACCEPT `0x00932E40`, PROPOSE
+        `0x00933690`. Ours: `CampaignCommand::ProposeDeal { threat }` / `DeclineDeal` / `AcceptDeal`.
+      - `CanThreaten` (which gates the threat button) stays UNKNOWN.
     - Re-emergence: `0x00A64AC0` → `0x008AE6E0` → `0x00B2BB00` (a faction coming back into the game) resets
       its records both ways (`0x00B2BC10` / `0x00B72AC0`, which reset the religion factor through `0x00B1B540`), no
       broadcast of its own; in `spa_napoleon` a re-emerging `spa_spain` or `spa_portugal` (the liberation flag clear) then
@@ -2952,7 +3131,7 @@ systems the model lacks stay PROVISIONAL.
   capture. Other listeners: a fort/slot removal (`0x00A8DF40`, fired by the fort destructor
   `0x00AF71C0` on model `+0x78` unless model flag `+0xFC5`), an army's garrison change
   (`0x00A8E320` → `0x00A79EA0`). The army it raises (CONFIRMED from the disassembly, director2
-  2026-10-15; PROVISIONAL in ours: not raised): candidates are the 32-byte entries of the region's
+  2026-10-15; raised in ours since director3, `director_transfer`): candidates are the 32-byte entries of the region's
   unit list (`0x00C3C340`, `+0x1B4` entries, `+0x1B0` count) whose record (`+0x18`) has a non-zero
   unit key (`+0x9C`) and passes `0x00BAF9A0`(receiver, region, record), sorted by `0x00B7F510`;
   each of the N units is built by `0x0087FEA0`(campaign faction, key, 0, 0, 1) cycling through the
@@ -2961,6 +3140,51 @@ systems the model lacks stay PROVISIONAL.
   in the settlement through `0x00C1BEF0`(settlement) vt+0x88 (character, 0, 0, 1, 1, 0), then
   `0x009D3B60`(character, 0, 0), then the `+0x5E8` broadcaster of the object at the director's `+0` is told of the army.
   `0x00C3C330` is the `CaiFaction` → `CampaignFaction` getter (`+0x168`).
+  Director3 (2026-10-15, CONFIRMED unless marked):
+  - The count is drawn before the candidates are gathered; the gather draws nothing. With no
+    candidate the draw stays spent and nothing is raised.
+  - The unit list is the region's recruitable list (region `+0x1A8`), which the capture
+    (`CaptureSettlementForDirectorTransfer` `0x00B58A30` → `0x00A6AE40`) rebuilds for the new owner
+    (`0x00C3C340` gives the CAI region's game region, `+0x1A0`; entries have stride 0x20, flags
+    `+0x14` and record `+0x18`, as `MergeRecruitableEntrySorted` `0x00B08E30` writes them; ours
+    `recruitable_units`). Record `+0x9C` is the land stats record (set for land units), `+0xA0` the naval one.
+  - `0x00BAF9A0`: for a land unit, the unit passes when the region (if the receiver owns it) or a
+    region across one of its CAI boundaries (`GetCaiRegionBoundariesBegin`/`End`,
+    `GetBoundaryOtherRegion`) that the receiver owns has it in its land recruitment belief. A
+    naval-only record goes to `0x00BAFAF0` (never reached here). The belief comes from `0x00D5F720`
+    (cached per faction view, rebuilt through `0x00CCCF70` when `IsBeliefDirty` `0x00CF1170`).
+    Membership is `0x00D5BE50` → `0x00D5BDB0`, a scan of the belief's land set (belief `+0xFC`:
+    count `+0x28`, data `+0x2C`, 16-byte entries).
+  - The region belief is rebuilt by `0x00D9C9D0` from two parts:
+    - When the region has a settlement (`0x00C3E1E0`), the settlement belief (`0x00D5F930`): the
+      region's priced land entries whose flags hold nothing but TOO_DEAR (0x02).
+    - The belief (`0x00D5F7D0`, rebuilt by `0x00D9CD60`) of each slot that passes `0x00C3F480`,
+      i.e. one with a recruitment manager (model slot `+0x1E4`, our `RegionSlot::port`):
+      - A slot of CAI building slot type 3 lists its port manager's units (`+0x1E8` vt+0xC), keeping
+        ships only (`+0xA0`), so it adds no land unit. The type is set by the `CAI_BUILDING_SLOT`
+        constructor `0x00BE6EF0` from the model slot's type key (`+0x1DC` → `+0x44`), and "port"
+        maps to 3. The ESF reader is `0x00BE6DC0`; the type sits at the building slot's `+0x100`,
+        reached through CAI slot `+0x16C` (`0x0080DC60`); thunks `0x00C55560` / `0x00C1BF00`. The
+        exe hardcodes the "port" key in `0x00BE6EF0`; no table marks a slot type as a port, so ours
+        names it in `director.rs` `PORT_SLOT_TYPE`.
+      - Any other slot, when its building (`+0x1E0` → `+8`) has health ≥ 100 (`+0x18`), adds the land
+        entries of its `0x00B43CA0` list whose flags & 0xFD are 0. NO_TECHNOLOGY entries are
+        skipped outright, and OCCUPIED keeps a unit out.
+  - The sort `0x00B7F510` ranks by the unit record's category code (`+0x1C`): infantry 3;
+    cavalry, dragoons, elephants and camels 2; artillery 1; others 0. The highest rank goes first.
+    It is the library introsort, with partition `0x00B7D810` and the comparator inlined.
+  - Unit and army construction are the same calls as the land recruit placement `0x008ECAD0`
+    (`0x0087FEA0(.., 0, 0, 1)`, `0x008D25F0(.., 1, 0, 1, 1)`). `0x008D25F0` → `0x008D24B0` →
+    `0x00870E60` with character argument 0 makes no general. So ours places each unit with
+    `spawn_recruited_unit`: the first raises a colonel's army garrisoned in the settlement, and the
+    rest join it. Ours emits no `UnitTrained` for them.
+  - Known difference: the original puts every unit in its one army whatever the army cap. Ours
+    honours the cap (vanilla's 20 is above the most drawn, 10), so a lower cap set by a mod starts a
+    second army.
+  - INFERRED: ours builds the beliefs from the current state, while the original reads its cache,
+    which is fresh only if every change the belief reads marked it dirty (`MarkBeliefDirty`
+    `0x00CF0AB0`, 147 call sites, which propagates to dependents through `0x00CF0B10`). Which
+    changes mark a region recruitment belief is not traced.
 - **Transfer and the old owner's forces** (director2 2026-10-15, CONFIRMED): the settlement
   handover `TransferSettlementOwnership` `0x00B449F0` (assault `0x00B58560`, deal and liberation
   `0x00B58A10`, the director `0x00B58A30`) calls `TransferRegionToFaction` `0x00A64AC0` with its
@@ -2970,17 +3194,114 @@ systems the model lacks stay PROVISIONAL.
   region). That moves only the faction's land armies standing in the region (`0x009D3A40`, the character's `+0x2A8` holder vt+0x3C; position
   `0x00A06D80` → `0x00A17D60`, region test `0x00A075B0` → `0x00B4D7B0`) and its navies docked in
   the region's port when not at war with the new owner (`0x009D3A80` vt+0x44, undocked by
-  `UndockCharacterFromPort` `0x00A8C0B0`, `0x00B377E0`); access (`0x00B16570`: military access,
-  a protectorate tie or a neutral stance) only silences the move notice. **Agents are not ejected**:
+  `UndockCharacterFromPort` `0x00A8C0B0`, `0x00B377E0`); the "may stay" test (`0x00B16570`, below)
+  only orders the candidates and silences the move notice. **Agents are not ejected**:
   a character without an army or navy stays where it is (ours: test
   `a_transfer_leaves_the_old_owners_agents_in_place`; our agents never stand in a settlement).
-  Not modelled: the expulsion itself; where the armies go is not traced (candidates `0x008DCB30`,
-  then `0x00B35570` / `0x00B37670` → `0x00B35640` with a 100.0 radius). Other callers of
-  `0x008D9DC0`: deals `0x00C114B0` (4 sites), `EndProtectorateTie` `0x00B64B10`, `0x00B0CA20`,
-  `0x00B13A30`, `0x00B0D0C0`, `0x00B67BD0`, `0x00B29170`, `0x00B4F090` (2), `0x00936B37` /
-  `0x00936B76`. So the "moves no army" claims of `battles.rs` (`change_region_owner`), `capture.rs`
-  (liberation), `commands.rs` (entering a foreign garrison) and the tests pinning them do not hold:
-  all are now PROVISIONAL, pointing at `0x008D9DC0` (director2 fix round), as is `director_transfer`.
+  Modelled (transfer3, 2026-10-15, CONFIRMED from the disassembly): the rule is
+  `expulsion::expel_faction_from_region` behind the seam `region.expulsion`
+  (`CampaignSeams::region_expulsion`), applied by `CampaignModel::expel_from_region`; its callers are
+  `change_region_owner` (`expel_after_owner_change`, every handover), `accept_deal` and
+  `end_protectorate_tie` (tests `campaign/tests/transfer.rs`):
+  - **Where it runs:** inside `0x00A64AC0`, after the research stop `0x008B4AB0`, the early return
+    when the owner does not change, the queue drains, the diplomacy event `0x00B62120`,
+    `RemoveRegionFromFactionAndMoveCapital`, `AddRegionToFaction` and the re-emergence handling;
+    before `0x00AA16E0`, `RebuildRegionRecruitablesAndEffects` and `UpdateRegionTownWealth`. In
+    ours: the end of `change_region_owner`, after the capital change and the trade routes
+    (`0x00BBE1A0` is called at `0x00A64E87`, the expulsion loop at `0x00A650E4`), before `take_settlement`
+    puts the capturer inside and before `end_if_capital_lost`. The factions are walked in the world
+    list (campaign `+0xF5C` → `+0x2C` / `+0x30`, which holds no rebels: the rebel faction is
+    `+0x1C`), so the rebels' forces are never expelled; a faction without a capital (`+0x72C`) is
+    skipped too.
+  - **"May stay" flag** (N = the region's owner, already the new one; F = the expelled faction):
+    set when either has no record (`0x008CEEF0`), N is F, N's relationship record towards F
+    (`N +0x528` → `0x00B64C50`) passes `0x00B16570`, or N is at war with F (`0x008CE9B0`).
+    `0x00B16570` on a record: true when its military access turns (`+0x78C`, #3) are not 0, its
+    `allied_in_war_against` list (`+0x7D0` count) is not empty, its stance is protectorate
+    (`IsStanceProtectorate`) or its stance index (`+0x790 → +0x10`) is 0 (war). The flag (a) puts
+    the region itself first in the candidate list (the caller writes the region into the search
+    context's `+0x24` slot after `0x008C6010`, `0x008D9E72..0x008D9E80`) and (b) silences the move
+    notice `0x009FB680`.
+  - **Candidates** (`0x008C6010` builds, `0x008DCB30` orders; entries region + point): (1) the
+    region itself at the army's own position, when "may stay"; (2) F's regions (faction `+0x778` /
+    `+0x77C`, its gain order) in the region's theatre or with an overlapping theatre box, other
+    than the region; (3) the world's regions (`+0xF5C` → `+0x34` → `+0x10` / `+0x14`) in the same
+    theatre, owned by another faction not at war with F whose record towards F passes
+    `0x00B16570`, other than the region; (4) F's capital, only when it lies in another theatre.
+    Lists (2) and (3) are each sorted (std::sort `0x00868A30`) by squared distance from the army's
+    position to the region's nearest outline point (`0x008AF750`). With each map one theatre (as
+    `nearest_capital`), (2) is all of F's other regions and (4) never happens. The context's list
+    holds 12-byte entries (region, x, z); `0x008DCB30` copies entry (1) first, then appends the
+    sorted (2) and (3), then (4).
+  - **Land armies:** each character of F (faction `+0x768`, count `+0x764`) whose army (holder
+    vt+0x3C, `0x009D3A40`) has a map position (`0x00A17D60`: its own, or its carrier's when
+    aboard) inside the region's polygons (`0x00B4D7B0`). The candidates are tried in order until
+    one places it: one in the region itself through `0x00B37670`, any other through `0x00B35570`,
+    both with 100.0. Both are wrappers over the path grid's layers, each layer prepared for F
+    (`0x00B06280`); `0x00B37670` also lifts the character's own footprint off the grid around the
+    search (`0x00AF59B0` / `0x00B0C830`, put back by `0x00B66720`). The flood `0x00B35640`(point,
+    region, radius) is a best-first search over the region's cells from the point's cell (no cell
+    there: fails), 8 neighbours, writing the nearest valid position (`0x00B41A60`); it succeeds when
+    that position is closer than the radius. Then, when the army has a residence
+    (army `+0x9C`): N at war with F and the residence's vt+0x54 returning 0 leaves the army
+    untouched where it is; otherwise the army leaves the residence (vt+0x90: a settlement
+    `0x00B0D610`, which unlinks the garrison handle `+0xC0`, a region slot `0x00A64450` → `0x00B0D610`; a fort `0x00B0D570` also
+    tears the fort down), placed or not, **whether or not it "may stay"** (the flag only orders
+    the candidates; ours: test `a_garrison_that_may_stay_still_leaves_the_settlement`). vt+0x54
+    (fix round, 2026-10-15, CONFIRMED from the vtables) returns the residence itself only for a
+    settlement (vtable `0x0137C9A4`, `0x004470B0` `mov eax,ecx`; constructor `0x00AF48D0`, region
+    `+0xF4`); it returns 0 (`0x00461180`) for a fort (`0x0137D3E4`, constructor `0x00AEB4A0`), a
+    region slot (`g_apfnRegionSlotVtbl` `0x0137695C`, constructor `0x00A4D990`: ports and the other
+    slot buildings) and their two base classes (`0x0137C7F0`, constructor `0x00AEC210`; `0x0137C8B4`, constructors
+    `0x00AF5090` and `0x00AF4B00`, the latter reading `FORTIFICATIONS_BLOCK`). No RTTI names them. So the
+    exception is an army garrisoning anything but a settlement while N is at war with F. A placed
+    army is teleported (`0x0096C8D0`) and, unless "may stay", the notice fires.
+  - **Out of the game:** the function itself returns at once when F is out of the game (faction
+    `+0x824`, `0x008D9DD5` / `0x008D9DDC`), so every caller gets it (ours: in
+    `expel_faction_from_region`; test `a_faction_out_of_the_game_is_not_expelled`).
+  - **Embarked armies** (INFERRED): the region test (`0x00A075B0` → `0x00B4D7B0`, campaign
+    `+0xF64`'s layers `+0xB4` / `+0xB8`, each `0x00B4D800`) takes the path-grid polygon under the
+    position (`0x00A17D50`) and compares its region index (`0x00B62280`) with the region's
+    (`0x00B62290`); an index past `+0x140` instead names an entry of the shared list `+0x154`
+    (16-byte entries holding region ids, compared with region `+0x10` → `+0xA4`). An army aboard
+    stands at its carrier's position: at sea, or for a docked carrier its port's exit
+    (`0x00A99A60`), both on sea polygons, so ours never counts an embarked army. Not traced: whether
+    a shared-list polygon under a port exit can name the land region (debugger sitting).
+  - **Navies:** for every character, when N is not at war with F and its navy (`0x009D3A80`) is
+    docked in a port (`+0xE0`) of the region: undocked (`UndockCharacterFromPort` `0x00A8C0B0`),
+    then placed at sea from the port's exit point (`0x00A99A60`) by `0x00B377E0` (mode 2, 100.0);
+    teleported on success, else it stays where it is, undocked.
+  - **Positions** (`0x00A17D60`): a garrisoned army stands at its settlement, an army aboard at its
+    carrier's position, a docked navy at its port's exit (`0x00A99A60`), anything else at its own.
+  - Agents are never moved. Our stand-ins (PROVISIONAL, in `expulsion.rs`): the candidate's point
+    is the centre of the region's path-grid cell nearest to the army (the settlement without the
+    map) for the outline point; the flood is `PathGrid::nearest_place_within` (the point itself if
+    its cell fits, else the nearest fitting cell of the region closer than 100; no footprints in the
+    model); F's regions in region-id order for its gain order; our sort is stable, std::sort is
+    not; the port's exit is the harbour's dock point, else the port slot; no theatres in the model
+    (every shipped map is one theatre, CONFIRMED, see "Theatres CONFIRMED a no-op"; a map with several needs the
+    exe's theatre filter). The move notice `0x009FB680` (message 0x119) is not modelled (BACKLOG).
+    An army that no candidate places stays where it stands, out of the settlement; the model
+    garrisons armies only in settlements, so the at-war exception for other residences never
+    applies.
+  - **Other callers** (CONFIRMED): the deal `AcceptCampaignNegotiationDeal` `0x00C114B0`, after
+    all records: the regions record (`+0x94`) expels the proposer from each offered region (`+0x20`)
+    and the recipient from each demanded one (`+0x10`), with no capital test (modelled); the peace
+    record (`+0x184`) expels the proposer from all of the recipient's regions and the recipient
+    from all of the proposer's (not modelled: our deals hold no peace record; PROVISIONAL note in
+    `accept_deal`). `EndProtectorateTie` `0x00B64B10`: after the neutral stance and the tribute /
+    income clear, the patron leaves each of the protectorate's regions unless its skip flag is set
+    (both callers pass 0; modelled, region ids for the list order), then `0x00A0B570`,
+    `0x00B795A0`, `0x00B67490` and the broadcast. The loss of military access expels the target
+    from all of the owner's regions: `0x00B0CA20`, `0x00B13A30`, `0x00B0D0C0`, `0x00B67BD0` (cancel
+    access), `0x00B29170` (timed access running out) — not wired yet (BACKLOG). `0x00B4F090` (2
+    sites): the liberated faction's new army (not modelled). `0x00936B37` / `0x00936B76`: a mutual
+    expulsion inside a command handler Ghidra has not defined; which command is UNKNOWN.
+    `TransferSettlementOwnership` always passes 0; only the start-position load `FUN_00a46a70`
+    passes 1 (no expulsion). ORIGINAL BUGs: none found.
+  So the earlier "moves no army" PROVISIONALs of `battles.rs`, `capture.rs`, `commands.rs` and
+  `director.rs` are gone: a foreign garrison now remains only when its faction has no capital (or
+  comes from a loaded save).
 - **CAI save writer and sea regions** (director2 2026-10-15): with the path grid's sea cells now
   carrying their sea region, the CAI writer (`crates/ntw_campaign/src/cai_world.rs`, the mobiles'
   `CAI_SITUATED`) writes a moved fleet's sea region into `CAI_SITUATED` #2 (and its theatres into
@@ -3057,14 +3378,14 @@ locals that re-split on retype): `BreakTradeBothWays` `0x00B73430` 95, `IsStance
 (count / data, as `0x008B4330` reads them), +0x778 / +0x77C region list, +0x820 prestige, +0x824 out-of-game
 byte (read by `0x008D9DC0`, not by `0x00B64B10` itself); the patron is now typed `CampaignFaction *`),
 `AddAbandonedAllyFactorUnlessAtWar`
-`0x00B544F0` 82; strings `szGame_FactionSpaSpain` / `szGame_FactionSpaPortugal` beside the existing
-`szGame_FactionSpaBritain`.
+`0x00B544F0` 82; strings `g_szFactionKeySpaSpain` / `g_szFactionKeySpaPortugal` beside the existing
+`g_szFactionKeySpaBritain` (all three `szGame_FactionSpa*` until polish31 added the `g_` prefix).
 Desires: Ghidra not yet updated (names and plates for the next writer-lock batch, V5 with them):
 `StepAtWarDesire` `0x00BAC560`, `StepBoostPlayerRivalsDesire` `0x00BAC310`, `SetAutoresolverModifierPair`
 `0x00BC5240`, `StepReplenishUnitsDesire` `0x00BADA40`, `StepUnitXpUpgradeDesire` `0x00BAE910` (needs
 create_function), `IsDirectorServedFaction` `0x00BB5160`, `CollectXpUpgradeArmies` `0x00BA30B0`,
 `CollectReplenishUnits` `0x00BA2A00`, `UnitNeedsReplenish` `0x00BC0800`, `ApplyReplenishUnit`
-`0x00BC06E0`, `QueueUnitXpUpgrade` `0x00BA3240`, `DrawUnitXpSteps` `0x00BD4A60`, `SpawnTransferGarrison`
+`0x00BC06E0`, `QueueUnitXpUpgrade` `0x00BA3240`, `DrawUnitXpSteps` `0x00BD4A60`, `SpawnDirectorTransferGarrison`
 `0x00BA8400`, `DrawDirectorRandomInt` `0x00BBD6A0`, `GetCdirConfigFactionFloat` / `Uint` / `FactionInt`
 `0x00BD2960` / `0x00BD2920` / `0x00BD29F0`, `ParseFloatStrict` / `ParseUint` / `ParseInt`
 `0x004F38A0` / `0x004F37B0` / `0x004F3720`; also `0x00BB50D0`, `0x00BB51E0`, `0x00BB5530`, `0x00BB5270`.
@@ -3149,8 +3470,36 @@ Ours: `ntw_sim::campaign::destruction` (`capital_after_owner_change`, `end_if_ca
   `0x0136CC60`, patron `0x0137D74C`, war `0x0136D47C`), the two database key error formats
   (`0x0137E010`, `0x0137E758`) and the key separator `0x013305F8`. The `0x00B2BB00` plate now reads the
   transfer flag's low byte as the liberation flag (the resets take it as such) and says what ours models.
-  The remaining deductions are register-only locals and the diplomacy manager (faction +0x528), which
-  has no struct yet.
+  The remaining deductions were register-only locals and the diplomacy manager (faction +0x528), which
+  had no struct then; polish31 (next bullet) added it.
+- **Ghidra, polish31 (2026-10-16, V5):** struct `FactionDiplomacyManager` (0x24 bytes; `operator new(0x24)`
+  at `0x0087BEF4` / `0x0087A8DD`, constructors `0x00AE8DD0` (new faction) and `0x00AE8E10` (save load)):
+  +0x0 owner faction, +0x4 never set, +0x8 record capacity, +0xC record count, +0x10 the
+  `DiplomacyRelationRecord` array (save `DIPLOMACY_RELATIONSHIPS_ARRAY`), +0x14 alliances broken,
+  +0x18 access abuses (`0x00B0DA90`; §Diplomacy manager counters), +0x1C treaties broken (both constructors preset 1; the load overwrites it only when
+  the block version is above 1), +0x20 access cancel marks (version above 2). CONFIRMED from both
+  constructors. `CampaignFaction.pDiplomacy` (+0x528) is typed with it, and `0x00B2BB00` is now
+  `FactionDiplomacyManager::ResetRelationsOnFactionReemergence` (93.1 raw; locals typed, its three
+  `spa_*` faction-key strings renamed `g_szFactionKeySpa*`). Callees named:
+  - `CampaignFaction::GetFactionKeyOrRebels` `0x008E5060` (88.9): the faction's key string, the
+    pointer at faction +0x514 (the record the faction was built from, key first); a faction without one
+    (the rebels) gets a function-static "rebels" string (`g_RebelsFactionKey` `0x015C1264`, built once
+    under `g_nRebelsFactionKeyInitGuard` `0x015C1270`). The struct field +0x514 is still called
+    `pPlayerSlot`, which does not match this use; left for the faction struct's own pass.
+  - `FindCampaignFactionByKey` `0x00955B70` (87.5): looks a faction up by key in the faction registry
+    (model +0xF5C), an open-addressing hash table (16-byte buckets at +0x44, count +0x48, empty-key
+    sentinel +0x4C, UTF-16 XOR hash with seed 0xF73A51C9), linear probe from the home bucket with
+    wrap-around, null when an empty bucket or the full circle is reached. `this` stays `void *`: the
+    registry has no struct yet (only its table fields are known).
+  - `FactionDiplomacyManager::GrantMilitaryAccessToFaction` `0x00B444B0` (96.9): finds the record
+    towards the grantee, applies the access there (`0x00B44550`), refreshes both factions
+    (`0x00B795A0`) and the model's +0xF64 object (`0x00B67490`), then broadcasts the model's +0x858
+    event with {granter, grantee, turns} and the diplomacy-changed event (+0x3A8) with {granter}. Ours
+    (`grant_military_access`, treaties.rs) has the record fields and the diplomacy-changed broadcast;
+    the +0x858 event and the two refreshes are not traced (`0x00B795A0`, `0x00B67490` left unnamed).
+  - Gap (CONFIRMED), closed by dipcounters (2026-10-16): manager +0x1C starts at 1 (both constructors,
+    `0x00AE8DD0`, `0x00AE8E10`; every vanilla save holds 1). Ours now loads and saves all four counters
+    and starts `treaty_breaks` at 1 (§Diplomacy manager counters).
 
 ## Resolved / open
 | question | answer | tag | code |
@@ -3184,9 +3533,9 @@ Ours: `ntw_sim::campaign::destruction` (`capital_after_owner_change`, `end_if_ca
 
 ## Save writer (for the manager / save-compat owner)
 Round 9 (diplomacy): the model now changes the relationship records (factors #1, #2, #3, #6, #7, #10–#15, #17, #19,
-#24–#27) and keeps three manager counters (`World::treaty_breaks` +0x1C, `alliances_broken` +0x14,
-`access_cancel_marks` +0x20 of `DIPLOMACY_MANAGER`); `save.rs` writes only the stances, so a save keeps the loaded
-values.
+#24–#27) and keeps the four manager counters (`World::alliances_broken` +0x14, `access_abuses` +0x18,
+`treaty_breaks` +0x1C, `access_cancel_marks` +0x20 of `DIPLOMACY_MANAGER` #1..#4); they are loaded and `save.rs`
+writes them back (§Diplomacy manager counters); of the relationship records it writes the stances and #18.
 
 Round 9: capture damage changes `BUILDING` #0 health and a repair is a construction item
 (our writer and the original write it as item type 2, `0x00AE7010`, in the slot's `BUILDING_MANAGER`); loot changes `REGION` #12 / #14

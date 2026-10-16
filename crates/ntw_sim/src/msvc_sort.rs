@@ -11,6 +11,10 @@
 //! - a range left with more than 32 elements and no budget is heap-sorted (`0x00B7F090` is the
 //!   sift-down / sift-up step);
 //! - a range of 2..=32 elements is insertion-sorted, which keeps equal elements in their order.
+//!
+//! The same template sorts the director's transfer garrison units by kind (`0x00B7F510`, partition
+//! `0x00B7D810` with median `0x00B7C9B0`, the comparator inlined; CONFIRMED same loop, threshold,
+//! budget and heap-sort fallback).
 
 /// The library's insertion-sort threshold (`_ISORT_MAX`).
 const ISORT_MAX: usize = 32;

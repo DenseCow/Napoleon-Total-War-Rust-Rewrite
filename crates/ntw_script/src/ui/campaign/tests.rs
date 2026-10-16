@@ -1656,6 +1656,104 @@ fn the_promote_gate_and_price_come_from_the_model() {
     assert!(hud.errors().is_empty(), "{:?}", hud.errors());
 }
 
+/// The navy panel's port repair button (`navy_repair` → `Army.ReplenishUnits`, `army.lua:591`):
+/// the ship rows carry the model's repair state (`Replenished` / `Replenishable` / `RepairCost` /
+/// `NeedsRepair`, CONFIRMED card fields of `0x009AA5E0` from `0x008DF820`), and
+/// `ToggleReplenishUnit(card)` (`0x009F9D60`) queues `ToggleShipRepair` and answers the flipped order. MADE-UP world: a damaged `test_ship` docked at a port of `REGION` that recruits.
+#[test]
+fn the_repair_button_reads_the_models_repair_state_and_toggles_the_order() {
+    use ntw_sim::campaign::{BuildingRef, MilitaryForce, RegionSlot};
+    use ntw_sim::fixed::Fixed20;
+    let hud = test_hud();
+    let (navy, army, ship, soldier, admiral) = (ForceId(4300), ForceId(4301), UnitId(80), UnitId(81), CharacterId(130));
+    let port = (Fixed20::from_int(5), Fixed20::from_int(5));
+    {
+        let mut st = hud._scripts.state_mut();
+        let rules = std::sync::Arc::make_mut(&mut st.model.rules);
+        let mut rec = rules.units["test_unit"].clone();
+        (rec.is_naval, rec.campaign_cost) = (true, 1000);
+        rules.units.insert("test_ship".into(), rec);
+        rules.allow_unit_for_all("test_ship");
+        let w = &mut st.model.world;
+        w.regions.get_mut(&REGION).unwrap().slots.push(RegionSlot {
+            key: "test_port".into(),
+            slot_type: "test_slot".into(),
+            building: Some(BuildingRef { level_key: "test_building_level".into(), health: 100 }),
+            position: Some(port),
+            port: true,
+            holder: None,
+            id: 0,
+        });
+        w.characters.insert(admiral, ntw_sim::campaign::Character {
+            id: admiral,
+            faction: A,
+            kind: CharacterKind::Admiral,
+            position: port,
+            movement_points: 20,
+            max_movement_points: 20,
+            base_movement_points: 20,
+            garrisoned_in: None,
+        });
+        let unit = |id, key: &str| ntw_sim::campaign::CampaignUnit { id, unit_key: key.into(), men: 300, max_men: 300, character: None, officer_name: Default::default() };
+        w.forces.insert(navy, MilitaryForce { id: navy, faction: A, commander: Some(admiral), units: vec![unit(ship, "test_ship")], is_navy: true });
+        w.forces.insert(army, MilitaryForce { id: army, faction: A, commander: None, units: vec![unit(soldier, "test_unit")], is_navy: false });
+        let state = ntw_sim::campaign::naval::ShipState { damage: [0.4, 0.4, 0.4, 0.4, 0.0], crews: [100; 3], max_crews: [100; 3], ..Default::default() };
+        w.ship_states.insert(ship, state);
+        st.model.turn.humans = vec![A];
+        st.model.start_campaign();
+    }
+    let rows = |c: CharacterId| -> Table {
+        hud.host.campaign_select(CampaignSelection::Character(c));
+        hud.open_tab("navy_tab");
+        let info: Table = hud.root_env().get("army_panel").expect("GenerateNavyPanel ran");
+        info.get::<Table>("units_info").unwrap().get::<Table>("Ships").unwrap().get(1).unwrap()
+    };
+    hud.tabs();
+    // Ordered nothing yet: repairable for 1000 × 0.4.
+    let row = rows(admiral);
+    assert!(hud._scripts.state_mut().model.can_repair_ship(navy, 0), "the fixture is a repairable docked ship");
+    assert!(row.get::<bool>("Replenishable").unwrap());
+    assert!(!row.get::<bool>("Replenished").unwrap());
+    assert!(row.get::<bool>("NeedsRepair").unwrap());
+    assert_eq!(row.get::<i32>("RepairCost").unwrap(), 400);
+    // The button's click: the command is deferred, the answer is the order flipped.
+    let toggle: Function = hud.host.lua().load("return function(u) return CampaignUI.ToggleReplenishUnit(u) end").eval().unwrap();
+    hud.host.take_campaign_requests();
+    assert!(toggle.call::<bool>(hud.unit_addr(ship)).unwrap(), "ordering: the new state is on");
+    assert_eq!(hud.host.take_campaign_requests(), vec![CampaignRequest::Command(CampaignCommand::ToggleShipRepair { force: navy, unit: 0 })]);
+    // Once ordered (the model ran the command): the row shows it and the toggle answers off.
+    hud._scripts.state_mut().model.apply(CampaignCommand::ToggleShipRepair { force: navy, unit: 0 }).unwrap();
+    let row = rows(admiral);
+    assert!(row.get::<bool>("Replenished").unwrap());
+    assert!(!row.get::<bool>("Replenishable").unwrap(), "already ordered (`0x008B3120`)");
+    assert!(!toggle.call::<bool>(hud.unit_addr(ship)).unwrap(), "cancelling: the new state is off");
+    assert_eq!(hud.host.take_campaign_requests(), vec![CampaignRequest::Command(CampaignCommand::ToggleShipRepair { force: navy, unit: 0 })]);
+    assert!(hud.errors().is_empty(), "{:?}", hud.errors());
+    // A land unit: nothing queued, false, logged once (land replenishment is not modelled).
+    assert!(!toggle.call::<bool>(hud.unit_addr(soldier)).unwrap());
+    assert!(!toggle.call::<bool>(hud.unit_addr(soldier)).unwrap());
+    assert!(hud.host.take_campaign_requests().is_empty());
+    let log = hud.host.take_log();
+    assert_eq!(log.iter().filter(|l| l.contains("ToggleReplenishUnit on a land unit")).count(), 1, "{log:?}");
+    // The unit's own type decides, not its force's (`0x009F9D60` asks the unit's vtable slot +0x20):
+    // a land unit in a navy takes the land path.
+    let odd = UnitId(82);
+    {
+        let mut st = hud._scripts.state_mut();
+        let unit = ntw_sim::campaign::CampaignUnit { id: odd, unit_key: "test_unit".into(), men: 300, max_men: 300, character: None, officer_name: Default::default() };
+        st.model.world.forces.get_mut(&navy).unwrap().units.push(unit);
+    }
+    assert!(!toggle.call::<bool>(hud.unit_addr(odd)).unwrap());
+    assert!(hud.host.take_campaign_requests().is_empty(), "a land unit in a navy queues no ship repair");
+    // Not a unit in any force (a stale address, a non-unit value): nothing queued, false, logged once.
+    assert!(!toggle.call::<bool>(hud.unit_addr(UnitId(9999))).unwrap());
+    assert!(!toggle.call::<bool>(mlua::Value::Nil).unwrap());
+    assert!(hud.host.take_campaign_requests().is_empty());
+    let log = hud.host.take_log();
+    assert_eq!(log.iter().filter(|l| l.contains("ToggleReplenishUnit: the argument is not a unit in a force")).count(), 1, "{log:?}");
+    assert!(hud.errors().is_empty(), "{:?}", hud.errors());
+}
+
 /// The fog of war as the interface sees it: `SpyingDataLevelCharacter` /
 /// `SpyingDataLevelUnit` (CONFIRMED arity 1 and the `>= ADVANCED` gate the root's double click
 /// uses, `layout.root.lua:1093`), the levels `utilities.lua` defines (CONFIRMED values) and the
@@ -1884,10 +1982,10 @@ fn negotiation_with_offer(hud: &TestHud) {
 fn a_deal_applies_at_most_once() {
     let gift = CampaignRequest::Command(CampaignCommand::Diplomacy { a: A, b: B, action: D::StateGift(500) });
     let accept = CampaignRequest::Command(CampaignCommand::AcceptDeal);
-    let propose = CampaignRequest::Command(CampaignCommand::ProposeDeal);
+    let propose = CampaignRequest::Command(CampaignCommand::ProposeDeal { threat: false });
     let cases = [
-        ("CampaignUI.ProposeDeal() CampaignUI.ProposeDeal()", vec![propose.clone(), gift.clone(), accept.clone(), propose.clone(), accept.clone()]),
-        ("CampaignUI.ProposeDeal() CampaignUI.AcceptOffer()", vec![propose.clone(), gift.clone(), accept.clone(), accept.clone()]),
+        ("CampaignUI.ProposeDeal(false) CampaignUI.ProposeDeal(false)", vec![propose.clone(), gift.clone(), accept.clone(), propose.clone(), accept.clone()]),
+        ("CampaignUI.ProposeDeal(false) CampaignUI.AcceptOffer()", vec![propose.clone(), gift.clone(), accept.clone(), accept.clone()]),
     ];
     for (script, expected) in cases {
         let hud = test_hud();
@@ -1911,6 +2009,28 @@ fn a_deal_applies_at_most_once() {
     // Without a counterpart nothing is applied or proposed.
     hud.host.campaign_ui().unwrap().negotiation.borrow_mut().release();
     assert_eq!(hud.requests_of("CampaignUI.AcceptOffer() CampaignUI.Propose({}, {}, 'regions')"), Vec::new());
+}
+
+/// `ProposeDeal`'s argument is the threat flag (`0x009BFCF0` reads a boolean, `ThreatOfForce` passes
+/// true): it reaches the model's proposal; `DeclineOffer` sends the decline (`0x00932F00` →
+/// `0x00C1F210`, where a threat's factor is applied); an argument that is not a boolean proposes
+/// nothing and logs once.
+#[test]
+fn propose_deal_carries_the_threat_flag_and_decline_reaches_the_model() {
+    let hud = test_hud();
+    negotiation_with_offer(&hud);
+    let requests = hud.requests_of("CampaignUI.ProposeDeal(true)");
+    assert_eq!(requests.first(), Some(&CampaignRequest::Command(CampaignCommand::ProposeDeal { threat: true })));
+    let hud = test_hud();
+    negotiation_with_offer(&hud);
+    assert_eq!(hud.requests_of("CampaignUI.DeclineOffer()"), vec![CampaignRequest::Command(CampaignCommand::DeclineDeal)]);
+    assert!(hud.errors().is_empty());
+    for script in ["CampaignUI.ProposeDeal()", "CampaignUI.ProposeDeal('yes')"] {
+        let hud = test_hud();
+        negotiation_with_offer(&hud);
+        assert_eq!(hud.requests_of(script), Vec::new(), "{script}");
+        assert_eq!(hud.errors().len(), 1, "{script}");
+    }
 }
 
 /// The payments `Propose(offer, amount, turns, regular, action)` (`0x009BF3C0`) becomes the payment

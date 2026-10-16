@@ -41,6 +41,7 @@ pub mod rating;
 use std::collections::BTreeMap;
 
 use ntw_sim::battle::model::{Battle, LandUnit, MELEE_CONTACT_RANGE};
+use ntw_sim::battle::strength::mounted as mounted_unit;
 
 use geom::{P, add, centroid, dist, dot, norm_or, right_of, rotate, scale, sub};
 use melee_manager::{Assignments, Candidate, ObjectiveKind, allocate};
@@ -583,7 +584,8 @@ impl AllianceAi {
             if cat == classes::category::INFANTRY {
                 inf += me + mi;
             }
-            if classes::is_mounted(cat) {
+            // Mounted (`0x0055ABF0` at `0x007A4EDE`, via `0x007A4EB0`).
+            if mounted_unit(u) {
                 mounted += me + mi;
             }
         }
@@ -615,8 +617,9 @@ impl AllianceAi {
                 (class, class == classes::class::GENERAL, u.can_shoot())
             })
             .collect();
+        // Mounted (`0x0055ABF0` at `0x0075376F`).
         let their_units: Vec<(bool, bool)> =
-            self.enemies(b).filter(|u| u.active).map(|u| (classes::is_mounted(classes::codes(u).0), u.can_shoot())).collect();
+            self.enemies(b).filter(|u| u.active).map(|u| (mounted_unit(u), u.can_shoot())).collect();
         let flags = plan::Flags {
             defender: self.defender,
             withdraw_allowed: p.withdraw_allowed,
@@ -1645,7 +1648,9 @@ impl WingBidder {
             (v.iter().filter(|u| f(u)).map(|u| u.men).sum::<u32>() * 100).checked_div(men).unwrap_or(0) as i32
         };
         let class8 = |u: &LandUnit| classes::codes(u).1 == 8;
-        let mounted = |u: &LandUnit| classes::is_mounted(classes::codes(u).0);
+        // INFERRED predicate: the builder of the mounted share (`+0x78` / `+0x84`) is not traced; read as
+        // mounted (`0x0055ABF0`), as the wing filters below.
+        let mounted = |u: &LandUnit| mounted_unit(u);
         let right = right_of(ai.dir);
         let own_c = centroid(own.iter().map(|u| u.position)).unwrap_or(ai.anchor);
         let enemy_c = centroid(enemies.iter().map(|u| u.position)).unwrap_or(ai.anchor);
@@ -1653,7 +1658,8 @@ impl WingBidder {
             .iter()
             .filter(|u| {
                 let (cat, class) = classes::codes(u);
-                (classes::is_mounted(cat) || cat == classes::category::ELEPHANTS || class == 0x11 || class == 0x16)
+                // Mounted (`0x0055ABF0` in `0x007D33B0` / `0x007D34A0`).
+                (mounted_unit(u) || cat == classes::category::ELEPHANTS || class == 0x11 || class == 0x16)
                     && class != classes::class::GENERAL
             })
             .map(|u| (u.id, if dot(sub(u.position, own_c), right) >= 0.0 { 1.0 } else { -1.0 }))

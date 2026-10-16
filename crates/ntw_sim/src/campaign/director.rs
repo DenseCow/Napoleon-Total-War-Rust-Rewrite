@@ -37,17 +37,20 @@
 //!
 //! Evidence tags: CONFIRMED unless marked. PROVISIONAL: the transferable test's siege test is never
 //! true (no sieges in the model, [`transferable_at`]); the effects the model has no system for
-//! (the autoresolver modifiers, unit experience, the transfer's new army, the teleport desire) and
+//! (the autoresolver modifiers, unit experience, the teleport desire) and
 //! the desires whose gathers are not traced ([`director_desires`]), so the RNG's sequence matches
 //! the original's only until one of those draws. PROVISIONAL: of the exe's many readers of the
 //! relation belief (`GetCaiRelationBelief` `0x00A74A20`, 185 callers) the model has only the
 //! AI's evaluation of a proposed deal ([`CampaignModel::refresh_relation_belief`]), so a belief
 //! another reader would have stored during a human's turn is rebuilt later in ours, possibly from
-//! newer stances ([`DirectorState::beliefs`]). PROVISIONAL: the transfer does not expel the other
-//! factions' armies and docked navies from the region (`0x00A64AC0` → `0x008D9DC0`, the placement
-//! `0x008DCB30` untraced; `director_transfer`). INFERRED: the turn change's mark
-//! of every belief ([`CampaignModel::director_handover`]).
+//! newer stances ([`DirectorState::beliefs`]). The transfer expels the other factions' armies and
+//! docked navies from the region as every owner change does (`0x00A64AC0` → `0x008D9DC0`,
+//! [`super::expulsion`]; `director_transfer`). INFERRED: the turn change's mark
+//! of every belief ([`CampaignModel::director_handover`]). INFERRED: the transfer's garrison reads
+//! the region recruitment beliefs from the current state where the original reads its cache
+//! ([`land_recruitment_belief`]).
 
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::events::CampaignEvent;
@@ -504,10 +507,10 @@ pub fn believes_at_war(model: &CampaignModel, f: FactionId, g: FactionId) -> boo
 /// seen (test `an_embargo_after_a_proposal_is_not_seen_by_the_rival_score`). The round start's
 /// computed factors (`0x00B71EC0`) also skip it, but come after the round-end broadcasts with no
 /// read between them, so the pool's read still rebuilds. The Peninsular loot resentment
-/// (`0x00B541E0` → `0x00B544F0`) skips it too and is modelled so. The exe's other attitude writes
-/// without the broadcast belong to events the model lacks: the threatened factor on a threatening
-/// deal's answer (`0x00B72F00`) and `0x00AAB440` → `0x00B544F0` (a region revolt or handover,
-/// INFERRED: the caller is not traced). A faction's re-emergence (`0x00B2BB00` → `0x00B2BC10` /
+/// (`0x00B541E0` → `0x00B544F0`) skips it too and is modelled so, as is the threatened factor on a
+/// threatening deal's answer (`0x00B72F00`, [`CampaignModel::apply_threatened`]). The other write
+/// without the broadcast belongs to an event the model lacks: `0x00AAB440` → `0x00B544F0` (a region
+/// revolt or handover, INFERRED: the caller is not traced). A faction's re-emergence (`0x00B2BB00` → `0x00B2BC10` /
 /// `0x00B72AC0`, [`CampaignModel::reemerge_faction`]) resets its records without it too and is
 /// modelled so; only the protectorate a liberation makes broadcasts, through
 /// [`CampaignModel::make_protectorate`] (CAMPAIGN_FIDELITY.md "The relation is a stored copy").
@@ -569,27 +572,22 @@ fn rival_score_in(model: &CampaignModel, areas: &[Area], f: FactionId) -> f32 {
 struct Area<'a> {
     region: Option<&'a Region>,
     links: Vec<usize>,
-    /// Whether a human has a mobile in it ([`human_inside`]), found once when the areas are built.
-    human: bool,
+    /// The CAI area's key (empty without CAI areas), for a sea area's [`human_in`].
+    key: &'a str,
+    /// Whether a human has a mobile in it, found on first use by [`human_in`]: only the transfer
+    /// checks read it, never the rival score.
+    human: OnceCell<bool>,
 }
 
-/// The director's map areas ([`Area`]), with their human flags. Cold path: built once per desire step,
-/// and once per due transfer (a transfer changes owners).
+/// The director's map areas ([`Area`]). Cold path: built once per desire step, and once per due
+/// transfer (a transfer changes owners).
 fn areas(model: &CampaignModel) -> Vec<Area<'_>> {
     let w = &model.world;
     if !w.ai_areas.is_empty() {
         let by_key: BTreeMap<&str, &Region> = w.regions.values().map(|r| (r.key.as_str(), r)).collect();
-        let at_sea = human_grid_regions(model);
         return w.ai_areas
             .iter()
-            .map(|a| {
-                let region = by_key.get(a.key.as_str()).copied();
-                let human = match region {
-                    Some(r) => human_inside(model, r),
-                    None => at_sea.contains(a.key.as_str()),
-                };
-                Area { region, links: a.links.clone(), human }
-            })
+            .map(|a| Area { region: by_key.get(a.key.as_str()).copied(), links: a.links.clone(), key: a.key.as_str(), human: OnceCell::new() })
             .collect();
     }
     let index: BTreeMap<RegionId, usize> = w.regions.keys().enumerate().map(|(i, &id)| (id, i)).collect();
@@ -598,31 +596,39 @@ fn areas(model: &CampaignModel) -> Vec<Area<'_>> {
         .map(|r| Area {
             region: Some(r),
             links: w.region_neighbours.get(&r.id).map_or(&[][..], Vec::as_slice).iter().filter_map(|n| index.get(n).copied()).collect(),
-            human: human_inside(model, r),
+            key: "",
+            human: OnceCell::new(),
         })
         .collect()
+}
+
+/// Whether a human has a mobile in the area, computed once per area on first use: [`human_inside`]
+/// for a game region, else [`human_at_sea`] of its key.
+fn human_in(model: &CampaignModel, area: &Area) -> bool {
+    *area.human.get_or_init(|| match area.region {
+        Some(r) => human_inside(model, r),
+        None => human_at_sea(model, area.key),
+    })
 }
 
 /// Whether a human has a mobile in the area (`0x00BB51B0` over the CAI region's mobiles, #9
 /// +0x18C, as the loader `0x00BECCE0` reads them): the mobiles are the forces (at their leader) and
 /// the agents situated in it (`cai_world.rs`; matches the original's saves). A land area holds the
-/// characters [`super::economy::in_region`] places in its region; a sea area, see [`human_grid_regions`].
+/// characters [`super::economy::in_region`] places in its region; a sea area, see [`human_at_sea`].
 fn human_inside(model: &CampaignModel, reg: &Region) -> bool {
     model.world.characters.values().any(|c| model.is_human(c.faction) && super::economy::in_region(model, reg, c))
 }
 
-/// The path grid's region keys under the humans' characters not in a garrison, in one pass over the
-/// characters: a sea area (an area without a game region) holds a human's mobile when its key is
-/// in the set. The original situates a mobile in the `regions.esf` region under it, sea included
-/// (its saves' CAI_SITUATED #2, test `mobiles_are_situated_in_the_region_under_them`), and the
-/// grid's sea cells carry that region. A theatre or `all` has no cells, and without the map the set
-/// is empty.
-fn human_grid_regions(model: &CampaignModel) -> BTreeSet<&str> {
-    let Some(t) = &model.terrain else { return BTreeSet::new() };
+/// Whether a human's mobile (not in a garrison) stands in the sea area with the key: the path grid's
+/// region under it is the key. The original situates a mobile in the `regions.esf` region under it,
+/// sea included (its saves' CAI_SITUATED #2, test `mobiles_are_situated_in_the_region_under_them`),
+/// and the grid's sea cells carry that region. A theatre or `all` has no cells, and without the map
+/// nothing is found.
+fn human_at_sea(model: &CampaignModel, key: &str) -> bool {
+    let Some(t) = &model.terrain else { return false };
     model.world.characters.values()
         .filter(|c| model.is_human(c.faction) && c.garrisoned_in.is_none())
-        .filter_map(|c| t.0.region_at(c.position.0.to_f32(), c.position.1.to_f32()))
-        .collect()
+        .any(|c| t.0.region_at(c.position.0.to_f32(), c.position.1.to_f32()) == Some(key))
 }
 
 /// Whether any human sees the region's settlement or one of its other slots (`0x00BB55A0`): each
@@ -657,11 +663,11 @@ fn transferable_at(model: &CampaignModel, areas: &[Area], i: usize) -> bool {
     let area = &areas[i];
     let Some(reg) = area.region else { return false };
     let owner = reg.owner;
-    if !model.world.factions.contains_key(&owner) || is_major(model, owner) || model.is_human(owner) || area.human {
+    if !model.world.factions.contains_key(&owner) || is_major(model, owner) || model.is_human(owner) || human_in(model, area) {
         return false;
     }
     for link in area.links.iter().filter_map(|&j| areas.get(j)) {
-        if link.region.is_some_and(|n| model.is_human(n.owner)) || link.human {
+        if link.region.is_some_and(|n| model.is_human(n.owner)) || human_in(model, link) {
             return false;
         }
     }
@@ -1106,7 +1112,7 @@ impl CampaignModel {
     /// an alliance (`0x00B29C60`) and its break (`0x00B13840`), a protectorate (`0x00B105C0`) and
     /// the end of an old protectorate tie (`0x00B64B10`, [`Self::end_protectorate_tie`]), a
     /// trade agreement (`0x00B55090`) and its break (`0x00B29BB0`), military access granted
-    /// (`0x00B444B0`) or cancelled (`0x00B67B20`, `0x00B0DA90`), a state gift (`0x00B44590`), a
+    /// (`GrantMilitaryAccessToFaction` `0x00B444B0`) or cancelled (`0x00B67B20`, `0x00B0DA90`), a state gift (`0x00B44590`), a
     /// regular payment (`0x00B54FC0`), a government change (`0x00B1B100`), a capture
     /// (`0x00B62120`, [`Self::take_settlement`]), an agent's detected misdeed (`0x00B0D870`,
     /// `0x00B67FD0`, `0x00B71CF0`) or blamed one (`0x00B0D700`, `0x00B67E60`; both unless the
@@ -1152,8 +1158,8 @@ impl CampaignModel {
     /// link cleared and the region changes hands as a capture does ([`Self::take_settlement`]: the
     /// queues emptied, the land units and constructions without refund, the ships with), but no
     /// capture is reported (no `SettlementOccupied`). Then the receiver's new garrison's size is
-    /// drawn (`0x00BA8400`, CONFIRMED draw): `int_range(a + 3, 4a + 6)` on the director's RNG, `a`
-    /// 1 for an AI receiver, 0 for a human (4 to 10 units for an AI).
+    /// drawn and that army raised (`0x00BA8400`, CONFIRMED): `int_range(a + 3, 4a + 6)` on the
+    /// director's RNG, `a` 1 for an AI receiver, 0 for a human (4 to 10 units for an AI).
     ///
     /// The draw and the spawn need the receiver to own the region and the region to have no
     /// garrison (CONFIRMED): the exe tests the CAI region's settlement (`+0x12C`, `0x008CF5F0`,
@@ -1164,11 +1170,18 @@ impl CampaignModel {
     /// (`0x00A8DE80` → `0x00C4E930` → `0x00C4F6D0` → `0x00C54470(0)`) clears `+0xFC`. So the skip
     /// holds only for a garrison the capture itself left, which the model never does.
     ///
-    /// PROVISIONAL: the army it raises from that count is not modelled. PROVISIONAL: the handover
-    /// (`0x00B449F0` → `TransferRegionToFaction` `0x00A64AC0` with its fourth argument 0) expels
-    /// every other faction's land armies in the region, and its navies docked in the port when not
-    /// at war with the receiver (`ExpelFactionForcesFromRegion` `0x008D9DC0`; where they go,
-    /// `0x008DCB30`, is untraced); ours moves none of them.
+    /// The count is drawn first; then the units are gathered ([`transfer_garrison_units`], no draw)
+    /// and, when there is one, that many units are raised, unit `i` being the `i`-th of the sorted
+    /// list taken round and round, into one army at the settlement garrisoned there (CONFIRMED,
+    /// `0x00BA8400`). With no unit to raise the draw is still made and nothing is raised. The
+    /// original puts every unit in its one army whatever the army cap; ours places them as recruits
+    /// are placed, so a mod's cap below the count (vanilla's 20 is above the 10 drawn at most) starts
+    /// a second army outside the settlement.
+    ///
+    /// The handover (`0x00B449F0` →
+    /// `TransferRegionToFaction` `0x00A64AC0` with its fourth argument 0) expels every other
+    /// faction's land armies in the region, and its navies docked in the port when not at war with
+    /// the receiver (`ExpelFactionForcesFromRegion` `0x008D9DC0`, [`Self::expel_after_owner_change`]).
     fn director_transfer(&mut self, region: RegionId, receiver: FactionId, events: &mut Vec<CampaignEvent>) {
         if let Some(garrison) = self.world.regions.get(&region).and_then(|r| r.garrison) {
             self.destroy_force(garrison, events);
@@ -1178,8 +1191,110 @@ impl CampaignModel {
             return;
         }
         let ai = i32::from(!self.is_human(receiver));
-        let _units = self.director.rng.int_range(ai + 3, ai * 4 + 6);
+        let count = self.director.rng.int_range(ai + 3, ai * 4 + 6);
+        let units = transfer_garrison_units(self, region, receiver);
+        // Unit i is the i-th candidate round the sorted list (the exe's cursor wraps at the end).
+        for unit_key in units.iter().cycle().take(count.max(0) as usize) {
+            // The first unit finds no garrison (the transfer destroyed it) and raises a new army led by a
+            // new colonel, garrisoned in the settlement; the others join it. The original builds its
+            // units and army the way a finished land recruit is placed (unit `0x0087FEA0(faction, record,
+            // 0, 0, 1)` and army `0x008D25F0(.., 1, 0, 1, 1)` at the settlement, the same calls as the
+            // recruit placement `0x008ECAD0`), so ours reuses that placement. Not a finished recruitment
+            // item: no `UnitTrained`.
+            let _ = self.spawn_recruited_unit(region, unit_key.clone());
+        }
     }
+}
+
+/// The slot type that the CAI building slot's constructor (`0x00BE6EF0`, from the model slot's type
+/// key, model slot +0x1DC → +0x44) maps to type 3: a port slot, whose recruitment belief lists ships.
+/// The exe hardcodes this key in that constructor (`0x00BE6EF0`); no merged-db table or data value
+/// marks a slot type as a port, so ours names it here.
+const PORT_SLOT_TYPE: &str = "port";
+
+/// The units the director's transfer raises its garrison from (`0x00BA8400`, CONFIRMED): the
+/// transferred region's recruitable list ([`CampaignModel::recruitable_units`], rebuilt for the new
+/// owner by the capture `0x00B58A30` → `0x00A6AE40`), in its unit-key order, keeping the land units
+/// (record +0x9C set) that `0x00BAF9A0` accepts: a unit in the land recruitment belief
+/// ([`land_recruitment_belief`]) of the region or of a region across one of its CAI boundaries
+/// (`GetCaiRegionBoundariesBegin`/`End`, `GetBoundaryOtherRegion`; the director's area links,
+/// [`areas`]) that the receiver owns. They are then sorted by [`garrison_priority`], highest first,
+/// with the library sort (`0x00B7F510`, [`crate::msvc_sort::sort_by`]).
+fn transfer_garrison_units(model: &CampaignModel, region: RegionId, receiver: FactionId) -> Vec<String> {
+    let areas = areas(model);
+    let mut regions: Vec<&Region> = model.world.regions.get(&region).into_iter().collect();
+    for a in areas.iter().filter(|a| a.region.is_some_and(|r| r.id == region)) {
+        regions.extend(a.links.iter().filter_map(|&l| areas.get(l)?.region));
+    }
+    let mut belief: BTreeSet<&str> = BTreeSet::new();
+    for r in regions.into_iter().filter(|r| r.owner == receiver) {
+        belief.extend(land_recruitment_belief(model, r));
+    }
+    let mut units: Vec<(&str, u8)> = model
+        .recruitable_units(region)
+        .iter()
+        .filter_map(|e| {
+            let (key, unit) = model.rules.units.get_key_value(&e.unit_key)?;
+            (!unit.is_naval && belief.contains(key.as_str())).then(|| (key.as_str(), garrison_priority(unit)))
+        })
+        .collect();
+    crate::msvc_sort::sort_by(&mut units, |a, b| a.1 > b.1);
+    units.into_iter().map(|(key, _)| key.to_owned()).collect()
+}
+
+/// The comparator's rank of a unit (`0x00B7F510` inline, by the unit record's category code +0x1C,
+/// CONFIRMED): infantry 3; cavalry, dragoons, elephants and camels 2; artillery (and every key the
+/// category chain does not know) 1; the naval categories 0.
+fn garrison_priority(unit: &super::rules::UnitRules) -> u8 {
+    use crate::unit_kind::Category;
+    match crate::unit_kind::category(&unit.category) {
+        Category::Infantry => 3,
+        Category::Cavalry | Category::Dragoons | Category::Elephants | Category::Camels => 2,
+        Category::Artillery => 1,
+        _ => 0,
+    }
+}
+
+/// The land units in a region's recruitment belief (region belief `0x00D5F720`, rebuilt by
+/// `0x00D9C9D0`; membership `0x00D5BE50` → `0x00D5BDB0`, the belief's land set), CONFIRMED:
+/// * the settlement's belief (`0x00D5F930`): the region's land entries priced and flagged as the land
+///   queue does ([`CampaignModel::recruitable_entry_flags`]) with no flag but [`ENTRY_TOO_DEAR`](super::commands::ENTRY_TOO_DEAR)
+///   (a region without a settlement has none; every region of the model has one);
+/// * plus each slot's belief (`0x00D5F7D0`, rebuilt by `0x00D9CD60`) for a slot with a recruitment
+///   manager (`0x00C3F480`: model slot +0x1E4, [`super::world::RegionSlot::port`]): a port slot
+///   ([`PORT_SLOT_TYPE`]) lists ships only, so it adds no land unit; any other adds the land units of
+///   its building's `0x00B43CA0` entries ([`CampaignModel::building_entries`]) whose flags hold nothing
+///   but the price flag: the building at full health (+0x18 ≥ 100), the slot not held by another
+///   faction, and the unit's technology researched (a unit without it is skipped).
+///
+/// INFERRED: the original reads the belief from its cache, rebuilt only when marked dirty
+/// (`IsBeliefDirty` `0x00CF1170`; `MarkBeliefDirty` `0x00CF0AB0` marks a belief and its dependents,
+/// from 147 call sites); ours builds it from the current state, which matches only while every change
+/// the belief reads marks it dirty before the transfer. Which changes do is not traced.
+fn land_recruitment_belief<'a>(model: &'a CampaignModel, r: &'a Region) -> BTreeSet<&'a str> {
+    use super::commands::ENTRY_TOO_DEAR;
+    let set = super::economy::region_effect_set(model, r);
+    let counts = model.unit_type_counts(r.owner);
+    let mut out = BTreeSet::new();
+    for e in model.recruitable_units(r.id) {
+        let Some((key, unit)) = model.rules.units.get_key_value(&e.unit_key) else { continue };
+        if unit.is_naval {
+            continue;
+        }
+        let cost = super::economy::recruitment_cost_in(&model.rules, &set, key, unit);
+        if model.recruitable_entry_flags(r, &e, unit, cost, &counts) & !ENTRY_TOO_DEAR == 0 {
+            out.insert(key.as_str());
+        }
+    }
+    for s in r.slots.iter().filter(|s| s.port && s.slot_type != PORT_SLOT_TYPE) {
+        let Some(b) = s.building.as_ref() else { continue };
+        for (u, flags) in model.building_entries(r, b, r.slot_occupied(s)) {
+            if flags == 0 && model.rules.units.get(u).is_some_and(|x| !x.is_naval) {
+                out.insert(u.as_str());
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1311,7 +1426,7 @@ mod tests {
     fn proposed_to_b(m: &mut CampaignModel) {
         m.turn = super::super::turn::TurnState::in_turn_of(A, vec![A]);
         m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
-        m.apply(CampaignCommand::ProposeDeal).unwrap();
+        m.apply(CampaignCommand::ProposeDeal { threat: false }).unwrap();
         m.apply(CampaignCommand::EndNegotiation).unwrap();
         assert_eq!(m.director.beliefs.get(&B), Some(&build_relation_belief(m, B)));
     }
@@ -1890,5 +2005,134 @@ mod tests {
         let mut other = m.clone();
         other.director.autoresolver_pairs[0] = (C, A);
         assert_ne!(other.state_hash(), m.state_hash());
+    }
+
+    /// [`world`] with a MADE-UP slot in C's region 12 whose building allows a gun, a horse, a foot
+    /// unit and a ship (keys in that order), at full health, or damaged when `health` is below 100.
+    fn mixed_world(health: u32) -> CampaignModel {
+        use super::super::world::{BuildingRef, RegionSlot};
+        let mut m = world("1.0");
+        let mut rules = (*m.rules).clone();
+        let base = rules.units["test_unit"].clone();
+        for (key, category, is_naval) in [("a_gun", "artillery", false), ("b_horse", "cavalry", false), ("c_foot", "infantry", false), ("d_ship", "naval_frigate", true)] {
+            rules.units.insert(key.into(), super::super::rules::UnitRules { category: category.into(), is_naval, ..base.clone() });
+            rules.allow_unit_for_all(key);
+        }
+        let mut level = rules.buildings["test_building_level"].clone();
+        level.units_allowed = ["a_gun", "b_horse", "c_foot", "d_ship"].map(String::from).to_vec();
+        rules.buildings.insert("test_mixed_level".into(), level);
+        m.rules = Arc::new(rules);
+        m.world.regions.get_mut(&RegionId(12)).unwrap().slots.push(RegionSlot {
+            key: "test_slot_mixed".into(),
+            slot_type: "test_slot".into(),
+            building: Some(BuildingRef { level_key: "test_mixed_level".into(), health }),
+            position: None,
+            port: false,
+            holder: None,
+            id: 0,
+        });
+        m
+    }
+
+    /// The unit keys of the garrison now in `region`.
+    fn garrison_units(m: &CampaignModel, region: RegionId) -> Vec<String> {
+        let g = m.world.regions[&region].garrison.expect("a garrison");
+        m.world.forces[&g].units.iter().map(|u| u.unit_key.clone()).collect()
+    }
+
+    /// `0x00BA8400`: the count drawn first (4 to 10 for an AI receiver), then the land units sorted
+    /// infantry, cavalry, artillery and taken round and round; the ship is left out. One army, led by
+    /// a new colonel garrisoned in the settlement.
+    #[test]
+    fn a_transfer_raises_its_drawn_count_of_units_sorted_by_kind() {
+        for seed in [RNG_SEED, 1, 2, 3, 77] {
+            let mut m = mixed_world(100);
+            m.director.rng = CaRng::new(seed);
+            let mut one = CaRng::new(seed);
+            let count = one.int_range(4, 10) as usize;
+            m.director_transfer(RegionId(12), B, &mut Vec::new());
+            assert_eq!(m.director.rng, one, "one draw, none while the units are gathered");
+            let want: Vec<String> = ["c_foot", "b_horse", "a_gun"].iter().cycle().take(count).map(|s| s.to_string()).collect();
+            assert_eq!(garrison_units(&m, RegionId(12)), want);
+            let army = &m.world.forces[&m.world.regions[&RegionId(12)].garrison.unwrap()];
+            assert_eq!(army.faction, B);
+            let colonel = &m.world.characters[&army.commander.unwrap()];
+            assert_eq!((colonel.kind, colonel.garrisoned_in), (super::super::world::CharacterKind::Colonel, Some(RegionId(12))));
+            assert!(army.units.iter().all(|u| u.men == 100 && u.max_men == 100));
+        }
+    }
+
+    /// A human receiver gets 3 to 6 units.
+    #[test]
+    fn a_human_receiver_gets_three_to_six_units() {
+        for seed in [RNG_SEED, 1, 2, 3, 77] {
+            let mut m = mixed_world(100);
+            m.director.rng = CaRng::new(seed);
+            let count = CaRng::new(seed).int_range(3, 6) as usize;
+            m.director_transfer(RegionId(12), A, &mut Vec::new());
+            assert_eq!(garrison_units(&m, RegionId(12)).len(), count);
+        }
+    }
+
+    /// The price flag does not keep a unit out of the belief (`0x00D5F930` keeps entries flagged only
+    /// [`ENTRY_TOO_DEAR`](super::super::commands::ENTRY_TOO_DEAR)): a receiver with no money still
+    /// gets its garrison.
+    #[test]
+    fn a_receiver_too_poor_to_recruit_still_gets_the_garrison() {
+        let mut m = mixed_world(100);
+        m.world.factions.get_mut(&B).unwrap().treasury = 0;
+        m.director_transfer(RegionId(12), B, &mut Vec::new());
+        assert_eq!(garrison_units(&m, RegionId(12))[0], "c_foot");
+    }
+
+    /// A unit the region cannot recruit (its building is damaged) is raised when a region of the
+    /// receiver's across a boundary can (`0x00BAF9A0`): B's 11 allows `test_unit` and
+    /// `test_recruit`, and of those only `test_unit` is in 12's list, so with 12's own building damaged
+    /// only `test_unit` is raised, and only while 11 is B's and linked to 12. Without a unit to raise, the draw is still made and nothing is raised.
+    #[test]
+    fn a_unit_the_region_cannot_recruit_comes_from_a_receivers_neighbour() {
+        let mut m = mixed_world(50);
+        let mut rules = (*m.rules).clone();
+        rules.buildings.get_mut("test_mixed_level").unwrap().units_allowed.push("test_unit".into());
+        m.rules = Arc::new(rules);
+        let before = m.clone();
+        m.director_transfer(RegionId(12), B, &mut Vec::new());
+        assert!(garrison_units(&m, RegionId(12)).iter().all(|u| u == "test_unit"));
+
+        // 11 no longer linked to 12: no unit, no army, the draw made all the same.
+        for edit in [
+            (|m: &mut CampaignModel| m.world.region_neighbours.clear()) as fn(&mut CampaignModel),
+            |m: &mut CampaignModel| m.world.regions.get_mut(&RegionId(11)).unwrap().owner = A,
+        ] {
+            let mut m = before.clone();
+            edit(&mut m);
+            let mut one = m.director.rng;
+            one.int_range(4, 10);
+            let forces = m.world.forces.len();
+            m.director_transfer(RegionId(12), B, &mut Vec::new());
+            assert_eq!((m.world.regions[&RegionId(12)].garrison, m.world.forces.len()), (None, forces));
+            assert_eq!(m.director.rng, one);
+        }
+    }
+
+    /// A slot with its own recruitment manager adds its building's land units whatever the queue
+    /// flags say (`0x00D9CD60`), unless it is a port slot (type 3, `0x00BE6EF0`), which lists ships:
+    /// with B at its cap of foot units, the foot unit is raised only from a non-port slot that has one.
+    #[test]
+    fn a_slot_with_its_own_queue_adds_its_land_units_unless_it_is_a_port() {
+        let capped = |port: bool, slot_type: &str| {
+            let mut m = mixed_world(100);
+            let mut rules = (*m.rules).clone();
+            rules.units.get_mut("c_foot").unwrap().unit_cap = 1;
+            m.rules = Arc::new(rules);
+            m.world.forces.get_mut(&ForceId(1001)).unwrap().units[0].unit_key = "c_foot".into();
+            let slot = m.world.regions.get_mut(&RegionId(12)).unwrap().slots.last_mut().unwrap();
+            (slot.port, slot.slot_type) = (port, slot_type.into());
+            m.director_transfer(RegionId(12), B, &mut Vec::new());
+            garrison_units(&m, RegionId(12))[0].clone()
+        };
+        assert_eq!(capped(false, "test_slot"), "b_horse");
+        assert_eq!(capped(true, PORT_SLOT_TYPE), "b_horse");
+        assert_eq!(capped(true, "test_slot"), "c_foot");
     }
 }

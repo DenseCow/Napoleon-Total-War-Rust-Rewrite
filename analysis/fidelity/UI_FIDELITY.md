@@ -838,7 +838,7 @@ silent, as the host reproduces.
 | 5 | `End` | 0x009BA850 (114) | no arg reads | `0x008FD010`, ..., `0x009B8560` | UNKNOWN |
 | 6 | `Finished` | 0x009BB8B0 (72) | no arg reads | `0x01056610`, `0x01058750`, `0x006CCA70` | UNKNOWN (one bool out, INFERRED) |
 | 7 | `BuildOfferAndDemandStrings` | 0x009B48B0 | literals `"Offers"`, `"Demands"`, `"Action"`, `"Regions"` (x2); the row's action id from `0x006A3110` is tested **`== 6`** for the region list | 0 callees: a pure reader of the engine's rows | superseded by §4.6: three return values (offers, demands, regions text); "Offers" / "Demands" are not keys |
-| 8 | `ProposerId` | 0x009BFD80 (105) | wraps the faction userdata (`0x008E5060`) | `0x01056500`, `0x004F1090`, ... | CONFIRMED one value out; the host returns the faction key (INFERRED) |
+| 8 | `ProposerId` | 0x009BFD80 (105) | takes the faction key from `0x008E5060` and pushes it as a Lua string (`0x00FE95E0` → `0x00FE9560`); no userdata | `0x01056500`, `0x004F1090`, ... | CONFIRMED one value out, the proposer's faction key as a string (CONFIRMED) |
 | 9 | `PrepareCounterOffer` | 0x009BF120 (112) | no arg reads | `0x008FCFF0`, `0x008D1F30`, ... | UNKNOWN (host: false, AI evaluation not modelled) |
 | 10 | `CanPropose` | 0x009B7990 (72) | no arg reads | `0x00C1C080`, `0x01056610`, `0x01058750` | UNKNOWN (host INFERRED: a non-empty deal) |
 | 11 | `CanThreaten` | 0x009B79E0 (72) | no arg reads | `0x01056610`, `0x01058750`, `0x00C1C0F0` | UNKNOWN (host INFERRED: not already at war) |
@@ -1129,7 +1129,7 @@ User bug 2026-10-07 (Britain vs France, late June 1805): the X did nothing, Powe
   the proposer, so the panel's listener ignores it unless the local player proposed);
   `CLEAR_NEGOTIATION` (`Cancel`) → 0x00932EC0 (deal items removed, hub +0x348 posted with flag 0 →
   `InitialiseNegotiation(nil?, proposer == player, false)` via 0x00A14850); `PROPOSE_DEAL` →
-  0x00933690 → 0x00C49BE0 (AI evaluation). Only END ends the negotiation. `Finished()`
+  0x00933690 → ProcessNegotiationDealProposal 0x00C49BE0 (AI evaluation). Only END ends the negotiation. `Finished()`
   (0x009BB8B0) is nothing without +0xAC, else `+0x28 != 0` (0x006CCA70): accepted or declined.
 - Every panel close reaches `End()`: the PanelManager's table gives `diplomacy_panel` the
   `ExitFunc` "OnExit" (panelmanager.lua:34), and `OnExit` (:1755) ends a negotiation the panel still
@@ -1407,7 +1407,7 @@ row reads the record (`payment_row_text`), `CanPropose` counts it and `AcceptDea
 `a_proposed_payment_is_capped_once_and_its_row_shows_the_capped_amount`.
 Open: the other actions' `Propose` items (state gift, protector, war, lists 13–15) have no
 command yet (PLACEHOLDER, logged once per action); the AI's evaluation (`0x00C49BE0` →
-`0x00AA5ED0`, `0x00C1E240`) is traced in AI_RESEARCH.md §4 "Deal evaluation" (technology value, evaluation and accept tests ported in `campaign::deal_value`; the goal lists and weights traced, and a deal of regions and technologies answered as the exe, `ai_accepts_deal`, with the region inputs PROVISIONAL as listed there).
+`EvaluateProposedNegotiationDealAI 0x00AA5ED0`, `0x00C1E240`) is traced in AI_RESEARCH.md §4 "Deal evaluation" (technology value, evaluation and accept tests ported in `campaign::deal_value`; the goal lists and weights traced, and a deal of regions and technologies answered as the exe, `ai_accepts_deal`, with the region inputs PROVISIONAL as listed there).
 
 **Review round 1 (2026-10-10).**
 - The settlement's owner-changed event (+0x24, fired at `0x00B44B31` and by `0x00B2B810`): its
@@ -2819,3 +2819,108 @@ and `hover()` are gone. Tests: `a_building_slots_tooltip_goes_when_the_pointer_l
 Not modelled yet: `SetTooltipText` (`0x01036E10`) re-notifies (empty, then the new text) while the
 component is hovered; the registered tooltip is drawn in tree order, not last (PROVISIONAL in
 `ui_prelude.lua`); the hover delay is UNKNOWN (shown at once).
+
+## 13. `Component.CreateFromLayout`'s arguments: x, y place the new component (layoutxy, 2026-10-15)
+
+**Exe, CONFIRMED (disassembly of the binding `0x01016BD0`).** The binding reads the optional
+arguments from the top of the Lua stack down, before the fixed ones:
+
+- A table on top is the **image list**, unless the value below it is a table too: then the top
+  one is the **text list** (key/value; a number key means the empty id) and the one below the
+  image list. The table reader `0x010558B0` only records the table's stack index; once its
+  entries are read, the binding removes it at that index (`0x00FE9820`, at `0x01016E80` for the
+  texts and `0x01016F7A` for the images).
+- After the tables, a number on top means a position: two reads by `0x010556D0` (a Lua number
+  read as a float and rounded to an integer, ties to even: the FPU control word is RC_NEAR,
+  `0x010F4670` sets `_controlfp_s(0xA001F)`), the first y, the second x. A "no position" flag
+  starts set and is cleared by these reads.
+- **A non-number x below a number y is no Lua error.** The number reader `0x01055700` logs
+  "Trying to retrieve type number, found type %s" (`0x01095090` → the script error logger
+  `0x0106BD10`, which logs with a traceback and returns) and clears the reader's ok flag
+  ([reader+4]). Every later read checks that flag first, so the parent (`0x0044D320`), id and
+  path (`0x01055760`) are skipped: `0x01027400` gets an empty path and a null parent, creates
+  nothing, and the binding returns nil (`0x01085B30` → pushnil `0x00FE95A0`). The script keeps
+  running.
+- **ORIGINAL BUG, the ok flag is sticky (CONFIRMED, 2026-10-16).** The "reader" is not made per
+  call: it is the calling component's script context, found by `GetRunningScriptContext`
+  (`0x01058750`: registry "lookup"[thread]). `0x010586B0` creates it once, lazily, on the
+  component's script holder (+0x18) and keeps it at holder+4; its constructors `0x01050940` (own
+  Lua state) and `0x01050980` (thread of the shared state `0x01767AB0`) set [ctx+4] = (Lua state
+  != null). Writers of [ctx+4]: those two set it; the readers `0x01055700` (number),
+  `0x01055760` (string), `0x010557E0`, `0x01055840`, `0x010558B0` (table) clear it on a type
+  error, and `0x0044D320` (component) clears it and raises a Lua error. No writer that sets it
+  again was found: a scan of every byte store to [reg+4] in `0x01050000`–`0x0105C000`, in the 806
+  callers of `0x01058750` and in the 310 callers of lua_type `0x00FE9DA0` finds only clears
+  (`0x01052400` copies the flag into its own object; the `[x+4] = 0` stores in
+  `0x01016E8A`/`0x01016F84` are the table-key objects' own flags). So after one type error,
+  every later argument read by every binding called from that component's script is skipped for
+  the component's life, with no further log: CreateFromLayout returns nil, other bindings run on
+  their defaults. That contradicts the flag's own use (the readers check it first to stop reading
+  the rest of one call's arguments) and the logger, which returns so the script keeps running.
+  Ours fails only that call (nil, nothing created) and logs it once (no log spam).
+- Then the parent (`0x0044D320`), the id and the path, and the call
+  `CreateUIComponentFromLayoutFile` (`0x01027400`)(path, id, images, texts, parent, x, y,
+  no-position, 1).
+
+**`0x01027400`, CONFIRMED.** With no position, the new component's offset is the layout file's
+absolute position minus the parent's, so it stays where the file puts it. With x, y, they are the
+offset in the parent and **replace** the file's offset: 0, 0 is the parent's top-left corner.
+Image and text lists then go to `0x01026F90`, which builds the component with the images and
+applies the texts (`ApplyCreatedComponentStateTexts` `0x01032010`). `CreateComponentFromTemplate`
+(`0x010276D0`) and `CreateFromComponent` (`0x010273C0`) hand their two lists to the same function.
+`0x01034210` then initialises the subtree, and the parent's `OnAdoptChild` fires.
+
+**The image list, CONFIRMED (disassembly, 2026-10-16).** `CreateComponentWithImageAndTextLists`
+(`0x01026F90`) first picks the list the builder gets. When the script's first entry contains a
+'{' anywhere (substring search `0x004F32C0` for `g_szOpenBrace` `0x0132E1B8`) the list is copied
+through as given (keyed mode). Otherwise `AppendTemplateImagePathsPreOrder` (`0x01026E30`) fills
+it with every image path of the template subtree in pre-order (own images, then children at
++0x8C/+0x90), and the script entries are laid over it slot by slot: a non-empty entry
+(`0x004F3500`) replaces the slot (`0x004F0AA0`), an empty entry keeps the template's path, and
+entries past the last image are dropped (lists are `UIStringList`, nodes `UIStringListNode`).
+The component builder (the manager's +0x28 callback `0x00DA9340` → `0x00DA68E0` → `0x0101FC20`)
+then walks each new component's images with a counter starting at 1 and tests '{' on the list's
+*current first entry*, per image:
+- first entry starts with '{': it formats the key "{%S:%d}" (component id, 1-based image index),
+  takes the first entry longer than the key that starts with it, uses the rest as the image path
+  and removes that entry. So "{id:0}" never matches (the old battle wrapper turned it into image
+  1), nor does a non-canonical number ("{id:01}"); an entry with no path is never used, the first
+  of two entries for the same image wins, and an image with no match keeps its path;
+- any other first entry (an empty one too): the image takes it as its path (empty = untextured)
+  and it is removed;
+- an empty list: the image keeps its own path.
+So in a mixed keyed list such as {'{a:1}x', 'plain'} the plain entry goes to the image built
+right after the one that used the keyed entry (ours used to drop it). The builder runs per
+component, its own images first, then `0x00DA68E0` builds the children through `0x01029480`
+with the same list, so components are visited in pre-order and, since each used entry is
+removed, two components with the same id take successive entries for one key. Ours matches all
+of this (`apply_created_lists`; tests
+`created_component_image_keys_are_1_based_and_the_first_entry_wins`,
+`created_component_image_entries_are_used_up_in_build_order`,
+`created_component_image_list_tests_the_current_first_entry_per_image`: mixed, positional with
+empty and extra entries, positional then keyed, and a '{' mid-entry selecting keyed mode).
+Our own model on top: an image the script supplied an entry for marks its component `painted`
+(INFERRED, `UiNode::painted`, as `__SetImagePath` does even when the path is unchanged); an image
+handed its own path back (an empty positional entry, past the list's end, no keyed match) does
+not (test `created_component_image_list_paints_only_supplied_entries`). A non-string entry is
+skipped, so later entries move up a slot, and logged once; the exe's handling of one is UNKNOWN.
+
+**Shipped call shapes (luac_dump):**
+
+| Shape | Callers |
+|---|---|
+| path, id, parent | deployment_end, 3d_component_manager, varargs callers |
+| path, id, parent, 0, 0 | battle root.luac (pip_frame line 146, xp_bling, inspire_bling, SpecialTooltip, menu bar, deployables, victory tickets, paused panel, countdown timer, post-battle details); esc_menu_battle.luac line 113 (`options_<name>` into `Component.Root()`); panelmanager.luac (§8) |
+| path, id, parent, images | battle_hud.luac lines 19, 21, 26, 28 |
+| path, id, parent, x, y, images | character_information.luac line 93 |
+
+**Our bug.** `battle_prelude.lua` wrapped `CreateFromLayout` as `(path, id, parent, images)`. It
+took x as the image list and never passed x, y on, so every 5-argument battle call landed at the
+file offset instead of 0, 0 in its parent. **Fix:** the wrapper (and the template one) is gone.
+The host binding (`crates/ntw_script/src/ui/host.rs`, `layout_call_tail` and
+`apply_created_lists`) reads the tail the way the exe does, for every screen. The image and text
+lists are applied once, for all three create calls. So frontend and campaign `CreateFromLayout`
+calls now get their lists too, as in the exe. Test:
+`created_layouts_land_at_the_scripts_x_y_not_their_file_offset` (battle.rs) covers the pip_frame,
+esc_menu option, relative-to-parent, rounding, no-position, images and 6-argument shapes, and the
+non-number x (nil returned, nothing created, logged once).

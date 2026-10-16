@@ -1,6 +1,6 @@
 //! The AI recipient's value of a proposed deal (`analysis/ai/AI_RESEARCH.md` §4 "Deal
 //! evaluation"): the parts of the original's evaluator that are traced. The evaluator itself
-//! (`0x00AA5ED0`, run by `CCQ_DIPLOMACY_PROPOSE_DEAL` → `0x00C49BE0` when the recipient is not
+//! (`EvaluateProposedNegotiationDealAI 0x00AA5ED0`, run by `CCQ_DIPLOMACY_PROPOSE_DEAL` → `ProcessNegotiationDealProposal 0x00C49BE0` when the recipient is not
 //! human), for the records the model holds. Ported here: the technology value, the deal inflation,
 //! the evaluation sum and its accept tests, the goal weights of region and technology items (the
 //! research need, the technology spread) and how a record sums them, the region value

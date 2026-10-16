@@ -14,11 +14,16 @@
 //!   ([`super::director::director_desires`]).
 //! - [`PROPOSED_PAYMENT`]: the cap on a payment a deal proposes ([`super::treaties::proposed_payment`]).
 //! - [`CONSTRUCTION_STEP`]: one round of a region's construction item ([`super::turn::construction_step`]).
+//! - [`REGION_EXPULSION`]: which of a faction's forces leave a region, and where to
+//!   ([`super::expulsion::expel_faction_from_region`]).
+//! - [`TRADE_ROUTE_CHECK`]: whether one faction can send a trade route to another
+//!   ([`super::trade_check::trade_route_check`]).
 
 use std::sync::Arc;
 
 use super::director::DirectorState;
-use super::ids::FactionId;
+use super::expulsion::ExpelledForce;
+use super::ids::{FactionId, RegionId};
 use super::mod_state::ModWrites;
 use super::population::PopulationState;
 use super::turn::ConstructionStep;
@@ -37,6 +42,10 @@ pub const DIRECTOR_DESIRES: &str = "director.desires";
 pub const PROPOSED_PAYMENT: &str = "diplomacy.proposed_payment";
 /// Seam key of one round of a construction item ([`ConstructionStepRule`]).
 pub const CONSTRUCTION_STEP: &str = "construction.step";
+/// Seam key of a faction's forces leaving a region ([`RegionExpulsion`]).
+pub const REGION_EXPULSION: &str = "region.expulsion";
+/// Seam key of the check that one faction can send a trade route to another ([`TradeRouteCheck`]).
+pub const TRADE_ROUTE_CHECK: &str = "trade.route_check";
 
 /// A region's population after one round of growth: given the model, the region, its population
 /// and its population state, the new population and state. The original's is
@@ -66,6 +75,18 @@ pub type ProposedPayment = dyn Fn(&CampaignModel, FactionId, i32, u32) -> i32 + 
 /// the result before the next slot steps (`construction_round_end`). The original's is
 /// [`super::turn::construction_step`]. Its mod-state changes go to the [`ModWrites`].
 pub type ConstructionStepRule = dyn Fn(&CampaignModel, &Region, &ConstructionItem, &mut ModWrites) -> ConstructionStep + Send + Sync;
+/// Which of a faction's forces leave a region, and where they go: given the model, the faction and the
+/// region, the forces to move ([`ExpelledForce`]); the model applies the plan
+/// ([`CampaignModel::expel_from_region`]: an army leaves its residence, a navy its port, each placed
+/// commander moves). Called at every change of a region's owner, for an accepted deal's region lists
+/// and at the end of a protectorate tie. The original's is
+/// [`super::expulsion::expel_faction_from_region`]. Its mod-state changes go to the [`ModWrites`].
+pub type RegionExpulsion = dyn Fn(&CampaignModel, FactionId, RegionId, &mut ModWrites) -> Vec<ExpelledForce> + Send + Sync;
+/// Whether faction `a` can send a trade route to faction `b`: 0 when it cannot, else the kind of route
+/// (the codes of [`super::trade_check::trade_route_check`], the original's). A route through a region that
+/// changes hands is dropped, and a pair that fails it either way loses its agreement. A query: it changes no
+/// state.
+pub type TradeRouteCheck = dyn Fn(&CampaignModel, FactionId, FactionId) -> u8 + Send + Sync;
 
 /// The campaign rules in use, one field per seam (see the module docs).
 #[derive(Clone, Debug, PartialEq)]
@@ -80,6 +101,10 @@ pub struct CampaignSeams {
     pub proposed_payment: Seam<ProposedPayment>,
     /// [`CONSTRUCTION_STEP`].
     pub construction_step: Seam<ConstructionStepRule>,
+    /// [`REGION_EXPULSION`].
+    pub region_expulsion: Seam<RegionExpulsion>,
+    /// [`TRADE_ROUTE_CHECK`].
+    pub trade_route_check: Seam<TradeRouteCheck>,
 }
 
 impl Default for CampaignSeams {
@@ -91,6 +116,8 @@ impl Default for CampaignSeams {
             director_desires: Seam::original(Arc::new(|m: &mut CampaignModel, w: &mut ModWrites| super::director::director_desires(m, w))),
             proposed_payment: Seam::original(Arc::new(super::treaties::proposed_payment)),
             construction_step: Seam::original(Arc::new(|m: &CampaignModel, r: &Region, i: &ConstructionItem, _: &mut ModWrites| super::turn::construction_step(m, r, i))),
+            region_expulsion: Seam::original(Arc::new(|m: &CampaignModel, f: FactionId, r: RegionId, _: &mut ModWrites| super::expulsion::expel_faction_from_region(m, f, r))),
+            trade_route_check: Seam::original(Arc::new(super::trade_check::trade_route_check)),
         }
     }
 }
@@ -98,13 +125,15 @@ impl Default for CampaignSeams {
 impl CampaignSeams {
     /// Every seam's key and implementation chain, in a fixed order (for the multiplayer handshake
     /// and the log).
-    pub fn chains(&self) -> [(&'static str, &[String]); 5] {
+    pub fn chains(&self) -> [(&'static str, &[String]); 7] {
         [
             (POPULATION_GROW, self.population_grow.chain()),
             (DIRECTOR_REGION_TRANSFER, self.director_region_transfer.chain()),
             (DIRECTOR_DESIRES, self.director_desires.chain()),
             (PROPOSED_PAYMENT, self.proposed_payment.chain()),
             (CONSTRUCTION_STEP, self.construction_step.chain()),
+            (REGION_EXPULSION, self.region_expulsion.chain()),
+            (TRADE_ROUTE_CHECK, self.trade_route_check.chain()),
         ]
     }
 }
@@ -124,6 +153,10 @@ pub struct CampaignRuleRegistry {
     pub proposed_payment: SeamRegistry<ProposedPayment>,
     /// [`CONSTRUCTION_STEP`] implementations.
     pub construction_step: SeamRegistry<ConstructionStepRule>,
+    /// [`REGION_EXPULSION`] implementations.
+    pub region_expulsion: SeamRegistry<RegionExpulsion>,
+    /// [`TRADE_ROUTE_CHECK`] implementations.
+    pub trade_route_check: SeamRegistry<TradeRouteCheck>,
 }
 
 impl CampaignRuleRegistry {
@@ -139,6 +172,8 @@ impl CampaignRuleRegistry {
                 DIRECTOR_DESIRES => self.director_desires.apply(&mut seams.director_desires, key),
                 PROPOSED_PAYMENT => self.proposed_payment.apply(&mut seams.proposed_payment, key),
                 CONSTRUCTION_STEP => self.construction_step.apply(&mut seams.construction_step, key),
+                REGION_EXPULSION => self.region_expulsion.apply(&mut seams.region_expulsion, key),
+                TRADE_ROUTE_CHECK => self.trade_route_check.apply(&mut seams.trade_route_check, key),
                 _ => {
                     warnings.push(format!("rule seam {seam}: no such seam; {key} is ignored"));
                     continue;
@@ -215,6 +250,8 @@ mod tests {
                 (DIRECTOR_DESIRES, &original[..]),
                 (PROPOSED_PAYMENT, &original[..]),
                 (CONSTRUCTION_STEP, &original[..]),
+                (REGION_EXPULSION, &original[..]),
+                (TRADE_ROUTE_CHECK, &original[..]),
             ]
         );
         // The round end through the seam gives exactly what the original's function gives.

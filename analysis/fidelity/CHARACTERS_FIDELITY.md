@@ -1092,8 +1092,12 @@ are in our words, no decompiled code stored. Targets and findings:
   every install `db` table (latin1 and UTF-16) finds no `promote_general_in_field` or
   `promote_admiral_at_sea`, so with vanilla data the model's effect gate in `pool.rs`
   `can_promote_unit` never passes either: vanilla behaviour matches. This reads as a design choice
-  (field promotion switched off), not an ORIGINAL BUG. The promotion-price debugger sitting can
-  find nothing, because the original never reaches the price. Decision (user, 2026-10-11): a mod that grants the bonus
+  (field promotion switched off), not an ORIGINAL BUG. The price is still readable at run time
+  (corrected 2026-10-15, sitting-sheet prep, static): the army panel's unit-row builder `0x009ABE00`
+  (callers include BuildArmyPanelInfoTable at `0x009FD20F` and BuildCharacterDetailsInfoTable) calls
+  slot +0x44 at `0x009AC5FF` and stores the result as "PromotionCost" (`0x0136EC6C`), so selecting a
+  land army runs `0x008E2770` with no promotion; the read is step 2a of
+  `analysis/fidelity/debugger/SITTING_SHEET.md` (breakpoint `0x008E2799`, price = `[[record+0xC]+0x38]`). Decision (user, 2026-10-11): a mod that grants the bonus
   still promotes (mod makers decide, no toggle); vanilla grants none, so it matches the original. The
   `pool.rs` / `commands.rs` / `events.rs` docs now say slot +0x4C and the constant-false gate.
 - Superseded by the line above: the base tables hold a return-0 stub at slot +0x40 (`CanPromoteUnit` `0x009E0AF0`
@@ -1299,7 +1303,38 @@ All CONFIRMED by static trace (Ghidra names applied in this round) unless tagged
     `dwCapacity`, `pPwszData`; `0x014A2F50` → `g_wszEmptyUniStringBuffer`. Widening sign-extends bytes ≥ 0x80
     with no code-page conversion, and every empty string shares that one buffer, never freed. The CampaignCharacter
     vtables (`0x0136A62C`, 12 slots; the +0xC8 thunk, 1; eight sub-object vtables, 3 each) are shared by the four
-    constructors and the destructor. The four constructors and `0x00A1A300` are still at 13–26 (not started).
+    constructors and the destructor.
+  - polish22 (2026-10-15, static trace): the four constructors and `0x00A1A300` now have prototypes, `this`
+    types, named and typed locals, plates, and EOL comments on every constant. Completeness, raw / effective
+    (before: 13–34):
+    - `ConstructCharacterDetails` `0x00992E60`: 74 / 85.
+    - `ConstructGenericCharacter` `0x0098F250`: 72 / 87.
+    - `ConstructHistoricalCharacter` `0x0098F880`: 73 / 87.
+    - `ConstructUnitOfficerCharacter` `0x00990EF0`: 71 / 86.
+    - `ApplyAgentRecordToCharacterDetails` `0x00A1A300`: 71 / 83.
+    - What is left is structural (register-only and extraout values).
+    New types: `CharacterNameSource` (0x40) and `PlayerSlot` (0xBC). `0x01321294` →
+    `g_pRegisteredCampaignObjectVtable`. Behaviour read on the way:
+    - **Registration:** the character is 0x550 bytes. The generic constructor registers it in the campaign
+      context's object registry (context +8 → +0xFC0; the registry count +0x14 becomes the id at character
+      +0xCC, and the registry pointer goes to +0xD0). It writes the registered-object vtable, builds eight
+      empty 0x18-byte list sub-objects (sentinel at +0x10) and sets +0x1B4 = 0x00FFFFFF.
+    - **Age and names:** the age is drawn with the campaign RNG (`0x00A05740`). Names come from a
+      `CharacterNameSource` (surname +0, forename +0x18, owner at +0x3C read as a `PlayerSlot`, INFERRED from
+      the read chain) or are drawn from the faction's culture. Character +0x4EC = calendar turns elapsed.
+    - **Historical:** age = current year − record +0x34 + 20; +0x510 = 0, +0x511 = 1. Each (dword, dword)
+      pair of the record's list (+0x54, count +0x50) goes to `0x008C2D30` with the faction's player slot.
+    - **Unit officer:** the age is drawn first, and the names come from the force's name block (force
+      +0x7C). The agents record (2 = colonel, 3 = captain) is looked up twice by the same key, once for
+      `0x009078A0` and once for +0x1AC. Same row both times, so ours does one lookup. The guerrilla flag is 0
+      in every known caller.
+    - **Details:** +0x188 = the faction's player slot (faction +0x514). When that is null, it takes the
+      default from `0x008B9DE0` (character +0x2A0 → `0x006649C0`). `PlayerSlot` holds the faction record
+      at +0x10; `0x008DD090` copies its +0xA8 / +0xAC to faction +0x6E0 / +0x6E4. The constructor takes the
+      deck age from `0x009C9C70`, while `0x00A1A300` uses `0x009C9C50`. `SavePortraitDetails` `0x0099F6D0`
+      confirms the portrait block at details +0x7C.
+    - **`0x00A1A300`:** resets the ability pairs to (-1, 0), runs a functor (vtable `0x0136A97C`), and finds
+      the culture key through +0x2A0 → `0x006649C0` → `0x008F3490` → +0x10.
 - **Types created:**
   - `PortraitDeck` (0x1C): pictures +0, order capacity +8, count +0xC, order +0x10, next position +0x14,
     seed +0x18.

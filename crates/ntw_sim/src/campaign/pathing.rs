@@ -71,6 +71,28 @@ pub struct PathGrid {
     /// The map's ground types (`regions.esf` `groundtypes`), for the stealth test
     /// ([`PathGrid::ground_type_at`]).
     pub ground_types: Vec<GroundType>,
+    /// Cells of each region (ascending cell index), built on first use by
+    /// [`PathGrid::nearest_cell_per_region`]. Derived from [`PathGrid::region`]: fill `region` and
+    /// `region_keys` before the first lookup, or call [`PathGrid::invalidate_region_cells`] after
+    /// changing them.
+    region_cells: RegionCells,
+}
+
+/// Lazy per-region cell lists; equal for any two grids (derived data, not part of the identity).
+#[derive(Debug, Default)]
+struct RegionCells(std::sync::OnceLock<Vec<Vec<usize>>>);
+
+/// A clone starts empty and rebuilds on its first lookup.
+impl Clone for RegionCells {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl PartialEq for RegionCells {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 
 /// One area of a ground type: its (outer?, outline points) loops.
@@ -150,6 +172,7 @@ impl PathGrid {
             poly: None,
             harbours: Vec::new(),
             ground_types: Vec::new(),
+            region_cells: RegionCells::default(),
         }
     }
 
@@ -227,6 +250,75 @@ impl PathGrid {
             }
         }
         None
+    }
+
+    /// The index of region `key` in [`PathGrid::region_keys`], if the grid has it.
+    pub fn region_index(&self, key: &str) -> Option<u32> {
+        self.region_keys.iter().position(|k| k == key).and_then(|i| u32::try_from(i).ok())
+    }
+
+    /// For each region index, the cell of that region nearest to (x, z) by the squared distance to
+    /// its centre (ties: the lowest cell index), whatever its kind; `None` for a region with no cell.
+    /// Scans only each region's own cells (lists built once, on first use).
+    pub fn nearest_cell_per_region(&self, x: f32, z: f32) -> Vec<Option<usize>> {
+        let lists = self.region_cells.0.get_or_init(|| {
+            let mut lists = vec![Vec::new(); self.region_keys.len()];
+            for (i, &r) in self.region.iter().enumerate() {
+                if let Some(l) = lists.get_mut(r as usize) {
+                    l.push(i);
+                }
+            }
+            lists
+        });
+        lists
+            .iter()
+            .map(|cells| {
+                let mut best: Option<(f32, usize)> = None;
+                for &i in cells {
+                    let (cx, cz) = self.centre(i);
+                    let d = (cx - x).powi(2) + (cz - z).powi(2);
+                    if best.is_none_or(|(b, _)| d < b) {
+                        best = Some((d, i));
+                    }
+                }
+                best.map(|(_, i)| i)
+            })
+            .collect()
+    }
+
+    /// Drops the per-region cell lists; call after changing [`PathGrid::region`] or
+    /// [`PathGrid::region_keys`] once [`PathGrid::nearest_cell_per_region`] has been used.
+    pub fn invalidate_region_cells(&mut self) {
+        self.region_cells = RegionCells::default();
+    }
+
+    /// The nearest place to (x, z) less than `radius` map units away on a cell passable for
+    /// `domain` (and of region index `region`, when given): (x, z) itself when its own cell
+    /// qualifies, else the centre of the nearest such cell (ties: the lowest cell index).
+    pub fn nearest_place_within(&self, x: f32, z: f32, region: Option<u32>, domain: Domain, radius: f32) -> Option<(f32, f32)> {
+        let fits = |i: usize| self.passable(i, domain) && region.is_none_or(|r| self.region.get(i) == Some(&r));
+        if self.cell_at(x, z).is_some_and(fits) {
+            return Some((x, z));
+        }
+        let c0 = ((x - self.origin.0) / self.cell).floor() as i64;
+        let r0 = ((z - self.origin.1) / self.cell).floor() as i64;
+        let span = (radius / self.cell).ceil() as i64 + 1;
+        let (w, h) = (i64::from(self.width), i64::from(self.height));
+        let mut best: Option<(f32, usize)> = None;
+        for r in (r0 - span).max(0)..=(r0 + span).min(h - 1) {
+            for c in (c0 - span).max(0)..=(c0 + span).min(w - 1) {
+                let i = (r * w + c) as usize;
+                if !fits(i) {
+                    continue;
+                }
+                let (cx, cz) = self.centre(i);
+                let d = (cx - x).powi(2) + (cz - z).powi(2);
+                if d < radius * radius && best.is_none_or(|(b, bi)| d < b || (d == b && i < bi)) {
+                    best = Some((d, i));
+                }
+            }
+        }
+        best.map(|(_, i)| self.centre(i))
     }
 
     /// Finds the cheapest path from `from` to `to` for `domain`. `cost_per_unit(cell)` is the
@@ -349,6 +441,73 @@ mod tests {
         g.region[0] = 70_000;
         assert_eq!(g.region_at(0.5, 0.5), Some("r70000"));
         assert_eq!(g.region_at(1.5, 0.5), None);
+    }
+
+    #[test]
+    fn cached_region_cells_match_brute_force_with_ties() {
+        let mut g = grid();
+        g.region_keys = vec!["a".into(), "b".into(), "empty".into()];
+        for i in 0..50 {
+            g.region[i] = if i % 3 == 0 { 0 } else if i % 7 == 0 { u32::MAX } else { 1 };
+        }
+        let brute = |g: &PathGrid, x: f32, z: f32| -> Vec<Option<usize>> {
+            let mut best: Vec<Option<(f32, usize)>> = vec![None; g.region_keys.len()];
+            for (i, &r) in g.region.iter().enumerate() {
+                let Some(slot) = best.get_mut(r as usize) else { continue };
+                let (cx, cz) = g.centre(i);
+                let d = (cx - x).powi(2) + (cz - z).powi(2);
+                if slot.is_none_or(|(b, _)| d < b) {
+                    *slot = Some((d, i));
+                }
+            }
+            best.into_iter().map(|b| b.map(|(_, i)| i)).collect()
+        };
+        // Points on cell corners and edges are equidistant from several cells.
+        for (x, z) in [(1.0, 1.0), (0.5, 0.5), (4.0, 2.0), (5.0, 3.5), (9.5, 4.5), (-3.0, 2.0)] {
+            assert_eq!(g.nearest_cell_per_region(x, z), brute(&g, x, z), "({x}, {z})");
+        }
+        assert_eq!(g.nearest_cell_per_region(0.5, 0.5)[2], None);
+        // A change plus invalidation is seen.
+        g.region[0] = 1;
+        g.invalidate_region_cells();
+        assert_eq!(g.nearest_cell_per_region(0.5, 0.5), brute(&g, 0.5, 0.5));
+    }
+
+
+    #[test]
+    fn cloned_grid_starts_with_empty_region_cache() {
+        let mut g = grid();
+        g.region_keys = vec!["a".into(), "b".into()];
+        for i in 0..50 {
+            g.region[i] = (i % 2) as u32;
+        }
+        let first = g.nearest_cell_per_region(1.0, 1.0);
+        assert!(g.region_cells.0.get().is_some());
+        let c = g.clone();
+        assert!(c.region_cells.0.get().is_none());
+        assert_eq!(c.nearest_cell_per_region(1.0, 1.0), first);
+        assert!(c.region_cells.0.get().is_some());
+    }
+    #[test]
+    fn nearest_places_and_region_cells() {
+        let mut g = grid();
+        g.region_keys = vec!["west".into(), "east".into(), "sea".into()];
+        for i in 0..50 {
+            let c = i % 10;
+            g.region[i] = if g.kind[i] == CellKind::Sea as u8 { 2 } else if c < 5 { 0 } else { 1 };
+        }
+        assert_eq!(g.region_index("east"), Some(1));
+        assert_eq!(g.region_index("nowhere"), None);
+        // From (0.5, 0.5): west's nearest cell is its own (0); east's is (6, 0), 6.0 away (the land
+        // cell (5, 4) is sqrt(41) away); the sea's is (5, 0).
+        assert_eq!(g.nearest_cell_per_region(0.5, 0.5), vec![Some(0), Some(6), Some(5)]);
+        // A point on a fitting cell stays itself; otherwise the nearest fitting cell's centre,
+        // closer than the radius.
+        assert_eq!(g.nearest_place_within(1.2, 0.3, Some(0), Domain::Land, 100.0), Some((1.2, 0.3)));
+        assert_eq!(g.nearest_place_within(1.2, 0.3, Some(1), Domain::Land, 100.0), Some((6.5, 0.5)));
+        assert_eq!(g.nearest_place_within(1.2, 0.3, Some(1), Domain::Land, 5.0), None);
+        assert_eq!(g.nearest_place_within(4.5, 0.5, None, Domain::Sea, 100.0), Some((5.5, 0.5)));
+        assert_eq!(g.nearest_place_within(4.5, 0.5, Some(9), Domain::Land, 100.0), None);
     }
 
     #[test]

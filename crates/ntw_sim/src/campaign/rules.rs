@@ -588,6 +588,9 @@ impl CampaignRules {
         use super::effects::{BonusKind, EffectKey, EffectRules};
         let mut mapping = BTreeMap::from([
             ("recruitment_points".to_string(), vec![EffectKey::basic("recruitment_points")]),
+            // The vanilla rows of the trade port effects (the route cap, effect 0x43, and the export port, effect 2).
+            ("trade_routes_mod_max_sea".to_string(), vec![EffectKey::basic("trade_route_cap_sea")]),
+            ("export_capacity_port".to_string(), vec![EffectKey::basic("commodity_export_vol")]),
             ("happy_active_lower_tax".to_string(), vec![EffectKey::basic("happiness_active_lower_tax")]),
             (
                 "happy_culture_all".to_string(),

@@ -1666,7 +1666,7 @@ fn negotiation_screen_closes_from_its_close_button_and_opens_again() {
 /// `End()` posted nothing and diplomacy stayed locked).
 #[test]
 fn the_x_after_a_proposal_ends_the_negotiation_once() {
-    negotiation_ends_once("CampaignUI.ProposeDeal()", click_x);
+    negotiation_ends_once("CampaignUI.ProposeDeal(false)", click_x);
 }
 
 /// A declined offer gives the negotiation a result (`Finished()`, +0x28 = 2, 0x00C1F210) but does
@@ -2039,7 +2039,7 @@ fn negotiation_regions_list_the_tradeable_regions() {
     let row: mlua::Table = offers.get(1).unwrap();
     assert!(row.get::<bool>("CurrentlyOffered").unwrap());
     // Proposing the gift (the AI's evaluation accepts it: all gain) hands it over.
-    s.host.lua().load("CampaignUI.ProposeDeal()").exec().unwrap();
+    s.host.lua().load("CampaignUI.ProposeDeal(false)").exec().unwrap();
     frame(&s, 0.2);
     no_errors(&s.host);
     {
@@ -2065,7 +2065,7 @@ fn negotiation_regions_list_the_tradeable_regions() {
         .exec()
         .unwrap();
     frame(&s, 0.4);
-    s.host.lua().load("CampaignUI.ProposeDeal()").exec().unwrap();
+    s.host.lua().load("CampaignUI.ProposeDeal(false)").exec().unwrap();
     frame(&s, 0.5);
     let finished: Option<bool> = s.host.lua().load("return CampaignUI.Finished()").eval().unwrap();
     assert_eq!(finished, Some(true), "declined is a result");

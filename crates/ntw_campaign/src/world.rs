@@ -109,6 +109,7 @@ pub(crate) fn load_world(
         let fpath = format!("{path}/FACTION[{fkey}]");
         if let Some(dm) = rf.diplomacy {
             let stances = read_diplomacy(dm, &fpath, &fkey, &faction_ids, check)?;
+            read_diplomacy_counters(dm, &fpath, fid, &mut world)?;
             if let Some(f) = world.factions.get_mut(&fid) {
                 f.diplomacy = stances;
             }
@@ -480,6 +481,25 @@ fn read_diplomacy(
         }
     }
     Ok(out)
+}
+
+/// `DIPLOMACY_MANAGER` #1..#4, the manager's four u32 counters (the reader `0x00AE8E10`, CONFIRMED):
+/// #1 +0x14 alliances broken while committed, #2 +0x18 access abuses, #3 +0x1C treaty breaks, #4
+/// +0x20 access cancel marks (see [`World::treaty_breaks`]). The reader reads #3 only from version 2
+/// and #4 only from version 3 (vanilla files are all version 3); a field the version leaves out
+/// keeps the constructor's preset (1 for #3, else 0), which the model's defaults already give, so it
+/// gets no entry. A faction without the block (the rebels) has no manager and no entries.
+fn read_diplomacy_counters(dm: &EsfRecord, fpath: &str, faction: FactionId, world: &mut World) -> Result<(), LoadError> {
+    let dpath = format!("{fpath}/DIPLOMACY_MANAGER");
+    world.alliances_broken.insert(faction, u32_at(dm, 1, &dpath)?);
+    world.access_abuses.insert(faction, u32_at(dm, 2, &dpath)?);
+    if dm.version > 1 {
+        world.treaty_breaks.insert(faction, u32_at(dm, 3, &dpath)?);
+    }
+    if dm.version > 2 {
+        world.access_cancel_marks.insert(faction, u32_at(dm, 4, &dpath)?);
+    }
+    Ok(())
 }
 
 /// `CHARACTER` v12 (startpos) / v14 (1.3 saves): #0 `LOCOMOTABLE`, #2 i32 id, #3 utf16 type.
@@ -1170,5 +1190,33 @@ mod recruitment_tests {
         assert_eq!(a.iter().map(|i| i.id.raw()).collect::<Vec<_>>(), vec![500, 0, 600]);
         assert_eq!(b.iter().map(|i| i.id.raw()).collect::<Vec<_>>(), vec![700, 0, 0]);
         assert_eq!(check.warnings, vec![LoadWarning::DuplicateRecruitmentItemId { region: "b".into(), unit: "u500".into(), id: 500 }]);
+    }
+}
+
+#[cfg(test)]
+mod diplomacy_counter_tests {
+    use super::*;
+
+    fn manager(version: u8, counters: &[u32]) -> EsfRecord {
+        let mut r = EsfRecord::new("DIPLOMACY_MANAGER", version);
+        r.children = std::iter::once(EsfNode::U32Array(vec![])).chain(counters.iter().map(|&n| EsfNode::U32(n))).collect();
+        r
+    }
+
+    /// `0x00AE8E10` reads #1 and #2 always, #3 from version 2 and #4 from version 3; a field the
+    /// version leaves out keeps the constructor's preset (treaty breaks 1, the rest 0).
+    #[test]
+    fn the_counters_follow_the_block_version() {
+        let f = FactionId(4);
+        let mut w = World::default();
+        read_diplomacy_counters(&manager(3, &[2, 3, 7, 16]), "F", f, &mut w).unwrap();
+        assert_eq!((w.alliances_broken[&f], w.access_abuses[&f], w.treaty_breaks[&f], w.access_cancel_marks[&f]), (2, 3, 7, 16));
+        let mut w = World::default();
+        read_diplomacy_counters(&manager(1, &[2, 3]), "F", f, &mut w).unwrap();
+        assert_eq!((w.alliances_broken[&f], w.access_abuses[&f]), (2, 3));
+        assert_eq!(w.treaty_breaks_of(f), 1);
+        assert!(!w.access_cancel_marks.contains_key(&f));
+        // A version-3 block without its fields is a load error, not a silent default.
+        assert!(read_diplomacy_counters(&manager(3, &[2, 3]), "F", f, &mut World::default()).is_err());
     }
 }

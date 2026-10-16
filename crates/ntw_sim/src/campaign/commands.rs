@@ -395,14 +395,21 @@ pub enum CampaignCommand {
     /// `CCQ_DIPLOMACY_CLEAR_NEGOTIATION` (executor `0x00932EC0`): the open negotiation's deal is
     /// emptied (`CampaignModel::clear_negotiation`).
     ClearNegotiation,
-    /// `CCQ_DIPLOMACY_PROPOSE_DEAL` (executor `0x00933690` → `0x00C49BE0`): the open negotiation's
-    /// deal is proposed; an AI recipient evaluates it (`0x00AA5ED0`), which reads and keeps its
+    /// `CCQ_DIPLOMACY_PROPOSE_DEAL` (executor `0x00933690` → `ProcessNegotiationDealProposal 0x00C49BE0`): the open negotiation's
+    /// deal is proposed; an AI recipient evaluates it (`EvaluateProposedNegotiationDealAI 0x00AA5ED0`), which reads and keeps its
     /// relation belief (`CampaignModel::propose_deal`). The answer itself is
     /// `CampaignModel::ai_refuses_deal`.
-    ProposeDeal,
+    ProposeDeal {
+        /// Proposed as a threat (the panel's `ProposeDeal(true)`; negotiation +0x2B8).
+        threat: bool,
+    },
     /// `CCQ_DIPLOMACY_ACCEPT_DEAL` (executor `0x00932E40` → `0x00C114B0`): the deal of the open
-    /// negotiation is applied (`CampaignModel::accept_deal`: its regions, technologies and payment).
+    /// negotiation is applied (`CampaignModel::accept_deal`: its regions, technologies and payment,
+    /// then a threat's `threatened` factor).
     AcceptDeal,
+    /// `CCQ_DIPLOMACY_DECLINE_DEAL` (executor `0x00932F00` → `0x00C1F210`): the deal of the open
+    /// negotiation is declined (`CampaignModel::decline_deal`: a threat's `threatened` factor).
+    DeclineDeal,
 }
 
 /// Why a command was rejected. A rejected command leaves the model unchanged.
@@ -639,9 +646,10 @@ impl CampaignModel {
     fn apply_inner(&mut self, cmd: CampaignCommand) -> Result<Vec<CampaignEvent>, CommandError> {
         // The negotiation commands touch no battle state: a pending battle must not leave a
         // negotiation open with no way to end it.
-        // Proposing or clearing deal items, or proposing the deal (which only stores the
-        // recipient's relation belief), edits no battle state; accepting a deal moves
-        // regions, so it waits for the battle like every other command.
+        // Proposing or clearing deal items, proposing the deal (which only stores the threat flag
+        // and the recipient's relation belief) or declining it (an attitude factor) edits no
+        // battle state; accepting a deal moves regions, so it waits for the battle like every
+        // other command.
         let exempt = matches!(
             cmd,
             CampaignCommand::Autoresolve
@@ -651,7 +659,8 @@ impl CampaignModel {
                 | CampaignCommand::ProposeTechnologies { .. }
                 | CampaignCommand::ProposePayment { .. }
                 | CampaignCommand::ClearNegotiation
-                | CampaignCommand::ProposeDeal
+                | CampaignCommand::ProposeDeal { .. }
+                | CampaignCommand::DeclineDeal
         );
         if self.pending_battle.is_some() && !exempt {
             return Err(CommandError::BattlePending);
@@ -765,7 +774,8 @@ impl CampaignModel {
             }
             CampaignCommand::ProposePayment { clear, amount, turns } => self.propose_payment(clear, amount, turns).map(|()| Vec::new()),
             CampaignCommand::ClearNegotiation => self.clear_negotiation().map(|()| Vec::new()),
-            CampaignCommand::ProposeDeal => self.propose_deal().map(|()| Vec::new()),
+            CampaignCommand::ProposeDeal { threat } => self.propose_deal(threat).map(|()| Vec::new()),
+            CampaignCommand::DeclineDeal => self.decline_deal().map(|()| Vec::new()),
             CampaignCommand::AcceptDeal => self.accept_deal(),
         }
     }
@@ -971,8 +981,9 @@ impl CampaignModel {
     }
 
     /// Forces inside a region's settlement: its garrison and every army whose commander is
-    /// garrisoned there. PROVISIONAL: a garrison of another faction than the owner (left by a deal
-    /// or a liberation) is counted too; whom the exe makes fight then is not traced.
+    /// garrisoned there. PROVISIONAL: a garrison of another faction than the owner (one an owner
+    /// change does not expel: the rebels, a faction out of the game or one without a capital) is
+    /// counted too; whom the exe makes fight then is not traced.
     pub fn defenders_of(&self, region: RegionId) -> Vec<ForceId> {
         let Some(r) = self.world.regions.get(&region) else { return Vec::new() };
         let mut out: Vec<ForceId> = r.garrison.into_iter().filter(|f| self.world.forces.contains_key(f)).collect();
@@ -1081,9 +1092,9 @@ impl CampaignModel {
         if !hostile {
             // A settlement holds one garrison army (`SIEGEABLE_GARRISON_RESIDENCE` #12, CONFIRMED):
             // an army entering one that has a garrison joins it (INFERRED; PROVISIONAL when the
-            // garrison is full: the army then waits outside). A garrison of another faction (left
-            // inside by a deal or a liberation, which in ours move no army; PROVISIONAL: the original
-            // expels it, 0x008D9DC0, not modelled yet) is never joined: the army waits outside
+            // garrison is full: the army then waits outside). A garrison of another faction (one an
+            // owner change does not expel, `expel_after_owner_change`: the rebels, a faction out of the
+            // game or one without a capital; or one from a loaded save) is never joined: the army waits outside
             // (PROVISIONAL: what the exe does then is not traced).
             let held = self.world.regions[&region].garrison.filter(|g| *g != force && self.world.forces.contains_key(g));
             if let Some(g) = held {
@@ -1199,6 +1210,22 @@ impl CampaignModel {
         })
     }
 
+    /// The entries one building of the region `r` gives its `0x00B43CA0` list (CONFIRMED): each of its
+    /// [`Self::building_units`] with the building flags [`Self::recruitable_units`] lists ([`ENTRY_DAMAGED`],
+    /// [`ENTRY_OCCUPIED`] when its slot is `occupied`, [`ENTRY_NO_TECHNOLOGY`] from [`Self::unit_tech_ok`]).
+    /// [`Self::recruitable_units`] merges them over the region; the director's land recruitment belief reads
+    /// a slot's own.
+    pub(crate) fn building_entries<'a>(
+        &'a self,
+        r: &'a super::world::Region,
+        b: &super::world::BuildingRef,
+        occupied: bool,
+    ) -> impl Iterator<Item = (&'a String, u32)> + 'a {
+        let flag = |on: bool, flag: u32| if on { flag } else { 0 };
+        let building_flags = flag(b.is_damaged(), ENTRY_DAMAGED) | flag(occupied, ENTRY_OCCUPIED);
+        self.building_units(r, b).map(move |u| (u, building_flags | flag(!self.unit_tech_ok(r.owner, u), ENTRY_NO_TECHNOLOGY)))
+    }
+
     /// The region's recruitable list (region +0x1A8, built by `RebuildRegionRecruitablesAndEffects`
     /// `0x00A6AE40` from the building of each slot, then of the road slot (slot manager +0x20) and of the walls
     /// slot (+0x24), `BuildSlotBuildingRecruitableList` `0x00B43CA0`; CONFIRMED): the units a building in the
@@ -1223,18 +1250,14 @@ impl CampaignModel {
     /// The merge keeps an unflagged entry when any source gives one and ORs the flags otherwise, so the order of the sources does not change the list.
     pub fn recruitable_units(&self, region: RegionId) -> Vec<RecruitableUnit> {
         let Some(r) = self.world.regions.get(&region) else { return Vec::new() };
-        let flag = |on: bool, flag: u32| if on { flag } else { 0 };
-        let sources = r
-            .slots
-            .iter()
-            .filter_map(|s| s.building.as_ref().map(|b| (b, flag(b.is_damaged(), ENTRY_DAMAGED) | flag(r.slot_occupied(s), ENTRY_OCCUPIED))))
-            .chain([(SlotRef::Road, &r.road), (SlotRef::Walls, &r.fortification)].into_iter().filter_map(|(slot, b)| {
-                b.as_ref().map(|b| (b, flag(b.is_damaged(), ENTRY_DAMAGED) | flag(!r.slot_held(slot), ENTRY_OCCUPIED)))
-            }));
+        let sources = r.slots.iter().filter_map(|s| s.building.as_ref().map(|b| (b, r.slot_occupied(s)))).chain(
+            [(SlotRef::Road, &r.road), (SlotRef::Walls, &r.fortification)]
+                .into_iter()
+                .filter_map(|(slot, b)| b.as_ref().map(|b| (b, !r.slot_held(slot)))),
+        );
         let mut out: Vec<RecruitableUnit> = Vec::new();
-        for (b, building_flags) in sources {
-            for u in self.building_units(r, b) {
-                let flags = building_flags | if self.unit_tech_ok(r.owner, u) { 0 } else { ENTRY_NO_TECHNOLOGY };
+        for (b, occupied) in sources {
+            for (u, flags) in self.building_entries(r, b, occupied) {
                 match out.iter_mut().find(|e| e.unit_key == *u) {
                     Some(e) if e.flags == 0 => {}
                     Some(e) if flags == 0 => e.flags = 0,
@@ -1785,8 +1808,8 @@ impl CampaignModel {
                 let c = CharacterId(self.world.alloc_id() as i32);
                 let f = ForceId(self.world.alloc_id());
                 // Inside the settlement when it has no garrison (land only). PROVISIONAL: with a
-                // garrison of another faction inside (a deal or a liberation) the recruit stands
-                // outside; the exe's spawn check `0x008EF790` is not traced for that case.
+                // garrison of another faction inside (the rebels, out of the game or without a
+                // capital) the recruit stands outside; the exe's spawn check `0x008EF790` is not traced for that case.
                 let inside = !naval && self.world.regions[&region].garrison.is_none_or(|g| !self.world.forces.contains_key(&g));
                 self.world.characters.insert(
                     c,

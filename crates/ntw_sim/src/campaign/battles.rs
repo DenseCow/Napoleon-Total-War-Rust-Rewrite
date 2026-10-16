@@ -362,15 +362,15 @@ impl CampaignModel {
     /// the old owner's `0x008B3580`, the same call the completion `0x008EED20` makes for a school's
     /// characters; the model keeps no per-character research link — gentlemen count by position,
     /// `gentlemen_in` — so there is nothing to clear), the queues are cleared, the slots and the governorship pass to the new
-    /// owner. No army is moved or destroyed here (the settlement's owner-changed event, +0x24 fired
-    /// at `0x00B44B31`, has on the campaign side only the siege listener `0x008DB7D0`, sieges not
-    /// being in the model), so after a deal or a liberation the old owner's garrison stays inside,
-    /// a foreign garrison (see `defenders_of`, `enter_settlement`, `recruit`). PROVISIONAL:
-    /// `0x00A64AC0` with its fourth argument 0 (every `0x00B449F0` handover) expels the other
-    /// factions' land armies in the region, and their docked navies when not at war with the new
-    /// owner (`ExpelFactionForcesFromRegion` `0x008D9DC0`; placement `0x008DCB30` untraced), not
-    /// modelled yet. Returns false when
-    /// the region does not exist. The capitals move with it ([`Self::capital_after_owner_change`]).
+    /// owner. The capitals move with it ([`Self::capital_after_owner_change`]). Then, as
+    /// `0x00A64AC0` with its fourth argument 0 does (every `0x00B449F0` handover passes 0: captures,
+    /// deals, liberations, the director's transfer; CONFIRMED), the other factions' land armies in
+    /// the region leave it, and their docked navies when not at war with the new owner
+    /// ([`Self::expel_after_owner_change`], `0x008D9DC0`): after a deal or a liberation the old
+    /// owner's garrison is put out, as the capturer's army is after a liberation. Nothing is
+    /// destroyed here (the settlement's owner-changed event, +0x24 fired at `0x00B44B31`, has on the
+    /// campaign side only the siege listener `0x008DB7D0`, sieges not being in the model). Returns
+    /// false when the region does not exist.
     fn change_region_owner(&mut self, region: RegionId, faction: super::FactionId) -> bool {
         let Some(r) = self.world.regions.get_mut(&region) else { return false };
         let old = r.owner;
@@ -415,6 +415,12 @@ impl CampaignModel {
         }
         if old != faction {
             self.capital_after_owner_change(region, old, faction);
+            // Then the trade routes through the region (`0x00BBE1A0`, called at `0x00A64E87` when the old
+            // owner is not the rebels).
+            if !self.is_rebel_faction(old) {
+                self.trade_routes_after_region_lost(region, old);
+            }
+            self.expel_after_owner_change(region);
         }
         true
     }

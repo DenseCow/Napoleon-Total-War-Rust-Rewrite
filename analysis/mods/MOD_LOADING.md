@@ -1,9 +1,8 @@
 # Mod loading (original NTW mods + our mods folder)
 
-Where I am (2026-10-10, worker mod-loading2, review round 1 fixes): the precedence graph is traced
-and ported whole (§2.1), the AI's raw tables read the merged view with each table's traced key
-(§3.1), skipped script lines and flag mistakes warn. Next: §9.
-
+Where I am (2026-10-15, polish22 merged): the precedence graph is traced and ported whole (§2.1), the AI's raw tables
+read the merged view with each table's traced key (§3.1), skipped script lines and flag mistakes warn, and the
+mod-loading functions are documented in Ghidra (V5 write-ups). Next: §9.
 Code: `crates/ntw_formats/src/pack/{vfs.rs,mods.rs}` (layers, priority, plan builder, script parser),
 `crates/ntw_formats/src/loc.rs`, `crates/ntw_data/src/{database.rs,record.rs,kv.rs}` (merged tables),
 `crates/napoleon/src/config.rs` (flags). Tests: unit tests in `pack/{vfs,mods}.rs`,
@@ -32,7 +31,9 @@ Names below are the ones now set in Ghidra.
   (`VFS_ComparePackPrecedenceGraph` 0x0108ebb0): the **later node wins**, see §2.1.
 - **Loose files never beat packs.** `VFS_OpenFileForRead` 0x0106a890 opens the indexed pack copy if
   any pack has the path; only otherwise it tries each working directory with `CreateFileW`. Folder
-  listings tag loose files with `g_szLooseFileMarker` (0x01767f58), whose type is -1.
+  listings tag loose files with `g_LooseFileMarker` (0x01767f58, `SharedStringRef`), whose text is "non-pack"
+  (string 0x013F35AC, set by the static initialiser at 0x0043cd85) and whose type is -1 (no pack has that
+  name, so `VFS_GetPackTypeByName` returns -1).
 - **Mount order** (only decides equal-type ties):
   1. `VFS_InitMountBootPack` 0x01062600: scan, then the single boot pack (errors: two boot packs,
      boot pack with dependencies).
@@ -49,7 +50,8 @@ Names below are the ones now set in Ghidra.
   `& 0x7fffffff`, mod capacity (71 at start, `VFS_Construct` 0x01051340), linear probing with wrap;
   only when no slot is free it grows to 2n+1 and re-inserts in old slot order. Iteration is slot
   order. Our `scan_slot_order` reproduces this.
-- **Working directories** (`g_pWorkingDirectories` 0x01767d4c): `data\` first;
+- **Working directories** (`g_WorkingDirectoryList` 0x01767D40, `WorkingDirectoryList`: capacity +4, folder
+  count +8, folder array +0xC of 0x10-byte strings): `data\` first;
   `add_working_directory` (0x0105c780 → `VFS_AddWorkingDirectory` 0x0105ca70) appends a folder
   (relative to the process folder, i.e. the install root) unless the same text is already listed.
   Its packs join the scan (release/patch/movie load automatically) and its loose files are searched
@@ -70,7 +72,7 @@ Names below are the ones now set in Ghidra.
     (0x00db80f0, stops on state & 0xC) silently drops every later line. The folder itself is still
     added. Ours ends statements at the line; a second word that is not 0 or 1 warns.
 - **`mod` line** (`Console_CmdMod` 0x01085910 → `VFS_AddModToStartupList` 0x0105c4c0): the name is
-  normalized (`/`→`\`, ASCII lowercase, repeated `\` collapsed, 0x00edee40); an absolute `X:\...`
+  normalized (`/`→`\`, ASCII lowercase, repeated `\` collapsed except at the start, 0x00edee40); an absolute `X:\...`
   path adds its folder as a working directory and keeps the file name. `VFS_MountPack` 0x01082690
   looks the bare file name up in the scan, else opens the path relative to the working directories.
 - **`exclude_pack_file`** (0x0106bf60 → list at graph+0x2c): an excluded pack is not mounted;
@@ -138,22 +140,34 @@ before → after. New structs: `PackPrecedencePair` (0x20), `PackPrecedencePairL
 | `DB_LoadTableFolderMergedByKey` 0x00E778A0 | 0 / 13 | 0 / 21 (very large; the rest is structural) |
 
 Findings: `add_working_directory` reads an optional bool after the folder (stream `>> bool`) and
-passes it to `VFS_AddWorkingDirectory` (traced by polish15: §2 "add_working_directory"). `DB_LoadTableFolderMergedByKey` is the
-table loader's constructor. The vtable it writes first, 0x01320F24, is not the agent attributes
-loader's (its old label `g_pAgentAttributesTableLoaderVtable`): it is the one vtable of every DB
+passes it to `VFS_AddWorkingDirectory` 0x0105CA70 (traced by polish15: §2 "add_working_directory").
+`VFS_AddWorkingDirectory` 0x0105CA70 (thiscall on `g_WorkingDirectoryList`, CONFIRMED static trace, polish22 V5 0 → 81):
+when the bool is set and the text is non-empty it lowercases A-Z, turns `/` into `\`, collapses doubled `\` (except at
+the start) and adds a trailing `\`; it returns the index of an equal entry (`CompareUniStrings`) if one is listed, else
+appends the folder and returns count − 1; on an append while the string at +0x10 is still empty, and the folder has a `\`
+before its last character, it builds the folder's parent + `\raw_data\empiredesigndata\` and stores it there (normalised)
+when that path exists. `DB_LoadTableFolderMergedByKey` is the table loader's constructor. The vtable it writes first,
+0x01320F24, is not the agent attributes loader's (its old label `g_pAgentAttributesTableLoaderVtable`): it is the one vtable of every DB
 table object (CONFIRMED, polish9: 1304 write sites; `DB_LoadTableFolderMergedByKey`,
 `DB_LoadJunctionFolderMergedBySemicolonKey` `0x00DC6B67`, `LoadAgentAttributesTableRows`
 `0x00F94C42` and the per-table constructors, copy constructors (e.g. `0x00E3B8C0`) and
 destructors (e.g. `0x0073A910`) store it at `+0`; in the sites read, no other vtable follows it).
 Renamed `g_pDbTableVtable`.
-Globals labelled: `g_bImportAllMods`, `g_WorkingDirectoryList` / `g_dwWorkingDirectoryCount`,
-`g_pConsoleCommandMap`, `g_strCommandStreamEnd` (value not traced), `g_dwDbTableLoadVersion`,
-`g_szDbFolderPrefix`, `g_wszBobFilePrefix`.
+`g_pDbTableVtable` 0x01320F24 is typed `void *` in Ghidra: its one slot is 0x00542E90 (code with no function
+defined yet), and 0x01320F28 already starts another class's vtable (written at 0x00522673 and 0x0051d0bc).
+Globals labelled: `g_bImportAllMods`, `g_WorkingDirectoryList` (polish22 deleted the old interior labels
+`g_dwWorkingDirectoryCount` 0x01767d48 and `g_pWorkingDirectories` 0x01767d4c, now its fields +8 and +0xC),
+`g_pConsoleCommandMap` 0x0163C228, `g_wCommandStreamEnd` 0x0163C288 (`ushort`; U+0000, INFERRED),
+`g_dwDbTableLoadVersion`, `g_szDbFolderPrefix`, `g_wszDbBobFilePrefix` (`wchar_t[5]`, L"bob_").
 Re-check (polish9, 2026-10-11): `VFS_PackScanMapInsert` 69 / 86, `Console_CmdAddWorkingDirectory`
 69 / 69, `VFS_ListLooseFilesInWorkingDirs` 43 / 59, unchanged. What is left needs types not yet
-built: the VFS object (`g_WorkingDirectoryList` 0x01767D40 is really the VFS object passed as `this`
-to the `VFS_*` methods, with the folder count at +8 and the folder array at +0xC), the console
-argument stream and the scan map key; plus register-only temporaries the API cannot rename.
+built: the VFS object, the console argument stream and the scan map key; plus register-only temporaries
+the API cannot rename. Polish9 also took `g_WorkingDirectoryList` 0x01767D40 for the VFS object passed as
+`this` to the `VFS_*` methods; polish22 found that wrong (CONFIRMED): it is `this` only of the thiscall
+`VFS_AddWorkingDirectory` (reads +8 and +0x10); its static constructor 0x0104f0d0 (called at 0x0043c420 with
+ECX = 0x01767D40) zeroes +4 / +8 / +0xC and never writes +0, so it has no vtable; the VFS `this` of
+`VFS_ListFolderFiles` calls through its vtable (+0xB8) and reads its pack directory map at +0x108, a different
+object.
 Static trace (polish13, 2026-10-12; Ghidra types not applied yet, saving was blocked):
 - `DB_LoadTableFolderMergedByKey` is not generic: its only caller is `0x00E86AA0` ("units_tables", row
   reader `0x00EDC6B0`), so it is the units_tables instance of the loader template; rows are 0xB4 bytes,
@@ -161,12 +175,77 @@ Static trace (polish13, 2026-10-12; Ghidra types not applied yet, saving was blo
   +0x14 (slots +0x14, slot count +0x18, 13 at start), folder path +0x2C, file list +0x3C/+0x40/+0x44, row block
   list +0x4C/+0x50/+0x54. Key slot 0x1C: key string +0, row index +0xC, pack name +0x10. File entry 0x18: name
   +0, pack name +0xC. VFS vtable: +0x3C list folder, +0x64 file info, +0x68 higher-priority pack, +0x84 open
-  pack file, +0x8C open loose file. Its decompilation has a broken stack frame (`this`, `pVfs` and the row
-  reader show as stack temporaries), which caps the score.
+  pack file, +0x8C open loose file. Its decompilation had a broken stack frame (`this`, `pVfs` and the row
+  reader showed as stack temporaries); polish22 fixed it (below).
 - Pack names are 0x10-byte strings (allocator +8, whose vtable +4 frees unless the data is the shared empty
   buffer; data +0xC), stride 0x10 in `PackNameList`; pairs are 0x20 bytes.
 - Console command map: 0x10-byte slots (name +0, handler object +0xC whose first dword is the function), hash
   `0x0045C1A0` modulo the capacity (+4), linear probing.
+
+Second pass (polish22, 2026-10-15, static trace; applied and saved in Ghidra). Completeness, raw / effective:
+
+| Function | polish7 | polish22 |
+|---|---|---|
+| `VFS_AddPackPrecedencePair` 0x0108E8F0 | 90 / 93 | 90 / 93 |
+| `VFS_ComparePackPrecedenceGraph` 0x0108EBB0 | 64 / 78 | 87 / 100 |
+| `VFS_SortPacksByPrecedenceWithDependencies` 0x0109ECF0 | 68 / 87 | 83 / 100 |
+| `VFS_SortPackPrecedencePairsTopologically` 0x0105E8E0 | 76 / 91 | 76 / 91 |
+| `VFS_PackScanMapInsert` 0x010970D0 | 69 / 86 | 85 / 100 |
+| `Console_CmdAddWorkingDirectory` 0x0105C780 | 69 / 69 | 84 / 84 |
+| `VFS_ListLooseFilesInWorkingDirs` 0x010430C0 | 43 / 59 | 84 / 84 |
+| `Console_ExecuteCommandStream` 0x00DB80F0 | 41 / 55 | 80 / 87 |
+| `DB_LoadTableFolderMergedByKey` 0x00E778A0 | 0 / 21 | 74 / 90 |
+| `VFS_ListFolderFiles` 0x01042C80 | (not scored) | 87 / 95 |
+
+The others in the polish7 table are unchanged (`0x0106BBB0` 92 / 100, `0x010782F0` 100, `0x004F2FC0` 79).
+Every function in the table is now at raw ≥ 70 (fix round, 2026-10-15); the rest of each deduction is structural
+(register-only and extraout values the API cannot name) or the interior fields of `g_WorkingDirectoryList`.
+- **Types built:** `VirtualFileSystem` (a 4-byte stub {vtable}: the `this` of `VFS_ListFolderFiles` and the VFS
+  argument of the DB loader; its fields, e.g. the pack directory map at +0x108, are not laid out yet),
+  `WorkingDirectoryList` (16 bytes, the type of `g_WorkingDirectoryList`: capacity +4, count +8, array +0xC; it misses the `AllocWideString` at +0x10 (the `raw_data\empiredesigndata\` path, read by `VFS_AddWorkingDirectory`),
+  `FolderFileEntry` (0x18) /
+  `FolderFileList`, `SharedStringRef` (`g_LooseFileMarker`), `AllocWideString` (0x10), `ConsoleCommandSlot` /
+  `ConsoleCommandMap`, `DbKeySlot` (0x1C), `DbTableLoader` (0x5C), `UnitsTableRow` (0xB4, layout not read),
+  `VfsListFilesMethodFn` (VFS vtable +0x3C: folder, pattern, out list), and the IAT slot types
+  `FindFirstFileWFn` / `FindNextFileWFn` / `FindCloseFn` / `GetLastErrorFn` / `GetLocalTimeFn`.
+- **Globals renamed:** `g_szBadKey` 0x0139A5E8 ("<bad>"), `g_szVfsLogLevel` 0x013118BC, `g_szRemovedKey`
+  0x01357204, `g_szUnusedKey` 0x01399C40, `g_wszDbBobFilePrefix` 0x0139A5F4, `g_szDbFolderPrefix` 0x0139A5F0
+  (`char[4]`), `g_dwDbTableLoadVersion` 0x01766C28, `g_szWildcardAll` 0x0131A8AC (ANSI `char[2]` "*", bytes
+  2A 00: every reader converts it from ANSI, so not a wide string), `g_VfsCriticalSection` 0x01767DE8 (the VFS
+  guard, `CRITICAL_SECTION`, spin count 10000), `g_bVfsReady` 0x01767681 (`bool`).
+- **Loose listing order** (CONFIRMED by the call order): `VFS_ListFolderFiles` 0x01042c80 calls
+  `VFS_ListLooseFilesInWorkingDirs` at 0x01042d2b, before its pack index walk at 0x01042d49, so loose files
+  come first. A loose file is skipped only when the list already holds the same name **and** that entry is
+  loose too (its source is `g_LooseFileMarker`): a second loose copy from a later working directory is
+  dropped; no pack entry is in the list yet at that point.
+- **Pack part of the listing** (CONFIRMED, static trace of `VFS_ListFolderFiles`, under the VFS guard and only
+  when `g_bVfsReady`): the folder is normalised (vtable +0xB8) and a trailing `\` dropped; the folder node is
+  found in the pack directory map at `this`+0x108 (djb2 seed 0x1505, ×33 + UTF-16 unit, `& 0x7fffffff`, mod
+  capacity, 0x54-byte slots, linear probing; FUN_0106d870). Its 0x18-byte entries are matched in node order
+  against the pattern, on the name after the folder prefix: `*` at the end matches the rest; `*` then c skips
+  to the next c (no backtracking); if the pattern runs out first it restarts from its first character; a match
+  needs both to end together. Pack entries are **not** deduplicated against the loose ones, so a name both on
+  disk and in a pack is listed twice. Its fourth stack argument is never read.
+- **Command stream:** `Console_ExecuteCommandStream` tests the address of the slot's handler field (slot
+  +0xC, `LEA`/`TEST` at 0x00db8235), never its value, so its "no handler" branch can never be taken (CONFIRMED;
+  every registered command has a handler, so not an ORIGINAL BUG). `g_wCommandStreamEnd` 0x0163C288 is 0 in
+  the image and has no writer, so the stop word is U+0000 (INFERRED: no runtime read).
+- **Stack frame fixed:** the indirect calls of `DB_LoadTableFolderMergedByKey` got 10 call-site signature
+  overrides that pass `this` explicitly first, which restores `this`, the VFS and the row reader as parameters.
+  Prototype: thiscall on `DbTableLoader`, arguments VFS, folder name, row reader; returns `this`.
+- **Merge rules** (`DB_LoadTableFolderMergedByKey`, units_tables instance):
+  - Setup: a 13-slot key map filled with "<bad>", the folder "db\" + table name listed with "*", and
+    "vfs_log_level" read twice; the merge map uses the "unused" / "removed" markers.
+  - Per file: open loose (VFS +0x8C) or from its pack (+0x84); the `bob_` name test; the 0xFFFEFDFC version
+    marker; then one flag byte. Flag byte 0 discards every row collected so far and appends the file's source
+    to the source-name list (a full-replace file).
+  - The key map rehashes, then a row block of row count × 0xB4 bytes is read.
+  - A duplicate key: the new row replaces the old one when VFS +0x68(old source, new source) is true, or when
+    VFS +0x68(new, old) is false and the new file is a `bob_` file (a `bob_` file wins a tie). Otherwise the
+    new row is destroyed.
+  - Rows are emitted in key-slot order.
+- Open: the row reader `0x00EDC6B0` has no function defined in Ghidra, and its caller `0x00E86AA0` is
+  unnamed.
 
 ## 3. DB tables (CONFIRMED, `DB_LoadTableFolderMergedByKey` 0x00e778a0)
 - Every file of `db\<table>_tables\` is read, in `VFS_ListFolderFiles` 0x01042c80 order: first the
@@ -305,16 +384,16 @@ address with `debugger_static_to_dynamic`; stop the game once the main menu is u
   mod d.pack;
   ```
 
-String objects: a 12-byte string is {u32 length, u32, u16* text}. Read the text from the pointer at +8.
+String objects: the by-value string parameter of `VFS_AddModToStartupList` and the key of the key slot are the 12-byte exe string (text pointer at +8; `RET 0xC` at 0x0105C5F7 and the accessor 0x004A5140, called on the parameter at 0x0105C4ED, returns [ECX+0x8]; CONFIRMED, Ghidra 2026-10-15). The folder argument of `VFS_AddWorkingDirectory` (step 2) is a pointer to the 16-byte `AllocWideString` instead (text pointer at +0xC: its copies free the buffer at +0xC with the allocator at +8, 0x0105CAC8..0x0105CADB; CONFIRMED, Ghidra 2026-10-15).
 
 1. **`;` terminator** (§5): break at entry of 0x0105C4C0 (`VFS_AddModToStartupList`). The name is
-   passed by value at [ESP+4], text pointer at [ESP+0xC]; log that wide string.
+   passed by value at [ESP+4], text pointer at [ESP+0xC] (+8 into the 12-byte string); log that wide string.
    - Expected: 3 hits.
    - If a logged name ends in `;`, the exe keeps it: tag `;` as a word character, so `mod x.pack;`
      fails in the original.
    - If not, CONFIRMED: `;` is dropped.
-2. **Script before the scan**: log the hit order of 0x0105CA70 entry ([ESP+4] points to a 12-byte
-   string; log its text) and 0x01095100 entry.
+2. **Script before the scan**: log the hit order of 0x0105CA70 entry ([ESP+4] points to a 16-byte
+   `AllocWideString`; log the text at its +0xC pointer) and 0x01095100 entry.
    - Expected: `data\`, then `nr_mod_probe\`, before the first 0x01095100 hit.
    - If 0x01095100 comes first, folders added by the script are not scanned: drop that from `plan_layers`.
 3. **Precedence direction**: settled by static trace (§2.1: rhs wins). Optional cross-check: break
@@ -338,6 +417,10 @@ String objects: a 12-byte string is {u32 length, u32, u16* text}. Read the text 
      keep. That table then needs the dedupe (and its key reader checked).
    - No hits on vanilla: the keep-all is equivalent on vanilla; mark it CONFIRMED-equivalent and
      dedupe anyway for mods.
+   - Scope (static, 2026-10-15): 0x00E778A0 has one caller, 0x00E86AC4 in the `units_tables`
+     loader 0x00E86AA0 (literal 0x013BD638), so items 5 and 6 read the `units` table only; the
+     other tables are their own template instances (§3.1) with their own drop sites. Both reads
+     are steps 1a/1b of `analysis/fidelity/debugger/SITTING_SHEET.md`.
 
 ## 7. Our mods folder (ours, not in the original)
 `<exe dir>\mods\` holds packs and loose folders; `load_order.txt` lists them, first line on top

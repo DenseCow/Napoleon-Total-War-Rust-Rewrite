@@ -1,0 +1,649 @@
+//! Campaign model tests: deals.
+
+use super::*;
+
+#[test]
+fn population_factors_round_to_hundredths_as_the_exe_stores_them() {
+    use super::effects::EffectSet;
+    use super::population::{growth_factors, hundredths, FactorInputs};
+    // The vanilla saves' stored values: 0.3 → 0.29999998, −0.37 → −0.37, eight hostile units × −0.05 →
+    // −0.39999998 (the product of 0.01f and 40 lies exactly between two floats and rounds to even).
+    assert_eq!(hundredths(0.3).to_bits(), 0.29999998f32.to_bits());
+    assert_eq!(hundredths(-0.37).to_bits(), (-0.37f32).to_bits());
+    assert_eq!(hundredths(8.0 * -0.05).to_bits(), (-0.39999998f32).to_bits());
+    let mut m = test_model();
+    let mut rules = (*m.rules).clone();
+    rules.variables.insert("baseline_pop_growth".into(), 0.3);
+    m.rules = Arc::new(rules);
+    let r = m.world.regions[&RegionId(10)].clone();
+    let set = EffectSet::default();
+    let s = growth_factors(&m, &r, r.population, &r.population_state, &FactorInputs { set: &set, hostile_units: 8 });
+    assert_eq!(s.factors[0].to_bits(), 0.29999998f32.to_bits());
+    assert_eq!(s.factors[3].to_bits(), (-0.39999998f32).to_bits());
+    assert_eq!(s.capacity, r.population_state.base_capacity);
+    assert!(!s.overcrowded);
+    // Above 90% of the capacity: food shortages (0.9 − r) × 10 × (base + buildings + ports).
+    let crowded = growth_factors(&m, &r, r.population_state.base_capacity / 100 * 95, &r.population_state, &FactorInputs { set: &set, hostile_units: 0 });
+    assert!(crowded.overcrowded);
+    assert_eq!(crowded.factors[4], hundredths((0.9 - 0.95f32) * 10.0 * 0.29999998));
+}
+
+#[test]
+fn population_grows_by_its_rounded_share_and_keeps_the_minimum() {
+    use super::population::{grow, PopulationState};
+    let mut m = test_model();
+    let mut rules = (*m.rules).clone();
+    rules.variables.insert("minimum_population".into(), 1000.0);
+    m.rules = Arc::new(rules);
+    let r = m.world.regions[&RegionId(10)].clone();
+    // `auto_nr4_t4` → `orig_over_nr4_0252`, eur_east_prussia: 1296529 at −0.07% → 1295621, down.
+    let state = PopulationState { factors: [0.29999998, 0.0, -0.37, 0.0, 0.0, 0.0, 0.0], trend: 3, ..Default::default() };
+    let (pop, next) = grow(&m, &r, 1_296_529, &state);
+    assert_eq!((pop, next.trend), (1_295_621, 3));
+    // Never below `minimum_population`; unchanged reads as trend 2.
+    assert_eq!(grow(&m, &r, 1000, &state).0, 1000);
+    assert_eq!(grow(&m, &r, 1000, &state).1.trend, 2);
+    let up = PopulationState { factors: [0.29999998, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], ..Default::default() };
+    assert_eq!(grow(&m, &r, 100_000, &up), (100_300, PopulationState { growth: up.factors[0], trend: 1, ..up.clone() }));
+}
+
+#[test]
+fn religion_normalisation_drops_dust_and_leaves_an_empty_breakdown_alone() {
+    use super::population::normalise_religions;
+    let mut shares = vec![("a".to_string(), 0.6f32), ("b".to_string(), 0.3), ("c".to_string(), 0.0004)];
+    normalise_religions(&mut shares);
+    assert_eq!(shares[2].1, 0.0);
+    assert!((shares[0].1 - 0.6 / 0.9).abs() < 1e-6 && (shares[1].1 - 0.3 / 0.9).abs() < 1e-6);
+    // ORIGINAL BUG (0x00AA4860): the exe writes the first share of an empty breakdown through a null list.
+    let mut empty: Vec<(String, f32)> = Vec::new();
+    normalise_religions(&mut empty);
+    assert!(empty.is_empty());
+    let mut zero = vec![("a".to_string(), 0.0f32), ("b".to_string(), 0.0)];
+    normalise_religions(&mut zero);
+    assert_eq!((zero[0].1, zero[1].1), (1.0, 0.0));
+}
+
+#[test]
+fn the_round_end_refreshes_then_grows_every_region() {
+    let mut m = test_model();
+    let mut rules = (*m.rules).clone();
+    rules.variables.insert("baseline_pop_growth".into(), 0.3);
+    m.rules = Arc::new(rules);
+    let before = m.world.regions[&RegionId(10)].population;
+    m.end_turn();
+    m.end_turn();
+    m.end_turn();
+    let r = &m.world.regions[&RegionId(10)];
+    assert!(r.population > before, "{} -> {}", before, r.population);
+    assert_eq!(r.population_state.trend, 1);
+    assert_eq!(r.population_state.factors[0].to_bits(), 0.29999998f32.to_bits());
+}
+
+#[test]
+fn town_wealth_growth_breaks_down_by_factor_and_predicts_constructions() {
+    use super::economy::{region_wealth, wealth_trend};
+    let mut m = test_model();
+    let mut rules = (*m.rules).clone();
+    rules.buildings.get_mut("test_building_level").unwrap().effects.push(("tw_growth_education".into(), 7.0));
+    rules.buildings.get_mut("test_building_level_2").unwrap().effects.push(("tw_growth_roads".into(), 30.0));
+    m.rules = Arc::new(rules);
+    let r = m.world.regions.get_mut(&RegionId(10)).unwrap();
+    r.discontent_growth = -4;
+    let reg = r.clone();
+    let now = region_wealth(&m, None, &reg, false);
+    assert_eq!(now.factors[0], 7, "{now:?}");
+    assert_eq!(now.factors[9], -4);
+    assert_eq!(now.growth, super::economy::recompute_region(&m, &reg).1);
+    // Predicted: the level under construction in the slot's place (the education building upgraded to roads).
+    let r = m.world.regions.get_mut(&RegionId(10)).unwrap();
+    r.construction.push(ConstructionItem { slot: SlotRef::Slot(0), level_key: "test_building_level_2".into(), turns_remaining: 2, cost: 600, kind: ConstructionKind::Build, active: true });
+    let reg = r.clone();
+    let next = region_wealth(&m, None, &reg, true);
+    assert_eq!((next.factors[0], next.factors[4]), (0, 30), "{next:?}");
+    assert_eq!(region_wealth(&m, None, &reg, false), now);
+    // The trend codes of 0x00AB4410.
+    assert_eq!([21, 20, 1, 0, -1, -20, -21].map(wealth_trend), [0, 1, 1, 2, 3, 3, 4]);
+}
+
+/// `0x00C5C040`: a faction offers every region it owns but its capital.
+#[test]
+fn tradeable_regions_leave_out_the_capital() {
+    let mut m = test_model();
+    let owned: Vec<RegionId> = m.world.regions.values().filter(|r| r.owner == A).map(|r| r.id).collect();
+    assert!(owned.contains(&RegionId(10)) && owned.len() > 1, "{owned:?}");
+    m.world.faction_details.entry(A).or_default().capital = None;
+    assert_eq!(m.tradeable_regions(A).collect::<Vec<_>>(), owned);
+    m.world.faction_details.entry(A).or_default().capital = Some(RegionId(10));
+    let without: Vec<RegionId> = owned.iter().copied().filter(|r| *r != RegionId(10)).collect();
+    assert_eq!(m.tradeable_regions(A).collect::<Vec<_>>(), without);
+}
+
+/// The deal's region and technology records (UI_FIDELITY.md §4.9): `ProposeRegions` replaces the
+/// regions record (`0x00933CC0` → `0x00C4B0A0`), two empty lists leave it, `clear` empties it;
+/// `ProposeTechnologies` (`0x009340A0`) clears on two empty lists too; an unknown region or
+/// technology aborts; nothing without a negotiation.
+#[test]
+fn deal_records_follow_the_propose_executors() {
+    use super::rules::TechRules;
+    let mut m = test_model();
+    let mut rules = (*m.rules).clone();
+    rules.technologies.insert("admin1_a".into(), TechRules { cost: 25, building_level: "test_building_level".into(), requires: vec![] });
+    m.rules = Arc::new(rules);
+    let regions = |m: &CampaignModel| m.negotiations.current.as_ref().unwrap().regions.clone();
+    let techs = |m: &CampaignModel| m.negotiations.current.as_ref().unwrap().technologies.clone();
+    let propose = |clear, demanded: &[u32], offered: &[u32]| CampaignCommand::ProposeRegions {
+        clear,
+        demanded: demanded.iter().map(|&r| RegionId(r)).collect(),
+        offered: offered.iter().map(|&r| RegionId(r)).collect(),
+    };
+    assert_eq!(m.apply(propose(false, &[11], &[])), Err(CommandError::NoNegotiation));
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    m.apply(propose(false, &[11], &[12])).unwrap();
+    assert_eq!((regions(&m).demanded, regions(&m).offered), (vec![RegionId(11)], vec![RegionId(12)]));
+    // Owners are not checked (0x00933CC0, 0x00C4B0A0): a demanded region the proposer A owns
+    // and an offered one of the recipient B are kept as given.
+    m.apply(propose(false, &[12], &[11])).unwrap();
+    assert_eq!((regions(&m).demanded, regions(&m).offered), (vec![RegionId(12)], vec![RegionId(11)]));
+    // Replaced, not added to.
+    m.apply(propose(false, &[], &[10])).unwrap();
+    assert_eq!((regions(&m).demanded, regions(&m).offered), (vec![], vec![RegionId(10)]));
+    // Two empty lists leave the regions record; an unknown region aborts.
+    m.apply(propose(false, &[], &[])).unwrap();
+    assert_eq!(regions(&m).offered, vec![RegionId(10)]);
+    assert_eq!(m.apply(propose(false, &[99], &[])), Err(CommandError::UnknownRegion(RegionId(99))));
+    assert_eq!(regions(&m).offered, vec![RegionId(10)]);
+    m.apply(propose(true, &[11], &[])).unwrap();
+    assert!(regions(&m).is_empty());
+    // Technologies: an unknown key aborts; two empty lists clear.
+    let t = |demanded: &[&str], offered: &[&str]| CampaignCommand::ProposeTechnologies {
+        clear: false,
+        demanded: demanded.iter().map(|s| s.to_string()).collect(),
+        offered: offered.iter().map(|s| s.to_string()).collect(),
+    };
+    m.apply(t(&["admin1_a"], &[])).unwrap();
+    assert_eq!(techs(&m).demanded, vec!["admin1_a".to_string()]);
+    assert_eq!(m.apply(t(&["nope"], &[])), Err(CommandError::UnknownTechnology("nope".into())));
+    assert_eq!(techs(&m).demanded, vec!["admin1_a".to_string()]);
+    m.apply(t(&[], &[])).unwrap();
+    assert!(techs(&m).is_empty());
+    // Clear empties both records; a new negotiation starts empty.
+    m.apply(propose(false, &[11], &[])).unwrap();
+    m.apply(CampaignCommand::ClearNegotiation).unwrap();
+    assert!(regions(&m).is_empty());
+    m.apply(propose(false, &[11], &[])).unwrap();
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    assert!(regions(&m).is_empty());
+}
+
+/// Accepting the deal (`0x00C114B0`): the regions record's demanded regions go to the proposer and
+/// the offered ones to the recipient (`0x00C18BF0` → `0x00B449F0`): queues cleared, research at
+/// the region's schools stopped. The old owner's garrison leaves the settlement (`0x008D9DC0` for
+/// the proposer on the offered regions; more in tests/transfer.rs).
+#[test]
+fn accepted_regions_change_hands_and_put_the_old_garrison_out() {
+    use super::details::TechResearch;
+    let mut m = test_model();
+    m.turn.humans = vec![A, B];
+    // Region 12 (A) holds A's army and A researches at its school (slot id 55).
+    m.world.regions.get_mut(&RegionId(12)).unwrap().garrison = Some(ForceId(1000));
+    m.world.characters.get_mut(&CharacterId(100)).unwrap().garrisoned_in = Some(RegionId(12));
+    m.world.regions.get_mut(&RegionId(12)).unwrap().slots.push(RegionSlot {
+        key: "school".into(),
+        slot_type: "test_slot".into(),
+        building: None,
+        position: None,
+        port: false,
+        holder: None,
+        id: 55,
+    });
+    m.world.faction_details.entry(A).or_default().research.insert("t".into(), TechResearch { progress: 4.0, researcher: 55, traded: 0 });
+    m.world.regions.get_mut(&RegionId(11)).unwrap().recruitment_queue.push(RecruitmentItem {
+        id: RecruitmentItemId(9),
+        unit_key: "u".into(),
+        turns_remaining: 2,
+        cost: 0,
+        target: None,
+        target_lost: false,
+    });
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    m.apply(CampaignCommand::ProposeRegions { clear: false, demanded: vec![RegionId(11)], offered: vec![RegionId(12)] }).unwrap();
+    m.apply(CampaignCommand::AcceptDeal).unwrap();
+    assert_eq!(m.world.regions[&RegionId(11)].owner, A);
+    assert_eq!(m.world.regions[&RegionId(12)].owner, B);
+    assert!(m.world.regions[&RegionId(11)].recruitment_queue.is_empty());
+    assert_eq!(m.world.faction_details[&A].research["t"], TechResearch { progress: 4.0, researcher: 0, traded: 0 });
+    // A's army leaves B's settlement for A's nearest region, 10 (A has no capital: the deal's own
+    // pass, not the owner change's).
+    assert_eq!(m.world.regions[&RegionId(12)].garrison, None);
+    assert_eq!(m.world.characters[&CharacterId(100)].garrisoned_in, None);
+    assert_eq!(m.world.characters[&CharacterId(100)].position, pos(10, 0));
+    // Accepting again changes nothing (the regions are already theirs: 0x00A64AC0 returns).
+    m.apply(CampaignCommand::AcceptDeal).unwrap();
+    assert_eq!((m.world.regions[&RegionId(11)].owner, m.world.regions[&RegionId(12)].owner), (A, B));
+    // No negotiation, no deal.
+    m.apply(CampaignCommand::EndNegotiation).unwrap();
+    assert_eq!(m.apply(CampaignCommand::AcceptDeal), Err(CommandError::NoNegotiation));
+}
+
+/// A threat (`ProposeDeal(true)`, negotiation +0x2B8): whether accepted (`0x00C114B0`, at
+/// `0x00C11671`) or declined (`0x00C1F210`), the recipient gets the `threatened` event (−30, drift 3,
+/// limit 0) added towards the proposer (`0x00B72F00` → `0x00B72EC0` → `0x00B02CB0`); the
+/// proposer's record is untouched, a plain offer leaves both alone, and a decline without a
+/// negotiation is refused.
+#[test]
+fn a_threat_leaves_the_threatened_factor_on_accept_and_decline() {
+    let threatened = |m: &CampaignModel, a, b| m.world.relationships.get(&(a, b)).and_then(|r| r.factor("threatened").copied());
+    let answer = |threat: bool, decline: bool| {
+        let mut m = test_model();
+        m.turn.humans = vec![A, B];
+        m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+        m.apply(CampaignCommand::ProposeDeal { threat }).unwrap();
+        let before = (threatened(&m, B, A), threatened(&m, A, B));
+        m.apply(if decline { CampaignCommand::DeclineDeal } else { CampaignCommand::AcceptDeal }).unwrap();
+        (m, before)
+    };
+    for decline in [false, true] {
+        let (m, (before, proposer_before)) = answer(true, decline);
+        let after = threatened(&m, B, A).unwrap();
+        let old = before.map_or(0, |f| f.value);
+        assert_eq!((after.value, after.drift, after.limit, after.limited), ((old - 30).min(0), 3, 0, true), "decline {decline}");
+        assert_eq!(threatened(&m, A, B), proposer_before, "decline {decline}");
+        let (m, (before, proposer_before)) = answer(false, decline);
+        assert_eq!((threatened(&m, B, A), threatened(&m, A, B)), (before, proposer_before), "decline {decline}");
+    }
+    let mut m = test_model();
+    assert_eq!(m.apply(CampaignCommand::DeclineDeal), Err(CommandError::NoNegotiation));
+}
+
+/// Declining a threat twice adds the `threatened` event twice: the command (`0x00932F00`) and
+/// `0x00C1F210` keep no record of an earlier answer, and `0x00B02CB0` caps the value only from
+/// above (limit 0, drift 3), so −30 becomes −60.
+#[test]
+fn a_repeated_decline_adds_the_threat_again() {
+    let mut m = test_model();
+    m.turn.humans = vec![A, B];
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    m.apply(CampaignCommand::ProposeDeal { threat: true }).unwrap();
+    let old = m.world.relationships.get(&(B, A)).and_then(|r| r.factor("threatened").copied()).map_or(0, |f| f.value);
+    m.apply(CampaignCommand::DeclineDeal).unwrap();
+    m.apply(CampaignCommand::DeclineDeal).unwrap();
+    let f = *m.world.relationships[&(B, A)].factor("threatened").unwrap();
+    assert_eq!(f.value, (old - 30).min(0) - 30);
+}
+
+/// Accepted technologies (`0x00C18CF0`): the receiver researches each one it has at state 1..4
+/// (`0x008CDCB0` → `0x008EED20`: progress = cost, no school, then availability), the giver's
+/// traded count (+0x28, `0x008F3DD0`) goes up by one per technology handed over, granted or not.
+#[test]
+fn accepted_technologies_are_granted_and_counted() {
+    use super::research::state;
+    use super::rules::TechRules;
+    let mut m = test_model();
+    m.turn.humans = vec![A, B];
+    let mut rules = (*m.rules).clone();
+    rules.technologies.insert("admin1_a".into(), TechRules { cost: 25, building_level: "test_building_level".into(), requires: vec![] });
+    rules.technologies.insert("mil1".into(), TechRules { cost: 40, building_level: "test_building_level".into(), requires: vec![] });
+    m.rules = Arc::new(rules);
+    m.world.faction_details.entry(A).or_default().technologies = vec![("admin1_a".into(), state::RESEARCHED), ("mil1".into(), state::AVAILABLE)];
+    m.world.faction_details.entry(B).or_default().technologies = vec![("admin1_a".into(), state::AVAILABLE), ("mil1".into(), state::RESEARCHED)];
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    m.apply(CampaignCommand::ProposeTechnologies { clear: false, demanded: vec!["mil1".into()], offered: vec!["admin1_a".into()] }).unwrap();
+    m.apply(CampaignCommand::AcceptDeal).unwrap();
+    assert_eq!(m.tech_state(B, "admin1_a"), Some(state::RESEARCHED));
+    assert_eq!(m.world.faction_details[&B].research["admin1_a"].progress, 25.0);
+    assert_eq!(m.tech_state(A, "mil1"), Some(state::RESEARCHED));
+    assert_eq!(m.world.faction_details[&A].research["mil1"].progress, 40.0);
+    assert_eq!(m.world.faction_details[&A].research["admin1_a"].traded, 1);
+    assert_eq!(m.world.faction_details[&B].research["mil1"].traded, 1);
+    // A deal applies once: accepted again (ProposeDeal then AcceptOffer), nothing changes; after
+    // the deal is proposed anew it applies again (a granted technology is not granted twice, but
+    // the giver's count goes up per hand-over, as 0x008F3DD0).
+    m.apply(CampaignCommand::AcceptDeal).unwrap();
+    assert_eq!(m.world.faction_details[&A].research["admin1_a"].traded, 1);
+    m.apply(CampaignCommand::ProposeTechnologies { clear: false, demanded: vec![], offered: vec!["admin1_a".into()] }).unwrap();
+    m.apply(CampaignCommand::AcceptDeal).unwrap();
+    assert_eq!(m.world.faction_details[&A].research["admin1_a"].traded, 2);
+    // A technology the receiver has no entry for is not granted.
+    assert!(!m.grant_technology(C, "admin1_a"));
+}
+
+/// The technology record's value for the AI recipient (`0x00C13360` → `0x00A36B20`): each item
+/// from the model's costs, holders and the proposer's traded counts, summed, × trunc(inflation).
+#[test]
+fn technology_deal_value_reads_the_model() {
+    use super::deal_value::{technology_value, DealEvaluation};
+    use super::research::state;
+    use super::rules::TechRules;
+    let mut m = test_model();
+    m.turn.humans = vec![A];
+    let mut rules = (*m.rules).clone();
+    rules.technologies.insert("admin1_a".into(), TechRules { cost: 25, building_level: "test_building_level".into(), requires: vec![] });
+    rules.technologies.insert("mil1".into(), TechRules { cost: 40, building_level: "test_building_level".into(), requires: vec![] });
+    m.rules = Arc::new(rules);
+    m.world.faction_details.entry(A).or_default().technologies = vec![("admin1_a".into(), state::RESEARCHED), ("mil1".into(), state::AVAILABLE)];
+    m.world.faction_details.entry(B).or_default().technologies = vec![("admin1_a".into(), state::AVAILABLE), ("mil1".into(), state::RESEARCHED)];
+    m.world.faction_details.entry(A).or_default().research.entry("admin1_a".into()).or_default().traded = 1;
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    m.apply(CampaignCommand::ProposeTechnologies { clear: false, demanded: vec!["mil1".into()], offered: vec!["admin1_a".into()] }).unwrap();
+    let n = m.negotiations.current.clone().unwrap();
+    // One holder each (doubled); the offered one divided by (1 + 1)²; inflation 2.5 counts as 2.
+    let v = m.technology_deal_value(&n, 2.5);
+    let gain = technology_value(25, 1, 1, true, true).gain;
+    let cost = technology_value(40, 1, 0, false, true).cost;
+    assert_eq!((gain, cost), ((500 + 344) * 2 / 4, (500 + 578) * 2));
+    assert_eq!((v.gain, v.cost, v.given), (gain * 2, cost * 2, cost * 2));
+    // A dear technology demanded for a cheap one: not fair.
+    let mut e = DealEvaluation::default();
+    e.add(5, v, 0.0, 1.0);
+    assert!(!e.fair());
+}
+
+/// The payment record (`CCQ_DIPLOMACY_PROPOSE_PAYMENT`, executor `0x00933AD0`): an offered one-off
+/// payment is capped at the proposer's treasury when it is proposed (`0x00C4AB20`), not again when the
+/// deal is accepted; the applier (`0x00C18A70`) has the recipient pay a demand and the proposer an
+/// offer, once over 1 turn, else as a regular payment.
+#[test]
+fn a_proposed_payment_is_capped_when_proposed_and_paid_on_accept() {
+    use super::details::RegularPayment;
+    use super::negotiation::DealPayment;
+    let mut m = test_model();
+    m.turn.humans = vec![A, B];
+    let propose = |m: &mut CampaignModel, amount, turns| m.apply(CampaignCommand::ProposePayment { clear: false, amount, turns }).unwrap();
+    let treasuries = |m: &CampaignModel| (m.world.factions[&A].treasury, m.world.factions[&B].treasury);
+    assert_eq!(m.apply(CampaignCommand::ProposePayment { clear: false, amount: 10, turns: 1 }), Err(CommandError::NoNegotiation));
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    // A offers 5000 once with 1000: the record holds −1000.
+    propose(&mut m, -5000, 1);
+    assert_eq!(m.negotiations.current.as_ref().unwrap().payment, DealPayment { amount: -1000, turns: 1 });
+    // The treasury falls before the accept: the stored amount is paid as it is.
+    m.world.factions.get_mut(&A).unwrap().treasury = 200;
+    m.apply(CampaignCommand::AcceptDeal).unwrap();
+    assert_eq!(treasuries(&m), (-800, 2000));
+    // A demands 300 once: B pays A.
+    propose(&mut m, 300, 1);
+    m.apply(CampaignCommand::AcceptDeal).unwrap();
+    assert_eq!(treasuries(&m), (-500, 1700));
+    // A demands 50 a turn for 5 turns: a regular payment of B to A; nothing moves now.
+    propose(&mut m, 50, 5);
+    m.apply(CampaignCommand::AcceptDeal).unwrap();
+    assert_eq!(treasuries(&m), (-500, 1700));
+    assert_eq!(m.world.relationships[&(B, A)].payments, vec![RegularPayment { amount: 50, turns: 5 }]);
+    // Clearing empties the record; i32::MIN is refused.
+    m.apply(CampaignCommand::ProposePayment { clear: true, amount: 0, turns: 0 }).unwrap();
+    assert!(!m.negotiations.current.as_ref().unwrap().payment.has_items());
+    propose(&mut m, 70, 1);
+    m.apply(CampaignCommand::ClearNegotiation).unwrap();
+    assert!(!m.negotiations.current.as_ref().unwrap().payment.has_items());
+    assert!(m.apply(CampaignCommand::ProposePayment { clear: false, amount: i32::MIN, turns: 1 }).is_err());
+}
+
+/// A deal whose payment fails is not applied at all: no region moves, no money, and the deal stays
+/// unapplied (a later accept of a valid deal still applies it).
+#[test]
+fn a_deal_with_a_failing_payment_applies_nothing() {
+    use super::research::state;
+    use super::rules::TechRules;
+    let mut m = test_model();
+    m.turn.humans = vec![A, B];
+    let mut rules = (*m.rules).clone();
+    rules.technologies.insert("mil1".into(), TechRules { cost: 40, building_level: "test_building_level".into(), requires: vec![] });
+    m.rules = Arc::new(rules);
+    m.world.faction_details.entry(A).or_default().technologies = vec![("mil1".into(), state::AVAILABLE)];
+    let owner = m.world.regions[&RegionId(11)].owner;
+    assert_ne!(owner, A);
+    let treasury = m.world.factions[&A].treasury;
+    // A negotiation of A with itself: the payment's faction pair is refused.
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: A }).unwrap();
+    m.apply(CampaignCommand::ProposeRegions { clear: false, demanded: vec![RegionId(11)], offered: vec![] }).unwrap();
+    m.apply(CampaignCommand::ProposeTechnologies { clear: false, demanded: vec![], offered: vec!["mil1".into()] }).unwrap();
+    m.apply(CampaignCommand::ProposePayment { clear: false, amount: 300, turns: 1 }).unwrap();
+    assert_eq!(m.apply(CampaignCommand::AcceptDeal), Err(CommandError::SameFaction(A)));
+    assert_eq!(m.world.regions[&RegionId(11)].owner, owner);
+    assert_eq!(m.tech_state(A, "mil1"), Some(state::AVAILABLE));
+    assert!(!m.world.faction_details[&A].research.contains_key("mil1"));
+    assert_eq!(m.world.factions[&A].treasury, treasury);
+    assert!(!m.negotiations.current.as_ref().unwrap().applied);
+    // Without the payment the same regions and technology records apply.
+    m.apply(CampaignCommand::ProposePayment { clear: true, amount: 0, turns: 0 }).unwrap();
+    m.apply(CampaignCommand::AcceptDeal).unwrap();
+    assert_eq!(m.world.regions[&RegionId(11)].owner, A);
+    assert_eq!(m.tech_state(A, "mil1"), Some(state::RESEARCHED));
+    assert_eq!(m.world.faction_details[&A].research["mil1"].traded, 1);
+}
+
+/// The payment record's value for the AI recipient (`0x00C12EE0`) and its part in the answer
+/// (`0x00AA5ED0`: weight 0, slot 2 is the payment the accept tests read).
+#[test]
+fn the_ai_values_a_payment_as_the_exe() {
+    let mut m = test_model();
+    m.turn.humans = vec![A];
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    let value = |m: &mut CampaignModel, amount, turns| {
+        m.apply(CampaignCommand::ProposePayment { clear: false, amount, turns }).unwrap();
+        let v = m.payment_deal_value(m.negotiations.current.as_ref().unwrap());
+        (v.gain, v.cost, v.given)
+    };
+    // Once: the AI gains an offer, gives a demand.
+    assert_eq!(value(&mut m, -700, 1), (700, 0, 0));
+    assert_eq!(value(&mut m, 400, 1), (0, 400, 400));
+    // Regular: worth (0.9^t − 1) × −10 payments, at most 0.8 × the payer's treasury and future net
+    // income. B (1000, no history) pays 105 for 2 turns: 1.9 × 105 = 199.5 → 199; 1000 for 3 turns:
+    // 2710 capped at 800; given = amount × turns.
+    assert_eq!(value(&mut m, 105, 2), (0, 199, 210));
+    assert_eq!(value(&mut m, 1000, 3), (0, 800, 3000));
+    // An offer is capped by the proposer's means: A has 0 and a net income of 60 a turn.
+    m.world.factions.get_mut(&A).unwrap().treasury = 0;
+    let mut record = [0; 25];
+    (record[5], record[18]) = (100, 40);
+    m.world.economy_history.insert(A, vec![record]);
+    assert_eq!(value(&mut m, -1000, 3), (144, 0, 0));
+    // A one-off offer from an empty treasury is capped to nothing: no record, no AI answer.
+    value(&mut m, -100, 1);
+    assert_eq!(m.ai_accepts_deal(), None);
+    // The answer: an offered gift is accepted; a demand for nothing is not.
+    m.world.factions.get_mut(&A).unwrap().treasury = 1000;
+    value(&mut m, -100, 1);
+    assert_eq!(m.ai_accepts_deal(), Some(true));
+    value(&mut m, 500, 1);
+    assert_eq!(m.ai_accepts_deal(), Some(false));
+    assert!(m.apply(CampaignCommand::AcceptDeal).is_err());
+}
+
+/// The technology goals of the AI's two goal lists (`0x008F4F10`): the giver has it researched and
+/// the receiver has it in state 1, 2 or 3; the weight of one the AI gives follows its spread.
+#[test]
+fn technology_goals_follow_the_research_states() {
+    use super::research::state;
+    let mut m = test_model();
+    m.world.faction_details.entry(A).or_default().technologies =
+        vec![("t1".into(), state::RESEARCHED), ("t2".into(), state::RESEARCHED), ("t3".into(), state::AVAILABLE)];
+    m.world.faction_details.entry(B).or_default().technologies =
+        vec![("t1".into(), state::AVAILABLE), ("t2".into(), state::UNAVAILABLE), ("t3".into(), state::RESEARCHED)];
+    assert!(m.is_technology_goal("t1", A, B), "researched by the giver, available to the receiver");
+    assert!(!m.is_technology_goal("t2", A, B), "not yet available to the receiver (state 4)");
+    assert!(!m.is_technology_goal("t1", B, A), "the giver must have it researched");
+    assert!(m.is_technology_goal("t3", B, A));
+    // Fewer than 8 factions: t = 1, so any holder makes the spread 1 and the weight −0.5.
+    assert_eq!(m.given_technology_goal_weight("t1"), -0.5);
+    assert_eq!(m.given_technology_goal_weight("nobody_has_it"), -1.0);
+}
+
+/// The AI evaluates a deal of technologies as the exe's `0x00AA5ED0` (AI_RESEARCH.md §4): value,
+/// goal weights, `fair` / `good`, and the `diplomacy_options` refusal.
+#[test]
+fn the_ai_evaluates_technology_deals() {
+    use super::research::state;
+    use super::rules::TechRules;
+    let mut m = test_model();
+    m.turn.humans = vec![A];
+    let mut rules = (*m.rules).clone();
+    let tech = |cost| TechRules { cost, building_level: "test_building_level".into(), requires: vec![] };
+    rules.technologies.insert("admin1_a".into(), tech(1000));
+    rules.technologies.insert("military1_b".into(), tech(1000));
+    rules.technologies.insert("economy1_c".into(), tech(100));
+    m.rules = Arc::new(rules);
+    m.world.faction_details.entry(A).or_default().technologies =
+        vec![("admin1_a".into(), state::RESEARCHED), ("military1_b".into(), state::AVAILABLE), ("economy1_c".into(), state::RESEARCHED)];
+    m.world.faction_details.entry(B).or_default().technologies =
+        vec![("admin1_a".into(), state::AVAILABLE), ("military1_b".into(), state::RESEARCHED), ("economy1_c".into(), state::AVAILABLE)];
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    // Nothing proposed: nothing to answer.
+    assert_eq!(m.ai_accepts_deal(), None);
+    // An even trade (both worth 20452 × 2, one holder each): the AI's need weight for the admin
+    // technology (≤ 0.5 × 500) and the spread weight of the one it gives (−0.5 × 500, one holder of
+    // two factions) leave it fair.
+    m.apply(CampaignCommand::ProposeTechnologies { clear: false, demanded: vec!["military1_b".into()], offered: vec!["admin1_a".into()] }).unwrap();
+    assert_eq!(m.ai_accepts_deal(), Some(true));
+    assert!(!m.ai_refuses_deal());
+    // A cheap technology for a dear one: refused.
+    m.apply(CampaignCommand::ProposeTechnologies { clear: false, demanded: vec!["military1_b".into()], offered: vec!["economy1_c".into()] }).unwrap();
+    assert_eq!(m.ai_accepts_deal(), Some(false));
+    assert!(m.ai_refuses_deal());
+    assert_eq!(m.apply(CampaignCommand::AcceptDeal), Err(CommandError::DealRefused));
+    // A gift is accepted.
+    m.apply(CampaignCommand::ProposeTechnologies { clear: false, demanded: vec![], offered: vec!["economy1_c".into()] }).unwrap();
+    assert_eq!(m.ai_accepts_deal(), Some(true));
+    // The AI's diplomacy options forbid accepting technology deals from A (1 or 3): refused.
+    m.world.relationships.entry((B, A)).or_default().diplomacy_options[5] = 1;
+    assert_eq!(m.ai_accepts_deal(), Some(false));
+    // A human recipient answers for itself.
+    m.world.relationships.entry((B, A)).or_default().diplomacy_options[5] = 0;
+    m.turn.humans = vec![A, B];
+    assert_eq!(m.ai_accepts_deal(), None);
+}
+
+/// `force_diplomacy` permissions have one home, the model's relationship (`0x00B28670`): set for
+/// one direction only, refused for the same faction (the original's `0x00B64C50` miss bug), an
+/// unknown faction or option, or a pair with no relationship (never created there); the
+/// negotiation panel and the deal rules read them back.
+#[test]
+fn diplomacy_permissions_live_in_the_model() {
+    use super::negotiation::NegotiationAction as N;
+    let mut m = test_model();
+    let (peace, war) = (N::Peace.option(), N::War.option());
+    m.relationship_mut(A, B);
+    m.relationship_mut(B, A);
+    assert!(!m.world.relationships.contains_key(&(A, C)));
+    assert!(!m.set_diplomacy_option(A, C, war, false, false), "no relationship: refused");
+    assert!(!m.world.relationships.contains_key(&(A, C)), "and none created");
+    assert!(m.may_propose(A, B, war) && m.may_accept(A, B, war), "nothing stored: allowed");
+    assert!(m.set_diplomacy_option(A, B, war, false, true));
+    assert_eq!((m.diplomacy_option(A, B, war), m.diplomacy_option(B, A, war)), (2, 0));
+    assert!(!m.may_propose(A, B, war) && m.may_accept(A, B, war));
+    assert!(m.negotiation_actions(A, B).iter().any(|r| r.action == N::War && r.forbidden));
+    assert!(m.negotiation_actions(B, A).iter().all(|r| !r.forbidden), "the other direction is untouched");
+    assert!(!m.deal_goal_allowed(A, B, war) && m.deal_goal_allowed(B, A, war));
+    assert!(m.set_diplomacy_option(B, A, peace, true, false));
+    assert!(!m.may_accept(B, A, peace) && !m.deal_goal_allowed(A, B, peace));
+    assert!(!m.set_diplomacy_option(A, A, war, false, false));
+    assert!(!m.set_diplomacy_option(A, FactionId(999), war, false, false));
+    assert!(!m.set_diplomacy_option(A, B, 14, false, false));
+    assert!(!m.world.relationships.contains_key(&(A, A)));
+    assert!(m.may_propose(A, B, 14), "an index past the table is allowed");
+}
+
+/// The research need from the model: enemies / allies, forts and forces (`0x00ABB340`).
+#[test]
+fn the_research_need_reads_the_model() {
+    let mut m = test_model();
+    // No history (16), no enemies or allies (M = 1, D = 1), p1 / p2 from B's forces.
+    let v = m.research_need(B);
+    let land = m.world.forces.values().filter(|f| f.faction == B && !f.is_navy && !f.units.is_empty()).count() as u32;
+    let naval = m.world.forces.values().filter(|f| f.faction == B && f.is_navy && !f.units.is_empty()).count() as u32;
+    let ports = m.world.regions.values().filter(|r| r.owner == B).map(|r| r.slots.iter().filter(|s| s.port).count() as u32).sum::<u32>();
+    let p1 = deal_value::need_power(land >> 2);
+    let p2 = deal_value::need_power((ports >> 1) + (naval >> 2));
+    assert_eq!(v, deal_value::research_need_values(1, 1, 16, p1, p2));
+    // At war with A: one enemy → M = 2.
+    m.world.set_stance(A, B, Stance::War).unwrap();
+    let v = m.research_need(B);
+    assert_eq!(v, deal_value::research_need_values(2, 1, 16, p1, p2));
+}
+
+/// The AI evaluates a deal of regions as the exe's `0x00C131C0` → `0x00A364B0` → `0x00AA1E90`
+/// (AI_RESEARCH.md §4 "Region value"): the region goals (−1 × 2500 each), the worth of each
+/// region to each side, the human-demand factor and its counter, and the `diplomacy_options`
+/// refusal. Bases from the formula: region 10 (gdp 4000) 35000, 11 (8000) 55000, 12 (2000)
+/// 25000.
+#[test]
+fn the_ai_evaluates_region_deals() {
+    let mut m = test_model();
+    m.turn.humans = vec![A];
+    m.world.region_neighbours =
+        [(RegionId(10), vec![RegionId(11)]), (RegionId(11), vec![RegionId(10), RegionId(12)]), (RegionId(12), vec![RegionId(11)])].into();
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    assert_eq!(m.ai_accepts_deal(), None, "an empty deal");
+    // A gift bordering the AI: worth 25000 to B (no slots, B holds a region), against the region
+    // goal's −2500: accepted.
+    m.apply(CampaignCommand::ProposeRegions { clear: false, demanded: vec![], offered: vec![RegionId(12)] }).unwrap();
+    let n = m.negotiations.current.clone().unwrap();
+    assert_eq!(m.region_deal_value(&n, 1.0), deal_value::DealValue { gain: 25000, cost: 0, given: 0 });
+    assert_eq!(m.ai_accepts_deal(), Some(true));
+    // A gift that borders none of the AI's regions counts too (attitude ≥ 0 needs no border).
+    let neighbours = std::mem::take(&mut m.world.region_neighbours);
+    assert_eq!(m.region_deal_value(&n, 1.0), deal_value::DealValue { gain: 25000, cost: 0, given: 0 });
+    assert_eq!(m.ai_accepts_deal(), Some(true));
+    m.world.region_neighbours = neighbours;
+    // A demand for B's only region: 55000 to A (A has another region with slots); to B ×2 (its
+    // only region in the theatre) and ×1.5 (its last with slots) = 165000. Refused.
+    m.apply(CampaignCommand::ProposeRegions { clear: false, demanded: vec![RegionId(11)], offered: vec![] }).unwrap();
+    let n = m.negotiations.current.clone().unwrap();
+    assert_eq!(m.region_deal_value(&n, 1.0), deal_value::DealValue { gain: 0, cost: 55000, given: 165000 });
+    assert_eq!(m.region_deal_value(&n, 2.5), deal_value::DealValue { gain: 0, cost: 110000, given: 330000 }, "inflation ×2");
+    assert!(m.ai_refuses_deal());
+    assert_eq!(m.apply(CampaignCommand::AcceptDeal), Err(CommandError::DealRefused));
+    assert_eq!(m.world.regions[&RegionId(11)].owner, B);
+    // A swap that pays: region 10 stored at 200000, region 11 at 10000.
+    m.world.region_base_values = [(RegionId(10), 200_000), (RegionId(11), 10_000)].into();
+    m.apply(CampaignCommand::ProposeRegions { clear: false, demanded: vec![RegionId(11)], offered: vec![RegionId(10)] }).unwrap();
+    let n = m.negotiations.current.clone().unwrap();
+    assert_eq!(m.region_deal_value(&n, 1.0), deal_value::DealValue { gain: 200_000, cost: 10_000, given: 30_000 });
+    // The AI's diplomacy options forbid region deals from A (1 or 3): refused.
+    m.world.relationships.entry((B, A)).or_default().diplomacy_options[4] = 3;
+    assert_eq!(m.ai_accepts_deal(), Some(false));
+    m.world.relationships.entry((B, A)).or_default().diplomacy_options[4] = 0;
+    assert_eq!(m.ai_accepts_deal(), Some(true));
+    m.apply(CampaignCommand::AcceptDeal).unwrap();
+    assert_eq!((m.world.regions[&RegionId(10)].owner, m.world.regions[&RegionId(11)].owner), (B, A));
+    // The human receiver counts its deal region (faction +0x938); the AI receiver does not.
+    assert_eq!(m.world.deal_regions_received.get(&A), Some(&1));
+    assert_eq!(m.world.deal_regions_received.get(&B), None);
+    // So A's next demand counts m = 1 + 1: B's worth of region 10 (200000 × 2 × 1.5) × 1.5.
+    m.apply(CampaignCommand::EndNegotiation).unwrap();
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    m.apply(CampaignCommand::ProposeRegions { clear: false, demanded: vec![RegionId(10)], offered: vec![] }).unwrap();
+    let n = m.negotiations.current.clone().unwrap();
+    assert_eq!(m.region_deal_value(&n, 1.0), deal_value::DealValue { gain: 0, cost: 200_000, given: 900_000 });
+    // An AI proposer's demands are not scaled.
+    m.turn.humans = vec![];
+    assert_eq!(m.region_deal_value(&n, 1.0).given, 600_000);
+    // A human recipient answers for itself.
+    m.turn.humans = vec![A, B];
+    assert_eq!(m.ai_accepts_deal(), None);
+    assert!(!m.ai_refuses_deal());
+}
+
+/// A deal of regions and technologies is evaluated as one sum (records 4 then 5).
+#[test]
+fn the_ai_evaluates_regions_and_technologies_together() {
+    use super::research::state;
+    use super::rules::TechRules;
+    let mut m = test_model();
+    m.turn.humans = vec![A];
+    m.world.region_neighbours = [(RegionId(12), vec![RegionId(11)]), (RegionId(11), vec![RegionId(12)])].into();
+    let mut rules = (*m.rules).clone();
+    rules.technologies.insert("military1_b".into(), TechRules { cost: 1000, building_level: "test_building_level".into(), requires: vec![] });
+    m.rules = Arc::new(rules);
+    m.world.faction_details.entry(A).or_default().technologies = vec![("military1_b".into(), state::AVAILABLE)];
+    m.world.faction_details.entry(B).or_default().technologies = vec![("military1_b".into(), state::RESEARCHED)];
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    // A technology worth 20452 × 2 (one holder) for nothing: refused.
+    m.apply(CampaignCommand::ProposeTechnologies { clear: false, demanded: vec!["military1_b".into()], offered: vec![] }).unwrap();
+    assert_eq!(m.ai_accepts_deal(), Some(false));
+    // With region 12 (25000 to B, −2500 region goal, −250 technology goal) added, still short.
+    m.apply(CampaignCommand::ProposeRegions { clear: false, demanded: vec![], offered: vec![RegionId(12)] }).unwrap();
+    assert_eq!(m.ai_accepts_deal(), Some(false));
+    // Region 12 stored at 60000: 1.05 × (60000 − 2500 − 250) against 40904 → accepted.
+    m.world.region_base_values.insert(RegionId(12), 60_000);
+    assert_eq!(m.ai_accepts_deal(), Some(true));
+}

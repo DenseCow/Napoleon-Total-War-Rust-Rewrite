@@ -3,7 +3,7 @@
 //! `CAMPAIGN_TRADE_MANAGER/INTERNATIONAL_TRADE_ROUTES[]` = {utf16 exporter key,
 //! [FACTION_INTERNATIONAL_TRADE_ROUTES_ARRAY] of `INTERNATIONAL_TRADE_ROUTE` v3}. A route record is
 //! written by `0x00AFD490` (CONFIRMED field order): u32 `n` (+0xC) and `n` waypoints {i32 region
-//! id, coord, u32, u32, bool}, bool (+0x14), u32[] (+0x24), seven u32 (+0x28 .. +0x40), u32[],
+//! id, coord, u32, u32, bool}, bool (+0x14, the capital port flag: `TradePath::capital_port`), u32[] (+0x24), seven u32 (+0x28 .. +0x40), u32[],
 //! u32 count with its items, i32. +0x3C is the accumulated value: the round-end accumulator
 //! `0x00B05CC0` adds to it (CONFIRMED), so it is child `5n + 8`. The importer is the owner of the
 //! last waypoint's region (INFERRED from the layout; `trade_check` measures how often it is a model
@@ -237,7 +237,8 @@ pub fn read_paths(esf: &EsfFile, m: &CampaignModel) -> (PairPaths, Vec<u32>) {
                 })
                 .collect();
             let volumes = r.get(5 * n + 2).and_then(EsfNode::as_u32_array).map(<[u32]>::to_vec).unwrap_or_default();
-            out.entry((exporter, importer)).or_default().push(TradePath { waypoints, volumes });
+            let capital_port = r.get(5 * n + 1).and_then(EsfNode::as_bool).unwrap_or(false);
+            out.entry((exporter, importer)).or_default().push(TradePath { waypoints, volumes, capital_port });
         }
     }
     (out, prices)
@@ -296,7 +297,7 @@ pub fn read_domestic(esf: &EsfFile, m: &CampaignModel) -> BTreeMap<FactionId, Ve
                     }
                 })
                 .collect();
-            entry.push(TradePath { waypoints, volumes: volumes.to_vec() });
+            entry.push(TradePath { waypoints, volumes: volumes.to_vec(), capital_port: false });
         }
     }
     out
