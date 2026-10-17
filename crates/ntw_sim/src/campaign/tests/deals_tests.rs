@@ -647,3 +647,98 @@ fn the_ai_evaluates_regions_and_technologies_together() {
     m.world.region_base_values.insert(RegionId(12), 60_000);
     assert_eq!(m.ai_accepts_deal(), Some(true));
 }
+
+/// `test_model` with capitals for A (12, so its region 10 counts towards its sea cap) and B (11) and the route check answering `codes` per (from, to)
+/// pair (0 for any other), for the trade agreement explanation (`0x00BC7910`).
+fn trade_tooltip_model(codes: Vec<(FactionId, FactionId, u8)>) -> CampaignModel {
+    let mut m = test_model();
+    for (f, cap) in [(A, 12), (B, 11)] {
+        m.world.faction_details.entry(f).or_default().capital = Some(RegionId(cap));
+    }
+    for (x, y) in [(A, B), (B, A)] {
+        m.relationship_mut(x, y);
+    }
+    let mut rules = (*m.rules).clone();
+    let maker: crate::seam::Maker<super::seams::TradeRouteCheck> = Arc::new(move |_| {
+        let codes = codes.clone();
+        Arc::new(move |_, a, b| codes.iter().find(|(x, y, _)| (*x, *y) == (a, b)).map_or(0, |c| c.2))
+    });
+    rules.seams.trade_route_check.apply("test_mod", &maker);
+    m.rules = Arc::new(rules);
+    m
+}
+
+/// `0x00BC7910`'s reason (`0x00BC7BB1`, CONFIRMED disassembly): an embargo either way, then the other
+/// side's route back, then the asking side's code; no capital on either side gives no text.
+#[test]
+fn trade_agreement_tooltip_reasons_follow_the_route_codes() {
+    use super::negotiation::*;
+    let reason = |m: &CampaignModel| m.trade_agreement_tooltip(A, B, false).map(|t| (t.reason, t.route_shifted));
+    // B cannot reach A: "no route them" whatever A's code.
+    assert_eq!(reason(&trade_tooltip_model(vec![(A, B, 3)])), Some((TRADE_TIP_NO_ROUTE_THEM, false)));
+    for (code, want) in [
+        (0, (TRADE_TIP_NO_ROUTE_YOU, false)),
+        (1, (TRADE_TIP_NEIGHBOUR, false)),
+        (2, (TRADE_TIP_SEA_ROUTES, false)),
+        (3, (TRADE_TIP_SEA_ROUTES, false)),
+        (4, (TRADE_TIP_SEA_ROUTES, true)),
+        (5, (TRADE_TIP_SEA_ROUTES, false)),
+        (6, (TRADE_TIP_SEA_ROUTES, true)),
+        (7, (TRADE_TIP_SEA_ROUTES, false)),
+        (9, (TRADE_TIP_NO_ROUTE_THEM, false)),
+    ] {
+        assert_eq!(reason(&trade_tooltip_model(vec![(B, A, 1), (A, B, code)])), Some(want), "code {code}");
+    }
+    let mut m = trade_tooltip_model(vec![(B, A, 1), (A, B, 1)]);
+    m.relationship_mut(B, A).trade_embargo_turns = 2;
+    assert_eq!(reason(&m), Some((TRADE_TIP_EMBARGOED, false)), "an embargo either way comes first");
+    m.relationship_mut(B, A).trade_embargo_turns = 0;
+    m.world.faction_details.get_mut(&B).unwrap().capital = None;
+    assert_eq!(m.trade_agreement_tooltip(A, B, true), None, "no capital: the empty text");
+}
+
+/// The counts (`0x00BC7910` with the flag): each side's sea route cap less its export routes with a sea
+/// hop, then the cap; a land-only route is not counted.
+#[test]
+fn trade_agreement_tooltip_counts_sea_routes_left() {
+    use super::trade::{TradePath, TradeWaypoint};
+    let mut m = trade_tooltip_model(vec![(B, A, 1), (A, B, 1)]);
+    edit_test_building_effects(&mut m, |e| e.push(("trade_routes_mod_max_sea".into(), 2.0)));
+    let wp = |region: u32, sea: bool| TradeWaypoint { region: RegionId(region), from: 0, to: 0, sea, from_pos: None, to_pos: None };
+    let path = |sea: bool| TradePath { waypoints: vec![wp(10, sea), wp(11, false)], ..Default::default() };
+    m.world.trade_paths.insert((A, B), vec![path(true), path(false)]);
+    let cap = |f| m.sea_route_cap(f) + m.capital_port_route_cap(f);
+    let (ca, cb) = (cap(A), cap(B));
+    assert!(ca > 0, "the test effect gives A a sea cap");
+    let t = m.trade_agreement_tooltip(A, B, true).expect("both capitals");
+    assert_eq!(t.sea_routes, Some([ca - 1, ca, cb, cb]));
+    assert_eq!(m.trade_agreement_tooltip(A, B, false).unwrap().sea_routes, None);
+}
+
+/// The diplomacy screen's explanation (`0x009F35CC`, CONFIRMED): only for a new agreement the scripts
+/// allow, never at war or while one is held; the negotiation panel's trade button always carries it
+/// with the counts (`0x009B55FF`).
+#[test]
+fn diplomacy_trade_tooltip_only_for_an_allowed_new_agreement() {
+    use super::negotiation::*;
+    let mut m = trade_tooltip_model(vec![(B, A, 1), (A, B, 1)]);
+    let neighbour = Some(TradeAgreementTooltip { reason: TRADE_TIP_NEIGHBOUR, sea_routes: None, route_shifted: false });
+    assert_eq!(m.diplomacy_trade_tooltip(A, B), neighbour);
+    let trade = NegotiationAction::Trade.option();
+    m.relationship_mut(A, B).diplomacy_options[trade] = 2;
+    assert_eq!(m.diplomacy_trade_tooltip(A, B), None, "the player may not propose");
+    m.relationship_mut(A, B).diplomacy_options[trade] = 0;
+    m.relationship_mut(B, A).diplomacy_options[trade] = 3;
+    assert_eq!(m.diplomacy_trade_tooltip(A, B), None, "the other side neither proposes nor accepts");
+    m.relationship_mut(B, A).diplomacy_options[trade] = 2;
+    assert_eq!(m.diplomacy_trade_tooltip(A, B), neighbour, "the other side's 2 still allows it");
+    m.relationship_mut(A, B).trade_agreement = true;
+    assert_eq!(m.diplomacy_trade_tooltip(A, B), None, "held");
+    m.relationship_mut(A, B).trade_agreement = false;
+    let button = m.possible_actions(A, A, B).unilaterals.into_iter().find(|a| a.action == NegotiationAction::Trade);
+    let with_counts = m.trade_agreement_tooltip(A, B, true);
+    assert!(with_counts.is_some_and(|t| t.sea_routes.is_some()));
+    assert_eq!(button.map(|a| a.tooltip), Some(Some(ActionTooltip::TradeAgreement(with_counts))));
+    m.world.set_stance(A, B, Stance::War).unwrap();
+    assert_eq!(m.diplomacy_trade_tooltip(A, B), None, "at war");
+}

@@ -630,6 +630,12 @@ impl Effects {
         faction + self.character(c, bonus)
     }
 
+    /// [`Self::character_total`] of a qualified bonus, e.g. (`UnitCategory`, `movement_mod`, `infantry`).
+    pub fn character_total_qualified(&self, c: CharacterId, kind: BonusKind, bonus: &str, qualifier: &str) -> f32 {
+        let faction = self.character_owner.get(&c).map_or(0.0, |f| self.faction_qualified(*f, kind, bonus, qualifier));
+        faction + self.character.get(&c).map_or(0.0, |s| s.get_qualified(kind, bonus, qualifier))
+    }
+
     /// Only a region's own building effects (no faction part), e.g. `tax_bonus_building`.
     pub fn region_local(&self, r: RegionId, bonus: &str) -> f32 {
         self.region_local.get(&r).map_or(0.0, |s| s.get(bonus))

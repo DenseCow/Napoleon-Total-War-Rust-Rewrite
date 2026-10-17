@@ -59,31 +59,19 @@ impl CampaignCamera {
     }
 }
 
-/// WASD / arrow keys pan, the mouse wheel (or PageUp/PageDown) zooms, dragging with the
-/// right or middle mouse button pans.
-#[allow(clippy::too_many_arguments)] // Bevy system: every parameter is a system param, not splittable
-pub fn control(
-    keys: Res<ButtonInput<KeyCode>>,
-    mouse: Res<ButtonInput<MouseButton>>,
-    scroll: Res<AccumulatedMouseScroll>,
-    motion: Res<AccumulatedMouseMotion>,
-    time: Res<Time<Real>>,
-    ground: Option<Res<super::scene::CampaignGround>>,
-    harness: Option<Res<crate::frontend::AutoScreenshot>>,
-    mut cams: Query<(&mut CampaignCamera, &mut Transform)>,
-) {
-    let dt = time.delta_secs();
-    // Harness runs (`--screenshot`) ignore the live keyboard and mouse so captures are repeatable.
-    let live = harness.is_none();
-    for (mut cam, mut tf) in &mut cams {
-        if !live {
-            if let Some(g) = &ground {
-                cam.ground = g.0.height_at(cam.target.x, -cam.target.y);
-            }
-            *tf = cam.transform();
-            continue;
-        }
-        let mut pan = Vec2::ZERO;
+/// The keyboard's camera move this frame: (pan direction, zoom steps). WASD / arrows pan and
+/// PageUp / PageDown zoom, none of them while a HUD text field holds the focus (`text_focused`: the
+/// keys are being typed into it). The pan keys also do nothing while CTRL or ALT is held:
+/// `text/default_keys.xml` binds the camera's `step_fwd` / `step_bck` / `step_l` / `step_r` (W/S/A/D,
+/// the arrows) with `modifier="ALLOW_SHIFT"` only (CONFIRMED from the data), so CTRL+S is the quick
+/// save and never pans.
+fn key_move(keys: &ButtonInput<KeyCode>, text_focused: bool, dt: f32) -> (Vec2, f32) {
+    if text_focused {
+        return (Vec2::ZERO, 0.0);
+    }
+    let mut pan = Vec2::ZERO;
+    let modified = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::AltLeft, KeyCode::AltRight]);
+    if !modified {
         let pressed = |a: KeyCode, b: KeyCode| keys.pressed(a) || keys.pressed(b);
         if pressed(KeyCode::KeyW, KeyCode::ArrowUp) {
             pan.y -= 1.0;
@@ -97,19 +85,51 @@ pub fn control(
         if pressed(KeyCode::KeyD, KeyCode::ArrowRight) {
             pan.x += 1.0;
         }
+    }
+    let mut zoom = 0.0;
+    if keys.pressed(KeyCode::PageUp) {
+        zoom -= 5.0 * dt;
+    }
+    if keys.pressed(KeyCode::PageDown) {
+        zoom += 5.0 * dt;
+    }
+    (pan, zoom)
+}
+
+/// The keys of [`key_move`] pan and zoom, the mouse wheel zooms, dragging with the right or middle
+/// mouse button pans.
+#[allow(clippy::too_many_arguments)] // Bevy system: every parameter is a system param, not splittable
+pub fn control(
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    scroll: Res<AccumulatedMouseScroll>,
+    motion: Res<AccumulatedMouseMotion>,
+    time: Res<Time<Real>>,
+    ground: Option<Res<super::scene::CampaignGround>>,
+    hud: Option<NonSend<super::hud::CampaignHud>>,
+    harness: Option<Res<crate::frontend::AutoScreenshot>>,
+    mut cams: Query<(&mut CampaignCamera, &mut Transform)>,
+) {
+    let dt = time.delta_secs();
+    // Harness runs (`--screenshot`) ignore the live keyboard and mouse so captures are repeatable.
+    let live = harness.is_none();
+    let text_focused = hud.is_some_and(|h| h.text_focused);
+    for (mut cam, mut tf) in &mut cams {
+        if !live {
+            if let Some(g) = &ground {
+                cam.ground = g.0.height_at(cam.target.x, -cam.target.y);
+            }
+            *tf = cam.transform();
+            continue;
+        }
+        let (pan, key_zoom) = key_move(&keys, text_focused, dt);
         let speed = cam.distance;
         cam.target += pan * speed * dt;
         if mouse.pressed(MouseButton::Right) || mouse.pressed(MouseButton::Middle) {
             let d = cam.distance;
             cam.target -= motion.delta * d * 0.002;
         }
-        let mut zoom = -scroll.delta.y;
-        if keys.pressed(KeyCode::PageUp) {
-            zoom -= 5.0 * dt;
-        }
-        if keys.pressed(KeyCode::PageDown) {
-            zoom += 5.0 * dt;
-        }
+        let zoom = key_zoom - scroll.delta.y;
         if zoom != 0.0 {
             cam.distance = (cam.distance * 1.12f32.powf(zoom)).clamp(MIN_DISTANCE, MAX_DISTANCE);
         }
@@ -136,5 +156,22 @@ mod tests {
         // Zoomed out: above and south of the target, looking north and down.
         assert!(t.translation.y > 0.0 && t.translation.z > 0.0);
         assert!(t.forward().z < 0.0 && t.forward().y < 0.0);
+    }
+    /// Typing a save name (WASD, arrows) or the CTRL+S quick save does not move the camera; the
+    /// keys still pan without a focused field (SHIFT allowed, as `default_keys.xml` binds them).
+    #[test]
+    fn typing_and_shortcuts_do_not_pan() {
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::KeyS);
+        keys.press(KeyCode::PageDown);
+        assert_eq!(key_move(&keys, false, 1.0), (Vec2::new(0.0, 1.0), 5.0));
+        assert_eq!(key_move(&keys, true, 1.0), (Vec2::ZERO, 0.0), "a text field is focused");
+        keys.press(KeyCode::ShiftLeft);
+        assert_eq!(key_move(&keys, false, 1.0).0, Vec2::new(0.0, 1.0), "SHIFT is allowed");
+        keys.press(KeyCode::ControlLeft);
+        assert_eq!(key_move(&keys, false, 1.0), (Vec2::ZERO, 5.0), "CTRL+S is the quick save");
+        keys.release(KeyCode::ControlLeft);
+        keys.press(KeyCode::AltRight);
+        assert_eq!(key_move(&keys, false, 1.0).0, Vec2::ZERO, "ALT held");
     }
 }

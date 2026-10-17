@@ -13,8 +13,7 @@ use super::rules::{KvRules, c_div, x87_round};
 use crate::rng::{CaRng, INV_65535};
 
 /// Encounter attack direction `E.dir`, relative to the defender. W1 §12.9 (CONFIRMED values 0..3
-/// and which `factor_attackdir_*` key each selects; how the original computes it, 0x006AD890, is
-/// still open).
+/// and which `factor_attackdir_*` key each selects). Computed by `model::melee_dir` (`0x006AD890`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum MeleeDir {

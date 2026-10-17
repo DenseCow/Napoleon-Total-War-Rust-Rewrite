@@ -18,9 +18,11 @@
 //!   ([`super::expulsion::expel_faction_from_region`]).
 //! - [`TRADE_ROUTE_CHECK`]: whether one faction can send a trade route to another
 //!   ([`super::trade_check::trade_route_check`]).
+//! - [`RAID_TAKE`]: what a commerce raid takes from one trade route ([`super::commerce_raid::raid_take`]).
 
 use std::sync::Arc;
 
+use super::commerce_raid::OwnedRoute;
 use super::director::DirectorState;
 use super::expulsion::ExpelledForce;
 use super::ids::{FactionId, RegionId};
@@ -46,6 +48,8 @@ pub const CONSTRUCTION_STEP: &str = "construction.step";
 pub const REGION_EXPULSION: &str = "region.expulsion";
 /// Seam key of the check that one faction can send a trade route to another ([`TradeRouteCheck`]).
 pub const TRADE_ROUTE_CHECK: &str = "trade.route_check";
+/// Seam key of what a commerce raid takes from one trade route ([`RaidTake`]).
+pub const RAID_TAKE: &str = "trade.raid_take";
 
 /// A region's population after one round of growth: given the model, the region, its population
 /// and its population state, the new population and state. The original's is
@@ -87,6 +91,11 @@ pub type RegionExpulsion = dyn Fn(&CampaignModel, FactionId, RegionId, &mut ModW
 /// changes hands is dropped, and a pair that fails it either way loses its agreement. A query: it changes no
 /// state.
 pub type TradeRouteCheck = dyn Fn(&CampaignModel, FactionId, FactionId) -> u8 + Send + Sync;
+/// What one raiding faction takes from one trade route this turn: given the model, the route (its owner,
+/// kind, path and volumes) and the faction's share (0..1, the shares of all raiders already normalised),
+/// the amount; it is the raider's income and, on an international route, the owner's loss. The original's
+/// is [`super::commerce_raid::raid_take`]. A query: it changes no state.
+pub type RaidTake = dyn Fn(&CampaignModel, &OwnedRoute, f32) -> i32 + Send + Sync;
 
 /// The campaign rules in use, one field per seam (see the module docs).
 #[derive(Clone, Debug, PartialEq)]
@@ -105,6 +114,8 @@ pub struct CampaignSeams {
     pub region_expulsion: Seam<RegionExpulsion>,
     /// [`TRADE_ROUTE_CHECK`].
     pub trade_route_check: Seam<TradeRouteCheck>,
+    /// [`RAID_TAKE`].
+    pub raid_take: Seam<RaidTake>,
 }
 
 impl Default for CampaignSeams {
@@ -118,6 +129,7 @@ impl Default for CampaignSeams {
             construction_step: Seam::original(Arc::new(|m: &CampaignModel, r: &Region, i: &ConstructionItem, _: &mut ModWrites| super::turn::construction_step(m, r, i))),
             region_expulsion: Seam::original(Arc::new(|m: &CampaignModel, f: FactionId, r: RegionId, _: &mut ModWrites| super::expulsion::expel_faction_from_region(m, f, r))),
             trade_route_check: Seam::original(Arc::new(super::trade_check::trade_route_check)),
+            raid_take: Seam::original(Arc::new(super::commerce_raid::raid_take)),
         }
     }
 }
@@ -125,7 +137,7 @@ impl Default for CampaignSeams {
 impl CampaignSeams {
     /// Every seam's key and implementation chain, in a fixed order (for the multiplayer handshake
     /// and the log).
-    pub fn chains(&self) -> [(&'static str, &[String]); 7] {
+    pub fn chains(&self) -> [(&'static str, &[String]); 8] {
         [
             (POPULATION_GROW, self.population_grow.chain()),
             (DIRECTOR_REGION_TRANSFER, self.director_region_transfer.chain()),
@@ -134,6 +146,7 @@ impl CampaignSeams {
             (CONSTRUCTION_STEP, self.construction_step.chain()),
             (REGION_EXPULSION, self.region_expulsion.chain()),
             (TRADE_ROUTE_CHECK, self.trade_route_check.chain()),
+            (RAID_TAKE, self.raid_take.chain()),
         ]
     }
 }
@@ -157,6 +170,8 @@ pub struct CampaignRuleRegistry {
     pub region_expulsion: SeamRegistry<RegionExpulsion>,
     /// [`TRADE_ROUTE_CHECK`] implementations.
     pub trade_route_check: SeamRegistry<TradeRouteCheck>,
+    /// [`RAID_TAKE`] implementations.
+    pub raid_take: SeamRegistry<RaidTake>,
 }
 
 impl CampaignRuleRegistry {
@@ -174,6 +189,7 @@ impl CampaignRuleRegistry {
                 CONSTRUCTION_STEP => self.construction_step.apply(&mut seams.construction_step, key),
                 REGION_EXPULSION => self.region_expulsion.apply(&mut seams.region_expulsion, key),
                 TRADE_ROUTE_CHECK => self.trade_route_check.apply(&mut seams.trade_route_check, key),
+                RAID_TAKE => self.raid_take.apply(&mut seams.raid_take, key),
                 _ => {
                     warnings.push(format!("rule seam {seam}: no such seam; {key} is ignored"));
                     continue;
@@ -252,6 +268,7 @@ mod tests {
                 (CONSTRUCTION_STEP, &original[..]),
                 (REGION_EXPULSION, &original[..]),
                 (TRADE_ROUTE_CHECK, &original[..]),
+                (RAID_TAKE, &original[..]),
             ]
         );
         // The round end through the seam gives exactly what the original's function gives.

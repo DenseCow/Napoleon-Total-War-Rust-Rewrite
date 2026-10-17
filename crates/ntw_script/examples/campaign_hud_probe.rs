@@ -126,13 +126,13 @@ fn main() {
     let loc = Localisation::from_vfs(&vfs).unwrap();
     let facts = FrontEndFacts { game_version: "1.3.0".into(), ..Default::default() };
     let host = UiScriptHost::new(ScriptSource::from_install(&dir).unwrap(), loc, facts, (1280.0, 960.0), db.limits.clone()).unwrap();
-    host.install_campaign(CampaignLink { state: scripts.shared_state(), human: human.clone(), campaign: campaign.clone(), map: loaded.info.map_key.clone(), theatres: loaded.info.theatres().map(str::to_owned).collect(), db: Rc::new(db) })
+    host.install_campaign(CampaignLink { state: scripts.shared_state(), human: human.clone(), campaign: campaign.clone(), map: loaded.info.map_key.clone(), theatres: loaded.info.theatres().map(str::to_owned).collect(), db: Rc::new(db), saves: None })
         .unwrap();
     let root = host.load_root_layout("data/ui/campaign ui/layout").unwrap();
     println!("== loaded");
     drain(&host);
     host.campaign_ready();
-    host.campaign_update_funds("Early May");
+    host.campaign_update_funds();
 
     println!("== start");
     drain(&host);

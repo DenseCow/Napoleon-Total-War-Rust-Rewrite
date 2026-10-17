@@ -40,12 +40,13 @@ pub mod rating;
 
 use std::collections::BTreeMap;
 
-use ntw_sim::battle::model::{Battle, LandUnit, MELEE_CONTACT_RANGE};
+use ntw_sim::battle::melee::MeleeDir;
+use ntw_sim::battle::model::{Battle, LandUnit, MELEE_CONTACT_RANGE, melee_dir};
 use ntw_sim::battle::strength::mounted as mounted_unit;
 
 use geom::{P, add, centroid, dist, dot, norm_or, right_of, rotate, scale, sub};
 use melee_manager::{Assignments, Candidate, ObjectiveKind, allocate};
-use rating::{AttackSide, attack_side, balance, engaged, melee_base_priority, melee_potential};
+use rating::{balance, engaged, melee_base_priority, melee_potential};
 
 /// Tuning numbers. Every default is PROVISIONAL unless its doc says CONFIRMED.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1589,7 +1590,7 @@ impl AllianceAi {
             if d > p.flank_threat_distance {
                 continue;
             }
-            if attack_side(u.position, u.facing, e.position) == AttackSide::Front {
+            if melee_dir(u.position, u.facing, e.position) == MeleeDir::Front {
                 continue;
             }
             if best.is_none_or(|(_, bd)| d < bd) {
@@ -1647,7 +1648,7 @@ impl WingBidder {
             let men: u32 = v.iter().map(|u| u.men).sum();
             (v.iter().filter(|u| f(u)).map(|u| u.men).sum::<u32>() * 100).checked_div(men).unwrap_or(0) as i32
         };
-        let class8 = |u: &LandUnit| classes::codes(u).1 == 8;
+        let class8 = |u: &LandUnit| classes::codes(u).1 == classes::class::CAVALRY_MISSILE;
         // INFERRED predicate: the builder of the mounted share (`+0x78` / `+0x84`) is not traced; read as
         // mounted (`0x0055ABF0`), as the wing filters below.
         let mounted = |u: &LandUnit| mounted_unit(u);
@@ -1659,7 +1660,7 @@ impl WingBidder {
             .filter(|u| {
                 let (cat, class) = classes::codes(u);
                 // Mounted (`0x0055ABF0` in `0x007D33B0` / `0x007D34A0`).
-                (mounted_unit(u) || cat == classes::category::ELEPHANTS || class == 0x11 || class == 0x16)
+                (mounted_unit(u) || cat == classes::category::ELEPHANTS || class == classes::class::INFANTRY_LIGHT || class == classes::class::INFANTRY_SKIRMISHERS)
                     && class != classes::class::GENERAL
             })
             .map(|u| (u.id, if dot(sub(u.position, own_c), right) >= 0.0 { 1.0 } else { -1.0 }))

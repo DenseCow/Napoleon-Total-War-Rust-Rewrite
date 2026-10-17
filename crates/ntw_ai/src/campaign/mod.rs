@@ -1225,6 +1225,11 @@ pub fn apply_orders(model: &mut CampaignModel, orders: &[AiOrder]) -> usize {
 
 /// Like [`apply_orders`], collecting every event the commands caused and every order the model refused
 /// with its error (the driver reports them, [`driver::AiTurnReport::rejected`], and the app logs each kind once).
+///
+/// Once the campaign is over (`TurnState::campaign_over`, e.g. an order took a human faction's last region,
+/// `0x008AB6C0` → `0x008C30A0`) the remaining orders are dropped quietly: neither applied nor rejected, as
+/// nobody may act then (`CampaignModel::end_campaign`). PROVISIONAL: the exe's CAI step loop (`0x008F4524`)
+/// has no test of the flag and finishes that frame's steps; what they then do is not traced.
 pub fn apply_orders_with_events(
     model: &mut CampaignModel,
     orders: &[AiOrder],
@@ -1233,6 +1238,9 @@ pub fn apply_orders_with_events(
 ) -> usize {
     let mut accepted = 0;
     for (order, cmd) in orders.iter().filter_map(|o| Some((o, o.to_campaign_command()?))) {
+        if model.turn.campaign_over {
+            break;
+        }
         match model.apply(cmd) {
             Ok(ev) => {
                 accepted += 1;
@@ -1430,5 +1438,66 @@ mod tests {
         }
         assert_eq!(turn.orders.len(), 1);
         assert_eq!(apply_orders(&mut m, &turn.orders), 1);
+    }
+
+    /// Review (campaignover): an AI order that takes the human's last region ends the campaign
+    /// (`0x008AB6C0` → `0x008C30A0`); the AI's remaining orders are then dropped quietly, not refused
+    /// one by one (nobody may act once the queue is gone). PROVISIONAL rule, see `apply_orders_with_events`.
+    #[test]
+    fn an_ai_order_that_destroys_the_human_drops_its_remaining_orders_quietly() {
+        use ntw_sim::campaign::{CampaignUnit, Character, CharacterId, CharacterKind, Faction, GovernmentType, MilitaryForce, TurnState, TurnStep, UnitId};
+        let mut m = model(Some(CampaignRules::test_rules()));
+        let (ai, human) = (FactionId(2), FactionId(1));
+        for (id, key) in [(human, "test_faction_human"), (ai, "test_faction_ai")] {
+            let f = Faction {
+                id,
+                key: key.into(),
+                treasury: 1000,
+                government: GovernmentType::AbsoluteMonarchy,
+                government_key: String::new(),
+                tax_lower: "tax_normal".into(),
+                tax_upper: "tax_normal".into(),
+                diplomacy: BTreeMap::new(),
+            };
+            m.world.factions.insert(id, f);
+        }
+        m.world.turn_order = vec![ai, human];
+        // The human's only region (1, its capital), ungarrisoned; the AI's army 5 away.
+        let region = m.world.regions.get_mut(&RegionId(1)).unwrap();
+        region.settlement.position = (Fixed20::from_int(5), Fixed20::from_int(0));
+        region.slots[0].key = "settlement:test_region:town:test_slot:0".into();
+        let d = m.world.faction_details.entry(human).or_default();
+        (d.capital, d.capital_2, d.out_of_game) = (Some(RegionId(1)), Some(RegionId(1)), Some(false));
+        let general = Character {
+            id: CharacterId(100),
+            faction: ai,
+            kind: CharacterKind::General,
+            position: (Fixed20::from_int(0), Fixed20::from_int(0)),
+            movement_points: 30,
+            max_movement_points: 30,
+            base_movement_points: 30,
+            garrisoned_in: None,
+        };
+        m.world.characters.insert(general.id, general);
+        let unit = CampaignUnit { id: UnitId(1), unit_key: "test_unit".into(), men: 80, max_men: 100, character: None, officer_name: Default::default() };
+        m.world.forces.insert(ForceId(9), MilitaryForce { id: ForceId(9), faction: ai, commander: Some(CharacterId(100)), units: vec![unit], is_navy: false });
+        m.apply(CampaignCommand::DeclareWar { a: ai, b: human }).unwrap();
+        // Inside the round, the AI's turn step next (the AI may act).
+        m.turn = TurnState::in_turn_of(human, vec![human]);
+        m.turn.in_turn = false;
+        m.turn.queue.extend([TurnStep::AiTurn(ai), TurnStep::FactionEnd(ai)]);
+        assert!(m.may_act(ai));
+
+        let to = (Fixed20::from_int(5), Fixed20::from_int(0));
+        let orders = [
+            AiOrder::MoveForce { force: ForceId(9), to, purpose: MovePurpose::Attack(RegionId(1)) },
+            AiOrder::DeclareWar { a: ai, b: FactionId(3) },
+            AiOrder::SetTax { faction: ai, class: 0, level: "tax_normal".into() },
+        ];
+        let (mut events, mut rejected) = (Vec::new(), Vec::new());
+        let accepted = apply_orders_with_events(&mut m, &orders, &mut events, &mut rejected);
+        assert!(events.contains(&CampaignEvent::FactionDestroyed { faction: human }), "{events:?}");
+        assert!(m.turn.campaign_over && !m.has_pending_steps());
+        assert_eq!((accepted, rejected), (1, Vec::new()), "the orders after the end are neither applied nor refused");
     }
 }

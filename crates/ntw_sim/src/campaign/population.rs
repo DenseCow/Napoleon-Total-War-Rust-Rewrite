@@ -9,8 +9,8 @@
 //! overcrowded flag (+0x44, #7), the last round's migrants (+0x58, #8), the classes and the religion
 //! breakdown.
 //!
-//! - **Factors** (`0x00AA9C10`, run by the round start `0x008F1F60` → `0x00AAE710` and by the round end's
-//!   first pass `0x008E1030` → `0x00AB3E70` for every region before any faction's economy; also on a copy
+//! - **Factors** (`0x00AA9C10`, run by the round start `0x008F1F60` → `0x00AAE710` for the regions of every
+//!   faction in the game except the rebels, and by the round end's first pass `0x008E1030` → `0x00AB3E70` for every region before any faction's economy; also on a copy
 //!   for the panel): see [`growth_factors`]. A rebel-owned region (`0x008CEEF0`) has all factors 0.
 //! - **Growth** (`0x00AB4070`, from the round-end economy `0x008BC650` → `0x00AB42F0` → `0x00AB3FF0`):
 //!   see [`grow`]; the religion conversion follows on the grown population, then the town wealth.
@@ -24,8 +24,10 @@
 //! always 0 here: the migrant counts, factor 5 and the faction table are not computed (BACKLOG §0-E,
 //! with theatres).
 
+use std::collections::BTreeSet;
+
 use super::effects::EffectSet;
-use super::ids::RegionId;
+use super::ids::{FactionId, RegionId};
 use super::mod_state::ModWrites;
 use super::world::{CampaignModel, Region};
 
@@ -269,7 +271,7 @@ pub fn predicted_effect_set(model: &CampaignModel, reg: &Region) -> EffectSet {
 /// The faction part of [`predicted_effect_set`]'s change: `faction`'s technologies under research
 /// (`0x008AFCF0`) and the faction-wide change of the buildings under construction in its regions
 /// (`0x008BF110`). Empty for the rebels (`0x008CEEF0`).
-pub fn predicted_faction_change(model: &CampaignModel, faction: super::ids::FactionId) -> EffectSet {
+pub fn predicted_faction_change(model: &CampaignModel, faction: FactionId) -> EffectSet {
     let mut set = EffectSet::default();
     if model.is_rebel_faction(faction) {
         return set;
@@ -357,13 +359,29 @@ pub fn project(model: &CampaignModel, region: RegionId) -> Option<Projection> {
 
 impl CampaignModel {
     /// Every region's population factors refreshed (`0x00AA9C10` with the region's set, then the religion
-    /// breakdown normalised, `0x00AA4860`): the round start (`0x008F1F60` → `0x00AAE710`) and the round
-    /// end's first pass (`0x008E1030` → `0x00AB3E70`) run it for every faction's regions.
+    /// breakdown normalised, `0x00AA4860`): the round end's first pass (`0x008E1030` → `0x00AB3E70`) runs it
+    /// for every region. The round start refreshes fewer: [`Self::refresh_round_start_population_factors`].
     pub fn refresh_population_factors(&mut self) {
+        self.refresh_population_factors_where(|_, _| true);
+    }
+
+    /// The round start's population refresh (`0x008F1F60` → `0x00AAE710` per owned region, CONFIRMED): only the
+    /// regions of a faction that is not the rebels (`IsFactionWithoutRecord` `0x008CEEF0`) and is still in the
+    /// game (+0x824 clear, [`Self::in_the_game`]). The rebels' and out-of-game factions' regions keep their
+    /// factors until the round end's pass.
+    pub fn refresh_round_start_population_factors(&mut self) {
+        // The faction set once per refresh: `in_the_game` may scan every region and force (old saves).
+        let listed: BTreeSet<FactionId> =
+            self.world.factions.keys().copied().filter(|&f| !self.is_rebel_faction(f) && self.in_the_game(f)).collect();
+        self.refresh_population_factors_where(|_, r| listed.contains(&r.owner));
+    }
+
+    fn refresh_population_factors_where(&mut self, refresh: impl Fn(&CampaignModel, &Region) -> bool) {
         let updates: Vec<(RegionId, PopulationState)> = self
             .world
             .regions
             .values()
+            .filter(|r| refresh(self, r))
             .map(|r| {
                 let set = super::economy::region_effect_set(self, r);
                 let input = FactorInputs { set: &set, hostile_units: hostile_units(self, r) };
@@ -385,7 +403,7 @@ impl CampaignModel {
     /// each grows by its stored factors, then its religions convert on the new population (`0x00A63FE0`).
     /// The growth is the rule in use (seam `population.grow`, [`grow`] in vanilla); its mod-state writes
     /// apply before the next region grows.
-    pub fn population_round_end(&mut self, faction: super::ids::FactionId) {
+    pub fn population_round_end(&mut self, faction: FactionId) {
         let regions: Vec<RegionId> = self.world.regions.values().filter(|r| r.owner == faction).map(|r| r.id).collect();
         let mut writes = ModWrites::default();
         for id in regions {

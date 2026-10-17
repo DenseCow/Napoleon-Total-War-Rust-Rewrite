@@ -371,6 +371,44 @@ pub enum CampaignEvent {
         /// The new government key.
         new_government: String,
     },
+    /// Project event: a message for `recipient`'s message feed (the message manager, model +0xFA0,
+    /// posts it with `0x009D3250`; the display shows the messages of the human it views). The exe's
+    /// delivery gates belong to the display: none for the rebels (`0x008CEEF0`), none while the flag
+    /// at model +0xD9C → +0x6C is 1 (meaning UNKNOWN), and in a shared view (`0x008CA0B0`, faction
+    /// +0x814) only for a faction with +0x81C set (not modelled: single player).
+    Message {
+        /// The faction whose feed gets the message.
+        recipient: FactionId,
+        /// What the message says.
+        message: CampaignMessage,
+    },
+}
+
+/// A message the model posts to a faction's message feed ([`CampaignEvent::Message`]). Each kind
+/// is one entry of the exe's message type table (`0x0145C530`, indexed by type id); its name is
+/// the `message_events` type the display looks the text and picture up by (with the recipient's
+/// subculture).
+#[derive(Debug, Clone, PartialEq)]
+pub enum CampaignMessage {
+    /// Type 11 `alliance_broken` (`0x009CA7B0`, CONFIRMED by disassembly 2026-10-17): the title is
+    /// "<first name> - <second name>" (faction +0x518). Posted by an alliance break (`0x00B13840`,
+    /// first = the former ally, second = the breaker) and by a cancelled military access
+    /// (`0x00B67B20`, first = the faction losing the access, second = the one cancelling it).
+    AllianceBroken {
+        /// The first faction of the title.
+        first: FactionId,
+        /// The second faction of the title.
+        second: FactionId,
+    },
+}
+
+impl CampaignMessage {
+    /// The message type's name (the exe's type table entry, the `message_events` key).
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            CampaignMessage::AllianceBroken { .. } => "alliance_broken",
+        }
+    }
 }
 
 impl CampaignEvent {
@@ -433,7 +471,8 @@ impl CampaignEvent {
             | CampaignEvent::ForceDestroyed { .. }
             | CampaignEvent::FactionDestroyed { .. }
             | CampaignEvent::GovernmentChanged { .. }
-            | CampaignEvent::ConstructionItemDropped { .. } => return None,
+            | CampaignEvent::ConstructionItemDropped { .. }
+            | CampaignEvent::Message { .. } => return None,
         })
     }
 }

@@ -239,7 +239,8 @@ impl CampaignModel {
     ///
     /// Not modelled: the original's listener when `old` has no capital, its pair-cache refresh
     /// (`0x00BBDBA0`, `0x00BAC0D0`; the model searches fresh) and the price update `0x00BCB020` (the
-    /// model updates prices at the round end only; BACKLOG follow-up).
+    /// model runs it only at the round start, flag 0, and the round end, flag 1, not on a region loss;
+    /// BACKLOG follow-up).
     pub(crate) fn trade_routes_after_region_lost(&mut self, region: RegionId, old: FactionId) {
         if region == RegionId(0) {
             return;
@@ -290,17 +291,29 @@ impl CampaignModel {
     /// `0x00BC3699`; the price update `0x00BCB020` that `0x00B29BB0` calls right after its break reaches it on
     /// every path, at `0x00BCC52F`), and the only reader that tells "empty" from "none",
     /// [`Self::trade_port_full`], differs only for an export port with a route cap of 0 (vanilla's are 3-5).
-    /// CONFIRMED.
+    /// CONFIRMED. The removed route's accumulated value goes with it ([`TradePath::accumulated`](super::trade::TradePath::accumulated): the
+    /// erase destroys that record, `0x00B981D0`); the pair's other routes keep theirs.
+    ///
+    /// A pair with no stored route has its one route built when valued ([`Self::trade_routes_of`]); the
+    /// original stores that route (`0x00BA0490`) and this erase would drop it with its value, so the pair's
+    /// built-route value ([`World::trade_accumulated`](super::World::trade_accumulated)) is dropped here
+    /// too, and the next built route starts from 0 as a rebuilt one does. Still false then: no stored
+    /// route was removed (the region-loss scan, which reads it, walks stored routes only).
     pub(crate) fn remove_first_trade_route(&mut self, exporter: FactionId, importer: FactionId) -> bool {
-        let Some(ps) = self.world.trade_paths.get_mut(&(exporter, importer)) else { return false };
-        if ps.is_empty() {
-            return false;
+        let removed = match self.world.trade_paths.get_mut(&(exporter, importer)) {
+            Some(ps) if !ps.is_empty() => {
+                ps.remove(0);
+                if ps.is_empty() {
+                    self.world.trade_paths.remove(&(exporter, importer));
+                }
+                true
+            }
+            _ => false,
+        };
+        if self.world.trade_paths.get(&(exporter, importer)).is_none_or(Vec::is_empty) {
+            self.world.trade_accumulated.remove(&(exporter, importer));
         }
-        ps.remove(0);
-        if ps.is_empty() {
-            self.world.trade_paths.remove(&(exporter, importer));
-        }
-        true
+        removed
     }
 }
 
@@ -351,7 +364,7 @@ mod tests {
 
     /// A route through `regions`, a sea hop from the first.
     fn route(regions: &[u32], capital_port: bool) -> TradePath {
-        TradePath { waypoints: regions.iter().enumerate().map(|(i, &r)| wp(r, i == 0)).collect(), capital_port, volumes: Vec::new() }
+        TradePath { waypoints: regions.iter().enumerate().map(|(i, &r)| wp(r, i == 0)).collect(), capital_port, volumes: Vec::new(), accumulated: 0 }
     }
 
     fn add_route(m: &mut CampaignModel, exporter: FactionId, importer: FactionId, p: TradePath) {
@@ -450,7 +463,7 @@ mod tests {
         let full = |m: &CampaignModel| m.trade_port_full(&m.world.regions[&RegionId(13)]);
         assert!(!full(&m));
         // A route whose first waypoint is a land step: its first sea hop counts.
-        add_route(&mut m, A, C, TradePath { waypoints: vec![wp(10, false), wp(13, true), wp(14, false)], capital_port: false, volumes: Vec::new() });
+        add_route(&mut m, A, C, TradePath { waypoints: vec![wp(10, false), wp(13, true), wp(14, false)], capital_port: false, volumes: Vec::new(), accumulated: 0 });
         assert!(full(&m));
         add_route(&mut m, A, B, route(&[13, 12, 11], false));
         assert!(!full(&m), "the count wraps below 0");
@@ -571,5 +584,68 @@ mod tests {
                 assert_eq!(m.world.trade_paths[&(A, C)].len(), 1, "{exporter:?}->{importer:?} both_ways {both_ways}");
             }
         }
+    }
+
+    /// The diplomacy screen's trade status (`RetrieveFactionListForDiplomacy` `0x009F33E1`): the route
+    /// check both ways, the player's permission to propose, the other side's value 3 only, embargoes.
+    #[test]
+    fn diplomacy_trade_status_reads_routes_permissions_and_embargoes() {
+        use super::super::negotiation::{DiplomacyTradeStatus, NegotiationAction};
+        use super::super::world::Stance;
+        let new = |can_trade, land| Some(DiplomacyTradeStatus { held: false, can_trade, land });
+        let mut m = trade_map();
+        for (x, y) in [(A, B), (B, A), (A, C), (C, A)] {
+            m.relationship_mut(x, y);
+        }
+        // C by land (route code 1), B by the capital port (3).
+        assert_eq!(m.diplomacy_trade_status(A, C), new(true, true));
+        assert_eq!(m.diplomacy_trade_status(A, B), new(true, false));
+        let trade = NegotiationAction::Trade.option();
+        let set = |m: &mut CampaignModel, x: FactionId, y: FactionId, v: u32| m.relationship_mut(x, y).diplomacy_options[trade] = v;
+        // The player may not propose (2 or 3): cannot; it only declines (1): can.
+        for (v, can) in [(1, true), (2, false), (3, false)] {
+            set(&mut m, A, C, v);
+            assert_eq!(m.diplomacy_trade_status(A, C), new(can, can), "player value {v}");
+        }
+        set(&mut m, A, C, 0);
+        // The other side: only 3 (neither proposes nor accepts) closes it.
+        for (v, can) in [(1, true), (2, true), (3, false)] {
+            set(&mut m, C, A, v);
+            assert_eq!(m.diplomacy_trade_status(A, C), new(can, can), "other value {v}");
+        }
+        set(&mut m, C, A, 0);
+        // An embargo either way.
+        m.relationship_mut(C, A).trade_embargo_turns = 5;
+        assert_eq!(m.diplomacy_trade_status(A, C), new(false, false));
+        m.relationship_mut(C, A).trade_embargo_turns = 0;
+        // No capital on one side: no route either way.
+        m.world.faction_details.get_mut(&B).unwrap().capital = None;
+        assert_eq!(m.diplomacy_trade_status(A, B), new(false, false));
+        assert!(!m.trade_possible(A, B, false) && !m.trade_possible(B, A, false));
+        // At war: no entry.
+        m.world.set_stance(A, C, Stance::War).unwrap();
+        assert_eq!(m.diplomacy_trade_status(A, C), None);
+    }
+
+    /// A held agreement: "trading" unless either side embargoes; `LandTrade` from the first of the other
+    /// side's routes to the player (`0x00B28620`: no sea hop), whatever the scripts say.
+    #[test]
+    fn diplomacy_trade_status_of_a_held_agreement() {
+        use super::super::negotiation::{DiplomacyTradeStatus, NegotiationAction};
+        let held = |can_trade, land| Some(DiplomacyTradeStatus { held: true, can_trade, land });
+        let mut m = trade_map();
+        trading(&mut m, A, B);
+        // B's route to A has a sea hop.
+        assert_eq!(m.diplomacy_trade_status(A, B), held(true, false));
+        m.world.trade_paths.get_mut(&(B, A)).unwrap().insert(0, TradePath { waypoints: vec![wp(12, false), wp(10, false)], ..Default::default() });
+        assert_eq!(m.diplomacy_trade_status(A, B), held(true, true));
+        m.relationship_mut(A, B).diplomacy_options[NegotiationAction::Trade.option()] = 3;
+        assert_eq!(m.diplomacy_trade_status(A, B), held(true, true));
+        m.relationship_mut(A, B).trade_embargo_turns = 1;
+        assert_eq!(m.diplomacy_trade_status(A, B), held(false, true));
+        // `0x00C1A7D0` with cancel: the held agreement; a new one is not possible while held.
+        assert!(m.trade_possible(A, B, true) && !m.trade_possible(A, B, false));
+        m.world.trade_paths.remove(&(B, A));
+        assert_eq!(m.diplomacy_trade_status(A, B), held(false, false));
     }
 }

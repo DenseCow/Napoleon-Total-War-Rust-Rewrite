@@ -40,6 +40,6 @@ pub mod source;
 pub mod state;
 pub mod ui;
 
-pub use host::{AiTurnHook, FireReport, ScriptError, ScriptHost};
+pub use host::{AiTurnHook, FireReport, ScriptError, ScriptHandle, ScriptHost};
 pub use source::{ScriptFile, ScriptSource};
 pub use state::{CustomMission, ScriptContext, ScriptState, ScriptValue, TimeTrigger};

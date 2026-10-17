@@ -18,7 +18,7 @@ use ntw_sim::campaign::{CampaignModel, CharacterId, CharacterKind, FactionId, Re
 
 use super::CampaignStart;
 use super::camera::{self, CampaignCamera};
-use super::play::{CampaignSim, CharacterMarker, SettlementFlag};
+use super::play::{CampaignSaver, CampaignSim, CharacterMarker, SettlementFlag};
 use crate::GameMode;
 use crate::data::GameData;
 use crate::model_viewer::load_dds;
@@ -291,7 +291,7 @@ pub fn enter(world: &mut World) {
     if start.save.is_some() {
         start.campaign = loaded.info.campaign_key.clone();
         // The state as the save holds it, before the LoadingGame handlers use the live RNGs. The
-        // script RNGs are not saved, so this is the hash `quick_save` logs when it writes one.
+        // script RNGs are not saved, so this is the hash `CampaignSaver::save` logs when it writes one.
         info!("Campaign: save state hash {:016x}", loaded.model.saved_state_hash());
     }
     info!(
@@ -454,12 +454,17 @@ pub fn enter(world: &mut World) {
         info!("Campaign: turn 1 started as {human} ({} script events, {errors} script errors)", started.len());
     }
     let demo = std::env::args().any(|a| a == "--campaign-demo");
-    let mut sim = CampaignSim {
-        host,
+    let saver = CampaignSaver {
+        script: host.handle(),
         campaign: start.campaign.clone(),
         human,
         info: loaded.info,
         rebel_faction: loaded.rebel_faction,
+        pictures: Arc::new(pictures),
+    };
+    let mut sim = CampaignSim {
+        host,
+        saver: std::rc::Rc::new(saver),
         generation: 0,
         selected: None,
         selected_region: None,
@@ -467,7 +472,6 @@ pub fn enter(world: &mut World) {
         moves: Vec::new(),
         last_message: String::new(),
         demo_target: None,
-        pictures: Arc::new(pictures),
     };
     if demo {
         super::demo(&mut sim);

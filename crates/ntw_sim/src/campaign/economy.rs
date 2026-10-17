@@ -36,6 +36,9 @@ pub struct Income {
     pub taxes: i32,
     /// Trade (category 7): the faction's trade routes ([`trade_routes_value`]; see the module docs).
     pub trade: i32,
+    /// Commerce raiding (category 9, `finances_commerce_raiding_income`): what the faction's raids take
+    /// from other factions' trade routes ([`CampaignModel::raid_income`]).
+    pub raiding: i32,
     /// `faction_gdp_other` (or `faction_gdp_other_minor` for `minor` factions; category 11).
     pub other: i32,
     /// Upkeep of every unit the faction owns (a cost, so it is subtracted).
@@ -43,9 +46,9 @@ pub struct Income {
 }
 
 impl Income {
-    /// Everything earned: taxes + trade + other.
+    /// Everything earned: taxes + trade + commerce raiding + other.
     pub fn revenue(&self) -> i32 {
-        self.taxes.wrapping_add(self.trade).wrapping_add(self.other)
+        self.taxes.wrapping_add(self.trade).wrapping_add(self.raiding).wrapping_add(self.other)
     }
 
     /// Revenue − upkeep.
@@ -298,6 +301,15 @@ pub fn trade_route_importers(model: &CampaignModel, faction: FactionId) -> Vec<F
     out
 }
 
+/// Each importer of [`trade_route_importers`] with the pair's routes ([`CampaignModel::trade_routes_of`]),
+/// built once for the income and the home term to share.
+pub type ImporterRoutes = Vec<(FactionId, Option<Vec<super::trade::TradePath>>)>;
+
+/// [`trade_route_importers`] of `faction`, each with its routes ([`ImporterRoutes`]).
+pub fn trade_route_importer_paths(model: &CampaignModel, faction: FactionId) -> ImporterRoutes {
+    trade_route_importers(model, faction).into_iter().map(|b| (b, model.trade_routes_of(faction, b))).collect()
+}
+
 /// The GDP part of a trade route's value (0x00B3F8F0, CONFIRMED):
 /// `trunc(trade_route_value_combined_gdp_proportion × sqrt(GDP_a + GDP_b))`.
 pub fn trade_route_gdp_value(model: &CampaignModel, a: FactionId, b: FactionId) -> i32 {
@@ -319,35 +331,61 @@ pub fn trade_path_gdp_value(model: &CampaignModel, a: FactionId, b: FactionId, p
 
 /// The value of one (exporter, importer) pair's routes this turn: per route (`0x00B15B50`,
 /// CONFIRMED) 0 if blockaded, else its commodity part (the volumes of [`CampaignModel::trade_path_volumes`])
-/// plus the GDP part ([`trade_route_gdp_value`]); plus the pair's accumulated value unless every
-/// route is blockaded. A pair without a loaded route gets one built over the trade network
-/// ([`CampaignModel::build_trade_route`]); without a path it has no route and earns nothing. Without
-/// a loaded network (tests) such a pair counts its GDP part and accumulated value. The resource part is 0 in every shipped file
-/// (not modelled).
+/// plus the GDP part ([`trade_route_gdp_value`]) plus its own accumulated value
+/// ([`TradePath::accumulated`](super::trade::TradePath::accumulated): the recompute copies +0x3C into
+/// +0x38 and adds it to the total +0x28). A pair without a loaded route gets one built over the trade
+/// network ([`CampaignModel::build_trade_route`]); without a path it has no route and earns nothing.
+/// Without a loaded network (tests) such a pair counts its GDP part and its route's accumulated value
+/// ([`World::trade_accumulated`](super::World::trade_accumulated)). The resource part is 0 in every
+/// shipped file (not modelled).
+///
+/// The income reads each route's net value (`GetTradeRouteNetValue` 0x00B79B20, CONFIRMED): the total
+/// less the commerce-raid takes in its list (+0x58..+0x64, {faction, amount} entries), which the
+/// recompute refills each time (`0x00B15B50` → `0x00B61780` → `0x00BA7730` → `0x00B83C30`,
+/// [`CampaignModel::route_raid_takes`]).
 pub fn trade_pair_value(model: &CampaignModel, a: FactionId, b: FactionId) -> i32 {
-    trade_pair_value_with(model, model.trade_split(a).as_ref(), a, b)
+    trade_pair_value_with(model, model.trade_split(a).as_ref(), &model.raid_view(a), a, b, model.trade_routes_of(a, b).as_deref())
+}
+
+/// One international route's total (`0x00B15B50`, CONFIRMED; +0x28): 0 when blockaded, else its
+/// commodity part for `volumes` plus its GDP part ([`trade_path_gdp_value`]) plus its accumulated value.
+pub fn trade_path_value(model: &CampaignModel, a: FactionId, b: FactionId, path: &super::trade::TradePath, volumes: &[u32]) -> i32 {
+    if model.trade_path_blockaded(a, path) {
+        return 0;
+    }
+    model.trade_commodity_value(volumes).saturating_add(trade_path_gdp_value(model, a, b, path)).saturating_add(path.accumulated)
 }
 
 /// The exporter's supply split ([`CampaignModel::trade_split`]): importer → volumes.
 type Split = std::collections::BTreeMap<FactionId, Vec<u32>>;
 
-/// [`trade_pair_value`] with the exporter's supply split given.
-pub fn trade_pair_value_with(model: &CampaignModel, split: Option<&Split>, a: FactionId, b: FactionId) -> i32 {
-    let gdp = trade_route_gdp_value(model, a, b);
-    let acc = model.world.trade_accumulated.get(&(a, b)).copied().unwrap_or(0);
-    match model.trade_routes_of(a, b) {
+/// [`trade_pair_value`] with the exporter's supply split, the raids on its routes
+/// ([`CampaignModel::raid_view`], built once for all its importers) and the pair's routes
+/// ([`CampaignModel::trade_routes_of`]) given.
+pub fn trade_pair_value_with(
+    model: &CampaignModel,
+    split: Option<&Split>,
+    raids: &super::commerce_raid::RaidView<'_>,
+    a: FactionId,
+    b: FactionId,
+    routes: Option<&[super::trade::TradePath]>,
+) -> i32 {
+    match routes {
         None if !model.world.trade_network.is_empty() => 0,
-        None => gdp.saturating_add(acc),
-        Some(paths) => {
-            let mut total = 0i32;
-            let mut open = false;
-            for p in paths.iter().filter(|p| !model.trade_path_blockaded(a, p)) {
-                open = true;
-                let value = model.trade_commodity_value(&model.trade_path_volumes(split, a, b, p));
-                total = total.saturating_add(value).saturating_add(trade_path_gdp_value(model, a, b, p));
-            }
-            if open { total.saturating_add(acc) } else { 0 }
-        }
+        None => trade_route_gdp_value(model, a, b).saturating_add(model.world.trade_accumulated.get(&(a, b)).copied().unwrap_or(0)),
+        Some(paths) => paths
+            .iter()
+            .map(|p| {
+                let volumes = model.trade_path_volumes(split, a, b, p);
+                let value = trade_path_value(model, a, b, p, &volumes);
+                if raids.shares.is_empty() {
+                    return value;
+                }
+                let kind = super::commerce_raid::RouteKind::International { importer: b };
+                let route = super::commerce_raid::OwnedRoute { owner: a, kind, path: std::borrow::Cow::Borrowed(p), volumes };
+                value.saturating_sub(model.route_raid_loss(raids, &route))
+            })
+            .fold(0i32, i32::saturating_add),
     }
 }
 
@@ -358,9 +396,13 @@ pub fn trade_pair_value_with(model: &CampaignModel, split: Option<&Split>, a: Fa
 /// [`CampaignModel::trade_home_value`]).
 pub fn trade_routes_value(model: &CampaignModel, faction: FactionId) -> i32 {
     let split = model.trade_split(faction);
-    let importers = trade_route_importers(model, faction);
-    let home = model.trade_home_value(faction, split.as_ref(), &importers);
-    importers.into_iter().map(|b| trade_pair_value_with(model, split.as_ref(), faction, b)).fold(home, i32::saturating_add)
+    let routes = trade_route_importer_paths(model, faction);
+    let home = model.trade_home_value(faction, split.as_ref(), &routes);
+    let raids = model.raid_view(faction);
+    routes
+        .iter()
+        .map(|(b, paths)| trade_pair_value_with(model, split.as_ref(), &raids, faction, *b, paths.as_deref()))
+        .fold(home, i32::saturating_add)
 }
 
 /// Round end: every open trade route of the faction accumulates
@@ -368,9 +410,8 @@ pub fn trade_routes_value(model: &CampaignModel, faction: FactionId) -> i32 {
 /// with `value` = commodity + resource + GDP part (`AccumulateTradeRouteValue` 0x00B05CC0, CONFIRMED),
 /// over the same routes that earn ([`trade_route_importers`]: a route left after a broken agreement
 /// keeps its GDP part, as `RecomputeAllInternationalTradeRoutes` 0x00BBD870 recomputes every route).
-/// The exe keeps the accumulated value per route (+0x3C) and an erased route (`0x00BAC2A0`) loses it;
-/// the model keeps it per pair (`World::trade_accumulated`), so the route a broken agreement removes
-/// leaves its share with the pair's other routes (PROVISIONAL, BACKLOG).
+/// Each route adds its own share to its own value (+0x3C, [`TradePath::accumulated`](super::trade::TradePath::accumulated));
+/// a pair's built route (no stored route) adds to [`World::trade_accumulated`](super::World::trade_accumulated).
 pub fn accumulate_trade(model: &mut CampaignModel, faction: FactionId) {
     let fx = Effects::compute_for(model, faction);
     accumulate_trade_with(model, &fx, faction);
@@ -380,24 +421,30 @@ pub fn accumulate_trade(model: &mut CampaignModel, faction: FactionId) {
 pub fn accumulate_trade_with(model: &mut CampaignModel, fx: &Effects, faction: FactionId) {
     let growth = fx.faction(faction, "trade_route_all_mod_growth_rate");
     let p = (growth * 0.01 + 1.0) * model.rules.var("trade_route_value_accumulator_proportion", 0.0);
-    let mut adds: Vec<(FactionId, i32)> = Vec::new();
+    // (importer, index of the stored route or None for the pair's built route, share)
+    let mut adds: Vec<(FactionId, Option<usize>, i32)> = Vec::new();
     let split = model.trade_split(faction);
     for b in trade_route_importers(model, faction) {
-        let gdp = trade_route_gdp_value(model, faction, b);
-        let add = match model.trade_routes_of(faction, b) {
-            None if !model.world.trade_network.is_empty() => 0,
-            None => (p * gdp as f32) as i32,
-            Some(paths) => paths
-                .iter()
-                .filter(|path| !model.trade_path_blockaded(faction, path))
-                .map(|path| (p * model.trade_commodity_value(&model.trade_path_volumes(split.as_ref(), faction, b, path)).saturating_add(trade_path_gdp_value(model, faction, b, path)) as f32) as i32)
-                .fold(0i32, i32::saturating_add),
-        };
-        adds.push((b, add));
+        let stored = model.world.trade_paths.get(&(faction, b)).is_some_and(|ps| !ps.is_empty());
+        match model.trade_routes_of(faction, b) {
+            None if !model.world.trade_network.is_empty() => {}
+            None => adds.push((b, None, (p * trade_route_gdp_value(model, faction, b) as f32) as i32)),
+            Some(paths) => {
+                for (i, path) in paths.iter().enumerate().filter(|(_, path)| !model.trade_path_blockaded(faction, path)) {
+                    let value = model.trade_commodity_value(&model.trade_path_volumes(split.as_ref(), faction, b, path)).saturating_add(trade_path_gdp_value(model, faction, b, path));
+                    adds.push((b, stored.then_some(i), (p * value as f32) as i32));
+                }
+            }
+        }
     }
-    for (b, add) in adds {
-        let e = model.world.trade_accumulated.entry((faction, b)).or_insert(0);
-        *e = e.saturating_add(add);
+    for (b, index, add) in adds {
+        let slot = match index {
+            Some(i) => model.world.trade_paths.get_mut(&(faction, b)).and_then(|ps| ps.get_mut(i)).map(|p| &mut p.accumulated),
+            None => Some(model.world.trade_accumulated.entry((faction, b)).or_insert(0)),
+        };
+        if let Some(v) = slot {
+            *v = v.saturating_add(add);
+        }
     }
 }
 
@@ -430,7 +477,8 @@ pub fn faction_income_with_upkeep(model: &CampaignModel, fx: &Effects, faction: 
         model.rules.var("faction_gdp_other", 0.0) as i32
     };
     let trade = trade_routes_value(model, faction);
-    Income { taxes, trade, other, upkeep: upkeep() }
+    let raiding = model.raid_income(faction);
+    Income { taxes, trade, raiding, other, upkeep: upkeep() }
 }
 
 
@@ -689,11 +737,13 @@ pub fn settle_round(model: &mut CampaignModel, faction: FactionId) -> Settlement
     let revenue = income.revenue();
     // The turn's record goes to the history (0x00BABE30); its categories 5..11 are the ranking's
     // Wealth (`0x00BBCC40`). PROVISIONAL: the model's record holds categories 5 (taxes), 7 (trade),
-    // 11 (other), 19 / 20 (land / naval upkeep); 6, 8..10, 18, 21..24 and the one-off groups are
+    // 9 (commerce raiding: `0x00BBE9A0` books group 1 into category 9, CONFIRMED),
+    // 11 (other), 19 / 20 (land / naval upkeep); 6, 8, 10, 18, 21..24 and the one-off groups are
     // not modelled (0).
     let mut record = [0i32; 25];
     record[5] = income.taxes;
     record[7] = income.trade;
+    record[9] = income.raiding;
     record[11] = income.other;
     record[19] = land_upkeep;
     record[20] = naval_upkeep;

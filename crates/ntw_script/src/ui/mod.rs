@@ -16,6 +16,6 @@ mod image;
 pub mod test_support;
 pub mod world;
 
-pub use campaign::{CampaignLink, CampaignRequest, CampaignSelection};
+pub use campaign::{CampaignLink, CampaignRequest, CampaignSaves, CampaignSelection};
 pub use host::{CustomArmy, FrontEndFacts, UiFrame, UiRequest, UiScriptHost};
 pub use world::{NodeId, PointerEvent, RUNTIME_IMAGE_PREFIX, RuntimeImage, UiNode, UiRect, UiWorld};

@@ -608,7 +608,9 @@ mod tests {
         }
     }
 
-    /// Class codes of the exe's enum (`ntw_sim::unit_kind::class_code`).
+    /// Class codes of the exe's enum; ntw_formats cannot depend on ntw_sim, so the
+    /// `ntw_sim::unit_kind` constants (`ARTILLERY_FOOT`, `GENERAL`, `INFANTRY_LINE`) are tested equal in
+    /// `ntw_sim`'s `unit_kind` tests.
     const ARTILLERY_FOOT: u32 = 1;
     const GENERAL: u32 = 12;
     const INFANTRY_LINE: u32 = 18;

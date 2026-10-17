@@ -12,7 +12,7 @@ use ntw_formats::campaign_map::{CampaignMap, GameFiles};
 use ntw_formats::esf::{EsfFile, EsfNode};
 use ntw_formats::pack::Vfs;
 use ntw_sim::campaign::polypath::Mover;
-use ntw_sim::campaign::zoc::{obstacle_record, reach, Owner, ARMY_ZONE, GARRISON_BONUS, NAVY_ZONE};
+use ntw_sim::campaign::zoc::{obstacle_record, obstacle_record_with_zone, reach, Owner, ARMY_ZONE, GARRISON_BONUS, NAVY_ZONE};
 use ntw_sim::campaign::CharacterId;
 
 fn data_dir() -> PathBuf {
@@ -33,8 +33,15 @@ fn saved_obstacle_boxes_match_the_zone_limits() {
     let files = GameFiles { vfs: &vfs };
     let bytes = files.read("campaigns/eur_napoleon/startpos.esf").expect("startpos");
     let esf = EsfFile::from_bytes(&bytes).expect("esf");
-    let loaded = ntw_campaign::read_esf(&esf, &db).expect("load");
+    let mut loaded = ntw_campaign::read_esf(&esf, &db).expect("load");
     let map = CampaignMap::load(&files, &loaded.info.map_key).expect("map");
+    // The stored zones as the load pass floods them (`ntw_sim::campaign::zones`).
+    let terrain = ntw_sim::campaign::Terrain(std::sync::Arc::new(ntw_campaign::pathing::build_grid(&map)));
+    let t0 = std::time::Instant::now();
+    loaded.model.attach_terrain(terrain);
+    let stored = loaded.model.stored_zones().expect("a polygon map").len();
+    eprintln!("load pass: {stored} zones in {:.1} ms", t0.elapsed().as_secs_f64() * 1000.0);
+    let model_pm = loaded.model.terrain.as_ref().and_then(|t| t.0.poly.as_ref()).expect("a polygon map");
     let pf = map.pathfinding.as_ref().expect("pathfinding");
     let a = &pf.areas[0];
     let pm = poly_map(a, &a.grid.expand(), &a.grid.region_sets().expect("regions"));
@@ -44,8 +51,9 @@ fn saved_obstacle_boxes_match_the_zone_limits() {
     let lists = grid.items[0].iter().filter_map(EsfNode::as_record).find(|r| r.name == "OBSTACLE_LISTS").expect("lists");
     let fx = |n: &EsfNode| n.as_int().expect("int") as f32 / 1_048_576.0;
     // (owner) -> (matching boxes with our limits, with the swapped limits, matching zone cell
-    // ranges, total, matching core cell ranges)
-    let mut tally: HashMap<&str, [usize; 5]> = HashMap::new();
+    // ranges, total, matching core cell ranges, matching boxes and zone cell ranges from the
+    // stored zones)
+    let mut tally: HashMap<&str, [usize; 7]> = HashMap::new();
     for item in &lists.record_array("CHARACTER_OBSTACLE").expect("obstacles").items {
         let Some(o) = item.first().and_then(EsfNode::as_record) else { continue };
         let id = item.get(1).and_then(EsfNode::as_int).expect("id") as i32;
@@ -79,8 +87,14 @@ fn saved_obstacle_boxes_match_the_zone_limits() {
         t[2] += usize::from(cells == [i64::from(rec.zone_cells.0), i64::from(rec.zone_cells.1), i64::from(rec.zone_cells.2), i64::from(rec.zone_cells.3)]);
         t[3] += 1;
         t[4] += usize::from(core_cells == [i64::from(rec.core_cells.0), i64::from(rec.core_cells.1), i64::from(rec.core_cells.2), i64::from(rec.core_cells.3)]);
+        if owner != Owner::Agent {
+            let zone = loaded.model.stored_zone(CharacterId(id)).expect("a stored zone").to_vec();
+            let s = obstacle_record_with_zone(model_pm, pos, owner, garrisoned, zone);
+            t[5] += usize::from(s.bbox == saved);
+            t[6] += usize::from(cells == [i64::from(s.zone_cells.0), i64::from(s.zone_cells.1), i64::from(s.zone_cells.2), i64::from(s.zone_cells.3)]);
+        }
     }
-    eprintln!("[box, swapped box, zone cells, total, core cells]: {tally:?}");
+    eprintln!("[box, swapped box, zone cells, total, core cells, stored box, stored zone cells]: {tally:?}");
     let (army, navy) = (tally["army"], tally["navy"]);
     assert!(army[3] > 30 && navy[3] > 10);
     // Our limits reproduce most saved boxes exactly; the swapped ones none.
@@ -92,6 +106,41 @@ fn saved_obstacle_boxes_match_the_zone_limits() {
     for (owner, t) in &tally {
         assert_eq!(t[4], t[3], "{owner}: core cell ranges");
     }
+    // The stored zones (the load pass, each flood cut by those before it) give one army box fewer
+    // than the bare floods (59 against 60 of 87, 2026-10-17), so the save writer keeps the bare
+    // flood (PATHFINDING.md §8).
+    assert!(army[5] + navy[5] >= 59, "{army:?} {navy:?}");
     let agent = tally.get("agent").copied().unwrap_or_default();
     assert_eq!(agent[0], agent[3], "agents: boxes");
+}
+
+/// The faction lists the load pass walks (faction +0x768) hold their characters in `CHARACTER_ARRAY`
+/// order; that order is rising character id in every faction of the start position, so the model's
+/// id order is the list's (`ntw_sim::campaign::zones`).
+#[test]
+fn start_position_characters_are_listed_in_rising_id_order() {
+    let dir = data_dir();
+    if !dir.is_dir() {
+        eprintln!("skipped: no install");
+        return;
+    }
+    let vfs = Vfs::open_install(&dir).expect("vfs");
+    let bytes = GameFiles { vfs: &vfs }.read("campaigns/eur_napoleon/startpos.esf").expect("startpos");
+    let esf = EsfFile::from_bytes(&bytes).expect("esf");
+    let world = esf.root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD").expect("world");
+    let mut factions: Vec<_> = world.record_array("FACTION_ARRAY").into_iter().flat_map(|a| a.records()).collect();
+    factions.extend(world.child("REBEL_FACTION").and_then(|r| r.child("FACTION")));
+    let mut seen = 0;
+    for f in factions {
+        let ids: Vec<i32> = f
+            .record_array("CHARACTER_ARRAY")
+            .into_iter()
+            .flat_map(|a| a.records())
+            .filter(|c| c.name == "CHARACTER")
+            .filter_map(|c| c.get_i32(2))
+            .collect();
+        assert!(ids.windows(2).all(|w| w[0] < w[1]), "{ids:?}");
+        seen += ids.len();
+    }
+    assert!(seen > 100, "{seen} characters");
 }

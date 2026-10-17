@@ -30,6 +30,8 @@
 //! | 4 | construction items keep their kind (`ConstructionItem::kind`: build, repair, demolish) and their active byte (`ConstructionItem::active`, read active from an older save); an older save's repair, stored as a build of the standing level, is converted (`CampaignModel::convert_legacy_repairs`), and a version 1 or 2 save made mid-round gets back the construction step the turn start ran then (see [`read_with_start`]) |
 //! | 5 | trade routes keep their capital port flag (`TradePath::capital_port`); an older save's routes that leave by sea from their exporter's capital get it (see [`read_with_start`]) |
 //! | 6 | the diplomacy manager's treaty-break counts start at 1 (`TREATY_BREAKS_START`, the exe's preset) and the access-abuse counts are kept (`World::access_abuses`); an older save's treaty-break entries, counted from 0, get 1 added, and it has no access-abuse counts (none were kept, read 0) (see [`read_with_start`]) |
+//! | 7 | trade routes keep their own accumulated value (`TradePath::accumulated`, +0x3C); `World::trade_accumulated` holds only the value of a pair's built route (a pair with no stored route). An older save's per-pair value of a pair with stored routes goes to its first route (see [`read_with_start`]) |
+//! | 8 | the commerce raids (`World::commerce_raids`) and the trade network's course they need: each leg's spline ids (`TradeLeg::splines`) and each segment's curves (`TradeSegmentSight::curves`); an older save, with no raids, takes the course from the campaign's start (see [`read_with_start`]) |
 //!
 //! **What is saved.** The whole [`CampaignModel`] except the fields marked `serde(skip)` in
 //! `ntw_sim`: game data rebuilt on load (`rules` from the DB, `terrain` from the map), fields the
@@ -50,7 +52,7 @@ use crate::{CampaignInfo, LoadError, LoadedCampaign};
 /// The first bytes of every save in this format.
 pub const MAGIC: &[u8; 16] = b"NAPOLEONRUST\0SAV";
 /// The format version this build writes and the newest it reads.
-pub const FORMAT_VERSION: u32 = 6;
+pub const FORMAT_VERSION: u32 = 8;
 
 /// Everything a save holds besides its header.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -275,14 +277,27 @@ pub fn read(bytes: &[u8], db: &GameDatabase) -> Result<LoadedCampaign, FormatErr
 ///   entry already reads the preset. The access-abuse counts (+0x18) were not kept (`World::access_abuses`
 ///   reads 0, the exe's preset, as older builds charged every abuse at count 0); the other two counters
 ///   already started at the exe's 0.
+/// * version 6 → 7, with no start: an older save kept one accumulated trade value per (exporter, importer)
+///   pair (`World::trade_accumulated`), the sum of its routes' (+0x3C, `0x00B05CC0`). A pair with stored routes
+///   gets it on its first route (`TradePath::accumulated`): the pair's total is kept, its split over the routes
+///   was not; a pair without one keeps it as its built route's value.
+/// * version 7 → 8: an older save holds no commerce raids (none could be made) and lacks the static course of
+///   the trade network: each leg takes the spline ids of the start's leg between the same nodes
+///   (`TradeLeg::splines`) and each trade segment the curves of the start's segment of the same index
+///   (`TradeSegmentSight::curves`). Without a usable start the load goes on with a warning and no segment can
+///   be raided.
 pub fn read_with_start(bytes: &[u8], db: &GameDatabase, start: impl FnOnce() -> Result<CampaignModel, String>) -> Result<LoadedCampaign, FormatError> {
     let (version, info, data) = read_stored(bytes)?;
     let mut model = data.model;
+    let mut start = (version < FORMAT_VERSION).then(start);
     if version < 3 {
         let fail = |reason: String| FormatError::NeedsStart { found: version, reason };
-        let start = start().map_err(fail)?;
+        let start = start.take().unwrap_or_else(|| Err("no start".into())).map_err(fail)?;
         convert_from_start(version, &mut model, &start).map_err(fail)?;
         give_back_turn_start_construction(&mut model);
+        if version < 8 {
+            copy_trade_course(&mut model, &start);
+        }
     }
     model.world.restricted_units.extend(data.restricted_units);
     crate::attach_rules(&mut model, db, &info.campaign_key);
@@ -300,6 +315,16 @@ pub fn read_with_start(bytes: &[u8], db: &GameDatabase, start: impl FnOnce() -> 
         let n = migrate_treaty_breaks(&mut model);
         log::info!("Own save format version {version}: {n} treaty-break counts counted from 0 moved to the preset start of 1");
     }
+    if version < 7 {
+        let n = migrate_trade_accumulated(&mut model);
+        log::info!("Own save format version {version}: {n} per-pair accumulated trade values moved to the pair's first route");
+    }
+    if let Some(start) = start.take().filter(|_| version < 8) {
+        match start {
+            Ok(start) => copy_trade_course(&mut model, &start),
+            Err(e) => log::warn!("Own save format version {version}: the trade network's course was not restored (no campaign start: {e}); no trade segment can be raided"),
+        }
+    }
     Ok(LoadedCampaign {
         model,
         info,
@@ -307,6 +332,41 @@ pub fn read_with_start(bytes: &[u8], db: &GameDatabase, start: impl FnOnce() -> 
         warnings: Vec::new(),
         script_values: data.script_values,
     })
+}
+
+/// The version 7 → 8 step of [`read_with_start`]: copies the trade network's static course from the campaign's
+/// start (each leg's spline ids by its node pair, each segment's curves by its index); logs how many.
+fn copy_trade_course(model: &mut CampaignModel, start: &CampaignModel) {
+    let key = |a: u32, b: u32| (a.min(b), a.max(b));
+    let splines: std::collections::BTreeMap<(u32, u32), &Vec<u32>> = start.world.trade_network.iter().map(|l| (key(l.from, l.to), &l.splines)).collect();
+    let w = &mut model.world;
+    let mut legs = 0;
+    for l in &mut w.trade_network {
+        if let Some(s) = splines.get(&key(l.from, l.to)) {
+            l.splines.clone_from(s);
+            legs += 1;
+        }
+    }
+    let mut segments = 0;
+    for (s, from) in w.trade_sight.iter_mut().zip(&start.world.trade_sight) {
+        s.curves.clone_from(&from.curves);
+        segments += 1;
+    }
+    log::info!("Own save format version < 8: the course of {legs} of {} trade legs and {segments} of {} trade segments taken from the campaign's start", w.trade_network.len(), w.trade_sight.len());
+}
+
+/// The version 6 → 7 step of [`read_with_start`]: moves the per-pair accumulated trade value of each pair
+/// with stored routes onto its first route; returns how many.
+fn migrate_trade_accumulated(model: &mut CampaignModel) -> usize {
+    let w = &mut model.world;
+    let mut n = 0;
+    w.trade_accumulated.retain(|pair, value| {
+        let Some(first) = w.trade_paths.get_mut(pair).and_then(|ps| ps.first_mut()) else { return true };
+        first.accumulated = first.accumulated.saturating_add(*value);
+        n += 1;
+        false
+    });
+    n
 }
 
 /// The version 5 → 6 step of [`read_with_start`]: adds the preset start [`TREATY_BREAKS_START`](ntw_sim::campaign::TREATY_BREAKS_START)

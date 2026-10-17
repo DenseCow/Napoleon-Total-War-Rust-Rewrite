@@ -53,6 +53,17 @@ pub struct CampaignFeatures {
     /// Looting turns the region's homeland faction against the looter (`0x00B541E0` → `0x00B544F0`, CONFIRMED
     /// in `spa_napoleon`; applied when a capture is resolved, [`super::capture`]). `None`: no change.
     pub loot_resentment: Option<LootResentment>,
+    /// The default save name (`CampaignUI.DefaultSaveName`) starts with the campaign's on-screen name
+    /// (loc `campaigns_onscreen_name_<campaign key>`, when that string exists) instead of the human
+    /// faction's display name. CONFIRMED: `BuildDefaultSaveName` (`0x009D5400`) compares the campaign
+    /// key with `egy_napoleon`, `ita_napoleon`, `tut_napoleon` and `eur_napoleon` and uses the
+    /// on-screen name for those four only (set by `ntw_campaign::features::original`).
+    pub save_name_uses_campaign_name: bool,
+    /// Faction keys the diplomacy screen's faction list leaves out. CONFIRMED: the list builder
+    /// (`0x009F2EA0`, at `0x009F2F77`..`0x009F2FA3`) skips `britain` when the campaign key (campaign
+    /// +0xD9C → +0x30, the key `CampaignIsEpisodic` `0x009E0570` reads) equals `episodic_3`, an Empire
+    /// campaign key no Napoleon campaign uses (set by `ntw_campaign::features::original`).
+    pub diplomacy_hidden_factions: Vec<String>,
 }
 
 impl Default for CampaignFeatures {
@@ -69,6 +80,8 @@ impl Default for CampaignFeatures {
             ai_recruitment_points: Vec::new(),
             date_step: None,
             loot_resentment: None,
+            save_name_uses_campaign_name: false,
+            diplomacy_hidden_factions: Vec::new(),
         }
     }
 }

@@ -1,6 +1,7 @@
 //! The region-transfer expulsion (`0x008D9DC0`; analysis/fidelity/CAMPAIGN_FIDELITY.md, director
 //! section "Transfer and the old owner's forces"): who leaves a region at an owner change, a deal and
-//! the end of a protectorate tie, and where they go.
+//! the end of a protectorate tie, the loss of military access ("Access-loss expulsions"), and where
+//! they go.
 
 use super::*;
 use crate::campaign::expulsion::{expel_faction_from_region, ExpelledForce};
@@ -158,7 +159,7 @@ fn terrain_model(with_13: bool) -> CampaignModel {
         grid.region[i] = region;
     }
     grid.harbours.push(crate::campaign::embark::Harbour { port: (9.5, 1.5), dock: (12.5, 1.5), outline: Vec::new() });
-    m.terrain = Some(crate::campaign::world::Terrain(Arc::new(grid)));
+    m.attach_terrain(crate::campaign::world::Terrain(Arc::new(grid)));
     m.world.regions.get_mut(&RegionId(12)).unwrap().slots.push(RegionSlot {
         key: "port:test_region_12".into(),
         slot_type: "port".into(),
@@ -290,4 +291,138 @@ fn a_garrison_that_may_stay_still_leaves_the_settlement() {
     assert_eq!(at(&m, 100), fpos(7.5, 1.5));
     assert_eq!(m.world.characters[&CharacterId(100)].garrisoned_in, None);
     assert_eq!(m.world.regions[&RegionId(12)].garrison, None);
+}
+
+/// `owner`'s record towards `target` as a war of `enemy` left it (`0x00B0CCE0`): access -1, and one
+/// `allied_in_war_against` item saving `saved` access turns.
+fn suspend_access(m: &mut CampaignModel, owner: FactionId, target: FactionId, enemy: FactionId, saved: i32) {
+    let r = m.relationship_mut(owner, target);
+    r.military_access_turns = -1;
+    r.allied_in_war_against = vec![crate::campaign::details::AlliedWar { enemy, saved_access_turns: saved }];
+}
+
+/// Cancelling military access (`0x00B67BD0`) sends the target's forces out of each of the giver's
+/// regions. The war declaration's abuse cancel (`0x00B0DAF0`) comes after the stance turned to war,
+/// so there they may stay.
+#[test]
+fn cancelled_access_expels_the_target_but_not_at_war() {
+    let base = || {
+        let mut m = spread_model();
+        add_army(&mut m, 103, C, pos(205, 0));
+        m.relationship_mut(A, C).military_access_turns = 5;
+        m
+    };
+    let mut m = base();
+    m.apply_diplomatic_action(A, C, crate::campaign::treaties::DiplomaticAction::CancelMilitaryAccess).unwrap();
+    assert_eq!(at(&m, 103), pos(400, 0), "out of A's region 12 to C's own 13");
+
+    let mut m = base();
+    m.declare_war_rules(C, A).unwrap();
+    assert_eq!(m.world.relationships[&(A, C)].military_access_turns, 0, "the abuse cancelled it");
+    assert_eq!(at(&m, 103), pos(205, 0), "at war: may stay");
+}
+
+/// Timed access running out at the giver's round end (`0x00B29170`) sends the target out.
+#[test]
+fn timed_access_running_out_expels_the_target() {
+    let mut m = spread_model();
+    add_army(&mut m, 103, C, pos(205, 0));
+    m.relationship_mut(A, C).military_access_turns = 2;
+    m.diplomacy_round_end(A);
+    assert_eq!(at(&m, 103), pos(205, 0), "one turn left");
+    m.diplomacy_round_end(A);
+    assert_eq!(m.world.relationships[&(A, C)].military_access_turns, 0);
+    assert_eq!(at(&m, 103), pos(400, 0));
+
+    // Indefinite access never runs out.
+    let mut m = spread_model();
+    add_army(&mut m, 103, C, pos(205, 0));
+    m.relationship_mut(A, C).military_access_turns = -1;
+    m.diplomacy_round_end(A);
+    assert_eq!(at(&m, 103), pos(205, 0));
+}
+
+/// Breaking an alliance (`0x00B13A30` on the breaker's record, `0x00B0CA20` on the other's): a side
+/// whose access the alliance had suspended for a war, and that gets none back, leaves the other's
+/// regions; access given back lets it stay; the war declaration's break (its war flag) moves no one,
+/// not even out of a garrison.
+#[test]
+fn a_broken_alliance_expels_a_side_given_back_no_access() {
+    let base = |saved| {
+        let mut m = spread_model();
+        add_army(&mut m, 103, C, pos(205, 0));
+        m.form_alliance(A, C).unwrap();
+        suspend_access(&mut m, A, C, B, saved);
+        m
+    };
+    let mut m = base(0);
+    m.break_alliance(A, C).unwrap();
+    assert_eq!(at(&m, 103), pos(400, 0), "A breaks: its own record");
+    let mut m = base(0);
+    m.break_alliance(C, A).unwrap();
+    assert_eq!(at(&m, 103), pos(400, 0), "C breaks: A's record is the other's");
+
+    let mut m = base(3);
+    m.break_alliance(A, C).unwrap();
+    assert_eq!(m.world.relationships[&(A, C)].military_access_turns, 3);
+    assert_eq!(at(&m, 103), pos(205, 0), "access given back");
+
+    let mut m = base(0);
+    let army = ForceId(103 + 900);
+    garrison(&mut m, army, 12);
+    m.declare_war_rules(A, C).unwrap();
+    assert_eq!(at(&m, 103), pos(205, 0));
+    assert_eq!(m.world.regions[&RegionId(12)].garrison, Some(army), "not expelled at all");
+}
+
+/// Peace (`0x00B0D0C0` from `0x00B262C0`): the access the proposer's alliances suspended against the
+/// enemy comes back, and a side given back none leaves the other's regions. Only the proposer's
+/// alliances: the loop runs on its manager alone.
+#[test]
+fn peace_gives_back_the_proposers_allies_access_only() {
+    let base = || {
+        let mut m = spread_model();
+        add_army(&mut m, 104, A, pos(405, 0));
+        m.world.declare_war(A, B).unwrap();
+        m.form_alliance(A, C).unwrap();
+        suspend_access(&mut m, C, A, B, 0);
+        m
+    };
+    let mut m = base();
+    m.make_peace_rules(A, B).unwrap();
+    assert!(m.world.relationships[&(C, A)].allied_in_war_against.is_empty());
+    assert_eq!(m.world.relationships[&(C, A)].military_access_turns, 0);
+    assert_eq!(at(&m, 104), pos(200, 0), "out of C's region 13 to A's nearest, 12");
+
+    let mut m = base();
+    m.make_peace_rules(B, A).unwrap();
+    assert_eq!(m.world.relationships[&(C, A)].allied_in_war_against.len(), 1, "B has no ally");
+    assert_eq!(at(&m, 104), pos(405, 0));
+}
+
+/// A patron breaking with its protectorate ends the tie first (`0x00B0CA20` → `0x00B64B10`): the
+/// patron leaves the protectorate's regions, unless the break comes from its war declaration (the
+/// war flag is the tie's skip flag). The protectorate breaking away moves no one: neither record
+/// runs the tie's end.
+#[test]
+fn a_patron_breaking_with_its_protectorate_leaves_its_regions() {
+    let base = || {
+        let mut m = spread_model();
+        add_army(&mut m, 104, A, pos(405, 0));
+        m.make_protectorate(C, A).unwrap();
+        m
+    };
+    let mut m = base();
+    m.break_alliance(A, C).unwrap();
+    assert_eq!(m.world.stance(C, A), Stance::Neutral);
+    assert_eq!(at(&m, 104), pos(200, 0));
+
+    let mut m = base();
+    m.declare_war_rules(A, C).unwrap();
+    assert_eq!(at(&m, 104), pos(405, 0));
+
+    let mut m = base();
+    m.break_alliance(C, A).unwrap();
+    assert_eq!(m.world.stance(C, A), Stance::Neutral);
+    assert_eq!(at(&m, 104), pos(405, 0));
 }

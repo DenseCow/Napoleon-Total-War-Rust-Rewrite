@@ -79,6 +79,8 @@ impl Plugin for CampaignPlugin {
                 (
                     hud::harness,
                     hud::pointer,
+                    hud::keys,
+                    hud::requests,
                     play::input,
                     camera::control,
                     play::sync_markers,

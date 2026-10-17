@@ -26,6 +26,53 @@ is ready: `analysis/fidelity/debugger/SITTING_SHEET.md`. Steps in order:
 
 Side-by-side looks (no debugger): the first full side-by-side run, once step 3 is done.
 
+## 2026-10-17 (night mode)
+
+### Usage
+
+- Week at 30% at the start (03:09). Blocks raised from 12 to 16 points (your request) so Sat–Tue use the ~70 points
+  left before the Wed 00:00 reset. Tonight's stop moved to 45.5% at your request (this block only; later blocks keep 16).
+
+### Needs you
+
+- Nothing new. The debugger sitting sheet above is still open.
+
+### Done tonight
+
+- Usage blocks raised to 16 points (`tools/usage_budget.ps1` line 22).
+- **Battle morale knows who is attacking a unit and from where** (`9e0f975c`): the attacker list and front/flank/rear direction now come from the exe's own rules; three functions written up in Ghidra. Stays INFERRED until sitting sheet step 3. Visible in a battle as units losing more morale when hit in the flank or rear.
+- **Diplomacy save reader/writer written up in Ghidra** (polish36 merge, `af69aa91` area): notes only, nothing visible in game.
+- **Backstab penalty goes to the declarer's subculture** (`1624daae`): when a faction breaks a treaty by declaring war, factions of the declarer's own subculture now resent it, as in the exe (ours used the victim's). Visible in a campaign: break an alliance and check the diplomacy attitudes.
+- **Battle AI and battle model share one attack-direction rule** (polish37 merge): the AI used its own copy; now it calls the model's. Nothing visible except an attacker standing on top of a unit now counts as frontal.
+- **Battle movement class from the unit's category alone** (cavclass merge): as in the exe; elephants and ships get no gait modifier, a dismounted fixed unit walks as infantry. All 328 vanilla land units keep their old class (install test), so nothing changes in vanilla play.
+- **Trade income kept per route, as in the exe** (routeacc merge): each trade route keeps its own running total instead of one per faction pair; our saves move to version 7 and older ones load without loss. Visible in a campaign: the trade overlay's per-route values. Commerce raiding is a new open item.
+- **Ghidra write-ups for three battle squad-summary functions** (polish38 merge, 1aad88c1): notes and names in the exe project only; nothing changes in play.
+- **Battle movement class reads the shared unit-class codes** (polish39 merge, dcc2f5c0): code clean-up and a corrected note on elephants; nothing changes in play.
+- **Turn passes over factions out of the game** (deadqueue merge, aaa5c85d): as in the exe (`0x00948CF0`), a faction out of the game gets no turn, and director transfers queued for it wait until it re-emerges. Ending the turn with every human faction destroyed no longer hangs; the exe ends the campaign there, which is now running as its own item (campaignover).
+- **Alliance break and lost-access messages** (allybreak merge, 960ecd7f): breaking an alliance between two major factions messages every major human, and cancelling military access messages the target, as in the exe. Our map shows no message feed yet (open item), so nothing is visible in play.
+- **Unit class codes live in one place** (polish40 merge, ed82a6b0): the battle AI reads its class numbers from the shared unit-class module; code clean-up, nothing changes in play.
+- **Campaign save naming and save/load shortcuts** (savename merge, f5046aa0): saves get the original's default names, the save panel asks before overwriting (our saves and the original's), CTRL+S / CTRL+L / ESC work, typing a name no longer moves the map, and scripts can switch saving off (`disable_saving_game`). Visible in a campaign: open the save panel from the menu and save. Left open: one untraced part of when saving is allowed.
+- **Trade: routes built once, home term needs a domestic entry** (polish41 merge, 3a928db3): faster trade sums, and as in the exe (`0x00BB3490`) a faction with no domestic trade entry gets no home-trade term. In vanilla only one faction has no such entry (`spa_france`), so its trade income can differ slightly from before.
+- **Military access loss pushes armies out** (accessloss merge, b6a5639b): when a war, a broken treaty or peace ends military access, the faction's armies are moved out of the other faction's lands, as the exe does (`0x00B29170`, `0x00B67BD0`, `0x00B0CA20`, `0x00B13A30`, `0x00B0D0C0`). Logic only, covered by tests; the order regions are walked in is still a stand-in.
+- **Campaign ends when the player is destroyed** (campaignover merge, b5af9b4f): destroying the human faction sets the campaign-over flag (campaign +0xFE9, saved) and the turn loop stops, as the exe does (`0x008F419E`); the AI's remaining orders that frame stop quietly. Logic only, covered by tests. The defeat screen is not built yet, so the map just stops; that is a BACKLOG line.
+- **Battle soldier notes corrected** (polish42 merge, f8a4abb1): Ghidra notes on the squad summary records; the soldier's squad-box radius is its own size at set-up but the exe grows it for objects with attached entities (`0x00607540`), now tagged and listed for tracing. Notes and comments only, no game change.
+- **Small clean-ups** (polish43 merge, 3e733313): the access-restore rule now lives once in treaties.rs; a save log message and a save test made accurate. No game change.
+- **Trade offers respect scripted diplomacy permissions** (dipperm merge, d3e0e5d7): the diplomacy screen's trade check now reads the script-set permissions as the exe does (`0x009F33E1` / `0x00C1A7D0`), and the relationship line names "protectorate" only for the player's own protectorates. The AI's own checks are traced but not ported yet (BACKLOG). Quick look: start a campaign, open Diplomacy, pick a faction; trade shows as allowed or blocked.
+- **Turn order fixed** (turnorder merge, bf914e31): the rebels now take their turn after every listed faction, and round-start events skip factions that are out of the game, as `0x0096C050` / `0x00948CF0` do. Covered by tests; no visible change beyond end-turn order.
+- **Ghidra names** (polish44 merge, e979aaf2): the military-access turn counter and the region-expulsion function are documented in Ghidra and the notes. No game change.
+- **Small clean-ups** (polish45 merge, 206a3ad9): the access give-back rule and the trade-held check each live in one place now; three notes worded exactly. No game change.
+- **Diplomacy screen stances fixed** (dipstance merge, e646fc13): the patron / protectorate lists were swapped and are now as in the original (`0x009B2690`), the military-access mark sits on the protectorate, and the treaty list gains the "protectorate of …" line (`0x00B750D0`). Quick look: in a campaign with a protectorate, open Diplomacy and select the protector and the protectorate.
+- **Ghidra write-ups** (polish46 merge, cc74edfe): the path-grid refresh calls after an access change, the faction registry and three AI/diplomacy functions are named and typed in Ghidra (scores 72–97); notes only. No game change.
+- **Worker self-check tightened** (polish47 merge, ccd9ad42): `tools/self_check.sh` now also checks Ghidra functions the notes name without an address, fails on every lookup error, and a rename by another worker is excused only by an explicit, printed `--not-mine 0xADDR`. Tooling only.
+- dippermai merged (287e46a0): the negotiation panel's trade button explains why a trade agreement can or can't be made (routes left, embargo, no route), from the game's own text; see it on the campaign diplomacy screen → negotiate → hover Trade agreement.
+- **Campaign date text from the game's strings** (polish48 merge, 028e071a): the HUD date ("Early January 1805") and the default save name now use the original's round_id text; see it on the campaign map's top bar.
+- **Diplomacy screen follow-ups** (polish49 merge, 6b48c3a3): a patron missing from the world is logged once and left out instead of a blank name; Ghidra write-ups for the diplomacy stance functions. Nothing to see in game.
+- **Round start like the original** (roundstart merge, 52b05225): at the start of each round only factions still in the game get their regions refreshed (rebels skipped), rebel relationships are no longer reset, and trade prices update at round start too. Logic only, covered by tests.
+- **War declarations: refusing allies** (polish50 merge, 871e04fa): an AI ally of the attacker that refuses the call to war now keeps its alliance, as the original does; notes on peace and war-declaration functions corrected. Logic only.
+- **Commerce raids on trade routes** (traderaid merge, 5248efa3): a fleet raiding a sea trade route cuts that route's income each turn (three-term formula 0x00B60A40); the raids pass to the next commander when the admiral dies or escapes, and the round start checks them too. See it: park a fleet on an enemy sea trade route in a war, end the turn, and the enemy's trade income drops.
+- **Diplomacy screen empty cases** (dipempty merge, ebe286c8): the diplomacy details, treaties and access-turns calls now return nothing for an unknown or empty faction key (the rebels never match) instead of the player's own data, as in the original. Logic only, covered by tests.
+- **Zones of control around walls** (zocflood merge, 6fe8905d): an army's zone of control now spreads around obstacles the way the original's does, is built once at map load, and is rebuilt only when something changes it (a move, a death, war or peace, a region changing hands). See it: move an army next to an enemy force beside a river or a city wall and compare where its movement stops with the original.
+
 ## 2026-10-15 (night mode)
 
 ### Needs you

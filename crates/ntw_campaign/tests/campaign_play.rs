@@ -62,7 +62,7 @@ fn fixture() -> Option<&'static Fixture> {
 fn model(f: &Fixture) -> CampaignModel {
     let mut l = f.loaded.clone();
     assert!(l.set_human("france"));
-    l.model.terrain = Some(f.terrain.clone());
+    l.model.attach_terrain(f.terrain.clone());
     l.model
 }
 
@@ -113,7 +113,10 @@ fn turn_loop_from_the_startpos() {
     assert_eq!(m.calendar.turns_elapsed, 5);
     assert_eq!(m.calendar.date.year, 1805);
     assert_eq!(m.calendar.date.month, 2); // Early Jan + 5 half-months = Late Mar
-    assert_eq!(seen_end, 5 * m.world.factions.len());
+    // Only the factions in the game play a turn (0x00948CF0 passes over the rest; the rebels play).
+    let playing = m.world.factions.keys().filter(|&&f| m.takes_turns(f)).count();
+    assert!(playing < m.world.factions.len());
+    assert_eq!(seen_end, 5 * playing);
     // France was paid five times, once per round end.
     assert_eq!(m.world.factions[&france].treasury, expected);
 
@@ -324,7 +327,7 @@ fn save_round_trip() {
     assert_eq!(back.info.kind, ntw_campaign::FileKind::Save);
     assert_eq!(back.info.header.turn_number, m.calendar.turn_number());
     let mut r = back.model;
-    r.terrain = m.terrain.clone();
+    r.attach_terrain(m.terrain.clone().expect("a map"));
     assert_eq!(r.calendar, m.calendar);
     // Reading the save seeds every portrait deck from one campaign-RNG step, as the original's
     // loader does (CHARACTERS_FIDELITY.md §14).
@@ -388,7 +391,8 @@ fn paths_bend_round_enemy_zones() {
             let free = pm.find_path(a, g, Mover::Land, &vec![0.5; pm.region_sets.len()]);
             let free_near = free.map_or(f32::INFINITY, |p| p.points.iter().map(|q| ((q.0 - e.0).powi(2) + (q.1 - e.1).powi(2)).sqrt()).fold(f32::INFINITY, f32::min));
             println!("army {me:?} -> past enemy at {d:.0} units: closest {near:.1} (without zones {free_near:.1}), {} points, {ms:.1} ms", plan.path.points.len());
-            let zone = ntw_sim::campaign::zoc::reach(pm, e, Mover::Land, ntw_sim::campaign::zoc::ARMY_ZONE);
+            // The enemy's stored zone (flooded at load against those before it, PATHFINDING.md §8).
+            let zone = m.stored_zone(enemy.commander.unwrap()).expect("a stored zone").to_vec();
             for q in &plan.path.points[1..] {
                 let poly = pm.polygon_at(q.0, q.1).expect("on the map") as u32;
                 assert!(zone.binary_search(&poly).is_err(), "the path enters the enemy's zone at {q:?} ({near:.1} from it)");

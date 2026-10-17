@@ -65,10 +65,11 @@ pub struct MapData {
 
 impl MapData {
     /// Puts the map's parts of the campaign state into `model`: the movement grid, the region
-    /// neighbours and the trade nodes' regions (CAMPAIGN_FIDELITY.md §Trade). Called on every load,
-    /// whatever the model came from.
+    /// neighbours and the trade nodes' regions (CAMPAIGN_FIDELITY.md §Trade), and floods the stored
+    /// zones of control (the load pass, right after the world is read: `ntw_sim::campaign::zones`).
+    /// Called on every load, whatever the model came from.
     pub fn attach(&self, model: &mut CampaignModel) {
-        model.terrain = Some(self.terrain.clone());
+        model.attach_terrain(self.terrain.clone());
         crate::trade::attach_map(model, &self.display.regions);
     }
 }

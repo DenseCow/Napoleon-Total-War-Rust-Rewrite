@@ -5,7 +5,9 @@ use ntw_sim::campaign::{
     CampaignModel, CampaignUnit, Character, CharacterId, CharacterKind, Faction, FactionAiKeys, FactionId, ForceId, GovernmentType,
     MilitaryForce, PendingBattle, Region, RegionId, RegionSlot, Settlement, Stance, UnitId, World,
 };
-use ntw_sim::campaign::trade::{TradePath, TradeWaypoint};
+use ntw_sim::campaign::commerce_raid::CommerceRaid;
+use ntw_sim::campaign::trade::{TradeLeg, TradePath, TradeWaypoint};
+use ntw_sim::campaign::visibility::TradeSegmentSight;
 use ntw_sim::fixed::Fixed20;
 use ntw_sim::rng::CaRng;
 
@@ -88,17 +90,23 @@ pub(crate) fn made_up_model() -> CampaignModel {
     w.forces.insert(ForceId(2), MilitaryForce { id: ForceId(2), faction: A, commander: Some(CharacterId(101)), units: vec![unit(50)], is_navy: true });
     w.forces.insert(ForceId(3), MilitaryForce { id: ForceId(3), faction: B, commander: Some(CharacterId(102)), units: vec![unit(60)], is_navy: false });
     w.embarked.insert(ForceId(1), ForceId(2));
-    w.trade_accumulated.insert((A, B), 4321);
+    // B's route to A is built in play (no stored route): its accumulated value is kept per pair.
+    w.trade_accumulated.insert((B, A), 4321);
     // A route leaving by sea from A's capital (a capital port route) and a land route.
     w.faction_details.entry(A).or_default().capital = Some(RegionId(1));
     let hop = |region: u32, sea: bool| TradeWaypoint { region: RegionId(region), from: 3, to: 4, sea, from_pos: None, to_pos: None };
     w.trade_paths.insert(
         (A, B),
         vec![
-            TradePath { waypoints: vec![hop(1, true), hop(2, false)], capital_port: true, volumes: vec![5, 0] },
-            TradePath { waypoints: vec![hop(1, false), hop(2, false)], capital_port: false, volumes: vec![1, 2] },
+            TradePath { waypoints: vec![hop(1, true), hop(2, false)], capital_port: true, volumes: vec![5, 0], accumulated: 4000 },
+            TradePath { waypoints: vec![hop(1, false), hop(2, false)], capital_port: false, volumes: vec![1, 2], accumulated: 321 },
         ],
     );
+    // A trade leg along segments 0 and 1, segment 0's course, and general 100 raiding it for B.
+    w.trade_network = vec![TradeLeg { from: 3, to: 4, length: 2.5, splines: vec![0, 3] }];
+    let course = [(1.0, 2.0), (3.0, 2.0), (5.0, 2.5), (7.0, 3.0)];
+    w.trade_sight = vec![TradeSegmentSight { cells: vec![(1, 2)], domestic: vec![A], international: Vec::new(), curves: vec![course] }, TradeSegmentSight::default()];
+    w.commerce_raids = vec![CommerceRaid { character: CharacterId(100), segment: 0, target: B }];
     w.ai_keys.insert(A, FactionAiKeys { manager: "made_up_manager".into(), personality: "made_up_personality".into(), extra: ["default".into(), "x".into()] });
     w.region_base_values.insert(RegionId(2), 15_025);
     w.deal_regions_received.insert(A, 3);
@@ -183,7 +191,7 @@ fn mod_state_round_trips() {
         model.mod_state.set(k, v);
     }
     let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
-    let (_, mut back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
+    let (_, back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
     assert_eq!(back.model.mod_state, data.model.mod_state);
     assert_eq!(back.model.mod_state.len(), values.len());
     assert_eq!(back.model.state_hash(), data.model.state_hash());
@@ -222,7 +230,7 @@ fn director_victory_regions_and_ai_areas_round_trip() {
         AiArea { key: "made_up_region_2".into(), links: vec![0, 0] },
     ];
     let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
-    let (_, mut back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
+    let (_, back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
     assert_eq!(back.model.director, data.model.director);
     assert_eq!(back.model.world.victory_regions, data.model.world.victory_regions);
     assert_eq!(back.model.world.ai_areas, data.model.world.ai_areas);
@@ -242,7 +250,7 @@ fn fields_the_original_does_not_save_are_not_saved() {
     model.world.sabotaged.insert(ForceId(3));
     model.world.agents_acted.insert(CharacterId(100));
     let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
-    let (_, mut back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
+    let (_, back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
     assert!(back.model.world.sabotaged.is_empty() && back.model.world.agents_acted.is_empty());
     assert_eq!(back.model.world.factions, data.model.world.factions);
 }
@@ -298,26 +306,32 @@ pub(crate) fn as_version_1(bytes: &[u8]) -> Vec<u8> {
 
 /// `bytes` (a save of the current format) as a save of format `version` wrote it: that version word,
 /// without the region fields later versions added (2: `unit_resources`, 3: `road_holder` and
-/// `fortification_holder`), the route field (5: `capital_port`) and the world's access-abuse counts (6: `access_abuses`).
+/// `fortification_holder`), the route fields (5: `capital_port`, 7: `accumulated`), the world's access-abuse counts (6: `access_abuses`)
+/// and the commerce raids with the trade network's course (8: `commerce_raids`, `splines`, `curves`).
 /// A list or map value ends at its first `]` / `}` (the made-up keys hold none), an
-/// `Option` of a faction id at its first `,`.
+/// `Option` of a faction id at its first `,`, the route's last field (`,accumulated:`; the leading comma
+/// keeps `trade_accumulated` out) at its struct's `)`, which is kept.
 pub(crate) fn as_version(bytes: &[u8], version: u32) -> Vec<u8> {
     let (_, header, body) = sections(bytes).expect("sections");
     let mut text = String::new();
     flate2::read::ZlibDecoder::new(body).read_to_string(&mut text).expect("inflate");
-    let added: [(u32, &str, char); 5] = [
+    let added: [(u32, &str, char); 9] = [
         (2, "unit_resources:[", ']'),
         (3, "road_holder:", ','),
         (3, "fortification_holder:", ','),
         (5, "capital_port:", ','),
         (6, "access_abuses:{", '}'),
+        (7, ",accumulated:", ')'),
+        (8, "commerce_raids:[", ']'),
+        (8, "splines:[", ']'),
+        (8, "curves:[", ']'),
     ];
     for (_, field, end_char) in added.into_iter().filter(|&(v, ..)| v > version) {
         let mut old = String::with_capacity(text.len());
         let mut rest = text.as_str();
         while let Some(at) = rest.find(field) {
             old.push_str(&rest[..at]);
-            let end = at + rest[at..].find(end_char).expect("value end") + 1;
+            let end = at + rest[at..].find(end_char).expect("value end") + usize::from(end_char != ')');
             rest = if matches!(end_char, ']' | '}') { rest[end..].strip_prefix(',').unwrap_or(&rest[end..]) } else { &rest[end..] };
         }
         old.push_str(rest);
@@ -558,4 +572,73 @@ fn a_route_left_after_a_broken_agreement_still_earns_after_a_load() {
     assert_eq!(back.model.world.trade_paths, data.model.world.trade_paths);
     assert_eq!(economy::trade_route_importers(&back.model, A), vec![B]);
     assert_eq!(economy::trade_routes_value(&back.model, A), value);
+}
+
+/// routeacc: format version 7 keeps each trade route's accumulated value (`TradePath::accumulated`, +0x3C,
+/// `0x00B05CC0`) and the pair-level value only for a pair's built route. A version-6 save kept one value
+/// per pair: a pair with stored routes gets it on its first route, a pair without keeps it.
+#[test]
+fn trade_routes_keep_their_own_accumulated_value_and_a_version_6_save_moves_its_pair_value() {
+    let db = ntw_data::GameDatabase::test_fixture();
+    let load = |model: &CampaignModel, version: u32| {
+        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+        let bytes = as_version(&write(&info(), &data).expect("write"), version);
+        read_with_start(&bytes, &db, || Ok(model.clone())).expect("read").model.world
+    };
+    let model = made_up_model();
+    let now = load(&model, FORMAT_VERSION);
+    assert_eq!(now.trade_paths[&(A, B)].iter().map(|p| p.accumulated).collect::<Vec<_>>(), [4000, 321]);
+    assert_eq!(now.trade_accumulated, BTreeMap::from([((B, A), 4321)]));
+    // A version-6 save: the pair's total and no per-route field (`as_version` strips `accumulated:`, so
+    // the routes' 4000 / 321 are not in the bytes and read 0).
+    let mut old = model.clone();
+    old.world.trade_accumulated.insert((A, B), 4321);
+    let v6 = load(&old, 6);
+    assert_eq!(v6.trade_paths[&(A, B)].iter().map(|p| p.accumulated).collect::<Vec<_>>(), [4321, 0]);
+    assert_eq!(v6.trade_accumulated, BTreeMap::from([((B, A), 4321)]), "a pair without a stored route keeps its value");
+}
+
+/// traderaid: format version 8 keeps the commerce raids and the trade network's course they need (each leg's
+/// spline ids, each segment's curves). A version-7 save holds no raids and takes the course from the
+/// campaign's start; without a start it loads with a warning and no course.
+#[test]
+fn commerce_raids_round_trip_and_a_version_7_save_takes_the_trade_course_from_the_start() {
+    let db = ntw_data::GameDatabase::test_fixture();
+    let model = made_up_model();
+    let bytes = |version: u32| {
+        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+        as_version(&write(&info(), &data).expect("write"), version)
+    };
+    let now = read_with_start(&bytes(FORMAT_VERSION), &db, || panic!("start read for a current save")).expect("read").model.world;
+    assert_eq!(now.commerce_raids, model.world.commerce_raids);
+    assert_eq!(now.trade_network, model.world.trade_network);
+    assert_eq!(now.trade_sight, model.world.trade_sight);
+    let old = read_with_start(&bytes(7), &db, || Ok(model.clone())).expect("read").model.world;
+    assert!(old.commerce_raids.is_empty(), "a version-7 save holds no raids");
+    assert_eq!(old.trade_network, model.world.trade_network, "the spline ids come from the start");
+    assert_eq!(old.trade_sight, model.world.trade_sight, "the curves come from the start");
+    let bare = read_with_start(&bytes(7), &db, || Err("no start".into())).expect("loads without a start").model.world;
+    assert!(bare.trade_network.iter().all(|l| l.splines.is_empty()) && bare.trade_sight.iter().all(|s| s.curves.is_empty()));
+}
+
+/// The campaign-over flag (campaign +0xFE9, `TurnState::campaign_over`) saves and loads back; a save
+/// of ours written before the field was kept loads it as false (`serde(default)`, no format bump).
+#[test]
+fn campaign_over_round_trips_and_an_older_save_loads_it_as_false() {
+    let mut model = made_up_model();
+    model.end_campaign();
+    assert!(model.turn.queue.is_empty(), "ending the campaign clears the queue");
+    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+    let (_, back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
+    assert!(back.model.turn.campaign_over);
+    // An older turn state: the same record without the field, removed from the parsed value (not
+    // from the text, so the test does not depend on RON's layout).
+    let ron::Value::Map(mut fields) = ron::from_str::<ron::Value>(&ron::to_string(&back.model.turn).expect("encode")).expect("parse") else {
+        panic!("a turn state is a record");
+    };
+    assert_eq!(fields.remove(&ron::Value::String("campaign_over".into())), Some(ron::Value::Bool(true)));
+    let turn: ntw_sim::campaign::TurnState = ron::Value::Map(fields).into_rust().expect("an older turn state loads");
+    assert!(!turn.campaign_over);
+    assert_eq!(turn.humans, back.model.turn.humans, "the other fields load as they were");
+    assert_eq!(turn.queue, back.model.turn.queue, "the (empty) queue loads as it was");
 }

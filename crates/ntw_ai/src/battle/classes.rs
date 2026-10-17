@@ -28,28 +28,12 @@ pub mod category {
 
 /// Class codes used by the battle AI.
 pub mod class {
-    /// `cavalry_heavy`.
-    pub const CAVALRY_HEAVY: u8 = 4;
-    /// `cavalry_lancers`.
-    pub const CAVALRY_LANCERS: u8 = 6;
-    /// `cavalry_light`.
-    pub const CAVALRY_LIGHT: u8 = 7;
-    /// `cavalry_standard`.
-    pub const CAVALRY_STANDARD: u8 = 9;
-    /// `dragoons`.
-    pub const DRAGOONS: u8 = 10;
-    /// `general`.
-    pub const GENERAL: u8 = 12;
-    /// `infantry_elite`.
-    pub const INFANTRY_ELITE: u8 = 0xE;
-    /// `infantry_light`.
-    pub const INFANTRY_LIGHT: u8 = 0x11;
-    /// `infantry_line`.
-    pub const INFANTRY_LINE: u8 = 0x12;
-    /// `infantry_militia`.
-    pub const INFANTRY_MILITIA: u8 = 0x14;
-    /// `infantry_skirmishers`.
-    pub const INFANTRY_SKIRMISHERS: u8 = 0x16;
+    pub use ntw_sim::unit_kind::{
+        ARTILLERY_FIXED, ARTILLERY_FOOT, ARTILLERY_HORSE, CAVALRY_HEAVY, CAVALRY_LANCERS, CAVALRY_LIGHT,
+        CAVALRY_MISSILE, CAVALRY_STANDARD, DRAGOONS, GENERAL, INFANTRY_ELITE, INFANTRY_LIGHT, INFANTRY_LINE,
+        INFANTRY_MELEE, INFANTRY_MILITIA, INFANTRY_SKIRMISHERS,
+    };
+
     /// No key (`0x00531E50` uses 0x2E for an empty string).
     pub const NONE: u8 = 0x2E;
 }
@@ -73,7 +57,7 @@ pub fn codes(u: &LandUnit) -> (u8, u8) {
         return (category_code(&u.unit_category), class_code(&u.unit_class));
     }
     if u.missile.is_some_and(|w| w.is_artillery) {
-        (category::ARTILLERY, 1)
+        (category::ARTILLERY, class::ARTILLERY_FOOT)
     } else if u.is_cavalry {
         (category::CAVALRY, class::CAVALRY_STANDARD)
     } else {

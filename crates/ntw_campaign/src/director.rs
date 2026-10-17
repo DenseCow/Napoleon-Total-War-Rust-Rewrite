@@ -115,9 +115,11 @@ impl Components {
     }
 }
 
-/// Reads the file's director state into the model. A file without the interface record keeps a
-/// new director's state (logged); one older than version 2 seeds the RNG from the campaign RNG,
-/// as the original's loader does.
+/// Reads the file's director state into the model. A file without the interface record (logged
+/// once) gets a new director: no queued transfers and the default RNG seed, with the desire
+/// counters still read from the file; the exe's new director also takes one campaign-RNG step for
+/// its seed, which ours skips (PROVISIONAL, see the `None` arm). A record older than version 2
+/// seeds the RNG from the campaign RNG, as the original's loader does ([`seed_from_campaign_rng`]).
 pub fn fill(root: &EsfRecord, model: &mut CampaignModel) {
     let Some(model_rec) = root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL") else { return };
     let mut ids = Components::read(model_rec, model);
@@ -140,10 +142,15 @@ pub fn fill(root: &EsfRecord, model: &mut CampaignModel) {
                     None => log::warn!("Campaign director: {INTERFACE} v{} has no RNG; a new director's is used", cdir.version),
                 }
             } else {
-                model.rng.state = lcg_step(model.rng.state);
-                state.rng.state = model.rng.state >> 16;
+                // The record's last read (`0x00B94170`, after the queue and the uber factions).
+                seed_from_campaign_rng(model, &mut state);
             }
         }
+        // PROVISIONAL: the model loader builds a new director instead (`0x0087418C` → constructor
+        // `0x00B949B0`), which also seeds its RNG from one campaign-RNG step and builds a new BDI
+        // pool (`0x00B95230`). Ours keeps the new director's seed and the file's desire counters:
+        // [`write`] cannot add the missing record, so stepping here would step again at each reload
+        // of our own save. Every vanilla file has the record.
         None => log::warn!("Campaign director: the file has no {DIRECTOR}/{INTERFACE}; a new director's state is used"),
     }
     let pool = model_rec.child("CAI_INTERFACE").and_then(|c| find(c, POOL, &|_| true));
@@ -162,6 +169,16 @@ pub fn fill(root: &EsfRecord, model: &mut CampaignModel) {
         log::warn!("Campaign director: {} CAI component ids name no faction or region of the model; their entries are dropped", ids.unmapped);
     }
     model.director = state;
+}
+
+/// A record older than version 2 has no RNG: one step of the campaign RNG (+0xFB8), the director's
+/// RNG its high 16 bits (`0x00B94170`, its last read, after the queue and the uber factions;
+/// CONFIRMED). In the model loader `0x00872550` the director is the last campaign-RNG user, after
+/// the portrait allocator's steps (`0x008733BA`; a static scan of its calls three levels deep finds
+/// no other), so [`fill`] runs after [`portraits::fill`](crate::portraits::fill).
+fn seed_from_campaign_rng(model: &mut CampaignModel, state: &mut DirectorState) {
+    model.rng.state = lcg_step(model.rng.state);
+    state.rng.state = model.rng.state >> 16;
 }
 
 /// The army XP desire's record (#0 true; a navy's would be false).

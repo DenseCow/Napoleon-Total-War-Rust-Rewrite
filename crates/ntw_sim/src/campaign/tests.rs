@@ -12,6 +12,7 @@ use crate::rng::CaRng;
 mod agents_tests;
 mod buildings_tests;
 mod capture_diplomacy_tests;
+mod commerce_raid_tests;
 mod construction_tests;
 mod deals_tests;
 mod economy_tests;
@@ -22,6 +23,7 @@ mod recruitment_tests;
 mod slots_exit_tests;
 mod trade_order_tests;
 mod transfer;
+mod turn_order_tests;
 
 const A: FactionId = FactionId(1);
 const B: FactionId = FactionId(2);
@@ -271,10 +273,10 @@ fn split_model(commodities: &[&str], home: Vec<u32>) -> CampaignModel {
             m.world.relationships.insert((x, y), details::Relationship { trade_agreement: true, ..Default::default() });
         }
         let end = TradeWaypoint { region: RegionId(11), from: u32::MAX, to: u32::MAX, sea: false, from_pos: None, to_pos: None };
-        m.world.trade_paths.insert((A, b), vec![TradePath { waypoints: vec![end], volumes: vec![0; commodities.len()], capital_port: false }]);
+        m.world.trade_paths.insert((A, b), vec![TradePath { waypoints: vec![end], volumes: vec![0; commodities.len()], capital_port: false, accumulated: 0 }]);
     }
     let w = TradeWaypoint { region: RegionId(10), from: 120, to: 1, sea: true, from_pos: None, to_pos: None };
-    m.world.domestic_trade.insert(A, vec![TradePath { waypoints: vec![w], volumes: home, capital_port: false }]);
+    m.world.domestic_trade.insert(A, vec![TradePath { waypoints: vec![w], volumes: home, capital_port: false, accumulated: 0 }]);
     m
 }
 

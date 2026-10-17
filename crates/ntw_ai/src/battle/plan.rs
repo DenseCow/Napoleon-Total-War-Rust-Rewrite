@@ -118,7 +118,8 @@ pub fn composition_defends(any_defender: bool, ours: &[(u8, bool, bool)], theirs
         return false;
     }
     // (class, is the general's unit, can fire)
-    if ours.iter().any(|&(class, general, _)| !general && class != 0x13 && class != 0) {
+    use crate::battle::classes::class::{ARTILLERY_FIXED, INFANTRY_MELEE};
+    if ours.iter().any(|&(class, general, _)| !general && class != INFANTRY_MELEE && class != ARTILLERY_FIXED) {
         return false;
     }
     let ours_fire = ours.iter().any(|x| x.2);

@@ -67,11 +67,11 @@ fn setup_loaded(dir: &std::path::Path, (vfs, db): &(ntw_formats::pack::Vfs, Rc<n
     let scripts = ScriptHost::new(loaded.model, &human, ScriptSource::from_install(dir).unwrap()).unwrap();
     let loc = Localisation::from_vfs(vfs).unwrap();
     let host = UiScriptHost::new(ScriptSource::from_install(dir).unwrap(), loc, FrontEndFacts::default(), (1280.0, 960.0), ntw_sim::limits::GameLimits::default()).unwrap();
-    host.install_campaign(CampaignLink { state: scripts.shared_state(), human: human.clone(), campaign, map: loaded.info.map_key.clone(), theatres: loaded.info.theatres().map(str::to_owned).collect(), db: Rc::clone(db) })
+    host.install_campaign(CampaignLink { state: scripts.shared_state(), human: human.clone(), campaign, map: loaded.info.map_key.clone(), theatres: loaded.info.theatres().map(str::to_owned).collect(), db: Rc::clone(db), saves: None })
         .unwrap();
     let root = host.load_root_layout("data/ui/campaign ui/layout").unwrap();
     host.campaign_ready();
-    host.campaign_update_funds("Early May");
+    host.campaign_update_funds();
     Setup { scripts, host, root, human }
 }
 
@@ -2627,4 +2627,30 @@ fn settlement_recruitment_card_price_is_the_regions_entry_cost() {
     let first = find_prefix(&s.host, s.root, "Art_Foot_French_6_lber!recruitable!").expect("6-lber card");
     let price = find(&s.host, first, "Cost").expect("selected card's Cost text");
     assert_eq!(text(&s.host, price), "512");
+}
+
+/// The HUD date and the default save name read the calendar's turn name from the install's loc
+/// (`random_localisation_strings_string_round_id_*`, UI_FIDELITY.md §5.1): every turn of the 24-turn
+/// year and of a 12-turn year has its English name.
+#[test]
+fn round_description_is_the_loc_turn_name() {
+    let Some(s) = setup() else { return };
+    const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    let default_name = |s: &Setup| -> String { s.host.lua().load("return CampaignUI.DefaultSaveName()").eval().unwrap() };
+    let year = s.scripts.state_mut().model.calendar.date.year;
+    for turn in 0..24u32 {
+        s.scripts.state_mut().model.calendar.turn_in_year = turn;
+        let half = if turn % 2 == 0 { "Early" } else { "Late" };
+        assert!(default_name(&s).ends_with(&format!(" {half} {} {year}", MONTHS[turn as usize / 2])), "turn {turn}: {}", default_name(&s));
+    }
+    for turn in 0..12u32 {
+        let mut st = s.scripts.state_mut();
+        st.model.calendar.turns_per_year = 12;
+        st.model.calendar.turn_in_year = turn;
+        drop(st);
+        assert!(default_name(&s).ends_with(&format!(" {} {year}", MONTHS[turn as usize])), "month {turn}: {}", default_name(&s));
+    }
+    s.host.campaign_update_funds();
+    let log = s.host.take_log();
+    assert!(!log.iter().any(|l| l.starts_with("ERROR") || l.contains("round_id")), "{log:?}");
 }

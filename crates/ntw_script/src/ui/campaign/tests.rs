@@ -1,7 +1,7 @@
 use super::*;
 use ntw_sim::campaign::treaties::DiplomaticAction as D;
 
-const A: FactionId = FactionId(1);
+pub(super) const A: FactionId = FactionId(1);
 const B: FactionId = FactionId(2);
 
 
@@ -22,7 +22,7 @@ fn negotiation_rows_map_to_their_appliers() {
 // ----- A campaign HUD host without the install: a MADE-UP one-region world and a made-up root
 // script that records what the engine calls on it (no game file is read).
 
-const HUMAN: &str = "test_faction_a";
+pub(super) const HUMAN: &str = "test_faction_a";
 const REGION: RegionId = RegionId(10);
 const FORT_LEVEL: &str = "test_fort_level";
 
@@ -41,18 +41,37 @@ const ROOT: &str = "calls = {}\n\
     function GenerateNavyPanel(info) army_panel = info end\n\
     function SetSelectedEntity(e, name) selected_entity = e end\n";
 
-struct TestHud {
-    _scripts: crate::ScriptHost,
-    host: UiScriptHost,
-    root: NodeId,
+pub(super) struct TestHud {
+    pub(super) _scripts: crate::ScriptHost,
+    pub(super) host: UiScriptHost,
+    pub(super) root: NodeId,
 }
 
-fn test_hud() -> TestHud {
+/// What a test HUD runs with besides its database ([`test_hud_setup`]).
+pub(super) struct HudSetup {
+    pub(super) campaign: &'static str,
+    pub(super) loc: ntw_formats::loc::Localisation,
+    pub(super) facts: super::super::host::FrontEndFacts,
+    pub(super) saves: Option<Rc<dyn CampaignSaves>>,
+}
+
+impl Default for HudSetup {
+    fn default() -> Self {
+        HudSetup { campaign: "test_campaign", loc: ntw_formats::loc::Localisation::new(), facts: super::super::host::tests::facts(), saves: None }
+    }
+}
+
+pub(super) fn test_hud() -> TestHud {
     test_hud_with(GameDatabase::test_fixture())
 }
 
 /// [`test_hud`] over database `db` (the fixture with some made-up rows added).
 fn test_hud_with(db: GameDatabase) -> TestHud {
+    test_hud_setup(db, HudSetup::default())
+}
+
+/// [`test_hud_with`] with its campaign key, loc, facts and save callback from `setup`.
+pub(super) fn test_hud_setup(db: GameDatabase, setup: HudSetup) -> TestHud {
     use ntw_sim::calendar::{Calendar, Date, HALF_EARLY};
     use ntw_sim::campaign::{BuildingRef, Faction, GovernmentType, Region, Settlement, World};
     use ntw_sim::fixed::Fixed20;
@@ -107,14 +126,15 @@ fn test_hud_with(db: GameDatabase) -> TestHud {
     let scripts = crate::ScriptHost::new(model, HUMAN, crate::ScriptSource::empty()).unwrap();
     let source = crate::ScriptSource::empty().with_memory_file("ui/test/root", super::super::host::tests::layout_bytes_with_root(ROOT, ""));
     let host =
-        UiScriptHost::new(source, ntw_formats::loc::Localisation::new(), super::super::host::tests::facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
+        UiScriptHost::new(source, setup.loc, setup.facts, (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
     host.install_campaign(CampaignLink {
         state: scripts.shared_state(),
         human: HUMAN.into(),
-        campaign: "test_campaign".into(),
+        campaign: setup.campaign.into(),
         map: "test_map".into(),
         theatres: vec!["europe_main".into()],
         db: Rc::new(db),
+        saves: setup.saves,
     })
     .unwrap();
     let root = host.load_root_layout("ui/test/root").unwrap();
@@ -152,7 +172,7 @@ impl TestHud {
         env.set("calls", self.host.lua().create_table().unwrap()).unwrap();
         out
     }
-    fn errors(&self) -> Vec<String> {
+    pub(super) fn errors(&self) -> Vec<String> {
         self.host.take_log().into_iter().filter(|l| l.starts_with("ERROR") || l.starts_with("UNKNOWN CampaignUI")).collect()
     }
     /// MADE-UP walls rules: the standing `FORT_LEVEL` is level 0 of `test_fort` (a
@@ -2176,4 +2196,64 @@ fn effect_text_fills_in_the_value_as_the_exe_does() {
     assert_eq!(effect_text("Reduces administration costs", 3.0), "Reduces administration costs");
     assert_eq!(effect_text("100%x and %", 1.0), "100%x and %");
     assert_eq!(effect_text("%+x", 1.0), "%+x");
+}
+
+/// `RetrieveFactionListForDiplomacy` lists only factions still in the game (the exe skips faction
+/// `+0x824` set at 0x009F2F69) and never the pirates.
+#[test]
+fn the_diplomacy_faction_list_skips_factions_out_of_the_game_and_the_pirates() {
+    let hud = test_hud();
+    {
+        let mut st = hud._scripts.state_mut();
+        let w = &mut st.model.world;
+        for (id, key, out) in [(B, OTHER, false), (FactionId(3), "test_faction_out", true), (FactionId(4), "pirates", false)] {
+            let mut f = w.factions[&A].clone();
+            f.id = id;
+            f.key = key.into();
+            w.factions.insert(id, f);
+            w.faction_details.entry(id).or_default().out_of_game = Some(out);
+        }
+    }
+    let listed: (bool, bool, bool, bool) = hud
+        .host
+        .lua()
+        .load(
+            "local t = CampaignUI.RetrieveFactionListForDiplomacy()\n\
+             return t.test_faction_a ~= nil, t.test_faction_b ~= nil, t.test_faction_out ~= nil, t.pirates ~= nil",
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(listed, (true, true, false, false));
+    assert!(hud.errors().is_empty(), "{:?}", hud.errors());
+}
+
+/// `RetrieveFactionListForDiplomacy`'s Relationship: "protectorate" only when the player is the
+/// faction's patron (stance index 3, `IsStancePatron` 0x00B5DCB0 at 0x009F3064); the player as its
+/// protectorate (index 4) and neutral show nothing.
+#[test]
+fn the_diplomacy_relationship_names_only_the_players_protectorates() {
+    use ntw_sim::campaign::Stance;
+    let hud = test_hud();
+    {
+        let mut st = hud._scripts.state_mut();
+        let w = &mut st.model.world;
+        let mut f = w.factions[&A].clone();
+        f.id = B;
+        f.key = OTHER.into();
+        w.factions.insert(B, f);
+        w.faction_details.entry(B).or_default().out_of_game = Some(false);
+    }
+    for (stance, want) in [
+        (Stance::Allied, Some("allied")),
+        (Stance::War, Some("at war")),
+        (Stance::Patron, Some("protectorate")),
+        (Stance::Protectorate, None),
+        (Stance::Neutral, None),
+    ] {
+        hud._scripts.state_mut().model.world.set_stance(A, B, stance).unwrap();
+        let got: Option<String> =
+            hud.host.lua().load("return CampaignUI.RetrieveFactionListForDiplomacy().test_faction_b.Relationship").eval().unwrap();
+        assert_eq!(got.as_deref(), want, "{stance:?}");
+    }
+    assert!(hud.errors().is_empty(), "{:?}", hud.errors());
 }

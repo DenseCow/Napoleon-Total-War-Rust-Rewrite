@@ -331,7 +331,7 @@ needs a refit later. Vanilla runs the original's 1:1 rule. Code: `ntw_sim::seam`
 | Plugin | What it will do |
 |---|---|
 | `FrontEndPlugin` (main menu exists) | the remaining front-end pages need their `FrontEnd.*` engine functions; background movie needs a Bink decoder |
-| `CampaignPlugin` (exists) | `CampaignSim` (the Lua `ScriptHost` owning the model, built by `ntw_campaign` from a startpos or save); map, settlements and markers that follow the model; selection, right-click orders with a path preview; the original HUD layout (`uimpaign uiayout`) through `UiScriptHost` with the funds/date and End Turn button (`CCQ_END_TURN`); F5 save |
+| `CampaignPlugin` (exists) | `CampaignSim` (the Lua `ScriptHost` owning the model, built by `ntw_campaign` from a startpos or save); map, settlements and markers that follow the model; selection, right-click orders with a path preview; the original HUD layout (`uimpaign uiayout`) through `UiScriptHost` with the funds/date and End Turn button (`CCQ_END_TURN`); the save panel and CTRL+S / CTRL+L quick save and load (`CampaignSaver`) |
 | `model_viewer` (exists) | `cargo run -p napoleon -- --view-model <name>` / `--list-models <text>`: shows original `.rigid_model` files with their diffuse textures (orbit camera, optional `--screenshot`) |
 | 3D battle / campaign map | planned: terrain from BATTLE_TERRAIN.md / CAMPAIGN_MAP_GRAPHICS.md, soldiers from UNIT_VARIANT_AND_TEXTURES.md |
 

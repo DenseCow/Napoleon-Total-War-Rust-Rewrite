@@ -31,8 +31,9 @@ use ntw_formats::db_folder::{self, TableError, tables};
 use ntw_formats::pack::Vfs;
 use ntw_formats::unit_model::BattleTables;
 use ntw_sim::battle::attributes::shot_type_value;
-use ntw_sim::battle::ground::{BattleGround, GridSpec, GroundTypeGrid, HeightGrid, MovementClass, speed_table};
+use ntw_sim::battle::ground::{BattleGround, GridSpec, GroundTypeGrid, HeightGrid, speed_table};
 use ntw_sim::battle::model::{Battle, LandUnit, Reinforcement};
+use ntw_sim::battle::strength;
 use ntw_sim::battle::shooting::MissileWeapon;
 use ntw_sim::battle::fatigue::FatigueEffects;
 
@@ -965,18 +966,9 @@ fn make_unit(db: &GameDatabase, setup: &SetupData, key: &str, id: u32, side: u8)
     u.unit_class = record.unit_class.clone();
     u.unit_category = record.category.clone();
     u.fatigue_effects = fatigue_effects_of(db, &record.category);
-    // The `unit_movement_modifiers` column (`0x006543D0`, see `MovementClass`).
-    u.movement_class = if stats.is_artillery {
-        match record.unit_class.as_str() {
-            "artillery_foot" => MovementClass::FootArtillery,
-            "artillery_horse" => MovementClass::HorseArtillery,
-            _ => MovementClass::Fixed,
-        }
-    } else if matches!(ntw_sim::unit_kind::category(&record.category), ntw_sim::unit_kind::Category::Cavalry | ntw_sim::unit_kind::Category::Camels | ntw_sim::unit_kind::Category::Dragoons) || is_cavalry {
-        MovementClass::Mounted
-    } else {
-        MovementClass::Infantry
-    };
+    // The `unit_movement_modifiers` column (`0x006543D0`, see `MovementClass`): keyed on the
+    // category, not on the unit's mounts.
+    u.movement_class = strength::built_movement_class(strength::category(&u), &record.unit_class, stats.is_artillery);
     // Missile weapon (muskets): unit_stats_land accuracy/reload/ammunition + its projectiles row.
     if let Some(weapon) = missile_weapon(db, stats) {
         u.missile = Some(weapon);
@@ -997,8 +989,9 @@ fn make_unit(db: &GameDatabase, setup: &SetupData, key: &str, id: u32, side: u8)
         // PLACEHOLDER speeds when the entity is unknown (e.g. on the test fixture).
         None => (u.walk_speed, u.run_speed) = if is_cavalry { (3.0, 9.0) } else { (1.5, 4.0) },
     }
-    // Each man's radius (soldier `+0x620`): column 12 of the man's `battle_entities` record (unit
-    // `+0x60`), the margin the squad box adds around the men (`LandUnit::man_radius`, CONFIRMED).
+    // Each man's radius (a plain soldier's `+0x620`): column 12 of the man's `battle_entities`
+    // record (unit `+0x60`), the margin the squad box adds around the men (`LandUnit::man_radius`,
+    // evidence and tags: see the field doc in ntw_sim `battle/model.rs`).
     // Without the tables (the test fixture) it stays 0: the box spans the men's centres.
     if let Some(t) = entities {
         match t.entity(&stats.man_entity) {
@@ -1209,6 +1202,42 @@ mod tests {
         use ntw_sim::battle::attributes::ability;
         assert!(caps.has_ability(ability::SQUARE_FORMATION) && !caps.has_ability(ability::FIRE_AND_ADVANCE));
         assert!(researched_technologies(&model, "no_such_faction").is_none());
+    }
+
+    /// The category-keyed movement class (`0x006543D0`) gives every shipped land unit the class the
+    /// earlier mounts-or-category rule gave it: no vanilla unit has a mount outside a mounted
+    /// category, guns outside the artillery category, or a category with no column. Skipped when
+    /// the game is not installed.
+    #[test]
+    fn movement_class_from_the_category_matches_vanilla() {
+        use ntw_sim::battle::ground::MovementClass;
+        use ntw_sim::unit_kind::{Category, category};
+        let dir = crate::config::game_data_dir();
+        let Ok(db) = GameDatabase::from_install(&dir) else {
+            eprintln!("skipped: no install at {}", dir.display());
+            return;
+        };
+        let mut checked = 0;
+        for record in db.units.iter() {
+            let Some(stats) = db.unit_stats(&record.key) else { continue };
+            let c = category(&record.category);
+            let mounts = stats.num_mounts > 0 && stats.mount_entity.is_some();
+            let earlier = if stats.is_artillery {
+                match record.unit_class.as_str() {
+                    "artillery_foot" => MovementClass::FootArtillery,
+                    "artillery_horse" => MovementClass::HorseArtillery,
+                    _ => MovementClass::Fixed,
+                }
+            } else if matches!(c, Category::Cavalry | Category::Camels | Category::Dragoons) || mounts {
+                MovementClass::Mounted
+            } else {
+                MovementClass::Infantry
+            };
+            assert_eq!(strength::built_movement_class(c, &record.unit_class, stats.is_artillery), earlier, "{}", record.key);
+            checked += 1;
+        }
+        eprintln!("{checked} land units checked");
+        assert!(checked > 0);
     }
 
     /// Every projectile's `shot_type` is a name of the exe's shot type enum, and artillery units

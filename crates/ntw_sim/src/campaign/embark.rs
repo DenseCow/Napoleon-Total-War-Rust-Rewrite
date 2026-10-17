@@ -643,8 +643,7 @@ impl CampaignModel {
         if a == b {
             return false;
         }
-        let rebel = |f: FactionId| self.world.factions.get(&f).is_some_and(|x| x.key.is_empty());
-        rebel(a) || rebel(b) || self.world.stance(a, b) == Stance::War
+        self.world.is_rebel_faction(a) || self.world.is_rebel_faction(b) || self.world.stance(a, b) == Stance::War
     }
 
     /// The transport path of an embarked army to `to`: its navy sails, lands it and it walks on
@@ -713,7 +712,8 @@ impl CampaignModel {
     /// Puts `character` at `pos`: the one path a force commander's move takes (a walk, a fleet sailing towards a
     /// landing, a force taking a settlement). A navy that moves leaves the port it lies in first ([`Self::undock`],
     /// `0x00A8C0B0`: its repair orders cancelled and refunded) and carries its embarked armies along
-    /// ([`Self::sync_passengers`]).
+    /// ([`Self::sync_passengers`]). A move ends a raiding commander's raids (the move order's start `0x0095D940` →
+    /// `0x009DA140`, [`Self::clear_character_raids`]; that every move goes through that order is INFERRED).
     pub(crate) fn move_character(&mut self, character: CharacterId, pos: (Fixed20, Fixed20)) {
         let Some(old) = self.world.characters.get(&character).map(|c| c.position) else { return };
         if old != pos
@@ -723,6 +723,10 @@ impl CampaignModel {
         }
         self.world.characters.get_mut(&character).expect("checked").position = pos;
         self.sync_passengers(character);
+        // 0x0095D940 → 0x009DA140: a move ends his raids (INFERRED: every move is that order).
+        if old != pos {
+            self.clear_character_raids(character);
+        }
     }
 
     /// Moves the commanders of the armies aboard the navy `character` commands to its position.
@@ -813,6 +817,8 @@ impl CampaignModel {
                 self.world.embarked.insert(force, navy);
             }
         }
+        // The boarding join (`0x008F0F20` / `0x008F17D0` → `0x00A285C0`): the fleet's zones again.
+        self.rebuild_force_zones(navy);
         Ok(events)
     }
 
@@ -837,6 +843,8 @@ impl CampaignModel {
         let mut events = Vec::new();
         if fleet_end > 0 {
             self.move_character(nc, to_fixed(plan.points[fleet_end]));
+            // The fleet's move (`0x00A285E0`): its zones again, with the army aboard.
+            self.rebuild_moved_zones(nc);
             let ch = self.world.characters.get_mut(&nc).expect("checked");
             let used = ((plan.costs[fleet_end] - plan.costs[0]) * ch.max_movement_points as f32).ceil() as i32;
             let had = ch.movement_points;
@@ -853,6 +861,7 @@ impl CampaignModel {
             ch.position = to_fixed(plan.points[l]);
             ch.movement_points = 0;
             self.world.embarked.remove(&force);
+            self.rebuild_force_zones(force);
             events.push(CampaignEvent::CharacterMoved { character: c, path: vec![plan.points[l - 1], plan.points[l]] });
             events.push(CampaignEvent::CharacterDisembarksNavy { character: c, navy });
         }

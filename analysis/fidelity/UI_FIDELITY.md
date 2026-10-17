@@ -378,7 +378,8 @@ font.
   mapped, actions TODO (0-E sandbox note below, §5); **the naming rules are CONFIRMED and wired**
   (0-E, 2026-10-06 — `ValidateFilename` refuses `/ \ * ? " < > | :` and a 101st character, and
   `ntw_script::ui::frontend::is_valid_save_name` is that rule set, applied in `SaveFolders::resolve`;
-  `ConfirmSave` / `SaveCampaign` are still UNKNOWN and unwired).
+  `ConfirmSave` / `SaveCampaign` / `DefaultSaveName` / `GetCurrentGameInfo` are now CONFIRMED
+  (§5.1, 2026-10-16) but still unwired).
 - **Round of 2026-10-04 evening (0-E sandbox, branch `work/sandbox/0e-ui`): negotiation screen
   mapped** (§4 below). Read-only probe of the original files (no Ghidra, no placeholders):
   the negotiation screen is `ui\campaign ui\diplomacy_panel` (Version039, 351 components) with
@@ -573,7 +574,7 @@ tooltips, (3) credits, (4) custom battle setup. The 0-E work before the pause is
 | ClipChildren clipping (draw and hit test) | resolved | tiled pieces PROVISIONAL |
 | BuildingBrowserDetails | resolved (PROVISIONAL parts listed in code) | 0x009B5AF0 |
 | ConstructBuildingTree (browser tree view) | resolved, layout INFERRED | 0x009B8830 |
-| RetrieveFactionListForDiplomacy, RetrieveDiplomacyDetails | resolved (trade tests PROVISIONAL) | 0x009F2EA0, 0x009B2690 |
+| RetrieveFactionListForDiplomacy, RetrieveDiplomacyDetails | resolved (trade status CONFIRMED, `CampaignModel::diplomacy_trade_status`; the _can / _cannot tooltip parameter `0x00BC7910` PROVISIONAL; CAMPAIGN_FIDELITY "Scripted diplomacy permissions") | 0x009F2EA0, 0x009B2690 |
 | UI scale for windows under 1280x960 (0x0114EB20) | resolved | campaign and battle HUDs (one mapping, `frontend::render`; device-wide, BATTLE_FLOW.md §3); the front end still draws at scale 1 |
 | Government screen: InitialiseGovernmentDetails (ministers keyed by post number), RetrieveGovernorshipDetails, SetGovernorshipTaxRate, TradeInfo | resolved, parts PROVISIONAL | popularity inputs, class tax split, trade prices and route kinds, minister pool |
 | Objectives: MissionsDetails, PrestigeDetails, VictoryConditions, CurrentSeasonString | resolved, parts PROVISIONAL | prestige and victory conditions are not in the model |
@@ -1285,8 +1286,8 @@ implementation).
 | (2) which record a held treaty swaps | trade record: id 1 (trade_cancel) when the proposer's relationship to the recipient has the trade agreement (`+0x788`), else id 0. Alliance record: id 5 when the two are allied-like (`0x008CE390`: neither is the rebel faction and stance allied / patron / protectorate, or the same faction), else id 4 | CONFIRMED | `0x00BF3E90`, `0x00BF3A30` |
 | (2) forbidden | for every action, the proposer's relationship to the recipient, `diplomacy_options[map[id]]` (map `0x01459080`: 0,0,1,2,3,3,4,5,6,7,8,9,10,11,12,13) equal to 2 or 3 sets the forbidden flag | CONFIRMED | `0x00BF5CB3` loop, `0x00B27FE0`, `0x008CE140` |
 | (2) which buttons show | `BuildPossibleActions` (`0x009B5220`): type 1 entries listed only when available (Active true); type 0 entries listed when available, and also when unavailable for ids 0, 4, 13, 14, 15 if the local player's stance towards the counterpart is not war (stance index ≠ 0) — those carry a `Tooltip` and Active false (the greyed "Joining Wars"). Otherwise an unavailable type-0 entry is left out | CONFIRMED | `0x009B5220` |
-| (2) tooltips | request_join_war: `random_localisation_strings` `join_war_tooltip_not_allied` (id 0x1BB) when not allied-like (`0x00B0CDF0`: stance 2/3/4), else `..._can_join_war` (0x1BD) when `0x00B28010` holds either way, else `..._no_joinable_wars` (0x1BC). trade (`0x00BC7910`, keys `trade_agreement_tooltip_*` 0x1C7..0x1CD), alliance (`0x00B0CBD0`, `alliance_tooltip_*` 0x1B7..0x1BA), break_trade (`0x00B13CB0`, `break_trade_tooltip_*` 0x1C0/0x1C1), break_alliance (`0x00B13B80`, `break_alliance_tooltip_*` 0x1BE/0x1BF) | CONFIRMED keys; branches of the four non-join builders UNKNOWN | listed |
-| (2) possible: trade | at war → no; an agreement held → yes (the cancel); else both route tests `0x00BA42E0(p, r)` and `(r, p)` non-zero and neither relationship embargoing (`+0x840` = 0 both ways) | CONFIRMED shape; `0x00BA42E0` (route existence, 1388 bytes) not decoded | `0x00C1A7D0` |
+| (2) tooltips | request_join_war: `random_localisation_strings` `join_war_tooltip_not_allied` (id 0x1BB) when not allied-like (`0x00B0CDF0`: stance 2/3/4), else `..._can_join_war` (0x1BD) when `0x00B28010` holds either way, else `..._no_joinable_wars` (0x1BC). trade (`0x00BC7910(local, other, counts 1)` from `0x009B55FF`, keys `trade_agreement_tooltip_*` 0x1C7..0x1CD): either side without a capital → "" ; else the reason (embargo either way → `embargoed`; else the route check other → local 0 → `no_route_them`; else by local → other: 0 → `no_route_you`, 1 → `neighbour`, 2/3/5/7 → `sea_routes`, 4/6 → `sea_routes` + `existing_route_shifted`), then the `export_route_count` line (each side's sea routes left and cap) before the shifted line; full decoding in CAMPAIGN_FIDELITY.md (dippermai). `Tooltip` is set only for a non-empty text (`0x004F3500` at `0x009B58B4`). alliance (`0x00B0CBD0`, `alliance_tooltip_*` 0x1B7..0x1BA), break_trade (`0x00B13CB0`, `break_trade_tooltip_*` 0x1C0/0x1C1), break_alliance (`0x00B13B80`, `break_alliance_tooltip_*` 0x1BE/0x1BF) | CONFIRMED keys, the trade branches and the non-empty test (disassembly 2026-10-17); branches of the alliance / break_trade / break_alliance builders UNKNOWN | listed |
+| (2) possible: trade | at war → no; an agreement held → yes (the cancel); else both route tests `0x00BA42E0(p, r)` and `(r, p)` non-zero and neither relationship embargoing (`+0x840` = 0 both ways) | CONFIRMED (decompile); ours `CampaignModel::trade_possible`, the route check `CheckTradeRoutePossible` `0x00BA42E0` = `trade_route_check` | `0x00C1A7D0` |
 | (2) possible: access / access_cancel | access: not at war and the relevant side's access not already indefinite (`+0x78C` ≠ −1), either direction; access_cancel: the proposer gives access (`+0x78C` ≠ 0), the stance is not protectorate and `allied_in_war_against` (`+0x7D0`) is empty | CONFIRMED | `0x00C1A6E0`, `0x00C1A5D0` |
 | (2) possible: alliance | allied already (stance 2) → yes (the cancel); else not allied-like, not at war, and `0x00C16990` false (no faction at war with one of them while allied-like with the other) | CONFIRMED | `0x00C1A630`, `0x00C16990` |
 | (2) possible: others | regions, technology, payments: always; state_gift: the recipient is not human (`+0x6E0`); protector: neither side has a protectorate relationship (`0x00B4D9A0`), not at war, the recipient holds exactly one region (count of its faction `+0x76C` list == 1: the region list, CONFIRMED by `0x008AE270`, which appends a region to it and makes it the capital `+0x72C` when there is none, and `0x008B4330`, which marks a faction with no regions and no owned forces out of the game) and the recipient not human; peace: at war and option 9 allowed (0 or 1); war: not at war, and when the proposer has a forced war target (`+0x754`) the recipient is it or at war with it; request_join_war: allied-like and `0x00C1E590` either way (a faction at war with one side, not with the other); break_trade: not at war and either side trades with a third faction (`0x00C3E410`); break_alliance: not at war and either side is allied (stance 2) with a third faction (`0x00C3D5A0`) | CONFIRMED (protector's region count 2026-10-09) | listed, `0x00C1A770` |
@@ -1619,6 +1620,164 @@ TODO (needs luac decompilation or Ghidra; NR-ai-ghidra may be busy, not run):
    `overwrite_msg` / `confirm_overwrite` strings in the driver).
 8. Engine side: the actual campaign save call + `UiRequest`/model hook (ours
    only quick-saves today), and whether `CanSave` gates more than the button.
+
+### 5.1 Save naming traced (worker savename, 2026-10-16; luac + Ghidra, CONFIRMED unless tagged)
+
+Answers to the TODO list above. **Code wired (2026-10-17, commit 295ffe6e):**
+`crates/ntw_script/src/ui/campaign/saves.rs` (CanSave, SaveCampaign in its three result shapes,
+DefaultSaveName, GetCurrentGameInfo, QuickSave, QuickLoad, the multiplayer names nil / false in SP;
+the listing and LoadCampaign names reuse `frontend.rs` `install_saves`, one source of truth), the
+synchronous save callback `CampaignSaves` / `CampaignSaver` (`crates/napoleon/src/campaign/play.rs`),
+the shortcuts CTRL+S / CTRL+L / ESCAPE sent to the root's `OnShortcut` (`hud.rs` `keys`; F5 removed),
+and `World::saving_disabled` set by `disable_saving_game` (`game.rs`), read from vanilla saves
+(`EPISODIC_RESTRICTIONS` #25, loader `0x009968A0`, versions above 0xB) and kept in our own saves.
+Tests: `saves_tests.rs` (9). Tags left: `CanSave` PROVISIONAL (the other `0x008BE4A0` fields); the
+shortcut bindings PROVISIONAL (`default_keys.xml` not read, hard-wired to its vanilla keys) and
+the order of a shortcut against a focused text field INFERRED.
+
+**Review fix round (2026-10-17):**
+- The four campaign keys of `BuildDefaultSaveName` are data: `CampaignFeatures::save_name_uses_campaign_name`,
+  set for those four by the importer (`ntw_campaign::features::original`), so a custom campaign sets
+  its own. Before the engine's first `UpdateFactionFundsAndDate` the round is empty and left out
+  ("France 1805", no double space; ours, the exe always has one).
+- SaveCampaign's exists test looks in both folders the panel lists (`SaveFolders::find`, the lookup
+  `resolve` uses too), so a name shown from the original's folder asks before saving; the save still
+  goes to our folder.
+- `EPISODIC_RESTRICTIONS` #25 is read only when the record's version is above 0xB (re-checked in
+  `0x009968A0`: the bool at campaign +0x115 is read under `version > 0xB`); an older record leaves the
+  flag false (`details.rs` test).
+- Keys: while a HUD text field holds the focus (`UiScriptHost::text_focused`, `CampaignHud::text_focused`)
+  the camera's WASD / arrow pans and PageUp / PageDown zoom do nothing, and the pans also do nothing
+  while CTRL or ALT is held: `default_keys.xml` binds `step_fwd` / `step_bck` / `step_l` / `step_r`
+  with `modifier="ALLOW_SHIFT"` only (CONFIRMED from the data), so CTRL+S never pans (`camera.rs`
+  `key_move` test). The shortcut test is CTRL without ALT, so AltGr characters reach the field.
+  The `QuickLoad` (no save) and the saving-disabled `SaveCampaign` lines are logged as info.
+
+- **Entry:** `text\default_keys.xml` binds `escape_menu` = ESCAPE (any modifier, component root,
+  all modes), `quick_save` = CTRL+S, `quick_load` = CTRL+L (campaign). `layout.root.luac`
+  `OnShortcut(name, down)` (line 1602, acts on down == true): escape_menu → `ShowEscapeMenu` =
+  `OpenPanel("esc_menu_campaign", nil, nil, "Initialise", CampaignUI.CanSave())`; quick_save →
+  `QuickSave` when `CanSave()`; quick_load → `QuickLoad`. The escape menu's save / load buttons call
+  `ShowSaveGameRequester(is_load)` = `OpenPanel("load-save_game", nil, nil, "Initialise", is_load)`.
+  `menu_save_game_button.luac` calls `Root.LuaCall("SaveCurrentGameFromEscapeMenu")`, which no root
+  script defines (unused button script).
+- **Panel driver** `load-save_game.load-save_game.luac`, SP config (IsMultiplayer() false):
+  WriteClass "save_game", Enumerator `CampaignUI.EnumerateCampaignSaves`, CurrentDetails
+  `CampaignUI.GetCurrentGameInfo`, ExtendedDetails `CampaignUI.GetExtendedSaveGameInfo`, Save
+  `CampaignUI.SaveCampaign`, DisplayName = file name minus extension, GenerateName
+  `d.DefaultName = CampaignUI.DefaultSaveName()`. MP: mp_save_game, EnumerateMultiplayerCampaignSaves,
+  GetCurrentMPGameInfo, GetExtendedMPSaveGameInfo, MPSaveGame, DefaultSaveNameMP.
+  - TODO 1: `ValidateFilename` (line 33) = the field's CharacterValidator (already CONFIRMED above).
+  - TODO 5: `SortAndRemoveExcessiveFiles` (line 46): sort by Date, newest first; list entries past
+    900 are dropped from the list (no file is deleted).
+  - `Initialise(is_load)` (line 264): title state Load/Save; filename_panel only when saving;
+    `FileExtenstionAndPathForWriteClass(WriteClass)` → (ext, dir), `Enumerator(dir, "*"..ext)`; when
+    saving (or loading with no file) `Current = GetCurrentGameInfo(); GenerateName(Current);
+    SetDetails(Current)`, which ends `name_input:LuaCall("SetValue", DefaultName)`. Clicking a row
+    puts that row's `m_name` in the field.
+  - TODO 2/7, `OnAccept` (line 340): name = field value, nothing on ""; `ClosePopup`; load →
+    `CampaignUI.LoadCampaign(name)`; save → `r1, r2 = SaveCampaign(name, false)`; if r1 == true a
+    `dialogue_box` shows `LocalisationString("overwrite_title").."\n\n"..LocalisationString("overwrite_msg")`,
+    accept → `ConfirmSave(SaveCampaign(name, true))`, decline → `OnCancelOverwrite` (no-op);
+    otherwise `ConfirmSave(r2)`. `ConfirmSave(x)` = `root:LuaCall("ConfirmSave", x)`.
+    `OnCancel`: ClosePopup, then `ShowEscapeMenu` when no panel is open.
+  - Root `ConfirmSave(result)` (layout.root line 1764): nil → nothing; load → load_success /
+    load_fail. **Corrected (code round, 2026-10-16):** the save branch tests
+    `not IsMultiplayer() or MultiplayerPlayerOutOfTurn()` (TEST C = 0 at pc 27 and pc 32, both
+    "jump if false" to different targets, so it is not an `and`). That branch reads
+    `MultiplayerPlayersName()` and shows `MultiplayerMessagePlayerSaved(name..": "..save_success)` only
+    when result == true and the name is not nil. `MultiplayerPlayersName` (`0x009EE550`) returns nil
+    when `[ui+0x9FC]+0x70` is 0, the same field `IsMultiplayer` (`0x009EC6C0`) tests. So **a single-player
+    save shows no message, on success or failure**: the panel just closes. The `dialogue_box`
+    save_success / save_fail, with a closure to `MultiplayerSaveConfirm`, is only for a multiplayer
+    player saving in turn (and not while popup_pre_battle is open). Handlers: OutOfTurn `0x009EE4E0`
+    (true when MP, local faction +0x6E0 set and the active faction is not the local one),
+    PlayersName `0x009EE550`, SaveConfirm `0x009EE610` (no Ghidra function there yet).
+- **`CampaignUI.SaveCampaign`** (`0x009F4A20`, registered at `0x0042A250`; its exe help text: "In:
+  Full path to place to save game, bool: Confirm overwrite. Out: true if overwrite request is
+  requested and needed. false, save success if overwrite not requested or not needed"):
+  args (name, optional bool overwrite; read only when the last argument is a boolean). The name is
+  completed by the file-system object's path builder (`0x00DB7FC0`, write class 0 = save_game):
+  `<class folder>` + name, plus `.save` when the result does not already end in `.save`
+  (case-sensitive compare, `0x004F21E0`). No name validation in the exe.
+  - overwrite false and the file opens (`fopen "rbS"`, `0x004C4D80`): returns **one** value, `true`
+    (no save).
+  - overwrite false, no such file: returns **two** values, `false, success`.
+  - overwrite true: no exists check, returns **one** value, `success`.
+  - The save itself: `0x00A1F000(name, 0)` (same path builder; returns false at once when the
+    campaign's flag `[+0xFA8]+0x115` is set). **That flag is "saving disabled"** (code round,
+    2026-10-16): its only writer is `0x0097B840`, the campaign script method
+    `game_interface:disable_saving_game(bool)` (table entry `0x014582D4` → name `0x0136A2AC`), which
+    stores the bool argument there. The tutorial calls `disable_saving_game(true)`. Ours:
+    `World::saving_disabled`, set by `game.rs`; the save then refuses (SaveCampaign returns
+    `false, false` / `false`). The flag is kept in the save: `EPISODIC_RESTRICTIONS` #25, read by the
+    loader `0x009968A0` for versions above 0xB (CONFIRMED position; false in the vanilla saves).
+  - `CampaignUI.CanSave` (`0x009E0D50`) returns `0x008BE4A0([ui+0x9FC]+8, [ui+0x9FC]+0xB0)`, which
+    is false while the flag above is set; its other fields are not traced (ours is true otherwise,
+    PROVISIONAL).
+- **`CampaignUI.DefaultSaveName`** (`0x009E22C0` → `0x009D5400`): `"<name> <round> <year>"` where
+  round + year = `"%S %d"` of the calendar's round description and year (the same pair the engine
+  sends as `round_description` / `year` in `UpdateFactionFundsAndDate`, `0x009C1AD0`), and name =
+  the localised `campaigns_onscreen_name_<campaign key>` **only** when that string exists and the
+  campaign key is one of `egy_napoleon`, `ita_napoleon`, `tut_napoleon`, `eur_napoleon`; otherwise
+  the human faction's display name (faction +0x518 = `FACTION` plain value 2, read by the faction
+  loader at `0x0087A9D5`; `FactionDetails::display_name`, e.g. "France"). So the Coalition and
+  Peninsular campaigns default to e.g. "France Early January 1805".
+- Round text (CONFIRMED, polish48): the round ids are an enum of random-localisation-string ids;
+  `0x00F555C0` maps an id to its key holder (`0x0164DB58 + id*8`; keys at `0x013CE38C`..`0x013CE674`,
+  set up by `0x00435E1F`). `round_id_early_january`..`round_id_late_december` are ids
+  `0x191`..`0x1A8` (holder of the first at `0x0164E7E0`), `round_id_january`..`round_id_december`
+  `0x1A9`..`0x1B4`. The CAMPAIGN_CALENDAR reader (`0x00871B00`, call at `0x00871BCD`) calls
+  `BuildCalendarTurnNameTables` (`0x008EF0C0`, cdecl: database, turns per year, turn-name vector
+  `[calendar+0xF68]+0x1C`, month-name vector `+0x2C`): 24 turns a year give the 24 half-month names
+  (id `0x191 + turn`), 12 give the 12 month names (`0x1A9 + turn`), any other count that many empty
+  names; the month vector always gets the 12 month names. Each name is the
+  `random_localisation_strings` record's text for the id's key (`0x00F59170`, record `+0xC`); a
+  missing key logs "In table %S: '%S' is not a valid key..." and gives the static empty string
+  (`0x0164EB78`). The round description (`0x008D1E20`) is `turnNames[turn_in_year]`, no bounds
+  check; its only callers are `UpdateFactionFundsAndDate` (`0x009C1AD0`, call `0x009C1D6B`, the
+  HUD's `round_description`) and `BuildDefaultSaveName` (`0x009D5400`, call `0x009D5429`), which
+  formats "%S %d" (round, year) then "%S %S" (name, round-year), so an empty round keeps both
+  spaces. Ours: `ntw_sim::calendar::Calendar::round_id` (the id for the turn, None off the table:
+  the exe's out-of-range read is not reproduced) and `ntw_script` campaign `round_description`,
+  which reads `random_localisation_strings_string_<id>` from the merged loc through `loc_required`
+  (missing: logged once, ""); the HUD's `campaign_update_funds` and `DefaultSaveName` both use it,
+  and the HUD's English "Early/Late <month>" text is gone. Tests: `calendar.rs`
+  `round_id_follows_turns_per_year_and_turn_in_year`, `saves_tests.rs` (default name, missing key),
+  real loc `tests/campaign_ui.rs` `round_description_is_the_loc_turn_name`. Open (not this item):
+  `0x009C1AD0` also sends `season_string` (`0x008ED110`), which ours does not, and on
+  `[campaign+0xFA8]+0xD1` takes a second branch (`UpdateFactionFundsAndTurn`: funds, season,
+  `season_string`, round = turns elapsed + 1) that ours lacks.
+- **`CampaignUI.GetCurrentGameInfo`** (`0x009E4BB0`): builds a save header from the running
+  campaign (`0x00888320`, the same builder the save writer uses) and fills the table with
+  `0x008982C0`, the filler of `GetExtendedSaveGameInfo`: the same fields (Faction, FlagPath,
+  LeaderPortrait, TimePlayed, Year, Season, Maps).
+
+- **`CampaignUI.QuickSave`** (`0x009EF470`, Ghidra `CAMPAIGNUI_WriteQuickSaveOrSendMpCommand`):
+  busy state on (`0x00E2C390(0x10, 1)`), name = random localisation string id 0x133
+  (`random_localisation_strings_string_quick_save`, via `0x00A0CB30`); single player (session
+  `+0x70` null): `0x00A1F000(name, 0)`, no overwrite question, no Lua result; multiplayer: a save
+  header from `0x00889210`, a "%S: %S" message (`0x009D55D0`) and a save command (vtable
+  `0x0136ABA8`) sent through the session's command stream; busy state off. Ours: the SP path.
+- **`CampaignUI.QuickLoad`** (`0x009EF420`, Ghidra `CAMPAIGNUI_LoadNewestSaveQuick`): nothing in
+  multiplayer; otherwise `0x008A0A00` → `0x0085F7D0` lists the write class 0 folder, callback
+  `0x0085F990` keeps the newest file with the class extension that `0x00A0BA70` accepts, and loads it
+  (`0x00A0C960`): the same choice as the front end's ContinueCampaign (`latest_campaign_save`).
+- **`0x00A1F000`** (Ghidra `SaveCampaignGameToFile(pSaveName, pStartposSource)`): the second
+  argument is an object pointer, not a bool: null writes a save (root node `CAMPAIGN_SAVE_GAME`,
+  path of write class 0), non-null writes `%Scampaigns/%S/startpos.esf` (root `CAMPAIGN_STARTPOS`,
+  plus `0x008EC2F0` on that object). Then the `BUILD` node, the save info (`0x00888320`,
+  `0x008908D0`) and the campaign records; on any failure the file is deleted (file system
+  vtable+0x14). The save panel and QuickSave both pass null.
+- Ghidra (V5, all completeness ≥70): `CAMPAIGNUI_SaveCampaign` `0x009F4A20`,
+  `CAMPAIGNUI_GetDefaultSaveName` `0x009E22C0`, `BuildDefaultSaveName` `0x009D5400`,
+  `CAMPAIGNUI_GetCurrentGameInfo` `0x009E4BB0` (function created), `SaveCampaignGameToFile`
+  `0x00A1F000`, `SCRIPT_DisableSavingGame` `0x0097B840` (created), `CAMPAIGNUI_GetMultiplayerPlayersName`
+  `0x009EE550`, `CAMPAIGNUI_LoadNewestSaveQuick` `0x009EF420` (created),
+  `CAMPAIGNUI_WriteQuickSaveOrSendMpCommand` `0x009EF470` (created); global
+  `g_dwEsfWriterOpenSize` `0x01458838` (1000000, the writer-open size argument).
+- Still open: the other `0x008BE4A0` fields CanSave tests; reading `text\default_keys.xml` for the
+  bindings; the round-description loc id per turn (above).
 
 ## 6. Region labels on the campaign map (slot campaign-ui, branch `work/campaign-ui`, 2026-10-05)
 

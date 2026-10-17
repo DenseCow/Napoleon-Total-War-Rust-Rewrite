@@ -96,7 +96,7 @@ Tags used below:
 | W1 §12.9 xholds tiers and outcome 0x00DAA290 | `melee::xholds_tier`, `outcome_for_roll`, `resolve_blow` | CONFIRMED (one roll per blow, which is tested) |
 | W1 §12.9 roll 0x00DADB20 | `melee::roll_1000` | CONFIRMED |
 | W1 §12.9 pair selection 0x006AFE20 (priority, weights, roll #1, defender rolls, attackers_on_target) | `melee::priority`, `selection_weight`, `pick_weighted`, `pick_index`, `select_pair` | CONFIRMED order. The binary-search tie and fallthrough rule is INFERRED. |
-| Encounter `dir` 0x006AD890 | `model::melee_dir` | PLACEHOLDER (angle vs facing: 45° and 135°) |
+| Encounter `dir` 0x006AD890 | `model::melee_dir` | CONFIRMED from the disassembly (under 0.1 m front; 45° and 135° split; flank side by world x). The `acos` CRT call is INFERRED. The battle AI's potentials `0x006AFC00`/`0x006B06F0` call it too. |
 | W1 §12.7 tweak defaults | `autoresolve::AutoresolveTweaks::default` | CONFIRMED |
 | W1 §12.7 kill rates 0x0078D200 | `autoresolve::kill_rates` | CONFIRMED |
 | W1 §12.7 engagement loop 0x00759860 | `autoresolve::engage` | Per-step loss and clamp CONFIRMED. Fuzz use, rout test, summing melee and missile, and the result codes are INFERRED/PLACEHOLDER. `shaken` is unused. |

@@ -14,8 +14,8 @@
 //!   the doc comment of `Battle::melee_step` for exactly what is approximated.
 //!
 //! What is **PLACEHOLDER** (our own simple stand-ins, to be replaced):
-//! - Movement (straight lines), how attack direction is classified, the casualty-ratio
-//!   bookkeeping, and treating each unit's fatigue as a single representative soldier.
+//! - Movement (straight lines), the casualty-ratio bookkeeping, and treating each unit's fatigue
+//!   as a single representative soldier.
 
 use std::collections::BTreeSet;
 
@@ -25,7 +25,7 @@ use super::fatigue::{self, FatigueAction, FatigueEffects, FatigueInputs, Fatigue
 use super::ground::{BattleGround, MovementClass};
 use super::melee::{self, BlowOutcome, Combatant, EncounterMember, MeleeDir, MeleeInputs};
 use super::morale::{
-    self, AttackDirection, Attacker, KvMorale, MoraleBehaviour, MoraleComponent, MoraleInputs,
+    self, Attacker, KvMorale, MoraleBehaviour, MoraleComponent, MoraleInputs,
     MoraleState,
 };
 use super::rules::KvRules;
@@ -118,8 +118,15 @@ pub struct LandUnit {
     pub deceleration: f32,
     /// Each man's radius in metres: the soldier's `+0x620`, which the soldier set-up `0x0061CB90`
     /// sets from `+0x58`, column 12 of the `battle_entities` record his unit builds its men from
-    /// (unit `+0x60`, pushed at `0x0051C09B`; men 0.35). CONFIRMED. The measured box adds twice the
-    /// largest to each extent ([`super::march::SquadBox`]). Unit stat input; 0 without entity data.
+    /// (unit `+0x60`, pushed at `0x0051C09B`; men 0.35). The copy at `0x0061D2D8` is CONFIRMED;
+    /// INFERRED that nothing else rewrites a plain (0x660-byte) soldier's `+0x620`: a scan for direct
+    /// stores to `[reg+0x620]` finds 24 besides `0x0061D2D8` and `0x00607540`, none traced to a
+    /// soldier (UNITS_TERRAIN_FIDELITY.md "The radius grown over attached entities"). The measured
+    /// box adds twice the largest to each extent ([`super::march::SquadBox`]). Unit stat
+    /// input; 0 without entity data. PROVISIONAL: `0x00607540` grows `+0x620` of the 0x6C8-byte
+    /// soldier objects to cover their attached entities; ours keeps the man's own radius, and which
+    /// units those objects are and whether their squad box reads them is UNKNOWN
+    /// (UNITS_TERRAIN_FIDELITY.md "The radius grown over attached entities").
     pub man_radius: f32,
     /// The ground speed (m/s) the unit moved at in its last tick (the soldier's `+0x194`): the
     /// speed the next tick's change starts from ([`step_speed`]). 0 when it stopped.
@@ -162,6 +169,9 @@ pub struct LandUnit {
     pub out_of_contact_ticks: u32,
     /// In square (combatant `+0x54`).
     pub in_square: bool,
+    /// The squad's attacker list (unit `+0xADC → +0x74C`), committed at each update of a unit with
+    /// men ([`Battle::fill_attackers`]); the morale reads it ([`Battle::morale_inputs`]).
+    pub attackers: super::attackers::AttackerList,
     /// Blows this unit has resolved as attacker (statistics counter `unit+0xBF0`, W1 §12.9).
     pub blows_resolved: u32,
     /// `+0x180`: morale stat added to `morale_base`.
@@ -354,6 +364,7 @@ impl LandUnit {
             left_field: false,
             out_of_contact_ticks: 0,
             in_square: false,
+            attackers: Default::default(),
             blows_resolved: 0,
             morale_stat: 0,
             attributes: UnitAttributes::default(),
@@ -610,8 +621,12 @@ pub struct Battle {
 /// True if every living man of `u` where he stands ([`LandUnit::men_standing`]) has his circle
 /// inside the area `[min x, min y, max x, max y]`, edges included: the soldier test of `0x005857A0`
 /// (CONFIRMED: `min ≤ p − r` and `p + r ≤ max` on both axes, `0x0058582D` / `0x00585831`). True
-/// without men, as the exe's empty loop. INFERRED: the soldier's circle radius (`+0x58`) is the man
-/// radius the squad box reads ([`LandUnit::man_radius`], soldier `+0x620`).
+/// without men, as the exe's empty loop. Ours tests `+0x58` itself: each man's radius comes from
+/// `+0x58`'s source, `battle_entities` column 12. For a plain soldier it equals the squad box's
+/// [`LandUnit::man_radius`] (soldier `+0x620`): equal at set-up (CONFIRMED, the copy at `0x0061D2D8`
+/// in `0x0061CB90`); stays equal afterwards INFERRED (no other writer identified; see the field
+/// doc); for a 0x6C8-byte
+/// object the two differ (`0x00607540` grows `+0x620` over the attached entities at `+0x674`).
 fn men_inside(u: &LandUnit, a: [f32; 4]) -> bool {
     u.men_standing().all(|m| {
         let r = m.radius;
@@ -1227,6 +1242,8 @@ impl Battle {
         // `0x00580A30`, `march`).
         let tick = self.tick;
         self.units[idx].refresh_summary(tick);
+        // The attacker list's commit comes next (`0x00551A40` at `0x00580B85`, CONFIRMED static).
+        self.fill_attackers(idx);
         self.units[idx].reslot_tick(tick);
         let pos = self.units[idx].position;
         let Some((goal, speed, is_order)) = self.movement_goal(idx) else {
@@ -1493,24 +1510,20 @@ impl Battle {
         let u = &self.units[idx];
         let max = u.max_men.max(1) as f32;
         let total = 1.0 - u.men as f32 / max;
-        // PLACEHOLDER: attackers = fighting enemies in contact; direction from the angle between our
-        // facing and the attacker (front within 45°, rear beyond 135°, flank otherwise).
-        let mut attackers = Vec::new();
-        for e in &self.units {
-            if e.side == u.side
-                || e.is_out_of_fight()
-                || !e.active
-                || dist2(u.position, e.position) > MELEE_CONTACT_RANGE * MELEE_CONTACT_RANGE
-            {
+        // Every entry of the committed attacker list (`0x0053C720`, CONFIRMED: no filter on the
+        // entry), its direction from the two summary boxes (`0x0057F310`).
+        let entries = u.attackers.entries();
+        let (own_box, in_square) = (u.squad_box(), super::strength::square_active(u));
+        let mut attackers = Vec::with_capacity(entries.len());
+        for entry in entries {
+            // Units are never removed from `units`, so every entry's unit is there.
+            let Some(e) = self.unit_index(entry.unit).map(|j| &self.units[j]) else {
+                debug_assert!(false, "attacker {} is not in the battle", entry.unit);
                 continue;
-            }
-            let direction = match melee_dir(u.position, u.facing, e.position) {
-                MeleeDir::Front => AttackDirection::Front,
-                MeleeDir::FlankLeft | MeleeDir::FlankRight => AttackDirection::Flank,
-                MeleeDir::Rear => AttackDirection::Rear,
             };
-            // The attacker's charge test and riding test (`0x0055AC20`, `0x0055C2A0`, CONFIRMED
-            // in `0x0053C720`).
+            let direction = super::attackers::attack_direction(&own_box, in_square, e.squad_box().centre);
+            // The attacker's charge test (`0x0055AC20`; its link to `e.charging` is INFERRED, see
+            // `MoraleInputs`/morale.rs) and riding test (`0x0055C2A0`, CONFIRMED in `0x0053C720`).
             attackers.push(Attacker {
                 id: e.id,
                 direction,
@@ -1874,6 +1887,13 @@ impl Battle {
             // The idle reform gate's state (`march::LandUnit::idle_gate`).
             h.u32(u.march.in_place_at);
             h.u32(u.march.idle_reformed as u32);
+            // The committed attacker list (`attackers::AttackerList`, squad `+0x74C`).
+            h.u32(u.attackers.entries().len() as u32);
+            for a in u.attackers.entries() {
+                h.u32(a.unit);
+                h.u32(a.contacts);
+                h.u32(a.updates);
+            }
             // The box measured from the men (`march::SquadBox`, squad summary `+0x62C`).
             match u.march.measured {
                 None => h.u32(0),
@@ -2728,6 +2748,7 @@ mod combatant_fatigue_tests {
         let mut hussars = LandUnit::new(1, 1, 120, (0.0, 5.0));
         hussars.unit_category = "cavalry".into();
         b.add_unit(hussars);
+        b.fill_attackers(0);
         let i = b.morale_inputs(0);
         assert!(!i.riding && !i.square_formation);
         assert_eq!(i.attackers.len(), 1);
@@ -2745,6 +2766,68 @@ mod combatant_fatigue_tests {
         b.units[0].active_abilities = 1 << DISMOUNT;
         b.units[1].active_abilities = 1 << DISMOUNT;
         assert!(!b.morale_inputs(0).attackers[0].riding);
+    }
+
+    #[test]
+    fn attacker_list_holds_the_enemies_in_contact() {
+        // 0x0052EDB0 / 0x00551A40: enemy men within both radii + 2 m of one of ours count, each
+        // once; the list is rebuilt at every commit; friends never count.
+        use crate::battle::attackers::AttackerEntry;
+        use crate::battle::morale::AttackDirection;
+        let mut b = Battle::new(1, KvMorale::default(), KvFatigue::default());
+        for (id, side, x) in [(0, 0, 0.0), (1, 1, 200.0), (2, 0, 400.0)] {
+            let mut u = LandUnit::new(id, side, 16, (x, 0.0));
+            u.man_radius = 0.5;
+            u.place_at((x, 0.0), 0.0);
+            b.add_unit(u);
+        }
+        let men = |b: &Battle, i: usize| b.units[i].men_standing().map(|m| m.pos).collect::<Vec<_>>();
+        let reach = 0.5 + 0.5 + crate::battle::attackers::CONTACT_MARGIN_M;
+        // The nearest enemy man stands 1 m beyond reach of our nearest man, then just within it.
+        let gap = |b: &Battle, a: usize, e: usize| {
+            men(b, a).iter().flat_map(|p| men(b, e).into_iter().map(move |q| dist2(*p, q).sqrt())).fold(f32::INFINITY, f32::min)
+        };
+        let shift = |b: &mut Battle, i: usize, dx: f32| {
+            let u = &mut b.units[i];
+            let (p, f) = (u.position, u.facing);
+            u.place_at((p.0 + dx, p.1), f);
+        };
+        let d = gap(&b, 0, 1);
+        shift(&mut b, 1, reach + 1.0 - d);
+        b.fill_attackers(0);
+        assert!(b.units[0].attackers.entries().is_empty());
+        shift(&mut b, 1, -1.01);
+        b.fill_attackers(0);
+        let in_reach = men(&b, 1).iter().filter(|q| men(&b, 0).iter().any(|p| dist2(*p, **q) <= reach * reach)).count() as u32;
+        assert!((1..16).contains(&in_reach), "{in_reach}");
+        assert_eq!(b.units[0].attackers.entries(), [AttackerEntry { unit: 1, contacts: in_reach, updates: 0 }]);
+        // Overlapping men: every enemy man counts once, however many of ours touch him.
+        let p0 = b.units[0].position;
+        let dx = p0.0 - b.units[1].position.0;
+        shift(&mut b, 1, dx);
+        b.fill_attackers(0);
+        assert_eq!(b.units[0].attackers.entries(), [AttackerEntry { unit: 1, contacts: 16, updates: 1 }]);
+        // A friend on top of us does not count.
+        let dx = p0.0 - b.units[2].position.0;
+        shift(&mut b, 2, dx);
+        b.fill_attackers(0);
+        assert_eq!(b.units[0].attackers.entries(), [AttackerEntry { unit: 1, contacts: 16, updates: 2 }]);
+        // Out of reach again: the list is empty at the next commit.
+        shift(&mut b, 1, 100.0);
+        b.fill_attackers(0);
+        assert!(b.units[0].attackers.entries().is_empty());
+        // The morale reads the list with `0x0057F310`: an enemy behind the line (facing +x, its
+        // box's front) is a rear attacker.
+        let (p, f) = (b.units[0].position, b.units[0].facing);
+        b.units[1].place_at((p.0 - 3.0, p.1), f);
+        b.fill_attackers(0);
+        let i = b.morale_inputs(0);
+        assert_eq!(i.attackers.len(), 1);
+        assert_eq!(i.attackers[0].direction, AttackDirection::Rear);
+        // A step commits it in the unit's own update.
+        b.units[1].place_at((p.0 + 500.0, p.1), f);
+        b.step();
+        assert!(b.units[0].attackers.entries().is_empty());
     }
 
     #[test]

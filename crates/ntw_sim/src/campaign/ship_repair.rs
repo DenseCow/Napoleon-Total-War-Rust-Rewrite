@@ -482,7 +482,7 @@ mod tests {
         // Sea in x 0..9 (the port at (5, 5) lies in it), the coast at x 9..10, land from x 10.
         let mut grid = super::super::pathing::PathGrid::new((0.0, 0.0), 2.0, 10, 6);
         grid.poly = Some(super::super::embark::tests::coast_map());
-        m.terrain = Some(super::super::world::Terrain(Arc::new(grid)));
+        m.attach_terrain(super::super::world::Terrain(Arc::new(grid)));
         let army = ForceId(1000);
         let general = m.world.forces[&army].commander.unwrap();
         m.world.characters.get_mut(&general).unwrap().position = at(PORT);

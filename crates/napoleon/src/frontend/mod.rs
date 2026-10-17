@@ -197,7 +197,7 @@ fn pointer(
 
 /// The engine's key names (CONFIRMED in the scripts: ESCAPE and RETURN, which the pages steal;
 /// BACK, DELETE, LEFT, RIGHT, HOME, END, which template.text_input.lua edits with).
-fn key_name(k: KeyCode) -> Option<&'static str> {
+pub(crate) fn key_name(k: KeyCode) -> Option<&'static str> {
     Some(match k {
         KeyCode::Escape => "ESCAPE",
         KeyCode::Enter | KeyCode::NumpadEnter => "RETURN",

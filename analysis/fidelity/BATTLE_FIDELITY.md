@@ -1338,7 +1338,11 @@ comment.
   (soldier `+0x19C`, set by `0x0081AC80` from the ground grid, or from the building it stands on):
   - artillery with guns (`0x0055AB90`): `artillery_foot` → column 0, `artillery_horse` → column 1, others → 1.0;
   - mounted (`0x0055ABF0` / `0x0055C2A0`: cavalry, camels, dragoons not dismounted) → column 2 (dismounted → 3);
-  - infantry and the rest (`0x0055C1C0`) → column 3.
+  - on foot (`0x0055C1C0`: category infantry 2, artillery 1 without guns, or `dismount` active) → column 3;
+  - anything else (elephants, naval) → 1.0. All four tests key on the category (`+0x2C → +0x1C`), never on
+    the unit's mounts, so a mounted infantry-category unit takes column 3 (`strength::built_movement_class`,
+    re-checked 2026-10-17; before, setup gave a unit with mounts column 2 and any other non-artillery unit, elephants included, column 3; now elephants get none (1.0); no vanilla
+    unit differs, install test `movement_class_from_the_category_matches_vanilla`).
 
   It multiplies the soldier speed `+0x1A4`. `MovementClass` now follows this. Before, infantry used column 2 and
   cavalry column 1.
@@ -1350,8 +1354,10 @@ comment.
 - **On the field (CONFIRMED, `0x005857A0`, update slot 2).** Unit `+0xAA0` becomes 1 once every soldier's circle
   (position, radius `+0x58`) is inside the playable area (battle `+0x84..+0x8C`). It becomes 2 when a leaving unit
   has a soldier outside. Reinforcements now join that way, and leaving units leave that way (`Battle::leave_step`): ours
-  tests each man's standing place with the man radius (unit `+0x620`); that the soldier's `+0x58` holds the same value is
-  INFERRED (both are the unit's man size; not traced). The bounds are inclusive (`CMPLEPS` at `0x0058582D` / `0x00585831`).
+  tests each man's standing place with his radius from `+0x58`'s source (`battle_entities` column 12), which is what
+  `0x005857A0` tests. The soldier's `+0x620` (the squad box's man radius) is a copy of `+0x58` for a plain soldier
+  (`0x0061D2D8`) and grown over attached entities for a 0x6C8-byte object (`0x00607540`; UNITS_TERRAIN_FIDELITY.md).
+  The bounds are inclusive (`CMPLEPS` at `0x0058582D` / `0x00585831`).
 - **Update slot 4 (CONFIRMED, `0x005828A0`).** It decrements the unit's under-fire timers (`+0xC80/+0xC84/+0xC88`) and
   computes a casualty-rate state.
 - **Garrison slot radius (`0x00E619D0`).** It is the largest radius `+0x4C` over the `battle_entities` records (table

@@ -173,19 +173,49 @@ fn read_trade(esf: &EsfFile, model: &mut CampaignModel) {
             }
         }
     }
+    // One entry per segment, so the entries keep the segments' indices (the legs' spline ids name them).
+    let mut bad_curves = 0usize;
     for it in t.record_array("TRADE_SEGMENTS").into_iter().flat_map(|a| a.items.iter()) {
-        let Some(li) = it.iter().position(|c| matches!(c, EsfNode::Record(r) if r.name == "LINE_OF_SIGHT")) else { continue };
-        let Some(los) = it[li].as_record() else { continue };
-        let cells = if los.get(0).and_then(EsfNode::as_bool) == Some(true) {
-            los.child("QUAD_TREE_BIT_ARRAY").and_then(decode).map(|c| c.cells().collect()).unwrap_or_default()
-        } else {
+        let curves = segment_curves(it).unwrap_or_else(|| {
+            bad_curves += 1;
             Vec::new()
+        });
+        let Some(li) = it.iter().position(|c| matches!(c, EsfNode::Record(r) if r.name == "LINE_OF_SIGHT")) else {
+            model.world.trade_sight.push(TradeSegmentSight { curves, ..Default::default() });
+            continue;
+        };
+        let cells = match it[li].as_record() {
+            Some(los) if los.get(0).and_then(EsfNode::as_bool) == Some(true) => {
+                los.child("QUAD_TREE_BIT_ARRAY").and_then(decode).map(|c| c.cells().collect()).unwrap_or_default()
+            }
+            _ => Vec::new(),
         };
         let ids = |k: usize| li.checked_sub(k).and_then(|i| it[i].as_u32_array()).unwrap_or(&[]);
         model.world.trade_sight.push(TradeSegmentSight {
             cells,
             domestic: ids(4).iter().filter_map(|i| domestic.get(i).copied()).collect(),
             international: ids(3).iter().filter_map(|i| international.get(i).copied()).collect(),
+            curves,
         });
     }
+    if bad_curves > 0 {
+        log::warn!("load: {bad_curves} TRADE_SEGMENTS item(s) without their curves (u32 n + 4n coord2d); they draw no trade line and take no raid");
+    }
+}
+
+/// A `TRADE_SEGMENTS[]` item's curves: after the `COMMERCE_RAIDS[]` array, a u32 n and 4n coord2d (n
+/// cubic Bézier curves of four control points). `None` when the item does not hold that shape.
+fn segment_curves(it: &[EsfNode]) -> Option<Vec<[(f32, f32); 4]>> {
+    let start = it.iter().position(|c| c.as_u32().is_some())?;
+    let n = it[start].as_u32()? as usize;
+    let points: Vec<(f32, f32)> = it
+        .iter()
+        .skip(start + 1)
+        .take(4 * n)
+        .map_while(|c| match c {
+            EsfNode::Coord2d(x, y) => Some((*x, *y)),
+            _ => None,
+        })
+        .collect();
+    (points.len() == 4 * n).then(|| points.as_chunks::<4>().0.to_vec())
 }

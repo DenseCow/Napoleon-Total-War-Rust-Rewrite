@@ -77,7 +77,7 @@ impl Install {
     fn new_campaign(&self) -> ScriptHost {
         let mut loaded = ntw_campaign::read(&self.startpos, &self.db).expect("startpos");
         assert!(loaded.set_human(HUMAN));
-        loaded.model.terrain = Some(self.terrain.clone());
+        loaded.model.attach_terrain(self.terrain.clone());
         if let Some(nd) = &self.names {
             ntw_campaign::names::attach_data(&mut loaded.model, nd);
         }
@@ -735,6 +735,12 @@ mod bisect {
         }
         m.world.relationships = after.world.relationships.clone();
         m.world.trade_accumulated = after.world.trade_accumulated.clone();
+        for (pair, paths) in m.world.trade_paths.iter_mut() {
+            let Some(a) = after.world.trade_paths.get(pair) else { continue };
+            for (p, q) in paths.iter_mut().zip(a).filter(|(p, q)| p.waypoints == q.waypoints) {
+                p.accumulated = q.accumulated;
+            }
+        }
         m.world.bankrupt_turns = after.world.bankrupt_turns.clone();
         format!("{stances} stance changes")
     }

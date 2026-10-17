@@ -36,7 +36,7 @@ fn main() {
     let mut loaded = ntw_campaign::read(&startpos, &db).expect("startpos");
     assert!(loaded.set_human(&human), "no faction {human}");
     let map = CampaignMap::load(&files, &loaded.info.map_key).expect("map");
-    loaded.model.terrain = Some(Terrain(Arc::new(ntw_campaign::pathing::build_grid(&map))));
+    loaded.model.attach_terrain(Terrain(Arc::new(ntw_campaign::pathing::build_grid(&map))));
     let source = ScriptSource::from_install(&dir).expect("scripts");
     let mut host = ScriptHost::new(loaded.model, &human, source).expect("script host");
     if let Err(e) = host.load_campaign(&campaign) {

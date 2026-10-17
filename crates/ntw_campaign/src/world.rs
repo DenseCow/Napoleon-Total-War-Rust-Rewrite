@@ -74,7 +74,7 @@ pub(crate) fn load_world(
         rebel_faction = Some(rf.faction.id);
         raw.push(rf);
     }
-    // Turn order: FACTION_ARRAY order, then the rebels (INFERRED, see `World::turn_order`).
+    // Turn order: FACTION_ARRAY order, then the rebels (CONFIRMED, `0x0090BEB0`; see `World::turn_order`).
     for rf in &raw {
         if !world.turn_order.contains(&rf.faction.id) {
             world.turn_order.push(rf.faction.id);

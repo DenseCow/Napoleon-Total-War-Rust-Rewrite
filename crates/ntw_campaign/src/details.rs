@@ -34,18 +34,20 @@ fn s(n: Option<&EsfNode>) -> String {
 /// `HISTORICAL_CHARACTER_MANAGER/CREATED_CHARACTER_ARRAY[]` {utf16 key} (the historical characters
 /// already made; kept sorted as the exe's list is), and `EPISODIC_RESTRICTIONS` #20 / #22 (the
 /// `force_assassination_success_for_human` / `force_garrison_infiltration_success_for_human`
-/// switches; CONFIRMED positions from the loader `0x009968A0`, both false in every vanilla save).
-pub(crate) fn model_extras(model_rec: &EsfRecord) -> (Vec<String>, (bool, bool)) {
+/// switches; CONFIRMED positions from the loader `0x009968A0`, both false in every vanilla save) and
+/// #25 (`disable_saving_game`, campaign +0x115, read by the same loader for versions above 0xB;
+/// CONFIRMED position, false in the vanilla saves). An older record (version 0xB or below) has no
+/// #25: the loader leaves the flag false, so ours reads it only above 0xB.
+pub(crate) fn model_extras(model_rec: &EsfRecord) -> (Vec<String>, (bool, bool), bool) {
     let mut created: Vec<String> = model_rec
         .child("HISTORICAL_CHARACTER_MANAGER")
         .map(|m| items(m, "CREATED_CHARACTER_ARRAY").filter_map(|it| it.first()?.as_str().map(str::to_string)).collect())
         .unwrap_or_default();
     created.sort();
-    let switches = model_rec
-        .child("EPISODIC_RESTRICTIONS")
-        .map(|e| (e.get_bool(20).unwrap_or(false), e.get_bool(22).unwrap_or(false)))
-        .unwrap_or((false, false));
-    (created, switches)
+    let restrictions = model_rec.child("EPISODIC_RESTRICTIONS");
+    let flag = |i: usize| restrictions.and_then(|e| e.get_bool(i)).unwrap_or(false);
+    let saving_disabled = restrictions.is_some_and(|e| e.version > 0xB) && flag(25);
+    (created, (flag(20), flag(22)), saving_disabled)
 }
 
 /// `CHARACTER` → its details (`CHARACTER_DETAILS` v3 at #1, post id at #8).
@@ -367,4 +369,24 @@ pub(crate) fn read_family(fam: &EsfRecord) -> Option<ntw_sim::campaign::family::
         .filter_map(|it| Some((loc_strings(it.first()).into_iter().next().unwrap_or_default(), it.get(1)?.as_i32()?)))
         .collect();
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn model_with_restrictions(version: u8) -> EsfRecord {
+        let restrictions = EsfRecord { name: "EPISODIC_RESTRICTIONS".into(), version, children: vec![EsfNode::Bool(true); 26] };
+        EsfRecord { name: "CAMPAIGN_MODEL".into(), version: 0, children: vec![EsfNode::Record(Box::new(restrictions))] }
+    }
+
+    /// `disable_saving_game` (#25) is read only from a record above version 0xB (the loader
+    /// `0x009968A0` reads campaign +0x115 only then); #20 / #22 are read at any version.
+    #[test]
+    fn the_saving_switch_needs_a_record_above_version_0xb() {
+        let (_, forced, saving_disabled) = model_extras(&model_with_restrictions(0xC));
+        assert_eq!((forced, saving_disabled), ((true, true), true));
+        let (_, forced, saving_disabled) = model_extras(&model_with_restrictions(0xB));
+        assert_eq!((forced, saving_disabled), ((true, true), false));
+    }
 }

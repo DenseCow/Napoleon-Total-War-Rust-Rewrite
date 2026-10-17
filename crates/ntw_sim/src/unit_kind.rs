@@ -158,6 +158,39 @@ pub fn category(key: &str) -> Category {
     Category::of_key(key).unwrap_or(FALLBACK_CATEGORY)
 }
 
+/// Class code of `artillery_fixed` in [`ORIGINAL_CLASSES`].
+pub const ARTILLERY_FIXED: u8 = 0;
+/// Class code of `artillery_foot` in [`ORIGINAL_CLASSES`].
+pub const ARTILLERY_FOOT: u8 = 1;
+/// Class code of `artillery_horse` in [`ORIGINAL_CLASSES`].
+pub const ARTILLERY_HORSE: u8 = 2;
+/// Class code of `cavalry_heavy` in [`ORIGINAL_CLASSES`].
+pub const CAVALRY_HEAVY: u8 = 4;
+/// Class code of `cavalry_lancers` in [`ORIGINAL_CLASSES`].
+pub const CAVALRY_LANCERS: u8 = 6;
+/// Class code of `cavalry_light` in [`ORIGINAL_CLASSES`].
+pub const CAVALRY_LIGHT: u8 = 7;
+/// Class code of `cavalry_missile` in [`ORIGINAL_CLASSES`].
+pub const CAVALRY_MISSILE: u8 = 8;
+/// Class code of `cavalry_standard` in [`ORIGINAL_CLASSES`].
+pub const CAVALRY_STANDARD: u8 = 9;
+/// Class code of `dragoons` in [`ORIGINAL_CLASSES`].
+pub const DRAGOONS: u8 = 10;
+/// Class code of `general` in [`ORIGINAL_CLASSES`].
+pub const GENERAL: u8 = 12;
+/// Class code of `infantry_elite` in [`ORIGINAL_CLASSES`].
+pub const INFANTRY_ELITE: u8 = 0xE;
+/// Class code of `infantry_light` in [`ORIGINAL_CLASSES`].
+pub const INFANTRY_LIGHT: u8 = 0x11;
+/// Class code of `infantry_line` in [`ORIGINAL_CLASSES`].
+pub const INFANTRY_LINE: u8 = 0x12;
+/// Class code of `infantry_melee` in [`ORIGINAL_CLASSES`].
+pub const INFANTRY_MELEE: u8 = 0x13;
+/// Class code of `infantry_militia` in [`ORIGINAL_CLASSES`].
+pub const INFANTRY_MILITIA: u8 = 0x14;
+/// Class code of `infantry_skirmishers` in [`ORIGINAL_CLASSES`].
+pub const INFANTRY_SKIRMISHERS: u8 = 0x16;
+
 /// The class code of a `units` class key (`0x00EED3E0`): its place in [`ORIGINAL_CLASSES`], an
 /// unknown key 0.
 pub fn class_code(key: &str) -> u8 {
@@ -179,6 +212,32 @@ pub fn unknown_categories<'a>(keys: impl IntoIterator<Item = &'a str>) -> Vec<&'
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The class constants name their [`ORIGINAL_CLASSES`] entries.
+    #[test]
+    fn class_constants_match_the_class_table() {
+        assert_eq!(ORIGINAL_CLASSES[ARTILLERY_FOOT as usize], "artillery_foot");
+        assert_eq!(ORIGINAL_CLASSES[ARTILLERY_HORSE as usize], "artillery_horse");
+        for (code, key) in [
+            (ARTILLERY_FIXED, "artillery_fixed"),
+            (CAVALRY_MISSILE, "cavalry_missile"),
+            (INFANTRY_MELEE, "infantry_melee"),
+            (CAVALRY_HEAVY, "cavalry_heavy"),
+            (CAVALRY_LANCERS, "cavalry_lancers"),
+            (CAVALRY_LIGHT, "cavalry_light"),
+            (CAVALRY_STANDARD, "cavalry_standard"),
+            (DRAGOONS, "dragoons"),
+            (GENERAL, "general"),
+            (INFANTRY_ELITE, "infantry_elite"),
+            (INFANTRY_LIGHT, "infantry_light"),
+            (INFANTRY_LINE, "infantry_line"),
+            (INFANTRY_MILITIA, "infantry_militia"),
+            (INFANTRY_SKIRMISHERS, "infantry_skirmishers"),
+        ] {
+            assert_eq!(ORIGINAL_CLASSES[code as usize], key);
+            assert_eq!(class_code(key), code);
+        }
+    }
 
     /// The codes are the exe's (`0x00EED2B0` / `0x00EED3E0` listings): the enum order, the fallbacks,
     /// exact case.

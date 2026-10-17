@@ -34,7 +34,7 @@ fn main() {
     let vfs = Vfs::open_install(&dir).expect("packs");
     let map = CampaignMap::load(&GameFiles { vfs: &vfs }, &loaded.info.map_key).expect("map");
     let mut m = loaded.model;
-    m.terrain = Some(Terrain(Arc::new(ntw_campaign::pathing::build_grid(&map))));
+    m.attach_terrain(Terrain(Arc::new(ntw_campaign::pathing::build_grid(&map))));
     let ctx = driver::context_for(&m, "eur_napoleon");
     for _ in 0..turns {
         driver::end_turn(&mut m, &data, &ctx);

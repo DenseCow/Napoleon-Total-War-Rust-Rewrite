@@ -1218,7 +1218,7 @@ deal-region, 2026-10-10, below "Region value").
   `0x00CF8400` → `0x00CC3E00`; the goal keeps its own deal). Each goal is built only when
   `0x00CCB150(AI, proposer, index)` passes: neither side's `diplomacy_options` for the index forbids
   it (AI→proposer not 2 or 3, proposer→AI not 1 or 3). All are made with weight 0.
-  - **List 1** (`0x00CC13D0(proposer, out, core)`, what the AI would ask of the proposer): trade,
+  - **List 1** (`BuildAiDealGoalsAskedOfFaction` `0x00CC13D0(proposer, out, core)`, what the AI would ask of the proposer): trade,
     alliance, access (by turns), protector, peace, join war, break trade/alliance as possible; **one
     region goal per region of the proposer's CAI region list** (CAI faction `+0x114`) that is not its
     owner's capital (`0x00A8B5A0`, the check `tradeable_regions` uses) and whose CAI region `+0x12C`

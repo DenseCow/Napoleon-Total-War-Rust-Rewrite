@@ -11,7 +11,10 @@
 //! 1. the queued transfers whose receiver is the starting faction are carried out (`0x00BA90E0` →
 //!    `0x00BCA430` → `0x00B58A30`): the region changes hands when its owner is still the one it had
 //!    when the transfer was queued and it is still [transferable](transferable); every such entry
-//!    leaves the queue either way;
+//!    leaves the queue either way. An entry whose receiver is out of the game stays queued (and saved):
+//!    the turn passes over that faction (`0x00948CF0`, [`CampaignModel::takes_turns`]), so it starts no
+//!    turn until it re-emerges, and nothing else purges the queue (CONFIRMED: its only other users are
+//!    the step that queues and the save code);
 //! 2. when the ending faction is human and the starting one is not (`0x00BC6DF0`), the director's
 //!    pool runs (`0x00BA9220` via `0x008F1F40`, loop `0x00BBC880`): the beliefs (each faction's
 //!    rival score, [`rival_score`]) are refreshed, then the desires in score order; the
@@ -284,7 +287,8 @@ impl DirectorRules {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PendingTransfer {
-    /// The faction that receives the region at its next turn start.
+    /// The faction that receives the region at its next turn start (an entry waits while the
+    /// receiver is out of the game, which starts no turn).
     pub receiver: FactionId,
     /// The region.
     pub region: RegionId,
@@ -396,11 +400,6 @@ pub struct Candidate {
     pub receiver: FactionId,
     /// The weight: the receiver's rival score, times the uber modifier for an uber faction.
     pub weight: f32,
-}
-
-/// A major power (faction +0x524, `0x00C3FB20`).
-fn is_major(model: &CampaignModel, f: FactionId) -> bool {
-    model.world.faction_details.get(&f).and_then(|d| d.major) == Some(true)
 }
 
 /// On the director's uber list (`0x00BB5480`; the list `0x00BAE300` holds the factions whose
@@ -535,7 +534,7 @@ fn rival_score_in(model: &CampaignModel, areas: &[Area], f: FactionId) -> f32 {
     let campaign = model.rules.campaign.as_str();
     let pct = |v: &str| rules.float(campaign, v) as f64;
     let (relation_pct, victory_pct, proximity_pct) = (pct(RIVAL_RELATION_PCT), pct(RIVAL_VICTORY_REGIONS_PCT), pct(RIVAL_PROXIMITY_PCT));
-    let weight = if is_major(model, f) { 1.0 } else { pct(RIVAL_MINOR_FACTION_WEIGHT) };
+    let weight = if model.is_major(f) { 1.0 } else { pct(RIVAL_MINOR_FACTION_WEIGHT) };
     let mine: Vec<RegionId> = model.world.regions.values().filter(|r| r.owner == f).map(|r| r.id).collect();
     // The areas linked to its regions' areas, each once (seas included: they count in the share's
     // denominator, never in its numerator).
@@ -663,7 +662,7 @@ fn transferable_at(model: &CampaignModel, areas: &[Area], i: usize) -> bool {
     let area = &areas[i];
     let Some(reg) = area.region else { return false };
     let owner = reg.owner;
-    if !model.world.factions.contains_key(&owner) || is_major(model, owner) || model.is_human(owner) || human_in(model, area) {
+    if !model.world.factions.contains_key(&owner) || model.is_major(owner) || model.is_human(owner) || human_in(model, area) {
         return false;
     }
     for link in area.links.iter().filter_map(|&j| areas.get(j)) {
@@ -697,7 +696,7 @@ pub fn candidates(model: &CampaignModel) -> (Vec<Candidate>, f32) {
         let Some(reg) = area.region.filter(|_| transferable_at(model, &areas, i)) else { continue };
         for n in area.links.iter().filter_map(|&j| areas.get(j)?.region) {
             let o = n.owner;
-            if o == reg.owner || !model.world.factions.contains_key(&o) || !is_major(model, o) || model.is_human(o) || !believes_at_war(model, reg.owner, o) {
+            if o == reg.owner || !model.world.factions.contains_key(&o) || !model.is_major(o) || model.is_human(o) || !believes_at_war(model, reg.owner, o) {
                 continue;
             }
             let mut weight = *scores.entry(o).or_insert_with(|| rival_score_in(model, &areas, o));
@@ -1659,7 +1658,7 @@ mod tests {
         grid.kind[0] = super::super::pathing::CellKind::Sea as u8;
         grid.region[0] = 0;
         grid.region_keys = vec!["sea".into()];
-        at_sea.terrain = Some(super::super::world::Terrain(Arc::new(grid)));
+        at_sea.attach_terrain(super::super::world::Terrain(Arc::new(grid)));
         let admiral = at_sea.world.characters.get_mut(&CharacterId(100)).unwrap();
         (admiral.position, admiral.garrisoned_in) = ((Fixed20::from_int(0), Fixed20::from_int(0)), None);
         assert!(candidates(&at_sea).0.is_empty());
@@ -1776,6 +1775,31 @@ mod tests {
         let mut other = m.clone();
         other.director.transfer_counter += 1;
         assert_ne!(other.state_hash(), m.state_hash());
+    }
+
+    /// A queued transfer to a faction out of the game stays in the queue: the turn passes over that
+    /// faction (`0x00948CF0`), so it never starts a turn and `0x00BA90E0` never serves it; once it
+    /// is back in the game, its next turn start serves the entry.
+    #[test]
+    fn a_transfer_to_a_faction_out_of_the_game_waits_for_it_to_come_back() {
+        let mut m = world("0.0");
+        m.world.faction_details.entry(C).or_default().out_of_game = Some(true);
+        let entry = PendingTransfer { receiver: C, region: RegionId(11), queued_owner: B };
+        m.director.pending = vec![entry];
+        m.start_campaign();
+        for _ in 0..2 {
+            let events = m.apply(CampaignCommand::EndTurn).unwrap();
+            assert!(!events.iter().any(|e| matches!(e, CampaignEvent::FactionTurnStart { faction } if *faction == C)));
+            assert!(events.iter().any(|e| matches!(e, CampaignEvent::FactionTurnStart { faction } if *faction == B)));
+            assert_eq!(m.turn.current, Some(A));
+            assert_eq!(m.director.pending, vec![entry]);
+        }
+        // A liberation brings C back (`0x008AE6E0` clears +0x824).
+        m.reemerge_faction(C, B, true, &mut Vec::new());
+        assert!(m.in_the_game(C));
+        let events = m.apply(CampaignCommand::EndTurn).unwrap();
+        assert!(events.iter().any(|e| matches!(e, CampaignEvent::FactionTurnStart { faction } if *faction == C)));
+        assert!(!m.director.pending.contains(&entry));
     }
 
     #[test]

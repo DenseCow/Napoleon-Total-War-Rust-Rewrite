@@ -4,8 +4,11 @@
 //! [FACTION_INTERNATIONAL_TRADE_ROUTES_ARRAY] of `INTERNATIONAL_TRADE_ROUTE` v3}. A route record is
 //! written by `0x00AFD490` (CONFIRMED field order): u32 `n` (+0xC) and `n` waypoints {i32 region
 //! id, coord, u32, u32, bool}, bool (+0x14, the capital port flag: `TradePath::capital_port`), u32[] (+0x24), seven u32 (+0x28 .. +0x40), u32[],
-//! u32 count with its items, i32. +0x3C is the accumulated value: the round-end accumulator
-//! `0x00B05CC0` adds to it (CONFIRMED), so it is child `5n + 8`. The importer is the owner of the
+//! u32 count with its items (the commerce-raid list +0x58..+0x64: per entry i32 amount, u32 raiding
+//! faction's saved id; the reader `0x00AEC420` reads it for record versions above 1, CONFIRMED; not
+//! modelled, see `economy::trade_pair_value`), i32. +0x3C is the accumulated value: the round-end
+//! accumulator `0x00B05CC0` adds to it (CONFIRMED), so it is child `5n + 8`, kept per route
+//! (`TradePath::accumulated`). The importer is the owner of the
 //! last waypoint's region (INFERRED from the layout; `trade_check` measures how often it is a model
 //! trade partner).
 
@@ -38,8 +41,10 @@ pub struct Route {
     pub exporter: FactionId,
     /// The region of the last waypoint.
     pub last_region: RegionId,
-    /// The accumulated value (+0x3C).
-    pub accumulated: u32,
+    /// The accumulated value (+0x3C, an `int` stored as a u32 node: see [`accumulated_i32`]).
+    pub accumulated: i32,
+    /// The length of the commerce-raid list (+0x60, the u32 count after the u32[] at +0x4C), if the record has one.
+    pub raids: Option<u32>,
 }
 
 impl Route {
@@ -67,27 +72,25 @@ pub fn routes(esf: &EsfFile) -> Vec<Route> {
         for r in it.iter().filter_map(EsfNode::as_record_array).flat_map(|a| a.records()) {
             let Some(n) = waypoints(r).filter(|&n| n > 0) else { continue };
             let last = r.get_i32(1 + 5 * (n - 1)).unwrap_or(0) as u32;
-            out.push(Route { exporter, last_region: RegionId(last), accumulated: r.get_u32(accumulated_index(n)).unwrap_or(0) });
+            out.push(Route { exporter, last_region: RegionId(last), accumulated: accumulated_i32(r.get_u32(accumulated_index(n)).unwrap_or(0)), raids: r.get_u32(5 * n + 11) });
         }
     }
     out
 }
 
-/// The model's `trade_accumulated` from a save: the routes' accumulated values summed per
-/// (exporter, importer).
-pub fn read_accumulated(esf: &EsfFile, m: &CampaignModel) -> BTreeMap<(FactionId, FactionId), i32> {
-    let mut out: BTreeMap<(FactionId, FactionId), i32> = BTreeMap::new();
-    for r in routes(esf) {
-        if let Some(i) = r.importer(m) {
-            let e = out.entry((r.exporter, i)).or_insert(0);
-            *e = e.saturating_add(r.accumulated.min(i32::MAX as u32) as i32);
-        }
-    }
-    out
+/// A stored accumulated value as the model's `i32`. The route's +0x3C is an `int` (the accumulator
+/// `0x00B05CC0` adds a truncated `int` to it) that the saver `0x00AFD490` writes as its 4 raw bytes
+/// under the u32 node tag (8) and the reader `0x00AEC420` reads back the same way (CONFIRMED; the
+/// record signature of the 12 evidence saves has a u32 there): the node holds the int's bits, so both ways are a bit
+/// cast, every value fits and nothing is clamped ([`accumulated_u32`]).
+fn accumulated_i32(v: u32) -> i32 {
+    v as i32
 }
 
-/// A route in the tree: (item, array/record position, pair, waypoints, stored value).
-type RouteAt = (usize, usize, (FactionId, FactionId), usize, u32);
+/// The model's accumulated value as the record's u32 node: the bit cast back of [`accumulated_i32`].
+fn accumulated_u32(v: i32) -> u32 {
+    v as u32
+}
 
 /// Writes the commodity market back into `CAMPAIGN_TRADE_MANAGER` (CONFIRMED layout, `0x00BCB020`;
 /// read by [`read_paths`]): #3 f32[] price factors, #4 u32[] current prices, #5 the price two rounds
@@ -121,10 +124,25 @@ pub(crate) fn write_market(model_rec: &mut EsfRecord, m: &CampaignModel) {
     put_u32(t, 7, &mk.trend);
 }
 
-/// Writes the model's `trade_accumulated` into the routes of a save tree (the CAMPAIGN_MODEL
-/// record): for each (exporter, importer) the change from the stored sum goes to its first route,
-/// so pairs with several routes keep their split and an unchanged model writes the file back
-/// byte for byte.
+/// Whether a stored route record has the waypoints of a model route (region, nodes, sea hop), as
+/// [`read_paths`] reads them.
+fn same_waypoints(r: &EsfRecord, n: usize, path: &TradePath) -> bool {
+    path.waypoints.len() == n
+        && path.waypoints.iter().enumerate().all(|(k, w)| {
+            let b = 1 + 5 * k;
+            r.get_i32(b) == Some(w.region.0 as i32)
+                && r.get_u32(b + 2).unwrap_or(u32::MAX) == w.from
+                && r.get_u32(b + 3).unwrap_or(u32::MAX) == w.to
+                && r.get(b + 4).and_then(EsfNode::as_bool).unwrap_or(false) == w.sea
+        })
+}
+
+/// Writes each model route's accumulated value ([`TradePath::accumulated`], +0x3C) into its record
+/// in a save tree (the CAMPAIGN_MODEL record). A record is matched to the first model route of its
+/// (exporter, importer) pair with the same waypoints not matched yet, so routes the model removed
+/// (their records stay: this writer adds or removes no route) and repeated paths keep their own
+/// values; an unchanged model writes the file back byte for byte. A pair's built route
+/// (`World::trade_accumulated`) has no record and is not written.
 pub(crate) fn write_accumulated(model_rec: &mut EsfRecord, m: &CampaignModel) {
     let Some(t) = model_rec.children.iter_mut().find_map(|c| match c {
         EsfNode::Record(r) if r.name == "CAMPAIGN_TRADE_MANAGER" => Some(&mut **r),
@@ -132,40 +150,34 @@ pub(crate) fn write_accumulated(model_rec: &mut EsfRecord, m: &CampaignModel) {
     }) else {
         return;
     };
-    // Stored sums per pair.
-    let mut stored: BTreeMap<(FactionId, FactionId), i64> = BTreeMap::new();
-    let mut first: BTreeMap<(FactionId, FactionId), (usize, usize)> = BTreeMap::new();
     let Some(EsfNode::RecordArray(routes)) = t.children.iter_mut().find(|c| matches!(c, EsfNode::RecordArray(a) if a.name == "INTERNATIONAL_TRADE_ROUTES")) else { return };
-    // (item, array/record position, pair, waypoints, stored value)
-    let mut pairs: Vec<RouteAt> = Vec::new();
-    for (i, it) in routes.items.iter().enumerate() {
+    // The model routes already matched, per pair.
+    let mut used: BTreeMap<(FactionId, FactionId), Vec<bool>> = BTreeMap::new();
+    for it in routes.items.iter_mut() {
         let Some(key) = it.first().and_then(EsfNode::as_str) else { continue };
         let Some(exporter) = m.faction_by_key(key).map(|f| f.id) else { continue };
-        for (j, r) in it.iter().enumerate().filter_map(|(j, n)| n.as_record_array().map(|a| (j, a))).flat_map(|(j, a)| a.records().enumerate().map(move |(k, r)| ((j, k), r))) {
-            let Some(n) = waypoints(r).filter(|&n| n > 0) else { continue };
-            let last = RegionId(r.get_i32(1 + 5 * (n - 1)).unwrap_or(0) as u32);
-            let Some(importer) = m.world.governing_faction(last) else { continue };
-            let acc = r.get_u32(accumulated_index(n)).unwrap_or(0);
-            *stored.entry((exporter, importer)).or_default() += i64::from(acc);
-            first.entry((exporter, importer)).or_insert((i, j.0 * 1_000_000 + j.1));
-            pairs.push((i, j.0 * 1_000_000 + j.1, (exporter, importer), n, acc));
-        }
-    }
-    for (i, jk, pair, n, acc) in pairs {
-        if first.get(&pair) != Some(&(i, jk)) {
-            continue;
-        }
-        let want = i64::from(m.world.trade_accumulated.get(&pair).copied().unwrap_or(0));
-        let new = (i64::from(acc) + want - stored[&pair]).clamp(0, i64::from(u32::MAX)) as u32;
-        if new == acc {
-            continue;
-        }
-        let (j, k) = (jk / 1_000_000, jk % 1_000_000);
-        if let Some(EsfNode::RecordArray(a)) = routes.items[i].get_mut(j)
-            && let Some(EsfNode::Record(r)) = a.items.get_mut(k).and_then(|item| item.first_mut())
-            && let Some(slot @ EsfNode::U32(_)) = r.children.get_mut(accumulated_index(n))
-        {
-            *slot = EsfNode::U32(new);
+        for a in it.iter_mut().filter_map(|c| match c {
+            EsfNode::RecordArray(a) => Some(a),
+            _ => None,
+        }) {
+            for r in a.items.iter_mut().filter_map(|item| match item.first_mut() {
+                Some(EsfNode::Record(r)) => Some(&mut **r),
+                _ => None,
+            }) {
+                let Some(n) = waypoints(r).filter(|&n| n > 0) else { continue };
+                let last = RegionId(r.get_i32(1 + 5 * (n - 1)).unwrap_or(0) as u32);
+                let Some(importer) = m.world.governing_faction(last) else { continue };
+                let Some(paths) = m.world.trade_paths.get(&(exporter, importer)) else { continue };
+                let taken = used.entry((exporter, importer)).or_insert_with(|| vec![false; paths.len()]);
+                let Some(i) = (0..paths.len()).find(|&i| !taken[i] && same_waypoints(r, n, &paths[i])) else { continue };
+                taken[i] = true;
+                let want = accumulated_u32(paths[i].accumulated);
+                if let Some(EsfNode::U32(v)) = r.children.get_mut(accumulated_index(n))
+                    && *v != want
+                {
+                    *v = want;
+                }
+            }
         }
     }
 }
@@ -238,7 +250,8 @@ pub fn read_paths(esf: &EsfFile, m: &CampaignModel) -> (PairPaths, Vec<u32>) {
                 .collect();
             let volumes = r.get(5 * n + 2).and_then(EsfNode::as_u32_array).map(<[u32]>::to_vec).unwrap_or_default();
             let capital_port = r.get(5 * n + 1).and_then(EsfNode::as_bool).unwrap_or(false);
-            out.entry((exporter, importer)).or_default().push(TradePath { waypoints, volumes, capital_port });
+            let accumulated = accumulated_i32(r.get_u32(accumulated_index(n)).unwrap_or(0));
+            out.entry((exporter, importer)).or_default().push(TradePath { waypoints, volumes, capital_port, accumulated });
         }
     }
     (out, prices)
@@ -297,7 +310,7 @@ pub fn read_domestic(esf: &EsfFile, m: &CampaignModel) -> BTreeMap<FactionId, Ve
                     }
                 })
                 .collect();
-            entry.push(TradePath { waypoints, volumes: volumes.to_vec(), capital_port: false });
+            entry.push(TradePath { waypoints, volumes: volumes.to_vec(), capital_port: false, accumulated: 0 });
         }
     }
     out
@@ -316,14 +329,29 @@ pub fn read_network(esf: &EsfFile, m: &mut CampaignModel) {
         .flat_map(|a| a.items.iter())
         .filter_map(|it| it.first()?.as_str().map(str::to_string))
         .collect();
+    let (mut dropped, mut partial) = (0usize, 0usize);
     let legs: Vec<TradeLeg> = t
         .record_array("TRADE_ROUTES")
         .into_iter()
         .flat_map(|a| a.items.iter())
         .filter_map(|it| {
-            Some(TradeLeg { from: it.first()?.as_u32()?, to: it.get(1)?.as_u32()?, length: it.get(3).and_then(EsfNode::as_f32).unwrap_or(0.0) })
+            let (Some(from), Some(to)) = (it.first().and_then(EsfNode::as_u32), it.get(1).and_then(EsfNode::as_u32)) else {
+                dropped += 1;
+                return None;
+            };
+            let length = it.get(3).and_then(EsfNode::as_f32);
+            let splines = it.get(2).and_then(EsfNode::as_u32_array);
+            if length.is_none() || splines.is_none() {
+                partial += 1;
+            }
+            Some(TradeLeg { from, to, length: length.unwrap_or(0.0), splines: splines.map(<[u32]>::to_vec).unwrap_or_default() })
         })
         .collect();
+    if dropped > 0 || partial > 0 {
+        log::warn!(
+            "load: TRADE_ROUTES: {dropped} leg(s) without their nodes skipped, {partial} without their splines or length (no segments, length 0)"
+        );
+    }
     let nodes: Vec<TradeNode> = t
         .record_array("TRADE_NODES")
         .into_iter()

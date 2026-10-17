@@ -137,8 +137,9 @@ impl CampaignModel {
     ///    deletes each one's army or navy) and every character dies ([`Self::character_dies`]; no post is
     ///    refilled, see [`Self::refill_post`]); the town slots of other factions' regions it held go back
     ///    to their region's owner (`0x00B1B010` with the owner read through the slot's +0x38 object,
-    ///    INFERRED to be its region). A human faction keeps its forces and characters (the exe's
-    ///    campaign-over flag `0x008C30A0` and its multiplayer messages are not modelled);
+    ///    INFERRED to be its region). A human faction keeps its forces and characters, and the
+    ///    campaign is over ([`Self::end_campaign`], `0x008C30A0` from `0x008AB6C0` when the faction is
+    ///    human, CONFIRMED; the exe's multiplayer messages are not modelled);
     /// 4. [`CampaignEvent::FactionDestroyed`] (the exe's event +0x108).
     ///
     /// Called only for a faction left with no region (see [`Self::end_if_capital_lost`]): the exe's
@@ -185,6 +186,8 @@ impl CampaignModel {
                     s.holder = None;
                 }
             }
+        } else {
+            self.end_campaign();
         }
         events.push(CampaignEvent::FactionDestroyed { faction });
     }

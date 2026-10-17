@@ -378,6 +378,16 @@ fn dispatch(lua: &Lua, s: &Shared, name: &'static str, args: &MultiValue) -> mlu
             st.log.push(text);
         }
 
+        // disable_saving_game(on): CONFIRMED (`0x0097B840`, one boolean read with default false,
+        // stored at campaign +0x115): while set, the save refuses (`0x00A1F000`) and
+        // `CampaignUI.CanSave` answers false. Tutorial only.
+        "disable_saving_game" => {
+            let on = arg_bool(args, 1);
+            let mut st = s.borrow_mut();
+            st.model.world.saving_disabled = on;
+            st.log.push(text);
+        }
+
         // trigger_custom_mission(key, faction, type, 0, target, heading, text, reward_text, 0, "",
         // context, bool, rewards...) (W3 §7, CONFIRMED argument layout). Recorded only:
         // PLACEHOLDER, missions are not tracked or rewarded yet.

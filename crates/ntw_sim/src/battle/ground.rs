@@ -59,7 +59,10 @@ pub const GROUND_TYPE_NAMES: [&str; 25] = [
 ///   (`+0x14`) while it also rides and is not dismounted (`0x0055C2A0` at `0x006544AB`), else
 ///   column 3 (see [`super::strength::movement_class`]);
 /// - infantry, gun crews without guns and dismounted units (`0x0055C1C0`): column 3 (`+0x18`);
-/// - anything else, or a ground index ≥ 25: 1.0.
+/// - anything else (elephants, naval), or a ground index ≥ 25: 1.0.
+///
+/// A unit is built with [`super::strength::built_movement_class`] (the category alone, not its
+/// mounts).
 ///
 /// The soldier's speed `+0x1A4` is multiplied by it (and by the unit type's fatigue speed factor
 /// `+0xE4 + fatigue state × 4`, `0x00649520`, while `+0x220 > 0`; not modelled).
@@ -75,7 +78,8 @@ pub enum MovementClass {
     /// Infantry (and dismounted units, crews without guns): column 3.
     #[default]
     Infantry,
-    /// Other artillery with guns (`artillery_fixed`): no modifier.
+    /// Other artillery with guns (`artillery_fixed`) and the categories with no column
+    /// (elephants, naval): no modifier.
     Fixed,
 }
 

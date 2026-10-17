@@ -168,54 +168,11 @@ impl ScriptHost {
         self.run_file(&format!("data/campaigns/{campaign}/scripting.lua"))
     }
 
-    /// The event-handler table: `package.loaded["data.events"]` (the module that `events.lua`
-    /// declares and every script appends to), else the global `events` (INFERRED).
-    fn events_table(&self) -> Result<Option<Table>, ScriptError> {
-        let package: Table = self.lua.globals().get("package")?;
-        let loaded: Table = package.get("loaded")?;
-        if let Value::Table(t) = loaded.get::<Value>("data.events")? {
-            return Ok(Some(t));
-        }
-        Ok(match self.lua.globals().get::<Value>("events")? {
-            Value::Table(t) => Some(t),
-            _ => None,
-        })
-    }
-
     /// Fires script event `name`: calls every function in `events[name]`, in list order, with a
     /// `context` object (W3 §6.2, CONFIRMED mechanism; order INFERRED). The list is copied before
     /// the calls, so handlers added or removed during the event take effect next time (INFERRED).
     pub fn fire(&self, name: &str, ctx: ScriptContext) -> FireReport {
-        let mut report = FireReport::default();
-        let handlers: Vec<Function> = match self.events_table() {
-            Ok(Some(events)) => match events.get::<Value>(name) {
-                Ok(Value::Table(list)) => {
-                    (1..=list.raw_len()).filter_map(|i| list.raw_get::<Function>(i).ok()).collect()
-                }
-                _ => Vec::new(),
-            },
-            Ok(None) => Vec::new(),
-            Err(e) => {
-                report.errors.push(e.to_string());
-                Vec::new()
-            }
-        };
-        let ud = match self.lua.create_userdata(ctx) {
-            Ok(ud) => ud,
-            Err(e) => {
-                report.errors.push(e.to_string());
-                return report;
-            }
-        };
-        for f in handlers {
-            report.handlers += 1;
-            if let Err(e) = f.call::<()>(ud.clone()) {
-                let msg = format!("{name}: {e}");
-                game::log(&self.state, format!("SCRIPT ERROR {msg}"));
-                report.errors.push(msg);
-            }
-        }
-        report
+        fire_in(&self.lua, &self.state, name, ctx)
     }
 
     /// Ends the turn in the model and forwards every resulting script event to Lua, in the order
@@ -399,7 +356,8 @@ impl ScriptHost {
             CampaignEvent::StanceChanged { .. } => {}
             CampaignEvent::GovernmentChanged { .. }
             | CampaignEvent::ConstructionItemDropped { .. }
-            | CampaignEvent::FactionDestroyed { .. } => {}
+            | CampaignEvent::FactionDestroyed { .. }
+            | CampaignEvent::Message { .. } => {}
         }
         c
     }
@@ -421,9 +379,7 @@ impl ScriptHost {
 
     /// Fires `SavingGame` and returns the values the scripts saved with `save_value`, in order.
     pub fn save_values(&mut self) -> (Vec<ScriptValue>, FireReport) {
-        self.state.borrow_mut().saved_values.clear();
-        let report = self.fire("SavingGame", ScriptContext::default());
-        (std::mem::take(&mut self.state.borrow_mut().saved_values), report)
+        save_values_in(&self.lua, &self.state)
     }
 
     /// Queues `values` for `load_value` and fires `LoadingGame`. Marks the game as not new.
@@ -463,6 +419,92 @@ impl ScriptHost {
     pub fn lua(&self) -> &Lua {
         &self.lua
     }
+
+    /// A cheap handle on this host's Lua state and script state, for code that lives beside the
+    /// host and must fire events while the host itself is owned elsewhere (the campaign HUD's save
+    /// callback fires `SavingGame`, see [`ScriptHandle`]).
+    pub fn handle(&self) -> ScriptHandle {
+        ScriptHandle { lua: self.lua.clone(), state: self.state.clone() }
+    }
+}
+
+/// A clone of a [`ScriptHost`]'s Lua state and script state ([`ScriptHost::handle`]): fires events
+/// and reads the state like the host does, without owning it. Same rule as the host: never hold a
+/// borrow of the state across a call that runs Lua.
+#[derive(Clone)]
+pub struct ScriptHandle {
+    lua: Lua,
+    state: Shared,
+}
+
+impl ScriptHandle {
+    /// [`ScriptHost::fire`].
+    pub fn fire(&self, name: &str, ctx: ScriptContext) -> FireReport {
+        fire_in(&self.lua, &self.state, name, ctx)
+    }
+
+    /// [`ScriptHost::save_values`].
+    pub fn save_values(&self) -> (Vec<ScriptValue>, FireReport) {
+        save_values_in(&self.lua, &self.state)
+    }
+
+    /// [`ScriptHost::state`].
+    pub fn state(&self) -> Ref<'_, ScriptState> {
+        self.state.borrow()
+    }
+}
+
+/// The event-handler table: `package.loaded["data.events"]` (the module that `events.lua`
+/// declares and every script appends to), else the global `events` (INFERRED).
+fn events_table(lua: &Lua) -> Result<Option<Table>, ScriptError> {
+    let package: Table = lua.globals().get("package")?;
+    let loaded: Table = package.get("loaded")?;
+    if let Value::Table(t) = loaded.get::<Value>("data.events")? {
+        return Ok(Some(t));
+    }
+    Ok(match lua.globals().get::<Value>("events")? {
+        Value::Table(t) => Some(t),
+        _ => None,
+    })
+}
+
+/// [`ScriptHost::fire`] on a Lua state and its script state.
+fn fire_in(lua: &Lua, state: &Shared, name: &str, ctx: ScriptContext) -> FireReport {
+    let mut report = FireReport::default();
+    let handlers: Vec<Function> = match events_table(lua) {
+        Ok(Some(events)) => match events.get::<Value>(name) {
+            Ok(Value::Table(list)) => (1..=list.raw_len()).filter_map(|i| list.raw_get::<Function>(i).ok()).collect(),
+            _ => Vec::new(),
+        },
+        Ok(None) => Vec::new(),
+        Err(e) => {
+            report.errors.push(e.to_string());
+            Vec::new()
+        }
+    };
+    let ud = match lua.create_userdata(ctx) {
+        Ok(ud) => ud,
+        Err(e) => {
+            report.errors.push(e.to_string());
+            return report;
+        }
+    };
+    for f in handlers {
+        report.handlers += 1;
+        if let Err(e) = f.call::<()>(ud.clone()) {
+            let msg = format!("{name}: {e}");
+            game::log(state, format!("SCRIPT ERROR {msg}"));
+            report.errors.push(msg);
+        }
+    }
+    report
+}
+
+/// Fires `SavingGame` and returns the values the scripts saved with `save_value`, in order.
+fn save_values_in(lua: &Lua, state: &Shared) -> (Vec<ScriptValue>, FireReport) {
+    state.borrow_mut().saved_values.clear();
+    let report = fire_in(lua, state, "SavingGame", ScriptContext::default());
+    (std::mem::take(&mut state.borrow_mut().saved_values), report)
 }
 
 /// Loads a chunk: source text as it is, bytecode after [`luac::convert_chunk`].

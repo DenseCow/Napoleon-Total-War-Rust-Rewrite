@@ -509,6 +509,8 @@ impl CampaignModel {
         };
         self.name_new_unit(fid, uid);
         self.update_hidden(c);
+        // `HireGeneral` `0x00A164C0` → `0x00A285C0`: the force's zones again.
+        self.rebuild_force_zones(fid);
         Ok(vec![CampaignEvent::CharacterHired { character: c, force: fid, cost }])
     }
 
@@ -557,6 +559,8 @@ impl CampaignModel {
         if let Some(old) = old {
             self.character_dies(old);
         }
+        // The fleet's commander picked again (`0x008B8E50` → `0x008F9400`): its zones again.
+        self.rebuild_force_zones(fleet);
         self.update_hidden(c);
         Ok(vec![CampaignEvent::CharacterHired { character: c, force: fleet, cost }])
     }
@@ -644,6 +648,8 @@ impl CampaignModel {
         if let Some(x) = self.world.forces.get_mut(&force) {
             x.commander = Some(c);
         }
+        // He commands the force (`0x008E1C20` / `0x008E2260` → `0x00A285C0`): its zones again.
+        self.rebuild_force_zones(force);
         self.update_sight_radius(c);
         self.update_hidden(c);
         Ok(vec![CampaignEvent::CharacterPromoted { character: c }])

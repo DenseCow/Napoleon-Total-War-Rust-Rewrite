@@ -742,6 +742,12 @@ impl UiScriptHost {
         *self.inner.focus.borrow()
     }
 
+    /// True while a component that takes the focus holds it (a text field being typed into): the
+    /// same test [`Self::text_input`] and [`Self::key`] make before they deliver to it.
+    pub fn text_focused(&self) -> bool {
+        (*self.inner.focus.borrow()).is_some_and(|f| accepts_focus(&self.inner, f))
+    }
+
     /// Fires a layout event on a component (e.g. `"OnMouseLClickUp"`).
     pub fn fire(&self, id: NodeId, event: &str) {
         let func = self.inner.world.borrow().get(id).and_then(|n| n.data.event(event).map(str::to_owned));

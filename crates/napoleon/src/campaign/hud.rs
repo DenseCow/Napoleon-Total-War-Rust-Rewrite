@@ -9,7 +9,11 @@
 //!   here through `CampaignSim`, so the campaign scripts see every event;
 //! - the map selection (`CampaignSim::selected` / `selected_region` / `selected_fort`) is sent to the HUD, which
 //!   fills the selection bar and the review panel (unit cards, ...);
-//! - clicks on HUD components send `audio::UiSound` like the front end.
+//! - clicks on HUD components send `audio::UiSound` like the front end;
+//! - keys: the focused text field and the components that steal keys first, then the original's
+//!   campaign shortcuts (save, load, escape menu) through the root's `OnShortcut` ([`keys`]);
+//! - the scripts' load requests (`UiRequest::LoadCampaign`, from the save panel or quick load)
+//!   reload the campaign ([`requests`]).
 
 use std::rc::Rc;
 
@@ -22,7 +26,7 @@ use ntw_formats::pack::Vfs;
 use ntw_script::ScriptSource;
 use ntw_script::ui::{CampaignLink, CampaignRequest, CampaignSelection, FrontEndFacts, NodeId, PointerEvent, UiScriptHost};
 
-use super::play::{CampaignSim, month_name};
+use super::play::CampaignSim;
 use crate::GameMode;
 use crate::data::GameData;
 use crate::frontend::render::{UiAssets, UiSprite, spawn_world, ui_rect_to_window, ui_scale, ui_to_window, ui_virtual_screen, window_to_ui};
@@ -43,6 +47,12 @@ pub struct CampaignHud {
     /// A camera move the HUD asked for (`CampaignUI.SetCameraTarget`, e.g. a radar click), in
     /// map units, applied by `labels`.
     camera_to: Option<Vec2>,
+    /// True when a key pressed this frame went to a HUD component (a focused text field, or a
+    /// component that stole it), set by [`keys`]: the map's own keys (Return = end turn) leave it.
+    pub keys_taken: bool,
+    /// True while a HUD text field holds the input focus (the save panel's name), set by [`keys`]:
+    /// the camera's key pans and zooms leave the keys to it ([`super::camera::control`]).
+    pub text_focused: bool,
 }
 
 impl CampaignHud {
@@ -85,16 +95,23 @@ pub fn enter(world: &mut World) {
     let db = Rc::new(world.resource::<GameData>().db.clone());
     let Some(link) = world.get_non_send::<CampaignSim>().map(|sim| CampaignLink {
         state: sim.host.shared_state(),
-        human: sim.human.clone(),
-        campaign: sim.campaign.clone(),
-        map: sim.info.map_key.clone(),
-        theatres: sim.info.theatres().map(str::to_owned).collect(),
+        human: sim.human().to_owned(),
+        campaign: sim.campaign().to_owned(),
+        map: sim.saver.info.map_key.clone(),
+        theatres: sim.saver.info.theatres().map(str::to_owned).collect(),
         db,
+        saves: Some(sim.saver.clone() as Rc<dyn ntw_script::ui::CampaignSaves>),
     }) else {
         warn!("Campaign HUD: no campaign running");
         return;
     };
-    let facts = FrontEndFacts { game_version: "1.3.0".into(), user_dir: crate::config::user_dir(), ..Default::default() };
+    // Both user folders: the save panel lists our saves and the original's (`frontend::SaveFolders`).
+    let facts = FrontEndFacts {
+        game_version: "1.3.0".into(),
+        original_user_dir: crate::config::original_user_dir(),
+        user_dir: crate::config::user_dir(),
+        ..Default::default()
+    };
     // The scripts lay the HUD out in the virtual screen of the original UI scale (see `ui_scale`).
     let virt = ui_virtual_screen(screen);
     let host = match UiScriptHost::new(source, loc, facts, (virt.x, virt.y), world.resource::<GameData>().db.limits.clone()) {
@@ -145,12 +162,23 @@ pub fn enter(world: &mut World) {
         clock_ms: 0.0,
         panels: Vec::new(),
         camera_to: None,
+        keys_taken: false,
+        text_focused: false,
     });
 }
 
+/// The scripts' log lines, each once (the host's log is drained): errors as warnings, the save
+/// functions' own results (`QuickLoad` with no save, a `SaveCampaign` the campaign script switched
+/// off) as info, the rest at debug level, as the front end does.
 fn log_errors(host: &UiScriptHost) {
-    for l in host.take_log().into_iter().filter(|l| l.starts_with("ERROR")) {
-        warn!("Campaign HUD script: {l}");
+    for l in host.take_log() {
+        if l.starts_with("ERROR") {
+            warn!("Campaign HUD script: {l}");
+        } else if l.starts_with("QuickLoad") || l.starts_with("SaveCampaign") {
+            info!("Campaign HUD script: {l}");
+        } else {
+            debug!("Campaign HUD script: {l}");
+        }
     }
 }
 
@@ -166,6 +194,87 @@ fn log_errors(host: &UiScriptHost) {
 fn advance_ui_clock(clock_ms: &mut f64, real: &Time<Real>) -> f64 {
     *clock_ms += real.delta_secs_f64() * 1000.0;
     *clock_ms
+}
+
+/// Keyboard → the HUD, like the front end's `keys`: typed text and the editing keys go to the
+/// focused text field (the save panel's name), a key a component stole goes to its `OnKey`. Then the
+/// campaign's shortcuts of `text/default_keys.xml` (CONFIRMED bindings, read 2026-10-16:
+/// `escape_menu` = ESCAPE with any modifier, `quick_save` = CTRL+S, `quick_load` = CTRL+L) go to the
+/// root's `OnShortcut` ([`UiScriptHost::campaign_shortcut`]), whose script decides (quick save only
+/// when `CanSave()`). INFERRED: an ESCAPE the HUD took (a focused field or a component that stole
+/// it) does not also open the escape menu; the engine's dispatch order between the two is not
+/// traced. PROVISIONAL: the bindings are written here, not read from `default_keys.xml`, and CTRL+S
+/// / CTRL+L match whatever other modifiers are held, except ALT: CTRL+ALT is AltGr on many layouts,
+/// whose characters (`@`, `{`, `€`...) are typed text, not shortcuts. Harness runs ignore the
+/// keyboard. Last, [`CampaignHud::text_focused`] records whether a text field holds the focus.
+pub fn keys(
+    hud: Option<NonSendMut<CampaignHud>>,
+    mut input: MessageReader<bevy::input::keyboard::KeyboardInput>,
+    held: Res<ButtonInput<KeyCode>>,
+    harness: Option<Res<crate::frontend::AutoScreenshot>>,
+) {
+    let Some(mut hud) = hud else { return };
+    hud.keys_taken = false;
+    if harness.is_some() {
+        hud.text_focused = false;
+        input.clear();
+        return;
+    }
+    // CTRL without ALT is the shortcut modifier (CTRL+ALT is AltGr, which types characters).
+    let alt = held.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
+    let ctrl = held.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]) && !alt;
+    for ev in input.read() {
+        if !ev.state.is_pressed() {
+            continue;
+        }
+        let shortcut = match ev.key_code {
+            KeyCode::KeyS if ctrl => Some("quick_save"),
+            KeyCode::KeyL if ctrl => Some("quick_load"),
+            _ => None,
+        };
+        if let Some(name) = shortcut {
+            if !ev.repeat {
+                hud.host.campaign_shortcut(name);
+            }
+            continue;
+        }
+        if let Some(name) = crate::frontend::key_name(ev.key_code) {
+            // ESCAPE / RETURN act once per press (no repeat); editing keys repeat.
+            if ev.repeat && matches!(name, "ESCAPE" | "RETURN") {
+                continue;
+            }
+            if hud.host.key(name) {
+                hud.keys_taken = true;
+            } else if name == "ESCAPE" {
+                hud.host.campaign_shortcut("escape_menu");
+            }
+        } else if let Some(text) = &ev.text
+            && !ctrl
+            && hud.host.text_input(text)
+        {
+            hud.keys_taken = true;
+        }
+    }
+    hud.text_focused = hud.host.text_focused();
+    log_errors(&hud.host);
+}
+
+/// The scripts' requests outside the HUD (`UiRequest`): a load (`CampaignUI.LoadCampaign` from the
+/// save panel, `QuickLoad`) reloads the campaign from that save, as the front end's Load Game does
+/// (`CampaignStart` + `GameMode::Campaign`, which leaves and re-enters the campaign). The other
+/// requests are the front end's and have no meaning here: logged.
+pub fn requests(mut commands: Commands, hud: Option<NonSend<CampaignHud>>) {
+    let Some(hud) = hud else { return };
+    for r in hud.host.take_requests() {
+        match r {
+            ntw_script::ui::UiRequest::LoadCampaign(path) => {
+                info!("Campaign: load {}", path.display());
+                commands.insert_resource(super::CampaignStart { campaign: String::new(), faction: None, save: Some(path) });
+                commands.queue(|world: &mut World| world.resource_mut::<NextState<GameMode>>().set(GameMode::Campaign));
+            }
+            other => warn!("Campaign HUD: request {other:?} is not handled in the campaign"),
+        }
+    }
 }
 
 /// Mouse → HUD components (like the front end's pointer system). Harness runs ignore the mouse.
@@ -263,13 +372,7 @@ pub fn update(hud: Option<NonSendMut<CampaignHud>>, sim: Option<NonSend<Campaign
         return;
     }
     hud.sim_generation = sim.generation;
-    let (month, half) = {
-        let d = sim.model().calendar.date;
-        (d.month, d.half)
-    };
-    // PROVISIONAL round text "Early/Late <month>" (the original's loc key is not found yet).
-    let round = format!("{} {}", if half == 0 { "Early" } else { "Late" }, month_name(month));
-    hud.host.campaign_update_funds(&round);
+    hud.host.campaign_update_funds();
     let sel = match (sim.selected, sim.selected_region, sim.selected_fort) {
         (Some(c), ..) => CampaignSelection::Character(c),
         (None, Some(r), _) => CampaignSelection::Settlement(r),
@@ -347,7 +450,7 @@ pub struct Harness {
 /// `selectfort:<region key>` step selects that region's fort instead, `selectchar:<name>` one of the
 /// player's characters; a `shot:<name>` step writes a screenshot to the `--campaign-ui-proof`
 /// folder, default `target/tmp/ui_proof`). `--campaign-quick-save`
-/// writes the F5 quick save after all that (for testing our saves in the original game). All only
+/// presses the CTRL+S quick save after all that (for testing our saves in the original game). All only
 /// run with `--screenshot`.
 pub fn harness(
     mut commands: Commands,
@@ -461,7 +564,7 @@ pub fn harness(
         } else if let Some(key) = id.strip_prefix("owner:") {
             let m = sim.model();
             let owner = m.world.regions.values().find(|r| r.key == key).and_then(|r| m.world.factions.get(&r.owner)).map(|f| f.key.clone());
-            info!("Proof: {key} is owned by {owner:?}, capture waiting: {}, treasury {}", m.pending_capture.is_some(), m.faction_by_key(&sim.human).map_or(0, |f| f.treasury));
+            info!("Proof: {key} is owned by {owner:?}, capture waiting: {}, treasury {}", m.pending_capture.is_some(), m.faction_by_key(sim.human()).map_or(0, |f| f.treasury));
         } else {
             click(&mut hud, &id, &mut sounds);
             apply_requests(&mut hud, &mut sim);
@@ -470,7 +573,11 @@ pub fn harness(
     }
     if st.quick_save {
         st.quick_save = false;
-        super::play::quick_save(&mut sim);
+        // The CTRL+S shortcut, as a player would press it (the root decides, `CanSave()`).
+        if !hud.host.campaign_shortcut("quick_save") {
+            warn!("Harness: the campaign root has no OnShortcut");
+        }
+        log_errors(&hud.host);
         shot.secs = 0.0;
     }
 }
@@ -576,7 +683,7 @@ fn select_character(sim: &mut CampaignSim, name: &str) {
     let needle = name.to_ascii_lowercase();
     let (found, matches) = {
         let m = sim.model();
-        let human = m.faction_by_key(&sim.human).map(|f| f.id);
+        let human = m.faction_by_key(sim.human()).map(|f| f.id);
         let keys = |c: &ntw_sim::campaign::Character| {
             m.world.character_details.get(&c.id).map(|d| [d.forename.to_ascii_lowercase(), d.surname.to_ascii_lowercase()])
         };
@@ -609,7 +716,7 @@ fn select_character(sim: &mut CampaignSim, name: &str) {
 /// Logs the selected settlement's treasury and queues (harness `queues`).
 fn log_queues(sim: &CampaignSim) {
     let m = sim.model();
-    let treasury = m.faction_by_key(&sim.human).map_or(0, |f| f.treasury);
+    let treasury = m.faction_by_key(sim.human()).map_or(0, |f| f.treasury);
     let Some(r) = sim.selected_region.and_then(|r| m.world.regions.get(&r)) else {
         info!("Proof: turn {}, treasury {treasury}, no settlement selected", m.calendar.turn_number());
         return;

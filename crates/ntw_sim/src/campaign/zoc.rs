@@ -6,7 +6,9 @@
 //!   (an army) or [`NAVY_ZONE`] (a navy), measured as pure walking distance over the polygons
 //!   its own force may enter (no terrain bytes, no roads), a neighbour being taken while the
 //!   distance so far plus half the step stays within the limit (CONFIRMED `0x00ACA170`,
-//!   `0x00B11820`); +[`GARRISON_BONUS`] for a commander inside a settlement (INFERRED);
+//!   `0x00B11820`); +[`GARRISON_BONUS`] for a commander inside a settlement (INFERRED). The
+//!   original floods it with the other obstacles cut in as the owner's faction sees them and keeps
+//!   it until set events rebuild it ([`zone_in`]; the model stores it, [`super::zones`]);
 //! - the **core** round the character itself: a 24-sided polygon of radius [`CORE_RADIUS`] (1 map
 //!   unit) centred on it (CONFIRMED `0x009CC0E0`; a 0.25-unit triangle for a commander in a special
 //!   state, `0x009D3CB0`, not modelled).
@@ -42,6 +44,7 @@
 //! ported).
 
 use std::collections::BinaryHeap;
+use std::sync::Arc;
 
 use super::polypath::{dir_index, Mover, Overlay, PolyMap, View, DIR_LEN};
 use super::rtcut::{self, Cut, Shape};
@@ -95,8 +98,8 @@ pub fn reach(map: &PolyMap, pos: (f32, f32), mover: Mover, limit: f32) -> Vec<u3
     reach_in(&map.view(), pos, mover, limit)
 }
 
-/// [`reach`] on a map with run-time polygons (the original floods with the other obstacles cut
-/// in, `0x00B7BAF0` → `0x00AF5200`); the result indexes the view (pieces included).
+/// [`reach`] on a map with run-time polygons ([`zone_in`] floods a zone this way); the result
+/// indexes the view (pieces included).
 pub fn reach_in(map: &View<'_>, pos: (f32, f32), mover: Mover, limit: f32) -> Vec<u32> {
     if limit <= 0.0 {
         return Vec::new();
@@ -157,6 +160,8 @@ pub struct Obstacle {
     pub garrisoned: bool,
     /// Whether its faction is at war with the mover's.
     pub at_war: bool,
+    /// Its stored zone (the static polygons, sorted; [`zone_in`], kept by [`super::zones`]).
+    pub zone: Arc<[u32]>,
 }
 
 /// What a mover is, for [`cuts`].
@@ -193,6 +198,56 @@ pub fn core_shape(pos: (f32, f32), garrisoned: bool) -> Vec<(f32, f32)> {
     if garrisoned { rtcut::triangle(pos) } else { rtcut::circle(pos, CORE_RADIUS) }
 }
 
+/// An upper bound on how far from a commander its zone's polygons reach: a polygon is reached at
+/// a cell-centre walking distance below `limit` + half a diagonal step (the first step at most
+/// one and a half diagonals), and extends half a diagonal from its centre, so 3 cells is safe.
+fn zone_extent(map: &PolyMap, limit: f32) -> f32 {
+    limit + 3.0 * map.cell
+}
+
+/// The zone of a commander at `pos` (`navy`, `garrisoned`: [`zone_limit`]), flooded the way the
+/// original floods it (CONFIRMED `0x00A28440` → `0x00B7BAF0`): over the map with the other
+/// obstacles cut in as the commander's own faction sees them. The scope `0x00AF5200` prepares
+/// every obstacle of every layer for that faction (`0x00B06280`: the mode rule `0x00B3F4F0`, with
+/// no relevance or fleet filter), the flood `0x00B7B7A0` runs, and `0x00AF7A00` restores the grid's
+/// stored view. So other factions' cores (kind 9) and the zones of factions at war with the owner
+/// (kind 8) bound the zone; an army's flood enters neither.
+///
+/// `others` are those obstacles, each with its stored zone (`at_war` = at war with the owner's
+/// faction; [`super::zones`] builds them, `CampaignModel::obstacles_seen_by`), the owner left out: the saved
+/// start-position zones are never empty, so the owner's own core does not stop its flood
+/// (CONFIRMED by data, `zoc_install.rs`). Obstacles too far away to touch the flood are skipped
+/// (that changes nothing, [`zone_extent`]). The result is the static polygons the flood reaches
+/// (a run-time piece counts as the polygon it was cut from), sorted.
+///
+/// Not ported: the script barriers (Lua `add_barrier` / `remove_barrier`, `0x00977700` →
+/// `0x00B64E30`), which `0x00B7B7A0` adds to the flood for a faction whose +0x6E0 flag is set; none
+/// exist in the shipped start positions.
+pub fn zone_in(map: &PolyMap, pos: (f32, f32), navy: bool, garrisoned: bool, others: &[Obstacle]) -> Vec<u32> {
+    let limit = zone_limit(navy, garrisoned);
+    let reach_of = |o: &Obstacle| zone_extent(map, zone_limit(o.navy, o.garrisoned));
+    let near = |o: &Obstacle, r: f32| {
+        let r = zone_extent(map, limit) + r;
+        (o.pos.0 - pos.0).powi(2) + (o.pos.1 - pos.1).powi(2) < r * r
+    };
+    let mut cut = Vec::new();
+    for o in others {
+        if o.at_war && !o.zone.is_empty() && near(o, reach_of(o)) {
+            cut.push(Cut { shape: Shape::Polygons(Arc::clone(&o.zone)), kind: ZONE_KIND });
+        }
+        if near(o, CORE_RADIUS) {
+            cut.push(Cut { shape: Shape::Convex(core_shape(o.pos, o.garrisoned)), kind: CORE_KIND });
+        }
+    }
+    let ov = rtcut::build(map, &cut);
+    let view = map.with(&ov);
+    let mover = if navy { Mover::Sea } else { Mover::Land };
+    let mut out: Vec<u32> = reach_in(&view, pos, mover, limit).into_iter().map(|p| view.origin_of(p as usize) as u32).collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 /// The shapes the obstacles cut for the mover heading for `goal`, in order (see the module docs).
 pub fn cuts(map: &PolyMap, mover: MoverInfo, goal: (f32, f32), obstacles: &[Obstacle]) -> Vec<Cut> {
     let walk = if mover.navy { Mover::Sea } else { Mover::Land };
@@ -213,13 +268,15 @@ pub fn cuts(map: &PolyMap, mover: MoverInfo, goal: (f32, f32), obstacles: &[Obst
         let target = d2(o.pos, goal) <= TARGET_DISTANCE * TARGET_DISTANCE;
         // Zones are left out for agents: kind 8 does not stop them anyway.
         if o.at_war && !mover.agent {
-            let own = if o.navy { Mover::Sea } else { Mover::Land };
-            let zone = reach(map, o.pos, own, zone_limit(o.navy, o.garrisoned));
+            // The obstacle's stored zone (`0x00B3F4F0` → `0x00B69C20` cut the layer the flood
+            // `0x00A28440` left on the character, +0x1C8; rebuilt only at the events of
+            // [`super::zones`], CONFIRMED).
+            let zone = &o.zone;
             // A zone holding the start: mode 1, core only (`0x00B65FC0`); a zone holding the goal:
             // mode 4, the zone as kind 10 (`0x00B551A0`); otherwise mode 0, kind 8 (CONFIRMED).
             if !start.is_some_and(|sp| zone.binary_search(&sp).is_ok()) && !zone.is_empty() {
                 let kind = if target || goal_poly.is_some_and(|gp| zone.binary_search(&gp).is_ok()) { GOAL_ZONE_KIND } else { ZONE_KIND };
-                out.push(Cut { shape: Shape::Polygons(zone), kind });
+                out.push(Cut { shape: Shape::Polygons(Arc::clone(zone)), kind });
             }
         }
         let r = if o.garrisoned { GARRISON_CORE_RADIUS } else { CORE_RADIUS };
@@ -295,13 +352,19 @@ pub struct ObstacleRecord {
 }
 
 /// The [`ObstacleRecord`] of a character of `owner` standing at `pos` (`garrisoned`: inside a
-/// settlement, for the zone bonus).
+/// settlement, for the zone bonus). Its zone is the bare-map flood.
 pub fn obstacle_record(map: &PolyMap, pos: (f32, f32), owner: Owner, garrisoned: bool) -> ObstacleRecord {
     let zone = match owner {
         Owner::Army => reach(map, pos, Mover::Land, zone_limit(false, garrisoned)),
         Owner::Navy => reach(map, pos, Mover::Sea, zone_limit(true, garrisoned)),
         Owner::Agent => Vec::new(),
     };
+    obstacle_record_with_zone(map, pos, owner, garrisoned, zone)
+}
+
+/// [`obstacle_record`] with the zone `zone` (sorted polygons; empty for an agent): a stored zone
+/// ([`super::zones`]).
+pub fn obstacle_record_with_zone(map: &PolyMap, pos: (f32, f32), owner: Owner, garrisoned: bool, zone: Vec<u32>) -> ObstacleRecord {
     let core = core_shape(pos, garrisoned);
     let bounds = |pts: &mut dyn Iterator<Item = (f32, f32)>| {
         pts.fold(None, |m: Option<(f32, f32, f32, f32)>, v| {
@@ -346,13 +409,13 @@ pub fn obstacle_record(map: &PolyMap, pos: (f32, f32), owner: Owner, garrisoned:
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::polypath::{kind, CellInput, PolyInput};
     use super::*;
 
     const U: i32 = 1 << 20;
 
-    fn open(w: u32, h: u32) -> PolyMap {
+    pub(crate) fn open(w: u32, h: u32) -> PolyMap {
         let mut cells = Vec::new();
         for r in 0..h {
             for c in 0..w {
@@ -362,6 +425,31 @@ mod tests {
             }
         }
         PolyMap::build((0, 0), 2 * U, w, h, &cells, vec![vec![0]])
+    }
+
+    #[test]
+    fn other_obstacles_bound_a_zone_flood() {
+        let m = open(40, 20);
+        let me = (41.0, 21.0);
+        let bare = reach(&m, me, Mover::Land, ARMY_ZONE);
+        assert_eq!(zone_in(&m, me, false, false, &[]), bare);
+        // An enemy 8 units east: its zone (kind 8 in the owner's view) stops the flood, so the
+        // owner's zone loses its east side and holds none of the enemy's polygons.
+        let ez = reach(&m, (49.0, 21.0), Mover::Land, ARMY_ZONE);
+        let enemy = Obstacle { pos: (49.0, 21.0), navy: false, garrisoned: false, at_war: true, zone: ez.clone().into() };
+        let z = zone_in(&m, me, false, false, std::slice::from_ref(&enemy));
+        assert!(z.len() < bare.len(), "{} {}", z.len(), bare.len());
+        assert!(z.iter().all(|p| bare.binary_search(p).is_ok() && ez.binary_search(p).is_err()));
+        let east = |z: &[u32]| z.iter().map(|&p| m.centre(m.poly_cell[p as usize]).0).fold(0.0, f32::max);
+        assert!(east(&z) <= 43.0 && east(&bare) == 47.0, "{} {}", east(&z), east(&bare));
+        // Not at war: only its core is cut; the flood goes round it and still reaches the far side.
+        let friend = Obstacle { at_war: false, pos: (44.0, 21.0), ..enemy.clone() };
+        let fz = zone_in(&m, me, false, false, std::slice::from_ref(&friend));
+        assert!(fz.binary_search(&(m.polygon_at(44.0, 21.0).unwrap() as u32)).is_ok());
+        assert_eq!(east(&fz), 47.0);
+        // Far away: changes nothing.
+        let far = Obstacle { pos: (75.0, 21.0), zone: reach(&m, (75.0, 21.0), Mover::Land, ARMY_ZONE).into(), ..enemy };
+        assert_eq!(zone_in(&m, me, false, false, &[far]), bare);
     }
 
     #[test]
@@ -386,7 +474,7 @@ mod tests {
     fn enemies_cut_their_zone_friends_their_core() {
         let m = open(40, 20);
         let me = MoverInfo { pos: (3.0, 21.0), navy: false, agent: false };
-        let enemy = Obstacle { pos: (41.0, 21.0), navy: false, garrisoned: false, at_war: true };
+        let enemy = Obstacle { pos: (41.0, 21.0), navy: false, garrisoned: false, at_war: true, zone: reach(&m, (41.0, 21.0), Mover::Land, ARMY_ZONE).into() };
         let friend = Obstacle { at_war: false, ..enemy.clone() };
         let goal = (77.0, 21.0);
         let zone_ov = overlay(&m, me, goal, std::slice::from_ref(&enemy));

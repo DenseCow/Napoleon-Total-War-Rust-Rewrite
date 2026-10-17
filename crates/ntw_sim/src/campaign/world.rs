@@ -94,11 +94,17 @@ pub struct CampaignModel {
     /// [`super::negotiation::Negotiations`]. Not saved, not hashed.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub negotiations: super::negotiation::Negotiations,
+    /// The force commanders' stored zones of control ([`super::zones`]): not saved (a load floods
+    /// them again, as the original's `0x00B0DC10` does), not hashed, not compared (derived from the
+    /// world and the map).
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub zones: super::zones::Zones,
 }
 
-/// Equality over everything but [`CampaignModel::negotiations`]: the negotiation slot is a UI
-/// session, neither saved nor hashed. Every other field is compared, including `rules`, `terrain` and
-/// `last_autoresolve`, which are also neither saved nor hashed.
+/// Equality over everything but [`CampaignModel::negotiations`] and [`CampaignModel::zones`]: the
+/// negotiation slot is a UI session, neither saved nor hashed; the zones are derived.
+/// Every other field is compared, including `rules`, `terrain` and `last_autoresolve`,
+/// which are also neither saved nor hashed.
 impl PartialEq for CampaignModel {
     fn eq(&self, other: &Self) -> bool {
         // Destructured so a new field must be placed here on purpose.
@@ -118,6 +124,7 @@ impl PartialEq for CampaignModel {
             mod_state,
             director,
             negotiations: _,
+            zones: _,
         } = self;
         *calendar == other.calendar
             && *rng == other.rng
@@ -156,6 +163,7 @@ impl CampaignModel {
             last_autoresolve: None,
             script_rngs: super::characters::ScriptRngs::default(),
             negotiations: super::negotiation::Negotiations::default(),
+            zones: super::zones::Zones::default(),
         }
     }
 
@@ -344,6 +352,7 @@ impl CampaignModel {
                     h.u32(*v);
                 }
                 h.u32(p.capital_port as u32);
+                h.i32(p.accumulated);
             }
         }
         h.u32(w.domestic_trade.len() as u32);
@@ -355,6 +364,12 @@ impl CampaignModel {
                     h.u32(*v);
                 }
             }
+        }
+        h.u32(w.commerce_raids.len() as u32);
+        for r in &w.commerce_raids {
+            h.i32(r.character.raw());
+            h.u32(r.segment);
+            h.i32(r.target.raw());
         }
         for p in w.commodity_market.factors.iter() {
             h.u32(p.to_bits());
@@ -518,6 +533,22 @@ impl CampaignModel {
         self.world.factions.values().find(|f| f.key == key)
     }
 
+    /// The faction the exe's campaign faction registry finds under this key: every faction but
+    /// the rebels, dead, out of the game or not yet emerged alike (CONFIRMED by disassembly). The
+    /// registry (model +0xF5C) hashes each faction of its own list (+0x2C / +0x30) under its
+    /// record's key (0x009516A0, key 0x008E5060). That list is `WORLD/FACTION_ARRAY` in file order
+    /// on load (0x0090BEB0) or every faction of the new campaign's setup (0x0090C4A0); the rebels
+    /// (`REBEL_FACTION`) are held apart at +0x1C. Nothing removes a faction from it: a destroyed
+    /// faction only gets its out-of-game flag (+0x824, `DestroyFactionAndResetRelations`
+    /// 0x008AB6C0), and the only other rebuild (0x0095A810, via 0x00915E20) reorders it, human
+    /// factions first, keeping every faction. Ours holds the same set: every faction but the rebels
+    /// (no key, [`World::is_rebel_faction`]), so an empty key finds nothing; a faction a mod adds
+    /// without listing it in [`World::turn_order`] still takes its turn
+    /// ([`World::factions_in_turn_order`]) and so is in the registry too.
+    pub fn registry_faction(&self, key: &str) -> Option<&Faction> {
+        self.faction_by_key(key).filter(|f| !f.key.is_empty())
+    }
+
     /// The map position of a force: its commander's position, else (a garrison without a
     /// commander) the settlement of the region it garrisons.
     pub fn force_position(&self, force: ForceId) -> Option<(Fixed20, Fixed20)> {
@@ -540,9 +571,11 @@ impl CampaignModel {
 pub struct World {
     /// `FACTION` records (W3 §3.3).
     pub factions: BTreeMap<FactionId, Faction>,
-    /// The order factions take their turns: the order of `WORLD/FACTION_ARRAY` (INFERRED: the
-    /// player's faction is first in every shipped start position, e.g. france in eur), then the
-    /// rebel faction. Factions missing here take their turns after the listed ones, in id order.
+    /// The order factions take their turns: the order of `WORLD/FACTION_ARRAY` (CONFIRMED: the world
+    /// loader `0x0090BEB0` appends each item to the turn list, world +0x2C / +0x30, in file order,
+    /// and the writer `0x00910E40` writes the list back in that order), then the rebel faction
+    /// (`REBEL_FACTION`, world +0x1C). Factions missing here take their turns after the listed
+    /// ones, in id order; the rebels always play last ([`Self::factions_in_turn_order`]).
     pub turn_order: Vec<FactionId>,
     /// `REGION` records (W3 §3.7).
     pub regions: BTreeMap<RegionId, Region>,
@@ -575,9 +608,14 @@ pub struct World {
     /// The full `DIPLOMACY_RELATIONSHIP` records by (owner, target) (see
     /// [`details`](super::details)); the stances are in [`Faction::diplomacy`].
     pub relationships: super::details::RelationshipMap,
-    /// The accumulated value of each trade route, by (exporter, importer): it grows every round
-    /// by `trade_route_value_accumulator_proportion` of the route's value (0x00B05CC0, CONFIRMED).
-    /// Loaded from the saved routes (`ntw_campaign::trade::read_accumulated`, summed per pair).
+    /// The accumulated value of the route of a pair with no stored route, by (exporter, importer).
+    /// A stored route keeps its own ([`TradePath::accumulated`](super::trade::TradePath::accumulated),
+    /// +0x3C); a pair without one has a single route built over the network when its trade is valued
+    /// ([`CampaignModel::trade_routes_of`]; with no network loaded, tests, the pair stands for that
+    /// route), and the original stores that route with its value (`0x00BA0490`), so the value is
+    /// kept here for it. It grows every round like a stored route's (0x00B05CC0) and is dropped when
+    /// the pair's route is removed (`CampaignModel::remove_first_trade_route`). The original's save
+    /// holds no such route, so the `.esf` loader leaves this empty.
     pub trade_accumulated: BTreeMap<(FactionId, FactionId), i32>,
     /// The international routes of each (exporter, importer) pair, with their paths and commodity
     /// volumes (see [`trade`](super::trade)). Loaded from the file; a pair with a trade agreement
@@ -712,6 +750,10 @@ pub struct World {
     pub region_sight: super::visibility::RegionSight,
     /// The trade route segments' sight (`TRADE_SEGMENTS[]`, in file order).
     pub trade_sight: Vec<super::visibility::TradeSegmentSight>,
+    /// The live commerce raids (each trade segment's `COMMERCE_RAIDS` list: one entry per raiding
+    /// character and segment, CONFIRMED `0x00BA7600`), in creation order ([`super::commerce_raid`]).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub commerce_raids: Vec<super::commerce_raid::CommerceRaid>,
     /// Each character's sight radius (character +0x2EC, `CHARACTER` #17 f32, CONFIRMED by the loader
     /// `0x00991520`), as loaded and as [`CampaignModel::update_sight_radius`] sets it; a character not
     /// listed sees with his type's radius ([`CampaignModel::sight_radius`]).
@@ -727,6 +769,13 @@ pub struct World {
     /// assassination / settlement spying gets outcome 1 without a roll (`0x0094ACB0`,
     /// `0x0094CCB0`). Both false in every vanilla save; only the tutorial scripts set them.
     pub force_success_for_human: (bool, bool),
+    /// Saving is switched off (campaign +0x115, `CAMPAIGN_MODEL/EPISODIC_RESTRICTIONS` #25 bool,
+    /// read by the loader `0x009968A0` for versions above 0xB; CONFIRMED). Its only writer is the
+    /// script method `disable_saving_game(bool)` (`0x0097B840`); the save (`0x00A1F000`) refuses
+    /// while it is set and `CampaignUI.CanSave` (`0x008BE4A0`) answers false. False in every
+    /// vanilla save; only the tutorial scripts set it. An own save from before the field reads false.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub saving_disabled: bool,
     /// The faction whose shroud keeps the AI from shopping under it: the script's
     /// `disable_shopping_for_ai_under_shroud` (`0x00AA9B40`, CAI interface +0x618, CONFIRMED), set
     /// by [`CampaignModel::set_ai_shopping_shroud`] and read by
@@ -916,16 +965,30 @@ impl World {
         self.regions.get(&region).is_some_and(|r| self.capital(r.owner) == Some(region))
     }
 
+    /// The rebel faction: the one with no faction record and so no key (`IsFactionWithoutRecord`
+    /// `0x008CEEF0`; the world holds it at +0x1C, outside the faction list).
+    pub fn is_rebel_faction(&self, f: FactionId) -> bool {
+        self.factions.get(&f).is_some_and(|x| x.key.is_empty())
+    }
+
     /// Every faction in turn order: [`World::turn_order`] first, then any other faction in id
-    /// order.
+    /// order (our own addition for factions a mod adds without listing them), and the rebels last
+    /// wherever they are listed. The exe keeps the rebels outside its turn list (world +0x1C, list
+    /// +0x2C / +0x30): they play after the last listed faction and their turn ends the round
+    /// (`PassTurnToNextActiveFaction` `0x00948CF0`), their round-start event comes last
+    /// (`0x0096C050` tail-calls `0x008F1F60` on +0x1C) and their round-end economy runs last
+    /// (`0x00948CF0` → `0x008BC650`); CONFIRMED by disassembly.
     pub fn factions_in_turn_order(&self) -> Vec<FactionId> {
-        let mut out: Vec<FactionId> =
-            self.turn_order.iter().copied().filter(|f| self.factions.contains_key(f)).collect();
-        for id in self.factions.keys() {
-            if !out.contains(id) {
-                out.push(*id);
+        let listed = self.turn_order.iter().copied().filter(|f| self.factions.contains_key(f));
+        let mut seen = std::collections::HashSet::with_capacity(self.factions.len());
+        let mut out: Vec<FactionId> = Vec::with_capacity(self.factions.len());
+        for f in listed.chain(self.factions.keys().copied()) {
+            if seen.insert(f) {
+                out.push(f);
             }
         }
+        // A stable partition: the rebels move to the end, every other faction keeps its place.
+        out.sort_by_key(|&f| self.is_rebel_faction(f));
         out
     }
 

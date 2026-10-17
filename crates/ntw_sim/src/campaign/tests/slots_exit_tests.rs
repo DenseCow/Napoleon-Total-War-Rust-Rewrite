@@ -473,6 +473,76 @@ fn a_human_faction_out_of_the_game_keeps_its_forces() {
     assert!(m.world.characters.contains_key(&CharacterId(101)));
 }
 
+/// A human faction destroyed ends the campaign (`0x008AB6C0` → `SetCampaignOverFlag` `0x008C30A0`):
+/// from then on the turn loop runs nothing (`0x008F4120` returns at its flag test `0x008F419E`,
+/// before the CAI step loop), so ending the turn plays no faction.
+#[test]
+fn a_destroyed_human_ends_the_campaign_and_the_turn_loop_stops() {
+    let mut m = test_model();
+    m.turn.humans = vec![A];
+    set_details(&mut m, A, Some(10), false);
+    m.start_campaign();
+    assert_eq!(m.turn.current, Some(A));
+    for r in [10, 12] {
+        m.world.regions.get_mut(&RegionId(r)).unwrap().owner = B;
+    }
+    m.destroy_faction(A, &mut Vec::new());
+    assert!(m.turn.campaign_over && m.turn.queue.is_empty());
+    let mut not_over = m.clone();
+    not_over.turn.campaign_over = false;
+    assert_ne!(m.state_hash(), not_over.state_hash(), "the flag is part of the state");
+    for _ in 0..2 {
+        assert_eq!(m.apply(CampaignCommand::EndTurn).unwrap(), Vec::new());
+        assert_eq!((m.turn.current, m.turn.in_turn), (Some(A), true));
+        assert!(!m.has_pending_steps());
+    }
+}
+
+/// A human destroyed while an AI plays its turn (between steps, as the AI's capture of the human's
+/// last region is) stops the loop at once: the queued rest of the round is dropped.
+#[test]
+fn a_human_destroyed_in_an_ai_turn_drops_the_rest_of_the_round() {
+    let mut m = test_model();
+    m.turn.humans = vec![A];
+    set_details(&mut m, A, Some(10), false);
+    m.start_campaign();
+    m.begin_end_turn();
+    // Turn order B, A, C (C holds nothing): after A's turn end comes the round end, then B's (an AI's) turn.
+    while m.turn.queue.front().is_some_and(|s| !matches!(s, super::turn::TurnStep::AiTurn(_))) {
+        m.step();
+    }
+    assert!(m.has_pending_steps());
+    for r in [10, 12] {
+        m.world.regions.get_mut(&RegionId(r)).unwrap().owner = B;
+    }
+    m.destroy_faction(A, &mut Vec::new());
+    assert!(m.turn.campaign_over);
+    assert_eq!(m.step(), None);
+    assert!(m.run_pending().is_empty());
+}
+
+/// Every listed human out of the game with the campaign not over (a save of ours from before the
+/// flag was kept; the exe cannot reach it): the loop plays the AI factions left in the round, then
+/// ends the campaign at the next round start (tested once per round) instead of playing AI rounds
+/// forever.
+#[test]
+fn every_human_out_of_the_game_without_the_flag_ends_the_campaign() {
+    let mut m = test_model();
+    m.turn.humans = vec![A];
+    set_details(&mut m, A, Some(10), false);
+    m.start_campaign();
+    // Turn order B, A, C: C (now holding region 12) still plays after A this round; B does not start again.
+    m.world.regions.get_mut(&RegionId(10)).unwrap().owner = B;
+    m.world.regions.get_mut(&RegionId(12)).unwrap().owner = C;
+    m.world.faction_details.get_mut(&A).unwrap().out_of_game = Some(true);
+    assert!(!m.turn.campaign_over);
+    let events = m.apply(CampaignCommand::EndTurn).unwrap();
+    let started = |f: FactionId| events.iter().any(|e| matches!(e, CampaignEvent::FactionTurnStart { faction } if *faction == f));
+    assert!(started(C) && !started(B), "{events:?}");
+    assert!(m.turn.campaign_over && !m.has_pending_steps());
+    assert_eq!(m.apply(CampaignCommand::EndTurn).unwrap(), Vec::new());
+}
+
 /// A deal that hands over the giver's last region ends it (`0x00C18BF0` → `0x00B58A10(faction, 1, 0)`).
 #[test]
 fn a_deal_giving_away_the_last_region_ends_the_giver() {

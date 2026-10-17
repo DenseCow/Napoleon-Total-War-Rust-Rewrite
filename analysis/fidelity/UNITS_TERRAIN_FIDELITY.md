@@ -1699,7 +1699,7 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
     *Width and depth: the exe measures the men (CONFIRMED static).* Every reader takes the squad summary at squad
     `+0x62C`: width `+0x650` (summary `+0x24`), depth `+0x654` (`+0x28`), radius `+0x670` (`+0x44`). `0x0053C180`
     refreshes it on alternate ticks: `0x00519150` builds one 0x1C-byte record per soldier (soldier, x `+0x48`,
-    y `+0x50`, heading `+0x64`, radius `+0x620`, `+0x10`, `+0x18`); `0x0053A390` the centroid (`+0x0C`/`+0x10`),
+    z `+0x50`, heading `+0x64`, radius `+0x620`, surface `+0x10`, `pGroundProvider` `+0x18`); `0x0053A390` the centroid (`+0x0C`/`+0x10`),
     a 7-sample moving average of its change (`+0x4C`/`+0x50`) and the speed `+0x94` (|velocity| × 10 / ticks
     elapsed); `0x0053A1D0` the dominant heading from a 256-bin histogram of the soldiers' headings; `0x0053D1A0`
     the box: one soldier gives width = depth = his radius; otherwise the principal axis from the 2×2 covariance,
@@ -1727,7 +1727,7 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
     parity is the unit id's (test `the_box_is_measured_on_alternate_ticks`). PROVISIONAL: the stamp is the unit
     body's serial (`0x00518E3C` reads it through `0x0057E910`, numbered by the battle's counter at `0x0051B816`),
     ours the unit id, and the exe tick's parity against ours is not traced; the radius enlargement for attached
-    members (`0x00607540`) is not modelled. `evade_room` (`0x0057A6F0`) takes
+    members (`0x00607540`, below) is not modelled. `evade_room` (`0x0057A6F0`) takes
     max(radius, speed × 3 s) as its strip's length and starts it at the front centre `+0x9C` (`0x0053FBD0` at
     `0x0057A753`; test `the_evade_strip_runs_the_squad_radius_from_the_front_centre`); the skirmish strips start at
     the front centres too and test the boxes with the oriented-box overlap `0x0055A1B0` (BATTLE_FIDELITY.md
@@ -1748,6 +1748,74 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
     `SetUnitFormationShapeParams` `0x00579780`, `CheckIdleUnitCanEnterReform` `0x00573770`; globals
     `g_dwSquadSummaryManRecordsHeader` `0x014A3ED8` (the man-record vector), `g_pSquadSummaryDistances`
     `0x014A3ED0`, `g_wHeadingHalfTurn` `0x014A3A1C` (0x8000, set at start-up by `0x004079D0`).
+    Ghidra types (polish38, polish42): the three functions are methods of class `SquadSummary` (0x120 bytes:
+    `0x0053E500`, called last by `0x0053C3D0` with this summary, the records and the man nearest the front
+    point, writes `+0x98`, `+0xEC` and `+0xF4`..`+0x11C`; their meaning is UNKNOWN), with the fields above
+    plus `FrontPoint` `+0x9C`, `CentrePoint` `+0xB0`, `FrontCornerA` `+0xC4`, `FrontCornerB` `+0xD8`, each a
+    20-byte `SquadSummaryGroundPoint` built by `0x007FD070(.., 3, 0)` on battle `+0xB4` from the hint point
+    `GetSoldierGroundPoint` `0x00659480` gives for the nearest man (ECX = that man). The ground point (CONFIRMED
+    static): `flX` `+0x00`, `flY` `+0x04` (height), `flZ` `+0x08`, `pSurface` `+0x0C` (the surface it stands on;
+    `0x0057E870` takes the height from its plane at `+0x30`..`+0x3C`, y = −(a·x + c·z + d)/b, or from the terrain
+    `0x0066BB40` when it is null), `pFrame` `+0x10` (the surface's moving frame, `pSurface`→vfunc `+0x10`→`+0x80`,
+    or null): `InitializeGroundPointOnSurface` `0x007EAD80` stores xyz and the surface and, with a frame, converts xyz
+    to the frame's local space (`0x007F66F0`); `GetGroundPointWorldPosition` `0x0080E9D0` (477 callers) turns it
+    back to world space. `GetSoldierGroundPoint` copies the soldier's stored point (`+0x4F8`) when his byte
+    `+0xB4` is 1, else builds one at his x/z on his surface `+0x10` (`0x005473B0`) or, when `+0x18` is set, calls
+    slot `+0x10` of the object at provider `+0x1C` with the output point. `0x007FD070` searches the surfaces
+    outward from the hint's and copies the hint (setting its fifth argument) when none is found; its own steps
+    are UNKNOWN. The record is `SquadSummaryManRecord` (0x1C:
+    `pMan`, `flX`, `flZ`, `wHeading`, `flCoverRadius` (the man's `+0x620`), `pManSurface` (the man's `+0x10`), `pManGroundProvider`
+    (the man's `+0x18`, what it points to is UNKNOWN)), built by `InitializeSquadSummaryManRecord` `0x00519150`,
+    and the vector `SquadSummaryManRecordVector` (count `+0x08`, data `+0x0C`;
+    `g_pSquadSummaryManRecordsData` `0x014A3EE4` typed as a record pointer). The four `.y` reads of
+    `g_aHeadingDirectionTable` in `0x0053D1A0` carry user references to the table base `0x0176CFF8` instead of
+    the interior `0x0176CFFC`. Completeness (raw): `0x0053D1A0` 76, `0x0053C3D0` 82, `0x0053C180` 61 (effective 79; after the
+    polish42 fix round typed its record pointer and named its build buffer; the rest is register-only splits and the untyped battle pointer), `0x00607540` 86, `0x00519150` 92, `0x00659480` 74, `0x007EAD80` 79, `0x0080E9D0` 85; the rest is
+    register temps the decompiler splits and the untyped surface pointers. New `BattleSoldier` fields (polish42):
+    `pGroundSurface` `+0x10`, `pGroundProvider` `+0x18`, `wHeading` `+0x64`, `bUseStoredGroundPoint` `+0xB4`,
+    `StoredGroundPoint` `+0x4F8`, `flCoverRadius` `+0x620`. A plain soldier is 0x660 bytes (CONFIRMED static: the
+    base constructor `0x0061CB90`, vtable `0x01333714`, and the plain-soldier allocations push 0x660 at
+    `0x0051C05E` and `0x0069477E`); the `BattleSoldier` type holds those 0x660 bytes. Larger objects that run
+    soldier code exist (0x69C and 0x6C8 bytes, below), so 0x660 is the plain soldier's size, not every
+    soldier's. The base constructor writes `+0x620` as a copy of the radius `+0x58` at `0x0061D2D8`.
+    *The radius grown over attached entities (polish42 fix round, CONFIRMED static):*
+    `UpdateSoldierCoverRadiusOverAttachedEntities` `0x00607540` (ECX = the soldier) sets `+0x620` = `+0x58`,
+    then walks a linked list at `+0x674` (next `+0x04`); each node holds a pointer array (count `+0x2C`, data
+    `+0x30`) whose entries point (at their `+0x20`) to an entity, and for each non-null one `+0x620` becomes
+    max(`+0x620`, the x/z distance from the soldier (`+0x48`/`+0x50`) to the entity's `+0x48`/`+0x50` plus the
+    entity's `+0x58`). So `+0x620` is the radius of a circle round the soldier that also covers his attached
+    entities; it equals `+0x58` only while the list is empty. Its two callers both read fields past 0x660:
+    `0x005ED4B0` first moves each list node's point (`+0x0C`/`+0x10`) to the soldier's position plus the
+    offset (`+0x68C`, `+0x690` − node `+0x18`) rotated by his heading `+0x64`, then calls `0x0060CAC0`,
+    `0x005ED450` and `0x00607540`; it is reached from vtable slot `+0x58` (`0x005ED030` / `0x005ED060`, which
+    first call the base `0x00659D20` / `0x00659D40`) of the vtables `0x0132BE3C`, `0x0132C0C8`, `0x0132C2F0`
+    and `0x0132C528`, and from `0x005BD200` / `0x005BD310` (slot `+0x1C0` of `0x0132C2F0` / `0x0132C528`). A plain
+    soldier's vtable `0x01333714` holds `0x00659D20` in that slot. The other caller is the code at `0x005FCF83`
+    (not a defined function in Ghidra), which also reads `+0x69D`..`+0x6A8`. `0x0132C2F0` and `0x0132C528` are
+    written by `0x005A1EB0` and `0x005A38C0`, the constructors of the 0x6C8-byte objects that `0x00544E60`
+    allocates once per entry of its `+0x1F4` → `+0x24` list when it has a record at `+0xB4` (`0x005A1EB0` when
+    that record's `+0x18` is 6, else `0x005A38C0`), each followed by 0x69C-byte objects built by `0x0059EED0`
+    (vtable `0x0132BA04`, whose slot `+0x58` is `0x005ED1F0`, which does not call `0x00607540`). So in a plain
+    soldier and a 0x69C object `+0x620` stays the base constructor's copy of `+0x58` as far as these writers go;
+    in a 0x6C8 object it is grown. The 0x6C8 constructors run the base chain `0x0059EAB0` (vtable `0x0132C0C8`)
+    → `0x0058EF40` (vtable `0x0132BE3C`), so those two are base vtables of the 0x6C8 objects. `0x0059EED0` is
+    also called from `0x0051B7D0` (at `0x0051C2B4`; the function that pushes the unit `+0x60` record at
+    `0x0051C09B`), besides `0x00544E60`'s five calls.
+    *Write scan (polish42 fix round 2, read-only `run_script_inline` over every instruction):* 27 direct stores
+    to `[reg+0x620]` (MOV/MOVSS/FST*; the scan finds only direct 4-byte stores and misses wide or
+    overlapping ones: memcpy, rep movs, struct copies); 2 in `0x00607540`, 1 at `0x0061D2D8`, and 24 others: `0x0070A254`
+    (`0x00709FB0`, an object whose `+0` is copied from an argument), `0x0071FE72` (constructor `0x0071FC80`,
+    vtables `0x0132CE04` / `0x01340828`), `0x007D70E0`, `0x00875999` (vtables from `0x0135456C`),
+    `0x00879BF4`, `0x0087A3B0` / `0x0087AC73` / `0x0087AC7D` / `0x0087AD0B`, `0x0087C189`, `0x00A3D992` /
+    `0x00A3DEB8` / `0x00A3EF81`, `0x00A3FB1D` (vtables from `0x013779AC`), `0x00DF2BBA`, `0x00E0F0F2`,
+    `0x00E83836` / `0x00E83DA2` / `0x00E840DA` (`0x00E83E40` runs on a stack object of `0x00545C20`),
+    `0x01123519`, `0x01130C36`, plus stack locals at `0x00788B68`, `0x00A42791` and `0x0100EAB4`. None is
+    a virtual method or traced to a soldier, but their classes are not all identified, and bulk copies or
+    stores through a computed pointer are not covered. So that only `0x0061D2D8` and `0x00607540` write a
+    soldier's `+0x620` is INFERRED. UNKNOWN: what the 0x6C8 and 0x69C objects and the attached entities are;
+    the class chain between
+    `BattleSoldier` and those classes (their fields past 0x660 have no Ghidra type); and whether a 0x6C8 object
+    is in a squad's man list, so whether the squad summary's box and radius see the grown radius.
     Ours (`march.rs`): `MenMarch::laid` holds the formation; `LandUnit::reslot_tick` (every active unit's tick,
     `placeholder_movement`) restarts a 20-tick countdown at each loss, lays out every tick while the unit's own
     order (`TimedMove`) is short of its end, re-lays when the countdown runs out and clears the pending re-slot
@@ -2354,10 +2422,74 @@ and "self riding"; `fighting_cavalry` was always false; the level-2/3 scaling us
 (−5 → −3 / −2) where the exe divides; zero values were added. The seen set is `MoraleComponent::
 attackers_seen` (unit ids). INFERRED: it lasts the battle; the only free found is the component destructor
 `0x00522690` (from `0x00522130`), and no writer clears `+0x10` in `0x0053A000`–`0x0053F000`,
-`0x0054E000`–`0x0054F200`, `0x00580000`–`0x00587000` or the unit constructor `0x0051D0F0`. Still
-PLACEHOLDER in model.rs: the attacker list (enemies within melee contact range) and the direction (our angle
-test, not `0x0057F310`).
+`0x0054E000`–`0x0054F200`, `0x00580000`–`0x00587000` or the unit constructor `0x0051D0F0`. The attacker
+list and the direction are ported in §10.2.
 
 Found, not changed (one item each): the soldier-pair callers of `0x0055C2A0` (`0x0081D8E0`, `0x00820040`, `0x00821B90`, `0x00822940`,
 `0x008261A0`, gated on type class 10), `0x00532320` (melee class factor gate in `0x007D23E0`) and
 `0x0053EFE0` have no counterpart in ours yet.
+
+### 10.2 The attacker list and the attack direction (2026-10-16, attackers)
+
+Traced from the disassembly (CONFIRMED static unless tagged). Ported in `crates/ntw_sim/src/battle/attackers.rs`
+(`AttackerList`, `Battle::fill_attackers`, `attack_direction`); `morale_inputs` (model.rs) reads the committed
+entries. Ghidra names (V5, completeness 89 / 97 / 90): `BattleAttackerList::AddSoldierContactToAttackerList`
+(`0x0052EDB0`), `BattleAttackerList::CommitAttackerList` (`0x00551A40`),
+`BattleUnitMoraleComponent::GetAttackDirectionFromSquadBox` (`0x0057F310`). Ghidra types added: `BattleAttackerList`
+(0x2034 bytes, embedded as `BattleSquad::attackerList` +0x74C, which ends at +0x2780 just before the known
+`dwInPlaceTick` +0x2784), `BattleAttackerEntry` (0xC); `BattleSoldier` grown to 0x5F0 (0x660 since polish42, see "Ghidra types (polish38, polish42)") with `wBattleIndex` +0x2C,
+`dwSideKey` +0x44, `flRadius` +0x58, `pUnit` +0x1F0, `bInEnemyContact` +0x5EC; `BattleUnit::pSquad` +0xADC;
+`BattleSquad` box fields +0x644–+0x664.
+
+**Layout.** The list lives at squad `+0x74C` (unit `+0xADC` → squad). `+0x4` capacity, `+0x8` count and `+0xC`
+data of the list being filled; `+0x14` / `+0x18` / `+0x1C` the same for the committed list the morale pass
+`0x0053C720` reads; `+0x20` a bitset with one bit per soldier index, cleared through a dirty list
+(`0x0056EE80` records the index, `0x00542AA0` clears the bits). Entry (stride `0xC`): the enemy unit (soldier
+`+0x1F0`), the soldiers in contact, an update counter.
+
+**Add `0x0052EDB0`** (`this` = the list, args: own soldier, other soldier). Nothing when the other soldier has no
+unit (`+0x1F0` = 0) or his bit (u16 index `+0x2C`, battle-wide) is already set. Otherwise the bit is set
+**first**, then the friend test (soldier `+0x44` equal → nothing) and the distance test: squared ground
+distance (`+0x48`, `+0x50`) at most (`r_own + r_other + 2.0`)², radii `+0x58`, 2.0 at `0x01325D14`
+(`COMISS`/`JC` at `0x0052EE5F`). On a hit: own soldier `+0x5EC` = 1, then the other's unit's entry gains one
+contact, or `{unit, 1, 0}` is appended (capacity doubles from 1). Callers: the soldier-pair collision
+handler `0x0064CAD0` (a vfunc in 23 soldier vtables; it calls the add for both soldiers of the pair, then
+at `0x0064CB06` compares `+0x44`: different → the melee path `0x00664100` / `0x00629240`, same → the
+friendly push `0x00667260`), and the pair loop `0x0066E680` over a local group (from `0x0066C250`,
+`0x0066C3B0`).
+- Quirk (not called a bug, since nothing shows it is unintended): an enemy soldier is marked before the
+  distance test, so the first pair the exe hands over decides for him in that update; a later pair with a
+  closer man of ours does not count him. Ours tests every pair (APPROXIMATION, the model has no soldier
+  collision pass); the two agree whenever the first pair is in reach.
+
+**Commit `0x00551A40`** (`this` = the list). For every filled entry whose unit is also in the committed list, the
+counter becomes the committed entry's counter + 1; the filled list is copied over the committed one (so a unit
+that left contact drops out), the filling count is reset and the bitset cleared (`0x00542AA0`). Its only caller
+is `SQUAD::update` `0x00580A30` at `0x00580B85`, inside the "squad has men" branch (`+0x18` test at
+`0x00580A62`), after `UpdateSquadSummary` (`0x00580A7C`) and `0x00581E80`. Ours: `fill_attackers` in the
+unit's update slot after `refresh_summary`, skipped without men; both buffers are kept, so no allocation per
+tick once grown.
+
+**Direction `0x0057F310`** (`this` = the defender's morale component, arg the attacker unit). 0 (front) when the
+defender has ability 1 or 0 active (`0x0055C9A0` on `+0xDAC`), or when the squared distance between the two
+summary centres (squad `+0x62C` summary centre, then `0x0080E9D0`) is under 4.0 (`0x01325D20`, `JA` at
+`0x0057F3D9`). Otherwise, from the defender's box (summary `+0x18` = squad `+0x644` / `+0x648` centre,
+`+0x650` width, `+0x654` depth, `+0x658`/`+0x65C` the right axis, `+0x660`/`+0x664` the front axis): the two
+box diagonals through the centre split the plane into four wedges; the attacker is front when on the front
+side of both (`>= 0`), rear when on the back side of both (`<= 0`), and flank otherwise (a NaN gives
+flank). So the wedges follow the box's shape: a wide line has a wide front and rear and narrow flanks, a
+column wide flanks. Ours `attack_direction`, in the same order of tests; tests for a line, a block, a column, a turned
+heading, the square and the same-centre case.
+
+**Removed from ours.** `morale_inputs` filtered out-of-fight and inactive enemies; the morale pass iterates every
+committed entry with no filter, so the filter is gone.
+
+INFERRED (debugger, SITTING_SHEET 3k/3l):
+- soldier `+0x44` is our `side`. Its writer was not found statically (`0x00518230` only copies it), and
+  whether it is the alliance or the army is open (allied armies on one side would differ if it is the army).
+- where the soldier collision pass runs in the frame relative to `SQUAD::update`; ours fills at the unit's
+  own update, on the men where they stand then.
+- the seen set (§10.1) lasting the battle: a whole-program scan found no unit-relative `+0xC0C` / `+0xC10` /
+  `+0xC14` access in the battle unit code besides the insert and the destructor.
+
+Not ported: `0x0054F070` (the main attacker = the entry with the most contacts); no reader in ours yet.

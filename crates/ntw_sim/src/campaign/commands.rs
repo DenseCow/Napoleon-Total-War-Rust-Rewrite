@@ -90,6 +90,19 @@ pub enum CampaignCommand {
         /// Destination, in 20-bit fixed point (W3 §2.4).
         to: (Fixed20, Fixed20),
     },
+    /// `CMO_RAID_TRADE_ROUTE` (CONFIRMED name, order vtable slot `0x01361694` = `0x0094BA50`): move a force
+    /// towards a map position like [`Self::MoveForce`], by the same path (an army aboard a navy sails and lands);
+    /// once it stands there its commander raids the trade
+    /// segments near it ([`CampaignModel::raid_trade_route`]). The order first ends his raids (`0x009DA140`;
+    /// INFERRED: the order-start slot `0x0095D940` of order vtable `0x0135F498` calls it; that the raid
+    /// order starts through it is not traced). PROVISIONAL: an order the force does not finish this turn is dropped (the original keeps
+    /// it for the next turns).
+    RaidTradeRoute {
+        /// The raiding force.
+        force: ForceId,
+        /// Where it raids, in 20-bit fixed point.
+        to: (Fixed20, Fixed20),
+    },
     /// Move a character without a force (an agent, or a general alone).
     MoveCharacter {
         /// The character.
@@ -679,12 +692,15 @@ impl CampaignModel {
             CampaignCommand::ChooseCapture { choice } => self.choose_capture(choice),
             CampaignCommand::RepairBuilding { region, slot } => self.repair_building(region, slot),
             CampaignCommand::DemolishBuilding { region, slot } => self.demolish_building(region, slot),
-            CampaignCommand::MoveForce { force, to } => {
-                let c = self.commander_of(force)?;
-                if self.carrier_of(force).is_some() {
-                    return self.disembark(force, to);
+            CampaignCommand::MoveForce { force, to } => self.move_force(force, to).map(|(_, w)| w.events),
+            CampaignCommand::RaidTradeRoute { force, to } => {
+                let (c, walk) = self.move_force(force, to)?;
+                // The order's start ends his raids, also when he raids where he already stands.
+                self.clear_character_raids(c);
+                if walk.arrived {
+                    self.raid_trade_route(c, to);
                 }
-                self.walk(c, to, 0.0).map(|w| w.events)
+                Ok(walk.events)
             }
             CampaignCommand::MoveCharacter { character, to } => {
                 let faction = self.world.characters.get(&character).ok_or(CommandError::UnknownCharacter(character))?.faction;
@@ -806,6 +822,18 @@ impl CampaignModel {
         self.rules.buildings.get(&b.level_key).map_or(0, |b| (b.level + 1).clamp(0, 3) as u8)
     }
 
+    /// The character obstacles `faction` sees, leaving out `character` and its own force: the
+    /// commanders of the other forces, with `at_war` against `faction` (the mode rule `0x00B3F4F0`
+    /// → `0x00B57C00`, zoc module docs). The one obstacle set for the path search ([`Self::plan_path`],
+    /// the mover's faction) and for a zone flood ([`super::zoc::zone_in`], the zone owner's faction,
+    /// `0x00B7BAF0` → `0x00AF5200`). An obstacle the faction cannot see is hidden (mode 5,
+    /// `0x00B3F4F0`, CONFIRMED) and left out: its faction has a shroud and the obstacle's place is not
+    /// visible (`0x00B6A920`), or its character is unknown to it (obstacle slot 9 `0x00B4D600` →
+    /// [`super::agents::knows_character`]). Each carries its stored zone ([`super::zones`]).
+    pub fn obstacles_seen_by(&self, faction: FactionId, character: CharacterId) -> Vec<super::zoc::Obstacle> {
+        self.obstacles_with_stored_zones(faction, character)
+    }
+
     /// The path a character would take to `to`, with what it can reach this turn. `None` without
     /// a path. Without terrain the path is a straight line at the off-road cost.
     pub fn plan_path(&self, character: CharacterId, to: (Fixed20, Fixed20)) -> Option<PlannedMove> {
@@ -835,30 +863,8 @@ impl CampaignModel {
                     // their regions, everything else the cells' header bytes.
                     let by_id = pm.road_costs(|r| road.get(r).copied().unwrap_or(OFF_ROAD_COST), self.rules.road_cost(0));
                     // Zones of control (zoc module docs): other force commanders' obstacles.
-                    // An obstacle the mover's faction cannot see is hidden (mode 5, `0x00B3F4F0`,
-                    // CONFIRMED) and is not cut: its faction has a shroud and the obstacle's place is
-                    // not visible (`0x00B6A920`), or its character is unknown to it (obstacle slot 9
-                    // `0x00B4D600` → [`super::agents::knows_character`]).
                     let own_force = self.force_of(character);
-                    let obstacles: Vec<super::zoc::Obstacle> = self
-                        .world
-                        .forces
-                        .values()
-                        .filter(|f| Some(f.id) != own_force)
-                        .filter_map(|f| {
-                            let c = self.world.characters.get(&f.commander?)?;
-                            let pos = (c.position.0.to_f32(), c.position.1.to_f32());
-                            if !self.sees(ch.faction, pos) || !super::agents::knows_character(self, ch.faction, c.id) {
-                                return None;
-                            }
-                            (c.id != character).then(|| super::zoc::Obstacle {
-                                pos,
-                                navy: f.is_navy,
-                                garrisoned: c.garrisoned_in.is_some(),
-                                at_war: f.faction != ch.faction && self.world.stance(ch.faction, f.faction) == Stance::War,
-                            })
-                        })
-                        .collect();
+                    let obstacles = self.obstacles_seen_by(ch.faction, character);
                     let info = super::zoc::MoverInfo { pos: from, navy, agent: own_force.is_none() };
                     let mover = info.mover();
                     // The obstacles cut into the map at run time (rtcut module docs).
@@ -896,6 +902,19 @@ impl CampaignModel {
         Some(PlannedMove { path, reachable })
     }
 
+    /// Moves a force's commander towards `to` ([`CampaignCommand::MoveForce`]): an army aboard a navy
+    /// sails and lands ([`Self::disembark`]; it has arrived when its commander stands on `to`), any other
+    /// force walks ([`Self::walk`]). Returns the commander and how far he got.
+    pub(crate) fn move_force(&mut self, force: ForceId, to: (Fixed20, Fixed20)) -> Result<(CharacterId, Walk), CommandError> {
+        let c = self.commander_of(force)?;
+        if self.carrier_of(force).is_some() {
+            let events = self.disembark(force, to)?;
+            let arrived = self.world.characters.get(&c).is_some_and(|ch| ch.position == to);
+            return Ok((c, Walk { events, arrived }));
+        }
+        Ok((c, self.walk(c, to, 0.0)?))
+    }
+
     /// Moves a character towards `to`, stopping `stop_short` map units before it, as far as its
     /// action points reach. Errors (and changes nothing) if it cannot move at all.
     pub(crate) fn walk(&mut self, character: CharacterId, to: (Fixed20, Fixed20), stop_short: f32) -> Result<Walk, CommandError> {
@@ -931,10 +950,15 @@ impl CampaignModel {
         if available > 0 && ch.movement_points <= 0 {
             events.push(CampaignEvent::MovementPointsExhausted { character });
         }
-        // The mover's faction sees from his new place (`0x00A27F10` → `0x00B1B8B0`; the model
-        // recomputes the whole set, CHARACTERS_FIDELITY.md §10).
-        // The hidden flag after a move (`0x00A285E0` → `0x009D3000`), for the mover and any army he
-        // carries.
+        // After a move `0x00A285E0` runs, in this order (CONFIRMED, disassembly): the sight from the
+        // new place for the mover and each army he carries (`0x00A27F10` → `0x00B1B8B0`; the model
+        // recomputes the whole set, CHARACTERS_FIDELITY.md §10), the zones of control (`0x00A28440`,
+        // [`super::zones`]), then the hidden flags (`0x009D3000`). INFERRED: the walk floods the zones;
+        // `0x00A285E0` (a virtual, character vtable `0x0136A62C` slot +0x20) floods only when its first
+        // argument is 1, and the value its move callers pass is not traced (PATHFINDING.md §8).
+        let faction = self.world.characters[&character].faction;
+        self.refresh_shroud(faction, false);
+        self.rebuild_moved_zones(character);
         let carried: Vec<CharacterId> = self
             .force_of(character)
             .map(|f| self.world.embarked.iter().filter(|(_, n)| **n == f).filter_map(|(a, _)| self.world.forces.get(a).and_then(|x| x.commander)).collect())
@@ -942,8 +966,6 @@ impl CampaignModel {
         for c in std::iter::once(character).chain(carried) {
             self.update_hidden(c);
         }
-        let faction = self.world.characters[&character].faction;
-        self.refresh_shroud(faction, false);
         Ok(Walk { events, arrived: end == target_idx })
     }
 
@@ -1055,6 +1077,13 @@ impl CampaignModel {
         // After a unit transfer, a navy outside a port loses its repair orders (`0x008B36D0` from the transfers).
         self.cancel_undocked_repairs(force);
         self.cancel_undocked_repairs(into);
+        // The forces' zones again (`0x008F9400` from the transfers `0x008D47B0` / `0x008D5F10`): the
+        // target's commander, the source's if it is left, a commander without a force dropped.
+        self.rebuild_force_zones(into);
+        match commander {
+            Some(c) if empty => self.rebuild_zone(c),
+            _ => self.rebuild_force_zones(force),
+        }
         events.push(CampaignEvent::CampaignArmiesMerge { force, into });
     }
 
@@ -1107,6 +1136,7 @@ impl CampaignModel {
             ch.position = pos;
             ch.garrisoned_in = Some(region);
             self.world.regions.get_mut(&region).expect("checked").garrison = Some(force);
+            self.rebuild_zone(c);
             events.push(CampaignEvent::CharacterEntersGarrison { character: c, region });
             return Ok(events);
         }
@@ -1827,6 +1857,8 @@ impl CampaignModel {
                 self.world.forces.insert(f, MilitaryForce { id: f, faction: owner, commander: Some(c), units: Vec::new(), is_navy: naval });
                 self.update_sight_radius(c);
                 self.name_new_character(c);
+                // The new general placed (`0x00B67670` → `0x00A285C0`): his zone.
+                self.rebuild_zone(c);
                 let r = self.world.regions.get_mut(&region).expect("region exists");
                 if naval {
                     r.fleet = Some(f);

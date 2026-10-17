@@ -562,6 +562,8 @@ impl CampaignModel {
         }
         self.drop_recruitment_target(c);
         self.command_vacated(&dead);
+        // 0x0099D681: any raid he still holds ends with him (a commander's ended in the hand-over).
+        self.clear_character_raids(c);
         for (f, i) in vacated {
             self.refill_post(f, i);
         }
@@ -588,10 +590,12 @@ impl CampaignModel {
     /// `0x00990EF0` with agent type 2 / 3). The new commander stands where the old one stood
     /// (`0x00963840`). A save never has a force without a commander (CONFIRMED rule of every
     /// original save, SAVE_COMPAT.md §23); a new colonel takes his unit's officer's name
-    /// ([`Self::name_new_character`]).
+    /// ([`Self::name_new_character`]). His commerce raids pass to the new commanders
+    /// ([`Self::hand_over_raids`], the force's observer `0x008DB3E0`).
     pub(crate) fn command_vacated(&mut self, old: &super::world::Character) {
         use super::world::{Character, CharacterKind};
         let commanded: Vec<ForceId> = self.world.forces.values().filter(|f| f.commander == Some(old.id)).map(|f| f.id).collect();
+        let mut successors = Vec::with_capacity(commanded.len());
         for fid in commanded {
             let (navy, empty) = (self.world.forces[&fid].is_navy, self.world.forces[&fid].units.is_empty());
             if let Some(f) = self.world.forces.get_mut(&fid) {
@@ -611,6 +615,9 @@ impl CampaignModel {
                     ch.garrisoned_in = old.garrisoned_in;
                 }
                 self.world.forces.get_mut(&fid).expect("force exists").commander = Some(next);
+                successors.push(next);
+                // The new commander's zones (`0x008B8E50` → `0x008F9400`).
+                self.rebuild_force_zones(fid);
                 continue;
             }
             let kind = if navy { CharacterKind::Captain } else { CharacterKind::Colonel };
@@ -640,7 +647,12 @@ impl CampaignModel {
             // He carries his unit's officer's name (`0x008B7EF0` colonel / `0x008B7F60` captain pass unit
             // +0x7c to `0x00990EF0`).
             self.name_new_character(id);
+            successors.push(id);
+            self.rebuild_force_zones(fid);
         }
+        self.hand_over_raids(old.id, &successors);
+        // He commands nothing now: his zone goes (`0x008DB3E0`).
+        self.rebuild_zone(old.id);
     }
 
     /// The unit of `force` that gives a new commander: the first in the original's order

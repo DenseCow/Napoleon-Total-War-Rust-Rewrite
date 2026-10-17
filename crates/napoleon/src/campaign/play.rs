@@ -1,5 +1,6 @@
 //! Playing the campaign: the simulation resource, army markers that follow the model, selection,
-//! right-click orders with a path preview, move animation, end turn, autoresolve and quick save.
+//! right-click orders with a path preview, move animation, end turn, autoresolve and the game side
+//! of saving ([`CampaignSaver`]).
 //!
 //! The model (`ntw_sim::campaign::CampaignModel`) lives inside the Lua [`ScriptHost`] so the
 //! original campaign scripts see every event; every change goes through
@@ -10,9 +11,11 @@
 //! left click selects an army, navy or agent; right click (without dragging) orders: move to the
 //! ground, attack an enemy army, merge with an own army, board an own fleet (an embarked army
 //! lands where it is ordered), or enter a settlement. `Return` ends the
-//! turn (the HUD button does too); `F5` writes a save to NapoleonRust's own folder.
+//! turn (the HUD button does too). The save shortcuts (CTRL+S, CTRL+L, ESCAPE) are the HUD's
+//! (`super::hud::keys`).
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use bevy::prelude::*;
@@ -28,15 +31,9 @@ use super::scene::{CampaignGround, MarkerAssets};
 pub struct CampaignSim {
     /// The script host; it owns the model.
     pub host: ScriptHost,
-    /// Campaign key, e.g. `eur_napoleon`.
-    pub campaign: String,
-    /// The human player's faction key.
-    pub human: String,
-    /// The facts of the campaign as loaded (key, map, players, header); a save's header is made from
-    /// them (`ntw_campaign::own_save::save_header`).
-    pub info: ntw_campaign::CampaignInfo,
-    /// The rebel faction, if the campaign has one (kept in saves).
-    pub rebel_faction: Option<FactionId>,
+    /// Writes this campaign's saves (the HUD's save panel and quick save call it) and holds the
+    /// facts of the campaign as loaded.
+    pub saver: Rc<CampaignSaver>,
     /// Bumped after every change, so displays know when to refresh.
     pub generation: u64,
     /// The selected character.
@@ -59,9 +56,69 @@ pub struct CampaignSim {
     pub last_message: String,
     /// Harness (`--campaign-demo`): a fixed logic (x, z) for the path preview instead of the cursor.
     pub demo_target: Option<(f32, f32)>,
+}
+
+/// The game side of the campaign's save calls (`CampaignUI.SaveCampaign`, `QuickSave`,
+/// `GetCurrentGameInfo`; [`ntw_script::ui::CampaignSaves`]): writes the running campaign in our own
+/// save format (`ntw_campaign::own_save`) to the path the HUD chose, which is always inside
+/// NapoleonRust's own user folder, never the original game's.
+pub struct CampaignSaver {
+    /// The campaign scripts and the model they own.
+    pub script: ntw_script::ScriptHandle,
+    /// Campaign key, e.g. `eur_napoleon`.
+    pub campaign: String,
+    /// The human player's faction key.
+    pub human: String,
+    /// The facts of the campaign as loaded (key, map, players, header); a save's header is made from
+    /// them (`ntw_campaign::own_save::save_header`).
+    pub info: ntw_campaign::CampaignInfo,
+    /// The rebel faction, if the campaign has one (kept in saves).
+    pub rebel_faction: Option<FactionId>,
     /// The theatres' base and lookup pictures for the save header's territory maps
     /// (`ntw_campaign::header_map`).
     pub pictures: Arc<Vec<ntw_campaign::header_map::TheatrePictures>>,
+}
+
+impl CampaignSaver {
+    /// The header a save written now carries (time of saving = now).
+    fn header(&self, model: &CampaignModel) -> ntw_campaign::CampaignInfo {
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as u32);
+        ntw_campaign::own_save::save_header(&self.info, model, &self.human, ts, &self.pictures)
+    }
+}
+
+impl ntw_script::ui::CampaignSaves for CampaignSaver {
+    fn current_info(&self) -> ntw_campaign::CampaignInfo {
+        self.header(&self.script.state().model)
+    }
+
+    fn save(&self, path: &std::path::Path) -> Result<(), String> {
+        // The scripts write their `save_value` slots during `SavingGame` (CAMPAIGN_DATA.md §4).
+        let (values, report) = self.script.save_values();
+        for e in report.errors {
+            warn!("Campaign script SavingGame: {e}");
+        }
+        let (saved, hash) = {
+            let st = self.script.state();
+            // The hash the load logs ("save state hash"): equal when the save keeps the state.
+            let hash = st.model.saved_state_hash();
+            let data = ntw_campaign::own_save::SaveDataRef {
+                human: &self.human,
+                model: &st.model,
+                rebel_faction: self.rebel_faction,
+                // The scripts' restricted building levels and units are in the model.
+                script_values: script_values_out(&values),
+            };
+            (ntw_campaign::own_save::write(&self.header(&st.model), &data), hash)
+        };
+        let bytes = saved.map_err(|e| e.to_string())?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        }
+        std::fs::write(path, bytes).map_err(|e| e.to_string())?;
+        info!("Campaign: saved {} to {} (state hash {hash:016x})", self.campaign, path.display());
+        Ok(())
+    }
 }
 
 impl CampaignSim {
@@ -70,9 +127,19 @@ impl CampaignSim {
         self.host.model()
     }
 
+    /// Campaign key, e.g. `eur_napoleon` (held by [`Self::saver`]).
+    pub fn campaign(&self) -> &str {
+        &self.saver.campaign
+    }
+
+    /// The human player's faction key (held by [`Self::saver`]).
+    pub fn human(&self) -> &str {
+        &self.saver.human
+    }
+
     /// The human faction's id.
     pub fn human_id(&self) -> Option<FactionId> {
-        self.model().faction_by_key(&self.human).map(|f| f.id)
+        self.model().faction_by_key(self.human()).map(|f| f.id)
     }
 
     /// Applies a command through the script host, then autoresolves any battle it started
@@ -124,7 +191,7 @@ impl CampaignSim {
             m.calendar.turn_number(),
             month_name(m.calendar.date.month),
             m.calendar.date.year,
-            m.faction_by_key(&self.human).map_or(0, |f| f.treasury)
+            m.faction_by_key(self.human()).map_or(0, |f| f.treasury)
         );
         drop(m);
         info!("Campaign: end turn -> {msg}");
@@ -561,11 +628,10 @@ pub fn input(
     mut right_down: Local<Option<Vec2>>,
 ) {
     let (Some(mut sim), Some(ground)) = (sim, ground) else { return };
-    if keys.just_pressed(KeyCode::Enter) {
+    // Return ends the turn unless the HUD took it this frame (a text field or a panel that steals
+    // it, e.g. the save panel's name field).
+    if keys.just_pressed(KeyCode::Enter) && !hud.as_ref().is_some_and(|h| h.keys_taken) {
         sim.end_turn();
-    }
-    if keys.just_pressed(KeyCode::F5) {
-        quick_save(&mut sim);
     }
     // Clicks on the HUD belong to the HUD.
     if let (Some(h), Some(c)) = (&hud, window.cursor_position())
@@ -679,48 +745,6 @@ pub fn preview(
         Some(_) => {}
         None => withdraw(&mut commands),
     }
-}
-
-/// `F5`: writes the campaign to `<NapoleonRust user folder>\save_games\quick_save.save` (never the
-/// original game's folder), in our own save format (`ntw_campaign::own_save`).
-pub fn quick_save(sim: &mut CampaignSim) {
-    let Some(dir) = crate::config::user_dir().map(|d| d.join("save_games")) else {
-        sim.last_message = "Save failed: no user folder".to_owned();
-        warn!("Campaign: {}", sim.last_message);
-        return;
-    };
-    // The scripts write their `save_value` slots during `SavingGame` (CAMPAIGN_DATA.md §4).
-    let (values, report) = sim.host.save_values();
-    for e in report.errors {
-        warn!("Campaign script SavingGame: {e}");
-    }
-    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as u32);
-    let (saved, hash) = {
-        let st = sim.host.state();
-        // The hash the load logs ("save state hash"): equal when the save keeps the state.
-        let hash = st.model.saved_state_hash();
-        let info = ntw_campaign::own_save::save_header(&sim.info, &st.model, &sim.human, ts, &sim.pictures);
-        let data = ntw_campaign::own_save::SaveDataRef {
-            human: &sim.human,
-            model: &st.model,
-            rebel_faction: sim.rebel_faction,
-            // The scripts' restricted building levels and units are in the model.
-            script_values: script_values_out(&values),
-        };
-        (ntw_campaign::own_save::write(&info, &data), hash)
-    };
-    let result = (|| -> Result<std::path::PathBuf, Box<dyn std::error::Error + Send + Sync>> {
-        let bytes = saved?;
-        std::fs::create_dir_all(&dir)?;
-        let path = dir.join("quick_save.save");
-        std::fs::write(&path, bytes)?;
-        Ok(path)
-    })();
-    sim.last_message = match result {
-        Ok(p) => format!("Saved {} to {}", sim.campaign, p.display()),
-        Err(e) => format!("Save failed: {e}"),
-    };
-    info!("Campaign: {} (state hash {hash:016x})", sim.last_message);
 }
 
 /// A save's `save_value` slots as script values (`load_value` returns integers as numbers).

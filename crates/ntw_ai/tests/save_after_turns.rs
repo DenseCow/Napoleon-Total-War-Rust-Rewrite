@@ -53,7 +53,7 @@ fn fixture() -> Option<&'static Fixture> {
 }
 
 fn play(f: &Fixture, m: &mut CampaignModel, turns: u32) {
-    m.terrain = Some(f.terrain.clone());
+    m.attach_terrain(f.terrain.clone());
     let ctx = driver::context_for(m, "eur_napoleon");
     for _ in 0..turns {
         driver::end_turn(m, &f.data, &ctx);

@@ -38,11 +38,14 @@ pub fn category(u: &LandUnit) -> Category {
 /// all-men volley (`0x005694D0`, shooting.rs) and the battle AI (`0x007A4EB0`, `0x007536C0`,
 /// `0x007D33B0`, `0x007D34A0`). [`riding`] is the other predicate.
 pub fn mounted(u: &LandUnit) -> bool {
-    match category(u) {
-        Category::Cavalry | Category::Camels => true,
-        Category::Dragoons => !dismount_active(u),
-        _ => false,
-    }
+    let c = category(u);
+    mounted_category(c) && (c != Category::Dragoons || !dismount_active(u))
+}
+
+/// The categories [`mounted`] counts while no `dismount` is active: cavalry (0), dragoons (3) and
+/// camels (5) (`0x0055ABF0`, CONFIRMED static).
+fn mounted_category(c: Category) -> bool {
+    matches!(c, Category::Cavalry | Category::Dragoons | Category::Camels)
 }
 
 /// `0x0055C2A0` (CONFIRMED static): [`mounted`] and the `dismount` ability (15) not active, for
@@ -68,12 +71,33 @@ pub fn square_active(u: &LandUnit) -> bool {
     u.active_abilities & ((1 << SQUARE_FORMATION) | (1 << PIKE_SQUARE_FORMATION)) != 0
 }
 
+/// The movement class a unit is built with, from its category, its `units` class key and whether
+/// it has guns (`unit_stats_land` column 23): the tests of `0x006543D0` with no ability active
+/// (CONFIRMED). Artillery with guns (`0x0055AB90`: category 1 and its guns) takes the column of its
+/// class (`artillery_foot`, `artillery_horse`) or none; a mounted category (`0x0055ABF0`) the mounted
+/// column, whatever mounts the unit has; infantry and gunless artillery (`0x0055C1C0`) the infantry
+/// column; any other category (elephants, naval) none. [`movement_class`] then follows `dismount`.
+pub fn built_movement_class(category: Category, unit_class: &str, has_guns: bool) -> MovementClass {
+    match category {
+        Category::Artillery if has_guns => match crate::unit_kind::class_code(unit_class) {
+            crate::unit_kind::ARTILLERY_FOOT => MovementClass::FootArtillery,
+            crate::unit_kind::ARTILLERY_HORSE => MovementClass::HorseArtillery,
+            _ => MovementClass::Fixed,
+        },
+        c if mounted_category(c) => MovementClass::Mounted,
+        Category::Infantry | Category::Artillery => MovementClass::Infantry,
+        _ => MovementClass::Fixed,
+    }
+}
+
 /// The `unit_movement_modifiers` column the unit's men use this tick (`0x006543D0`, CONFIRMED):
-/// the class set at setup, except that a mounted unit that is not [`riding`] (`0x006544AB`) takes
-/// the infantry column 3, like a unit on foot.
+/// the class set at setup ([`built_movement_class`]), except that a mounted unit that is not
+/// [`riding`] (`0x006544AB`) takes the infantry column 3, like a unit on foot, and so does a unit
+/// of another non-artillery category with `dismount` active (`0x0055C1C0`).
 pub fn movement_class(u: &LandUnit) -> MovementClass {
     match u.movement_class {
         MovementClass::Mounted if !riding(u) => MovementClass::Infantry,
+        MovementClass::Fixed if dismount_active(u) && category(u) != Category::Artillery => MovementClass::Infantry,
         class => class,
     }
 }
@@ -330,7 +354,30 @@ mod tests {
         u.active_abilities = 1 << super::super::abilities::ability_ids::DISMOUNT;
         assert_eq!(movement_class(&u), MovementClass::Infantry);
         u.movement_class = MovementClass::FootArtillery;
-        assert_eq!(movement_class(&u), MovementClass::FootArtillery, "only the mounted column changes");
+        assert_eq!(movement_class(&u), MovementClass::FootArtillery, "artillery with guns keeps its column");
+        u.unit_category = "elephants".into();
+        u.movement_class = MovementClass::Fixed;
+        assert_eq!(movement_class(&u), MovementClass::Infantry, "0x0055C1C0: dismount gives the infantry column");
+        u.active_abilities = 0;
+        assert_eq!(movement_class(&u), MovementClass::Fixed);
+    }
+
+    /// `0x006543D0` keys the built class on the category alone: a mount on an infantry-category
+    /// unit does not give the mounted column, and elephants or naval units get no modifier.
+    #[test]
+    fn built_movement_class_follows_the_category() {
+        use Category::*;
+        for c in [Cavalry, Dragoons, Camels] {
+            assert_eq!(built_movement_class(c, "cavalry_light", false), MovementClass::Mounted, "{c:?}");
+        }
+        assert_eq!(built_movement_class(Infantry, "infantry_line", false), MovementClass::Infantry);
+        assert_eq!(built_movement_class(Infantry, "infantry_line", true), MovementClass::Infantry, "guns need category artillery");
+        assert_eq!(built_movement_class(Artillery, "artillery_foot", true), MovementClass::FootArtillery);
+        assert_eq!(built_movement_class(Artillery, "artillery_horse", true), MovementClass::HorseArtillery);
+        assert_eq!(built_movement_class(Artillery, "artillery_fixed", true), MovementClass::Fixed);
+        assert_eq!(built_movement_class(Artillery, "artillery_foot", false), MovementClass::Infantry, "gunless crew");
+        assert_eq!(built_movement_class(Elephants, "elephant", false), MovementClass::Fixed);
+        assert_eq!(built_movement_class(NavalFrigate, "", false), MovementClass::Fixed);
     }
 
     #[test]

@@ -201,3 +201,17 @@ fn disable_shopping_for_ai_under_shroud_stores_the_one_humans_shroud() {
     h.lua().load("game_interface:disable_shopping_for_ai_under_shroud(false)").exec().unwrap();
     assert_eq!(h.model().world.ai_shopping_shroud, None);
 }
+
+#[test]
+fn disable_saving_game_sets_the_saving_switch() {
+    // 0x0097B840: the boolean goes to campaign +0x115 (World::saving_disabled); no argument = false.
+    let src = ScriptSource::empty().with_memory_file("events.lua", EVENTS).with_memory_file("test.lua", SCRIPT);
+    let h = ScriptHost::new(common::tiny_model(), "france", src).unwrap();
+    h.run_file("data/test.lua").unwrap();
+    h.fire("NewSession", ScriptContext::default());
+    assert!(!h.model().world.saving_disabled);
+    h.lua().load("game_interface:disable_saving_game(true)").exec().unwrap();
+    assert!(h.model().world.saving_disabled);
+    h.lua().load("game_interface:disable_saving_game()").exec().unwrap();
+    assert!(!h.model().world.saving_disabled);
+}

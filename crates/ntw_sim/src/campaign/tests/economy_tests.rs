@@ -405,6 +405,8 @@ fn event_order_is_stable() {
     use CampaignEvent::*;
     let mut m = test_model();
     m.turn.humans = vec![A];
+    // C holds nothing but stays in the game (faction +0x824 clear), so it plays its turns.
+    m.world.faction_details.entry(C).or_default().out_of_game = Some(false);
     let start = m.start_campaign();
     let r = RegionId;
     let ch = CharacterId;

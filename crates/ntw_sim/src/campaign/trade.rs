@@ -52,6 +52,13 @@ pub struct TradePath {
     pub capital_port: bool,
     /// Commodity volumes in `COMMODITIES_ORDER` (+0x24).
     pub volumes: Vec<u32>,
+    /// The route's accumulated value (+0x3C, CONFIRMED): the round end adds a share of the route's
+    /// value to it (`AccumulateTradeRouteValue` 0x00B05CC0), the recompute `0x00B15B50` copies it
+    /// into the route's value (+0x38) unless the route is blockaded, and it goes with the route: the
+    /// erase `0x00BAC2A0` destroys that record (`0x00B981D0`) and moves the later ones down whole.
+    /// International routes only (0 on domestic routes).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub accumulated: i32,
 }
 
 impl TradePath {
@@ -239,35 +246,37 @@ impl CampaignModel {
     /// `spa_france` also earns `Σ domestic volume × price` over its domestic routes (those whose last
     /// waypoint is in the faction's capital: `0x00A8B5A0`, region == faction `+0x72C`) minus
     /// `Σ current volume × price` (`0x008AFAA0`) over every international route of the faction, blockaded
-    /// or not, with or without an agreement: the routes to `importers` ([`super::economy::trade_route_importers`])
-    /// with this turn's volumes ([`Self::trade_path_volumes`]; `split` is `trade_split(faction)`), so a route
-    /// left after a broken agreement takes off nothing. 0 for every other faction.
+    /// or not, with or without an agreement: the `routes` of each importer
+    /// ([`super::economy::trade_route_importer_paths`]) with this turn's volumes ([`Self::trade_path_volumes`];
+    /// `split` is `trade_split(faction)`), so a route left after a broken agreement takes off nothing.
+    /// The whole term needs the faction's entry in the domestic map (CONFIRMED: when the find
+    /// `0x00BB0A10` on map +0x100 returns the end, `0x00BB35C4` / `0x00BB35CC` jump to the plain route
+    /// sum), so without one ([`World::domestic_trade`](super::World::domestic_trade) has no key for it)
+    /// nothing is subtracted either; an entry with no routes still subtracts. 0 for every other faction.
     pub fn trade_home_value(
         &self,
         faction: FactionId,
         split: Option<&std::collections::BTreeMap<FactionId, Vec<u32>>>,
-        importers: &[FactionId],
+        routes: &[(FactionId, Option<Vec<TradePath>>)],
     ) -> i32 {
         let Some(home) = self.rules.features.home_trade_faction.as_deref() else { return 0 };
         if self.world.factions.get(&faction).is_none_or(|f| f.key != home) {
             return 0;
         }
+        let Some(domestic) = self.world.domestic_trade.get(&faction) else { return 0 };
         let value = |volumes: &[u32]| -> i64 {
             volumes.iter().zip(&self.world.commodity_prices).map(|(v, p)| i64::from(*v) * i64::from(*p)).sum()
         };
-        let home: i64 = self
-            .world
-            .domestic_trade
-            .get(&faction)
-            .into_iter()
-            .flatten()
-            .filter(|r| r.waypoints.last().is_some_and(|w| Some(w.region) == self.world.capital(faction)))
+        let capital = self.world.capital(faction);
+        let home: i64 = domestic
+            .iter()
+            .filter(|r| r.waypoints.last().is_some_and(|w| Some(w.region) == capital))
             .map(|r| value(&r.volumes))
             .sum();
-        let exported: i64 = importers
+        let exported: i64 = routes
             .iter()
-            .flat_map(|b| self.trade_routes_of(faction, *b).into_iter().flatten().map(move |p| (*b, p)))
-            .map(|(b, p)| value(&self.trade_path_volumes(split, faction, b, &p)))
+            .flat_map(|(b, paths)| paths.iter().flatten().map(move |p| (*b, p)))
+            .map(|(b, p)| value(&self.trade_path_volumes(split, faction, b, p)))
             .sum();
         (home - exported).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
     }
@@ -317,7 +326,7 @@ pub const NODE_RADIUS: f32 = 1.0;
 
 /// One leg of the static trade network (`CAMPAIGN_TRADE_MANAGER/TRADE_ROUTES`: from, to, spline
 /// ids, length).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TradeLeg {
     /// Start node.
@@ -326,6 +335,11 @@ pub struct TradeLeg {
     pub to: u32,
     /// Length in map units.
     pub length: f32,
+    /// The leg's spline ids (`TRADE_ROUTES` #2 u32 array, CONFIRMED by the loader `0x00B89270` at
+    /// `0x00B8CF2E`): id `s` runs along trade segment `s >> 1` (the `TRADE_SEGMENTS[]` index), reversed
+    /// when `s & 1`. The commerce raids find a route's segments through them ([`super::commerce_raid`]).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub splines: Vec<u32>,
 }
 
 impl CampaignModel {
@@ -421,6 +435,15 @@ impl CampaignModel {
         if self.region_has_export_port(r) { self.region_trade_route_cap(r) } else { 0 }
     }
 
+    /// The faction's sea route use: (its export routes with a sea hop, [`TradePath::uses_sea`]; its sea
+    /// and capital port caps together, [`Self::sea_route_cap`] + [`Self::capital_port_route_cap`]).
+    /// The one count both [`Self::build_trade_route`] and the trade tooltip's counts line use.
+    pub fn sea_route_use(&self, faction: FactionId) -> (i32, i32) {
+        let w = &self.world;
+        let used = w.trade_paths.iter().filter(|((e, _), _)| *e == faction).flat_map(|(_, ps)| ps).filter(|p| p.uses_sea()).count() as i32;
+        (used, self.sea_route_cap(faction) + self.capital_port_route_cap(faction))
+    }
+
     /// A route for a trade agreement that has no loaded route (made in play): the cheapest path over
     /// the static trade network from any port or settlement of `a` to any of `b`. Land legs (one end a
     /// settlement) cost their length, sea legs (ports and nodes) their length × `trade_route_land_sea_bias`
@@ -443,9 +466,8 @@ impl CampaignModel {
         let is_node = |node: u32| !w.trade_node_regions.contains_key(&node);
         let bias = self.rules.var("trade_route_land_sea_bias", 1.0);
         // With the sea route caps reached (sea and capital port together), the new route may not use the sea.
-        let cap = (self.sea_route_cap(a) + self.capital_port_route_cap(a)) as f32;
-        let sea_routes = w.trade_paths.iter().filter(|((x, _), _)| *x == a).flat_map(|(_, p)| p).filter(|p| p.waypoints.iter().any(|w| w.sea)).count();
-        let sea_allowed = (sea_routes as f32) < cap;
+        let (sea_routes, cap) = self.sea_route_use(a);
+        let sea_allowed = sea_routes < cap;
         let sea_limit = self.rules.var("trade_route_internat_sea_length_limit", 0.0);
         let mut adj: BTreeMap<u32, Vec<(u32, f32, bool)>> = BTreeMap::new();
         for l in &w.trade_network {
@@ -520,7 +542,7 @@ impl CampaignModel {
         waypoints.push(TradeWaypoint { region: region(goal), from: u32::MAX, to: u32::MAX, sea: false, from_pos: None, to_pos: None });
         // A route leaving by sea from the capital uses its port (PROVISIONAL, as the saves' routes show it).
         let capital_port = waypoints.first().is_some_and(|p| p.sea && Some(p.region) == w.capital(a));
-        Some(TradePath { waypoints, volumes: vec![0; w.commodity_prices.len()], capital_port })
+        Some(TradePath { waypoints, volumes: vec![0; w.commodity_prices.len()], capital_port, accumulated: 0 })
     }
 }
 
@@ -539,13 +561,18 @@ impl CampaignModel {
     }
 
     /// The routes of an (exporter, importer) pair: the loaded ones, else a built one
-    /// ([`Self::build_trade_route`]). `None` = no route known: the caller counts the pair with its
-    /// GDP part only when the network is not loaded either (tests), else not at all.
+    /// ([`Self::build_trade_route`]) carrying the pair's built-route accumulated value
+    /// ([`World::trade_accumulated`](super::World::trade_accumulated)). `None` = no route known: the
+    /// caller counts the pair with its GDP part only when the network is not loaded either (tests),
+    /// else not at all.
     pub fn trade_routes_of(&self, a: FactionId, b: FactionId) -> Option<Vec<TradePath>> {
         if let Some(p) = self.world.trade_paths.get(&(a, b)).filter(|p| !p.is_empty()) {
             return Some(p.clone());
         }
-        self.build_trade_route(a, b).map(|p| vec![p])
+        self.build_trade_route(a, b).map(|mut p| {
+            p.accumulated = self.world.trade_accumulated.get(&(a, b)).copied().unwrap_or(0);
+            vec![p]
+        })
     }
 }
 
@@ -599,6 +626,22 @@ impl CampaignModel {
     /// update there once the factors are set). The factors' first-time setup (`f = (bg + S) × f / D`)
     /// is not needed: every file holds set factors.
     pub fn update_commodity_prices(&mut self) {
+        self.update_commodity_prices_with(true);
+    }
+
+    /// The price update with the exe's flag (`0x00BCB020`'s byte argument, CONFIRMED): the round end passes 1
+    /// (`PUSH 0x1` at `0x00948E0E`), the round start 0 (`0x0096C050`). With 0 the prices and trends are
+    /// recomputed but the history (#5 ← #6, #6 ← price) does not move. Either way it ends with the route
+    /// rebuild's raid check (`0x00BD1020` at `0x00BCC5F8`, CONFIRMED: the flag test at `0x00BCC534` skips only
+    /// the route accumulation `0x00B05CC0` and rejoins at the call; the commodity-count and fixed-price skips
+    /// rejoin before it too), so both round points run [`Self::validate_commerce_raids`].
+    pub fn update_commodity_prices_with(&mut self, shift_history: bool) {
+        self.recompute_commodity_prices(shift_history);
+        self.validate_commerce_raids();
+    }
+
+    /// The price part of [`Self::update_commodity_prices_with`].
+    fn recompute_commodity_prices(&mut self, shift_history: bool) {
         let n = self.world.commodity_prices.len();
         if n == 0 || self.world.commodity_market.factors.len() != n || self.rules.features.fixed_commodity_prices {
             return;
@@ -635,8 +678,10 @@ impl CampaignModel {
             } else {
                 2 + u32::from(price < m.previous[c])
             };
-            m.previous[c] = m.previous2[c];
-            m.previous2[c] = price;
+            if shift_history {
+                m.previous[c] = m.previous2[c];
+                m.previous2[c] = price;
+            }
         }
     }
 }

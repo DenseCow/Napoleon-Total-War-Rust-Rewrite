@@ -92,6 +92,7 @@ fn trade_commodities_and_blockades() {
         ],
         volumes: vec![2, 1],
         capital_port: false,
+        accumulated: 0,
     };
     m.world.trade_paths.insert((A, B), vec![path.clone()]);
     assert_eq!(economy::trade_routes_value(&m, A), 302);
@@ -99,7 +100,7 @@ fn trade_commodities_and_blockades() {
     assert_eq!(economy::trade_routes_value(&m, B), 262);
     // Accumulation counts the commodity part: trunc(0.005 × 302) = 1.
     economy::accumulate_trade(&mut m, A);
-    assert_eq!(m.world.trade_accumulated[&(A, B)], 1);
+    assert_eq!(m.world.trade_paths[&(A, B)][0].accumulated, 1);
     // A navy of C (at war with A) at the port blockades the route: nothing, not even the
     // accumulated value, and nothing accumulates.
     let mut admiral = character(104, C, CharacterKind::Admiral, 60);
@@ -114,7 +115,7 @@ fn trade_commodities_and_blockades() {
     assert!(m.trade_path_blockaded(A, &path));
     assert_eq!(economy::trade_routes_value(&m, A), 0);
     economy::accumulate_trade(&mut m, A);
-    assert_eq!(m.world.trade_accumulated[&(A, B)], 1);
+    assert_eq!(m.world.trade_paths[&(A, B)][0].accumulated, 1);
     // Far from the port it no longer blocks.
     m.world.characters.get_mut(&CharacterId(104)).unwrap().position = pos(50, 30);
     assert_eq!(economy::trade_routes_value(&m, A), 303);
@@ -125,6 +126,7 @@ fn trade_commodities_and_blockades() {
         waypoints: vec![TradeWaypoint { region: RegionId(0), from: 120, to: 1, sea: true, from_pos: Some(pos(60, 30)), to_pos: Some(port) }],
         volumes: vec![2, 1],
         capital_port: false,
+        accumulated: 0,
     };
     m.world.domestic_trade.insert(A, vec![home]);
     assert_eq!(economy::trade_routes_value(&m, A), 263);
@@ -172,10 +174,10 @@ fn new_trade_agreements_get_a_route_over_the_network() {
         [(1, (RegionId(10), false)), (2, (RegionId(10), true)), (3, (RegionId(11), true)), (4, (RegionId(11), false))].into_iter().collect();
     // Land 1-4 costs 100; land 1-2 (5) + sea 2-3 (100 × 0.5) + land 3-4 (5) costs 60.
     m.world.trade_network = vec![
-        TradeLeg { from: 1, to: 4, length: 100.0 },
-        TradeLeg { from: 1, to: 2, length: 5.0 },
-        TradeLeg { from: 2, to: 3, length: 100.0 },
-        TradeLeg { from: 3, to: 4, length: 5.0 },
+        TradeLeg { from: 1, to: 4, length: 100.0, splines: Vec::new() },
+        TradeLeg { from: 1, to: 2, length: 5.0, splines: Vec::new() },
+        TradeLeg { from: 2, to: 3, length: 100.0, splines: Vec::new() },
+        TradeLeg { from: 3, to: 4, length: 5.0, splines: Vec::new() },
     ];
     let route = m.build_trade_route(A, B).expect("route");
     let hops: Vec<(u32, u32, bool)> = route.waypoints.iter().map(|w| (w.from, w.to, w.sea)).collect();
@@ -198,7 +200,7 @@ fn new_trade_agreements_get_a_route_over_the_network() {
     assert_eq!(hops[0], (1, 4));
     // No path at all: no route, no income from the pair.
     m.world.trade_network.clear();
-    m.world.trade_network.push(TradeLeg { from: 7, to: 8, length: 1.0 });
+    m.world.trade_network.push(TradeLeg { from: 7, to: 8, length: 1.0, splines: Vec::new() });
     assert!(m.build_trade_route(A, B).is_none());
     assert_eq!(economy::trade_routes_value(&m, A), 0);
 }
@@ -399,7 +401,7 @@ fn supply_is_split_over_the_partners_by_their_net_demand() {
     // so both partners have 2000. Equal demands keep the faction list order (B before C: turn order
     // B, A, C) and are handed out from the end: C 33 × 2000 / 4000 = 16 first, then B the rest, 17.
     let w = TradeWaypoint { region: RegionId(11), from: 121, to: 2, sea: true, from_pos: None, to_pos: None };
-    m.world.domestic_trade.insert(B, vec![TradePath { waypoints: vec![w], volumes: vec![6000], capital_port: false }]);
+    m.world.domestic_trade.insert(B, vec![TradePath { waypoints: vec![w], volumes: vec![6000], capital_port: false, accumulated: 0 }]);
     m.world.faction_details.entry(B).or_default().capital = Some(RegionId(11));
     let split = m.trade_split(A).unwrap();
     assert_eq!((split[&C].clone(), split[&B].clone()), (vec![16], vec![17]));
@@ -512,7 +514,7 @@ fn construction_cost_rounds_half_to_even_in_f32() {
 /// route stays and still earns (`0x00BB3490` sums every route of the exporter, no agreement check): its GDP
 /// part and accumulated value, with no commodity part (the split clears every route and shares only to
 /// partners, `0x00B1C1A0` / `0x00BC26D0`). The `spa_france` home term subtracts this turn's volumes over the
-/// same routes, so the leftover route takes off nothing.
+/// same routes (it needs the faction's domestic map entry, `0x00BB35C4`), so the leftover route takes off nothing.
 #[test]
 fn a_route_left_after_a_broken_agreement_keeps_earning() {
     use super::trade::{TradePath, TradeWaypoint};
@@ -536,11 +538,19 @@ fn a_route_left_after_a_broken_agreement_keeps_earning() {
         ],
         volumes: vec![2, 1],
         capital_port: false,
+        accumulated: 0,
     };
     m.world.trade_paths.insert((A, B), vec![path(1), path(3)]);
-    // Home term: no domestic income, minus 2 × 40 exported.
-    assert_eq!(m.trade_home_value(A, None, &economy::trade_route_importers(&m, A)), -80);
-    assert_eq!(economy::trade_routes_value(&m, A), 2 * 302 - 80);
+    // Home term: with a domestic map entry, no domestic income minus 2 × 40 exported; without one, none
+    // (`0x00BB35C4`): A has no entry here.
+    let with_entry = |m: &CampaignModel| {
+        let mut m = m.clone();
+        m.world.domestic_trade.insert(A, Vec::new());
+        m.trade_home_value(A, None, &economy::trade_route_importer_paths(&m, A))
+    };
+    assert_eq!(with_entry(&m), -80);
+    assert_eq!(m.trade_home_value(A, None, &economy::trade_route_importer_paths(&m, A)), 0);
+    assert_eq!(economy::trade_routes_value(&m, A), 2 * 302);
     assert_eq!(economy::trade_routes_value(&m, B), 262, "B has no route loaded: GDP part only");
 
     m.break_trade(A, B).unwrap();
@@ -549,7 +559,7 @@ fn a_route_left_after_a_broken_agreement_keeps_earning() {
     assert_eq!(economy::trade_route_importers(&m, A), vec![B]);
     assert_eq!(m.trade_path_volumes(None, A, B, &path(3)), vec![0, 0]);
     // The leftover route: GDP part 262, no commodity part, and the home term subtracts nothing.
-    assert_eq!(m.trade_home_value(A, None, &economy::trade_route_importers(&m, A)), 0);
+    assert_eq!(with_entry(&m), 0);
     assert_eq!(economy::trade_routes_value(&m, A), 262);
     assert_eq!(economy::faction_income(&m, A).trade, 262);
     // B's only route was its built one: nothing left.
@@ -558,11 +568,94 @@ fn a_route_left_after_a_broken_agreement_keeps_earning() {
     // Turn after turn the route accumulates trunc(0.005 × 262) = 1 and earns it.
     for turn in 1..=3 {
         economy::accumulate_trade(&mut m, A);
-        assert_eq!(m.world.trade_accumulated[&(A, B)], turn);
+        assert_eq!(m.world.trade_paths[&(A, B)][0].accumulated, turn);
         assert_eq!(economy::trade_routes_value(&m, A), 262 + turn, "turn {turn}");
     }
     // A second break removes it: nothing earns any more.
     m.break_trade(A, B).unwrap();
     assert!(!m.world.trade_paths.contains_key(&(A, B)));
     assert_eq!(economy::trade_routes_value(&m, A), 0);
+}
+
+/// polish41: the `spa_france` home term of `0x00BB3490` runs only when the domestic map find (`0x00BB0A10`)
+/// returns the faction's entry; at its end `0x00BB35C4` / `0x00BB35CC` jump to the plain route sum, so
+/// without an entry nothing is subtracted either. With an entry it adds the domestic routes ending in the
+/// capital and subtracts every international route's volumes, also when the entry holds no route.
+#[test]
+fn the_home_term_needs_a_domestic_map_entry() {
+    use super::trade::{TradePath, TradeWaypoint};
+    let mut m = test_model();
+    let mut rules = (*m.rules).clone();
+    rules.features.home_trade_faction = Some(m.world.factions[&A].key.clone());
+    m.rules = Arc::new(rules);
+    m.world.relationships.insert((A, B), details::Relationship { trade_agreement: true, ..Default::default() });
+    m.world.faction_details.entry(A).or_default().capital = Some(RegionId(10));
+    m.world.commodity_prices = vec![10, 20];
+    let path = |end: u32, volumes: Vec<u32>| TradePath {
+        waypoints: vec![
+            TradeWaypoint { region: RegionId(10), from: 1, to: 2, sea: true, from_pos: Some(pos(20, 0)), to_pos: Some(pos(90, 0)) },
+            TradeWaypoint { region: RegionId(end), from: u32::MAX, to: u32::MAX, sea: false, from_pos: None, to_pos: None },
+        ],
+        volumes,
+        capital_port: false,
+        accumulated: 0,
+    };
+    // One international route A -> B worth 2 × 10 + 1 × 20 = 40 at its loaded volumes (split `None`).
+    m.world.trade_paths.insert((A, B), vec![path(11, vec![2, 1])]);
+    let home = |m: &CampaignModel| m.trade_home_value(A, None, &economy::trade_route_importer_paths(m, A));
+    assert_eq!(home(&m), 0, "no domestic map entry: no home term");
+    m.world.domestic_trade.insert(A, Vec::new());
+    assert_eq!(home(&m), -40, "an entry with no route still subtracts the exports");
+    // A route home to the capital (3 × 10 + 1 × 20 = 50) counts; one ending elsewhere does not.
+    m.world.domestic_trade.insert(A, vec![path(10, vec![3, 1]), path(11, vec![5, 5])]);
+    assert_eq!(home(&m), 50 - 40);
+    // Only the configured faction has the term.
+    m.world.domestic_trade.insert(B, vec![path(11, vec![3, 1])]);
+    assert_eq!(m.trade_home_value(B, None, &economy::trade_route_importer_paths(&m, B)), 0);
+}
+
+/// routeacc: each route accumulates its own value (+0x3C, `AccumulateTradeRouteValue` 0x00B05CC0) and earns
+/// it (`0x00B15B50` adds it to the route's total); the erase of a broken agreement (`0x00BC0120` →
+/// `0x00BAC2A0`) drops only the removed route's value. A pair with no stored route keeps its built route's
+/// value, dropped with that route.
+#[test]
+fn each_trade_route_keeps_its_own_accumulated_value() {
+    use super::trade::{TradePath, TradeWaypoint};
+    let mut m = test_model();
+    let mut rules = (*m.rules).clone();
+    rules.variables.insert("trade_route_value_combined_gdp_proportion".into(), 2.2);
+    rules.variables.insert("trade_route_value_accumulator_proportion".into(), 0.5);
+    m.rules = Arc::new(rules);
+    for (x, y) in [(A, B), (B, A)] {
+        m.world.relationships.insert((x, y), details::Relationship { trade_agreement: true, ..Default::default() });
+    }
+    // Two routes A -> B: commodity parts 40 and 100 on top of the GDP part 262 (no domestic route: the
+    // loaded volumes stand).
+    m.world.commodity_prices = vec![10, 20];
+    let path = |from: u32, volumes: Vec<u32>| TradePath {
+        waypoints: vec![
+            TradeWaypoint { region: RegionId(10), from, to: 2, sea: true, from_pos: Some(pos(20, 0)), to_pos: Some(pos(90, 0)) },
+            TradeWaypoint { region: RegionId(11), from: u32::MAX, to: u32::MAX, sea: false, from_pos: None, to_pos: None },
+        ],
+        volumes,
+        capital_port: false,
+        accumulated: 0,
+    };
+    m.world.trade_paths.insert((A, B), vec![path(1, vec![2, 1]), path(3, vec![10, 0])]);
+    assert_eq!(economy::trade_pair_value(&m, A, B), 302 + 362);
+    economy::accumulate_trade(&mut m, A);
+    // trunc(0.5 × 302) = 151 and trunc(0.5 × 362) = 181, each on its own route, each earned once.
+    assert_eq!(m.world.trade_paths[&(A, B)].iter().map(|p| p.accumulated).collect::<Vec<_>>(), [151, 181]);
+    assert_eq!(economy::trade_pair_value(&m, A, B), 302 + 151 + 362 + 181);
+    assert!(m.world.trade_accumulated.is_empty(), "stored routes keep their values on the routes");
+    // B has no stored route (no network here: the pair stands for its built route): trunc(0.5 × 262) = 131.
+    economy::accumulate_trade(&mut m, B);
+    assert_eq!(m.world.trade_accumulated[&(B, A)], 131);
+    assert_eq!(economy::trade_pair_value(&m, B, A), 262 + 131);
+    // The break removes A's first route with its 151; the second keeps its 181 (and loses its volumes, A and B
+    // no longer being partners). B's built route goes with its value.
+    m.break_trade(A, B).unwrap();
+    assert_eq!(m.world.trade_paths[&(A, B)].iter().map(|p| p.accumulated).collect::<Vec<_>>(), [181]);
+    assert_eq!(economy::trade_pair_value(&m, A, B), 262 + 181);
+    assert!(!m.world.trade_accumulated.contains_key(&(B, A)));
 }

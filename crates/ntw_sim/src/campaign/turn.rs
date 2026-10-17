@@ -9,9 +9,14 @@
 //!
 //! ## Order
 //! Factions play in [`World::factions_in_turn_order`](super::World::factions_in_turn_order) (the
-//! startpos `FACTION_ARRAY` order, INFERRED). A *round* is every faction once:
-//! 1. Round start: `FactionRoundStart` for every faction, in turn order (posted by `0x008F1F60`, which also
-//!    refreshes every region's population factors, `0x00AAE710`).
+//! startpos `FACTION_ARRAY` order, loader `0x0090BEB0`, then the rebels last; CONFIRMED). A *round* is
+//! every faction once, ended by the rebels' turn; the turn passes over a faction out of the game
+//! (`0x00948CF0`, CONFIRMED, [`CampaignModel::takes_turns`]), which gets no turn start, turn end or
+//! handover until it re-emerges:
+//! 1. Round start (`0x0096C050`): `FactionRoundStart` for every faction, in turn order, out-of-game
+//!    factions included and the rebels last (CONFIRMED: posted by `0x008F1F60` outside its +0x824 test;
+//!    that function also refreshes the region population factors, `0x00AAE710`, of a faction in the game
+//!    other than the rebels).
 //! 2. For each faction in turn order, the turn start `0x008F2620` (CONFIRMED order of its calls):
 //!    1. Every character (`0x00A24EB0` per character): `CharacterTurnStart` (INFERRED place of the event)
 //!       and the action points refill to the type's base, times [`force_action_point_factor`] for a
@@ -75,7 +80,7 @@ use crate::fnv::Fnv64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TurnStep {
-    /// `FactionRoundStart` for every faction.
+    /// `FactionRoundStart` for every faction (out-of-game ones included, the rebels last; `0x0096C050`).
     RoundStart,
     /// The calendar advances.
     RoundEnd,
@@ -122,13 +127,18 @@ pub struct TurnState {
     pub in_turn: bool,
     /// Work not done yet.
     pub queue: VecDeque<TurnStep>,
+    /// The campaign is over (campaign +0xFE9; `CAMPAIGN_MODEL` #18 of the exe's start positions and
+    /// saves). Set only by [`CampaignModel::end_campaign`], never cleared; from then on no turn step
+    /// runs. A save of ours from before it was kept loads it as false.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub campaign_over: bool,
 }
 
 impl TurnState {
     /// The state of a loaded save: inside `faction`'s turn (saves are made by the human during
-    /// their own turn; INFERRED).
+    /// their own turn; INFERRED). The loader sets [`Self::campaign_over`] from the save afterwards.
     pub fn in_turn_of(faction: FactionId, humans: Vec<FactionId>) -> Self {
-        TurnState { humans, started: true, current: Some(faction), in_turn: true, queue: VecDeque::new() }
+        TurnState { humans, started: true, current: Some(faction), in_turn: true, queue: VecDeque::new(), campaign_over: false }
     }
 
     pub(crate) fn hash_into(&self, h: &mut Fnv64) {
@@ -140,17 +150,76 @@ impl TurnState {
         h.i32(self.current.map_or(i32::MIN, FactionId::raw));
         h.u32(self.in_turn as u32);
         h.u32(self.queue.len() as u32);
+        h.u32(self.campaign_over as u32);
     }
 }
 
 impl CampaignModel {
-    /// True if `faction` is played by a human, or (with no humans at all) if it is the first
-    /// faction in turn order, where an all-AI game pauses after each round.
+    /// The campaign is over (`SetCampaignOverFlag` `0x008C30A0`, CONFIRMED: it sets campaign
+    /// +0xFE9 to 1 and nothing else). The one path that sets [`TurnState::campaign_over`]; the
+    /// queued turn work is dropped, as nothing will run it. From then on the campaign update
+    /// `0x008F4120` still runs its queued-command loop (from `0x008F4158`) but returns at the flag
+    /// test `0x008F419E`, before time, the CAI step loop (`0x008F4524`, the AI's turns), the victory
+    /// check `0x0096CD10` and the rest, so here [`Self::step`] runs nothing and [`Self::end_turn`]
+    /// does nothing. [`Self::may_act`] is unchanged: a human destroyed in their own turn may still
+    /// give commands, but one destroyed in an AI's turn leaves nobody who may act (the AI's
+    /// [`TurnStep::AiTurn`] went with the queue). The campaign AI therefore gives no more orders
+    /// once the flag is set (`ntw_ai::campaign::apply_orders_with_events`; PROVISIONAL: that stops
+    /// the AI's remaining orders of the frame, while the exe's CAI loop has no test of the flag and
+    /// finishes the frame's steps; what those steps then do is not traced). Saving is refused too
+    /// (`0x008BE4A0` returns false while it is set; the save button's check is the UI's, BACKLOG).
+    ///
+    /// Callers: a human faction destroyed ([`Self::destroy_faction`], `0x008AB6C0`). Not modelled
+    /// (BACKLOG): the multiplayer victory check (`0x0096CD10` sets it when a human has won and another
+    /// human is still in the game; in single player winning or losing by the victory conditions does
+    /// not set it), and the end of a human faction's +0x814 state (`0x008BEAA0` from a settlement
+    /// transfer, `0x008DB1A0` from the faction's listener; a state the model does not have). What the
+    /// exe shows next (the defeat or victory screen) is not traced.
+    pub fn end_campaign(&mut self) {
+        self.turn.campaign_over = true;
+        self.turn.queue.clear();
+    }
+
+    /// True if `faction` is played by a human, or (with no humans) if it is the [first faction to
+    /// take turns](Self::first_turn_taker), where an all-AI game pauses after each round. A human
+    /// out of the game gets no `Decide` step ([`Self::takes_turns`]), and a destroyed human ends the
+    /// campaign ([`Self::end_campaign`]). With humans listed but none of them taking turns (a state
+    /// the exe never reaches, see [`Self::no_human_left`]) this stops for nobody; the loop is still
+    /// bounded, as the next round start ends the campaign (`TurnStep::RoundStart`), whatever the
+    /// order of the checks here.
     fn stops_for(&self, faction: FactionId) -> bool {
-        if self.turn.humans.is_empty() {
-            return self.world.factions_in_turn_order().first() == Some(&faction);
+        if !self.turn.humans.is_empty() {
+            return self.turn.humans.contains(&faction);
         }
-        self.turn.humans.contains(&faction)
+        self.first_turn_taker() == Some(faction)
+    }
+
+    /// True if humans are listed but none of them [takes turns](Self::takes_turns) while the
+    /// campaign is not over: the turn loop would never stop. The exe cannot reach it (a human
+    /// leaves the game only through `0x008AB6C0`, which ends the campaign); a save of ours from
+    /// before [`TurnState::campaign_over`] was kept, or a hand-built world, can. Tested once per
+    /// round, at its start (`TurnStep::RoundStart`).
+    fn no_human_left(&self) -> bool {
+        !self.turn.humans.is_empty() && !self.turn.humans.iter().any(|&h| self.takes_turns(h))
+    }
+
+    /// The first faction in turn order that [takes turns](Self::takes_turns): where a campaign and
+    /// each round begin, and where an all-AI game pauses.
+    fn first_turn_taker(&self) -> Option<FactionId> {
+        self.world.factions_in_turn_order().into_iter().find(|&f| self.takes_turns(f))
+    }
+
+    /// Whether `f` gets a turn when the turn moves on (`PassTurnToNextActiveFaction`
+    /// `0x00948CF0`, CONFIRMED by disassembly): a listed faction out of the game (faction +0x824,
+    /// [`Self::in_the_game`]) is passed over, so it gets no turn start, turn, turn end or handover
+    /// until it comes back ([`Self::reemerge_faction`]); its round-end economy still runs (that loop
+    /// walks every faction). The rebels (world +0x1C, after the list) are never tested. A save of
+    /// ours from before the flag was kept has no +0x824: then `in_the_game`'s INFERRED fallback
+    /// (the faction holds a region or a force) decides who gets a turn. Not modelled: the exe also
+    /// passes over a faction whose byte +0x93C is set, a flag no byte store in the exe writes
+    /// (UNKNOWN meaning, never seen set).
+    pub fn takes_turns(&self, f: FactionId) -> bool {
+        self.is_rebel_faction(f) || self.in_the_game(f)
     }
 
     /// Begins turn 1 of a freshly loaded start position: round start, then every faction up to
@@ -162,9 +231,9 @@ impl CampaignModel {
     }
 
     /// Queues the work of [`start_campaign`](Self::start_campaign) without running it (for
-    /// callers that [`step`](Self::step) themselves).
+    /// callers that [`step`](Self::step) themselves). Does nothing once the campaign is over.
     pub fn begin_start_campaign(&mut self) {
-        if self.turn.started {
+        if self.turn.started || self.turn.campaign_over {
             return;
         }
         self.turn.started = true;
@@ -174,7 +243,7 @@ impl CampaignModel {
         for c in all {
             self.update_hidden(c);
         }
-        let Some(&first) = self.world.factions_in_turn_order().first() else {
+        let Some(first) = self.first_turn_taker() else {
             return;
         };
         self.turn.queue.push_back(TurnStep::RoundStart);
@@ -197,8 +266,11 @@ impl CampaignModel {
 
     /// Queues the end of the current turn (see [`end_turn`](Self::end_turn)) without running it.
     /// If the campaign has not started, this queues the start instead; call it again once that has
-    /// run.
+    /// run. Does nothing once the campaign is over ([`Self::end_campaign`]).
     pub fn begin_end_turn(&mut self) {
+        if self.turn.campaign_over {
+            return;
+        }
         if !self.turn.started {
             self.begin_start_campaign();
             return;
@@ -233,28 +305,57 @@ impl CampaignModel {
         events
     }
 
-    /// Runs the next queued step. `None` when nothing is queued.
+    /// Runs the next queued step. `None` when nothing is queued (always once the campaign is over:
+    /// [`Self::end_campaign`] drops the queue, and a step that ends it drops what it queued).
     pub fn step(&mut self) -> Option<Vec<CampaignEvent>> {
         let step = self.turn.queue.pop_front()?;
         let mut events = Vec::new();
         let known: std::collections::BTreeSet<_> = self.world.characters.keys().copied().collect();
         match step {
+            TurnStep::RoundStart if self.no_human_left() => {
+                // Our own fix for a state the exe never reaches (see `no_human_left`), tested once per round:
+                // without it the loop would play AI rounds forever. Logged once per campaign (the flag stops
+                // the loop; the rest of the queue is dropped below).
+                log::warn!("every human faction {:?} is out of the game but the campaign was not over; it ends now", self.turn.humans);
+                self.end_campaign();
+            }
             TurnStep::RoundStart => {
-                for faction in self.world.factions_in_turn_order() {
+                // `0x0096C050` (CONFIRMED by disassembly): `0x008F1F60` for each listed faction (list +0x2C /
+                // +0x30), then `0x008BAF30` for each listed faction, then `0x00AAAF60`, `0x00BCB020(0)` and
+                // `0x008F5990`, and last a tail call of `0x008F1F60` on the rebels (world +0x1C). `0x008F1F60`
+                // refreshes the faction's regions' population factors (`0x00AAE710`) unless the faction is the
+                // rebels (`0x008CEEF0`) or out of the game (+0x824), and posts the event (`0x013563E4`, named by
+                // `0x008BDE70`) either way. So every faction gets the event, the rebels' after the refreshes.
+                let (rebels, listed): (Vec<_>, Vec<_>) =
+                    self.world.factions_in_turn_order().into_iter().partition(|&f| self.world.is_rebel_faction(f));
+                for faction in listed {
                     events.push(CampaignEvent::FactionRoundStart { faction });
                 }
-                // Every faction's regions refresh their population factors (0x0096C050 → 0x008F1F60 → 0x00AAE710;
-                // 0x008F1F60 also posts the round-start events), then the relationships' computed factors
-                // (0x0096C050 → 0x008BAF30 per faction).
-                self.refresh_population_factors();
+                // The listed factions' regions (not the rebels', not an out-of-game faction's), then the
+                // relationships' computed factors (`0x008BAF30`, the same faction set).
+                self.refresh_round_start_population_factors();
                 self.refresh_computed_factors();
+                // `0x00AAAF60` per region of world +0x34: `0x00B796B0` on a settlement or a fort under siege
+                // (virtual +0x98); it raises the siege counter and removes garrison men by a campaign RNG draw
+                // (siege attrition: meaning INFERRED, CAMPAIGN_FIDELITY.md). Nothing is under siege in the model
+                // (BACKLOG "Sieges on the campaign map"), so the step does nothing here.
+                // The trade update with flag 0 (`0x00BCB020(0)`): prices and trends, no history shift, then the
+                // raid check (`0x00BD1020`) as at the round end.
+                self.update_commodity_prices_with(false);
+                // PLACEHOLDER: the historical events of the round (`0x008F5990`: `events_tables` rows chosen per
+                // human faction (+0x6E0), one random pick drawn from the campaign RNG +0xFB8, and their event messages) are
+                // not in the model (BACKLOG §0 'Historical events').
+                for faction in rebels {
+                    events.push(CampaignEvent::FactionRoundStart { faction });
+                }
             }
             TurnStep::RoundEndRefresh => self.refresh_population_factors(),
             TurnStep::RoundEnd => {
                 // The yearly character pass (natural deaths, expired ancillaries) of the year's last
                 // round end, before the calendar moves on (`0x008A9920`, CONFIRMED order).
                 super::characters::yearly_character_pass(self);
-                // The trade update of the round end (0x00BCB020): commodity prices.
+                // The trade update of the round end (0x00BCB020(1)): commodity prices, then the route rebuild
+                // (0x00BD1020 at 0x00BCC5F8), whose check ends the raids no longer raidable.
                 self.update_commodity_prices();
                 // The calendar moves on (`0x008A98B0`), by the campaign's date step when its data names one.
                 self.calendar.advance_turn(self.rules.features.date_step);
@@ -407,15 +508,17 @@ impl CampaignModel {
             TurnStep::Advance(f) => {
                 let order = self.world.factions_in_turn_order();
                 let pos = order.iter().position(|&x| x == f).unwrap_or(order.len());
-                match order.get(pos + 1) {
-                    Some(&next) => {
+                // The next faction that takes turns (`0x00948CF0`, [`Self::takes_turns`]). The rebels are
+                // last in `order`, so their turn ends the round, as in the exe.
+                match order.iter().skip(pos + 1).copied().find(|&x| self.takes_turns(x)) {
+                    Some(next) => {
                         // The next faction's turn start, then the handover (`0x008A9920`, CONFIRMED order).
                         for s in [TurnStep::Decide(next), TurnStep::Handover(f, next), TurnStep::FactionStart(next)] {
                             self.turn.queue.push_front(s);
                         }
                     }
                     None => {
-                        if let Some(&first) = order.first() {
+                        if let Some(first) = self.first_turn_taker() {
                             // Round end (every faction's economy, then the calendar), then a new
                             // round; pushed to the front in reverse order.
                             for s in [TurnStep::Decide(first), TurnStep::Handover(f, first), TurnStep::FactionStart(first), TurnStep::RoundStart, TurnStep::RoundEnd] {
@@ -429,6 +532,9 @@ impl CampaignModel {
                     }
                 }
             }
+        }
+        if self.turn.campaign_over {
+            self.turn.queue.clear();
         }
         events.extend(self.created_since(&known));
         Some(events)

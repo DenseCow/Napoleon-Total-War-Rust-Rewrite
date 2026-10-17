@@ -273,7 +273,7 @@ pub struct SummaryMan {
     pub pos: (f32, f32),
     /// The 16-bit heading he faces.
     pub heading: u16,
-    /// His radius (soldier `+0x620`).
+    /// His radius (soldier `+0x620`; ours the man's own, see [`LandUnit::man_radius`]).
     pub radius: f32,
 }
 

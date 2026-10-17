@@ -424,11 +424,17 @@ What to report: load (or crash and the loading-bar position); France waits for t
   accumulator `0x00B05CC0` adding to +0x3C): `INTERNATIONAL_TRADE_ROUTE` v3 = u32 `n`, `n` waypoints
   {i32 region id, coord, u32, u32, bool}, bool, u32[], seven u32 (+0x28..+0x40), u32[], u32 count +
   items, i32; +0x3C is child `5n + 8`. The importer is the owner of the last waypoint's region
-  (INFERRED; `trade_check`: it is a model trade partner for 712 of 714 routes in 10 saves). Loaded per
-  (exporter, importer) as the sum of the routes into `World::trade_accumulated` (before the
-  trade stand-in, which therefore shrinks by it); written back with the change from the stored sum
-  put on the pair's first route (two pairs have two routes). Test
-  `trade_accumulation_and_bankruptcy_are_written`. Domestic routes are not modelled.
+  (INFERRED; `trade_check`: it is a model trade partner for 712 of 714 routes in 10 saves). +0x3C is
+  an `int` the saver writes as its raw 4 bytes under the u32 node tag and the reader `0x00AEC420`
+  reads back the same way (CONFIRMED; the 12 evidence saves' record signature has a u32 there), so
+  load and write are a bit cast, never a clamp. Kept per route, as the exe does: `read_paths` reads
+  each record's +0x3C into its `TradePath::accumulated`, and `write_accumulated` writes each model
+  route's value back into the record of the same (exporter, importer) pair with the same waypoints
+  (first unmatched one, so repeated paths and routes the model removed keep their own values; an
+  unchanged model writes the file back byte for byte). `World::trade_accumulated` holds only the
+  value of a pair's built route (no stored route, so no record), which is not written. Test
+  `trade_accumulation_and_bankruptcy_are_written` (a negative value included). Domestic routes'
+  records carry no accumulated value in the model (0).
 
 ## 13. Round-4 refresh of the test saves and the PROVISIONAL list (2026-10-04)
 Regenerated with the current writer (economy fields, slot garrisons; model fidelity from main) and
@@ -1233,6 +1239,14 @@ of an id, all of it (forts and rebel faction too, `world::load_world`, `LoadWarn
 the save drops the others before it indexes the source (`save.rs` `drop_duplicate_regions`, one log
 line), so the written file holds exactly the regions the model was loaded from and none keeps a stale
 owner (#20), residences or queue.
+
+## 33. Campaign over (`CAMPAIGN_MODEL` #18, 2026-10-17, worker campaignover)
+- `CAMPAIGN_MODEL` #18 is a bool, the campaign-over byte (campaign +0xFE9): read by the loader `0x00872550`
+  (`0x0087393A`) when the record version is above 2, written by `0x008EBAB0` (`0x008EBF3F`). CONFIRMED; false in
+  the original's running-campaign saves (v10). Ours reads it for start positions and saves
+  (`ntw_campaign::read_campaign_over`, a record without the layout gives false) and writes it from
+  `TurnState::campaign_over`; our own save keeps the field with `serde(default)` (no format bump).
+  Test `campaign_over_loads_and_round_trips_through_the_esf_save`. CAMPAIGN_FIDELITY.md "Campaign over".
 
 ## For 0-B (please pass on)
 Since round 4 the loader reads `World::trade_accumulated` from the saved routes (§12) **before** it

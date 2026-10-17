@@ -405,9 +405,8 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
     }
     // Movement maximums include the commanders' force factor (CAMPAIGN_FIDELITY.md §Action points).
     model.refresh_movement_maximums();
-    // The routes: accumulated values (SAVE_COMPAT.md §12), paths, commodity volumes and prices
+    // The routes: paths, commodity volumes, accumulated values (SAVE_COMPAT.md §12) and prices
     // (CAMPAIGN_FIDELITY.md §Trade).
-    model.world.trade_accumulated = trade::read_accumulated(esf, &model);
     (model.world.trade_paths, model.world.commodity_prices) = trade::read_paths(esf, &model);
     model.world.domestic_trade = trade::read_domestic(esf, &model);
     trade::read_network(esf, &mut model);
@@ -424,9 +423,10 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
     // The campaign director: its RNG (seeded from the campaign RNG in a record older than version 2,
     // after the portrait steps), its queued region transfers and the region-transfer counter.
     director::fill(root, &mut model);
-    // The historical characters already made and the two episodic force-success switches
-    // (CHARACTERS_FIDELITY.md §7, §8).
-    (model.world.historical_created, model.world.force_success_for_human) = details::model_extras(model_rec);
+    // The historical characters already made, the two episodic force-success switches
+    // (CHARACTERS_FIDELITY.md §7, §8) and the saving switch (UI_FIDELITY.md §5.1).
+    (model.world.historical_created, model.world.force_success_for_human, model.world.saving_disabled) =
+        details::model_extras(model_rec);
     // The scripts' restricted building levels and units (EPISODIC_RESTRICTIONS): the scripts set them
     // only on a new game (InitialiseCampaign at UICreated), so a save carries them.
     let restrictions = script_values::read_restrictions(esf);
@@ -437,6 +437,9 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
         if let Some(f) = model.faction_by_key(&header.faction_key).map(|f| f.id) {
             model.turn = TurnState::in_turn_of(f, vec![f]);
         }
+    }
+    if read_campaign_over(model_rec) {
+        model.end_campaign();
     }
     Ok(LoadedCampaign {
         model,
@@ -461,11 +464,29 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
 /// loader `0x00872550` and writer `0x008EBAB0`, see [`ntw_sim::campaign::rules::ForceCaps`]).
 pub(crate) const OSMOSIS_CULTURES_AT: usize = 20;
 
+/// True if `model_rec` (`CAMPAIGN_MODEL`) is laid out as the layout puts it: `OSMOSIS_CULTURES[]` at
+/// [`OSMOSIS_CULTURES_AT`], so the slots counted from it (#18, #21 to #24) are the ones the exe's
+/// loader and writer mean. The one test the readers here and the save writer share.
+pub(crate) fn has_model_layout(model_rec: &EsfRecord) -> bool {
+    model_rec.get(OSMOSIS_CULTURES_AT).and_then(EsfNode::as_record_array).is_some_and(|a| a.name == "OSMOSIS_CULTURES")
+}
+
+/// Position of the campaign-over bool in `CAMPAIGN_MODEL` (#18, campaign +0xFE9; read by the loader
+/// `0x00872550` at `0x0087393A` when the record version is above 2, written by `0x008EBAB0` at
+/// `0x008EBF3F`; CONFIRMED, a bool there in the original's saves of version 10).
+pub(crate) const CAMPAIGN_OVER_AT: usize = OSMOSIS_CULTURES_AT - 2;
+
+/// `CAMPAIGN_MODEL` #18, campaign over ([`ntw_sim::campaign::TurnState::campaign_over`]). A record
+/// not laid out as the layout puts it (already warned about by [`read_force_caps`]) gives false, the
+/// constructor's value, as the exe's loader leaves it for a record of version 2 or below.
+fn read_campaign_over(model_rec: &EsfRecord) -> bool {
+    has_model_layout(model_rec) && model_rec.get_bool(CAMPAIGN_OVER_AT) == Some(true)
+}
+
 /// `CAMPAIGN_MODEL` #23 / #24, the units per army and per navy; the original's 20 / 20 (with a
 /// warning) when the record does not have them where the layout puts them.
 fn read_force_caps(model_rec: &EsfRecord, warnings: &mut Vec<LoadWarning>) -> ntw_sim::campaign::rules::ForceCaps {
-    let laid_out = model_rec.get(OSMOSIS_CULTURES_AT).and_then(EsfNode::as_record_array).is_some_and(|a| a.name == "OSMOSIS_CULTURES");
-    match (laid_out, model_rec.get_u32(OSMOSIS_CULTURES_AT + 3), model_rec.get_u32(OSMOSIS_CULTURES_AT + 4)) {
+    match (has_model_layout(model_rec), model_rec.get_u32(OSMOSIS_CULTURES_AT + 3), model_rec.get_u32(OSMOSIS_CULTURES_AT + 4)) {
         (true, Some(army), Some(navy)) => ntw_sim::campaign::rules::ForceCaps { army, navy },
         _ => {
             warnings.push(LoadWarning::MissingForceCaps);
@@ -479,8 +500,7 @@ fn read_force_caps(model_rec: &EsfRecord, warnings: &mut Vec<LoadWarning>) -> nt
 /// positions, AI_RESEARCH.md §4 "Inflation in the save"). A record without them (not laid out as
 /// the layout puts them) gives the constructors' 0 / 1.0, as the exe's loader leaves them.
 fn read_deal_inflation(model_rec: &EsfRecord) -> ntw_sim::campaign::deal_value::DealInflation {
-    let laid_out = model_rec.get(OSMOSIS_CULTURES_AT).and_then(EsfNode::as_record_array).is_some_and(|a| a.name == "OSMOSIS_CULTURES");
-    match (laid_out, model_rec.get_u32(OSMOSIS_CULTURES_AT + 1), model_rec.get(OSMOSIS_CULTURES_AT + 2)) {
+    match (has_model_layout(model_rec), model_rec.get_u32(OSMOSIS_CULTURES_AT + 1), model_rec.get(OSMOSIS_CULTURES_AT + 2)) {
         (true, Some(first), Some(EsfNode::F32(factor))) => ntw_sim::campaign::deal_value::DealInflation { first, factor: *factor },
         _ => {
             static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

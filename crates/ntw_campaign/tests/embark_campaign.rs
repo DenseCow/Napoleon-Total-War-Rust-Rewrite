@@ -53,7 +53,7 @@ fn fixture() -> Option<&'static Fixture> {
 fn model(f: &Fixture) -> CampaignModel {
     let mut l = f.loaded.clone();
     assert!(l.set_human("france"));
-    l.model.terrain = Some(f.terrain.clone());
+    l.model.attach_terrain(f.terrain.clone());
     l.model
 }
 

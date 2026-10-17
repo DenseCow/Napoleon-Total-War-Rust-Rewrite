@@ -118,13 +118,15 @@ fn first_rec(item: &[EsfNode]) -> Option<&EsfRecord> {
 }
 
 /// Sets child `i` if it holds a value of the same ESF type (a wrong type means the layout is not
-/// what we expect, and the value is left alone).
-fn set(r: &mut EsfRecord, i: usize, v: EsfNode) {
+/// what we expect, and the value is left alone). Returns whether it was set.
+fn set(r: &mut EsfRecord, i: usize, v: EsfNode) -> bool {
     if let Some(slot) = r.children.get_mut(i)
         && slot.type_code() == v.type_code()
     {
         *slot = v;
+        return true;
     }
+    false
 }
 
 /// `CAMPAIGN_PLAYER_SETUP` #3 is the human flag, and a save holds it twice: in the setup
@@ -292,13 +294,25 @@ fn write_save_tree(source: &EsfFile, model: &CampaignModel, human: &str, timesta
     }
     // The units per army / navy (#23 / #24, after `OSMOSIS_CULTURES`), as the original's writer
     // `0x008EBAB0` saves its globals.
-    if m.children.get(crate::OSMOSIS_CULTURES_AT).and_then(EsfNode::as_record_array).is_some_and(|a| a.name == "OSMOSIS_CULTURES") {
+    if crate::has_model_layout(m) {
         let caps = model.force_caps;
-        // #21 / #22: the deal inflation's first net and factor (`0x008EC094` / `0x008EC0DE`).
-        set(m, crate::OSMOSIS_CULTURES_AT + 1, EsfNode::U32(model.deal_inflation.first));
-        set(m, crate::OSMOSIS_CULTURES_AT + 2, EsfNode::F32(model.deal_inflation.factor));
-        set(m, crate::OSMOSIS_CULTURES_AT + 3, EsfNode::U32(caps.army));
-        set(m, crate::OSMOSIS_CULTURES_AT + 4, EsfNode::U32(caps.navy));
+        let all_set = [
+            // #18: campaign over (`0x008EBAB0` at `0x008EBF3F`).
+            set(m, crate::CAMPAIGN_OVER_AT, EsfNode::Bool(model.turn.campaign_over)),
+            // #21 / #22: the deal inflation's first net and factor (`0x008EC094` / `0x008EC0DE`).
+            set(m, crate::OSMOSIS_CULTURES_AT + 1, EsfNode::U32(model.deal_inflation.first)),
+            set(m, crate::OSMOSIS_CULTURES_AT + 2, EsfNode::F32(model.deal_inflation.factor)),
+            set(m, crate::OSMOSIS_CULTURES_AT + 3, EsfNode::U32(caps.army)),
+            set(m, crate::OSMOSIS_CULTURES_AT + 4, EsfNode::U32(caps.navy)),
+        ];
+        if all_set.contains(&false) {
+            static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                log::warn!(
+                    "save: CAMPAIGN_MODEL #18 / #21-#24 (campaign over, deal inflation, units per army / navy) are not of the layout's types {all_set:?}; the slots that failed keep the source's values (logged once)"
+                );
+            }
+        }
     }
     let world = child_mut(m, "WORLD").ok_or(SaveError::Missing("WORLD"))?;
     let dropped = drop_duplicate_regions(world);
@@ -465,8 +479,12 @@ fn drop_dangling_refs(m: &mut EsfRecord, model: &CampaignModel, ix: &SourceIndex
         "GENERAL_RECRUITMENT" | "ADMIRAL_RECRUITMENT" => keep_chars(r, 0, true),
         "MILITARY_FORCE" => keep_chars(r, 2, false),
         "SIEGEABLE_GARRISON_RESIDENCE" => keep_chars(r, 14, false),
-        "CHARACTER" if r.get_u32(6).is_some_and(|f| f != 0 && !w.forces.contains_key(&ForceId(f))) => set(r, 6, EsfNode::U32(0)),
-        "PORT_GARRISON_MANAGER" if r.get_u32(0).is_some_and(|f| f != 0 && !navy_in_place(f)) => set(r, 0, EsfNode::U32(0)),
+        "CHARACTER" if r.get_u32(6).is_some_and(|f| f != 0 && !w.forces.contains_key(&ForceId(f))) => {
+            set(r, 6, EsfNode::U32(0));
+        }
+        "PORT_GARRISON_MANAGER" if r.get_u32(0).is_some_and(|f| f != 0 && !navy_in_place(f)) => {
+            set(r, 0, EsfNode::U32(0));
+        }
         _ => {}
     };
     let mut arrays = |a: &mut EsfRecordArray| {

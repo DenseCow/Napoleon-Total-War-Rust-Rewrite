@@ -103,7 +103,7 @@ fn main() {
             {
                 let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
                 let map = ntw_formats::campaign_map::CampaignMap::load(&files, &l.info.map_key).expect("map");
-                l.model.terrain = Some(ntw_sim::campaign::Terrain(std::sync::Arc::new(ntw_campaign::pathing::build_grid(&map))));
+                l.model.attach_terrain(ntw_sim::campaign::Terrain(std::sync::Arc::new(ntw_campaign::pathing::build_grid(&map))));
             }
             let m = &l.model;
             println!("== {file}");
@@ -179,7 +179,7 @@ fn main() {
             let vfs = ntw_formats::pack::Vfs::open_install(std::path::Path::new(data)).expect("vfs");
             let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
             let map = ntw_formats::campaign_map::CampaignMap::load(&files, &l.info.map_key).expect("map");
-            l.model.terrain = Some(ntw_sim::campaign::Terrain(std::sync::Arc::new(ntw_campaign::pathing::build_grid(&map))));
+            l.model.attach_terrain(ntw_sim::campaign::Terrain(std::sync::Arc::new(ntw_campaign::pathing::build_grid(&map))));
             ntw_campaign::trade::attach_map(&mut l.model, &map.regions);
         }
         let esf = EsfFile::open(file).expect("open");

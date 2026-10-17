@@ -301,7 +301,12 @@ impl SaveFolders {
             return None;
         }
         let file = if save_name(name, ext).len() == name.len() { format!("{name}{ext}") } else { name.to_owned() };
-        [self.ours.as_deref(), self.original.as_deref()].into_iter().flatten().map(|d| d.join(&file)).find(|p| p.is_file())
+        self.find(&file)
+    }
+
+    /// The file `file` (a bare file name, extension included): ours first, then the original's.
+    pub fn find(&self, file: &str) -> Option<PathBuf> {
+        [self.ours.as_deref(), self.original.as_deref()].into_iter().flatten().map(|d| d.join(file)).find(|p| p.is_file())
     }
 
     /// The newest file of the class that reads as a campaign save (`ContinueCampaign`).
@@ -393,17 +398,12 @@ pub fn save_preferences(user_dir: Option<&Path>, prefs: &Preferences) -> std::io
     std::fs::write(dir.join("preferences.script.txt"), prefs.to_bytes())
 }
 
-/// Adds the `FrontEnd.*` functions of the single-player pages to `t`.
-pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Result<()> {
-    let battles: Rc<RefCell<Option<Vec<BattleRecord>>>> = Rc::new(RefCell::new(None));
-    let get_battles = {
-        let inner = inner.clone();
-        let battles = battles.clone();
-        move || -> Vec<BattleRecord> {
-            battles.borrow_mut().get_or_insert_with(|| read_battles(&inner.source)).clone()
-        }
-    };
-
+/// The save-panel functions both UI tables carry (the front end's `FrontEnd.*` load page and the
+/// campaign's `CampaignUI.*` load / save panel, `load-save_game.luac`, which calls the same names on
+/// `CampaignUI`; UI_FIDELITY.md §5.1): `FileExtenstionAndPathForWriteClass`,
+/// `EnumerateCampaignSaves` (and its multiplayer name), `GetExtendedSaveGameInfo` and `LoadCampaign`.
+/// One implementation, installed into each table.
+pub(super) fn install_saves(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Result<()> {
     // The save folders. The original lists and writes `<its user folder>\save_games\` only
     // (CONFIRMED `0x0046EE50`). NapoleonRust writes its saves to its own user folder
     // (`FrontEndFacts::user_dir`), so the write class names that folder, and the load-game page
@@ -446,11 +446,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Result<(
     })?)?;
     t.set("EnumerateMultiplayerCampaignSaves", t.get::<Value>("EnumerateCampaignSaves")?)?;
 
-    // GetExtendedSaveGameInfo(path) → {Faction, FlagPath, LeaderPortrait, TimePlayed, Year, Season,
-    // Maps} (CONFIRMED field names, 0x008982C0), from the save's SAVE_GAME_HEADER. Maps[theatre] =
-    // the header's region-ownership picture (MAPS item), shown on the page's `map_<map>` component
-    // through UIImage(...):SetComponentTexture; here a run-time image (one per theatre, replaced on
-    // the next call).
+    // GetExtendedSaveGameInfo(path) → the save's SAVE_GAME_HEADER as a details table ([`save_info_table`]).
     let i = inner.clone();
     t.set("GetExtendedSaveGameInfo", lua.create_function(move |lua, path: String| {
         let info = match std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| ntw_campaign::read_info(&b).map_err(|e| e.to_string())) {
@@ -460,32 +456,10 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Result<(
                 return Ok(None);
             }
         };
-        let h = &info.header;
-        let t = lua.create_table()?;
-        t.set("Faction", h.faction_key.as_str())?;
-        t.set("FlagPath", h.flag_path.as_str())?;
-        t.set("LeaderPortrait", h.portrait.as_str())?;
-        t.set("TimePlayed", h.turn_number)?;
-        t.set("Year", h.year)?;
-        // The header stores the season key (e.g. "winter"); the screen shows its loc text (INFERRED).
-        let season = i.loc.get(&format!("seasons_onscreen_{}", h.season_name.to_ascii_lowercase())).map(str::to_owned).unwrap_or_else(|| h.season_name.clone());
-        t.set("Season", season)?;
-        let maps = lua.create_table()?;
-        for m in h.maps.iter().filter(|m| m.width > 0 && m.height > 0 && m.pixels.len() >= (m.width * m.height) as usize) {
-            let key = format!("save_map_{}", m.theatre);
-            let mut world = i.world.borrow_mut();
-            let version = world.runtime_images.get(&key).map_or(0, |r| r.version + 1);
-            let mut img = super::world::RuntimeImage::from_rgba(m.width, m.height, m.rgba());
-            img.version = version;
-            world.runtime_images.insert(key.clone(), img);
-            world.generation += 1;
-            maps.set(m.theatre.as_str(), format!("{}{key}", super::world::RUNTIME_IMAGE_PREFIX))?;
-        }
-        t.set("Maps", maps)?;
-        Ok(Some(t))
+        save_info_table(lua, &i, &info.header).map(Some)
     })?)?;
 
-    // LoadCampaign(name) and ContinueCampaign(): hand over to the game (campaign mode). The page
+    // LoadCampaign(name) (and the front end's ContinueCampaign): hand over to the game (campaign mode). The page
     // passes the save's name without folder or extension (its row global `m_name`, CONFIRMED in
     // sp_load_game.lua); the exe completes it with the save class's folder and extension
     // (`0x0047CC70` → the file system object's path builder, write class 0, CONFIRMED). A full
@@ -500,11 +474,66 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Result<(
         }
         Ok(())
     })?)?;
+    Ok(())
+}
+
+/// The newest file of the save class that reads as a campaign save, ours and the original's
+/// folders: the front end's `ContinueCampaign` and the campaign's `QuickLoad` (both CONFIRMED to
+/// make this choice, `0x0046CF00` → `0x0085F7D0` and `0x009EF420`).
+pub(super) fn latest_campaign_save(facts: &super::host::FrontEndFacts) -> Option<PathBuf> {
+    SaveFolders::of(facts, "save_games").latest(".save")
+}
+
+/// Fills a save panel's details table from a save header: `{Faction, FlagPath, LeaderPortrait,
+/// TimePlayed, Year, Season, Maps}` (CONFIRMED field names, `0x008982C0`). The filler of
+/// `GetExtendedSaveGameInfo` (a save on disk) and the campaign's `GetCurrentGameInfo` (the running
+/// campaign's header, `0x009E4BB0`), which the exe shares. Maps[theatre] = the header's
+/// region-ownership picture (MAPS item), shown on the page's `map_<map>` component through
+/// UIImage(...):SetComponentTexture; here a run-time image (one per theatre, replaced on the next
+/// call).
+pub(super) fn save_info_table(lua: &Lua, inner: &Inner, h: &ntw_campaign::SaveHeader) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("Faction", h.faction_key.as_str())?;
+    t.set("FlagPath", h.flag_path.as_str())?;
+    t.set("LeaderPortrait", h.portrait.as_str())?;
+    t.set("TimePlayed", h.turn_number)?;
+    t.set("Year", h.year)?;
+    // The header stores the season key (e.g. "winter"); the screen shows its loc text (INFERRED).
+    let season = inner.loc.get(&format!("seasons_onscreen_{}", h.season_name.to_ascii_lowercase())).map(str::to_owned).unwrap_or_else(|| h.season_name.clone());
+    t.set("Season", season)?;
+    let maps = lua.create_table()?;
+    for m in h.maps.iter().filter(|m| m.width > 0 && m.height > 0 && m.pixels.len() >= (m.width * m.height) as usize) {
+        let key = format!("save_map_{}", m.theatre);
+        let mut world = inner.world.borrow_mut();
+        let version = world.runtime_images.get(&key).map_or(0, |r| r.version + 1);
+        let mut img = super::world::RuntimeImage::from_rgba(m.width, m.height, m.rgba());
+        img.version = version;
+        world.runtime_images.insert(key.clone(), img);
+        world.generation += 1;
+        maps.set(m.theatre.as_str(), format!("{}{key}", super::world::RUNTIME_IMAGE_PREFIX))?;
+    }
+    t.set("Maps", maps)?;
+    Ok(t)
+}
+
+/// Adds the `FrontEnd.*` functions of the single-player pages to `t`.
+pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Result<()> {
+    let battles: Rc<RefCell<Option<Vec<BattleRecord>>>> = Rc::new(RefCell::new(None));
+    let get_battles = {
+        let inner = inner.clone();
+        let battles = battles.clone();
+        move || -> Vec<BattleRecord> {
+            battles.borrow_mut().get_or_insert_with(|| read_battles(&inner.source)).clone()
+        }
+    };
+
+    install_saves(lua, inner, t)?;
+
     let i = inner.clone();
     t.set("ContinueCampaign", lua.create_function(move |_, ()| {
         // CONFIRMED (`0x0046CF00` → `0x0085F7D0`): "Load the most recently saved campaign game", the
         // newest file of the save class that reads as a save. Ours and the original's folders.
-        if let Some(path) = SaveFolders::of(&i.facts, "save_games").latest(".save") {
+        if let Some(path) = latest_campaign_save(&i.facts) {
             i.requests.borrow_mut().push(UiRequest::LoadCampaign(path));
         }
         Ok(())

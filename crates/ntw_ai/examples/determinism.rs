@@ -109,7 +109,7 @@ fn campaign(turns: u32) -> Option<()> {
     let vfs = Vfs::open_install(&dir).ok()?;
     let files = GameFiles { vfs: &vfs };
     let map = CampaignMap::load(&files, &loaded.info.map_key).ok()?;
-    loaded.model.terrain = Some(Terrain(Arc::new(ntw_campaign::pathing::build_grid(&map))));
+    loaded.model.attach_terrain(Terrain(Arc::new(ntw_campaign::pathing::build_grid(&map))));
     let mut m = loaded.model;
     let ctx = driver::context_for(&m, "eur_napoleon");
     println!("turn 0 {:016x}", m.state_hash());

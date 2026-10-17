@@ -54,9 +54,14 @@ mod agents;
 mod army;
 mod characters;
 mod diplomacy;
+#[cfg(test)]
+mod diplomacy_tests;
 mod government;
 mod map;
 mod region_info;
+mod saves;
+#[cfg(test)]
+mod saves_tests;
 mod settlement;
 mod tabs;
 mod technology;
@@ -88,6 +93,22 @@ pub struct CampaignLink {
     pub theatres: Vec<String>,
     /// The game database (units, buildings, factions).
     pub db: Rc<GameDatabase>,
+    /// Writes the running campaign to disk (`CampaignUI.SaveCampaign` / `QuickSave`, see
+    /// [`CampaignSaves`]). None when the HUD runs without a game behind it (tests, probes): a save
+    /// then fails and is logged.
+    pub saves: Option<Rc<dyn CampaignSaves>>,
+}
+
+/// The game side of the campaign save panel (`load-save_game.luac`, UI_FIDELITY.md §5.1). The
+/// original's `CampaignUI.SaveCampaign` saves at once and returns whether it worked (the panel's
+/// `ConfirmSave` needs the result in the same call), so this is a synchronous callback, not a
+/// queued [`CampaignRequest`].
+pub trait CampaignSaves {
+    /// The header a save written now would carry (`GetCurrentGameInfo`, `0x009E4BB0`, builds it with
+    /// `0x00888320`, the save writer's own header builder).
+    fn current_info(&self) -> ntw_campaign::CampaignInfo;
+    /// Writes the running campaign to `path` (the campaign scripts hear `SavingGame` first).
+    fn save(&self, path: &std::path::Path) -> Result<(), String>;
 }
 
 /// What is selected on the campaign map.
@@ -519,12 +540,34 @@ fn loc_required(inner: &Inner, key: &str) -> String {
     })
 }
 
+/// The calendar's round description ("Early May"), sent in `UpdateFactionFundsAndDate`
+/// (`0x009C1AD0`) and used by `DefaultSaveName` (`0x009D5400`); both read the calendar's turn-name
+/// list at `turn_in_year` (`0x008D1E20`, CONFIRMED, UI_FIDELITY.md §5.1). The name is the
+/// `random_localisation_strings` text of [`ntw_sim::calendar::Calendar::round_id`]; a calendar the
+/// exe gives no names (not 24 or 12 turns a year) has the empty name, and a missing loc string is
+/// "" and logged once, as the exe's lookup `0x00F59170` logs a missing key and returns "".
+fn round_description(inner: &Inner, calendar: &ntw_sim::calendar::Calendar) -> String {
+    calendar.round_id().map_or_else(String::new, |id| loc_required(inner, &format!("random_localisation_strings_string_{id}")))
+}
+
 /// A faction's on-screen name: loc `factions_screen_name_<key>`, else the DB name (as the front
 /// end's `CampaignDetails`).
 fn faction_name(inner: &Inner, db: &GameDatabase, key: &str) -> String {
     loc(inner, &format!("factions_screen_name_{key}"))
         .or_else(|| db.faction(key).map(|r| r.screen_name.clone()))
         .unwrap_or_else(|| key.to_owned())
+}
+
+/// A faction's display name: faction +0x518 (read through `0x008DA780`), the save's `FACTION`
+/// plain value 2 (`FactionDetails::display_name`, e.g. "France"). Ours: a faction whose record gave
+/// none (a custom map) uses its on-screen name ([`faction_name`]).
+fn faction_display_name(inner: &Inner, db: &GameDatabase, m: &CampaignModel, id: FactionId, key: &str) -> String {
+    m.world
+        .faction_details
+        .get(&id)
+        .map(|d| d.display_name.clone())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| faction_name(inner, db, key))
 }
 
 /// A region's on-screen name: loc `regions_onscreen_<key>` (CONFIRMED keys, e.g.
@@ -861,7 +904,6 @@ fn install_functions(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tabl
         Ok(())
     });
     f!("CanEndTurn", |_l, inner, ui, _a: Variadic<Value>| Ok(true));
-    f!("CanSave", |_l, inner, ui, _a: Variadic<Value>| Ok(true));
     f!("PlayerHasFunds", |_l, inner, ui, amount: Option<f64>| {
         let m = ui.model();
         Ok(m.faction_by_key(&ui.link.human).is_some_and(|f| f64::from(f.treasury) >= amount.unwrap_or(0.0)))
@@ -915,6 +957,7 @@ fn install_functions(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tabl
     diplomacy::install(lua, inner, ui, t)?;
     government::install(lua, inner, ui, t)?;
     map::install(lua, inner, ui, t)?;
+    saves::install(lua, inner, ui, t)?;
     settlement::install(lua, inner, ui, t)?;
     tabs::install(lua, inner, ui, t)?;
     technology::install(lua, inner, ui, t)?;
@@ -1107,14 +1150,23 @@ impl UiScriptHost {
         }
     }
 
+    /// A key binding fired (`text/default_keys.xml`: `escape_menu` = ESCAPE, `quick_save` = CTRL+S,
+    /// `quick_load` = CTRL+L in the campaign): the root's `OnShortcut(name, true)` (CONFIRMED,
+    /// `layout.root.luac` line 1602: it acts only when the second argument is true, so the release
+    /// call is not made). Returns false when the root has no `OnShortcut`.
+    pub fn campaign_shortcut(&self, name: &str) -> bool {
+        call_root_global(self.lua(), self.inner(), "OnShortcut", (name, true))
+    }
+
     /// The engine's `UpdateFactionFundsAndDate{funds, season, year, round_description}` call
-    /// (CONFIRMED from `layout.root.luac`).
-    pub fn campaign_update_funds(&self, round_description: &str) {
+    /// (CONFIRMED from `layout.root.luac`; `0x009C1AD0`), the round description being the
+    /// calendar's turn name ([`round_description`]).
+    pub fn campaign_update_funds(&self) {
         let Some(ui) = self.campaign_ui() else { return };
-        let (funds, season, year) = {
+        let (funds, season, year, round_description) = {
             let m = ui.model();
             let funds = m.faction_by_key(&ui.link.human).map_or(0, |f| f.treasury);
-            (funds, m.calendar.date.season, m.calendar.date.year)
+            (funds, m.calendar.date.season, m.calendar.date.year, round_description(self.inner(), &m.calendar))
         };
         let t = (|| -> mlua::Result<Table> {
             let t = self.lua().create_table()?;

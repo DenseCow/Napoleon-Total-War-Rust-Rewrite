@@ -9,6 +9,12 @@ use ntw_sim::campaign::features::{CampaignFeatures, LootResentment, UnitKeyEffec
 const PENINSULAR: &str = "spa_napoleon";
 /// The multiplayer Europe campaign's key (`0x00B61F30`, CONFIRMED).
 const MP_EUROPE: &str = "mp_eur_napoleon";
+/// The campaigns whose default save name starts with the campaign's on-screen name
+/// (`BuildDefaultSaveName` `0x009D5400` compares the key with these four, CONFIRMED).
+const SAVE_NAMED_BY_CAMPAIGN: [&str; 4] = ["egy_napoleon", "ita_napoleon", "tut_napoleon", "eur_napoleon"];
+/// The Empire campaign key whose diplomacy screen hides `britain` (`0x009F2EA0` at `0x009F2F77`,
+/// CONFIRMED); no Napoleon campaign has it, so vanilla never hides a faction.
+const EPISODIC_3: &str = "episodic_3";
 
 /// The feature set the exe gives the original's campaign `key`; any other key gets none (the exe's
 /// behaviour for every campaign it has no switch for).
@@ -38,6 +44,10 @@ pub fn original(key: &str) -> CampaignFeatures {
     if key == MP_EUROPE {
         f.ai_recruitment_points = vec![("france".into(), 1)];
     }
+    f.save_name_uses_campaign_name = SAVE_NAMED_BY_CAMPAIGN.contains(&key);
+    if key == EPISODIC_3 {
+        f.diplomacy_hidden_factions = vec!["britain".into()];
+    }
     f
 }
 
@@ -45,12 +55,19 @@ pub fn original(key: &str) -> CampaignFeatures {
 mod tests {
     use super::*;
 
-    /// Only the two switched campaigns get features; the others behave as the exe's default.
+    /// Only the two switched campaigns get rule features, and the four single-player Napoleon
+    /// campaigns the save-name switch; the others behave as the exe's default.
     #[test]
     fn the_original_keys_get_the_exe_switches() {
-        for key in ["eur_napoleon", "egy_napoleon", "ita_napoleon", "mp_ita_napoleon", "made_up_campaign"] {
+        for key in ["eur_napoleon", "egy_napoleon", "ita_napoleon", "tut_napoleon"] {
+            let f = original(key);
+            assert!(f.save_name_uses_campaign_name, "{key}");
+            assert_eq!(CampaignFeatures { save_name_uses_campaign_name: false, ..f }, CampaignFeatures::default(), "{key}");
+        }
+        for key in ["mp_ita_napoleon", "made_up_campaign"] {
             assert_eq!(original(key), CampaignFeatures::default(), "{key}");
         }
+        assert!(!original("spa_napoleon").save_name_uses_campaign_name, "the Peninsular campaign takes the faction's name");
         let spa = original("spa_napoleon");
         assert_eq!(spa.loot_value, (2, 10_000));
         assert_eq!(spa.home_trade_faction.as_deref(), Some("spa_france"));
@@ -66,6 +83,7 @@ mod tests {
         assert_eq!(mp.ai_recruitment_bonus("france"), 1);
         assert_eq!(mp.ai_recruitment_bonus("britain"), 0);
         assert_eq!(CampaignFeatures { ai_recruitment_points: Vec::new(), ..mp }, CampaignFeatures::default());
+        assert_eq!(original("episodic_3").diplomacy_hidden_factions, ["britain"]);
     }
 
     /// A campaign's own data can name any feature set: it round-trips through the open text format.

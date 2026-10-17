@@ -2,7 +2,9 @@
 //! (`UIDiplomacyNegotiation`).
 
 use super::*;
-use ntw_sim::campaign::negotiation::{DealPayment, Greeting, NegotiationAction};
+use ntw_sim::campaign::negotiation::{
+    ActionTooltip, DealPayment, Greeting, NegotiationAction, TRADE_TIP_ROUTE_COUNT, TRADE_TIP_ROUTE_SHIFTED, TradeAgreementTooltip,
+};
 
 /// The diplomacy panel's negotiation object: the host's stand-in for the exe's
 /// `UIDiplomacyNegotiation` userdata (ctor 0x00A102B0, 0xB4 bytes). The campaign negotiation behind
@@ -277,23 +279,27 @@ fn relationship_details(inner: &Inner, rel: &ntw_sim::campaign::Relationship) ->
 }
 
 /// `CampaignUI.RetrieveFactionListForDiplomacy()` (0x009F2EA0, CONFIRMED keys) → a table keyed by
-/// faction key, one entry per faction except pirates: Name, Key, IsHuman, IsMajor, FlagPath,
+/// faction key, one entry per faction still in the game (`+0x824` clear, 0x009F2F69) except
+/// pirates: Name, Key, IsHuman, IsMajor, FlagPath,
 /// ReligionIcon, ReligionName, Government, GovernmentName; for factions other than the player
-/// also Relationship ("allied", "at war", "protectorate" or nil, the player's stance towards it),
-/// Trading ("trading" with a trade agreement, else "can_trade" / "cannot_trade"), LandTrade,
-/// TradingTooltip (random loc `trade_status_tooltip_already_trading` / `_can` / `_cannot`),
+/// also Relationship ("allied", "at war", "protectorate" when the player is its patron, else nil),
+/// Trading, LandTrade and TradingTooltip (random loc `trade_status_tooltip_already_trading` /
+/// `_can` / `_cannot`) when not at war, from
+/// [`ntw_sim::campaign::CampaignModel::diplomacy_trade_status`],
 /// Attitude (diplomacy loc `relationship_<level>` of the faction's attitude towards the player,
 /// 0x00B64CC0), AttitudeValue (that level, 0..4), PlayersRelationshipDetails and
-/// FactionRelationshipDetailsTowardsPlayer (the attitude factor lists). PROVISIONAL: can_trade
-/// when not at war (the exe's trade-route tests 0x00C1A7D0 / 0x00B27FE0 are not ported),
-/// LandTrade false; destroyed factions are kept (the exe skips factions with +0x824 set, UNKNOWN).
+/// FactionRelationshipDetailsTowardsPlayer (the attitude factor lists). The _can / _cannot tooltip is
+/// followed by [`ntw_sim::campaign::CampaignModel::diplomacy_trade_tooltip`] (`0x004F1200` at `0x009F362A`
+/// with `0x00BC7910(player, faction, 0)` when the scripts allow trade, else "", `0x009F35CC`, CONFIRMED).
+/// A faction in the campaign's `diplomacy_hidden_factions` is left out (the exe skips britain while the
+/// campaign key, +0xD9C -> +0x30, is the Empire key "episodic_3", `0x009F2F77`..`0x009F2FA3`, CONFIRMED).
 fn faction_list_for_diplomacy(lua: &Lua, inner: &Inner, ui: &CampaignUi) -> mlua::Result<Value> {
     let m = ui.model();
     let out = lua.create_table()?;
     let me = m.faction_by_key(&ui.link.human).map(|f| f.id);
     let word = |k: &str| loc(inner, &format!("random_localisation_strings_string_{k}")).unwrap_or_default();
     for f in m.world.factions.values() {
-        if f.key == "pirates" {
+        if f.key == "pirates" || !m.in_the_game(f.id) || m.rules.features.diplomacy_hidden_factions.contains(&f.key) {
             continue;
         }
         let e = lua.create_table()?;
@@ -311,25 +317,31 @@ fn faction_list_for_diplomacy(lua: &Lua, inner: &Inner, ui: &CampaignUi) -> mlua
         if let Some(me) = me
             && me != f.id
         {
-            let stance = m.world.factions.get(&me).and_then(|p| p.diplomacy.get(&f.id).copied()).unwrap_or_default();
-            let relationship = match stance {
-                ntw_sim::campaign::Stance::Allied => Some("allied"),
-                ntw_sim::campaign::Stance::War => Some("at war"),
-                ntw_sim::campaign::Stance::Protectorate | ntw_sim::campaign::Stance::Patron => Some("protectorate"),
-                ntw_sim::campaign::Stance::Neutral => None,
+            use ntw_sim::campaign::Stance;
+            // "protectorate" only for stance index 3, the player as `f`'s patron (`IsStancePatron`
+            // 0x00B5DCB0 at 0x009F3064, CONFIRMED disassembly): the player as `f`'s protectorate
+            // (index 4) shows nothing.
+            let relationship = match m.world.stance(me, f.id) {
+                Stance::Allied => Some("allied"),
+                Stance::War => Some("at war"),
+                Stance::Patron => Some("protectorate"),
+                Stance::Protectorate | Stance::Neutral => None,
             };
             e.set("Relationship", relationship)?;
             let towards_me = m.world.relationships.get(&(f.id, me));
             let mine = m.world.relationships.get(&(me, f.id));
-            if stance != ntw_sim::campaign::Stance::War {
-                let (trading, tip) = if mine.is_some_and(|r| r.trade_agreement) {
-                    ("trading", "trade_status_tooltip_already_trading")
-                } else {
-                    ("can_trade", "trade_status_tooltip_can")
+            if let Some(t) = m.diplomacy_trade_status(me, f.id) {
+                let (trading, tip) = match (t.held, t.can_trade) {
+                    (true, true) => ("trading", "trade_status_tooltip_already_trading"),
+                    (true, false) => ("cannot_trade", "trade_status_tooltip_already_trading"),
+                    (false, true) => ("can_trade", "trade_status_tooltip_can"),
+                    (false, false) => ("cannot_trade", "trade_status_tooltip_cannot"),
                 };
                 e.set("Trading", trading)?;
-                e.set("LandTrade", false)?;
-                e.set("TradingTooltip", word(tip))?;
+                e.set("LandTrade", t.land)?;
+                let mut tooltip = word(tip);
+                tooltip.push_str(&trade_agreement_text(inner, m.diplomacy_trade_tooltip(me, f.id)));
+                e.set("TradingTooltip", tooltip)?;
             }
             let level = m.attitude_category(f.id, me);
             e.set("Attitude", attitude_loc(inner, level).unwrap_or_default())?;
@@ -345,17 +357,25 @@ fn faction_list_for_diplomacy(lua: &Lua, inner: &Inner, ui: &CampaignUi) -> mlua
 
 /// `CampaignUI.RetrieveDiplomacyDetails(faction)` (0x009F2750 → 0x009B2690, CONFIRMED keys) →
 /// `{AtWar, Allies, TradeRights, Protectorates, ProtectorOf}`: the factions the given faction is at
-/// war with (stance 0), allied to (2), trades with (trade agreement), has as protectorates (3),
-/// is the protectorate of (4). Each entry (0x009B1B50): Name, Label (the faction key), Flag
-/// ("<flag path>/small.tga"). Nil for an unknown faction. Our stances map as Protectorate → 3,
-/// Patron → 4 (INFERRED).
-fn diplomacy_details(lua: &Lua, inner: &Inner, ui: &CampaignUi, key: &str) -> mlua::Result<Value> {
+/// war with (stance 0), allied to (2), trades with (trade agreement, record `+0x788`), has as
+/// protectorates (its record says 3, patron: `IsStancePatron` 0x00B5DCB0 at 0x009B2834 → the list
+/// named "Protectorates") and is the protectorate of (4: `IsStanceProtectorate` 0x00B5DCC0 at
+/// 0x009B284D → "ProtectorOf"), CONFIRMED by disassembly; the caller passes all five list bits
+/// (0x1F). Ours: `Stance::Patron` is index 3 and `Stance::Protectorate` 4 (the patron's record gets 3,
+/// `SetPatronStanceAndIncome` 0x00B10480; the protectorate's 4, `MakeProtectorateOfPatron`
+/// 0x00B105C0). Factions out of the game (`+0x824`, 0x009B27E1) are left out. Each entry
+/// (0x009B1B50): Name, Label (the faction key), Flag ("<flag path>/small.tga"). `None` (the call
+/// returns nothing) for a faction the registry does not hold: see [`faction_key_args`].
+fn diplomacy_details(lua: &Lua, inner: &Inner, ui: &CampaignUi, key: &str) -> mlua::Result<Option<Table>> {
     use ntw_sim::campaign::Stance;
     let m = ui.model();
-    let Some(f) = m.faction_by_key(key) else { return Ok(Value::Nil) };
+    let Some(f) = m.registry_faction(key) else { return Ok(None) };
     let lists: Vec<Table> = (0..5).map(|_| lua.create_table()).collect::<mlua::Result<_>>()?;
     for (other, stance) in &f.diplomacy {
         let Some(o) = m.world.factions.get(other) else { continue };
+        if !m.in_the_game(o.id) {
+            continue;
+        }
         let e = lua.create_table()?;
         e.set("Name", faction_name(inner, &ui.link.db, &o.key))?;
         e.set("Label", o.key.as_str())?;
@@ -364,8 +384,8 @@ fn diplomacy_details(lua: &Lua, inner: &Inner, ui: &CampaignUi, key: &str) -> ml
         let list = match stance {
             Stance::War => Some(0),
             Stance::Allied => Some(1),
-            Stance::Protectorate => Some(3),
-            Stance::Patron => Some(4),
+            Stance::Patron => Some(3),
+            Stance::Protectorate => Some(4),
             Stance::Neutral => None,
         };
         if let Some(i) = list {
@@ -379,13 +399,73 @@ fn diplomacy_details(lua: &Lua, inner: &Inner, ui: &CampaignUi, key: &str) -> ml
     for (i, name) in ["AtWar", "Allies", "TradeRights", "Protectorates", "ProtectorOf"].iter().enumerate() {
         out.set(*name, lists[i].clone())?;
     }
-    Ok(Value::Table(out))
+    Ok(Some(out))
+}
+
+/// The faction-key arguments of `RetrieveDiplomacyDetails` (0x009F2750, one key),
+/// `RetrieveExistingTreaties` (0x009F2B80) and `RetrieveRemainingMilitaryAccessTurns` (0x009F4380,
+/// two keys each), read as the exe reads them (CONFIRMED by disassembly). Each wrapper calls the
+/// string reader `0x01055760` once per key, and the reader always takes the top of the Lua stack
+/// (index -1) and then pops it (`lua_settop(-2)`): the first read is the last argument and fills
+/// the last key, so the keys are the last N arguments and any extra ones before them are ignored
+/// (0x009F2B80 and 0x009F4380 pass the first read's result to the second lookup, `b`). The reader
+/// takes a string, or a number turned into its string; any other value is the script error
+/// "Trying to retrieve type string, found type <t>" (`0x01095090` → the logger `0x0106BD10`, which
+/// returns: no Lua error is raised), the value is not popped, and the reader's ok flag is cleared,
+/// so the later reads of that call are skipped and their keys stay empty: only the first fault in
+/// read order (from the last argument back) is reported. A missing argument is read through the
+/// stack index without a bounds check (`0x00FE8B50`) and finds the slot below the arguments, the
+/// called function itself (`luaD_precall` 0x00FECED0 sets base = func + 1 for a C function), so the
+/// exe reports "found type function".
+///
+/// Each of the three calls then looks its keys up in the faction registry
+/// (`FindCampaignFactionByKey` 0x00955B70, [`CampaignModel::registry_faction`]) and returns nothing
+/// at all (`return 0`, no value pushed; not nil) unless every key is found: an empty or unknown
+/// key, or the rebels (never in the registry), give no result. The rebel tests 0x009F2B80 and
+/// 0x009F4380 make after the lookup (`IsFactionWithoutRecord` 0x008CEEF0) can never fire for that
+/// reason. The diplomacy panel's script only passes real factions (the player and the opposing
+/// faction, diplomacy_panel.luac `InitPanel` and the treaty and military access lines), and
+/// indexes, measures or compares each result at once, so a missing result is a Lua error in the
+/// calling script.
+///
+/// `None` for a wrong-typed or missing argument: ours logs it once per call, argument and type, and
+/// returns nothing, the exe's result. The exe's cleared ok flag also silences every later argument
+/// read of that script context (the ORIGINAL BUG noted at `CreateFromLayout`, host.rs); ours fails
+/// just this call.
+fn faction_key_args<const N: usize>(lua: &Lua, inner: &Inner, call: &'static str, args: &MultiValue) -> Option<[String; N]> {
+    let mut keys: [String; N] = std::array::from_fn(|_| String::new());
+    // Read `j` takes the top value left: argument `len - 1 - j`, filling the keys from the last.
+    for (j, key) in keys.iter_mut().rev().enumerate() {
+        let arg = args.len().checked_sub(j + 1);
+        let v = arg.and_then(|i| args.get(i));
+        if let Some(Ok(Some(s))) = v.map(|v| lua.coerce_string(v.clone())) {
+            *key = s.to_string_lossy();
+            continue;
+        }
+        let found = match v {
+            None => "function",
+            Some(Value::LightUserData(_)) => "userdata",
+            Some(v) => v.type_name(),
+        };
+        let position = arg.map_or_else(|| "none".to_owned(), |i| (i + 1).to_string());
+        inner.log_once_for(call, &format!("{position}:{found}"), || {
+            format!("ERROR CampaignUI.{call}: Trying to retrieve type string, found type {found} (argument {position}); nothing returned (logged once)")
+        });
+        return None;
+    }
+    Some(keys)
+}
+
+/// The values a call returns: nothing at all (no value pushed, not nil) for `None`.
+fn nothing_unless(lua: &Lua, v: Option<impl IntoLuaMulti>) -> mlua::Result<MultiValue> {
+    v.map_or_else(|| Ok(MultiValue::new()), |v| v.into_lua_multi(lua))
 }
 
 
 /// `CampaignUI.RetrieveExistingTreaties(a, b)` → one string listing the treaties of `a` with `b`
 /// (0x009F2B80 → 0x00B750D0, CONFIRMED pieces), each line a diplomacy loc string
-/// `current_treaty_<x>`: protectorate_of_player, at_war, alliance, trade_agreement,
+/// `current_treaty_<x>` (CONFIRMED, the whole of 0x00B750D0): protectorate_of_player or the
+/// protectorate_of_non_player lines, at_war, alliance, trade_agreement,
 /// giving_military_access_indefinite / _turns, has_military_access_indefinite / _turns,
 /// trade_embargoed, embargoing_trade ("%d" = turns). The lines are joined with "\n\n" (CONFIRMED:
 /// 0x00B0B120 puts the narrow string at 0x0131604C, `0A 0A`, before every line but the first).
@@ -393,18 +473,44 @@ fn diplomacy_details(lua: &Lua, inner: &Inner, ui: &CampaignUi, key: &str) -> ml
 /// the Lua stack down, 0x01055760, and looks `a` up in `b`'s diplomacy `[b + 0x528]`), so
 /// "Grants military access" is `b` giving `a` access, "Has military access to your lands" `a`
 /// giving `b` access, "Their trade embargo against you" `b`'s, "Your trade embargo" `a`'s.
-/// PROVISIONAL: the non-player protectorate lines and the peace-treaty countdown are not listed.
+/// The protectorate text comes first (CONFIRMED by disassembly): when that record's stance is 4
+/// (`b` is `a`'s protectorate, `IsStanceProtectorate` 0x00B5DCC0 at 0x00B750E6),
+/// protectorate_of_player; else, for each other record of `b` with stance 4 (`b` is that faction's
+/// protectorate, 0x00B751AD), protectorate_of_non_player + " " + that faction's display name
+/// (faction +0x518, 0x008DA780), appended without a separator (0x004F0CE0 at 0x00B75273). A
+/// faction has at most one patron, so there is at most one such line. `None` (the call returns
+/// nothing) unless both factions are in the registry: see [`faction_key_args`].
 fn existing_treaties(inner: &Inner, ui: &CampaignUi, a: &str, b: &str) -> Option<String> {
     use ntw_sim::campaign::Stance;
     let m = ui.model();
-    let fa = m.faction_by_key(a)?;
-    let fb = m.faction_by_key(b)?;
+    let fa = m.registry_faction(a)?;
+    let fb = m.registry_faction(b)?;
     let text = |k: &str| loc(inner, &format!("diplomacy_strings_string_current_treaty_{k}")).unwrap_or_default();
     let turns = |k: &str, n: i32| text(k).replace("%d", &n.to_string());
     let mut lines = Vec::new();
-    let stance = fa.diplomacy.get(&fb.id).copied().unwrap_or_default();
-    if stance == Stance::Patron {
+    let stance = fb.diplomacy.get(&fa.id).copied().unwrap_or_default();
+    if stance == Stance::Protectorate {
         lines.push(text("protectorate_of_player"));
+    } else {
+        let mut patrons = String::new();
+        for (x, _) in fb.diplomacy.iter().filter(|(x, s)| **x != fa.id && **s == Stance::Protectorate) {
+            // The exe's record holds the faction pointer itself (record +4, read by 0x004B4A50 at
+            // 0x00B75255, no null test), so its patron always resolves; ours keys by id, and an id
+            // with no faction is a broken model: log it once and leave its line out.
+            let Some(patron) = m.world.factions.get(x) else {
+                inner.log_once_for("existing treaties patron", b, || {
+                    format!("ERROR RetrieveExistingTreaties: {b}'s patron {x:?} is not in the world; its line is left out (logged once)")
+                });
+                continue;
+            };
+            let key = patron.key.as_str();
+            patrons.push_str(&text("protectorate_of_non_player"));
+            patrons.push(' ');
+            patrons.push_str(&faction_display_name(inner, &ui.link.db, &m, *x, key));
+        }
+        if !patrons.is_empty() {
+            lines.push(patrons);
+        }
     }
     match stance {
         Stance::War => lines.push(text("at_war")),
@@ -413,7 +519,7 @@ fn existing_treaties(inner: &Inner, ui: &CampaignUi, a: &str, b: &str) -> Option
     }
     let ab = m.world.relationships.get(&(fa.id, fb.id));
     let ba = m.world.relationships.get(&(fb.id, fa.id));
-    if ab.is_some_and(|r| r.trade_agreement) {
+    if ba.is_some_and(|r| r.trade_agreement) {
         lines.push(text("trade_agreement"));
     }
     match ba.map_or(0, |r| r.military_access_turns) {
@@ -569,6 +675,27 @@ fn payment_row_text(inner: &Inner, payment: DealPayment) -> String {
     fill_payment_text(&text, payment)
 }
 
+/// The text of a trade agreement explanation ([`TradeAgreementTooltip`], `0x00BC7910`): the reason's
+/// string, then the route counts line with each `%d` filled in turn (`0x00446C80`), then the
+/// route-shifted line; `None` (a side without a capital) is "". Missing strings are logged once.
+pub(super) fn trade_agreement_text(inner: &Inner, tip: Option<TradeAgreementTooltip>) -> String {
+    let Some(tip) = tip else { return String::new() };
+    let random = |k: &str| loc_required(inner, &format!("random_localisation_strings_string_{k}"));
+    let mut text = random(tip.reason);
+    if let Some(counts) = tip.sea_routes {
+        text.push_str(&fill_counts(&random(TRADE_TIP_ROUTE_COUNT), counts));
+    }
+    if tip.route_shifted {
+        text.push_str(&random(TRADE_TIP_ROUTE_SHIFTED));
+    }
+    text
+}
+
+/// `template` with each `%d` replaced in turn by the next of `values` (`%d`s past them are kept).
+pub(super) fn fill_counts(template: &str, values: [i32; 4]) -> String {
+    values.iter().fold(template.to_owned(), |t, v| t.replacen("%d", &v.to_string(), 1))
+}
+
 /// A payment row's loc text with its numbers: the first `%d` the size of the amount, the second (the
 /// regular payment's) the turns.
 pub(super) fn fill_payment_text(template: &str, payment: DealPayment) -> String {
@@ -680,7 +807,10 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     // GovernorshipList(faction) → {Name, Key, TheatreKey} (CONFIRMED names 0x009E4D50).
     // The campaign's theatre is its header's (`CampaignLink::theatres`; each Napoleon map has one).
     // RetrieveExistingTreaties(a, b) → see `existing_treaties`.
-    f!("RetrieveExistingTreaties", |_l, inner, ui, (a, b): (String, String)| Ok(existing_treaties(&inner, &ui, &a, &b)));
+    f!("RetrieveExistingTreaties", |lua, inner, ui, args: MultiValue| {
+        let text = faction_key_args::<2>(lua, &inner, "RetrieveExistingTreaties", &args).and_then(|[a, b]| existing_treaties(&inner, &ui, &a, &b));
+        nothing_unless(lua, text)
+    });
     // RetrieveDiplomaticOpinions(a, b) → a's attitude towards b, then b's towards a, each a
     // `relationship_<level>` text (0x009F2830, CONFIRMED: the argument reader 0x01055760 takes
     // the top of the stack, so its first read is b; the first result is 0x00B64CC0 on a's
@@ -691,21 +821,27 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
         Ok((attitude_text(&inner, &ui, &a, &b), attitude_text(&inner, &ui, &b, &a)))
     });
     // RetrieveRemainingMilitaryAccessTurns(a, b) → two numbers, one per direction: the
-    // relationship's military access turns (+0x78C), or -1 when the stance is 4 (protector):
-    // first a's record about b (the access a gives b, which the panel's "offer_access" buttons
-    // show), then b's about a (0x009F4380, CONFIRMED, the same argument order as
-    // `RetrieveDiplomaticOpinions`; our Patron stance = 4).
-    f!("RetrieveRemainingMilitaryAccessTurns", |_l, inner, ui, (a, b): (String, String)| {
-        let m = ui.model();
-        let (Some(fa), Some(fb)) = (m.faction_by_key(&a), m.faction_by_key(&b)) else { return Ok((None, None)) };
-        let turns = |x: &ntw_sim::campaign::Faction, y: &ntw_sim::campaign::Faction| {
-            if x.diplomacy.get(&y.id) == Some(&ntw_sim::campaign::Stance::Patron) {
-                -1
-            } else {
-                m.world.relationships.get(&(x.id, y.id)).map_or(0, |r| r.military_access_turns)
-            }
-        };
-        Ok((Some(turns(fa, fb)), Some(turns(fb, fa))))
+    // relationship's military access turns (+0x78C), or -1 (indefinite) when that record's stance
+    // is 4, protectorate (`IsStanceProtectorate` 0x00B5DCC0; stance table 0x0145D378: 3 "patron",
+    // 4 "protectorate"): a protectorate gives its patron access for good. First a's record about b
+    // (the access a gives b, which the panel's "offer_access" buttons show), then b's about a
+    // (0x009F4380, CONFIRMED, the same argument order as `RetrieveDiplomaticOpinions`; our
+    // `Stance::Protectorate` is index 4). Nothing at all unless both factions are in the
+    // registry (see `faction_key_args`).
+    f!("RetrieveRemainingMilitaryAccessTurns", |lua, inner, ui, args: MultiValue| {
+        let turns = faction_key_args::<2>(lua, &inner, "RetrieveRemainingMilitaryAccessTurns", &args).and_then(|[a, b]| {
+            let m = ui.model();
+            let (fa, fb) = (m.registry_faction(&a)?, m.registry_faction(&b)?);
+            let turns = |x: &ntw_sim::campaign::Faction, y: &ntw_sim::campaign::Faction| {
+                if x.diplomacy.get(&y.id) == Some(&ntw_sim::campaign::Stance::Protectorate) {
+                    -1
+                } else {
+                    m.world.relationships.get(&(x.id, y.id)).map_or(0, |r| r.military_access_turns)
+                }
+            };
+            Some((turns(fa, fb), turns(fb, fa)))
+        });
+        nothing_unless(lua, turns)
     });
     // RetrieveDiplomaticStanceString(a, b): the stance string for a relationship, CONFIRMED one call
     // site and UNKNOWN shape (no argument reads, no literal string in the wrapper). The value here
@@ -773,9 +909,15 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     });
     // RetrieveDiplomacyDetails(key): a read only. The negotiation is opened by the panel's own
     // constructor call, `UIDiplomacyNegotiation(player, opposing)` (see `install_negotiation_object`).
-    f!("RetrieveDiplomacyDetails", |lua, inner, ui, key: Option<String>| {
-        let key = key.unwrap_or_else(|| ui.link.human.clone());
-        diplomacy_details(lua, &inner, &ui, &key)
+    // Without a key (nil, none or another type) the exe looks up an empty key and returns nothing,
+    // the same as for an unknown faction; with more than one argument it reads the last (see
+    // `faction_key_args`). No fallback to the player.
+    f!("RetrieveDiplomacyDetails", |lua, inner, ui, args: MultiValue| {
+        let details = match faction_key_args::<1>(lua, &inner, "RetrieveDiplomacyDetails", &args) {
+            Some([key]) => diplomacy_details(lua, &inner, &ui, &key)?,
+            None => None,
+        };
+        nothing_unless(lua, details)
     });
     f!("RetrieveFactionListForDiplomacy", |lua, inner, ui, _a: Variadic<Value>| faction_list_for_diplomacy(lua, &inner, &ui));
     // ===== Negotiation (`UIDiplomacyNegotiation`, userdata ctor 0x00A102B0) =====
@@ -802,7 +944,8 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     // (`CampaignModel::possible_actions`: the rules of 0x009B5220 over the action records of
     // 0x00BF5A60, UI_FIDELITY.md 4.7): `State` the action's name, `Active` its availability,
     // `Unilateral` for ids 1, 3, 5, 8, 12, `Tooltip` the text of the model's
-    // `random_localisation_strings` key. INFERRED: `Address` is the action's name (the exe hands
+    // `random_localisation_strings` key, or for trade the agreement explanation ([`trade_agreement_text`],
+    // `0x00BC7910` with the counts at `0x009B55FF`). INFERRED: `Address` is the action's name (the exe hands
     // the action record's pointer, which the panel only gives back to `Propose`).
     f!("BuildPossibleActions", |lua, inner, ui, _a: Variadic<Value>| {
         let Some((p, r)) = negotiation_factions(&ui) else { return Ok(Value::Nil) };
@@ -828,8 +971,15 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
                 if a.action.unilateral() {
                     e.set("Unilateral", true)?;
                 }
-                if let Some(key) = a.tooltip {
-                    e.set("Tooltip", loc_required(&inner, &format!("random_localisation_strings_string_{key}")))?;
+                // `Tooltip` is set only for a non-empty text (the UniString length test `0x004F3500` at
+                // `0x009B58B4`): a trade tooltip with a side without a capital leaves it unset.
+                let tooltip = match a.tooltip {
+                    Some(ActionTooltip::Key(key)) => loc_required(&inner, &format!("random_localisation_strings_string_{key}")),
+                    Some(ActionTooltip::TradeAgreement(tip)) => trade_agreement_text(&inner, tip),
+                    None => String::new(),
+                };
+                if !tooltip.is_empty() {
+                    e.set("Tooltip", tooltip)?;
                 }
                 out.raw_set(i + 1, e)?;
             }

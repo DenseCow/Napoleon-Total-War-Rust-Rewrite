@@ -756,7 +756,7 @@ fn population_factors_and_growth_match_the_vanilla_saves() {
             let map = ntw_formats::campaign_map::CampaignMap::load(&files, &l.info.map_key).expect("map");
             ntw_sim::campaign::Terrain(std::sync::Arc::new(ntw_campaign::pathing::build_grid(&map)))
         });
-        l.model.terrain = Some(terrain.clone());
+        l.model.attach_terrain(terrain.clone());
         Some(l.model)
     };
     let mut checked = 0;
@@ -975,6 +975,31 @@ fn deal_inflation_and_economy_history_round_trip() {
         checked += 1;
     }
     println!("{checked} saves checked");
+}
+
+/// The campaign-over flag (`CAMPAIGN_MODEL` #18, campaign +0xFE9; loader `0x00872550`, writer
+/// `0x008EBAB0`): false in the original's save of a running campaign, and written to and read back
+/// from our ESF save; a loaded campaign that is over runs no turn step.
+#[test]
+fn campaign_over_loads_and_round_trips_through_the_esf_save() {
+    let dir = data_dir();
+    let p = common::evidence_dir().join("orig_fr_t1.save");
+    if !dir.is_dir() || !p.is_file() {
+        println!("SKIP: no install at {} or no evidence save {}", dir.display(), p.display());
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).expect("database");
+    let source = EsfFile::open(&p).expect("esf");
+    let m = ntw_campaign::read_esf(&source, &db).expect("loads").model;
+    assert!(!m.turn.campaign_over);
+    let mut over = m.clone();
+    over.end_campaign();
+    let out = ntw_campaign::save::write_save(&source, &over, "france", 1).expect("write");
+    let mut again = ntw_campaign::read_esf(&out, &db).expect("reloads").model;
+    assert!(again.turn.campaign_over);
+    assert!(again.end_turn().is_empty(), "no turn step runs once the campaign is over");
+    let out = ntw_campaign::save::write_save(&source, &m, "france", 1).expect("write");
+    assert!(!ntw_campaign::read_esf(&out, &db).expect("reloads").model.turn.campaign_over);
 }
 
 /// The AI's region deal evaluation (`0x00C131C0` → `0x00A364B0` → `0x00AA1E90`, AI_RESEARCH.md §4

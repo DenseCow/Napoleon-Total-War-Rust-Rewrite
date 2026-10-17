@@ -236,6 +236,93 @@ marks functions `__thiscall` in memory before decompiling (the decompile then sh
 - Kinds: 8 = enterable only by agents (mover types ≡ 1 mod 3), 9 = by nobody (CONFIRMED kind table, §11 of
   CAMPAIGN_DATA). So **armies and fleets cannot enter an enemy's zone nor anyone's core; agents cross zones but not
   cores**. Kinds 10/11 (from inside a 10 only 10/11/7, from 11 only 11) belong to modes 3/4 (not decoded).
+- **After a diplomacy change** (polish46 2026-10-17, CONFIRMED by disassembly; details in CAMPAIGN_FIDELITY.md
+  under `GrantMilitaryAccessToFaction`): access, alliance and protectorate changes call
+  `RefreshFactionPathGridObstacles` `0x00B795A0` on each faction (the grid, model +0xF64, recomputes every layer's
+  modes against that faction without storing the view; each of its live characters recomputes its zone,
+  `0x00A28440`, and is re-added) and then `CampaignPathGrid::ReapplyPathGridFactionView` `0x00B67490` (rebuilds
+  the layers for whichever view the grid last stored, mode +0x414; 15 of its 27 callers run it without
+  `0x00B795A0`). Ours builds the obstacles at search time from war stances only (`plan_path`, as `0x00B57C00`;
+  that test's third-faction argument is UNKNOWN), so neither refresh needs a port for the modes; the
+  zone rebuild it runs does once zones are stored (next bullet).
+- **The zone flood's obstacles and when it runs** (zocflood 2026-10-17, CONFIRMED by disassembly unless tagged):
+  - `0x00A28440` (character, already-prepared flag): returns at once while model +0xFC7 is set; clears the zone box
+    (+0x1B8..+0x1C4) and +0x1D0; only for a character with an obstacle owner (`0x006649C0`(+0x2A8)) that is an
+    army or fleet commander or not in the special state (`0x009D3CB0` / `0x009FB9A0` / `0x00A17CF0`) it floods the
+    zone with grid (model +0xF64) `0x00B7BAF0` and keeps the outline (+0x1C8) and its box.
+  - `0x00B7BAF0`, flag 0: the view faction is the character's own (char +0x2A0; the grid's stored view
+    grid +0x3FC/+0x400 when model +0xF5C +0x39 is set). A scope (`0x00AF5200`) prepares every layer for it: the
+    layer's third faction (+0x1AC) set to 0 (`0x00B72D70`), then `0x00B06280` gives **every obstacle of the layer**
+    (characters, forts, barriers; no relevance or fleet filter) its mode for that faction (`0x00B3F4F0`: 5 hidden,
+    1 core only for its own faction or one not at war, else its +0x6C mode) and rebuilds the changed ones' cells.
+    For a character whose army has +0x98 set, `0x00B078C0` also flags the layer entries (+0x144 shorts, flags
+    +0x164) equal to the army's id (army +0x10 → +0xA4): meaning UNKNOWN. Then the flood (`0x00B7B7A0`) and the
+    scope's end (`0x00AF7A00`: third factions cleared, `CampaignPathGrid::ReapplyPathGridFactionView` `0x00B67490`
+    restores the stored view). Flag 1: the flood runs on the layers as they stand (the caller prepared them).
+    A faction without a record (`IsFactionWithoutRecord` `0x008CEEF0`) with a stored view floods unprepared.
+  - `0x00B7B7A0`: starts at the army's, the carrier's or the character's own position (an army-less, carrier-less
+    character with +0x4E8 = 0 must pass `0x00B6A860`, else no zone); locates it (`0x00B53EE0`, kind 0xC = no zone);
+    limit `0x00A2A1C0` + 2.0 when the army's slot 0x58 or 0x48 test holds; flood `0x00ACA170` with neighbours
+    `0x00B7BBB0`. When the character's faction has +0x6E0 set, the active script barriers (grid +0x3F4 list, 0x9C
+    stride, +0x14 active; Lua `add_barrier` / `remove_barrier`, `remove_barrier` = `0x00977700` → `0x00B64E30`) are
+    cut into the flood (`0x00B09020` → `0x00B5E7D0`). None are in the shipped start positions: not ported.
+  - So a zone is bounded by the other characters' cores (kind 9) and by the zones of factions at war with the
+    owner (kind 8) as the owner's faction sees them. The owner's own obstacle does not stop it (the saved
+    start-position zones are never empty, `zoc_install.rs`; CONFIRMED by data).
+  - **When it runs** (callers of `0x00A28440`): `0x00A285C0` (flag 0, then the core `0x009CC0E0` and the sight
+    `0x00A27F10`); after a move `0x00A285E0` (flag 1, then the core); `RefreshFactionPathGridObstacles` `0x00B795A0`
+    (flag 1 after preparing the layers for the faction, `0x00B06210`, each live character of it, then re-added);
+    `0x00B64E30` (a barrier removed: every faction's characters); also `0x008E2260`, `0x009CB4C0` (from
+    `0x00881120`), `0x009D3B60`, `0x00A16110` (no direct caller) directly. A zone is kept between these, so it
+    depends on their order: two enemies that meet differ (the later one's zone stops at the earlier one's).
+    The events (zocflood 2026-10-17, CONFIRMED by disassembly unless tagged):
+    - **Loading** `0x00B0DC10` (from the campaign constructor `0x008742C0`): zones are not saved, every one is
+      flooded again: factions in turn order (campaign +0xF5C +0x30), the rebels last; per faction each character of
+      its list (+0x768) flooded, then added as an obstacle (`0x00B084F0`). So each flood sees only those added
+      before it. The constructor runs it right after the world is read (`0x0090C4A0` at ~`0x00874E03`) and before
+      the later subsystems (`0x00882C30` at +0xF6C onwards): it clears the model's +0xFC7 flag (`0x00874E0D`; while
+      it is set `0x00A28440` returns at once, so the world load floods nothing), then calls `0x00B0DC10` on
+      the grid +0xF64 (`0x00874E22`).
+    - After a move `0x00A285E0` (a virtual: character vtable `0x0136A62C`, slot +0x20; its only reference): the
+      sight `0x00A27F10` for the character (`0x00A2863A`) and for each character it carries (`0x00A28694`); then,
+      only when its first argument is 1, `0x00A28290`, the zone flood `0x00A28440(1)` (`0x00A28843`) and the core
+      `0x009CC0E0`; then the hidden flag `0x009D3000` (`0x00A2885C`). Argument 2 returns early (`0x00A2860D`). The
+      values its move callers pass are not traced (the virtual's callers were not found), so whether every
+      walk floods is INFERRED.
+    - `0x00A285C0` callers: `0x008F9400` (a force's commander plus the characters it carries or that carry it;
+      from the commander pick `0x008B8E50` and the unit transfers `0x008D47B0` / `0x008D5F10`), a split or new
+      force `0x008F04C0`, the boarding joins `0x008F0F20` / `0x008F17D0`, a commander's death `0x008DB3E0`, the
+      promotions in the field `0x008E1C20` / `0x008E2260`, `HireGeneral` `0x00A164C0`, a recruited general placed
+      `0x00B67670`, a settlement entered `0x00B4E760`; `0x0096CBE0` for characters with the +0x1B7 flag (UNKNOWN
+      flag; not ported).
+    - `0x00B795A0` per diplomacy rule: an expulsion over another's lands (`0x00B13A30`, `0x00B0CA20`, `0x00B0D0C0`,
+      `0x00B29170`, `EndProtectorateTie` `0x00B64B10`) refreshes the expelled faction, then the owner, inside the
+      expel branch; `CancelMilitaryAccessOnRecord` `0x00B67BD0` none (its command path `0x00B67B20` refreshes the
+      target after the grievance mark, before the broadcast; the war abuse path `0x00B0DAF0` none);
+      `GrantMilitaryAccessToFaction` `0x00B444B0` the receiver, then the giver; `MakeProtectorate` `0x00B105C0`
+      the patron once, before the broadcast (`0x00B106CC`); peace `0x00B262C0` the proposer, then the target;
+      a war declaration `0x00B268B0` the declarer's allies that joined (its list +0), the target's that joined
+      (+0x20), the target's that refused and broke with it (+0x30), the target, the declarer (the joins'
+      `0x00B26700` passes 0 for its refresh); a captured region's owner change (`0x00B62120` from
+      `TransferRegionToFaction` `0x00A64AC0`) the new owner, then the old.
+  - Ours (zocflood 2026-10-17): `ntw_sim::campaign::zones` stores each commander's zone in the model
+    (`world.zones`, not saved or compared), built by the load pass when the map is attached to a loaded model
+    (`attach_terrain` from `MapData::attach`, as the constructor runs it right after the world load; 3.8 ms for
+    the 87 eur_napoleon commanders, release) and never by a read, so a path preview changes nothing (test). They
+    are rebuilt at the events above (`rebuild_zone`, `rebuild_force_zones`, `rebuild_moved_zones`,
+    `refresh_faction_zones`, called from the walk, merge and transfer, settlement entry, recruit, hire,
+    promotion, command succession, boarding and landing, and the treaty, expulsion and capture rules in the
+    exe's orders). The walk runs the sight, then the zones, then the hidden flags, as `0x00A285E0` does. A stored
+    zone stays until such an event, wherever its character stands (an expelled army that stays keeps it). The
+    path search (`zoc::cuts`, `CampaignModel::obstacles_seen_by`) reads the stored zones, so two neighbouring
+    enemies leave no gap between their zones (`zones.rs` tests, one per event kind). A commander with no stored
+    zone (a path that floods none) reads as his bare flood, logged once. The faction list order is taken
+    as character-id order (start-position `CHARACTER_ARRAY`s rise, CONFIRMED by data; the loader's fill INFERRED).
+    The save writer (`obstacle_record`) keeps the bare flood: it gives the saved box and zone range for 60 of 87
+    start-position commanders, the stored zones 59 (`zoc_install.rs`; PATHFINDING_PORTS.md §11.1). Not ported:
+    the barrier refresh `0x00B64E30` (no barriers), `0x0096CBE0` (UNKNOWN flag), `0x009CB4C0` / `0x00A16110`
+    (callers UNKNOWN). `0x00B078C0`'s layer flags (army +0x98) do not change a zone's polygons (the flood reads
+    the layer modes, not those flags): left as the Polish note.
 - Save layout (`OBSTACLE_LISTS/CHARACTER_OBSTACLE[]/OBSTACLE`): #0 six boundary slots (slot 0 = zone pieces,
   slot 1 = core pieces, entries 0x80000000 | run-time boundary index), #6 = 9, #7..#10 Fixed20 bbox, #11..#18 u16
   ranges (cell ranges of the two cut layers, decoded in PATHFINDING_PORTS.md §10.4). Tool: `cargo run -p ntw_campaign --example obstacle_probe -- <esf>`.

@@ -117,6 +117,25 @@ pub fn original_date_step(turns_per_year: u32) -> Option<u32> {
     }
 }
 
+/// The `random_localisation_strings` keys naming the turns of a 24-turn year, in turn order
+/// (string ids 0x191..0x1A8, static table `0x0164E7E0`; CONFIRMED, UI_FIDELITY.md §5.1).
+const HALF_MONTH_ROUND_IDS: [&str; 24] = [
+    "round_id_early_january", "round_id_late_january", "round_id_early_february", "round_id_late_february",
+    "round_id_early_march", "round_id_late_march", "round_id_early_april", "round_id_late_april",
+    "round_id_early_may", "round_id_late_may", "round_id_early_june", "round_id_late_june",
+    "round_id_early_july", "round_id_late_july", "round_id_early_august", "round_id_late_august",
+    "round_id_early_september", "round_id_late_september", "round_id_early_october", "round_id_late_october",
+    "round_id_early_november", "round_id_late_november", "round_id_early_december", "round_id_late_december",
+];
+
+/// The `random_localisation_strings` keys naming the turns of a 12-turn year (string ids
+/// 0x1A9..0x1B4; CONFIRMED, UI_FIDELITY.md §5.1).
+const MONTH_ROUND_IDS: [&str; 12] = [
+    "round_id_january", "round_id_february", "round_id_march", "round_id_april", "round_id_may", "round_id_june",
+    "round_id_july", "round_id_august", "round_id_september", "round_id_october", "round_id_november",
+    "round_id_december",
+];
+
 /// The campaign calendar record. W3 §3.1 (CONFIRMED layout).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -145,6 +164,21 @@ impl Calendar {
     /// The 1-based turn number shown in the save header. W3 §3.1 (CONFIRMED).
     pub fn turn_number(&self) -> u32 {
         self.turns_elapsed + 1
+    }
+
+    /// The `random_localisation_strings` key of the current turn's name, the "round description" of
+    /// the HUD date and the default save name (CONFIRMED, UI_FIDELITY.md §5.1): when the calendar is
+    /// read, `0x008EF0C0` fills its turn-name list from `turns_per_year`: 24 → the half-month names
+    /// ("Early January" ...), 12 → the month names, any other count → that many empty names; the
+    /// round description is the entry at `turn_in_year` (`0x008D1E20`). `None` is the exe's empty
+    /// name (also for a `turn_in_year` past the list, which the exe does not check).
+    pub fn round_id(&self) -> Option<&'static str> {
+        let ids: &[&'static str] = match self.turns_per_year {
+            24 => &HALF_MONTH_ROUND_IDS,
+            12 => &MONTH_ROUND_IDS,
+            _ => &[],
+        };
+        ids.get(self.turn_in_year as usize).copied()
     }
 
     /// Moves to the next turn: the exe's `0x008A98B0` (CONFIRMED). One more turn played; the turn in
@@ -325,5 +359,21 @@ mod tests {
         let mut plain = Calendar { turns_per_year: 4, turn_in_year: 0, date: start, turns_elapsed: 0 };
         plain.advance_turn(None);
         assert_eq!(plain.date, start, "no step: the exe keeps the date");
+    }
+
+    #[test]
+    fn round_id_follows_turns_per_year_and_turn_in_year() {
+        let date = Date { year: 1805, season: Season::Spring as u32, month: 3, half: HALF_LATE };
+        let c = Calendar::new(date, 0);
+        assert_eq!(c.round_id(), Some("round_id_late_april"));
+        let first = Calendar::new(Date { year: 1805, season: Season::Winter as u32, month: 0, half: HALF_EARLY }, 0);
+        assert_eq!(first.round_id(), Some("round_id_early_january"));
+        let last = Calendar { turn_in_year: 23, ..c };
+        assert_eq!(last.round_id(), Some("round_id_late_december"));
+        let monthly = Calendar { turns_per_year: 12, turn_in_year: 4, ..c };
+        assert_eq!(monthly.round_id(), Some("round_id_may"));
+        // Any other count: the exe's empty names.
+        assert_eq!(Calendar { turns_per_year: 2, turn_in_year: 0, ..c }.round_id(), None);
+        assert_eq!(Calendar { turns_per_year: 24, turn_in_year: 24, ..c }.round_id(), None);
     }
 }

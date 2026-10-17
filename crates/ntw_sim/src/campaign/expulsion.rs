@@ -6,8 +6,13 @@
 //! argument 0, which every settlement handover `0x00B449F0` passes: captures, deals, liberations, the
 //! director's transfer; [`CampaignModel::expel_after_owner_change`]), an accepted deal's region lists
 //! (`0x00C114B0`, [`CampaignModel::accept_deal`]) and the end of a protectorate tie (`0x00B64B10`,
-//! [`CampaignModel::end_protectorate_tie`]). The loss of military access calls it too
-//! (`0x00B29170`, `0x00B67BD0`, `0x00B0CA20`, `0x00B13A30`, `0x00B0D0C0`): not wired yet (BACKLOG).
+//! [`CampaignModel::end_protectorate_tie`]) and every loss of military access, over all the giver's
+//! regions ([`CampaignModel::expel_from_lands_of`]): timed access running out (`0x00B29170`,
+//! [`CampaignModel::diplomacy_round_end`]), a cancel (`0x00B67BD0`,
+//! [`CampaignModel::cancel_military_access`]), a broken alliance (`0x00B13A30` / `0x00B0CA20`,
+//! [`CampaignModel::break_alliance`]) and a peace (`0x00B0D0C0`, [`CampaignModel::make_peace_rules`])
+//! that give back no access. All but the cancel then flood both factions' zones of control again
+//! ([`CampaignModel::expel_from_lands_of`]); the cancel loops alone ([`CampaignModel::expel_from_each_region_of`]).
 //!
 //! The rule ([`expel_faction_from_region`], behind the [`super::seams::REGION_EXPULSION`] seam) says
 //! which forces go where; the model applies it ([`CampaignModel::expel_from_region`]). Agents are
@@ -204,6 +209,7 @@ impl CampaignModel {
             }
             if let (Some(c), Some(to)) = (commander, e.to) {
                 self.move_character(c, to);
+                self.rebuild_moved_zones(c);
             }
         }
     }
@@ -224,6 +230,32 @@ impl CampaignModel {
             .collect();
         for f in factions {
             self.expel_from_region(f, region);
+        }
+    }
+
+    /// `f`'s forces leave each region `owner` holds ([`Self::expel_from_each_region_of`]), then both
+    /// factions' zones of control are flooded again, `f`'s first ([`Self::refresh_faction_zones`],
+    /// `RefreshFactionPathGridObstacles` `0x00B795A0`): the loss of standing in another's land that a
+    /// broken alliance, a peace, timed access running out and the end of a protectorate tie run
+    /// (`0x00B13A30`, `0x00B0CA20`, `0x00B0D0C0`, `0x00B29170`, `0x00B64B10`; CONFIRMED, disassembly: both
+    /// refreshes sit inside the expel branch). A cancel (`0x00B67BD0`) runs the loop alone.
+    pub(crate) fn expel_from_lands_of(&mut self, f: FactionId, owner: FactionId) {
+        self.expel_from_each_region_of(f, owner);
+        self.refresh_faction_zones(f);
+        self.refresh_faction_zones(owner);
+    }
+
+    /// `f`'s forces leave each region `owner` holds ([`Self::expel_from_region`] per region): the loop over
+    /// the owner's region list (faction `+0x778`) that every loss of standing in another's land runs
+    /// (`0x00B64B10`, `0x00B13A30`, `0x00B0CA20`, `0x00B0D0C0`, `0x00B67BD0`, `0x00B29170`; CONFIRMED).
+    /// PROVISIONAL: the exe walks the list in gain order, ours in region-id order (the model keeps no gain
+    /// order). The order matters only when a force one step moves stands in a region a later step
+    /// expels from: with no footprints in the model, that takes a force that may stay but cannot be
+    /// placed where it stands and is sent to another of `owner`'s regions.
+    pub(crate) fn expel_from_each_region_of(&mut self, f: FactionId, owner: FactionId) {
+        let regions: Vec<RegionId> = self.world.regions.values().filter(|r| r.owner == owner).map(|r| r.id).collect();
+        for r in regions {
+            self.expel_from_region(f, r);
         }
     }
 }

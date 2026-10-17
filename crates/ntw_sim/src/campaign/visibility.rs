@@ -523,7 +523,8 @@ impl CampaignModel {
     /// as they are (INFERRED: rebel armies on hiding ground are not hidden in the vanilla saves).
     pub fn update_hidden(&mut self, c: CharacterId) {
         let Some(ch) = self.world.characters.get(&c) else { return };
-        if self.world.factions.get(&ch.faction).is_none_or(|f| f.key.is_empty()) {
+        // A character of a faction the world no longer holds is left as it is too.
+        if !self.world.factions.contains_key(&ch.faction) || self.world.is_rebel_faction(ch.faction) {
             return;
         }
         let hidden = self.stealthy(c);
@@ -657,6 +658,11 @@ pub struct TradeSegmentSight {
     pub domestic: Vec<FactionId>,
     /// The international routes on it: (exporter, region of the route's last waypoint).
     pub international: Vec<(FactionId, RegionId)>,
+    /// The segment's course (`TRADE_SEGMENTS[]` #1 n, then 4n coord2d): n cubic Bézier curves of four
+    /// control points each, consecutive curves sharing their end points. Static data. The commerce
+    /// raids measure a position's distance to it ([`super::commerce_raid::segment_distance`]).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub curves: Vec<[(f32, f32); 4]>,
 }
 
 /// Saved region sight shapes by region (`REGION` `LINE_OF_SIGHT`, cells).

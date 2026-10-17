@@ -2,6 +2,7 @@
 //!
 //! - [`speed`]: the battle speed multipliers (W1 §12.2).
 //! - [`morale`]: the 8-state morale machine and its modifiers (W1 §12.3, §12.4).
+//! - [`attackers`]: a squad's attacker list and the attack direction the morale reads from it.
 //! - [`fatigue`]: the 6-state fatigue machine (W1 §12.5).
 //! - [`ground`]: ground types (movement speed) and heights (slope fatigue) under the units.
 //! - [`melee`]: real-time melee hit number, kill chance and blow outcome (W1 §12.9).
@@ -23,6 +24,7 @@
 //! - [`model`]: the `Battle` / `LandUnit` skeleton and the 0.1 s tick (W1 §5 item 6).
 
 pub mod abilities;
+pub mod attackers;
 pub mod attributes;
 pub mod autoresolve;
 pub mod casualties;

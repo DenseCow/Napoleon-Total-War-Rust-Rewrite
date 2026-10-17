@@ -180,6 +180,30 @@ fn war_reads_and_bumps_the_diplomacy_manager_counters() {
     assert_eq!(m.world.access_abuses[&A], 3);
 }
 
+/// A backstab's other-faction penalty (`0x00B0E540`) goes to the factions of the declarer's own
+/// subculture, not the victim's: `0x00B0E420` reads the declarer's faction record +0x10 at
+/// `0x00B0E446` and compares every other faction's against it.
+#[test]
+fn a_backstab_angers_the_declarers_subculture_not_the_victims() {
+    use super::treaties::slot;
+    let backstab = |subs: [&str; 3]| {
+        let mut m = test_model();
+        let mut rules = (*m.rules).clone();
+        for (k, s) in ["test_faction_a", "test_faction_b", "test_faction_c"].into_iter().zip(subs) {
+            rules.faction_subcultures.insert(k.into(), s.into());
+        }
+        m.rules = Arc::new(rules);
+        m.relationship_mut(A, B).friendship_turns = 4;
+        m.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
+        let f = m.world.relationships.get(&(C, A)).map(|r| r.attitudes[slot("peace_treaty")]).unwrap_or_default();
+        (f.value, f.drift, f.limit)
+    };
+    // C shares the declarer A's subculture: n = 1 → value −5·1·4, limit −25·1.
+    assert_eq!(backstab(["sc_a", "sc_b", "sc_a"]), (-20, 1, -25));
+    // C shares only the victim B's subculture: untouched.
+    assert_eq!(backstab(["sc_a", "sc_b", "sc_b"]), (0, 0, 0));
+}
+
 /// A deal's embargo item (`0x00C18800` → `0x00B28DB0`): A embargoes B at C's request. A's embargo
 /// turns towards B are 10, and B resents C, the side that asked for it; B's attitude to A is untouched.
 #[test]
@@ -263,6 +287,53 @@ fn treaties_and_the_per_turn_update() {
     // Protectorate: B becomes A's protectorate.
     act(&mut m, B, A, D::BecomeProtectorate);
     assert_eq!((m.world.stance(B, A), m.world.stance(A, B)), (Stance::Protectorate, Stance::Patron));
+}
+
+/// The `alliance_broken` message (type 11, `0x009CA7B0`): an alliance break between two major powers
+/// goes to every human major power in faction order, titled "<ally> - <breaker>" (`0x00B13840`); none
+/// when either side is minor. A cancelled military access sends it to the faction losing the access,
+/// human or not (`0x00B67B20`).
+#[test]
+fn alliance_broken_messages_follow_the_exe() {
+    use super::treaties::DiplomaticAction as D;
+    use super::CampaignMessage;
+    let mut m = test_model();
+    for f in [A, B, C] {
+        m.world.faction_details.entry(f).or_default().major = Some(true);
+    }
+    m.turn.humans = vec![C, A];
+    let act = |m: &mut CampaignModel, a, b, action| m.apply(CampaignCommand::Diplomacy { a, b, action }).unwrap();
+    let broken = |recipient, first, second| CampaignEvent::Message { recipient, message: CampaignMessage::AllianceBroken { first, second } };
+    act(&mut m, A, B, D::Alliance);
+    assert_eq!(
+        act(&mut m, A, B, D::BreakAlliance),
+        vec![broken(A, B, A), broken(C, B, A), CampaignEvent::StanceChanged { a: A, b: B, stance: Stance::Neutral }],
+        "the human majors in faction order, B (AI) gets none"
+    );
+    // The order is the world's faction list (`FACTION_ARRAY` order, model +0xF5C → +0x30), not the ids.
+    m.world.turn_order = vec![C, B, A];
+    act(&mut m, A, B, D::Alliance);
+    assert_eq!(
+        act(&mut m, A, B, D::BreakAlliance),
+        vec![broken(C, B, A), broken(A, B, A), CampaignEvent::StanceChanged { a: A, b: B, stance: Stance::Neutral }],
+        "the human majors in faction-list order"
+    );
+    // A minor ally: no message.
+    m.world.faction_details.entry(B).or_default().major = Some(false);
+    act(&mut m, A, B, D::Alliance);
+    assert_eq!(act(&mut m, A, B, D::BreakAlliance), vec![CampaignEvent::StanceChanged { a: A, b: B, stance: Stance::Neutral }]);
+    // A human minor gets none either.
+    m.world.faction_details.entry(B).or_default().major = Some(true);
+    m.world.faction_details.entry(C).or_default().major = Some(false);
+    act(&mut m, B, A, D::Alliance);
+    assert_eq!(
+        act(&mut m, B, A, D::BreakAlliance),
+        vec![broken(A, A, B), CampaignEvent::StanceChanged { a: B, b: A, stance: Stance::Neutral }]
+    );
+    // Cancelled access: B (an AI) is told.
+    act(&mut m, A, B, D::GrantMilitaryAccess(10));
+    assert_eq!(act(&mut m, A, B, D::CancelMilitaryAccess), vec![broken(B, B, A)]);
+    assert_eq!(CampaignMessage::AllianceBroken { first: A, second: B }.type_name(), "alliance_broken");
 }
 
 /// Becoming a protectorate (`0x00B105C0`) settles the new protectorate's own ties first (`0x00B104E0`): a patron

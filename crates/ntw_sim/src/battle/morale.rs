@@ -28,7 +28,7 @@ pub mod effect_id {
     pub const CATEGORY_PENALTY: i32 = 0x17;
     /// A new attacker (one per attacker, the first evaluation it attacks in): the front, flank or
     /// rear `was_attacked_in_*` value by its direction (`0x0053C7ED`–`0x0053C873`, CONFIRMED).
-    pub const ATTACKED_FRONT: i32 = 0x18;
+    pub const NEW_ATTACKER: i32 = 0x18;
     /// Attacked in a flank. W1 §12.4 (CONFIRMED).
     pub const ATTACKED_FLANK: i32 = 0x19;
     /// Attacked in the rear. W1 §12.4 (CONFIRMED).
@@ -362,8 +362,8 @@ pub struct KvMorale {
 // ---------------------------------------------------------------------------------------------
 
 /// Direction an attacker hits this unit from. W1 §12.4 (the three effects are CONFIRMED; the
-/// original classifies it with `0x0057F310`, 0 front / 1 flank / 2 rear, and the caller decides
-/// how: model.rs still uses its own angle test, PLACEHOLDER there).
+/// original classifies it with `0x0057F310`, 0 front / 1 flank / 2 rear:
+/// [`super::attackers::attack_direction`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AttackDirection {
     /// From the front.
@@ -1094,7 +1094,7 @@ fn add_nonzero(c: &mut MoraleComponent, id: i32, value: i32) {
 ///
 /// Per attacker: a flank attacker sets the flank flag and a rear attacker the rear flag. An attacker
 /// not yet in [`MoraleComponent::attackers_seen`] (insert-unique `0x0054ED20`) adds
-/// [`effect_id::ATTACKED_FRONT`] with the `was_attacked_in_*` value of its direction, doubled when
+/// [`effect_id::NEW_ATTACKER`] with the `was_attacked_in_*` value of its direction, doubled when
 /// it is charging, plus [`new_attacker_adjust`] (skipped at 0), and sets the suppress flag. An
 /// attacker already seen sets the fighting-cavalry flag when it rides, this unit does not
 /// (a dismounted cavalry unit counts as on foot) and this unit is not in a square.
@@ -1128,7 +1128,7 @@ pub fn modifiers(c: &mut MoraleComponent, kv: &KvMorale, i: &MoraleInputs) {
                 v = v.wrapping_mul(2);
             }
             v = v.wrapping_add(new_attacker_adjust(i.riding, a.riding, i.training_level));
-            add_nonzero(c, effect_id::ATTACKED_FRONT, v);
+            add_nonzero(c, effect_id::NEW_ATTACKER, v);
             c.suppress_shaken_clamp = true;
         } else if a.riding && !i.riding && !i.square_formation {
             fighting_cavalry = true;
@@ -1864,7 +1864,7 @@ mod tests {
             ..Default::default()
         };
         let c = run_mods(&i);
-        let mut new = effects(&c, effect_id::ATTACKED_FRONT);
+        let mut new = effects(&c, effect_id::NEW_ATTACKER);
         new.sort_unstable();
         assert_eq!(new, vec![-30, -20, -20]); // -10 doubled, -20, -30; nobody rides
         assert_eq!(c.effect(effect_id::ATTACKED_FLANK), Some(-20));
@@ -1888,7 +1888,7 @@ mod tests {
             (0, false, attacker(7, AttackDirection::Front), Some(-10)),
         ] {
             let i = MoraleInputs { training_level: level, riding: self_riding, attackers: vec![a], ..Default::default() };
-            assert_eq!(run_mods(&i).effect(effect_id::ATTACKED_FRONT), want, "{level} {self_riding} {a:?}");
+            assert_eq!(run_mods(&i).effect(effect_id::NEW_ATTACKER), want, "{level} {self_riding} {a:?}");
         }
         // A value of 0 adds no effect, but the attacker still sets the suppress flag.
         let mut k = kv();
@@ -1896,7 +1896,7 @@ mod tests {
         let mut c = MoraleComponent::default();
         let i = MoraleInputs { training_level: 2, attackers: vec![rider], ..Default::default() };
         modifiers(&mut c, &k, &i);
-        assert_eq!(c.effect(effect_id::ATTACKED_FRONT), None);
+        assert_eq!(c.effect(effect_id::NEW_ATTACKER), None);
         assert!(c.suppress_shaken_clamp);
     }
 
@@ -1908,7 +1908,7 @@ mod tests {
         c.active_effects.clear();
         c.suppress_shaken_clamp = false;
         modifiers(&mut c, &kv(), &i);
-        assert_eq!(c.effect(effect_id::ATTACKED_FRONT), None);
+        assert_eq!(c.effect(effect_id::NEW_ATTACKER), None);
         assert_eq!(c.effect(effect_id::ATTACKED_FLANK), Some(-20)); // the flag is per evaluation
         assert!(!c.suppress_shaken_clamp);
     }

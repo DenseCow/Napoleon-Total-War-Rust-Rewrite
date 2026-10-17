@@ -24,6 +24,8 @@ pub fn tiny_model() -> CampaignModel {
                 diplomacy: BTreeMap::new(),
             },
         );
+        // In the game though it holds nothing, so it takes turns (0x00948CF0).
+        world.faction_details.entry(id).or_default().out_of_game = Some(false);
     }
     // Made-up start date (Early September 1805, as in W3 §3.1's example).
     let date = Date { year: 1805, season: 0, month: 8, half: 0 };

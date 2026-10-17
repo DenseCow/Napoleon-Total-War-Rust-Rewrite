@@ -274,17 +274,20 @@ fn trade_accumulation_and_bankruptcy_are_written() {
     let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     let mut m = l.model.clone();
-    let pairs: Vec<_> = ntw_campaign::trade::read_accumulated(&esf, &m).keys().copied().take(3).collect();
+    // Each route keeps its own value (+0x3C): set the last route of three pairs, so a pair's other
+    // routes must keep theirs. The first is negative: the exe's int goes into the u32 node as its bits
+    // (0x00AFD490), so it comes back unchanged, not clamped to 0.
+    let pairs: Vec<_> = m.world.trade_paths.keys().copied().take(3).collect();
     assert!(!pairs.is_empty(), "the startpos has trade routes");
     for (k, p) in pairs.iter().enumerate() {
-        m.world.trade_accumulated.insert(*p, 100 * (k as i32 + 1));
+        m.world.trade_paths.get_mut(p).unwrap().last_mut().unwrap().accumulated = if k == 0 { -100 } else { 100 * (k as i32 + 1) };
     }
     let france = m.faction_by_key("france").unwrap().id;
     m.world.bankrupt_turns.insert(france, 3);
     let out = save::write_save(&esf, &m, "france", 1).unwrap();
     let back = ntw_campaign::read(&out.to_bytes().unwrap(), &db).unwrap();
     for p in &pairs {
-        assert_eq!(back.model.world.trade_accumulated.get(p), m.world.trade_accumulated.get(p));
+        assert_eq!(back.model.world.trade_paths[p], m.world.trade_paths[p]);
     }
     assert_eq!(back.model.world.bankrupt_turns.get(&france), Some(&3));
 }

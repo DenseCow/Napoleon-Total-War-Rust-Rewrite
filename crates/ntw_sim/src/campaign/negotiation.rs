@@ -145,6 +145,23 @@ impl ActionRecord {
     }
 }
 
+/// The diplomacy screen's trade status of the player towards another faction
+/// ([`CampaignModel::diplomacy_trade_status`]: the `Trading` / `LandTrade` / `TradingTooltip`
+/// entries of `RetrieveFactionListForDiplomacy` `0x009F2EA0`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiplomacyTradeStatus {
+    /// The player holds a trade agreement with the faction (relationship `+0x788`): `Trading` is
+    /// "trading" (or "cannot_trade" when `can_trade` is false) and the tooltip
+    /// `trade_status_tooltip_already_trading`.
+    pub held: bool,
+    /// Held: no embargo either way. Not held: a new agreement is possible and the scripts allow it.
+    /// `Trading` is "can_trade" / "cannot_trade" and the tooltip `trade_status_tooltip_can` /
+    /// `_cannot` when not held.
+    pub can_trade: bool,
+    /// `LandTrade`.
+    pub land: bool,
+}
+
 /// One button the negotiation panel shows (`PushNegotiationPossibleActionsFromScript` `0x009B5220`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListedAction {
@@ -152,9 +169,51 @@ pub struct ListedAction {
     pub action: NegotiationAction,
     /// `Active`: the action is available (an unavailable one is shown greyed).
     pub active: bool,
-    /// `Tooltip`: a `random_localisation_strings` key, for the actions listed although unavailable.
-    pub tooltip: Option<&'static str>,
+    /// `Tooltip`: for trade and request_join_war while the local player is not at war with the other
+    /// side (`action_tooltip`); `None` for every other action. The exe
+    /// also explains alliance, break_trade and break_alliance (`0x00B0CBD0`, `0x00B13CB0`,
+    /// `0x00B13B80`), still undecoded: see the PROVISIONAL note on `action_tooltip`.
+    pub tooltip: Option<ActionTooltip>,
 }
+
+/// An explained action's tooltip ([`ListedAction::tooltip`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionTooltip {
+    /// A `random_localisation_strings` key.
+    Key(&'static str),
+    /// Trade (`0x00BC7910` with the counts, from `0x009B55FF`): `None` is the exe's empty text (a side
+    /// without a capital).
+    TradeAgreement(Option<TradeAgreementTooltip>),
+}
+
+/// The trade agreement explanation ([`CampaignModel::trade_agreement_tooltip`], `0x00BC7910`): the
+/// text is the reason's string, then the route counts line when asked for, then
+/// `trade_agreement_tooltip_existing_route_shifted` when [`Self::route_shifted`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TradeAgreementTooltip {
+    /// The reason's `random_localisation_strings` key (one of the `TRADE_TIP_*` keys).
+    pub reason: &'static str,
+    /// `trade_agreement_tooltip_export_route_count` filled with (your routes left, your cap, their
+    /// routes left, their cap), each `%d` in turn (`0x00446C80`); `None` when not asked for.
+    pub sea_routes: Option<[i32; 4]>,
+    /// Route check codes 4 and 6 (a sea route is freed by moving one over land).
+    pub route_shifted: bool,
+}
+
+/// `trade_agreement_tooltip_embargoed` (random string 0x1CD, `0x00BC7910`).
+pub const TRADE_TIP_EMBARGOED: &str = "trade_agreement_tooltip_embargoed";
+/// `trade_agreement_tooltip_no_route_them` (0x1C9).
+pub const TRADE_TIP_NO_ROUTE_THEM: &str = "trade_agreement_tooltip_no_route_them";
+/// `trade_agreement_tooltip_no_route_you` (0x1C8).
+pub const TRADE_TIP_NO_ROUTE_YOU: &str = "trade_agreement_tooltip_no_route_you";
+/// `trade_agreement_tooltip_neighbour` (0x1CA).
+pub const TRADE_TIP_NEIGHBOUR: &str = "trade_agreement_tooltip_neighbour";
+/// `trade_agreement_tooltip_sea_routes` (0x1CB).
+pub const TRADE_TIP_SEA_ROUTES: &str = "trade_agreement_tooltip_sea_routes";
+/// `trade_agreement_tooltip_export_route_count` (0x1C7), the counts line.
+pub const TRADE_TIP_ROUTE_COUNT: &str = "trade_agreement_tooltip_export_route_count";
+/// `trade_agreement_tooltip_existing_route_shifted` (0x1CC).
+pub const TRADE_TIP_ROUTE_SHIFTED: &str = "trade_agreement_tooltip_existing_route_shifted";
 
 /// The two button lists of the panel.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -388,7 +447,7 @@ impl CampaignModel {
     /// The rebel faction (no faction record, `0x008CEEF0`): the model's faction with no key, as
     /// [`Self::at_war`] (`IsFactionAtWarWith` `0x008CE9B0`) tells it.
     pub fn is_rebel_faction(&self, f: FactionId) -> bool {
-        self.world.factions.get(&f).is_some_and(|x| x.key.is_empty())
+        self.world.is_rebel_faction(f)
     }
 
     /// `0x008CE390`: neither is the rebel faction, and the same faction or an allied-like stance.
@@ -398,6 +457,11 @@ impl CampaignModel {
 
     pub(crate) fn is_human(&self, f: FactionId) -> bool {
         self.turn.humans.contains(&f)
+    }
+
+    /// A major power (faction +0x524, `0x00C3FB20`).
+    pub(crate) fn is_major(&self, f: FactionId) -> bool {
+        self.world.faction_details.get(&f).and_then(|d| d.major) == Some(true)
     }
 
     /// The other factions of the campaign (the relationship lists the exe walks).
@@ -436,6 +500,146 @@ impl CampaignModel {
         self.third_factions(f).any(|x| self.world.stance(f, x) == Stance::Protectorate)
     }
 
+    /// `0x00C1A7D0(p, r, cancel)`, CONFIRMED (decompile): with `cancel`, whether `p` holds a trade
+    /// agreement with `r` (relationship `+0x788`, the held agreement can be cancelled); else whether a
+    /// new one is possible: not at war (`IsFactionAtWarWith` `0x008CE9B0`), none held, a trade route
+    /// both ways ([`Self::trade_route_check`] `p` → `r` and `r` → `p` non-zero, `0x00BA42E0`) and no
+    /// embargo either way (`0x00B28E10`: relationship `+0x840` non-zero).
+    pub fn trade_possible(&self, p: FactionId, r: FactionId, cancel: bool) -> bool {
+        if cancel {
+            return self.trade_held(p, r);
+        }
+        self.new_trade_route(p, r).is_some()
+    }
+
+    /// `a` holds a trade agreement with `b` (relationship `+0x788`, [`Relationship::trade_agreement`]).
+    fn trade_held(&self, a: FactionId, b: FactionId) -> bool {
+        self.rel(a, b).is_some_and(|x| x.trade_agreement)
+    }
+
+    /// [`Self::trade_possible`] without `cancel`, answering `p`'s route code to `r`
+    /// ([`Self::trade_route_check`], non-zero) when a new agreement is possible, else `None`. The exe
+    /// searches the routes before it reads the embargoes (`0x00C1A7D0`); all the tests are reads, so
+    /// testing the cheap embargo fields first gives the same answer without the two path searches.
+    fn new_trade_route(&self, p: FactionId, r: FactionId) -> Option<u8> {
+        if self.at_war(p, r)
+            || self.trade_held(p, r)
+            || self.trade_embargoed(p, r)
+            || self.trade_embargoed(r, p)
+        {
+            return None;
+        }
+        let code = self.trade_route_check(p, r);
+        (code != 0 && self.trade_route_check(r, p) != 0).then_some(code)
+    }
+
+    /// `0x00B28E10` on `a`'s relationship to `b`: an embargo is running (`+0x840` non-zero, CONFIRMED
+    /// by disassembly; [`Relationship::trade_embargo_turns`]).
+    fn trade_embargoed(&self, a: FactionId, b: FactionId) -> bool {
+        self.rel(a, b).is_some_and(|x| x.trade_embargo_turns != 0)
+    }
+
+    /// The diplomacy screen's trade status of `player` towards `other` (`RetrieveFactionListForDiplomacy`
+    /// `0x009F2EA0`, block `0x009F30AA`..`0x009F3507`), CONFIRMED (disassembly):
+    /// - `None` at war (the player's relationship stance `+0x790` → `+0x10` is 0): no trade entries;
+    /// - held agreement (`+0x788`, `0x009F30E6`): `can_trade` when neither side embargoes the other
+    ///   (`0x00B28E10` on player → `other`, then `other` → player); `land` when the first of
+    ///   `other`'s routes to the player has no sea hop (`0x00B28620`: no waypoint byte `+0x14`), false
+    ///   without such a route. "First": the loop `0x009F3143`..`0x009F31B5` walks `other`'s route
+    ///   vector in the trade manager's exporter map (`+0x11C`; count `+0x14`, data `+0x18`, 0x84 bytes)
+    ///   from index 0 and stops at the first route whose importer (`0x00B27680`: `+0x54`) is the
+    ///   player. That vector keeps file and build order with an order-keeping erase
+    ///   (CAMPAIGN_FIDELITY.md "Agreement breaks remove one route each way"), the order of the pair's
+    ///   `Vec` in [`super::World::trade_paths`], so its first entry is the same route;
+    /// - else (`0x009F33E1`): `can_trade` when [`Self::trade_possible`] (`0x00C1A7D0(player, other, 0)`)
+    ///   and the scripts allow it: the player may propose trade to `other` ([`Self::may_propose`]: its
+    ///   option 0 towards `other` is not 2 or 3) and `other`'s option 0 towards the player is not 3;
+    ///   `land` when also the player's route check to `other` (`0x00BA42E0`, called again by the exe,
+    ///   the same code `0x00C1A7D0` got) is a land route ([`Self::trade_route_check`] code 1).
+    ///
+    /// `other`'s value 1 alone (it declines trade from the player) still shows "can_trade": the exe
+    /// tests 3 only there (`CMP EAX,0x3` at `0x009F345C`..`0x009F3467`), as ours does.
+    pub fn diplomacy_trade_status(&self, player: FactionId, other: FactionId) -> Option<DiplomacyTradeStatus> {
+        if self.world.stance(player, other) == Stance::War {
+            return None;
+        }
+        if self.trade_held(player, other) {
+            let land = self.world.trade_paths.get(&(other, player)).and_then(|ps| ps.first()).is_some_and(|p| !p.uses_sea());
+            return Some(DiplomacyTradeStatus {
+                held: true,
+                can_trade: !self.trade_embargoed(player, other) && !self.trade_embargoed(other, player),
+                land,
+            });
+        }
+        let route = if self.diplomacy_trade_allowed(player, other) { self.new_trade_route(player, other) } else { None };
+        Some(DiplomacyTradeStatus { held: false, can_trade: route.is_some(), land: route == Some(1) })
+    }
+
+    /// The scripts allow the diplomacy screen's new trade agreement of `player` with `other`
+    /// (`0x009F33E1`..`0x009F3469`, the flag at `[ESP+0x1FE]`): the player's option 0 towards `other`
+    /// is not 2 or 3 and `other`'s towards the player is not 3 (it may neither propose nor accept
+    /// trade with the player: `force_diplomacy` false, false).
+    fn diplomacy_trade_allowed(&self, player: FactionId, other: FactionId) -> bool {
+        let trade = NegotiationAction::Trade.option();
+        self.may_propose(player, other, trade) && self.diplomacy_option(other, player, trade) != 3
+    }
+
+    /// The explanation the diplomacy screen appends to the `TradingTooltip` of a faction it shows
+    /// ([`Self::diplomacy_trade_status`]) after the `trade_status_tooltip_can` / `_cannot` text
+    /// (`0x004F1200` at `0x009F362A`), CONFIRMED (disassembly `0x009F35CC`..`0x009F361F`): with no
+    /// agreement held and the scripts allowing one ([`Self::diplomacy_trade_allowed`]),
+    /// [`Self::trade_agreement_tooltip`] (`0x00BC7910(player, other, 0)`, no counts); else nothing
+    /// (the empty string `0x0131005F`). `None` also at war (no trade entries) or while held.
+    pub fn diplomacy_trade_tooltip(&self, player: FactionId, other: FactionId) -> Option<TradeAgreementTooltip> {
+        if self.world.stance(player, other) == Stance::War || self.trade_held(player, other) || !self.diplomacy_trade_allowed(player, other) {
+            return None;
+        }
+        self.trade_agreement_tooltip(player, other, false)
+    }
+
+    /// Why `a` can or cannot make a trade agreement with `b` (`0x00BC7910(a, b, counts)` on the trade
+    /// manager), CONFIRMED (disassembly):
+    /// - either side without a capital (faction `+0x72C`, `0x008C9200`): `None`, the empty text
+    ///   (`0x00BC7D3D`);
+    /// - with `counts`, the line [`TRADE_TIP_ROUTE_COUNT`] filled from [`Self::sea_route_use`]: each side's sea route cap
+    ///   ([`Self::sea_route_cap`] + [`Self::capital_port_route_cap`], `0x008DC150` + `0x008DC360`) less
+    ///   its routes with a sea hop (its export routes in the trade manager's map `+0x11C`,
+    ///   `0x00BB0980`, that are not land-only, `0x00B28620`: [`super::trade::TradePath::uses_sea`]),
+    ///   then the cap: (a's left, a's cap, b's left, b's cap);
+    /// - the reason (`0x00BC7BB1`): an embargo either way (`0x00B28E10`) → [`TRADE_TIP_EMBARGOED`];
+    ///   else `b` cannot send a route to `a` ([`Self::trade_route_check`] `b` → `a` is 0) →
+    ///   [`TRADE_TIP_NO_ROUTE_THEM`]; else by `a`'s code to `b`: 0 → [`TRADE_TIP_NO_ROUTE_YOU`],
+    ///   1 → [`TRADE_TIP_NEIGHBOUR`], 2 / 3 / 5 / 7 → [`TRADE_TIP_SEA_ROUTES`], 4 / 6 → that with
+    ///   [`TradeAgreementTooltip::route_shifted`], any other (a mod's check) → [`TRADE_TIP_NO_ROUTE_THEM`].
+    pub fn trade_agreement_tooltip(&self, a: FactionId, b: FactionId, counts: bool) -> Option<TradeAgreementTooltip> {
+        let w = &self.world;
+        if w.capital(a).is_none() || w.capital(b).is_none() {
+            return None;
+        }
+        let sea_routes = counts.then(|| {
+            let side = |x: FactionId| {
+                let (used, cap) = self.sea_route_use(x);
+                (cap - used, cap)
+            };
+            let ((al, ac), (bl, bc)) = (side(a), side(b));
+            [al, ac, bl, bc]
+        });
+        let (reason, route_shifted) = if self.trade_embargoed(a, b) || self.trade_embargoed(b, a) {
+            (TRADE_TIP_EMBARGOED, false)
+        } else if self.trade_route_check(b, a) == 0 {
+            (TRADE_TIP_NO_ROUTE_THEM, false)
+        } else {
+            match self.trade_route_check(a, b) {
+                0 => (TRADE_TIP_NO_ROUTE_YOU, false),
+                1 => (TRADE_TIP_NEIGHBOUR, false),
+                2 | 3 | 5 | 7 => (TRADE_TIP_SEA_ROUTES, false),
+                4 | 6 => (TRADE_TIP_SEA_ROUTES, true),
+                _ => (TRADE_TIP_NO_ROUTE_THEM, false),
+            }
+        };
+        Some(TradeAgreementTooltip { reason, sea_routes, route_shifted })
+    }
+
     /// The 14 action records of a negotiation of `proposer` with `recipient`, in the exe's order
     /// (the constructors `0x00BF3E90` .. `0x00BF3520` called by `0x00BF5A60`). Every record is then
     /// forbidden when the proposer's relationship to the recipient has its option at 2 or 3
@@ -446,13 +650,8 @@ impl CampaignModel {
         let war = self.at_war(p, r);
         let pr = self.rel(p, r);
         let rp = self.rel(r, p);
-        let trade_held = pr.is_some_and(|x| x.trade_agreement);
-        let embargo = |x: Option<&Relationship>| x.is_some_and(|x| x.trade_embargo_turns != 0);
-        // Trade (`0x00C1A7D0`): the held agreement can be cancelled; a new one needs peace, a trade
-        // route both ways (`0x00BA42E0`) and no embargo either way. PROVISIONAL: the route test is
-        // not decoded; the model has no route builder (see `economy::trade_partners`), so a route
-        // is assumed to exist.
-        let trade_possible = trade_held || (!war && !embargo(pr) && !embargo(rp));
+        let trade_held = self.trade_held(p, r);
+        let trade_possible = self.trade_possible(p, r, trade_held);
         // Access (`0x00C1A6E0`, side 1 / side 0): peace and the access not already indefinite.
         let access_free = |x: Option<&Relationship>| x.is_none_or(|x| x.military_access_turns != -1);
         let access_possible = !war && (access_free(pr) || access_free(rp));
@@ -557,20 +756,23 @@ impl CampaignModel {
     /// The tooltip of an explained action. request_join_war (`0x00B4ECF0`, CONFIRMED keys and
     /// order): `join_war_tooltip_not_allied` when not allied-like, else `..._can_join_war` when a
     /// war is joinable either way (`0x00B28010`; INFERRED to be the same test as `0x00C1E590`),
-    /// else `..._no_joinable_wars`. PROVISIONAL: the trade / alliance / break_trade /
-    /// break_alliance builders (`0x00BC7910`, `0x00B0CBD0`, `0x00B13CB0`, `0x00B13B80`) are not
-    /// decoded, so those buttons keep the template's own tooltip.
-    fn action_tooltip(&self, action: NegotiationAction, local: FactionId, other: FactionId) -> Option<&'static str> {
-        if action != NegotiationAction::RequestJoinWar {
-            return None;
+    /// else `..._no_joinable_wars`. trade (`0x009B55FF`, CONFIRMED disassembly):
+    /// [`Self::trade_agreement_tooltip`] of the local player to the other side with the counts
+    /// (`0x00BC7910(local, other, 1)`). PROVISIONAL: the alliance / break_trade / break_alliance
+    /// builders (`0x00B0CBD0`, `0x00B13CB0`, `0x00B13B80`) are not decoded, so those buttons keep the
+    /// template's own tooltip.
+    fn action_tooltip(&self, action: NegotiationAction, local: FactionId, other: FactionId) -> Option<ActionTooltip> {
+        match action {
+            NegotiationAction::Trade => Some(ActionTooltip::TradeAgreement(self.trade_agreement_tooltip(local, other, true))),
+            NegotiationAction::RequestJoinWar => Some(ActionTooltip::Key(if !allied_like(self.world.stance(local, other)) {
+                "join_war_tooltip_not_allied"
+            } else if self.joinable_war(local, other) || self.joinable_war(other, local) {
+                "join_war_tooltip_can_join_war"
+            } else {
+                "join_war_tooltip_no_joinable_wars"
+            })),
+            _ => None,
         }
-        Some(if !allied_like(self.world.stance(local, other)) {
-            "join_war_tooltip_not_allied"
-        } else if self.joinable_war(local, other) || self.joinable_war(other, local) {
-            "join_war_tooltip_can_join_war"
-        } else {
-            "join_war_tooltip_no_joinable_wars"
-        })
     }
 
     /// A diplomat's line (`ResolveDiplomacyNegotiationString` `0x00C55CC0`, CONFIRMED): the

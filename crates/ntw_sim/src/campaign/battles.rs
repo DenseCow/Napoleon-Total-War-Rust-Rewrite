@@ -316,6 +316,9 @@ impl CampaignModel {
             return false;
         }
         if old != faction && !self.is_rebel_faction(old) && !self.is_rebel_faction(faction) {
+            // `0x00B62120` refreshes both sides' zones first: the new owner, then the old.
+            self.refresh_faction_zones(faction);
+            self.refresh_faction_zones(old);
             self.diplomacy_changed();
         }
         let Some(r) = self.world.regions.get_mut(&region) else { return false };
@@ -328,6 +331,8 @@ impl CampaignModel {
         {
             self.move_character(c, pos);
             self.world.characters.get_mut(&c).expect("checked").garrisoned_in = Some(region);
+            // He holds the settlement now (`0x00B4E760` → `0x00A285C0`): his force's zones again, once.
+            self.rebuild_moved_zones(c);
         }
         if let Some(f) = by.filter(|f| self.world.forces.get(f).is_some_and(|f| !f.is_navy && f.commander.is_some()))
             && let Some(r) = self.world.regions.get_mut(&region)

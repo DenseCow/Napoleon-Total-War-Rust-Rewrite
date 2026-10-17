@@ -46,7 +46,7 @@ fn fixture() -> Option<&'static Fixture> {
         let vfs = Vfs::open_install(&dir).expect("packs");
         let files = GameFiles { vfs: &vfs };
         let map = CampaignMap::load(&files, &loaded.info.map_key).expect("map");
-        loaded.model.terrain = Some(Terrain(Arc::new(ntw_campaign::pathing::build_grid(&map))));
+        loaded.model.attach_terrain(Terrain(Arc::new(ntw_campaign::pathing::build_grid(&map))));
         // The model holds them (World::ai_keys, filled by the importer); by faction key for the tests.
         let keys = loaded.model.world.ai_keys.iter().map(|(id, k)| (loaded.model.world.factions[id].key.clone(), k.clone())).collect();
         Some(Fixture { model: loaded.model, data: Arc::new(data), keys })

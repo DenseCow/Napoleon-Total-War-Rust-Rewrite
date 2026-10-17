@@ -17,7 +17,8 @@
 //!   target is engaged in melee (`0x0054EE90`, INFERRED meaning).
 //! - CONFIRMED shape of the melee potential `0x006AFC00` (see [`melee_potential`]).
 
-use ntw_sim::battle::model::{Battle, LandUnit, MELEE_CONTACT_RANGE};
+use ntw_sim::battle::melee::MeleeDir;
+use ntw_sim::battle::model::{Battle, LandUnit, MELEE_CONTACT_RANGE, melee_dir};
 use ntw_sim::battle::morale::MoraleState;
 use ntw_sim::battle::strength;
 
@@ -93,40 +94,18 @@ pub fn melee_base_priority(target: &LandUnit) -> f32 {
     target_value(target)
 }
 
-/// Where `attacker` strikes `target` from, relative to the target's facing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AttackSide {
-    /// Within 45° of the target's front.
-    Front,
-    /// Left or right flank.
-    Flank,
-    /// Within 45° of the target's rear.
-    Rear,
-}
-
-/// Classifies the attack direction. Same split as the model's PLACEHOLDER `melee_dir`
-/// (the original's `0x006AD890` direction lookup is not decoded yet).
-pub fn attack_side(target_pos: (f32, f32), target_facing: f32, attacker_pos: (f32, f32)) -> AttackSide {
-    use std::f32::consts::FRAC_PI_4;
-    let angle = (attacker_pos.1 - target_pos.1).atan2(attacker_pos.0 - target_pos.0);
-    let rel = wrap(angle - target_facing).abs();
-    if rel <= FRAC_PI_4 {
-        AttackSide::Front
-    } else if rel >= 3.0 * FRAC_PI_4 {
-        AttackSide::Rear
-    } else {
-        AttackSide::Flank
-    }
-}
-
 /// PROVISIONAL per-man bonus for the attack direction in [`melee_potential`], as a fraction of the
-/// attacker's melee rating per man. The original looks the direction up in a table held by the
-/// analyser (`0x00DAC7A0`) and multiplies it by the attacker's men; the table values are UNKNOWN.
-pub fn direction_factor(side: AttackSide) -> f32 {
-    match side {
-        AttackSide::Front => 0.0,
-        AttackSide::Flank => 0.5,
-        AttackSide::Rear => 1.0,
+/// attacker's melee rating per man. The direction is the model's [`melee_dir`]: the AI functions
+/// `0x006AFC00` (call at `0x006AFCAA`) and `0x006B06F0` (`0x006B079A`) call the same `0x006AD890`
+/// the encounter uses (CONFIRMED, xrefs), so the AI reads the model's rule rather than its own. The
+/// original looks the direction (0..3, left and right flank kept apart) up in a table held by the
+/// analyser (`0x00DAC7A0`) and multiplies it by the attacker's men; the table values are UNKNOWN,
+/// including whether the two flanks differ, so both flanks take the same value here.
+pub fn direction_factor(dir: MeleeDir) -> f32 {
+    match dir {
+        MeleeDir::Front => 0.0,
+        MeleeDir::FlankLeft | MeleeDir::FlankRight => 0.5,
+        MeleeDir::Rear => 1.0,
     }
 }
 
@@ -138,9 +117,9 @@ pub fn direction_factor(side: AttackSide) -> f32 {
 pub fn melee_potential(attacker: &LandUnit, target: &LandUnit) -> f32 {
     let a = melee_rating(attacker);
     let t = melee_rating(target).max(0.01);
-    let side = attack_side(target.position, target.facing, attacker.position);
+    let dir = melee_dir(target.position, target.facing, attacker.position);
     let per_man = a / attacker.men.max(1) as f32;
-    let num = a + attacker.men as f32 * per_man * direction_factor(side);
+    let num = a + attacker.men as f32 * per_man * direction_factor(dir);
     ((num.max(0.01) / t).clamp(0.0, 2.0)) * 0.5
 }
 
@@ -281,6 +260,29 @@ mod tests {
         assert!((pf - 0.5).abs() < 1e-6, "equal units head on = even");
         assert!(pr > pf);
         assert!(pr <= 1.0);
+    }
+
+    #[test]
+    fn melee_potential_reads_the_models_melee_dir() {
+        // Target faces +x at the origin; equal units, so a frontal attack is even (0.5).
+        let target = unit(2, 1, 100, (0.0, 0.0), 5);
+        let at = |pos| unit(1, 0, 100, pos, 5);
+        let even = melee_potential(&at((20.0, 0.0)), &target);
+        assert!((even - 0.5).abs() < 1e-6);
+        // Under 0.1 m `melee_dir` (0x006AD890) says front, even from behind.
+        let close = (-0.05, 0.05);
+        assert_eq!(melee_dir(target.position, target.facing, close), MeleeDir::Front);
+        assert!((melee_potential(&at(close), &target) - even).abs() < 1e-6);
+        // Both flanks, as the model classifies them, give the same (PROVISIONAL) bonus.
+        let up = std::f32::consts::FRAC_PI_2;
+        let mut north = target.clone();
+        north.facing = up;
+        let (l, r) = ((5.0, 1.0), (-5.0, 1.0));
+        assert_eq!(melee_dir(north.position, up, l), MeleeDir::FlankLeft);
+        assert_eq!(melee_dir(north.position, up, r), MeleeDir::FlankRight);
+        let pl = melee_potential(&at(l), &north);
+        assert!((pl - melee_potential(&at(r), &north)).abs() < 1e-6);
+        assert!(pl > even && pl < melee_potential(&at((-20.0, 0.0)), &target));
     }
 
     #[test]

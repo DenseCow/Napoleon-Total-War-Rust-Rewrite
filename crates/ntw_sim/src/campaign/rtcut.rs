@@ -58,7 +58,7 @@ pub fn links(a: u8, b: u8) -> bool {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Shape {
     /// Whole base polygons (a zone of control: the flood's polygons).
-    Polygons(Vec<u32>),
+    Polygons(std::sync::Arc<[u32]>),
     /// A convex outline in map units (a core).
     Convex(Vec<(f32, f32)>),
 }
@@ -357,7 +357,7 @@ pub fn build(map: &PolyMap, cuts: &[Cut]) -> Overlay {
     for cut in cuts {
         match &cut.shape {
             Shape::Polygons(ps) => {
-                for &p in ps {
+                for &p in ps.iter() {
                     let cell = map.poly_cell[p as usize];
                     if let Some(pieces) = cells.get_mut(&cell) {
                         for pc in pieces.iter_mut().filter(|pc| pc.origin == p) {
@@ -848,7 +848,7 @@ mod tests {
     #[test]
     fn a_zone_changes_kinds_only() {
         let m = open(6, 6);
-        let ov = build(&m, &[Cut { shape: Shape::Polygons(vec![7, 8]), kind: 8 }, Cut { shape: Shape::Convex(circle((5.0, 3.0), 1.0)), kind: 9 }]);
+        let ov = build(&m, &[Cut { shape: Shape::Polygons(vec![7, 8].into()), kind: 8 }, Cut { shape: Shape::Convex(circle((5.0, 3.0), 1.0)), kind: 9 }]);
         let v = m.with(&ov);
         assert_eq!(v.kind(7), 8);
         assert!(!Mover::Land.may_enter(v.kind(7)) && Mover::Agent.may_enter(v.kind(7)));

@@ -133,7 +133,7 @@ fn stealth_rule_matches_the_saved_hidden_flags() {
         let esf = EsfFile::open(&path).expect("save");
         let mut l = ntw_campaign::read_esf(&esf, &db).expect("load");
         let map = ntw_formats::campaign_map::CampaignMap::load(&files, &l.info.map_key).expect("map");
-        l.model.terrain = Some(ntw_sim::campaign::Terrain(std::sync::Arc::new(ntw_campaign::pathing::build_grid(&map))));
+        l.model.attach_terrain(ntw_sim::campaign::Terrain(std::sync::Arc::new(ntw_campaign::pathing::build_grid(&map))));
         let m = &l.model;
         for f in m.world.forces.values() {
             let Some(c) = f.commander.and_then(|c| m.world.characters.get(&c)) else { continue };
