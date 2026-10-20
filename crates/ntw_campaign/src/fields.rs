@@ -32,6 +32,14 @@ pub(crate) fn u32_at(r: &EsfRecord, index: usize, path: &str) -> Result<u32, Loa
     r.get_u32(index).ok_or_else(|| bad(r, path, index, "u32"))
 }
 
+/// Child `index` as a `u32` array.
+pub(crate) fn u32_array_at<'a>(r: &'a EsfRecord, index: usize, path: &str) -> Result<&'a [u32], LoadError> {
+    match r.get(index) {
+        Some(EsfNode::U32Array(values)) => Ok(values),
+        _ => Err(bad(r, path, index, "u32 array")),
+    }
+}
+
 /// Child `index` as a string (UTF-16 or ASCII).
 pub(crate) fn str_at<'a>(r: &'a EsfRecord, index: usize, path: &str) -> Result<&'a str, LoadError> {
     r.get_str(index)

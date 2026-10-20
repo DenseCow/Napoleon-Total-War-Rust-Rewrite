@@ -188,7 +188,8 @@ impl ScriptHost {
     }
 
     /// Ends the turn in the model and forwards every resulting script event to Lua, in the order
-    /// the model produced them (PROVISIONAL order, see `ntw_sim::campaign::turn`).
+    /// the model produced them (PROVISIONAL order, see `ntw_sim::campaign::turn`), and returns every
+    /// event of the turn, the AI turns' included ([`fire_all`](Self::fire_all)).
     pub fn end_turn(&mut self) -> Vec<(CampaignEvent, FireReport)> {
         let started = self.state.borrow().model.turn.started;
         let mut out = Vec::new();
@@ -208,7 +209,8 @@ impl ScriptHost {
     }
 
     /// Applies a command to the model and fires the script events it caused (`EndTurn` steps
-    /// through the turn like [`end_turn`](Self::end_turn)).
+    /// through the turn like [`end_turn`](Self::end_turn); `RespondToAllyWarCall` resumes the turn
+    /// steps a waiting call to war had paused, `ntw_sim` `CampaignModel::step`).
     pub fn apply(
         &mut self,
         cmd: ntw_sim::campaign::CampaignCommand,
@@ -219,9 +221,34 @@ impl ScriptHost {
             }
             return Ok(self.end_turn());
         }
+        let resumes = matches!(cmd, ntw_sim::campaign::CampaignCommand::RespondToAllyWarCall { .. });
         let events = self.state.borrow_mut().model.apply(cmd)?;
-        // Every event is returned (project events such as `CharacterMoved` with an empty report).
-        Ok(self.fire_all(events, |_| true))
+        let mut out = self.fire_all(events);
+        out.extend(self.fire_script_events());
+        if resumes {
+            out.extend(self.run_steps());
+        }
+        Ok(out)
+    }
+
+    /// Fires the model events that script commands queued while the last Lua ran
+    /// (`ScriptState::script_events`: `grant_faction_handover`'s destruction, `force_make_protectorate`'s
+    /// peace and protectorate), then those their own
+    /// handlers queued, until none is left, through [`Self::fire_all`] like a command's events, so
+    /// the caller gets every one (`OutcomeMovie` with an empty report). Run after
+    /// each batch of handlers in [`Self::apply`] and the turn steps; a command issued by a handler of
+    /// the opening events, a time trigger or a bare [`Self::fire`] waits for the next of those.
+    /// INFERRED: they fire after the batch whose handler issued the command, not nested inside that
+    /// handler; the exe's order for events posted from inside a script handler is not traced.
+    fn fire_script_events(&mut self) -> Vec<(CampaignEvent, FireReport)> {
+        let mut out = Vec::new();
+        loop {
+            let queued = std::mem::take(&mut self.state.borrow_mut().script_events);
+            if queued.is_empty() {
+                return out;
+            }
+            out.extend(self.fire_all(queued));
+        }
     }
 
     /// Sets the campaign AI that plays the non-human factions in the turn loop (see
@@ -240,26 +267,30 @@ impl ScriptHost {
             let next = self.state.borrow().model.turn.queue.front().copied();
             if let (Some(TurnStep::AiTurn(faction)), Some(hook)) = (next, self.ai_turn.as_mut()) {
                 let events = hook(&mut self.state.borrow_mut(), faction);
-                out.extend(self.fire_all(events, CampaignEvent::is_diagnostic));
+                out.extend(self.fire_all(events));
+                out.extend(self.fire_script_events());
             }
             let step = self.state.borrow_mut().model.step();
             let Some(events) = step else { break };
-            out.extend(self.fire_all(events, CampaignEvent::is_diagnostic));
+            out.extend(self.fire_all(events));
+            out.extend(self.fire_script_events());
         }
         out
     }
 
-    /// Fires every script event in `events`, in order, and returns it with its report; of the
-    /// other events, those `keep` accepts are returned unfired (a command's caller gets them all,
-    /// the turn steps only the diagnostics ([`CampaignEvent::is_diagnostic`]) for the app's log).
-    fn fire_all(&mut self, events: Vec<CampaignEvent>, keep: fn(&CampaignEvent) -> bool) -> Vec<(CampaignEvent, FireReport)> {
+    /// The one path from the model's events to the scripts and the caller (commands, turn steps and
+    /// AI turns alike): fires every script event in `events`, in order, and returns every event, a
+    /// script event with its report, a project event (`CharacterMoved`, `ForceDestroyed`,
+    /// `OutcomeMovie`, the diagnostics...: no script name, as the exe declares no such script event)
+    /// unfired with an empty report, for the app's move animations, outcome movies and logs.
+    fn fire_all(&mut self, events: Vec<CampaignEvent>) -> Vec<(CampaignEvent, FireReport)> {
         let mut out = Vec::new();
         for ev in events {
             if let Some(name) = ev.script_name() {
                 let ctx = self.context_for(&ev);
                 let report = self.fire(name, ctx);
                 out.push((ev, report));
-            } else if keep(&ev) {
+            } else {
                 out.push((ev, FireReport::default()));
             }
         }
@@ -276,7 +307,8 @@ impl ScriptHost {
             CampaignEvent::FactionRoundStart { faction }
             | CampaignEvent::FactionTurnStart { faction }
             | CampaignEvent::FactionTurnEnd { faction }
-            | CampaignEvent::GovernorshipTaxRateChanged { faction } => c.faction = faction_of(*faction),
+            | CampaignEvent::GovernorshipTaxRateChanged { faction }
+            | CampaignEvent::FactionBecomesLiberationProtectorate { faction } => c.faction = faction_of(*faction),
             CampaignEvent::RegionTurnStart { region }
             | CampaignEvent::RegionTurnEnd { region }
             | CampaignEvent::SlotTurnStart { region, .. }
@@ -361,6 +393,9 @@ impl ScriptHost {
                 c.character = Some(character.raw());
                 c.faction = w.characters.get(character).and_then(|ch| faction_of(ch.faction));
             }
+            // The exe's event answers only its character getter (vtable +0x1C); its faction getter (+0x38)
+            // is the null stub 0x00461180, so no faction is set (CONFIRMED, vtable 0x0137CCB8).
+            CampaignEvent::CharacterLootedSettlement { character } => c.character = Some(character.raw()),
             CampaignEvent::AgentActionResolved { agent, .. } => {
                 c.character = Some(agent.raw());
                 c.faction = w.characters.get(agent).and_then(|ch| faction_of(ch.faction));
@@ -370,6 +405,7 @@ impl ScriptHost {
             | CampaignEvent::ConstructionItemDropped { .. }
             | CampaignEvent::FactionDestroyed { .. }
             | CampaignEvent::OutcomeMovie { .. }
+            | CampaignEvent::AllyWarCallPending { .. }
             | CampaignEvent::Message { .. } => {}
         }
         c

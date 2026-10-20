@@ -179,7 +179,7 @@ impl CampaignModel {
         );
         let birth = crate::calendar::Date { year: (self.calendar.date.year as i32 - age).max(0) as u32, ..self.calendar.date };
         let historical_key = historical.as_ref().map(|(k, _)| k.clone());
-        self.world.character_details.insert(id, CharacterDetails { birth: Some(birth), historical_key, ..Default::default() });
+        self.world.character_details.insert(id, CharacterDetails { birth: Some(birth), historical_key, ..self.rules.characters.new_character_details(ckind.esf_name()) });
         self.name_new_character(id);
         match &historical {
             Some((_, note)) => self.assign_historical_portrait(id, ckind.esf_name(), note),
@@ -403,8 +403,10 @@ impl CampaignModel {
             return Some(0);
         }
         let at = self.force_position(force)?;
-        // A unit without a character is given a fresh General (`0x00990EF0`), whose rank is the
-        // model's -1 (no attributes yet) -- the same value the promotion itself charges.
+        // A unit without a character is given a fresh officer (`0x00990EF0`, with his officer type's
+        // `agent_to_agent_attributes` levels) whom the promotion gives the new type's levels
+        // (`0x00A1A300`), so his rank is not -1 once made. PROVISIONAL: the price still uses -1 for him
+        // (with the land price itself, above); the promotion charges this same value.
         let rank = f.units[unit].character.map_or(-1, |c| super::agents::rank(self, c));
         Some(self.hire_cost_at_rank(f.faction, at, rank))
     }
@@ -445,6 +447,28 @@ impl CampaignModel {
         }
     }
 
+    /// After `force`'s command passed from `from` to another character (a hire or a field promotion):
+    /// the new commander holds the place `from` held inside a settlement or port
+    /// ([`super::Character::garrisoned_in`]), and `from` rides on with his unit, inside through the
+    /// force and not one of the settlement's residents ([`super::World::residence_of`]). The command
+    /// changes touch no residence list: the General hire `0x00A164C0` adds the unit (`0x008CFBE0`)
+    /// and picks the commander again (`0x008D2FA0`, whose one indirect call is the campaign's event
+    /// at +0xB40), and neither they nor the admiral hire `0x00A16110` (with `0x008B8E50`) nor the
+    /// field promotions `0x008E1C20` / `0x008E2260` (same `0x008CFBE0` + `0x008D2FA0` steps; their
+    /// indirect calls are the unit's, the force's and the campaign's events) reach the residence's
+    /// list append `0x008CFA70` or its leave `0x00B4EE70` (CONFIRMED, decompiled and call graphs to
+    /// depth 3-4); the residence keeps the army at +0xC0 (the enter `0x00B4E760`).
+    fn pass_garrison_on(&mut self, from: CharacterId, force: ForceId) {
+        let Some(now) = self.world.forces.get(&force).and_then(|f| f.commander) else { return };
+        if now == from {
+            return;
+        }
+        let inside = self.world.characters.get_mut(&from).and_then(|x| x.garrisoned_in.take());
+        if let Some(x) = self.world.characters.get_mut(&now) {
+            x.garrisoned_in = inside;
+        }
+    }
+
     /// Hires a General from his faction's pool (`0x00A1B8F0` → `0x00A164C0`, CONFIRMED structure):
     /// pays the cost, takes him out of the pool and makes him a new army with his culture's general
     /// unit (`0x0087FB30`); with `into` (an army of his faction; the interface's "recruit general"
@@ -453,7 +477,8 @@ impl CampaignModel {
     /// distance from the capital to that army; a raiding commander's raids pass to the General
     /// ([`hand_over_raids_on_command_change`](Self::hand_over_raids_on_command_change), CONFIRMED).
     /// Without a target (PROVISIONAL, no such path in the original) the army stands at the capital,
-    /// inside the settlement when it has no garrison army.
+    /// inside the settlement when it has no garrison army. The army's old commander rides on with
+    /// his unit ([`Self::pass_garrison_on`]).
     pub(crate) fn hire_general(&mut self, c: CharacterId, into: Option<ForceId>) -> Result<Vec<CampaignEvent>, CommandError> {
         let ch = self.world.characters.get(&c).cloned().ok_or(CommandError::UnknownCharacter(c))?;
         if !self.may_act(ch.faction) {
@@ -489,9 +514,12 @@ impl CampaignModel {
                     x.position = position;
                     x.garrisoned_in = garrisoned_in;
                 }
-                if let Some(force) = self.world.forces.get_mut(&f) {
+                let old = self.world.forces.get_mut(&f).and_then(|force| {
                     force.units.push(unit);
-                    force.commander = Some(c);
+                    force.commander.replace(c)
+                });
+                if let Some(old) = old {
+                    self.pass_garrison_on(old, f);
                 }
                 f
             }
@@ -545,7 +573,7 @@ impl CampaignModel {
             return Err(CommandError::Unsupported("an admiral joins a navy of his own faction"));
         }
         let lead = force.commander.ok_or(CommandError::UnknownForce(fleet))?;
-        let (position, garrisoned_in) = self.world.characters.get(&lead).map(|x| (x.position, x.garrisoned_in)).ok_or(CommandError::UnknownCharacter(lead))?;
+        let position = self.world.characters.get(&lead).map(|x| x.position).ok_or(CommandError::UnknownCharacter(lead))?;
         // Crash guard, not a rule of the original: the exe hands the null ship on (`0x00A161A1`).
         let ship = self.admiral_ship(fleet).ok_or(CommandError::Unsupported("every ship of the fleet has an admiral"))?;
         let cost = self.hire_cost_at(c, position).expect("checked");
@@ -554,7 +582,6 @@ impl CampaignModel {
         self.take_candidate(c, PoolKind::Admiral, cost);
         if let Some(x) = self.world.characters.get_mut(&c) {
             x.position = position;
-            x.garrisoned_in = garrisoned_in;
         }
         let f = self.world.forces.get_mut(&fleet).expect("checked");
         let old = f.units[ship].character.replace(c).filter(|o| self.world.characters.contains_key(o));
@@ -568,6 +595,8 @@ impl CampaignModel {
         // the replaced character was the raider, the exe ends his raids by destroying him first (flag
         // set at `0x00A161CB`, `0x00A0C6F0`); handing over before `character_dies` leaves the same raids.
         self.hand_over_raids_on_command_change(raider, fleet);
+        // Whoever commands now holds the fleet's place; the others ride on aboard.
+        self.pass_garrison_on(lead, fleet);
         // The replaced character goes the way of any destroyed character (posts, pools, queued items).
         if let Some(old) = old {
             self.character_dies(old);
@@ -641,7 +670,8 @@ impl CampaignModel {
                 // decks are empty in the shipped data.
                 let age = self.draw_new_character_age();
                 let birth = crate::calendar::Date { year: (self.calendar.date.year as i32 - age).max(0) as u32, ..self.calendar.date };
-                self.world.character_details.insert(id, CharacterDetails { birth: Some(birth), ..Default::default() });
+                let officer = if f.is_navy { CharacterKind::Captain } else { CharacterKind::Colonel };
+                self.world.character_details.insert(id, CharacterDetails { birth: Some(birth), ..self.rules.characters.new_character_details(officer.esf_name()) });
                 if let Some(x) = self.world.forces.get_mut(&force).and_then(|x| x.units.get_mut(unit)) {
                     x.character = Some(id);
                 }
@@ -652,7 +682,6 @@ impl CampaignModel {
                 // "guerrilla", the `guerilla` record, number 0). Both field promotions pass 0
                 // (CONFIRMED: the land force's slot 1 `0x008B7EF0` pushes 0 at `0x008B7F05`, naval
                 // `0x008E2260` at `0x008E2558`), so the officer's portrait string is empty: drawn.
-                let officer = if f.is_navy { CharacterKind::Captain } else { CharacterKind::Colonel };
                 self.assign_portrait(id, officer.esf_name());
                 id
             }
@@ -666,12 +695,17 @@ impl CampaignModel {
             x.base_movement_points = mp;
             x.max_movement_points = x.max_movement_points.max(mp);
         }
+        // `0x00A1A300` gives him the new type's attribute levels.
+        let rules = self.rules.clone();
+        if let Some(d) = self.world.character_details.get_mut(&c) {
+            d.attributes = super::characters::promoted_attributes(&rules, new_kind.esf_name(), d);
+        }
         // `0x00A1A300` resolves his portrait again as the new agent type at his current age: an
         // officer still at number -1 draws one now (an admiral from the General decks); one who drew
         // from the colonel or captain deck keeps his number, and only his pictures change folder.
         self.assign_portrait(c, new_kind.esf_name());
-        if let Some(x) = self.world.forces.get_mut(&force) {
-            x.commander = Some(c);
+        if let Some(old) = self.world.forces.get_mut(&force).and_then(|x| x.commander.replace(c)) {
+            self.pass_garrison_on(old, force);
         }
         // A raiding commander's raids pass to him, at the old commander's position (land `0x008E2170` /
         // `0x008E2190`, naval `0x008E2650` / `0x008E2670`).

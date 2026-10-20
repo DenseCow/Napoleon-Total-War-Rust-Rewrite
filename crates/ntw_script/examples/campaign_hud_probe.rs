@@ -233,13 +233,15 @@ fn main() {
             }
         } else if let Some(k) = a.strip_prefix("stagecapture:") {
             // Stages a capture of region <k> by the human (the model's preview, as after a
-            // battle won at that settlement) and lets the HUD open its capture screen.
+            // battle won at that settlement) and lets the HUD open its capture screen. The capturing
+            // force is the human's first one with a commander, so a loot has a looter.
             let mut st = scripts.state_mut();
             let m = &mut st.model;
             let f = m.faction_by_key(&human).map(|f| f.id);
             let r = m.world.regions.values().find(|r| r.key == k).map(|r| r.id);
             if let (Some(f), Some(r)) = (f, r) {
-                let p = m.capture_preview(r, f, None, false);
+                let by = m.world.forces.values().find(|x| x.faction == f && x.commander.is_some()).map(|x| x.id);
+                let p = m.capture_preview(r, f, by, false);
                 m.pending_capture = Some(p);
             }
             drop(st);

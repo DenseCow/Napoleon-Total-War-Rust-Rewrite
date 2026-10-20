@@ -27,9 +27,9 @@ pub struct CampaignFeatures {
     /// `0x00B0D220`, land upkeep `0x008F9B10`, effects 0x90 / 0x94).
     pub unit_key_effects: Vec<UnitKeyEffects>,
     /// Public order: the religion factor goes to happiness slot 12 instead of 2, and hostile armies in
-    /// the region add no war-results unrest (`spa_napoleon`, CONFIRMED; [`super::economy`]).
+    /// the region add no resistance unrest (`spa_napoleon`, CONFIRMED; [`super::economy`]).
     pub alignment_public_order: bool,
-    /// A missionary's rank also adds his faction's `zeal_europe` ([`super::religion::missionary_rank`]).
+    /// A missionary's rank adds his own and his faction's `zeal_europe` ([`super::agents::rank_original`]).
     /// The exe (`0x00A198D0`, CONFIRMED) tests the theatre under the missionary (`spain_main`); the
     /// model has no theatres (one per shipped map) and `spa_napoleon`'s map is the `spain_main` one.
     pub faction_zeal: bool,

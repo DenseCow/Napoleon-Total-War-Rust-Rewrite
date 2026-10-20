@@ -372,6 +372,7 @@ fn load_campaign(vfs: &Loader) -> Result<crate::campaign::CampaignTables, DataEr
         slot_templates_models: load(vfs)?,
         trade_nodes: load(vfs)?,
         tech_requirements: load(vfs)?,
+        tech_building_levels: load(vfs)?,
         tech_factions: load(vfs)?,
         unit_techs: load(vfs)?,
         building_techs: load(vfs)?,
@@ -418,6 +419,7 @@ fn load_campaign(vfs: &Loader) -> Result<crate::campaign::CampaignTables, DataEr
             ancillary_subcultures: load(vfs)?,
             subcultures: load(vfs)?,
             cultures: load(vfs)?,
+            agent_start_attributes: load(vfs)?,
         },
         events: crate::events::EventTables {
             events: load(vfs)?,

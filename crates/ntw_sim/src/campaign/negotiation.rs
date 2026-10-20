@@ -279,6 +279,11 @@ pub struct Negotiation {
     /// The payment record (record 7): set by [`super::CampaignCommand::ProposePayment`], applied by
     /// [`super::CampaignCommand::AcceptDeal`].
     pub payment: DealPayment,
+    /// The join-war record's two lists (record 11, vtable `0x0138202C`): `offered` the factions the
+    /// proposer is to declare war on for the recipient, `demanded` those the recipient is to declare
+    /// war on for the proposer. Set by [`super::CampaignCommand::ProposeJoinWar`], applied by
+    /// [`super::CampaignCommand::AcceptDeal`].
+    pub join_war: DealItems<FactionId>,
     /// The records have been applied since they last changed: a deal applies once (`AcceptDeal`
     /// again is a no-op until a Propose or Clear changes the deal).
     pub applied: bool,
@@ -343,7 +348,8 @@ impl<T> DealItems<T> {
 /// the one source of truth the UI reads. Changed only by the commands
 /// [`super::CampaignCommand::BeginNegotiation`] / [`super::CampaignCommand::EndNegotiation`]
 /// (`CCQ_DIPLOMACY_BEGIN_NEGOTIATION` / `CCQ_DIPLOMACY_END_NEGOTIATION`) and the deal's
-/// `ProposeRegions` / `ProposeTechnologies` / `ClearNegotiation`, so a negotiation and the
+/// `ProposeRegions` / `ProposeTechnologies` / `ProposePayment` / `ProposeJoinWar` /
+/// `ClearNegotiation`, so a negotiation and the
 /// RNG draw of its greeting go through the command queue like every other command. The counts
 /// stand in for the exe's "started" (hub +0x318) and "ended" (hub +0x378) events: a listener that
 /// has seen fewer begins or ends than these has events due. Not saved, not hashed.
@@ -451,7 +457,7 @@ impl CampaignModel {
     }
 
     /// `0x008CE390`: neither is the rebel faction, and the same faction or an allied-like stance.
-    fn allied_with(&self, a: FactionId, b: FactionId) -> bool {
+    pub(crate) fn allied_with(&self, a: FactionId, b: FactionId) -> bool {
         !self.is_rebel_faction(a) && !self.is_rebel_faction(b) && (a == b || allied_like(self.world.stance(a, b)))
     }
 
@@ -495,8 +501,12 @@ impl CampaignModel {
         blocks(p, r) || blocks(r, p)
     }
 
-    /// `0x00B4D9A0`: the faction has a relationship with the protectorate stance (index 4).
-    fn has_protectorate(&self, f: FactionId) -> bool {
+    /// `0x00B4D9A0`: the faction has a relationship with the protectorate stance (index 4), so it has a
+    /// patron. The same answer as `FactionHasPatron` `0x008CEEA0` (faction +0x754 set): `SetFactionPatron`
+    /// `0x008AF590` sets +0x754 to the patron right after `0x00B104E0` gives the record stance 4
+    /// (`0x00B1058B`) and to 0 right after `0x00B64B10` takes it away (`0x00B64C2D`); the faction's
+    /// destruction clears both (`0x008AB825`); the loader `0x0087A190` reads it back. CONFIRMED.
+    pub fn has_patron(&self, f: FactionId) -> bool {
         self.third_factions(f).any(|x| self.world.stance(f, x) == Stance::Protectorate)
     }
 
@@ -661,11 +671,12 @@ impl CampaignModel {
         // one region (faction +0x76C list count == 1; CONFIRMED the region list: `0x008AE270` adds a
         // region to it and makes it the capital +0x72C when there is none) and is not human.
         let regions_of_r = self.world.regions.values().filter(|x| x.owner == r).count();
-        let protector = !self.has_protectorate(p) && !self.has_protectorate(r) && !war && regions_of_r == 1 && !self.is_human(r);
+        let protector = !self.has_patron(p) && !self.has_patron(r) && !war && regions_of_r == 1 && !self.is_human(r);
         // Peace (`0x00C1A730`): at war and the peace option allowed (0 or 1).
         let peace = war && self.diplomacy_option(p, r, A::Peace.option()) <= 1;
-        // War (`0x00C1A890`): not at war. PROVISIONAL: the proposer's forced war target (+0x754) is
-        // not modelled (no faction has one).
+        // War (`0x00C1A890`): not at war. PROVISIONAL: its patron test is not modelled (BACKLOG): a
+        // proposer with a patron (+0x754, `Self::has_patron`) may declare only on the patron
+        // itself or on a faction the patron is at war with.
         let declare = !war;
         let join = allied && (self.joinable_war(r, p) || self.joinable_war(p, r));
         let break_trade = !war && (self.trades_with_third(r, p) || self.trades_with_third(p, r));
@@ -697,11 +708,12 @@ impl CampaignModel {
     /// `0x009C5770`): every region of the faction's region list (faction `+0x778`) except its
     /// capital (`0x00A8B5A0`: faction `+0x72C`) and a settlement under siege (settlement virtual
     /// `+0x98`, the slot the script function `IsUnderSiege` `0x008A1FF0` reads). CONFIRMED rule.
-    /// PROVISIONAL: sieges are not in the model, so no region is left out for one; the order is
-    /// the model's region order, not the faction list's (acquisition) order.
+    /// In the list's order ([`super::world::World::faction_regions_in_list_order`];
+    /// CONFIRMED, CAMPAIGN_FIDELITY.md "Faction region list order"). PROVISIONAL: sieges are not in
+    /// the model, so no region is left out for one. Allocates: cold paths only.
     pub fn tradeable_regions(&self, faction: FactionId) -> impl Iterator<Item = super::ids::RegionId> + '_ {
         let capital = self.world.capital(faction);
-        self.world.regions.values().filter(move |r| r.owner == faction && Some(r.id) != capital).map(|r| r.id)
+        self.world.faction_regions_in_list_order(faction).into_iter().filter(move |id| Some(*id) != capital)
     }
 
     /// The technologies `side` can hand `other` in a deal (`0x008F4F10`, from `0x00C5C170`, the
@@ -819,6 +831,7 @@ impl CampaignModel {
             regions: DealItems::default(),
             technologies: DealItems::default(),
             payment: DealPayment::default(),
+            join_war: DealItems::default(),
             applied: false,
             threat: false,
         });
@@ -889,13 +902,40 @@ impl CampaignModel {
         Ok(())
     }
 
+    /// `CCQ_DIPLOMACY_PROPOSE_JOIN_WAR` (posted by the join-war record's `0x00C4A960`, executor
+    /// `ExecuteProposeJoinWarCommand` `0x009336C0`, CONFIRMED by disassembly): as
+    /// [`Self::propose_regions`] with factions: `clear` empties the record (`0x00C11B80(11)` →
+    /// `0x00C5C730`); otherwise, when either list has a faction, the record's two lists are replaced
+    /// by these (the demand setter `0x00C1F690`, the offer setter `0x00C43D30`, then `0x00C49AA0` →
+    /// the record's setter `0x00C4A670`); two empty lists leave it as it is. A faction that does not
+    /// exist aborts the command (the executor drops it when an id does not resolve, `0x0090E2F0`).
+    /// The executor checks nothing else (neither side's stance to the factions, nor that a faction
+    /// is not the side that would declare war): an item naming its own joiner is refused on accept
+    /// ([`Self::accept_deal`]).
+    pub(crate) fn propose_join_war(&mut self, clear: bool, demanded: Vec<FactionId>, offered: Vec<FactionId>) -> Result<(), super::CommandError> {
+        if let Some(f) = demanded.iter().chain(&offered).find(|f| !self.world.factions.contains_key(f)) {
+            return Err(super::CommandError::UnknownFaction(*f));
+        }
+        let n = self.negotiations.current.as_mut().ok_or(super::CommandError::NoNegotiation)?;
+        if clear {
+            n.join_war.clear();
+            n.applied = false;
+        } else if !demanded.is_empty() || !offered.is_empty() {
+            n.join_war = DealItems { demanded, offered };
+            n.applied = false;
+        }
+        Ok(())
+    }
+
     /// `CCQ_DIPLOMACY_CLEAR_NEGOTIATION` (executor `0x00932EC0`): the deal is emptied. The model
-    /// holds the regions, technology and payment records; the other items are still held by the UI.
+    /// holds the regions, technology, payment and join-war records; the other items are still held
+    /// by the UI.
     pub(crate) fn clear_negotiation(&mut self) -> Result<(), super::CommandError> {
         let n = self.negotiations.current.as_mut().ok_or(super::CommandError::NoNegotiation)?;
         n.regions.clear();
         n.technologies.clear();
         n.payment = DealPayment::default();
+        n.join_war.clear();
         n.applied = false;
         Ok(())
     }
@@ -928,7 +968,7 @@ impl CampaignModel {
 
     /// `CCQ_DIPLOMACY_ACCEPT_DEAL` (`AcceptCampaignNegotiationDeal` `0x00C114B0`) for the records
     /// the model holds, each through its virtual +0x3C, in the records' order (regions,
-    /// technologies, then the payment). The deal stays (it goes with the negotiation's end), as in the exe; it is
+    /// technologies, the payment, then join war). The deal stays (it goes with the negotiation's end), as in the exe; it is
     /// applied once: accepting it again before a Propose or Clear changes it does nothing
     /// ([`Negotiation::applied`]; the exe re-applies every record on each accept, which its UI
     /// never asks for, and which would raise the traded counts again).
@@ -942,6 +982,13 @@ impl CampaignModel {
     ///   negative one's negation by the proposer to the recipient; over 1 turn once
     ///   ([`Self::pay_once`]), else each turn ([`Self::pay_regularly`]); 0 pays nothing. The
     ///   amount was capped when it was proposed ([`Self::propose_payment`]): not capped again here.
+    /// - join war (`ApplyJoinWarRecordOnAccept` `0x00C188F0`): the proposer declares war on each
+    ///   offered faction on the recipient's behalf, then the recipient on each demanded one on the
+    ///   proposer's, in list order ([`Self::join_war_by_deal`]: each war, its notice to the faction
+    ///   war is declared on and its zones' refresh, before the next). No at-war or stance test, as in
+    ///   the exe; an item naming its own joiner fails the deal (checked before any record is applied).
+    ///   PROVISIONAL: the exe has no such test and would declare a faction's war on itself; what that
+    ///   does, and whether anything can propose it, is not traced.
     ///
     /// Then the expulsions (`0x008D9DC0`, [`Self::expel_from_region`]): the proposer's forces leave
     /// each offered region, then the recipient's each demanded one. A deal with a peace record first
@@ -954,7 +1001,8 @@ impl CampaignModel {
     /// Not ported: `0x00C1E240`, which can turn a deal with no demands into a payment before it is
     /// applied (the AI's side, AI_RESEARCH.md §6).
     /// A deal [`Self::ai_refuses_deal`] refuses is not applied (`CommandError::DealRefused`); nor is
-    /// one whose payment names an invalid faction pair (checked before any record is applied).
+    /// one whose payment or join-war item names an invalid faction pair (checked before any record
+    /// is applied).
     pub(crate) fn accept_deal(&mut self) -> Result<Vec<super::CampaignEvent>, super::CommandError> {
         if self.negotiations.current.is_some() && self.ai_refuses_deal() {
             return Err(super::CommandError::DealRefused);
@@ -964,17 +1012,28 @@ impl CampaignModel {
             return Ok(Vec::new());
         }
         let (proposer, recipient, payment, threat) = (n.proposer, n.recipient, n.payment, n.threat);
-        let (regions, techs) = (n.regions.clone(), n.technologies.clone());
-        // The deal applies whole or not at all: the payment's only failure (the faction pair) is
-        // checked before any record is applied, so an error leaves the deal unapplied (the caller
-        // logs it). The payment has no money test (0x00BAF500): it cannot fail on its amount.
+        let (regions, techs, join_war) = (n.regions.clone(), n.technologies.clone(), n.join_war.clone());
+        // The deal applies whole or not at all: the payment's and the join-war wars' only failure
+        // (the faction pair) is checked before any record is applied, so an error leaves the deal
+        // unapplied (the caller logs it). The payment has no money test (0x00BAF500): it cannot
+        // fail on its amount.
         if payment.has_items() {
             self.check_diplomacy_pair(proposer, recipient)?;
+        }
+        // PROVISIONAL: an item naming its own joiner refuses the whole deal here (SameFaction). The
+        // exe has no such test (`0x00C188F0` → `0x00B26700` takes any pair); what its war of a
+        // faction on itself does to the records, and whether its panel or the AI can ever propose
+        // one, is not traced.
+        let join_wars = [(&join_war.offered, proposer, recipient), (&join_war.demanded, recipient, proposer)];
+        for (list, joiner, _) in join_wars {
+            for &f in list {
+                self.check_diplomacy_pair(joiner, f)?;
+            }
         }
         if let Some(n) = self.negotiations.current.as_mut() {
             n.applied = true;
         }
-        let mut ended = Vec::new();
+        let mut events = Vec::new();
         for (list, to) in [(&regions.demanded, proposer), (&regions.offered, recipient)] {
             for &r in list {
                 let old = self.world.regions.get(&r).map(|x| x.owner);
@@ -983,7 +1042,7 @@ impl CampaignModel {
                 {
                     // A deal sets the owner change's first flag (`0x00B58A10(faction, 1, 0)`): losing the
                     // capital with the last region ends the giver (`0x00A64AC0`, CONFIRMED).
-                    self.end_if_capital_lost(old, &mut ended);
+                    self.end_if_capital_lost(old, &mut events);
                 }
                 self.count_deal_region_received(to);
             }
@@ -1003,6 +1062,14 @@ impl CampaignModel {
                 self.pay_regularly(payer, payee, amount, payment.turns);
             }
         }
+        // Record 11, join war (`0x00C188F0`): the proposer declares war on each offered faction on
+        // the recipient's behalf, then the recipient on each demanded one on the proposer's.
+        for (list, joiner, ally) in join_wars {
+            for &f in list {
+                // The pairs were checked above: an item cannot fail here.
+                events.extend(self.join_war_by_deal(joiner, f, ally));
+            }
+        }
         // After every record: the proposer's forces leave each offered region, then the recipient's
         // each demanded one (`0x00C114B0` → `0x008D9DC0`, CONFIRMED).
         for (list, f) in [(&regions.offered, proposer), (&regions.demanded, recipient)] {
@@ -1014,7 +1081,7 @@ impl CampaignModel {
         if threat {
             self.apply_threatened(recipient, proposer);
         }
-        Ok(ended)
+        Ok(events)
     }
 
     /// `CCQ_DIPLOMACY_DECLINE_DEAL` (`DeclineCampaignNegotiationDeal` `0x00C1F210`; also the AI
@@ -1066,23 +1133,25 @@ impl CampaignModel {
     /// `BuildFactionRankingTable` `0x00949630`; CONFIRMED): over the faction's forces (+0x7BC), into
     /// the land or naval total by the force kind, each force's units' per-unit value (`0x008F9C50`:
     /// virtual +0x3C of each unit) summed. With flag 0 that value is given an **empty** effect set
-    /// (the round-end upkeep, flag 1, gives the force's commander / region and faction effects,
-    /// `0x008AFC00`), so every upkeep modifier reads 0 and the land unit's `0x008F9B10` (vtable slot
+    /// (the round-end upkeep, flag 1, gives the force's set, its faction's sum plus its commander's
+    /// own set, `0x008AFC00`), so every upkeep modifier reads 0 and the land unit's `0x008F9B10` (vtable slot
     /// `0x013554D0`) gives round(upkeep × 100 × 0.01) = the unit's raw `upkeep`, whatever its
     /// strength: [`super::economy::unit_upkeep`] with no effects. Ships give their raw upkeep too
-    /// and every force counts: CONFIRMED by the original's values read in the debugger (Coalition
+    /// and every commanded force counts: CONFIRMED by the original's values read in the debugger (Coalition
     /// start `mp_eur_napoleon`, 1805), which this gives exactly for every listed faction, land and
     /// naval (install test `faction_power_is_the_originals_at_the_coalition_start`). Integer sums as
-    /// the exe's. A unit key with no `units` record counts 0 and is added to `unknown_units` (the
-    /// caller logs it).
+    /// the exe's. A force without a commander counts 0, before the flag is read (`0x008F9C62`,
+    /// CONFIRMED disassembly; [`super::economy::costed_force`], as the upkeep). A unit
+    /// key with no `units` record counts 0 and is added to `unknown_units` (the caller logs it).
     pub fn faction_powers(&self, unknown_units: &mut BTreeSet<String>) -> BTreeMap<FactionId, FactionPower> {
-        let none = super::effects::Effects::default();
+        let none = super::effects::ForceEffects::default();
         let mut out: BTreeMap<FactionId, FactionPower> = BTreeMap::new();
         for f in self.world.forces.values() {
             let mut sum = 0i32;
-            for u in &f.units {
+            let units = super::economy::costed_force(f).map_or(&[][..], |(_, units)| units);
+            for u in units {
                 match self.rules.units.get(&u.unit_key) {
-                    Some(r) => sum = sum.wrapping_add(super::economy::unit_upkeep(&none, f.faction, &self.rules.features, &u.unit_key, r)),
+                    Some(r) => sum = sum.wrapping_add(super::economy::unit_upkeep(none, &self.rules.features, &u.unit_key, r)),
                     None => {
                         if !unknown_units.contains(&u.unit_key) {
                             unknown_units.insert(u.unit_key.clone());

@@ -28,6 +28,9 @@ pub const KEY_CUSTOM_BATTLE_FUNDS_NAVAL: &str = "custom_battle_funds_naval";
 /// `_kv_rules` key: reinforcement units an army brings onto the field
 /// ([`GameLimits::max_reinforcement_units`]).
 pub const KEY_MAX_REINFORCEMENT_UNITS: &str = "max_reinforcement_units";
+/// `_kv_rules` key: characters without a force one settlement holds
+/// ([`GameLimits::max_residence_characters`]).
+pub const KEY_MAX_RESIDENCE_CHARACTERS: &str = "max_residence_characters";
 
 /// Land units per army at any unit scale: 20. The exe's land function is folded into a shared
 /// `return 20` (`0x00851550`), called with the scale by the custom battle army setup
@@ -45,6 +48,12 @@ pub const ORIGINAL_FUNDS_NAVAL: [i32; 3] = [5000, 14000, 24000];
 /// Reinforcements: the arrival step `0x00608200` stops bringing units of an entry group once it
 /// holds 20 (`+0xF0 < 0x14`, CONFIRMED, BATTLE_FIDELITY.md §13).
 pub const ORIGINAL_MAX_REINFORCEMENT_UNITS: u32 = 20;
+/// Characters without a force in one settlement: the settlement residence's can-enter check
+/// `0x00B165B0` (vtable `0x0137C9A4` slot +0x6C) lets one more in only while its resident list
+/// +0xC8 holds fewer than 20 (`CMP EAX,0x14` at `0x00B16632`); for an own agent of a counted type
+/// in a garrisoned settlement it counts the garrison army's accompanying characters (+0x60,
+/// `0x008B2620`, also below 20) instead (CONFIRMED, disassembly).
+pub const ORIGINAL_MAX_RESIDENCE_CHARACTERS: u32 = 20;
 
 /// The gameplay caps (see the module docs). Lists read from data always have their entries; a
 /// hand-built empty list reads as scale 1.0, its last naval entry as 20 and funds as 0.
@@ -65,6 +74,8 @@ pub struct GameLimits {
     pub custom_battle_funds_naval: Vec<i32>,
     /// Reinforcement units brought in per army (`max_reinforcement_units`): 20.
     pub max_reinforcement_units: u32,
+    /// Characters without a force one settlement lets in (`max_residence_characters`): 20.
+    pub max_residence_characters: u32,
 }
 
 impl Default for GameLimits {
@@ -76,6 +87,7 @@ impl Default for GameLimits {
             custom_battle_funds_land: ORIGINAL_FUNDS_LAND.to_vec(),
             custom_battle_funds_naval: ORIGINAL_FUNDS_NAVAL.to_vec(),
             max_reinforcement_units: ORIGINAL_MAX_REINFORCEMENT_UNITS,
+            max_residence_characters: ORIGINAL_MAX_RESIDENCE_CHARACTERS,
         }
     }
 }

@@ -17,13 +17,13 @@ fn population_factors_round_to_hundredths_as_the_exe_stores_them() {
     m.rules = Arc::new(rules);
     let r = m.world.regions[&RegionId(10)].clone();
     let set = EffectSet::default();
-    let s = growth_factors(&m, &r, r.population, &r.population_state, &FactorInputs { set: &set, hostile_units: 8 });
+    let s = growth_factors(&m, &r, r.population, &r.population_state, &FactorInputs { hostile_units: 8, ..FactorInputs::of(&m, &r, &set) });
     assert_eq!(s.factors[0].to_bits(), 0.29999998f32.to_bits());
     assert_eq!(s.factors[3].to_bits(), (-0.39999998f32).to_bits());
     assert_eq!(s.capacity, r.population_state.base_capacity);
     assert!(!s.overcrowded);
     // Above 90% of the capacity: food shortages (0.9 − r) × 10 × (base + buildings + ports).
-    let crowded = growth_factors(&m, &r, r.population_state.base_capacity / 100 * 95, &r.population_state, &FactorInputs { set: &set, hostile_units: 0 });
+    let crowded = growth_factors(&m, &r, r.population_state.base_capacity / 100 * 95, &r.population_state, &FactorInputs { hostile_units: 0, ..FactorInputs::of(&m, &r, &set) });
     assert!(crowded.overcrowded);
     assert_eq!(crowded.factors[4], hundredths((0.9 - 0.95f32) * 10.0 * 0.29999998));
 }
@@ -61,6 +61,25 @@ fn religion_normalisation_drops_dust_and_leaves_an_empty_breakdown_alone() {
     let mut zero = vec![("a".to_string(), 0.0f32), ("b".to_string(), 0.0)];
     normalise_religions(&mut zero);
     assert_eq!((zero[0].1, zero[1].1), (1.0, 0.0));
+    // A NaN share fails the minimum and is zeroed like dust.
+    let mut nan = vec![("a".to_string(), f32::NAN), ("b".to_string(), 0.5)];
+    normalise_religions(&mut nan);
+    assert_eq!((nan[0].1, nan[1].1), (0.0, 1.0));
+}
+
+/// One share read without copying the breakdown gives what [`normalise_religions`] writes there.
+#[test]
+fn a_normalised_share_matches_the_normalised_breakdown() {
+    use super::population::{normalise_religions, normalised_share};
+    let cases: [&[f32]; 5] = [&[0.6, 0.3, 0.0004], &[0.0, 0.0], &[0.25, 0.75], &[0.0001, 0.2], &[f32::NAN, 0.5]];
+    for shares in cases {
+        let original: Vec<(String, f32)> = shares.iter().enumerate().map(|(i, s)| (i.to_string(), *s)).collect();
+        let mut normalised = original.clone();
+        normalise_religions(&mut normalised);
+        for (i, (_, s)) in normalised.iter().enumerate() {
+            assert_eq!(normalised_share(&original, i).to_bits(), s.to_bits(), "{shares:?} [{i}]");
+        }
+    }
 }
 
 #[test]
@@ -116,6 +135,15 @@ fn tradeable_regions_leave_out_the_capital() {
     m.world.faction_details.entry(A).or_default().capital = Some(RegionId(10));
     let without: Vec<RegionId> = owned.iter().copied().filter(|r| *r != RegionId(10)).collect();
     assert_eq!(m.tradeable_regions(A).collect::<Vec<_>>(), without);
+    // In the faction's region list order (faction +0x778): the manager's order, a gain last.
+    m.world.faction_details.entry(A).or_default().capital = None;
+    let mut listed = owned.clone();
+    listed.reverse();
+    m.world.region_order = listed.clone();
+    assert_eq!(m.tradeable_regions(A).collect::<Vec<_>>(), listed);
+    m.world.note_region_gain(listed[0]);
+    listed.rotate_left(1);
+    assert_eq!(m.tradeable_regions(A).collect::<Vec<_>>(), listed, "a gain goes last");
 }
 
 /// The deal's region and technology records (UI_FIDELITY.md §4.9): `ProposeRegions` replaces the
@@ -127,7 +155,7 @@ fn deal_records_follow_the_propose_executors() {
     use super::rules::TechRules;
     let mut m = test_model();
     let mut rules = (*m.rules).clone();
-    rules.technologies.insert("admin1_a".into(), TechRules { cost: 25, building_level: "test_building_level".into(), requires: vec![], factions: vec![] });
+    rules.technologies.insert("admin1_a".into(), TechRules { cost: 25, building_level: "test_building_level".into(), requires: vec![], factions: vec![], thread: 2, ..Default::default() });
     m.rules = Arc::new(rules);
     let regions = |m: &CampaignModel| m.negotiations.current.as_ref().unwrap().regions.clone();
     let techs = |m: &CampaignModel| m.negotiations.current.as_ref().unwrap().technologies.clone();
@@ -195,6 +223,7 @@ fn accepted_regions_change_hands_and_put_the_old_garrison_out() {
         port: false,
         holder: None,
         id: 55,
+        blockade: None,
     });
     m.world.faction_details.entry(A).or_default().research.insert("t".into(), TechResearch { progress: 4.0, researcher: 55, traded: 0 });
     m.world.regions.get_mut(&RegionId(11)).unwrap().recruitment_queue.push(RecruitmentItem {
@@ -281,8 +310,8 @@ fn accepted_technologies_are_granted_and_counted() {
     let mut m = test_model();
     m.turn.humans = vec![A, B];
     let mut rules = (*m.rules).clone();
-    rules.technologies.insert("admin1_a".into(), TechRules { cost: 25, building_level: "test_building_level".into(), requires: vec![], factions: vec![] });
-    rules.technologies.insert("mil1".into(), TechRules { cost: 40, building_level: "test_building_level".into(), requires: vec![], factions: vec![] });
+    rules.technologies.insert("admin1_a".into(), TechRules { cost: 25, building_level: "test_building_level".into(), requires: vec![], factions: vec![], thread: 2, ..Default::default() });
+    rules.technologies.insert("mil1".into(), TechRules { cost: 40, building_level: "test_building_level".into(), requires: vec![], factions: vec![], thread: 2, ..Default::default() });
     m.rules = Arc::new(rules);
     m.world.faction_details.entry(A).or_default().technologies = vec![("admin1_a".into(), state::RESEARCHED), ("mil1".into(), state::AVAILABLE)];
     m.world.faction_details.entry(B).or_default().technologies = vec![("admin1_a".into(), state::AVAILABLE), ("mil1".into(), state::RESEARCHED)];
@@ -317,8 +346,8 @@ fn technology_deal_value_reads_the_model() {
     let mut m = test_model();
     m.turn.humans = vec![A];
     let mut rules = (*m.rules).clone();
-    rules.technologies.insert("admin1_a".into(), TechRules { cost: 25, building_level: "test_building_level".into(), requires: vec![], factions: vec![] });
-    rules.technologies.insert("mil1".into(), TechRules { cost: 40, building_level: "test_building_level".into(), requires: vec![], factions: vec![] });
+    rules.technologies.insert("admin1_a".into(), TechRules { cost: 25, building_level: "test_building_level".into(), requires: vec![], factions: vec![], thread: 2, ..Default::default() });
+    rules.technologies.insert("mil1".into(), TechRules { cost: 40, building_level: "test_building_level".into(), requires: vec![], factions: vec![], thread: 2, ..Default::default() });
     m.rules = Arc::new(rules);
     m.world.faction_details.entry(A).or_default().technologies = vec![("admin1_a".into(), state::RESEARCHED), ("mil1".into(), state::AVAILABLE)];
     m.world.faction_details.entry(B).or_default().technologies = vec![("admin1_a".into(), state::AVAILABLE), ("mil1".into(), state::RESEARCHED)];
@@ -386,7 +415,7 @@ fn a_deal_with_a_failing_payment_applies_nothing() {
     let mut m = test_model();
     m.turn.humans = vec![A, B];
     let mut rules = (*m.rules).clone();
-    rules.technologies.insert("mil1".into(), TechRules { cost: 40, building_level: "test_building_level".into(), requires: vec![], factions: vec![] });
+    rules.technologies.insert("mil1".into(), TechRules { cost: 40, building_level: "test_building_level".into(), requires: vec![], factions: vec![], thread: 2, ..Default::default() });
     m.rules = Arc::new(rules);
     m.world.faction_details.entry(A).or_default().technologies = vec![("mil1".into(), state::AVAILABLE)];
     let owner = m.world.regions[&RegionId(11)].owner;
@@ -477,7 +506,7 @@ fn the_ai_evaluates_technology_deals() {
     let mut m = test_model();
     m.turn.humans = vec![A];
     let mut rules = (*m.rules).clone();
-    let tech = |cost| TechRules { cost, building_level: "test_building_level".into(), requires: vec![], factions: vec![] };
+    let tech = |cost| TechRules { cost, building_level: "test_building_level".into(), requires: vec![], factions: vec![], thread: 2, ..Default::default() };
     rules.technologies.insert("admin1_a".into(), tech(1000));
     rules.technologies.insert("military1_b".into(), tech(1000));
     rules.technologies.insert("economy1_c".into(), tech(100));
@@ -571,6 +600,9 @@ fn the_ai_evaluates_region_deals() {
     m.turn.humans = vec![A];
     m.world.region_neighbours =
         [(RegionId(10), vec![RegionId(11)]), (RegionId(11), vec![RegionId(10), RegionId(12)]), (RegionId(12), vec![RegionId(11)])].into();
+    // Regions 10 and 12 hold only B's state religion: B's attitude to them is their class order
+    // (1 and 0, `0x00A79050`), so an offer of either counts.
+    share_religion(&mut m, B, &[RegionId(10), RegionId(12)]);
     m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
     assert_eq!(m.ai_accepts_deal(), None, "an empty deal");
     // A gift bordering the AI: worth 25000 to B (no slots, B holds a region), against the region
@@ -631,8 +663,9 @@ fn the_ai_evaluates_regions_and_technologies_together() {
     let mut m = test_model();
     m.turn.humans = vec![A];
     m.world.region_neighbours = [(RegionId(12), vec![RegionId(11)]), (RegionId(11), vec![RegionId(12)])].into();
+    share_religion(&mut m, B, &[RegionId(12)]);
     let mut rules = (*m.rules).clone();
-    rules.technologies.insert("military1_b".into(), TechRules { cost: 1000, building_level: "test_building_level".into(), requires: vec![], factions: vec![] });
+    rules.technologies.insert("military1_b".into(), TechRules { cost: 1000, building_level: "test_building_level".into(), requires: vec![], factions: vec![], ..Default::default() });
     m.rules = Arc::new(rules);
     m.world.faction_details.entry(A).or_default().technologies = vec![("military1_b".into(), state::AVAILABLE)];
     m.world.faction_details.entry(B).or_default().technologies = vec![("military1_b".into(), state::RESEARCHED)];
@@ -741,4 +774,243 @@ fn diplomacy_trade_tooltip_only_for_an_allowed_new_agreement() {
     assert_eq!(button.map(|a| a.tooltip), Some(Some(ActionTooltip::TradeAgreement(with_counts))));
     m.world.set_stance(A, B, Stance::War).unwrap();
     assert_eq!(m.diplomacy_trade_tooltip(A, B), None, "at war");
+}
+
+/// The join-war record (11): `CCQ_DIPLOMACY_PROPOSE_JOIN_WAR` (`0x009336C0`) replaces its two lists,
+/// leaves it on two empty ones and empties it on `clear`, as the regions record; an unknown faction
+/// aborts; `ClearNegotiation` empties it too.
+#[test]
+fn the_join_war_record_is_proposed_like_the_regions_record() {
+    let mut m = test_model();
+    let jw = |clear, demanded: &[FactionId], offered: &[FactionId]| CampaignCommand::ProposeJoinWar { clear, demanded: demanded.to_vec(), offered: offered.to_vec() };
+    assert_eq!(m.apply(jw(false, &[C], &[])), Err(CommandError::NoNegotiation));
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    let items = |m: &CampaignModel| {
+        let j = &m.negotiations.current.as_ref().unwrap().join_war;
+        (j.demanded.clone(), j.offered.clone())
+    };
+    m.apply(jw(false, &[C], &[])).unwrap();
+    assert_eq!(items(&m), (vec![C], vec![]));
+    m.apply(jw(false, &[], &[])).unwrap();
+    assert_eq!(items(&m), (vec![C], vec![]), "two empty lists leave the record");
+    m.apply(jw(false, &[], &[C])).unwrap();
+    assert_eq!(items(&m), (vec![], vec![C]), "replaced, both lists");
+    assert_eq!(m.apply(jw(false, &[FactionId(77)], &[])), Err(CommandError::UnknownFaction(FactionId(77))));
+    assert_eq!(items(&m), (vec![], vec![C]));
+    m.apply(jw(true, &[C], &[C])).unwrap();
+    assert_eq!(items(&m), (vec![], vec![]));
+    m.apply(jw(false, &[C], &[C])).unwrap();
+    m.apply(CampaignCommand::ClearNegotiation).unwrap();
+    assert_eq!(items(&m), (vec![], vec![]));
+}
+
+/// Accepting a join-war item (`0x00C188F0`): the proposer declares war on each offered faction on the
+/// recipient's behalf, then the recipient on each demanded one on the proposer's, each through
+/// `0x00B26700` with its refresh: the war (`war_dragged_by_ally` both ways, the ally as #5, both war
+/// flags), then `campmap_faction_joins_your_enemies` (0x14D, `0x009DAE40`) to the faction war is
+/// declared on, before the next war. No allies called, no access saved for the war, no
+/// third-party factors (B, hostile to C, gets no `war_against_enemies` towards A).
+#[test]
+fn a_join_war_deal_declares_each_war_on_the_partners_behalf() {
+    use super::treaties::{event, slot};
+    let mut m = test_model();
+    m.turn.humans = vec![A, B];
+    m.relationship_mut(B, C).factor_mut("war").value = -200;
+    assert_eq!(m.attitude_category(B, C), 0, "B hostile to C");
+    for f in [A, B, C] {
+        m.world.faction_details.entry(f).or_default();
+    }
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    m.apply(CampaignCommand::ProposeJoinWar { clear: false, demanded: vec![C], offered: vec![C] }).unwrap();
+    let ev = m.apply(CampaignCommand::AcceptDeal).unwrap();
+    let seen: Vec<String> = ev
+        .iter()
+        .filter_map(|e| match e {
+            CampaignEvent::StanceChanged { a, b, stance: Stance::War } => Some(format!("war {a:?} {b:?}")),
+            CampaignEvent::Message { recipient, message: CampaignMessage::FactionJoinsYourEnemies { joiner } } => Some(format!("notice {recipient:?} {joiner:?}")),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(seen, [format!("war {A:?} {C:?}"), format!("notice {C:?} {A:?}"), format!("war {B:?} {C:?}"), format!("notice {C:?} {B:?}")]);
+    let dragged = event("war_dragged_by_ally");
+    for (x, y) in [(A, C), (C, A), (B, C), (C, B)] {
+        assert_eq!(m.world.relationships[&(x, y)].attitudes[slot("war")].value, dragged.value, "{x:?}->{y:?}");
+    }
+    assert_eq!((m.world.relationships[&(A, C)].war_ally, m.world.relationships[&(B, C)].war_ally), (Some(B), Some(A)));
+    assert!(m.world.relationships.get(&(B, A)).is_none_or(|r| r.attitudes[slot("declared_war_against_enemies")].value == 0));
+    for (x, y) in [(A, B), (B, A)] {
+        assert!(m.world.relationships.get(&(x, y)).is_none_or(|r| r.allied_in_war_against.is_empty()));
+    }
+    for f in [A, B, C] {
+        assert!(m.world.faction_details[&f].war_started, "{f:?}");
+    }
+    assert_eq!(CampaignMessage::FactionJoinsYourEnemies { joiner: A }.type_name(), "campmap_faction_joins_your_enemies");
+    // Applied once.
+    assert_eq!(m.apply(CampaignCommand::AcceptDeal), Ok(Vec::new()));
+}
+
+/// `0x00B26700` has no at-war test: a join-war item against a faction already at war with the joiner
+/// applies the war's records again (the factor becomes `war_dragged_by_ally`, the ally #5) and posts
+/// the notice, with no new stance change. An item naming its own joiner fails the whole deal before
+/// anything is applied.
+#[test]
+fn a_join_war_item_against_an_existing_enemy_applies_again() {
+    use super::treaties::{event, slot};
+    let mut m = test_model();
+    m.turn.humans = vec![A, B];
+    m.apply(CampaignCommand::DeclareWar { a: A, b: C }).unwrap();
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    m.apply(CampaignCommand::ProposeJoinWar { clear: false, demanded: vec![], offered: vec![C] }).unwrap();
+    let ev = m.apply(CampaignCommand::AcceptDeal).unwrap();
+    assert!(!ev.iter().any(|e| matches!(e, CampaignEvent::StanceChanged { .. })));
+    assert!(ev.contains(&CampaignEvent::Message { recipient: C, message: CampaignMessage::FactionJoinsYourEnemies { joiner: A } }));
+    assert_eq!(m.world.relationships[&(A, C)].attitudes[slot("war")].value, event("war_dragged_by_ally").value);
+    assert_eq!(m.world.relationships[&(A, C)].war_ally, Some(B));
+    // B demanded to declare war on itself, after A's item on C: nothing applied.
+    m.apply(CampaignCommand::ProposePayment { clear: false, amount: 100, turns: 1 }).unwrap();
+    m.apply(CampaignCommand::ProposeJoinWar { clear: false, demanded: vec![B], offered: vec![C] }).unwrap();
+    let treasury = m.world.factions[&B].treasury;
+    assert_eq!(m.apply(CampaignCommand::AcceptDeal), Err(CommandError::SameFaction(B)));
+    assert_eq!(m.world.factions[&B].treasury, treasury);
+    assert!(!m.negotiations.current.as_ref().unwrap().applied);
+}
+
+/// An AI recipient declines any deal with a join-war item (PROVISIONAL: the record's goal and value,
+/// `0x00A62400` / `0x00C12D40`, are not ported).
+#[test]
+fn an_ai_declines_a_join_war_deal() {
+    let mut m = test_model();
+    m.turn.humans = vec![A];
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    assert_eq!(m.ai_accepts_deal(), None);
+    m.apply(CampaignCommand::ProposeJoinWar { clear: false, demanded: vec![], offered: vec![C] }).unwrap();
+    assert_eq!(m.ai_accepts_deal(), Some(false));
+    assert_eq!(m.apply(CampaignCommand::AcceptDeal), Err(CommandError::DealRefused));
+    assert_ne!(m.world.stance(A, C), Stance::War);
+}
+
+/// A deal applies whole or not at all: with a region, a payment and join-war items, one item naming
+/// its own joiner (`SameFaction`, checked before any record) leaves every record unapplied (no
+/// region moves, nothing is paid, no war); once the item is valid, every record applies, the
+/// join-war wars after the region and the payment, none of them failing part-way.
+#[test]
+fn a_deal_with_an_invalid_join_war_item_applies_none_of_its_records() {
+    let mut m = test_model();
+    m.turn.humans = vec![A, B];
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    m.apply(CampaignCommand::ProposeRegions { clear: false, demanded: vec![RegionId(11)], offered: vec![] }).unwrap();
+    m.apply(CampaignCommand::ProposePayment { clear: false, amount: -100, turns: 1 }).unwrap();
+    m.apply(CampaignCommand::ProposeJoinWar { clear: false, demanded: vec![B], offered: vec![C] }).unwrap();
+    let treasuries = |m: &CampaignModel| (m.world.factions[&A].treasury, m.world.factions[&B].treasury);
+    let before = treasuries(&m);
+    assert_eq!(m.apply(CampaignCommand::AcceptDeal), Err(CommandError::SameFaction(B)));
+    assert_eq!(m.world.regions[&RegionId(11)].owner, B);
+    assert_eq!(treasuries(&m), before);
+    assert_ne!(m.world.stance(A, C), Stance::War, "the valid item before the bad one is not applied either");
+    assert!(!m.negotiations.current.as_ref().unwrap().applied);
+    m.apply(CampaignCommand::ProposeJoinWar { clear: false, demanded: vec![C], offered: vec![C] }).unwrap();
+    m.apply(CampaignCommand::AcceptDeal).unwrap();
+    assert_eq!(m.world.regions[&RegionId(11)].owner, A);
+    assert_ne!(treasuries(&m), before);
+    assert_eq!((m.world.stance(A, C), m.world.stance(B, C)), (Stance::War, Stance::War));
+    assert!(m.negotiations.current.as_ref().unwrap().applied);
+}
+
+/// Gives `faction` the state religion `rel_b` and `regions` that religion as their whole breakdown,
+/// so `faction`'s hypothetical-order attitude to them (`0x00A79050`) is their class order.
+fn share_religion(m: &mut CampaignModel, faction: FactionId, regions: &[RegionId]) {
+    m.world.faction_details.entry(faction).or_default().religion = "rel_b".into();
+    for r in regions {
+        m.world.regions.get_mut(r).unwrap().religions = vec![("rel_b".into(), 1.0)];
+    }
+}
+
+/// A population class's order under another faction (`0x008BDB90`): the total, its negative
+/// resistance (slot 10) again, without its negative tax and its garrison, the gentlemen taken for the new side.
+#[test]
+fn a_class_order_under_another_faction() {
+    use super::economy::{hypothetical_class_order, ClassPublicOrder};
+    let mut c = ClassPublicOrder { class: "lower".into(), happiness: [0; 13], repression: [0; 6] };
+    // Government 5, tax −3, resistance −2, the owner's gentlemen 1; government buildings 2, garrison 4.
+    (c.happiness[0], c.happiness[1], c.happiness[10], c.happiness[11]) = (5, -3, -2, 1);
+    (c.repression[1], c.repression[4]) = (2, 4);
+    assert_eq!(c.total(), 7);
+    // 5 + 2 − 2 × 2, the owner's gentleman gone: 3.
+    assert_eq!(hypothetical_class_order(&c, 1, 0), 3);
+    // Two gentlemen on the new side's terms: 5.
+    assert_eq!(hypothetical_class_order(&c, 1, 2), 5);
+    // Positive tax and resistance stay as they are.
+    let mut p = ClassPublicOrder { class: "lower".into(), happiness: [0; 13], repression: [0; 6] };
+    (p.happiness[1], p.happiness[10]) = (2, 3);
+    assert_eq!(hypothetical_class_order(&p, 0, 0), 5);
+}
+
+/// The AI's attitude to holding an offered region (`0x00A79050`): the lower class order less
+/// `floor((1 − share) × 6)` of its state religion's (normalised) share, or 6 without one; the deal
+/// valuation (`0x00A364B0`) counts the region at 0 or more, or at −5 or more when it borders the AI.
+#[test]
+fn the_ai_counts_an_offered_region_by_its_attitude() {
+    use super::economy::hypothetical_order_attitude;
+    let mut m = test_model();
+    m.turn.humans = vec![A];
+    m.world.region_neighbours = [(RegionId(12), vec![RegionId(11)]), (RegionId(11), vec![RegionId(12)])].into();
+    let attitude = |m: &CampaignModel, r: u32| hypothetical_order_attitude(m, &m.world.regions[&RegionId(r)], B);
+    // B has no state religion: −6.
+    assert_eq!(attitude(&m, 12), -6);
+    share_religion(&mut m, B, &[RegionId(10), RegionId(12)]);
+    // Region 10's classes have culture +1, region 12's nothing.
+    assert_eq!((attitude(&m, 10), attitude(&m, 12)), (1, 0));
+    let set = |m: &mut CampaignModel, shares: &[(&str, f32)]| {
+        m.world.regions.get_mut(&RegionId(12)).unwrap().religions = shares.iter().map(|&(k, s)| (k.to_string(), s)).collect();
+    };
+    set(&mut m, &[("rel_a", 0.3), ("rel_b", 0.7)]);
+    assert_eq!(attitude(&m, 12), -1, "floor(0.3 × 6)");
+    set(&mut m, &[("rel_a", 0.25), ("rel_b", 0.25)]);
+    assert_eq!(attitude(&m, 12), -3, "normalised to a half");
+    set(&mut m, &[("rel_a", 1.0), ("rel_b", 0.0004)]);
+    assert_eq!(attitude(&m, 12), -6, "a share under 0.0005 is dropped");
+    set(&mut m, &[("rel_a", 1.0)]);
+    assert_eq!(attitude(&m, 12), -6, "not held");
+    // At −3 the offer counts only while region 12 borders B's region 11.
+    set(&mut m, &[("rel_a", 0.5), ("rel_b", 0.5)]);
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    m.apply(CampaignCommand::ProposeRegions { clear: false, demanded: vec![], offered: vec![RegionId(12)] }).unwrap();
+    let n = m.negotiations.current.clone().unwrap();
+    assert_eq!(m.region_deal_value(&n, 1.0).gain, 25000);
+    let neighbours = std::mem::take(&mut m.world.region_neighbours);
+    assert_eq!(m.region_deal_value(&n, 1.0).gain, 0);
+    m.world.region_neighbours = neighbours;
+    // At −6 it never counts.
+    set(&mut m, &[("rel_a", 1.0)]);
+    assert_eq!(m.region_deal_value(&n, 1.0).gain, 0);
+    assert_eq!(m.ai_accepts_deal(), Some(false));
+}
+
+/// `0x008BDB90` subtracts the owner's gentlemen with its own `0x008C55D0(region, owner)` call
+/// (`0x008BDBB4`), not the class's gentlemen slot: a region whose first class its government does
+/// not govern (the fallback, e.g. a monarchy's region a republic took) still loses them.
+#[test]
+fn the_fallback_class_still_loses_the_owners_gentlemen() {
+    use super::economy::{gentlemen_factor, gentlemen_factor_for, hypothetical_order_attitude};
+    let mut m = test_model();
+    let mut rules = (*m.rules).clone();
+    rules.variables.insert("gentleman_happiness_positive_limit".into(), 6.0);
+    rules.variables.insert("gentleman_happiness_negative_limit".into(), -8.0);
+    m.rules = Arc::new(rules);
+    let r = RegionId(10);
+    let owner = m.world.regions[&r].owner;
+    assert!(owner != B && !m.allied_with(owner, B));
+    share_religion(&mut m, B, &[r]);
+    m.world.regions.get_mut(&r).unwrap().class_bases = vec![PopulationClassState::new("clergy")];
+    // The ungoverned class has every slot 0.
+    assert_eq!(hypothetical_order_attitude(&m, &m.world.regions[&r], B), 0);
+    // The owner's gentleman resident in the settlement, rank 2: +2 for the owner, −2 for B.
+    let mut g = character(106, owner, CharacterKind::Gentleman, 10);
+    g.garrisoned_in = Some(r);
+    m.world.characters.insert(g.id, g);
+    m.world.character_details.entry(CharacterId(106)).or_default().attributes = vec![("research".into(), 2)];
+    let reg = &m.world.regions[&r];
+    assert_eq!((gentlemen_factor(&m, reg), gentlemen_factor_for(&m, reg, B)), (2.0, -2.0));
+    // 0 − 2 (owner's) + (−2) (B's).
+    assert_eq!(hypothetical_order_attitude(&m, reg, B), -4);
 }

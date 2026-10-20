@@ -155,7 +155,7 @@ fn main() {
             ages.entry(ch.kind.esf_name().to_string()).or_default().push(age);
             for t in &d.traits {
                 trait_total += 1;
-                if rules.trait_level_key(&t.key, t.points).is_none() {
+                if rules.held_level_key(&t.key, t.level).is_none() {
                     below_first += 1;
                 }
             }
@@ -163,7 +163,7 @@ fn main() {
                 let traits: Vec<String> = d
                     .traits
                     .iter()
-                    .map(|t| format!("{}:{}({})", t.key, t.points, rules.trait_level_key(&t.key, t.points).unwrap_or("-")))
+                    .map(|t| format!("{}:{}({})", t.key, t.points, rules.held_level_key(&t.key, t.level).unwrap_or("-")))
                     .collect();
                 println!(
                     "  {} {} | {:<10} age {:>3} post {} traits [{}] anc {:?}",

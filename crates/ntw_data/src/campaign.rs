@@ -72,10 +72,14 @@ db_record! {
     pub struct BuildingChain in "building_chains", key = key {
         /// #0 H: chain key, e.g. `sAdmin`.
         key: String,
-        /// #1: an optional key (`enlightenment`, `military`, `industry` on three chains; UNKNOWN use).
-        unknown_1: Option<String>,
-        /// #2: an optional number (`0` sAdmin, `1` sArmy, `2` tFactory), parsed into chain record +0x18
-        /// (`0x004F3720`: empty = 0; CONFIRMED). The sabotage chance reads it.
+        /// #1: an optional group (`enlightenment`, `military`, `industry` on five chains). The chain record
+        /// builder `0x00E55C30` turns it into the technology thread at record +0xC (`0x00F21E60`, exact
+        /// case: `military` 0, `industry` 1, `enlightenment` 2, anything else 3) and sets record +0x10 to
+        /// 0 for those three groups, −1 otherwise (CONFIRMED).
+        group: Option<String>,
+        /// #2: an optional number (`0` sAdmin, `1` sArmy, `2` tFactory), parsed into chain record +0x14
+        /// (`0x004F3720`: empty = 0; builder `0x00E55C30`, CONFIRMED; record +0x18 is the #3 category enum).
+        /// The sabotage chance reads it.
         class_number: Option<String>,
         /// #3: the chain's category (`military`, `money`, `government`, ...).
         category: Option<String>,
@@ -197,6 +201,20 @@ db_record! {
 }
 
 db_record! {
+    /// `technology_required_building_levels_junctions` (`ss`, 0 rows in the shipped DB): a technology and a
+    /// building level the faction must also own before it can be researched (row reader `0x00DD2620`: two
+    /// strings at +0 and +0xC, CONFIRMED). The linker `0x00F21A30` appends each row's level to the
+    /// technology record's list +0x7C / +0x80; the availability writer `0x008F91F0` checks it
+    /// (`CampaignModel::update_tech_availability`).
+    pub struct TechnologyBuildingLevelRecord in "technology_required_building_levels_junctions", key = technology + building {
+        /// #0 H: the technology.
+        technology: String,
+        /// #1 H: the building level it requires.
+        building: String,
+    }
+}
+
+db_record! {
     /// `technology_faction_junctions` (`ss`, 3212 rows): a faction that may research a technology.
     pub struct TechnologyFactionRecord in "technology_faction_junctions", key = technology {
         /// #0 H: the technology.
@@ -218,7 +236,9 @@ db_record! {
         flag_1: bool,
         /// #2: UNKNOWN flag (true for absolute monarchy and empire).
         flag_2: bool,
-        /// #3: UNKNOWN (3, 2, 1, 0).
+        /// #3: the government's rank (3, 2, 1, 0; record +0x14, CONFIRMED copied there by `0x00F76A70`), compared
+        /// between the declarer's and the target's governments when a war declaration moves the declarer's
+        /// classes' war factor (`0x008A94D0`).
         value: i32,
         /// #4 H: the upper class (`upper`, or `middle` for a republic and an empire).
         upper_class: String,
@@ -252,8 +272,12 @@ db_record! {
         unknown_1c: i32,
         /// #3 @0x20: UNKNOWN (0..20).
         unknown_20: i32,
-        /// #4 @0x24: UNKNOWN flag (false only for minister and bandit).
-        unknown_24: bool,
+        /// #4 @0x24: whether a character of the type counts against a settlement's room for
+        /// characters without a force (agent record +0x18, copied at `0x00F92F82`, read by
+        /// `0x00A0B9C0` in the settlement can-enter check `0x00B165B0`: an own agent of a type with
+        /// it false always gets in; CONFIRMED, disassembly). Vanilla: false only for minister and
+        /// bandit.
+        residence_limited: bool,
         /// #5 @0x28 M: model kind, `human` / `ship`.
         model_kind: String,
         /// #6 @0x34 L: the portrait folder (`General` for admiral, `minister` for the missionaries
@@ -593,7 +617,8 @@ db_record! {
 
 db_record! {
     /// `building_chains` (`sooo`, 48 rows): a building chain. Row reader `0x00E550D0`: #2 is also
-    /// parsed as an integer into record +0x18 (CONFIRMED from the reader; empty → 0). The capture
+    /// parsed as an integer into the row's +0x18 (CONFIRMED from the reader; empty → 0), which the chain
+    /// record builder `0x00E55C30` copies to chain record +0x14 (record +0x18 holds the #3 category enum). The capture
     /// preview `0x00B14930` damages on occupation only the buildings whose chain has 0 there
     /// (`sArmy` 1 and `tFactory` 2 are spared; CONFIRMED use).
     pub struct BuildingChainRecord in "building_chains", key = key {
@@ -927,6 +952,8 @@ pub struct CampaignTables {
     pub trade_nodes: Table<TradeNodeRecord>,
     /// `technology_required_technology_junctions`.
     pub tech_requirements: Table<TechnologyRequirementRecord>,
+    /// `technology_required_building_levels_junctions`.
+    pub tech_building_levels: Table<TechnologyBuildingLevelRecord>,
     /// `technology_faction_junctions`.
     pub tech_factions: Table<TechnologyFactionRecord>,
     /// `unit_required_technology_junctions`.

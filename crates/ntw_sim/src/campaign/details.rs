@@ -45,7 +45,8 @@ pub struct CharacterDetails {
     /// #11 `AgentAncillaries[]` {utf16 ancillary key} (CONFIRMED in the saves).
     pub ancillaries: Vec<String>,
     /// #12 `AgentAttributes[]` {utf16 attribute key, i32 level} (`command_land`, `subterfuge`, ...;
-    /// -1 = the agent type does not have it, INFERRED).
+    /// -1 = the agent type does not have it: every character maker starts all 14 at −1, `0x00984AD0`,
+    /// then copies its type's `agent_to_agent_attributes` rows, CONFIRMED).
     pub attributes: Vec<(String, i32)>,
     /// #13 `AgentAbilities[]` {utf16 key, i32, utf16} (`can_assassinate`, ...).
     pub abilities: Vec<(String, i32, String)>,
@@ -131,6 +132,14 @@ pub struct CharacterTrait {
     pub key: String,
     /// i32 points (INFERRED).
     pub points: i32,
+    /// The level it is held at (its level record, held trait +4; 0 = none), kept by
+    /// [`CharacterRules::update_trait_level`](super::characters::CharacterRules::update_trait_level)
+    /// (`0x008B5380`, CONFIRMED). Not always the level its points give: below the first threshold the
+    /// level it had is kept. The original's save holds only key and points, and its load sets this from
+    /// the points ([`super::characters::load_trait_levels`]); our own save keeps it (one from before the
+    /// field reads 0, which that load step fills the same way).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub level: i32,
 }
 
 /// One `GOVERNMENT/POSTS_ARRAY/CHARACTER_POST` v1 (CONFIRMED structure).
@@ -257,11 +266,22 @@ pub struct FactionDetails {
     pub exposed: Vec<CharacterId>,
     /// The `FACTION` bool faction +0x824: the faction is out of the game (CONFIRMED: the loader
     /// reads it at `0x0087B4CC`..`0x0087B4D5`, right before the u32 +0x828; the destruction
-    /// `0x008AB6C0` sets it, [`CampaignModel::destroy_faction`](super::CampaignModel::destroy_faction)).
+    /// `0x008AB6C0` sets it, [`CampaignModel::destroy_faction_by`](super::CampaignModel::destroy_faction_by)).
     /// Set at the start for the factions that only emerge later. `None` when not loaded (an own
     /// save from before the flag was kept).
     #[cfg_attr(feature = "serde", serde(default))]
     pub out_of_game: Option<bool>,
+    /// `FACTION` #62 bool, faction +0x924: the faction destroyed another since its last turn end, the flag
+    /// the script condition `FactionDestroyedByCharacterFaction` reads (`0x0089F4B0`: the context
+    /// character's faction). CONFIRMED: the only setter is the destruction of an AI faction by a killer
+    /// (`DestroyFactionAndResetRelations` `0x008AB6C0` at `0x008ABC50`, the killer's flag, before its regions
+    /// pass; [`CampaignModel::destroy_faction_by`](super::CampaignModel::destroy_faction_by)); the faction's
+    /// own turn end clears it with [`Self::war_started`] (the word write at `0x008BD408`), the constructor
+    /// (`0x0098C2F0` at `0x0098CFD5`) starts it clear. Loaded and saved as the bool before
+    /// [`Self::war_started`] (the loader `0x0087A190` reads +0x924 / +0x925 / +0x926 in that order; the
+    /// writer `0x00892A80` saves +0x924 at `0x00893888`).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub destroyed_faction: bool,
     /// `FACTION` #63 bool, faction +0x925: the faction was a side of a war begun since its last turn end,
     /// the flag the script condition `WarStartedCharacterFaction` reads (`0x008A66C0`: the context
     /// character's faction). CONFIRMED: `DeclareWarOnFactionRecords` `0x00B26700` sets it on both

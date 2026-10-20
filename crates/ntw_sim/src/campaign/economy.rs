@@ -24,10 +24,11 @@
 //! ([`super::effects`]); GDP and town wealth growth are recomputed at each round end
 //! ([`recompute_region`]); public order follows the exe's slots ([`public_order_factors`]).
 
-use super::ids::{FactionId, ForceId, RegionId};
+use super::events::CampaignEvent;
+use super::ids::{CharacterId, FactionId, ForceId, RegionId};
 use super::effects::{BonusKind, Effects};
 use super::rules::{CampaignRules, TaxClass};
-use super::world::{CampaignModel, EconomyRecord, Region, SlotRef};
+use super::world::{CampaignModel, CampaignUnit, EconomyRecord, MilitaryForce, PopulationClassState, Region, SlotRef};
 
 /// One faction's income for one turn, split into its parts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -184,19 +185,21 @@ pub fn building_effect(rules: &CampaignRules, level: &str, effect: &str) -> f32 
 }
 
 /// One unit's upkeep: the unit's upkeep methods, land `0x008F9B10` and naval `0x008F9D00` (CONFIRMED
-/// listings). In f32: `mod = 100 + faction mod + category mod + class mod + unit-key mod`, the faction
+/// listings). In f32: `mod = 100 + force mod + category mod + class mod + unit-key mod`, the force
 /// mod `upkeep_cost_mod_land_all` / `upkeep_cost_mod_naval_all` read as a float, the others integer
 /// reads (the exe's int read, half to even): the qualified `upkeep_mod` of the unit's category and
 /// class, and the campaign's unit-key upkeep effect (`0x008F9B5F` / `0x008F9D4F`, in `spa_napoleon`
 /// `guerrilla_upkeep_mod` (0x90) for a key ending in `_Guerrilla`, else `auxiliary_upkeep_mod` (0x94)
 /// for `_Auxiliary`; [`super::features::CampaignFeatures::unit_key_effects`]). The result is
 /// `FISTP(upkeep × mod × 0.01)`; a ship with a negative `mod` costs 0, a land unit has no such clamp.
-pub fn unit_upkeep(fx: &Effects, faction: FactionId, features: &super::features::CampaignFeatures, unit_key: &str, unit: &super::rules::UnitRules) -> i32 {
+/// Every effect is read from `set`, the per-force set: the force's faction sum plus its commander's
+/// own set for the upkeep ([`Effects::force_set`]), the empty default for the ranking power.
+pub fn unit_upkeep(set: super::effects::ForceEffects<'_>, features: &super::features::CampaignFeatures, unit_key: &str, unit: &super::rules::UnitRules) -> i32 {
     let int = |v: f32| f64::from(v).round_ties_even() as f32;
-    let fmod = fx.faction(faction, if unit.is_naval { "upkeep_cost_mod_naval_all" } else { "upkeep_cost_mod_land_all" });
-    let cat = int(fx.faction_qualified(faction, BonusKind::UnitCategory, "upkeep_mod", &unit.category));
-    let class = int(fx.faction_qualified(faction, BonusKind::UnitClass, "upkeep_mod", &unit.unit_class));
-    let key = features.effects_of_unit(unit_key).map_or(0.0, |e| int(fx.faction(faction, &e.upkeep)));
+    let fmod = set.get(if unit.is_naval { "upkeep_cost_mod_naval_all" } else { "upkeep_cost_mod_land_all" });
+    let cat = int(set.get_qualified(BonusKind::UnitCategory, "upkeep_mod", &unit.category));
+    let class = int(set.get_qualified(BonusKind::UnitClass, "upkeep_mod", &unit.unit_class));
+    let key = features.effects_of_unit(unit_key).map_or(0.0, |e| int(set.get(&e.upkeep)));
     let mult = 100.0 + fmod + cat + class + key;
     if unit.is_naval && mult < 0.0 {
         return 0;
@@ -231,9 +234,10 @@ pub fn recruitment_cost_in(rules: &CampaignRules, set: &super::effects::EffectSe
     super::commands::fistp((sum.max(-100) as f32 + 100.0) * unit.campaign_cost as f32 * 0.01)
 }
 
-/// Upkeep per turn of every unit in the faction's forces (0x008B2150 over the faction's forces,
-/// CONFIRMED structure): [`unit_upkeep`] of each unit, whatever its strength. Computes the effects;
-/// use [`faction_upkeep_with`] to reuse them.
+/// Upkeep per turn of every commanded force's units (0x008B2150 over the faction's forces,
+/// CONFIRMED structure; a force without a commander costs 0, `0x008F9C62`, [`costed_force`]):
+/// [`unit_upkeep`] of each unit, whatever its strength. Computes the effects; use
+/// [`faction_upkeep_with`] to reuse them.
 pub fn faction_upkeep(model: &CampaignModel, faction: FactionId) -> i32 {
     faction_upkeep_with(model, &Effects::compute_for(model, faction), faction)
 }
@@ -246,13 +250,27 @@ pub fn faction_upkeep_with(model: &CampaignModel, fx: &Effects, faction: Faction
 
 /// [`faction_upkeep_with`] split by force kind into (land, naval): the economics categories 19
 /// and 20 the round end writes (`0x008E1030`: land / naval totals of `0x008B2150`, CONFIRMED).
+/// Each force's units are costed with that force's set (`0x008F9C50` → `0x008AFC00`,
+/// [`Effects::force_set`]), so its commander's traits and ancillaries count. A force without a
+/// commander costs 0 ([`costed_force`]).
 pub fn faction_upkeep_split_with(model: &CampaignModel, fx: &Effects, faction: FactionId) -> (i32, i32) {
     let (mut land, mut naval) = (0i32, 0i32);
     for f in model.world.forces.values().filter(|f| f.faction == faction) {
-        let sum: i32 = f.units.iter().map(|u| model.rules.units.get(&u.unit_key).map_or(0, |r| unit_upkeep(fx, faction, &model.rules.features, &u.unit_key, r))).sum();
+        let Some((commander, units)) = costed_force(f) else { continue };
+        let set = fx.force_set(faction, commander);
+        let sum: i32 = units.iter().map(|u| model.rules.units.get(&u.unit_key).map_or(0, |r| unit_upkeep(set, &model.rules.features, &u.unit_key, r))).sum();
         if f.is_navy { naval += sum } else { land += sum }
     }
     (land, naval)
+}
+
+/// The commander and units of `force` that its per-unit sum (`0x008F9C50`: the upkeep, flag 1, and
+/// the ranking power, flag 0) counts, or `None` when it counts 0: `0x008F9C50` resolves the force's
+/// +0x74 commander handle first and on null returns 0 for the whole force, before the flag is read
+/// (`0x008F9C62`, CONFIRMED disassembly). A unit raised alone gets a colonel and a dead commander's
+/// force a new one (SAVE_COMPAT.md), so the original's forces always have one.
+pub fn costed_force(force: &MilitaryForce) -> Option<(CharacterId, &[CampaignUnit])> {
+    force.commander.map(|c| (c, force.units.as_slice()))
 }
 
 
@@ -725,6 +743,8 @@ impl CampaignModel {
             let fx = Effects::compute_for(self, faction);
             let (land, naval) = faction_upkeep_split_with(self, &fx, faction);
             set_upkeep_trackers(self, faction, land, naval);
+            // In any order: `0x008E10CE`–`0x008E10FE` walks the faction region list, but each step books a wrapping
+            // integer change to the same category (`book_expense`), so the sum is the same.
             let regions: Vec<(RegionId, i32)> = self.world.regions.values().filter(|r| r.owner == faction).map(|r| (r.id, r.population_state.policing_cost)).collect();
             for (region, cost) in regions {
                 set_policing_tracker(self, region, cost);
@@ -978,6 +998,10 @@ pub enum Settlement {
         /// First bankrupt turn in a row.
         first_turn: bool,
     },
+    /// Nothing paid or recorded: the rebels and a faction out of the game skip the settle (`0x008BC650`
+    /// calls `0x00BABE30` only for [`CampaignModel::in_the_game_with_record`], CONFIRMED by listing), so
+    /// their treasury, record ring and bankrupt-turn count stay as they are.
+    Skipped,
 }
 
 /// The round-end economy of one faction (0x00BABE30, then the regions' 0x00AB4410), paying its running
@@ -987,16 +1011,49 @@ pub enum Settlement {
 /// faction is bankrupt ([`Settlement::CannotPay`], CONFIRMED 0x00BABE30 / 0x00BA2030 /
 /// 0x008AE710): the treasury becomes 0, the bankrupt-turn count grows, and the capital region's
 /// [`Region::wealth_growth_offset`] grows by 2 (at most 6; it falls by 1 at each of the faction's
-/// turn ends, which slows that region's town wealth growth). Not modelled (CAMPAIGN_FIDELITY.md
-/// §Bankruptcy): the units deserting each bankrupt turn (0x008BA020), the prestige loss and the
-/// regular payments cancelled to cover the deficit (0x00B0E580). Then trade routes accumulate
-/// value, and every owned region's GDP and town wealth growth are recomputed
+/// turn ends, which slows that region's town wealth growth); from its second bankrupt turn in a row its
+/// armies desert ([`bankrupt_desertion`], 0x008BA020, its events pushed to `events`). Not modelled
+/// (CAMPAIGN_FIDELITY.md §Bankruptcy): the prestige loss and the regular payments cancelled to cover the
+/// deficit (0x00B0E580). The rebels and a faction out of the game pay nothing ([`Settlement::Skipped`]:
+/// `0x008BC650` tests `0x008CEEF0` at `0x008BC65D` and faction +0x824 at `0x008BC666` before the settle,
+/// CONFIRMED by listing). Then trade routes accumulate value, and, for every faction still in the game, the
+/// rebels too (`0x008BC650` tests only +0x824 at `0x008BC685` before its region loop of `0x00AB42F0`, which
+/// calls `0x00AB4410(1)` at `0x00AB437E`), every owned region's GDP and town wealth growth are recomputed
 /// ([`recompute_region`]) and its town wealth becomes `max(0, town_wealth + town_wealth_growth)`
 /// (CONFIRMED).
-pub fn settle_round(model: &mut CampaignModel, faction: FactionId) -> Settlement {
-    // The faction's effects, once for the whole step: nothing below changes their sources, except
-    // desertion, after which they are computed again.
-    let mut fx = Effects::compute_for(model, faction);
+pub fn settle_round(model: &mut CampaignModel, faction: FactionId, events: &mut Vec<CampaignEvent>) -> Settlement {
+    let result = if model.in_the_game_with_record(faction) { pay_running_record(model, faction, events) } else { Settlement::Skipped };
+    // The faction's effects, once, after the payment (a desertion changes their sources).
+    let fx = Effects::compute_for(model, faction);
+    // Trade routes accumulate value (0x00BCB020 -> 0x00B05CC0, after the economy).
+    accumulate_trade_with(model, &fx, faction);
+    if !model.in_the_game(faction) {
+        return result;
+    }
+    // Each region: GDP and growth recomputed, then the growth applied (0x00AB4410).
+    let updates: Vec<(RegionId, u32, i32)> = model
+        .world
+        .regions
+        .values()
+        .filter(|r| r.owner == faction)
+        .map(|r| {
+            let (gdp, growth) = recompute_region_with(model, Some(&fx), r);
+            (r.id, gdp, growth)
+        })
+        .collect();
+    for (id, gdp, growth) in updates {
+        if let Some(r) = model.world.regions.get_mut(&id) {
+            r.gdp = gdp;
+            r.town_wealth_growth = growth;
+            r.town_wealth = (i64::from(r.town_wealth) + i64::from(growth)).clamp(0, i64::from(u32::MAX)) as u32;
+        }
+    }
+    result
+}
+
+/// [`settle_round`]'s payment (`0x00BABE30`): the running record paid and rolled, or the cannot-pay path
+/// with its capital offset and desertion.
+fn pay_running_record(model: &mut CampaignModel, faction: FactionId, events: &mut Vec<CampaignEvent>) -> Settlement {
     // The running record (the history's last, `0x00BABE00`) is what `0x00BABE30` pays: its income
     // 5..11 (`0x00BBE970`) and expenses 18..24 (`0x00BBE910`), plain 32-bit sums, CONFIRMED. Taxes (5)
     // and trade (7) are as last refreshed ([`refresh_running_income`]: a building finished since counts
@@ -1042,28 +1099,7 @@ pub fn settle_round(model: &mut CampaignModel, faction: FactionId) -> Settlement
     // 0x008AE710: bankrupt armies desert from the second bankrupt turn in a row on (gate CONFIRMED, see
     // `bankrupt_desertion`).
     if matches!(result, Settlement::CannotPay { .. }) && model.world.bankrupt_turns.get(&faction).copied().unwrap_or(0) > 1 {
-        bankrupt_desertion(model, faction, revenue, expenses);
-        fx = Effects::compute_for(model, faction);
-    }
-    // Trade routes accumulate value (0x00BCB020 -> 0x00B05CC0, after the economy).
-    accumulate_trade_with(model, &fx, faction);
-    // Each region: GDP and growth recomputed, then the growth applied (0x00AB4410).
-    let updates: Vec<(RegionId, u32, i32)> = model
-        .world
-        .regions
-        .values()
-        .filter(|r| r.owner == faction)
-        .map(|r| {
-            let (gdp, growth) = recompute_region_with(model, Some(&fx), r);
-            (r.id, gdp, growth)
-        })
-        .collect();
-    for (id, gdp, growth) in updates {
-        if let Some(r) = model.world.regions.get_mut(&id) {
-            r.gdp = gdp;
-            r.town_wealth_growth = growth;
-            r.town_wealth = (i64::from(r.town_wealth) + i64::from(growth)).clamp(0, i64::from(u32::MAX)) as u32;
-        }
+        bankrupt_desertion(model, faction, revenue, expenses, events);
     }
     result
 }
@@ -1081,7 +1117,8 @@ pub fn settle_round(model: &mut CampaignModel, faction: FactionId) -> Settlement
 ///   ([`automated_policing`], CONFIRMED 0x008EDF70);
 /// - education ([9]: clamour-for-reform effects only in the capital or where research points are,
 ///   with `education_happy_mod` and the class's stored base), religion ([3], [`religion_factor`]),
-///   war results ([11]: the class's stored value, +12 with a hostile character in the region) and
+///   war ([8]: the class's stored [`PopulationClassState::war`]), resistance ([11]: the class's stored
+///   base, +12 with a hostile character in the region) and
 ///   gentlemen ([12], [`gentlemen_factor`]) (round 4; see CAMPAIGN_FIDELITY.md §Public order).
 ///
 /// The factors of every class are [`public_order_factors`] (the exe's slots, effects included);
@@ -1158,9 +1195,10 @@ pub fn garrison_units(model: &CampaignModel, region: &Region) -> u32 {
 pub struct ClassPublicOrder {
     /// The class (`lower`, `middle`, `upper`).
     pub class: String,
-    /// Happiness [1..13]: 0 government type, 1 taxes, 2 religion, 3 events, 4 culture, 5 industry,
-    /// 6 characters / ministers / traits, 7 (unused), 8 education, 9 (unused), 10 war results,
-    /// 11 gentlemen, 12 religion with [`super::features::CampaignFeatures::alignment_public_order`] (`spa_napoleon`).
+    /// Happiness [1..13] (class +0x04..+0x34): 0 government type, 1 taxes, 2 religion, 3 events, 4 culture,
+    /// 5 industry, 6 characters / ministers / traits, 7 war (+0x20, the stored
+    /// [`PopulationClassState::war`]), 8 education (reform), 9 bankruptcy (+0x28, a stored value the model
+    /// does not keep: 0), 10 resistance (+0x2C), 11 gentlemen, 12 religion with [`super::features::CampaignFeatures::alignment_public_order`] (`spa_napoleon`).
     pub happiness: [i32; 13],
     /// Repression [16..21]: 0 government type, 1 government buildings, 2 ministers, 3 automated
     /// policing, 4 garrison, 5 (set elsewhere: 0).
@@ -1208,22 +1246,35 @@ pub fn region_effect_set(model: &CampaignModel, reg: &Region) -> super::effects:
 /// factors (all 0, as the vanilla saves store them).
 pub fn public_order_factors(model: &CampaignModel, region: RegionId) -> Vec<ClassPublicOrder> {
     let Some(reg) = model.world.regions.get(&region) else { return Vec::new() };
-    public_order_factors_with(model, reg, &region_effect_set(model, reg), &reg.religions, garrison_units(model, reg))
+    public_order_factors_with(model, reg, &region_effect_set(model, reg), &reg.religions, &reg.class_bases, garrison_units(model, reg))
 }
 
 /// [`public_order_factors`] from the inputs `0x008EDF70` takes: the effect set (the region's, or the
-/// predicted one for the panel's projection), the religion breakdown the religion factor reads (the
-/// population object's, a projected copy's for the panel) and the garrison's unit count (`0x008B18F0`'s
+/// predicted one for the panel's projection), the religion breakdown the religion factor reads and the
+/// classes whose stored bases it reads (the population object's, a projected copy's for the panel:
+/// `0x00AA9C10` passes the object it refreshes), and the garrison's unit count (`0x008B18F0`'s
 /// argument; −1 there means the garrison's own). The garrison factor's population is always the
-/// region's own (`0x008B18F0` reads region +0x28, not the copy).
-pub fn public_order_factors_with(model: &CampaignModel, reg: &Region, set: &super::effects::EffectSet, religions: &[(String, f32)], garrison_units: u32) -> Vec<ClassPublicOrder> {
+/// region's own (`0x008B18F0` reads region +0x28, not the copy). No classes: the governing faction's
+/// government's two ([`government_class_bases`]).
+pub fn public_order_factors_with(
+    model: &CampaignModel,
+    reg: &Region,
+    set: &super::effects::EffectSet,
+    religions: &[(String, f32)],
+    classes: &[PopulationClassState],
+    garrison_units: u32,
+) -> Vec<ClassPublicOrder> {
     use super::effects::BonusKind;
     let region = reg.id;
     if !model.world.factions.contains_key(&reg.owner) {
         return Vec::new();
     }
     let rules = &model.rules;
-    let (upper_class, lower_class) = government_classes(model, model.world.governing_faction(region).unwrap_or(reg.owner));
+    let governing = model.world.governing_faction(region).unwrap_or(reg.owner);
+    // PROVISIONAL: a rebel owner. `0x008EDF70` picks the classes it refreshes with the faction tests
+    // (`0x008CE230` / `0x008CE2F0`, not the region ones), which match no class of the rebels, so it
+    // refreshes none and the stored factors stay; ours computes the default `upper` / `lower` ones.
+    let (upper_class, lower_class) = government_classes(model, governing);
     let int = |b: &str| set.get_int(b);
     let class_int = |b: &str, class: &str| f64::from(set.get_qualified(BonusKind::PopClass, b, class)).round_ties_even() as i32;
     let alignment = rules.features.alignment_public_order;
@@ -1237,11 +1288,14 @@ pub fn public_order_factors_with(model: &CampaignModel, reg: &Region, set: &supe
     let gentlemen = gentlemen_factor(model, reg) as i32;
     let hostile = !alignment && hostile_in_region(model, reg);
     let garrison = garrison_repression(rules, garrison_units, reg.population) as i32;
-    let classes: Vec<(String, i32, i32)> =
-        if reg.class_bases.is_empty() { vec![(lower_class.clone(), 0, 0), (upper_class.clone(), 0, 0)] } else { reg.class_bases.clone() };
+    let classes: Vec<PopulationClassState> = if classes.is_empty() {
+        government_class_bases(model, governing)
+    } else {
+        classes.to_vec()
+    };
     classes
         .into_iter()
-        .map(|(class, edu_base, war_base)| {
+        .map(|PopulationClassState { class, education, resistance, war }| {
             let side = if class == lower_class {
                 "lower"
             } else if class == upper_class {
@@ -1261,11 +1315,12 @@ pub fn public_order_factors_with(model: &CampaignModel, reg: &Region, set: &supe
             h[4] = class_int("happiness_culture", &class);
             h[5] = class_int("happiness_industry", &class);
             h[6] = class_int("happiness_character", &class) + int("happiness_ministerial_position") + int("happiness_character_trait_or_ancillary");
+            h[7] = war;
             if schools {
                 let clamour = set.get_qualified(BonusKind::PopClass, "happiness_clamour_for_reform", &class);
-                h[8] = edu_base + ((set.get("education_happy_mod") * 0.01 + 1.0) * clamour).round_ties_even() as i32;
+                h[8] = education +((set.get("education_happy_mod") * 0.01 + 1.0) * clamour).round_ties_even() as i32;
             }
-            h[10] = war_base + if war_base == 0 && hostile { 12 } else { 0 };
+            h[10] = resistance + if resistance == 0 && hostile { 12 } else { 0 };
             h[11] = gentlemen;
             let mut r = [0i32; 6];
             r[0] = int("repression_gov_type");
@@ -1291,8 +1346,9 @@ pub fn public_order(model: &CampaignModel, region: RegionId) -> PublicOrder {
 }
 
 /// The [`public_order_factors`] of the region's government's upper and lower classes (see
-/// [`government_classes`]; the governing faction's government), in that order; `None` for a class
-/// the region does not have.
+/// [`region_government_classes`]: the governing faction's government, or a rebel region's first risen
+/// army's), in that order; `None` for a class the region does not have, and both `None` for a rebel
+/// region with no risen army.
 pub fn governed_class_factors(model: &CampaignModel, region: RegionId) -> (Option<ClassPublicOrder>, Option<ClassPublicOrder>) {
     let Some(reg) = model.world.regions.get(&region) else { return (None, None) };
     governed_classes(model, reg, public_order_factors(model, region))
@@ -1301,23 +1357,104 @@ pub fn governed_class_factors(model: &CampaignModel, region: RegionId) -> (Optio
 /// The government's upper and lower classes out of `factors` (a region's [`public_order_factors`] or
 /// [`public_order_factors_with`]), as [`governed_class_factors`] picks them.
 pub fn governed_classes(model: &CampaignModel, reg: &Region, mut factors: Vec<ClassPublicOrder>) -> (Option<ClassPublicOrder>, Option<ClassPublicOrder>) {
-    let (upper, lower) = government_classes(model, model.world.governing_faction(reg.id).unwrap_or(reg.owner));
+    let Some((upper, lower)) = region_government_classes(model, reg) else { return (None, None) };
     let mut take = |c: &str| factors.iter().position(|f| f.class == c).map(|i| factors.swap_remove(i));
     let u = take(&upper);
     let l = if lower == upper { u.clone() } else { take(&lower) };
     (u, l)
 }
 
+/// The order a population class of a region would have under another faction (`0x008BDB90(class,
+/// region, faction)`, CONFIRMED by disassembly): the class's public order ([`ClassPublicOrder::total`],
+/// `0x008E2AB0`) plus its resistance (war results, class +0x2C, happiness slot 10) again when negative,
+/// without its tax unhappiness (+0x8, slot 1, when negative) and its garrison repression (+0x50,
+/// repression slot 4), and with the gentlemen factor taken for the faction instead of the region's
+/// owner: `0x008C55D0` runs twice, for the owner (region +0xF4, at `0x008BDBB4`; subtracted) and for
+/// the faction (at `0x008BDBD9`; added), both passed in ([`gentlemen_factor_for`]). The owner's is
+/// computed afresh, not read from the class's gentlemen slot (happiness slot 11): a class the region's
+/// government does not govern (the first-class fallback of [`hypothetical_order_attitude`], e.g. a
+/// monarchy's region taken by a republic) has every slot 0 yet still loses the owner's gentlemen.
+///
+/// The negative resistance counts twice, kept 1:1: `0x008E2AB0` sums
+/// +0x38 + +0x3C + +0x58, `0x008EDF70` adds slot +0x2C into the negative sum +0x3C, and `0x008BDB90`
+/// adds `min(+0x2C, 0)` again (`0x008BDBC2`).
+pub fn hypothetical_class_order(class: &ClassPublicOrder, gentlemen_owner: i32, gentlemen_faction: i32) -> i32 {
+    let (tax, resistance) = (class.happiness[1], class.happiness[10]);
+    class.total() + resistance.min(0) - tax.min(0) - class.repression[4] - gentlemen_owner + gentlemen_faction
+}
+
+/// The attitude of `faction` to holding `reg` (`CalculateRegionHypotheticalOrderAttitude` `0x00A79050`,
+/// CONFIRMED by disassembly), on the region's factors refreshed now (`CopyRefreshedRegionPopulation`
+/// `0x00A72990`: [`public_order_factors`], then the religion breakdown normalised,
+/// [`super::population::normalise_religions`], unless the rebels own it):
+/// - the lower of [`hypothetical_class_order`] for the region government's lower and upper classes
+///   ([`governed_classes`]; `0x00A60FE0` / `0x00A61320` take the first class when the region has
+///   no such class);
+/// - minus `floor((1 − share) × 6)` (f32) when `faction`'s state religion (faction +0x710, `0x008F32B0`,
+///   the key the religion factor `0x008B1B10` pairs with the region's religions) has a share in the
+///   region's breakdown (its first entry with that key), else minus 6 (also for a faction without one).
+///
+/// The deal valuation ([`CampaignModel::region_deal_value`], `0x00A364B0`) counts a region offered to
+/// `faction` when this is at least 0, or at least −5 with the region bordering one of `faction`'s.
+/// A region whose owner is not a campaign faction has no classes ([`public_order_factors`] is
+/// empty; the exe would read past an empty class list): its order counts as 0.
+pub fn hypothetical_order_attitude(model: &CampaignModel, reg: &Region, faction: FactionId) -> i32 {
+    let factors = public_order_factors(model, reg.id);
+    let [g_owner, g_faction] = gentlemen_factors_for(model, reg, [reg.owner, faction]).map(|g| g as i32);
+    // A class the region does not have reads its first class (taken before `governed_classes` moves them).
+    let first = factors.first().map_or(0, |c| hypothetical_class_order(c, g_owner, g_faction));
+    let (upper, lower) = governed_classes(model, reg, factors);
+    let order = |c: Option<ClassPublicOrder>| c.map_or(first, |c| hypothetical_class_order(&c, g_owner, g_faction));
+    let order = order(lower).min(order(upper));
+    let Some(religion) = model.world.faction_details.get(&faction).map(|d| d.religion.as_str()).filter(|r| !r.is_empty()) else {
+        return order - 6;
+    };
+    let Some(i) = reg.religions.iter().position(|(key, _)| key == religion) else { return order - 6 };
+    let share = if model.is_rebel_faction(reg.owner) { reg.religions[i].1 } else { super::population::normalised_share(&reg.religions, i) };
+    order - ((1.0f32 - share) * 6.0f32).floor() as i32
+}
+
 /// The (upper, lower) population classes of a faction's government type (`government_types` #4 / #5;
-/// `upper` and `lower` when the type is not in the rules).
+/// `upper` and `lower` when the type is not in the rules): the faction class tests
+/// (`IsUpperClassOfFactionGovernment` `0x008CE2F0` / `IsLowerClassOfFactionGovernment` `0x008CE230`,
+/// faction +0x70C → +0xB0, class record +0x18 / +0x1C; CONFIRMED by decompile). A region's classes,
+/// where the rebels take their risen army's government, are [`region_government_classes`].
 pub fn government_classes(model: &CampaignModel, faction: FactionId) -> (String, String) {
-    model
-        .world
-        .factions
-        .get(&faction)
-        .and_then(|f| model.rules.government_classes.get(&f.government_key))
-        .cloned()
-        .unwrap_or_else(|| ("upper".into(), "lower".into()))
+    model.world.factions.get(&faction).map_or_else(default_classes, |f| government_type_classes(model, &f.government_key))
+}
+
+fn default_classes() -> (String, String) {
+    ("upper".into(), "lower".into())
+}
+
+/// The (upper, lower) classes of a `government_types` key (`upper` / `lower` when it is not in the rules).
+fn government_type_classes(model: &CampaignModel, key: &str) -> (String, String) {
+    model.rules.government_classes.get(key).cloned().unwrap_or_else(default_classes)
+}
+
+/// The (upper, lower) classes the region class tests name (`IsUpperClassOfRegionGovernment` `0x008CE320` /
+/// `IsLowerClassOfRegionGovernment` `0x008CE260`, CONFIRMED by decompile): for a region the rebels own
+/// (region +0xF4, `0x008CEEF0`), the government of the first of its risen rebel armies (region +0x220,
+/// `0x008CFC20(0)`; [`World::region_risen_armies`](super::World::region_risen_armies), kept in file order)
+/// read from that army's REBEL_DATA (army +0x98 → +0x18 government record → class +0x18 / +0x1C;
+/// [`World::rebel_army_governments`](super::World::rebel_army_governments)); `None` with no risen army
+/// (the list count, +0xC, is 0: no class matches) or none with a government. Otherwise the governing
+/// faction's government's ([`government_classes`]).
+pub fn region_government_classes(model: &CampaignModel, reg: &Region) -> Option<(String, String)> {
+    if !model.is_rebel_faction(reg.owner) {
+        return Some(government_classes(model, model.world.governing_faction(reg.id).unwrap_or(reg.owner)));
+    }
+    let army = model.world.region_risen_armies.get(&reg.id)?.first()?;
+    Some(government_type_classes(model, model.world.rebel_army_governments.get(army)?))
+}
+
+/// The classes of a region that has none (one loaded without `POPULATION_CLASS` entries: every region of
+/// the original's files has them, `0x008861E0`): `faction`'s government's two ([`government_classes`]),
+/// lower then upper, with no stored bases. The one place this rule lives: the public order reads it and
+/// [`CampaignModel::ensure_population_classes`] stores it.
+pub fn government_class_bases(model: &CampaignModel, faction: FactionId) -> Vec<PopulationClassState> {
+    let (upper, lower) = government_classes(model, faction);
+    vec![PopulationClassState::new(lower), PopulationClassState::new(upper)]
 }
 
 /// Distance from the settlement within which a character counts as standing in the region
@@ -1328,7 +1465,7 @@ pub const REGION_AREA_RADIUS: f32 = 20.0;
 /// `0x00AA10F0`: a character of a faction at war with the region's owner stands in the region.
 fn hostile_in_region(model: &CampaignModel, reg: &Region) -> bool {
     // Only characters with an army count (0x009D3A60; navies do not: the vanilla eur save has a
-    // British fleet off Rotterdam and Holland shows no war-results factor).
+    // British fleet off Rotterdam and Holland shows no resistance factor).
     model.world.forces.values().filter(|f| !f.is_navy && f.faction != reg.owner && model.world.stance(reg.owner, f.faction) == super::Stance::War).any(|f| {
         f.commander.and_then(|c| model.world.characters.get(&c)).is_some_and(|c| in_region(model, reg, c))
     })
@@ -1377,8 +1514,9 @@ pub const DESERTION_EXEMPT_CLASSES: [&str; 4] = ["cavalry_heavy", "elephants", "
 /// a unit left at or under [`unit_minimum_men`] is disbanded. It runs while faction `+0x50C` > 1: that field is
 /// the bankrupt-turn count (the economics object sits at faction +0xAC, and its +0x460 is the counter; CONFIRMED
 /// with a debugger write-watch, CAMPAIGN_FIDELITY.md §Bankruptcy). Units of the [`DESERTION_EXEMPT_CLASSES`]
-/// are skipped too, and draw no random number.
-pub fn bankrupt_desertion(model: &mut CampaignModel, faction: FactionId, income: i32, expenses: i32) {
+/// are skipped too, and draw no random number. A force left with no unit is destroyed, its
+/// [`CampaignEvent::ForceDestroyed`] pushed to `events`.
+pub fn bankrupt_desertion(model: &mut CampaignModel, faction: FactionId, income: i32, expenses: i32, events: &mut Vec<CampaignEvent>) {
     let p = if income < 1 { 0.3f32 } else { ((expenses as f32 / income as f32 - 1.0) * 0.3 + 0.07).clamp(0.07, 0.3) };
     let garrisons: Vec<ForceId> = model.world.regions.values().filter_map(|r| r.garrison).collect();
     let forces: Vec<ForceId> = model
@@ -1415,9 +1553,8 @@ pub fn bankrupt_desertion(model: &mut CampaignModel, faction: FactionId, income:
             emptied.push(fid);
         }
     }
-    let mut events = Vec::new();
     for fid in emptied {
-        model.destroy_force(fid, &mut events);
+        model.destroy_force(fid, events);
     }
 }
 
@@ -1436,25 +1573,56 @@ pub fn in_region(model: &CampaignModel, reg: &Region, c: &super::Character) -> b
     c.garrisoned_in.is_none() && (c.position.0.to_f32() - sx).powi(2) + (c.position.1.to_f32() - sy).powi(2) <= REGION_AREA_RADIUS * REGION_AREA_RADIUS
 }
 
-/// The gentlemen factor of public order (`0x008C55D0`, CONFIRMED): each gentleman in the region gives
-/// `ceil(x / gentleman_happiness_divisor) + gentleman_happiness_bonus` — positive for the owner's
-/// own gentlemen, negative for others'; the positive sum is clamped to
+/// The gentlemen factor of public order (`0x008C55D0`, CONFIRMED): each gentleman resident in the
+/// region's settlement gives
+/// `ceil(x / gentleman_happiness_divisor) + gentleman_happiness_bonus` — positive for gentlemen of the
+/// owner or a faction allied to it ([`gentlemen_factor_for`]), negative for others'; the positive sum is clamped to
 /// [0, `gentleman_happiness_positive_limit`], the negative one floored at
-/// `gentleman_happiness_negative_limit`. x is the gentleman's skill (`0x00A198D0`): the model uses his
-/// `research` attribute level (INFERRED; the effects on it are not modelled) and the bonus effect 0.
+/// `gentleman_happiness_negative_limit`. CONFIRMED by disassembly: x is the gentleman's rank
+/// ([`super::agents::rank`], `GetCharacterRank` `0x00A198D0` called at `0x008C5698`), the ceiling is
+/// `(x − 1 + divisor) / divisor` (truncating `IDIV`, `0x008C56A9`), and the bonus is effect 0x81 of his
+/// own set (character +0x48C at `0x008C569E`, read by `0x00E1F130`; [`super::agents::own_bonus`]),
+/// not his faction's.
+///
+/// Which gentlemen (CONFIRMED by disassembly and the vanilla saves): `0x008C55D0` walks the
+/// settlement's resident list (region +0xFC → +0xC8, filled from `SIEGEABLE_GARRISON_RESIDENCE` #14
+/// by the settlement loader at `0x00AF4DFF` → `0x008CFA70`) and tests each for a gentleman (type
+/// +0x2C 4 or 5, `0x00F9C6D0`). A gentleman merely standing in the region, or studying in a school
+/// (the school's own residence #14), is not counted: every vanilla save stores 0 in the gentlemen
+/// slot (11) of its capitals, whose gentlemen sit in their schools. The model's resident list is the
+/// characters in no force [`super::Character::garrisoned_in`] the region
+/// ([`super::World::residence_of`], the one resident rule): the importer fills it from #14, a
+/// gentleman ordered into a settlement joins it (`CampaignCommand::AgentEnterSettlement`, the enter
+/// `0x00B4E760`) and any move takes him out (the leave `0x00B4EE70`); CONFIRMED, disassembly.
+/// PROVISIONAL: in the `spa_napoleon`
+/// campaign (character +0x194 → +0x30) the walk also counts the characters passing `0x00F9C6F0`
+/// and the three missionary types (`0x008C562F`..`0x008C568D`); not modelled.
+/// The region's own factor is [`gentlemen_factor_for`] its owner (region +0xF4, `0x008EDF70`).
 pub fn gentlemen_factor(model: &CampaignModel, reg: &Region) -> f32 {
+    gentlemen_factor_for(model, reg, reg.owner)
+}
+
+/// [`gentlemen_factor`] for `side` (`0x008C55D0(region, side)`): a gentleman is on `side`'s side when his
+/// faction and `side` pass `0x008CE390` (neither is the rebels; the same faction, or allied, patron or
+/// protectorate: `CampaignModel::allied_with`; CONFIRMED, disassembly: the call at `0x008C56CC`).
+pub fn gentlemen_factor_for(model: &CampaignModel, reg: &Region, side: FactionId) -> f32 {
+    gentlemen_factors_for(model, reg, [side])[0]
+}
+
+/// [`gentlemen_factor_for`] each of `sides`, in one walk of the characters.
+fn gentlemen_factors_for<const N: usize>(model: &CampaignModel, reg: &Region, sides: [FactionId; N]) -> [f32; N] {
     let rules = &model.rules;
     let divisor = (rules.var("gentleman_happiness_divisor", 1.0) as i32).max(1);
-    let (mut pos, mut neg) = (0i32, 0i32);
-    for c in model.world.characters.values().filter(|c| c.kind == super::CharacterKind::Gentleman && in_region(model, reg, c)) {
-        // The skill 0x00A198D0 has no term for a gentleman beyond effects: 0 (vanilla saves: own
-        // gentlemen in their capitals add nothing). The bonus is the character's + faction's effect 129.
-        let x = 0i32;
-        let bonus = super::effects::Effects::faction_sum(model, c.faction).get_int("gentleman_happiness_bonus");
+    let (mut pos, mut neg) = ([0i32; N], [0i32; N]);
+    for c in model.world.characters.values().filter(|c| c.kind == super::CharacterKind::Gentleman && c.garrisoned_in == Some(reg.id) && model.world.residence_of(c.id).is_some()) {
+        let x = super::agents::rank(model, c.id);
+        let bonus = super::agents::own_bonus(model, c.id, "gentleman_happiness_bonus");
         let v = (x + divisor - 1) / divisor + bonus;
-        if c.faction == reg.owner { pos += v } else { neg -= v }
+        for (i, &side) in sides.iter().enumerate() {
+            if model.allied_with(c.faction, side) { pos[i] += v } else { neg[i] -= v }
+        }
     }
-    let pos = pos.clamp(0, rules.var("gentleman_happiness_positive_limit", 0.0) as i32);
+    let limit = rules.var("gentleman_happiness_positive_limit", 0.0) as i32;
     let floor = rules.var("gentleman_happiness_negative_limit", 0.0) as i32;
-    (if neg < floor { floor } else { neg.min(0) } + pos) as f32
+    std::array::from_fn(|i| (if neg[i] < floor { floor } else { neg[i].min(0) } + pos[i].clamp(0, limit)) as f32)
 }

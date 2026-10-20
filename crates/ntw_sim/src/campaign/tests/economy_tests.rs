@@ -41,13 +41,15 @@ fn income_and_upkeep() {
     assert_eq!(economy::faction_income(&m, C).net(), 100);
     assert_eq!(economy::faction_income(&m, FactionId(99)).net(), 0);
 
-    // No humans: the first end_turn plays round 1; the economy of every faction is settled once,
+    // No humans: the first end_turn plays round 1; the economy of every faction in the game is settled once,
     // at the round end.
     let mut m = test_model();
     m.end_turn();
     assert_eq!(m.world.factions[&B].treasury, 1000 + 2480);
     assert_eq!(m.world.factions[&A].treasury, 1000 + 1890);
-    assert_eq!(m.world.factions[&C].treasury, 100);
+    // C holds no region and no character, so it is out of the game (+0x824): its round end does not
+    // settle (`0x008BC650` gate at `0x008BC666`), and its treasury stays.
+    assert_eq!(m.world.factions[&C].treasury, 0);
 
     // A higher tax level raises income: 6000 × 20 % × 2 = 2400.
     let mut m = test_model();
@@ -68,11 +70,13 @@ fn economy_is_settled_at_round_end() {
     m.start_campaign();
     assert_eq!(m.world.factions[&A].treasury, 1000);
     assert_eq!(m.world.factions[&B].treasury, 1000);
-    // A ends the turn: C plays, the round ends and every faction is paid once, then B plays.
+    // A ends the turn: C plays, the round ends and every faction in the game is paid once, then B plays.
     m.end_turn();
     assert_eq!(m.world.factions[&A].treasury, 1000 + 1890);
     assert_eq!(m.world.factions[&B].treasury, 1000 + 2480);
-    assert_eq!(m.world.factions[&C].treasury, 100);
+    // C holds no region and no character, so it is out of the game (+0x824): its round end does not
+    // settle (`0x008BC650` gate at `0x008BC666`), and its treasury stays.
+    assert_eq!(m.world.factions[&C].treasury, 0);
 }
 
 #[test]
@@ -117,7 +121,7 @@ fn the_round_end_records_the_economy_history() {
     // The round start books upkeep, taxes and trade into A's first record (other income from creation).
     economy::refresh_running_record_round_start(&mut m, A);
     for _ in 0..12 {
-        economy::settle_round(&mut m, A);
+        economy::settle_round(&mut m, A, &mut Vec::new());
     }
     let history = &m.world.economy_history[&A];
     assert_eq!(history.len(), super::world::ECONOMY_HISTORY_LEN);
@@ -164,7 +168,7 @@ fn the_round_end_keeps_unmodelled_categories() {
     economy::refresh_running_record_round_start(&mut m, A);
     let income = economy::faction_income(&m, A);
     let treasury = m.world.factions[&A].treasury;
-    economy::settle_round(&mut m, A);
+    economy::settle_round(&mut m, A, &mut Vec::new());
     let history = &m.world.economy_history[&A];
     assert_eq!(history.len(), 2);
     let (paid, next) = (&history[0], &history[1]);
@@ -188,7 +192,7 @@ fn the_round_end_pays_the_recorded_taxes() {
     m.world.regions.get_mut(&RegionId(10)).unwrap().gdp += 5000;
     assert_ne!(economy::faction_income(&m, A).taxes, recorded[5]);
     let treasury = m.world.factions[&A].treasury;
-    economy::settle_round(&mut m, A);
+    economy::settle_round(&mut m, A, &mut Vec::new());
     let paid = m.world.economy_history[&A][0];
     assert_eq!(paid[5], recorded[5]);
     let (revenue, expenses): (i32, i32) = (paid[5..12].iter().sum(), paid[18..25].iter().sum());
@@ -248,11 +252,11 @@ fn exemption_town_wealth_and_bankruptcy() {
     m.rules = Arc::new(rules);
     m.world.regions.get_mut(&RegionId(10)).unwrap().town_wealth = 1000;
     assert_eq!(economy::faction_income(&m, A).taxes, 2 * 750);
-    assert_eq!(economy::settle_round(&mut m, A), economy::Settlement::Paid);
+    assert_eq!(economy::settle_round(&mut m, A, &mut Vec::new()), economy::Settlement::Paid);
     assert_eq!(m.world.regions[&RegionId(10)].town_wealth_growth, 25);
     assert_eq!(m.world.regions[&RegionId(10)].town_wealth, 1025);
     m.world.regions.get_mut(&RegionId(10)).unwrap().discontent_growth = -5000;
-    economy::settle_round(&mut m, A);
+    economy::settle_round(&mut m, A, &mut Vec::new());
     assert_eq!(m.world.regions[&RegionId(10)].town_wealth, 0);
 
     // Cannot pay (treasury + income < upkeep).
@@ -267,11 +271,11 @@ fn exemption_town_wealth_and_bankruptcy() {
     // B's record: income 100, upkeep 20: -150 + 100 < 20.
     // Bankrupt: the treasury is emptied and the capital's growth offset grows by 2 (at most 6).
     m.world.faction_details.entry(B).or_default().capital = Some(RegionId(11));
-    assert_eq!(economy::settle_round(&mut m, B), economy::Settlement::CannotPay { first_turn: true });
+    assert_eq!(economy::settle_round(&mut m, B, &mut Vec::new()), economy::Settlement::CannotPay { first_turn: true });
     assert_eq!(m.world.factions[&B].treasury, 0);
     assert_eq!(m.world.regions[&RegionId(11)].wealth_growth_offset, 2);
     m.world.factions.get_mut(&B).unwrap().treasury = -150;
-    assert_eq!(economy::settle_round(&mut m, B), economy::Settlement::CannotPay { first_turn: false });
+    assert_eq!(economy::settle_round(&mut m, B, &mut Vec::new()), economy::Settlement::CannotPay { first_turn: false });
     assert_eq!(m.world.bankrupt_turns[&B], 2);
     // From the second bankrupt turn, B's army outside a settlement deserts. Income 100 and upkeep 20 give
     // p = clamp((20 / 100 - 1) × 0.3 + 0.07, 0.07, 0.3) = 0.07, so every unit loses round(0.07 × 80) = 6.
@@ -281,17 +285,40 @@ fn exemption_town_wealth_and_bankruptcy() {
     assert_eq!(economy::unit_minimum_men(&m, 20), 4);
     for _ in 0..3 {
         m.world.factions.get_mut(&B).unwrap().treasury = -150;
-        economy::settle_round(&mut m, B);
+        economy::settle_round(&mut m, B, &mut Vec::new());
     }
     assert_eq!(m.world.regions[&RegionId(11)].wealth_growth_offset, 6);
     m.world.factions.get_mut(&B).unwrap().treasury = -80;
-    assert_eq!(economy::settle_round(&mut m, B), economy::Settlement::Paid);
+    assert_eq!(economy::settle_round(&mut m, B, &mut Vec::new()), economy::Settlement::Paid);
     assert_eq!(m.world.factions[&B].treasury, 0);
     assert!(!m.world.bankrupt_turns.contains_key(&B));
     // The offset slows the capital's town wealth growth: (modifier - offset) × growth.
     let mut r = m.world.regions[&RegionId(11)].clone();
     r.discontent_growth = 10;
     assert_eq!(economy::recompute_region(&m, &r).1, 10 - 6 * 10);
+}
+
+#[test]
+fn an_army_emptied_by_desertion_is_reported_by_the_economy_step() {
+    // B cannot pay for a second turn in a row and every unit of its army stands at the minimum strength
+    // (ceil(0.05 × 100) = 5): all of them disband, the force goes, and the round-end step returns its
+    // `ForceDestroyed` (it was lost inside the economy before).
+    let mut m = test_model();
+    {
+        let r = m.world.regions.get_mut(&RegionId(11)).unwrap();
+        r.gdp = 0;
+        r.base_gdp = 0;
+    }
+    economy::refresh_running_record_round_start(&mut m, B);
+    m.world.factions.get_mut(&B).unwrap().treasury = -150;
+    m.world.bankrupt_turns.insert(B, 1);
+    for u in &mut m.world.forces.get_mut(&ForceId(1001)).unwrap().units {
+        u.men = 5;
+    }
+    m.turn.queue.push_front(TurnStep::Economy(B));
+    let events = m.step().expect("the economy step ran");
+    assert!(!m.world.forces.contains_key(&ForceId(1001)));
+    assert!(events.contains(&CampaignEvent::ForceDestroyed { force: ForceId(1001) }), "{events:?}");
 }
 
 #[test]
@@ -479,6 +506,20 @@ fn only_the_current_faction_may_act() {
         Err(CommandError::NotYourTurn(B))
     );
     assert!(m.apply(CampaignCommand::MoveForce { force: ForceId(1000), to: pos(1, 0) }).is_ok());
+}
+
+#[test]
+fn peace_holds_outside_the_proposers_turn() {
+    // No exe peace path tests the turn (the handler 0x00936710, the deal's peace item 0x00C18B60, the
+    // protectorate 0x00B105C0): B makes peace with C during A's turn; declaring war still checks it.
+    let mut m = test_model();
+    m.apply(CampaignCommand::DeclareWar { a: B, b: C }).unwrap();
+    m.turn.humans = vec![A];
+    m.start_campaign();
+    assert_eq!(m.turn.current, Some(A));
+    assert_eq!(m.apply(CampaignCommand::DeclareWar { a: B, b: A }), Err(CommandError::NotYourTurn(B)));
+    m.apply(CampaignCommand::MakePeace { a: B, b: C, suppress_messages: false }).unwrap();
+    assert_eq!(m.world.stance(B, C), Stance::Neutral);
 }
 
 #[test]

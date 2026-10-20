@@ -216,7 +216,7 @@ fn the_round_end_books_raids_as_category_9() {
     let income = economy::faction_income(&m, A);
     assert_eq!(income.raiding, 30);
     assert_eq!(income.revenue(), income.taxes + income.trade + 30 + income.other);
-    economy::settle_round(&mut m, A);
+    economy::settle_round(&mut m, A, &mut Vec::new());
     assert_eq!(m.world.economy_history[&A].last().map(|r| r[9]), Some(30));
 }
 
@@ -398,6 +398,11 @@ fn a_hired_admiral_leaves_the_raids_of_an_admiral_already_in_command() {
     let mut adm = character(120, A, CharacterKind::Admiral, 25);
     adm.position = at(55.0, 50.0);
     m.world.characters.insert(adm.id, adm);
+    // Both admirals start at the vanilla `command_sea` 2 (`agent_to_agent_attributes`), so the pick
+    // falls to the unit order.
+    Arc::make_mut(&mut m.rules).characters.agent_attributes.insert("admiral".into(), vec![("command_sea".into(), 2)]);
+    let start = m.rules.characters.new_character_details("admiral");
+    m.world.character_details.insert(CharacterId(120), start);
     let f = m.world.forces.get_mut(&ForceId(1003)).unwrap();
     let mut flag = unit(9);
     flag.character = Some(CharacterId(120));

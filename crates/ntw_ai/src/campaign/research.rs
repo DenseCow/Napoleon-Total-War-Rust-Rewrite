@@ -36,7 +36,7 @@ pub struct ResearchCand {
     /// `technologies` #3 research cost in points.
     pub cost: i32,
     /// Thread of the school rate that researches it: 0 military, 1 industry, 2 enlightenment
-    /// (`ntw_sim::campaign::research::thread_of`).
+    /// (`ntw_sim::campaign::rules::TechRules::thread`).
     pub thread: usize,
 }
 

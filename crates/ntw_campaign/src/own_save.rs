@@ -34,11 +34,13 @@
 //! | 8 | the commerce raids (`World::commerce_raids`) and the trade network's course they need: each leg's spline ids (`TradeLeg::splines`) and each segment's curves (`TradeSegmentSight::curves`); an older save, with no raids, takes the course from the campaign's start (see [`read_with_start`]) |
 //! | 9 | the running economics record's expense trackers: each faction's land and naval upkeep trackers (`World::upkeep_booked`) and each region's policing tracker (`PopulationState::policing_booked`), with the policing cost (`PopulationState::policing_cost`); an older save's trackers take what its running record holds (see [`read_with_start`]) |
 //! | 10 | each faction's diplomacy records keep their order (`World::diplomacy_record_order`, the order the allies of a war are called in); an older save takes it from the campaign's start, or without one walks the records by faction id (see [`read_with_start`]) |
+//! | 11 | the region manager's order (`World::region_order`, the order each faction's region list follows after a load); an older save takes it from the campaign's start, or without one walks the regions by id (see [`read_with_start`]) |
 //!
 //! **What is saved.** The whole [`CampaignModel`] except the fields marked `serde(skip)` in
 //! `ntw_sim`: game data rebuilt on load (`rules` from the DB, `terrain` from the map), fields the
 //! original does not save either (the trait / ancillary script RNGs, the open negotiation, a duel
-//! wound, sabotage marks, agents' used actions, spy-network sight) and the ESF writer's own
+//! wound, sabotage marks, agents' used actions, spy-network sight, the regions' gain order: its reload
+//! rebuilds each faction's region list in the manager's order) and the ESF writer's own
 //! bookkeeping (`recruitment_sources`). No count is capped: every collection is written as long as
 //! it is.
 
@@ -54,7 +56,7 @@ use crate::{CampaignInfo, LoadError, LoadedCampaign};
 /// The first bytes of every save in this format.
 pub const MAGIC: &[u8; 16] = b"NAPOLEONRUST\0SAV";
 /// The format version this build writes and the newest it reads.
-pub const FORMAT_VERSION: u32 = 10;
+pub const FORMAT_VERSION: u32 = 11;
 
 /// Everything a save holds besides its header.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -68,8 +70,8 @@ pub struct SaveData {
     /// The scripts' `save_value` slots, in order (the values `load_value` gives back).
     pub script_values: Vec<ScriptSaveValue>,
     /// Legacy: the scripts' restricted units as saves written before `World::restricted_units` kept them
-    /// (read only; [`read`] merges them into the model, which holds them now). Written only when not empty,
-    /// so a save from [`SaveDataRef`] and one from this struct stay identical.
+    /// (read only; [`read`] merges them into the model, which holds them now: each unit once, when not listed
+    /// already). Written only when not empty, so a save from [`SaveDataRef`] and one from this struct stay identical.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub restricted_units: Vec<String>,
 }
@@ -252,7 +254,7 @@ pub fn read(bytes: &[u8], db: &GameDatabase) -> Result<LoadedCampaign, FormatErr
 
 /// [`read`], converting a save older than [`FORMAT_VERSION`] from `start`, the campaign at its start
 /// (its source's [`new_campaign`](crate::source::CampaignSource::new_campaign) model), called only
-/// for a save older than version 10:
+/// for a save older than version 11:
 /// * version 1 → 2: every region takes the unit resources (`RESOURCES_ARRAY`) of the start's region
 ///   of the same key. Nothing in the campaign changes a region's resources, so the start's are the
 ///   ones the save would hold. A region the start does not have fails the load: never a region left
@@ -296,11 +298,14 @@ pub fn read(bytes: &[u8], db: &GameDatabase) -> Result<LoadedCampaign, FormatErr
 /// * version 9 → 10: an older save lacks the order of the diplomacy records (`World::diplomacy_record_order`); it
 ///   takes the start's (a record made since sits after them, as the exe pushes one at the end, `0x00B5F330`). Without a
 ///   usable start the load goes on with a warning and the records are walked by faction id.
+/// * version 10 → 11: an older save lacks the region manager's order (`World::region_order`); it takes the
+///   start's, which is exact: nothing in play changes the manager's order and the exe's writer saves it as it is
+///   (`0x00A52FE0`). Without a usable start the load goes on with a warning and the regions are walked by id.
 pub fn read_with_start(bytes: &[u8], db: &GameDatabase, start: impl FnOnce() -> Result<CampaignModel, String>) -> Result<LoadedCampaign, FormatError> {
     let (version, info, data) = read_stored(bytes)?;
     let mut model = data.model;
-    // Only the steps before version 10 need the start (built here, once, before the steps).
-    let start = (version < 10).then(start);
+    // Only the steps before version 11 need the start (built here, once, before the steps).
+    let start = (version < 11).then(start);
     if version < 3 {
         let fail = |reason: String| FormatError::NeedsStart { found: version, reason };
         let start = match &start {
@@ -312,8 +317,18 @@ pub fn read_with_start(bytes: &[u8], db: &GameDatabase, start: impl FnOnce() -> 
         give_back_turn_start_construction(&mut model);
         copy_trade_course(&mut model, start);
     }
-    model.world.restricted_units.extend(data.restricted_units);
     crate::attach_rules(&mut model, db, &info.campaign_key);
+    // Held trait levels: kept from the save, set from the points for a save from before it kept them.
+    ntw_sim::campaign::characters::load_trait_levels(&mut model);
+    // The legacy list was merged into a set before the model kept the exe's list, so a unit it names is
+    // added once and only when not listed already.
+    for key in data.restricted_units {
+        if !model.world.restricted_units.contains(&key) {
+            model.world.restricted_units.push(key);
+        }
+    }
+    let units = std::mem::take(&mut model.world.restricted_units);
+    model.world.restricted_units = crate::known_restricted_units(&model, units, "the own save's restricted units");
     if version < 4 {
         let n = model.convert_legacy_repairs();
         if n > 0 {
@@ -351,6 +366,16 @@ pub fn read_with_start(bytes: &[u8], db: &GameDatabase, start: impl FnOnce() -> 
                 log::info!("Own save format version {version}: the order of {} factions' diplomacy records taken from the campaign's start", start.world.diplomacy_record_order.len());
             }
             Some(Err(e)) => log::warn!("Own save format version {version}: the diplomacy records' order was not restored (no campaign start: {e}); they are walked by faction id"),
+            None => {}
+        }
+    }
+    if version < 11 {
+        match &start {
+            Some(Ok(start)) => {
+                model.world.region_order.clone_from(&start.world.region_order);
+                log::info!("Own save format version {version}: the order of {} regions taken from the campaign's start", start.world.region_order.len());
+            }
+            Some(Err(e)) => log::warn!("Own save format version {version}: the regions' order was not restored (no campaign start: {e}); they are walked by id"),
             None => {}
         }
     }

@@ -252,24 +252,76 @@ marks functions `__thiscall` in memory before decompiling (the decompile then sh
     (+0x1B8..+0x1C4) and +0x1D0; only for a character with an obstacle owner (`0x006649C0`(+0x2A8)) that is an
     army or fleet commander or not in the special state (`0x009D3CB0` / `0x009FB9A0` / `0x00A17CF0`) it floods the
     zone with grid (model +0xF64) `0x00B7BAF0` and keeps the outline (+0x1C8) and its box.
-  - `0x00B7BAF0`, flag 0: the view faction is the character's own (char +0x2A0; the grid's stored view
-    grid +0x3FC/+0x400 when model +0xF5C +0x39 is set). A scope (`0x00AF5200`) prepares every layer for it: the
-    layer's third faction (+0x1AC) set to 0 (`0x00B72D70`), then `0x00B06280` gives **every obstacle of the layer**
-    (characters, forts, barriers; no relevance or fleet filter) its mode for that faction (`0x00B3F4F0`: 5 hidden,
+  - `0x00B7BAF0`, flag 0: the view faction V is the character's own (char +0x2A0) while the campaign's byte
+    +0x39 (model +0xF5C) is clear, else the grid's stored view faction +0x3FC (`0x00B07790` returns +0x3FC/+0x400;
+    zoneview 2026-10-20, below). A scope (`0x00AF5200`) prepares every layer for it: the
+    layer's third faction (+0x1AC) set to 0 (`0x00B72D70`), then `0x00B06280` (the character's own faction for the
+    region flags, V for the modes) gives **every obstacle of the layer**
+    (characters, forts, barriers; no relevance or fleet filter) its mode for V (`0x00B3F4F0`: 5 hidden,
     1 core only for its own faction or one not at war, else its +0x6C mode) and rebuilds the changed ones' cells.
     For a character whose army has +0x98 set, `0x00B078C0` replaces the layer's region flags (below) with "only
     region X": flags[slot] = 1 when the slot's region (+0x144 short) is X (army +0x98 → handle +0x68 → +0x10 →
     +0xA4), every extra slot 0 (polish58 2026-10-19, CONFIRMED by disassembly). Army +0x98 is the region the army
     rose in, its `REBEL_DATA` (0x74 bytes; zonegate 2026-10-19, CONFIRMED by disassembly and data): set by the
-    risings `0x00870E60` / `0x008AF5D0` → `0x00886BA0`; the force writer `0x008971C0` does not save it; the
+    risings `0x00870E60` / `0x008AF5D0` → `0x00886BA0`; loaded with the army itself (ARMY #7, `0x00870FD0` →
+    `0x00886950`) and saved by the ARMY writer `0x008FA810` (the REBEL_DATA writer `0x008971C0`, called at
+    `0x008FAA09` when +0x98 is set, before the navy u32 +0xEC; rebelgov 2026-10-20, CONFIRMED by decompile); the
     region reader `ConstructCampaignRegionFromEsf` `0x00A45950` reads the optional `REBEL_DATA` template
     (+0x21C, `0x00886C90`), then the region's id list (`0x0086F140`), each id resolved (`0x0105AC60`) and added
-    to the set +0x220 (`0x008CFB60` → `0x008CF7D0`), which gives the army its +0x98. In the save the list is
+    to the set +0x220 (`0x008CFB60` → `0x008CF7D0`, appended in file order), linking the army's +0x98 block to
+    the region; an army's destructor `0x0088CE30` unlinks it (`0x0088F310` → `0x0088CA00` → `0x008B0150`:
+    erase, the rest shifted down, order kept; rebelgov 2026-10-20, CONFIRMED by decompile). In the save the list is
     `REGION` #35 when #34 is the `REBEL_DATA_INNARDS` record, else #34 (orig_fr_may1811: each id a rebel land
     army). Then the flood (`0x00B7B7A0`) and the
     scope's end (`0x00AF7A00`: third factions cleared, `CampaignPathGrid::ReapplyPathGridFactionView` `0x00B67490`
     restores the stored view). Flag 1: the flood runs on the layers as they stand (the caller prepared them).
-    A faction without a record (`IsFactionWithoutRecord` `0x008CEEF0`) with a stored view floods unprepared.
+    A V without a record (`IsFactionWithoutRecord` `0x008CEEF0`) while +0x400 is non-zero floods unprepared.
+  - **The grid's stored view** (zoneview 2026-10-20, CONFIRMED by decompile, disassembly and an instruction
+    search for every store): `CampaignPathGrid` (model +0xF64) +0x3FC view faction, +0x400 single-region index,
+    +0x404..+0x410 the view list, +0x414 mode (0 faction, 1 list, 2 rebel region; the constructor `0x00AE7350`
+    leaves +0x400 = 0, +0x414 = 3). `0x00B06210`(faction, store): every layer's modes and flags for the faction
+    (`0x00B06620` → `0x00B06280`); with store set it also writes +0x3FC and +0x414 = 0. Store set only from the
+    load pass `0x00B0DC10`, `0x00B0DF30`, `0x00B67490` mode 0 and the acting view `0x008A87D0`; the diplomacy
+    refresh `0x00B795A0`, `0x00A87F50` and the barrier refresh `0x00B64E30` pass 0. `0x00B06C00` stores the list
+    view (mode 1). `StorePathGridRebelRegionView` `0x00B077B0`(character): `0x00B06210`(his faction, 0), per layer `0x00B078C0`, then +0x3FC = his
+    faction, +0x400 = his army's +0x98 region index (handle +0xA4) at `0x00B0784C`, +0x414 = 2; nothing else
+    writes +0x400, so it is never cleared. `ReapplyPathGridFactionView` `0x00B67490`: mode 0 → `0x00B06210`(+0x3FC,
+    1); 1 → `0x00B06C00`; 2 → `0x00B06210`(+0x3FC, 0) and `0x00B07870`(+0x400) (per layer `0x00B07950`, only
+    that region's slots); `0x00B67420` (from `0x00B617E0`) is the same with `0x00B05E50`. Who stores what: the
+    load pass per faction `0x00B06210`(f, 1) before its characters, per rebel character `0x00B077B0`; the campaign
+    start `0x00872550` runs `0x00B0DF30` (re-adds the obstacles, no flood, stores the same views, rebels last),
+    sets campaign +0x39 = 1 at `0x00873D4D`, then the acting view `0x008ED860` at `0x00873DF3`; `0x008ED860` →
+    `0x008A87D0` stores the acting faction's view (`0x00974EF0`: the turn faction, campaign +0x18, outside a
+    revolution; see "Revolutions" below), at each faction turn start (`0x008F2620` at `0x008F28D3`) and after
+    battles (`0x008F7880`); the campaign AI's order steps (`0x00A645C0`, `0x00A65360`, `0x00AAF550` →
+    `0x00C3C320`, others in `0x00A6xxxx`–`0x00AAxxxx`) call `0x00B077B0` for the order's character when his
+    faction has no record, before issuing the order (`0x00A645C0`: `0x00B077B0`, then `0x00915F20`), and never
+    put the old view back, whether the order succeeds or not. Campaign +0x39: cleared by the campaign constructor `0x0090C4A0` (word +0x38 at
+    `0x0090C527`), set at `0x00873D4D` and `RunCampaignRoundStart` `0x0096C054`, never cleared after. So the load
+    pass floods each commander with his own faction's modes, and every later flood with the stored view's: in a
+    faction's turn every commander's zone, of any faction, sees the obstacles with the turn faction's modes, and
+    after a rebel's order with the rebel view (only his home region's slots). `0x00A84230` (AI scratch) stores and
+    puts back a view around its own work. Ours: `zones::GridState` (view, +0x400, +0x39), `store_acting_view` at
+    `TurnStep::FactionStart`, `store_rebel_view` before a rebel's force order in `CampaignModel::apply` (kept
+    when the order fails); the load pass is unchanged (zoc_install: 64 of 87 commanders' saved zones match).
+    PROVISIONAL: the views `0x008F7880` (post-battle continuation) and `0x008C1140` store are not modelled.
+  - **Revolutions (acting view; CONFIRMED by disassembly, zoneview round 2):** `0x00974EF0` returns campaign
+    +0x1C instead of the turn faction +0x18 only while +0x18 is in a revolution (`0x008CA0B0`: +0x814) with
+    +0x81C == +0x81D. `0x008A87D0` returns a character only when that acting faction differs from +0x18
+    (`0x00898B80`), has no record (`0x008CEEF0`), the revolution settlement (+0x818, set by `0x008EE3E0`) resolves
+    (`0x008B7810`, its vtable +0x34) and its +0x220 list is non-empty (`0x006A3110` = +0x22C; items +0x230): the
+    first entry whose +0x74 handle resolves (`0x00898E80`) is the character, and `0x008ED860` stores his rebel view
+    (`0x00B077B0`) instead of a faction view (`0x00B06210`). So in the rebels' own turn the acting view is the
+    rebels' faction view, as ours. PROVISIONAL (BACKLOG §6 revolutions, faction +0x814 / +0x81C): revolutions
+    are not in our model, so `zones::acting_view` always takes the turn faction.
+  - **Other `0x008ED860` / `0x008A87D0` callers** (listed, not traced further; ours stores the acting view only
+    at the campaign start and the faction turn start): `0x00AAB440` (the rebel spawn of the unrest outcomes)
+    stores it again near its end (at `0x00AAD3E6`); `0x008BD6D0` (a faction's end of turn, after
+    the autosave) stores it when the turn faction is in a revolution with +0x81D clear, setting +0x81D = 1 first
+    (the revolution's second half of the turn); `SHROUD_SetEnabledAndRefresh` `0x00B68500` (script
+    `show_shroud`) stores it before posting the redraws; `0x008ED820`, the same choice with a faction view stored
+    by `0x00B05E50` (+0x3FC = faction, mode 0; or the rebel view), is called only by the revolution setter
+    `0x008EE3E0` (at `0x008EE479`). A seventh call at `0x008B9EC2` lies outside any defined function.
   - `0x00B7B7A0`: starts at the army's, the carrier's or the character's own position (an army-less, carrier-less
     character with +0x4E8 = 0 must pass `0x00B6A860`, else no zone); locates it (`0x00B53EE0`, kind 0xC = no zone);
     limit `0x00A2A1C0` + 2.0 when the army's slot 0x58 or 0x48 test holds; flood `0x00ACA170` with neighbours
@@ -330,8 +382,11 @@ marks functions `__thiscall` in memory before decompiling (the decompile then sh
     an agent's action) run armies and fleets behind it and agents without it. Tests: zones.rs
     `an_army_paths_only_into_regions_its_faction_may_stand_in`, `an_agent_and_a_rebel_force_path_without_the_gate`,
     `the_path_gate_has_the_zone_floods_flags`; zoc.rs `the_region_gate_stops_a_path_at_a_closed_region`.
-    PROVISIONAL: a recordless (rebel) mover's search, which runs on the grid's stored view (+0x400,
-    `0x00B67490` mode 2; not traced): ours runs it without a gate. Not ported: the transport / port-entry
+    PROVISIONAL: a recordless (rebel) mover's search runs on the layers as the grid's stored view left
+    them (after his own order `0x00B077B0`'s: his home region's single slots, +0x400). Ours keeps that view
+    (`zones::GridState`) but `path_region_gate` does not read it, so a rebel force paths with no gate; how
+    the search scopes (`0x00AF5B60` / `0x00AF5C00`, `0x00B67490` mode 2) treat a recordless mover is not traced.
+    Not ported: the transport / port-entry
     searches (embark.rs) and the commander-recruitment search; the smoothing corridor `0x00B6AD30`'s
     region test (not traced).
   - **When it runs** (callers of `0x00A28440`): `0x00A285C0` (flag 0, then the core `0x009CC0E0` and the sight
@@ -410,8 +465,8 @@ marks functions `__thiscall` in memory before decompiling (the decompile then sh
     in (`0x00B077B0`). `zoc::reach_in` takes the flags in its neighbour test. A missing relationship record
     reads as no access (ours; the exe's first-record read above is an ORIGINAL BUG, unreachable with shipped
     data: every non-rebel pair has a record in eur_napoleon's startpos and the evidence saves, measured).
-    PROVISIONAL (BACKLOG): a rebel commander's later floods use the grid's stored view (+0x400, never
-    cleared) in the exe, its own flags in ours. With the gate the stored zones give the saved box and zone
+    Every flood after the load pass reads the grid's stored view (`zones::GridState`, zoneview 2026-10-20,
+    "The grid's stored view" above). With the gate the stored zones give the saved box and zone
     range for 64 of 87 start-position commanders, the bare flood 60 (`zoc_install.rs`), so the save writer
     now takes each commander's stored zone (`NewObstacle::zone`, `obstacle_record_with_zone`); agents keep
     no zone. The other 23 are UNKNOWN (BACKLOG). Not ported, none needed: the barrier refresh
@@ -447,7 +502,7 @@ marks functions `__thiscall` in memory before decompiling (the decompile then sh
     `expel_faction_from_region` did armies by force id, then navies, and now walks the list (test
     `the_expulsion_walks_the_faction_list_in_its_order`). Order-independent: the out-of-game flag `0x008B4330`
     (an all-of check: with no region, +0x824 is set only when every character's +0x2B8 handle resolves through
-    `0x006649C0`, returning at the first that does not; what +0x2B8 is, is UNKNOWN) and peace `0x00B262C0`
+    `0x006649C0`, returning at the first that does not; +0x2B8 is the character's government post handle, set by `0x009CB1E0`, CONFIRMED by charflag, see CHARACTERS_FIDELITY.md "Out-of-game flag") and peace `0x00B262C0`
     (`0x00B263A6`, `0x00B263E4`: each character's `0x00A25570` ends only his own raids; ours
     `clear_raids_on_peace` builds a set). About forty more functions read +0x768 (BACKLOG).
 - Save layout (`OBSTACLE_LISTS/CHARACTER_OBSTACLE[]/OBSTACLE`): #0 six boundary slots (slot 0 = zone pieces,

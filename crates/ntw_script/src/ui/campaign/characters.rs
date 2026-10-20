@@ -176,7 +176,7 @@ pub(super) fn traits_table(lua: &Lua, inner: &Inner, ui: &CampaignUi, m: &Campai
         if m.rules.characters.traits.get(&tr.key).is_some_and(|r| r.hidden) {
             continue;
         }
-        let Some((_, level, level_key)) = m.rules.effects.trait_level_row(&tr.key, tr.points) else { continue };
+        let Some((_, level, level_key)) = m.rules.effects.held_level_row(&tr.key, tr.level) else { continue };
         if *level <= 0 {
             continue;
         }
@@ -296,10 +296,8 @@ pub(super) enum Pips {
 /// builder `0x009AD250` takes the character's main-attribute index (`0x00A198C0`) and fills the three
 /// `Primary*` fields only when it is a valid index (< 14), CONFIRMED. `PrimaryLevel` =
 /// `min(rank + 1, 9)` with the rank from `0x00A198D0` (`0x009AE759..0x009AE768`): the formula is
-/// CONFIRMED; the rank it reads is our `agents::rank`, CONFIRMED for agents but PROVISIONAL for
-/// generals, admirals, ministers and missionaries (their theatre / battle / army-make-up /
-/// minister-post bonuses are not modelled, see `GetCharacterRank` in `CHARACTERS_FIDELITY.md`), so
-/// their `PrimaryLevel` is PROVISIONAL too.
+/// CONFIRMED; the rank it reads is our `agents::rank` (the `character.rank` seam). PROVISIONAL with it:
+/// the pending-battle bonuses of generals and admirals are not modelled (see `agents::rank_original`).
 ///
 /// `character` is `None` for rows that are not a character (sabotage targets), and a character id
 /// with no record has no type: PROVISIONAL empty `Primary*` values so the card's unguarded reads still
@@ -308,8 +306,9 @@ pub(super) enum Pips {
 /// empty values where the exe leaves the fields unset.
 ///
 /// PROVISIONAL: the exe's per-attribute part is all 14 attributes keyed by attribute key (its loop
-/// `0x009AE87D..`, value from `0x009CB560`, not traced, so whether it is the base or the effective
-/// level is UNKNOWN); ours is the character's own attribute list (base values) as an array.
+/// `0x009AE87D..`, value from `0x009CB560`: the stored level, which holds the trait and ancillary
+/// attribute effects, CONFIRMED in `Effects::character_attribute`); ours is the character's own
+/// attribute list (the same stored levels) as an array.
 pub(super) fn attributes_table(lua: &Lua, inner: &Inner, ui: &CampaignUi, character: Option<CharacterId>, pips: Pips) -> mlua::Result<Table> {
     let attrs = lua.create_table()?;
     let m = ui.model();

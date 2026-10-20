@@ -9,11 +9,9 @@
 //!
 //! Controls: left click selects an army, navy or agent; right click (without dragging) orders:
 //! move to the ground, attack an enemy army, merge with an own army, board an own fleet (an
-//! embarked army lands where it is ordered), or enter a settlement. `Return` ends the turn (the
-//! HUD button does too; PROVISIONAL: written here, while `text/default_keys.xml` maps `end_turn`
-//! to the `button_end_turn` component, which ours does not dispatch yet). The root's shortcuts
-//! (quick save, quick load, escape menu...) are read from that file by the HUD
-//! (`super::hud::keys`).
+//! embarked army lands where it is ordered), or enter a settlement. The keys (Return = end turn on
+//! the HUD's `button_end_turn`, the root's quick save, quick load, escape menu..., the camera's
+//! steps) are the bindings of `text/default_keys.xml`, run by the HUD (`super::hud::keys`).
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -52,7 +50,7 @@ pub struct CampaignSim {
     /// eight start positions and all ten vanilla saves -- so in practice a fort selection still comes
     /// only from the HUD.
     pub selected_fort: Option<RegionId>,
-    /// Paths to animate, by character (logic x, z), from the last command.
+    /// Paths to animate, one per character (logic x, z), from the last command or end turn.
     pub moves: Vec<(CharacterId, Vec<(f32, f32)>)>,
     /// Defeat / victory movies the model queued (`CampaignEvent::OutcomeMovie`), for the HUD's movie
     /// panel; drained by `hud::update`.
@@ -166,7 +164,7 @@ impl CampaignSim {
                 }
                 for e in &events {
                     if let CampaignEvent::CharacterMoved { character, path } = e {
-                        self.moves.push((*character, path.clone()));
+                        record_move(&mut self.moves, *character, path);
                     }
                     if let CampaignEvent::OutcomeMovie { faction, movie } = e {
                         self.outcome_movies.push((*faction, movie.clone()));
@@ -208,6 +206,16 @@ impl CampaignSim {
     }
 }
 
+/// Adds a `CharacterMoved` path to the moves to animate. A character moving more than once (an AI's
+/// moves in an end turn, an embark's legs) walks them one after another, as one path, so his marker
+/// ends where the model put him.
+fn record_move(moves: &mut Vec<(CharacterId, Vec<(f32, f32)>)>, character: CharacterId, path: &[(f32, f32)]) {
+    match moves.iter_mut().find(|(c, _)| *c == character) {
+        Some((_, walked)) => walked.extend_from_slice(path),
+        None => moves.push((character, path.to_vec())),
+    }
+}
+
 /// A character's marker on the map.
 #[derive(Component)]
 pub struct CharacterMarker {
@@ -228,6 +236,15 @@ pub struct MoveAnimation {
     path: Vec<Vec3>,
     /// Distance walked so far.
     done: f32,
+}
+
+/// Ends a marker's walk at the model's position `target`: a character relocated with no
+/// `CharacterMoved` after his last one (put into or out of a settlement, a transport's landing...)
+/// steps there at the end instead of stopping off it until the next command.
+fn end_at(path: &mut Vec<Vec3>, target: Vec3) {
+    if path.last().is_none_or(|p| p.distance_squared(target) > 1e-6) {
+        path.push(target);
+    }
 }
 
 /// Animation speed in map units per second. PLACEHOLDER (presentation only).
@@ -283,9 +300,13 @@ pub fn sync_markers(
         let (x, z) = (ch.position.0.to_f32(), ch.position.1.to_f32());
         let target = ground_pos(&ground, x, z, lift);
         if let Some((_, path)) = moves.iter().find(|(c, _)| *c == ch.id) {
-            let pts: Vec<Vec3> = path.iter().map(|&(px, pz)| ground_pos(&ground, px, pz, lift)).collect();
+            let mut pts: Vec<Vec3> = path.iter().map(|&(px, pz)| ground_pos(&ground, px, pz, lift)).collect();
+            end_at(&mut pts, target);
             commands.entity(e).insert(MoveAnimation { path: pts, done: 0.0 });
-        } else if anim.is_none() {
+        } else if let Some(mut anim) = anim {
+            // Relocated during a running walk without a new move: the walk still ends where he is.
+            end_at(&mut anim.path, target);
+        } else {
             tf.translation = target;
         }
     }
@@ -594,6 +615,11 @@ pub fn order_for(m: &CampaignModel, me: CharacterId, x: f32, z: f32) -> Option<C
     let ch = m.world.characters.get(&me)?;
     let to = (Fixed20::from_f64(x as f64), Fixed20::from_f64(z as f64));
     let Some(force) = m.force_of(me) else {
+        // A character without a force ordered onto a settlement walks into it (the move-to-residence
+        // order 0x009549B0; see CampaignCommand::AgentEnterSettlement).
+        if let Some(region) = settlement_near(m, x, z, PICK_RADIUS) {
+            return Some(CampaignCommand::AgentEnterSettlement { agent: me, region });
+        }
         return Some(CampaignCommand::MoveCharacter { character: me, to });
     };
     if let Some(other) = character_near(m, x, z, PICK_RADIUS, None).filter(|c| *c != me)
@@ -623,28 +649,27 @@ pub fn order_for(m: &CampaignModel, me: CharacterId, x: f32, z: f32) -> Option<C
 pub fn order_targets(m: &CampaignModel, me: CharacterId, x: f32, z: f32) -> bool {
     matches!(
         order_for(m, me, x, z),
-        Some(CampaignCommand::AttackForce { .. } | CampaignCommand::MergeForces { .. } | CampaignCommand::EnterSettlement { .. })
+        Some(
+            CampaignCommand::AttackForce { .. }
+                | CampaignCommand::MergeForces { .. }
+                | CampaignCommand::EnterSettlement { .. }
+                | CampaignCommand::AgentEnterSettlement { .. }
+        )
     )
 }
 
-/// Mouse and keyboard input on the map.
+/// Mouse input on the map.
 #[allow(clippy::too_many_arguments)]
 pub fn input(
     sim: Option<NonSendMut<CampaignSim>>,
     ground: Option<Res<CampaignGround>>,
     buttons: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
     window: Single<&Window, With<PrimaryWindow>>,
     camera: Single<(&Camera, &GlobalTransform), With<CampaignCamera>>,
     hud: Option<NonSend<super::hud::CampaignHud>>,
     mut right_down: Local<Option<Vec2>>,
 ) {
     let (Some(mut sim), Some(ground)) = (sim, ground) else { return };
-    // Return ends the turn unless the HUD took it this frame or holds the input focus (the exe runs
-    // no key binding then, 0x00EEE1E0; the camera keys use the same `text_focused` gate).
-    if keys.just_pressed(KeyCode::Enter) && !hud.as_ref().is_some_and(|h| h.keys_taken || h.text_focused) {
-        sim.end_turn();
-    }
     // Clicks on the HUD belong to the HUD.
     if let (Some(h), Some(c)) = (&hud, window.cursor_position())
         && h.covers(c)
@@ -791,6 +816,34 @@ pub fn leave(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_characters_moves_walk_as_one_path() {
+        // An end turn returns every AI move: a character moving twice walks both legs, in order.
+        let mut moves = Vec::new();
+        record_move(&mut moves, CharacterId(1), &[(0.0, 0.0), (1.0, 0.0)]);
+        record_move(&mut moves, CharacterId(2), &[(5.0, 5.0), (6.0, 5.0)]);
+        record_move(&mut moves, CharacterId(1), &[(1.0, 0.0), (1.0, 1.0)]);
+        assert_eq!(
+            moves,
+            vec![(CharacterId(1), vec![(0.0, 0.0), (1.0, 0.0), (1.0, 0.0), (1.0, 1.0)]), (CharacterId(2), vec![(5.0, 5.0), (6.0, 5.0)])]
+        );
+    }
+
+    #[test]
+    fn a_walk_ends_at_the_models_position() {
+        // Relocated after his last move: the walk gets one more leg to where the model put him.
+        let mut path = vec![Vec3::ZERO, Vec3::X];
+        end_at(&mut path, Vec3::new(1.0, 0.0, -2.0));
+        assert_eq!(path, vec![Vec3::ZERO, Vec3::X, Vec3::new(1.0, 0.0, -2.0)]);
+        // Already there: unchanged.
+        end_at(&mut path, Vec3::new(1.0, 0.0, -2.0));
+        assert_eq!(path.len(), 3);
+        // An empty path (a move with no points) still ends at the position.
+        let mut empty = Vec::new();
+        end_at(&mut empty, Vec3::Y);
+        assert_eq!(empty, vec![Vec3::Y]);
+    }
 
     /// A click on any settlement of the Europe start position opens that settlement, unless a
     /// character standing on the map (not inside a settlement) is nearer. Needs the install.

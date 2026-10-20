@@ -190,7 +190,8 @@ fn member_year(rng: &mut CaRng, m: &mut FamilyMember) {
 }
 
 /// The yearly family pass (`0x008BC9C0`, run first in the year-end faction pass `0x008BC650` for a
-/// living faction with a family). CONFIRMED order of the draws, all on the campaign RNG:
+/// faction that is not the rebels (`0x008CEEF0`), has +0x824 clear (`0x008BC6D0`) and whose family
+/// +0x794 resolves). CONFIRMED order of the draws, all on the campaign RNG:
 /// 1. the leader ages; each present child ages and has his year ([`member_year`]); a child turning
 ///    16 draws #4;
 /// 2. an unmarried leader (or one whose spouse is gone) marries when 25 + a 0..=10 draw is below
@@ -447,7 +448,7 @@ impl CampaignModel {
                 regnal_numeral: numeral,
                 birth: Some(birth),
                 post: post_id as u32,
-                ..Default::default()
+                ..self.rules.characters.new_character_details(CharacterKind::Minister.esf_name())
             },
         );
         if let Some(p) = self.world.faction_details.get_mut(&faction).and_then(|d| d.posts.get_mut(post)) {

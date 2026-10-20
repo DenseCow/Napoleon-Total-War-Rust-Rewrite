@@ -25,6 +25,7 @@ use ntw_sim::campaign::{
 };
 
 use super::host::{CallTarget, Inner, PostedCall, UiScriptHost, addr, call_entry, log, state_function_guard};
+use super::shortcuts::ShortcutMachine;
 use super::world::{NodeId, UiRect};
 use crate::ScriptState;
 
@@ -83,13 +84,15 @@ use settlement::*;
 use tabs::*;
 use technology::*;
 
-/// One key press for [`UiScriptHost::campaign_key`].
+/// One key event (a press, an auto-repeat or a release) for [`UiScriptHost::campaign_key`].
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CampaignKey<'a> {
-    /// The exe's name of the physical key (its key table `0x0139FEC8`, e.g. `"S"`, `"ESCAPE"`,
-    /// `"NUMPADENTER"`): what `default_keys.xml` binds and `StealShortcutKey` steals. None for a
-    /// key the exe has no name for.
-    pub key: Option<&'a str>,
+    /// The exe's names of the keys down now, this event's key included on a press (its key table
+    /// `0x0139FEC8`, e.g. `"S"`, `"ESCAPE"`, `"NUMPADENTER"`): what `default_keys.xml` binds and
+    /// `StealShortcutKey` steals. The exe polls its frame's key snapshot (`0x00E20190`).
+    pub down: &'a [&'a str],
+    /// A key release (else a press or a repeat).
+    pub up: bool,
     /// The editing key's name a focused text field hears (`"ESCAPE"`, `"RETURN"`, `"BACK"`, ...).
     pub edit: Option<&'a str>,
     /// The text the press types.
@@ -98,6 +101,98 @@ pub struct CampaignKey<'a> {
     pub repeat: bool,
     /// The modifiers held.
     pub held: ntw_formats::default_keys::Held,
+    /// The frame's time in seconds, which a pressed binding passes on (the camera's steps scale
+    /// with it, `0x0095A510`).
+    pub time: f32,
+}
+
+/// The component name of the camera's bindings (`default_keys.xml` mappings; the campaign
+/// camera controller registers under it, `0x009012B0`).
+pub const CAMERA_COMPONENT: &str = "camera";
+
+/// The campaign HUD as the shortcut handler's target ([`UiScriptHost::campaign_key`]).
+struct HudShortcuts<'a> {
+    host: &'a UiScriptHost,
+    camera: &'a mut dyn FnMut(&str, f32),
+}
+
+impl HudShortcuts<'_> {
+    /// The UI component a binding goes to: the first of that name under the root, depth first,
+    /// searched once per UI change (`Inner::find_under_root`).
+    /// PROVISIONAL: the exe binds every registered handler of that name (`0x00EDD1B0`), ours the
+    /// first component found.
+    fn component(&self, name: &str) -> Option<NodeId> {
+        self.host.inner().find_under_root(name)
+    }
+
+    /// The component's global `OnShortcut(func, released)` (`0x0102F280`: the press passes false,
+    /// the release true); a script error is logged.
+    fn on_shortcut(&self, component: &str, func: &str, released: bool) {
+        let Some(id) = self.component(component) else { return };
+        let (lua, inner) = (self.host.lua(), self.host.inner());
+        let r = call_entry::<bool>(lua, inner, id, "__ntw_call_if_defined", (addr(id), "OnShortcut", func, released));
+        if let Err(e) = r {
+            log(inner, format!("ERROR in OnShortcut of {component}: {e}"));
+        }
+    }
+}
+
+impl super::shortcuts::ShortcutTarget for HudShortcuts<'_> {
+    fn registered(&self, component: &str) -> bool {
+        component == CAMERA_COMPONENT || self.component(component).is_some()
+    }
+
+    /// PROVISIONAL: the input layer (`0x00DACBA0`, a component's priority against
+    /// `g_nUIMinInputLayer` `0x01765944`; the camera `0x009535B0`) is not modelled: never locked.
+    fn unlocked(&self, _: &str) -> bool {
+        true
+    }
+
+    /// A component takes shortcuts while its current state is not disabled (`0x00DACBB0` reads the
+    /// state's +0x115 flag, our `disabled`, INFERRED mapping as for clicks); the camera always
+    /// (`0x0095A510`'s handler answers true).
+    fn ready(&self, component: &str) -> bool {
+        if component == CAMERA_COMPONENT {
+            return true;
+        }
+        let Some(id) = self.component(component) else { return false };
+        !self.host.inner().world.borrow().get(id).and_then(|n| n.current()).is_some_and(|s| s.disabled)
+    }
+
+    fn press(&mut self, component: &str, func: &str, time: f32) {
+        if component == CAMERA_COMPONENT {
+            (self.camera)(func, time);
+        } else {
+            self.on_shortcut(component, func, false);
+        }
+    }
+
+    /// A UI component hears `OnShortcut(func, true)` (`0x00DAD1B0`; PROVISIONAL: its post of a
+    /// component string (likely its name) to `[0x01765920]+0x60` and the list at `0x015F8FEC` is not
+    /// ported); the camera's release does nothing (`0x0044A780`).
+    fn release(&mut self, component: &str, func: &str) {
+        if component != CAMERA_COMPONENT {
+            self.on_shortcut(component, func, true);
+        }
+    }
+
+    fn stolen(&self, key: &str) -> bool {
+        self.host.stealer_of(key).is_some()
+    }
+
+    fn stolen_keys(&self) -> Vec<String> {
+        self.host.stolen_key_names()
+    }
+
+    fn send_stolen(&mut self, keys: &[&str], down: bool) -> bool {
+        let mut heard = false;
+        for k in self.host.stolen_key_names() {
+            if keys.contains(&k.as_str()) {
+                heard |= self.host.send_stolen_key(&k, !down).is_some();
+            }
+        }
+        heard
+    }
 }
 
 /// What the HUD needs from the running campaign.
@@ -957,8 +1052,11 @@ fn install_functions(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tabl
     // QuitToMainScreen(): the OK of the defeat movie panel and the Exit of the campaign result
     // (CONFIRMED callers, event_movie_panel.luac / campaign_result.luac). The exe (`0x00429CF0` →
     // `0x009EF630` → `0x009BFED0`) sets the leave request, byte +0x7C of the UI manager's +0x9FC
-    // object. INFERRED: that request goes back to the main menu, as the name says (its reader is
-    // not traced).
+    // object, which the campaign mode's next-mode step `0x00A065A0` reads (CONFIRMED by
+    // decompilation): it answers mode code 2 (QuitToWindowsFromEscapeMenu's byte +0x7D gives 6),
+    // unless EPISODIC_RESTRICTIONS +0xD0 is set and the mode holds a launcher (+0x2C), which then
+    // starts "campaign|<the mode's +0x30>" instead (UNKNOWN which campaigns set +0xD0). INFERRED:
+    // code 2 is the main menu, as the name says (the code's consumer is not traced).
     f!("QuitToMainScreen", |_l, inner, ui, _a: Variadic<Value>| {
         ui.push(CampaignRequest::QuitToMainScreen);
         Ok(())
@@ -971,8 +1069,11 @@ fn install_functions(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tabl
     });
     // ContinueGameSelected(): Continue on the campaign result (campaign_result.luac `ContinueGame`).
     // The exe (`0x00428910` → `0x009E1D20`) sends `CCQ_CONTINUE_GAME_SELECTED`, whose handler
-    // `0x00932B40` clears byte +0x9C of an object of campaign +0xF70 (UNKNOWN meaning). PROVISIONAL:
-    // nothing; the campaign goes on, as in single player the victory conditions never end it.
+    // `0x00932B40` clears byte +0x9C of the object campaign +0xF70's first entry returns (vfunc
+    // +0x1C), the byte the victory check `0x0096CD10` sets when a human has won (at `0x0096CE7C`,
+    // single player too; CONFIRMED by disassembly; no other access through that path). PROVISIONAL:
+    // nothing; the campaign goes on, as in single player the victory conditions never end it (what
+    // reads byte +0x9C is not traced).
     f!("ContinueGameSelected", |_l, inner, ui, _a: Variadic<Value>| {
         inner.log_once("ContinueGameSelected", || {
             "PROVISIONAL: CampaignUI.ContinueGameSelected does nothing yet (the effect of CCQ_CONTINUE_GAME_SELECTED is not traced)".into()
@@ -982,6 +1083,13 @@ fn install_functions(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tabl
     f!("PlayerHasFunds", |_l, inner, ui, amount: Option<f64>| {
         let m = ui.model();
         Ok(m.faction_by_key(&ui.link.human).is_some_and(|f| f64::from(f.treasury) >= amount.unwrap_or(0.0)))
+    });
+    // EnableShortcutHandler(on): switches the key bindings on or off (CONFIRMED, `0x009E2550` reads
+    // the argument and calls `0x00EA5080`, which sets the shortcut manager's +0x30 that
+    // `0x00EEE250` and `0x00ED76E0` test first; see `UiScriptHost::campaign_key`).
+    f!("EnableShortcutHandler", |_l, inner, ui, on: Value| {
+        inner.shortcuts_enabled.set(!matches!(on, Value::Nil | Value::Boolean(false)));
+        Ok(())
     });
     // Debug and engine-side notifications with nothing to do in our engine.
     for name in [
@@ -993,7 +1101,6 @@ fn install_functions(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tabl
         "TriggerUnitSelectedEvent",
         "TriggerMessageOpenedEvent",
         "TriggerMessageDropEvent",
-        "EnableShortcutHandler",
         "PauseCampaign",
         "StopCamera",
         "InformAdviceReachedRender",
@@ -1224,62 +1331,58 @@ impl UiScriptHost {
         }
     }
 
-    /// A key binding mapped to the root fired (`text/default_keys.xml`, e.g. `escape_menu`,
-    /// `quick_save`, `quick_load`; see [`Self::campaign_key`]): the root's `OnShortcut(name, true)`
-    /// (CONFIRMED, `layout.root.luac` line 1602: it acts only when the second argument is true, so
-    /// the release call is not made). Returns false when the root has no `OnShortcut`.
+    /// The root's `OnShortcut(name, true)`: what a root binding's release does (CONFIRMED,
+    /// `layout.root.luac` line 1602 acts only when the second argument is true). The harness's
+    /// quick save calls it; keys go through [`Self::campaign_key`]. Returns false when the root has
+    /// no `OnShortcut`.
     pub fn campaign_shortcut(&self, name: &str) -> bool {
         call_root_global(self.lua(), self.inner(), "OnShortcut", (name, true))
     }
 
-    /// One key press in the campaign, in the exe's order (CONFIRMED, disassembly): the campaign
+    /// One key event in the campaign, in the exe's order (CONFIRMED, disassembly): the campaign
     /// mode's key handler `0x00A27EB0` passes "a component holds the input focus"
     /// ([`Self::input_focus_held`]) to the shortcut handler `0x00EEE1E0`, which then runs no
     /// binding at all: while a text field has the focus no shortcut fires (CTRL+S does not quick
     /// save, ESCAPE does not open the escape menu) and no component that stole the key hears it;
-    /// the press goes to the focused field only (its editing keys, [`Self::focused_key`], and the
+    /// a press goes to the focused field only (its editing keys, [`Self::focused_key`], and the
     /// typed text, [`Self::text_input`]; while CTRL is held without ALT nothing is typed: Windows
     /// sends CTRL+letter as a control character, which `IsCharPrintable` `0x01015F10` rejects,
-    /// while CTRL+ALT is AltGr and types its character). Without a focus, `0x00ED76E0` gives a key a component stole
-    /// (`StealShortcutKey`, `0x00EC3DE0`) to that component instead of its bindings
-    /// ([`Self::stolen_key`]); else every binding of `bindings` (the campaign's root-mapped
-    /// shortcuts) the key and the held modifiers match fires, each through
-    /// [`Self::campaign_shortcut`] (several may fire on one press: `0x00ED76E0` does not stop at the
-    /// first). Returns true when the HUD took the key.
+    /// while CTRL+ALT is AltGr and types its character).
     ///
-    /// PROVISIONAL: the exe's binding state machine is not ported: it polls each binding's keys on
-    /// every key event, so a binding also fires when its modifier goes down after its key, keeps
-    /// one binding active, calls the release (`+0x2c`) and honours the repeat / ignore-lock flags
-    /// and the handler lock `+0x84`; ours fires on the key's own press, once (no key repeat), and a
-    /// stolen key goes to its stealer whatever modifiers are held.
-    pub fn campaign_key(&self, bindings: &ntw_formats::default_keys::Bindings, press: CampaignKey) -> bool {
+    /// Without a focus, and while `CampaignUI.EnableShortcutHandler` has not switched them off,
+    /// the key bindings run ([`ShortcutMachine::key_event`], `0x00EEE250`): a binding of a UI
+    /// component calls that component's `OnShortcut(func, false)` when pressed and
+    /// `OnShortcut(func, true)` when released (Return: `end_turn` to `button_end_turn`, whose
+    /// script ends the turn on the release); a camera binding calls `camera(func, time)` on each
+    /// press; a stolen key (`StealShortcutKey`) goes to its stealer's `OnKey`.
+    ///
+    /// The handler's lock (`steal_user_input`) is not modelled yet: its tag is on
+    /// [`ShortcutMachine::key_event`].
+    pub fn campaign_key(&self, machine: &mut ShortcutMachine, press: CampaignKey, camera: &mut dyn FnMut(&str, f32)) {
         if self.input_focus_held() {
+            if press.up {
+                return;
+            }
             if let Some(name) = press.edit {
                 // ESCAPE / RETURN act once per press; the editing keys repeat.
-                if press.repeat && matches!(name, "ESCAPE" | "RETURN") {
-                    return false;
+                if !(press.repeat && matches!(name, "ESCAPE" | "RETURN")) {
+                    self.focused_key(name);
                 }
-                return self.focused_key(name);
+                return;
             }
             let shortcut_modifier = press.held.ctrl && !press.held.alt;
-            return match press.text {
-                Some(text) if !shortcut_modifier => self.text_input(text),
-                _ => false,
-            };
+            if let Some(text) = press.text
+                && !shortcut_modifier
+            {
+                self.text_input(text);
+            }
+            return;
         }
-        let Some(key) = press.key else { return false };
-        if press.repeat {
-            return false;
+        if !self.inner().shortcuts_enabled.get() {
+            return;
         }
-        if self.stolen_key(key).is_some() {
-            return true;
-        }
-        let mut fired = false;
-        for func in bindings.fired(key, press.held) {
-            self.campaign_shortcut(func);
-            fired = true;
-        }
-        fired
+        let is_down = |k: &str| press.down.contains(&k);
+        machine.key_event(&is_down, press.held, press.time, &mut HudShortcuts { host: self, camera });
     }
 
     /// The engine's HUD treasury and date update `0x009C1AD0` (CONFIRMED, UI_FIDELITY.md §5.1): with
@@ -1407,9 +1510,12 @@ impl UiScriptHost {
     /// manager with the table; the exe fills it in `0x00A13DB0` → `0x009AB1B0`). The table:
     /// `SettlementName` ("settlement, region"), `Looting` / `Occupation` = {Loot, TownWealth,
     /// LowerOrder, UpperOrder, DamagedBuildings = {{Building, Damage}...}} and, only when a
-    /// liberation target exists, `Liberation` = {FactionLocation} (CONFIRMED names). INFERRED:
-    /// FactionLocation is the liberated faction's on-screen name; orders are the previewed public
-    /// order after the choice, rounded. When the capture is answered the root's
+    /// liberation target exists, `Liberation` = {FactionLocation} (CONFIRMED names). The orders are
+    /// the option's previewed public order of the government's lower and upper classes
+    /// (`CaptureOutcome::public_order_after`, whose own tags cover the effect set and rebels; the
+    /// mapping is CONFIRMED: `0x009AB1B0` reads option +0x1C as `LowerOrder` and +0x18 as
+    /// `UpperOrder`, the labels at `0x0136BC28` / `0x0136BC1C`; whole numbers, as the exe's ints). INFERRED:
+    /// FactionLocation is the liberated faction's on-screen name. When the capture is answered the root's
     /// `ClearSettlementLootingOptions` closes the panel. Returns true when it opened the screen.
     pub fn campaign_capture_screen(&self) -> bool {
         let Some(ui) = self.campaign_ui() else { return false };
@@ -1430,7 +1536,12 @@ impl UiScriptHost {
                 let t = lua.create_table()?;
                 t.set("Loot", o.money)?;
                 t.set("TownWealth", o.town_wealth)?;
-                let (lower, upper) = o.public_order_after.unwrap_or((0.0, 0.0));
+                // The model computes the preview for every human capture, so a missing one is a model bug:
+                // say so (once per option when the screen opens) rather than showing 0 / 0 as if it were the preview.
+                let (lower, upper) = o.public_order_after.unwrap_or_else(|| {
+                    log(inner, format!("WARN capture screen for region {:?}: no public-order preview; showing 0", p.region));
+                    (0.0, 0.0)
+                });
                 t.set("LowerOrder", lower.round() as i32)?;
                 t.set("UpperOrder", upper.round() as i32)?;
                 let damaged = lua.create_table()?;
@@ -1471,14 +1582,18 @@ impl UiScriptHost {
 
     /// The defeat / victory movie panel for a campaign outcome (`CampaignEvent::OutcomeMovie`,
     /// the model's `CampaignModel::outcome_movie`): the root's `InitialiseMoviePanel(data)` opens
-    /// `event_movie_panel` (CONFIRMED, layout.root.lua:1033; the exe's movie queue `0x00998E20`
-    /// calls it). `data` = {`title`, `bink_control_ptr`, `Data` = {`ExitFunction`, `show_everyone`,
-    /// `only_call_function_for_local_faction`, `local_faction_involved`}} (CONFIRMED names, read by
-    /// event_movie_panel.luac; the first three `Data` values are the exe's, `0x00A07790` /
-    /// `0x00A07760`). Our `bink_control_ptr` is the movie's file name (see `AttachCustomControl`).
-    /// PROVISIONAL: `title` is not set (the panel shows ""): where the queue takes it from is not
-    /// traced. INFERRED: `local_faction_involved` is whether the faction is the local player's, and a
-    /// movie not shown to everyone opens only for that player. Returns true when the panel opened.
+    /// `event_movie_panel` (CONFIRMED, layout.root.lua:1033). `data` = {`title`, `bink_control_ptr`,
+    /// `Data` = {`ExitFunction`, `show_everyone`, `only_call_function_for_local_faction`,
+    /// `local_faction_involved`}} (CONFIRMED names, read by event_movie_panel.luac; the first three
+    /// `Data` values are the exe's, `0x00A07790` / `0x00A07760`). Our `bink_control_ptr` is the
+    /// movie's file name (see `AttachCustomControl`). CONFIRMED by disassembly of the exe's movie
+    /// queue step (`0x00A13EA0`, its panel call at `0x00A13FD0` → `0x00998E20`): `title` is the row's
+    /// loc text ([`OutcomeMovie::title_key`](ntw_sim::campaign::outcome::OutcomeMovie::title_key); a
+    /// missing string is "" and logged once, which the panel shows the same as no title, its script
+    /// reading `data.title or ""`); the panel opens only when the local faction is human (ours always
+    /// is) and, unless the data's `show_everyone` is set, only when the movie's faction is the local
+    /// one; `local_faction_involved` is that equality (`0x00898B20`). Returns true when the panel
+    /// opened.
     pub fn campaign_outcome_movie(&self, faction: FactionId, movie: &ntw_sim::campaign::outcome::OutcomeMovie) -> bool {
         let Some(ui) = self.campaign_ui() else { return false };
         let local = ui.model().world.factions.get(&faction).is_some_and(|f| f.key == ui.link.human);
@@ -1493,6 +1608,7 @@ impl UiScriptHost {
             d.set("only_call_function_for_local_faction", movie.only_local_faction)?;
             d.set("local_faction_involved", local)?;
             let t = lua.create_table()?;
+            t.set("title", loc_required(self.inner(), &movie.title_key()))?;
             t.set("bink_control_ptr", movie.movie.as_str())?;
             t.set("Data", d)?;
             Ok(t)

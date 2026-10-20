@@ -239,8 +239,8 @@ fn schools_research_technologies_and_unlock_the_next() {
     let mut rules = (*m.rules).clone();
     // The test building is a school: research_points 10.
     rules.effects.insert_building_local("test_building_level".into(), mapped(&rules, vec![("research_points", 10.0)]));
-    rules.technologies.insert("admin1_a".into(), TechRules { cost: 25, building_level: "test_building_level".into(), requires: vec![], factions: vec![] });
-    rules.technologies.insert("admin2_b".into(), TechRules { cost: 30, building_level: "test_building_level".into(), requires: vec!["admin1_a".into()], factions: vec![] });
+    rules.technologies.insert("admin1_a".into(), TechRules { cost: 25, building_level: "test_building_level".into(), requires: vec![], factions: vec![], thread: 2, ..Default::default() });
+    rules.technologies.insert("admin2_b".into(), TechRules { cost: 30, building_level: "test_building_level".into(), requires: vec!["admin1_a".into()], factions: vec![], thread: 2, ..Default::default() });
     m.rules = Arc::new(rules);
     m.world.faction_details.entry(A).or_default().technologies = vec![("admin1_a".into(), state::AVAILABLE), ("admin2_b".into(), state::UNAVAILABLE)];
     let school_pos = pos(10, 2);
@@ -284,7 +284,7 @@ fn building_level_technologies_follow_the_tree_the_faction_list_and_the_switches
     let mut m = test_model();
     let key_a = m.world.factions[&A].key.clone();
     let mut rules = (*m.rules).clone();
-    let tech = |level: &str, factions: Vec<String>| TechRules { cost: 10, building_level: level.into(), requires: vec![], factions };
+    let tech = |level: &str, factions: Vec<String>| TechRules { cost: 10, building_level: level.into(), requires: vec![], factions, thread: 2, ..Default::default() };
     rules.technologies.insert("t_mine".into(), tech("test_building_level", vec![key_a.clone(), "other".into()]));
     rules.technologies.insert("t_all".into(), tech("test_building_level", vec![]));
     rules.technologies.insert("t_theirs".into(), tech("test_building_level", vec!["other".into()]));

@@ -8,6 +8,10 @@
 //! Seams so far (one per rule function; the systems still to be moved behind seams are BACKLOG
 //! §11 "Replaceable systems" lines):
 //! - [`POPULATION_GROW`]: a region's round-end growth ([`super::population::grow`]).
+//! - [`POPULATION_CLASS_ROUND`]: a region's population classes at the round end, before the growth
+//!   ([`super::population::class_round`]).
+//! - [`POPULATION_CLASS_WAR`]: a class's war factor after a war declaration or a battle
+//!   ([`super::population::class_war_change`]).
 //! - [`DIRECTOR_REGION_TRANSFER`]: the campaign director's region-transfer step at a handover from
 //!   a human to an AI faction ([`super::director::region_transfer_step`]).
 //! - [`DIRECTOR_DESIRES`]: the campaign director's other desires after it
@@ -21,6 +25,8 @@
 //! - [`RAID_TAKE`]: what a commerce raid takes from one trade route ([`super::commerce_raid::raid_take`]).
 //! - [`HISTORICAL_EVENTS`]: the round start's historical events ([`super::historical_events::historical_events`]).
 //! - [`OUTCOME_MOVIE`]: the movie a faction's campaign outcome plays ([`super::outcome::outcome_movie`]).
+//! - [`SIEGE_ATTRITION`]: a besieged settlement's round-start attrition ([`super::siege::siege_attrition`]).
+//! - [`CHARACTER_RANK`]: a character's rank, his command stars ([`super::agents::rank_original`]).
 
 use std::sync::Arc;
 
@@ -28,16 +34,21 @@ use super::commerce_raid::OwnedRoute;
 use super::director::DirectorState;
 use super::events::CampaignEvent;
 use super::expulsion::ExpelledForce;
-use super::ids::{FactionId, RegionId};
+use super::effects::EffectSet;
+use super::ids::{CharacterId, FactionId, RegionId};
 use super::mod_state::ModWrites;
 use super::outcome::{CampaignOutcome, OutcomeMovie};
-use super::population::PopulationState;
+use super::population::{ClassWarEvent, PopulationState};
 use super::turn::ConstructionStep;
-use super::world::{CampaignModel, ConstructionItem, Region};
+use super::world::{CampaignModel, ConstructionItem, PopulationClassState, Region};
 use crate::seam::{Seam, SeamRegistry};
 
 /// Seam key of a region's population growth for one round ([`PopulationGrow`]).
 pub const POPULATION_GROW: &str = "population.grow";
+/// Seam key of a region's population classes at the round end ([`PopulationClassRound`]).
+pub const POPULATION_CLASS_ROUND: &str = "population.class_round";
+/// Seam key of a class's war factor after an event ([`PopulationClassWar`]).
+pub const POPULATION_CLASS_WAR: &str = "population.class_war";
 
 /// Seam key of the campaign director's region-transfer step ([`DirectorRegionTransfer`]).
 pub const DIRECTOR_REGION_TRANSFER: &str = "director.region_transfer";
@@ -58,11 +69,24 @@ pub const RAID_TAKE: &str = "trade.raid_take";
 pub const HISTORICAL_EVENTS: &str = "events.historical";
 /// Seam key of the movie a faction's campaign outcome plays ([`OutcomeMovieRule`]).
 pub const OUTCOME_MOVIE: &str = "campaign.outcome_movie";
+/// Seam key of a besieged settlement's round-start attrition ([`SiegeAttrition`]).
+pub const SIEGE_ATTRITION: &str = "siege.attrition";
+/// Seam key of a character's rank ([`CharacterRank`]).
+pub const CHARACTER_RANK: &str = "character.rank";
 
 /// A region's population after one round of growth: given the model, the region, its population
 /// and its population state, the new population and state. The original's is
 /// [`super::population::grow`]. Its mod-state changes go to the [`ModWrites`].
 pub type PopulationGrow = dyn Fn(&CampaignModel, &Region, u32, &PopulationState, &mut ModWrites) -> (u32, PopulationState) + Send + Sync;
+/// A region's population classes after their round-end passes, before the region grows: given the model and
+/// the region, its new classes (the region's [`Region::class_bases`] is replaced with them). The original's is
+/// [`super::population::class_round`]. Its mod-state changes go to the [`ModWrites`].
+pub type PopulationClassRound = dyn Fn(&CampaignModel, &Region, &mut ModWrites) -> Vec<PopulationClassState> + Send + Sync;
+/// A population class's war factor after an event: given the model, the class key, the event, the region's
+/// owner, the other faction (the war's target, the battle's opponent) and the current value, the new value.
+/// Called for each class of the owner's capital ([`CampaignModel::move_class_war`]). The original's is
+/// [`super::population::class_war_change`]. Its mod-state changes go to the [`ModWrites`].
+pub type PopulationClassWar = dyn Fn(&CampaignModel, &str, ClassWarEvent, FactionId, FactionId, i32, &mut ModWrites) -> i32 + Send + Sync;
 
 /// The campaign director's region-transfer step: given the model (the director's state in
 /// [`CampaignModel::director`]), its state after the step; a transfer it queues
@@ -113,12 +137,27 @@ pub type HistoricalEvents = dyn Fn(&mut CampaignModel, &mut ModWrites) -> Vec<Ca
 /// the panel's OK then runs the movie's exit. The original's is [`super::outcome::outcome_movie`]. A query:
 /// it changes no state.
 pub type OutcomeMovieRule = dyn Fn(&CampaignModel, FactionId, CampaignOutcome) -> Option<OutcomeMovie> + Send + Sync;
+/// A besieged settlement's round-start attrition: given the model (it changes state: the siege counter, the
+/// RNG, the garrison's units and characters) and the region, the events to report. Called at each round start
+/// for each region whose settlement is under siege, in region order. The original's is
+/// [`super::siege::siege_attrition`]. Its mod-state changes go to the [`ModWrites`].
+pub type SiegeAttrition = dyn Fn(&mut CampaignModel, RegionId, &mut ModWrites) -> Vec<CampaignEvent> + Send + Sync;
+/// A character's rank, his command stars: given the model, the character, his own effect set (traits and
+/// ancillaries) and whether to include his faction's effects (false when the faction's own set asks, for its
+/// ministers' levels), the rank. Every reader calls it: agent actions, hiring costs, the ministerial levels,
+/// conversion and the character panel. The original's is [`super::agents::rank_original`]. A query: it changes
+/// no state.
+pub type CharacterRank = dyn Fn(&CampaignModel, CharacterId, &EffectSet, bool) -> i32 + Send + Sync;
 
 /// The campaign rules in use, one field per seam (see the module docs).
 #[derive(Clone, Debug, PartialEq)]
 pub struct CampaignSeams {
     /// [`POPULATION_GROW`].
     pub population_grow: Seam<PopulationGrow>,
+    /// [`POPULATION_CLASS_ROUND`].
+    pub population_class_round: Seam<PopulationClassRound>,
+    /// [`POPULATION_CLASS_WAR`].
+    pub population_class_war: Seam<PopulationClassWar>,
     /// [`DIRECTOR_REGION_TRANSFER`].
     pub director_region_transfer: Seam<DirectorRegionTransfer>,
     /// [`DIRECTOR_DESIRES`].
@@ -137,6 +176,10 @@ pub struct CampaignSeams {
     pub historical_events: Seam<HistoricalEvents>,
     /// [`OUTCOME_MOVIE`].
     pub outcome_movie: Seam<OutcomeMovieRule>,
+    /// [`SIEGE_ATTRITION`].
+    pub siege_attrition: Seam<SiegeAttrition>,
+    /// [`CHARACTER_RANK`].
+    pub character_rank: Seam<CharacterRank>,
 }
 
 impl Default for CampaignSeams {
@@ -144,6 +187,10 @@ impl Default for CampaignSeams {
     fn default() -> Self {
         CampaignSeams {
             population_grow: Seam::original(Arc::new(|m: &CampaignModel, r: &Region, pop: u32, s: &PopulationState, _: &mut ModWrites| super::population::grow(m, r, pop, s))),
+            population_class_round: Seam::original(Arc::new(|m: &CampaignModel, r: &Region, _: &mut ModWrites| super::population::class_round(m, r))),
+            population_class_war: Seam::original(Arc::new(|m: &CampaignModel, c: &str, e: ClassWarEvent, a: FactionId, b: FactionId, w: i32, _: &mut ModWrites| {
+                super::population::class_war_change(m, c, e, a, b, w)
+            })),
             director_region_transfer: Seam::original(Arc::new(|m: &CampaignModel, _: &mut ModWrites| super::director::region_transfer_step(m))),
             director_desires: Seam::original(Arc::new(|m: &mut CampaignModel, w: &mut ModWrites| super::director::director_desires(m, w))),
             proposed_payment: Seam::original(Arc::new(super::treaties::proposed_payment)),
@@ -153,6 +200,8 @@ impl Default for CampaignSeams {
             raid_take: Seam::original(Arc::new(super::commerce_raid::raid_take)),
             historical_events: Seam::original(Arc::new(super::historical_events::historical_events)),
             outcome_movie: Seam::original(Arc::new(super::outcome::outcome_movie)),
+            siege_attrition: Seam::original(Arc::new(|m: &mut CampaignModel, r: RegionId, _: &mut ModWrites| super::siege::siege_attrition(m, r))),
+            character_rank: Seam::original(Arc::new(super::agents::rank_original)),
         }
     }
 }
@@ -160,9 +209,11 @@ impl Default for CampaignSeams {
 impl CampaignSeams {
     /// Every seam's key and implementation chain, in a fixed order (for the multiplayer handshake
     /// and the log).
-    pub fn chains(&self) -> [(&'static str, &[String]); 10] {
+    pub fn chains(&self) -> [(&'static str, &[String]); 14] {
         [
             (POPULATION_GROW, self.population_grow.chain()),
+            (POPULATION_CLASS_ROUND, self.population_class_round.chain()),
+            (POPULATION_CLASS_WAR, self.population_class_war.chain()),
             (DIRECTOR_REGION_TRANSFER, self.director_region_transfer.chain()),
             (DIRECTOR_DESIRES, self.director_desires.chain()),
             (PROPOSED_PAYMENT, self.proposed_payment.chain()),
@@ -172,6 +223,8 @@ impl CampaignSeams {
             (RAID_TAKE, self.raid_take.chain()),
             (HISTORICAL_EVENTS, self.historical_events.chain()),
             (OUTCOME_MOVIE, self.outcome_movie.chain()),
+            (SIEGE_ATTRITION, self.siege_attrition.chain()),
+            (CHARACTER_RANK, self.character_rank.chain()),
         ]
     }
 }
@@ -183,6 +236,10 @@ impl CampaignSeams {
 pub struct CampaignRuleRegistry {
     /// [`POPULATION_GROW`] implementations.
     pub population_grow: SeamRegistry<PopulationGrow>,
+    /// [`POPULATION_CLASS_ROUND`] implementations.
+    pub population_class_round: SeamRegistry<PopulationClassRound>,
+    /// [`POPULATION_CLASS_WAR`] implementations.
+    pub population_class_war: SeamRegistry<PopulationClassWar>,
     /// [`DIRECTOR_REGION_TRANSFER`] implementations.
     pub director_region_transfer: SeamRegistry<DirectorRegionTransfer>,
     /// [`DIRECTOR_DESIRES`] implementations.
@@ -201,6 +258,10 @@ pub struct CampaignRuleRegistry {
     pub historical_events: SeamRegistry<HistoricalEvents>,
     /// [`OUTCOME_MOVIE`] implementations.
     pub outcome_movie: SeamRegistry<OutcomeMovieRule>,
+    /// [`SIEGE_ATTRITION`] implementations.
+    pub siege_attrition: SeamRegistry<SiegeAttrition>,
+    /// [`CHARACTER_RANK`] implementations.
+    pub character_rank: SeamRegistry<CharacterRank>,
 }
 
 impl CampaignRuleRegistry {
@@ -212,6 +273,8 @@ impl CampaignRuleRegistry {
         for (seam, key) in selection {
             let applied = match seam.as_str() {
                 POPULATION_GROW => self.population_grow.apply(&mut seams.population_grow, key),
+                POPULATION_CLASS_ROUND => self.population_class_round.apply(&mut seams.population_class_round, key),
+                POPULATION_CLASS_WAR => self.population_class_war.apply(&mut seams.population_class_war, key),
                 DIRECTOR_REGION_TRANSFER => self.director_region_transfer.apply(&mut seams.director_region_transfer, key),
                 DIRECTOR_DESIRES => self.director_desires.apply(&mut seams.director_desires, key),
                 PROPOSED_PAYMENT => self.proposed_payment.apply(&mut seams.proposed_payment, key),
@@ -221,6 +284,8 @@ impl CampaignRuleRegistry {
                 RAID_TAKE => self.raid_take.apply(&mut seams.raid_take, key),
                 HISTORICAL_EVENTS => self.historical_events.apply(&mut seams.historical_events, key),
                 OUTCOME_MOVIE => self.outcome_movie.apply(&mut seams.outcome_movie, key),
+                SIEGE_ATTRITION => self.siege_attrition.apply(&mut seams.siege_attrition, key),
+                CHARACTER_RANK => self.character_rank.apply(&mut seams.character_rank, key),
                 _ => {
                     warnings.push(format!("rule seam {seam}: no such seam; {key} is ignored"));
                     continue;
@@ -293,6 +358,8 @@ mod tests {
             seams.chains(),
             [
                 (POPULATION_GROW, &original[..]),
+                (POPULATION_CLASS_ROUND, &original[..]),
+                (POPULATION_CLASS_WAR, &original[..]),
                 (DIRECTOR_REGION_TRANSFER, &original[..]),
                 (DIRECTOR_DESIRES, &original[..]),
                 (PROPOSED_PAYMENT, &original[..]),
@@ -302,6 +369,8 @@ mod tests {
                 (RAID_TAKE, &original[..]),
                 (HISTORICAL_EVENTS, &original[..]),
                 (OUTCOME_MOVIE, &original[..]),
+                (SIEGE_ATTRITION, &original[..]),
+                (CHARACTER_RANK, &original[..]),
             ]
         );
         // The round end through the seam gives exactly what the original's function gives.

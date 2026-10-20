@@ -266,6 +266,32 @@ pub enum CampaignEvent {
         /// The new owner.
         faction: FactionId,
     },
+    /// Script event `CharacterLootedSettlement` (CONFIRMED name, "A character loots a settlement": name
+    /// getter `0x008BDDA0` → string `0x0134FAF0`; vtable `0x0137CCB8`; `export_triggers.lua`'s
+    /// `C_NTW_General_Looter_Good_Trigger` handles it). Posted by the loot choice `0x00B541E0` (at
+    /// `0x00B54468`) after the option is applied. Its only context is the character (the event's +0x10,
+    /// read by the character getter, vtable +0x1C `0x0044A500`; the faction getter +0x38 and the
+    /// settlement / region getters are the null stub `0x00461180`): the commander of the capturing
+    /// force, which the capture report keeps from the capture (report +0x8, from force +0x74,
+    /// `0x00885F90` called by `0x00B58560` / `0x00B58C00`). Raised only when that force had one: the
+    /// poster `0x00E30700` drops the event before Lua when its vtable +0xB8 (`0x008F9EE0`) fails, which
+    /// it does for a null character.
+    CharacterLootedSettlement {
+        /// The looting commander.
+        character: CharacterId,
+    },
+    /// Script event `FactionBecomesLiberationProtectorate` (CONFIRMED name, string `0x01350274`, event
+    /// vtable `0x0137D064`): the liberation choice `0x00B4F090` posts it first (`0x00B4F0FE` in the
+    /// `spa_napoleon` campaign, `0x00B5089D` in every other), before it puts the capturer's armies out of
+    /// the region (`0x008D9DC0`) and passes the region to the liberated faction (`0x00B58A10`),
+    /// CONFIRMED. Its one payload is the region's owner at that moment (settlement vtable +0x14
+    /// `0x00B2B7D0`), the liberator; its only accessor is the faction (event vtable +0x38 `0x0044A500`,
+    /// read by conditions such as `FactionTreasury` `0x008A0860`), so a script sees no region,
+    /// settlement or character.
+    FactionBecomesLiberationProtectorate {
+        /// The liberating faction (the capturer, still the region's owner when the event is posted).
+        faction: FactionId,
+    },
     /// Script event `CharacterEmbarksNavy` (CONFIRMED name, "A character embarks on a navy").
     CharacterEmbarksNavy {
         /// The army's commander.
@@ -336,6 +362,21 @@ pub enum CampaignEvent {
         region: RegionId,
         /// The capturer.
         faction: FactionId,
+    },
+    /// Project event: a declaration of war asks a human ally to join; the call waits in
+    /// `CampaignModel::pending_ally_war_calls` for `RespondToAllyWarCall` (the original raises the UI
+    /// event of model +0xB10, vfunc +8, with these five values: `0x00B26C6A` / `0x00B26E5F`).
+    AllyWarCallPending {
+        /// The ally asked (a human faction).
+        ally: FactionId,
+        /// The declarer.
+        declarer: FactionId,
+        /// The declaration's target.
+        target: FactionId,
+        /// The ally is allied to the declarer (the UI event's first flag).
+        allied_to_declarer: bool,
+        /// The target's allies' loop asked it (the UI event's second flag).
+        asked_by_target_side: bool,
     },
     /// Project event: a capture choice was applied (`0x008C0310`).
     CaptureResolved {
@@ -417,6 +458,15 @@ pub enum CampaignMessage {
         /// The faction peace was made with (the title).
         other: FactionId,
     },
+    /// Type 0x76 `military_access_prompt` (`SendMilitaryAccessPromptMessage` `0x00A0E630`, CONFIRMED by
+    /// disassembly 2026-10-20): the title is the granter's name (faction +0x518), the detail empty. The
+    /// round end's access step (`0x00B29170`) posts it to the faction holding timed access when the
+    /// count-down leaves one turn ([`super::CampaignModel::diplomacy_round_end`]). Nothing answers it:
+    /// its text asks the player to negotiate, through the ordinary diplomacy commands.
+    MilitaryAccessPrompt {
+        /// The faction giving the access (the title).
+        granter: FactionId,
+    },
     /// Type 0x112 `war_declared` (`0x009DAFE0`, CONFIRMED by disassembly 2026-10-20): the title is
     /// "<declarer name>\n<target name>" (faction +0x518), the detail empty. A declaration between two
     /// major powers (`0x00B268B0`) posts one to every listed faction that is neither side nor in its
@@ -426,6 +476,15 @@ pub enum CampaignMessage {
         declarer: FactionId,
         /// The faction war was declared on (the title's second name).
         target: FactionId,
+    },
+    /// Type 0x14D `campmap_faction_joins_your_enemies` (`0x009DAE40`, the type table's entry
+    /// `0x0145CA64`; CONFIRMED by disassembly 2026-10-20): the title is the joining faction's name
+    /// (faction +0x518), the detail empty. Posted only by a war declared with its refresh flag
+    /// (`0x00B26700`), i.e. a deal's join-war item ([`super::CampaignModel::join_war_by_deal`]), to
+    /// the faction war is declared on, with no major-power or human test.
+    FactionJoinsYourEnemies {
+        /// The faction that joined the war (the title).
+        joiner: FactionId,
     },
     /// A historical event (`0x00A06DA0`, model +0xFA0; CONFIRMED by disassembly): not a type of the
     /// message type table but a message of its own, posted by the round start's historical events
@@ -445,7 +504,9 @@ impl CampaignMessage {
         match self {
             CampaignMessage::AllianceBroken { .. } => "alliance_broken",
             CampaignMessage::CeasefireDeclared { .. } => "ceasefire_declared",
+            CampaignMessage::MilitaryAccessPrompt { .. } => "military_access_prompt",
             CampaignMessage::WarDeclared { .. } => "war_declared",
+            CampaignMessage::FactionJoinsYourEnemies { .. } => "campmap_faction_joins_your_enemies",
             CampaignMessage::HistoricalEvent { .. } => "historical_event",
         }
     }
@@ -500,10 +561,13 @@ impl CampaignEvent {
             CampaignEvent::BattleCompleted { .. } => "BattleCompleted",
             CampaignEvent::CharacterCompletedBattle { .. } => "CharacterCompletedBattle",
             CampaignEvent::SettlementOccupied { .. } => "SettlementOccupied",
+            CampaignEvent::CharacterLootedSettlement { .. } => "CharacterLootedSettlement",
+            CampaignEvent::FactionBecomesLiberationProtectorate { .. } => "FactionBecomesLiberationProtectorate",
             CampaignEvent::CharacterEmbarksNavy { .. } => "CharacterEmbarksNavy",
             CampaignEvent::CharacterDisembarksNavy { .. } => "CharacterDisembarksNavy",
             CampaignEvent::StanceChanged { .. }
             | CampaignEvent::CaptureChoicePending { .. }
+            | CampaignEvent::AllyWarCallPending { .. }
             | CampaignEvent::CaptureResolved { .. }
             | CampaignEvent::AgentActionResolved { .. }
             | CampaignEvent::CharacterHired { .. }

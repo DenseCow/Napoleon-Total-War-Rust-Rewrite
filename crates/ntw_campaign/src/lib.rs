@@ -399,6 +399,8 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
     model.force_caps = read_force_caps(model_rec, &mut check.warnings);
     model.deal_inflation = read_deal_inflation(model_rec);
     attach_rules(&mut model, db, &campaign_key);
+    // Held trait levels from their points (the save holds none: `ntw_sim::campaign::characters::load_trait_levels`).
+    ntw_sim::campaign::characters::load_trait_levels(&mut model);
     // A repair our ESF writer stored as an upgrade to the standing level before it wrote item type 2 (an
     // original save holds none: [`CampaignModel::convert_legacy_repairs`]).
     let repairs = model.convert_legacy_repairs();
@@ -441,7 +443,8 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
     // only on a new game (InitialiseCampaign at UICreated), so a save carries them.
     let restrictions = script_values::read_restrictions(esf);
     model.world.restricted_buildings = restrictions.buildings.into_iter().collect();
-    model.world.restricted_units = restrictions.units.into_iter().collect();
+    // The units in file order, duplicates kept (the loader `0x009968A0` appends each item as it reads it).
+    model.world.restricted_units = known_restricted_units(&model, restrictions.units, "UNIT_RESTRICTIONS");
     if kind == FileKind::Save {
         // A save is made inside the human player's turn (INFERRED); the header names that faction.
         if let Some(f) = model.faction_by_key(&header.faction_key).map(|f| f.id) {
@@ -528,6 +531,19 @@ pub fn attach_rules(model: &mut CampaignModel, db: &GameDatabase, campaign_key: 
     let mut rules = rules_from_db(db, campaign_key);
     rules::fill_ship_guns(&mut rules, db, &model.world);
     model.rules = std::sync::Arc::new(rules);
+}
+
+/// The one load rule for a restricted-unit list (an original save's `UNIT_RESTRICTIONS` and an own save's,
+/// read after [`attach_rules`]): the keys in order, duplicates kept, less any key the units table lacks, which
+/// is dropped and logged once per load (`source` names the list). The exe logs such a key and appends a null
+/// record, which restricts nothing and crashes its next save (ORIGINAL BUG, see
+/// `CampaignModel::add_restricted_unit`).
+pub(crate) fn known_restricted_units(model: &CampaignModel, keys: Vec<String>, source: &str) -> Vec<String> {
+    let (units, unknown): (Vec<String>, Vec<String>) = keys.into_iter().partition(|k| model.rules.units.contains_key(k));
+    if !unknown.is_empty() {
+        log::warn!("load: {source} names {} unit key(s) not in the units table, dropped: {}", unknown.len(), unknown.join(", "));
+    }
+    units
 }
 
 /// The first multiple of 8 above every integer value (and integer array element) of the tree

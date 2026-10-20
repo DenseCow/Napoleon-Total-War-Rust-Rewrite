@@ -15,13 +15,13 @@ use ntw_data::GameDatabase;
 use ntw_formats::esf::{EsfNode, EsfRecord};
 use ntw_sim::campaign::{
     BuildingRef, CampaignUnit, Character, CharacterId, CharacterKind, ConstructionItem, ConstructionKind, Faction,
-    FactionId, Fort, FortId, ForceId, GovernmentType, MilitaryForce, RecruitmentItem, RecruitmentItemId, RecruitmentManager, RecruitmentSource,
-    Region, RegionId, RegionSlot, Settlement, SlotRef, Stance, UnitId, World,
+    FactionId, Fort, FortId, ForceId, GovernmentType, MilitaryForce, PopulationClassState, RecruitmentItem, RecruitmentItemId, RecruitmentManager, RecruitmentSource,
+    PortBlockade, Region, RegionId, RegionSlot, Settlement, SlotRef, Stance, UnitId, World,
 };
 use ntw_sim::campaign::rules::DEFAULT_TAX_LEVEL;
 use ntw_sim::fixed::Fixed20;
 
-use crate::fields::{array, child, i32_at, rec_at, str_at, u32_at, value};
+use crate::fields::{array, child, i32_at, rec_at, str_at, u32_array_at, u32_at, value};
 use crate::{LoadError, LoadWarning};
 
 /// What [`load_world`] produces.
@@ -188,6 +188,9 @@ pub(crate) fn load_world(
                         id: force.id.raw().into(),
                     }),
                     Entry::Vacant(slot) => {
+                        if !is_navy && let Some(gov) = rebel_army_government(rec, &apath) {
+                            world.rebel_army_governments.insert(force.id, gov);
+                        }
                         slot.insert(force);
                     }
                 }
@@ -215,12 +218,14 @@ pub(crate) fn load_world(
     // Recruitment item ids seen so far, in file order (see `keep_recruitment_ids_unique`).
     let mut recruitment_ids = BTreeSet::new();
     let mut recruitment_sources = BTreeMap::new();
+    // Each settlement's resident characters (`read_region`'s third value), applied after the garrisons.
+    let mut settlement_residents: Vec<(RegionId, Vec<CharacterId>)> = Vec::new();
     for (i, item) in regions.items.iter().enumerate() {
         let rpath = format!("{rm_path}/REGIONS_ARRAY[{i}]/REGION");
         let rec = first_record(item, "REGION").ok_or_else(|| LoadError::MissingRecord {
             path: rpath.clone(),
         })?;
-        let (mut region, sources) = read_region(rec, &rpath, check)?;
+        let (mut region, sources, residents) = read_region(rec, &rpath, check)?;
         // A region id repeated in the file (malformed): only the first record of an id is read, all of
         // it (forts and rebel faction too); the save drops the others (`save::drop_duplicate_regions`).
         if world.regions.contains_key(&region.id) {
@@ -251,6 +256,12 @@ pub(crate) fn load_world(
         if !dangling.is_empty() {
             log::warn!("{rpath}: risen army ids {dangling:?} name no loaded force; dropped");
         }
+        // The exe links each listed army's REBEL_DATA (`0x008CFB60` takes army +0x98 + 0x68), so a
+        // listed army without one is malformed: its region's class tests find no government.
+        let ungoverned: Vec<ForceId> = known.iter().copied().filter(|id| !world.rebel_army_governments.contains_key(id)).collect();
+        if !ungoverned.is_empty() {
+            log::warn!("{rpath}: risen armies {ungoverned:?} have no REBEL_DATA government");
+        }
         if !known.is_empty() {
             world.region_risen_armies.insert(region.id, known);
         }
@@ -262,6 +273,12 @@ pub(crate) fn load_world(
         }
         keep_recruitment_ids_unique(&mut region.recruitment_queue, &region.key, &mut recruitment_ids, check);
         recruitment_sources.insert(region.id, sources);
+        if !residents.is_empty() {
+            settlement_residents.push((region.id, residents));
+        }
+        // The region manager's order, which each faction's region list follows after a load
+        // (`0x00A4CE20`, `0x00A45950`; `World::region_order`).
+        world.region_order.push(region.id);
         world.regions.insert(region.id, region);
     }
 
@@ -274,6 +291,30 @@ pub(crate) fn load_world(
             && let Some(ch) = world.characters.get_mut(&c)
         {
             ch.garrisoned_in = Some(r.id);
+        }
+        // A besieger id the forces don't hold is dropped, so a siege nothing can end is not kept
+        // (our own guard: the exe's link resolution of #13 at `0x00AF4D6D` is not traced for a
+        // missing force).
+        let region_key = &r.key;
+        r.siege.besiegers.retain(|b| {
+            let known = forces.contains_key(b);
+            if !known {
+                log::warn!("region {region_key}: besieging force {b:?} is not in the save; dropped");
+            }
+            known
+        });
+    }
+    // Settlement residents (#14, `read_settlement_residents`): a listed character without a force is
+    // inside that settlement. An id no loaded character holds, or one in a force (a commander or a
+    // unit's rider, `World::force_characters`: the exe's enter path `0x00B4E760` only lists
+    // forceless characters), is dropped with a warning.
+    let in_force: BTreeSet<CharacterId> = world.force_characters().collect();
+    for (region, residents) in settlement_residents {
+        for c in residents {
+            match world.characters.get_mut(&c) {
+                Some(ch) if !in_force.contains(&c) => ch.garrisoned_in = Some(region),
+                _ => log::warn!("region {}: settlement resident {} is not a loaded agent; dropped", region.raw(), c.raw()),
+            }
         }
     }
 
@@ -441,6 +482,14 @@ fn read_faction<'a>(
         .and_then(|g| g.get_str(1))
         .unwrap_or_default()
         .to_string();
+    // Reinforcement marches in progress (entry layout `0x00AFC060`, `Reinforcement`): not loaded, said once per faction.
+    let reinforcements = rec
+        .child("ARMY_REINFORCEMENT_MANAGER")
+        .and_then(|m| m.record_array("CHARACTER_REINFORCEMENTS_ARRAY"))
+        .map_or(0, |a| a.items.len());
+    if reinforcements > 0 {
+        check.warnings.push(LoadWarning::UnloadedReinforcements { faction: key.to_string(), entries: reinforcements });
+    }
     if !is_rebel && check.db.faction(key).is_none() {
         check
             .warnings
@@ -655,8 +704,9 @@ fn read_unit(rec: &EsfRecord, path: &str) -> Result<CampaignUnit, LoadError> {
 /// managers (the region's at #27, a port slot's) and their `REGION_RECRUITMENT_ITEM_ARRAY` are found
 /// by type, not position: a malformed record without them reads as an empty queue, with a
 /// `LoadWarning`, and the save repairs the manager a new item goes to
-/// (`save::repair_recruitment_managers`, SAVE_COMPAT.md §32).
-fn read_region(rec: &EsfRecord, path: &str, check: &mut Checker<'_>) -> Result<(Region, Vec<RecruitmentSource>), LoadError> {
+/// (`save::repair_recruitment_managers`, SAVE_COMPAT.md §32). The third value is the settlement's
+/// resident characters (see [`read_settlement_residents`]).
+fn read_region(rec: &EsfRecord, path: &str, check: &mut Checker<'_>) -> Result<(Region, Vec<RecruitmentSource>, Vec<CharacterId>), LoadError> {
     let key = str_at(rec, 0, path)?.to_string();
     // Region id: stored as i32; `RegionId` wraps a u32, so we keep the same 32 bits.
     let id = i32_at(rec, 4, path)? as u32;
@@ -728,7 +778,8 @@ fn read_region(rec: &EsfRecord, path: &str, check: &mut Checker<'_>) -> Result<(
                 position: slot.get_i32(6).zip(slot.get_i32(7)).map(|(x, z)| (Fixed20::from_raw(x), Fixed20::from_raw(z))),
                 port: slot.child("REGION_RECRUITMENT_MANAGER").is_some(),
                 holder: slot_holder(slot, owner),
-                id: slot.get_u32(2).unwrap_or(0) });
+                id: slot.get_u32(2).unwrap_or(0),
+                blockade: port_blockade(slot) });
             // Port slots have their own (naval) recruitment queue.
             if let Some(m) = slot.child("REGION_RECRUITMENT_MANAGER") {
                 read_recruitment(m, &key, RecruitmentManager::Port(i), &mut recruitment_queue, &mut recruitment_sources, check);
@@ -770,11 +821,20 @@ fn read_region(rec: &EsfRecord, path: &str, check: &mut Checker<'_>) -> Result<(
         .flat_map(|a| a.items.iter())
         .filter_map(|it| Some((it.first()?.as_str()?.to_string(), it.get(1)?.as_f32()?)))
         .collect();
-    let class_bases: Vec<(String, i32, i32)> = factors
+    // Each class's stored values (`0x008861E0`): #1 the 13 happiness slots (element 7, class +0x20, is the
+    // war factor), #11 the education base (+0x70), #12 the resistance base (+0x74).
+    let class_bases: Vec<PopulationClassState> = factors
         .and_then(|f| f.record_array("POPULATION CLASSES"))
         .into_iter()
         .flat_map(|a| a.records())
-        .filter_map(|c| Some((c.get_str(0)?.to_string(), c.get_i32(11).unwrap_or(0), c.get_i32(12).unwrap_or(0))))
+        .filter_map(|c| {
+            Some(PopulationClassState {
+                class: c.get_str(0)?.to_string(),
+                education: c.get_i32(11).unwrap_or(0),
+                resistance: c.get_i32(12).unwrap_or(0),
+                war: c.get(1).and_then(EsfNode::as_i32_array).and_then(|h| h.get(7).copied()).unwrap_or(0),
+            })
+        })
         .collect();
     // `RESOURCES_ARRAY`: one utf16 key per item (CONFIRMED shape: 102 items over the 72 regions of
     // `eur_napoleon`), the region's unit resources (`0x00A45950` at `0x00A467BE`).
@@ -818,8 +878,35 @@ fn read_region(rec: &EsfRecord, path: &str, check: &mut Checker<'_>) -> Result<(
         // checked against the forces in `load_world`.
         garrison: garrison_res.get_u32(12).filter(|&f| f != 0).map(ForceId),
         fleet: None,
+        // SIEGEABLE_GARRISON_RESIDENCE #2 turns to surrender (+0x108), #3 turns besieged (+0x10C),
+        // #13 the besieging forces (+0x12C) (CONFIRMED, reader `0x00AF4B00`); besiegers are checked
+        // against the forces in `load_world`.
+        siege: read_siege(garrison_res, &gpath)?,
     };
-    Ok((region, recruitment_sources))
+    let residents = read_settlement_residents(garrison_res, &gpath)?;
+    Ok((region, recruitment_sources, residents))
+}
+
+/// The characters resident in a settlement: `SIEGEABLE_GARRISON_RESIDENCE` #14, a `U32Array` of
+/// character ids (CONFIRMED: the residence reader `0x00AF4B00` resolves each id and links the
+/// character into the residence's list +0xC8 through `0x008CFA70`, which also sets the character's
+/// residence handle +0x2C0; the enter path `0x00B4E760` appends a forceless character to the same
+/// list). In the vanilla saves the list holds agents only (missionaries in a GB April 1811 and a
+/// Spain turn-2 save; in the latter each one's `CHARACTER` #7 is the residence's #1 id); a garrisoned army's
+/// commander is in the army's list instead (#12). Checked against the characters in `load_world`.
+fn read_settlement_residents(garrison_res: &EsfRecord, path: &str) -> Result<Vec<CharacterId>, LoadError> {
+    Ok(u32_array_at(garrison_res, 14, path)?.iter().map(|&c| CharacterId(c as i32)).collect())
+}
+
+/// A settlement's siege from its `SIEGEABLE_GARRISON_RESIDENCE` (CONFIRMED, reader `0x00AF4B00`,
+/// writer `0x00B7A5F0`): #2 the turns to surrender, #3 the turns besieged, #13 the `U32Array` of
+/// besieging force ids (checked against the forces in `load_world`).
+fn read_siege(garrison_res: &EsfRecord, path: &str) -> Result<ntw_sim::campaign::SiegeState, LoadError> {
+    Ok(ntw_sim::campaign::SiegeState {
+        besiegers: u32_array_at(garrison_res, 13, path)?.iter().map(|&f| ForceId(f)).collect(),
+        surrender_turns: u32_at(garrison_res, 2, path)?,
+        turns_besieged: u32_at(garrison_res, 3, path)?,
+    })
 }
 
 /// The ids of the armies risen in one `REGION` (see `World::region_risen_armies`): the `I32Array`
@@ -839,6 +926,24 @@ fn read_risen_armies(rec: &EsfRecord) -> Vec<ForceId> {
 /// model's list back there): #35 when #34 is the `REBEL_DATA_INNARDS` record, else #34.
 pub(crate) fn risen_armies_slot(rec: &EsfRecord) -> usize {
     if rec.get(34).and_then(EsfNode::as_record).is_some() { 35 } else { 34 }
+}
+
+/// The government key of an `ARMY`'s `REBEL_DATA` block (`World::rebel_army_governments`):
+/// `REBEL_SETUP` #3, below `REBEL_DATA_INNARDS` (record version 4, every vanilla save) or directly
+/// below `REBEL_DATA` (older versions). CONFIRMED: the `ARMY` reader `0x00870FD0` builds army +0x98
+/// with `0x00886950` only when the block is there; `0x00886F10` reads the unit list, faction,
+/// religion, government (#3, stored at +0x18), a u32 and the population class. `None` without the
+/// block; a block without the government string is logged once here.
+fn rebel_army_government(rec: &EsfRecord, path: &str) -> Option<String> {
+    let data = rec.child("REBEL_DATA")?;
+    let setup = data.child("REBEL_DATA_INNARDS").and_then(|i| i.child("REBEL_SETUP")).or_else(|| data.child("REBEL_SETUP"));
+    match setup.and_then(|s| s.get_str(3)) {
+        Some(key) => Some(key.to_string()),
+        None => {
+            log::warn!("{path}/REBEL_DATA: no REBEL_SETUP government (#3); the army's government is unknown");
+            None
+        }
+    }
 }
 
 /// The forts of one `REGION`: its `FORT_ARRAY` items.
@@ -904,6 +1009,15 @@ pub(crate) fn slot_type(key: &str, db: &GameDatabase) -> String {
 pub(crate) fn wrapped_slot<'a>(sm: &'a EsfRecord, name: &str) -> Option<&'a EsfRecord> {
     let slot = sm.child(name)?;
     slot.child("REGION_SLOT").or(Some(slot))
+}
+
+/// A port slot's blockade (`REGION_SLOT` child `PORT_GARRISON_MANAGER` v2: #0 the docked navy, #1 the
+/// blockading navy, #2 the +0x74 byte, read only from v2 on; CONFIRMED, reader `0x00A45860`, writer
+/// `0x00A51D90`). `None` when #1 is 0, as in every vanilla save and start position.
+pub(crate) fn port_blockade(slot: &EsfRecord) -> Option<PortBlockade> {
+    let pgm = slot.child("PORT_GARRISON_MANAGER")?;
+    let navy = pgm.get_u32(1).filter(|&n| n != 0)?;
+    Some(PortBlockade { navy: ForceId(navy), docked_navy_attacked: pgm.get_bool(2).unwrap_or(false) })
 }
 
 /// The faction holding a `REGION_SLOT` (#0 SIEGEABLE_GARRISON_RESIDENCE #0 GARRISON_RESIDENCE #0,
@@ -1025,7 +1139,9 @@ pub(crate) fn read_recruitment(
             turns_remaining: turns,
             cost: inner.get_u32(4).unwrap_or(0) as i32,
             // #2: the commander the unit was recruited through (item +0x18, `WriteRecruitmentItemToEsf`
-            // `0x00B5C900`), saved as an object id like #1's region (0 = none; INFERRED from that id rule, SAVE_COMPAT.md §3). An id that names no loaded
+            // `0x00B5C900`), saved as the target's object id (0 = none; CONFIRMED: `LoadRecruitmentItemFromEsf` `0x00AF3D00` reads it
+            // raw into +0x18 and the item's post-load resolver `0x00B5C2D0` maps it through the id table
+            // `0x0105AC60`, an unknown id giving 0). An id that names no loaded
             // character is dropped with a warning ([`drop_dangling_recruitment_targets`]).
             target: inner.get_i32(2).or_else(|| inner.get_u32(2).map(|v| v as i32)).filter(|&v| v != 0).map(CharacterId),
             // #5: the item's +0x24, 0 once its commander was destroyed (CONFIRMED, `RecruitmentItem::target_lost`;

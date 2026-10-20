@@ -421,7 +421,7 @@ fn exempt_unit_classes_do_not_desert() {
         let f = m.world.forces.get_mut(&ForceId(1001)).unwrap();
         f.units = keys.iter().enumerate().map(|(i, k)| CampaignUnit { unit_key: (*k).into(), ..unit(10 + i as i32) }).collect();
         // Income 0: p = 0.3, so each loss depends on the unit's random draw.
-        economy::bankrupt_desertion(&mut m, B, 0, 20);
+        economy::bankrupt_desertion(&mut m, B, 0, 20, &mut Vec::new());
         (m.world.forces[&ForceId(1001)].units.iter().map(|u| u.men).collect::<Vec<_>>(), m.rng.unit_float())
     };
     let (alone, next_alone) = run(&["test_unit"]);

@@ -173,7 +173,8 @@ fn treaty_money_round_trips_through_a_save() {
 
 /// The `WarStartedCharacterFaction` flag (`FACTION` #63, faction +0x925, read at `0x0087B769`): the start
 /// position holds it set on the factions at war, and a save written from the model reloads what the model
-/// holds. The diplomacy records' order (`World::diplomacy_record_order`) is the file's: every faction's
+/// holds; the same for #62 (faction +0x924, `FactionDestroyedByCharacterFaction`), clear on every faction of
+/// the start position. The diplomacy records' order (`World::diplomacy_record_order`) is the file's: every faction's
 /// list names each of its records once.
 #[test]
 fn war_started_and_record_order_load_and_round_trip() {
@@ -207,12 +208,16 @@ fn war_started_and_record_order_load_and_round_trip() {
     assert!(started.contains(&france) && started.contains(&austria) && !started.contains(&portugal));
     m.world.faction_details.get_mut(&france).unwrap().war_started = false;
     m.world.faction_details.get_mut(&portugal).unwrap().war_started = true;
+    assert!(w.faction_details.values().all(|d| !d.destroyed_faction));
+    m.world.faction_details.get_mut(&austria).unwrap().destroyed_faction = true;
     let human = l.info.header.faction_key.clone();
     let out = save::write_save(&esf, &m, &human, 1, None).unwrap();
     let back = ntw_campaign::read(&out.to_bytes().unwrap(), &db).unwrap().model.world;
     assert!(!back.faction_details[&france].war_started);
     assert!(back.faction_details[&portugal].war_started);
     assert!(back.faction_details[&austria].war_started, "the others keep the model's");
+    let destroyed: Vec<FactionId> = back.faction_details.iter().filter(|(_, d)| d.destroyed_faction).map(|(&f, _)| f).collect();
+    assert_eq!(destroyed, vec![austria], "#62 round trips");
     assert_eq!(back.diplomacy_record_order, w.diplomacy_record_order, "the records keep their order");
 }
 

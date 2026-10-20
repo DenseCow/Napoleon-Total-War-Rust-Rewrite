@@ -386,7 +386,8 @@ impl CampaignModel {
     /// 8, `0x00CC53D0`) spend from it, which our AI does not have) is not ported: the `fair` test
     /// takes it as covering any payment; a deal the AI would not accept is declined where the exe
     /// may first make a counter-offer (`0x00CC58C0`, fewer than 10 per negotiation); the records the
-    /// model does not hold (trade, alliance, peace, ...) are not evaluated.
+    /// model does not hold (trade, alliance, peace, ...) are not evaluated; a join-war record (11) is
+    /// declined outright (its goal and value are not ported).
     pub fn ai_accepts_deal(&self) -> Option<bool> {
         use super::negotiation::NegotiationAction;
         let n = self.negotiations.current.as_ref()?;
@@ -394,7 +395,8 @@ impl CampaignModel {
         let has_regions = !(n.regions.offered.is_empty() && n.regions.demanded.is_empty());
         let has_techs = !(n.technologies.offered.is_empty() && n.technologies.demanded.is_empty());
         let has_payment = n.payment.has_items();
-        if self.is_human(ai) || !(has_regions || has_techs || has_payment) {
+        let has_join_war = !n.join_war.is_empty();
+        if self.is_human(ai) || !(has_regions || has_techs || has_payment || has_join_war) {
             return None;
         }
         let declines = |index: usize| !self.may_accept(ai, proposer, index);
@@ -446,6 +448,14 @@ impl CampaignModel {
         } else {
             0
         };
+        // Record 11, join war: the exe declines on its `diplomacy_options` (1 or 3), else builds its
+        // goal (`0x00A62400`, weight from the AI's join-war goals) and adds its value (`0x00C12D40`:
+        // the AI's war assessment `0x00A75330` per faction, inflated). PROVISIONAL: neither is ported,
+        // so a deal with a join-war item is always declined (the safe answer: an AI is never dragged
+        // into a war its assessment would refuse).
+        if has_join_war {
+            return Some(false);
+        }
         let budget_ok = true;
         let treasury = self.world.factions.get(&ai).map_or(0, |f| f.treasury);
         Some((e.fair() && budget_ok) || (e.good() && payment <= treasury))
@@ -514,9 +524,10 @@ impl CampaignModel {
     /// - `0x00A364B0`: each region the proposer offers is worth [`Self::region_deal_worth`] to the
     ///   AI, added to slot 2 when either of the exe's two tests holds (`0x00C3E0C0`: campaign
     ///   region `+0x22C`, UNKNOWN meaning; or the CAI region's strategy `+0x34` virtual `+0x94`,
-    ///   INFERRED a siege), else to slot 0 when the AI's attitude to the region (`0x00A79050`) is
-    ///   at least 0, or at least −5 with the region bordering one of the AI's
-    ///   ([`super::World::region_neighbours`]), else nowhere; each region the proposer demands adds
+    ///   INFERRED a siege), else to slot 0 when the AI's attitude to the region
+    ///   ([`super::economy::hypothetical_order_attitude`], `0x00A79050` with the AI's state religion
+    ///   and faction, CONFIRMED: the call at `0x00A365BC`) is at least 0, or at least −5 with the region
+    ///   bordering one of the AI's ([`super::World::region_neighbours`]), else nowhere; each region the proposer demands adds
     ///   its worth to the proposer to slot 1 (unless either test holds) and its worth to the AI to
     ///   slot 2;
     /// - the sum times the inflation factor ([`DealValue::inflated`]);
@@ -524,10 +535,7 @@ impl CampaignModel {
     ///   [`super::World::deal_regions_received`] when the proposer is human (0 otherwise).
     ///
     /// PROVISIONAL: the two tests read false (sieges are not in the model; `+0x22C` is UNKNOWN);
-    /// the attitude (`0x00A79050`: the lower of two population-class results from `0x008BDB90`,
-    /// minus 6, or minus `floor((1 − x) × 6)` when the region is in the AI's list `+0x50/+0x54`) is
-    /// not ported and reads 0, so every offered region counts as gain; the deal's peace record is
-    /// not in the model, so `m` treats it as empty.
+    /// the deal's peace record is not in the model, so `m` treats it as empty.
     pub fn region_deal_value(&self, n: &Negotiation, inflation: f32) -> DealValue {
         let (ai, proposer) = (n.recipient, n.proposer);
         // The regions bordering one of the AI's, built once and only if a test needs it.
@@ -541,11 +549,11 @@ impl CampaignModel {
                 .contains(&r)
         };
         let (ai_census, proposer_census) = (self.region_census(ai), self.region_census(proposer));
-        // PROVISIONAL: the attitude `0x00A79050` is not ported.
-        let attitude = |_: RegionId| 0;
         let mut v = DealValue::default();
         for &r in &n.regions.offered {
-            let a = attitude(r);
+            // A deal only holds existing regions (`propose_regions` refuses an unknown id).
+            let Some(reg) = self.world.regions.get(&r) else { continue };
+            let a = super::economy::hypothetical_order_attitude(self, reg, ai);
             if a >= 0 || (a >= -5 && borders_ai(r)) {
                 v.gain = v.gain.wrapping_add(self.region_deal_worth_with(r, ai, &ai_census));
             }

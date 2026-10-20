@@ -8,6 +8,9 @@
 //! - A capture, the campaign director's transfer or a deal (not a liberation) that leaves the old
 //!   owner without a capital ends it ([`CampaignModel::end_if_capital_lost`], `0x00A64AC0`):
 //!   [`CampaignModel::destroy_faction`] (`0x008AB6C0` with no killer).
+//! - A faction destroyed by another (the script's `grant_faction_handover`, a mission's takeover
+//!   reward) hands its regions to the killer ([`CampaignModel::destroy_faction_by`], `0x008AB6C0`
+//!   with a killer; [`CampaignModel::grant_faction_handover`], [`CampaignModel::take_over_faction`]).
 
 use std::collections::BTreeSet;
 
@@ -88,14 +91,14 @@ impl CampaignModel {
     /// regions it holds in its home theatre (every region: each map is one theatre), the squared
     /// distance (single precision, map units) from the lost capital's settlement to each settlement;
     /// the nearest region whose settlement has at least [`CAPITAL_TOWN_SLOTS`] building slots, else
-    /// the nearest of the others, else none. A tie keeps the first region (strict `<`); the exe's
-    /// order is the faction's region list (gain order), the model's the region ids (INFERRED: no
-    /// two settlements of a shipped map lie the same distance from a third).
+    /// the nearest of the others, else none. A tie keeps the first region (strict `<`) in the
+    /// faction's region list order ([`super::world::World::faction_regions_in_list_order`]: the exe
+    /// walks faction +0x76C, count +0x778 / data +0x77C, at `0x008DAC2F`..`0x008DACF7`, CONFIRMED).
     fn nearest_capital(&self, faction: FactionId, lost: RegionId) -> Option<RegionId> {
         let (ox, oz) = self.world.regions.get(&lost)?.settlement.position;
         let mut town: Option<(f32, RegionId)> = None;
         let mut other: Option<(f32, RegionId)> = None;
-        for r in self.world.regions.values().filter(|r| r.owner == faction) {
+        for r in self.world.faction_regions_in_list_order(faction).iter().filter_map(|id| self.world.regions.get(id)) {
             let (x, z) = r.settlement.position;
             let (dx, dz) = (x.to_f32() - ox.to_f32(), z.to_f32() - oz.to_f32());
             let d = dx * dx + dz * dz;
@@ -123,7 +126,14 @@ impl CampaignModel {
         self.destroy_faction(old, events);
     }
 
-    /// `faction` leaves the game (`0x008AB6C0` with no killer, CONFIRMED):
+    /// `faction` leaves the game with no killer ([`Self::destroy_faction_by`] with `None`).
+    pub(crate) fn destroy_faction(&mut self, faction: FactionId, events: &mut Vec<CampaignEvent>) {
+        self.destroy_faction_by(faction, None, events);
+    }
+
+    /// `faction` leaves the game, destroyed by `killer` if any (`DestroyFactionAndResetRelations`
+    /// `0x008AB6C0`, CONFIRMED). With a killer, the regions it holds are first listed (its region list,
+    /// faction +0x76C, copied); then:
     /// 1. it is marked out of the game ([`super::details::FactionDetails::out_of_game`], faction +0x824);
     ///    its faction +0x754 is cleared too (read by `0x008CEEA0` / `0x008E2A80`; the notes read it as
     ///    the patron in the sight sources and as a forced war target in the negotiation options, and the
@@ -131,8 +141,10 @@ impl CampaignModel {
     ///    which reading is right is not traced, BACKLOG);
     /// 2. each relationship between it and another faction, both ways, is reset (`0x00B2B8B0` →
     ///    `0x00B2B920` on its own record, `0x00B72900` on the other's; [`reset_relationship`]) and the
-    ///    stance becomes neutral; no trade break is posted and nothing is broadcast (the break
-    ///    `0x00B73430` runs only towards a killer);
+    ///    stance becomes neutral. Only its own record towards the killer, when it holds a trade
+    ///    agreement (record +0x788), first breaks that trade both ways (`0x00B2B920` →
+    ///    `BreakTradeBothWays` `0x00B73430`, [`Self::break_trade_both_ways`]); nothing else is posted or
+    ///    broadcast;
     /// 3. an AI faction loses everything on the map: no character of it returns after death (character
     ///    +0x52C cleared), every force goes ([`Self::destroy_force`]: the character loop `0x009DAB40`
     ///    deletes each one's army or navy) and every character dies ([`Self::character_dies`]; no post is
@@ -142,21 +154,55 @@ impl CampaignModel {
     ///    `0x0088CE30` → `0x00A64560` for a slot garrison, and `0x00B794B0` from `0x008ABB2D`/`0x008ABB3D`,
     ///    which recomputes a slot's holder from its region owner, docked navy and garrison and calls
     ///    `SetSettlementOwner` `0x00B2B810` on a change; which slots go back in our model is INFERRED,
-    ///    as slot garrisons are not modelled). The exe's loop at `0x008ABD3E` that hands back held forts
-    ///    (`0x00B1B010`, region +0x240 list) has no price effect, and our forts have no holder. A human
-    ///    faction keeps its forces and characters, and the
-    ///    campaign is over ([`Self::end_campaign`], `0x008C30A0` from `0x008AB6C0` when the faction is
-    ///    human, CONFIRMED; the exe's multiplayer messages are not modelled);
-    /// 4. [`CampaignEvent::FactionDestroyed`] (the exe's event +0x108); for a human faction its defeat
-    ///    movie follows ([`CampaignEvent::OutcomeMovie`]: the listener `0x00A14E80` on that event with
-    ///    its flag 1, CONFIRMED) when the data names one ([`Self::outcome_movie`]).
+    ///    as slot garrisons are not modelled). With a killer, the killer's destroyed-a-faction flag is
+    ///    set ([`super::details::FactionDetails::destroyed_faction`], killer +0x924 at `0x008ABC50`, even
+    ///    with no region to hand over) and, while the faction holds a region, its first region goes to
+    ///    the killer, or its second when the first is its capital (`0x00A8B5A0`) and it holds more than
+    ///    one, so the capital goes last (`TransferSettlementWithoutCharacter` `0x00B58A10(killer, 0, 0)`:
+    ///    [`Self::transfer_region`], which neither ends the old owner nor brings anyone back). The
+    ///    exe's loop at `0x008ABD3E` that hands back held forts (`0x00B1B010`, region +0x240 list) has
+    ///    no price effect, and our forts have no holder. A human faction keeps its forces, characters
+    ///    and regions, and the campaign is over ([`Self::end_campaign`], `0x008C30A0` from `0x008AB6C0`
+    ///    when the faction is human, CONFIRMED; the exe's multiplayer messages are not modelled);
+    /// 4. [`CampaignEvent::FactionDestroyed`] (the exe's event +0x108), except for an AI faction with a
+    ///    killer, which posts none; for a human faction its defeat movie follows
+    ///    ([`CampaignEvent::OutcomeMovie`]: the listener `0x00A14E80` on that event with its flag 1,
+    ///    CONFIRMED) when the data names one ([`Self::outcome_movie`]);
+    /// 5. with a killer and a listed region, the director garrisons the handed-over regions
+    ///    (`0x00BA80E0`, CONFIRMED): only for a killer in the CAI world ([`super::director::in_cai_world`],
+    ///    `0x00C3C4E0`), the listed regions are sorted (the library sort `0x00B7FEE0`,
+    ///    [`crate::msvc_sort::sort_by`]) by settlement building slots, most first, then by recruitable
+    ///    units, most first (the comparator's tie test is `>=`), and the first gets a new garrison
+    ///    ([`Self::spawn_transfer_garrison`], `0x00BA8400`), then the second when more than three were
+    ///    listed (`0x00BA8090`). A region the killer does not own (a human faction keeps its regions)
+    ///    gets none: the exe runs the pass for a human target too, and `0x00BA8400` then spawns
+    ///    nothing, so ours runs it the same way. INFERRED: the sort key is our [`settlement_slots`]
+    ///    (which slots count is INFERRED there), and the CAI settlement's count is taken to be that
+    ///    plus a constant (see [`Self::garrison_handed_regions`]).
     ///
-    /// Called only for a faction left with no region (see [`Self::end_if_capital_lost`]): the exe's
-    /// handing out of regions it still holds in other theatres (a revolt, `0x00A79810`, else the
-    /// faction scoring best, AI 5 / human 1, +2 for the same home theatre) is never reached on a map
-    /// of one theatre.
-    pub(crate) fn destroy_faction(&mut self, faction: FactionId, events: &mut Vec<CampaignEvent>) {
-        debug_assert!(!self.world.regions.values().any(|r| r.owner == faction), "a faction leaves the game holding a region");
+    /// The listed regions and the hand-over walk follow the faction's region list (faction +0x76C,
+    /// count +0x778 / data +0x77C; [`super::world::World::faction_regions_in_list_order`]), CONFIRMED.
+    ///
+    /// With no killer, it is called only for a faction left with no region (see
+    /// [`Self::end_if_capital_lost`]): the exe's handing out of regions it still holds in other
+    /// theatres (a revolt, `0x00A79810`, else the faction scoring best, AI 5 / human 1, +2 for the same
+    /// home theatre) is never reached on a map of one theatre.
+    ///
+    /// ORIGINAL BUG: `0x008AB6C0` hands the destroyed faction's regions to the killer with no
+    /// killer ≠ destroyed check; when they are the same faction, `TransferRegionToFaction`
+    /// `0x00A64AC0` returns early on a same-owner transfer (`0x00A64D13`), the region never leaves the
+    /// list and the loop never ends. Ours refuses a faction destroying itself (logged, nothing
+    /// changes) and returns false.
+    pub(crate) fn destroy_faction_by(&mut self, faction: FactionId, killer: Option<FactionId>, events: &mut Vec<CampaignEvent>) -> bool {
+        if killer == Some(faction) {
+            log::warn!("{faction:?} cannot be destroyed by itself: refused");
+            return false;
+        }
+        debug_assert!(killer.is_some() || !self.world.regions.values().any(|r| r.owner == faction), "a faction leaves the game holding a region");
+        let listed: Vec<RegionId> = match killer {
+            Some(_) => self.world.faction_regions_in_list_order(faction),
+            None => Vec::new(),
+        };
         if let Some(d) = self.world.faction_details.get_mut(&faction) {
             d.out_of_game = Some(true);
         }
@@ -166,6 +212,9 @@ impl CampaignModel {
         }
         others.remove(&faction);
         for other in others {
+            if Some(other) == killer && self.world.relationships.get(&(faction, other)).is_some_and(|r| r.trade_agreement) {
+                self.break_trade_both_ways(faction, other);
+            }
             for key in [(faction, other), (other, faction)] {
                 self.change_treaty_money(key.0, key.1, reset_relationship);
                 if let Some(stance) = self.world.factions.get_mut(&key.0).and_then(|f| f.diplomacy.get_mut(&key.1)) {
@@ -202,14 +251,123 @@ impl CampaignModel {
                     self.update_commodity_prices_with(false);
                 }
             }
+            if let Some(killer) = killer {
+                if let Some(d) = self.world.faction_details.get_mut(&killer) {
+                    d.destroyed_faction = true;
+                }
+                self.hand_regions_to_killer(faction, killer);
+            }
         } else {
             self.end_campaign();
         }
-        events.push(CampaignEvent::FactionDestroyed { faction });
+        if killer.is_none() || self.is_human(faction) {
+            events.push(CampaignEvent::FactionDestroyed { faction });
+        }
         if self.is_human(faction)
             && let Some(movie) = self.outcome_movie(faction, super::outcome::CampaignOutcome::Destroyed)
         {
             events.push(CampaignEvent::OutcomeMovie { faction, movie });
+        }
+        if let Some(killer) = killer
+            && !listed.is_empty()
+        {
+            self.garrison_handed_regions(killer, &listed);
+        }
+        true
+    }
+
+    /// The script's `grant_faction_handover(killer, target, min_turn, max_turn)` (binding `0x00978950`,
+    /// CONFIRMED): `target` still in the game (faction +0x824 clear) may be destroyed by `killer`
+    /// ([`Self::destroy_faction_by`]) once per call between turns `min_turn` and `max_turn` (both
+    /// included; a `max_turn` below `min_turn` is raised to it, `0x00978A55`), the turn being the
+    /// calendar's elapsed turns. Inside the window one campaign RNG draw (`0..=100`,
+    /// [`crate::rng::CaRng::percent_0_100`]) is made and the faction is destroyed when
+    /// `100.0 / (max_turn − turn + 1)` (f32) is at least the draw, or on `max_turn` itself, so the
+    /// chance rises to certain by the last turn. Outside the window, or with the target out of the
+    /// game, nothing happens and no draw is made. Returns the destruction's events when the target was
+    /// destroyed ([`Self::destroy_by_command`]: an AI target destroyed by a killer posts no
+    /// `FactionDestroyed`).
+    pub fn grant_faction_handover(&mut self, killer: FactionId, target: FactionId, min_turn: i32, max_turn: i32) -> Option<Vec<CampaignEvent>> {
+        if self.world.faction_details.get(&target).is_some_and(|d| d.out_of_game == Some(true)) {
+            return None;
+        }
+        let max_turn = max_turn.max(min_turn);
+        let turn = self.calendar.turns_elapsed as i32;
+        if turn < min_turn || turn > max_turn {
+            return None;
+        }
+        // The exe's int arithmetic, wrapping (a max_turn near i32::MAX).
+        let threshold = 100.0f32 / max_turn.wrapping_sub(turn).wrapping_add(1) as f32;
+        let draw = self.rng.percent_0_100() as f32;
+        if threshold < draw && turn < max_turn {
+            return None;
+        }
+        self.destroy_by_command(target, killer)
+    }
+
+    /// A mission's takeover reward (`0x00A06050`, after its money; CONFIRMED): the mission's target
+    /// faction (mission +0x68) is destroyed by the mission's owner ([`Self::destroy_by_command`]),
+    /// with no other check. Returns the destruction's events, or `None` when it was refused (the owner
+    /// is the target, logged by [`Self::destroy_faction_by`]). Mission completion is not modelled yet,
+    /// so nothing calls this (the reward is only saved, [`super::details::CampaignMission::reward_takeover`]).
+    pub fn take_over_faction(&mut self, target: FactionId, owner: FactionId) -> Option<Vec<CampaignEvent>> {
+        self.destroy_by_command(target, owner)
+    }
+
+    /// `target` destroyed by `killer` outside the turn steps and commands (the script binding, a
+    /// mission reward): [`Self::destroy_faction_by`], then `CharacterCreated` for each character it
+    /// created (the killer's garrison colonel), as [`Self::apply`] reports a command's. `None` when
+    /// the destruction was refused.
+    fn destroy_by_command(&mut self, target: FactionId, killer: FactionId) -> Option<Vec<CampaignEvent>> {
+        let known: BTreeSet<CharacterId> = self.world.characters.keys().copied().collect();
+        let mut events = Vec::new();
+        if !self.destroy_faction_by(target, Some(killer), &mut events) {
+            return None;
+        }
+        events.extend(self.created_since(&known));
+        Some(events)
+    }
+
+    /// Step 3's hand-over of every region `faction` holds to `killer` (`0x008AB6C0`'s loop over the
+    /// faction's region list, `0x00B58A10(killer, 0, 0)` each): the first region of the list
+    /// ([`super::world::World::faction_regions_in_list_order`]), or the second when the first is the
+    /// faction's capital (`0x00A8B5A0`) and another is left.
+    fn hand_regions_to_killer(&mut self, faction: FactionId, killer: FactionId) {
+        loop {
+            let list = self.world.faction_regions_in_list_order(faction);
+            let mut held = list.iter().copied();
+            let Some(first) = held.next() else { return };
+            let region = match held.next() {
+                Some(second) if self.world.is_capital(first) => second,
+                _ => first,
+            };
+            if !self.transfer_region(region, killer) {
+                // Not reached: the killer is another faction, so the owner always changes.
+                log::error!("{faction:?}'s region {region:?} did not pass to {killer:?}: hand-over stopped");
+                return;
+            }
+        }
+    }
+
+    /// Step 5 (`0x00BA80E0` → `0x00BA8090`): the killer's new garrisons in the sorted `listed` regions.
+    fn garrison_handed_regions(&mut self, killer: FactionId, listed: &[RegionId]) {
+        if !super::director::in_cai_world(self, killer) {
+            return;
+        }
+        // (region, settlement slots, recruitable units): the exe's key is the CAI settlement's building
+        // slot count (`0x00B7CF1A`); its tie key is the region's recruitable list count (region +0x1B0),
+        // read after the hand-over. INFERRED: ours sorts by [`settlement_slots`] (itself INFERRED),
+        // taking the CAI count to be the settlement's own slots plus two, as on every settlement of
+        // three original saves, so the constant cancels out; the CAI settlement's slot list builder is
+        // not traced (which two slots it adds, and whether every settlement gets them).
+        let mut sorted: Vec<(RegionId, usize, usize)> = listed
+            .iter()
+            .filter_map(|id| Some((*id, settlement_slots(self.world.regions.get(id)?), self.recruitable_units(*id).len())))
+            .collect();
+        crate::msvc_sort::sort_by(&mut sorted, |a, b| if a.1 != b.1 { a.1 > b.1 } else { a.2 >= b.2 });
+        let picks = if sorted.len() > 3 { 2 } else { 1 };
+        for &(region, _, _) in sorted.iter().take(picks) {
+            self.spawn_transfer_garrison(region, killer);
         }
     }
 }

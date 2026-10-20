@@ -29,7 +29,7 @@ fn human_capture_waits_for_the_choice_then_loots() {
     let r = &m.world.regions[&RegionId(11)];
     assert_eq!(r.slots[0].building.as_ref().unwrap().health, loot_h);
     assert_eq!(r.town_wealth, 200);
-    assert!(r.class_bases.iter().all(|c| c.2 == -10), "{:?}", r.class_bases);
+    assert!(r.class_bases.iter().all(|c| c.resistance == -10), "{:?}", r.class_bases);
     // Repair: round((100 − h) × 300 × 0.01) with no cost modifier, over max(1, floor((100 − h) × 0.02)) turns.
     assert!(m.can_repair(RegionId(11), SlotRef::Slot(0)));
     let cost = ((100 - loot_h) as f64 * 3.0).round_ties_even() as i32;
@@ -40,6 +40,44 @@ fn human_capture_waits_for_the_choice_then_loots() {
     let item = &m.world.regions[&RegionId(11)].construction[0];
     assert_eq!((item.slot, item.level_key.as_str(), item.turns_remaining), (SlotRef::Slot(0), "test_building_level", (((100 - loot_h) as f32 * 0.02).floor() as u32).max(1)));
     assert!(!m.can_repair(RegionId(11), SlotRef::Slot(0)), "already being repaired");
+}
+
+/// `0x00B14930`: an option's public-order previews are the net order (`0x008E2AB0`) of the classes the
+/// capturer's government names: +0x18 the upper class (`0x00A61400`), +0x1C the lower (`0x00A610C0`), and 0 for
+/// a class the region does not have (not the first class, as `0x00A61320` / `0x00A60FE0` fall back to).
+#[test]
+fn capture_previews_are_the_governments_upper_and_lower_classes() {
+    use super::capture::CaptureChoice;
+    let setup = |classes: &[(&str, i32)]| {
+        let mut m = capture_model(vec![A]);
+        m.world.factions.get_mut(&A).unwrap().government_key = "gov_constitutional".into();
+        Arc::make_mut(&mut m.rules).government_classes.insert("gov_constitutional".into(), ("upper".into(), "middle".into()));
+        m.world.regions.get_mut(&RegionId(11)).unwrap().class_bases = classes.iter().map(|&(c, res)| PopulationClassState { resistance: res, ..PopulationClassState::new(c) }).collect();
+        m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+        m
+    };
+    let total = |m: &CampaignModel, class: &str| {
+        economy::public_order_factors(m, RegionId(11)).iter().find(|f| f.class == class).map(|f| f.total() as f32)
+    };
+    // A constitutional monarchy governs `upper` and `middle`: the region's `lower` class feeds neither preview.
+    let mut m = setup(&[("lower", 7), ("middle", -3), ("upper", 5)]);
+    let p = m.pending_capture.clone().unwrap();
+    let (lower, upper) = p.occupy.public_order_after.unwrap();
+    m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Occupy }).unwrap();
+    assert_eq!((Some(lower), Some(upper)), (total(&m, "middle"), total(&m, "upper")));
+    assert_ne!(Some(lower), total(&m, "lower"), "the region's own `lower` class is not the government's lower class");
+    // The loot preview counts its public-order reduction on both classes.
+    let mut m = setup(&[("lower", 7), ("middle", -3), ("upper", 5)]);
+    let p = m.pending_capture.clone().unwrap();
+    m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Loot }).unwrap();
+    assert_eq!(p.loot.public_order_after, Some((total(&m, "middle").unwrap(), total(&m, "upper").unwrap())));
+    // No `middle` class in the region: the lower preview is 0, not the first class's order.
+    let mut m = setup(&[("upper", 5), ("lower", 7)]);
+    let (lower, upper) = m.pending_capture.clone().unwrap().occupy.public_order_after.unwrap();
+    m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Occupy }).unwrap();
+    assert_eq!(lower, 0.0);
+    assert_ne!(upper, 0.0, "the first class (upper) has an order of its own");
+    assert_eq!(Some(upper), total(&m, "upper"));
 }
 
 #[test]
@@ -67,16 +105,22 @@ fn ai_capture_occupies_and_liberation_hands_the_region_over() {
     m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
     assert_eq!(m.pending_capture.as_ref().unwrap().liberate, Some(C));
     let mut no_capital = m.clone();
+    let pos_before = m.world.characters[&CharacterId(100)].position;
     set_details(&mut m, A, Some(10), false);
     m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Liberate }).unwrap();
     assert_eq!(m.world.regions[&RegionId(11)].owner, C);
-    // The liberation's owner change (0x00B58A10 → 0x00A64AC0, fourth argument 0) expels the
-    // capturer's army from the region (0x008D9DC0); a capturer without a capital is not in that
-    // pass (the world's faction list, 0x00A64AC0) and stays inside, a foreign garrison.
+    // The liberation expels the capturer's army from the region (0x008D9DC0 at 0x00B508C5, before
+    // the owner change), so a capturer without a capital, which the owner change's own pass
+    // (0x00A64AC0, factions with a capital only) skips, is moved out of the settlement too (it stays in the region on the map: the owner is still
+    // the liberator at expel time, so it may stay).
     assert_eq!(m.world.characters[&CharacterId(100)].garrisoned_in, None);
     assert_eq!(m.world.regions[&RegionId(11)].garrison, None);
+    assert_eq!(no_capital.world.capital(A), None);
     no_capital.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Liberate }).unwrap();
-    assert_eq!(no_capital.world.regions[&RegionId(11)].garrison, Some(ForceId(1000)));
+    assert_eq!(no_capital.world.regions[&RegionId(11)].owner, C);
+    assert_eq!(no_capital.world.regions[&RegionId(11)].garrison, None);
+    assert_eq!(no_capital.world.characters[&CharacterId(100)].garrisoned_in, None);
+    assert_eq!(no_capital.world.characters[&CharacterId(100)].position, pos_before);
     // Not offered when the relationship forbids returning regions, nor for the capturer itself.
     let mut m = capture_model(vec![A]);
     m.world.region_rebel_factions.insert(RegionId(11), "test_faction_c".into());
@@ -388,6 +432,49 @@ fn a_new_protectorate_settles_its_old_ties() {
     assert_eq!(m.world.stance(A, B), Stance::Allied, "the patron's alliances stay");
 }
 
+/// `CCQ_MAKE_PROTECTORATE` (`0x009367A0`): refused for an unknown or the same faction, at war, or when either
+/// side already has a patron (`0x008CEEA0`); otherwise the second faction becomes the first's protectorate
+/// (`0x00B105C0`). No turn test.
+#[test]
+fn the_make_protectorate_command_follows_the_exe_handler() {
+    let mut m = test_model();
+    m.turn = TurnState::in_turn_of(C, vec![C]);
+    assert_eq!(m.apply(CampaignCommand::MakeProtectorate { patron: A, protectorate: A }), Err(CommandError::SameFaction(A)));
+    assert_eq!(m.apply(CampaignCommand::MakeProtectorate { patron: A, protectorate: FactionId(99) }), Err(CommandError::UnknownFaction(FactionId(99))));
+    m.apply(CampaignCommand::DeclareWar { a: C, b: B }).unwrap();
+    assert_eq!(m.apply(CampaignCommand::MakeProtectorate { patron: B, protectorate: C }), Err(CommandError::AlreadyAtWar(B, C)));
+    m.apply(CampaignCommand::MakeProtectorate { patron: A, protectorate: B }).unwrap();
+    assert_eq!((m.world.stance(B, A), m.world.stance(A, B)), (Stance::Protectorate, Stance::Patron));
+    assert!(m.has_patron(B) && !m.has_patron(A));
+    // B has a patron now: it may take part in no other.
+    m.apply(CampaignCommand::MakePeace { a: C, b: B, suppress_messages: true }).unwrap();
+    assert_eq!(m.apply(CampaignCommand::MakeProtectorate { patron: C, protectorate: B }), Err(CommandError::HasPatron(B)));
+    assert_eq!(m.apply(CampaignCommand::MakeProtectorate { patron: B, protectorate: C }), Err(CommandError::HasPatron(B)));
+    // The patron itself may take a second protectorate.
+    m.apply(CampaignCommand::MakeProtectorate { patron: A, protectorate: C }).unwrap();
+    assert_eq!(m.world.stance(C, A), Stance::Protectorate);
+}
+
+/// `CCQ_MOVE_ARMIES_OUT_OF_REGIONS` (`0x00936AB0`): the second faction's forces leave the first's regions,
+/// then the first's the second's, whatever their stance; a force that may stay still leaves the settlement.
+#[test]
+fn moving_armies_out_empties_both_sides_settlements() {
+    let mut m = test_model();
+    let garrison = |m: &mut CampaignModel, force: u32, ch: i32, region: u32| {
+        m.world.regions.get_mut(&RegionId(region)).unwrap().garrison = Some(ForceId(force));
+        m.world.characters.get_mut(&CharacterId(ch)).unwrap().garrisoned_in = Some(RegionId(region));
+    };
+    garrison(&mut m, 1000, 100, 11);
+    garrison(&mut m, 1001, 101, 10);
+    assert_eq!(m.apply(CampaignCommand::MoveArmiesOutOfRegions { a: A, b: FactionId(99) }), Err(CommandError::UnknownFaction(FactionId(99))));
+    assert_eq!(m.world.regions[&RegionId(10)].garrison, Some(ForceId(1001)), "nothing moved on a refusal");
+    m.apply(CampaignCommand::MoveArmiesOutOfRegions { a: A, b: B }).unwrap();
+    assert_eq!((m.world.regions[&RegionId(10)].garrison, m.world.regions[&RegionId(11)].garrison), (None, None));
+    assert_eq!(m.world.characters[&CharacterId(100)].garrisoned_in, None);
+    assert_eq!(m.world.characters[&CharacterId(101)].garrisoned_in, None);
+    assert_eq!(m.world.characters[&CharacterId(101)].position, pos(11, 0), "B's army goes to B's region");
+}
+
 #[test]
 fn religion_conversion_follows_the_exe_formula() {
     let mut m = test_model_with([("conversion_rel_a".to_string(), vec![EffectKey { kind: BonusKind::Religion, bonus: "conversion".into(), qualifier: "rel_a".into() }])]);
@@ -508,6 +595,42 @@ fn peace_posts_ceasefire_messages_unless_suppressed() {
     assert_eq!(messages(ev), vec![]);
     assert_eq!(m.world.stance(A, B), Stance::Neutral, "a suppressed peace is still a peace");
     assert_eq!(CampaignMessage::CeasefireDeclared { other: A }.type_name(), "ceasefire_declared");
+}
+
+/// Timed access left at one turn (2 → 1) posts `military_access_prompt` (type 0x76, `0x00A0E630`) to the
+/// holder, titled with the granter (`0x00B29170` → `0x00A0E630`(target, owner)); a 1-turn grant and
+/// indefinite access post none, and the granter's records are walked in record order (`0x00B29100`).
+#[test]
+fn timed_access_with_one_turn_left_posts_the_access_prompt() {
+    let prompts = |ev: Vec<CampaignEvent>| -> Vec<(FactionId, FactionId)> {
+        ev.iter()
+            .filter_map(|e| match e {
+                CampaignEvent::Message { recipient, message: CampaignMessage::MilitaryAccessPrompt { granter } } => Some((*recipient, *granter)),
+                _ => None,
+            })
+            .collect()
+    };
+    let mut m = test_model();
+    // C holds no region in the test world: keep it in the game (a target out of it is skipped).
+    m.world.faction_details.entry(C).or_default().out_of_game = Some(false);
+    m.world.diplomacy_record_order.insert(A, vec![C, B]);
+    m.grant_military_access(A, B, 3).unwrap();
+    m.grant_military_access(A, C, 2).unwrap();
+    assert_eq!(prompts(m.diplomacy_round_end(A)), vec![(C, A)], "C's 2 turns leave 1");
+    assert_eq!(prompts(m.diplomacy_round_end(A)), vec![(B, A)], "B's 3 turns leave 1; C's run out silently");
+    assert_eq!(prompts(m.diplomacy_round_end(A)), vec![]);
+    assert_eq!(m.world.relationships[&(A, B)].military_access_turns, 0);
+    // Both at 2 together: record order, C before B.
+    m.grant_military_access(A, B, 2).unwrap();
+    m.grant_military_access(A, C, 2).unwrap();
+    assert_eq!(prompts(m.diplomacy_round_end(A)), vec![(C, A), (B, A)]);
+    // A 1-turn grant and indefinite access never leave one turn.
+    drop(m.diplomacy_round_end(A));
+    m.grant_military_access(A, B, 1).unwrap();
+    m.grant_military_access(A, C, -1).unwrap();
+    assert_eq!(prompts(m.diplomacy_round_end(A)), vec![]);
+    assert_eq!(prompts(m.diplomacy_round_end(A)), vec![]);
+    assert_eq!(CampaignMessage::MilitaryAccessPrompt { granter: A }.type_name(), "military_access_prompt");
 }
 
 /// Made-up extra factions for the declaration tests: D, E, F in the game, and R, the rebels (no key,
@@ -661,4 +784,172 @@ fn a_peace_access_grant_row_gives_the_grantee_access() {
     std::sync::Arc::make_mut(&mut m.rules).features.peace_access_grants = vec![grant];
     peace(&mut m, A, C);
     assert_eq!((access(&m, A, C), access(&m, C, A)), (0, 0));
+}
+
+/// A rebel region's classes (`0x008CE320` / `0x008CE260`): the government of its first risen army's REBEL_DATA
+/// (region +0x220, `0x008CFC20(0)` → army +0x98 → +0x18); with no risen army no class matches. Removing the first
+/// army (`0x0088CE30` → `0x0088F310` → `0x008B0150`) makes the next one count.
+#[test]
+fn a_rebel_regions_classes_are_its_first_risen_armys_government() {
+    let mut m = test_model();
+    m.world.factions.get_mut(&B).unwrap().key.clear();
+    let rules = Arc::make_mut(&mut m.rules);
+    rules.government_classes.insert("gov_rep".into(), ("middle".into(), "lower".into()));
+    rules.government_classes.insert("gov_abs".into(), ("upper".into(), "lower".into()));
+    for id in [2000u32, 2001] {
+        m.world.forces.insert(ForceId(id), MilitaryForce { id: ForceId(id), faction: B, commander: None, units: vec![unit(id as i32)], is_navy: false });
+    }
+    m.world.rebel_army_governments.insert(ForceId(2000), "gov_rep".into());
+    m.world.rebel_army_governments.insert(ForceId(2001), "gov_abs".into());
+    m.world.regions.get_mut(&RegionId(11)).unwrap().class_bases =
+        [("lower", 4), ("middle", -3), ("upper", 6)].iter().map(|&(c, res)| PopulationClassState { resistance: res, ..PopulationClassState::new(c) }).collect();
+    let classes = |m: &CampaignModel| {
+        let (u, l) = economy::governed_class_factors(m, RegionId(11));
+        (u.map(|c| c.class), l.map(|c| c.class))
+    };
+    // No risen army: no class matches, both previews 0.
+    assert_eq!(economy::region_government_classes(&m, &m.world.regions[&RegionId(11)]), None);
+    assert_eq!(classes(&m), (None, None));
+    assert_eq!(economy::public_order(&m, RegionId(11)), economy::PublicOrder { lower: 0.0, upper: 0.0 });
+    // The first risen army's government names the classes, not the second's.
+    m.world.region_risen_armies.insert(RegionId(11), vec![ForceId(2000), ForceId(2001)]);
+    assert_eq!(classes(&m), (Some("middle".into()), Some("lower".into())));
+    // A non-rebel region keeps its governing faction's government.
+    assert_eq!(economy::region_government_classes(&m, &m.world.regions[&RegionId(10)]), Some(economy::government_classes(&m, A)));
+    // The first army gone: the second counts, and the first's government entry goes with it.
+    m.remove_force(ForceId(2000), None);
+    assert_eq!(m.world.region_risen_armies[&RegionId(11)], vec![ForceId(2001)]);
+    assert!(!m.world.rebel_army_governments.contains_key(&ForceId(2000)));
+    assert_eq!(classes(&m), (Some("upper".into()), Some("lower".into())));
+    // A first army with no government (none loaded): no class matches.
+    m.world.rebel_army_governments.remove(&ForceId(2001));
+    assert_eq!(classes(&m), (None, None));
+}
+
+/// Position of the first event matching `f` (panics with the list when there is none).
+fn event_at(ev: &[CampaignEvent], f: impl Fn(&CampaignEvent) -> bool) -> usize {
+    ev.iter().position(f).unwrap_or_else(|| panic!("event missing: {ev:?}"))
+}
+
+/// A capture that ends the old owner: `FactionDestroyed` fires inside the owner change
+/// (`0x00B449F0` → `0x00A64AC0` → `0x008AB6C0` at `0x00A652A2`), which every capture variant
+/// calls before it builds `SettlementOccupied` (`0x00B5874F` / `0x00B589A6` / `0x00B58DA0`); the
+/// capture report's choice comes after both.
+#[test]
+fn a_capture_that_ends_the_owner_reports_its_destruction_before_the_occupation() {
+    use super::capture::CaptureChoice;
+    for humans in [Vec::new(), vec![A]] {
+        let mut m = capture_model(humans.clone());
+        set_details(&mut m, A, Some(10), false);
+        set_details(&mut m, B, Some(11), false);
+        let ev = m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+        let destroyed = event_at(&ev, |e| *e == CampaignEvent::FactionDestroyed { faction: B });
+        let occupied = event_at(&ev, |e| *e == CampaignEvent::SettlementOccupied { region: RegionId(11), faction: A });
+        let report = if humans.is_empty() {
+            event_at(&ev, |e| *e == CampaignEvent::CaptureResolved { region: RegionId(11), faction: A, choice: CaptureChoice::Occupy, money: 0 })
+        } else {
+            event_at(&ev, |e| *e == CampaignEvent::CaptureChoicePending { region: RegionId(11), faction: A })
+        };
+        assert!(destroyed < occupied && occupied < report, "{ev:?}");
+        assert_eq!(ev.iter().filter(|e| matches!(e, CampaignEvent::SettlementOccupied { .. })).count(), 1, "{ev:?}");
+    }
+}
+
+/// A capture that leaves the old owner in the game posts no `FactionDestroyed`, and
+/// `SettlementOccupied` still comes before the capture report. Liberating the region afterwards
+/// posts no second `SettlementOccupied` (`0x00889EE0` is built only by the capture variants;
+/// `0x00B58A10` forwards to the owner change `0x00B449F0` alone).
+#[test]
+fn a_capture_that_leaves_the_owner_reports_the_occupation_then_the_choice() {
+    use super::capture::CaptureChoice;
+    let mut m = capture_model(vec![A]);
+    m.world.region_rebel_factions.insert(RegionId(11), "test_faction_c".into());
+    let ev = m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+    assert!(!ev.iter().any(|e| matches!(e, CampaignEvent::FactionDestroyed { .. })), "{ev:?}");
+    let occupied = event_at(&ev, |e| *e == CampaignEvent::SettlementOccupied { region: RegionId(11), faction: A });
+    let pending = event_at(&ev, |e| *e == CampaignEvent::CaptureChoicePending { region: RegionId(11), faction: A });
+    assert!(occupied < pending, "{ev:?}");
+    assert_eq!(m.pending_capture.as_ref().unwrap().liberate, Some(C));
+    let ev = m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Liberate }).unwrap();
+    assert_eq!(m.world.regions[&RegionId(11)].owner, C);
+    assert!(!ev.iter().any(|e| matches!(e, CampaignEvent::SettlementOccupied { .. })), "{ev:?}");
+    assert!(ev.contains(&CampaignEvent::CaptureResolved { region: RegionId(11), faction: A, choice: CaptureChoice::Liberate, money: 0 }), "{ev:?}");
+}
+
+/// The loot choice (`0x008C0310` choice 0, or choice 2 with no liberation target) runs
+/// `0x00B541E0`, which posts `CharacterLootedSettlement` (at `0x00B54468`) with the capture report's
+/// character: the capturing force's commander (report +0x8, from force +0x74 in `0x00B58560` /
+/// `0x00B58C00`), after the option is applied. Occupy (`0x00B582E0`) and a liberation with a
+/// target (`0x00B4F090`) post no loot event, nor does a loot with no commander (`0x008F9EE0` gate).
+#[test]
+fn looting_posts_character_looted_settlement_with_the_capturing_commander() {
+    use super::capture::CaptureChoice;
+    let looted = |ev: &[CampaignEvent]| ev.iter().filter(|e| matches!(e, CampaignEvent::CharacterLootedSettlement { .. })).count();
+    // Loot: after the option is applied, before the report closes.
+    let mut m = capture_model(vec![A]);
+    let ev = m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+    assert_eq!(looted(&ev), 0, "the choice waits: {ev:?}");
+    assert_eq!(m.pending_capture.as_ref().unwrap().looter, Some(CharacterId(100)));
+    let ev = m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Loot }).unwrap();
+    let loot = event_at(&ev, |e| *e == CampaignEvent::CharacterLootedSettlement { character: CharacterId(100) });
+    let resolved = event_at(&ev, |e| matches!(e, CampaignEvent::CaptureResolved { choice: CaptureChoice::Loot, .. }));
+    assert!(loot < resolved, "{ev:?}");
+    assert_eq!(looted(&ev), 1, "{ev:?}");
+    // Occupy: none.
+    let mut m = capture_model(vec![A]);
+    m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+    let ev = m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Occupy }).unwrap();
+    assert_eq!(looted(&ev), 0, "{ev:?}");
+    // Liberate with a target: none.
+    let mut m = capture_model(vec![A]);
+    m.world.region_rebel_factions.insert(RegionId(11), "test_faction_c".into());
+    m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+    let ev = m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Liberate }).unwrap();
+    assert_eq!(looted(&ev), 0, "{ev:?}");
+    // Liberate with no target loots, and so posts the event.
+    let mut m = capture_model(vec![A]);
+    m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+    let ev = m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Liberate }).unwrap();
+    assert!(ev.contains(&CampaignEvent::CharacterLootedSettlement { character: CharacterId(100) }), "{ev:?}");
+    // A capture with no force (a scripted capture) has no commander: the exe posts the event, but its
+    // +0xB8 check (0x008F9EE0) fails on the null character, so 0x00E30700 never hands it to Lua.
+    let mut m = capture_model(vec![A]);
+    m.capture_by_force(RegionId(11), A, None);
+    let ev = m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Loot }).unwrap();
+    assert!(ev.iter().any(|e| matches!(e, CampaignEvent::CaptureResolved { choice: CaptureChoice::Loot, .. })), "{ev:?}");
+    assert_eq!(looted(&ev), 0, "{ev:?}");
+}
+
+/// A liberation posts `FactionBecomesLiberationProtectorate` first (`0x00B4F0FE` / `0x00B5089D`, before
+/// the expulsion `0x008D9DC0` and the owner change `0x00B58A10`), once, with the liberator (the
+/// region's owner when it is posted); the liberated faction's return (its stance changes) and the
+/// capture report come after it. Loot and occupy post none.
+#[test]
+fn a_liberation_posts_the_protectorate_event_before_the_owner_change() {
+    use super::capture::CaptureChoice;
+    let start = |m: &mut CampaignModel| {
+        m.world.region_rebel_factions.insert(RegionId(11), "test_faction_c".into());
+        set_details(m, C, None, true);
+        m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap()
+    };
+    let mut m = capture_model(vec![A]);
+    let ev = start(&mut m);
+    assert!(!ev.iter().any(|e| matches!(e, CampaignEvent::FactionBecomesLiberationProtectorate { .. })), "{ev:?}");
+    assert_eq!(m.world.regions[&RegionId(11)].owner, A);
+    let ev = m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Liberate }).unwrap();
+    assert_eq!(ev[0], CampaignEvent::FactionBecomesLiberationProtectorate { faction: A }, "{ev:?}");
+    assert_eq!(ev.iter().filter(|e| matches!(e, CampaignEvent::FactionBecomesLiberationProtectorate { .. })).count(), 1);
+    assert!(ev.iter().any(|e| matches!(e, CampaignEvent::StanceChanged { .. })), "C came back: {ev:?}");
+    assert_eq!(
+        ev.last(),
+        Some(&CampaignEvent::CaptureResolved { region: RegionId(11), faction: A, choice: CaptureChoice::Liberate, money: 0 })
+    );
+    assert!(m.in_the_game(C) && m.world.regions[&RegionId(11)].owner == C);
+    assert_eq!(CampaignEvent::FactionBecomesLiberationProtectorate { faction: A }.script_name(), Some("FactionBecomesLiberationProtectorate"));
+    for choice in [CaptureChoice::Loot, CaptureChoice::Occupy] {
+        let mut m = capture_model(vec![A]);
+        start(&mut m);
+        let ev = m.apply(CampaignCommand::ChooseCapture { choice }).unwrap();
+        assert!(!ev.iter().any(|e| matches!(e, CampaignEvent::FactionBecomesLiberationProtectorate { .. })), "{choice:?}: {ev:?}");
+    }
 }

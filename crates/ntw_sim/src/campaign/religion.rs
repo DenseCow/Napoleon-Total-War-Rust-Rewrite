@@ -46,21 +46,6 @@ fn missionary_religion(model: &CampaignModel, kind: CharacterKind) -> Option<Str
     model.rules.agent_religions.get(kind.esf_name()).cloned()
 }
 
-/// A missionary's rank as the conversion step reads it (`0x00A198D0`, CONFIRMED): his raw `zeal` level plus his
-/// theatre's zeal bonus (`zeal_europe`, bonus 0x68, which the trait effects `zeal_spain` map to), clamped to −1..9;
-/// in the `spain_main` theatre also his faction's `zeal_europe`. CONFIRMED on the vanilla spa round
-/// `nr16_spa_t0` → `nr16_spa_t2` with the debugger log: a "Radical" provocateur (+2) converts with strength 4, a
-/// "Politics" priest (+1) with 3, a missionary without traits with 2.
-pub fn missionary_rank(model: &CampaignModel, c: CharacterId) -> i32 {
-    let Some(ch) = model.world.characters.get(&c) else { return -1 };
-    let level = model.world.character_details.get(&c).and_then(|d| d.attributes.iter().find(|(k, _)| k == "zeal").map(|(_, v)| *v)).unwrap_or(-1);
-    let mut bonus = super::effects::Effects::character_effects(model, c).get_int("zeal_europe");
-    if model.rules.features.faction_zeal {
-        bonus += super::effects::Effects::faction_sum(model, ch.faction).get_int("zeal_europe");
-    }
-    (level + bonus).clamp(-1, 9)
-}
-
 /// One conversion flow: `amount` people of `region` from religion `from` to `to`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Flow {
@@ -97,7 +82,7 @@ impl CampaignModel {
             .collect();
         missionaries.sort_by_key(|(c, _)| *c);
         for (c, r) in missionaries {
-            let rank = missionary_rank(self, c);
+            let rank = super::agents::rank(self, c);
             add(&mut acc, &r, rank as f32);
         }
         for (r, _) in religions {

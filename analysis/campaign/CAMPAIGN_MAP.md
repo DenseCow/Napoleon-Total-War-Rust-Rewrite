@@ -77,8 +77,8 @@ human faction's first army.
 ## 8. Questions for Ghidra
 1. The heightmap vertical scale (campaign terrain build; `heightmaps/default.tga` string at init).
 2. The display↔logic transform constant (confirm 0.0254) and the settlement model scale/rotation.
-3. CampaignCamera: tilt vs distance law, FOV axis, what pan speed 50 is per, clamping area, and the
-   meaning of the startpos `CAMPAIGN_CAMERA` fields.
+3. CampaignCamera: tilt vs distance law, FOV axis, clamping area, and the
+   meaning of the startpos `CAMPAIGN_CAMERA` fields. (Pan speed 50, answered: the key step is 50 × time (×2 with SHIFT) × (eye height × 0.01 + 0.25), `0x0095A510`, UI_FIDELITY.md "Campaign camera handler".)
 4. Supertexture alpha channel use, the stpi `value` field and the second `6`.
 5. Settlement template choice (culture prefix, fortification level, rotation) and army/agent models.
 

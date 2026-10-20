@@ -10,8 +10,9 @@ db_record! {
     pub struct CharacterTraitRecord in "character_traits", key = key {
         /// #0 trait key, e.g. `C_General_Brave`.
         key: String,
-        /// #1 @0x0C the no-going-back level: once reached, falling points never take the trait below it
-        /// (CONFIRMED, `0x008B5380`).
+        /// #1 @0x0C the no-going-back level: once the held level has reached it, a loss of points that reaches a
+        /// lower level lands the trait on it, its points set to its threshold (CONFIRMED, `0x008B5380`).
+        /// Points that reach no level (below the first threshold) change nothing, and below 1 the trait is gone.
         no_going_back_level: i32,
         /// #2 @0x10 hidden: the character's trait list in the UI leaves the trait out (CONFIRMED, the list
         /// builder 0x008C65A0 keeps only traits with this false and a current level above 0).
@@ -149,6 +150,28 @@ db_record! {
     }
 }
 
+db_record! {
+    /// `agent_to_agent_attributes` (`ssio`, 30 rows): an agent type's starting level of one attribute.
+    /// Every character maker (`0x00992E60`, called by the generic, historical, unit-officer and
+    /// template makers) sets all 14 attributes to −1 (`0x00984AD0`) and then copies the agent's rows
+    /// (CONFIRMED: in 530 of the 531 characters of the `eur_napoleon` start position the saved level
+    /// minus his trait and ancillary attribute bonuses is his type's row, or −1 without one; the one
+    /// exception is as the start position was written, `ntw_campaign` test
+    /// `stored_attributes_are_the_start_levels_plus_the_effects`). The table reader is `0xF94B10`
+    /// (getter `0x00E0EB40`, database +0x568). Merge key: the two key columns (INFERRED).
+    pub struct AgentToAgentAttribute in "agent_to_agent_attributes", key = attribute + agent {
+        /// #0 the attribute key (`agent_attributes`), e.g. `command_land`.
+        attribute: String,
+        /// #1 the agent type (`agents` #0), e.g. `General`.
+        agent: String,
+        /// #2 the starting level.
+        level: i32,
+        /// #3 UNKNOWN (1 on most rows; 0 on `morale_land` / `movement_points_land` for General and on
+        /// every level-0 row, yet those characters still start at the row's level).
+        flag: bool,
+    }
+}
+
 /// Every character table. Empty in [`crate::GameDatabase::test_fixture`].
 #[derive(Debug, Clone, Default)]
 pub struct CharacterTables {
@@ -164,6 +187,7 @@ pub struct CharacterTables {
     pub ancillary_subcultures: Table<AncillarySubculture>,
     pub subcultures: Table<SubcultureRecord>,
     pub cultures: Table<CultureRecord>,
+    pub agent_start_attributes: Table<AgentToAgentAttribute>,
 }
 
 impl CharacterTables {

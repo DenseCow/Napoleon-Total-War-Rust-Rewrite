@@ -366,6 +366,24 @@ fn an_inactive_construction_item_is_not_stepped() {
     assert_eq!(completed, vec![&CampaignEvent::BuildingCompleted { region: r10, slot: SlotRef::Walls }]);
 }
 
+/// accessloss2: the round-end construction steps the faction's regions in its region list order
+/// (faction +0x778, `0x008BC873`; `World::regions_in_list_order`), so the events come out in that order.
+#[test]
+fn construction_steps_the_faction_regions_in_list_order() {
+    let completed = |order: [u32; 3]| {
+        let mut m = test_model();
+        m.world.region_order = order.map(RegionId).to_vec();
+        let item = ConstructionItem { slot: SlotRef::Walls, level_key: "test_building_level_2".into(), turns_remaining: 1, cost: 0, kind: ConstructionKind::Build, active: true };
+        for r in [10, 12] {
+            m.world.regions.get_mut(&RegionId(r)).unwrap().construction = vec![item.clone()];
+        }
+        let ev = m.end_turn();
+        ev.iter().filter_map(|e| match e { CampaignEvent::BuildingCompleted { region, .. } => Some(region.raw()), _ => None }).collect::<Vec<_>>()
+    };
+    assert_eq!(completed([10, 11, 12]), vec![10, 12]);
+    assert_eq!(completed([12, 11, 10]), vec![12, 10], "not id order");
+}
+
 /// construction: a slot another faction holds offers no construction option and refuses the command
 /// (`0x00B43300` exits at `0x00B4333B` when `0x00A91FC0` says the slot is held by another faction).
 #[test]
@@ -611,8 +629,8 @@ fn a_returning_faction_is_at_war_with_the_pirates() {
     assert_eq!(m.world.relationships[&(C, B)].factor("initial_modifier").unwrap().value, -140);
 }
 
-/// `in_the_game` follows the out-of-game flag (faction +0x824) when it is known, and the old rule
-/// (a region or a force) for an own save from before the flag was kept.
+/// `in_the_game` follows the out-of-game flag (faction +0x824) when it is known, and the exe's startpos
+/// rule (`0x008B4330`) for an own save from before the flag was kept.
 #[test]
 fn in_the_game_follows_the_out_of_game_flag() {
     let mut m = test_model();
@@ -620,6 +638,32 @@ fn in_the_game_follows_the_out_of_game_flag() {
     set_details(&mut m, A, Some(10), true);
     set_details(&mut m, C, None, false);
     assert!(!m.in_the_game(A) && m.in_the_game(C));
+}
+
+/// charflag: the exe's rule for faction +0x824 (`0x008B4330`): out of the game when the faction holds
+/// no region and every character of it holds a government post (character +0x2B8); no character, out;
+/// the rebels never. A save without the flag falls back on it (it was "a region or a force").
+#[test]
+fn the_out_of_game_rule_needs_no_region_and_only_post_holders() {
+    use super::details::GovernmentPost;
+    let mut m = test_model();
+    assert!(!m.out_of_game_by_startpos_rule(A), "holds a region");
+    assert!(m.out_of_game_by_startpos_rule(C) && !m.in_the_game(C), "no region, no character");
+    m.world.characters.insert(CharacterId(300), character(300, C, CharacterKind::Minister, 0));
+    assert!(!m.out_of_game_by_startpos_rule(C) && m.in_the_game(C), "a character in no post");
+    m.world.faction_details.entry(C).or_default().posts =
+        vec![GovernmentPost { id: 1, key: "faction_leader".into(), holder: Some(CharacterId(300)), governorship: None }];
+    assert!(m.out_of_game_by_startpos_rule(C) && !m.in_the_game(C), "every character in a post");
+    // A force without a character keeps no faction in the game (the old fallback's force).
+    m.world.forces.insert(ForceId(1005), MilitaryForce { id: ForceId(1005), faction: C, commander: None, units: Vec::new(), is_navy: false });
+    assert!(!m.in_the_game(C));
+    m.world.regions.get_mut(&RegionId(11)).unwrap().owner = C;
+    assert!(!m.out_of_game_by_startpos_rule(C), "a region");
+    // The rebels are never out by the rule.
+    m.world.factions.get_mut(&B).unwrap().key.clear();
+    m.world.regions.get_mut(&RegionId(11)).unwrap().owner = A;
+    m.world.characters.remove(&CharacterId(101));
+    assert!(m.is_rebel_faction(B) && !m.out_of_game_by_startpos_rule(B));
 }
 
 /// A return without the liberation flag (`0x00B2BC10` / `0x00B72AC0`): an AI previous owner costs 50

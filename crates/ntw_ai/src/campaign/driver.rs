@@ -87,7 +87,11 @@ pub fn next_ai_turn(model: &CampaignModel) -> Option<FactionId> {
 }
 
 /// `CCQ_END_TURN` on a bare model with the campaign AI playing every AI faction (the model's own
-/// `end_turn` leaves them idle). Returns every event in order and one report per AI turn.
+/// `end_turn` leaves them idle). Returns every event in order and one report per AI turn. A call to war
+/// waiting for a human ally (`CampaignModel::pending_ally_war_calls`, only with
+/// `CampaignModel::ask_human_allies` on) pauses the steps (`CampaignModel::step`): the turn stops there,
+/// logged once per call, and a later call does not end the turn again until it is answered (a
+/// script host's `apply` of the answer resumes the steps).
 pub fn end_turn(model: &mut CampaignModel, data: &CampaignAiData, ctx: &TurnContext) -> (Vec<CampaignEvent>, Vec<AiTurnReport>) {
     let mut events = Vec::new();
     let mut reports = Vec::new();
@@ -95,9 +99,24 @@ pub fn end_turn(model: &mut CampaignModel, data: &CampaignAiData, ctx: &TurnCont
         model.begin_start_campaign();
         run_pending(model, data, ctx, &mut events, &mut reports);
     }
-    model.begin_end_turn();
-    run_pending(model, data, ctx, &mut events, &mut reports);
+    if !stopped_for_human(model) {
+        model.begin_end_turn();
+        run_pending(model, data, ctx, &mut events, &mut reports);
+        stopped_for_human(model);
+    }
     (events, reports)
+}
+
+/// True (and logged) while a call to war waits for a human ally's answer, which pauses the turn steps.
+fn stopped_for_human(model: &CampaignModel) -> bool {
+    let Some(call) = model.pending_ally_war_calls.last() else { return false };
+    log::warn!(
+        "AI driver: the turn stops until {:?} answers the call to {:?}'s war on {:?} (RespondToAllyWarCall)",
+        call.ally,
+        call.declarer,
+        call.target
+    );
+    true
 }
 
 fn run_pending(model: &mut CampaignModel, data: &CampaignAiData, ctx: &TurnContext, events: &mut Vec<CampaignEvent>, reports: &mut Vec<AiTurnReport>) {

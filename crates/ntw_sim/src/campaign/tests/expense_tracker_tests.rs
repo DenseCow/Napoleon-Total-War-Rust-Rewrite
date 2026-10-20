@@ -119,7 +119,7 @@ fn script_other_income_entries_book_the_running_record() {
     let r = *m.world.last_economy_record(B).unwrap();
     assert_eq!((r[11], r[18]), (other + 2506, 250));
     // Both are carried into the next running record.
-    economy::settle_round(&mut m, B);
+    economy::settle_round(&mut m, B, &mut Vec::new());
     let r = *m.world.last_economy_record(B).unwrap();
     assert_eq!((r[11], r[18]), (other + 2506, 250));
     // A human faction's negative amount is dropped (`0x0097BBE3`).

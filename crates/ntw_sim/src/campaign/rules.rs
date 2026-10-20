@@ -181,9 +181,13 @@ pub struct BuildingRules {
     pub units_allowed: Vec<String>,
     /// `building_upgrades_junction`: levels this one upgrades to.
     pub upgrades_to: Vec<String>,
-    /// The chain's `building_chains` #2 number (chain record +0x18; empty = 0, CONFIRMED parse): the
-    /// building sabotage chance reads it (`super::agents::building_sabotage_chance`).
+    /// The chain's `building_chains` #2 number (chain record +0x14, copied from the row's +0x18 by the
+    /// builder `0x00E55C30`; empty = 0, CONFIRMED parse): the building sabotage chance reads it
+    /// (`super::agents::building_sabotage_chance`).
     pub chain_class: i32,
+    /// The chain's technology thread (chain record +0xC, CONFIRMED `0x00F21E60` from `building_chains` #1,
+    /// exact case): 0 `military`, 1 `industry`, 2 `enlightenment`, 3 any other group or none.
+    pub chain_thread: i32,
     /// `building_faction_variants`: the factions that may build this level.
     pub factions: Vec<String>,
     /// `building_culture_variants`: the cultures (`cultures_subcultures` #1) that may
@@ -191,7 +195,18 @@ pub struct BuildingRules {
     pub cultures: Vec<String>,
 }
 
+/// The thread of a chain without one of the three technology groups (`0x00F21E60`'s fallback).
+pub const NO_THREAD: i32 = 3;
+
 impl BuildingRules {
+    /// The chain record's pair at +0x10 / +0x14 (builder `0x00E55C30`, CONFIRMED): (0, #2 number) for a
+    /// chain of one of the three technology groups, (−1, #2 number) otherwise. A technology's building
+    /// requirement matches every chain with the same pair (`0x008B13E0`), so `sAdminSpain` (enlightenment,
+    /// 0) serves `sAdmin` (enlightenment, 0) but `tFactorySpain` (no group) does not serve `tFactory`.
+    pub fn chain_pair(&self) -> (i32, i32) {
+        (if self.chain_thread == NO_THREAD { -1 } else { 0 }, self.chain_class)
+    }
+
     /// Sum of this level's values for one effect key.
     pub fn effect(&self, key: &str) -> f32 {
         self.effects.iter().filter(|(k, _)| k == key).map(|(_, v)| v).sum()
@@ -248,6 +263,10 @@ pub struct CampaignRules {
     /// `agents` #2: character type → sight radius in map units (character +0x2EC from record +0x10,
     /// CONFIRMED against the saved sight boxes: General 15, colonel 10, admiral 20, rake 18, ...).
     pub agent_sight: BTreeMap<String, i32>,
+    /// `agents` #4 false: the character types that never count against a settlement's room for
+    /// characters without a force (agent record +0x18 via `0x00A0B9C0`, read by the can-enter check
+    /// `0x00B165B0`, CONFIRMED; vanilla: minister and bandit). A type without a row counts.
+    pub residence_exempt_agents: std::collections::BTreeSet<String>,
     /// `agents` #8 (record +0x44) by agent key: the type's main attribute, which its rank and the cards'
     /// primary attribute picture are read from (`0x00A198C0`, CONFIRMED data: General and colonel
     /// `command_land`, admiral and captain `command_sea`, rake `subterfuge`, ...). A type without one has
@@ -296,13 +315,22 @@ pub struct CampaignRules {
     /// `government_types`: government key → (upper class, lower class). A missing key governs `upper`
     /// and `lower`.
     pub government_classes: BTreeMap<String, (String, String)>,
-    /// `technologies` with their `technology_required_technology_junctions` rows, by key.
+    /// `government_types` #3 by government key (government record +0x14, CONFIRMED copied there by the
+    /// record's constructor `0x00F76A70`): the rank a war declaration compares between the two factions'
+    /// governments when it moves the declarer's classes' war factor
+    /// ([`super::population::class_war_change`]). A missing key ranks 0.
+    pub government_ranks: BTreeMap<String, i32>,
+    /// `technologies` with their `technology_required_technology_junctions` and
+    /// `technology_required_building_levels_junctions` rows, by key.
     pub technologies: BTreeMap<String, TechRules>,
-    /// `unit_required_technology_junctions`: unit key → the technologies it needs.
+    /// `unit_required_technology_junctions`: unit key → the technologies it needs (rows naming no unit or
+    /// no technology dropped at load, as the exe's linker `0x00EA9B10`).
     pub unit_techs: BTreeMap<String, Vec<String>>,
-    /// `building_level_required_technology_junctions`: building level → the technologies it needs.
+    /// `building_level_required_technology_junctions`: building level → the technologies it needs
+    /// (building level record +0x118 / +0x11C, linked by `0x00DDF300`: a row naming no technology is
+    /// dropped, so only `technologies` keys are kept).
     pub building_techs: BTreeMap<String, Vec<String>>,
-    /// `building_chains` #2 as an integer (chain record +0x18; empty → 0), by chain key. The capture
+    /// `building_chains` #2 as an integer (chain record +0x14; empty → 0), by chain key. The capture
     /// preview damages on occupation only buildings whose chain has 0 (`0x00B14930`, CONFIRMED).
     pub chain_kinds: BTreeMap<String, i32>,
     /// `unit_stats_naval` by ship key: what the naval autoresolve reads ([`super::naval::ShipRules`]).
@@ -647,11 +675,25 @@ pub const OFF_ROAD_COST: f32 = 1.0;
 pub struct TechRules {
     /// #3 research cost (the points the research needs).
     pub cost: i32,
-    /// #1 the building level it needs: the faction must own that chain (or a variant such as
-    /// `sAdminSpain` for `sAdmin`) at this level or higher before it becomes available.
+    /// #1 the building level it needs (record +0x5C): the faction must own a building of a chain with
+    /// the same [`BuildingRules::chain_pair`] at this level or higher before it becomes available.
     pub building_level: String,
-    /// The technologies it requires (`technology_required_technology_junctions`).
+    /// The technologies it requires (`technology_required_technology_junctions` rows naming a
+    /// `technologies` key, in table order; the linker `0x00F21A30` drops the others). The exe splits
+    /// them into [`Self::parent`] (+0x60) and the list +0x70; availability checks them all.
     pub requires: Vec<String>,
+    /// The single requirement (record +0x60, linker `0x00F21A30`, CONFIRMED): the last of
+    /// [`Self::requires`] whose building level's chain has the same [`BuildingRules::chain_pair`] as this
+    /// one's (the same tree). The grant walk (`GrantFactionTechnology` `0x008CDCB0`) follows it.
+    pub parent: Option<String>,
+    /// The building levels it also needs, exact chain at that level or higher
+    /// (`technology_required_building_levels_junctions` rows naming a `building_levels` key; list +0x7C,
+    /// linker `0x00F21A30`; checked by `0x008B13C0`). Empty in the shipped DB.
+    pub required_buildings: Vec<String>,
+    /// The research thread (record +0x8C = its building level's chain record +0xC, linker `0x00F21A30`,
+    /// CONFIRMED): 0 military, 1 industry, 2 enlightenment, 3 none ([`BuildingRules::chain_thread`]). The
+    /// school rate adds the matching thread effect (`0x008EA9F0`).
+    pub thread: usize,
     /// The factions that may have it (`technology_faction_junctions`, gathered per technology by the
     /// technologies table's row builder `0x00F20F00` into the record's set at +0xC0): empty means every
     /// faction (`0x00F1EFA0`, CONFIRMED).

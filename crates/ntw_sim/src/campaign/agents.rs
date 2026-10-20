@@ -58,10 +58,9 @@ pub const PISTOLS: usize = 2;
 /// Attribute index of `duelling_swords`.
 pub const SWORDS: usize = 3;
 
-/// A character's attribute by index (`0x009CB560` → character +0x394 + 4 × index): the effective
-/// level ([`Effects::character_attribute`]: the saved level plus trait and ancillary attribute
-/// effects; that the array holds the effective value is INFERRED), −1 when he has no such
-/// attribute.
+/// A character's attribute by index (`0x009CB560` → character +0x394 + 4 × index): the stored
+/// level ([`Effects::character_attribute`], which already holds his trait and ancillary attribute
+/// effects, CONFIRMED there), −1 when he has no such attribute.
 pub fn attribute(model: &CampaignModel, c: CharacterId, index: usize) -> i32 {
     ATTRIBUTES.get(index).and_then(|a| Effects::character_attribute(model, c, a)).unwrap_or(-1)
 }
@@ -103,19 +102,106 @@ pub fn main_attribute(rules: &super::rules::CampaignRules, kind: CharacterKind) 
     rules.agent_primary_attributes.get(kind.esf_name()).map_or("", String::as_str)
 }
 
-/// A character's rank (`0x00A198D0`): his main attribute plus situation bonuses, at least −1 and at
-/// most 9. CONFIRMED for agents (no bonus applies to spies and gentlemen). PROVISIONAL: the
-/// situation bonuses of generals (theatre, army make-up), admirals (fleet make-up), missionaries
-/// (theatre zeal) and ministers (their post) are not added here.
+/// A character's rank, his command stars (`0x00A198D0`): the rule behind the
+/// [`super::seams::CHARACTER_RANK`] seam ([`rank_original`] in the original game), called with his own
+/// effect set and with the faction's terms included.
 pub fn rank(model: &CampaignModel, c: CharacterId) -> i32 {
+    (model.rules.seams.character_rank.rule())(model, c, &Effects::character_effects(model, c), true)
+}
+
+/// The original's rank (`0x00A198D0`, CONFIRMED listing): the level of his type's main attribute
+/// ([`main_attribute`]; −1 for a type without one, with no bonus) plus these bonuses of his own effect
+/// set `own` (traits and ancillaries, character +0x48C, each rounded by `0x00E1F130`), then clamped to
+/// [`super::characters::CharacterRules::rank_limits`] (−1..9 in the original):
+/// - `zeal`: in the `spain_main` theatre his `zeal_europe` plus his faction's (only when `faction`;
+///   the faction set itself calls this with `faction` false). The exe tests the theatre under his
+///   map position (`0x00A17D60`, `FindTheatreContainingPoint`); the model has no theatres and
+///   `spa_napoleon`'s map is the only `spain_main` one, so [`super::features::CampaignFeatures::faction_zeal`]
+///   stands for it (CONFIRMED on the vanilla spa round `nr16_spa_t0` → `nr16_spa_t2` with the debugger
+///   log: a "Radical" provocateur, +2 from the trait effect `zeal_spain` that maps to `zeal_europe`,
+///   converts with strength 4, a "Politics" priest, +1, with 3, a missionary without traits with 2).
+///   Its other theatre names (`america`: `zeal_america`, `india`: `zeal_india`,
+///   `europe`: `zeal_europe`) and those of the `command_land` theatre bonuses (`land_command_america`
+///   / `_europe` / `_india`) are Empire's: no Napoleon theatre (`europe_main`, `italy_main`,
+///   `egypt_main`, `spain_main`) matches them, so they are not modelled.
+/// - `command_land`: the army he commands (`CHARACTER` #4, the `0x009D3A60` cast of character +0x2A8)
+///   of n units: `command_land_infantry` when at least ⌈2n/3⌉ (`(2n+2)/3`) are infantry (category 2),
+///   `command_land_cavalry` when at least ⌈n/3⌉ are cavalry, elephants or camels (0, 4, 5) and
+///   `command_land_artillery` when at least ⌈n/3⌉ are artillery (1); each on its own.
+/// - `command_sea`: the navy he commands (`0x009D3AA0`): `command_naval_frigates` when at least
+///   ⌈2n/3⌉ ships are frigates (7), `command_naval_ships_of_the_line` when at least ⌈2n/3⌉ are ships of
+///   the line (6).
+/// - `management`: his post (character +0x2B8): `management_army` / `_navy` / `_finance` / `_justice`
+///   for the `army`, `navy`, `finance` and `justice` posts.
+///
+/// PROVISIONAL: during a pending battle the exe also adds, for `command_land` and `command_sea`, the
+/// battle-type bonuses (`land_command_attack` / `_defence` / `_ambush` / `_siege_attack` /
+/// `_siege_defence`, `sea_command_attack` / `_defence`, by the battle's type and his side, `0x008CE700`)
+/// and the enemy bonuses (`hates_ottomans`, `hates_europeans`, `hates_french`, `hates_british`); the
+/// model has no pending-battle state for them yet.
+pub fn rank_original(model: &CampaignModel, c: CharacterId, own: &super::effects::EffectSet, faction: bool) -> i32 {
     let Some(ch) = model.world.characters.get(&c) else { return -1 };
-    let v = Effects::character_attribute(model, c, main_attribute(&model.rules, ch.kind)).unwrap_or(-1);
-    v.clamp(-1, 9)
+    let main = main_attribute(&model.rules, ch.kind);
+    let (lo, hi) = model.rules.characters.rank_limits;
+    let level = Effects::character_attribute(model, c, main).unwrap_or(-1);
+    let force = |navy: bool| model.force_of(c).and_then(|f| model.world.forces.get(&f)).filter(|f| f.is_navy == navy);
+    // A unit key with no `units` record has no category, so it is none of these classes but still
+    // counts in n. Not logged here (the rank is read for every display and AI query): the loader
+    // warns once per such unit (`LoadWarning::UnknownUnitKey`) and commands refuse unknown units.
+    let counts = |f: &super::world::MilitaryForce, codes: &[u8]| {
+        f.units.iter().filter(|u| model.rules.units.get(&u.unit_key).is_some_and(|r| codes.contains(&crate::unit_kind::category(&r.category).code()))).count()
+    };
+    let mut bonus = 0;
+    match main {
+        "zeal" if model.rules.features.faction_zeal => {
+            bonus += own.get_int("zeal_europe");
+            if faction {
+                bonus += Effects::faction_sum(model, ch.faction).get_int("zeal_europe");
+            }
+        }
+        "command_land" => {
+            if let Some(f) = force(false) {
+                let n = f.units.len();
+                if counts(f, &[2]) >= (2 * n).div_ceil(3) {
+                    bonus += own.get_int("command_land_infantry");
+                }
+                if counts(f, &[0, 4, 5]) >= n.div_ceil(3) {
+                    bonus += own.get_int("command_land_cavalry");
+                }
+                if counts(f, &[1]) >= n.div_ceil(3) {
+                    bonus += own.get_int("command_land_artillery");
+                }
+            }
+        }
+        "command_sea" => {
+            if let Some(f) = force(true) {
+                let n = f.units.len();
+                if counts(f, &[7]) >= (2 * n).div_ceil(3) {
+                    bonus += own.get_int("command_naval_frigates");
+                }
+                if counts(f, &[6]) >= (2 * n).div_ceil(3) {
+                    bonus += own.get_int("command_naval_ships_of_the_line");
+                }
+            }
+        }
+        "management" => {
+            let post = model.world.faction_details.get(&ch.faction).and_then(|d| d.posts.iter().find(|p| p.holder == Some(c)));
+            bonus += match post.map(|p| p.key.as_str()) {
+                Some("army") => own.get_int("management_army"),
+                Some("navy") => own.get_int("management_navy"),
+                Some("finance") => own.get_int("management_finance"),
+                Some("justice") => own.get_int("management_justice"),
+                _ => 0,
+            };
+        }
+        _ => {}
+    }
+    (level + bonus).max(lo).min(hi)
 }
 
 /// A bonus of a character's own effects (traits and ancillaries, character +0x48C; `0x00E1F130`
 /// rounds the value to an integer).
-fn own_bonus(model: &CampaignModel, c: CharacterId, bonus: &str) -> i32 {
+pub(crate) fn own_bonus(model: &CampaignModel, c: CharacterId, bonus: &str) -> i32 {
     Effects::character_effects(model, c).get_int(bonus)
 }
 

@@ -15,7 +15,7 @@
 //! | treasury | `FACTION_ECONOMICS` #1 | CONFIRMED position |
 //! | characters | `LOCOMOTABLE` #0/#1 position, #8 base and #9 current action points; removed characters' items are dropped | CONFIRMED positions |
 //! | forces | `MILITARY_FORCE` #0/#1, `UNITS_ARRAY` rebuilt from the model (existing unit items kept and patched: `UNIT` #5 men, #6 max men; new units cloned from a template unit item); destroyed forces dropped; new forces cloned from a template `ARMY`/`NAVY` item | CONFIRMED positions; cloning PROVISIONAL |
-//! | regions | `REGION` #20 owner, garrison residence owner, slot buildings, road building, `BUILDING_CONSTRUCTION_ITEM`s (source items kept, repair items kept), the recruitment queues (region and port managers; source items kept), the economy fields (`write_region_economy`), the population state and religion shares (`write_region_population`) | CONFIRMED layouts from the user's saves |
+//! | regions | `REGION` #20 owner, garrison residence owner and siege (`SIEGEABLE_GARRISON_RESIDENCE` #2 turns to surrender, #3 turns besieged, #13 besieging forces; writer `0x00B7A5F0`), slot buildings, road building, `BUILDING_CONSTRUCTION_ITEM`s (source items kept, repair items kept), the recruitment queues (region and port managers; source items kept), the economy fields (`write_region_economy`), the population state and religion shares (`write_region_population`) | CONFIRMED layouts from the user's saves; the siege fields from the writer `0x00B7A5F0` and a round trip (`save_compat.rs` `siege_state_is_written`): no evidence save holds a siege |
 //! | taxes | every `GOVERNORSHIP_TAXES` | CONFIRMED position (CAMPAIGN_DATA.md §3) |
 //! | stances | `DIPLOMACY_RELATIONSHIP` #4 (old stance to #20) | #4 CONFIRMED, #20 INFERRED |
 //! | treaty money | `DIPLOMACY_RELATIONSHIP` #8 protectorate tribute, #9 patron income, #14 `REGULAR_PAYMENTS[]` (`write_treaty_money`) | CONFIRMED (writer `0x00AFC340`) |
@@ -357,14 +357,16 @@ fn write_save_tree(source: &EsfFile, model: &CampaignModel, human: &str, timesta
     }
     let ix = SourceIndex::build(world);
     let residences = ix.residences(model);
-    write_factions(world, model, &ix, &residences)?;
+    // Each settlement resident and his settlement, built once (`World::settlement_residence_index`).
+    let residents = model.world.settlement_residence_index();
+    write_factions(world, model, &ix, &residences, &residents)?;
     // Regiment and ship names of new units, and the name lists' in-use flags (SAVE_COMPAT.md §20).
     let new_units: BTreeSet<i32> = model.world.forces.values().flat_map(|f| f.units.iter()).map(|u| u.id.raw()).filter(|id| !ix.unit_items.contains_key(id)).collect();
     crate::regiments::write_regiment_names(world, model, &new_units);
     // The model's names of new unit officers and its name decks (SAVE_COMPAT.md §21; new
     // characters' names go with their details).
     crate::charnames::write_model_names(world, model, &new_units);
-    write_regions(world, model)?;
+    write_regions(world, model, &residents)?;
     write_residences(world, &residences);
     drop_dangling_refs(m, model, &ix);
     // The trade routes' accumulated values (SAVE_COMPAT.md §12).
@@ -715,11 +717,17 @@ impl SourceIndex {
     }
 }
 
-fn write_factions(world: &mut EsfRecord, model: &CampaignModel, ix: &SourceIndex, residences: &BTreeMap<u32, u32>) -> Result<(), SaveError> {
+fn write_factions(
+    world: &mut EsfRecord,
+    model: &CampaignModel,
+    ix: &SourceIndex,
+    residences: &BTreeMap<u32, u32>,
+    residents: &BTreeMap<ntw_sim::campaign::CharacterId, ntw_sim::campaign::RegionId>,
+) -> Result<(), SaveError> {
     let patch = |f: &mut EsfRecord| -> Result<(), SaveError> {
         let Some(id) = faction_id(f) else { return Ok(()) };
         let Some(faction) = model.world.factions.values().find(|x| x.id.raw() == id) else { return Ok(()) };
-        write_faction(f, faction, model, ix, residences)
+        write_faction(f, faction, model, ix, residences, residents)
     };
     if let Some(a) = array_mut(world, "FACTION_ARRAY") {
         for item in &mut a.items {
@@ -792,7 +800,8 @@ fn write_pools(f: &mut EsfRecord, details: Option<&ntw_sim::campaign::details::F
     }
 }
 
-/// `CHARACTER_DETAILS` #0 `TRAITS/TRAIT[]` {key, points} and #11 `AgentAncillaries[]` {key} from
+/// `CHARACTER_DETAILS` #0 `TRAITS/TRAIT[]` {key, points}, #11 `AgentAncillaries[]` {key} and #12
+/// `AgentAttributes[]` ([`write_attributes`]) from
 /// the model, for every character (traits and ancillaries change in play; layouts CONFIRMED in
 /// every original save; SAVE_COMPAT.md §23).
 fn write_traits(d: &mut EsfRecord, details: &ntw_sim::campaign::details::CharacterDetails) {
@@ -810,6 +819,30 @@ fn write_traits(d: &mut EsfRecord, details: &ntw_sim::campaign::details::Charact
         && a.name == "AgentAncillaries"
     {
         a.items = details.ancillaries.iter().map(|k| vec![EsfNode::Utf16String(k.clone())]).collect();
+    }
+    if let Some(EsfNode::RecordArray(a)) = d.children.get_mut(12)
+        && a.name == "AgentAttributes"
+    {
+        write_attributes(&mut a.items, &details.attributes);
+    }
+}
+
+/// `CHARACTER_DETAILS` #12 `AgentAttributes[]` {key, i32 level} from the model: the stored levels move
+/// with every trait level and ancillary gained or lost (`0x00A0ECB0` / `0x00A0EC10`,
+/// CHARACTERS_FIDELITY.md §16). Each entry's level is set in place, so the entries keep their order and
+/// key node type and an unchanged character writes back byte for byte; an attribute the record lacks
+/// (a mod's, from `agent_to_agent_attributes` or an effect) is appended with the UTF-16 key the
+/// original writes.
+fn write_attributes(items: &mut Vec<Vec<EsfNode>>, attributes: &[(String, i32)]) {
+    for (key, level) in attributes {
+        match items.iter_mut().find(|it| it.first().and_then(EsfNode::as_str) == Some(key.as_str())) {
+            Some(it) => {
+                if let Some(n @ EsfNode::I32(_)) = it.get_mut(1) {
+                    *n = EsfNode::I32(*level);
+                }
+            }
+            None => items.push(vec![EsfNode::Utf16String(key.clone()), EsfNode::I32(*level)]),
+        }
     }
 }
 
@@ -995,6 +1028,7 @@ fn write_faction(
     model: &CampaignModel,
     ix: &SourceIndex,
     residences: &BTreeMap<u32, u32>,
+    residents: &BTreeMap<ntw_sim::campaign::CharacterId, ntw_sim::campaign::RegionId>,
 ) -> Result<(), SaveError> {
     use ntw_sim::campaign::CharacterId;
     if let Some(e) = child_mut(f, "FACTION_ECONOMICS") {
@@ -1012,8 +1046,10 @@ fn write_faction(
         set(f, arr + 1, EsfNode::I32(land));
         set(f, arr + 2, EsfNode::I32(naval));
     }
-    // The `WarStartedCharacterFaction` flag (`details::war_started_index`), where the record has it.
+    // The `WarStartedCharacterFaction` flag (`details::war_started_index`) and the
+    // `FactionDestroyedByCharacterFaction` flag, the bool before it, where the record has them.
     if let (Some(i), Some(d)) = (crate::details::war_started_index(f), model.world.faction_details.get(&faction.id)) {
+        set(f, i - 1, EsfNode::Bool(d.destroyed_faction));
         set(f, i, EsfNode::Bool(d.war_started));
     }
     write_taxes(f, faction, model);
@@ -1027,6 +1063,9 @@ fn write_faction(
     let commands: BTreeMap<i32, u32> = w.forces.values().filter_map(|fo| Some((fo.commander?.raw(), fo.id.raw()))).collect();
     let attached: BTreeMap<i32, i32> =
         w.forces.values().flat_map(|fo| fo.units.iter()).filter_map(|u| Some((u.character?.raw(), u.id.raw()))).collect();
+    // The settlement residence each resident is in (CHARACTER #7; SAVE_COMPAT.md §4).
+    let resident_in = |id: i32| residents.get(&CharacterId(id)).and_then(|r| ix.settlement_residence.get(&r.raw())).copied();
+    let settlement_residences: BTreeSet<u32> = ix.settlement_residence.values().copied().collect();
     // Characters: patch survivors, drop the dead, add the new.
     if let Some(chars) = array_mut(f, "CHARACTER_ARRAY") {
         chars.items.retain(|item| {
@@ -1060,6 +1099,19 @@ fn write_faction(
             let Some(id) = c.get_i32(2) else { continue };
             set(c, 4, EsfNode::U32(commands.get(&id).copied().unwrap_or(0)));
             set(c, 5, EsfNode::U32(attached.get(&id).map_or(0, |&u| u as u32)));
+            // CHARACTER #7: the residence he is in (character +0x2C0): his settlement's residence id
+            // for a resident (`World::residence_of`: in no force); 0 once he has left one (a
+            // garrisoned commander's is 0 in the vanilla saves, SAVE_COMPAT.md §4: his army is the
+            // residence's +0xC0), and for a new character (not the template's); a slot residence
+            // (a school, a town) is kept, as the model does not place characters there.
+            if let Some(EsfNode::U32(old)) = c.children.get(7).cloned() {
+                let new = match resident_in(id) {
+                    Some(res) => res,
+                    None if !have.contains(&id) || settlement_residences.contains(&old) => 0,
+                    None => old,
+                };
+                set(c, 7, EsfNode::U32(new));
+            }
             // CHARACTER #17: the sight radius (f32, character +0x2EC; `World::sight_radius`).
             // Written only when it changed, so a stored value the model never touched stays
             // bit for bit.
@@ -1135,9 +1187,13 @@ fn write_faction(
         if r.name == "ARMY" {
             set(r, 5, EsfNode::U32(residences.get(&id).copied().unwrap_or(0)));
             // ARMY #7 = the navy carrying it, 0 = none (CONFIRMED by the ports worker from the
-            // loaders 0x00870FD0 / 0x008822F0 and the writer 0x008FAB60).
+            // loaders 0x00870FD0 / 0x008822F0 and the writer 0x008FAB60); #8 when the optional
+            // REBEL_DATA block sits at #7: the ARMY writer 0x008FA810 writes it (0x008971C0, at
+            // 0x008FAA09, when army +0x98 is set) before the navy u32 (+0xEC) and the bool (+0xE8),
+            // CONFIRMED by decompile and orig_fr_may1811's rebel ARMYs; it must survive
+            // (`World::rebel_army_governments`).
             let navy = w.embarked.get(&force.id).map_or(0, |n| n.raw());
-            set(r, 7, EsfNode::U32(navy));
+            set(r, army_navy_slot(r), EsfNode::U32(navy));
         } else {
             // NAVY #4 = the army it carries, 0 = none (same source).
             let carried = w.embarked.iter().find(|(_, n)| **n == force.id).map_or(0, |(a, _)| a.raw());
@@ -1153,6 +1209,7 @@ fn write_faction(
 /// freshly raised one as the original writes it (`auto_save` france army 728689440):
 /// `MILITARY_FORCE` {id, commander, []}, `ARMY` #2/#3 empty, #4 = the id, #5 residence (set by the
 /// caller), #6 false, #7 0, #8 false; `NAVY` #2/#3 empty, #4 0, #6 0 (INFERRED from its new navy).
+/// A rebel `ARMY` template's `REBEL_DATA` (#7) is dropped first, giving the 9-child layout above.
 fn new_force_item(force: &MilitaryForce, ix: &SourceIndex) -> Result<Vec<EsfNode>, SaveError> {
     let t = if force.is_navy { &ix.navy } else { &ix.army };
     let mut item = t.clone().ok_or(SaveError::NoTemplate(if force.is_navy { "NAVY" } else { "ARMY" }))?;
@@ -1164,6 +1221,9 @@ fn new_force_item(force: &MilitaryForce, ix: &SourceIndex) -> Result<Vec<EsfNode
         set(r, 2, EsfNode::U32Array(Vec::new()));
         set(r, 3, EsfNode::U32Array(Vec::new()));
         if r.name == "ARMY" {
+            // A raised army has no REBEL_DATA (the auto_save army has none): drop a rebel
+            // template's, so it is not read back with a rebel government and #7..#8 keep their types.
+            r.children.retain(|n| !n.as_record().is_some_and(|x| x.name == "REBEL_DATA"));
             set(r, 4, EsfNode::I32(force.id.raw() as i32));
             set(r, 5, EsfNode::U32(0));
             set(r, 6, EsfNode::Bool(false));
@@ -1175,6 +1235,12 @@ fn new_force_item(force: &MilitaryForce, ix: &SourceIndex) -> Result<Vec<EsfNode
         }
     }
     Ok(item)
+}
+
+/// The `ARMY` child holding the carrying navy's id: #7, or #8 when the optional `REBEL_DATA` record
+/// sits at #7 (the loader's `transport_link` reads the same u32, the last but the final bool).
+fn army_navy_slot(r: &EsfRecord) -> usize {
+    if r.get(7).and_then(EsfNode::as_record).is_some_and(|x| x.name == "REBEL_DATA") { 8 } else { 7 }
 }
 
 /// `FACTION` `EXPOSED_CHARACTERS` (items {i32 character id}, CONFIRMED layout in
@@ -1432,7 +1498,16 @@ fn drop_duplicate_regions(world: &mut EsfRecord) -> Vec<i32> {
     dropped
 }
 
-fn write_regions(world: &mut EsfRecord, model: &CampaignModel) -> Result<(), SaveError> {
+fn write_regions(
+    world: &mut EsfRecord,
+    model: &CampaignModel,
+    residents: &BTreeMap<ntw_sim::campaign::CharacterId, ntw_sim::campaign::RegionId>,
+) -> Result<(), SaveError> {
+    // Each settlement's residents in id order, from the one index (`World::settlement_residence_index`).
+    let mut by_region: BTreeMap<ntw_sim::campaign::RegionId, Vec<ntw_sim::campaign::CharacterId>> = BTreeMap::new();
+    for (&c, &r) in residents {
+        by_region.entry(r).or_default().push(c);
+    }
     let gov_of = |f: ntw_sim::campaign::FactionId| model.world.factions.get(&f);
     // A BUILDING record to clone for new buildings.
     let mut template: Option<EsfRecord> = None;
@@ -1461,6 +1536,7 @@ fn write_regions(world: &mut EsfRecord, model: &CampaignModel) -> Result<(), Sav
         let owner = gov_of(region.owner);
         write_region(r, region, owner, template.as_ref(), &|k| model.rules.is_naval_unit(k), &mut links, &model.rules)?;
         write_risen_armies(r, model.world.region_risen_armies.get(&region.id).map_or(&[], Vec::as_slice));
+        write_settlement_residents(r, by_region.get(&region.id).map_or(&[], Vec::as_slice));
     }
     if links.broken > 0 {
         // Logged once per save: the source tree is not the file the model was loaded from.
@@ -1488,6 +1564,32 @@ fn write_risen_armies(r: &mut EsfRecord, ids: &[ntw_sim::campaign::ForceId]) {
     }
 }
 
+/// The settlement's residents (`SETTLEMENT/SIEGEABLE_GARRISON_RESIDENCE` #14, the list +0xC8 the
+/// loader `0x00AF4B00` fills through `0x008CFA70`; [`World::settlement_residence_index`](ntw_sim::campaign::World::settlement_residence_index)): the
+/// source's ids still resident, in their order, then the new residents in id order. Slot residences
+/// (towns, ports, schools) keep their lists. A region without the list is logged when there are
+/// residents to lose (a save writes each region once).
+fn write_settlement_residents(r: &mut EsfRecord, residents: &[ntw_sim::campaign::CharacterId]) {
+    let id = r.get_i32(4);
+    let Some(g) = child_mut(r, "SETTLEMENT").and_then(|s| child_mut(s, "SIEGEABLE_GARRISON_RESIDENCE")) else {
+        if !residents.is_empty() {
+            log::warn!("save: region {id:?} has no settlement residence for its {} residents; not written", residents.len());
+        }
+        return;
+    };
+    let want: Vec<u32> = residents.iter().map(|c| c.raw() as u32).collect();
+    let Some(EsfNode::U32Array(old)) = g.children.get_mut(14) else {
+        if !want.is_empty() {
+            log::warn!("save: region {id:?}: settlement residence #14 is not a u32 array; its {} residents are not written", want.len());
+        }
+        return;
+    };
+    let keep: BTreeSet<u32> = want.iter().copied().collect();
+    old.retain(|c| keep.contains(c));
+    let have: BTreeSet<u32> = old.iter().copied().collect();
+    old.extend(want.into_iter().filter(|c| !have.contains(c)));
+}
+
 /// The region's economy fields the model changes each round (REGION writer 0x00A51E30, child →
 /// region offset, CAMPAIGN_FIDELITY.md "Economy"; CONFIRMED positions): #9 base GDP, #10 GDP,
 /// #12 town wealth, #14 stored town wealth (= #12 in every region of every original save,
@@ -1510,7 +1612,10 @@ fn write_region_economy(r: &mut EsfRecord, region: &Region) {
 /// layout of the reader `0x00A4C340`, CONFIRMED): #0 the growth factors, #2 the population, #3 the
 /// capacity, #4 its base, #5 the growth, #6 the trend, #7 overcrowded, #8 the migrants, #9 the policing
 /// cost, and each `RELIGION_BREAKDOWN` item's share (#1) by religion key; and `POPULATION` #4, the policing
-/// tracker's booked amount. `POPULATION` #1..#3 and the classes' stored factors are not modelled: kept.
+/// tracker's booked amount; and each `POPULATION_CLASS` the model keeps, by position (the classes
+/// `world::read_region` reads: the item records with a key #0, in order): #1 element 7 the
+/// war factor (class +0x20), #11 the education base, #12 the resistance base (where the record's version has
+/// them, `0x008861E0`). `POPULATION` #1..#3 and the classes' other values are not modelled: kept.
 fn write_region_population(r: &mut EsfRecord, region: &Region) {
     let Some(pop) = child_mut(r, "POPULATION") else { return };
     // #4: the policing tracker's booked amount (`world::read_region`).
@@ -1526,6 +1631,22 @@ fn write_region_population(r: &mut EsfRecord, region: &Region) {
     set(f, 7, EsfNode::Bool(p.overcrowded));
     set(f, 8, EsfNode::I32(p.migrants));
     set(f, 9, EsfNode::I32(p.policing_cost));
+    if let Some(a) = array_mut(f, "POPULATION CLASSES") {
+        // The reader's classes in its order: the item records that have a key.
+        let records = a.items.iter_mut().filter_map(|it| match it.first_mut() {
+            Some(EsfNode::Record(c)) if c.get_str(0).is_some() => Some(&mut **c),
+            _ => None,
+        });
+        for (c, state) in records.zip(&region.class_bases) {
+            if let Some(EsfNode::I32Array(h)) = c.children.get_mut(1)
+                && let Some(war) = h.get_mut(7)
+            {
+                *war = state.war;
+            }
+            set(c, 11, EsfNode::I32(state.education));
+            set(c, 12, EsfNode::I32(state.resistance));
+        }
+    }
     let Some(a) = array_mut(f, "RELIGION_BREAKDOWN") else { return };
     for item in &mut a.items {
         let Some(key) = item.first().and_then(EsfNode::as_str).map(str::to_owned) else { continue };
@@ -1640,11 +1761,16 @@ fn write_region(
     set(r, 20, EsfNode::U32(new_owner));
     write_region_economy(r, region);
     write_region_population(r, region);
-    if let Some(gr) = child_mut(r, "SETTLEMENT")
-        .and_then(|s| child_mut(s, "SIEGEABLE_GARRISON_RESIDENCE"))
-        .and_then(|g| child_mut(g, "GARRISON_RESIDENCE"))
-    {
-        set(gr, 0, EsfNode::U32(region.owner.raw() as u32));
+    if let Some(sgr) = child_mut(r, "SETTLEMENT").and_then(|s| child_mut(s, "SIEGEABLE_GARRISON_RESIDENCE")) {
+        // The siege (CONFIRMED, writer `0x00B7A5F0`): #2 turns to surrender, #3 turns besieged,
+        // #13 the besieging force ids.
+        let siege = &region.siege;
+        set(sgr, 2, EsfNode::U32(siege.surrender_turns));
+        set(sgr, 3, EsfNode::U32(siege.turns_besieged));
+        set(sgr, 13, EsfNode::U32Array(siege.besiegers.iter().map(|f| f.raw()).collect()));
+        if let Some(gr) = child_mut(sgr, "GARRISON_RESIDENCE") {
+            set(gr, 0, EsfNode::U32(region.owner.raw() as u32));
+        }
     }
     let (fkey, gkey) = owner.map_or((String::new(), String::new()), |f| (f.key.clone(), f.government_key.clone()));
     if let Some(sm) = child_mut(r, "REGION_SLOT_MANAGER") {
@@ -1783,6 +1909,7 @@ fn write_slot_manager(
             let c = region.construction.iter().find(|c| c.slot == SlotRef::Slot(i));
             write_building_manager(slot, model_slot.building.as_ref(), c, faction, government, template, rules)?;
             write_slot_holder(slot, region, model_slot.holder);
+            write_port_blockade(slot, model_slot.blockade);
         }
     }
     for (name, slot_ref, building, holder) in [
@@ -1809,6 +1936,23 @@ fn write_slot_holder(slot: &mut EsfRecord, region: &Region, holder: Option<ntw_s
         return;
     }
     set(gr, 0, EsfNode::U32(holder.unwrap_or(region.owner).raw() as u32));
+}
+
+/// A port slot's blockade, where the reader finds it (`PORT_GARRISON_MANAGER` #1 the blockading navy's id or 0,
+/// #2 the +0x74 byte; CONFIRMED, writer `0x00A51D90`). A slot without the record (not a port) is left alone, as
+/// is a v1 record's missing #2 while the byte is clear; a record that can't take the values is logged once.
+fn write_port_blockade(slot: &mut EsfRecord, blockade: Option<ntw_sim::campaign::PortBlockade>) {
+    let Some(pgm) = child_mut(slot, "PORT_GARRISON_MANAGER") else { return };
+    let attacked = blockade.is_some_and(|b| b.docked_navy_attacked);
+    let navy_ok = set(pgm, 1, EsfNode::U32(blockade.map_or(0, |b| b.navy.raw())));
+    let has_byte = pgm.children.len() > 2;
+    let byte_ok = set(pgm, 2, EsfNode::Bool(attacked)) || (!has_byte && !attacked);
+    if !(navy_ok && byte_ok) {
+        static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            log::warn!("save: a PORT_GARRISON_MANAGER lacks the u32 at #1 or the bool at #2; its port blockade is not all written (logged once)");
+        }
+    }
 }
 
 /// [`crate::world::wrapped_slot`], to write: the `name` child's `REGION_SLOT`, or the child itself
@@ -1976,8 +2120,8 @@ fn write_building_manager(
 /// `RECRUITMENT_ITEM` v2 → `LAND_UNIT_RECRUITMENT_ITEM` v1 {inner `RECRUITMENT_ITEM` v2, u32 0}.
 /// Inner: #0 i32 the item's id (`RecruitmentItem::id`; pointer-like and unique in the original: a new
 /// item's comes from `World::alloc_id`, above every id of the model and the source),
-/// #1 i32 region id (CONFIRMED match), #2 the target commander's id or 0 (INFERRED: an id like #1's; item +0x18,
-/// `0x00B5C900`), #3 turns, #4 cost, #5 true, #6 unit key, #7 cost, #8 0, #9 false, #10 0, #11 0,
+/// #1 i32 region id (CONFIRMED match), #2 the target commander's id or 0 (CONFIRMED: item +0x18 written raw by
+/// `0x00B5C900`, read back by `0x00AF3D00` and resolved as an object id by `0x00B5C2D0`), #3 turns, #4 cost, #5 true, #6 unit key, #7 cost, #8 0, #9 false, #10 0, #11 0,
 /// #12 true (constants as in every sample; meanings UNKNOWN).
 fn recruitment_item(region: &Region, it: &ntw_sim::campaign::RecruitmentItem, naval: bool) -> EsfRecord {
     let rid = region.id.raw() as i32;
@@ -2185,6 +2329,7 @@ mod tests {
             construction: Vec::new(),
             garrison: None,
             fleet: None,
+            siege: Default::default(),
         }
     }
 
@@ -2588,7 +2733,7 @@ mod tests {
             ntw_sim::rng::CaRng::new(1),
             w,
         );
-        write_regions(&mut world, &model).unwrap();
+        write_regions(&mut world, &model, &model.world.settlement_residence_index()).unwrap();
         let items = &mut array_mut(child_mut(&mut world, "REGION_MANAGER").unwrap(), "REGIONS_ARRAY").unwrap().items;
         let ids: Vec<Option<i32>> = items.iter().map(|it| first_rec(it).and_then(|r| r.get_i32(4))).collect();
         assert_eq!(ids, [Some(1), Some(2)], "the first record of each id, in file order");
@@ -2655,6 +2800,34 @@ mod tests {
         assert_eq!(holders(&sm), (Some(FactionId(7)), None), "no holder: the owner");
     }
 
+    /// portblockade: a port's blockade is written where the loader reads it (`PORT_GARRISON_MANAGER` #1 the
+    /// navy, #2 the +0x74 byte; writer `0x00A51D90`, reader `0x00A45860`), the docked navy (#0) left alone,
+    /// and a lifted one is written back as 0 / false.
+    #[test]
+    fn a_port_blockade_is_written_where_the_loader_reads_it() {
+        use ntw_sim::campaign::{ForceId, PortBlockade, RegionSlot};
+        let pgm = rec("PORT_GARRISON_MANAGER", vec![EsfNode::U32(5), EsfNode::U32(0), EsfNode::Bool(false)]);
+        let mut slots = EsfRecordArray::new("REGION_SLOT_ARRAY", 0);
+        slots.items = vec![vec![rec("REGION_SLOT", vec![pgm])]];
+        let EsfNode::Record(mut sm) = rec("REGION_SLOT_MANAGER", vec![EsfNode::RecordArray(Box::new(slots))]) else { unreachable!() };
+        let read = |sm: &EsfRecord| {
+            let slot = sm.record_array("REGION_SLOT_ARRAY").unwrap().records().next().unwrap();
+            (crate::world::port_blockade(slot), slot.child("PORT_GARRISON_MANAGER").unwrap().get_u32(0))
+        };
+        assert_eq!(read(&sm), (None, Some(5)), "0 is no blockade");
+        let blockade = PortBlockade { navy: ForceId(42), docked_navy_attacked: true };
+        let slot = RegionSlot { key: "port".into(), slot_type: "port".into(), building: None, position: None, port: true, holder: None, id: 0, blockade: Some(blockade) };
+        let region = Region { slots: vec![slot], ..test_region() };
+        write_slot_manager(&mut sm, &region, "test_faction", "test_gov", None, &Default::default()).unwrap();
+        assert_eq!(read(&sm), (Some(blockade), Some(5)));
+        let mut lifted = region.clone();
+        lifted.slots[0].blockade = None;
+        write_slot_manager(&mut sm, &lifted, "test_faction", "test_gov", None, &Default::default()).unwrap();
+        assert_eq!(read(&sm), (None, Some(5)));
+        let pgm = sm.record_array("REGION_SLOT_ARRAY").unwrap().records().next().unwrap().child("PORT_GARRISON_MANAGER").unwrap();
+        assert_eq!((pgm.get_u32(1), pgm.get_bool(2)), (Some(0), Some(false)));
+    }
+
     /// polish20: `FACTION` #55 entries carry the qualifier strings of their type, as the original's
     /// writer `0x00E02F80` writes them (type 7 two: population class, then religion; type 1 none;
     /// type 0 one), and the reader (`0x00DF0D10`) reads both of type 7 back.
@@ -2684,5 +2857,45 @@ mod tests {
         assert_eq!(strings, vec![vec!["General"], vec![], vec!["upper", "rel_catholic"]]);
         let read: Vec<SavedBonus> = arr.items.iter().filter_map(|it| crate::details::saved_bonus(first_rec(it)?)).collect();
         assert_eq!(read, entries);
+    }
+
+    /// A rebel `ARMY` holds `REBEL_DATA` at #7 (the ARMY writer `0x008FA810` writes it, `0x008971C0` at
+    /// `0x008FAA09`, before the navy u32 +0xEC and the bool +0xE8): the navy is written to #8 and the block
+    /// stays; a new army cloned from such a template drops the block and gets the 9-child layout.
+    #[test]
+    fn a_rebel_armys_navy_goes_behind_its_rebel_data() {
+        use ntw_sim::campaign::{FactionId, ForceId};
+        let army = |rebel: bool| {
+            let mut mf = EsfRecord::new("MILITARY_FORCE", 1);
+            mf.children = vec![EsfNode::U32(5), EsfNode::U32(6), EsfNode::U32Array(vec![])];
+            let mut r = EsfRecord::new("ARMY", 2);
+            r.children = vec![
+                EsfNode::Record(Box::new(mf)),
+                EsfNode::RecordArray(Box::new(EsfRecordArray::new("UNITS_ARRAY", 0))),
+                EsfNode::U32Array(vec![1]),
+                EsfNode::U32Array(vec![2]),
+                EsfNode::I32(5),
+                EsfNode::U32(0),
+                EsfNode::Bool(false),
+            ];
+            if rebel {
+                r.children.push(EsfNode::Record(Box::new(EsfRecord::new("REBEL_DATA", 4))));
+            }
+            r.children.extend([EsfNode::U32(0), EsfNode::Bool(false)]);
+            r
+        };
+        let (mut rebel, plain) = (army(true), army(false));
+        assert_eq!((army_navy_slot(&rebel), army_navy_slot(&plain)), (8, 7));
+        let slot = army_navy_slot(&rebel);
+        assert!(set(&mut rebel, slot, EsfNode::U32(9)));
+        assert_eq!(rebel.children.get(7).and_then(EsfNode::as_record).map(|x| x.name.as_str()), Some("REBEL_DATA"));
+        assert_eq!(rebel.get(8).and_then(EsfNode::as_u32), Some(9));
+        let ix = SourceIndex { army: Some(vec![EsfNode::Record(Box::new(army(true)))]), ..Default::default() };
+        let force = MilitaryForce { id: ForceId(77), faction: FactionId(1), commander: None, units: Vec::new(), is_navy: false };
+        let item = new_force_item(&force, &ix).expect("template");
+        let r = first_rec(&item).expect("ARMY");
+        assert!(r.child("REBEL_DATA").is_none());
+        assert_eq!(r.children.len(), 9);
+        assert_eq!((r.get(4).cloned(), r.get(7).cloned()), (Some(EsfNode::I32(77)), Some(EsfNode::U32(0))));
     }
 }

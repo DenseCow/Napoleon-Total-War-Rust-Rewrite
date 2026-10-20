@@ -15,7 +15,7 @@ use ntw_formats::esf::{EsfFile, EsfNode};
 use ntw_formats::pack::Vfs;
 use ntw_sim::campaign::polypath::Mover;
 use ntw_sim::campaign::zoc::{obstacle_record, obstacle_record_with_zone, reach, Owner, ARMY_ZONE, GARRISON_BONUS, NAVY_ZONE};
-use ntw_sim::campaign::CharacterId;
+use ntw_sim::campaign::{CharacterId, RegionId};
 
 fn data_dir() -> PathBuf {
     std::env::var_os("NTW_DATA_DIR")
@@ -206,4 +206,88 @@ fn vanilla_save_risen_armies_are_rebel_armies() {
     let kept = |l: &std::collections::BTreeMap<_, Vec<_>>| l.iter().filter(|(_, v)| !v.is_empty()).map(|(k, v)| (*k, v.clone())).collect::<Vec<_>>();
     assert_eq!(kept(&back.region_risen_armies), kept(&m.world.region_risen_armies), "{gone:?}");
     assert_ne!(kept(&back.region_risen_armies), kept(&w.region_risen_armies));
+}
+
+/// A vanilla save's rebel armies keep their REBEL_DATA government (`World::rebel_army_governments`, ARMY #7
+/// → REBEL_DATA_INNARDS → REBEL_SETUP #3, read by `0x00870FD0` → `0x00886950` → `0x00886F10`): every risen army
+/// of the French May 1811 save has one (`gov_absolute_monarchy`, a `government_types` key), which names its
+/// region's classes (`economy::region_government_classes`, the exe's `0x008CE320` / `0x008CE260`), and a save
+/// writes the block back (the carrying-navy u32 goes to #8 behind it, not over it). Skips without the evidence
+/// save.
+#[test]
+fn vanilla_save_risen_armies_keep_their_government() {
+    let dir = data_dir();
+    let path = common::evidence_dir().join("orig_fr_may1811.save");
+    if !dir.is_dir() || !path.is_file() {
+        eprintln!("skipped: no install or no evidence save");
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).expect("DB");
+    let bytes = std::fs::read(&path).expect("read");
+    let esf = EsfFile::from_bytes(&bytes).expect("esf");
+    let loaded = ntw_campaign::read_esf(&esf, &db).expect("load");
+    let m = &loaded.model;
+    let w = &m.world;
+    assert!(!w.region_risen_armies.is_empty());
+    for (region, armies) in &w.region_risen_armies {
+        for id in armies {
+            assert_eq!(w.rebel_army_governments.get(id).map(String::as_str), Some("gov_absolute_monarchy"), "{id:?}");
+        }
+        // A region its owner still holds keeps the owner's government; a rebel-held one takes the army's.
+        let reg = &w.regions[region];
+        let classes = ntw_sim::campaign::economy::region_government_classes(m, reg);
+        if w.is_rebel_faction(reg.owner) {
+            assert_eq!(classes.as_ref(), m.rules.government_classes.get("gov_absolute_monarchy"), "{region:?}");
+        } else {
+            assert_eq!(classes, Some(ntw_sim::campaign::economy::government_classes(m, w.governing_faction(*region).unwrap_or(reg.owner))), "{region:?}");
+        }
+    }
+    let out = ntw_campaign::save::write_save(&esf, m, &loaded.info.header.faction_key, 1, None).expect("save");
+    let back = ntw_campaign::read(&out.to_bytes().expect("bytes"), &db).expect("reload").model.world;
+    assert_eq!(back.rebel_army_governments, w.rebel_army_governments);
+    assert_eq!(back.embarked, w.embarked);
+}
+
+/// Each faction's region list (faction +0x76C) after a load is `REGION_MANAGER/REGIONS_ARRAY` in file
+/// order filtered by owner (the array loader `0x00A4CE20`, each region's constructor `0x00A45950`
+/// appending it to its owner's list at `0x00A46008`): the importer keeps that order in
+/// `World::region_order`. The writer (`0x00A52FE0`, ours patches the array in place) keeps it, and a
+/// gain's place at the end of its new owner's list is not saved, so a reload puts the region back in
+/// file order. Skips without the install or the evidence save.
+#[test]
+fn vanilla_save_region_order_is_the_manager_order() {
+    let dir = data_dir();
+    let path = common::evidence_dir().join("orig_fr_may1811.save");
+    if !dir.is_dir() || !path.is_file() {
+        eprintln!("skipped: no install or no evidence save");
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).expect("DB");
+    let bytes = std::fs::read(&path).expect("read");
+    let esf = EsfFile::from_bytes(&bytes).expect("esf");
+    let mut loaded = ntw_campaign::read_esf(&esf, &db).expect("load");
+    let rm = esf.root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD/REGION_MANAGER").expect("region manager");
+    let file: Vec<RegionId> = rm
+        .record_array("REGIONS_ARRAY")
+        .into_iter()
+        .flat_map(|a| a.records())
+        .filter(|r| r.name == "REGION")
+        .filter_map(|r| r.get_i32(4))
+        .map(|id| RegionId(id as u32))
+        .collect();
+    let w = &loaded.model.world;
+    assert_eq!(w.region_order, file);
+    assert_eq!(w.regions_in_list_order(), file, "every region listed");
+    let descents = file.windows(2).filter(|p| p[0] > p[1]).count();
+    assert_eq!((file.len(), descents), (31, 12), "31 regions, 12 descents from id order: walking by id is wrong");
+    // A region gained moves to the end of the order; the save and reload put it back.
+    let moved = file[0];
+    let owner = w.regions.values().map(|r| r.owner).find(|&o| o != w.regions[&moved].owner).expect("another owner");
+    let w = &mut loaded.model.world;
+    w.regions.get_mut(&moved).expect("region").owner = owner;
+    w.note_region_gain(moved);
+    assert_eq!(loaded.model.world.regions_in_list_order().last(), Some(&moved));
+    let out = ntw_campaign::save::write_save(&esf, &loaded.model, &loaded.info.header.faction_key, 1, None).expect("save");
+    let back = ntw_campaign::read(&out.to_bytes().expect("bytes"), &db).expect("reload").model.world;
+    assert_eq!(back.regions_in_list_order(), file);
 }

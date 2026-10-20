@@ -726,6 +726,42 @@ fn tech_availability_rule_keeps_every_start_position_state() {
     assert!(checked > 1000, "{checked}");
 }
 
+/// The shipped technologies against the exe's links (`0x00F21A30`, chain builder `0x00E55C30`): every
+/// one names a known building level; its thread (the level's chain group) is military for the
+/// `military*` keys, industry for `economy*`, enlightenment for the rest (so the school rates of the
+/// vanilla saves are unchanged); each has at most one requirement of its own tree, so the exe's +0x60
+/// overwrite never drops one in vanilla; the variant chains pair as the exe's +0x10 / +0x14.
+#[test]
+fn shipped_technology_links_match_the_exe_builders() {
+    let dir = data_dir();
+    if !dir.is_dir() {
+        println!("SKIP: no install at {}", dir.display());
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).expect("database");
+    let rules = ntw_campaign::rules_from_db(&db, "eur_napoleon");
+    assert!(rules.technologies.len() > 50, "{}", rules.technologies.len());
+    for (k, t) in &rules.technologies {
+        let level = rules.buildings.get(&t.building_level).unwrap_or_else(|| panic!("{k}: level {}", t.building_level));
+        let want = if k.starts_with("military") { 0 } else if k.starts_with("economy") { 1 } else { 2 };
+        assert_eq!(t.thread, want, "{k}");
+        let same: Vec<_> = t
+            .requires
+            .iter()
+            .filter(|q| rules.buildings.get(&rules.technologies[*q].building_level).map(|b| b.chain_pair()) == Some(level.chain_pair()))
+            .collect();
+        assert!(same.len() <= 1, "{k}: {same:?}");
+        assert_eq!(t.parent.as_ref(), same.first().copied(), "{k}");
+        assert!(t.required_buildings.is_empty(), "{k}");
+    }
+    let pair = |chain: &str| rules.buildings.values().find(|b| b.chain == chain).map(|b| b.chain_pair());
+    assert_eq!(pair("sAdminSpain"), pair("sAdmin"));
+    assert_eq!(pair("sArmySpain"), pair("sArmy"));
+    assert_eq!(pair("tFactory"), Some((0, 2)));
+    assert_ne!(pair("tFactorySpain"), pair("tFactory"));
+    assert_ne!(pair("sArmyTutorial"), pair("sArmy"));
+}
+
 /// The population factors (`population::growth_factors`, `0x00AA9C10`) against those the original
 /// stored in the vanilla saves (`REGION_FACTORS` #0, #3, #7; refreshed at the round start of the saved
 /// turn), with the campaign map loaded for the military factor's area test. The saves whose armies
@@ -765,7 +801,7 @@ fn population_factors_and_growth_match_the_vanilla_saves() {
         let Some(m) = load(name, &mut maps) else { continue };
         for r in m.world.regions.values() {
             let set = economy::region_effect_set(&m, r);
-            let input = population::FactorInputs { set: &set, hostile_units: population::hostile_units(&m, r) };
+            let input = population::FactorInputs::of(&m, r, &set);
             let s = population::growth_factors(&m, r, r.population, &r.population_state, &input);
             let p = &r.population_state;
             assert_eq!((s.factors, s.capacity, s.overcrowded), (p.factors, p.capacity, p.overcrowded), "{name} {}", r.key);
@@ -1068,6 +1104,10 @@ fn region_deals_on_the_europe_start() {
     m.apply(CampaignCommand::ProposeRegions { clear: false, demanded: vec![], offered: vec![ours] }).unwrap();
     let n = m.negotiations.current.clone().unwrap();
     let v = m.region_deal_value(&n, m.deal_inflation.factor);
+    // The AI's attitude to holding it (`0x00A79050`) passes the bordering test (−5 or more).
+    let attitude = economy::hypothetical_order_attitude(&m, &m.world.regions[&ours], ai);
+    println!("attitude of {} to {}: {attitude}", m.world.factions[&ai].key, m.world.regions[&ours].key);
+    assert!(attitude >= -5, "{attitude}");
     assert!(v.gain >= 15_000 && v.cost == 0 && v.given == 0, "{v:?}");
     assert_eq!(m.ai_accepts_deal(), Some(true), "a gift of {ours:?} to {ai:?}: {v:?}");
 }
@@ -1388,19 +1428,17 @@ fn the_expense_trackers_rebuild_the_saved_running_record() {
                 assert_eq!((running[19], running[20], running[21]), (12019, 563, 2177));
             }
             // The trackers hold the upkeep of the last round start (`0x008F1F60` → `0x008B2150`), unchanged since
-            // in these saves. Known miss: the Netherlands' naval upkeep is 53 more than its tracker (BACKLOG).
+            // in these saves.
             let fx = ntw_sim::campaign::effects::Effects::compute_for(&m, fac.id);
             let (land, naval) = economy::faction_upkeep_split_with(&m, &fx, fac.id);
             assert_eq!(land, running[19], "{name} {key}: land upkeep");
-            if key != "netherlands" {
-                assert_eq!(naval, running[20], "{name} {key}: naval upkeep");
-            }
+            assert_eq!(naval, running[20], "{name} {key}: naval upkeep");
             paying += usize::from(running[21] != 0);
             factions += 1;
         }
         for r in m.world.regions.values() {
             let set = economy::region_effect_set(&m, r);
-            assert_eq!(population::policing_cost(&m, r, &set, r.population), r.population_state.policing_cost, "{name} {}: policing cost", r.key);
+            assert_eq!(population::policing_cost(&m, r, &population::FactorInputs::of(&m, r, &set), r.population), r.population_state.policing_cost, "{name} {}: policing cost", r.key);
             regions += 1;
         }
     }
@@ -1410,4 +1448,30 @@ fn the_expense_trackers_rebuild_the_saved_running_record() {
     } else if ev.join("orig_fr_may1811.save").is_file() {
         assert!(checked_france && paying >= 1, "France in orig_fr_may1811 not checked");
     }
+}
+
+/// A force's units are costed with the force's set: the faction sum plus the commander's own traits and
+/// ancillaries (`0x008F9C50` → `0x008AFC00`). The Netherlands' one fleet in `auto_after_c8` has an
+/// admiral with `C_Admiral_Dutch_Seamanship` (`upkeep_cost_mod_naval_all` −5, faction −1): 1006 as the
+/// save's naval tracker (FACTION #47) holds, 1059 with the faction sum alone.
+#[test]
+fn an_admirals_traits_lower_his_fleets_upkeep() {
+    let dir = data_dir();
+    let path = common::evidence_dir().join("auto_after_c8.save");
+    if !dir.is_dir() || !path.is_file() {
+        println!("SKIP: no install at {} or no save {}", dir.display(), path.display());
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).expect("database");
+    let m = ntw_campaign::read_file(&path, &db).expect("save loads").model;
+    let nl = m.faction_by_key("netherlands").expect("netherlands").id;
+    let fx = ntw_sim::campaign::effects::Effects::compute_for(&m, nl);
+    let fleet = m.world.forces.values().find(|f| f.faction == nl && f.is_navy).expect("the Dutch fleet");
+    let admiral = fleet.commander.expect("the fleet's admiral");
+    assert_eq!(fx.character(admiral, "upkeep_cost_mod_naval_all"), -5.0);
+    let (_, naval) = economy::faction_upkeep_split_with(&m, &fx, nl);
+    assert_eq!(naval, 1006);
+    assert_eq!(m.world.last_economy_record(nl).expect("running record")[20], 1006);
+    let without: i32 = fleet.units.iter().map(|u| economy::unit_upkeep(ntw_sim::campaign::effects::ForceEffects::faction_only(&fx.faction[&nl]), &m.rules.features, &u.unit_key, &m.rules.units[&u.unit_key])).sum();
+    assert_eq!(without, 1059);
 }

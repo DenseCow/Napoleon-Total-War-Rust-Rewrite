@@ -91,8 +91,9 @@ decompiled code is stored. Temp files: `target\tmp`.
   finance / justice from it, CONFIRMED). Builder INFERRED `0x009CDF10`: the trait list's set (`0x008EDAE0`: each trait's
   current level record +0x58) plus each entry of a second list (taken to be the ancillaries). A minister or governor
   also adds his post-level set (`0x008D9D40`: post table (*(post+0xC))+0x4C, 16 bytes per level, level from
-  `0x008D9D70`). The character view `0x008AFC00` (16 callers) = his army's container (army +0x98 → +0x24) if any,
-  else faction +0x6FC, plus +0x48C.
+  `0x008D9D70`). The force view `0x008AFC00` (16 callers; ECX = the military force, CONFIRMED from `0x008F9C50` and
+  `0x008B6C50`) = its army's container (force virtual +0x38 → +0x98 → +0x24) if any, else its faction's +0x6FC (handle
+  +0x7C), plus its commander's +0x48C (handle +0x74). Ours: `Effects::force_set` (upkeep), `character_total` (raid share).
 - **Trait levels** (`0x008B5380`, CONFIRMED): the highest level whose threshold ≤ max(points, 0); when points fall the
   level stays at the trait's no-going-back level once that was reached; a trait whose points fall below 1 is
   removed (`0x008D21B0`). Trait entries are {trait, current level record, points} (12 bytes; list loader

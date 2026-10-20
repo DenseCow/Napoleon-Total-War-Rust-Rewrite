@@ -10,9 +10,10 @@
 //! - the map selection (`CampaignSim::selected` / `selected_region` / `selected_fort`) is sent to the HUD, which
 //!   fills the selection bar and the review panel (unit cards, ...);
 //! - clicks on HUD components send `audio::UiSound` like the front end;
-//! - keys, in the exe's order: a focused text field takes them all; else the components that
-//!   steal keys, then the root's shortcuts of `text/default_keys.xml` (save, load, escape menu...)
-//!   through the root's `OnShortcut` ([`keys`]);
+//! - keys, in the exe's order: a focused text field takes them all; else the campaign's bindings
+//!   of `text/default_keys.xml` (the root's save, load, escape menu, the end turn button's Return,
+//!   the camera's steps...) through the shortcut handler's state machine, a stolen key going to
+//!   its stealer ([`keys`]);
 //! - the scripts' load requests (`UiRequest::LoadCampaign`, from the save panel or quick load)
 //!   reload the campaign ([`requests`]).
 //! - a defeat / victory movie the model queued opens the original movie panel ([`update`]), its
@@ -25,11 +26,11 @@ use bevy::camera::ClearColorConfig;
 use bevy::camera::primitives::{Aabb, Frustum};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use ntw_formats::default_keys::{self, Bindings, Shortcuts};
+use ntw_formats::default_keys::{self, Shortcuts};
 use ntw_formats::loc::Localisation;
 use ntw_formats::pack::Vfs;
 use ntw_script::ScriptSource;
-use ntw_script::ui::{CampaignKey, CampaignLink, CampaignRequest, CampaignSelection, FrontEndFacts, NodeId, PointerEvent, UiScriptHost};
+use ntw_script::ui::{CampaignKey, CampaignLink, CampaignRequest, CampaignSelection, FrontEndFacts, NodeId, PointerEvent, ShortcutMachine, UiScriptHost};
 
 use super::play::CampaignSim;
 use crate::GameMode;
@@ -52,16 +53,11 @@ pub struct CampaignHud {
     /// A camera move the HUD asked for (`CampaignUI.SetCameraTarget`, e.g. a radar click), in
     /// map units, applied by `labels`.
     camera_to: Option<Vec2>,
-    /// True when a key pressed this frame went to a HUD component (a focused text field, a
-    /// component that stole it, or a fired root shortcut), set by [`keys`]: the map's own keys
-    /// (Return = end turn) leave it.
-    pub keys_taken: bool,
-    /// True while a HUD component holds the input focus (a text field: the save panel's name), set
-    /// by [`keys`] ([`UiScriptHost::input_focus_held`]): the camera's key pans and zooms leave the
-    /// keys to it ([`super::camera::control`]), as the exe runs no key binding then (`0x00EEE1E0`).
-    pub text_focused: bool,
-    /// The campaign's shortcuts mapped to the root, from `text/default_keys.xml` ([`keys`]).
-    shortcuts: Bindings,
+    /// The campaign's key bindings from `text/default_keys.xml` and their state ([`keys`]).
+    shortcuts: ShortcutMachine,
+    /// The camera bindings pressed this frame, in order: [`keys`] queues them,
+    /// [`super::camera::control`] moves the camera and empties the queue.
+    pub camera_steps: Vec<super::camera::CameraKeyPress>,
     /// `CampaignUI.QuitToMainScreen` ran: [`requests`] leaves for the main menu.
     leave: bool,
     /// The movie a HUD panel shows (`AttachCustomControl`), once [`panel_movie`] started it.
@@ -187,9 +183,8 @@ pub fn enter(world: &mut World) {
         clock_ms: 0.0,
         panels: Vec::new(),
         camera_to: None,
-        keys_taken: false,
-        text_focused: false,
         shortcuts,
+        camera_steps: Vec::new(),
         leave: false,
         panel_movie: None,
     });
@@ -224,59 +219,86 @@ fn advance_ui_clock(clock_ms: &mut f64, real: &Time<Real>) -> f64 {
     *clock_ms
 }
 
-/// The campaign's shortcuts mapped to the root, read once from `text/default_keys.xml` through
-/// the install's file system (mods included): the default keyset's funcs whose campaign or "all"
-/// mapping names `root` (`ntw_formats::default_keys`; the exe's loader `0x00EDB080`). A missing
-/// or unreadable file is logged once and leaves no shortcuts.
-fn campaign_shortcuts(vfs: &Vfs) -> Bindings {
+/// The campaign's key bindings, read once from `text/default_keys.xml` through the install's file
+/// system (mods included): the default keyset's funcs with a campaign or "all" mapping, each to
+/// its component (`Shortcuts::mode_bindings`; the exe's loader `0x00EDB080`). A missing or
+/// unreadable file is logged once and leaves no bindings.
+fn campaign_shortcuts(vfs: &Vfs) -> ShortcutMachine {
     match vfs.read(default_keys::PATH).map_err(|e| e.to_string()).and_then(|b| Shortcuts::parse(&b).map_err(|e| e.to_string())) {
-        Ok(s) => s.bindings("campaign", "root"),
+        Ok(s) => ShortcutMachine::new(s.mode_bindings("campaign")),
         Err(e) => {
             warn!("Campaign HUD: {} not read, no keyboard shortcuts: {e}", default_keys::PATH);
-            Bindings::default()
+            ShortcutMachine::default()
         }
     }
 }
 
-/// Keyboard → the HUD in the exe's order ([`UiScriptHost::campaign_key`]): while a component
-/// holds the input focus, the editing keys and the typed text go to it and no shortcut fires;
-/// else a key a component stole goes to its `OnKey`, and the campaign's root shortcuts of
-/// `text/default_keys.xml` ([`campaign_shortcuts`]: in vanilla `escape_menu` = ESCAPE with any
-/// modifier, `quick_save` = CTRL+S, `quick_load` = CTRL+L, ...) go to the root's `OnShortcut`,
-/// whose script decides (quick save only when `CanSave()`). Keys are matched by the exe's name of
-/// the physical key ([`crate::shortcut_keys::exe_key_name`]). Harness runs ignore the keyboard.
-/// Last, [`CampaignHud::text_focused`] records whether a component holds the focus.
+/// The `keys` system's buffers, kept between frames so they are not allocated again once they
+/// have grown: the frame's key events, their (key, pressed) changes, the keys down replayed from
+/// the frame's start and the exe's names of those keys. The binding walk itself
+/// ([`ShortcutMachine::key_event`]) still allocates on each key event: its per-binding held flags
+/// and the list of stolen keys it reads from the UI (plus the stolen keys a stealer hears).
+#[derive(Default)]
+pub struct KeyBuffers {
+    events: Vec<bevy::input::keyboard::KeyboardInput>,
+    changes: Vec<(KeyCode, bool)>,
+    down: crate::shortcut_keys::KeysDown,
+    names: Vec<&'static str>,
+}
+
+/// Keyboard → the HUD in the exe's order ([`UiScriptHost::campaign_key`]), once per key event
+/// (press, auto-repeat, release), as the campaign's key handler runs the bindings only then
+/// (`0x00A27EB0` → `0x00EEE1E0`): while a component holds the input focus, the editing keys and
+/// the typed text go to it and no binding runs; else the campaign's bindings of
+/// `text/default_keys.xml` ([`campaign_shortcuts`]) go through the shortcut handler's state
+/// machine: in vanilla ESCAPE (any modifier) is the root's `escape_menu`, CTRL+S `quick_save`,
+/// CTRL+L `quick_load` (the root's script decides, quick save only when `CanSave()`), Return
+/// `end_turn` on `button_end_turn` (its script ends the turn), W/S/A/D and the arrows the camera's
+/// steps ([`CampaignHud::camera_steps`], with the SHIFT of the frame's start, see
+/// [`super::camera::key_step`]); a key a component stole goes to its `OnKey`. Keys are matched by
+/// the exe's name of the physical key, the keys down at each event replayed from the frame's start
+/// ([`crate::shortcut_keys::KeysDown`]). Harness runs ignore the keyboard.
 pub fn keys(
     hud: Option<NonSendMut<CampaignHud>>,
     mut input: MessageReader<bevy::input::keyboard::KeyboardInput>,
     held: Res<ButtonInput<KeyCode>>,
+    time: Res<Time<Real>>,
     harness: Option<Res<crate::frontend::AutoScreenshot>>,
+    mut buf: Local<KeyBuffers>,
 ) {
     let Some(mut hud) = hud else { return };
-    hud.keys_taken = false;
-    if harness.is_some() {
-        hud.text_focused = false;
+    if harness.is_some() || input.is_empty() {
         input.clear();
         return;
     }
-    let modifiers = crate::shortcut_keys::held_modifiers(&held);
+    let KeyBuffers { events, changes, down, names } = &mut *buf;
+    events.clear();
+    events.extend(input.read().cloned());
+    changes.clear();
+    changes.extend(events.iter().map(|ev| (ev.key_code, ev.state.is_pressed())));
+    down.rewind(held.get_pressed().copied(), changes);
+    let shift = down.modifiers().shift;
+    let dt = time.delta_secs();
     let hud = &mut *hud;
-    for ev in input.read() {
-        if !ev.state.is_pressed() {
-            continue;
-        }
-        let press = CampaignKey {
-            key: crate::shortcut_keys::exe_key_name(ev.key_code),
-            edit: crate::frontend::key_name(ev.key_code),
-            text: ev.text.as_deref(),
+    for (ev, &(key, pressed)) in events.iter().zip(changes.iter()) {
+        down.apply(key, pressed);
+        down.names_into(names);
+        let event = CampaignKey {
+            down: names.as_slice(),
+            up: !pressed,
+            edit: if pressed { crate::frontend::key_name(key) } else { None },
+            text: if pressed { ev.text.as_deref() } else { None },
             repeat: ev.repeat,
-            held: modifiers,
+            held: down.modifiers(),
+            time: dt,
         };
-        if hud.host.campaign_key(&hud.shortcuts, press) {
-            hud.keys_taken = true;
-        }
+        let steps = &mut hud.camera_steps;
+        hud.host.campaign_key(&mut hud.shortcuts, event, &mut |func, time| {
+            if let Some(func) = super::camera::CameraFunc::from_binding(func) {
+                steps.push(super::camera::CameraKeyPress { func, time, shift });
+            }
+        });
     }
-    hud.text_focused = hud.host.input_focus_held();
     log_errors(&hud.host);
 }
 
@@ -434,7 +456,7 @@ fn same_panel_movie(want: Option<&(NodeId, Rc<str>)>, playing: Option<&PanelMovi
 /// `movie_window`, CONFIRMED event_movie_panel.luac) and `CampaignUI.MovieDismissed` drops it.
 /// Starts it into a texture, draws it in that component and stops it when it is dropped or the
 /// component is gone. INFERRED: the movie plays once with its sound track in the player's language
-/// (the exe's movie queue `0x00998E20` that starts it is not traced).
+/// (the bink control that `0x00A13EA0` hands the panel constructor `0x00998E20` is not traced).
 pub fn panel_movie(
     hud: Option<NonSendMut<CampaignHud>>,
     assets: Option<ResMut<UiAssets>>,
@@ -452,6 +474,13 @@ pub fn panel_movie(
         }
         if let Some((node, movie)) = want {
             let component = hud.host.world().get(node).map(|n| n.data.id.clone()).unwrap_or_default();
+            // PROVISIONAL: the movie's sound plays like every movie's in ours (`audio::movie_audio`):
+            // the `sound_events` movie-table multiplier, in the movie group (`MOVIE_VOLUME`), under
+            // master. The exe: `0x00A13EA0` hands the panel constructor `0x00998E20` int(setting 4 ×
+            // 0.01 × setting 5) (CVTTSS2SI at ~0x00A13FC0), stored at panel +0x24; `0x00A23330` reads
+            // +0x24 and passes it to the bink control's open `0x00D9F600`, which multiplies it by 0x102
+            // (0 when the control's +0xC vfunc +0xD4(5) returns false) and hands it to the player's
+            // vfunc +0xC. Not traced: which two settings, and how the player applies that value.
             play.write(crate::video::PlayMovie { path: movie.to_string(), mode: crate::video::MovieMode::Texture, track: None, looped: false, sound: true });
             hud.panel_movie = Some(PanelMovie { node, movie, component, shown: false });
         }

@@ -202,6 +202,16 @@ pub enum LoadWarning {
         /// The region key.
         region: String,
     },
+    /// A faction's `ARMY_REINFORCEMENT_MANAGER/CHARACTER_REINFORCEMENTS_ARRAY` holds entries (new
+    /// armies on their way to the commander they were raised for). They are not loaded: ours keeps
+    /// such an entry only from its region step to the same turn start's march
+    /// (see `CampaignModel::march_reinforcements`), so those armies stay where they are.
+    UnloadedReinforcements {
+        /// The faction key (empty for the rebels).
+        faction: String,
+        /// How many entries the array holds.
+        entries: usize,
+    },
     /// A recruitment manager (the region's or a port slot's) without its `REGION_RECRUITMENT_ITEM_ARRAY`:
     /// read as an empty queue (the save adds the array only when a new item is written to that manager).
     RecruitmentManagerWithoutItems {
@@ -298,6 +308,9 @@ impl fmt::Display for LoadWarning {
             }
             Self::UnreadableRecruitmentItem { region } => {
                 write!(f, "region {region}: recruitment item without turns or unit key (skipped)")
+            }
+            Self::UnloadedReinforcements { faction, entries } => {
+                write!(f, "faction {faction:?}: {entries} reinforcement marches (CHARACTER_REINFORCEMENTS_ARRAY) not loaded; those armies stay where they are")
             }
             Self::RecruitmentManagerWithoutItems { region, manager } => {
                 let manager = match manager {

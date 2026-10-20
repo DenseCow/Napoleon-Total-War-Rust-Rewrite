@@ -672,6 +672,7 @@ pub fn game_limits(table: &KvTable, warnings: &mut Vec<String>) -> ntw_sim::limi
         custom_battle_funds_land: funds_land,
         custom_battle_funds_naval: funds_naval,
         max_reinforcement_units: single(KEY_MAX_REINFORCEMENT_UNITS, d.max_reinforcement_units),
+        max_residence_characters: single(KEY_MAX_RESIDENCE_CHARACTERS, d.max_residence_characters),
     }
 }
 
@@ -826,6 +827,7 @@ mod tests {
             ("unit_scale_3", 1.0),
             ("max_land_units", 40.0),
             ("max_reinforcement_units", 30.0),
+            ("max_residence_characters", 25.0),
             ("max_naval_units_4", 40.0),
             ("max_naval_units_0", 6.0),
             ("custom_battle_funds_land_3", 20000.0),
@@ -837,7 +839,7 @@ mod tests {
         let modded = KvTable::from_entries("_kv_rules", rows.iter().map(|(k, v)| (k.to_string(), *v)).collect());
         let l = game_limits(&modded, &mut warnings);
         assert_eq!(l.unit_scales, [0.2, 0.5, 0.75, 1.0, 1.5]);
-        assert_eq!((l.max_land_units, l.max_reinforcement_units), (40, 30));
+        assert_eq!((l.max_land_units, l.max_reinforcement_units, l.max_residence_characters), (40, 30, 25));
         // `_2`, `_3` missing: they keep the original's; `_4` is appended.
         assert_eq!(l.max_naval_units, [6, 8, 10, 20, 40]);
         assert_eq!(l.custom_battle_funds_land, [5000, 10000, 14000, 20000]);

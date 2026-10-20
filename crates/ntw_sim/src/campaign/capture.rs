@@ -21,7 +21,7 @@
 //!    gets the three previews in a UI event (`+0xC78`) and answers with a choice; two report flags (+0x9A,
 //!    +0x9B, set from the capturer's faction, `0x00B4DA40` / `0x00B4D9E0`) skip the choice and occupy.
 //! 3. **Apply** (`0x008C0310`): 0 → `0x00B541E0` (buildings set to the previewed health, money paid through
-//!    the economy, `0x00AAA580`: every population class's war-results base (+0x74) minus the reduction, town
+//!    the economy, `0x00AAA580`: every population class's resistance base (+0x74) minus the reduction, town
 //!    wealth set, region economy refreshed); 1 → `0x00B582E0` (buildings only); 2 → `0x00B4F090` when a
 //!    liberation target was found (the region goes to it, `0x00B58A10`, and it gets an army), else loot.
 //!
@@ -36,7 +36,7 @@
 
 use super::effects::Effects;
 use super::events::CampaignEvent;
-use super::ids::{FactionId, ForceId, RegionId};
+use super::ids::{CharacterId, FactionId, ForceId, RegionId};
 use super::treaties::AttitudeEvent;
 use super::world::{CampaignModel, ConstructionItem, ConstructionKind, SlotRef, Stance};
 use super::CommandError;
@@ -72,10 +72,17 @@ pub struct CaptureOutcome {
     pub money: i32,
     /// The region's town wealth afterwards.
     pub town_wealth: u32,
-    /// Subtracted from every population class's war-results base.
+    /// Subtracted from every population class's resistance base.
     pub public_order_reduction: i32,
-    /// (lower, upper) public order of the region afterwards (the original's +0x18 / +0x1C previews), for the
-    /// capture screen. Computed for human capturers only (display data; no RNG).
+    /// (lower, upper): the region's [`public_order`](super::economy::public_order) after this option, for the
+    /// capture screen's `LowerOrder` / `UpperOrder`. CONFIRMED (`0x00B14930`): option +0x1C = `0x00A610C0`, the net
+    /// order `0x008E2AB0` of the government's lower class; +0x18 = `0x00A61400`, its upper class; each 0 when the
+    /// region has no such class; the classes are those the region tests `0x008CE260` / `0x008CE320` name
+    /// ([`region_government_classes`](super::economy::region_government_classes): the government's, or for a
+    /// rebel region its first risen army's, none with no army); `0x009AB1B0` reads +0x1C as `LowerOrder`,
+    /// +0x18 as `UpperOrder`. Not traced: the effect set the copy is recomputed with (`0x00B0D3B0`, tagged
+    /// where the preview is computed).
+    /// The exe computes it for every capturer; ours for human capturers only (display data, no RNG draw).
     pub public_order_after: Option<(f32, f32)>,
 }
 
@@ -95,6 +102,11 @@ pub struct CapturePreview {
     pub occupy: CaptureOutcome,
     /// Option 2: the faction a liberation would hand the region to.
     pub liberate: Option<FactionId>,
+    /// The capturing force's commander at the capture (report +0x8: `0x00885F90`'s first argument, from
+    /// force +0x74, in `0x00B58560` / `0x00B58C00`); the loot choice posts it in
+    /// `CharacterLootedSettlement`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub looter: Option<CharacterId>,
 }
 
 /// `0x00B14560`: one building's damage roll. Returns (new health, value). Draws once from `rng`.
@@ -205,11 +217,16 @@ impl CampaignModel {
             let cost = self.rules.buildings.get(&b.level_key).map_or(0, |x| x.cost);
             occupy.fortification = Some(damage_roll(&mut self.rng, b.health, cost, OCCUPY_DAMAGE, loot_value).0);
         }
-        let mut preview = CapturePreview { region, faction, surrender, loot, occupy, liberate: self.liberation_target(region, faction) };
+        let looter = by.and_then(|f| self.world.forces.get(&f)).and_then(|f| f.commander);
+        let mut preview = CapturePreview { region, faction, surrender, loot, occupy, liberate: self.liberation_target(region, faction), looter };
         if self.turn.humans.contains(&faction) {
             for o in [&mut preview.loot, &mut preview.occupy] {
                 let mut m = self.clone();
                 m.apply_outcome(region, faction, o, false);
+                // INFERRED: the exe recomputes the copy's classes with the region's effect set adjusted by
+                // `0x00B0D3B0(capturer, region, set)` (not traced) less the damaged buildings' effects; ours reads
+                // the option-applied model's `region_effect_set` (the governing faction's tax bundles), which already
+                // excludes the damaged buildings' effects (`Region::effect_buildings` keeps only full-health ones).
                 let po = super::economy::public_order(&m, region);
                 o.public_order_after = Some((po.lower, po.upper));
             }
@@ -232,16 +249,12 @@ impl CampaignModel {
         }
         r.town_wealth = o.town_wealth;
         if o.public_order_reduction != 0 {
-            // 0x008EF780 on every class: class +0x74 (the war-results base) -= reduction. A region loaded without
+            // 0x008EF780 on every class: class +0x74 (the resistance base) -= reduction. A region loaded without
             // classes gets the government's two.
-            if r.class_bases.is_empty() {
-                let (upper, lower) = super::economy::government_classes(self, faction);
-                let r = self.world.regions.get_mut(&region).expect("checked");
-                r.class_bases = vec![(lower, 0, 0), (upper, 0, 0)];
-            }
+            self.ensure_population_classes(region, faction);
             let r = self.world.regions.get_mut(&region).expect("checked");
             for c in &mut r.class_bases {
-                c.2 -= o.public_order_reduction;
+                c.resistance -= o.public_order_reduction;
             }
             // spa_napoleon (`0x00AAA5B0`, CONFIRMED; the campaign's `looting_alignment`): the population turns against
             // the looter: its alignment loses 0.5 of the share (floored at 0) and the other alignment gains 0.5 (capped
@@ -329,6 +342,14 @@ impl CampaignModel {
             CaptureChoice::Loot => {
                 self.apply_outcome(p.region, p.faction, &p.loot, true);
                 self.loot_resentment(p.region, p.faction);
+                // 0x00B541E0 posts CharacterLootedSettlement (at 0x00B54468) after the option and the
+                // resentment are applied, with the report's commander (CONFIRMED). It posts even with no
+                // commander, but the poster 0x00E30700 hands an event to Lua only when its vtable +0xB8
+                // (0x008F9EE0 for this event) passes, and that returns 0 when the character getter (+0x1C,
+                // 0x0044A500) is null: no script ever sees a looter-less loot, so ours raises none (CONFIRMED).
+                if let Some(character) = p.looter {
+                    events.push(CampaignEvent::CharacterLootedSettlement { character });
+                }
                 p.loot.money
             }
             CaptureChoice::Occupy => {
@@ -337,17 +358,26 @@ impl CampaignModel {
             }
             CaptureChoice::Liberate => {
                 let target = p.liberate.expect("checked");
-                // 0x00B58A10(target, 0, 1): the liberated faction comes back if it was out of the game,
-                // then the region passes to it through the shared owner change (`liberate_region` →
-                // `transfer_region`), which expels the other factions' armies from the region
-                // (0x00A64AC0 with its fourth argument 0 → 0x008D9DC0, `expel_after_owner_change`):
-                // the capturer's army is put out of the settlement. The army the original raises for
-                // the target (0x00B4F090: units chosen from what the region's sArmy / rHorse / tGuns
-                // buildings allow, a new general) is not modelled. The SettlementOccupied event is
-                // kept as before (INFERRED for this path).
-                if self.liberate_region(p.region, target, events) {
-                    events.push(CampaignEvent::SettlementOccupied { region: p.region, faction: target });
+                // 0x00B4F090 first posts FactionBecomesLiberationProtectorate (0x00B4F0FE / 0x00B5089D)
+                // with the region's owner at that moment, the liberator (CONFIRMED), then puts the
+                // liberator's armies out of the region (0x008D9DC0 at 0x00B508C5, unconditional,
+                // CONFIRMED), then calls 0x00B58A10(target, 0, 1): the liberated faction comes back if
+                // it was out of the game, then the region passes to it through the shared owner change
+                // (`liberate_region` → `transfer_region`), which expels the other factions' armies
+                // again (0x00A64AC0 with its fourth argument 0 → 0x008D9DC0,
+                // `expel_after_owner_change`; only factions with a capital, so the first call is what
+                // puts a capturer without one out of the settlement). The army the original raises
+                // for the target (0x00B4F090: units chosen from what the region's sArmy / rHorse /
+                // tGuns buildings allow, a new general) is not modelled. Liberation posts no
+                // SettlementOccupied (its constructor 0x00889EE0 is called only by the three capture
+                // variants, and 0x00B58A10 only forwards to the owner change 0x00B449F0, CONFIRMED).
+                // `liberate_region` refuses only a missing region or one `target` already owns, and
+                // then changes nothing.
+                if let Some(liberator) = self.world.regions.get(&p.region).map(|r| r.owner) {
+                    events.push(CampaignEvent::FactionBecomesLiberationProtectorate { faction: liberator });
+                    self.expel_from_region(liberator, p.region);
                 }
+                self.liberate_region(p.region, target, events);
                 0
             }
         };
@@ -545,6 +575,9 @@ impl CampaignModel {
         if self.turn.humans.contains(&faction) {
             return;
         }
+        // In region-id order, part of the stand-in: the exe repairs from the CAI's slot intentions (`0x00CE9A60`: repair
+        // `0x00AA4910` when the slot's building handle is the intention's +0x110, else build `0x00A67890`), in the
+        // intention order, not traced. The order matters: each repair's cost is capped at the treasury left.
         let regions: Vec<RegionId> = self.world.regions.values().filter(|r| r.owner == faction).map(|r| r.id).collect();
         for region in regions {
             let n = self.world.regions[&region].slots.len();

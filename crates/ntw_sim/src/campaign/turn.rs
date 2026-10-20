@@ -18,24 +18,34 @@
 //!    that function also refreshes the region population factors, `0x00AAE710`, of a faction in the game
 //!    other than the rebels).
 //! 2. For each faction in turn order, the turn start `0x008F2620` (CONFIRMED order of its calls):
-//!    1. Every character (`0x00A24EB0` per character): `CharacterTurnStart` (INFERRED place of the event)
+//!    1. Every character, in the faction's character list order (faction +0x764 count / +0x768 data, front
+//!       to back, `0x008F2AC4`, and `0x008F2B47` in the branch for the rebels; CONFIRMED;
+//!       [`World::faction_characters_in_list_order`](super::World::faction_characters_in_list_order)),
+//!       `0x00A24EB0` per character: `CharacterTurnStart` (INFERRED place of the event)
 //!       and the action points refill to the type's base, times [`force_action_point_factor`] for a
 //!       force's commander (CONFIRMED factor; trait, ancillary and technology movement effects are not
 //!       modelled).
-//!    2. Every owned region, in id order, the region update `0x00AAE820`: the slots (`SlotTurnStart` each, `0x00AAE8D0`, with a port's naval queue right
-//!       after its slot), the land queue counts down (`UnitTrained`; `0x00B71FB0`, CONFIRMED), then
+//!    2. Every owned region, in the faction's region list order (faction +0x778 count / +0x77C data, front
+//!       to back, `0x008F2AF6`, and `0x008F2B7F` in the branch for the rebels; CONFIRMED, CAMPAIGN_FIDELITY.md
+//!       "Turn order"; [`World::faction_regions_in_list_order`](super::World::faction_regions_in_list_order)),
+//!       the region update `0x00AAE820`: the slots (`SlotTurnStart` each, `0x00AAE8D0`, with a port's naval
+//!       queue right after its slot), the land queue counts down (`UnitTrained`; `0x00B71FB0`, CONFIRMED), then
 //!       `RegionTurnStart` (posted at the end of the region update, CONFIRMED). An item takes part only
 //!       after a round end has flagged it (`0x00A78620` from the round-end economy `0x008BC650`,
 //!       CONFIRMED); the saves agree.
 //!       Not modelled in the region update: building-driven spawns `0x00A249A0` (a campaign-RNG roll).
-//!    3. The faction-level updates: research availability (`0x008F91F0`, CONFIRMED place), then the
-//!       other calls of `0x008F2620` not modelled (character pools `0x00A24C90`, pending orders resumed
+//!    3. The faction-level updates: the reinforcement manager (`0x00B71FA0` at `0x008F2B35`: the armies raised
+//!       for a commander march to him, [`CampaignModel::march_reinforcements`]; CONFIRMED place), research
+//!       availability (`0x008F91F0` through `0x008AE3B0` at `0x008F2B40`, CONFIRMED place); the rebels skip
+//!       both, since their branch `0x008F28E1` → `0x008F2B47` runs only the character and region walks
+//!       (CONFIRMED); then the other calls of `0x008F2620` not modelled (character pools `0x00A24C90`, pending orders resumed
 //!       `0x009653D0`, forces in transit), and last `FactionTurnStart` (posted at its end, CONFIRMED).
 //!    4. The faction acts: a **human** faction stops here and waits for commands until
 //!       `CCQ_END_TURN`; an AI faction is played by the campaign AI (`ntw_ai`), which the caller runs
 //!       while `TurnStep::AiTurn` is the next step (without a driver the AI does nothing).
-//!    5. The turn end `0x008BD0F0` (CONFIRMED order): `CharacterTurnEnd` for every character
-//!       (`0x009DA210`), every region (`0x00A786C0`: `RegionTurnEnd`, then its bankruptcy offset −1),
+//!    5. The turn end `0x008BD0F0` (CONFIRMED order): `CharacterTurnEnd` for every character in the
+//!       faction's character list order (`0x008BD1AF` → `0x009DA210`, CONFIRMED), every region in the faction's region list order (`0x008BD1E1`, CONFIRMED;
+//!       `0x00A786C0`: `RegionTurnEnd`, then its bankruptcy offset −1),
 //!       `UnitTurnEnd` for every unit of every force (forces in id order, units in array order;
 //!       `0x008BD4B0`), the diplomacy manager's turn end (`0x00B29940`, not read), `FactionTurnEnd`.
 //!    6. The handover ([`TurnStep::Handover`], `0x008A9920`, CONFIRMED order): right after the next
@@ -48,11 +58,14 @@
 //!    ([`TurnStep::RoundEndRefresh`], `0x008E1030` per listed faction, which also sets the expense
 //!    trackers), then for every faction in turn order, [`TurnStep::Economy`]: income and upkeep are settled
 //!    (0x00BABE30: treasury += income − expenses, unless the faction cannot pay, see
-//!    [`economy`](super::economy)), every owned region's town wealth grows (0x00AB4410) and its
-//!    population grows and converts ([`super::population`], 0x00AB4070), then (not for the rebels) every owned
+//!    [`economy`](super::economy); not for the rebels or a faction out of the game), every owned region's
+//!    town wealth grows (0x00AB4410) and its population grows and converts ([`super::population`],
+//!    0x00AB4070), then (not for the rebels or a faction out of the game) every owned
 //!    region's construction steps (`BuildingCompleted`, `CampaignBuildingDamaged`; `0x00AB3DA0` → `0x00A78670`,
-//!    every slot in one pass; regions in id order where the exe walks the faction's region list
-//!    (PROVISIONAL order), with the same results, see `construction_round_end`), then the
+//!    every slot in one pass; regions in the faction's region list order, faction +0x778 / +0x77C,
+//!    CONFIRMED: CAMPAIGN_FIDELITY.md "Faction region list order", test
+//!    `vanilla_save_region_order_is_the_manager_order` with 31 regions and 12 descents from id order;
+//!    see `construction_round_end`), then the
 //!    relationships' per-turn update ([`super::treaties`], `0x00B29100`), then research takes one step
 //!    ([`super::research`], `0x008F3C40` → `0x008DD450`); CONFIRMED order of `0x008BC650`. So the queue
 //!    step of the next turn start reads the list with the buildings finished here. Then the calendar
@@ -96,7 +109,7 @@ pub enum TurnStep {
     Region(RegionId),
     /// `CharacterTurnStart` and action point refill for the faction's characters.
     CharactersStart(FactionId),
-    /// The end of the faction's turn start: research availability, then `FactionTurnStart`.
+    /// The end of the faction's turn start: research availability (not for the rebels), then `FactionTurnStart`.
     FactionReady(FactionId),
     /// Either stop for a human player or play the AI's turn.
     Decide(FactionId),
@@ -170,7 +183,7 @@ impl CampaignModel {
     /// finishes the frame's steps; what those steps then do is not traced). Saving is refused too
     /// (`0x008BE4A0` returns false while it is set; the save button's check is the UI's, BACKLOG).
     ///
-    /// Callers: a human faction destroyed ([`Self::destroy_faction`], `0x008AB6C0`). Not modelled
+    /// Callers: a human faction destroyed ([`Self::destroy_faction_by`], `0x008AB6C0`). Not modelled
     /// (BACKLOG): the multiplayer victory check (`0x0096CD10` sets it when a human has won and another
     /// human is still in the game; in single player winning or losing by the victory conditions does
     /// not set it), and the end of a human faction's +0x814 state (`0x008BEAA0` from a settlement
@@ -215,8 +228,8 @@ impl CampaignModel {
     /// [`Self::in_the_game`]) is passed over, so it gets no turn start, turn, turn end or handover
     /// until it comes back ([`Self::reemerge_faction`]); its round-end economy still runs (that loop
     /// walks every faction). The rebels (world +0x1C, after the list) are never tested. A save of
-    /// ours from before the flag was kept has no +0x824: then `in_the_game`'s INFERRED fallback
-    /// (the faction holds a region or a force) decides who gets a turn. Not modelled: the exe also
+    /// ours from before the flag was kept has no +0x824: then `in_the_game` derives it by the exe's
+    /// startpos rule ([`Self::out_of_game_by_startpos_rule`]). Not modelled: the exe also
     /// passes over a faction whose byte +0x93C is set, a flag no byte store in the exe writes
     /// (UNKNOWN meaning, never seen set).
     pub fn takes_turns(&self, f: FactionId) -> bool {
@@ -307,8 +320,18 @@ impl CampaignModel {
     }
 
     /// Runs the next queued step. `None` when nothing is queued (always once the campaign is over:
-    /// [`Self::end_campaign`] drops the queue, and a step that ends it drops what it queued).
+    /// [`Self::end_campaign`] drops the queue, and a step that ends it drops what it queued), and
+    /// also while a call to war waits for a human ally's answer
+    /// ([`CampaignModel::pending_ally_war_calls`]): the queue is kept and the turn resumes with the
+    /// next `step` after the answer. CONFIRMED: the campaign update (`0x008F4120`) does not advance the
+    /// turn phases while the pending stack (+0xF70) holds an entry (`0x008F41F9`, `0x008F457A`); it only
+    /// runs `0x008F7850`, which leaves an offer waiting for a human (counter 0) on the stack. An
+    /// [`TurnStep::AiTurn`] at the front still runs (it does nothing: its faction's orders were given
+    /// before it, and one of them asked), so a driver does not play that faction again on resuming.
     pub fn step(&mut self) -> Option<Vec<CampaignEvent>> {
+        if !self.pending_ally_war_calls.is_empty() && !matches!(self.turn.queue.front(), Some(TurnStep::AiTurn(_))) {
+            return None;
+        }
         let step = self.turn.queue.pop_front()?;
         let mut events = Vec::new();
         let known: std::collections::BTreeSet<_> = self.world.characters.keys().copied().collect();
@@ -342,10 +365,9 @@ impl CampaignModel {
                     super::economy::refresh_running_record_round_start(self, faction);
                 }
                 self.refresh_computed_factors();
-                // `0x00AAAF60` per region of world +0x34: `0x00B796B0` on a settlement or a fort under siege
-                // (virtual +0x98); it raises the siege counter and removes garrison men by a campaign RNG draw
-                // (siege attrition: meaning INFERRED, CAMPAIGN_FIDELITY.md). Nothing is under siege in the model
-                // (BACKLOG "Sieges on the campaign map"), so the step does nothing here.
+                // Siege attrition (`0x00AAAF60` per region of world +0x34, [`super::siege`]): each besieged
+                // settlement's turns besieged go up and its garrison loses men by campaign RNG draws.
+                self.siege_attrition_round_start(&mut events);
                 // The trade update with flag 0 (`0x00BCB020(0)`): prices and trends, no history shift, then the
                 // raid check (`0x00BD1020`) as at the round end.
                 self.update_commodity_prices_with(false);
@@ -372,12 +394,18 @@ impl CampaignModel {
             }
             TurnStep::FactionStart(f) => {
                 self.turn.current = Some(f);
+                // The acting view on the path grid (`0x008ED860` at `0x008F28D3`), which every later
+                // zone flood reads (`CampaignModel::store_acting_view`).
+                self.store_acting_view();
                 // The faction turn start 0x008F2620 (CONFIRMED order): every character (0x00A24EB0), every region
                 // (0x00AAE820), then the faction-level updates (research availability 0x008F91F0) and last the
                 // `FactionTurnStart` event (posted at its end). Its phases run next, before whatever was queued
                 // after this step.
                 let mut phases = vec![TurnStep::CharactersStart(f)];
-                phases.extend(self.world.regions.values().filter(|r| r.owner == f).map(|r| TurnStep::Region(r.id)));
+                // The regions in the faction's region list order (+0x778 count / +0x77C data, walked front to
+                // back at `0x008F2AF6`, and at `0x008F2B7F` for the rebels; CONFIRMED), the same list as the
+                // round end's (see `construction_round_end`).
+                phases.extend(self.world.faction_regions_in_list_order(f).into_iter().map(TurnStep::Region));
                 phases.push(TurnStep::FactionReady(f));
                 for p in phases.into_iter().rev() {
                     self.turn.queue.push_front(p);
@@ -386,37 +414,57 @@ impl CampaignModel {
             TurnStep::Economy(f) => {
                 // The treaty money (regular payments, protectorate tribute and income) is in the running
                 // record the settle pays (categories 8 / 10 / 22 / 24, booked by its writers,
-                // `CampaignModel::change_treaty_money`).
-                if economy::settle_round(self, f) == (economy::Settlement::CannotPay { first_turn: true }) {
+                // `CampaignModel::change_treaty_money`). The rebels and a faction out of the game pay nothing
+                // (`economy::Settlement::Skipped`).
+                if economy::settle_round(self, f, &mut events) == (economy::Settlement::CannotPay { first_turn: true }) {
                     events.push(CampaignEvent::PendingBankruptcy { faction: f });
                 }
                 // The payments to `f` that an earlier payer's update finished this round go now that `f` has
                 // been paid their last round (ORIGINAL BUG fix, `CampaignModel::diplomacy_round_end` step 8).
                 self.drop_finished_payments_to(f);
                 // Each region's population growth, then its religion conversion (0x00AB42F0 → 0x00AB4070 →
-                // 0x00A63FE0, in the same step).
-                self.population_round_end(f);
-                // Then, unless the faction is the rebels, `0x008BC650` steps each owned region's construction
-                // (`0x00AB3DA0`, [`Self::construction_round_end`]) and flags its queued recruits (`0x00A78620`, which
-                // the turn order gives already, see `region_turn`), then the relationships' per-turn update
-                // (`0x00B29100`), then research (`0x008F3C40` → `0x008DD450` with (0, 0, 1)); CONFIRMED order from
-                // the listing.
-                self.construction_round_end(f, &mut events);
-                self.diplomacy_round_end(f);
-                // The saves agree on research's place: AI techs started in turn 1 hold one step in the turn-2 save.
-                for technology in self.research_step(f) {
-                    events.push(CampaignEvent::ResearchCompleted { faction: f, technology });
+                // 0x00A63FE0, in the same step), for the rebels too: `0x008BC650` tests only faction +0x824 at
+                // `0x008BC685` before that loop (CONFIRMED by listing).
+                if self.in_the_game(f) {
+                    self.population_round_end(f);
+                }
+                // Then, for a faction with a record still in the game (`Self::in_the_game_with_record`: the JNZs
+                // at `0x008BC869` / `0x008BC871` jump past the whole block to `0x008BC8C4` for the rebels and a
+                // faction out of the game, CONFIRMED by listing), `0x008BC650` steps each owned region's
+                // construction (`0x00AB3DA0`, [`Self::construction_round_end`]) and flags its queued recruits
+                // (`0x00A78620`, which the turn order gives already, see `region_turn`), then the relationships'
+                // per-turn update (`0x00B29100`), then research (`0x008F3C40` → `0x008DD450` with (0, 0, 1));
+                // CONFIRMED order from the listing. The same gate holds the family year (`0x008BC9C0`, in
+                // `characters::yearly_character_pass`) and the last two steps `0x008AB200` / `0x008ABF50`
+                // (over the faction's +0x7BC / +0x7C0 force list; not modelled).
+                if self.in_the_game_with_record(f) {
+                    self.construction_round_end(f, &mut events);
+                    events.extend(self.diplomacy_round_end(f));
+                    // The saves agree on research's place: AI techs started in turn 1 hold one step in the turn-2 save.
+                    for technology in self.research_step(f) {
+                        events.push(CampaignEvent::ResearchCompleted { faction: f, technology });
+                    }
                 }
             }
             TurnStep::Region(r) => self.region_turn(r, &mut events),
             TurnStep::FactionReady(f) => {
                 // After the faction's regions (buildings may have finished): new techs open up (0x008F2620 runs the
-                // availability writer 0x008F91F0 after its region updates, CONFIRMED), then `FactionTurnStart`.
-                self.update_tech_availability(f);
+                // availability writer 0x008F91F0, through the thunk 0x008AE3B0 at 0x008F2B40, after its region
+                // updates, CONFIRMED), then `FactionTurnStart`. Before them the reinforcement manager (`0x00B71FA0`
+                // at `0x008F2B35`, CONFIRMED order). The rebels skip both: for a faction without a record
+                // (`IsFactionWithoutRecord` 0x008CEEF0) the JNZ at 0x008F28E1 takes the branch 0x008F2B47, which
+                // walks the characters and regions only and joins at 0x008F2BB1, past the tax-rate log, the
+                // reinforcement manager and research availability (CONFIRMED by listing).
+                if !self.is_rebel_faction(f) {
+                    events.extend(self.march_reinforcements(f));
+                    self.update_tech_availability(f);
+                }
                 events.push(CampaignEvent::FactionTurnStart { faction: f });
             }
             TurnStep::CharactersStart(f) => {
-                let ids: Vec<_> = self.world.characters.values().filter(|c| c.faction == f).map(|c| c.id).collect();
+                // The faction's character list front to back (+0x764 / +0x768 at `0x008F2AC4`, and at
+                // `0x008F2B47` for the rebels → `0x00A24EB0`; CONFIRMED), not the ids.
+                let ids = self.world.faction_characters_in_list_order(f);
                 let fx = super::effects::Effects::compute_for(self, f);
                 for character in ids {
                     self.world.agents_acted.remove(&character);
@@ -454,8 +502,7 @@ impl CampaignModel {
                 // an AI faction runs only the spotting pass), then the recruitment pools' step
                 // (`0x00A25310` on the manager at faction +0x940, both pools' slot 12 `0x00A252B0`);
                 // CHARACTERS_FIDELITY.md §8, §10.
-                let mine: Vec<_> = self.world.characters.values().filter(|c| c.faction == f).map(|c| c.id).collect();
-                for c in mine {
+                for c in self.world.faction_characters_in_list_order(f) {
                     self.update_hidden(c);
                 }
                 if self.turn.humans.contains(&f) {
@@ -487,15 +534,15 @@ impl CampaignModel {
             TurnStep::FactionEnd(f) => {
                 // The faction turn end 0x008BD0F0 (CONFIRMED order): every character (`CharacterTurnEnd`, 0x009DA210),
                 // every region (0x00A786C0: `RegionTurnEnd`, then the bankruptcy offset falls by 1), every force's
-                // units (`UnitTurnEnd`, 0x008BD4B0), then `FactionTurnEnd`.
-                let mine: Vec<crate::campaign::CharacterId> = self.world.characters.values().filter(|c| c.faction == f).map(|c| c.id).collect();
-                for c in mine {
+                // units (`UnitTurnEnd`, 0x008BD4B0), then `FactionTurnEnd`. The regions go in the faction's region
+                // list order, as the turn start's (+0x778 / +0x77C front to back at `0x008BD1E1`, CONFIRMED),
+                // and the characters in the character list order (+0x764 / +0x768 at `0x008BD1AF`, CONFIRMED).
+                for c in self.world.faction_characters_in_list_order(f) {
                     // The turn-end counters come first (`0x009DA210`, CharacterTurnEnd after them).
                     self.turn_end_counters(c);
                     events.push(CampaignEvent::CharacterTurnEnd { character: c });
                 }
-                let regions: Vec<RegionId> = self.world.regions.values().filter(|r| r.owner == f).map(|r| r.id).collect();
-                for region in regions {
+                for region in self.world.faction_regions_in_list_order(f) {
                     events.push(CampaignEvent::RegionTurnEnd { region });
                     if let Some(r) = self.world.regions.get_mut(&region).filter(|r| r.wealth_growth_offset != 0) {
                         r.wealth_growth_offset -= 1;
@@ -521,9 +568,11 @@ impl CampaignModel {
                 // write at `0x008BD408`) after the `FactionTurnEnd` dispatch, before the shroud rebuild
                 // (CONFIRMED). The scripts get a step's events only after the step, so clearing it in
                 // `FactionEnd` would hide it from the `FactionTurnEnd` handlers; `Advance(f)` always runs
-                // right after `FactionEnd(f)`, and nothing between them reads the flag.
+                // right after `FactionEnd(f)`, and nothing between them reads the flag. The same word write
+                // clears the `FactionDestroyedByCharacterFaction` flag (+0x924).
                 if let Some(d) = self.world.faction_details.get_mut(&f) {
                     d.war_started = false;
+                    d.destroyed_faction = false;
                 }
                 let order = self.world.factions_in_turn_order();
                 let pos = order.iter().position(|&x| x == f).unwrap_or(order.len());
@@ -562,30 +611,28 @@ impl CampaignModel {
     /// The construction step of `faction`'s round-end economy (`0x008BC650` → `0x00AB3DA0` per owned region,
     /// CONFIRMED place and order). The exe walks the faction's region list (faction +0x778 count / +0x77C data,
     /// `0x008BC873`: appended as the faction gains a region,`AddRegionToFaction` `0x008AE270`, and erased in place as it loses one,
-    /// `0x008BA580` → `0x008B0210`, both from `0x00A64AC0`); the model walks its owned regions in id order. The
-    /// results are the same: a region's step reads and changes only that region, its owner's treasury is not
-    /// touched and a demolition clears only the researcher of its own school; only the order of the events
-    /// differs. PROVISIONAL: the id order stands in for the list's order, which is not traced (the order a
-    /// startpos or a save builds it in, and how gains and losses in play reorder it), so the events
-    /// (`BuildingCompleted`, `CampaignBuildingDamaged`) can come out in a different order from the original's. Each region steps its slots in one
+    /// `0x008BA580` → `0x008B0210`, both from `0x00A64AC0`), and so does the model
+    /// ([`super::world::World::faction_regions_in_list_order`]; the list's order after a load and in play
+    /// is CONFIRMED, CAMPAIGN_FIDELITY.md "Faction region list order"), so the events (`BuildingCompleted`,
+    /// `CampaignBuildingDamaged`) come out in the original's order. A region's step reads and changes only that
+    /// region, its owner's treasury is not touched and a demolition clears only the researcher of its own school,
+    /// so only the order of the events hangs on the list's order. Each region steps its slots in one
     /// pass (`0x00A78670`: the town / port slots in index order, then the road, then the walls, each through
     /// `0x00B78800`), one item at a time through the [`construction.step`](super::seams::CONSTRUCTION_STEP) seam
     /// ([`construction_step`] in the original game), each result applied before the next slot steps
-    /// ([`Self::apply_construction_step`]). The rebel faction steps nothing (`0x008BC650` skips the whole block
-    /// when the faction has no record, `0x008CEEF0`; a faction out of the game owns no region). The saves
-    /// agree: Brandenburg farm 3/4 and supply post 1/3.
+    /// ([`Self::apply_construction_step`]). The rebel faction steps nothing: the caller, `TurnStep::Economy`, runs
+    /// it only for [`Self::in_the_game_with_record`] (`0x008BC650` skips the whole block for a faction with no
+    /// record, `0x008CEEF0`, or out of the game). The saves agree: Brandenburg farm 3/4 and supply post 1/3.
     fn construction_round_end(&mut self, faction: FactionId, events: &mut Vec<CampaignEvent>) {
-        if self.is_rebel_faction(faction) {
-            return;
-        }
         // `0x00A78670`'s order: the town / port slots, the road (+0x20), the walls (+0x24).
         let order = |s: super::SlotRef| match s {
             super::SlotRef::Slot(i) => (0, i),
             super::SlotRef::Road => (1, 0),
             super::SlotRef::Walls => (2, 0),
         };
-        // PROVISIONAL: id order, not the faction's region list order (+0x778 / +0x77C, not traced; see above).
-        let regions: Vec<RegionId> = self.world.regions.values().filter(|r| r.owner == faction && !r.construction.is_empty()).map(|r| r.id).collect();
+        // The faction's region list order (+0x778 / +0x77C; see above).
+        let mut regions = self.world.faction_regions_in_list_order(faction);
+        regions.retain(|id| self.world.regions.get(id).is_some_and(|r| !r.construction.is_empty()));
         let mut writes = ModWrites::default();
         for region in regions {
             let Some(reg) = self.world.regions.get_mut(&region) else { continue };
@@ -728,17 +775,50 @@ impl CampaignModel {
                 item.turns_remaining = item.turns_remaining.saturating_sub(1);
             }
             if item.turns_remaining == 0 {
-                finished.push(item.unit_key);
+                finished.push((item.unit_key, item.target, is_naval));
             } else {
                 waiting.push(item);
             }
         }
         reg.recruitment_queue = waiting;
-        // PROVISIONAL: an item recruited through a commander (its target, item +0x18) is not spawned like
-        // the others: the queue step hands it to the faction's reinforcement list (`0x00B71FB0` at
-        // `0x00B72207` → `0x00B0A270` → `0x00AE8B10`), whose march to the commander is not traced. Ours spawns
-        // it in the settlement like any recruit (UI_FIDELITY.md §4.10).
-        for unit_key in finished {
+        // The finished items spawn through the queue manager's vtable +0x20 (land `0x00B1E500`, CONFIRMED):
+        // first the land items recruited through a commander (item +0x18) who leads an army, one new army
+        // per commander that marches to him ([`Self::spawn_reinforcement`]), then every other item
+        // ([`Self::spawn_recruited_unit`]). The exe groups by (+0x18, +0x50); +0x50 is 0 for a player's
+        // item (`HandleRecruitUnitCommand` passes 0 at `0x00936C55`) and an AI handle only for AI items
+        // queued with no target (`0x00A9F126`), so grouping by commander is the exe's for every item with one.
+        // PROVISIONAL: a commander with no army: the exe hands the item to the holder at his +0x2B0 when
+        // that holder's vfunc +0x38 says so (`0x00B1E500` phase 1), ours spawns it as a settlement recruit
+        // (the exe's other branch, +0x18 cleared). PROVISIONAL: the exe also spawns a group as settlement
+        // recruits when its path query from the settlement to the commander fails (`0x00B6D8D0` /
+        // `0x00B6D760`); ours always raises the army. PROVISIONAL: naval items recruited through an
+        // admiral spawn as port recruits here. The naval spawn `0x00B1D7E0` groups its items by (+0x18,
+        // +0x50) too and, when the target has a navy (his +0xE0) and the sea path query `0x00B6D760`
+        // succeeds, raises one new fleet per group (`SpawnRecruitmentGroupAsNewArmy`) and returns the
+        // (item, fleet) pairs to the queue step `0x00B71FB0`; that fleet, its spot and its march to the
+        // admiral are not ported.
+        let mut groups: Vec<(super::CharacterId, Vec<String>)> = Vec::new();
+        let mut others = Vec::with_capacity(finished.len());
+        // The commanders leading an army, looked up once for the pass (and only when a land item has a target).
+        let army_leaders: std::collections::BTreeSet<super::CharacterId> = if finished.iter().any(|(_, t, naval)| t.is_some() && !naval) {
+            self.world.forces.values().filter(|f| !f.is_navy).filter_map(|f| f.commander).collect()
+        } else {
+            std::collections::BTreeSet::new()
+        };
+        for (unit_key, target, is_naval) in finished {
+            match target.filter(|t| !is_naval && army_leaders.contains(t)) {
+                Some(t) => match groups.iter_mut().find(|g| g.0 == t) {
+                    Some(g) => g.1.push(unit_key),
+                    None => groups.push((t, vec![unit_key])),
+                },
+                None => others.push(unit_key),
+            }
+        }
+        for (target, unit_keys) in groups {
+            let ev = self.spawn_reinforcement(region, target, unit_keys);
+            events.extend(ev);
+        }
+        for unit_key in others {
             let ev = self.spawn_recruited_unit(region, unit_key);
             events.push(ev);
         }

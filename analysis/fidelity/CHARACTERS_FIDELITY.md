@@ -134,9 +134,29 @@ Effects are read through the effects store (`EFFECTS_FIDELITY.md` §4).
      first is evicted when its #3 is lower than T's, or equal with fewer points than p; then, if there is room, T is
      added with max(0, p) points.
   4. The character's trait effect set is rebuilt (`0x008EDAE0`).
-- Level (`0x008B5380`): highest level whose threshold ≤ max(points, 0); none below the first threshold (e.g. Soult's
-  `C_Sausage_Vice` at 1 point in `orig_fr_may1811`); falling points never drop below the trait's no-going-back level
-  (`character_traits` #1) once reached.
+- Level (`0x008B5380`, CONFIRMED, stickytrait 2026-10-20): a held trait is {trait record, level record (or none),
+  points}; the level record is what is held, not derived from the points each time. After a points change the
+  routine looks for the highest level whose threshold ≤ max(points, 0) (by level record +0x18 number, +0x1C
+  threshold, from the top). None found (below the first threshold): nothing changes, so the trait keeps the level it
+  had, its effects included (e.g. Soult's `C_Sausage_Vice` at 1 point in `orig_fr_may1811` has none since it never
+  had one). Found level N under the held level L while losing points (`gaining` false), with a no-going-back level
+  ngb (`character_traits` #1) > 0 and ngb ≤ L: the points are set to level ngb's threshold and N becomes ngb (so a
+  fall from above ngb lands on ngb even when the points alone stop higher). Then N (if not 0 and not L) becomes the
+  level record. It returns true only when the level moved the expected way (up when gaining, down when losing), and
+  its callers run the old level's loss slot and the new one's gain slot only then. Callers: `0x008CA0E0` (add points,
+  gaining), `0x008B9EE0` (antitrait takes points, losing; a negative remainder becomes the overflow), `0x008EF070`
+  (points := max(0, value), gaining) from the new-trait ctor `0x0088B0B0` and the save reader `0x0088AFF0`.
+  Ours: `CharacterRules::update_trait_level`, the level in `CharacterTrait::level`, read by every effect / UI site
+  through `EffectRules::held_level_key` / `held_level_row`.
+- **ORIGINAL BUG (`0x008B5380` / `0x008C2D30`):** gaining points into a level under a level kept from below the first
+  threshold moves the level record down but returns false, so no slot runs: the kept level's attribute effects stay
+  and the new level's are never added. Ours moves them on every level change.
+- **Save (CONFIRMED):** the trait list's ESF loader `0x0088B110` reads each held trait with `0x0088AFF0`: key and
+  points only; the level comes from `0x008EF070` on a null record. **ORIGINAL BUG:** a level kept below the first
+  threshold is lost on reload (the trait then has no level, its effect set goes, `0x008EDAE0` → `0x008AFC90`), while
+  its attribute effects stay in the saved attribute levels with no loss slot left to take them off. Our own save
+  keeps `CharacterTrait::level`; an original save still loads with the points' level
+  (`characters::load_trait_levels`, also filling own saves from before the field).
 - `character_traits` = {key, #1 no-going-back level, #2 bool (INFERRED hidden), #3 i32 eviction priority, #4 category};
   `trait_info` maps each trait to its scope ("agent").
 
@@ -174,11 +194,11 @@ six pushes, resolve the strings with `strat:`. The resulting table is bulk exe t
   `IsFactionLeader`, `IsFactionLeaderFemale` (false: no gender in the model, PROVISIONAL), `FactionGovernmentType`,
   `CharacterFactionHasTechType`, `FactionwideAncillaryTypeExists`, `WorldwideAncillaryTypeExists`,
   `CharacterFactionGeneralCount` / `AdmiralCount`, `CharacterAttribute`, `CharacterForename` / `Surname`,
-  `InSettlement`, `OnAWarFooting`, `IsGuerrillaGeneral`.
+  `InSettlement`, `OnAWarFooting`, `IsGuerrillaGeneral`, `FactionDestroyedByCharacterFaction` (`0x0089F4B0`, faction +0x924).
 - Still logging stubs (false / 0): the battle facts (`CharacterWonBattle`, `CharacterWasAttacker`, `BattleResult`,
   `CampaignBattleType`, percentages, `CommanderFoughtIn*`, `CharacterRouted`, ...), duels, `ResearchType`,
   `CharacterBuildingConstructed`, `IsBuildingInChain`, `CharacterInRegion`, `CharacterInEnemyLands`, the turn counters
-  (§6), `NoActionThisTurn`, `InsurrectionCrushed`, `FactionDestroyedByCharacterFaction`, and a few faction ones.
+  (§6), `NoActionThisTurn`, `InsurrectionCrushed`, and a few faction ones.
 
 ## 5. Ageing and natural death (CONFIRMED unless tagged)
 - When: the round end (`0x008A9920`) passes "this is the year's last turn" (`turn_in_year + 1 == turns_per_year`) to
@@ -201,6 +221,24 @@ six pushes, resolve the strings with `strat:`. The resulting table is bulk exe t
 - Model: `characters::yearly_character_pass` from `TurnStep::RoundEnd`; a force he led goes to a successor (§5b).
   Every character draws (leaders too); a post the dead held gets a new holder at once (§5c). PROVISIONAL: loaded
   characters count as old (+0x4EC is not in the save).
+- **Out-of-game flag** (faction +0x824; charflag, 2026-10-20, CONFIRMED). The family year in `0x008BC650` is gated
+  on it (cmp at `0x008BC6D0`), the death checks are not. Character +0x2B8 is the **government post handle**: written by
+  `0x009CB1E0` (character, post), from the post fillers `0x008BF310` / `0x008E4610` / `0x008E44F0`, the minister swap
+  `0x008F3760`, `0x008BBD90`, `0x008BBFB0` and `0x00A1A6E0`; set at setup by `0x00991F40` (`0x00992A31`, the post found by
+  key, `0x008D2090`); cleared by the destruction's character loop `0x009DAB40`; saved with the other handles by
+  `0x0099FB10`. Ours: `CharacterDetails::post` and `GovernmentPost::holder` (kept together by `family::seat`), no new
+  field. `UpdateFactionOutOfGameFlag` `0x008B4330`: a faction with no region (count at +0x778) is out unless some
+  character of its list holds no post (+0x2B8 not resolving, `0x006649C0`); no character, out. Its only caller is the
+  faction registry's setup `0x0090C4A0` (loop at `0x0090C860` over the faction list, the rebels not in it) ← the
+  campaign model's creation `0x008742C0` ← `0x00988B00` ← `0x00A19350`, the startpos preprocessor ("About to
+  preprocess %S"); a loaded campaign (`0x00872550` → `0x0090BEB0`) reads the flag from the file (`0x0087B4CC`). Byte
+  writers of +0x824: 0 in the constructors `0x008799D0` / `0x0087A190` / `0x0087BD70`, 1 in the destruction
+  `0x008AB81E`, 0 in the re-emergence `0x008AE6F8`, 1 in `0x008B437A`. Test `loads_all_eight_startpos`: the rule gives
+  every stored flag of all eight vanilla start positions (the rebels' stays clear). Model: the yearly pass gates
+  `family_year` on `!is_rebel_faction && in_the_game` (was "owns a region", a stand-in); `in_the_game` on an own save
+  without the flag applies the rule (`out_of_game_by_startpos_rule`; was "a region or a force", a stand-in). It differs
+  from the exe's flag only for a faction in the game from the start without a region that later loses every character
+  outside a post (the destruction needs a capital loss, so the exe keeps it in).
 
 ## 5b. When a commander goes: successor, empty forces, returning commanders, leaders and posts (2026-10-04)
 - **Empty force** (CONFIRMED, destructor `0x0099D2D0`): when the dying character's force (+0x2A8 = `CHARACTER` #4)
@@ -257,8 +295,9 @@ six pushes, resolve the strings with `strat:`. The resulting table is bulk exe t
   owner's id (+0x64), #14 married (the owner's id, 0 = unmarried; +0x68), #15 a name loc present when #14 is not 0
   (+0x6C). Vanilla saves: Christian VII #6 = 7, George III 3; relatives aged 60+ have four children born at 46..49 (the
   fertility wrap below). Family +0x544 "daughters may inherit" is set false by the loader (where else: UNKNOWN).
-- **Yearly family pass** (`0x008BC9C0`, first in the year-end faction pass `0x008BC650`, for a living faction with a
-  family; CONFIRMED order, all draws on the campaign RNG): leader age +1; each present child age +1 and his year
+- **Yearly family pass** (`0x008BC9C0`, first in the year-end faction pass `0x008BC650`, for a faction that is not the
+  rebels (`0x008CEEF0`), is in the game (faction +0x824 clear, the cmp at `0x008BC6D0`) and has a family (+0x794
+  resolves); the death checks after it run for every faction, CONFIRMED; CONFIRMED order, all draws on the campaign RNG): leader age +1; each present child age +1 and his year
   (`0x008B45E0`: unmarried, marries when 25 + int_range(0, 10) < age; married with < 4 children, percent_0_100 <
   fertility → a child, remembering his age); a child turning 16 draws #4 (uniform_below(3)). Unmarried leader (or
   spouse gone): marries when 25 + int_range(0, 10) < age, the spouse the other sex aged age − (king) / + (queen)
@@ -288,7 +327,8 @@ six pushes, resolve the strings with `strat:`. The resulting table is bulk exe t
   governorships `0x008B5420`); `0x008BF280` keeps a pool of 5 spare ministers (the dismiss / appoint commands
   `0x008EB9D0` / `0x008F3760` draw from it). Vanilla saves: no living faction has a vacant post.
 - **Model** (`ntw_sim::campaign::family`): `Family` loaded into `FactionDetails::family` and written back
-  (`save::write_family`); `family_year` in the yearly pass (living faction = owns a region, INFERRED); `succession`;
+  (`save::write_family`); `family_year` in the yearly pass (gated on `!is_rebel_faction && in_the_game`, charflag; it was "owns a
+  region", a stand-in); `succession`;
   `CampaignModel::refill_post` from `character_dies` for every post the dead held (the leader exemption is gone; post
   holders now fall in battle too, only +0x52C characters escape). The writer: new ministers from a `minister` template,
   `CHARACTER` #8 and the post holders from the model, a new leader keeps the family name (the namer skips him), birth
@@ -1176,7 +1216,8 @@ The cards and panels' `PipPath` / `PrimaryAttributePath` used to be built as
   ministers and missionaries, whose situation bonuses (`GetCharacterRank`: theatre of the region
   for zeal / command_land, battle type and side, enemy faction / culture, army and fleet make-up,
   minister post; each an effect-bonus id read from the character's own effects) are not
-  modelled. So their `PrimaryLevel` stays PROVISIONAL until those bonuses are in. A character id
+  modelled. So their `PrimaryLevel` stays PROVISIONAL until those bonuses are in (2026-10-20, §16:
+  all modelled but the pending-battle ones). A character id
   with no record shows empty `Primary*` fields (PROVISIONAL; the exe always has the record).
 - **The per-attribute part:** the builder then loops over all 14 attributes. Each entry gets a
   value from `0x009CB560`, `PipPath` (first the raw row path, then overwritten by the skinned
@@ -1416,3 +1457,72 @@ settle without a person.
 - Seen, not changed (no scope widening): a target whose own subterfuge beats every other candidate's is his
   own protector, so the protector rule can take him out of the assassination targets. Traced as it stands
   in our model only; the exe's protector choice is a BACKLOG trace item.
+
+## 16. Command stars: the rank and the stored attribute levels (2026-10-20, worker cmdstars)
+
+The command stars are the character's rank (`GetCharacterRank` `0x00A198D0`): his type's main attribute
+level plus situation bonuses, clamped to −1..9. The UI shows `PrimaryLevel` = min(rank + 1, 9) (§13).
+- **The stored level is the effective level (CONFIRMED).** `CHARACTER_DETAILS` #12 `AgentAttributes`
+  (character +0x394 = details +0xA4, `int[14]`) is read as it is (`0x009CB580` / `0x009CB560`, no sum at
+  read time). Every trait level's `trait_attribute_effects` is added on gaining the level and taken off on
+  losing it (`CharacterDetails::ApplyTraitLevelAttributeEffects` `0x00A0ECB0`, run by the trait list's
+  vtable `0x01354408`: [0] loss `0x008DCAA0` pushes 0, [1] gain `0x008DC9F0` pushes 1; the list sits at
+  details +0x34 inside the list's owner). Every ancillary's `ancillary_to_attribute_effects` likewise on
+  gaining / losing it (`CharacterDetails::ApplyAncillaryAttributeEffects` `0x00A0EC10`). No floor, no cap;
+  an attribute the type lacks is −1 and the effect adds to that. Ability effects go to the +0xDC slots the
+  same way (not modelled; BACKLOG). Evidence beyond the trace: `ntw_campaign` test
+  `stored_attributes_are_the_start_levels_plus_the_effects` on the `eur_napoleon` start position: 530 of 531
+  characters' stored levels equal their type's starting rows plus their traits' and ancillaries' effects;
+  the one exception (rake 749615820: his `C_Rake_Counter_Spy` level 2 gives `subterfuge` +2, but the start
+  position stores his starting 2; the loader runs no gain slot, so he plays at 2) is listed in the test.
+- **Starting levels (CONFIRMED):** a new character's details (`0x00984AD0`) set every attribute to −1, then
+  `0x00992E60` applies the type's `agent_to_agent_attributes` rows in table order (30 rows in vanilla).
+  A promotion (`0x00A1A300`) resets to −1 and applies the new type's rows. Ours:
+  `CharacterRules::starting_attributes` / `new_character_details` (every creation site: pool, minister,
+  successor colonel, commands) and `promoted_attributes`.
+- **Gain and loss in ours:** `characters::shift_attributes` / `shift_trait_attributes` (level changes of
+  trait points, antitraits, eviction, `remove_trait`), the ancillary add / remove / yearly expiry, between
+  the held levels before and after (`CharacterTrait::level`, moved by `CharacterRules::update_trait_level`,
+  `0x008B5380`, CONFIRMED: the level rule in §1).
+- **Rank formula (`agents::rank_original`, behind the `character.rank` seam):** main attribute
+  (`agents` column 8; index 14 = none → −1) + effect-bonus values of his own effects, by attribute:
+  zeal: `zeal_europe` (own, plus the faction's; the America / India theatre names are Empire's and never
+  match a Napoleon theatre); command_land: army make-up, ⌈2n/3⌉ infantry (class 2) →
+  `command_land_infantry` 0x71, ⌈n/3⌉ cavalry / elephants / camels (0, 4, 5) → `command_land_cavalry`
+  0x70, ⌈n/3⌉ artillery (1) → `command_land_artillery` 0x6F; command_sea: ⌈2n/3⌉ frigates (7) →
+  `command_naval_frigates` 0x72, ships of the line (6) → 0x73; management: the minister's post
+  (`management_army` / `_navy` / `_finance` / `_justice` 0x5D..0x60). Clamp −1..9 from data
+  (`CharacterRules::rank_limits`, original constants `0x00A19FA1`..`0x00A19FB4`). PROVISIONAL: the
+  pending-battle bonuses (battle stance `land_command_*` / `sea_command_*` by battle type and side
+  `0x008CE700`, and `hates_*` against the enemy faction / culture), as the model has no pending battle.
+  The missionary rank of the religion pass now calls the same seam (`religion::missionary_rank` gone).
+- **Experience from battles** is not a separate counter: a general's stars grow only through traits and
+  ancillaries (their attribute effects above) that the battle triggers give; the triggers are the trait
+  scripts' (§1), not this rule.
+- **Save (ours):** `save::write_attributes` writes #12 from the model, each entry's level in place (order
+  and key node kept; an unchanged character writes back byte for byte), a missing key appended as
+  UTF-16. Test `save_compat::character_changes_and_deaths_are_written`.
+- **ORIGINAL BUGs (fixed in ours):**
+  - `SubtractAntitraitPointsFromHeldTrait` `0x008D21B0` erases a trait its antitrait drove below 1
+    point through `0x008BDB20` (a plain vector erase) without the loss slot, so that level's attribute
+    effects stay on the character for good. Ours takes them off.
+  - `RemoveTraitBelowNoGoingBackLevel` `0x008E98A0` reads the held level record's +0x18 at `0x008E98D0`
+    before its null test at `0x008E98F2`: a held trait with no level record crashes `remove_trait`. Ours
+    treats it as level 0.
+  - The promotion `0x00A1A300` copies the new type's levels over the stored ones and adds nothing back,
+    so the held traits' and ancillaries' effects are lost, and losing one later takes its effect off a
+    second time. Ours adds them back.
+- **Readers outside the campaign model (BACKLOG lines, not code):** the battle's morale / leadership from
+  the commander's rank, the autoresolve (`autoresolve_commander_star_rating_impact`), the character
+  details `PrimaryLevel` (now from our rank), and the other exe callers of `0x00A198D0` (31 xrefs, not
+  audited one by one).
+- **Ghidra (saved):** `CharacterDetails::ApplyTraitLevelAttributeEffects` `0x00A0ECB0` (completeness
+  93.9), `CharacterDetails::ApplyAncillaryAttributeEffects` `0x00A0EC10` (95.0),
+  `SubtractAntitraitPointsFromHeldTrait` `0x008D21B0` (85.9), `RemoveHeldTraitByRecord` `0x008E9830`
+  (85.9), `RemoveTraitBelowNoGoingBackLevel` `0x008E98A0` (77.4), `GetCharacterRank` plate rewritten
+  (75.0; its remaining deductions are the earlier session's register locals). Left deductions: void*
+  record pointers (no trait-record struct yet) and `this` naming (structural). Not renamed, described
+  here only: `0x009CB580`, `0x009CB560`, `0x00A1D7B0`, `0x00A1D5E0`, `0x00A1CEC0`, `0x00A1CE20`,
+  `0x008ADE70`, `0x00984AD0`, `0x00992E60`, `0x009D3A60` (character's army), `0x009D3AA0` (navy),
+  `0x00A06D80`, `0x008B9EE0` (subtract points, report the level change), `0x008BDB20` (vector erase,
+  0xC rows), `0x008EDAE0` (re-sum the trait list's effects).

@@ -119,11 +119,18 @@ impl KeySlot {
     }
 }
 
-/// A `<func>`: a named action and its keys (at most two, the exe's two slots).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A `<func>`: a named action, its keys (at most two, the exe's two slots) and its flags (each
+/// attribute read as a boolean by `0x00E8BB00`, missing = false; vanilla writes `1`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Func {
     pub name: String,
     pub keys: Vec<KeySlot>,
+    /// `hidden` (`+0x1C`): left out of the options screen's key list; no effect on the bindings.
+    pub hidden: bool,
+    /// `repeating` (`+0x1D`): see [`Binding::repeating`].
+    pub repeating: bool,
+    /// `ignore_lock` (`+0x1E`): see [`Binding::ignore_lock`].
+    pub ignore_lock: bool,
 }
 
 /// A `<keyset>`: its funcs in file order (categories and groups flattened).
@@ -154,11 +161,20 @@ pub struct Shortcuts {
     pub mappings: Vec<Mapping>,
 }
 
-/// A shortcut one component gets in one mode: the func's name and keys.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A shortcut one component gets in one mode: the func, its keys and the component it goes to
+/// (the exe's binding, constructor `0x00E8B760`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Binding {
     pub func: String,
     pub keys: Vec<KeySlot>,
+    /// The UI component the shortcut goes to ([`Shortcuts::component`]).
+    pub component: String,
+    /// The func's `repeating`: while its key is held, every key event (each auto-repeat) presses
+    /// it again; otherwise it presses once per hold (flag bit5, `0x00ED76E0`).
+    pub repeating: bool,
+    /// The func's `ignore_lock`: it fires even while its component's handler is locked (`+0x49`,
+    /// `0x00ED76E0`).
+    pub ignore_lock: bool,
 }
 
 /// The bindings of one component in one mode ([`Shortcuts::bindings`]).
@@ -271,20 +287,36 @@ impl Shortcuts {
         if all.is_empty() { of(mode) } else { all }
     }
 
-    /// The shortcuts of the default keyset that go to `component` in `mode`, in file order.
-    pub fn bindings(&self, mode: &str, component: &str) -> Bindings {
+    /// The shortcuts of the default keyset that go to some component in `mode`, in file order (a
+    /// func with no component in the mode gets no binding, `0x00EDD1B0`).
+    pub fn mode_bindings(&self, mode: &str) -> Bindings {
         let Some(ks) = self.default_keyset() else { return Bindings::default() };
         Bindings(
             ks.funcs
                 .iter()
-                .filter(|f| self.component(mode, &f.name) == component)
-                .map(|f| Binding { func: f.name.clone(), keys: f.keys.clone() })
+                .filter_map(|f| {
+                    let component = self.component(mode, &f.name);
+                    (!component.is_empty()).then(|| Binding {
+                        func: f.name.clone(),
+                        keys: f.keys.clone(),
+                        component: component.to_owned(),
+                        repeating: f.repeating,
+                        ignore_lock: f.ignore_lock,
+                    })
+                })
                 .collect(),
         )
     }
+
+    /// The shortcuts of the default keyset that go to `component` in `mode`, in file order.
+    pub fn bindings(&self, mode: &str, component: &str) -> Bindings {
+        let mut all = self.mode_bindings(mode);
+        all.0.retain(|b| b.component == component);
+        all
+    }
 }
 
-/// A `<func>`: its name and its first two `<key>` children (a third is ignored, `0x00E8BB00`).
+/// A `<func>`: its name, flags and first two `<key>` children (a third is ignored, `0x00E8BB00`).
 fn parse_func(f: &XmlElement) -> Func {
     let keys = f
         .children_named("key")
@@ -292,7 +324,14 @@ fn parse_func(f: &XmlElement) -> Func {
         .filter(|k| !k.text.is_empty())
         .map(|k| KeySlot { key: k.text.clone(), modifier: Modifier::parse(k.attr("modifier")) })
         .collect();
-    Func { name: f.attr("name").unwrap_or_default().to_owned(), keys }
+    let flag = |name| f.attr_bool(name).unwrap_or(false);
+    Func {
+        name: f.attr("name").unwrap_or_default().to_owned(),
+        keys,
+        hidden: flag("hidden"),
+        repeating: flag("repeating"),
+        ignore_lock: flag("ignore_lock"),
+    }
 }
 
 #[cfg(test)]
@@ -314,7 +353,7 @@ mod tests {
           <key modifier ="SHIFT">L</key>
           <key>X</key>
         </func>
-        <func name="show_lists" order="6">
+        <func name="show_lists" order="6" repeating="1">
           <key>L</key>
         </func>
         <func name="escape_menu" hidden="1">
@@ -408,6 +447,15 @@ mod tests {
         assert_eq!(root.fired("ESCAPE", ctrl).collect::<Vec<_>>(), ["escape_menu"]);
         // show_lists (L) goes to its button, not the root.
         assert!(s.bindings("campaign", "button_lists").fired("L", none).eq(["show_lists"]));
+        // The flags come from the func's attributes, the component from the mappings.
+        assert!(root.0[0].ignore_lock && !root.0[0].repeating);
+        assert!(!root.0[1].ignore_lock);
+        let fps = s.default_keyset().unwrap();
+        assert!(fps.funcs[3].hidden && !fps.funcs[0].hidden);
+        let mode = s.mode_bindings("campaign");
+        let pairs: Vec<(&str, &str)> = mode.0.iter().map(|b| (b.func.as_str(), b.component.as_str())).collect();
+        assert_eq!(pairs, [("quick_save", "root"), ("quick_load", "root"), ("show_lists", "button_lists"), ("escape_menu", "root")]);
+        assert!(mode.0[2].repeating);
     }
 
     #[test]

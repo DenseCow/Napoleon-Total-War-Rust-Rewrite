@@ -9,13 +9,22 @@
 //! - [`add_ancillary`] follows `0x00A180C0`: type, date, world / faction uniqueness, agent type,
 //!   subculture, exclusions, `max_ancillaries` with eviction by priority.
 //!
-//! Traits are stored as (key, points); the level is derived from the points
-//! ([`EffectRules::trait_level_key`](super::effects::EffectRules::trait_level_key)), so the
-//! no-going-back rule is kept by never letting points fall below that level's threshold.
+//! Traits are stored as (key, points, level): the level is the held level record, moved only by
+//! [`CharacterRules::update_trait_level`] (`0x008B5380`) as points change, which also keeps the
+//! no-going-back level; every reader takes the held level
+//! ([`EffectRules::held_level_key`](super::effects::EffectRules::held_level_key)).
+//!
+//! A character's attribute levels (`AgentAttributes`) are stored with his trait levels' and
+//! ancillaries' attribute effects already in them: every gain, loss, level change and eviction above
+//! moves those effects in or out of the stored levels (`shift_attributes`), as the exe does. A new
+//! character starts from his agent type's levels ([`CharacterRules::starting_attributes`]). His rank,
+//! the command stars, is read from them ([`super::agents::rank`]).
 
 use std::collections::BTreeMap;
 
-use super::details::CharacterTrait;
+use super::agents::ATTRIBUTES;
+use super::details::{CharacterDetails, CharacterTrait};
+use super::effects::EffectRules;
 use super::ids::{CharacterId, ForceId};
 use super::world::CampaignModel;
 use crate::rng::CaRng;
@@ -75,6 +84,12 @@ pub struct CharacterRules {
     pub max_traits: usize,
     /// Tweak `max_ancillaries` (default 3, CONFIRMED registration at 0x0042B270).
     pub max_ancillaries: usize,
+    /// Agent type → its starting attribute levels (`agent_to_agent_attributes`, table order):
+    /// [`Self::starting_attributes`].
+    pub agent_attributes: BTreeMap<String, Vec<(String, i32)>>,
+    /// The lowest and highest rank ([`super::agents::rank`]): the original clamps to −1..9
+    /// (`0x00A19FA1`..`0x00A19FB4`, CONFIRMED).
+    pub rank_limits: (i32, i32),
 }
 
 impl Default for CharacterRules {
@@ -86,6 +101,8 @@ impl Default for CharacterRules {
             subculture_culture: BTreeMap::new(),
             max_traits: MAX_TRAITS,
             max_ancillaries: MAX_ANCILLARIES,
+            agent_attributes: BTreeMap::new(),
+            rank_limits: RANK_LIMITS,
         }
     }
 }
@@ -94,6 +111,8 @@ impl Default for CharacterRules {
 pub const MAX_TRAITS: usize = 6;
 /// Default of the `max_ancillaries` tweak.
 pub const MAX_ANCILLARIES: usize = 3;
+/// The original's rank clamp ([`CharacterRules::rank_limits`]).
+pub const RANK_LIMITS: (i32, i32) = (-1, 9);
 /// Initial state of the two binding RNGs (`effect.trait` 0x01457A70, `effect.ancillary` 0x01457968):
 /// both hold 0x61266 in the exe's data and nothing else writes them (CONFIRMED), so they run on from
 /// the program start and are not saved.
@@ -126,8 +145,9 @@ impl CharacterRules {
         self.subculture_culture.get(self.subculture(faction_key)).map_or("", String::as_str)
     }
 
-    /// The level (1..) a trait is at with `points`: the highest whose threshold ≤ max(points, 0), 0 when
-    /// below the first (CONFIRMED, `0x008B5380`).
+    /// The level (1..) `points` of a trait reach: the highest whose threshold ≤ max(points, 0), 0 when
+    /// below the first (CONFIRMED, `0x008B5380`'s search). What a held trait is at is its own
+    /// [`CharacterTrait::level`], moved by [`Self::update_trait_level`].
     pub fn level(&self, trait_key: &str, points: i32) -> i32 {
         let p = points.max(0);
         self.traits
@@ -136,9 +156,113 @@ impl CharacterRules {
             .map_or(0, |(lvl, _)| *lvl)
     }
 
+    /// `0x008B5380` (CONFIRMED): moves a held trait's level after its points changed, `gaining` when
+    /// points were added (`0x008CA0E0`, a new trait `0x008EF070`) and not when an antitrait took them
+    /// (`0x008B9EE0`).
+    ///
+    /// 1. The level its points reach ([`Self::level`]). None (below the first threshold): nothing
+    ///    changes, so the trait keeps the level it had, whatever it was.
+    /// 2. Losing points to a level under the held one, when the trait has a no-going-back level
+    ///    (`character_traits` #1) above 0 and the held level has reached it: the points are set to that
+    ///    level's threshold and the trait goes to that level (so a fall from above it lands on it, even
+    ///    when the points alone would have stopped higher).
+    /// 3. Otherwise the trait goes to the level its points reach.
+    ///
+    /// The exe tells its caller the level changed only when it moved the expected way (up when
+    /// gaining, down when losing), and its callers run the old level's loss slot and the new one's
+    /// gain slot only then. ORIGINAL BUG: a gain into a level under a kept higher one (step 1 kept it
+    /// above the points) moves the level record with no slot, so the old level's attribute effects stay
+    /// on the character and the new level's are never added. Ours moves them on every change (the
+    /// callers compare the level before and after, [`shift_trait_attributes`]).
+    pub fn update_trait_level(&self, t: &mut CharacterTrait, gaining: bool) {
+        let mut reached = self.level(&t.key, t.points);
+        if reached == 0 {
+            return;
+        }
+        let ngb = self.traits.get(&t.key).map_or(0, |r| r.no_going_back_level);
+        // A no-going-back level at or under the held level is one of its levels, so it has a threshold.
+        if !gaining && ngb > 0 && ngb <= t.level && reached < t.level
+            && let Some(th) = self.threshold(&t.key, ngb)
+        {
+            t.points = th;
+            reached = ngb;
+        }
+        t.level = reached;
+    }
+
     fn threshold(&self, trait_key: &str, level: i32) -> Option<i32> {
         self.traits.get(trait_key)?.thresholds.iter().find(|(l, _)| *l == level).map(|(_, th)| *th)
     }
+
+    /// The attribute levels a new character of agent type `agent` starts with (`0x00992E60`,
+    /// CONFIRMED): every attribute of [`ATTRIBUTES`] at −1 (the type does not have it, the details
+    /// ctor `0x00984AD0`), then the type's `agent_to_agent_attributes` rows in table order
+    /// ([`Self::agent_attributes`]; a row naming an attribute outside the list adds it).
+    pub fn starting_attributes(&self, agent: &str) -> Vec<(String, i32)> {
+        let mut attributes: Vec<(String, i32)> = ATTRIBUTES.iter().map(|a| ((*a).to_owned(), -1)).collect();
+        for (attr, level) in self.agent_attributes.get(agent).into_iter().flatten() {
+            match attributes.iter_mut().find(|(k, _)| k == attr) {
+                Some((_, l)) => *l = *level,
+                None => attributes.push((attr.clone(), *level)),
+            }
+        }
+        attributes
+    }
+
+    /// The details a new character of agent type `agent` starts with: his
+    /// [`Self::starting_attributes`], everything else empty (the caller fills birth, names, post...).
+    pub fn new_character_details(&self, agent: &str) -> CharacterDetails {
+        CharacterDetails { attributes: self.starting_attributes(agent), ..Default::default() }
+    }
+}
+
+/// Adds `sign` × one source's attribute effects to a character's stored attribute levels
+/// (CONFIRMED): a trait level's `trait_attribute_effects` (`0x00A0ECB0`, run by the trait list's
+/// gain / loss slots `0x008DC9F0` / `0x008DCAA0`, vtable `0x01354408`) or an ancillary's `ancillary_to_attribute_effects`
+/// (`0x00A0EC10`), with no floor or cap; an attribute he lacks counts as −1 and is added. So the
+/// stored levels (`AgentAttributes`) are the effective ones every reader takes
+/// ([`super::effects::Effects::character_attribute`]).
+fn shift_attributes(attributes: &mut Vec<(String, i32)>, effects: Option<&Vec<(String, i32)>>, sign: i32) {
+    for (attr, v) in effects.into_iter().flatten() {
+        match attributes.iter_mut().find(|(k, _)| k == attr) {
+            Some((_, level)) => *level += sign * v,
+            None => attributes.push((attr.clone(), -1 + sign * v)),
+        }
+    }
+}
+
+/// Moves trait `key`'s attribute effects from its held level `before` to `after` (0: no level
+/// record, or not held), as a level change runs the old level's loss slot then the new level's gain
+/// slot (`0x008D21B0`, `0x008C2D30`, CONFIRMED).
+fn shift_trait_attributes(fx: &EffectRules, attributes: &mut Vec<(String, i32)>, key: &str, before: i32, after: i32) {
+    let old = fx.held_level_key(key, before);
+    let new = fx.held_level_key(key, after);
+    if old == new {
+        return;
+    }
+    shift_attributes(attributes, old.and_then(|k| fx.trait_attribute.get(k)), -1);
+    shift_attributes(attributes, new.and_then(|k| fx.trait_attribute.get(k)), 1);
+}
+
+
+/// A character's attribute levels once he becomes agent type `agent` (a promotion, `0x00A1A300`,
+/// CONFIRMED): every attribute back to −1, then the new type's levels
+/// ([`CharacterRules::starting_attributes`]), then his held trait levels' and ancillaries' attribute
+/// effects again.
+///
+/// ORIGINAL BUG: `0x00A1A300` copies the new type's levels over the stored ones and adds nothing
+/// back, so the effects of the traits and ancillaries he keeps are lost, and losing one of them later
+/// (its loss slot) takes its effect off the new levels a second time. Ours adds them back.
+pub fn promoted_attributes(rules: &super::rules::CampaignRules, agent: &str, d: &CharacterDetails) -> Vec<(String, i32)> {
+    let fx = &rules.effects;
+    let mut attributes = rules.characters.starting_attributes(agent);
+    for t in &d.traits {
+        shift_trait_attributes(fx, &mut attributes, &t.key, 0, t.level);
+    }
+    for a in &d.ancillaries {
+        shift_attributes(&mut attributes, fx.ancillary_attribute.get(a), 1);
+    }
+    attributes
 }
 
 /// What [`add_trait_points`] did.
@@ -180,6 +304,7 @@ pub fn add_trait_points(model: &mut CampaignModel, c: CharacterId, key: &str, po
 fn add_trait_points_inner(model: &mut CampaignModel, c: CharacterId, key: &str, points: i32) -> TraitOutcome {
     let rules = model.rules.clone();
     let cr = &rules.characters;
+    let fx = &rules.effects;
     let Some(rule) = cr.traits.get(key) else { return TraitOutcome::Unknown };
     let Some(d) = model.world.character_details.get_mut(&c) else { return TraitOutcome::Unknown };
     // 1. Every held trait that lists the new one as its antitrait, in list order (`0x008D21B0` /
@@ -196,20 +321,20 @@ fn add_trait_points_inner(model: &mut CampaignModel, c: CharacterId, key: &str, 
             i += 1;
             continue;
         }
-        let before = cr.level(&held, d.traits[i].points);
+        let before = d.traits[i].level;
         d.traits[i].points -= p;
         let overflow = if d.traits[i].points < 0 { -d.traits[i].points } else { 0 };
-        // The no-going-back level holds once reached (`0x008B5380`): points reset to its threshold.
-        let ngb = cr.traits.get(&held).map_or(0, |h| h.no_going_back_level);
-        if ngb > 0 && before >= ngb && cr.level(&held, d.traits[i].points) < ngb
-            && let Some(th) = cr.threshold(&held, ngb)
-        {
-            d.traits[i].points = th;
-        }
+        cr.update_trait_level(&mut d.traits[i], false);
         p = d.traits[i].points;
         if d.traits[i].points < 1 {
+            // ORIGINAL BUG: the exe erases the trait (`0x008BDB20`) without running its level's loss
+            // slot (`0x008D21B0`), so the attribute effects of the level it last had stay on the
+            // character for good. Ours takes them off with the trait.
             d.traits.remove(i);
+            shift_trait_attributes(fx, &mut d.attributes, &held, before, 0);
         } else {
+            let after = d.traits[i].level;
+            shift_trait_attributes(fx, &mut d.attributes, &held, before, after);
             i += 1;
         }
         if overflow == 0 {
@@ -223,10 +348,15 @@ fn add_trait_points_inner(model: &mut CampaignModel, c: CharacterId, key: &str, 
         return TraitOutcome::Absorbed;
     }
     // 2. Held: more points.
+    //    (`0x008CA0E0`; the level moves as [`CharacterRules::update_trait_level`] says, and ours moves
+    //    its attribute effects on any change, see the ORIGINAL BUG there.)
     if let Some(t) = d.traits.iter_mut().find(|t| t.key == key) {
-        let from_level = cr.level(key, t.points);
+        let from_level = t.level;
         t.points += p;
-        return TraitOutcome::Raised { from_level, to_level: cr.level(key, t.points) };
+        cr.update_trait_level(t, true);
+        let to_level = t.level;
+        shift_trait_attributes(fx, &mut d.attributes, key, from_level, to_level);
+        return TraitOutcome::Raised { from_level, to_level };
     }
     // 3. New: make room if the list is full.
     let mut evicted = None;
@@ -240,27 +370,69 @@ fn add_trait_points_inner(model: &mut CampaignModel, c: CharacterId, key: &str, 
         if let Some((i, prio, pts)) = lowest
             && (prio < rule.priority || (prio == rule.priority && pts < p))
         {
-            evicted = Some(d.traits.remove(i).key);
+            let gone = d.traits.remove(i);
+            // Eviction runs the level's loss slot, then erases (`0x008E9830`).
+            shift_trait_attributes(fx, &mut d.attributes, &gone.key, gone.level, 0);
+            evicted = Some(gone.key);
         }
     }
     if d.traits.len() >= cr.max_traits {
         return TraitOutcome::NoRoom;
     }
-    let pts = p.max(0);
-    d.traits.push(CharacterTrait { key: key.to_string(), points: pts });
-    TraitOutcome::Added { level: cr.level(key, pts), evicted }
+    // A new held trait starts with no level record and takes the level its points reach
+    // (`0x0088B0B0` → `0x008EF070`: points = max(points, 0), then `0x008B5380` gaining).
+    let mut t = CharacterTrait { key: key.to_string(), points: p.max(0), level: 0 };
+    cr.update_trait_level(&mut t, true);
+    let level = t.level;
+    d.traits.push(t);
+    // A new trait with a level runs that level's gain slot (`0x008E3F00`).
+    shift_trait_attributes(fx, &mut d.attributes, key, 0, level);
+    TraitOutcome::Added { level, evicted }
 }
 
-/// `remove_trait` (binding `0x008E9F50`): drops a held trait. Returns whether it was held.
-pub fn remove_trait(model: &mut CampaignModel, c: CharacterId, key: &str) -> bool {
-    let Some(d) = model.world.character_details.get_mut(&c) else { return false };
-    let n = d.traits.len();
-    d.traits.retain(|t| t.key != key);
-    let changed = d.traits.len() != n;
-    if changed {
-        model.update_sight_radius(c);
+/// The held trait levels a loaded model starts with, once its rules are attached (CONFIRMED): the
+/// original's save holds a held trait's key and points only (`0x0088AFF0`, read by the trait list's
+/// loader `0x0088B110`), and its load sets the points to max(points, 0) and the level from them as for
+/// a new trait (`0x008EF070` → [`CharacterRules::update_trait_level`] gaining, from no level record).
+/// Only traits at level 0 are set: our own save keeps the level, and one from before it did reads 0.
+/// The stored attribute levels are saved with their effects in, so nothing is shifted.
+///
+/// ORIGINAL BUG: a level kept below the first threshold (`0x008B5380`) is not in the original's save,
+/// so its reload drops the trait to no level: the level's effects stop applying (`0x008EDAE0` takes
+/// the level record's), while its attribute effects stay in the saved attribute levels and no loss
+/// slot can take them off any more. Our own save keeps the level; an original save has no level to
+/// read, so its load still gives none there.
+pub fn load_trait_levels(model: &mut CampaignModel) {
+    let rules = model.rules.clone();
+    for d in model.world.character_details.values_mut() {
+        for t in d.traits.iter_mut().filter(|t| t.level == 0) {
+            t.points = t.points.max(0);
+            rules.characters.update_trait_level(t, true);
+        }
     }
-    changed
+}
+
+/// `remove_trait` (binding `0x008E9F50` → `0x008E2DD0` → `0x008ADE70` → `0x00A1D5E0` → `0x00A1D7B0`,
+/// CONFIRMED): drops a held trait unless its level has reached its no-going-back level
+/// (`0x008E98A0`: removed only while the level is below `character_traits` #1, so a trait whose
+/// no-going-back level is 0 is never removed), taking its level's attribute effects off (the loss
+/// slot, then the erase), then re-sums his effects (`0x009CDF10`). Returns whether it was removed.
+pub fn remove_trait(model: &mut CampaignModel, c: CharacterId, key: &str) -> bool {
+    let rules = model.rules.clone();
+    let Some(d) = model.world.character_details.get_mut(&c) else { return false };
+    let Some(i) = d.traits.iter().position(|t| t.key == key) else { return false };
+    let level = d.traits[i].level;
+    // ORIGINAL BUG: `0x008E98A0` reads the level record's number before testing it for null, so a
+    // trait held with no level record crashes the game. Ours takes that as level 0. A trait the
+    // rules no longer know has no level to keep and is removed.
+    let kept = rules.characters.traits.get(key).is_some_and(|r| level >= r.no_going_back_level);
+    if kept {
+        return false;
+    }
+    d.traits.remove(i);
+    shift_trait_attributes(&rules.effects, &mut d.attributes, key, level, 0);
+    model.update_sight_radius(c);
+    true
 }
 
 /// Why [`add_ancillary`] refused (the exe's own result names, `0x00A180C0`).
@@ -333,22 +505,28 @@ pub fn add_ancillary(model: &mut CampaignModel, c: CharacterId, key: &str) -> Re
     if d.ancillaries.iter().any(|a| rule.excluded.iter().any(|x| x == a)) {
         return Err(AncillaryRefusal::Excluded);
     }
+    // The evicted one's attribute effects come off, the new one's go on (`0x009C80C0`).
+    let fx = &rules.effects;
     let evicted = evict.map(|i| d.ancillaries.remove(i));
+    if let Some(gone) = &evicted {
+        shift_attributes(&mut d.attributes, fx.ancillary_attribute.get(gone), -1);
+    }
     d.ancillaries.push(key.to_string());
+    shift_attributes(&mut d.attributes, fx.ancillary_attribute.get(key), 1);
     model.update_sight_radius(c);
     Ok(evicted)
 }
 
-/// `remove_ancillary` (binding `0x008E9990`): drops a held ancillary. Returns whether it was held.
+/// `remove_ancillary` (binding `0x008E9990` → `0x00A1CE20` → `0x00A1CEC0`, CONFIRMED): drops a held
+/// ancillary, taking its attribute effects off, then re-sums his effects. Returns whether it was held.
 pub fn remove_ancillary(model: &mut CampaignModel, c: CharacterId, key: &str) -> bool {
+    let rules = model.rules.clone();
     let Some(d) = model.world.character_details.get_mut(&c) else { return false };
-    let n = d.ancillaries.len();
-    d.ancillaries.retain(|a| a != key);
-    let changed = d.ancillaries.len() != n;
-    if changed {
-        model.update_sight_radius(c);
-    }
-    changed
+    let Some(i) = d.ancillaries.iter().position(|a| a == key) else { return false };
+    d.ancillaries.remove(i);
+    shift_attributes(&mut d.attributes, rules.effects.ancillary_attribute.get(key), -1);
+    model.update_sight_radius(c);
+    true
 }
 
 /// Whether a character is a recruitment-pool candidate (listed in his faction's general or admiral
@@ -469,12 +647,14 @@ pub struct YearlyPass {
 /// are skipped without a draw. A dying General's own unit is deleted first; a force he commanded
 /// goes to a successor ([`CampaignModel::command_vacated`]).
 ///
-/// Each living faction's family has its year first ([`super::family::family_year`]); a post whose
-/// holder dies gets a new holder at once ([`CampaignModel::refill_post`]).
+/// The family of each faction other than the rebels and still in the game has its year first
+/// ([`super::family::family_year`]; `0x008BC650` tests `0x008CEEF0`, then faction +0x824 at `0x008BC6D0`,
+/// [`CampaignModel::in_the_game_with_record`], CONFIRMED); the death checks run
+/// for every faction, out of the game too. A post whose holder dies gets a new holder at once
+/// ([`CampaignModel::refill_post`]).
 ///
 /// PROVISIONAL: the "appeared" turn (+0x4EC) is not in the save, so loaded characters count as old;
-/// characters without a birth date are skipped; a "living faction" is one that owns a region
-/// (INFERRED stand-in for the exe's destroyed flag, `0x008CEEF0`).
+/// characters without a birth date are skipped.
 pub fn yearly_character_pass(model: &mut CampaignModel) -> YearlyPass {
     let mut out = YearlyPass::default();
     if model.calendar.turn_in_year + 1 != model.calendar.turns_per_year {
@@ -484,14 +664,13 @@ pub fn yearly_character_pass(model: &mut CampaignModel) -> YearlyPass {
     let year = model.calendar.date.year as i32;
     let rules = model.rules.clone();
     for f in model.world.factions_in_turn_order() {
-        if model.world.regions.values().any(|r| r.owner == f) {
+        if model.in_the_game_with_record(f) {
             super::family::family_year(model, f, &hazards);
         }
-        // The faction's list (+0x768) in its order (`World::characters_in_list_order`): each draw goes
-        // to the character the exe draws for, and the dead die in that order (`0x008BC650` collects
-        // them walking the list, CONFIRMED).
-        let ids: Vec<CharacterId> =
-            model.world.characters_in_list_order().into_iter().filter(|c| model.world.characters[c].faction == f).collect();
+        // The faction's list (+0x768) in its order (`World::faction_characters_in_list_order`): each
+        // draw goes to the character the exe draws for, and the dead die in that order (`0x008BC650`
+        // collects them walking the list, CONFIRMED).
+        let ids: Vec<CharacterId> = model.world.faction_characters_in_list_order(f);
         let mut dead = Vec::new();
         for c in ids {
             let Some(birth) = model.world.character_details.get(&c).and_then(|d| d.birth) else { continue };
@@ -502,13 +681,18 @@ pub fn yearly_character_pass(model: &mut CampaignModel) -> YearlyPass {
                 dead.push(c);
             }
             if let Some(d) = model.world.character_details.get_mut(&c) {
-                d.ancillaries.retain(|a| {
-                    let keep = rules.characters.ancillaries.get(a).is_none_or(|r| year < r.end_year);
-                    if !keep {
-                        out.expired.push((c, a.clone()));
+                // Each expired one's attribute effects come off as it goes (`0x009D2E50` →
+                // `0x00A0EC10`, CONFIRMED).
+                let mut i = 0;
+                while i < d.ancillaries.len() {
+                    if rules.characters.ancillaries.get(&d.ancillaries[i]).is_none_or(|r| year < r.end_year) {
+                        i += 1;
+                        continue;
                     }
-                    keep
-                });
+                    let gone = d.ancillaries.remove(i);
+                    shift_attributes(&mut d.attributes, rules.effects.ancillary_attribute.get(&gone), -1);
+                    out.expired.push((c, gone));
+                }
             }
         }
         for (c, _) in &out.expired {
@@ -538,8 +722,8 @@ impl CampaignModel {
     /// A recruitment item queued through him stays queued, unrefunded, and loses its target (CONFIRMED static
     /// trace 2026-10-10): the character destructor `0x0099D2D0` notifies the observers on his list (+0xD4), and the
     /// item's listener (`0x00B57F40`, land and naval alike) clears its target +0x18 and its byte +0x24 when he is
-    /// the item's target; the turn's queue step (`0x00B71FB0`) hands an item to the target's reinforcements only
-    /// while +0x18 is set, so the finished unit appears in its settlement like any recruit.
+    /// the item's target; the land spawn (`0x00B1E500`) raises an army that marches to the target only while
+    /// +0x18 is set, so the finished unit appears in its settlement like any recruit.
     pub fn character_dies(&mut self, c: CharacterId) {
         let Some(dead) = self.world.remove_character(c) else { return };
         self.world.character_details.remove(&c);
@@ -645,6 +829,7 @@ impl CampaignModel {
                 garrisoned_in: old.garrisoned_in,
             };
             self.world.characters.insert(id, colonel);
+            self.world.character_details.insert(id, self.rules.characters.new_character_details(kind.esf_name()));
             self.update_sight_radius(id);
             let f = self.world.forces.get_mut(&fid).expect("force exists");
             f.commander = Some(id);

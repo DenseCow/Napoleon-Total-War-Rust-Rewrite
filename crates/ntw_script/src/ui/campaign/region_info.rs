@@ -307,11 +307,12 @@ fn region_facts(ui: &CampaignUi, r: RegionId, details: bool) -> Option<(Facts, O
     let projection = population::project(&m, r)?;
     let extra = details.then(|| {
         let (upper, lower) = economy::governed_class_factors(&m, r);
-        // The projection's public order: the predicted set, the projected religions and the
-        // garrison as it stands. PROVISIONAL: the exe's garrison count (`0x00A190A0`) adds or
-        // removes the units of an army the player has selected to move into or out of the
-        // settlement (`0x00B148B0` / `0x00B14900`); the model's UI has no such selection here.
-        let predicted = economy::public_order_factors_with(&m, reg, &projection.set, &projection.religions, economy::garrison_units(&m, reg));
+        // The projection's public order: the predicted set, the projected religions and classes (the
+        // copy's after the round's class passes, `0x00AB4070`) and the garrison as it stands.
+        // PROVISIONAL: the exe's garrison count (`0x00A190A0`) adds or removes the units of an army
+        // the player has selected to move into or out of the settlement (`0x00B148B0` /
+        // `0x00B14900`); the model's UI has no such selection here.
+        let predicted = economy::public_order_factors_with(&m, reg, &projection.set, &projection.religions, &projection.classes, economy::garrison_units(&m, reg));
         let (predicted_upper, predicted_lower) = economy::governed_classes(&m, reg, predicted);
         DetailFacts {
             town_wealth_growth: reg.town_wealth_growth,
@@ -332,6 +333,9 @@ fn region_facts(ui: &CampaignUi, r: RegionId, details: bool) -> Option<(Facts, O
         tax_exempt: reg.tax_exempt,
         rebel: m.is_rebel_faction(reg.owner),
         religions: reg.religions.clone(),
+        // PROVISIONAL: a rebel region. `ActiveUpperClass` / `ActiveLowerClass` read `0x00A975F0`, which for
+        // a rebel owner takes the region's REBEL_DATA template's government (region +0x21C → +0x18), and
+        // with no template the first `government_types` record; ours gives the rebels' default classes.
         classes: economy::government_classes(&m, governing),
         rates: economy::region_tax_rates(&m, &fx, reg),
         governorship: post.is_some(),

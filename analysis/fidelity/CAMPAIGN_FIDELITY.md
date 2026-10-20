@@ -124,7 +124,7 @@ exact (sandbox count: 713 tests).
   - **Spa drift CONFIRMED (fixed).** The changes come from the conversion step at the round end with the
     missionaries where they stand then (the British missionary moved from Badajoz to Caceres during the round).
     The missionary rank adds the theatre zeal bonus `zeal_europe` (`0x00A198D0`, traits `zeal_spain`):
-    `religion::missionary_rank`. Check: `ECON_MAP=1 ECON_RELIGION_CHARS=1 ECON_RELIGION=nr16_spa_t2 nr16_spa_t0`
+    `agents::rank_original` (the `character.rank` seam). Check: `ECON_MAP=1 ECON_RELIGION_CHARS=1 ECON_RELIGION=nr16_spa_t2 nr16_spa_t0`
     gives all 341 shares within 1e-3. The 3-turn `orig_fr_t1` pair cannot be checked: the missionaries'
     intermediate positions are not in any file.
   - Theatres CONFIRMED a no-op (`economy_check theatres`: one theatre per shipped map, all regions in it).
@@ -544,8 +544,21 @@ that order through the booking constructor. Our loader (`details::relationship`)
 `settle_round` pays Σ 5..11 − Σ 18..24 of the record, writing only 9. Tests: `expense_tracker_tests.rs`,
 `economy_tests::the_round_end_pays_the_recorded_taxes`, `economy_fidelity::the_expense_trackers_rebuild_the_saved_running_record`
 (6 vanilla saves: the rebuilt 9 and 18..21 equal the saved record, 11 too but for the spa factions; our land / naval
-split of the upkeep equals the trackers for every faction but the Netherlands' naval tracker, 1006 saved against our
-1059, in 3 saves; every region's policing cost equals REGION_FACTORS #9).
+split of the upkeep equals the trackers for every faction; every region's policing cost equals REGION_FACTORS #9).
+**A force's upkeep set** (navyupkeep 2026-10-20, disassembly + saves, CONFIRMED): each force's units are costed with
+the force's own set, `0x008F9C50` → `0x008AFC00` on the force: a copy of the faction sum (the force's +0x7C faction
+handle → +0x6FC; a land army's container army +0x98 → +0x24 instead when set, UNKNOWN, not modelled) with the
+commander's own set summed in (the +0x74 commander handle → character +0x48C, traits + ancillaries); every upkeep
+modifier (`upkeep_cost_mod_*_all`, category / class `upkeep_mod`, unit-key effect) is read from it. A force without a
+commander counts 0 in both the upkeep and the ranking power: `0x008F9C56` resolves the +0x74 handle (`0x00898E80`)
+and on null `0x008F9C62` returns EAX = 0 for the whole force, before the flag test at `0x008F9C69` (CONFIRMED
+disassembly; ours skips such a force in `faction_upkeep_split_with` and `faction_powers`, test
+`forces_tests::a_force_without_a_commander_costs_and_counts_nothing`). A unit raised alone gets a colonel and a dead
+commander's force a new one (SAVE_COMPAT.md), so no force of the 12 evidence saves lacks one.
+This was the Netherlands' missing input: its one fleet's admiral has `C_Admiral_Dutch_Seamanship` (−5 naval upkeep)
+in auto_nr4_t4 / auto_after_c8 / orig_over_nr4_0252, so (100 − 1 − 5)% per ship gives 1006 = FACTION #47, where the
+faction sum alone gave 1059. Ported: `Effects::force_set`, `economy::faction_upkeep_split_with`; `unit_upkeep`
+takes the set (the ranking power passes an empty one). Test `economy_fidelity::an_admirals_traits_lower_his_fleets_upkeep`.
 
 **Round end** (0x00948CF0, when the turn passes the last faction): for every faction 0x008E1030 (region pre-pass,
 upkeep = Σ forces 0x008B2150 → land / naval, then the cannot-pay flag `treasury + income < expenses`, 0x00BBC7D0),
@@ -587,14 +600,66 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
     0x008CEEF0 or +0x824, else `UpdateComputedFactorsForAllRelations` 0x00B71E90 on faction +0x528 (every record,
     stride 0x848). The rebels are not in the list it walks either, so their records keep their factors. Ours reset
     them (the filter `in_the_game` lets the rebels through); fixed in `refresh_computed_factors` (treaties.rs).
-  - 0x00AAAF60 (ECX = each region of world +0x34): if the region's settlement (+0xFC) is under siege (virtual +0x98),
-    0x00B796B0 on it; then the same for each object of the region's list +0x240 / +0x244 (forts). 0x00B796B0 is the
-    siege attrition (meaning INFERRED, rule from the code): the siege counter +0x10C goes up by 1; n = min(counter,
-    cap +0x108); damage = clamp(trunc((n² − 1) × 1.5), 1, 30); for each unit of the garrison army (virtual +0x1C;
-    list +0xB4 / +0xB8) except the general's, one campaign RNG draw (model +0xFB8, MSVC LCG ×0x343FD + 0x269EC3;
-    r = ((x >> 16) × (damage + 1)) / 0xFFFF, capped at damage) and 0x00B5C0E0(unit, r) removes r men; units left at
-    or below 0x008F68F0() men are destroyed (0x00A0C6F0(1) on the +0xF4 handle, then virtual 0(1)). The model has no
-    sieges, so the step does nothing there; it belongs to BACKLOG "Sieges on the campaign map".
+  - **Siege attrition** (worker siegeattr 2026-10-20; disassembly, CONFIRMED unless tagged). `ApplyRegionSiegeAttrition`
+    0x00AAAF60 runs once per region of the region manager (world +0x34; count +0x10, array +0x14), called at 0x0096C0F2
+    between the computed factors and the trade update. The array is filled in startpos file order by
+    `ConstructRegionManagerFromEsf` 0x00A4CE20, and the ids are **not** sorted in that order in mp_eur_napoleon, ita,
+    mp_ita, spa, tut and every vanilla save (whose region ids are regenerated); eur, egy, mp_egy and our own saves are
+    sorted. For each region: if the settlement (+0xFC) is under siege (virtual +0x98 = 0x00A8B9C0, besieger list +0x12C
+    non-empty), `ApplySiegeAttritionToResidence` 0x00B796B0; then the same for each fort (+0x240 / +0x244; no shipped
+    startpos or save holds a fort).
+    - 0x00B796B0: the turns besieged +0x10C go up by 1 (also with no garrison). The garrison army is virtual +0x1C;
+      none ends the step. n = min(turns, surrender turns +0x108); percent = trunc((n·n − 1) as u32 → f64 → f32 × 1.5),
+      below 1 (unsigned: n = 0 wraps to a huge value) → 1, else at most 30 (0x00B79732). For each unit of the army
+      (+0xB4 count, +0xB8 array) in order, the commander's own unit (army +0x74 → 0x00898E80 → character +0x2B0,
+      0x00B79790) is skipped with no draw; any other draws r = `CaRng::int_range(0, percent)` inlined at 0x00B797B2
+      (campaign RNG residence +0x3C → +0x8 → +0xFB8; (next16 × (p + 1)) / 65535, capped at p) and `RemoveUnitMenPercent` 0x00B5C0E0 removes
+      r **percent** of the unit's current men (trunc(men × r / 100); all of them at r ≥ 100) through 0x008AABB0. A unit
+      left at or below `unit_minimum_men` 0x008F68F0 is kept in a list; after the loop each listed unit's character
+      (+0xF4) is killed (0x00A0C6F0(1)) and the unit deleted.
+    - **Meaning CONFIRMED:** `GetSiegeTurnsUntilSurrender` 0x008AF520 returns +0x108 − +0x10C (0 when past) for the
+      UI string "siege_turns_until_surrender" (0x009A2BDB). The cap is set when a siege starts, in
+      `AddBesiegerToResidence` 0x00B112F0 (+0x108 = virtual +0xB4, +0x10C = 0): a settlement's is
+      `GetSettlementSiegeSurrenderTurns` 0x00B57B10 (population < 25 000 → 2, < 100 000 → 3, < 1 000 000 → 4,
+      < 10 000 000 → 5, else 6); a fort's 0x00B57B00 is fort +0x188 × 2 + 2. ESF SIEGEABLE_GARRISON_RESIDENCE: #2 cap,
+      #3 turns besieged, #12 garrison, #13 besieger force ids (reader 0x00AF4B00, links at 0x00AF4D6D; writer
+      0x00B7A5F0). None of the evidence saves holds a siege (#13 empty everywhere).
+    - **Siege ends** (siegeattr fix rounds 1–2, 2026-10-20, disassembly, CONFIRMED unless tagged). Every end of a
+      siege goes through `EndForceSiegeOfSettlement` 0x008BD550(force), a destroyed besieger's too: it destroys the
+      siege object at force +0x94 (unlinking the force from the target's besieger list), calls the untraced
+      0x00B084F0 on the target's character, then, unless the campaign is torn down (+0xFC5), the price update
+      0x00BCB020(0) at 0x008BD65B and `RebuildRegionRecruitablesAndEffects` 0x00A6AE40 at 0x008BD678, then posts
+      event 0xDF (model +0x9A8). The turns stay. 17 callers. Traced: (1) destruction: the military force's
+      destructor 0x0088CE30 (sole caller 0x0089A2F3) calls it at 0x0088CE93 when force +0x94 is set and +0xFC5 is
+      clear, then tail-jumps to the base teardown 0x0088ECC0; (2) the three capture variants 0x00B58560 / 0x00B58890 /
+      0x00B58C00 end the captor's own siege after `TransferSettlementOwnership` (0x00B586E9, 0x00B5898A, 0x00B58D3B,
+      each when force +0x94 is set); (3) `TransferSettlementOwnership` 0x00B449F0 fires the settlement's
+      owner-changed event +0x24 at 0x00B44B31 (after 0x00A64AC0, before the slot pass 0x00B1B300 at 0x00B44B69; the
+      whole function is skipped only when a passed character's army already belongs to the owner); each siege object
+      listens (0x008DB7D0, its call 0x008DB84A) and ends its siege when the besieger's faction is the new owner or not
+      at war with it (0x008CE9B0), an at-war besieger goes on; (4) peace: 0x00A25570 per commander of either side
+      (from 0x00B262C0) ends his force's siege when the besieged settlement's owner (vt+0x14, compared by
+      0x00898B20) is the other side (0x00A255C5); a force with no commander is not reached. PROVISIONAL (untraced
+      callers): 0x008FF4B7, 0x008BEB42, 0x008AC130, 0x00B290B0, 0x008DB7BD (listener 0x008DB7A0), 0x008F801B
+      (post-battle placement), 0x00A787C0, 0x00B584ED, 0x00B5881D, 0x00B58BD8, 0x00932794 (moving off is among
+      them), and 0x00B084F0 / event 0xDF. Nor the siege start's other callers of 0x00B112F0.
+    - **Model:** `Region::siege` (`SiegeState`: besiegers, surrender turns, turns besieged; ntw_sim campaign/siege.rs),
+      read from and written to #2 / #3 / #13 (ntw_campaign world.rs `read_siege`, save.rs `write_region`; every vanilla
+      startpos.esf and evidence save has the residence at version 1 with all three fields, so only a corrupt save
+      lacks them and the load fails then; no evidence save holds a siege, so #13's writing rests on the writer
+      0x00B7A5F0 and a round trip); the regions run in `World::regions_in_manager_order` (the region manager's order, kept by `World::region_order`, accessloss2).
+      `CampaignModel::siege_attrition_round_start` runs at the exe's place in `TurnStep::RoundStart` (turn.rs) through
+      the seam `siege.attrition`, drawing from the shared campaign RNG in the exe's order. The ends share
+      `CampaignModel::end_force_siege` (siege.rs): `remove_force` (battles.rs), `take_settlement` for the captor,
+      `change_region_owner` in both branches through `end_sieges_after_owner_change`, and `make_peace_rules`
+      (treaties.rs) through `end_sieges_on_peace` (commanded forces only). When it finds a siege it runs
+      `update_commodity_prices_with(false)` (the prices, `validate_commerce_raids`, the trade income); the
+      recruitables rebuild needs no port (recruitables and building effects are derived from the slots when read).
+      `RemoveUnitMenPercent`'s men × percent is a 32-bit IMUL that wraps (then unsigned /100),
+      and ours wraps alike. The state hash covers the siege. Forts are not modelled (their residences' sieges are
+      not read). Tests: siege.rs (13), turn_order_tests.rs `ending_a_siege_updates_the_prices_keeping_the_history`,
+      save_compat.rs
+      `siege_state_is_written`; the order: zoc_install.rs `vanilla_save_region_order_is_the_manager_order`. ORIGINAL BUGs: none.
   - The trade update 0x00BCB020 takes a byte flag: 0 here, 1 at the round end (`PUSH 0x1` at 0x00948E0E before the
     call at 0x00948E19 in 0x00948CF0). Both recompute the factors (first time), the prices #4 and the trends #7 (vs
     #5), then the route builder 0x00BC0960, 0x00B97310 twice and `RecomputeAllInternationalTradeRoutes` 0x00BBD870,
@@ -779,18 +844,53 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
     have no poster: every caller of `0x009D3250` (~88) and of `0x009D39A0` was read, none passes 0x22 / 0x23
     (INFERRED unused: names in the table only). The exe never calls `ShowCampaignLostMessage` (scripts only);
     `InitialiseMoviePanel` is called by the UI's movie queue `0x00998E20`.
+  - **Who opens the movie panel** (worker victoryscreen2, 2026-10-20; CONFIRMED by disassembly): `0x00998E20` is the
+    constructor (vtable `0x0136DA80`) of the 0x2C movie-panel object, thiscall (lua root, movie event, bink, volume int,
+    local-involved byte). It calls the root's `InitialiseMoviePanel` with `bink_control_ptr`, `title` (only when the
+    event's +0x18 is non-null) and `Data` = {`ExitFunction`, `show_everyone` (event data byte +4),
+    `only_call_function_for_local_faction` (+5), `local_faction_involved` (the argument)}. Its only caller is the call
+    at `0x00A13FD0` in `0x00A13EA0` (was not a Ghidra function; reached through the thunk `0x00A13E90`, `this` -=
+    0x3A0, in vtable slot `0x0136B5A0`; `this` = the CampaignUiManager +0x3BC sub-object): it returns unless the
+    local faction (`[[ui +0x9FC] +0xB0]`) is human (+0x6E0); involved = the event's faction is the local one
+    (`0x00898B20`); not involved and `show_everyone` clear → nothing; else it frees the previous panel (+0xCC0,
+    `0x009D5A60` / `0x0099DD60`), builds the new one (its volume argument is int(setting 4 × 0.01 × setting 5), CVTTSS2SI at ~`0x00A13FC0`) and keeps it at +0xCC0. So the panel opens only
+    on a human machine, for that player's own movie or one shown to everyone, and `local_faction_involved` is
+    exactly "the event's faction is the local player's".
+  - **The title:** the movie event (`0x0099A4F0`, queued by `0x00A20700`) keeps at +0x18 the movie-event row's +0x14.
+    The row builder `0x00F57D60` (record constructor `0x00F43E00`) formats `"movie_event_strings_title_%S"`
+    (`0x013D43E4`) with the row's key (event + culture) and stores that loc string at +0x14: the title is the loc
+    text `movie_event_strings_title_<event><culture>` (shipped, e.g. `..._game_lost_franceeuropean` "Faction
+    Destroyed", `..._game_victory_absolute_monachyeuropean` "Supreme Victory"). The panel script shows `data.title`.
   - **`set_ui_notification_of_victory_disabled`** (script command, handler `0x0097B980`) sets EPISODIC_RESTRICTIONS
     (campaign +0xFA8) +0x125; the victory check `0x0096CD10` then posts no +0x120 for a winner and skips its
     multiplayer campaign-over step (test `0x0096CE9C`), and the victory test `0x0096FCE0` still marks the faction won
     but skips the `campaign_won` post (test `0x0096FFE7`). Saved at `EPISODIC_RESTRICTIONS` #32; set in the tut start
     position. Ours: `World::victory_notification_disabled` (CAMPAIGN_DATA.md §4.2); the victory check must read it.
   - **CampaignUI bindings** (registration thunks hold name and handler): `QuitToMainScreen` (`0x00429CF0`) →
-    `0x009EF630` → `0x009BFED0` sets byte +0x7C of the UI manager's +0x9FC object to 1 (the request to leave; its
-    reader not traced, INFERRED back to the main menu as the name says). `MovieDismissed` (`0x004295F0`) → `0x009EE380`
+    `0x009EF630` → `0x009BFED0` sets byte +0x7C of the UI manager's +0x9FC object to 1 (the request to leave). Its
+    neighbour `QuitToWindowsFromEscapeMenu` (`0x00429D10` → `0x009EF640` → `0x009BFEE0`) sets +0x7D. Both are read
+    by `0x00A065A0` (worker victoryscreen2), the campaign mode's next-mode step (called by `0x00A166F0`, vtable
+    `0x0136A540` slot +0x14, which copies the result {pointer, code} to its out +0xC / +0x10): +0x7D → code 6;
+    +0x7C → if the mode's +0x2C is set and EPISODIC_RESTRICTIONS (`[[obj +8] +0xFA8]`) +0xD0 is set, it calls +0x2C
+    vfunc +4 with `"campaign|<mode +0x30>"` (an episodic campaign chain, UNKNOWN), else code 2; code 1 builds the
+    0x178 battle object (`0x00506B50`), 3 the campaign loader (`0x00872380`), 0 stays (CONFIRMED by its other
+    callers, worker victoryfix: `0x00506B50` is called by `0x005D73A0`, which formats `"battle|%C|%S"`, and by the
+    tutorial-battle starter `0x00488C60` (`Battle_Tutorial.xml` / `NavalTutorial.xml`); `0x00872380` by the mode
+    factory `0x00485B90` (`"campaign"`, `"campaign_load"`), and its vtable `0x01357168` sits before the string
+    "Creating campaign env"). So code 1 comes from a pending battle (mode +0xD0, a 0x144 object freed after) or the
+    next-mode build, code 3 from mode +0x3C (a campaign to load). Ghidra's plate of `0x00A065A0` and its
+    `CampaignGameModeState` fields now say so (`pPendingBattleSetup` +0xD0, `bCampaignLoadPending` +0x3C,
+    `aCampaignLoadArgs` +0x40, `dwCampaignLoadArg` +0x38; corrected 2026-10-20). The consumer of the code is
+    not traced (the SGM_* string enum `0x013A484C`, parser `0x00DEE560`, is a different one), so code 2 = the main
+    menu stays INFERRED. `MovieDismissed` (`0x004295F0`) → `0x009EE380`
     → `0x00A0FC30` frees the playing movie (UI manager +0x107C, 0x2C bytes, `0x0099DD60`). `ContinueGameSelected`
     (`0x00428910`) → `0x009E1D20` sends the command `CCQ_CONTINUE_GAME_SELECTED` (registered `0x00420380`), whose
     handler `0x00932B40` clears byte +0x9C of the object returned by vfunc +0x1C of campaign +0xF70's first entry
-    (UNKNOWN meaning; in single player the campaign goes on anyway, as the flag is not set by the conditions).
+    (UNKNOWN meaning). Its only setter through that path (worker victoryscreen2): the victory check `0x0096CD10`
+    sets it to 1 at `0x0096CE7C` whenever a human winner exists, in single player too (early-outs only on its done
+    byte +0x38 and campaign +0xFE9). Campaign +0xF70 is the 8-byte object from `0x00882AC0` (stored at `0x008732D1`
+    in `0x00872550` and at `0x00874E8C` in `0x008742C0`); the reader of +0x9C is not found, so what continuing
+    changes stays UNKNOWN.
 - **The scripts' side** (worker victoryscreen, 2026-10-17; CONFIRMED by `luac_dump` of the shipped bytecode; the exe
   side is "What is shown next" above):
   - `ui/campaign ui/event_movie_panel_scripts/event_movie_panel.luac`: the panel (`panelmanager.luac` registers
@@ -847,17 +947,23 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
   `bink_control_ptr` is the movie's file name); the original `event_movie_panel` script attaches it with the new
   component method `AttachCustomControl`, and `hud::panel_movie` plays it into a texture drawn in `movie_window`.
   `CampaignUI.QuitToMainScreen` → `CampaignRequest::QuitToMainScreen` → the main menu (INFERRED, see the bindings
-  above); `MovieDismissed` drops the movie; `ContinueGameSelected` is a logged PROVISIONAL no-op. PROVISIONAL: the
-  panel's `title` (where `0x00998E20` takes it from is not traced); INFERRED: `local_faction_involved` = the faction is
-  the local player's, a movie not shown to everyone opens only for that player, and the movie plays once with its
-  sound. Tests: outcome.rs `the_defeat_movie_is_the_last_row_with_the_factions_id`,
+  above); `MovieDismissed` drops the movie; `ContinueGameSelected` is a logged PROVISIONAL no-op. The panel's `title`
+  is the loc text of `OutcomeMovie::title_key` (`movie_event_strings_title_<event><culture>`, the row's new `culture`
+  field; a missing string gives "" and logs once), and `local_faction_involved` = the faction is the local
+  player's, a movie not shown to everyone opening only for that player (both CONFIRMED, `0x00A13EA0` and the title
+  above; worker victoryscreen2, 2026-10-20). INFERRED: the movie plays once with its sound. Tests: outcome.rs `the_defeat_movie_is_the_last_row_with_the_factions_id`,
   `the_victory_movie_follows_the_government_and_the_culture`,
   `the_victory_movie_takes_a_culture_standing_in_for_the_factions`, `a_destroyed_human_plays_its_defeat_movie`; ntw_campaign
   `the_outcome_movie_rows_and_faction_ids_reach_the_rules`, real_install `outcome_movies_from_the_real_data`;
-  ntw_script movie_panel_tests (5) and campaign_ui `the_defeat_movie_panel_shows_the_movie_and_its_ok_quits`,
+  ntw_script movie_panel_tests (6, `the_movie_panel_title_is_the_rows_loc_text` added) and campaign_ui `the_defeat_movie_panel_shows_the_movie_and_its_ok_quits`,
   `the_victory_movie_panel_opens_the_campaign_result_as_a_victory` (the shipped scripts, real install).
-  Next: the victory check's +0x120 post (BACKLOG, the victory conditions), the panel title, the reader of the
-  leave request (`0x009BFED0`'s byte), `CCQ_CONTINUE_GAME_SELECTED`'s effect, the `campaign_result` buttons.
+  Next: the victory check's +0x120 post (BACKLOG, the victory conditions), the consumer of `0x00A065A0`'s code 2
+  and the episodic +0xD0 chain, the reader of +0x9C (`CCQ_CONTINUE_GAME_SELECTED`'s effect), play-once, the
+  `campaign_result` buttons, and the movie volume: `0x00A13EA0` passes the panel (+0x24) `setting 4 × 0.01 ×
+  setting 5` from the options object's vfunc +0xDC; `0x00A23330` hands +0x24 to the bink open `0x00D9F600`, which
+  scales it by 0x102 (0 when the control's +0xC vfunc +0xD4(5) is false) for the player's vfunc +0xC. Not traced: which
+  two settings, and how the player applies the value; ours plays it as any movie (movie table × `MOVIE_VOLUME` × master),
+  PROVISIONAL in `panel_movie`.
 - **Ghidra (V5):** `0x008C30A0` renamed `SetCampaignOverFlag` (prototype, plate; completeness 89.4, effective 95);
   plate comments without renames on `0x0096CD10`, `0x008F4120`, `0x008BEAA0`, `0x008DB1A0` (campover2 rewrote the last three and added plates on `0x008EE3E0` and `0x00CB1D90`, no renames).
 - **Ghidra (V5), the movies** (worker victoryscreen, 2026-10-19; prototype + plate each, completeness / effective):
@@ -874,6 +980,18 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
   in `0x00F54F80` / `0x0099B720`; `0x00F73880` `CultureRecord::ConstructCultureRecordFromBuilder` 96.9 / 96.9 (this typed; new struct `CultureRecordBuilder`, 0x1C) and `0x008F3490` `CampaignFaction::GetFactionSubcultureRecord` 93.1 / 96.9 (new struct `SubcultureRecord`, 0x1C; the faction record stays `void *` until a `FACTION_RECORD` struct exists). The listener
   subscriptions: main on +0x798, +0x70 on +0x108 (destroyed), +0x54 on +0x8D0, +0x38 on +0x8B8, +0x8C on +0x120
   (won); `0x00A134E0` listens on +0x138, subscribed by `0x0098C2F0` at `0x0098EB59`.
+- **Ghidra (V5), the movie panel** (worker victoryscreen2, 2026-10-20; prototype, plate, EOL / PRE comments,
+  locals typed and named; completeness / effective): `0x00A13EA0` ShowQueuedMovieEventPanel (function created,
+  339 bytes) 78.9 / 91.9; `0x00998E20` ConstructMoviePanelAndInitialise 70.3 / 75.9 (args confirmed from the
+  stack offsets: pLuaRoot, pMovieEvent, pBinkControl, nVolume, fLocalFactionInvolved; nVolume is an int, CVTTSS2SI
+  of setting 4 × 0.01 (0x01318034) × setting 5 at ~0x00A13FC0; its +0x28 holds MovieEventData +8, a dword, not a
+  pointer; vtable `g_apCampaignMoviePanelVtbl` 0x0136DA80); `0x00F57D60` BuildMovieEventStringRecord (cdecl:
+  pResult, pRowKeys UniString[2] event / culture, ppCultureTable, pLocDatabase, pFailedTables) 80.9 / 80.9;
+  `0x00A065A0` GetNextCampaignGameModeTransition 73.6 / 90.0 (this typed as the new struct `CampaignGameModeState`, 0xD4, the fields this function reads). Structs `QueuedMovieEvent` (0x44) and
+  `GameModeTransition` (8); the Lua key strings, the format strings and the two pending / new mode arg-list
+  statics (`g_pbPendingModeArgList`, `g_abNewModeArgList` with their counts, guards and atexit labels) renamed
+  with plates. Left at the score floor: the `this` pointers (ECX, not retypeable by the API) and register-only
+  temporaries.
 
 **Upkeep** (spec, not in code yet): per unit `round(upkeep × (100 + mod) × 0.01)` with mod = faction
 `upkeep_cost_mod_land_all` (land, 0x008F9B10) or `upkeep_cost_mod_naval_all` (ships, 0x008B21D0) + two
@@ -904,9 +1022,9 @@ Other sources read in round 3, all CONFIRMED formulas but not modelled because t
 - **Religion** [3]/[13] (0x008B1B10). Per religion share s of the class, `s × 100 × religion factor`, minus the faction's
   religion effect (0x00E1F030). Then `× (1 + happiness_mod_religious_unrest/100)` (0 if negative), rounded and
   negated. Needs the regions' religion shares (`POPULATION` / `TRAITS`, not loaded).
-- **Gentlemen** [12] (0x008C55D0). Each gentleman in the region (in `spa_napoleon` also the three missionary types)
-  gives `ceil(x / gentleman_happiness_[103]) + gentleman_happiness_bonus` (effect 129). x = 0x00A198D0, a character
-  value: UNKNOWN, not modelled. The total is positive for the class's own side and negative otherwise. The positive
+- **Gentlemen** [12] (0x008C55D0). Each gentleman resident in the region's settlement (region +0xFC → +0xC8; in `spa_napoleon` also the three missionary types)
+  gives `ceil(x / gentleman_happiness_[103]) + gentleman_happiness_bonus` (effect 129). x = 0x00A198D0, the
+  character's rank (see round 4 below for the trace). The total is positive for the side's own and allied gentlemen (0x008CE390) and negative otherwise. The positive
   part is clamped to [0, var 104]; the negative part is floored at var 105.
 - **War results** [11]: 0x00AA10F0 is true when a character of another faction stands in the area query of the
   region (0x00BA6840) and passes 0x008CE9B0 (hostile).
@@ -918,7 +1036,8 @@ test `religion_gentlemen_war_and_education_in_public_order`).
 - Data loaded per region:
   - `POPULATION/REGION_FACTORS/RELIGION_BREAKDOWN`: (religion, share) → `Region::religions`;
   - per population class (`POPULATION CLASSES`, `POPULATION_CLASS` v3): #11 the education base (class +0x70) and #12
-    the war-results base (class +0x74) → `Region::class_bases`.
+    the war-results (resistance) base (class +0x74) → `Region::class_bases` (since classfactor 2026-10-20 also #1
+    element 7, the war factor +0x20: §Population, "The class war factor").
 - The class record also holds the original's computed factors: #1 i32[13] happiness factors [1..13], #2 i32[6]
   repression [16..21], #3 positive sum, #4 negative sum, #5 repression total. These are CONFIRMED by 0x008EDF70's
   layout. Round 6 compares the model with them on the vanilla saves (§Public order, round 6).
@@ -929,11 +1048,64 @@ test `religion_gentlemen_war_and_education_in_public_order`).
 - **Religion** [3] (CONFIRMED on the vanilla eur save, round 6): `−round(max(0, 100 + happiness_mod_religious_unrest)
   / 100 × (Σ share × 100 × value − conversion))`, with `value` = `diplomatic_relations_religion` #3 for (region religion,
   state religion). A missing pair counts 0. The `conversion` effect (religion-keyed, bonus type 10, id 1; EFFECTS_FIDELITY.md §1) is the owner's faction-level value for its state religion, without the region's own buildings (the vanilla spa saves: churches with `conversion_anti_french` leave the stored factor unchanged); `economy.rs` `public_order_factors_with` reads it.
-- **Gentlemen** [12] (CONFIRMED formula; skill INFERRED): each gentleman in the region gives
-  `ceil(research attribute / gentleman_happiness_divisor) + gentleman_happiness_bonus`.
-  - The sign is positive for the owner's own gentlemen and negative for others'.
+- **Gentlemen** [12] (CONFIRMED, disassembly of 0x008C55D0, dealattitude fix 2026-10-20): each gentleman resident in
+  the region's settlement gives `ceil(rank / gentleman_happiness_divisor) + gentleman_happiness_bonus`.
+  - Which characters (CONFIRMED, disassembly and the vanilla saves, fix round 2): the walk reads the settlement
+    (region +0xFC) list +0xC8, filled by the settlement loader from `SIEGEABLE_GARRISON_RESIDENCE` #14 (`LEA ECX,
+    [ESI+0xC8]` at 0x00AF4DFF, then 0x008CFA70 per id), and tests each with 0x00F9C6D0 (type +0x2C 4 or 5). A
+    gentleman standing in the region, or studying in a school (the school's own residence #14), does not count.
+    The vanilla capitals' gentlemen all sit in their schools (every settlement #14 is empty) and every save stores
+    0 in slot 11. The model stands in for the resident list with the gentlemen `garrisoned_in` the region.
+  - Residence in play (CONFIRMED, disassembly; residence 2026-10-20): the settlement residence (vtable 0x0137C9A4)
+    keeps its forceless characters in +0xC8. Load: 0x00AF4B00 appends each #14 id through 0x008CFA70 (the
+    character's residence handle +0x2C0; `CHARACTER` #7 is the residence id). Enter (slot +0x88, 0x00B4E760): a
+    character without a force is appended to +0xC8 and `CharacterEntersGarrison` fires (event vtable 0x013561B0),
+    then his zone / hidden flag are rebuilt (0x00A285C0); an army sets +0xC0 and fires the event for its commander
+    and unit characters, and its accompanying characters (army +0x60) move in with it (loop at 0x00B4E874). Leave
+    (slot +0x8C, 0x00B4EE70): he is taken off +0xC8 (0x008B0210), no script event. Can-enter (slot +0x6C,
+    0x00B165B0): a character with a force asks the force; else, for the owner's agent, a type with `agents` #4
+    false (vanilla: minister, bandit; 0x00A0B9C0) always enters, and with a garrison army the room is that army's
+    accompanying characters below 20 (0x008B2620); otherwise (a foreign agent, or no garrison) the residents below
+    20 (`CMP 0x14` at 0x00B16632). No stance check. The order: the move-to-residence order 0x009549B0 (13 callers,
+    UI and AI 0x00A845B0) → 0x00918AB0 → command 0x00904EF0 (vtable 0x0135F8F4, execute 0x0095B7F0) → 0x0091BE30,
+    which builds the walk and an enter step (0x009071F0, vtable 0x013613DC); on arrival the step (0x0094CFF0)
+    checks can-enter again (false: he stops outside), and with its enter flag (+0x58) set enters him and sends a
+    world event (+0x3D8); with it clear it opens diplomacy (PushPendingDiplomacyAction). Any later move leaves.
+    Model: the importer makes each #14 agent resident (`garrisoned_in`, a listed id that is not a loaded forceless
+    character is logged and dropped); `CampaignCommand::AgentEnterSettlement` walks and enters (`may_reside`, the
+    room is the moddable `max_residence_characters`, default 20), `leave_garrison` (every walk) leaves; our save
+    writes #14 (the source's ids still resident, then new ones) and `CHARACTER` #7; own saves keep `garrisoned_in`.
+    One rule says who is a resident (`World::residence_of`: `garrisoned_in` and in no force, neither commander
+    nor unit rider); the room check, the gentlemen factor, the save writer and the importer all read it. A
+    command change (General hire 0x00A164C0, admiral hire 0x00A16110, field promotions 0x008E1C20 / 0x008E2260)
+    reaches no residence list (0x008CFA70 / 0x00B4EE70; call graphs to depth 3-4): the new commander holds the
+    army's place inside and the old one rides on with his unit (`pool.rs` `pass_garrison_on`, CONFIRMED).
+    The map's right click on a settlement orders it for a forceless character. Tests: `residence_tests.rs`,
+    `residence_install.rs` (the vanilla GB April 1811 save: five Spanish missionaries), own-save round trip.
+  - PROVISIONAL (residence): the model keeps no accompanying characters (`MILITARY_FORCE` #2, army +0x60), so the
+    garrison branch counts 0 and an army entering brings none; which callers of 0x009549B0 set the enter flag
+    (+0x140 → step +0x58) and the arrival step's world event (+0x3D8) and foreign-owner branch (+0x59 / +0x5A,
+    event +0x978) are not traced. Not modelled (BACKLOG §5): residents when a settlement changes hands, agents
+    spawning into a residence (0x00A241E0), the returning-agent countdown (character +0x530, 0x00A24EB0 →
+    0x008B3790), the re-enter / leave after an agent action (0x00915150), school-slot residents.
+  - `economy_check` (`ECON_MAP=1 ECON_POSUM=1`, the 8 vanilla saves):
+    slot 11 went from 134/144 on each eur save (model +1 / +2 from the capitals' gentlemen, rank 2) to 144/144;
+    exact classes 854 → 904 of 906 (the 2 left are `auto_nr1`'s garrison slot 17, older). `ECON_RESIDENTS=1`
+    prints each settlement's #14 residents and the gentlemen standing in its region.
+  - PROVISIONAL: in the `spa_napoleon` campaign (character +0x194 → +0x30) the walk also counts characters
+    passing 0x00F9C6F0 and the three missionary types (0x008C562F..0x008C568D); not modelled.
+  - The rank is `GetCharacterRank` 0x00A198D0 (called at 0x008C5698; `agents::rank`, CONFIRMED for gentlemen: his
+    `research` plus trait / ancillary bonuses, clamped to [−1, 9]); the ceiling is `(rank − 1 + divisor) / divisor`
+    with a truncating `IDIV` (0x008C56A9).
+  - The bonus is effect 0x81 read by 0x00E1F130 from the gentleman's own set (ECX = character +0x48C at 0x008C569E;
+    `Effects::character_effects`: his traits and ancillaries), not his faction's sum.
+  - The sign is positive for gentlemen of the owner or a faction allied to it and negative for others'
+    (CONFIRMED, disassembly: `0x008C55D0(region, side)` tests `0x008CE390(gentleman's faction, side)` at
+    `0x008C56CC`: neither rebels, the same faction or an allied / patron / protectorate stance;
+    `economy::gentlemen_factor_for`, worker dealattitude 2026-10-20). The deal attitude `0x00A79050`
+    calls it with the AI as the side (AI_RESEARCH.md §4 "Offered-region attitude").
   - The positive part is clamped to [0, positive limit]; the negative part is floored at the negative limit.
-  - Round 6: the skill 0x00A198D0 is 0 on the vanilla saves; only the bonus (the faction's effect 129) counts.
+  - Round 6 had read the rank as 0 and the bonus from the faction's sum, untraced; replaced by the trace above.
 - **War results** [11] (CONFIRMED): the class's stored value, plus 12 when that value is 0 and a character of a faction
   at war with the owner stands in the region (0x00AA10F0), except in `spa_napoleon`.
 - "In the region" = garrisoned there, else the path grid's region at the character's position (round 6), else within
@@ -975,8 +1147,9 @@ eur `auto_nr4_t4`, `auto_after_c8` and `auto_b2b3_0211` 144/144, `auto_nr1` and 
   same `eur_bavaria` is still in the dead Bavaria's governorship and shows Bavaria's government and none of Austria's
   minister effects (`happiness_character` −2 elsewhere in Austria). `World::governing_faction`; on capture the
   region moves to the new owner's governorship.
-- **Gentlemen** (INFERRED): the skill `0x00A198D0` contributes 0 in every vanilla save (own gentlemen in their
-  capitals add nothing), so each gentleman gives his faction's `gentleman_happiness_bonus` (effect 129).
+- **Gentlemen** (CONFIRMED, 2026-10-20): the term is the gentleman's rank `0x00A198D0` (call at `0x008C5698`) and
+  his own set's `gentleman_happiness_bonus` (character +0x48C at `0x008C569E`), counted only for the settlement's
+  residents (region +0xFC → +0xC8), see round 4 above; the earlier reading (rank 0, the faction's bonus) is withdrawn.
 - **War results**: only armies count (a navy does not: the British fleet off Rotterdam in `auto_nr4_t4` leaves
   Holland at 0), and "in the region" uses the path grid's region lookup when terrain is loaded.
 - **Garrison**: only the settlement's garrison army counts (`0x00B14880` → `0x008B1C30`), and a militia unit
@@ -1143,7 +1316,45 @@ Recomputed for every owned region at the round end (then `tw += growth`, 0x00AB4
 
   Model: a hostile navy within 1 map unit of the node's position (PROVISIONAL: the area shapes are not read). In the
   vanilla eur save a British navy 1.17 units off Rotterdam does not blockade the Dutch sea routes. Sieges are not
-  modelled.
+  modelled. Whether the waypoint object's vt+0x98 reads the port blockade below (port +0x68 / +0x74) is untraced, so
+  ours does not yet let a port blockade blockade a route (BACKLOG).
+- **Port blockades** (portblockade 2026-10-20, CONFIRMED by decompile and disassembly; V5 in Ghidra). A port is the
+  PORT_GARRISON_MANAGER object at region slot +0x1E4 (+0x70 = its slot, +0x60 = the docked navy's handle, +0x68 = the
+  blockading navy's handle, linked both ways with the navy's +0xE8, +0x74 = a byte).
+  - **Start**, `StartPortBlockade` `0x00A66F80` (`this` = the port, the navy): links +0x68 with the navy's +0xE8, sets
+    byte +0x58 of the slot's naval recruitment manager (slot +0x1E8), posts message 0xBA when the navy's faction or
+    the slot's holder is human, runs the price update `0x00BCB020(0)`, posts the slot's +0x480 event, sets slot
+    byte +0x220 = 1 (never cleared by the lift), calls `0x00A17BE0` and, with a navy docked, `0x00B653A0`, then fires
+    CharacterBlockadedPort (vtable `0x01376C40`) and the holder's +0x2A0 event. Its only caller is the move-order
+    step `0x0094B9B0` (`0x0094BA2A`), when the target port has a docked navy or a garrison. Not modelled yet
+    (BACKLOG: ours has no naval move orders onto ports).
+  - Byte +0x74 (save #2): set to 1 only at `0x0095B667` in the attack step `0x0095B370`, when the attacker's +0xE8
+    port is the port the attacked navy is docked in; cleared only by the lift.
+  - **Lift**, `LiftPortSlotBlockade` `0x00A784E0` (ECX = the port): unlinks +0x68, clears the +0x58 byte, always
+    runs the price update `0x00BCB020(0)`, calls the untraced `0x00B084F0` on the docked navy's character if any,
+    posts the slot's +0x480 event and the holder's +0x2A0 event, and sets +0x74 = 0. Its 7 callers:
+    1. the peace, `ClearCommerceRaidsBetweenFactions` `0x00A25570` (the call at `0x00A25627`, from
+       `MakePeaceWithFaction` `0x00B262C0`): per character of either side, after the siege end and before the
+       raids, a navy whose +0xE8 port's slot holder (vt+0x14) is the other side;
+    2. the owner change's slot pass `TransferRegionSlotOwners` `0x00B1B300` (`0x00B1B3EF`): after the holder pass
+       (which runs only with no garrison and no docked navy, +0x60), when the port is blockaded, the slot's holder
+       is now the new owner, and the blockading navy is the new owner's or not at war with it (`0x008CE9B0`);
+    3. the navy destructor `0x0088EF90`: restores the docked port's holder, then lifts the navy's +0xE8 port (both
+       skipped while campaign +0xFC5 is set);
+    4. the move wrapper `0x008AC010` when the move result is 2 (the navy sails off);
+    5. the post-battle state machine `0x008F7880` (`0x008F8981`, state 1);
+    6. the attack-step helper `0x008FF470`;
+    7. the `CCQ_CHARACTER_END_BLOCKADE` command handler at `0x00932710` (no function defined there; command
+       name string `0x0135E534`).
+  - Saves: PORT_GARRISON_MANAGER v2 = [u32 #0 docked navy, u32 #1 blockading navy, bool #2 = +0x74] (reader
+    `0x00A45860`, #2 only from version 2; writer `0x00A51D90`). All 64 vanilla and evidence saves and every start
+    position hold #1 = 0 and #2 false.
+  - Model (`campaign::port_blockade`): `RegionSlot::blockade` (navy, +0x74) is the one state, loaded from and
+    written to #1 / #2, and in our own save (a defaulted field, so no format bump). `lift_port_blockade` is the one
+    lift and runs the price update; the peace (`make_peace_rules`), the slot pass (`pass_region_slots`; its lifts'
+    price updates fold into the owner change's one, as the port passes' do) and the navy's removal (`remove_force`) call it.
+    Callers 4 to 7, the start, the +0x58 byte's reader and `0x00B084F0` wait for naval moves, battles and the
+    command (BACKLOG).
 - Checked: the computed trade income equals the stored figure for **all 83 factions** of the shipped start positions
   (`economy_fidelity`). Round 7: it also equals it for **every faction of all 9 original vanilla saves** (5 eur, 4 spa;
   `economy_check` ECON_TRADE).
@@ -1317,8 +1528,8 @@ Recomputed for every owned region at the round end (then `tw += growth`, 0x00AB4
     TransferSettlementOwnership 0x00B449F0 (0x00B44ACC, 0x00B44B2C) never update prices. The slot constructor
     0x00A4D4F0 builds the slot's recruitment manager (0x00AF3CC0 → 0x00AF4140, record "REGION_RECRUITMENT_MANAGER")
     and its port object under exactly the same two tests, so the slots that update are the model's
-    `RegionSlot::port`. Order in 0x00B449F0 (when fDoTransfer, i.e. unless a character whose army's faction already
-    owns the region; a transfer to the same owner passes too, but 0x00A64AC0 then returns at 0x00A64D13 after its research stop, see "Same-owner transfer"): SetSettlementOwner(settlement, new, 1) →
+    `RegionSlot::port`. Order in 0x00B449F0 (when fDoTransfer, i.e. unless a passed force carries REBEL_DATA (+0x98)
+    whose faction (+0x34) already owns the region, see "Ghidra pass (polish9)" below; a transfer to the same owner passes too, but 0x00A64AC0 then returns at 0x00A64D13 after its research stop, see "Same-owner transfer"): SetSettlementOwner(settlement, new, 1) →
     TransferRegionToFaction 0x00A64AC0 (route loss and its update when the old owner is not the rebels, then expel,
     policing tracker, taxes) → listeners → TransferRegionSlotOwners 0x00B1B300 (SetSettlementOwner(new, 0) for each
     slot with no garrison and no docked navy: one update per such port slot) → RebuildRegionRecruitablesAndEffects.
@@ -1591,13 +1802,97 @@ CONFIRMED from the exe unless tagged. The module docs hold the formulas; this is
 
 **Capture variants and the queues (worker capture-refund, 2026-10-10; CONFIRMED by disassembly).** Four settlement
 methods take a settlement by force; all four first empty the queues the same way, then call
-`TransferSettlementOwnership` `0x00B449F0(new owner, character, report flag 1, 1, 0)`:
+`TransferSettlementOwnership` `0x00B449F0(new owner, force, report flag 1, 1, 0)` (the variant's military force;
+`0x00B58A30` passes none):
 | Variant | Reached from | Own steps |
 |---|---|---|
-| `0x00B58560` | settlement vtable `0x0137CA30` slot 5 (+0x44), argument a character | destroys the garrison (virtual +0x1C), undo record `0x00AAA790`, capture report (`0x00885F90`, surrender 0), loc event id `0xFD` |
-| `0x00B58890` | slot 6 (+0x48), a character | no garrison step, no report |
-| `0x00B58C00` | slot 11 (+0x5C), a character | `0x009CB580` on the character's main attribute, report with surrender 1 |
-| `0x00B58A30` | not virtual; only caller `0x00BCA430`, the campaign director's (`CDIR_INTERFACE`, campaign +0xF80) applier of a `CDIR_INTENTION_TRANSFER_REGION_OWNERSHIP` (ctor `0x00B93840`, vtable `0x013801BC`; slot 12 `0x00BAF410` queues (faction, region, faction) in the director's list +0x3C via `0x00BA33A0`). The list is walked at each turn handover (`0x008A9920` → `0x00BA90E0`): an entry for the starting faction whose region still has its queued owner and is still transferable (`0x00BB52E0`) is applied; every such entry is dropped | argument a faction, no character: destroys the garrison, no report. Code: `director::director_transfer` (§Campaign director below) |
+| `0x00B58560` | settlement vtable slot at `0x0137CA44`, argument a military force (commander handle +0x74, faction handle +0x7C, siege object +0x94) | destroys the garrison (virtual +0x1C), a local slot list it frees unread (`0x00AAA790`), capture report (`0x00885F90`, surrender 0), loc event id `0xFD` |
+| `0x00B58890` | slot at `0x0137CA48`, a force | no garrison step, no report |
+| `0x00B58C00` | slot at `0x0137CA5C`, two stack arguments: the first never read, then a force | `0x009CB580` on the commander's main attribute, report with surrender 1 |
+| `0x00B58A30` | not virtual; only caller `0x00BCA430`, the campaign director's (`CDIR_INTERFACE`, campaign +0xF80) applier of a `CDIR_INTENTION_TRANSFER_REGION_OWNERSHIP` (ctor `0x00B93840`, vtable `0x013801BC`; slot 12 `0x00BAF410` queues (faction, region, faction) in the director's list +0x3C via `0x00BA33A0`). The list is walked at each turn handover (`0x008A9920` → `0x00BA90E0`): an entry for the starting faction whose region still has its queued owner and is still transferable (`0x00BB52E0`) is applied; every such entry is dropped | argument a faction, NULL force to `0x00B449F0`: destroys the garrison, no report. Code: `director::director_transfer` (§Campaign director below) |
+
+**SettlementOccupied and the event order (worker occupyorder, 2026-10-20; CONFIRMED by disassembly).** The
+`SettlementOccupied` script event (ctor `InitializeSettlementOccupiedEvent` `0x00889EE0`: event base `0x00DF2F20`, settlement at +0x10, vtable
+`0x01355EC0`, whose name getter `0x008BDFC0` returns the string at `0x0134FEFC`) is built only by the three
+virtual variants (its sole callers `0x00B5874F`, `0x00B589A6`, `0x00B58DA0`; the vtable is written only by the
+ctor), each right after its owner change returns, and posted at once through `0x00E30700` (synchronous script
+dispatch). Per variant: `0x00B58560` destroys the garrison (~`0x00B585A9`), builds a local slot list it frees unread (`0x00AAA790`), clears the
+queues, changes the owner (`0x00B449F0` at `0x00B586D9`), runs `0x008BD550` (force +0x94 set), `0x00A6AE40`,
+`0x00B44920`, pushes the capture report on the context's +0xF70 queue (`0x008E2B80`; the push calls report slot 1
+`0x00447880`, which only returns 1; the choice, slot 9, runs later), posts `SettlementOccupied` (`0x00B58755`),
+then broadcasts the address of its argument slot on context +0x2A0 (`0x00B5877D`; by then the slot's low byte
+holds the `0x00B4D9E0` result) and queues loc event id `0xFD` (with the force's commander) on context +0x9A8
+(`0x00B587AE`). `0x00B58890`: owner change `0x00B5897A`, the same three calls, no report, event `0x00B589AC`,
+broadcast `0x00B589D4`, loc id `0xFC` (`0x00B58A05`). `0x00B58C00`: owner change `0x00B58D2B`, the three calls,
+report (surrender 1) `0x00B58D96`, event `0x00B58DA6`, no broadcast and no loc id. A capture that ends the old
+owner does so inside the owner change (`0x00B449F0` → `0x00A64AC0` → `DestroyFactionAndResetRelations`
+`0x008AB6C0` at `0x00A652A2`), which posts model event +0x108 (`FactionDestroyed`; human `0x008AB86A`,
+multiplayer `0x008ABA4D`, AI without a killer `0x008ABDC2`); its broadcaster (vtable `0x01354CB0` slot +8,
+`0x008DBAC0`) calls every listener at once. So the exe's order is: garrison destroyed, `FactionDestroyed`,
+`SettlementOccupied`, then the capture choice. Ours: `CampaignModel::occupy` (battles.rs) is the one place that
+orders them, and `settle_capture` follows it; tests `a_capture_that_ends_the_owner_reports_its_destruction_before_the_occupation`,
+`a_capture_that_leaves_the_owner_reports_the_occupation_then_the_choice`. The director's transfer
+`0x00B58A30` and the liberation's owner change `0x00B58A10` (a bare forward to `0x00B449F0`) post no
+`SettlementOccupied`; ours posted one for the liberated faction, now removed. The liberation `0x00B4F090` posts
+its own script event `FactionBecomesLiberationProtectorate` (vtable `0x0137D064`, name getter `0x008BDE20` →
+string `0x01350274`; built at `0x00B4F0E8` / `0x00B50887`, posted at `0x00B4F0FE` / `0x00B5089D`), and the loot
+choice `0x00B541E0` posts `CharacterLootedSettlement` (vtable `0x0137CCB8`, at `0x00B54468`; modelled below).
+**FactionBecomesLiberationProtectorate (libevent, CONFIRMED by disassembly):** the apply-choice `0x008C0310` calls
+`ApplySettlementLiberation` `0x00B4F090` (thiscall, the report's settlement, argument the target faction, `RET 4`)
+for choice 2. It tests the campaign key against `spa_napoleon` (`0x00B4F0CC`) and both branches start the same way:
+the event is built on the stack (base `0x00DF2F20`, vtable `0x0137D064`), its payload at +0x10 is the settlement's
+owner (settlement vtable +0x14 `0x00B2B7D0`: region +0xF4), still the capturer since nothing has changed yet, and it
+is posted synchronously (`0x00E30700`) before anything else. Then the capturer's armies are put out of the region
+(`0x008D9DC0(capturer, region)` at `0x00B508C5`), then the owner change `0x00B58A10(target, 0, 1)` (the target's
+return inside it), then the new army for the target. So it fires before the owner change, the re-emergence and the
+capture report; a liberation posts no `SettlementOccupied` and no `FactionDestroyed` (the change's first flag is
+clear). The event's vtable has one game accessor, the faction (+0x38 `0x0044A500` returns +0x10; read by the
+faction conditions, e.g. `FactionTreasury` `0x008A0860`, registered at `0x0041B8F0`); character (+0x1C), settlement
+(+0x40) and the region slots are null, so a script sees only the liberator. Ours:
+`CampaignEvent::FactionBecomesLiberationProtectorate { faction }`, pushed by `resolve_capture` (capture.rs) with the
+region's owner, then `expel_from_region(liberator, region)` (0x00B508C5), before `liberate_region`; the script host gives it a faction-only context. Tests
+`a_liberation_posts_the_protectorate_event_before_the_owner_change` (ntw_sim),
+`the_liberation_protectorate_event_gives_handlers_the_liberator`, `a_liberate_choice_fires_the_protectorate_event_with_the_liberator` (ntw_script); the no-capital expulsion in `ai_capture_occupies_and_liberation_hands_the_region_over` (ntw_sim). Side finding for a trace:
+`SettlementOccupied`'s vtable `0x01355EC0` has no faction accessor (+0x38 null; its +0x40 is the settlement, +0x2C
+the region slot, +0x34 the fort) while our host gives it one. **Ghidra (V5, occupyorder fix round 1; completeness):** `CaptureSettlementAfterAssault` `0x00B58560` 85.3,
+`CaptureSettlementWithoutReport` `0x00B58890` 85.3, `CaptureSettlementWithSurrenderReport` `0x00B58C00` 85.3 (all
+`CampaignSettlement::` members, argument typed `CampaignMilitaryForce *`).
+
+**`CharacterLootedSettlement` (looting branch, CONFIRMED by disassembly).** The capture report is built by
+`SettlementCaptureReport::InitializeSettlementCaptureReport` `0x00885F90` (vtable `0x013574DC`), called only by
+`CaptureSettlementAfterAssault` `0x00B58560` and `CaptureSettlementWithSurrenderReport` `0x00B58C00` (at
+`0x00B58D8A`); its first argument, kept at report +0x8, is the capturing force's commander (force +0x74, resolved by
+`0x00898E80`). The report holds three `CaptureOption` blocks: loot +0x14, occupy +0x40, liberate +0x6C (its
+liberation target faction at +0x94). The choice is applied by `ApplySettlementCaptureReportChoice` `0x008C0310`
+(callers: report vtable slot 9 `0x008F8D00`, the AI path, at `0x008F8EBB`; the human command at `0x00936043`):
+choice 0 runs `ApplyCaptureOptionToRegion` `0x00B541E0` (settlement, loot option, report +0x8); 1 tail-jumps to
+`0x00B582E0` (occupy option); 2 tail-jumps to `ApplySettlementLiberation` `0x00B4F090` when +0x94 is set, else
+falls into the loot path; any other value does nothing. `0x00B541E0` is reached only from there, so only a loot
+(or a liberate with no target) posts the event: after the buildings, money, wealth, the spa_napoleon resentment
+and the effects rebuild, it builds the event (`0x00DF2F20`, +0x10 = report +0x8) and posts it synchronously
+(`0x00E30700` at `0x00B54468`). The event's name getter `0x008BDDA0` returns `0x0134FAF0` "CharacterLootedSettlement"
+("A character loots a settlement"); its vtable answers only the character getter (+0x1C `0x0044A500`, event +0x10):
+the faction (+0x38), settlement and region getters are the null stub `0x00461180`. No loot amount is carried. The
+vanilla handler is `export_triggers.lua`'s `C_NTW_General_Looter_Good_Trigger` (a General rolls
+`C_NTW_General_Looter_Good`, 1 point at 12 then 1 point at 25). With no commander (report +0x8 null, e.g. a
+scripted capture) `0x00B541E0` still builds and posts the event (no null check), but the poster `0x00E30700` hands
+an event to Lua (`0x00E142B0`) only when its vtable +0xB8 passes; for this event (vtable `0x0137CCB8`, +0xB8 =
+`0x008F9EE0`, +0x1C = `0x0044A500`) that check returns 0 at once when the character getter is null, so no script
+ever sees a looter-less loot (CONFIRMED). For a non-null character `0x008F9EE0` also requires the event name to be
+a `trigger_events_table` record (`0x00E30810`) and that record to be absent from the character's list at +0x1AC
+(`0x00EC5360`); ours does not model those two gates yet (open trace). Ours: `CapturePreview::looter` keeps the
+capturing force's commander from `capture_preview`; `resolve_capture`'s loot arm pushes
+`CampaignEvent::CharacterLootedSettlement { character }` (a plain `CharacterId`) only when there is a looter,
+after `apply_outcome` and `loot_resentment`, before `CaptureResolved`; `ScriptHost::context_for` gives it the character only (no faction, so `FactionIsLocal` answers
+false as in the exe). Tests: `looting_posts_character_looted_settlement_with_the_capturing_commander` (ntw_sim),
+`character_looted_settlement_gives_the_character_and_no_faction` (ntw_script host),
+`eur_napoleon_looting_reaches_the_looter_trait_trigger` (real install: the vanilla trigger runs and the trait is
+gained). Open: the AI's choice `0x00AAABA0` is not decoded (ours: PROVISIONAL occupy), so the AI never loots in
+ours yet. **Ghidra (V5, completeness):** `ApplySettlementCaptureReportChoice` `0x008C0310` 100,
+`InitializeSettlementCaptureReport` `0x00885F90` 92 (the vtable global's bare pointer type), the name getter
+`GetCharacterLootedSettlementEventName` `0x008BDDA0` (function created) 95, `ApplyCaptureOptionToRegion` plate
+updated 98; struct `SettlementCaptureReport` created; `g_apfnCharacterLootedSettlementEventVtable`,
+`g_apfnSettlementCaptureReportVtable`, `g_szCharacterLootedSettlementEventName` named.
 
 The shared queue step: the land queue (region +0x124) `0x00B1A760(0)`; for each slot of the region's slot manager
 (+0x120, vector +0x18 / count +0x14) with a port recruitment manager (slot +0x1E8) `0x00B1A760(1)`, then the slot's
@@ -1624,12 +1919,21 @@ construction `0x00A6CBE0(0)`; then the two single slots +0x24 / +0x20 (walls / r
   manager or the region's). Tests: `a_capture_refunds_the_old_owners_queued_ships_only`,
   `a_transfer_refunds_an_ai_old_owners_queued_units_and_a_humans_none` (ntw_sim),
   `a_capture_in_the_vanilla_saves_refunds_the_queued_ships` (ntw_campaign: 36 captures of regions with queued ships).
-- Ghidra pass (polish9, 2026-10-11; disassembly): `TransferSettlementOwnership` compares the character's army's
-  faction (character +0x98 → +0x34) with the region's current owner (region +0xF4, `0x006649C0`) at
-  `0x00B44A3A`–`0x00B44A67`, never the new-owner argument. When they match it skips `0x00B44AC7`–`0x00B44B7F`
+- Ghidra pass (polish9, 2026-10-11; disassembly; the +0x98 reading corrected by occupyorder fix round 4,
+  2026-10-20): `TransferSettlementOwnership` reads the passed force's +0x98 and, when it and its +0x34 are both
+  non-NULL, compares that +0x34 with the region's current owner (region +0xF4, `0x006649C0`) at
+  `0x00B44A3A`–`0x00B44A67`, never the new-owner argument. Force +0x98 is not the force's faction (that is the
+  handle +0x7C the capture variants pass as the new owner) but the army's `REBEL_DATA` (0x74 bytes; set only on
+  a risen rebel army, PATHFINDING.md "REBEL_DATA"; built by `0x00886BA0`, called by the risings `0x00870E60` /
+  `0x008AF5D0`). Its +0x34 is a faction pointer or NULL: `0x00886D30` stores there the rising record's +0x28
+  (`0x00886BA0`'s fifth argument), the save reader `0x00886C90` zeroes it and fills it only when the record's flag
+  is set, and when set the rebels take their name from that faction (`0x008C73A0`, a faction method,
+  called with it at `0x00886DF6`). When they match it skips `0x00B44AC7`–`0x00B44B7F`
   (`0x00B2B810`, the drain `0x00A64AC0`, the owner-change signals, `0x00B1B300`) but does not return: the +0x730 step
-  at `0x00B44B84` still runs. With no character (`0x00B58A10`: deals, liberation, handover) there is no skip. Every
-  capture path takes a region its capturer does not own. A deal can hand a region to its own owner; the drain
+  at `0x00B44B84` still runs. With no force (`0x00B58A10`: deals, liberation, handover; `0x00B58A30`: the
+  director), or a force that is not a risen rebel army, there is no skip. Whether a rebel army can capture a
+  settlement whose owner is its `REBEL_DATA` faction (the one case that skips) is not traced (UNKNOWN). A deal
+  can hand a region to its own owner; the drain
   `0x00A64AC0` then returns early but `0x00B1B300` still runs (corrected 2026-10-20, see "Same-owner transfer" below:
   the model no longer returns early in `transfer_region`). `CancelRecruitmentItem` ends by firing the manager's multicast signal (+0x24, vtable
   `0x0137CBD8`, slot +8 `0x008DBAC0`: each subscriber's vtable +4 with an item pointer) after the refund, population
@@ -1660,18 +1964,18 @@ construction `0x00A6CBE0(0)`; then the two single slots +0x24 / +0x20 (walls / r
   `change_region_owner`, `pass_region_slots`; tests `a_same_owner_deal_handover_stops_research_and_passes_slots_only`,
   `a_same_owner_handover_updates_the_prices_only_through_a_port`). The regionprice review's premise (the taxes, the
   policing tracker and the port price update all refresh for a transfer to the same owner) was only partly right.
-  - `TransferSettlementOwnership` `0x00B449F0` (new owner, character, report flag, a, b; `RET 0x14`) never compares
-    the new owner with the old one; only a passed character whose army's faction owns the region skips the transfer
+  - `TransferSettlementOwnership` `0x00B449F0` (new owner, force or NULL, report flag, a, b; `RET 0x14`) never compares
+    the new owner with the old one; only a passed force whose `REBEL_DATA` (+0x98) faction (+0x34) owns the region skips the transfer
     (above). Its five callers:
-    - `TransferSettlementWithoutCharacter` `0x00B58A10` (call at `0x00B58A20`: new, no character, report 0, a, b).
+    - `TransferSettlementWithoutCharacter` `0x00B58A10` (call at `0x00B58A20`: new, NULL force, report 0, a, b).
       Its callers: the deal's `ApplyRegionsRecordOnAccept` `0x00C18BF0` (`0x00C18C26` demanded list → proposer,
       `0x00C18C9C` offered list → recipient; a 1, b 0); the liberation `0x00B4F090` (`0x00B50202`, `0x00B511DF`; a 0,
       b 1; called only from the capture choice 2 at `0x008C0310`); `DestroyFactionAndResetRelations` `0x008AB6C0`
       (`0x008ABC30`, `0x008ABC98`; a 0, b 0).
-    - `CaptureSettlementForDirectorTransfer` `0x00B58A30` (`0x00B58B4D`: new, no character, report 1, a 1, b 0),
+    - `CaptureSettlementForDirectorTransfer` `0x00B58A30` (`0x00B58B4D`: new, NULL force, report 1, a 1, b 0),
       only from `ApplyDirectorRegionTransferIntention` `0x00BCA430` ← `0x00BA90E0` ← `AdvanceFactionTurn` (`0x008A9BAA`).
     - The capture virtuals `0x00B58560` (`0x00B586D9`), `0x00B58890` (`0x00B5897A`) and `0x00B58C00` (`0x00B58D2B`),
-      settlement vtable `0x0137CA44` / `0x0137CA48` / `0x0137CA5C`: they pass the capturing character.
+      settlement vtable `0x0137CA44` / `0x0137CA48` / `0x0137CA5C`: they pass the capturing military force.
   - Which can pass the region's own owner:
     - Deal: yes. Nothing checks a deal's region owners (`propose_regions`); the panel's and the AI's lists hold only
       each side's own regions, so it takes a command naming a region its receiver already owns (a peer's
@@ -1680,12 +1984,15 @@ construction `0x00A6CBE0(0)`; then the two single slots +0x24 / +0x20 (walls / r
       (ours: `liberation_target`; `liberate_region` also refuses the owner).
     - Director: no. An entry is applied only while the region's owner is the queued non-major owner
       (`IsSameComponentId` `0x00CF0D30`) and `0x00BB52E0` passes; the receiver is a major other than it (`0x00BA2B90`).
-    - Captures: the owner's own character skips everything; every capture path takes a region its capturer does not own.
+    - Captures: every capture path takes a region its capturer (force +0x7C) does not own. The skip in
+      `0x00B449F0` is not about the capturer: it needs a risen rebel army whose `REBEL_DATA` faction owns the region
+      (above, UNKNOWN whether that happens).
     - Destruction: without a killer each region goes to the best other faction. With one (the script's
       `grant_faction_handover` `0x00978950`, a mission reward `0x00A06050`) every region goes to the killer and nothing
       checks killer ≠ target: with the same faction `0x00A64AC0` returns early, the region never leaves the faction's
       list (+0x76C) and the loop never ends (a hang). No vanilla data does it (mp_eur hands bavaria and wurttemberg to
-      france). Neither path is modelled (BACKLOG).
+      france). Ours (handover, 2026-10-20): both paths call `destroy_faction_by`, which refuses a killer that is the
+      target ("Destruction by a killer" under §Destruction and re-emergence).
   - What runs for the same owner. In `0x00A64AC0`, before its return (`CMP` of the region's owner, region +0xF4, with
     the new one at `0x00A64D11`, `JZ` to the epilogue at `0x00A64D13`): `0x008B37B0(new)` (faction +0x950 and MP
     stats, only when the new owner is human, the third argument is 0 and the old owner is human; not modelled), the
@@ -1702,8 +2009,8 @@ construction `0x00A6CBE0(0)`; then the two single slots +0x24 / +0x20 (walls / r
     (`pass_region_slots`, shared with the different-owner path), then the price update when a port slot passed, and
     returns. `transfer_region` returns true only when the owner changed, so a same-owner deal item ends no giver; it
     still counts as a region received. Not ported here, as for the different-owner path: the UI notifier, the
-    listeners, `0x008B37B0`, `0x00A6AE40` / `0x00AB3DF0`. ORIGINAL BUG: the destruction hang above, only once its
-    callers are modelled.
+    listeners, `0x008B37B0`, `0x00A6AE40` / `0x00AB3DF0`. ORIGINAL BUG: the destruction hang above, fixed in
+    `destroy_faction_by` (logged refusal).
 
 **Flow.** A capture (after a won assault, `0x00B58560`; an undefended settlement, PROVISIONAL same variant) changes the
 owner and clears the queues (round 8), then queues a report object (`0x00885F90`, vtable `0x013574DC`; flags +0x98
@@ -1715,10 +2022,63 @@ pending, +0x99 surrender, +0x9A / +0x9B skip the choice). Its slot 9 `0x008F8D00
 - otherwise choice 1; then `0x008C0310(choice)`.
 
 **Option structs** (report +0x14, +0x40, +0x6C; 0x2C bytes each): {+0 vector header, +4 capacity, +8 count, +0xC
-(building, value) list, +0x10 money, +0x14 town wealth after, +0x18 / +0x1C public order previews (`0x00A61400` /
-`0x00A610C0` on a copy of the region after `0x00AAA5B0`), +0x20 public-order reduction, +0x24 flag, +0x28 liberation
+(building, value) list, +0x10 money, +0x14 town wealth after, +0x18 upper-class / +0x1C lower-class public order
+preview (below), +0x20 public-order reduction, +0x24 flag, +0x28 liberation
 faction}. The third struct's flag (+0x90) and faction (+0x94) mark
 a liberation; `0x008C0310(2)` loots when +0x94 is 0.
+
+**Public-order previews** (capturepreview, CONFIRMED from the listing of `0x00B14930`, `0x00A61400`, `0x00A610C0`,
+`0x009AB1B0`):
+- Per option (loot, then occupy), on a copy of the region's population factors (`CopyRegionFactors` `0x00A4C1D0`, region
+  +0x4C): loot only, `0x00AAA5B0(reduction)` on the copy (each class +0x74 −= reduction, `0x008EF780`; then the spa
+  alignment shift); the region's effect set (`0x00A67530`) is adjusted by `0x00B0D3B0(capturer, region, set)` and has
+  the full local (level +0xE0) and faction-wide (level +0x100) effects of every building in the option's damage list
+  (fortification included) subtracted; `RefreshRegionPopulationFactors` `0x00AA9C10(copy, set, 0, -1)` recomputes the
+  classes. The copy's region pointer is the real region, already owned by the capturer (the owner changes before the
+  report is queued).
+- +0x18 = `GetUpperClassNetPublicOrder` `0x00A61400(copy)`: the net public order (`GetPopulationClassNetPublicOrder` `0x008E2AB0`: class +0x38 + +0x3C + +0x58, an int) of the first
+  class for which `IsUpperClassOfRegionGovernment` `0x008CE320` holds, i.e. the class record equals the upper class (+0x18) of the government (+0xB0, `CompareGovernmentUpperClassRecord` `0x008CE2D0`) of
+  the region's faction (region +0xF4, faction +0x70C). For the rebel faction (`0x008CEEF0`), CONFIRMED from the listing
+  `0x008CE341`–`0x008CE368` (`0x008CE281`–`0x008CE2A8` in the lower test): region +0x220 is the region's set of risen
+  rebel armies (count +0xC, `0x006A3110`); with at least one, the class is compared with the first army's
+  (`0x008CFC20(0)`) REBEL_DATA (+0x98) → government record (+0x18, the GOVERNMENT_TYPE record per `0x00886F10`) →
+  upper class +0x18 (lower +0x1C); with none the test is false, so both previews are 0. +0x1C = `GetLowerClassNetPublicOrder` `0x00A610C0`, the same with `IsLowerClassOfRegionGovernment` `0x008CE260` and the lower class (+0x1C, `CompareGovernmentLowerClassRecord` `0x008CE210`). Each is
+  **0 when no class matches** (unlike `FindUpperPopulationClassEntry` `0x00A61320` / `0x00A60FE0`, which fall back to
+  the first class).
+- The screen (`0x009AB1B0`, ESI = option − 4): `Loot` ← +0x10, `TownWealth` ← +0x14, `UpperOrder` ← +0x18, `LowerOrder`
+  ← +0x1C (string pushes at `0x009AB4A4`–`0x009AB4D6` and `0x009AB831`–`0x009AB863`).
+- The preview runs for every capturer (AI included); it draws nothing.
+
+Ours: `CaptureOutcome::public_order_after` = (lower, upper) of `economy::public_order` on a clone with the option
+applied (buildings, fortification, town wealth, class reduction, spa shift): the same governed-class rule
+(`governed_classes`, 0 for a missing class) and the same damaged-building removal (`Region::effect_buildings` skips a
+damaged building); the UI maps lower → `LowerOrder`, upper → `UpperOrder` (test
+`capture_previews_are_the_governments_upper_and_lower_classes`). Computed for human capturers only (display data).
+Rebels (rebelgov 2026-10-20, CONFIRMED by decompile and data): `economy::region_government_classes` is the region
+tests' one port, read by `governed_classes` (so the previews, `public_order` and the order attitude): for a
+rebel-owned region (region +0xF4) the first id of `World::region_risen_armies` (the set +0x220 in file order:
+`0x00A45950` → `0x008CFB60` → `AppendOwnedLinkToOwnerList` `0x008CF7D0`; an army's destructor `0x0088CE30` →
+`0x0088F310` → `0x0088CA00` → `0x008B0150` erases its link and shifts the rest down, ours `remove_force`), whose
+government is `World::rebel_army_governments` (the army's own ARMY #7 `REBEL_DATA` → `REBEL_DATA_INNARDS` →
+`REBEL_SETUP` #3, read by `0x00870FD0` → `0x00886950` → `0x00886C90` / `0x00886F10`; v<4 blocks hold `REBEL_SETUP`
+directly; written back by the ARMY writer `0x008FA810` via `0x008971C0` at `0x008FAA09`); no risen army or no
+government → no class (both previews 0). Data: orig_fr_may1811's 8 rebel ARMYs all name `gov_absolute_monarchy`
+(test `vanilla_save_risen_armies_keep_their_government`; model test
+`a_rebel_regions_classes_are_its_first_risen_armys_government`). Our save writer aimed a rebel army's navy u32 at #7, the
+REBEL_DATA record, so the type check skipped it and the navy link was silently not saved (our bug, fixed:
+`army_navy_slot`, #8 behind the block, test `a_rebel_armys_navy_goes_behind_its_rebel_data`; a new army drops a
+rebel template's block). The faction-level tests (`0x008CE230` / `0x008CE2F0`) stay `economy::government_classes`.
+Left, PROVISIONAL: `RefreshRegionPopulationFactors`' per-class pass `0x008EDF70` picks classes with the faction tests,
+which match none for the rebels, so it refreshes nothing and the stored factors stay (ours computes default
+`upper` / `lower` factors: `public_order_factors_with`); and the region panel's `ActiveUpperClass` /
+`ActiveLowerClass` read `0x00A975F0`, which for a rebel owner takes the region's REBEL_DATA template (+0x21C →
++0x18 government; `0x00A91EB0` frees the template when the region's risen list drops below 2 entries and the
+owner is not the rebels) and with no template the first `government_types` record (db +0x4D8, `0x00E1F150`), not
+the risen army's (ours: default classes; region_info.rs).
+Not traced: what `0x00B0D3B0` adds (an effect set built by `0x00BC74B0` from `lower_classes;` / `upper_classes;`
+tax-level keys, when the capturer has a record and `0x008C8D90` finds its entry for the region) and subtracts (the
+region's governorship container, region +0x248 → `0x00BA2170`); ours takes the tax bundles of the governing faction
+(`region_effect_set`), equivalence INFERRED.
 
 **Preview `0x00B14930`:**
 - loot list: every slot of the settlement with a building of health > 1, `0x00B14560(range 0.01–0.5)` → (new health,
@@ -1750,14 +2110,15 @@ the army's units.
 **Apply:**
 - loot `0x00B541E0`: each listed building's health := the listed value (a fortification goes through its damage
   object); money through `0x00BB3810(money, 0)` (treasury and the economy tracker); `0x00AAA580(reduction, TW after)`:
-  every population class's +0x74 (the war-results base, our `class_bases` .2) −= reduction (`0x008EF780`), region
+  every population class's +0x74 (the war-results base, our `PopulationClassState::resistance`) −= reduction (`0x008EF780`), region
   +0xD4 := TW after, then `0x00AB4410(0)` copies +0xD4 into +0xCC and refreshes the region economy without growth;
   effects recomputed.
 - occupy `0x00B582E0`: the occupy list's healths only.
-- liberate `0x00B4F090`: `0x00B58A10(target, 0, 1)` → `0x00B449F0` hands the region over; then an army for the target
+- liberate `0x00B4F090` (`ApplySettlementLiberation`): posts `FactionBecomesLiberationProtectorate` (the liberator),
+  puts the capturer's armies out of the region (`0x008D9DC0` at `0x00B508C5`, CONFIRMED; ours: `expel_from_region(liberator, region)` right after the event, so a capturer without a
+  capital, which the owner change's own expulsion skips, is moved out of the settlement too and stays in the region on the map: the owner is still the liberator at expel time, so it may stay), then `0x00B58A10(target, 0, 1)` → `0x00B449F0` hands the region over; then an army for the target
   (units filtered by `0x00B69BA0` from what the region's `sArmy` / `rHorse` / `tGuns` allow, a named general,
-  `0x008D24B0`): not modelled. The capturer's army leaves the settlement (INFERRED). spa_napoleon has its own branch
-  (guerrilla units).
+  `0x008D24B0`): not modelled. spa_napoleon has its own branch (guerrilla units).
 
 **Repairs** (`0x00B66260`, `0x00B66410`, `0x00B1A6B0`, `0x00B16430`): can repair = health < 100, no item in the slot,
 slot held by the owner; cost = round((100 + chain cost mod) × round((100 − health) × level cost × 0.01) × 0.01), the AI
@@ -1899,11 +2260,13 @@ faction and liberation target.
     model prices from its state at its own queue time, as the exe does.
   - **When `RebuildFactionEffectSum` `0x008B16C0` runs** (its 15 callers, CONFIRMED by xrefs, recruit-cost2
     2026-10-14): each faction's turn start (`AdvanceFactionTurn` `0x008F4120` → `0x0096C050` → `0x008F1F60`, skipped
-    while faction +0x824 is set); the round end over every faction (`0x00A06050` → `0x00A1D3B0`); a region or
-    settlement changing hands (`TransferRegionToFaction` `0x00A64AC0` via `0x008AE6E0` / `0x008E4420`,
+    while faction +0x824 is set); a unit restriction added or lifted, over every faction (`AddRestrictedUnitRecord`
+    `0x009C9700` and `RemoveRestrictedUnitRecord` `0x00A1D3B0`, called by their script bindings `0x00977500` /
+    `0x00977570`; the remove also by the mission reward `ApplyMissionSuccessReward` `0x00A06050`, so a mission
+    reward lifts a restriction; CONFIRMED by xrefs, unitrestrict 2026-10-20); a region or settlement changing hands (`TransferRegionToFaction` `0x00A64AC0` via `0x008AE6E0` / `0x008E4420`,
     `TransferSettlementOwnership` `0x00B449F0` via `0x008BEAA0`; the capture options `0x00B541E0`, `0x00B582E0`);
     a technology granted (`GrantFactionTechnology` `0x008CDCB0` unless its param_2 is set; `0x00948A40`, `0x00948AD0`);
-    the script functions `0x00977500` / `0x00977570` (loop over factions); `0x0095FF00` (from `0x00872550`); and three
+    `0x0095FF00` (from `0x00872550`); and three
     command handlers near `0x00936530` (`0x008F3760`, `0x008C9C50`, `0x008EB9D0`; which commands is UNKNOWN). None is
     on a trait or minister-level change, so a sum reader can see a stale +0x6FC until the next of these. Ours
     sums on demand. Whether any reader observably lags is a question for the effects system (every reader of the
@@ -1995,6 +2358,28 @@ faction and liberation target.
       (`EPISODIC_RESTRICTIONS`, loaded by the ctor `0x009968A0`; `add_restricted_unit_record` /
       `remove_restricted_unit_record`). Its sibling +0x10/+0x14 is `BUILDING_RESTRICTIONS` (gate `0x009CDA90`,
       modelled as `World::restricted_buildings`): restricted units get the same home, `World::restricted_units`.
+    - The restricted-unit list (unitrestrict, 2026-10-20, CONFIRMED). It is a list of UNIT_RECORD pointers, not a
+      set. `AddRestrictedUnitRecord` `0x009C9700` (Lua binding `LUA_AddRestrictedUnitRecord` `0x00977500`, name
+      string 0x01369B40) looks the key up in the units table and appends the record with no duplicate check, then
+      rebuilds every faction's effect sums (`RebuildFactionEffectSum` per faction, which rebuilds the region
+      recruitable lists). `RemoveRestrictedUnitRecord` `0x00A1D3B0` (binding `0x00977570`, string 0x01369B5C; also
+      called by `ApplyMissionSuccessReward` `0x00A06050`, so a mission reward can lift a restriction) erases the
+      first matching entry only and rebuilds only when it erased one. So a unit added twice stays restricted until
+      removed twice. The ESF loader `0x009968A0` reads each `UNIT_RESTRICTIONS` item as one type-0x0E (UTF16) key
+      and appends it in file order (at 0x00996D3B); the writer `0x009A1070` writes each record's key as type 0x0E.
+      Ported: `World::restricted_units` is a `Vec` in list order with duplicates kept; `CampaignModel::
+      add_restricted_unit` / `remove_restricted_unit` are the one rule the script command calls;
+      `World::unit_restricted` is the one test (recruit list, so the panel, the AI and the recruit command).
+      Own saves keep the list as written (a RON list either way, format unchanged).
+    - ORIGINAL BUG (unitrestrict): a key the units table lacks makes both the add and the loader append a NULL
+      record (the loader logs it; its building list skips such keys). The writer `0x009A1070` has no null test for
+      units (its building list has one, at 0x009A1170), so the next save dereferences the NULL record and crashes.
+      A NULL entry restricts nothing. Ours logs the key and stores nothing: the script command logs "not a valid
+      unit key, ignored", the loader one warning listing the dropped keys. A remove of an unknown key does nothing
+      in both.
+    - Third caller of `0x00A27960`: `CampaignUI.BuildingEffects` (handler 0x009DE150, call at 0x009DF476) sets
+      each recruitment row's `ScriptRestricted` field (string 0x0136C798) from it. Our BuildingEffects is still a
+      stub; its rows must read `World::unit_restricted` when they are built.
     - `0x00B77F90` `CheckQueuedUnitStillRecruitable(item, faction, region, pFaction)` (CONFIRMED; called from
       `0x00AAFD40` in the queue step `0x00B71FB0`'s removal): permission mask (unit +0x94 & faction +0x30 → +0x44),
       the faction's unit set (hash at faction +0x1B0), technology, government, `0x00AA1660`, `0x00A27960`; no
@@ -2038,7 +2423,14 @@ faction and liberation target.
     - Tests: `restricted_units_and_units_without_their_region_resource_are_not_recruitable` (ntw_sim),
       `unit_resources_with_vanilla_data` (ntw_campaign, real install: the units #14 values and the regions'
       `RESOURCES_ARRAY`), `a_legacy_restricted_unit_list_loads_into_the_model` (own save: the old top-level
-      list is merged into the world on read).
+      list is merged into the world on read). unitrestrict: `a_unit_restricted_twice_stays_restricted_until_lifted_twice`
+      (ntw_sim), `restricted_unit_records_are_the_models_list` (ntw_script host: the script command),
+      `the_snapshot_leaves_out_a_script_restricted_unit` (ntw_ai: the AI's list is the model's recruit list, the
+      one the settlement panel reads), `a_made_up_campaign_round_trips` (own save keeps order and duplicates),
+      `the_loader_fills_the_restricted_building_levels` (ESF: order, duplicates, unknown key dropped).
+    - Ghidra (unitrestrict, V5): `AddRestrictedUnitRecord` / `RemoveRestrictedUnitRecord` raw 77 each (effective 90;
+      the rest is register-only locals), methods of the partial struct `CampaignScriptRestrictions` (+0x20 count, +0x24 data;
+      one stack argument, the key, RET 4); `LUA_AddRestrictedUnitRecord` / `LUA_RemoveRestrictedUnitRecord` effective 89 each.
     - Ghidra (V5, `analyze_function_completeness` 2026-10-13, effective scores): `0x00AA1660` 86,
       `0x00A27960` 88, `0x00B77F90` 64, `0x009FB640` / `0x009FB660` / `0x00B57F40` 88 each. What is left is
       struct typing (UNIT_RECORD, region, faction, recruitment item as `void *`, no struct defined yet) and
@@ -2178,11 +2570,11 @@ faction and liberation target.
   +0x77C data, loop at `0x008BC873`), not for the rebels (`0x008CEEF0`), then the queue flag `0x00A78620`, before
   diplomacy `0x00B29100` and research `0x008F3C40`. Model: `construction_round_end` in `TurnStep::Economy` (tests
   `a_repair_counts_down_in_a_slot_another_faction_holds`, `the_rebels_construction_does_not_count_down`), through the
-  seam `construction.step` (`turn::construction_step`). Regions go in id order, not list order: each region's step
-  reads and writes only that region's slots, its school's research entry and its owner's records (completion
-  events, the recruitable cache), so the order changes no result, only the order of the events (CONFIRMED by the
-  callees below). The event order is PROVISIONAL: the list's order (as a startpos or a save builds it, and as
-  gains and losses reorder it in play) is not traced, so the model's id order stands in for it.
+  seam `construction.step` (`turn::construction_step`). Regions go in the list's order (`World::regions_in_list_order`
+  filtered by owner; accessloss2 2026-10-20, CONFIRMED, see "Faction region list order"; test
+  `construction_steps_the_faction_regions_in_list_order`): each region's step reads and writes only that region's
+  slots, its school's research entry and its owner's records (completion events, the recruitable cache), so the
+  order changes no result, only the order of the events (CONFIRMED by the callees below).
 - **Item types** (CONFIRMED; vtable +4 the type, +0xC the step, `0x00B781A0` the shared count: done + 1, finished
   at done ≥ total):
   - 0 upgrade (loader `0x00AE7040`, step `0x00B78560`) and 1 new building (loader `0x00AE6EF0`, step `0x00B78230`): the level at
@@ -2227,9 +2619,9 @@ garrison join. Round 15's read of `0x00B71FB0` (1523 bytes, the queue tick) sett
   manager's method `+0x20`, hand each to `0x00B0A270`, and delete the entries that fail `0x00B5C110`.
   There is **no unit construction and no `num_men` read anywhere on it**. So round 12's
   "no `num_men` reader and no position / garrison-branch reader found on this path" was not a failure to
-  find them: they are not there. The spawn is elsewhere, in the `0x008EF790` walker.
+  find them: they are not there. The spawn is elsewhere (corrected 2026-10-20: in the manager's +0x20 itself, `0x00B1E500` / `0x00B1D7E0`, §Recruitment spawn and reinforcements; `0x008EF790` only links reinforcements).
 - **Placement and the garrison join were already ported — by 0-E, not by us.**
-  `CampaignModel::spawn_recruited_unit` (`commands.rs`) implements the `0x008EF790` walker and the
+  `CampaignModel::spawn_recruited_unit` (`commands.rs`) implements phase 3 of `0x00B1E500` and the
   branch: land into the army garrisoned in the settlement if it is the owner's and has room, else a new
   army under a new colonel; naval into the navy that received the port's last ship while it is still in
   the port, else a new navy under a new captain at the port slot's position. Both branches are marked
@@ -2258,6 +2650,83 @@ garrison join. Round 15's read of `0x00B71FB0` (1523 bytes, the queue tick) sett
   new commander can be found, and the population cost of a queued item (round 12 step 1 found the
   variable, not the amount).
 
+### Recruitment spawn and reinforcements (recruitmarch, 2026-10-20; static trace, CONFIRMED unless tagged; code `turn.rs` `region_turn`, `commands.rs` `spawn_reinforcement` / `march_reinforcements`)
+
+Correction to round 15: the spawn is not in the `0x008EF790` walker. The queue tick `0x00B71FB0`
+creates the units through the queue manager's vtable +0x20: land manager vtable `0x0137CBA0`
+(+8 `0x00B62010` = the settlement position, region +0xFC; +0x20 `0x00B1E500`), naval vtable
+`0x0137CBE4` (+0x20 `0x00B1D7E0`). `0x008EF790` only links a new army's units into the target's
+incoming-reinforcement list (below).
+
+- **Land spawn `0x00B1E500`, three phases.**
+  1. Per queued item whose target (+0x18) or +0x50 is set, the distinct (target, +0x50) pairs in queue
+     order. A finished item (`0x00B5C110`) whose target leads no army (`0x009D3A40` = 0) is retargeted
+     to the character of the holder at target +0x2B0 when that holder's vfunc +0x38 says so (vfunc +0x14
+     with holder(+0x34)+0x74), else its +0x18 is cleared.
+  2. Per pair: the spawn spot is the settlement position (manager +8), moved by a path query, to the
+     target army's building (`0x00B6D760`, mover 9) when it has +0x9C, else to its commander
+     (`0x00B6D8D0`, mover 6); both run the pathfinder `0x00B6E6E0` and trim the path (`0x00B77820` →
+     `0x00B67A30` / `0x00B77900`, `0x00B77790`; a one-node path becomes empty). Query true with nodes:
+     the spot is node 0 (INFERRED meaning); with none: a free spot near the settlement (`0x00B39FE0`).
+     Then `0x00B1D3F0(target, +0x50, out, &spot)`: every finished item of that pair becomes a unit
+     (land `0x00B258C0`, naval `0x00B25D20`) and the group ONE new army, `0x008D25F0(owner, units, spot,
+     1, 0, 0, 0)` (a navy `0x008D2DA0` when the group has no land unit), each unit placed (`0x00A27990`,
+     `0x008F9040`) and named (`0x008EDE30`). Query false: the pair's items fall to phase 3.
+  3. Every other finished item with +0x48 = 0: +0x18 cleared, unit `0x00B258C0`, then the garrison /
+     existing army / new army branch `0x008D25F0(owner, units, spot, 1, 0, 1, 1)` (the one
+     `spawn_recruited_unit` ports).
+  Each new unit posts the `UnitTrained` script event (vtable `0x0137D120`, name string `0x0135056C`,
+  posted by `0x00E30700`): in the group spawn at `0x00B1D74F`, the naval spawn `0x00B1D7E0` at
+  `0x00B1E44F` and phase 3 at `0x00B1F1C9`.
+  Which unit the new army's colonel is attached to: `0x008D25F0` → `0x008D24B0` (commander pick
+  `0x008B8E50` / `0x008ED2C0`) or `0x00870E60` (army constructor), not traced (PROVISIONAL in ours).
+- **+0x50 (`RECRUITMENT_ITEM` #11)** is `QueueRecruitmentItemForUnit`'s third argument: 0 from the
+  player's command (`HandleRecruitUnitCommand` pushes 0 at `0x00936C55`, and passes the command's
+  commander as the target) and from the console (`0x00924FE2`) and one AI site (`0x00A9F350`); the AI site
+  `0x00A9F12C` passes an AI object (`0x004CE450` result at `0x00A9F10F`) with target 0. So the vanilla
+  saves' nonzero #11 are AI items, and the player's targeted items group by target alone. The AI's
+  (0, handle) groups (an army raised for an AI task) are not modelled.
+- **Hand-over to the march.** The tail of `0x00B71FB0` takes the (item, new army) pairs of +0x20 and,
+  per new army of an item with +0x18 (one per army), calls `0x00B0A270` on the faction's
+  `ARMY_REINFORCEMENT_MANAGER` (faction +0x52C, vtable `0x0137DAEC`, getter `0x00B01F80`) with (new
+  army's commander, settlement region +0xFC, target). An entry with the same source is retargeted
+  (`0x00B69670`); else a new 0x54-byte entry `0x00AE8B10(source, settlement, target, 1)`: +4 source,
+  +8 target, +0xC settlement, +0x10 done; `0x008EF790` links the source army's units into the target's
+  incoming list. The entry listens to both characters (`0x0137DA8C` / `0x0137DA98` → `0x00B57DA0`: either
+  destroyed, the entry is dead; `0x00B57E50`).
+- **The march, at the faction turn start.** `0x008F2620` calls `0x00B71FA0(faction +0x52C)` at
+  `0x008F2B35`, after the regions (`0x008F2B14`) and before research availability; only on the
+  non-rebel branch (the rebels' `0x008F2B47` skips it; "The rebels' turn start"). An earlier version of
+  the turn-start list's item (g) called this "the diplomacy manager": it is the reinforcement manager. `0x00B71FA0` → `0x00B5C710` (character
+  entries) and `0x00B5C7A0` (unit entries). Per character entry: valid (`0x00B5C830`: source and target
+  set, the source's `0x009D0D00(target, 1)` UNKNOWN, done flag clear) → `0x00B5C4A0`, else deleted. `0x00B5C4A0`:
+  `0x00968B00(movers, target, 1)` (`0x008BE360`, else the move-to-character order `0x009195A0`, a
+  multi-turn order object `0x00905460` of 0x120 bytes resumed by `0x009653D0`; events 0xEF / 0xE8); true
+  → `0x00967070`, source army +0x9C +0x14 = 1, entry done and deleted; false → kept for next turn.
+- **Saved.** `ARMY_REINFORCEMENT_MANAGER`: writer `0x00AFB6C0` (from `0x00892A80`),
+  `CHARACTER_REINFORCEMENTS_ARRAY` items by `0x00AFC060` (i32 source, i32 target, i32 settlement, bool
+  done), `UNIT_REINFORCEMENTS_ARRAY` by `0x00AFDEC0`; reader `0x00AE62F0` (from `0x0087A190`) →
+  `0x00AE8C10`; post-load `0x00B5B740` (from `0x008E07F0`) → `0x00B5C130` / `0x00B5C330`. Not modelled
+  in our saves (an entry lives only from its region step to the same turn start's march in ours).
+- **`RECRUITMENT_ITEM` #2** (settled): `WriteRecruitmentItemToEsf` `0x00B5C900` writes #0 the item, #1
+  raw +0x14, #2 raw +0x18; `LoadRecruitmentItemFromEsf` `0x00AF3D00` reads #1 / #2 raw and registers the
+  item under #0 (`0x0105AEC0`); the item's post-load resolver `0x00B5C2D0` (item vtable `0x0137CAE8`
+  slot +0x20, called from `0x00B5C1B3` / `0x00B5C243`) maps +0x14 and +0x18 through the id table
+  (`0x0085F890` → `0x0105AC60`; an unknown id gives 0) and, for a target, registers the item as his
+  listener (`0x005301C0`). So #2 is the target character's object id, 0 for none (CONFIRMED). No vanilla
+  evidence save holds a nonzero #2.
+
+**Ours.** `region_turn` spawns the finished land items whose target leads an army first, one new army
+per target (`spawn_reinforcement`: units, then the colonel's army at the settlement position, not
+garrisoned, the colonel on `commander_unit`'s pick, an entry in `World::reinforcements`), then the rest
+(`spawn_recruited_unit`). The faction's `FactionReady` step runs `march_reinforcements` before research
+availability: an entry whose source or target leads no force is dropped; else the merge order's walk and
+merge (`march_and_merge`, shared with `MergeForces`). PROVISIONAL: the spawn spot (no path query; the
+exe's failed query → settlement spawn; node 0 / `0x00B39FE0`); the holder retarget of phase 1; the
+colonel's unit; the march is one walk this turn, then the entry is dropped (the exe's order lasts until
+it arrives, and a refused order retries next turn); the entries are not saved; naval targeted items
+(`0x00B1D7E0`) and the AI's (0, handle) groups spawn as ordinary recruits.
+
 ## Research (round 7; code `ntw_sim::campaign::research`)
 - **Save layout** (CONFIRMED). `FACTION_TECHNOLOGY_MANAGER` `techs[]` entries are {utf16 key, u32 state, f32
   progress, u32 researcher, u32[], u32}.
@@ -2268,23 +2737,69 @@ garrison join. Round 15's read of `0x00B71FB0` (1523 bytes, the queue tick) sett
   - 0 = researched (CONFIRMED: completion `0x008EED20` sets progress = cost and state 0; the stored progress of
     every state-0 tech equals its cost).
   - 2 = available. Research may start in state 2 or 1 (`0x008B33B0`).
+  - 3 = requirements met but a required building level missing (`state::BUILDING_MISSING`).
   - 4 = not yet available.
-- **Availability** (round 8: CONFIRMED writer `0x008F91F0`). For each tech in state 4 or 3:
-  - its single requirement (record +0x60) must be absent or researched;
-  - the faction must own the tech's building level (`0x008B13E0`): any slot of an owned region (region +0x120 slot
-    list; any health, any holder; not the road) with a building whose chain record matches the required one (the pair
-    at chain +0x10 / +0x14), at that level or higher;
-  - every tech of the record's list +0x70 (`technology_required_technology_junctions`) must be researched.
+- **Links** (techchain worker 2026-10-20, static trace, CONFIRMED; code `ntw_campaign::rules`, test
+  `the_loader_links_technologies_as_the_exe`, real-data test `shipped_technology_links_match_the_exe_builders`).
+  - Chain record `BuildBuildingChainRecord` `0x00E55C30`: +0xC = thread from the chain's group
+    (`GetTechnologyThreadFromChainGroup` `0x00F21E60`, case-sensitive: industry 1, military 0, enlightenment 2, else 3);
+    +0x10 = 0 when the thread is not 3, else −1; +0x14 = the row's #2 number; +0x18 = category enum (military 0,
+    government 1, money 2, agriculture 3, happiness 4, research 5, else 6). Loaded as `BuildingRules::chain_thread` /
+    `chain_class`, `BuildingChain::group`.
+  - `LinkTechnologyRequirements` `0x00F21A30` (called from `0x00E2125A`): per technology, +0x5C = its building level
+    (unknown key: logged, +0x5C null), +0x8C = chain +0xC (the thread, `TechRules::thread`), +0x90 / +0x94 = chain
+    +0x10 / +0x14, +0x98 = level +0x10. Rows of `technology_required_building_levels_junctions`
+    (`GetTechnologyRequiredBuildingLevelsJunctionsTable` `0x00E2F220`, row reader `0x00DD2620` "ss") with a known level
+    go to list +0x78 / +0x7C / +0x80 (`TechRules::required_buildings`). Then each
+    `technology_required_technology_junctions` row (`GetTechnologyToTechnologyJunctionsTable` `0x00E2F2E0`) with a known required tech: same pair (+0x90 / +0x94)
+    → +0x60 (`TechRules::parent`), else appended to +0x70. Unknown keys are logged ("In table %S: '%S' is not a valid key
+    for this table") and dropped; a junction row whose technology is no record is never matched (silent). Ours drops
+    the same rows and logs each once at load (`rules::invalid_key`), the silent ones too.
+  - **ORIGINAL BUG** (`0x00F21A30`): +0x60 is overwritten per same-pair requirement, so only the last one is ever
+    checked by `0x008F91F0`; ours checks every requirement (`TechRules::requires`), test
+    `every_requirement_is_checked_even_two_of_the_same_tree`. Vanilla has at most one per technology, so it gives the
+    same states.
+  - **ORIGINAL BUG** (`0x00F21A30` / `0x008F91F0`): a technology with an unknown level keeps +0x5C null, and the
+    availability walk dereferences it unconditionally (its chain record): a crash. Ours never opens it.
+  - Shipped data: `technology_required_building_levels_junctions` has 0 rows (state 3 never occurs in vanilla); every
+    vanilla thread equals the old key-prefix rule.
+  - `LinkUnitRequiredTechnologies` `0x00EA9B10` (unittechs worker 2026-10-20, static trace, CONFIRMED; called once from
+    the DB loader at `0x00E212A6`; this = the units table `0x00E31890`, args the junction table `0x00E31250` and the
+    technologies table `0x00E2EFB0`). At load, for each built unit in table order, each
+    `unit_required_technology_junctions` row in table order whose unit (row +0) equals the unit's key exactly
+    (`0x004F0F40` → `CompareUniStrings`, case-sensitive) has its technology (row +0xC) looked up in the technologies key
+    index (`0x0047AA40`). Unknown: logged ("In table %S: '%S' is not a valid key for this table", `0x01359008`) and the
+    row dropped. Known: appended to unit +0xD0 (count +0xCC, capacity +0xC8), repeats kept. A row naming no built unit
+    (including a unit the units builder dropped, `0x00EDC000`) matches nothing: dropped, no log. The drop is the
+    exe's deliberate bad-key handling, not a bug, so ours is 1:1: `rules_from_db` drops the same rows and logs each
+    once (the unit case too), test `the_loader_drops_unit_technology_rows_with_bad_keys`. Before, ours kept an unknown
+    technology and so never let the unit be recruited; the exe recruits it with no such requirement. Shipped data:
+    all 46 rows link (real-data test `unit_technology_rows_from_the_real_data`).
+- **Availability** (CONFIRMED, `UpdateFactionTechnologyAvailability` `0x008F91F0`; code `update_tech_availability`,
+  tests `availability_matches_the_chain_pair_at_the_level_or_higher`,
+  `a_missing_required_building_level_holds_state_3_until_it_is_built`). For each tech in state 4 or 3:
+  - its parent (+0x60) must be absent or researched;
+  - the faction must own a building of the pair (`FactionOwnsTechTreeBuildingAtLevel` `0x008B13E0`): any slot of an
+    owned region (region +0x120 slot list; any health, any holder; not the road) whose building's chain has the tech
+    level's chain +0x10 / +0x14, at that level index or higher. So any group-less chain with the same #2 number
+    serves (e.g. a Spanish variant), and a chain of another group does not;
+  - every tech of +0x70 must be researched (else the entry is left as it is).
 
-  Then the state is 2, or 3 when an item of the list +0x7C fails `0x008B13C0` (INFERRED to be
-  `technology_required_building_levels_junctions`, empty in the shipped DB, so 3 never occurs). The writer never
-  sets 4, so a tech never goes back (Bavaria, Italy and Oldenburg keep state 2 after losing the building).
-  - The chain match is modelled as "the chain, or a variant whose name starts with it" (`sAdminSpain` for `sAdmin`):
-    INFERRED for the +0x10 / +0x14 pair.
-  - Callers: research step `0x008DD450`, completion `0x008CDCB0`, load `0x008CB8F0`, and `0x008CDD60` after its
+  Then every level of +0x80 must be owned by exact chain at that level or higher (`FactionOwnsBuildingLevelOrHigher`
+  `0x008B13C0` → `FactionOwnsBuildingOfChainAtLevel` `0x008B1330`): state 2, else 3. The writer never sets 4, so a
+  tech never goes back (Bavaria, Italy and Oldenburg keep state 2 after losing the building).
+  - On state 2 the exe posts {technology manager +0x14 (its faction), entry} through `(game +8) +0x4E0` vtable slot +8: not identified (PROVISIONAL in
+    `update_tech_availability`).
+  - Callers: research step `0x008DD450`, grant `0x008CDCB0`, load `0x008CB8F0`, and `0x008CDD60` after its
     per-region pass. The model runs it at the faction's turn start (after its regions) and after each research step.
   - The rule reproduces every state of the 4 shipped start positions (test
-    `tech_availability_rule_keeps_every_start_position_state`) and changes nothing in the 12 vanilla saves.
+    `tech_availability_rule_keeps_every_start_position_state`) and changes nothing in 11 vanilla saves
+    (`ECON_TECH=update`, 0 changed each).
+- **Grant** (`GrantFactionTechnology` `0x008CDCB0`, CONFIRMED; code `grant_technology`, test
+  `a_grant_walks_the_parents_and_always_updates_availability`): while the tech is at state 1..4 it is completed
+  (`0x008EED20`) and the walk follows its parent (+0x60) until there is none; then always
+  `RebuildResearchedTechnologyEffects` `0x008E49C0` (clears the manager's set +0x18, then sums every state-0 record's effects +0xAC into it), the
+  availability update, and the faction effect sum unless the second argument is set.
 - **Who researches** (`0x008B33B0` checks, `0x008EEC90` starts):
   - a school is a slot whose building's own effects give `research_points` > 0, at full health, held by its
     region's owner (colleges / universities 10 / 20 / 40, Spanish ones 15 / 30 / 60, Spanish churches 10 / 20 / 40);
@@ -2295,9 +2810,9 @@ garrison join. Round 15's read of `0x00B71FB0` (1523 bytes, the queue tick) sett
   `(100 + research_rate_mod) / 100 × (min(Σ gentlemen, character_research_points_cap = 12) + research_points +
   thread effect)`.
   - The effect set is the owner's faction sum + the school building's own set + each own gentleman's set.
-  - The thread effect is `research_points_military` / `_industry` / `_enlightenment` for thread 0 / 1 / 2. The thread
-    (technology record +0x8C) is not a DB column; it is taken from the key prefix: military / economy / other
-    (INFERRED; consistent with the saves).
+  - The thread effect is `research_points_military` / `_industry` / `_enlightenment` for thread 0 / 1 / 2, none for 3.
+    The thread is technology record +0x8C, copied from its level's chain +0xC (the chain group, see Links; CONFIRMED,
+    test `the_research_rate_reads_the_technology_thread`).
   - A gentleman counts his research attribute (`0x009C7610` index 8: level + bonus array +0x394). That is
     **saved level + 1** (INFERRED: the saved level already holds trait bonuses, e.g. Academic Honours base 2 + 1 = 3
     saved, and every AI school with a gentleman needs one more point; the +1's source is not traced).
@@ -2315,10 +2830,13 @@ garrison join. Round 15's read of `0x00B71FB0` (1523 bytes, the queue tick) sett
   - Its effects apply at once through the effects store (state 0 technologies).
   - Not modelled: the prestige award `0x008F8EF0` (×var 7 when 0x008BE760 holds, majors only; prestige is not
     modelled).
-- **Gates** (INFERRED: the DB junctions; 0 failures over the queued items of the original saves):
-  - `building_level_required_technology_junctions` (`building_tech_ok`, used by `can_build`): e.g.
-    sAdmin3_court_justice needs admin1_public_schooling, so Paris cannot upgrade its magistrate at the start.
-  - `unit_required_technology_junctions` (`unit_tech_ok`, used by `recruitable_units`): e.g. rocket troops need
+- **Gates** (0 failures over the queued items of the original saves):
+  - `building_level_required_technology_junctions` (`building_tech_ok`, used by `can_build`; CONFIRMED:
+    `LinkBuildingLevelRequiredTechnologies` `0x00DDF300` links each row with a known technology into level record
+    +0x114 / +0x118 / +0x11C, unknown dropped; `BuildSlotConstructionOptionsWithCost` `0x00B43300` flags the option 8
+    when any of them is not at state 0, and the construct command drops it): e.g. sAdmin3_court_justice needs
+    admin1_public_schooling, so Paris cannot upgrade its magistrate at the start.
+  - `unit_required_technology_junctions` (`unit_tech_ok`, used by `recruitable_units`; CONFIRMED `0x008AAB60`, links `0x00EA9B10`): e.g. rocket troops need
     military5_rockets.
   - `nr1`–`nr3` are saves written by our own port (0 public-order classes), not evidence; `nr3` holds a France
     sAdmin3 queued without the tech.
@@ -3113,6 +3631,70 @@ CONFIRMED from the exe unless tagged; the Ghidra names below are in the program.
     the new owner's capital; otherwise a negative value with the new owner's +0x6E0 clear is scaled by
     (1 + var 0x8a / 100), rounded up; −2 when `0x009DAE00` holds; 0 for spa_napoleon. Not modelled:
     `Region::class_bases` is untouched by our owner changes (BACKLOG).
+  - **The class war factor** (classfactor 2026-10-20, CONFIRMED by disassembly and decompilation; code
+    `population::{class_war_change, class_round, class_round_step}`, `CampaignModel::move_class_war`, state
+    `PopulationClassState::war`): class +0x20, happiness factor [8] (our `ClassPublicOrder::happiness[7]`, the UI's
+    `happiness_war`). The fill `0x008EDF70` never writes it (nor +0x28, bankruptcy); public order sums the stored
+    value.
+    - *Load / save*: `0x008861E0` reads `POPULATION_CLASS` #1 (i32[13]) into class[1..13], so +0x20 is #1 element 7;
+      #11 (+0x70) when the record's version > 1, #12 (+0x74) when > 2. Ours reads all three per class
+      with a key (#0) and writes them back by position.
+    - *Events*: `0x008A94D0(class, kind, owner, other)` returns when either faction is the rebels
+      (`0x008CEEF0`). Kind 6 (a war declaration): category = the owner's attitude category to the other
+      (`0x00B0DBA0`); lower = the class is the owner's government's lower class (`0x008CE230`), upper = its upper
+      class (`0x008CE2F0`); the ranks are the governments' record +0x14 = `government_types` #3 (copied by the
+      record ctor `0x00F76A70`; 3/2/1/0 shipped). Category 0: +4 if (lower and own ≤ theirs) or (upper and theirs
+      ≤ own); 3: −3, 4: −6, if (upper and own ≤ theirs) or (lower and theirs ≤ own); else 0. Kinds 0..5 add the
+      i32 table `0x014579F0` = −1, −2, +1, +2, −4, +4. Every change is then clamped to [−15, 6].
+    - *Who calls it*: `0x00A63490` (thunk, ECX += 0x28) → `0x00A633F0`, which runs only when the region is its
+      owner's capital (`0x008B3790`: faction +0x72C → +0xFC, or 0) and calls `0x00A63430` per class →
+      `0x008A94D0`. Callers: `ApplyWarToDeclarerRecord` `0x00B27070` with kind 6 (no ally, no skip flag; only
+      the setup `0x00B45C20` passes the flag) and the battle results `0x008ACCF0` (from `0x008F7880` at
+      `0x008F7B7C`) with kinds 0..5 on each side's capital: battle state +0x60 ∈ {6, 7, 8} → winner kind 5, loser
+      kind 4; else winner codes 8/9 → 2, 10/11 → 3; loser 13/14 → 0, 15/16 → 1. Ours: the war declaration
+      (`war_on`); the battle kinds are ready (`ClassWarEvent::Battle`) but not called, the battle results lack
+      the victory type (BACKLOG).
+    - *ORIGINAL BUG*: `0x00B27070` reads the capital's vtable at `0x00B270D0` without a null test after
+      `0x008B3790` returns 0 (a declarer with no capital) and crashes; ours skips the step. The battle path shows
+      the intent: `0x008ACCF0` tests `0x008C9200` (faction +0x72C ≠ 0, has a capital) for both sides before each
+      of its calls. *How it is reached* (traced read-only, classfactor fix round): every path into `0x00B27070`
+      with no ally and no skip flag, none of which tests the declarer's capital: the declare-war command
+      (`CCQ_DECLARE_WAR` handler `0x00932B70`, registered by `0x00420400`) → `DeclareWarAndCallAllies`
+      `0x00B268B0` (ally 0, skip 0) → `0x00B26700` → `0x00B27070`; a deal's war record applied (`0x00C4B990`,
+      vtable ref `0x0138201C`) → `0x00B268B0`; and `0x008BFA80` / `0x008BFCA0` (vtable refs `0x01357314` /
+      `0x0135735C`) → `0x00B268B0` / `0x00B26700`. (The setup `0x00B45C20` passes the skip flag and the join-war
+      accept `0x00C188F0` an ally: both safe.) A declarer has +0x72C = 0 when it was loaded with no capital (the
+      loader `0x0087A190` stores 0 at `0x0087B20C` / `0x0087B217` for a missing region) or when `0x008BA580`
+      cleared it on an owner change, `FindNearestCapitalRegion` `0x008DABC0` found no region in its home theatre
+      (+0x734) and the change did not end the faction (`0x00A651D5` ends a capital-less faction only when the
+      transfer's first flag is set). Not seen in vanilla play.
+    - *Ghidra names* (classfactor): `0x008A94D0` PopulationClass::ApplyPopulationClassWarEvent (field +0x20
+      `nWarFactor`), `0x00A63490` ApplyRegionPopulationWarEvent, `0x00A633F0` ApplyWarEventIfCapitalPopulation,
+      `0x00A63430` ApplyWarEventToPopulationClasses, `0x008CE230` IsLowerClassOfFactionGovernment, `0x008CE2F0`
+      IsUpperClassOfFactionGovernment, table `0x014579F0` g_anClassWarBattleChange; `0x008ACCF0`, `0x008F9690`
+      and the class finders keep their FUN_ names until the battle and riot items trace them.
+    - *Battle path details*: both sides must not be the rebels and both must have a capital (`0x008C9200`); the
+      first block also posts a UI event (0xC1..0xC4) by which side is human (`+0x6E0`) and `0x008CECD0`
+      (not traced).
+    - *Round decay*: `0x008F9690`'s first part (before its riot checks, not modelled), per pass: +0x20 one step
+      toward 0; a negative +0x28 +1; a negative +0x74 +1; a positive +0x54 (repression [21]) −1; a positive +0x70
+      becomes 0 below 3, else −2; +0x64 == 5 clears +0x64/+0x68/+0x60. `GrowRegionPopulation` `0x00AB4070` runs
+      the passes before the growth: a rebel owner, one per class; otherwise one on the first lower class
+      (`0x00A60FE0`), one on the first upper (`0x00A61320`), one on the first of neither (`0x00A89C90`: not
+      `0x008CE320` upper, not `0x008CE260` lower); a find with no match takes the first class (vanilla regions
+      have three classes, so each once). Ours keeps +0x20, +0x70 and +0x74 (+0x28 and +0x54 are not stored:
+      BACKLOG).
+    - *Seams*: `population.class_round` (a region's classes after the passes) and `population.class_war` (one
+      class's factor after an event).
+    - *Projection* (classfactor fix round, CONFIRMED by disassembly): `ProjectRegionPopulationRound`
+      `0x00A727D0` calls `GrowRegionPopulation` with ECX = the copy (`CopyRegionFactors` `0x00A4C1D0` filled it)
+      at `0x00A72844`, so all three class passes run on the copy's classes; then `RefreshRegionPopulationFactors`
+      `0x00AA9C10` refreshes the copy with the predicted set, calling `0x008EDF70(region, set, copy, garrison)`
+      per class, so the predicted public order and policing read the copy's classes and its converted religions
+      (before `0x00AA4860` normalises them). Ours: `population::project` runs the seam `population.class_round`
+      on the copy (`Projection::classes`), and `FactorInputs` carries the classes and religions the refresh
+      reads.
+    - Owner change: `0x008E6400` clears +0x20 too (not modelled, with the rest of that step).
   - **Projection seed**: `ProjectRegionPopulationRound` passes a local holding 0x61266 by pointer to
     `GrowRegionPopulation`, which reaches `0x008B37D0` through the riot passes `0x008F9690` (class +0x6C). The
     director's RNG is seeded with the same constant (RNG section), but this use is not traced: UNKNOWN.
@@ -3126,9 +3708,10 @@ CONFIRMED from the exe (the calls of each function in order; event posters found
   slots (`SlotTurnStart` each, `0x00AAE8D0`, a port's naval queue `0x00B71FB0` right after its slot), the land queue
   `0x00B71FB0`, `0x00A249A0` (per slot: a chance roll on the campaign RNG from two building effects; INFERRED
   building-driven spawns), the settlement's virtual +0x98 → `0x00A22480`, then **`RegionTurnStart`** (vtable
-  `0x01376DB8`); (g) the diplomacy manager `0x00B71FA0`; (h) **research availability `0x008F91F0`**; (i) faction
-  `0x00A18A70`; (j) the character recruitment pools `0x00A24C90` (+0x6F4); (k) every region `0x00A6F720`; (l) eur only
-  `0x008F2E10`; (m) `0x008DA210` (characters with skill 5 or flag +0x4E0); (n) +0x800: AI `0x008B4B70` / human
+  `0x01376DB8`); (g) the reinforcement manager `0x00B71FA0` (faction +0x52C, §Recruitment spawn and reinforcements); (h) **research availability `0x008F91F0`**
+  (thunk `0x008AE3B0`); (i) the message manager `0x00A18A70` (model +0xFA0); (j) the character recruitment pools
+  `0x00A24C90` (+0x6F4); (k) every region `0x00A6F720`; (l) `0x008F2E10` (the government +0x70C's popularity, see
+  "The rebels' turn start"); (m) `0x008DA210` (characters with skill 5 or flag +0x4E0); (n) +0x800: AI `0x008B4B70` / human
   `0x008F2480`; (o) every character's pending order `0x009653D0` (+0x9C, resumed or dropped); (p) +0x940 → `0x00A25310`;
   (q) forces in transit (+0x90C list → `0x00A2A080` / `0x00A29F20`); (r) **`FactionTurnStart`** (vtable `0x01356328`,
   name getter `0x008BDE80`) last.
@@ -3140,11 +3723,125 @@ CONFIRMED from the exe (the calls of each function in order; event posters found
   region `0x00AB42F0` (discontent growth); `0x008BC9C0`; characters matched by `0x009DA190` → `0x00A0C6F0(3)`; per
   region `0x00AB3DA0` and the queue flag `0x00A78620`; **the relationships `0x00B29100`**; `0x008F3C40`; `0x008AB200`,
   `0x008ABF50`.
+  **Who skips what** (rebelroundend 2026-10-20, CONFIRMED by listing). The function tests the rebels
+  (`IsFactionWithoutRecord` `0x008CEEF0`) and faction +0x824 (out of the game) together, four times: before the settle
+  (`0x008BC65D` / `0x008BC666`), before the family year `0x008BC9C0` (`0x008BC6C7` / `0x008BC6D0`, which also needs the
+  +0x794 object), before the block of construction + queue flag + relationships + research (`0x008BC862` /
+  `0x008BC86B`, both jumping to `0x008BC8C4`) and before `0x008AB200` / `0x008ABF50` (`0x008BC8C6` / `0x008BC8CF`).
+  The region loop of `0x00AB42F0` (population, discontent growth, town wealth `0x00AB4410(1)` at `0x00AB437E`) tests only
+  +0x824 (`0x008BC685`), so the rebels' regions grow and their town wealth moves; the migration table `0x00A44DB0`, the
+  character refresh (`0x009DA190` → `0x00A0C6F0(3)`) and the +0x964 list clean-up run for every faction. Ours before:
+  the rebels and factions out of the game were settled (treasury paid, record ring rolled, cannot-pay and desertion
+  reachable), and the rebels' relationships and research stepped (only construction skipped them). Now one gate,
+  `CampaignModel::in_the_game_with_record`, used by `economy::settle_round` (`Settlement::Skipped`), `TurnStep::Economy`
+  (construction, relationships, research) and the family year; the population step runs while the faction is in the
+  game. `0x008AB200` / `0x008ABF50` walk the faction's force list (+0x7BC count / +0x7C0 data) and are not modelled
+  (UNKNOWN purpose). Test `the_round_end_economy_skips_the_rebels_settle`.
 
 The model now follows (a)–(r) for what it models: characters (`CharacterTurnStart`, action points) → regions (slots,
 land queue, `RegionTurnStart`) → research availability → `FactionTurnStart`; and at the end
 `CharacterTurnEnd` → `RegionTurnEnd` (+ offset) → `UnitTurnEnd` → `FactionTurnEnd`; construction runs in the round-end economy, before diplomacy and research, as the exe's. Before, `FactionTurnStart` came
 first and `RegionTurnEnd` closed each region update. Not modelled: (a)–(d), (g), (i)–(q) and `0x00A249A0`.
+
+**Region walk order** (regionwalk 2026-10-20, CONFIRMED by listing). Every per-region loop of the turn start and
+turn end walks the faction's owned-region list (faction +0x778 count, +0x77C data; see "Faction region list
+order"), front to back, re-reading the count each step, each entry an owned link whose first field is the region:
+(f) at `0x008F2AF6`–`0x008F2B2D` for every faction with a record, and the same walk at `0x008F2B7F`–`0x008F2BAF`
+in the branch for a faction without a record (`IsFactionWithoutRecord` `0x008CEEF0` true, the rebels: the `JNZ` at
+`0x008F28E1` goes to `0x008F2B47`, their character loop, then `0x008F2B7F`), which skips the tax-rate log, the
+reinforcement manager `0x00B71FA0` and research availability (see "The rebels' turn start" below); (k) `0x00A6F720` at `0x008F2BED`–`0x008F2C1D`; and the turn end's `0x00A786C0` loop at
+`0x008BD1E1`–`0x008BD211`. None walks the region manager's array. Model: the turn start queues its
+`TurnStep::Region` steps from `World::faction_regions_in_list_order` (test
+`the_turn_start_updates_the_regions_in_the_faction_list_order`); the order matters beyond the events, since a
+finished land-queue item makes its unit then (new ids are handed out in that order). The turn end's `RegionTurnEnd`
+walk (`TurnStep::FactionEnd` in `turn.rs`) uses the same list (test
+`the_turn_end_walks_the_faction_list_with_gains_last_and_losses_dropped`: a region gained in play goes to the
+list's end, a lost one leaves it and the rest keep their order). The vanilla-save tests
+(save_compat, economy_fidelity, own_save_install, campaign_play) pass unchanged. Ghidra: pre comments at the three
+loops.
+
+**The rebels' turn start** (rebelresearch 2026-10-20, CONFIRMED by listing of `0x008F2620`). Both paths share
+everything up to `0x008F28DA` ((a)–(d)) and from `0x008F2BB1` on, except two more `IsFactionWithoutRecord`
+(`0x008CEEF0`) tests there. For the rebels the `JNZ` at `0x008F28E1` jumps to `0x008F2B47`: the character loop
+(`0x00A24EB0`) and the region loop (`0x00AAE820`) only, then the join at `0x008F2BB1`. So the rebels skip:
+1. the `FactionTaxRates` log (`0x008F28E7`–`0x008F2AC4`; runs only while the byte `0x01767039`, read by
+   `0x0106A690`, is set; it formats strings and writes no game state);
+2. the reinforcement manager `0x00B71FA0` (faction +0x52C, at `0x008F2B35`);
+3. research availability (`0x008AE3B0`, a `JMP` to `0x008F91F0`, on the technology manager faction +0x7C4, at
+   `0x008F2B40`);
+4. the message manager's step for the faction (`0x00A18A70` on model +0xFA0, at `0x008F2BCC`, behind the test at
+   `0x008F2BB3`: it takes the faction's entry of its map at +0xB0, drops the items whose vfunc +8 is false, and for
+   the rest finds a `MovieEvent` row by the faction's culture and posts it through model +0x270's vfunc +8; the
+   meaning, queued movies for the faction, is INFERRED);
+5. `0x008F2E10` on the government (faction +0x70C, at `0x008F2C30`, behind the test at `0x008F2C21`): it stores the
+   popularity `0x008DEA60` (capital's two class public-order terms clamped to ±20, plus a rounded term `0x00A975C0`,
+   plus 10, clamped 0..100) at government +0xE0, reports it to model +0xD9C's vfunc +0x2C only in `eur_napoleon` /
+   `mp_eur_napoleon`, then tail-calls the vfunc +0xC of government +0xCC (not traced).
+Steps both paths run: (j) the pools `0x00A24C90` (own +0x814 / `0x008CA0B0` test), (k), (m)–(r).
+Model: (2) and (3) are modelled at the turn start (`march_reinforcements`, then `update_tech_availability`), and
+`TurnStep::FactionReady` skips both for the rebels behind one test (tests
+`the_rebels_turn_start_skips_research_availability`: A's technology opens at its turn start, the rebels' stays
+unavailable through theirs; `the_rebels_turn_start_skips_reinforcement_march`: a rebel entry neither marches nor is
+dropped at their turn start). (1) is a log; (4) is display-side in ours (messages are events); (5) is not modelled (the
+government screen computes the popularity itself, PROVISIONAL in `ntw_script` government.rs). Also from the xrefs:
+`AddRegionToFaction` `0x008AE270` calls `0x008AE3B0` twice (`0x008AE2D1`, `0x008AE2E3`); ours does not update
+availability on a region gain (BACKLOG trace line). The round end's rebel test (`0x008BC650`) is a separate item.
+Ghidra: EOL comments at `0x008F28E1`, `0x008F28E7`, `0x008F2B35`, `0x008F2B40`, `0x008F2BBA`, `0x008F2C28`; plates of
+`0x008AE3B0` and `0x00B71FA0` corrected (callers, our name).
+
+### Turn-step event delivery (BACKLOG §5 "eventdrop", 2026-10-20; code `ntw_script` `host::fire_all`)
+- `CharacterMoved` and `ForceDestroyed` are project events: the exe declares no script event of either name
+  (CONFIRMED, the declared event list in `analysis/worker3/lua_api.txt`), so they never go to Lua, by design.
+- Two drops found and fixed, each pinned by a test:
+  - The script host returned a turn step's or an AI turn's project events only when they were diagnostics.
+    So the app never got the AI's `CharacterMoved` (no move animation) or an `OutcomeMovie` posted during the
+    turn loop (the defeat movie of a human faction destroyed in an AI turn). Now every event
+    goes through `fire_all`, the one path for commands, turn steps and AI turns: script events fire in the model's
+    order, and every event is returned in that order (test `turn_steps_return_every_model_event_in_order`). The app
+    joins a character's successive moves into one path (`play::record_move`).
+  - Bankrupt desertion (`economy::bankrupt_desertion`, round-end step) destroyed the emptied forces into a local
+    list, losing their `ForceDestroyed`. It now goes to the step's events (test
+    `an_army_emptied_by_desertion_is_reported_by_the_economy_step`).
+- Still open (UNKNOWN, not traced): an AI turn applies all its orders and only then fires their script events
+  (`ntw_ai` `driver::play_faction` through the host's AI hook). A human's command fires its events right after it.
+  Whether the exe dispatches each AI order's events before its next order (event dispatch from model +0x120 /
+  +0x870) is untraced.
+- Events a script command queues (`grant_faction_handover`, `ScriptState::script_events`) are fired by
+  `ScriptHost::fire_script_events` through the same `fire_all` after each batch, so they are returned too.
+  Still dropped (not this branch's): `force_make_peace` / `force_declare_war` (`game.rs`) apply their model command
+  and discard its events.
+
+**Character walk order** (charwalk 2026-10-20, CONFIRMED by listing). The per-character loops of the turn start and
+turn end walk the faction's character list (faction +0x764 count, +0x768 data; see `World::character_order`),
+front to back, re-reading the count each step, each entry a link whose first field is the character: (e)
+`0x00A24EB0` at `0x008F2AC4`–`0x008F2AF4` for every faction with a record, and at `0x008F2B47`–`0x008F2B7D` in the
+rebels' branch; (o) `0x009653D0` at `0x008F2C5B`–`0x008F2C8D` (not modelled); the human-only achievement loop at
+`0x008F26DC` (`0x00A198C0`, not modelled); and the turn end's `0x009DA210` at `0x008BD1AF`–`0x008BD1DF`, right
+before its region loop. None goes by character id. The list: a constructor appends (`0x008CF6B0`), removal keeps
+the rest's order (`0x008B0150`), a faction transfer moves the character to the new list's end (`0x00A1B4E0`). Model:
+`World::faction_characters_in_list_order` (the one filter of `characters_in_list_order` by faction, also used by
+the round-end death checks) feeds `TurnStep::CharactersStart` (refill, `CharacterTurnStart`, then the hidden flags)
+and the `CharacterTurnEnd` walk of `TurnStep::FactionEnd`; before, both went in id order. Test
+`the_turn_walks_the_faction_character_list_with_gains_last_and_losses_dropped` (a character made in play last, a
+removed one dropped, the rest in list order, at both the turn end and the next turn start). Ghidra: pre comments at
+`0x008F2AC4`, `0x008F2B47`, `0x008BD1AF`.
+
+**The other region walks** (idwalks 2026-10-20, CONFIRMED by listing unless tagged). (1) The round end's population
+step (`RunFactionRoundEndEconomy` `0x008BC68E`–`0x008BC6C3` → `UpdateRegionRoundEnd` `0x00AB42F0` per entry) walks
+the faction region list. Vanilla's rules read only their own region, but a mod rule's state writes reach the next
+region's rule, so `population_round_end` now walks `World::faction_regions_in_list_order` (test
+`the_population_round_end_walks_the_faction_list_with_gains_last`). (2) The population refresh walks the list in
+both passes (round start `0x008F1FB3` → `0x00AAE710`; round end `PrepareFactionRoundEnd` `0x008E1040` →
+`0x00AB3E70`), and the policing trackers too (`0x008E10CE`–`0x008E10FE` → `0x00AB4400`); order cannot change
+either: each region's factors read only its own state, and each tracker books a wrapping integer change into one
+category. Code left. (The exe interleaves refresh and trackers per faction; ours refreshes every faction first, the
+same result since a tracker reads only its own region's freshly stored cost.) (3) The rival score's victory-region
+share (`UpdatePlayerRivalScoreBelief` `0x00BD22BC`–`0x00BD2309`) counts over the CAI faction's region list
+(`0x00A676E0`, CAI faction +0x114): a count, any order; code left. (4) The AI's repairs are not a region walk in the
+exe: `0x00AA4910`'s one caller is the CAI slot-intention executor `0x00CE9A60` (table entry `0x01389564`; it
+repairs when the slot's building handle equals the intention's +0x110, else builds through `0x00A67890`). The order
+is the CAI's intention order, not traced, and it matters (an AI repair's cost is capped at the treasury left), so
+`capture::ai_repairs` keeps its id-order stand-in (tagged in its doc).
 
 ## Diplomacy rules (round 9 item 3; code `ntw_sim::campaign::treaties`)
 CONFIRMED from the exe unless tagged. The relationship record is S1_LEFTOVERS.md §1 (29 fields, 24 attitude factors).
@@ -3182,8 +3879,8 @@ halves; the upper two minus 1): total ≤ −65 hostile (0), ≤ −22 (1), ≤ 
 
 **Per-turn update** `0x00B29100` → `0x00B29170`, called from the faction's round-end economy `0x008BC650` after its
 regions (CONFIRMED place). Skipped when the owner or the target is out of the game (+0x824, CONFIRMED;
-ours `CampaignModel::in_the_game` reads the flag, and only an own save from before the flag falls back to "holds a
-region or a force"). Order: factors drift; #6 −1; access: timed −1 with #25 and #19 +1, indefinite #19 +1, none #19 = 0;
+ours `CampaignModel::in_the_game` reads the flag, and only an own save from before the flag falls back to the
+exe's own rule, `CampaignModel::out_of_game_by_startpos_rule`, `0x008B4330`). Order: factors drift; #6 −1; access: timed −1 with #25 and #19 +1, indefinite #19 +1, none #19 = 0;
 #17 items of dead factions dropped, their turns −1; #15 −1, then 10 while allied or given access; at war #10 / #11
 (armies in the other's regions, GDP and army balance: `CampaignModel::war_balances`, army value PROVISIONAL) and
 #12 / #13 +1; #7 toward 0 (−2 / +1); protectorate tribute and patron income set again (booking the change); payments:
@@ -3199,7 +3896,7 @@ receives N − 1: the last payment's money leaves the payer and reaches no one, 
 (`diplomacy_round_end` step 8) keeps a finished item at 0 turns while the payee's `TurnStep::Economy` is still queued
 this round; the payee's economy removes it right after its settle (`CampaignModel::drop_finished_payments_to`), so
 the payee receives every payment the payer makes in either order (no toggle). Test
-`the_payee_receives_every_payment_in_either_turn_order` (treaty_money_tests.rs). Then the
+`the_payee_receives_every_payment_in_either_turn_order` (treaty_money_tests.rs); the user kept the fix (2026-10-20). Then the
 manager's +0x20 −1 (only while above 0: `test eax,eax; jz` at `0x00B29139`, CONFIRMED; ours `saturating_sub`).
 
 - **Diplomacy manager counters** (CONFIRMED, 2026-10-16). The manager (faction +0x528, 0x24 bytes; null for the
@@ -3472,7 +4169,7 @@ block, so a deal can bundle the change with other effects.
 
 **Correction (deal-items, 2026-10-10, UI_FIDELITY.md §4.9):** `0x00B449F0` is
 `TransferSettlementOwnership`, a *settlement* method (`this` = the settlement, `+0x178` its region,
-`+0x88` its owner; arguments new owner, character, report flag, a, b); its callers are the capture
+`+0x88` its owner; arguments new owner, force or NULL, report flag, a, b); its callers are the capture
 variants (settlement vtable), liberation and the deal's region item (`0x00C18BF0`). `0x008BEAA0` is
 called (disassembly `0x00B44A6A..0x00B44ABA`) when the region's *old* owner is in a revolution
 (`0x008CA0B0`, faction +0x814; corrected by campover2, see "Campaign over" (3)) and that owner's `+0x818`
@@ -3503,10 +4200,51 @@ further here).
   each record (`0x00B5F330`) and nothing sorts them (CONFIRMED, warnotice 2026-10-20; ours: the loader
   keeps it in `World::diplomacy_record_order`, own save format 10, and `call_allies` and the peace ally
   loop walk it through `record_targets_in_order`; before, faction-id order). Else:
-  - a human ally gets an offer (UI event; not modelled, so a human ally not yet at war is not called). The exe queues a
-    100-byte `AllyWarCallOffer` (model +0xF70, carrying the four participant lists so far), fires the
-    model's +0xB10 event and returns without declaring the war: the answer handler `0x008BFA80` records
-    the human's choice and calls `0x00B268B0` again, which then declares it (not modelled: BACKLOG);
+  - a human ally (+0x6E0) gets an offer and the declaration waits (CONFIRMED by disassembly, allyoffer
+    2026-10-20; ours: `call_allies` returns the `AllyWarCall`, `declare_war_rules` pushes it on
+    `CampaignModel::pending_ally_war_calls` and raises `AllyWarCallPending`). The offer (built by
+    `0x00885DA0` at `0x00B26C06` / `0x00B26DFE`, 100 bytes, vtable `0x01357314`, class string
+    "pending_diplomacy") holds +8 the target, +0xC the declarer, +0x10 the ally, +0x14 the chosen side (0),
+    +0x18 / +0x19 the call flags, +0x1C..+0x5B copies of the four lists so far (`0x00AE6260`), +0x5C the
+    negotiation context, +0x60 allied to the target, +0x61 allied to the declarer, +0x62 accepted (0). In the
+    target-side loop +0x60 = 1 and +0x61 = `0x008CE390`(ally, declarer) (not the rebels; same faction or
+    stance allied / patron / protectorate) with the declarer-loop flag; the declarer-side loop the mirror.
+    `0x008E2B80` (at `0x00B26C1F` / `0x00B26E17`) pushes it on the model's pending-diplomacy stack
+    (+0xF70, a linked list, newest on top) and sets the stack's countdown to 1 when the offer's vfunc +4
+    (`0x008EA660`: the ally human and not in revolution, `0x008CA0B0` / faction +0x814 / +0x81C) is false,
+    else 0. The UI event (model +0xB10 vfunc +8, `0x00B26C6A` / `0x00B26E5F`) carries {declarer, target, ally,
+    allied to the declarer, 1 from the target-side loop / 0 from the declarer's}; then `0x00B268B0`
+    returns: no notices, no war, no zones. The campaign update `0x008F4120` calls `0x008F7850` (at
+    `0x008F4699`): with a countdown of 0 it waits (the offer's vfunc +0x24); else it counts down and at 0
+    pops and applies the offer unanswered (+0x62 = 0: a refusal), so an ally that is no longer
+    human-needed is refused automatically (not modelled: revolutions; BACKLOG). While the stack is not
+    empty `0x008F4120` does not advance the turn phases (`0x008F41F9`, `0x008F457A`, `0x008F4686`,
+    `0x008F4706`, `0x008F4754`); ours: `CampaignModel::step` returns none and keeps the queue, except for
+    an `AiTurn` step (its orders already ran; PROVISIONAL: the AI's later orders of that turn are applied
+    before the answer, the exe's CAI pauses).
+    The answer is `CCQ_RESPOND_TO_ALLY_WAR_INVITATION` (string `0x0135BA00`, registered `0x00422480`,
+    handler `0x009370F0`): it reads {side faction, accept byte} (`0x0090E2F0`), sets +0x62 (`0x008A8190`)
+    and +0x14 (`0x008EFCE0`), then `0x008BF910` pops the top offer, applies it (vfunc 0) and frees it.
+    Applying (`0x008BFA80`): refused: +0x60 → listed broken with the target (`0x00B27500`) and
+    `BreakAllianceWithFaction` `0x00B13840`(ally, target, no war flag); +0x61 → listed refusing
+    (`0x00B0DB40`). Accepted with +0x14 = the target: joined (`0x00B274E0`), `0x00B26700` unless at war,
+    `0x00B0CCE0` on both records; +0x61 also listed refusing. Accepted with the declarer: joined
+    (`0x00741C70`), the war on the target, `0x00B0CCE0`; +0x60 also listed broken (its war broke that
+    alliance, `0x00B27070`). A side matching neither lists it nowhere, so it is asked again. Then
+    `0x00B268B0` again with the offer's lists, which skips the answered allies (`0x00B673D0` lists +0x20 /
+    +0x30 for the target's side, `0x00B67380` lists +0 / +0x10 for the declarer's), asks the next human
+    ally or declares the war. Ours: `CampaignCommand::RespondToAllyWarCall` → `respond_to_ally_war_call`
+    (an acceptance naming a side not asked for is refused and the call keeps waiting: the same end state
+    without the round trip); the call is in our own save (serde default, no format bump). The panel is the
+    `ally_attacked` event message (`ui/campaign ui/event_message_scripts/event_message.luac`, layout
+    `ui/campaign ui/layout_ally_attacked`: assist_button1 / assist_button2 / decline_button "breaks
+    alliance"), filled from the Lua table of `0x00A08B90` (Aggressor, Defender, LocalFaction,
+    AlliedWithAggressor / AlliedWithDefender, InvitedByAggressor / InvitedByDefender): not wired yet, so the
+    app does not ask a human ally at all: `CampaignModel::ask_human_allies` stays off, the human is
+    skipped and keeps its alliance, as before this branch (PLACEHOLDER at the gate in `call_allies`;
+    BACKLOG §3 event messages; the panel turns the switch on). Refusing at once instead would break the
+    human's alliance on every AI attack on its ally (review round 1). Not traced: `CCQ_INVITE_ALLIES_INTO_WAR` (`0x0135BB34`, handler `0x00936630`, the
+    diplomacy screen's `InviteAlliesIntoWar`);
   - an AI ally decides through the AI (`0x00AAA950` → `0x00AAA920`, §6).
   - Join (`join_war`): the joined list (`0x00B274E0`), the ally's own `0x00B26700`(enemy, ally, 0, 0) unless
     already at war, then `0x00B0CCE0` on the side's record for the ally and the ally's for the side
@@ -3553,14 +4291,54 @@ further here).
     cleared at the start of the faction's next `TurnStep::Advance` (so FactionTurnEnd handlers still see
     it), read and written at #63 (CONFIRMED). With its refresh flag set `0x00B26700` also posts
     `0x009DAE40` (type 0x14D `campmap_faction_joins_your_enemies`, to the target); only the deal's join-war
-    loop `0x00C188F0` passes it, never `0x00B268B0` (not modelled: BACKLOG). The declaration's own war
-    (`0x00B27070`) also calls `0x00A63490`(6): each population class of the declarer's capital gets
-    `0x008A94D0`(kind 6), which moves the class's happiness factor [8] (+0x20) by its attitude category
-    (category 0: +4 when `0x008CE230`/`0x008CE2F0` pass; 3: −3; 4: −6; other kinds from table
-    `0x014579F0`), clamped to [−15, 6]; battle results use the same field (`0x008ACCF0`, kinds 0–5). Ours
-    has no factor [8] (`economy.rs` `public_order_factors`), so this is not modelled (BACKLOG). Then the
+    loop `0x00C188F0` passes it, never `0x00B268B0` (modelled: "Deal join war" below). The declaration's own war
+    (`0x00B27070`) also calls `0x00A63490`(6, target) at `0x00B270DC`, before it sets the `war` attitude
+    factor: each population class of the declarer's capital gets `0x008A94D0`(kind 6), which moves the
+    class's war factor [8] (+0x20) by its attitude category to the target (§Population, "The class war
+    factor"). Ported (classfactor 2026-10-20): `war_on` → `move_class_war` with `ClassWarEvent::WarDeclared`
+    when there is no ally; ORIGINAL BUG at `0x00B270D0` (a declarer without a capital crashes; how it is reached:
+    §Population, "The class war factor") fixed. Then the
     declarer, the target and everyone listed except the attacker's refusers get a path-grid obstacle
     refresh.
+  - Deal join war (joinwar 2026-10-20, CONFIRMED by disassembly): record 11 of the negotiation (vtable
+    `0x0138202C`; lists as the regions record: +0x14 demanded (count +0x1C, data +0x20), +0x24 offered (+0x2C, +0x30);
+    proposer `0x00C4BC20`, recipient `0x00C4CE90`). Its accept, vtable +0x3C `ApplyJoinWarRecordOnAccept`
+    `0x00C188F0` (thiscall, no args), runs in `0x00C114B0`'s record loop after the payment (7) and before
+    the expulsions: for each **offered** faction F, the proposer's manager (+0x528) `0x00B26700`(F, on
+    behalf of the recipient, skip 0, refresh 1); then for each **demanded** F, the recipient's
+    `0x00B26700`(F, on behalf of the proposer, 0, 1). No at-war, stance or same-faction test, here or in
+    `0x00B26700`. With an ally, `0x00B26700` skips the third-party loop and `0x00A63490`; with refresh 1
+    it then posts `PostFactionJoinsYourEnemiesNotice` `0x009DAE40` (thiscall on model +0xFA0, RET 8,
+    args target, joiner): a 0x28-byte text message (vtable `0x0136F9A8`), title the joiner's name
+    (`0x008DA780`), detail empty, sent by `0x009D3250` to the target as type 0x14D (type table entry
+    `0x0145CA64` → `campmap_faction_joins_your_enemies`), no major-power or human test (unlike
+    `war_declared` `0x009DAFE0`); then zones target then joiner (`0x00B795A0`), path view `0x00B67490`,
+    prices `0x00BCB020(0)`, then the diplomacy events +0x7E0, +0x3A8. No allies are called and no access
+    is saved for the war (no `0x00B0CCE0`, unlike `0x00B268B0`'s joining allies). The command
+    `CCQ_DIPLOMACY_PROPOSE_JOIN_WAR` (registered in `0x00420B80`, posted by the record's +0x40
+    `0x00C4A960` with descriptor `0x01387A04`: header, then list counts, then each faction id;
+    executor `ExecuteProposeJoinWarCommand` `0x009336C0`): returns if the command's +4 flag is set;
+    reads list A then list B through `0x0090E2F0` (a failure flag kept across both lists,
+    `0x00933754`..`0x00933766`: any id that does not resolve, or a failed read, aborts the command); clear → `0x00C11B80(11)`
+    → `0x00C5C730`; two empty lists → nothing; else a temporary action (`0x00BF3900`) gets A as demands
+    (`0x00C1F690`, +0x90) and B as offers (`0x00C43D30`, +0xA0), and `0x00C49AA0` replaces the record
+    through its setter +0x44 `0x00C4A670` (src +0x90 → record demanded, +0xA0 → offered, `0x00522F00`;
+    the row text `offer_or_demand_join_war` lists offered first). Ours: `Negotiation::join_war`,
+    `CampaignCommand::ProposeJoinWar` (`propose_join_war`, an unknown faction aborts as for regions),
+    `accept_deal` → `join_war_by_deal` → `war_on(x, F, Some(ally))` + `CampaignMessage::FactionJoinsYourEnemies`
+    + `refresh_faction_zones(F)`, then the joiner's; `war_on` now skips the stance change when already at
+    war (the records are applied again, as the exe's). An item naming its own joiner fails the deal
+    (project check: the exe would declare a faction's war on itself). PROVISIONAL (not ported): the AI's
+    evaluation of record 11 (`0x00AA5ED0`: decline when its `diplomacy_options` index 11 is 1 or 3, else
+    a goal by `0x00A62400` with the record's value +0x38 `0x00C12D40` = per offered F `0x00A75330(.., F,
+    1, ..)` and per demanded F `0x00A75330(.., F, 0, ..)`, summed and inflated): ours declines every
+    deal with a join-war item. The panel (`ntw_script` `diplomacy.rs`): `Propose(offers, demands,
+    'request_join_war')` (`0x009BF3C0` case 0xD: two tables of faction keys through
+    `FindCampaignFactionByKey`, demands → `0x00C1F690`, offers → `0x00C43D30`) posts `ProposeJoinWar`
+    (an unknown key proposes nothing, logged once: the exe pushes a null entry, what its command then carries UNKNOWN);
+    `RemoveAction` posts it with the clear flag (`0x00C5CA50`); `BuildOfferAndDemandStrings` gives one
+    join-war row per side with items (its `offer_or_demand_join_war` text not built, as the other
+    records' rows).
   - Achievement hook (polish57 2026-10-19, CONFIRMED by disassembly): `0x009C7660` returns the campaign
     achievement tracker (model +0xD9C; class vtable `0x01319E90`, constructor `0x0048E930`, +0x1C the
     tracked local faction's key; names table `0x0144F3F8`, 75 entries from EmpireAchievements.cpp). Its
@@ -4076,8 +4854,7 @@ systems the model lacks stay PROVISIONAL.
       with O whose `0x00B0CDF0` towards P holds makes peace with O (`0x00B262C0`) (BACKLOG).
     - `0x00B73430` (`BreakTradeBothWays`): trade broken on both records, then the broadcast. Callers:
       faction destruction `0x008AB6C0` → `0x00B2B8B0` → `0x00B2B920`, only on the dead faction's record
-      towards its killer (§Destruction and re-emergence: the model's destruction has no killer, so it
-      breaks no trade this way), and a lost trade route: `0x00BB9410` / `0x00BB9B90` / `0x00BBE1A0` when
+      towards its killer (§Destruction and re-emergence, "Destruction by a killer"; ours `destroy_faction_by`), and a lost trade route: `0x00BB9410` / `0x00BB9B90` / `0x00BBE1A0` when
       the route check `0x00BA42E0` fails (← `0x00A64AC0`, the owner change). The owner-change path
       `0x00BBE1A0` is modelled (§Trade, Route loss); the listener handlers `0x00BB9410` / `0x00BB9B90`
       are not (BACKLOG).
@@ -4335,8 +5112,9 @@ systems the model lacks stay PROVISIONAL.
     notice `0x009FB680`.
   - **Candidates** (`0x008C6010` builds, `0x008DCB30` orders; entries region + point): (1) the
     region itself at the army's own position, when "may stay"; (2) F's regions (faction `+0x778` /
-    `+0x77C`, its gain order) in the region's theatre or with an overlapping theatre box, other
-    than the region; (3) the world's regions (`+0xF5C` → `+0x34` → `+0x10` / `+0x14`) in the same
+    `+0x77C`, in its list's order: see "Faction region list order") in the region's theatre or with an overlapping theatre box, other
+    than the region; (3) the world's regions (`+0xF5C` → `+0x34` → `+0x10` / `+0x14`, the region manager's
+    order; ours `World::regions_in_manager_order`) in the same
     theatre, owned by another faction not at war with F whose record towards F passes
     `0x00B16570`, other than the region; (4) F's capital, only when it lies in another theatre.
     Lists (2) and (3) are each sorted (std::sort `0x00868A30`) by squared distance from the army's
@@ -4395,7 +5173,9 @@ systems the model lacks stay PROVISIONAL.
     is the centre of the region's path-grid cell nearest to the army (the settlement without the
     map) for the outline point; the flood is `PathGrid::nearest_place_within` (the point itself if
     its cell fits, else the nearest fitting cell of the region closer than 100; no footprints in the
-    model); F's regions in region-id order for its gain order; our sort is stable, std::sort is
+    model); F's regions go in in its list's order (`World::regions_in_list_order`, CONFIRMED below,
+    "Faction region list order"), the third parties' in the manager's order (`World::regions_in_manager_order`),
+    but our sort is stable, std::sort is
     not; the port's exit is the harbour's dock point, else the port slot; no theatres in the model
     (every shipped map is one theatre, CONFIRMED, see "Theatres CONFIRMED a no-op"; a map with several needs the
     exe's theatre filter). The move notice `0x009FB680` (message 0x119) is not modelled (BACKLOG).
@@ -4412,8 +5192,7 @@ systems the model lacks stay PROVISIONAL.
     (`0x00B104E0` passes 0, `0x00B0CA20` its war flag; modelled, region ids for the list order), then `0x00A0B570`,
     the path-grid obstacle refreshes `0x00B795A0` / `0x00B67490` and the broadcast. The loss of military access expels the target
     from all of the owner's regions: `0x00B0CA20`, `0x00B13A30`, `0x00B0D0C0`, `0x00B67BD0` (cancel
-    access), `0x00B29170` (timed access running out): modelled, see "Access-loss expulsions" below. `0x00B4F090` (2
-    sites): the liberated faction's new army (not modelled). `0x00936B37` / `0x00936B76`: a mutual
+    access), `0x00B29170` (timed access running out): modelled, see "Access-loss expulsions" below. `0x00B4F090` (both sites, `0x00B4F126` and `0x00B508C5`): the liberation expulsion, modelled. `0x00936B37` / `0x00936B76`: a mutual
     expulsion inside a command handler Ghidra has not defined; which command is UNKNOWN.
     `TransferSettlementOwnership` always passes 0; only the start-position load `FUN_00a46a70`
     passes 1 (no expulsion). ORIGINAL BUGs: none found.
@@ -4422,14 +5201,37 @@ systems the model lacks stay PROVISIONAL.
   comes from a loaded save).
 - **Access-loss expulsions** (accessloss 2026-10-17, CONFIRMED by decompile and disassembly). Each of
   these runs the same loop on one relationship record (owner O → target T): `0x008D9DC0`(T, region) for
-  every region of O's list (faction +0x778, gain order), then `0x00A0B570` per character of T,
+  every region of O's list (faction +0x778, in its order), then `0x00A0B570` per character of T,
   `RefreshFactionPathGridObstacles` `0x00B795A0` on both factions and
   `CampaignPathGrid::ReapplyPathGridFactionView` `0x00B67490` (path-grid obstacle refreshes, not visibility;
   ours builds the obstacles at search time in `plan_path`, so it needs no refresh).
   Ours: `CampaignModel::expel_from_lands_of(T, O)` (`expulsion.rs`), the `region.expulsion` rule per
-  region, region-id order (PROVISIONAL stand-in for the gain order; it matters only for a force that
-  may stay but cannot be placed where it stands). Whether a force leaves is the rule's "may stay" test,
-  read at the moment of the call.
+  region, in O's list order (`World::regions_in_list_order`, accessloss2 2026-10-20, CONFIRMED; it
+  matters only for a force that may stay but cannot be placed where it stands). Whether a force leaves
+  is the rule's "may stay" test, read at the moment of the call.
+  - **Faction region list order** (accessloss2 2026-10-20, CONFIRMED by decompile). The list is the
+    owned-list object at faction +0x76C (count +0x778, data +0x77C). A gain appends: `AddRegionToFaction`
+    `0x008AE270` → `0x008CFA40` → `0x008CF7D0` pushes the region at the end (when its owner link is
+    empty) and sets the owner; its only caller is `TransferRegionToFaction` `0x00A64AC0`. A loss removes
+    in place: `RemoveRegionFromFactionAndMoveCapital` `0x008BA580` → `0x008B0210` erases the entry and
+    shifts the rest down. At a load the region array loader `0x00A4CE20` (from the world loader
+    `0x0090BEB0`, after `FACTION_ARRAY` and `REBEL_FACTION`) reads `REGION_MANAGER/REGIONS_ARRAY` in file
+    order, and each region's constructor `ConstructCampaignRegionFromEsf` `0x00A45950` resolves the saved
+    owner (`0x0105AC60`) and appends itself to the owner's list (`0x00A46008`: `0x008CFB40` → `0x008CF6B0`
+    with the region's owner link, region +0xF4). The writer `0x00A52FE0` saves `REGIONS_ARRAY` in the
+    manager's vector order (manager +0x10 count / +0x14 data, filled only by the loader), and the file
+    holds no per-faction list: so each faction's list after a load is the file order filtered by owner,
+    and a save and reload in the original puts a gained region back in its file place. (The dev set-up
+    path `0x0090C4A0` → `0x00A4D050` → `0x00A46A70`, which hands regions over through `0x00A64AC0` with
+    its fourth argument 1, runs only under the dev preprocessor `0x00A19350`.) Ours: `World::region_order`
+    (the importer's file order, kept by own saves from format version 11; an older one takes the start's)
+    and `World::region_gains` (each owner change in `change_region_owner` moves the region to the end;
+    not saved, and left out of `saved_state_hash`). The ESF writer patches the array in place, so the file
+    order survives our saves too (test `vanilla_save_region_order_is_the_manager_order`: in the evidence save
+    `orig_fr_may1811.save` the file order of 31 regions has 12 descents from id order, so walking by id was
+    wrong). Ghidra names (V5): `ConstructRegionManagerFromEsf` `0x00A4CE20`, `SaveRegionManagerRegions`
+    `0x00A52FE0`, `AttachOwnedLinkToOwnerList` `0x008CF6B0`, `AppendOwnedLinkToOwnerList` `0x008CF7D0`,
+    `RemoveOwnedItemFromOwnerList` `0x008B0210`.
   - `0x00B67BD0` (cancel access, record O→T): after the grievance and #3 = 0, always. Callers: the
     command `0x00B67B20` and the war's abuse `0x00B0DAF0`. In the war `0x00B26700` the stance turns to
     war (`0x00B27250`) before the abuse, so there the target may stay; ours had declared war after the
@@ -4437,8 +5239,27 @@ systems the model lacks stay PROVISIONAL.
   - `0x00B29170` (round end, record O→T): when timed access counts down to 0 (from 1), right after the
     access step and before the dead-item clean-up of #17, friendship and the war balances (so the
     balances see the moved armies; ours moved the step first in `diplomacy_round_end`). When the
-    count-down leaves 1, `0x00A0E630` posts T message 0x76 (`military_access_prompt`): PROVISIONAL, not modelled
-    (BACKLOG).
+    count-down leaves 1, `0x00A0E630` posts T message 0x76 (`military_access_prompt`), below.
+  - The access prompt (accessprompt 2026-10-20, CONFIRMED by decompile and disassembly; V5 in Ghidra):
+    `SendMilitaryAccessPromptMessage` `0x00A0E630` (`this` = the message manager, model +0xFA0;
+    recipient, granter; `RET 0x8`) builds the same 0x28-byte text message as `SendCeasefireDeclaredMessage`
+    (vtable `0x0136F9A8`, title = the granter's name +0x518, empty detail, flags 0) and posts it with
+    `0x009D3250`(recipient, 0x76, 0x76, msg, 0): entry 0x76 of the type table `0x0145C530` is the string
+    `0x013CFD4C` `military_access_prompt`. Its only caller is `UpdateRelationRecordForRoundEnd` `0x00B29170`
+    (`0x00B2920D`): after the timed count-down, when the new count is 1 (so a grant of 2 or more turns,
+    the round its count goes 2 → 1; a 1-turn grant and indefinite access −1 never post it), recipient =
+    the record's target (record +4), granter = the record's owner (record +0, the faction whose
+    `0x00B29100` walks its record vector in order, stride 0x848). No human or major test (the display
+    gates of `0x009D3250` apply). The message asks nothing back: it is the plain text message class,
+    its `message_event_strings` rows (four subcultures) use layout `standard` with pictures
+    `map-region.tga` / `army.tga` (as `alliance_broken`'s `standard`), and the text
+    (`message_event_text_text_military_access_prompt`) tells the player to enter negotiations; nothing
+    in the model reads the post back, so renewing is the ordinary diplomacy offer and letting it lapse
+    is the next round's 1 → 0 expulsion. Ours: `diplomacy_round_end` returns
+    `CampaignEvent::Message { recipient: T, message: CampaignMessage::MilitaryAccessPrompt { granter: O } }`
+    in the turn's events (`TurnStep::Economy`), walking the records in `World::record_targets_in_order`
+    (before: id order). Test `timed_access_with_one_turn_left_posts_the_access_prompt`
+    (capture_diplomacy_tests).
   - `0x00B13A30` (alliance break, breaker's record A→B) and `0x00B0CA20` (the other's record B→A), both
     with `0x00B13840`'s war flag (1 only from the war path `0x00B27144`): when #17 is not empty, its
     first item's saved access goes back to #3 and the list is cleared; if the flag is 0 and that access
@@ -4455,7 +5276,17 @@ systems the model lacks stay PROVISIONAL.
     `MOV ECX,[ESI+0x528]`): for each of the proposer P's records with stance 2 / 3 / 4 (ally Y), on P→Y
     then on Y→P. Ours restored both sides' allies, for both factions; now P's side only
     (`make_peace_rules`). `0x00B262C0` also runs `ClearCommerceRaidsBetweenFactions` `0x00A25570` per force of each side
-    towards the other (per its plate: a commander with a raid on the other side loses all his raids, see the commerce raid ends; its steps `0x008BD550` and `0x00A784E0` are still untraced). Its other steps (polish50 2026-10-17, CONFIRMED by decompile; V5 in Ghidra):
+    towards the other (per its plate: a commander with a raid on the other side loses all his raids, see the commerce raid ends). Its other two steps (accessloss2 2026-10-20, CONFIRMED by decompile; V5 in Ghidra):
+    a commander whose force (`0x009D3A40`) besieges a settlement of the other side (siege object +0x94, its +0x7C
+    target's faction vt+0x14) ends the siege, `EndForceSiegeOfSettlement` `0x008BD550` (destroys the siege object,
+    clears +0x94, calls the untraced `0x00B084F0` on the target's character, then unless model flag +0xFC5 a price
+    update `0x00BCB020(0)` and `RebuildRegionRecruitablesAndEffects` on its region, then event 0xDF); a navy
+    (`0x009D3A80`) blockading a port of the other side (+0xE8 port-slot handle, the slot's +0x70 owner) lifts it,
+    `LiftPortSlotBlockade` `0x00A784E0` (unlinks slot+0x68, clears the building's +0x1E8→+0x58 byte, price update,
+    `0x00B084F0` on a docked navy's character, events, slot +0x74 = 0; see "Port blockades" under Trade). The siege
+    call (`0x00A255C5`) comes before the blockade call (`0x00A25627`). Ours ends the siege (`end_sieges_on_peace`,
+    siegeattr; see "Siege ends") and then lifts the blockade (`lift_blockades_on_peace`, portblockade).
+    `0x00B084F0` stays untraced. Its other steps (polish50 2026-10-17, CONFIRMED by decompile; V5 in Ghidra):
     the two stance records (`0x00B26590`), the model's +0x390 peace event, the path-grid obstacle
     refreshes of both sides, the trade price update `0x00BCB020`(0), then, unless its second argument
     (read from `force_make_peace`'s command stream; `MakeProtectorateOfPatron` `0x00B105C0` passes 0) is
@@ -4476,8 +5307,8 @@ systems the model lacks stay PROVISIONAL.
     stream, both factions, different, at war (`0x008CE9B0`); then `MakePeaceWithFaction` on the proposer's
     +0x528. The script `force_make_peace` (`0x0097AC90`) sends 0 (then `CCQ_MOVE_ARMIES_OUT_OF_REGIONS`,
     `0x009838B0`); `force_make_protectorate` (`0x0097AA20`) sends 1 when the two are at war, its only setter;
-    `MakeProtectorateOfPatron` (`0x00B10685`) and the negotiated deal's peace item (code at `0x00C18B60`, no
-    function in Ghidra, vtable slot `0x01381FC0`, `PUSH 0` at `0x00C18B7C`) call `MakePeaceWithFaction` with
+    `MakeProtectorateOfPatron` (`0x00B10685`) and the negotiated deal's peace item (`ApplyPeaceRecordOnAccept`
+    `0x00C18B60`, created 2026-10-20, vtable slot `0x01381FC0`, `PUSH 0` at `0x00C18B7C`) call `MakePeaceWithFaction` with
     0. A transient argument: no model field, never saved. The `spa_napoleon` step compares the campaign key
     (campaign link +0x30), then the keys (`GetFactionKeyOrRebels`): target ∈ {spa_spain, spa_portugal} and
     proposer = spa_britain → the target grants; else proposer ∈ {spa_spain, spa_portugal} and target =
@@ -4486,9 +5317,68 @@ systems the model lacks stay PROVISIONAL.
     unless suppressed (`CampaignCommand::MakePeace::suppress_messages`; `force_make_peace` and the AI pass
     false); the grant is data, `CampaignFeatures::peace_access_grants` (`PeaceAccessGrant { granters,
     grantee, turns }`, filled for `spa_napoleon` by `ntw_campaign::features::original`), run after the
-    messages through `grant_military_access`. `force_make_protectorate` itself is not implemented (BACKLOG).
+    messages through `grant_military_access`. `force_make_protectorate`: the next entry.
     Tests: `peace_posts_ceasefire_messages_unless_suppressed`, `a_peace_access_grant_row_gives_the_grantee_access`
     (capture_diplomacy_tests), `the_original_keys_get_the_exe_switches` (ntw_campaign features).
+  - `force_make_protectorate` and its two commands (forceprot 2026-10-20, CONFIRMED by disassembly; V5 in
+    Ghidra). The binding `HandleScriptForceMakeProtectorate` `0x0097AA20` reads two faction keys (the
+    reader `0x01055760` pops from the stack top, so the first script argument is read last): the first is
+    the patron, the second the protectorate (vanilla: `ita_napoleon\scripting.lua` 1005,
+    `force_make_protectorate("ita_french_republic", "ita_piedmont")` in `subjugate_piedmont_timer`). It does
+    nothing unless both exist and differ. At war (`0x008CE9B0`, the rebels count as at war) it first queues
+    `CCQ_MAKE_PEACE` (patron proposer, suppress byte 1). Unless either side has a patron
+    (`FactionHasPatron` `0x008CEEA0`, faction +0x754 not 0) it queues `CCQ_MAKE_PROTECTORATE` (type id
+    `0x008FD2A0` → `0x015C3650`, registered by `0x00421D00`; payload vtable `0x0136AB84`, its writer
+    `0x00953A70` the two faction pointers). Then always `CCQ_MOVE_ARMIES_OUT_OF_REGIONS` (sender
+    `0x009838B0`, type id `0x008FD2D0` → `0x015C3A2C`, registered by `0x00421E80`) with patron, protectorate.
+    `HandleMakeProtectorateCommand` `0x009367A0` decodes patron then protectorate; needs a good stream, both,
+    different, not at war, neither with a patron; then `0x00B105C0` on the protectorate's diplomacy (+0x528)
+    with the patron and the deal's peace step 0 (`PUSH 0` at `0x00936817`).
+    `HandleMoveArmiesOutOfRegionsCommand` `0x00936AB0` (no function in Ghidra before this branch) decodes a
+    and b; needs a good stream and both; then b's forces leave each region of a's list (count +0x778, data
+    +0x77C; `0x008D9DC0` per region), then a's each of b's. No stance, same-faction or turn test and no zone
+    flood after (each placement rebuilds what it moves). `force_make_peace` `0x0097AC90` queues the same
+    command after its peace when the two are at war (ours does not yet, BACKLOG).
+    Faction +0x754 is the patron: `SetFactionPatron` `0x008AF590` writes it (passing the old and then the new
+    patron's +0x6F8 object with the faction to `0x008F9860`, two calls on it, not traced), from `0x00B104E0` at `0x00B1058B` right after stance 4 is set and from the
+    tie's end `0x00B64B10` at `0x00B64C2D` with 0; `0x008E2A90` (from `0x0090BEB0`) and the loader
+    `0x0087A190` also write it, `DestroyFactionAndResetRelations` `0x008AB6C0` clears it; `GetFactionPatron`
+    `0x008E2A80` reads it. So "has a patron" is the model's `has_patron` (`0x00B4D9A0`, a record with
+    stance 4). This settles destruction.rs ~128 (the patron reading) and negotiation.rs's war option
+    (`0x00C1A890`: with a patron, war only on the patron or on a faction the patron is at war with; not
+    modelled yet, BACKLOG). Ours: `CampaignCommand::MakeProtectorate` (`make_protectorate_command`, then the
+    existing `make_protectorate`) and `CampaignCommand::MoveArmiesOutOfRegions`
+    (`move_armies_out_of_regions`, `expel_from_each_region_of` both ways); the script applies the three in
+    the exe's order, their events queued for the host. The peace step sends `CampaignCommand::MakePeace`, which
+    has no turn test (below). All three go through `apply`, so a pending battle refuses each of them (no
+    half-applied result).
+  - **Peace has no turn test on any path (peaceturn, 2026-10-20, CONFIRMED, disassembly).**
+    `MakePeaceWithFaction` `0x00B262C0` has exactly three callers, and none of them, nor anything before them,
+    tests whose turn it is: (1) `HandleMakePeaceCommand` `0x00936710` (good stream, both factions, different, at
+    war `0x008CE9B0`); `CCQ_MAKE_PEACE` is sent only by the scripts `force_make_peace` `0x0097AC90` (both keys
+    found and at war, then `CCQ_MOVE_ARMIES_OUT_OF_REGIONS`) and `force_make_protectorate` `0x0097AA20`, both
+    through `SendMakePeaceCommand` `0x00983850` (renamed; type id `0x015C268C`, the payload written by the
+    command's vtable slot 0); its registration (`0x00421C80`) carries the same flag word 0 as every other
+    command (e.g. `CCQ_DIPLOMACY_ACCEPT_DEAL` `0x00420600`). (2) `MakeProtectorateOfPatron` (call at
+    `0x00B10685`). (3) `ApplyPeaceRecordOnAccept` `0x00C18B60` (created; the deal's peace record, deal +0x184,
+    vtable slot +0x3C): if the record's +0x14 byte is set, the proposer's (`0x00C4BC20`) diplomacy +0x528 makes
+    peace with the recipient (`0x00C4CE90`), suppress 0; no turn, at-war or same-faction test. It runs from
+    `AcceptCampaignNegotiationDeal` `0x00C114B0`, called by the human's `ExecuteDiplomacyAcceptDealCommand`
+    `0x00932E40` (only the reader's error byte checked) and the AI's `EvaluateProposedNegotiationDealAI`
+    `0x00AA5ED0` (at `0x00AA62FF`): the exe's AI makes peace only through deals. Ours: the `turn_test` bool is
+    gone; `CampaignCommand::MakePeace` never checks the turn, for the scripts and the AI alike, and the deal's peace
+    item (the human's diplomacy) will call the same rule when it lands (one rule; a network sender check, if ever wanted, belongs to the network layer for every command, not
+    to this command). Our deals have no peace record yet (negotiation.rs `accept_deal`, BACKLOG), so path (3) has
+    no test of its own. Tests: `peace_holds_outside_the_proposers_turn` (economy_tests),
+    `force_make_peace_outside_the_first_factions_turn_makes_peace` (ntw_script host),
+    `the_ai_peace_is_the_models_make_peace_with_messages` (ntw_ai). Ghidra: `ApplyPeaceRecordOnAccept` and
+    `SendMakePeaceCommand` documented per V5 (completeness 89 and 79; the rest is the structural `void *this`
+    and untyped command payloads).
+    ORIGINAL BUGs: none. Tests:
+    `the_make_protectorate_command_follows_the_exe_handler`, `moving_armies_out_empties_both_sides_settlements`
+    (capture_diplomacy_tests), `force_make_protectorate_makes_peace_then_the_protectorate`,
+    `force_make_protectorate_outside_the_patrons_turn_returns_its_events`,
+    `force_make_protectorate_with_a_battle_pending_changes_nothing` (ntw_script host).
   - ORIGINAL BUGs: none found. Tests: `tests/transfer.rs` (`cancelled_access_expels_the_target_but_not_at_war`,
     `timed_access_running_out_expels_the_target`, `a_broken_alliance_expels_a_side_given_back_no_access`,
     `peace_gives_back_the_proposers_allies_access_only`, `a_patron_breaking_with_its_protectorate_leaves_its_regions`).
@@ -4613,6 +5503,57 @@ Ours: `ntw_sim::campaign::destruction` (`capital_after_owner_change`, `end_if_ca
   its forces and characters; a human one keeps them. Event `FactionDestroyed` (exe event +0x108).
   Tests `capturing_the_last_region_ends_an_ai_faction`, `a_human_faction_out_of_the_game_keeps_its_forces`,
   `a_deal_giving_away_the_last_region_ends_the_giver`, `a_lost_capital_moves_to_the_nearest_town_and_back_home`.
+- **Destruction by a killer** (handover, 2026-10-20, CONFIRMED by disassembly and decompilation unless tagged; code
+  `destruction.rs` `destroy_faction_by`, `grant_faction_handover`, `take_over_faction`; `director.rs`
+  `spawn_transfer_garrison`). Callers with a killer: the script binding `grant_faction_handover` `0x00978950` and the
+  mission reward `0x00A06050` (only caller `0x00A26600`: the money, then, when mission +0x68 names a faction,
+  `0x008AB6C0(target, mission owner +4)` with no other check; mission completion is not modelled, so ours only offers
+  `take_over_faction`).
+  - `0x00978950` (thiscall, `RET 4`): pops max_turn then min_turn, each a Lua number only (`0x01055700`, type 3; another
+    type logs and clears the reader's ok flag, so the keys after it read empty) rounded ties to even (`0x010556D0`),
+    then target and killer keys (`FindCampaignFactionByKey`; the target only when its key is non-empty, `0x004F3500`).
+    Needs both found and the target's +0x824 clear; no killer ≠ target check. max = max(max, min) (`CMOVG`
+    `0x00978A55`); turn = the calendar's elapsed turns (model +0xF68 → +8); nothing unless min ≤ turn ≤ max (signed).
+    Then one campaign RNG draw (model +0xFB8, inlined: next16 until ≥ 0x58, then % 101, ours `percent_0_100`) and the
+    destruction when draw ≤ 100.0f (`0x01318064`) / (f32)(max − turn + 1) (`DIVSS`, `COMISS` / `JNC` `0x00978AE6`) or
+    turn ≥ max (`0x00978AEB`); call at `0x00978AF4`. Vanilla: `campaigns\mp_eur_napoleon\scripting.lua` 803-810
+    (France AI and the handover flag unset → france takes bavaria and wurttemberg, turns 0..0: always at once).
+  - `0x008AB6C0` with a killer: the faction's region list (+0x76C vector; count +0x778, data +0x77C) is copied first.
+    The relation reset `0x00B2B8B0(killer)` → `0x00B2B920` breaks trade both ways (`0x00B73430`) on the dead faction's
+    own record towards the killer when its +0x788 is set, then resets. AI target: the characters and forces go, the
+    slots are handed back (as without a killer), then killer +0x924 = 1 (`0x008ABC50`, even with no region) and, while
+    the faction's list is non-empty, region[0] goes to the killer, or region[1] when region[0] is the faction's capital
+    (`0x00A8B5A0`) and more than one is left (`0x00B58A10(killer, 0, 0)` at `0x008ABC30` / `0x008ABC98`: no end check,
+    no liberation; ours `transfer_region`); then the fort hand-back `0x00B1B010` (`0x008ABD3E`). An AI target with a
+    killer posts no event +0x108; without one it posts it with flag 0. Human target: the campaign-over flag
+    `0x008C30A0`, event +0x108 flag 1 and the multiplayer report; regions, forces and characters stay.
+  - Hand-off (both kinds, when the copied list is non-empty): `0x00BA80E0(director, killer, list)` finds the killer's
+    CAI faction (`0x00C3C4E0` over the CAI world list +0x11C / +0x120; none → nothing; ours `ai_order` contains the
+    killer) and each region's CAI region (`0x00C3C970`; any missing → nothing; ours has every region), then
+    `0x00BA8090`: library sort `0x00B7FEE0` with the comparator at `0x00B7CF1A`..`0x00B7CF5D` (x before y when its CAI
+    settlement's building slot count is larger; on a tie when its region's recruitable list count, region +0x1B0, is
+    at least y's: a non-strict `>=`, harmless for the insertion sort), then `SpawnDirectorTransferGarrison`
+    `0x00BA8400(killer, sorted[0])` and, when more than three regions were listed, sorted[1]. The slot count is the
+    settlement's own slots plus two on every settlement of `orig_fr_t1.save`, `orig_fr_may1811.save` and a new
+    campaign's turn-1 save, so ours sorts by `settlement_slots` (INFERRED above: the `settlement:` key prefix).
+    `0x00BA8400` needs the killer to own the region with no garrison: a human target's regions get none.
+  - Killer +0x924: set only at `0x008ABC50`; cleared at the faction's turn end (`0x008BD0F0`, word write at
+    `0x008BD408` with +0x925); constructor `0x0098C2F0` (`0x0098CFD5`); saved by `0x00892A80` (`0x00893888`) and
+    loaded by `0x0087A190` before +0x925 (FACTION #62, ours `FactionDetails::destroyed_faction`). Read by the script
+    condition `FactionDestroyedByCharacterFaction` `0x0089F4B0` (the context character's faction, +0x2A0; false
+    without a character).
+  - ORIGINAL BUG (`0x008AB6C0` / `0x00A64AC0`): no killer ≠ target check; with the same faction the transfer returns
+    early at `0x00A64D13`, region[0] never leaves the list and the loop never ends. Ours refuses it (logged, nothing
+    changes). No vanilla data does it.
+  - CONFIRMED tie order: every walk uses the faction's region list (faction +0x76C, ours `World::faction_regions_in_list_order`: the loaded order, then regions gained since in gain order): the hand-over takes the list's first region, or its second when the first is the capital; the garrison pass sorts its copy of that list with the MSVC `std::sort` replica, so equal keys fall as the exe's sort leaves them from that input; the new capital (`0x008DABC0`, faction +0x76C at `0x008DAC2F`..`0x008DACF7`) keeps the first of equally near regions in that list (strict `<`). INFERRED: the garrison sort key (the CAI settlement's slot count read as the settlement's slots plus two, constant on three original saves; the CAI slot-list builder is not traced).
+  - Ghidra names (V5, raw completeness score): `HandleScriptGrantFactionHandover` `0x00978950` (75),
+    `SpawnKillerHandoverGarrisons` `0x00BA80E0` (78), `SpawnGarrisonsInSortedTransferRegions` `0x00BA8090`
+    (89), `IsRegionCapitalOfOwner` `0x00A8B5A0` (100), `ApplyMissionSuccessReward` `0x00A06050` (71),
+    `CheckFactionDestroyedByCharacterFactionCondition` `0x0089F4B0` (86); `DestroyFactionAndResetRelations`
+    `0x008AB6C0` plate updated (76). The remaining points are register-only locals and untyped `this` (structural).
+    Also named: `g_szFmt_InvalidUnitTableKey` `0x01316FC0`.
+  - Tests (ntw_sim `campaign/tests/handover_tests.rs` and the two `director.rs` hand-off garrison tests, ntw_script
+    host tests, ntw_campaign round trip of #62).
 - **Re-emergence** `0x008AE6E0` (CONFIRMED): `0x00B2BB00` on its diplomacy manager, then +0x824
   cleared, then `RebuildFactionEffectSum` (ours derives effects when read). For each of its records,
   `0x00B2BC10` resets its own record and `0x00B72AC0` the other faction's record towards it:
@@ -4636,13 +5577,12 @@ Ours: `ntw_sim::campaign::destruction` (`capital_after_owner_change`, `end_if_ca
   traced to its field); the record's second factor array (+0x3C8, the model holds one); a war set
   directly as the stance with its factor instead of the declaration `DeclareWarAndCallAllies` `0x00B268B0` (its ally calls: "Allies called into a war"; the
   flags `0x00B45C20` passes are not traced). **INFERRED** (in `destruction.rs`): the settlement's slots read as the slots whose key
-  starts with `settlement:`; the owner of a town slot read through the slot's +0x38 object; the tie
-  order (region ids instead of the gain order).
+  starts with `settlement:`; the owner of a town slot read through the slot's +0x38 object. The tie
+  order is the region list order (CONFIRMED, see the hand-over above).
 - **Not modelled** (BACKLOG): the revolt path (`0x00AAB440`: a re-emergence without the liberation flag,
   the rebel-record redirect, the `spa_napoleon` access grant `0x00B444B0`, the multiplayer case); the
   lost-route trade break; the destruction's handing out of regions in other theatres (never reached
-  on a one-theatre map); in `0x008AB6C0`, the killer path
-  (regions to the killer, killer +0x924, the hand-off `0x00BA80E0`) and the achievement / stat
+  on a one-theatre map); in `0x008AB6C0`, the achievement / stat
   tracker (`0x009C7660`, event +0x120; not a game rule).
 - **Ghidra (V5, TOOL_USAGE guide):** renamed with prototypes and plate comments:
   `HandleFactionReemergence` `0x008AE6E0` (95.0 effective), `ResetRelationsOnFactionReemergence`
@@ -4651,7 +5591,7 @@ Ours: `ntw_sim::campaign::destruction` (`capital_after_owner_change`, `end_if_ca
   `0x00B45A40` (95.0), `ApplyRecordStanceAfterSetup` `0x00B45C20` (81.7),
   `ResetRelationsOnFactionDestruction` `0x00B2B8B0` (83.8), `ResetOwnRecordOnDestruction` `0x00B2B920`
   (93.1), `ResetOtherRecordOnDestruction` `0x00B72900` (93.1), `RemoveRegionFromFactionAndMoveCapital`
-  `0x008BA580` (80.9), `FindNearestCapitalRegion` `0x008DABC0` (79.0) and, in the fix round,
+  `0x008BA580` (80.9), `CampaignFaction::FindNearestCapitalRegion` `0x008DABC0` (82 raw, typed and commented in the hand-over fix round) and, in the fix round,
   `CampaignFaction::DestroyFactionAndResetRelations` `0x008AB6C0` (90.0): the destruction itself (out
   of game +0x824, +0x754 cleared, relations reset, characters deleted for an AI faction, regions to the
   best neighbour or to the killer, town slots returned, FactionDestroyed). New structs:
@@ -4744,7 +5684,7 @@ Ours: `ntw_sim::campaign::destruction` (`capital_after_owner_change`, `end_if_ca
 | AP bonus: who qualifies | everything in an army or navy (force type 0/1), any commander kind | CONFIRMED (mapping to character AP INFERRED) | `turn::force_action_point_factor` |
 | Upkeep / recruitment cost modifiers | spec above | CONFIRMED formula; effects 0 | `economy::faction_upkeep` (plain sum) |
 | Public order structure, garrison repression, automated policing | above | CONFIRMED | `economy::public_order` |
-| Other public order sources: education, religion, gentlemen, war results | modelled (round 4) with loaded religion shares, class bases and gentleman attributes | education / war CONFIRMED; gentlemen skill INFERRED; religion table and sign PROVISIONAL | `economy::public_order` |
+| Other public order sources: education, religion, gentlemen, war results | modelled (round 4) with loaded religion shares, class bases and gentleman attributes | education / war / gentlemen formula CONFIRMED; gentlemen residents CONFIRMED (#14 loaded and saved, enter / leave in play; accompanying characters PROVISIONAL); religion table and sign PROVISIONAL | `economy::public_order` |
 | Public order: ministers, characters and traits, techs, events, difficulty | faction sum of the effects store: class-keyed `happiness_*` and `repression_gov_type` / `repression_ministers` / `repression_gov_building` (round 5) | CONFIRMED source (0x008EDF70 via 0x00A67530); per-factor slot mapping INFERRED | `economy::public_order`, `Effects::faction_sum` |
 | Recruitment points | land: effect 32 + home-region effect 33 in the capital + mp_eur AI France +1 | CONFIRMED (faction-wide effects 0) | `CampaignModel::recruitment_points` |
 | Where trade accumulation and bankrupt turns are saved | INTERNATIONAL_TRADE_ROUTE +0x3C, FACTION_ECONOMICS #3 | CONFIRMED | written by save-compat |

@@ -10,6 +10,7 @@ use crate::fixed::Fixed20;
 use crate::rng::CaRng;
 
 mod agents_tests;
+mod ally_war_call_tests;
 mod black_shroud_tests;
 mod buildings_tests;
 mod capture_diplomacy_tests;
@@ -19,9 +20,16 @@ mod deals_tests;
 mod economy_tests;
 mod expense_tracker_tests;
 mod fog_turn_end_tests;
+mod handover_tests;
 mod forces_tests;
 mod hiring_tests;
+mod population_class_tests;
+mod port_blockade_tests;
+mod rank_tests;
+mod trait_level_tests;
 mod recruitment_tests;
+mod research_tests;
+mod residence_tests;
 mod slots_exit_tests;
 mod trade_order_tests;
 mod transfer;
@@ -95,7 +103,7 @@ fn faction(id: FactionId, key: &str, treasury: i32, government: GovernmentType) 
 
 fn region(id: u32, owner: FactionId, gdp: u32, slots: usize) -> Region {
     let mut s: Vec<RegionSlot> = (0..slots)
-        .map(|i| RegionSlot { key: format!("test_slot_{i}"), slot_type: "test_slot".into(), building: None, position: None, port: false, holder: None, id: 0 })
+        .map(|i| RegionSlot { key: format!("test_slot_{i}"), slot_type: "test_slot".into(), building: None, position: None, port: false, holder: None, id: 0, blockade: None })
         .collect();
     if slots > 0 {
         s[0].building = Some(BuildingRef { level_key: "test_building_level".into(), health: 100 });
@@ -127,6 +135,7 @@ fn region(id: u32, owner: FactionId, gdp: u32, slots: usize) -> Region {
         construction: Vec::new(),
         garrison: None,
         fleet: None,
+        siege: Default::default(),
     }
 }
 

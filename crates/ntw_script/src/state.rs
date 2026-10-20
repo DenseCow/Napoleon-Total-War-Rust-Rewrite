@@ -4,7 +4,7 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use mlua::{UserData, UserDataFields};
-use ntw_sim::campaign::{CampaignModel, FactionId};
+use ntw_sim::campaign::{CampaignEvent, CampaignModel, FactionId};
 
 /// One value stored by `save_value` / read back by `load_value`. Numbers are kept as `f32`, the
 /// original's `lua_Number` (W3 §6.1, CONFIRMED).
@@ -128,6 +128,10 @@ pub struct ScriptState {
     /// The game_interface argument-type errors already logged, by (method, type found): each is
     /// logged once (`game::type_error_once`).
     pub(crate) type_errors_logged: BTreeSet<(&'static str, &'static str)>,
+    /// The model events a script command caused (`grant_faction_handover`, `force_make_protectorate`),
+    /// waiting for the host to fire them after the Lua that issued it returns
+    /// ([`crate::ScriptHost::apply`] and the turn steps; see `ScriptHost::fire_script_events`).
+    pub(crate) script_events: Vec<CampaignEvent>,
 }
 
 impl ScriptState {
@@ -146,6 +150,7 @@ impl ScriptState {
             missions: Vec::new(),
             character_log: Vec::new(),
             type_errors_logged: BTreeSet::new(),
+            script_events: Vec::new(),
         }
     }
 

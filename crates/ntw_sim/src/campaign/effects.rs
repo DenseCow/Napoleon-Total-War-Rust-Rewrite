@@ -113,12 +113,18 @@ impl EffectSet {
         self.get_qualified(BonusKind::Basic, bonus, "")
     }
 
-    /// A qualified bonus (0 when absent).
+    /// A qualified bonus (0 when absent): the value of [`Self::find_qualified`].
     pub fn get_qualified(&self, kind: BonusKind, bonus: &str, qualifier: &str) -> f32 {
+        self.find_qualified(kind, bonus, qualifier).map_or(0.0, |(_, v)| v)
+    }
+
+    /// The lookup rule of every read: the first entry in key order of `kind` and `bonus` whose
+    /// qualifier equals `qualifier` ignoring ASCII case, with its key.
+    pub fn find_qualified(&self, kind: BonusKind, bonus: &str, qualifier: &str) -> Option<(&EffectKey, f32)> {
         self.values
             .iter()
             .find(|(k, _)| k.kind == kind && k.bonus == bonus && k.qualifier.eq_ignore_ascii_case(qualifier))
-            .map_or(0.0, |(_, v)| *v)
+            .map(|(k, v)| (k, *v))
     }
 
     /// The int form the exe uses in integer formulas (`0x00E23E10`: rounded half to even).
@@ -129,6 +135,47 @@ impl EffectSet {
     /// No entries.
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
+    }
+}
+
+/// A force's effect set as a borrowed view ([`Effects::force_set`]): the faction sum with the
+/// commander's own set added on read, the same values as the exe's merged copy without building one
+/// per force. The default view is empty (every bonus 0), the ranking power's set.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ForceEffects<'a> {
+    /// The faction's sum (faction +0x6FC).
+    pub faction: Option<&'a EffectSet>,
+    /// The commander's own set (character +0x48C).
+    pub commander: Option<&'a EffectSet>,
+}
+
+impl<'a> ForceEffects<'a> {
+    /// The view of a faction's sum alone (no commander's set).
+    pub fn faction_only(set: &'a EffectSet) -> Self {
+        Self { faction: Some(set), commander: None }
+    }
+
+    /// A basic bonus (0 when absent), read as [`Self::get_qualified`].
+    pub fn get(&self, bonus: &str) -> f32 {
+        self.get_qualified(BonusKind::Basic, bonus, "")
+    }
+
+    /// A qualified bonus (0 when absent), the value the merged copy (faction sum with the
+    /// commander's set merged in) gives under [`EffectSet::find_qualified`]: its first matching key
+    /// is the smaller of the two sets' first matches, and its value the sum of both sets' entries
+    /// under exactly that key. So qualifiers that differ only in case are not added together.
+    pub fn get_qualified(&self, kind: BonusKind, bonus: &str, qualifier: &str) -> f32 {
+        let f = self.faction.and_then(|s| s.find_qualified(kind, bonus, qualifier));
+        let c = self.commander.and_then(|s| s.find_qualified(kind, bonus, qualifier));
+        match (f, c) {
+            (Some((fk, fv)), Some((ck, cv))) => match fk.cmp(ck) {
+                std::cmp::Ordering::Less => fv,
+                std::cmp::Ordering::Greater => cv,
+                std::cmp::Ordering::Equal => fv + cv,
+            },
+            (Some((_, v)), None) | (None, Some((_, v))) => v,
+            (None, None) => 0.0,
+        }
     }
 }
 
@@ -429,19 +476,20 @@ impl EffectRules {
         self.trait_level.get(key).map(|(_, set)| set)
     }
 
-    /// The level a trait is at with `points`: the highest level whose threshold ≤ max(points, 0), none
-    /// below the first threshold (CONFIRMED, `0x008B5380`). Not modelled: when
-    /// points fall, the level does not drop below the trait's no-going-back level once reached, and a
-    /// trait whose points fall below 1 is removed (`0x008D21B0`); the model never lowers trait points yet.
-    pub fn trait_level_key(&self, trait_key: &str, points: i32) -> Option<&str> {
-        self.trait_level_row(trait_key, points).map(|(_, _, k)| k.as_str())
+    /// The level key of a held trait at level `level` ([`super::details::CharacterTrait::level`], the
+    /// level record `0x008B5380` keeps), none at level 0 (no level record, CONFIRMED: the effect
+    /// rebuild `0x008EDAE0` → `0x008AFC90` takes the record's effects, or none when it is null).
+    pub fn held_level_key(&self, trait_key: &str, level: i32) -> Option<&str> {
+        self.held_level_row(trait_key, level).map(|(_, _, k)| k.as_str())
     }
 
-    /// The whole `character_trait_levels` row of [`Self::trait_level_key`]'s level (threshold, level
+    /// The whole `character_trait_levels` row of [`Self::held_level_key`]'s level (threshold, level
     /// number, level key).
-    pub fn trait_level_row(&self, trait_key: &str, points: i32) -> Option<&TraitLevelRow> {
-        let levels = self.trait_levels.get(trait_key)?;
-        levels.iter().rev().find(|(t, _, _)| points >= *t)
+    pub fn held_level_row(&self, trait_key: &str, level: i32) -> Option<&TraitLevelRow> {
+        if level == 0 {
+            return None;
+        }
+        self.trait_levels.get(trait_key)?.iter().find(|(_, l, _)| *l == level)
     }
 }
 
@@ -469,20 +517,7 @@ impl Effects {
         let mut fx = Effects::default();
         // Characters: traits by level + ancillaries.
         for (id, d) in &w.character_details {
-            let mut s = EffectSet::default();
-            for t in &d.traits {
-                if let Some(level) = rules.trait_level_key(&t.key, t.points)
-                    && let Some(set) = rules.trait_level_set(level)
-                {
-                    s.merge(set);
-                }
-            }
-            for a in &d.ancillaries {
-                if let Some(set) = rules.ancillary.get(a) {
-                    s.merge(set);
-                }
-            }
-            fx.character.insert(*id, s);
+            fx.character.insert(*id, character_set(rules, Some(d)));
             if let Some(c) = w.characters.get(id) {
                 fx.character_owner.insert(*id, c.faction);
             }
@@ -554,27 +589,17 @@ impl Effects {
         fx
     }
 
-    /// A character's effective agent attribute (`0x009C7610`, CONFIRMED shape): the saved level
-    /// (`AgentAttributes`), plus — when the level is not −1 (the agent type has it) — the bonuses of his
-    /// trait levels (`trait_attribute_effects`) and ancillaries (`ancillary_to_attribute_effects`),
-    /// floored at 0. `None` when he does not have the attribute.
+    /// A character's agent attribute level (the details' attribute array, character +0x2F0 → +0xA4 + 4 ×
+    /// index; `0x009CB560` / `0x009CB580` read it): the stored level (`AgentAttributes`), which
+    /// already holds his trait levels' and ancillaries' attribute effects (CONFIRMED: the exe adds and
+    /// removes them in the array itself, `0x00A0ECB0` / `0x00A0EC10`, and in 530 of the 531 characters of
+    /// the `eur_napoleon` start position the stored level less those effects is his agent type's
+    /// `agent_to_agent_attributes` level, the one exception as written in the start position;
+    /// [`super::characters`] keeps them in step). −1: his type does not have it; `None` when the array
+    /// has no such attribute.
     pub fn character_attribute(model: &CampaignModel, c: CharacterId, attribute: &str) -> Option<i32> {
-        let rules = &model.rules.effects;
         let d = model.world.character_details.get(&c)?;
-        let level = d.attributes.iter().find(|(k, _)| k == attribute).map(|(_, v)| *v)?;
-        if level < 0 {
-            return Some(level);
-        }
-        let mut bonus = 0;
-        for t in &d.traits {
-            if let Some(lk) = rules.trait_level_key(&t.key, t.points) {
-                bonus += rules.trait_attribute.get(lk).into_iter().flatten().filter(|(a, _)| a == attribute).map(|(_, v)| *v).sum::<i32>();
-            }
-        }
-        for a in &d.ancillaries {
-            bonus += rules.ancillary_attribute.get(a).into_iter().flatten().filter(|(x, _)| x == attribute).map(|(_, v)| *v).sum::<i32>();
-        }
-        Some(level + bonus.max(0))
+        d.attributes.iter().find(|(k, _)| k == attribute).map(|(_, v)| *v)
     }
 
     /// One character's own set (traits by level + ancillaries, character +0x48C).
@@ -630,6 +655,20 @@ impl Effects {
         faction + self.character(c, bonus)
     }
 
+    /// A commanded force's whole set, the one its unit upkeep is read from (`0x008AFC00` on the force,
+    /// called by `0x008F9C50`, CONFIRMED disassembly): a copy of the faction's sum (the force's `+0x7C`
+    /// handle → +0x6FC) with its commander's own set (the `+0x74` handle → character +0x48C) summed in,
+    /// here a view rather than a merged copy. So an admiral's `upkeep_cost_mod_naval_all` trait lowers
+    /// his fleet's upkeep (`netherlands` in `auto_after_c8`: faction −1 + `C_Admiral_Dutch_Seamanship`
+    /// −5, 1006 as saved). A force without a commander has no set: the exe counts it 0 (`0x008F9C62`,
+    /// [`super::economy::faction_upkeep_split_with`]).
+    /// PROVISIONAL: the exe takes the force's army container (force virtual +0x38 → +0x98 → +0x24)
+    /// instead of the faction sum when it has one; its content is UNKNOWN and not modelled, as in
+    /// [`Self::character_total`].
+    pub fn force_set(&self, faction: FactionId, commander: CharacterId) -> ForceEffects<'_> {
+        ForceEffects { faction: self.faction.get(&faction), commander: self.character.get(&commander) }
+    }
+
     /// [`Self::character_total`] of a qualified bonus, e.g. (`UnitCategory`, `movement_mod`, `infantry`).
     pub fn character_total_qualified(&self, c: CharacterId, kind: BonusKind, bonus: &str, qualifier: &str) -> f32 {
         let faction = self.character_owner.get(&c).map_or(0.0, |f| self.faction_qualified(*f, kind, bonus, qualifier));
@@ -651,22 +690,14 @@ impl Effects {
 pub const TECH_RESEARCHED: u32 = 0;
 
 /// The level 0..9 a ministerial post's effects are looked up with (`0x008D9D70`, CONFIRMED shape):
-/// the holder's rank (`0x00A198D0`): the main attribute of his character type (`agents` #8: `management`
-/// for a minister, `command_land` for a general such as Napoleon), its raw saved level without trait / ancillary
-/// bonuses (`base`), plus his `management_<post>` bonus (army, navy, finance, justice), clamped to −1..9,
-/// plus the `ministerial_effectiveness_modifiers` modifier of the government type for that value
-/// (`0x008C6A70`); clamped to 0..9.
-pub fn minister_level(rules: &EffectRules, government: &str, post: &str, base: i32, ch: &EffectSet) -> i32 {
-    let bonus = match post {
-        "army" => ch.get_int("management_army"),
-        "navy" => ch.get_int("management_navy"),
-        "finance" => ch.get_int("management_finance"),
-        "justice" => ch.get_int("management_justice"),
-        _ => 0,
-    };
-    let value = (base + bonus).clamp(-1, 9);
-    let modifier = rules.ministerial_effectiveness.get(&(government.to_string(), value)).copied().unwrap_or(0);
-    (value + modifier).clamp(0, 9)
+/// the holder's `rank` (`0x00A198D0`, the [`super::seams::CHARACTER_RANK`] seam: the level of his type's
+/// main attribute, `management` for a minister, `command_land` for a general such as Napoleon, with his
+/// situation bonuses, a minister's `management_<post>` among them, clamped to −1..9), plus the
+/// `ministerial_effectiveness_modifiers` modifier of the government type for that rank (`0x008C6A70`);
+/// clamped to 0..9.
+pub fn minister_level(rules: &EffectRules, government: &str, rank: i32) -> i32 {
+    let modifier = rules.ministerial_effectiveness.get(&(government.to_string(), rank)).copied().unwrap_or(0);
+    (rank + modifier).clamp(0, 9)
 }
 
 
@@ -762,7 +793,7 @@ fn character_set(rules: &EffectRules, d: Option<&super::details::CharacterDetail
     let mut s = EffectSet::default();
     let Some(d) = d else { return s };
     for t in &d.traits {
-        if let Some(level) = rules.trait_level_key(&t.key, t.points)
+        if let Some(level) = rules.held_level_key(&t.key, t.level)
             && let Some(set) = rules.trait_level_set(level)
         {
             s.merge(set);
@@ -815,13 +846,10 @@ fn faction_set(
         for post in d.posts.iter().filter(|p| p.governorship.is_none()) {
             let Some(holder) = post.holder else { continue };
             let ch = character(holder);
-            // The raw saved level of the type's main attribute (trait and ancillary attribute bonuses do not count here:
-            // with them Spain's head of government would be one level too high in every vanilla save).
-            let base = w.characters.get(&holder).zip(w.character_details.get(&holder)).and_then(|(c, d)| {
-                let main = super::agents::main_attribute(&model.rules, c.kind);
-                d.attributes.iter().find(|(k, _)| k == main).map(|(_, v)| *v)
-            }).unwrap_or(0);
-            let level = minister_level(rules, &f.government_key, &post.key, base, &ch);
+            // His rank through the seam, without the faction's terms (this is the faction's set being built): the
+            // stored main attribute already holds his trait and ancillary attribute effects.
+            let rank = (model.rules.seams.character_rank.rule())(model, holder, &ch, false);
+            let level = minister_level(rules, &f.government_key, rank);
             if let Some(set) = rules.ministerial.get(&(post.key.clone(), level)) {
                 s.merge(set);
             }
@@ -842,6 +870,30 @@ mod tests {
         ]));
         r.trait_levels.insert("T".into(), vec![(4, 1, "T_1".into()), (8, 2, "T_2".into()), (16, 3, "T_3".into())]);
         r
+    }
+
+    /// The force view reads as the merged copy does: equal keys add up, and of qualifiers that differ
+    /// only in case the first key in order wins, not their sum.
+    #[test]
+    fn the_force_view_reads_as_the_merged_copy() {
+        let key = |q: &str| EffectKey { kind: BonusKind::UnitCategory, bonus: "upkeep_mod".into(), qualifier: q.into() };
+        let mut faction = EffectSet::default();
+        faction.add(key("infantry"), -10.0);
+        faction.add(EffectKey::basic("upkeep_cost_mod_naval_all"), -1.0);
+        let mut commander = EffectSet::default();
+        commander.add(key("Infantry"), -5.0);
+        commander.add(key("cavalry"), -3.0);
+        commander.add(EffectKey::basic("upkeep_cost_mod_naval_all"), -5.0);
+        let mut merged = faction.clone();
+        merged.merge(&commander);
+        let view = ForceEffects { faction: Some(&faction), commander: Some(&commander) };
+        for q in ["infantry", "INFANTRY", "cavalry", "artillery"] {
+            assert_eq!(view.get_qualified(BonusKind::UnitCategory, "upkeep_mod", q), merged.get_qualified(BonusKind::UnitCategory, "upkeep_mod", q), "{q}");
+        }
+        assert_eq!(view.get_qualified(BonusKind::UnitCategory, "upkeep_mod", "infantry"), -5.0);
+        assert_eq!(view.get("upkeep_cost_mod_naval_all"), -6.0);
+        assert_eq!(ForceEffects::faction_only(&faction).get("upkeep_cost_mod_naval_all"), -1.0);
+        assert_eq!(ForceEffects::default().get("upkeep_cost_mod_naval_all"), 0.0);
     }
 
     /// A DB agent bonus and a saved type-0 entry of the same name and agent share one key
@@ -961,12 +1013,13 @@ mod tests {
     }
 
     #[test]
-    fn trait_levels_by_threshold() {
+    fn held_levels_by_level_number() {
         let r = rules();
-        assert_eq!(r.trait_level_key("T", 3), None);
-        assert_eq!(r.trait_level_key("T", 4), Some("T_1"));
-        assert_eq!(r.trait_level_key("T", 15), Some("T_2"));
-        assert_eq!(r.trait_level_key("T", 99), Some("T_3"));
+        assert_eq!(r.held_level_key("T", 0), None, "no level record");
+        assert_eq!(r.held_level_key("T", 1), Some("T_1"));
+        assert_eq!(r.held_level_key("T", 3), Some("T_3"));
+        assert_eq!(r.held_level_key("T", 4), None, "no such level");
+        assert_eq!(r.held_level_row("T", 2).map(|(th, _, _)| *th), Some(8));
     }
 
     #[test]
@@ -981,16 +1034,12 @@ mod tests {
     }
 
     #[test]
-    fn minister_level_from_raw_rank_plus_post_bonus() {
+    fn minister_level_is_the_rank_plus_the_government_modifier() {
         let mut r = EffectRules::default();
         r.ministerial_effectiveness.insert(("absolute_monarchy".into(), 5), 1);
-        let mut ch = EffectSet::default();
-        ch.add(EffectKey::basic("management_finance"), 2.0);
-        // A faction leader takes only his raw rank plus the government modifier for that value.
-        assert_eq!(minister_level(&r, "absolute_monarchy", "faction_leader", 5, &ch), 6);
-        // A finance minister adds his management_finance bonus before the modifier lookup.
-        assert_eq!(minister_level(&r, "absolute_monarchy", "finance", 3, &ch), 6);
-        assert_eq!(minister_level(&r, "republic", "finance", 9, &ch), 9, "clamped");
-        assert_eq!(minister_level(&r, "republic", "army", -4, &ch), 0, "clamped at 0");
+        assert_eq!(minister_level(&r, "absolute_monarchy", 5), 6, "the modifier for that rank");
+        assert_eq!(minister_level(&r, "absolute_monarchy", 3), 3, "no modifier row");
+        assert_eq!(minister_level(&r, "republic", 9), 9);
+        assert_eq!(minister_level(&r, "republic", -1), 0, "clamped at 0");
     }
 }

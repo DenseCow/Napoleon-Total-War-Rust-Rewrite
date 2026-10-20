@@ -607,9 +607,9 @@ pub(super) fn negotiation_action_name(item: &NegotiationItem) -> &'static str {
 /// `AcceptCampaignNegotiationDeal` 0x00C114B0), every action record applies its items (virtual
 /// +0x3C, UI_FIDELITY.md §4.9). Nothing without a counterpart ([`negotiation_factions`]).
 ///
-/// - **regions, technologies and the payment** are the model's records: `CampaignCommand::AcceptDeal`
-///   applies them (`0x00C18BF0` region transfer, `0x00C18CF0` technology grant, `0x00C18A70` payment;
-///   `CampaignModel::accept_deal`). The payment's amount is the one stored when it was proposed,
+/// - **regions, technologies, the payment and join war** are the model's records:
+///   `CampaignCommand::AcceptDeal` applies them (`0x00C18BF0` region transfer, `0x00C18CF0` technology
+///   grant, `0x00C18A70` payment, `0x00C188F0` join war; `CampaignModel::accept_deal`). The payment's amount is the one stored when it was proposed,
 ///   already capped there (`CampaignModel::proposed_payment`, `0x00C4AB20`).
 /// - the rows the UI still holds, the first time only (a row marked applied is skipped, so a row
 ///   applies at most once; see [`DealRow`]), become one `CampaignCommand::Diplomacy` each
@@ -635,7 +635,7 @@ fn accept_deal(ui: &CampaignUi) {
             ui.push(CampaignRequest::Command(deal_item_command(&row.item, actor, target)));
         }
     }
-    // The records the model holds (regions, technologies, the payment).
+    // The records the model holds (regions, technologies, the payment, join war).
     ui.push(CampaignRequest::Command(CampaignCommand::AcceptDeal));
 }
 
@@ -996,7 +996,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     // `offer_or_demand_regions` (InitialiseNegotiation reads `offers, demands, regions_text =` and
     // hands each row to AddToOffersDemandsList). `Regions` is set for the region-transfer action
     // (action id 6). INFERRED: `Action` is the host's action name (the exe gives the action
-    // record). The region, technology and payment rows come from the model's records (one row per
+    // record). The region, technology, payment and join-war rows come from the model's records (one row per
     // side that has items, `Regions` the region keys), after the UI's rows, in the action list's
     // order; their `Action` is the action's name, our stand-in for the action record everywhere
     // (`BuildPossibleActions`' `Address`), which the panel hands back to `RemoveAction`
@@ -1009,7 +1009,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
         if state.target.is_none() {
             return Ok(mlua::MultiValue::new());
         }
-        let (regions, techs, payment) = {
+        let (regions, techs, payment, join_war) = {
             let m = ui.model();
             let keys = |list: &[RegionId]| -> Vec<String> { list.iter().filter_map(|r| m.world.regions.get(r).map(|x| x.key.clone())).collect() };
             match m.negotiations.current.as_ref().filter(|n| Some(n.serial) == state.target) {
@@ -1017,6 +1017,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
                     [keys(&n.regions.offered), keys(&n.regions.demanded)],
                     [!n.technologies.offered.is_empty(), !n.technologies.demanded.is_empty()],
                     n.payment,
+                    [!n.join_war.offered.is_empty(), !n.join_war.demanded.is_empty()],
                 ),
                 None => Default::default(),
             }
@@ -1044,6 +1045,11 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
                 let row = lua.create_table()?;
                 row.set("Action", NegotiationAction::Payments.name())?;
                 row.set("Text", payment_row_text(&inner, payment))?;
+                list.push(row)?;
+            }
+            if join_war[side] {
+                let row = lua.create_table()?;
+                row.set("Action", NegotiationAction::RequestJoinWar.name())?;
                 list.push(row)?;
             }
             out.push(Value::Table(list));
@@ -1213,8 +1219,13 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     //   demand as it is (`0x00C1F6D0` / `0x00C1F6F0`); turns 1 unless `regular` and turns above 1. The
     //   executor caps it (`CampaignModel::proposed_payment`, `0x00C4AB20`). An argument of the wrong
     //   type is a script error in the exe (`0x01095090`); ours logs once and proposes nothing.
-    // PLACEHOLDER: the other actions' items (state gift, protector, war, the faction lists of 13–15)
-    // have no model command yet; logged once per action.
+    // - join war `(offers, demands, action)` (`0x009BF3C0`'s faction-list case: two tables of faction
+    //   keys found in the campaign registry, `FindCampaignFactionByKey` on model +0xF5C; the demands
+    //   go to `0x00C1F690`, the offers to `0x00C43D30`; CONFIRMED by disassembly) →
+    //   `CampaignCommand::ProposeJoinWar`. A key the registry lacks gives the exe a null entry (what its
+    //   command then carries is UNKNOWN, not traced); ours proposes nothing and logs the key once.
+    // PLACEHOLDER: the other actions' items (state gift, protector, war, the break-trade and
+    // break-alliance faction lists) have no model command yet; logged once per action.
     f!("Propose", |_l, inner, ui, a: Variadic<Value>| {
         if negotiation_factions(&ui).is_none() {
             return Ok(());
@@ -1224,6 +1235,10 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
             _ => None,
         };
         let entries = |t: &Table| -> Vec<Value> { t.sequence_values::<Value>().filter_map(Result::ok).collect() };
+        // A list's string entries (a technology or faction key each); `None` if one is not a string.
+        let keys = |t: &Table| -> Option<Vec<String>> {
+            entries(t).iter().map(|v| if let Value::String(s) = v { s.to_str().ok().map(|s| s.to_string()) } else { None }).collect()
+        };
         let tables = || match a.as_slice() {
             [.., Value::Table(offers), Value::Table(demands), _] => Some((offers, demands)),
             _ => None,
@@ -1236,11 +1251,28 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
                 Some(CampaignCommand::ProposeRegions { clear: false, demanded: ids(demands)?, offered: ids(offers)? })
             }),
             Some(NegotiationAction::Technology) => tables().and_then(|(offers, demands)| {
-                let keys = |t: &Table| -> Option<Vec<String>> {
-                    entries(t).iter().map(|v| if let Value::String(s) = v { s.to_str().ok().map(|s| s.to_string()) } else { None }).collect()
-                };
                 Some(CampaignCommand::ProposeTechnologies { clear: false, demanded: keys(demands)?, offered: keys(offers)? })
             }),
+            Some(NegotiationAction::RequestJoinWar) => {
+                match tables().and_then(|(offers, demands)| Some((keys(offers)?, keys(demands)?))) {
+                    None => None,
+                    Some((offers, demands)) => {
+                        let m = ui.model();
+                        let ids = |list: &[String]| -> Result<Vec<FactionId>, String> {
+                            list.iter().map(|k| m.registry_faction(k).map(|f| f.id).ok_or_else(|| k.clone())).collect()
+                        };
+                        match ids(&demands).and_then(|demanded| Ok((demanded, ids(&offers)?))) {
+                            Ok((demanded, offered)) => Some(CampaignCommand::ProposeJoinWar { clear: false, demanded, offered }),
+                            Err(key) => {
+                                inner.log_once_for("Propose join war faction", &key, || {
+                                    format!("ERROR negotiation:Propose: join war names faction {key}, which the campaign registry lacks; nothing proposed (logged once per key)")
+                                });
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
             Some(NegotiationAction::Payments) => {
                 // A Lua number as `0x010556D0` reads it: as a float, rounded to the nearest (ties to
                 // even); out of range is the x87 "integer indefinite", i32::MIN.
@@ -1270,13 +1302,15 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
         match cmd {
             Some(cmd) => ui.push(CampaignRequest::Command(cmd)),
             None => inner.log_once("Propose entries", || {
-                "ERROR negotiation:Propose: an argument is not of its action's type (region, technology key, payment boolean or number); nothing proposed (logged once)".into()
+                "ERROR negotiation:Propose: an argument is not of its action's type (region, technology or faction key, payment boolean or number); nothing proposed (logged once)".into()
             }),
         }
         Ok(())
     });
     // ProposeDeal(threat): the AI's answer (`CampaignModel::ai_refuses_deal`: the regions, technology
-    // and payment records evaluated as the exe's `EvaluateProposedNegotiationDealAI 0x00AA5ED0`) — declined as `DeclineOffer` does
+    // and payment records evaluated as the exe's `EvaluateProposedNegotiationDealAI 0x00AA5ED0`; every
+    // deal with a join-war item is declined, PROVISIONAL: the exe's join-war goal and value are not
+    // ported, see `CampaignModel::ai_accepts_deal`) — declined as `DeclineOffer` does
     // (the evaluator calls `0x00C1F210`), else accepted at once (`0x00C114B0`). The proposal itself
     // is a command (`CampaignCommand::ProposeDeal`): it stores the threat flag (+0x2B8), and the AI
     // recipient's evaluation keeps its relation belief, which the campaign director reads later.
@@ -1333,8 +1367,9 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     // action out of the deal. For regions, technologies and payments that posts the action's own
     // command with the clear flag set and no items (0x00C5CF20 / 0x00C5CFF0 / 0x00C5CBC0, the last
     // with the payment command's descriptor 0x013879FC that Propose's 0x00C4AD60 posts with the flag
-    // clear; CONFIRMED). PLACEHOLDER: the other actions' items are not built (see
-    // [`NegotiationItem`]), so there is nothing to remove.
+    // clear; CONFIRMED), and for join war 0x00C5CA50 (descriptor 0x01387A04, the flag set; CONFIRMED).
+    // PLACEHOLDER: the other actions' items are not built (see [`NegotiationItem`]), so there is
+    // nothing to remove.
     f!("RemoveAction", |_l, inner, ui, a: Variadic<Value>| {
         if negotiation_factions(&ui).is_none() {
             return Ok(());
@@ -1347,6 +1382,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
             Some(NegotiationAction::Regions) => CampaignCommand::ProposeRegions { clear: true, demanded: Vec::new(), offered: Vec::new() },
             Some(NegotiationAction::Technology) => CampaignCommand::ProposeTechnologies { clear: true, demanded: Vec::new(), offered: Vec::new() },
             Some(NegotiationAction::Payments) => CampaignCommand::ProposePayment { clear: true, amount: 0, turns: 0 },
+            Some(NegotiationAction::RequestJoinWar) => CampaignCommand::ProposeJoinWar { clear: true, demanded: Vec::new(), offered: Vec::new() },
             _ => return Ok(()),
         };
         ui.push(CampaignRequest::Command(cmd));
@@ -1361,7 +1397,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
             .negotiations
             .current
             .as_ref()
-            .is_some_and(|n| Some(n.serial) == state.target && !(n.regions.is_empty() && n.technologies.is_empty() && !n.payment.has_items()));
+            .is_some_and(|n| Some(n.serial) == state.target && !(n.regions.is_empty() && n.technologies.is_empty() && n.join_war.is_empty() && !n.payment.has_items()));
         Ok(!state.offers.is_empty() || !state.demands.is_empty() || modelled)
     });
     // CanThreaten(): UNKNOWN shape; INFERRED: any counterparty not already at war.

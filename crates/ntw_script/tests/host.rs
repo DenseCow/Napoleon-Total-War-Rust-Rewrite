@@ -220,6 +220,96 @@ fn war_started_character_faction_reads_the_faction_flag() {
 }
 
 #[test]
+fn grant_faction_handover_destroys_the_target_and_sets_the_killers_flag() {
+    // Binding 0x00978950: the turns must be Lua numbers (else nothing happens), the keys known
+    // factions; the model's rule decides (window, draw, `0x008AB6C0` with a killer). The killer's
+    // +0x924 then reads through FactionDestroyedByCharacterFaction (0x0089F4B0).
+    use ntw_sim::campaign::{Character, CharacterId, CharacterKind};
+    use ntw_sim::fixed::Fixed20;
+    let src = ScriptSource::empty().with_memory_file("events.lua", EVENTS).with_memory_file("test.lua", SCRIPT);
+    let mut model = common::tiny_model();
+    let fr = model.faction_by_key("france").unwrap().id;
+    let au = model.faction_by_key("austria").unwrap().id;
+    let c = CharacterId(7);
+    model.world.characters.insert(
+        c,
+        Character {
+            id: c,
+            faction: fr,
+            kind: CharacterKind::General,
+            position: (Fixed20::from_int(0), Fixed20::from_int(0)),
+            movement_points: 10,
+            max_movement_points: 10,
+            base_movement_points: 10,
+            garrisoned_in: None,
+        },
+    );
+    let h = ScriptHost::new(model, "france", src).unwrap();
+    h.run_file("data/test.lua").unwrap();
+    h.fire("NewSession", ScriptContext::default());
+    h.exec(
+        r#"local e = require "data.events"
+           e.CharacterTurnEnd = {}
+           e.CharacterTurnEnd[1] = function(context) destroyed[#destroyed+1] = conditions.FactionDestroyedByCharacterFaction(context) end
+           destroyed = {}"#,
+    )
+    .unwrap();
+    let ctx = ScriptContext { character: Some(c.0), ..Default::default() };
+    let out = |h: &ScriptHost| h.model().world.faction_details.get(&au).and_then(|d| d.out_of_game);
+    h.fire("CharacterTurnEnd", ctx.clone());
+    for call in [
+        r#"game_interface:grant_faction_handover("france", "austria", "0", 0)"#, // not a number
+        r#"game_interface:grant_faction_handover("france", "nowhere", 0, 0)"#,
+        r#"game_interface:grant_faction_handover("france", "austria", 3, 9)"#, // turn 0: outside
+    ] {
+        h.exec(call).unwrap();
+        assert_eq!(out(&h), Some(false), "{call}");
+    }
+    h.exec(r#"game_interface:grant_faction_handover("france", "austria", 0, 0.4)"#).unwrap(); // 0.4 → 0: certain
+    assert_eq!(out(&h), Some(true));
+    h.fire("CharacterTurnEnd", ctx);
+    let seen: Vec<bool> = h.lua().load("return destroyed").eval().unwrap();
+    assert_eq!(seen, vec![false, true]);
+    let st = h.state_mut();
+    assert!(st.log.iter().any(|l| l.contains("\"0\"") && l.contains("unexpected arguments")), "{:?}", st.log);
+    assert!(st.log.iter().any(|l| l.contains("\"nowhere\"") && l.contains("unknown faction")));
+    assert!(st.log.iter().any(|l| l.ends_with("austria destroyed by france")));
+}
+
+#[test]
+fn a_handover_from_a_handler_returns_its_destruction_events() {
+    // The destruction's model events (here a human target's `FactionDestroyed`) were dropped on the
+    // script command path; the host now fires/returns them after the handler's batch.
+    let src = ScriptSource::empty().with_memory_file("events.lua", EVENTS).with_memory_file("test.lua", SCRIPT);
+    let mut model = common::tiny_model();
+    let fr = model.faction_by_key("france").unwrap().id;
+    let au = model.faction_by_key("austria").unwrap().id;
+    model.turn.humans = vec![fr, au];
+    let mut h = ScriptHost::new(model, "france", src).unwrap();
+    h.run_file("data/test.lua").unwrap();
+    h.fire("NewSession", ScriptContext::default());
+    h.exec(
+        r#"local e = require "data.events"
+           handed = false
+           e.FactionTurnStart[#e.FactionTurnStart+1] = function(context)
+               if not handed then
+                   handed = true
+                   local t = conditions.TurnNumber(context) - 1
+                   game_interface:grant_faction_handover("france", "austria", t, t)
+               end
+           end"#,
+    )
+    .unwrap();
+    let fired = h.end_turn();
+    let start = fired.iter().position(|(e, _)| e.script_name() == Some("FactionTurnStart")).expect("a turn started");
+    let destroyed = fired
+        .iter()
+        .position(|(e, _)| matches!(e, ntw_sim::campaign::CampaignEvent::FactionDestroyed { faction } if *faction == au))
+        .expect("the handover's FactionDestroyed is returned");
+    assert!(start < destroyed, "after the batch whose handler issued it");
+    assert_eq!(h.model().world.faction_details.get(&au).and_then(|d| d.out_of_game), Some(true));
+}
+#[test]
 fn end_turn_forwards_model_events() {
     let mut h = host();
     h.fire("NewSession", ScriptContext::default());
@@ -229,6 +319,153 @@ fn end_turn_forwards_model_events() {
     assert!(fired.iter().all(|(_, r)| r.errors.is_empty()));
     let seen: Vec<String> = h.lua().load("return seen").eval().unwrap();
     assert!(seen.iter().any(|s| s.starts_with("local turn")), "{seen:?}");
+}
+
+#[test]
+fn force_make_protectorate_makes_peace_then_the_protectorate() {
+    // 0x0097AA20: at war, a peace first (messages off), then the protectorate, then the armies out.
+    use ntw_sim::campaign::{CampaignCommand, Stance};
+    let src = ScriptSource::empty().with_memory_file("events.lua", EVENTS).with_memory_file("test.lua", SCRIPT);
+    let mut model = common::tiny_model();
+    let id = |m: &ntw_sim::campaign::CampaignModel, k: &str| m.faction_by_key(k).unwrap().id;
+    let (fr, au, pr) = (id(&model, "france"), id(&model, "austria"), id(&model, "prussia"));
+    model.apply(CampaignCommand::DeclareWar { a: fr, b: au }).unwrap();
+    let h = ScriptHost::new(model, "france", src).unwrap();
+    h.run_file("data/test.lua").unwrap();
+    h.fire("NewSession", ScriptContext::default());
+    h.lua().load(r#"game_interface:force_make_protectorate("france", "austria")"#).exec().unwrap();
+    assert_eq!((h.model().world.stance(au, fr), h.model().world.stance(fr, au)), (Stance::Protectorate, Stance::Patron));
+    // Austria has a patron: no second protectorate (the armies still move out); the same faction or
+    // an unknown one does nothing.
+    h.lua()
+        .load(
+            r#"game_interface:force_make_protectorate("prussia", "austria")
+               game_interface:force_make_protectorate("france", "france")
+               game_interface:force_make_protectorate("france", "nobody")"#,
+        )
+        .exec()
+        .unwrap();
+    assert_eq!(h.model().world.stance(au, pr), Stance::Neutral);
+    let st = h.state();
+    let log: Vec<&String> = st.log.iter().filter(|l| l.contains("force_make_protectorate")).collect();
+    assert_eq!(log.len(), 4, "{log:?}");
+    assert!(!log[0].contains("refused") && !log[1].contains("refused"), "{log:?}");
+    assert!(log[2].contains("same faction") && log[3].contains("unknown faction"), "{log:?}");
+}
+
+#[test]
+fn force_make_protectorate_outside_the_patrons_turn_returns_its_events() {
+    // 0x0097AA20 from a handler in another faction's turn: the peace (`CCQ_MAKE_PEACE` handler
+    // 0x00936710 has no turn test) and the protectorate both hold, and their stance events reach the
+    // host after the handler's batch (they were dropped). The peace's messages are off.
+    use ntw_sim::campaign::{CampaignCommand, CampaignEvent, Stance};
+    let src = ScriptSource::empty().with_memory_file("events.lua", EVENTS).with_memory_file("test.lua", SCRIPT);
+    let mut model = common::tiny_model();
+    let (fr, au) = (model.faction_by_key("france").unwrap().id, model.faction_by_key("austria").unwrap().id);
+    model.apply(CampaignCommand::DeclareWar { a: fr, b: au }).unwrap();
+    model.turn.humans = vec![fr, au];
+    let mut h = ScriptHost::new(model, "france", src).unwrap();
+    h.run_file("data/test.lua").unwrap();
+    h.fire("NewSession", ScriptContext::default());
+    h.exec(
+        r#"local e = require "data.events"
+           starts = 0
+           e.FactionTurnStart[#e.FactionTurnStart+1] = function(context)
+               starts = starts + 1
+               if starts == 2 then -- Austria's turn, after France's
+                   game_interface:force_make_protectorate("france", "austria")
+               end
+           end"#,
+    )
+    .unwrap();
+    let fired = h.end_turn();
+    let start = fired.iter().position(|(e, _)| matches!(e, CampaignEvent::FactionTurnStart { faction } if *faction == au)).expect("Austria's turn started");
+    let stance_event = |stance: Stance| {
+        fired.iter().position(|(e, _)| matches!(e, CampaignEvent::StanceChanged { a, b, stance: s } if *s == stance && [*a, *b].contains(&fr) && [*a, *b].contains(&au)))
+    };
+    let peace = stance_event(Stance::Neutral).expect("the peace's event is returned");
+    let protectorate = stance_event(Stance::Protectorate).expect("the protectorate's event is returned");
+    assert!(start < peace && peace < protectorate, "{start} {peace} {protectorate}");
+    assert!(!fired.iter().any(|(e, _)| matches!(e, CampaignEvent::Message { .. })), "the peace posts no ceasefire messages (suppress byte 1)");
+    assert_eq!((h.model().world.stance(au, fr), h.model().world.stance(fr, au)), (Stance::Protectorate, Stance::Patron));
+    let st = h.state();
+    assert!(st.log.iter().any(|l| l.contains("force_make_protectorate") && !l.contains("refused")), "{:?}", st.log);
+}
+
+#[test]
+fn force_make_peace_outside_the_first_factions_turn_makes_peace() {
+    // 0x0097AC90 queues CCQ_MAKE_PEACE, whose handler 0x00936710 has no turn test: France's peace with
+    // Austria holds when a handler in Austria's turn calls it.
+    use ntw_sim::campaign::{CampaignCommand, CampaignEvent, Stance};
+    let src = ScriptSource::empty().with_memory_file("events.lua", EVENTS).with_memory_file("test.lua", SCRIPT);
+    let mut model = common::tiny_model();
+    let (fr, au) = (model.faction_by_key("france").unwrap().id, model.faction_by_key("austria").unwrap().id);
+    model.apply(CampaignCommand::DeclareWar { a: fr, b: au }).unwrap();
+    model.turn.humans = vec![fr, au];
+    let mut h = ScriptHost::new(model, "france", src).unwrap();
+    h.run_file("data/test.lua").unwrap();
+    h.fire("NewSession", ScriptContext::default());
+    h.exec(
+        r#"local e = require "data.events"
+           starts = 0
+           e.FactionTurnStart[#e.FactionTurnStart+1] = function(context)
+               starts = starts + 1
+               if starts == 2 then -- Austria's turn, after France's
+                   game_interface:force_make_peace("france", "austria")
+               end
+           end"#,
+    )
+    .unwrap();
+    let fired = h.end_turn();
+    assert!(fired.iter().any(|(e, _)| matches!(e, CampaignEvent::FactionTurnStart { faction } if *faction == au)), "Austria's turn started");
+    assert_eq!(h.model().world.stance(fr, au), Stance::Neutral);
+    let st = h.state();
+    assert!(st.log.iter().any(|l| l.contains("force_make_peace") && !l.contains("refused")), "{:?}", st.log);
+}
+
+#[test]
+fn force_make_protectorate_with_a_battle_pending_changes_nothing() {
+    // The three commands go through `CampaignModel::apply`, so a pending battle refuses each of them:
+    // no peace without the protectorate and the expulsion.
+    use ntw_sim::campaign::{CampaignCommand, ForceId, PendingBattle};
+    let src = ScriptSource::empty().with_memory_file("events.lua", EVENTS).with_memory_file("test.lua", SCRIPT);
+    let mut model = common::tiny_model();
+    let (fr, au) = (model.faction_by_key("france").unwrap().id, model.faction_by_key("austria").unwrap().id);
+    model.apply(CampaignCommand::DeclareWar { a: fr, b: au }).unwrap();
+    model.pending_battle = Some(PendingBattle { attacker: ForceId(1), defenders: vec![ForceId(2)], settlement: None, resume: None });
+    let h = ScriptHost::new(model, "france", src).unwrap();
+    h.run_file("data/test.lua").unwrap();
+    h.fire("NewSession", ScriptContext::default());
+    let before = h.model().world.clone();
+    h.lua().load(r#"game_interface:force_make_protectorate("france", "austria")"#).exec().unwrap();
+    assert!(h.model().world == before, "the world changed");
+    let st = h.state();
+    let line = st.log.iter().find(|l| l.contains("force_make_protectorate")).expect("logged");
+    assert_eq!(line.matches("a battle is pending").count(), 3, "{line}");
+}
+
+#[test]
+fn turn_steps_return_every_model_event_in_order() {
+    use ntw_sim::campaign::{CampaignEvent, CharacterId, FactionId, ForceId};
+    // Project events (no script name: the exe declares no `CharacterMoved` / `ForceDestroyed` script
+    // event) from an AI turn reach the caller with the script events, in the model's order, as a
+    // command's do: the app animates the moves and shows the outcome movies from them.
+    let mut h = host();
+    let (fr, au) = (FactionId(100), FactionId(101));
+    h.state_mut().model.turn.humans = vec![fr];
+    h.set_ai_turn_hook(Box::new(move |_, faction| {
+        if faction != au {
+            return Vec::new();
+        }
+        vec![CampaignEvent::CharacterMoved { character: CharacterId(7), path: vec![(0.0, 0.0), (1.0, 1.0)] }, CampaignEvent::ForceDestroyed { force: ForceId(8) }]
+    }));
+    let fired: Vec<CampaignEvent> = h.end_turn().into_iter().map(|(e, _)| e).collect();
+    let at = |want: &dyn Fn(&CampaignEvent) -> bool| fired.iter().position(want);
+    let start = at(&|e| *e == CampaignEvent::FactionTurnStart { faction: au }).expect("austria's turn start");
+    let moved = at(&|e| matches!(e, CampaignEvent::CharacterMoved { character: CharacterId(7), .. })).expect("the AI's move returned");
+    let gone = at(&|e| *e == CampaignEvent::ForceDestroyed { force: ForceId(8) }).expect("the AI's destroyed force returned");
+    let end = at(&|e| *e == CampaignEvent::FactionTurnEnd { faction: au }).expect("austria's turn end");
+    assert!(start < moved && moved < gone && gone < end, "{start} {moved} {gone} {end}");
 }
 
 #[test]
@@ -274,6 +511,28 @@ fn display_turns_sets_the_turns_display_switch() {
     assert!(h.model().world.display_turns);
     h.lua().load("game_interface:display_turns()").exec().unwrap();
     assert!(!h.model().world.display_turns);
+}
+
+#[test]
+fn restricted_unit_records_are_the_models_list() {
+    // 0x009C9700 appends (a unit added twice is listed twice), 0x00A1D3B0 erases the first match only, and
+    // a key the units table lacks is logged and stored nowhere (ORIGINAL BUG fixed: the exe stores a null
+    // record its next save crashes on, 0x009A1070).
+    let src = ScriptSource::empty().with_memory_file("events.lua", EVENTS).with_memory_file("test.lua", SCRIPT);
+    let mut model = common::tiny_model();
+    model.rules = std::sync::Arc::new(ntw_sim::campaign::rules::CampaignRules::test_rules());
+    let h = ScriptHost::new(model, "france", src).unwrap();
+    h.run_file("data/test.lua").unwrap();
+    h.fire("NewSession", ScriptContext::default());
+    let listed = |h: &ScriptHost| h.model().world.restricted_units.clone();
+    h.lua().load(r#"game_interface:add_restricted_unit_record("test_recruit") game_interface:add_restricted_unit_record("made_up_none") game_interface:add_restricted_unit_record("test_recruit")"#).exec().unwrap();
+    assert_eq!(listed(&h), ["test_recruit", "test_recruit"]);
+    h.lua().load(r#"game_interface:remove_restricted_unit_record("test_recruit")"#).exec().unwrap();
+    assert_eq!(listed(&h), ["test_recruit"], "added twice, removed once: still restricted");
+    assert!(h.model().world.unit_restricted("test_recruit"));
+    h.lua().load(r#"game_interface:remove_restricted_unit_record("test_recruit") game_interface:remove_restricted_unit_record("test_recruit")"#).exec().unwrap();
+    assert!(listed(&h).is_empty(), "removing an unlisted unit does nothing");
+    assert!(h.state().log.iter().any(|l| l.contains("'made_up_none' is not a valid unit key, ignored")));
 }
 
 #[test]
@@ -497,4 +756,187 @@ fn a_new_campaign_with_an_empty_block_gives_the_handlers_their_defaults() {
     assert_eq!(fired.iter().filter(|(n, r)| *n == "LoadingGame" && r.handlers > 0).count(), 1);
     assert_eq!(h.state().model.world.last_economy_record(au).unwrap()[11], 500, "default 0: no boost");
     assert!(h.state().is_new_game);
+}
+
+/// `FactionBecomesLiberationProtectorate` gives a handler the liberator as its faction (event vtable
+/// `0x0137D064` +0x38 `0x0044A500`, read by `FactionTreasury` `0x008A0860`) and nothing else: the
+/// event has no region, settlement or character accessor.
+#[test]
+fn the_liberation_protectorate_event_gives_handlers_the_liberator() {
+    use ntw_sim::campaign::CampaignEvent;
+    let h = host();
+    let fr = h.model().faction_by_key("france").unwrap().id;
+    h.state_mut().model.world.factions.get_mut(&fr).unwrap().treasury = 1234;
+    h.exec(
+        r#"local e = require "data.events"
+           e.FactionBecomesLiberationProtectorate = {}
+           e.FactionBecomesLiberationProtectorate[1] = function(context)
+               liberation = { conditions.FactionName("france", context), conditions.FactionTreasury(context) }
+           end"#,
+    )
+    .unwrap();
+    let ev = CampaignEvent::FactionBecomesLiberationProtectorate { faction: fr };
+    let ctx = h.context_for(&ev);
+    assert_eq!(ctx.faction.as_deref(), Some("france"));
+    assert_eq!((ctx.region, ctx.settlement, ctx.character), (None, None, None));
+    let r = h.fire(ev.script_name().unwrap(), h.context_for(&ev));
+    assert_eq!((r.handlers, r.errors), (1, vec![]));
+    let (is_france, treasury): (bool, f64) = h.lua().load("return liberation[1], liberation[2]").eval().unwrap();
+    assert_eq!((is_france, treasury), (true, 1234.0));
+}
+
+/// The human's `ChooseCapture` liberate answer fires `FactionBecomesLiberationProtectorate` through the
+/// host with the liberator (france, the region's owner when it is posted, `0x00B5089D`) as the handler's
+/// faction, before the region passes to the liberated faction.
+#[test]
+fn a_liberate_choice_fires_the_protectorate_event_with_the_liberator() {
+    use ntw_sim::campaign::{
+        CampaignCommand, CampaignEvent, CaptureChoice, Region, RegionId, Settlement,
+    };
+    use ntw_sim::fixed::Fixed20;
+    let src = ScriptSource::empty().with_memory_file("events.lua", EVENTS).with_memory_file("test.lua", SCRIPT);
+    let mut model = common::tiny_model();
+    let id = |m: &ntw_sim::campaign::CampaignModel, k: &str| m.faction_by_key(k).unwrap().id;
+    let (fr, au, pr) = (id(&model, "france"), id(&model, "austria"), id(&model, "prussia"));
+    model.turn.humans = vec![fr];
+    // Made-up region of austria's whose rebels are prussia, out of the game: a liberation target.
+    let region = RegionId(1);
+    model.world.regions.insert(
+        region,
+        Region {
+            id: region,
+            key: "test_region_1".into(),
+            owner: au,
+            settlement: Settlement { key: "settlement:test_region_1:town".into(), position: (Fixed20::from_int(0), Fixed20::from_int(0)) },
+            slots: Vec::new(),
+            road: None,
+            fortification: None,
+            road_holder: None,
+            fortification_holder: None,
+            population: 1000,
+            base_gdp: 100,
+            gdp: 100,
+            wealth_growth_offset: 0,
+            discontent_growth: 0,
+            town_wealth: 0,
+            town_wealth_growth: 0,
+            tax_exempt: false,
+            religions: Vec::new(),
+            class_bases: Vec::new(),
+            unit_resources: Vec::new(),
+            population_state: Default::default(),
+            recruitment_queue: Vec::new(),
+            construction: Vec::new(),
+            garrison: None,
+            fleet: None,
+            siege: Default::default(),
+        },
+    );
+    model.world.region_rebel_factions.insert(region, "prussia".into());
+    model.world.faction_details.entry(pr).or_default().out_of_game = Some(true);
+    model.capture_by_force(region, fr, None);
+    assert_eq!(model.pending_capture.as_ref().and_then(|p| p.liberate), Some(pr));
+    let mut h = ScriptHost::new(model, "france", src).unwrap();
+    h.run_file("data/test.lua").unwrap();
+    h.exec(
+        r#"local e = require "data.events"
+           e.FactionBecomesLiberationProtectorate = {}
+           e.FactionBecomesLiberationProtectorate[1] = function(context)
+               liberator_is_france = conditions.FactionName("france", context)
+           end"#,
+    )
+    .unwrap();
+    let fired = h.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Liberate }).unwrap();
+    let (event, report) = fired
+        .iter()
+        .find(|(e, _)| matches!(e, CampaignEvent::FactionBecomesLiberationProtectorate { .. }))
+        .expect("the liberation posts the event");
+    assert_eq!(*event, CampaignEvent::FactionBecomesLiberationProtectorate { faction: fr });
+    assert_eq!((report.handlers, report.errors.clone()), (1, vec![]));
+    assert!(h.lua().load("return liberator_is_france").eval::<bool>().unwrap());
+    assert_eq!(h.model().world.regions[&region].owner, pr);
+}
+
+#[test]
+fn a_call_to_war_pauses_the_turn_until_the_human_ally_answers() {
+    // An AI faction's war on a human's ally asks the human (0x00B268B0 → the pending offer); the turn
+    // steps wait (0x008F4120) and the answer's command resumes them without replaying the AI's turn.
+    use ntw_sim::campaign::{CampaignCommand, CampaignEvent, Stance};
+    use std::cell::Cell;
+    use std::rc::Rc;
+    let src = ScriptSource::empty().with_memory_file("events.lua", EVENTS).with_memory_file("test.lua", SCRIPT);
+    let mut model = common::tiny_model();
+    let id = |m: &ntw_sim::campaign::CampaignModel, k: &str| m.faction_by_key(k).unwrap().id;
+    let (fr, au, pr, ru) = (id(&model, "france"), id(&model, "austria"), id(&model, "prussia"), id(&model, "russia"));
+    model.turn.humans = vec![fr, au];
+    model.ask_human_allies = true;
+    model.form_alliance(au, pr).unwrap();
+    let mut h = ScriptHost::new(model, "france", src).unwrap();
+    h.run_file("data/test.lua").unwrap();
+    h.fire("NewSession", ScriptContext::default());
+    h.end_turn();
+    let played = Rc::new(Cell::new(0));
+    let count = played.clone();
+    h.set_ai_turn_hook(Box::new(move |state, faction| {
+        if faction != ru {
+            return Vec::new();
+        }
+        count.set(count.get() + 1);
+        state.model.declare_war_rules(ru, pr).unwrap()
+    }));
+    let fired = h.end_turn();
+    assert!(!fired.iter().any(|(e, _)| matches!(e, CampaignEvent::FactionTurnStart { faction } if *faction == fr)), "france's next turn waits");
+    assert_eq!(h.model().pending_ally_war_calls.len(), 1, "austria is asked");
+    assert!(!h.model().turn.queue.is_empty(), "the turn waits");
+    assert_ne!(h.model().world.stance(ru, pr), Stance::War);
+    let fired = h.apply(CampaignCommand::RespondToAllyWarCall { side: Some(pr), accept: true }).unwrap();
+    assert_eq!(h.model().world.stance(ru, pr), Stance::War);
+    assert_eq!(h.model().world.stance(au, ru), Stance::War, "austria joined");
+    assert!(fired.iter().any(|(e, _)| matches!(e, CampaignEvent::FactionTurnStart { faction } if *faction == fr)), "the turn went on");
+    assert_eq!(played.get(), 1, "russia's turn is not played again");
+}
+
+#[test]
+fn character_looted_settlement_gives_the_character_and_no_faction() {
+    // The exe's event (vtable 0x0137CCB8) answers only the character getter (+0x1C); the faction
+    // getter (+0x38) is the null stub 0x00461180, so FactionIsLocal is false even for the local
+    // faction's own looter, while the character conditions read the looter.
+    use ntw_sim::campaign::{CampaignEvent, Character, CharacterId, CharacterKind};
+    use ntw_sim::fixed::Fixed20;
+    let src = ScriptSource::empty().with_memory_file("events.lua", EVENTS).with_memory_file("test.lua", SCRIPT);
+    let mut model = common::tiny_model();
+    let fr = model.faction_by_key("france").unwrap().id;
+    let c = CharacterId(7);
+    model.world.characters.insert(
+        c,
+        Character {
+            id: c,
+            faction: fr,
+            kind: CharacterKind::General,
+            position: (Fixed20::from_int(0), Fixed20::from_int(0)),
+            movement_points: 10,
+            max_movement_points: 10,
+            base_movement_points: 10,
+            garrisoned_in: None,
+        },
+    );
+    let h = ScriptHost::new(model, "france", src).unwrap();
+    h.run_file("data/test.lua").unwrap();
+    let ev = CampaignEvent::CharacterLootedSettlement { character: c };
+    assert_eq!(ev.script_name(), Some("CharacterLootedSettlement"));
+    let ctx = h.context_for(&ev);
+    assert_eq!(ctx, ScriptContext { character: Some(c.0), ..Default::default() });
+    h.exec(
+        r#"local e = require "data.events"
+           e.CharacterLootedSettlement = {}
+           e.CharacterLootedSettlement[1] = function(context)
+               looted[#looted+1] = tostring(conditions.CharacterType("General", context)) .. " " .. tostring(conditions.FactionIsLocal(context))
+           end
+           looted = {}"#,
+    )
+    .unwrap();
+    let r = h.fire("CharacterLootedSettlement", ctx);
+    assert_eq!((r.handlers, r.errors.clone()), (1, vec![]));
+    let seen: Vec<String> = h.lua().load("return looted").eval().unwrap();
+    assert_eq!(seen, vec!["true false"]);
 }

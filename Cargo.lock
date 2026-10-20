@@ -3662,6 +3662,7 @@ dependencies = [
 name = "ntw_ai"
 version = "0.1.0"
 dependencies = [
+ "log",
  "ntw_campaign",
  "ntw_data",
  "ntw_formats",

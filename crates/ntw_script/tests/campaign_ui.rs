@@ -1042,8 +1042,8 @@ fn enlist_traits_show_their_names_and_effects() {
         let pool = m.world.faction_details[&f].general_pool.0.clone();
         for c in pool {
             m.world.character_details.entry(c).or_default().traits = vec![
-                CharacterTrait { key: "C_General_Attacker_Bad".into(), points: 0 },
-                CharacterTrait { key: "C_General_Brave".into(), points: 16 },
+                CharacterTrait { key: "C_General_Attacker_Bad".into(), points: 0, level: 0 },
+                CharacterTrait { key: "C_General_Brave".into(), points: 16, level: 5 },
             ];
         }
         m.world.forces.values().filter(|x| x.faction == f && !x.is_navy).find_map(|x| x.commander).unwrap()
@@ -1084,13 +1084,13 @@ fn trait_tooltip_follows_the_models_level_effects() {
     let (general, level_key) = {
         let mut st = s.scripts.state_mut();
         let m = &mut st.model;
-        let level_key = m.rules.effects.trait_level_row("C_General_Brave", 16).expect("Brave level 5").2.clone();
+        let level_key = m.rules.effects.held_level_row("C_General_Brave", 5).expect("Brave level 5").2.clone();
         // A rule change: morale_bonus twice (summed to 7), in place of the level's table rows.
         std::sync::Arc::make_mut(&mut m.rules).effects.insert_trait_level(level_key.clone(), [("morale_bonus", 2.0), ("morale_bonus", 5.0)]);
         let f = m.faction_by_key("france").unwrap().id;
         let pool = m.world.faction_details[&f].general_pool.0.clone();
         for c in pool {
-            m.world.character_details.entry(c).or_default().traits = vec![CharacterTrait { key: "C_General_Brave".into(), points: 16 }];
+            m.world.character_details.entry(c).or_default().traits = vec![CharacterTrait { key: "C_General_Brave".into(), points: 16, level: 5 }];
         }
         let general = m.world.forces.values().filter(|x| x.faction == f && !x.is_navy).find_map(|x| x.commander).unwrap();
         (general, level_key)
@@ -2772,4 +2772,32 @@ fn minister_portrait_fallback_follows_the_models_alternate() {
     }
     let path: String = s.host.lua().load("return CampaignUI.MinisterPortraitPath('austria')").eval().unwrap();
     assert_eq!(path, "ui/portraits/middle_east/Cards/minister/young/001.tga");
+}
+
+/// The shipped `text/default_keys.xml` through the shortcut handler on the original HUD: Return is
+/// `end_turn` on `button_end_turn`, whose script ends the turn on the key's release; ESCAPE is the
+/// root's `escape_menu`, which opens the escape menu; W is the camera's repeating `step_fwd`.
+#[test]
+fn shipped_key_bindings_end_the_turn_open_the_escape_menu_and_step_the_camera() {
+    use ntw_formats::default_keys::{Held, PATH, Shortcuts};
+    use ntw_script::ui::{CampaignKey, ShortcutMachine};
+    let Some(s) = setup() else { return };
+    let vfs = ntw_formats::pack::Vfs::open_install(data_dir()).unwrap();
+    let mut m = ShortcutMachine::new(Shortcuts::parse(&vfs.read(PATH).unwrap()).unwrap().mode_bindings("campaign"));
+    let mut steps = Vec::new();
+    let mut key = |s: &Setup, down: &[&str], up: bool, repeat: bool, steps: &mut Vec<String>| {
+        s.host.campaign_key(&mut m, CampaignKey { down, up, repeat, held: Held::default(), time: 0.1, ..Default::default() }, &mut |f, _| steps.push(f.to_owned()))
+    };
+    key(&s, &["RETURN"], false, false, &mut steps);
+    assert!(s.host.take_campaign_requests().iter().all(|r| !matches!(r, CampaignRequest::EndTurn)), "the button acts on the release");
+    key(&s, &[], true, false, &mut steps);
+    assert!(s.host.take_campaign_requests().iter().any(|r| matches!(r, CampaignRequest::EndTurn)), "Return ends the turn");
+    key(&s, &["W"], false, false, &mut steps);
+    key(&s, &["W"], false, true, &mut steps);
+    key(&s, &[], true, false, &mut steps);
+    assert_eq!(steps, ["step_fwd", "step_fwd"], "the camera's step repeats");
+    key(&s, &["ESCAPE"], false, false, &mut steps);
+    key(&s, &[], true, false, &mut steps);
+    assert!(errors(&s.host).is_empty());
+    assert!(find(&s.host, s.root, "esc_menu_campaign").is_some(), "ESCAPE opens the escape menu");
 }

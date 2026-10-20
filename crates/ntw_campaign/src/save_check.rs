@@ -24,7 +24,7 @@
 //! * government posts name living characters;
 //! * the other id sites (`save_audit refsites`): recruitment pools name characters of the faction
 //!   without a force; `CHARACTER` #6, `MILITARY_FORCE` #2, residence #14, `PORT_GARRISON_MANAGER`
-//!   #0 (a navy), `COMMERCE_RAIDS` #0 and `PENDING_BATTLE_PARTICIPANT` #0 name existing objects;
+//!   #0 and #1 (navies), `COMMERCE_RAIDS` #0 and `PENDING_BATTLE_PARTICIPANT` #0 name existing objects;
 //!   `ARMY` #4 = its force id;
 //! * pathfinder: every character obstacle's owner exists; `OBSTACLE_LISTS` #2 lists the
 //!   `CHARACTER_OBSTACLE` owners in order; every obstacle pair names an obstacle; no grid node
@@ -376,10 +376,13 @@ pub fn check(esf: &EsfFile) -> Report {
             }
         }
         "PORT_GARRISON_MANAGER" => {
-            if let Some(v) = x.get_u32(0).filter(|&v| v != 0)
-                && forces.get(&v).is_none_or(|f| !f.navy)
-            {
-                refs.push(format!("PORT_GARRISON_MANAGER #0 = {v} is no navy"));
+            // #0 the docked navy, #1 the blockading navy (reader `0x00A45860`).
+            for i in [0, 1] {
+                if let Some(v) = x.get_u32(i).filter(|&v| v != 0)
+                    && forces.get(&v).is_none_or(|f| !f.navy)
+                {
+                    refs.push(format!("PORT_GARRISON_MANAGER #{i} = {v} is no navy"));
+                }
             }
         }
         _ => {}

@@ -226,8 +226,12 @@ fn character_tables() {
         c.ancillary_excluded.len(),
         c.ancillary_subcultures.len(),
         c.subcultures.len(),
+        c.agent_start_attributes.len(),
     ];
-    assert_eq!(n, [163, 163, 93, 179, 275, 333, 238, 1235, 16]);
+    assert_eq!(n, [163, 163, 93, 179, 275, 333, 238, 1235, 16, 30]);
+    // The vanilla starting levels the rank reads first (CHARACTERS_FIDELITY.md §16).
+    let level = |agent: &str, attr: &str| c.agent_start_attributes.iter().find(|r| r.agent == agent && r.attribute == attr).map(|r| r.level);
+    assert_eq!([level("General", "command_land"), level("colonel", "command_land"), level("admiral", "command_sea"), level("minister", "management"), level("rake", "subterfuge")], [Some(2), Some(0), Some(2), Some(2), Some(2)]);
     let t = c.traits.get("C_Admiral_Attacker_Bad").unwrap();
     assert_eq!((t.no_going_back_level, t.priority, t.category.as_str()), (3, 2, "Naval"));
     let a = c.ancillaries.get("Anc_Banker").unwrap();

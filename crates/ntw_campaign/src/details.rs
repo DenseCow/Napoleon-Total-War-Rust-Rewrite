@@ -129,7 +129,7 @@ pub(crate) fn character_details(ch: &EsfRecord) -> Option<CharacterDetails> {
     let traits = rec(0)
         .map(|t| {
             items(t, "TRAIT")
-                .filter_map(|it| Some(CharacterTrait { key: it.first()?.as_str()?.to_string(), points: it.get(1)?.as_i32()? }))
+                .filter_map(|it| Some(CharacterTrait { key: it.first()?.as_str()?.to_string(), points: it.get(1)?.as_i32()?, level: 0 }))
                 .collect()
         })
         .unwrap_or_default();
@@ -200,8 +200,9 @@ pub(crate) fn upkeep_trackers(f: &EsfRecord) -> Option<[i32; 2]> {
 
 /// The position of a `FACTION`'s `WarStartedCharacterFaction` flag (faction +0x925,
 /// `FactionDetails::war_started`): 8 after the second `CAMPAIGN_BONUS_VALUES`, when a bool sits there
-/// (the loader `0x0087A190`; #63 on every vanilla `FACTION` v18). `None` when the record does not
-/// have that shape.
+/// (the loader `0x0087A190`; #63 on every vanilla `FACTION` v18). The bool before it (#62) is the
+/// `FactionDestroyedByCharacterFaction` flag (faction +0x924, `FactionDetails::destroyed_faction`).
+/// `None` when the record does not have that shape.
 pub(crate) fn war_started_index(f: &EsfRecord) -> Option<usize> {
     let bonus = f.children.iter().enumerate().filter(|(_, c)| c.record_name() == Some("CAMPAIGN_BONUS_VALUES")).nth(1)?.0;
     let i = bonus + 8;
@@ -257,11 +258,12 @@ pub(crate) fn faction_details(f: &EsfRecord) -> (FactionDetails, Option<(String,
     if let Some(i) = f.children.iter().position(|c| c.record_name() == Some("CHARACTER_ARRAY")) {
         d.major = i.checked_sub(1).and_then(|p| f.children[p].as_bool());
     }
-    d.war_started = match war_started_index(f) {
-        Some(i) => f.children[i].as_bool().unwrap_or(false),
+    // The flags +0x924 / +0x925, which sit together: one warning for a record without them.
+    (d.destroyed_faction, d.war_started) = match war_started_index(f) {
+        Some(i) => (f.children[i - 1].as_bool().unwrap_or(false), f.children[i].as_bool().unwrap_or(false)),
         None => {
-            log::warn!("load: a FACTION v{} has no WarStartedCharacterFaction flag; read as not set", f.version);
-            false
+            log::warn!("load: a FACTION v{} has no FactionDestroyedByCharacterFaction / WarStartedCharacterFaction flags; read as not set", f.version);
+            (false, false)
         }
     };
     d.family = f.child("FAMILY").and_then(read_family);

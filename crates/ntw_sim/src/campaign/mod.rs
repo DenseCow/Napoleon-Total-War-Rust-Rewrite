@@ -51,12 +51,14 @@ pub mod mod_state;
 pub mod naval;
 pub mod outcome;
 pub mod ship_repair;
+pub mod siege;
 pub mod events;
 pub mod ids;
 pub mod pathing;
 pub mod population;
 pub mod polypath;
 pub mod polysmooth;
+pub mod port_blockade;
 pub mod rtcut;
 pub mod zoc;
 pub mod zones;
@@ -86,11 +88,12 @@ pub use rules::{BuildingRules, BuildingTable, CampaignRules, TaxClass, UnitAutor
 pub use turn::{TurnState, TurnStep};
 pub use world::{SlotRef, FactionAiKeys, AiArea,
     BuildingRef, CampaignModel, CampaignUnit, Character, CharacterKind, ConstructionItem, ConstructionKind, Faction,
-    GovernmentType, MilitaryForce, RecruitmentItem, RecruitmentManager, RecruitmentSource, Region, RegionSlot, Settlement, Stance,
+    GovernmentType, MilitaryForce, RecruitmentItem, RecruitmentManager, Reinforcement, RecruitmentSource, Region, RegionSlot, PortBlockade, Settlement, Stance,
     Terrain, World,
 };
 pub use visibility::{FogState, Shroud, SightGrid};
-pub use world::Fort;
+pub use world::{Fort, PopulationClassState};
+pub use siege::SiegeState;
 pub use world::{EconomyRecord, ECONOMY_HISTORY_LEN, TREATY_BREAKS_START};
 
 #[cfg(test)]

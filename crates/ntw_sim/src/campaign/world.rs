@@ -74,6 +74,19 @@ pub struct CampaignModel {
     /// when a human faction takes a settlement by force, cleared by `ChooseCapture` (or settled as an occupation
     /// at the end of the turn).
     pub pending_capture: Option<super::capture::CapturePreview>,
+    /// The calls to war waiting for a human ally's answer, the last one on top (the campaign's pending
+    /// stack +0xF70 holding `0x00885DA0` offers, [`super::treaties::AllyWarCall`]): pushed when a
+    /// declaration reaches a human ally not yet at war (only with [`Self::ask_human_allies`] on),
+    /// answered (top first) by `RespondToAllyWarCall`. While one waits, the turn sequence does not
+    /// advance ([`Self::step`]). Saved and hashed (an own save from before the field reads none waiting).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub pending_ally_war_calls: Vec<super::treaties::AllyWarCall>,
+    /// Whether a declaration of war asks a human ally not yet at war to join (an
+    /// [`super::treaties::AllyWarCall`] pushed on [`Self::pending_ally_war_calls`]). Off (the default):
+    /// the human ally is not asked, not listed and keeps its alliance; the gate and why it is off are in
+    /// `treaties.rs` `call_allies`. A session setting: not saved, hashed or compared.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub ask_human_allies: bool,
     /// Game data from the DB (see [`CampaignRules`]).
     #[cfg_attr(feature = "serde", serde(skip))]
     pub rules: Arc<CampaignRules>,
@@ -101,8 +114,9 @@ pub struct CampaignModel {
     pub zones: super::zones::Zones,
 }
 
-/// Equality over everything but [`CampaignModel::negotiations`] and [`CampaignModel::zones`]: the
-/// negotiation slot is a UI session, neither saved nor hashed; the zones are derived.
+/// Equality over everything but [`CampaignModel::negotiations`], [`CampaignModel::zones`] and
+/// [`CampaignModel::ask_human_allies`]: the negotiation slot is a UI session, neither saved nor
+/// hashed; the zones are derived; the switch is a session setting.
 /// Every other field is compared, including `rules`, `terrain` and `last_autoresolve`,
 /// which are also neither saved nor hashed.
 impl PartialEq for CampaignModel {
@@ -117,6 +131,8 @@ impl PartialEq for CampaignModel {
             deal_inflation,
             pending_battle,
             pending_capture,
+            pending_ally_war_calls,
+            ask_human_allies: _,
             rules,
             terrain,
             last_autoresolve,
@@ -134,6 +150,7 @@ impl PartialEq for CampaignModel {
             && *deal_inflation == other.deal_inflation
             && *pending_battle == other.pending_battle
             && *pending_capture == other.pending_capture
+            && *pending_ally_war_calls == other.pending_ally_war_calls
             && *rules == other.rules
             && *terrain == other.terrain
             && *last_autoresolve == other.last_autoresolve
@@ -158,6 +175,8 @@ impl CampaignModel {
             director: super::director::DirectorState::default(),
             pending_battle: None,
             pending_capture: None,
+            pending_ally_war_calls: Vec::new(),
+            ask_human_allies: false,
             rules: Arc::new(CampaignRules::default()),
             terrain: None,
             last_autoresolve: None,
@@ -179,17 +198,19 @@ impl CampaignModel {
     /// tests (our own tool, like `Battle::state_hash`). Collections are hashed in id order.
     /// Rules and terrain are not hashed (they are game data, not state).
     pub fn state_hash(&self) -> u64 {
-        self.hash_with_script_rngs(&self.script_rngs)
+        self.hash_with(&self.script_rngs, &self.world.region_gains)
     }
 
     /// [`Self::state_hash`] of this state as a save of it loads: the script RNGs are not saved
     /// (`ntw_campaign::own_save` "What is saved"), so a loaded model starts them at
-    /// [`super::characters::SCRIPT_RNG_SEED`]. A save / load round trip keeps this hash.
+    /// [`super::characters::SCRIPT_RNG_SEED`]; nor is the regions' gain order
+    /// ([`World::region_gains`]), so a loaded model walks the faction region lists in the manager's
+    /// order, as the original's reload does. A save / load round trip keeps this hash.
     pub fn saved_state_hash(&self) -> u64 {
-        self.hash_with_script_rngs(&super::characters::ScriptRngs::default())
+        self.hash_with(&super::characters::ScriptRngs::default(), &[])
     }
 
-    fn hash_with_script_rngs(&self, script_rngs: &super::characters::ScriptRngs) -> u64 {
+    fn hash_with(&self, script_rngs: &super::characters::ScriptRngs, region_gains: &[RegionId]) -> u64 {
         let mut h = Fnv64::new();
         let c = &self.calendar;
         h.u32(c.turns_per_year);
@@ -229,6 +250,13 @@ impl CampaignModel {
                 h.u32(1);
                 h.u32(p.region.raw());
                 h.i32(p.faction.raw());
+            }
+        }
+        // Only when one waits, so a campaign without one hashes as before.
+        if !self.pending_ally_war_calls.is_empty() {
+            h.u32(self.pending_ally_war_calls.len() as u32);
+            for c in &self.pending_ally_war_calls {
+                c.hash_into(&mut h);
             }
         }
 
@@ -446,6 +474,12 @@ impl CampaignModel {
             }
             h.u32(r.garrison.map_or(u32::MAX, ForceId::raw));
             h.u32(r.fleet.map_or(u32::MAX, ForceId::raw));
+            h.u32(r.siege.besiegers.len() as u32);
+            for b in &r.siege.besiegers {
+                h.u32(b.raw());
+            }
+            h.u32(r.siege.surrender_turns);
+            h.u32(r.siege.turns_besieged);
             h.u32(r.recruitment_queue.len() as u32);
             for item in &r.recruitment_queue {
                 h.i32(item.id.raw());
@@ -506,6 +540,12 @@ impl CampaignModel {
         for id in listed {
             h.i32(id.raw());
         }
+        // The faction region lists' order the same way (`region_gains` empty for the saved hash).
+        let mut listed = w.regions_in_list_order_with(region_gains);
+        listed.sort_by_key(|id| w.regions.get(id).map(|r| r.owner));
+        for id in listed {
+            h.u32(id.raw());
+        }
         h.u32(w.forces.len() as u32);
         for fo in w.forces.values() {
             h.u32(fo.id.raw());
@@ -533,6 +573,11 @@ impl CampaignModel {
             for a in armies {
                 h.u32(a.raw());
             }
+        }
+        h.u32(w.rebel_army_governments.len() as u32);
+        for (a, gov) in &w.rebel_army_governments {
+            h.u32(a.raw());
+            h.str(gov);
         }
         h.u32(w.deal_regions_received.len() as u32);
         for (f, n) in &w.deal_regions_received {
@@ -637,6 +682,25 @@ pub struct World {
     /// empty (id order).
     #[cfg_attr(feature = "serde", serde(default))]
     pub character_order: Vec<CharacterId>,
+    /// The region manager's order (`REGION_MANAGER/REGIONS_ARRAY`, region manager +0x10 / +0x14):
+    /// each faction's region list (faction +0x76C, count +0x778, data +0x77C) as a load builds it is
+    /// this order filtered by [`Region::owner`]. CONFIRMED: the array loader `0x00A4CE20` reads the
+    /// regions in file order and each region's constructor (`0x00A45950`, at `0x00A46008`) appends it
+    /// to its owner's list (`0x008CFB40` → `0x008CF6B0`); the writer `0x00A52FE0` saves the manager's
+    /// order, which nothing changes in play, and the file holds no per-faction list. So a save and
+    /// reload in the original puts each list back in this order. The importer fills it; an own save
+    /// keeps it (format version 11). Regions not listed follow the listed ones by id. Read through
+    /// [`World::regions_in_list_order`].
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub region_order: Vec<RegionId>,
+    /// The regions that changed owner since the load, oldest first, each once: a gain appends the
+    /// region at the end of its new owner's list (`AddRegionToFaction` `0x008AE270` → `0x008CFA40` →
+    /// `0x008CF7D0`, from `TransferRegionToFaction` `0x00A64AC0`) and the loss removes it from the old
+    /// owner's list keeping the rest in order (`RemoveRegionFromFactionAndMoveCapital` `0x008BA580` →
+    /// `0x008B0210`); CONFIRMED. Written by [`World::note_region_gain`]. Not saved: a reload rebuilds
+    /// the lists from [`Self::region_order`], as the original's does.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub region_gains: Vec<RegionId>,
     /// `ARMY` / `NAVY` → `MILITARY_FORCE` records (W3 §3.6). In the ESF they live inside each
     /// faction's `ARMY_ARRAY`; here they are flattened, with [`MilitaryForce::faction`].
     pub forces: BTreeMap<ForceId, MilitaryForce>,
@@ -765,12 +829,29 @@ pub struct World {
     /// `0x00A45950` reads the id list with `0x0086F140` and adds each army to the set, `0x008CFB60`; the ids
     /// are the rebel armies' `ARMY` #4 in the vanilla saves). Such an army's `REBEL_DATA` (army +0x98)
     /// points back at the region, and its zone of control floods only into that region (`0x00B078C0`,
-    /// [`zones`](super::zones)). A force leaves its list when it leaves the world
-    /// (`CampaignModel::remove_force`); the save writes the lists back to the same slot. Nothing of
-    /// ours adds to them yet: the rising that makes an army's `REBEL_DATA` (`0x00870E60` / `0x008AF5D0`)
-    /// is not modelled (BACKLOG: rebellions).
+    /// [`zones`](super::zones)). Each list keeps the file's order: the loader appends
+    /// (`0x008CFB60` → `AppendOwnedLinkToOwnerList` `0x008CF7D0`), and an army leaving it keeps the rest in
+    /// order (the army's destructor `0x0088CE30` → the `REBEL_DATA` destructor `0x0088F310` → `0x0088CA00`
+    /// → `0x008B0150`, which erases the link and shifts the rest down; CONFIRMED by decompile). So the
+    /// first entry is the region's "first risen army" whose government the class tests read
+    /// ([`economy::region_government_classes`](super::economy::region_government_classes)). A force leaves
+    /// its list when it leaves the world (`CampaignModel::remove_force`); the save writes the lists back
+    /// to the same slot. Nothing of ours adds to them yet: the rising that makes an army's `REBEL_DATA`
+    /// (`0x00870E60` / `0x008AF5D0`) is not modelled (BACKLOG: rebellions).
     #[cfg_attr(feature = "serde", serde(default))]
     pub region_risen_armies: BTreeMap<RegionId, Vec<ForceId>>,
+    /// The government type key of each army with a `REBEL_DATA` block (army +0x98): its `REBEL_SETUP`
+    /// #3 (CONFIRMED: the `ARMY` reader `0x00870FD0` builds army +0x98 from the army's own `REBEL_DATA`
+    /// with `0x00886950`, which reads `REBEL_DATA_INNARDS/REBEL_SETUP` from record version 4, or
+    /// `REBEL_SETUP` directly below, with `0x00886F10`: #3, the government key, resolved to its
+    /// `government_types` record at +0x18, and copies it in with `0x0088FF10`; every risen army of the
+    /// vanilla saves has one, e.g. `gov_absolute_monarchy`). Read by
+    /// [`economy::region_government_classes`](super::economy::region_government_classes) for the rebels'
+    /// regions. A force's entry goes when the force leaves the world (`CampaignModel::remove_force`, as the
+    /// army's destructor `0x0088CE30` frees +0x98). Our saves keep it: the writer patches the `ARMY` items
+    /// in place.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub rebel_army_governments: BTreeMap<ForceId, String>,
     /// The script missions of each faction (see [`CampaignMission`](super::details::CampaignMission)).
     /// Not part of `state_hash`; no rule runs them yet (PROVISIONAL: loaded for the UI and scripts).
     pub missions: super::details::MissionMap,
@@ -784,13 +865,18 @@ pub struct World {
     /// The units the scripts restricted (`add_restricted_unit_record` /
     /// `remove_restricted_unit_record`): the restricted set's other list (model `+0xFA8` → `+0x20`
     /// count / `+0x24` items, CONFIRMED: `0x00A27960` `CheckUnitNotScriptRestricted` scans it and the
-    /// recruitable list `0x00A6AE40` and the queue step's held-back check `0x00B77F90` call it). One
-    /// campaign-wide set like [`Self::restricted_buildings`]: [`CampaignModel::recruitable_units`]
+    /// recruitable list `0x00A6AE40` and the queue step's held-back check `0x00B77F90` call it). A list,
+    /// as the exe's (CONFIRMED): an add appends even a unit already listed (`AddRestrictedUnitRecord`
+    /// `0x009C9700`) and a remove erases only the first match (`RemoveRestrictedUnitRecord`
+    /// `0x00A1D3B0`), so a unit added twice stays restricted after one remove; the save keeps the list
+    /// order (`0x009A1070`). The scripts change it through [`CampaignModel::add_restricted_unit`] /
+    /// [`CampaignModel::remove_restricted_unit`]; read through [`Self::unit_restricted`]. One
+    /// campaign-wide list like [`Self::restricted_buildings`]: [`CampaignModel::recruitable_units`]
     /// leaves these units out, so the panels, the commands, the queue step and the AI read this one
     /// list. Saved in `EPISODIC_RESTRICTIONS` (`ntw_campaign`); an own save from before the field
     /// reads it empty (the save's legacy list is merged in by the loader).
     #[cfg_attr(feature = "serde", serde(default))]
-    pub restricted_units: std::collections::BTreeSet<String>,
+    pub restricted_units: Vec<String>,
     /// The next id [`World::alloc_id`] hands out. The original keeps one global id → object map
     /// for every kind of object (SAVE_COMPAT.md §3, CONFIRMED in the exe), so new ids must not
     /// collide with any id in the loaded file: the loader sets this above every integer of the
@@ -821,6 +907,13 @@ pub struct World {
     /// saved (CONFIRMED: the army loader `0x00870FD0` clears it).
     #[cfg_attr(feature = "serde", serde(skip))]
     pub sabotaged: std::collections::BTreeSet<ForceId>,
+    /// New armies marching to the commander they were recruited through, in the order they were
+    /// raised ([`Reinforcement`]; [`CampaignModel::spawn_reinforcement`] adds them in a region's
+    /// update, [`CampaignModel::march_reinforcements`] steps them after the faction's regions, in the
+    /// same turn start). Not saved: none is left once that step has run (the original keeps an entry
+    /// it could not finish, see [`CampaignModel::march_reinforcements`]).
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub reinforcements: Vec<Reinforcement>,
     /// The sight cell grid (`super::visibility`), from the loaded file; `None` when unknown.
     pub sight_grid: Option<super::visibility::SightGrid>,
     /// Each faction's shroud (`FACTION` `CAMPAIGN_SHROUD`; only factions that have one).
@@ -993,10 +1086,54 @@ pub struct FactionAiKeys {
 pub type NetworkSight = BTreeMap<FactionId, Vec<((f32, f32), f32)>>;
 
 impl World {
+    /// The characters in a force: each force's commander and the character attached to each of its
+    /// units (a rider: a General riding with the army, an admiral aboard a ship). The one list the
+    /// settlement resident rule ([`Self::residence_of`]) and the loader read.
+    pub fn force_characters(&self) -> impl Iterator<Item = CharacterId> + '_ {
+        self.forces.values().flat_map(|f| f.commander.into_iter().chain(f.units.iter().filter_map(|u| u.character)))
+    }
+
+    /// The rule of a settlement resident (the settlement residence's resident list +0xC8,
+    /// `SIEGEABLE_GARRISON_RESIDENCE` #14): a character inside a settlement
+    /// ([`Character::garrisoned_in`]) who is in no force (`in_force`, [`Self::force_characters`]).
+    /// A commander is inside through his army (the residence's force list +0xC0) and a rider with
+    /// it: the enter `0x00B4E760` appends only a forceless character to +0xC8 (CONFIRMED,
+    /// disassembly). Every reader goes through it: [`Self::residence_of`],
+    /// [`Self::settlement_residents`], [`Self::settlement_residence_index`].
+    fn resident_region(ch: &Character, in_force: impl FnOnce() -> bool) -> Option<RegionId> {
+        ch.garrisoned_in.filter(|_| !in_force())
+    }
+
+    /// The settlement `character` is a resident of, if any (see [`Self::resident_region`]).
+    pub fn residence_of(&self, character: CharacterId) -> Option<RegionId> {
+        let ch = self.characters.get(&character)?;
+        Self::resident_region(ch, || self.force_characters().any(|c| c == character))
+    }
+
+    /// `region`'s settlement residents, in id order (see [`Self::resident_region`]).
+    pub fn settlement_residents(&self, region: RegionId) -> Vec<CharacterId> {
+        self.characters.values().filter(|c| c.garrisoned_in == Some(region) && self.residence_of(c.id).is_some()).map(|c| c.id).collect()
+    }
+
+    /// Every settlement resident and his settlement, in one pass (the save writer builds it once
+    /// per save; see [`Self::resident_region`]).
+    pub fn settlement_residence_index(&self) -> BTreeMap<CharacterId, RegionId> {
+        let in_force: std::collections::BTreeSet<CharacterId> = self.force_characters().collect();
+        self.characters.values().filter_map(|c| Some((c.id, Self::resident_region(c, || in_force.contains(&c.id))?))).collect()
+    }
+
     /// `faction`'s treaty-break count (diplomacy manager +0x1C): its entry, else the constructors'
     /// preset [`TREATY_BREAKS_START`].
     pub fn treaty_breaks_of(&self, faction: FactionId) -> u32 {
         self.treaty_breaks.get(&faction).copied().unwrap_or(TREATY_BREAKS_START)
+    }
+
+    /// Whether the scripts restricted the unit `unit_key` (`CheckUnitNotScriptRestricted` `0x00A27960`
+    /// negated: [`Self::restricted_units`] names it; CONFIRMED). The one test every reader uses: the
+    /// recruitable list (so the recruit command, the queue step, the panels and the AI) and, once built,
+    /// the building effects table's `ScriptRestricted` row field (`0x009DF476`).
+    pub fn unit_restricted(&self, unit_key: &str) -> bool {
+        self.restricted_units.iter().any(|k| k == unit_key)
     }
 
     /// A new object id (characters, forces, units), unique among the ids of the loaded file and
@@ -1142,6 +1279,64 @@ impl World {
             }
         }
         out.extend(self.characters.keys().copied().filter(|id| !seen.contains(id)));
+        out
+    }
+
+    /// `faction`'s character list (faction +0x764 count / +0x768 data) in its order:
+    /// [`Self::characters_in_list_order`] filtered by faction. A character made in play follows the
+    /// listed ones (constructors append, `0x008CF6B0`), a removed one leaves the list and the rest
+    /// keep their order (`0x008B0150`). The turn start's character walk (`0x008F2AC4`, and
+    /// `0x008F2B47` in the branch for the rebels, → `0x00A24EB0`) and the turn end's (`0x008BD1AF`
+    /// → `0x009DA210`) go through it front to back (CONFIRMED by listing). Allocates: cold paths only.
+    pub fn faction_characters_in_list_order(&self, faction: FactionId) -> Vec<CharacterId> {
+        let mut list = self.characters_in_list_order();
+        list.retain(|id| self.characters.get(id).is_some_and(|c| c.faction == faction));
+        list
+    }
+
+    /// The list half of a region's owner change (`0x00A64AC0`, see [`World::region_gains`]): the
+    /// region moves to the end of the order, behind every region of every list. Called by the
+    /// model's one owner change (`change_region_owner`) only when the owner changes.
+    pub fn note_region_gain(&mut self, id: RegionId) {
+        self.region_gains.retain(|x| *x != id);
+        self.region_gains.push(id);
+    }
+
+    /// Every region in faction-list order: the regions of [`World::region_order`] that still exist
+    /// and changed no owner since the load (first listing only), then the other unchanged ones by id,
+    /// then [`World::region_gains`] in gain order. Filtered by owner, this is that faction's region
+    /// list (+0x76C) as the original walks it. Allocates: cold paths only.
+    pub fn regions_in_list_order(&self) -> Vec<RegionId> {
+        self.regions_in_list_order_with(&self.region_gains)
+    }
+
+    /// `faction`'s region list (faction +0x778 count / +0x77C data) in its order: the regions of
+    /// [`Self::regions_in_list_order`] it owns. Allocates: cold paths only.
+    pub fn faction_regions_in_list_order(&self, faction: FactionId) -> Vec<RegionId> {
+        let mut list = self.regions_in_list_order();
+        list.retain(|id| self.regions.get(id).is_some_and(|r| r.owner == faction));
+        list
+    }
+
+    /// Every region in the region manager's order (manager +0x10 count / +0x14 data, which nothing
+    /// reorders in play; CONFIRMED, see [`World::region_order`]): the listed regions that still exist,
+    /// then the unlisted ones by id. The order the exe walks the world's regions in (world +0x34 →
+    /// +0x10 / +0x14). Allocates: cold paths only.
+    pub fn regions_in_manager_order(&self) -> Vec<RegionId> {
+        self.regions_in_list_order_with(&[])
+    }
+
+    /// [`Self::regions_in_list_order`] with `gains` standing for [`World::region_gains`].
+    fn regions_in_list_order_with(&self, gains: &[RegionId]) -> Vec<RegionId> {
+        let mut seen: std::collections::BTreeSet<RegionId> = gains.iter().copied().collect();
+        let mut out = Vec::with_capacity(self.regions.len());
+        for &id in &self.region_order {
+            if self.regions.contains_key(&id) && seen.insert(id) {
+                out.push(id);
+            }
+        }
+        out.extend(self.regions.keys().copied().filter(|id| !seen.contains(id)));
+        out.extend(gains.iter().copied().filter(|id| self.regions.contains_key(id)));
         out
     }
 
@@ -1295,6 +1490,24 @@ pub struct RegionSlot {
     /// `REGION_SLOT` #2 u32: the slot's id (= its residence's #1; a school's id is what a technology's
     /// `techs[]` #3 names as its researcher, CONFIRMED in the vanilla saves). 0 when unknown.
     pub id: u32,
+    /// The navy blockading the port: `PORT_GARRISON_MANAGER` #1 and #2 (the port object at slot +0x1E4,
+    /// its +0x68 handle and +0x74 byte; CONFIRMED, reader `0x00A45860`). `None` in every port of the
+    /// vanilla saves and start positions. See [`super::port_blockade`].
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub blockade: Option<PortBlockade>,
+}
+
+/// A port's blockade (`PORT_GARRISON_MANAGER` #1/#2, CONFIRMED structure): the port's +0x68 handle linked
+/// with the navy's +0xE8 handle (`0x008CFB20` in the blockade start `0x00A66F80`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PortBlockade {
+    /// The blockading navy (`PORT_GARRISON_MANAGER` #1, the navy's id).
+    pub navy: ForceId,
+    /// `PORT_GARRISON_MANAGER` #2 (port +0x74): set only by the character attack step `0x0095B370` (at
+    /// `0x0095B667`) when the attacker's blockaded port is the attacked navy's docked port; cleared by the
+    /// lift `0x00A784E0` (CONFIRMED). Kept and saved; nothing in the model reads it yet.
+    pub docked_navy_attacked: bool,
 }
 
 /// A slot's construction item: a building being built, repaired or demolished. Saves hold
@@ -1379,6 +1592,21 @@ pub struct Settlement {
     pub position: (Fixed20, Fixed20),
 }
 
+/// One entry of a faction's reinforcement manager (`ARMY_REINFORCEMENT_MANAGER`, faction +0x52C;
+/// the 0x54-byte entry `0x00AE8B10`, saved in `CHARACTER_REINFORCEMENTS_ARRAY` by `0x00AFC060`
+/// as i32 source, i32 target, i32 settlement, bool done; CONFIRMED): a new army raised for a
+/// commander, which marches to him.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Reinforcement {
+    /// The new army's commander (entry +4).
+    pub source: CharacterId,
+    /// The commander it marches to (entry +8; the item's +0x18).
+    pub target: CharacterId,
+    /// The region whose settlement raised it (entry +0xC).
+    pub settlement: RegionId,
+}
+
 /// A unit being recruited. Saves hold `RECRUITMENT_ITEM` v2 {i32 id, i32, i32, #3 u32 turns
 /// remaining (INFERRED), #4 u32 cost (INFERRED), #5 bool (+0x24, [`Self::target_lost`]), #6 unit key (CONFIRMED), ...}.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1427,6 +1655,53 @@ pub struct RecruitmentSource {
     pub manager: RecruitmentManager,
     /// The item's index in the manager's array (every array item counts).
     pub index: usize,
+}
+
+/// A region's population class (`POPULATION_CLASS`, 0x78 bytes in the exe; CONFIRMED layout, reader
+/// `0x008861E0`): the values public order keeps from round to round. The other factors are refilled from
+/// the region's effects each time (`0x008EDF70` never writes these three).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize), serde(from = "PopulationClassRepr", into = "PopulationClassRepr"))]
+pub struct PopulationClassState {
+    /// The class (`upper` / `lower` / `middle`, `POPULATION_CLASS` #0).
+    pub class: String,
+    /// The stored base of the reform factor (class +0x70, #11; happiness slot 8).
+    pub education: i32,
+    /// The stored base of the resistance factor (class +0x74, #12; happiness slot 10): lowered by a
+    /// capture's public-order reduction.
+    pub resistance: i32,
+    /// The war factor (class +0x20, #1 element 7; happiness slot 7), in [−15, 6]: moved by a war
+    /// declaration and by battle results (`0x008A94D0`, [`super::population::class_war_change`]), one step
+    /// back toward 0 at each round-end growth (`0x008F9690`).
+    pub war: i32,
+}
+
+/// [`PopulationClassState`] as an own save stores it: a tuple whose last element (the war factor, added
+/// without a format-version change) reads 0, through `#[serde(default)]`, from an older save's
+/// `(class, education, resistance)`.
+#[cfg(feature = "serde")]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct PopulationClassRepr(String, i32, i32, #[serde(default)] i32);
+
+#[cfg(feature = "serde")]
+impl From<PopulationClassRepr> for PopulationClassState {
+    fn from(PopulationClassRepr(class, education, resistance, war): PopulationClassRepr) -> Self {
+        PopulationClassState { class, education, resistance, war }
+    }
+}
+
+#[cfg(feature = "serde")]
+impl From<PopulationClassState> for PopulationClassRepr {
+    fn from(c: PopulationClassState) -> Self {
+        PopulationClassRepr(c.class, c.education, c.resistance, c.war)
+    }
+}
+
+impl PopulationClassState {
+    /// A class with nothing stored (what a region loaded without classes starts from).
+    pub fn new(class: impl Into<String>) -> Self {
+        PopulationClassState { class: class.into(), ..Default::default() }
+    }
 }
 
 /// A region. W3 §3.7 `REGION` v5 (CONFIRMED structure).
@@ -1505,9 +1780,9 @@ pub struct Region {
     /// `POPULATION/REGION_FACTORS/RELIGION_BREAKDOWN`: (religion key, share 0..1). Data the religion
     /// factor of public order reads.
     pub religions: Vec<(String, f32)>,
-    /// Per population class (`upper` / `lower` / `middle`): the stored base of the education factor
-    /// (class +0x70, `POPULATION_CLASS` #11) and of the war-results factor (class +0x74, #12).
-    pub class_bases: Vec<(String, i32, i32)>,
+    /// The population classes (`POPULATION/REGION_FACTORS/POPULATION_CLASS`, in the file's order) with
+    /// what public order keeps of each ([`PopulationClassState`]).
+    pub class_bases: Vec<PopulationClassState>,
     /// `REGION/RESOURCES_ARRAY`: the region's unit resources (`region_unit_resources` keys, e.g.
     /// `global`, `horses`), region `+0x270` count / `+0x274` list (CONFIRMED: filled by the region
     /// loader `0x00A45950` at `0x00A467BE`, written back by `0x00A51E30`). A unit with a
@@ -1533,6 +1808,10 @@ pub struct Region {
     /// The navy that last received ships recruited in the region's port, while it is still there
     /// (our own bookkeeping: navies have no residence link in the original).
     pub fleet: Option<ForceId>,
+    /// The settlement's siege: its besiegers and turns (`SIEGEABLE_GARRISON_RESIDENCE` #2, #3, #13;
+    /// [`super::siege`]).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub siege: super::siege::SiegeState,
 }
 
 /// A region's building slot, as the commands, construction items and the HUD address it: the
@@ -1717,8 +1996,10 @@ pub struct Character {
     /// character in the eur startpos and the saves (General 26, colonel 25, admiral 90, ...): the
     /// files store the unscaled base.
     pub base_movement_points: i32,
-    /// The region whose settlement the character is inside, if any (our own field; the
-    /// original keeps garrisons in `SIEGEABLE_GARRISON_RESIDENCE`, not decoded yet).
+    /// The region whose settlement the character is inside, if any (our own field; the original
+    /// keeps it on the settlement's `SIEGEABLE_GARRISON_RESIDENCE`: the garrison army at +0xC0
+    /// for a commander, the resident list +0xC8 (#14) for a character without a force, see
+    /// [`super::CampaignModel::settlement_residents`]).
     pub garrisoned_in: Option<RegionId>,
 }
 

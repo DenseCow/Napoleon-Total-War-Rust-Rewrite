@@ -221,6 +221,16 @@ not something we introduce).
   that `ARMY` #5 = the residence id (`SIEGEABLE_GARRISON_RESIDENCE` #1 = `SETTLEMENT` #4). Slot
   residences (forts, ports: `REGION_SLOT` #0) work the same way. Navies have no residence link.
   `GARRISON_RESIDENCE` #0 = the owner faction id.
+- **Residents:** `SETTLEMENT/SIEGEABLE_GARRISON_RESIDENCE` #14 (u32[]) = the characters without a
+  force inside the settlement (the residence's list +0xC8, loaded at `0x00AF4B00` through
+  `0x008CFA70`), and each one's `CHARACTER` #7 = that residence id (a garrisoned commander's #7 is
+  0; e.g. the vanilla GB April 1811 save: missionary 865679480 in `spa_alentejo`). A school slot's
+  residence #14 lists its gentlemen the same way. Ours: the importer makes each settlement #14 id
+  resident (`Character::garrisoned_in`); the writer writes #14 from the model (the source's ids still
+  resident, then new ones) and #7 (the settlement residence for a resident, 0 for one who left or a
+  new character, a slot residence kept); a commander or a unit's rider is no resident (`World::residence_of`),
+  so his #7 is 0 and no #14 lists him (a General hired into a garrison army: test
+  `a_general_hired_into_a_garrison_writes_no_resident`); test `residence_install.rs`.
 - `CHARACTER_DETAILS` #10 repeats the character id.
 - Government posts (`CHARACTER_POST` #2) refer to characters (france's `faction_leader` = Napoleon).
 - **Every id reference site** (`save_audit refsites FILE`: each integer equal to a character, force
@@ -896,6 +906,11 @@ This section covers the work for the 0-G characters slot (`work/fidelity-charact
   `World::character_details` for every character in the model, in the model's order. The layouts are
   CONFIRMED in every original save: TRAIT v1 and AgentAncillaries v0. A new character without details
   keeps the emptied template lists.
+- **Attribute levels** (`save::write_attributes`, 2026-10-20). `CHARACTER_DETAILS` #12 `AgentAttributes[]`
+  {utf16 key, i32 level} is written from `CharacterDetails::attributes`: each entry's level is set in place
+  (order and key node kept, so an unchanged character writes back byte for byte), a key the record lacks is
+  appended. The levels move with every trait level and ancillary (CHARACTERS_FIDELITY.md §16). Test:
+  `save_compat::character_changes_and_deaths_are_written`.
 - **Deaths.** A dead character is no longer in the model, so the existing removal cascade drops him
   (§7, §10): the CHARACTER_ARRAY item, AI mirrors, force / residence / pool / raid references, and his
   obstacle. His post goes vacant in the model.

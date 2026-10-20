@@ -795,6 +795,10 @@ fn main() {
             po_summary(m, &esf);
             continue;
         }
+        if std::env::var("ECON_RESIDENTS").is_ok() {
+            residents_detail(m, &esf);
+            continue;
+        }
         if let Ok(k) = std::env::var("ECON_GARRISON") {
             garrison_detail(m, &k);
             continue;
@@ -1153,15 +1157,7 @@ pub fn fx_detail(mut l: ntw_campaign::LoadedCampaign, human: &str) {
     let fx = Effects::compute(m);
     for key in ["france", "austria", "britain"] {
         let Some(f) = m.faction_by_key(key).map(|f| f.id) else { continue };
-        let (mut land, mut naval) = (0, 0);
-        for force in m.world.forces.values().filter(|x| x.faction == f) {
-            for u in &force.units {
-                if let Some(r) = m.rules.units.get(&u.unit_key) {
-                    let c = economy::unit_upkeep(&fx, f, &m.rules.features, &u.unit_key, r);
-                    if r.is_naval { naval += c } else { land += c }
-                }
-            }
-        }
+        let (land, naval) = economy::faction_upkeep_split_with(m, &fx, f);
         let inc = economy::faction_income(m, f);
         println!("{key}: land upkeep {land} naval {naval} taxes {} trade {} other {}", inc.taxes, inc.trade, inc.other);
     }
@@ -1404,7 +1400,7 @@ pub fn pop_check(m: &ntw_sim::campaign::CampaignModel, next: &str, db: &GameData
     let (mut same, mut differ) = (0, 0);
     for r in m.world.regions.values() {
         let set = economy::region_effect_set(m, r);
-        let input = population::FactorInputs { set: &set, hostile_units: population::hostile_units(m, r) };
+        let input = population::FactorInputs::of(m, r, &set);
         let s = population::growth_factors(m, r, r.population, &r.population_state, &input);
         if s.factors == r.population_state.factors && s.capacity == r.population_state.capacity && s.overcrowded == r.population_state.overcrowded {
             same += 1;
@@ -1515,6 +1511,38 @@ pub fn po_summary(m: &ntw_sim::campaign::CampaignModel, esf: &EsfFile) {
         }
     }
     println!("classes {n}, exact {exact}, per slot {slot_ok:?}");
+}
+
+/// `ECON_RESIDENTS=1`: every settlement's resident characters (`SIEGEABLE_GARRISON_RESIDENCE` #14, the
+/// settlement +0xC8 list `0x008C55D0` scans) with their types, and the gentlemen standing in each region.
+#[allow(dead_code)]
+pub fn residents_detail(m: &ntw_sim::campaign::CampaignModel, esf: &EsfFile) {
+    let regions = esf.root.find_record_array("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD/REGION_MANAGER/REGIONS_ARRAY").expect("regions");
+    for it in &regions.items {
+        let Some(r) = it.first().and_then(EsfNode::as_record) else { continue };
+        let key = r.get_str(0).unwrap_or_default();
+        let Some(reg) = m.world.regions.values().find(|x| x.key == key) else { continue };
+        let res = r.child("SETTLEMENT").and_then(|s| s.child("SIEGEABLE_GARRISON_RESIDENCE"));
+        let ids: Vec<u32> = res
+            .and_then(|g| g.get(14))
+            .and_then(EsfNode::as_u32_array)
+            .map(<[u32]>::to_vec)
+            .unwrap_or_default();
+        let kinds: Vec<String> = ids
+            .iter()
+            .map(|id| m.world.characters.get(&ntw_sim::campaign::CharacterId(*id as i32)).map_or(format!("{id}:?"), |c| format!("{id}:{}", c.kind.esf_name())))
+            .collect();
+        let gents: Vec<String> = m
+            .world
+            .characters
+            .values()
+            .filter(|c| c.kind == ntw_sim::campaign::CharacterKind::Gentleman && economy::in_region(m, reg, c))
+            .map(|c| format!("{}:{}", c.id.0, ntw_sim::campaign::agents::rank(m, c.id)))
+            .collect();
+        if !kinds.is_empty() || !gents.is_empty() {
+            println!("{key}: residents {kinds:?} gentlemen in region (id:rank) {gents:?}");
+        }
+    }
 }
 
 /// `ECON_GARRISON=<region>`: the forces inside a region's settlement and their units.
@@ -1685,8 +1713,8 @@ pub fn tech_avail(m: &ntw_sim::campaign::CampaignModel, db: &GameDatabase) {
             let prereqs: Vec<&str> = req.iter().filter(|(t, _)| t == k).map(|(_, r)| r.as_str()).collect();
             let pre_ok = prereqs.iter().all(|p| state(p) == Some(0));
             let bl = db.technology(k).map(|t| t.building_level.clone()).unwrap_or_default();
-            let need = m.rules.buildings.get(&bl).map(|b| (b.chain.clone(), b.level));
-            let has_bl = need.as_ref().is_some_and(|(c, l)| owned.iter().any(|o| m.rules.buildings.get(*o).is_some_and(|b| b.chain.starts_with(c.as_str()) && b.level >= *l)));
+            let need = m.rules.buildings.get(&bl).map(|b| (b.chain_pair(), b.level));
+            let has_bl = need.as_ref().is_some_and(|(c, l)| owned.iter().any(|o| m.rules.buildings.get(*o).is_some_and(|b| b.chain_pair() == *c && b.level >= *l)));
             let fac_ok = allowed.contains(&(k.clone(), f.key.clone()));
             let key = format!("state {s} pre_ok {pre_ok} has_building {has_bl} faction_ok {fac_ok}");
             *tally.entry(key.clone()).or_default() += 1;

@@ -37,4 +37,13 @@ fn shipped_campaign_root_shortcuts() {
     // End turn (RETURN) goes to its button, not the root.
     assert_eq!(s.component("campaign", "end_turn"), "button_end_turn");
     assert_eq!(root.fired("RETURN", Held::default()).count(), 0);
+    // Every campaign binding with its component: Return to the end turn button, the camera's
+    // repeating steps (`repeating = "1"`, spaces around the `=` in the shipped file).
+    let all = s.mode_bindings("campaign");
+    let find = |func: &str| all.0.iter().find(|b| b.func == func).unwrap();
+    assert_eq!((find("end_turn").component.as_str(), find("end_turn").keys[0].key.as_str()), ("button_end_turn", "RETURN"));
+    let fwd = find("step_fwd");
+    assert_eq!((fwd.component.as_str(), fwd.keys[0].key.as_str(), fwd.keys[0].modifier, fwd.repeating), ("camera", "W", Modifier::AllowShift, true));
+    assert!(!find("end_turn").repeating);
+    assert_eq!(find("escape_menu").component, "root");
 }

@@ -57,6 +57,7 @@ fn region(id: u32, owner: FactionId) -> Region {
         construction: Vec::new(),
         garrison: None,
         fleet: None,
+        siege: Default::default(),
     }
 }
 
@@ -141,11 +142,12 @@ pub(crate) fn info() -> CampaignInfo {
 }
 
 /// A campaign that never came from an ESF file saves and loads back field for field: header,
-/// model, script slots and restricted units.
+/// model, script slots and restricted units (in their list order, a unit added twice listed twice, as the
+/// exe's list `0x009C9700`).
 #[test]
 fn a_made_up_campaign_round_trips() {
     let mut model = made_up_model();
-    model.world.restricted_units.insert("made_up_unit".into());
+    model.world.restricted_units = vec!["made_up_unit_b".into(), "made_up_unit_a".into(), "made_up_unit_b".into()];
     let data = SaveData {
         human: "made_up_a".into(),
         model,
@@ -164,14 +166,20 @@ fn a_made_up_campaign_round_trips() {
 
 /// recruit-gates: the scripts' restricted units moved from the save body into the model
 /// (`World::restricted_units`); a save written before that, with the list beside the model, loads with
-/// it merged into the model.
+/// it merged into the model: once per unit and not again when the model lists it (the set it was merged
+/// into then). The load drops a key the units table lacks from either list, as an original save's load does;
+/// the model's own duplicates stay (the exe's list keeps them).
 #[test]
 fn a_legacy_restricted_unit_list_loads_into_the_model() {
     let mut model = made_up_model();
-    model.world.restricted_units.insert("made_up_kept".into());
-    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: vec!["made_up_legacy".into()] };
+    model.world.restricted_units = vec!["fixture_line_infantry".into(), "made_up_gone".into(), "fixture_line_infantry".into()];
+    let legacy = vec!["fixture_foot_artillery".into(), "fixture_line_infantry".into(), "made_up_legacy_gone".into(), "fixture_foot_artillery".into()];
+    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: legacy };
     let loaded = read(&write(&info(), &data).expect("write"), &ntw_data::GameDatabase::test_fixture()).expect("read");
-    assert_eq!(loaded.model.world.restricted_units.iter().map(String::as_str).collect::<Vec<_>>(), ["made_up_kept", "made_up_legacy"]);
+    assert_eq!(
+        loaded.model.world.restricted_units.iter().map(String::as_str).collect::<Vec<_>>(),
+        ["fixture_line_infantry", "fixture_line_infantry", "fixture_foot_artillery"]
+    );
 }
 
 /// The values mods' rules keep (DESIGN.md §3.3.1) save and load back value for value, in key order,
@@ -309,7 +317,7 @@ pub(crate) fn as_version_1(bytes: &[u8]) -> Vec<u8> {
 /// without the region fields later versions added (2: `unit_resources`, 3: `road_holder` and
 /// `fortification_holder`), the route fields (5: `capital_port`, 7: `accumulated`), the world's access-abuse counts (6: `access_abuses`)
 /// the commerce raids with the trade network's course (8: `commerce_raids`, `splines`, `curves`) and the
-/// expense trackers (9: `upkeep_booked`, `policing_cost`, `policing_booked`).
+/// expense trackers (9: `upkeep_booked`, `policing_cost`, `policing_booked`) and the region manager's order (11: `region_order`).
 /// A list or map value ends at its first `]` / `}` (the made-up keys hold none), an
 /// `Option` of a faction id or a number at its first `,`, a struct's last field (`,accumulated:`, the leading
 /// comma keeping `trade_accumulated` out; `,policing_booked:`) at its struct's `)`, which is kept.
@@ -317,7 +325,7 @@ pub(crate) fn as_version(bytes: &[u8], version: u32) -> Vec<u8> {
     let (_, header, body) = sections(bytes).expect("sections");
     let mut text = String::new();
     flate2::read::ZlibDecoder::new(body).read_to_string(&mut text).expect("inflate");
-    let added: [(u32, &str, char); 12] = [
+    let added: [(u32, &str, char); 13] = [
         (2, "unit_resources:[", ']'),
         (3, "road_holder:", ','),
         (3, "fortification_holder:", ','),
@@ -330,6 +338,7 @@ pub(crate) fn as_version(bytes: &[u8], version: u32) -> Vec<u8> {
         (9, "upkeep_booked:{", '}'),
         (9, "policing_cost:", ','),
         (9, ",policing_booked:", ')'),
+        (11, "region_order:[", ']'),
     ];
     for (_, field, end_char) in added.into_iter().filter(|&(v, ..)| v > version) {
         let mut old = String::with_capacity(text.len());
@@ -396,7 +405,7 @@ fn a_version_1_save_takes_its_unit_resources_from_the_start() {
 /// region's slots, or, holding none, while the start's owner still owns the region.
 #[test]
 fn a_version_2_save_takes_its_road_and_walls_holders_from_the_start() {
-    let slot = |holder: Option<FactionId>| RegionSlot { key: "made_up_slot".into(), slot_type: "made_up".into(), building: None, position: None, port: false, holder, id: 1 };
+    let slot = |holder: Option<FactionId>| RegionSlot { key: "made_up_slot".into(), slot_type: "made_up".into(), building: None, position: None, port: false, holder, id: 1, blockade: None };
     let (r1, r2, r3) = (RegionId(1), RegionId(2), RegionId(5_000_000));
     let mut start = made_up_model();
     {
@@ -658,6 +667,20 @@ fn triggered_historical_events_round_trip() {
     assert_eq!(back.model.world.historical_events_triggered, ["a_once", "b_quiet"]);
 }
 
+/// portblockade: a port's blockade (`RegionSlot::blockade`, `PORT_GARRISON_MANAGER` #1/#2) is kept by the save;
+/// it is a defaulted field, so an older save loads without one (no format change: no start holds a blockade).
+#[test]
+fn a_port_blockade_round_trips() {
+    use ntw_sim::campaign::PortBlockade;
+    let mut model = made_up_model();
+    let blockade = PortBlockade { navy: ForceId(77), docked_navy_attacked: true };
+    let slot = RegionSlot { key: "made_up_port".into(), slot_type: "port".into(), building: None, position: None, port: true, holder: None, id: 2, blockade: Some(blockade) };
+    model.world.regions.get_mut(&RegionId(1)).unwrap().slots.push(slot);
+    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+    let (_, back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
+    assert_eq!(back.model.world.regions[&RegionId(1)].slots.last().unwrap().blockade, Some(blockade));
+}
+
 /// recordpay: format version 9 keeps the running record's expense trackers (the upkeep trackers and each
 /// region's policing tracker with its cost). Every load books the record again from them, as the exe's
 /// load does (`0x00B95B90`), dropping the script's `other_income_mod` entries (not saved). A version-8
@@ -713,4 +736,128 @@ fn diplomacy_record_order_round_trips_and_a_version_9_save_takes_it_from_the_sta
     assert_eq!(old.world.diplomacy_record_order, start.world.diplomacy_record_order, "taken from the start");
     let bare = read_with_start(&bytes(9), &db, || Err("no start".into())).expect("loads without a start").model;
     assert_eq!(bare.world.diplomacy_record_order, model.world.diplomacy_record_order);
+}
+
+/// accessloss2: format version 11 keeps the region manager's order (`World::region_order`), which each faction's
+/// region list follows after a load (`0x00A4CE20`, `0x00A45950`). The gain order is not saved: the reload walks
+/// each list in the manager's order, as the original's does (its writer `0x00A52FE0` saves no per-faction list),
+/// and the saved state hash leaves it out. A version-10 save takes the order from the start.
+#[test]
+fn region_order_round_trips_the_gains_do_not_and_a_version_10_save_takes_it_from_the_start() {
+    let db = ntw_data::GameDatabase::test_fixture();
+    let mut model = made_up_model();
+    model.world.region_order = vec![RegionId(5_000_000), RegionId(2), RegionId(1)];
+    model.world.note_region_gain(RegionId(5_000_000));
+    assert_eq!(model.world.regions_in_list_order(), vec![RegionId(2), RegionId(1), RegionId(5_000_000)]);
+    let bytes = |version: u32| {
+        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+        as_version(&write(&info(), &data).expect("write"), version)
+    };
+    let now = read_with_start(&bytes(FORMAT_VERSION), &db, || panic!("start read for a current save")).expect("read").model;
+    assert_eq!(now.world.region_order, model.world.region_order);
+    assert!(now.world.region_gains.is_empty(), "the gain order is not saved");
+    assert_eq!(now.world.regions_in_list_order(), vec![RegionId(5_000_000), RegionId(2), RegionId(1)], "back in the manager's order");
+    let mut as_loaded = model.clone();
+    as_loaded.world.region_gains.clear();
+    as_loaded.script_rngs = Default::default();
+    assert_eq!(as_loaded.state_hash(), model.saved_state_hash(), "the saved hash leaves the gain order out");
+    assert_ne!(model.state_hash(), model.saved_state_hash(), "A's list is [1, 5000000] live, [5000000, 1] as saved");
+    let mut start = made_up_model();
+    start.world.region_order = vec![RegionId(2), RegionId(1), RegionId(5_000_000)];
+    let old = read_with_start(&bytes(10), &db, || Ok(start.clone())).expect("read").model;
+    assert_eq!(old.world.region_order, start.world.region_order, "taken from the start");
+    let bare = read_with_start(&bytes(10), &db, || Err("no start".into())).expect("loads without a start").model;
+    assert!(bare.world.region_order.is_empty(), "a version-10 save holds no order");
+    assert_eq!(bare.world.regions_in_list_order(), vec![RegionId(1), RegionId(2), RegionId(5_000_000)], "without a start: id order");
+}
+
+/// classfactor: each population class keeps its war factor (class +0x20); an older save's
+/// `(class, education, resistance)` reads it as 0.
+#[test]
+fn population_classes_keep_their_war_factor_and_older_saves_read_zero() {
+    use ntw_sim::campaign::PopulationClassState;
+    let class = PopulationClassState { class: "lower".into(), education: 4, resistance: -2, war: -15 };
+    let mut model = made_up_model();
+    model.world.regions.get_mut(&RegionId(1)).unwrap().class_bases = vec![class.clone()];
+    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+    let db = ntw_data::GameDatabase::test_fixture();
+    let loaded = read(&write(&info(), &data).expect("write"), &db).expect("read");
+    assert_eq!(loaded.model.world.regions[&RegionId(1)].class_bases, vec![class.clone()]);
+    let text = ron::to_string(&class).expect("encode");
+    assert_eq!(text, "(\"lower\",4,-2,-15)");
+    let older: PopulationClassState = ron::from_str("(\"lower\",4,-2)").expect("decode");
+    assert_eq!(older, PopulationClassState { war: 0, ..class });
+}
+
+/// classfactor: a class an older own save stored as `(class, education, resistance)` reads with war 0, and
+/// the 4-tuple written now round-trips.
+#[test]
+fn population_class_reads_an_older_three_tuple() {
+    use ntw_sim::campaign::PopulationClassState;
+    let old: PopulationClassState = ron::from_str(r#"("lower", 3, -2)"#).expect("an older class reads");
+    assert_eq!(old, PopulationClassState { class: "lower".into(), education: 3, resistance: -2, war: 0 });
+    let now = PopulationClassState { war: -7, ..old };
+    let text = ron::to_string(&now).expect("a class writes");
+    assert_eq!(ron::from_str::<PopulationClassState>(&text).expect("a class reads back"), now);
+}
+
+/// A character without a force resident in a settlement (the settlement residence's list +0xC8,
+/// `SIEGEABLE_GARRISON_RESIDENCE` #14 in an original save) is still resident after our own save
+/// loads back.
+#[test]
+fn settlement_residents_round_trip() {
+    let mut model = made_up_model();
+    let mut g = model.world.characters[&CharacterId(100)].clone();
+    (g.id, g.kind, g.garrisoned_in) = (CharacterId(103), CharacterKind::Gentleman, Some(RegionId(1)));
+    model.world.characters.insert(g.id, g);
+    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: Some(B), script_values: Vec::new(), restricted_units: Vec::new() };
+    let (_, back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
+    assert_eq!(back.model.settlement_residents(RegionId(1)), vec![CharacterId(103)]);
+    assert_eq!(back, data);
+}
+
+/// allyoffer: a call to war waiting for a human ally (`CampaignModel::pending_ally_war_calls`, the exe's
+/// pending-diplomacy stack, campaign +0xF70) is kept by the save with its lists; an older save, without
+/// the field, loads with none waiting.
+#[test]
+fn a_waiting_call_to_war_round_trips_and_an_older_save_has_none() {
+    use ntw_sim::campaign::treaties::{AllyWarCall, CalledAllies};
+    let mut model = made_up_model();
+    let call = AllyWarCall {
+        declarer: A,
+        target: B,
+        ally: FactionId(11),
+        allied_to_target: true,
+        allied_to_declarer: false,
+        asked_by_target_side: true,
+        called: CalledAllies { joined_b: vec![FactionId(12)], torn_b: vec![FactionId(13)], ..CalledAllies::default() },
+    };
+    model.pending_ally_war_calls.push(call.clone());
+    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+    let (_, back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
+    assert_eq!(back.model.pending_ally_war_calls, [call]);
+    // An older save: the same model text without the field.
+    let text = ron::to_string(&made_up_model()).expect("encode");
+    // The field may be the last one written (no trailing comma).
+    let field = ["pending_ally_war_calls:[],", "pending_ally_war_calls:[]"].into_iter().find(|f| text.contains(f)).expect("the field is written");
+    let older: CampaignModel = ron::from_str(&text.replacen(field, "", 1)).expect("an older model loads");
+    assert!(older.pending_ally_war_calls.is_empty());
+}
+
+/// stickytrait: our own save keeps a held trait's level (`CharacterTrait::level`, the level record
+/// `0x008B5380` keeps below the first threshold, which the original's save drops), and a trait saved
+/// before the field reads level 0, which the load sets from its points
+/// (`ntw_sim::campaign::characters::load_trait_levels`).
+#[test]
+fn a_held_trait_keeps_its_level_through_our_own_save() {
+    use ntw_sim::campaign::details::CharacterTrait;
+    let db = ntw_data::GameDatabase::test_fixture();
+    let mut model = made_up_model();
+    let kept = CharacterTrait { key: "made_up_trait".into(), points: 1, level: 2 };
+    model.world.character_details.entry(CharacterId(900)).or_default().traits = vec![kept.clone()];
+    let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+    let back = read_with_start(&write(&info(), &data).expect("write"), &db, || Ok(model.clone())).expect("read").model;
+    assert_eq!(back.world.character_details[&CharacterId(900)].traits, vec![kept]);
+    let old: CharacterTrait = ron::from_str("(key: \"made_up_trait\", points: 5)").expect("a trait from before the level");
+    assert_eq!(old, CharacterTrait { key: "made_up_trait".into(), points: 5, level: 0 });
 }

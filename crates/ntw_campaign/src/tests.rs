@@ -147,6 +147,8 @@ fn region(id: i32, key: &str, owner: i32, forts: Vec<Vec<EsfNode>>) -> Vec<EsfNo
     )];
     garrison.extend((1..10).map(|_| EsfNode::U32(0)));
     garrison.extend([EsfNode::I32(5 << 20), EsfNode::I32(7 << 20)]);
+    // #12 the garrisoned army (none), #13 the besieging forces (none), #14 the residents (none).
+    garrison.extend([EsfNode::U32(0), EsfNode::U32Array(vec![]), EsfNode::U32Array(vec![])]);
     let mut children = vec![
         s(key),
         rec(
@@ -539,6 +541,14 @@ fn bad_field_type_is_an_error() {
 #[test]
 fn oddities_become_warnings() {
     let db = GameDatabase::test_fixture();
+    // test_b has one reinforcement march in progress (entry: source, target, settlement, done).
+    let mut test_b = faction(2000, "test_b", "GOVERNMENT::REPUBLIC", 1000, "frenemies", vec![], vec![]);
+    let EsfNode::Record(b) = &mut test_b[0] else { unreachable!("faction() gives a FACTION record") };
+    b.children.push(rec(
+        "ARMY_REINFORCEMENT_MANAGER",
+        0,
+        vec![arr("CHARACTER_REINFORCEMENTS_ARRAY", vec![vec![rec("CHARACTER_REINFORCEMENT", 0, vec![EsfNode::I32(1), EsfNode::I32(2), EsfNode::I32(77), EsfNode::Bool(false)])]])],
+    ));
     let world = rec(
         "WORLD",
         4,
@@ -555,15 +565,7 @@ fn oddities_become_warnings() {
                         vec![character(11, "spy", 0)],
                         vec![army(500, 99, vec![])],
                     ),
-                    faction(
-                        2000,
-                        "test_b",
-                        "GOVERNMENT::REPUBLIC",
-                        1000,
-                        "frenemies",
-                        vec![],
-                        vec![],
-                    ),
+                    test_b,
                 ],
             ),
             rec(
@@ -600,6 +602,10 @@ fn oddities_become_warnings() {
     assert!(has(&|x| matches!(
         x,
         LoadWarning::DanglingRegionOwner { owner: 31337, .. }
+    )));
+    assert!(has(&|x| matches!(
+        x,
+        LoadWarning::UnloadedReinforcements { faction, entries: 1 } if faction == "test_b"
     )));
     // Every warning prints a message.
     assert!(w.iter().all(|x| !x.to_string().is_empty()));
@@ -667,6 +673,101 @@ fn the_loader_takes_the_campaign_cost_from_units_7() {
     assert_eq!((land.cost, land.campaign_cost, land.unit_cap), (111, 99, 4));
     // The director's rival score skips the original's pirates (`0x00C3FD50`), set here, not in the model.
     assert_eq!(rules.director.no_rival_keys, ["pirates"]);
+}
+
+/// The technology links follow the exe's builders: the chain record's thread and pair (`0x00E55C30`,
+/// `0x00F21E60`: exact-case group, +0x10 = 0 only for the three groups, +0x14 the #2 number), the
+/// technology linker `0x00F21A30` (thread from the level's chain; requirement and building-level rows
+/// naming no technology dropped; the last same-tree requirement as the parent +0x60) and the building
+/// level linker `0x00DDF300` (a required technology that is no `technologies` key dropped).
+#[test]
+fn the_loader_links_technologies_as_the_exe() {
+    use ntw_data::campaign::{BuildingChain, BuildingTechnologyRecord, TechnologyBuildingLevelRecord, TechnologyRequirementRecord};
+    use ntw_data::schemas::{BuildingLevel, Technology};
+    let mut db = GameDatabase::test_fixture();
+    let chain = |key: &str, group: Option<&str>, n: Option<&str>| BuildingChain {
+        key: key.into(),
+        group: group.map(Into::into),
+        class_number: n.map(Into::into),
+        category: None,
+    };
+    db.campaign.building_chains = Table::from_rows(
+        0,
+        vec![
+            chain("sAdmin", Some("enlightenment"), Some("0")),
+            chain("sAdminSpain", Some("enlightenment"), Some("0")),
+            chain("tFactory", Some("industry"), Some("2")),
+            chain("tFactorySpain", None, None),
+            chain("sArmy", Some("military"), Some("1")),
+            chain("sArmyTutorial", None, Some("1")),
+            chain("sArmyCase", Some("Military"), Some("1")),
+        ],
+    );
+    let level = |key: &str, chain: &str, level: i32| BuildingLevel { key: key.into(), chain: chain.into(), level, ..Default::default() };
+    let levels = [
+        level("admin_1", "sAdmin", 1),
+        level("admin_spain_2", "sAdminSpain", 2),
+        level("factory_1", "tFactory", 1),
+        level("factory_spain_1", "tFactorySpain", 1),
+        level("army_1", "sArmy", 1),
+        level("army_tut_1", "sArmyTutorial", 1),
+        level("army_case_1", "sArmyCase", 1),
+    ];
+    db.building_levels = Table::from_rows(0, db.building_levels.rows().iter().cloned().chain(levels).collect());
+    let tech = |key: &str, level: &str| Technology { key: key.into(), building_level: level.into(), research_cost: 10, ..Default::default() };
+    db.technologies = Table::from_rows(
+        0,
+        vec![tech("admin_a", "admin_1"), tech("admin_b", "admin_1"), tech("admin_c", "admin_spain_2"), tech("mil_a", "army_1"), tech("eco_a", "factory_spain_1"), tech("lost", "nowhere")],
+    );
+    let req = |t: &str, r: &str| TechnologyRequirementRecord { technology: t.into(), required: r.into() };
+    db.campaign.tech_requirements = Table::from_rows(
+        0,
+        vec![req("admin_b", "admin_a"), req("admin_b", "mil_a"), req("admin_b", "ghost"), req("admin_c", "admin_b"), req("admin_c", "admin_a"), req("ghost", "admin_a")],
+    );
+    let need = |t: &str, b: &str| TechnologyBuildingLevelRecord { technology: t.into(), building: b.into() };
+    db.campaign.tech_building_levels = Table::from_rows(0, vec![need("admin_b", "factory_1"), need("admin_b", "nowhere"), need("ghost", "factory_1")]);
+    let gate = |b: &str, t: &str| BuildingTechnologyRecord { building: b.into(), technology: t.into() };
+    db.campaign.building_techs = Table::from_rows(0, vec![gate("factory_1", "admin_a"), gate("factory_1", "ghost")]);
+    let rules = rules_from_db(&db, "test_campaign");
+    let b = &rules.buildings;
+    let pair = |k: &str| b[k].chain_pair();
+    assert_eq!((pair("admin_1"), pair("factory_1"), pair("army_1")), ((0, 0), (0, 2), (0, 1)));
+    assert_eq!(pair("admin_spain_2"), pair("admin_1"), "a variant of the same group and number serves the chain");
+    assert_eq!(pair("factory_spain_1"), (-1, 0), "no group: -1, an empty number 0");
+    assert_eq!(pair("army_tut_1"), (-1, 1));
+    assert_eq!(b["army_case_1"].chain_thread, ntw_sim::campaign::rules::NO_THREAD, "the group compare is case-sensitive");
+    let t = &rules.technologies;
+    let threads: Vec<usize> = ["admin_a", "mil_a", "eco_a", "lost"].iter().map(|k| t[*k].thread).collect();
+    assert_eq!(threads, [2, 0, 3, 3]);
+    assert_eq!(t["admin_b"].requires, ["admin_a", "mil_a"], "an unknown requirement is dropped");
+    assert_eq!(t["admin_b"].parent.as_deref(), Some("admin_a"), "the other tree's requirement is no parent");
+    assert_eq!(t["admin_c"].parent.as_deref(), Some("admin_a"), "the last same-tree row wins");
+    assert_eq!(t["admin_a"].parent, None);
+    assert_eq!(t["admin_b"].required_buildings, ["factory_1"], "an unknown level is dropped");
+    assert!(!t.contains_key("ghost"));
+    assert_eq!(rules.building_techs["factory_1"], ["admin_a"], "an unknown technology is dropped");
+}
+
+/// `unit_required_technology_junctions` as the linker `0x00EA9B10`: a row whose technology is no
+/// `technologies` key is dropped (the exe logs it), and so is a row naming no built unit (the exe's
+/// exact-case unit compare matches nothing); the rest keep table order.
+#[test]
+fn the_loader_drops_unit_technology_rows_with_bad_keys() {
+    use ntw_data::campaign::UnitTechnologyRecord;
+    use ntw_data::schemas::Technology;
+    let mut db = GameDatabase::test_fixture();
+    let tech = |key: &str| Technology { key: key.into(), building_level: BARRACKS.into(), ..Default::default() };
+    db.technologies = Table::from_rows(0, vec![tech("mil_a"), tech("mil_b")]);
+    let row = |unit: &str, t: &str| UnitTechnologyRecord { unit: unit.into(), technology: t.into() };
+    let upper = UNIT.to_uppercase();
+    db.campaign.unit_techs = Table::from_rows(
+        0,
+        vec![row(UNIT, "mil_b"), row(UNIT, "ghost"), row("no_such_unit", "mil_a"), row(&upper, "mil_a"), row(UNIT, "mil_a")],
+    );
+    let rules = rules_from_db(&db, "test_campaign");
+    assert_eq!(rules.unit_techs[UNIT], ["mil_b", "mil_a"], "the unknown technology is dropped, the rest in row order");
+    assert!(!rules.unit_techs.contains_key("no_such_unit"), "a row naming no unit is dropped");
+    assert!(!rules.unit_techs.contains_key(&upper), "the unit compare is case-sensitive");
 }
 
 /// A negotiation line listed twice keeps the last row, generic and faction override alike: the
@@ -949,6 +1050,8 @@ fn a_region_without_a_recruitment_manager_warns_once() {
 /// Review (round 12): the scripts' restricted building levels of a save were copied into the
 /// model by the game's scene setup, a second place for the rule; the loader now fills
 /// `World::restricted_buildings` itself, and `World::restricted_units` too (recruit-gates: the model holds both).
+/// unitrestrict: the units keep their file order and duplicates (the exe's list, `0x009968A0`), and a key
+/// that names no unit is logged and dropped (the exe stores a null entry the next save crashes on, `0x009A1070`).
 #[test]
 fn the_loader_fills_the_restricted_building_levels() {
     let db = GameDatabase::test_fixture();
@@ -957,7 +1060,10 @@ fn the_loader_fills_the_restricted_building_levels() {
         "EPISODIC_RESTRICTIONS",
         0,
         vec![
-            arr("UNIT_RESTRICTIONS", vec![vec![s("unit_x")]]),
+            arr(
+                "UNIT_RESTRICTIONS",
+                vec![vec![s("fixture_line_infantry")], vec![s("unit_x")], vec![s("fixture_foot_artillery")], vec![s("fixture_line_infantry")]],
+            ),
             arr("BUILDING_RESTRICTIONS", vec![vec![s("level_b")], vec![s("level_a")]]),
         ],
     );
@@ -979,7 +1085,7 @@ fn the_loader_fills_the_restricted_building_levels() {
     model_rec.children.push(episodic);
     let loaded = read(&esf.to_bytes().unwrap(), &db).unwrap();
     assert_eq!(loaded.model.world.restricted_buildings.iter().map(String::as_str).collect::<Vec<_>>(), vec!["level_a", "level_b"]);
-    assert_eq!(loaded.model.world.restricted_units.iter().map(String::as_str).collect::<Vec<_>>(), vec!["unit_x"]);
+    assert_eq!(loaded.model.world.restricted_units.iter().map(String::as_str).collect::<Vec<_>>(), ["fixture_line_infantry", "fixture_foot_artillery", "fixture_line_infantry"]);
     // A file without the record restricts nothing.
     let plain = read(&tiny(STARTPOS_ROOT, tiny_world()), &db).unwrap();
     assert!(plain.model.world.restricted_buildings.is_empty() && plain.model.world.restricted_units.is_empty());

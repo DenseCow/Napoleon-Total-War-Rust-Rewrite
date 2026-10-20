@@ -1188,15 +1188,39 @@ deal-region, 2026-10-10, below "Region value").
   `deal_goal_allowed(ai, proposer, 4)`). Accepting a deal counts each region a human receives
   (`World::deal_regions_received`). Tests `the_ai_evaluates_region_deals`,
   `the_ai_evaluates_regions_and_technologies_together`, and `region_deals_on_the_europe_start`
-  (economy_fidelity, real data). PROVISIONAL inputs: the `+0x22C` and siege tests read false; the
-  attitude is not ported and reads 0 (every offered region is gain; `0x00A79050` = the lower of two
-  population-class results `0x008BDB90` minus 6, or minus floor((1 − x) × 6) for a region in the
-  AI's list `+0x50/+0x54`); every region is taken to have a group (`+0x12C`, region groups not
+  (economy_fidelity, real data). PROVISIONAL inputs: the `+0x22C` and siege tests read false; every region is taken to have a group (`+0x12C`, region groups not
   in the model); the peace record is not in the model (taken as empty); the group state is always NEW
   (belief 0x52 not ported), so the SPLIT / MERGED factors are not reached; the `+0x1C0` list reads
   false (not imported); several theatres count as one; `+0x938` is not read from original saves
   (its `FACTION` child index is not found); the base value is the startpos one (its refresh,
   settlement `+0xE8`, is not traced).
+- **Offered-region attitude (worker dealattitude, 2026-10-20, CONFIRMED by disassembly).**
+  `0x00A364B0` builds the offered region's factors (`CopyRefreshedRegionPopulation` `0x00A72990`:
+  its population refreshed, the religion breakdown normalised unless the rebels own it) and calls
+  `CalculateRegionHypotheticalOrderAttitude` `0x00A79050` at `0x00A365BC` with the recipient AI
+  and its state religion (faction `+0x710`, `0x008F32B0` at `0x00A365B3`). `0x00A79050`: the
+  government's lower class (`0x00A60FE0` / `0x008CE260`) and upper class (`0x00A61320` /
+  `0x008CE320`), each the first class entry when the region has no such class (`0x00A6101A`); for
+  each, `0x008BDB90(class, region, faction)` = the class total (`0x008E2AB0`) + its resistance
+  (war results, +0x2C) again when negative − its tax (+0x8) when negative − its garrison repression (+0x50) −
+  the gentlemen factor for the owner (`0x008C55D0(region, region +0xF4)`) + the gentlemen factor
+  for the AI; the lower of the two, then − floor((1 − share) × 6) (f32, FIST + remainder sign,
+  constants `0x01318048` / `0x01325D2C`) for the first religion-share entry (+0x50 count / +0x54
+  data, {religion, share}) whose key is the AI's state religion, else − 6 (also for a faction
+  without one). The negative resistance counts twice, kept 1:1: `0x008E2AB0` sums +0x38 + +0x3C +
+  +0x58, `0x008EDF70` adds slot +0x2C into the negative sum +0x3C, and `0x008BDB90` adds `min(+0x2C, 0)` again
+  (`0x008BDBC2`). The owner's gentlemen factor comes from its own `0x008C55D0(region, owner)` call
+  (`0x008BDBB4`), not the class's slot +0x30: the first-class fallback (a class the government does not
+  govern, e.g. a monarchy's region a republic took) has every slot 0 yet still loses the owner's gentlemen
+  (fix round 2, 2026-10-20; test `the_fallback_class_still_loses_the_owners_gentlemen`). `0x008C55D0` counts a gentleman as positive when his faction and the side pass
+  `0x008CE390` (call at `0x008C56CC`: neither rebels, same faction or allied / patron /
+  protectorate stance), so allied gentlemen count for the owner too (the model had faction
+  equality; fixed). Port: `economy::hypothetical_class_order`, `economy::hypothetical_order_attitude`,
+  `economy::gentlemen_factor_for` (on `CampaignModel::allied_with`), read by
+  `CampaignModel::region_deal_value`. Tests `a_class_order_under_another_faction`,
+  `the_ai_counts_an_offered_region_by_its_attitude`, `religion_gentlemen_war_and_education_in_public_order`
+  (allied gentlemen) and `region_deals_on_the_europe_start` (real data: Spain's attitude to
+  `eur_pays_d_oc` is 4).
 - **Who scores the goals (round 2, CONFIRMED).** The AI object of the evaluator is the faction's
   manager (`0x00A87F50`); its BDI core is manager `+8` (`0x005D6450`), built by `0x00C8E290`:
   `+0x34` the component list, `+0x90` `0x00C904F0`, `+0x94` `0x00C8FB10`, `+0x98` the **finance
@@ -1361,7 +1385,7 @@ deal-region, 2026-10-10, below "Region value").
   (other branch, `0x00AA20A6`: MERGED `+0x22C`, divisor `2 − REDUCED` `+0x21C`) change the value;
   states 0 and 3 only reach analyser 0x56 (`0x00AB8BC0`); `0x00A364B0` builds an offered region's
   factors from campaign region `+0x28`.
-- **Resume point:** the region value's PROVISIONAL inputs: the attitude `0x00A79050`, the
+- **Resume point:** the region value's PROVISIONAL inputs: the
   `0x00C3E0C0` (`+0x22C`) and siege tests, belief 0x52's region-group analysis (`0x00A634D0` /
   `0x00A63FD0`), the CAI `+0x1C0` list import, `+0x938` from original saves, the peace record,
   multi-theatre maps and the base-value refresh (`+0xE8`). The counter-offer `0x00CC58C0` stays its

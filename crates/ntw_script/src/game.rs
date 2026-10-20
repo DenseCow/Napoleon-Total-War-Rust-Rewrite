@@ -321,9 +321,48 @@ fn dispatch(lua: &Lua, s: &Shared, name: &'static str, args: &MultiValue) -> mlu
             }
         }
 
+        // grant_faction_handover(killer, target, min_turn, max_turn): CONFIRMED (binding `0x00978950`):
+        // the turns are read first, each a Lua number only (`0x01055700`, type 3; the f32 `lua_Number`,
+        // DESIGN §3.5) rounded ties to even (`0x010556D0`), then the two keys. Another type logs the
+        // type error and clears the reader's ok flag, so the keys read empty, no faction is found and
+        // nothing happens (ours: logged).
+        // Unknown killer or target: nothing. The rule (window, draw, destruction) is the model's
+        // (`CampaignModel::grant_faction_handover`). Its events (the forces destroyed, the killer's new
+        // garrison colonel, a human target's `FactionDestroyed` and defeat movie) are queued for the host,
+        // which fires them once the calling Lua returns (`ScriptHost::fire_script_events`).
+        "grant_faction_handover" => {
+            let int = |i: usize| -> Option<i32> {
+                let x = match args.get(i)? {
+                    Value::Integer(n) => *n as f32,
+                    Value::Number(n) => *n as f32,
+                    _ => return None,
+                };
+                let r = x.round_ties_even();
+                // Out of range is the x87 "integer indefinite".
+                Some(if (-2_147_483_648.0..2_147_483_648.0).contains(&r) { r as i32 } else { i32::MIN })
+            };
+            let (Some(killer), Some(target), Some(min_turn), Some(max_turn)) = (arg_str(args, 1), arg_str(args, 2), int(3), int(4)) else {
+                return bad_args(s, text);
+            };
+            let mut st = s.borrow_mut();
+            let (Some(killer_id), Some(target_id)) = (st.faction_id(&killer), st.faction_id(&target)) else {
+                st.log.push(format!("{text}: unknown faction"));
+                return Ok(Value::Nil);
+            };
+            let line = match st.model.grant_faction_handover(killer_id, target_id, min_turn, max_turn) {
+                Some(events) => {
+                    st.script_events.extend(events);
+                    format!("{text}: {target} destroyed by {killer}")
+                }
+                None => text,
+            };
+            st.log.push(line);
+        }
+
         // force_make_peace / force_declare_war(a, b) → the model's own diplomacy commands.
-        // PROVISIONAL: whether the exe's force_make_peace (`0x0097AC90`) also queues the
-        // move-armies-out command (`0x009838B0`) is untraced; ours sends only the peace (BACKLOG §0).
+        // PROVISIONAL: the exe's force_make_peace (`0x0097AC90`) also queues the move-armies-out
+        // command (`0x009838B0`, `CampaignCommand::MoveArmiesOutOfRegions`) after the peace when the
+        // two are at war (CONFIRMED); ours sends only the peace (BACKLOG §0).
         "force_make_peace" | "force_declare_war" => {
             let (Some(a), Some(b)) = (arg_str(args, 1), arg_str(args, 2)) else {
                 return bad_args(s, text);
@@ -341,8 +380,51 @@ fn dispatch(lua: &Lua, s: &Shared, name: &'static str, args: &MultiValue) -> mlu
             let result = st.model.apply(cmd);
             st.log.push(match result {
                 Ok(_) => text,
-                Err(e) => format!("{text}: refused by the model ({e:?})"),
+                Err(e) => format!("{text}: refused by the model ({e})"),
             });
+        }
+
+        // force_make_protectorate(patron, protectorate) (`HandleScriptForceMakeProtectorate`
+        // `0x0097AA20`, CONFIRMED; vanilla: `force_make_protectorate("ita_french_republic",
+        // "ita_piedmont")`, France the patron): nothing unless both factions exist and differ; at
+        // war, first a peace with its messages off (`CCQ_MAKE_PEACE`, suppress byte 1); then, unless
+        // either side already has a patron (`0x008CEEA0`), the protectorate (`CCQ_MAKE_PROTECTORATE`,
+        // whose handler checks again); then always each side's forces out of the other's regions
+        // (`CCQ_MOVE_ARMIES_OUT_OF_REGIONS`). The exe queues the three commands; ours applies them
+        // in the same order. The peace holds in any faction's turn: the `CCQ_MAKE_PEACE` handler
+        // `0x00936710` checks only that both factions exist, differ and are at war (`0x008CE9B0`)
+        // before `0x00B262C0` (`CampaignCommand::MakePeace` has no turn test). Like every
+        // command, each of the three is refused while a battle is pending (`CampaignModel::apply`).
+        // Their events are queued for the host, as `grant_faction_handover`'s.
+        "force_make_protectorate" => {
+            let (Some(patron), Some(protectorate)) = (arg_str(args, 1), arg_str(args, 2)) else {
+                return bad_args(s, text);
+            };
+            let mut st = s.borrow_mut();
+            let (Some(patron), Some(protectorate)) = (st.faction_id(&patron), st.faction_id(&protectorate)) else {
+                st.log.push(format!("{text}: unknown faction"));
+                return Ok(Value::Nil);
+            };
+            if patron == protectorate {
+                st.log.push(format!("{text}: the same faction twice"));
+                return Ok(Value::Nil);
+            }
+            let mut results = Vec::with_capacity(3);
+            if st.model.at_war(patron, protectorate) {
+                results.push(st.model.apply(CampaignCommand::MakePeace { a: patron, b: protectorate, suppress_messages: true }));
+            }
+            if !st.model.has_patron(patron) && !st.model.has_patron(protectorate) {
+                results.push(st.model.apply(CampaignCommand::MakeProtectorate { patron, protectorate }));
+            }
+            results.push(st.model.apply(CampaignCommand::MoveArmiesOutOfRegions { a: patron, b: protectorate }));
+            let mut refused = Vec::new();
+            for result in results {
+                match result {
+                    Ok(events) => st.script_events.extend(events),
+                    Err(e) => refused.push(e.to_string()),
+                }
+            }
+            st.log.push(if refused.is_empty() { text } else { format!("{text}: refused by the model ({})", refused.join(", ")) });
         }
 
         // force_diplomacy(a, b, option, offer, accept) (`SetDiplomacyOptionFromScript`
@@ -406,13 +488,10 @@ fn dispatch(lua: &Lua, s: &Shared, name: &'static str, args: &MultiValue) -> mlu
 
         "add_restricted_unit_record" | "remove_restricted_unit_record" => {
             let Some(key) = arg_str(args, 1) else { return bad_args(s, text) };
+            // The model's list rule (`0x009C9700` / `0x00A1D3B0`): an add appends, a remove erases the first match.
             let mut st = s.borrow_mut();
-            if name.starts_with("add") {
-                st.model.world.restricted_units.insert(key);
-            } else {
-                st.model.world.restricted_units.remove(&key);
-            }
-            st.log.push(text);
+            let known = if name.starts_with("add") { st.model.add_restricted_unit(&key) } else { st.model.remove_restricted_unit(&key) };
+            st.log.push(if known { text } else { format!("{text}: '{key}' is not a valid unit key, ignored") });
         }
         "add_restricted_building_level_record" | "remove_restricted_building_level_record" => {
             let Some(key) = arg_str(args, 1) else { return bad_args(s, text) };

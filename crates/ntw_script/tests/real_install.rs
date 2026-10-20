@@ -180,3 +180,45 @@ fn spa_napoleon_new_campaign_reads_its_start_position_values_at_loading_game() {
     assert_eq!(host.model().world.last_income(fr), before, "the start position's boosts are 0");
     assert!(host.state().is_new_game);
 }
+
+/// The vanilla `export_triggers.lua` handler `C_NTW_General_Looter_Good_Trigger` answers the loot
+/// choice's `CharacterLootedSettlement` (character-only context, vtable `0x0137CCB8`): for a
+/// General it rolls `C_NTW_General_Looter_Good` (1 point at 12, then 1 point at 25), so a French
+/// general of the real start position gains it within a few loots, without a script error.
+#[test]
+fn eur_napoleon_looting_reaches_the_looter_trait_trigger() {
+    use ntw_sim::campaign::{CampaignEvent, CharacterKind};
+    let dir = data_dir();
+    if !dir.join("campaigns").join("eur_napoleon").join("startpos.esf").is_file() {
+        eprintln!("skipped: no install at {}", dir.display());
+        return;
+    }
+    let db = ntw_data::GameDatabase::from_install(&dir).expect("DB");
+    let mut loaded = ntw_campaign::read_file(dir.join("campaigns").join("eur_napoleon").join("startpos.esf"), &db).expect("startpos");
+    assert!(loaded.set_human("france"));
+    let fr = loaded.model.faction_by_key("france").unwrap().id;
+    let general = loaded
+        .model
+        .world
+        .characters
+        .values()
+        .filter(|c| c.faction == fr && c.kind == CharacterKind::General)
+        .map(|c| c.id)
+        .min()
+        .expect("a French general");
+    let source = ScriptSource::from_install(&dir).expect("open packs");
+    let mut host = ScriptHost::new(loaded.model, "france", source).unwrap();
+    host.load_campaign("eur_napoleon").expect("scripts load");
+    let ctx = host.context_for(&CampaignEvent::CharacterLootedSettlement { character: general });
+    for _ in 0..40 {
+        let r = host.fire("CharacterLootedSettlement", ctx.clone());
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(r.handlers >= 1, "the vanilla trigger is registered");
+    }
+    let st = host.state();
+    assert!(
+        st.character_log.iter().any(|l| l.contains("C_NTW_General_Looter_Good") && l.contains(&general.raw().to_string())),
+        "{:?}",
+        st.character_log
+    );
+}

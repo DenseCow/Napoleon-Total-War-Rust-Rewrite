@@ -56,11 +56,29 @@
 //! in. An army's or fleet's path search runs behind the same flags (CONFIRMED by disassembly,
 //! [`CampaignModel::path_region_gate`]).
 //!
-//! PROVISIONAL (BACKLOG): a rebel commander's later floods. Once the grid has stored a single-region
-//! view (+0x400, written by `0x00B077B0` and never cleared), `0x00B7BAF0` floods a faction without a
-//! record on the layers as the stored view left them (`ReapplyPathGridFactionView` `0x00B67490`),
-//! skipping the faction scope; ours keeps no stored view and gives the rebels their own flags, as at
-//! load.
+//! A rebel commander's later floods, and every flood's view (`PATHFINDING.md` §8, CONFIRMED by
+//! disassembly; [`GridState`]): the grid keeps the faction view its layers were last set for (+0x3FC
+//! the faction, +0x414 the mode) and the single-region field +0x400. A faction view is stored by
+//! `0x00B06210` with its store flag: per faction in the load pass, again by `0x00B0DF30` at the
+//! campaign start, and as the acting view (`0x008ED860` → `0x008A87D0`, the turn faction's) at the
+//! campaign start (`0x00873DF3`) and at each faction's turn start (`0x008F2620` at `0x008F28D3`,
+//! [`CampaignModel::store_acting_view`]). A rebel view (mode 2) is stored by `0x00B077B0` with +0x400 =
+//! the region index its army rose in: per rebel commander in the load pass, and before each order a
+//! rebel character carries out (the campaign AI's order steps `0x00A645C0`, `0x00A65360`, ...;
+//! [`CampaignModel::store_rebel_view`]). Only the grid constructor (`0x00AE7350`, 0) and `0x00B077B0`
+//! write +0x400, so it keeps the last rebel commander's region. `0x00B7BAF0` (flag 0) takes the view
+//! faction V from the commander during the load pass and from the stored view after it (campaign
+//! +0x39, set at `0x00873D4D`). V with a record, or any V while +0x400 is 0, gets the scope
+//! `0x00AF5200`: V's obstacle modes and the commander's own faction's flags; V without a record after
+//! a non-zero +0x400 floods on the layers as the stored view left them, without the scope. So after
+//! the load pass every flood, of any faction's commander, sees the obstacles with the turn faction's
+//! (or the acting rebel's) modes. `ReapplyPathGridFactionView` (`0x00B67490`) puts a stored view back
+//! on the layers after the diplomacy refreshes, which ours need not: each flood here takes its view
+//! from [`GridState`].
+//!
+//! The acting view is a character's only in a revolution ([`CampaignModel::store_acting_view`],
+//! CONFIRMED by disassembly), which ours does not model yet (PROVISIONAL there). PROVISIONAL (BACKLOG):
+//! the views the post-battle steps (`0x008F7880`) and `0x008C1140` store are not modelled.
 //!
 //! The faction's character list (+0x768) is walked in its own order
 //! ([`World::characters_in_list_order`](super::world::World::characters_in_list_order)): the loader
@@ -94,7 +112,7 @@ pub type StoredZones = BTreeMap<CharacterId, Arc<[u32]>>;
 static EMPTY_ZONE: LazyLock<Arc<[u32]>> = LazyLock::new(|| Arc::from([]));
 
 /// The model's stored zones (not saved: a load floods them again, as `0x00B0DC10` does), with the map
-/// they were flooded on.
+/// they were flooded on and the grid's stored view.
 #[derive(Debug, Clone, Default)]
 pub struct Zones(Option<Built>);
 
@@ -102,6 +120,51 @@ pub struct Zones(Option<Built>);
 struct Built {
     terrain: Terrain,
     zones: StoredZones,
+    grid: GridState,
+}
+
+/// The faction view the path grid's layers were last left in (module docs, "A rebel commander's
+/// later floods"): `CampaignPathGrid` +0x3FC (the faction) and +0x414 (the mode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GridView {
+    /// Mode 0, stored by `0x00B06210` with its store flag: the faction's obstacle modes and region
+    /// flags on every layer.
+    Faction(FactionId),
+    /// Mode 2, stored by `0x00B077B0`: the rebel faction's modes and only the single slots of the
+    /// region the acting rebel army rose in, which is the grid's +0x400 ([`GridState`]).
+    Rebel(FactionId),
+}
+
+/// The grid's stored view with its single-region field +0x400 (the region index of the last
+/// `0x00B077B0`: 0 from the grid constructor `0x00AE7350`, and never cleared after), and the
+/// campaign's byte +0x39 (model +0xF5C), which makes every flood read the stored view's faction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GridState {
+    view: Option<GridView>,
+    region: u32,
+    /// Campaign +0x39: cleared by the campaign constructor (`0x0090C4A0` at `0x0090C527`), set once
+    /// the load pass is done (`0x00872550` at `0x00873D4D`, before the acting view) and again at each
+    /// round start (`RunCampaignRoundStart` `0x0096C054`); no store clears it after (CONFIRMED by an
+    /// instruction search of the exe).
+    read_view: bool,
+}
+
+impl GridState {
+    /// The grid as its constructor leaves it: no view stored, +0x400 = 0.
+    const NEW: GridState = GridState { view: None, region: 0, read_view: false };
+
+    /// `0x00B077B0`: the rebel `faction`'s view of `region`, stored with +0x400.
+    fn store_rebel(&mut self, faction: FactionId, region: u32) {
+        self.view = Some(GridView::Rebel(faction));
+        self.region = region;
+    }
+
+    /// The faction of the stored view (+0x3FC).
+    fn view_faction(self) -> Option<FactionId> {
+        match self.view? {
+            GridView::Faction(f) | GridView::Rebel(f) => Some(f),
+        }
+    }
 }
 
 /// A commander's obstacle as the zone rules see it.
@@ -158,6 +221,14 @@ fn slot_flags(map: &PolyMap, open: &[bool], rebel: bool) -> Vec<bool> {
     let open_at = |i: &u32| open.get(*i as usize).copied().unwrap_or(!rebel);
     let flag = |(slot, set): (usize, &Vec<u32>)| if rebel && slot < map.single_region_slots { false } else { set.iter().all(open_at) };
     map.region_sets.iter().enumerate().map(flag).collect()
+}
+
+/// The flags of a layer set to one region `x` (by region index): its single slots only, every other
+/// slot closed (`0x00B078C0` for an army's home region, `0x00B07870` → `0x00B07950` for a given
+/// one; CONFIRMED by disassembly). `None`, a region the grid does not hold, closes every slot.
+fn only_region(map: &PolyMap, x: Option<u32>) -> Vec<bool> {
+    let only_x = |(slot, set): (usize, &Vec<u32>)| slot < map.single_region_slots && x.is_some_and(|x| set.as_slice() == [x]);
+    map.region_sets.iter().enumerate().map(only_x).collect()
 }
 
 impl CampaignModel {
@@ -222,12 +293,49 @@ impl CampaignModel {
             .collect()
     }
 
-    /// Floods `c`'s zone against the obstacles his faction sees with their stored zones, behind his
-    /// layer's region gate ([`Self::region_gate`]).
-    fn flood_zone(&self, map: &PolyMap, c: &Commander, zones: &StoredZones, only_stored: bool, owners: &RegionOwners<'_>) -> Arc<[u32]> {
-        let others = self.obstacles_with_zones(Some(map), c.faction, c.id, Some(zones), only_stored);
-        let gate = self.region_gate(map, c, owners);
+    /// Floods `c`'s zone against the obstacles the view's faction sees with their stored zones, behind
+    /// the layer's region gate ([`Self::flood_view`]).
+    fn flood_zone(&self, map: &PolyMap, c: &Commander, zones: &StoredZones, only_stored: bool, owners: &RegionOwners<'_>, grid: GridState) -> Arc<[u32]> {
+        let (modes, gate) = self.flood_view(map, c, owners, grid);
+        let others = self.obstacles_with_zones(Some(map), modes, c.id, Some(zones), only_stored);
         zoc::zone_in(map, c.pos_f32(), c.navy, c.garrisoned, &others, gate.as_deref()).into()
+    }
+
+    /// The faction whose obstacle modes `c`'s flood reads, with the region flags of its layer
+    /// (`0x00B7BAF0` with flag 0; module docs, "A rebel commander's later floods"). The view faction
+    /// is `c`'s own during the load pass and the stored view's (+0x3FC) after it (campaign +0x39,
+    /// [`GridState`]). A view faction with a record, or any while +0x400 is 0, gets the scope
+    /// (`0x00AF5200`): the view faction's modes, `c`'s own faction's flags ([`Self::region_gate`]). A
+    /// view faction without a record after a non-zero +0x400 floods on the layers as the stored view
+    /// left them: a faction view's modes and flags (`0x00B06210`), or the rebel view's modes with only
+    /// its region's single slots (`0x00B077B0` / `0x00B07870`).
+    fn flood_view(&self, map: &PolyMap, c: &Commander, owners: &RegionOwners<'_>, grid: GridState) -> (FactionId, Option<Vec<bool>>) {
+        let view = if grid.read_view { grid.view_faction().unwrap_or(c.faction) } else { c.faction };
+        if self.world.is_rebel_faction(view) && grid.region != 0 {
+            match grid.view {
+                Some(GridView::Faction(f)) => {
+                    // `map` is the terrain's polygon map, so the terrain is there.
+                    if let Some(t) = &self.terrain {
+                        let open = self.regions_open_to(&t.0.region_keys, f, owners);
+                        return (f, Some(slot_flags(map, &open, self.world.is_rebel_faction(f))));
+                    }
+                }
+                Some(GridView::Rebel(f)) => return (f, Some(only_region(map, Some(grid.region)))),
+                // +0x400 is written only with a rebel view (`0x00B077B0`), so the exe always has a view
+                // stored here; ours has none only after its load-pass fallback ([`Self::build_zones`]).
+                None => {}
+            }
+        }
+        (view, self.region_gate(map, c, owners))
+    }
+
+    /// The region index of the region `force` rose in (army +0x98, its `REBEL_DATA`: the region list
+    /// [`World::region_risen_armies`](super::world::World::region_risen_armies) holds it in), if it
+    /// is a risen army; `Some(None)` for one whose region the grid does not hold.
+    fn risen_home_index(&self, force: ForceId) -> Option<Option<u32>> {
+        let home = self.world.region_risen_armies.iter().find(|(_, armies)| armies.contains(&force)).map(|(r, _)| *r)?;
+        let grid = self.terrain.as_ref().map(|t| &t.0);
+        Some(self.world.regions.get(&home).and_then(|r| grid?.region_index(&r.key)))
     }
 
     /// The owner of each region by key: built once per flood pass, not per flood.
@@ -240,11 +348,8 @@ impl CampaignModel {
     fn region_gate(&self, map: &PolyMap, c: &Commander, owners: &RegionOwners<'_>) -> Option<Vec<bool>> {
         let grid = &self.terrain.as_ref()?.0;
         // A risen army (army +0x98 set): only the single slots of its home region X (`0x00B078C0`).
-        let home = self.world.region_risen_armies.iter().find(|(_, armies)| armies.contains(&c.force)).map(|(r, _)| *r);
-        if let Some(home) = home {
-            let x = self.world.regions.get(&home).and_then(|r| grid.region_index(&r.key));
-            let only_x = |(slot, set): (usize, &Vec<u32>)| slot < map.single_region_slots && x.is_some_and(|x| set.as_slice() == [x]);
-            return Some(map.region_sets.iter().enumerate().map(only_x).collect());
+        if let Some(x) = self.risen_home_index(c.force) {
+            return Some(only_region(map, x));
         }
         // A rebel commander with no risen-army entry keeps the faction flags (every single region closed, empty groups open): our own fallback; the exe never reaches it (its load pass 0x00B0DC10 calls 0x00B077B0 then 0x00B078C0, which reads army +0x98 with no null check).
         let rebel = self.world.is_rebel_faction(c.faction);
@@ -281,9 +386,12 @@ impl CampaignModel {
     /// only when O is not the mover's faction, both have a record and O's record towards the mover
     /// does not let it stand; otherwise O's regions are open already, which ours relies on.
     ///
-    /// `None` without a polygon map, and for the rebels: PROVISIONAL (BACKLOG): the view a rebel
-    /// mover's search reads (the grid's single-region view +0x400, `0x00B67490` mode 2) is not
-    /// traced, so a rebel force paths without the gate.
+    /// `None` without a polygon map, and for the rebels: PROVISIONAL (BACKLOG): a recordless (rebel)
+    /// mover's search runs on the layers as the grid's stored view left them, which ours keeps in
+    /// [`GridState`] (after his own order `0x00B077B0`'s view: only his home region's single slots,
+    /// +0x400). Missing: this gate does not read [`GridState`] yet, so a rebel force paths with no
+    /// gate at all, and whether the search scopes (`0x00AF5B60` / `0x00AF5C00`, and `0x00B67490`
+    /// mode 2 behind them) keep, re-store or widen that view for a recordless mover is not traced.
     ///
     /// [`PathGrid::region_at`]: super::pathing::PathGrid::region_at
     pub(crate) fn path_region_gate(&self, faction: FactionId, target: Option<(f32, f32)>) -> Option<Vec<bool>> {
@@ -323,18 +431,89 @@ impl CampaignModel {
     }
 
     /// The load pass `0x00B0DC10` (module docs): every commander flooded in turn order, the rebels
-    /// last, each against those flooded before it.
-    fn build_zones(&self, map: &PolyMap) -> StoredZones {
+    /// last, each against those flooded before it; with the grid's view as the campaign start leaves
+    /// it (module docs, "A rebel commander's later floods").
+    fn build_zones(&self, map: &PolyMap) -> (StoredZones, GridState) {
         let commanders = self.commanders_in_list_order();
         let mut zones = BTreeMap::new();
         let owners = self.region_owners();
+        let mut grid = GridState::NEW;
         for f in self.world.factions_in_turn_order() {
+            // A faction's view is stored before its characters (`0x00B06210(f, 1)`); each rebel
+            // character's own before his flood (`0x00B077B0`).
+            let rebel = self.world.is_rebel_faction(f);
+            if !rebel {
+                grid.view = Some(GridView::Faction(f));
+            }
             for c in commanders.iter().filter(|c| c.faction == f) {
-                let z = self.flood_zone(map, c, &zones, true, &owners);
+                if rebel {
+                    match self.risen_home_index(c.force) {
+                        Some(Some(x)) => grid.store_rebel(f, x),
+                        // A rebel commander with no home region on the grid gets no stored view (our
+                        // own fallback: he floods behind [`Self::region_gate`], not the previous
+                        // rebel's view). The exe never reaches this case: its load pass reads
+                        // army +0x98 with no null check ([`Self::region_gate`]).
+                        _ => grid.view = None,
+                    }
+                }
+                let z = self.flood_zone(map, c, &zones, true, &owners, grid);
                 zones.insert(c.id, z);
             }
         }
-        zones
+        // The campaign start (`0x00872550`) then runs `0x00B0DF30`, which stores the same views again
+        // (the rebels' last, so +0x400 keeps the last rebel commander's region), and stores the acting
+        // view (`0x008ED860` at `0x00873DF3`).
+        if let Some(view) = self.acting_view() {
+            grid.view = Some(view);
+        }
+        // Then campaign +0x39 is set (`0x00873D4D`): every later flood reads the stored view.
+        grid.read_view = true;
+        (zones, grid)
+    }
+
+    /// The acting view `0x008ED860` stores (`0x008A87D0`, CONFIRMED by disassembly): the acting
+    /// faction's (`0x00974EF0`), which is the turn faction (campaign +0x18,
+    /// [`super::turn::TurnState::current`]) unless that faction is in a revolution (+0x814 set,
+    /// `0x008CA0B0`) with +0x81C == +0x81D, when it is campaign +0x1C. Only when the acting faction is
+    /// not the turn faction (`0x00898B80`) and has no record (`0x008CEEF0`) does `0x008A87D0` look at
+    /// the turn faction's revolution settlement (+0x818, set by `0x008EE3E0`; `0x008B7810`): the first
+    /// entry of its +0x220 list (count +0x22C via `0x006A3110`, items +0x230) whose +0x74 handle
+    /// resolves (`0x00898E80`) gives a character, whose rebel view (`0x00B077B0`) is stored instead.
+    /// So in the rebels' own turn the stored view is the rebels' faction view, as ours. `None` before
+    /// any turn.
+    ///
+    /// PROVISIONAL (BACKLOG §6 revolutions, faction +0x814 / +0x81C): revolutions are not in the
+    /// model, so ours always takes the turn faction and never the revolution branch.
+    fn acting_view(&self) -> Option<GridView> {
+        self.turn.current.map(GridView::Faction)
+    }
+
+    /// `0x008ED860`: the acting view stored, at a faction's turn start (`0x008F2620` at `0x008F28D3`).
+    pub(crate) fn store_acting_view(&mut self) {
+        let view = self.acting_view();
+        if let (Some(b), Some(view)) = (self.zones.0.as_mut(), view) {
+            b.grid.view = Some(view);
+        }
+    }
+
+    /// `0x00B077B0` for a rebel character about to carry out an order: the campaign AI's order
+    /// steps store the acting character's view first when his faction has no record (`0x00A645C0`,
+    /// `0x00A65360` and the other callers in `0x00A6xxxx`–`0x00AAxxxx`; CONFIRMED by decompile).
+    /// `force` is the order's force, whose commander is the acting character. Nothing for a force of a
+    /// faction with a record, one without a commander, or one that is no risen army (our own
+    /// fallback: the exe reads army +0x98 with no null check).
+    pub(crate) fn store_rebel_view(&mut self, force: ForceId) {
+        let commander = self.world.forces.get(&force).and_then(|f| self.commander_of_force(f));
+        let Some(c) = commander.filter(|c| self.world.is_rebel_faction(c.faction)) else { return };
+        let Some(Some(x)) = self.risen_home_index(c.force) else { return };
+        if let Some(b) = self.zones.0.as_mut() {
+            b.grid.store_rebel(c.faction, x);
+        }
+    }
+
+    /// The grid's stored view.
+    pub(crate) fn grid_state(&self) -> Option<GridState> {
+        self.zones.0.as_ref().map(|b| b.grid)
     }
 
     /// Puts the campaign map's movement grid into a loaded model and floods every stored zone (the
@@ -348,7 +527,10 @@ impl CampaignModel {
     /// polygon map).
     pub fn build_stored_zones(&mut self) {
         let built = match (&self.terrain, self.poly_map()) {
-            (Some(t), Some(map)) => Some(Built { terrain: t.clone(), zones: self.build_zones(map) }),
+            (Some(t), Some(map)) => {
+                let (zones, grid) = self.build_zones(map);
+                Some(Built { terrain: t.clone(), zones, grid })
+            }
             _ => None,
         };
         self.zones = Zones(built);
@@ -378,13 +560,12 @@ impl CampaignModel {
     }
 
     /// `0x00A285C0` / `0x00A285E0`: floods `character`'s zone again against the stored zones of the
-    /// obstacles his faction sees, and stores it; a character who commands no force loses his entry.
-    /// Nothing without zones flooded for the current map ([`Self::attach_terrain`]).
+    /// obstacles the grid's stored view faction ([`Self::flood_view`]) sees, and stores it; a
+    /// character who commands no force loses his entry. Nothing without zones flooded for the current
+    /// map ([`Self::attach_terrain`]).
     pub(crate) fn rebuild_zone(&mut self, character: CharacterId) {
-        let new = match (self.poly_map(), self.stored_zones()) {
-            (Some(map), Some(zones)) => self.commander(character).map(|c| self.flood_zone(map, &c, zones, false, &self.region_owners())),
-            _ => return,
-        };
+        let (Some(map), Some(zones), Some(grid)) = (self.poly_map(), self.stored_zones(), self.grid_state()) else { return };
+        let new = self.commander(character).map(|c| self.flood_zone(map, &c, zones, false, &self.region_owners(), grid));
         let Some(zones) = self.stored_zones_mut() else { return };
         match new {
             Some(z) => {
@@ -462,9 +643,11 @@ mod tests {
     }
 
     /// The made-up test world: A's general at (41, 21), B's colonel 8 units east at (49, 21), at war
-    /// when `war`; not yet on a map.
+    /// when `war`; not yet on a map. It is A's turn, so every flood after the load pass reads A's
+    /// stored view (module docs, "A rebel commander's later floods").
     fn world(war: bool) -> CampaignModel {
         let mut m = super::super::tests::test_model();
+        m.turn.current = Some(A);
         m.world.characters.get_mut(&GA).unwrap().position = at(41, 21);
         m.world.characters.get_mut(&GB).unwrap().position = at(49, 21);
         if war {
@@ -488,10 +671,12 @@ mod tests {
         zoc::reach(map(m), p, Mover::Land, ARMY_ZONE)
     }
 
-    /// `c`'s zone flooded now against the stored zones of what his faction sees, behind his region gate.
+    /// `c`'s zone flooded now against the stored zones of what the grid's stored view sees, behind
+    /// that view's gate ([`CampaignModel::flood_view`]).
     fn fresh(m: &CampaignModel, c: CharacterId) -> Vec<u32> {
         let k = m.commander(c).expect("a commander");
-        zone_in(map(m), k.pos_f32(), k.navy, k.garrisoned, &m.obstacles_with_stored_zones(k.faction, c), m.region_gate(map(m), &k, &m.region_owners()).as_deref())
+        let (modes, gate) = m.flood_view(map(m), &k, &m.region_owners(), m.grid_state().expect("zones flooded"));
+        zone_in(map(m), k.pos_f32(), k.navy, k.garrisoned, &m.obstacles_with_stored_zones(modes, c), gate.as_deref())
     }
 
     fn zone(m: &CampaignModel, c: CharacterId) -> Vec<u32> {
@@ -666,11 +851,13 @@ mod tests {
         let before_a = zone(&m, GA);
         assert!(holds(&m, &before_a, mid) && holds(&m, &zone(&m, GB), mid));
         m.declare_war_rules(A, B).unwrap();
-        // B first, against A's peace-time zone; then A against B's new one.
-        assert_eq!(zone(&m, GB), zone_in(map(&m), (49.0, 21.0), false, false, &[obstacle((41.0, 21.0), before_a)], None));
+        // B first, against A's peace-time zone, with A's modes (A's turn, the stored view): A's own
+        // general is no enemy to the view, so only his core cuts; then A against B's new one.
+        let friend = Obstacle { at_war: false, ..obstacle((41.0, 21.0), before_a) };
+        assert_eq!(zone(&m, GB), zone_in(map(&m), (49.0, 21.0), false, false, &[friend], None));
         assert_eq!(zone(&m, GA), fresh(&m, GA));
-        assert!(!holds(&m, &zone(&m, GB), mid));
-        assert!(holds(&m, &zone(&m, GA), mid), "A's zone, flooded last, covers the ground between");
+        assert!(holds(&m, &zone(&m, GB), mid));
+        assert!(!holds(&m, &zone(&m, GA), mid), "A's zone, flooded last, stops at B's");
         m.make_peace_rules(A, B, false).unwrap();
         assert!(holds(&m, &zone(&m, GA), mid) && holds(&m, &zone(&m, GB), mid));
     }
@@ -832,6 +1019,7 @@ mod tests {
     /// A's army at (12, 5) and A's navy (force 1002, admiral 103) at (6, 5); B's colonel far away.
     fn coast_model() -> (CampaignModel, CharacterId) {
         let mut m = super::super::tests::test_model();
+        m.turn.current = Some(A);
         m.world.characters.get_mut(&GA).unwrap().position = at(12, 5);
         m.world.characters.get_mut(&GB).unwrap().position = at(18, 1);
         let c = CharacterId(103);
@@ -1050,5 +1238,110 @@ mod tests {
             let m = with_record(edit);
             assert_eq!(m.path_region_gate(A, None), Some(gate(&m, GA)));
         }
+    }
+
+    /// [`border_world`] with A's general a rebel army risen in `home`, loaded onto the region map.
+    fn risen_rebel(home: RegionId) -> CampaignModel {
+        let mut m = border_world();
+        m.world.forces.get_mut(&ForceId(1000)).unwrap().faction = REBELS;
+        m.world.characters.get_mut(&GA).unwrap().faction = REBELS;
+        m.world.region_risen_armies.insert(home, vec![ForceId(1000)]);
+        m.attach_terrain(region_terrain());
+        m
+    }
+
+    /// `f`'s turn start stores its view (`0x008ED860`), then the rebel's zone is flooded again.
+    fn reflood_in_turn_of(m: &mut CampaignModel, f: FactionId) {
+        m.turn.current = Some(f);
+        m.store_acting_view();
+        m.rebuild_zone(GA);
+    }
+
+    #[test]
+    fn a_rebel_commanders_later_flood_reads_the_grids_stored_view() {
+        // Risen in B's region 11 (region index 1): at load only that region's slot is open, so his
+        // zone crosses from region 10 into it, and +0x400 = 1.
+        let mut m = risen_rebel(RegionId(11));
+        assert!(east(&m, GA) > 40.0, "{}", east(&m, GA));
+        let k = m.commander(GA).unwrap();
+        // In A's turn the stored view is A's, which has a record: the scope floods with A's modes and
+        // his own flags (his home region's slot).
+        reflood_in_turn_of(&mut m, A);
+        assert!(east(&m, GA) > 40.0, "{}", east(&m, GA));
+        let (modes, flags) = m.flood_view(map(&m), &k, &m.region_owners(), m.grid_state().unwrap());
+        assert_eq!((modes, flags.unwrap()), (A, vec![false, true, false, false]));
+        // In the rebels' turn the stored view has no record and +0x400 is set: the flood runs on the
+        // layers as the rebels' faction view left them, every single region closed.
+        reflood_in_turn_of(&mut m, REBELS);
+        assert!(east(&m, GA) < 40.0, "{}", east(&m, GA));
+        let (modes, flags) = m.flood_view(map(&m), &k, &m.region_owners(), m.grid_state().unwrap());
+        assert_eq!((modes, flags.unwrap()), (REBELS, vec![false, false, false, true]));
+        // His own order stores his view again (`0x00B077B0`): his home region's slot only.
+        m.store_rebel_view(ForceId(1000));
+        m.rebuild_zone(GA);
+        assert!(east(&m, GA) > 40.0, "{}", east(&m, GA));
+        let (modes, flags) = m.flood_view(map(&m), &k, &m.region_owners(), m.grid_state().unwrap());
+        assert_eq!((modes, flags.unwrap()), (REBELS, vec![false, true, false, false]));
+    }
+
+    #[test]
+    fn a_rebel_floods_in_his_own_scope_while_the_single_region_field_is_0() {
+        // Risen in A's region 10 (region index 0): +0x400 stays 0, so the rebels' stored faction view
+        // (every single region closed) is not read; the scope gives his home region's slot.
+        let mut m = risen_rebel(RegionId(10));
+        reflood_in_turn_of(&mut m, REBELS);
+        assert_eq!(m.grid_state().unwrap().region, 0);
+        assert!(!zone(&m, GA).is_empty() && east(&m, GA) < 40.0, "{}", east(&m, GA));
+        let k = m.commander(GA).unwrap();
+        let (modes, flags) = m.flood_view(map(&m), &k, &m.region_owners(), m.grid_state().unwrap());
+        assert_eq!((modes, flags.unwrap()), (REBELS, vec![true, false, false, false]));
+    }
+
+    /// Campaign +0x39 is clear during the load pass: each commander floods with his own faction's
+    /// modes there, and with the stored view's after it.
+    #[test]
+    fn the_load_pass_floods_with_each_commanders_own_modes_and_later_floods_with_the_views() {
+        let m = model(true);
+        let k = m.commander(GB).unwrap();
+        let mut load = m.grid_state().unwrap();
+        load.read_view = false;
+        assert_eq!(m.flood_view(map(&m), &k, &m.region_owners(), load).0, B);
+        assert_eq!(m.flood_view(map(&m), &k, &m.region_owners(), m.grid_state().unwrap()).0, A);
+    }
+
+    /// A commander of a faction with a record flooded while the stored view is a rebel army's (an
+    /// order's) floods on that view's layers: its modes and its region's slots only.
+    #[test]
+    fn any_commander_flooded_after_a_rebels_order_gets_the_rebel_view() {
+        let mut m = risen_rebel(RegionId(11));
+        reflood_in_turn_of(&mut m, REBELS);
+        m.store_rebel_view(ForceId(1000));
+        let k = m.commander(GB).unwrap();
+        let (modes, flags) = m.flood_view(map(&m), &k, &m.region_owners(), m.grid_state().unwrap());
+        assert_eq!((modes, flags.unwrap()), (REBELS, vec![false, true, false, false]));
+    }
+
+    #[test]
+    fn a_rebels_force_order_stores_his_view_and_a_failed_one_keeps_it() {
+        let mut m = risen_rebel(RegionId(11));
+        m.turn.started = true;
+        m.turn.in_turn = true;
+        m.turn.current = Some(A);
+        m.store_acting_view();
+        let before = m.grid_state();
+        // A faction with a record stores nothing on its orders.
+        m.store_rebel_view(m.force_of(GB).unwrap());
+        assert_eq!(m.grid_state(), before);
+        // Not the rebels' turn: the order fails, and his view, stored before the order is issued,
+        // stays (`0x00A645C0` never puts the old view back).
+        assert!(m.apply(CampaignCommand::MoveForce { force: ForceId(1000), to: at(30, 21) }).is_err());
+        let g = m.grid_state().unwrap();
+        assert_eq!((g.view, g.region), (Some(GridView::Rebel(REBELS)), 1));
+        // In the rebels' turn his order stores his view (`0x00AAF550` → `0x00B077B0`) before he moves.
+        m.turn.current = Some(REBELS);
+        m.store_acting_view();
+        assert!(m.apply(CampaignCommand::MoveForce { force: ForceId(1000), to: at(30, 21) }).is_ok());
+        let g = m.grid_state().unwrap();
+        assert_eq!((g.view, g.region), (Some(GridView::Rebel(REBELS)), 1));
     }
 }

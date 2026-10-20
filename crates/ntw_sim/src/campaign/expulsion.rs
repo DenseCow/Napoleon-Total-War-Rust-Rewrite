@@ -4,7 +4,8 @@
 //!
 //! Callers: every change of a region's owner (`TransferRegionToFaction` `0x00A64AC0` with its fourth
 //! argument 0, which every settlement handover `0x00B449F0` passes: captures, deals, liberations, the
-//! director's transfer; [`CampaignModel::expel_after_owner_change`]), an accepted deal's region lists
+//! director's transfer; [`CampaignModel::expel_after_owner_change`]), the liberation itself, which first expels the
+//! capturer's army (`0x00B4F090` at `0x00B508C5`; [`CampaignModel::expel_from_region`]), an accepted deal's region lists
 //! (`0x00C114B0`, [`CampaignModel::accept_deal`]) and the end of a protectorate tie (`0x00B64B10`,
 //! [`CampaignModel::end_protectorate_tie`]) and every loss of military access, over all the giver's
 //! regions ([`CampaignModel::expel_from_lands_of`]): timed access running out (`0x00B29170`,
@@ -75,8 +76,11 @@ fn to_fixed(p: (f32, f32)) -> (Fixed20, Fixed20) {
 ///
 /// PROVISIONAL stand-ins: the point is the region's nearest outline point in the exe (`0x008AF750`);
 /// ours is the centre of the region's path-grid cell nearest to the army, or its settlement without
-/// the map. `f`'s regions are in its gain order there (faction `+0x778`), in region-id order here,
-/// and the exe's sort (std::sort `0x00868A30`) is not stable where ours is.
+/// the map. `f`'s regions go in in its list's order (faction `+0x778`,
+/// [`super::world::World::regions_in_list_order`]) and the others' in the region manager's order
+/// (world `+0x34` → `+0x10` / `+0x14`, [`super::world::World::regions_in_manager_order`]), as in the
+/// exe (CONFIRMED), but the exe's sort (std::sort `0x00868A30`) is not stable where ours is, so
+/// equal distances may come out in another order.
 fn army_candidates<'a>(m: &'a CampaignModel, f: FactionId, region: &'a Region, here: (f32, f32), stay: bool) -> Vec<(&'a str, (f32, f32))> {
     let cells = m.terrain.as_ref().map(|t| (&t.0, t.0.nearest_cell_per_region(here.0, here.1)));
     let point = |r: &Region| {
@@ -92,10 +96,22 @@ fn army_candidates<'a>(m: &'a CampaignModel, f: FactionId, region: &'a Region, h
             d(a.1).total_cmp(&d(b.1))
         });
     };
-    let others = m.world.regions.values().filter(|r| r.id != region.id);
-    let mut own: Vec<(&str, (f32, f32))> = others.clone().filter(|r| r.owner == f).map(|r| (r.key.as_str(), point(r))).collect();
-    let mut open: Vec<(&str, (f32, f32))> =
-        others.filter(|r| r.owner != f && !m.at_war(r.owner, f) && record_lets_stand(m, r.owner, f)).map(|r| (r.key.as_str(), point(r))).collect();
+    let mut own: Vec<(&str, (f32, f32))> = m
+        .world
+        .faction_regions_in_list_order(f)
+        .into_iter()
+        .filter_map(|id| m.world.regions.get(&id))
+        .filter(|r| r.id != region.id)
+        .map(|r| (r.key.as_str(), point(r)))
+        .collect();
+    let mut open: Vec<(&str, (f32, f32))> = m
+        .world
+        .regions_in_manager_order()
+        .into_iter()
+        .filter_map(|id| m.world.regions.get(&id))
+        .filter(|r| r.id != region.id && r.owner != f && !m.at_war(r.owner, f) && record_lets_stand(m, r.owner, f))
+        .map(|r| (r.key.as_str(), point(r)))
+        .collect();
     by_distance(&mut own);
     by_distance(&mut open);
     let mut out = Vec::with_capacity(own.len() + open.len() + 1);
@@ -258,14 +274,28 @@ impl CampaignModel {
     /// `f`'s forces leave each region `owner` holds ([`Self::expel_from_region`] per region): the loop over
     /// the owner's region list (faction `+0x778`) that every loss of standing in another's land runs
     /// (`0x00B64B10`, `0x00B13A30`, `0x00B0CA20`, `0x00B0D0C0`, `0x00B67BD0`, `0x00B29170`; CONFIRMED).
-    /// PROVISIONAL: the exe walks the list in gain order, ours in region-id order (the model keeps no gain
-    /// order). The order matters only when a force one step moves stands in a region a later step
-    /// expels from: with no footprints in the model, that takes a force that may stay but cannot be
-    /// placed where it stands and is sent to another of `owner`'s regions.
+    /// The list is walked in its order ([`super::world::World::regions_in_list_order`]; CONFIRMED: the
+    /// manager's order after a load, each gain appended at the end, a loss removed in place; see
+    /// [`super::world::World::region_order`]). The order matters when a force one step moves stands in
+    /// a region a later step expels from: with no footprints in the model, that takes a force that may
+    /// stay but cannot be placed where it stands and is sent to another of `owner`'s regions.
     pub(crate) fn expel_from_each_region_of(&mut self, f: FactionId, owner: FactionId) {
-        let regions: Vec<RegionId> = self.world.regions.values().filter(|r| r.owner == owner).map(|r| r.id).collect();
-        for r in regions {
+        for r in self.world.faction_regions_in_list_order(owner) {
             self.expel_from_region(f, r);
         }
+    }
+
+    /// The `CCQ_MOVE_ARMIES_OUT_OF_REGIONS` command (`HandleMoveArmiesOutOfRegionsCommand` `0x00936AB0`,
+    /// CONFIRMED): both factions exist; `b`'s forces leave each of `a`'s regions, then `a`'s forces each of
+    /// `b`'s ([`Self::expel_from_each_region_of`], `0x008D9DC0` per region of the owner's list). No stance,
+    /// same-faction or turn test, and no zone flood after the loops (each move rebuilds the zones it
+    /// touches, [`Self::expel_from_region`]); a faction out of the game moves nothing (`0x008D9DC0`).
+    pub fn move_armies_out_of_regions(&mut self, a: FactionId, b: FactionId) -> Result<(), super::CommandError> {
+        if let Some(&f) = [a, b].iter().find(|f| !self.world.factions.contains_key(f)) {
+            return Err(super::CommandError::UnknownFaction(f));
+        }
+        self.expel_from_each_region_of(b, a);
+        self.expel_from_each_region_of(a, b);
+        Ok(())
     }
 }

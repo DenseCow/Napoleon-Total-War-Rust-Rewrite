@@ -140,7 +140,7 @@ fn the_recruitment_cost_is_units_7_scaled_by_the_cost_effects() {
 /// without the feature is unchanged.
 #[test]
 fn upkeep_adds_the_unit_key_effect() {
-    use super::effects::{EffectKey, EffectSet, Effects};
+    use super::effects::{EffectKey, EffectSet, Effects, ForceEffects};
     use super::features::{CampaignFeatures, UnitKeyEffects};
     let mut set = EffectSet::default();
     set.add(EffectKey::basic("guerrilla_upkeep_mod"), -50.0);
@@ -149,23 +149,23 @@ fn upkeep_adds_the_unit_key_effect() {
     fx.faction.insert(A, set);
     let land = UnitRules { upkeep: 100, ..Default::default() };
     let none = CampaignFeatures::default();
-    assert_eq!(economy::unit_upkeep(&fx, A, &none, "Inf_Spanish_Guerrilla", &land), 100);
+    assert_eq!(economy::unit_upkeep(ForceEffects::faction_only(&fx.faction[&A]), &none, "Inf_Spanish_Guerrilla", &land), 100);
     let spa = CampaignFeatures {
         unit_key_effects: vec![UnitKeyEffects::new("_Guerrilla", "guerrilla_cost_mod", "guerrilla_upkeep_mod"), UnitKeyEffects::new("_Auxiliary", "auxiliary_cost_mod", "auxiliary_upkeep_mod")],
         ..Default::default()
     };
-    assert_eq!(economy::unit_upkeep(&fx, A, &spa, "Inf_Spanish_Guerrilla", &land), 50);
-    assert_eq!(economy::unit_upkeep(&fx, A, &spa, "Inf_British_Auxiliary", &land), 120);
-    assert_eq!(economy::unit_upkeep(&fx, A, &spa, "Inf_Line", &land), 100);
+    assert_eq!(economy::unit_upkeep(ForceEffects::faction_only(&fx.faction[&A]), &spa, "Inf_Spanish_Guerrilla", &land), 50);
+    assert_eq!(economy::unit_upkeep(ForceEffects::faction_only(&fx.faction[&A]), &spa, "Inf_British_Auxiliary", &land), 120);
+    assert_eq!(economy::unit_upkeep(ForceEffects::faction_only(&fx.faction[&A]), &spa, "Inf_Line", &land), 100);
     let ship = UnitRules { upkeep: 100, is_naval: true, ..Default::default() };
     // Ships too (`0x008F9D00`, review round 2), and a ship's negative mod costs 0 where a land unit's goes negative.
-    assert_eq!(economy::unit_upkeep(&fx, A, &spa, "Ship_Guerrilla", &ship), 50);
+    assert_eq!(economy::unit_upkeep(ForceEffects::faction_only(&fx.faction[&A]), &spa, "Ship_Guerrilla", &ship), 50);
     let mut cheap = EffectSet::default();
     cheap.add(EffectKey::basic("upkeep_cost_mod_naval_all"), -150.0);
     cheap.add(EffectKey::basic("upkeep_cost_mod_land_all"), -150.0);
     fx.faction.insert(A, cheap);
-    assert_eq!(economy::unit_upkeep(&fx, A, &spa, "Ship", &ship), 0);
-    assert_eq!(economy::unit_upkeep(&fx, A, &spa, "Inf_Line", &land), -50);
+    assert_eq!(economy::unit_upkeep(ForceEffects::faction_only(&fx.faction[&A]), &spa, "Ship", &ship), 0);
+    assert_eq!(economy::unit_upkeep(ForceEffects::faction_only(&fx.faction[&A]), &spa, "Inf_Line", &land), -50);
 }
 
 /// The recruit command charges the region's entry cost (#7 with the region's effects, here a faction
@@ -427,4 +427,84 @@ fn a_population_charged_below_zero_keeps_the_exes_bits() {
     let r = &m.world.regions[&r10];
     let state = super::population::PopulationState { factors: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], ..Default::default() };
     assert_eq!(super::population::grow(&m, r, (-200i32) as u32, &state).0, 42_949_468);
+}
+
+/// Two items recruited through a general who leads an army (item +0x18): when they finish, their units
+/// raise ONE new army led by a new colonel outside the settlement (`0x00B1E500` → `0x00B1D3F0`), which
+/// the faction's turn start then marches to him and merges into his army (`0x00B71FA0` at `0x008F2B35`
+/// → `0x00B5C4A0`), before `FactionTurnStart`. An untargeted item of the same turn joins the garrison.
+#[test]
+fn items_recruited_through_a_commander_march_to_his_army() {
+    let mut m = commander_recruitment_model();
+    let general = CharacterId(100);
+    for _ in 0..2 {
+        m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into(), target: Some(general) }).unwrap();
+    }
+    m.world.characters.get_mut(&general).unwrap().position = pos(10, 1);
+    m.turn.humans = vec![A];
+    m.start_campaign();
+    let ev = m.end_turn();
+    let trained: Vec<_> = ev.iter().filter_map(|e| if let CampaignEvent::UnitTrained { force, unit } = e { Some((*force, *unit)) } else { None }).collect();
+    assert_eq!(trained.len(), 2, "{ev:?}");
+    let new_force = trained[0].0;
+    assert!(trained.iter().all(|&(f, _)| f == new_force), "one army for the group: {trained:?}");
+    assert_ne!(new_force, ForceId(1000));
+    let merged = ev.iter().position(|e| *e == CampaignEvent::CampaignArmiesMerge { force: new_force, into: ForceId(1000) }).expect("the new army merges");
+    let started = ev.iter().position(|e| *e == CampaignEvent::FactionTurnStart { faction: A }).unwrap();
+    assert!(merged < started);
+    // Both units are in the general's army now; the new army is gone and nothing was garrisoned.
+    let army = &m.world.forces[&ForceId(1000)];
+    assert_eq!(army.units.len(), 3);
+    assert!(trained.iter().all(|&(_, u)| army.units.iter().any(|x| x.id == u)));
+    assert!(!m.world.forces.contains_key(&new_force));
+    assert_eq!(m.world.regions[&RegionId(10)].garrison, None);
+    assert!(m.world.reinforcements.is_empty());
+}
+
+/// The army raised for a commander (`spawn_reinforcement`): every unit of the group in one new army led by
+/// a new colonel attached to one of them, standing outside the settlement, with a reinforcement entry
+/// (`0x00B0A270` → `0x00AE8B10`: source, target, settlement). When the target is gone by the step
+/// (`0x00B5C830`; his death listener `0x00B57DA0` clears the entry) the entry is dropped and the army stays.
+#[test]
+fn a_reinforcement_whose_commander_is_gone_stays_where_it_was_raised() {
+    let mut m = commander_recruitment_model();
+    let general = CharacterId(100);
+    let ev = m.spawn_reinforcement(RegionId(10), general, vec!["test_recruit".into(), "test_unit".into()]);
+    assert_eq!(ev.len(), 2);
+    let CampaignEvent::UnitTrained { force, .. } = ev[0] else { panic!("{ev:?}") };
+    let f = m.world.forces[&force].clone();
+    let colonel = f.commander.unwrap();
+    assert_eq!(f.units.iter().map(|u| u.unit_key.as_str()).collect::<Vec<_>>(), ["test_recruit", "test_unit"]);
+    assert_eq!(f.units.iter().filter(|u| u.character == Some(colonel)).count(), 1);
+    let ch = &m.world.characters[&colonel];
+    assert_eq!((ch.kind, ch.faction, ch.garrisoned_in), (CharacterKind::Colonel, A, None));
+    assert_eq!(ch.position, m.world.regions[&RegionId(10)].settlement.position);
+    assert_eq!(m.world.regions[&RegionId(10)].garrison, None);
+    assert_eq!(m.world.reinforcements, vec![Reinforcement { source: colonel, target: general, settlement: RegionId(10) }]);
+    m.character_dies(general);
+    assert!(m.march_reinforcements(A).is_empty());
+    assert!(m.world.reinforcements.is_empty());
+    assert_eq!(m.world.forces[&force].units.len(), 2);
+}
+
+/// An item whose commander died before it finished has lost its target (`0x00B57F40`) and spawns as a
+/// settlement recruit; so does one whose commander leads no army (`0x00B1E500` phase 1: +0x18 cleared).
+#[test]
+fn an_item_whose_commander_is_gone_or_leads_no_army_spawns_in_the_settlement() {
+    for dies in [true, false] {
+        let mut m = commander_recruitment_model();
+        let general = CharacterId(100);
+        m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into(), target: Some(general) }).unwrap();
+        if dies {
+            m.character_dies(general);
+        } else {
+            m.world.forces.remove(&ForceId(1000));
+        }
+        m.turn.humans = vec![A];
+        m.start_campaign();
+        let ev = m.end_turn();
+        let Some(&CampaignEvent::UnitTrained { force, .. }) = ev.iter().find(|e| matches!(e, CampaignEvent::UnitTrained { .. })) else { panic!("{ev:?}") };
+        assert_eq!(m.world.regions[&RegionId(10)].garrison, Some(force), "dies: {dies}");
+        assert!(m.world.reinforcements.is_empty());
+    }
 }

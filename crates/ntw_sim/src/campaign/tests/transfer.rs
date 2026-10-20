@@ -126,6 +126,28 @@ fn own_regions_come_before_a_nearer_third_partys() {
     assert_eq!(at(&m, 103), pos(400, 0), "A's 13 (190 away) before A's 10 (210 away)");
 }
 
+/// The third parties' regions go in in the region manager's order (world +0x34 → +0x10 / +0x14,
+/// `World::regions_in_manager_order`) before the sort, so of two as near the first in that order wins
+/// (our sort is stable).
+#[test]
+fn a_third_partys_regions_go_in_in_the_manager_order() {
+    let army_goes_to = |order: Option<[u32; 4]>| {
+        let mut m = spread_model();
+        add_army(&mut m, 103, C, pos(200, 0));
+        m.world.relationships.insert((A, C), Relationship { military_access_turns: 2, ..Default::default() });
+        // C holds no region: A's 10 and 13 are both 200 away.
+        m.world.regions.get_mut(&RegionId(13)).unwrap().owner = A;
+        if let Some(order) = order {
+            m.world.region_order = order.map(RegionId).to_vec();
+        }
+        m.transfer_region(RegionId(12), B);
+        at(&m, 103)
+    };
+    assert_eq!(army_goes_to(None), pos(0, 0), "no order listed: id order, 10 first");
+    assert_eq!(army_goes_to(Some([13, 12, 11, 10])), pos(400, 0), "13 first in the manager's order");
+    assert_eq!(army_goes_to(Some([10, 11, 12, 13])), pos(0, 0));
+}
+
 /// An army aboard a navy is never expelled (INFERRED: it stands where its carrier is, `0x00A17D60`,
 /// on a sea polygon; see `expel_faction_from_region`).
 #[test]
@@ -168,6 +190,7 @@ fn terrain_model(with_13: bool) -> CampaignModel {
         port: true,
         holder: None,
         id: 0,
+        blockade: None,
     });
     m.world.characters.get_mut(&CharacterId(100)).unwrap().position = fpos(7.5, 1.5);
     garrison(&mut m, ForceId(1000), 12);
@@ -438,4 +461,51 @@ fn a_patron_breaking_with_its_protectorate_leaves_its_regions() {
     m.break_alliance(C, A).unwrap();
     assert_eq!(m.world.stance(C, A), Stance::Neutral);
     assert_eq!(at(&m, 104), pos(405, 0));
+}
+
+/// Each faction's region list (faction +0x76C) follows the region manager's order after a load
+/// (`0x00A4CE20`, `0x00A45950`; `World::region_order`); a gain appends the region at the end of the
+/// new owner's list (`0x008AE270` → `0x008CF7D0`) and the loss keeps the old owner's others in order
+/// (`0x008B0210`). A transfer to the owner moves nothing: `0x00A64AC0` returns before the lists
+/// (`0x00A64D13`).
+#[test]
+fn a_region_list_keeps_the_manager_order_and_a_gain_goes_last() {
+    let mut m = spread_model();
+    let ids = |m: &CampaignModel| m.world.regions_in_list_order().into_iter().map(RegionId::raw).collect::<Vec<_>>();
+    assert_eq!(ids(&m), vec![10, 11, 12, 13], "no order listed: id order");
+    m.world.region_order = vec![RegionId(12), RegionId(10), RegionId(13)];
+    assert_eq!(ids(&m), vec![12, 10, 13, 11], "the unlisted after the listed");
+    assert!(m.transfer_region(RegionId(10), B));
+    assert_eq!(ids(&m), vec![12, 13, 11, 10], "the gain at the end, the rest in their order");
+    assert!(m.transfer_region(RegionId(11), A));
+    assert_eq!(ids(&m), vec![12, 13, 10, 11]);
+    assert!(m.transfer_region(RegionId(10), A));
+    assert_eq!(ids(&m), vec![12, 13, 11, 10], "gained again: moved to the end, listed once");
+    assert!(!m.transfer_region(RegionId(10), A), "already A's");
+    assert_eq!(ids(&m), vec![12, 13, 11, 10], "no owner change: no move");
+}
+
+/// The access-loss loops walk the giver's region list in its order (`0x00B67BD0` and the other
+/// callers of `expel_from_each_region_of`), a gained region last: here the order the expulsion seam
+/// is asked in.
+#[test]
+fn an_access_loss_walks_the_givers_region_list_in_its_order() {
+    let mut m = spread_model();
+    m.world.regions.insert(RegionId(14), region(14, B, 1000, 0));
+    m.world.region_order = [12, 14, 10, 11, 13].map(RegionId).to_vec();
+    let walked = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = walked.clone();
+    let record: Maker<RegionExpulsion> = Arc::new(move |_| {
+        let log = log.clone();
+        Arc::new(move |_: &CampaignModel, f: FactionId, r: RegionId, _: &mut _| {
+            log.lock().unwrap().push((f, r));
+            Vec::new()
+        })
+    });
+    Arc::make_mut(&mut m.rules).seams.region_expulsion.apply("test.record", &record);
+    assert!(m.transfer_region(RegionId(14), A));
+    walked.lock().unwrap().clear();
+    m.relationship_mut(A, C).military_access_turns = 5;
+    m.apply_diplomatic_action(A, C, crate::campaign::treaties::DiplomaticAction::CancelMilitaryAccess).unwrap();
+    assert_eq!(*walked.lock().unwrap(), vec![(C, RegionId(12)), (C, RegionId(10)), (C, RegionId(14))]);
 }

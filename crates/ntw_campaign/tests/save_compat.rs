@@ -218,8 +218,9 @@ fn region_economy_is_written() {
 }
 
 /// The population state the model changes each round (`POPULATION/REGION_FACTORS` #0, #2..#8) and the
-/// religion shares are written where the original keeps them and read back unchanged, also after a
-/// round's refresh, growth and conversion.
+/// religion shares and the population classes' stored values (`POPULATION_CLASS` #1 element 7 the war factor,
+/// #11, #12) are written where the original keeps them and read back unchanged, also after a round's refresh,
+/// growth, conversion and class passes.
 #[test]
 fn region_population_is_written() {
     let dir = data_dir();
@@ -229,6 +230,9 @@ fn region_population_is_written() {
     let db = GameDatabase::from_install(&dir).unwrap();
     let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
+    // `government_types` #3, the rank `0x008A94D0` compares (3, 2, 1, 0 in the shipped table).
+    let ranks = &l.model.rules.government_ranks;
+    assert!(!ranks.is_empty() && ranks.values().all(|r| (0..=3).contains(r)), "{ranks:?}");
     let mut m = l.model.clone();
     let ids: Vec<_> = m.world.regions.keys().copied().take(3).collect();
     for (k, id) in ids.iter().enumerate() {
@@ -246,13 +250,19 @@ fn region_population_is_written() {
         for (i, (_, s)) in r.religions.iter_mut().enumerate() {
             *s = (i as f32 + 1.0) / (n * (n + 1.0) / 2.0);
         }
+        assert!(!r.class_bases.is_empty(), "{}: every startpos region has its classes", r.key);
+        for (i, c) in r.class_bases.iter_mut().enumerate() {
+            c.war = [6, -15, 3][(i + k) % 3];
+            c.education = 4 + k as i32;
+            c.resistance = -3 - i as i32;
+        }
     }
     let check = |m: &ntw_sim::campaign::CampaignModel| {
         let out = save::write_save(&esf, m, "france", 1, None).unwrap();
         let back = ntw_campaign::read(&out.to_bytes().unwrap(), &db).unwrap();
         for (id, a) in &m.world.regions {
             let b = &back.model.world.regions[id];
-            assert_eq!((a.population, &a.population_state, &a.religions), (b.population, &b.population_state, &b.religions), "{}", a.key);
+            assert_eq!((a.population, &a.population_state, &a.religions, &a.class_bases), (b.population, &b.population_state, &b.religions, &b.class_bases), "{}", a.key);
         }
         let r = ntw_campaign::save_check::check(&out);
         assert!(r.violations.is_empty(), "{:#?}", r.violations);
@@ -670,7 +680,8 @@ fn new_characters_and_officers_get_names() {
     assert!(r.violations.is_empty(), "{:#?}", r.violations);
 }
 
-/// Traits, trait points and ancillaries of existing characters are written from the model; a
+/// Traits, trait points, ancillaries and attribute levels of existing characters are written from
+/// the model (a new colonel's are his type's starting levels, not his template's); a
 /// commander who dies of natural causes leaves no reference (his force goes to a new colonel named
 /// after the unit officer he takes over); the recruitment pools are written from the model
 /// (SAVE_COMPAT.md §23).
@@ -696,12 +707,21 @@ fn character_changes_and_deaths_are_written() {
     let mut ids = m.world.character_details.iter().filter(|(id, d)| **id != dead && Some(**id) != pool_dead && m.world.characters.get(id).is_some_and(|c| c.faction == france) && !d.traits.is_empty()).map(|(id, _)| *id);
     let (a, b) = (ids.next().unwrap(), ids.next().unwrap());
     let anc_key = l.model.world.character_details.values().flat_map(|d| d.ancillaries.iter()).next().cloned().unwrap_or_else(|| "anc_test".into());
+    let rules = m.rules.clone();
     {
         let d = m.world.character_details.get_mut(&a).unwrap();
         d.traits[0].points += 3;
-        d.traits.push(CharacterTrait { key: "C_Gen_Test_Trait".into(), points: 2 });
+        d.traits.push(CharacterTrait { key: "C_Gen_Test_Trait".into(), points: 2, level: 0 });
+        // Their levels as the model sets them from the points (the save holds only the points).
+        for t in &mut d.traits {
+            rules.characters.update_trait_level(t, true);
+        }
         d.ancillaries.retain(|x| *x != anc_key);
         d.ancillaries.push(anc_key.clone());
+        // His attribute levels move (a trait level or ancillary gained, CHARACTERS_FIDELITY.md §16), and
+        // a mod's attribute is appended.
+        d.attributes[0].1 += 1;
+        d.attributes.push(("made_up_attribute".into(), 3));
         let d = m.world.character_details.get_mut(&b).unwrap();
         d.traits.clear();
         d.ancillaries.clear();
@@ -728,10 +748,12 @@ fn character_changes_and_deaths_are_written() {
     for id in [a, b] {
         assert_eq!(bw.character_details[&id].traits, m.world.character_details[&id].traits);
         assert_eq!(bw.character_details[&id].ancillaries, m.world.character_details[&id].ancillaries);
+        assert_eq!(bw.character_details[&id].attributes, m.world.character_details[&id].attributes);
     }
     // Every character's traits and ancillaries read back as the model has them.
     for (id, d) in m.world.character_details.iter().filter(|(id, _)| m.world.characters.contains_key(id)) {
         assert_eq!((&bw.character_details[id].traits, &bw.character_details[id].ancillaries), (&d.traits, &d.ancillaries), "{id:?}");
+        assert_eq!(bw.character_details[id].attributes, d.attributes, "{id:?}");
     }
     // The dead are gone everywhere; the colonel commands the force from the picked unit.
     assert!(!bw.characters.contains_key(&dead));
@@ -1121,4 +1143,31 @@ fn triggered_historical_events_are_written() {
     assert_eq!(arr.items, [vec![EsfNode::Utf16String("a_once".into())], vec![EsfNode::Utf16String("b_quiet".into())]]);
     let back = ntw_campaign::read(&out.to_bytes().unwrap(), &db).unwrap();
     assert_eq!(back.model.world.historical_events_triggered, ["a_once", "b_quiet"]);
+}
+
+/// A settlement's siege (`SIEGEABLE_GARRISON_RESIDENCE` #2 turns to surrender, #3 turns besieged, #13
+/// besieging force ids; CONFIRMED, reader `0x00AF4B00` / writer `0x00B7A5F0`) is written and read back.
+#[test]
+fn siege_state_is_written() {
+    let dir = data_dir();
+    if !dir.is_dir() {
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).unwrap();
+    let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
+    let l = ntw_campaign::read_esf(&esf, &db).unwrap();
+    assert!(l.model.world.regions.values().all(|r| !r.siege.under_siege()), "nothing is besieged at the start");
+    let mut m = l.model.clone();
+    let region = *m.world.regions.keys().next().unwrap();
+    let owner = m.world.regions[&region].owner;
+    let besiegers: Vec<_> = m.world.forces.values().filter(|f| f.faction != owner && !f.is_navy).map(|f| f.id).take(2).collect();
+    assert_eq!(besiegers.len(), 2);
+    let siege = ntw_sim::campaign::SiegeState { besiegers, surrender_turns: 4, turns_besieged: 3 };
+    m.world.regions.get_mut(&region).unwrap().siege = siege.clone();
+    let out = save::write_save(&esf, &m, "france", 1, None).unwrap();
+    let back = ntw_campaign::read(&out.to_bytes().unwrap(), &db).unwrap();
+    for (id, r) in &back.model.world.regions {
+        assert_eq!(r.siege, m.world.regions[id].siege, "{}", r.key);
+    }
+    assert_eq!(back.model.world.regions[&region].siege, siege);
 }

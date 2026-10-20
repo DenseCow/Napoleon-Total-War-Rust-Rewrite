@@ -10,17 +10,17 @@ the original's values. See the Goal section of `CLAUDE.md`.
 
 Generated 2026-10-20 by `bash tools/progress.sh` (from `tools/backlog_count.sh` and `tools/tag_count.sh`); never edit it by hand.
 
-Tags left in the code (done means zero): 1805 (718 PROVISIONAL, 99 PLACEHOLDER, 988 INFERRED), plus 589 UNKNOWN.
+Tags left in the code (done means zero): 1820 (742 PROVISIONAL, 100 PLACEHOLDER, 978 INFERRED), plus 592 UNKNOWN.
 
 | Section | Done | Partly done | To do |
 |---|---|---|---|
-| 0. Cross-cutting fidelity | 145 | 0 | 41 |
+| 0. Cross-cutting fidelity | 150 | 0 | 37 |
 | 1. File formats and data | 11 | 0 | 0 |
 | 2. Graphics and rendering | 0 | 11 | 36 |
 | 3. Battle gameplay (land) | 2 | 11 | 27 |
 | 4. Naval battles | 0 | 1 | 7 |
-| 5. Campaign gameplay | 4 | 13 | 32 |
-| 6. AI | 0 | 1 | 11 |
+| 5. Campaign gameplay | 19 | 13 | 94 |
+| 6. AI | 0 | 1 | 13 |
 | 7. User interface | 1 | 7 | 13 |
 | 8. Video (Bink) | 2 | 1 | 1 |
 | 9. Audio | 0 | 2 | 11 |
@@ -99,7 +99,7 @@ first. Evidence and round history live there; the pre-2026-10-07 long form of th
 - [x] Experience-adjusted recruitment cost (recruitment use INFERRED; upkeep untouched)
 - [x] Region transfer in deals (`TransferRegion` rejected: needs the `0x00B449F0` flags)
 - [x] Peace terms: regions and techs as deal items (`0x00B449F0`)
-- [ ] Deals: the AI's region valuation is ported (`0x00C131C0` → `0x00A364B0` → `0x00AA1E90`, scaled by `0x00C4D140`), but its inputs are still PROVISIONAL: the hypothetical-order attitude (`0x00A79050`; offered regions use 0), every region assumed to belong to a group (region +0x12C, `0x00AA1F0A`), the AI personality's multipliers in `region_deal_worth` (defaults now); `grant_technology` requirement walk (PROVISIONAL); a foreign garrison left by a deal or liberation: what the exe does when the owner's army arrives (ours waits outside), `defenders_of` and recruit spawn (`0x008EF790`) (PROVISIONAL); the capital loss path (`0x008BA580` / `0x008DABC0`)
+- [ ] Deals: the AI's region valuation is ported (`0x00C131C0` → `0x00A364B0` → `0x00AA1E90`, scaled by `0x00C4D140`), but its inputs are still PROVISIONAL: every region assumed to belong to a group (region +0x12C, `0x00AA1F0A`), the AI personality's multipliers in `region_deal_worth` (defaults now); `grant_technology` requirement walk (PROVISIONAL); a foreign garrison left by a deal or liberation: what the exe does when the owner's army arrives (ours waits outside), `defenders_of` and recruit spawn (`0x008EF790`) (PROVISIONAL); the capital loss path (`0x008BA580` / `0x008DABC0`)
 - [x] Recruitment details (`0x00AECEE0`, `0x00AED220`): cost from units #7 and region effects, the unit cap (units #15, `0x008F68B0`), the AI handicap and recruit prices from the model (`0x008DD090`)
 - [x] Recruitable population gate and charge (`0x00A89550` / `0x00AAF190` / `0x00A61AA0`, `REGION_FACTORS` #2)
 - [x] Capture refunds a port's naval queue items to the old owner (`0x00B1A760(1)` per port); our `occupy` refunds nothing; `0x00B58A30` is a fourth capture variant missing from the notes
@@ -114,8 +114,7 @@ first. Evidence and round history live there; the pre-2026-10-07 long form of th
 - [x] Director transfer garrison (director3): the count drawn first, the region's recruitable list filtered by the receiver's land recruitment beliefs (`0x00BAF9A0`, `0x00D9C9D0` / `0x00D9CD60`), sorted by category (`0x00B7F510`), raised round and round into one garrisoned army (`0x00BA8400`, placement as `0x008ECAD0`) CONFIRMED and tested; the belief-cache freshness left (§5)
 - [ ] Region-transfer expulsion left (transfer3; rule `0x008D9DC0` modelled behind `region.expulsion`): PROVISIONAL placement stand-ins (outline point `0x008AF750`, flood `0x00B35640`, footprints, faction gain order, unstable sort); INFERRED embarked army never counts (shared-polygon lists `0x00B4D800` +0x140 / +0x154 and the carrier position `0x00A99A60` untraced); PROVISIONAL one theatre per map (a no-op on every shipped map)
 - [x] Access-loss expulsions (accessloss merged; region-id walk PROVISIONAL, line below): `0x00B29170`, `0x00B67BD0`, `0x00B0CA20`, `0x00B13A30`, `0x00B0D0C0` (transfer3)
-- [ ] (running: accessloss2) Access-loss leftovers (accessloss): `expel_from_lands_of` walks regions in region-id order, the exe in faction gain order (PROVISIONAL in expulsion.rs); `join_war` does not zero enemy→x access (`0x00B27250` with an ally); peace's per-force call `0x00A25570` is untraced
-- [ ] The `military_access_prompt` message (0x76, `0x00A0E630`) is not modelled (PROVISIONAL in treaties.rs ~761, accessloss)
+- [x] (accessprompt) The `military_access_prompt` message (0x76, `0x00A0E630`) is not modelled (PROVISIONAL in treaties.rs ~761, accessloss)
 - [ ] Trace whether peace leaving the non-proposer's allies' -1 access and their suspended-access item is an ORIGINAL BUG, and whether `0x00C4A4E0` allows a cancel only when access exists (accessloss review)
 - [ ] The deal's peace-record pass (+0x184) after a region exchange is not modelled (PROVISIONAL in negotiation.rs; transfer3)
 - [x] (tradebreak) Breaking trade removes every route of the pair: `break_trade` and `break_trade_both_ways` (treaties.rs ~408-445); the exe removes only the first exporter→importer route each way (`0x00B73430` → `0x00B13C30` ×2 → `0x00BC0120`; `0x00B29BB0` → `0x00B733B0` → `0x00BC0120`), and its lookup creates an empty exporter entry (polish26)
@@ -127,15 +126,17 @@ first. Evidence and round history live there; the pre-2026-10-07 long form of th
 - [x] Alliance break notifications (polish36 review): `break_alliance` matches the exe's penalty and counter rules but raises no human-major-power notification and no `+0x810` event (`0x00B13840`, CAMPAIGN_FIDELITY BreakAlliance bullet)
 - [ ] Campaign message listeners (allybreak): trace the other listeners of the model +0x870 event (cancelled military access, `0x00B67B20`) and the model +0xD9C → +0x6C gate before a message is shown (`0x009CA7B0`); our `CampaignEvent::Message` has no feed yet (event-messages display lines below).
 - [x] Campaign over (campaignover merged): destroying a human faction (`0x008AB6C0` → `0x008C30A0`) sets campaign +0xFE9 (`TurnState::campaign_over`, saved), and the turn loop stops at the flag test `0x008F419E` after its queued-entry loop; replaces the `stops_for` fallback
-- [ ] Defeat / victory screen left (victoryscreen merged: outcome movie in the model, the original `event_movie_panel` / `campaign_result` through the root script; messages 34/35 have no poster, 37 is posted by `0x009D0870`): PROVISIONAL panel title (`0x00998E20` takes it from its arg +0x18: trace its caller, which also settles the INFERRED `local_faction_involved`) and `ContinueGameSelected` (a logged no-op); INFERRED `QuitToMainScreen`, local-only display, play-once; the victory event +0x120 is not posted (ntw_script ui/campaign mod.rs ~1353, ntw_sim outcome.rs)
+- [ ] Defeat / victory screen left (victoryscreen, victoryscreen2 merged: outcome movie, panel title from the row's loc text and local-only display CONFIRMED, `0x00F57D60` → `0x0099A4F0` → `0x00998E20`, `0x00898B20`): the `QuitToMainScreen` code-2 consumer (`0x00A065A0`); the `ContinueGameSelected` reader of +0x9C (a logged no-op now); play-once; the victory event +0x120 is not posted (`0x0096CD10`, §6; ntw_script ui/campaign mod.rs, ntw_sim outcome.rs); the movie volume (int of setting 4 × 0.01 × setting 5) is not applied; the episodic +0xD0 branch (ntw_script ui/campaign mod.rs ~1052, UNKNOWN)
 - [x] (roundstart) Round-start refresh left (turnorder review): at round start the exe refreshes only listed, in-game factions' regions (`0x008F1F60` / `0x008BAF30`; PROVISIONAL in turn.rs and population.rs), and turn.rs ~337 also resets rebel-owned relationships, which `0x008BAF30` doesn't cover; `0x00AAAF60`, `0x00BCB020(0)` and `0x008F5990` run at round start in `0x0096C050` but aren't modelled there (ours runs `0x00BCB020` at round end). Trace and match
 - [ ] Historical events (roundstart) left: `0x008F5990` in `0x0096C050` is ported (histevents: events tables, view-group buckets, RNG pick, triggered list in own saves); left: the candidate pick stands in for the `HistoricalEvents` script event through the script host `0x0087F960` (PROVISIONAL in ntw_sim / ntw_campaign historical_events.rs, so a mod's handlers are ignored); the message reaches the UI through the campaign message feed (§3 "event messages" panel line)
 - [ ] WorldCreated switches left (wcstubs, techswitch): the technology switch's model queries are done (`CampaignModel::building_level_technologies` / `building_info_technologies` / `effects_table_technologies`), but the UI's Lua tables don't call them yet (row format `0x009ABB50` not traced), and the construction-complete message (not posted yet) must carry its +0xBC copy of the switch (`0x00A09D93`); the victory switch (+0x125) must skip the campaign_won post and the winners' event (`0x0096FFE7`, `0x0096CE9C`) once the defeat/victory screen posts them
-- [ ] War and peace left (polish50): a human ally's war offer waits until answered (`0x008BFA80`); a human ally not yet at war gets no war-call offer (UI +0xB10, warnotice) (CAMPAIGN_FIDELITY ally-call paragraph)
-- [ ] Deal join-war (warnotice): the diplomacy deal's join-war loop `0x00C188F0` (`0x00B26700`, refresh=1) and its notice `0x009DAE40` (type 0x14D `campmap_faction_joins_your_enemies`, to the target) are not modelled
-- [ ] Population class happiness factor [8] (warnotice): class +0x20, moved by a war declaration (`0x00A63490`(6) → `0x008A94D0`) and by battle results (`0x008ACCF0`, kinds 0–5) from table `0x014579F0`, clamped to [−15, 6]; trace its load and decay, then model it
-- [ ] `force_make_protectorate` script (`0x0097AA20`) is not implemented (listed in ntw_script game.rs ~53): a suppressed CCQ_MAKE_PEACE, then the protectorate steps `0x008FD2A0` / `0x008D1F30` / `0x00953A70` and CCQ_MOVE_ARMIES_OUT_OF_REGIONS (`0x009838B0`)
-- [ ] `force_make_peace` (`0x0097AC90`): trace whether it queues the move-armies-out command `0x009838B0` after the peace and match (PROVISIONAL in ntw_script game.rs ~325); the deal's peace item `0x00C18B60` has no Ghidra function yet (peacemsg)
+- [ ] (running: allyattacked) War and peace left (polish50; allyoffer merged: AI allies get the war call and answer through the model): the human side: a human ally's war offer waits until answered (`0x008BFA80`) through the ally_attacked panel (`layout_ally_attacked`, Lua `0x00A08B90`); a human ally not yet at war gets no war-call offer (UI +0xB10, warnotice); until then humans are skipped behind a switch (world.rs ~88; PLACEHOLDER `ask_human_allies` treaties.rs ~1630; PROVISIONAL ntw_ai campaign mod.rs) (CAMPAIGN_FIDELITY ally-call paragraph)
+- [x] Deal join-war (warnotice → joinwar 2026-10-20): the deal's join-war loop `0x00C188F0` (`0x00B26700`, refresh=1) and its notice `0x009DAE40` (type 0x14D, to the target) are modelled; no at-war check before the loop and the stance write `0x00B27250` posts no event (CONFIRMED)
+- [x] (classfactor) Population class happiness factor [8] (warnotice): class +0x20 loaded and saved, moved by a war declaration (`0x00A63490`(6) → `0x008A94D0`) from table `0x014579F0`, clamped to [−15, 6], with its round decay; the projection runs the class passes on its copy (`0x00A727D0` → `0x00AB4070`, CONFIRMED `0x00A72844`)
+- [ ] Population class war factor left (classfactor): the battle-result step `0x008ACCF0` (from `0x008F7B7C`), kinds 0–5 (needs the victory type and both capitals; PROVISIONAL); the class factor +0x28 bankruptcy and +0x54 repression slots; the riot checks `0x008F9690`
+- [x] (forceprot) `force_make_protectorate` script (`0x0097AA20`) is not implemented (listed in ntw_script game.rs ~53): a suppressed CCQ_MAKE_PEACE, then the protectorate steps `0x008FD2A0` / `0x008D1F30` / `0x00953A70` and CCQ_MOVE_ARMIES_OUT_OF_REGIONS (`0x009838B0`)
+- [ ] `force_make_peace` (`0x0097AC90`): it queues the move-armies-out command `0x009838B0` (now a model command, MoveArmiesOutOfRegions) after the peace when at war; match (PROVISIONAL in ntw_script game.rs ~325) (peacemsg)
+- [x] (peaceturn) Peace turn test (forceprot review): `MakePeace` from `force_make_peace` and the AI still checks the turn (PROVISIONAL in commands.rs); trace whether the exe's diplomacy peace path has a turn test (the CCQ_MAKE_PEACE handler `0x00936710` has none), and match
 - [x] (zocflood) Zone-of-control flood (polish46 review): ntw_sim zoc.rs ~217 floods zones on the bare map, while the exe floods with the other obstacles cut in (campaign/PATHFINDING.md ~98); trace and match
 - [ ] Trace 0x00A285E0's callers (character vtable 0x0136A62C +0x20) and the first argument they pass: it decides whether a walk floods its zone and sets the hidden flag 0x009D3000 (branch 0x00A2882D; zones/commands INFERRED, zocflood)
 - [x] (leftroutes) Trade routes left after a break (tradebreak review): the exe keeps earning on routes that outlive their agreement (`0x00BB3490`, `0x00BBD870`) while ours counts only `trade_partners`, and `trade_home_value` (trade.rs ~255) keeps subtracting their stale loaded volumes; trace and match
@@ -244,7 +245,7 @@ SpeedTree leftovers are in §2.
 - [ ] First real side-by-side run against the original (needs the user)
 - [x] Battle `B.WindowsTime`: `timeGetTime()*0.001f` as a float (`0x005D4BF0`); the campaign's `0x009FB0B0` truncates to int; one shared clock
 - [x] Portraits of generated characters: pool hires and promoted generals get a portrait in the model as the exe does: the per-folder deck is dealt by `0x00A1F730`, a promoted officer draws only while his number is -1 (`0x00A1A300`), and the draw order follows `0x00A05440`. The guerrilla flag is CONFIRMED 0. ORIGINAL BUG `0x00A1F730`: a folder's last picture was never dealt, fixed (CHARACTERS_FIDELITY.md)
-- [ ] Army recruitment tab follow-ups (tab merged with army-recruit-tab): a finished item targeted at a commander marches to him (`0x00B0A270` / `0x00AE8B10`; ours spawns it in the settlement); the `0x00AC54C0` limit test and zone-of-control cuts of the source search; who writes `+0xA94`; original save #2 = the item's target character id (INFERRED); the naval tab's port path (PROVISIONAL)
+- [ ] Army recruitment tab follow-ups (tab merged with army-recruit-tab; recruitmarch merged: a finished item targeted at a commander marches to him, `0x00B0A270` / `0x00AE8B10`, save #2 = the target character id CONFIRMED `0x00B5C900` / `0x00AF3D00` / `0x00B5C2D0` / `0x0105AC60`): the `0x00AC54C0` limit test and zone-of-control cuts of the source search; who writes `+0xA94`; the naval tab's port path (PROVISIONAL)
 - [x] Battle HUD scripts' frame: CONFIRMED 1280x960 (debugger sitting 2026-10-09, root at manager +0xC4); the battle host uses `UiFrame::ScriptFrame`; CreateFromLayout makes the file root's first child at its own frame position (`0x01027400`, `0x0101E270`)
 - [x] Battle HUD UI scale: the exe's UI scale (`0x0114EB20`) applies to the battle HUD too; ours lays the battle HUD out at window / scale and maps the mouse back
 - [x] Battle `B.Time`: the exe binds it (`0x005D3BB0`): the UI pulse clock, real time capped at 300 ms a frame
@@ -544,22 +545,22 @@ the input; how it is drawn is ours. Items below that say "as the original" mean 
       [CAMPAIGN_PLAY.md]
 - [x] The exact economy formulas: town wealth, GDP, tax efficiency, trade income (0-B: exact against the start positions and all original saves).
 - [ ] **PARTLY DONE:** Trade: land trade routes, sea trade theatres, trade ships, blockades. Done: routes, nodes and trade fleets, blockades, prices, supply split, sea cap. Open: the importer-side limit (INFERRED rule in use).
-- [ ] **PARTLY DONE:** Research: technologies, gentlemen in schools, and their effects. Done: states, rate (CONFIRMED), schools, completion, gates, tech stealing. Open: the building-chain match (INFERRED), the research UI command wiring.
+- [ ] **PARTLY DONE:** Research: technologies, gentlemen in schools, and their effects. Done: states, rate (CONFIRMED), schools, completion, gates, tech stealing, the building-chain match (techchain; ORIGINAL BUG `0x00F21A30` fixed). Open: the research UI command wiring.
 - [ ] **PARTLY DONE:** Government types, ministers, revolutions, rebellions, emergent factions. Done: royal family and succession, vacated posts, ministers' dismissal/appointment, government classes in public order. Open: revolutions, rebellions, emergent factions, elections.
 - [ ] Population, settlement growth, minor settlements, resources.
 - [ ] Attrition (winter, desert), seasons, and turns per year per campaign.
-- [ ] BUG: Turn steps may drop CharacterMoved / ForceDestroyed events before they reach scripts (ntw_script host.rs fire_all); verify.
+- [x] (eventdrop) BUG: Turn steps may drop CharacterMoved / ForceDestroyed events before they reach scripts (ntw_script host.rs fire_all); verify.
 
 **Military**
 - [ ] **PARTLY DONE:** Army movement, pathing, intents (move, attack, merge, enter).
 - [ ] **PARTLY DONE:** Zones of control, forced march, ambush, river crossings, retreat after battle. Done: zones of control with fog of war (CONFIRMED), river crossings, no retreat after battle (CONFIRMED). Open: forced march, ambush.
-- [ ] **PARTLY DONE:** Generals: traits, ancillaries and retinue, command stars, death and wounds. This includes Napoleon's special rules. Done (0-G): traits and ancillaries gained by script triggers, natural death, succession of command, the wounded-and-returns Generals (+0x52C). Open: command stars, retinue limits, battle wounds.
+- [ ] **PARTLY DONE:** Generals: traits, ancillaries and retinue, command stars, death and wounds. This includes Napoleon's special rules. Done (0-G): traits and ancillaries gained by script triggers, natural death, succession of command, the wounded-and-returns Generals (+0x52C), command stars (GetCharacterRank `0x00A198D0`, the character.rank seam; cmdstars; promotion cost PROVISIONAL in pool.rs). Open: retinue limits, battle wounds.
       (e.g. returning when wounded).
 - [ ] **PARTLY DONE:** Recruitment pools, replenishment, unit upgrades and experience. Done: the recruitment queue (CONFIRMED), character recruitment pools loaded and saved. Character pools run: refill timers and bonuses (CONFIRMED), HireGeneral (0-G). Open: replenishment, unit upgrades, experience, the pool step's phase (PROVISIONAL).
-- [ ] Sieges on the campaign map: turns until surrender, and assaults.
-- [ ] Round-start siege attrition (roundstart): `0x00AAAF60` / `0x00B796B0` raise the siege counter and remove garrison men by an RNG draw at round start (meaning INFERRED; formula and RNG draws in CAMPAIGN_FIDELITY round start section; not modelled, turn.rs)
+- [ ] Sieges on the campaign map: turns until surrender, and assaults. A peace ends a siege of the other side's settlement (`0x00A25570` → `0x008BD550`, `0x00B084F0`; accessloss2).
+- [x] (siegeattr) Round-start siege attrition (roundstart): `0x00AAAF60` / `0x00B796B0` raise the siege counter and remove garrison men by an RNG draw at round start (meaning INFERRED; formula and RNG draws in CAMPAIGN_FIDELITY round start section; not modelled, turn.rs)
 - [x] Occupy, sack and liberate options after capture: the model (preview, damage roll, apply, liberation; CONFIRMED) and the capture screen (0-E).
-- [ ] Capture previews: trace which class the public-order previews at CaptureOption +0x18 / +0x1C belong to (`0x00A61400` picks it by a faction test, `0x00A610C0`) against capture.rs:77 lower/upper (polish26 review)
+- [x] (rebelgov) Capture previews (capturepreview): +0x18 / +0x1C are the governing government's upper / lower class net order (`0x00A61400` / `0x00A610C0`, CONFIRMED). Left: port the rebel-army government lookup (`0x008CE320` / `0x008CE260`: the first risen rebel army's government, region +0x220 → REBEL_DATA +0x98) into `economy::government_classes`; ours uses the default government for rebels (PROVISIONAL, capture.rs)
 - [ ] Director transfer garrison (director3): which changes mark a region recruitment belief dirty (`MarkBeliefDirty` `0x00CF0AB0`, 147 sites, `0x00CF0B10` propagation); ours rebuilds the belief each time (INFERRED in director.rs `land_recruitment_belief`)
 - [ ] **PARTLY DONE:** Navies: fleets, naval movement, embarking and disembarking armies (done: Embark / Disembark with the
       original's landing rules, PATHFINDING_PORTS.md; open: fleet capacity, AI transport, naval invasions, naval battles).
@@ -583,28 +584,105 @@ the input; how it is drawn is ours. Items below that say "as the original" mean 
 
 **Saves**
 - [ ] **PARTLY DONE:** Save and load: our saves round-trip and keep script state, economy, characters, research, families, sight and names. Open: compatibility with the original game after AI turns (§1, running).
-- [ ] Restricted units (`add_restricted_unit_record`, saved in `EPISODIC_RESTRICTIONS/UNIT_RESTRICTIONS`) live only in the script state (loader → napoleon/src/campaign/scene.rs → `ScriptState::restricted_units`); the AI reads them, the model's recruit command and the recruitment panel don't. Trace where the exe checks them (as `0x009CDA90` for building levels), then give them one home, a `World::restricted_units` that model, UI and AI read (ntw_campaign/src/lib.rs ~210).
+- [x] (unitrestrict) Restricted units (`add_restricted_unit_record`, saved in `EPISODIC_RESTRICTIONS/UNIT_RESTRICTIONS`) live only in the script state (loader → napoleon/src/campaign/scene.rs → `ScriptState::restricted_units`); the AI reads them, the model's recruit command and the recruitment panel don't. Trace where the exe checks them (as `0x009CDA90` for building levels), then give them one home, a `World::restricted_units` that model, UI and AI read (ntw_campaign/src/lib.rs ~210).
 - [ ] A save's restricted building levels reach the model before the campaign scripts load (they are in the loaded `World`); the exe's order of restrictions vs. script load is not traced (napoleon/src/campaign/scene.rs ~430).
 
 **From §0 (exit bar, 2026-10-15)**
 - [ ] `CDIR_INTENTION_TRANSFER_REGION_OWNERSHIP` (`0x00B93840`, applied via `0x00B58A30`): merged 2026-10-11 (region-transfer: campaign director in the model behind seam `director.region_transfer`, TurnStep::Handover, cdir_configs keyed campaign_faction_variable `0x00FCD150`, CDIR_INTERFACE + counter in .esf `0x00B94170`/`0x00B9D6E0`/`0x00B9B6C0`, startpos director RNG, 4 ORIGINAL BUGs fixed; CAMPAIGN_FIDELITY.md). Left (PROVISIONAL): the stored relation copy `rival_score` reads (next line), the siege test (§5 "Sieges on the campaign map"), sea mobiles, the director's other RNG users (below)
-- [ ] Trace faction +0x754, which `0x008AB6C0` clears (two candidate meanings, broadcasters2 notes); model the clear
+- [ ] Trace faction +0x754, which `0x008AB6C0` clears (forceprot: it is the patron, `0x008AF590`; destruction.rs ~128); model the clear
 - [ ] Trace when a re-emerged faction's posts get holders (ours leaves them empty, INFERRED)
-- [ ] Trace the SettlementOccupied events (`0x00B58560` / `0x00B58890` / `0x00B58C00`) against FactionDestroyed (`0x00A64AC0`): ours sends FactionDestroyed first (INFERRED)
-- [ ] `0x008AB6C0` parts not modelled: the killer path (+0x924, `0x00BA80E0`), the multiplayer report (`0x009C7660`, event +0x120)
-- [ ] (running: handover) Faction handover / mission takeover (sameowner): model `grant_faction_handover` and the mission-reward takeover (`0x008AB6C0` killer path) with a killer ≠ destroyed guard: the exe loops forever when the killer is the destroyed faction itself (ORIGINAL BUG, CAMPAIGN_FIDELITY "Same-owner transfer")
-- [ ] Construction left (construction2): slot garrisons (`0x00A64440`, slot +0xC0; `0x00A64560` from `0x00A64450` / `0x0088CE30` hands a slot back with the price update); port blockade (`0x00A784E0`, which also runs the price update `0x00BCB020(0)` when lifted from `0x00B1B300`); slot +0x1EC; the other SetBuildingHealth callers (`0x00B541E0`); BuildingCompleted posted per list entry (`0x00B78230`); the +0xBA0 event; what clears an item's active byte (+8); the walls damage-object restore; research stopping on an upgrade to another building (`0x00B4D4D0`); `docked_port` PROVISIONAL
+- [x] (occupyorder) Trace the SettlementOccupied events (`0x00B58560` / `0x00B58890` / `0x00B58C00`) against FactionDestroyed (`0x00A64AC0`): ours sends FactionDestroyed first (INFERRED)
+- [ ] `0x008AB6C0` part not modelled: the multiplayer report (`0x009C7660`, event +0x120)
+- [ ] Faction handover (handover): trace the CAI settlement slot-list builder; step 5 rebuilds the slot list with the "+2" slots (INFERRED)
+- [ ] Faction handover (handover): trace the exe's order for events posted inside a script handler; ours fires them after the handler returns (INFERRED, ntw_script host.rs)
+- [ ] `force_declare_war` / `force_make_peace` drop the events they cause (ntw_script game.rs ~379; handover review)
+- [ ] Trace whether the AI hook runs for a faction a script handler destroys (handover review)
+- [ ] Construction left (construction2; portblockade merged: a peace lifts a blockade of the other side's port after its sieges end, `0x00A25570` → `0x00A784E0` with one price update, plus the slot pass and the navy removal): slot garrisons (`0x00A64440`, slot +0xC0; `0x00A64560` from `0x00A64450` / `0x0088CE30` hands a slot back with the price update); slot +0x1EC; the other SetBuildingHealth callers (`0x00B541E0`); BuildingCompleted posted per list entry (`0x00B78230`); the +0xBA0 event; what clears an item's active byte (+8); the walls damage-object restore; research stopping on an upgrade to another building (`0x00B4D4D0`); `docked_port` PROVISIONAL
 - [ ] Port slot holders left (priceupdate): the slot captures (`0x00A92380`, `0x00A925C0`, `0x00A971B0`) and the docking step (`0x0094B9B0` → `0x00A924D0`) change a port slot's holder and run the price update; not modelled, as our slots keep no holder of their own; fort holders (`0x00B1B010`, no price update) likewise
-- [ ] Trace the faction region-list order (+0x778 / +0x77C) at startpos, at load and on gains and losses, so the round end walks regions in the original's order (ours: id order, PROVISIONAL, ntw_sim turn.rs; construction2)
+- [x] The turn-start and turn-end region walks (regionwalk 2026-10-20): `0x008F2620` → `0x00AAE820` walks the faction region list (+0x778 / +0x77C) front to back (the rebels at `0x008F2B7F`, every other faction at `0x008F2AF6`), and so does the turn end's `0x00A786C0` (`0x008BD1E1`); ours uses `World::faction_regions_in_list_order` (CONFIRMED)
+- [x] (rebelresearch) Turn start (regionwalk review): the rebels skip research availability (`0x008F28E1` branch); check ours
+- [x] (charwalk) Turn start / end (regionwalk review): characters go in id order; trace whether the exe walks a list (`0x00A24EB0`, `0x009DA210`)
+- [x] (idwalks) Trace the other id-order region walks against the faction region list: capture.rs ~554, population.rs ~564, economy.rs ~745, director.rs ~538 (regionwalk review)
 - [ ] Trace whether GDP (`0x00A6AFC0`) reads the walls (recruit-followups)
-- [ ] Map callers of the recruit gates `0x00AA1660`/`0x00A27960`: `0x00A87640`, `0x00AAB440`, `0x00A799A0` → `0x00B43FC0`, `0x009B74E0`, `0x009DF476`
+- [ ] Map callers of the recruit gates `0x00AA1660`/`0x00A27960`: `0x00A87640`, `0x00AAB440`, `0x00A799A0` → `0x00B43FC0`, `0x009B74E0`
 - [ ] Recruit cost: which commands the three handlers near `0x00936530` are (UNKNOWN, recruit-cost2)
 - [ ] Treasury callers still not modelled (treasury4 traced): missions credit `0x00A06050` (needs mission completion); captured-ship sale / placement (`0x00B38F10`, needs the state-6 force rebuild); MP results counter FACTION +0x954 (`0x008F56C0` / `0x00B298F0`, with MP results)
 - [ ] Undock: `0x00A8C0B0`'s three notifications are not modelled (the handle clear and port slot hand-back are, polish21); the war kick-out of docked navies (`0x008DA179`) and the port order caller `0x0094D4F0`; docking within 1 map unit and the battle undock before captures are PROVISIONAL (treasury3)
 - [ ] Map forts (the `fFort` chain, separate from settlement walls): `BuildFort`/`UpgradeFort` levels PROVISIONAL; nothing in the shipped exe builds a map fort (UI_FIDELITY.md)
 - [ ] Region details: Migration (needs theatres); a `region_wealth_factors` table from mods; base_capacity 0 drops the population to the minimum (check the exe)
 - [ ] Fort as its own selection
+- [ ] Zone flood (zoneview): trace the post-battle zone views (`0x008F7880`, `0x008C1140`); ours keeps the stored view +0x400 unchanged after a battle
+- [ ] Join war (joinwar review): decline join-war deals before the full evaluation (deal_value.rs ~455; after dealattitude)
+- [ ] Join war (joinwar review): trace the self-joiner refusal (negotiation.rs ~1017), and whether a joiner an earlier region record ended should still declare
+- [ ] Capture previews (capturepreview): trace whether the governorship tax-bundle swap `0x00B0D3B0` matches our `region_effect_set` (INFERRED, capture.rs)
+- [x] (residence) Deal hypothetical order (dealattitude review): load the residence #14 agents (region +0xFC → +0xC8 via `0x00AF4DFF` / `0x008CFA70`) and set residence when an agent enters or leaves a settlement; then remove the gentlemen-count PROVISIONAL in economy.rs (gentlemen are never resident in play now)
+- [x] (rebelroundend) Turn order (accessprompt review): turn.rs ~401 does not skip the rebels the way `0x008BC650` does; trace and match
+- [ ] Treaty records (accessprompt review) (running: treatyorder): world.rs ~1225 records made mid-game fall back to id order instead of creation order; trace and match
+- [ ] Sieges (siegeattr review): forts' sieges are not read or run; trace and model them
+- [ ] Sieges (siegeattr review): trace the remaining `0x008BD550` callers (`0x008FF4B7`, `0x008BEB42`, `0x008AC130`), `0x00B084F0` and event 0xDF; the siege start in the model (AddBesieger `0x00B112F0` callers); the besieged tests (commands.rs ENTRY_BESIEGED, director.rs ~652, negotiation.rs ~698) should read `Region::siege`
+- [ ] Peace (siegeattr review) (running: peaceprice): peace's own price update `0x00BCB020(0)` at `0x00B2643F` is not modelled; trace and match
+- [ ] Battles pending (forceprot review): trace whether the exe drops queued commands while a battle is pending, and match
+- [ ] War option (forceprot review): trace the patron check `0x00C1A890` in the war option and match
+- [ ] Command stars (cmdstars review) (running: starmorale): battle morale reading the rank; trace and match
+- [ ] Command stars (cmdstars review): the autoresolve star rating; trace and match
+- [ ] Command stars (cmdstars review): audit the 31 xrefs of GetCharacterRank `0x00A198D0` against our readers
+- [ ] Character abilities (cmdstars review): the ability effects (character +0xDC); trace and model
+- [x] (stickytrait) Traits (cmdstars review): the sticky trait level (`0x008B5380`); trace and match
+- [ ] Character attributes (cmdstars review) (running: attrsituation): the attribute situation tables; trace and model
+- [ ] Pending battles (cmdstars review): the pending-battle bonuses to the rank (PROVISIONAL); trace and match
+- [ ] Agent attributes (cmdstars review): what the agent_to_agent_attributes flag means; trace
+- [ ] Research (techchain review): the state-2 event of `0x008F91F0` (game +0x4E0 object) is PROVISIONAL; trace and match
+- [x] (unittechs) Research (techchain review): rules.rs ~158 `unit_techs` are not checked for bad keys (the exe drops them, `0x00EA9B10`); trace and match
+- [ ] AI-order event timing (eventdrop review, UNKNOWN): trace whether the exe fires each AI order's script events before its next order (model +0x120 / +0x870); ours fires them after all orders (ntw_ai `driver::play_faction`)
+- [x] (libevent) Liberation (occupyorder review): FactionBecomesLiberationProtectorate (`0x00B4F090`, posted `0x00B4F0FE` / `0x00B5089D`) is not modelled
+- [x] (looting) Looting (occupyorder review): CharacterLootedSettlement (`0x00B541E0`, vtable `0x0137CCB8`, posted `0x00B54468`) is not modelled
+- [ ] Capture order (occupyorder review): battles.rs ~337 (end_if_capital_lost, garrison clear, diplomacy_changed): trace the exe's order and match
+- [ ] Capture (occupyorder review): trace the rebel-faction skip (CAMPAIGN_FIDELITY ~1728, UNKNOWN: does a rebel army ever hit it?); `take_settlement` (~316) always transfers and has no tag
+- [ ] Turn start (charwalk review) (running: charloops): `0x008F2C5B` → `0x009653D0` and the human-only loop `0x008F26DC` (`0x00A198C0`, gated by `0x009C7660`) walk the character list and are not modelled
+- [ ] Unit restrictions (unitrestrict review): ApplyMissionSuccessReward `0x00A06050` lifts a unit restriction (call at `0x00A062DD`); not modelled, needs mission completion
+- [ ] Unit restrictions (unitrestrict review): the BuildingEffects ScriptRestricted field (`0x009DF476`) should read `World::unit_restricted` (stub settlement.rs ~831); trace and model; trace whether restricted building levels are a list too
+- [ ] Recruit march (recruitmarch): the multi-turn reinforcement order and its retry (`0x009195A0` / `0x00905460` / `0x009653D0`); trace and match
+- [ ] Recruit march (recruitmarch): save ARMY_REINFORCEMENT_MANAGER (`0x00AFB6C0` / `0x00AE62F0` / `0x00B5B740`) in our own saves
+- [ ] Recruit march (recruitmarch): the spawn-spot path query (`0x00B6D8D0` / `0x00B6D760`, `0x00B39FE0`), including the no-navy branch of `0x00B6D8D0` (turn.rs ~760); trace and match
+- [ ] Recruit march (recruitmarch): `0x009D0D00`; trace what it gates in the reinforcement march
+- [ ] Recruit march (recruitmarch): the naval targeted spawn `0x00B1D7E0` (a new fleet per admiral, PROVISIONAL); trace and match
+- [ ] Recruit march (recruitmarch): the incoming-reinforcement list `0x008EF790` and the holder retarget +0x2B0; trace and model
+- [ ] Recruit march (recruitmarch): the AI's (0, handle) reinforcement groups; trace and model
+- [ ] Recruit march (recruitmarch): the new colonel's unit (`0x008D25F0`, `0x00870E60`) and his action points, which are not scaled by the faction factor; trace and match
+- [ ] Recruit (recruitmarch review): `recruit` does not check the target character's faction; trace the exe's check and match
+- [ ] Port blockade (portblockade): the blockade start `0x00A66F80` via the move step `0x0094B9B0` (slot +0x220); trace and model
+- [ ] Port blockade (portblockade): the other lifts: on a move `0x008AC010` (result 2), after a battle `0x008F7880` (state 1), the attack step `0x008FF470` and the +0x74 set at `0x0095B370`; trace and match
+- [ ] Port blockade (portblockade): the end-blockade command `0x00932710` (CCQ_CHARACTER_END_BLOCKADE); trace and model
+- [ ] Port blockade (portblockade): trade-route blockade vt+0x98 against the port blockade (`0x00B12050`); trace how they relate
+- [ ] Port blockade (portblockade): the lift's +0x58 byte clear and `0x00B084F0` on the docked navy's character (PROVISIONAL, port_blockade.rs); trace the +0x58 reader and match
+- [ ] Port blockade (portblockade review): ours runs the slot pass before the expulsion, the exe runs `0x00B1B300` after `0x00A64AC0`; trace and match
+- [ ] Port blockade (portblockade review): trace whether the peace lift (`0x00A25570`) skips a navy with no commander
+- [ ] AI repairs (idwalks review): trace the CAI slot-intention order behind the AI's repairs (`0x00CE9A60`, table `0x01389564`) for `capture::ai_repairs` (PROVISIONAL id order)
+- [ ] Defeat / victory screen (victoryfix review): ntw_script ui/campaign mod.rs ~1597 does not free the previous panel (+0xCC0); trace and match
+- [ ] Rebel regions (rebelgov review): the factor pass `0x008EDF70` skips a rebel owner (via `0x008CEEF0`), so its factors keep their stored values; ours computes default factors (PROVISIONAL `public_order_factors_with`)
+- [ ] Rebel regions (rebelgov review): ActiveUpperClass / ActiveLowerClass for a rebel region come from the REGION #34 template (`0x00A975F0`, +0x21C), else the first `government_types` record (PROVISIONAL region_info.rs)
+- [ ] Army save (rebelgov review): save.rs ~1146 `army_navy_slot` misses the optional +0x94 siege record (`0x00897590`), so a besieging army's navy link may land in the wrong slot; use `transport_link`'s rule and log when the set fails
+- [ ] Ally war call (allyoffer): the AI's auto-refusal path (`0x008E2B80` / `0x008F7850` / `0x008EA660`); trace and match
+- [ ] Ally war call (allyoffer): `0x00936630`; trace what it does in the war-call flow and match
+- [ ] Ally war call (allyoffer): the AI-order pause while a call waits (`0x008F457A`); trace and match
+- [ ] Ally war call (allyoffer review): `declare_war_rules` does not refuse a pair with a war call waiting (debug_assert at treaties.rs ~501); trace the exe's rule and match
+- [ ] Research availability (rebelresearch): AddRegionToFaction `0x008AE270` updates availability (`0x008AE2D1` / `0x008AE2E3`); ours does not on a region gain (research.rs ~274)
+- [ ] Turn start (rebelresearch): `0x008F2E10` (government popularity into +0xE0) is not modelled; the rebels skip it
 
+- [ ] Traits (stickytrait review): a gain can drop below the no-going-back level (characters.rs ~177), as the exe does; trace whether that contradicts the exe's own intent (ORIGINAL BUG or 1:1)
+- [ ] Unit records (unittechs review): `0x00EDC000` drops units with a null name, class or category; not modelled
+- [ ] Residents (residence): residents on a capture (`0x00B58560` / `0x00B58C00`, +0xC8; PROVISIONAL battles.rs ~353); trace and match
+- [ ] Residents (residence): `0x009D9FB0`, a resident joins the garrison army; trace and model
+- [ ] Residents (residence): the school #14 list is never updated; trace whether the exe changes it in play
+- [ ] Residents (residence): the callers of `0x009549B0`, the leave callers through vt+0x8C, and the enter-flag callers (PROVISIONAL); trace and match
+- [ ] Residents (residence): accompanying characters (`0x008B2620`, MILITARY_FORCE #2, `0x00B4E874`, `0x0095C070`; PROVISIONAL); trace and match
+- [ ] Residents (residence): agent spawn `0x00A241E0` and a returning agent (`0x00A24EB0` +0x530) set residence; trace and match
+- [ ] Residents (residence): `0x0094CFF0` (+0x59 / +0x3D8) and `0x00915150` (re-enter after an agent action); trace and match
+- [ ] Round end (rebelroundend): `0x008AB200` / `0x008ABF50` (over the faction force list +0x7BC / +0x7C0, skipped for the rebels and out-of-game factions) are not modelled; trace and model
+- [ ] Script events (libevent review): the SettlementOccupied vtable `0x01355EC0` has no faction accessor (+0x38 null), yet host.rs gives that event a faction; trace and match
+- [ ] Script events (libevent review): our script handlers run after the whole command, while the exe posts synchronously (`0x00E30700`) before the owner change; trace and match
+- [ ] Script events (looting review): character-only events (e.g. CharacterCompletedBattle, vtable `0x013558E0`, faction getter the null stub `0x00461180`) still get a faction from `context_for`; trace each event's vtable and match
+- [ ] Script events (looting review): `0x008F9EE0` (shared by 32 event vtables) checks the trigger_events_table (`0x00E30810`) and character +0x1AC (`0x00EC5360`) before Lua; model them once where ScriptHost hands events to Lua, then recheck real_install.rs ~212
 ## 6. AI
 - [ ] Diplomacy AI readers of the scripted permissions (dippermai; moved from §0 #18): port the intention filter `0x00CE4A30` / `0x00CB8200`, the counter-offer filter `0x00CC58C0` (our AI makes no counter-offers yet, so this needs counter-offers first) and `0x00932EE0` → `0x00C1E770` (`0x00C561C0` is redundant) (CAMPAIGN_FIDELITY "Scripted diplomacy permissions")
 - [ ] Our campaign AI's Austria attacks in its first turn, so the diplomacy screen's Power reads Mighty instead of the original's Terrifying (self-checks2 (f), IN_GAME_CHECKS_2026-10-10.md); trace the original's turn-1 AI choice
@@ -626,6 +704,8 @@ the input; how it is drawn is ours. Items below that say "as the original" mean 
 - [ ] Stored CAI relation belief (`0x00A89E00` faction +0x100 list +8, written by `0x00ABAFB0`): merged 2026-10-14 (cai-belief: belief store + dirty mark in the director state, per-broadcaster marks CONFIRMED `0x00A8F320` → `0x00A88CE0`, capture `0x00A64AC0`/`0x00B62120`, misdeeds `0x00B0D870`/`0x00B67FD0`/`0x00B0D700`/`0x00B67E60`). Left: the turn-change mark (INFERRED, `0x00CF7F60`, propagation `0x00CF0B10`: debugger sitting); the other 184 readers of `0x00A74A20` (PROVISIONAL); the +0xA8 enemy-majority flag
 - [ ] AI shopping shroud (treasury4): the naval goal that creates CAI_BDIM_REPAIR_NAVY (`0x00CDD540`; `ai_repair_navy` has no runtime caller yet); the gate `0x00A8B2D0` on its 11 other callers (incl. `0x00A67890`); trace CAI slot +0x104 (the gate's position, INFERRED at capture.rs ~472); the CAI unit-list order (INFERRED); the ESF CAI_INTERFACE bool is neither read nor written (no load warning)
 - [ ] Trace the AI diplomatic budget pot (CAI +0x140, `0x00AAF570`; PROVISIONAL in the AI's payment evaluation, deals-fix)
+- [ ] AI join-war rule (joinwar) (running: joinwarrule): port `0x00AA5ED0` (~300-450 lines): it declines when diplomacy_options index 11 is 1 or 3; goals `0x00CC13D0` / `0x00CC0280`, weight `0x00D01370`, strength `0x00AB5400`, attitude `0x00A8D250`, all untraced; ours declines every join-war deal (PROVISIONAL, deal_value.rs). Start after dealattitude merges
+- [ ] AI capture choice (looting review) (running: aicapture): the AI's occupy / loot / liberate choice `0x00AAABA0` (AI virtual +0x2F8) is not decoded; ours always occupies (PROVISIONAL capture.rs ~313), so the AI never loots or liberates; trace and port
 
 ## 7. User interface
 **Front end**
@@ -776,20 +856,32 @@ the input; how it is drawn is ours. Items below that say "as the original" mean 
 
 ## Polish
 Non-blocking review findings, one line each (CLAUDE.md "Done means"). A worker editing a file clears that file's lines.
+- [ ] ntw_sim turn.rs ~563/587 and destruction.rs ~92 `nearest_capital` (accessloss2 review): could use `regions_in_list_order`
+- [ ] Ghidra (accessloss2 review): set 0x008CF6B0 `AttachOwnedLinkToOwnerList`'s this type to `OwnedItemLink*` (dry run OK), then rerun completeness
+- [ ] ntw_sim effects (navyupkeep review): `force_set` leaves out the army container's own effects (PROVISIONAL, effects.rs); trace what the container contributes to a force's effect set at `0x008AFC00`
+- [ ] ntw_sim effects_check.rs ~79 (navyupkeep review): still copies the old faction-wide upkeep rule; call the model's per-force rule
+- [ ] Ghidra (navyupkeep review): label the `_Guerrilla` 0x01357CE0 and `_Auxiliary` 0x01357CEC strings
+- [ ] ntw_sim effects.rs (navyupkeep review): `find_qualified` scans the whole effect map, use a range query; make `EffectKey` qualifiers canonical at compile (case variants, mod-only: the exe compares ids, 0x00E04760); the `force_set` doc (~686) should link `costed_force`
+- [ ] ntw_sim economy (navyupkeep review): `costed_force` should return `Option<CharacterId>`; the `economy_breakdown` example should print the skipped commanderless count
+- [ ] ntw_sim campaign (charflag review): fill `out_of_game` once at load instead of recomputing the startpos fallback per call (it can drift on flagless saves); then family.rs ~402 and destruction.rs ~120 `Some(true)` checks agree
+- [ ] ntw_sim campaign (charflag review): one shared post-holder helper (`GovernmentPost::holder` vs `CharacterDetails::post` in `spare_ministers`)
+- [ ] ntw_sim save.rs `write_faction` (charflag review): the ESF writer never writes faction +0x824
 - [ ] Battle artillery that loses its guns mid-battle (`+0x1F4→+0x10`, `0x006543D0`): the crew should take column 3; our movement class is fixed at setup (cavclass review; trace the switch)
 - [ ] ntw_ai battle/mod.rs ~1593 (polish37 review): trace whether the exe passes the target as the facing (defender) unit to `0x006AD890` at `0x006AFCAA` / `0x006B079A`; ours assumes it
 - [ ] ntw_sim battle/attackers.rs `fill_attackers` (attackers review): no release timing for a large melee (up to men×men distance tests per contact pair per tick); measure. The main attacker `0x0054F070` is not ported
 - [ ] Ghidra (formation3): V5 for 0x00653560, 0x0055AD60, 0x0054FDD0, 0x0057B000 once named; 0x005373F0 / 0x00502770 / 0x005281D0 deductions are structural (void* this, split register vars)
 - [ ] Ghidra (formation4): the BattleUnit, BattleUnitTypeInfo and UnitSpecialAbilitySet structs are minimal; type their fields
 - [ ] ntw_script ui/campaign/army.rs `unit_entry` ~48/63 (polish35): the repair fields and `IsNaval` use `force.is_navy`; trace which unit virtual picks `0x008DF820` vs `0x008DF190` and use the unit's own type
-- [ ] (running: keybind) Campaign key bindings left (shortcutkeys): the binding state machine (`0x00EEE250`; PROVISIONAL ntw_script ui/campaign/mod.rs ~1250); non-root campaign bindings; Return = end turn from `default_keys.xml` `end_turn` (PROVISIONAL play.rs:13); camera keys through the same `default_keys` reader; `custom_keys` / keyset selection (`0x00ED27D0`); frontend bindings
+- [ ] Key bindings left (keybind merged: the binding state machine `0x00EEE250`, non-root campaign bindings, Return = end turn and the camera keys from `default_keys.xml`): `custom_keys` / keyset selection (`0x00ED27D0`); frontend and battle bindings; the input layer `0x00DACBA0`; `steal_user_input`; tilt / bookmarks / busy (`0x00955820`); the mouse `0x00970A90`; the release post `0x00DAD1B0`; the binding order; the dummy OnShortcut
+- [ ] Key bindings (keybind review): is time [ctx+8] in `0x00ED76E0` the frame time (SHIFT timing INFERRED); where `0x00970A90` falls among a frame's key events, and is handler +0x20 controller +0x48; the handler lock +0x84 (`0x00A22430`) and the stealer choice are PROVISIONAL
+- [ ] Key bindings (keybind review): a re-steal keeps the stealer's place (`0x00EC3DE0`): a one-line `stealer_of` fix
+- [ ] Key bindings (keybind review): the generation is bumped on text / tooltip edits, so the binding cache is often cleared; bookmark lookups prefix-match
 - [ ] Key focus left (shortcutkeys): a focused field's own RETURN / ESC handling; the stealer's `OnKey` arguments (`0x00DAC9E0`); focus held by a destroyed component (PROVISIONAL ntw_script ui/host.rs ~778); Ghidra: create the function at `0x00A27EB0` (the key handler the docs cite) with its V5 plate
 - [ ] Gait (gait-blend2): 6 Ghidra functions at 0-37% completeness, `0x005DD450` unnamed; merge `man_level` and `mount_level`; tree/water probes index the palette by ground; `fatigue_effect` runs twice per tick; tga.rs cmap padding maps to road
 - [ ] Raise the generic-engine Ghidra functions' completeness: upkeep done (polish7), 9 functions left (analysis/modding/MODDING_AUDIT.md; FUNCTION_DOC_WORKFLOW_V5)
 - [ ] Two-file key tests: which same-key row survives is covered (polish8); still unchecked: that each typed ntw_data table's `key()` is the key the exe merges by
 - [ ] `CursorPosition` (ui_prelude.lua ~281) and CampaignUI's label `ScreenPos` (Labels.lua) give screen pixels while the campaign HUD's Position / MoveTo use the 1280x960 scripts' frame; read what the original returns on a wide screen.
 - [ ] `unwrap()` audit on paths that read install or mod data (ntw_formats, ntw_data, pack loading): a malformed file or broken mod must log one error and skip, never panic. Unwraps on the code's own invariants and in tests stay.
-- [ ] (running: navyupkeep) Netherlands naval upkeep (recordpay): ours 1059, the save's tracker 1006, every other faction matches; trace the missing input of `faction_upkeep_split_with` (CAMPAIGN_FIDELITY running record)
 - [ ] Running record count (rebuildrec review): `running_record` (economy.rs ~517) treats the history length as the exe's record count; the exe keeps a running record at count 0 and saves none (CAMPAIGN_FIDELITY running record), so a dead faction rebuilt on load now writes 1 record to ESF saves (save.rs ~973) where the exe writes 0, and an emerging faction passes `need_from_economy`'s ≤2 cutoff a round early; keep the running record apart from the saved count
 - [ ] Army recruitment: queue cards never show "Paused" (`0x00A00775`); army-recruit-tab's 34 Ghidra functions at 0-53% completeness
 - [ ] Debugger: who subscribes to the signal at the end of CancelRecruitmentItem (breakpoint `0x008DBB59`); it passes the already-freed item when the cancelled one was last (ORIGINAL BUG only once a listener reads it)
@@ -806,11 +898,9 @@ Non-blocking review findings, one line each (CLAUDE.md "Done means"). A worker e
 - [ ] Path gate (pathgate): trace whether the transport, port-entry and commander-recruitment searches share the zone region gate (`0x00B2CC20` → `0x00B16CF0`; PROVISIONAL in embark.rs `plan_transport_move` / `plan_port_entry`, commander_recruitment.rs); a rebel mover's search gets no gate (PROVISIONAL): trace its stored view (+0x400, `0x00B67490` mode 2)
 - [ ] Path gate (pathgate): `path_region_gate` locates settlements with Mover::Land mode 2, the exe with `0x00B53930` type 6 (PROVISIONAL zones.rs); the path smoothing `0x00B6AD30`'s region test is not ported; classify the fixed-flag `0x00AF5B60` callers `0x00B70540` / `0x00B700A0` / `0x00B70380` / `0x00B3B460` / `0x00B0FBE0` / `0x00B56F40` / `0x00B6D760` / `0x00B6D8D0`
 - [ ] Path gate (pathgate): each plan builds the gate Vec and region owners once; cache them per faction with an invalidation rule if a measure shows the AI's planning pays for it
-- [ ] Character list order, other readers (charorder): about 40 other faction +0x768 readers are not yet checked for order dependence (e.g. `0x008B3E80`, `0x008E0070`, `0x00B29170`, `0x00C1E240`); walk `World::characters_in_list_order` where order matters
-- [ ] Character +0x2B8 (charorder): trace the flag `0x008B4330` reads against our `in_the_game` fallback in the yearly death check
+- [ ] Character list order, other readers (charorder): about 40 other faction +0x768 readers are not yet checked for order dependence (e.g. `0x008B3E80`, `0x008E0070`, `0x00B29170`, `0x00C1E240`; the spy network step `0x008F9530`, visibility.rs ~874 `spy_network_step` still walks by id; the spotting pass `0x008B4B70` walks spotters and targets by id); walk `World::characters_in_list_order` where order matters
 - [ ] Character faction transfer (charorder): call `World::transfer_character` (`0x00A1B4E0`, moves the id to the new list's end) from the first faction-transfer rule (TransferRegionToFaction, `0x00AAE250`, `0x008BEAA0`, `0x009DBBB0`) and port the rest of `0x00A1B4E0`
 - [ ] Groupings loader (empirebucket): the exe (`0x00F56770` → `0x00F47450`) drops a grouping whose junction member isn't in its table; ours keeps it (mod-only)
-- [ ] Zone flood (zonegate): a rebel commander's later floods use the grid's stored single-region view +0x400 (`0x00B077B0`, `0x00B7BAF0` → `0x00B67490`); ours keeps no stored view (PROVISIONAL zones.rs ~58; PATHFINDING §8)
 - [ ] Zone flood (zonegate): 23 of 87 commanders' stored zones still differ from the save after the region gate (64 match); trace the rest (PATHFINDING §8)
 - [ ] Identify the `0x0096CBE0` list (INFERRED) and trace the callers of the `0x00A285E0` virtual (the walk's last step passing 1, `commands.rs` ~960)
 - [ ] Population owner change (popghidra): the class reset on a region's owner change (`0x00AA16E0` → `0x00AA1730` → `0x008E6400`) is not modelled; `Region::class_bases` keeps the old owner's classes (CAMPAIGN_FIDELITY "The other population users")
@@ -819,3 +909,72 @@ Non-blocking review findings, one line each (CLAUDE.md "Done means"). A worker e
 - [ ] Diplomacy screen (polish57): the code-5 war-call negotiation lines posted by `0x00C4FFC0` (hub +0x360) to both sides when allies are called into a war; what they show is not traced; the peace raid clear `0x00A25570`'s steps `0x008BD550` / `0x00A784E0` are untraced
 - [ ] Shroud setup (shroudfill): trace `0x008DD090` keeping (and rebuilding) a non-human's shroud when the setup's +0x20 and the faction's +0x6E1 (player slot +0xA9) are set (UNKNOWN in visibility.rs `start_shrouds`)
 - [ ] Faction +0x814 / +0x81C flags (shroudfill): model them; `0x00B66EF0` skips the visible rebuild when +0x814 is set and +0x81C clear (guard `0x008CA0B0`; PROVISIONAL in `start_shrouds` / `refresh_shroud`); also read by `knows_character` and PlayerPlayingAsRevolutionaries; the revolution ends `0x008BEAA0` / `0x008DB1A0` call end_campaign for a human (campover2)
+- [ ] Ghidra: `QueuedMovieEvent` +0 is named `dwFactionId` but holds a faction pointer; rename to `pFaction` (victoryscreen2 review)
+- [ ] Own save (classfactor review): save.rs ~1533 has no test for the positional class write; own_save/tests.rs duplicates the class three-tuple test (`population_classes_keep_their_war_factor_and_older_saves_read_zero` and `population_class_reads_an_older_three_tuple`): keep one
+- [ ] Economy (classfactor review): economy.rs ~1237 should call `governing_faction()`; population.rs ~505 lets a mod's grow seam in `project()` see the old classes; `policing_cost` filters by the owner's government but its fallback uses the governing faction
+- [ ] Zones (zoneview review): zones.rs ~505 and ~449-457 handle a rebel without a home region two ways; make it one path, and test the ~449 load branch
+- [ ] Zones (zoneview review): zones.rs ~506 should read `force.faction`; ~676 has no test of the view choice alone; the `store_rebel_view` doc should say it stores nothing for a region outside the grid
+- [ ] Script host (handover review): host.rs ~237 should drain `script_events` on every Lua entry point (events posted in the gap are lost if the game saves before the next drain)
+- [ ] Destruction (handover review): destruction.rs ~337 rebuilds the faction list on every pass; tests/host.rs ~311 has a stray blank line and should assert OutcomeMovie / CharacterCreated
+- [ ] Ghidra (joinwar review): V5 write-ups for `0x00BF3900`, `0x00C114B0`, `0x00C18CF0`, `0x00C49AA0`, `0x009BF3C0` (score 0), `0x00A62400` (33.9)
+- [ ] Diplomacy (joinwar review): diplomacy.rs ~612 has an over-long doc line
+- [ ] Capture (capturepreview review): the preview clones the whole model twice per human capture (capture.rs ~215, cold path); the capture.rs ~221 "(tax bundles)" note is incomplete
+- [ ] economy.rs (~1584, dealattitude review): `clamp(0, limit)` panics on a negative mod limit (predates the branch)
+- [ ] economy.rs (~1380, dealattitude review): the owner's characters are walked twice; the const-generic helper (~1571) could be a plain fn
+- [ ] treaties.rs (~920, accessprompt review): `diplomacy_round_end` returns a Vec where the other steps take `&mut events`; the access-prompt test does not cover a target that is out of the game
+- [ ] agents.rs (cmdstars review): `rank()` builds the EffectSet on every call; agents.rs ~150 says "commands refuse unknown units" but only recruiting does (commands.rs ~1433); pool.rs ~406's PROVISIONAL wording is ambiguous
+- [ ] Research rules (techchain review): a logging test for `rules::invalid_key`; rules.rs ~19's log says "In table" with the junction table where the exe names the table it searched; no test for the AI's `map_or` default; the rate `[f32; 4]` array; economy_check's copy of the rule; duplicate building_chains tables; the AI rate for thread 3 reads 0
+- [ ] CHARACTERS_FIDELITY.md ~411 (techchain): building_chains #2 is at chain record +0x14 (+0x18 is the category), per techchain; check and fix the note
+- [ ] Campaign play (eventdrop review): play.rs ~306 a walk can end at the (0,0) off-map spot; the marker × move scan runs every sync (~302, use a HashMap); DerefMut marks a walk changed every sync (~307); AI moves are animated inside fog; scene.rs ~453 turn-1 project events from start_campaign are unused and logged as "script events"; `is_diagnostic` is used only by tests
+- [ ] Occupy notes (occupyorder review): CAMPAIGN_FIDELITY ~1720 `0x00870E60` is the force constructor with an optional rising record, not a rising; effects.rs ~687 says "virtual +0x38 → +0x98" against the direct force +0x98; V5 write-ups 0x00A64AC0 (0.9), 0x00B58560 (64.3), 0x00B58890 (50.1), 0x00B58C00 (48.4)
+- [ ] Turn walks (charwalk review): turn.rs ~435/474 reuse `ids` in CharactersStart; CAMPAIGN_FIDELITY ~3407 the "achievement loop" label is unverified; turn_order_tests.rs ~382 collect the ids per event window
+- [ ] Unit restrictions (unitrestrict review): own_save.rs ~329 rephrase the log text; lib.rs ~539 `known_restricted_units` should take `&rules.units` (drops the `mem::take`); CAMPAIGN_FIDELITY ~1956 the two calls to `0x008B16C0` outside any function (`0x00961307`, `0x0096141E`) are not listed
+- [ ] world.rs ~448 (recruitmarch review): the reinforcement load warning counts done/rebel entries; UNIT_REINFORCEMENTS_ARRAY has no warning
+- [ ] save.rs `write_faction` (recruitmarch review): re-saves a stale reinforcement manager
+- [ ] Ghidra (recruitmarch review): stale plate comments at `0x00AE8B10` and `0x00B0A270`
+- [ ] port_blockade.rs ~96 (portblockade review): `clear_blockades_after_slot_pass` walks every region; filter by region
+- [ ] port_blockade.rs ~67 (portblockade review): the doc should say the batching is order-free
+- [ ] save.rs ~1873 (portblockade review): with no blockade, a missing #1 still warns
+- [ ] director.rs ~538 (idwalks review): trace whether the CAI region list (`0x00A676E0`, +0x114) matches `owner == f`
+- [ ] capture.rs ~554 (idwalks review): put the PROVISIONAL on the id-order comment itself
+- [ ] turn_order_tests.rs ~405 (idwalks review): add a lost-region case
+- [ ] population.rs ~584 (idwalks review): build the list per faction, not over the whole world
+- [ ] hud.rs ~458 (victoryfix review): narrow the "bink untraced" doc
+- [ ] CAMPAIGN_FIDELITY ~846 (victoryfix review): `0x00998E20` is the constructor, not a "movie queue"
+- [ ] hud.rs ~481 / CAMPAIGN_FIDELITY ~964 (victoryfix review): name the +0xC object and the player
+- [ ] economy.rs ~1257 (rebelgov review): the comment should say a (middle, lower) government reads 0
+- [ ] economy.rs (rebelgov review): an unknown government key falls back silently; log it once
+- [ ] world.rs ~257 (rebelgov review): logs twice
+- [ ] zoc_install.rs ~242 (rebelgov review): the non-rebel check is a tautology
+- [ ] CAMPAIGN_FIDELITY ~5016 (peaceturn review): the new bullet sits above forceprot's trailer
+- [ ] ntw_script tests/host.rs ~396 (peaceturn review): the test lacks a start < peace assert
+- [ ] ntw_ai campaign/mod.rs ~1336 (peaceturn review): the doc should say the AI's direct peace differs from the exe's deal-only path
+- [ ] driver.rs ~102 (allyoffer review): drop the `!stopped_for_human` guard, as host.rs ~198 does
+- [ ] driver.rs ~112 (allyoffer review): logs on every `end_turn` while a call waits; log once
+- [ ] CAMPAIGN_FIDELITY ~3799 (allyoffer review): say the skipped human isn't listed
+- [ ] ntw_ai driver (allyoffer review): a test for the driver's `resume`
+- [ ] world.rs ~865 / error.rs ~207 (rebelresearch review): "no entry outlives its turn start" is now wrong for rebel entries
+- [ ] turn.rs ~111 (rebelresearch review): the `FactionReady` doc omits the reinforcement march
+- [ ] turn.rs (rebelresearch review): debug_assert that `march_reinforcements` never runs for the rebels
+- [ ] ntw_sim characters.rs ~404 (stickytrait review): a modded trait level with no row is silent; log once
+- [ ] ntw_script ui/campaign/characters.rs ~180 (stickytrait review): the `level <= 0` check is dead
+- [ ] CHARACTERS_FIDELITY (stickytrait review): cite the save writer `0x00897DF0`
+- [ ] ntw_data rules.rs ~165 (unittechs review): use `invalid_key` for the unit case
+- [ ] ntw_data rules.rs ~161 + notes (unittechs review): say "once" means once per campaign load
+- [ ] ntw_campaign tests/real_install.rs ~558 (unittechs review): the sum assert is redundant
+- [ ] Ghidra V5 (unittechs review): CompareUniStrings `0x004F1F30` (50.4) and BuildUnitRecordFromBuilder `0x00EDC000` (63.0)
+- [ ] ntw_sim economy.rs ~1602 / world.rs ~1115 (residence review): rescan forces per character; index once
+- [ ] ntw_sim world.rs ~316 (residence review): the warning's wording
+- [ ] CAMPAIGN_FIDELITY ~1079 / world.rs ~1101 (residence review): say all readers use `residence_of`
+- [ ] ntw_campaign save.rs ~1506 (residence review): group the index once
+- [ ] ntw_campaign save.rs `write_faction` (residence review): O(factions × forces × units); index once
+- [ ] Ghidra V5 (rebelroundend review): `0x00A44DB0`, `0x00AB4070`, `0x00AB42F0`, `0x00AB4410`
+- [ ] ntw_sim turn.rs ~230 (rebelroundend review): the `takes_turns` doc
+- [ ] ntw_sim treaties.rs ~1572 (rebelroundend review): the `drop_finished_payments_to` doc
+- [ ] ntw_sim economy.rs ~741, population.rs ~553, treaties.rs ~1388, director.rs ~809 (rebelroundend review): use `in_the_game_with_record`
+- [ ] ntw_sim tests (rebelroundend review): a test that rebel relations and research don't step
+- [ ] ntw_sim capture.rs (libevent review): the liberator is read from the region owner (the choice isn't modal); say so
+- [ ] ntw_script host.rs ~806 (libevent review): the Region literal
+- [ ] ntw_sim capture tests (libevent review): `pos_before`, a capital-case position check, a no-terrain test
+- [ ] capture.rs ~349, CAMPAIGN_FIDELITY ~1818 / ~2055 (libevent review): "out of the region" wording
+- [ ] ntw_script campaign_hud_probe.rs ~243 (looting review): picks any commander (admirals too); pick a force in or next to the region

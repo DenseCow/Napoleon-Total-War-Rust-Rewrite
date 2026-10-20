@@ -250,29 +250,49 @@ fn religion_gentlemen_war_and_education_in_public_order() {
     m.world.regions.get_mut(&RegionId(10)).unwrap().religions = vec![("rel_catholic".into(), 0.7), ("rel_protestant".into(), 0.3)];
     assert_eq!(economy::public_order(&m, RegionId(10)).lower, base.lower - 14.0);
     m.world.regions.get_mut(&RegionId(10)).unwrap().religions.clear();
-    // Gentlemen: the skill term is 0; each gentleman gives his faction's gentleman_happiness_bonus,
-    // own ones positive, foreign ones negative.
+    // Gentlemen (`0x008C55D0`): each resident in the settlement (region +0xFC → +0xC8) gives
+    // ceil(rank / 3) plus his own set's gentleman_happiness_bonus
+    // (character +0x48C, `0x008C569E`), own ones positive, foreign ones negative. Without a research
+    // attribute the rank is −1: ceil(−1 / 3) = 0. A faction-level bonus does not count.
     let mut rules = (*m.rules).clone();
-    for (key, v) in [("tech_gent_a", 1.0), ("tech_gent_c", 2.0)] {
-        rules.effects.insert_technology(key.into(), mapped(&rules, vec![("gentleman_happiness_bonus", v)]));
+    for (key, v) in [("anc_gent_a", 1.0), ("anc_gent_c", 2.0)] {
+        rules.effects.insert_ancillary(key.into(), mapped(&rules, vec![("gentleman_happiness_bonus", v)]));
     }
+    rules.effects.insert_technology("tech_gent".into(), mapped(&rules, vec![("gentleman_happiness_bonus", 5.0)]));
     m.rules = Arc::new(rules);
-    m.world.faction_details.entry(A).or_default().technologies = vec![("tech_gent_a".into(), 0)];
-    m.world.faction_details.entry(C).or_default().technologies = vec![("tech_gent_c".into(), 0)];
+    m.world.faction_details.entry(A).or_default().technologies = vec![("tech_gent".into(), 0)];
+    m.world.character_details.entry(CharacterId(106)).or_default().ancillaries = vec!["anc_gent_a".into()];
+    m.world.character_details.entry(CharacterId(107)).or_default().ancillaries = vec!["anc_gent_c".into()];
     let mut g = character(106, A, CharacterKind::Gentleman, 10);
     g.position = pos(10, 0);
     m.world.characters.insert(g.id, g);
+    // Standing in the region outside the settlement, he does not count.
+    assert_eq!(economy::public_order(&m, RegionId(10)).lower, base.lower);
+    m.world.characters.get_mut(&CharacterId(106)).unwrap().garrisoned_in = Some(RegionId(10));
     assert_eq!(economy::public_order(&m, RegionId(10)).lower, base.lower + 1.0);
     let mut g = character(107, C, CharacterKind::Gentleman, 10);
-    g.position = pos(11, 0);
+    (g.position, g.garrisoned_in) = (pos(11, 0), Some(RegionId(10)));
     m.world.characters.insert(g.id, g);
     assert_eq!(economy::public_order(&m, RegionId(10)).lower, base.lower + 1.0 - 2.0);
-    m.world.characters.remove(&CharacterId(106));
-    m.world.characters.remove(&CharacterId(107));
+    // An ally's gentleman is on the owner's side (`0x008CE390`, called at `0x008C56CC`).
+    m.world.set_stance(A, C, Stance::Allied).unwrap();
+    assert_eq!(economy::public_order(&m, RegionId(10)).lower, base.lower + 1.0 + 2.0);
+    // Taken for C instead of the owner A (`0x008C55D0(region, C)`): allied, both are C's side; at peace,
+    // C's own +2 and A's −1.
+    assert_eq!(economy::gentlemen_factor_for(&m, &m.world.regions[&RegionId(10)], C), 3.0);
+    m.world.set_stance(A, C, Stance::Neutral).unwrap();
+    assert_eq!(economy::gentlemen_factor_for(&m, &m.world.regions[&RegionId(10)], C), 1.0);
+    // A's gentleman at rank 4 (`0x00A198D0`, his research): ceil(4 / 3) + 1 = 3.
+    m.world.character_details.entry(CharacterId(106)).or_default().attributes = vec![("research".into(), 4)];
+    assert_eq!(economy::public_order(&m, RegionId(10)).lower, base.lower + 3.0 - 2.0);
+    assert_eq!(economy::gentlemen_factor_for(&m, &m.world.regions[&RegionId(10)], C), 2.0 - 3.0);
+    for id in [CharacterId(106), CharacterId(107)] {
+        m.world.characters.remove(&id);
+        m.world.character_details.remove(&id);
+    }
     m.world.faction_details.entry(A).or_default().technologies.clear();
-    m.world.faction_details.entry(C).or_default().technologies.clear();
     // War results: a stored base counts as it is; with base 0 an enemy army in the region adds 12.
-    m.world.regions.get_mut(&RegionId(10)).unwrap().class_bases = vec![("lower".into(), 0, 0), ("upper".into(), 0, 3)];
+    m.world.regions.get_mut(&RegionId(10)).unwrap().class_bases = vec![PopulationClassState::new("lower"), PopulationClassState { resistance: 3, ..PopulationClassState::new("upper") }];
     assert_eq!(economy::public_order(&m, RegionId(10)).upper, base.upper + 3.0);
     m.world.set_stance(A, C, Stance::War).unwrap();
     let mut col = character(108, C, CharacterKind::Colonel, 10);

@@ -31,7 +31,7 @@ use std::collections::BTreeSet;
 use super::effects::EffectSet;
 use super::ids::{FactionId, RegionId};
 use super::mod_state::ModWrites;
-use super::world::{CampaignModel, Region};
+use super::world::{CampaignModel, PopulationClassState, Region};
 
 /// The growth factors' keys in their slots (`0x00A88F20`: the table at `0x01458B04`; rows of
 /// `public_order_factors`, which give each its picture and tooltip).
@@ -90,13 +90,15 @@ pub struct PopulationState {
 /// 1))` in single precision, where `var` is campaign variable 18 `policing_automated_cost_per_pop`, Σ the
 /// automated policing (repression slot 3, class +0x4C) of the classes that are the owner's government's
 /// upper or lower class (`0x008CE320` / `0x008CE260`), refreshed just before in the same pass
-/// (`0x008EDF70`), and `pop` the population the factors are for.
-pub fn policing_cost(model: &CampaignModel, reg: &Region, set: &EffectSet, pop: u32) -> i32 {
+/// (`0x008EDF70` with the object it refreshes: `input`'s set, classes and religions), and `pop` the
+/// population the factors are for.
+pub fn policing_cost(model: &CampaignModel, reg: &Region, input: &FactorInputs<'_>, pop: u32) -> i32 {
     if model.is_rebel_faction(reg.owner) || !model.is_human(reg.owner) {
         return 0;
     }
+    let set = input.set;
     let (upper, lower) = super::economy::government_classes(model, reg.owner);
-    let classes = super::economy::public_order_factors_with(model, reg, set, &reg.religions, super::economy::garrison_units(model, reg));
+    let classes = super::economy::public_order_factors_with(model, reg, set, input.religions, input.classes, super::economy::garrison_units(model, reg));
     let policing: i32 = classes.iter().filter(|c| c.class == upper || c.class == lower).map(|c| c.repression[3]).sum();
     // The modifier through the x87 registers (the f32 constant 0.01 at 0x01318034, + 1.0), stored as a
     // float and clamped at 0 (MAXSS); the product in single precision, then FISTP.
@@ -105,12 +107,25 @@ pub fn policing_cost(model: &CampaignModel, reg: &Region, set: &EffectSet, pop: 
     super::commands::fistp(per_pop * policing as f32 * (pop as f32).sqrt() * modifier)
 }
 
-/// What the population factors read besides the region (`0x00AA9C10`'s arguments).
+/// What the population factors read besides the region (`0x00AA9C10`'s arguments and the population
+/// object it refreshes: the region's own, or the panel's projected copy, [`project`]).
 pub struct FactorInputs<'a> {
     /// The region's effect set (`0x00A67530`, or the predicted set `0x00A9B930` for the panel).
     pub set: &'a EffectSet,
     /// The units of hostile armies standing in the region ([`hostile_units`]).
     pub hostile_units: u32,
+    /// The object's classes (`REGION_FACTORS` +0x2C; [`Region::class_bases`], or the projected copy's).
+    pub classes: &'a [PopulationClassState],
+    /// The object's religion breakdown ([`Region::religions`], or the projected copy's after its
+    /// conversion), as the public order reads it before the refresh normalises it (`0x00AA4860`).
+    pub religions: &'a [(String, f32)],
+}
+
+impl<'a> FactorInputs<'a> {
+    /// The inputs of `reg`'s own population object: `set` and its classes and religions.
+    pub fn of(model: &CampaignModel, reg: &'a Region, set: &'a EffectSet) -> Self {
+        Self { set, hostile_units: hostile_units(model, reg), classes: &reg.class_bases, religions: &reg.religions }
+    }
 }
 
 /// `0x00AA6830`: a percentage rounded to hundredths, [`as_hundredths`] then × 0.01 (`0x00A88EF0`, the
@@ -179,7 +194,7 @@ pub fn growth_factors(model: &CampaignModel, reg: &Region, pop: u32, prev: &Popu
     if overcrowded {
         f[4] = hundredths(if ratio >= 1.0 { (1.0 - ratio) * 20.0 - s } else { (OVERCROWDED - ratio) * 10.0 * s });
     }
-    let policing_cost = policing_cost(model, reg, set, pop);
+    let policing_cost = policing_cost(model, reg, input, pop);
     PopulationState { factors: f, capacity, overcrowded, growth: total(&f), policing_cost, ..prev.clone() }
 }
 
@@ -212,6 +227,109 @@ pub fn grow(model: &CampaignModel, reg: &Region, pop: u32, state: &PopulationSta
     let delta = new.wrapping_sub(pop as i32);
     next.trend = if delta == 0 { 2 } else if delta < 0 { 3 } else { 1 };
     (((new as u32).min(POPULATION_CAP)), next)
+}
+
+/// What moves a population class's war factor ([`PopulationClassState::war`], class +0x20): the kind
+/// `0x008A94D0` takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassWarEvent {
+    /// Kinds 0..=5, a battle result's step (`0x008ACCF0`, for each side's capital): the factor gains
+    /// [`BATTLE_WAR_CHANGE`]`[kind]`. PROVISIONAL: never called: the battle results' step `0x008ACCF0`
+    /// (from `0x008F7880` at `0x008F7B7C`) is not modelled, the battle results lack the victory type it reads.
+    Battle(u8),
+    /// Kind 6: the region's owner declared war on the other faction (`0x00B27070` → `0x00A63490`).
+    WarDeclared,
+}
+
+/// The war factor's change per battle-result kind (the i32 table `0x014579F0`, CONFIRMED by reading
+/// memory): kinds 0 and 1 for the loser (result codes 13/14 and 15/16), 2 and 3 for the winner (8/9 and
+/// 10/11), 4 and 5 for the loser and the winner of the battles `0x008ACCF0` tests first.
+pub const BATTLE_WAR_CHANGE: [i32; 6] = [-1, -2, 1, 2, -4, 4];
+
+/// The war factor's range (`0x008A94D0` clamps after every change: below −15 to −15, above 6 to 6).
+pub const CLASS_WAR_RANGE: (i32, i32) = (-15, 6);
+
+/// A class's war factor after one event (`0x008A94D0`, CONFIRMED by decompilation): `owner` is the
+/// region's owner, `other` the other side (the war's target, the battle's opponent). Nothing changes when
+/// either is the rebels (`IsFactionWithoutRecord` `0x008CEEF0`); otherwise the value is clamped to
+/// [`CLASS_WAR_RANGE`] after the change, whatever it was. A war declaration
+/// ([`ClassWarEvent::WarDeclared`]) reads the attitude category of `owner` to `other` (`0x00B0DBA0`) and the
+/// two governments' ranks ([`CampaignRules::government_ranks`](super::rules::CampaignRules::government_ranks),
+/// `government_types` #3): with `lower` = the class is `owner`'s government's lower class (`0x008CE230`),
+/// `upper` = its upper class (`0x008CE2F0`), `own` / `theirs` the ranks:
+/// - hostile (0): +4 if (`lower` and `own` ≤ `theirs`) or (`upper` and `theirs` ≤ `own`);
+/// - friendly (3): −3, very friendly (4): −6, if (`upper` and `own` ≤ `theirs`) or (`lower` and `theirs` ≤ `own`);
+/// - otherwise nothing.
+///
+/// The original's rule of the seam `population.class_war` ([`super::seams`]): the model calls the rule in
+/// use, never this directly.
+pub fn class_war_change(model: &CampaignModel, class: &str, event: ClassWarEvent, owner: FactionId, other: FactionId, war: i32) -> i32 {
+    if model.is_rebel_faction(owner) || model.is_rebel_faction(other) {
+        return war;
+    }
+    let change = match event {
+        ClassWarEvent::Battle(kind) => {
+            debug_assert!(usize::from(kind) < BATTLE_WAR_CHANGE.len(), "battle war kind {kind}");
+            BATTLE_WAR_CHANGE.get(usize::from(kind)).copied().unwrap_or(0)
+        }
+        ClassWarEvent::WarDeclared => {
+            let (upper, lower) = super::economy::government_classes(model, owner);
+            let rank = |f: FactionId| {
+                model.world.factions.get(&f).and_then(|x| model.rules.government_ranks.get(&x.government_key)).copied().unwrap_or(0)
+            };
+            let (own, theirs) = (rank(owner), rank(other));
+            let (lower, upper) = (class == lower, class == upper);
+            match model.attitude_category(owner, other) {
+                0 if (lower && own <= theirs) || (upper && theirs <= own) => 4,
+                3 if (upper && own <= theirs) || (lower && theirs <= own) => -3,
+                4 if (upper && own <= theirs) || (lower && theirs <= own) => -6,
+                _ => 0,
+            }
+        }
+    };
+    war.saturating_add(change).clamp(CLASS_WAR_RANGE.0, CLASS_WAR_RANGE.1)
+}
+
+/// One class's round-end pass (`0x008F9690`'s first part, CONFIRMED by decompilation; the riot checks
+/// that follow it are not modelled): the war factor one step toward 0, a negative resistance base +1, a
+/// positive education base −2 (1 or 2 become 0). (Also, not stored here: a negative bankruptcy factor,
+/// class +0x28, +1 and a positive repression slot 5, +0x54, −1; the model keeps neither, both are 0.)
+pub fn class_round_step(class: &mut PopulationClassState) {
+    class.war -= class.war.signum();
+    if class.resistance < 0 {
+        class.resistance += 1;
+    }
+    if class.education > 0 {
+        class.education = if class.education < 3 { 0 } else { class.education - 2 };
+    }
+}
+
+/// A region's classes after its round-end passes (`GrowRegionPopulation` `0x00AB4070`, CONFIRMED by
+/// disassembly; each pass is [`class_round_step`]). A rebel owner: one pass per class. Otherwise three
+/// passes, on the first class that is the owner's government's lower class (`0x00A60FE0`), on the first
+/// that is its upper class (`0x00A61320`) and on the first that is neither (`0x00A89C90`); a find with no
+/// match takes the first class, so with fewer than three classes that one has more than one pass. No
+/// classes: nothing. The original's rule of the seam `population.class_round` ([`super::seams`]).
+pub fn class_round(model: &CampaignModel, reg: &Region) -> Vec<PopulationClassState> {
+    let mut classes = reg.class_bases.clone();
+    if classes.is_empty() {
+        return classes;
+    }
+    if model.is_rebel_faction(reg.owner) {
+        classes.iter_mut().for_each(class_round_step);
+        return classes;
+    }
+    let (upper, lower) = super::economy::government_classes(model, reg.owner);
+    let find = |classes: &[PopulationClassState], pick: &dyn Fn(&str) -> bool| classes.iter().position(|c| pick(&c.class)).unwrap_or(0);
+    let passes = [
+        find(&classes, &|c| c == lower),
+        find(&classes, &|c| c == upper),
+        find(&classes, &|c| c != upper && c != lower),
+    ];
+    for i in passes {
+        class_round_step(&mut classes[i]);
+    }
+    classes
 }
 
 /// What recruiting costs a region's population (CONFIRMED, CAMPAIGN_FIDELITY.md §Recruitment cost and money):
@@ -263,28 +381,42 @@ impl RecruitmentPopulation {
     }
 }
 
+/// The smallest religion share [`normalise_religions`] keeps (`0x00AA4860`).
+const RELIGION_SHARE_MIN: f32 = 0.0005;
+
+/// The sum of the shares [`normalise_religions`] keeps, added in order as `0x00AA4860` does.
+fn kept_religion_sum(religions: &[(String, f32)]) -> f32 {
+    religions.iter().map(|(_, s)| *s).filter(|s| *s >= RELIGION_SHARE_MIN).fold(0.0f32, |a, s| a + s)
+}
+
 /// `0x00AA4860`: shares below 0.0005 become 0 and the rest are scaled to sum to 1 (left as they are
 /// when they already do); with nothing left the first religion takes everything. ORIGINAL BUG: the
 /// exe writes that first share even when the breakdown is empty (a write through a null list, a
 /// crash for a region without religions); an empty breakdown stays empty here.
 pub fn normalise_religions(religions: &mut [(String, f32)]) {
-    let mut sum = 0.0f32;
-    for (_, share) in religions.iter_mut() {
-        if *share >= 0.0005 {
-            sum += *share;
-        } else {
-            *share = 0.0;
-        }
+    let sum = kept_religion_sum(religions);
+    for (i, (_, share)) in religions.iter_mut().enumerate() {
+        *share = normalised_entry(*share, sum, i);
     }
-    if sum == 1.0 {
-        return;
-    }
-    if sum != 0.0 {
-        for (_, share) in religions.iter_mut() {
-            *share *= 1.0 / sum;
-        }
-    } else if let Some((_, first)) = religions.first_mut() {
-        *first = 1.0;
+}
+
+/// Entry `i`'s share after [`normalise_religions`], without changing the breakdown (`i` in range).
+pub fn normalised_share(religions: &[(String, f32)], i: usize) -> f32 {
+    normalised_entry(religions[i].1, kept_religion_sum(religions), i)
+}
+
+/// The one rule of `0x00AA4860` for entry `i` holding `share`, given the [`kept_religion_sum`]
+/// `sum`: nothing kept, the first entry takes everything; a share below the minimum (or NaN) is 0;
+/// the rest are scaled by `1 / sum` unless the sum is exactly 1.
+fn normalised_entry(share: f32, sum: f32, i: usize) -> f32 {
+    if sum == 0.0 {
+        if i == 0 { 1.0 } else { 0.0 }
+    } else if share.is_nan() || share < RELIGION_SHARE_MIN {
+        0.0
+    } else if sum == 1.0 {
+        share
+    } else {
+        share * (1.0 / sum)
     }
 }
 
@@ -356,13 +488,19 @@ pub struct Projection {
     pub predicted: PopulationState,
     /// The religion breakdown after the round's conversion, normalised by the refresh.
     pub religions: Vec<(String, f32)>,
+    /// The classes after the round's passes on the copy (`0x00AB4070` runs them on the copy before its
+    /// growth; seam `population.class_round`): the next round's classes, which the predicted factors read.
+    pub classes: Vec<PopulationClassState>,
     /// The predicted set the projection's public order reads.
     pub set: EffectSet,
 }
 
 /// The projection of `region` (`0x00A727D0`): the current factors (`0x00A72990`: refreshed with the
-/// region's set, religions normalised), one growth step and the conversion on a copy (`0x00AB4070` with
-/// the region's set), the copy's factors refreshed with the predicted set ([`predicted_effect_set`];
+/// region's set, religions normalised), the classes' round-end passes, one growth step and the conversion
+/// on a copy (`0x00AB4070` with the region's set; the passes are the seam `population.class_round`, CONFIRMED
+/// by disassembly: `0x00A727D0` calls `0x00AB4070` with the copy at `0x00A72844`, and each of its class passes
+/// `0x008F9690` takes a class of that copy), the copy's factors (with its classes and converted religions,
+/// `0x00AA9C10` → `0x008EDF70`) refreshed with the predicted set ([`predicted_effect_set`];
 /// religions normalised), then the migration factor of both set to migrants × 100 / population (0
 /// here, see the module) and their totals recomputed (`0x00AAA010`, `0x00AB3EA0`). `None` for a region
 /// not in the campaign.
@@ -370,19 +508,22 @@ pub fn project(model: &CampaignModel, region: RegionId) -> Option<Projection> {
     let reg = model.world.regions.get(&region)?;
     let rebel = model.is_rebel_faction(reg.owner);
     let set = super::economy::region_effect_set(model, reg);
-    let hostile = hostile_units(model, reg);
-    let mut current = growth_factors(model, reg, reg.population, &reg.population_state, &FactorInputs { set: &set, hostile_units: hostile });
+    let own = FactorInputs::of(model, reg, &set);
+    let mut current = growth_factors(model, reg, reg.population, &reg.population_state, &own);
     let mut current_religions = reg.religions.clone();
     if !rebel {
         normalise_religions(&mut current_religions);
     }
-    // The growth rule in use (seam `population.grow`); a projection drops the rule's mod-state writes.
+    // The class and growth rules in use (seams `population.class_round`, `population.grow`), in the round
+    // end's order; a projection drops the rules' mod-state writes.
+    let classes = model.rules.seams.population_class_round.rule()(model, reg, &mut ModWrites::default());
     let (population, grown) = model.rules.seams.population_grow.rule()(model, reg, reg.population, &current, &mut ModWrites::default());
     let mut religions = current_religions.clone();
     let flows = model.conversion_flows_for(reg, population, &religions, &set);
     super::religion::apply_conversion(&mut religions, &flows, population);
     let predicted_set = predicted_effect_set(model, reg);
-    let mut predicted = growth_factors(model, reg, population, &grown, &FactorInputs { set: &predicted_set, hostile_units: hostile });
+    let input = FactorInputs { set: &predicted_set, hostile_units: own.hostile_units, classes: &classes, religions: &religions };
+    let mut predicted = growth_factors(model, reg, population, &grown, &input);
     if !rebel {
         normalise_religions(&mut religions);
     }
@@ -390,7 +531,7 @@ pub fn project(model: &CampaignModel, region: RegionId) -> Option<Projection> {
         s.factors[5] = hundredths(0.0);
         s.growth = total(&s.factors);
     }
-    Some(Projection { current, current_religions, population, predicted, religions, set: predicted_set })
+    Some(Projection { current, current_religions, population, predicted, religions, classes, set: predicted_set })
 }
 
 impl CampaignModel {
@@ -405,7 +546,9 @@ impl CampaignModel {
     ///
     /// So the rebels' and out-of-game factions' regions keep their factors through both.
     pub fn refresh_population_factors(&mut self) {
-        // The faction set once per refresh: `in_the_game` may scan every region and force (old saves).
+        // In any order: both passes walk the faction region list (`0x008F1FB3`, `0x008E1040`), but each region's
+        // factors read only that region's own state, which no other region's refresh writes.
+        // The faction set once per refresh: `in_the_game` may scan every region and character (old saves).
         let listed: BTreeSet<FactionId> =
             self.world.factions.keys().copied().filter(|&f| !self.is_rebel_faction(f) && self.in_the_game(f)).collect();
         let updates: Vec<(RegionId, PopulationState)> = self
@@ -415,7 +558,7 @@ impl CampaignModel {
             .filter(|r| listed.contains(&r.owner))
             .map(|r| {
                 let set = super::economy::region_effect_set(self, r);
-                let input = FactorInputs { set: &set, hostile_units: hostile_units(self, r) };
+                let input = FactorInputs::of(self, r, &set);
                 (r.id, growth_factors(self, r, r.population, &r.population_state, &input))
             })
             .collect();
@@ -429,13 +572,24 @@ impl CampaignModel {
     }
 
     /// The round end's population step of `faction`'s regions (`0x00AB42F0` → `0x00AB3FF0` → `0x00AB4070`):
-    /// each grows by its stored factors, then its religions convert on the new population (`0x00A63FE0`).
-    /// The growth is the rule in use (seam `population.grow`, [`grow`] in vanilla); its mod-state writes
-    /// apply before the next region grows.
+    /// each region's classes take their round-end passes first (seam `population.class_round`, [`class_round`]
+    /// in vanilla), then it grows by its stored factors, then its religions convert on the new population
+    /// (`0x00A63FE0`). The growth is the rule in use (seam `population.grow`, [`grow`] in vanilla). Each rule's
+    /// mod-state writes apply before the next rule runs.
+    ///
+    /// The regions in the faction's region list order (`0x008BC68E`–`0x008BC6C3` walks +0x778 / +0x77C,
+    /// CONFIRMED; [`super::world::World::faction_regions_in_list_order`]). The vanilla rules read only their
+    /// own region, so the order shows only through a mod rule's state writes, which the next region's rule sees.
     pub fn population_round_end(&mut self, faction: FactionId) {
-        let regions: Vec<RegionId> = self.world.regions.values().filter(|r| r.owner == faction).map(|r| r.id).collect();
+        let regions = self.world.faction_regions_in_list_order(faction);
         let mut writes = ModWrites::default();
         for id in regions {
+            let Some(reg) = self.world.regions.get(&id) else { continue };
+            let classes = self.rules.seams.population_class_round.rule()(self, reg, &mut writes);
+            if let Some(r) = self.world.regions.get_mut(&id) {
+                r.class_bases = classes;
+            }
+            self.mod_state.apply(&mut writes);
             let Some(reg) = self.world.regions.get(&id) else { continue };
             let (pop, state) = self.rules.seams.population_grow.rule()(self, reg, reg.population, &reg.population_state, &mut writes);
             if let Some(r) = self.world.regions.get_mut(&id) {
@@ -445,5 +599,40 @@ impl CampaignModel {
             self.mod_state.apply(&mut writes);
             self.convert_region(id);
         }
+    }
+
+    /// Gives `region` its government's two classes ([`super::economy::government_class_bases`] of `faction`,
+    /// the one place that rule lives) when it has none (a region loaded without `POPULATION_CLASS` entries:
+    /// every region of the original's files has them, `0x008861E0`). What a class change needs to have
+    /// something to change.
+    pub fn ensure_population_classes(&mut self, region: RegionId, faction: FactionId) {
+        if self.world.regions.get(&region).is_some_and(|r| r.class_bases.is_empty()) {
+            let classes = super::economy::government_class_bases(self, faction);
+            if let Some(r) = self.world.regions.get_mut(&region) {
+                r.class_bases = classes;
+            }
+        }
+    }
+
+    /// `region`'s classes' war factor moved by `event` against `other` (`0x00A633F0`, reached through the thunk
+    /// `0x00A63490`, CONFIRMED by disassembly): only while the region is its owner's capital (`0x008B3790`
+    /// compared with the region); then each class (`0x00A63430`) takes the rule in use (seam
+    /// `population.class_war`, [`class_war_change`] in vanilla) with the region's owner and `other`.
+    pub fn move_class_war(&mut self, region: RegionId, event: ClassWarEvent, other: FactionId) {
+        let Some(owner) = self.world.regions.get(&region).map(|r| r.owner) else { return };
+        if !self.world.is_capital(region) {
+            return;
+        }
+        self.ensure_population_classes(region, owner);
+        let Some(reg) = self.world.regions.get(&region) else { return };
+        let mut writes = ModWrites::default();
+        let rule = self.rules.seams.population_class_war.rule();
+        let war: Vec<i32> = reg.class_bases.iter().map(|c| rule(self, &c.class, event, owner, other, c.war, &mut writes)).collect();
+        if let Some(r) = self.world.regions.get_mut(&region) {
+            for (c, w) in r.class_bases.iter_mut().zip(war) {
+                c.war = w;
+            }
+        }
+        self.mod_state.apply(&mut writes);
     }
 }

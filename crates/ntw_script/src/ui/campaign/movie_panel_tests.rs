@@ -1,9 +1,10 @@
 //! Tests of the defeat / victory movie panel's engine side ([`UiScriptHost::campaign_outcome_movie`],
 //! `AttachCustomControl`, `CampaignUI.QuitToMainScreen` / `MovieDismissed` / `ContinueGameSelected`).
 
+use ntw_formats::loc::{LocEntry, LocFile, Localisation};
 use ntw_sim::campaign::outcome::{MovieExit, OutcomeMovie};
 
-use super::tests::{A, TestHud, test_hud};
+use super::tests::{A, HudSetup, TestHud, test_hud, test_hud_setup};
 use super::*;
 
 /// The root records the panel data the engine hands `InitialiseMoviePanel` (a stand-in for
@@ -15,12 +16,13 @@ fn record_movie_panel(hud: &TestHud) -> Table {
 }
 
 fn defeat() -> OutcomeMovie {
-    OutcomeMovie { event: "game_lost_france".into(), movie: "EUR_Lose_FR.bik".into(), exit: MovieExit::ExitGame, show_everyone: true, only_local_faction: true }
+    OutcomeMovie { event: "game_lost_france".into(), culture: "european".into(), movie: "EUR_Lose_FR.bik".into(), exit: MovieExit::ExitGame, show_everyone: true, only_local_faction: true }
 }
 
 fn victory() -> OutcomeMovie {
     OutcomeMovie {
         event: "game_victory_absolute_monachy".into(),
+        culture: "european".into(),
         movie: "EUR_MON_VIC.bik".into(),
         exit: MovieExit::ShowVictoryOptionsPopup,
         show_everyone: false,
@@ -35,7 +37,8 @@ fn an_outcome_movie_opens_the_movie_panel_with_the_exes_data() {
     assert!(hud.host.campaign_outcome_movie(A, &defeat()));
     let data: Table = panels.get(1).unwrap();
     assert_eq!(data.get::<String>("bink_control_ptr").unwrap(), "EUR_Lose_FR.bik");
-    assert_eq!(data.get::<Option<String>>("title").unwrap(), None, "PROVISIONAL: no title yet");
+    // No loc string: an empty title, logged once.
+    assert_eq!(data.get::<String>("title").unwrap(), "");
     let d: Table = data.get("Data").unwrap();
     assert_eq!(d.get::<String>("ExitFunction").unwrap(), "ExitGame");
     assert!(d.get::<bool>("show_everyone").unwrap());
@@ -46,7 +49,31 @@ fn an_outcome_movie_opens_the_movie_panel_with_the_exes_data() {
     let d: Table = panels.get::<Table>(2).unwrap().get("Data").unwrap();
     assert_eq!(d.get::<String>("ExitFunction").unwrap(), "ShowVictoryOptionsPopup");
     assert!(!d.get::<bool>("show_everyone").unwrap());
-    assert!(hud.errors().is_empty(), "{:?}", hud.errors());
+    let log = hud.host.take_log();
+    // The missing title string logs "UNKNOWN no loc string"; any other ERROR / UNKNOWN CampaignUI line fails.
+    assert!(!log.iter().any(|l| l.starts_with("ERROR") || l.starts_with("UNKNOWN CampaignUI")), "{log:?}");
+    assert_eq!(log.iter().filter(|l| l.contains("movie_event_strings_title_game_lost_franceeuropean")).count(), 1, "{log:?}");
+}
+
+/// The title is the row's loc text, `movie_event_strings_title_<event><culture>` (`0x00F57D60`).
+#[test]
+fn the_movie_panel_title_is_the_rows_loc_text() {
+    let mut loc = Localisation::new();
+    let entry = |k: &str, t: &str| LocEntry { key: k.into(), text: t.into(), flag: false };
+    loc.add(&LocFile {
+        version: 1,
+        entries: vec![
+            entry("movie_event_strings_title_game_lost_franceeuropean", "Faction Destroyed"),
+            entry("movie_event_strings_title_game_victory_absolute_monachyeuropean", "Supreme Victory"),
+        ],
+    });
+    let hud = test_hud_setup(GameDatabase::test_fixture(), HudSetup { loc, ..HudSetup::default() });
+    let panels = record_movie_panel(&hud);
+    assert!(hud.host.campaign_outcome_movie(A, &defeat()));
+    assert!(hud.host.campaign_outcome_movie(A, &victory()));
+    let title = |i: usize| panels.get::<Table>(i).unwrap().get::<String>("title").unwrap();
+    assert_eq!((title(1), title(2)), ("Faction Destroyed".to_owned(), "Supreme Victory".to_owned()));
+    assert!(!hud.host.take_log().iter().any(|l| l.contains("movie_event_strings_title")));
 }
 
 #[test]

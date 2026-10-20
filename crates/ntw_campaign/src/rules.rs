@@ -12,6 +12,13 @@ use ntw_sim::unit_kind::Category;
 /// the faction's key with this literal (CONFIRMED).
 const NO_RIVAL_FACTION: &str = "pirates";
 
+/// Reports, once at load, a link a row of `table` (the row of `row`) cannot make because `key` is not
+/// a key of `target`: the exe's table lookup logs "In table %S: '%S' is not a valid key for this
+/// table" there (e.g. `0x00F21A30`) and drops the link.
+fn invalid_key(table: &str, row: &str, target: &str, key: &str) {
+    log::warn!("In table {table}: '{key}' is not a valid key of {target} (row of {row}); the link is dropped");
+}
+
 /// Copies every table the campaign rules use, with `campaign`'s per-campaign variable overrides
 /// (`campaigns_campaign_variables_junctions`) applied and the exe's rule switches for the key
 /// ([`crate::features::original`]; a source with its own sets them in [`crate::source::open`]).
@@ -68,6 +75,15 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
     let chain_class = |chain: &str| -> i32 {
         c.building_chains.iter().find(|x| x.key == chain).and_then(|x| x.class_number.as_deref()).and_then(|s| s.parse().ok()).unwrap_or(0)
     };
+    // `building_chains` #1 as the technology thread (`0x00F21E60`, exact case; anything else is 3).
+    let chain_thread = |chain: &str| -> i32 {
+        match c.building_chains.iter().find(|x| x.key == chain).and_then(|x| x.group.as_deref()) {
+            Some("military") => 0,
+            Some("industry") => 1,
+            Some("enlightenment") => 2,
+            _ => ntw_sim::campaign::rules::NO_THREAD,
+        }
+    };
     for b in &db.building_levels {
         r.buildings.insert(
             b.key.clone(),
@@ -77,6 +93,7 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
                 cost: b.cost,
                 turns: b.construction_turns.max(1) as u32,
                 chain_class: chain_class(&b.chain),
+                chain_thread: chain_thread(&b.chain),
                 ..Default::default()
             },
         );
@@ -113,13 +130,53 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
         r.commodity_demand.push((x.commodity.clone(), x.driver.clone(), x.factor, x.weight));
     }
     for t in db.technologies.iter() {
-        r.technologies.insert(t.key.clone(), TechRules { cost: t.research_cost, building_level: t.building_level.clone(), requires: Vec::new(), factions: Vec::new() });
+        // The thread is the building level's chain record +0xC (linker `0x00F21A30`); a technology
+        // without a known level has none. ORIGINAL BUG: the exe logs the unknown key, leaves record
+        // +0x5C null and its availability walk `0x008F91F0` then dereferences it (a crash); ours
+        // logs it here and never opens the technology (`update_tech_availability`).
+        let thread = match r.buildings.get(&t.building_level) {
+            Some(b) => b.chain_thread,
+            None => {
+                invalid_key("technologies", &t.key, "building_levels", &t.building_level);
+                ntw_sim::campaign::rules::NO_THREAD
+            }
+        } as usize;
+        r.technologies.insert(t.key.clone(), TechRules { cost: t.research_cost, building_level: t.building_level.clone(), thread, ..Default::default() });
     }
+    // `technology_required_building_levels_junctions` (linker `0x00F21A30`): a row naming no
+    // technology or no building level is dropped (logged once, here).
+    for q in c.tech_building_levels.iter() {
+        let table = "technology_required_building_levels_junctions";
+        if !r.buildings.contains_key(&q.building) {
+            invalid_key(table, &q.technology, "building_levels", &q.building);
+        } else if let Some(t) = r.technologies.get_mut(&q.technology) {
+            t.required_buildings.push(q.building.clone());
+        } else {
+            invalid_key(table, &q.technology, "technologies", &q.technology);
+        }
+    }
+    // `unit_required_technology_junctions`, linked at load by `0x00EA9B10` (CONFIRMED): for each built
+    // unit, each row naming it (exact case) in table order adds its technology to the unit's list, unless
+    // the technology is no `technologies` key (logged, row dropped). A row naming no built unit matches
+    // nothing and is dropped without a log in the exe; ours logs it too (once, here).
     for u in c.unit_techs.iter() {
-        r.unit_techs.entry(u.unit.clone()).or_default().push(u.technology.clone());
+        let table = "unit_required_technology_junctions";
+        if !r.units.contains_key(&u.unit) {
+            log::warn!("In table {table}: '{}' is not a unit (row requiring {}); the row is dropped", u.unit, u.technology);
+        } else if r.technologies.contains_key(&u.technology) {
+            r.unit_techs.entry(u.unit.clone()).or_default().push(u.technology.clone());
+        } else {
+            invalid_key(table, &u.unit, "technologies", &u.technology);
+        }
     }
+    // The building level linker `0x00DDF300` drops a row whose technology is not a `technologies` key
+    // (logged once, here).
     for b in c.building_techs.iter() {
-        r.building_techs.entry(b.building.clone()).or_default().push(b.technology.clone());
+        if r.technologies.contains_key(&b.technology) {
+            r.building_techs.entry(b.building.clone()).or_default().push(b.technology.clone());
+        } else {
+            invalid_key("building_level_required_technology_junctions", &b.building, "technologies", &b.technology);
+        }
     }
     for g in c.government_relations.iter() {
         r.government_relations.insert((g.government.clone(), g.other.clone()), (g.limit, g.value));
@@ -205,9 +262,24 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
     for ch in c.chains.iter() {
         r.chain_kinds.insert(ch.key.clone(), ch.kind.as_deref().and_then(|s| s.trim().parse().ok()).unwrap_or(0));
     }
+    // `technology_required_technology_junctions` (linker `0x00F21A30`'s second pass): a row naming an
+    // unknown technology is dropped (logged once, here); a requirement of the same tree (the same chain
+    // pair) becomes the single requirement +0x60, each such row overwriting the last.
+    let pair = |r: &CampaignRules, tech: &str| r.technologies.get(tech).and_then(|t| r.buildings.get(&t.building_level)).map(BuildingRules::chain_pair);
     for q in c.tech_requirements.iter() {
+        let table = "technology_required_technology_junctions";
+        if !r.technologies.contains_key(&q.required) {
+            invalid_key(table, &q.technology, "technologies", &q.required);
+            continue;
+        }
+        let same_tree = pair(&r, &q.technology).is_some_and(|p| pair(&r, &q.required) == Some(p));
         if let Some(t) = r.technologies.get_mut(&q.technology) {
             t.requires.push(q.required.clone());
+            if same_tree {
+                t.parent = Some(q.required.clone());
+            }
+        } else {
+            invalid_key(table, &q.technology, "technologies", &q.technology);
         }
     }
     // `technology_faction_junctions`: the row builder `0x00F20F00` keeps each faction once (a hash set).
@@ -220,6 +292,7 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
     }
     for g in c.government_types.iter() {
         r.government_classes.insert(g.key.clone(), (g.upper_class.clone(), g.lower_class.clone()));
+        r.government_ranks.insert(g.key.clone(), g.value);
     }
     for x in c.religion_relations.iter() {
         r.religion_relations.insert((x.religion.clone(), x.other.clone()), x.value);
@@ -241,6 +314,9 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
             r.agent_religions.insert(a.key.clone(), rel.clone());
         }
         r.agent_sight.insert(a.key.clone(), a.unknown_1c);
+        if !a.residence_limited {
+            r.residence_exempt_agents.insert(a.key.clone());
+        }
         if !a.primary_attribute.is_empty() {
             r.agent_primary_attributes.insert(a.key.clone(), a.primary_attribute.clone());
         }
@@ -498,6 +574,10 @@ pub fn character_rules_from_db(db: &GameDatabase) -> ntw_sim::campaign::characte
     }
     for s in &t.subcultures {
         r.subculture_culture.insert(s.key.clone(), s.culture.clone());
+    }
+    // `agent_to_agent_attributes`, copied in table order by the character maker `0x00992E60`.
+    for x in &t.agent_start_attributes {
+        r.agent_attributes.entry(x.agent.clone()).or_default().push((x.attribute.clone(), x.level));
     }
     r
 }

@@ -15,7 +15,7 @@ fn faction_events(ev: &[CampaignEvent]) -> Vec<(&'static str, FactionId)> {
 }
 
 /// Makes `f` the rebel faction (no key, no diplomacy records), as in the startpos `REBEL_FACTION`.
-fn make_rebels(m: &mut CampaignModel, f: FactionId) {
+pub(super) fn make_rebels(m: &mut CampaignModel, f: FactionId) {
     m.world.factions.get_mut(&f).unwrap().key.clear();
     m.world.relationships.retain(|(a, b), _| *a != f && *b != f);
     for x in m.world.factions.values_mut() {
@@ -159,7 +159,7 @@ fn the_round_start_price_update_keeps_the_price_history() {
 
 /// [`split_model`] with the price history of [`the_round_start_price_update_keeps_the_price_history`] (the
 /// update gives 140, trend 0) and the prices still at 10.
-fn price_model() -> CampaignModel {
+pub(super) fn price_model() -> CampaignModel {
     let mut m = split_model(&["c0"], vec![100]);
     m.world.commodity_market = super::super::trade::CommodityMarket {
         initial: vec![10],
@@ -171,9 +171,32 @@ fn price_model() -> CampaignModel {
     m
 }
 
-fn price_state(m: &CampaignModel) -> (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>) {
+pub(super) fn price_state(m: &CampaignModel) -> (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>) {
     let mk = &m.world.commodity_market;
     (m.world.commodity_prices.clone(), mk.previous.clone(), mk.previous2.clone(), mk.trend.clone())
+}
+
+/// Ending a siege runs the price update with flag 0 (`0x008BD550` → `0x00BCB020(0)` at `0x008BD65B`), from
+/// every path (here the call itself and a destroyed besieger, `0x0088CE30` → `0x008BD550`); a force that
+/// holds no siege runs none.
+#[test]
+fn ending_a_siege_updates_the_prices_keeping_the_history() {
+    let besieged = || {
+        let mut m = price_model();
+        m.world.regions.get_mut(&RegionId(10)).unwrap().siege.besiegers = vec![ForceId(1001)];
+        m
+    };
+    let updated = (vec![140], vec![100], vec![120], vec![0]);
+    let mut m = besieged();
+    m.end_force_siege(ForceId(1000));
+    assert_eq!(price_state(&m), (vec![10], vec![100], vec![120], vec![9]), "no siege held: no update");
+    m.end_force_siege(ForceId(1001));
+    assert!(!m.world.regions[&RegionId(10)].siege.under_siege());
+    assert_eq!(price_state(&m), updated);
+    let mut m = besieged();
+    m.destroy_force(ForceId(1001), &mut Vec::new());
+    assert!(!m.world.regions[&RegionId(10)].siege.under_siege());
+    assert_eq!(price_state(&m), updated, "a destroyed besieger");
 }
 
 /// A region lost mid-turn by a faction other than the rebels runs the price update with flag 0 at the end of
@@ -298,4 +321,245 @@ fn the_faction_registry_holds_every_faction_but_the_rebels() {
     assert!(m.registry_faction("").is_none(), "the rebels");
     assert!(m.registry_faction("rebels").is_none(), "no faction has the key \"rebels\"");
     assert!(m.registry_faction("nobody").is_none(), "an unknown key");
+}
+
+/// regionwalk: the faction turn start updates the faction's regions in its region list order (faction
+/// +0x778 count / +0x77C data, walked front to back at `0x008F2AF6` → `0x00AAE820`), not by id: A owns
+/// regions 10 and 12, listed 12 first.
+#[test]
+fn the_turn_start_updates_the_regions_in_the_faction_list_order() {
+    let region_starts = |order: [u32; 3]| {
+        let mut m = test_model();
+        m.turn.humans = vec![A];
+        m.world.region_order = order.map(RegionId).to_vec();
+        let ev = m.start_campaign();
+        // A's turn start comes last in the start events (B plays first as AI).
+        let a_start = ev.iter().rposition(|e| matches!(e, CampaignEvent::CharacterTurnStart { .. })).unwrap();
+        ev[a_start..]
+            .iter()
+            .filter_map(|e| match e {
+                CampaignEvent::RegionTurnStart { region } => Some(region.raw()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(region_starts([10, 11, 12]), vec![10, 12]);
+    assert_eq!(region_starts([12, 11, 10]), vec![12, 10], "not id order");
+}
+
+/// regionwalk fix 1: the faction turn end walks the same region list (`0x008BD1E1` → `0x00A786C0`), not
+/// the ids. A region gained in play joins the list's end (`0x008CF7D0`); a lost one leaves it and the
+/// rest keep their order (`0x008B0210`).
+#[test]
+fn the_turn_end_walks_the_faction_list_with_gains_last_and_losses_dropped() {
+    let mut m = test_model();
+    m.turn.humans = vec![A];
+    m.world.regions.insert(RegionId(13), region(13, A, 1000, 0));
+    // A's list: 13, 12, 10 (id order would be 10, 12, 13).
+    m.world.region_order = [13, 12, 11, 10].map(RegionId).to_vec();
+    m.start_campaign();
+    assert!(m.transfer_region(RegionId(11), A), "gained: to the end");
+    assert_eq!(m.world.faction_regions_in_list_order(A), [13, 12, 10, 11].map(RegionId));
+    assert!(m.transfer_region(RegionId(12), B), "lost: removed");
+    assert_eq!(m.world.faction_regions_in_list_order(A), [13, 10, 11].map(RegionId));
+    let region_ends: Vec<u32> = a_turn_end(&mut m)
+        .iter()
+        .filter_map(|e| match e {
+            CampaignEvent::RegionTurnEnd { region } => Some(region.raw()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(region_ends, vec![13, 10, 11]);
+}
+
+/// rebelresearch: the faction turn start opens the technologies whose building the faction owns
+/// (research availability `0x008F91F0`, through `0x008AE3B0` at `0x008F2B40`), but not for the rebels:
+/// their branch (`IsFactionWithoutRecord` `0x008CEEF0`, the JNZ at `0x008F28E1` → `0x008F2B47`) walks
+/// only the characters and the regions and joins past it at `0x008F2BB1`. A and the rebels (B) each own
+/// a region with the test building and hold one technology that needs it, unavailable.
+#[test]
+fn the_rebels_turn_start_skips_research_availability() {
+    use super::research::state;
+    use super::rules::TechRules;
+    let mut m = test_model();
+    make_rebels(&mut m, B);
+    m.turn.humans = vec![C];
+    set_details(&mut m, C, None, false);
+    let mut rules = (*m.rules).clone();
+    rules.technologies.insert("t1".into(), TechRules { cost: 25, building_level: "test_building_level".into(), requires: vec![], factions: vec![], thread: 2, ..Default::default() });
+    m.rules = Arc::new(rules);
+    for f in [A, B] {
+        m.world.faction_details.entry(f).or_default().technologies = vec![("t1".into(), state::UNAVAILABLE)];
+    }
+    // Turn order A, C (human), then the rebels B: A's turn start runs before C stops.
+    m.start_campaign();
+    assert_eq!(m.tech_state(A, "t1"), Some(state::AVAILABLE), "a normal faction's turn start opens it");
+    assert_eq!(m.tech_state(B, "t1"), Some(state::UNAVAILABLE));
+    // Step C's turn end and the rebels' turn start, up to their FactionTurnStart (before the round end).
+    m.begin_end_turn();
+    let mut rebels_started = false;
+    while let Some(ev) = m.step() {
+        if ev.iter().any(|e| matches!(e, CampaignEvent::FactionTurnStart { faction } if *faction == B)) {
+            rebels_started = true;
+            break;
+        }
+    }
+    assert!(rebels_started, "the rebels' turn start ran");
+    assert_eq!(m.tech_state(B, "t1"), Some(state::UNAVAILABLE), "the rebels' turn start leaves it");
+}
+
+/// rebelresearch: the rebels' turn start skips the reinforcement manager too (`0x00B71FA0` at `0x008F2B35`
+/// sits on the branch their JNZ at `0x008F28E1` jumps past, to `0x008F2B47`): a rebel army raised for a
+/// rebel commander one step away neither marches to him nor loses its entry.
+#[test]
+fn the_rebels_turn_start_skips_reinforcement_march() {
+    let mut m = test_model();
+    make_rebels(&mut m, B);
+    m.turn.humans = vec![C];
+    set_details(&mut m, C, None, false);
+    // B's colonel 101 leads army 1001 at (0, 0); B's general 104 leads army 1004 at (1, 0).
+    let mut general = character(104, B, CharacterKind::General, 30);
+    general.position = pos(1, 0);
+    m.world.characters.insert(general.id, general);
+    m.world.forces.insert(
+        ForceId(1004),
+        MilitaryForce { id: ForceId(1004), faction: B, commander: Some(CharacterId(104)), units: vec![unit(5)], is_navy: false },
+    );
+    let entry = Reinforcement { source: CharacterId(101), target: CharacterId(104), settlement: RegionId(11) };
+    m.world.reinforcements = vec![entry];
+    // Turn order A, C (human), then the rebels B.
+    m.start_campaign();
+    m.begin_end_turn();
+    let mut rebels_started = false;
+    while let Some(ev) = m.step() {
+        assert!(!ev.iter().any(|e| matches!(e, CampaignEvent::CampaignArmiesMerge { .. })), "nothing merges: {ev:?}");
+        if ev.iter().any(|e| matches!(e, CampaignEvent::FactionTurnStart { faction } if *faction == B)) {
+            rebels_started = true;
+            break;
+        }
+    }
+    assert!(rebels_started, "the rebels' turn start ran");
+    assert_eq!(m.world.reinforcements, vec![entry], "the entry is kept");
+    assert_eq!(m.world.forces[&ForceId(1001)].units.len(), 2, "the army stays where it was");
+    assert_eq!(m.world.forces[&ForceId(1004)].units.len(), 1);
+    assert_eq!(m.world.characters[&CharacterId(101)].position, pos(0, 0));
+}
+
+/// rebelroundend: the round-end economy (`0x008BC650`) settles only a faction with a record still in the game
+/// (`0x008CEEF0` at `0x008BC65D`, faction +0x824 at `0x008BC666`, both before `0x00BABE30`): the rebels and a
+/// faction out of the game, each with a running record worth 50, keep their treasury and record ring, while
+/// the rebels' regions still take their town wealth step (`0x008BC685` tests only +0x824 before `0x00AB42F0`).
+#[test]
+fn the_round_end_economy_skips_the_rebels_settle() {
+    let mut m = test_model();
+    make_rebels(&mut m, B);
+    m.turn.humans = vec![A];
+    assert!(!m.in_the_game(C) && m.in_the_game(B) && m.world.regions[&RegionId(11)].owner == B);
+    m.start_campaign();
+    m.begin_end_turn();
+    // Up to the first faction's economy: the round end's first pass has run.
+    while m.turn.queue.front().is_some_and(|s| !matches!(s, TurnStep::Economy(_))) {
+        m.step();
+    }
+    for f in [A, B, C] {
+        let mut record = [0; 25];
+        record[11] = 50;
+        m.world.economy_history.insert(f, vec![record]);
+        m.world.factions.get_mut(&f).unwrap().treasury = 1000;
+    }
+    m.world.regions.get_mut(&RegionId(11)).unwrap().town_wealth_growth = i32::MIN;
+    while let Some(TurnStep::Economy(_)) = m.turn.queue.front() {
+        m.step();
+    }
+    assert_eq!(m.world.economy_history[&A].len(), 2, "A settled and rolled its record");
+    assert_ne!(m.world.factions[&A].treasury, 1000, "A was paid");
+    for f in [B, C] {
+        assert_eq!(m.world.factions[&f].treasury, 1000, "{f:?} pays nothing");
+        assert_eq!(m.world.economy_history[&f].len(), 1, "{f:?} keeps its record ring");
+    }
+    assert_ne!(m.world.regions[&RegionId(11)].town_wealth_growth, i32::MIN, "the rebels' region growth was recomputed");
+}
+
+/// The events of the human A's turn end (`0x008BD0F0`) and nothing else: ends A's turn and runs only
+/// its first step (`TurnStep::FactionEnd`), which closes with `FactionTurnEnd`.
+fn a_turn_end(m: &mut CampaignModel) -> Vec<CampaignEvent> {
+    assert_eq!((m.turn.current, m.turn.in_turn, m.has_pending_steps()), (Some(A), true, false), "A's turn, nothing queued");
+    m.begin_end_turn();
+    let end = m.step().expect("A's turn end is queued");
+    assert_eq!(end.last(), Some(&CampaignEvent::FactionTurnEnd { faction: A }), "the step is A's whole turn end");
+    end
+}
+
+/// charwalk: the faction turn start (`0x008F2AC4` → `0x00A24EB0`) and turn end (`0x008BD1AF` →
+/// `0x009DA210`) walk the faction's character list (+0x764 / +0x768) front to back, not the ids. A
+/// character made in play joins the list's end (`0x008CF6B0`); a removed one leaves it and the rest keep
+/// their order (`0x008B0150`).
+#[test]
+fn the_turn_walks_the_faction_character_list_with_gains_last_and_losses_dropped() {
+    let mut m = test_model();
+    m.turn.humans = vec![A];
+    m.world.characters.insert(CharacterId(103), character(103, A, CharacterKind::General, 30));
+    // A's list: 103, 102, 100 (id order would be 100, 102, 103); 101 is B's.
+    m.world.character_order = [103, 101, 102, 100].map(CharacterId).to_vec();
+    m.start_campaign();
+    let made = CharacterId(m.world.alloc_id() as i32);
+    m.world.characters.insert(made, character(made.0, A, CharacterKind::Colonel, 20));
+    assert!(m.world.remove_character(CharacterId(102)).is_some(), "lost: removed");
+    let expected = vec![CharacterId(103), CharacterId(100), made];
+    assert_eq!(m.world.faction_characters_in_list_order(A), expected, "made in play: at the end");
+    let of_a = |m: &CampaignModel, ev: &[CampaignEvent], end: bool| -> Vec<CharacterId> {
+        ev.iter()
+            .filter_map(|e| match *e {
+                CampaignEvent::CharacterTurnEnd { character } if end => Some(character),
+                CampaignEvent::CharacterTurnStart { character } if !end => Some(character),
+                _ => None,
+            })
+            .filter(|c| m.world.characters.get(c).is_some_and(|x| x.faction == A))
+            .collect()
+    };
+    let end = a_turn_end(&mut m);
+    assert_eq!(of_a(&m, &end, true), expected, "turn end");
+    // The rest of the round, then A's next turn start.
+    let next = m.run_pending();
+    assert!(next.contains(&CampaignEvent::FactionTurnStart { faction: A }), "A's next turn started");
+    assert_eq!(of_a(&m, &next, false), expected, "turn start");
+}
+
+/// idwalks: the round end's population step walks the faction region list too (`0x008BC68E`–`0x008BC6C3` →
+/// `UpdateRegionRoundEnd` `0x00AB42F0`), not the ids: a MADE-UP mod growth rule that logs each region it
+/// grows in mod state sees a region gained in play last.
+#[test]
+fn the_population_round_end_walks_the_faction_list_with_gains_last() {
+    use super::super::mod_state::{ModKey, ModScope, ModValue, ModWrites};
+    use super::super::population::PopulationState;
+    use super::super::seams::{CampaignRuleRegistry, PopulationGrow, POPULATION_GROW};
+    const OWNER: &str = "test_mod.walk_log";
+    let mut reg = CampaignRuleRegistry::default();
+    let maker = |prev: Arc<PopulationGrow>| {
+        Arc::new(move |m: &CampaignModel, r: &Region, pop: u32, s: &PopulationState, w: &mut ModWrites| {
+            let key = ModKey::new(OWNER, ModScope::Campaign, "order");
+            let mut order = match m.mod_state.get(&key) {
+                Some(ModValue::List(v)) => v.clone(),
+                _ => Vec::new(),
+            };
+            order.push(ModValue::Int(i64::from(r.id.raw())));
+            w.set(key, ModValue::List(order));
+            prev(m, r, pop, s, w)
+        }) as Arc<PopulationGrow>
+    };
+    assert!(reg.population_grow.register(OWNER, Arc::new(maker)));
+    let mut warnings = Vec::new();
+    let seams = reg.seams(&[(POPULATION_GROW.to_owned(), OWNER.to_owned())], &mut warnings);
+    assert!(warnings.is_empty());
+    let mut m = test_model();
+    let mut rules = (*m.rules).clone();
+    rules.seams = seams;
+    m.rules = Arc::new(rules);
+    m.world.regions.insert(RegionId(13), region(13, A, 1000, 0));
+    // A's list: 13, 12, 10 (id order would be 10, 12, 13), then 11 gained in play.
+    m.world.region_order = [13, 12, 11, 10].map(RegionId).to_vec();
+    assert!(m.transfer_region(RegionId(11), A), "gained: to the end");
+    m.population_round_end(A);
+    let order = m.mod_state.get(&ModKey::new(OWNER, ModScope::Campaign, "order")).cloned();
+    assert_eq!(order, Some(ModValue::List([13, 12, 10, 11].map(ModValue::Int).to_vec())));
 }

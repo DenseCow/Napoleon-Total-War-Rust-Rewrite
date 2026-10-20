@@ -118,6 +118,7 @@ pub(super) fn test_hud_setup(db: GameDatabase, setup: HudSetup) -> TestHud {
             construction: Vec::new(),
             garrison: None,
             fleet: None,
+            siege: Default::default(),
         },
     );
     let start = Date { year: 1805, season: 1, month: 0, half: HALF_EARLY };
@@ -1034,6 +1035,7 @@ fn agent_button_questions_answer_from_the_model() {
             port: true,
             holder: None,
             id: 7,
+            blockade: None,
         });
         let ch = w.characters.get_mut(&RAKE).unwrap();
         ch.garrisoned_in = None;
@@ -1703,6 +1705,7 @@ fn the_repair_button_reads_the_models_repair_state_and_toggles_the_order() {
             port: true,
             holder: None,
             id: 0,
+            blockade: None,
         });
         w.characters.insert(admiral, ntw_sim::campaign::Character {
             id: admiral,
@@ -2093,6 +2096,38 @@ fn a_proposed_payment_is_capped_once_and_its_row_shows_the_capped_amount() {
         vec![CampaignRequest::Command(CampaignCommand::ProposePayment { clear: true, amount: 0, turns: 0 })]
     );
     assert!(hud.errors().is_empty());
+}
+
+/// The join-war `Propose(offers, demands, action)` (`0x009BF3C0`) reads two tables of faction keys
+/// from the campaign registry into the join-war command; an unknown key proposes nothing (logged
+/// once). The model's record gives a row on its side, enables `CanPropose`, and `RemoveAction`
+/// clears it (`0x00C5CA50`).
+#[test]
+fn a_proposed_join_war_is_the_faction_keys_and_remove_action_clears_it() {
+    let hud = test_hud();
+    negotiation_with_offer(&hud);
+    let script = format!("CampaignUI.Propose({{'test_faction_b'}}, {{'{HUMAN}'}}, 'request_join_war')");
+    let cmd = CampaignCommand::ProposeJoinWar { clear: false, demanded: vec![A], offered: vec![B] };
+    assert_eq!(hud.requests_of(&script), vec![CampaignRequest::Command(cmd.clone())]);
+    assert!(hud.errors().is_empty());
+    assert_eq!(hud.requests_of("CampaignUI.Propose({'no_such_faction'}, {}, 'request_join_war')"), Vec::new());
+    assert_eq!(hud.errors().len(), 1, "an unknown faction key is logged");
+    // An entry of the wrong type is another error, under its own log key: still logged.
+    assert_eq!(hud.requests_of("CampaignUI.Propose({1}, {}, 'request_join_war')"), Vec::new());
+    assert_eq!(hud.errors().len(), 1, "a non-string entry is logged apart from the unknown key");
+
+    hud._scripts.state_mut().model.apply(cmd).unwrap();
+    let (offers, demands, can): (String, String, bool) = hud
+        .host
+        .lua()
+        .load("local o, d = CampaignUI.BuildOfferAndDemandStrings() return o[#o].Action, d[#d].Action, CampaignUI.CanPropose()")
+        .eval()
+        .unwrap();
+    assert_eq!((offers.as_str(), demands.as_str(), can), ("request_join_war", "request_join_war", true));
+    assert_eq!(
+        hud.requests_of("CampaignUI.RemoveAction('request_join_war')"),
+        vec![CampaignRequest::Command(CampaignCommand::ProposeJoinWar { clear: true, demanded: Vec::new(), offered: Vec::new() })]
+    );
 }
 
 /// The payment caps push the treasury (0x00BCAFE0, the HUD's "funds"): MaxPlayer the local

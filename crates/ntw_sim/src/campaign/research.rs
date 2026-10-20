@@ -4,9 +4,9 @@
 //! region's owner holds) researches one technology at a time (`0x008B33B0` / `0x008EEC90`). Each
 //! research step adds the school's rate to the technology's progress (`0x008DD450`); at the cost the
 //! technology is researched: state 0, progress = cost, researcher cleared (`0x008EED20`). Techs
-//! become available (state 4 → 2) once their prerequisites are researched and the faction owns the
-//! tech's building level; they never go back (CONFIRMED writer `0x008F91F0`, see
-//! [`CampaignModel::update_tech_availability`]).
+//! become available (state 4 or 3 → 2) once their prerequisites are researched and the faction owns
+//! a building of the tech's tree at its building level; they never go back (CONFIRMED writer
+//! `0x008F91F0`, see [`CampaignModel::update_tech_availability`]).
 
 use super::effects::{EffectSet, Effects};
 use super::ids::{FactionId, RegionId};
@@ -19,6 +19,9 @@ pub mod state {
     pub const RESEARCHED: u32 = 0;
     /// Available to research (CONFIRMED: research may start in state 2 or 1, 0x008B33B0).
     pub const AVAILABLE: u32 = 2;
+    /// Requirements met but a building level of its list +0x7C is missing (CONFIRMED: set by
+    /// `0x008F91F0`; re-checked on every update like state 4).
+    pub const BUILDING_MISSING: u32 = 3;
     /// Not yet available.
     pub const UNAVAILABLE: u32 = 4;
 }
@@ -34,19 +37,6 @@ pub enum ResearchError {
     NotAvailable,
     /// 4: the faction has no such technology.
     Unknown,
-}
-
-/// The thread of a technology (`0x008EA9F0`, technology record +0x8C), which picks the thread effect:
-/// 0 `research_points_military`, 1 `research_points_industry`, 2 `research_points_enlightenment`.
-/// INFERRED from the key prefix (see CAMPAIGN_FIDELITY.md §Research).
-pub fn thread_of(tech: &str) -> usize {
-    if tech.starts_with("military") {
-        0
-    } else if tech.starts_with("economy") {
-        1
-    } else {
-        2
-    }
 }
 
 /// The inputs of a school's research rate (`0x008EA9F0`).
@@ -100,8 +90,12 @@ impl CampaignModel {
     /// his effective attribute ([`Effects::character_attribute`]). 0 when it is no school.
     /// PROVISIONAL: the army / navy rate mods (`research_rate_mod_army_tech` / `_navy_tech`, added for
     /// military techs whose record names "army-admin" / "navy-admin") are not applied.
+    /// The thread effect is the technology's [`super::rules::TechRules::thread`] (record +0x8C: 0
+    /// `research_points_military`, 1 `research_points_industry`, 2 `research_points_enlightenment`,
+    /// 3 none; CONFIRMED `0x008EA9F0`).
     pub fn research_rate(&self, region: RegionId, slot: usize, tech: &str) -> f32 {
-        self.research_parts(region, slot).map_or(0.0, |p| p.rate(thread_of(tech)))
+        let thread = self.rules.technologies.get(tech).map_or(super::rules::NO_THREAD as usize, |t| t.thread);
+        self.research_parts(region, slot).map_or(0.0, |p| p.rate(thread))
     }
 
     /// The inputs of [`Self::research_rate`] at a school (`None` when it is no school).
@@ -226,24 +220,28 @@ impl CampaignModel {
     }
 
     /// A technology handed over in a deal (`GrantFactionTechnology` `0x008CDCB0(tech, 0, 1, 0)`,
-    /// from the deal's `0x00C18CF0`): researched (`0x008EED20`) when the faction has it at state
-    /// 1..4, then availability is updated (`0x008F91F0`); a technology already researched, or one
-    /// the faction has no entry for, is left alone. Returns true when the technology was
-    /// researched by this.
-    ///
-    /// PROVISIONAL: the exe (`0x008CDCB0`) then walks the technology's single requirement (record
-    /// +0x60) the same way, while each is at state 1..4. The record field +0x60 is not loaded (its
-    /// source is not traced), so the walk is not ported. For the deal's technologies it changes
-    /// nothing: they are at state 1..3 for the receiver ([`CampaignModel::tradeable_technologies`]),
-    /// which the availability rule (`0x008F91F0`) only allows once that requirement is researched,
-    /// so the walk stops at once (UI_FIDELITY.md §4.9).
+    /// from the deal's `0x00C18CF0`, CONFIRMED): while the faction has the technology at state 1..4 it
+    /// is researched (`0x008EED20`) and the walk moves on to its single requirement
+    /// ([`super::rules::TechRules::parent`], record +0x60), stopping at none or one the faction has no
+    /// entry for. Then availability is always updated (`0x008F91F0`); the technology effects follow
+    /// from the states (the exe rebuilds its sum, `0x008E49C0`). A technology already researched, or
+    /// one the faction has no entry for, researches nothing. Returns true when `tech` itself was
+    /// researched by this. For the deal's technologies the walk stops at once: they are at state
+    /// 1..3 for the receiver ([`CampaignModel::tradeable_technologies`]), which the availability
+    /// rule only allows once the parent is researched (UI_FIDELITY.md §4.9).
     pub fn grant_technology(&mut self, faction: FactionId, tech: &str) -> bool {
-        if !self.tech_state(faction, tech).is_some_and(|s| (1..=4).contains(&s)) {
-            return false;
+        let mut next = Some(tech.to_string());
+        let mut granted = false;
+        while let Some(t) = next.take() {
+            if !self.tech_state(faction, &t).is_some_and(|s| (1..=4).contains(&s)) {
+                break;
+            }
+            self.complete_technology(faction, &t);
+            granted |= t == tech;
+            next = self.rules.technologies.get(&t).and_then(|r| r.parent.clone());
         }
-        self.complete_technology(faction, tech);
         self.update_tech_availability(faction);
-        true
+        granted
     }
 
     /// The giver's count of how often it handed `tech` over in a deal goes up by one (technology
@@ -258,47 +256,67 @@ impl CampaignModel {
         }
     }
 
-    /// State 4 → 2 for every technology whose prerequisites are researched and whose building level
-    /// the faction owns (`0x008F91F0`, CONFIRMED structure). For each tech in state 4 or 3: its single
-    /// requirement (record +0x60) must be absent or researched; some slot of an owned region (region
-    /// +0x120 list, `0x008B13E0`; any health, any holder) must hold a building whose chain matches the
-    /// tech's building level (the chain record's +0x10 / +0x14 pair) at that level or higher; every tech
-    /// of the record's list +0x70 (`technology_required_technology_junctions`) must be researched. Then
-    /// the state is 2, or 3 when an item of the list +0x7C fails `0x008B13C0` (INFERRED to be
-    /// `technology_required_building_levels_junctions`, empty in the shipped DB, so 3 never occurs).
-    /// The writer never sets 4, so a tech never goes back. The chain match is modelled as "the chain,
-    /// or a variant whose name starts with it" (`sAdminSpain` for `sAdmin`; INFERRED for the pair).
-    /// Callers in the exe: research step `0x008DD450`, completion `0x008CDCB0`, load `0x008CB8F0`,
-    /// and `0x008CDD60` (after the regions' update). The rule reproduces every stored state of the
-    /// shipped start positions and the vanilla saves.
+    /// State 4 or 3 → 2 (or 3) for every technology whose prerequisites are met (`0x008F91F0`,
+    /// CONFIRMED). For each tech in state 4 or 3, in order:
+    /// - every requirement ([`super::rules::TechRules::requires`]) must be researched;
+    /// - some slot of an owned region (faction region list +0x77C → region +0x120 slots, `0x008B13E0`;
+    ///   any health, any holder) must hold a building whose chain has the same
+    ///   [`super::rules::BuildingRules::chain_pair`] as the tech's building level (chain record +0x10 /
+    ///   +0x14), at that level or higher;
+    /// - otherwise the state is left as it is. Then it is 2 when each level of
+    ///   [`super::rules::TechRules::required_buildings`] (list +0x7C) is held by an owned building of
+    ///   exactly that chain at that level or higher (`0x008B13C0` → `0x008B1330`), else 3.
+    ///
+    /// The writer never sets 4, so a tech never goes back. Callers in the exe: research step
+    /// `0x008DD450`, completion `0x008CDCB0`, load `0x008CB8F0`, `0x008CDD60` (after the regions'
+    /// update), and through the thunk `0x008AE3B0` the faction turn start (`0x008F2B40`, not for the
+    /// rebels: see `TurnStep::FactionReady`) and `AddRegionToFaction` (`0x008AE2D1`, `0x008AE2E3`).
+    /// Ours does not call it on a region gain yet (BACKLOG trace line).
+    /// The rule reproduces every stored state of the shipped start positions and the vanilla saves.
+    ///
+    /// ORIGINAL BUG: the exe checks only the single requirement (record +0x60) and the list +0x70,
+    /// and its linker `0x00F21A30` puts every requirement of the same tree into +0x60, each
+    /// overwriting the last, so all but the last same-tree requirement are never checked. Ours
+    /// checks every requirement (vanilla has at most one per tree, so it is unaffected).
+    ///
+    /// ORIGINAL BUG: a tech whose building level key is unknown keeps a null level (record +0x5C,
+    /// `0x00F21A30`), which this walk (`0x008F91F0`) dereferences unconditionally: a crash. Ours
+    /// never opens such a tech (the loader logs the key).
+    ///
+    /// PROVISIONAL: on 2 the exe posts an event (game +0x4E0 queue, payload the technology
+    /// manager's +0x14, its faction, and the entry), not identified and not ported.
     pub fn update_tech_availability(&mut self, faction: FactionId) {
         let Some(d) = self.world.faction_details.get(&faction) else { return };
-        let owned: Vec<(&str, i32)> = self
+        let owned: Vec<&super::rules::BuildingRules> = self
             .world
             .regions
             .values()
             .filter(|r| r.owner == faction)
             .flat_map(|r| r.slots.iter().filter_map(|s| s.building.as_ref()))
             .filter_map(|b| self.rules.buildings.get(&b.level_key))
-            .map(|b| (b.chain.as_str(), b.level))
             .collect();
         let researched = |k: &str| d.technologies.iter().any(|(x, s)| x == k && *s == state::RESEARCHED);
-        let opens: Vec<String> = d
+        let holds = |need: &super::rules::BuildingRules| owned.iter().any(|b| b.chain == need.chain && b.level >= need.level);
+        let updates: Vec<(usize, u32)> = d
             .technologies
             .iter()
-            .filter(|(_, s)| *s == state::UNAVAILABLE)
-            .filter(|(k, _)| {
-                let Some(t) = self.rules.technologies.get(k) else { return false };
-                let Some(need) = self.rules.buildings.get(&t.building_level) else { return false };
-                t.requires.iter().all(|q| researched(q)) && owned.iter().any(|(c, l)| c.starts_with(need.chain.as_str()) && *l >= need.level)
+            .enumerate()
+            .filter(|(_, (_, s))| *s == state::UNAVAILABLE || *s == state::BUILDING_MISSING)
+            .filter_map(|(i, (k, _))| {
+                let t = self.rules.technologies.get(k)?;
+                let need = self.rules.buildings.get(&t.building_level)?;
+                let tree = need.chain_pair();
+                let met = t.requires.iter().all(|q| researched(q)) && owned.iter().any(|b| b.chain_pair() == tree && b.level >= need.level);
+                if !met {
+                    return None;
+                }
+                let built = t.required_buildings.iter().all(|l| self.rules.buildings.get(l).is_some_and(holds));
+                Some((i, if built { state::AVAILABLE } else { state::BUILDING_MISSING }))
             })
-            .map(|(k, _)| k.clone())
             .collect();
         if let Some(d) = self.world.faction_details.get_mut(&faction) {
-            for (k, s) in d.technologies.iter_mut() {
-                if opens.contains(k) {
-                    *s = state::AVAILABLE;
-                }
+            for (i, s) in updates {
+                d.technologies[i].1 = s;
             }
         }
     }
@@ -318,8 +336,12 @@ impl CampaignModel {
         self.rules.unit_techs.get(unit).is_none_or(|t| self.has_researched(faction, t))
     }
 
-    /// True if `faction` may build `level` as far as technology goes
-    /// (`building_level_required_technology_junctions`; INFERRED gate, of the shape of [`Self::unit_tech_ok`], not traced).
+    /// True if `faction` may build `level` as far as technology goes (CONFIRMED): every technology
+    /// `building_level_required_technology_junctions` links to the level (`0x00DDF300`, level record
+    /// +0x118 / +0x11C; [`super::rules::CampaignRules::building_techs`]) is in state 0; one the
+    /// faction's tree lacks reads as state 5 (`0x008F3DB0`). Failing it flags the construction option
+    /// (flag 8, `BuildSlotConstructionOptionsWithCost` `0x00B43300`), and the construct command,
+    /// which stops on an unavailable option, drops it.
     pub fn building_tech_ok(&self, faction: FactionId, level: &str) -> bool {
         self.rules.building_techs.get(level).is_none_or(|t| self.has_researched(faction, t))
     }

@@ -535,6 +535,8 @@ fn rival_score_in(model: &CampaignModel, areas: &[Area], f: FactionId) -> f32 {
     let pct = |v: &str| rules.float(campaign, v) as f64;
     let (relation_pct, victory_pct, proximity_pct) = (pct(RIVAL_RELATION_PCT), pct(RIVAL_VICTORY_REGIONS_PCT), pct(RIVAL_PROXIMITY_PCT));
     let weight = if model.is_major(f) { 1.0 } else { pct(RIVAL_MINOR_FACTION_WEIGHT) };
+    // A count and a membership test, so any order (the exe counts over the CAI faction's region list,
+    // `0x00A676E0` +0x114, at `0x00BD22BC`–`0x00BD2309`).
     let mine: Vec<RegionId> = model.world.regions.values().filter(|r| r.owner == f).map(|r| r.id).collect();
     // The areas linked to its regions' areas, each once (seas included: they count in the share's
     // denominator, never in its numerator).
@@ -784,6 +786,15 @@ fn ai_order(model: &CampaignModel) -> Vec<FactionId> {
     let w = &model.world;
     let listed: Vec<FactionId> = w.ai_factions.iter().copied().filter(|f| w.factions.contains_key(f)).collect();
     if listed.is_empty() { w.factions.keys().copied().collect() } else { listed }
+}
+
+/// Whether `faction` has a CAI faction (`0x00C3C4E0`; a caller that finds none does nothing, as the
+/// killer's garrison pass `0x00BA80E0`): it is one of [`ai_order`]'s. A file with CAI state lists
+/// them ([`super::World::ai_factions`], `CAI_WORLD_FACTIONS`). A map without it (our own map format,
+/// which has no CAI world) counts every faction of the model as in it, as the director's walks do
+/// ([`ai_order`]): our design, so the director serves those maps too.
+pub(crate) fn in_cai_world(model: &CampaignModel, faction: FactionId) -> bool {
+    ai_order(model).contains(&faction)
 }
 
 /// A faction the director treats as the pirates (the importer's [`DirectorRules::no_rival_keys`],
@@ -1120,9 +1131,9 @@ impl CampaignModel {
     /// start's computed factors (`0x00B71EC0`). The exe's three other broadcasters: the religion
     /// factors set while the start position's diplomacy records are built (`0x00B45EA0` →
     /// `0x00B1B4E0`; [`Self::setup_relationship_factors`]), before any belief exists, so nothing to clear,
-    /// and a trade break both ways (`0x00B73430`) towards the killer of a destroyed faction or on a lost
-    /// trade route: the model's destruction ([`Self::destroy_faction`]) has no killer, so it posts
-    /// none, and the route loss is not in the model (BACKLOG §0-B).
+    /// and a trade break both ways (`0x00B73430`, [`Self::break_trade_both_ways`]) towards the killer of
+    /// a destroyed faction ([`Self::destroy_faction_by`]) or on a lost trade route
+    /// ([`Self::trade_routes_after_region_lost`]), which clears the beliefs itself.
     pub(crate) fn diplomacy_changed(&mut self) {
         self.director.beliefs.clear();
     }
@@ -1186,6 +1197,16 @@ impl CampaignModel {
             self.destroy_force(garrison, events);
         }
         self.take_settlement(region, receiver, None, events);
+        self.spawn_transfer_garrison(region, receiver);
+    }
+
+    /// The receiver's new garrison after a transfer (`0x00BA8400`, CONFIRMED), shared by the director's
+    /// transfer ([`Self::director_transfer`]) and the hand-off of a destroyed faction's regions to its
+    /// killer ([`Self::destroy_faction_by`], `0x00BA8090`): nothing unless the receiver owns the region
+    /// and it has no garrison; then the size is drawn (`int_range(a + 3, 4a + 6)` on the director's RNG,
+    /// `a` 1 for an AI receiver, 0 for a human) and that many units raised from
+    /// [`transfer_garrison_units`], as described at [`Self::director_transfer`].
+    pub(crate) fn spawn_transfer_garrison(&mut self, region: RegionId, receiver: FactionId) {
         if !self.world.regions.get(&region).is_some_and(|r| r.owner == receiver && r.garrison.is_none()) {
             return;
         }
@@ -1416,6 +1437,7 @@ mod tests {
         let mut gone = m.clone();
         gone.world.regions.get_mut(&RegionId(11)).unwrap().owner = A;
         gone.world.forces.retain(|_, f| f.faction != B);
+        gone.world.characters.retain(|_, c| c.faction != B);
         assert_eq!(rival_score(&gone, B), 0.0);
         m.turn.humans.clear();
         assert_eq!(rival_score(&m, B), 0.0);
@@ -1500,7 +1522,7 @@ mod tests {
             ("regular payment", |m| drop(m.regular_payment(A, B, 100, 5).unwrap())),
             ("protectorate", |m| drop(m.make_protectorate(C, A).unwrap())),
             ("join war", |m| drop(m.join_war(A, C, B).unwrap())),
-            ("round end", |m| m.diplomacy_round_end(B)),
+            ("round end", |m| drop(m.diplomacy_round_end(B))),
             ("capture", |m| assert!(m.take_settlement(RegionId(12), A, None, &mut Vec::new()))),
             ("break alliance", |m| {
                 m.form_alliance(A, B).unwrap();
@@ -1891,8 +1913,7 @@ mod tests {
             let mut f = m.world.factions[&C].clone();
             (f.id, f.key, f.diplomacy) = (id, key.into(), BTreeMap::new());
             m.world.factions.insert(id, f);
-            let force = MilitaryForce { id: ForceId(2000 + id.0 as u32), faction: id, commander: None, units: Vec::new(), is_navy: false };
-            m.world.forces.insert(force.id, force);
+            m.world.faction_details.entry(id).or_default().out_of_game = Some(false);
         }
         m.world.set_stance(B, D, Stance::War).unwrap();
         assert!(!m.at_war(C, D) && m.at_war(B, R) && m.at_war(C, R));
@@ -2054,6 +2075,7 @@ mod tests {
             port: false,
             holder: None,
             id: 0,
+            blockade: None,
         });
         m
     }
@@ -2158,5 +2180,65 @@ mod tests {
         assert_eq!(capped(false, "test_slot"), "b_horse");
         assert_eq!(capped(true, PORT_SLOT_TYPE), "b_horse");
         assert_eq!(capped(true, "test_slot"), "c_foot");
+    }
+
+    /// A faction destroyed by a killer (`0x008AB6C0` → `0x00BA80E0` → `0x00BA8090`): the killer's new
+    /// garrison in the handed-over region is drawn and raised as after the director's transfer.
+    #[test]
+    fn a_region_handed_to_a_killer_gets_the_transfer_garrison() {
+        for seed in [RNG_SEED, 1, 2, 3, 77] {
+            let mut m = mixed_world(100);
+            m.director.rng = CaRng::new(seed);
+            let mut one = CaRng::new(seed);
+            let count = one.int_range(4, 10) as usize;
+            assert!(m.destroy_faction_by(C, Some(B), &mut Vec::new()));
+            assert_eq!(m.world.regions[&RegionId(12)].owner, B);
+            assert_eq!(m.director.rng, one, "one draw");
+            let want: Vec<String> = ["c_foot", "b_horse", "a_gun"].iter().cycle().take(count).map(|s| s.to_string()).collect();
+            assert_eq!(garrison_units(&m, RegionId(12)), want);
+        }
+    }
+
+    /// Of more than three handed-over regions the two first by the sort (`0x00B7FEE0` with
+    /// `0x00B7CF1A`: settlement building slots, most first, then recruitable units) get a garrison, in
+    /// that order; with three or fewer, only the first. A human target keeps its regions: none.
+    #[test]
+    fn handed_over_regions_are_garrisoned_in_sorted_order() {
+        let killed = |extra: &[u32]| {
+            let mut m = mixed_world(100);
+            let base = m.world.regions[&RegionId(12)].clone();
+            for &id in extra {
+                let mut r = base.clone();
+                (r.id, r.key) = (RegionId(id), format!("test_region_{id}"));
+                if id == 13 {
+                    // One settlement slot: sorted first.
+                    r.slots.last_mut().unwrap().key = "settlement:test_region_13:town:test_slot:0".into();
+                } else {
+                    r.slots.clear();
+                }
+                m.world.regions.insert(r.id, r);
+            }
+            m.director.rng = CaRng::new(5);
+            assert!(m.destroy_faction_by(C, Some(B), &mut Vec::new()));
+            m
+        };
+        let garrisoned = |m: &CampaignModel| -> Vec<(u32, usize)> {
+            m.world.regions.values().filter_map(|r| Some((r.id.0, m.world.forces[&r.garrison?].units.len()))).collect()
+        };
+        let mut rng = CaRng::new(5);
+        let (first, second) = (rng.int_range(4, 10) as usize, rng.int_range(4, 10) as usize);
+        assert_ne!(first, second, "the seed tells the two garrisons apart");
+        let m = killed(&[13, 14, 15]);
+        assert_eq!(m.director.rng, rng, "two draws");
+        assert_eq!(garrisoned(&m), vec![(12, second), (13, first)]);
+        let m = killed(&[13, 14]);
+        assert_eq!(garrisoned(&m), vec![(13, first)], "three listed: one garrison");
+
+        let mut m = mixed_world(100);
+        m.turn.humans = vec![A, C];
+        let rng = m.director.rng;
+        assert!(m.destroy_faction_by(C, Some(B), &mut Vec::new()));
+        assert_eq!((m.world.regions[&RegionId(12)].owner, m.world.regions[&RegionId(12)].garrison), (C, None));
+        assert_eq!(m.director.rng, rng);
     }
 }

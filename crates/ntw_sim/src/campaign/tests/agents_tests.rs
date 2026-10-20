@@ -148,6 +148,56 @@ fn the_yearly_death_checks_draw_in_list_order() {
     assert_eq!(died(model(1, (100, 100), listed_order())), listed_order());
 }
 
+/// charflag: the family year runs for a faction still in the game (`0x008BC650` tests faction +0x824 at
+/// `0x008BC6D0`), with or without a region, and not for one out of the game, even holding a region
+/// (it was gated on owning a region).
+#[test]
+fn the_family_year_follows_the_out_of_game_flag() {
+    use super::family::{Family, FamilyMember, LEADER};
+    let leader_age = |out: bool, region: bool| {
+        let mut m = test_model();
+        m.calendar.turn_in_year = m.calendar.turns_per_year - 1;
+        if region {
+            m.world.regions.get_mut(&RegionId(11)).unwrap().owner = C;
+        }
+        let mut family = Family { members: vec![FamilyMember::default(); 10], ordinals: Vec::new(), female_heirs: false };
+        family.members[LEADER] = FamilyMember { names: vec!["Karl".into()], male: true, exists: true, age: 60, ..Default::default() };
+        let d = m.world.faction_details.entry(C).or_default();
+        d.family = Some(family);
+        d.out_of_game = Some(out);
+        super::characters::yearly_character_pass(&mut m);
+        m.world.faction_details[&C].family.as_ref().unwrap().members[LEADER].age
+    };
+    assert_eq!(leader_age(false, false), 61, "in the game without a region");
+    assert_eq!(leader_age(false, true), 61);
+    assert_eq!(leader_age(true, false), 60, "out of the game");
+    assert_eq!(leader_age(true, true), 60, "out of the game holding a region");
+}
+
+/// charflag: the rebels have no family year even while in the game (`0x008BC650` tests `0x008CEEF0`
+/// before faction +0x824).
+#[test]
+fn the_rebels_have_no_family_year() {
+    use super::family::{Family, FamilyMember, LEADER};
+    let leader_age = |rebel: bool| {
+        let mut m = test_model();
+        m.calendar.turn_in_year = m.calendar.turns_per_year - 1;
+        if rebel {
+            m.world.factions.get_mut(&C).unwrap().key.clear();
+        }
+        let mut family = Family { members: vec![FamilyMember::default(); 10], ordinals: Vec::new(), female_heirs: false };
+        family.members[LEADER] = FamilyMember { names: vec!["Karl".into()], male: true, exists: true, age: 60, ..Default::default() };
+        let d = m.world.faction_details.entry(C).or_default();
+        d.family = Some(family);
+        d.out_of_game = Some(false);
+        assert_eq!(m.is_rebel_faction(C), rebel);
+        super::characters::yearly_character_pass(&mut m);
+        m.world.faction_details[&C].family.as_ref().unwrap().members[LEADER].age
+    };
+    assert_eq!(leader_age(false), 61, "in the game, not the rebels");
+    assert_eq!(leader_age(true), 60, "the rebels, in the game");
+}
+
 #[test]
 fn agent_rolls_classify_as_the_original() {
     use super::agents::{classify, Outcome};
@@ -525,7 +575,7 @@ fn restricted_units_and_units_without_their_region_resource_are_not_recruitable(
     let r10 = RegionId(10);
     let listed = |m: &CampaignModel, k: &str| m.recruitable_units(r10).iter().any(|e| e.unit_key == k);
     assert!(listed(&m, "test_guard"));
-    m.world.restricted_units.insert("test_guard".into());
+    m.world.restricted_units.push("test_guard".into());
     assert!(!listed(&m, "test_guard") && listed(&m, "test_recruit"));
     assert_eq!(
         m.apply(CampaignCommand::Recruit { region: r10, unit_key: "test_guard".into(), target: None }),
@@ -543,11 +593,33 @@ fn restricted_units_and_units_without_their_region_resource_are_not_recruitable(
     m.apply(CampaignCommand::Recruit { region: r10, unit_key: "test_guard".into(), target: None }).unwrap();
     let after = m.world.factions[&A].treasury;
     let cost = m.world.regions[&r10].recruitment_queue[0].cost;
-    m.world.restricted_units.insert("test_guard".into());
+    m.world.restricted_units.push("test_guard".into());
     m.turn.humans = vec![A];
     m.start_campaign();
     assert!(m.world.regions[&r10].recruitment_queue.is_empty());
     assert_eq!(m.world.factions[&A].treasury, after + cost);
+}
+
+/// unitrestrict: the scripts' restricted units are the exe's list. An add appends even a listed unit
+/// (`0x009C9700`), a remove erases the first match only (`0x00A1D3B0`), so a unit added twice stays out of the
+/// recruit list and the recruit command until removed twice; a key the units table lacks is stored nowhere
+/// (ORIGINAL BUG fixed: the exe appends a null record its save writer `0x009A1070` crashes on).
+#[test]
+fn a_unit_restricted_twice_stays_restricted_until_lifted_twice() {
+    let mut m = model_with_a_depot();
+    let r10 = RegionId(10);
+    let listed = |m: &CampaignModel| m.recruitable_units(r10).iter().any(|e| e.unit_key == "test_guard");
+    assert!(m.add_restricted_unit("test_guard") && m.add_restricted_unit("test_guard"));
+    assert!(!m.add_restricted_unit("made_up_no_unit") && !m.remove_restricted_unit("made_up_no_unit"));
+    assert_eq!(m.world.restricted_units, ["test_guard", "test_guard"]);
+    assert!(m.remove_restricted_unit("test_guard"));
+    assert!(!listed(&m) && m.world.unit_restricted("test_guard"));
+    assert_eq!(
+        m.apply(CampaignCommand::Recruit { region: r10, unit_key: "test_guard".into(), target: None }),
+        Err(CommandError::UnitNotAvailable("test_guard".into()))
+    );
+    assert!(m.remove_restricted_unit("test_guard") && m.remove_restricted_unit("test_guard"), "not listed: nothing to erase");
+    assert!(m.world.restricted_units.is_empty() && listed(&m));
 }
 
 /// recruit-gates: `0x00A6AE40` reads the settlement container's `FORTIFICATION_SLOT` (+0x24) like the road

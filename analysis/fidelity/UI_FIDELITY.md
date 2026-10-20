@@ -366,7 +366,7 @@ font.
     the proof's second `owner:` line shows the region as France's after Loot (it stayed with the
     old owner before: the staging only built the preview).
   - **(1) Restricted buildings in our saves: done.** `EPISODIC_RESTRICTIONS/BUILDING_RESTRICTIONS[]`
-    and `UNIT_RESTRICTIONS[]` (one utf16 key per item; CONFIRMED in the user's vanilla auto_save: 55
+    and `UNIT_RESTRICTIONS[]` (one utf16 key per item; CONFIRMED in the user's vanilla auto_save (and for units from the exe, `0x009968A0` / `0x009A1070`): 55
     building levels, units empty; the startpos has both lists empty) are written from the script
     state at quick save (`script_values::write_restrictions`) and seeded into the script state at
     load (`LoadedCampaign::restrictions`, scene.rs) before `UICreated`. Checked in the game: the
@@ -458,7 +458,7 @@ font.
 | Template texts set on every state (cost in the "red" state) | resolved | INFERRED |
 | `obj:SequentialFind` returns an object | resolved | CONFIRMED usage |
 | Capture screen (`SettlementLootingOptions`, `InformLootingSelection`) | resolved | names CONFIRMED; FactionLocation text INFERRED |
-| Restricted buildings and units in our saves (BUILDING_RESTRICTIONS / UNIT_RESTRICTIONS) | resolved | layout CONFIRMED (buildings), INFERRED (units) |
+| Restricted buildings and units in our saves (BUILDING_RESTRICTIONS / UNIT_RESTRICTIONS) | resolved | layout CONFIRMED (buildings from the vanilla auto_save; units from the exe loader `0x009968A0` and writer `0x009A1070`, one type-0x0E key per item) |
 | Brunswick Hussars card for France has no picture (no `france_` icon) | open | UNKNOWN whether France may recruit it |
 | Agents tab of a settlement | listed and filled (install run pending) | CHARACTER_UI_HOOKS.md "Agents panel". Info and the eight button questions from the model (gates CONFIRMED, residences / candidates INFERRED or PROVISIONAL); the six action calls PROVISIONAL no-ops. Test `agents_panel_opens_without_script_errors` (install), see "State on main" |
 | Naval recruitment / infrastructure tabs | resolved (N+2) | naval on a character panel, infrastructure on a settlement's |
@@ -1347,7 +1347,7 @@ our `--campaign-ui-click` screenshots against the Austria screenshot.
 | Treaty lines joiner | `0x00B0B120` appends the narrow string at `0x0131604C` (`0A 0A`, "\n\n") before every line but the first, so the lines have a blank line between them (the screenshot's spacing). Ours joined with "\n" | CONFIRMED | `0x00B0B120`, `0x0131604C` |
 | Treaty record | `RetrieveExistingTreaties(a, b)` (`0x009F2B80`, made a function 2026-10-10) reads its arguments from the top of the Lua stack down (`0x01055760` reads index −1 and pops), so `b` is read first; it then looks `a` up in `b`'s diplomacy (`[b + 0x528]`, `0x00B750B0`) and builds the text from that record (`0x00B750D0`): "Grants military access" = `b` gives `a` access (`+0x78C`), "Has military access to your lands" = `a`'s record `+0x78C`, "Their trade embargo against you" = `b`'s `+0x840`, "Your trade embargo" = `a`'s. Ours had the two access lines swapped | CONFIRMED (code + the loc texts' "their" / "your") | `0x009F2B80`, `0x00B750B0`, `0x00B750D0` |
 | `TradeableRegions` shape | `0x009C5770` (made a function 2026-10-10): nothing unless the campaign negotiation (`+0xF9C`) and the counterpart (`+0xAC`); else TWO return values, the proposer's list and the recipient's ("Proposer" / "Recipient" only name the Lua references). Each row: the region info table `0x009AF570` (Address, Name, Theatre, ...) plus `CurrentlyOffered` / `CurrentlyDemanded` (the region is in the deal's offers / demands, `0x00C4D3F0` / `0x00C4D250`). `TradeableTechnologies` (`0x009C5AA0`) likewise returns two lists; its rows are the card helper `0x009ABB50`, `tech_status` = **0** (a literal) and `FactionKey` = the side's faction key (`0x008B9DE0`). Correction: `0x009C5B9B` / `0x009C5BC0` are return addresses in the decompile, not two unread row keys | CONFIRMED | `0x009C5770`, `0x009C5AA0` |
-| Which regions | `0x00C5C040`: the faction's region list (`+0x778` count, `+0x77C` items), minus the faction's capital (`0x00A8B5A0`: faction `+0x72C`) and minus a settlement whose virtual `+0x98` is true (the slot the script function `IsUnderSiege`, "Is the character under siege?", `0x008A1FF0`, reads: under siege). Model: `CampaignModel::tradeable_regions` | CONFIRMED rule; sieges and the list's order not in the model (PROVISIONAL) | `0x00C5C040`, `0x00A8B5A0`, `0x008A1FF0` |
+| Which regions | `0x00C5C040`: the faction's region list (`+0x778` count, `+0x77C` items), minus the faction's capital (`0x00A8B5A0`: faction `+0x72C`) and minus a settlement whose virtual `+0x98` is true (the slot the script function `IsUnderSiege`, "Is the character under siege?", `0x008A1FF0`, reads: under siege). Model: `CampaignModel::tradeable_regions` | CONFIRMED rule and order (the list's order, `World::regions_in_list_order`, CAMPAIGN_FIDELITY.md "Faction region list order"); sieges not in the model (PROVISIONAL) | `0x00C5C040`, `0x00A8B5A0`, `0x008A1FF0` |
 | `Theatre` of the region info | `0x00AAF350` → region's theatre `+0x68`, the same field `HomeTheatre` (`0x009E5180`: faction `+0x734` → `+0x68`) returns: the theatre key. InitRegionList lists a region only when `Theatre == HomeTheatre(player)`. Ours gave the theatre's display name | CONFIRMED | `0x00AAF350`, `0x009E5180` |
 | OK on the regions popup | `OkRegions` (:1302) collects the `Address` of every `Selected` entry of `offerable_regions` / `demandable_regions` and calls `negotiation:Propose(offers, demands, current_action.Action)`. `Propose` (`0x009BF3C0`) builds a deal item from the action record (`0x00BF3900`), switch on the action id: 6 (regions) reads the two address tables (`"Offered"`, `"Demanded"`) into region lists (`0x00C1F6C0` / `0x00C43D60`), then hands the item to the campaign negotiation (`0x00C49BD0` → its virtual `+0x40`). Ours: `Propose` is the PLACEHOLDER that accepts at once, so the region item never reaches the offers / demands lists | traced shape; the campaign side (`+0x40`) not traced | `0x009BF3C0`, `0x00C49BD0` |
 
@@ -1366,8 +1366,9 @@ not (§6); hovering a region row opens the
 Correction of earlier notes (this file §4 open item, CAMPAIGN_FIDELITY.md §Diplomacy rules): `0x00B449F0`
 is **not** a peace-terms deal applier. It is `TransferSettlementOwnership`, a settlement method
 (`this` = the settlement; `+0x178` its region, `+0x88` its owner), RET 0x14, arguments (new owner,
-character, capture-report flag, a, b). `0x00B58560` / `0x00B58890` / `0x00B58C00` are capture
-variants in the settlement vtable (`0x0137CA44..5C`), not deal appliers. All CONFIRMED (disassembly).
+capturing military force or NULL, capture-report flag, a, b). `0x00B58560` / `0x00B58890` /
+`0x00B58C00` are capture variants in the settlement vtable (`0x0137CA44..5C`), not deal appliers.
+All CONFIRMED (disassembly).
 
 | Step | Behaviour | Tag | Evidence |
 |---|---|---|---|
@@ -1378,7 +1379,7 @@ variants in the settlement vtable (`0x0137CA44..5C`), not deal appliers. All CON
 | Propose payments (deals-fix, 2026-10-14) | action 9 is called `Propose(offer, amount, turns, regular, action)`; read top-down: the action, `regular` (bool reader `0x01055840`: Lua type 1, else a type error `0x01095090` and nothing proposed), `turns` and `amount` (number reader `0x010556D0` → `0x01055700`: Lua type 3, a float rounded to the nearest, ties to even; out of range gives the x87 integer indefinite, 0x80000000), `offer`. An offer stores −amount (`0x00C43D70` / `0x00C43D90`), a demand amount (`0x00C1F6D0` / `0x00C1F6F0`); turns = the panel's when `regular` and turns > 1 (signed), else 1. The record's virtual `+0x40` (`0x00C4AD60`) posts the payments command (descriptor `0x013879FC`, clear flag 0) | CONFIRMED (disassembly `0x009BF64C`–`0x009BF701`) | `0x009BF3C0` |
 | Payments executor and row | the record copies the pair and caps an offered one-off payment at the proposer's treasury (`0x00C4AB20`, CAMPAIGN_FIDELITY.md §Treasury changes "Payment cap"), then builds its row text from the capped amount (`0x00C4AB85`): turns 1 `diplomacy_strings_string_offer_or_demand_single_payment`, else `…_regular_payment`, with \|amount\| (and the turns). `BuildOfferAndDemandStrings` `0x009B48B0` adds a record's offers row when its offer-text getter (vtable `+0x14`, payments `0x00C123F0`: amount < 0) returns text and its demands row when the demand getter (`+0x4`, `0x00C11F20`: amount > 0) does. `RemoveAction('payments')` (record `+0x4C`, `0x00C5CBC0`) posts the same command with the clear flag and zeros | CONFIRMED | `0x00C4AB20`, `0x009B48B0`, `0x00C5CBC0` |
 | Accept | `AcceptCampaignNegotiationDeal` `0x00C114B0`: unless `0x00C1E240` (a deal with no demands at all may be turned into a payment; AI, §6), the embedded record `+0x184` then every record of `+0x2A0/+0x2A4` runs its virtual `+0x3C` | CONFIRMED order; `0x00C1E240` not ported | `0x00C114B0` |
-| Region item applied | `0x00C18BF0`: each demanded region (record `+0x14`) goes to the proposer (negotiation `+0x18`), then each offered one (`+0x24`) to the recipient (`+0x1C`), through the settlement's `0x00B58A10(new owner, 1, 0)` = `0x00B449F0(new owner, no character, no report, 1, 0)` | CONFIRMED | `0x00C18BF0`, `0x00B58A10` |
+| Region item applied | `0x00C18BF0`: each demanded region (record `+0x14`) goes to the proposer (negotiation `+0x18`), then each offered one (`+0x24`) to the recipient (`+0x1C`), through the settlement's `0x00B58A10(new owner, 1, 0)` = `0x00B449F0(new owner, NULL force, no report, 1, 0)` | CONFIRMED | `0x00C18BF0`, `0x00B58A10` |
 | Region transfer | `0x00B449F0` → `SetSettlementOwner` `0x00B2B810` (settlement `+0x88`), `TransferRegionToFaction` `0x00A64AC0` (schools stop researching `0x008B4AB0`; constructions cancelled `0x00A6CC10`; recruitment drained `0x00B1A760`; the old owner's capital cleared if it was this region `0x008BA580`; region joins the new owner), `TransferRegionSlotOwners` `0x00B1B300` (a slot with no occupant and no holder passes to the new owner), recruitables / effects / economy refreshed. **No army is moved or destroyed on this path** (the capture variants destroy the garrison first, e.g. `0x00B58A30` deletes settlement virtual `+0x1C`); the campaign's `+0x420` owner-changed hub only has UI subscribers (`0x00906C00`, `0x00907150`, `0x009087C0`) | CONFIRMED for the call chain | as named |
 | Technology item applied | `0x00C18CF0`: each offered technology: the recipient is granted it (`GrantFactionTechnology` `0x008CDCB0(tech, 0, 1, 0)`), the proposer's entry `+0x28` += 1 (`0x008F3DD0`); then each demanded one the other way round | CONFIRMED | `0x00C18CF0` |
 | Grant | `0x008CDCB0`: while the entry's state is 1..4: completion `0x008EED20` (progress = cost, state 0, schools cleared), then the record's single requirement (`+0x60`); then availability `0x008F91F0` and the faction effect sum. A tradeable technology is at state 1..3 for the receiver (`tradeable_technologies`), so its `+0x60` requirement is already researched (availability rule) and the walk grants that one technology | CONFIRMED | `0x008CDCB0`, `0x008F91F0` |
@@ -1388,7 +1389,7 @@ variants in the settlement vtable (`0x0137CA44..5C`), not deal appliers. All CON
 (`DealItems`: demanded, offered) are the two records; `CampaignCommand::ProposeRegions` /
 `ProposeTechnologies` are the two executors, `ClearNegotiation` the CLEAR executor (`0x00932EC0`),
 `AcceptDeal` applies the records (`CampaignModel::accept_deal`). `battles.rs`: `transfer_region`
-(`0x00B449F0` without a character; armies stay) and `change_region_owner`, the steps every owner
+(`0x00B449F0` with no force; armies stay) and `change_region_owner`, the steps every owner
 change shares (now also used by `occupy`, so a capture also stops research at the region's
 schools). `research.rs`: `grant_technology` (`0x008CDCB0`), `count_technology_traded`
 (`0x008F3DD0`), the completion `0x008EED20` shared with the research step;
@@ -1497,19 +1498,22 @@ fits: 2 turns of training, 1 of march.
 
 **Recruiting.** `RecruitUnit(character, manager, record)` → the `CCQ` command with the commander as
 its third value → `QueueRecruitmentItemForUnit` stores it at item +0x18 (saved as `RECRUITMENT_ITEM`
-#2). When such an item finishes, `ProcessRecruitmentQueueTurn` hands it to the faction's
-reinforcement list (`0x00B72207` → `0x00B0A270` → `0x00AE8B10`) instead of the normal spawn; that
-march is **not traced**.
+#2). When such an item finishes while its commander leads an army, the land spawn `0x00B1E500` raises
+the items of that commander as one new army, which the faction's reinforcement manager marches to him
+at the next faction turn start (`0x00B0A270` → `0x00AE8B10`, stepped by `0x00B71FA0`; traced in
+CAMPAIGN_FIDELITY.md §Recruitment spawn and reinforcements).
 
 **Ours.** Model as above, with: the theatre = the faction's whole map (one theatre per shipped
 campaign); the source order's queue id = region id (INFERRED); experience 0 (not modelled); the path
 search is the model's (`View::find_path_avoiding`, static map, no zones of control) and the limit cut
 compares its own cost (INFERRED: `0x00AC54C0`'s limit test not traced); `" "` for a card without a
 training estimate (INFERRED: the manager constructor `0x0098C2F0` clears +0xA94 and no writer was
-found). PROVISIONAL: a finished targeted item spawns in its settlement like any recruit (CONFIRMED only once
-its commander has died: `0x00B57F40` clears the target, CAMPAIGN_FIDELITY.md §Treasury changes). The target
-is saved and loaded as `RECRUITMENT_ITEM` #2, a character id like #1's region id (INFERRED from that
-id rule, SAVE_COMPAT.md §3); an id naming no loaded character is dropped with a load warning
+found). A finished targeted item raises the army that marches to its commander (`spawn_reinforcement`,
+`march_reinforcements`; their PROVISIONAL parts are listed in CAMPAIGN_FIDELITY.md §Recruitment spawn and
+reinforcements); once its commander has died it spawns in its settlement like any recruit (`0x00B57F40`
+clears the target, CAMPAIGN_FIDELITY.md §Treasury changes). The target is saved and loaded as
+`RECRUITMENT_ITEM` #2, the character's object id (CONFIRMED: `0x00B5C900` / `0x00AF3D00` /
+`0x00B5C2D0`); an id naming no loaded character is dropped with a load warning
 (`DanglingRecruitmentTarget`). `units` #9 below 1 (mod data) is read as 1, reported once per load
 (the exe divides unguarded).
 
@@ -1646,12 +1650,10 @@ against a focused text field are CONFIRMED: see "Shortcut keys" below.
 - `EPISODIC_RESTRICTIONS` #25 is read only when the record's version is above 0xB (re-checked in
   `0x009968A0`: the bool at campaign +0x115 is read under `version > 0xB`); an older record leaves the
   flag false (`details.rs` test).
-- Keys: while a HUD text field holds the focus (`UiScriptHost::text_focused`, `CampaignHud::text_focused`)
-  the camera's WASD / arrow pans and PageUp / PageDown zoom do nothing, and the pans also do nothing
-  while CTRL or ALT is held: `default_keys.xml` binds `step_fwd` / `step_bck` / `step_l` / `step_r`
-  with `modifier="ALLOW_SHIFT"` only (CONFIRMED from the data), so CTRL+S never pans (`camera.rs`
-  `key_move` test). (Superseded 2026-10-20: while a field holds the focus no shortcut fires at all,
-  see "Shortcut keys".)
+- Keys: while a HUD text field holds the focus no shortcut fires, camera steps included; the pans
+  do nothing while CTRL or ALT is held: `default_keys.xml` binds `step_fwd` / `step_bck` / `step_l` /
+  `step_r` with `modifier="ALLOW_SHIFT"` only (CONFIRMED from the data; `shortcut_tests.rs`). See
+  "Shortcut keys".
   The `QuickLoad` (no save) and the saving-disabled `SaveCampaign` lines are logged as info.
 
 **Shortcut keys (worker shortcutkeys, 2026-10-20; data + Ghidra, CONFIRMED unless tagged):**
@@ -1675,30 +1677,91 @@ against a focused text field are CONFIRMED: see "Shortcut keys" below.
   key is delivered; the key goes to the field. Otherwise `0x00EEE250` → `0x00ED76E0`: a key a
   component stole (`StealShortcutKey` `0x01015C70` → `0x00EC3DE0`) goes to that component's
   `OnKey`; else every binding the key and the held modifiers match calls its component's
-  `OnShortcut(name, down)` (several can fire on one press). `SetUIInputFocusComponent` `0x010367F0`
+  `OnShortcut(name, released)` (the state machine below). `SetUIInputFocusComponent` `0x010367F0`
   can force a holder; the focus-lost handler (vtable `0x01393B6C` +0x1C = `0x00DA9C80`) clears it.
   While a field has the focus, CTRL+letter types nothing: Windows sends a control character, which
   `IsCharPrintable` `0x01015F10` rejects (CTRL+ALT is AltGr and types its character).
-- **Ours.** `ntw_formats::default_keys` parses the file (`Shortcuts::parse`, `bindings(mode,
-  component)`, `Bindings::fired(key, held)`); `CampaignHud` loads the campaign's root bindings once
-  on entering (`hud.rs` `campaign_shortcuts`; warns once and runs with none if the file is
-  missing); `UiScriptHost::campaign_key` (`ui/campaign/mod.rs`) is the order above;
-  `napoleon::shortcut_keys` maps Bevy's physical keys to the exe's key names. Tests:
-  `default_keys.rs` (5), `ui/campaign/shortcut_tests.rs` (3: a rebound key in a test file, the
-  focus order, a stolen key), `tests/default_keys_install.rs` (`#[ignore]`, the shipped file:
-  quick_save CTRL S, quick_load CTRL L, escape_menu ANY ESCAPE, end_turn → button_end_turn).
-- PROVISIONAL (`campaign_key`): the binding state machine is not ported (`0x00ED76E0` polls each
-  binding's keys on every key event, so a binding also fires when its modifier goes down after the
-  key; one binding stays active; the release call +0x2c; the repeat / ignore-lock flags and the
-  handler lock +0x84); ours fires on the key's own press, once, and a stolen key ignores modifiers.
+- **The state machine (worker keybind, 2026-10-20; disassembly, CONFIRMED unless tagged).** The
+  campaign (`0x00A27EDF`), front end (`0x0048B3F0`) and battle (`0x00607AA9`) key handlers call
+  `HandleShortcutKeyEvent` `0x00EEE1E0` on every key event (press, OS auto-repeat, release), which
+  calls `0x00EEE250` (its only caller). `0x00EEE250` returns at once when the handler is switched
+  off (manager +0x30, `CampaignUI.EnableShortcutHandler` `0x009E2550` → `0x00EA5080`), and while
+  the handler lock (+0x84, `0x00A22430`; `steal_user_input` `0x00979680` → `0x00A22400`) is set
+  unless the key is ESCAPE. Else it fills one entry per binding: slot k1 / k2 held = that key is
+  down in the frame's key snapshot (`0x00E20190`) and its modifier rule holds; it returns whether
+  any slot is held, after `0x00ED76E0` walks the bindings in order:
+  - no slot held: a pressed binding (flag bit2) is released: the handler's +0x2C, or when a key is
+    stolen the stealer's key-up (`0x00EB0900`);
+  - a slot held, binding's handler gone, or it is the active one (+0x24) and not repeating
+    (bit5/6): released if pressed. So a non-repeating binding presses once per hold and is
+    released on the next key event (the first auto-repeat or the key's release);
+  - a slot held whose key is not stolen: the handler's +0x28 (func name, frame time) when the
+    handler is unlocked (`+0x38`) or the func has `ignore_lock` (+0x49), and ready (`+0x3C`); it
+    becomes the active binding;
+  - else (stolen) and not active: the stealer's key-down (`0x00EA5090`: the newest stealer whose
+    handler passes +0x38 and +0x3C gets `OnKey` through `0x00DAC9E0`);
+  - after the walk the active binding is cleared when none of its slots is held and it is not
+    repeating (or the slot last seen held, +0x28, is stolen); dummy bindings (bit7) are deleted.
+  Binding constructor `0x00E8B760` (flags: bit0 camera, bit1 stealer's dummy, bit2 pressed, bit4
+  hidden, bit5/6 repeating; +0x49 ignore_lock), func reader `0x00E8BB00` (`hidden`, `repeating`,
+  `ignore_lock`). Each handler registers its component's bindings when it is built (`0x00DA6860`
+  → `0x00E8CE80` → `0x00EDD1B0`), so the walk follows registration order.
+- **Stealing.** `StealShortcutKey(key)` (`0x01015C70` → `0x00EC3DE0`) marks every binding with
+  that key stolen and clears its repeat; a key no binding has gets a dummy binding for the stealer
+  (`0x00EAF250`: the key, modifier NONE, not repeating). `StealShortcutKey(false)` gives the keys
+  back (`0x00EC3AA0`) and also clears the input focus (`0x00DA9C80`).
+- **UI component handler** (vtable `0x01393BD0`): +0x28 `0x00DAD190` → `0x0102F280` calls the
+  component's Lua `OnShortcut(func, false)`; +0x2C `0x00DAD1B0` calls `OnShortcut(func, true)`
+  and posts a string from the component (sub-object -0x2D0, vtable +4; INFERRED its name, not
+  the func) to `[0x01765920]+0x60` (`0x004B0CF0`, tag 0x10) and to the list at `0x015F8FEC`
+  (12-byte strings, capacity doubles); +0x38 `0x00DACBA0` priority ≥
+  `g_nUIMinInputLayer` `0x01765944`; +0x3C `0x00DACBB0` current state not disabled (+0x115).
+  `0x0102F280` only calls Lua (no click). So the second argument is "released": root.luac and
+  `layout.button_end_turn.luac` (`OnShortcut(name, up)`: `if up == true then EndTurn() end`) act
+  on the key's release.
+- **Campaign camera handler** (`0x009012B0` registers it under component `camera`): +0x28
+  `0x0095A510(func, time)` (Ghidra: `CampaignCameraShortcutHandler::HandleCampaignCameraShortcutPress`,
+  the camera's get-position call at `0x0095A54A` given a call-site signature, structs
+  `CampaignCamera` / `CampaignCameraVtbl`): time ×2 while SHIFT is held, read from the handler's
+  +0x20 when the key event is handled (not the event's own modifiers); `0x00970A90` sets it each
+  frame from LSHIFT/RSHIFT (as controller +0x48; INFERRED the same field, the handler at
+  controller +0x28). d = `CAMPAIGN_CAMERA_PAN_SPEED` × time × (h × 0.01 + 0.25), the pan speed
+  being tweak `0x015C4258` +0x5C (default 50, used here), the time the one the binding passes on
+  (`[ctx+8]` in `0x00ED76E0`; whether it is the frame time is not traced); the tilt keys use the
+  undoubled time,
+  h = the camera's `+0x30` position y (INFERRED: its eye height); nothing while the busy test
+  `0x00955820` is set; `step_fwd` `0x00956F10` (z += d, north), `step_fwd_fast` 2d, `step_bck`
+  `0x00956E70`, `step_r` / `rot_r` `0x009570F0` (x += d), `step_l` / `rot_l` `0x00956FA0`,
+  `cam_up` / `cam_down` tilt `0x00977100` (tilt speed, +0x138, `0x00920D00`), `camera_bookmark_save<n>`
+  `0x00968900`, `camera_bookmark_view<n>` `0x00974B10`; release `0x0044A780` does nothing; +0x38
+  `0x009535B0`; +0x3C true. The per-frame camera update `0x00970A90` otherwise reads only the mouse (drag,
+  edge scroll), so the campaign's keyboard camera moves only on key events.
+- **Ours.** `ntw_formats::default_keys` parses the file (`Shortcuts::parse`; `mode_bindings(mode)`:
+  the default keyset's funcs with a mapping in the mode, each with its component, `repeating`,
+  `ignore_lock`, `hidden`); `ntw_script::ui::shortcuts::ShortcutMachine` is `0x00EEE250` +
+  `0x00ED76E0` behind a `ShortcutTarget` (components by name, the camera, the stolen keys);
+  `UiScriptHost::campaign_key` (`ui/campaign/mod.rs`) runs the focus order above, then the machine;
+  `CampaignHud` builds the machine once on entering (`hud.rs` `campaign_shortcuts`), `keys` feeds
+  it every key event with the keys down replayed from the frame's start
+  (`napoleon::shortcut_keys::KeysDown`), camera presses go to `camera.rs` `key_step` (with the SHIFT of the frame's start, as `CameraKeyPress`); Return's old
+  hand-written end turn and the camera's own WASD table are gone. `EnableShortcutHandler` switches
+  the machine. Tests: `default_keys.rs`, `ui/shortcuts.rs` (5), `ui/campaign/shortcut_tests.rs` (6),
+  `tests/campaign_ui.rs` `shipped_key_bindings_…` (the shipped file on the original HUD: Return
+  ends the turn on release, ESCAPE opens the escape menu, W steps the camera),
+  `tests/default_keys_install.rs` (`#[ignore]`), `camera.rs` `key_steps_follow_the_exes_formula`.
+- PROVISIONAL (ours): the bindings walk in the keyset file's order, not the handlers' registration
+  order (matters only when one event presses two bindings); a binding's component is the first
+  component of that name under the root (the exe gives every registered handler of the name the
+  binding); the input layer / lock (`0x00DACBA0`, `0x00A22430`, `steal_user_input`) is not modelled;
+  the release's post to the event lists is not ported; a key's stealer is our most recent shown
+  stealer (the exe: newest with +0x38 / +0x3C, no reorder on re-steal); the camera's busy test.
   PROVISIONAL (`input_focus_held`): ours keeps the focus on a component that is destroyed; what the
-  exe does then is not traced. Not read yet: `custom_keys.keys.xml` and the options' keyset choice;
-  funcs mapped to other components (end_turn → button_end_turn, show_*, the camera's step_* /
-  cam_*) are not dispatched; the camera keys (`camera.rs`) still have their own table.
+  exe does then is not traced. Not done yet: `custom_keys.keys.xml` and the keyset choice
+  (`0x00ED27D0`), the front end's and the battle's bindings, the camera's tilt and bookmarks.
 
 - **Entry:** `text\default_keys.xml` binds `escape_menu` = ESCAPE (any modifier, component root,
   all modes), `quick_save` = CTRL+S, `quick_load` = CTRL+L (campaign). `layout.root.luac`
-  `OnShortcut(name, down)` (line 1602, acts on down == true): escape_menu → `ShowEscapeMenu` =
+  `OnShortcut(name, released)` (line 1602, acts on the release, true): escape_menu → `ShowEscapeMenu` =
   `OpenPanel("esc_menu_campaign", nil, nil, "Initialise", CampaignUI.CanSave())`; quick_save →
   `QuickSave` when `CanSave()`; quick_load → `QuickLoad`. The escape menu's save / load buttons call
   `ShowSaveGameRequester(is_load)` = `OpenPanel("load-save_game", nil, nil, "Initialise", is_load)`.

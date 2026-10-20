@@ -23,6 +23,21 @@ fn faction_power_is_the_raw_upkeep_of_the_forces() {
     assert!(r.ranks.contains_key(&A));
 }
 
+/// A force without a commander counts 0 in both the upkeep and the ranking power: `0x008F9C50`
+/// returns 0 for the whole force when its +0x74 commander handle resolves to null (`0x008F9C62`),
+/// before the upkeep / power flag is read.
+#[test]
+fn a_force_without_a_commander_costs_and_counts_nothing() {
+    let mut m = test_model();
+    let fx = super::effects::Effects::compute_for(&m, B);
+    assert_eq!(super::economy::faction_upkeep_split_with(&m, &fx, B), (20, 0));
+    m.world.forces.get_mut(&ForceId(1001)).unwrap().commander = None;
+    assert_eq!(super::economy::faction_upkeep_split_with(&m, &fx, B), (0, 0));
+    let p = m.faction_powers(&mut std::collections::BTreeSet::new());
+    assert_eq!(p[&B].total(), 0);
+    assert_eq!(p[&A].total(), 10);
+}
+
 /// The negotiation's constructor (`0x00BF5A60`, run by the `BeginNegotiation` command) picks the
 /// human proposer's greeting (the recipient's `receive` line) and the human recipient's `approach`
 /// line; an override row costs one RNG draw, no override row none, and reading the negotiation

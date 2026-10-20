@@ -15,30 +15,33 @@
 //!   military access `0x00B44550` / cancel `0x00B67BD0`, state gift `0x00B44590`, protectorate
 //!   `0x00B105C0`.
 //!
-//! Not here: the AI's acceptance of a deal (§6), the allies' answer to a call to war (`0x00B268B0`
-//! asks them in `call_allies`: an AI decision). The treaty money (regular payments, protectorate
+//! Not here: the AI's acceptance of a deal (§6), an AI ally's answer to a call to war (`0x00B268B0`
+//! asks it in `call_allies`: an AI decision; a human ally's waits in an [`AllyWarCall`]). The treaty money (regular payments, protectorate
 //! tribute and income) is booked into the running economics records by
 //! [`CampaignModel::change_treaty_money`] and paid by the round settle ([`super::economy::settle_round`]).
 
 use super::details::{AttitudeFactor, RegularPayment, Relationship, ATTITUDE_FACTORS};
 use super::events::{CampaignEvent, CampaignMessage};
 use super::ids::FactionId;
+use super::population::ClassWarEvent;
 use super::world::{CampaignModel, GovernmentType, Stance};
 use super::CommandError;
 
 /// Who answered a call to war ([`CampaignModel::call_allies`]), as the exe lists them (`0x00B268B0`:
 /// four lists at +0, +0x10, +0x20, +0x30; the zones' refresh walks +0, +0x20, +0x30, and the war
-/// notice skips a faction in any of the four, `0x00B2BEC0`).
-#[derive(Debug, Default)]
-struct CalledAllies {
+/// notice skips a faction in any of the four, `0x00B2BEC0`). A waiting [`AllyWarCall`] keeps a copy
+/// (offer +0x1C..+0x5B, `0x00AE6260`), so the declaration resumes with them.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct CalledAllies {
     /// The declarer's allies that joined (`0x00741C70`, list +0).
-    joined_a: Vec<FactionId>,
+    pub joined_a: Vec<FactionId>,
     /// The target's allies that joined (`0x00B274E0`, list +0x20).
-    joined_b: Vec<FactionId>,
+    pub joined_b: Vec<FactionId>,
     /// The target's allies that broke with it (`0x00B27500`, list +0x30).
-    torn_b: Vec<FactionId>,
+    pub torn_b: Vec<FactionId>,
     /// The declarer's allies that refused and kept their alliance (`0x00B0DB40`, list +0x10).
-    refused_a: Vec<FactionId>,
+    pub refused_a: Vec<FactionId>,
 }
 
 impl CalledAllies {
@@ -46,6 +49,65 @@ impl CalledAllies {
     fn contains(&self, f: FactionId) -> bool {
         [&self.joined_a, &self.joined_b, &self.torn_b, &self.refused_a].iter().any(|l| l.contains(&f))
     }
+
+    /// Already answered for `side` of the war: the target's lists +0x20 / +0x30 (`0x00B673D0`) when
+    /// `side` is the target, else the declarer's +0 / +0x10 (`0x00B67380`). Each loop of
+    /// `0x00B268B0` skips such an ally, so a resumed declaration asks no one twice.
+    fn answered_for(&self, target_side: bool, f: FactionId) -> bool {
+        let lists = if target_side { [&self.joined_b, &self.torn_b] } else { [&self.joined_a, &self.refused_a] };
+        lists.iter().any(|l| l.contains(&f))
+    }
+
+    fn hash_into(&self, h: &mut crate::fnv::Fnv64) {
+        for list in [&self.joined_a, &self.refused_a, &self.joined_b, &self.torn_b] {
+            h.u32(list.len() as u32);
+            for f in list {
+                h.i32(f.raw());
+            }
+        }
+    }
+}
+
+/// A call to war waiting for a human ally's answer: the exe's 100-byte `pending_diplomacy` offer
+/// (`0x00885DA0`, vtable `0x01357314`), pushed on the campaign's pending stack (+0xF70, `0x008E2B80`) by
+/// [`CampaignModel::call_allies`] and answered by `RespondToAllyWarCall`
+/// ([`CampaignModel::respond_to_ally_war_call`], `CCQ_RESPOND_TO_ALLY_WAR_INVITATION` `0x009370F0` →
+/// `0x008BFA80`). CONFIRMED by disassembly (CAMPAIGN_FIDELITY.md §Diplomacy, "Allies called into a war").
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct AllyWarCall {
+    /// The declarer (offer +0xC).
+    pub declarer: FactionId,
+    /// The declaration's target (offer +8).
+    pub target: FactionId,
+    /// The human ally asked (offer +0x10).
+    pub ally: FactionId,
+    /// The ally is asked as the target's ally (offer +0x60): always when the target's loop asks it;
+    /// when the declarer's loop does, if it is allied to the target too (`0x008CE390`).
+    pub allied_to_target: bool,
+    /// The ally is asked as the declarer's ally (offer +0x61), likewise.
+    pub allied_to_declarer: bool,
+    /// Which loop asked it: the target's (`0x00B26B80`) or the declarer's (`0x00B26D79`). The UI
+    /// event's last flag (+0xB10 vfunc +8); the answer does not read it.
+    pub asked_by_target_side: bool,
+    /// Who had answered when the offer was made (the declaration's four lists).
+    pub called: CalledAllies,
+}
+
+impl AllyWarCall {
+    pub(crate) fn hash_into(&self, h: &mut crate::fnv::Fnv64) {
+        for f in [self.declarer, self.target, self.ally] {
+            h.i32(f.raw());
+        }
+        h.u32(u32::from(self.allied_to_target) | u32::from(self.allied_to_declarer) << 1 | u32::from(self.asked_by_target_side) << 2);
+        self.called.hash_into(h);
+    }
+}
+
+/// What [`CampaignModel::call_allies`] ended with: every ally answered, or a human ally asked.
+enum CallOutcome {
+    Answered(CalledAllies),
+    Asked(AllyWarCall),
 }
 
 /// An attitude event: {limit, drift, value} (the original's triple order).
@@ -246,6 +308,13 @@ impl CampaignModel {
     ///    it by their attitude after the allies' wars and broken alliances;
     /// 4. then the zones of control again (`0x00B795A0`).
     ///
+    /// When step 1 reaches a human ally not yet at war (with [`CampaignModel::ask_human_allies`] on;
+    /// off, it is skipped), the declaration stops there: the ally's
+    /// [`AllyWarCall`] is pushed on [`CampaignModel::pending_ally_war_calls`] with the lists so far,
+    /// [`CampaignEvent::AllyWarCallPending`] is raised, and steps 2-4 wait for the answer
+    /// ([`Self::respond_to_ally_war_call`], which resumes here). CONFIRMED: `0x00B268B0` returns after
+    /// pushing the offer (`0x00B26C1F` / `0x00B26E17`), and `0x008BFA80` calls it again.
+    ///
     /// Not modelled: the achievement hook (`0x009C7660`, a stat only, between the notices and the war),
     /// the path grid's view and the trade price update (`0x00B67490`, `0x00BCB020`, no model state).
     pub fn declare_war_rules(&mut self, a: FactionId, b: FactionId) -> Result<Vec<CampaignEvent>, CommandError> {
@@ -254,7 +323,27 @@ impl CampaignModel {
             return Err(CommandError::AlreadyAtWar(a, b));
         }
         let mut events = Vec::new();
-        let called = self.call_allies(a, b, &mut events);
+        self.declare_war_with_calls(a, b, CalledAllies::default(), &mut events)?;
+        Ok(events)
+    }
+
+    /// [`Self::declare_war_rules`] from step 1 on, with the allies in `called` already answered (a
+    /// fresh declaration passes none; a resumed one the waiting call's lists).
+    fn declare_war_with_calls(&mut self, a: FactionId, b: FactionId, called: CalledAllies, events: &mut Vec<CampaignEvent>) -> Result<(), CommandError> {
+        let called = match self.call_allies(a, b, called, events) {
+            CallOutcome::Answered(called) => called,
+            CallOutcome::Asked(call) => {
+                events.push(CampaignEvent::AllyWarCallPending {
+                    ally: call.ally,
+                    declarer: call.declarer,
+                    target: call.target,
+                    allied_to_declarer: call.allied_to_declarer,
+                    asked_by_target_side: call.asked_by_target_side,
+                });
+                self.pending_ally_war_calls.push(call);
+                return Ok(());
+            }
+        };
         if self.is_major(a) && self.is_major(b) {
             for recipient in self.listed_third_parties(a, b) {
                 if !called.contains(recipient) {
@@ -269,7 +358,84 @@ impl CampaignModel {
         for x in called.joined_a.into_iter().chain(called.joined_b).chain(called.torn_b).chain([b, a]) {
             self.refresh_faction_zones(x);
         }
+        Ok(())
+    }
+
+    /// Command `RespondToAllyWarCall`: the human ally's answer to the top waiting call
+    /// (`CCQ_RESPOND_TO_ALLY_WAR_INVITATION`, handler `0x009370F0`: it stores the accept byte, `0x008A8190`
+    /// → offer +0x62, and the side, `0x008EFCE0` → +0x14, then pops the offer and applies it,
+    /// `0x008BF910` → `ApplyAllyWarCallAnswer` `0x008BFA80`; CONFIRMED by disassembly):
+    /// - refused: as the target's ally, it is listed as broken with the target (`0x00B27500`) and breaks
+    ///   the alliance ([`Self::break_alliance`], `0x00B13840` with no war flag); as the declarer's ally, it
+    ///   is listed as refusing (`0x00B0DB40`) and keeps its alliance;
+    /// - accepted for the target (`side` = the target, asked as its ally): listed as joined
+    ///   (`0x00B274E0`) and joins ([`Self::join_war`]: its war on the declarer unless already at war, the
+    ///   access saved for the war, `0x00B26700` / `0x00B0CCE0`); if it was the declarer's ally too, it is
+    ///   also listed as refusing the declarer;
+    /// - accepted for the declarer: likewise listed as joined (`0x00741C70`) and joins the war on the
+    ///   target; if it was the target's ally too, it is also listed as broken with the target (its own
+    ///   war has broken that alliance, `0x00B27070`).
+    ///
+    /// Then the declaration resumes (`0x008BFA80` calls `0x00B268B0` again with the offer's lists): the
+    /// next human ally gets its call, or the war is declared. `side` is ignored on a refusal. An
+    /// acceptance must name a side the ally was asked for; the exe's handler stores any side, and one
+    /// that matches neither lists the ally nowhere, so the resumed declaration asks it again: ours
+    /// refuses the command instead and the same call keeps waiting (the same state, without the
+    /// round trip).
+    pub fn respond_to_ally_war_call(&mut self, side: Option<FactionId>, accept: bool) -> Result<Vec<CampaignEvent>, CommandError> {
+        let call = self.pending_ally_war_calls.last().ok_or(CommandError::Unsupported("no call to war is waiting for an answer"))?;
+        if accept && !((call.allied_to_target && side == Some(call.target)) || (call.allied_to_declarer && side == Some(call.declarer))) {
+            return Err(CommandError::Unsupported("the ally can only join the war on a side it is allied to"));
+        }
+        let Some(AllyWarCall { declarer, target, ally, allied_to_target, allied_to_declarer, mut called, .. }) = self.pending_ally_war_calls.pop() else {
+            unreachable!("the top call was read above");
+        };
+        let mut events = Vec::new();
+        let joined = if !accept {
+            if allied_to_target {
+                called.torn_b.push(ally);
+                let result = self.break_alliance(ally, target);
+                Self::answer_events(result, &mut events);
+            }
+            if allied_to_declarer {
+                called.refused_a.push(ally);
+            }
+            None
+        } else if side == Some(target) {
+            called.joined_b.push(ally);
+            if allied_to_declarer {
+                called.refused_a.push(ally);
+            }
+            Some((declarer, target))
+        } else {
+            called.joined_a.push(ally);
+            if allied_to_target {
+                called.torn_b.push(ally);
+            }
+            Some((target, declarer))
+        };
+        if let Some((enemy, side)) = joined {
+            let result = self.join_war(ally, enemy, side);
+            Self::answer_events(result, &mut events);
+        }
+        if let Err(e) = self.declare_war_with_calls(declarer, target, called, &mut events) {
+            // Unreachable while the pair stays a valid one: its only errors are the pair's.
+            debug_assert!(false, "respond_to_ally_war_call: {e}");
+            log::warn!("respond_to_ally_war_call: {declarer:?}'s war on {target:?} could not resume: {e}");
+        }
         Ok(events)
+    }
+
+    /// The events of one of the answer's treaty steps; an error is logged (unreachable: the factions
+    /// of a waiting call are known ones other than their enemy).
+    fn answer_events(result: Result<Vec<CampaignEvent>, CommandError>, events: &mut Vec<CampaignEvent>) {
+        match result {
+            Ok(mut e) => events.append(&mut e),
+            Err(e) => {
+                debug_assert!(false, "respond_to_ally_war_call: {e}");
+                log::warn!("respond_to_ally_war_call: {e}");
+            }
+        }
     }
 
     /// `a`'s war on `b` itself (`DeclareWarOnFactionRecords` `0x00B26700`), on `ally`'s behalf when `a`
@@ -295,9 +461,19 @@ impl CampaignModel {
     /// [`FactionDetails::war_started`](super::details::FactionDetails::war_started): `b`'s at
     /// `0x00B2670D`, then `a`'s at `0x00B26716`), for a joining war too.
     ///
-    /// Not modelled: `0x00B27070`'s call `0x00A63490(6)` for the declaration's own war, which moves the
-    /// declarer's capital population classes' happiness factor [8] (class +0x20, `0x008A94D0` kind 6)
-    /// by its attitude to `b`: that factor is not modelled at all yet (BACKLOG §0).
+    /// For the declaration's own war (no `ally`), `0x00B27070` first moves the war factor of the classes of
+    /// `a`'s capital by `a`'s attitude to `b` (`0x00A63490(6, b)` at `0x00B270DC`, [`Self::move_class_war`]
+    /// with [`ClassWarEvent::WarDeclared`]), before it sets the `war` factor; a joining war does not
+    /// (CONFIRMED: the call is skipped when `0x00B27070` has an ally or the skip-notice flag, which only the
+    /// setup's `0x00B45C20` passes, and the model sets that war directly).
+    ///
+    /// ORIGINAL BUG: the exe reads the capital's vtable unchecked (`0x00B270D0`, after `0x008B3790` returns 0
+    /// for a faction without one), so a declarer without a capital crashes; ours skips the step (the battle path
+    /// `0x008ACCF0` tests `0x008C9200`, has a capital, before its same call). Reached by every own war with no
+    /// skip flag, none testing the capital: the declare-war command (`0x00932B70` → `0x00B268B0` → `0x00B26700`),
+    /// a deal's war record (`0x00C4B990` → `0x00B268B0`) and `0x008BFA80` / `0x008BFCA0`; by a declarer loaded
+    /// with no capital (`0x0087A190`) or left without one by an owner change that found no other in its home
+    /// theatre (`0x008BA580` → `0x008DABC0`) and did not end it (CAMPAIGN_FIDELITY.md §Population).
     fn war_on(&mut self, a: FactionId, b: FactionId, ally: Option<FactionId>) -> Result<Vec<CampaignEvent>, CommandError> {
         for f in [b, a] {
             // Every loaded faction has its details; a write here never makes a record for one without.
@@ -308,6 +484,11 @@ impl CampaignModel {
         let stance = self.world.stance(a, b);
         let war = event(if ally.is_some() { "war_dragged_by_ally" } else { "war" });
         let mut events = Vec::new();
+        if ally.is_none()
+            && let Some(capital) = self.world.capital(a)
+        {
+            self.move_class_war(capital, ClassWarEvent::WarDeclared, b);
+        }
         {
             let r = self.relationship_mut(a, b);
             r.set_factor("war", war);
@@ -340,8 +521,14 @@ impl CampaignModel {
         // `b`'s regular payments to `a` end likewise (`0x00B27250` → `0x0086A120`).
         self.change_treaty_money(b, a, |r| r.payments.clear());
         // The stance turns to war (0x00B27250) before the abuse's cancel, so `a`'s forces in `b`'s
-        // land may stay through its expulsion.
-        events.extend(self.world.declare_war(a, b)?);
+        // land may stay through its expulsion. `0x00B26700` has no at-war test: a deal's join-war item
+        // against a faction already at war with the joiner applies the records again
+        // ([`Self::join_war_by_deal`]), the stance staying war. The other callers test it themselves
+        // and keep their answer: [`Self::declare_war_rules`] returns `AlreadyAtWar` before anything
+        // changes, [`Self::join_war`] skips the war.
+        if stance != Stance::War {
+            events.extend(self.world.declare_war(a, b)?);
+        }
         if gave_access {
             match ally {
                 Some(_) => self.relationship_mut(b, a).military_access_turns = 0,
@@ -411,6 +598,12 @@ impl CampaignModel {
     /// gives its grantee access (`0x00B444B0`). CONFIRMED by disassembly of `0x00B262C0`.
     pub fn make_peace_rules(&mut self, a: FactionId, b: FactionId, suppress_messages: bool) -> Result<Vec<CampaignEvent>, CommandError> {
         let mut events = self.world.make_peace(a, b)?;
+        // 0x00A25570 (0x00A255C5): a commander of either side besieging a settlement the other side
+        // owns ends his siege.
+        self.end_sieges_on_peace(a, b);
+        // 0x00A25570 (0x00A25627, after the siege call): a commander of either side blockading a port the
+        // other side holds lifts the blockade.
+        self.lift_blockades_on_peace(a, b);
         // 0x00A25570: a commander of either side raiding the other side loses all his raids.
         self.clear_raids_on_peace(a, b);
         for (x, y) in [(a, b), (b, a)] {
@@ -850,6 +1043,22 @@ impl CampaignModel {
         Ok(events)
     }
 
+    /// The `CCQ_MAKE_PROTECTORATE` command (`HandleMakeProtectorateCommand` `0x009367A0`, CONFIRMED):
+    /// both factions exist and differ, `patron` is not at war with `protectorate` ([`Self::at_war`],
+    /// `0x008CE9B0`) and neither side already has a patron ([`Self::has_patron`], `0x008CEEA0`);
+    /// then `protectorate` becomes `patron`'s protectorate ([`Self::make_protectorate`]: the handler calls
+    /// `0x00B105C0` on the protectorate's diplomacy with the patron and the deal's peace step off).
+    pub fn make_protectorate_command(&mut self, patron: FactionId, protectorate: FactionId) -> Result<Vec<CampaignEvent>, CommandError> {
+        self.check_diplomacy_pair(patron, protectorate)?;
+        if self.at_war(patron, protectorate) {
+            return Err(CommandError::AlreadyAtWar(patron, protectorate));
+        }
+        if let Some(f) = [patron, protectorate].into_iter().find(|&f| self.has_patron(f)) {
+            return Err(CommandError::HasPatron(f));
+        }
+        self.make_protectorate(protectorate, patron)
+    }
+
     /// Ends `protectorate`'s tie to `patron` (`0x00B64B10` with flag 0, CONFIRMED): the stance neutral both
     /// ways (`0x00B64C10` / `0x00B54530`), the tribute (`protectorate`→`patron`) and income
     /// (`patron`→`protectorate`) lines cleared, then the relation-change broadcast. No attitude factor, no
@@ -899,9 +1108,9 @@ impl CampaignModel {
     /// 2. the alliance commitment (#6) −1;
     /// 3. military access (#3): timed access counts down (#25 elapsed +1, #19 streak +1); indefinite access
     ///    keeps the streak growing; none resets it. Timed access running out (1 → 0) sends the target's
-    ///    forces out of the faction's regions ([`Self::expel_from_lands_of`]). (When the count-down leaves
-    ///    one turn, the exe posts the target the `military_access_prompt` message, 0x76 via `0x00A0E630`:
-    ///    PROVISIONAL, not modelled.)
+    ///    forces out of the faction's regions ([`Self::expel_from_lands_of`]). When the count-down leaves
+    ///    one turn (2 → 1), the target gets the `military_access_prompt` message about the faction
+    ///    ([`CampaignMessage::MilitaryAccessPrompt`], `0x00A0E630`), returned with the other events.
     /// 4. `allied_in_war_against`: items of factions out of the game dropped, saved access turns −1;
     /// 5. friendship (#15) −1, then 10 again while allied (stance 2–4) or while the target gives the owner
     ///    military access;
@@ -917,13 +1126,16 @@ impl CampaignModel {
     /// 9. the cancel grievance (#26) −2 (to 0); embargo turns (#27) −1.
     ///
     /// Then the manager's own counter (+0x20, [`World::access_cancel_marks`](super::World::access_cancel_marks)) −1.
-    pub fn diplomacy_round_end(&mut self, faction: FactionId) {
-        let targets: Vec<FactionId> = self.world.relationships.keys().filter(|(o, _)| *o == faction).map(|(_, t)| *t).collect();
+    pub fn diplomacy_round_end(&mut self, faction: FactionId) -> Vec<CampaignEvent> {
+        let mut events = Vec::new();
         // A faction out of the game updates nothing (0x00B29100 tests the owner's +0x824 first, [`Self::in_the_game`]).
         // The vanilla saves agree: such factions' records do not drift.
         if !self.in_the_game(faction) {
-            return;
+            return events;
         }
+        // 0x00B29100 walks the faction's record vector (stride 0x848) in its own order (CONFIRMED), so the
+        // messages and expulsions come in record order.
+        let targets = self.world.record_targets_in_order(faction);
         for t in targets {
             if !self.in_the_game(t) {
                 continue;
@@ -938,6 +1150,11 @@ impl CampaignModel {
                     r.military_access_elapsed += 1;
                     r.military_access_streak += 1;
                     r.military_access_turns = n - 1;
+                    // 0x00B291E0: one turn left, so the holder `t` gets the prompt titled with the
+                    // granter's name (`0x00A0E630`(t, faction), CONFIRMED by disassembly).
+                    if n == 2 {
+                        events.push(CampaignEvent::Message { recipient: t, message: CampaignMessage::MilitaryAccessPrompt { granter: faction } });
+                    }
                     n == 1
                 }
                 -1 => {
@@ -1005,6 +1222,7 @@ impl CampaignModel {
             *n = n.saturating_sub(1);
         }
         self.diplomacy_changed();
+        events
     }
 
     /// The two war balances of `owner` against `target` (#10, #11 of the per-turn update, `0x00B29170`):
@@ -1293,13 +1511,45 @@ impl CampaignModel {
     }
 
     /// A faction still in the game: the exe's faction +0x824 clear ([`super::details::FactionDetails::out_of_game`],
-    /// CONFIRMED). An own save from before the flag was kept lacks it; then, INFERRED: the faction holds a
-    /// region or a force.
+    /// CONFIRMED). An own save from before the flag was kept lacks it; then the flag is derived as the exe
+    /// derives it ([`Self::out_of_game_by_startpos_rule`]).
     pub fn in_the_game(&self, f: FactionId) -> bool {
         match self.world.faction_details.get(&f).and_then(|d| d.out_of_game) {
             Some(out) => !out,
-            None => self.world.regions.values().any(|r| r.owner == f) || self.world.forces.values().any(|x| x.faction == f),
+            None => !self.out_of_game_by_startpos_rule(f),
         }
+    }
+
+    /// The gate of most of a faction's round-end economy (`RunFactionRoundEndEconomy` `0x008BC650`,
+    /// CONFIRMED by listing): a faction with a record (not the rebels, `IsFactionWithoutRecord`
+    /// `0x008CEEF0`) still in the game (faction +0x824 clear, [`Self::in_the_game`]). The function tests
+    /// both before the settle `0x00BABE30` (`0x008BC65D` / `0x008BC666`), the family year `0x008BC9C0`
+    /// (`0x008BC6C7` / `0x008BC6D0`), the block of construction, diplomacy and research (`0x008BC862` /
+    /// `0x008BC86B`) and its last two steps (`0x008BC8C6` / `0x008BC8CF`).
+    pub fn in_the_game_with_record(&self, f: FactionId) -> bool {
+        !self.is_rebel_faction(f) && self.in_the_game(f)
+    }
+
+    /// The exe's own rule for faction +0x824 (`UpdateFactionOutOfGameFlag` `0x008B4330`, CONFIRMED): a
+    /// faction is out of the game when it holds no region and every character of its list holds a
+    /// government post (character +0x2B8, the post handle `0x009CB1E0` sets; a faction with no character
+    /// is out). The exe runs it only when it preprocesses a `startpos.esf` (`0x00A19350` → `0x00988B00` →
+    /// the campaign model's creation `0x008742C0` → `0x0090C4A0`), so every campaign reads the result
+    /// from the file; in play only the destruction (`0x008AB6C0`: no region left and, for an AI faction,
+    /// no character; a human faction's ends the campaign) sets the flag and only a re-emergence
+    /// (`0x008AE6E0`: a region again) clears it, both agreeing with this rule (the other byte writers of
+    /// +0x824 are the three faction constructors' clears and the loader). It differs from the stored flag only for a faction that starts in
+    /// the game without a region and later loses every character holding no post: the exe keeps it in
+    /// the game, which an own save without the flag cannot show. The rebels are never tested (the loop at
+    /// `0x0090C860` walks the faction list, which they are not in): their flag stays clear, as it is in all
+    /// eight vanilla start positions (real-install test `loads_all_eight_startpos`, where the rule gives
+    /// every other faction's stored flag).
+    pub fn out_of_game_by_startpos_rule(&self, f: FactionId) -> bool {
+        if self.is_rebel_faction(f) || self.world.regions.values().any(|r| r.owner == f) {
+            return false;
+        }
+        let posts = self.world.faction_details.get(&f).map(|d| d.posts.as_slice()).unwrap_or_default();
+        self.world.characters.values().filter(|c| c.faction == f).all(|c| posts.iter().any(|p| p.holder == Some(c.id)))
     }
 
     /// Changes the treaty money of `owner`'s record towards `target` (its regular payments, protectorate
@@ -1358,18 +1608,23 @@ impl CampaignModel {
 
     /// The allies of both sides called into `a`'s war on `b` (`DeclareWarAndCallAllies` `0x00B268B0`,
     /// CONFIRMED flow and order), before the war itself: every faction X allied to `b` (stance allied,
-    /// patron or protectorate), in the game, not `a` (`0x00898B80`): if X is already at war with `a` it is
-    /// not asked and simply joins; else a human X gets an offer (UI event `+0xB10`; not modelled: a human
-    /// ally not yet at war is not called) and an AI X decides through the AI (`0x00AAA950` → `0x00AAA920`,
-    /// §6). Join ([`Self::join_war`]): X's own war on `a` on `b`'s behalf unless already at war, then the
-    /// access of X and `b` is saved for the war (`0x00B0CCE0` on both records). Refuse: X breaks its
-    /// alliance with `b` (`0x00B27500`, `0x00B13840`). Then the same for `a`'s allies against `b`, except
-    /// that a refusing ally of `a` is only listed (`0x00B0DB40`) and keeps its alliance. PROVISIONAL AI
-    /// decision: join, unless X is allied to the enemy as well (then it refuses). The events go to
-    /// `events`; returns who joined and who broke with `b`, the lists the exe keeps for the zones' refresh.
-    fn call_allies(&mut self, a: FactionId, b: FactionId, events: &mut Vec<CampaignEvent>) -> CalledAllies {
-        let mut called = CalledAllies::default();
+    /// patron or protectorate), in the game, not `a` (`0x00898B80`), not yet answered for `b`'s side
+    /// (in `called`'s lists +0x20 / +0x30, `0x00B673D0`): if X is already at war with `a` it is not asked
+    /// and simply joins; else a human X is asked (only with [`CampaignModel::ask_human_allies`] on, else
+    /// it is skipped): its [`AllyWarCall`] is returned (`0x00885DA0` at
+    /// `0x00B26C06`, pushed `0x00B26C1F`) and the calling stops there; an AI X decides through the AI
+    /// (`0x00AAA950` → `0x00AAA920`, §6). Join ([`Self::join_war`]): X's own war on `a` on `b`'s behalf
+    /// unless already at war, then the access of X and `b` is saved for the war (`0x00B0CCE0` on both
+    /// records). Refuse: X breaks its alliance with `b` (`0x00B27500`, `0x00B13840`). Then the same for
+    /// `a`'s allies against `b` (skipping those answered for `a`'s side, +0 / +0x10, `0x00B67380`; a human
+    /// asked at `0x00B26DFE`), except that a refusing ally of `a` is only listed (`0x00B0DB40`) and keeps
+    /// its alliance. The call records whether X is allied to the other side too (`0x008CE390`), so its
+    /// answer lists it for both. PROVISIONAL AI decision: join, unless X is allied to the enemy as well
+    /// (then it refuses). The events go to `events`; returns who joined and who broke with `b`, the lists
+    /// the exe keeps for the zones' refresh, or the human ally's call.
+    fn call_allies(&mut self, a: FactionId, b: FactionId, mut called: CalledAllies, events: &mut Vec<CampaignEvent>) -> CallOutcome {
         for (side, enemy) in [(b, a), (a, b)] {
+            let target_side = side == b;
             // In the order of `side`'s diplomacy records (CONFIRMED: both loops walk the side's record
             // array, stride 0x848, front to back).
             let allies: Vec<FactionId> = self
@@ -1380,9 +1635,28 @@ impl CampaignModel {
                 .filter(|&x| matches!(self.world.stance(x, side), Stance::Allied | Stance::Patron | Stance::Protectorate))
                 .collect();
             for x in allies {
-                let at_war = self.world.stance(x, enemy) == Stance::War;
-                if !at_war && self.turn.humans.contains(&x) {
+                if called.answered_for(target_side, x) {
                     continue;
+                }
+                let at_war = self.world.stance(x, enemy) == Stance::War;
+                if !at_war && self.is_human(x) {
+                    // PLACEHOLDER: ally_attacked panel not built; humans keep main's skip. With
+                    // `ask_human_allies` off (the app's setting) a human ally not yet at war is not
+                    // asked, not listed, and keeps its alliance; the exe asks it through the
+                    // `ally_attacked` event message (BACKLOG §3 event messages), which turns it on.
+                    if !self.ask_human_allies {
+                        continue;
+                    }
+                    let allied_to_enemy = self.allied_with(x, enemy);
+                    return CallOutcome::Asked(AllyWarCall {
+                        declarer: a,
+                        target: b,
+                        ally: x,
+                        allied_to_target: target_side || allied_to_enemy,
+                        allied_to_declarer: !target_side || allied_to_enemy,
+                        asked_by_target_side: target_side,
+                        called,
+                    });
                 }
                 let torn = !at_war && matches!(self.world.stance(x, enemy), Stance::Allied | Stance::Patron | Stance::Protectorate);
                 let result = match (torn, side == b) {
@@ -1410,7 +1684,36 @@ impl CampaignModel {
                 }
             }
         }
-        called
+        CallOutcome::Answered(called)
+    }
+
+    /// A deal's join-war item (`ApplyJoinWarRecordOnAccept` `0x00C188F0` → `0x00B26700` with its
+    /// refresh flag set, CONFIRMED by disassembly): `x` declares war on `target` on `ally`'s behalf
+    /// ([`Self::war_on`] with the ally: no allies called, no third parties' factors, no `war_declared`
+    /// notices, no access saved for the war), with no at-war test (an existing war's records are
+    /// applied again); then `0x00B26700`'s refresh step: the `campmap_faction_joins_your_enemies`
+    /// notice to `target` ([`CampaignMessage::FactionJoinsYourEnemies`], `0x009DAE40`, no major-power
+    /// test), then the zones of control of `target`, then of `x` (`0x00B795A0`). Not modelled: the
+    /// path grid's view and the trade price update (`0x00B67490`, `0x00BCB020(0)`, no model state).
+    ///
+    /// The caller has checked the pair ([`Self::check_diplomacy_pair`], before any of the deal's
+    /// records is applied); with that, [`Self::war_on`] cannot fail (its only errors are the pair's,
+    /// and an existing war is no error here), so the item cannot leave a deal half-applied.
+    pub(crate) fn join_war_by_deal(&mut self, x: FactionId, target: FactionId, ally: FactionId) -> Vec<CampaignEvent> {
+        let mut events = match self.war_on(x, target, Some(ally)) {
+            Ok(events) => events,
+            // Unreachable: the caller checked the pair.
+            Err(e) => {
+                debug_assert!(false, "join_war_by_deal: {e}");
+                log::warn!("join_war_by_deal: {x:?} could not declare war on {target:?} for {ally:?}: {e}");
+                return Vec::new();
+            }
+        };
+        events.push(CampaignEvent::Message { recipient: target, message: CampaignMessage::FactionJoinsYourEnemies { joiner: x } });
+        for f in [target, x] {
+            self.refresh_faction_zones(f);
+        }
+        events
     }
 
     /// `x` joins `ally`'s war on `enemy` (`0x00B268B0`'s joined step): `x`'s own war on `enemy` on

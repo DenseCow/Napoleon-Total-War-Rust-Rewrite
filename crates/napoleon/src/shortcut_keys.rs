@@ -152,13 +152,53 @@ pub(crate) fn exe_key_name(k: KeyCode) -> Option<&'static str> {
     })
 }
 
-/// The modifier keys held, as the exe's modifier test `0x00EC53A0` reads them (CONFIRMED: CTRL is
-/// LCONTROL or RCONTROL, SHIFT LSHIFT or RSHIFT, ALT LALT or RALT).
-pub(crate) fn held_modifiers(keys: &ButtonInput<KeyCode>) -> Held {
-    Held {
-        ctrl: keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]),
-        shift: keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]),
-        alt: keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]),
+/// The keys down at each of a frame's key events, as the exe's frame key snapshot (`0x00E20190`)
+/// has them when a key event runs the bindings (`0x00EEE250`). Bevy's [`ButtonInput`] only holds
+/// the frame's end state, so [`Self::rewind`] winds it back to the frame's start and
+/// [`Self::apply`] replays the events in order (a key pressed and let go in one frame is still
+/// down at its press).
+#[derive(Debug, Default, Clone, PartialEq)]
+pub(crate) struct KeysDown(pub Vec<KeyCode>);
+
+impl KeysDown {
+    /// Winds back to the keys down before the frame's `events` (key, pressed): the keys down at
+    /// the end of the frame without an event, and each key with events in the opposite of its
+    /// first event's state. Reuses this set's buffer (no allocation once it has grown).
+    pub(crate) fn rewind(&mut self, end: impl Iterator<Item = KeyCode>, events: &[(KeyCode, bool)]) {
+        self.0.clear();
+        self.0.extend(end.filter(|k| !events.iter().any(|(e, _)| e == k)));
+        for (i, &(k, pressed)) in events.iter().enumerate() {
+            if !pressed && !events[..i].iter().any(|(e, _)| *e == k) {
+                self.0.push(k);
+            }
+        }
+    }
+
+    /// One key event: `key` goes down or up.
+    pub(crate) fn apply(&mut self, key: KeyCode, pressed: bool) {
+        if !pressed {
+            self.0.retain(|k| *k != key);
+        } else if !self.0.contains(&key) {
+            self.0.push(key);
+        }
+    }
+
+    /// The exe's names of the keys down ([`exe_key_name`]) into `out` (emptied first; no
+    /// allocation once it has grown).
+    pub(crate) fn names_into(&self, out: &mut Vec<&'static str>) {
+        out.clear();
+        out.extend(self.0.iter().filter_map(|k| exe_key_name(*k)));
+    }
+
+    /// The modifier keys held, as the exe's modifier test `0x00EC53A0` reads them (CONFIRMED: CTRL
+    /// is LCONTROL or RCONTROL, SHIFT LSHIFT or RSHIFT, ALT LALT or RALT).
+    pub(crate) fn modifiers(&self) -> Held {
+        let any = |a: KeyCode, b: KeyCode| self.0.contains(&a) || self.0.contains(&b);
+        Held {
+            ctrl: any(KeyCode::ControlLeft, KeyCode::ControlRight),
+            shift: any(KeyCode::ShiftLeft, KeyCode::ShiftRight),
+            alt: any(KeyCode::AltLeft, KeyCode::AltRight),
+        }
     }
 }
 
@@ -178,9 +218,27 @@ mod tests {
 
     #[test]
     fn modifiers_are_either_side() {
-        let mut keys = ButtonInput::<KeyCode>::default();
-        keys.press(KeyCode::ControlRight);
-        keys.press(KeyCode::AltLeft);
-        assert_eq!(held_modifiers(&keys), Held { ctrl: true, shift: false, alt: true });
+        let keys = KeysDown(vec![KeyCode::ControlRight, KeyCode::AltLeft]);
+        assert_eq!(keys.modifiers(), Held { ctrl: true, shift: false, alt: true });
+    }
+
+    /// A frame's events replay from the frame's start: a key tapped within the frame is down at its
+    /// press, a key let go is down before its release, an untouched key stays down throughout.
+    #[test]
+    fn a_frames_key_events_replay_from_its_start() {
+        use KeyCode::{ControlLeft as C, KeyS as S, KeyW as W};
+        // End of frame: W and CTRL down. Events: S down, S up, CTRL up, CTRL down.
+        let events = [(S, true), (S, false), (C, false), (C, true)];
+        let mut keys = KeysDown::default();
+        keys.rewind([W, C].into_iter(), &events);
+        assert_eq!(keys, KeysDown(vec![W, C]));
+        let mut seen = Vec::new();
+        for (k, p) in events {
+            keys.apply(k, p);
+            let mut names = Vec::new();
+            keys.names_into(&mut names);
+            seen.push(names);
+        }
+        assert_eq!(seen, [vec!["W", "LCONTROL", "S"], vec!["W", "LCONTROL"], vec!["W"], vec!["W", "LCONTROL"]]);
     }
 }

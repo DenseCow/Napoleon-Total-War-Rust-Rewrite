@@ -141,6 +141,13 @@ pub(super) struct PostedCall {
     pub(super) before: Option<Box<dyn FnOnce()>>,
 }
 
+/// One [`Inner::find_under_root`] answer: for the component name `name`, the last search's
+/// (world generation, root, component found).
+struct NamedNode {
+    name: String,
+    found: (u64, NodeId, Option<NodeId>),
+}
+
 pub(super) struct Inner {
     pub(super) world: RefCell<UiWorld>,
     pub(super) source: ScriptSource,
@@ -156,6 +163,11 @@ pub(super) struct Inner {
     pub(super) requests: RefCell<Vec<UiRequest>>,
     /// `StealShortcutKey(key)` calls, oldest first: (component, key name).
     stolen_keys: RefCell<Vec<(NodeId, String)>>,
+    /// The shortcut handler runs its bindings (manager `+0x30`, set by `0x00EA5080`, which
+    /// `CampaignUI.EnableShortcutHandler` calls); on from the start.
+    pub(super) shortcuts_enabled: std::cell::Cell<bool>,
+    /// The components the key bindings name, as last found ([`Inner::find_under_root`]).
+    named_nodes: RefCell<Vec<NamedNode>>,
     /// The component that last called `StealInputFocus`.
     focus: RefCell<Option<NodeId>>,
     /// The component under the pointer (the exe's hovered component): set by
@@ -225,6 +237,31 @@ impl Inner {
     /// `agent_options.lua:109`).
     pub(super) fn root_node(&self) -> Option<NodeId> {
         *self.root.borrow()
+    }
+
+    /// The first component named `name` under the root, depth first ([`UiWorld::find`]), found
+    /// once per UI change: the answer is kept with the world's
+    /// [`generation`](super::world::UiWorld::generation) and the root it was found under and reused
+    /// while both are unchanged (nothing in the tree changed, so a new search would give the same
+    /// answer). One entry per name asked for (the key bindings' components), kept for the host's
+    /// life.
+    pub(super) fn find_under_root(&self, name: &str) -> Option<NodeId> {
+        let root = self.root_node()?;
+        let world = self.world.borrow();
+        let mut nodes = self.named_nodes.borrow_mut();
+        let stamp = (world.generation, root);
+        match nodes.iter_mut().find(|n| n.name == name) {
+            Some(n) if (n.found.0, n.found.1) == stamp => n.found.2,
+            Some(n) => {
+                n.found = (stamp.0, root, world.find(root, name));
+                n.found.2
+            }
+            None => {
+                let node = world.find(root, name);
+                nodes.push(NamedNode { name: name.to_string(), found: (stamp.0, root, node) });
+                node
+            }
+        }
     }
 
     /// Logs `text` the first time `what` happens in this host (one host per screen: the front
@@ -374,6 +411,8 @@ impl UiScriptHost {
             log: RefCell::new(Vec::new()),
             requests: RefCell::new(Vec::new()),
             stolen_keys: RefCell::new(Vec::new()),
+            shortcuts_enabled: std::cell::Cell::new(true),
+            named_nodes: RefCell::new(Vec::new()),
             focus: RefCell::new(None),
             hovered: std::cell::Cell::new(None),
             fonts: RefCell::new(std::collections::HashMap::new()),
@@ -629,22 +668,51 @@ impl UiScriptHost {
     /// while they are open. Returns `None` when no shown component holds the key, else its
     /// `OnKey`'s result (false on a script error, logged once).
     pub fn stolen_key(&self, key: &str) -> Option<bool> {
-        let target = {
-            let w = self.inner.world.borrow();
-            let root = *self.inner.root.borrow();
-            let shown = |mut id: NodeId| loop {
-                let Some(n) = w.get(id) else { return false };
-                if !n.visible {
-                    return false;
-                }
-                match n.parent {
-                    Some(p) => id = p,
-                    None => return Some(id) == root,
-                }
-            };
-            self.inner.stolen_keys.borrow().iter().rev().find(|(n, k)| k == key && shown(*n)).map(|(n, _)| *n)
-        }?;
-        let r = call_entry::<bool>(&self.lua, &self.inner, target, "__ntw_call_if_defined", (addr(target), "OnKey", key, false, true));
+        self.send_stolen_key(key, true)
+    }
+
+    /// The component that most recently stole `key` and is still shown ([`Self::stolen_key`]).
+    ///
+    /// PROVISIONAL: the stealer choice. The exe's key-down (`0x00EA5090`) gives the key to the
+    /// newest stealer whose handler passes its input-layer test (+0x38, `0x00DACBA0`) and is not
+    /// disabled (+0x3C, `0x00DACBB0`), and a re-steal keeps the stealer's first place
+    /// (`0x00EC3DE0`); ours takes the newest shown stealer without either test, and a re-steal
+    /// (`StealShortcutKey`) moves it to the newest place.
+    pub(super) fn stealer_of(&self, key: &str) -> Option<NodeId> {
+        let w = self.inner.world.borrow();
+        let root = *self.inner.root.borrow();
+        let shown = |mut id: NodeId| loop {
+            let Some(n) = w.get(id) else { return false };
+            if !n.visible {
+                return false;
+            }
+            match n.parent {
+                Some(p) => id = p,
+                None => return Some(id) == root,
+            }
+        };
+        self.inner.stolen_keys.borrow().iter().rev().find(|(n, k)| k == key && shown(*n)).map(|(n, _)| *n)
+    }
+
+    /// The keys a shown component holds ([`Self::stealer_of`]), each once, in the order first
+    /// stolen.
+    pub(super) fn stolen_key_names(&self) -> Vec<String> {
+        let all: Vec<String> = self.inner.stolen_keys.borrow().iter().map(|(_, k)| k.clone()).collect();
+        let mut keys: Vec<String> = Vec::new();
+        for k in all {
+            if !keys.contains(&k) && self.stealer_of(&k).is_some() {
+                keys.push(k);
+            }
+        }
+        keys
+    }
+
+    /// The stealer of `key` ([`Self::stealer_of`]) hears it go down (`OnKey(key, false, false)`)
+    /// or up (`(key, false, true)`). None when no shown component holds the key, else its
+    /// `OnKey`'s result (false on a script error, logged).
+    pub(super) fn send_stolen_key(&self, key: &str, up: bool) -> Option<bool> {
+        let target = self.stealer_of(key)?;
+        let r = call_entry::<bool>(&self.lua, &self.inner, target, "__ntw_call_if_defined", (addr(target), "OnKey", key, false, up));
         Some(r.unwrap_or_else(|e| {
             log(&self.inner, format!("ERROR in OnKey of component {target}: {e}"));
             false
@@ -764,12 +832,6 @@ impl UiScriptHost {
         let (node, movie) = attached.as_ref()?;
         self.inner.world.borrow().get(*node)?;
         Some((*node, movie.clone()))
-    }
-
-    /// True while a component that takes the focus holds it (a text field being typed into): the
-    /// same test [`Self::text_input`] and [`Self::focused_key`] make before they deliver to it.
-    pub fn text_focused(&self) -> bool {
-        (*self.inner.focus.borrow()).is_some_and(|f| accepts_focus(&self.inner, f))
     }
 
     /// True while any component holds the input focus, whether or not its state takes it: the
@@ -1898,7 +1960,7 @@ fn component_methods(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
     method!("IsDragged", |inner, lua, _id, args| ret(lua, false));
     // AttachCustomControl(control): show an engine control inside this component. CONFIRMED use:
     // `event_movie_panel.luac`'s `ShowMovieType` attaches `data.bink_control_ptr` (the playing
-    // movie, which the exe's movie queue `0x00998E20` hands over) to `movie_window`. Ours: the
+    // movie, which the exe's movie-panel constructor `0x00998E20` passes) to `movie_window`. Ours: the
     // engine's only custom control is a movie, and the handle the engine gives the scripts is the
     // movie's file name; the game draws that movie in the component ([`UiScriptHost::attached_movie`]).
     method!("AttachCustomControl", |inner, lua, id, args| {

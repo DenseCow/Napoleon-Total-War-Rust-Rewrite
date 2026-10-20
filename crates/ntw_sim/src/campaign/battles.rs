@@ -242,15 +242,19 @@ impl CampaignModel {
         events.push(CampaignEvent::ForceDestroyed { force });
     }
 
-    /// The one path a force leaves the world: the regions' garrison and fleet links to it go, and a navy docked in
+    /// The one path a force leaves the world: the regions' garrison, fleet and siege links to it go, and a navy docked in
     /// a port (`port`, [`Self::docked_port`] looked up by the caller while the force still stands on the map) hands
     /// the slot back to the region's owner, as the navy's destructor does (`0x0088EF90` → `0x00A8D830` on the
     /// navy's port handle +0xE0, CONFIRMED polish21; skipped there only while the campaign is torn down, campaign
-    /// +0xFC5). Its repair orders are not refunded: the ships go with it.
+    /// +0xFC5); then a port a navy blockades is freed ([`Self::lift_blockade_of_navy`], the same destructor's next
+    /// step). Its repair orders are not refunded: the ships go with it.
     pub(crate) fn remove_force(&mut self, force: ForceId, port: Option<(RegionId, usize)>) -> Option<MilitaryForce> {
         let f = self.world.forces.remove(&force)?;
         if let Some((region, slot)) = port {
             self.restore_port_holder(region, slot);
+        }
+        if f.is_navy {
+            self.lift_blockade_of_navy(force);
         }
         for r in self.world.regions.values_mut() {
             if r.garrison == Some(force) {
@@ -260,22 +264,32 @@ impl CampaignModel {
                 r.fleet = None;
             }
         }
-        // Its entry in the risen armies goes too (`World::region_risen_armies`), so a later force given
-        // the same id is not taken for a risen army (our own bookkeeping: how the exe unlinks a dead
-        // army from region +0x220 is not traced, and needs no port).
+        // A besieger ends its siege (the destructor `0x0088CE30` calls `0x008BD550` at `0x0088CE93`
+        // when force +0x94 is set, CONFIRMED), the price update with it; the siege's turns stay.
+        self.end_force_siege(force);
+        // Its entry in the risen armies goes too, keeping the rest in order, with its rebel government
+        // (`World::region_risen_armies`, `World::rebel_army_governments`): the army's destructor
+        // `0x0088CE30` frees its REBEL_DATA (+0x98), whose destructor `0x0088F310` unlinks it from
+        // region +0x220 (`0x008B0150`: erase and shift down). CONFIRMED by decompile.
         self.world.region_risen_armies.retain(|_, armies| {
             armies.retain(|&a| a != force);
             !armies.is_empty()
         });
+        self.world.rebel_army_governments.remove(&force);
         Some(f)
     }
 
     /// `faction` takes `region`'s settlement ([`Self::take_settlement`]) and the capture is reported
     /// (`SettlementOccupied`; the event's constructor `0x00889EE0` is called only by the capture
-    /// variants `0x00B58560`, `0x00B58890` and `0x00B58C00`, CONFIRMED). A capture that ends the old
-    /// owner reports `FactionDestroyed` (fired inside the owner change `0x00A64AC0`) before
-    /// `SettlementOccupied`: INFERRED, where those variants build the event relative to their owner
-    /// change is not traced (BACKLOG).
+    /// variants `0x00B58560`, `0x00B58890` and `0x00B58C00`, CONFIRMED). This is the one place the
+    /// capture's events are ordered: each variant builds and posts `SettlementOccupied` after its
+    /// owner change returns (`0x00B449F0` at `0x00B586D9` / `0x00B5897A` / `0x00B58D2B`, event at
+    /// `0x00B5874F` / `0x00B589A6` / `0x00B58DA0`), and a capture that ends the old owner fires
+    /// `FactionDestroyed` inside that owner change (`0x00A64AC0` → `0x008AB6C0` at `0x00A652A2`,
+    /// model event +0x108, whose broadcast `0x008DBAC0` calls every listener at once). So
+    /// `FactionDestroyed` comes first, then `SettlementOccupied`, then the capture report
+    /// ([`Self::settle_capture`]; the variants queue it before posting the event, but the choice it
+    /// carries runs later): CONFIRMED, disassembly.
     pub(crate) fn occupy(
         &mut self,
         region: RegionId,
@@ -293,13 +307,13 @@ impl CampaignModel {
     /// reports a capture, the campaign director's transfer (`0x00B58A30`, [`super::director`]) none.
     /// Returns false when the region does not exist.
     ///
-    /// Every capture variant (the settlement's virtuals `0x00B58560` +0x44, `0x00B58890` +0x48 and
-    /// `0x00B58C00` +0x5C, and `0x00B58A30`, the campaign director's region transfer) empties the
-    /// queues itself before the owner changes (CONFIRMED, disassembly): the region's land queue
-    /// (region +0x124) with no refund (`0x00B1A760(0)`), each port's naval queue (slot +0x1E8) with
-    /// the refund (`0x00B1A760(1)`), every construction with no refund (`0x00A6CBE0(0)`). So the old
-    /// owner gets its queued ships' cost back but not its land units' ([`Self::clear_region_queues`]);
-    /// the owner change that follows finds the queues empty.
+    /// Every capture variant (the settlement's virtuals `0x00B58560`, `0x00B58890` and `0x00B58C00`,
+    /// at vtable slots `0x0137CA44` / `0x0137CA48` / `0x0137CA5C`, and `0x00B58A30`, the campaign
+    /// director's region transfer) empties the queues itself before the owner changes (CONFIRMED,
+    /// disassembly): the region's land queue (region +0x124) with no refund (`0x00B1A760(0)`), each
+    /// port's naval queue (slot +0x1E8) with the refund (`0x00B1A760(1)`), every construction with no
+    /// refund (`0x00A6CBE0(0)`). So the old owner gets its queued ships' cost back but not its land
+    /// units' ([`Self::clear_region_queues`]); the owner change that follows finds the queues empty.
     ///
     /// Every one of them also sets the owner change's capture flag, and `TransferRegionToFaction`
     /// (`0x00A64AC0`) with it set, neither side the rebels (`0x00C3FE80`) and the owner a different
@@ -322,6 +336,12 @@ impl CampaignModel {
         if !self.change_region_owner(region, faction) {
             return false;
         }
+        // The capture variants end the captor's own siege after the owner change (`0x00B586E9`,
+        // `0x00B5898A`, `0x00B58D3B`, each when the force's siege object +0x94 is set; CONFIRMED). The
+        // owner change's listener has ended it already ([`Self::end_sieges_after_owner_change`]).
+        if let Some(f) = by {
+            self.end_force_siege(f);
+        }
         if old != faction && !self.is_rebel_faction(old) && !self.is_rebel_faction(faction) {
             // `0x00B62120` refreshes both sides' zones first: the new owner, then the old.
             self.refresh_faction_zones(faction);
@@ -330,6 +350,10 @@ impl CampaignModel {
         }
         let Some(r) = self.world.regions.get_mut(&region) else { return false };
         // The capture variants destroy the garrison army first; the settlement's links go with it.
+        // PROVISIONAL: the settlement's residents (characters in no force, `World::settlement_residents`)
+        // stay inside under the new owner, so a foreign gentleman goes on counting in its public
+        // order; what the capture variants (`0x00B58560` / `0x00B58C00`) do to the residence's list
+        // +0xC8 is not traced.
         r.garrison = None;
         r.fleet = None;
         let pos = r.settlement.position;
@@ -352,15 +376,17 @@ impl CampaignModel {
         true
     }
 
-    /// A region handed over without a character: the deal's region item (`0x00C18BF0` →
-    /// `0x00B58A10(faction, 1, 0)` → `TransferSettlementOwnership` `0x00B449F0` with no character
+    /// A region handed over without a capturing force: the deal's region item (`0x00C18BF0` →
+    /// `0x00B58A10(faction, 1, 0)` → `TransferSettlementOwnership` `0x00B449F0` with a NULL force
     /// and no capture report). The owner change itself is [`Self::change_region_owner`], the one rule
     /// capture, liberation and deals share. A region `faction` already owns still goes through it
-    /// (CONFIRMED: `0x00B449F0` tests the owner only against a passed character's army,
-    /// `0x00B44A3A`..`0x00B44A67`, and this path passes none), which then does only its same-owner
+    /// (CONFIRMED: `0x00B449F0` tests the owner only against the faction (+0x34) of a passed force's
+    /// `REBEL_DATA` (+0x98, a risen rebel army's), `0x00B44A3A`..`0x00B44A67`, and this path passes
+    /// no force), which then does only its same-owner
     /// part. Of this path's callers only a deal can name such a region: nothing checks a deal's region
     /// owners ([`Self::propose_regions`]), a liberation's target is out of the game, and the
-    /// destruction handover (`0x008AB6C0`) is not modelled (CAMPAIGN_FIDELITY.md "Same-owner transfer").
+    /// destruction hand-over (`0x008AB6C0`, [`Self::destroy_faction_by`]) refuses a killer that is the
+    /// destroyed faction (the exe's loop never ends then; CAMPAIGN_FIDELITY.md "Same-owner transfer").
     /// Neither the old owner's end (a deal's caller runs [`Self::end_if_capital_lost`] for its first
     /// flag) nor a liberated faction's return ([`Self::liberate_region`]) happens here. Returns true
     /// only when the region changed hands.
@@ -383,9 +409,10 @@ impl CampaignModel {
     /// ([`Self::expel_after_owner_change`], `0x008D9DC0`): after a deal or a liberation the old
     /// owner's garrison is put out, as the capturer's army is after a liberation. Nothing is
     /// destroyed here (the settlement's owner-changed event, +0x24 fired at `0x00B44B31`, has on the
-    /// campaign side only the siege listener `0x008DB7D0`, sieges not being in the model). The trade
+    /// campaign side only the siege listener `0x008DB7D0`, which ends sieges and destroys no force:
+    /// [`Self::end_sieges_after_owner_change`], in both branches). The trade
     /// price update (flag 0, [`Self::update_commodity_prices_with`]) runs after the route loss
-    /// ([`Self::trade_routes_after_region_lost`]) and again when a port slot passes.
+    /// ([`Self::trade_routes_after_region_lost`]) and again when a port slot passes or the slot pass lifts a blockade.
     ///
     /// When `faction` already owns the region ([`Self::transfer_region`]) only the research stop and
     /// the slot pass run (CONFIRMED, disassembly): `0x00A64AC0` stops the research (`0x008B4AB0` at
@@ -404,6 +431,8 @@ impl CampaignModel {
             }
         }
         if old == faction {
+            // The owner-changed event fires here too (`0x00B44B31`, before the slot pass `0x00B44B69`).
+            self.end_sieges_after_owner_change(region);
             if self.pass_region_slots(region, old, faction) {
                 self.update_commodity_prices_with(false);
             }
@@ -418,9 +447,12 @@ impl CampaignModel {
         // units, land and naval, and a human old owner's none.
         let refund = !self.turn.humans.contains(&old);
         self.clear_region_queues(region, QueueRefund { land: refund, naval: refund });
-        let port_passed = self.pass_region_slots(region, old, faction);
+        let slot_prices_due = self.pass_region_slots(region, old, faction);
         let Some(r) = self.world.regions.get_mut(&region) else { return false };
         r.owner = faction;
+        // It leaves the old owner's region list and joins the end of the new owner's (`0x008BA580`,
+        // `0x008AE270`; `World::region_gains`).
+        self.world.note_region_gain(region);
         // The region leaves every governorship and joins the new owner's first one, if it has one
         // (INFERRED; the governorship supplies the region's faction part, see `World::governing_faction`).
         for d in self.world.faction_details.values_mut() {
@@ -444,8 +476,11 @@ impl CampaignModel {
         super::economy::move_policing_tracker(self, region, old, faction);
         super::economy::refresh_running_income(self, faction, super::economy::RunningIncome::Taxes);
         super::economy::refresh_running_income(self, old, super::economy::RunningIncome::Taxes);
+        // After `0x00A64AC0`, the settlement's owner-changed event (`0x00B44B31`): its sieges by the new
+        // owner or by factions not at war with it end ([`Self::end_sieges_after_owner_change`]).
+        self.end_sieges_after_owner_change(region);
         // Then the slot pass's price updates (`0x00B1B300` runs after `0x00A64AC0` in `0x00B449F0`).
-        if port_passed {
+        if slot_prices_due {
             self.update_commodity_prices_with(false);
         }
         true
@@ -464,7 +499,9 @@ impl CampaignModel {
     /// settlement's own `SetSettlementOwner` call before `0x00A64AC0` runs none (the settlement vtable
     /// `0x0137C9A4` +0x4C is `0x00461180`, null). The exe updates once per port slot passed; the caller's one
     /// update gives the same prices: nothing the update reads changes between those calls and flag 0 leaves the
-    /// history alone.
+    /// history alone. The same pass lifts the blockades of the ports the new owner now holds
+    /// ([`Self::clear_blockades_after_slot_pass`]); each lift's own price update (`0x00A784E0` → `0x00BCB020(0)`)
+    /// folds into the caller's one in the same way, so the return value is also true when a blockade was lifted.
     fn pass_region_slots(&mut self, region: RegionId, old: super::FactionId, faction: super::FactionId) -> bool {
         let docked: Vec<usize> = self.world.forces.keys().filter_map(|&x| self.docked_port(x)).filter(|&(r, _)| r == region).map(|(_, i)| i).collect();
         let Some(r) = self.world.regions.get_mut(&region) else { return false };
@@ -475,7 +512,8 @@ impl CampaignModel {
         }
         r.road_holder = None;
         r.fortification_holder = None;
-        port_passed
+        let lifted = self.clear_blockades_after_slot_pass(region, faction);
+        port_passed || lifted
     }
 
     /// Empties `region`'s queues as an owner change does (`0x00B1A760` on the land queue and on each

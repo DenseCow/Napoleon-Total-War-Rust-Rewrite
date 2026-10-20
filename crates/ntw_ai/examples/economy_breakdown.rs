@@ -52,17 +52,18 @@ fn main() {
     for round in 0..=rounds {
         let fx = Effects::compute(&m);
         let inc = economy::faction_income(&m, f);
-        let (mut land, mut naval, mut land_plain, mut naval_plain, mut land_units, mut ships) = (0, 0, 0, 0, 0, 0);
+        let (land, naval) = economy::faction_upkeep_split_with(&m, &fx, f);
+        // The raw `units` upkeep and unit counts beside it, split by force kind and over the same
+        // (commanded) forces as the upkeep.
+        let (mut land_plain, mut naval_plain, mut land_units, mut ships) = (0, 0, 0, 0);
         for force in m.world.forces.values().filter(|x| x.faction == f) {
-            for u in &force.units {
+            let Some((_, units)) = economy::costed_force(force) else { continue };
+            for u in units {
                 let Some(r) = m.rules.units.get(&u.unit_key) else { continue };
-                let c = economy::unit_upkeep(&fx, f, &m.rules.features, &u.unit_key, r);
-                if r.is_naval {
-                    naval += c;
+                if force.is_navy {
                     naval_plain += r.upkeep;
                     ships += 1;
                 } else {
-                    land += c;
                     land_plain += r.upkeep;
                     land_units += 1;
                 }

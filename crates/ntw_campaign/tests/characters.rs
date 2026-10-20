@@ -73,6 +73,35 @@ fn traits_follow_the_exe_rules() {
     assert!(m.world.character_details[&g].traits.len() <= 6);
 }
 
+/// stickytrait: a held trait's level on vanilla thresholds (`0x008B5380`, CHARACTERS_FIDELITY.md §1):
+/// kept below the first threshold, and a fall from the no-going-back level lands on it.
+///
+/// Run on the install: `cargo test -p ntw_campaign --test characters held_trait_levels -- --nocapture`.
+#[test]
+fn held_trait_levels_follow_the_exe_on_vanilla_thresholds() {
+    let Some(mut m) = model() else { return };
+    let rules = m.rules.characters.clone();
+    let rule = |k: &str| rules.traits.get(k).unwrap_or_else(|| panic!("{k} in character_traits"));
+    let (bad, brave) = (rule("C_General_Attacker_Bad"), rule("C_General_Brave"));
+    assert_eq!((bad.no_going_back_level, bad.thresholds.clone()), (3, vec![(1, 4), (2, 8), (3, 16)]));
+    assert_eq!((brave.no_going_back_level, brave.thresholds.clone()), (3, vec![(1, 1), (2, 2), (3, 4), (4, 8), (5, 16)]));
+    let anti = |r: &ntw_sim::campaign::characters::TraitRule| r.antitraits.first().cloned().expect("an antitrait");
+    let g = pick(&m, "General");
+    let held = |m: &CampaignModel, k: &str| m.world.character_details[&g].traits.iter().find(|t| t.key == k).map(|t| (t.points, t.level));
+    // Attacker_Bad at level 2 (8 points); its antitrait takes 6: 2 points, below level 1's 4, level 2 kept.
+    m.world.character_details.get_mut(&g).unwrap().traits.clear();
+    characters::add_trait_points(&mut m, g, "C_General_Attacker_Bad", 8);
+    assert_eq!(held(&m, "C_General_Attacker_Bad"), Some((8, 2)));
+    assert_eq!(characters::add_trait_points(&mut m, g, &anti(bad), 6), TraitOutcome::Absorbed);
+    assert_eq!(held(&m, "C_General_Attacker_Bad"), Some((2, 2)));
+    // Brave at level 5 (16); its antitrait takes 13: 3 points reach level 2, so it lands on level 3 at 4.
+    m.world.character_details.get_mut(&g).unwrap().traits.clear();
+    characters::add_trait_points(&mut m, g, "C_General_Brave", 16);
+    assert_eq!(held(&m, "C_General_Brave"), Some((16, 5)));
+    assert_eq!(characters::add_trait_points(&mut m, g, &anti(brave), 13), TraitOutcome::Absorbed);
+    assert_eq!(held(&m, "C_General_Brave"), Some((4, 3)));
+}
+
 #[test]
 fn ancillaries_follow_the_exe_rules() {
     let Some(mut m) = model() else { return };
@@ -296,4 +325,45 @@ fn vanilla_agent_main_attributes() {
     ] {
         assert_eq!(main_attribute(&m.rules, kind), main, "{kind:?}");
     }
+}
+
+/// A character's stored attribute levels (`AgentAttributes`, character +0x394) already hold his
+/// traits' and ancillaries' attribute effects (`0x00A0ECB0` / `0x00A0EC10` add them as they are
+/// gained): on the vanilla start position every character's levels are his type's starting levels
+/// plus those effects (CHARACTERS_FIDELITY.md §16). One exception: a rake (749615820) holds `C_Rake_Counter_Spy` at 6
+/// points (level 2, `subterfuge` +2) with his starting `subterfuge` 2, as the start position was
+/// written; the levels are loaded as stored (the loader runs no gain slot), so he plays at 2 there.
+#[test]
+fn stored_attributes_are_the_start_levels_plus_the_effects() {
+    let Some(m) = model() else { return };
+    let fx = &m.rules.effects;
+    let mut checked = 0;
+    let mut wrong = Vec::new();
+    for (id, ch) in &m.world.characters {
+        let Some(d) = m.world.character_details.get(id) else { continue };
+        let mut expected = m.rules.characters.starting_attributes(ch.kind.esf_name());
+        let mut add = |rows: Option<&Vec<(String, i32)>>| {
+            for (attr, v) in rows.into_iter().flatten() {
+                match expected.iter_mut().find(|(k, _)| k == attr) {
+                    Some((_, l)) => *l += v,
+                    None => expected.push((attr.clone(), -1 + v)),
+                }
+            }
+        };
+        for t in &d.traits {
+            add(fx.held_level_key(&t.key, t.level).and_then(|k| fx.trait_attribute.get(k)));
+        }
+        for a in &d.ancillaries {
+            add(fx.ancillary_attribute.get(a));
+        }
+        let mut stored = d.attributes.clone();
+        stored.sort();
+        expected.sort();
+        if stored != expected {
+            wrong.push((id.0, ch.kind.esf_name(), stored, expected));
+        }
+        checked += 1;
+    }
+    assert_eq!(checked, 531);
+    assert_eq!(wrong.iter().map(|w| (w.0, w.1)).collect::<Vec<_>>(), vec![(749615820, "rake")], "{wrong:?}");
 }

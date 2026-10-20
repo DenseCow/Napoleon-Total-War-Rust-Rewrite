@@ -136,6 +136,11 @@ pub(crate) fn evaluate(st: &ScriptState, name: &str, args: &MultiValue, ctx: &Sc
         // 0x008A66C0 (CONFIRMED): the context's character's faction (+0x2A0) has its +0x925 flag set: it
         // was in a war declared since its last turn end (`FactionDetails::war_started`); false without one.
         "WarStartedCharacterFaction" => is(ch.and_then(|ch| w.faction_details.get(&ch.faction)).is_some_and(|d| d.war_started)),
+        // 0x0089F4B0 (CONFIRMED, the same shape on +0x924): the context's character's faction destroyed a
+        // faction since its last turn end (`FactionDetails::destroyed_faction`); false without one.
+        "FactionDestroyedByCharacterFaction" => {
+            is(ch.and_then(|ch| w.faction_details.get(&ch.faction)).is_some_and(|d| d.destroyed_faction))
+        }
         _ => return None,
     })
 }

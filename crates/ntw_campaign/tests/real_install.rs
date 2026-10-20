@@ -335,6 +335,12 @@ fn loads_all_eight_startpos() {
             assert!(!w.regions.values().any(|r| r.owner == f), "{c}: {} is out of the game holding a region", w.factions[&f].key);
         }
         println!("    {c}: {} factions out of the game", w.faction_details.values().filter(|d| d.out_of_game == Some(true)).count());
+        // The stored flag is what the exe's rule gives at the start (`0x008B4330`, run when the
+        // startpos was preprocessed): no region and every character in a government post.
+        // The rebels are not in the list the rule walks: their flag stays clear.
+        for (f, d) in &w.faction_details {
+            assert_eq!(d.out_of_game, Some(l.model.out_of_game_by_startpos_rule(*f)), "{c}: the rule for {:?}", w.factions[f].key);
+        }
     }
 }
 
@@ -536,6 +542,20 @@ fn outcome_movies_from_the_real_data() {
     assert_eq!(won("ottomans").as_deref(), Some("OTT_MON_VIC.bik"));
     let france = m.outcome_movie(id("france"), CampaignOutcome::Destroyed).expect("france's defeat movie");
     assert_eq!((france.event.as_str(), france.exit, france.show_everyone, france.only_local_faction), ("game_lost_france", MovieExit::ExitGame, true, true));
+}
+
+/// Vanilla's `unit_required_technology_junctions` rows: the linker `0x00EA9B10` drops a row naming no
+/// built unit or no technology; on the shipped data it drops none, so all 46 rows reach the rules.
+#[test]
+fn unit_technology_rows_from_the_real_data() {
+    let Some(db) = db() else { return };
+    let rules = ntw_campaign::rules_from_db(db, "eur_napoleon");
+    let rows: Vec<(&str, &str)> = db.campaign.unit_techs.iter().map(|r| (r.unit.as_str(), r.technology.as_str())).collect();
+    assert_eq!(rows.len(), 46, "vanilla's row count");
+    let dropped: Vec<&(&str, &str)> =
+        rows.iter().filter(|(u, t)| !rules.units.contains_key(*u) || !rules.technologies.contains_key(*t)).collect();
+    assert_eq!(dropped, Vec::<&(&str, &str)>::new());
+    assert_eq!(rules.unit_techs.values().map(Vec::len).sum::<usize>(), rows.len());
 }
 
 /// `technology_faction_junctions` reach each technology's faction list (once per faction, as the row

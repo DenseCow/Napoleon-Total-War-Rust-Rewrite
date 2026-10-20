@@ -65,15 +65,30 @@ impl MovieExit {
 pub struct OutcomeMovie {
     /// The row's movie event key, e.g. `game_lost_france`.
     pub event: String,
+    /// The row's culture (#1), the second half of the row's key.
+    pub culture: String,
     /// The row's movie file under `movies\`, e.g. `EUR_Lose_FR.bik`.
     pub movie: String,
     /// What OK runs after the movie.
     pub exit: MovieExit,
-    /// The data's `show_everyone` (the data's byte +4).
+    /// The data's `show_everyone` (the data's byte +4): clear, the panel opens only on the machine of
+    /// the faction the movie is for (`0x00A13EA0`, CONFIRMED by disassembly).
     pub show_everyone: bool,
     /// The data's `only_call_function_for_local_faction` (byte +5): the exit runs only on the machine
     /// of the faction the movie is for.
     pub only_local_faction: bool,
+}
+
+impl OutcomeMovie {
+    /// The loc key of the panel's title, `movie_event_strings_title_<event><culture>` (CONFIRMED by
+    /// disassembly: the record builder `0x00F57D60` formats `"movie_event_strings_title_%S"`
+    /// (`0x013D43E4`) with the row's event key followed by its culture and keeps the looked-up text at
+    /// record +0x14; the queued event `0x0099A4F0` copies it to its +0x18, which the panel
+    /// `0x00998E20` passes as the data's `title`). Shipped e.g.
+    /// `movie_event_strings_title_game_lost_franceeuropean` = "Faction Destroyed".
+    pub fn title_key(&self) -> String {
+        format!("movie_event_strings_title_{}{}", self.event, self.culture)
+    }
 }
 
 /// The movie events of a win, by the winner's government (`0x00A14E00`): event 0x1D unless the
@@ -110,7 +125,7 @@ pub fn outcome_movie(m: &CampaignModel, faction: FactionId, outcome: CampaignOut
             // no row (a custom map's) compares the empty string the same way.
             let id = m.rules.faction_movie_ids.get(&f.key).map_or("", String::as_str);
             let row = rows.iter().rev().find(|r| r.id == id)?;
-            Some(OutcomeMovie { event: row.event.clone(), movie: row.movie.clone(), exit: MovieExit::ExitGame, show_everyone: true, only_local_faction: true })
+            Some(OutcomeMovie { event: row.event.clone(), culture: row.culture.clone(), movie: row.movie.clone(), exit: MovieExit::ExitGame, show_everyone: true, only_local_faction: true })
         }
         CampaignOutcome::Won { multiplayer_over } => {
             let event = match f.government_key.as_str() {
@@ -121,7 +136,7 @@ pub fn outcome_movie(m: &CampaignModel, faction: FactionId, outcome: CampaignOut
             let culture = m.rules.faction_cultures.get(&f.key).map(String::as_str);
             let row = victory_row(m, rows.iter().filter(|r| r.event == event), culture)?;
             let exit = if multiplayer_over { MovieExit::ExitGame } else { MovieExit::ShowVictoryOptionsPopup };
-            Some(OutcomeMovie { event: row.event.clone(), movie: row.movie.clone(), exit, show_everyone: false, only_local_faction: false })
+            Some(OutcomeMovie { event: row.event.clone(), culture: row.culture.clone(), movie: row.movie.clone(), exit, show_everyone: false, only_local_faction: false })
         }
     }
 }
@@ -196,7 +211,7 @@ mod tests {
         let rows = vec![row("game_lost_a", "european", "first.bik", "7"), row("game_lost_b", "middle_east", "other.bik", "8"), row("game_lost_c", "european", "last.bik", "7")];
         let m = model(rows.clone(), "7", "european", "gov_republic");
         let got = m.outcome_movie(A, CampaignOutcome::Destroyed).expect("a row names 7");
-        assert_eq!(got, OutcomeMovie { event: "game_lost_c".into(), movie: "last.bik".into(), exit: MovieExit::ExitGame, show_everyone: true, only_local_faction: true });
+        assert_eq!(got, OutcomeMovie { event: "game_lost_c".into(), culture: "european".into(), movie: "last.bik".into(), exit: MovieExit::ExitGame, show_everyone: true, only_local_faction: true });
         assert_eq!(got.exit.script_name(), "ExitGame");
         // No row with the id: no movie (`0x009FBA20` queues nothing); the comparison is case-sensitive.
         assert_eq!(movie(&model(rows.clone(), "9", "european", ""), CampaignOutcome::Destroyed), None);

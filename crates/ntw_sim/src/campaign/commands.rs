@@ -133,6 +133,16 @@ pub enum CampaignCommand {
         /// The region whose settlement to enter.
         region: RegionId,
     },
+    /// A character without a force walks into a settlement and stays inside as one of its residents
+    /// (the move-to-residence order `0x009549B0` → command execute `0x0095B7F0` → `0x0091BE30`, whose
+    /// arrival step `0x0094CFF0` checks the settlement's room and enters him; CONFIRMED, disassembly).
+    /// Arriving without room he stops outside. See [`CampaignModel::may_reside`].
+    AgentEnterSettlement {
+        /// The character (one who commands no force).
+        agent: CharacterId,
+        /// The region whose settlement to enter (any owner's: the room check has no stance test).
+        region: RegionId,
+    },
     /// Modelled on `CCQ_EMBARK_NAVY` (CONFIRMED name): an army walks to a navy of its faction and
     /// boards it (see [`super::embark`]).
     Embark {
@@ -309,6 +319,15 @@ pub enum CampaignCommand {
         /// Occupy, loot or liberate.
         choice: super::capture::CaptureChoice,
     },
+    /// A human ally's answer to the top call to war waiting for it (`CampaignModel::pending_ally_war_calls`;
+    /// `CCQ_RESPOND_TO_ALLY_WAR_INVITATION`, `0x009370F0`; see `CampaignModel::respond_to_ally_war_call`).
+    RespondToAllyWarCall {
+        /// The side it joins: the declaration's target or its declarer, one it was asked for (ignored on
+        /// a refusal).
+        side: Option<FactionId>,
+        /// Join (true) or refuse.
+        accept: bool,
+    },
     /// Repair a damaged building (`0x00B66260`; see [`capture`](super::capture)).
     RepairBuilding {
         /// The region.
@@ -334,7 +353,13 @@ pub enum CampaignCommand {
         b: FactionId,
     },
     /// `a` and `b` make peace: the exe's `CCQ_MAKE_PEACE` (`HandleMakePeaceCommand` `0x00936710`; scripts
-    /// use `force_make_peace`, W3 §6.3).
+    /// use `force_make_peace`, W3 §6.3). No turn test: it holds in any faction's turn, as every exe peace
+    /// path does (CONFIRMED, disassembly 2026-10-20). `MakePeaceWithFaction` `0x00B262C0` has three
+    /// callers, none testing the turn: this handler (both factions exist, differ and are at war; sent only
+    /// by `force_make_peace` `0x0097AC90` and `force_make_protectorate` `0x0097AA20` through
+    /// `SendMakePeaceCommand` `0x00983850`), `MakeProtectorateOfPatron` `0x00B105C0`, and an accepted
+    /// deal's peace item `ApplyPeaceRecordOnAccept` `0x00C18B60` (the human's `CCQ_DIPLOMACY_ACCEPT_DEAL`
+    /// `0x00932E40` and the AI's `0x00AA5ED0`, both through `0x00C114B0`).
     MakePeace {
         /// The proposer (its alliances get their suspended access back).
         a: FactionId,
@@ -343,6 +368,25 @@ pub enum CampaignCommand {
         /// No `ceasefire_declared` messages (the command's byte: 0 from `force_make_peace` `0x0097AC90`,
         /// 1 from `force_make_protectorate` `0x0097AA20`).
         suppress_messages: bool,
+    },
+    /// `protectorate` becomes the protectorate of `patron`: the exe's `CCQ_MAKE_PROTECTORATE`
+    /// (`HandleMakeProtectorateCommand` `0x009367A0`; sent only by the script's `force_make_protectorate`
+    /// `0x0097AA20`), [`make_protectorate_command`](super::CampaignModel::make_protectorate_command).
+    MakeProtectorate {
+        /// The patron (the script's first faction).
+        patron: FactionId,
+        /// The new protectorate (the script's second faction).
+        protectorate: FactionId,
+    },
+    /// Each side's forces leave the other's regions: the exe's `CCQ_MOVE_ARMIES_OUT_OF_REGIONS`
+    /// (`HandleMoveArmiesOutOfRegionsCommand` `0x00936AB0`; sent by the scripts' `force_make_protectorate`
+    /// `0x0097AA20` and `force_make_peace` `0x0097AC90`),
+    /// [`move_armies_out_of_regions`](super::CampaignModel::move_armies_out_of_regions).
+    MoveArmiesOutOfRegions {
+        /// The first faction: `b`'s forces leave its regions first.
+        a: FactionId,
+        /// The second faction.
+        b: FactionId,
     },
     /// A diplomatic action of `a` towards `b` that the other side has accepted (the AI's acceptance is §6):
     /// the relationship rules of [`treaties`](super::treaties).
@@ -409,6 +453,16 @@ pub enum CampaignCommand {
         /// 1: paid once; more: paid each turn for that many turns.
         turns: u32,
     },
+    /// `CCQ_DIPLOMACY_PROPOSE_JOIN_WAR` (posted by the join-war record's `0x00C4A960`, executor
+    /// `0x009336C0`): sets the open negotiation's join-war record (`CampaignModel::propose_join_war`).
+    ProposeJoinWar {
+        /// Empty the record instead.
+        clear: bool,
+        /// Factions the recipient is to declare war on for the proposer.
+        demanded: Vec<FactionId>,
+        /// Factions the proposer is to declare war on for the recipient.
+        offered: Vec<FactionId>,
+    },
     /// `CCQ_DIPLOMACY_CLEAR_NEGOTIATION` (executor `0x00932EC0`): the open negotiation's deal is
     /// emptied (`CampaignModel::clear_negotiation`).
     ClearNegotiation,
@@ -421,7 +475,7 @@ pub enum CampaignCommand {
         threat: bool,
     },
     /// `CCQ_DIPLOMACY_ACCEPT_DEAL` (executor `0x00932E40` → `0x00C114B0`): the deal of the open
-    /// negotiation is applied (`CampaignModel::accept_deal`: its regions, technologies and payment,
+    /// negotiation is applied (`CampaignModel::accept_deal`: its regions, technologies, payment and join-war wars,
     /// then a threat's `threatened` factor).
     AcceptDeal,
     /// `CCQ_DIPLOMACY_DECLINE_DEAL` (executor `0x00932F00` → `0x00C1F210`): the deal of the open
@@ -522,6 +576,8 @@ pub enum CommandError {
     DealRefused,
     /// A technology key the `technologies` table does not have.
     UnknownTechnology(String),
+    /// The faction is already a protectorate (it has a patron: `FactionHasPatron` `0x008CEEA0`).
+    HasPatron(FactionId),
 }
 
 impl fmt::Display for CommandError {
@@ -573,6 +629,7 @@ impl fmt::Display for CommandError {
             CommandError::NoNegotiation => write!(f, "no negotiation is open"),
             CommandError::DealRefused => write!(f, "the deal is refused"),
             CommandError::UnknownTechnology(k) => write!(f, "unknown technology {k}"),
+            CommandError::HasPatron(id) => write!(f, "faction {} is already a protectorate", id.0),
         }
     }
 }
@@ -647,17 +704,41 @@ impl CampaignModel {
     }
 
     /// Validates and applies one command. On success returns the events it caused; on failure the
-    /// model is left exactly as it was.
+    /// model is left as it was, except the path grid's stored view a rebel's force order sets first.
     pub fn apply(&mut self, cmd: CampaignCommand) -> Result<Vec<CampaignEvent>, CommandError> {
         // Characters a command creates (a successor after an assassination, ...) fire
         // `CharacterCreated`; the end of turn fires its own from each step.
         let known: Option<std::collections::BTreeSet<CharacterId>> =
             (!matches!(cmd, CampaignCommand::EndTurn)).then(|| self.world.characters.keys().copied().collect());
+        // A rebel's force order stores his view on the path grid first
+        // (`CampaignModel::store_rebel_view`), and it stays when the order fails: the order step
+        // `0x00A645C0` stores it (`0x00B077B0`) before issuing the order (`0x00915F20`) and never
+        // puts the old view back (CONFIRMED by decompile).
+        if let Some(force) = self.order_force(&cmd) {
+            self.store_rebel_view(force);
+        }
         let mut out = self.apply_inner(cmd);
         if let (Ok(events), Some(known)) = (&mut out, known) {
             events.extend(self.created_since(&known));
         }
         out
+    }
+
+    /// The force of a force order (a move, raid, attack, merge, settlement entry, embarking or
+    /// landing), whose commander carries it out: the force moved, or the one the moved character
+    /// commands.
+    fn order_force(&self, cmd: &CampaignCommand) -> Option<ForceId> {
+        match *cmd {
+            CampaignCommand::MoveCharacter { character, .. } => self.force_of(character),
+            CampaignCommand::MoveForce { force, .. }
+            | CampaignCommand::RaidTradeRoute { force, .. }
+            | CampaignCommand::AttackForce { force, .. }
+            | CampaignCommand::MergeForces { force, .. }
+            | CampaignCommand::EnterSettlement { force, .. }
+            | CampaignCommand::Embark { force, .. }
+            | CampaignCommand::Disembark { force, .. } => Some(force),
+            _ => None,
+        }
     }
 
     fn apply_inner(&mut self, cmd: CampaignCommand) -> Result<Vec<CampaignEvent>, CommandError> {
@@ -675,6 +756,7 @@ impl CampaignModel {
                 | CampaignCommand::ProposeRegions { .. }
                 | CampaignCommand::ProposeTechnologies { .. }
                 | CampaignCommand::ProposePayment { .. }
+                | CampaignCommand::ProposeJoinWar { .. }
                 | CampaignCommand::ClearNegotiation
                 | CampaignCommand::ProposeDeal { .. }
                 | CampaignCommand::DeclineDeal
@@ -694,6 +776,7 @@ impl CampaignModel {
                 Ok(events)
             }
             CampaignCommand::ChooseCapture { choice } => self.choose_capture(choice),
+            CampaignCommand::RespondToAllyWarCall { side, accept } => self.respond_to_ally_war_call(side, accept),
             CampaignCommand::RepairBuilding { region, slot } => self.repair_building(region, slot),
             CampaignCommand::DemolishBuilding { region, slot } => self.demolish_building(region, slot),
             CampaignCommand::MoveForce { force, to } => self.move_force(force, to).map(|(_, w)| w.events),
@@ -728,6 +811,7 @@ impl CampaignModel {
             CampaignCommand::AttackForce { force, target } => self.attack(force, target),
             CampaignCommand::MergeForces { force, into } => self.merge(force, into),
             CampaignCommand::EnterSettlement { force, region } => self.enter_settlement(force, region),
+            CampaignCommand::AgentEnterSettlement { agent, region } => self.agent_enter_settlement(agent, region),
             CampaignCommand::Autoresolve => self.autoresolve(),
             CampaignCommand::Assassinate { agent, target } => self.assassinate(agent, target),
             CampaignCommand::Duel { challenger, target } => self.duel(challenger, target),
@@ -763,10 +847,11 @@ impl CampaignModel {
                 self.check_turn(a)?;
                 self.declare_war_rules(a, b)
             }
-            CampaignCommand::MakePeace { a, b, suppress_messages } => {
-                self.check_turn(a)?;
-                self.make_peace_rules(a, b, suppress_messages)
-            }
+            // No turn test: no exe peace path has one (`MakePeace`).
+            CampaignCommand::MakePeace { a, b, suppress_messages } => self.make_peace_rules(a, b, suppress_messages),
+            // No turn test: the exe's handlers (`0x009367A0`, `0x00936AB0`) have none.
+            CampaignCommand::MakeProtectorate { patron, protectorate } => self.make_protectorate_command(patron, protectorate),
+            CampaignCommand::MoveArmiesOutOfRegions { a, b } => self.move_armies_out_of_regions(a, b).map(|()| Vec::new()),
             CampaignCommand::Diplomacy { a, b, action } => {
                 self.check_turn(a)?;
                 self.apply_diplomatic_action(a, b, action)
@@ -793,6 +878,7 @@ impl CampaignModel {
                 self.propose_technologies(clear, demanded, offered).map(|()| Vec::new())
             }
             CampaignCommand::ProposePayment { clear, amount, turns } => self.propose_payment(clear, amount, turns).map(|()| Vec::new()),
+            CampaignCommand::ProposeJoinWar { clear, demanded, offered } => self.propose_join_war(clear, demanded, offered).map(|()| Vec::new()),
             CampaignCommand::ClearNegotiation => self.clear_negotiation().map(|()| Vec::new()),
             CampaignCommand::ProposeDeal { threat } => self.propose_deal(threat).map(|()| Vec::new()),
             CampaignCommand::DeclineDeal => self.decline_deal().map(|()| Vec::new()),
@@ -1041,6 +1127,13 @@ impl CampaignModel {
 
     fn merge(&mut self, force: ForceId, into: ForceId) -> Result<Vec<CampaignEvent>, CommandError> {
         let c = self.commander_of(force)?;
+        self.march_and_merge(c, force, into)
+    }
+
+    /// The merge order's checks, walk and merge for `force` led by `c`, without the turn check:
+    /// [`Self::merge`] and the reinforcement step ([`Self::march_reinforcements`], which runs inside the
+    /// faction's turn start) share it.
+    fn march_and_merge(&mut self, c: CharacterId, force: ForceId, into: ForceId) -> Result<Vec<CampaignEvent>, CommandError> {
         let a = &self.world.forces[&force];
         let b = self.world.forces.get(&into).ok_or(CommandError::UnknownForce(into))?;
         if a.faction != b.faction || force == into {
@@ -1059,6 +1152,46 @@ impl CampaignModel {
             self.merge_units(force, into, &mut events);
         }
         Ok(events)
+    }
+
+    /// Steps `faction`'s reinforcement entries ([`World::reinforcements`](super::world::World::reinforcements)),
+    /// as the faction turn start does after its regions (`0x008F2620` calls `0x00B71FA0` on the
+    /// manager at faction +0x52C at `0x008F2B35`, CONFIRMED; the rebels' branch `0x008F2B47` skips it, so
+    /// `TurnStep::FactionReady` never calls this for them and their entries stay). Per entry,
+    /// in order (`0x00B5C710`): one whose new army or target commander is gone is dropped
+    /// (`0x00B5C830`: source and target set; their death listener `0x00B57DA0` clears the entry, CONFIRMED);
+    /// else the new army is ordered to the target to merge into his army (`0x00B5C4A0` → `0x00968B00`,
+    /// the move-to-character order `0x009195A0`, CONFIRMED), here the merge command's walk and merge.
+    /// PROVISIONAL: the original's order is a multi-turn one (order object `0x00905460`, resumed by
+    /// `0x009653D0`); ours walks as far as this turn's action points reach and is dropped there, like
+    /// every order (see `CampaignCommand::MoveForce`). PROVISIONAL: when the order cannot be given
+    /// the original keeps the entry and tries again next turn (`0x00B5C4A0` returns 0); ours drops it
+    /// and logs it. UNKNOWN: the source's check `0x009D0D00(target, 1)` before the order.
+    pub(crate) fn march_reinforcements(&mut self, faction: super::FactionId) -> Vec<CampaignEvent> {
+        let mut events = Vec::new();
+        // The faction's entries, and any whose new army's commander is gone (dropped below).
+        let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.world.reinforcements)
+            .into_iter()
+            .partition(|r| self.world.characters.get(&r.source).is_none_or(|c| c.faction == faction));
+        self.world.reinforcements = rest;
+        if mine.is_empty() {
+            return events;
+        }
+        // Who leads which force, looked up once for the pass. A merge only removes a force (its
+        // commander then leads none), so an entry still checks that the force it finds is there
+        // and led by him.
+        let led: BTreeMap<CharacterId, ForceId> = self.world.forces.values().filter_map(|f| Some((f.commander?, f.id))).collect();
+        let force_led_by = |model: &Self, c: CharacterId| {
+            led.get(&c).copied().filter(|f| model.world.forces.get(f).is_some_and(|f| f.commander == Some(c)))
+        };
+        for r in mine {
+            let (Some(src), Some(dst)) = (force_led_by(self, r.source), force_led_by(self, r.target)) else { continue };
+            match self.march_and_merge(r.source, src, dst) {
+                Ok(mut ev) => events.append(&mut ev),
+                Err(e) => log::warn!("the reinforcement raised in {:?} could not march to {:?}: {e}; it stays where it is", r.settlement, r.target),
+            }
+        }
+        events
     }
 
     /// Moves `force`'s units into `into` (up to its cap, [`CampaignModel::max_units`]), each with
@@ -1108,7 +1241,10 @@ impl CampaignModel {
         events.push(CampaignEvent::CampaignArmiesMerge { force, into });
     }
 
-    /// The character's force leaves the settlement it garrisons (if any).
+    /// The character leaves the settlement he is in (if any): his force stops garrisoning it, or,
+    /// without a force, he leaves its residents (the settlement residence's leave `0x00B4EE70`,
+    /// vtable `0x0137C9A4` slot +0x8C: he is taken off the list +0xC8; no script event; CONFIRMED,
+    /// disassembly). Every move starts with it ([`Self::walk`]).
     pub(crate) fn leave_garrison(&mut self, character: CharacterId) {
         let Some(ch) = self.world.characters.get_mut(&character) else { return };
         let Some(region) = ch.garrisoned_in.take() else { return };
@@ -1178,6 +1314,73 @@ impl CampaignModel {
             self.pending_battle = Some(PendingBattle { attacker: force, defenders, settlement: Some(region), resume: None });
             events.push(CampaignEvent::PreBattle { attacker: force });
         }
+        Ok(events)
+    }
+
+    /// The characters in no force inside `region`'s settlement (the settlement residence's
+    /// resident list +0xC8, `SIEGEABLE_GARRISON_RESIDENCE` #14), in id order
+    /// ([`super::World::settlement_residents`]).
+    pub fn settlement_residents(&self, region: RegionId) -> Vec<CharacterId> {
+        self.world.settlement_residents(region)
+    }
+
+    /// Whether `character` (one without a force) may enter `region`'s settlement: the settlement
+    /// residence's can-enter check `0x00B165B0` (vtable `0x0137C9A4` slot +0x6C, CONFIRMED,
+    /// disassembly). For an agent of the owner's faction: always when his type does not count
+    /// (`agents` #4 false, [`CampaignRules::residence_exempt_agents`]); else, with a garrison army
+    /// inside, while that army's accompanying characters number fewer than the room (`0x008B2620`,
+    /// army +0x60). Otherwise (another faction's agent, or no garrison) while the settlement's
+    /// residents number fewer than the room (+0xC8 below 20 at `0x00B16632`). The room is
+    /// [`crate::limits::GameLimits::max_residence_characters`]. No stance is checked.
+    /// PROVISIONAL: the model keeps no accompanying characters (`MILITARY_FORCE` #2), so the
+    /// garrison branch counts 0.
+    ///
+    /// [`CampaignRules::residence_exempt_agents`]: super::rules::CampaignRules::residence_exempt_agents
+    pub fn may_reside(&self, character: CharacterId, region: RegionId) -> bool {
+        let (Some(ch), Some(r)) = (self.world.characters.get(&character), self.world.regions.get(&region)) else { return false };
+        let room = self.rules.limits.max_residence_characters as usize;
+        if ch.faction == r.owner {
+            if self.rules.residence_exempt_agents.contains(ch.kind.esf_name()) {
+                return true;
+            }
+            if r.garrison.is_some_and(|g| self.world.forces.contains_key(&g)) {
+                let accompanying = 0;
+                return accompanying < room;
+            }
+        }
+        self.settlement_residents(region).iter().filter(|&&c| c != character).count() < room
+    }
+
+    /// [`CampaignCommand::AgentEnterSettlement`]: he walks to the settlement; on arrival, with room
+    /// ([`Self::may_reside`], checked again then as the arrival step `0x0094CFF0` does), he stands on
+    /// it inside, and `CharacterEntersGarrison` fires (the enter `0x00B4E760`, vtable `0x0137C9A4`
+    /// slot +0x88, appends him to the list +0xC8 through `0x008CFA70` and fires the event of vtable
+    /// `0x013561B0`; CONFIRMED, disassembly); his zone and hidden flag follow (the enter's tail
+    /// `0x00A285C0`). Without room he stays where the walk ended. PROVISIONAL: which of the order
+    /// paths into `0x009549B0` set the enter flag the arrival step tests (+0x58; without it the step
+    /// opens diplomacy instead), and the second event the arrival step sends after entering (world
+    /// +0x3D8), are not traced.
+    fn agent_enter_settlement(&mut self, agent: CharacterId, region: RegionId) -> Result<Vec<CampaignEvent>, CommandError> {
+        let faction = self.world.characters.get(&agent).ok_or(CommandError::UnknownCharacter(agent))?.faction;
+        self.check_turn(faction)?;
+        if self.force_of(agent).is_some() {
+            return Err(CommandError::Unsupported("a character with a force enters a settlement with his force (EnterSettlement)"));
+        }
+        let pos = self.world.regions.get(&region).ok_or(CommandError::UnknownRegion(region))?.settlement.position;
+        if self.world.characters[&agent].garrisoned_in == Some(region) {
+            return Ok(Vec::new());
+        }
+        let walk = self.walk(agent, pos, true)?;
+        let mut events = walk.events;
+        if !walk.arrived || !self.may_reside(agent, region) {
+            return Ok(events);
+        }
+        let ch = self.world.characters.get_mut(&agent).expect("checked");
+        ch.position = pos;
+        ch.garrisoned_in = Some(region);
+        self.rebuild_zone(agent);
+        self.update_hidden(agent);
+        events.push(CampaignEvent::CharacterEntersGarrison { character: agent, region });
         Ok(events)
     }
 
@@ -1260,7 +1463,7 @@ impl CampaignModel {
                 // `0x00AA1660`: a unit needing a resource only where the region has it (CONFIRMED).
                 && unit.unit_resource.as_ref().is_none_or(|res| r.unit_resources.contains(res))
                 // `0x00A27960`: not a unit the scripts restricted (CONFIRMED).
-                && !self.world.restricted_units.contains(*u)
+                && !self.world.unit_restricted(u)
         })
     }
 
@@ -1324,6 +1527,35 @@ impl CampaignModel {
         // order of `str::cmp` on these ASCII keys).
         out.sort_by(|a, b| a.unit_key.cmp(&b.unit_key));
         out
+    }
+
+    /// `add_restricted_unit_record(unit_key)` (`AddRestrictedUnitRecord` `0x009C9700`, CONFIRMED): appends the
+    /// unit to [`super::world::World::restricted_units`], even when it is listed already. The exe then rebuilds
+    /// every faction's region recruitable lists (`RebuildFactionEffectSum`); ours are built on demand, so the
+    /// next [`Self::recruitable_units`] already leaves the unit out. Returns false, storing nothing, for a key the
+    /// units table lacks. ORIGINAL BUG: the exe logs "not a valid key" and appends a null record, which the save
+    /// writer `0x009A1070` then reads the key of with no null test (its building list has one), so the next save
+    /// crashes; a null entry restricts nothing, so leaving it out changes nothing else.
+    pub fn add_restricted_unit(&mut self, unit_key: &str) -> bool {
+        if !self.rules.units.contains_key(unit_key) {
+            return false;
+        }
+        self.world.restricted_units.push(unit_key.to_string());
+        true
+    }
+
+    /// `remove_restricted_unit_record(unit_key)` (`RemoveRestrictedUnitRecord` `0x00A1D3B0`, CONFIRMED): erases the
+    /// first entry naming the unit, keeping the others' order; a unit added twice stays restricted. Nothing
+    /// happens when it is not listed. Returns false for a key the units table lacks (the exe logs it and looks for
+    /// the null record [`Self::add_restricted_unit`] never stores).
+    pub fn remove_restricted_unit(&mut self, unit_key: &str) -> bool {
+        if !self.rules.units.contains_key(unit_key) {
+            return false;
+        }
+        if let Some(i) = self.world.restricted_units.iter().position(|k| k == unit_key) {
+            self.world.restricted_units.remove(i);
+        }
+        true
     }
 
     /// The unavailability flags of the region's recruitable `entry` (one of [`Self::recruitable_units`]): its
@@ -1814,9 +2046,10 @@ impl CampaignModel {
     }
 
     /// Places a finished unit as the original does (SAVE_COMPAT.md §4, CONFIRMED from its saves
-    /// and exe: queue processor `0x00B71FB0` → `0x00B0A270` creates 0x54-records; list walker
-    /// `0x008EF790` consumes context+0xD4 (land) / +0xC4 (naval) lists via holder virtual +0x3C/+0x44,
-    /// iterates holder+0xB8/+0xB4 (land) / +0xA8/+0xA4 (naval), calls `0x008A94C0` for each):
+    /// and exe: the queue step `0x00B71FB0` spawns its finished items through the queue manager's
+    /// vtable +0x20, `0x00B1E500` land / `0x00B1D7E0` naval; this is the last phase of each, the
+    /// single-item spawn for land and naval items that do not march to a commander, see
+    /// [`Self::spawn_reinforcement`]):
     /// * land: into the army garrisoned in the region's settlement, if it is the owner's and has
     ///   room (up to `CampaignModel::max_units`); otherwise a new army led by a new colonel attached to
     ///   the unit, garrisoned in the settlement (CONFIRMED placement branch).
@@ -1827,12 +2060,7 @@ impl CampaignModel {
     /// Public for test tooling (the save-compatibility test saves); the turn calls it when a
     /// recruitment item completes.
     pub fn spawn_recruited_unit(&mut self, region: RegionId, unit_key: String) -> CampaignEvent {
-        use super::world::{Character, CharacterKind};
-        let rules = self.rules.units.get(&unit_key).cloned().unwrap_or_default();
-        let naval = rules.is_naval;
-        // Full strength, CONFIRMED from the saves: `unit_stats_land.num_men` for land, the sum of the
-        // `unit_stats_naval` crew triple for ships ([`super::world::recruited_unit_size`]).
-        let men = super::world::recruited_unit_size(&self.rules, &unit_key);
+        let naval = self.rules.units.get(&unit_key).is_some_and(|r| r.is_naval);
         let reg = &self.world.regions[&region];
         let owner = reg.owner;
         let (spot, garrison) = if naval {
@@ -1855,34 +2083,11 @@ impl CampaignModel {
         let (force_id, character) = match join {
             Some(id) => (id, None),
             None => {
-                let kind = if naval { CharacterKind::Captain } else { CharacterKind::Colonel };
-                let mp = self.rules.agent_action_points.get(kind.esf_name()).copied().or_else(|| {
-                    self.world.characters.values().filter(|c| c.kind == kind).map(|c| c.max_movement_points).max()
-                });
-                let c = CharacterId(self.world.alloc_id() as i32);
-                let f = ForceId(self.world.alloc_id());
                 // Inside the settlement when it has no garrison (land only). PROVISIONAL: with a
                 // garrison of another faction inside (the rebels, out of the game or without a
-                // capital) the recruit stands outside; the exe's spawn check `0x008EF790` is not traced for that case.
+                // capital) the recruit stands outside; the spawn `0x00B1E500` is not traced for that case.
                 let inside = !naval && self.world.regions[&region].garrison.is_none_or(|g| !self.world.forces.contains_key(&g));
-                self.world.characters.insert(
-                    c,
-                    Character {
-                        id: c,
-                        faction: owner,
-                        kind,
-                        position: spot,
-                        movement_points: mp.unwrap_or(0),
-                        max_movement_points: mp.unwrap_or(0),
-                        base_movement_points: mp.unwrap_or(0),
-                        garrisoned_in: inside.then_some(region),
-                    },
-                );
-                self.world.forces.insert(f, MilitaryForce { id: f, faction: owner, commander: Some(c), units: Vec::new(), is_navy: naval });
-                self.update_sight_radius(c);
-                self.name_new_character(c);
-                // The new general placed (`0x00B67670` → `0x00A285C0`): his zone.
-                self.rebuild_zone(c);
+                let (f, c) = self.new_recruit_force(owner, naval, spot, inside.then_some(region));
                 let r = self.world.regions.get_mut(&region).expect("region exists");
                 if naval {
                     r.fleet = Some(f);
@@ -1892,16 +2097,98 @@ impl CampaignModel {
                 (f, Some(c))
             }
         };
-        self.world.forces.get_mut(&force_id).expect("force exists").units.push(CampaignUnit {
-            id: unit_id,
+        self.push_recruited_unit(force_id, unit_id, unit_key, character);
+        self.name_new_unit(force_id, unit_id);
+        CampaignEvent::UnitTrained { force: force_id, unit: unit_id }
+    }
+
+    /// The finished land items recruited through `target` (item +0x18) while he leads an army: their
+    /// units raise ONE new army led by a new colonel, which then marches to him (CONFIRMED: the land
+    /// spawn `0x00B1E500` groups its finished items by target and has `0x00B1D3F0` create every unit
+    /// of a group and one army for them, `0x008D25F0`, before the other finished items spawn; the
+    /// queue step `0x00B71FB0` then hands the army's commander, the settlement and the target to the
+    /// faction's reinforcement manager, `0x00B0A270` → entry `0x00AE8B10`, stepped by
+    /// [`Self::march_reinforcements`]). The army stands outside the settlement. PROVISIONAL: the exe
+    /// places it at the first node of the path from the settlement to the target (`0x00B6D8D0` /
+    /// `0x00B6D760` → pathfinder `0x00B6E6E0`, trimmed by `0x00B77820`) or, when no node is left, at a
+    /// free spot near the settlement (`0x00B39FE0`); ours at the settlement's position.
+    /// PROVISIONAL: which unit the colonel is attached to is not traced (`0x008D25F0` → `0x00870E60`);
+    /// ours takes [`Self::commander_unit`]'s pick, the order the exe uses for a force that loses its
+    /// commander. Returns one `UnitTrained` per unit, in `unit_keys` order.
+    pub(crate) fn spawn_reinforcement(&mut self, region: RegionId, target: CharacterId, unit_keys: Vec<String>) -> Vec<CampaignEvent> {
+        let Some(reg) = self.world.regions.get(&region) else {
+            log::warn!("reinforcement for {target:?} from unknown region {region:?}: its {} units are not raised", unit_keys.len());
+            return Vec::new();
+        };
+        let (owner, spot) = (reg.owner, reg.settlement.position);
+        // The units first, then their army (the order of `0x00B1D3F0`).
+        let ids: Vec<_> = unit_keys.iter().map(|_| super::ids::UnitId(self.world.alloc_id() as i32)).collect();
+        let (force, colonel) = self.new_recruit_force(owner, false, spot, None);
+        for (&unit, unit_key) in ids.iter().zip(unit_keys) {
+            self.push_recruited_unit(force, unit, unit_key, None);
+        }
+        if let Some(i) = self.commander_unit(force) {
+            self.world.forces.get_mut(&force).expect("just created").units[i].character = Some(colonel);
+        }
+        // Named once the colonel is attached, so his unit carries his name ([`Self::name_new_unit`]).
+        for &unit in &ids {
+            self.name_new_unit(force, unit);
+        }
+        self.world.reinforcements.push(super::world::Reinforcement { source: colonel, target, settlement: region });
+        ids.into_iter().map(|unit| CampaignEvent::UnitTrained { force, unit }).collect()
+    }
+
+    /// A new force for a recruit (`naval`: a navy led by a new captain, else an army led by a new
+    /// colonel) standing at `spot`, inside the settlement of `inside` if given, with no units yet: the
+    /// commander gets his type's action points, his sight, a name and his zone (the new general
+    /// placed, `0x00B67670` → `0x00A285C0`). The caller sets the region's garrison or fleet.
+    fn new_recruit_force(&mut self, owner: super::FactionId, naval: bool, spot: (Fixed20, Fixed20), inside: Option<RegionId>) -> (ForceId, CharacterId) {
+        use super::world::{Character, CharacterKind};
+        let kind = if naval { CharacterKind::Captain } else { CharacterKind::Colonel };
+        let mp = self
+            .rules
+            .agent_action_points
+            .get(kind.esf_name())
+            .copied()
+            .or_else(|| self.world.characters.values().filter(|c| c.kind == kind).map(|c| c.max_movement_points).max())
+            .unwrap_or(0);
+        let c = CharacterId(self.world.alloc_id() as i32);
+        let f = ForceId(self.world.alloc_id());
+        self.world.characters.insert(
+            c,
+            Character {
+                id: c,
+                faction: owner,
+                kind,
+                position: spot,
+                movement_points: mp,
+                max_movement_points: mp,
+                base_movement_points: mp,
+                garrisoned_in: inside,
+            },
+        );
+        self.world.forces.insert(f, MilitaryForce { id: f, faction: owner, commander: Some(c), units: Vec::new(), is_navy: naval });
+        self.world.character_details.insert(c, self.rules.characters.new_character_details(kind.esf_name()));
+        self.update_sight_radius(c);
+        self.name_new_character(c);
+        self.rebuild_zone(c);
+        (f, c)
+    }
+
+    /// Adds a freshly raised unit of `unit_key` to `force` at full strength (CONFIRMED from the saves:
+    /// `unit_stats_land.num_men` for land, the sum of the `unit_stats_naval` crew triple for ships,
+    /// [`super::world::recruited_unit_size`]), attached to `character` if given. The caller names its
+    /// officer ([`Self::name_new_unit`]).
+    fn push_recruited_unit(&mut self, force: ForceId, unit: super::ids::UnitId, unit_key: String, character: Option<CharacterId>) {
+        let men = super::world::recruited_unit_size(&self.rules, &unit_key);
+        self.world.forces.get_mut(&force).expect("force exists").units.push(CampaignUnit {
+            id: unit,
             unit_key,
             men,
             max_men: men,
             character,
             officer_name: Default::default(),
         });
-        self.name_new_unit(force_id, unit_id);
-        CampaignEvent::UnitTrained { force: force_id, unit: unit_id }
     }
 }
 

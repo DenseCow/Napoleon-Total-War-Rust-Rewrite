@@ -69,7 +69,8 @@ fn episodic_array_mut<'a>(root: &'a mut EsfRecord, name: &str) -> Option<&'a mut
 /// The scripts' restriction lists of a save: `EPISODIC_RESTRICTIONS/BUILDING_RESTRICTIONS[]`
 /// (the keys given to `add_restricted_building_level_record`; CONFIRMED in the user's vanilla
 /// `auto_save.save`: 55 items of one utf16 string each, the start position's list is empty) and
-/// `UNIT_RESTRICTIONS[]` (`add_restricted_unit_record`; INFERRED the same shape, every vanilla
+/// `UNIT_RESTRICTIONS[]` (`add_restricted_unit_record`; the same shape, CONFIRMED from the exe: the loader
+/// `0x009968A0` and the writer `0x009A1070` read and write one type-0x0E utf16 key per item; every vanilla
 /// list seen is empty). Without them a loaded game offers the tutorial and Peninsular buildings
 /// again, because the scripts restrict them only on a new game.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

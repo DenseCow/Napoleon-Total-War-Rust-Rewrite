@@ -659,7 +659,9 @@ impl<'a> FactionTurn<'a> {
         if already {
             return;
         }
-        let thread = self.world.technologies.as_ref().and_then(|t| t.get(tech)).map_or(2, |t| t.thread);
+        // Every candidate comes from `technologies`; an unknown one gets the model's own fallback
+        // (`CampaignModel::research_rate`: no thread, 3).
+        let thread = self.world.technologies.as_ref().and_then(|t| t.get(tech)).map_or(ntw_sim::campaign::rules::NO_THREAD as usize, |t| t.thread);
         let Some((region, slot)) = self.best_free_school(thread) else { return };
         self.researching.insert((region, slot));
         self.orders.push(AiOrder::StartResearch { region, slot, tech: tech.to_string() });
@@ -1235,6 +1237,11 @@ pub fn apply_orders(model: &mut CampaignModel, orders: &[AiOrder]) -> usize {
 /// `0x00D024D0`), and the faction's next step comes only once the move has played out (`0x00A761F0`). A move
 /// that destroys the human therefore ends the AI's work: every later frame returns at the flag test
 /// `0x008F419E` before the step loop, so the orders of the faction's later steps are never given.
+///
+/// PROVISIONAL: an order that leaves a call to war waiting for a human ally (`CampaignModel::pending_ally_war_calls`)
+/// does not hold back the faction's later orders, which are applied before the answer; the exe gives no
+/// CAI step while the pending stack holds the offer (`0x008F4120`, `0x008F457A`), so its later steps come
+/// after the answer (and may then decide otherwise). Ours decides the whole turn at once.
 pub fn apply_orders_with_events(
     model: &mut CampaignModel,
     orders: &[AiOrder],
@@ -1278,6 +1285,7 @@ mod tests {
             port: false,
             holder: None,
             id: 0,
+            blockade: None,
         };
         let region = Region {
             id: RegionId(1),
@@ -1305,6 +1313,7 @@ mod tests {
             construction: Vec::new(),
             garrison: None,
             fleet: None,
+            siege: Default::default(),
         };
         let mut w = World::default();
         w.regions.insert(region.id, region);
@@ -1328,6 +1337,51 @@ mod tests {
         assert_eq!(keys(&m), ["test_building_level_2"]);
         m.world.restricted_buildings.insert("test_building_level_2".into());
         assert_eq!(keys(&m), Vec::<String>::new(), "a script-restricted level is left out by the model's rule");
+    }
+
+    /// The AI's peace is the model's `MakePeace` with its messages on: the exe's AI makes peace only through
+    /// an accepted deal (`0x00AA5ED0` → `0x00C114B0` → the peace item `0x00C18B60`), which calls
+    /// `0x00B262C0` with suppress 0 and no turn test, so `MakePeace` has none.
+    #[test]
+    fn the_ai_peace_is_the_models_make_peace_with_messages() {
+        let (a, b) = (FactionId(1), FactionId(2));
+        assert_eq!(AiOrder::MakePeace { a, b }.to_campaign_command(), Some(CampaignCommand::MakePeace { a, b, suppress_messages: false }));
+    }
+
+    /// unitrestrict: the AI's recruitable entries are the model's recruit list (`CampaignModel::recruitable_units`,
+    /// the one the settlement panel and the recruit command read), so a unit the scripts restricted
+    /// (`0x00A27960`) is never offered to it, and listed again once the scripts lift it.
+    #[test]
+    fn the_snapshot_leaves_out_a_script_restricted_unit() {
+        use ntw_sim::campaign::{Faction, GovernmentType};
+        let mut m = model(Some(CampaignRules::test_rules()));
+        let me = FactionId(1);
+        let faction = Faction {
+            id: me,
+            key: "test_faction".into(),
+            treasury: 100_000,
+            government: GovernmentType::AbsoluteMonarchy,
+            government_key: String::new(),
+            tax_lower: "tax_normal".into(),
+            tax_upper: "tax_normal".into(),
+            diplomacy: BTreeMap::new(),
+        };
+        m.world.factions.insert(me, faction);
+        let keys = |m: &CampaignModel| -> (Vec<String>, Vec<String>) {
+            let ai = AiWorld::from_model_for(m, Some(me)).regions[&RegionId(1)].recruitable.iter().map(|e| e.unit_key.clone()).collect();
+            let mut model: Vec<String> = m.recruitable_units(RegionId(1)).into_iter().map(|e| e.unit_key).collect();
+            model.sort();
+            (ai, model)
+        };
+        let (ai, model_list) = keys(&m);
+        assert_eq!(ai, ["test_recruit", "test_unit"]);
+        assert_eq!(ai, model_list);
+        assert!(m.add_restricted_unit("test_recruit"));
+        let (ai, model_list) = keys(&m);
+        assert_eq!(ai, ["test_unit"], "restricted: left out");
+        assert_eq!(ai, model_list);
+        assert!(m.remove_restricted_unit("test_recruit"));
+        assert_eq!(keys(&m).0, ["test_recruit", "test_unit"]);
     }
 
     /// The AI's peace and war gates read the model's `force_diplomacy` permissions (one home:

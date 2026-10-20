@@ -57,8 +57,8 @@ pub struct AiSchool {
     /// researcher and the model never uses it).
     pub id: u32,
     /// Points per research step for a technology of thread 0 military, 1 industry, 2
-    /// enlightenment (`ResearchParts::rate`, CONFIRMED formula).
-    pub rate: [f32; 3],
+    /// enlightenment, 3 none (`ResearchParts::rate`, CONFIRMED formula).
+    pub rate: [f32; 4],
     /// The technology this school is researching now, if any (`CampaignModel::researching_at`).
     pub researching: Option<String>,
 }
@@ -69,7 +69,7 @@ pub struct AiTech {
     /// Research cost in points (`technologies` #3).
     pub cost: i32,
     /// Thread the technology's school rate is taken from: 0 military, 1 industry, 2 enlightenment
-    /// (`ntw_sim::campaign::research::thread_of`, INFERRED from the key prefix there).
+    /// (`ntw_sim::campaign::rules::TechRules::thread`; 3, none, for a tree outside the three groups).
     pub thread: usize,
 }
 
@@ -274,7 +274,7 @@ impl AiWorld {
                 .map(|(k, t)| {
                     (
                         k.clone(),
-                        AiTech { cost: t.cost, thread: ntw_sim::campaign::research::thread_of(k) },
+                        AiTech { cost: t.cost, thread: t.thread },
                     )
                 })
                 .collect()
@@ -298,7 +298,7 @@ impl AiWorld {
                         Some(AiSchool {
                             slot: i,
                             id: s.id,
-                            rate: [p.rate(0), p.rate(1), p.rate(2)],
+                            rate: [p.rate(0), p.rate(1), p.rate(2), p.rate(3)],
                             researching: m.researching_at(r.id, i),
                         })
                     })
