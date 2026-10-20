@@ -38,14 +38,13 @@ fn main() {
     let map = CampaignMap::load(&files, &loaded.info.map_key).expect("map");
     loaded.model.attach_terrain(Terrain(Arc::new(ntw_campaign::pathing::build_grid(&map))));
     let source = ScriptSource::from_install(&dir).expect("scripts");
+    let script_values = loaded.script_values;
     let mut host = ScriptHost::new(loaded.model, &human, source).expect("script host");
     if let Err(e) = host.load_campaign(&campaign) {
         eprintln!("warning: campaign scripts: {e}");
     }
     driver::install(&mut host, data);
-    for name in ["NewSession", "NewCampaignStarted"] {
-        let _ = host.fire(name, ScriptContext::for_faction(&human));
-    }
+    let _ = host.open_campaign(ScriptContext::for_faction(&human), ntw_script::CampaignOpening::NewCampaign, &script_values);
     host.start_campaign();
     let mut seen = 0;
     let olds = |st: &ntw_script::ScriptState| -> std::collections::BTreeMap<i32, (String, u32)> {

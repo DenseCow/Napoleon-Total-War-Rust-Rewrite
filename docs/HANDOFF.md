@@ -3,9 +3,9 @@
 Keep this file short. It holds what is true now: replace finished items rather than appending logs.
 Old session logs are in `docs/archive/`.
 
-Last updated: 2026-10-16. Main tests at last full run (2026-10-08): `cargo test --workspace` passes on the install.
+Last updated: 2026-10-19. Main tests at last full run (2026-10-08): `cargo test --workspace` passes on the install.
 
-## Resume here (2026-10-15)
+## Resume here (2026-10-20)
 
 - **Repos:** work happens in the private repo (origin, `…-Private`). The public repo
   `DenseCow/Napoleon-Total-War-Rust-Rewrite` is a snapshot mirror for contributors: publish after a
@@ -17,16 +17,13 @@ Last updated: 2026-10-16. Main tests at last full run (2026-10-08): `cargo test 
   → push (the hook syncs public #2) → publish in batches. Running work = the BACKLOG `(running: …)`
   markers and `git worktree list`; merged work = `git log`.
 - **Resume points:** the one debugger sitting sheet at the top of docs/FOR_USER.md. Running work: BACKLOG markers.
-- **Night 2026-10-17 (block cap 45.5%; no resume scheduled):** merged tonight: dippermai, polish48, polish49, roundstart, polish50, traderaid, dipempty, zocflood (FOR_USER "Done tonight"). **Resume next session (each branch pushed, its BACKLOG marker kept; a fresh worker per branch):**
-  - `work/polish51` done (1c0c77c4, NR-polish51; HUD date from loc keys, EPISODIC_RESTRICTIONS #8, ORIGINAL BUGs 0x00979600 / 0x008ED110): run `/code-review medium` on `main...work/polish51`, then merge: delete its Polish line, add its three Polish lines (frontend.rs ~502 `seasons_onscreen_` key misses: the key is `seasons_onscreen_season_<x>`; the save header season from the loc name 0x00888320→0x008ED110, not `header_name`; create Ghidra functions at 0x00979600 / 0x009E24D0 / 0x009E2010 with V5).
-  - `work/victoryscreen` (6422ea82, NR-victoryscreen): §0 defeat/victory screen. The scripts' side is traced (CAMPAIGN_FIDELITY "Campaign over" → "The scripts' side"); next: trace the exe posting of messages 34/35/37 (strings "ExitFunction", "ShowVictoryOptionsPopup"), then the model and the UI.
+- **Night 2026-10-19/20 (block cap 85%):** merged: polish58, raidhand, polish62, victoryscreen, polish61, culturefb, raidcite, esfseason, vsnotes, histevents, zonegate, shroudnotes, recordpay, popnotes, rebuildrec, pathgate, shroudfill, modelcreated, regionprice, warorder, esfevents, shortcutkeys, portfull, treatymoney, ownshroud, wcstubs, appendorder, empirebucket, keynames, peacemsg, sameowner, polish63, techswitch, polish64, loadinggame, polish65, priceupdate, treatysave, warnotice, popghidra, charorder, campover2. **Running when last updated (each branch pushed when done, its BACKLOG marker kept; a fresh reviewer per finished branch):** handover (faction handover), keybind (campaign key bindings), accessloss2 (access-loss leftovers), navyupkeep (Netherlands naval upkeep). The user has one decision in FOR_USER "Needs you" (treaty money ORIGINAL BUG).
   Every brief names `tools/self_check.sh` and holds one item. §11: framework parts only; the unwrap audit last.
 - **Disk:** C: filled up on 2026-10-09; 21 merged worktrees were removed (~100 GB back). Remove a
   worktree after its merge; check `df -h /c` before starting builds.
 - Evidence saves live in `%USERPROFILE%\Documents\ntw-evidence\saves` (never inside a target folder);
   recovered build-folder data in `ntw-evidence\recovered-targets\`.
-- Usage (user plan, 2026-10-17): 16-point blocks (~17 with the reading lag), one a day Sat–Tue, to use the ~70 points left at 30% before the weekly
-  reset Wed 2026-10-21 00:00; `BlockPercent` in tools/usage_budget.ps1.
+- Usage (user plan, 2026-10-17): 16-point blocks (`BlockPercent` in tools/usage_budget.ps1). On Tue 2026-10-20 the user lifted the cap: this block runs to 100% (`extra`), night mode kept, until the weekly reset Wed 2026-10-21 00:00.
 
 ## Open bugs
 

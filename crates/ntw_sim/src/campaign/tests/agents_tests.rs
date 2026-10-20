@@ -109,6 +109,45 @@ fn a_general_dying_of_old_age_loses_his_own_unit_first() {
     assert!(super::characters::yearly_character_pass(&mut m2).died.is_empty());
 }
 
+/// The yearly death checks draw in the order of the faction's character list (+0x768, `0x008BC650`),
+/// not in id order: two characters listed the other way round get each other's draws, and the dead
+/// die in list order.
+#[test]
+fn the_yearly_death_checks_draw_in_list_order() {
+    // C plays last (turn order B, A, C), so the draws before its own are the same in every run; 200
+    // and 201 are its only characters with a birth date.
+    let model = |seed: u32, ages: (u32, u32), order: Vec<CharacterId>| {
+        let mut m = test_model();
+        m.rng = CaRng::new(seed);
+        m.calendar.turn_in_year = m.calendar.turns_per_year - 1;
+        let year = m.calendar.date.year;
+        for (id, age) in [(200, ages.0), (201, ages.1)] {
+            m.world.characters.insert(CharacterId(id), character(id, C, CharacterKind::Minister, 0));
+            m.world.character_details.entry(CharacterId(id)).or_default().birth = Some(Date { year: year - age, season: 0, month: 0, half: HALF_EARLY });
+        }
+        m.world.character_order = order;
+        m
+    };
+    let died = |mut m: CampaignModel| super::characters::yearly_character_pass(&mut m).died;
+    let swap = |c: CharacterId| if c == CharacterId(200) { CharacterId(201) } else { CharacterId(200) };
+    let listed_order = || vec![CharacterId(201), CharacterId(200)];
+    let mut differs = false;
+    for seed in 0..64 {
+        // Listed 201 first: the same draws as 200 first (id order) with the ages swapped.
+        let listed = died(model(seed, (70, 66), listed_order()));
+        let swapped = died(model(seed, (66, 70), Vec::new()));
+        assert_eq!(listed.iter().map(|c| swap(*c)).collect::<Vec<_>>(), swapped, "seed {seed}");
+        let mut by_id = died(model(seed, (70, 66), Vec::new()));
+        let mut sorted = listed.clone();
+        sorted.sort();
+        by_id.sort();
+        differs |= sorted != by_id;
+    }
+    assert!(differs, "the order changes who dies for some seed");
+    // Both certain to die (age 100: chance 1): in list order.
+    assert_eq!(died(model(1, (100, 100), listed_order())), listed_order());
+}
+
 #[test]
 fn agent_rolls_classify_as_the_original() {
     use super::agents::{classify, Outcome};

@@ -411,6 +411,12 @@ pub struct RegionMap {
     pub trade_nodes: Vec<(String, (f32, f32))>,
     /// The ground-type map (`groundtypes`), one entry per `campaign_ground_types` key present.
     pub ground_types: Vec<GroundTypeRegion>,
+    /// The black shroud outlines (`black_shroud_outlines`, a root record array of {utf16 name,
+    /// coord2d[] outline}, CONFIRMED by parsing; the exe's map data loader `0x00A47220` keeps them at
+    /// map data +0xC0 / +0xC4), in file order: what `unveil_black_shroud(name)` lifts. Only the
+    /// tutorial map has any (`shroud_map_1_1` .. `shroud_map_1_9`). An open-format map gives its own
+    /// from its `black_shroud.txt` ([`crate::open_map::attach_black_shroud`]).
+    pub black_shroud_outlines: Vec<(String, Vec<(f32, f32)>)>,
 }
 
 /// One area of a ground type: its (outer?, outline points) loops.
@@ -614,7 +620,16 @@ impl RegionMap {
             }
         }
         let ground_types = read_ground_types(root);
-        Ok(Self { bounds_min, bounds_max, theatre, labels, vertices, regions, trade_nodes, ground_types })
+        let mut black_shroud_outlines = Vec::new();
+        if let Some(a) = find_array(&root.children, "black_shroud_outlines") {
+            for it in &a.items {
+                match (it.first().and_then(EsfNode::as_str), it.get(1).and_then(EsfNode::as_coord2d_array)) {
+                    (Some(k), Some(p)) => black_shroud_outlines.push((k.to_owned(), p.to_vec())),
+                    _ => log::warn!("regions.esf: a black_shroud_outlines entry is not {{name, outline}}; left out"),
+                }
+            }
+        }
+        Ok(Self { bounds_min, bounds_max, theatre, labels, vertices, regions, trade_nodes, ground_types, black_shroud_outlines })
     }
 
     /// The ground type (`campaign_ground_types` key) at (x, z): the first type whose areas contain

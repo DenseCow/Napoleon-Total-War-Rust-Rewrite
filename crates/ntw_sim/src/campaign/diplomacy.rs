@@ -15,6 +15,12 @@ use super::ids::FactionId;
 use super::world::{Stance, World};
 
 impl World {
+    /// `a` holds a trade agreement with `b` (relationship `+0x788`, [`super::details::Relationship::trade_agreement`]): the flag on
+    /// `a`'s record only; a missing relationship counts as none. The one place this test lives.
+    pub fn trade_held(&self, a: FactionId, b: FactionId) -> bool {
+        self.relationships.get(&(a, b)).is_some_and(|r| r.trade_agreement)
+    }
+
     /// The stance of `a` towards `b`. A missing relationship counts as [`Stance::Neutral`].
     pub fn stance(&self, a: FactionId, b: FactionId) -> Stance {
         self.factions

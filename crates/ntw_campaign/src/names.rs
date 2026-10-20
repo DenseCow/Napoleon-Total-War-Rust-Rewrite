@@ -186,11 +186,17 @@ pub struct NameData {
 impl NameData {
     /// Loads the names table, the faction groups and the historical names from an install.
     pub fn load(vfs: &Vfs, db: &GameDatabase) -> Option<NameData> {
+        let loc = ntw_formats::loc::Localisation::from_vfs(vfs).ok();
+        Self::load_with(vfs, db, loc.as_ref())
+    }
+
+    /// [`NameData::load`] with the localisation already loaded (`None`: no localised texts).
+    pub fn load_with(vfs: &Vfs, db: &GameDatabase, loc: Option<&ntw_formats::loc::Localisation>) -> Option<NameData> {
         let rows = read_names(vfs).map_err(|e| eprintln!("WARN ntw_campaign: names: {e}; no character names")).ok()?;
         let groups = db.factions.iter().map(|f| (f.key.clone(), f.character_names_group.clone())).collect();
         let mut historical = std::collections::BTreeSet::new();
         let mut text = std::collections::BTreeMap::new();
-        if let Ok(loc) = ntw_formats::loc::Localisation::from_vfs(vfs) {
+        if let Some(loc) = loc {
             for (k, v) in loc.iter() {
                 if k.starts_with("historical_characters_on_screen_name_") {
                     historical.insert(v.to_string());
@@ -246,12 +252,12 @@ pub fn fill_allocators(root: &EsfRecord, model: &mut CampaignModel) {
     w.name_allocators = w.factions.values().filter_map(|f| Some((f.id, by_key.remove(&f.key)?))).collect();
 }
 
-/// Gives the model its naming data from the install's `names` table and localisation, so new
+/// Gives the model its naming data from the install's `names` table and `loc` (the localisation), so new
 /// characters and unit officers are named when they are created
 /// (`CampaignModel::name_new_character`, `name_new_unit`). Logged once when the table cannot be read
 /// (new characters then stay unnamed).
-pub fn attach(model: &mut CampaignModel, vfs: &Vfs, db: &GameDatabase) {
-    let Some(data) = NameData::load(vfs, db) else {
+pub fn attach(model: &mut CampaignModel, vfs: &Vfs, db: &GameDatabase, loc: Option<&ntw_formats::loc::Localisation>) {
+    let Some(data) = NameData::load_with(vfs, db, loc) else {
         log::warn!("Campaign names: the names table cannot be read; new characters stay unnamed");
         return;
     };

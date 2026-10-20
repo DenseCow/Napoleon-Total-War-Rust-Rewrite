@@ -10,12 +10,14 @@ use crate::fixed::Fixed20;
 use crate::rng::CaRng;
 
 mod agents_tests;
+mod black_shroud_tests;
 mod buildings_tests;
 mod capture_diplomacy_tests;
 mod commerce_raid_tests;
 mod construction_tests;
 mod deals_tests;
 mod economy_tests;
+mod expense_tracker_tests;
 mod fog_turn_end_tests;
 mod forces_tests;
 mod hiring_tests;
@@ -23,6 +25,7 @@ mod recruitment_tests;
 mod slots_exit_tests;
 mod trade_order_tests;
 mod transfer;
+mod treaty_money_tests;
 mod turn_order_tests;
 
 const A: FactionId = FactionId(1);
@@ -245,7 +248,7 @@ fn play(m: &mut CampaignModel, turns: u32) {
             let _ = m.apply(CampaignCommand::DeclareWar { a: A, b: B });
         }
         if cur == B && t % 5 == 3 {
-            let _ = m.apply(CampaignCommand::MakePeace { a: B, b: A });
+            let _ = m.apply(CampaignCommand::MakePeace { a: B, b: A, suppress_messages: false });
         }
         if cur == B {
             let _ = m.apply(CampaignCommand::MoveForce { force: ForceId(1001), to: pos((t % 10) as i32, (t % 3) as i32) });

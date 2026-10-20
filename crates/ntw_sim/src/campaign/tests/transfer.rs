@@ -219,6 +219,19 @@ fn an_army_no_region_takes_stays_in_place_out_of_the_settlement() {
     assert_eq!(m.world.regions[&RegionId(12)].garrison, None);
 }
 
+/// The forces leave in the order of the faction's character list (+0x768, `0x008D9E7A`), each
+/// commander's army or navy in turn, not armies first and then navies by id.
+#[test]
+fn the_expulsion_walks_the_faction_list_in_its_order() {
+    let mut m = terrain_model(true);
+    let extra = add_army(&mut m, 104, A, fpos(6.5, 1.5));
+    m.world.regions.get_mut(&RegionId(12)).unwrap().owner = B;
+    let forces = |m: &CampaignModel| expel_faction_from_region(m, A, RegionId(12)).into_iter().map(|e| e.force).collect::<Vec<_>>();
+    assert_eq!(forces(&m), vec![ForceId(1000), ForceId(1003), extra], "no order listed: id order");
+    m.world.character_order = vec![CharacterId(104), CharacterId(103), CharacterId(100)];
+    assert_eq!(forces(&m), vec![extra, ForceId(1003), ForceId(1000)]);
+}
+
 /// The end of a protectorate tie (`0x00B64B10`): the patron's forces leave each of the
 /// protectorate's regions, which they could stand in while the tie held.
 #[test]
@@ -389,13 +402,13 @@ fn peace_gives_back_the_proposers_allies_access_only() {
         m
     };
     let mut m = base();
-    m.make_peace_rules(A, B).unwrap();
+    m.make_peace_rules(A, B, false).unwrap();
     assert!(m.world.relationships[&(C, A)].allied_in_war_against.is_empty());
     assert_eq!(m.world.relationships[&(C, A)].military_access_turns, 0);
     assert_eq!(at(&m, 104), pos(200, 0), "out of C's region 13 to A's nearest, 12");
 
     let mut m = base();
-    m.make_peace_rules(B, A).unwrap();
+    m.make_peace_rules(B, A, false).unwrap();
     assert_eq!(m.world.relationships[&(C, A)].allied_in_war_against.len(), 1, "B has no ally");
     assert_eq!(at(&m, 104), pos(405, 0));
 }

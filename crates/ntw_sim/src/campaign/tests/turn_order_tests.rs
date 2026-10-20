@@ -90,10 +90,10 @@ fn run_round_start(m: &mut CampaignModel) {
 }
 
 /// The round start refreshes the population factors of the listed, in-game factions' regions only
-/// (`0x008F1F60` skips step 1 for the rebels, `0x008CEEF0`, and an out-of-game faction, +0x824); the round
-/// end's first pass (`0x008E1030` → `0x00AB3E70`) refreshes every region.
+/// (`0x008F1F60` skips step 1 for the rebels, `0x008CEEF0`, and an out-of-game faction, +0x824), and so does
+/// the round end's first pass (`0x00948CF0` → `0x008E1030` → `0x00AB3E70`: listed factions only, +0x824 clear).
 #[test]
-fn the_round_start_refreshes_only_listed_in_game_factions_regions() {
+fn the_round_start_and_end_refresh_only_listed_in_game_factions_regions() {
     let mut m = test_model();
     make_rebels(&mut m, B);
     m.world.regions.get_mut(&RegionId(12)).unwrap().owner = C;
@@ -107,9 +107,14 @@ fn the_round_start_refreshes_only_listed_in_game_factions_regions() {
     assert_ne!(factor(&m, 10), STALE, "A's region is refreshed");
     assert_eq!(factor(&m, 11), STALE, "the rebels' region keeps its factors");
     assert_eq!(factor(&m, 12), STALE, "the out-of-game faction's region keeps its factors");
-    m.refresh_population_factors();
-    let after = [10, 11, 12].map(|id| factor(&m, id));
-    assert!(after.iter().all(|&g| g != STALE), "the round end's pass refreshes every region: {after:?}");
+    for r in m.world.regions.values_mut() {
+        r.population_state.factors[0] = STALE;
+    }
+    m.turn.queue.push_front(TurnStep::RoundEndRefresh);
+    m.step().expect("the round end's refresh step");
+    assert_ne!(factor(&m, 10), STALE, "A's region is refreshed at the round end");
+    assert_eq!(factor(&m, 11), STALE, "the rebels' region keeps its factors at the round end");
+    assert_eq!(factor(&m, 12), STALE, "the out-of-game faction's region keeps its factors at the round end");
 }
 
 /// The computed factors (`0x008BAF30` → `0x00B71E90`) are reset only on relationships owned by a listed
@@ -150,6 +155,131 @@ fn the_round_start_price_update_keeps_the_price_history() {
     m.update_commodity_prices();
     let mk = &m.world.commodity_market;
     assert_eq!((mk.previous.clone(), mk.previous2.clone()), (vec![120], vec![140]), "the round end shifts the history");
+}
+
+/// [`split_model`] with the price history of [`the_round_start_price_update_keeps_the_price_history`] (the
+/// update gives 140, trend 0) and the prices still at 10.
+fn price_model() -> CampaignModel {
+    let mut m = split_model(&["c0"], vec![100]);
+    m.world.commodity_market = super::super::trade::CommodityMarket {
+        initial: vec![10],
+        factors: vec![1.0],
+        previous: vec![100],
+        previous2: vec![120],
+        trend: vec![9],
+    };
+    m
+}
+
+fn price_state(m: &CampaignModel) -> (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>) {
+    let mk = &m.world.commodity_market;
+    (m.world.commodity_prices.clone(), mk.previous.clone(), mk.previous2.clone(), mk.trend.clone())
+}
+
+/// A region lost mid-turn by a faction other than the rebels runs the price update with flag 0 at the end of
+/// the route loss (`0x00BCB020(0)` at `0x00BBE7C4`): prices and trends recomputed, the history kept.
+#[test]
+fn a_region_lost_mid_turn_updates_the_prices_keeping_the_history() {
+    let mut m = price_model();
+    assert!(m.transfer_region(RegionId(12), A), "C hands region 12 over");
+    assert_eq!(price_state(&m), (vec![140], vec![100], vec![120], vec![0]));
+}
+
+/// A region the rebels lose runs no route loss (`0x00A64E87` is skipped), so only a port slot passing to the
+/// new owner runs the price update (`SetSettlementOwner` `0x00B2B810` → `0x00BCB020(0)` at `0x00B2B84F`); a
+/// port a navy is docked in does not pass (`0x00B1B300`), so it runs none.
+#[test]
+fn a_port_slot_passing_updates_the_prices() {
+    let r12 = RegionId(12);
+    let rebel_held = |port: bool, docked: bool| {
+        let mut m = price_model();
+        make_rebels(&mut m, C);
+        let mut slot = m.world.regions[&RegionId(10)].slots[1].clone();
+        (slot.port, slot.position) = (port, Some(pos(5, 5)));
+        m.world.regions.get_mut(&r12).unwrap().slots.push(slot);
+        if docked {
+            let admiral = Character { id: CharacterId(109), faction: B, kind: CharacterKind::Admiral, position: pos(5, 5), movement_points: 0, max_movement_points: 0, base_movement_points: 0, garrisoned_in: None };
+            m.world.characters.insert(admiral.id, admiral);
+            m.world.forces.insert(ForceId(1005), MilitaryForce { id: ForceId(1005), faction: B, commander: Some(CharacterId(109)), units: vec![unit(9)], is_navy: true });
+        }
+        assert!(m.transfer_region(r12, A), "the rebels lose region 12");
+        price_state(&m)
+    };
+    let unchanged = (vec![10], vec![100], vec![120], vec![9]);
+    assert_eq!(rebel_held(false, false), unchanged, "no port slot: no update");
+    assert_eq!(rebel_held(true, false), (vec![140], vec![100], vec![120], vec![0]), "the port passes: flag 0");
+    assert_eq!(rebel_held(true, true), unchanged, "the docked port stays: no update");
+}
+
+/// A handover to the region's own owner (a deal naming it, `0x00B58A10` → `0x00B449F0`) loses no route
+/// (`0x00A64AC0` returns at `0x00A64D13` first) but still passes the slots (`0x00B1B300` at `0x00B44B69`):
+/// a port slot runs the price update with flag 0, a region without one none.
+#[test]
+fn a_same_owner_handover_updates_the_prices_only_through_a_port() {
+    let r12 = RegionId(12);
+    let same_owner = |port: bool| {
+        let mut m = price_model();
+        let mut slot = m.world.regions[&RegionId(10)].slots[1].clone();
+        slot.port = port;
+        m.world.regions.get_mut(&r12).unwrap().slots.push(slot);
+        assert!(!m.transfer_region(r12, C), "C already owns region 12");
+        assert_eq!(m.world.regions[&r12].owner, C);
+        price_state(&m)
+    };
+    assert_eq!(same_owner(false), (vec![10], vec![100], vec![120], vec![9]), "no port slot: no update");
+    assert_eq!(same_owner(true), (vec![140], vec![100], vec![120], vec![0]), "the port passes: flag 0");
+}
+
+/// [`price_model`] with a slot (a port when `port`) at (5, 5) in C's region 12, held by B.
+fn price_model_with_held_slot(port: bool) -> CampaignModel {
+    let mut m = price_model();
+    let mut slot = m.world.regions[&RegionId(10)].slots[1].clone();
+    (slot.port, slot.position, slot.holder) = (port, Some(pos(5, 5)), Some(B));
+    m.world.regions.get_mut(&RegionId(12)).unwrap().slots.push(slot);
+    m
+}
+
+/// A docked navy leaving its port, by undocking or by dying, hands the slot back to the region's owner through
+/// `RestorePortSlotHolderToRegionOwner` (`0x00A8D830`, the call `0x00A8D859`), whose `SetSettlementOwner`
+/// (`0x00B2B810`) runs the price update with flag 0 for a port slot (`0x00BCB020(0)` at `0x00B2B84F`). A navy
+/// standing at a slot that is no port is docked nowhere: no update.
+#[test]
+fn a_navy_leaving_its_port_updates_the_prices() {
+    let leaves = |port: bool, dies: bool| {
+        let mut m = price_model_with_held_slot(port);
+        let admiral = Character { id: CharacterId(109), faction: B, kind: CharacterKind::Admiral, position: pos(5, 5), movement_points: 0, max_movement_points: 0, base_movement_points: 0, garrisoned_in: None };
+        m.world.characters.insert(admiral.id, admiral);
+        m.world.forces.insert(ForceId(1005), MilitaryForce { id: ForceId(1005), faction: B, commander: Some(CharacterId(109)), units: vec![unit(9)], is_navy: true });
+        if dies {
+            m.destroy_force(ForceId(1005), &mut Vec::new());
+        } else {
+            m.undock(ForceId(1005));
+        }
+        if port {
+            assert_eq!(m.world.regions[&RegionId(12)].slots.last().unwrap().holder, None, "the port goes back to C");
+        }
+        price_state(&m)
+    };
+    let (updated, unchanged) = ((vec![140], vec![100], vec![120], vec![0]), (vec![10], vec![100], vec![120], vec![9]));
+    assert_eq!(leaves(true, false), updated, "undocking: flag 0");
+    assert_eq!(leaves(true, true), updated, "the navy's destructor: flag 0");
+    assert_eq!(leaves(false, false), unchanged, "no port: no update");
+}
+
+/// An AI faction leaving the game hands back the town slots it held in other factions' regions; a port slot
+/// runs the price update with flag 0 (`0x00B794B0` from `0x008ABB2D`/`0x008ABB3D` → `SetSettlementOwner`
+/// `0x00B2B810` → `0x00BCB020(0)` at `0x00B2B84F`); a slot that is no port runs none.
+#[test]
+fn a_destroyed_faction_handing_back_a_port_updates_the_prices() {
+    let destroyed = |port: bool| {
+        let mut m = price_model_with_held_slot(port);
+        m.world.regions.get_mut(&RegionId(11)).unwrap().owner = A;
+        m.destroy_faction(B, &mut Vec::new());
+        assert_eq!(m.world.regions[&RegionId(12)].slots.last().unwrap().holder, None, "the slot goes back to C");
+        price_state(&m)
+    };
+    assert_eq!(destroyed(true), (vec![140], vec![100], vec![120], vec![0]), "the port passes: flag 0");
+    assert_eq!(destroyed(false), (vec![10], vec![100], vec![120], vec![9]), "no port: no update");
 }
 
 /// The faction registry (`FindCampaignFactionByKey` 0x00955B70) holds every faction of the turn

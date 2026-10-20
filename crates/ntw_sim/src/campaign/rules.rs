@@ -338,12 +338,23 @@ pub struct CampaignRules {
     /// The culture of each faction key (`cultures_subcultures` of its subculture; the building permission test,
     /// [`CampaignModel::building_permitted`](super::CampaignModel::building_permitted)).
     pub faction_cultures: BTreeMap<String, String>,
+    /// `cultures` #2 by culture key (empty when the row has none): the culture a culture's movie rows
+    /// also stand in for ([`super::outcome`]), and the fallback portrait folder of the UI's
+    /// `MinisterPortraitPath` when the culture's own folder lacks the minister card (ntw_script
+    /// `ui/campaign/diplomacy.rs`; INFERRED there, `0x008C05B0` is not decoded).
+    pub culture_alternates: BTreeMap<String, String>,
+    /// `factions` #39, the faction's movie id, by faction key (empty when it names none; [`super::outcome`]).
+    pub faction_movie_ids: BTreeMap<String, String>,
+    /// `movie_event_strings` rows in table order ([`super::outcome`]; the lookups depend on the order).
+    pub movie_events: Vec<super::outcome::MovieEventRow>,
     /// `commodities_demand_junction` rows: (commodity key, driver key, factor, weight).
     pub commodity_demand: Vec<(String, String, f32, f32)>,
     /// The effect sources, compiled (slot 0-F, [`super::effects`]).
     pub effects: super::effects::EffectRules,
     /// The character rules (traits, ancillaries; slot 0-G).
     pub characters: super::characters::CharacterRules,
+    /// The round start's historical events ([`super::historical_events`]).
+    pub historical_events: super::historical_events::HistoricalEventRules,
 }
 
 /// The tax classes of `taxes_keys` (CONFIRMED keys).
@@ -641,4 +652,8 @@ pub struct TechRules {
     pub building_level: String,
     /// The technologies it requires (`technology_required_technology_junctions`).
     pub requires: Vec<String>,
+    /// The factions that may have it (`technology_faction_junctions`, gathered per technology by the
+    /// technologies table's row builder `0x00F20F00` into the record's set at +0xC0): empty means every
+    /// faction (`0x00F1EFA0`, CONFIRMED).
+    pub factions: Vec<String>,
 }

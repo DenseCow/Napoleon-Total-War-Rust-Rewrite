@@ -57,12 +57,18 @@ mod diplomacy;
 #[cfg(test)]
 mod diplomacy_tests;
 mod government;
+#[cfg(test)]
+mod hud_date_tests;
 mod map;
+#[cfg(test)]
+mod movie_panel_tests;
 mod region_info;
 mod saves;
 #[cfg(test)]
 mod saves_tests;
 mod settlement;
+#[cfg(test)]
+mod shortcut_tests;
 mod tabs;
 mod technology;
 #[cfg(test)]
@@ -76,6 +82,23 @@ use map::*;
 use settlement::*;
 use tabs::*;
 use technology::*;
+
+/// One key press for [`UiScriptHost::campaign_key`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CampaignKey<'a> {
+    /// The exe's name of the physical key (its key table `0x0139FEC8`, e.g. `"S"`, `"ESCAPE"`,
+    /// `"NUMPADENTER"`): what `default_keys.xml` binds and `StealShortcutKey` steals. None for a
+    /// key the exe has no name for.
+    pub key: Option<&'a str>,
+    /// The editing key's name a focused text field hears (`"ESCAPE"`, `"RETURN"`, `"BACK"`, ...).
+    pub edit: Option<&'a str>,
+    /// The text the press types.
+    pub text: Option<&'a str>,
+    /// A key repeat (the key is held).
+    pub repeat: bool,
+    /// The modifiers held.
+    pub held: ntw_formats::default_keys::Held,
+}
 
 /// What the HUD needs from the running campaign.
 pub struct CampaignLink {
@@ -105,10 +128,13 @@ pub struct CampaignLink {
 /// queued [`CampaignRequest`].
 pub trait CampaignSaves {
     /// The header a save written now would carry (`GetCurrentGameInfo`, `0x009E4BB0`, builds it with
-    /// `0x00888320`, the save writer's own header builder).
-    fn current_info(&self) -> ntw_campaign::CampaignInfo;
-    /// Writes the running campaign to `path` (the campaign scripts hear `SavingGame` first).
-    fn save(&self, path: &std::path::Path) -> Result<(), String>;
+    /// `0x00888320`, the save writer's own header builder). `season_name` is the header's season:
+    /// `0x00888320` stores what `0x008ED110` returns, the calendar season's on-screen name, which the
+    /// HUD also sends as `season_string` (CONFIRMED, UI_FIDELITY.md §5.1).
+    fn current_info(&self, season_name: &str) -> ntw_campaign::CampaignInfo;
+    /// Writes the running campaign to `path` (the campaign scripts hear `SavingGame` first), its
+    /// header's season being `season_name` (as in [`CampaignSaves::current_info`]).
+    fn save(&self, path: &std::path::Path, season_name: &str) -> Result<(), String>;
 }
 
 /// What is selected on the campaign map.
@@ -152,6 +178,8 @@ pub enum CampaignRequest {
     Select(CampaignSelection),
     /// Centre the camera on a map position (logic x, y).
     CameraTo(f32, f32),
+    /// `CampaignUI.QuitToMainScreen()`: leave the campaign for the main menu.
+    QuitToMainScreen,
 }
 
 /// A review-panel tab (INFERRED from the exe's tab objects, see CAMPAIGN_UI.md §Review panel).
@@ -295,8 +323,6 @@ pub(super) struct CampaignUi {
     order_factor_pips: std::cell::OnceCell<HashMap<String, (String, String)>>,
     /// See `CampaignUi::town_factor_pip`.
     town_factor_pips: std::cell::OnceCell<HashMap<String, String>>,
-    /// See `CampaignUi::culture_fallback`.
-    portrait_folders: std::cell::OnceCell<HashMap<String, String>>,
     /// The capture whose screen is open (see `campaign_capture_screen`).
     capture_shown: Cell<Option<RegionId>>,
     /// Negotiation state for the diplomacy panel.
@@ -548,6 +574,27 @@ fn loc_required(inner: &Inner, key: &str) -> String {
 /// "" and logged once, as the exe's lookup `0x00F59170` logs a missing key and returns "".
 fn round_description(inner: &Inner, calendar: &ntw_sim::calendar::Calendar) -> String {
     calendar.round_id().map_or_else(String::new, |id| loc_required(inner, &format!("random_localisation_strings_string_{id}")))
+}
+
+/// The calendar season's on-screen name ("Spring"): `0x008ED110` (CONFIRMED, UI_FIDELITY.md §5.1)
+/// picks the season's `seasons` key by code ([`ntw_sim::calendar::Season::key`]) and returns its
+/// record's on-screen name, the loc string `seasons_onscreen_<key>`. Sent as `season_string` in both
+/// HUD updates of `0x009C1AD0`, answered by `CampaignUI.CurrentSeasonString` (`0x009E1F70`) and
+/// stored as the save header's season (`0x00888320`; [`CampaignSaves`]).
+/// A missing loc string is "" and logged once. ORIGINAL BUG: for a key missing from the `seasons`
+/// table the exe logs it and then reads through the null record (a crash); ours gives "" and logs
+/// once. A code outside 0..3 (the date setter `0x008EDC80` never makes one) is "" and logged once.
+fn season_string(inner: &Inner, calendar: &ntw_sim::calendar::Calendar) -> String {
+    let code = calendar.date.season;
+    match ntw_sim::calendar::Season::from_code(code) {
+        Some(season) => loc_required(inner, &season.onscreen_key()),
+        None => {
+            inner.log_once_for("unknown season code", &code.to_string(), || {
+                format!("UNKNOWN calendar season code {code}: its on-screen name is shown as \"\" (logged once per code)")
+            });
+            String::new()
+        }
+    }
 }
 
 /// A faction's on-screen name: loc `factions_screen_name_<key>`, else the DB name (as the front
@@ -853,17 +900,20 @@ fn install_functions(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tabl
     f!("IsTimedMultiplayerGame", |_l, inner, ui, _a: Variadic<Value>| Ok(false));
     f!("IsTimedMultiplayer", |_l, inner, ui, _a: Variadic<Value>| Ok(false));
     f!("CampaignIsEpisodic", |_l, inner, ui, _a: Variadic<Value>| Ok(false));
-    f!("DisplayingTurns", |_l, inner, ui, _a: Variadic<Value>| Ok(false));
+    // DisplayingTurns() → the turns display switch (`0x009E24D0`, CONFIRMED: the byte at episodic
+    // restrictions +0xD1 as a boolean; World::display_turns).
+    f!("DisplayingTurns", |_l, inner, ui, _a: Variadic<Value>| Ok(ui.model().world.display_turns));
     f!("CurrentTurn", |_l, inner, ui, _a: Variadic<Value>| Ok(ui.model().calendar.turn_number()));
-    f!("CurrentYear", |_l, inner, ui, _a: Variadic<Value>| Ok(ui.model().calendar.date.year));
-    // CurrentSeasonString() → the season's on-screen name (0x009E1F70 → 0x008ED110, CONFIRMED:
-    // the date's season code 0..3 picks season_summer / _winter / _spring / _autumn, whose
-    // `seasons` record names it; loc `seasons_onscreen_<key>`).
-    f!("CurrentSeasonString", |_l, inner, ui, _a: Variadic<Value>| {
-        const KEYS: [&str; 4] = ["season_summer", "season_winter", "season_spring", "season_autumn"];
-        let code = ui.model().calendar.date.season as usize;
-        Ok(KEYS.get(code).and_then(|k| loc(&inner, &format!("seasons_onscreen_{k}"))).unwrap_or_default())
+    // CurrentYear() → (year, displaying turns) (`0x009E2010`, CONFIRMED: two results; while the turns
+    // display switch is set the first is the turn number, turns elapsed + 1, else the date's year).
+    f!("CurrentYear", |_l, inner, ui, _a: Variadic<Value>| {
+        let m = ui.model();
+        let turns = m.world.display_turns;
+        Ok((if turns { m.calendar.turn_number() } else { m.calendar.date.year }, turns))
     });
+    // CurrentSeasonString() → the season's on-screen name (0x009E1F70 → 0x008ED110, CONFIRMED;
+    // [`season_string`]).
+    f!("CurrentSeasonString", |_l, inner, ui, _a: Variadic<Value>| Ok(season_string(&inner, &ui.model().calendar)));
     // Time(): "the current models time in seconds", CONFIRMED `0x009F9B80` → `0x00A0EB80`: a u32
     // ms counter × 0.001 -- the same getter whose value (× 1000) the campaign UI frame hands to
     // `OnUpdatePulse` (see `UiScriptHost::pulse`). So ours is the pulse clock in seconds.
@@ -904,6 +954,31 @@ fn install_functions(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tabl
         Ok(())
     });
     f!("CanEndTurn", |_l, inner, ui, _a: Variadic<Value>| Ok(true));
+    // QuitToMainScreen(): the OK of the defeat movie panel and the Exit of the campaign result
+    // (CONFIRMED callers, event_movie_panel.luac / campaign_result.luac). The exe (`0x00429CF0` →
+    // `0x009EF630` → `0x009BFED0`) sets the leave request, byte +0x7C of the UI manager's +0x9FC
+    // object. INFERRED: that request goes back to the main menu, as the name says (its reader is
+    // not traced).
+    f!("QuitToMainScreen", |_l, inner, ui, _a: Variadic<Value>| {
+        ui.push(CampaignRequest::QuitToMainScreen);
+        Ok(())
+    });
+    // MovieDismissed(): the movie panel closed (event_movie_panel.luac `RemoveMoviePanel`). The exe
+    // (`0x004295F0` → `0x009EE380` → `0x00A0FC30`) frees the playing movie, CONFIRMED.
+    f!("MovieDismissed", |_l, inner, ui, _a: Variadic<Value>| {
+        *inner.attached_movie.borrow_mut() = None;
+        Ok(())
+    });
+    // ContinueGameSelected(): Continue on the campaign result (campaign_result.luac `ContinueGame`).
+    // The exe (`0x00428910` → `0x009E1D20`) sends `CCQ_CONTINUE_GAME_SELECTED`, whose handler
+    // `0x00932B40` clears byte +0x9C of an object of campaign +0xF70 (UNKNOWN meaning). PROVISIONAL:
+    // nothing; the campaign goes on, as in single player the victory conditions never end it.
+    f!("ContinueGameSelected", |_l, inner, ui, _a: Variadic<Value>| {
+        inner.log_once("ContinueGameSelected", || {
+            "PROVISIONAL: CampaignUI.ContinueGameSelected does nothing yet (the effect of CCQ_CONTINUE_GAME_SELECTED is not traced)".into()
+        });
+        Ok(())
+    });
     f!("PlayerHasFunds", |_l, inner, ui, amount: Option<f64>| {
         let m = ui.model();
         Ok(m.faction_by_key(&ui.link.human).is_some_and(|f| f64::from(f.treasury) >= amount.unwrap_or(0.0)))
@@ -927,8 +1002,8 @@ fn install_functions(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tabl
         t.raw_set(name, lua.create_function(|_, _: Variadic<Value>| Ok(()))?)?;
     }
     // PlayerPlayingAsRevolutionaries() → the player's faction has its +0x814 flag set and not its
-    // +0x81C one (0x009EED40, CONFIRMED test; the flags' meaning INFERRED from the description:
-    // the player sided with the revolutionaries). PROVISIONAL: neither flag is in our model yet,
+    // +0x81C one (0x009EED40, CONFIRMED test; +0x814 = in a revolution, +0x81C clear = on the
+    // revolutionaries' side, CONFIRMED by the setter's callers, CAMPAIGN_FIDELITY.md "Campaign over"). PROVISIONAL: neither flag is in our model yet,
     // so false.
     f!("PlayerPlayingAsRevolutionaries", |_l, inner, ui, _a: Variadic<Value>| Ok(false));
     // RegionFromSelection(): the selected settlement's region (button_selector.lua opens the
@@ -1050,7 +1125,6 @@ impl UiScriptHost {
             religion_icons: std::cell::OnceCell::new(),
             order_factor_pips: std::cell::OnceCell::new(),
             town_factor_pips: std::cell::OnceCell::new(),
-            portrait_folders: std::cell::OnceCell::new(),
             capture_shown: Cell::new(None),
             negotiation: RefCell::new(NegotiationState::default()),
         });
@@ -1150,34 +1224,116 @@ impl UiScriptHost {
         }
     }
 
-    /// A key binding fired (`text/default_keys.xml`: `escape_menu` = ESCAPE, `quick_save` = CTRL+S,
-    /// `quick_load` = CTRL+L in the campaign): the root's `OnShortcut(name, true)` (CONFIRMED,
-    /// `layout.root.luac` line 1602: it acts only when the second argument is true, so the release
-    /// call is not made). Returns false when the root has no `OnShortcut`.
+    /// A key binding mapped to the root fired (`text/default_keys.xml`, e.g. `escape_menu`,
+    /// `quick_save`, `quick_load`; see [`Self::campaign_key`]): the root's `OnShortcut(name, true)`
+    /// (CONFIRMED, `layout.root.luac` line 1602: it acts only when the second argument is true, so
+    /// the release call is not made). Returns false when the root has no `OnShortcut`.
     pub fn campaign_shortcut(&self, name: &str) -> bool {
         call_root_global(self.lua(), self.inner(), "OnShortcut", (name, true))
     }
 
-    /// The engine's `UpdateFactionFundsAndDate{funds, season, year, round_description}` call
-    /// (CONFIRMED from `layout.root.luac`; `0x009C1AD0`), the round description being the
-    /// calendar's turn name ([`round_description`]).
+    /// One key press in the campaign, in the exe's order (CONFIRMED, disassembly): the campaign
+    /// mode's key handler `0x00A27EB0` passes "a component holds the input focus"
+    /// ([`Self::input_focus_held`]) to the shortcut handler `0x00EEE1E0`, which then runs no
+    /// binding at all: while a text field has the focus no shortcut fires (CTRL+S does not quick
+    /// save, ESCAPE does not open the escape menu) and no component that stole the key hears it;
+    /// the press goes to the focused field only (its editing keys, [`Self::focused_key`], and the
+    /// typed text, [`Self::text_input`]; while CTRL is held without ALT nothing is typed: Windows
+    /// sends CTRL+letter as a control character, which `IsCharPrintable` `0x01015F10` rejects,
+    /// while CTRL+ALT is AltGr and types its character). Without a focus, `0x00ED76E0` gives a key a component stole
+    /// (`StealShortcutKey`, `0x00EC3DE0`) to that component instead of its bindings
+    /// ([`Self::stolen_key`]); else every binding of `bindings` (the campaign's root-mapped
+    /// shortcuts) the key and the held modifiers match fires, each through
+    /// [`Self::campaign_shortcut`] (several may fire on one press: `0x00ED76E0` does not stop at the
+    /// first). Returns true when the HUD took the key.
+    ///
+    /// PROVISIONAL: the exe's binding state machine is not ported: it polls each binding's keys on
+    /// every key event, so a binding also fires when its modifier goes down after its key, keeps
+    /// one binding active, calls the release (`+0x2c`) and honours the repeat / ignore-lock flags
+    /// and the handler lock `+0x84`; ours fires on the key's own press, once (no key repeat), and a
+    /// stolen key goes to its stealer whatever modifiers are held.
+    pub fn campaign_key(&self, bindings: &ntw_formats::default_keys::Bindings, press: CampaignKey) -> bool {
+        if self.input_focus_held() {
+            if let Some(name) = press.edit {
+                // ESCAPE / RETURN act once per press; the editing keys repeat.
+                if press.repeat && matches!(name, "ESCAPE" | "RETURN") {
+                    return false;
+                }
+                return self.focused_key(name);
+            }
+            let shortcut_modifier = press.held.ctrl && !press.held.alt;
+            return match press.text {
+                Some(text) if !shortcut_modifier => self.text_input(text),
+                _ => false,
+            };
+        }
+        let Some(key) = press.key else { return false };
+        if press.repeat {
+            return false;
+        }
+        if self.stolen_key(key).is_some() {
+            return true;
+        }
+        let mut fired = false;
+        for func in bindings.fired(key, press.held) {
+            self.campaign_shortcut(func);
+            fired = true;
+        }
+        fired
+    }
+
+    /// The engine's HUD treasury and date update `0x009C1AD0` (CONFIRMED, UI_FIDELITY.md §5.1): with
+    /// the turns display switch set (World::display_turns, episodic restrictions +0xD1) it calls the
+    /// root's `UpdateFactionFundsAndTurn{funds, season, season_string, round}`, `round` being the
+    /// turn number (turns elapsed + 1); else `UpdateFactionFundsAndDate{funds, season,
+    /// season_string, round_description, year}`, the round description being the calendar's turn
+    /// name ([`round_description`]). Fields in the exe's order; funds, season, round and year are
+    /// numbers (`0x0044DE40`), season_string ([`season_string`]) and round_description strings.
+    /// Without the local faction the exe sends nothing; ours logs that once.
     pub fn campaign_update_funds(&self) {
         let Some(ui) = self.campaign_ui() else { return };
-        let (funds, season, year, round_description) = {
+        let inner = self.inner();
+        // The date part: the turn number, or the round description and the year.
+        enum Date {
+            Turn(u32),
+            Round(String, u32),
+        }
+        let (name, funds, season, season_string, date) = {
             let m = ui.model();
-            let funds = m.faction_by_key(&ui.link.human).map_or(0, |f| f.treasury);
-            (funds, m.calendar.date.season, m.calendar.date.year, round_description(self.inner(), &m.calendar))
+            let Some(funds) = m.faction_by_key(&ui.link.human).map(|f| f.treasury) else {
+                inner.log_once("hud funds without faction", || {
+                    format!("UNKNOWN no faction {:?} for the HUD treasury and date: nothing sent (logged once)", ui.link.human)
+                });
+                return;
+            };
+            let season = m.calendar.date.season;
+            let season_string = season_string(inner, &m.calendar);
+            if m.world.display_turns {
+                ("UpdateFactionFundsAndTurn", funds, season, season_string, Date::Turn(m.calendar.turn_number()))
+            } else {
+                let date = Date::Round(round_description(inner, &m.calendar), m.calendar.date.year);
+                ("UpdateFactionFundsAndDate", funds, season, season_string, date)
+            }
         };
         let t = (|| -> mlua::Result<Table> {
             let t = self.lua().create_table()?;
-            t.set("funds", funds.to_string())?;
+            t.set("funds", funds)?;
             t.set("season", season)?;
-            t.set("year", year.to_string())?;
-            t.set("round_description", round_description)?;
+            t.set("season_string", season_string)?;
+            match date {
+                Date::Turn(round) => t.set("round", round)?,
+                Date::Round(round_description, year) => {
+                    t.set("round_description", round_description)?;
+                    t.set("year", year)?;
+                }
+            }
             Ok(t)
         })();
-        if let Ok(t) = t {
-            call_root_global(self.lua(), self.inner(), "UpdateFactionFundsAndDate", t);
+        match t {
+            Ok(t) => {
+                call_root_global(self.lua(), inner, name, t);
+            }
+            Err(e) => inner.log_once("hud funds table", || format!("ERROR building the {name} table: {e} (logged once)")),
         }
     }
 
@@ -1313,6 +1469,49 @@ impl UiScriptHost {
         }
     }
 
+    /// The defeat / victory movie panel for a campaign outcome (`CampaignEvent::OutcomeMovie`,
+    /// the model's `CampaignModel::outcome_movie`): the root's `InitialiseMoviePanel(data)` opens
+    /// `event_movie_panel` (CONFIRMED, layout.root.lua:1033; the exe's movie queue `0x00998E20`
+    /// calls it). `data` = {`title`, `bink_control_ptr`, `Data` = {`ExitFunction`, `show_everyone`,
+    /// `only_call_function_for_local_faction`, `local_faction_involved`}} (CONFIRMED names, read by
+    /// event_movie_panel.luac; the first three `Data` values are the exe's, `0x00A07790` /
+    /// `0x00A07760`). Our `bink_control_ptr` is the movie's file name (see `AttachCustomControl`).
+    /// PROVISIONAL: `title` is not set (the panel shows ""): where the queue takes it from is not
+    /// traced. INFERRED: `local_faction_involved` is whether the faction is the local player's, and a
+    /// movie not shown to everyone opens only for that player. Returns true when the panel opened.
+    pub fn campaign_outcome_movie(&self, faction: FactionId, movie: &ntw_sim::campaign::outcome::OutcomeMovie) -> bool {
+        let Some(ui) = self.campaign_ui() else { return false };
+        let local = ui.model().world.factions.get(&faction).is_some_and(|f| f.key == ui.link.human);
+        if !movie.show_everyone && !local {
+            return false;
+        }
+        let lua = self.lua();
+        let r = (|| -> mlua::Result<Table> {
+            let d = lua.create_table()?;
+            d.set("ExitFunction", movie.exit.script_name())?;
+            d.set("show_everyone", movie.show_everyone)?;
+            d.set("only_call_function_for_local_faction", movie.only_local_faction)?;
+            d.set("local_faction_involved", local)?;
+            let t = lua.create_table()?;
+            t.set("bink_control_ptr", movie.movie.as_str())?;
+            t.set("Data", d)?;
+            Ok(t)
+        })();
+        match r {
+            Ok(t) => {
+                let opened = call_root_global(lua, self.inner(), "InitialiseMoviePanel", t);
+                if !opened {
+                    log(self.inner(), format!("ERROR: the movie panel for {} did not open (no root InitialiseMoviePanel, or it failed)", movie.event));
+                }
+                opened
+            }
+            Err(e) => {
+                log(self.inner(), format!("ERROR building the movie panel: {e}"));
+                false
+            }
+        }
+    }
+
     /// Re-sends the current selection (after the model changed).
     pub fn campaign_refresh_selection(&self) {
         let sel = self.campaign_selection();
@@ -1406,22 +1605,6 @@ impl CampaignUi {
                     .collect()
             })
             .get(religion)
-            .cloned()
-    }
-
-    /// A culture's fallback culture: the `cultures` row's third column (egy_european → european,
-    /// middle_east → indian, indian → middle_east; empty for european), layout string, int,
-    /// optional string (DB_BUILDERS.md `cultures_tables`). Read once. INFERRED use: the portrait
-    /// folder when the culture's own folder lacks the picture (`MinisterPortraitPath`).
-    fn culture_fallback(&self, inner: &Inner, culture: &str) -> Option<String> {
-        self.portrait_folders
-            .get_or_init(|| {
-                small_table(inner, &tables::CULTURES)
-                    .iter()
-                    .filter_map(|r| Some((r.first()?.as_str()?.to_owned(), r.get(2)?.as_str()?.to_owned())))
-                    .collect()
-            })
-            .get(culture)
             .cloned()
     }
 

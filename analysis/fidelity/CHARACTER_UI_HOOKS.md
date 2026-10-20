@@ -400,7 +400,7 @@ PromotionCost display (CONFIRMED mechanism, value split):
   it is the `units` record: column #7 `unknown_3c` (file `@0x3C`, i.e. record `+0x38` under the -4
   shift 0-B documents for the recruitment time), which is a plausible money cost per unit (350 for
   `Gen_Generals_Staff`, 470 for `Gen_Generals_Bodyguard`, 1060 for `Gen_Napoleon`-grade generals,
-  1020 for a 2-deck ship). To close it: decompile `0x008F3490` (the table `0x008E27D0` reads) and the
+  1020 for a 2-deck ship). To close it (`0x008F3490` is decoded: the faction's subculture record, whose +0x10 culture key is the hash key's second half, CHARACTERS_FIDELITY.md 0-G round 3): trace the
   reader/constructor of the record, and match the `+0x38` field against a named column.
 - **The vanilla save fixtures cannot settle it** (checked, 0-G 2026-10-05): the charge is read from
   the DB tables through the unit class at run time, and no save field carries it (nothing in
@@ -587,7 +587,7 @@ Reads (all CONFIRMED unless tagged; full model §10):
 
 - `Shroud { explored, visible, hidden, active }`
   (`crates/ntw_sim/src/campaign/visibility.rs:137-147`; exe
-  `CAMPAIGN_SHROUD` v1, loader `0x00AFBFC0`, faction `+0x6F8`).
+  `CAMPAIGN_SHROUD` v1, reader `0x00AE89A0`, writer `0x00AFBFC0`, faction `+0x6F8`).
 - Per-character radius `sight_radius(c)` (`visibility.rs:154`;
   `CHARACTER` #17, loader `0x00991520`); re-sum `update_sight_radius`
   (`visibility.rs:168`, `0x009CDF10` → `0x009CBC80`,
@@ -631,7 +631,10 @@ on a new campaign, INFERRED):
   2, `_OWNED` 3. So they are script-defined, not engine constants, and our HUD gets them for free
   with `utilities.luac` loaded. They were also the values the `unit_entry` comment already claimed.
 - `game_interface:show_shroud(on)` (26 call sites in the shipped campaign scripts) and
-  `:unveil_black_shroud(on)` (15), one boolean each -- the only fog controls the scripts have.
+  `:unveil_black_shroud(name)` (the tutorial's `shroud_map_1_1` .. `1_9`, once each) -- the only fog
+  controls the vanilla campaign scripts have. A data.pack UI feature-list script (`m_features`) also
+  calls `disable_shopping_for_ai_under_shroud` and `unveil_black_shroud` (`2_1` .. `2_3` too);
+  whether Napoleon runs it is UNKNOWN.
 
 **Wired** in `ntw_script`:
 - `SpyingDataLevelCharacter` / `SpyingDataLevelUnit` answer from the model's own knowledge
@@ -654,9 +657,94 @@ on a new campaign, INFERRED):
   `spying_level_unit` answers `PASSIVE` for a unit whose force has no commander, even when the
   force is the player's own; it should answer `OWNED` when `owner.faction == human` before
   looking at the commander.
-- `game_interface:show_shroud(on)` sets the local faction's `Shroud::active`;
-  `:unveil_black_shroud(true)` marks every cell of the sight grid explored (INFERRED meaning; it
-  takes no faction, and only the human keeps a shroud).
+- Shroud switches, CONFIRMED from the exe (2026-10-19, polish61):
+  - The readers: `0x01055840` (Ghidra `LUA_PopBooleanArg`) reads the **stack top**, not argument 1:
+    a boolean there is stored in the caller's slot and popped; anything else logs "Trying to
+    retrieve type %s, found type %s" through `0x01095090` (`LUA_LogArgTypeMismatch`; its
+    format goes to the log `0x0106BD10`) and clears the ok flag (+4) of the calling script
+    context (`0x01058750`; sticky, the ORIGINAL BUG "the ok flag is sticky" in UI_FIDELITY.md, so
+    later reads of that script are skipped), leaving the slot as it was. `0x01055760` (`LUA_PopStringArg`) is the same for a string (`lua_isstring`, so a
+    number is accepted as its text). Ours: `top_bool` / `top_str` in `game.rs` read the last
+    argument, log each (expected, found) pair once (`type_errors_logged`), and give `None`.
+  - `show_shroud` `0x00979260` (`SCRIPT_ShowShroud`; there was no function there, method table
+    `0x0145814C`): reads the bool into a slot it never cleared (the lua_State argument), then for
+    every faction of the campaign list (+0xF5C: count +0x2C, array +0x30) with a shroud (+0x6F8)
+    calls `0x00B68500` (`SHROUD_SetEnabledAndRefresh`): the byte goes to shroud +0x50 and the map
+    display is refreshed. So every faction's shroud switches, not only the local one. ORIGINAL BUG:
+    a call without a boolean (or any call after an earlier type error of that script) stores the
+    pointer's low byte; ours stores false (as `disable_saving_game` `0x0097B840`, which clears its
+    slot). Ours: `CampaignModel::show_shroud`.
+  - `disable_shopping_for_ai_under_shroud` `0x00979910` (`SCRIPT_DisableAiShoppingUnderShroud`):
+    the same uncleared slot, passed to the CAI interface (campaign +0xF7C) `0x00AA9B40`
+    (`CaiInterface::SetAiShoppingShroud`). Same ORIGINAL BUG and fix.
+  - `unveil_black_shroud` `0x00977A90` (`SCRIPT_UnveilBlackShroud`) takes a **string**, an outline
+    name, not a bool. It calls `0x008F7760` (`UnveilBlackShroudForAllFactions`) without checking
+    the read (so a non-string unveils "", which matches nothing): for every faction with a
+    shroud, `0x00B65BC0`
+    (`SHROUD_UnveilNamedBlackShroud`) looks the name up in the map's `black_shroud_outlines`
+    (map data `**(campaign+0xF58)` +0xC0 count / +0xC4 array, stride 0x1C, name +0, points +0xC;
+    loaded by `0x00A47220` from regions.esf), exact case-sensitive match, and calls `0x00B65C50`
+    (`SHROUD_LiftBlackShroudOutline`) on it, then re-applies the faction's path-grid view and posts
+    +0xD08.
+  - `0x00B65C50`: outlines of fewer than 3 points are skipped. The points' box is widened by 2 at
+    the low x and z and by 4 at the high x (constants `0x01325D14` 2.0, `0x01325D20` 4.0; the high
+    z is not widened) and floored to grid cells (`0x00B42670`). Inside the box: explored cells still
+    under the black shroud are forgotten (`0x00E29E60`: explored &= ~hidden), then each cell whose
+    low corner is inside the outline (`0x010E7320`) or nearer it than cell × 0.707 + 0.5
+    (`0x0137E910`, `0x01318038`; distance `0x00B287A0`) leaves the black shroud (`0x00E2A180`:
+    hidden &= ~mask). Ours: `CampaignModel::unveil_black_shroud` (visibility.rs), outlines in
+    `World::black_shroud_outlines` from `RegionMap` (campaign_map.rs). Only the tutorial map has
+    outlines (`shroud_map_1_1` .. `1_9`, real-file test `black_shroud_outlines_are_the_tutorials`).
+    The old meaning (every cell explored) is gone.
+  - ORIGINAL BUG (`0x00B42670`, CONFIRMED from the disassembly): the box corners are floored signed
+    but each cell index is turned back into an edge unsigned (CVTDQ2PD, then +2^32 from the table at
+    `0x01318130` when negative). A box reaching below cell 0 gets a low edge ~2^32 cells away, so the
+    outline lifts nothing while the forget step still clears explored cells. The high edge uses the
+    same formula and is right, so the intent is the box's own edge. Ours converts signed (fixed, no
+    toggle; test `unveil_black_shroud_lifts_a_box_reaching_below_cell_0`). Vanilla never reaches it:
+    the tutorial outlines' lowest x is about -253 and z about -112.7, far inside the grid; a mod
+    outline at the map's low edge would.
+  - The path-grid refresh after the lift (`0x00B67490`, `ReapplyPathGridFactionView`, the same one
+    diplomacy changes run) rebuilds the obstacle layers for the view the grid last stored; that
+    rebuild reads the view faction's shroud (an obstacle not seen or under the black shroud takes
+    mode 5: `0x00B3F4F0` → `0x00B6A920` → `0x00B7A150`). Ours decides per search
+    (`obstacles_seen_by` → `seen_commanders` → `sees`), so nothing needs refreshing.
+  - Shroud object (CONFIRMED, Ghidra struct `CampaignShroud`, 0x54 bytes, allocated in `0x008DD090`
+    at faction +0x6F8, ctor `0x00AE8910`): +0 campaign link (`*(faction+0xA8)`), +4 explored, +0x1C
+    visible, +0x34 hidden (three 0x18-byte quad-tree bit arrays, `0x00DF3190`(cols, rows, fill)),
+    +0x4C owner faction, +0x50 active (set 1). The ctor fills hidden with 1 when the map has
+    `black_shroud_outlines` (+0xC0 count != 0), so a new tutorial campaign starts all black.
+  - When a shroud is made (CONFIRMED, traced 2026-10-20): `0x00AE8910` has two callers. The new
+    faction ctor `0x0087BD70` (factions built from the setup records, registry `0x0090C4A0` ←
+    `0x008742C0` ← `0x00988B00`) makes one only for a human (+0x6E0, the player slot's +0xA8). The
+    campaign start `0x008DD090` runs per faction from `0x0095A810` (every faction, then humans first,
+    then once more) ← `0x00915E20`, called only by the model ctor `0x00872550` at 0x00874009 when a
+    campaign setup is passed. Per faction: not human (+0x6E0 = 0) and not (setup +0x20 and faction
+    +0x6E1) → the shroud is deleted; otherwise one is made if +0x6F8 is null, then
+    `0x00B66EF0(1)` rebuilds visible and (flag 1) moves it into explored, so explored = what is seen.
+    A save never runs this: the faction loader `0x0087A190` (0x0087B0C2..0x0087B0FC) reads a
+    has-shroud bool and, if set, builds the shroud with `0x00AE89A0` (three 1×1 empty trees, then the
+    three `QUAD_TREE_BIT_ARRAY`s and the active bool from the file), so the saved sets are kept. The
+    `FACTION` writer `0x00892A80` writes the bool and then `CAMPAIGN_SHROUD` through `0x00AFBFC0`:
+    it is the writer (older notes called it the loader); the reader is `0x00AE89A0`.
+    The rebels (no record, `IsFactionWithoutRecord` `0x008CEEF0`) skip the whole setup, so they keep
+    the start position's shroud. `0x00B66EF0(1)` runs on every human's shroud, new or kept: it clears the
+    visible tree (`0x00E143F0` on +0x1C), ORs the sources back in box by box (`0x00B617E0`, clear 0, for each map-data box `**(campaign+0xF58)` +0x6C, stride 0xBC), and with
+    the flag copies the visible header +0x1C..+0x24 over +4..+0xC and its tree (`0x00E02070`, +0x28
+    over +0x10), so explored = visible = what is seen, replacing the start position's sets (hidden
+    kept). It does nothing when faction +0x814 (`0x008CA0B0`) is set and +0x81C clear (not in our
+    model: PROVISIONAL, always rebuilt).
+    Ours: `CampaignModel::start_shrouds` (visibility.rs), called by `LoadedCampaign::set_human` on a
+    campaign that has not started (our model is built before the human is known; the exe does it in
+    the model ctor, before any script event, so ours runs before `NewCampaignStarted` too). It drops
+    every non-rebel non-human shroud, gives a human without one a new shroud sized to the sight grid
+    (hidden full when `World::black_shroud_outlines` is not empty), then sets every human's explored
+    and visible to `compute_visible`. Tests: `black_shroud_tests.rs` (outlines → all hidden; none →
+    empty; a kept shroud rebuilt; rebels kept; no grid) and `own_save_install.rs`
+    `the_install_new_campaign_shroud_starts_black_on_the_tutorial_map`. UNKNOWN, not ported: the
+    keep exception for a non-human (setup +0x20 and faction +0x6E1).
+    Ghidra: `BlackShroudOutline` (0x10: point count +8, points +0xC), `QuadTreeBitArray`;
+    `CampaignShroud::SHROUD_LiftBlackShroudOutline` typed, completeness 61.4 → 82.7.
 
 **Still open:** drawing the fog on the map (the dimmed terrain over the unexplored cells) is in
 `crates/napoleon` (`campaign/scene.rs`), which this sandbox cannot build; the model side is ready

@@ -953,10 +953,16 @@ fn deal_inflation_and_economy_history_round_trip() {
         let source = EsfFile::open(&p).expect("esf");
         let m = ntw_campaign::read_esf(&source, &db).expect("loads").model;
         assert_eq!((m.deal_inflation.first, m.deal_inflation.factor), (first, 1.0), "{name}");
-        // France's last record: the turn-1 figures of the original (UI_FIDELITY.md 4.7 "wealth value").
+        // France's last record: the turn-1 figures of the original (UI_FIDELITY.md 4.7 "wealth value"). The
+        // save holds other income 3000: spa_napoleon's 500 plus the script's 2500 boost for a human France
+        // (scripting.lua OnFactionTurnStart, turn 1). The entry is not saved: the load books 500, and the
+        // script's OnModelCreated adds the saved boost again through other_income_mod.
         if name == "orig_fr_t1" {
             let fr = m.world.factions.values().find(|f| f.key == "spa_france").expect("spa_france").id;
-            assert_eq!(m.world.last_income(fr), 12030 + 1856 + 3000, "{name}: France's last income");
+            assert_eq!(m.world.last_income(fr), 12030 + 1856 + 500, "{name}: France's last income as the load books it");
+            let mut boosted = m.clone();
+            economy::script_other_income_mod(&mut boosted, fr, 2500.0);
+            assert_eq!(boosted.world.last_income(fr), 12030 + 1856 + 3000, "{name}: France's last income with the script's boost");
         }
         let histories = m.world.economy_history.len();
         assert!(histories > 0, "{name}: no economics history loaded");
@@ -965,10 +971,18 @@ fn deal_inflation_and_economy_history_round_trip() {
         changed.deal_inflation = ntw_sim::campaign::deal_value::DealInflation { first: 7, factor: 2.5 };
         // A changed history must come back (a writer that left the source's records would fail).
         let (&f, h) = changed.world.economy_history.iter_mut().find(|(_, h)| !h.is_empty()).expect("a faction with a history");
-        h.last_mut().expect("a record")[19] = 123_456;
+        h.last_mut().expect("a record")[5] = 123_456;
         h.push([7; 25]);
         assert_ne!(changed.world.economy_history[&f], m.world.economy_history[&f]);
-        let out = ntw_campaign::save::write_save(&source, &changed, "france", 1).expect("write");
+        // The load books the tracked categories of the running record again (0x00B95B90 zero-fills
+        // them, the trackers rebook): rebuild ours the same way before comparing.
+        let factions: Vec<_> = changed.world.economy_history.keys().copied().collect();
+        for g in factions {
+            ntw_sim::campaign::economy::rebuild_running_record(&mut changed, g);
+        }
+        let booked = |model: &ntw_sim::campaign::CampaignModel| model.world.last_economy_record(f).map(|r| r[19]);
+        assert_eq!(booked(&changed), booked(&m), "{name}: the upkeep tracker books category 19 again");
+        let out = ntw_campaign::save::write_save(&source, &changed, "france", 1, None).expect("write");
         let again = ntw_campaign::read_esf(&out, &db).expect("reloads").model;
         assert_eq!(again.deal_inflation, changed.deal_inflation, "{name}");
         assert_eq!(again.world.economy_history, changed.world.economy_history, "{name}");
@@ -994,11 +1008,11 @@ fn campaign_over_loads_and_round_trips_through_the_esf_save() {
     assert!(!m.turn.campaign_over);
     let mut over = m.clone();
     over.end_campaign();
-    let out = ntw_campaign::save::write_save(&source, &over, "france", 1).expect("write");
+    let out = ntw_campaign::save::write_save(&source, &over, "france", 1, None).expect("write");
     let mut again = ntw_campaign::read_esf(&out, &db).expect("reloads").model;
     assert!(again.turn.campaign_over);
     assert!(again.end_turn().is_empty(), "no turn step runs once the campaign is over");
-    let out = ntw_campaign::save::write_save(&source, &m, "france", 1).expect("write");
+    let out = ntw_campaign::save::write_save(&source, &m, "france", 1, None).expect("write");
     assert!(!ntw_campaign::read_esf(&out, &db).expect("reloads").model.turn.campaign_over);
 }
 
@@ -1126,7 +1140,7 @@ fn director_state_in_an_original_save() {
     changed.director.transfer_counter = 9;
     let (region, owner) = m.world.regions.values().map(|r| (r.id, r.owner)).next().expect("a region");
     changed.director.pending.push(ntw_sim::campaign::director::PendingTransfer { receiver: owner, region, queued_owner: owner });
-    let out = ntw_campaign::save::write_save(&source, &changed, "france", 1).expect("write");
+    let out = ntw_campaign::save::write_save(&source, &changed, "france", 1, None).expect("write");
     let again = ntw_campaign::read_esf(&out, &db).expect("reloads").model;
     assert_eq!(again.director, changed.director);
 }
@@ -1281,4 +1295,119 @@ fn mobiles_are_situated_in_the_region_under_them() {
     assert!(sea > 0 && land > 0);
     assert!(mismatched.is_empty(), "{mismatched:?}");
     assert_eq!(grid_ok, sea + land);
+}
+
+/// The last record of a save's economics history is the running one, whose trade (category 7) the
+/// exe keeps current (`0x00BBD7C0(2)` from the price update `0x00BC7080` at each round start,
+/// CONFIRMED; CAMPAIGN_FIDELITY.md "FACTION_ECONOMICS"): it equals our trade income for every faction
+/// but the rebels in every vanilla save, which also confirms the saver writes it last (`0x00BD46E0`).
+#[test]
+fn the_running_record_holds_the_current_trade() {
+    let dir = data_dir();
+    let ev = common::evidence_dir();
+    if !dir.is_dir() || !ev.is_dir() {
+        println!("SKIP: no install at {} or no evidence saves at {}", dir.display(), ev.display());
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).expect("database");
+    let mut checked = 0;
+    for name in ["auto_nr4_t4", "orig_fr_t1", "orig_fr_may1811", "auto_orig_spa_0245"] {
+        let path = ev.join(format!("{name}.save"));
+        if !path.is_file() {
+            continue;
+        }
+        let m = ntw_campaign::read_file(&path, &db).expect("save loads").model;
+        for (&faction, history) in &m.world.economy_history {
+            let Some(running) = history.last() else { continue };
+            if m.world.is_rebel_faction(faction) {
+                continue;
+            }
+            assert_eq!(running[7], economy::trade_routes_value(&m, faction), "{name}: faction {faction:?}");
+            checked += 1;
+        }
+    }
+    println!("checked {checked} running records");
+    if checked == 0 {
+        println!("SKIP: none of the evidence saves found in {}", ev.display());
+    }
+}
+
+/// The expense trackers (CAMPAIGN_FIDELITY.md "Expense trackers and the record's payment"): the load
+/// zero-fills the running record's tracked categories and the trackers book them again (`0x00B95B90`,
+/// then `0x0088F950` / `0x0088F990` and `0x00A51230`), so the rebuilt record must hold what the original
+/// saved: 19 / 20 the faction's upkeep trackers, 21 the sum of its regions' policing trackers
+/// (`orig_fr_may1811` France: 12019 / 563 / 2177). And each region's policing cost (`REGION_FACTORS` #9)
+/// recomputes from the save ([`ntw_sim::campaign::population::policing_cost`], `0x00AA9C10`).
+#[test]
+fn the_expense_trackers_rebuild_the_saved_running_record() {
+    use ntw_sim::campaign::population;
+    let dir = data_dir();
+    let ev = common::evidence_dir();
+    if !dir.is_dir() || !ev.is_dir() {
+        println!("SKIP: no install at {} or no evidence saves at {}", dir.display(), ev.display());
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).expect("database");
+    let (mut factions, mut regions, mut paying, mut checked_france) = (0, 0, 0, false);
+    for name in ["orig_fr_may1811", "orig_fr_t1", "auto_nr4_t4", "auto_after_c8", "auto_orig_spa_0245", "orig_over_nr4_0252"] {
+        let path = ev.join(format!("{name}.save"));
+        if !path.is_file() {
+            continue;
+        }
+        let m = ntw_campaign::read_file(&path, &db).expect("save loads").model;
+        let esf = EsfFile::open(&path).expect("save");
+        let arr = esf.root.find_record_array("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD/FACTION_ARRAY").expect("factions");
+        for item in &arr.items {
+            let Some(f) = item.first().and_then(EsfNode::as_record) else { continue };
+            let key = f.values().find_map(EsfNode::as_str).unwrap_or_default();
+            let Some(fac) = m.world.factions.values().find(|x| x.key == key) else { continue };
+            let Some(saved) = f
+                .child("FACTION_ECONOMICS")
+                .and_then(|e| e.get(0))
+                .and_then(EsfNode::as_record_array)
+                .and_then(|h| h.items.last())
+                .and_then(|it| it.first())
+                .and_then(EsfNode::as_record)
+            else {
+                continue;
+            };
+            // Groups of 5 / 3 / 4 / 1 / 5 / 7: 18..21 are #5[0..4], 9 #2[1], 11 #2[3].
+            let category = |group: usize, i: usize| saved.get(group).and_then(EsfNode::as_i32_array).and_then(|a| a.get(i).copied()).unwrap_or(0);
+            let running = m.world.last_economy_record(fac.id).expect("running record");
+            assert_eq!((running[19], running[20], running[21]), (category(5, 1), category(5, 2), category(5, 3)), "{name} {key}: expenses 19..21");
+            assert_eq!(running[18], category(5, 0), "{name} {key}: expense 18");
+            // 11 is the other income booked at load (`0x00BBC710`); in spa_napoleon the script adds its saved
+            // boosts again from `OnModelCreated` (`other_income_mod`), which needs the script host this test
+            // leaves out (`ScriptHost::open_campaign` fires it after a load too).
+            if !key.starts_with("spa_") {
+                assert_eq!(running[11], category(2, 3), "{name} {key}: other income");
+            }
+            assert_eq!(running[9], category(2, 1), "{name} {key}: raid income");
+            if (name, key) == ("orig_fr_may1811", "spa_france") {
+                checked_france = true;
+                assert_eq!((running[19], running[20], running[21]), (12019, 563, 2177));
+            }
+            // The trackers hold the upkeep of the last round start (`0x008F1F60` → `0x008B2150`), unchanged since
+            // in these saves. Known miss: the Netherlands' naval upkeep is 53 more than its tracker (BACKLOG).
+            let fx = ntw_sim::campaign::effects::Effects::compute_for(&m, fac.id);
+            let (land, naval) = economy::faction_upkeep_split_with(&m, &fx, fac.id);
+            assert_eq!(land, running[19], "{name} {key}: land upkeep");
+            if key != "netherlands" {
+                assert_eq!(naval, running[20], "{name} {key}: naval upkeep");
+            }
+            paying += usize::from(running[21] != 0);
+            factions += 1;
+        }
+        for r in m.world.regions.values() {
+            let set = economy::region_effect_set(&m, r);
+            assert_eq!(population::policing_cost(&m, r, &set, r.population), r.population_state.policing_cost, "{name} {}: policing cost", r.key);
+            regions += 1;
+        }
+    }
+    println!("expense trackers: {factions} factions ({paying} paying policing), {regions} regions");
+    if factions == 0 {
+        println!("SKIP: none of the evidence saves found in {}", ev.display());
+    } else if ev.join("orig_fr_may1811.save").is_file() {
+        assert!(checked_france && paying >= 1, "France in orig_fr_may1811 not checked");
+    }
 }

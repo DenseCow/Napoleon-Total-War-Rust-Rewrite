@@ -16,6 +16,17 @@ use crate::{bit, conditions};
 /// Our own prelude: stand-ins for the engine's UI and logging tables (UNKNOWN behaviour).
 const PRELUDE: &str = include_str!("prelude.lua");
 
+/// Which file a campaign opens from: `0x00987070`'s new-campaign argument (its stack slot
+/// `[ESP+0x3cc]`), which picks `startpos.esf` over the save (`0x00987634`) and gates
+/// `NewCampaignStarted` (`0x00988A1F`, CONFIRMED).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CampaignOpening {
+    /// A new campaign from its start position.
+    NewCampaign,
+    /// A loaded save.
+    LoadedSave,
+}
+
 /// What went wrong while loading or running scripts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScriptError {
@@ -64,14 +75,15 @@ pub type AiTurnHook = Box<dyn FnMut(&mut ScriptState, FactionId) -> Vec<Campaign
 
 /// Typical use:
 /// ```no_run
-/// # use ntw_script::{ScriptHost, ScriptSource, ScriptContext};
-/// # fn demo(model: ntw_sim::campaign::CampaignModel) -> Result<(), ntw_script::ScriptError> {
+/// # use ntw_script::{CampaignOpening, ScriptHost, ScriptSource, ScriptContext};
+/// # fn demo(loaded: ntw_campaign::LoadedCampaign) -> Result<(), ntw_script::ScriptError> {
 /// let source = ScriptSource::from_install(r"C:\...\Napoleon Total War\data")
 ///     .map_err(|e| ntw_script::ScriptError::Pack(e.to_string()))?;
-/// let mut host = ScriptHost::new(model, "france", source)?;
+/// let mut host = ScriptHost::new(loaded.model, "france", source)?;
 /// host.load_campaign("eur_napoleon")?;
-/// host.fire("NewSession", ScriptContext::default());
-/// host.fire("NewCampaignStarted", ScriptContext::default());
+/// // A new campaign: LoadingGame reads the start position's stored values.
+/// host.open_campaign(ScriptContext::for_faction("france"), CampaignOpening::NewCampaign, &loaded.script_values);
+/// host.start_campaign();
 /// # Ok(()) }
 /// ```
 pub struct ScriptHost {
@@ -357,6 +369,7 @@ impl ScriptHost {
             CampaignEvent::GovernmentChanged { .. }
             | CampaignEvent::ConstructionItemDropped { .. }
             | CampaignEvent::FactionDestroyed { .. }
+            | CampaignEvent::OutcomeMovie { .. }
             | CampaignEvent::Message { .. } => {}
         }
         c
@@ -382,14 +395,55 @@ impl ScriptHost {
         save_values_in(&self.lua, &self.state)
     }
 
-    /// Queues `values` for `load_value` and fires `LoadingGame`. Marks the game as not new.
-    pub fn load_values(&mut self, values: Vec<ScriptValue>) -> FireReport {
-        {
-            let mut st = self.state.borrow_mut();
-            st.values_to_load = values.into();
-            st.is_new_game = false;
+    /// Fires the script events of a campaign's opening, in the exe's order, and returns each with its
+    /// report. `lua_values` are the opened file's `EPISODIC_RESTRICTIONS/LUA[]` items: the start
+    /// position's for a new campaign, the save's for a load.
+    ///
+    /// The campaign model's constructor (`0x00872550`, run by `0x00987070` for a new campaign from its
+    /// start position and for a loaded save alike, CONFIRMED) posts `NewSession` first (`0x009968A0` at
+    /// `0x00996B06`), then `LoadingGame` whenever the opened file's EPISODIC_RESTRICTIONS holds a `LUA`
+    /// block (`0x0099878E`, with no test of the new-campaign flag): every shipped start position carries
+    /// one (some empty) and the save writer `0x009A1070` opens it on every path (`0x009A200C`), so both
+    /// paths fire it, a new campaign reading its start position's items (CONFIRMED,
+    /// CAMPAIGN_DATA.md §4.1). Our openings always fire it; a campaign without stored items (our open
+    /// map format, an empty block) gives the handlers their defaults. It then builds the factions (each
+    /// running record rebuilt by `0x00B95B90`, which our load did already: `ntw_campaign::read_esf` /
+    /// `own_save`) and posts `ModelCreated` last (`0x0087426F`). `0x00987070` then posts
+    /// `NewCampaignStarted` only for a new campaign (`0x00988A3F`; the load passes no start,
+    /// `0x008B8AE3`) and `WorldCreated` for both (`0x00988A72`). So a `ModelCreated` handler books into
+    /// the rebuilt record (spa_napoleon's `other_income_mod` boosts). Turn 1 of a new campaign
+    /// ([`start_campaign`](Self::start_campaign)) and `UICreated` come later.
+    ///
+    /// `is_new_game` is the opening's new-campaign flag (`0x009968A0` keeps it at +4 of the object the
+    /// campaign holds at +0xFA8, which the getter at `0x009798E0` returns), not whether `LoadingGame` ran.
+    pub fn open_campaign(
+        &mut self,
+        ctx: ScriptContext,
+        opening: CampaignOpening,
+        lua_values: &[ntw_campaign::script_values::ScriptSaveValue],
+    ) -> Vec<(&'static str, FireReport)> {
+        let is_new = opening == CampaignOpening::NewCampaign;
+        self.state.borrow_mut().is_new_game = is_new;
+        let mut out = vec![("NewSession", self.fire("NewSession", ctx.clone()))];
+        out.push(("LoadingGame", self.load_values(lua_values.iter().map(|&v| v.into()).collect())));
+        out.push(("ModelCreated", self.fire("ModelCreated", ctx.clone())));
+        if is_new {
+            out.push(("NewCampaignStarted", self.fire("NewCampaignStarted", ctx.clone())));
         }
-        self.fire("LoadingGame", ScriptContext::default())
+        out.push(("WorldCreated", self.fire("WorldCreated", ctx)));
+        out
+    }
+
+    /// Queues `values` for `load_value` and fires `LoadingGame`. Values its handlers leave unread are
+    /// dropped after it: `load_value` reads only through the `LoadingGame` event's reader (slot +0x98 of
+    /// its vtable `0x01370D08` is `0x0044A500`); the other opening events' slot (NewSession `0x01370E80`,
+    /// WorldCreated `0x01371020`, NewCampaignStarted `0x013710DC`) is `0x00461180`, which returns none,
+    /// so there it gives the default (CONFIRMED).
+    pub fn load_values(&mut self, values: Vec<ScriptValue>) -> FireReport {
+        self.state.borrow_mut().values_to_load = values.into();
+        let report = self.fire("LoadingGame", ScriptContext::default());
+        self.state.borrow_mut().values_to_load.clear();
+        report
     }
 
     /// Read access to the script state (model, log, missions, ...). Do not hold it across a call

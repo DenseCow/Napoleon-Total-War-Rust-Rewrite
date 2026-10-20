@@ -239,8 +239,8 @@ fn schools_research_technologies_and_unlock_the_next() {
     let mut rules = (*m.rules).clone();
     // The test building is a school: research_points 10.
     rules.effects.insert_building_local("test_building_level".into(), mapped(&rules, vec![("research_points", 10.0)]));
-    rules.technologies.insert("admin1_a".into(), TechRules { cost: 25, building_level: "test_building_level".into(), requires: vec![] });
-    rules.technologies.insert("admin2_b".into(), TechRules { cost: 30, building_level: "test_building_level".into(), requires: vec!["admin1_a".into()] });
+    rules.technologies.insert("admin1_a".into(), TechRules { cost: 25, building_level: "test_building_level".into(), requires: vec![], factions: vec![] });
+    rules.technologies.insert("admin2_b".into(), TechRules { cost: 30, building_level: "test_building_level".into(), requires: vec!["admin1_a".into()], factions: vec![] });
     m.rules = Arc::new(rules);
     m.world.faction_details.entry(A).or_default().technologies = vec![("admin1_a".into(), state::AVAILABLE), ("admin2_b".into(), state::UNAVAILABLE)];
     let school_pos = pos(10, 2);
@@ -272,4 +272,43 @@ fn schools_research_technologies_and_unlock_the_next() {
     assert!(m.researching_at(RegionId(10), 0).is_none());
     // A finished technology cannot be researched again.
     assert_eq!(m.start_research(RegionId(10), 0, "admin1_a"), Err(ResearchError::NotAvailable));
+}
+
+/// A building level's technology list (`0x008C7620`): the faction tree's technologies of that exact
+/// level whose faction list passes (`0x00F1EFA0`), in tree order; the building info drops it while the
+/// script's technology switch is set (`0x009B73AF`), the effects table also for no owner, the caller's
+/// snapshot or an `episodic` campaign (`0x009B2BB0`).
+#[test]
+fn building_level_technologies_follow_the_tree_the_faction_list_and_the_switches() {
+    use super::rules::TechRules;
+    let mut m = test_model();
+    let key_a = m.world.factions[&A].key.clone();
+    let mut rules = (*m.rules).clone();
+    let tech = |level: &str, factions: Vec<String>| TechRules { cost: 10, building_level: level.into(), requires: vec![], factions };
+    rules.technologies.insert("t_mine".into(), tech("test_building_level", vec![key_a.clone(), "other".into()]));
+    rules.technologies.insert("t_all".into(), tech("test_building_level", vec![]));
+    rules.technologies.insert("t_theirs".into(), tech("test_building_level", vec!["other".into()]));
+    rules.technologies.insert("t_upgrade".into(), tech("test_building_level_2", vec![]));
+    m.rules = Arc::new(rules);
+    // The tree order wins over the table's (its key order); any state counts.
+    m.world.faction_details.entry(A).or_default().technologies =
+        vec![("t_upgrade".into(), 0), ("t_mine".into(), 4), ("t_theirs".into(), 0), ("t_all".into(), 0), ("t_unknown".into(), 0)];
+    let level = "test_building_level";
+    assert_eq!(m.building_level_technologies(A, level), ["t_mine", "t_all"]);
+    assert_eq!(m.building_level_technologies(A, "test_building_level_2"), ["t_upgrade"], "exact level only");
+    assert!(m.building_level_technologies(B, level).is_empty(), "no tree, no list");
+    assert_eq!(m.building_info_technologies(A, level), ["t_mine", "t_all"]);
+    assert_eq!(m.effects_table_technologies(Some(A), level, false), ["t_mine", "t_all"]);
+    assert!(m.effects_table_technologies(None, level, false).is_empty());
+    assert!(m.effects_table_technologies(Some(A), level, true).is_empty(), "a message's snapshot of the switch");
+    // The script switch empties the building info, not the ungated list.
+    m.world.technology_research_disabled = true;
+    assert!(m.building_info_technologies(A, level).is_empty());
+    assert_eq!(m.building_level_technologies(A, level), ["t_mine", "t_all"]);
+    m.world.technology_research_disabled = false;
+    let mut rules = (*m.rules).clone();
+    rules.features.effects_technologies_hidden = true;
+    m.rules = Arc::new(rules);
+    assert!(m.effects_table_technologies(Some(A), level, false).is_empty());
+    assert_eq!(m.building_info_technologies(A, level), ["t_mine", "t_all"], "the episodic gate is the effects table's only");
 }

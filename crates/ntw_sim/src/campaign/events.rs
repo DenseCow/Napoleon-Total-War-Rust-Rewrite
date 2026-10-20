@@ -293,6 +293,15 @@ pub enum CampaignEvent {
         /// The faction.
         faction: FactionId,
     },
+    /// Project event: a faction's campaign outcome plays a movie ([`super::CampaignModel::outcome_movie`];
+    /// the exe's movie listener `0x0099B720` queues it on campaign +0x288 and the UI shows it in
+    /// `event_movie_panel`). Pushed after the [`Self::FactionDestroyed`] of a human faction.
+    OutcomeMovie {
+        /// The faction the movie is for.
+        faction: FactionId,
+        /// The movie and its panel data.
+        movie: super::outcome::OutcomeMovie,
+    },
     /// Project event: a force lost all its units and was removed.
     ForceDestroyed {
         /// The force.
@@ -374,8 +383,8 @@ pub enum CampaignEvent {
     /// Project event: a message for `recipient`'s message feed (the message manager, model +0xFA0,
     /// posts it with `0x009D3250`; the display shows the messages of the human it views). The exe's
     /// delivery gates belong to the display: none for the rebels (`0x008CEEF0`), none while the flag
-    /// at model +0xD9C → +0x6C is 1 (meaning UNKNOWN), and in a shared view (`0x008CA0B0`, faction
-    /// +0x814) only for a faction with +0x81C set (not modelled: single player).
+    /// at model +0xD9C → +0x6C is 1 (meaning UNKNOWN), and for a faction in a revolution (`0x008CA0B0`,
+    /// faction +0x814) only when its +0x81C is set (not modelled: no revolutions in the model yet).
     Message {
         /// The faction whose feed gets the message.
         recipient: FactionId,
@@ -400,13 +409,44 @@ pub enum CampaignMessage {
         /// The second faction of the title.
         second: FactionId,
     },
+    /// Type 47 `ceasefire_declared` (`SendCeasefireDeclaredMessage` `0x009D1F20`, CONFIRMED by disassembly
+    /// 2026-10-20): the title is the other side's name (faction +0x518), the detail empty. A peace
+    /// (`0x00B262C0`) posts one to each side about the other, the target's first, unless the peace
+    /// suppresses its messages ([`super::CampaignModel::make_peace_rules`]).
+    CeasefireDeclared {
+        /// The faction peace was made with (the title).
+        other: FactionId,
+    },
+    /// Type 0x112 `war_declared` (`0x009DAFE0`, CONFIRMED by disassembly 2026-10-20): the title is
+    /// "<declarer name>\n<target name>" (faction +0x518), the detail empty. A declaration between two
+    /// major powers (`0x00B268B0`) posts one to every listed faction that is neither side nor in its
+    /// call lists, with no human test ([`super::CampaignModel::declare_war_rules`]).
+    WarDeclared {
+        /// The faction that declared the war (the title's first name).
+        declarer: FactionId,
+        /// The faction war was declared on (the title's second name).
+        target: FactionId,
+    },
+    /// A historical event (`0x00A06DA0`, model +0xFA0; CONFIRMED by disassembly): not a type of the
+    /// message type table but a message of its own, posted by the round start's historical events
+    /// ([`super::historical_events`]) and by the script's `trigger_historical_event` (`0x0096D520`). It
+    /// shows the event's title (`events_onscreen_name_<key>`), text (`events_event_text_<key>`) and
+    /// picture `ui/eventpics/<recipient's culture>/<events #6>` (`0x00F840E0`).
+    HistoricalEvent {
+        /// The `events` key.
+        event: String,
+    },
 }
 
 impl CampaignMessage {
-    /// The message type's name (the exe's type table entry, the `message_events` key).
+    /// The message type's name (the exe's type table entry, the `message_events` key; for
+    /// [`CampaignMessage::HistoricalEvent`], outside the table, our own name).
     pub fn type_name(&self) -> &'static str {
         match self {
             CampaignMessage::AllianceBroken { .. } => "alliance_broken",
+            CampaignMessage::CeasefireDeclared { .. } => "ceasefire_declared",
+            CampaignMessage::WarDeclared { .. } => "war_declared",
+            CampaignMessage::HistoricalEvent { .. } => "historical_event",
         }
     }
 }
@@ -470,6 +510,7 @@ impl CampaignEvent {
             | CampaignEvent::CharacterMoved { .. }
             | CampaignEvent::ForceDestroyed { .. }
             | CampaignEvent::FactionDestroyed { .. }
+            | CampaignEvent::OutcomeMovie { .. }
             | CampaignEvent::GovernmentChanged { .. }
             | CampaignEvent::ConstructionItemDropped { .. }
             | CampaignEvent::Message { .. } => return None,

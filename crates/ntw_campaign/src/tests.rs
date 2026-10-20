@@ -697,6 +697,28 @@ fn a_repeated_negotiation_line_keeps_the_last_row() {
     assert_eq!(rules.negotiation_overrides[&(key.0, key.1, key.2, "france".to_owned())], "last");
 }
 
+/// The outcome movies' data reaches the rules: every faction's `factions` #39 (an absent one as the empty
+/// string the exe's record compares) and every `movie_event_strings` row in table order, a repeated
+/// event included (the lookups `0x00F54F80` / `0x00F55030` depend on the order).
+#[test]
+fn the_outcome_movie_rows_and_faction_ids_reach_the_rules() {
+    use ntw_data::campaign::MovieEventStringRecord;
+    use ntw_sim::campaign::outcome::MovieEventRow;
+    let mut db = db_with_a_barracks();
+    let mut factions: Vec<_> = db.factions.rows().to_vec();
+    factions[0].movie_id = Some("24".into());
+    let (named, blank) = (factions[0].key.clone(), factions.last().expect("the player").key.clone());
+    factions.last_mut().expect("the player").movie_id = None;
+    db.factions = Table::from_rows(0, factions);
+    let rec = |event: &str, culture: &str, movie: &str, id: &str| MovieEventStringRecord { event: event.into(), culture: culture.into(), movie: movie.into(), id: id.into() };
+    db.campaign.movie_event_strings = Table::from_rows(0, vec![rec("game_lost_france", "european", "EUR_Lose_FR.bik", "24"), rec("game_victory_republic", "european", "a.bik", ""), rec("game_victory_republic", "middle_east", "b.bik", "")]);
+    let rules = rules_from_db(&db, "test_campaign");
+    assert_eq!(rules.faction_movie_ids[&named], "24");
+    assert_eq!(rules.faction_movie_ids[&blank], "");
+    let row = |event: &str, culture: &str, movie: &str, id: &str| MovieEventRow { event: event.into(), culture: culture.into(), movie: movie.into(), id: id.into() };
+    assert_eq!(rules.movie_events, [row("game_lost_france", "european", "EUR_Lose_FR.bik", "24"), row("game_victory_republic", "european", "a.bik", ""), row("game_victory_republic", "middle_east", "b.bik", "")]);
+}
+
 /// All the way through a **loaded campaign**: `read` runs `rules_from_db`, and the recruitment command
 /// then charges the region's entry cost — `units` #7 with the region's building effects (the
 /// barracks' −10 `recruitment_mod_cost_land_all`, compiled through the junction) — keeps it on the
@@ -828,7 +850,7 @@ fn recruitment_items_keep_their_own_records_over_a_save_and_load() {
     });
     // #5 (+0x24): unit_c's commander is gone (its +0x18 was cleared too).
     m.world.regions.get_mut(&RegionId(77)).unwrap().recruitment_queue[2].target_lost = true;
-    let written = crate::save::write_save(&source, &m, "test_faction", 1).unwrap();
+    let written = crate::save::write_save(&source, &m, "test_faction", 1, None).unwrap();
     let back = read(&written.to_bytes().unwrap(), &db).unwrap();
     assert!(
         back.warnings.iter().all(|w| !matches!(
@@ -859,7 +881,7 @@ fn recruitment_items_keep_their_own_records_over_a_save_and_load() {
     assert_eq!(after.len(), 5);
     assert_ne!(after[4].2, Some(4), "the new unit_d recruit is built fresh, not a copy of unit_d's record");
     // Stable: saving the reloaded model again gives the same tree.
-    let again = crate::save::write_save(&written, &back.model, "test_faction", 1).unwrap();
+    let again = crate::save::write_save(&written, &back.model, "test_faction", 1, None).unwrap();
     assert_eq!(again.to_bytes().unwrap(), written.to_bytes().unwrap());
 }
 
@@ -895,7 +917,7 @@ fn a_repeated_region_record_is_not_read_and_not_saved() {
     assert!(m.world.forts.is_empty(), "the repeated record's fort is not read");
     // Region 77 changes hands, then the game saves.
     m.world.regions.get_mut(&RegionId(77)).unwrap().owner = FactionId(2000);
-    let written = crate::save::write_save(&source, &m, "test_a", 1).unwrap();
+    let written = crate::save::write_save(&source, &m, "test_a", 1, None).unwrap();
     let region_records = |f: &EsfFile| {
         let mut out = Vec::new();
         f.root.walk(&mut |r| {
@@ -982,5 +1004,43 @@ fn faction_capital_read_with_or_without_fort_upgrade_manager() {
         let (d, _) = details::faction_details(&faction(fum));
         assert_eq!(d.capital, Some(RegionId(12)), "FORT_UPGRADE_MANAGER present: {fum}");
         assert_eq!(d.capital_2, Some(RegionId(13)), "FORT_UPGRADE_MANAGER present: {fum}");
+    }
+}
+
+/// esfevents: the save writes the once-only historical events already triggered as the exe's writer
+/// `0x00895050` does (`HISTORICAL_EVENT_MANAGER` v1 holding only `TRIGGERED_DYNAMIC_EVENT_ARRAY` v0,
+/// one UTF-16 key per item, just before `HISTORICAL_CHARACTER_MANAGER`), replacing the source's block
+/// or placing a missing one there, and they load back; saving the reloaded model again is stable.
+#[test]
+fn the_triggered_historical_events_are_saved_and_load_back() {
+    let db = GameDatabase::test_fixture();
+    let manager_pair = |with_events: bool| {
+        let mut out = Vec::new();
+        if with_events {
+            out.push(rec("HISTORICAL_EVENT_MANAGER", 1, vec![arr("TRIGGERED_DYNAMIC_EVENT_ARRAY", vec![vec![s("stale")]])]));
+        }
+        out.push(rec("HISTORICAL_CHARACTER_MANAGER", 1, vec![arr("CREATED_CHARACTER_ARRAY", vec![])]));
+        out
+    };
+    fn model_rec(f: &mut EsfFile) -> &mut EsfRecord {
+        let EsfNode::Record(env) = f.root.children.iter_mut().find(|c| c.record_name() == Some("CAMPAIGN_ENV")).unwrap() else { unreachable!() };
+        let EsfNode::Record(m) = env.children.iter_mut().find(|c| c.record_name() == Some("CAMPAIGN_MODEL")).unwrap() else { unreachable!() };
+        m
+    }
+    for with_events in [true, false] {
+        let mut source = EsfFile::from_bytes(&tiny(STARTPOS_ROOT, tiny_world())).unwrap();
+        model_rec(&mut source).children.extend(manager_pair(with_events));
+        let mut m = read(&source.to_bytes().unwrap(), &db).unwrap().model;
+        m.world.historical_events_triggered = vec!["a_once".into(), "b_quiet".into()];
+        let mut written = crate::save::write_save(&source, &m, "test_a", 1, None).unwrap();
+        let children = &model_rec(&mut written).children;
+        let names: Vec<Option<&str>> = children.iter().rev().take(2).map(EsfNode::record_name).collect();
+        assert_eq!(names, [Some("HISTORICAL_CHARACTER_MANAGER"), Some("HISTORICAL_EVENT_MANAGER")], "the source had the block: {with_events}");
+        let expected = rec("HISTORICAL_EVENT_MANAGER", 1, vec![arr("TRIGGERED_DYNAMIC_EVENT_ARRAY", vec![vec![s("a_once")], vec![s("b_quiet")]])]);
+        assert_eq!(children[children.len() - 2], expected, "the source had the block: {with_events}");
+        let back = read(&written.to_bytes().unwrap(), &db).unwrap();
+        assert_eq!(back.model.world.historical_events_triggered, ["a_once", "b_quiet"]);
+        let again = crate::save::write_save(&written, &back.model, "test_a", 1, None).unwrap();
+        assert_eq!(again.to_bytes().unwrap(), written.to_bytes().unwrap());
     }
 }

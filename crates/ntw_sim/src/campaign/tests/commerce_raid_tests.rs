@@ -160,7 +160,7 @@ fn raids_end_on_peace_death_and_the_round_end_check() {
     assert!(!m.is_raiding(g));
     // Peace (0x00A25570) ends his raids on the other side.
     assert!(m.raid_trade_route(g, at(55.0, 50.0)));
-    m.make_peace_rules(A, B).unwrap();
+    m.make_peace_rules(A, B, false).unwrap();
     assert!(m.world.commerce_raids.is_empty());
     // The round-end check (0x008B3690): a segment no longer raidable ends all his raids.
     m.world.set_stance(A, B, Stance::War).unwrap();
@@ -170,7 +170,7 @@ fn raids_end_on_peace_death_and_the_round_end_check() {
     m.world.set_stance(A, B, Stance::Neutral).unwrap();
     m.validate_commerce_raids();
     assert!(!m.is_raiding(g));
-    // Death (0x0099D681): his raids end with him, but as the force's commander he hands them on first
+    // Death (0x0099D62E): his raids end with him, but as the force's commander he hands them on first
     // (the force's observer 0x008DB3E0): the colonel who takes over raids where he stood.
     m.world.set_stance(A, B, Stance::War).unwrap();
     assert!(m.raid_trade_route(g, at(55.0, 50.0)));
@@ -255,4 +255,159 @@ fn the_round_start_checks_the_raids() {
     m.turn.queue.push_back(TurnStep::RoundStart);
     m.step().expect("the round-start step");
     assert!(!m.is_raiding(g), "no longer raidable: the round start ends his raids");
+}
+
+/// [`raid_model`] with the pools' rules (the hire tests' `pool_model`): A's army 1002 under colonel 107
+/// and fleet 1003 under captain 108 (on its one ship), both standing on segment 0.
+fn raid_pool_model() -> CampaignModel {
+    let mut m = raid_model();
+    m.world.faction_details.entry(A).or_default().capital = Some(RegionId(10));
+    let rules = Arc::make_mut(&mut m.rules);
+    rules.general_units.insert(String::new(), "test_unit".into());
+    rules.agent_caps.insert("General".into(), (4, 0));
+    rules.agent_caps.insert("admiral".into(), (3, 0));
+    for (id, kind) in [(107, CharacterKind::Colonel), (108, CharacterKind::Captain)] {
+        let mut c = character(id, A, kind, 25);
+        c.position = at(55.0, 50.0);
+        m.world.characters.insert(c.id, c);
+    }
+    m.world.forces.insert(ForceId(1002), MilitaryForce { id: ForceId(1002), faction: A, commander: Some(CharacterId(107)), units: vec![unit(7)], is_navy: false });
+    let mut ship = unit(8);
+    ship.character = Some(CharacterId(108));
+    m.world.forces.insert(ForceId(1003), MilitaryForce { id: ForceId(1003), faction: A, commander: Some(CharacterId(108)), units: vec![ship], is_navy: true });
+    m
+}
+
+/// A candidate drawn into A's admiral (`admiral`) or General pool, with the campaign started for human A.
+fn candidate(m: &mut CampaignModel, admiral: bool) -> CharacterId {
+    let elapsed = m.calendar.turns_elapsed;
+    let d = m.world.faction_details.get_mut(&A).unwrap();
+    d.general_pool = (Vec::new(), if admiral { elapsed + 100 } else { elapsed });
+    d.admiral_pool = (Vec::new(), if admiral { elapsed } else { elapsed + 100 });
+    let c = m.pool_tick(A)[0];
+    m.turn.humans = vec![A];
+    m.start_campaign();
+    c
+}
+
+/// Every raid is `c`'s, on segment 0 against B.
+fn only_raider(m: &CampaignModel, c: CharacterId) -> bool {
+    !m.world.commerce_raids.is_empty() && m.world.commerce_raids.iter().all(|r| r.character == c && r.segment == 0 && r.target == B)
+}
+
+#[test]
+fn a_general_hired_into_a_raiding_army_takes_its_raids() {
+    let mut m = raid_pool_model();
+    let c = candidate(&mut m, false);
+    assert!(m.raid_trade_route(CharacterId(107), at(55.0, 50.0)));
+    m.apply(CampaignCommand::HireGeneral { character: c, into: Some(ForceId(1002)) }).unwrap();
+    // 0x00A164C0: the colonel's raids end (0x00A165D0) and the General raids where he stood (0x00A165E9).
+    assert_eq!(m.world.forces[&ForceId(1002)].commander, Some(c));
+    assert!(only_raider(&m, c));
+    assert!(!m.is_raiding(CharacterId(107)));
+    // A commander who was not raiding hands nothing on.
+    let mut m = raid_pool_model();
+    let c = candidate(&mut m, false);
+    m.apply(CampaignCommand::HireGeneral { character: c, into: Some(ForceId(1002)) }).unwrap();
+    assert!(m.world.commerce_raids.is_empty());
+}
+
+#[test]
+fn a_hired_admiral_takes_the_raids_of_the_captain_he_replaces() {
+    let mut m = raid_pool_model();
+    let c = candidate(&mut m, true);
+    assert!(m.raid_trade_route(CharacterId(108), at(55.0, 50.0)));
+    m.apply(CampaignCommand::HireAdmiral { character: c, fleet: ForceId(1003) }).unwrap();
+    // 0x00A16110: the raiding captain is the one replaced (flag at 0x00A161CB) and destroyed
+    // (0x00A0C6F0); the admiral raids at the position noted on entry (0x00A163DF).
+    assert!(!m.world.characters.contains_key(&CharacterId(108)));
+    assert_eq!(m.world.forces[&ForceId(1003)].commander, Some(c));
+    assert!(only_raider(&m, c));
+}
+
+#[test]
+fn a_hired_admiral_on_an_empty_ship_takes_the_raids_of_the_commander_he_outranks() {
+    let mut m = raid_pool_model();
+    // An empty ship first: the admiral boards it (0x008EDE20) and the captain stays aboard his own.
+    let f = m.world.forces.get_mut(&ForceId(1003)).unwrap();
+    let mut empty = unit(9);
+    empty.character = None;
+    f.units.insert(0, empty);
+    let c = candidate(&mut m, true);
+    assert!(m.raid_trade_route(CharacterId(108), at(55.0, 50.0)));
+    m.apply(CampaignCommand::HireAdmiral { character: c, fleet: ForceId(1003) }).unwrap();
+    // The command passes to the admiral: the captain's raids end (0x00A163CC), the admiral's start.
+    assert!(m.world.characters.contains_key(&CharacterId(108)));
+    assert_eq!(m.world.forces[&ForceId(1003)].units[0].character, Some(c));
+    assert_eq!(m.world.forces[&ForceId(1003)].commander, Some(c));
+    assert!(!m.is_raiding(CharacterId(108)));
+    assert!(only_raider(&m, c));
+}
+
+/// Grants A both field promotion bonuses (`promote_general_in_field` 64, `promote_admiral_at_sea` 65).
+fn allow_promotion(m: &mut CampaignModel) {
+    use crate::campaign::effects::SavedBonus;
+    let d = m.world.faction_details.get_mut(&A).unwrap();
+    d.bonus_base = [64, 65].map(|bonus| SavedBonus { kind: 1, bonus, value: 1.0, qualifier: String::new(), ..Default::default() }).to_vec();
+    d.bonus_with_difficulty = Vec::new();
+}
+
+#[test]
+fn a_promoted_colonel_takes_the_raids_of_the_army_commander() {
+    let mut m = raid_pool_model();
+    // A second colonel (110) in the army, standing elsewhere.
+    m.world.characters.insert(CharacterId(110), character(110, A, CharacterKind::Colonel, 25));
+    let mut u = unit(10);
+    u.character = Some(CharacterId(110));
+    m.world.forces.get_mut(&ForceId(1002)).unwrap().units.push(u);
+    m.turn.humans = vec![A];
+    m.start_campaign();
+    allow_promotion(&mut m);
+    assert!(m.raid_trade_route(CharacterId(107), at(55.0, 50.0)));
+    m.apply(CampaignCommand::PromoteUnit { force: ForceId(1002), unit: 1 }).unwrap();
+    // 0x008E1C20: he stands where the commander stood (0x008E1E4F) and takes his raids (0x008E2170 / 0x008E2190).
+    assert_eq!(m.world.forces[&ForceId(1002)].commander, Some(CharacterId(110)));
+    assert_eq!(m.world.characters[&CharacterId(110)].position, at(55.0, 50.0));
+    assert!(!m.is_raiding(CharacterId(107)));
+    assert!(only_raider(&m, CharacterId(110)));
+}
+
+#[test]
+fn a_ship_promoted_at_sea_takes_the_raids_of_the_fleet_commander() {
+    let mut m = raid_pool_model();
+    // A second ship without a character: a new officer is made for it (0x00990EF0).
+    let mut empty = unit(9);
+    empty.character = None;
+    m.world.forces.get_mut(&ForceId(1003)).unwrap().units.push(empty);
+    m.turn.humans = vec![A];
+    m.start_campaign();
+    allow_promotion(&mut m);
+    assert!(m.raid_trade_route(CharacterId(108), at(55.0, 50.0)));
+    let ev = m.apply(CampaignCommand::PromoteUnit { force: ForceId(1003), unit: 1 }).unwrap();
+    let CampaignEvent::CharacterPromoted { character: new } = ev[0] else { panic!("promoted") };
+    // 0x008E2260: the captain's raids end (0x008E2650) and the new admiral raids at his position (0x008E2670).
+    assert_eq!(m.world.forces[&ForceId(1003)].commander, Some(new));
+    assert!(!m.is_raiding(CharacterId(108)));
+    assert!(only_raider(&m, new));
+}
+
+#[test]
+fn a_hired_admiral_leaves_the_raids_of_an_admiral_already_in_command() {
+    let mut m = raid_pool_model();
+    // An admiral already aboard the first ship commands the fleet and raids; the captain (108) sails the second.
+    let mut adm = character(120, A, CharacterKind::Admiral, 25);
+    adm.position = at(55.0, 50.0);
+    m.world.characters.insert(adm.id, adm);
+    let f = m.world.forces.get_mut(&ForceId(1003)).unwrap();
+    let mut flag = unit(9);
+    flag.character = Some(CharacterId(120));
+    f.units.insert(0, flag);
+    f.commander = Some(CharacterId(120));
+    let c = candidate(&mut m, true);
+    assert!(m.raid_trade_route(CharacterId(120), at(55.0, 50.0)));
+    m.apply(CampaignCommand::HireAdmiral { character: c, fleet: ForceId(1003) }).unwrap();
+    // The commander after the pick is the one before, so nothing is handed over (0x00A163CC is not reached).
+    assert_eq!(m.world.forces[&ForceId(1003)].commander, Some(CharacterId(120)));
+    assert!(only_raider(&m, CharacterId(120)));
+    assert!(!m.is_raiding(c));
 }

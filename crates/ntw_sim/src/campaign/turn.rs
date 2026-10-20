@@ -43,9 +43,10 @@
 //!       the campaign director's queued region transfers and, from a human to an AI faction, its
 //!       step ([`super::director`]).
 //! 3. Round end (CONFIRMED order, 0x00948CF0: when the turn passes the last faction, the economy of
-//!    **every** faction is settled at once, not at each faction's turn start): first every region's
-//!    population factors are refreshed ([`TurnStep::RoundEndRefresh`], `0x008E1030` per faction), then
-//!    for every faction in turn order, [`TurnStep::Economy`]: income and upkeep are settled
+//!    **every** faction is settled at once, not at each faction's turn start): first the
+//!    population factors of the regions of every faction in the game but the rebels are refreshed
+//!    ([`TurnStep::RoundEndRefresh`], `0x008E1030` per listed faction, which also sets the expense
+//!    trackers), then for every faction in turn order, [`TurnStep::Economy`]: income and upkeep are settled
 //!    (0x00BABE30: treasury += income − expenses, unless the faction cannot pay, see
 //!    [`economy`](super::economy)), every owned region's town wealth grows (0x00AB4410) and its
 //!    population grows and converts ([`super::population`], 0x00AB4070), then (not for the rebels) every owned
@@ -84,8 +85,8 @@ pub enum TurnStep {
     RoundStart,
     /// The calendar advances.
     RoundEnd,
-    /// The round end's first pass (`0x00948CF0` → `0x008E1030` for every faction, before any economy):
-    /// every region's population factors are refreshed.
+    /// The round end's first pass (`0x00948CF0` → `0x008E1030` for every listed faction, before any economy):
+    /// the population factors of the regions of every faction in the game but the rebels are refreshed, then their expense trackers set ([`CampaignModel::prepare_round_end`]).
     RoundEndRefresh,
     /// Start of a faction's turn: queues its phases.
     FactionStart(FactionId),
@@ -328,12 +329,18 @@ impl CampaignModel {
                 // `0x008BDE70`) either way. So every faction gets the event, the rebels' after the refreshes.
                 let (rebels, listed): (Vec<_>, Vec<_>) =
                     self.world.factions_in_turn_order().into_iter().partition(|&f| self.world.is_rebel_faction(f));
-                for faction in listed {
+                for &faction in &listed {
                     events.push(CampaignEvent::FactionRoundStart { faction });
                 }
                 // The listed factions' regions (not the rebels', not an out-of-game faction's), then the
                 // relationships' computed factors (`0x008BAF30`, the same faction set).
-                self.refresh_round_start_population_factors();
+                self.refresh_population_factors();
+                // The same factions' running economics records: upkeep, taxes, category 6 and trade
+                // (`0x008F1F60` step 1d, CONFIRMED; [`super::economy::refresh_running_record_round_start`]).
+                let in_game: Vec<_> = listed.iter().copied().filter(|&f| self.in_the_game(f)).collect();
+                for faction in in_game {
+                    super::economy::refresh_running_record_round_start(self, faction);
+                }
                 self.refresh_computed_factors();
                 // `0x00AAAF60` per region of world +0x34: `0x00B796B0` on a settlement or a fort under siege
                 // (virtual +0x98); it raises the siege counter and removes garrison men by a campaign RNG draw
@@ -342,14 +349,14 @@ impl CampaignModel {
                 // The trade update with flag 0 (`0x00BCB020(0)`): prices and trends, no history shift, then the
                 // raid check (`0x00BD1020`) as at the round end.
                 self.update_commodity_prices_with(false);
-                // PLACEHOLDER: the historical events of the round (`0x008F5990`: `events_tables` rows chosen per
-                // human faction (+0x6E0), one random pick drawn from the campaign RNG +0xFB8, and their event messages) are
-                // not in the model (BACKLOG §0 'Historical events').
+                // The round's historical events (`0x008F5990`, [`super::historical_events`]): the human factions'
+                // event messages, with at most one campaign RNG draw per human faction.
+                self.historical_events_round_start(&mut events);
                 for faction in rebels {
                     events.push(CampaignEvent::FactionRoundStart { faction });
                 }
             }
-            TurnStep::RoundEndRefresh => self.refresh_population_factors(),
+            TurnStep::RoundEndRefresh => self.prepare_round_end(),
             TurnStep::RoundEnd => {
                 // The yearly character pass (natural deaths, expired ancillaries) of the year's last
                 // round end, before the calendar moves on (`0x008A9920`, CONFIRMED order).
@@ -377,11 +384,15 @@ impl CampaignModel {
                 }
             }
             TurnStep::Economy(f) => {
-                // Treaty money: regular payments and protectorate tribute (PROVISIONAL place, see `treaties`).
-                self.diplomacy_money(f);
+                // The treaty money (regular payments, protectorate tribute and income) is in the running
+                // record the settle pays (categories 8 / 10 / 22 / 24, booked by its writers,
+                // `CampaignModel::change_treaty_money`).
                 if economy::settle_round(self, f) == (economy::Settlement::CannotPay { first_turn: true }) {
                     events.push(CampaignEvent::PendingBankruptcy { faction: f });
                 }
+                // The payments to `f` that an earlier payer's update finished this round go now that `f` has
+                // been paid their last round (ORIGINAL BUG fix, `CampaignModel::diplomacy_round_end` step 8).
+                self.drop_finished_payments_to(f);
                 // Each region's population growth, then its religion conversion (0x00AB42F0 → 0x00AB4070 →
                 // 0x00A63FE0, in the same step).
                 self.population_round_end(f);
@@ -506,6 +517,14 @@ impl CampaignModel {
             }
             TurnStep::Handover(ending, starting) => self.director_handover(ending, starting, &mut events),
             TurnStep::Advance(f) => {
+                // The faction turn end clears its `WarStartedCharacterFaction` flag (+0x925, by the word
+                // write at `0x008BD408`) after the `FactionTurnEnd` dispatch, before the shroud rebuild
+                // (CONFIRMED). The scripts get a step's events only after the step, so clearing it in
+                // `FactionEnd` would hide it from the `FactionTurnEnd` handlers; `Advance(f)` always runs
+                // right after `FactionEnd(f)`, and nothing between them reads the flag.
+                if let Some(d) = self.world.faction_details.get_mut(&f) {
+                    d.war_started = false;
+                }
                 let order = self.world.factions_in_turn_order();
                 let pos = order.iter().position(|&x| x == f).unwrap_or(order.len());
                 // The next faction that takes turns (`0x00948CF0`, [`Self::takes_turns`]). The rebels are

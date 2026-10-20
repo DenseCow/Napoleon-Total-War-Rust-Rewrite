@@ -10,8 +10,8 @@
 //!   `line_of_sight_extension` / 100), `0x009CDF10`), settlements and slots with 5 (`0x00B40C00`),
 //!   and an owned region its whole saved shape.
 //! - A faction with a shroud (`FACTION` `CAMPAIGN_SHROUD`; faction +0x6F8; the playable factions in
-//!   the vanilla saves) has three cell sets: explored, visible, and a third set (empty in every
-//!   save; UNKNOWN meaning). A point is visible when its cell is visible and not in the third set
+//!   the vanilla saves) has three cell sets: explored, visible, and the black shroud (`Shroud::hidden`;
+//!   empty in every save but the tutorial's). A point is visible when its cell is visible and not in the third set
 //!   (`0x00B7A150`); a faction without a shroud sees everything (its AI has its own beliefs).
 
 use std::collections::BTreeMap;
@@ -99,6 +99,15 @@ impl CellSet {
     fn index(&self, x: u32, z: u32) -> Option<usize> {
         (x < self.cols && z < self.rows).then(|| z as usize * self.cols as usize + x as usize)
     }
+    /// Every cell of `cols` × `rows` (the quad tree's build with fill 1, `0x00DF3190`).
+    pub fn full(cols: u32, rows: u32) -> Self {
+        let n = cols as usize * rows as usize;
+        let mut bits = vec![u64::MAX; n.div_ceil(64)];
+        if let Some(last) = bits.last_mut().filter(|_| !n.is_multiple_of(64)) {
+            *last = (1u64 << (n % 64)) - 1;
+        }
+        CellSet { cols, rows, bits }
+    }
     /// Whether the cell is in the set.
     pub fn get(&self, x: u32, z: u32) -> bool {
         self.index(x, z).is_some_and(|i| self.bits[i / 64] >> (i % 64) & 1 == 1)
@@ -107,6 +116,12 @@ impl CellSet {
     pub fn set(&mut self, x: u32, z: u32) {
         if let Some(i) = self.index(x, z) {
             self.bits[i / 64] |= 1 << (i % 64);
+        }
+    }
+    /// Removes a cell.
+    pub fn unset(&mut self, x: u32, z: u32) {
+        if let Some(i) = self.index(x, z) {
+            self.bits[i / 64] &= !(1 << (i % 64));
         }
     }
     /// Removes every cell.
@@ -133,8 +148,9 @@ impl CellSet {
     }
 }
 
-/// A faction's shroud (`CAMPAIGN_SHROUD` v1: three quad trees and a bool, CONFIRMED layout; loader
-/// `0x00AFBFC0`, object +4 / +0x1C / +0x34 and +0x50).
+/// A faction's shroud (`CAMPAIGN_SHROUD` v1: three quad trees and a bool, CONFIRMED layout; read by
+/// `0x00AE89A0`, written by `0x00AFBFC0` from the `FACTION` writer `0x00892A80`; object +4 / +0x1C
+/// / +0x34 and +0x50; a new campaign's is built by `0x00AE8910`, [`CampaignModel::start_shrouds`]).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Shroud {
@@ -142,11 +158,132 @@ pub struct Shroud {
     pub explored: CellSet,
     /// #1: the cells seen now.
     pub visible: CellSet,
-    /// #2: cells that hide what is in them even when seen (`0x00B7A150` tests visible and not this);
-    /// empty in every vanilla save, what fills it is UNKNOWN.
+    /// #2: the black shroud, cells that hide what is in them even when seen (`0x00B7A150` tests
+    /// visible and not this). Empty in every vanilla save and campaign start position but the
+    /// tutorial's, which fills all but 270 of its 524,288 cells (CONFIRMED by loading
+    /// `campaigns/tut_napoleon/startpos.esf`); `unveil_black_shroud` lifts it outline by outline
+    /// ([`CampaignModel::unveil_black_shroud`]). A shroud a new campaign creates
+    /// starts with every cell here when the map has black shroud outlines (the ctor `0x00AE8910`,
+    /// CONFIRMED; [`CampaignModel::start_shrouds`]).
     pub hidden: CellSet,
     /// #3: the shroud is on (true in every save); off, everything is visible.
     pub active: bool,
+}
+
+/// One black shroud outline turned into sight cells (`0x00B65C50`, the steps are listed at
+/// [`CampaignModel::unveil_black_shroud`]).
+struct BlackShroudLift {
+    /// The cell box's low corner (it may reach off the grid, where no cell is touched; the exe's
+    /// tree walks clip the same way, `0x00E29F90` / `0x00E2A1B0`).
+    x0: i64,
+    z0: i64,
+    /// The cell box's size.
+    w: i64,
+    h: i64,
+    /// Row by row over the box (index row × w + column, as the exe's byte mask): whether the cell
+    /// leaves the black shroud.
+    mask: Vec<bool>,
+}
+
+impl BlackShroudLift {
+    fn of(grid: &SightGrid, outline: &[(f32, f32)]) -> Option<Self> {
+        let &first = outline.first()?;
+        if outline.len() < 3 {
+            return None;
+        }
+        let (mut lo, mut hi) = (first, first);
+        for &(x, z) in outline {
+            lo = (lo.0.min(x), lo.1.min(z));
+            hi = (hi.0.max(x), hi.1.max(z));
+        }
+        let (cx, cz) = (grid.cols as f32, grid.rows as f32);
+        let (ex, ez) = (cx * grid.cell, cz * grid.cell);
+        let (ox, oz) = grid.origin;
+        // `0x00B42670`, in f32 as the exe: a corner's cell, and a cell edge's map position.
+        // ORIGINAL BUG: the exe floors the corners to signed cells (start cells and counts stay
+        // signed, the tree walks clip a box reaching off the grid) but turns a cell back into its
+        // edge position through an unsigned conversion (`0x00B42670`: CVTDQ2PD then + 2^32 for a
+        // negative value, table `0x01318130`), so a box reaching below cell 0 gets a low edge some
+        // 2^32 cells away: every test point of that axis lands millions of units off the map and
+        // the outline lifts nothing, while step 2 still forgets the box's explored cells. The high
+        // edge uses the same formula and is right, so the intent is the box's own edge; ours
+        // converts signed. Vanilla never reaches it (the tutorial's outlines lie far inside its
+        // grid); a mod outline at the map's low x or z edge would.
+        let cell = |v: f32, o: f32, n: f32, e: f32| ((v - o) * n / e).floor() as i64;
+        let edge = |i: i64, o: f32, n: f32, e: f32| i as f32 * e * (1.0 / n) + o;
+        // The widening the exe applies (constants 2.0 at `0x01325D14`, 4.0 at `0x01325D20`): the
+        // high z gets none.
+        let (x0, x1) = (cell(lo.0 - 2.0, ox, cx, ex), cell(hi.0 + 4.0, ox, cx, ex));
+        let (z0, z1) = (cell(lo.1 - 2.0, oz, cz, ez), cell(hi.1, oz, cz, ez));
+        let (w, h) = (x1 - x0 + 1, z1 - z0 + 1);
+        let (sx0, sz0) = (edge(x0, ox, cx, ex), edge(z0, oz, cz, ez));
+        let cw = (edge(x1 + 1, ox, cx, ex) - sx0) / w as f32;
+        let ch = (edge(z1 + 1, oz, cz, ez) - sz0) / h as f32;
+        // 0.707 at `0x0137E910`, 0.5 at `0x01318038`.
+        let reach = ch * 0.707 + 0.5;
+        let mut mask = vec![false; usize::try_from(w * h).ok()?];
+        for c in 0..w {
+            let px = c as f32 * cw + sx0;
+            for r in 0..h {
+                let p = (px, r as f32 * ch + sz0);
+                mask[(r * w + c) as usize] = outline_contains(outline, p) || outline_distance(outline, p) < reach;
+            }
+        }
+        Some(BlackShroudLift { x0, z0, w, h, mask })
+    }
+
+    /// Forgets the explored cells of the box still under the black shroud, then takes the mask's
+    /// cells out of it (each step touches only its own cell, so one pass does both in order).
+    fn apply(&self, s: &mut Shroud) {
+        for r in 0..self.h {
+            for c in 0..self.w {
+                let (Ok(x), Ok(z)) = (u32::try_from(self.x0 + c), u32::try_from(self.z0 + r)) else { continue };
+                if s.hidden.get(x, z) {
+                    s.explored.unset(x, z);
+                }
+                if self.mask[(r * self.w + c) as usize] {
+                    s.hidden.unset(x, z);
+                }
+            }
+        }
+    }
+}
+
+/// Whether a point is inside a closed outline (`0x010E7320`): even-odd crossings, an edge counting
+/// when the point's z is in [low z, high z) and the point lies left of it.
+fn outline_contains(outline: &[(f32, f32)], p: (f32, f32)) -> bool {
+    let mut inside = false;
+    for (i, &a) in outline.iter().enumerate() {
+        let b = outline[(i + 1) % outline.len()];
+        let (lo, hi) = if a.1 <= b.1 { (a, b) } else { (b, a) };
+        if lo.1 <= p.1 && p.1 < hi.1 && (hi.0 - lo.0) * (p.1 - lo.1) > (hi.1 - lo.1) * (p.0 - lo.0) {
+            inside = !inside;
+        }
+    }
+    inside
+}
+
+/// A point's distance to a closed outline's edges (`0x00B287A0`: the nearest point of each edge,
+/// the last point to the first included).
+fn outline_distance(outline: &[(f32, f32)], p: (f32, f32)) -> f32 {
+    let Some(&last) = outline.last() else { return f32::MAX };
+    let mut best = f32::MAX;
+    let mut a = last;
+    for &b in outline {
+        let (dx, dz) = (b.0 - a.0, b.1 - a.1);
+        let len = (dx * dx + dz * dz).sqrt();
+        let t = if len > 0.0 {
+            let inv = 1.0 / len;
+            let t = (p.1 - a.1) * inv * dz * inv + inv * (p.0 - a.0) * dx * inv;
+            if t >= 1.0 { 1.0 } else if t >= 0.0 { t } else { 0.0 }
+        } else {
+            0.0
+        };
+        let (qx, qz) = (dx * t + a.0 - p.0, dz * t + a.1 - p.1);
+        best = best.min(qx * qx + qz * qz);
+        a = b;
+    }
+    best.sqrt()
 }
 
 impl CampaignModel {
@@ -176,8 +313,8 @@ impl CampaignModel {
     }
 
     /// The factions whose sight counts for `faction` (`0x00B85040` / `0x00B85090`, CONFIRMED): itself
-    /// and its protectorates (a protectorate whose patron it is). PROVISIONAL: the human-with-shared-
-    /// vision case (faction +0x81C) is not modelled.
+    /// and its protectorates (a protectorate whose patron it is). PROVISIONAL: the revolution case (the
+    /// faction in a revolution on the revolutionaries' side, faction +0x81C) is not modelled.
     fn sight_factions(&self, faction: FactionId) -> Vec<FactionId> {
         let mut out = vec![faction];
         for (f, x) in &self.world.factions {
@@ -271,7 +408,7 @@ impl CampaignModel {
     /// visible tree (+0x1C) and the moved source's new shape into the explored tree (+4); the
     /// visible tree is cleared and rebuilt from every source over the whole map at the faction's
     /// turn END (`0x008BD0F0` → `0x00B66EF0(0)`, after the turn-end counters and `FactionTurnEnd`;
-    /// skipped for a faction sharing a human ally's view) and at the setups `0x008DD090` /
+    /// skipped for a faction in a revolution on the revolutionaries' side) and at the setups `0x008DD090` /
     /// `0x008BD4F0` / `0x008EE3E0`. So `reset` belongs to the turn end, and a turn start adds only.
     pub fn refresh_shroud(&mut self, faction: FactionId, reset: bool) {
         if !self.world.shrouds.contains_key(&faction) {
@@ -397,7 +534,8 @@ impl CampaignModel {
     /// faction has no shroud and drops the label only when `0x00B11E70` is true: the shroud is on
     /// (+0x50) and the cell, from `0x00B5B5A0`, is in the hide set (`0x00E25280`, false off the
     /// grid). Neither the visible (#1) nor the explored (#0) set is read, so a settlement never
-    /// seen keeps its label, as one in sight does; the hide set is empty in every vanilla save.
+    /// seen keeps its label, as one in sight does; the hide set (the black shroud) is empty
+    /// in every vanilla save but the tutorial's.
     pub fn hides_map_label(&self, faction: FactionId, p: (f32, f32)) -> bool {
         let Some(s) = self.world.shrouds.get(&faction) else { return false };
         if !s.active {
@@ -426,6 +564,113 @@ impl CampaignModel {
     /// ([`Self::ai_repair_navy`]), its building repair for the slot's ([`Self::ai_repairs`]).
     pub fn ai_shopping_hidden(&self, p: (crate::fixed::Fixed20, crate::fixed::Fixed20)) -> bool {
         self.world.ai_shopping_shroud.is_some_and(|f| self.hides_map_label(f, (p.0.to_f32(), p.1.to_f32())))
+    }
+
+    /// The script's `show_shroud(on)` (CONFIRMED, binding `0x00979260`): every faction that keeps a
+    /// shroud (the campaign's faction list +0xF5C, faction +0x6F8 not null) gets its on flag
+    /// (shroud +0x50, [`Shroud::active`]) set to `on` by `0x00B68500`, which then refreshes the
+    /// display (`0x008ED860` and a redraw of every map region through the game's +0x210 object;
+    /// no model state).
+    pub fn show_shroud(&mut self, on: bool) {
+        for s in self.world.shrouds.values_mut() {
+            s.active = on;
+        }
+    }
+
+    /// The shroud part of a new campaign's per-faction setup (CONFIRMED, `0x008DD090`, run for
+    /// every faction by `0x0095A810` from `0x00915E20`, which the model ctor `0x00872550` calls at
+    /// 0x00874009 only with a campaign setup, so never on a save load: a loaded faction reads its
+    /// whole shroud from the file, `0x0087A190` → `0x00AE89A0`, and keeps it). The rebels (no
+    /// faction record, `IsFactionWithoutRecord` `0x008CEEF0`) skip the whole setup and keep whatever
+    /// shroud the start position gave them. Any other faction that is not human loses its shroud
+    /// (faction +0x6F8). A human without one gets a new shroud (`0x00AE8910`): the three sets sized
+    /// to the sight grid (map data +0x3C / +0x40), explored and visible empty, the black shroud
+    /// ([`Shroud::hidden`]) every cell when the map has black shroud outlines (+0xC0 not 0) and
+    /// empty otherwise, and on. Then every human's shroud, new or the start position's, runs
+    /// `0x00B66EF0(1)`: the visible tree (+0x1C) is cleared and rebuilt box by box
+    /// (`0x00E143F0`, then `0x00B617E0` with clear 0 for each of the map data's boxes,
+    /// `**(campaign+0xF58)` +0x6C, stride 0xBC, ORing in the sources each box sees), and with the
+    /// flag 1 the explored tree (+4) becomes a copy of it (its header copied, `0x00E02070` copying
+    /// the tree +0x28 over +0x10). So explored = visible = what the sources see now; the start
+    /// position's explored and visible sets are replaced, its black shroud is kept.
+    /// UNKNOWN: `0x008DD090` also keeps a non-human's shroud (and rebuilds it the same way) when
+    /// the setup's +0x20 and the faction's +0x6E1 (the player slot's +0xA9) are both set; not
+    /// ported (no such flag yet).
+    /// PROVISIONAL: `0x00B66EF0` does nothing for a faction whose +0x814 flag (`0x008CA0B0`) is set
+    /// and +0x81C clear (in a revolution, on the revolutionaries' side); neither flag is in our model, so
+    /// the rebuild always runs.
+    /// Without a sight grid no shroud can be sized or rebuilt: logged once per call when a human
+    /// lacks one, and that human plays without a shroud (sees everything, as a faction without one).
+    pub fn start_shrouds(&mut self) {
+        let humans = self.turn.humans.clone();
+        let dropped: Vec<FactionId> = self
+            .world
+            .shrouds
+            .keys()
+            .copied()
+            .filter(|f| !humans.contains(f) && !self.is_rebel_faction(*f))
+            .collect();
+        for f in dropped {
+            self.world.shrouds.remove(&f);
+        }
+        let humans: Vec<FactionId> = humans.into_iter().filter(|f| !self.is_rebel_faction(*f)).collect();
+        let Some(grid) = self.world.sight_grid else {
+            let missing: Vec<&FactionId> = humans.iter().filter(|f| !self.world.shrouds.contains_key(f)).collect();
+            if !missing.is_empty() {
+                log::warn!("campaign start: no sight grid, so {missing:?} start without a shroud");
+            }
+            return;
+        };
+        let black = !self.world.black_shroud_outlines.is_empty();
+        for f in humans {
+            let Some(seen) = self.compute_visible(f) else { continue };
+            let shroud = self.world.shrouds.entry(f).or_insert_with(|| {
+                let hidden = if black { CellSet::full(grid.cols, grid.rows) } else { CellSet::new(grid.cols, grid.rows) };
+                Shroud { explored: CellSet::new(grid.cols, grid.rows), visible: CellSet::new(grid.cols, grid.rows), hidden, active: true }
+            });
+            shroud.explored = seen.clone();
+            shroud.visible = seen;
+        }
+    }
+
+    /// The script's `unveil_black_shroud(key)` (CONFIRMED, binding `0x00977A90` → `0x008F7760`):
+    /// for every faction that keeps a shroud, `0x00B65BC0` lifts each black shroud outline named
+    /// `key` ([`World::black_shroud_outlines`](super::world::World::black_shroud_outlines), exact
+    /// name match, every match in file order) with `0x00B65C50`, then has the path grid rebuild
+    /// its obstacle layers for the view it last stored (`CampaignPathGrid::ReapplyPathGridFactionView`
+    /// `0x00B67490`, the refresh the diplomacy changes run too; that view is whichever faction the
+    /// grid stored last, not the one whose shroud was lifted) and posts the key to the game's
+    /// +0xD08 object (not traced; no model state found). The rebuild reads the view faction's
+    /// shroud: an obstacle whose place it does not see, or sees under the black shroud, is hidden
+    /// (mode 5, `0x00B3F4F0` → `0x00B6A920` → `0x00B7A150`). Ours decides that per search
+    /// ([`Self::obstacles_seen_by`]) from the shroud as it stands, so nothing is refreshed here.
+    /// Per outline of 3 points or more:
+    /// 1. the box around the outline, widened by 2 at its low x and z and by 4 at its high x and
+    ///    not at all at its high z (as the exe does), is turned into the sight cells x0..=x1,
+    ///    z0..=z1 (`0x00B42670`: floor((v − origin) × count / extent) for each corner);
+    /// 2. inside that cell box every explored cell (#0) still under the black shroud (#2) is
+    ///    forgotten (`0x00E29E60`, explored &= !hidden), so ground lifted from the shroud shows as
+    ///    never seen until something sees it;
+    /// 3. a cell of the box leaves the black shroud (`0x00E2A180`, hidden &= !mask) when its low
+    ///    corner is inside the outline (even-odd, `0x010E7320`) or nearer the closed outline than
+    ///    0.707 × the cell height + 0.5 (`0x00B287A0`).
+    ///
+    /// Returns how many outlines matched; 0 also without a sight grid.
+    pub fn unveil_black_shroud(&mut self, key: &str) -> usize {
+        let Some(grid) = self.world.sight_grid else { return 0 };
+        let w = &mut self.world;
+        let mut matched = 0;
+        for (name, outline) in &w.black_shroud_outlines {
+            if name != key {
+                continue;
+            }
+            matched += 1;
+            let Some(lift) = BlackShroudLift::of(&grid, outline) else { continue };
+            for s in w.shrouds.values_mut() {
+                lift.apply(s);
+            }
+        }
+        matched
     }
 
     /// The same three states as [`fog_state`](Self::fog_state), but per sight cell — for a caller

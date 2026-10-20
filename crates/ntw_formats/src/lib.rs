@@ -15,11 +15,13 @@
 //! | [`loc`] | `.loc` localisation tables | all on-screen text |
 //! | [`mount`] | `mount_variants` -> `warscape_animated[_lod]` -> horse meshes | cavalry mounts |
 //! | [`dds`] | `.dds` textures (DXT1/3/5, uncompressed) + CPU decoder | every model texture |
+//! | [`default_keys`] | `text/default_keys.xml` key bindings (keysets, mappings per mode) | campaign shortcuts |
 //! | [`rigid_model`] | `.rigid_model` static meshes + `.rigid_model_header` | buildings, props, campaign pieces |
 //! | [`battle_terrain`] | `battleterrain\presets\<map>\` (L16 heightfields, XML, ESF lists) | battle maps |
 //! | [`battle_markers`] | battle-map `.markers` (prop and polygon markers) | battlefield props, clear areas |
 //! | [`campaign_map`] | `campaign_maps\<map>\` heightmap, supertexture, SPLN splines, `regions.esf` | the campaign map |
 //! | [`campaign_pathfinding`] | `pathfinding.esf` (with its value cipher), `sea_grids.esf` | campaign movement, AI sea zones |
+//! | [`open_map`] | the open campaign map format's text files (`campaigns/<name>/black_shroud.txt`) | custom campaign maps |
 //! | [`tga`] | `.tga` images (palette, true colour, RLE) | UI art, ground-type maps, terrain masks |
 //! | [`xml`] | small XML settings files | battle-map metadata |
 //! | [`unit_variant`] | `.unit_variant` part lists + `.variant_part_mesh` LOD streams | soldiers and equipment |
@@ -56,6 +58,7 @@ pub mod battle_animation;
 pub mod db;
 pub mod db_folder;
 pub mod dds;
+pub mod default_keys;
 pub mod esf;
 pub mod effects;
 pub mod font;
@@ -63,6 +66,7 @@ pub mod group_formation;
 pub mod loc;
 pub mod models_building;
 pub mod mount;
+pub mod open_map;
 pub mod pack;
 pub mod preferences;
 pub mod projectile_fx;

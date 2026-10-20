@@ -191,6 +191,8 @@ pub(super) struct Inner {
     /// Engine events' calls into the scripts, made at the start of the next UI frame
     /// ([`Inner::post_call`]).
     posted_calls: RefCell<Vec<PostedCall>>,
+    /// The movie a component shows (`AttachCustomControl`), until `CampaignUI.MovieDismissed`.
+    pub(super) attached_movie: RefCell<Option<(NodeId, Rc<str>)>>,
     /// The component whose script the engine is running (see [`ScriptContext`]).
     script_context: std::cell::Cell<Option<NodeId>>,
     /// How many calls switched the context through `__ntw_call_as` (tests check that per-frame
@@ -386,6 +388,7 @@ impl UiScriptHost {
             logged_keys: RefCell::default(),
             logged_pairs: RefCell::default(),
             posted_calls: RefCell::default(),
+            attached_movie: RefCell::default(),
             script_context: std::cell::Cell::new(None),
             #[cfg(test)]
             cross_context_calls: std::cell::Cell::new(0),
@@ -596,24 +599,36 @@ impl UiScriptHost {
     }
 
     /// A key was pressed and released (`key` is the engine's key name, e.g. `"ESCAPE"`,
-    /// `"RETURN"`). It goes to the component that most recently stole that key with
-    /// `StealShortcutKey` and is still shown (attached under the top root and visible), whose
-    /// `OnKey(key, false, true)` runs. INFERRED: root.lua steals ESCAPE and its `OnKey` calls
-    /// `TransitionBack` only when the third argument is true; sub-panels such as the options
-    /// gamma panel steal ESCAPE/RETURN later, while they are open. Returns true if delivered.
-    ///
-    /// A focused component that takes the focus hears the key first, through its layout's `OnKey`
-    /// binding, once pressed (`OnKey(key, false, false)`) and once released (`(key, false, true)`)
-    /// (INFERRED from template.text_input.lua: it edits on the `false` call and lets go of the
-    /// focus on RETURN / ESCAPE on the `true` one); the shortcut holder still gets it afterwards.
+    /// `"RETURN"`): first the focused component ([`Self::focused_key`]), then the component that
+    /// stole it ([`Self::stolen_key`]). Returns the stealer's `OnKey` result when one holds the key,
+    /// else whether a focused component heard it. The front end and the battle use this; the
+    /// campaign HUD calls the two halves itself, in the exe's order against its shortcuts.
     pub fn key(&self, key: &str) -> bool {
+        let focused = self.focused_key(key);
+        self.stolen_key(key).unwrap_or(focused)
+    }
+
+    /// The key goes to the focused component, if its state takes the focus, through its layout's
+    /// `OnKey` binding, once pressed (`OnKey(key, false, false)`) and once released
+    /// (`(key, false, true)`) (INFERRED from template.text_input.lua: it edits on the `false` call
+    /// and lets go of the focus on RETURN / ESCAPE on the `true` one). Returns true if one heard it.
+    pub fn focused_key(&self, key: &str) -> bool {
         let focused = (*self.inner.focus.borrow()).filter(|&f| accepts_focus(&self.inner, f));
-        if let Some(f) = focused {
-            for up in [false, true] {
-                let args: MultiValue = mlua::IntoLuaMulti::into_lua_multi((key, false, up), &self.lua).unwrap_or_default();
-                fire_event(&self.lua, &self.inner, f, "OnKey", args);
-            }
+        let Some(f) = focused else { return false };
+        for up in [false, true] {
+            let args: MultiValue = mlua::IntoLuaMulti::into_lua_multi((key, false, up), &self.lua).unwrap_or_default();
+            fire_event(&self.lua, &self.inner, f, "OnKey", args);
         }
+        true
+    }
+
+    /// The key goes to the component that most recently stole it with `StealShortcutKey` and is
+    /// still shown (attached under the top root and visible), whose `OnKey(key, false, true)` runs.
+    /// INFERRED: root.lua steals ESCAPE and its `OnKey` calls `TransitionBack` only when the third
+    /// argument is true; sub-panels such as the options gamma panel steal ESCAPE/RETURN later,
+    /// while they are open. Returns `None` when no shown component holds the key, else its
+    /// `OnKey`'s result (false on a script error, logged once).
+    pub fn stolen_key(&self, key: &str) -> Option<bool> {
         let target = {
             let w = self.inner.world.borrow();
             let root = *self.inner.root.borrow();
@@ -628,13 +643,12 @@ impl UiScriptHost {
                 }
             };
             self.inner.stolen_keys.borrow().iter().rev().find(|(n, k)| k == key && shown(*n)).map(|(n, _)| *n)
-        };
-        let Some(id) = target else { return focused.is_some() };
-        let r = call_entry::<bool>(&self.lua, &self.inner, id, "__ntw_call_if_defined", (addr(id), "OnKey", key, false, true));
-        r.unwrap_or_else(|e| {
-            log(&self.inner, format!("ERROR in OnKey of component {id}: {e}"));
+        }?;
+        let r = call_entry::<bool>(&self.lua, &self.inner, target, "__ntw_call_if_defined", (addr(target), "OnKey", key, false, true));
+        Some(r.unwrap_or_else(|e| {
+            log(&self.inner, format!("ERROR in OnKey of component {target}: {e}"));
             false
-        })
+        }))
     }
 
     /// Sets the UI clock the `Time` bindings read (whole ms, floored) without running a frame, and
@@ -742,10 +756,29 @@ impl UiScriptHost {
         *self.inner.focus.borrow()
     }
 
+    /// The movie attached to a component (`AttachCustomControl`): (the component, the movie's file
+    /// name). None once `CampaignUI.MovieDismissed` ran or the component is gone. Allocates nothing
+    /// (the game asks every frame).
+    pub fn attached_movie(&self) -> Option<(NodeId, Rc<str>)> {
+        let attached = self.inner.attached_movie.borrow();
+        let (node, movie) = attached.as_ref()?;
+        self.inner.world.borrow().get(*node)?;
+        Some((*node, movie.clone()))
+    }
+
     /// True while a component that takes the focus holds it (a text field being typed into): the
-    /// same test [`Self::text_input`] and [`Self::key`] make before they deliver to it.
+    /// same test [`Self::text_input`] and [`Self::focused_key`] make before they deliver to it.
     pub fn text_focused(&self) -> bool {
         (*self.inner.focus.borrow()).is_some_and(|f| accepts_focus(&self.inner, f))
+    }
+
+    /// True while any component holds the input focus, whether or not its state takes it: the
+    /// campaign's key handler's test, focus manager `0x01464428` `+0x14` != 0 (CONFIRMED,
+    /// `0x00A27EB0` reads `0x0146443C`), which `0x010367F0` also keeps for a forced `StealInputFocus(true)`. A holder
+    /// whose component was destroyed counts as none. PROVISIONAL: ours keeps the focus on a
+    /// destroyed component; what the exe does with a focused component it destroys is not traced.
+    pub fn input_focus_held(&self) -> bool {
+        (*self.inner.focus.borrow()).is_some_and(|f| self.inner.world.borrow().get(f).is_some())
     }
 
     /// Fires a layout event on a component (e.g. `"OnMouseLClickUp"`).
@@ -1863,6 +1896,20 @@ fn component_methods(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
     // PROVISIONAL: always false -- our HUD keeps no drag-and-drop state, so nothing is ever
     // dragged and the original's answer can only be false (or true while a drag runs).
     method!("IsDragged", |inner, lua, _id, args| ret(lua, false));
+    // AttachCustomControl(control): show an engine control inside this component. CONFIRMED use:
+    // `event_movie_panel.luac`'s `ShowMovieType` attaches `data.bink_control_ptr` (the playing
+    // movie, which the exe's movie queue `0x00998E20` hands over) to `movie_window`. Ours: the
+    // engine's only custom control is a movie, and the handle the engine gives the scripts is the
+    // movie's file name; the game draws that movie in the component ([`UiScriptHost::attached_movie`]).
+    method!("AttachCustomControl", |inner, lua, id, args| {
+        match args.front() {
+            Some(Value::String(s)) => *inner.attached_movie.borrow_mut() = Some((id, Rc::from(s.to_string_lossy()))),
+            _ => inner.log_once("AttachCustomControl: not a movie", || {
+                "AttachCustomControl: the control is not a movie (the engine attaches only movies); ignored".into()
+            }),
+        }
+        Ok(MultiValue::new())
+    });
     // Parent(n): the n-th ancestor, default 1; Parent("id"): an ancestor with that id (see below).
     // INFERRED from use: template.list.lua calls Parent(2) to reach its list view, and
     // napoleon_battles_scripts/battle_icon.lua calls Parent("napoleon_battles").

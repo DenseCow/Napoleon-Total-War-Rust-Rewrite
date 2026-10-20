@@ -438,7 +438,7 @@ pub fn relation_value(model: &CampaignModel, f: FactionId, x: FactionId) -> f32 
     let mut v = w.attitude * att01;
     v += w.allied * flag(stance == Stance::Allied);
     v += w.access * flag(rel.is_some_and(|r| r.military_access_turns != 0));
-    v += w.trade * flag(rel.is_some_and(|r| r.trade_agreement));
+    v += w.trade * flag(model.world.trade_held(f, x));
     v -= w.peace * flag(stance == Stance::War);
     v += w.peace;
     v / (w.attitude + w.allied + w.access + w.trade + w.peace)
@@ -1488,7 +1488,7 @@ mod tests {
         let mut base = world("0.01");
         proposed_to_b(&mut base);
         let marks: [NamedChange; 14] = [
-            ("peace", |m| drop(m.make_peace_rules(B, C).unwrap())),
+            ("peace", |m| drop(m.make_peace_rules(B, C, false).unwrap())),
             ("alliance", |m| drop(m.form_alliance(A, B).unwrap())),
             ("trade", |m| drop(m.trade_agreement(A, B).unwrap())),
             ("access", |m| drop(m.grant_military_access(A, B, 5).unwrap())),

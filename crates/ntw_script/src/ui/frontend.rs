@@ -498,9 +498,11 @@ pub(super) fn save_info_table(lua: &Lua, inner: &Inner, h: &ntw_campaign::SaveHe
     t.set("LeaderPortrait", h.portrait.as_str())?;
     t.set("TimePlayed", h.turn_number)?;
     t.set("Year", h.year)?;
-    // The header stores the season key (e.g. "winter"); the screen shows its loc text (INFERRED).
-    let season = inner.loc.get(&format!("seasons_onscreen_{}", h.season_name.to_ascii_lowercase())).map(str::to_owned).unwrap_or_else(|| h.season_name.clone());
-    t.set("Season", season)?;
+    // The header's season text as it is (CONFIRMED: `0x008982C0` copies header +0x2C into Season
+    // with no lookup). It is already the on-screen name: the header builder `0x00888320` stores
+    // `0x008ED110`'s result there (the HUD's `season_string`), so a save shows the season in the
+    // language it was saved in, as the original's do.
+    t.set("Season", h.season_name.as_str())?;
     let maps = lua.create_table()?;
     for m in h.maps.iter().filter(|m| m.width > 0 && m.height > 0 && m.pixels.len() >= (m.width * m.height) as usize) {
         let key = format!("save_map_{}", m.theatre);

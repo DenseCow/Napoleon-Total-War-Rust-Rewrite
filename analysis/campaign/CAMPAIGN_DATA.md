@@ -137,12 +137,18 @@ Not found / not in the data:
   `0x0099F820` and reader `0x00989CF0`; reader + writer `ntw_campaign::missions`. The start positions hold none; the
   user's newest `auto_save.save` holds one (France, `eur_take_vienna`), which reads and writes back identically.
 - **`other_income_mod(faction, amount)`** (`FUN_0097bb70` → `FUN_00a15b30`): a positive amount is appended as an
-  8-byte entry to a per-faction list (faction +0x130) and added to economics category 3 (other income, the
-  `ECONOMICS_DATA` #2 i32[4] slot 3 = 1700 for France); a negative one goes to a second list (+0x13C). Where those
+  8-byte entry to a list and booked into the running record's category 11 (income group 3, `0x00BBE9A0`); a
+  negative one, only for a faction that is not human (faction +0x6E0), goes to a second list as an expense entry
+  booking category 18 (group 0, `0x00984B60`, taken back by `0x00984B30` / `0x0099C2C0`). Correction (worker
+  recordpay 2026-10-19, disassembly, CONFIRMED): the lists are on the campaign model (+0xFA8), not the faction, and
+  "category 3" was the group, not the category. Where those
   lists are saved: **nowhere (INFERRED)**: of the 356 functions touching those member offsets, only the adder
   (`0x00A15B30`) and a clear-all (`0x00A0EAF0`, run while the campaign model is torn down from `0x0088D1A0`) walk the
   lists; no ESF writer or loader reads them (the `FACTION` writer `0x00892A80` and `FACTION_ECONOMICS` writer
-  `0x00BD46E0` do not). The amount itself is saved through the economics data it was added to (category 3).
+  `0x00BD46E0` do not). The amount is in the saved record, but the load (`0x00B95B90`) zero-fills 8..11 and 18..24
+  and books only the trackers again, so it is lost at load; `spa_napoleon`'s scripting.lua adds its boosts again
+  from `OnModelCreated` with its saved `VAR_other_income_boost_*` values, which corroborates "not saved" (the spa
+  saves' record 11: France 3000, Britain 4000, Portugal 1500, Spain 2000, against 500 of other income each).
 - **Campaign variables**: the DB `campaign_variables` with the campaign's junction overrides, already in
   `CampaignRules::variables`; not save data.
 - `FACTION_ECONOMICS` v6: `history[]` of `ECONOMICS_DATA` v5 (6 i32 arrays per turn: income/expense categories),
@@ -152,9 +158,92 @@ Not found / not in the data:
 `CAMPAIGN_MODEL/EPISODIC_RESTRICTIONS` v17 child `LUA[]`: one value per item, in call order (13 in the user's
 saves). CONFIRMED from the Lua handlers: `save_value` (`FUN_009796c0`) stores a **bool** (0x01) for a Lua boolean,
 otherwise `lua_tointeger(v)` as an **i32** (0x04); `load_value(default)` (`FUN_009797f0`) reads the next item with
-the default's type, else returns the default. Loaded into `LoadedCampaign::script_values`; the app gives them to
-`ScriptHost::load_values` before `LoadingGame`, and F5 fires `SavingGame` and writes the host's values back
+the default's type, else returns the default. Loaded into `LoadedCampaign::script_values` (from a start position too); the app gives them to
+`ScriptHost::open_campaign`, which queues them for `LoadingGame` on both paths (§4.1), and F5 fires `SavingGame` and writes the host's values back
 (`save::write_save_with`).
+
+### 4.1 The opening's script events (CONFIRMED, modelcreated worker 2026-10-20)
+Each event's name getter is a vtable slot of its event class (ModelCreated `0x008BDEE0`, LoadingGame `0x009DA9A0`,
+NewSession `0x009DAA20`, WorldCreated `0x009DAA80`, NewCampaignStarted `0x009DAA10`); every post goes through
+`0x00E30700` → `0x00E142B0`, which runs `events[name]` synchronously. A new campaign (`0x008B8930`, "Creating campaign
+env (includes model)") and a loaded save (`0x008B8A60`, "... for loaded game") both build the model through `0x00987070`
+and its constructor `0x00872550`:
+1. `0x009968A0` (EPISODIC_RESTRICTIONS reader, at `0x0087315C`) posts `NewSession` first (`0x00996B06`), then
+   `LoadingGame` whenever the record's child `LUA` opens (test at `0x00998732`, `0x00DE96A0` → `0x00DE96C0`; post at
+   `0x0099878E`, event vtable `0x01370D08`, its +0x10 the block's reader). CONFIRMED that a new campaign takes this
+   path with its start position (loadinggame worker, 2026-10-20): `0x00987070`'s new-campaign argument (stack slot
+   `[ESP+0x3cc]`) picks `data/campaigns/%S/startpos.esf` (string `0x01357818`, opened at `0x0098763F`) over the save
+   (`0x00987634`), the scripts (`campaigns/%S/scripting.lua`) are loaded before the model, and the constructor
+   (called at `0x00987FFD`, the same slot passed as its 4th argument at `0x00987FEB`) calls `0x009968A0(…, reader,
+   start != NULL)` unconditionally on both paths. The flag only lands at +4 of the object `0x009968A0` returns, which
+   the constructor stores at campaign +0xFA8 after it returns; the `LoadingGame` post does not test it. The writer
+   `0x009A1070` opens the block on every path (`0x009A200C`), and every shipped start position has it (`esf_find`:
+   `EPISODIC_RESTRICTIONS` v17 #30 is `LUA[]` in all eight; mp_egy, mp_ita and tut hold 0 items, mp_eur 6, egy 16,
+   eur and ita 17, spa 30). So both paths fire `LoadingGame`, and on a new campaign `load_value` reads the start
+   position's items: their values match the scripts' own initial values (e.g. spa `BOOL_cantabria_french` and
+   `BOOL_gibraltar_british` are stored true where the `load_value` default is false and the script's top-level
+   value true), so the shipped campaigns start the same either way. `load_value` (`0x009797F0`) asks the context for
+   its reader (vtable slot +0x98): `0x0044A500` (returns +0x10) for LoadingGame, `0x00461180` (returns none) for
+   NewSession `0x01370E80`, WorldCreated `0x01371020` and NewCampaignStarted `0x013710DC`, so outside LoadingGame it
+   always gives the default. `is_new_game` (name `0x01369EE4`, table entry `0x01458180`, code `0x009798E0`) returns
+   byte +4 of campaign +0xFA8: the new-campaign flag, whatever `LoadingGame` did. During NewSession / LoadingGame
+   +0xFA8 is still null, so a handler calling it there would read through null; no shipped handler does.
+2. The factions are built (`0x0090BEB0` → `0x0087A190`), each running record rebuilt by `0x00B95B90` (`0x0087A2F2`).
+3. `ModelCreated` is posted at the constructor's end (`0x0087426F`).
+4. Back in `0x00987070`: `NewCampaignStarted` only when a start is passed (`0x00988A3F`; the load passes none,
+   `0x008B8AE3`), then `WorldCreated` (`0x00988A72`).
+
+So a new campaign runs NewSession, LoadingGame (the start position's items), ModelCreated, NewCampaignStarted,
+WorldCreated; a save NewSession, LoadingGame (the save's items), ModelCreated, WorldCreated; UICreated and turn 1 come
+later. `ScriptHost::open_campaign(ctx, CampaignOpening, lua_values)` fires them in that order with the opened file's
+`LUA[]` items (`LoadedCampaign::script_values`, read from the start position too), sets `is_new_game` from the
+opening, and drops unread values after LoadingGame. Our openings always fire LoadingGame: a campaign in our open map
+format has no stored items and opens like a start position with an empty block (handlers read their defaults); an
+original-format file without the block (none shipped, none written) is not modelled. Our loads rebuild the records
+before any script runs (`ntw_campaign::read_esf` / `own_save`). A NewSession or LoadingGame
+handler runs in the exe before the factions exist; the shipped ones only create `game_interface` and read values.
+Shipped handlers: `ModelCreated` only spa_napoleon (`OnModelCreated`: when `BOOL_load_game`, which `OnLoadingGame`
+sets on both paths and turn 1's `OnFactionTurnStart` clears, `other_income_mod` of each stored
+`VAR_other_income_boost_*`; all 0 in the start position, so nothing on a new game); `WorldCreated` every campaign (EpisodicScripting's
+`OnWorldCreated`: `effect.rewind_scripted_advice` on a new game; ita/egy/tut/mp_ita/mp_egy also
+`set_liberation_options_disabled(true)`, ita `set_technology_research_disabled(true)`, tut
+`set_ui_notification_of_victory_disabled(true)` (the three switches, §4.2), and tut
+`unveil_black_shroud("shroud_map_1_1")`, which our visibility applies). Tests: `ntw_script` `tests/host.rs` (both orders, the boost in the record, a new campaign reading its start position's value, an empty block, no value outside LoadingGame),
+`tests/real_install.rs` (`orig_fr_t1`: France's income 12030 + 1856 + 3000 after the opening; a new spa_napoleon campaign runs OnLoadingGame with its 30 items and leaves the income; eur_napoleon's 17).
+`0x00988B00` ("Creating campaign model...") loads the scripts itself and posts NewSession, ModelCreated and
+WorldCreated. CONFIRMED never run in the shipped exe (wcstubs worker, 2026-10-20): its only caller is `0x00A19350`
+(two calls, `0x00A1973B` / `0x00A197B8`), the developer start-position preprocessor (builds `campaigns/%S`, warns
+"WARNING! About to preprocess %S, but this is not writeable! Check it out of perforce…" at string `0x01371348`, and
+writes `startpos.esf` with the campaign saver). `0x00A19350`'s only caller is `0x00485B90` (at `0x00485DB1`), in a
+loop over a vector of campaign names (count `0x014A0570`, data `0x014A0574`, 12-byte entries) that nothing in the exe
+fills: its only references are the two reads in that loop (`0x00485D74` / `0x00485DBD`) and its atexit destructor
+(`0x012E2850`, registered at `0x00404920`). So the vector is always empty. That is also why the shipped start
+positions already hold the WorldCreated switches (§4.2): the preprocessor posted WorldCreated before saving them
+(INFERRED from its call order and the matching values). The
+"game mode reads" before its post are three application vfuncs (+0x29C / +0x2A4 / +0x2A0, through `0x00A29EF0`;
+meaning UNKNOWN) that only set one byte of the loading-progress notices sent to session +8's listener (vfunc +4);
+they gate neither the events nor the switches. Ours: nothing to port.
+
+### 4.2 The WorldCreated switches (CONFIRMED, wcstubs worker 2026-10-20)
+Three `game_interface` methods (script table entries `0x014582F0` / `0x014582F8` / `0x01458300`, names at
+`0x0136A334` / `0x0136A358` / `0x0136A378`), each reading one boolean with its slot cleared first (so a number, a
+string or no argument stores false), storing it in the episodic restrictions (campaign +0xFA8) and returning nothing:
+
+| method | handler | field | ESF (`EPISODIC_RESTRICTIONS`) | readers | ours |
+|---|---|---|---|---|---|
+| `set_technology_research_disabled` | `0x0097B900` | +0x118 | #29, loader version > 0xE | building screens' unlocked-technology lists only (`0x008C7620`): building info `0x009B7300` (`CampaignUI.BuildingEffects` `0x009DE150`), building-completed message data `0x009CDA30` / `0x009FB920` (message +0xBC via `0x00985A70` / `0x00985CB0`), `CampaignUI.FortEffects` "technology" table `0x009E4AA0` → `0x009B2BB0`. No research gate (every escape of the +0xFA8 pointer and every method on it checked) | `World::technology_research_disabled`, read by `CampaignModel::building_info_technologies`; `effects_table_technologies` takes it from its caller (FortEffects the live value, a building-completed message its +0xBC copy; CAMPAIGN_FIDELITY.md §Research). The Lua tables calling them are still PROVISIONAL empty stubs (`ui/campaign/settlement.rs`) and ours posts no building-completed message yet |
+| `set_liberation_options_disabled` | `0x0097B940` | +0x124 | #31 (after `LUA[]`), version > 0xF | capture options `0x00B14930`, both paths (spa `0x00B15134`, normal `0x00B15214`): no liberation offered | `World::liberation_options_disabled`, read by `CampaignModel::liberation_target` |
+| `set_ui_notification_of_victory_disabled` | `0x0097B980` | +0x125 | #32, version > 0x10 | victory test `0x0096FCE0`: still marks the faction won (+0x31) and fires its own event, but skips the `campaign_won` post (test `0x0096FFE7`, post `0x0096FFF7`); victory check `0x0096CD10`: skips each winner's event +0x120 and that winner's multiplayer campaign-over step (test `0x0096CE9C`); the losers' event +0x138 unchanged | `World::victory_notification_disabled`; no victory check yet (BACKLOG "Defeat / victory screen") |
+
+The loader `0x009968A0` reads them (+0x118 at `0x009986D7`, +0x124 at `0x009987D3`, +0x125 at `0x009987F1`; the
+`LUA[]` block between is read only when present, so without it the last two sit at #30 / #31); the writer
+`0x009A1070` writes them (`0x009A1FEC`, `LUA[]` always at `0x009A200C`, `0x009A20A3`, `0x009A20E9`). The shipped
+start positions carry the scripts' values: egy, mp_egy, mp_ita #31; ita #29 and #31; tut #31 and #32; eur, mp_eur,
+spa none (the user's mp_eur saves: all false). Ours: `ntw_campaign::details::read_switches` / `write_switches`
+(one position table, also for #8, #20, #22, #25), the dispatch arm in `ntw_script::game`. Tests: `details.rs`
+(version gates, `LUA[]` shift, write-back), `tests/real_install.rs` `loads_all_eight_startpos` (each campaign's
+values), `ntw_script` `tests/host.rs` `the_world_created_switches_set_the_world_flags`, `ntw_sim`
+`the_scripts_liberation_switch_offers_no_liberation`.
 
 ## 5. Save compatibility
 - **Original saves load fully**: all 8 user saves (mp_eur, 1.3.0 build 2081) load with every detail record
@@ -242,8 +331,8 @@ Ghidra on the main project (read-only), tooling `analysis/graphics/run_ghidra.ps
   all 720.
 - **`other_income_mod` storage: answered, INFERRED not saved** (§3 "Not found"). The positive list (8-byte entries
   {faction, amount}) and the negative list (12-byte entries) live at +0x12C..+0x144 of the object the adder runs on
-  (the decompile does not show for sure whether that is the faction or the campaign world); only the adder
-  and the teardown clear touch them.
+  (the campaign model's object at +0xFA8, CONFIRMED 2026-10-19, see the entry above); only the adder and the teardown clear
+  touch them.
 - **Pathfinding cell header:** run-time layout CONFIRMED, meaning UNKNOWN; data facts in §1.
 - **Boundary words at run time** (CONFIRMED `0x00B78960`, `0x00B108D0`, `0x00B28E30`, `0x00AEF3E0`): word 0 = bits 0..21
   outline offset (bit 21 = 0x200000 marks a polygon added at run time, stored in a 24-byte pool at pathfinder +0x124, i.e.

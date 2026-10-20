@@ -48,6 +48,7 @@ struct Install {
     terrain: Terrain,
     names: Option<ntw_campaign::names::NameData>,
     pictures: Vec<ntw_campaign::header_map::TheatrePictures>,
+    loc: ntw_formats::loc::Localisation,
 }
 
 impl Install {
@@ -68,12 +69,13 @@ impl Install {
         let names = ntw_campaign::names::NameData::load(&vfs, &db);
         let files = GameFiles { vfs: &vfs };
         let pictures = loaded.info.header.maps.iter().filter_map(|m| ntw_campaign::header_map::TheatrePictures::load(&files, &db, &loaded.info.map_key, &m.theatre)).collect();
-        Install { dir, db, data, startpos, terrain, names, pictures }
+        let loc = ntw_formats::loc::Localisation::from_vfs(&vfs).expect("localisation");
+        Install { dir, db, data, startpos, terrain, names, pictures, loc }
     }
 
     /// A new campaign as the game starts one (`napoleon::campaign::scene`): model with the human
     /// set and the movement grid, script host with the campaign's scripts, the AI hook, then
-    /// `NewSession`, `NewCampaignStarted` and turn 1.
+    /// the opening's script events (`ScriptHost::open_campaign`) and turn 1.
     fn new_campaign(&self) -> ScriptHost {
         let mut loaded = ntw_campaign::read(&self.startpos, &self.db).expect("startpos");
         assert!(loaded.set_human(HUMAN));
@@ -82,13 +84,13 @@ impl Install {
             ntw_campaign::names::attach_data(&mut loaded.model, nd);
         }
         let source = ScriptSource::from_install(&self.dir).expect("scripts");
+        let script_values = loaded.script_values;
         let mut host = ScriptHost::new(loaded.model, HUMAN, source).expect("script host");
         if let Err(e) = host.load_campaign(CAMPAIGN) {
             eprintln!("warning: campaign scripts: {e}");
         }
         driver::install(&mut host, self.data.clone());
-        for name in ["NewSession", "NewCampaignStarted"] {
-            let r = host.fire(name, ScriptContext::for_faction(HUMAN));
+        for (name, r) in host.open_campaign(ScriptContext::for_faction(HUMAN), ntw_script::CampaignOpening::NewCampaign, &script_values) {
             for e in r.errors {
                 eprintln!("warning: script {name}: {e}");
             }
@@ -204,7 +206,8 @@ fn save_full(inst: &Install, host: &mut ScriptHost, name: &str, ai: AiBlock, val
     let values = script_values_out(&values);
     let source = EsfFile::from_bytes(&inst.startpos).expect("esf");
     let m = host.model();
-    let mut tree = ntw_campaign::save::write_save_with(&source, &m, HUMAN, now(), Some(&values)).expect("write");
+    let season = season_name(&inst.loc, &m);
+    let mut tree = ntw_campaign::save::write_save_with(&source, &m, HUMAN, now(), season.as_deref(), Some(&values)).expect("write");
     ntw_campaign::header_map::update_maps(&mut tree, &m, HUMAN, &inst.pictures);
     if let AiBlock::Version(v) = ai {
         let cai = tree.root.children.iter_mut().find_map(|c| match c {
@@ -643,7 +646,7 @@ mod bisect {
         let gone_chars: Vec<CharacterId> =
             w.characters.keys().filter(|c| !after.world.characters.contains_key(c) && !commanders.contains(c)).copied().collect();
         for c in &gone_chars {
-            w.characters.remove(c);
+            w.remove_character(*c);
             w.character_details.remove(c);
         }
         let mut units = 0;
@@ -960,4 +963,20 @@ fn undo_handover(source: &EsfFile, tree: &mut EsfFile) {
             set_owner(r, o, n, true);
         }
     }
+}
+
+/// The header season text for the model's date (the saves are loaded in the original, so it must
+/// follow the date, not the start position's). A missing loc key is logged once per run.
+fn season_name(loc: &ntw_formats::loc::Localisation, m: &CampaignModel) -> Option<String> {
+    let code = m.calendar.date.season;
+    let Some(season) = ntw_sim::calendar::Season::from_code(code) else {
+        eprintln!("warning: unknown calendar season code {code}: header season kept from the source");
+        return None;
+    };
+    let key = season.onscreen_key();
+    let text = loc.get(&key).map(str::to_owned);
+    if text.is_none() {
+        eprintln!("warning: missing loc key {key}: header season kept from the source");
+    }
+    text
 }

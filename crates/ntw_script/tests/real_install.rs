@@ -7,7 +7,7 @@ mod common;
 
 use std::path::PathBuf;
 
-use ntw_script::{ScriptContext, ScriptHost, ScriptSource};
+use ntw_script::{CampaignOpening, ScriptContext, ScriptHost, ScriptSource};
 use ntw_sim::campaign::{CampaignCommand, Stance};
 
 fn data_dir() -> PathBuf {
@@ -86,12 +86,19 @@ fn eur_napoleon_turn_loop_with_the_real_startpos() {
     let db = ntw_data::GameDatabase::from_install(&dir).expect("DB");
     let mut loaded = ntw_campaign::read_file(dir.join("campaigns").join("eur_napoleon").join("startpos.esf"), &db).expect("startpos");
     assert!(loaded.set_human("france"));
+    // The start position's own LUA[] items (17 in eur_napoleon), read by OnLoadingGame on a new campaign too.
+    assert_eq!(loaded.script_values.len(), 17);
+    let script_values = loaded.script_values;
     let source = ScriptSource::from_install(&dir).expect("open packs");
     let mut host = ScriptHost::new(loaded.model, "france", source).unwrap();
     host.load_campaign("eur_napoleon").expect("scripts load");
-    for name in ["NewSession", "NewCampaignStarted"] {
-        assert!(host.fire(name, ScriptContext::for_faction("france")).errors.is_empty());
+    let opened = host.open_campaign(ScriptContext::for_faction("france"), CampaignOpening::NewCampaign, &script_values);
+    for (name, r) in &opened {
+        assert!(r.errors.is_empty(), "{name}: {:?}", r.errors);
     }
+    let ran = |event: &str| opened.iter().any(|(n, r)| *n == event && r.handlers > 0);
+    assert!(ran("LoadingGame") && ran("NewCampaignStarted"), "{:?}", opened.iter().map(|(n, r)| (*n, r.handlers)).collect::<Vec<_>>());
+    assert!(host.state().is_new_game);
     let started = host.start_campaign();
     assert!(started.iter().any(|(e, r)| matches!(e, ntw_sim::campaign::CampaignEvent::FactionTurnStart { .. }) && r.handlers > 0));
     for (ev, r) in &started {
@@ -105,4 +112,71 @@ fn eur_napoleon_turn_loop_with_the_real_startpos() {
     let m = host.model();
     assert_eq!(m.calendar.turns_elapsed, 3);
     assert_eq!(m.turn.current.and_then(|f| m.world.factions.get(&f)).map(|f| f.key.as_str()), Some("france"));
+}
+
+/// The user's spa_napoleon save at turn 1 (France human, `orig_fr_t1`): the load books France's other
+/// income without the script's boost (the entry is not saved); the opening's `ModelCreated` handler
+/// (`OnModelCreated`, after `OnLoadingGame` read `VAR_other_income_boost_france`) adds it again, so
+/// France's income is the original's turn-1 figure (UI_FIDELITY.md 4.7 "wealth value": taxes 12030,
+/// trade 1856, other income 500 + the 2500 boost).
+#[test]
+fn spa_napoleon_load_books_the_saved_boosts_again_at_model_created() {
+    let dir = data_dir();
+    let ev = std::env::var_os("NTW_EVIDENCE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default().join(r"Documents\ntw-evidence\saves"));
+    let save = ev.join("orig_fr_t1.save");
+    if !dir.join("campaigns").join("spa_napoleon").join("scripting.lua").is_file() || !save.is_file() {
+        eprintln!("skipped: no install at {} or no {}", dir.display(), save.display());
+        return;
+    }
+    let db = ntw_data::GameDatabase::from_install(&dir).expect("DB");
+    let loaded = ntw_campaign::read_file(&save, &db).expect("save");
+    let values = loaded.script_values;
+    let fr = loaded.model.faction_by_key("spa_france").expect("spa_france").id;
+    assert_eq!(loaded.model.world.last_income(fr), 12030 + 1856 + 500, "the load alone");
+    let source = ScriptSource::from_install(&dir).expect("open packs");
+    let mut host = ScriptHost::new(loaded.model, "spa_france", source).unwrap();
+    host.load_campaign("spa_napoleon").expect("scripts load");
+    let fired = host.open_campaign(ScriptContext::for_faction("spa_france"), CampaignOpening::LoadedSave, &values);
+    for (name, r) in &fired {
+        assert!(r.errors.is_empty(), "{name}: {:?}", r.errors);
+    }
+    let model_created = fired.iter().filter(|(n, r)| *n == "ModelCreated" && r.handlers > 0).count();
+    assert_eq!(model_created, 1, "OnModelCreated ran once");
+    assert_eq!(host.model().world.last_income(fr), 12030 + 1856 + 3000, "with the boost OnModelCreated books again");
+}
+
+/// A new spa_napoleon campaign also fires `LoadingGame`, with the start position's 30 stored items
+/// (`0x009968A0` posts it whenever the file has a `LUA` block, CAMPAIGN_DATA.md §4.1): `OnLoadingGame`
+/// sets `BOOL_load_game`, and `OnModelCreated` then books the start position's boosts, all 0, so the
+/// opening leaves France's income as the start position has it.
+#[test]
+fn spa_napoleon_new_campaign_reads_its_start_position_values_at_loading_game() {
+    let dir = data_dir();
+    let sp = dir.join("campaigns").join("spa_napoleon").join("startpos.esf");
+    if !sp.is_file() {
+        eprintln!("skipped: no install at {}", dir.display());
+        return;
+    }
+    let db = ntw_data::GameDatabase::from_install(&dir).expect("DB");
+    let mut loaded = ntw_campaign::read_file(&sp, &db).expect("startpos");
+    assert!(loaded.set_human("spa_france"));
+    assert_eq!(loaded.script_values.len(), 30);
+    let values = loaded.script_values;
+    let fr = loaded.model.faction_by_key("spa_france").expect("spa_france").id;
+    let before = loaded.model.world.last_income(fr);
+    let source = ScriptSource::from_install(&dir).expect("open packs");
+    let mut host = ScriptHost::new(loaded.model, "spa_france", source).unwrap();
+    host.load_campaign("spa_napoleon").expect("scripts load");
+    let fired = host.open_campaign(ScriptContext::for_faction("spa_france"), CampaignOpening::NewCampaign, &values);
+    for (name, r) in &fired {
+        assert!(r.errors.is_empty(), "{name}: {:?}", r.errors);
+    }
+    let names: Vec<&str> = fired.iter().map(|(n, _)| *n).collect();
+    assert_eq!(names, ["NewSession", "LoadingGame", "ModelCreated", "NewCampaignStarted", "WorldCreated"]);
+    assert!(fired.iter().any(|(n, r)| *n == "LoadingGame" && r.handlers > 0), "OnLoadingGame ran");
+    assert!(host.state().log.iter().any(|l| l.contains("muahahahaha")), "OnModelCreated ran");
+    assert_eq!(host.model().world.last_income(fr), before, "the start position's boosts are 0");
+    assert!(host.state().is_new_game);
 }

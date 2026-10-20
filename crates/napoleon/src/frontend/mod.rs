@@ -195,20 +195,27 @@ fn pointer(
     }
 }
 
-/// The engine's key names (CONFIRMED in the scripts: ESCAPE and RETURN, which the pages steal;
-/// BACK, DELETE, LEFT, RIGHT, HOME, END, which template.text_input.lua edits with).
+/// The engine's key names the front end's scripts use (CONFIRMED in the scripts: ESCAPE and
+/// RETURN, which the pages steal; BACK, DELETE, LEFT, RIGHT, HOME, END, which
+/// template.text_input.lua edits with). Derived from the exe's key table
+/// (`shortcut_keys::exe_key_name`), so each name lives once; the one difference is the numpad
+/// Enter, which the scripts get as RETURN while the table names it NUMPADENTER.
 pub(crate) fn key_name(k: KeyCode) -> Option<&'static str> {
-    Some(match k {
-        KeyCode::Escape => "ESCAPE",
-        KeyCode::Enter | KeyCode::NumpadEnter => "RETURN",
-        KeyCode::Backspace => "BACK",
-        KeyCode::Delete => "DELETE",
-        KeyCode::ArrowLeft => "LEFT",
-        KeyCode::ArrowRight => "RIGHT",
-        KeyCode::Home => "HOME",
-        KeyCode::End => "END",
-        _ => return None,
-    })
+    let k = if k == KeyCode::NumpadEnter { KeyCode::Enter } else { k };
+    if !matches!(
+        k,
+        KeyCode::Escape
+            | KeyCode::Enter
+            | KeyCode::Backspace
+            | KeyCode::Delete
+            | KeyCode::ArrowLeft
+            | KeyCode::ArrowRight
+            | KeyCode::Home
+            | KeyCode::End
+    ) {
+        return None;
+    }
+    crate::shortcut_keys::exe_key_name(k)
 }
 
 /// Keyboard → the focused text field (typed characters and editing keys, with key repeat) and
@@ -486,4 +493,29 @@ pub(crate) fn click_sound(host: &UiScriptHost, id: NodeId, sounds: &mut MessageW
         return;
     }
     sounds.write(crate::audio::UiSound::click(node.data.id.clone()));
+}
+
+#[cfg(test)]
+mod key_name_tests {
+    use super::*;
+
+    #[test]
+    fn editing_names_derive_from_the_exe_table() {
+        for (k, n) in [
+            (KeyCode::Escape, "ESCAPE"),
+            (KeyCode::Enter, "RETURN"),
+            (KeyCode::NumpadEnter, "RETURN"),
+            (KeyCode::Backspace, "BACK"),
+            (KeyCode::Delete, "DELETE"),
+            (KeyCode::ArrowLeft, "LEFT"),
+            (KeyCode::ArrowRight, "RIGHT"),
+            (KeyCode::Home, "HOME"),
+            (KeyCode::End, "END"),
+        ] {
+            assert_eq!(key_name(k), Some(n));
+        }
+        assert_eq!(key_name(KeyCode::KeyS), None);
+        assert_eq!(key_name(KeyCode::ArrowUp), None);
+        assert_eq!(crate::shortcut_keys::exe_key_name(KeyCode::NumpadEnter), Some("NUMPADENTER"));
+    }
 }

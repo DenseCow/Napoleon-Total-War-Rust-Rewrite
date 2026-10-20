@@ -19,14 +19,18 @@
 //! - [`TRADE_ROUTE_CHECK`]: whether one faction can send a trade route to another
 //!   ([`super::trade_check::trade_route_check`]).
 //! - [`RAID_TAKE`]: what a commerce raid takes from one trade route ([`super::commerce_raid::raid_take`]).
+//! - [`HISTORICAL_EVENTS`]: the round start's historical events ([`super::historical_events::historical_events`]).
+//! - [`OUTCOME_MOVIE`]: the movie a faction's campaign outcome plays ([`super::outcome::outcome_movie`]).
 
 use std::sync::Arc;
 
 use super::commerce_raid::OwnedRoute;
 use super::director::DirectorState;
+use super::events::CampaignEvent;
 use super::expulsion::ExpelledForce;
 use super::ids::{FactionId, RegionId};
 use super::mod_state::ModWrites;
+use super::outcome::{CampaignOutcome, OutcomeMovie};
 use super::population::PopulationState;
 use super::turn::ConstructionStep;
 use super::world::{CampaignModel, ConstructionItem, Region};
@@ -50,6 +54,10 @@ pub const REGION_EXPULSION: &str = "region.expulsion";
 pub const TRADE_ROUTE_CHECK: &str = "trade.route_check";
 /// Seam key of what a commerce raid takes from one trade route ([`RaidTake`]).
 pub const RAID_TAKE: &str = "trade.raid_take";
+/// Seam key of the round start's historical events ([`HistoricalEvents`]).
+pub const HISTORICAL_EVENTS: &str = "events.historical";
+/// Seam key of the movie a faction's campaign outcome plays ([`OutcomeMovieRule`]).
+pub const OUTCOME_MOVIE: &str = "campaign.outcome_movie";
 
 /// A region's population after one round of growth: given the model, the region, its population
 /// and its population state, the new population and state. The original's is
@@ -96,6 +104,15 @@ pub type TradeRouteCheck = dyn Fn(&CampaignModel, FactionId, FactionId) -> u8 + 
 /// the amount; it is the raider's income and, on an international route, the owner's loss. The original's
 /// is [`super::commerce_raid::raid_take`]. A query: it changes no state.
 pub type RaidTake = dyn Fn(&CampaignModel, &OwnedRoute, f32) -> i32 + Send + Sync;
+/// The round start's historical events: given the model (it may change state: the RNG, the triggered list),
+/// the messages to post. The original's is [`super::historical_events::historical_events`]. Its mod-state
+/// changes go to the [`ModWrites`].
+pub type HistoricalEvents = dyn Fn(&mut CampaignModel, &mut ModWrites) -> Vec<CampaignEvent> + Send + Sync;
+/// The movie a faction's campaign outcome plays and its panel data ([`OutcomeMovie`]), or none: given the
+/// model, the faction and how its campaign ended ([`CampaignOutcome`]). The UI shows the movie panel with it;
+/// the panel's OK then runs the movie's exit. The original's is [`super::outcome::outcome_movie`]. A query:
+/// it changes no state.
+pub type OutcomeMovieRule = dyn Fn(&CampaignModel, FactionId, CampaignOutcome) -> Option<OutcomeMovie> + Send + Sync;
 
 /// The campaign rules in use, one field per seam (see the module docs).
 #[derive(Clone, Debug, PartialEq)]
@@ -116,6 +133,10 @@ pub struct CampaignSeams {
     pub trade_route_check: Seam<TradeRouteCheck>,
     /// [`RAID_TAKE`].
     pub raid_take: Seam<RaidTake>,
+    /// [`HISTORICAL_EVENTS`].
+    pub historical_events: Seam<HistoricalEvents>,
+    /// [`OUTCOME_MOVIE`].
+    pub outcome_movie: Seam<OutcomeMovieRule>,
 }
 
 impl Default for CampaignSeams {
@@ -130,6 +151,8 @@ impl Default for CampaignSeams {
             region_expulsion: Seam::original(Arc::new(|m: &CampaignModel, f: FactionId, r: RegionId, _: &mut ModWrites| super::expulsion::expel_faction_from_region(m, f, r))),
             trade_route_check: Seam::original(Arc::new(super::trade_check::trade_route_check)),
             raid_take: Seam::original(Arc::new(super::commerce_raid::raid_take)),
+            historical_events: Seam::original(Arc::new(super::historical_events::historical_events)),
+            outcome_movie: Seam::original(Arc::new(super::outcome::outcome_movie)),
         }
     }
 }
@@ -137,7 +160,7 @@ impl Default for CampaignSeams {
 impl CampaignSeams {
     /// Every seam's key and implementation chain, in a fixed order (for the multiplayer handshake
     /// and the log).
-    pub fn chains(&self) -> [(&'static str, &[String]); 8] {
+    pub fn chains(&self) -> [(&'static str, &[String]); 10] {
         [
             (POPULATION_GROW, self.population_grow.chain()),
             (DIRECTOR_REGION_TRANSFER, self.director_region_transfer.chain()),
@@ -147,6 +170,8 @@ impl CampaignSeams {
             (REGION_EXPULSION, self.region_expulsion.chain()),
             (TRADE_ROUTE_CHECK, self.trade_route_check.chain()),
             (RAID_TAKE, self.raid_take.chain()),
+            (HISTORICAL_EVENTS, self.historical_events.chain()),
+            (OUTCOME_MOVIE, self.outcome_movie.chain()),
         ]
     }
 }
@@ -172,6 +197,10 @@ pub struct CampaignRuleRegistry {
     pub trade_route_check: SeamRegistry<TradeRouteCheck>,
     /// [`RAID_TAKE`] implementations.
     pub raid_take: SeamRegistry<RaidTake>,
+    /// [`HISTORICAL_EVENTS`] implementations.
+    pub historical_events: SeamRegistry<HistoricalEvents>,
+    /// [`OUTCOME_MOVIE`] implementations.
+    pub outcome_movie: SeamRegistry<OutcomeMovieRule>,
 }
 
 impl CampaignRuleRegistry {
@@ -190,6 +219,8 @@ impl CampaignRuleRegistry {
                 REGION_EXPULSION => self.region_expulsion.apply(&mut seams.region_expulsion, key),
                 TRADE_ROUTE_CHECK => self.trade_route_check.apply(&mut seams.trade_route_check, key),
                 RAID_TAKE => self.raid_take.apply(&mut seams.raid_take, key),
+                HISTORICAL_EVENTS => self.historical_events.apply(&mut seams.historical_events, key),
+                OUTCOME_MOVIE => self.outcome_movie.apply(&mut seams.outcome_movie, key),
                 _ => {
                     warnings.push(format!("rule seam {seam}: no such seam; {key} is ignored"));
                     continue;
@@ -269,6 +300,8 @@ mod tests {
                 (REGION_EXPULSION, &original[..]),
                 (TRADE_ROUTE_CHECK, &original[..]),
                 (RAID_TAKE, &original[..]),
+                (HISTORICAL_EVENTS, &original[..]),
+                (OUTCOME_MOVIE, &original[..]),
             ]
         );
         // The round end through the seam gives exactly what the original's function gives.

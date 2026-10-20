@@ -1304,8 +1304,8 @@ deal-region, 2026-10-10, below "Region value").
   oldest first. Ported: `World::economy_history` (loaded, saved, replaces `last_income`),
   `CampaignModel::deal_inflation` (CAMPAIGN_MODEL #21/#22, updated in `TurnStep::RoundEnd`); tests
   `the_round_end_records_the_economy_history`, `inflation_takes_the_first_net_once`,
-  `deal_inflation_and_economy_history_round_trip` (real saves). PROVISIONAL: our records hold
-  categories 5, 7, 11, 19, 20 only (the model's income and upkeep).
+  `deal_inflation_and_economy_history_round_trip` (real saves). The round end pays the running
+  record's sums, its expenses kept by the trackers (CAMPAIGN_FIDELITY.md "Expense trackers and the record's payment").
 - **Research-need inputs (round 3).** CAI faction `+0x14C` = `CAI_FACTION` #3, its mobiles; a mobile's
   `+0x168` = `CAI_RESOURCE_MOBILE` #6 bool, set at creation (`0x00C15370` ← `0x00A8E590` /
   `0x00A8DC10`) from the force's virtual `+0x38` ≠ 0, the same test that sorts land / naval in

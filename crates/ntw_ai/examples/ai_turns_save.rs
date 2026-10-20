@@ -32,6 +32,7 @@ fn main() {
     let mut loaded = ntw_campaign::read_esf(&startpos, &db).expect("load");
     loaded.set_human("france");
     let vfs = Vfs::open_install(&dir).expect("packs");
+    let loc = ntw_formats::loc::Localisation::from_vfs(&vfs).expect("localisation");
     let map = CampaignMap::load(&GameFiles { vfs: &vfs }, &loaded.info.map_key).expect("map");
     let mut m = loaded.model;
     m.attach_terrain(Terrain(Arc::new(ntw_campaign::pathing::build_grid(&map))));
@@ -39,7 +40,15 @@ fn main() {
     for _ in 0..turns {
         driver::end_turn(&mut m, &data, &ctx);
     }
-    let save = ntw_campaign::save::write_save(&startpos, &m, "france", 0).expect("write");
+    let season = ntw_sim::calendar::Season::from_code(m.calendar.date.season).and_then(|s| {
+        let key = s.onscreen_key();
+        let text = loc.get(&key).map(str::to_owned);
+        if text.is_none() {
+            eprintln!("warning: missing loc key {key}: header season kept from the source");
+        }
+        text
+    });
+    let save = ntw_campaign::save::write_save(&startpos, &m, "france", 0, season.as_deref()).expect("write");
     std::fs::write(out, save.to_bytes().expect("bytes")).expect("write file");
     let r = ntw_campaign::save_check::check(&save);
     println!(

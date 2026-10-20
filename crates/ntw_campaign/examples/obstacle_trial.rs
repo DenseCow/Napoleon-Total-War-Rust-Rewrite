@@ -199,9 +199,11 @@ fn main() {
 fn add(cx: &Ctx, path: &str, out: Option<&String>) {
     let mut esf = EsfFile::from_bytes(&std::fs::read(path).expect("read")).expect("esf");
     let before = ntw_campaign::save_check::check(&esf);
-    let loaded = ntw_campaign::read_esf(&esf, &cx.db).expect("load");
+    let mut loaded = ntw_campaign::read_esf(&esf, &cx.db).expect("load");
     let files = GameFiles { vfs: &cx.vfs };
     let map = CampaignMap::load(&files, &loaded.info.map_key).expect("map");
+    // The commanders' stored zones (`ntw_sim::campaign::zones`), which the obstacles keep.
+    loaded.model.attach_terrain(ntw_sim::campaign::Terrain(std::sync::Arc::new(ntw_campaign::pathing::build_grid(&map))));
     let a = &map.pathfinding.as_ref().expect("pathfinding").areas[0];
     let cells = a.grid.expand();
     let pm = poly_map(a, &cells, &a.grid.region_sets().expect("regions"));
@@ -225,7 +227,11 @@ fn add(cx: &Ctx, path: &str, out: Option<&String>) {
             continue;
         };
         let owner = if navy_of.get(&(id as i32)) == Some(&true) { Owner::Navy } else { Owner::Army };
-        let ob = NewObstacle { character: id, pos: (ch.position.0.0, ch.position.1.0), owner, garrisoned: ch.garrisoned_in.is_some() };
+        let Some(zone) = loaded.model.stored_zone(ch.id) else {
+            println!("  {id}: no stored zone");
+            continue;
+        };
+        let ob = NewObstacle { character: id, pos: (ch.position.0.0, ch.position.1.0), owner, garrisoned: ch.garrisoned_in.is_some(), zone: zone.to_vec() };
         match add_character_obstacle(grid, &sg, &ob) {
             Ok(added) => {
                 let ours = obstacles(grid).into_iter().find(|o| o.0 == id).map(|o| o.1).unwrap_or_default();
@@ -261,9 +267,11 @@ fn add(cx: &Ctx, path: &str, out: Option<&String>) {
 
 fn compare(cx: &Ctx, path: &str) {
     let mut esf = EsfFile::from_bytes(&std::fs::read(path).expect("read")).expect("esf");
-    let loaded = ntw_campaign::read_esf(&esf, &cx.db).expect("load");
+    let mut loaded = ntw_campaign::read_esf(&esf, &cx.db).expect("load");
     let files = GameFiles { vfs: &cx.vfs };
     let map = CampaignMap::load(&files, &loaded.info.map_key).expect("map");
+    // The commanders' stored zones (`ntw_sim::campaign::zones`), which the obstacles keep.
+    loaded.model.attach_terrain(ntw_sim::campaign::Terrain(std::sync::Arc::new(ntw_campaign::pathing::build_grid(&map))));
     let a = &map.pathfinding.as_ref().expect("pathfinding").areas[0];
     let cells = a.grid.expand();
     let pm = poly_map(a, &cells, &a.grid.region_sets().expect("regions"));
@@ -287,7 +295,12 @@ fn compare(cx: &Ctx, path: &str) {
             None => Owner::Agent,
         };
         let fake = 0x7000_0000 | (k as u32) << 2;
-        let ob = NewObstacle { character: fake, pos: (ch.position.0.0, ch.position.1.0), owner, garrisoned: ch.garrisoned_in.is_some() };
+        let zone = match (owner, loaded.model.stored_zone(ch.id)) {
+            (Owner::Agent, _) => Vec::new(),
+            (_, Some(z)) => z.to_vec(),
+            (_, None) => continue,
+        };
+        let ob = NewObstacle { character: fake, pos: (ch.position.0.0, ch.position.1.0), owner, garrisoned: ch.garrisoned_in.is_some(), zone };
         if add_character_obstacle(grid, &sg, &ob).is_err() {
             continue;
         }

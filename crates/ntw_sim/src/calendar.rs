@@ -43,24 +43,22 @@ impl Season {
         }
     }
 
-    /// The season's name as the save header stores it (`SAVE_GAME_HEADER` #4: "Summer", "Winter",
-    /// "Spring", "Autumn"; CONFIRMED in the shipped start positions and the original's saves, e.g. its
-    /// `auto_save` of a Europe campaign at Early March 1805 holds season 2 and "Spring").
-    pub fn header_name(self) -> &'static str {
+    /// The season's `seasons` table key, by code: the exe's key table `0x01457a74` (CONFIRMED:
+    /// `season_summer`, `season_winter`, `season_spring`, `season_autumn` for codes 0..3), which
+    /// `0x008ED110` indexes with the calendar's season to find the record that names it on screen.
+    pub fn key(self) -> &'static str {
         match self {
-            Season::Summer => "Summer",
-            Season::Winter => "Winter",
-            Season::Spring => "Spring",
-            Season::Autumn => "Autumn",
+            Season::Summer => "season_summer",
+            Season::Winter => "season_winter",
+            Season::Spring => "season_spring",
+            Season::Autumn => "season_autumn",
         }
     }
-}
 
-impl Date {
-    /// The save header's season name of this date ([`Season::header_name`]); `None` for a season code
-    /// the enum does not know.
-    pub fn season_header_name(&self) -> Option<&'static str> {
-        Season::from_code(self.season).map(Season::header_name)
+    /// The loc key of the season's on-screen name, `seasons_onscreen_<key>` (`0x008ED110`; the one
+    /// builder for the HUD's `season_string` and the save header's season).
+    pub fn onscreen_key(self) -> String {
+        format!("seasons_onscreen_{}", self.key())
     }
 }
 
@@ -212,6 +210,12 @@ impl Calendar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn onscreen_key_prefixes_the_season_key() {
+        assert_eq!(Season::Summer.onscreen_key(), "seasons_onscreen_season_summer");
+        assert_eq!(Season::Autumn.onscreen_key(), "seasons_onscreen_season_autumn");
+    }
 
     #[test]
     fn early_april_1806() {

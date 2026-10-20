@@ -15,15 +15,18 @@
 //! - **A change of commander** hands the raids on (`CampaignModel::hand_over_raids`, CONFIRMED): when
 //!   the old commander raided, his raids end and the new one raids where he stands, the old one's place
 //!   (`0x009D3AC0`). The force's observer `0x008DB3E0` does it when its commander dies or leaves (the
-//!   character destructor `0x0099D2D0` notifies it). Three other commander changes are in our model and
-//!   set `commander` directly, without [`CampaignModel::hand_over_raids`]: a General hired into an army
-//!   (`hire_general`, `0x00A164C0`, which calls `0x009DA140` then `0x009D3AC0` at `0x00A165D0` /
-//!   `0x00A165E9`), an admiral hired into a fleet (`hire_admiral`, `0x00A16110`, calls at `0x00A163CC` /
-//!   `0x00A163DF`; the replaced admiral dies, so his raids simply end) and the promotion in the field
-//!   (`promote_unit`, `0x008E1C20` land / `0x008E2260` naval). Whether those three hand the raids on is
-//!   not traced yet (UNKNOWN). The rest (`0x008B9030` force split, `0x008D47B0`, `0x008D5F10`, each
-//!   calling `0x009DA140` and `0x009D3AC0`) are paths our model does not have yet.
-//! - **Ending**: his death (`0x0099D681`); a peace (`0x00B262C0` → `0x00A25570`: every commander of either
+//!   character destructor `0x0099D2D0` notifies it). Three other commander changes hand the raids on
+//!   too ([`CampaignModel::hand_over_raids_on_command_change`], CONFIRMED): each notes the force's
+//!   commander, his position and whether he raids before the change, and when he raided and the
+//!   force's commander is now someone else, ends his raids and has the new commander raid at the
+//!   noted position. A General hired into an army (`0x00A164C0`, `hire_general`); the field promotion
+//!   (`0x008E1C20` land, `0x008E2260` naval, `promote_unit`); an admiral hired into a fleet
+//!   (`0x00A16110`, `hire_admiral`): the ship's character he replaces is destroyed either way
+//!   (`0x00A0C6F0`); when that one was the raiding commander, the destruction ends his raids (flag set
+//!   at `0x00A161CB`) and the new commander still raids at the noted position, the same outcome. The
+//!   rest (the force split `0x008B9030`, which hands the raids on only when the remaining force's new
+//!   commander is a new officer, `0x008D47B0`, `0x008D5F10`) are paths our model does not have yet.
+//! - **Ending**: his death (`0x0099D62E`); a peace (`0x00B262C0` → `0x00A25570`: every commander of either
 //!   side with a raid on the other side loses all his raids); the trade update's rebuild at the round start and end (`0x00BD1020` →
 //!   `0x00BA4A70` → `0x008B3690`: a raider no longer raidable on one of his segments loses all his raids).
 //! - **The take** (`0x00B83C30` for an international route, `0x00B83360` for a domestic one, the same
@@ -39,7 +42,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::effects::{BonusKind, Effects};
-use super::ids::{CharacterId, FactionId};
+use super::ids::{CharacterId, FactionId, ForceId};
 use super::trade::{TradeLeg, TradePath};
 use super::world::CampaignModel;
 use super::Stance;
@@ -408,21 +411,42 @@ impl CampaignModel {
         !near.is_empty()
     }
 
-    /// `old` hands his forces' command to `successors` (the force's observer `0x008DB3E0`, CONFIRMED:
-    /// run by the character destructor `0x0099D2D0` for a commander who dies or leaves the force): when
-    /// he raided, his raids end (`0x009DA140`) and each new commander raids at his own position, where
-    /// the old one stood ([`Self::raid_trade_route`], `0x009D3AC0`, keeping any raids of his own). A
-    /// commander who did not raid hands nothing on.
-    pub(crate) fn hand_over_raids(&mut self, old: CharacterId, successors: &[CharacterId]) {
+    /// `old`, standing at `at`, hands his forces' command to `successors` (CONFIRMED: the force's
+    /// observer `0x008DB3E0`, run by the character destructor `0x0099D2D0` for a commander who dies or
+    /// leaves the force; the hires and field promotions through
+    /// [`Self::hand_over_raids_on_command_change`]): when he raided, his raids end (`0x009DA140`) and
+    /// each new commander raids at `at`, where the old one stood ([`Self::raid_trade_route`],
+    /// `0x009D3AC0` with `0x00A17D50` on the old commander, keeping any raids of his own). A commander
+    /// who did not raid hands nothing on.
+    pub(crate) fn hand_over_raids(&mut self, old: CharacterId, at: (Fixed20, Fixed20), successors: &[CharacterId]) {
         if !self.is_raiding(old) {
             return;
         }
         self.clear_character_raids(old);
         for &c in successors {
-            if let Some(pos) = self.world.characters.get(&c).map(|x| x.position) {
-                self.raid_trade_route(c, pos);
-            }
+            self.raid_trade_route(c, at);
         }
+    }
+
+    /// The commander of `force` and where he stands, when he raids: what a hire or a field promotion
+    /// notes on entry (CONFIRMED in `0x00A164C0`, `0x00A16110`, `0x008E1C20` and `0x008E2260`: the
+    /// force's commander `0x00898E80` on +0x74, his raid list +0x2D0 not empty, his position
+    /// `0x00A17D50`), for [`Self::hand_over_raids_on_command_change`].
+    pub(crate) fn raiding_commander(&self, force: ForceId) -> Option<(CharacterId, (Fixed20, Fixed20))> {
+        let c = self.world.forces.get(&force)?.commander.filter(|&c| self.is_raiding(c))?;
+        Some((c, self.world.characters.get(&c)?.position))
+    }
+
+    /// After a hire or a field promotion (CONFIRMED: a General hired into an army `0x00A164C0`, calls
+    /// at `0x00A165D0` / `0x00A165E9`; an admiral hired into a fleet `0x00A16110`, `0x00A163CC` /
+    /// `0x00A163DF`; the field promotion, land `0x008E1C20` at `0x008E2170` / `0x008E2190`, naval
+    /// `0x008E2260` at `0x008E2650` / `0x008E2670`): when the commander noted on entry
+    /// ([`Self::raiding_commander`]) raided and `force` is now led by someone else, his raids end and
+    /// the new commander raids where he stood ([`Self::hand_over_raids`]).
+    pub(crate) fn hand_over_raids_on_command_change(&mut self, raider: Option<(CharacterId, (Fixed20, Fixed20))>, force: ForceId) {
+        let Some((old, at)) = raider else { return };
+        let Some(new) = self.world.forces.get(&force).and_then(|f| f.commander).filter(|&n| n != old) else { return };
+        self.hand_over_raids(old, at, &[new]);
     }
 
     /// A peace between `a` and `b` (`0x00B262C0` → `0x00A25570`, CONFIRMED): every commander of either

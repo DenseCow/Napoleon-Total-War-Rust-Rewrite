@@ -11,14 +11,14 @@ use super::super::host::UiRequest;
 use super::tests::{A, HudSetup, TestHud, test_hud_setup};
 use super::*;
 
-/// A made-up save callback: counts its calls and writes a minimal own-format save (header only),
-/// so the listing and `latest` see a valid file.
+/// A made-up save callback: counts its calls and writes a minimal own-format save (header only, with
+/// the season name the HUD gives), so the listing and `latest` see a valid file.
 struct FakeSaves {
     calls: Cell<u32>,
     paths: RefCell<Vec<PathBuf>>,
 }
 
-fn info() -> ntw_campaign::CampaignInfo {
+fn info(season_name: &str) -> ntw_campaign::CampaignInfo {
     ntw_campaign::CampaignInfo {
         kind: ntw_campaign::FileKind::Save,
         timestamp: 0,
@@ -29,7 +29,7 @@ fn info() -> ntw_campaign::CampaignInfo {
             portrait: "ui/portraits/a.tga".into(),
             turn_number: 7,
             year: 1806,
-            season_name: "Winter".into(),
+            season_name: season_name.into(),
             flag_path: "ui/flags/a".into(),
             date: None,
             maps: Vec::new(),
@@ -41,13 +41,13 @@ fn info() -> ntw_campaign::CampaignInfo {
 }
 
 impl CampaignSaves for FakeSaves {
-    fn current_info(&self) -> ntw_campaign::CampaignInfo {
-        info()
+    fn current_info(&self, season_name: &str) -> ntw_campaign::CampaignInfo {
+        info(season_name)
     }
-    fn save(&self, path: &Path) -> Result<(), String> {
+    fn save(&self, path: &Path, season_name: &str) -> Result<(), String> {
         self.calls.set(self.calls.get() + 1);
         self.paths.borrow_mut().push(path.to_path_buf());
-        let bytes = ntw_campaign::own_save::write(&info(), &()).map_err(|e| e.to_string())?;
+        let bytes = ntw_campaign::own_save::write(&info(season_name), &()).map_err(|e| e.to_string())?;
         std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
         std::fs::write(path, bytes).map_err(|e| e.to_string())
     }
@@ -213,14 +213,36 @@ fn a_name_listed_from_the_original_folder_asks_before_saving() {
 #[test]
 fn get_current_game_info_is_the_running_campaigns_header() {
     let dir = TempDir::new("current_info");
-    let (hud, _) = hud_saving(&dir, "test_campaign", Localisation::new());
+    let loc = loc_of(&[("seasons_onscreen_season_winter", "Hiver")]);
+    let (hud, _) = hud_saving(&dir, "test_campaign", loc);
+    hud._scripts.state_mut().model.calendar.date.season = ntw_sim::calendar::Season::Winter as u32;
     let t: Table = eval(&hud, "return CampaignUI.GetCurrentGameInfo()");
     assert_eq!(t.get::<String>("Faction").unwrap(), "test_faction_a");
     assert_eq!(t.get::<String>("LeaderPortrait").unwrap(), "ui/portraits/a.tga");
     assert_eq!(t.get::<String>("FlagPath").unwrap(), "ui/flags/a");
     assert_eq!(t.get::<u32>("TimePlayed").unwrap(), 7);
     assert_eq!(t.get::<u32>("Year").unwrap(), 1806);
-    assert_eq!(t.get::<String>("Season").unwrap(), "Winter");
+    // The header's season is the calendar season's on-screen name (`0x00888320` → `0x008ED110`).
+    assert_eq!(t.get::<String>("Season").unwrap(), "Hiver");
+}
+
+/// The save header's season is the loc on-screen name the HUD sends (`0x00888320` stores
+/// `0x008ED110`'s result), and the details table shows a header's season as it is stored
+/// (`0x008982C0` copies it; review: ours looked up `seasons_onscreen_<stored text>`, a key the loc
+/// never has, and showed the stored text only by falling back to it).
+#[test]
+fn a_save_keeps_the_seasons_on_screen_name_and_shows_it_as_stored() {
+    let dir = TempDir::new("season_name");
+    let loc = loc_of(&[("seasons_onscreen_season_spring", "Printemps"), ("seasons_onscreen_printemps", "not looked up")]);
+    let (hud, saves) = hud_saving(&dir, "test_campaign", loc);
+    hud._scripts.state_mut().model.calendar.date.season = ntw_sim::calendar::Season::Spring as u32;
+    assert!(eval::<bool>(&hud, "return CampaignUI.SaveCampaign('spring', true)"));
+    let path = saves.paths.borrow().last().unwrap().clone();
+    let read = ntw_campaign::read_info(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(read.header.season_name, "Printemps");
+    let t: Table = hud.host.lua().load("return CampaignUI.GetExtendedSaveGameInfo(...)").call(path.to_string_lossy().into_owned()).unwrap();
+    assert_eq!(t.get::<String>("Season").unwrap(), "Printemps");
+    assert!(hud.errors().is_empty());
 }
 
 #[test]

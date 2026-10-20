@@ -31,6 +31,7 @@ mod data;
 mod frontend;
 mod model_viewer;
 mod screenshot;
+mod shortcut_keys;
 mod soldiers;
 mod terrain;
 mod video;

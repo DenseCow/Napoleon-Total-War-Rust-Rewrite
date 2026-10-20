@@ -530,8 +530,9 @@ Model: `ntw_sim::campaign::visibility` (grid, cell sets, sight sources, shrouds)
 - The sources count for a faction when they belong to it or to its protectorates (`0x00B85040` / `0x00B85090`: the
   object's faction, or a faction whose patron, faction +0x754, is it). Which side is which is CONFIRMED by data: the
   only protectorate in the shipped start positions (egy_napoleon) has `egy_mamelukes` holding `protectorate` towards
-  `egy_ottomans`, so a faction holding `Protectorate` towards F is F's protectorate (`sight_factions`). The co-op
-  shared view (`0x008CA0B0` with faction +0x81C / +0x818) is not modelled (single player).
+  `egy_ottomans`, so a faction holding `Protectorate` towards F is F's protectorate (`sight_factions`). The
+  revolution state (`0x008CA0B0` with faction +0x81C / +0x818; CAMPAIGN_FIDELITY.md "Campaign over" (3), not a co-op
+  shared view) is not modelled (no revolutions in the model yet).
 - **Characters.** Each character sees a disc of his sight radius, character +0x2EC, saved as `CHARACTER` #17 f32
   (CONFIRMED: the loader `0x00991520` reads #14 bool +0x4C5, #15 u32 +0x4C8, #16 bool +0x4CC, #17 float +0x2EC,
   #18..#21 u32, #22 bool +0x4E0, ..., #34 bool +0x52C).
@@ -563,14 +564,17 @@ Model: `ntw_sim::campaign::visibility` (grid, cell sets, sight sources, shrouds)
   - the Peninsular turn-4 save: exact;
   - the start positions: 97..100 % covered, at most 0.4 % extra.
 
-**The shroud (`FACTION` `CAMPAIGN_SHROUD` v1; loader `0x00AFBFC0`; faction +0x6F8).**
-- It holds three quad trees and a bool: #0 explored (always a superset of #1), #1 visible now, #2 a hide set (empty in
-  every save, UNKNOWN), and #3 the shroud is on.
+**The shroud (`FACTION` `CAMPAIGN_SHROUD` v1; reader `0x00AE89A0`, writer `0x00AFBFC0`; faction +0x6F8).**
+- It holds three quad trees and a bool: #0 explored (always a superset of #1), #1 visible now, #2 the black shroud (empty in
+  every save but the tutorial's; `Shroud::hidden`), and #3 the shroud is on.
 - Which factions have one: the start positions give one to every playable faction (5 in eur, 4 in the Peninsular
-  campaign). The only vanilla new game in the evidence (the Peninsular saves) keeps only the human's; the eur saves
-  continue NapoleonRust files and keep all 5. INFERRED: a new campaign keeps only the human's (`set_human` drops the
-  others). What creates or drops one is not traced (UNKNOWN; faction +0x6F8 is only zeroed in the constructors
-  `0x008799D0` / `0x0087A190` / `0x0087BD70`). A faction without one sees everything; its AI keeps its own beliefs.
+  campaign). CONFIRMED (traced 2026-10-20, CHARACTER_UI_HOOKS.md black shroud "When a shroud is made"): the
+  campaign start `0x008DD090` (per faction, model ctor only, never on a load) deletes a non-human's shroud and makes
+  one (`0x00AE8910`) for a human that has none, then `0x00B66EF0(1)` sets every human's explored and visible to
+  what its sources see (a start position's sets replaced); the rebels skip it and keep theirs. So a new campaign keeps
+  only the human's, as the Peninsular saves show (the eur saves continue NapoleonRust files and keep all 5). Ours: `CampaignModel::start_shrouds`, from
+  `set_human`. UNKNOWN: the keep exception for a non-human (setup +0x20 and faction +0x6E1). A save reads the
+  shroud whole (`0x0087A190` → `0x00AE89A0`). A faction without one sees everything; its AI keeps its own beliefs.
 - Visible test (`0x00B7A150`): with the shroud on, the cell must be in #1 and not in #2.
 - The original updates the area round a source when it changes (`0x00A27F10`, `0x00B790F0` → `0x00B1B8B0`, which
   ORs the sources of the box of the old and new sight into the visible tree, `0x00B617E0` with its clear flag 0,
@@ -608,7 +612,7 @@ Model: `ntw_sim::campaign::visibility` (grid, cell sets, sight sources, shrouds)
   (`0x00A285E0`; model: after every walk, for the mover and the army he carries), and when a force's units change
   (`0x008B4260`; model: PROVISIONAL, picked up at the next turn start or move).
 - **Knows** (`0x008CE880`, CONFIRMED). A faction knows its own characters. It knows a character with `subterfuge`
-  ≥ 1, or one flagged hidden, only once it has exposed him. It knows anyone else. (A human-ally case, faction +0x814
+  ≥ 1, or one flagged hidden, only once it has exposed him. It knows anyone else. (A revolution case, the current player's faction in a revolution on the revolutionaries' side, faction +0x814
   set and +0x81C clear, is not modelled.)
 - **Expose** (`0x008A8B30`, CONFIRMED). A character with `subterfuge` ≥ 1 is pushed onto the faction's list (+0x80C /
   +0x810, `FACTION` `EXPOSED_CHARACTERS[]` = {i32 id}) without a duplicate check. A hidden one is added only if not
@@ -743,7 +747,7 @@ Worker: `characters-ai6` on `NR-characters`, Ghidra copy `NR-spt-ghidra` with `S
 Every address is a static VA of Napoleon.exe 1.3.0.0.
 
 **The shroud (CONFIRMED).** The shroud object (`FACTION` `CAMPAIGN_SHROUD`, faction +0x6F8; constructor
-`0x00AE89A0`, loader `0x00AFBFC0`) holds three quad trees of {cols, rows, root, node} at +4 (#0 explored), +0x1C (#1
+`0x00AE89A0`, writer `0x00AFBFC0`) holds three quad trees of {cols, rows, root, node} at +4 (#0 explored), +0x1C (#1
 visible) and +0x34 (#2 hide), the faction id at +0x4C and the on flag at +0x50. `0x00B617E0(box, clear)` collects the
 sources in the box (`0x00BB2A00`: characters' and forces' +0x27C shapes, settlements' +0x200, slots', regions', the
 trade segments, and the faction sight object's +0x20 shape list) and ORs each into the visible tree (`0x00E0D750`,
@@ -753,8 +757,9 @@ character destructor `0x0099D2D0`; the reveal `0x00B62350`; `0x00B73520`; `0x00B
 moved source's new shape into the explored tree (`lea ecx,[ebx+4]` before `0x00E0D720`). The whole visible tree is
 cleared and rebuilt from every source over the map only by `0x00B66EF0` — called last in the faction turn end
 `0x008BD0F0` (after the turn-end counters `0x009DA210`, the regions' `0x00A786C0` and `FactionTurnEnd`; skipped for a
-faction sharing a human ally's view, +0x81C) and by the setups `0x008DD090` (the player record), `0x008BD4F0` (the
-share undone) — and by `0x00B67150` (`0x008EE3E0`, sharing a human's view). So within a turn the visible set only
+faction in a revolution on the revolutionaries' side, +0x814 set and +0x81C clear) and by the setups `0x008DD090` (the
+player record), `0x008BD4F0` (the revolution ended) — and by `0x00B67150` (`0x008EE3E0`, the revolution begun; the
+"shared view" reading corrected by campover2, CAMPAIGN_FIDELITY.md "Campaign over" (3)). So within a turn the visible set only
 grows; the AI saves' ≤ 1 % extra of round 7 are moves after their last turn end. Model: `refresh_shroud(f, true)` in
 `TurnStep::FactionEnd`, `refresh_shroud(f, false)` at the turn start and after walks. Test:
 `campaign::tests::the_visible_set_grows_during_the_turn_and_is_rebuilt_at_the_turn_end`.
@@ -925,8 +930,9 @@ step three. Three things closed, one left open.
   `colonel`, `captain`, `gentleman`, `Eastern_Scholar`, `missionary`, …) — and uses that row only
   as a **guard** (absent, or `this+0x514 != 0` via the 11-byte `0x008CEEF0`, and the lookup returns
   0). What it returns instead is `0x00F9C2A0`, the value of a runtime string hash keyed by that
-  agent-type name plus `*(*(world_singleton+0x10)+0x10)` — `0x008F3490` is that 9-byte getter, and
-  `FUN_008B9DE0` its singleton. So **the price is one value per (agent type, culture)**, read from a
+  agent-type name plus the passed faction's culture key (corrected 2026-10-20, see round 3 below:
+  `GetFactionSubcultureRecord` `0x008F3490` gives the faction's subculture record, whose +0x10 is its
+  culture). So **the price is one value per (agent type, culture)**, read from a
   hash table built at load time, not a field of the promoted unit's row. The identity of the row
   behind that hash is still **UNKNOWN**.
 - **`units` column #7 `unknown_3c` is INFERRED unlikely as the price** (was "REFUTED"; the 2026-10-06
@@ -965,13 +971,20 @@ the probe is now the only way in.** Round 2 left one specific lead: trace what f
   reads `*(this+0x1AC)` and hands it straight to `0x00F9C2A0`. The map is embedded in the row:
   **bucket count at `+0x3C`, bucket array at `+0x40`, 0x14-byte buckets, chained nodes
   `{next@+4, key@+8, value@+0x14}`, and the function returns `[node+0x14] + 0x2C`.**
-- **The key's second half is the faction's SUBCULTURE, not "a world string" as round 2 said.**
-  `0x008F3490` (9 bytes) is `*(FACTION_RECORD + 0x10)` = **`factions` column #2 @0x10**
-  (`subculture`, `sc_european_west`). `FUN_008B9DE0` (78 callers) is the lazy getter for the
-  **human faction's** `FACTION_RECORD`, cached at **`this+0x514`** and **defaulting to the
-  literal `"britain"`**; `FUN_00A257C0` (7 callers) is the same field with a fallback through
-  `world->+0x98->+0x10->+0x10`. So the price is **one value per (agent type, faction
-  subculture)** — keyed off the *player's* faction.
+- **The key's second half is the faction's CULTURE key, not "a world string" as round 2 said**
+  (corrected 2026-10-20, worker vsnotes, CONFIRMED by disassembly; round 3 had stopped one step
+  short at the subculture). `GetFactionSubcultureRecord` `0x008F3490` (9 bytes, `__thiscall` on a
+  `CampaignFaction`) returns `*(FACTION_RECORD + 0x10)`, the faction's **subculture record**
+  (`factions` column #2, e.g. `sc_european_west`; `SubcultureRecord`, 0x1C, built by `0x00F0CF60`:
+  key +0x00, culture record +0x10, #2 int +0x14, #3 group's `BATTLE_TERRAIN_FARM_RECORD` +0x18).
+  `0x008E27D0` then reads that record's +0x10 (the `CultureRecord`) and copies its key (`0x004F0750`
+  reads the string data at +0x0C) into the key handed to `0x00F9C2A0` (`0x008E2956`..`0x008E296F`).
+  `FUN_008B9DE0` (78 callers) is not a human-faction getter: it returns **its `this` faction's**
+  `FACTION_RECORD` (`CampaignFaction` +0x514), and only when that is null (the rebels) the
+  `"britain"` record; `FUN_00A257C0` (7 callers) is the same field with a fallback through
+  `world->+0x98->+0x10->+0x10`. `0x008E27D0` calls it on its faction argument (`[esp+0x34]`) after
+  `IsFactionWithoutRecord` `0x008CEEF0` has refused the rebels, so the fallback never applies there.
+  So the price is **one value per (agent type, culture)** of the faction asked about.
 - **The guard table is the `agents_tables` database, and its shipped file is name-only.**
   `0x00E0ED90` logs `Loading database: agents_table`; the inner table name registered by
   `0x00F94D00` is **`agents_tables`**, whose row reader is `0x00F94940` (reached through the

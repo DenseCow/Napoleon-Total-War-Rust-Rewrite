@@ -459,7 +459,8 @@ pub struct YearlyPass {
 
 /// The yearly character pass of the round end (`0x008A9920` → `0x00948CF0` → per faction `0x008BC650`
 /// → per character `0x009DA190`, CONFIRMED): it runs at the end of the round whose turn is the year's
-/// last (`turn_in_year + 1 == turns_per_year`). For every faction, every character: a death check by
+/// last (`turn_in_year + 1 == turns_per_year`). For every faction, every character in its list's
+/// order ([`super::world::World::characters_in_list_order`]): a death check by
 /// age (current year − birth year) unless he appeared less than 3 turns ago, then his ancillaries whose
 /// end year has come are dropped (`0x009D2E50`); the dead are removed after the faction's pass
 /// (`0x00A0C6F0` reason 3, natural causes).
@@ -486,7 +487,11 @@ pub fn yearly_character_pass(model: &mut CampaignModel) -> YearlyPass {
         if model.world.regions.values().any(|r| r.owner == f) {
             super::family::family_year(model, f, &hazards);
         }
-        let ids: Vec<CharacterId> = model.world.characters.values().filter(|c| c.faction == f).map(|c| c.id).collect();
+        // The faction's list (+0x768) in its order (`World::characters_in_list_order`): each draw goes
+        // to the character the exe draws for, and the dead die in that order (`0x008BC650` collects
+        // them walking the list, CONFIRMED).
+        let ids: Vec<CharacterId> =
+            model.world.characters_in_list_order().into_iter().filter(|c| model.world.characters[c].faction == f).collect();
         let mut dead = Vec::new();
         for c in ids {
             let Some(birth) = model.world.character_details.get(&c).and_then(|d| d.birth) else { continue };
@@ -536,7 +541,7 @@ impl CampaignModel {
     /// the item's target; the turn's queue step (`0x00B71FB0`) hands an item to the target's reinforcements only
     /// while +0x18 is set, so the finished unit appears in its settlement like any recruit.
     pub fn character_dies(&mut self, c: CharacterId) {
-        let Some(dead) = self.world.characters.remove(&c) else { return };
+        let Some(dead) = self.world.remove_character(c) else { return };
         self.world.character_details.remove(&c);
         self.world.sight_radius.remove(&c);
         // INFERRED: no faction keeps a dead character in its exposed list (the loader re-links the ids,
@@ -562,7 +567,7 @@ impl CampaignModel {
         }
         self.drop_recruitment_target(c);
         self.command_vacated(&dead);
-        // 0x0099D681: any raid he still holds ends with him (a commander's ended in the hand-over).
+        // 0x0099D62E (EndCharacterCommerceRaids): any raid he still holds ends with him (a commander's ended in the hand-over).
         self.clear_character_raids(c);
         for (f, i) in vacated {
             self.refill_post(f, i);
@@ -650,7 +655,7 @@ impl CampaignModel {
             successors.push(id);
             self.rebuild_force_zones(fid);
         }
-        self.hand_over_raids(old.id, &successors);
+        self.hand_over_raids(old.id, old.position, &successors);
         // He commands nothing now: his zone goes (`0x008DB3E0`).
         self.rebuild_zone(old.id);
     }

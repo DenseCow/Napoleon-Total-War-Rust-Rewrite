@@ -333,12 +333,16 @@ pub enum CampaignCommand {
         /// The target.
         b: FactionId,
     },
-    /// `a` and `b` make peace. Our own command (scripts use `force_make_peace`, W3 §6.3).
+    /// `a` and `b` make peace: the exe's `CCQ_MAKE_PEACE` (`HandleMakePeaceCommand` `0x00936710`; scripts
+    /// use `force_make_peace`, W3 §6.3).
     MakePeace {
-        /// First faction.
+        /// The proposer (its alliances get their suspended access back).
         a: FactionId,
-        /// Second faction.
+        /// The target.
         b: FactionId,
+        /// No `ceasefire_declared` messages (the command's byte: 0 from `force_make_peace` `0x0097AC90`,
+        /// 1 from `force_make_protectorate` `0x0097AA20`).
+        suppress_messages: bool,
     },
     /// A diplomatic action of `a` towards `b` that the other side has accepted (the AI's acceptance is §6):
     /// the relationship rules of [`treaties`](super::treaties).
@@ -710,7 +714,7 @@ impl CampaignModel {
                 {
                     return self.disembark(f, to);
                 }
-                self.walk(character, to, 0.0).map(|w| w.events)
+                self.walk(character, to, false).map(|w| w.events)
             }
             CampaignCommand::Embark { force, navy } => self.embark(force, navy),
             CampaignCommand::Disembark { force, to } => self.disembark(force, to),
@@ -759,9 +763,9 @@ impl CampaignModel {
                 self.check_turn(a)?;
                 self.declare_war_rules(a, b)
             }
-            CampaignCommand::MakePeace { a, b } => {
+            CampaignCommand::MakePeace { a, b, suppress_messages } => {
                 self.check_turn(a)?;
-                self.make_peace_rules(a, b)
+                self.make_peace_rules(a, b, suppress_messages)
             }
             CampaignCommand::Diplomacy { a, b, action } => {
                 self.check_turn(a)?;
@@ -837,6 +841,17 @@ impl CampaignModel {
     /// The path a character would take to `to`, with what it can reach this turn. `None` without
     /// a path. Without terrain the path is a straight line at the off-road cost.
     pub fn plan_path(&self, character: CharacterId, to: (Fixed20, Fixed20)) -> Option<PlannedMove> {
+        self.plan_path_with(character, to, false)
+    }
+
+    /// [`Self::plan_path`] towards a character or settlement standing at `to` (an attack, a merge,
+    /// entering a settlement, an agent's action): the search also opens the regions of the owner of
+    /// the region there ([`Self::path_region_gate`]'s `target`).
+    pub fn plan_path_to_target(&self, character: CharacterId, to: (Fixed20, Fixed20)) -> Option<PlannedMove> {
+        self.plan_path_with(character, to, true)
+    }
+
+    fn plan_path_with(&self, character: CharacterId, to: (Fixed20, Fixed20), target: bool) -> Option<PlannedMove> {
         let ch = self.world.characters.get(&character)?;
         let navy = self.force_of(character).and_then(|f| self.world.forces.get(&f)).is_some_and(|f| f.is_navy)
             || matches!(ch.kind, super::CharacterKind::Admiral | super::CharacterKind::Captain);
@@ -875,7 +890,9 @@ impl CampaignModel {
                     let family = super::movers::Family::of(ch.garrisoned_in.is_some());
                     let open7 = super::movers::open_shared(pm, pm.locate(from.0, from.1, mover, 2), pm.locate(goal.0, goal.1, mover, 2));
                     let is_blocked = |q: usize| super::movers::kind7_closed(&view, family, &open7, q);
-                    let raw = view.find_path_avoiding(from, goal, mover, &by_id, &is_blocked)?;
+                    // The region gate (zones module docs): on for an army or a fleet, off for an agent.
+                    let gate = if info.agent { None } else { self.path_region_gate(ch.faction, target.then_some(goal)) };
+                    let raw = view.find_path_gated(from, goal, mover, &by_id, &is_blocked, gate.as_deref())?;
                     let p = super::polysmooth::smooth_view(&view, &raw, &is_blocked);
                     // Run-time pieces are reported as the static polygon they were cut from.
                     let polys = p.polys.iter().map(|&q| view.origin_of(q as usize) as u32).collect();
@@ -912,19 +929,20 @@ impl CampaignModel {
             let arrived = self.world.characters.get(&c).is_some_and(|ch| ch.position == to);
             return Ok((c, Walk { events, arrived }));
         }
-        Ok((c, self.walk(c, to, 0.0)?))
+        Ok((c, self.walk(c, to, false)?))
     }
 
-    /// Moves a character towards `to`, stopping `stop_short` map units before it, as far as its
-    /// action points reach. Errors (and changes nothing) if it cannot move at all.
-    pub(crate) fn walk(&mut self, character: CharacterId, to: (Fixed20, Fixed20), stop_short: f32) -> Result<Walk, CommandError> {
-        let plan = self.plan_path(character, to).ok_or(CommandError::NoPath)?;
+    /// Moves a character towards `to` as far as its action points reach. `target`: a character or
+    /// settlement stands at `to` ([`Self::plan_path_to_target`]), and the walk stops
+    /// [`CONTACT_DISTANCE`] map units before it. Errors (and changes nothing) if it cannot move at all.
+    pub(crate) fn walk(&mut self, character: CharacterId, to: (Fixed20, Fixed20), target: bool) -> Result<Walk, CommandError> {
+        let plan = self.plan_path_with(character, to, target).ok_or(CommandError::NoPath)?;
         let pts = &plan.path.points;
-        // The last point to aim for: the first one within `stop_short` of the goal.
+        // The last point to aim for: the first one within contact distance of the target.
         let goal = (to.0.to_f32(), to.1.to_f32());
-        let target_idx = if stop_short > 0.0 {
+        let target_idx = if target {
             pts.iter()
-                .position(|&(x, z)| ((x - goal.0).powi(2) + (z - goal.1).powi(2)).sqrt() <= stop_short)
+                .position(|&(x, z)| ((x - goal.0).powi(2) + (z - goal.1).powi(2)).sqrt() <= CONTACT_DISTANCE)
                 .unwrap_or(pts.len() - 1)
         } else {
             pts.len() - 1
@@ -953,9 +971,12 @@ impl CampaignModel {
         // After a move `0x00A285E0` runs, in this order (CONFIRMED, disassembly): the sight from the
         // new place for the mover and each army he carries (`0x00A27F10` → `0x00B1B8B0`; the model
         // recomputes the whole set, CHARACTERS_FIDELITY.md §10), the zones of control (`0x00A28440`,
-        // [`super::zones`]), then the hidden flags (`0x009D3000`). INFERRED: the walk floods the zones;
-        // `0x00A285E0` (a virtual, character vtable `0x0136A62C` slot +0x20) floods only when its first
-        // argument is 1, and the value its move callers pass is not traced (PATHFINDING.md §8).
+        // [`super::zones`]), then the hidden flags (`0x009D3000`). `0x00A285E0` (a virtual, character
+        // vtable `0x0136A62C` slot +0x20) runs the zones and the hidden flags only when its first argument
+        // is 1, the step that sets the character down again (+0x1B7 cleared at `0x00A28855`); argument 0
+        // keeps him lifted off the map (slot +0x1C `0x00A28B50`) and runs only the sight, argument 2
+        // returns at `0x00A2860D`. INFERRED: a walk's last step passes 1, so the walk runs both (the move
+        // callers that pass it are not traced; PATHFINDING.md §8).
         let faction = self.world.characters[&character].faction;
         self.refresh_shroud(faction, false);
         self.rebuild_moved_zones(character);
@@ -987,7 +1008,7 @@ impl CampaignModel {
             return Err(CommandError::Unsupported("a navy and an army cannot fight"));
         }
         let to = self.force_position(target).ok_or(CommandError::UnknownForce(target))?;
-        let walk = self.walk(c, to, CONTACT_DISTANCE)?;
+        let walk = self.walk(c, to, true)?;
         let mut events = walk.events;
         if walk.arrived {
             // A force inside a settlement is attacked together with the settlement's defenders.
@@ -1032,7 +1053,7 @@ impl CampaignModel {
             return Err(CommandError::Unsupported("the receiving force is full"));
         }
         let to = self.force_position(into).ok_or(CommandError::UnknownForce(into))?;
-        let walk = self.walk(c, to, CONTACT_DISTANCE)?;
+        let walk = self.walk(c, to, true)?;
         let mut events = walk.events;
         if walk.arrived {
             self.merge_units(force, into, &mut events);
@@ -1113,7 +1134,7 @@ impl CampaignModel {
         if hostile && self.world.stance(fa, owner) != Stance::War {
             return Err(CommandError::NotAtWar(fa, owner));
         }
-        let walk = self.walk(c, pos, CONTACT_DISTANCE)?;
+        let walk = self.walk(c, pos, true)?;
         let mut events = walk.events;
         if !walk.arrived {
             return Ok(events);
@@ -1182,6 +1203,9 @@ impl CampaignModel {
             TaxClass::Lower => f.tax_lower = level,
             TaxClass::Upper => f.tax_upper = level,
         }
+        // The running economics record takes the new taxes (`0x00BC5380` lower / `0x00BC5440` upper end
+        // with `0x00BBD7C0(0)`, CONFIRMED).
+        super::economy::refresh_running_income(self, faction, super::economy::RunningIncome::Taxes);
         Ok(vec![CampaignEvent::GovernorshipTaxRateChanged { faction }])
     }
 

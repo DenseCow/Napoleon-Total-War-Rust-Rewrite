@@ -7,11 +7,12 @@
 //! [`ScriptHost::apply`] (a `CampaignCommand`). Lua is single-threaded, so the host is a non-`Send`
 //! resource.
 //!
-//! Controls (PROVISIONAL bindings; the original's are in `text/default_keys.xml`, not read yet):
-//! left click selects an army, navy or agent; right click (without dragging) orders: move to the
-//! ground, attack an enemy army, merge with an own army, board an own fleet (an embarked army
-//! lands where it is ordered), or enter a settlement. `Return` ends the
-//! turn (the HUD button does too). The save shortcuts (CTRL+S, CTRL+L, ESCAPE) are the HUD's
+//! Controls: left click selects an army, navy or agent; right click (without dragging) orders:
+//! move to the ground, attack an enemy army, merge with an own army, board an own fleet (an
+//! embarked army lands where it is ordered), or enter a settlement. `Return` ends the turn (the
+//! HUD button does too; PROVISIONAL: written here, while `text/default_keys.xml` maps `end_turn`
+//! to the `button_end_turn` component, which ours does not dispatch yet). The root's shortcuts
+//! (quick save, quick load, escape menu...) are read from that file by the HUD
 //! (`super::hud::keys`).
 
 use std::collections::HashMap;
@@ -21,6 +22,7 @@ use std::sync::Arc;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use ntw_script::ScriptHost;
+use ntw_sim::campaign::outcome::OutcomeMovie;
 use ntw_sim::campaign::{CampaignCommand, CampaignEvent, CampaignModel, CharacterId, CharacterKind, FactionId, ForceId, RegionId};
 use ntw_sim::fixed::Fixed20;
 
@@ -52,6 +54,9 @@ pub struct CampaignSim {
     pub selected_fort: Option<RegionId>,
     /// Paths to animate, by character (logic x, z), from the last command.
     pub moves: Vec<(CharacterId, Vec<(f32, f32)>)>,
+    /// Defeat / victory movies the model queued (`CampaignEvent::OutcomeMovie`), for the HUD's movie
+    /// panel; drained by `hud::update`.
+    pub outcome_movies: Vec<(FactionId, OutcomeMovie)>,
     /// A short status line for the log and the harness.
     pub last_message: String,
     /// Harness (`--campaign-demo`): a fixed logic (x, z) for the path preview instead of the cursor.
@@ -80,19 +85,20 @@ pub struct CampaignSaver {
 }
 
 impl CampaignSaver {
-    /// The header a save written now carries (time of saving = now).
-    fn header(&self, model: &CampaignModel) -> ntw_campaign::CampaignInfo {
+    /// The header a save written now carries (time of saving = now), its season `season_name` (the
+    /// HUD's `season_string`, [`ntw_script::ui::CampaignSaves::current_info`]).
+    fn header(&self, model: &CampaignModel, season_name: &str) -> ntw_campaign::CampaignInfo {
         let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as u32);
-        ntw_campaign::own_save::save_header(&self.info, model, &self.human, ts, &self.pictures)
+        ntw_campaign::own_save::save_header(&self.info, model, &self.human, season_name, ts, &self.pictures)
     }
 }
 
 impl ntw_script::ui::CampaignSaves for CampaignSaver {
-    fn current_info(&self) -> ntw_campaign::CampaignInfo {
-        self.header(&self.script.state().model)
+    fn current_info(&self, season_name: &str) -> ntw_campaign::CampaignInfo {
+        self.header(&self.script.state().model, season_name)
     }
 
-    fn save(&self, path: &std::path::Path) -> Result<(), String> {
+    fn save(&self, path: &std::path::Path, season_name: &str) -> Result<(), String> {
         // The scripts write their `save_value` slots during `SavingGame` (CAMPAIGN_DATA.md §4).
         let (values, report) = self.script.save_values();
         for e in report.errors {
@@ -109,7 +115,7 @@ impl ntw_script::ui::CampaignSaves for CampaignSaver {
                 // The scripts' restricted building levels and units are in the model.
                 script_values: script_values_out(&values),
             };
-            (ntw_campaign::own_save::write(&self.header(&st.model), &data), hash)
+            (ntw_campaign::own_save::write(&self.header(&st.model, season_name), &data), hash)
         };
         let bytes = saved.map_err(|e| e.to_string())?;
         if let Some(dir) = path.parent() {
@@ -162,6 +168,9 @@ impl CampaignSim {
                     if let CampaignEvent::CharacterMoved { character, path } = e {
                         self.moves.push((*character, path.clone()));
                     }
+                    if let CampaignEvent::OutcomeMovie { faction, movie } = e {
+                        self.outcome_movies.push((*faction, movie.clone()));
+                    }
                     if let CampaignEvent::ConstructionItemDropped { region, slot, level_key } = e {
                         warn!("Campaign: dropped construction item {level_key} in region {region:?}: its slot {slot:?} does not exist");
                     }
@@ -187,9 +196,9 @@ impl CampaignSim {
         self.command(CampaignCommand::EndTurn);
         let m = self.model();
         let msg = format!(
-            "Turn {} ({} {}), treasury {}",
+            "Turn {} (month {} of {}), treasury {}",
             m.calendar.turn_number(),
-            month_name(m.calendar.date.month),
+            m.calendar.date.month + 1,
             m.calendar.date.year,
             m.faction_by_key(self.human()).map_or(0, |f| f.treasury)
         );
@@ -197,14 +206,6 @@ impl CampaignSim {
         info!("Campaign: end turn -> {msg}");
         self.last_message = msg;
     }
-}
-
-/// English month name for logs.
-pub fn month_name(m: u32) -> &'static str {
-    ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
-        .get(m as usize)
-        .copied()
-        .unwrap_or("?")
 }
 
 /// A character's marker on the map.
@@ -615,6 +616,17 @@ pub fn order_for(m: &CampaignModel, me: CharacterId, x: f32, z: f32) -> Option<C
     Some(CampaignCommand::MoveForce { force, to })
 }
 
+/// Whether a click on (x, z) walks towards a character or settlement standing there (an attack, a
+/// merge, entering a settlement), so its path search also opens that owner's regions
+/// ([`CampaignModel::plan_path_to_target`]). An embark walks as a plain move (`embark.rs`).
+/// Derived from [`order_for`], so the move preview plans exactly what the click would.
+pub fn order_targets(m: &CampaignModel, me: CharacterId, x: f32, z: f32) -> bool {
+    matches!(
+        order_for(m, me, x, z),
+        Some(CampaignCommand::AttackForce { .. } | CampaignCommand::MergeForces { .. } | CampaignCommand::EnterSettlement { .. })
+    )
+}
+
 /// Mouse and keyboard input on the map.
 #[allow(clippy::too_many_arguments)]
 pub fn input(
@@ -628,9 +640,9 @@ pub fn input(
     mut right_down: Local<Option<Vec2>>,
 ) {
     let (Some(mut sim), Some(ground)) = (sim, ground) else { return };
-    // Return ends the turn unless the HUD took it this frame (a text field or a panel that steals
-    // it, e.g. the save panel's name field).
-    if keys.just_pressed(KeyCode::Enter) && !hud.as_ref().is_some_and(|h| h.keys_taken) {
+    // Return ends the turn unless the HUD took it this frame or holds the input focus (the exe runs
+    // no key binding then, 0x00EEE1E0; the camera keys use the same `text_focused` gate).
+    if keys.just_pressed(KeyCode::Enter) && !hud.as_ref().is_some_and(|h| h.keys_taken || h.text_focused) {
         sim.end_turn();
     }
     // Clicks on the HUD belong to the HUD.
@@ -729,7 +741,10 @@ pub fn preview(
     let fresh = !matches!(&*cache, Some((k, g, _)) if *k == key && *g == sim.generation);
     if fresh {
         let to = (Fixed20::from_f64(x as f64), Fixed20::from_f64(z as f64));
-        let plan = sim.model().plan_path(me, to);
+        let plan = {
+            let m = sim.model();
+            if order_targets(&m, me, x, z) { m.plan_path_to_target(me, to) } else { m.plan_path(me, to) }
+        };
         *cache = plan.map(|p| {
             let path = super::arrows::ArrowPath {
                 generation: sim.generation,
@@ -745,18 +760,6 @@ pub fn preview(
         Some(_) => {}
         None => withdraw(&mut commands),
     }
-}
-
-/// A save's `save_value` slots as script values (`load_value` returns integers as numbers).
-pub fn script_values_in(values: &[ntw_campaign::script_values::ScriptSaveValue]) -> Vec<ntw_script::ScriptValue> {
-    use ntw_campaign::script_values::ScriptSaveValue as S;
-    values
-        .iter()
-        .map(|v| match *v {
-            S::Bool(b) => ntw_script::ScriptValue::Bool(b),
-            S::Int(i) => ntw_script::ScriptValue::Number(i as f32),
-        })
-        .collect()
 }
 
 /// The scripts' saved values as the original stores them: booleans as bool, everything else as
@@ -777,7 +780,10 @@ pub fn script_values_out(values: &[ntw_script::ScriptValue]) -> Vec<ntw_campaign
 /// Removes the campaign when leaving the mode.
 pub fn leave(world: &mut World) {
     world.remove_non_send::<CampaignSim>();
-    world.remove_non_send::<super::hud::CampaignHud>();
+    // A movie playing in a HUD panel (the defeat movie when its OK quits) stops with the campaign.
+    if let Some(stop) = world.remove_non_send::<super::hud::CampaignHud>().and_then(|mut h| h.stop_panel_movie()) {
+        world.write_message(stop);
+    }
     world.remove_resource::<MarkerAssets>();
     world.remove_resource::<CampaignGround>();
 }

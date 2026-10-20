@@ -2654,3 +2654,122 @@ fn round_description_is_the_loc_turn_name() {
     let log = s.host.take_log();
     assert!(!log.iter().any(|l| l.starts_with("ERROR") || l.contains("round_id")), "{log:?}");
 }
+
+/// The HUD date from the install's loc and root script (UI_FIDELITY.md §5.1): `season_string` and
+/// `CurrentSeasonString` name every season in English, the date reads "<round>\n<year>" in the
+/// `GrandCampaign` state, and with the turns display switch (`display_turns`, +0xD1) the root's
+/// `UpdateFactionFundsAndTurn` shows the turn number in the `Episodic` state.
+#[test]
+fn the_hud_date_shows_the_round_and_year_or_the_turn_number() {
+    let Some(s) = setup() else { return };
+    let season_name = |s: &Setup| -> String { s.host.lua().load("return CampaignUI.CurrentSeasonString()").eval().unwrap() };
+    for (code, name) in [(0, "Summer"), (1, "Winter"), (2, "Spring"), (3, "Autumn")] {
+        s.scripts.state_mut().model.calendar.date.season = code;
+        assert_eq!(season_name(&s), name, "season {code}");
+    }
+    let date = find(&s.host, s.root, "date").expect("the HUD date");
+    let state = |s: &Setup| s.host.world().get(date).map(|n| n.state_name().to_owned()).unwrap_or_default();
+    let (round, year, turn) = {
+        let st = s.scripts.state_mut();
+        let m = &st.model;
+        (m.calendar.round_id().expect("a 24-turn calendar"), m.calendar.date.year, m.calendar.turn_number())
+    };
+    let _ = s.host.take_log();
+    s.host.campaign_update_funds();
+    assert_eq!(state(&s), "GrandCampaign");
+    assert!(text(&s.host, date).ends_with(&format!("\n{year}")), "{:?} (round {round})", text(&s.host, date));
+    assert!(!text(&s.host, date).starts_with('\n'), "{:?}", text(&s.host, date));
+    s.scripts.state_mut().model.world.display_turns = true;
+    s.host.campaign_update_funds();
+    assert_eq!(state(&s), "Episodic");
+    assert_eq!(text(&s.host, date), turn.to_string());
+    let log = s.host.take_log();
+    assert!(!log.iter().any(|l| l.starts_with("ERROR") || l.starts_with("UNKNOWN")), "{log:?}");
+}
+
+/// The save header's season is the calendar season's loc on-screen name (`0x00888320` stores what
+/// `0x008ED110` returns, UI_FIDELITY.md §5.1), which our saves take from the HUD's `season_string`:
+/// every shipped start position's header season (#4) is that name of its own date's season code.
+#[test]
+fn the_shipped_headers_hold_the_seasons_on_screen_name() {
+    let Some(s) = setup() else { return };
+    let (_, db) = open_install(&data_dir());
+    let campaigns = data_dir().join("campaigns");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&campaigns).unwrap() {
+        let path = entry.unwrap().path().join("startpos.esf");
+        let Ok(bytes) = std::fs::read(&path) else { continue };
+        // A start position's header has no DATE: the season code is its calendar's.
+        let loaded = ntw_campaign::read(&bytes, &db).unwrap();
+        s.scripts.state_mut().model.calendar.date = loaded.model.calendar.date;
+        let shown: String = s.host.lua().load("return CampaignUI.CurrentSeasonString()").eval().unwrap();
+        assert_eq!(shown, loaded.info.header.season_name, "{}", path.display());
+        checked += 1;
+    }
+    assert_eq!(checked, 8, "the eight shipped start positions");
+    no_errors(&s.host);
+}
+
+/// France destroyed: the model's defeat movie opens the original `event_movie_panel` through the
+/// root's `InitialiseMoviePanel` (layout.root.lua), whose `ShowMovieType` attaches the movie to
+/// `movie_window`; dismissing it runs the "ExitGame" exit (`CampaignUI.QuitToMainScreen`) and
+/// `CampaignUI.MovieDismissed`. A win's panel opens the campaign result as a victory instead.
+#[test]
+fn the_defeat_movie_panel_shows_the_movie_and_its_ok_quits() {
+    use ntw_sim::campaign::outcome::CampaignOutcome;
+    let Some(s) = setup() else { return };
+    errors(&s.host);
+    let (france, movie) = {
+        let st = s.scripts.state();
+        let f = st.model.faction_by_key("france").unwrap().id;
+        (f, st.model.outcome_movie(f, CampaignOutcome::Destroyed).unwrap())
+    };
+    assert!(s.host.campaign_outcome_movie(france, &movie));
+    assert!(errors(&s.host).is_empty());
+    let window = find(&s.host, s.root, "movie_window").expect("the movie panel's movie window");
+    let (node, attached) = s.host.attached_movie().expect("the movie is attached");
+    assert_eq!((node, &*attached), (window, "EUR_Lose_FR.bik"));
+    let panel = find(&s.host, s.root, "event_movie_panel").expect("the movie panel");
+    let env = s.host.script_env(panel).expect("the panel's script");
+    s.host.take_campaign_requests();
+    s.host.lua().load("DismissMovieEvent()").set_environment(env).exec().unwrap();
+    assert_eq!(s.host.take_campaign_requests(), vec![CampaignRequest::QuitToMainScreen]);
+    assert_eq!(s.host.attached_movie(), None);
+    assert!(errors(&s.host).is_empty());
+}
+
+#[test]
+fn the_victory_movie_panel_opens_the_campaign_result_as_a_victory() {
+    use ntw_sim::campaign::outcome::CampaignOutcome;
+    let Some(s) = setup() else { return };
+    errors(&s.host);
+    let (france, movie) = {
+        let st = s.scripts.state();
+        let f = st.model.faction_by_key("france").unwrap().id;
+        (f, st.model.outcome_movie(f, CampaignOutcome::Won { multiplayer_over: false }).unwrap())
+    };
+    assert!(s.host.campaign_outcome_movie(france, &movie));
+    let panel = find(&s.host, s.root, "event_movie_panel").expect("the movie panel");
+    let env = s.host.script_env(panel).expect("the panel's script");
+    s.host.lua().load("DismissMovieEvent()").set_environment(env).exec().unwrap();
+    assert!(s.host.take_campaign_requests().is_empty());
+    let result = find(&s.host, s.root, "campaign_result").expect("the campaign result panel");
+    let title = find(&s.host, result, "title_frame").expect("its title");
+    assert!(!text(&s.host, title).is_empty());
+    assert!(errors(&s.host).is_empty());
+}
+
+/// The minister card's fallback folder is the model's `CampaignRules::culture_alternates`, not a
+/// second read of the `cultures` table: a culture with no folder of its own falls to its alternate.
+#[test]
+fn minister_portrait_fallback_follows_the_models_alternate() {
+    let Some((s, _panel)) = britain_negotiates("austria") else { return };
+    {
+        let mut st = s.scripts.state_mut();
+        let rules = std::sync::Arc::make_mut(&mut st.model.rules);
+        rules.faction_cultures.insert("austria".into(), "no_such_culture".into());
+        rules.culture_alternates.insert("no_such_culture".into(), "middle_east".into());
+    }
+    let path: String = s.host.lua().load("return CampaignUI.MinisterPortraitPath('austria')").eval().unwrap();
+    assert_eq!(path, "ui/portraits/middle_east/Cards/minister/young/001.tga");
+}

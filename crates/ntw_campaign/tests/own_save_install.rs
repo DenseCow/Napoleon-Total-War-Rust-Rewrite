@@ -103,7 +103,7 @@ fn a_played_campaign_round_trips_through_our_own_save() {
         let d = m.world.character_details.get(c).expect("details");
         assert!(d.forename.starts_with("names_name_") && d.surname.starts_with("names_name_"), "{c:?} unnamed: {:?} {:?}", d.forename, d.surname);
     }
-    let info = own_save::save_header(&opened.loaded.info, m, "france", 1_790_000_000, &opened.map.theatre_pictures);
+    let info = own_save::save_header(&opened.loaded.info, m, "france", "Winter", 1_790_000_000, &opened.map.theatre_pictures);
     let data = SaveData {
         human: "france".into(),
         model: m.clone(),
@@ -219,4 +219,76 @@ fn the_original_map_display_is_the_map_files() {
     assert!(d.trees.is_some());
     assert!(d.river_texture.as_ref().is_ok_and(|b| b.starts_with(b"DDS ")), "river texture");
     assert!(d.arrow_model.as_ref().is_ok_and(|b| !b.is_empty()), "arrow model");
+}
+
+/// The historical events on the install: every campaign but the tutorial requires the events script,
+/// the 8 `events` rows survive the converter's checks (titles and texts present, `all_factions` a
+/// grouping) and post their messages; at the first event's date the human France, in
+/// `all_factions`, gets one event of that date, drawn with one campaign RNG draw.
+#[test]
+fn the_install_historical_events_reach_a_human_faction() {
+    use ntw_sim::campaign::events::{CampaignEvent, CampaignMessage};
+    use ntw_sim::campaign::historical_events::event_date;
+    let Some(f) = fixture() else { return };
+    let tutorial = source::open(f.files(), Start::New("tut_napoleon", None), &f.db).expect("open tut_napoleon");
+    assert!(!tutorial.loaded.model.rules.historical_events.scripted, "the tutorial does not require the events script");
+    let mut opened = source::open(f.files(), Start::New("eur_napoleon", None), &f.db).expect("open eur_napoleon");
+    let m = &mut opened.loaded.model;
+    let rules = std::sync::Arc::clone(&m.rules);
+    let events = &rules.historical_events;
+    assert!(events.scripted);
+    assert_eq!(events.events.len(), 8, "every vanilla row is kept");
+    assert!(events.events.iter().all(|e| e.posts_message && e.view_groups == ["all_factions"] && e.effect_groups.is_empty()));
+    let first = &events.events[0];
+    let date = event_date(first.year, first.turn_of_year, m.calendar.turns_per_year).expect("a date");
+    let same_date: Vec<&str> =
+        events.events.iter().filter(|e| event_date(e.year, e.turn_of_year, m.calendar.turns_per_year) == Some(date)).map(|e| e.key.as_str()).collect();
+    let france = m.faction_by_key("france").expect("france").id;
+    m.turn.humans = vec![france];
+    m.calendar.date = date;
+    let mut expected_rng = m.rng;
+    let pick = expected_rng.uniform_below(same_date.len() as u32) as usize;
+    let mut out = Vec::new();
+    m.historical_events_round_start(&mut out);
+    let got: Vec<(_, &str)> = out
+        .iter()
+        .filter_map(|e| match e {
+            CampaignEvent::Message { recipient, message: CampaignMessage::HistoricalEvent { event } } => Some((*recipient, event.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(got, [(france, same_date[pick])]);
+    assert_eq!(m.rng, expected_rng, "one draw");
+}
+
+/// A new campaign's shroud setup (`0x008DD090` → `0x00AE8910`, [`CampaignModel::start_shrouds`]):
+/// on the tutorial map, the only one with black shroud outlines, a human the start position gave no
+/// shroud starts wholly under the black shroud; on the European map (no outlines) its black shroud
+/// is empty. Only the human keeps a shroud. Once the campaign has started, as every loaded save
+/// has, `set_human` leaves the shroud as it is.
+#[test]
+fn the_install_new_campaign_shroud_starts_black_on_the_tutorial_map() {
+    let Some(f) = fixture() else { return };
+    for (key, black) in [("tut_napoleon", true), ("eur_napoleon", false)] {
+        let mut opened = source::open(f.files(), Start::New(key, None), &f.db).expect("open");
+        let l = &mut opened.loaded;
+        assert_eq!(!l.model.world.black_shroud_outlines.is_empty(), black, "{key}: outlines");
+        let human_key = l.info.header.faction_key.clone();
+        let human = l.model.faction_by_key(&human_key).expect("the header's faction").id;
+        l.model.world.shrouds.remove(&human);
+        assert!(l.set_human(&human_key));
+        let grid = l.model.world.sight_grid.expect("a sight grid");
+        assert_eq!(l.model.world.shrouds.keys().copied().collect::<Vec<_>>(), [human], "{key}: only the human keeps a shroud");
+        let s = &l.model.world.shrouds[&human];
+        let cells = grid.cols as usize * grid.rows as usize;
+        assert_eq!(s.hidden.len(), if black { cells } else { 0 }, "{key}: black shroud");
+        assert!(s.active && s.explored == s.visible && !s.visible.is_empty(), "{key}: the new shroud sees its sources");
+        l.model.start_campaign();
+        let mut saved = l.model.world.shrouds[&human].clone();
+        saved.hidden.unset(0, 0);
+        saved.explored.set(0, 0);
+        l.model.world.shrouds.insert(human, saved.clone());
+        assert!(l.set_human(&human_key));
+        assert_eq!(l.model.world.shrouds.get(&human), Some(&saved), "{key}: a started campaign keeps its shroud");
+    }
 }

@@ -27,7 +27,7 @@
 use super::ids::{FactionId, ForceId, RegionId};
 use super::effects::{BonusKind, Effects};
 use super::rules::{CampaignRules, TaxClass};
-use super::world::{CampaignModel, Region, SlotRef};
+use super::world::{CampaignModel, EconomyRecord, Region, SlotRef};
 
 /// One faction's income for one turn, split into its parts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -276,7 +276,7 @@ pub fn trade_partners(model: &CampaignModel, faction: FactionId) -> Vec<FactionI
 
 /// Whether `b` is one of `a`'s [`trade_partners`].
 pub fn is_trade_partner(model: &CampaignModel, a: FactionId, b: FactionId) -> bool {
-    model.world.relationships.get(&(a, b)).is_some_and(|r| r.trade_agreement)
+    model.world.trade_held(a, b)
         && model.world.factions.contains_key(&b)
         && model.world.stance(a, b) != super::Stance::War
 }
@@ -461,26 +461,290 @@ pub fn faction_income_with(model: &CampaignModel, fx: &Effects, faction: Faction
 /// [`faction_income_with`] with the upkeep supplied (a caller that already has the unit upkeep passes it,
 /// so the forces are walked once). `upkeep` is not called for a faction that does not exist.
 pub fn faction_income_with_upkeep(model: &CampaignModel, fx: &Effects, faction: FactionId, upkeep: impl FnOnce() -> i32) -> Income {
-    let Some(f) = model.world.factions.get(&faction) else { return Income::default() };
-    let taxes = model.world.regions.values().filter(|r| r.owner == faction).map(|r| region_taxes_with(model, fx, r)).sum();
+    if !model.world.factions.contains_key(&faction) {
+        return Income::default();
+    }
+    let taxes = faction_taxes_with(model, fx, faction);
+    let other = other_income(model, faction);
+    let trade = trade_routes_value(model, faction);
+    let raiding = model.raid_income(faction);
+    Income { taxes, trade, raiding, other, upkeep: upkeep() }
+}
+
+/// A faction's other income (category 11, which `0x00BBC710` writes at the faction's load,
+/// `0x0087AD51`): campaign variable `faction_gdp_other`, or `faction_gdp_other_minor` for a faction
+/// that is not a major power; 0 for the rebels and an unknown faction.
+pub fn other_income(model: &CampaignModel, faction: FactionId) -> i32 {
+    let Some(f) = model.world.factions.get(&faction) else { return 0 };
+    if model.world.is_rebel_faction(faction) {
+        return 0;
+    }
     // CONFIRMED: the major-power flag (faction +0x524, `FactionDetails::major`) picks the variable.
     // Without loaded details (tests, tools) the `factions` category stands in (INFERRED).
     let minor = match model.world.faction_details.get(&faction).and_then(|d| d.major) {
         Some(major) => !major,
         None => model.rules.faction_categories.get(&f.key).is_some_and(|c| c == "minor"),
     };
-    let other = if f.key.is_empty() {
-        0 // the rebel faction
-    } else if minor {
+    if minor {
         model.rules.var("faction_gdp_other_minor", model.rules.var("faction_gdp_other", 0.0)) as i32
     } else {
         model.rules.var("faction_gdp_other", 0.0) as i32
-    };
-    let trade = trade_routes_value(model, faction);
-    let raiding = model.raid_income(faction);
-    Income { taxes, trade, raiding, other, upkeep: upkeep() }
+    }
 }
 
+/// A faction's taxes for the turn: [`region_taxes_with`] summed over the regions it owns (the upper
+/// classes' `0x00AB5560` by `0x008F9E50` plus the lower classes' `0x00A8C2E0` by `0x008D22F0`, CONFIRMED).
+pub fn faction_taxes_with(model: &CampaignModel, fx: &Effects, faction: FactionId) -> i32 {
+    model.world.regions.values().filter(|r| r.owner == faction).map(|r| region_taxes_with(model, fx, r)).sum()
+}
+
+/// One income category of a faction's running economics record that `0x00BBD7C0` writes from the
+/// current state (its argument 0 or 2; argument 1, category 6, builds a vector through `0x00AA25C0`,
+/// discards it and writes 0: CONFIRMED by disassembly, and 0 in every record of the vanilla saves).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunningIncome {
+    /// Category 5, taxes ([`faction_taxes_with`]: `0x008F9E50` + `0x008D22F0`).
+    Taxes,
+    /// Category 7, trade ([`trade_routes_value`], `GetFactionInternationalTradeIncome` `0x00BB3490`).
+    Trade,
+}
+
+/// `faction`'s running economics record: the last of its history (record `(cursor − 1) mod 10`,
+/// `0x00BABE00`), which the round end pays and [`super::World::last_income`] reads. A faction
+/// without one gets a new record first: the exe's economics always holds one
+/// (`ConstructNewFactionEconomics` `0x00B96100` starts with one, CONFIRMED), into which the new-faction
+/// path writes the other income (`0x0087BD70` → `0x00BBC710`, CONFIRMED). `None` for an unknown faction.
+fn running_record(model: &mut CampaignModel, faction: FactionId) -> Option<&mut EconomyRecord> {
+    if !model.world.factions.contains_key(&faction) {
+        return None;
+    }
+    if model.world.economy_history.get(&faction).is_none_or(|h| h.is_empty()) {
+        let mut first = [0; 25];
+        first[11] = other_income(model, faction);
+        model.world.economy_history.entry(faction).or_default().push(first);
+    }
+    model.world.economy_history.get_mut(&faction)?.last_mut()
+}
+
+/// Writes one income category of `faction`'s running record from the current state, as
+/// `0x00BBD7C0` does (its callers, CONFIRMED): taxes when a tax rate changes (`0x00BC5380` lower,
+/// `0x00BC5440` upper) and when a region changes owner (`TransferRegionToFaction` `0x00A64AC0`, old
+/// and new owner, the rebels too); trade after each trade update (`0x00BCB020` at `0x00BCE78E`,
+/// every listed faction); all three at the round start ([`refresh_running_record_round_start`]) and
+/// at the round end ([`settle_round`]). The exe's other caller, a region's tax exemption changing
+/// (`0x00AAA140`), has no counterpart: the model never changes an exemption.
+pub fn refresh_running_income(model: &mut CampaignModel, faction: FactionId, category: RunningIncome) {
+    let (index, value) = match category {
+        RunningIncome::Taxes => (5, faction_taxes_with(model, &Effects::compute_for(model, faction), faction)),
+        RunningIncome::Trade => (7, trade_routes_value(model, faction)),
+    };
+    if let Some(r) = running_record(model, faction) {
+        r[index] = value;
+    }
+}
+
+/// A faction's part of the round start for its running record (`RunFactionRoundStart` `0x008F1F60`
+/// step 1d, CONFIRMED; not for the rebels or a faction out of the game, which the caller skips): the
+/// land and naval upkeep ([`faction_upkeep_split_with`], `0x008B2150`) into the trackers +0x738 / +0x744
+/// ([`set_upkeep_trackers`]), then taxes, category 6 and trade (`0x00BC7080` → `0x00BBD7C0(0..2)`).
+pub fn refresh_running_record_round_start(model: &mut CampaignModel, faction: FactionId) {
+    let fx = Effects::compute_for(model, faction);
+    let (land, naval) = faction_upkeep_split_with(model, &fx, faction);
+    set_upkeep_trackers(model, faction, land, naval);
+    let taxes = faction_taxes_with(model, &fx, faction);
+    let trade = trade_routes_value(model, faction);
+    if let Some(r) = running_record(model, faction) {
+        (r[5], r[6], r[7]) = (taxes, 0, trade);
+    }
+}
+
+/// Adds `amount` to expense category `18 + group` of `faction`'s running record (`0x00BBE930(amount,
+/// group)`, CONFIRMED: an integer add, the converter the identity). Nothing for an unknown faction.
+fn book_expense(model: &mut CampaignModel, faction: FactionId, group: usize, amount: i32) {
+    if let Some(r) = running_record(model, faction) {
+        r[18 + group] = r[18 + group].wrapping_add(amount);
+    }
+}
+
+/// Adds `amount` to income category `8 + group` of `faction`'s running record (`0x00BBE9A0(amount,
+/// group)`, CONFIRMED: an integer add, the converter the identity). Nothing for an unknown faction.
+fn book_income(model: &mut CampaignModel, faction: FactionId, group: usize, amount: i32) {
+    if let Some(r) = running_record(model, faction) {
+        r[8 + group] = r[8 + group].wrapping_add(amount);
+    }
+}
+
+/// The treaty money of `owner`'s relationship towards `target` as its trackers book it, `sign` times
+/// (+1 after a change, −1 before one; every writer of the payments, the tribute or the income brackets
+/// its change with the two). CONFIRMED trackers:
+/// - each regular payment ([`super::details::RegularPayment`], 24 bytes on the payer's record) is an
+///   expense of group 4 (category 22) of the owner, its payer, and an income of group 0 (category 8)
+///   of the target, its payee: built by `0x00AE90A0` (`0x00AE5570` books the payer's line, then the
+///   payee's), copied by `0x00AE5540`, taken back by its destructor `0x0086A120` (the payee's, then the
+///   payer's through `0x0088CB40`);
+/// - the protectorate tribute (record +0x7AC, the owner its payer) an expense of group 6 (category 24)
+///   of the owner (`0x00AE55D0` in the record's constructor, setter `0x00AF8130`: new − old);
+/// - the patron income (record +0x7B8 / +0x7BC, the owner its receiver) an income of group 2
+///   (category 10) of the owner (`0x00BBE9A0(new − old, 2)` at each write).
+///
+/// A zero amount books nothing, so a faction without a history gets no record from it.
+pub(super) fn book_treaty_money(model: &mut CampaignModel, owner: FactionId, target: FactionId, sign: i32) {
+    let Some(r) = model.world.relationships.get(&(owner, target)) else { return };
+    let (paid, tribute, income) = (r.payments_total(), r.protectorate_tribute, r.protectorate_income);
+    for (faction, income_side, group, amount) in [(owner, false, 4, paid), (target, true, 0, paid), (owner, false, 6, tribute), (owner, true, 2, income)] {
+        if amount == 0 {
+            continue;
+        }
+        let amount = amount.wrapping_mul(sign);
+        if income_side {
+            book_income(model, faction, group, amount);
+        } else {
+            book_expense(model, faction, group, amount);
+        }
+    }
+}
+
+/// The tribute a protectorate pays its patron, which is also the patron's income from it
+/// (`0x00BBCD00`, CONFIRMED): categories 5 + 6 + 7 (taxes, 6, trade; `0x00B803A0` sums the record's
+/// i32s from +0x14 to +0x20, wrapping) of `protectorate`'s running record (`0x00BABE00`), divided by 5
+/// toward zero (the multiply by `0x66666667` with the sign fix). Both the tribute's and the income's
+/// writers read the protectorate's record. 0 without a history (the exe's fresh record has no taxes or
+/// trade yet).
+pub(super) fn protectorate_tribute_value(model: &CampaignModel, protectorate: FactionId) -> i32 {
+    model.world.last_economy_record(protectorate).map_or(0, |r| super::world::economy_sum(r, 5..8) / 5)
+}
+
+/// Sets `faction`'s land and naval upkeep trackers ([`super::World::upkeep_booked`]): each books the
+/// change, new − booked, into its running record's category 19 / 20 and keeps the new amount
+/// (`0x0088F950` / `0x0088F990`, CONFIRMED: the change is booked when the tracker is linked to its
+/// faction, which every faction's is from its load or creation on). Callers: the round start
+/// ([`refresh_running_record_round_start`]) and the round end's first pass
+/// ([`CampaignModel::prepare_round_end`]), as the exe's (`0x008F2048` / `0x008F2057`, `0x008E10BA` /
+/// `0x008E10C9`).
+pub fn set_upkeep_trackers(model: &mut CampaignModel, faction: FactionId, land: i32, naval: i32) {
+    if !model.world.factions.contains_key(&faction) {
+        return;
+    }
+    let booked = model.world.upkeep_booked.get(&faction).copied().unwrap_or([0, 0]);
+    book_expense(model, faction, 1, land.wrapping_sub(booked[0]));
+    book_expense(model, faction, 2, naval.wrapping_sub(booked[1]));
+    model.world.upkeep_booked.insert(faction, [land, naval]);
+}
+
+/// Sets `region`'s policing tracker ([`super::population::PopulationState::policing_booked`]) to
+/// `amount`: the change is booked into its owner's category 21 (`0x00A51230`, CONFIRMED: new − old
+/// through `0x00BBE930(_, 3)` when linked to an owner, which every region's is from its load on).
+pub fn set_policing_tracker(model: &mut CampaignModel, region: RegionId, amount: i32) {
+    let Some(r) = model.world.regions.get_mut(&region) else { return };
+    let change = amount.wrapping_sub(r.population_state.policing_booked);
+    r.population_state.policing_booked = amount;
+    let owner = r.owner;
+    book_expense(model, owner, 3, change);
+}
+
+/// `region`'s policing tracker follows an owner change (`TransferRegionToFaction` `0x00A64AC0` →
+/// `0x00AA16E0` → `0x00AAF220` at `0x00A65103`, CONFIRMED): its amount leaves the old owner's
+/// category 21 and joins the new owner's. Never reached for the same owner (`0x00A64AC0` returns at `0x00A64D13` first).
+pub fn move_policing_tracker(model: &mut CampaignModel, region: RegionId, old: FactionId, new: FactionId) {
+    let Some(amount) = model.world.regions.get(&region).map(|r| r.population_state.policing_booked) else { return };
+    book_expense(model, old, 3, amount.wrapping_neg());
+    book_expense(model, new, 3, amount);
+}
+
+/// The script's `other_income_mod(faction, amount)` (`0x0097BB70` → `0x00A15B30`, CONFIRMED). The Lua
+/// number is rounded as `treasury_mod`'s is (`0x010556D0`, FISTP). A positive amount is a lasting entry
+/// of income group 3: `amount` more in category 11 of `faction`'s running record, carried into every
+/// later record. A negative one, for a faction no human plays (a human's is dropped at `0x0097BBE3`), is
+/// an entry of expense group 0: `−amount` more in category 18. 0 or an unknown faction does nothing.
+/// The entries are not saved (CAMPAIGN_DATA.md §3): a load books the record without them
+/// ([`rebuild_running_record`]) and the shipped scripts add them again (spa_napoleon's `OnModelCreated`
+/// from its saved `VAR_other_income_boost_*`).
+pub fn script_other_income_mod(model: &mut CampaignModel, faction: FactionId, amount: f32) {
+    let amount = super::commands::fistp(amount);
+    if amount > 0 {
+        if let Some(r) = running_record(model, faction) {
+            r[11] = r[11].wrapping_add(amount);
+        }
+    } else if amount < 0 && !model.is_human(faction) {
+        book_expense(model, faction, 0, amount.wrapping_neg());
+    }
+}
+
+/// `faction`'s running record as the exe's load leaves it (`ConstructFactionEconomicsFromSave`
+/// `0x00B95B90` zero-fills categories 8..11 and 18..24, CONFIRMED; then the objects that track them book
+/// their amounts again as they load): 11 the other income ([`other_income`], `0x00BBC710` at `0x0087AD51`),
+/// 19 / 20 the upkeep trackers (`0x0088F950` / `0x0088F990` at `0x0087B548` / `0x0087B551`), 21 the
+/// policing trackers of the regions it owns (`0x00A456D0` → `0x00A51230`, then `0x00AAF220` when the
+/// region is linked to its owner), 9 the commerce raids' income ([`CampaignModel::raid_income`]; the
+/// live raid entries book their takes into group 1 and take them back when dropped, `0x00BBE9A0` /
+/// `0x00AC8810`, CONFIRMED, so 9 holds the sum of the takes). 8 / 10 / 22 / 24 the treaty money of the
+/// relationships (the record copy constructor `0x00AE9160` books each regular payment into its payer's 22
+/// and payee's 8, each tribute into its owner's 24 and each patron income into its owner's 10, CONFIRMED;
+/// [`book_treaty_money`]). The script's `other_income_mod` entries
+/// (11 and 18, [`script_other_income_mod`]; 18's only writers, `0x00984B30` / `0x00984B60` / `0x0099C2C0`)
+/// are not saved, so the load drops them as the exe's does. A faction without a history gets its record
+/// first ([`running_record`]), so later tracker changes add to the full base amounts; an unknown
+/// faction is left alone.
+pub fn rebuild_running_record(model: &mut CampaignModel, faction: FactionId) {
+    let raiding = model.raid_income(faction);
+    let other = other_income(model, faction);
+    let [land, naval] = model.world.upkeep_booked.get(&faction).copied().unwrap_or([0, 0]);
+    let policing = model.world.regions.values().filter(|r| r.owner == faction).fold(0i32, |a, r| a.wrapping_add(r.population_state.policing_booked));
+    let (mut paid_in, mut tribute_in, mut paid_out, mut tribute_out) = (0i32, 0i32, 0i32, 0i32);
+    for (&(owner, target), r) in &model.world.relationships {
+        if owner == faction {
+            paid_out = paid_out.wrapping_add(r.payments_total());
+            tribute_out = tribute_out.wrapping_add(r.protectorate_tribute);
+            tribute_in = tribute_in.wrapping_add(r.protectorate_income);
+        }
+        if target == faction {
+            paid_in = paid_in.wrapping_add(r.payments_total());
+        }
+    }
+    if let Some(r) = running_record(model, faction) {
+        r[8..12].fill(0);
+        r[18..25].fill(0);
+        (r[8], r[9], r[10], r[11]) = (paid_in, raiding, tribute_in, other);
+        (r[19], r[20], r[21], r[22], r[24]) = (land, naval, policing, paid_out, tribute_out);
+    }
+}
+
+impl CampaignModel {
+    /// The round end's first pass (`0x00948CF0` → `PrepareFactionRoundEnd` `0x008E1030` per listed faction,
+    /// CONFIRMED), before any faction's economy: the population factors of every listed faction's regions
+    /// ([`Self::refresh_population_factors`]); then, for each listed faction still in the game, not the
+    /// rebels, the upkeep trackers set to its land and naval upkeep (`0x008B2150(…, 1)` → `0x0088F950` /
+    /// `0x0088F990`, [`set_upkeep_trackers`]) and each owned region's policing tracker to its policing cost
+    /// (`0x00AB4400` → `0x00AB43A0`: `0x00A51230` with the cost of a freshly refreshed copy, the cost the
+    /// refresh just stored; [`set_policing_tracker`]). The pass's last step, the cannot-pay flag
+    /// (`0x00BBC7D0` on the running record's sums), is [`settle_round`]'s check.
+    pub fn prepare_round_end(&mut self) {
+        self.refresh_population_factors();
+        let factions: Vec<FactionId> = self.world.factions_in_turn_order().into_iter().filter(|&f| !self.is_rebel_faction(f) && self.in_the_game(f)).collect();
+        for faction in factions {
+            let fx = Effects::compute_for(self, faction);
+            let (land, naval) = faction_upkeep_split_with(self, &fx, faction);
+            set_upkeep_trackers(self, faction, land, naval);
+            let regions: Vec<(RegionId, i32)> = self.world.regions.values().filter(|r| r.owner == faction).map(|r| (r.id, r.population_state.policing_cost)).collect();
+            for (region, cost) in regions {
+                set_policing_tracker(self, region, cost);
+            }
+        }
+    }
+}
+
+/// The record the round end starts after paying `paid` (`0x00BB8EE0` → `0x00B955C0`, CONFIRMED):
+/// categories 8..11 and 18..24 carried over (the running income and expenses their trackers keep up,
+/// `0x00BBE930`), the one-off groups 0..4 and 12..17 and categories 5..7 cleared; then the end of
+/// `0x00BABE30` writes taxes, category 6 and trade again (`0x00BBD7C0(0..2)` at `0x00BAC093`).
+/// Nothing those read changes between the payment and that write, so they are `paid`'s.
+pub fn next_running_record(paid: &EconomyRecord) -> EconomyRecord {
+    let mut next = [0; 25];
+    next[8..12].copy_from_slice(&paid[8..12]);
+    next[18..25].copy_from_slice(&paid[18..25]);
+    (next[5], next[6], next[7]) = (paid[5], 0, paid[7]);
+    next
+}
 
 /// The `gdp_*` effects a building adds to its region's GDP, as `building_effects_junction` keys
 /// (mapped by `effect_bonus_value_basic_junction` to gdp_farm 4, gdp_industry 5, gdp_mine 6 and
@@ -716,7 +980,8 @@ pub enum Settlement {
     },
 }
 
-/// The round-end economy of one faction (0x00BABE30, then the regions' 0x00AB4410): if
+/// The round-end economy of one faction (0x00BABE30, then the regions' 0x00AB4410), paying its running
+/// record (income = the sum of categories 5..11, expenses = the sum of 18..24): if
 /// `treasury + income >= expenses` the treasury changes by `income − expenses` ([`super::treasury::cannot_pay`] /
 /// [`super::treasury::settle_round`], without the exe's 32-bit wrap: ORIGINAL BUG, `treasury` module docs). Otherwise the
 /// faction is bankrupt ([`Settlement::CannotPay`], CONFIRMED 0x00BABE30 / 0x00BA2030 /
@@ -732,35 +997,40 @@ pub fn settle_round(model: &mut CampaignModel, faction: FactionId) -> Settlement
     // The faction's effects, once for the whole step: nothing below changes their sources, except
     // desertion, after which they are computed again.
     let mut fx = Effects::compute_for(model, faction);
-    let (land_upkeep, naval_upkeep) = faction_upkeep_split_with(model, &fx, faction);
-    let income = faction_income_with_upkeep(model, &fx, faction, || land_upkeep + naval_upkeep);
-    let revenue = income.revenue();
-    // The turn's record goes to the history (0x00BABE30); its categories 5..11 are the ranking's
-    // Wealth (`0x00BBCC40`). PROVISIONAL: the model's record holds categories 5 (taxes), 7 (trade),
-    // 9 (commerce raiding: `0x00BBE9A0` books group 1 into category 9, CONFIRMED),
-    // 11 (other), 19 / 20 (land / naval upkeep); 6, 8, 10, 18, 21..24 and the one-off groups are
-    // not modelled (0).
-    let mut record = [0i32; 25];
-    record[5] = income.taxes;
-    record[7] = income.trade;
-    record[9] = income.raiding;
-    record[11] = income.other;
-    record[19] = land_upkeep;
-    record[20] = naval_upkeep;
-    let history = model.world.economy_history.entry(faction).or_default();
-    history.push(record);
-    if history.len() > super::world::ECONOMY_HISTORY_LEN {
-        history.remove(0);
+    // The running record (the history's last, `0x00BABE00`) is what `0x00BABE30` pays: its income
+    // 5..11 (`0x00BBE970`) and expenses 18..24 (`0x00BBE910`), plain 32-bit sums, CONFIRMED. Taxes (5)
+    // and trade (7) are as last refreshed ([`refresh_running_income`]: a building finished since counts
+    // from the next refresh, as in the exe); the expenses are the trackers' ([`set_upkeep_trackers`],
+    // [`set_policing_tracker`], set by the round end's first pass, [`CampaignModel::prepare_round_end`]).
+    // The other income (11) is booked at the faction's load or creation and by the script's
+    // `other_income_mod` ([`script_other_income_mod`]). The treaty money (income 8 / 10, expenses 22 / 24) is booked
+    // by its writers ([`book_treaty_money`]). The model keeps no tracker for income 9, so it writes it here:
+    // the commerce raids' income (the live raid entries book their takes into group 1 and take them back
+    // when dropped, `0x00BBE9A0` / `0x00AC8810`, CONFIRMED).
+    let raiding = model.raid_income(faction);
+    let (mut revenue, mut expenses) = (0i32, 0i32);
+    if let Some(running) = running_record(model, faction) {
+        running[9] = raiding;
+        revenue = running[5..12].iter().fold(0i32, |a, &v| a.wrapping_add(v));
+        expenses = running[18..25].iter().fold(0i32, |a, &v| a.wrapping_add(v));
+        // Then the next round's running record goes in at the cursor, the oldest of 10 dropping
+        // (`0x00BABE30`).
+        let next = next_running_record(running);
+        let history = model.world.economy_history.entry(faction).or_default();
+        history.push(next);
+        if history.len() > super::world::ECONOMY_HISTORY_LEN {
+            history.remove(0);
+        }
     }
     let mut result = Settlement::Paid;
     if let Some(f) = model.world.factions.get_mut(&faction) {
-        if super::treasury::cannot_pay(f.treasury, revenue, income.upkeep) {
+        if super::treasury::cannot_pay(f.treasury, revenue, expenses) {
             f.treasury = 0;
             let turns = model.world.bankrupt_turns.entry(faction).or_insert(0);
             *turns += 1;
             result = Settlement::CannotPay { first_turn: *turns == 1 };
         } else {
-            super::treasury::settle_round(&mut f.treasury, revenue, income.upkeep);
+            super::treasury::settle_round(&mut f.treasury, revenue, expenses);
             model.world.bankrupt_turns.remove(&faction);
         }
     }
@@ -772,7 +1042,7 @@ pub fn settle_round(model: &mut CampaignModel, faction: FactionId) -> Settlement
     // 0x008AE710: bankrupt armies desert from the second bankrupt turn in a row on (gate CONFIRMED, see
     // `bankrupt_desertion`).
     if matches!(result, Settlement::CannotPay { .. }) && model.world.bankrupt_turns.get(&faction).copied().unwrap_or(0) > 1 {
-        bankrupt_desertion(model, faction, revenue, income.upkeep);
+        bankrupt_desertion(model, faction, revenue, expenses);
         fx = Effects::compute_for(model, faction);
     }
     // Trade routes accumulate value (0x00BCB020 -> 0x00B05CC0, after the economy).

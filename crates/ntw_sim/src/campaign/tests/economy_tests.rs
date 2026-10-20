@@ -114,6 +114,8 @@ fn tax_efficiency_matches_the_original() {
 fn the_round_end_records_the_economy_history() {
     let mut m = test_model();
     let income = economy::faction_income(&m, A);
+    // The round start books upkeep, taxes and trade into A's first record (other income from creation).
+    economy::refresh_running_record_round_start(&mut m, A);
     for _ in 0..12 {
         economy::settle_round(&mut m, A);
     }
@@ -132,6 +134,105 @@ fn the_round_end_records_the_economy_history() {
         m.world.economy_history.insert(r, vec![[1000; 25]]);
         assert_eq!(m.world_net_income(), income.revenue() - income.upkeep);
     }
+}
+
+/// The next running record keeps the tracker categories 8..11 and 18..24, clears the one-off groups
+/// and category 6, and takes taxes and trade from the paid one (`0x00B955C0` then `0x00BBD7C0(0..2)`).
+#[test]
+fn the_next_running_record_carries_the_trackers() {
+    let paid: super::world::EconomyRecord = std::array::from_fn(|i| 100 + i as i32);
+    let next = economy::next_running_record(&paid);
+    for i in 0..25 {
+        let expected = match i {
+            5 | 7 | 8..=11 | 18..=24 => paid[i],
+            _ => 0,
+        };
+        assert_eq!(next[i], expected, "category {i}");
+    }
+}
+
+/// The round end pays the running record (`0x00BABE30` → `0x00BBE970` / `0x00BBE910`) and starts the
+/// next from it: categories the model does not keep (income 8, expenses 21 here) stay in the paid record
+/// and carry on; one-off spending (0..4, 12..17) stays in the paid record only. Category 11 is the
+/// record's, not recomputed.
+#[test]
+fn the_round_end_keeps_unmodelled_categories() {
+    let mut m = test_model();
+    let mut running = [0; 25];
+    (running[0], running[8], running[11], running[13], running[21]) = (500, 40, 7, 60, 77);
+    m.world.economy_history.insert(A, vec![running]);
+    economy::refresh_running_record_round_start(&mut m, A);
+    let income = economy::faction_income(&m, A);
+    let treasury = m.world.factions[&A].treasury;
+    economy::settle_round(&mut m, A);
+    let history = &m.world.economy_history[&A];
+    assert_eq!(history.len(), 2);
+    let (paid, next) = (&history[0], &history[1]);
+    assert_eq!((paid[0], paid[8], paid[11], paid[13], paid[21]), (500, 40, 7, 60, 77));
+    assert_eq!((paid[5], paid[7], paid[9]), (income.taxes, income.trade, income.raiding));
+    assert_eq!((next[0], next[8], next[11], next[13], next[21]), (0, 40, 7, 0, 77));
+    let revenue = income.taxes + income.trade + income.raiding + 40 + 7;
+    assert_eq!(m.world.last_income(A), revenue);
+    assert_eq!(m.world.last_expenses(A), income.upkeep + 77);
+    assert_eq!(m.world.factions[&A].treasury, treasury + revenue - income.upkeep - 77);
+}
+
+/// The round end pays the record's taxes as last refreshed, not the current ones (`0x00BABE30` pays the
+/// running record; `0x00BBD7C0(0)` writes taxes only at its callers).
+#[test]
+fn the_round_end_pays_the_recorded_taxes() {
+    let mut m = test_model();
+    economy::refresh_running_record_round_start(&mut m, A);
+    let recorded = *m.world.last_economy_record(A).unwrap();
+    // A region gets richer after the refresh: its taxes count only from the next refresh.
+    m.world.regions.get_mut(&RegionId(10)).unwrap().gdp += 5000;
+    assert_ne!(economy::faction_income(&m, A).taxes, recorded[5]);
+    let treasury = m.world.factions[&A].treasury;
+    economy::settle_round(&mut m, A);
+    let paid = m.world.economy_history[&A][0];
+    assert_eq!(paid[5], recorded[5]);
+    let (revenue, expenses): (i32, i32) = (paid[5..12].iter().sum(), paid[18..25].iter().sum());
+    assert_eq!(m.world.factions[&A].treasury, treasury + revenue - expenses);
+}
+
+/// The running record's taxes follow a tax-level change (`0x00BC5380` / `0x00BC5440` →
+/// `0x00BBD7C0(0)`) and a region's change of owner, for both owners (`0x00A6512D` / `0x00A6513E`).
+#[test]
+fn the_running_taxes_follow_tax_levels_and_owners() {
+    let mut m = test_model();
+    m.apply(CampaignCommand::SetTaxLevel { faction: A, class: TaxClass::Lower, level: "tax_high".into() }).unwrap();
+    assert_eq!(m.world.last_economy_record(A).unwrap()[5], economy::faction_income(&m, A).taxes);
+    m.apply(CampaignCommand::SetTaxLevel { faction: A, class: TaxClass::Upper, level: "tax_high".into() }).unwrap();
+    assert_eq!(m.world.last_economy_record(A).unwrap()[5], 2400);
+    m.world.economy_history.insert(B, vec![[0; 25]]);
+    assert!(m.transfer_region(RegionId(12), B));
+    assert_eq!(m.world.last_economy_record(A).unwrap()[5], economy::faction_income(&m, A).taxes);
+    assert_eq!(m.world.last_economy_record(B).unwrap()[5], economy::faction_income(&m, B).taxes);
+    assert_ne!(m.world.last_economy_record(A).unwrap()[5], 2400);
+}
+
+/// The round start writes taxes, category 6 and trade of each listed faction in the game into its
+/// running record and books the upkeep trackers' change, new − booked, into 19 / 20 (`0x008F1F60`
+/// step 1d, `0x0088F950` / `0x0088F990`).
+#[test]
+fn the_round_start_refreshes_the_running_record() {
+    let mut m = test_model();
+    m.world.economy_history.insert(A, vec![[9; 25]]);
+    economy::refresh_running_record_round_start(&mut m, A);
+    let income = economy::faction_income(&m, A);
+    let r = *m.world.last_economy_record(A).unwrap();
+    assert_eq!((r[5], r[6], r[7]), (income.taxes, 0, income.trade));
+    // Nothing was booked before: the whole upkeep is added to the 9 already there.
+    assert_eq!(r[19] + r[20], income.upkeep + 18);
+    // A second refresh with the same upkeep books nothing more.
+    economy::refresh_running_record_round_start(&mut m, A);
+    let r2 = m.world.last_economy_record(A).unwrap();
+    assert_eq!(r2[19] + r2[20], income.upkeep + 18);
+    // The other categories are left as they were.
+    assert_eq!((r[0], r[8], r[11], r[21]), (9, 9, 9, 9));
+    // A faction without a history gets one record.
+    economy::refresh_running_record_round_start(&mut m, B);
+    assert_eq!(m.world.economy_history[&B].len(), 1);
 }
 
 #[test]
@@ -161,8 +262,9 @@ fn exemption_town_wealth_and_bankruptcy() {
         r.gdp = 0;
         r.base_gdp = 0;
     }
+    economy::refresh_running_record_round_start(&mut m, B);
     m.world.factions.get_mut(&B).unwrap().treasury = -150;
-    // B: income 100, upkeep 20: -150 + 100 < 20.
+    // B's record: income 100, upkeep 20: -150 + 100 < 20.
     // Bankrupt: the treasury is emptied and the capital's growth offset grows by 2 (at most 6).
     m.world.faction_details.entry(B).or_default().capital = Some(RegionId(11));
     assert_eq!(economy::settle_round(&mut m, B), economy::Settlement::CannotPay { first_turn: true });
@@ -324,7 +426,7 @@ fn command_validation_errors_leave_model_unchanged() {
         ),
         (CampaignCommand::DeclareWar { a: A, b: A }, CommandError::SameFaction(A)),
         (CampaignCommand::DeclareWar { a: A, b: FactionId(99) }, CommandError::UnknownFaction(FactionId(99))),
-        (CampaignCommand::MakePeace { a: A, b: B }, CommandError::NotAtWar(A, B)),
+        (CampaignCommand::MakePeace { a: A, b: B, suppress_messages: false }, CommandError::NotAtWar(A, B)),
         (CampaignCommand::AttackForce { force: ForceId(1000), target: ForceId(1001) }, CommandError::NotAtWar(A, B)),
         (CampaignCommand::MergeForces { force: ForceId(1000), into: ForceId(1001) }, CommandError::WrongFaction),
         (
@@ -389,7 +491,7 @@ fn war_and_peace_are_symmetric() {
     assert_eq!(m.world.stance(B, A), Stance::War);
     assert!(m.world.diplomacy_is_symmetric());
     assert_eq!(m.apply(CampaignCommand::DeclareWar { a: B, b: A }), Err(CommandError::AlreadyAtWar(B, A)));
-    m.apply(CampaignCommand::MakePeace { a: B, b: A }).unwrap();
+    m.apply(CampaignCommand::MakePeace { a: B, b: A, suppress_messages: false }).unwrap();
     assert_eq!(m.world.stance(A, B), Stance::Neutral);
     assert!(m.world.diplomacy_is_symmetric());
     assert_eq!(m.world.stance(A, C), Stance::Neutral);
@@ -480,4 +582,16 @@ fn stepping_gives_the_same_events_as_running() {
     }
     assert_eq!(all, stepped);
     assert_eq!(a, b);
+}
+
+/// Each trade update ends by writing every listed faction's running trade (`0x00BBD7C0(2)` at
+/// `0x00BCE78E`).
+#[test]
+fn the_trade_update_refreshes_the_running_trade() {
+    let mut m = test_model();
+    m.world.economy_history.insert(A, vec![[999; 25]]);
+    m.update_commodity_prices();
+    let r = m.world.last_economy_record(A).unwrap();
+    assert_eq!(r[7], economy::trade_routes_value(&m, A));
+    assert_eq!((r[5], r[6]), (999, 999));
 }

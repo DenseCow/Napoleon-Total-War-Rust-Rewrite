@@ -477,7 +477,7 @@ impl CampaignModel {
 
     /// `0x00C3E410(a, b)`: `a` has a trade agreement with a faction other than `b`.
     fn trades_with_third(&self, a: FactionId, b: FactionId) -> bool {
-        self.third_factions(a).any(|x| x != b && self.rel(a, x).is_some_and(|r| r.trade_agreement))
+        self.third_factions(a).any(|x| x != b && self.world.trade_held(a, x))
     }
 
     /// `0x00C3D5A0(a, b)`: `a` is allied (stance 2) with a faction other than `b`.
@@ -507,14 +507,9 @@ impl CampaignModel {
     /// embargo either way (`0x00B28E10`: relationship `+0x840` non-zero).
     pub fn trade_possible(&self, p: FactionId, r: FactionId, cancel: bool) -> bool {
         if cancel {
-            return self.trade_held(p, r);
+            return self.world.trade_held(p, r);
         }
         self.new_trade_route(p, r).is_some()
-    }
-
-    /// `a` holds a trade agreement with `b` (relationship `+0x788`, [`Relationship::trade_agreement`]).
-    fn trade_held(&self, a: FactionId, b: FactionId) -> bool {
-        self.rel(a, b).is_some_and(|x| x.trade_agreement)
     }
 
     /// [`Self::trade_possible`] without `cancel`, answering `p`'s route code to `r`
@@ -523,7 +518,7 @@ impl CampaignModel {
     /// testing the cheap embargo fields first gives the same answer without the two path searches.
     fn new_trade_route(&self, p: FactionId, r: FactionId) -> Option<u8> {
         if self.at_war(p, r)
-            || self.trade_held(p, r)
+            || self.world.trade_held(p, r)
             || self.trade_embargoed(p, r)
             || self.trade_embargoed(r, p)
         {
@@ -563,7 +558,7 @@ impl CampaignModel {
         if self.world.stance(player, other) == Stance::War {
             return None;
         }
-        if self.trade_held(player, other) {
+        if self.world.trade_held(player, other) {
             let land = self.world.trade_paths.get(&(other, player)).and_then(|ps| ps.first()).is_some_and(|p| !p.uses_sea());
             return Some(DiplomacyTradeStatus {
                 held: true,
@@ -591,7 +586,7 @@ impl CampaignModel {
     /// [`Self::trade_agreement_tooltip`] (`0x00BC7910(player, other, 0)`, no counts); else nothing
     /// (the empty string `0x0131005F`). `None` also at war (no trade entries) or while held.
     pub fn diplomacy_trade_tooltip(&self, player: FactionId, other: FactionId) -> Option<TradeAgreementTooltip> {
-        if self.world.stance(player, other) == Stance::War || self.trade_held(player, other) || !self.diplomacy_trade_allowed(player, other) {
+        if self.world.stance(player, other) == Stance::War || self.world.trade_held(player, other) || !self.diplomacy_trade_allowed(player, other) {
             return None;
         }
         self.trade_agreement_tooltip(player, other, false)
@@ -650,7 +645,7 @@ impl CampaignModel {
         let war = self.at_war(p, r);
         let pr = self.rel(p, r);
         let rp = self.rel(r, p);
-        let trade_held = self.trade_held(p, r);
+        let trade_held = self.world.trade_held(p, r);
         let trade_possible = self.trade_possible(p, r, trade_held);
         // Access (`0x00C1A6E0`, side 1 / side 0): peace and the access not already indefinite.
         let access_free = |x: Option<&Relationship>| x.is_none_or(|x| x.military_access_turns != -1);

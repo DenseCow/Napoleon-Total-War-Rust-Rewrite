@@ -64,6 +64,18 @@ pub struct CampaignFeatures {
     /// +0xD9C → +0x30, the key `CampaignIsEpisodic` `0x009E0570` reads) equals `episodic_3`, an Empire
     /// campaign key no Napoleon campaign uses (set by `ntw_campaign::features::original`).
     pub diplomacy_hidden_factions: Vec<String>,
+    /// Peaces that also give military access ([`super::CampaignModel::make_peace_rules`]). CONFIRMED:
+    /// `MakePeaceWithFaction` (`0x00B262C0`), when the campaign key (campaign +0x30) is `spa_napoleon`,
+    /// has `spa_spain` or `spa_portugal` grant `spa_britain` indefinite access (`0x00B444B0` with −1) on
+    /// a peace between the two (set by `ntw_campaign::features::original`).
+    pub peace_access_grants: Vec<PeaceAccessGrant>,
+    /// A building effects table (`0x009B2BB0`: `CampaignUI.FortEffects` and the building-completed
+    /// messages' details) leaves its "technology" table empty. CONFIRMED: `0x009B2FA1`..`0x009B2FE0`
+    /// skips that list when the campaign key (campaign +0xD9C → +0x30) starts with `episodic` (string
+    /// `0x0136C4F8`, prefix test `0x004F4480` called at `0x009B2FD9`, the test `CampaignIsEpisodic`
+    /// `0x009E0570` makes), Empire campaign keys no Napoleon campaign uses (set by
+    /// `ntw_campaign::features::original`). Read by [`super::CampaignModel::effects_table_technologies`].
+    pub effects_technologies_hidden: bool,
 }
 
 impl Default for CampaignFeatures {
@@ -82,6 +94,8 @@ impl Default for CampaignFeatures {
             loot_resentment: None,
             save_name_uses_campaign_name: false,
             diplomacy_hidden_factions: Vec::new(),
+            peace_access_grants: Vec::new(),
+            effects_technologies_hidden: false,
         }
     }
 }
@@ -154,5 +168,35 @@ impl UnitKeyEffects {
     /// A row from its three keys.
     pub fn new(suffix: &str, cost: &str, upkeep: &str) -> Self {
         UnitKeyEffects { suffix: suffix.to_owned(), cost: cost.to_owned(), upkeep: upkeep.to_owned() }
+    }
+}
+
+/// A peace that also gives military access ([`CampaignFeatures::peace_access_grants`]): when one side of a
+/// peace is a [`Self::granters`] faction and the other is [`Self::grantee`], the granter gives the grantee
+/// access for [`Self::turns`] turns. CONFIRMED (`0x00B262C0`): the exe tests the target as the granter
+/// first, then the proposer; the faction keys (`GetFactionKeyOrRebels`) are compared case-sensitively.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PeaceAccessGrant {
+    /// The faction keys that grant the access (CONFIRMED: `spa_spain`, `spa_portugal`).
+    pub granters: Vec<String>,
+    /// The faction key that receives it (CONFIRMED: `spa_britain`).
+    pub grantee: String,
+    /// The access length in turns, −1 for indefinitely (CONFIRMED: −1).
+    pub turns: i32,
+}
+
+impl PeaceAccessGrant {
+    /// The (granter, grantee) of a peace between `proposer` and `target` (by faction key), or `None` when
+    /// the row does not apply: the target as the granter first, then the proposer (`0x00B262C0`).
+    pub fn granter_of<T>(&self, proposer: (&str, T), target: (&str, T)) -> Option<(T, T)> {
+        let is_granter = |k: &str| self.granters.iter().any(|g| g == k);
+        if is_granter(target.0) && proposer.0 == self.grantee {
+            Some((target.1, proposer.1))
+        } else if is_granter(proposer.0) && target.0 == self.grantee {
+            Some((proposer.1, target.1))
+        } else {
+            None
+        }
     }
 }

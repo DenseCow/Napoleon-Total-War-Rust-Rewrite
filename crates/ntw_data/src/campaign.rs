@@ -523,6 +523,25 @@ db_record! {
 }
 
 db_record! {
+    /// `movie_event_strings` (`ssss`, 57 rows, CONFIRMED layout from the vanilla file):
+    /// the full-screen movie a campaign event plays. The exe loads it lazily (`0x00E234F0`) and resolves
+    /// #0 against its movie event names (table `0x0145CAE8`, `0x00F54F30`). Two lookups read it: by
+    /// (event, culture) with a `european` fallback (`0x00F54F80`, the victory movie) and by #3 against a
+    /// faction's movie id, the last matching row winning (`0x00F55030`, the defeat movie). CAMPAIGN_FIDELITY.md
+    /// "Campaign over".
+    pub struct MovieEventStringRecord in "movie_event_strings", key = event + culture {
+        /// #0 H: the movie event, e.g. `game_lost_france`, `game_victory_republic`.
+        event: String,
+        /// #1 H: the culture it is for (`european`, `middle_east`, ...).
+        culture: String,
+        /// #2: the movie file under `movies\`, e.g. `EUR_Lose_FR.bik`.
+        movie: String,
+        /// #3: the movie id a faction names (`factions` #39, [`crate::schemas::FactionRecord::movie_id`]), e.g. `24`.
+        id: String,
+    }
+}
+
+db_record! {
     /// `diplomacy_negotiation_faction_override_strings` (`sssss`, 537 rows, CONFIRMED layout): a
     /// faction's own line for (event, culture, government); `ResolveDiplomacyNegotiationString`
     /// (`0x00C55CC0`) picks it over the generic row on a campaign-RNG draw below 0.5.
@@ -867,6 +886,8 @@ pub struct CampaignTables {
     pub negotiation_strings: Table<NegotiationStringRecord>,
     /// `diplomacy_negotiation_faction_override_strings`.
     pub negotiation_override_strings: Table<NegotiationOverrideStringRecord>,
+    /// `movie_event_strings`.
+    pub movie_event_strings: Table<MovieEventStringRecord>,
     /// `unit_stats_naval`.
     pub naval_stats: Table<NavalStatsRecord>,
     /// `building_chains`.
@@ -932,6 +953,8 @@ pub struct CampaignTables {
     pub effects: crate::effects::EffectTables,
     /// The character tables (slot 0-G).
     pub characters: crate::characters::CharacterTables,
+    /// The historical events' tables.
+    pub events: crate::events::EventTables,
 }
 
 impl CampaignTables {

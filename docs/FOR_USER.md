@@ -26,6 +26,91 @@ is ready: `analysis/fidelity/debugger/SITTING_SHEET.md`. Steps in order:
 
 Side-by-side looks (no debugger): the first full side-by-side run, once step 3 is done.
 
+## 2026-10-20 (night mode, started Mon 10-19 21:40)
+
+### Usage
+
+- Week at 50% at the start. Last night used only 4 points, so tonight's block was raised to stop at 85% (block
+  reopened now, from the 46% reading + 16 + 23 extra; local `block.json` only, no repo change). That leaves ~15 points
+  for Tuesday's block before the Wed 00:00 reset. To undo: `usage_budget.ps1` reopens a normal block after Tue 17:40.
+
+### Needs you
+
+- Confirm a decision (treatymoney): in the original, a faction that receives treaty payments and moves later in the turn order than the payer gets one payment fewer than the payer pays (the finished deal is removed before the receiver collects; traced at 0x00B29170 / 0x0086A120). I marked it ORIGINAL BUG and fixed it, so the receiver now gets every payment. Say if you want it kept 1:1 instead.
+- The debugger sitting sheet above is still open.
+
+### Done tonight
+
+- polish58 merged (716d1cf9): the zone-of-control flood's region gate is traced in Ghidra and its notes corrected (an expelled army that cannot be placed keeps its old zone). Notes only; porting the gate is a new BACKLOG item. Nothing to look at.
+- raidhand merged (21d160ef): when an army or fleet gets a new commander (hired general or admiral, or a promotion), its commerce raids pass to him at the old commander's place, as the exe does. Logic only, covered by tests; see it in a campaign by raiding trade with a fleet, then hiring an admiral into it.
+- polish62 merged (b05d273c): each faction's money history keeps a running record for the current round, as the exe does, and saves keep it in the original's order. Same income in vanilla play; one part (the round end pays from the record's sums) is a new BACKLOG item, running now. Nothing to look at.
+- victoryscreen merged (a3d1c125): when the human faction is destroyed or wins, the original's defeat/victory movie panel opens from its own layout and script, and the campaign result follows, instead of the map seeming frozen. Some parts are still marked unconfirmed (BACKLOG). See: a campaign where your faction loses its last region.
+- polish61 merged (e2ef4a4f): the scripts' shroud switches accept only a real true/false (two original bugs fixed: a bad value used leftover memory), and `unveil_black_shroud` now lifts the named black-shroud outline as in the exe. Seen only in campaigns whose scripts use these calls.
+- culturefb merged (af55f586): the minister portrait fallback uses the same culture rule as the victory screen (one copy instead of two); nothing changes on screen.
+- raidcite merged (1345fbf0): the naval promotion comments cite the right exe addresses; a new test covers an admiral who already commands the fleet (cargo test -p ntw_sim hired_admiral).
+- esfseason merged (9101e3c0): saves we write now carry the season's on-screen name (the original's text) in the header the load list shows, instead of the English name; nothing else changes.
+- vsnotes merged (39b213c8): the victory/defeat movie lookup now treats a faction with no movie row as the original does (matters for custom maps); the cultures list in the notes is checked against the game data; Ghidra notes added. Nothing to look at.
+- histevents merged (71e3ee0b): at the start of each round the campaign's historical events (the game's events tables) now fire as in the original, with the same random pick, and saves remember which once-only events have fired. Their message panel and a mod's own event scripts are still open (BACKLOG §0). See: end a few turns in a new campaign.
+- zonegate merged (524bcc69): an army's zone of control now stops at regions whose owner doesn't let it stand there, as in the original, and a rebel army raised in a region keeps to it (saves keep that). One original bug fixed (a missing diplomatic record tested an unrelated one). See: armies near a neutral border during the AI's turn.
+- shroudnotes merged (3de7ae1f): one original bug fixed in the script call that lifts the black shroud (a lift box reaching past the map's edge lifted nothing); review notes cleared. Seen only in campaigns that use black shroud (the tutorial).
+- recordpay merged (b1431a5c): the round end pays each faction from its running money record, as the original does; script income boosts (other_income_mod) now really reach the treasury. Same income in vanilla Europe saves. Found: a loaded campaign never fires the scripts' start event, so Iberia's script boosts are lost after loading (old bug; BACKLOG §0, next worker). See: the finance panel over a few turns.
+- popnotes merged (71aeae5d): two round-end calls traced (they set each region's policing cost for the expense record, already done by recordpay); notes only, nothing changes in play.
+- rebuildrec merged (8943522c): a faction with no money history now gets its running record when it is rebuilt (on load); nothing to look at.
+- pathgate merged: armies' and fleets' path searches now stop at regions whose owner doesn't let them in, as in the original (agents still walk anywhere; an attack, merge or settlement entry also opens the target owner's regions); the move arrow shows the same path the click takes. See: order an army towards a neutral's land.
+- shroudfill merged: a new campaign now starts each human's shroud as the original does: the black shroud covers the whole map on maps that have one (the tutorial), and what the player has explored is reset to what their armies and towns see at the start; the rebels keep the start position's view. Loaded games are unchanged. See: start the tutorial campaign.
+- modelcreated merged: the campaign scripts' start events now fire in the original's order for a new campaign and after loading a save, so script effects set at start survive a load (Iberia's spa_napoleon income boosts are back after loading). The tutorial's start script now also lifts its first black-shroud area. See: load a spa_napoleon save and check the finance panel.
+- regionprice merged: trade prices now also update when a region is lost and when a port passes to a new owner mid-turn, as in the original (before: only at round start/end). See: take a port town and open the trade screen.
+- warorder merged: when a war is declared, both sides' allies are now called in first, as in the original, so an ally joins while the two sides are still formally at peace (no backstab or third-party penalties for it). See: declare war on a faction with allies.
+- esfevents merged: original-format saves now keep which historical events have already fired (written exactly where the original writes them), so they do not fire again after loading.
+- shortcutkeys merged: on the campaign map, CTRL+S (save), CTRL+L (load) and ESC (menu) now come from the game's own key file, and no shortcut (Return = end turn included) fires while a text box has focus, as in the original. See: campaign map, press CTRL+S; type in the save name box and press Return.
+- portfull merged: a trade port of a faction with no trade routes now counts as full when it has no free slot, as in the original (every faction but the rebels has a trade entry from turn 1). Logic only, covered by tests.
+- treatymoney merged: treaty payments and tribute are now booked in the money record as in the original; payments between an ally and the enemy stop when the ally joins a war; the receiver now gets every payment (see Needs you). Logic only, covered by tests.
+- ownshroud merged: an own-format campaign map can give black shroud outlines in `campaigns/<name>/black_shroud.txt` (format in docs/DESIGN.md §3.5.1); it takes effect once the own-format loader exists. Logic only, covered by tests.
+- vsnotes merged: Ghidra types for the culture records (CultureRecord, SubcultureRecord) and two functions written up; corrected notes: the agent price key uses the faction's culture, and 0x008B9DE0 returns the faction's own record. Notes only.
+- popnotes merged: Ghidra struct for the region population object (RegionPopulation with its policing tracker and region factors) and 8 functions written up to 91-100%. Notes only.
+- wcstubs merged: the campaign scripts' three start switches (liberation options, technology research, victory notice) are now real and saved in original-format saves; while liberation is switched off (e.g. the Italian campaign) a captured settlement no longer offers liberation. See: Italian campaign, capture a settlement.
+- appendorder merged: each faction's commanders are now kept in the order the original lists them (new ones at the end), and the zone flood walks them in that order instead of by id. Logic only, covered by tests.
+- empirebucket merged: settled that the historical events' "empire" group can never match in the original by design (the empire tables have no link to a faction), so it is not a bug and ours already matches. Notes only.
+- keynames merged: the front end's text fields and the campaign's key bindings now read key names from one table instead of two (same keys as before; NumpadEnter still counts as Enter). Logic only, covered by a test.
+- peacemsg merged: a peace now posts its peace message to both sides (the scripts' protectorate path can suppress it), and in the Spanish campaign (spa_napoleon) an Iberia–Britain peace gives Britain lasting military access, as in the original. Logic only, covered by tests.
+- sameowner merged: a region handed over in a deal to the faction that already owns it no longer skips everything: as in the original, research there stops and its port and building slots are passed back (with the port price update); taxes, queues and policing are left alone. Logic only, covered by tests.
+- polish63 merged: a dead commander now also leaves the faction's list order, and new commanders are written into an original-format save in that order. Logic only, covered by tests.
+- techswitch merged: while a campaign script has switched technology research off, the model's building technology lists come out empty (as in the original's building info and FortEffects panels); the panels themselves don't read them yet. Logic only, covered by tests (one runs against the real install).
+- polish64 merged: the front end's text-field key filter now names its keys only once (same keys as before). Logic only, covered by a test.
+- loadinggame merged: settled that starting a new campaign also runs the scripts' LoadingGame event with the start position's stored values (order: NewSession, LoadingGame, ModelCreated, NewCampaignStarted, WorldCreated; a loaded save skips NewCampaignStarted), and ours now does the same. Logic only, covered by tests on the real eur and spa start positions.
+- polish65 merged: two notes from the techswitch review (the AI's technology score reads the ungated building list; the original's britain fallback can't arise in ours). Notes only.
+- priceupdate merged: trade prices now update when a port is handed back after a faction dies or a besieged port is restored (the original does it at 0x00A8D859 and 0x00B794B0), once per port slot. Covered by tests; nothing to look at.
+- treatysave merged: original-format saves now keep each relationship's tribute, income and regular payments (written as the original's 0x00AFC340 does). Covered by a round-trip test on a vanilla save; nothing to look at.
+- warnotice merged: a war declaration now sets the original's war-started flag, calls in allies in the original's record order and posts the war notice to every uninvolved major power (0x009DAFE0); own saves move to v10 (v9 still loads). Covered by tests; nothing to look at.
+- popghidra merged: Ghidra names, types and write-ups for the region population code (8 functions, 4 structs); the factors +0x60 field is the worst class's order colour (0x00AAA0F0). Notes and Ghidra only.
+- charorder merged: the yearly death checks (0x008BC650) and expulsion (0x008D9DC0) now walk a faction's characters in the original's list order, and a character moving faction goes to the end of the new list (0x00A1B4E0). Covered by tests; nothing to look at.
+- campover2 merged: what else ends a campaign is traced (multiplayer victory, revolution ends) and the AI is confirmed to take at most one step in the frame the campaign ends (0x008F4524); +0x814 is the revolution state. Notes and comments; nothing to look at.
+- Running: handover (handing a faction over to another), keybind (the campaign key bindings from the original's key files), accessloss2 (what happens when military access is lost), navyupkeep (Netherlands naval upkeep 1059 vs the save's 1006).
+
+## 2026-10-19 (night mode)
+
+### Usage
+
+- Week at 46% at the start (03:29). Last night was skipped, so its 16 points were added to tonight's block only
+  (new `usage_budget.ps1 extra <points>` command, 63a878e8): tonight's block allows 78%; Tuesday's block is back to 16.
+
+### Needs you
+
+- Nothing new. The debugger sitting sheet above is still open.
+
+### Done tonight
+
+- polish51 merged (f674e226): the campaign HUD date and season come from the game's own text keys, and the turn-number branch works as in the exe; two original crashes/bugs fixed. See: start any campaign, look at the top-left date.
+- polish53 merged (cfe7b259): the "do these two factions trade" test now lives in one place (`World::trade_held`), no behaviour change. Nothing to look at.
+- polish55 merged (83801997): the diplomacy screen's trade-rights reads use the same test, each in the direction the original reads it (checked in Ghidra). Nothing changes in play.
+- polish54 merged (cfce4ea0): at round end, rebel regions and regions of factions out of the game keep their population factors, as in the original (traced in Ghidra); before, ours reset the rebels' too. Not visible on screen.
+- polish52 merged (e8825244): the trade-raid functions are documented in Ghidra and a raid-speed rule is now CONFIRMED. Nothing to look at.
+- polish57 merged (follows e8825244): two war/peace functions traced; one is only an achievement counter, the other adds a line to the negotiation screen (now a BACKLOG item). Nothing changes in play.
+- polish56 merged (04c14fb2): the season in save headers and on the front end now uses the game's own on-screen text (it was looked up with the wrong key). See: Load Game list in the front end, the season next to each save.
+- polish60 merged (3e734287): the scripts' "disable saving" and "show turns" switches accept only a real true/false, as the original; where the original keeps leftover memory, ours uses false (ORIGINAL BUG 0x00979600). Nothing to look at.
+- polish59 merged (0b6b6023): traced how the original moves commerce raids when an army or fleet gets a new commander (hire or promotion). Notes and Ghidra only; the matching game change is the §0 item "Commerce raids on the other commander changes". Nothing to look at.
+- Stopped by you after polish59. Four unfinished branches (victory screen, polish58, polish61, polish62) are saved and pushed; HANDOFF says where each resumes.
+
 ## 2026-10-17 (night mode)
 
 ### Usage

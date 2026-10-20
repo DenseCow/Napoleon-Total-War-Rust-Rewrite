@@ -59,6 +59,7 @@ pub mod regiments;
 pub mod charnames;
 pub mod features;
 pub mod header_map;
+pub mod historical_events;
 pub mod names;
 pub mod own_save;
 pub mod portraits;
@@ -217,8 +218,9 @@ pub struct LoadedCampaign {
     pub rebel_faction: Option<FactionId>,
     /// Non-fatal oddities, in the order they were found.
     pub warnings: Vec<LoadWarning>,
-    /// The scripts' `save_value` slots (`EPISODIC_RESTRICTIONS/LUA[]`), in order; empty for a
-    /// start position. Give them to the script host before `LoadingGame` fires.
+    /// The scripts' `save_value` slots (`EPISODIC_RESTRICTIONS/LUA[]`), in order, from a save or a
+    /// start position alike (every startpos carries the block). Give them to the script host before
+    /// `LoadingGame` fires (`0x0099878E`, posted on both paths).
     pub script_values: Vec<script_values::ScriptSaveValue>,
 }
 
@@ -410,6 +412,11 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
     (model.world.trade_paths, model.world.commodity_prices) = trade::read_paths(esf, &model);
     model.world.domestic_trade = trade::read_domestic(esf, &model);
     trade::read_network(esf, &mut model);
+    // Each running economics record as the exe's load leaves it: the tracked categories zeroed and booked
+    // again by their trackers (`ntw_sim::campaign::economy::rebuild_running_record`), after the raids above.
+    for f in model.world.factions.keys().copied().collect::<Vec<_>>() {
+        ntw_sim::campaign::economy::rebuild_running_record(&mut model, f);
+    }
     // Sight: the grid, the shrouds and the regions' sight shapes (CHARACTERS_FIDELITY.md §10).
     shroud::read(esf, &mut model);
     // The campaign AI's manager / personality keys and region base values (AI_RESEARCH.md §2.3, §4).
@@ -423,10 +430,13 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
     // The campaign director: its RNG (seeded from the campaign RNG in a record older than version 2,
     // after the portrait steps), its queued region transfers and the region-transfer counter.
     director::fill(root, &mut model);
-    // The historical characters already made, the two episodic force-success switches
-    // (CHARACTERS_FIDELITY.md §7, §8) and the saving switch (UI_FIDELITY.md §5.1).
-    (model.world.historical_created, model.world.force_success_for_human, model.world.saving_disabled) =
-        details::model_extras(model_rec);
+    // The historical characters already made (CHARACTERS_FIDELITY.md §7, §8) and the episodic
+    // switches: force-success, saving, turns display (UI_FIDELITY.md §5.1) and the three
+    // WorldCreated switches (CAMPAIGN_DATA.md §4).
+    model.world.historical_created = details::historical_created(model_rec);
+    details::read_switches(model_rec, &mut model.world);
+    // The once-only historical events already triggered (CAMPAIGN_FIDELITY.md "Historical events").
+    model.world.historical_events_triggered = details::triggered_historical_events(model_rec);
     // The scripts' restricted building levels and units (EPISODIC_RESTRICTIONS): the scripts set them
     // only on a new game (InitialiseCampaign at UICreated), so a save carries them.
     let restrictions = script_values::read_restrictions(esf);
@@ -620,10 +630,10 @@ impl LoadedCampaign {
         let Some(id) = self.model.faction_by_key(faction_key).map(|f| f.id) else { return false };
         if !self.model.turn.started {
             self.model.turn.humans = vec![id];
-            // Only the human keeps a shroud (INFERRED: the start positions give one to every
-            // playable faction, the vanilla saves of a new campaign keep only the human's;
-            // CHARACTERS_FIDELITY.md §10).
-            self.model.world.shrouds.retain(|f, _| *f == id);
+            // Only the human (and the rebels) keep a shroud; the human gets one if it had none (the
+            // campaign start's 0x008DD090, [`CampaignModel::start_shrouds`]). Run here, not at the
+            // turn start, since the exe does it in the model ctor, before any script event.
+            self.model.start_shrouds();
             // Only the human gets the default victory option ([`victory::fill`] gives it to every
             // faction with options, as the human is not known yet); the other factions keep the start
             // position's empty default (CONFIRMED: the Coalition saves, victory.rs module notes).

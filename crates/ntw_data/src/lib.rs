@@ -33,6 +33,7 @@ pub mod record;
 pub mod campaign;
 pub mod effects;
 pub mod characters;
+pub mod events;
 pub mod schemas;
 pub mod weather;
 

@@ -509,7 +509,7 @@ impl CampaignModel {
             return Err(E::Unsupported("the faction leader cannot be dismissed"));
         }
         let gov = self.world.factions.get(&faction).map(|f| f.government);
-        self.world.characters.remove(&minister);
+        self.world.remove_character(minister);
         self.world.character_details.remove(&minister);
         if let Some(p) = self.world.faction_details.get_mut(&faction).and_then(|d| d.posts.get_mut(post)) {
             p.holder = None;
@@ -556,7 +556,7 @@ impl CampaignModel {
                 if !self.spare_ministers(fa).contains(&spare) {
                     return Err(E::Unsupported("not a spare minister"));
                 }
-                self.world.characters.remove(&holder);
+                self.world.remove_character(holder);
                 self.world.character_details.remove(&holder);
                 self.seat(fa, i, spare);
             }

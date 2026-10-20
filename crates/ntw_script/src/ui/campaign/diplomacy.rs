@@ -391,7 +391,8 @@ fn diplomacy_details(lua: &Lua, inner: &Inner, ui: &CampaignUi, key: &str) -> ml
         if let Some(i) = list {
             lists[i].set(o.key.as_str(), e.clone())?;
         }
-        if m.world.relationships.get(&(f.id, *other)).is_some_and(|r| r.trade_agreement) {
+        // `f`'s own record about `other` (the `[f + 0x528]` entry, `+0x788` read at 0x009B2869).
+        if m.world.trade_held(f.id, *other) {
             lists[2].set(o.key.as_str(), e)?;
         }
     }
@@ -442,11 +443,7 @@ fn faction_key_args<const N: usize>(lua: &Lua, inner: &Inner, call: &'static str
             *key = s.to_string_lossy();
             continue;
         }
-        let found = match v {
-            None => "function",
-            Some(Value::LightUserData(_)) => "userdata",
-            Some(v) => v.type_name(),
-        };
+        let found = crate::game::lua_found_type(v);
         let position = arg.map_or_else(|| "none".to_owned(), |i| (i + 1).to_string());
         inner.log_once_for(call, &format!("{position}:{found}"), || {
             format!("ERROR CampaignUI.{call}: Trying to retrieve type string, found type {found} (argument {position}); nothing returned (logged once)")
@@ -519,7 +516,8 @@ fn existing_treaties(inner: &Inner, ui: &CampaignUi, a: &str, b: &str) -> Option
     }
     let ab = m.world.relationships.get(&(fa.id, fb.id));
     let ba = m.world.relationships.get(&(fb.id, fa.id));
-    if ba.is_some_and(|r| r.trade_agreement) {
+    // `b`'s record about `a`, the record the "giving" access line reads (`+0x788` at 0x00B753D7).
+    if m.world.trade_held(fb.id, fa.id) {
         lines.push(text("trade_agreement"));
     }
     match ba.map_or(0, |r| r.military_access_turns) {
@@ -890,13 +888,13 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     // `ui/portraits/<folder>/Cards/minister/young/001.tga`, with no "data/" (the panel adds it).
     // The folder is the faction's culture key (european, middle_east: the two diplomats of the
     // original's screens); INFERRED: when that folder lacks the picture, the culture's fallback
-    // (`CampaignUi::culture_fallback`) — the exe's folder map 0x008C05B0 is not decoded. No
+    // (`CampaignRules::culture_alternates`, `cultures` #2) — the exe's folder map 0x008C05B0 is not decoded. No
     // picture at all: "" (logged once).
     f!("MinisterPortraitPath", |_l, inner, ui, key: Option<String>| {
         let key = key.unwrap_or_else(|| ui.link.human.clone());
         let culture = ui.model().rules.faction_cultures.get(&key).cloned().unwrap_or_default();
         let path = |folder: &str| format!("ui/portraits/{folder}/Cards/minister/young/001.tga");
-        let fallback = ui.culture_fallback(&inner, &culture).unwrap_or_default();
+        let fallback = ui.model().rules.culture_alternates.get(&culture).cloned().unwrap_or_default();
         match [culture.as_str(), fallback.as_str()].into_iter().filter(|f| !f.is_empty()).map(path).find(|p| inner.source.exists(p)) {
             Some(p) => Ok(p),
             None => {

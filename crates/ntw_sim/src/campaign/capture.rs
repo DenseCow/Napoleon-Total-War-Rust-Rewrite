@@ -139,9 +139,16 @@ impl CampaignModel {
     /// campaign path). CONFIRMED: the region's rebel-faction record names a campaign faction, other than the
     /// capturer, and the capturer's relationship to it allows regions back (#28, default true), and the faction is out of the game
     /// (+0x824 set, [`Self::in_the_game`]; CONFIRMED meaning: the destruction `0x008AB6C0` sets it). The
-    /// branch for a faction still in the game (+0x72C / a count of 1) is not decoded: not offered. Not
-    /// modelled: a campaign-wide switch (+0x124) and a flag of the faction record (+0x4C), both UNKNOWN.
+    /// branch for a faction still in the game (+0x72C / a count of 1) is not decoded: not offered. The
+    /// scripts' switch (episodic restrictions +0x124, [`World::liberation_options_disabled`]) offers
+    /// none, on both of the exe's paths (tests `0x00B15134` / `0x00B15214`, CONFIRMED). Not modelled:
+    /// a flag of the faction record (+0x4C), UNKNOWN.
+    ///
+    /// [`World::liberation_options_disabled`]: super::World::liberation_options_disabled
     pub fn liberation_target(&self, region: RegionId, faction: FactionId) -> Option<FactionId> {
+        if self.world.liberation_options_disabled {
+            return None;
+        }
         let key = self.world.region_rebel_factions.get(&region)?;
         let target = self.world.factions.values().find(|f| &f.key == key)?.id;
         if target == faction || self.in_the_game(target) {

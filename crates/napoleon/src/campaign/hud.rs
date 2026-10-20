@@ -10,10 +10,14 @@
 //! - the map selection (`CampaignSim::selected` / `selected_region` / `selected_fort`) is sent to the HUD, which
 //!   fills the selection bar and the review panel (unit cards, ...);
 //! - clicks on HUD components send `audio::UiSound` like the front end;
-//! - keys: the focused text field and the components that steal keys first, then the original's
-//!   campaign shortcuts (save, load, escape menu) through the root's `OnShortcut` ([`keys`]);
+//! - keys, in the exe's order: a focused text field takes them all; else the components that
+//!   steal keys, then the root's shortcuts of `text/default_keys.xml` (save, load, escape menu...)
+//!   through the root's `OnShortcut` ([`keys`]);
 //! - the scripts' load requests (`UiRequest::LoadCampaign`, from the save panel or quick load)
 //!   reload the campaign ([`requests`]).
+//! - a defeat / victory movie the model queued opens the original movie panel ([`update`]), its
+//!   movie plays in the panel ([`panel_movie`]), and `CampaignUI.QuitToMainScreen` goes back to
+//!   the main menu ([`requests`]).
 
 use std::rc::Rc;
 
@@ -21,10 +25,11 @@ use bevy::camera::ClearColorConfig;
 use bevy::camera::primitives::{Aabb, Frustum};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
+use ntw_formats::default_keys::{self, Bindings, Shortcuts};
 use ntw_formats::loc::Localisation;
 use ntw_formats::pack::Vfs;
 use ntw_script::ScriptSource;
-use ntw_script::ui::{CampaignLink, CampaignRequest, CampaignSelection, FrontEndFacts, NodeId, PointerEvent, UiScriptHost};
+use ntw_script::ui::{CampaignKey, CampaignLink, CampaignRequest, CampaignSelection, FrontEndFacts, NodeId, PointerEvent, UiScriptHost};
 
 use super::play::CampaignSim;
 use crate::GameMode;
@@ -47,12 +52,31 @@ pub struct CampaignHud {
     /// A camera move the HUD asked for (`CampaignUI.SetCameraTarget`, e.g. a radar click), in
     /// map units, applied by `labels`.
     camera_to: Option<Vec2>,
-    /// True when a key pressed this frame went to a HUD component (a focused text field, or a
-    /// component that stole it), set by [`keys`]: the map's own keys (Return = end turn) leave it.
+    /// True when a key pressed this frame went to a HUD component (a focused text field, a
+    /// component that stole it, or a fired root shortcut), set by [`keys`]: the map's own keys
+    /// (Return = end turn) leave it.
     pub keys_taken: bool,
-    /// True while a HUD text field holds the input focus (the save panel's name), set by [`keys`]:
-    /// the camera's key pans and zooms leave the keys to it ([`super::camera::control`]).
+    /// True while a HUD component holds the input focus (a text field: the save panel's name), set
+    /// by [`keys`] ([`UiScriptHost::input_focus_held`]): the camera's key pans and zooms leave the
+    /// keys to it ([`super::camera::control`]), as the exe runs no key binding then (`0x00EEE1E0`).
     pub text_focused: bool,
+    /// The campaign's shortcuts mapped to the root, from `text/default_keys.xml` ([`keys`]).
+    shortcuts: Bindings,
+    /// `CampaignUI.QuitToMainScreen` ran: [`requests`] leaves for the main menu.
+    leave: bool,
+    /// The movie a HUD panel shows (`AttachCustomControl`), once [`panel_movie`] started it.
+    panel_movie: Option<PanelMovie>,
+}
+
+/// A movie playing in a HUD component (the movie panel's `movie_window`).
+struct PanelMovie {
+    node: NodeId,
+    /// The movie's file name, as the scripts attached it.
+    movie: Rc<str>,
+    /// The component's id, the key the renderer draws the movie under (`UiAssets::movies`).
+    component: String,
+    /// The movie's picture is in `UiAssets::movies`.
+    shown: bool,
 }
 
 impl CampaignHud {
@@ -148,6 +172,7 @@ pub fn enter(world: &mut World) {
     }
     // A 2D camera over the 3D map for the HUD sprites.
     world.spawn((Camera2d, Camera { order: 1, clear_color: ClearColorConfig::None, ..default() }, DespawnOnExit(GameMode::Campaign)));
+    let shortcuts = campaign_shortcuts(&vfs);
     let mut assets = UiAssets::new(vfs);
     assets.add_embedded(host.template_images());
     world.insert_resource(assets);
@@ -164,6 +189,9 @@ pub fn enter(world: &mut World) {
         camera_to: None,
         keys_taken: false,
         text_focused: false,
+        shortcuts,
+        leave: false,
+        panel_movie: None,
     });
 }
 
@@ -196,17 +224,28 @@ fn advance_ui_clock(clock_ms: &mut f64, real: &Time<Real>) -> f64 {
     *clock_ms
 }
 
-/// Keyboard → the HUD, like the front end's `keys`: typed text and the editing keys go to the
-/// focused text field (the save panel's name), a key a component stole goes to its `OnKey`. Then the
-/// campaign's shortcuts of `text/default_keys.xml` (CONFIRMED bindings, read 2026-10-16:
-/// `escape_menu` = ESCAPE with any modifier, `quick_save` = CTRL+S, `quick_load` = CTRL+L) go to the
-/// root's `OnShortcut` ([`UiScriptHost::campaign_shortcut`]), whose script decides (quick save only
-/// when `CanSave()`). INFERRED: an ESCAPE the HUD took (a focused field or a component that stole
-/// it) does not also open the escape menu; the engine's dispatch order between the two is not
-/// traced. PROVISIONAL: the bindings are written here, not read from `default_keys.xml`, and CTRL+S
-/// / CTRL+L match whatever other modifiers are held, except ALT: CTRL+ALT is AltGr on many layouts,
-/// whose characters (`@`, `{`, `€`...) are typed text, not shortcuts. Harness runs ignore the
-/// keyboard. Last, [`CampaignHud::text_focused`] records whether a text field holds the focus.
+/// The campaign's shortcuts mapped to the root, read once from `text/default_keys.xml` through
+/// the install's file system (mods included): the default keyset's funcs whose campaign or "all"
+/// mapping names `root` (`ntw_formats::default_keys`; the exe's loader `0x00EDB080`). A missing
+/// or unreadable file is logged once and leaves no shortcuts.
+fn campaign_shortcuts(vfs: &Vfs) -> Bindings {
+    match vfs.read(default_keys::PATH).map_err(|e| e.to_string()).and_then(|b| Shortcuts::parse(&b).map_err(|e| e.to_string())) {
+        Ok(s) => s.bindings("campaign", "root"),
+        Err(e) => {
+            warn!("Campaign HUD: {} not read, no keyboard shortcuts: {e}", default_keys::PATH);
+            Bindings::default()
+        }
+    }
+}
+
+/// Keyboard → the HUD in the exe's order ([`UiScriptHost::campaign_key`]): while a component
+/// holds the input focus, the editing keys and the typed text go to it and no shortcut fires;
+/// else a key a component stole goes to its `OnKey`, and the campaign's root shortcuts of
+/// `text/default_keys.xml` ([`campaign_shortcuts`]: in vanilla `escape_menu` = ESCAPE with any
+/// modifier, `quick_save` = CTRL+S, `quick_load` = CTRL+L, ...) go to the root's `OnShortcut`,
+/// whose script decides (quick save only when `CanSave()`). Keys are matched by the exe's name of
+/// the physical key ([`crate::shortcut_keys::exe_key_name`]). Harness runs ignore the keyboard.
+/// Last, [`CampaignHud::text_focused`] records whether a component holds the focus.
 pub fn keys(
     hud: Option<NonSendMut<CampaignHud>>,
     mut input: MessageReader<bevy::input::keyboard::KeyboardInput>,
@@ -220,51 +259,38 @@ pub fn keys(
         input.clear();
         return;
     }
-    // CTRL without ALT is the shortcut modifier (CTRL+ALT is AltGr, which types characters).
-    let alt = held.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
-    let ctrl = held.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]) && !alt;
+    let modifiers = crate::shortcut_keys::held_modifiers(&held);
+    let hud = &mut *hud;
     for ev in input.read() {
         if !ev.state.is_pressed() {
             continue;
         }
-        let shortcut = match ev.key_code {
-            KeyCode::KeyS if ctrl => Some("quick_save"),
-            KeyCode::KeyL if ctrl => Some("quick_load"),
-            _ => None,
+        let press = CampaignKey {
+            key: crate::shortcut_keys::exe_key_name(ev.key_code),
+            edit: crate::frontend::key_name(ev.key_code),
+            text: ev.text.as_deref(),
+            repeat: ev.repeat,
+            held: modifiers,
         };
-        if let Some(name) = shortcut {
-            if !ev.repeat {
-                hud.host.campaign_shortcut(name);
-            }
-            continue;
-        }
-        if let Some(name) = crate::frontend::key_name(ev.key_code) {
-            // ESCAPE / RETURN act once per press (no repeat); editing keys repeat.
-            if ev.repeat && matches!(name, "ESCAPE" | "RETURN") {
-                continue;
-            }
-            if hud.host.key(name) {
-                hud.keys_taken = true;
-            } else if name == "ESCAPE" {
-                hud.host.campaign_shortcut("escape_menu");
-            }
-        } else if let Some(text) = &ev.text
-            && !ctrl
-            && hud.host.text_input(text)
-        {
+        if hud.host.campaign_key(&hud.shortcuts, press) {
             hud.keys_taken = true;
         }
     }
-    hud.text_focused = hud.host.text_focused();
+    hud.text_focused = hud.host.input_focus_held();
     log_errors(&hud.host);
 }
 
 /// The scripts' requests outside the HUD (`UiRequest`): a load (`CampaignUI.LoadCampaign` from the
 /// save panel, `QuickLoad`) reloads the campaign from that save, as the front end's Load Game does
 /// (`CampaignStart` + `GameMode::Campaign`, which leaves and re-enters the campaign). The other
-/// requests are the front end's and have no meaning here: logged.
-pub fn requests(mut commands: Commands, hud: Option<NonSend<CampaignHud>>) {
-    let Some(hud) = hud else { return };
+/// requests are the front end's and have no meaning here: logged. `CampaignUI.QuitToMainScreen`
+/// (the OK of the defeat movie, Exit on the campaign result) goes to the main menu.
+pub fn requests(mut commands: Commands, hud: Option<NonSendMut<CampaignHud>>) {
+    let Some(mut hud) = hud else { return };
+    if std::mem::take(&mut hud.leave) {
+        info!("Campaign: quit to the main menu");
+        commands.queue(|world: &mut World| world.resource_mut::<NextState<GameMode>>().set(GameMode::FrontEnd));
+    }
     for r in hud.host.take_requests() {
         match r {
             ntw_script::ui::UiRequest::LoadCampaign(path) => {
@@ -360,16 +386,21 @@ fn apply_requests(hud: &mut CampaignHud, sim: &mut CampaignSim) {
                 sim.generation += 1;
             }
             CampaignRequest::CameraTo(x, y) => hud.camera_to = Some(Vec2::new(x, y)),
+            CampaignRequest::QuitToMainScreen => hud.leave = true,
         }
     }
 }
 
 /// Feeds the model's treasury and date (`UpdateFactionFundsAndDate`) and the map selection to the
-/// layout whenever the campaign changed.
-pub fn update(hud: Option<NonSendMut<CampaignHud>>, sim: Option<NonSend<CampaignSim>>) {
-    let (Some(mut hud), Some(sim)) = (hud, sim) else { return };
+/// layout whenever the campaign changed, and opens the movie panel for each defeat / victory movie
+/// the model queued (`UiScriptHost::campaign_outcome_movie`).
+pub fn update(hud: Option<NonSendMut<CampaignHud>>, sim: Option<NonSendMut<CampaignSim>>) {
+    let (Some(mut hud), Some(mut sim)) = (hud, sim) else { return };
     if hud.sim_generation == sim.generation {
         return;
+    }
+    for (faction, movie) in std::mem::take(&mut sim.outcome_movies) {
+        hud.host.campaign_outcome_movie(faction, &movie);
     }
     hud.sim_generation = sim.generation;
     hud.host.campaign_update_funds();
@@ -388,6 +419,61 @@ pub fn update(hud: Option<NonSendMut<CampaignHud>>, sim: Option<NonSend<Campaign
     // A capture the human must answer opens the capture screen (see `campaign_capture_screen`).
     hud.host.campaign_capture_screen();
     log_errors(&hud.host);
+}
+
+/// Whether the movie the scripts attached (`UiScriptHost::attached_movie`) is the one playing.
+fn same_panel_movie(want: Option<&(NodeId, Rc<str>)>, playing: Option<&PanelMovie>) -> bool {
+    match (want, playing) {
+        (Some((node, movie)), Some(p)) => *node == p.node && *movie == p.movie,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// The movie a HUD panel shows: the scripts attach it with `AttachCustomControl` (the movie panel's
+/// `movie_window`, CONFIRMED event_movie_panel.luac) and `CampaignUI.MovieDismissed` drops it.
+/// Starts it into a texture, draws it in that component and stops it when it is dropped or the
+/// component is gone. INFERRED: the movie plays once with its sound track in the player's language
+/// (the exe's movie queue `0x00998E20` that starts it is not traced).
+pub fn panel_movie(
+    hud: Option<NonSendMut<CampaignHud>>,
+    assets: Option<ResMut<UiAssets>>,
+    started: Query<&crate::video::Movie, Added<crate::video::Movie>>,
+    mut play: MessageWriter<crate::video::PlayMovie>,
+    mut stop: MessageWriter<crate::video::StopMovie>,
+) {
+    let (Some(mut hud), Some(mut assets)) = (hud, assets) else { return };
+    let want = hud.host.attached_movie();
+    if !same_panel_movie(want.as_ref(), hud.panel_movie.as_ref()) {
+        if let Some(old) = hud.panel_movie.take() {
+            stop.write(crate::video::StopMovie { path: Some(old.movie.to_string()) });
+            assets.movies.remove(&old.component);
+            hud.drawn_generation = u64::MAX;
+        }
+        if let Some((node, movie)) = want {
+            let component = hud.host.world().get(node).map(|n| n.data.id.clone()).unwrap_or_default();
+            play.write(crate::video::PlayMovie { path: movie.to_string(), mode: crate::video::MovieMode::Texture, track: None, looped: false, sound: true });
+            hud.panel_movie = Some(PanelMovie { node, movie, component, shown: false });
+        }
+    }
+    let mut shown = false;
+    if let Some(p) = hud.panel_movie.as_mut().filter(|p| !p.shown)
+        && let Some(m) = started.iter().find(|m| m.plays(&p.movie))
+    {
+        assets.movies.insert(p.component.clone(), m.image.clone());
+        p.shown = true;
+        shown = true;
+    }
+    if shown {
+        hud.drawn_generation = u64::MAX;
+    }
+}
+
+impl CampaignHud {
+    /// The stop for the panel's movie, when one plays (leaving the campaign).
+    pub(super) fn stop_panel_movie(&mut self) -> Option<crate::video::StopMovie> {
+        self.panel_movie.take().map(|p| crate::video::StopMovie { path: Some(p.movie.to_string()) })
+    }
 }
 
 /// Rebuilds the HUD sprites when the UI tree changed, and records the panel rectangles.

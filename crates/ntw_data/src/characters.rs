@@ -123,7 +123,22 @@ db_record! {
 }
 
 db_record! {
-    /// `agent_attributes` (`ss`, 14 rows; exe reader 0x00E55090): attribute key → its picture.
+    /// `cultures` (`sio`): built into `CULTURE_RECORD` (stride 0x24) by `0x00F73880`: key +0x00,
+    /// #1 +0x10, #2 +0x14.
+    pub struct CultureRecord in "cultures", key = key {
+        key: String,
+        /// #1 UNKNOWN.
+        unknown_1: i32,
+        /// #2 another culture key (vanilla: egy_european, PIR_european, PIR_natives, PIR_pirates,
+        /// tribal → european; egy_middle_east, indian → middle_east; middle_east → indian; empty for
+        /// european). The victory movie lookup `0x00F54F80` takes a row whose
+        /// culture has this column equal to the faction's culture key (CONFIRMED by disassembly).
+        alternate: Option<String>,
+    }
+}
+
+db_record! {
+    /// `agent_attributes`(`ss`, 14 rows; exe reader 0x00E55090): attribute key → its picture.
     pub struct AgentAttributeRecord in "agent_attributes", key = key {
         /// #0 attribute key, e.g. `command_land`, `subterfuge`.
         key: String,
@@ -148,6 +163,7 @@ pub struct CharacterTables {
     pub ancillary_excluded: Table<AncillaryExcluded>,
     pub ancillary_subcultures: Table<AncillarySubculture>,
     pub subcultures: Table<SubcultureRecord>,
+    pub cultures: Table<CultureRecord>,
 }
 
 impl CharacterTables {

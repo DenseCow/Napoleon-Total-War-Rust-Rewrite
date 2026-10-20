@@ -1,7 +1,7 @@
 //! The data the scripting layer keeps: the campaign model the scripts drive, plus everything that
 //! only scripts use (time triggers, missions, saved values, the log).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 
 use mlua::{UserData, UserDataFields};
 use ntw_sim::campaign::{CampaignModel, FactionId};
@@ -18,6 +18,16 @@ pub enum ScriptValue {
     Number(f32),
     /// A string.
     String(String),
+}
+
+impl From<ntw_campaign::script_values::ScriptSaveValue> for ScriptValue {
+    /// A stored `LUA[]` item as `load_value` returns it: a bool, or an integer as a number.
+    fn from(v: ntw_campaign::script_values::ScriptSaveValue) -> Self {
+        match v {
+            ntw_campaign::script_values::ScriptSaveValue::Bool(b) => ScriptValue::Bool(b),
+            ntw_campaign::script_values::ScriptSaveValue::Int(i) => ScriptValue::Number(i as f32),
+        }
+    }
 }
 
 /// A pending `add_time_trigger(name, seconds)`.
@@ -111,13 +121,13 @@ pub struct ScriptState {
     pub saved_values: Vec<ScriptValue>,
     /// Values waiting to be read by `load_value` (filled before `LoadingGame`).
     pub values_to_load: VecDeque<ScriptValue>,
-    /// `other_income_mod(faction, amount)`: summed per faction. UNKNOWN whether the original adds or
-    /// replaces, and how it feeds the turn income; not applied to the treasury yet.
-    pub other_income: BTreeMap<String, f32>,
     /// Missions started by `trigger_custom_mission`.
     pub missions: Vec<CustomMission>,
     /// What the trait and ancillary actions did (gains, losses, refusals), in order (slot 0-G).
     pub character_log: Vec<String>,
+    /// The game_interface argument-type errors already logged, by (method, type found): each is
+    /// logged once (`game::type_error_once`).
+    pub(crate) type_errors_logged: BTreeSet<(&'static str, &'static str)>,
 }
 
 impl ScriptState {
@@ -133,9 +143,9 @@ impl ScriptState {
             time_triggers: Vec::new(),
             saved_values: Vec::new(),
             values_to_load: VecDeque::new(),
-            other_income: BTreeMap::new(),
             missions: Vec::new(),
             character_log: Vec::new(),
+            type_errors_logged: BTreeSet::new(),
         }
     }
 

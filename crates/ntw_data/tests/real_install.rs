@@ -443,3 +443,39 @@ fn entity_training_levels_give_the_drill_tolerances() {
     }
     assert_eq!(t.len(), 6);
 }
+
+/// The historical events' tables (`ntw_data::events`): the 8 vanilla events with their years and
+/// turns of the year (the same arguments the vanilla `export_historic_events.lua` passes), each
+/// offered to `all_factions` as a random event, and the groupings they name.
+#[test]
+#[ignore = "needs the game installed"]
+fn historical_event_tables() {
+    let db = GameDatabase::from_install(data_dir()).unwrap();
+    let e = &db.campaign.events;
+    assert_eq!(e.events.version(), 1);
+    let rows: Vec<(&str, i32, i32, bool, &str)> =
+        e.events.iter().map(|r| (r.key.as_str(), r.year, r.turn_of_year, r.once, r.picture.as_str())).collect();
+    assert_eq!(
+        rows,
+        [
+            ("1812_war", 1812, 12, false, "us-nation emerges.tga"),
+            ("davy_lamp", 1815, 16, false, "innovation.tga"),
+            ("embargo_act_repealed", 1809, 6, false, "Politics_european.tga"),
+            ("lewis_clark", 1805, 24, false, "departure.tga"),
+            ("luddite_movement", 1811, 12, false, "strike-eu.tga"),
+            ("mutiny_vellore", 1806, 14, false, "Crime_European.tga"),
+            ("rum_rebellion", 1808, 12, false, "Crime_European.tga"),
+            ("stock_exchange_hoax", 1814, 4, false, "Politics_european.tga"),
+        ]
+    );
+    assert_eq!(e.view_groups.len(), 8);
+    assert!(e.view_groups.iter().all(|v| v.grouping == "all_factions"));
+    assert!(e.effect_groups.is_empty() && e.historical_characters.is_empty() && e.policies.is_empty());
+    assert_eq!(e.groupings.len(), 25);
+    assert!(e.groupings.get("all_factions").is_some());
+    assert_eq!(e.policy_keys.len(), 2);
+    let all: Vec<&str> = e.grouping_factions.iter().filter(|g| g.grouping == "all_factions").map(|g| g.member.as_str()).collect();
+    assert_eq!(all, ["austria", "britain", "egy_french_republic", "egy_ottomans", "france", "ita_austrian_alliance", "ita_french_republic", "prussia", "russia"]);
+    assert_eq!(e.grouping_continents.len(), 2);
+    assert!(e.grouping_cultures.is_empty() && e.grouping_subcultures.is_empty() && e.grouping_regions.is_empty() && e.grouping_empires.is_empty());
+}

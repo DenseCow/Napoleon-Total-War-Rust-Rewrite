@@ -15,9 +15,10 @@
 //!   military access `0x00B44550` / cancel `0x00B67BD0`, state gift `0x00B44590`, protectorate
 //!   `0x00B105C0`.
 //!
-//! Not here: the AI's acceptance of a deal (§6), calling allies into a war (`0x00B268B0` asks them:
-//! an AI decision), money changing hands for regular payments and protectorate tribute (the
-//! economy's income lines, `0x00BBE9A0` categories 0 / 2 / 6; not modelled).
+//! Not here: the AI's acceptance of a deal (§6), the allies' answer to a call to war (`0x00B268B0`
+//! asks them in `call_allies`: an AI decision). The treaty money (regular payments, protectorate
+//! tribute and income) is booked into the running economics records by
+//! [`CampaignModel::change_treaty_money`] and paid by the round settle ([`super::economy::settle_round`]).
 
 use super::details::{AttitudeFactor, RegularPayment, Relationship, ATTITUDE_FACTORS};
 use super::events::{CampaignEvent, CampaignMessage};
@@ -25,16 +26,26 @@ use super::ids::FactionId;
 use super::world::{CampaignModel, GovernmentType, Stance};
 use super::CommandError;
 
-/// Who answered a call to war ([`CampaignModel::call_allies`]), as the exe lists them for the zones'
-/// refresh (`0x00B268B0`: lists +0, +0x20, +0x30).
+/// Who answered a call to war ([`CampaignModel::call_allies`]), as the exe lists them (`0x00B268B0`:
+/// four lists at +0, +0x10, +0x20, +0x30; the zones' refresh walks +0, +0x20, +0x30, and the war
+/// notice skips a faction in any of the four, `0x00B2BEC0`).
 #[derive(Debug, Default)]
 struct CalledAllies {
-    /// The declarer's allies that joined.
+    /// The declarer's allies that joined (`0x00741C70`, list +0).
     joined_a: Vec<FactionId>,
-    /// The target's allies that joined.
+    /// The target's allies that joined (`0x00B274E0`, list +0x20).
     joined_b: Vec<FactionId>,
-    /// The target's allies that broke with it.
+    /// The target's allies that broke with it (`0x00B27500`, list +0x30).
     torn_b: Vec<FactionId>,
+    /// The declarer's allies that refused and kept their alliance (`0x00B0DB40`, list +0x10).
+    refused_a: Vec<FactionId>,
+}
+
+impl CalledAllies {
+    /// In any of the four lists (`0x00B2BEC0`).
+    fn contains(&self, f: FactionId) -> bool {
+        [&self.joined_a, &self.joined_b, &self.torn_b, &self.refused_a].iter().any(|l| l.contains(&f))
+    }
 }
 
 /// An attitude event: {limit, drift, value} (the original's triple order).
@@ -215,75 +226,137 @@ impl CampaignModel {
         self.world.factions.keys().copied().filter(|&x| x != a && x != b).collect()
     }
 
-    /// `a` declares war on `b` (`0x00B26700` with no ally: the relationship side of a war declaration;
-    /// the stances go through [`World::declare_war`](super::World::declare_war)).
-    /// - `a`→`b`: the `war` factor set from the `war` event; a patron loses `allows_region_return`; an
-    ///   alliance, patronage or protectorate is broken first (`0x00B13840` with its war flag set,
-    ///   [`Self::break_alliance_with`]`(.., true)`: the same steps as [`Self::break_alliance`], but no one is
-    ///   sent out of the other's regions, neither for an access given back as none nor by a protectorate
-    ///   tie's end); the access `a` gives `b` ends; a trade agreement is broken ([`Self::break_trade`]);
-    ///   during friendship turns the declarer is a backstabber (`backstab`); payments are dropped.
-    /// - `b`→`a`: the `war` factor likewise; payments dropped; if `b` gave `a` military access, `a` is
-    ///   charged with abusing it (`0x00B0DA90`).
-    /// - every other faction X: if X's attitude to `b` is hostile (category 0), X likes `a` more
-    ///   (`war_against_enemies` on X's `declared_war_against_enemies`); if very friendly (4), less
-    ///   (`war_against_friends`). (The exe also skips X when `0x008CEE00` holds for it: UNKNOWN test.)
+    /// The factions of the world's faction list (model +0xF5C: the turn list, which never holds the
+    /// rebels, world +0x1C) other than `a` and `b`, in list order: the third parties the declaration's
+    /// loops walk (`0x00B268B0`'s notice loop, `0x00B26700`'s attitude loop; CONFIRMED by disassembly).
+    fn listed_third_parties(&self, a: FactionId, b: FactionId) -> Vec<FactionId> {
+        let mut out = self.world.factions_in_turn_order();
+        out.retain(|&x| x != a && x != b && !self.is_rebel_faction(x));
+        out
+    }
+
+    /// `a` declares war on `b` (`DeclareWarAndCallAllies` `0x00B268B0`, CONFIRMED order):
+    /// 1. both sides' allies are called while `a` and `b` are still at peace ([`Self::call_allies`]): `b`'s
+    ///    first, then `a`'s; each joining ally's own war ([`Self::join_war`]) runs then;
+    /// 2. if both sides are major powers (faction +0x524), the `war_declared` notice
+    ///    ([`CampaignMessage::WarDeclared`], `0x009DAFE0`) to every listed faction
+    ///    ([`Self::listed_third_parties`], so never the rebels) in none of the call lists
+    ///    (`0x00B2BEC0`), in list order, with no human test;
+    /// 3. then the war itself ([`Self::war_on`] with no ally, `0x00B26700`), so the third parties judge
+    ///    it by their attitude after the allies' wars and broken alliances;
+    /// 4. then the zones of control again (`0x00B795A0`).
+    ///
+    /// Not modelled: the achievement hook (`0x009C7660`, a stat only, between the notices and the war),
+    /// the path grid's view and the trade price update (`0x00B67490`, `0x00BCB020`, no model state).
     pub fn declare_war_rules(&mut self, a: FactionId, b: FactionId) -> Result<Vec<CampaignEvent>, CommandError> {
         self.check_diplomacy_pair(a, b)?;
         if self.world.stance(a, b) == Stance::War {
             return Err(CommandError::AlreadyAtWar(a, b));
         }
-        // Third parties judge by their attitude *before* the war changes anything.
-        let thirds: Vec<(FactionId, u8)> = self.other_factions(a, b).into_iter().map(|x| (x, self.attitude_category(x, b))).collect();
-        let stance = self.world.stance(a, b);
         let mut events = Vec::new();
+        let called = self.call_allies(a, b, &mut events);
+        if self.is_major(a) && self.is_major(b) {
+            for recipient in self.listed_third_parties(a, b) {
+                if !called.contains(recipient) {
+                    events.push(CampaignEvent::Message { recipient, message: CampaignMessage::WarDeclared { declarer: a, target: b } });
+                }
+            }
+        }
+        events.extend(self.war_on(a, b, None)?);
+        // Then the zones of control again (`0x00B268B0` → `0x00B795A0`, CONFIRMED order): `a`'s allies
+        // that joined, `b`'s that joined, `b`'s that broke with it, then `b`, then `a`. (Every
+        // `0x00B26700` of `0x00B268B0` passes 0 for its own refresh flag.)
+        for x in called.joined_a.into_iter().chain(called.joined_b).chain(called.torn_b).chain([b, a]) {
+            self.refresh_faction_zones(x);
+        }
+        Ok(events)
+    }
+
+    /// `a`'s war on `b` itself (`DeclareWarOnFactionRecords` `0x00B26700`), on `ally`'s behalf when `a`
+    /// joins `ally`'s war (`None`: the declaration's own war). CONFIRMED by disassembly:
+    /// - `a`→`b` (`ApplyWarToDeclarerRecord` `0x00B27070`): the `war` factor set from the `war` event
+    ///   (`war_dragged_by_ally` for a joining war, whose #5 is then `ally`); a patron loses `allows_region_return`; an alliance,
+    ///   patronage or protectorate is broken (`0x00B13840` with its war flag set,
+    ///   [`Self::break_alliance_with`]`(.., true)`: the same steps as [`Self::break_alliance`], but no one
+    ///   is sent out of the other's regions, neither for an access given back as none nor by a
+    ///   protectorate tie's end); the access `a` gives `b` ends; a trade agreement is broken
+    ///   ([`Self::break_trade`]); during friendship turns the declarer is a backstabber (`backstab`; not
+    ///   for a joining war); payments are dropped; the stance war.
+    /// - `b`→`a` (`ApplyWarToTargetRecord` `0x00B27250`, given the same `ally`): the `war` factor
+    ///   likewise (`war_dragged_by_ally` for a joining war); payments dropped; the stance war; if `b` gave `a` military access, `a` is
+    ///   charged with abusing it (`0x00B0DA90`), or for a joining war the access only ends.
+    /// - not for a joining war, every other listed faction X ([`Self::listed_third_parties`]: the
+    ///   world's faction list +0xF5C, so never the rebels): if X's attitude to `b` is hostile (category 0) and
+    ///   `b` is neither the rebels nor the pirates (`IsFactionExemptFromWarApproval` `0x008CEE00`:
+    ///   `0x008CEEF0` / `IsPiratesFaction` `0x008CEE20`, tested on `b`), X likes `a` more (`war_against_enemies` on X's
+    ///   `declared_war_against_enemies`); else if very friendly (4), less (`war_against_friends`).
+    ///
+    /// First of all, both sides' `WarStartedCharacterFaction` flag is set (faction +0x925,
+    /// [`FactionDetails::war_started`](super::details::FactionDetails::war_started): `b`'s at
+    /// `0x00B2670D`, then `a`'s at `0x00B26716`), for a joining war too.
+    ///
+    /// Not modelled: `0x00B27070`'s call `0x00A63490(6)` for the declaration's own war, which moves the
+    /// declarer's capital population classes' happiness factor [8] (class +0x20, `0x008A94D0` kind 6)
+    /// by its attitude to `b`: that factor is not modelled at all yet (BACKLOG §0).
+    fn war_on(&mut self, a: FactionId, b: FactionId, ally: Option<FactionId>) -> Result<Vec<CampaignEvent>, CommandError> {
+        for f in [b, a] {
+            // Every loaded faction has its details; a write here never makes a record for one without.
+            if let Some(d) = self.world.faction_details.get_mut(&f) {
+                d.war_started = true;
+            }
+        }
+        let stance = self.world.stance(a, b);
+        let war = event(if ally.is_some() { "war_dragged_by_ally" } else { "war" });
+        let mut events = Vec::new();
+        {
+            let r = self.relationship_mut(a, b);
+            r.set_factor("war", war);
+            if ally.is_some() {
+                r.war_ally = ally;
+            }
+        }
         if matches!(stance, Stance::Allied | Stance::Patron | Stance::Protectorate) {
             if stance == Stance::Patron {
                 self.relationship_mut(a, b).allows_region_return = false;
             }
             events.extend(self.break_alliance_with(a, b, true)?);
         }
-        let had_trade = self.world.relationships.get(&(a, b)).is_some_and(|r| r.trade_agreement);
-        if had_trade {
+        self.relationship_mut(a, b).military_access_turns = 0;
+        if self.world.trade_held(a, b) {
             events.extend(self.break_trade(a, b)?);
         }
         let friendship = self.world.relationships.get(&(a, b)).map_or(0, |r| r.friendship_turns);
-        if friendship != 0 {
+        if friendship != 0 && ally.is_none() {
             self.backstab(a, b, friendship);
         }
-        let war = event("war");
-        {
-            let r = self.relationship_mut(a, b);
-            r.set_factor("war", war);
-            r.military_access_turns = 0;
-            r.payments.clear();
-        }
+        // `a`'s regular payments to `b` end (`0x00B27070`), each item's lines taken back by its
+        // destructor (`0x0086A120`).
+        self.change_treaty_money(a, b, |r| r.payments.clear());
         let gave_access = {
             let r = self.relationship_mut(b, a);
             r.set_factor("war", war);
-            r.payments.clear();
             r.military_access_turns != 0
         };
+        // `b`'s regular payments to `a` end likewise (`0x00B27250` → `0x0086A120`).
+        self.change_treaty_money(b, a, |r| r.payments.clear());
         // The stance turns to war (0x00B27250) before the abuse's cancel, so `a`'s forces in `b`'s
         // land may stay through its expulsion.
         events.extend(self.world.declare_war(a, b)?);
         if gave_access {
-            self.abuse_access(b, a);
-        }
-        // The allies of both sides are called (0x00B268B0).
-        let called = self.call_allies(a, b, &mut events);
-        for (x, cat) in thirds {
-            match cat {
-                0 => self.relationship_mut(x, a).add_factor("declared_war_against_enemies", event("war_against_enemies")),
-                4 => self.relationship_mut(x, a).add_factor("declared_war_against_friends", event("war_against_friends")),
-                _ => {}
+            match ally {
+                Some(_) => self.relationship_mut(b, a).military_access_turns = 0,
+                None => self.abuse_access(b, a),
             }
         }
-        // Then the zones of control again (`0x00B268B0` → `0x00B795A0`, CONFIRMED order): `a`'s allies
-        // that joined, `b`'s that joined, `b`'s that broke with it, then `b`, then `a`. (The joins'
-        // `0x00B26700` passes 0 for its refresh flag.)
-        for x in called.joined_a.into_iter().chain(called.joined_b).chain(called.torn_b).chain([b, a]) {
-            self.refresh_faction_zones(x);
+        if ally.is_none() {
+            let enemies_count = !self.is_rebel_faction(b) && !super::director::is_pirate(self, b);
+            for x in self.listed_third_parties(a, b) {
+                match self.attitude_category(x, b) {
+                    0 if enemies_count => self.relationship_mut(x, a).add_factor("declared_war_against_enemies", event("war_against_enemies")),
+                    4 => self.relationship_mut(x, a).add_factor("declared_war_against_friends", event("war_against_friends")),
+                    _ => {}
+                }
+            }
         }
         self.diplomacy_changed();
         Ok(events)
@@ -330,9 +403,14 @@ impl CampaignModel {
     /// the `war` factor gets the `peace` event added (`peace_dragged_by_ally` if the side was in the war
     /// for an ally, `war_ally`, which is then cleared); friendship 10 turns; the war counters (#10–#13)
     /// zeroed. The access an alliance of `a` had suspended for this enemy is restored (`0x00B0D0C0`, on
-    /// `a`'s side only), and a side given back no access leaves the other's regions.
-    pub fn make_peace_rules(&mut self, a: FactionId, b: FactionId) -> Result<Vec<CampaignEvent>, CommandError> {
-        let events = self.world.make_peace(a, b)?;
+    /// `a`'s side only), and a side given back no access leaves the other's regions. Unless
+    /// `suppress_messages`, each side gets the `ceasefire_declared` message about the other, `b` first
+    /// (`0x009D1F20`, posted with no human test; the flag is the `CCQ_MAKE_PEACE` command's byte, set only
+    /// by the script's `force_make_protectorate` `0x0097AA20`, never saved). Last, a
+    /// [`CampaignFeatures::peace_access_grants`](super::features::CampaignFeatures::peace_access_grants) row
+    /// gives its grantee access (`0x00B444B0`). CONFIRMED by disassembly of `0x00B262C0`.
+    pub fn make_peace_rules(&mut self, a: FactionId, b: FactionId, suppress_messages: bool) -> Result<Vec<CampaignEvent>, CommandError> {
+        let mut events = self.world.make_peace(a, b)?;
         // 0x00A25570: a commander of either side raiding the other side loses all his raids.
         self.clear_raids_on_peace(a, b);
         for (x, y) in [(a, b), (b, a)] {
@@ -349,8 +427,12 @@ impl CampaignModel {
         // 0x00B0D0C0 (enemy `b`) on each of `a`'s alliance records (stance 2–4, record order), then on that
         // ally's record towards `a`. Only `a`'s side: the loop runs on the proposer's manager alone (CONFIRMED,
         // `0x00B262C0`, `force_make_peace` `0x00936710` passing the first faction's).
-        let allies: Vec<FactionId> =
-            self.world.factions.keys().copied().filter(|&x| x != a && matches!(self.world.stance(a, x), Stance::Allied | Stance::Patron | Stance::Protectorate)).collect();
+        let allies: Vec<FactionId> = self
+            .world
+            .record_targets_in_order(a)
+            .into_iter()
+            .filter(|&x| matches!(self.world.stance(a, x), Stance::Allied | Stance::Patron | Stance::Protectorate))
+            .collect();
         for ally in allies {
             for (owner, target) in [(a, ally), (ally, a)] {
                 if self.restore_access_suspended_for(owner, target, b) {
@@ -361,6 +443,22 @@ impl CampaignModel {
         // `0x00B262C0` floods the zones again: the proposer's, then the target's (CONFIRMED, disassembly).
         self.refresh_faction_zones(a);
         self.refresh_faction_zones(b);
+        if !suppress_messages {
+            for (recipient, other) in [(b, a), (a, b)] {
+                events.push(CampaignEvent::Message { recipient, message: CampaignMessage::CeasefireDeclared { other } });
+            }
+        }
+        let (ka, kb) = (self.world.factions[&a].key.as_str(), self.world.factions[&b].key.as_str());
+        let grants: Vec<(FactionId, FactionId, i32)> = self
+            .rules
+            .features
+            .peace_access_grants
+            .iter()
+            .filter_map(|g| g.granter_of((ka, a), (kb, b)).map(|(granter, grantee)| (granter, grantee, g.turns)))
+            .collect();
+        for (granter, grantee, turns) in grants {
+            events.extend(self.grant_military_access(granter, grantee, turns)?);
+        }
         self.diplomacy_changed();
         Ok(events)
     }
@@ -488,10 +586,10 @@ impl CampaignModel {
             let r = self.relationship_mut(b, a);
             r.factor_mut("alliance").reset(0);
             r.set_factor("alliance_broken", event("alliance_broken"));
-            r.protectorate_income = 0;
-            r.protectorate_tribute = 0;
             r.alliance_commitment_turns = 0;
         }
+        // The income and tribute lines cleared, each booking −old (`0x00B0CA9A` / `0x00B0CAB6`).
+        self.change_treaty_money(b, a, |r| (r.protectorate_income, r.protectorate_tribute) = (0, 0));
         let lost = self.restore_first_suspended_access(b, a);
         if lost && !from_war {
             self.expel_from_lands_of(a, b);
@@ -571,7 +669,7 @@ impl CampaignModel {
     pub fn embargo(&mut self, a: FactionId, x: FactionId, requester: FactionId) -> Result<Vec<CampaignEvent>, CommandError> {
         self.check_diplomacy_pair(a, x)?;
         self.check_diplomacy_pair(x, requester)?;
-        if self.world.relationships.get(&(a, x)).is_some_and(|r| r.trade_agreement) {
+        if self.world.trade_held(a, x) {
             self.break_trade(a, x)?;
         }
         self.relationship_mut(a, x).trade_embargo_turns = 10;
@@ -672,7 +770,10 @@ impl CampaignModel {
     }
 
     /// `payer` agrees to pay `payee` `amount` a turn for `turns` turns: a `REGULAR_PAYMENTS` item on the payer's
-    /// record (direction INFERRED), and the friendship raised to min(turns, 10) (S1_LEFTOVERS.md #15).
+    /// record towards the payee (`0x00B54FC0` → `0x00B55010`, CONFIRMED), and the friendship raised to
+    /// min(turns, 10) (S1_LEFTOVERS.md #15). The item books `amount` into the payer's category 22 and the
+    /// payee's category 8 while it lives ([`Self::change_treaty_money`]; `0x00B55010` books a temporary item,
+    /// pushes its copy and destroys the temporary, a net single booking), so each round end pays it once.
     pub fn regular_payment(&mut self, payer: FactionId, payee: FactionId, amount: i32, turns: u32) -> Result<Vec<CampaignEvent>, CommandError> {
         self.check_diplomacy_pair(payer, payee)?;
         self.pay_regularly(payer, payee, amount, turns);
@@ -682,8 +783,8 @@ impl CampaignModel {
     /// The record of [`Self::regular_payment`], for a caller that has checked the faction pair.
     pub(super) fn pay_regularly(&mut self, payer: FactionId, payee: FactionId, amount: i32, turns: u32) {
         let r = self.relationship_mut(payer, payee);
-        r.payments.push(RegularPayment { amount, turns });
         r.friendship_turns = r.friendship_turns.max(turns.min(10));
+        self.change_treaty_money(payer, payee, |r| r.payments.push(RegularPayment { amount, turns }));
         self.diplomacy_changed();
     }
 
@@ -700,8 +801,11 @@ impl CampaignModel {
     ///
     /// Not modelled: the deal's peace step (`param_3`, from the deal record's +0x16 flag: an AI faction at war
     /// with the protectorate makes peace with it when its own `0x00B0CDF0` check towards the patron holds,
-    /// `0x00B262C0`; BACKLOG). Tribute: `0x00BBCD00` = a faction value / 5 (the value, `0x00B803A0`, is not
-    /// read: the tribute line is left at 0, PROVISIONAL).
+    /// `0x00B262C0`; BACKLOG).
+    ///
+    /// With the stances the money starts, before the other alliances break: the protectorate's tribute
+    /// (`0x00B104E0`'s end, `0x00AF8130`) and the patron's income (`0x00B10480`), each a fifth of the
+    /// protectorate's running categories 5..7 (`0x00BBCD00`, [`Self::refresh_protectorate_money`]).
     pub fn make_protectorate(&mut self, protectorate: FactionId, patron: FactionId) -> Result<Vec<CampaignEvent>, CommandError> {
         self.check_diplomacy_pair(protectorate, patron)?;
         let mut events = Vec::new();
@@ -726,6 +830,8 @@ impl CampaignModel {
         }
         self.world.set_stance(protectorate, patron, Stance::Protectorate)?;
         events.push(CampaignEvent::StanceChanged { a: protectorate, b: patron, stance: Stance::Protectorate });
+        self.refresh_protectorate_money(protectorate, patron);
+        self.refresh_protectorate_money(patron, protectorate);
         let allies: Vec<FactionId> = self
             .world
             .factions
@@ -761,8 +867,11 @@ impl CampaignModel {
     /// patron's forces stay. Only the war path's alliance break sets it ([`Self::break_alliance_with`]).
     fn end_protectorate_tie_with(&mut self, protectorate: FactionId, patron: FactionId, skip_expulsion: bool) -> Result<Vec<CampaignEvent>, CommandError> {
         self.world.set_stance(protectorate, patron, Stance::Neutral)?;
-        self.relationship_mut(protectorate, patron).protectorate_tribute = 0;
-        self.relationship_mut(patron, protectorate).protectorate_income = 0;
+        // Each line cleared books −old (`0x00B64C10` → `0x00AF8130(0)`, `0x00B54530`).
+        self.relationship_mut(protectorate, patron);
+        self.relationship_mut(patron, protectorate);
+        self.change_treaty_money(protectorate, patron, |r| r.protectorate_tribute = 0);
+        self.change_treaty_money(patron, protectorate, |r| r.protectorate_income = 0);
         if !skip_expulsion {
             self.expel_from_lands_of(patron, protectorate);
         }
@@ -798,7 +907,13 @@ impl CampaignModel {
     ///    military access;
     /// 6. at war: the war balances #10 and #11 (`war_balances`), #12 and #13 +1;
     /// 7. war momentum (#7): positive −2 (to 0), negative +1 (to 0);
-    /// 8. regular payments: turns −1, finished ones removed (the money is an economy line: not modelled);
+    /// 8. the protectorate tribute or patron income set again ([`Self::refresh_protectorate_money`]); regular
+    ///    payments: turns −1, finished ones removed, their money taken back out of both running records
+    ///    ([`Self::change_treaty_money`]). The faction's own settle has already paid them this round (the
+    ///    payer's step runs after its settle). ORIGINAL BUG (`0x0086A120`): the exe removes a finished item
+    ///    here at once, so a payee whose economy runs later in the round loses the last payment; ours
+    ///    removes it after the payee's settle ([`Self::drop_finished_payments_to`]), so the payee receives
+    ///    every payment the payer makes in either turn order;
     /// 9. the cancel grievance (#26) −2 (to 0); embargo turns (#27) −1.
     ///
     /// Then the manager's own counter (+0x20, [`World::access_cancel_marks`](super::World::access_cancel_marks)) −1.
@@ -867,12 +982,24 @@ impl CampaignModel {
                 r.turns_since_battle += 1;
             }
             r.war_momentum = if r.war_momentum > 0 { (r.war_momentum - 2).max(0) } else { (r.war_momentum + 1).min(0) };
-            for p in &mut r.payments {
-                p.turns = p.turns.saturating_sub(1);
-            }
-            r.payments.retain(|p| p.turns != 0);
             r.access_cancel_grievance -= r.access_cancel_grievance.min(2);
             r.trade_embargo_turns = r.trade_embargo_turns.saturating_sub(1);
+            // Step 8's money (no field above reads it): the tribute or income set again, then the payments
+            // tick and the finished ones go, each taking its lines back (`0x0086A120`). ORIGINAL BUG: the
+            // exe removes a finished item here even when the payee's economy is still ahead this round, so
+            // its income line is gone before the payee's settle and the payee gets one payment fewer than
+            // the payer makes (`0x00B29170` → `0x0086A120`). Ours keeps such an item (at 0 turns) until the
+            // payee has settled ([`Self::drop_finished_payments_to`]).
+            self.refresh_protectorate_money(faction, t);
+            let payee_settles_later = self.turn.queue.contains(&super::TurnStep::Economy(t));
+            self.change_treaty_money(faction, t, |r| {
+                for p in &mut r.payments {
+                    p.turns = p.turns.saturating_sub(1);
+                }
+                if !payee_settles_later {
+                    r.payments.retain(|p| p.turns != 0);
+                }
+            });
         }
         if let Some(n) = self.world.access_cancel_marks.get_mut(&faction) {
             *n = n.saturating_sub(1);
@@ -1045,6 +1172,8 @@ impl CampaignModel {
         for (o, t) in keys {
             let leader = fx.faction(t, "diplomacy_bonus_faction_leader") as i32;
             let enlightenment = fx.faction(t, "diplomacy_bonus_enlightenment") as i32;
+            // Steps 1 and 2: the tribute or income set again from the protectorate's running record.
+            self.refresh_protectorate_money(o, t);
             let r = self.relationship_mut(o, t);
             r.factor_mut("faction_leader").reset(leader);
             r.factor_mut("enlightenment").reset(enlightenment);
@@ -1173,114 +1302,125 @@ impl CampaignModel {
         }
     }
 
-    /// The money of treaties at `faction`'s round-end economy (PROVISIONAL place; INFERRED direction):
-    /// - regular payments: the items on `faction`'s record towards a target move their amount from `faction` to
-    ///   the target each turn (the economy line category 0 holds the sum of the active items, `0x00B29170`);
-    /// - protectorate tribute: a protectorate pays its patron a fifth of its revenue (`0x00BBCD00` = the sum of
-    ///   three economics lines / 5, read as taxes + trade + other), economy lines 6 (protectorate) and 2 (patron),
-    ///   kept in #8 / #9.
-    ///
-    /// In the exe both are economy lines summed into the round settle (`0x00BABE30`), so the model moves them with
-    /// [`super::treasury::pay`] / [`super::treasury::credit`], which saturate where the exe's 32-bit sum wraps
-    /// (ORIGINAL BUG, `treasury` module docs).
-    pub fn diplomacy_money(&mut self, faction: FactionId) {
-        let targets: Vec<FactionId> = self.world.relationships.keys().filter(|(o, _)| *o == faction).map(|(_, t)| *t).collect();
-        for t in targets {
-            if !self.in_the_game(t) {
-                continue;
+    /// Changes the treaty money of `owner`'s record towards `target` (its regular payments, protectorate
+    /// tribute or patron income) through `change`, booking it into the running records as the exe's
+    /// trackers do: the old amounts taken back, the new ones booked
+    /// ([`super::economy::book_treaty_money`]). Every writer of the three goes through here, so the
+    /// records' categories 8 / 10 / 22 / 24 always hold the live amounts, which the round end pays
+    /// ([`super::economy::settle_round`]). Nothing without a record.
+    pub(super) fn change_treaty_money(&mut self, owner: FactionId, target: FactionId, change: impl FnOnce(&mut Relationship)) {
+        if !self.world.relationships.contains_key(&(owner, target)) {
+            return;
+        }
+        super::economy::book_treaty_money(self, owner, target, -1);
+        if let Some(r) = self.world.relationships.get_mut(&(owner, target)) {
+            change(r);
+        }
+        super::economy::book_treaty_money(self, owner, target, 1);
+    }
+
+    /// The regular payments to `payee` that finished in their payer's per-turn update earlier this round
+    /// end, removed once `payee`'s own settle has paid their last round (run by the payee's round-end
+    /// economy right after its settle, [`super::TurnStep::Economy`]), each taking its lines back
+    /// (`0x0086A120`). ORIGINAL BUG fix: see [`Self::diplomacy_round_end`] step 8.
+    pub(super) fn drop_finished_payments_to(&mut self, payee: FactionId) {
+        let payers: Vec<FactionId> = self
+            .world
+            .relationships
+            .iter()
+            .filter(|((_, t), r)| *t == payee && r.payments.iter().any(|p| p.turns == 0))
+            .map(|((o, _), _)| *o)
+            .collect();
+        for payer in payers {
+            self.change_treaty_money(payer, payee, |r| r.payments.retain(|p| p.turns != 0));
+        }
+    }
+
+    /// The protectorate tribute and patron income of `owner`'s record towards `target` set again from the
+    /// protectorate's running record ([`super::economy::protectorate_tribute_value`]), CONFIRMED at the
+    /// round end (`0x00B29170`, after the war momentum's drift) and the round start (`0x00B71EC0` steps 1
+    /// and 2): owner the target's protectorate (stance 4, `0x00B5DCC0`): the tribute (`0x00AF8130` with
+    /// `0x00BBCD00` of the owner's record); owner the target's patron (stance 3, `0x00B5DCB0`): the income
+    /// (`0x00BBCD00` of the target's record). Any other stance keeps both as they are.
+    fn refresh_protectorate_money(&mut self, owner: FactionId, target: FactionId) {
+        match self.world.stance(owner, target) {
+            Stance::Protectorate => {
+                let tribute = super::economy::protectorate_tribute_value(self, owner);
+                self.change_treaty_money(owner, target, |r| r.protectorate_tribute = tribute);
             }
-            let pay = self.world.relationships.get(&(faction, t)).map_or(0, |r| r.payments.iter().fold(0i32, |s, p| s.wrapping_add(p.amount)));
-            let tribute = if self.world.stance(faction, t) == Stance::Protectorate {
-                super::economy::faction_income(self, faction).revenue().max(0) / 5
-            } else {
-                0
-            };
-            if tribute != 0 || self.world.relationships.get(&(faction, t)).is_some_and(|r| r.protectorate_tribute != 0) {
-                self.relationship_mut(faction, t).protectorate_tribute = tribute;
-                self.relationship_mut(t, faction).protectorate_income = tribute;
+            Stance::Patron => {
+                let income = super::economy::protectorate_tribute_value(self, target);
+                self.change_treaty_money(owner, target, |r| r.protectorate_income = income);
             }
-            let total = pay.wrapping_add(tribute);
-            if total != 0 {
-                if let Some(f) = self.world.factions.get_mut(&faction) {
-                    super::treasury::pay(&mut f.treasury, total);
-                }
-                if let Some(f) = self.world.factions.get_mut(&t) {
-                    super::treasury::credit(&mut f.treasury, total);
-                }
-            }
+            _ => {}
         }
     }
 
     /// The allies of both sides called into `a`'s war on `b` (`DeclareWarAndCallAllies` `0x00B268B0`,
-    /// CONFIRMED flow): every faction X allied to `b` (stance allied, patron or protectorate), in the game,
-    /// not `a`, not already at war with `a`: a human X gets an offer (UI event `+0xB10`; not modelled: a
-    /// human ally is not called); an AI X decides through the AI (`0x00AAA950` → `0x00AAA920`, §6). Join: X
-    /// declares war on `a` on `b`'s behalf ([`Self::join_war`]). Refuse: X breaks its alliance with `b`
-    /// (`0x00B27500`, `0x00B13840`). Then the same for `a`'s allies against `b`, except that a refusing ally
-    /// of `a` is only listed (`0x00B0DB40`) and keeps its alliance. PROVISIONAL AI decision: join, unless X
-    /// is allied to the enemy as well (then it refuses). PROVISIONAL order: the exe calls the allies before
-    /// declaring the war itself (`0x00B26700` inside `0x00B268B0`); [`Self::declare_war_rules`] declares it
-    /// first. The events go to `events`; returns who joined and who broke with `b`, the lists the exe keeps
-    /// for the zones' refresh.
+    /// CONFIRMED flow and order), before the war itself: every faction X allied to `b` (stance allied,
+    /// patron or protectorate), in the game, not `a` (`0x00898B80`): if X is already at war with `a` it is
+    /// not asked and simply joins; else a human X gets an offer (UI event `+0xB10`; not modelled: a human
+    /// ally not yet at war is not called) and an AI X decides through the AI (`0x00AAA950` → `0x00AAA920`,
+    /// §6). Join ([`Self::join_war`]): X's own war on `a` on `b`'s behalf unless already at war, then the
+    /// access of X and `b` is saved for the war (`0x00B0CCE0` on both records). Refuse: X breaks its
+    /// alliance with `b` (`0x00B27500`, `0x00B13840`). Then the same for `a`'s allies against `b`, except
+    /// that a refusing ally of `a` is only listed (`0x00B0DB40`) and keeps its alliance. PROVISIONAL AI
+    /// decision: join, unless X is allied to the enemy as well (then it refuses). The events go to
+    /// `events`; returns who joined and who broke with `b`, the lists the exe keeps for the zones' refresh.
     fn call_allies(&mut self, a: FactionId, b: FactionId, events: &mut Vec<CampaignEvent>) -> CalledAllies {
         let mut called = CalledAllies::default();
         for (side, enemy) in [(b, a), (a, b)] {
+            // In the order of `side`'s diplomacy records (CONFIRMED: both loops walk the side's record
+            // array, stride 0x848, front to back).
             let allies: Vec<FactionId> = self
                 .world
-                .factions
-                .keys()
-                .copied()
+                .record_targets_in_order(side)
+                .into_iter()
                 .filter(|&x| x != a && x != b && self.in_the_game(x))
                 .filter(|&x| matches!(self.world.stance(x, side), Stance::Allied | Stance::Patron | Stance::Protectorate))
-                .filter(|&x| self.world.stance(x, enemy) != Stance::War)
                 .collect();
             for x in allies {
-                if self.turn.humans.contains(&x) {
+                let at_war = self.world.stance(x, enemy) == Stance::War;
+                if !at_war && self.turn.humans.contains(&x) {
                     continue;
                 }
-                let torn = matches!(self.world.stance(x, enemy), Stance::Allied | Stance::Patron | Stance::Protectorate);
+                let torn = !at_war && matches!(self.world.stance(x, enemy), Stance::Allied | Stance::Patron | Stance::Protectorate);
                 let result = match (torn, side == b) {
                     (true, true) => self.break_alliance(x, side),
                     // A refusing ally of the attacker keeps its alliance (0x00B0DB40 only lists it).
                     (true, false) => Ok(Vec::new()),
                     (false, _) => self.join_war(x, enemy, side),
                 };
-                if let Ok(mut e) = result {
-                    events.append(&mut e);
-                    let list = match (torn, side == a) {
-                        (false, true) => &mut called.joined_a,
-                        (false, false) => &mut called.joined_b,
-                        (true, false) => &mut called.torn_b,
-                        (true, true) => continue,
-                    };
-                    list.push(x);
+                match result {
+                    Ok(mut e) => {
+                        events.append(&mut e);
+                        let list = match (torn, side == a) {
+                            (false, true) => &mut called.joined_a,
+                            (false, false) => &mut called.joined_b,
+                            (true, false) => &mut called.torn_b,
+                            (true, true) => &mut called.refused_a,
+                        };
+                        list.push(x);
+                    }
+                    // Unreachable: every faction here is a known one other than its enemy.
+                    Err(e) => {
+                        debug_assert!(false, "call_allies: {e}");
+                        log::warn!("call_allies: {x:?} could not join the war on {enemy:?}: {e}");
+                    }
                 }
             }
         }
         called
     }
 
-    /// `x` goes to war with `enemy` on `ally`'s behalf (`0x00B26700` with an ally: `0x00B27070` sets the
-    /// `war_dragged_by_ally` event and #5 = `ally`), and `0x00B0CCE0` on (x, ally) and (ally, x): the access
-    /// they give each other is saved for this war (#17) and becomes indefinite.
+    /// `x` joins `ally`'s war on `enemy` (`0x00B268B0`'s joined step): `x`'s own war on `enemy` on
+    /// `ally`'s behalf ([`Self::war_on`] with the ally) unless they are already at war, then
+    /// `0x00B0CCE0` on (ally, x) and (x, ally): the access they give each other is saved for this war
+    /// (#17) and becomes indefinite.
     pub fn join_war(&mut self, x: FactionId, enemy: FactionId, ally: FactionId) -> Result<Vec<CampaignEvent>, CommandError> {
         self.check_diplomacy_pair(x, enemy)?;
-        if self.world.stance(x, enemy) == Stance::War {
-            return Err(CommandError::AlreadyAtWar(x, enemy));
-        }
-        {
-            let r = self.relationship_mut(x, enemy);
-            r.set_factor("war", event("war_dragged_by_ally"));
-            r.war_ally = Some(ally);
-            r.military_access_turns = 0;
-            r.payments.clear();
-        }
-        {
-            let r = self.relationship_mut(enemy, x);
-            r.set_factor("war", event("war"));
-            r.payments.clear();
-        }
-        for (p, q) in [(x, ally), (ally, x)] {
+        let events = if self.world.stance(x, enemy) == Stance::War { Vec::new() } else { self.war_on(x, enemy, Some(ally))? };
+        for (p, q) in [(ally, x), (x, ally)] {
             let r = self.relationship_mut(p, q);
             if !r.allied_in_war_against.iter().any(|w| w.enemy == enemy) {
                 let saved = r.military_access_turns;
@@ -1288,8 +1428,6 @@ impl CampaignModel {
             }
             r.military_access_turns = -1;
         }
-        let events = self.world.declare_war(x, enemy)?;
-        self.diplomacy_changed();
         Ok(events)
     }
 }

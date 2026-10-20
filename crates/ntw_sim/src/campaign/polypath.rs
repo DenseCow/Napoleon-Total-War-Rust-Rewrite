@@ -122,6 +122,11 @@ pub struct PolyMap {
     pub adj: Vec<u32>,
     /// Region id -> indices into the grid's region keys (empty = sea / no region).
     pub region_sets: Vec<Vec<u32>>,
+    /// How many of the first region ids are single land regions (the file's region count; the exe's
+    /// layer slots below +0x140, each one region index at +0x144): the region id groups follow (layer
+    /// +0x150 extra slots, each a list). Only the single region of a risen army tells them apart
+    /// (`0x00B078C0`, [`super::zones`]); 0 on a map without the original's region table.
+    pub single_region_slots: usize,
     /// Per polygon, its connected component for armies (`[0]`) and fleets (`[1]`): polygons the
     /// mover may enter, joined by adjacency; `u32::MAX` where the mover may not enter. A search
     /// between two components fails at once (the original compares a component id before
@@ -492,6 +497,18 @@ impl<'a> View<'a> {
         }
     }
 
+    /// The region gate's neighbour test (`CheckNeighbourRegionGate` `0x00B16CF0`, and `0x00B16BA0`
+    /// with the layer passed in; CONFIRMED by disassembly): a step from polygon `from` to `to` in the
+    /// same region id always passes; into another region id only when `gate` (a layer's flags, one
+    /// per region id, [`PolyMap::region_sets`]) has that id's flag set (`IsKeyRegionOpenOnLayer`
+    /// `0x00B16BD0`). An id past the flags (only the off-map and river polygons' 1023, which no mover
+    /// enters) counts as open. The zone flood ([`super::zoc::reach_in`]) and the path search
+    /// ([`View::find_path_gated`]) both take it.
+    pub fn gate_lets(&self, gate: &[bool], from: usize, to: usize) -> bool {
+        let r = self.region_id(to);
+        r == self.region_id(from) || gate.get(r as usize).copied().unwrap_or(true)
+    }
+
     /// Region id of polygon `p`.
     pub fn region_id(&self, p: usize) -> u32 {
         match self.piece(p) {
@@ -726,6 +743,22 @@ impl<'a> View<'a> {
         road_cost: &[f32],
         blocked: &dyn Fn(usize) -> bool,
     ) -> Option<PolyPath> {
+        self.find_path_gated(from, to, mover, road_cost, blocked, None)
+    }
+
+    /// [`View::find_path_avoiding`] behind a layer's region gate: every step, the goal's included,
+    /// passes [`View::gate_lets`] (`0x00B2CC20` at `0x00B2D021` and `0x00B2DCA3`, CONFIRMED), so a
+    /// path never crosses into a region whose flag is clear; staying in the start's region needs no
+    /// flag. `None`: no gate (the gate byte +0x168 cleared, an agent's search).
+    pub fn find_path_gated(
+        &self,
+        from: (f32, f32),
+        to: (f32, f32),
+        mover: Mover,
+        road_cost: &[f32],
+        blocked: &dyn Fn(usize) -> bool,
+        gate: Option<&[bool]>,
+    ) -> Option<PolyPath> {
         let free = |p: usize| mover.may_enter(self.kind(p)) && !blocked(p);
         let sp = self.locate(from.0, from.1, mover, 2)?;
         let mut to = to;
@@ -809,7 +842,7 @@ impl<'a> View<'a> {
                 if matches!(here_kind, 10 | 11) && !super::rtcut::links(here_kind, self.kind(nb)) {
                     continue;
                 }
-                if !mover.may_enter(self.kind(nb)) || (nb != gp && blocked(nb)) {
+                if !mover.may_enter(self.kind(nb)) || (nb != gp && blocked(nb)) || gate.is_some_and(|g| !self.gate_lets(g, poly, nb)) {
                     continue;
                 }
                 let (c1, r1) = self.cell_rc(nb);

@@ -323,4 +323,57 @@ impl CampaignModel {
     pub fn building_tech_ok(&self, faction: FactionId, level: &str) -> bool {
         self.rules.building_techs.get(level).is_none_or(|t| self.has_researched(faction, t))
     }
+
+    /// The technologies building level `level` unlocks for `faction`, whatever their state
+    /// (CONFIRMED, `0x008C7620` → `0x008C7640`): every technology of the faction's tree whose
+    /// building level (technology record +0x5C) is `level` itself (no chain or variant match) and
+    /// whose faction list passes the faction ([`super::rules::TechRules::factions`], `0x00F1EFA0` with
+    /// the faction's own record, faction +0x514, `0x008B9DE0`). In tree order: the walk is the one the
+    /// `techs[]` saver `0x00894430` makes, so the order of [`super::world::FactionDetails::technologies`].
+    /// The exe takes the faction's record from `0x008B9DE0` (+0x514) and falls back to `britain`'s when that is
+    /// null; ours always has the faction's own key, so the fallback can't arise.
+    /// Empty for a faction without a tree (faction +0x7C4 null). Callers show it only while
+    /// [`super::world::World::technology_research_disabled`] is clear: see
+    /// [`Self::building_info_technologies`] and [`Self::effects_table_technologies`].
+    pub fn building_level_technologies(&self, faction: FactionId, level: &str) -> Vec<String> {
+        let (Some(d), Some(f)) = (self.world.faction_details.get(&faction), self.world.factions.get(&faction)) else { return Vec::new() };
+        d.technologies
+            .iter()
+            .map(|(k, _)| k)
+            .filter(|k| {
+                self.rules
+                    .technologies
+                    .get(*k)
+                    .is_some_and(|t| t.building_level == level && (t.factions.is_empty() || t.factions.contains(&f.key)))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// The technology list of the building info (`0x009B7300`, used twice by `CampaignUI.BuildingEffects`,
+    /// handler `0x009DE150`): [`Self::building_level_technologies`], or nothing while
+    /// [`super::world::World::technology_research_disabled`] is set (CONFIRMED test at `0x009B73AF`; the
+    /// rest of that info, `0x009B73F0` / `0x009B74E0`, is built either way).
+    pub fn building_info_technologies(&self, faction: FactionId, level: &str) -> Vec<String> {
+        if self.world.technology_research_disabled {
+            return Vec::new();
+        }
+        self.building_level_technologies(faction, level)
+    }
+
+    /// The "technology" table of a building effects table (`0x009B2BB0`, which also builds the
+    /// "generic", "construction", "recruitment", "FactionColour" and "UniformColour" tables):
+    /// [`Self::building_level_technologies`] of the owner, or nothing when `research_disabled`, when there
+    /// is no owner, or when the campaign's [`super::features::CampaignFeatures::effects_technologies_hidden`]
+    /// is set (CONFIRMED, `0x009B2FA1`..`0x009B2FE0`). `research_disabled` is
+    /// [`super::world::World::technology_research_disabled`] as it stands for `CampaignUI.FortEffects`
+    /// (`0x009E4AA0`), but for a building-completed message the value it had when the message was posted
+    /// (`0x009CDA30` / `0x009FB920` store it at message +0xBC, its details builder `0x00A096C0` passes it
+    /// on).
+    pub fn effects_table_technologies(&self, owner: Option<FactionId>, level: &str, research_disabled: bool) -> Vec<String> {
+        match owner {
+            Some(f) if !research_disabled && !self.rules.features.effects_technologies_hidden => self.building_level_technologies(f, level),
+            _ => Vec::new(),
+        }
+    }
 }

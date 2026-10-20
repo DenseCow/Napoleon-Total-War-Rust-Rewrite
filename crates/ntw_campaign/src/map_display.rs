@@ -129,6 +129,7 @@ mod tests {
                 regions: Vec::new(),
                 trade_nodes: Vec::new(),
                 ground_types: Vec::new(),
+                black_shroud_outlines: Vec::new(),
             },
             // West half 0, east half 255.
             heightmap: Heightmap { width: 2, height: 1, values: vec![0, 255] },

@@ -297,6 +297,17 @@ fn loads_all_eight_startpos() {
             _ => "europe_main",
         };
         assert_eq!(theatres, [expected], "{c}");
+        // The WorldCreated switches the start positions carry (`EPISODIC_RESTRICTIONS` #29, #31,
+        // #32: technology research / liberation options / victory notification disabled).
+        let w = &l.model.world;
+        let switches = (w.technology_research_disabled, w.liberation_options_disabled, w.victory_notification_disabled);
+        let expected = match c {
+            "egy_napoleon" | "mp_egy_napoleon" | "mp_ita_napoleon" => (false, true, false),
+            "ita_napoleon" => (true, true, false),
+            "tut_napoleon" => (false, true, true),
+            _ => (false, false, false),
+        };
+        assert_eq!(switches, expected, "{c}: WorldCreated switches");
         check_sane(c, &l, db, true);
 
         // Region owners agree with the front-end ownership table.
@@ -480,4 +491,80 @@ fn recruit_permissions_from_the_real_data() {
     assert!(!rules.faction_may_recruit("austria", "Inf_Line_French_Fusiliers"));
     assert!(rules.faction_may_recruit("britain", "Inf_Mob_Armed_Citizenry"));
     assert!(!rules.faction_may_recruit("britain", "Cav_Light_Brunswick_Hussars"));
+}
+
+/// The outcome movies from the real data on the eur startpos (CAMPAIGN_FIDELITY.md "Campaign over"):
+/// a destroyed human's defeat movie is the row naming its `factions` #39 id (a minor faction's empty or
+/// `0` id names none: no movie, as the exe); a win plays its government's victory movie of its culture
+/// (`gov_empire` the absolute monarchy's).
+#[test]
+fn outcome_movies_from_the_real_data() {
+    use ntw_sim::campaign::outcome::{CampaignOutcome, MovieExit};
+    let Some(db) = db() else { return };
+    let path = data_dir().join(r"campaigns\eur_napoleon\startpos.esf");
+    if !path.is_file() {
+        return;
+    }
+    let m = ntw_campaign::read_file(&path, db).unwrap().model;
+    assert_eq!(m.rules.movie_events.len(), 57);
+    // Every vanilla `cultures` row's #2 (CAMPAIGN_FIDELITY.md "Campaign over" cites this list).
+    let alternates: Vec<(&str, &str)> = m.rules.culture_alternates.iter().map(|(c, a)| (c.as_str(), a.as_str())).collect();
+    assert_eq!(
+        alternates,
+        [
+            ("PIR_european", "european"),
+            ("PIR_natives", "european"),
+            ("PIR_pirates", "european"),
+            ("egy_european", "european"),
+            ("egy_middle_east", "middle_east"),
+            ("european", ""),
+            ("indian", "middle_east"),
+            ("middle_east", "indian"),
+            ("tribal", "european"),
+        ]
+    );
+    let id = |key: &str| m.world.factions.values().find(|f| f.key == key).unwrap_or_else(|| panic!("{key} is in the startpos")).id;
+    let lost = |key: &str| m.outcome_movie(id(key), CampaignOutcome::Destroyed).map(|o| o.movie);
+    let won = |key: &str| m.outcome_movie(id(key), CampaignOutcome::Won { multiplayer_over: false }).map(|o| o.movie);
+    assert_eq!(lost("france").as_deref(), Some("EUR_Lose_FR.bik"));
+    assert_eq!(lost("ottomans").as_deref(), Some("Ottoman_Lose_battle.bik"));
+    assert_eq!(lost("poland_lithuania").as_deref(), Some("EUR_Lose_POL.bik"));
+    assert_eq!((lost("denmark"), lost("sicily")), (None, None));
+    assert_eq!(won("france").as_deref(), Some("EUR_MON_VIC.bik"));
+    assert_eq!(won("britain").as_deref(), Some("EUR_CON_VIC.bik"));
+    assert_eq!(won("netherlands").as_deref(), Some("EUR_REP_VIC.bik"));
+    assert_eq!(won("ottomans").as_deref(), Some("OTT_MON_VIC.bik"));
+    let france = m.outcome_movie(id("france"), CampaignOutcome::Destroyed).expect("france's defeat movie");
+    assert_eq!((france.event.as_str(), france.exit, france.show_everyone, france.only_local_faction), ("game_lost_france", MovieExit::ExitGame, true, true));
+}
+
+/// `technology_faction_junctions` reach each technology's faction list (once per faction, as the row
+/// builder `0x00F20F00`'s set), and on the eur startpos every technology of a faction's tree passes its
+/// list: the exe builds the tree through the same filter (`0x008CB8F0` → `0x00F1EFA0`), so the
+/// "empty list = every faction" reading matches the shipped data.
+#[test]
+fn technology_faction_lists_from_the_real_data() {
+    let Some(db) = db() else { return };
+    let rules = ntw_campaign::rules_from_db(db, "eur_napoleon");
+    assert!(!db.campaign.tech_factions.is_empty());
+    for row in db.campaign.tech_factions.iter() {
+        if let Some(t) = rules.technologies.get(&row.technology) {
+            assert_eq!(t.factions.iter().filter(|f| **f == row.faction).count(), 1, "{} {}", row.technology, row.faction);
+        }
+    }
+    let path = data_dir().join(r"campaigns\eur_napoleon\startpos.esf");
+    if !path.is_file() {
+        return;
+    }
+    let m = ntw_campaign::read_file(&path, db).unwrap().model;
+    let mut checked = 0;
+    for (fid, d) in &m.world.faction_details {
+        let key = &m.world.factions[fid].key;
+        for (k, _) in &d.technologies {
+            let t = &m.rules.technologies[k];
+            assert!(t.factions.is_empty() || t.factions.contains(key), "{key} {k}");
+            checked += 1;
+        }
+    }
+    assert!(checked > 0);
 }

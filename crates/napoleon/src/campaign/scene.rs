@@ -13,7 +13,7 @@ use ntw_campaign::map_display::{LineKind, MapDisplay, level_rgba};
 use ntw_formats::campaign_map::{DISPLAY_TO_LOGIC, GameFiles};
 use ntw_formats::pack::Vfs;
 use ntw_formats::rigid_model::RigidModel;
-use ntw_script::{ScriptContext, ScriptHost, ScriptSource};
+use ntw_script::{CampaignOpening, ScriptContext, ScriptHost, ScriptSource};
 use ntw_sim::campaign::{CampaignModel, CharacterId, CharacterKind, FactionId, RegionId};
 
 use super::CampaignStart;
@@ -407,8 +407,8 @@ pub fn enter(world: &mut World) {
     world.insert_resource(ClearColor(Color::srgb(0.08, 0.06, 0.04)));
 
     // The scripts: the original campaign Lua runs against the model from here on.
-    // The scripts' own `save_value` slots of a save (EPISODIC_RESTRICTIONS/LUA[]).
-    let saved_script_values = super::play::script_values_in(&loaded.script_values);
+    // The scripts' own `save_value` slots of the opened file (EPISODIC_RESTRICTIONS/LUA[]).
+    let script_values = loaded.script_values;
     let model = loaded.model;
     let saved_restrictions = (model.world.restricted_buildings.len(), model.world.restricted_units.len());
     let source = match ScriptSource::from_install(&dir) {
@@ -436,19 +436,20 @@ pub fn enter(world: &mut World) {
     }
     // The campaign AI plays the non-human factions in the turn loop (`--campaign-ai on|off`).
     crate::campaign_ai::attach(world, &mut host, &vfs);
-    // INFERRED engine order for a new campaign: NewSession, NewCampaignStarted, then turn 1.
-    let first_events: &[&str] = if start.save.is_some() { &["NewSession"] } else { &["NewSession", "NewCampaignStarted"] };
-    for &name in first_events {
-        let r = host.fire(name, ScriptContext::for_faction(&human));
+    // The opening's script events in the exe's order (`ScriptHost::open_campaign`): NewSession,
+    // LoadingGame (`load_value` reads the opened file's LUA[] slots in order: the save's, or a new
+    // campaign's start position's; CAMPAIGN_DATA.md §4.1), ModelCreated, a new campaign's
+    // NewCampaignStarted, WorldCreated; then turn 1 of a new campaign.
+    let opening = if start.save.is_some() { CampaignOpening::LoadedSave } else { CampaignOpening::NewCampaign };
+    for (name, r) in host.open_campaign(ScriptContext::for_faction(&human), opening, &script_values) {
+        if name == "LoadingGame" && opening == CampaignOpening::LoadedSave {
+            info!("Campaign: save loaded as {human} (LoadingGame: {} handlers, {} errors)", r.handlers, r.errors.len());
+        }
         for e in r.errors {
             warn!("Campaign script {name}: {e}");
         }
     }
-    if start.save.is_some() {
-        // `load_value` reads the save's slots in order (CAMPAIGN_DATA.md §4).
-        let r = host.load_values(saved_script_values);
-        info!("Campaign: save loaded as {human} (LoadingGame: {} handlers, {} errors)", r.handlers, r.errors.len());
-    } else {
+    if start.save.is_none() {
         let started = host.start_campaign();
         let errors: usize = started.iter().map(|(_, r)| r.errors.len()).sum();
         info!("Campaign: turn 1 started as {human} ({} script events, {errors} script errors)", started.len());
@@ -470,6 +471,7 @@ pub fn enter(world: &mut World) {
         selected_region: None,
         selected_fort: None,
         moves: Vec::new(),
+        outcome_movies: Vec::new(),
         last_message: String::new(),
         demo_target: None,
     };

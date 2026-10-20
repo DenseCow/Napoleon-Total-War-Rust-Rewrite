@@ -260,6 +260,13 @@ impl CampaignModel {
                 r.fleet = None;
             }
         }
+        // Its entry in the risen armies goes too (`World::region_risen_armies`), so a later force given
+        // the same id is not taken for a risen army (our own bookkeeping: how the exe unlinks a dead
+        // army from region +0x220 is not traced, and needs no port).
+        self.world.region_risen_armies.retain(|_, armies| {
+            armies.retain(|&a| a != force);
+            !armies.is_empty()
+        });
         Some(f)
     }
 
@@ -347,17 +354,19 @@ impl CampaignModel {
 
     /// A region handed over without a character: the deal's region item (`0x00C18BF0` →
     /// `0x00B58A10(faction, 1, 0)` → `TransferSettlementOwnership` `0x00B449F0` with no character
-    /// and no capture report). Nothing happens when `faction` already owns it (`0x00A64AC0` returns
-    /// when the old owner is the new one). The owner change itself is [`Self::change_region_owner`],
-    /// the one rule capture, liberation and deals share. Neither the old owner's end (a deal's caller
-    /// runs [`Self::end_if_capital_lost`] for its first flag) nor a liberated faction's return
-    /// ([`Self::liberate_region`]) happens here. Returns false when the region does not exist or did
-    /// not change hands.
+    /// and no capture report). The owner change itself is [`Self::change_region_owner`], the one rule
+    /// capture, liberation and deals share. A region `faction` already owns still goes through it
+    /// (CONFIRMED: `0x00B449F0` tests the owner only against a passed character's army,
+    /// `0x00B44A3A`..`0x00B44A67`, and this path passes none), which then does only its same-owner
+    /// part. Of this path's callers only a deal can name such a region: nothing checks a deal's region
+    /// owners ([`Self::propose_regions`]), a liberation's target is out of the game, and the
+    /// destruction handover (`0x008AB6C0`) is not modelled (CAMPAIGN_FIDELITY.md "Same-owner transfer").
+    /// Neither the old owner's end (a deal's caller runs [`Self::end_if_capital_lost`] for its first
+    /// flag) nor a liberated faction's return ([`Self::liberate_region`]) happens here. Returns true
+    /// only when the region changed hands.
     pub(crate) fn transfer_region(&mut self, region: RegionId, faction: super::FactionId) -> bool {
-        if self.world.regions.get(&region).is_none_or(|r| r.owner == faction) {
-            return false;
-        }
-        self.change_region_owner(region, faction)
+        let Some(old) = self.world.regions.get(&region).map(|r| r.owner) else { return false };
+        self.change_region_owner(region, faction) && old != faction
     }
 
     /// What every change of a region's owner does (`TransferRegionToFaction` `0x00A64AC0` and the
@@ -374,16 +383,31 @@ impl CampaignModel {
     /// ([`Self::expel_after_owner_change`], `0x008D9DC0`): after a deal or a liberation the old
     /// owner's garrison is put out, as the capturer's army is after a liberation. Nothing is
     /// destroyed here (the settlement's owner-changed event, +0x24 fired at `0x00B44B31`, has on the
-    /// campaign side only the siege listener `0x008DB7D0`, sieges not being in the model). Returns
-    /// false when the region does not exist.
+    /// campaign side only the siege listener `0x008DB7D0`, sieges not being in the model). The trade
+    /// price update (flag 0, [`Self::update_commodity_prices_with`]) runs after the route loss
+    /// ([`Self::trade_routes_after_region_lost`]) and again when a port slot passes.
+    ///
+    /// When `faction` already owns the region ([`Self::transfer_region`]) only the research stop and
+    /// the slot pass run (CONFIRMED, disassembly): `0x00A64AC0` stops the research (`0x008B4AB0` at
+    /// `0x00A64CE5`) and then returns (`CMP` of the region's owner with the new one at `0x00A64D11`,
+    /// `JZ` to the epilogue at `0x00A64D13`) before the queues, the capitals, the routes, the
+    /// expulsion, the policing tracker and the taxes; `0x00B449F0` still calls `0x00B1B300`
+    /// (`0x00B44B69`), so slots a third faction held come back and a port slot's price update runs.
+    /// Returns false when the region does not exist.
     fn change_region_owner(&mut self, region: RegionId, faction: super::FactionId) -> bool {
-        let Some(r) = self.world.regions.get_mut(&region) else { return false };
+        let Some(r) = self.world.regions.get(&region) else { return false };
         let old = r.owner;
         let schools: Vec<u32> = r.slots.iter().map(|s| s.id).filter(|&id| id != 0).collect();
         if let Some(d) = self.world.faction_details.get_mut(&old) {
             for t in d.research.values_mut().filter(|t| schools.contains(&t.researcher)) {
                 t.researcher = 0;
             }
+        }
+        if old == faction {
+            if self.pass_region_slots(region, old, faction) {
+                self.update_commodity_prices_with(false);
+            }
+            return true;
         }
         // The queues are cleared while the region is still the old owner's (CONFIRMED, `0x00A64AC0`: the
         // constructions `0x00A6CC10` → `0x00A6CBE0(0)`, no refund; then the land queue `0x00B1A760(flag)` and
@@ -394,19 +418,8 @@ impl CampaignModel {
         // units, land and naval, and a human old owner's none.
         let refund = !self.turn.humans.contains(&old);
         self.clear_region_queues(region, QueueRefund { land: refund, naval: refund });
-        // The ports a navy is docked in (the port's +0x60, [`Self::docked_port`]; whoever's navy).
-        let docked: Vec<usize> = self.world.forces.keys().filter_map(|&x| self.docked_port(x)).filter(|&(r, _)| r == region).map(|(_, i)| i).collect();
+        let port_passed = self.pass_region_slots(region, old, faction);
         let Some(r) = self.world.regions.get_mut(&region) else { return false };
-        // Then the slots pass to the new owner (`0x00B1B300`, CONFIRMED): each town / port slot goes to it
-        // (`0x00B2B810(new, 0)` sets the holder whoever held it before, a third faction too), except a slot with a
-        // garrison (slot virtual +0x1C, `0x00A64440`, the handle at slot +0xC0; not in the model) or a port with a
-        // navy docked (its holder stays, so a slot the old owner held stays the old owner's). The road and the walls always pass. (`None` = the owner's.)
-        for (i, s) in r.slots.iter_mut().enumerate() {
-            let kept = s.holder.or(Some(old));
-            s.holder = if docked.contains(&i) && kept != Some(faction) { kept } else { None };
-        }
-        r.road_holder = None;
-        r.fortification_holder = None;
         r.owner = faction;
         // The region leaves every governorship and joins the new owner's first one, if it has one
         // (INFERRED; the governorship supplies the region's faction part, see `World::governing_faction`).
@@ -418,16 +431,51 @@ impl CampaignModel {
         if let Some(g) = self.world.faction_details.get_mut(&faction).and_then(|d| d.posts.iter_mut().find_map(|p| p.governorship.as_mut())) {
             g.regions.push(region);
         }
-        if old != faction {
-            self.capital_after_owner_change(region, old, faction);
-            // Then the trade routes through the region (`0x00BBE1A0`, called at `0x00A64E87` when the old
-            // owner is not the rebels).
-            if !self.is_rebel_faction(old) {
-                self.trade_routes_after_region_lost(region, old);
-            }
-            self.expel_after_owner_change(region);
+        self.capital_after_owner_change(region, old, faction);
+        // Then the trade routes through the region (`0x00BBE1A0`, called at `0x00A64E87` when the old
+        // owner is not the rebels).
+        if !self.is_rebel_faction(old) {
+            self.trade_routes_after_region_lost(region, old);
+        }
+        self.expel_after_owner_change(region);
+        // The region's policing tracker follows the owner (`0x00AAF220` at `0x00A65103`), then both owners'
+        // running economics records take their new taxes (`0x00BBD7C0(0)` at `0x00A6512D` for the new owner and
+        // `0x00A6513E` for the old, CONFIRMED).
+        super::economy::move_policing_tracker(self, region, old, faction);
+        super::economy::refresh_running_income(self, faction, super::economy::RunningIncome::Taxes);
+        super::economy::refresh_running_income(self, old, super::economy::RunningIncome::Taxes);
+        // Then the slot pass's price updates (`0x00B1B300` runs after `0x00A64AC0` in `0x00B449F0`).
+        if port_passed {
+            self.update_commodity_prices_with(false);
         }
         true
+    }
+
+    /// The slot pass of an owner change (`0x00B1B300`, CONFIRMED): each town / port slot goes to `faction`
+    /// (`0x00B2B810(new, 0)` sets the holder whoever held it before, a third faction too), except a slot with a
+    /// garrison (slot virtual +0x1C, `0x00A64440`, the handle at slot +0xC0; not in the model) or a port with a
+    /// navy docked (the port's +0x60, [`Self::docked_port`], whoever's navy: its holder stays, so a slot `old`
+    /// held stays `old`'s). The road and the walls always pass. (`None` = the owner's.) The owner itself is not
+    /// set here. Returns whether a port slot passed: `SetSettlementOwner` (`0x00B2B810`) then calls the trade
+    /// price update with flag 0 (`PUSH 0x0` at `0x00B2B844`, the call `0x00BCB020` at `0x00B2B84F`) when the slot
+    /// (region slot vtable +0x4C `0x004470B0`, the slot itself) creates port objects (+0x20C) and its slot type
+    /// is a port (`IsPortSlotType 0x00A8B810`): the same two tests under which the slot's constructor `0x00A4D4F0`
+    /// builds its recruitment manager, so exactly the [`RegionSlot::port`](super::RegionSlot::port) slots. The
+    /// settlement's own `SetSettlementOwner` call before `0x00A64AC0` runs none (the settlement vtable
+    /// `0x0137C9A4` +0x4C is `0x00461180`, null). The exe updates once per port slot passed; the caller's one
+    /// update gives the same prices: nothing the update reads changes between those calls and flag 0 leaves the
+    /// history alone.
+    fn pass_region_slots(&mut self, region: RegionId, old: super::FactionId, faction: super::FactionId) -> bool {
+        let docked: Vec<usize> = self.world.forces.keys().filter_map(|&x| self.docked_port(x)).filter(|&(r, _)| r == region).map(|(_, i)| i).collect();
+        let Some(r) = self.world.regions.get_mut(&region) else { return false };
+        let port_passed = r.slots.iter().enumerate().any(|(i, s)| s.port && !docked.contains(&i));
+        for (i, s) in r.slots.iter_mut().enumerate() {
+            let kept = s.holder.or(Some(old));
+            s.holder = if docked.contains(&i) && kept != Some(faction) { kept } else { None };
+        }
+        r.road_holder = None;
+        r.fortification_holder = None;
+        port_passed
     }
 
     /// Empties `region`'s queues as an owner change does (`0x00B1A760` on the land queue and on each

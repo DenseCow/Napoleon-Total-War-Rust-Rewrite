@@ -11,7 +11,7 @@ use ntw_sim::campaign::details::{
     AlliedWar, AttitudeFactor, CharacterDetails, CharacterTrait, FactionDetails, GovernmentPost, Governorship,
     GovernorshipTaxes, Portrait, RegularPayment, Relationship,
 };
-use ntw_sim::campaign::{CharacterId, FactionId, RegionId};
+use ntw_sim::campaign::{CharacterId, FactionId, RegionId, World};
 
 fn date_of(r: Option<&EsfRecord>) -> Option<Date> {
     let r = r?;
@@ -30,24 +30,96 @@ fn s(n: Option<&EsfNode>) -> String {
     n.and_then(EsfNode::as_str).unwrap_or_default().to_string()
 }
 
-/// Two `CAMPAIGN_MODEL` children the characters area reads (CHARACTERS_FIDELITY.md §7, §8):
-/// `HISTORICAL_CHARACTER_MANAGER/CREATED_CHARACTER_ARRAY[]` {utf16 key} (the historical characters
-/// already made; kept sorted as the exe's list is), and `EPISODIC_RESTRICTIONS` #20 / #22 (the
-/// `force_assassination_success_for_human` / `force_garrison_infiltration_success_for_human`
-/// switches; CONFIRMED positions from the loader `0x009968A0`, both false in every vanilla save) and
-/// #25 (`disable_saving_game`, campaign +0x115, read by the same loader for versions above 0xB;
-/// CONFIRMED position, false in the vanilla saves). An older record (version 0xB or below) has no
-/// #25: the loader leaves the flag false, so ours reads it only above 0xB.
-pub(crate) fn model_extras(model_rec: &EsfRecord) -> (Vec<String>, (bool, bool), bool) {
+/// `CAMPAIGN_MODEL/HISTORICAL_CHARACTER_MANAGER/CREATED_CHARACTER_ARRAY[]` {utf16 key}: the
+/// historical characters already made, kept sorted as the exe's list is (CHARACTERS_FIDELITY.md §7,
+/// §8).
+pub(crate) fn historical_created(model_rec: &EsfRecord) -> Vec<String> {
     let mut created: Vec<String> = model_rec
         .child("HISTORICAL_CHARACTER_MANAGER")
         .map(|m| items(m, "CREATED_CHARACTER_ARRAY").filter_map(|it| it.first()?.as_str().map(str::to_string)).collect())
         .unwrap_or_default();
     created.sort();
-    let restrictions = model_rec.child("EPISODIC_RESTRICTIONS");
-    let flag = |i: usize| restrictions.and_then(|e| e.get_bool(i)).unwrap_or(false);
-    let saving_disabled = restrictions.is_some_and(|e| e.version > 0xB) && flag(25);
-    (created, (flag(20), flag(22)), saving_disabled)
+    created
+}
+
+/// The `CAMPAIGN_MODEL/EPISODIC_RESTRICTIONS` switches, in this order: #8 `display_turns` (+0xD1,
+/// UI_FIDELITY.md §5.1); #20 / #22 `force_assassination_success_for_human` /
+/// `force_garrison_infiltration_success_for_human` (CHARACTERS_FIDELITY.md §7, §8); #25
+/// `disable_saving_game` (+0x115); #29 `set_technology_research_disabled` (+0x118); #31
+/// `set_liberation_options_disabled` (+0x124); #32 `set_ui_notification_of_victory_disabled`
+/// (+0x125). Each is (position, the record version the loader `0x009968A0` needs to exceed to read
+/// it, `None` for any); positions and gates CONFIRMED from that loader and the writer `0x009A1070`.
+/// An older record leaves the flag false.
+///
+/// #30 is the scripts' `LUA[]` slot array, which the loader reads only when present
+/// (CAMPAIGN_DATA.md §4); every shipped start position and save has it. Without it the last two
+/// switches move up to #30 / #31, so their positions follow whether #30 is that array.
+fn switch_slots(restrictions: &EsfRecord) -> [(usize, Option<u8>); 7] {
+    let has_lua = matches!(restrictions.get(30), Some(EsfNode::RecordArray(a)) if a.name == "LUA");
+    let after_lua = if has_lua { 31 } else { 30 };
+    [(8, Some(1)), (20, None), (22, None), (25, Some(0xB)), (29, Some(0xE)), (after_lua, Some(0xF)), (after_lua + 1, Some(0x10))]
+}
+
+/// The world's switches in [`switch_slots`] order.
+fn switch_values(world: &World) -> [bool; 7] {
+    [
+        world.display_turns,
+        world.force_success_for_human.0,
+        world.force_success_for_human.1,
+        world.saving_disabled,
+        world.technology_research_disabled,
+        world.liberation_options_disabled,
+        world.victory_notification_disabled,
+    ]
+}
+
+/// Reads the [`switch_slots`] into `world`. The shipped start positions carry the scripts' values
+/// (CONFIRMED: Egypt sets #31, Italy #29 and #31, the tutorial #31 and #32).
+pub(crate) fn read_switches(model_rec: &EsfRecord, world: &mut World) {
+    let mut v = [false; 7];
+    if let Some(r) = model_rec.child("EPISODIC_RESTRICTIONS") {
+        for (out, (at, above)) in v.iter_mut().zip(switch_slots(r)) {
+            *out = above.is_none_or(|a| r.version > a) && r.get_bool(at).unwrap_or(false);
+        }
+    }
+    let [turns, assassination, infiltration, saving, research, liberation, victory] = v;
+    world.display_turns = turns;
+    world.force_success_for_human = (assassination, infiltration);
+    world.saving_disabled = saving;
+    world.technology_research_disabled = research;
+    world.liberation_options_disabled = liberation;
+    world.victory_notification_disabled = victory;
+}
+
+/// Writes the world's switches back into the [`switch_slots`] the source record has (the writer
+/// `0x009A1070` saves every one). A slot the record's version does not have, or one that is not a
+/// boolean, keeps the source's node, so the record's layout never changes.
+pub(crate) fn write_switches(model_rec: &mut EsfRecord, world: &World) {
+    let Some(r) = model_rec.children.iter_mut().find_map(|c| match c {
+        EsfNode::Record(b) if b.name == "EPISODIC_RESTRICTIONS" => Some(&mut **b),
+        _ => None,
+    }) else {
+        return;
+    };
+    for ((at, above), value) in switch_slots(r).into_iter().zip(switch_values(world)) {
+        if above.is_none_or(|a| r.version > a)
+            && let Some(node @ EsfNode::Bool(_)) = r.children.get_mut(at)
+        {
+            *node = EsfNode::Bool(value);
+        }
+    }
+}
+
+/// `CAMPAIGN_MODEL/HISTORICAL_EVENT_MANAGER` (v1) → `TRIGGERED_DYNAMIC_EVENT_ARRAY[]` {utf16 key}: the
+/// once-only historical events already triggered (loader `0x0087F980`, writer `0x00895050`; CONFIRMED
+/// shape, empty in every vanilla save), in the exe's list order
+/// ([`ntw_sim::campaign::historical_events::sorted_triggered`]).
+pub(crate) fn triggered_historical_events(model_rec: &EsfRecord) -> Vec<String> {
+    let keys = model_rec
+        .child("HISTORICAL_EVENT_MANAGER")
+        .map(|m| items(m, "TRIGGERED_DYNAMIC_EVENT_ARRAY").filter_map(|it| it.first()?.as_str().map(str::to_string)).collect::<Vec<_>>())
+        .unwrap_or_default();
+    ntw_sim::campaign::historical_events::sorted_triggered(keys)
 }
 
 /// `CHARACTER` → its details (`CHARACTER_DETAILS` v3 at #1, post id at #8).
@@ -103,6 +175,39 @@ pub(crate) fn character_details(ch: &EsfRecord) -> Option<CharacterDetails> {
     })
 }
 
+/// The index in `FACTION` of the faction-flag anchor: the first bool array after `EXPOSED_CHARACTERS`
+/// (#45 in the vanilla saves), with the u32 +0x828 right before it and the out-of-game bool +0x824 before
+/// that (the loader `0x0087A190`; anchored on the array, so the `PRESTIGE` record between them does not
+/// shift it; checked on the eur_napoleon startpos). `None` when the record does not have that shape.
+pub(crate) fn flags_anchor(f: &EsfRecord) -> Option<usize> {
+    let exposed = f.children.iter().position(|c| c.record_name() == Some("EXPOSED_CHARACTERS"))?;
+    let after = exposed + 1;
+    let arr = f.children[after..].iter().position(|c| matches!(c, EsfNode::BoolArray(_))).map(|i| after + i)?;
+    (arr >= after + 2 && f.children[arr - 1].as_u32().is_some()).then_some(arr)
+}
+
+/// A `FACTION`'s land and naval upkeep trackers (faction +0x738 / +0x744, the amounts they booked into the
+/// running economics record's categories 19 / 20): the two i32 right after the flag anchor ([`flags_anchor`]),
+/// which the loader reads at `0x0087B548` / `0x0087B551` (`0x0085EF40` / `0x0085EF60`, one int each) and sets
+/// through `0x0088F950` / `0x0088F990` (CONFIRMED: France in `orig_fr_may1811` holds 12019 and 563, its
+/// record's 19 and 20). `None` without them.
+pub(crate) fn upkeep_trackers(f: &EsfRecord) -> Option<[i32; 2]> {
+    let arr = flags_anchor(f)?;
+    let land = f.children.get(arr + 1)?.as_i32()?;
+    let naval = f.children.get(arr + 2)?.as_i32()?;
+    Some([land, naval])
+}
+
+/// The position of a `FACTION`'s `WarStartedCharacterFaction` flag (faction +0x925,
+/// `FactionDetails::war_started`): 8 after the second `CAMPAIGN_BONUS_VALUES`, when a bool sits there
+/// (the loader `0x0087A190`; #63 on every vanilla `FACTION` v18). `None` when the record does not
+/// have that shape.
+pub(crate) fn war_started_index(f: &EsfRecord) -> Option<usize> {
+    let bonus = f.children.iter().enumerate().filter(|(_, c)| c.record_name() == Some("CAMPAIGN_BONUS_VALUES")).nth(1)?.0;
+    let i = bonus + 8;
+    (f.children.get(i)?.as_bool().is_some() && f.children[i - 1].as_bool().is_some()).then_some(i)
+}
+
 /// `FACTION` → its details, and the governorship taxes as `taxes_levels` keys (lower, upper).
 pub(crate) fn faction_details(f: &EsfRecord) -> (FactionDetails, Option<(String, String)>) {
     let plain: Vec<&EsfNode> = f.values().collect();
@@ -130,14 +235,9 @@ pub(crate) fn faction_details(f: &EsfRecord) -> (FactionDetails, Option<(String,
         };
         d.capital = region(exposed.checked_sub(2));
         d.capital_2 = region(exposed.checked_sub(1));
-        // The out-of-game flag (faction +0x824, read at 0x0087B4CC): the bool right before the u32
-        // +0x828, which is right before the first bool array after EXPOSED_CHARACTERS (anchored on the array, so
-        // the PRESTIGE record between them does not shift it; checked on the eur_napoleon startpos).
-        let after = exposed + 1;
-        if let Some(arr) = f.children[after..].iter().position(|c| matches!(c, EsfNode::BoolArray(_))).map(|i| after + i)
-            && arr >= after + 2
-            && f.children[arr - 1].as_u32().is_some()
-        {
+        // The out-of-game flag (faction +0x824, read at 0x0087B4CC): the bool two before the anchor
+        // ([`flags_anchor`]).
+        if let Some(arr) = flags_anchor(f) {
             d.out_of_game = f.children[arr - 2].as_bool();
         }
     }
@@ -157,6 +257,13 @@ pub(crate) fn faction_details(f: &EsfRecord) -> (FactionDetails, Option<(String,
     if let Some(i) = f.children.iter().position(|c| c.record_name() == Some("CHARACTER_ARRAY")) {
         d.major = i.checked_sub(1).and_then(|p| f.children[p].as_bool());
     }
+    d.war_started = match war_started_index(f) {
+        Some(i) => f.children[i].as_bool().unwrap_or(false),
+        None => {
+            log::warn!("load: a FACTION v{} has no WarStartedCharacterFaction flag; read as not set", f.version);
+            false
+        }
+    };
     d.family = f.child("FAMILY").and_then(read_family);
     // Technologies (EFFECTS_FIDELITY.md §3) and the campaign difficulty (slot 0-F).
     if let Some(tm) = f.child("FACTION_TECHNOLOGY_MANAGER") {
@@ -226,7 +333,8 @@ fn read_governorship(g: &EsfRecord) -> Governorship {
 }
 
 /// `DIPLOMACY_RELATIONSHIP` v14 → (target, relationship). Field meanings:
-/// `analysis/campaign/S1_LEFTOVERS.md` §1 (the exe's reader `0x00AE9480` / writer `0x00AFC340`).
+/// `analysis/campaign/S1_LEFTOVERS.md` §1 (the exe's reader `0x00AE9480` and its payment-item reader
+/// `0x00AE90E0`; writer `0x00AFC340`).
 pub(crate) fn relationship(r: &EsfRecord) -> Option<(FactionId, Relationship)> {
     let target = FactionId(r.get_i32(0)?);
     // Every plain field is read by its index with whatever integer type it has, so a value of
@@ -374,19 +482,83 @@ pub(crate) fn read_family(fam: &EsfRecord) -> Option<ntw_sim::campaign::family::
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ntw_formats::esf::EsfRecordArray;
 
-    fn model_with_restrictions(version: u8) -> EsfRecord {
-        let restrictions = EsfRecord { name: "EPISODIC_RESTRICTIONS".into(), version, children: vec![EsfNode::Bool(true); 26] };
+    /// A `CAMPAIGN_MODEL` whose `EPISODIC_RESTRICTIONS` has every switch set: 33 children with the
+    /// `LUA[]` array at #30, or 32 booleans without it.
+    fn model_with_restrictions(version: u8, lua: bool) -> EsfRecord {
+        let mut children = vec![EsfNode::Bool(true); if lua { 33 } else { 32 }];
+        if lua {
+            children[30] = EsfNode::RecordArray(Box::new(EsfRecordArray { name: "LUA".into(), version: 0, items: Vec::new() }));
+        }
+        let restrictions = EsfRecord { name: "EPISODIC_RESTRICTIONS".into(), version, children };
         EsfRecord { name: "CAMPAIGN_MODEL".into(), version: 0, children: vec![EsfNode::Record(Box::new(restrictions))] }
     }
 
-    /// `disable_saving_game` (#25) is read only from a record above version 0xB (the loader
-    /// `0x009968A0` reads campaign +0x115 only then); #20 / #22 are read at any version.
+    fn switches(model_rec: &EsfRecord) -> [bool; 7] {
+        let mut world = World::default();
+        read_switches(model_rec, &mut world);
+        switch_values(&world)
+    }
+
+    /// Each switch is read only from a record above the version the loader `0x009968A0` checks:
+    /// #8 above 1, #25 above 0xB, #29 above 0xE, #31 above 0xF, #32 above 0x10; #20 / #22 at any
+    /// version.
     #[test]
-    fn the_saving_switch_needs_a_record_above_version_0xb() {
-        let (_, forced, saving_disabled) = model_extras(&model_with_restrictions(0xC));
-        assert_eq!((forced, saving_disabled), ((true, true), true));
-        let (_, forced, saving_disabled) = model_extras(&model_with_restrictions(0xB));
-        assert_eq!((forced, saving_disabled), ((true, true), false));
+    fn each_switch_needs_a_record_above_its_version() {
+        assert_eq!(switches(&model_with_restrictions(17, true)), [true; 7]);
+        assert_eq!(switches(&model_with_restrictions(0x10, true)), [true, true, true, true, true, true, false]);
+        assert_eq!(switches(&model_with_restrictions(0xF, true)), [true, true, true, true, true, false, false]);
+        assert_eq!(switches(&model_with_restrictions(0xE, true)), [true, true, true, true, false, false, false]);
+        assert_eq!(switches(&model_with_restrictions(0xB, true)), [true, true, true, false, false, false, false]);
+        assert_eq!(switches(&model_with_restrictions(1, true)), [false, true, true, false, false, false, false]);
+    }
+
+    /// The liberation and victory-notification switches follow the `LUA[]` array at #30, and move
+    /// up to #30 / #31 when a record has none (the loader reads that array only when present).
+    #[test]
+    fn the_last_two_switches_follow_the_lua_array() {
+        let mut model = model_with_restrictions(17, true);
+        let EsfNode::Record(r) = &mut model.children[0] else { unreachable!() };
+        r.children[31] = EsfNode::Bool(false);
+        assert_eq!(switches(&model)[5..], [false, true]);
+        let mut model = model_with_restrictions(17, false);
+        let EsfNode::Record(r) = &mut model.children[0] else { unreachable!() };
+        r.children[31] = EsfNode::Bool(false);
+        assert_eq!(switches(&model)[5..], [true, false]);
+    }
+
+    /// The writer puts each switch back where the reader takes it, and leaves the slots an older
+    /// record does not have (and the `LUA[]` array) as they are.
+    #[test]
+    fn the_switches_are_written_where_they_are_read() {
+        let world = World {
+            technology_research_disabled: false,
+            liberation_options_disabled: true,
+            victory_notification_disabled: false,
+            ..World::default()
+        };
+        let mut model = model_with_restrictions(17, true);
+        write_switches(&mut model, &world);
+        assert_eq!(switches(&model), switch_values(&world));
+        let EsfNode::Record(r) = &model.children[0] else { unreachable!() };
+        assert!(matches!(&r.children[30], EsfNode::RecordArray(a) if a.name == "LUA"));
+        let mut old = model_with_restrictions(0xE, true);
+        write_switches(&mut old, &world);
+        let EsfNode::Record(r) = &old.children[0] else { unreachable!() };
+        assert_eq!(r.get_bool(31), Some(true));
+        assert_eq!(r.get_bool(32), Some(true));
+        assert_eq!(r.get_bool(25), Some(false));
+    }
+
+    /// The triggered list is read in the exe's order (UTF-16 code units, each key once).
+    #[test]
+    fn the_triggered_events_are_read_sorted() {
+        let item = |k: &str| vec![EsfNode::Utf16String(k.into())];
+        let array = EsfRecordArray { name: "TRIGGERED_DYNAMIC_EVENT_ARRAY".into(), version: 0, items: vec![item("b"), item("{FF21}"), item("{1F600}"), item("b")] };
+        let manager = EsfRecord { name: "HISTORICAL_EVENT_MANAGER".into(), version: 1, children: vec![EsfNode::RecordArray(Box::new(array))] };
+        let model = EsfRecord { name: "CAMPAIGN_MODEL".into(), version: 0, children: vec![EsfNode::Record(Box::new(manager))] };
+        assert_eq!(triggered_historical_events(&model), ["b", "{1F600}", "{FF21}"]);
+        assert!(triggered_historical_events(&model_with_restrictions(2, true)).is_empty());
     }
 }

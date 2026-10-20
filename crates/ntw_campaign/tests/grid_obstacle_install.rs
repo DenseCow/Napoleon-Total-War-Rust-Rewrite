@@ -11,7 +11,7 @@ use ntw_data::GameDatabase;
 use ntw_formats::campaign_map::{CampaignMap, GameFiles};
 use ntw_formats::esf::{EsfFile, EsfNode};
 use ntw_formats::pack::Vfs;
-use ntw_sim::campaign::zoc::Owner;
+use ntw_sim::campaign::zoc::{self, Owner};
 use ntw_sim::campaign::CharacterId;
 
 fn data_dir() -> PathBuf {
@@ -76,8 +76,10 @@ fn start_position_obstacles_are_reproduced() {
     let files = GameFiles { vfs: &vfs };
     let bytes = files.read("campaigns/eur_napoleon/startpos.esf").expect("startpos");
     let mut esf = EsfFile::from_bytes(&bytes).expect("esf");
-    let loaded = ntw_campaign::read_esf(&esf, &db).expect("load");
+    let mut loaded = ntw_campaign::read_esf(&esf, &db).expect("load");
     let map = CampaignMap::load(&files, &loaded.info.map_key).expect("map");
+    // The commanders' stored zones, as the load pass floods them (`ntw_sim::campaign::zones`).
+    loaded.model.attach_terrain(ntw_sim::campaign::Terrain(std::sync::Arc::new(ntw_campaign::pathing::build_grid(&map))));
     let a = &map.pathfinding.as_ref().expect("pathfinding").areas[0];
     let cells = a.grid.expand();
     let pm = poly_map(a, &cells, &a.grid.region_sets().expect("regions"));
@@ -108,7 +110,8 @@ fn start_position_obstacles_are_reproduced() {
             None => Owner::Agent,
         };
         let fake = 0x7000_0000 | (k as u32) << 2;
-        let ob = NewObstacle { character: fake, pos: (ch.position.0.0, ch.position.1.0), owner, garrisoned: ch.garrisoned_in.is_some() };
+        let zone = if owner == Owner::Agent { Vec::new() } else { loaded.model.stored_zone(ch.id).expect("a stored zone").to_vec() };
+        let ob = NewObstacle { character: fake, pos: (ch.position.0.0, ch.position.1.0), owner, garrisoned: ch.garrisoned_in.is_some(), zone };
         add_character_obstacle(grid, &sg, &ob).expect("added");
         let ours: Vec<Vec<u32>> = grid
             .iter()
@@ -209,7 +212,10 @@ fn new_obstacles_pass_save_check() {
     let grid = grid_mut(&mut esf);
     for (k, &(id, pos)) in free.iter().take(3).enumerate() {
         let owner = [Owner::Army, Owner::Agent, Owner::Army][k];
-        let added = add_character_obstacle(grid, &sg, &NewObstacle { character: id, pos, owner, garrisoned: k == 2 }).expect("added");
+        // Not commanders, so no stored zone: the bare-map flood stands in for one.
+        let posf = (pos.0 as f32 / 1_048_576.0, pos.1 as f32 / 1_048_576.0);
+        let zone = zoc::obstacle_record(&pm, posf, owner, k == 2).zone;
+        let added = add_character_obstacle(grid, &sg, &NewObstacle { character: id, pos, owner, garrisoned: k == 2, zone }).expect("added");
         assert!(added.versions[1] > 0);
     }
     let after = ntw_campaign::save_check::check(&esf).all_lines();

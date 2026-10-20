@@ -315,7 +315,7 @@ fn save_round_trip() {
     m.world.factions.get_mut(&france).unwrap().treasury += 100_000;
     m.apply(CampaignCommand::ConstructBuilding { region: paris, slot: SlotRef::Walls, level_key: walls }).unwrap();
 
-    let tree = save::write_save(&f.source, &m, "france", 1_000_000).expect("write");
+    let tree = save::write_save(&f.source, &m, "france", 1_000_000, None).expect("write");
     let bytes = tree.to_bytes().expect("serialise");
     // Our own folder under the system temp dir; never the game's save folder.
     let dir = std::env::temp_dir().join("napoleonrust_tests");
@@ -349,7 +349,7 @@ fn save_round_trip() {
     // Writing the reloaded model again gives the same bytes (stable writer), its RNG put back to
     // before the load's deck seeding (`RandSeed` is the one value reading changes).
     r.rng = m.rng;
-    let again = save::write_save(&EsfFile::from_bytes(&bytes).unwrap(), &r, "france", 1_000_000).unwrap().to_bytes().unwrap();
+    let again = save::write_save(&EsfFile::from_bytes(&bytes).unwrap(), &r, "france", 1_000_000, None).unwrap().to_bytes().unwrap();
     assert_eq!(again, bytes);
     let _ = std::fs::remove_file(&path);
 }

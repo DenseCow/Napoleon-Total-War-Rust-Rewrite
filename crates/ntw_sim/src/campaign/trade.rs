@@ -634,10 +634,19 @@ impl CampaignModel {
     /// recomputed but the history (#5 ← #6, #6 ← price) does not move. Either way it ends with the route
     /// rebuild's raid check (`0x00BD1020` at `0x00BCC5F8`, CONFIRMED: the flag test at `0x00BCC534` skips only
     /// the route accumulation `0x00B05CC0` and rejoins at the call; the commodity-count and fixed-price skips
-    /// rejoin before it too), so both round points run [`Self::validate_commerce_raids`].
+    /// rejoin before it too), so both round points run [`Self::validate_commerce_raids`]. After the check
+    /// every path reaches the tail at `0x00BCE75A` (CONFIRMED: the jumps at `0x00BCC621` / `0x00BCD6B2`),
+    /// which writes the trade income of every listed faction's running economics record
+    /// (`0x00BBD7C0(2)` at `0x00BCE78E`, the world list +0x2C / +0x30: not the rebels, out-of-game
+    /// factions included).
     pub fn update_commodity_prices_with(&mut self, shift_history: bool) {
         self.recompute_commodity_prices(shift_history);
         self.validate_commerce_raids();
+        for faction in self.world.factions_in_turn_order() {
+            if !self.world.is_rebel_faction(faction) {
+                super::economy::refresh_running_income(self, faction, super::economy::RunningIncome::Trade);
+            }
+        }
     }
 
     /// The price part of [`Self::update_commodity_prices_with`].

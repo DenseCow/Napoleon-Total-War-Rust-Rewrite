@@ -69,10 +69,16 @@ impl CampaignModel {
     /// `0x0088EF90`): the slot goes back to the region's owner (`RestorePortSlotHolderToRegionOwner` `0x00A8D830`,
     /// CONFIRMED polish21: `SetSettlementOwner(slot, region owner +0xF4)`) unless the slot's vfunc +0x1C test is
     /// nonzero. That test is the slot's garrison handle (+0xC0), which the model does not hold, so the slot always
-    /// passes back here, as in [`Self::change_region_owner`]'s hand-over. (`None` = the owner's.)
+    /// passes back here, as in an owner change's slot pass ([`Self::pass_region_slots`]). (`None` = the owner's.)
+    /// Then the trade price update with flag 0 runs (CONFIRMED, priceupdate: `SetSettlementOwner` `0x00B2B810`,
+    /// called at `0x00A8D859`, runs `0x00BCB020(0)` at `0x00B2B84F` for a slot whose +0x4C is the slot itself,
+    /// whose +0x20C is set and whose type is a port: the tests under which the slot got its port object, so every
+    /// port slot. It has no same-holder test, so a slot that was already the owner's updates too.)
     pub(crate) fn restore_port_holder(&mut self, region: RegionId, slot: usize) {
-        if let Some(s) = self.world.regions.get_mut(&region).and_then(|r| r.slots.get_mut(slot)) {
-            s.holder = None;
+        let Some(s) = self.world.regions.get_mut(&region).and_then(|r| r.slots.get_mut(slot)) else { return };
+        s.holder = None;
+        if s.port {
+            self.update_commodity_prices_with(false);
         }
     }
 

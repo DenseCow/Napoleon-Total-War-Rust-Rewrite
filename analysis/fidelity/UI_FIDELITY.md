@@ -1290,7 +1290,7 @@ implementation).
 | (2) possible: trade | at war → no; an agreement held → yes (the cancel); else both route tests `0x00BA42E0(p, r)` and `(r, p)` non-zero and neither relationship embargoing (`+0x840` = 0 both ways) | CONFIRMED (decompile); ours `CampaignModel::trade_possible`, the route check `CheckTradeRoutePossible` `0x00BA42E0` = `trade_route_check` | `0x00C1A7D0` |
 | (2) possible: access / access_cancel | access: not at war and the relevant side's access not already indefinite (`+0x78C` ≠ −1), either direction; access_cancel: the proposer gives access (`+0x78C` ≠ 0), the stance is not protectorate and `allied_in_war_against` (`+0x7D0`) is empty | CONFIRMED | `0x00C1A6E0`, `0x00C1A5D0` |
 | (2) possible: alliance | allied already (stance 2) → yes (the cancel); else not allied-like, not at war, and `0x00C16990` false (no faction at war with one of them while allied-like with the other) | CONFIRMED | `0x00C1A630`, `0x00C16990` |
-| (2) possible: others | regions, technology, payments: always; state_gift: the recipient is not human (`+0x6E0`); protector: neither side has a protectorate relationship (`0x00B4D9A0`), not at war, the recipient holds exactly one region (count of its faction `+0x76C` list == 1: the region list, CONFIRMED by `0x008AE270`, which appends a region to it and makes it the capital `+0x72C` when there is none, and `0x008B4330`, which marks a faction with no regions and no owned forces out of the game) and the recipient not human; peace: at war and option 9 allowed (0 or 1); war: not at war, and when the proposer has a forced war target (`+0x754`) the recipient is it or at war with it; request_join_war: allied-like and `0x00C1E590` either way (a faction at war with one side, not with the other); break_trade: not at war and either side trades with a third faction (`0x00C3E410`); break_alliance: not at war and either side is allied (stance 2) with a third faction (`0x00C3D5A0`) | CONFIRMED (protector's region count 2026-10-09) | listed, `0x00C1A770` |
+| (2) possible: others | regions, technology, payments: always; state_gift: the recipient is not human (`+0x6E0`); protector: neither side has a protectorate relationship (`0x00B4D9A0`), not at war, the recipient holds exactly one region (count of its faction `+0x76C` list == 1: the region list, CONFIRMED by `0x008AE270`, which appends a region to it and makes it the capital `+0x72C` when there is none, and `0x008B4330`, which marks a faction out of the game only when it has no regions; its character test is in PATHFINDING.md §8) and the recipient not human; peace: at war and option 9 allowed (0 or 1); war: not at war, and when the proposer has a forced war target (`+0x754`) the recipient is it or at war with it; request_join_war: allied-like and `0x00C1E590` either way (a faction at war with one side, not with the other); break_trade: not at war and either side trades with a third faction (`0x00C3E410`); break_alliance: not at war and either side is allied (stance 2) with a third faction (`0x00C3D5A0`) | CONFIRMED (protector's region count 2026-10-09) | listed, `0x00C1A770` |
 | (2) "at war" | `0x008CE9B0(a, b)`: a ≠ b and (either is the rebel faction, i.e. has no faction record `+0x514`, or a's stance to b is war) | CONFIRMED | `0x008CE9B0`, `0x008CEEF0` |
 | (2) three screens | France (war): state_gift; regions, technology, payments, peace. Ottomans (neutral, trade): trade_cancel, alliance, state_gift, war, request_join_war (grey, not allied), break_trade, break_alliance; access, regions, technology, payments. Austria (allied, trade, access both ways indefinite): trade_cancel, access_cancel, alliance_cancel, state_gift, war, request_join_war (grey, no joinable war), break_trade, break_alliance; regions, technology, payments. All three match the rules above | CONFIRMED (screenshots) | |
 | (3) greeting text | the campaign negotiation, when the proposer is human, builds the event key `receive_<attitude>`, attitude = `0x00B0DBA0` on the **recipient's** relationship to the proposer (names table `0x015F2910`: hostile, unfriendly, neutral, friendly, very_friendly), and looks it up by (event, recipient culture, recipient government key) in `diplomacy_negotiation_strings`, giving a `diplomacy_strings` key; loc `diplomacy_strings_string_<key>` | CONFIRMED (code + data: France → `european_monarchy_receive_hostile`, Ottomans → `middle_east_monarchy_receive_friendly`, Austria → `european_monarchy_receive_very_friendly`, the three screenshot texts) | `0x00BF5A60`, `0x00B0DBA0` |
@@ -1631,9 +1631,9 @@ synchronous save callback `CampaignSaves` / `CampaignSaver` (`crates/napoleon/sr
 the shortcuts CTRL+S / CTRL+L / ESCAPE sent to the root's `OnShortcut` (`hud.rs` `keys`; F5 removed),
 and `World::saving_disabled` set by `disable_saving_game` (`game.rs`), read from vanilla saves
 (`EPISODIC_RESTRICTIONS` #25, loader `0x009968A0`, versions above 0xB) and kept in our own saves.
-Tests: `saves_tests.rs` (9). Tags left: `CanSave` PROVISIONAL (the other `0x008BE4A0` fields); the
-shortcut bindings PROVISIONAL (`default_keys.xml` not read, hard-wired to its vanilla keys) and
-the order of a shortcut against a focused text field INFERRED.
+Tests: `saves_tests.rs` (9). Tags left: `CanSave` PROVISIONAL (the other `0x008BE4A0` fields). The
+shortcut bindings (read from `default_keys.xml` since 2026-10-20) and the order of a shortcut
+against a focused text field are CONFIRMED: see "Shortcut keys" below.
 
 **Review fix round (2026-10-17):**
 - The four campaign keys of `BuildDefaultSaveName` are data: `CampaignFeatures::save_name_uses_campaign_name`,
@@ -1650,8 +1650,51 @@ the order of a shortcut against a focused text field INFERRED.
   the camera's WASD / arrow pans and PageUp / PageDown zoom do nothing, and the pans also do nothing
   while CTRL or ALT is held: `default_keys.xml` binds `step_fwd` / `step_bck` / `step_l` / `step_r`
   with `modifier="ALLOW_SHIFT"` only (CONFIRMED from the data), so CTRL+S never pans (`camera.rs`
-  `key_move` test). The shortcut test is CTRL without ALT, so AltGr characters reach the field.
+  `key_move` test). (Superseded 2026-10-20: while a field holds the focus no shortcut fires at all,
+  see "Shortcut keys".)
   The `QuickLoad` (no save) and the saving-disabled `SaveCampaign` lines are logged as info.
+
+**Shortcut keys (worker shortcutkeys, 2026-10-20; data + Ghidra, CONFIRMED unless tagged):**
+- **The file.** `text\default_keys.xml` (version 32): `<mode>` list (battle, campaign, all), keysets
+  (`fps`, `total_war`; without a `custom_keys` file the exe uses the first its keyset map iterates,
+  `fps`), each with categories → groups → `<func name>` holding up to two
+  `<key modifier="…">NAME</key>`, then `<mappings>` per mode: func → component. The loader
+  `0x00EDB080` reads the shipped file (`0x00ED5C20`) and then the user's `custom_keys.keys.xml`
+  (`0x00ED27D0`). Key names go through `GetKeyCodeFromKeyName` `0x00E20290` (table `0x0139FEC8`,
+  143 entries {code, scan code, name}, case-sensitive, unknown = 0x90); the modifier attribute
+  through `ParseShortcutModifierName` `0x00EEC620` (11 names: NONE, CTRL, SHIFT, ALT, ANY,
+  ALLOW_SHIFT, ALLOW_ALT, ALLOW_CTRL, SHIFT_OR_CTRL, SHIFT_OR_ALT, CTRL_OR_ALT; unknown = NONE).
+  `IsShortcutModifierHeld` `0x00EC53A0` tests them: NONE = none of CTRL/SHIFT/ALT; CTRL / SHIFT /
+  ALT = either side's key; ANY always; ALLOW_x = x held or none of the three; the pairs = either
+  one. A mapping applies only in its declared mode; a func mapped in "all" wins over the mode's own
+  entry. The mode switch is `0x00ED5640`.
+- **Dispatch.** The campaign's key handler `0x00A27EB0` reads the UI focus manager (`0x01464428`,
+  holder at +0x14 = `0x0146443C`) and passes "a holder exists" to `HandleShortcutKeyEvent` `0x00EEE1E0`, which
+  returns false without running any binding when it is set: while a text field has the focus no
+  shortcut fires (CTRL+S does not quick save, ESCAPE does not open the escape menu) and no stolen
+  key is delivered; the key goes to the field. Otherwise `0x00EEE250` → `0x00ED76E0`: a key a
+  component stole (`StealShortcutKey` `0x01015C70` → `0x00EC3DE0`) goes to that component's
+  `OnKey`; else every binding the key and the held modifiers match calls its component's
+  `OnShortcut(name, down)` (several can fire on one press). `SetUIInputFocusComponent` `0x010367F0`
+  can force a holder; the focus-lost handler (vtable `0x01393B6C` +0x1C = `0x00DA9C80`) clears it.
+  While a field has the focus, CTRL+letter types nothing: Windows sends a control character, which
+  `IsCharPrintable` `0x01015F10` rejects (CTRL+ALT is AltGr and types its character).
+- **Ours.** `ntw_formats::default_keys` parses the file (`Shortcuts::parse`, `bindings(mode,
+  component)`, `Bindings::fired(key, held)`); `CampaignHud` loads the campaign's root bindings once
+  on entering (`hud.rs` `campaign_shortcuts`; warns once and runs with none if the file is
+  missing); `UiScriptHost::campaign_key` (`ui/campaign/mod.rs`) is the order above;
+  `napoleon::shortcut_keys` maps Bevy's physical keys to the exe's key names. Tests:
+  `default_keys.rs` (5), `ui/campaign/shortcut_tests.rs` (3: a rebound key in a test file, the
+  focus order, a stolen key), `tests/default_keys_install.rs` (`#[ignore]`, the shipped file:
+  quick_save CTRL S, quick_load CTRL L, escape_menu ANY ESCAPE, end_turn → button_end_turn).
+- PROVISIONAL (`campaign_key`): the binding state machine is not ported (`0x00ED76E0` polls each
+  binding's keys on every key event, so a binding also fires when its modifier goes down after the
+  key; one binding stays active; the release call +0x2c; the repeat / ignore-lock flags and the
+  handler lock +0x84); ours fires on the key's own press, once, and a stolen key ignores modifiers.
+  PROVISIONAL (`input_focus_held`): ours keeps the focus on a component that is destroyed; what the
+  exe does then is not traced. Not read yet: `custom_keys.keys.xml` and the options' keyset choice;
+  funcs mapped to other components (end_turn → button_end_turn, show_*, the camera's step_* /
+  cam_*) are not dispatched; the camera keys (`camera.rs`) still have their own table.
 
 - **Entry:** `text\default_keys.xml` binds `escape_menu` = ESCAPE (any modifier, component root,
   all modes), `quick_save` = CTRL+S, `quick_load` = CTRL+L (campaign). `layout.root.luac`
@@ -1744,10 +1787,66 @@ the order of a shortcut against a focused text field INFERRED.
   (missing: logged once, ""); the HUD's `campaign_update_funds` and `DefaultSaveName` both use it,
   and the HUD's English "Early/Late <month>" text is gone. Tests: `calendar.rs`
   `round_id_follows_turns_per_year_and_turn_in_year`, `saves_tests.rs` (default name, missing key),
-  real loc `tests/campaign_ui.rs` `round_description_is_the_loc_turn_name`. Open (not this item):
-  `0x009C1AD0` also sends `season_string` (`0x008ED110`), which ours does not, and on
-  `[campaign+0xFA8]+0xD1` takes a second branch (`UpdateFactionFundsAndTurn`: funds, season,
-  `season_string`, round = turns elapsed + 1) that ours lacks.
+  real loc `tests/campaign_ui.rs` `round_description_is_the_loc_turn_name`.
+- **HUD treasury and date, both branches** (`0x009C1AD0`, `__fastcall`, the campaign UI manager;
+  CONFIRMED, polish51 2026-10-17). Its only caller is `0x00A0EBC0`. Nothing is sent without the
+  local faction (`[ui+0x9FC]+0xB0`). The branch is the byte at episodic restrictions +0xD1
+  (`[campaign+0xFA8]+0xD1`). Set: the root global `UpdateFactionFundsAndTurn{funds, season,
+  season_string, round}`. Clear: `UpdateFactionFundsAndDate{funds, season, season_string,
+  round_description, year}`, in that order. funds is the treasury (`GetFactionEconomyTreasury` of
+  faction +0xAC), season is calendar +0xC, round is calendar +8 (turns elapsed) + 1, year is
+  calendar +0x10 (key string `0x0136F078` "year"). The numbers go through `0x0044DE40`
+  (`PushScriptIntegerAsNumber`), so funds, season, round and year are Lua numbers. Ours sent funds
+  and year as strings until polish51.
+  - `season_string` is `0x008ED110` (`__thiscall`, ECX = calendar, argument = the database
+    `[[campaign+0xD9C]+0x10]+0x10`). It indexes the key table `0x01457A74` by the season code
+    (0..3 = `season_summer`, `season_winter`, `season_spring`, `season_autumn`), finds that key's
+    SEASON_RECORD and returns the record's on-screen name. A key missing from the table logs
+    "In table %S: '%S' is not a valid key" and then reads through the null record, a crash
+    (ORIGINAL BUG; ours gives "" and logs once). `CampaignUI.CurrentSeasonString` (`0x009E1F70`) and
+    the save header builder `0x00888320` call the same function.
+  - `layout.root.luac` reads funds, season and round in `UpdateFactionFundsAndTurn` (line 533). It
+    sets `g_date` to the state `Episodic` with the round as text. `UpdateFactionFundsAndDate`
+    (line 547) reads funds, season, round_description and year, and sets `GrandCampaign` with the
+    text "<round_description>\n<year>". Neither reads `season_string`: it is sent for a mod's root
+    script.
+  - +0xD1 is "display turns instead of dates", and its only script writer is
+    `game_interface:display_turns(bool)`. The method table entry `0x01458158` gives the name
+    `0x01369E98` and the function `0x00979600` (Ghidra `SCRIPT_SetDisplayTurns`). That function
+    reads one boolean into +0xD1 without clearing its result slot first, and the slot is the
+    lua_State argument's. So a call without a boolean stores that pointer's low byte (ORIGINAL BUG;
+    `disable_saving_game` `0x0097B840` clears the slot, and ours stores false as that one does).
+    No vanilla script calls `display_turns`: none of the data.pack `.lua` files or `.luac`
+    constants hold the name.
+  - Readers of +0xD1: `CampaignUI.DisplayingTurns` (`0x009E24D0`, Ghidra
+    `CAMPAIGNUI_GetDisplayingTurns`, registered `0x00428B55`) returns it as a boolean.
+    `CampaignUI.CurrentYear` (`0x009E2010`, Ghidra `CAMPAIGNUI_GetCurrentYearOrTurn`, registered
+    `0x004289BA`) returns two results: turns elapsed + 1 while it is set, else the year, and then
+    the flag itself. `0x009746E0` is a one-byte getter of +0xD1 in a vtable (`0x0135F7D8`). Ours called
+    neither getter and answered false and the year alone until polish51.
+  - Default and save: the episodic-restrictions constructor `0x00996620` zeroes it. The loader
+    `0x009968A0` reads it as `EPISODIC_RESTRICTIONS` #8 (bool) only for versions above 1. It is
+    false in the vanilla `auto_save.save` (v17).
+  - Ours: `World::display_turns` (serde default false; `details::read_switches` #8 for versions
+    above 1; `game_interface:display_turns`, bound through `MOD_GAME_INTERFACE_METHODS` since no
+    shipped script calls it). `ntw_sim::calendar::Season::key` holds the key table, and campaign
+    `season_string` (`loc_required` of `seasons_onscreen_<key>`) feeds both the update and
+    `CurrentSeasonString`. `campaign_update_funds` takes both branches.
+  - Tests: `ui/campaign/hud_date_tests.rs`, `tests/host.rs`
+    `display_turns_sets_the_turns_display_switch`, `details.rs`
+    `each_switch_needs_a_record_above_its_version`, and with the real loc
+    `tests/campaign_ui.rs` `the_hud_date_shows_the_round_and_year_or_the_turn_number`.
+  - Save header season (CONFIRMED, polish56): `0x00888320` calls `0x008ED110` at `0x00888392` on
+    the calendar and copies its result, the season's on-screen loc name, into header +0x2C.
+    `0x008982C0` (the `GetExtendedSaveGameInfo` / `GetCurrentGameInfo` filler) copies +0x2C into
+    "Season" as it is, with no loc lookup. Ours: `CampaignSaves::save` and `current_info` take the
+    name from `season_string`, the one key builder, and the frontend shows the stored text; its
+    guessed `seasons_onscreen_<name>` lookup (a key that never matched) is gone. All 8 shipped
+    startpos headers hold the real loc's `seasons_onscreen_season_<key>` for their calendar season
+    (`tests/campaign_ui.rs` `the_shipped_headers_hold_the_seasons_on_screen_name`); `saves_tests.rs`
+    `a_save_keeps_the_seasons_on_screen_name_and_shows_it_as_stored`. The ESF tool writer
+    (`ntw_campaign` `save.rs`) takes the name from its caller (`season`, `None` keeps the source's);
+    `Season::header_name` is gone. Test `the_header_season_is_the_callers_string`.
 - **`CampaignUI.GetCurrentGameInfo`** (`0x009E4BB0`): builds a save header from the running
   campaign (`0x00888320`, the same builder the save writer uses) and fills the table with
   `0x008982C0`, the filler of `GetExtendedSaveGameInfo`: the same fields (Faction, FlagPath,
@@ -1776,8 +1875,8 @@ the order of a shortcut against a focused text field INFERRED.
   `0x009EE550`, `CAMPAIGNUI_LoadNewestSaveQuick` `0x009EF420` (created),
   `CAMPAIGNUI_WriteQuickSaveOrSendMpCommand` `0x009EF470` (created); global
   `g_dwEsfWriterOpenSize` `0x01458838` (1000000, the writer-open size argument).
-- Still open: the other `0x008BE4A0` fields CanSave tests; reading `text\default_keys.xml` for the
-  bindings; the round-description loc id per turn (above).
+- Still open: the other `0x008BE4A0` fields CanSave tests; the round-description loc id per turn
+  (above). Shortcut keys: see "Shortcut keys" above for what is left.
 
 ## 6. Region labels on the campaign map (slot campaign-ui, branch `work/campaign-ui`, 2026-10-05)
 

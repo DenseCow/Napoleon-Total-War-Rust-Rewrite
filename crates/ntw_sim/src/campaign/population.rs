@@ -6,12 +6,14 @@
 //! (region +0x4C, saved as `POPULATION/REGION_FACTORS`) holds the live population (+0x30, #2), the
 //! capacity (+0x34, #3) and its base (+0x38, #4), the seven growth factors in percent (+0x04..+0x1C, #0),
 //! their total (+0x3C, #5), the trend of the last growth (+0x40, #6: 1 up, 2 unchanged, 3 down), the
-//! overcrowded flag (+0x44, #7), the last round's migrants (+0x58, #8), the classes and the religion
-//! breakdown.
+//! overcrowded flag (+0x44, #7), the last round's migrants (+0x58, #8), the policing cost (+0x5C, #9), the
+//! classes and the religion breakdown; the population object's +0x14 is the region's policing tracker (saved as
+//! `POPULATION` #4, [`PopulationState::policing_booked`]).
 //!
-//! - **Factors** (`0x00AA9C10`, run by the round start `0x008F1F60` → `0x00AAE710` for the regions of every
-//!   faction in the game except the rebels, and by the round end's first pass `0x008E1030` → `0x00AB3E70` for every region before any faction's economy; also on a copy
-//!   for the panel): see [`growth_factors`]. A rebel-owned region (`0x008CEEF0`) has all factors 0.
+//! - **Factors** (`0x00AA9C10`, run for the regions of every faction in the game except the rebels by the
+//!   round start `0x008F1F60` → `0x00AAE710` and by the round end's first pass `0x008E1030` → `0x00AB3E70`
+//!   before any faction's economy, see [`CampaignModel::refresh_population_factors`]; also on a copy for the
+//!   panel): see [`growth_factors`]. A rebel-owned region (`0x008CEEF0`) has all factors 0.
 //! - **Growth** (`0x00AB4070`, from the round-end economy `0x008BC650` → `0x00AB42F0` → `0x00AB3FF0`):
 //!   see [`grow`]; the religion conversion follows on the grown population, then the town wealth.
 //! - **Projection** (`0x00A727D0`, the region info table and the region details panel): see
@@ -68,6 +70,39 @@ pub struct PopulationState {
     pub overcrowded: bool,
     /// #8: the last round's net migrants (+0x58).
     pub migrants: i32,
+    /// #9: the policing cost (+0x5C, [`policing_cost`]), written by every refresh of the factors.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub policing_cost: i32,
+    /// The amount the region's policing tracker has booked into its owner's running economics record
+    /// (expense category 21, `0x00BBE930` group 3; CONFIRMED): the tracker at the population object's
+    /// +0x14 ({+4 owner, +8 amount}, `0x00A2C9F0`), saved as `POPULATION` #4 (the loader `0x00A456D0`
+    /// reads it after `REGION_FACTORS` and the three u32 and sets it through `0x00A51230`; CONFIRMED in
+    /// `orig_fr_may1811`: France's regions sum to its record's category 21, 2177). The round end's first
+    /// pass sets it to the policing cost ([`CampaignModel::prepare_round_end`]); an owner change moves it
+    /// from the old owner's record to the new one's (`0x00AAF220`).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub policing_booked: i32,
+}
+
+/// The policing cost of a region (`0x00AA9C10` at its end, stored at `REGION_FACTORS` +0x5C; CONFIRMED by
+/// disassembly): 0 unless the owner is human (faction +0x6E0; an AI owner pays none, and a rebel-owned
+/// region is zeroed by the rebel branch), else `FISTP(var × Σ × √pop × max(0, policing_cost_mod × 0.01 +
+/// 1))` in single precision, where `var` is campaign variable 18 `policing_automated_cost_per_pop`, Σ the
+/// automated policing (repression slot 3, class +0x4C) of the classes that are the owner's government's
+/// upper or lower class (`0x008CE320` / `0x008CE260`), refreshed just before in the same pass
+/// (`0x008EDF70`), and `pop` the population the factors are for.
+pub fn policing_cost(model: &CampaignModel, reg: &Region, set: &EffectSet, pop: u32) -> i32 {
+    if model.is_rebel_faction(reg.owner) || !model.is_human(reg.owner) {
+        return 0;
+    }
+    let (upper, lower) = super::economy::government_classes(model, reg.owner);
+    let classes = super::economy::public_order_factors_with(model, reg, set, &reg.religions, super::economy::garrison_units(model, reg));
+    let policing: i32 = classes.iter().filter(|c| c.class == upper || c.class == lower).map(|c| c.repression[3]).sum();
+    // The modifier through the x87 registers (the f32 constant 0.01 at 0x01318034, + 1.0), stored as a
+    // float and clamped at 0 (MAXSS); the product in single precision, then FISTP.
+    let modifier = ((f64::from(set.get("policing_cost_mod")) * f64::from(0.01f32) + 1.0) as f32).max(0.0);
+    let per_pop = model.rules.var("policing_automated_cost_per_pop", 0.0);
+    super::commands::fistp(per_pop * policing as f32 * (pop as f32).sqrt() * modifier)
 }
 
 /// What the population factors read besides the region (`0x00AA9C10`'s arguments).
@@ -117,11 +152,11 @@ pub fn hostile_units(model: &CampaignModel, reg: &Region) -> u32 {
 ///   or above the capacity, else (0.9 − r) × 10 × s;
 /// - 5 migration: 0 (set only on the panel's copy, see [`project`]);
 ///
-/// each rounded to hundredths ([`hundredths`]); the growth is their sum. A rebel-owned region has every
-/// factor 0 and keeps its capacity and growth.
+/// each rounded to hundredths ([`hundredths`]); the growth is their sum; then the [`policing_cost`]. A
+/// rebel-owned region has every factor and its policing cost 0 and keeps its capacity and growth.
 pub fn growth_factors(model: &CampaignModel, reg: &Region, pop: u32, prev: &PopulationState, input: &FactorInputs<'_>) -> PopulationState {
     if model.is_rebel_faction(reg.owner) {
-        return PopulationState { factors: [0.0; 7], overcrowded: false, ..prev.clone() };
+        return PopulationState { factors: [0.0; 7], overcrowded: false, policing_cost: 0, ..prev.clone() };
     }
     let set = input.set;
     let fx = |b: &str| set.get(b);
@@ -144,7 +179,8 @@ pub fn growth_factors(model: &CampaignModel, reg: &Region, pop: u32, prev: &Popu
     if overcrowded {
         f[4] = hundredths(if ratio >= 1.0 { (1.0 - ratio) * 20.0 - s } else { (OVERCROWDED - ratio) * 10.0 * s });
     }
-    PopulationState { factors: f, capacity, overcrowded, growth: total(&f), ..prev.clone() }
+    let policing_cost = policing_cost(model, reg, set, pop);
+    PopulationState { factors: f, capacity, overcrowded, growth: total(&f), policing_cost, ..prev.clone() }
 }
 
 /// `0x00A6B8C0`: the factors' sum (base + buildings + ports, then food, taxes, military, migration).
@@ -358,42 +394,35 @@ pub fn project(model: &CampaignModel, region: RegionId) -> Option<Projection> {
 }
 
 impl CampaignModel {
-    /// Every region's population factors refreshed (`0x00AA9C10` with the region's set, then the religion
-    /// breakdown normalised, `0x00AA4860`): the round end's first pass (`0x008E1030` → `0x00AB3E70`) runs it
-    /// for every region. The round start refreshes fewer: [`Self::refresh_round_start_population_factors`].
+    /// The population factors of every region owned by a faction that is not the rebels and is still in the
+    /// game refreshed (`0x00AA9C10` with the region's set, then the religion breakdown normalised,
+    /// `0x00AA4860`). Both passes that run it walk the same regions (disassembly, CONFIRMED):
+    /// - the round start, `0x008F1F60` → `0x00AAE710` per owned region, skips the rebels
+    ///   (`IsFactionWithoutRecord` `0x008CEEF0`) and a faction with +0x824 (out of the game) set;
+    /// - the round end's first pass, `0x00948CF0` → `0x008E1030` → `0x00AB3E70` per owned region, runs only for
+    ///   the listed factions (world +0x2C / +0x30, which never hold the rebels at +0x1C) and inside
+    ///   `0x008E1030` only when +0x824 is clear.
+    ///
+    /// So the rebels' and out-of-game factions' regions keep their factors through both.
     pub fn refresh_population_factors(&mut self) {
-        self.refresh_population_factors_where(|_, _| true);
-    }
-
-    /// The round start's population refresh (`0x008F1F60` → `0x00AAE710` per owned region, CONFIRMED): only the
-    /// regions of a faction that is not the rebels (`IsFactionWithoutRecord` `0x008CEEF0`) and is still in the
-    /// game (+0x824 clear, [`Self::in_the_game`]). The rebels' and out-of-game factions' regions keep their
-    /// factors until the round end's pass.
-    pub fn refresh_round_start_population_factors(&mut self) {
         // The faction set once per refresh: `in_the_game` may scan every region and force (old saves).
         let listed: BTreeSet<FactionId> =
             self.world.factions.keys().copied().filter(|&f| !self.is_rebel_faction(f) && self.in_the_game(f)).collect();
-        self.refresh_population_factors_where(|_, r| listed.contains(&r.owner));
-    }
-
-    fn refresh_population_factors_where(&mut self, refresh: impl Fn(&CampaignModel, &Region) -> bool) {
         let updates: Vec<(RegionId, PopulationState)> = self
             .world
             .regions
             .values()
-            .filter(|r| refresh(self, r))
+            .filter(|r| listed.contains(&r.owner))
             .map(|r| {
                 let set = super::economy::region_effect_set(self, r);
                 let input = FactorInputs { set: &set, hostile_units: hostile_units(self, r) };
                 (r.id, growth_factors(self, r, r.population, &r.population_state, &input))
             })
             .collect();
+        // No owner here is the rebels, so every breakdown is normalised (`0x00AA9C10` skips it only for them).
         for (id, state) in updates {
-            let rebel = self.world.regions.get(&id).is_some_and(|r| self.is_rebel_faction(r.owner));
             if let Some(r) = self.world.regions.get_mut(&id) {
-                if !rebel {
-                    normalise_religions(&mut r.religions);
-                }
+                normalise_religions(&mut r.religions);
                 r.population_state = state;
             }
         }

@@ -10,7 +10,7 @@
 //! - [`CampaignModel::trade_routes_after_region_lost`] (`0x00BBE1A0`, from the owner change
 //!   `0x00A64E87`): the routes through the region are dropped and each pair is checked again: a pair
 //!   that can no longer trade has its agreement broken both ways ([`CampaignModel::break_trade_both_ways`]),
-//!   the others get new routes.
+//!   the others get new routes; then the trade price update runs (`0x00BCB020` with flag 0, at `0x00BBE7C4`).
 //!
 //! The original caches each pair's paths (the faction's pair map) and refreshes the entries as routes
 //! change (`0x00BBDBA0`, step 2 of `0x00BBE1A0`); the model searches fresh each time. Existence of a
@@ -131,13 +131,25 @@ impl CampaignModel {
     /// unsigned count, less one for each of the owner's routes whose first sea hop (the first waypoint
     /// with its sea flag set and a region) leaves from this region, is 0. The count wraps below 0 in the
     /// original (a port with more routes than its cap is not full): kept. An owner with no entry in the
-    /// trade manager's exporter map (`+0x11C`, looked up with `0x00BB0980`) is never full, even with a cap
-    /// of 0: here, an owner exporting no route (the rebels among them). PROVISIONAL (BACKLOG): the original
-    /// never erases an entry once made (`0x00B9E480` inserts, no erase seen) and its supply split gives every
-    /// world faction one (`0x00BC26D0`, operator[] at `0x00BC3699`), so there a 0-cap port of an owner with no
-    /// routes reads full; here it does not. Vanilla's export ports have caps of 3-5, so only a mod sees it.
+    /// trade manager's exporter map (`+0x11C`, looked up with `0x00BB0980`; the end iterator returns false at
+    /// `0x00BB5039`) is never full, even with a cap of 0; an entry with an empty route vector is present, so
+    /// a 0-cap port is then full. CONFIRMED which owners have an entry: the supply split `0x00BC26D0` calls
+    /// operator[] `0x00B9E480` on the map for every faction of the registry list (registry +0x20, every
+    /// faction but the rebels; the call at `0x00BC3699`, unconditional); the split runs first in every route
+    /// rebuild (`0x00BBD870`) and so in every price update (`0x00BCB020`, at `0x00BCC52F`); the campaign's
+    /// construction runs a price update on every path once the trade manager exists (`0x00872550`: the
+    /// manager at `0x0087336B`, the update at `0x00873D57`), for a new campaign and a loaded save alike; and
+    /// nothing erases an entry. So from the first turn every registry faction has one for the whole session (a
+    /// faction added mid-session gets its exe entry at the next price update; ours has it at once):
+    /// here every faction of the world but the rebels ([`World::is_rebel_faction`](super::World::is_rebel_faction)).
+    /// Any other owner gets one only through operator[] as an exporter (the load `0x00B89270`, the builder
+    /// `0x00BA0490`, the route removals `0x00BC0120` / `0x00BC02B0`), which needs a route or an agreement the
+    /// rebels never hold: here, an owner exporting a stored route.
     pub fn trade_port_full(&self, region: &Region) -> bool {
-        if !self.world.trade_paths.keys().any(|(x, _)| *x == region.owner) {
+        let w = &self.world;
+        let has_entry = (w.factions.contains_key(&region.owner) && !w.is_rebel_faction(region.owner))
+            || w.trade_paths.keys().any(|(x, _)| *x == region.owner);
+        if !has_entry {
             return false;
         }
         let mut left = self.region_trade_route_cap(region) as u32;
@@ -237,11 +249,21 @@ impl CampaignModel {
     /// another faction owns), the route stays and the scan finds it again forever: the game hangs. Here
     /// the found route itself is removed and its own pair remembered.
     ///
-    /// Not modelled: the original's listener when `old` has no capital, its pair-cache refresh
-    /// (`0x00BBDBA0`, `0x00BAC0D0`; the model searches fresh) and the price update `0x00BCB020` (the
-    /// model runs it only at the round start, flag 0, and the round end, flag 1, not on a region loss;
-    /// BACKLOG follow-up).
+    /// 3. last, on every path, the trade price update with flag 0 ([`Self::update_commodity_prices_with`]`(false)`;
+    ///    `PUSH 0x0` at `0x00BBE7C0`, the call `0x00BCB020` at `0x00BBE7C4`, after the pair loop and the pair-cache
+    ///    refreshes; the function has no early return, CONFIRMED): prices and trends recomputed with the
+    ///    history kept, then the raid check and every listed faction's trade income.
+    ///
+    /// Not modelled: the original's listener when `old` has no capital and its pair-cache refresh
+    /// (`0x00BBDBA0`, `0x00BAC0D0`; the model searches fresh).
     pub(crate) fn trade_routes_after_region_lost(&mut self, region: RegionId, old: FactionId) {
+        self.drop_trade_routes_through(region, old);
+        self.update_commodity_prices_with(false);
+    }
+
+    /// Steps 1 and 2 of [`Self::trade_routes_after_region_lost`]. `RegionId(0)` (no region, as a sea
+    /// waypoint's) names no route.
+    fn drop_trade_routes_through(&mut self, region: RegionId, old: FactionId) {
         if region == RegionId(0) {
             return;
         }
@@ -269,7 +291,7 @@ impl CampaignModel {
         }
         for (a, b) in pairs {
             if self.trade_route_check(a, b) == 0 || self.trade_route_check(b, a) == 0 {
-                let trading = self.world.relationships.get(&(a, b)).is_some_and(|r| r.trade_agreement);
+                let trading = self.world.trade_held(a, b);
                 if self.in_the_game(a) && self.in_the_game(b) && trading {
                     self.break_trade_both_ways(a, b);
                 }
@@ -285,12 +307,9 @@ impl CampaignModel {
     /// keep). False when it has none. "First" is the oldest: both walk the exporter's route vector from index
     /// 0, routes are appended in load (`0x00B89270`) or build (`0x00BA0490`) order, and the erase
     /// (`0x00BAC2A0`) keeps the order of the rest, as the pair's `Vec` does. The exe's lookup (operator[]
-    /// `0x00B9E480`) also inserts an empty exporter entry; not modelled. It is observable only through the
-    /// [`Self::trade_port_full`] gap: an empty entry counts as no routes
-    /// everywhere, the supply split gives every world faction an entry anyway (`0x00BC26D0`, operator[] at
-    /// `0x00BC3699`; the price update `0x00BCB020` that `0x00B29BB0` calls right after its break reaches it on
-    /// every path, at `0x00BCC52F`), and the only reader that tells "empty" from "none",
-    /// [`Self::trade_port_full`], differs only for an export port with a route cap of 0 (vanilla's are 3-5).
+    /// `0x00B9E480`) also inserts an empty exporter entry, which needs no state here: the exporter of a stored
+    /// route is a registry faction (the rebels hold none), which has its entry from the campaign's
+    /// construction on anyway (the supply split, see [`Self::trade_port_full`], the only reader that tells "empty" from "none").
     /// CONFIRMED. The removed route's accumulated value goes with it ([`TradePath::accumulated`](super::trade::TradePath::accumulated): the
     /// erase destroys that record, `0x00B981D0`); the pair's other routes keep theirs.
     ///
@@ -439,20 +458,54 @@ mod tests {
         assert_eq!(m.trade_route_check(A, B), 3);
     }
 
-    /// `0x00BB4F80`: an owner with no exporter entry (no route) is never full, even with a 0 cap; once it
-    /// exports a route, the 0-cap port is full.
-    #[test]
-    fn port_full_needs_an_owner_route_list() {
+    /// [`trade_map`] with every port's route cap at 0.
+    fn zero_cap_map() -> CampaignModel {
         let mut m = trade_map();
         edit_test_building_effects(&mut m, |e| {
             e.iter_mut().filter(|(k, _)| k == "trade_routes_mod_max_sea").for_each(|(_, v)| *v = 0.0);
         });
-        let full = |m: &CampaignModel| m.trade_port_full(&m.world.regions[&RegionId(13)]);
         assert_eq!(m.region_trade_route_cap(&m.world.regions[&RegionId(13)]), 0);
-        assert!(!full(&m), "no route list: never full");
-        // A route that does not leave from 13 still gives A a list: the 0-cap port is full.
+        m
+    }
+
+    /// `0x00BB4F80` with the split's entries (`0x00BC26D0`, operator[] at `0x00BC3699` over the registry list):
+    /// a world faction's 0-cap port is full with no route at all; the rebels (not in the registry) and an
+    /// owner the world does not hold have no entry, so theirs is never full, until they export a route.
+    #[test]
+    fn port_full_entry_for_every_faction_but_the_rebels() {
+        const REBELS: FactionId = FactionId(9);
+        let mut m = zero_cap_map();
+        let mut rebels = m.world.factions[&B].clone();
+        rebels.id = REBELS;
+        rebels.key = String::new();
+        m.world.factions.insert(REBELS, rebels);
+        let full = |m: &CampaignModel| m.trade_port_full(&m.world.regions[&RegionId(13)]);
+        assert!(m.world.trade_paths.is_empty());
+        assert!(full(&m), "a registry faction with no route: full");
+        for owner in [REBELS, FactionId(99)] {
+            m.world.regions.get_mut(&RegionId(13)).unwrap().owner = owner;
+            assert!(!full(&m), "{owner:?}: no entry, never full");
+            // A route that does not leave from 13 still makes the entry: the 0-cap port is full.
+            add_route(&mut m, owner, C, route(&[10, 14], true));
+            assert!(full(&m), "{owner:?} with a route");
+            m.world.trade_paths.clear();
+        }
+    }
+
+    /// `0x00BB4F80`: nothing erases an exporter entry, so a faction whose last route is removed
+    /// (`0x00BC0120` / `0x00BC02B0`) still has its 0-cap port full; a full port is no sea-hop target.
+    #[test]
+    fn port_full_outlives_the_last_route() {
+        let mut m = zero_cap_map();
+        let full = |m: &CampaignModel| m.trade_port_full(&m.world.regions[&RegionId(13)]);
         add_route(&mut m, A, C, route(&[10, 14], true));
+        assert!(m.remove_first_trade_route(A, C));
+        assert!(!m.world.trade_paths.keys().any(|(x, _)| *x == A));
         assert!(full(&m));
+        // Only the land link 10–13–14 is left to reach C; with it cut, the sea search has no port to hop to.
+        m.world.region_neighbours.clear();
+        link(&mut m, 13, 14);
+        assert!(!m.trade_path_exists(A, C, TradeNetwork::Sea));
     }
 
     /// `0x00BB4F80`: the cap less one per route whose first sea hop leaves the port; an over-full port wraps

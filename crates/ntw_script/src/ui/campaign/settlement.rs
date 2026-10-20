@@ -793,7 +793,10 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
         t.set("MaxLevel", max)?;
         Ok(Value::Table(t))
     });
-    // PROVISIONAL: empty, as `BuildingEffects` / `TechEffects` above (the effect texts are not built).
+    // PROVISIONAL: empty, as `BuildingEffects` / `TechEffects` below (the effect texts are not built).
+    // Its "technology" table (`0x009E4AA0` → `0x009B2BB0`, rows `0x009ABB50` untraced) is
+    // `CampaignModel::effects_table_technologies(owner, level, world.technology_research_disabled)`
+    // (CONFIRMED, CAMPAIGN_DATA.md §4.2).
     t.raw_set("FortEffects", lua.create_function(|lua, _: Variadic<Value>| lua.create_table())?)?;
     // InformLootingSelection("loot" | "occupy" | "liberate"): the capture screen's answer
     // (settlement_captured.lua's LootSettlement / OccupySettlement / LiberateSettlement, CONFIRMED
@@ -825,7 +828,8 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     // past the template's last and errored (`pip` nil at line 179). The binding of the two
     // arguments to Level / MaxLevel is INFERRED (the caller was not dumped).
     // BuildingEffects / TechEffects → effect lists; PROVISIONAL: empty (the effect texts are not
-    // built yet).
+    // built yet). `BuildingEffects` (`0x009DE150`) builds the building info `0x009B7300` twice, whose
+    // technology list is `CampaignModel::building_info_technologies` (CONFIRMED, CAMPAIGN_DATA.md §4.2).
     f!("BuildingDetails", |lua, inner, ui, (key, _f, region_key, slot_key): (Option<String>, Value, Value, Value)| {
         let Some(key) = key else { return Ok(Value::Nil) };
         let (level, max) = ui.model().rules.chain_levels(&key).unwrap_or((0, 0));

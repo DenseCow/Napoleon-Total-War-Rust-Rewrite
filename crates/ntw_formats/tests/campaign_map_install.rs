@@ -124,3 +124,28 @@ fn the_shipped_border_ribbon_is_geometry_only_and_parses_to_the_byte() {
     // ribbon width can be read off this file, which is what stops it being a drop-in border mesh.
     assert_eq!(&r.indices[..6], &[0, 1, 2, 0, 3, 1], "the list is a fan from vertex 0");
 }
+
+/// The black shroud outlines (`regions.esf` `black_shroud_outlines`, what `unveil_black_shroud`
+/// lifts): only the tutorial map has any, `shroud_map_1_1` .. `shroud_map_1_9`, one each, every
+/// one a closed outline of at least 3 points (the exe's `0x00B65C50` skips fewer).
+#[test]
+#[ignore]
+fn black_shroud_outlines_are_the_tutorials() {
+    let dir = data_dir();
+    let vfs = Vfs::open_install(&dir).unwrap();
+    let files = GameFiles { vfs: &vfs };
+    for name in ["nap_europe", "nap_italy", "nap_egypt", "nap_spain", "nap_tut"] {
+        let m = CampaignMap::load(&files, name).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let keys: Vec<&str> = m.regions.black_shroud_outlines.iter().map(|(k, _)| k.as_str()).collect();
+        println!("{name}: {keys:?}");
+        if name == "nap_tut" {
+            let mut sorted = keys.clone();
+            sorted.sort_unstable();
+            let want: Vec<String> = (1..=9).map(|i| format!("shroud_map_1_{i}")).collect();
+            assert_eq!(sorted, want.iter().map(String::as_str).collect::<Vec<_>>());
+            assert!(m.regions.black_shroud_outlines.iter().all(|(_, p)| p.len() >= 3));
+        } else {
+            assert!(keys.is_empty(), "{name}");
+        }
+    }
+}

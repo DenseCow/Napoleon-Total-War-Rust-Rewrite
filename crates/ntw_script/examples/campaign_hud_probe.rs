@@ -72,7 +72,7 @@ fn drain_apply(host: &UiScriptHost, mut scripts: Option<&mut ScriptHost>, sel: &
                 *sel = x;
                 changed = true;
             }
-            CampaignRequest::CameraTo(..) => {}
+            CampaignRequest::CameraTo(..) | CampaignRequest::QuitToMainScreen => {}
         }
     }
     if changed {

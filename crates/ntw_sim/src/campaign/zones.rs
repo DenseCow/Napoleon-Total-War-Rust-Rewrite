@@ -24,19 +24,51 @@
 //!   (treaties and expulsion modules).
 //!
 //! Between those events a stored zone stays as it was flooded, wherever its character stands now:
-//! the exe keeps the flood's layer on the character (+0x1C8) until one of them (an expelled army that
-//! is not moved keeps its old zone, for one).
+//! the exe keeps the flood's layer on the character (+0x1C8) until one of them. A walk floods only the
+//! mover (and the armies it carries): an army an enemy walks up to keeps the zone it had. An expelled
+//! army the rule places is moved and flooded at its new place; one it could not place (`to: None` in
+//! [`CampaignModel::expel_from_region`], `0x008D9DC0` finding no candidate) stands where it was with its
+//! old zone, until its faction is flooded again: the treaty expulsions refresh both factions inside the
+//! expel branch (`0x00B13A30`, `0x00B0CA20`, `0x00B0D0C0`, `0x00B29170`, `0x00B64B10`), the cancel
+//! `0x00B67BD0` ([`CampaignModel::expel_from_each_region_of`] alone) none (its command path `0x00B67B20`
+//! refreshes the target afterwards, the war-abuse path `0x00B0DAF0` none).
 //!
-//! Not ported: the script barriers' refresh (`0x00B64E30`, every faction; no barriers are modelled,
-//! [`zoc::zone_in`]) and `0x0096CBE0`'s rebuild of characters with the +0x1B7 flag (UNKNOWN flag,
-//! which `0x00B795A0` skips too; no modelled state sets it).
+//! Not ported, none needed (`PATHFINDING.md` §8, CONFIRMED by disassembly): the script barriers'
+//! refresh (`0x00B64E30`, every faction; no barriers are modelled, [`zoc::zone_in`]); `0x0096CBE0`
+//! at a battle's start, which floods the characters lifted off the map in mid-move (+0x1B7, set by
+//! character vtable slot +0x1C `0x00A28B50`, cleared by the move's last step at `0x00A28855`; a walk
+//! of ours moves whole, so none is ever lifted); `0x009CB4C0`, run by the force reader `0x00881120`
+//! while a save is read, so it floods nothing (+0xFC7 is still set). `HireAdmiral`'s own flood
+//! (`0x00A16110` at `0x00A162CA`: the new commander at the fleet's place) is the one
+//! `rebuild_force_zones` makes there.
 //!
-//! The faction's character list (+0x768) is taken in character-id order: new characters get rising
-//! ids, and the start position's `CHARACTER_ARRAY`s list their characters in rising id order
-//! (CONFIRMED by data, `ntw_campaign` test `zoc_install.rs`). INFERRED: the loader fills +0x768 in
-//! `CHARACTER_ARRAY` order and new characters are appended (not traced). It matters only for a
-//! faction's own characters, whose cores bound each other's floods in that order. A flood's obstacles
-//! are taken in force order, as the path search takes them.
+//! The region gate (`PATHFINDING.md` §8, CONFIRMED by disassembly): a zone crosses into another
+//! pathfinding region only when its layer's flag for that region id is set (`0x00B16CF0` →
+//! `0x00B16BD0`, [`zoc::reach_in`]). The flags are set for the commander's own faction f before the
+//! flood (`0x00B06280` → `0x00B78A10`): a single region is open to f when f has a record and the
+//! region is no campaign region, or its owner is f or has no record, or the owner's record towards f
+//! lets f stand (`0x00B622E0`, [`region_open_to`]); a group of regions is open when
+//! every region of it is (an empty one always). A risen army (in a region's
+//! [`World::region_risen_armies`](super::world::World::region_risen_armies) list: army +0x98, its
+//! `REBEL_DATA`) gets only its home region's single slots instead (`0x00B078C0`); the load pass sets
+//! the same for every rebel character (`0x00B077B0`). So a zone stops at the border of a region its
+//! faction may not stand in, a rebel army's at the edge of the region it stands in and the one it rose
+//! in. An army's or fleet's path search runs behind the same flags (CONFIRMED by disassembly,
+//! [`CampaignModel::path_region_gate`]).
+//!
+//! PROVISIONAL (BACKLOG): a rebel commander's later floods. Once the grid has stored a single-region
+//! view (+0x400, written by `0x00B077B0` and never cleared), `0x00B7BAF0` floods a faction without a
+//! record on the layers as the stored view left them (`ReapplyPathGridFactionView` `0x00B67490`),
+//! skipping the faction scope; ours keeps no stored view and gives the rebels their own flags, as at
+//! load.
+//!
+//! The faction's character list (+0x768) is walked in its own order
+//! ([`World::characters_in_list_order`](super::world::World::characters_in_list_order)): the loader
+//! builds it in `CHARACTER_ARRAY` order (`0x0087A190`), every new character is appended
+//! (`0x00878C10` → `0x008CF6B0`) and removal keeps the order (`0x008B0150`); CONFIRMED by disassembly
+//! (PATHFINDING.md §8). It is not id order: the original's saves list characters out of id order. It
+//! matters only for a faction's own characters, whose cores bound each other's floods in that order.
+//! A flood's obstacles are taken in force order, as the path search takes them.
 //!
 //! A commander without a stored zone (a force made by a path that floods none, or a terrain set
 //! without [`CampaignModel::attach_terrain`]) is read as his bare-map flood ([`zoc::reach`]), logged
@@ -44,16 +76,22 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
+use super::expulsion::record_lets_stand;
 use super::ids::{CharacterId, FactionId, ForceId};
 use super::polypath::{Mover, PolyMap};
 use super::world::{CampaignModel, MilitaryForce, Stance, Terrain};
 use super::zoc::{self, Obstacle};
 use crate::fixed::Fixed20;
 
+type RegionOwners<'a> = std::collections::HashMap<&'a str, FactionId>;
+
 /// Each commander's stored zone: the static polygons of the zone, sorted ([`zoc::zone_in`]).
 pub type StoredZones = BTreeMap<CharacterId, Arc<[u32]>>;
+
+/// The one empty zone every obstacle shares when there is no polygon map to flood on.
+static EMPTY_ZONE: LazyLock<Arc<[u32]>> = LazyLock::new(|| Arc::from([]));
 
 /// The model's stored zones (not saved: a load floods them again, as `0x00B0DC10` does), with the map
 /// they were flooded on.
@@ -94,6 +132,34 @@ fn bare_zone(map: &PolyMap, c: &Commander) -> Arc<[u32]> {
     zoc::reach(map, c.pos_f32(), if c.navy { Mover::Sea } else { Mover::Land }, zoc::zone_limit(c.navy, c.garrisoned)).into()
 }
 
+/// `IsRegionOpenToFaction` `0x00B622E0` for a region `owner` holds (CONFIRMED by disassembly; `f`
+/// has a record, the caller checked): open when `owner` is `f` or has no record (the rebels; or is
+/// no loaded faction); otherwise when `owner`'s relationship record towards `f` lets it stand
+/// (`0x00B64C50` on owner +0x528, then `CheckRelationshipLetsFactionStand` `0x00B16570`,
+/// [`record_lets_stand`]). Not `may_stay` (`0x008D9DC0`), which also opens to the rebels and
+/// through `at_war`.
+///
+/// ORIGINAL BUG: on a missing record `0x00B64C50` returns the owner's first record (never null) and
+/// `0x00B16570` tests that one, an unrelated faction's. Ours reads the missing record as none: no
+/// access, so the stance alone decides. Unreachable with shipped data: every pair of non-rebel
+/// factions has a record in `eur_napoleon`'s startpos (41 factions) and in the evidence saves
+/// (measured 2026-10-19).
+fn region_open_to(m: &CampaignModel, owner: FactionId, f: FactionId) -> bool {
+    owner == f
+        || !m.world.factions.contains_key(&owner)
+        || m.world.is_rebel_faction(owner)
+        || record_lets_stand(m, owner, f)
+}
+
+/// `0x00B78A10`'s flag per region id of `map` from whether each region (by region index) is open:
+/// a single slot by its region, a group slot only when every region of it is open (an empty group
+/// always). A faction without a record (`rebel`) gets every single slot closed.
+fn slot_flags(map: &PolyMap, open: &[bool], rebel: bool) -> Vec<bool> {
+    let open_at = |i: &u32| open.get(*i as usize).copied().unwrap_or(!rebel);
+    let flag = |(slot, set): (usize, &Vec<u32>)| if rebel && slot < map.single_region_slots { false } else { set.iter().all(open_at) };
+    map.region_sets.iter().enumerate().map(flag).collect()
+}
+
 impl CampaignModel {
     fn poly_map(&self) -> Option<&PolyMap> {
         self.terrain.as_ref()?.0.poly.as_ref()
@@ -115,10 +181,14 @@ impl CampaignModel {
         self.world.forces.values().filter_map(|f| self.commander_of_force(f))
     }
 
-    /// Every force commander in character-id order (the faction lists' order, module docs).
-    fn commanders_by_id(&self) -> Vec<Commander> {
+    /// Every force commander in faction-list order
+    /// ([`World::characters_in_list_order`](super::world::World::characters_in_list_order), module
+    /// docs).
+    fn commanders_in_list_order(&self) -> Vec<Commander> {
+        let rank: BTreeMap<CharacterId, usize> =
+            self.world.characters_in_list_order().into_iter().enumerate().map(|(i, id)| (id, i)).collect();
         let mut out: Vec<Commander> = self.commanders().collect();
-        out.sort_by_key(|c| c.id);
+        out.sort_by_key(|c| rank.get(&c.id).copied().unwrap_or(usize::MAX));
         out
     }
 
@@ -145,27 +215,122 @@ impl CampaignModel {
                     (Some(z), _) => Arc::clone(z),
                     (None, _) if only_stored => return None,
                     (None, Some(map)) => bare_zone(map, &c),
-                    (None, None) => Arc::from([]),
+                    (None, None) => Arc::clone(&EMPTY_ZONE),
                 };
                 Some(Obstacle { pos: c.pos_f32(), navy: c.navy, garrisoned: c.garrisoned, at_war, zone })
             })
             .collect()
     }
 
-    /// Floods `c`'s zone against the obstacles his faction sees with their stored zones.
-    fn flood_zone(&self, map: &PolyMap, c: &Commander, zones: &StoredZones, only_stored: bool) -> Arc<[u32]> {
+    /// Floods `c`'s zone against the obstacles his faction sees with their stored zones, behind his
+    /// layer's region gate ([`Self::region_gate`]).
+    fn flood_zone(&self, map: &PolyMap, c: &Commander, zones: &StoredZones, only_stored: bool, owners: &RegionOwners<'_>) -> Arc<[u32]> {
         let others = self.obstacles_with_zones(Some(map), c.faction, c.id, Some(zones), only_stored);
-        zoc::zone_in(map, c.pos_f32(), c.navy, c.garrisoned, &others).into()
+        let gate = self.region_gate(map, c, owners);
+        zoc::zone_in(map, c.pos_f32(), c.navy, c.garrisoned, &others, gate.as_deref()).into()
+    }
+
+    /// The owner of each region by key: built once per flood pass, not per flood.
+    fn region_owners(&self) -> RegionOwners<'_> {
+        self.world.regions.values().map(|r| (r.key.as_str(), r.owner)).collect()
+    }
+
+    /// The region flags of `c`'s layer for his flood, one per region id of `map` (module docs, "The
+    /// region gate"); `None` without a movement grid to look the regions up in.
+    fn region_gate(&self, map: &PolyMap, c: &Commander, owners: &RegionOwners<'_>) -> Option<Vec<bool>> {
+        let grid = &self.terrain.as_ref()?.0;
+        // A risen army (army +0x98 set): only the single slots of its home region X (`0x00B078C0`).
+        let home = self.world.region_risen_armies.iter().find(|(_, armies)| armies.contains(&c.force)).map(|(r, _)| *r);
+        if let Some(home) = home {
+            let x = self.world.regions.get(&home).and_then(|r| grid.region_index(&r.key));
+            let only_x = |(slot, set): (usize, &Vec<u32>)| slot < map.single_region_slots && x.is_some_and(|x| set.as_slice() == [x]);
+            return Some(map.region_sets.iter().enumerate().map(only_x).collect());
+        }
+        // A rebel commander with no risen-army entry keeps the faction flags (every single region closed, empty groups open): our own fallback; the exe never reaches it (its load pass 0x00B0DC10 calls 0x00B077B0 then 0x00B078C0, which reads army +0x98 with no null check).
+        let rebel = self.world.is_rebel_faction(c.faction);
+        let open = self.regions_open_to(&grid.region_keys, c.faction, owners);
+        Some(slot_flags(map, &open, rebel))
+    }
+
+    /// The single-region half of `0x00B78A10` for faction `f`: whether each region of the grid (by
+    /// region index, `keys` its keys) is open to `f` through `0x00B622E0` ([`region_open_to`]);
+    /// every one closed to a faction without a record, every region nobody owns open to the others.
+    fn regions_open_to(&self, keys: &[String], f: FactionId, owners: &RegionOwners<'_>) -> Vec<bool> {
+        if self.world.is_rebel_faction(f) {
+            return vec![false; keys.len()];
+        }
+        keys.iter().map(|key| owners.get(key.as_str()).is_none_or(|&owner| region_open_to(self, owner, f))).collect()
+    }
+
+    /// The region flags a path search for a mover of `faction` runs behind, one per region id of the
+    /// polygon map (`PATHFINDING.md` §8, "The region gate"; CONFIRMED by disassembly): the flags of
+    /// the faction view the grid's layers hold (`0x00B06210` → `0x00B06280` → `0x00B78A10`, the
+    /// acting faction's), the zone flood's rule. Every search's neighbour test applies them
+    /// (`0x00B16CF0` / `0x00B16BA0` in `0x00B2CC20` and the other searches,
+    /// [`super::polypath::View::gate_lets`]); the caller leaves them off for an agent, whose searches
+    /// clear the gate byte +0x168 (the scopes `0x00AF5B60` / `0x00AF5C00` with their first argument
+    /// set unless the mover leads an army, `0x009D0F50`, or a fleet, `0x009D0F80`).
+    ///
+    /// `target`: a search towards a character or settlement standing there (the queries `0x00B20600`
+    /// … `0x00B25470`, e.g. `0x00B21510`). Its scope `0x00AF5C00` opens the regions of the owner O of
+    /// the campaign region at that point (`0x00AA1030`; ours [`PathGrid::region_at`]) on top for the
+    /// search and closes them after (`0x00AF7BE0`), through `0x00B628E0`: for each region of O's list
+    /// (faction +0x778) whose settlement lies inside the grid (`0x00B1FC40`), the slot of the polygon
+    /// located at the settlement (`0x00B53930`, mover type 6; ours [`PolyMap::locate`]) is set
+    /// (`0x00B620A0`), then every group slot all of whose regions are now open. The exe does this
+    /// only when O is not the mover's faction, both have a record and O's record towards the mover
+    /// does not let it stand; otherwise O's regions are open already, which ours relies on.
+    ///
+    /// `None` without a polygon map, and for the rebels: PROVISIONAL (BACKLOG): the view a rebel
+    /// mover's search reads (the grid's single-region view +0x400, `0x00B67490` mode 2) is not
+    /// traced, so a rebel force paths without the gate.
+    ///
+    /// [`PathGrid::region_at`]: super::pathing::PathGrid::region_at
+    pub(crate) fn path_region_gate(&self, faction: FactionId, target: Option<(f32, f32)>) -> Option<Vec<bool>> {
+        let grid = &self.terrain.as_ref()?.0;
+        let map = grid.poly.as_ref()?;
+        if self.world.is_rebel_faction(faction) {
+            return None;
+        }
+        let owners = self.region_owners();
+        let mut open = self.regions_open_to(&grid.region_keys, faction, &owners);
+        let mut groups_opened = Vec::new();
+        if let Some(o) = target.and_then(|(x, z)| grid.region_at(x, z)).and_then(|k| owners.get(k).copied()) {
+            for r in self.world.regions.values().filter(|r| r.owner == o) {
+                let (x, z) = (r.settlement.position.0.to_f32(), r.settlement.position.1.to_f32());
+                // PROVISIONAL: the settlement is located with Mover::Land, mode 2; the exe uses
+                // `0x00B53930` type 6, not shown equal.
+                let Some(p) = map.cell_of(x, z).and_then(|_| map.locate(x, z, Mover::Land, 2)) else { continue };
+                let id = map.region_id[p] as usize;
+                match map.region_sets.get(id) {
+                    Some(set) if id < map.single_region_slots => {
+                        for &i in set {
+                            if let Some(flag) = open.get_mut(i as usize) {
+                                *flag = true;
+                            }
+                        }
+                    }
+                    Some(_) => groups_opened.push(id),
+                    None => {}
+                }
+            }
+        }
+        let mut flags = slot_flags(map, &open, false);
+        for id in groups_opened {
+            flags[id] = true;
+        }
+        Some(flags)
     }
 
     /// The load pass `0x00B0DC10` (module docs): every commander flooded in turn order, the rebels
     /// last, each against those flooded before it.
     fn build_zones(&self, map: &PolyMap) -> StoredZones {
-        let commanders = self.commanders_by_id();
+        let commanders = self.commanders_in_list_order();
         let mut zones = BTreeMap::new();
+        let owners = self.region_owners();
         for f in self.world.factions_in_turn_order() {
             for c in commanders.iter().filter(|c| c.faction == f) {
-                let z = self.flood_zone(map, c, &zones, true);
+                let z = self.flood_zone(map, c, &zones, true, &owners);
                 zones.insert(c.id, z);
             }
         }
@@ -217,7 +382,7 @@ impl CampaignModel {
     /// Nothing without zones flooded for the current map ([`Self::attach_terrain`]).
     pub(crate) fn rebuild_zone(&mut self, character: CharacterId) {
         let new = match (self.poly_map(), self.stored_zones()) {
-            (Some(map), Some(zones)) => self.commander(character).map(|c| self.flood_zone(map, &c, zones, false)),
+            (Some(map), Some(zones)) => self.commander(character).map(|c| self.flood_zone(map, &c, zones, false, &self.region_owners())),
             _ => return,
         };
         let Some(zones) = self.stored_zones_mut() else { return };
@@ -260,9 +425,10 @@ impl CampaignModel {
         if self.stored_zones().is_none() {
             return;
         }
-        let commanders = self.commanders_by_id();
+        let commanders = self.commanders_in_list_order();
         if let Some(zones) = self.stored_zones_mut() {
-            zones.retain(|id, _| commanders.binary_search_by_key(id, |c| c.id).is_ok());
+            let ids: std::collections::BTreeSet<CharacterId> = commanders.iter().map(|c| c.id).collect();
+            zones.retain(|id, _| ids.contains(id));
         }
         for c in commanders.iter().filter(|c| c.faction == faction) {
             self.rebuild_zone(c.id);
@@ -322,10 +488,10 @@ mod tests {
         zoc::reach(map(m), p, Mover::Land, ARMY_ZONE)
     }
 
-    /// `c`'s zone flooded now against the stored zones of what his faction sees.
+    /// `c`'s zone flooded now against the stored zones of what his faction sees, behind his region gate.
     fn fresh(m: &CampaignModel, c: CharacterId) -> Vec<u32> {
         let k = m.commander(c).expect("a commander");
-        zone_in(map(m), k.pos_f32(), k.navy, k.garrisoned, &m.obstacles_with_stored_zones(k.faction, c))
+        zone_in(map(m), k.pos_f32(), k.navy, k.garrisoned, &m.obstacles_with_stored_zones(k.faction, c), m.region_gate(map(m), &k, &m.region_owners()).as_deref())
     }
 
     fn zone(m: &CampaignModel, c: CharacterId) -> Vec<u32> {
@@ -358,7 +524,7 @@ mod tests {
         // B moves first: flooded before A is added, its zone is the bare flood; A's stops at it.
         assert_eq!(zone(&m, GB), bare(&m, (49.0, 21.0)));
         let a = zone(&m, GA);
-        assert_eq!(a, zone_in(map(&m), (41.0, 21.0), false, false, &[obstacle((49.0, 21.0), zone(&m, GB))]));
+        assert_eq!(a, zone_in(map(&m), (41.0, 21.0), false, false, &[obstacle((49.0, 21.0), zone(&m, GB))], None));
         assert!(a.len() < bare(&m, (41.0, 21.0)).len());
         // Not saved: a loaded copy floods the same zones again when its map is attached.
         let mut loaded = m.clone();
@@ -367,6 +533,59 @@ mod tests {
         assert_eq!(loaded.stored_zones(), None, "a read builds nothing");
         loaded.build_stored_zones();
         assert_eq!(loaded.stored_zones(), m.stored_zones());
+    }
+
+    /// The load pass walks a faction's commanders in its list's order (`World::character_order`,
+    /// +0x768), not in id order: the one listed first floods before the other's core is placed.
+    #[test]
+    fn the_load_pass_floods_a_factions_commanders_in_list_order() {
+        let run = |order: Vec<CharacterId>| {
+            let mut m = world(false);
+            let c = second_army(&mut m);
+            m.world.characters.get_mut(&c).unwrap().position = at(44, 21);
+            m.world.character_order = order;
+            m.attach_terrain(open_terrain());
+            (m, c)
+        };
+        // No order listed: id order, GA (100) before the second army (103).
+        let (by_id, c) = run(Vec::new());
+        assert_eq!(zone(&by_id, c), fresh(&by_id, c), "flooded last");
+        // Listed the other way round: the second army floods first and GA's flood stops at its core.
+        let (listed, _) = run(vec![c, GB, GA]);
+        assert_eq!(zone(&listed, GA), fresh(&listed, GA), "flooded last");
+        assert_ne!(zone(&listed, GA), zone(&by_id, GA));
+        assert_ne!(zone(&listed, c), zone(&by_id, c));
+    }
+
+    /// A removed character leaves the faction list (`World::character_order`) too, the rest keep order.
+    #[test]
+    fn a_removed_character_leaves_the_list_order() {
+        let mut m = world(false);
+        let c = second_army(&mut m);
+        m.world.character_order = vec![c, GB, GA];
+        assert!(m.world.remove_character(GB).is_some());
+        assert_eq!(m.world.character_order, vec![c, GA]);
+        assert!(m.world.remove_character(GB).is_none());
+    }
+
+    /// A faction transfer (`0x00A1B4E0`) moves the character to the end of the list, behind every
+    /// character made before it (listed or not), the rest keeping their order.
+    #[test]
+    fn a_transferred_character_goes_to_the_end_of_the_list() {
+        let mut m = world(false);
+        let c = second_army(&mut m);
+        m.world.character_order = vec![GB, GA];
+        let before = m.world.characters_in_list_order();
+        assert_eq!(before.last(), Some(&c), "unlisted, after the listed ones");
+        m.world.transfer_character(GB, REBELS);
+        assert_eq!(m.world.characters[&GB].faction, REBELS);
+        let mut expected: Vec<CharacterId> = before.into_iter().filter(|x| *x != GB).collect();
+        expected.push(GB);
+        assert_eq!(m.world.characters_in_list_order(), expected);
+        assert_eq!(m.world.character_order, expected, "the whole order listed");
+        // An unknown character changes nothing.
+        m.world.transfer_character(CharacterId(9999), REBELS);
+        assert_eq!(m.world.character_order, expected);
     }
 
     #[test]
@@ -392,8 +611,8 @@ mod tests {
         let mid = (45.0, 21.0);
         // Flooding each zone against the other's at search time would leave the ground between them
         // in neither zone.
-        let a_cut = zone_in(map(&m), (41.0, 21.0), false, false, &[obstacle((49.0, 21.0), bare(&m, (49.0, 21.0)))]);
-        let b_cut = zone_in(map(&m), (49.0, 21.0), false, false, &[obstacle((41.0, 21.0), bare(&m, (41.0, 21.0)))]);
+        let a_cut = zone_in(map(&m), (41.0, 21.0), false, false, &[obstacle((49.0, 21.0), bare(&m, (49.0, 21.0)))], None);
+        let b_cut = zone_in(map(&m), (49.0, 21.0), false, false, &[obstacle((41.0, 21.0), bare(&m, (41.0, 21.0)))], None);
         assert!(!holds(&m, &a_cut, mid) && !holds(&m, &b_cut, mid));
         // The stored zones cover it (B's, flooded first), and the search reads them.
         assert!(holds(&m, &zone(&m, GB), mid));
@@ -417,7 +636,7 @@ mod tests {
     }
 
     #[test]
-    fn a_walk_floods_the_zone_after_the_sight() {
+    fn a_walk_floods_the_movers_zone() {
         let mut m = model(true);
         spoil(&mut m, GA);
         m.apply(CampaignCommand::MoveForce { force: ForceId(1000), to: at(36, 21) }).unwrap();
@@ -429,7 +648,7 @@ mod tests {
     fn a_stored_zone_stays_until_an_event_floods_it() {
         let mut m = model(true);
         let b = zone(&m, GB);
-        // Moved with no event after it (an expelled army that is not placed elsewhere keeps its zone too).
+        // Moved with no event after it: the stored zone keeps the old place.
         m.world.characters.get_mut(&GB).unwrap().position = at(60, 21);
         assert_eq!(zone(&m, GB), b);
         let seen = m.obstacles_seen_by(A, GA);
@@ -448,11 +667,11 @@ mod tests {
         assert!(holds(&m, &before_a, mid) && holds(&m, &zone(&m, GB), mid));
         m.declare_war_rules(A, B).unwrap();
         // B first, against A's peace-time zone; then A against B's new one.
-        assert_eq!(zone(&m, GB), zone_in(map(&m), (49.0, 21.0), false, false, &[obstacle((41.0, 21.0), before_a)]));
+        assert_eq!(zone(&m, GB), zone_in(map(&m), (49.0, 21.0), false, false, &[obstacle((41.0, 21.0), before_a)], None));
         assert_eq!(zone(&m, GA), fresh(&m, GA));
         assert!(!holds(&m, &zone(&m, GB), mid));
         assert!(holds(&m, &zone(&m, GA), mid), "A's zone, flooded last, covers the ground between");
-        m.make_peace_rules(A, B).unwrap();
+        m.make_peace_rules(A, B, false).unwrap();
         assert!(holds(&m, &zone(&m, GA), mid) && holds(&m, &zone(&m, GB), mid));
     }
 
@@ -652,5 +871,184 @@ mod tests {
         assert_ne!(m.world.characters[&admiral].position, at(2, 5), "the fleet sailed");
         assert!(!zone(&m, admiral).is_empty());
         assert_flooded(&m, GA);
+    }
+
+    /// The rebels of the region-gate tests (a faction without a key).
+    const REBELS: FactionId = FactionId(9);
+
+    /// An 80 x 40 open map of four pathfinding regions by column: x < 40 is region id 0 (the single
+    /// region `test_region_10`, A's), x 40..60 id 1 (`test_region_11`, B's), x 60..70 id 2 (a group of
+    /// both) and x 70..80 id 3 (an empty group). The campaign regions' cells match the single ids.
+    fn region_terrain() -> Terrain {
+        let mut grid = PathGrid::new((0.0, 0.0), 2.0, 40, 20);
+        grid.region_keys = vec!["test_region_10".into(), "test_region_11".into()];
+        let id = |c: u32| match c {
+            0..20 => 0,
+            20..30 => 1,
+            30..35 => 2,
+            _ => 3,
+        };
+        for (i, r) in grid.region.iter_mut().enumerate() {
+            let c = id(i as u32 % 40);
+            *r = if c < 2 { c } else { u32::MAX };
+        }
+        grid.poly = Some(super::super::zoc::tests::open_regions(40, 20, id, vec![vec![0], vec![1], vec![0, 1], vec![]], 2));
+        Terrain(Arc::new(grid))
+    }
+
+    /// [`world`] (at peace) with A's general at (38, 21), 2 units from the border of B's region 11,
+    /// B's colonel out of the way at (75, 5), and the rebels; not yet on a map.
+    fn border_world() -> CampaignModel {
+        let mut m = world(false);
+        m.world.characters.get_mut(&GA).unwrap().position = at(38, 21);
+        m.world.characters.get_mut(&GB).unwrap().position = at(75, 5);
+        let mut rebels = m.world.factions[&B].clone();
+        rebels.id = REBELS;
+        rebels.key = String::new();
+        m.world.factions.insert(REBELS, rebels);
+        m
+    }
+
+    /// `c`'s region flags, one per region id.
+    fn gate(m: &CampaignModel, c: CharacterId) -> Vec<bool> {
+        m.region_gate(map(m), &m.commander(c).expect("a commander"), &m.region_owners()).expect("a movement grid")
+    }
+
+    /// The easternmost polygon centre of `c`'s stored zone.
+    fn east(m: &CampaignModel, c: CharacterId) -> f32 {
+        zone(m, c).iter().map(|&p| map(m).centre(map(m).poly_cell[p as usize]).0).fold(0.0, f32::max)
+    }
+
+    /// A on a region map where B holds a relationship record towards A edited by `edit`.
+    fn with_record(edit: impl FnOnce(&mut CampaignModel)) -> CampaignModel {
+        let mut m = border_world();
+        m.world.relationships.insert((B, A), super::super::details::Relationship::default());
+        edit(&mut m);
+        m.attach_terrain(region_terrain());
+        m
+    }
+
+    #[test]
+    fn a_zone_stops_at_a_region_whose_record_does_not_let_its_faction_stand() {
+        let m = with_record(|_| {});
+        // A's own region open, B's closed, the group of both closed, the empty group open.
+        assert_eq!(gate(&m, GA), [true, false, false, true]);
+        assert!(east(&m, GA) < 40.0, "{}", east(&m, GA));
+        assert_eq!(zone(&m, GA), fresh(&m, GA));
+        // An alliance alone does not open it (not `may_stay`'s rule).
+        let m = with_record(|m| m.world.set_stance(B, A, Stance::Allied).unwrap());
+        assert_eq!(gate(&m, GA), [true, false, false, true]);
+    }
+
+    #[test]
+    fn a_missing_record_reads_as_no_access_and_a_recordless_owner_opens_its_region() {
+        // No (B, A) record: no access, so only the stance can open B's region (the exe would test
+        // B's first, unrelated record: ORIGINAL BUG of 0x00B64C50, see `region_open_to`).
+        let mut m = border_world();
+        m.attach_terrain(region_terrain());
+        assert!(!m.world.relationships.contains_key(&(B, A)));
+        assert_eq!(gate(&m, GA), [true, false, false, true]);
+        assert!(east(&m, GA) < 40.0, "{}", east(&m, GA));
+        let mut m = border_world();
+        m.world.set_stance(B, A, Stance::War).unwrap();
+        m.attach_terrain(region_terrain());
+        assert!(!m.world.relationships.contains_key(&(B, A)));
+        assert_eq!(gate(&m, GA), [true; 4]);
+        assert!(east(&m, GA) > 40.0, "{}", east(&m, GA));
+        // A rebel owner, or one that is no loaded faction, opens its region even with a record.
+        for owner in [REBELS, FactionId(99)] {
+            let m = with_record(|m| {
+                m.world.relationships.insert((owner, A), super::super::details::Relationship::default());
+                m.world.regions.get_mut(&RegionId(11)).unwrap().owner = owner;
+            });
+            assert_eq!(gate(&m, GA), [true; 4], "{owner:?}");
+        }
+    }
+
+    #[test]
+    fn a_record_that_lets_the_faction_stand_opens_the_owners_region() {
+        let edits: [fn(&mut CampaignModel); 4] = [
+            |m| m.world.relationships.get_mut(&(B, A)).unwrap().military_access_turns = 1,
+            |m| m.world.relationships.get_mut(&(B, A)).unwrap().allied_in_war_against.push(super::super::details::AlliedWar { enemy: FactionId(3), saved_access_turns: 0 }),
+            |m| m.world.set_stance(B, A, Stance::Protectorate).unwrap(),
+            |m| m.world.set_stance(B, A, Stance::War).unwrap(),
+        ];
+        for (k, edit) in edits.into_iter().enumerate() {
+            let m = with_record(edit);
+            assert_eq!(gate(&m, GA), [true; 4], "case {k}");
+            assert!(east(&m, GA) > 40.0, "case {k}");
+        }
+    }
+
+    #[test]
+    fn a_rebel_commander_keeps_to_the_region_it_stands_in() {
+        let mut m = border_world();
+        m.world.forces.get_mut(&ForceId(1000)).unwrap().faction = REBELS;
+        m.world.characters.get_mut(&GA).unwrap().faction = REBELS;
+        m.attach_terrain(region_terrain());
+        // Every single region closed (its own too, which its flood needs no flag for), groups by
+        // their regions: only the empty group stays open.
+        assert_eq!(gate(&m, GA), [false, false, false, true]);
+        assert!(!zone(&m, GA).is_empty() && east(&m, GA) < 40.0, "{}", east(&m, GA));
+    }
+
+    #[test]
+    fn a_risen_army_keeps_to_its_home_region_until_it_leaves_the_world() {
+        let mut m = border_world();
+        m.world.region_risen_armies.insert(RegionId(11), vec![ForceId(1000)]);
+        m.attach_terrain(region_terrain());
+        // Only its home region's single slot (`0x00B078C0`), whatever the owners' records say.
+        assert_eq!(gate(&m, GA), [false, true, false, false]);
+        assert!(east(&m, GA) > 40.0, "{}", east(&m, GA));
+        m.remove_force(ForceId(1000), None);
+        assert!(m.world.region_risen_armies.is_empty());
+    }
+
+    /// Whether `c` finds a path to `to`, as a move ([`CampaignModel::plan_path`]) and as a search
+    /// towards a character or settlement there ([`CampaignModel::plan_path_to_target`]).
+    fn paths(m: &CampaignModel, c: CharacterId, to: (Fixed20, Fixed20)) -> (bool, bool) {
+        (m.plan_path(c, to).is_some(), m.plan_path_to_target(c, to).is_some())
+    }
+
+    #[test]
+    fn an_army_paths_only_into_regions_its_faction_may_stand_in() {
+        // Into B's region 11 (x 40..60) and on to the group of both (x 60..70): closed to A without
+        // access; A's own region needs no flag. A target there opens B's regions for the search,
+        // but only the slot its settlement stands in.
+        let mut m = with_record(|_| {});
+        let (inside, beyond, home) = (at(50, 21), at(65, 21), at(20, 21));
+        assert_eq!(paths(&m, GA, inside), (false, false), "B's settlement stands in A's region");
+        assert_eq!(paths(&m, GA, home), (true, true));
+        m.world.regions.get_mut(&RegionId(11)).unwrap().settlement.position = at(52, 31);
+        assert_eq!(paths(&m, GA, inside), (false, true));
+        // The group slot opens once all its regions are open: a target in it opens B's region 11
+        // (its own region at that point is no campaign region, so nothing more).
+        assert_eq!(paths(&m, GA, beyond), (false, false));
+        // Access opens B's regions to every search.
+        m.world.relationships.get_mut(&(B, A)).unwrap().military_access_turns = 1;
+        assert_eq!(paths(&m, GA, inside), (true, true));
+        assert_eq!(paths(&m, GA, beyond), (true, true));
+    }
+
+    #[test]
+    fn an_agent_and_a_rebel_force_path_without_the_gate() {
+        // An agent's searches clear the gate byte (0x00AF5B60 / 0x00AF5C00 with the flag set).
+        let mut m = with_record(|_| {});
+        m.world.forces.remove(&ForceId(1000));
+        assert_eq!(paths(&m, GA, at(50, 21)), (true, true));
+        // A rebel force: no gate (PROVISIONAL, `path_region_gate`).
+        let mut m = border_world();
+        m.world.forces.get_mut(&ForceId(1000)).unwrap().faction = REBELS;
+        m.world.characters.get_mut(&GA).unwrap().faction = REBELS;
+        m.attach_terrain(region_terrain());
+        assert_eq!(paths(&m, GA, at(50, 21)), (true, true));
+    }
+
+    #[test]
+    fn the_path_gate_has_the_zone_floods_flags() {
+        for edit in [(|_: &mut CampaignModel| {}) as fn(&mut CampaignModel), |m| m.world.set_stance(B, A, Stance::War).unwrap()] {
+            let m = with_record(edit);
+            assert_eq!(m.path_region_gate(A, None), Some(gate(&m, GA)));
+        }
     }
 }

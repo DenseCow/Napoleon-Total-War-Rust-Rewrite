@@ -413,10 +413,12 @@ pub fn attach_trade_nodes(m: &mut CampaignModel, map_nodes: &[(String, (f32, f32
 }
 
 /// Attaches the campaign map's static data the model reads: the trade nodes' DB rows
-/// ([`attach_trade_nodes`]) and the regions' land neighbours ([`attach_region_neighbours`]).
+/// ([`attach_trade_nodes`]), the regions' land neighbours ([`attach_region_neighbours`]) and the
+/// black shroud outlines (`World::black_shroud_outlines`).
 pub fn attach_map(m: &mut CampaignModel, map: &ntw_formats::campaign_map::RegionMap) {
     attach_trade_nodes(m, &map.trade_nodes);
     attach_region_neighbours(m, map);
+    m.world.black_shroud_outlines = map.black_shroud_outlines.clone();
 }
 
 /// Fills `World::region_neighbours` from the map's outline connectivity: two game regions are

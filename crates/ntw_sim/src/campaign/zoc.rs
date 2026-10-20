@@ -92,15 +92,21 @@ impl Ord for Open {
 }
 
 /// The polygons reachable from `pos` within `limit` map units of walking distance for `mover`
-/// (the zone flood, see the module docs). Empty if `pos` has no enterable polygon nearby or the
-/// limit is not positive.
+/// (the zone flood, see the module docs), with no region gate. Empty if `pos` has no enterable
+/// polygon nearby or the limit is not positive.
 pub fn reach(map: &PolyMap, pos: (f32, f32), mover: Mover, limit: f32) -> Vec<u32> {
-    reach_in(&map.view(), pos, mover, limit)
+    reach_in(&map.view(), pos, mover, limit, None)
 }
 
 /// [`reach`] on a map with run-time polygons ([`zone_in`] floods a zone this way); the result
 /// indexes the view (pieces included).
-pub fn reach_in(map: &View<'_>, pos: (f32, f32), mover: Mover, limit: f32) -> Vec<u32> {
+///
+/// `gate`: the layer's region flags, one per region id ([`PolyMap::region_sets`]; `0x00B78A10` /
+/// `0x00B078C0` fill them, [`super::zones`] ports them). The flood's neighbour test (`0x00B7BBB0` →
+/// `0x00B16CF0`, CONFIRMED) is [`View::gate_lets`]. The gate byte that switches the test off (layer
+/// +0x168) is cleared only by the path searches' scopes (`0x00AF5B60` / `0x00AF5C00` with their first
+/// argument set, an agent's search; restored by `0x00AF7BE0`); the zone flood does not open it.
+pub fn reach_in(map: &View<'_>, pos: (f32, f32), mover: Mover, limit: f32, gate: Option<&[bool]>) -> Vec<u32> {
     if limit <= 0.0 {
         return Vec::new();
     }
@@ -121,7 +127,7 @@ pub fn reach_in(map: &View<'_>, pos: (f32, f32), mover: Mover, limit: f32) -> Ve
         let (c0, r0) = rc(p);
         for &nb in map.neighbours(p) {
             let nb = nb as usize;
-            if !mover.may_enter(map.kind(nb)) {
+            if !mover.may_enter(map.kind(nb)) || gate.is_some_and(|g| !map.gate_lets(g, p, nb)) {
                 continue;
             }
             let (c1, r1) = rc(nb);
@@ -220,10 +226,13 @@ fn zone_extent(map: &PolyMap, limit: f32) -> f32 {
 /// (that changes nothing, [`zone_extent`]). The result is the static polygons the flood reaches
 /// (a run-time piece counts as the polygon it was cut from), sorted.
 ///
+/// `gate`: the region flags of the commander's layer ([`reach_in`]): the zone does not flood into a
+/// region its owner may not stand in (`0x00B78A10`), nor a risen army out of its region (`0x00B078C0`).
+///
 /// Not ported: the script barriers (Lua `add_barrier` / `remove_barrier`, `0x00977700` →
 /// `0x00B64E30`), which `0x00B7B7A0` adds to the flood for a faction whose +0x6E0 flag is set; none
 /// exist in the shipped start positions.
-pub fn zone_in(map: &PolyMap, pos: (f32, f32), navy: bool, garrisoned: bool, others: &[Obstacle]) -> Vec<u32> {
+pub fn zone_in(map: &PolyMap, pos: (f32, f32), navy: bool, garrisoned: bool, others: &[Obstacle], gate: Option<&[bool]>) -> Vec<u32> {
     let limit = zone_limit(navy, garrisoned);
     let reach_of = |o: &Obstacle| zone_extent(map, zone_limit(o.navy, o.garrisoned));
     let near = |o: &Obstacle, r: f32| {
@@ -242,7 +251,7 @@ pub fn zone_in(map: &PolyMap, pos: (f32, f32), navy: bool, garrisoned: bool, oth
     let ov = rtcut::build(map, &cut);
     let view = map.with(&ov);
     let mover = if navy { Mover::Sea } else { Mover::Land };
-    let mut out: Vec<u32> = reach_in(&view, pos, mover, limit).into_iter().map(|p| view.origin_of(p as usize) as u32).collect();
+    let mut out: Vec<u32> = reach_in(&view, pos, mover, limit, gate).into_iter().map(|p| view.origin_of(p as usize) as u32).collect();
     out.sort_unstable();
     out.dedup();
     out
@@ -352,7 +361,8 @@ pub struct ObstacleRecord {
 }
 
 /// The [`ObstacleRecord`] of a character of `owner` standing at `pos` (`garrisoned`: inside a
-/// settlement, for the zone bonus). Its zone is the bare-map flood.
+/// settlement, for the zone bonus). Its zone is the bare-map flood (a commander's saved obstacle
+/// takes his stored zone instead, through [`obstacle_record_with_zone`]).
 pub fn obstacle_record(map: &PolyMap, pos: (f32, f32), owner: Owner, garrisoned: bool) -> ObstacleRecord {
     let zone = match owner {
         Owner::Army => reach(map, pos, Mover::Land, zone_limit(false, garrisoned)),
@@ -416,15 +426,64 @@ pub(crate) mod tests {
     const U: i32 = 1 << 20;
 
     pub(crate) fn open(w: u32, h: u32) -> PolyMap {
+        open_regions(w, h, |_| 0, vec![vec![0]], 1)
+    }
+
+    /// [`open`] with each column's polygons in pathfinding region `region_of(column)`, the region
+    /// table `region_sets` and its first `single` slots single regions.
+    pub(crate) fn open_regions(w: u32, h: u32, region_of: impl Fn(u32) -> u32, region_sets: Vec<Vec<u32>>, single: usize) -> PolyMap {
         let mut cells = Vec::new();
         for r in 0..h {
             for c in 0..w {
                 let (x0, z0) = (c as i32 * 2 * U, r as i32 * 2 * U);
                 let sq = vec![(x0, z0), (x0 + 2 * U, z0), (x0 + 2 * U, z0 + 2 * U), (x0, z0 + 2 * U)];
-                cells.push(CellInput { header: [0; 8], polys: vec![PolyInput { kind: kind::LAND, region_id: 0, outline: sq }] });
+                cells.push(CellInput { header: [0; 8], polys: vec![PolyInput { kind: kind::LAND, region_id: region_of(c), outline: sq }] });
             }
         }
-        PolyMap::build((0, 0), 2 * U, w, h, &cells, vec![vec![0]])
+        let mut m = PolyMap::build((0, 0), 2 * U, w, h, &cells, region_sets);
+        m.single_region_slots = single;
+        m
+    }
+
+    /// The flood takes a neighbour in another region id only when the gate opens that id; its own
+    /// region id needs no flag.
+    #[test]
+    fn the_region_gate_stops_a_flood_at_a_closed_region() {
+        // Columns 0..20 (x < 40) region id 0, the rest id 1.
+        let m = open_regions(40, 20, |c| u32::from(c >= 20), vec![vec![0], vec![1]], 2);
+        let me = (38.0, 21.0);
+        let bare = reach(&m, me, Mover::Land, ARMY_ZONE);
+        let flood = |gate: &[bool]| reach_in(&m.view(), me, Mover::Land, ARMY_ZONE, Some(gate));
+        let east = |z: &[u32]| z.iter().map(|&p| m.centre(m.poly_cell[p as usize]).0).fold(0.0, f32::max);
+        assert!(east(&bare) > 40.0);
+        assert_eq!(flood(&[true, true]), bare);
+        let closed = flood(&[true, false]);
+        assert!(!closed.is_empty() && east(&closed) < 40.0, "{}", east(&closed));
+        assert!(closed.iter().all(|p| bare.binary_search(p).is_ok()));
+        // Its own region id's flag does not matter; an id past the flags is open.
+        assert_eq!(flood(&[false, false]), closed);
+        assert_eq!(flood(&[false]), bare);
+    }
+
+    /// The path search takes the flood's neighbour test: never into a closed region id, the goal's
+    /// polygon included; inside its own region, or with no gate, it goes anywhere.
+    #[test]
+    fn the_region_gate_stops_a_path_at_a_closed_region() {
+        // Columns 0..20 (x < 40) region id 0, 20..30 id 1, the rest id 2.
+        let m = open_regions(40, 20, |c| (c / 10).saturating_sub(1).min(2), vec![vec![0], vec![1], vec![2]], 3);
+        let v = m.view();
+        let road = vec![1.0; 3];
+        let path = |to: (f32, f32), gate: Option<&[bool]>| v.find_path_gated((10.0, 21.0), to, Mover::Land, &road, &|_| false, gate);
+        let (west, middle, east) = ((30.0, 5.0), (50.0, 21.0), (70.0, 21.0));
+        let plain = path(east, None).expect("a path");
+        assert_eq!(path(east, Some(&[true; 3])), Some(plain.clone()));
+        assert_eq!(v.find_path((10.0, 21.0), east, Mover::Land, &road), Some(plain));
+        // Region id 1 closed: it cannot be crossed, so id 2 is cut off; its own id needs no flag.
+        assert!(path(middle, Some(&[false, false, true])).is_none());
+        assert!(path(east, Some(&[false, false, true])).is_none());
+        assert!(path(west, Some(&[false, false, false])).is_some());
+        let p = path(middle, Some(&[false, true, false])).expect("a path");
+        assert!(p.polys.iter().all(|&q| m.region_id[q as usize] < 2));
     }
 
     #[test]
@@ -432,24 +491,24 @@ pub(crate) mod tests {
         let m = open(40, 20);
         let me = (41.0, 21.0);
         let bare = reach(&m, me, Mover::Land, ARMY_ZONE);
-        assert_eq!(zone_in(&m, me, false, false, &[]), bare);
+        assert_eq!(zone_in(&m, me, false, false, &[], None), bare);
         // An enemy 8 units east: its zone (kind 8 in the owner's view) stops the flood, so the
         // owner's zone loses its east side and holds none of the enemy's polygons.
         let ez = reach(&m, (49.0, 21.0), Mover::Land, ARMY_ZONE);
         let enemy = Obstacle { pos: (49.0, 21.0), navy: false, garrisoned: false, at_war: true, zone: ez.clone().into() };
-        let z = zone_in(&m, me, false, false, std::slice::from_ref(&enemy));
+        let z = zone_in(&m, me, false, false, std::slice::from_ref(&enemy), None);
         assert!(z.len() < bare.len(), "{} {}", z.len(), bare.len());
         assert!(z.iter().all(|p| bare.binary_search(p).is_ok() && ez.binary_search(p).is_err()));
         let east = |z: &[u32]| z.iter().map(|&p| m.centre(m.poly_cell[p as usize]).0).fold(0.0, f32::max);
         assert!(east(&z) <= 43.0 && east(&bare) == 47.0, "{} {}", east(&z), east(&bare));
         // Not at war: only its core is cut; the flood goes round it and still reaches the far side.
         let friend = Obstacle { at_war: false, pos: (44.0, 21.0), ..enemy.clone() };
-        let fz = zone_in(&m, me, false, false, std::slice::from_ref(&friend));
+        let fz = zone_in(&m, me, false, false, std::slice::from_ref(&friend), None);
         assert!(fz.binary_search(&(m.polygon_at(44.0, 21.0).unwrap() as u32)).is_ok());
         assert_eq!(east(&fz), 47.0);
         // Far away: changes nothing.
         let far = Obstacle { pos: (75.0, 21.0), zone: reach(&m, (75.0, 21.0), Mover::Land, ARMY_ZONE).into(), ..enemy };
-        assert_eq!(zone_in(&m, me, false, false, &[far]), bare);
+        assert_eq!(zone_in(&m, me, false, false, &[far], None), bare);
     }
 
     #[test]

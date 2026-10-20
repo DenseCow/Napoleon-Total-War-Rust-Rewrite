@@ -92,6 +92,24 @@ fn ai_capture_occupies_and_liberation_hands_the_region_over() {
 }
 
 #[test]
+fn the_scripts_liberation_switch_offers_no_liberation() {
+    use super::capture::CaptureChoice;
+    // Episodic restrictions +0x124 (set_liberation_options_disabled): the capture options
+    // 0x00B14930 offer no liberation while it is set (tests 0x00B15134 / 0x00B15214), so a
+    // liberate choice loots, as with no target.
+    let mut m = capture_model(vec![A]);
+    m.world.region_rebel_factions.insert(RegionId(11), "test_faction_c".into());
+    assert_eq!(m.liberation_target(RegionId(11), A), Some(C));
+    m.world.liberation_options_disabled = true;
+    assert_eq!(m.liberation_target(RegionId(11), A), None);
+    m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+    assert_eq!(m.pending_capture.as_ref().unwrap().liberate, None);
+    let ev = m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Liberate }).unwrap();
+    assert!(ev.iter().any(|e| matches!(e, CampaignEvent::CaptureResolved { choice: CaptureChoice::Loot, .. })));
+    assert_eq!(m.world.regions[&RegionId(11)].owner, A);
+}
+
+#[test]
 fn attitude_factor_writes_and_drift_follow_the_exe() {
     use super::details::AttitudeFactor;
     use super::treaties::{attitude_category, event};
@@ -132,7 +150,7 @@ fn war_peace_and_third_parties_change_the_relationships() {
     }
     let f = m.world.relationships[&(C, A)].attitudes[super::treaties::slot("declared_war_against_friends")];
     assert_eq!((f.value, f.drift, f.limit), (-15, 1, 0), "war_against_friends added; it recovers to 0");
-    m.apply(CampaignCommand::MakePeace { a: A, b: B }).unwrap();
+    m.apply(CampaignCommand::MakePeace { a: A, b: B, suppress_messages: false }).unwrap();
     let r = &m.world.relationships[&(A, B)];
     assert_eq!(r.attitudes[super::treaties::slot("war")].value, -20);
     assert_eq!(r.friendship_turns, 10);
@@ -165,14 +183,14 @@ fn war_reads_and_bumps_the_diplomacy_manager_counters() {
     assert_eq!(m.world.relationships[&(B, A)].attitudes[slot("abused_military_access")].value, -30);
     assert_eq!(m.world.access_abuses[&A], 1);
     assert!(!m.world.treaty_breaks.contains_key(&A));
-    m.apply(CampaignCommand::MakePeace { a: A, b: B }).unwrap();
+    m.apply(CampaignCommand::MakePeace { a: A, b: B, suppress_messages: false }).unwrap();
     // First backstab, 4 friendship turns: n = 1 → value −3·1·4, limit −5·1; then n + 1.
     war(&mut m, 4);
     assert_eq!(peace_treaty(&m), (-12, 1, -5));
     assert_eq!(m.world.treaty_breaks[&A], 2);
     assert_eq!(m.world.relationships[&(B, A)].attitudes[slot("abused_military_access")].value, -40, "second abuse: −30 + 1 × (−10)");
     assert_eq!(m.world.access_abuses[&A], 2);
-    m.apply(CampaignCommand::MakePeace { a: A, b: B }).unwrap();
+    m.apply(CampaignCommand::MakePeace { a: A, b: B, suppress_messages: false }).unwrap();
     // A backstab at 10 friendship turns: n = 2 → value −60, limit −10; then n + 3.
     war(&mut m, 10);
     assert_eq!(peace_treaty(&m), (-60, 1, -10));
@@ -387,4 +405,260 @@ fn religion_conversion_follows_the_exe_formula() {
     m.convert_region(RegionId(10));
     let rel = &m.world.regions[&RegionId(10)].religions;
     assert!((rel[0].1 - 0.52064).abs() < 1e-5 && (rel[1].1 - 0.47936).abs() < 1e-5, "{rel:?}");
+}
+
+/// `DeclareWarAndCallAllies` `0x00B268B0` calls the allies before the war itself (`0x00B26700`):
+/// the declarer's ally C joins first (its own war on B, `war_dragged_by_ally` both ways, B's access
+/// to C only ended), then A's war, whose third-party loop already sees C hostile to B, so C likes A
+/// for declaring war on its enemy.
+#[test]
+fn the_allies_go_to_war_before_the_declaration() {
+    use super::treaties::{event, slot, DiplomaticAction as D};
+    let mut m = test_model();
+    m.world.regions.get_mut(&RegionId(12)).unwrap().owner = C;
+    m.apply(CampaignCommand::Diplomacy { a: A, b: C, action: D::Alliance }).unwrap();
+    m.relationship_mut(B, C).military_access_turns = 10;
+    let events = m.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
+    let wars: Vec<(FactionId, FactionId)> = events
+        .iter()
+        .filter_map(|e| match e {
+            CampaignEvent::StanceChanged { a, b, stance: Stance::War } => Some((*a, *b)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(wars, [(C, B), (A, B)], "the ally's war comes first");
+    let dragged = event("war_dragged_by_ally");
+    for (x, y) in [(C, B), (B, C)] {
+        let w = m.world.relationships[&(x, y)].attitudes[slot("war")];
+        assert_eq!((w.value, w.drift, w.limit), (dragged.value, dragged.drift, dragged.limit), "{x:?}->{y:?}");
+    }
+    assert_eq!(m.world.relationships[&(C, B)].war_ally, Some(A));
+    assert_eq!(m.world.relationships[&(B, C)].war_ally, None);
+    // B's access to C ends without an abuse charge (0x00B27250 with an ally).
+    assert_eq!(m.world.relationships[&(B, C)].military_access_turns, 0);
+    assert_eq!(m.world.relationships[&(B, C)].attitudes[slot("abused_military_access")].value, 0);
+    assert!(!m.world.access_abuses.contains_key(&C));
+    // C was hostile to B when A's war came: war_against_enemies on C's view of A.
+    let e = m.world.relationships[&(C, A)].attitudes[slot("declared_war_against_enemies")];
+    assert_eq!(e.value, event("war_against_enemies").value);
+    // The access of A and C is saved for the war and becomes indefinite.
+    for (x, y) in [(A, C), (C, A)] {
+        assert_eq!(m.world.relationships[&(x, y)].military_access_turns, -1);
+        assert_eq!(m.world.relationships[&(x, y)].allied_in_war_against.len(), 1);
+    }
+}
+
+/// An ally already at war with the enemy is not asked: it is listed as joined, and only its access
+/// with its ally is saved for the war (`0x00B0CCE0`); no new war, so no new factor.
+#[test]
+fn an_ally_already_at_war_joins_without_a_new_war() {
+    use super::treaties::{slot, DiplomaticAction as D};
+    let mut m = test_model();
+    m.world.regions.get_mut(&RegionId(12)).unwrap().owner = C;
+    m.apply(CampaignCommand::Diplomacy { a: A, b: C, action: D::Alliance }).unwrap();
+    m.relationship_mut(C, A).military_access_turns = 5;
+    m.world.declare_war(C, B).unwrap();
+    m.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
+    assert!(m.world.relationships.get(&(C, B)).is_none_or(|r| r.attitudes[slot("war")].value == 0));
+    let r = &m.world.relationships[&(C, A)];
+    assert_eq!((r.military_access_turns, r.allied_in_war_against[0].enemy, r.allied_in_war_against[0].saved_access_turns), (-1, B, 5));
+    assert_eq!(m.world.relationships[&(A, C)].military_access_turns, -1);
+}
+
+/// A war on the rebels or the pirates gives no one `war_against_enemies` (`0x00B26700` skips it
+/// when `0x008CEE00` holds for the target), but a very friendly view still costs the declarer.
+#[test]
+fn a_war_on_the_rebels_or_pirates_pleases_no_one() {
+    use super::treaties::slot;
+    let war = |pirates: bool, rebels: bool, value: i32| {
+        let mut m = test_model();
+        if pirates {
+            Arc::make_mut(&mut m.rules).director.no_rival_keys = vec!["test_faction_b".into()];
+        }
+        if rebels {
+            m.world.factions.get_mut(&B).unwrap().key.clear();
+        }
+        m.relationship_mut(C, B).attitudes[slot("alliance")].value = value;
+        m.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
+        let Some(r) = m.world.relationships.get(&(C, A)) else { return (0, 0) };
+        (r.attitudes[slot("declared_war_against_enemies")].value, r.attitudes[slot("declared_war_against_friends")].value)
+    };
+    assert!(war(false, false, -100).0 > 0, "a hostile bystander likes the declarer");
+    assert_eq!(war(true, false, -100), (0, 0));
+    assert_eq!(war(false, true, -100), (0, 0));
+    assert!(war(true, false, 80).1 < 0, "a very friendly bystander still minds");
+}
+
+/// A peace posts `ceasefire_declared` (type 47, `0x009D1F20`) to both sides about the other, the target first,
+/// AI or not (`0x00B262C0` has no human test); the `CCQ_MAKE_PEACE` suppress byte (`force_make_protectorate`
+/// `0x0097AA20`) posts none.
+#[test]
+fn peace_posts_ceasefire_messages_unless_suppressed() {
+    let messages = |ev: Vec<CampaignEvent>| ev.into_iter().filter(|e| matches!(e, CampaignEvent::Message { .. })).collect::<Vec<_>>();
+    let ceasefire = |recipient, other| CampaignEvent::Message { recipient, message: CampaignMessage::CeasefireDeclared { other } };
+    let mut m = test_model();
+    m.turn.humans = vec![A];
+    m.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
+    let ev = m.apply(CampaignCommand::MakePeace { a: A, b: B, suppress_messages: false }).unwrap();
+    assert_eq!(messages(ev), vec![ceasefire(B, A), ceasefire(A, B)]);
+    m.world.relationships.get_mut(&(A, B)).unwrap().friendship_turns = 0;
+    m.world.relationships.get_mut(&(B, A)).unwrap().friendship_turns = 0;
+    m.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
+    let ev = m.apply(CampaignCommand::MakePeace { a: A, b: B, suppress_messages: true }).unwrap();
+    assert_eq!(messages(ev), vec![]);
+    assert_eq!(m.world.stance(A, B), Stance::Neutral, "a suppressed peace is still a peace");
+    assert_eq!(CampaignMessage::CeasefireDeclared { other: A }.type_name(), "ceasefire_declared");
+}
+
+/// Made-up extra factions for the declaration tests: D, E, F in the game, and R, the rebels (no key,
+/// outside the turn list as in the exe). Every faction is a major power in the game; the turn list is
+/// E, B, A, C, D, F.
+const D: FactionId = FactionId(4);
+const E: FactionId = FactionId(5);
+const F: FactionId = FactionId(6);
+const R: FactionId = FactionId(9);
+
+fn war_test_model() -> CampaignModel {
+    let mut m = test_model();
+    for (id, key) in [(D, "test_faction_d"), (E, "test_faction_e"), (F, "test_faction_f"), (R, "")] {
+        m.world.factions.insert(id, super::faction(id, key, 0, GovernmentType::AbsoluteMonarchy));
+    }
+    for f in [A, B, C, D, E, F, R] {
+        let d = m.world.faction_details.entry(f).or_default();
+        d.major = Some(true);
+        d.out_of_game = Some(false);
+    }
+    m.world.turn_order = vec![E, B, A, C, D, F];
+    m
+}
+
+/// A declaration between two major powers posts `war_declared` (type 0x112, `0x009DAFE0`) to every faction
+/// of the world's list in none of the call lists (`0x00B268B0` → `0x00B2BEC0`), in list order, AI or not, and
+/// never to the rebels (outside the list); none when either side is minor.
+#[test]
+fn a_war_between_majors_is_announced_to_the_uninvolved() {
+    use super::treaties::DiplomaticAction as D_;
+    let notices = |ev: &[CampaignEvent]| {
+        ev.iter()
+            .filter_map(|e| match e {
+                CampaignEvent::Message { recipient, message: CampaignMessage::WarDeclared { declarer, target } } => Some((*recipient, *declarer, *target)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut m = war_test_model();
+    // C joins A's war (A's ally); D, allied to both, breaks with B when B calls it (B's allies first), then
+    // joins A's war when A calls it.
+    m.apply(CampaignCommand::Diplomacy { a: A, b: C, action: D_::Alliance }).unwrap();
+    m.form_alliance(D, B).unwrap();
+    m.form_alliance(D, A).unwrap();
+    let ev = m.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
+    assert_eq!(notices(&ev), vec![(E, A, B), (F, A, B)], "list order E, F; C and D are in the lists, R is not listed");
+    assert_eq!(m.world.stance(D, B), Stance::War, "D broke with B, then joined A");
+    // The notices come before the war itself (`0x00B26700`).
+    let first_notice = ev.iter().position(|e| matches!(e, CampaignEvent::Message { message: CampaignMessage::WarDeclared { .. }, .. })).unwrap();
+    let war = ev.iter().position(|e| matches!(e, CampaignEvent::StanceChanged { a: A, b: B, stance: Stance::War })).unwrap();
+    assert!(first_notice < war);
+    // A minor side: no notice.
+    let mut m = war_test_model();
+    m.world.faction_details.entry(B).or_default().major = Some(false);
+    assert_eq!(notices(&m.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap()), vec![]);
+    assert_eq!(CampaignMessage::WarDeclared { declarer: A, target: B }.type_name(), "war_declared");
+}
+
+/// The war's third-party loop (`0x00B26700`) walks the world's faction list, which never holds the rebels: a
+/// rebel faction hostile to the target gets no `war_against_enemies`.
+#[test]
+fn the_rebels_do_not_judge_a_declaration() {
+    use super::treaties::slot;
+    let mut m = war_test_model();
+    for x in [R, E] {
+        m.relationship_mut(x, B).attitudes[slot("alliance")].value = -100;
+    }
+    m.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
+    let liked = |m: &CampaignModel, x| m.world.relationships.get(&(x, A)).map_or(0, |r| r.attitudes[slot("declared_war_against_enemies")].value);
+    assert!(liked(&m, E) > 0, "a listed hostile bystander likes the declarer");
+    assert_eq!(liked(&m, R), 0, "the rebels are not listed");
+}
+
+/// The allies are called in the order of the side's diplomacy records (`0x00B268B0` walks the record array,
+/// stride 0x848), not by faction id.
+#[test]
+fn the_allies_are_called_in_record_order() {
+    let mut m = war_test_model();
+    m.form_alliance(C, B).unwrap();
+    m.form_alliance(D, B).unwrap();
+    let wars = |m: &mut CampaignModel| {
+        m.apply(CampaignCommand::DeclareWar { a: A, b: B })
+            .unwrap()
+            .into_iter()
+            .filter_map(|e| match e {
+                CampaignEvent::StanceChanged { a, b, stance: Stance::War } => Some((a, b)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut by_record = m.clone();
+    by_record.world.diplomacy_record_order.insert(B, vec![F, D, A, C]);
+    assert_eq!(wars(&mut by_record), vec![(D, A), (C, A), (A, B)]);
+    // Without a loaded order (a faction's records made since), by id.
+    assert_eq!(wars(&mut m), vec![(C, A), (D, A), (A, B)]);
+}
+
+/// A declaration sets the `WarStartedCharacterFaction` flag (+0x925) of both sides and of a joining ally's
+/// war (`0x00B26700`); each faction's own turn end clears it (`0x008BD0F0` at `0x008BD408`), after its
+/// `FactionTurnEnd`.
+#[test]
+fn war_started_lasts_until_the_factions_turn_end() {
+    use super::treaties::DiplomaticAction as D_;
+    let mut m = war_test_model();
+    m.turn.humans = vec![A];
+    m.apply(CampaignCommand::Diplomacy { a: A, b: C, action: D_::Alliance }).unwrap();
+    m.start_campaign();
+    assert_eq!(m.turn.current, Some(A));
+    let started = |m: &CampaignModel, f| m.world.faction_details.get(&f).is_some_and(|d| d.war_started);
+    m.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
+    assert!([A, B, C].iter().all(|&f| started(&m, f)));
+    assert!(!started(&m, E), "a bystander's flag stays clear");
+    m.begin_end_turn();
+    let end = m.step().unwrap();
+    assert!(end.contains(&CampaignEvent::FactionTurnEnd { faction: A }));
+    assert!(started(&m, A), "still set when the FactionTurnEnd handlers run");
+    m.step();
+    assert!(!started(&m, A), "cleared by A's turn end");
+    assert!(started(&m, B) && started(&m, C), "the others keep theirs until their own turn end");
+}
+
+/// A [`peace_access_grants`](super::features::CampaignFeatures::peace_access_grants) row (the Peninsular
+/// campaign's Iberia → Britain, `0x00B262C0` → `0x00B444B0` with −1) gives the grantee access from the granter,
+/// whichever side proposed; a peace between two granters, or with no row, gives none.
+#[test]
+fn a_peace_access_grant_row_gives_the_grantee_access() {
+    use super::features::PeaceAccessGrant;
+    let peace = |m: &mut CampaignModel, a, b| {
+        m.declare_war_rules(a, b).unwrap();
+        m.make_peace_rules(a, b, false).unwrap();
+    };
+    let access = |m: &CampaignModel, x, y| m.world.relationships.get(&(x, y)).map_or(0, |r| r.military_access_turns);
+    let grant = PeaceAccessGrant { granters: vec!["test_faction_a".into(), "test_faction_c".into()], grantee: "test_faction_b".into(), turns: -1 };
+    // No row: no access.
+    let mut m = test_model();
+    peace(&mut m, A, B);
+    assert_eq!((access(&m, A, B), access(&m, B, A)), (0, 0));
+    // The granter proposes.
+    let mut m = test_model();
+    std::sync::Arc::make_mut(&mut m.rules).features.peace_access_grants = vec![grant.clone()];
+    peace(&mut m, A, B);
+    assert_eq!((access(&m, A, B), access(&m, B, A)), (-1, 0), "A grants B indefinite access");
+    assert_eq!(m.world.relationships[&(A, B)].military_access_granted, -1);
+    // The grantee proposes.
+    let mut m = test_model();
+    std::sync::Arc::make_mut(&mut m.rules).features.peace_access_grants = vec![PeaceAccessGrant { turns: 10, ..grant.clone() }];
+    peace(&mut m, B, C);
+    assert_eq!((access(&m, C, B), access(&m, B, C)), (10, 0), "C grants B, the row's length");
+    // Two granters: none.
+    let mut m = test_model();
+    std::sync::Arc::make_mut(&mut m.rules).features.peace_access_grants = vec![grant];
+    peace(&mut m, A, C);
+    assert_eq!((access(&m, A, C), access(&m, C, A)), (0, 0));
 }

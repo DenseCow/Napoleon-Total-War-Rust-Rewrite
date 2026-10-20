@@ -71,6 +71,27 @@ fn diplomacy_details_list_protectorates_under_their_patron() {
     assert!(hud.errors().is_empty(), "{:?}", hud.errors());
 }
 
+/// `RetrieveDiplomacyDetails(f)`'s TradeRights reads `f`'s own record about the other faction
+/// (`+0x788` on the `[f + 0x528]` entry, 0x009B2869): a flag on one side only lists the other
+/// faction for that side alone.
+#[test]
+fn diplomacy_details_trade_rights_read_the_faction_s_own_record() {
+    let hud = hud();
+    {
+        let mut st = hud._scripts.state_mut();
+        let w = &mut st.model.world;
+        w.set_stance(A, B, Stance::Neutral).unwrap();
+        w.relationships.entry((A, B)).or_default().trade_agreement = true;
+        w.relationships.entry((B, A)).or_default().trade_agreement = false;
+    }
+    let has = |faction: &str, other: &str| -> bool {
+        eval(&hud, &format!("return CampaignUI.RetrieveDiplomacyDetails('{faction}').TradeRights.{other} ~= nil"))
+    };
+    assert!(has("test_faction_a", "test_faction_b"), "A's record holds the agreement");
+    assert!(!has("test_faction_b", "test_faction_a"), "B's record does not");
+    assert!(hud.errors().is_empty(), "{:?}", hud.errors());
+}
+
 /// `RetrieveRemainingMilitaryAccessTurns` (0x009F4380): -1 for the record whose stance is 4
 /// (`IsStanceProtectorate` 0x00B5DCC0), the protectorate's about its patron; the patron's own
 /// record keeps its turns. Bug: the -1 went to the patron's record.

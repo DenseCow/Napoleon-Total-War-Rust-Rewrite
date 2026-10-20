@@ -18,7 +18,10 @@
 //! | regions | `REGION` #20 owner, garrison residence owner, slot buildings, road building, `BUILDING_CONSTRUCTION_ITEM`s (source items kept, repair items kept), the recruitment queues (region and port managers; source items kept), the economy fields (`write_region_economy`), the population state and religion shares (`write_region_population`) | CONFIRMED layouts from the user's saves |
 //! | taxes | every `GOVERNORSHIP_TAXES` | CONFIRMED position (CAMPAIGN_DATA.md §3) |
 //! | stances | `DIPLOMACY_RELATIONSHIP` #4 (old stance to #20) | #4 CONFIRMED, #20 INFERRED |
+//! | treaty money | `DIPLOMACY_RELATIONSHIP` #8 protectorate tribute, #9 patron income, #14 `REGULAR_PAYMENTS[]` (`write_treaty_money`) | CONFIRMED (writer `0x00AFC340`) |
 //! | script slots | `EPISODIC_RESTRICTIONS/LUA[]` ([`write_save_with`]) | CONFIRMED (CAMPAIGN_DATA.md §4) |
+//! | historical events triggered | `HISTORICAL_EVENT_MANAGER/TRIGGERED_DYNAMIC_EVENT_ARRAY[]` (`write_triggered_events`) | CONFIRMED (writer `0x00895050`) |
+//! | episodic switches | `EPISODIC_RESTRICTIONS` #8, #20, #22, #25, #29, #31, #32 (`details::write_switches`) | CONFIRMED positions (writer `0x009A1070`) |
 //! | links | `CHARACTER` #4 (force commanded) / #5 (unit attached), `UNIT` #10, `ARMY` #5 and residence #12 (garrisons), new colonels / captains cloned from a template character | CONFIRMED links (SAVE_COMPAT.md §4); cloned names PROVISIONAL |
 //! | other id sites | recruitment pools, `CHARACTER` #6, `MILITARY_FORCE` #2, residence #14, `PORT_GARRISON_MANAGER` #0, `COMMERCE_RAIDS`: cleared of objects the model no longer has | sites CONFIRMED (`save_audit refsites`) |
 //! | AI block | `CAI_INTERFACE` kept while the world's objects are unchanged, else version 12 (the original rebuilds it) | CONFIRMED loader rule, SAVE_COMPAT.md §5 |
@@ -129,6 +132,33 @@ fn set(r: &mut EsfRecord, i: usize, v: EsfNode) -> bool {
     false
 }
 
+/// The once-only historical events already triggered, as the exe's writer `0x00895050` saves them
+/// (called by the `CAMPAIGN_MODEL` writer `0x008EBAB0` between the `PENDING_BATTLE` writer and the
+/// `HISTORICAL_CHARACTER_MANAGER` writer `0x00894F60`): a `HISTORICAL_EVENT_MANAGER` v1 record
+/// (`0x0047AF90` gives 1) holding only the `TRIGGERED_DYNAMIC_EVENT_ARRAY` v0 array, one item per key
+/// in the list's order, each a single UTF-16 string (type 0x0E). CONFIRMED by disassembly; the
+/// startpos and `orig_fr_t1.save` hold it at the same place, empty. The record is rebuilt whole
+/// (the exe writes nothing else in it); a source without one gets it before its
+/// `HISTORICAL_CHARACTER_MANAGER`, else after its `PENDING_BATTLE`.
+fn write_triggered_events(m: &mut EsfRecord, triggered: &[String]) {
+    let items = triggered.iter().map(|k| vec![EsfNode::Utf16String(k.clone())]).collect();
+    let array = EsfRecordArray { name: "TRIGGERED_DYNAMIC_EVENT_ARRAY".into(), version: 0, items };
+    let block = EsfNode::Record(Box::new(EsfRecord { name: "HISTORICAL_EVENT_MANAGER".into(), version: 1, children: vec![EsfNode::RecordArray(Box::new(array))] }));
+    let at = |name: &str| m.children.iter().position(|c| matches!(c, EsfNode::Record(r) if r.name == name));
+    if let Some(i) = at("HISTORICAL_EVENT_MANAGER") {
+        m.children[i] = block;
+    } else if let Some(i) = at("HISTORICAL_CHARACTER_MANAGER") {
+        m.children.insert(i, block);
+    } else if let Some(i) = at("PENDING_BATTLE") {
+        m.children.insert(i + 1, block);
+    } else if !triggered.is_empty() {
+        log::warn!(
+            "save: CAMPAIGN_MODEL has no HISTORICAL_EVENT_MANAGER, HISTORICAL_CHARACTER_MANAGER or PENDING_BATTLE to place the triggered historical events by; {} keys not saved",
+            triggered.len()
+        );
+    }
+}
+
 /// `CAMPAIGN_PLAYER_SETUP` #3 is the human flag, and a save holds it twice: in the setup
 /// (`CAMPAIGN_SETUP/CAMPAIGN_PLAYERS_SETUP/PLAYERS_ARRAY[]`) and in each faction's own record
 /// (`FACTION` #1). A startpos has both false for every faction; a real save has both true for exactly
@@ -214,9 +244,10 @@ fn write_date(r: &mut EsfRecord, d: &ntw_sim::calendar::Date) {
 
 /// Writes `model` into a copy of `source` (the start position or save it was loaded from) and
 /// returns the save tree. `human` is the faction key the save header names; `timestamp` goes in
-/// the ESF header (unix seconds; tests pass a constant so the output is reproducible).
-pub fn write_save(source: &EsfFile, model: &CampaignModel, human: &str, timestamp: u32) -> Result<EsfFile, SaveError> {
-    write_save_with(source, model, human, timestamp, None)
+/// the ESF header (unix seconds; tests pass a constant so the output is reproducible). `season` is the
+/// season's on-screen name for header #4 (the HUD's `season_string`); `None` keeps the source's.
+pub fn write_save(source: &EsfFile, model: &CampaignModel, human: &str, timestamp: u32, season: Option<&str>) -> Result<EsfFile, SaveError> {
+    write_save_with(source, model, human, timestamp, season, None)
 }
 
 /// [`write_save`], also writing the scripts' `save_value` slots (`EPISODIC_RESTRICTIONS/LUA[]`)
@@ -226,16 +257,17 @@ pub fn write_save_with(
     model: &CampaignModel,
     human: &str,
     timestamp: u32,
+    season: Option<&str>,
     script_values: Option<&[crate::script_values::ScriptSaveValue]>,
 ) -> Result<EsfFile, SaveError> {
-    let mut out = write_save_tree(source, model, human, timestamp)?;
+    let mut out = write_save_tree(source, model, human, timestamp, season)?;
     if let Some(v) = script_values {
         crate::script_values::write_script_values(&mut out, v);
     }
     Ok(out)
 }
 
-fn write_save_tree(source: &EsfFile, model: &CampaignModel, human: &str, timestamp: u32) -> Result<EsfFile, SaveError> {
+fn write_save_tree(source: &EsfFile, model: &CampaignModel, human: &str, timestamp: u32, season: Option<&str>) -> Result<EsfFile, SaveError> {
     let mut out = source.clone();
     out.header.timestamp = timestamp;
     let root = &mut out.root;
@@ -258,8 +290,9 @@ fn write_save_tree(source: &EsfFile, model: &CampaignModel, human: &str, timesta
         set(h, 0, EsfNode::Utf16String(human.to_string()));
         set(h, 2, EsfNode::U32(cal.turn_number()));
         set(h, 3, EsfNode::U32(cal.date.year));
-        // #4 the season's name, from the calendar (the start position's is stale after a turn).
-        if let Some(season) = cal.date.season_header_name() {
+        // #4 the season's on-screen name, which the caller gives (the HUD's `season_string`, as our
+        // own saves take it; the start position's is stale after a turn). `None` keeps the source's.
+        if let Some(season) = season {
             set(h, 4, EsfNode::Utf16String(season.to_string()));
         }
         if let Some(d) = child_mut(h, "DATE") {
@@ -284,6 +317,9 @@ fn write_save_tree(source: &EsfFile, model: &CampaignModel, human: &str, timesta
     crate::portraits::write(m, model);
     // The campaign director: its RNG, queued region transfers and region-transfer counter.
     crate::director::write(m, model);
+    write_triggered_events(m, &model.world.historical_events_triggered);
+    // The episodic switches (`EPISODIC_RESTRICTIONS` #8, #20, #22, #25, #29, #31, #32).
+    crate::details::write_switches(m, &model.world);
     if let Some(c) = child_mut(m, "CAMPAIGN_CALENDAR") {
         set(c, 0, EsfNode::U32(cal.turns_per_year));
         set(c, 1, EsfNode::U32(cal.turn_in_year));
@@ -971,6 +1007,15 @@ fn write_faction(
             write_economy_history(e, history);
         }
     }
+    // The land and naval upkeep trackers (`details::upkeep_trackers`), where the record has them.
+    if let (Some(arr), Some(&[land, naval])) = (crate::details::flags_anchor(f), model.world.upkeep_booked.get(&faction.id)) {
+        set(f, arr + 1, EsfNode::I32(land));
+        set(f, arr + 2, EsfNode::I32(naval));
+    }
+    // The `WarStartedCharacterFaction` flag (`details::war_started_index`), where the record has it.
+    if let (Some(i), Some(d)) = (crate::details::war_started_index(f), model.world.faction_details.get(&faction.id)) {
+        set(f, i, EsfNode::Bool(d.war_started));
+    }
     write_taxes(f, faction, model);
     write_stances(f, faction, model);
     write_diplomacy_counters(f, faction.id, &model.world);
@@ -1002,7 +1047,12 @@ fn write_faction(
             }
         }
         let have: BTreeSet<i32> = chars.items.iter().filter_map(|i| first_rec(i)?.get_i32(2)).collect();
-        for ch in w.characters.values().filter(|c| c.faction == faction.id && !have.contains(&c.id.raw())) {
+        for ch in w
+            .characters_in_list_order()
+            .into_iter()
+            .filter_map(|id| w.characters.get(&id))
+            .filter(|c| c.faction == faction.id && !have.contains(&c.id.raw()))
+        {
             chars.items.push(new_character_item(ch, &faction.key, ix)?);
         }
         for item in &mut chars.items {
@@ -1215,7 +1265,8 @@ fn write_taxes(f: &mut EsfRecord, faction: &Faction, model: &CampaignModel) {
 /// The model's stances into `DIPLOMACY_RELATIONSHIP` #4 (CONFIRMED position). When a stance
 /// changes, the stored one moves to #20 (INFERRED "previous stance"). #18, the scripted diplomacy
 /// permissions (`Relationship::diplomacy_options`, the u32[14] at relationship +0x7EC that
-/// `force_diplomacy` sets, `0x00B28670`), is written from the model. The other fields are kept.
+/// `force_diplomacy` sets, `0x00B28670`), and the treaty money #8 / #9 / #14 (`write_treaty_money`)
+/// are written from the model. The other fields are kept.
 fn write_stances(f: &mut EsfRecord, faction: &Faction, model: &CampaignModel) {
     let Some(rels) = child_mut(f, "DIPLOMACY_MANAGER").and_then(|d| array_mut(d, "DIPLOMACY_RELATIONSHIPS_ARRAY")) else { return };
     for item in &mut rels.items {
@@ -1238,7 +1289,42 @@ fn write_stances(f: &mut EsfRecord, faction: &Faction, model: &CampaignModel) {
                 }
             }
         }
+        if !write_treaty_money(r, rel) {
+            static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                log::warn!("save: a DIPLOMACY_RELATIONSHIP lacks the i32 at #8 / #9 or REGULAR_PAYMENTS at #14; its treaty money is not all written (logged once)");
+            }
+        }
     }
+}
+
+/// The relationship's treaty money, where the record writer `0x00AFC340` puts it (CONFIRMED,
+/// CAMPAIGN_FIDELITY "Running record"): #8 i32 the protectorate tribute (the value +0x7B4 of the
+/// tracker at +0x7AC, read through `0x004A5140`), #9 i32 the patron's income (+0x7BC), #14
+/// `REGULAR_PAYMENTS[]` one item per payment of the list at +0x7A4 / +0x7A8, each item written by
+/// `0x00B7A4F0` as i32 amount (the item tracker's value, +0x08) then u32 turns left (+0x14). A
+/// field whose value is unchanged is left as loaded, so an unchanged model keeps the bytes.
+/// Returns false when a field is missing or of another type (an odd modded file).
+fn write_treaty_money(r: &mut EsfRecord, rel: &ntw_sim::campaign::Relationship) -> bool {
+    let mut ok = true;
+    for (i, v) in [(8, rel.protectorate_tribute), (9, rel.protectorate_income)] {
+        if r.get(i).and_then(EsfNode::as_int) != Some(i64::from(v)) {
+            ok &= set(r, i, EsfNode::I32(v));
+        }
+    }
+    match r.children.get_mut(14) {
+        Some(EsfNode::RecordArray(a)) if a.name == "REGULAR_PAYMENTS" => {
+            let same = a.items.len() == rel.payments.len()
+                && a.items.iter().zip(&rel.payments).all(|(it, p)| {
+                    it.len() == 2 && it[0].as_int() == Some(i64::from(p.amount)) && it[1].as_int() == Some(i64::from(p.turns))
+                });
+            if !same {
+                a.items = rel.payments.iter().map(|p| vec![EsfNode::I32(p.amount), EsfNode::U32(p.turns)]).collect();
+            }
+        }
+        _ => ok = false,
+    }
+    ok
 }
 
 /// The diplomacy manager's four counters into `DIPLOMACY_MANAGER` #1..#4 (the writer `0x00AFC160`
@@ -1374,6 +1460,7 @@ fn write_regions(world: &mut EsfRecord, model: &CampaignModel) -> Result<(), Sav
         let Some(region) = model.world.regions.get(&ntw_sim::campaign::RegionId(id as u32)) else { continue };
         let owner = gov_of(region.owner);
         write_region(r, region, owner, template.as_ref(), &|k| model.rules.is_naval_unit(k), &mut links, &model.rules)?;
+        write_risen_armies(r, model.world.region_risen_armies.get(&region.id).map_or(&[], Vec::as_slice));
     }
     if links.broken > 0 {
         // Logged once per save: the source tree is not the file the model was loaded from.
@@ -1386,6 +1473,19 @@ fn write_regions(world: &mut EsfRecord, model: &CampaignModel) -> Result<(), Sav
         log::warn!("save: {} queued ships are in regions without a port recruitment manager; written to the region's own manager", links.misplaced);
     }
     Ok(())
+}
+
+/// The region's risen-army ids (`World::region_risen_armies`): the model's list over the slot the loader
+/// read it from (`world::risen_armies_slot`), so an army that left the world leaves it (the region's
+/// set +0x220 in the exe; the loader `0x00A45950` resolves each id to an army). A record without the
+/// slot is left as it is: the model's list is only ever read from there, so it is empty then.
+fn write_risen_armies(r: &mut EsfRecord, ids: &[ntw_sim::campaign::ForceId]) {
+    let at = crate::world::risen_armies_slot(r);
+    // A slot of another type cannot take the list; logged (a save writes each region once), and only
+    // when there is a list to lose.
+    if !set(r, at, EsfNode::I32Array(ids.iter().filter_map(|f| i32::try_from(f.raw()).ok()).collect())) && !ids.is_empty() {
+        log::warn!("save: region {:?} has no i32-array slot #{at} for its {} risen armies; not written", r.get_i32(4), ids.len());
+    }
 }
 
 /// The region's economy fields the model changes each round (REGION writer 0x00A51E30, child →
@@ -1408,11 +1508,14 @@ fn write_region_economy(r: &mut EsfRecord, region: &Region) {
 
 /// The region's population fields the model changes each round (`POPULATION/REGION_FACTORS`, the
 /// layout of the reader `0x00A4C340`, CONFIRMED): #0 the growth factors, #2 the population, #3 the
-/// capacity, #4 its base, #5 the growth, #6 the trend, #7 overcrowded, #8 the migrants, and each
-/// `RELIGION_BREAKDOWN` item's share (#1) by religion key. `POPULATION` #1..#4 and the classes' stored
-/// factors are not modelled: kept.
+/// capacity, #4 its base, #5 the growth, #6 the trend, #7 overcrowded, #8 the migrants, #9 the policing
+/// cost, and each `RELIGION_BREAKDOWN` item's share (#1) by religion key; and `POPULATION` #4, the policing
+/// tracker's booked amount. `POPULATION` #1..#3 and the classes' stored factors are not modelled: kept.
 fn write_region_population(r: &mut EsfRecord, region: &Region) {
-    let Some(f) = child_mut(r, "POPULATION").and_then(|p| child_mut(p, "REGION_FACTORS")) else { return };
+    let Some(pop) = child_mut(r, "POPULATION") else { return };
+    // #4: the policing tracker's booked amount (`world::read_region`).
+    set(pop, 4, EsfNode::I32(region.population_state.policing_booked));
+    let Some(f) = child_mut(pop, "REGION_FACTORS") else { return };
     let p = &region.population_state;
     set(f, 0, EsfNode::F32Array(p.factors.to_vec()));
     set(f, 2, EsfNode::U32(region.population));
@@ -1422,6 +1525,7 @@ fn write_region_population(r: &mut EsfRecord, region: &Region) {
     set(f, 6, EsfNode::U32(p.trend));
     set(f, 7, EsfNode::Bool(p.overcrowded));
     set(f, 8, EsfNode::I32(p.migrants));
+    set(f, 9, EsfNode::I32(p.policing_cost));
     let Some(a) = array_mut(f, "RELIGION_BREAKDOWN") else { return };
     for item in &mut a.items {
         let Some(key) = item.first().and_then(EsfNode::as_str).map(str::to_owned) else { continue };
@@ -1942,8 +2046,8 @@ pub fn written_by_napoleonrust(file_name: &str, esf: Option<&EsfFile>) -> bool {
 }
 
 /// [`write_save`] and serialise with the existing ESF writer.
-pub fn save_bytes(source: &EsfFile, model: &CampaignModel, human: &str, timestamp: u32) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-    Ok(write_save(source, model, human, timestamp)?.to_bytes()?)
+pub fn save_bytes(source: &EsfFile, model: &CampaignModel, human: &str, timestamp: u32, season: Option<&str>) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(write_save(source, model, human, timestamp, season)?.to_bytes()?)
 }
 
 

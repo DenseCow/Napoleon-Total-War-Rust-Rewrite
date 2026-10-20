@@ -32,6 +32,8 @@
 //! | 6 | the diplomacy manager's treaty-break counts start at 1 (`TREATY_BREAKS_START`, the exe's preset) and the access-abuse counts are kept (`World::access_abuses`); an older save's treaty-break entries, counted from 0, get 1 added, and it has no access-abuse counts (none were kept, read 0) (see [`read_with_start`]) |
 //! | 7 | trade routes keep their own accumulated value (`TradePath::accumulated`, +0x3C); `World::trade_accumulated` holds only the value of a pair's built route (a pair with no stored route). An older save's per-pair value of a pair with stored routes goes to its first route (see [`read_with_start`]) |
 //! | 8 | the commerce raids (`World::commerce_raids`) and the trade network's course they need: each leg's spline ids (`TradeLeg::splines`) and each segment's curves (`TradeSegmentSight::curves`); an older save, with no raids, takes the course from the campaign's start (see [`read_with_start`]) |
+//! | 9 | the running economics record's expense trackers: each faction's land and naval upkeep trackers (`World::upkeep_booked`) and each region's policing tracker (`PopulationState::policing_booked`), with the policing cost (`PopulationState::policing_cost`); an older save's trackers take what its running record holds (see [`read_with_start`]) |
+//! | 10 | each faction's diplomacy records keep their order (`World::diplomacy_record_order`, the order the allies of a war are called in); an older save takes it from the campaign's start, or without one walks the records by faction id (see [`read_with_start`]) |
 //!
 //! **What is saved.** The whole [`CampaignModel`] except the fields marked `serde(skip)` in
 //! `ntw_sim`: game data rebuilt on load (`rules` from the DB, `terrain` from the map), fields the
@@ -52,7 +54,7 @@ use crate::{CampaignInfo, LoadError, LoadedCampaign};
 /// The first bytes of every save in this format.
 pub const MAGIC: &[u8; 16] = b"NAPOLEONRUST\0SAV";
 /// The format version this build writes and the newest it reads.
-pub const FORMAT_VERSION: u32 = 8;
+pub const FORMAT_VERSION: u32 = 10;
 
 /// Everything a save holds besides its header.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -127,13 +129,15 @@ impl std::fmt::Display for FormatError {
 impl std::error::Error for FormatError {}
 
 /// The header of a save of `model` made by `human` now: the loaded campaign's facts (`base`) with
-/// the turn, year, date and season name of the model, the human marked as the player, the territory
+/// the turn, year and date of the model, `season_name` as its season (the calendar season's
+/// on-screen name, which the caller looks up: `0x00888320` stores what `0x008ED110` returns, CONFIRMED,
+/// UI_FIDELITY.md §5.1), the human marked as the player, the territory
 /// pictures of `pictures` rendered for the human's regions (as the original's header shows them,
 /// [`crate::header_map`]) and `timestamp` (unix seconds). Portrait and flag are kept from `base`, as
 /// the ESF writer keeps them. Every theatre of `base` is kept (the campaign's theatres,
 /// [`CampaignInfo::theatres`]); one whose pictures did not load (logged where they are loaded) is
 /// saved without a picture (0 x 0).
-pub fn save_header(base: &CampaignInfo, model: &CampaignModel, human: &str, timestamp: u32, pictures: &[crate::header_map::TheatrePictures]) -> CampaignInfo {
+pub fn save_header(base: &CampaignInfo, model: &CampaignModel, human: &str, season_name: &str, timestamp: u32, pictures: &[crate::header_map::TheatrePictures]) -> CampaignInfo {
     let cal = &model.calendar;
     let owned = crate::header_map::owned_regions(model, human);
     let maps = base
@@ -158,9 +162,7 @@ pub fn save_header(base: &CampaignInfo, model: &CampaignModel, human: &str, time
     info.header.turn_number = cal.turn_number();
     info.header.year = cal.date.year;
     info.header.date = Some(cal.date);
-    if let Some(season) = cal.date.season_header_name() {
-        info.header.season_name = season.to_owned();
-    }
+    info.header.season_name = season_name.to_owned();
     info.header.maps = maps;
     for p in &mut info.players {
         p.is_human = p.faction_key == human;
@@ -250,7 +252,7 @@ pub fn read(bytes: &[u8], db: &GameDatabase) -> Result<LoadedCampaign, FormatErr
 
 /// [`read`], converting a save older than [`FORMAT_VERSION`] from `start`, the campaign at its start
 /// (its source's [`new_campaign`](crate::source::CampaignSource::new_campaign) model), called only
-/// for a save older than version 3:
+/// for a save older than version 10:
 /// * version 1 → 2: every region takes the unit resources (`RESOURCES_ARRAY`) of the start's region
 ///   of the same key. Nothing in the campaign changes a region's resources, so the start's are the
 ///   ones the save would hold. A region the start does not have fails the load: never a region left
@@ -286,18 +288,29 @@ pub fn read(bytes: &[u8], db: &GameDatabase) -> Result<LoadedCampaign, FormatErr
 ///   (`TradeLeg::splines`) and each trade segment the curves of the start's segment of the same index
 ///   (`TradeSegmentSight::curves`). Without a usable start the load goes on with a warning and no segment can
 ///   be raided.
+/// * version 8 → 9, with no start: an older save has no expense trackers; it paid the upkeep it wrote into the
+///   running record's categories 19 / 20 at each round end, which become the faction's upkeep trackers, and each
+///   region's policing tracker starts at 0, so the running record is rebuilt as a load leaves it
+///   (`ntw_sim::campaign::economy::rebuild_running_record`: category 21 the regions' sum, 0; the categories no
+///   tracker keeps, 0). The next round end's first pass books each region's policing cost.
+/// * version 9 → 10: an older save lacks the order of the diplomacy records (`World::diplomacy_record_order`); it
+///   takes the start's (a record made since sits after them, as the exe pushes one at the end, `0x00B5F330`). Without a
+///   usable start the load goes on with a warning and the records are walked by faction id.
 pub fn read_with_start(bytes: &[u8], db: &GameDatabase, start: impl FnOnce() -> Result<CampaignModel, String>) -> Result<LoadedCampaign, FormatError> {
     let (version, info, data) = read_stored(bytes)?;
     let mut model = data.model;
-    let mut start = (version < FORMAT_VERSION).then(start);
+    // Only the steps before version 10 need the start (built here, once, before the steps).
+    let start = (version < 10).then(start);
     if version < 3 {
         let fail = |reason: String| FormatError::NeedsStart { found: version, reason };
-        let start = start.take().unwrap_or_else(|| Err("no start".into())).map_err(fail)?;
-        convert_from_start(version, &mut model, &start).map_err(fail)?;
+        let start = match &start {
+            Some(Ok(s)) => s,
+            Some(Err(e)) => return Err(fail(e.clone())),
+            None => return Err(fail("no start".into())),
+        };
+        convert_from_start(version, &mut model, start).map_err(fail)?;
         give_back_turn_start_construction(&mut model);
-        if version < 8 {
-            copy_trade_course(&mut model, &start);
-        }
+        copy_trade_course(&mut model, start);
     }
     model.world.restricted_units.extend(data.restricted_units);
     crate::attach_rules(&mut model, db, &info.campaign_key);
@@ -319,11 +332,33 @@ pub fn read_with_start(bytes: &[u8], db: &GameDatabase, start: impl FnOnce() -> 
         let n = migrate_trade_accumulated(&mut model);
         log::info!("Own save format version {version}: {n} per-pair accumulated trade values moved to the pair's first route");
     }
-    if let Some(start) = start.take().filter(|_| version < 8) {
-        match start {
-            Ok(start) => copy_trade_course(&mut model, &start),
-            Err(e) => log::warn!("Own save format version {version}: the trade network's course was not restored (no campaign start: {e}); no trade segment can be raided"),
+    // (A version 1 or 2 save took the course with its conversion above.)
+    if (3..8).contains(&version) {
+        match &start {
+            Some(Ok(start)) => copy_trade_course(&mut model, start),
+            Some(Err(e)) => log::warn!("Own save format version {version}: the trade network's course was not restored (no campaign start: {e}); no trade segment can be raided"),
+            None => {}
         }
+    }
+    if version < 9 {
+        let n = migrate_expense_trackers(&mut model);
+        log::info!("Own save format version {version}: the upkeep trackers of {n} factions set from their running records");
+    }
+    if version < 10 {
+        match &start {
+            Some(Ok(start)) => {
+                model.world.diplomacy_record_order.clone_from(&start.world.diplomacy_record_order);
+                log::info!("Own save format version {version}: the order of {} factions' diplomacy records taken from the campaign's start", start.world.diplomacy_record_order.len());
+            }
+            Some(Err(e)) => log::warn!("Own save format version {version}: the diplomacy records' order was not restored (no campaign start: {e}); they are walked by faction id"),
+            None => {}
+        }
+    }
+    // Each running record as the exe's load leaves one (`0x00B95B90`, as for the original's save in
+    // `crate::read_esf`): the tracked categories booked again by their trackers, the script's
+    // `other_income_mod` entries dropped (the scripts add them again).
+    for f in model.world.factions.keys().copied().collect::<Vec<_>>() {
+        ntw_sim::campaign::economy::rebuild_running_record(&mut model, f);
     }
     Ok(LoadedCampaign {
         model,
@@ -353,6 +388,18 @@ fn copy_trade_course(model: &mut CampaignModel, start: &CampaignModel) {
         segments += 1;
     }
     log::info!("Own save format version < 8: the course of {legs} of {} trade legs and {segments} of {} trade segments taken from the campaign's start", w.trade_network.len(), w.trade_sight.len());
+}
+
+/// The version 8 → 9 step of [`read_with_start`]: each faction's upkeep trackers take its running record's
+/// categories 19 / 20 (the load then rebuilds the record from the trackers); returns how many factions have a
+/// record.
+fn migrate_expense_trackers(model: &mut CampaignModel) -> usize {
+    let records: Vec<(ntw_sim::campaign::FactionId, [i32; 2])> =
+        model.world.economy_history.iter().filter_map(|(&f, h)| h.last().map(|r| (f, [r[19], r[20]]))).collect();
+    for &(f, booked) in &records {
+        model.world.upkeep_booked.insert(f, booked);
+    }
+    records.len()
 }
 
 /// The version 6 → 7 step of [`read_with_start`]: moves the per-pair accumulated trade value of each pair

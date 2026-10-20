@@ -365,6 +365,12 @@ Goal: making a new campaign on a new world (e.g. a Japan map) is easy, while ori
   - `heightmap.png`: the terrain; optional splat or texture layers for ground types, plus rivers and coasts.
   - Text files for settlements, ports and resources (positions), factions and their starting
     regions, characters, armies and navies, diplomacy and events.
+  - `black_shroud.txt` (optional): the black shroud outlines a campaign script lifts with
+    `unveil_black_shroud(name)`; a map with any starts a new campaign's human under the black shroud (as the
+    original's tutorial map does from its `regions.esf`). One outline per line: its name, then 3 or more
+    points, each `x z` in map units (the region outlines' units); `#` starts a comment, blank lines are
+    skipped, a name may repeat. No file: no outlines. A malformed file is logged once and skipped.
+    Reader: `ntw_formats::open_map`, which fills the same region map field as the importer.
   - Units, buildings and techs come from the normal database tables (packs or loose `data\`), so a custom
     campaign reuses or adds them like any mod.
 - **Generated, not hand-made:** borders, region adjacency, region meshes, the pathfinding grid, sea lanes and
@@ -431,12 +437,12 @@ Unknown `conditions.*` return `false` (or `0` for the ones the scripts compare a
 **Resume notes (2026-10-03):**
 - Done: Lua 5.1 host (`ScriptHost`), VFS `require`, `.luac` f32→f64 converter (real `ui\coreutils.luac`
   and `message_handler.luac` load), `events`/`context`, all 63 game_interface names (real:
-  treasury_mod, force_make_peace/declare_war, force_diplomacy, time triggers, save/load_value,
+  treasury_mod, other_income_mod, force_make_peace/declare_war, force_diplomacy, time triggers, save/load_value,
   restricted units/buildings, trigger_custom_mission record; rest are UNKNOWN stubs), a few
   conditions, `effect`/UI/out stubs, `bit`. Tests: `tests/host.rs` (in-memory scripts) and
   `tests/real_install.rs` (eur_napoleon from the install, skips if absent).
-- Next: more `conditions.*` from the model; apply `other_income_mod` once the income formula is
-  known; mission tracking and rewards; fire script events from the Bevy campaign screen; save
+- Next: more `conditions.*` from the model;
+  mission tracking and rewards; fire script events from the Bevy campaign screen; save
   `ScriptState` with the campaign save; other campaigns' scripts (spa, ita, egy, tut) as tests.
 
 ---

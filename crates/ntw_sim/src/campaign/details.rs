@@ -262,6 +262,18 @@ pub struct FactionDetails {
     /// save from before the flag was kept).
     #[cfg_attr(feature = "serde", serde(default))]
     pub out_of_game: Option<bool>,
+    /// `FACTION` #63 bool, faction +0x925: the faction was a side of a war begun since its last turn end,
+    /// the flag the script condition `WarStartedCharacterFaction` reads (`0x008A66C0`: the context
+    /// character's faction). CONFIRMED: `DeclareWarOnFactionRecords` `0x00B26700` sets it on both
+    /// sides of every war (the target's, then the declarer's: `0x00B2670D` / `0x00B26716`); only the
+    /// faction's own turn end clears it (`0x008BD0F0` at `0x008BD408`, after `FactionTurnEnd`; the
+    /// other writers are the constructors). The loader (`0x0087A190`) reads, after the second
+    /// `CAMPAIGN_BONUS_VALUES`: an i32 (+0x754), a bool (+0x8E4), two value pairs (`0x0090F5D0`,
+    /// +0x8E8 / +0x8F8), then the bools +0x924 / +0x925 (`0x0087B769`) / +0x926: so #63 is 8 after
+    /// that record (France in `orig_fr_may1811`: #55 the record, #56 i32, #57 bool, #58..#61 i32,
+    /// #62..#64 bool). The writer `0x00892A80` saves it there.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub war_started: bool,
 }
 
 impl FactionDetails {
@@ -403,7 +415,9 @@ impl AttitudeFactor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RegularPayment {
-    /// i32 amount per turn (INFERRED direction: paid by the owner to the target).
+    /// i32 amount per turn, paid by the record's owner to its target (CONFIRMED: `0x00B54FC0` adds the
+    /// item to the payer's record towards the payee, `0x00AE90A0` books it into the payer's category 22
+    /// and the payee's category 8).
     pub amount: i32,
     /// u32 turns left (CONFIRMED: decremented each turn, removed at 0).
     pub turns: u32,
@@ -435,8 +449,11 @@ pub struct Relationship {
     /// #3 i32 military access the owner gives the target: turns left, -1 = indefinite, 0 = none
     /// (CONFIRMED: `RetrieveRemainingMilitaryAccessTurns`, "current_treaty_giving_military_access_*").
     pub military_access_turns: i32,
-    /// #5 i32 the faction whose call brought the owner into this war (CONFIRMED a faction id;
-    /// INFERRED meaning: set when war is declared on an ally's behalf, cleared at peace).
+    /// #5 i32 (+0x794) the faction whose call brought the owner into this war. CONFIRMED: the only
+    /// game-rule writer that sets it is `ApplyWarToDeclarerRecord` `0x00B27070` (`0x00B270B1`, the
+    /// ally of a joining war); the peace `0x00B26590` (`0x00B26602`) and the destruction resets
+    /// (`0x00B2B9E3`, `0x00B729A6`) clear it; the rest are the record's constructors, loader and
+    /// post-load handle fix-up (`0x00AE9160`, `0x00AE9480`, `0x00AEA0F0`, `0x00B5BD70`).
     pub war_ally: Option<FactionId>,
     /// #6 u32 turns left of the alliance commitment (20 on every startpos alliance; breaking the
     /// alliance while it runs costs attitude with others) (CONFIRMED countdown; INFERRED meaning).
@@ -444,11 +461,14 @@ pub struct Relationship {
     /// #7 i32 war momentum: each battle result adds -8..+8; it decays by 2 a turn when positive
     /// and recovers by 1 when negative; the AI peace evaluation reads it (CONFIRMED).
     pub war_momentum: i32,
-    /// #8 i32 protectorate tribute the owner pays while it is the target's protectorate
-    /// (economics category 6) (CONFIRMED source; INFERRED name).
+    /// #8 i32 protectorate tribute the owner pays while it is the target's protectorate: an expense of its
+    /// economics group 6 (category 24), set when the tie is made and at each round end and start to a fifth
+    /// of the owner's running categories 5..7 (CONFIRMED: tracker `0x00AE55D0`, setter `0x00AF8130`, value
+    /// `0x00BBCD00`; booked by [`super::economy::book_treaty_money`]).
     pub protectorate_tribute: i32,
-    /// #9 i32 protectorate income the owner receives as the target's patron (economics category 2)
-    /// (CONFIRMED source; INFERRED name).
+    /// #9 i32 protectorate income the owner receives as the target's patron: an income of its economics
+    /// group 2 (category 10), the same value as the protectorate's tribute (CONFIRMED: `0x00BBE9A0(new −
+    /// old, 2)` at each write, `0x00B10480` / `0x00B29170` / `0x00B71EC0`).
     pub protectorate_income: i32,
     /// #10 i32 at war: region value balance, (captured - lost) / 1000 clamped to -10..10 (CONFIRMED).
     pub war_region_balance: i32,
@@ -501,6 +521,12 @@ pub struct Relationship {
 }
 
 impl Relationship {
+    /// The money a turn of the regular payments the owner makes to the target: the wrapping sum of the
+    /// items' amounts, as their trackers book it (one line each, [`super::economy::book_treaty_money`]).
+    pub fn payments_total(&self) -> i32 {
+        self.payments.iter().fold(0i32, |s, p| s.wrapping_add(p.amount))
+    }
+
     /// The attitude total: the sum of [`AttitudeFactor::contribution`] (CONFIRMED, `0x00B0DB60`).
     pub fn attitude_total(&self) -> i32 {
         self.attitudes.iter().map(AttitudeFactor::contribution).sum()

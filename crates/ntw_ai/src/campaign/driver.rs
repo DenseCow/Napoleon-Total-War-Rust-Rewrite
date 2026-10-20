@@ -63,7 +63,7 @@ pub fn context_from_script(state: &ScriptState) -> TurnContext {
 /// Plays AI faction `faction` now: decides and applies its orders. Returns the report and every
 /// event the orders caused. Human factions are skipped (empty report), and so is every faction once the
 /// campaign is over; an order that ends it drops the rest quietly (see [`apply_orders_with_events`],
-/// PROVISIONAL there).
+/// which cites the exe).
 pub fn play_faction(model: &mut CampaignModel, data: &CampaignAiData, ctx: &TurnContext, faction: FactionId) -> (AiTurnReport, Vec<CampaignEvent>) {
     let mut report = AiTurnReport { faction, turn: model.calendar.turn_number(), orders: Vec::new(), accepted: 0, rejected: Vec::new() };
     let mut events = Vec::new();

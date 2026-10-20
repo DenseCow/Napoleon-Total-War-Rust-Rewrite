@@ -165,7 +165,10 @@ pub fn poly_map(area: &PathfindingArea, cells: &[GridCell], sets: &[Vec<i16>]) -
         })
         .collect();
     let region_sets = sets.iter().map(|s| s.iter().filter_map(|&r| u32::try_from(r).ok()).collect()).collect();
-    PolyMap::build(g.origin, cs, g.cols, g.rows, &inputs, region_sets)
+    let mut m = PolyMap::build(g.origin, cs, g.cols, g.rows, &inputs, region_sets);
+    // The first `region_count` region ids are single regions, the groups follow (`region_sets`).
+    m.single_region_slots = usize::from(g.region_count);
+    m
 }
 
 /// True if polygon `p` overlaps the axis-aligned square (x0, z0, x1, z1).

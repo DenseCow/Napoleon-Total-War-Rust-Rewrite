@@ -479,11 +479,12 @@ Evidence: the vanilla start positions (install) and the vanilla saves of SAVE_CO
   character (`0x00AF5200` ... `0x00AF7A00`), so its outline can follow other cores (arcs in zone
   versions). Our flood on the static map gives the saved zone range for 60 of 87 commanders; with
   the other obstacles cut in (our `rtcut`), 59: the remaining differences are UNKNOWN (half-step,
-  strictness, garrison bonus and first-step variants tried; none fits better).
+  strictness, garrison bonus and first-step variants tried; none fits better). With the region gate
+  (PATHFINDING.md §8, zonegate 2026-10-19) the stored zones give 64; the writer uses them (§11.2).
 
 ### 11.2 Writing an obstacle (`ntw_campaign::grid_obstacle`)
 - `add_character_obstacle(grid, &StaticGrid { area, cells, map }, &NewObstacle { character, pos
-  (Fixed20), owner, garrisoned })` appends to `PATHFINDING_GRID[0]` everything the original stores
+  (Fixed20), owner, garrisoned, zone })` (`zone`: the commander's stored zone, empty for an agent) appends to `PATHFINDING_GRID[0]` everything the original stores
   for a freshly made obstacle: per layer (slot 0 when there is a zone, slot 1 always) a version for
   every cell of its range (cut: zone polygons re-kinded to 8, the core clipped, `rtcut::cut_polygon`)
   and of the ring (static geometry), flags recomputed by the rule above, new pieces with their use

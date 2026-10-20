@@ -158,7 +158,7 @@ impl AiOrder {
             }
             AiOrder::AttackForce { force, target } => CampaignCommand::AttackForce { force: *force, target: *target },
             AiOrder::DeclareWar { a, b } => CampaignCommand::DeclareWar { a: *a, b: *b },
-            AiOrder::MakePeace { a, b } => CampaignCommand::MakePeace { a: *a, b: *b },
+            AiOrder::MakePeace { a, b } => CampaignCommand::MakePeace { a: *a, b: *b, suppress_messages: false },
             AiOrder::Merge { force, into } => CampaignCommand::MergeForces { force: *force, into: *into },
             AiOrder::SetTax { faction, class, level } => CampaignCommand::SetTaxLevel {
                 faction: *faction,
@@ -1228,8 +1228,13 @@ pub fn apply_orders(model: &mut CampaignModel, orders: &[AiOrder]) -> usize {
 ///
 /// Once the campaign is over (`TurnState::campaign_over`, e.g. an order took a human faction's last region,
 /// `0x008AB6C0` → `0x008C30A0`) the remaining orders are dropped quietly: neither applied nor rejected, as
-/// nobody may act then (`CampaignModel::end_campaign`). PROVISIONAL: the exe's CAI step loop (`0x008F4524`)
-/// has no test of the flag and finishes that frame's steps; what they then do is not traced.
+/// nobody may act then (`CampaignModel::end_campaign`). CONFIRMED (CAMPAIGN_FIDELITY.md "Campaign over"):
+/// the exe's CAI step loop (`0x008F4524`) has no test of the flag, but it runs at most one CAI step per frame
+/// (a step needs an idle location manager, which also ends the loop at `0x008F485D`); each move order an
+/// intention gives ends that step's pool run (pool +0x8D, set by `0x00CB1D90`, stops the intention pass
+/// `0x00D024D0`), and the faction's next step comes only once the move has played out (`0x00A761F0`). A move
+/// that destroys the human therefore ends the AI's work: every later frame returns at the flag test
+/// `0x008F419E` before the step loop, so the orders of the faction's later steps are never given.
 pub fn apply_orders_with_events(
     model: &mut CampaignModel,
     orders: &[AiOrder],

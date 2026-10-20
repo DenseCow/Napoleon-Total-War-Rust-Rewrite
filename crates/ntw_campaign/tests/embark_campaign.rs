@@ -152,7 +152,7 @@ fn an_army_boards_a_fleet_and_lands() {
     println!("boarded after {turns} turn(s) at {:?}", f32p(m.world.characters[&admiral].position));
     // A save keeps the army aboard: it is written standing where the fleet is, and read back as
     // embarked.
-    let tree = save::write_save(&f.source, &m, "france", 1_000_000).expect("write");
+    let tree = save::write_save(&f.source, &m, "france", 1_000_000, None).expect("write");
     let back = ntw_campaign::read_esf(&EsfFile::from_bytes(&tree.to_bytes().unwrap()).unwrap(), &f.db).expect("read back");
     assert_eq!(back.model.world.embarked.get(&army), Some(&navy));
     m.end_turn();

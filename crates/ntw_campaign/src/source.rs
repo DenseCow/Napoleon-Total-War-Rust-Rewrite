@@ -4,7 +4,9 @@
 //! [`MapDisplay`]). Where the campaign comes from is a [`CampaignSource`]:
 //! - [`OriginalSource`]: the original's importer (`campaigns/<key>/startpos.esf` + the pack tables,
 //!   and the map folder `campaign_maps/<map>/`);
-//! - later the open format (a folder with `campaign.toml` and images), as a second implementation.
+//! - later the open format (a folder with `campaign.toml` and images), as a second implementation;
+//!   its text files are read by [`ntw_formats::open_map`] (today the black shroud outlines, which
+//!   [`ntw_formats::open_map::attach_black_shroud`] puts in the map's region map as the importer does).
 //!
 //! A save is not a source: it holds the model ([`crate::own_save`], or an original `.save` through
 //! the importer) and names its campaign, whose source then gives the map.
@@ -307,8 +309,11 @@ fn open_from<'a>(
     }
     let map = source.map(db, &loaded.info)?;
     map.attach(&mut loaded.model);
+    // The localisation, read once for the names and the historical events (a failure is logged here).
+    let loc = ntw_formats::loc::Localisation::from_vfs(files.vfs).map_err(|e| log::warn!("Campaign: the localisation cannot be read ({e}); names keep their table text and no historical event is kept")).ok();
     // The names new characters get when they are created (game data, like the rules).
-    crate::names::attach(&mut loaded.model, files.vfs, db);
+    crate::names::attach(&mut loaded.model, files.vfs, db, loc.as_ref());
+    crate::historical_events::attach(&mut loaded.model, files.vfs, loc.as_ref(), source.key());
     Ok(OpenedCampaign { loaded, map })
 }
 
@@ -344,6 +349,7 @@ mod tests {
                 regions: Vec::new(),
                 trade_nodes: Vec::new(),
                 ground_types: Vec::new(),
+                black_shroud_outlines: Vec::new(),
             };
             let display = MapDisplay {
                 key: "made_up_map".into(),

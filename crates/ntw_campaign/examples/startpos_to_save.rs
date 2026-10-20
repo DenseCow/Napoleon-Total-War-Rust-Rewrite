@@ -9,6 +9,6 @@ fn main() {
     let esf = EsfFile::open(&a[0]).unwrap();
     let mut l = ntw_campaign::read_esf(&esf, &db).unwrap();
     assert!(l.set_human(&a[1]));
-    let out = ntw_campaign::save::write_save(&esf, &l.model, &a[1], 0).unwrap();
+    let out = ntw_campaign::save::write_save(&esf, &l.model, &a[1], 0, None).unwrap();
     std::fs::write(&a[2], out.to_bytes().unwrap()).unwrap();
 }

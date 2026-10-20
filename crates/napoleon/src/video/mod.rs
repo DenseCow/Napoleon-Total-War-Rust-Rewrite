@@ -169,6 +169,12 @@ pub struct Movie {
 }
 
 impl Movie {
+    /// Whether this movie plays `path` as [`PlayMovie`] / [`StopMovie`] name it: a Vfs path or a
+    /// bare file name under `movies\`, any case and slash. Allocates (callers ask once per request).
+    pub fn plays(&self, path: &str) -> bool {
+        self.path.ends_with(&path.replace('/', "\\").to_ascii_lowercase())
+    }
+
     #[allow(dead_code)] // tests and hooks
     /// Frame number on screen (counting on through loops).
     pub fn frame(&self) -> Option<u64> {
@@ -452,7 +458,7 @@ fn stop_movies(
 ) {
     for s in msgs.read() {
         for (e, m) in &movies {
-            if s.path.as_ref().is_none_or(|p| m.path.ends_with(&p.replace('/', "\\").to_ascii_lowercase())) {
+            if s.path.as_ref().is_none_or(|p| m.plays(p)) {
                 end_movie(&mut commands, e, m, true, &screens, &mut finished);
             }
         }

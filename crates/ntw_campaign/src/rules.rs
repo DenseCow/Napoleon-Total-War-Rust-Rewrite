@@ -113,7 +113,7 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
         r.commodity_demand.push((x.commodity.clone(), x.driver.clone(), x.factor, x.weight));
     }
     for t in db.technologies.iter() {
-        r.technologies.insert(t.key.clone(), TechRules { cost: t.research_cost, building_level: t.building_level.clone(), requires: Vec::new() });
+        r.technologies.insert(t.key.clone(), TechRules { cost: t.research_cost, building_level: t.building_level.clone(), requires: Vec::new(), factions: Vec::new() });
     }
     for u in c.unit_techs.iter() {
         r.unit_techs.entry(u.unit.clone()).or_default().push(u.technology.clone());
@@ -165,7 +165,16 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
         if let Some(s) = c.characters.subcultures.get(&f.subculture) {
             r.faction_cultures.insert(f.key.clone(), s.culture.clone());
         }
+        // An absent id is the empty string the exe's record holds (and compares).
+        r.faction_movie_ids.insert(f.key.clone(), f.movie_id.clone().unwrap_or_default());
     }
+    // An absent third column is the empty string the exe's record holds (and compares).
+    r.culture_alternates = c.characters.cultures.iter().map(|k| (k.key.clone(), k.alternate.clone().unwrap_or_default())).collect();
+    r.movie_events = c
+        .movie_event_strings
+        .iter()
+        .map(|m| ntw_sim::campaign::outcome::MovieEventRow { event: m.event.clone(), culture: m.culture.clone(), movie: m.movie.clone(), id: m.id.clone() })
+        .collect();
     for m in c.effects.religion_conversion.iter() {
         r.conversion_mods.insert((m.religion.clone(), m.other.clone()), m.value);
     }
@@ -199,6 +208,14 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
     for q in c.tech_requirements.iter() {
         if let Some(t) = r.technologies.get_mut(&q.technology) {
             t.requires.push(q.required.clone());
+        }
+    }
+    // `technology_faction_junctions`: the row builder `0x00F20F00` keeps each faction once (a hash set).
+    for q in c.tech_factions.iter() {
+        if let Some(t) = r.technologies.get_mut(&q.technology)
+            && !t.factions.contains(&q.faction)
+        {
+            t.factions.push(q.faction.clone());
         }
     }
     for g in c.government_types.iter() {
@@ -246,6 +263,7 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
     }
     r.effects = effect_rules_from_db(db);
     r.characters = character_rules_from_db(db);
+    r.historical_events = crate::historical_events::rules(db);
     r
 }
 

@@ -677,6 +677,10 @@ impl CampaignModel {
 
     /// [`CampaignModel::plan_path`] for an embarked army: the transport path with its costs in the
     /// army's action points (turns × the army's maximum).
+    ///
+    /// PROVISIONAL: this search applies no zone region gate; the exe's gate on the transport searches
+    /// is not yet traced (the land search's is `0x00B2CC20` / `0x00B16CF0`, see
+    /// [`CampaignModel::path_region_gate`]; BACKLOG: trace whether the campaign path searches share it).
     pub(crate) fn plan_transport_move(&self, army: ForceId, to: (Fixed20, Fixed20)) -> Option<PlannedMove> {
         let p = self.plan_transport(army, to)?;
         let max = self.world.forces.get(&army)?.commander.and_then(|c| self.world.characters.get(&c))?.max_movement_points as f32;
@@ -689,6 +693,10 @@ impl CampaignModel {
     /// A navy's path into an open port at `to` (the port node, CONFIRMED) or out of the harbour it
     /// lies in (a kind 7 polygon, see the harbour exit in [`find_transport_path`]); costs in the
     /// navy's action points. `None` otherwise (the caller then plans an ordinary sea path).
+    ///
+    /// PROVISIONAL: this search applies no zone region gate; the exe's gate on the port searches is
+    /// not yet traced (the land search's is `0x00B2CC20` / `0x00B16CF0`, see
+    /// [`CampaignModel::path_region_gate`]; BACKLOG: trace whether the campaign path searches share it).
     pub(crate) fn plan_port_entry(&self, navy_commander: CharacterId, to: (Fixed20, Fixed20)) -> Option<PlannedMove> {
         let ch = self.world.characters.get(&navy_commander)?;
         let goal = to_f32(to);
@@ -797,7 +805,7 @@ impl CampaignModel {
         let mut events = Vec::new();
         let close = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).powi(2) + (a.1 - b.1).powi(2) < 1e-6;
         if !close(here, target) {
-            let w = self.walk(c, to_fixed(target), 0.0)?;
+            let w = self.walk(c, to_fixed(target), false)?;
             events.extend(w.events);
             if !w.arrived {
                 return Ok(events);

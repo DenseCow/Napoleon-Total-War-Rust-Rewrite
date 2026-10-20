@@ -204,7 +204,7 @@ fn a_dead_monarch_is_succeeded_and_posts_are_refilled() {
     // The save.
     let bytes = GameFiles { vfs: &Vfs::open_install(&dir).unwrap() }.read("campaigns/eur_napoleon/startpos.esf").unwrap();
     let src = EsfFile::from_bytes(&bytes).unwrap();
-    let out = ntw_campaign::save::write_save(&src, &m, "france", 1).unwrap();
+    let out = ntw_campaign::save::write_save(&src, &m, "france", 1, None).unwrap();
     let back = EsfFile::from_bytes(&out.to_bytes().unwrap()).unwrap();
     let r = ntw_campaign::save_check::check(&back);
     assert!(r.violations.is_empty(), "{:?}", r.violations);
@@ -265,7 +265,7 @@ fn ministers_are_dismissed_and_appointed() {
     // The save.
     let bytes = GameFiles { vfs: &Vfs::open_install(&dir).unwrap() }.read("campaigns/eur_napoleon/startpos.esf").unwrap();
     let src = EsfFile::from_bytes(&bytes).unwrap();
-    let out = ntw_campaign::save::write_save(&src, &m, "france", 1).unwrap();
+    let out = ntw_campaign::save::write_save(&src, &m, "france", 1, None).unwrap();
     let back = EsfFile::from_bytes(&out.to_bytes().unwrap()).unwrap();
     let r = ntw_campaign::save_check::check(&back);
     assert!(r.violations.is_empty(), "{:?}", r.violations);

@@ -133,6 +133,9 @@ pub(crate) fn evaluate(st: &ScriptState, name: &str, args: &MultiValue, ctx: &Sc
         // 0x008A22D0: the character's faction is at war with anyone.
         "OnAWarFooting" => is(faction.is_some_and(|f| f.diplomacy.values().any(|s| *s == Stance::War))),
         "IsGuerrillaGeneral" => is(ch.is_some_and(|ch| ch.kind.esf_name() == "guerilla")),
+        // 0x008A66C0 (CONFIRMED): the context's character's faction (+0x2A0) has its +0x925 flag set: it
+        // was in a war declared since its last turn end (`FactionDetails::war_started`); false without one.
+        "WarStartedCharacterFaction" => is(ch.and_then(|ch| w.faction_details.get(&ch.faction)).is_some_and(|d| d.war_started)),
         _ => return None,
     })
 }

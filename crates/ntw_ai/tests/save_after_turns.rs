@@ -87,7 +87,7 @@ fn round(f: &Fixture, turns: u32, extra: u32) {
     let mut m = f.model.clone();
     play(f, &mut m, turns);
     assert_model_sane("after play", &m);
-    let save = ntw_campaign::save::write_save(&f.startpos, &m, "france", 1).expect("write");
+    let save = ntw_campaign::save::write_save(&f.startpos, &m, "france", 1, None).expect("write");
     let r = assert_clean(&format!("after {turns} turns"), &save);
     assert!(!r.ai_block_rebuilt, "the AI block stays loadable (version 13), kept in step with the world");
     println!("after {turns} turns: {} forces, {} commanders without obstacle", m.world.forces.len(), r.commanders_without_obstacle.len());
@@ -112,7 +112,7 @@ fn round(f: &Fixture, turns: u32, extra: u32) {
     play(f, &mut m2, extra);
     assert_model_sane("after more play", &m2);
     let esf2 = EsfFile::from_bytes(&bytes).unwrap();
-    let save2 = ntw_campaign::save::write_save(&esf2, &m2, "france", 2).expect("write 2");
+    let save2 = ntw_campaign::save::write_save(&esf2, &m2, "france", 2, None).expect("write 2");
     assert_clean(&format!("after {} turns, saved twice", turns + extra), &save2);
 }
 

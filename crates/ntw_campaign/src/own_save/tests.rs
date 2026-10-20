@@ -272,15 +272,16 @@ fn bad_saves_are_errors() {
     assert!(read_parts(&damaged).is_err());
 }
 
-/// The header of a new save: the season name follows the calendar (review: it stayed the start
-/// position's), and every theatre of the campaign is kept even when its pictures did not load (review:
+/// The header of a new save: the date follows the calendar and the season is the on-screen name the
+/// caller gives (review: it stayed the start position's; `0x00888320` stores `0x008ED110`'s loc name),
+/// and every theatre of the campaign is kept even when its pictures did not load (review:
 /// a save without pictures lost its theatre, and with it the HUD's home theatre).
 #[test]
 fn the_save_header_follows_the_calendar_and_keeps_the_theatres() {
     let mut model = made_up_model();
     model.calendar.date.set_quarter(1805, 11 * 4);
-    let info = save_header(&info(), &model, "made_up_a", 1_800_000_000, &[]);
-    assert_eq!(info.header.season_name, "Winter", "December");
+    let info = save_header(&info(), &model, "made_up_a", "Hiver", 1_800_000_000, &[]);
+    assert_eq!(info.header.season_name, "Hiver", "the given on-screen name");
     assert_eq!(info.header.date, Some(model.calendar.date));
     assert_eq!(info.theatres().collect::<Vec<_>>(), ["made_up_main"]);
     assert_eq!((info.header.maps[0].width, info.header.maps[0].height), (0, 0), "no picture");
@@ -307,15 +308,16 @@ pub(crate) fn as_version_1(bytes: &[u8]) -> Vec<u8> {
 /// `bytes` (a save of the current format) as a save of format `version` wrote it: that version word,
 /// without the region fields later versions added (2: `unit_resources`, 3: `road_holder` and
 /// `fortification_holder`), the route fields (5: `capital_port`, 7: `accumulated`), the world's access-abuse counts (6: `access_abuses`)
-/// and the commerce raids with the trade network's course (8: `commerce_raids`, `splines`, `curves`).
+/// the commerce raids with the trade network's course (8: `commerce_raids`, `splines`, `curves`) and the
+/// expense trackers (9: `upkeep_booked`, `policing_cost`, `policing_booked`).
 /// A list or map value ends at its first `]` / `}` (the made-up keys hold none), an
-/// `Option` of a faction id at its first `,`, the route's last field (`,accumulated:`; the leading comma
-/// keeps `trade_accumulated` out) at its struct's `)`, which is kept.
+/// `Option` of a faction id or a number at its first `,`, a struct's last field (`,accumulated:`, the leading
+/// comma keeping `trade_accumulated` out; `,policing_booked:`) at its struct's `)`, which is kept.
 pub(crate) fn as_version(bytes: &[u8], version: u32) -> Vec<u8> {
     let (_, header, body) = sections(bytes).expect("sections");
     let mut text = String::new();
     flate2::read::ZlibDecoder::new(body).read_to_string(&mut text).expect("inflate");
-    let added: [(u32, &str, char); 9] = [
+    let added: [(u32, &str, char); 12] = [
         (2, "unit_resources:[", ']'),
         (3, "road_holder:", ','),
         (3, "fortification_holder:", ','),
@@ -325,6 +327,9 @@ pub(crate) fn as_version(bytes: &[u8], version: u32) -> Vec<u8> {
         (8, "commerce_raids:[", ']'),
         (8, "splines:[", ']'),
         (8, "curves:[", ']'),
+        (9, "upkeep_booked:{", '}'),
+        (9, "policing_cost:", ','),
+        (9, ",policing_booked:", ')'),
     ];
     for (_, field, end_char) in added.into_iter().filter(|&(v, ..)| v > version) {
         let mut old = String::with_capacity(text.len());
@@ -641,4 +646,71 @@ fn campaign_over_round_trips_and_an_older_save_loads_it_as_false() {
     assert!(!turn.campaign_over);
     assert_eq!(turn.humans, back.model.turn.humans, "the other fields load as they were");
     assert_eq!(turn.queue, back.model.turn.queue, "the (empty) queue loads as it was");
+}
+
+/// The once-only historical events already triggered are kept by the save (`World::historical_events_triggered`).
+#[test]
+fn triggered_historical_events_round_trip() {
+    let mut model = made_up_model();
+    model.world.historical_events_triggered = vec!["a_once".into(), "b_quiet".into()];
+    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+    let (_, back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
+    assert_eq!(back.model.world.historical_events_triggered, ["a_once", "b_quiet"]);
+}
+
+/// recordpay: format version 9 keeps the running record's expense trackers (the upkeep trackers and each
+/// region's policing tracker with its cost). Every load books the record again from them, as the exe's
+/// load does (`0x00B95B90`), dropping the script's `other_income_mod` entries (not saved). A version-8
+/// save, with no trackers, takes the upkeep trackers from its running record's 19 / 20; its policing
+/// trackers start at 0.
+#[test]
+fn expense_trackers_round_trip_and_a_version_8_save_takes_them_from_its_record() {
+    let db = ntw_data::GameDatabase::test_fixture();
+    let mut model = made_up_model();
+    let mut record = [0; 25];
+    (record[11], record[19], record[20], record[21]) = (2500 + ntw_sim::campaign::economy::other_income(&model, A), 100, 30, 12);
+    model.world.economy_history.insert(A, vec![[1; 25], record]);
+    model.world.upkeep_booked.insert(A, [100, 30]);
+    {
+        let r = model.world.regions.get_mut(&RegionId(1)).unwrap();
+        (r.population_state.policing_cost, r.population_state.policing_booked) = (15, 12);
+    }
+    let bytes = |version: u32| {
+        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+        as_version(&write(&info(), &data).expect("write"), version)
+    };
+    let now = read_with_start(&bytes(FORMAT_VERSION), &db, || panic!("start read for a current save")).expect("read").model;
+    assert_eq!(now.world.upkeep_booked, model.world.upkeep_booked);
+    assert_eq!(now.world.regions[&RegionId(1)].population_state, model.world.regions[&RegionId(1)].population_state);
+    let r = now.world.economy_history[&A].last().copied().unwrap();
+    // The script's 2500 is dropped; 19..21 rebooked from the trackers; the older record untouched.
+    assert_eq!((r[11], r[19], r[20], r[21]), (ntw_sim::campaign::economy::other_income(&now, A), 100, 30, 12));
+    assert_eq!(now.world.economy_history[&A][0], [1; 25]);
+    let old = read_with_start(&bytes(8), &db, || Err("no start".into())).expect("read").model;
+    assert_eq!(old.world.upkeep_booked.get(&A), Some(&[100, 30]));
+    assert_eq!(old.world.regions[&RegionId(1)].population_state.policing_booked, 0);
+    let r = old.world.economy_history[&A].last().copied().unwrap();
+    assert_eq!((r[19], r[20], r[21]), (100, 30, 0));
+}
+
+/// warnotice: format version 10 keeps the order of each faction's diplomacy records (`World::diplomacy_record_order`).
+/// A version-9 save takes the campaign start's order; without a start it loads with a warning and keeps what it
+/// holds (here the field, written by this build: a real version-9 save has none, so by faction id).
+#[test]
+fn diplomacy_record_order_round_trips_and_a_version_9_save_takes_it_from_the_start() {
+    let db = ntw_data::GameDatabase::test_fixture();
+    let mut model = made_up_model();
+    model.world.diplomacy_record_order.insert(A, vec![B]);
+    let bytes = |version: u32| {
+        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+        as_version(&write(&info(), &data).expect("write"), version)
+    };
+    let now = read_with_start(&bytes(FORMAT_VERSION), &db, || panic!("start read for a current save")).expect("read").model;
+    assert_eq!(now.world.diplomacy_record_order, model.world.diplomacy_record_order);
+    let mut start = made_up_model();
+    start.world.diplomacy_record_order.insert(B, vec![A]);
+    let old = read_with_start(&bytes(9), &db, || Ok(start.clone())).expect("read").model;
+    assert_eq!(old.world.diplomacy_record_order, start.world.diplomacy_record_order, "taken from the start");
+    let bare = read_with_start(&bytes(9), &db, || Err("no start".into())).expect("loads without a start").model;
+    assert_eq!(bare.world.diplomacy_record_order, model.world.diplomacy_record_order);
 }

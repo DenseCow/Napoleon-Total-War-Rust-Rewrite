@@ -17,6 +17,8 @@ marks functions `__thiscall` in memory before decompiling (the decompile then sh
   nothing; game run `--campaign eur_napoleon --campaign-demo --campaign-demo-zoc [--campaign-demo-move
   --campaign-end-turn 3]` (new harness flag: a target 18 units past the nearest enemy army): the path detours west
   round the Austrian zones in the Alps, the army moves, 3 AI turns, no panic.
+- **Region gate in the path search (§8, pathgate 2026-10-20):** traced (CONFIRMED) and ported: armies and fleets
+  path behind the zone flood's region flags (plus the target owner's regions), agents without; rebels PROVISIONAL.
 - **Still open:** obstacle modes 3/4 and kinds 10/11 (core shape and fog-of-war rule: §10),
   fort and barrier obstacles (`FORT_OBSTACLE`, `BARRIER_OBSTACLE`: none in the shipped startposes), stealth/spotting for
   obstacles; the exact segment rule of flag bits 4..23 (INFERRED, §3); a drawn movement-range zone (not found; the
@@ -255,8 +257,16 @@ marks functions `__thiscall` in memory before decompiling (the decompile then sh
     layer's third faction (+0x1AC) set to 0 (`0x00B72D70`), then `0x00B06280` gives **every obstacle of the layer**
     (characters, forts, barriers; no relevance or fleet filter) its mode for that faction (`0x00B3F4F0`: 5 hidden,
     1 core only for its own faction or one not at war, else its +0x6C mode) and rebuilds the changed ones' cells.
-    For a character whose army has +0x98 set, `0x00B078C0` also flags the layer entries (+0x144 shorts, flags
-    +0x164) equal to the army's id (army +0x10 → +0xA4): meaning UNKNOWN. Then the flood (`0x00B7B7A0`) and the
+    For a character whose army has +0x98 set, `0x00B078C0` replaces the layer's region flags (below) with "only
+    region X": flags[slot] = 1 when the slot's region (+0x144 short) is X (army +0x98 → handle +0x68 → +0x10 →
+    +0xA4), every extra slot 0 (polish58 2026-10-19, CONFIRMED by disassembly). Army +0x98 is the region the army
+    rose in, its `REBEL_DATA` (0x74 bytes; zonegate 2026-10-19, CONFIRMED by disassembly and data): set by the
+    risings `0x00870E60` / `0x008AF5D0` → `0x00886BA0`; the force writer `0x008971C0` does not save it; the
+    region reader `ConstructCampaignRegionFromEsf` `0x00A45950` reads the optional `REBEL_DATA` template
+    (+0x21C, `0x00886C90`), then the region's id list (`0x0086F140`), each id resolved (`0x0105AC60`) and added
+    to the set +0x220 (`0x008CFB60` → `0x008CF7D0`), which gives the army its +0x98. In the save the list is
+    `REGION` #35 when #34 is the `REBEL_DATA_INNARDS` record, else #34 (orig_fr_may1811: each id a rebel land
+    army). Then the flood (`0x00B7B7A0`) and the
     scope's end (`0x00AF7A00`: third factions cleared, `CampaignPathGrid::ReapplyPathGridFactionView` `0x00B67490`
     restores the stored view). Flag 1: the flood runs on the layers as they stand (the caller prepared them).
     A faction without a record (`IsFactionWithoutRecord` `0x008CEEF0`) with a stored view floods unprepared.
@@ -269,6 +279,61 @@ marks functions `__thiscall` in memory before decompiling (the decompile then sh
   - So a zone is bounded by the other characters' cores (kind 9) and by the zones of factions at war with the
     owner (kind 8) as the owner's faction sees them. The owner's own obstacle does not stop it (the saved
     start-position zones are never empty, `zoc_install.rs`; CONFIRMED by data).
+  - **The region gate** (polish58 2026-10-19, CONFIRMED by disassembly unless tagged): a layer holds one flag
+    byte per slot (+0x158..+0x164 vector, data +0x164): +0x140 land slots, each a pathfinding region (+0x144
+    shorts), then +0x150 extra slots (+0x154, 0x10 stride, each a region list at +8 count / +0xC data). The
+    constructor fills the flags with 0 (`0x00AF309E`) and sets the gate byte +0x168 to 1 (`0x00B0C9F0` /
+    `0x00B0CA10` write it). `0x00B78A10` (layer, faction) sets flags[slot] = `IsRegionOpenToFaction` `0x00B622E0`(faction, the slot's
+    region index; cdecl): 0 when the faction has no record (`0x008CEEF0`, the rebels); 1 when the region is
+    not found (`0x00AA12A0` on campaign +0xF5C +0x34, null on a miss), its owner (region +0xF4, `0x006649C0`)
+    has no record, or the owner is the faction itself; otherwise the owner's record towards the faction
+    (`0x00B64C50` on owner +0x528; on a miss it returns the owner's first record, never null, and
+    `0x00B16570` reads it with no check: an unrelated faction's record is tested; zonegate 2026-10-19) passes `CheckRelationshipLetsFactionStand` `0x00B16570` (access turns +0x78C, allied_in_war_against +0x7D0,
+    protectorate `0x00B5DCC0` or the war stance at +0x790; ours `record_lets_stand` in `expulsion.rs`). This
+    is not `0x008D9DC0`'s flag, which ours ports as `may_stay` (true for a recordless faction, through
+    `at_war`). An extra slot gets 1 only when every
+    region of its list passes. The flood's neighbour test (`0x00B7BBB0` at `0x00B7BD68` → `0x00B16CF0`, context
+    +0xC the current polygon's key, +0x10 the layer) takes a neighbour whose key has the same top 10 bits (the
+    pathfinding region, `0x00B680A0`; `Boundary::region()` in ours), else only when `0x00B16BD0` passes on the
+    neighbour's key: +0x168 is 0 or flags[key >> 22] (`0x00B62280`) is set. So **a zone does not flood into a
+    region its owner may not stay in** (and, for a +0x98 army, out of region X). The gate byte +0x168 is
+    cleared only by `0x00B0C9F0`, from the scopes `0x00AF5B60` (when its first argument is set) and `0x00AF5C00`,
+    and set back by `0x00B0CA10` (`0x00AF7BE0`); their callers are path searches. The zone flood's scope
+    `0x00AF5200` leaves it set, so the gate always applies to a zone (zonegate 2026-10-19).
+  - **The path searches share the gate** (pathgate 2026-10-20, CONFIRMED by disassembly unless tagged). The
+    neighbour expansion `0x00B2CC20` calls `0x00B16CF0` at `0x00B2D021` (its first argument is the node's
+    context: +0xC the current polygon's key, +0x10 the layer) and the second expansion `0x00B16BA0` at
+    `0x00B2DCA3` (the same test, the layer passed in); so do `0x00AE3300`, `0x00AE3DD0`, `0x00AE4740`,
+    `0x00B2AB40`, `0x00B2C0A0`, `0x00B2E020`, `0x00B2F4E0`. Every step is tested, the goal's polygon
+    included: **a move does not cross into a region whose flag is clear** while the gate byte is set.
+    `0x00B0C9F0` clears +0x168 (returns 1 when it was set), `0x00B0CA10` sets it (only from `0x00AF7BE0`,
+    the scopes' restore). The scopes: `0x00AF5B60`(flag, layers, ctx) and `0x00AF5C00`(flag, mover,
+    target owner, layers, ctx); flag 1 turns the gate off on every layer for the search. All 22 callers
+    of `0x00AF5C00` (`0x00B20600`..`0x00B25470`, the move-to-target queries, e.g. `0x00B21510`,
+    `0x00B22890`) pass 1 only when the mover leads no army (`0x009D0F50`) and is no fleet (`0x009D0F80`):
+    **an agent searches with the gate off, an army or fleet with it on**. Most `0x00AF5B60` callers make
+    the same test (`0x00B0FB60`, `0x00B37370`, `0x00B0FF90` by mover type). With flag 0 and a target,
+    `0x00AF5C00` also opens the target owner's regions when the owner is not the mover's faction
+    (`0x00898B20`), both have records and the owner's record towards the mover fails `0x00B16570`: per
+    layer `0x00B628E0` walks the owner's region list (faction +0x778/+0x77C), takes each settlement's
+    position (item +0xFC, vtable +0x3C), skips one outside the grid (`0x00B1FC40`), locates its polygon
+    (`0x00B53930`, mode 6) and sets that slot's flag (`0x00B62100` → `0x00B620A0`, slot = key >> 22 by
+    `0x00B62280`), keeping the changed slots; then every extra slot whose regions' flags are all set
+    gets 1 (an empty one too); `0x00AF7BE0` restores them. The target owner is the region at the target
+    point (`0x00AA1030`, a quad tree `0x00AA16A0` / `0x00AA0EC0`; ours `PathGrid::region_at`). The layers
+    hold the acting faction's stored view (`0x00B06210` → `0x00B06280` → `0x00B78A10`).
+  - **Our port:** `View::gate_lets` (polypath.rs) is the one neighbour test, used by the flood
+    (`zoc::reach_in`) and by `View::find_path_gated` (the A*'s neighbour loop; `find_path_avoiding`
+    passes no gate). `Zones::path_region_gate` builds the flags from the flood's rule
+    (`regions_open_to` → `region_open_to`, `slot_flags`) plus the target owner's regions;
+    `CampaignModel::plan_path` (no target) and `plan_path_to_target` (attack, merge, enter a settlement,
+    an agent's action) run armies and fleets behind it and agents without it. Tests: zones.rs
+    `an_army_paths_only_into_regions_its_faction_may_stand_in`, `an_agent_and_a_rebel_force_path_without_the_gate`,
+    `the_path_gate_has_the_zone_floods_flags`; zoc.rs `the_region_gate_stops_a_path_at_a_closed_region`.
+    PROVISIONAL: a recordless (rebel) mover's search, which runs on the grid's stored view (+0x400,
+    `0x00B67490` mode 2; not traced): ours runs it without a gate. Not ported: the transport / port-entry
+    searches (embark.rs) and the commander-recruitment search; the smoothing corridor `0x00B6AD30`'s
+    region test (not traced).
   - **When it runs** (callers of `0x00A28440`): `0x00A285C0` (flag 0, then the core `0x009CC0E0` and the sight
     `0x00A27F10`); after a move `0x00A285E0` (flag 1, then the core); `RefreshFactionPathGridObstacles` `0x00B795A0`
     (flag 1 after preparing the layers for the faction, `0x00B06210`, each live character of it, then re-added);
@@ -286,15 +351,31 @@ marks functions `__thiscall` in memory before decompiling (the decompile then sh
     - After a move `0x00A285E0` (a virtual: character vtable `0x0136A62C`, slot +0x20; its only reference): the
       sight `0x00A27F10` for the character (`0x00A2863A`) and for each character it carries (`0x00A28694`); then,
       only when its first argument is 1, `0x00A28290`, the zone flood `0x00A28440(1)` (`0x00A28843`) and the core
-      `0x009CC0E0`; then the hidden flag `0x009D3000` (`0x00A2885C`). Argument 2 returns early (`0x00A2860D`). The
-      values its move callers pass are not traced (the virtual's callers were not found), so whether every
-      walk floods is INFERRED.
+      `0x009CC0E0`; then the hidden flag `0x009D3000` (`0x00A2885C`). Argument 2 returns early (`0x00A2860D`).
+      (polish58 2026-10-19) Before the sight, a character not yet lifted is lifted off the map (`0x00A28613`
+      → vtable slot +0x1C `0x00A28B50`: +0x1B7 = 1, its obstacle and listeners dropped, the zone box +0x1B8..+0x1C4,
+      +0x1D0, +0x1E0, +0x4C8, +0x4E0 cleared); argument 1 sets him down: +0x1B7 = 0 at `0x00A28855`, between the
+      core and the hidden flag. So argument 0 is a mid-move step (lifted, sight only) and argument 1 the last
+      (flood, core, hidden flag); the hidden flag also runs only with 1. `0x00B795A0` skips lifted characters
+      (`0x00B795FC`). The values its move callers pass are not traced (the virtual's callers were not found),
+      so that every walk's last step passes 1 is INFERRED.
+    - `0x009CB4C0` (polish58): called only by the `MILITARY_FORCE` reader `0x00881120` (from the `ARMY` reader
+      `0x00870FD0` and the navy reader `0x008822F0`) on the commander read by id: links him and the force
+      (`0x008CFAB0`, a thunk that adds 0x74 to its stack argument and jumps to `0x008CF920`) and, when his
+      +0x4C4 is set, `0x00A28440(0)`, the core and the sight. It runs while a save is read, when +0xFC7 is
+      still set, so it floods nothing; the load pass does.
+    - `HireAdmiral` `0x00A16110` (polish58; a virtual, its pointer at `0x0136AEC8`): when the fleet's
+      commander after the pick (`0x008B8E50`) is not the one before, he is put at the fleet's place saved on
+      entry (`0x00963840`) and his zone flooded again (`0x00A28440(0)` at `0x00A162CA`), then `0x0096C8D0`.
+    - `0x0096CBE0` (polish58; from the battle set-ups `0x008E18D0` / `0x008E1A90`, model +0xF60): floods
+      (`0x00A285C0`) and re-adds (`0x00B084F0`) each character of its list (+0x24..+0x28, entry +8 → +0x20)
+      that is lifted (+0x1B7): INFERRED, an army caught in mid-move gets its zone back for the battle (the list is
+      not identified).
     - `0x00A285C0` callers: `0x008F9400` (a force's commander plus the characters it carries or that carry it;
       from the commander pick `0x008B8E50` and the unit transfers `0x008D47B0` / `0x008D5F10`), a split or new
       force `0x008F04C0`, the boarding joins `0x008F0F20` / `0x008F17D0`, a commander's death `0x008DB3E0`, the
       promotions in the field `0x008E1C20` / `0x008E2260`, `HireGeneral` `0x00A164C0`, a recruited general placed
-      `0x00B67670`, a settlement entered `0x00B4E760`; `0x0096CBE0` for characters with the +0x1B7 flag (UNKNOWN
-      flag; not ported).
+      `0x00B67670`, a settlement entered `0x00B4E760`; `0x0096CBE0` for lifted characters (above).
     - `0x00B795A0` per diplomacy rule: an expulsion over another's lands (`0x00B13A30`, `0x00B0CA20`, `0x00B0D0C0`,
       `0x00B29170`, `EndProtectorateTie` `0x00B64B10`) refreshes the expelled faction, then the owner, inside the
       expel branch; `CancelMilitaryAccessOnRecord` `0x00B67BD0` none (its command path `0x00B67B20` refreshes the
@@ -312,17 +393,63 @@ marks functions `__thiscall` in memory before decompiling (the decompile then sh
     are rebuilt at the events above (`rebuild_zone`, `rebuild_force_zones`, `rebuild_moved_zones`,
     `refresh_faction_zones`, called from the walk, merge and transfer, settlement entry, recruit, hire,
     promotion, command succession, boarding and landing, and the treaty, expulsion and capture rules in the
-    exe's orders). The walk runs the sight, then the zones, then the hidden flags, as `0x00A285E0` does. A stored
-    zone stays until such an event, wherever its character stands (an expelled army that stays keeps it). The
+    exe's orders). The walk runs the sight, then the zones, then the hidden flags, as `0x00A285E0`'s last step
+    does; it moves whole, so no character is left lifted. A stored zone stays until such an event, wherever its
+    character stands (an army an enemy walks up to keeps its zone; an expelled army the rule places is
+    flooded at its new place, one it cannot place (`to: None`) keeps its old zone until its faction is flooded
+    again: the treaty expulsions refresh both factions inside the expel branch, the cancel `0x00B67BD0` none,
+    above). The
     path search (`zoc::cuts`, `CampaignModel::obstacles_seen_by`) reads the stored zones, so two neighbouring
     enemies leave no gap between their zones (`zones.rs` tests, one per event kind). A commander with no stored
-    zone (a path that floods none) reads as his bare flood, logged once. The faction list order is taken
-    as character-id order (start-position `CHARACTER_ARRAY`s rise, CONFIRMED by data; the loader's fill INFERRED).
-    The save writer (`obstacle_record`) keeps the bare flood: it gives the saved box and zone range for 60 of 87
-    start-position commanders, the stored zones 59 (`zoc_install.rs`; PATHFINDING_PORTS.md §11.1). Not ported:
-    the barrier refresh `0x00B64E30` (no barriers), `0x0096CBE0` (UNKNOWN flag), `0x009CB4C0` / `0x00A16110`
-    (callers UNKNOWN). `0x00B078C0`'s layer flags (army +0x98) do not change a zone's polygons (the flood reads
-    the layer modes, not those flags): left as the Polish note.
+    zone (a path that floods none) reads as his bare flood, logged once. The faction list order is the
+    list's own (`World::character_order`, appendorder 2026-10-20, below).
+    The region gate (zonegate 2026-10-19): `zones::region_gate` gives each layer slot its flag as
+    `0x00B78A10` / `0x00B622E0` do (`region_open_to`, through `record_lets_stand`) or, for an army in a
+    region's `World::region_risen_armies` list (read from and written back to `REGION` #34/#35), only its
+    home region's single slots (`0x00B078C0`); the load pass gives every rebel character the region it stands
+    in (`0x00B077B0`). `zoc::reach_in` takes the flags in its neighbour test. A missing relationship record
+    reads as no access (ours; the exe's first-record read above is an ORIGINAL BUG, unreachable with shipped
+    data: every non-rebel pair has a record in eur_napoleon's startpos and the evidence saves, measured).
+    PROVISIONAL (BACKLOG): a rebel commander's later floods use the grid's stored view (+0x400, never
+    cleared) in the exe, its own flags in ours. With the gate the stored zones give the saved box and zone
+    range for 64 of 87 start-position commanders, the bare flood 60 (`zoc_install.rs`), so the save writer
+    now takes each commander's stored zone (`NewObstacle::zone`, `obstacle_record_with_zone`); agents keep
+    no zone. The other 23 are UNKNOWN (BACKLOG). Not ported, none needed: the barrier refresh
+    `0x00B64E30` (no barriers), `0x0096CBE0` (no character of ours is left lifted), `0x009CB4C0` (floods
+    nothing); `HireAdmiral`'s flood is `rebuild_force_zones` after the admiral is put at the fleet's place.
+    The order of a faction's +0x768 list (appendorder 2026-10-20, CONFIRMED by disassembly): a PtrVector at
+    faction +0x758 (count +0x764, data +0x768) of link objects at character +0x2A0 ({+0 character, +4 owning
+    list}). Append `0x008CF6B0`: a link not yet in a list is pushed at the end (`0x00448B90`, growth by doubling).
+    Every character constructor reaches it through `0x00878C10` (adds +0x758) and `0x0086FC50`: the ESF reader
+    `0x00991520`, the generic, historical and officer constructors (calls at `0x0098F4F7`, `0x0098FB1A`,
+    `0x00991278`) and `0x00991F40`, `0x009902D0`, `0x00990900`, `0x0098FE60`, so a new character goes at the end.
+    Load: the faction loader `0x0087A190` (`0x0087AD56`..`0x0087ADE2`) constructs the `CHARACTER_ARRAY` records in
+    file order, so the list is the file order. Save: the faction writer `0x00892A80` (`0x00892EC0`..`0x00892F61`)
+    writes `CHARACTER_ARRAY` walking the list, so the file order is the list order. Removal `0x008B0150` erases
+    and shifts (order kept). A faction transfer `0x00A1B4E0` unlinks, then appends at the end of the new
+    faction's list (thunk `0x008CF9F0`); callers `TransferRegionToFaction`, `0x00AAE250`, `0x008BEAA0`,
+    `0x009DBBB0` and a helper at `0x008E477F` (no function defined). Ours: `World::transfer_character` sets the
+    faction and moves the id to the end of `World::character_order` (test
+    `a_transferred_character_goes_to_the_end_of_the_list`); no rule transfers a character yet, and the rest of
+    `0x00A1B4E0` (character +0x478, the force calls `0x008AF5D0` / `0x008F3340`, the +0x2A8 vfunc +0x4C, three
+    events) is left for the port that first needs it. Readers in order: the load pass `0x00B0DC10` and
+    `0x00B795A0`. The original's saves list characters out of id order (`orig_fr_may1811.save`: 57 descents among
+    146 characters; ours and the start position rise), so the old id order differed from the exe on every vanilla
+    save. Ours: the importer fills `World::character_order` in file order, new characters (rising `alloc_id` ids)
+    follow it, the ESF writer keeps file order and appends new ones; `zones.rs` walks
+    `World::characters_in_list_order` (tests `the_load_pass_floods_a_factions_commanders_in_list_order`,
+    `zoc_install.rs` `vanilla_save_faction_lists_keep_the_file_order`). Other +0x768 readers (charorder 2026-10-20, CONFIRMED by disassembly):
+    the round-end economy `0x008BC650` (read at `0x008BC6FD`) collects the characters whose yearly death check
+    `0x009DA190` passes (one campaign RNG draw each) in list order and kills them in that order, so the draws
+    follow the list: ours `yearly_character_pass` walks `World::characters_in_list_order` (test
+    `the_yearly_death_checks_draw_in_list_order`). Expulsion `0x008D9DC0` (loop at `0x008D9E7A`) walks the list
+    once, each character's land army then his docked navy, so the moves and notices follow the list: ours
+    `expel_faction_from_region` did armies by force id, then navies, and now walks the list (test
+    `the_expulsion_walks_the_faction_list_in_its_order`). Order-independent: the out-of-game flag `0x008B4330`
+    (an all-of check: with no region, +0x824 is set only when every character's +0x2B8 handle resolves through
+    `0x006649C0`, returning at the first that does not; what +0x2B8 is, is UNKNOWN) and peace `0x00B262C0`
+    (`0x00B263A6`, `0x00B263E4`: each character's `0x00A25570` ends only his own raids; ours
+    `clear_raids_on_peace` builds a set). About forty more functions read +0x768 (BACKLOG).
 - Save layout (`OBSTACLE_LISTS/CHARACTER_OBSTACLE[]/OBSTACLE`): #0 six boundary slots (slot 0 = zone pieces,
   slot 1 = core pieces, entries 0x80000000 | run-time boundary index), #6 = 9, #7..#10 Fixed20 bbox, #11..#18 u16
   ranges (cell ranges of the two cut layers, decoded in PATHFINDING_PORTS.md §10.4). Tool: `cargo run -p ntw_campaign --example obstacle_probe -- <esf>`.

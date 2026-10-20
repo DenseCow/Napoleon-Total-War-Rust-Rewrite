@@ -26,11 +26,14 @@
 //! - the `OBSTACLE` record: `BOUNDARIES` slot per layer = its versions in row-major order, ring
 //!   versions with the high bit; `MANAGED_OBSTACLE_BOUNDARY` slot per layer = {true, its pair
 //!   list}; `#1..#4` the mode state; `#6` = 9; `#7..#10` the box; `#11..#18` the cell ranges
-//!   (`ntw_sim::campaign::zoc::obstacle_record`).
+//!   (`ntw_sim::campaign::zoc::obstacle_record_with_zone`).
+//!
+//! The zone is the caller's ([`NewObstacle::zone`]: a commander's stored zone, which gives the saved
+//! box and zone cell range of 64 of the 87 start-position commanders against 60 for the bare-map
+//! flood; `tests/zoc_install.rs`, `analysis/campaign/PATHFINDING.md` §8).
 //!
 //! PROVISIONAL: the pieces' shapes (our clipper: inside, and left / right / above / below the core;
-//! the original's clipper output is not decoded beyond kinds), the zone flood (on the static map;
-//! the original floods with the other obstacles cut in), protected polygons crossed by a core
+//! the original's clipper output is not decoded beyond kinds), protected polygons crossed by a core
 //! keep their outline (the original adds the crossing points to it).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -53,7 +56,7 @@ pub struct StaticGrid<'a> {
 }
 
 /// A character to give an obstacle.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NewObstacle {
     /// The character id.
     pub character: u32,
@@ -63,6 +66,10 @@ pub struct NewObstacle {
     pub owner: Owner,
     /// Inside a settlement (zone +2, triangle core).
     pub garrisoned: bool,
+    /// Its zone of control (sorted polygons): a commander's stored zone
+    /// (`CampaignModel::stored_zone`, the polygons the original keeps on obstacle layer 0, flooded
+    /// with the other obstacles cut in and the region gate applied); empty for an agent.
+    pub zone: Vec<u32>,
 }
 
 /// What [`add_character_obstacle`] added.
@@ -332,7 +339,7 @@ fn cell_range_fields(zone: CellRange, core: CellRange) -> Result<Vec<EsfNode>, S
 /// would store it right after creating it (module docs). The character must not have one yet.
 pub fn add_character_obstacle(grid: &mut [EsfNode], sg: &StaticGrid<'_>, ob: &NewObstacle) -> Result<Added, String> {
     let posf = (ob.pos.0 as f32 / FIX as f32, ob.pos.1 as f32 / FIX as f32);
-    let rec = zoc::obstacle_record(sg.map, posf, ob.owner, ob.garrisoned);
+    let rec = zoc::obstacle_record_with_zone(sg.map, posf, ob.owner, ob.garrisoned, ob.zone.clone());
     let cells = cell_range_fields(rec.zone_cells, rec.core_cells)?;
     let core = core_fixed(ob.pos, ob.garrisoned);
     let zone: HashSet<usize> = rec.zone.iter().map(|&p| p as usize).collect();

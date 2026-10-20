@@ -1,7 +1,10 @@
 //! Our own save writer against the real install: a start position written as a save reloads, and
 //! each model change is written (CAMPAIGN_DATA.md §5). Loading the original game's saves is out of
-//! scope, so nothing here reads the user's save folder. Run with
+//! scope, so nothing here reads the user's save folder (one test compares a block with a read-only
+//! evidence copy of a vanilla save, `tests/common`). Run with
 //! `cargo test -p ntw_campaign --test save_compat -- --nocapture` (skips itself without an install).
+
+mod common;
 
 use std::path::PathBuf;
 
@@ -30,7 +33,7 @@ fn startpos_saves_reload() {
         let esf = EsfFile::from_bytes(&bytes).unwrap();
         let l = ntw_campaign::read_esf(&esf, &db).unwrap();
         let human = l.info.header.faction_key.clone();
-        let out = save::write_save(&esf, &l.model, &human, 1).unwrap();
+        let out = save::write_save(&esf, &l.model, &human, 1, None).unwrap();
         assert_eq!(out.root.name, ntw_campaign::SAVE_ROOT);
         assert!(out.root.child("CAMPAIGN_PREOPEN_MAP_INFO").is_none());
         // The player is human (only him): without the flag the original plays every turn by
@@ -80,7 +83,7 @@ fn taxes_stances_and_script_values_are_written() {
     let _ = m.world.set_stance(france, austria, ntw_sim::campaign::Stance::War);
     use ntw_campaign::script_values::ScriptSaveValue as V;
     let vals = [V::Int(3), V::Bool(true), V::Int(-1)];
-    let out = save::write_save_with(&esf, &m, "france", 1, Some(&vals)).unwrap();
+    let out = save::write_save_with(&esf, &m, "france", 1, None, Some(&vals)).unwrap();
     let back = ntw_campaign::read(&out.to_bytes().unwrap(), &db).unwrap();
     let w = &back.model.world;
     assert_eq!(w.factions[&france].tax_lower, "tax_high");
@@ -109,7 +112,7 @@ fn diplomacy_permissions_are_written() {
     let austria = m.faction_by_key("austria").unwrap().id;
     assert!(m.set_diplomacy_option(france, austria, 9, false, true)); // peace: may not propose
     assert!(m.set_diplomacy_option(france, austria, 3, true, false)); // alliance: declines
-    let out = save::write_save(&esf, &m, "france", 1).unwrap();
+    let out = save::write_save(&esf, &m, "france", 1, None).unwrap();
     let back = ntw_campaign::read(&out.to_bytes().unwrap(), &db).unwrap();
     let b = &back.model;
     assert_eq!(b.diplomacy_option(france, austria, 9), 2);
@@ -163,7 +166,7 @@ fn removed_characters_leave_no_references() {
     let mut m = l.model.clone();
     assert!(m.world.characters.remove(&ntw_sim::campaign::CharacterId(id as i32)).is_some());
     let human = l.info.header.faction_key.clone();
-    let out = save::write_save(&esf, &m, &human, 1).unwrap();
+    let out = save::write_save(&esf, &m, &human, 1, None).unwrap();
     let mut sites = Vec::new();
     int_sites(&out.root.children, i64::from(id), &out.root.name, &mut sites);
     assert!(sites.is_empty(), "{id} still referenced: {sites:#?}");
@@ -194,7 +197,7 @@ fn region_economy_is_written() {
         r.discontent_growth = -(k as i32);
         r.tax_exempt = k == 1;
     }
-    let out = save::write_save(&esf, &m, "france", 1).unwrap();
+    let out = save::write_save(&esf, &m, "france", 1, None).unwrap();
     let back = ntw_campaign::read(&out.to_bytes().unwrap(), &db).unwrap();
     for id in &ids {
         let (a, b) = (&m.world.regions[id], &back.model.world.regions[id]);
@@ -245,7 +248,7 @@ fn region_population_is_written() {
         }
     }
     let check = |m: &ntw_sim::campaign::CampaignModel| {
-        let out = save::write_save(&esf, m, "france", 1).unwrap();
+        let out = save::write_save(&esf, m, "france", 1, None).unwrap();
         let back = ntw_campaign::read(&out.to_bytes().unwrap(), &db).unwrap();
         for (id, a) in &m.world.regions {
             let b = &back.model.world.regions[id];
@@ -284,7 +287,7 @@ fn trade_accumulation_and_bankruptcy_are_written() {
     }
     let france = m.faction_by_key("france").unwrap().id;
     m.world.bankrupt_turns.insert(france, 3);
-    let out = save::write_save(&esf, &m, "france", 1).unwrap();
+    let out = save::write_save(&esf, &m, "france", 1, None).unwrap();
     let back = ntw_campaign::read(&out.to_bytes().unwrap(), &db).unwrap();
     for p in &pairs {
         assert_eq!(back.model.world.trade_paths[p], m.world.trade_paths[p]);
@@ -318,7 +321,7 @@ fn embarked_armies_are_linked() {
         }
     }
     m.world.embarked.insert(army, navy);
-    let out = save::write_save(&esf, &m, "france", 1).unwrap();
+    let out = save::write_save(&esf, &m, "france", 1, None).unwrap();
     let mut seen = (0, 0);
     for f in out.root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD").unwrap().record_array("FACTION_ARRAY").unwrap().records() {
         for a in f.record_array("ARMY_ARRAY").into_iter().flat_map(|x| x.records()) {
@@ -371,7 +374,7 @@ fn victory_conditions_and_captured_regions_are_written() {
         e
     });
     assert!(before.is_empty() || before == ["france"], "{before:?}");
-    let out = save::write_save(&esf, &m, "france", 1).unwrap();
+    let out = save::write_save(&esf, &m, "france", 1, None).unwrap();
     assert!(ntw_campaign::victory::met_at_once(&out).is_empty());
     let mut found = 0;
     out.root.walk(&mut |r: &EsfRecord| {
@@ -446,7 +449,7 @@ fn removed_obstacles_leave_a_valid_grid() {
     let mover = field[3].1;
     let p = &mut m.world.characters.get_mut(&mover).unwrap().position;
     p.0 = ntw_sim::fixed::Fixed20::from_raw(p.0.raw() + (1 << 20));
-    let out = save::write_save(&esf, &m, "france", 1).unwrap();
+    let out = save::write_save(&esf, &m, "france", 1, None).unwrap();
     let r = ntw_campaign::save_check::check(&out);
     assert!(r.violations.is_empty(), "{:#?}", r.violations);
     // Rows that survive keep their fields.
@@ -481,7 +484,7 @@ fn commodity_market_is_written() {
     let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     let tm = |e: &EsfFile| e.root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL/CAMPAIGN_TRADE_MANAGER").unwrap().clone();
-    let same = save::write_save(&esf, &l.model, "france", 1).unwrap();
+    let same = save::write_save(&esf, &l.model, "france", 1, None).unwrap();
     assert!(tm(&same) == tm(&esf), "an unchanged market is written back as stored");
     let mut m = l.model.clone();
     assert!(!m.world.commodity_prices.is_empty());
@@ -491,7 +494,7 @@ fn commodity_market_is_written() {
     }
     m.world.commodity_market.trend.iter_mut().for_each(|t| *t = 4);
     m.world.commodity_market.factors.iter_mut().for_each(|f| *f *= 1.5);
-    let out = save::write_save(&esf, &m, "france", 1).unwrap();
+    let out = save::write_save(&esf, &m, "france", 1, None).unwrap();
     let back = ntw_campaign::read(&out.to_bytes().unwrap(), &db).unwrap();
     assert_eq!(back.model.world.commodity_prices, m.world.commodity_prices);
     assert_eq!(back.model.world.commodity_market, m.world.commodity_market);
@@ -550,7 +553,7 @@ fn new_units_get_regiment_names() {
     for f in m.world.forces.values_mut() {
         f.units.retain(|u| u.id != gone);
     }
-    let out = save::write_save(&esf, &m, "france", 1).unwrap();
+    let out = save::write_save(&esf, &m, "france", 1, None).unwrap();
     let (names, flags) = unit_names_and_flags(&out);
     // Every flagged name is carried by exactly one unit of the faction, every carried listed name
     // is flagged.
@@ -612,7 +615,7 @@ fn new_characters_and_officers_get_names() {
     m.spawn_recruited_unit(garrisoned, key.clone());
     m.spawn_recruited_unit(garrisoned, key);
     let new_char = *m.world.characters.keys().find(|c| !before_chars.contains(c)).unwrap();
-    let out = save::write_save(&esf, &m, "france", 1).unwrap();
+    let out = save::write_save(&esf, &m, "france", 1, None).unwrap();
     let w = out.root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD").unwrap();
     let f = w.record_array("FACTION_ARRAY").unwrap().records().find(|f| f.values().filter_map(EsfNode::as_str).next() == Some("france")).unwrap();
     let group = nd.groups["france"].clone();
@@ -715,7 +718,7 @@ fn character_changes_and_deaths_are_written() {
     assert_eq!(m.commander_unit(fid), Some(pick));
     let first_unit = m.world.forces[&fid].units[pick].id;
     assert!(!l.model.world.characters.contains_key(&colonel));
-    let out = save::write_save(&esf, &m, "france", 1).unwrap();
+    let out = save::write_save(&esf, &m, "france", 1, None).unwrap();
     let bytes = out.to_bytes().unwrap();
     let back_esf = EsfFile::from_bytes(&bytes).unwrap();
     let r = ntw_campaign::save_check::check(&back_esf);
@@ -802,7 +805,7 @@ fn an_existing_character_takes_over_a_dead_commanders_force() {
     m.character_dies(dead);
     assert_eq!(m.world.forces[&fid].commander, Some(next), "the existing character takes over");
     assert_eq!(m.world.characters.len(), chars_before - 1, "no new colonel");
-    let out = save::write_save(&esf, &m, "france", 1).unwrap();
+    let out = save::write_save(&esf, &m, "france", 1, None).unwrap();
     let bytes = out.to_bytes().unwrap();
     let back_esf = EsfFile::from_bytes(&bytes).unwrap();
     let r = ntw_campaign::save_check::check(&back_esf);
@@ -852,7 +855,7 @@ fn technology_research_is_written() {
         v
     };
     // Unchanged: every technology record as stored.
-    let same = save::write_save(&esf, &l.model, "france", 1).unwrap();
+    let same = save::write_save(&esf, &l.model, "france", 1, None).unwrap();
     assert_eq!(techs(&same), techs(&esf));
     // France researches one tech to the end and has another under way at a school, which it has
     // also handed over in deals 3 times (#5, entry +0x28).
@@ -867,7 +870,7 @@ fn technology_research_is_written() {
     }
     d.research.insert(avail[0].clone(), TechResearch { progress: 1500.0, researcher: 0, traded: 0 });
     d.research.insert(avail[1].clone(), TechResearch { progress: 37.5, researcher: slot, traded: 3 });
-    let out = save::write_save(&esf, &m, "france", 1).unwrap();
+    let out = save::write_save(&esf, &m, "france", 1, None).unwrap();
     let back_esf = EsfFile::from_bytes(&out.to_bytes().unwrap()).unwrap();
     let r = ntw_campaign::save_check::check(&back_esf);
     assert!(r.violations.is_empty(), "{:?}", r.violations);
@@ -898,7 +901,7 @@ fn header_territory_map_follows_the_owners() {
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     let pics: Vec<TheatrePictures> = l.info.header.maps.iter().filter_map(|m| TheatrePictures::load(&files, &db, &l.info.map_key, &m.theatre)).collect();
     assert_eq!(pics.len(), 1);
-    let mut same = save::write_save(&esf, &l.model, "france", 1).unwrap();
+    let mut same = save::write_save(&esf, &l.model, "france", 1, None).unwrap();
     assert_eq!(update_maps(&mut same, &l.model, "france", &pics), 0, "unchanged owners: picture as stored");
     assert_eq!(header_maps(&same.root), header_maps(&esf.root));
     // France takes Bavaria and loses Corsica.
@@ -912,7 +915,7 @@ fn header_territory_map_follows_the_owners() {
             r.owner = other;
         }
     }
-    let mut out = save::write_save(&esf, &m, "france", 1).unwrap();
+    let mut out = save::write_save(&esf, &m, "france", 1, None).unwrap();
     assert_eq!(update_maps(&mut out, &m, "france", &pics), 1);
     let back = EsfFile::from_bytes(&out.to_bytes().unwrap()).unwrap();
     let (old, new) = (&header_maps(&esf.root)[0].1, &header_maps(&back.root)[0].1);
@@ -958,13 +961,13 @@ fn governorship_tax_levels_are_written() {
         });
         v
     };
-    let same = save::write_save(&esf, &l.model, "france", 1).unwrap();
+    let same = save::write_save(&esf, &l.model, "france", 1, None).unwrap();
     assert_eq!(taxes(&same), taxes(&esf));
     let mut m = l.model.clone();
     let france = m.faction_by_key("france").unwrap().id;
     m.apply(CampaignCommand::SetTaxLevel { faction: france, class: TaxClass::Lower, level: "tax_extortionate".into() }).unwrap();
     m.apply(CampaignCommand::SetTaxLevel { faction: france, class: TaxClass::Upper, level: "tax_low".into() }).unwrap();
-    let out = save::write_save(&esf, &m, "france", 1).unwrap();
+    let out = save::write_save(&esf, &m, "france", 1, None).unwrap();
     let back_esf = EsfFile::from_bytes(&out.to_bytes().unwrap()).unwrap();
     assert!(ntw_campaign::save_check::check(&back_esf).violations.is_empty());
     let back = ntw_campaign::read_esf(&back_esf, &db).unwrap();
@@ -995,14 +998,14 @@ fn duel_counters_are_written() {
         });
         v
     };
-    let same = save::write_save(&esf, &l.model, "france", 1).unwrap();
+    let same = save::write_save(&esf, &l.model, "france", 1, None).unwrap();
     assert_eq!(counters(&same), counters(&esf));
     let mut m = l.model.clone();
     let id = *m.world.character_details.keys().find(|c| m.world.characters.contains_key(c)).unwrap();
     let d = m.world.character_details.get_mut(&id).unwrap();
     d.duels_lost = 2;
     d.duels_won = 5;
-    let out = save::write_save(&esf, &m, "france", 1).unwrap();
+    let out = save::write_save(&esf, &m, "france", 1, None).unwrap();
     let back_esf = EsfFile::from_bytes(&out.to_bytes().unwrap()).unwrap();
     assert!(ntw_campaign::save_check::check(&back_esf).violations.is_empty());
     let back = ntw_campaign::read_esf(&back_esf, &db).unwrap();
@@ -1024,7 +1027,7 @@ fn sight_state_is_written() {
     let db = GameDatabase::from_install(&dir).unwrap();
     let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
-    let same = save::write_save(&esf, &l.model, "france", 1).unwrap();
+    let same = save::write_save(&esf, &l.model, "france", 1, None).unwrap();
     let world = |e: &EsfFile| e.root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD").unwrap().clone();
     // France's shroud (the AI factions' are dropped from a new campaign, `trim_ai_faction_blocks`).
     let shrouds = |e: &EsfFile| {
@@ -1046,7 +1049,7 @@ fn sight_state_is_written() {
     m.world.sight_radius.insert(general, 22.5);
     m.world.character_details.get_mut(&general).unwrap().hidden = true;
     m.world.faction_details.get_mut(&france).unwrap().exposed = vec![general];
-    let out = save::write_save(&esf, &m, "france", 1).unwrap();
+    let out = save::write_save(&esf, &m, "france", 1, None).unwrap();
     let back_esf = EsfFile::from_bytes(&out.to_bytes().unwrap()).unwrap();
     assert!(ntw_campaign::save_check::check(&back_esf).violations.is_empty());
     let back = ntw_campaign::read_esf(&back_esf, &db).unwrap();
@@ -1058,10 +1061,10 @@ fn sight_state_is_written() {
     assert_eq!(back.model.world.faction_details[&france].exposed, vec![general]);
 }
 
-/// The ESF writer's header season name follows the calendar (`SAVE_GAME_HEADER` #4; review: it kept
-/// the start position's): a Europe campaign saved in June says "Summer" on the load list.
+/// The ESF writer's header season name is the caller's on-screen string (`SAVE_GAME_HEADER` #4), not a lookup
+/// of its own: a save passed "Ete" says that, and one passed `None` keeps the source's name.
 #[test]
-fn the_header_season_follows_the_calendar() {
+fn the_header_season_is_the_callers_string() {
     let dir = data_dir();
     if !dir.is_dir() {
         println!("SKIPPED: no install");
@@ -1073,7 +1076,49 @@ fn the_header_season_follows_the_calendar() {
     let mut l = ntw_campaign::read_esf(&esf, &db).unwrap();
     assert_eq!(l.info.header.season_name, "Winter");
     l.model.calendar.date.set_quarter(1805, 5 * 4);
-    let out = save::write_save(&esf, &l.model, "france", 1).unwrap();
+    let out = save::write_save(&esf, &l.model, "france", 1, Some("Ete")).unwrap();
     let info = ntw_campaign::read_info(&out.to_bytes().unwrap()).unwrap();
-    assert_eq!((info.header.season_name.as_str(), info.header.date.map(|d| d.month)), ("Summer", Some(5)));
+    assert_eq!((info.header.season_name.as_str(), info.header.date.map(|d| d.month)), ("Ete", Some(5)));
+    let kept = save::write_save(&esf, &l.model, "france", 1, None).unwrap();
+    assert_eq!(ntw_campaign::read_info(&kept.to_bytes().unwrap()).unwrap().header.season_name, "Winter");
+}
+
+/// esfevents: the triggered historical events are written as the exe's writer `0x00895050` writes them,
+/// at its place in `CAMPAIGN_MODEL` (after `PENDING_BATTLE`, before `HISTORICAL_CHARACTER_MANAGER`, as
+/// the writer `0x008EBAB0` calls them), and read back. With none triggered the block is node for node
+/// and byte for byte the one of a vanilla save (the read-only evidence copy `orig_fr_t1.save`; that
+/// part skips without it).
+#[test]
+fn triggered_historical_events_are_written() {
+    let dir = data_dir();
+    if !dir.is_dir() {
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).unwrap();
+    let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
+    let mut m = ntw_campaign::read_esf(&esf, &db).unwrap().model;
+    let block = |f: &EsfFile| -> (Vec<String>, EsfRecord) {
+        let model = f.root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL").unwrap();
+        let i = model.children.iter().position(|c| c.record_name() == Some("HISTORICAL_EVENT_MANAGER")).unwrap();
+        let around = [i - 1, i + 1].map(|j| model.children[j].record_name().unwrap_or_default().to_owned());
+        (around.to_vec(), model.children[i].as_record().unwrap().clone())
+    };
+    let empty = block(&save::write_save(&esf, &m, "france", 1, None).unwrap());
+    assert_eq!(empty.0, ["PENDING_BATTLE", "HISTORICAL_CHARACTER_MANAGER"]);
+    let vanilla = common::evidence_dir().join("orig_fr_t1.save");
+    if let Ok(bytes) = std::fs::read(&vanilla) {
+        let original = block(&EsfFile::from_bytes(&bytes).unwrap());
+        assert_eq!(empty, original, "node for node");
+        let encode = |r: &EsfRecord| EsfFile::new(r.clone()).to_bytes().unwrap();
+        assert_eq!(encode(&empty.1), encode(&original.1), "byte for byte");
+    }
+    m.world.historical_events_triggered = vec!["a_once".into(), "b_quiet".into()];
+    let out = save::write_save(&esf, &m, "france", 1, None).unwrap();
+    let (around, written) = block(&out);
+    assert_eq!(around, ["PENDING_BATTLE", "HISTORICAL_CHARACTER_MANAGER"]);
+    let arr = written.record_array("TRIGGERED_DYNAMIC_EVENT_ARRAY").unwrap();
+    assert_eq!((written.version, written.children.len(), arr.version), (1, 1, 0));
+    assert_eq!(arr.items, [vec![EsfNode::Utf16String("a_once".into())], vec![EsfNode::Utf16String("b_quiet".into())]]);
+    let back = ntw_campaign::read(&out.to_bytes().unwrap(), &db).unwrap();
+    assert_eq!(back.model.world.historical_events_triggered, ["a_once", "b_quiet"]);
 }

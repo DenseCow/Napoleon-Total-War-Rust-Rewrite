@@ -265,6 +265,12 @@ impl CampaignModel {
                 h.i32(*v);
             }
         }
+        h.u32(w.upkeep_booked.len() as u32);
+        for (f, [land, naval]) in &w.upkeep_booked {
+            h.i32(f.raw());
+            h.i32(*land);
+            h.i32(*naval);
+        }
         // The relationship records the diplomacy rules change (attitude factors and counters).
         h.u32(w.relationships.len() as u32);
         for ((a, b), r) in &w.relationships {
@@ -420,6 +426,8 @@ impl CampaignModel {
             h.u32(p.trend);
             h.u32(u32::from(p.overcrowded));
             h.i32(p.migrants);
+            h.i32(p.policing_cost);
+            h.i32(p.policing_booked);
             h.u32(r.religions.len() as u32);
             for (k, s) in &r.religions {
                 h.str(k);
@@ -491,6 +499,13 @@ impl CampaignModel {
             h.i32(ch.base_movement_points);
             h.u32(ch.garrisoned_in.map_or(u32::MAX, RegionId::raw));
         }
+        // The faction lists' order, faction by faction (a stable sort keeps each list's order), so
+        // an ESF save, which writes each faction's list in order, loads to the same hash.
+        let mut listed = w.characters_in_list_order();
+        listed.sort_by_key(|id| w.characters.get(id).map(|c| c.faction));
+        for id in listed {
+            h.i32(id.raw());
+        }
         h.u32(w.forces.len() as u32);
         for fo in w.forces.values() {
             h.u32(fo.id.raw());
@@ -511,6 +526,14 @@ impl CampaignModel {
             h.u32(army.raw());
             h.u32(navy.raw());
         }
+        h.u32(w.region_risen_armies.len() as u32);
+        for (r, armies) in &w.region_risen_armies {
+            h.u32(r.raw());
+            h.u32(armies.len() as u32);
+            for a in armies {
+                h.u32(a.raw());
+            }
+        }
         h.u32(w.deal_regions_received.len() as u32);
         for (f, n) in &w.deal_regions_received {
             h.i32(f.raw());
@@ -523,6 +546,10 @@ impl CampaignModel {
             for r in regions {
                 h.u32(r.raw());
             }
+        }
+        h.u32(w.historical_events_triggered.len() as u32);
+        for key in &w.historical_events_triggered {
+            h.str(key);
         }
         self.director.hash_into(&mut h);
         h.finish()
@@ -597,6 +624,19 @@ pub struct World {
     /// `CHARACTER` records (W3 §3.5). In the ESF they live inside each faction's
     /// `CHARACTER_ARRAY`; here they are flattened into one map, with [`Character::faction`].
     pub characters: BTreeMap<CharacterId, Character>,
+    /// The order of the faction character lists (faction +0x758 PtrVector, data at +0x768): each
+    /// faction's list is this sequence filtered by [`Character::faction`], read through
+    /// [`World::characters_in_list_order`]. In the original every character constructor appends
+    /// the new character at the end of its faction's list (`0x00878C10` → `0x008CF6B0`), the loader
+    /// builds each list in `CHARACTER_ARRAY` order (`0x0087A190`), the writer saves the list in
+    /// order (`0x00892A80`), removal keeps the order (`0x008B0150`) and a faction transfer moves the
+    /// character to the end of the new list (`0x00A1B4E0`, [`World::transfer_character`]).
+    /// CONFIRMED (PATHFINDING.md §8). The importer fills it in file order;
+    /// characters made since are not listed: they follow the listed ones by id, which is creation
+    /// order ([`World::alloc_id`] hands out rising ids). An own save from before the field reads it
+    /// empty (id order).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub character_order: Vec<CharacterId>,
     /// `ARMY` / `NAVY` → `MILITARY_FORCE` records (W3 §3.6). In the ESF they live inside each
     /// faction's `ARMY_ARRAY`; here they are flattened, with [`MilitaryForce::faction`].
     pub forces: BTreeMap<ForceId, MilitaryForce>,
@@ -608,6 +648,15 @@ pub struct World {
     /// The full `DIPLOMACY_RELATIONSHIP` records by (owner, target) (see
     /// [`details`](super::details)); the stances are in [`Faction::diplomacy`].
     pub relationships: super::details::RelationshipMap,
+    /// Each faction's diplomacy records in the order the original keeps them (the target of each, in
+    /// `DIPLOMACY_RELATIONSHIPS_ARRAY` order), read through [`World::record_targets_in_order`]. The
+    /// loader `InitializeFromSave` `0x00AE8E10` appends the records in file order, a new faction's
+    /// record is pushed at the end (`0x00B5F330`), nothing sorts or removes them, and the writer saves
+    /// them in that order (CONFIRMED; the vanilla saves list them out of id order). The importer
+    /// fills it; the ESF writer patches the records in place, so the order survives there. An own save
+    /// older than format version 10 takes the campaign start's (`ntw_campaign::own_save::read_with_start`).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub diplomacy_record_order: BTreeMap<FactionId, Vec<FactionId>>,
     /// The accumulated value of the route of a pair with no stored route, by (exporter, importer).
     /// A stored route keeps its own ([`TradePath::accumulated`](super::trade::TradePath::accumulated),
     /// +0x3C); a pair without one has a single route built over the network when its trade is valued
@@ -657,6 +706,11 @@ pub struct World {
     /// factions in id order. Static data, not hashed.
     #[cfg_attr(feature = "serde", serde(default))]
     pub ai_factions: Vec<FactionId>,
+    /// The map's black shroud outlines, (name, outline in map units) in file order: what
+    /// `unveil_black_shroud(name)` lifts ([`CampaignModel::unveil_black_shroud`]). Empty when the map
+    /// is not attached or has none (of the original's maps only the tutorial has any). Static data, not hashed.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub black_shroud_outlines: Vec<(String, Vec<(f32, f32)>)>,
     /// Bankrupt turns in a row of each faction (the economics object's +0x460, CONFIRMED); a faction
     /// that can pay is not listed.
     pub bankrupt_turns: BTreeMap<FactionId, u32>,
@@ -665,10 +719,24 @@ pub struct World {
     /// index `+0x3F0`), oldest first as the saver `0x00BD46E0` writes it (CONFIRMED). Income is
     /// categories 5..11 (5 taxes, 7 trade, 11 other), expenses 18..24 (19 land, 20 naval upkeep);
     /// the rest are one-off spending and refunds (CAMPAIGN_FIDELITY.md "FACTION_ECONOMICS").
-    /// Loaded and saved; [`super::economy::settle_round`] adds a record each round end. A faction
-    /// without an entry has no history.
+    /// The last record is the running one (record `(cursor − 1) mod 10`, `0x00BABE00`): the round end
+    /// pays it and starts the next from it ([`super::economy::settle_round`],
+    /// [`super::economy::next_running_record`]), and its taxes and trade are rewritten through the
+    /// turn ([`super::economy::refresh_running_income`]); the saver writes it last, so a save's last
+    /// item is it (CONFIRMED, `0x00BD46E0` writes records `cursor − count .. cursor − 1`). Loaded and
+    /// saved. A faction without an entry has no history.
     #[cfg_attr(feature = "serde", serde(default))]
     pub economy_history: BTreeMap<FactionId, Vec<EconomyRecord>>,
+    /// Each faction's land and naval upkeep trackers (faction +0x738 / +0x744, built by the faction loader
+    /// `0x0087A190` through `0x0086FEE0` / `0x0086FF10`): the amounts they have booked into its running
+    /// record's categories 19 and 20 (`0x00BBE930` groups 1 and 2). Their setters `0x0088F950` /
+    /// `0x0088F990` book the change and store the new amount ([`super::economy::set_upkeep_trackers`]); the
+    /// round start and the round end's first pass set them to the upkeep. Saved as `FACTION` #46 / #47, the
+    /// two i32 after the first bool array after `EXPOSED_CHARACTERS` (the loader reads them at
+    /// `0x0087B548` / `0x0087B551`; CONFIRMED in `orig_fr_may1811`: France's 12019 / 563 equal its record's
+    /// categories 19 / 20). A faction without an entry has booked 0 (the trackers start at 0).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub upkeep_booked: BTreeMap<FactionId, [i32; 2]>,
     /// Each faction's diplomacy manager counters, the four u32 after the relationships in
     /// `DIPLOMACY_MANAGER` (#1 +0x14, #2 +0x18, #3 +0x1C, #4 +0x20; read by `0x00AE8E10`, written by
     /// `0x00AFC160`, CONFIRMED). A faction without an entry has the constructors' values
@@ -692,6 +760,17 @@ pub struct World {
     /// offers to liberate the campaign faction with this key (`0x00B14930`; see
     /// [`capture`](super::capture)). Static data, not hashed.
     pub region_rebel_factions: BTreeMap<RegionId, String>,
+    /// The armies risen in each region: `REGION` #35 (#34 when the region has no `REBEL_DATA` template
+    /// block), the ids of the `ARMY`s in the region's set +0x220 (CONFIRMED: `ConstructCampaignRegionFromEsf`
+    /// `0x00A45950` reads the id list with `0x0086F140` and adds each army to the set, `0x008CFB60`; the ids
+    /// are the rebel armies' `ARMY` #4 in the vanilla saves). Such an army's `REBEL_DATA` (army +0x98)
+    /// points back at the region, and its zone of control floods only into that region (`0x00B078C0`,
+    /// [`zones`](super::zones)). A force leaves its list when it leaves the world
+    /// (`CampaignModel::remove_force`); the save writes the lists back to the same slot. Nothing of
+    /// ours adds to them yet: the rising that makes an army's `REBEL_DATA` (`0x00870E60` / `0x008AF5D0`)
+    /// is not modelled (BACKLOG: rebellions).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub region_risen_armies: BTreeMap<RegionId, Vec<ForceId>>,
     /// The script missions of each faction (see [`CampaignMission`](super::details::CampaignMission)).
     /// Not part of `state_hash`; no rule runs them yet (PROVISIONAL: loaded for the UI and scripts).
     pub missions: super::details::MissionMap,
@@ -776,6 +855,53 @@ pub struct World {
     /// vanilla save; only the tutorial scripts set it. An own save from before the field reads false.
     #[cfg_attr(feature = "serde", serde(default))]
     pub saving_disabled: bool,
+    /// The HUD shows turns instead of dates (episodic restrictions +0xD1, `CAMPAIGN_MODEL/
+    /// EPISODIC_RESTRICTIONS` #8 bool, read by the loader `0x009968A0` for versions above 1;
+    /// CONFIRMED). Its only writer is the script method `display_turns(bool)` (`0x00979600`); while
+    /// set, the HUD update `0x009C1AD0` calls `UpdateFactionFundsAndTurn` instead of
+    /// `UpdateFactionFundsAndDate`, `CampaignUI.CurrentYear` (`0x009E2010`) answers the turn number
+    /// and `CampaignUI.DisplayingTurns` (`0x009E24D0`) answers true. False in every vanilla save and
+    /// no vanilla script sets it. An own save from before the field reads false.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub display_turns: bool,
+    /// The technology lists of the building screens are switched off (episodic restrictions +0x118,
+    /// `CAMPAIGN_MODEL/EPISODIC_RESTRICTIONS` #29 bool, read by the loader `0x009968A0` for versions
+    /// above 0xE; CONFIRMED). Its only writer is the script method
+    /// `set_technology_research_disabled(bool)` (`0x0097B900`). Despite its name it gates no
+    /// research: every reader is a building screen's list of the technologies a building level
+    /// unlocks (`0x008C7620`), left empty while it is set: the building info (`0x009B7300`, called by
+    /// `CampaignUI.BuildingEffects`, `0x009DE150`), the building-completed messages (`0x009CDA30` /
+    /// `0x009FB920` copy it to message +0xBC when posting; their details builder `0x00A096C0` passes
+    /// that copy to `0x009B2BB0`) and `CampaignUI.FortEffects`'s "technology" table (`0x009E4AA0` →
+    /// `0x009B2BB0`, the live value). The only readers in the exe (every +0xFA8 load checked). Ours:
+    /// [`super::CampaignModel::building_info_technologies`] reads it,
+    /// [`super::CampaignModel::effects_table_technologies`] takes it from its caller (live, or the
+    /// message's copy). Set in the ita start position (as its scripts set it), false in
+    /// the others; saved at #29 by the writer `0x009A1070`. An own save from before the field reads
+    /// false.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub technology_research_disabled: bool,
+    /// A capture offers no liberation (episodic restrictions +0x124, `CAMPAIGN_MODEL/
+    /// EPISODIC_RESTRICTIONS` #31 bool, read by the loader `0x009968A0` for versions above 0xF;
+    /// CONFIRMED). Its only writer is the script method `set_liberation_options_disabled(bool)`
+    /// (`0x0097B940`); its only reader is the capture options `0x00B14930`
+    /// ([`CampaignModel::liberation_target`]). Set in the ita, egy, tut, mp_ita and mp_egy start
+    /// positions (as their scripts set it); saved at #31 by the writer `0x009A1070`. An own save
+    /// from before the field reads false.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub liberation_options_disabled: bool,
+    /// A win by the victory conditions is not announced (episodic restrictions +0x125,
+    /// `CAMPAIGN_MODEL/EPISODIC_RESTRICTIONS` #32 bool, read by the loader `0x009968A0` for versions
+    /// above 0x10; CONFIRMED). Its only writer is the script method
+    /// `set_ui_notification_of_victory_disabled(bool)` (`0x0097B980`). While set, the victory test
+    /// `0x0096FCE0` still marks the faction won and fires its own event but posts no `campaign_won`
+    /// message (test `0x0096FFE7`), and the victory check `0x0096CD10` fires no win event +0x120 for
+    /// a winner and skips that winner's multiplayer campaign-over step (test `0x0096CE9C`); the
+    /// losers' event +0x138 is unchanged. Ours has no victory check yet (BACKLOG "Defeat / victory
+    /// screen"): it must read this. Set in the tut start position (as its scripts set it); saved at
+    /// #32 by the writer `0x009A1070`. An own save from before the field reads false.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub victory_notification_disabled: bool,
     /// The faction whose shroud keeps the AI from shopping under it: the script's
     /// `disable_shopping_for_ai_under_shroud` (`0x00AA9B40`, CAI interface +0x618, CONFIRMED), set
     /// by [`CampaignModel::set_ai_shopping_shroud`] and read by
@@ -829,6 +955,13 @@ pub struct World {
     /// that loaded a different set. A faction without an entry names none.
     #[cfg_attr(feature = "serde", serde(default))]
     pub victory_regions: BTreeMap<FactionId, std::collections::BTreeSet<RegionId>>,
+    /// The once-only historical events already triggered (the historical event manager's list, model
+    /// +0xF84 +8/+0xC, kept sorted by `0x008BBC50`: `CompareUniStrings`, by UTF-16 code unit;
+    /// [`super::historical_events`]). Saved as `HISTORICAL_EVENT_MANAGER` /
+    /// `TRIGGERED_DYNAMIC_EVENT_ARRAY` (loader `0x0087F980`, writer `0x00895050`; empty in every vanilla
+    /// save, since no vanilla event is once-only). Hashed.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub historical_events_triggered: Vec<String>,
 }
 
 /// One of the campaign AI's map areas ([`World::ai_areas`]): a `CAI_REGION`.
@@ -971,6 +1104,63 @@ impl World {
         self.factions.get(&f).is_some_and(|x| x.key.is_empty())
     }
 
+    /// Remove a character from the world and from [`World::character_order`] (every listing of
+    /// him), so the list holds no dead id. Returns the removed character.
+    pub fn remove_character(&mut self, id: CharacterId) -> Option<Character> {
+        let dead = self.characters.remove(&id)?;
+        self.character_order.retain(|x| *x != id);
+        Some(dead)
+    }
+
+    /// The list half of a character's faction transfer (`0x00A1B4E0`, CONFIRMED by disassembly): he is
+    /// unlinked from his old faction's list (`0x008B0150`, the others keep their order) and appended
+    /// at the end of the new faction's (thunk `0x008CF9F0` → `0x008CF6B0`), and his faction becomes
+    /// `to`. The whole order is listed first, so characters made before the transfer stay ahead of
+    /// him. A port of a transfer goes through here; the rest of `0x00A1B4E0` (character +0x478, his
+    /// force, the events) is not modelled yet, and no rule of ours transfers a character yet.
+    pub fn transfer_character(&mut self, id: CharacterId, to: FactionId) {
+        let mut order = self.characters_in_list_order();
+        let Some(c) = self.characters.get_mut(&id) else {
+            log::warn!("transfer of character {id:?} to {to:?}: no such character; skipped");
+            return;
+        };
+        c.faction = to;
+        order.retain(|x| *x != id);
+        order.push(id);
+        self.character_order = order;
+    }
+
+    /// Every character in faction-list order ([`World::character_order`]): the listed ones that
+    /// still exist (first listing only), then the rest by id. Filtered by faction, this is that
+    /// faction's list (+0x768) as the original walks it. Allocates: cold paths only.
+    pub fn characters_in_list_order(&self) -> Vec<CharacterId> {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::with_capacity(self.characters.len());
+        for &id in &self.character_order {
+            if self.characters.contains_key(&id) && seen.insert(id) {
+                out.push(id);
+            }
+        }
+        out.extend(self.characters.keys().copied().filter(|id| !seen.contains(id)));
+        out
+    }
+
+    /// The targets of `owner`'s diplomacy records in record order ([`World::diplomacy_record_order`]):
+    /// the listed ones that still exist (first listing only), then every other faction but `owner`
+    /// by id (a record made since is pushed at the end in the original, `0x00B5F330`). Allocates:
+    /// cold paths only.
+    pub fn record_targets_in_order(&self, owner: FactionId) -> Vec<FactionId> {
+        let mut seen = std::collections::BTreeSet::from([owner]);
+        let mut out = Vec::with_capacity(self.factions.len());
+        let listed = self.diplomacy_record_order.get(&owner).into_iter().flatten().copied();
+        for f in listed.chain(self.factions.keys().copied()) {
+            if self.factions.contains_key(&f) && seen.insert(f) {
+                out.push(f);
+            }
+        }
+        out
+    }
+
     /// Every faction in turn order: [`World::turn_order`] first, then any other faction in id
     /// order (our own addition for factions a mod adds without listing them), and the rebels last
     /// wherever they are listed. The exe keeps the rebels outside its turn list (world +0x1C, list
@@ -992,19 +1182,21 @@ impl World {
         out
     }
 
-    /// The last record of `faction`'s economics history (record `(current − 1) mod 10`, `0x00BABE00`).
+    /// The running record of `faction`'s economics history (record `(cursor − 1) mod 10`,
+    /// `0x00BABE00`; [`World::economy_history`]).
     pub fn last_economy_record(&self, faction: FactionId) -> Option<&EconomyRecord> {
         self.economy_history.get(&faction)?.last()
     }
 
-    /// `faction`'s income of the last turn: the sum of categories 5..11 of its last economics record
+    /// `faction`'s income as its running record holds it: the sum of categories 5..11
     /// (`GetFactionLastTurnIncomeTotal` `0x00BBCC40` / `0x00BBE970`, CONFIRMED; the Wealth of
-    /// [`CampaignModel::faction_rankings`]); 0 without a history. Integer sums wrap as the exe's.
+    /// [`CampaignModel::faction_rankings`]): the last round end's figures with the taxes and trade
+    /// rewritten since. 0 without a history. Integer sums wrap as the exe's.
     pub fn last_income(&self, faction: FactionId) -> i32 {
         self.last_economy_record(faction).map_or(0, |r| economy_sum(r, 5..12))
     }
 
-    /// `faction`'s expenses of the last turn: categories 18..24 of its last record (`0x00BBE910`,
+    /// `faction`'s expenses as its running record holds them: categories 18..24 (`0x00BBE910`,
     /// CONFIRMED); 0 without a history.
     pub fn last_expenses(&self, faction: FactionId) -> i32 {
         self.last_economy_record(faction).map_or(0, |r| economy_sum(r, 18..25))

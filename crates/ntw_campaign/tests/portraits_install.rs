@@ -193,7 +193,7 @@ fn a_candidate_keeps_his_portrait_through_an_esf_save() {
     let c: CharacterId = m.create_candidate(france, ntw_sim::campaign::pool::PoolKind::General).expect("a candidate");
     let portrait = m.world.character_details[&c].portrait.clone();
     assert!(portrait.index >= 0);
-    let bytes = ntw_campaign::save::save_bytes(&esf, &m, "france", 0).expect("save");
+    let bytes = ntw_campaign::save::save_bytes(&esf, &m, "france", 0, None).expect("save");
     let back = ntw_campaign::read(&bytes, &i.db).expect("read back").model;
     assert_eq!(back.world.character_details[&c].portrait, portrait);
     let decks = |p: &[ntw_sim::campaign::portraits::CulturePortraits]| -> Vec<(u32, u32, Vec<u32>)> {

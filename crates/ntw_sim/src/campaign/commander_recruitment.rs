@@ -290,6 +290,8 @@ impl CampaignModel {
         let open7 = super::movers::open_shared(pm, pm.locate(a.0, a.1, mover, 2), pm.locate(b.0, b.1, mover, 2));
         let family = super::movers::Family::of(true);
         let blocked = |q: usize| super::movers::kind7_closed(&view, family, &open7, q);
+        // PROVISIONAL: no zone region gate here; the exe's gate on this search is not yet traced (the
+        // land search's is `0x00B2CC20` / `0x00B16CF0`; BACKLOG: trace whether the path searches share it).
         let Some(path) = view.find_path_avoiding(a, b, mover, by_id, &blocked) else { return -1.0 };
         if path.costs.last().is_some_and(|&c| c > limit) {
             return -1.0;

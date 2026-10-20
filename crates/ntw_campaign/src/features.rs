@@ -2,7 +2,7 @@
 //! [`CampaignFeatures`] the exe hard-codes for them (MODDING_AUDIT.md §1.1). The model reads the
 //! table, never the key, so a campaign of another source sets its own.
 
-use ntw_sim::campaign::features::{CampaignFeatures, LootResentment, UnitKeyEffects};
+use ntw_sim::campaign::features::{CampaignFeatures, LootResentment, PeaceAccessGrant, UnitKeyEffects};
 
 /// The Peninsular campaign's key: the exe's switches below test it (each CONFIRMED at the address the
 /// feature's field names).
@@ -15,6 +15,9 @@ const SAVE_NAMED_BY_CAMPAIGN: [&str; 4] = ["egy_napoleon", "ita_napoleon", "tut_
 /// The Empire campaign key whose diplomacy screen hides `britain` (`0x009F2EA0` at `0x009F2F77`,
 /// CONFIRMED); no Napoleon campaign has it, so vanilla never hides a faction.
 const EPISODIC_3: &str = "episodic_3";
+/// The campaign-key prefix whose building effects tables show no technologies (`0x009B2BB0`, string
+/// `0x0136C4F8` tested at `0x009B2FD9`, CONFIRMED); no Napoleon campaign key has it.
+const EPISODIC_PREFIX: &str = "episodic";
 
 /// The feature set the exe gives the original's campaign `key`; any other key gets none (the exe's
 /// behaviour for every campaign it has no switch for).
@@ -40,6 +43,12 @@ pub fn original(key: &str) -> CampaignFeatures {
             factor: "abandoned_ally_in_war".into(),
             value: -50,
         });
+        // `MakePeaceWithFaction` 0x00B262C0: an Iberian peace with Britain gives Britain indefinite access.
+        f.peace_access_grants = vec![PeaceAccessGrant {
+            granters: vec!["spa_spain".into(), "spa_portugal".into()],
+            grantee: "spa_britain".into(),
+            turns: -1,
+        }];
     }
     if key == MP_EUROPE {
         f.ai_recruitment_points = vec![("france".into(), 1)];
@@ -48,6 +57,7 @@ pub fn original(key: &str) -> CampaignFeatures {
     if key == EPISODIC_3 {
         f.diplomacy_hidden_factions = vec!["britain".into()];
     }
+    f.effects_technologies_hidden = key.starts_with(EPISODIC_PREFIX);
     f
 }
 
@@ -79,11 +89,18 @@ mod tests {
         let lr = spa.loot_resentment.as_ref().expect("loot resentment");
         assert_eq!(lr.homelands.iter().map(|(_, f)| f.as_str()).collect::<Vec<_>>(), ["spa_portugal", "spa_portugal", "spa_spain"]);
         assert_eq!((lr.exempt_looter.as_deref(), lr.factor.as_str(), lr.value), (Some("spa_france"), "abandoned_ally_in_war", -50));
+        let [grant] = spa.peace_access_grants.as_slice() else { panic!("one peace access grant") };
+        assert_eq!((grant.granters.as_slice(), grant.grantee.as_str(), grant.turns), (&["spa_spain".to_owned(), "spa_portugal".to_owned()][..], "spa_britain", -1));
         let mp = original("mp_eur_napoleon");
         assert_eq!(mp.ai_recruitment_bonus("france"), 1);
         assert_eq!(mp.ai_recruitment_bonus("britain"), 0);
         assert_eq!(CampaignFeatures { ai_recruitment_points: Vec::new(), ..mp }, CampaignFeatures::default());
         assert_eq!(original("episodic_3").diplomacy_hidden_factions, ["britain"]);
+        for key in ["episodic_1", "episodic_3"] {
+            assert!(original(key).effects_technologies_hidden, "{key}");
+        }
+        assert!(!original("Episodic_1").effects_technologies_hidden, "case-sensitive prefix");
+        assert_eq!(CampaignFeatures { effects_technologies_hidden: false, ..original("episodic_1") }, CampaignFeatures::default());
     }
 
     /// A campaign's own data can name any feature set: it round-trips through the open text format.

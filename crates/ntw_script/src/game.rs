@@ -86,6 +86,11 @@ pub const GAME_INTERFACE_METHODS: [&str; 63] = [
     "unveil_black_shroud",
 ];
 
+/// game_interface methods the exe registers (its script method table, e.g. `display_turns` at
+/// `0x01458158`) that no shipped script calls but a mod's script may (CONFIRMED name and behaviour
+/// at each one's `dispatch` arm).
+pub const MOD_GAME_INTERFACE_METHODS: [&str; 1] = ["display_turns"];
+
 // ---------------------------------------------------------------------------------------------
 // Argument helpers (shared with `conditions`)
 // ---------------------------------------------------------------------------------------------
@@ -110,9 +115,60 @@ pub(crate) fn arg_f32(args: &MultiValue, i: usize) -> Option<f32> {
     }
 }
 
-/// Argument `i` with Lua truthiness (only `nil` and `false` are false).
-pub(crate) fn arg_bool(args: &MultiValue, i: usize) -> bool {
-    !matches!(args.get(i), None | Some(Value::Nil) | Some(Value::Boolean(false)))
+/// The type the exe's argument readers name in their script error ("found type %s", `lua_typename`
+/// of the stack top, Lua 5.1): a missing argument finds the slot below the arguments, the called
+/// function itself (see `faction_key_args`, ui/campaign/diplomacy.rs); a light userdata is
+/// "userdata" and every number is "number" (mlua's own names "lightuserdata" and "integer" are not
+/// Lua's).
+pub(crate) fn lua_found_type(v: Option<&Value>) -> &'static str {
+    match v {
+        None => "function",
+        Some(Value::LightUserData(_)) => "userdata",
+        Some(Value::Integer(_) | Value::Number(_)) => "number",
+        Some(v) => v.type_name(),
+    }
+}
+
+/// Logs the exe's argument-type script error "Trying to retrieve type `want`, found type `found`"
+/// (`0x01095090` → the logger `0x0106BD10`, no Lua error raised) once per method and type found.
+/// The exe logs it on every call, and its cleared ok flag silences the later argument reads of
+/// that script context too (the ORIGINAL BUG noted at `CreateFromLayout`, ui/host.rs); ours fails
+/// just the call.
+fn type_error_once(s: &Shared, name: &'static str, want: &str, found: &'static str) {
+    let mut st = s.borrow_mut();
+    if st.type_errors_logged.insert((name, found)) {
+        st.log.push(format!("ERROR game_interface:{name}: Trying to retrieve type {want}, found type {found} (logged once)"));
+    }
+}
+
+/// The argument of a one-boolean binding as the exe's reader `0x01055840` takes it (CONFIRMED by
+/// disassembly): the top of the Lua stack (`lua_type(L, -1)`, then `lua_settop(L, -2)`), i.e. the
+/// **last** value passed (any before it are ignored, and the binding never checks the object: its
+/// `this` comes from the registration, not the stack), and only a real Lua boolean (a number,
+/// string or nil is not read, whatever its truthiness). Anything else is the type error, logged
+/// once ([`type_error_once`]), and `None`; with no argument the top is the object itself
+/// (`game_interface:show_shroud()`), or the called function when nothing at all is passed.
+fn top_bool(s: &Shared, name: &'static str, args: &MultiValue) -> Option<bool> {
+    match args.back() {
+        Some(Value::Boolean(b)) => Some(*b),
+        v => {
+            type_error_once(s, name, "boolean", lua_found_type(v));
+            None
+        }
+    }
+}
+
+/// The argument of a one-string binding as the exe's reader `0x01055760` takes it (CONFIRMED by
+/// disassembly): the top of the Lua stack, as [`top_bool`], when `lua_isstring` (a string, or a
+/// number turned into its string); anything else is the type error, logged once
+/// ([`type_error_once`]), and `None`.
+fn top_str(lua: &Lua, s: &Shared, name: &'static str, args: &MultiValue) -> Option<String> {
+    let top = args.back();
+    if let Some(Ok(Some(text))) = top.map(|v| lua.coerce_string(v.clone())) {
+        return Some(text.to_string_lossy());
+    }
+    type_error_once(s, name, "string", lua_found_type(top));
+    None
 }
 
 /// A short readable form of the arguments, for log lines.
@@ -166,7 +222,7 @@ pub(crate) fn log(shared: &Shared, line: String) {
 /// campaign's single interface; calling it again returns the same table).
 pub(crate) fn create(lua: &Lua, shared: &Shared) -> mlua::Result<Table> {
     let gi = lua.create_table()?;
-    for name in GAME_INTERFACE_METHODS {
+    for name in GAME_INTERFACE_METHODS.into_iter().chain(MOD_GAME_INTERFACE_METHODS) {
         gi.set(name, method(lua, shared, name)?)?;
     }
     // Any other name: a logging stub too (UNKNOWN), created on first use.
@@ -216,58 +272,58 @@ fn dispatch(lua: &Lua, s: &Shared, name: &'static str, args: &MultiValue) -> mlu
             }
         }
 
-        // show_shroud(on) / unveil_black_shroud(on): the fog of war (CONFIRMED names and argument
-        // count from the shipped campaign scripts -- 26 and 15 call sites, one boolean each).
-        // INFERRED meaning, from the names and what the model holds (`World::shrouds`, shroud #3
-        // "the shroud is on; off, everything is visible"):
-        //   show_shroud(true/false)      -> the local player's shroud on / off;
-        //   unveil_black_shroud(true)    -> the whole map is explored for the local player (the
-        //                                 black shroud is lifted), so nothing is hidden from him;
-        //   unveil_black_shroud(false)   -> nothing to put back, so it only logs.
-        // Which faction the calls name is UNKNOWN (they take no faction); the shroud is the human's
-        // (only he keeps one, INFERRED: the start positions).
-        "show_shroud" | "unveil_black_shroud" => {
-            let on = arg_bool(args, 1);
+        // show_shroud(on): CONFIRMED (binding `0x00979260`, one boolean read by `0x01055840`; 26
+        // shipped call sites, one boolean each): every faction's shroud on or off
+        // (`CampaignModel::show_shroud`). ORIGINAL BUG: `0x00979260` does not clear its result
+        // before the read (`0x01055840` writes it only for a real Lua boolean, and the slot is the
+        // lua_State argument's), so a non-boolean (number, nil, no argument) stores that pointer's
+        // low byte, an arbitrary value, into every shroud. Ours stores false, as `display_turns`.
+        "show_shroud" => {
+            let on = top_bool(s, name, args).unwrap_or(false);
             let mut st = s.borrow_mut();
-            let human = st.local_faction.clone();
-            let Some(id) = st.faction_id(&human) else {
-                st.log.push(format!("{text}: unknown faction {human:?}"));
-                return Ok(Value::Nil);
-            };
-            let grid = st.model.world.sight_grid;
-            let Some(shroud) = st.model.world.shrouds.get_mut(&id) else {
-                st.log.push(format!("{text}: {human} has no shroud"));
-                return Ok(Value::Nil);
-            };
-            if name == "show_shroud" {
-                shroud.active = on;
-            } else if on
-                && let Some(grid) = grid
-            {
-                // Every cell of the grid explored: what "unveiling" means for the player.
-                let cols = grid.cols;
-                let rows = grid.rows;
-                for x in 0..cols {
-                    for z in 0..rows {
-                        shroud.explored.set(x, z);
-                    }
-                }
-            }
+            st.model.show_shroud(on);
             st.log.push(text);
         }
 
-        // other_income_mod(faction, amount): stored only (see ScriptState::other_income). UNKNOWN
-        // how the original applies it.
+        // unveil_black_shroud(key): CONFIRMED (binding `0x00977A90`, one string read by `0x01055760`;
+        // the tutorial's 9 call sites pass "shroud_map_1_1" .. "shroud_map_1_9", once each; a data.pack
+        // feature-list script (`m_features`, "show_shroud_1_1" ..) passes 1_1 .. 1_3 and 2_1 .. 2_3):
+        // every shroud's black shroud is lifted inside the map's outlines of that name
+        // (`regions.esf` `black_shroud_outlines`, `CampaignModel::unveil_black_shroud`). A name no
+        // outline has does nothing in the exe; ours says so in the log line. On a non-string the
+        // reader logs the type error and leaves the name empty, and `0x00977A90` still calls
+        // `0x008F7760` with it (no ok-flag check), as ours does.
+        "unveil_black_shroud" => {
+            let key = top_str(lua, s, name, args).unwrap_or_default();
+            let mut st = s.borrow_mut();
+            if st.model.unveil_black_shroud(&key) == 0 {
+                st.log.push(format!("{text}: no black shroud outline {key:?} on this map"));
+            } else {
+                st.log.push(text);
+            }
+        }
+
+        // other_income_mod(faction, amount): CONFIRMED (`0x0097BB70` → `0x00A15B30`) a lasting other
+        // income entry (or, negative and for an AI faction, an expense entry) in the faction's running
+        // economics record (ntw_sim::campaign::economy::script_other_income_mod); an unknown faction
+        // changes nothing.
         "other_income_mod" => {
             let (Some(faction), Some(amount)) = (arg_str(args, 1), arg_f32(args, 2)) else {
                 return bad_args(s, text);
             };
             let mut st = s.borrow_mut();
-            *st.other_income.entry(faction).or_insert(0.0) += amount;
-            st.log.push(text);
+            match st.faction_id(&faction) {
+                Some(id) => {
+                    ntw_sim::campaign::economy::script_other_income_mod(&mut st.model, id, amount);
+                    st.log.push(text);
+                }
+                None => st.log.push(format!("{text}: unknown faction")),
+            }
         }
 
         // force_make_peace / force_declare_war(a, b) → the model's own diplomacy commands.
+        // PROVISIONAL: whether the exe's force_make_peace (`0x0097AC90`) also queues the
+        // move-armies-out command (`0x009838B0`) is untraced; ours sends only the peace (BACKLOG §0).
         "force_make_peace" | "force_declare_war" => {
             let (Some(a), Some(b)) = (arg_str(args, 1), arg_str(args, 2)) else {
                 return bad_args(s, text);
@@ -278,7 +334,7 @@ fn dispatch(lua: &Lua, s: &Shared, name: &'static str, args: &MultiValue) -> mlu
                 return Ok(Value::Nil);
             };
             let cmd = if name == "force_make_peace" {
-                CampaignCommand::MakePeace { a: a_id, b: b_id }
+                CampaignCommand::MakePeace { a: a_id, b: b_id, suppress_messages: false }
             } else {
                 CampaignCommand::DeclareWar { a: a_id, b: b_id }
             };
@@ -334,7 +390,8 @@ fn dispatch(lua: &Lua, s: &Shared, name: &'static str, args: &MultiValue) -> mlu
 
         // save_value(v, context) / load_value(default, context): positional values (W3 §9,
         // CONFIRMED "LUA[] positional values"). load_value returns the next stored value, or the
-        // default when there is none (INFERRED: a new game has none).
+        // default when none is left (`0x009797F0`): a new campaign's LoadingGame reads its start
+        // position's items, and outside LoadingGame nothing is queued (`ScriptHost::load_values`).
         "save_value" => {
             let v = args.get(1).map_or(ScriptValue::Nil, to_script_value);
             s.borrow_mut().saved_values.push(v);
@@ -368,11 +425,14 @@ fn dispatch(lua: &Lua, s: &Shared, name: &'static str, args: &MultiValue) -> mlu
             st.log.push(text);
         }
 
-        // disable_shopping_for_ai_under_shroud(on): CONFIRMED (binding at `0x00979910`, one boolean,
-        // then `0x00AA9B40` on the CAI interface): the one human's shroud holds the AI's shopping
-        // back where it hides (ntw_sim `CampaignModel::set_ai_shopping_shroud`). Tutorial only.
+        // disable_shopping_for_ai_under_shroud(on): CONFIRMED (binding `0x00979910`, one boolean read
+        // by `0x01055840`, then `0x00AA9B40` on the CAI interface): the one human's shroud holds the
+        // AI's shopping back where it hides (ntw_sim `CampaignModel::set_ai_shopping_shroud`). Only a
+        // data.pack feature-list script calls it (4 calls, next to `unveil_black_shroud`).
+        // ORIGINAL BUG: `0x00979910` does not clear its result before the read either (see
+        // `show_shroud`), so a non-boolean passes an arbitrary value; ours false.
         "disable_shopping_for_ai_under_shroud" => {
-            let on = arg_bool(args, 1);
+            let on = top_bool(s, name, args).unwrap_or(false);
             let mut st = s.borrow_mut();
             st.model.set_ai_shopping_shroud(on);
             st.log.push(text);
@@ -382,9 +442,44 @@ fn dispatch(lua: &Lua, s: &Shared, name: &'static str, args: &MultiValue) -> mlu
         // stored at campaign +0x115): while set, the save refuses (`0x00A1F000`) and
         // `CampaignUI.CanSave` answers false. Tutorial only.
         "disable_saving_game" => {
-            let on = arg_bool(args, 1);
+            // `0x0097B840` clears its slot first, so a non-boolean argument gives false.
+            let on = top_bool(s, name, args).unwrap_or(false);
             let mut st = s.borrow_mut();
             st.model.world.saving_disabled = on;
+            st.log.push(text);
+        }
+
+        // display_turns(on): CONFIRMED (`0x00979600`, one boolean stored at episodic restrictions
+        // +0xD1): the HUD shows the turn number instead of the date (World::display_turns). No
+        // vanilla script calls it. ORIGINAL BUG: `0x00979600` does not clear its result before the
+        // boolean read (`0x01055840` writes the slot only for a real Lua boolean, and the slot is the
+        // lua_State argument's), so a non-boolean (number, nil, no argument) stores that pointer's low
+        // byte, an arbitrary value. Ours stores false, as `disable_saving_game` does.
+        "display_turns" => {
+            let on = top_bool(s, name, args).unwrap_or(false);
+            let mut st = s.borrow_mut();
+            st.model.world.display_turns = on;
+            st.log.push(text);
+        }
+
+        // The WorldCreated switches: CONFIRMED (handlers `0x0097B900` / `0x0097B940` / `0x0097B980`,
+        // each one boolean read with its slot cleared first, so a non-boolean gives false, stored at
+        // episodic restrictions +0x118 / +0x124 / +0x125; saved and loaded with the campaign).
+        // In the exe, set_technology_research_disabled empties the building screens' unlocked-technology lists
+        // (World::technology_research_disabled; ita), set_liberation_options_disabled stops a
+        // capture's liberation option (World::liberation_options_disabled; ita, egy, tut, mp_ita,
+        // mp_egy) and set_ui_notification_of_victory_disabled skips the campaign-won message and the
+        // winners' victory event (World::victory_notification_disabled; tut). Ours stores all three; the field docs say
+        // which readers ours has yet (the technology switch: CampaignModel::building_info_technologies).
+        "set_technology_research_disabled" | "set_liberation_options_disabled" | "set_ui_notification_of_victory_disabled" => {
+            let on = top_bool(s, name, args).unwrap_or(false);
+            let mut st = s.borrow_mut();
+            let world = &mut st.model.world;
+            match name {
+                "set_technology_research_disabled" => world.technology_research_disabled = on,
+                "set_liberation_options_disabled" => world.liberation_options_disabled = on,
+                _ => world.victory_notification_disabled = on,
+            }
             st.log.push(text);
         }
 

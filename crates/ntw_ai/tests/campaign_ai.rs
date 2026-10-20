@@ -28,6 +28,8 @@ struct Fixture {
     data: Arc<CampaignAiData>,
     /// The factions' stored manager / personality keys (CONFIRMED source).
     keys: BTreeMap<String, FactionAiKeys>,
+    /// The startpos's stored script values (EPISODIC_RESTRICTIONS/LUA[]), for the opening's LoadingGame.
+    script_values: Vec<ntw_campaign::script_values::ScriptSaveValue>,
 }
 
 fn fixture() -> Option<&'static Fixture> {
@@ -49,7 +51,7 @@ fn fixture() -> Option<&'static Fixture> {
         loaded.model.attach_terrain(Terrain(Arc::new(ntw_campaign::pathing::build_grid(&map))));
         // The model holds them (World::ai_keys, filled by the importer); by faction key for the tests.
         let keys = loaded.model.world.ai_keys.iter().map(|(id, k)| (loaded.model.world.factions[id].key.clone(), k.clone())).collect();
-        Some(Fixture { model: loaded.model, data: Arc::new(data), keys })
+        Some(Fixture { model: loaded.model, data: Arc::new(data), keys, script_values: loaded.script_values })
     })
     .as_ref()
 }
@@ -274,8 +276,7 @@ fn ai_plays_inside_the_script_host() {
     let mut host = ntw_script::ScriptHost::new(f.model.clone(), "france", source).expect("host");
     host.load_campaign("eur_napoleon").expect("scripts load");
     let log = driver::install(&mut host, f.data.clone());
-    host.fire("NewSession", ntw_script::ScriptContext::for_faction("france"));
-    host.fire("NewCampaignStarted", ntw_script::ScriptContext::for_faction("france"));
+    host.open_campaign(ntw_script::ScriptContext::for_faction("france"), ntw_script::CampaignOpening::NewCampaign, &f.script_values);
     host.start_campaign();
     let mut errors = 0;
     for _ in 0..2 {

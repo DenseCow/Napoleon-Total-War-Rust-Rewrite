@@ -70,8 +70,9 @@ pub fn attribute(model: &CampaignModel, c: CharacterId, index: usize) -> i32 {
 /// always; a character with `subterfuge` ≥ 1 or flagged hidden (`CHARACTER` #22, +0x4E0) only once
 /// `f` has exposed him ([`CampaignModel::expose`]); anyone else always. Used by the pathfinder
 /// (an unknown character's zone of control is hidden, mode 5, obstacle slot 9 `0x00B4D600`) and by
-/// the spotting and spying code. PROVISIONAL: the human-ally case (faction +0x814 set and +0x81C
-/// clear: a character of the human's ally is known) is not modelled.
+/// the spotting and spying code. PROVISIONAL: the revolution case (the current player's faction in
+/// a revolution on the revolutionaries' side: faction +0x814 set and +0x81C clear, `0x008CE880`)
+/// is not modelled.
 pub fn knows_character(model: &CampaignModel, f: FactionId, c: CharacterId) -> bool {
     let Some(ch) = model.world.characters.get(&c) else { return false };
     if ch.faction == f {
@@ -470,7 +471,7 @@ impl CampaignModel {
         if self.world.agents_acted.contains(&agent) {
             return Err(CommandError::Unsupported("the agent has already acted this turn"));
         }
-        let walk = self.walk(agent, to, super::commands::CONTACT_DISTANCE)?;
+        let walk = self.walk(agent, to, true)?;
         Ok(walk.arrived.then_some(walk.events))
     }
 
@@ -593,7 +594,7 @@ impl CampaignModel {
             d.wounded = true;
         }
         if to != ch.position {
-            match self.walk(loser, to, 0.0) {
+            match self.walk(loser, to, false) {
                 Ok(w) => events.extend(w.events),
                 Err(CommandError::NotEnoughMovementPoints { .. }) => {}
                 Err(_) => {

@@ -15,7 +15,7 @@ use mlua::{Lua, Table, Value, Variadic};
 
 use super::super::frontend::{SaveFolders, install_saves, is_valid_save_name, latest_campaign_save, save_info_table, write_class};
 use super::super::host::{Inner, UiRequest, log};
-use super::{CampaignUi, loc, loc_required, round_description};
+use super::{CampaignUi, loc, loc_required, round_description, season_string};
 
 /// Where a save name goes.
 struct SaveTarget {
@@ -71,7 +71,8 @@ fn write_save(inner: &Inner, ui: &CampaignUi, path: Option<PathBuf>) -> bool {
         log(inner, format!("ERROR SaveCampaign {}: no game to save", path.display()));
         return false;
     };
-    match saves.save(&path) {
+    let season = season_string(inner, &ui.model().calendar);
+    match saves.save(&path, &season) {
         Ok(()) => true,
         Err(e) => {
             log(inner, format!("ERROR SaveCampaign {}: {e}", path.display()));
@@ -144,7 +145,8 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
             log(&inner, "ERROR GetCurrentGameInfo: no game to describe".into());
             return Ok(None);
         };
-        save_info_table(lua, &inner, &saves.current_info().header).map(Some)
+        let season = season_string(&inner, &ui.model().calendar);
+        save_info_table(lua, &inner, &saves.current_info(&season).header).map(Some)
     });
 
     // QuickSave() (`0x009EF470`, the `quick_save` shortcut when CanSave()): saves under the loc

@@ -127,7 +127,7 @@ fn deal_records_follow_the_propose_executors() {
     use super::rules::TechRules;
     let mut m = test_model();
     let mut rules = (*m.rules).clone();
-    rules.technologies.insert("admin1_a".into(), TechRules { cost: 25, building_level: "test_building_level".into(), requires: vec![] });
+    rules.technologies.insert("admin1_a".into(), TechRules { cost: 25, building_level: "test_building_level".into(), requires: vec![], factions: vec![] });
     m.rules = Arc::new(rules);
     let regions = |m: &CampaignModel| m.negotiations.current.as_ref().unwrap().regions.clone();
     let techs = |m: &CampaignModel| m.negotiations.current.as_ref().unwrap().technologies.clone();
@@ -281,8 +281,8 @@ fn accepted_technologies_are_granted_and_counted() {
     let mut m = test_model();
     m.turn.humans = vec![A, B];
     let mut rules = (*m.rules).clone();
-    rules.technologies.insert("admin1_a".into(), TechRules { cost: 25, building_level: "test_building_level".into(), requires: vec![] });
-    rules.technologies.insert("mil1".into(), TechRules { cost: 40, building_level: "test_building_level".into(), requires: vec![] });
+    rules.technologies.insert("admin1_a".into(), TechRules { cost: 25, building_level: "test_building_level".into(), requires: vec![], factions: vec![] });
+    rules.technologies.insert("mil1".into(), TechRules { cost: 40, building_level: "test_building_level".into(), requires: vec![], factions: vec![] });
     m.rules = Arc::new(rules);
     m.world.faction_details.entry(A).or_default().technologies = vec![("admin1_a".into(), state::RESEARCHED), ("mil1".into(), state::AVAILABLE)];
     m.world.faction_details.entry(B).or_default().technologies = vec![("admin1_a".into(), state::AVAILABLE), ("mil1".into(), state::RESEARCHED)];
@@ -317,8 +317,8 @@ fn technology_deal_value_reads_the_model() {
     let mut m = test_model();
     m.turn.humans = vec![A];
     let mut rules = (*m.rules).clone();
-    rules.technologies.insert("admin1_a".into(), TechRules { cost: 25, building_level: "test_building_level".into(), requires: vec![] });
-    rules.technologies.insert("mil1".into(), TechRules { cost: 40, building_level: "test_building_level".into(), requires: vec![] });
+    rules.technologies.insert("admin1_a".into(), TechRules { cost: 25, building_level: "test_building_level".into(), requires: vec![], factions: vec![] });
+    rules.technologies.insert("mil1".into(), TechRules { cost: 40, building_level: "test_building_level".into(), requires: vec![], factions: vec![] });
     m.rules = Arc::new(rules);
     m.world.faction_details.entry(A).or_default().technologies = vec![("admin1_a".into(), state::RESEARCHED), ("mil1".into(), state::AVAILABLE)];
     m.world.faction_details.entry(B).or_default().technologies = vec![("admin1_a".into(), state::AVAILABLE), ("mil1".into(), state::RESEARCHED)];
@@ -386,7 +386,7 @@ fn a_deal_with_a_failing_payment_applies_nothing() {
     let mut m = test_model();
     m.turn.humans = vec![A, B];
     let mut rules = (*m.rules).clone();
-    rules.technologies.insert("mil1".into(), TechRules { cost: 40, building_level: "test_building_level".into(), requires: vec![] });
+    rules.technologies.insert("mil1".into(), TechRules { cost: 40, building_level: "test_building_level".into(), requires: vec![], factions: vec![] });
     m.rules = Arc::new(rules);
     m.world.faction_details.entry(A).or_default().technologies = vec![("mil1".into(), state::AVAILABLE)];
     let owner = m.world.regions[&RegionId(11)].owner;
@@ -477,7 +477,7 @@ fn the_ai_evaluates_technology_deals() {
     let mut m = test_model();
     m.turn.humans = vec![A];
     let mut rules = (*m.rules).clone();
-    let tech = |cost| TechRules { cost, building_level: "test_building_level".into(), requires: vec![] };
+    let tech = |cost| TechRules { cost, building_level: "test_building_level".into(), requires: vec![], factions: vec![] };
     rules.technologies.insert("admin1_a".into(), tech(1000));
     rules.technologies.insert("military1_b".into(), tech(1000));
     rules.technologies.insert("economy1_c".into(), tech(100));
@@ -632,7 +632,7 @@ fn the_ai_evaluates_regions_and_technologies_together() {
     m.turn.humans = vec![A];
     m.world.region_neighbours = [(RegionId(12), vec![RegionId(11)]), (RegionId(11), vec![RegionId(12)])].into();
     let mut rules = (*m.rules).clone();
-    rules.technologies.insert("military1_b".into(), TechRules { cost: 1000, building_level: "test_building_level".into(), requires: vec![] });
+    rules.technologies.insert("military1_b".into(), TechRules { cost: 1000, building_level: "test_building_level".into(), requires: vec![], factions: vec![] });
     m.rules = Arc::new(rules);
     m.world.faction_details.entry(A).or_default().technologies = vec![("military1_b".into(), state::AVAILABLE)];
     m.world.faction_details.entry(B).or_default().technologies = vec![("military1_b".into(), state::RESEARCHED)];

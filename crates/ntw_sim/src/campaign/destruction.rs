@@ -30,7 +30,8 @@ fn settlement_slots(r: &Region) -> usize {
 
 /// The relationship reset of a faction leaving the game (`0x00B72900`; `0x00B2B920` does the same
 /// after its trade break, CONFIRMED): no trade agreement, access, war ally, commitment, payments,
-/// tribute or income (the economy tracker's income line `0x00BBE9A0` is not modelled), friendship,
+/// tribute or income (their running-record lines taken back, `0x00B72A04` / `0x00B72A20`, `0x00B2BA44` /
+/// `0x00B2BA60`: the caller resets through [`CampaignModel::change_treaty_money`]), friendship,
 /// war counters, access counters or embargo. The attitudes, the diplomacy options, the previous
 /// stance, the start attitude and the region-return flag stay. The stance (neutral) is set by the
 /// caller, which holds the stances.
@@ -136,11 +137,19 @@ impl CampaignModel {
     ///    +0x52C cleared), every force goes ([`Self::destroy_force`]: the character loop `0x009DAB40`
     ///    deletes each one's army or navy) and every character dies ([`Self::character_dies`]; no post is
     ///    refilled, see [`Self::refill_post`]); the town slots of other factions' regions it held go back
-    ///    to their region's owner (`0x00B1B010` with the owner read through the slot's +0x38 object,
-    ///    INFERRED to be its region). A human faction keeps its forces and characters, and the
+    ///    to their region's owner, each port slot running the trade price update with flag 0 (the exe
+    ///    does this through its occupants' leave paths, CONFIRMED, priceupdate: the army destructor
+    ///    `0x0088CE30` → `0x00A64560` for a slot garrison, and `0x00B794B0` from `0x008ABB2D`/`0x008ABB3D`,
+    ///    which recomputes a slot's holder from its region owner, docked navy and garrison and calls
+    ///    `SetSettlementOwner` `0x00B2B810` on a change; which slots go back in our model is INFERRED,
+    ///    as slot garrisons are not modelled). The exe's loop at `0x008ABD3E` that hands back held forts
+    ///    (`0x00B1B010`, region +0x240 list) has no price effect, and our forts have no holder. A human
+    ///    faction keeps its forces and characters, and the
     ///    campaign is over ([`Self::end_campaign`], `0x008C30A0` from `0x008AB6C0` when the faction is
     ///    human, CONFIRMED; the exe's multiplayer messages are not modelled);
-    /// 4. [`CampaignEvent::FactionDestroyed`] (the exe's event +0x108).
+    /// 4. [`CampaignEvent::FactionDestroyed`] (the exe's event +0x108); for a human faction its defeat
+    ///    movie follows ([`CampaignEvent::OutcomeMovie`]: the listener `0x00A14E80` on that event with
+    ///    its flag 1, CONFIRMED) when the data names one ([`Self::outcome_movie`]).
     ///
     /// Called only for a faction left with no region (see [`Self::end_if_capital_lost`]): the exe's
     /// handing out of regions it still holds in other theatres (a revolt, `0x00A79810`, else the
@@ -158,9 +167,7 @@ impl CampaignModel {
         others.remove(&faction);
         for other in others {
             for key in [(faction, other), (other, faction)] {
-                if let Some(r) = self.world.relationships.get_mut(&key) {
-                    reset_relationship(r);
-                }
+                self.change_treaty_money(key.0, key.1, reset_relationship);
                 if let Some(stance) = self.world.factions.get_mut(&key.0).and_then(|f| f.diplomacy.get_mut(&key.1)) {
                     *stance = Stance::Neutral;
                 }
@@ -181,15 +188,29 @@ impl CampaignModel {
             for c in left {
                 self.character_dies(c);
             }
-            for r in self.world.regions.values_mut() {
-                for s in r.slots.iter_mut().filter(|s| s.holder == Some(faction)) {
+            let held: Vec<(RegionId, usize, bool)> = self
+                .world
+                .regions
+                .iter()
+                .flat_map(|(id, r)| r.slots.iter().enumerate().filter(|(_, s)| s.holder == Some(faction)).map(move |(i, s)| (*id, i, s.port)))
+                .collect();
+            for (region, slot, port) in held {
+                if let Some(s) = self.world.regions.get_mut(&region).and_then(|r| r.slots.get_mut(slot)) {
                     s.holder = None;
+                }
+                if port {
+                    self.update_commodity_prices_with(false);
                 }
             }
         } else {
             self.end_campaign();
         }
         events.push(CampaignEvent::FactionDestroyed { faction });
+        if self.is_human(faction)
+            && let Some(movie) = self.outcome_movie(faction, super::outcome::CampaignOutcome::Destroyed)
+        {
+            events.push(CampaignEvent::OutcomeMovie { faction, movie });
+        }
     }
 }
 

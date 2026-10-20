@@ -497,8 +497,10 @@ db_record! {
         extra_g: f32,
         /// #38 @0x110 L: extra colour, blue.
         extra_b: f32,
-        /// #39 @0x114 L: voice / actor id ("24").
-        voice_id: Option<String>,
+        /// #39 @0x114 L: the faction's movie id ("24" for france): the built record keeps it at +0xD8
+        /// (`0x00F74CB0`, `0x00F74E56`..`0x00F74E63`), and a destroyed human's defeat movie is the
+        /// `movie_event_strings` row whose #3 equals it (`0x00A14E80`; CAMPAIGN_FIDELITY.md "Campaign over").
+        movie_id: Option<String>,
         /// #40 @0x120 H: language / voice code ("Fr", "Uk", ...).
         language_code: String,
         /// #41 @0x67: UNKNOWN flag.

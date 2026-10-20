@@ -351,6 +351,8 @@ fn load_campaign(vfs: &Loader) -> Result<crate::campaign::CampaignTables, DataEr
         // Only the diplomat's greeting reads them (no line → "Missing String", as the exe).
         negotiation_strings: load_optional(vfs)?,
         negotiation_override_strings: load_optional(vfs)?,
+        // Only the campaign's outcome movies read it (no row: no movie, as the exe).
+        movie_event_strings: load_optional(vfs)?,
         naval_stats: load(vfs)?,
         chains: load(vfs)?,
         chain_slots: load(vfs)?,
@@ -415,6 +417,22 @@ fn load_campaign(vfs: &Loader) -> Result<crate::campaign::CampaignTables, DataEr
             ancillary_excluded: load(vfs)?,
             ancillary_subcultures: load(vfs)?,
             subcultures: load(vfs)?,
+            cultures: load(vfs)?,
+        },
+        events: crate::events::EventTables {
+            events: load(vfs)?,
+            view_groups: load(vfs)?,
+            effect_groups: load(vfs)?,
+            historical_characters: load(vfs)?,
+            policies: load(vfs)?,
+            groupings: load(vfs)?,
+            policy_keys: load(vfs)?,
+            grouping_factions: load(vfs)?,
+            grouping_cultures: load(vfs)?,
+            grouping_subcultures: load(vfs)?,
+            grouping_regions: load(vfs)?,
+            grouping_continents: load(vfs)?,
+            grouping_empires: load(vfs)?,
         },
     })
 }

@@ -108,7 +108,7 @@ fn campaign_start_applies_the_handicap_and_saves_keep_it() {
     let mut started = loaded.model.clone();
     started.begin_start_campaign();
     assert_eq!(started.world.faction_details[&france].bonus_with_difficulty, m.world.faction_details[&france].bonus_with_difficulty);
-    let tree = save::write_save(&source, &m, "france", 1_000_000).expect("write");
+    let tree = save::write_save(&source, &m, "france", 1_000_000, None).expect("write");
     let back = ntw_campaign::read_esf(&tree, &db).expect("reload");
     for f in [france, austria] {
         assert_eq!(back.model.world.faction_details[&f].bonus_with_difficulty, m.world.faction_details[&f].bonus_with_difficulty);

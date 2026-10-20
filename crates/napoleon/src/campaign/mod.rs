@@ -92,6 +92,7 @@ impl Plugin for CampaignPlugin {
                     hud::update,
                     hud::labels,
                     hud::radar_outline,
+                    hud::panel_movie,
                     hud::redraw,
                 )
                     .chain()

@@ -21,7 +21,7 @@ fn capture_rolls_the_fortification_after_the_town_buildings() {
 }
 
 #[test]
-fn allies_are_called_and_treaty_money_moves() {
+fn allies_are_called_into_the_war() {
     use super::treaties::{slot, DiplomaticAction as D};
     let mut m = test_model();
     // C needs land to be in the game.
@@ -43,18 +43,6 @@ fn allies_are_called_and_treaty_money_moves() {
     m.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
     assert_eq!((m.world.stance(C, B), m.world.stance(C, A)), (Stance::War, Stance::Allied));
     assert!(m.world.relationships[&(B, C)].attitudes[slot("alliance_broken")].value < 0);
-    // Money: a payment moves each turn; a protectorate pays a fifth of its revenue.
-    let mut m = test_model();
-    act(&mut m, A, B, D::RegularPayment(100, 2));
-    let (ta, tb) = (m.world.factions[&A].treasury, m.world.factions[&B].treasury);
-    m.diplomacy_money(A);
-    assert_eq!((m.world.factions[&A].treasury, m.world.factions[&B].treasury), (ta - 100, tb + 100));
-    act(&mut m, B, A, D::BecomeProtectorate);
-    let revenue = economy::faction_income(&m, B).revenue();
-    let (ta, tb) = (m.world.factions[&A].treasury, m.world.factions[&B].treasury);
-    m.diplomacy_money(B);
-    assert_eq!((m.world.factions[&A].treasury, m.world.factions[&B].treasury), (ta + revenue / 5, tb - revenue / 5));
-    assert_eq!(m.world.relationships[&(A, B)].protectorate_income, revenue / 5);
 }
 
 #[test]

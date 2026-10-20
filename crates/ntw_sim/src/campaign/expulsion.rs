@@ -18,12 +18,13 @@
 //! which forces go where; the model applies it ([`CampaignModel::expel_from_region`]). Agents are
 //! never moved.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use super::ids::{FactionId, ForceId, RegionId};
+use super::ids::{CharacterId, FactionId, ForceId, RegionId};
 use super::mod_state::ModWrites;
 use super::pathing::Domain;
-use super::world::{CampaignModel, Region, Stance};
+use super::world::{CampaignModel, MilitaryForce, Region, Stance};
 use crate::fixed::Fixed20;
 
 /// How far from a candidate point a force may be placed, in map units: the 100.0 every placement of
@@ -44,7 +45,7 @@ pub struct ExpelledForce {
 /// land. True when `owner` gives `f` military access (#3 not 0), the record's
 /// `allied_in_war_against` list is not empty, `owner` is `f`'s protectorate, or they are at war
 /// (stance index 0). CONFIRMED.
-fn record_lets_stand(m: &CampaignModel, owner: FactionId, f: FactionId) -> bool {
+pub(super) fn record_lets_stand(m: &CampaignModel, owner: FactionId, f: FactionId) -> bool {
     m.world.relationships.get(&(owner, f)).is_some_and(|r| r.military_access_turns != 0 || !r.allied_in_war_against.is_empty())
         || matches!(m.world.stance(owner, f), Stance::Protectorate | Stance::War)
 }
@@ -126,7 +127,9 @@ fn place(m: &CampaignModel, key: Option<&str>, point: (f32, f32)) -> Option<(f32
 /// model applies ([`CampaignModel::expel_from_region`]); the default [`super::seams::RegionExpulsion`].
 ///
 /// Nothing moves when `f` is out of the game (faction `+0x824`, the early return at `0x008D9DDC`;
-/// CONFIRMED), whichever caller asks.
+/// CONFIRMED), whichever caller asks. The forces come in the order of `f`'s character list (+0x768,
+/// [`super::world::World::characters_in_list_order`]), each commander's army or navy in turn, as the
+/// exe's one loop takes them (CONFIRMED, `0x008D9E7A`).
 ///
 /// - **Land armies** of `f` standing in the region ([`super::economy::in_region`]): the candidates
 ///   ([`army_candidates`]) are tried in order until one places it ([`place`]). An army aboard a navy
@@ -157,21 +160,28 @@ pub fn expel_faction_from_region(m: &CampaignModel, f: FactionId, region: Region
     }
     let n = reg.owner;
     let stay = may_stay(m, n, f);
+    let at_war = m.at_war(n, f);
+    let harbours = m.terrain.as_ref().map_or(&[][..], |t| &t.0.harbours[..]);
+    // The exe walks the faction's character list (+0x768, `0x008D9E7A`) in its order, each
+    // commander's army or navy in turn (CONFIRMED), so the plan, and the moves the model applies
+    // from it, follow that order ([`super::world::World::characters_in_list_order`]).
+    let commanded: BTreeMap<CharacterId, &MilitaryForce> =
+        m.world.forces.values().filter(|x| x.faction == f).filter_map(|x| Some((x.commander?, x))).collect();
     let mut out = Vec::new();
-    for force in m.world.forces.values().filter(|x| x.faction == f && !x.is_navy) {
-        let Some(c) = force.commander.and_then(|c| m.world.characters.get(&c)) else { continue };
-        if m.carrier_of(force.id).is_some() || !super::economy::in_region(m, reg, c) {
+    for id in m.world.characters_in_list_order() {
+        let (Some(force), Some(c)) = (commanded.get(&id), m.world.characters.get(&id)) else { continue };
+        if !force.is_navy {
+            if m.carrier_of(force.id).is_some() || !super::economy::in_region(m, reg, c) {
+                continue;
+            }
+            let here = (c.position.0.to_f32(), c.position.1.to_f32());
+            let to = army_candidates(m, f, reg, here, stay).into_iter().find_map(|(key, p)| place(m, Some(key), p));
+            out.push(ExpelledForce { force: force.id, to: to.map(to_fixed) });
             continue;
         }
-        let here = (c.position.0.to_f32(), c.position.1.to_f32());
-        let to = army_candidates(m, f, reg, here, stay).into_iter().find_map(|(key, p)| place(m, Some(key), p));
-        out.push(ExpelledForce { force: force.id, to: to.map(to_fixed) });
-    }
-    if m.at_war(n, f) {
-        return out;
-    }
-    let harbours = m.terrain.as_ref().map_or(&[][..], |t| &t.0.harbours[..]);
-    for force in m.world.forces.values().filter(|x| x.faction == f && x.is_navy) {
+        if at_war {
+            continue;
+        }
         let Some((r, slot)) = m.docked_port(force.id).filter(|(r, _)| *r == region) else { continue };
         let Some(port) = m.world.regions.get(&r).and_then(|r| r.slots.get(slot)).and_then(|s| s.position) else { continue };
         let port = (port.0.to_f32(), port.1.to_f32());

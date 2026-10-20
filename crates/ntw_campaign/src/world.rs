@@ -126,6 +126,8 @@ pub(crate) fn load_world(
                     if fkey == "pirates" {
                         r.diplomacy_options = [3; 14];
                     }
+                    // The record order (`World::diplomacy_record_order`): file order.
+                    world.diplomacy_record_order.entry(fid).or_default().push(target);
                     world.relationships.insert((fid, target), r);
                 }
             }
@@ -152,6 +154,9 @@ pub(crate) fn load_world(
                             id: c.id.raw().into(),
                         }),
                         Entry::Vacant(slot) => {
+                            // The faction's list (+0x768) in file order, as the loader `0x0087A190`
+                            // builds it (`World::character_order`).
+                            world.character_order.push(c.id);
                             slot.insert(c);
                         }
                     }
@@ -240,6 +245,15 @@ pub(crate) fn load_world(
         if let Some(k) = rec.get_str(24).filter(|k| !k.is_empty()) {
             world.region_rebel_factions.insert(region.id, k.to_string());
         }
+        // The armies risen here (`World::region_risen_armies`): REGION #35, or #34 when #34 is not the
+        // REBEL_DATA template record (CONFIRMED `0x00A45950` and the vanilla saves).
+        let (known, dangling): (Vec<ForceId>, Vec<ForceId>) = read_risen_armies(rec).into_iter().partition(|id| world.forces.contains_key(id));
+        if !dangling.is_empty() {
+            log::warn!("{rpath}: risen army ids {dangling:?} name no loaded force; dropped");
+        }
+        if !known.is_empty() {
+            world.region_risen_armies.insert(region.id, known);
+        }
         if !faction_ids.contains(&region.owner) {
             check.warnings.push(LoadWarning::DanglingRegionOwner {
                 region: region.key.clone(),
@@ -325,6 +339,10 @@ pub(crate) fn load_world(
         // The economics history: FACTION_ECONOMICS #0, oldest first (the saver 0x00BD46E0).
         if let Some(h) = economy_history(rf.record) {
             world.economy_history.insert(rf.faction.id, h);
+        }
+        // The land and naval upkeep trackers (`crate::details::upkeep_trackers`).
+        if let Some(t) = crate::details::upkeep_trackers(rf.record) {
+            world.upkeep_booked.insert(rf.faction.id, t);
         }
     }
 
@@ -646,11 +664,14 @@ fn read_region(rec: &EsfRecord, path: &str, check: &mut Checker<'_>) -> Result<(
     let pop_rec = child(rec, "POPULATION", path)?;
     let total = u32_at(pop_rec, 1, &format!("{path}/POPULATION"))?;
     // `REGION_FACTORS` (the reader `0x00A4C340`, CONFIRMED layout): #0 f32[7] growth factors, #2 the live
-    // population, #3 capacity, #4 base capacity, #5 growth, #6 trend, #7 overcrowded, #8 migrants. Without
-    // the record the population is `POPULATION` #1 (equal to #2 until it has grown) and the state starts
-    // empty, as a new population object does (`0x00A4C340`'s defaults: trend 2).
+    // population, #3 capacity, #4 base capacity, #5 growth, #6 trend, #7 overcrowded, #8 migrants, #9 the
+    // policing cost. Without the record the population is `POPULATION` #1 (equal to #2 until it has
+    // grown) and the state starts empty, as a new population object does (`0x00A4C340`'s defaults: trend 2).
     let factors_rec = pop_rec.child("REGION_FACTORS");
     let population = factors_rec.and_then(|f| f.get_u32(2)).unwrap_or(total);
+    // `POPULATION` #4: the amount the region's policing tracker booked (the loader `0x00A456D0` reads it after
+    // `REGION_FACTORS` and #1..#3 and sets it through `0x00A51230`; CONFIRMED, see `PopulationState::policing_booked`).
+    let policing_booked = pop_rec.get_i32(4).unwrap_or(0);
     let population_state = match factors_rec {
         Some(f) => {
             let mut factors = [0.0f32; 7];
@@ -667,9 +688,11 @@ fn read_region(rec: &EsfRecord, path: &str, check: &mut Checker<'_>) -> Result<(
                 trend: f.get_u32(6).unwrap_or(2),
                 overcrowded: f.get_bool(7).unwrap_or(false),
                 migrants: f.get_i32(8).unwrap_or(0),
+                policing_cost: f.get_i32(9).unwrap_or(0),
+                policing_booked,
             }
         }
-        None => ntw_sim::campaign::population::PopulationState { trend: 2, ..Default::default() },
+        None => ntw_sim::campaign::population::PopulationState { trend: 2, policing_booked, ..Default::default() },
     };
 
     let spath = format!("{path}/SETTLEMENT");
@@ -797,6 +820,25 @@ fn read_region(rec: &EsfRecord, path: &str, check: &mut Checker<'_>) -> Result<(
         fleet: None,
     };
     Ok((region, recruitment_sources))
+}
+
+/// The ids of the armies risen in one `REGION` (see `World::region_risen_armies`): the `I32Array`
+/// at #35 when #34 is the `REBEL_DATA_INNARDS` template record, else at #34. CONFIRMED:
+/// `ConstructCampaignRegionFromEsf` `0x00A45950` reads the optional template block (`0x00886C90`, kept
+/// at region +0x21C), then this id list (`0x0086F140`), resolving each id (`0x0105AC60`) and adding the
+/// army to the region's set +0x220 (`0x008CFB60`); in the vanilla saves (e.g. a French May 1811 save)
+/// the ids equal the rebel armies' `ARMY` #4. Empty when the list is missing; a negative id is skipped.
+fn read_risen_armies(rec: &EsfRecord) -> Vec<ForceId> {
+    rec.get(risen_armies_slot(rec))
+        .and_then(EsfNode::as_i32_array)
+        .map(|ids| ids.iter().filter_map(|&id| u32::try_from(id).ok()).map(ForceId).collect())
+        .unwrap_or_default()
+}
+
+/// The child of a `REGION` holding its risen-army ids ([`read_risen_armies`]; the save writes the
+/// model's list back there): #35 when #34 is the `REBEL_DATA_INNARDS` record, else #34.
+pub(crate) fn risen_armies_slot(rec: &EsfRecord) -> usize {
+    if rec.get(34).and_then(EsfNode::as_record).is_some() { 35 } else { 34 }
 }
 
 /// The forts of one `REGION`: its `FORT_ARRAY` items.
@@ -1090,6 +1132,20 @@ mod transport_tests {
         let mut r = EsfRecord::new(name, version);
         r.children = children;
         r
+    }
+
+    /// A region's risen armies sit at #35 after the optional `REBEL_DATA_INNARDS` record at #34, else
+    /// at #34; a negative id is skipped and a missing list reads as none.
+    #[test]
+    fn risen_armies_follow_the_optional_template_record() {
+        let mut children = vec![EsfNode::U32(0); 34];
+        children.push(EsfNode::I32Array(vec![7, -1, 9]));
+        assert_eq!(read_risen_armies(&rec("REGION", 0, children.clone())), [ForceId(7), ForceId(9)]);
+        children[34] = EsfNode::Record(Box::new(rec("REBEL_DATA_INNARDS", 0, vec![])));
+        children.push(EsfNode::I32Array(vec![12]));
+        assert_eq!(read_risen_armies(&rec("REGION", 0, children.clone())), [ForceId(12)]);
+        children.truncate(35);
+        assert!(read_risen_armies(&rec("REGION", 0, children)).is_empty());
     }
 
     #[test]
