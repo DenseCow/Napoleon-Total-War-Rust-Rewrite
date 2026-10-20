@@ -17,7 +17,7 @@ All integers little-endian.
 | Bytes | Content |
 |---|---|
 | 16 | magic `NAPOLEONRUST\0SAV` |
-| 4 | format version (`FORMAT_VERSION`, now 10; the version table is in `own_save.rs`) |
+| 4 | format version (`FORMAT_VERSION`, now 12; the version table is in `own_save.rs`) |
 | 4 | `n`: byte length of the header section |
 | n | header: zlib of the RON text of `CampaignInfo` |
 | rest | body: zlib of the RON text of `SaveData` |

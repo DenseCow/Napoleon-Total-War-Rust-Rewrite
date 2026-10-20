@@ -589,6 +589,31 @@ fn the_research_need_reads_the_model() {
     assert_eq!(v, deal_value::research_need_values(2, 1, 16, p1, p2));
 }
 
+/// `0x00ABAFB0`: the rebels are on every enemy list, and the rebels' own list holds every faction,
+/// even one out of the game (the rebel test comes before the out-of-game skip); the ally list holds
+/// neither. The research need counts these lists (`0x00ABE100` / `0x00A98460`).
+#[test]
+fn the_rebels_are_on_every_enemy_list() {
+    use super::director::{believed_ally_count, believed_enemy_count};
+    let r = FactionId(9);
+    let mut m = test_model();
+    m.world.set_stance(A, B, Stance::Allied).unwrap();
+    let (enemies, allies) = (believed_enemy_count(&m, B), believed_ally_count(&m, B));
+    assert_eq!(allies, 1);
+    m.world.factions.insert(r, faction(r, "", 0, GovernmentType::Republic));
+    assert!(m.is_rebel_faction(r));
+    assert_eq!(believed_enemy_count(&m, B), enemies + 1, "the rebels are B's enemy at any stance");
+    assert_eq!(believed_ally_count(&m, B), allies);
+    let others = m.world.factions.len() as u32 - 1;
+    assert_eq!(believed_enemy_count(&m, r), others, "every faction is the rebels' enemy");
+    m.world.faction_details.entry(C).or_default().out_of_game = Some(true);
+    assert!(!m.in_the_game(C));
+    assert_eq!(believed_enemy_count(&m, r), others, "even one out of the game");
+    assert_eq!(believed_ally_count(&m, r), 0);
+    m.world.set_stance(A, C, Stance::War).unwrap();
+    assert_eq!(believed_enemy_count(&m, A), believed_enemy_count(&m, B), "C out of the game is no enemy of A");
+}
+
 /// The AI evaluates a deal of regions as the exe's `0x00C131C0` → `0x00A364B0` → `0x00AA1E90`
 /// (AI_RESEARCH.md §4 "Region value"): the region goals (−1 × 2500 each), the worth of each
 /// region to each side, the human-demand factor and its counter, and the `diplomacy_options`
@@ -875,18 +900,222 @@ fn a_join_war_item_against_an_existing_enemy_applies_again() {
     assert!(!m.negotiations.current.as_ref().unwrap().applied);
 }
 
-/// An AI recipient declines any deal with a join-war item (PROVISIONAL: the record's goal and value,
-/// `0x00A62400` / `0x00C12D40`, are not ported).
-#[test]
-fn an_ai_declines_a_join_war_deal() {
+/// A (human) proposes to B (AI): allied, A at war with C, B neutral with C (not at war, so C is
+/// a war B could join).
+fn join_war_model() -> CampaignModel {
     let mut m = test_model();
     m.turn.humans = vec![A];
+    m.world.set_stance(A, B, Stance::Allied).unwrap();
+    m.world.set_stance(A, C, Stance::War).unwrap();
+    m.world.set_stance(B, C, Stance::Neutral).unwrap();
     m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
-    assert_eq!(m.ai_accepts_deal(), None);
-    m.apply(CampaignCommand::ProposeJoinWar { clear: false, demanded: vec![], offered: vec![C] }).unwrap();
+    m
+}
+
+/// The join-war record's goal weight as the evaluator reads it: B asked to join A's war on C.
+fn asked_to_join_weight(m: &CampaignModel) -> f32 {
+    let n = m.negotiations.current.as_ref().unwrap();
+    m.join_war_record_weight(n, m.deal_goal_allowed(B, A, 11))
+}
+
+/// The join-war goals need record 11 allowed both ways (`0x00CCB150`), an alliance (`0x008CE390`)
+/// and a war joinable either way (`0x00C1A6A0`): without them the record weighs nothing.
+#[test]
+fn join_war_goals_need_an_alliance_and_a_joinable_war() {
+    let mut m = join_war_model();
+    m.apply(CampaignCommand::ProposeJoinWar { clear: false, demanded: vec![C], offered: vec![] }).unwrap();
+    // B asked to join A's war on C: C is a list-2 target throughout the gate's closed cases, so the
+    // zero comes from the gate, not from a missing goal.
+    let targets = |m: &CampaignModel| (m.join_war_targets(B, A), m.join_war_targets(A, B));
+    assert_eq!(targets(&m), (vec![], vec![C]));
+    assert_eq!(asked_to_join_weight(&m), -0.25);
+    m.world.relationships.entry((B, A)).or_default().diplomacy_options[11] = 2;
+    assert_eq!(targets(&m), (vec![], vec![C]));
+    assert_eq!(asked_to_join_weight(&m), 0.0, "the AI may not propose join-war deals to A");
+    m.world.relationships.entry((B, A)).or_default().diplomacy_options[11] = 0;
+    m.world.set_stance(A, B, Stance::Neutral).unwrap();
+    assert_eq!(targets(&m), (vec![], vec![C]));
+    assert_eq!(asked_to_join_weight(&m), 0.0, "not allied");
+    m.world.set_stance(A, B, Stance::Allied).unwrap();
+    m.world.set_stance(B, C, Stance::War).unwrap();
+    assert!(!m.joinable_war(A, B) && !m.joinable_war(B, A), "the gate is closed");
+    assert_eq!(targets(&m), (vec![], vec![]), "and no target is left");
+    assert_eq!(asked_to_join_weight(&m), 0.0, "both at war with C: no war left to join");
+}
+
+/// `0x00C1E590`: the joiner must be free to fight the enemy: no patron, or its patron is the
+/// enemy itself or at war with it.
+#[test]
+fn a_joinable_war_needs_the_joiners_patron_to_allow_it() {
+    let d = FactionId(4);
+    let mut m = join_war_model();
+    m.world.factions.insert(d, faction(d, "test_faction_d", 0, GovernmentType::Republic));
+    assert!(m.joinable_war(A, B), "B has no patron");
+    m.world.set_stance(B, d, Stance::Protectorate).unwrap();
+    assert_eq!(m.patron(B), Some(d));
+    assert!(!m.joinable_war(A, B), "B's patron D is not at war with C");
+    m.world.set_stance(d, C, Stance::War).unwrap();
+    assert!(m.joinable_war(A, B), "D is at war with C");
+    m.world.set_stance(d, C, Stance::Neutral).unwrap();
+    m.world.set_stance(B, d, Stance::Neutral).unwrap();
+    m.world.set_stance(B, C, Stance::Protectorate).unwrap();
+    assert!(m.joinable_war(A, B), "B's patron is C itself (a plain equality)");
+    assert!(!m.joinable_war(B, A), "B has no war");
+}
+
+/// `0x008FA020`: the first side's wars, not on the second side, that the second side is not
+/// already at war with (its record's stance, `0x008FA0BE..0x008FA0C8`).
+#[test]
+fn join_war_targets_are_wars_the_other_side_is_not_in() {
+    let mut m = join_war_model();
+    assert_eq!(m.join_war_targets(A, B), [C]);
+    assert_eq!(m.join_war_targets(B, A), []);
+    m.world.set_stance(B, C, Stance::War).unwrap();
+    assert_eq!(m.join_war_targets(A, B), [], "B is already at war with C");
+    assert_eq!(m.join_war_targets(B, A), [], "and A is at war with C too");
+    m.world.set_stance(B, C, Stance::Allied).unwrap();
+    assert_eq!(m.join_war_targets(A, B), [C], "an ally of C may still join A's war on it");
+    m.world.factions.get_mut(&B).unwrap().diplomacy.remove(&C);
+    // The exe would test B's first, unrelated record (ORIGINAL BUG of 0x00B64C50, see
+    // `join_war_targets`).
+    assert_eq!(m.join_war_targets(A, B), [C], "a missing record reads as not at war");
+}
+
+/// `0x00CCB210` case 11 with `0x00D62DA0`: the attitude is the relation difference (the
+/// stance-belief offsets read 0), capped by what the proposer is to the AI: patron −0.1, ally
+/// −0.25, else (here: B is A's patron) −0.5; below −1 it is −1; a target without a CAI faction
+/// is −1. Read through the record's goal weight, as the evaluator reads it.
+#[test]
+fn the_given_join_war_weight_is_capped_by_what_the_proposer_is() {
+    use super::director::relation_belief_value;
+    let mut m = join_war_model();
+    m.apply(CampaignCommand::ProposeJoinWar { clear: false, demanded: vec![C], offered: vec![] }).unwrap();
+    let attitude = |m: &CampaignModel| relation_belief_value(m, B, A) - relation_belief_value(m, B, C);
+    let w = attitude(&m);
+    assert_eq!(m.join_war_attitude(B, A, C), w);
+    assert!(w > -0.25, "an ally is related more closely than a neutral");
+    assert!(m.believes_allied(B, A) && m.believed_patron(B).is_none());
+    assert_eq!(asked_to_join_weight(&m), -0.25);
+    m.world.set_stance(B, A, Stance::Protectorate).unwrap();
+    assert_eq!(m.believed_patron(B), Some(A));
+    assert_eq!(asked_to_join_weight(&m), deal_value::given_join_war_weight(attitude(&m), -0.1));
+    m.world.set_stance(B, A, Stance::Patron).unwrap();
+    assert!(!m.believes_allied(B, A) && m.believed_patron(B).is_none());
+    assert_eq!(asked_to_join_weight(&m), deal_value::given_join_war_weight(attitude(&m), -0.5));
+    // C has no CAI faction: −1, and the attitude is the offsets only.
+    m.world.ai_factions = vec![A, B];
+    assert_eq!(asked_to_join_weight(&m), -1.0);
+    assert_eq!(m.join_war_attitude(B, A, C), 0.0);
+}
+
+/// The ally list is read from the stored relation belief while it is clean, like the enemy list:
+/// both counts come from one snapshot.
+#[test]
+fn the_ally_list_is_read_from_the_stored_belief() {
+    use super::director::{believed_ally_count, believed_enemy_count, build_relation_belief};
+    let mut m = join_war_model();
+    let belief = build_relation_belief(&m, B);
+    assert_eq!(belief.allies, [A]);
+    m.director.beliefs.insert(B, belief);
+    // A change that does not mark the belief dirty: the stored lists still answer.
+    m.world.factions.get_mut(&A).unwrap().diplomacy.insert(B, Stance::War);
+    assert!(m.believes_allied(B, A));
+    let stored_enemies = m.director.beliefs[&B].enemies.len() as u32;
+    assert_eq!((believed_enemy_count(&m, B), believed_ally_count(&m, B)), (stored_enemies, 1));
+    m.director.beliefs.remove(&B);
+    assert!(!m.believes_allied(B, A));
+    assert_eq!((believed_enemy_count(&m, B), believed_ally_count(&m, B)), (stored_enemies + 1, 0));
+}
+
+/// `0x00AB5400`: a land force near the target counts in full, any other a tenth, a navy halved
+/// first; forces without units count nothing.
+#[test]
+fn the_war_strength_counts_near_land_forces_in_full() {
+    let mut m = join_war_model();
+    let force = m.world.forces[&ForceId(1000)].clone();
+    let v = m.force_power(&force, &mut Default::default()) as u32;
+    assert!(v > 0);
+    m.world.characters.get_mut(&CharacterId(100)).unwrap().garrisoned_in = Some(RegionId(11));
+    assert_eq!(m.war_strength(A, B), v, "in B's region");
+    assert_eq!(m.war_strength(A, C), v / 10, "C owns nothing");
+    m.world.characters.get_mut(&CharacterId(100)).unwrap().garrisoned_in = Some(RegionId(10));
+    assert_eq!(m.war_strength(A, B), v / 10, "no neighbours");
+    m.world.region_neighbours = [(RegionId(10), vec![RegionId(11)])].into();
+    assert_eq!(m.war_strength(A, B), v, "next to B's region");
+    m.world.forces.get_mut(&ForceId(1000)).unwrap().is_navy = true;
+    assert_eq!(m.war_strength(A, B), (v >> 1) / 10, "a navy is never near");
+    m.world.forces.get_mut(&ForceId(1000)).unwrap().units.clear();
+    assert_eq!(m.war_strength(A, B), 0);
+}
+
+/// `0x00C12D40`: an offered war is worth twice the proposer's scaled strength, an asked one costs
+/// the AI's scaled strength and gives the enemy's strength + 1000; the factor is the AI's attitude
+/// to the proposer (`0x00A8D250`: 2 at −100, 1 at 0, 0.5 at +100). ORIGINAL BUG fixed: the exe
+/// truncates the factor before multiplying, so any attitude above 0 zeroed the value; ours keeps
+/// the fraction.
+#[test]
+fn the_join_war_value_follows_the_war_strengths() {
+    let mut m = join_war_model();
+    m.world.forces.get_mut(&ForceId(1000)).unwrap().units = (1..=60).map(unit).collect();
+    m.apply(CampaignCommand::ProposeJoinWar { clear: false, demanded: vec![C], offered: vec![C] }).unwrap();
+    let (sa, sb) = (m.war_strength(A, C), m.war_strength(B, C));
+    assert!(sa > 0 && sb > 0);
+    let value = |m: &CampaignModel| m.join_war_deal_value(m.negotiations.current.as_ref().unwrap(), 1.0);
+    assert_eq!(value(&m), deal_value::DealValue { gain: 2 * sa, cost: sb, given: 1000 }, "attitude 0: factor 1");
+    m.relationship_mut(B, A).factor_mut("war").value = -100;
+    assert_eq!(m.world.relationships[&(B, A)].attitude_total(), -100);
+    assert_eq!(value(&m), deal_value::DealValue { gain: 4 * sa, cost: 2 * sb, given: 1000 });
+    m.relationship_mut(B, A).factor_mut("war").value = 50;
+    // Factor 0.75 at +50 (the exe's truncation made it 0).
+    let three_quarters = |v: u32| (f64::from(v) * 0.75).trunc() as u32;
+    let expected = deal_value::DealValue { gain: 2 * three_quarters(sa), cost: three_quarters(sb), given: 1000 };
+    assert!(expected.gain > 0, "A's strength is large enough to keep a fraction");
+    assert_eq!(value(&m), expected);
+    let n = m.negotiations.current.clone().unwrap();
+    assert_eq!(m.join_war_deal_value(&n, 2.0), expected.inflated(2.0), "inflated");
+}
+
+/// The join-war record in the evaluator (`0x00AA5ED0`, after the payments): declined on
+/// `diplomacy_options` 1 or 3, else weighed and valued like any record.
+#[test]
+fn the_ai_answers_a_join_war_deal_from_its_goals_and_value() {
+    let mut m = join_war_model();
+    // Asked to join A's war on C: a list-2 goal (−0.25 × 1000) and 1000 given: refused.
+    m.apply(CampaignCommand::ProposeJoinWar { clear: false, demanded: vec![C], offered: vec![] }).unwrap();
+    let n = m.negotiations.current.clone().unwrap();
+    assert_eq!(m.join_war_record_weight(&n, m.deal_goal_allowed(B, A, 11)), -0.25);
     assert_eq!(m.ai_accepts_deal(), Some(false));
     assert_eq!(m.apply(CampaignCommand::AcceptDeal), Err(CommandError::DealRefused));
-    assert_ne!(m.world.stance(A, C), Stance::War);
+    assert_ne!(m.world.stance(B, C), Stance::War);
+    // B's war on C, which A offers to join: a list-1 goal (−1 × 1000) against twice A's strength.
+    m.world.set_stance(A, C, Stance::Neutral).unwrap();
+    m.world.set_stance(B, C, Stance::War).unwrap();
+    m.world.regions.get_mut(&RegionId(12)).unwrap().owner = C;
+    m.world.characters.get_mut(&CharacterId(100)).unwrap().garrisoned_in = Some(RegionId(12));
+    m.apply(CampaignCommand::ProposeJoinWar { clear: false, demanded: vec![], offered: vec![C] }).unwrap();
+    let n = m.negotiations.current.clone().unwrap();
+    assert_eq!(m.join_war_record_weight(&n, m.deal_goal_allowed(B, A, 11)), -1.0);
+    let expected = |m: &CampaignModel| {
+        let n = m.negotiations.current.as_ref().unwrap();
+        let mut e = deal_value::DealEvaluation::default();
+        e.add(11, m.join_war_deal_value(n, 1.0), m.join_war_record_weight(n, m.deal_goal_allowed(B, A, 11)), 1.0);
+        e.fair() || e.good()
+    };
+    assert!(2 * m.war_strength(A, C) < 1000);
+    assert!(!expected(&m));
+    assert_eq!(m.ai_accepts_deal(), Some(false), "A is too weak to be worth the goal");
+    m.world.forces.get_mut(&ForceId(1000)).unwrap().units = (1..=60).map(unit).collect();
+    assert!(2 * m.war_strength(A, C) >= 1000);
+    assert!(expected(&m));
+    assert_eq!(m.ai_accepts_deal(), Some(true));
+    // diplomacy_options 1 or 3: declined; 2 only takes the goal away (weight 0), still accepted.
+    for (option, answer) in [(1, false), (3, false), (2, true)] {
+        m.world.relationships.entry((B, A)).or_default().diplomacy_options[11] = option;
+        assert_eq!(m.ai_accepts_deal(), Some(answer), "option {option}");
+    }
+    m.world.relationships.entry((B, A)).or_default().diplomacy_options[11] = 0;
+    m.apply(CampaignCommand::AcceptDeal).unwrap();
+    assert_eq!(m.world.stance(A, C), Stance::War, "A joined B's war");
 }
 
 /// A deal applies whole or not at all: with a region, a payment and join-war items, one item naming

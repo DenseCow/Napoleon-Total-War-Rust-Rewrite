@@ -306,9 +306,15 @@ pub struct RelationBelief {
     /// [`ai_order`].
     pub relations: Vec<(FactionId, f32)>,
     /// The enemy list (count `+0x4C`, data `+0x50`): the CAI world's factions in [`ai_order`],
-    /// without the owner, that are the rebels or in the game and at war with it
-    /// ([`CampaignModel::at_war`]).
+    /// without the owner, that [`on_enemy_list`] puts on it.
     pub enemies: Vec<FactionId>,
+    /// The ally list (`+0x2C`, count `+0x38`): the CAI world's factions in `ai_order`, without
+    /// the owner, that `on_ally_list` puts on it. Stored with the enemy list, so both lists'
+    /// reads (`believed_enemy_count`, `believed_ally_count`) see one snapshot. A saved belief
+    /// written before the list was kept loads with it empty, and its load rebuilds it
+    /// ([`CampaignModel::rebuild_stored_ally_lists`]).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub allies: Vec<FactionId>,
 }
 
 /// The director's state (`CDIR_INTERFACE`): saved and hashed.
@@ -387,6 +393,10 @@ impl DirectorState {
             for g in &b.enemies {
                 h.i32(g.raw());
             }
+            h.u32(b.allies.len() as u32);
+            for g in &b.allies {
+                h.i32(g.raw());
+            }
         }
     }
 }
@@ -446,23 +456,65 @@ pub fn relation_value(model: &CampaignModel, f: FactionId, x: FactionId) -> f32 
 
 /// `f`'s CAI relation belief as `BuildCaiRelationBelief` `0x00ABAFB0` builds it from the CAI
 /// world's faction list (CAI world `+0x110`: count `+0x11C`, data `+0x120`; [`ai_order`]): the
-/// relation value towards each other faction ([`relation_value`]) and the enemy list
-/// ([`on_enemy_list`]). CONFIRMED.
+/// relation value towards each other faction ([`relation_value`]), the enemy list
+/// ([`on_enemy_list`]) and the ally list ([`on_ally_list`]). CONFIRMED.
 pub fn build_relation_belief(model: &CampaignModel, f: FactionId) -> RelationBelief {
     let order = ai_order(model);
     let others = || order.iter().copied().filter(move |&g| g != f);
     RelationBelief {
         relations: others().map(|g| (g, relation_value(model, f, g))).collect(),
         enemies: others().filter(|&g| on_enemy_list(model, f, g)).collect(),
+        allies: others().filter(|&g| on_ally_list(model, f, g)).collect(),
     }
 }
 
-/// Whether a rebuild of `f`'s relation belief puts `g` (not `f`) on its enemy list (`0x00ABAFB0`):
-/// the rebels (`0x00C3FE80`) always; any other faction when it is in the game (`+0x824` clear,
-/// [`CampaignModel::in_the_game`]) and `f`'s stance towards it is war (`0x00B64C50` record
-/// `+0x790 → +0x10` = 0, [`CampaignModel::at_war`]). CONFIRMED.
+/// Whether a rebuild of `f`'s relation belief puts `g` (not `f`) on its enemy list (`+0x40`,
+/// `0x00ABAFB0`, disassembly `0x00ABB07E..0x00ABB0EB`): every `g` when either of them is the rebels
+/// (`0x00C3FE80`, tested first, so even a `g` out of the game); else `g` when it is in the game
+/// (`+0x824` clear, [`CampaignModel::in_the_game`]) and its record towards `f` is war
+/// (`0x00B64C50`, `+0x790 → +0x10` = 0). CONFIRMED. The one enemy-list rule: the director's walks
+/// ([`believes_at_war`]) and the research need's enemy count ([`believed_enemy_count`]) read it.
 fn on_enemy_list(model: &CampaignModel, f: FactionId, g: FactionId) -> bool {
-    model.is_rebel_faction(g) || (model.in_the_game(g) && model.at_war(f, g))
+    model.is_rebel_faction(f) || model.is_rebel_faction(g) || (model.in_the_game(g) && model.world.stance(g, f) == Stance::War)
+}
+
+/// Whether a rebuild of `f`'s relation belief puts `g` (not `f`) on its ally list (`+0x2C`, tested
+/// by `0x00A63A40`, returned by `0x00A63AB0`; `0x00ABAFB0` at `0x00ABB0DD`): neither of them the
+/// rebels, `g` in the game and its record towards `f` allied (stance 2). CONFIRMED. The one
+/// ally-list rule: [`believes_allied`] and [`believed_ally_count`] read it.
+fn on_ally_list(model: &CampaignModel, f: FactionId, g: FactionId) -> bool {
+    !model.is_rebel_faction(f) && !model.is_rebel_faction(g) && model.in_the_game(g) && model.world.stance(g, f) == Stance::Allied
+}
+
+/// One read of `f`'s relation belief that keeps nothing (`0x00A74A20`): `clean` answers from the
+/// stored belief while it is clean ([`DirectorState::beliefs`]), else `dirty` answers as the read's
+/// rebuild would ([`build_relation_belief`]). The one clean-or-rebuild rule of the belief's reads.
+fn read_belief<R>(model: &CampaignModel, f: FactionId, clean: impl FnOnce(&RelationBelief) -> R, dirty: impl FnOnce() -> R) -> R {
+    model.director.beliefs.get(&f).map_or_else(dirty, clean)
+}
+
+/// How many factions a rebuild of `f`'s relation belief puts on the list `on_list` decides
+/// ([`on_enemy_list`], [`on_ally_list`]): of the CAI world's ([`ai_order`]), without `f`.
+fn rebuilt_list_len(model: &CampaignModel, f: FactionId, on_list: fn(&CampaignModel, FactionId, FactionId) -> bool) -> u32 {
+    ai_order(model).into_iter().filter(|&g| g != f && on_list(model, f, g)).count() as u32
+}
+
+/// The length of `f`'s relation belief's enemy list (`0x00A64990` → `+0x40`, count `+0x4C`): the
+/// stored list's while the belief is clean, else the rebuild's ([`on_enemy_list`] over [`ai_order`]).
+pub(crate) fn believed_enemy_count(model: &CampaignModel, f: FactionId) -> u32 {
+    read_belief(model, f, |b| b.enemies.len() as u32, || rebuilt_list_len(model, f, on_enemy_list))
+}
+
+/// The length of `f`'s relation belief's ally list (`0x00A63AB0` → `+0x2C`, count `+0x38`): the
+/// stored list's while the belief is clean, else the rebuild's ([`on_ally_list`] over [`ai_order`]).
+pub(crate) fn believed_ally_count(model: &CampaignModel, f: FactionId) -> u32 {
+    read_belief(model, f, |b| b.allies.len() as u32, || rebuilt_list_len(model, f, on_ally_list))
+}
+
+/// Whether `g` is on `f`'s relation belief's ally list (`0x00A63A40`): the stored list while the
+/// belief is clean, else what the read's rebuild lists ([`on_ally_list`]). False for `g` = `f`.
+pub fn believes_allied(model: &CampaignModel, f: FactionId, g: FactionId) -> bool {
+    read_belief(model, f, |b| b.allies.contains(&g), || g != f && on_ally_list(model, f, g))
 }
 
 /// `f`'s relation towards `x` as a read of `f`'s relation belief gets it (`0x00A74A20`): the stored
@@ -471,18 +523,15 @@ fn on_enemy_list(model: &CampaignModel, f: FactionId, g: FactionId) -> bool {
 /// nothing: the turn change after the pool marks every belief dirty anyway
 /// ([`CampaignModel::director_handover`]).
 pub fn relation_belief_value(model: &CampaignModel, f: FactionId, x: FactionId) -> f32 {
-    let stored = model.director.beliefs.get(&f).and_then(|b| b.relations.iter().find(|e| e.0 == x));
-    stored.map_or_else(|| relation_value(model, f, x), |e| e.1)
+    let rebuilt = || relation_value(model, f, x);
+    read_belief(model, f, |b| b.relations.iter().find(|e| e.0 == x).map_or_else(rebuilt, |e| e.1), rebuilt)
 }
 
 /// Whether `g` is on `f`'s relation belief's enemy list (`0x00A649F0` on the belief
 /// `0x00A74A20` returns): the stored list while the belief is clean, else what the read's rebuild
 /// lists ([`on_enemy_list`]). False for `g` = `f`.
 pub fn believes_at_war(model: &CampaignModel, f: FactionId, g: FactionId) -> bool {
-    match model.director.beliefs.get(&f) {
-        Some(b) => b.enemies.contains(&g),
-        None => g != f && on_enemy_list(model, f, g),
-    }
+    read_belief(model, f, |b| b.enemies.contains(&g), || g != f && on_enemy_list(model, f, g))
 }
 
 /// A faction's player rival score (`0x00BD21B0`, the belief stored at +0x100): how much of a rival
@@ -1146,6 +1195,36 @@ impl CampaignModel {
             let belief = build_relation_belief(self, f);
             self.director.beliefs.insert(f, belief);
         }
+    }
+
+    /// Gives every stored (clean) relation belief the ally list a rebuild from the current world
+    /// makes ([`build_relation_belief`]), keeping its relations and enemy list; returns how many.
+    /// For a load of a save written before beliefs kept their ally list ([`RelationBelief::allies`],
+    /// own save format 11 and older), which never held the list, so a rebuild is the only source.
+    ///
+    /// The rebuild reads the current world: the CAI world's factions (a set play does not change)
+    /// and, for each, its stance towards the belief's owner, whether it is in the game
+    /// ([`Self::in_the_game`]) and whether either is the rebels. Marking the beliefs dirty
+    /// (`diplomacy_changed`) drops every stored belief, so the rebuild can differ from a stored
+    /// list only where one of those changed after the belief was stored without the beliefs being
+    /// marked dirty since. The known cases:
+    /// * a faction destroyed by any path (`destroy_faction_by`) is put out of the game and its
+    ///   stances set to Neutral directly, not through a treaty or war; the beliefs stay clean
+    ///   unless something else the same path does marks them; while they stay clean, a stored
+    ///   list still naming the destroyed ally comes back without it. (A re-emergence also sets
+    ///   stances directly, but none to an alliance, since a protectorate is made through
+    ///   [`Self::make_protectorate`], which marks them, so it changes no ally list.)
+    /// * a save without the out-of-game flag (`out_of_game: None`) has it derived by the startpos
+    ///   rule ([`Self::in_the_game`], [`Self::out_of_game_by_startpos_rule`]): an ally the exe keeps
+    ///   in the game against that rule (one that started without a region and later lost every
+    ///   character holding no post) comes back off the list.
+    pub fn rebuild_stored_ally_lists(&mut self) -> usize {
+        let lists: Vec<Vec<FactionId>> = self.director.beliefs.keys().map(|&f| build_relation_belief(self, f).allies).collect();
+        let n = lists.len();
+        for (b, allies) in self.director.beliefs.values_mut().zip(lists) {
+            b.allies = allies;
+        }
+        n
     }
 
     /// `0x00BA90E0`: every queued transfer whose receiver is `starting` leaves the queue, and is

@@ -10,7 +10,7 @@ the original's values. See the Goal section of `CLAUDE.md`.
 
 Generated 2026-10-20 by `bash tools/progress.sh` (from `tools/backlog_count.sh` and `tools/tag_count.sh`); never edit it by hand.
 
-Tags left in the code (done means zero): 1820 (742 PROVISIONAL, 100 PLACEHOLDER, 978 INFERRED), plus 592 UNKNOWN.
+Tags left in the code (done means zero): 1823 (746 PROVISIONAL, 100 PLACEHOLDER, 977 INFERRED), plus 593 UNKNOWN.
 
 | Section | Done | Partly done | To do |
 |---|---|---|---|
@@ -19,8 +19,8 @@ Tags left in the code (done means zero): 1820 (742 PROVISIONAL, 100 PLACEHOLDER,
 | 2. Graphics and rendering | 0 | 11 | 36 |
 | 3. Battle gameplay (land) | 2 | 11 | 27 |
 | 4. Naval battles | 0 | 1 | 7 |
-| 5. Campaign gameplay | 19 | 13 | 94 |
-| 6. AI | 0 | 1 | 13 |
+| 5. Campaign gameplay | 22 | 13 | 95 |
+| 6. AI | 0 | 1 | 15 |
 | 7. User interface | 1 | 7 | 13 |
 | 8. Video (Bink) | 2 | 1 | 1 |
 | 9. Audio | 0 | 2 | 11 |
@@ -612,7 +612,7 @@ the input; how it is drawn is ours. Items below that say "as the original" mean 
 - [ ] Region details: Migration (needs theatres); a `region_wealth_factors` table from mods; base_capacity 0 drops the population to the minimum (check the exe)
 - [ ] Fort as its own selection
 - [ ] Zone flood (zoneview): trace the post-battle zone views (`0x008F7880`, `0x008C1140`); ours keeps the stored view +0x400 unchanged after a battle
-- [ ] Join war (joinwar review): decline join-war deals before the full evaluation (deal_value.rs ~455; after dealattitude)
+- [x] (joinwarrule) Join war (joinwar review): decline join-war deals before the full evaluation (deal_value.rs ~455; after dealattitude)
 - [ ] Join war (joinwar review): trace the self-joiner refusal (negotiation.rs ~1017), and whether a joiner an earlier region record ended should still declare
 - [ ] Capture previews (capturepreview): trace whether the governorship tax-bundle swap `0x00B0D3B0` matches our `region_effect_set` (INFERRED, capture.rs)
 - [x] (residence) Deal hypothetical order (dealattitude review): load the residence #14 agents (region +0xFC → +0xC8 via `0x00AF4DFF` / `0x008CFA70`) and set residence when an agent enters or leaves a settlement; then remove the gentlemen-count PROVISIONAL in economy.rs (gentlemen are never resident in play now)
@@ -623,8 +623,8 @@ the input; how it is drawn is ours. Items below that say "as the original" mean 
 - [ ] Peace (siegeattr review) (running: peaceprice): peace's own price update `0x00BCB020(0)` at `0x00B2643F` is not modelled; trace and match
 - [ ] Battles pending (forceprot review): trace whether the exe drops queued commands while a battle is pending, and match
 - [ ] War option (forceprot review): trace the patron check `0x00C1A890` in the war option and match
-- [ ] Command stars (cmdstars review) (running: starmorale): battle morale reading the rank; trace and match
-- [ ] Command stars (cmdstars review): the autoresolve star rating; trace and match
+- [x] (starmorale) Command stars (cmdstars review): battle morale reading the rank; trace and match
+- [x] Command stars (cmdstars review): the autoresolve star rating; trace and match (starmorale review: `autoresolve_units` passes rank 0; use `battle_general_card`)
 - [ ] Command stars (cmdstars review): audit the 31 xrefs of GetCharacterRank `0x00A198D0` against our readers
 - [ ] Character abilities (cmdstars review): the ability effects (character +0xDC); trace and model
 - [x] (stickytrait) Traits (cmdstars review): the sticky trait level (`0x008B5380`); trace and match
@@ -683,6 +683,10 @@ the input; how it is drawn is ours. Items below that say "as the original" mean 
 - [ ] Script events (libevent review): our script handlers run after the whole command, while the exe posts synchronously (`0x00E30700`) before the owner change; trace and match
 - [ ] Script events (looting review): character-only events (e.g. CharacterCompletedBattle, vtable `0x013558E0`, faction getter the null stub `0x00461180`) still get a faction from `context_for`; trace each event's vtable and match
 - [ ] Script events (looting review): `0x008F9EE0` (shared by 32 event vtables) checks the trigger_events_table (`0x00E30810`) and character +0x1AC (`0x00EC5360`) before Lua; model them once where ScriptHost hands events to Lua, then recheck real_install.rs ~212
+- [ ] Battle morale (starmorale review): Rally `0x0051DDB0` reads rank −1 (no general) as unsigned; trace whether it is an ORIGINAL BUG and match
+- [ ] Battle morale (starmorale review): decode Inspire `0x0051DAF0` (its rank use) and match
+- [ ] Research need (joinwarrule review): trace the enemy count research_need reads and match
+- [ ] CAI world (joinwarrule review): trace whether the rebels are in the CAI world faction list and match
 ## 6. AI
 - [ ] Diplomacy AI readers of the scripted permissions (dippermai; moved from §0 #18): port the intention filter `0x00CE4A30` / `0x00CB8200`, the counter-offer filter `0x00CC58C0` (our AI makes no counter-offers yet, so this needs counter-offers first) and `0x00932EE0` → `0x00C1E770` (`0x00C561C0` is redundant) (CAMPAIGN_FIDELITY "Scripted diplomacy permissions")
 - [ ] Our campaign AI's Austria attacks in its first turn, so the diplomacy screen's Power reads Mighty instead of the original's Terrifying (self-checks2 (f), IN_GAME_CHECKS_2026-10-10.md); trace the original's turn-1 AI choice
@@ -704,7 +708,9 @@ the input; how it is drawn is ours. Items below that say "as the original" mean 
 - [ ] Stored CAI relation belief (`0x00A89E00` faction +0x100 list +8, written by `0x00ABAFB0`): merged 2026-10-14 (cai-belief: belief store + dirty mark in the director state, per-broadcaster marks CONFIRMED `0x00A8F320` → `0x00A88CE0`, capture `0x00A64AC0`/`0x00B62120`, misdeeds `0x00B0D870`/`0x00B67FD0`/`0x00B0D700`/`0x00B67E60`). Left: the turn-change mark (INFERRED, `0x00CF7F60`, propagation `0x00CF0B10`: debugger sitting); the other 184 readers of `0x00A74A20` (PROVISIONAL); the +0xA8 enemy-majority flag
 - [ ] AI shopping shroud (treasury4): the naval goal that creates CAI_BDIM_REPAIR_NAVY (`0x00CDD540`; `ai_repair_navy` has no runtime caller yet); the gate `0x00A8B2D0` on its 11 other callers (incl. `0x00A67890`); trace CAI slot +0x104 (the gate's position, INFERRED at capture.rs ~472); the CAI unit-list order (INFERRED); the ESF CAI_INTERFACE bool is neither read nor written (no load warning)
 - [ ] Trace the AI diplomatic budget pot (CAI +0x140, `0x00AAF570`; PROVISIONAL in the AI's payment evaluation, deals-fix)
-- [ ] AI join-war rule (joinwar) (running: joinwarrule): port `0x00AA5ED0` (~300-450 lines): it declines when diplomacy_options index 11 is 1 or 3; goals `0x00CC13D0` / `0x00CC0280`, weight `0x00D01370`, strength `0x00AB5400`, attitude `0x00A8D250`, all untraced; ours declines every join-war deal (PROVISIONAL, deal_value.rs). Start after dealattitude merges
+- [ ] AI join-war rule (joinwarrule review): port `0x00ABCB80` join_war_attitude and match (PROVISIONAL, deal_value.rs)
+- [ ] AI join-war rule (joinwarrule review): trace `0x00AB5400` (area virtual +8) and `0x00C53FB0` war_strength and match
+- [ ] AI join-war rule (joinwarrule review): re-trace the break-trade and alliance list-2 caps and match
 - [ ] AI capture choice (looting review) (running: aicapture): the AI's occupy / loot / liberate choice `0x00AAABA0` (AI virtual +0x2F8) is not decoded; ours always occupies (PROVISIONAL capture.rs ~313), so the AI never loots or liberates; trace and port
 
 ## 7. User interface
@@ -978,3 +984,19 @@ Non-blocking review findings, one line each (CLAUDE.md "Done means"). A worker e
 - [ ] ntw_sim capture tests (libevent review): `pos_before`, a capital-case position check, a no-terrain test
 - [ ] capture.rs ~349, CAMPAIGN_FIDELITY ~1818 / ~2055 (libevent review): "out of the region" wording
 - [ ] ntw_script campaign_hud_probe.rs ~243 (looting review): picks any commander (admirals too); pick a force in or next to the region
+- [ ] Ghidra GetCharacterRank `0x00A198D0` (starmorale review): V5 write-up (predates the branch)
+- [ ] ntw_campaign tests/characters.rs ~387 (starmorale review): the test's commander check vs its "resolves" wording
+- [ ] ntw_sim CharacterKind (starmorale review): one commander-kind helper instead of repeated matches
+- [ ] ntw_sim BattleGeneralCard doc (starmorale review): covers land battles only; say so or cover naval
+- [ ] ntw_sim deal_value/negotiation (joinwarrule review): f32 vs the exe's x87 rounding in the join-war rule
+- [ ] ntw_sim character→region lookup (joinwarrule review): one index instead of the scans in war_mobiles, agents.rs ~675, characters.rs ~860
+- [ ] ntw_sim believed_patron (joinwarrule review): reads the live stance; read the belief
+- [ ] ntw_sim rebuild_stored_ally_lists (joinwarrule review): computes whole beliefs to get the ally lists
+- [ ] ntw_sim director.rs ~510 (joinwarrule review): believed_ally_count is pub only for a test
+- [ ] ntw_campaign own_save.rs ~305 (joinwarrule review): "with no start" wording
+- [ ] ntw_sim director.rs ~1212 (joinwarrule review): the re-emergence clause reasoning (on_ally_list counts only Allied)
+- [ ] ntw_campaign own_save/tests.rs ~357 (joinwarrule review): contains("beliefs:{}") substring check; compare the parsed value
+- [ ] ntw_sim tests.rs ~796 (joinwarrule review): asserts stance(B,A) while the rule reads stance(A,B)
+- [ ] ntw_campaign own_save.rs ~38 (joinwarrule review): version table row 12 omits the out_of_game None case
+- [ ] ntw_sim director.rs ~306/308 (joinwarrule review): docs link private items (cargo doc warns)
+- [ ] Ghidra (joinwarrule review): V5 write-ups for the predating names `0x008CE9B0`, `0x00A364B0`, `0x00A62400`, `0x00AA1E90`, `0x00ABAFB0`, `0x00C131C0`, `0x00CC0280`, `0x00CCB210`, `0x00CCB810`

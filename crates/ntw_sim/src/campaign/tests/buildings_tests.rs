@@ -319,6 +319,7 @@ fn naval_engagement_and_battle() {
         rules: ShipRules { crews: [30, 30, 144], hull: 3300.0, sink_weight: 0.45, morale: 10.0, fire: [40, 15], guns: 74, range: 3, ..Default::default() },
         human: false,
         force: 0,
+        star_rating: 0,
     };
     let mut rules = CampaignRules::test_rules();
     for (k, v) in [

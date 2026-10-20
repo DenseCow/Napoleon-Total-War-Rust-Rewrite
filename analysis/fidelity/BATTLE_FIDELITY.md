@@ -594,7 +594,7 @@ kv offsets in these functions are `kv_morale` index × 0x60 + 0x10 (checked agai
 - `FUN_0054C840` = units in the alliance's armies after the first → effect 1 = `min(n/4 + 1, 6)` when n > 0.
 - `0x00532000` army destruction → 0x13: own alliance strength ratio (`+0x64 / +0x60`) ≤ 0.1 and the other alliances'
   summed ratio ≥ 7 × ours. The start strength `+0x60` is stored once by `0x00539E80` (model: first step).
-- The model has no generals (`GeneralStatus::NotModelled` adds nothing, PROVISIONAL) and one army per side.
+- Generals and armies in the model: §11 (`Battle::general_status`; `GeneralStatus::NotModelled` only in fixtures without one).
 
 `0x0053CBD0` (lists of units within 160 m, weight `w = trunc(f32(clamp_line(d, −0.01, 2.0, 48, 160)))` = 1 up to
 100 m, else 0):
@@ -645,8 +645,66 @@ destroyed → "died recently" for `GENERAL_DIED_RECENTLY_TICKS` = 600 (60 s), th
 shattered → "fled recently".
 Code: `LandUnit::general_rank` / `army_index`, `Battle::general_of`, `general_status`, `allied_units`, `general_died`;
 `setup::apply_spec_unit` (rank = `star_rating level`, army index per battle-file army). The test armies have no general
-unit (so the CONFIRMED +5/+1 applies). Campaign battles (startpos characters) are not wired to the battle yet: when they
-are, the card's rank should come from the commander's character record (UNKNOWN field).
+unit (so the CONFIRMED +5/+1 applies).
+
+**Campaign battles: the card from the campaign character (2026-10-20, worker starmorale, CONFIRMED listings).** The
+campaign builds each unit's battle card with `0x008AF200` (land) / `0x008AEF40` (naval). Both start from the default
+record `0x00513A50` (rank 0, role 0, category 0); when the unit's character handle (campaign unit `+0xF4`) resolves they
+fill it with `0x00513A10` (+0x20 rank, +0x24 role, +0x28 category), rank = `GetCharacterRank` `0x00A198D0` of that
+character called at card build (calls at `0x008AF2A6` / `0x008AEFA5`), so the battle reads his rank as a battle-start
+snapshot. The land card `0x00513320` (from `0x005363C0`) copies the record to `+0xBC`/`+0xC0`/`+0xC4`, the naval card
+`0x00512E50` (from `0x00536130`) to `+0xE8`/`+0xEC`/`+0xF0`. Ghidra names (V5 plates): `BuildLandBattleUnitCardFromCampaignUnit`,
+`BuildNavalBattleUnitCardFromCampaignUnit`, `InitializeBattleGeneralRecordWithNames` / `...Unnamed`,
+`GetCampaignUnitCommanderRole` (`0x008B6AC0`), `CampaignCharacter::IsReturningNapoleonBonaparte` (`0x00A0B980`).
+- Role, `0x008B6AC0` (agent kind = character `+0x1AC` record `+0x2C`, the index of the `agents` key in the exe's table
+  at `0x0145D9E0`, set by `0x00F9DB50`: 0 General, 1 admiral, 2 colonel, 3 captain, 4 gentleman, 5 Eastern_Scholar, 6–10
+  the missionaries, 11 rake, 12 assassin, 13 minister, 14 bandit, 15 pirate, 16 guerilla): no character → none. When the
+  unit's force has a leader (force `+0x74`) that resolves and is not this character: General/admiral → subordinate,
+  other kinds → none. Otherwise (he leads it, or no leader): General/admiral → commander, other kinds → "other
+  commander". Land card values none 0 / commander 1 / other commander 2 / subordinate 3; naval 0 / 4 / 5 / 6. With the
+  army rule above ({1, 2, 4, 5}) the army's general is its commander's unit, or a colonel's or captain's unit raised
+  alone; a subordinate General never is.
+- Category: 1 when the character has `CHARACTER` #34 (+0x52C), 2 when he also is Napoléon Bonaparte (`0x00A0B980`:
+  forename `+0x2F4` = `names_name_names_frenchNapoléon` and surname `+0x30C` = `names_name_names_frenchBonaparte`,
+  exact-case compares `0x004F0F40` against the globals `0x015C4D5C` / `0x015C4D4C` set by `0x0042B540` / `0x0042B560`);
+  the naval builder leaves 0. Not read by any battle morale path; not modelled.
+- Code: `CampaignModel::battle_general_card` (`ntw_sim::campaign::battles`, rank through `agents::rank`, the one rank
+  rule and its seam) and `BattleGeneralCard::army_general_rank` → `LandUnit::general_rank`. The campaign does not
+  launch real-time battles yet (`campaign::play` HOOK); the autoresolve reads it (below) and so do the tests
+  (`the_battle_card_carries_the_rank_and_the_command_role`, `the_battle_card_reads_the_rank_through_its_seam`, real
+  data `battle_cards_carry_the_commanders_rank`: every land unit of the eur start, Napoléon's bodyguard at his rank).
+  The rank still lacks the pending-battle bonuses (`rank_original` PROVISIONAL, CHARACTERS_FIDELITY.md §16); the card
+  will carry them once the model has them, since the card is built while the battle is pending.
+- **Autoresolve star ratings** (CONFIRMED, autostars): the resolver units are built from the same cards.
+  `0x007CA330` (reached from `0x008F7880` → `0x008AE5A0` → `0x007ADDD0` → `0x007CA700`) walks the battle's armies
+  (land cards at army `+0x48`, stride 0x114, appended at `0x008B0F1C` → `0x00531370`; naval cards at `+0x58`, stride
+  0xFC) and passes the land card's `+0xBC` (`0x007CA5CE`, to `0x0070D4E0`) or the naval card's `+0xE8` (`0x007CA465`,
+  to `0x0070D580`) to the base unit `0x0070D740`, which stores it at unit `+0xAC` (`0x0070D787`). The setup
+  `0x0078D9E0` starts the sides' ratings (resolver `+0x20` / `+0x24`) at 0 and lets every unit's `+0xAC` that is
+  higher replace it (`0x0078E006` / `0x0078E287`), so every unit with a character counts, not only the army's general;
+  the star step `0x0078E33B` takes the signed difference (CAMPAIGN_FIDELITY.md, autoresolve "Stars"). Code:
+  `CampaignModel::autoresolve_units` / `naval_autoresolve_units` (both through `resolver_units`, star rating =
+  `battle_general_card(..).rank`), `ArUnit::star_rating` / `NavalUnit::star_rating`, `autoresolve::side_star_rating`,
+  `finalize_probabilities`; tests `the_autoresolve_star_ratings_are_the_battle_cards_ranks`,
+  `a_sides_star_rating_is_the_signed_best_from_zero`, `the_side_with_more_stars_has_its_win_chance_scaled`.
+  The path is CONFIRMED; the rank it carries still lacks the pending-battle bonuses (`rank_original` PROVISIONAL,
+  CHARACTERS_FIDELITY.md §16, BACKLOG "Pending battles" line), so the star ratings do too until the model has them.
+  **ORIGINAL BUG:** the replace test is unsigned (`JBE` at `0x0078E00F` / `0x0078E290`) while the rank is signed
+  (−1..9, `0x00A198D0`). A −1 rank is reachable: attribute levels start at −1 (`0x00984AD0`, called from the details
+  constructor at `0x00992F37` with −1, before the type's starting rows) and trait / ancillary effects subtract with
+  no floor (`0x00A0ECB0`; CHARACTERS_FIDELITY.md §16). So a −1 character becomes his side's best over a 9-star
+  general and the signed step then favours the enemy. Ours compares signed from the same 0 start.
+  Not changed here: the resolver's has-general flag reads card `+0xC0` in {1, 2, 4, 5} (`0x0074F840`), ours still
+  `character == commander` (BACKLOG trace line).
+- Other battle readers of card `+0xBC` (scan of every `[card+0xBC]` read): `0x0053BC70` (§10, ported), the Rally
+  ability `0x0051DDB0` and a UI/script unit-info reader `0x005D8300` (with `+0xC0`; not morale). **Rally** (special
+  ability 0x11; `0x0052ECC0` builds the abilities by id: 0x11 → `0x0051DDB0`, 0x12 Inspire → `0x0051DAF0`): bonus =
+  round-to-nearest(f32(rank read as unsigned → double) × 0.11111111 × (`special_ability_rally_max_bonus` −
+  `special_ability_rally_min_bonus`) + min), added as a timed morale effect (id 0x11, that value, the ability's
+  duration; `0x00531220` appends {id, value, duration} to the unit's morale list) to each unit within 75 m
+  (`0x00555F20`) of the general, also setting unit `+0xC60` = −1. The general's rank −1 read as unsigned gives a huge
+  bonus: a possible ORIGINAL BUG, not confirmed (whether a rank −1 card can reach Rally is not traced). Inspire adds kv values to unit `+0x160` / `+0x170` and a timed effect id 0x10; not
+  decoded. Both belong to the general-abilities items (BACKLOG §5 RALLY/INSPIRE), not ported here.
 AI test after this: Austria AI 5/8 v default 3/8, France 8/8 v 5/8.
 
 ## 12. "The battle stays in deployment" in `NAPOLEON_AI_SHOT` runs (bug report, 2026-10-04)

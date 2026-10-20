@@ -23,7 +23,7 @@
 use crate::rng::{CaRng, INV_65535};
 
 use super::autoresolve::{
-    ai_loss_factor, advantage, combine_stats, finalize_probabilities, roll_winner, sample_stats, ArUnit, ArVars, PairResult,
+    ai_loss_factor, advantage, combine_stats, finalize_probabilities, roll_winner, sample_stats, side_star_rating, ArUnit, ArVars, PairResult,
     PairSample, Stats, VictoryType,
 };
 
@@ -139,6 +139,9 @@ pub struct NavalUnit {
     pub human: bool,
     /// Its force's index on its side (the captives step shares the captures out per winning force).
     pub force: usize,
+    /// The star rating of the ship's character: the naval card's rank (`+0xE8`, resolver unit `+0xAC`;
+    /// [`ArUnit::star_rating`]), 0 without one.
+    pub star_rating: i32,
 }
 
 impl NavalUnit {
@@ -475,7 +478,7 @@ fn apply_damage(c: &Ctx, u: &mut NavalUnit, st: &NavalStats, rng: &mut CaRng) {
         sink(u);
         return;
     }
-    let factor = ai_loss_factor(&ArUnit { data: Default::default(), men: 0, has_general: false, general_rank: 0, human: u.human }, &c.v.land);
+    let factor = ai_loss_factor(&ArUnit { data: Default::default(), men: 0, has_general: false, star_rating: 0, human: u.human }, &c.v.land);
     let crews = &mut u.state.crews;
     for i in [1usize, 2, 0] {
         let mut lost = (crews[i] as f32 * r) as i32;
@@ -534,7 +537,8 @@ pub fn resolve(a: &mut [NavalUnit], b: &mut [NavalUnit], v: &NavalVars, rng: &mu
     let units_b: Vec<NavalStats> = (0..b.len()).map(|j| combine(&pairs.iter().map(|row| row[j]).collect::<Vec<_>>()).flipped()).collect();
     let all: Vec<NavalStats> = pairs.iter().flatten().copied().collect();
     let mut battle = combine(&all);
-    finalize_probabilities(&mut battle.crew, sa, sb, &v.land, 0, 0);
+    let (rank_a, rank_b) = (side_star_rating(a.iter().map(|u| u.star_rating)), side_star_rating(b.iter().map(|u| u.star_rating)));
+    finalize_probabilities(&mut battle.crew, sa, sb, &v.land, rank_a, rank_b);
     let (a_won, victory) = roll_winner(&battle.crew, &v.land, rng);
     let adv = advantage(sa, sb);
     // The crews each ship had going in (the card's +0x70..+0x78, which a capture restores before scaling).

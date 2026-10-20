@@ -27,6 +27,10 @@ Last updated: 2026-10-19. Main tests at last full run (2026-10-08): `cargo test 
 
 ## Open bugs
 
+- **Campaign keys (user check 2026-10-20, after keybind):** arrow keys do not move the camera; WASD barely moves it
+  (far too slow); CTRL+S does nothing; with the save box opened from the ESC menu, Return still ends the turn (text
+  focus / modal not blocking the binding); CTRL+L moves the camera back to London after ~3 s instead of opening load.
+  Return (end turn) and ESC (menu) work. Fix worker: keybind2.
 - **Campaign:** the region details panel is filled since 2026-10-10 except Effects, NextTown and the selected-army
   garrison (PROVISIONAL, BACKLOG §0-E); the user couldn't find the demolish button (offered from a building slot via
   `CanDemolishBuilding`: check it shows).

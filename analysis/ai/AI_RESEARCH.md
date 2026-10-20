@@ -1262,11 +1262,13 @@ deal-region, 2026-10-10, below "Region value").
   cleared); state gift and payments 0; the rest −1. List 2: region **−1**; technology (one item) =
   attitude `+0x2A0(tech)` (`0x00D63120`), below −1 → −1, then **min(w, −0.5)**; protector
   `+0x29C`, join war / break trade / break alliance `+0x2C4/+0x2C8/+0x2CC(proposer, third)` with
-  caps −0.1 / −0.25 / −0.5 by the third party's relation; the rest as list 1. The region goals'
+  caps −0.1 / −0.25 / −0.5 (for join war re-traced 2026-10-20: by what the **proposer** is to the
+  AI, see "Join war" below; break trade / alliance not re-traced); the rest as list 1. The region goals'
   `+0xC5` flag is `0x00CF1410` (not read by the evaluation).
   - Ghidra pass (polish9, 2026-10-11): the {4,5,6,7}-only rule fires when the goal already weighted
     ≥ 1 is a region goal; every other weight-0 goal then gets −1 and is left out. The list 2
-    third-party caps by relation are −0.1 same component, −0.25 allied, else −0.5. The ten deal-AI
+    caps are −0.1 / −0.25 / −0.5 (for join war corrected 2026-10-20: −0.1 when the proposer is
+    the AI's believed patron, −0.25 when on the AI's belief ally list, else −0.5). The ten deal-AI
     functions (`0x00AA5ED0`, `0x00A36B20`, `0x00A62400`, `0x00ABB340`, `0x00CC13D0`, `0x00CC0280`,
     `0x00CCB810`, `0x00CCB210`, `0x00D63120`, `0x00CF8400`) have V5 plates, labels and typed
     constants: effective completeness 0–32 → 55–88. What is left needs structs (`this`, raw vtable
@@ -1279,8 +1281,11 @@ deal-region, 2026-10-10, below "Region value").
     "economy" 1, "military" 2, else 3; 3 categories, `0x004CDC50`). Refresh: five need scores, each a
     power of two `2^k`, `k` ≤ 8: `M` = 2^min(enemies, 8) (`0x00ABE100`), `D` = allies − enemies,
     1 when < 0, 256 when > 8, else 2^D (`0x00A98460`) — enemies and allies are the relation
-    belief's (`0x00A74A20`, refresh `0x00ABAFB0`) lists `+0x40` (stance 0, war) and `+0x2C` (stance 2,
-    allied) over the other factions; `E` (`0x00A9B810`, economy history of the faction
+    belief's (`0x00A74A20`, refresh `0x00ABAFB0`) lists `+0x40` (stance 0, war; and every faction
+    when the owner or the other is the rebels, checked before the out-of-game skip, `0x00ABB07E` /
+    `0x00ABB08D`) and `+0x2C` (stance 2, allied) over the CAI world's factions, read through
+    `0x00A64990` (`+0x40`) and `0x00A63AB0` (`+0x2C`) (joinwarrule fix 2026-10-20; ours:
+    `director::on_enemy_list` / `on_ally_list`, the one rule); `E` (`0x00A9B810`, economy history of the faction
     economy `+4`: count `+0x3E8` (≤ 5), ring index `+0x3EC`, 100-byte turns; 16 when ≤ 2 turns; else
     `I`, `X` = income / expenses summed over the last count − 2 turns, `s` = trunc(2I × 0.125), `k`
     = 8 − the steps of `s` needed to reach 2I − X); `P1` (`0x00A64460`: (Σ region `+0x15C` >> 1) +
@@ -1290,6 +1295,56 @@ deal-region, 2026-10-10, below "Region value").
     max(P1, P2)`, `h = (Σ need) >> 1` and `value[i] = min(need[i], h) / h`. CONFIRMED formula;
     the CAI fields `+0x15C`, `+0x140`/`0x00C3F480`, `+0x160`/`+0x168` of the relation list `+0x14C`
     are UNKNOWN, and the belief is cached (refresh schedule not traced).
+- **Join war (record 11; joinwarrule 2026-10-20, CONFIRMED by disassembly unless marked; ported in
+  `deal_value.rs`).** The record's `offered` list is the proposer's wars on the AI's behalf, `demanded`
+  the AI's on the proposer's. In `0x00AA5ED0` it comes after the payments (7): decline on
+  `diplomacy_options` 1/3, else goal weight + value.
+  - Goals: both lists build join-war goals only when `0x00CCB150` passes for 11 and
+    `0x00C1A6A0(AI, P)` = allied (`0x008CE390`) and a war joinable either way (`0x00C1E590`, whose body
+    `0x00B28010` repeats: over Y's relations T with Y's stance war, X not at war with T, and X has no
+    patron, or its patron (`0x008E2A80`) is T (`0x00898B20`, plain equality) or at war with T). One
+    goal per T of `0x008FA020(this = A, out, B)`: T in A's record order with A's stance war, T ≠ B,
+    and B's record towards T (`0x00B64C50`) not at war (`+0x790 → +0x10` ≠ 0,
+    `0x008FA0BE..0x008FA0C8`; the first port read it as "B holds a record"). `0x00B64C50` never
+    returns null: on a miss it falls back to B's first record (`0x00B64C88`). ORIGINAL BUG (an
+    unrelated faction's stance is tested); ours reads a missing record as not at war, as
+    `zones::region_open_to` does; unreachable with shipped data (the rebels hold no records and are
+    in none, every other pair has one). List 1 (`0x00CC13D0`): A = AI, B = proposer,
+    weight −1 (`0x00CCB810`, `0x01318068`), matched on `offered`. List 2 (`0x00CC0280`): A =
+    proposer, B = AI, matched on `demanded`, weight `0x00CCB210` case 11: −1 unless the goal holds one
+    faction and T has a CAI faction (`0x00C3C4E0`); else `w = 0x00D62DA0(P, T)`, below −1 → −1, else
+    min(w, cap) with cap −0.1 when P is the AI's belief patron (belief `+0x100` info `+0x90`,
+    `0x00A9BDC0`: the faction whose stance to the AI is patron, in the game, no rebels), −0.25 when P
+    is on the belief's ally list (`+0x2C`, `0x00A63A40`), else −0.5. The goal weight getter
+    `0x00D01370` reads goal `+0xBC`.
+  - `0x00D62DA0` (attitude virtual `+0x2C4` on all three personality vtables): `off(sP) − off(sT)`
+    with the stance-belief states (`0x00A74D60` → `0x00ABCB80`, 0..4; offsets 0 → 0.5, 1 → 0.25,
+    3 → −0.25, 4 → −0.5, else 0), plus `rel(AI, P) − rel(AI, T)` (relation belief entry `+8`) when the
+    relation belief has entries for both (`0x00A89E00`). `0x00ABCB80` (thresholds on a score: < −0.75
+    → 4, < −0.25 → 3, ≥ 0.75 → 0, ≥ 0.25 → 1, else 2) reads another belief (`0x00A73390`), the
+    multi relation (`0x00A7C270`), `0x00A89580`, `0x00A8B700`, patron / allies / enemies, religion,
+    `0x00C3F870`, `0x00C288F0` / `0x00C28950` / `0x00C28920`: not ported (ours: state 2, PROVISIONAL).
+  - Value `0x00C12D40` (each faction through `0x00A75330` → `0x00A34E80`): `att` = the AI's
+    attitude total to P; offered F: (2 × S(war_strength(P, F)), 0, 0); demanded F: (0,
+    S(war_strength(AI, F)), war_strength(F, AI) + 1000); summed wrapping, then inflated. `S` is
+    `0x00A8D250(v, AI, P, p4 = 0.5, p5 = 2.0)` (pushed at `0x00A34EE5..0x00A34EED` /
+    `0x00A34F18..0x00A34F20`): k = (1 − p5)(att + 100)·0.01 + p5 below 0, else (p4 − 1)·att·0.01 + 1
+    (att clamped ±100), so k runs from 2 at −100 through 1 at 0 to 0.5 at +100. ORIGINAL BUG
+    (`0x00A8D250`): the exe truncates k (CVTTSS2SI) before the IMUL with v (`0x00A8D2AF` /
+    `0x00A8D2E2`), leaving 2 at −100, 1 from −99 to 0 and 0 above 0: any positive attitude zeroes
+    the value, against the endpoints its callers pass (0.5 here; `0x00A34CD0`'s outer call, with the
+    endpoints swapped (p4 = 2.0, p5 = 0.5), gets 0 for every attitude from −100 to −1, 1 from 0 to 99
+    and 2 only at +100) and against the sibling `0x00A34CD0`'s trade
+    branch, which multiplies first and keeps the fraction (`0x00A34DCD..0x00A34DD1`). Ours
+    (`deal_value::attitude_scaled`): trunc(k × v), the rest 1:1 (joinwarrule fix 2026-10-20).
+  - `0x00AB5400(attacker, target)`: over the attacker's mobiles with units, `v` = the force's raw
+    upkeep sum (as the rankings' power; commander required); land: total += v, near += v when the
+    force's area is owned by the target (area virtual `+0xC`) or a boundary area (`0x00C3DE80`,
+    `0x00C1BCE0`) answers virtual `+8(target)`, unless `0x00C53FB0` (area `+0x190 → +0xC` = 1);
+    navy: total += v >> 1. Returns near + (total − near) / 10 (u32). INFERRED: virtual `+8` = owned
+    by (the wrapper `0x01382678`'s `+8` `0x00C3FD10` and `+0xC` `0x00C45CF0` forward to the same inner
+    object); `0x00C53FB0`'s meaning UNKNOWN (ours: false); boundary areas taken as the region's land
+    neighbours.
 - **Matching (CONFIRMED, `0x00A62400` disassembly).** Regions: weight = Σ weights of the list-1
   goals whose `+0x10` first region is a region the proposer **offers** (deal `+0x20`) + Σ of the
   list-2 goals whose `+0x20` first region is one it **demands** (deal `+0x10`); technologies the

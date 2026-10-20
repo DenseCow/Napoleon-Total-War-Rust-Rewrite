@@ -52,15 +52,30 @@ pub struct BattleResult {
 impl CampaignModel {
     /// The autoresolve units of some forces, in force and unit order. A unit without autoresolve
     /// data (ships) takes part with zero potential. A unit carries a general when its character is
-    /// the force's commander; star ratings are not modelled (0).
-    fn autoresolve_units(&self, forces: &[ForceId]) -> Vec<(ForceId, usize, ArUnit)> {
+    /// the force's commander. Its star rating is its battle card's rank ([`Self::battle_general_card`],
+    /// CONFIRMED: `0x007CA330` passes land card `+0xBC` to the resolver unit's `+0xAC` at `0x007CA5CE`; the
+    /// cards are the `0x008AF200` ones the battle's armies hold, appended at `0x008B0F1C` → `0x00531370`).
+    pub(super) fn autoresolve_units(&self, forces: &[ForceId]) -> Vec<(ForceId, usize, ArUnit)> {
+        self.resolver_units(forces, |_, f, u, star_rating| {
+            let data = self.rules.units.get(&u.unit_key).and_then(|r| r.autoresolve).unwrap_or_default();
+            let has_general = u.character.is_some() && u.character == f.commander;
+            ArUnit { data, men: u.men, has_general, star_rating, human: self.turn.humans.contains(&f.faction) }
+        })
+    }
+
+    /// The resolver units of some forces, in force and unit order, shared by the land and naval
+    /// autoresolves (`0x007CA330` walks the battle's armies the same way for both): `make` gets the
+    /// force's index in `forces`, the force, the unit and the unit's star rating (its battle card's rank).
+    fn resolver_units<T>(
+        &self,
+        forces: &[ForceId],
+        mut make: impl FnMut(usize, &MilitaryForce, &super::world::CampaignUnit, i32) -> T,
+    ) -> Vec<(ForceId, usize, T)> {
         let mut out = Vec::new();
-        for &fid in forces {
+        for (k, &fid) in forces.iter().enumerate() {
             let Some(f) = self.world.forces.get(&fid) else { continue };
             for (i, u) in f.units.iter().enumerate() {
-                let data = self.rules.units.get(&u.unit_key).and_then(|r| r.autoresolve).unwrap_or_default();
-                let has_general = u.character.is_some() && u.character == f.commander;
-                out.push((fid, i, ArUnit { data, men: u.men, has_general, general_rank: 0, human: self.turn.humans.contains(&f.faction) }));
+                out.push((fid, i, make(k, f, u, self.battle_general_card(f, u).rank)));
             }
         }
         out
@@ -548,25 +563,25 @@ impl CampaignModel {
         super::naval::ShipState { crews, max_crews: crews, ..Default::default() }
     }
 
+    /// The naval autoresolve units of some navies, in navy and ship order (`force`: the navy's index in
+    /// `forces`). A ship's star rating is its naval battle card's rank ([`Self::battle_general_card`], CONFIRMED:
+    /// `0x007CA330` passes naval card `+0xE8` at `0x007CA465` to `0x0070D580`, which stores it at resolver unit `+0xAC`).
+    pub(super) fn naval_autoresolve_units(&self, forces: &[ForceId]) -> Vec<(ForceId, usize, super::naval::NavalUnit)> {
+        self.resolver_units(forces, |k, f, u, star_rating| {
+            let rules = self.rules.ships.get(&u.unit_key).copied().unwrap_or_default();
+            let human = self.turn.humans.contains(&f.faction);
+            super::naval::NavalUnit { state: self.ship_state(u), rules, human, force: k, star_rating }
+        })
+    }
+
     /// The naval autoresolve ([`super::naval`]): the attacker's navy against the defending navies. The ships'
     /// states and men (the crew total) are written back; sunk ships and ships without crew are removed; a navy
     /// left without ships is destroyed. Then the rest is settled as [`Self::apply_battle_result`] does, its undock run
     /// once here, before the captures ([`Self::undock_after_battle`]).
     pub(crate) fn autoresolve_naval(&mut self, battle: &PendingBattle) -> Vec<CampaignEvent> {
         use super::naval::{resolve, NavalUnit, NavalVars};
-        let collect = |m: &CampaignModel, forces: &[ForceId]| -> Vec<(ForceId, usize, NavalUnit)> {
-            let mut out = Vec::new();
-            for (k, &fid) in forces.iter().enumerate() {
-                let Some(f) = m.world.forces.get(&fid) else { continue };
-                for (i, u) in f.units.iter().enumerate() {
-                    let rules = m.rules.ships.get(&u.unit_key).copied().unwrap_or_default();
-                    out.push((fid, i, NavalUnit { state: m.ship_state(u), rules, human: m.turn.humans.contains(&f.faction), force: k }));
-                }
-            }
-            out
-        };
-        let a = collect(self, &[battle.attacker]);
-        let b = collect(self, &battle.defenders);
+        let a = self.naval_autoresolve_units(&[battle.attacker]);
+        let b = self.naval_autoresolve_units(&battle.defenders);
         let mut ua: Vec<NavalUnit> = a.iter().map(|x| x.2).collect();
         let mut ub: Vec<NavalUnit> = b.iter().map(|x| x.2).collect();
         let mut vars = NavalVars::from_rules(&self.rules);
@@ -621,5 +636,96 @@ impl CampaignModel {
         let mut rest = self.settle_battle(battle, BattleResult { attacker_won: o.a_won, attacker_casualties: 0.0, defender_casualties: 0.0 }, false);
         events.append(&mut rest);
         events
+    }
+}
+
+/// A battle unit card's commander role: the land card's `+0xC0` value, which the campaign's card builders
+/// (land `0x008AF200`, naval `0x008AEF40`, CONFIRMED) set from the unit's character through
+/// `0x008B6AC0` (CONFIRMED listing; BATTLE_FIDELITY.md §11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BattleCommandRole {
+    /// 0: no character on the unit, or a character of another kind (colonel, captain, ...) in a force
+    /// someone else commands.
+    None,
+    /// 1 (land) / 4 (naval): a General or admiral who commands the unit's force, or is in none.
+    Commander,
+    /// 2 (land) / 5 (naval): a character of another kind who commands the unit's force, or is in none
+    /// (a colonel or captain whose unit was raised alone).
+    OtherCommander,
+    /// 3 (land) / 6 (naval): a General or admiral in a force someone else commands.
+    Subordinate,
+}
+
+impl BattleCommandRole {
+    /// The card `+0xC0` value: land 0/1/2/3, naval 0/4/5/6 (the two builders' maps of the
+    /// `0x008B6AC0` result, CONFIRMED).
+    pub fn card_value(self, navy: bool) -> u8 {
+        match (self, navy) {
+            (Self::None, _) => 0,
+            (Self::Commander, false) => 1,
+            (Self::OtherCommander, false) => 2,
+            (Self::Subordinate, false) => 3,
+            (Self::Commander, true) => 4,
+            (Self::OtherCommander, true) => 5,
+            (Self::Subordinate, true) => 6,
+        }
+    }
+
+    /// The card makes its unit its army's general: the battle's army setup `0x00505B00` takes the
+    /// cards whose `+0xC0` is 1, 2, 4 or 5 (CONFIRMED), so a subordinate General is not one.
+    pub fn is_army_general(self) -> bool {
+        matches!(self, Self::Commander | Self::OtherCommander)
+    }
+}
+
+/// The general part of a battle unit card built from a campaign unit (CONFIRMED: `0x008AF200` /
+/// `0x008AEF40` fill the record `0x00513A10` (+0x20 rank, +0x24 role, +0x28 category), which the land
+/// card `0x00513320` copies to `+0xBC`/`+0xC0`/`+0xC4` and the naval card `0x00512E50` to
+/// `+0xE8`/`+0xEC`/`+0xF0`): what the battle's morale reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BattleGeneralCard {
+    /// Land card `+0xC0`.
+    pub role: BattleCommandRole,
+    /// Land card `+0xBC`: the unit character's rank ([`super::agents::rank`], `0x00A198D0`) when the card
+    /// is built, at battle start; 0 without a character (the default record `0x00513A50`).
+    pub rank: i32,
+}
+
+impl BattleGeneralCard {
+    /// The battle unit's general rank (`LandUnit::general_rank`): the rank when the card makes its
+    /// unit the army's general, else none.
+    pub fn army_general_rank(self) -> Option<i32> {
+        self.role.is_army_general().then_some(self.rank)
+    }
+}
+
+impl CampaignModel {
+    /// The battle card general record of `unit` of `force` (`0x008AF200` land / `0x008AEF40`
+    /// naval, CONFIRMED). With the unit's character `c`:
+    /// - rank: `GetCharacterRank` (`0x00A198D0`), here the model's one rank rule [`super::agents::rank`];
+    /// - role (`0x008B6AC0`): when `force` has a commander other than `c`, a General or admiral is a
+    ///   [`BattleCommandRole::Subordinate`] and any other kind gets no role; otherwise (he commands
+    ///   it, or it has no commander) a General or admiral is the [`BattleCommandRole::Commander`] and
+    ///   any other kind the [`BattleCommandRole::OtherCommander`].
+    ///
+    /// Without a character (or one the model does not hold), the default record: no role, rank 0.
+    /// The card's third value (`+0xC4`: 1 for a character with `CHARACTER` #34, 2 when he is also
+    /// Napoléon Bonaparte, `0x00A0B980`) is not read by any battle morale and is not modelled.
+    pub fn battle_general_card(&self, force: &MilitaryForce, unit: &super::world::CampaignUnit) -> BattleGeneralCard {
+        use super::world::CharacterKind;
+        let Some((c, ch)) = unit.character.and_then(|c| self.world.characters.get(&c).map(|ch| (c, ch))) else {
+            return BattleGeneralCard { role: BattleCommandRole::None, rank: 0 };
+        };
+        // The exe's agent kinds 0 and 1 (`0x00F9DB50`'s key table: "General", "admiral").
+        let commander_kind = matches!(ch.kind, CharacterKind::General | CharacterKind::Admiral);
+        // The force leader handle (force +0x74) counts only when it resolves to a character.
+        let led_by_other = force.commander.is_some_and(|l| l != c && self.world.characters.contains_key(&l));
+        let role = match (led_by_other, commander_kind) {
+            (true, true) => BattleCommandRole::Subordinate,
+            (true, false) => BattleCommandRole::None,
+            (false, true) => BattleCommandRole::Commander,
+            (false, false) => BattleCommandRole::OtherCommander,
+        };
+        BattleGeneralCard { role, rank: super::agents::rank(self, c) }
     }
 }

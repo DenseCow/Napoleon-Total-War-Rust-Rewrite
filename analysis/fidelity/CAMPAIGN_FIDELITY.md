@@ -3363,7 +3363,10 @@ Side A = the first alliance (the attacker, INFERRED). The resolver reads the `au
     [0.4, 0.6], else 0.35; normalised.
   - Blend (0x0075DBA0): if `|(p_side + pD/2) − (q_side + qD/2)| ≤ 0.5` for both sides, blend with
     w = max(clamp([52]), |`+0x18`|), where `+0x18` = 0 (INFERRED). Otherwise take the prediction and set `+0x3C`.
-  - Stars: d = best star rating of A − that of B. The side with more stars is × (|d|·[54] + 1). Then normalise.
+  - Stars (`0x0078E33B`): d = best star rating of A − that of B (signed). The side with more stars is × (|d|·[54] + 1).
+    Then normalise. A side's rating starts at 0 and takes every unit's `+0xAC` that is higher (`0x0078E006` /
+    `0x0078E287`); `+0xAC` is the unit's battle card rank (BATTLE_FIDELITY.md §11, autoresolve star ratings).
+    ORIGINAL BUG: that compare is unsigned (`0x0078E00F` / `0x0078E290`), so a −1 rank beats a 9; ours is signed.
 - **Winner** (0x007690C0):
   - One resolver LCG step. The gaussian 0x010E19B0 uses a local LCG seeded with that `state >> 16`: polar method,
     `t = ln(s)·−2/s`, root by the bit trick `((bits − 0x3F800000) >> 1) + 0x3F800000`, then × y × [48].
@@ -4328,11 +4331,20 @@ further here).
     `accept_deal` → `join_war_by_deal` → `war_on(x, F, Some(ally))` + `CampaignMessage::FactionJoinsYourEnemies`
     + `refresh_faction_zones(F)`, then the joiner's; `war_on` now skips the stance change when already at
     war (the records are applied again, as the exe's). An item naming its own joiner fails the deal
-    (project check: the exe would declare a faction's war on itself). PROVISIONAL (not ported): the AI's
-    evaluation of record 11 (`0x00AA5ED0`: decline when its `diplomacy_options` index 11 is 1 or 3, else
-    a goal by `0x00A62400` with the record's value +0x38 `0x00C12D40` = per offered F `0x00A75330(.., F,
-    1, ..)` and per demanded F `0x00A75330(.., F, 0, ..)`, summed and inflated): ours declines every
-    deal with a join-war item. The panel (`ntw_script` `diplomacy.rs`): `Propose(offers, demands,
+    (project check: the exe would declare a faction's war on itself). The AI's evaluation of record 11
+    (joinwarrule 2026-10-20) is ported (`deal_value.rs`; formulas in AI_RESEARCH.md §4 "Join war"):
+    in `0x00AA5ED0`'s record loop after the payments, decline when the AI's `diplomacy_options` index 11
+    towards the proposer is 1 or 3 (a decline is final, so where in the loop it falls does not change
+    the answer: the joinwar-review question of declining "before the full evaluation" is settled), else
+    the goal weight (`0x00A62400` matching the lists `0x00CC13D0` / `0x00CC0280`; the goal's weight
+    getter `0x00D01370` is goal `+0xBC`) and the value `0x00C12D40` are added. A goal's target is a
+    war of one side that the other side is not at war with (`0x008FA0BE..0x008FA0C8`). ORIGINAL BUG
+    (`0x00A8D250`): the value's attitude factor (2 at −100 to 0.5 at +100) is truncated before it
+    multiplies, so any positive attitude zeroes a join-war value; ours multiplies first (trunc(k ×
+    v)), the rest 1:1 (AI_RESEARCH.md §4 "Join war"). PROVISIONAL: the
+    stance-belief state of the join-war attitude (`0x00ABCB80`) reads 2 (offset 0), and the war
+    strength's nearness (`0x00AB5400`: area virtual `+8`, `0x00C53FB0`) is taken as "in or next to a
+    region the target owns". The panel (`ntw_script` `diplomacy.rs`): `Propose(offers, demands,
     'request_join_war')` (`0x009BF3C0` case 0xD: two tables of faction keys through
     `FindCampaignFactionByKey`, demands → `0x00C1F690`, offers → `0x00C43D30`) posts `ProposeJoinWar`
     (an unknown key proposes nothing, logged once: the exe pushes a null entry, what its command then carries UNKNOWN);
@@ -5691,7 +5703,8 @@ Ours: `ntw_sim::campaign::destruction` (`capital_after_owner_change`, `end_if_ca
 | Autoresolve: where the `autoresolve_*` variables are read | through a pointer to the variable array in the resolver (offset 4·index) | CONFIRMED | `autoresolve::ArVars` |
 | Autoresolve (land): potentials, pair engagements, statistics, probabilities, winner roll, advantage, wipeout, unit loss rates, reshuffle | above | CONFIRMED (inputs marked INFERRED above: side A = attacker, adv = 0 at query time, range class, `+0x14`/`+0x18`/`+0x3D`) | `campaign::autoresolve`, `battles.rs` |
 | Retreat after a campaign battle | none: the loser stays (aftermath states 1–7 read); the attacker resumes its order (not modelled) | CONFIRMED absence / INFERRED | `battles.rs` |
-| Autoresolve: captives, naval, siege damage, star ratings | not ported | open / PROVISIONAL | — |
+| Autoresolve: captives, naval, siege damage | not ported | open / PROVISIONAL | — |
+| Autoresolve star ratings (land and naval) | the battle card rank of every unit with a character, best per side from 0 (signed: ORIGINAL BUG fixed) | CONFIRMED path (`0x007CA330`, `0x0070D740`, `0x0078D9E0`); the rank still lacks the pending-battle bonuses (`rank_original` PROVISIONAL, CHARACTERS_FIDELITY.md §16) | `autoresolve::side_star_rating`, `battles.rs` |
 | Autoresolve difficulty handicaps | [74]–[79] by the human's campaign difficulty | CONFIRMED formulas; difficulty source INFERRED | `autoresolve::potential`, `ai_loss_factor` |
 | Validation against vanilla saves | eur after 3 turns, spa turn 1 and after 3 turns (round 6) | see the round-6 checks | `economy_check`, `effects_check` |
 | `units` #6 meaning | recruitment time in turns (new item turns = UNIT_RECORD +0x34) | CONFIRMED (round 4) | `UnitRules::turns` |

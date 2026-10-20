@@ -36,11 +36,12 @@ Side-by-side looks (no debugger): the first full side-by-side run, once step 3 i
 
 ### Needs you
 
-- Quick look (keybind, new and visible): `cargo run --release -p napoleon`, load any campaign; Return should end the turn and the camera keys (arrows / WASD, as in the original's key settings) should move the camera. Tell Claude if any key does nothing or the wrong thing.
+- (done, user 2026-10-20) Keys quick look: Return and ESC work; the arrow keys do nothing, WASD barely moves the camera, CTRL+S does nothing, Return still ends the turn with the save box (opened from the menu) up, CTRL+L moves the camera back to London ~3 s later. Recorded in HANDOFF Open bugs; fix worker keybind2 next. Command stars in the character panel: correct (user).
 - The debugger sitting sheet above is still open.
 
 ### Done tonight
 
+- joinwarrule merged: the AI's join-war rule reads each relation belief's stored ally lists, as the exe does; own saves (format 12) keep them, and older saves rebuild them on load. Logic only, covered by tests.
 - polish58 merged (716d1cf9): the zone-of-control flood's region gate is traced in Ghidra and its notes corrected (an expelled army that cannot be placed keeps its old zone). Notes only; porting the gate is a new BACKLOG item. Nothing to look at.
 - raidhand merged (21d160ef): when an army or fleet gets a new commander (hired general or admiral, or a promotion), its commerce raids pass to him at the old commander's place, as the exe does. Logic only, covered by tests; see it in a campaign by raiding trade with a fleet, then hiring an admiral into it.
 - polish62 merged (b05d273c): each faction's money history keeps a running record for the current round, as the exe does, and saves keep it in the original's order. Same income in vanilla play; one part (the round end pays from the record's sums) is a new BACKLOG item, running now. Nothing to look at.
@@ -123,6 +124,7 @@ Side-by-side looks (no debugger): the first full side-by-side run, once step 3 i
 - rebelroundend merged (see git log): at round end the rebels and factions out of the game skip the settle, family year and construction/research/relations steps as in the original (`0x008BC650`); trade still runs for everyone; logic, seen in the tests
 - libevent merged (see git log): liberating a settlement fires FactionBecomesLiberationProtectorate, then always expels the capturer's army, then hands the region over, as in the original (`0x00B4F090`, `0x00B508C5`); logic, seen in the tests
 - looting merged (see git log): looting a settlement fires CharacterLootedSettlement with the looting character, as in the original (`0x00B54468`); logic + real-install test
+- starmorale merged (see git log): battle morale reads the general's rank (command stars) through the model's one rank rule, as the original does (`0x008AF2A6` → `0x00513320`, CONFIRMED); battles from the campaign are not launched with it yet (§11); logic, seen in the tests
 
 ## 2026-10-19 (night mode)
 

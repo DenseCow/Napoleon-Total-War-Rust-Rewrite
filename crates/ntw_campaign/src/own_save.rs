@@ -35,6 +35,7 @@
 //! | 9 | the running economics record's expense trackers: each faction's land and naval upkeep trackers (`World::upkeep_booked`) and each region's policing tracker (`PopulationState::policing_booked`), with the policing cost (`PopulationState::policing_cost`); an older save's trackers take what its running record holds (see [`read_with_start`]) |
 //! | 10 | each faction's diplomacy records keep their order (`World::diplomacy_record_order`, the order the allies of a war are called in); an older save takes it from the campaign's start, or without one walks the records by faction id (see [`read_with_start`]) |
 //! | 11 | the region manager's order (`World::region_order`, the order each faction's region list follows after a load); an older save takes it from the campaign's start, or without one walks the regions by id (see [`read_with_start`]) |
+//! | 12 | the director's stored CAI relation beliefs keep their ally list (`RelationBelief::allies`); an older save's stored beliefs get it rebuilt from the loaded world, which leaves off an ally destroyed since the belief was stored (see [`read_with_start`]) |
 //!
 //! **What is saved.** The whole [`CampaignModel`] except the fields marked `serde(skip)` in
 //! `ntw_sim`: game data rebuilt on load (`rules` from the DB, `terrain` from the map), fields the
@@ -56,7 +57,7 @@ use crate::{CampaignInfo, LoadError, LoadedCampaign};
 /// The first bytes of every save in this format.
 pub const MAGIC: &[u8; 16] = b"NAPOLEONRUST\0SAV";
 /// The format version this build writes and the newest it reads.
-pub const FORMAT_VERSION: u32 = 11;
+pub const FORMAT_VERSION: u32 = 12;
 
 /// Everything a save holds besides its header.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -301,6 +302,10 @@ pub fn read(bytes: &[u8], db: &GameDatabase) -> Result<LoadedCampaign, FormatErr
 /// * version 10 → 11: an older save lacks the region manager's order (`World::region_order`); it takes the
 ///   start's, which is exact: nothing in play changes the manager's order and the exe's writer saves it as it is
 ///   (`0x00A52FE0`). Without a usable start the load goes on with a warning and the regions are walked by id.
+/// * version 11 → 12, which needs no start: an older save's stored (clean) relation beliefs hold no ally list
+///   (`RelationBelief::allies` reads empty); each gets the list a rebuild from the loaded world makes
+///   (`CampaignModel::rebuild_stored_ally_lists`, which says where that can differ from the list the belief
+///   held, such as an ally destroyed since it was stored: the rebuild leaves it off).
 pub fn read_with_start(bytes: &[u8], db: &GameDatabase, start: impl FnOnce() -> Result<CampaignModel, String>) -> Result<LoadedCampaign, FormatError> {
     let (version, info, data) = read_stored(bytes)?;
     let mut model = data.model;
@@ -378,6 +383,10 @@ pub fn read_with_start(bytes: &[u8], db: &GameDatabase, start: impl FnOnce() -> 
             Some(Err(e)) => log::warn!("Own save format version {version}: the regions' order was not restored (no campaign start: {e}); they are walked by id"),
             None => {}
         }
+    }
+    if version < 12 {
+        let n = model.rebuild_stored_ally_lists();
+        log::info!("Own save format version {version}: the ally lists of {n} stored relation beliefs rebuilt from the loaded world");
     }
     // Each running record as the exe's load leaves one (`0x00B95B90`, as for the original's save in
     // `crate::read_esf`): the tracked categories booked again by their trackers, the script's

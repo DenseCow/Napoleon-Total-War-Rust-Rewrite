@@ -475,10 +475,16 @@ impl CampaignModel {
         self.world.factions.keys().copied().filter(move |&x| x != a)
     }
 
-    /// `0x00C1E590(a, b)`: some faction `a` is at war with (stance war on `a`'s record) is not at war
-    /// with `b` — a war `b` could join.
-    fn joinable_war(&self, a: FactionId, b: FactionId) -> bool {
-        self.third_factions(a).any(|x| self.world.stance(a, x) == Stance::War && !self.at_war(b, x))
+    /// `0x00C1E590(joiner = b, a)`: a war of `a`'s that `b` could join. Over `a`'s relationships,
+    /// some `x` with `a`'s stance war, `b` not at war with `x` (`IsFactionAtWarWith` `0x008CE9B0`),
+    /// and `b` free to fight `x`: `b` has no patron (`0x008CEEA0`), or its patron (`0x008E2A80`,
+    /// [`Self::patron`]) is `x` itself (`0x00898B20`, a plain equality) or at war with `x`.
+    /// CONFIRMED (disassembly).
+    pub(crate) fn joinable_war(&self, a: FactionId, b: FactionId) -> bool {
+        let patron = self.patron(b);
+        self.third_factions(a).any(|x| {
+            self.world.stance(a, x) == Stance::War && !self.at_war(b, x) && patron.is_none_or(|p| p == x || self.at_war(p, x))
+        })
     }
 
     /// `0x00C3E410(a, b)`: `a` has a trade agreement with a faction other than `b`.
@@ -507,7 +513,13 @@ impl CampaignModel {
     /// (`0x00B1058B`) and to 0 right after `0x00B64B10` takes it away (`0x00B64C2D`); the faction's
     /// destruction clears both (`0x008AB825`); the loader `0x0087A190` reads it back. CONFIRMED.
     pub fn has_patron(&self, f: FactionId) -> bool {
-        self.third_factions(f).any(|x| self.world.stance(f, x) == Stance::Protectorate)
+        self.patron(f).is_some()
+    }
+
+    /// The faction's patron (`0x008E2A80`, faction +0x754, kept by `SetFactionPatron` as
+    /// [`Self::has_patron`] says): the faction its stance is protectorate towards.
+    pub fn patron(&self, f: FactionId) -> Option<FactionId> {
+        self.third_factions(f).find(|&x| self.world.stance(f, x) == Stance::Protectorate)
     }
 
     /// `0x00C1A7D0(p, r, cancel)`, CONFIRMED (decompile): with `cancel`, whether `p` holds a trade
@@ -762,7 +774,8 @@ impl CampaignModel {
 
     /// The tooltip of an explained action. request_join_war (`0x00B4ECF0`, CONFIRMED keys and
     /// order): `join_war_tooltip_not_allied` when not allied-like, else `..._can_join_war` when a
-    /// war is joinable either way (`0x00B28010`; INFERRED to be the same test as `0x00C1E590`),
+    /// war is joinable either way ([`Self::joinable_war`]: `0x00B28010`'s body is `0x00C1E590`'s,
+    /// CONFIRMED by disassembly),
     /// else `..._no_joinable_wars`. trade (`0x009B55FF`, CONFIRMED disassembly):
     /// [`Self::trade_agreement_tooltip`] of the local player to the other side with the counts
     /// (`0x00BC7910(local, other, 1)`). PROVISIONAL: the alliance / break_trade / break_alliance
@@ -1144,26 +1157,35 @@ impl CampaignModel {
     /// CONFIRMED disassembly; [`super::economy::costed_force`], as the upkeep). A unit
     /// key with no `units` record counts 0 and is added to `unknown_units` (the caller logs it).
     pub fn faction_powers(&self, unknown_units: &mut BTreeSet<String>) -> BTreeMap<FactionId, FactionPower> {
-        let none = super::effects::ForceEffects::default();
         let mut out: BTreeMap<FactionId, FactionPower> = BTreeMap::new();
         for f in self.world.forces.values() {
-            let mut sum = 0i32;
-            let units = super::economy::costed_force(f).map_or(&[][..], |(_, units)| units);
-            for u in units {
-                match self.rules.units.get(&u.unit_key) {
-                    Some(r) => sum = sum.wrapping_add(super::economy::unit_upkeep(none, &self.rules.features, &u.unit_key, r)),
-                    None => {
-                        if !unknown_units.contains(&u.unit_key) {
-                            unknown_units.insert(u.unit_key.clone());
-                        }
-                    }
-                }
-            }
+            let sum = self.force_power(f, unknown_units);
             let p = out.entry(f.faction).or_default();
             let total = if f.is_navy { &mut p.naval } else { &mut p.land };
             *total = total.wrapping_add(sum);
         }
         out
+    }
+
+    /// One force's units' summed value with flag 0 (`CalculateForceUnitValueTotal` `0x008F9C50`, an
+    /// empty effect set): what [`Self::faction_powers`] sums per force, and the AI's war strength
+    /// ([`Self::war_strength`]) per mobile. A unit key with no `units` record counts 0 and is added
+    /// to `unknown_units`.
+    pub(crate) fn force_power(&self, f: &super::MilitaryForce, unknown_units: &mut BTreeSet<String>) -> i32 {
+        let none = super::effects::ForceEffects::default();
+        let mut sum = 0i32;
+        let units = super::economy::costed_force(f).map_or(&[][..], |(_, units)| units);
+        for u in units {
+            match self.rules.units.get(&u.unit_key) {
+                Some(r) => sum = sum.wrapping_add(super::economy::unit_upkeep(none, &self.rules.features, &u.unit_key, r)),
+                None => {
+                    if !unknown_units.contains(&u.unit_key) {
+                        unknown_units.insert(u.unit_key.clone());
+                    }
+                }
+            }
+        }
+        sum
     }
 
     /// The power, wealth and prestige categories of every faction (`BuildFactionRankingTable`

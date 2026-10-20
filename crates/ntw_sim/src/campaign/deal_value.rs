@@ -4,8 +4,10 @@
 //! human), for the records the model holds. Ported here: the technology value, the deal inflation,
 //! the evaluation sum and its accept tests, the goal weights of region and technology items (the
 //! research need, the technology spread) and how a record sums them, the region value
-//! (`0x00C131C0` → `0x00A364B0` → `0x00AA1E90`, then `0x00C4D140`), and the answer to a deal of
-//! regions and technologies ([`CampaignModel::ai_accepts_deal`]).
+//! (`0x00C131C0` → `0x00A364B0` → `0x00AA1E90`, then `0x00C4D140`), the join-war goal weights and
+//! value (`0x00CC13D0` / `0x00CC0280`, `0x00C12D40`, the war strength `0x00AB5400`), and the
+//! answer to a deal of regions, technologies, payments and join-war items
+//! ([`CampaignModel::ai_accepts_deal`]).
 //!
 //! A deal item's value is a triple of integers (`0x00518210`): `gain`, what the recipient gets
 //! (slot 0), and `cost` / `given` (slots 1 and 2), two measures of what it gives.
@@ -251,6 +253,61 @@ pub fn record_goal_weight<T>(items: &DealItems<T>, received: impl Fn(&T) -> Opti
     offered.chain(demanded).fold(0.0f32, |w, x| w + x)
 }
 
+/// The weight of a join-war goal in the AI's list 1 (a war of the AI's that it asks the proposer to
+/// join, `0x00CCB810` type 11: −1.0, constant `0x01318068`). CONFIRMED.
+pub const ASKED_JOIN_WAR_WEIGHT: f32 = -1.0;
+
+/// The weight of a join-war goal in the AI's list 2 (a war of the proposer's the AI would join,
+/// `0x00CCB210` case 11) from its attitude `w` ([`CampaignModel::join_war_attitude`]) and `cap`
+/// (what the proposer is to the AI: −0.1 its patron, [`CampaignModel::believed_patron`], −0.25 an
+/// ally, [`CampaignModel::believes_allied`], else −0.5): below −1 it is −1, else at most `cap`
+/// (disassembly `0x00CCB5C1..0x00CCB62E`). CONFIRMED.
+pub fn given_join_war_weight(w: f32, cap: f32) -> f32 {
+    if w < -1.0 { -1.0 } else { w.min(cap) }
+}
+
+/// The join-war attitude's offset for the AI's stance-belief state towards the proposer
+/// (`0x00D62DA0`, states 0..4 of `0x00ABCB80`): 0 → +0.5, 1 → +0.25, 3 → −0.25, 4 → −0.5, any
+/// other 0 (constants `0x01318038` = 0.5, `0x01325CAC` = 0.25, `0x01331C38`, `0x01331C40`). The
+/// target's offset is its negation. CONFIRMED.
+pub fn join_war_state_offset(state: u8) -> f32 {
+    match state {
+        0 => 0.5,
+        1 => 0.25,
+        3 => -0.25,
+        4 => -0.5,
+        _ => 0.0,
+    }
+}
+
+/// The join-war value's attitude factor at attitude +100 (`0x00A8D250`'s 4th argument, pushed as
+/// `0x3F000000` at `0x00A34EED` and `0x00A34F20` in `0x00A34E80`). CONFIRMED.
+pub const JOIN_WAR_FACTOR_AT_BEST: f32 = 0.5;
+/// The join-war value's attitude factor at attitude −100 (`0x00A8D250`'s 5th argument, pushed as
+/// `0x40000000` at `0x00A34EE5` and `0x00A34F18`). CONFIRMED.
+pub const JOIN_WAR_FACTOR_AT_WORST: f32 = 2.0;
+
+/// `0x00A8D250(value, a, b, at_best, at_worst)`: `value` scaled by a factor from `a`'s attitude
+/// total `attitude` towards `b` (clamped to ±100), linear from 1 at 0 to `at_best` at +100
+/// (`(at_best − 1) × att × 0.01 + 1`) and to `at_worst` at −100 (`(1 − at_worst) × (att + 100) ×
+/// 0.01 + at_worst` below 0; constants `0x01318048` = 1.0, `0x01318034` = 0.01). CONFIRMED
+/// (disassembly).
+///
+/// ORIGINAL BUG: the exe truncates the factor to an integer before it multiplies (`CVTTSS2SI`,
+/// then `IMUL` with `value`, `0x00A8D2AF` / `0x00A8D2E2`), so every factor in [0, 1) gives 0 and
+/// every one in [1, 2) gives 1: with the endpoints all its callers pass (0.5 / 2.0, in either
+/// order), any attitude above 0 zeroes the value (or every one below 0, with the endpoints swapped)
+/// and only ±100 reaches the other endpoint, where the sibling `0x00A34CD0`'s trade branch
+/// multiplies first and keeps the fraction (`MULSS`, then `CVTTSS2SI`, `0x00A34DCD`). Ours
+/// multiplies first: `trunc(k × value)`, wrapping as the exe's `IMUL` does.
+pub fn attitude_scaled(value: u32, attitude: i32, at_best: f32, at_worst: f32) -> u32 {
+    let att = attitude.clamp(-100, 100) as f32;
+    let k = if att < 0.0 { (1.0 - at_worst) * (att + 100.0) * 0.01 + at_worst } else { (at_best - 1.0) * att * 0.01 + 1.0 };
+    // k ≥ 0 for endpoints ≥ 0; the product fits a u64 (k ≤ 2^32 for any sane endpoint), and the
+    // u32 cast wraps as the exe's 32-bit IMUL does for an integral factor.
+    (f64::from(k) * f64::from(value)).trunc() as u64 as u32
+}
+
 /// `0x00A9B810`: the economic need from the faction's economics history (oldest first). With
 /// `count` = min(records, 5): 16 when `count` ≤ 2; else over the newest `count − 2` records
 /// `I` = Σ categories 0..12 (`0x00BC7860`) and `X` = Σ categories 13..24 (`0x00BC7840`),
@@ -291,6 +348,16 @@ pub fn technology_category(key: &str) -> Option<usize> {
     ["admin", "economy", "military"].iter().position(|p| key.starts_with(p))
 }
 
+/// One force of an attacker as [`CampaignModel::war_strength`] reads it (a CAI mobile with units).
+struct WarMobile {
+    /// Its value ([`CampaignModel::force_power`]).
+    value: u32,
+    /// A navy (halved, never near).
+    navy: bool,
+    /// A land force's area: the region its commander stands in, if any.
+    area: Option<RegionId>,
+}
+
 impl CampaignModel {
     /// `SumFactionsLastTurnNetIncome` (`0x0096D2E0` on the world, `this` = campaign `+0xF5C`): over
     /// the world's faction list (`+0x2C` / `+0x30` = `FACTION_ARRAY`, dead factions included; the
@@ -308,9 +375,10 @@ impl CampaignModel {
     /// The research need belief of `faction` (`0x00ABB340`, [`research_need_values`]) from the
     /// model's state. The belief refreshes when it is read while dirty (`0x00A74AD0` →
     /// `0x00CCCF70`), so it is computed here when needed. Inputs:
-    /// - enemies / allies: the other factions in the game (faction `+0x824` clear,
-    ///   [`Self::in_the_game`]), neither of them the rebels, whose stance towards `faction` is war
-    ///   (stance 0) / allied (stance 2) (`0x00ABAFB0` lists `+0x40` / `+0x2C`); CONFIRMED;
+    /// - enemies / allies: the lengths of `faction`'s CAI relation belief's enemy and ally lists
+    ///   (`0x00ABE100` and `0x00A98460` read `0x00A64990` → `+0x40` / `0x00A63AB0` → `+0x2C`, count
+    ///   `+0xC`; [`super::director::believed_enemy_count`], [`super::director::believed_ally_count`]),
+    ///   so the rebels count as an enemy; CONFIRMED;
     /// - economy: [`need_from_economy`] of its history; CONFIRMED;
     /// - `p1` (`0x00A64460`): `(forts in its regions >> 1) + (its land forces with units >> 2)`
     ///   (CAI region `+0x15C` = the count of `CAI_REGION` #6, the forts `0x00C140C0` adds to the
@@ -320,19 +388,7 @@ impl CampaignModel {
     ///   (CAI region #3 entries whose object has a port `+0x1E4`, INFERRED: the region's port
     ///   slots, the model's [`super::world::RegionSlot::port`]).
     pub fn research_need(&self, faction: FactionId) -> [f32; 3] {
-        let (mut enemies, mut allies) = (0u32, 0u32);
-        if !self.is_rebel_faction(faction) {
-            for &other in self.world.factions.keys() {
-                if other == faction || self.is_rebel_faction(other) || !self.in_the_game(other) {
-                    continue;
-                }
-                match self.world.stance(other, faction) {
-                    super::world::Stance::War => enemies += 1,
-                    super::world::Stance::Allied => allies += 1,
-                    _ => {}
-                }
-            }
-        }
+        let (enemies, allies) = (super::director::believed_enemy_count(self, faction), super::director::believed_ally_count(self, faction));
         let history = self.world.economy_history.get(&faction).map_or(&[][..], |h| &h[..]);
         let own = |r: &RegionId| self.world.regions.get(r).is_some_and(|x| x.owner == faction);
         let forts = self.world.forts.values().filter(|f| own(&f.region)).count() as u32;
@@ -357,7 +413,7 @@ impl CampaignModel {
     }
 
     /// The AI recipient's answer to the open negotiation's deal (the evaluator `0x00AA5ED0` for
-    /// the records the model holds: 4 regions, 5 technology, then 7 payment): `None` when there is nothing to
+    /// the records the model holds: 4 regions, 5 technology, 7 payment, then 11 join war): `None` when there is nothing to
     /// answer (no negotiation, a human recipient, no item), else whether it accepts. For each
     /// record with items, in record order, CONFIRMED:
     /// - decline when the recipient's `diplomacy_options` towards the proposer for the record is 1
@@ -373,9 +429,10 @@ impl CampaignModel {
     ///     demands when it is a list-2 goal (from the AI to the proposer) with
     ///     [`Self::given_technology_goal_weight`];
     ///   - payment: 0 (`0x00A62400` builds its goal with weight 0);
+    ///   - join war: [`Self::join_war_record_weight`];
     /// - [`DealEvaluation::add`] of the record's value ([`Self::region_deal_value`] /
-    ///   [`Self::technology_deal_value`] at the campaign's inflation factor,
-    ///   [`Self::payment_deal_value`] as it is), scale 1.0.
+    ///   [`Self::technology_deal_value`] / [`Self::join_war_deal_value`] at the campaign's inflation
+    ///   factor, [`Self::payment_deal_value`] as it is), scale 1.0.
     ///
     /// Then accept when `fair` and the diplomatic budget is at least the payment (slot 2 of the
     /// payment record's value, 0 without one), or `good` and the payment is at most the recipient's
@@ -386,8 +443,9 @@ impl CampaignModel {
     /// 8, `0x00CC53D0`) spend from it, which our AI does not have) is not ported: the `fair` test
     /// takes it as covering any payment; a deal the AI would not accept is declined where the exe
     /// may first make a counter-offer (`0x00CC58C0`, fewer than 10 per negotiation); the records the
-    /// model does not hold (trade, alliance, peace, ...) are not evaluated; a join-war record (11) is
-    /// declined outright (its goal and value are not ported).
+    /// model does not hold (trade, alliance, peace, ...) are not evaluated; the join-war goal weight
+    /// reads a PROVISIONAL stance-belief state ([`Self::join_war_attitude`]) and its value a
+    /// PROVISIONAL nearness ([`Self::war_strength`]).
     pub fn ai_accepts_deal(&self) -> Option<bool> {
         use super::negotiation::NegotiationAction;
         let n = self.negotiations.current.as_ref()?;
@@ -448,12 +506,8 @@ impl CampaignModel {
         } else {
             0
         };
-        // Record 11, join war: the exe declines on its `diplomacy_options` (1 or 3), else builds its
-        // goal (`0x00A62400`, weight from the AI's join-war goals) and adds its value (`0x00C12D40`:
-        // the AI's war assessment `0x00A75330` per faction, inflated). PROVISIONAL: neither is ported,
-        // so a deal with a join-war item is always declined (the safe answer: an AI is never dragged
-        // into a war its assessment would refuse).
-        if has_join_war {
+        // Record 11, join war: its goal weight ([`Self::join_war_record_weight`]), then its value.
+        if has_join_war && !step(NegotiationAction::RequestJoinWar, &|allowed| self.join_war_record_weight(n, allowed), &|| self.join_war_deal_value(n, inflation)) {
             return Some(false);
         }
         let budget_ok = true;
@@ -633,6 +687,189 @@ impl CampaignModel {
     pub fn given_technology_goal_weight(&self, tech: &str) -> f32 {
         given_technology_weight(technology_spread(self.technology_holders(tech), self.world.factions.len()))
     }
+
+    /// `0x008FA020(this = a, out, b)`: the join-war goal targets between `a` and `b`, in `a`'s record
+    /// order ([`super::World::record_targets_in_order`]): each `t` that `a`'s record stance is war
+    /// towards (`+0x790 → +0x10` = 0, `0x008FA06C..76`), not `b` (`0x00898B80`), and that `b`'s
+    /// record towards (`0x00B64C50`) is not war (`+0x790 → +0x10` ≠ 0, `0x008FA0BE..C8`): a war `b`
+    /// could still join. CONFIRMED (disassembly). Both tests read the records' stances
+    /// ([`super::World::stance`]), not [`Self::at_war`]'s rebel rule.
+    ///
+    /// ORIGINAL BUG: `0x00B64C50` never returns null; when `b` holds no record towards `t` it falls
+    /// back to `b`'s first record (`0x00B64C88`), so the exe tests an unrelated faction's stance.
+    /// Ours reads the missing record as not at war (the stance default), as `region_open_to` does
+    /// for the same lookup. Unreachable with shipped data: the rebels hold no records and are in no
+    /// one's (so never a `t`), and every other pair has one (`eur_napoleon` startpos, measured
+    /// 2026-10-19).
+    pub fn join_war_targets(&self, a: FactionId, b: FactionId) -> Vec<FactionId> {
+        use super::world::Stance;
+        let w = &self.world;
+        w.record_targets_in_order(a).into_iter().filter(|&t| t != b && w.stance(a, t) == Stance::War && w.stance(b, t) != Stance::War).collect()
+    }
+
+    /// `0x00C1A6A0(ai, p)`: allied ([`Self::allied_with`], `0x008CE390`) with a war joinable either
+    /// way ([`Self::joinable_war`]). CONFIRMED (disassembly).
+    fn join_war_pair_allowed(&self, ai: FactionId, p: FactionId) -> bool {
+        self.allied_with(ai, p) && (self.joinable_war(ai, p) || self.joinable_war(p, ai))
+    }
+
+    /// Whether `g` is on `f`'s CAI relation belief's ally list ([`super::director::believes_allied`]).
+    pub fn believes_allied(&self, f: FactionId, g: FactionId) -> bool {
+        super::director::believes_allied(self, f, g)
+    }
+
+    /// `f`'s patron as its CAI relation belief holds it (`+0x100` info `+0x90`, `0x00A9BDC0`): the
+    /// faction whose stance towards `f` is patron (`IsStancePatron` `0x00B5DCB0`), from the same walk
+    /// as the ally list (in the game, no rebels). CONFIRMED.
+    pub fn believed_patron(&self, f: FactionId) -> Option<FactionId> {
+        self.patron(f).filter(|&g| !self.is_rebel_faction(f) && !self.is_rebel_faction(g) && self.in_the_game(g))
+    }
+
+    /// The AI's attitude to joining `p`'s war on `t` (its attitude object's virtual `+0x2C4` =
+    /// `0x00D62DA0`, on all three of the AI personality vtables `0x0138EBB0` / `0x0138EEAC` /
+    /// `0x0138F1B8`; CONFIRMED): [`join_war_state_offset`] of the AI's stance-belief state towards
+    /// `p` minus that towards `t`, plus `rel(ai, p) − rel(ai, t)` ([`super::director::relation_belief_value`],
+    /// entry `+8`) when the AI's relation belief has entries for both (`0x00A89E00`: the CAI world's
+    /// factions, [`super::director::in_cai_world`]).
+    ///
+    /// PROVISIONAL: the stance-belief state (`0x00A74D60` → `0x00ABCB80`, 0..4) is not ported (it
+    /// reads another belief, `0x00A73390`, the multi relation `0x00A7C270` and more), so both states
+    /// read 2 (offset 0).
+    pub fn join_war_attitude(&self, ai: FactionId, p: FactionId, t: FactionId) -> f32 {
+        // PROVISIONAL: state 2 for both until 0x00ABCB80 is ported.
+        let (state_p, state_t) = (2u8, 2u8);
+        let offsets = join_war_state_offset(state_p) - join_war_state_offset(state_t);
+        let has_entry = |x: FactionId| x != ai && super::director::in_cai_world(self, x);
+        if has_entry(p) && has_entry(t) {
+            let rel = |x: FactionId| super::director::relation_belief_value(self, ai, x);
+            (rel(p) - rel(t)) + offsets
+        } else {
+            offsets
+        }
+    }
+
+    /// The cap of the AI's list-2 join-war weights by what `p` is to it (`0x00CCB210` case 11,
+    /// CONFIRMED): −0.1 when `p` is the AI's patron ([`Self::believed_patron`]), −0.25 when an ally
+    /// ([`Self::believes_allied`]), else −0.5.
+    fn given_join_war_cap(&self, ai: FactionId, p: FactionId) -> f32 {
+        if self.believed_patron(ai) == Some(p) {
+            -0.1
+        } else if self.believes_allied(ai, p) {
+            -0.25
+        } else {
+            -0.5
+        }
+    }
+
+    /// The list-2 weight of `p`'s war on `t` (the AI would join it; `0x00CCB210` case 11,
+    /// CONFIRMED): −1 when `t` has no CAI faction (`0x00C3C4E0`, [`super::director::in_cai_world`]),
+    /// else [`given_join_war_weight`] of [`Self::join_war_attitude`] capped by what `p` is to the
+    /// AI (`cap`, [`Self::given_join_war_cap`], computed once for a whole record). (The exe also
+    /// gives −1 to a goal whose item list does not hold exactly one faction; a list-2 goal is built
+    /// with one.)
+    fn given_join_war_goal_weight(&self, ai: FactionId, p: FactionId, t: FactionId, cap: f32) -> f32 {
+        if !super::director::in_cai_world(self, t) {
+            return -1.0;
+        }
+        given_join_war_weight(self.join_war_attitude(ai, p, t), cap)
+    }
+
+    /// `0x00AB5400(attacker, target)`: the attacker's war strength against the target, over its
+    /// mobiles (its forces, CAI faction `+0x14C`) that have units (`+0x160`): each force's value
+    /// ([`Self::force_power`]) counts in full when it is land (`+0x168`) and near the target, a tenth
+    /// otherwise, a navy's halved first (`>> 1`): `near + (total − near) / 10` in unsigned integers,
+    /// `total` = land values + navy values >> 1. CONFIRMED (decompile).
+    ///
+    /// A land force is near when its area (mobile `+0x10`, the region its commander stands in,
+    /// [`super::economy::in_region`]) is owned by the target (area virtual `+0xC`, CONFIRMED) or one
+    /// of the area's boundary areas (`0x00C3DE80` over `+0x170`/`+0x174`, `GetBoundaryOtherRegion`
+    /// `0x00C1BCE0`) answers its virtual `+8` for the target. PROVISIONAL: that virtual is taken as
+    /// "owned by the target" (INFERRED: the wrapper `0x01382678`'s `+8` (`0x00C3FD10`) and `+0xC`
+    /// (`0x00C45CF0`) both forward to the same inner object, and with none `+8(x)` is `x` = null
+    /// where `+0xC` is null), the boundary areas are the region's land neighbours
+    /// ([`super::World::region_neighbours`]), and `0x00C53FB0` (area `+0x190 → +0xC` = 1, meaning
+    /// UNKNOWN), which takes a force out of the near count, reads false.
+    pub fn war_strength(&self, attacker: FactionId, target: FactionId) -> u32 {
+        self.war_strength_of(&self.war_mobiles(attacker), target)
+    }
+
+    /// The attacker's mobiles for [`Self::war_strength`], read once per evaluation: each force with
+    /// units, its value ([`Self::force_power`]), whether it is a navy and its area (the region its
+    /// commander stands in; `None` without one, never near).
+    fn war_mobiles(&self, attacker: FactionId) -> Vec<WarMobile> {
+        // Unknown unit keys count 0 here; the rankings report them (`FactionRankings::unknown_units`).
+        let mut unknown = std::collections::BTreeSet::new();
+        let area = |f: &super::MilitaryForce| {
+            let c = f.commander.and_then(|c| self.world.characters.get(&c))?;
+            self.world.regions.values().find(|r| super::economy::in_region(self, r, c)).map(|r| r.id)
+        };
+        let forces = self.world.forces.values().filter(|f| f.faction == attacker && !f.units.is_empty());
+        forces.map(|f| WarMobile { value: self.force_power(f, &mut unknown) as u32, navy: f.is_navy, area: if f.is_navy { None } else { area(f) } }).collect()
+    }
+
+    /// [`Self::war_strength`] over mobiles already read ([`Self::war_mobiles`]).
+    fn war_strength_of(&self, mobiles: &[WarMobile], target: FactionId) -> u32 {
+        let owned_by_target = |r: &RegionId| self.world.regions.get(r).is_some_and(|x| x.owner == target);
+        let near = |area: RegionId| owned_by_target(&area) || self.world.region_neighbours.get(&area).is_some_and(|ns| ns.iter().any(owned_by_target));
+        let (mut near_sum, mut total) = (0u32, 0u32);
+        for m in mobiles {
+            if m.navy {
+                total = total.wrapping_add(m.value >> 1);
+            } else {
+                total = total.wrapping_add(m.value);
+                if m.area.is_some_and(near) {
+                    near_sum = near_sum.wrapping_add(m.value);
+                }
+            }
+        }
+        near_sum.wrapping_add(total.wrapping_sub(near_sum) / 10)
+    }
+
+    /// The join-war record's goal weight for `n`'s AI recipient ([`record_goal_weight`]), with
+    /// `allowed` the record's [`Self::deal_goal_allowed`]: 0 unless that and `0x00C1A6A0` (the AI
+    /// and the proposer allied, `0x008CE390`, with a war joinable either way, `0x00C1E590`), the gate
+    /// of both goal lists; else each faction the proposer offers to fight counts
+    /// [`ASKED_JOIN_WAR_WEIGHT`] when it is one of the AI's list-1 goals (`0x00CC13D0`:
+    /// [`Self::join_war_targets`] from the AI to the proposer), each one the AI is asked to fight
+    /// its list-2 weight when it is a list-2 goal (`0x00CC0280`: from the proposer to the AI): −1
+    /// for a target with no CAI faction, else [`given_join_war_weight`] of
+    /// [`Self::join_war_attitude`]. CONFIRMED.
+    pub fn join_war_record_weight(&self, n: &Negotiation, allowed: bool) -> f32 {
+        let (ai, proposer) = (n.recipient, n.proposer);
+        if !(allowed && self.join_war_pair_allowed(ai, proposer)) {
+            return 0.0;
+        }
+        let (asked, given) = (self.join_war_targets(ai, proposer), self.join_war_targets(proposer, ai));
+        let cap = self.given_join_war_cap(ai, proposer);
+        record_goal_weight(
+            &n.join_war,
+            |t| asked.contains(t).then_some(ASKED_JOIN_WAR_WEIGHT),
+            |t| given.contains(t).then(|| self.given_join_war_goal_weight(ai, proposer, *t, cap)),
+        )
+    }
+
+    /// The join-war record of `n` valued for its AI recipient (virtual `+0x38` = `0x00C12D40`,
+    /// each faction through `0x00A75330` → `0x00A34E80`; CONFIRMED): with `att` the AI's attitude
+    /// total towards the proposer and the factor's endpoints [`JOIN_WAR_FACTOR_AT_BEST`] /
+    /// [`JOIN_WAR_FACTOR_AT_WORST`] ([`attitude_scaled`]), each faction `f` the proposer offers to
+    /// fight is worth (2 × [`attitude_scaled`]([`Self::war_strength`](proposer, f)), 0, 0), each one
+    /// the AI is asked to fight (0, [`attitude_scaled`](war_strength(ai, f)), war_strength(f, ai) +
+    /// 1000); summed (wrapping) and then [`DealValue::inflated`] by `inflation`.
+    pub fn join_war_deal_value(&self, n: &Negotiation, inflation: f32) -> DealValue {
+        let (ai, proposer) = (n.recipient, n.proposer);
+        let att = self.world.relationships.get(&(ai, proposer)).map_or(0, super::details::Relationship::attitude_total);
+        let scaled = |v: u32| attitude_scaled(v, att, JOIN_WAR_FACTOR_AT_BEST, JOIN_WAR_FACTOR_AT_WORST);
+        // Each side's mobiles once for the record, not once per item, and only for a side with items.
+        let mobiles = |f: FactionId, items: &[FactionId]| if items.is_empty() { Vec::new() } else { self.war_mobiles(f) };
+        let (theirs, ours) = (mobiles(proposer, &n.join_war.offered), mobiles(ai, &n.join_war.demanded));
+        let offered = n.join_war.offered.iter().map(|&f| DealValue { gain: scaled(self.war_strength_of(&theirs, f)).wrapping_mul(2), cost: 0, given: 0 });
+        let demanded = n.join_war.demanded.iter().map(|&f| DealValue {
+            gain: 0,
+            cost: scaled(self.war_strength_of(&ours, f)),
+            given: self.war_strength(f, ai).wrapping_add(1000),
+        });
+        offered.chain(demanded).fold(DealValue::default(), |s, v| s + v).inflated(inflation)
+    }
 }
 
 #[cfg(test)]
@@ -791,5 +1028,35 @@ mod tests {
         let v = DealValue { gain: 10, cost: 20, given: 30 };
         assert_eq!(v.inflated(1.8), v, "1.8 counts as 1");
         assert_eq!(v.inflated(2.5), DealValue { gain: 20, cost: 40, given: 60 });
+    }
+
+    #[test]
+    fn the_attitude_factor_keeps_its_fraction() {
+        // ORIGINAL BUG 0x00A8D250: the exe truncated the factor first (2 at −100, 1 from −99 to 0,
+        // 0 above 0). Ours: 1 at 0, linear to 0.5 at +100 and 2.0 at −100 (clamped to ±100),
+        // truncated after the multiply.
+        let scaled = |v: u32, att: i32| attitude_scaled(v, att, JOIN_WAR_FACTOR_AT_BEST, JOIN_WAR_FACTOR_AT_WORST);
+        for (att, v) in [(-500, 2000), (-100, 2000), (-50, 1500), (0, 1000), (50, 750), (100, 500), (500, 500)] {
+            assert_eq!(scaled(1000, att), v, "attitude {att}");
+        }
+        assert_eq!(scaled(3, 50), 2, "2.25 truncates");
+        assert_eq!(scaled(100, 1), 99, "99.5 truncates");
+        assert_eq!(scaled(50, -1), 50, "50.5 truncates");
+        assert_eq!(scaled(u32::MAX, -100), u32::MAX.wrapping_mul(2), "wraps as the exe's 32-bit multiply");
+        // The endpoints are arguments: swapped, a negative attitude scales down.
+        assert_eq!(attitude_scaled(1000, -50, 2.0, 0.5), 750);
+        assert_eq!(attitude_scaled(1000, 50, 2.0, 0.5), 1500);
+    }
+
+    #[test]
+    fn the_join_war_weights_and_offsets_follow_the_constants() {
+        assert_eq!(ASKED_JOIN_WAR_WEIGHT, -1.0);
+        assert_eq!([0, 1, 2, 3, 4, 5].map(join_war_state_offset), [0.5, 0.25, 0.0, -0.25, -0.5, 0.0]);
+        // Below −1: −1; else at most the cap.
+        assert_eq!(given_join_war_weight(-1.5, -0.1), -1.0);
+        assert_eq!(given_join_war_weight(-1.0, -0.1), -1.0);
+        assert_eq!(given_join_war_weight(-0.7, -0.25), -0.7);
+        assert_eq!(given_join_war_weight(0.8, -0.5), -0.5);
+        assert_eq!(given_join_war_weight(-0.05, -0.1), -0.1);
     }
 }

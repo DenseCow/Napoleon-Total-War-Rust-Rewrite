@@ -579,9 +579,12 @@ pub enum GeneralStatus {
     DiedRecently,
     /// Army `+0x1B0 != 0` and `+0x1B8 != 0`: the general fled recently (INFERRED reading).
     FledRecently,
-    /// The general is with the army. `rank` = the general's unit card `+0xBC` (INFERRED: his
-    /// star rank); `distance` = metres to the general's unit (`FUN_0057EB50`), `None` when this
-    /// unit is the general's own or the army has no general unit (distance 0 then).
+    /// The general is with the army. `rank` = the general's unit card `+0xBC`: his command stars,
+    /// `GetCharacterRank` (`0x00A198D0`) when the campaign builds the card at battle start (CONFIRMED:
+    /// `0x008AF200` → `0x00513A10` → `0x00513320`; [`crate::campaign::BattleGeneralCard`]), a battle
+    /// file's `star_rating level` otherwise; `distance` = metres to the general's unit
+    /// (`FUN_0057EB50`), `None` when this unit is the general's own or the army has no general
+    /// unit (distance 0 then).
     Present {
         /// The general's rank (card `+0xBC`).
         rank: i32,

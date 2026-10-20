@@ -77,7 +77,7 @@ pub mod portraits;
 pub mod visibility;
 pub mod world;
 
-pub use battles::{BattleResult, PendingBattle};
+pub use battles::{BattleCommandRole, BattleGeneralCard, BattleResult, PendingBattle};
 pub use capture::{CaptureChoice, CaptureOutcome, CapturePreview};
 pub use commander_recruitment::{CommanderOption, CommanderRecruitment};
 pub use commands::{CampaignCommand, CommandError, CommandQueue, ConstructionOption, PlannedMove};

@@ -228,7 +228,7 @@ fn director_victory_regions_and_ai_areas_round_trip() {
         ],
         autoresolver_pairs: vec![(B, A), (A, B)],
         xp_counters: [(A, 0), (B, u32::MAX)].into(),
-        beliefs: [(A, RelationBelief { relations: vec![(B, 0.25)], enemies: vec![B] })].into(),
+        beliefs: [(A, RelationBelief { relations: vec![(B, 0.25)], enemies: vec![B], allies: vec![B] })].into(),
     };
     model.world.ai_factions = vec![B, A];
     model.world.victory_regions.insert(A, [RegionId(2), RegionId(5_000_000)].into());
@@ -317,7 +317,9 @@ pub(crate) fn as_version_1(bytes: &[u8]) -> Vec<u8> {
 /// without the region fields later versions added (2: `unit_resources`, 3: `road_holder` and
 /// `fortification_holder`), the route fields (5: `capital_port`, 7: `accumulated`), the world's access-abuse counts (6: `access_abuses`)
 /// the commerce raids with the trade network's course (8: `commerce_raids`, `splines`, `curves`) and the
-/// expense trackers (9: `upkeep_booked`, `policing_cost`, `policing_booked`) and the region manager's order (11: `region_order`).
+/// expense trackers (9: `upkeep_booked`, `policing_cost`, `policing_booked`) and the region manager's order (11: `region_order`),
+/// and the stored relation beliefs' ally lists (12: `allies`, the one field a save may lack: a model with no stored
+/// belief has none).
 /// A list or map value ends at its first `]` / `}` (the made-up keys hold none), an
 /// `Option` of a faction id or a number at its first `,`, a struct's last field (`,accumulated:`, the leading
 /// comma keeping `trade_accumulated` out; `,policing_booked:`) at its struct's `)`, which is kept.
@@ -325,7 +327,7 @@ pub(crate) fn as_version(bytes: &[u8], version: u32) -> Vec<u8> {
     let (_, header, body) = sections(bytes).expect("sections");
     let mut text = String::new();
     flate2::read::ZlibDecoder::new(body).read_to_string(&mut text).expect("inflate");
-    let added: [(u32, &str, char); 13] = [
+    let added: [(u32, &str, char); 14] = [
         (2, "unit_resources:[", ']'),
         (3, "road_holder:", ','),
         (3, "fortification_holder:", ','),
@@ -339,6 +341,7 @@ pub(crate) fn as_version(bytes: &[u8], version: u32) -> Vec<u8> {
         (9, "policing_cost:", ','),
         (9, ",policing_booked:", ')'),
         (11, "region_order:[", ']'),
+        (12, "allies:[", ']'),
     ];
     for (_, field, end_char) in added.into_iter().filter(|&(v, ..)| v > version) {
         let mut old = String::with_capacity(text.len());
@@ -349,7 +352,10 @@ pub(crate) fn as_version(bytes: &[u8], version: u32) -> Vec<u8> {
             rest = if matches!(end_char, ']' | '}') { rest[end..].strip_prefix(',').unwrap_or(&rest[end..]) } else { &rest[end..] };
         }
         old.push_str(rest);
-        assert!(old.len() < text.len() && !old.contains(field), "no {field} to strip");
+        // Every field is stripped from something, but for the ally lists of a save with no stored belief
+        // (`DirectorState::beliefs`, the one field so named, written empty as `beliefs:{}`).
+        let may_lack = field == "allies:[" && text.contains("beliefs:{}");
+        assert!((old.len() < text.len() || may_lack) && !old.contains(field), "no {field} to strip");
         text = old;
     }
     let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
@@ -769,6 +775,48 @@ fn region_order_round_trips_the_gains_do_not_and_a_version_10_save_takes_it_from
     let bare = read_with_start(&bytes(10), &db, || Err("no start".into())).expect("loads without a start").model;
     assert!(bare.world.region_order.is_empty(), "a version-10 save holds no order");
     assert_eq!(bare.world.regions_in_list_order(), vec![RegionId(1), RegionId(2), RegionId(5_000_000)], "without a start: id order");
+}
+
+/// joinwarrule: format version 12 keeps each stored relation belief's ally list (`RelationBelief::allies`). A
+/// version-11 save's stored beliefs hold none: its load rebuilds them from the loaded world (no start needed), so
+/// the belief's ally reads answer from the load, not only after the next diplomacy change or turn change; an ally
+/// destroyed since the belief was stored (here by a takeover, which leaves it clean) is off the rebuilt list.
+#[test]
+fn stored_beliefs_keep_their_ally_list_and_a_version_11_save_rebuilds_it() {
+    use ntw_sim::campaign::director::{believes_allied, build_relation_belief};
+    let db = ntw_data::GameDatabase::test_fixture();
+    let mut model = made_up_model();
+    for (f, g) in [(A, B), (B, A)] {
+        model.world.factions.get_mut(&f).unwrap().diplomacy.insert(g, Stance::Allied);
+    }
+    let belief = build_relation_belief(&model, B);
+    assert_eq!(belief.allies, [A]);
+    model.director.beliefs.insert(B, belief);
+    let bytes = |model: &CampaignModel, version: u32| {
+        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+        as_version(&write(&info(), &data).expect("write"), version)
+    };
+    let now = read_with_start(&bytes(&model, FORMAT_VERSION), &db, || panic!("start read for a current save")).expect("read").model;
+    assert_eq!(now.director.beliefs, model.director.beliefs);
+    let (_, _, stored) = read_stored(&bytes(&model, 11)).expect("read stored");
+    assert!(stored.model.director.beliefs[&B].allies.is_empty(), "a version-11 save holds no ally list");
+    let old = read_with_start(&bytes(&model, 11), &db, || panic!("start read for a version-11 save")).expect("read").model;
+    assert_eq!(old.director.beliefs, model.director.beliefs, "the ally list rebuilt, the rest kept");
+    assert!(believes_allied(&old, B, A));
+    // A destroyed since the belief was stored, by B's takeover (`take_over_faction` → `destroy_faction_by`:
+    // A out of the game, the pair's stances Neutral, no trade agreement to break, so the belief stays
+    // clean): the current format keeps the list naming A, the rebuild drops it.
+    assert!(model.take_over_faction(A, B).is_some(), "A destroyed");
+    assert!(!model.in_the_game(A) && model.world.stance(B, A) == Stance::Neutral);
+    assert!(model.director.beliefs.contains_key(&B), "the destruction left the belief clean");
+    let now = read_with_start(&bytes(&model, FORMAT_VERSION), &db, || panic!("start read for a current save")).expect("read").model;
+    assert_eq!(now.director.beliefs[&B].allies, [A], "the stored list kept");
+    assert!(believes_allied(&now, B, A));
+    let old = read_with_start(&bytes(&model, 11), &db, || panic!("start read for a version-11 save")).expect("read").model;
+    let (kept, rebuilt) = (&model.director.beliefs[&B], &old.director.beliefs[&B]);
+    assert!(rebuilt.allies.is_empty(), "the destroyed ally is off the rebuilt list");
+    assert_eq!((&rebuilt.relations, &rebuilt.enemies), (&kept.relations, &kept.enemies), "the rest kept");
+    assert!(!believes_allied(&old, B, A));
 }
 
 /// classfactor: each population class keeps its war factor (class +0x20); an older save's

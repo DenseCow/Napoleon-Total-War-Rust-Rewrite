@@ -44,7 +44,7 @@ fn shipped_units_fight_sensible_battles() {
             .iter()
             .find(|(k, u)| u.autoresolve.is_some() && u.men > 0 && db.unit(k).is_some_and(|r| r.unit_class == class))
             .unwrap();
-        (k.clone(), ArUnit { data: u.autoresolve.unwrap(), men: u.men, has_general: false, general_rank: 0, human: false })
+        (k.clone(), ArUnit { data: u.autoresolve.unwrap(), men: u.men, has_general: false, star_rating: 0, human: false })
     };
     let (ki, inf) = first("infantry_line");
     let (kc, cav) = first("cavalry_heavy");

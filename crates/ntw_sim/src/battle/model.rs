@@ -261,8 +261,9 @@ pub struct LandUnit {
     pub army_index: u32,
     /// `Some(rank)` if this unit is its army's general: the unit card `+0xC0` is 1, 2, 4 or 5 and
     /// `+0xBC` is the rank (battle files: a `general` element, rank = `star_rating level`; the
-    /// `experience` child is not read, CONFIRMED parser `0x0050CAE0`). The last such unit of an
-    /// army is its general (`0x00505B00`, CONFIRMED).
+    /// `experience` child is not read, CONFIRMED parser `0x0050CAE0`; campaign battles:
+    /// [`crate::campaign::BattleGeneralCard::army_general_rank`], his rank at battle start). The
+    /// last such unit of an army is its general (`0x00505B00`, CONFIRMED).
     pub general_rank: Option<i32>,
     /// Reinforcement state (battle-file `reinforcement_army` units), see [`Reinforcement`].
     pub reinforcement: Reinforcement,

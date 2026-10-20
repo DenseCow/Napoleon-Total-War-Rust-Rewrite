@@ -321,3 +321,84 @@ fn a_mod_rule_replaces_the_rank() {
     Arc::make_mut(&mut m.rules).seams.character_rank.apply("test.seven", &maker);
     assert_eq!(rank(&m, CharacterId(100)), 7);
 }
+
+/// The battle card of unit `i` of force `f`.
+fn card(m: &CampaignModel, f: u32, i: usize) -> super::battles::BattleGeneralCard {
+    let force = &m.world.forces[&ForceId(f)];
+    m.battle_general_card(force, &force.units[i])
+}
+
+#[test]
+fn the_battle_card_carries_the_rank_and_the_command_role() {
+    use super::battles::BattleCommandRole as Role;
+    let mut m = test_model();
+    // Army 1000: General 100 (its commander) on unit 1, General 103 and colonel 104 under him, a unit
+    // without a character. Army 1001: colonel 101 commands it from unit 2.
+    m.world.characters.insert(CharacterId(103), character(103, A, CharacterKind::General, 30));
+    m.world.characters.insert(CharacterId(104), character(104, A, CharacterKind::Colonel, 25));
+    command_land(&mut m, 100, 3);
+    command_land(&mut m, 103, 5);
+    command_land(&mut m, 104, 1);
+    command_land(&mut m, 101, 2);
+    let f = m.world.forces.get_mut(&ForceId(1000)).unwrap();
+    f.units = vec![CampaignUnit { character: Some(CharacterId(100)), ..unit(1) }, CampaignUnit { character: Some(CharacterId(103)), ..unit(4) }, CampaignUnit { character: Some(CharacterId(104)), ..unit(5) }, unit(6)];
+    m.world.forces.get_mut(&ForceId(1001)).unwrap().units[0].character = Some(CharacterId(101));
+
+    let c = card(&m, 1000, 0);
+    assert_eq!((c.role, c.rank, c.role.card_value(false), c.army_general_rank()), (Role::Commander, 3, 1, Some(3)));
+    // A General under another one keeps his own rank on the card but is not the army's general.
+    let c = card(&m, 1000, 1);
+    assert_eq!((c.role, c.rank, c.role.card_value(false), c.army_general_rank()), (Role::Subordinate, 5, 3, None));
+    // A colonel in someone else's army gets no role.
+    let c = card(&m, 1000, 2);
+    assert_eq!((c.role, c.rank, c.role.card_value(false), c.army_general_rank()), (Role::None, 1, 0, None));
+    // No character: the default record.
+    let c = card(&m, 1000, 3);
+    assert_eq!((c.role, c.rank, c.army_general_rank()), (Role::None, 0, None));
+    // A colonel commanding his own unit is its army's general (card 2).
+    let c = card(&m, 1001, 0);
+    assert_eq!((c.role, c.rank, c.role.card_value(false), c.army_general_rank()), (Role::OtherCommander, 2, 2, Some(2)));
+
+    // A force without a (living) commander: the General on it counts as commanding it.
+    m.world.forces.get_mut(&ForceId(1000)).unwrap().commander = Some(CharacterId(999));
+    assert_eq!(card(&m, 1000, 1).role, Role::Commander);
+    m.world.forces.get_mut(&ForceId(1000)).unwrap().commander = None;
+    assert_eq!(card(&m, 1000, 2).role, Role::OtherCommander);
+
+    // The naval builder's values.
+    assert_eq!([Role::None, Role::Commander, Role::OtherCommander, Role::Subordinate].map(|r| r.card_value(true)), [0, 4, 5, 6]);
+}
+
+#[test]
+fn the_battle_card_reads_the_rank_through_its_seam() {
+    let mut m = rank_model(&ARMY_BONUSES);
+    with_rank_trait(&mut m, 100, "command_land", 2);
+    m.world.forces.get_mut(&ForceId(1000)).unwrap().units[0].character = Some(CharacterId(100));
+    assert_eq!(card(&m, 1000, 0).rank, rank(&m, CharacterId(100)));
+    let maker: crate::seam::Maker<super::seams::CharacterRank> = Arc::new(|_| Arc::new(|_: &CampaignModel, _: CharacterId, _: &super::effects::EffectSet, _: bool| 7));
+    Arc::make_mut(&mut m.rules).seams.character_rank.apply("test.seven", &maker);
+    assert_eq!(card(&m, 1000, 0).army_general_rank(), Some(7));
+}
+
+#[test]
+fn the_autoresolve_star_ratings_are_the_battle_cards_ranks() {
+    // 0x007CA330: land card +0xBC / naval card +0xE8 → resolver unit +0xAC, for every unit with a character.
+    let mut m = rank_model(&ARMY_BONUSES);
+    with_rank_trait(&mut m, 100, "command_land", 2);
+    m.world.characters.insert(CharacterId(104), character(104, A, CharacterKind::Colonel, 25));
+    command_land(&mut m, 104, 1);
+    let f = m.world.forces.get_mut(&ForceId(1000)).unwrap();
+    f.units = vec![CampaignUnit { character: Some(CharacterId(100)), ..unit(1) }, CampaignUnit { character: Some(CharacterId(104)), ..unit(2) }, unit(3)];
+    let ranks = |m: &CampaignModel| -> (Vec<i32>, Vec<i32>) {
+        let land = m.autoresolve_units(&[ForceId(1000)]).iter().map(|x| x.2.star_rating).collect();
+        let naval = m.naval_autoresolve_units(&[ForceId(1000)]).iter().map(|x| x.2.star_rating).collect();
+        (land, naval)
+    };
+    let expected = vec![card(&m, 1000, 0).rank, 1, 0];
+    assert_eq!(expected[0], rank(&m, CharacterId(100)));
+    assert_eq!(ranks(&m), (expected.clone(), expected));
+    // Through the rank seam (the one rank rule), for both resolvers.
+    let maker: crate::seam::Maker<super::seams::CharacterRank> = Arc::new(|_| Arc::new(|_: &CampaignModel, _: CharacterId, _: &super::effects::EffectSet, _: bool| 7));
+    Arc::make_mut(&mut m.rules).seams.character_rank.apply("test.seven", &maker);
+    assert_eq!(ranks(&m), (vec![7, 7, 0], vec![7, 7, 0]));
+}

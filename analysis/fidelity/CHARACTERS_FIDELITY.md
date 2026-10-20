@@ -1512,8 +1512,11 @@ level plus situation bonuses, clamped to −1..9. The UI shows `PrimaryLevel` = 
   - The promotion `0x00A1A300` copies the new type's levels over the stored ones and adds nothing back,
     so the held traits' and ancillaries' effects are lost, and losing one later takes its effect off a
     second time. Ours adds them back.
-- **Readers outside the campaign model (BACKLOG lines, not code):** the battle's morale / leadership from
-  the commander's rank, the autoresolve (`autoresolve_commander_star_rating_impact`), the character
+- **Readers outside the campaign model:** the battle's morale reads the rank from the unit's battle
+  card, which the campaign fills with `GetCharacterRank` of the unit's character at battle setup
+  (`0x008AF200` land / `0x008AEF40` naval, CONFIRMED; ported as `CampaignModel::battle_general_card`
+  through `agents::rank`, BATTLE_FIDELITY.md §11, 2026-10-20 worker starmorale). Still BACKLOG lines:
+  the autoresolve (`autoresolve_commander_star_rating_impact`), the character
   details `PrimaryLevel` (now from our rank), and the other exe callers of `0x00A198D0` (31 xrefs, not
   audited one by one).
 - **Ghidra (saved):** `CharacterDetails::ApplyTraitLevelAttributeEffects` `0x00A0ECB0` (completeness

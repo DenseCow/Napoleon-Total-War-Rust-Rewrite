@@ -268,6 +268,7 @@ fn ship_potential_from_the_battle_record() {
         rules: ShipRules { fire, guns, bombard, ..Default::default() },
         human: false,
         force: 0,
+        star_rating: 0,
     };
     assert_eq!(unit([40, 25], 74, false).potential(), 7215.0);
     assert_eq!(unit([60, 40], 32, false).potential(), 4800.0);
@@ -289,6 +290,7 @@ fn sunk_losers_can_be_captured() {
         rules: ShipRules { crews: [30, 30, 144], hull: 3300.0, sink_weight: 0.45, morale: 10.0, fire: [40, 15], guns: 74, range: 3, ..Default::default() },
         human: false,
         force: 0,
+        star_rating: 0,
     };
     let mut rules = CampaignRules::test_rules();
     for (k, v) in [

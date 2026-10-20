@@ -367,3 +367,39 @@ fn stored_attributes_are_the_start_levels_plus_the_effects() {
     assert_eq!(checked, 531);
     assert_eq!(wrong.iter().map(|w| (w.0, w.1)).collect::<Vec<_>>(), vec![(749615820, "rake")], "{wrong:?}");
 }
+
+/// The battle card the campaign builds for each unit (`0x008AF200`, CHARACTERS_FIDELITY.md §16,
+/// BATTLE_FIDELITY.md §11) on the eur start: a commander's own unit is his army's general at his
+/// rank, and no other unit of a land army is.
+#[test]
+fn battle_cards_carry_the_commanders_rank() {
+    use ntw_sim::campaign::{agents, BattleCommandRole};
+    let Some(m) = model() else { return };
+    let mut checked = 0;
+    for f in m.world.forces.values().filter(|f| !f.is_navy) {
+        for u in &f.units {
+            let card = m.battle_general_card(f, u);
+            let Some(c) = u.character else {
+                assert_eq!((card.role, card.rank), (BattleCommandRole::None, 0), "force {:?} unit {:?}", f.id, u.id);
+                continue;
+            };
+            assert_eq!(card.rank, agents::rank(&m, c), "force {:?} unit {:?}", f.id, u.id);
+            assert_eq!(card.army_general_rank().is_some(), f.commander == Some(c) || f.commander.is_none(), "force {:?} unit {:?}", f.id, u.id);
+            checked += 1;
+        }
+    }
+    assert!(checked > 50, "{checked} character units");
+    // Napoléon's bodyguard: the army's general at his rank.
+    let napoleon = m
+        .world
+        .character_details
+        .iter()
+        .find(|(_, d)| d.forename == "names_name_names_frenchNapol\u{e9}on" && d.surname == "names_name_names_frenchBonaparte")
+        .map(|(c, _)| *c)
+        .expect("Napoleon");
+    let f = m.world.forces.values().find(|f| f.commander == Some(napoleon)).expect("his army");
+    let u = f.units.iter().find(|u| u.character == Some(napoleon)).expect("his unit");
+    let rank = agents::rank(&m, napoleon);
+    assert_eq!(m.battle_general_card(f, u).army_general_rank(), Some(rank));
+    assert!((0..=9).contains(&rank));
+}

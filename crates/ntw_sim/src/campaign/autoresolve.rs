@@ -35,8 +35,13 @@ pub struct ArUnit {
     pub men: u32,
     /// The unit carries its army's general (card `+0xC0` in {1, 2, 4, 5}).
     pub has_general: bool,
-    /// The general's star rating (unit `+0xAC`; 0 without a general).
-    pub general_rank: u32,
+    /// The star rating of the unit's character (resolver unit `+0xAC`, CONFIRMED: `0x0070D740` stores the
+    /// value that `0x007CA330` passes from the land battle card `+0xBC` at `0x007CA5CE`, and `0x0070D580` from
+    /// the naval card `+0xE8`): the card's rank, so any character's, not only the army general's; 0 without
+    /// a character (the default record `0x00513A50`). Signed like the rank (`0x00A198D0`: −1..9). The path
+    /// is CONFIRMED; the rank itself still lacks the pending-battle bonuses (`agents::rank_original`
+    /// PROVISIONAL, CHARACTERS_FIDELITY.md §16), so this value does too until the model has them.
+    pub star_rating: i32,
     /// The unit belongs to a human player (unit `+0xB8`).
     pub human: bool,
 }
@@ -517,17 +522,32 @@ fn setup(a: &[ArUnit], b: &[ArUnit], v: &ArVars) -> Setup {
         (0..b.len()).map(|j| combine_stats(&pairs.iter().map(|row| row[j]).collect::<Vec<_>>()).flipped()).collect();
     let all: Vec<Stats> = pairs.iter().flatten().copied().collect();
     let mut battle = combine_stats(&all);
-    let rank_a = a.iter().map(|u| u.general_rank).max().unwrap_or(0);
-    let rank_b = b.iter().map(|u| u.general_rank).max().unwrap_or(0);
+    let rank_a = side_star_rating(a.iter().map(|u| u.star_rating));
+    let rank_b = side_star_rating(b.iter().map(|u| u.star_rating));
 
     let prediction_used = finalize_probabilities(&mut battle, sa, sb, v, rank_a, rank_b);
     Setup { sa, sb, shock_a, shock_b, units_a, units_b, battle, prediction_used }
 }
 
+/// A side's star rating (resolver `+0x20` for side A, `+0x24` for side B; CONFIRMED, `0x0078D9E0`): both start
+/// at 0, then every unit's rating (unit `+0xAC`) that is higher replaces it, after its statistics are stored
+/// (`0x0078E006` / `0x0078E287`). Shared by the land and naval resolvers (the same setup).
+///
+/// ORIGINAL BUG: the exe compares the ratings unsigned (`JBE` at `0x0078E00F` / `0x0078E290`) although the
+/// rank is signed (`0x00A198D0` clamps to −1..9). A rank of −1 is reachable: a character's attribute levels
+/// start at −1 (`0x00984AD0`, called from the details constructor at `0x00992F37` with −1) before his type's
+/// starting rows, and trait and ancillary effects subtract with no floor (`0x00A0ECB0`). So one −1 character
+/// becomes the side's best rating over a 9-star general, and the star step (`0x0078E33B`, signed difference)
+/// then favours the enemy. Ours compares signed from the same 0 start: a −1 rank never beats 0.
+pub(crate) fn side_star_rating(ranks: impl Iterator<Item = i32>) -> i32 {
+    ranks.fold(0, i32::max)
+}
+
 /// The battle probabilities after the pair statistics (`0x007DD740` weighting, `0x007930A0` prediction,
 /// `0x0075DBA0` blend, star ratings; CONFIRMED): shared by the land and naval resolvers. Returns whether the
-/// prediction replaced the simulated probabilities (resolver `+0x3C`).
-pub(crate) fn finalize_probabilities(battle: &mut Stats, sa: f32, sb: f32, v: &ArVars, rank_a: u32, rank_b: u32) -> bool {
+/// prediction replaced the simulated probabilities (resolver `+0x3C`). `rank_a` / `rank_b`: the sides' star
+/// ratings ([`side_star_rating`]); the side with more stars has its win chance × (difference × [54] + 1).
+pub(crate) fn finalize_probabilities(battle: &mut Stats, sa: f32, sb: f32, v: &ArVars, rank_a: i32, rank_b: i32) -> bool {
     // 0x007DD740: weight the simulated probabilities by the side potentials.
     let wa = battle.p_a * sa;
     let wb = battle.p_b * sb;
@@ -567,8 +587,9 @@ pub(crate) fn finalize_probabilities(battle: &mut Stats, sa: f32, sb: f32, v: &A
         prediction_used = true;
     }
 
-    // Commander star ratings.
-    let diff = rank_a as i64 - rank_b as i64;
+    // Commander star ratings (`0x0078E33B`: the signed difference of resolver +0x20 and +0x24, [54] read
+    // through resolver +0xF8 at +0xD8).
+    let diff = i64::from(rank_a) - i64::from(rank_b);
     if diff > 0 {
         battle.p_a *= diff as f32 * v.star_rating_impact + 1.0;
     } else if diff < 0 {
@@ -962,7 +983,7 @@ mod tests {
     use super::*;
 
     fn inf(men: u32) -> ArUnit {
-        ArUnit { data: super::super::rules::TEST_AUTORESOLVE, men, has_general: false, general_rank: 0, human: false }
+        ArUnit { data: super::super::rules::TEST_AUTORESOLVE, men, has_general: false, star_rating: 0, human: false }
     }
 
     fn vars() -> ArVars {
@@ -1085,5 +1106,42 @@ mod tests {
             assert!(o.losses_a.iter().chain(&o.losses_b).all(|&l| l <= 100));
         }
         assert!(wins > 5 && wins < 35, "{wins}");
+    }
+
+    #[test]
+    fn a_sides_star_rating_is_the_signed_best_from_zero() {
+        assert_eq!(side_star_rating([].into_iter()), 0);
+        assert_eq!(side_star_rating([3, 5, 1].into_iter()), 5);
+        // ORIGINAL BUG fix (0x0078E00F / 0x0078E290 compare unsigned): a −1 character never beats 0 or 9.
+        assert_eq!(side_star_rating([-1].into_iter()), 0);
+        assert_eq!(side_star_rating([9, -1].into_iter()), 9);
+        assert_eq!(side_star_rating([-1, 9].into_iter()), 9);
+    }
+
+    #[test]
+    fn the_side_with_more_stars_has_its_win_chance_scaled() {
+        let even = || Stats { p_a: 0.4, p_b: 0.4, p_draw: 0.2, ..Default::default() };
+        let v = vars();
+        let mut base = even();
+        finalize_probabilities(&mut base, 100.0, 100.0, &v, 0, 0);
+        assert!((base.p_a - base.p_b).abs() < 1e-6);
+        // A leads by 2 stars: its chance × (2 × [54] + 1) before the normalising step.
+        let scale = |stars: f32| stars * v.star_rating_impact + 1.0;
+        assert!(v.star_rating_impact > 0.0, "the test rules give stars an impact");
+        let mut s = even();
+        finalize_probabilities(&mut s, 100.0, 100.0, &v, 3, 1);
+        assert!((s.p_a / s.p_b - scale(2.0)).abs() < 1e-5, "{s:?}");
+        assert!((s.p_draw / s.p_b - base.p_draw / base.p_b).abs() < 1e-5);
+        assert!((s.p_a + s.p_b + s.p_draw - 1.0).abs() < 1e-6);
+        // B leads by 3.
+        let mut s = even();
+        finalize_probabilities(&mut s, 100.0, 100.0, &v, 0, 3);
+        assert!((s.p_b / s.p_a - scale(3.0)).abs() < 1e-5, "{s:?}");
+        // Through the resolver: a 4-star general on side A raises its win probability.
+        let a = vec![inf(100), ArUnit { star_rating: 4, ..inf(100) }];
+        let b = vec![inf(100), inf(100)];
+        let plain = resolve(&[inf(100), inf(100)], &b, &v, &mut CaRng::new(3)).probabilities;
+        let starred = resolve(&a, &b, &v, &mut CaRng::new(3)).probabilities;
+        assert!((starred[0] / starred[1] - scale(4.0) * plain[0] / plain[1]).abs() < 1e-4, "{plain:?} {starred:?}");
     }
 }
