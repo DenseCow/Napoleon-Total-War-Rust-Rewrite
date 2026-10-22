@@ -95,9 +95,9 @@ impl CampaignModel {
 
     /// The per-turn pool step of a faction (`0x00A252B0`, slot 12 of both pool classes), both pools.
     /// Returns the new candidates. CONFIRMED phase: the faction turn start `0x008F2620` calls the
-    /// manager's step `0x00A25310` (the manager is faction +0x940, two pointers {general pool,
-    /// admiral pool}) after the characters' turn starts, the hidden-flag pass and the spotting pass
-    /// (`TurnStep::CharactersStart`).
+    /// manager's step `0x00A25310` at `0x008F2C99` (the manager is faction +0x940, two pointers {general pool,
+    /// admiral pool}) after the characters' turn starts, the regions, the spotting pass and the standing
+    /// orders (`TurnStep::FactionReady`).
     pub fn pool_tick(&mut self, f: FactionId) -> Vec<CharacterId> {
         let mut out = Vec::new();
         let elapsed = self.calendar.turns_elapsed;
@@ -221,7 +221,8 @@ impl CampaignModel {
     /// faction) and otherwise true while the force's commander (+0x74) is not in the middle of a
     /// move (his byte +0x1B7). That byte (CONFIRMED) is set when a move starts (`0x00A28B50`,
     /// character vtable +0x1C) and cleared only when the move finishes (`0x00A285E0`, vtable +0x20,
-    /// with argument 1; the step mover `0x00972CA0` passes 0 or 2 between steps). The model's walks
+    /// with argument 1, [`Self::set_down`]; the step mover `0x00972CA0` passes 0 or 2 between
+    /// steps and 1 at the path's end). The model's walks
     /// are whole (each one ends finished, CHARACTERS_FIDELITY.md §10), so between commands no
     /// commander is mid-move. Which candidates the panel lists and which of them may be hired are
     /// the rows' own flags ([`commander_row_flags`](Self::commander_row_flags)).

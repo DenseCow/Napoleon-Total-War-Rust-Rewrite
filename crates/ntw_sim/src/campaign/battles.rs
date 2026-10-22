@@ -147,8 +147,7 @@ impl CampaignModel {
                 self.destroy_force(d, &mut events);
             }
             if let Some(f) = attacker_faction {
-                self.occupy(region, f, Some(battle.attacker), &mut events);
-                // The capture after a battle (0x00B58560: the report with the surrender flag clear).
+                // The capture after a battle (0x00B58560: the occupation, then the report with the surrender flag clear).
                 self.settle_capture(region, f, Some(battle.attacker), false, &mut events);
             }
         }
@@ -283,7 +282,8 @@ impl CampaignModel {
         // when force +0x94 is set, CONFIRMED), the price update with it; the siege's turns stay.
         self.end_force_siege(force);
         // Its entry in the risen armies goes too, keeping the rest in order, with its rebel government
-        // (`World::region_risen_armies`, `World::rebel_army_governments`): the army's destructor
+        // and side (`World::region_risen_armies`, `World::rebel_army_governments`,
+        // `World::rebel_army_sides`): the army's destructor
         // `0x0088CE30` frees its REBEL_DATA (+0x98), whose destructor `0x0088F310` unlinks it from
         // region +0x220 (`0x008B0150`: erase and shift down). CONFIRMED by decompile.
         self.world.region_risen_armies.retain(|_, armies| {
@@ -291,6 +291,7 @@ impl CampaignModel {
             !armies.is_empty()
         });
         self.world.rebel_army_governments.remove(&force);
+        self.world.rebel_army_sides.remove(&force);
         Some(f)
     }
 
@@ -320,7 +321,7 @@ impl CampaignModel {
     /// `faction` takes `region`'s settlement ([`Self::change_region_owner`]; the capture variants
     /// destroy the garrison army first); `by` (if any) moves inside. Reports nothing: [`Self::occupy`]
     /// reports a capture, the campaign director's transfer (`0x00B58A30`, [`super::director`]) none.
-    /// Returns false when the region does not exist.
+    /// Returns false when the region does not exist. The expulsion's move notices go to `events`.
     ///
     /// Every capture variant (the settlement's virtuals `0x00B58560`, `0x00B58890` and `0x00B58C00`,
     /// at vtable slots `0x0137CA44` / `0x0137CA48` / `0x0137CA5C`, and `0x00B58A30`, the campaign
@@ -348,7 +349,7 @@ impl CampaignModel {
     ) -> bool {
         let Some(old) = self.world.regions.get(&region).map(|r| r.owner) else { return false };
         self.clear_region_queues(region, QueueRefund { land: false, naval: true });
-        if !self.change_region_owner(region, faction) {
+        if !self.change_region_owner(region, faction, events) {
             return false;
         }
         // The capture variants end the captor's own siege after the owner change (`0x00B586E9`,
@@ -404,10 +405,10 @@ impl CampaignModel {
     /// destroyed faction (the exe's loop never ends then; CAMPAIGN_FIDELITY.md "Same-owner transfer").
     /// Neither the old owner's end (a deal's caller runs [`Self::end_if_capital_lost`] for its first
     /// flag) nor a liberated faction's return ([`Self::liberate_region`]) happens here. Returns true
-    /// only when the region changed hands.
-    pub(crate) fn transfer_region(&mut self, region: RegionId, faction: super::FactionId) -> bool {
+    /// only when the region changed hands; the expulsion's move notices go to `events`.
+    pub(crate) fn transfer_region(&mut self, region: RegionId, faction: super::FactionId, events: &mut Vec<CampaignEvent>) -> bool {
         let Some(old) = self.world.regions.get(&region).map(|r| r.owner) else { return false };
-        self.change_region_owner(region, faction) && old != faction
+        self.change_region_owner(region, faction, events) && old != faction
     }
 
     /// What every change of a region's owner does (`TransferRegionToFaction` `0x00A64AC0` and the
@@ -429,14 +430,30 @@ impl CampaignModel {
     /// price update (flag 0, [`Self::update_commodity_prices_with`]) runs after the route loss
     /// ([`Self::trade_routes_after_region_lost`]) and again when a port slot passes or the slot pass lifts a blockade.
     ///
-    /// When `faction` already owns the region ([`Self::transfer_region`]) only the research stop and
+    /// Before any of it the settlement's `SetSettlementOwner` (`0x00B44ACC`) rebuilds the region's demand
+    /// and refreshes its town wealth, for the same owner too. When `faction` already owns the region
+    /// ([`Self::transfer_region`]) only that, the research stop and
     /// the slot pass run (CONFIRMED, disassembly): `0x00A64AC0` stops the research (`0x008B4AB0` at
     /// `0x00A64CE5`) and then returns (`CMP` of the region's owner with the new one at `0x00A64D11`,
     /// `JZ` to the epilogue at `0x00A64D13`) before the queues, the capitals, the routes, the
     /// expulsion, the policing tracker and the taxes; `0x00B449F0` still calls `0x00B1B300`
     /// (`0x00B44B69`), so slots a third faction held come back and a port slot's price update runs.
-    /// Returns false when the region does not exist.
-    fn change_region_owner(&mut self, region: RegionId, faction: super::FactionId) -> bool {
+    /// Returns false when the region does not exist. The expulsion's move notices go to `events`.
+    fn change_region_owner(&mut self, region: RegionId, faction: super::FactionId, events: &mut Vec<CampaignEvent>) -> bool {
+        if !self.world.regions.contains_key(&region) {
+            return false;
+        }
+        // `0x00B449F0` first sets the settlement's holder (`SetSettlementOwner` `0x00B2B810(new, 1)` at
+        // `0x00B44ACC`, before `0x00A64AC0` at `0x00B44AE8`), which rebuilds the region's demand and refreshes
+        // its town wealth under the old owner (the settlement vtable `0x0137C9A4` +0x38 is `0x00B62090`, settlement
+        // +0x178, the region: `0x00AB49F0(0)` at `0x00B2B85F`, then `0x00AB4410(0)` at `0x00B2B86F`; its +0x4C is
+        // null, so no price update; CONFIRMED). The route loss's price update (`0x00BBE7C4`) reads this demand. PROVISIONAL: the exe's slot loop (`0x00B1B300`: slot-list order, then walls and road)
+        // runs each slot's demand step after a port's price update, so a slot passing before a port makes that update read the demand rebuilt from the refreshed GDP; ours reads this start demand. The whole body from here runs unless a passed force's `REBEL_DATA` (+0x98) names
+        // the region's owner as its faction (+0x34; `BL`, `0x00B44A3A`..`0x00B44A67`, `JZ` at `0x00B44AC1`): no
+        // caller of ours can pass such a force (no rising of ours sets +0x34, every vanilla save's risen army has
+        // it 0, `RebelArmySide::link`; how a loaded nonzero link becomes a faction is UNKNOWN, `world.rs`).
+        self.refresh_region_demand(region);
+        self.refresh_region_town_wealth(region);
         let Some(r) = self.world.regions.get(&region) else { return false };
         let old = r.owner;
         let schools: Vec<u32> = r.slots.iter().map(|s| s.id).filter(|&id| id != 0).collect();
@@ -451,6 +468,10 @@ impl CampaignModel {
             if self.pass_region_slots(region, old, faction) {
                 self.update_commodity_prices_with(false);
             }
+            // Each slot `SetSettlementOwner` passes rebuilds the region's demand (`0x00AB49F0(0)` at `0x00B2B85F`)
+            // and then refreshes its town wealth (`0x00AB4410(0)` at `0x00B2B86F`, CONFIRMED).
+            self.refresh_region_demand(region);
+            self.refresh_region_town_wealth(region);
             return true;
         }
         // The queues are cleared while the region is still the old owner's (CONFIRMED, `0x00A64AC0`: the
@@ -484,13 +505,25 @@ impl CampaignModel {
         if !self.is_rebel_faction(old) {
             self.trade_routes_after_region_lost(region, old);
         }
-        self.expel_after_owner_change(region);
-        // The region's policing tracker follows the owner (`0x00AAF220` at `0x00A65103`), then both owners'
+        self.expel_after_owner_change(region, events);
+        // The region's policing tracker follows the owner (`0x00AAF220` at `0x00A65103`), its town wealth is
+        // refreshed without apply under the new owner (`0x00AB4410(0)` at `0x00A65113`), then both owners'
         // running economics records take their new taxes (`0x00BBD7C0(0)` at `0x00A6512D` for the new owner and
-        // `0x00A6513E` for the old, CONFIRMED).
+        // `0x00A6513E` for the old, CONFIRMED). The demand step runs between the refresh and the running
+        // records (`0x00AB49F0(0)` at `0x00A6511C`, CONFIRMED).
         super::economy::move_policing_tracker(self, region, old, faction);
+        self.refresh_region_town_wealth(region);
+        self.refresh_region_demand(region);
         super::economy::refresh_running_income(self, faction, super::economy::RunningIncome::Taxes);
         super::economy::refresh_running_income(self, old, super::economy::RunningIncome::Taxes);
+        // PROVISIONAL: `0x00A64AC0` can give the region to another faction than `faction` (`0x00A64B6F`..`0x00A64CC8`,
+        // not modelled): with its sixth argument clear, a region with a `REBEL_DATA` template (region +0x21C) taken
+        // by a faction without a record (`0x008CEEF0`) goes to the template's faction (+0x10, `0x00955B30`); on that
+        // path and with the sixth argument set, `eur_france` in `mp_eur_napoleon` goes to `france` unless `france`
+        // holds it and is human (`0x00A64C1B`..`0x00A64C8F`); a chosen faction out of the game comes back
+        // (`0x008AE6E0`). Only then does the settlement's holder differ from the region's owner, and `0x00B449F0`
+        // sets it again (`0x00898B80` at `0x00B44B0A`, `SetSettlementOwner(owner, 1)` at `0x00B44B2C`: one more
+        // demand rebuild and town wealth refresh). With the redirect unmodelled that call never runs here.
         // After `0x00A64AC0`, the settlement's owner-changed event (`0x00B44B31`): its sieges by the new
         // owner or by factions not at war with it end ([`Self::end_sieges_after_owner_change`]).
         self.end_sieges_after_owner_change(region);
@@ -498,6 +531,11 @@ impl CampaignModel {
         if slot_prices_due {
             self.update_commodity_prices_with(false);
         }
+        // Each slot, the walls and the road the pass hands over rebuild the demand and refresh the town wealth
+        // again (`SetSettlementOwner` `0x00B2B810` → `0x00AB49F0(0)` at `0x00B2B85F`, then `0x00AB4410(0)` at
+        // `0x00B2B86F`, CONFIRMED), now after the sieges ended.
+        self.refresh_region_demand(region);
+        self.refresh_region_town_wealth(region);
         true
     }
 
@@ -513,7 +551,7 @@ impl CampaignModel {
     /// builds its recruitment manager, so exactly the [`RegionSlot::port`](super::RegionSlot::port) slots. The
     /// settlement's own `SetSettlementOwner` call before `0x00A64AC0` runs none (the settlement vtable
     /// `0x0137C9A4` +0x4C is `0x00461180`, null). The exe updates once per port slot passed; the caller's one
-    /// update gives the same prices: nothing the update reads changes between those calls and flag 0 leaves the
+    /// update reads the start demand. PROVISIONAL: the exe runs each slot's demand step (`0x00AB49F0`) after a port's update (`0x00B2B85F` after `0x00B2B84F`), so a later port's update reads the demand rebuilt from the refreshed GDP; flag 0 leaves the
     /// history alone. The same pass lifts the blockades of the ports the new owner now holds
     /// ([`Self::clear_blockades_after_slot_pass`]); each lift's own price update (`0x00A784E0` → `0x00BCB020(0)`)
     /// folds into the caller's one in the same way, so the return value is also true when a blockade was lifted.

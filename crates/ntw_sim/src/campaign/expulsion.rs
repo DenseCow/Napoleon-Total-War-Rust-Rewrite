@@ -6,7 +6,8 @@
 //! argument 0, which every settlement handover `0x00B449F0` passes: captures, deals, liberations, the
 //! director's transfer; [`CampaignModel::expel_after_owner_change`]), the liberation itself, which first expels the
 //! capturer's army (`0x00B4F090` at `0x00B508C5`; [`CampaignModel::expel_from_region`]), an accepted deal's region lists
-//! (`0x00C114B0`, [`CampaignModel::accept_deal`]) and the end of a protectorate tie (`0x00B64B10`,
+//! and, for a deal with a peace item, both sides' regions (`0x00C114B0`, [`CampaignModel::accept_deal`], the
+//! peace pass looping alone as the `CCQ_MOVE_ARMIES_OUT_OF_REGIONS` command does, `0x00936AB0`) and the end of a protectorate tie (`0x00B64B10`,
 //! [`CampaignModel::end_protectorate_tie`]) and every loss of military access, over all the giver's
 //! regions ([`CampaignModel::expel_from_lands_of`]): timed access running out (`0x00B29170`,
 //! [`CampaignModel::diplomacy_round_end`]), a cancel (`0x00B67BD0`,
@@ -25,6 +26,7 @@ use std::sync::Arc;
 use super::ids::{CharacterId, FactionId, ForceId, RegionId};
 use super::mod_state::ModWrites;
 use super::pathing::Domain;
+use super::events::{CampaignEvent, CampaignMessage};
 use super::world::{CampaignModel, MilitaryForce, Region, Stance};
 use crate::fixed::Fixed20;
 
@@ -40,6 +42,10 @@ pub struct ExpelledForce {
     pub force: ForceId,
     /// Where its commander is put; `None`: it stays where it stands (no candidate placed it).
     pub to: Option<(Fixed20, Fixed20)>,
+    /// Its faction gets the move notice after the move ([`super::CampaignMessage::YourArmyRetreatsRegion`],
+    /// `0x009FB680`): in the original game a placed army that may not stay; never a navy. Ignored when
+    /// `to` is `None` (nothing moved).
+    pub notice: bool,
 }
 
 /// `0x00B16570` on `owner`'s relationship record towards `f`: the record lets `f` stand in `owner`'s
@@ -167,8 +173,9 @@ fn place(m: &CampaignModel, key: Option<&str>, point: (f32, f32)) -> Option<(f32
 ///   links a navy to its port by position ([`CampaignModel::docked_port`]), so one left in place
 ///   still counts as docked there.
 ///
-/// The move notice (`0x009FB680`, message 0x119, silenced when the army may stay) is not modelled
-/// (BACKLOG).
+/// - **The move notice** (`SendArmyRetreatsRegionMessage` `0x009FB680`, CONFIRMED from the
+///   disassembly): a land army that a candidate placed gets it ([`ExpelledForce::notice`]) unless it
+///   may stay (the test at `0x008DA077`, after the move `0x0096C8D0`); an unplaced army and a navy never do (the navy branch has no call).
 pub fn expel_faction_from_region(m: &CampaignModel, f: FactionId, region: RegionId) -> Vec<ExpelledForce> {
     let Some(reg) = m.world.regions.get(&region) else { return Vec::new() };
     if !m.in_the_game(f) {
@@ -192,7 +199,7 @@ pub fn expel_faction_from_region(m: &CampaignModel, f: FactionId, region: Region
             }
             let here = (c.position.0.to_f32(), c.position.1.to_f32());
             let to = army_candidates(m, f, reg, here, stay).into_iter().find_map(|(key, p)| place(m, Some(key), p));
-            out.push(ExpelledForce { force: force.id, to: to.map(to_fixed) });
+            out.push(ExpelledForce { force: force.id, to: to.map(to_fixed), notice: to.is_some() && !stay });
             continue;
         }
         if at_war {
@@ -202,7 +209,7 @@ pub fn expel_faction_from_region(m: &CampaignModel, f: FactionId, region: Region
         let Some(port) = m.world.regions.get(&r).and_then(|r| r.slots.get(slot)).and_then(|s| s.position) else { continue };
         let port = (port.0.to_f32(), port.1.to_f32());
         let exit = harbours.iter().find(|h| (h.port.0 - port.0).powi(2) + (h.port.1 - port.1).powi(2) < 1.0).map_or(port, |h| h.dock);
-        out.push(ExpelledForce { force: force.id, to: place(m, None, exit).map(to_fixed) });
+        out.push(ExpelledForce { force: force.id, to: place(m, None, exit).map(to_fixed), notice: false });
     }
     out
 }
@@ -211,8 +218,11 @@ impl CampaignModel {
     /// `f`'s forces leave `region` (`0x008D9DC0`), as the [`super::seams::REGION_EXPULSION`] rule
     /// plans it ([`expel_faction_from_region`] in the original game). An army leaves its residence (its
     /// commander no longer garrisoned, the region's garrison link cleared); a navy leaves its port
-    /// ([`Self::undock`]); then each placed force's commander moves ([`Self::move_character`]).
-    pub(crate) fn expel_from_region(&mut self, f: FactionId, region: RegionId) {
+    /// ([`Self::undock`]); then each placed force's commander moves ([`Self::move_character`]) and,
+    /// when the plan says so ([`ExpelledForce::notice`]), his faction (character `+0x2A0`) gets the
+    /// move notice in `events` at once, before the next force moves (`0x009FB680` at `0x008DA091`,
+    /// right after the move `0x0096C8D0`; [`CampaignMessage::YourArmyRetreatsRegion`]).
+    pub(crate) fn expel_from_region(&mut self, f: FactionId, region: RegionId, events: &mut Vec<CampaignEvent>) {
         let mut writes = ModWrites::default();
         let rules = Arc::clone(&self.rules);
         let plan = rules.seams.region_expulsion.rule()(self, f, region, &mut writes);
@@ -235,7 +245,15 @@ impl CampaignModel {
             }
             if let (Some(c), Some(to)) = (commander, e.to) {
                 self.move_character(c, to);
-                self.rebuild_moved_zones(c);
+                // Placed by `0x0096C8D0` (`0x008DA072` army, `0x008DA1B2` navy), whose second call to
+                // `0x00A285E0` passes 1 (`0x0096C9C4`, CONFIRMED by disassembly): set down there.
+                self.set_down(c);
+                if e.notice
+                    && let Some(ch) = self.world.characters.get(&c)
+                {
+                    let message = CampaignMessage::YourArmyRetreatsRegion { character: c, at: ch.position };
+                    events.push(CampaignEvent::Message { recipient: ch.faction, message });
+                }
             }
         }
     }
@@ -245,7 +263,7 @@ impl CampaignModel {
     /// no rebels) other than the new owner, with a capital and still in the game, leaves the region
     /// ([`Self::expel_from_region`]). The model's faction ids stand in for the list's order (the
     /// placements do not depend on it: the model keeps no footprints).
-    pub(crate) fn expel_after_owner_change(&mut self, region: RegionId) {
+    pub(crate) fn expel_after_owner_change(&mut self, region: RegionId, events: &mut Vec<CampaignEvent>) {
         let Some(owner) = self.world.regions.get(&region).map(|r| r.owner) else { return };
         let factions: Vec<FactionId> = self
             .world
@@ -255,7 +273,7 @@ impl CampaignModel {
             .filter(|&f| f != owner && !self.is_rebel_faction(f) && self.world.capital(f).is_some() && self.in_the_game(f))
             .collect();
         for f in factions {
-            self.expel_from_region(f, region);
+            self.expel_from_region(f, region, events);
         }
     }
 
@@ -265,23 +283,24 @@ impl CampaignModel {
     /// broken alliance, a peace, timed access running out and the end of a protectorate tie run
     /// (`0x00B13A30`, `0x00B0CA20`, `0x00B0D0C0`, `0x00B29170`, `0x00B64B10`; CONFIRMED, disassembly: both
     /// refreshes sit inside the expel branch). A cancel (`0x00B67BD0`) runs the loop alone.
-    pub(crate) fn expel_from_lands_of(&mut self, f: FactionId, owner: FactionId) {
-        self.expel_from_each_region_of(f, owner);
+    pub(crate) fn expel_from_lands_of(&mut self, f: FactionId, owner: FactionId, events: &mut Vec<CampaignEvent>) {
+        self.expel_from_each_region_of(f, owner, events);
         self.refresh_faction_zones(f);
         self.refresh_faction_zones(owner);
     }
 
     /// `f`'s forces leave each region `owner` holds ([`Self::expel_from_region`] per region): the loop over
     /// the owner's region list (faction `+0x778`) that every loss of standing in another's land runs
-    /// (`0x00B64B10`, `0x00B13A30`, `0x00B0CA20`, `0x00B0D0C0`, `0x00B67BD0`, `0x00B29170`; CONFIRMED).
+    /// (`0x00B64B10`, `0x00B13A30`, `0x00B0CA20`, `0x00B0D0C0`, `0x00B67BD0`, `0x00B29170`, and a peace deal's
+    /// pass in `0x00C114B0`; CONFIRMED).
     /// The list is walked in its order ([`super::world::World::regions_in_list_order`]; CONFIRMED: the
     /// manager's order after a load, each gain appended at the end, a loss removed in place; see
     /// [`super::world::World::region_order`]). The order matters when a force one step moves stands in
     /// a region a later step expels from: with no footprints in the model, that takes a force that may
     /// stay but cannot be placed where it stands and is sent to another of `owner`'s regions.
-    pub(crate) fn expel_from_each_region_of(&mut self, f: FactionId, owner: FactionId) {
+    pub(crate) fn expel_from_each_region_of(&mut self, f: FactionId, owner: FactionId, events: &mut Vec<CampaignEvent>) {
         for r in self.world.faction_regions_in_list_order(owner) {
-            self.expel_from_region(f, r);
+            self.expel_from_region(f, r, events);
         }
     }
 
@@ -290,12 +309,14 @@ impl CampaignModel {
     /// `b`'s ([`Self::expel_from_each_region_of`], `0x008D9DC0` per region of the owner's list). No stance,
     /// same-faction or turn test, and no zone flood after the loops (each move rebuilds the zones it
     /// touches, [`Self::expel_from_region`]); a faction out of the game moves nothing (`0x008D9DC0`).
-    pub fn move_armies_out_of_regions(&mut self, a: FactionId, b: FactionId) -> Result<(), super::CommandError> {
+    /// Returns the move notices, in the order the moves happened.
+    pub fn move_armies_out_of_regions(&mut self, a: FactionId, b: FactionId) -> Result<Vec<CampaignEvent>, super::CommandError> {
         if let Some(&f) = [a, b].iter().find(|f| !self.world.factions.contains_key(f)) {
             return Err(super::CommandError::UnknownFaction(f));
         }
-        self.expel_from_each_region_of(b, a);
-        self.expel_from_each_region_of(a, b);
-        Ok(())
+        let mut events = Vec::new();
+        self.expel_from_each_region_of(b, a, &mut events);
+        self.expel_from_each_region_of(a, b, &mut events);
+        Ok(events)
     }
 }

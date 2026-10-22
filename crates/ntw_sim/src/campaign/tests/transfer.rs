@@ -84,28 +84,28 @@ fn a_third_party_stays_with_access_war_or_a_protectorate() {
         m
     };
     let mut m = base();
-    assert!(m.transfer_region(RegionId(12), B));
+    assert!(m.transfer_region(RegionId(12), B, &mut Vec::new()));
     assert_eq!(at(&m, 103), pos(400, 0), "no tie: to its own region 13");
 
     let mut m = base();
     m.world.relationships.insert((B, C), Relationship { military_access_turns: 2, ..Default::default() });
-    m.transfer_region(RegionId(12), B);
+    m.transfer_region(RegionId(12), B, &mut Vec::new());
     assert_eq!(at(&m, 103), pos(205, 0), "B gives C access");
 
     let mut m = base();
     m.apply(CampaignCommand::DeclareWar { a: B, b: C }).unwrap();
-    m.transfer_region(RegionId(12), B);
+    m.transfer_region(RegionId(12), B, &mut Vec::new());
     assert_eq!(at(&m, 103), pos(205, 0), "at war with B");
 
     let mut m = base();
     m.world.set_stance(B, C, Stance::Protectorate).unwrap();
-    m.transfer_region(RegionId(12), B);
+    m.transfer_region(RegionId(12), B, &mut Vec::new());
     assert_eq!(at(&m, 103), pos(205, 0), "B is C's protectorate");
 
     // Access from the old owner A is no reason to stay in B's region now.
     let mut m = base();
     m.world.relationships.insert((A, C), Relationship { military_access_turns: 2, ..Default::default() });
-    m.transfer_region(RegionId(12), B);
+    m.transfer_region(RegionId(12), B, &mut Vec::new());
     assert_eq!(at(&m, 103), pos(400, 0));
 }
 
@@ -117,12 +117,12 @@ fn own_regions_come_before_a_nearer_third_partys() {
     add_army(&mut m, 103, C, pos(195, 0));
     m.world.relationships.insert((A, C), Relationship { military_access_turns: 2, ..Default::default() });
     let mut own = m.clone();
-    own.transfer_region(RegionId(12), B);
+    own.transfer_region(RegionId(12), B, &mut Vec::new());
     assert_eq!(at(&own, 103), pos(400, 0), "C's region 13 (205 away), not A's 10 (195 away)");
     // C holds no region (its capital record still names 13): A's regions, nearest first.
     m.world.regions.get_mut(&RegionId(13)).unwrap().owner = A;
     m.world.characters.get_mut(&CharacterId(103)).unwrap().position = pos(210, 0);
-    m.transfer_region(RegionId(12), B);
+    m.transfer_region(RegionId(12), B, &mut Vec::new());
     assert_eq!(at(&m, 103), pos(400, 0), "A's 13 (190 away) before A's 10 (210 away)");
 }
 
@@ -140,7 +140,7 @@ fn a_third_partys_regions_go_in_in_the_manager_order() {
         if let Some(order) = order {
             m.world.region_order = order.map(RegionId).to_vec();
         }
-        m.transfer_region(RegionId(12), B);
+        m.transfer_region(RegionId(12), B, &mut Vec::new());
         at(&m, 103)
     };
     assert_eq!(army_goes_to(None), pos(0, 0), "no order listed: id order, 10 first");
@@ -156,7 +156,7 @@ fn an_embarked_army_is_not_expelled() {
     let army = add_army(&mut m, 103, C, pos(205, 0));
     m.world.embarked.insert(army, ForceId(9999));
     assert!(expel_faction_from_region(&m, C, RegionId(12)).is_empty());
-    m.transfer_region(RegionId(12), B);
+    m.transfer_region(RegionId(12), B, &mut Vec::new());
     assert_eq!(at(&m, 103), pos(205, 0));
 }
 
@@ -208,7 +208,7 @@ fn terrain_model(with_13: bool) -> CampaignModel {
 fn on_the_map_the_army_goes_to_its_region_and_the_navy_puts_to_sea() {
     let mut m = terrain_model(true);
     assert_eq!(m.docked_port(ForceId(1003)), Some((RegionId(12), 0)));
-    m.transfer_region(RegionId(12), B);
+    m.transfer_region(RegionId(12), B, &mut Vec::new());
     assert_eq!(at(&m, 100), fpos(4.5, 1.5), "region 13's cell nearest to the army");
     assert_eq!(m.world.characters[&CharacterId(100)].garrisoned_in, None);
     assert_eq!(m.world.regions[&RegionId(12)].garrison, None);
@@ -220,11 +220,29 @@ fn on_the_map_the_army_goes_to_its_region_and_the_navy_puts_to_sea() {
     // settlement; the navy stays docked, the port still held by A.
     let mut m = terrain_model(true);
     m.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
-    m.transfer_region(RegionId(12), B);
+    m.transfer_region(RegionId(12), B, &mut Vec::new());
     assert_eq!(at(&m, 100), fpos(7.5, 1.5));
     assert_eq!(m.world.characters[&CharacterId(100)].garrisoned_in, None);
     assert_eq!(at(&m, 103), fpos(9.5, 1.5));
     assert_eq!(m.world.regions[&RegionId(12)].slots[0].holder, Some(A));
+}
+
+/// The expelled are placed by `0x0096C8D0` (`0x008DA072`, `0x008DA1B2`), whose last call to
+/// `0x00A285E0` passes 1 (`0x0096C9C4`): set down there, the army's hidden flag is recomputed (out
+/// of the settlement, every unit able to hide: hidden).
+#[test]
+fn the_expelled_army_is_set_down_with_its_hidden_flag() {
+    let mut m = terrain_model(true);
+    let mut rules = (*m.rules).clone();
+    for r in rules.units.values_mut() {
+        r.campaign_stealth = true;
+    }
+    m.rules = Arc::new(rules);
+    m.world.character_details.entry(CharacterId(100)).or_default();
+    assert!(!m.stealthy(CharacterId(100)), "inside the settlement");
+    m.transfer_region(RegionId(12), B, &mut Vec::new());
+    assert_eq!(at(&m, 100), fpos(4.5, 1.5));
+    assert!(m.world.character_details[&CharacterId(100)].hidden);
 }
 
 /// No candidate places the army (its regions are not on the map): it stays where it stands, out of
@@ -235,8 +253,8 @@ fn an_army_no_region_takes_stays_in_place_out_of_the_settlement() {
     let mut handed = m.clone();
     handed.world.regions.get_mut(&RegionId(12)).unwrap().owner = B;
     let plan = expel_faction_from_region(&handed, A, RegionId(12));
-    assert!(plan.contains(&ExpelledForce { force: ForceId(1000), to: None }), "{plan:?}");
-    m.transfer_region(RegionId(12), B);
+    assert!(plan.contains(&ExpelledForce { force: ForceId(1000), to: None, notice: false }), "{plan:?}");
+    m.transfer_region(RegionId(12), B, &mut Vec::new());
     assert_eq!(at(&m, 100), fpos(7.5, 1.5));
     assert_eq!(m.world.characters[&CharacterId(100)].garrisoned_in, None);
     assert_eq!(m.world.regions[&RegionId(12)].garrison, None);
@@ -262,7 +280,7 @@ fn the_end_of_a_protectorate_tie_puts_the_patron_out() {
     let mut m = spread_model();
     m.make_protectorate(B, A).unwrap();
     m.world.characters.get_mut(&CharacterId(100)).unwrap().position = pos(95, 0);
-    assert_eq!(expel_faction_from_region(&m, A, RegionId(11)), vec![ExpelledForce { force: ForceId(1000), to: Some(pos(95, 0)) }], "may stay");
+    assert_eq!(expel_faction_from_region(&m, A, RegionId(11)), vec![ExpelledForce { force: ForceId(1000), to: Some(pos(95, 0)), notice: false }], "may stay");
     m.end_protectorate_tie(B, A).unwrap();
     assert_eq!(at(&m, 100), pos(0, 0), "to A's nearest region, 10 (95 away; 12 is 105)");
 }
@@ -279,7 +297,7 @@ fn the_deal_expels_a_recipient_without_a_capital() {
     m.world.regions.insert(r15.id, r15);
     garrison(&mut m, ForceId(1001), 11);
     let mut handover = m.clone();
-    handover.transfer_region(RegionId(11), A);
+    handover.transfer_region(RegionId(11), A, &mut Vec::new());
     assert_eq!(handover.world.characters[&CharacterId(101)].garrisoned_in, Some(RegionId(11)), "no capital: not in the owner change's pass");
     m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
     m.apply(CampaignCommand::ProposeRegions { clear: false, demanded: vec![RegionId(11)], offered: vec![] }).unwrap();
@@ -298,7 +316,7 @@ fn a_mod_rule_replaces_the_expulsion() {
     garrison(&mut m, ForceId(1000), 12);
     let keep: Maker<RegionExpulsion> = Arc::new(|_| Arc::new(|_: &CampaignModel, _: FactionId, _: RegionId, _: &mut _| Vec::new()));
     Arc::make_mut(&mut m.rules).seams.region_expulsion.apply("test.keep", &keep);
-    m.transfer_region(RegionId(12), B);
+    m.transfer_region(RegionId(12), B, &mut Vec::new());
     assert_eq!(at(&m, 100), pos(200, 0));
     assert_eq!(m.world.regions[&RegionId(12)].garrison, Some(ForceId(1000)));
 }
@@ -323,7 +341,7 @@ fn a_faction_out_of_the_game_is_not_expelled() {
 fn a_garrison_that_may_stay_still_leaves_the_settlement() {
     let mut m = terrain_model(true);
     m.world.relationships.insert((B, A), Relationship { military_access_turns: 2, ..Default::default() });
-    m.transfer_region(RegionId(12), B);
+    m.transfer_region(RegionId(12), B, &mut Vec::new());
     assert_eq!(at(&m, 100), fpos(7.5, 1.5));
     assert_eq!(m.world.characters[&CharacterId(100)].garrisoned_in, None);
     assert_eq!(m.world.regions[&RegionId(12)].garrison, None);
@@ -411,11 +429,12 @@ fn a_broken_alliance_expels_a_side_given_back_no_access() {
     assert_eq!(m.world.regions[&RegionId(12)].garrison, Some(army), "not expelled at all");
 }
 
-/// Peace (`0x00B0D0C0` from `0x00B262C0`): the access the proposer's alliances suspended against the
-/// enemy comes back, and a side given back none leaves the other's regions. Only the proposer's
-/// alliances: the loop runs on its manager alone.
+/// Peace (`0x00B0D0C0` from `0x00B262C0`): the access both sides' alliances suspended against the
+/// enemy comes back, and a side given back none leaves the other's regions. ORIGINAL BUG (0x00B262C0):
+/// the exe runs that loop on the proposer's manager alone, so the target's allies kept their indefinite
+/// access and their item; ours gives both sides' back, whoever proposes.
 #[test]
-fn peace_gives_back_the_proposers_allies_access_only() {
+fn peace_gives_back_both_sides_allies_access() {
     let base = || {
         let mut m = spread_model();
         add_army(&mut m, 104, A, pos(405, 0));
@@ -432,8 +451,52 @@ fn peace_gives_back_the_proposers_allies_access_only() {
 
     let mut m = base();
     m.make_peace_rules(B, A, false).unwrap();
-    assert_eq!(m.world.relationships[&(C, A)].allied_in_war_against.len(), 1, "B has no ally");
-    assert_eq!(at(&m, 104), pos(405, 0));
+    assert!(
+        m.world.relationships[&(C, A)].allied_in_war_against.is_empty(),
+        "the target's ally's item is cleared too (the exe kept it)"
+    );
+    assert_eq!(m.world.relationships[&(C, A)].military_access_turns, 0);
+    assert_eq!(at(&m, 104), pos(200, 0), "expelled as when A proposes");
+
+    // Saved timed access comes back to the target's ally's record as well.
+    let mut m = spread_model();
+    m.world.declare_war(A, B).unwrap();
+    m.form_alliance(A, C).unwrap();
+    suspend_access(&mut m, C, A, B, 4);
+    m.make_peace_rules(B, A, false).unwrap();
+    assert_eq!(m.world.relationships[&(C, A)].military_access_turns, 4);
+    assert!(m.world.relationships[&(C, A)].allied_in_war_against.is_empty());
+}
+
+/// Peace's step order (`0x00B262C0`): the `0x00B0D0C0` loop's expulsion runs before the character walk
+/// (`0x00A25570`), so a raider it moves out has lost his raids (the move ends them, with no price update)
+/// and his walk step finds none to end: the peace runs only its own update. Given back access, he stays,
+/// and his walk step ends the raid with its own update first.
+#[test]
+fn a_peace_expels_before_its_character_walk_ends_raids() {
+    use crate::campaign::trade::{TradeLeg, TradePath, TradeWaypoint};
+    let run = |saved: i32| {
+        let mut m = spread_model();
+        add_army(&mut m, 104, A, pos(405, 0));
+        m.world.declare_war(A, B).unwrap();
+        m.form_alliance(A, C).unwrap();
+        suspend_access(&mut m, C, A, B, saved);
+        // A MADE-UP leg (segment 0) through C's region 13, carrying B's route.
+        m.world.commodity_prices = vec![10];
+        m.world.trade_network = vec![TradeLeg { from: 2, to: 1, length: 10.0, splines: vec![0] }];
+        let line = [(400.0, 0.0), (403.0, 0.0), (406.0, 0.0), (410.0, 0.0)];
+        m.world.trade_sight = vec![crate::campaign::visibility::TradeSegmentSight { cells: Vec::new(), domestic: Vec::new(), international: Vec::new(), curves: vec![line] }];
+        let w = |from, to| TradeWaypoint { region: RegionId(13), from, to, sea: false, from_pos: None, to_pos: None };
+        let path = TradePath { waypoints: vec![w(1, 2), w(u32::MAX, u32::MAX)], volumes: vec![30], capital_port: false, accumulated: 0 };
+        m.world.domestic_trade.insert(B, vec![path]);
+        assert!(m.raid_trade_route(CharacterId(104), pos(405, 0)));
+        assert!(m.is_raiding(CharacterId(104)));
+        let updates = price_updates(|| drop(m.make_peace_rules(A, B, true).unwrap()));
+        assert!(m.world.commerce_raids.is_empty());
+        (at(&m, 104), updates.len())
+    };
+    assert_eq!(run(0), (pos(200, 0), 1), "expelled to A's region 12 first: the peace's own update only");
+    assert_eq!(run(3), (pos(405, 0), 2), "kept access: his raid end's update, then the peace's");
 }
 
 /// A patron breaking with its protectorate ends the tie first (`0x00B0CA20` → `0x00B64B10`): the
@@ -475,13 +538,13 @@ fn a_region_list_keeps_the_manager_order_and_a_gain_goes_last() {
     assert_eq!(ids(&m), vec![10, 11, 12, 13], "no order listed: id order");
     m.world.region_order = vec![RegionId(12), RegionId(10), RegionId(13)];
     assert_eq!(ids(&m), vec![12, 10, 13, 11], "the unlisted after the listed");
-    assert!(m.transfer_region(RegionId(10), B));
+    assert!(m.transfer_region(RegionId(10), B, &mut Vec::new()));
     assert_eq!(ids(&m), vec![12, 13, 11, 10], "the gain at the end, the rest in their order");
-    assert!(m.transfer_region(RegionId(11), A));
+    assert!(m.transfer_region(RegionId(11), A, &mut Vec::new()));
     assert_eq!(ids(&m), vec![12, 13, 10, 11]);
-    assert!(m.transfer_region(RegionId(10), A));
+    assert!(m.transfer_region(RegionId(10), A, &mut Vec::new()));
     assert_eq!(ids(&m), vec![12, 13, 11, 10], "gained again: moved to the end, listed once");
-    assert!(!m.transfer_region(RegionId(10), A), "already A's");
+    assert!(!m.transfer_region(RegionId(10), A, &mut Vec::new()), "already A's");
     assert_eq!(ids(&m), vec![12, 13, 11, 10], "no owner change: no move");
 }
 
@@ -503,9 +566,91 @@ fn an_access_loss_walks_the_givers_region_list_in_its_order() {
         })
     });
     Arc::make_mut(&mut m.rules).seams.region_expulsion.apply("test.record", &record);
-    assert!(m.transfer_region(RegionId(14), A));
+    assert!(m.transfer_region(RegionId(14), A, &mut Vec::new()));
     walked.lock().unwrap().clear();
     m.relationship_mut(A, C).military_access_turns = 5;
     m.apply_diplomatic_action(A, C, crate::campaign::treaties::DiplomaticAction::CancelMilitaryAccess).unwrap();
     assert_eq!(*walked.lock().unwrap(), vec![(C, RegionId(12)), (C, RegionId(10)), (C, RegionId(14))]);
+}
+
+/// The expulsion's move notices in `events`: (recipient, commander, position).
+fn retreat_notices(events: &[CampaignEvent]) -> Vec<(FactionId, CharacterId, (Fixed20, Fixed20))> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            CampaignEvent::Message { recipient, message: CampaignMessage::YourArmyRetreatsRegion { character, at } } => {
+                Some((*recipient, *character, *at))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The move notice (`0x009FB680`, from `0x008D9DC0` at `0x008DA091`): a placed army that may not stay
+/// tells its own faction where it went, after the move; the navy put to sea tells no one, and at war
+/// (the army may stay, the navy stays docked) nothing is sent.
+#[test]
+fn a_placed_army_that_may_not_stay_sends_its_faction_the_move_notice() {
+    let mut m = terrain_model(true);
+    let mut events = Vec::new();
+    m.transfer_region(RegionId(12), B, &mut events);
+    assert_eq!(at(&m, 103), fpos(12.5, 1.5), "the navy moved too");
+    assert_eq!(retreat_notices(&events), vec![(A, CharacterId(100), fpos(4.5, 1.5))], "{events:?}");
+    let message = CampaignMessage::YourArmyRetreatsRegion { character: CharacterId(100), at: fpos(4.5, 1.5) };
+    assert_eq!(message.type_name(), "your_army_retreats_region", "message type 0x119");
+
+    let mut m = terrain_model(true);
+    m.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
+    let mut events = Vec::new();
+    m.transfer_region(RegionId(12), B, &mut events);
+    assert_eq!(retreat_notices(&events), vec![], "at war: may stay");
+}
+
+/// No notice for an army that may stay (military access; `0x008DA077`) though it leaves the
+/// settlement, nor for one no candidate placed (the call sits in the placed branch).
+#[test]
+fn no_move_notice_when_the_army_may_stay_or_is_not_placed() {
+    let mut m = terrain_model(true);
+    m.world.relationships.insert((B, A), Relationship { military_access_turns: 2, ..Default::default() });
+    let mut events = Vec::new();
+    m.transfer_region(RegionId(12), B, &mut events);
+    assert_eq!(m.world.regions[&RegionId(12)].garrison, None);
+    assert_eq!(retreat_notices(&events), vec![]);
+
+    let mut m = terrain_model(false);
+    let mut events = Vec::new();
+    m.transfer_region(RegionId(12), B, &mut events);
+    assert_eq!(at(&m, 100), fpos(7.5, 1.5), "not placed");
+    assert_eq!(retreat_notices(&events), vec![]);
+}
+
+/// Every expulsion caller passes its notices on: the cancelled access (`0x00B67BD0`, before the command's
+/// `alliance_broken`), the end of a protectorate tie (before its stance change) and the
+/// `CCQ_MOVE_ARMIES_OUT_OF_REGIONS` command.
+#[test]
+fn the_expulsion_callers_return_the_move_notices() {
+    let mut m = spread_model();
+    add_army(&mut m, 103, C, pos(205, 0));
+    m.relationship_mut(A, C).military_access_turns = 5;
+    let events = m.apply_diplomatic_action(A, C, crate::campaign::treaties::DiplomaticAction::CancelMilitaryAccess).unwrap();
+    assert!(
+        matches!(events.as_slice(), [
+            CampaignEvent::Message { recipient: C, message: CampaignMessage::YourArmyRetreatsRegion { character: CharacterId(103), .. } },
+            CampaignEvent::Message { recipient: C, message: CampaignMessage::AllianceBroken { .. } },
+        ]),
+        "{events:?}"
+    );
+    assert_eq!(retreat_notices(&events), vec![(C, CharacterId(103), pos(400, 0))]);
+
+    let mut m = spread_model();
+    m.make_protectorate(B, A).unwrap();
+    m.world.characters.get_mut(&CharacterId(100)).unwrap().position = pos(95, 0);
+    let events = m.end_protectorate_tie(B, A).unwrap();
+    assert_eq!(retreat_notices(&events), vec![(A, CharacterId(100), pos(0, 0))]);
+    assert!(matches!(events.last(), Some(CampaignEvent::StanceChanged { .. })), "{events:?}");
+
+    let mut m = spread_model();
+    add_army(&mut m, 103, C, pos(205, 0));
+    let events = m.apply(CampaignCommand::MoveArmiesOutOfRegions { a: A, b: C }).unwrap();
+    assert_eq!(retreat_notices(&events), vec![(C, CharacterId(103), pos(400, 0))]);
 }

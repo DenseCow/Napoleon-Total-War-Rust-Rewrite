@@ -231,6 +231,10 @@ pub struct HistoricalCandidate {
     pub note: String,
 }
 
+/// The culture a culture-keyed row lookup falls back to ([`CampaignRules::culture_row`], `0x00F54F80`,
+/// string `0x0132EE78`).
+pub const FALLBACK_CULTURE: &str = "european";
+
 /// All game data the campaign rules use. See the module docs.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CampaignRules {
@@ -306,6 +310,10 @@ pub struct CampaignRules {
     /// The rules in use for every rule seam ([`super::seams`]): the original's by default, a mod's
     /// where data selects one. The model, the UI and the AI call those rules only through these.
     pub seams: super::seams::CampaignSeams,
+    /// The campaign AI's personalities and their tunables (`campaign_ai_personalities`,
+    /// `campaign_ai_personality_junctions`), read by the model's AI rules ([`super::capture_ai`]) and the
+    /// campaign AI.
+    pub ai_personalities: super::personalities::AiPersonalities,
     /// The campaign director's data ([`super::director`]): `cdir_configs` and its relation weights.
     pub director: super::director::DirectorRules,
     /// `trade_nodes` rows by node key: (commodity key, base volume, per extra ship, cap).
@@ -375,6 +383,9 @@ pub struct CampaignRules {
     pub faction_movie_ids: BTreeMap<String, String>,
     /// `movie_event_strings` rows in table order ([`super::outcome`]; the lookups depend on the order).
     pub movie_events: Vec<super::outcome::MovieEventRow>,
+    /// `message_event_strings` rows in table order ([`super::message_events`]; the culture lookup depends on
+    /// the order).
+    pub message_events: Vec<super::message_events::MessageEventRow>,
     /// `commodities_demand_junction` rows: (commodity key, driver key, factor, weight).
     pub commodity_demand: Vec<(String, String, f32, f32)>,
     /// The effect sources, compiled (slot 0-F, [`super::effects`]).
@@ -495,6 +506,32 @@ pub fn faction_unit_set<'a>(
 }
 
 impl CampaignRules {
+    /// The row of one event's `rows` (in table order) a faction of `culture` gets (`0x00F54F80`,
+    /// CONFIRMED by disassembly; the movie queuers and the event message queuer `0x009D3250` call it):
+    /// a row of the faction's own culture is taken at once; a row whose culture's `cultures` #2
+    /// ([`culture_alternates`](Self::culture_alternates)) is the faction's culture becomes the pick, the
+    /// last such row winning; otherwise the first row is the pick, which, until such a #2 match is seen,
+    /// a [`FALLBACK_CULTURE`] row replaces unless the pick is already of it. A faction whose culture is
+    /// unknown takes only the first / fallback steps. `row_culture` reads a row's culture key.
+    pub fn culture_row<'a, R: 'a>(&self, rows: impl IntoIterator<Item = &'a R>, culture: Option<&str>, row_culture: impl Fn(&R) -> &str) -> Option<&'a R> {
+        let mut pick: Option<&R> = None;
+        let mut alternate_seen = false;
+        for row in rows {
+            let rc = row_culture(row);
+            if culture == Some(rc) {
+                return Some(row);
+            }
+            let alternate = self.culture_alternates.get(rc).map(String::as_str);
+            if culture.is_some() && alternate == culture {
+                alternate_seen = true;
+                pick = Some(row);
+            } else if pick.is_none_or(|p| !alternate_seen && row_culture(p) != FALLBACK_CULTURE && rc == FALLBACK_CULTURE) {
+                pick = Some(row);
+            }
+        }
+        pick
+    }
+
     /// A `campaign_variables` value, or `default` if the table has no such row.
     pub fn var(&self, key: &str, default: f32) -> f32 {
         self.variables.get(key).copied().unwrap_or(default)

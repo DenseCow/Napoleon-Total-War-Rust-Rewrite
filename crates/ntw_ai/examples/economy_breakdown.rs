@@ -85,7 +85,7 @@ fn main() {
         );
         if round < rounds {
             if ai {
-                driver::end_turn(&mut m, &data, &ctx);
+                driver::end_turn_declining_calls(&mut m, &data, &ctx);
             } else {
                 m.end_turn();
             }

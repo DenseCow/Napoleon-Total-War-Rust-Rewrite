@@ -36,6 +36,8 @@
 //! | 10 | each faction's diplomacy records keep their order (`World::diplomacy_record_order`, the order the allies of a war are called in); an older save takes it from the campaign's start, or without one walks the records by faction id (see [`read_with_start`]) |
 //! | 11 | the region manager's order (`World::region_order`, the order each faction's region list follows after a load); an older save takes it from the campaign's start, or without one walks the regions by id (see [`read_with_start`]) |
 //! | 12 | the director's stored CAI relation beliefs keep their ally list (`RelationBelief::allies`); an older save's stored beliefs get it rebuilt from the loaded world, which leaves off an ally destroyed since the belief was stored (see [`read_with_start`]) |
+//! | 13 | risen armies keep their side in the rising (`World::rebel_army_sides`: the `REBEL_SETUP` faction and the `REBEL_DATA` +0x34 value, which the capture report reads); an older save has none and nothing holds them (the start has no risen army of the save), so its risen armies never skip the capture choice; the load warns once with their count. The CAI random stream (`CampaignModel::cai_rng`, `CAI_INTERFACE` #0); an older save starts it from the exe preset (see [`read_with_start`])
+//! | 14 | regions keep their demand per commodity (`Region::commodity_demand`, `REGION` #32), which the load leaves as stored; an older save's regions get it from the demand step on the save's own GDP and town wealth (see [`read_with_start`]) |
 //!
 //! **What is saved.** The whole [`CampaignModel`] except the fields marked `serde(skip)` in
 //! `ntw_sim`: game data rebuilt on load (`rules` from the DB, `terrain` from the map), fields the
@@ -51,13 +53,14 @@ use ntw_data::GameDatabase;
 use ntw_sim::campaign::{CampaignModel, FactionId};
 use serde::{Deserialize, Serialize};
 
+use crate::camera::CameraSave;
 use crate::script_values::ScriptSaveValue;
 use crate::{CampaignInfo, LoadError, LoadedCampaign};
 
 /// The first bytes of every save in this format.
 pub const MAGIC: &[u8; 16] = b"NAPOLEONRUST\0SAV";
 /// The format version this build writes and the newest it reads.
-pub const FORMAT_VERSION: u32 = 12;
+pub const FORMAT_VERSION: u32 = 14;
 
 /// Everything a save holds besides its header.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -75,6 +78,10 @@ pub struct SaveData {
     /// already). Written only when not empty, so a save from [`SaveDataRef`] and one from this struct stay identical.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub restricted_units: Vec<String>,
+    /// The campaign camera the game was saved with (`None` in a save written before it was kept: the
+    /// game opens on its start view then).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera: Option<CameraSave>,
 }
 
 /// The same body as [`SaveData`] with the model borrowed, for writing without cloning it (both
@@ -89,6 +96,9 @@ pub struct SaveDataRef<'a> {
     pub rebel_faction: Option<FactionId>,
     /// See [`SaveData::script_values`].
     pub script_values: Vec<ScriptSaveValue>,
+    /// See [`SaveData::camera`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub camera: Option<CameraSave>,
 }
 
 /// Why a save in this format could not be read or written.
@@ -297,8 +307,9 @@ pub fn read(bytes: &[u8], db: &GameDatabase) -> Result<LoadedCampaign, FormatErr
 ///   (`ntw_sim::campaign::economy::rebuild_running_record`: category 21 the regions' sum, 0; the categories no
 ///   tracker keeps, 0). The next round end's first pass books each region's policing cost.
 /// * version 9 → 10: an older save lacks the order of the diplomacy records (`World::diplomacy_record_order`); it
-///   takes the start's (a record made since sits after them, as the exe pushes one at the end, `0x00B5F330`). Without a
-///   usable start the load goes on with a warning and the records are walked by faction id.
+///   takes the start's (a record our model made in play since sits after them, by target id: that save kept no
+///   creation order; the exe makes none in play). Without a usable start the load goes on with a warning and the
+///   records are walked by faction id (`World::record_targets_in_order`).
 /// * version 10 → 11: an older save lacks the region manager's order (`World::region_order`); it takes the
 ///   start's, which is exact: nothing in play changes the manager's order and the exe's writer saves it as it is
 ///   (`0x00A52FE0`). Without a usable start the load goes on with a warning and the regions are walked by id.
@@ -306,6 +317,17 @@ pub fn read(bytes: &[u8], db: &GameDatabase) -> Result<LoadedCampaign, FormatErr
 ///   (`RelationBelief::allies` reads empty); each gets the list a rebuild from the loaded world makes
 ///   (`CampaignModel::rebuild_stored_ally_lists`, which says where that can differ from the list the belief
 ///   held, such as an ally destroyed since it was stored: the rebuild leaves it off).
+/// * version 12 → 13, which needs no start: an older save lacks the risen armies' sides (`World::rebel_army_sides`),
+///   which only the original's save holds; they stay empty with one warning (the capture report's skip flags read
+///   none set). It also lacks the CAI's random stream (`CampaignModel::cai_rng`, which older builds did not
+///   keep: their AI drew its capture choices on the campaign RNG), which starts from the exe's preset
+///   `CAI_RNG_SEED`, logged once.
+/// * version 13 → 14, which needs no start: an older save's regions hold no stored demand
+///   (`Region::commodity_demand` reads empty); each gets the demand step's result
+///   (`CampaignModel::refresh_all_demand`, `0x00AB49F0`) on the save's GDP and town wealth, before the load's
+///   refresh replaces the GDP. The older save did not keep the demand the exe would hold (built at the last
+///   round start from the GDP before that round start's own refresh, and changed by the round's events), so
+///   until the next round start rebuilds it the faction demand and the prices can differ from it.
 pub fn read_with_start(bytes: &[u8], db: &GameDatabase, start: impl FnOnce() -> Result<CampaignModel, String>) -> Result<LoadedCampaign, FormatError> {
     let (version, info, data) = read_stored(bytes)?;
     let mut model = data.model;
@@ -388,19 +410,51 @@ pub fn read_with_start(bytes: &[u8], db: &GameDatabase, start: impl FnOnce() -> 
         let n = model.rebuild_stored_ally_lists();
         log::info!("Own save format version {version}: the ally lists of {n} stored relation beliefs rebuilt from the loaded world");
     }
-    // Each running record as the exe's load leaves one (`0x00B95B90`, as for the original's save in
-    // `crate::read_esf`): the tracked categories booked again by their trackers, the script's
-    // `other_income_mod` entries dropped (the scripts add them again).
-    for f in model.world.factions.keys().copied().collect::<Vec<_>>() {
-        ntw_sim::campaign::economy::rebuild_running_record(&mut model, f);
+    if version < 13 {
+        let n = model.world.rebel_army_governments.keys().filter(|f| !model.world.rebel_army_sides.contains_key(f)).count();
+        if n > 0 {
+            log::warn!("Own save format version {version}: {n} risen armies have no side in their rising (not kept before format 13); their captures never skip the capture choice");
+        }
+        log::info!("Own save format version {version}: no CAI random state (kept from format 13); the CAI stream starts from its preset");
     }
+    if version < 14 {
+        // Before the load's town wealth refresh replaces the GDP the demand was last built from.
+        model.refresh_all_demand();
+        log::info!("Own save format version {version}: the demand of {} regions built from the save's GDP and town wealth", model.world.regions.len());
+    }
+    finish_load(&mut model);
     Ok(LoadedCampaign {
         model,
         info,
         rebel_faction: data.rebel_faction,
         warnings: Vec::new(),
         script_values: data.script_values,
+        camera: data.camera,
     })
+}
+
+/// The last steps of every load ([`read_with_start`]), whatever the save's version.
+fn finish_load(model: &mut CampaignModel) {
+    // Each running record as the exe's load leaves one (`0x00B95B90`, as for the original's save in
+    // `crate::read_esf`): the tracked categories booked again by their trackers, the script's
+    // `other_income_mod` entries dropped (the scripts add them again).
+    for f in model.world.factions.keys().copied().collect::<Vec<_>>() {
+        ntw_sim::campaign::economy::rebuild_running_record(model, f);
+    }
+    // Every region's GDP, town wealth growth, breakdown and trend recomputed from the live factors, as
+    // the exe's load does for a start position and a save alike (`0x00873D40` → `0x0095FF00`,
+    // CAMPAIGN_FIDELITY.md "Town wealth refresh"): the file's GDP and growth are replaced.
+    model.refresh_all_town_wealth();
+}
+
+/// The [`CampaignModel::saved_state_hash`] a save of `model` has once loaded: the load's last steps
+/// ([`finish_load`]) recompute the GDP, growth and running records from the live factors, which can
+/// differ from the live model's when a factor changed since its last refresh (an effect gained between
+/// two round starts). Clones the model: for the save's log line, not for a hot path.
+pub fn loaded_state_hash(model: &CampaignModel) -> u64 {
+    let mut as_loaded = model.clone();
+    finish_load(&mut as_loaded);
+    as_loaded.saved_state_hash()
 }
 
 /// The version 7 → 8 step of [`read_with_start`]: copies the trade network's static course from the campaign's

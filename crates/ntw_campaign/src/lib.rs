@@ -31,6 +31,7 @@
 //! | `CAMPAIGN_MODEL/RandSeed` u32 | `rng.state` | CONFIRMED location; INFERRED that it is the live LCG state |
 //! | `CAMPAIGN_MODEL/CAMPAIGN_CALENDAR` | `calendar` | CONFIRMED (W3 §3.1) |
 //! | `CAMPAIGN_MODEL` #23 / #24 u32 | `force_caps` (units per army / navy) | CONFIRMED (`0x00872550`) |
+//! | `CAMPAIGN_MODEL/CAI_INTERFACE` #0 u32 | `cai_rng.state` (the CAI's random stream) | CONFIRMED (`0x00A3CE70`, `0x00A5B5B0`) |
 //! | `WORLD/FACTION_ARRAY` + `REBEL_FACTION` | `world.factions` | CONFIRMED |
 //! | `FACTION_ECONOMICS` #1 | `Faction::treasury` | CONFIRMED values, INFERRED meaning |
 //! | `DIPLOMACY_RELATIONSHIP` #0, #4 | `Faction::diplomacy` | CONFIRMED |
@@ -52,6 +53,7 @@
 
 pub mod ai_keys;
 pub mod cai;
+pub mod camera;
 pub mod cai_world;
 pub mod trade;
 pub mod victory;
@@ -90,7 +92,7 @@ use ntw_sim::campaign::{CampaignModel, FactionId, TurnState};
 use ntw_sim::rng::CaRng;
 
 pub use error::{LoadError, LoadWarning};
-pub use rules::rules_from_db;
+pub use rules::{ai_personalities_from_db, rules_from_db};
 
 
 use fields::{array, child, date, rec_at, str_at, u32_at};
@@ -222,6 +224,10 @@ pub struct LoadedCampaign {
     /// start position alike (every startpos carries the block). Give them to the script host before
     /// `LoadingGame` fires (`0x0099878E`, posted on both paths).
     pub script_values: Vec<script_values::ScriptSaveValue>,
+    /// The campaign camera the file holds (`CAMPAIGN_ENV/CAMPAIGN_CAMERA_MANAGER`), if any. Every
+    /// start position has one too: a loaded game and a new single-player game open on it, only a new
+    /// multiplayer campaign replaces it (`0x00987070`, [`camera::opening_camera`]).
+    pub camera: Option<camera::CameraSave>,
 }
 
 /// Loads a start position from bytes (root must be `CAMPAIGN_STARTPOS`).
@@ -398,6 +404,9 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
     let mut model = CampaignModel::new(calendar, CaRng::new(seed), loaded.world);
     model.force_caps = read_force_caps(model_rec, &mut check.warnings);
     model.deal_inflation = read_deal_inflation(model_rec);
+    if let Some(cai_rng) = read_cai_rng(model_rec) {
+        model.cai_rng = cai_rng;
+    }
     attach_rules(&mut model, db, &campaign_key);
     // Held trait levels from their points (the save holds none: `ntw_sim::campaign::characters::load_trait_levels`).
     ntw_sim::campaign::characters::load_trait_levels(&mut model);
@@ -419,6 +428,10 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
     for f in model.world.factions.keys().copied().collect::<Vec<_>>() {
         ntw_sim::campaign::economy::rebuild_running_record(&mut model, f);
     }
+    // Every region's GDP, town wealth growth, breakdown and trend recomputed from the live factors, as
+    // the exe's load does for a start position and a save alike (`0x00873D40` → `0x0095FF00`,
+    // CAMPAIGN_FIDELITY.md "Town wealth refresh"): the file's GDP and growth are replaced.
+    model.refresh_all_town_wealth();
     // Sight: the grid, the shrouds and the regions' sight shapes (CHARACTERS_FIDELITY.md §10).
     shroud::read(esf, &mut model);
     // The campaign AI's manager / personality keys and region base values (AI_RESEARCH.md §2.3, §4).
@@ -434,7 +447,7 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
     director::fill(root, &mut model);
     // The historical characters already made (CHARACTERS_FIDELITY.md §7, §8) and the episodic
     // switches: force-success, saving, turns display (UI_FIDELITY.md §5.1) and the three
-    // WorldCreated switches (CAMPAIGN_DATA.md §4).
+    // WorldCreated switches (CAMPAIGN_DATA.md §4), and the camera's zoom limit (UI_FIDELITY.md "Zoom limit").
     model.world.historical_created = details::historical_created(model_rec);
     details::read_switches(model_rec, &mut model.world);
     // The once-only historical events already triggered (CAMPAIGN_FIDELITY.md "Historical events").
@@ -469,6 +482,7 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
         rebel_faction: loaded.rebel_faction,
         warnings: check.warnings,
         script_values: script_values::read_script_values(esf),
+        camera: camera::read(esf),
     })
 }
 
@@ -523,6 +537,22 @@ fn read_deal_inflation(model_rec: &EsfRecord) -> ntw_sim::campaign::deal_value::
             Default::default()
         }
     }
+}
+
+/// `CAI_INTERFACE` #0 u32, the CAI's random stream (`CampaignModel::cai_rng`, CAI interface +0x71C):
+/// the CAI loader `0x00A3CE70` reads it there (`0x00A3DE5C`) over its preset, and the writer
+/// `0x00A5B5B0` saves it there (CONFIRMED). A file without the block keeps the preset, as the exe's loader
+/// leaves it, silently: all 8 shipped startpos files hold the block with a u32 #0 (`esf_find`), so only a
+/// made-up file lacks it. A block whose #0 is not a u32 is malformed: it keeps the preset too, logged once.
+fn read_cai_rng(model_rec: &EsfRecord) -> Option<CaRng> {
+    let state = model_rec.child("CAI_INTERFACE")?.get_u32(0);
+    if state.is_none() {
+        static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            log::warn!("load: CAMPAIGN_MODEL/CAI_INTERFACE #0 (the CAI random state) is not a u32; the CAI stream keeps its preset (logged once)");
+        }
+    }
+    state.map(CaRng::new)
 }
 
 /// Gives the model the campaign's rules from the DB (game data, not state: rebuilt on every load,

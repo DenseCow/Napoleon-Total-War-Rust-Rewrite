@@ -36,7 +36,7 @@ fn main() {
     let only = args.get(1).cloned();
     let max: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(40);
     let all = [
-        ("campaign_ai_personalities", layouts::CAMPAIGN_AI_PERSONALITIES),
+        ("campaign_ai_personalities", "sb"),
         ("campaign_ai_personality_junctions", layouts::CAMPAIGN_AI_PERSONALITY_JUNCTIONS),
         ("campaign_ai_managers", layouts::CAMPAIGN_AI_MANAGERS),
         ("campaign_ai_manager_behaviour_junctions", layouts::CAMPAIGN_AI_MANAGER_BEHAVIOUR_JUNCTIONS),

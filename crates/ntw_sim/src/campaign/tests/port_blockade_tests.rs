@@ -41,27 +41,47 @@ fn blockade(m: &CampaignModel) -> Option<PortBlockade> {
 }
 
 /// A peace lifts a blockade by either side of a port the other side holds (`0x00A25570` → `0x00A784E0`, the
-/// call at `0x00A25627`), and the lift runs the price update with flag 0. A blockade of a third faction's
-/// port stays.
+/// call at `0x00A25627`), and the lift runs the price update with flag 0, before the peace's own
+/// (`0x00B2643F`). A blockade of a third faction's port stays.
 #[test]
 fn a_peace_lifts_a_blockade_of_the_other_sides_port_and_updates_the_prices() {
     let peace = |blockaded: bool, a: FactionId, b: FactionId| {
         let mut m = blockade_model(None, blockaded);
         m.world.set_stance(a, b, Stance::War).unwrap();
-        m.make_peace_rules(a, b, true).unwrap();
-        (blockade(&m), price_state(&m))
+        let updates = price_updates(|| drop(m.make_peace_rules(a, b, true).unwrap()));
+        (blockade(&m), price_state(&m), updates.len())
     };
-    assert_eq!(peace(true, B, C), (None, updated()), "B's navy, C's port");
-    assert_eq!(peace(true, C, B), (None, updated()), "either side proposing");
-    assert_eq!(peace(false, B, C), (None, unchanged()), "no blockade: the peace updates no prices");
+    assert_eq!(peace(true, B, C), (None, updated(), 2), "B's navy, C's port: the lift's update, then the peace's");
+    assert_eq!(peace(true, C, B), (None, updated(), 2), "either side proposing");
+    assert_eq!(peace(false, B, C), (None, updated(), 1), "no blockade: only the peace's own update");
     let kept = peace(true, A, B);
     assert_eq!(kept.0.map(|b| b.navy), Some(NAVY), "C's port is a third party's");
-    assert_eq!(kept.1, unchanged());
+    assert_eq!((kept.1, kept.2), (updated(), 1));
     // The port's holder is what counts, not the region's owner.
     let mut m = blockade_model(Some(A), true);
     m.world.set_stance(A, B, Stance::War).unwrap();
     m.make_peace_rules(A, B, true).unwrap();
     assert_eq!(blockade(&m), None, "A holds the port in C's region");
+}
+
+/// The peace reaches a blockading navy only through its commander's step (`0x00A25570` per listed
+/// character, `0x009D3A80`): a navy with no commander, or whose commander is in neither side's list, keeps
+/// blockading; and an army is not a navy (`0x009D3A80` returns null for it).
+#[test]
+fn a_peace_keeps_a_blockade_its_character_walk_does_not_reach() {
+    let peace = |edit: &dyn Fn(&mut CampaignModel)| {
+        let mut m = blockade_model(None, true);
+        m.world.set_stance(B, C, Stance::War).unwrap();
+        edit(&mut m);
+        let updates = price_updates(|| drop(m.make_peace_rules(B, C, true).unwrap()));
+        (blockade(&m).map(|b| b.navy), updates.len())
+    };
+    assert_eq!(peace(&|_| {}), (None, 2), "commanded: lifted");
+    assert_eq!(peace(&|m| m.world.forces.get_mut(&NAVY).unwrap().commander = None), (Some(NAVY), 1), "no commander");
+    assert_eq!(peace(&|m| {
+        m.world.characters.remove(&CharacterId(109));
+    }), (Some(NAVY), 1), "a commander in no list");
+    assert_eq!(peace(&|m| m.world.forces.get_mut(&NAVY).unwrap().is_navy = false), (Some(NAVY), 1), "not a navy");
 }
 
 /// An owner change's slot pass (`0x00B1B300`, the lift at `0x00B1B3EF`) lifts the blockade of a port the new
@@ -80,7 +100,7 @@ fn an_owner_change_lifts_a_blockade_of_a_port_the_new_owner_holds_unless_at_war(
         if let Some(f) = docked {
             add_navy(&mut m, ForceId(1006), 110, f, pos(5, 5));
         }
-        assert!(m.transfer_region(R12, A), "the rebels lose region 12");
+        assert!(m.transfer_region(R12, A, &mut Vec::new()), "the rebels lose region 12");
         (blockade(&m).is_some(), price_state(&m))
     };
     assert_eq!(transfer(None, false, None), (false, updated()), "the port passes to A and the blockade lifts");
@@ -93,7 +113,7 @@ fn an_owner_change_lifts_a_blockade_of_a_port_the_new_owner_holds_unless_at_war(
     make_rebels(&mut m, C);
     m.world.forces.get_mut(&NAVY).unwrap().faction = A;
     m.world.characters.get_mut(&CharacterId(109)).unwrap().faction = A;
-    assert!(m.transfer_region(R12, A));
+    assert!(m.transfer_region(R12, A, &mut Vec::new()));
     assert_eq!(blockade(&m), None);
 }
 
@@ -102,11 +122,11 @@ fn an_owner_change_lifts_a_blockade_of_a_port_the_new_owner_holds_unless_at_war(
 #[test]
 fn a_same_owner_handover_lifts_a_blockade_at_peace() {
     let mut m = blockade_model(None, true);
-    assert!(!m.transfer_region(R12, C), "C already owns region 12");
+    assert!(!m.transfer_region(R12, C, &mut Vec::new()), "C already owns region 12");
     assert_eq!(blockade(&m), None);
     let mut m = blockade_model(None, true);
     m.world.set_stance(B, C, Stance::War).unwrap();
-    m.transfer_region(R12, C);
+    m.transfer_region(R12, C, &mut Vec::new());
     assert!(blockade(&m).is_some(), "B at war with C");
 }
 

@@ -11,7 +11,7 @@ use ntw_sim::campaign::details::{
     AlliedWar, AttitudeFactor, CharacterDetails, CharacterTrait, FactionDetails, GovernmentPost, Governorship,
     GovernorshipTaxes, Portrait, RegularPayment, Relationship,
 };
-use ntw_sim::campaign::{CharacterId, FactionId, RegionId, World};
+use ntw_sim::campaign::{CharacterId, FactionId, RegionId, World, ZoomLimit};
 
 fn date_of(r: Option<&EsfRecord>) -> Option<Date> {
     let r = r?;
@@ -73,14 +73,42 @@ fn switch_values(world: &World) -> [bool; 7] {
     ]
 }
 
-/// Reads the [`switch_slots`] into `world`. The shipped start positions carry the scripts' values
-/// (CONFIRMED: Egypt sets #31, Italy #29 and #31, the tutorial #31 and #32).
+/// The positions of the zoom limit (episodic restrictions +0xC0 smallest tilt, +0xBC largest;
+/// [`ntw_sim::campaign::zoom_limit`]) in an `EPISODIC_RESTRICTIONS` record: the loader `0x009968A0`
+/// reads the smallest tilt after #8 (present above version 1) and the four map bounds, so at #13
+/// (#12 in a version-1 record; `0x00997B9D`), and the largest right after it only above version 2
+/// (`0x00997BBA`); the writer `0x009A1070` writes both (`0x009A1957`, `0x009A19A1`). CONFIRMED.
+fn zoom_limit_slots(restrictions: &EsfRecord) -> (usize, Option<usize>) {
+    let min_at = if restrictions.version > 1 { 13 } else { 12 };
+    (min_at, (restrictions.version > 2).then_some(min_at + 1))
+}
+
+/// Reads the zoom limit ([`zoom_limit_slots`]); a bound the record does not have keeps the
+/// constructor's tweaker value (`0x009968A0`), as in the exe.
+fn read_zoom_limit(r: &EsfRecord) -> ZoomLimit {
+    let mut z = ZoomLimit::default();
+    let (min_at, max_at) = zoom_limit_slots(r);
+    let read = |at: usize, out: &mut f32| match r.get(at) {
+        Some(EsfNode::F32(v)) => *out = *v,
+        _ => log::warn!("EPISODIC_RESTRICTIONS v{} #{at} is not an f32 zoom limit: the default {out} is kept", r.version),
+    };
+    read(min_at, &mut z.min_tilt);
+    if let Some(at) = max_at {
+        read(at, &mut z.max_tilt);
+    }
+    z
+}
+
+/// Reads the [`switch_slots`] and the zoom limit into `world`. The shipped start positions carry the
+/// scripts' values (CONFIRMED: Egypt sets #31, Italy #29 and #31, the tutorial #31 and #32).
 pub(crate) fn read_switches(model_rec: &EsfRecord, world: &mut World) {
     let mut v = [false; 7];
+    world.zoom_limit = ZoomLimit::default();
     if let Some(r) = model_rec.child("EPISODIC_RESTRICTIONS") {
         for (out, (at, above)) in v.iter_mut().zip(switch_slots(r)) {
             *out = above.is_none_or(|a| r.version > a) && r.get_bool(at).unwrap_or(false);
         }
+        world.zoom_limit = read_zoom_limit(r);
     }
     let [turns, assassination, infiltration, saving, research, liberation, victory] = v;
     world.display_turns = turns;
@@ -91,9 +119,10 @@ pub(crate) fn read_switches(model_rec: &EsfRecord, world: &mut World) {
     world.victory_notification_disabled = victory;
 }
 
-/// Writes the world's switches back into the [`switch_slots`] the source record has (the writer
-/// `0x009A1070` saves every one). A slot the record's version does not have, or one that is not a
-/// boolean, keeps the source's node, so the record's layout never changes.
+/// Writes the world's switches and zoom limit back into the [`switch_slots`] and
+/// [`zoom_limit_slots`] the source record has (the writer `0x009A1070` saves every one). A slot the
+/// record's version does not have, or one of another type, keeps the source's node, so the
+/// record's layout never changes.
 pub(crate) fn write_switches(model_rec: &mut EsfRecord, world: &World) {
     let Some(r) = model_rec.children.iter_mut().find_map(|c| match c {
         EsfNode::Record(b) if b.name == "EPISODIC_RESTRICTIONS" => Some(&mut **b),
@@ -106,6 +135,12 @@ pub(crate) fn write_switches(model_rec: &mut EsfRecord, world: &World) {
             && let Some(node @ EsfNode::Bool(_)) = r.children.get_mut(at)
         {
             *node = EsfNode::Bool(value);
+        }
+    }
+    let (min_at, max_at) = zoom_limit_slots(r);
+    for (at, value) in [(Some(min_at), world.zoom_limit.min_tilt), (max_at, world.zoom_limit.max_tilt)] {
+        if let Some(node @ EsfNode::F32(_)) = at.and_then(|at| r.children.get_mut(at)) {
+            *node = EsfNode::F32(value);
         }
     }
 }
@@ -551,6 +586,52 @@ mod tests {
         assert_eq!(r.get_bool(31), Some(true));
         assert_eq!(r.get_bool(32), Some(true));
         assert_eq!(r.get_bool(25), Some(false));
+    }
+
+    /// A record with the zoom limit: #13 the smallest tilt and #14 the largest as f32.
+    fn model_with_zoom_limit(version: u8, min: f32, max: f32) -> EsfRecord {
+        let mut model = model_with_restrictions(version, true);
+        let EsfNode::Record(r) = &mut model.children[0] else { unreachable!() };
+        r.children[13] = EsfNode::F32(min);
+        r.children[14] = EsfNode::F32(max);
+        model
+    }
+
+    fn zoom_limit(model_rec: &EsfRecord) -> ZoomLimit {
+        let mut world = World::default();
+        read_switches(model_rec, &mut world);
+        world.zoom_limit
+    }
+
+    /// The loader `0x009968A0` reads the smallest tilt at #13 above version 1 and the largest at #14
+    /// only above version 2; a bound it does not read keeps the tweaker default.
+    #[test]
+    fn the_zoom_limit_is_read_by_version() {
+        assert_eq!(zoom_limit(&model_with_zoom_limit(17, 0.61, 0.95)), ZoomLimit { max_tilt: 0.95, min_tilt: 0.61 });
+        assert_eq!(zoom_limit(&model_with_zoom_limit(3, 0.61, 0.95)), ZoomLimit { max_tilt: 0.95, min_tilt: 0.61 });
+        assert_eq!(zoom_limit(&model_with_zoom_limit(2, 0.61, 0.95)), ZoomLimit { max_tilt: 1.0, min_tilt: 0.61 });
+        // Version 1 has no #8, so the smallest tilt is at #12.
+        let mut v1 = model_with_zoom_limit(1, 0.61, 0.95);
+        let EsfNode::Record(r) = &mut v1.children[0] else { unreachable!() };
+        r.children[12] = EsfNode::F32(0.7);
+        assert_eq!(zoom_limit(&v1), ZoomLimit { max_tilt: 1.0, min_tilt: 0.7 });
+        // No f32 there (or no record): the defaults.
+        assert_eq!(zoom_limit(&model_with_restrictions(17, true)), ZoomLimit::default());
+        assert_eq!(zoom_limit(&EsfRecord { name: "CAMPAIGN_MODEL".into(), version: 0, children: Vec::new() }), ZoomLimit::default());
+    }
+
+    /// The writer `0x009A1070` puts the zoom limit back where the loader reads it; a version-2 record
+    /// keeps its #14.
+    #[test]
+    fn the_zoom_limit_is_written_where_it_is_read() {
+        let world = World { zoom_limit: ZoomLimit::from_script(1.0, 0.61), ..World::default() };
+        let mut model = model_with_zoom_limit(17, 0.5, 1.0);
+        write_switches(&mut model, &world);
+        assert_eq!(zoom_limit(&model), world.zoom_limit);
+        let mut v2 = model_with_zoom_limit(2, 0.5, 0.9);
+        write_switches(&mut v2, &world);
+        let EsfNode::Record(r) = &v2.children[0] else { unreachable!() };
+        assert_eq!((r.get_f32(13), r.get_f32(14)), (Some(0.61), Some(0.9)));
     }
 
     /// The triggered list is read in the exe's order (UTF-16 code units, each key once).

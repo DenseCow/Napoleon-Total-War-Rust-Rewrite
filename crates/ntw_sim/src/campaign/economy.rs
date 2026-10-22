@@ -21,8 +21,9 @@
 //!   ([`CampaignModel::trade_split`], `0x00BC26D0`, CONFIRMED).
 //!
 //! The effects (traits, ministers, technologies, buildings, difficulty) come from the effects store
-//! ([`super::effects`]); GDP and town wealth growth are recomputed at each round end
-//! ([`recompute_region`]); public order follows the exe's slots ([`public_order_factors`]).
+//! ([`super::effects`]); GDP and town wealth growth are recomputed by the town wealth refresh
+//! ([`update_region_town_wealth`]: at the load, at the round start, at the round end with the growth added to
+//! the town wealth, and at the events listed there); public order follows the exe's slots ([`public_order_factors`]).
 
 use super::events::CampaignEvent;
 use super::ids::{CharacterId, FactionId, ForceId, RegionId};
@@ -738,7 +739,7 @@ impl CampaignModel {
     /// (`0x00BBC7D0` on the running record's sums), is [`settle_round`]'s check.
     pub fn prepare_round_end(&mut self) {
         self.refresh_population_factors();
-        let factions: Vec<FactionId> = self.world.factions_in_turn_order().into_iter().filter(|&f| !self.is_rebel_faction(f) && self.in_the_game(f)).collect();
+        let factions: Vec<FactionId> = self.world.factions_in_turn_order().into_iter().filter(|&f| self.in_the_game_with_record(f)).collect();
         for faction in factions {
             let fx = Effects::compute_for(self, faction);
             let (land, naval) = faction_upkeep_split_with(self, &fx, faction);
@@ -858,7 +859,8 @@ fn faction_part(model: &CampaignModel, fx: &Effects, region: &Region, engine_key
     fx.faction(faction, engine_key) - gov
 }
 
-/// [`recompute_region`] with the faction-wide effects (`Some`), as the round end runs it. Without
+/// [`recompute_region`] with the faction-wide effects (`Some`), as the town wealth refresh computes it
+/// ([`update_region_town_wealth`], which takes [`region_wealth`] itself to keep the breakdown). Without
 /// them (`None`) it gives the values the shipped start positions store: those were computed before
 /// any faction container existed (at a start position `FACTION` #55 equals #54 and techs, scripted
 /// bonuses and handicaps have not been summed yet), so they match the building and government
@@ -985,6 +987,101 @@ pub fn wealth_trend(predicted_growth: i32) -> u32 {
     }
 }
 
+/// What the town wealth refresh ([`update_region_town_wealth`], `UpdateRegionTownWealth` `0x00AB4410`)
+/// stores in a region besides its GDP and growth, for the readers that take the stored values rather than a
+/// fresh computation. Derived: the original's region writer `0x00A51E30` saves neither and every load
+/// computes them again (`0x0095FF00` → `0x00A8A820(0)`, CONFIRMED), so ours are neither saved nor hashed and
+/// a load refreshes them ([`CampaignModel::refresh_all_town_wealth`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TownWealthRefresh {
+    /// The growth by [`TOWN_WEALTH_FACTORS`] slot as last refreshed (region +0x388, [`RegionWealth::factors`]):
+    /// the region details panel's current factors (`0x00A995A0` reads +0x388, CONFIRMED).
+    pub factors: [i32; 10],
+    /// The trend of the predicted growth as last refreshed (region +0xC4, [`wealth_trend`]): the region info's
+    /// WealthChange (`0x009AF570` reads +0xC4, CONFIRMED).
+    pub trend: u32,
+}
+
+impl Default for TownWealthRefresh {
+    /// No growth: no factors, the unchanged trend (2).
+    fn default() -> Self {
+        Self { factors: [0; 10], trend: wealth_trend(0) }
+    }
+}
+
+/// `UpdateRegionTownWealth` `0x00AB4410` (CONFIRMED by decompile and listing): the region's GDP, town wealth
+/// growth and growth breakdown recomputed from its live state (`0x00A6AFC0`, [`region_wealth`]) and stored;
+/// with `apply` (the round end only, `0x00AB42F0` → `0x00AB4410(1)` at `0x00AB437E`) the growth then added to
+/// the town wealth (`max(0, town_wealth + growth)`; the exe also copies it to its second town wealth field,
+/// +0xD4, which ours does not keep apart: the save writes the one value as `REGION` #12 and #14); last the
+/// predicted growth ([`region_wealth`] with `predicted`) sets the trend ([`wealth_trend`]). Without `apply`
+/// the town wealth stays as it is (the exe copies +0xD4 back into +0xCC first, the same value in ours). The
+/// town-level loop of the apply (`0x00AB4410` after the growth, the next town's emergence `0x00AB3FF0` /
+/// `0x00AADB00`) is PROVISIONAL: not modelled, so no town emerges at the round end
+/// (BACKLOG §0 "Region details panel", NextTown). `fx` holds the effects of the region's owner and governing faction
+/// ([`Effects::compute_for`] of the owner, or [`Effects::compute`]). A missing region is left alone.
+///
+/// The exe runs it (every call site CONFIRMED by xrefs): at every load for every region
+/// ([`CampaignModel::refresh_all_town_wealth`]); at the round start for the regions of every listed faction
+/// in the game, not the rebels (`0x008F1F60` → `0x00AAE710`); at the round end with `apply`
+/// ([`settle_round`]); when a construction item finishes (`StepSlotConstructionItem` `0x00B78800` →
+/// `0x00A682F0`); when a slot's holder is set (`SetSettlementOwner` `0x00B2B810`, at `0x00B2B86F`) and the
+/// region's owner changes (`TransferRegionToFaction` `0x00A64AC0`, at `0x00A65113`); when the region is looted
+/// (`0x00AAA580`, after the town wealth is set); and when a tax level changes, for every region of the
+/// governorship (`0x00937A70` → `0x008EE1E0`, after the level's setter).
+pub fn update_region_town_wealth(model: &mut CampaignModel, fx: &Effects, region: RegionId, apply: bool) {
+    let Some(r) = model.world.regions.get(&region) else { return };
+    let now = region_wealth(model, Some(fx), r, false);
+    let next = region_wealth(model, Some(fx), r, true);
+    let Some(r) = model.world.regions.get_mut(&region) else { return };
+    r.gdp = now.gdp;
+    r.town_wealth_growth = now.growth;
+    if apply {
+        r.town_wealth = (i64::from(r.town_wealth) + i64::from(now.growth)).clamp(0, i64::from(u32::MAX)) as u32;
+    }
+    r.town_wealth_refresh = TownWealthRefresh { factors: now.factors, trend: wealth_trend(next.growth) };
+}
+
+impl CampaignModel {
+    /// [`update_region_town_wealth`] without `apply` for one region, with its owner's effects: what a finished
+    /// construction, a slot holder change, an owner change and a loot run (see there).
+    pub fn refresh_region_town_wealth(&mut self, region: RegionId) {
+        let Some(owner) = self.world.regions.get(&region).map(|r| r.owner) else { return };
+        let fx = Effects::compute_for(self, owner);
+        update_region_town_wealth(self, &fx, region, false);
+    }
+
+    /// [`update_region_town_wealth`] without `apply` for every region, with every faction's effects: the load's
+    /// pass (`0x00872550` → `0x0095FF00` at `0x00873D40`, unconditional for a start position and a save alike:
+    /// every faction's effect sum rebuilt, then `0x00A8A820(0)` → `0x00A8A7F0` on each region of the world,
+    /// CONFIRMED). The shipped saves' stored GDP and growth are what it computes (`economy_fidelity`); the
+    /// start positions' are not (they were computed without the faction-wide effects, see
+    /// [`recompute_region_with`]), and the exe replaces them at the load as ours does.
+    pub fn refresh_all_town_wealth(&mut self) {
+        let fx = Effects::compute(self);
+        let regions: Vec<RegionId> = self.world.regions.keys().copied().collect();
+        for region in regions {
+            update_region_town_wealth(self, &fx, region, false);
+        }
+    }
+
+    /// The round start's region pass (`0x008F1F60` → `ProcessRegionRoundStart` `0x00AAE710`, CONFIRMED): for
+    /// each region of each listed faction still in the game, not the rebels, with that faction's effects, the
+    /// demand step (`0x00AB49F0(1)`, [`CampaignModel::refresh_region_demand`]) and then
+    /// [`update_region_town_wealth`] without `apply`, both before the region's population factors. The demand
+    /// step reads the GDP the refresh is about to replace, as the exe's order has it.
+    pub(crate) fn refresh_regions_round_start(&mut self, factions: &[FactionId]) {
+        for &faction in factions {
+            let fx = Effects::compute_for(self, faction);
+            let regions: Vec<RegionId> = self.world.regions.values().filter(|r| r.owner == faction).map(|r| r.id).collect();
+            for region in regions {
+                self.refresh_region_demand(region);
+                update_region_town_wealth(self, &fx, region, false);
+            }
+        }
+    }
+}
+
 /// What [`settle_round`] did with a faction's treasury.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -1018,9 +1115,9 @@ pub enum Settlement {
 /// `0x008BC650` tests `0x008CEEF0` at `0x008BC65D` and faction +0x824 at `0x008BC666` before the settle,
 /// CONFIRMED by listing). Then trade routes accumulate value, and, for every faction still in the game, the
 /// rebels too (`0x008BC650` tests only +0x824 at `0x008BC685` before its region loop of `0x00AB42F0`, which
-/// calls `0x00AB4410(1)` at `0x00AB437E`), every owned region's GDP and town wealth growth are recomputed
-/// ([`recompute_region`]) and its town wealth becomes `max(0, town_wealth + town_wealth_growth)`
-/// (CONFIRMED).
+/// calls `0x00AB4410(1)` at `0x00AB437E`), every owned region's GDP, town wealth growth and trend are
+/// refreshed and its town wealth becomes `max(0, town_wealth + town_wealth_growth)`
+/// ([`update_region_town_wealth`] with `apply`, CONFIRMED).
 pub fn settle_round(model: &mut CampaignModel, faction: FactionId, events: &mut Vec<CampaignEvent>) -> Settlement {
     let result = if model.in_the_game_with_record(faction) { pay_running_record(model, faction, events) } else { Settlement::Skipped };
     // The faction's effects, once, after the payment (a desertion changes their sources).
@@ -1030,23 +1127,11 @@ pub fn settle_round(model: &mut CampaignModel, faction: FactionId, events: &mut 
     if !model.in_the_game(faction) {
         return result;
     }
-    // Each region: GDP and growth recomputed, then the growth applied (0x00AB4410).
-    let updates: Vec<(RegionId, u32, i32)> = model
-        .world
-        .regions
-        .values()
-        .filter(|r| r.owner == faction)
-        .map(|r| {
-            let (gdp, growth) = recompute_region_with(model, Some(&fx), r);
-            (r.id, gdp, growth)
-        })
-        .collect();
-    for (id, gdp, growth) in updates {
-        if let Some(r) = model.world.regions.get_mut(&id) {
-            r.gdp = gdp;
-            r.town_wealth_growth = growth;
-            r.town_wealth = (i64::from(r.town_wealth) + i64::from(growth)).clamp(0, i64::from(u32::MAX)) as u32;
-        }
+    // Each region: GDP and growth recomputed, the growth applied, the trend set (0x00AB4410(1)). In any order:
+    // a region's refresh reads and writes only that region.
+    let regions: Vec<RegionId> = model.world.regions.values().filter(|r| r.owner == faction).map(|r| r.id).collect();
+    for region in regions {
+        update_region_town_wealth(model, &fx, region, true);
     }
     result
 }

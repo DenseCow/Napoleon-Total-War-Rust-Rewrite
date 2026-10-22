@@ -46,8 +46,9 @@ fn other_income_matches_the_startpos_records() {
         if !path.is_file() {
             continue;
         }
-        let loaded = ntw_campaign::read_file(&path, &db).expect("startpos loads");
+        let mut loaded = ntw_campaign::read_file(&path, &db).expect("startpos loads");
         let esf = EsfFile::open(&path).expect("startpos");
+        with_stored_gdp(&mut loaded.model, &esf);
         let arr = esf.root.find_record_array("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD/FACTION_ARRAY").expect("factions");
         for item in &arr.items {
             let Some(f) = item.first().and_then(EsfNode::as_record) else { continue };
@@ -84,7 +85,9 @@ fn other_income_matches_the_startpos_records() {
 /// Every shipped start position stores each region's GDP (`REGION` #10) and town wealth growth
 /// (#15) as the original computed them (0x00A6AFC0). The recomputation must give the same values
 /// (the growth includes both classes' `tw_growth_taxes_*` effects: -0.3 and -3 for the upper,
-/// -0.25 and -2 for the lower classes at `tax_normal`).
+/// -0.25 and -2 for the lower classes at `tax_normal`), computed without the faction-wide effects.
+/// The load then replaces them with its own refresh, with those effects (`0x0095FF00` →
+/// `0x00AB4410(0)` on every region, `CampaignModel::refresh_all_town_wealth`).
 #[test]
 fn gdp_and_growth_match_the_startpos_records() {
     let dir = data_dir();
@@ -99,14 +102,19 @@ fn gdp_and_growth_match_the_startpos_records() {
         if !path.is_file() {
             continue;
         }
-        let loaded = ntw_campaign::read_file(&path, &db).expect("startpos loads");
+        let esf = EsfFile::from_bytes(&std::fs::read(&path).expect("read")).expect("esf");
+        let stored = stored_gdp_and_growth(&esf);
+        let loaded = ntw_campaign::read_esf(&esf, &db).expect("startpos loads");
         let m = &loaded.model;
+        let fx = ntw_sim::campaign::effects::Effects::compute(m);
         for r in m.world.regions.values().filter(|r| m.world.factions.contains_key(&r.owner)) {
             let (gdp, growth) = economy::recompute_region(m, r);
-            assert_eq!(gdp, r.gdp, "{campaign} {}: GDP", r.key);
+            let (file_gdp, file_growth) = stored[&r.key];
+            assert_eq!(gdp, file_gdp, "{campaign} {}: GDP", r.key);
+            assert_eq!(economy::recompute_region_with(m, Some(&fx), r), (r.gdp, r.town_wealth_growth), "{campaign} {}: refreshed at the load", r.key);
             assert_eq!(
                 growth,
-                r.town_wealth_growth,
+                file_growth,
                 "{campaign} {}: town wealth growth (offset {}, discontent {}, buildings {:?})",
                 r.key,
                 r.wealth_growth_offset,
@@ -118,6 +126,31 @@ fn gdp_and_growth_match_the_startpos_records() {
     }
     println!("checked {checked} regions");
     assert!(checked > 200);
+}
+
+/// Each region's GDP (`REGION` #10) and town wealth growth (#15) by key as the file stores them; the
+/// loaded model holds the load's refresh instead.
+/// The start positions store GDP and growth computed before any faction effect; the load refreshes them
+/// (`0x00AB4410(0)`, effects included). The stored faction figures (tax and trade income) were built from the
+/// stored GDP, so the checks of their formulas put it back. The demand (#32) needs none: the model keeps the
+/// stored one until the round start, as the exe does.
+fn with_stored_gdp(m: &mut ntw_sim::campaign::CampaignModel, esf: &EsfFile) {
+    let stored = stored_gdp_and_growth(esf);
+    for r in m.world.regions.values_mut() {
+        (r.gdp, r.town_wealth_growth) = stored[&r.key];
+    }
+}
+
+fn stored_gdp_and_growth(esf: &EsfFile) -> std::collections::BTreeMap<String, (u32, i32)> {
+    let regions = esf.root.find_record_array("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD/REGION_MANAGER/REGIONS_ARRAY").expect("regions");
+    regions
+        .items
+        .iter()
+        .map(|it| {
+            let r = it.first().and_then(EsfNode::as_record).expect("region");
+            (r.get_str(0).expect("key").to_string(), (r.get_u32(10).expect("#10"), r.get_i32(15).expect("#15")))
+        })
+        .collect()
 }
 
 /// `diplomatic_relations_government_type` is keyed on the **pair** of governments (0-B round 14,
@@ -208,11 +241,13 @@ fn gdp_and_growth_match_the_vanilla_saves() {
             continue;
         }
         let m = ntw_campaign::read_file(&path, &db).expect("save loads").model;
+        let stored = stored_gdp_and_growth(&EsfFile::open(&path).expect("save"));
         let fx = fx_kind(&m);
         for r in m.world.regions.values().filter(|r| m.world.factions.get(&r.owner).is_some_and(|f| !f.key.is_empty())) {
             let (gdp, growth) = economy::recompute_region_with(&m, Some(&fx), r);
-            assert_eq!(gdp, r.gdp, "{name} {}: GDP", r.key);
-            assert_eq!(growth, r.town_wealth_growth, "{name} {}: town wealth growth", r.key);
+            // Against the file's values; the load's refresh (`0x0095FF00`) keeps them, so the model holds the same.
+            assert_eq!((gdp, growth), stored[&r.key], "{name} {}: GDP and town wealth growth", r.key);
+            assert_eq!((r.gdp, r.town_wealth_growth), stored[&r.key], "{name} {}: refreshed at the load", r.key);
             checked += 1;
             for k in ["eur_moravia", "eur_wallachia", "eur_bavaria"] {
                 if r.key == k {
@@ -591,6 +626,7 @@ fn trade_node_supply_matches_the_domestic_routes() {
         let esf = EsfFile::from_bytes(&bytes).expect("esf");
         let mut loaded = ntw_campaign::read_esf(&esf, &db).expect("load");
         let map = ntw_formats::campaign_map::CampaignMap::load(&files, &loaded.info.map_key).expect("map");
+        with_stored_gdp(&mut loaded.model, &esf);
         ntw_campaign::trade::attach_map(&mut loaded.model, &map.regions);
         let m = &loaded.model;
         let attached = m.world.trade_nodes.iter().filter(|n| n.info.is_some()).count();
@@ -630,8 +666,9 @@ fn trade_node_supply_matches_the_domestic_routes() {
     assert_eq!(equal, checked);
 }
 
-/// Region commodity demand (0x00AB49F0) equals the stored `REGION` #32 for every region, and the
-/// price update (0x00BCB020) gives back the stored prices of the start position.
+/// The load keeps each region's stored demand (`REGION` #32, region +0x154: the exe's load does not run the
+/// demand step 0x00AB49F0), the step on the stored GDP gives it back for every region, and the price update
+/// (0x00BCB020) on the loaded model, whose GDP the load has refreshed, gives back the stored prices.
 #[test]
 fn commodity_demand_and_prices_match_the_startpos() {
     let dir = data_dir();
@@ -647,6 +684,7 @@ fn commodity_demand_and_prices_match_the_startpos() {
     let mut loaded = ntw_campaign::read_esf(&esf, &db).expect("load");
     let map = ntw_formats::campaign_map::CampaignMap::load(&files, &loaded.info.map_key).expect("map");
     ntw_campaign::trade::attach_map(&mut loaded.model, &map.regions);
+    let stored_gdp = stored_gdp_and_growth(&esf);
     let m = &mut loaded.model;
     let regions = esf.root.find_record_array("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD/REGION_MANAGER/REGIONS_ARRAY").expect("regions");
     let mut checked = 0;
@@ -655,7 +693,10 @@ fn commodity_demand_and_prices_match_the_startpos() {
         let key = r.get_str(0).expect("key");
         let stored = r.get(32).and_then(EsfNode::as_u32_array).expect("#32").to_vec();
         let region = m.world.regions.values().find(|x| x.key == key).expect("model region");
-        assert_eq!(m.commodity_demand(region), stored, "{key}: demand");
+        assert_eq!(region.commodity_demand, stored, "{key}: the stored demand kept");
+        let mut as_stored = region.clone();
+        as_stored.gdp = stored_gdp[key].0;
+        assert_eq!(m.commodity_demand(&as_stored), stored, "{key}: the demand step on the stored GDP");
         checked += 1;
     }
     assert_eq!(checked, 72);

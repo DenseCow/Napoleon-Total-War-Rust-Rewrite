@@ -13,7 +13,7 @@ use std::rc::Rc;
 
 use mlua::{Lua, Table, Value, Variadic};
 
-use super::super::frontend::{SaveFolders, install_saves, is_valid_save_name, latest_campaign_save, save_info_table, write_class};
+use super::super::frontend::{SaveFolders, install_saves, is_valid_save_name, latest_campaign_save, save_info_table, write_class, SAVE_MAP_KEY};
 use super::super::host::{Inner, UiRequest, log};
 use super::{CampaignUi, loc, loc_required, round_description, season_string};
 
@@ -86,12 +86,13 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
 
     install_saves(lua, inner, t)?;
 
-    // CanSave() (`0x009E0D50` → `0x008BE4A0`): false while the campaign's scripts have saving
-    // switched off (`disable_saving_game`, CONFIRMED: `0x008BE4A0` tests the same flag the save
-    // tests). PROVISIONAL: `0x008BE4A0` tests more campaign fields whose meaning is not traced
-    // (byte +0xFE9, `[+0xF60]+0x24` against `+0x28`, `[+0xF6C]+0x58` with `0x008C1970`, `+0xF70`
-    // set, faction +0x93E, `[+0xF5C]+0x18` / `+0x3C`), so ours is true otherwise.
-    f!("CanSave", |_l, inner, ui, _a: Variadic<Value>| Ok(!ui.model().world.saving_disabled));
+    // CanSave() (`0x009E0D50` → `0x008BE4A0` with the local player's faction): the model's rule
+    // `CampaignModel::can_save` (its conditions and their tags are there). A local faction the
+    // model does not have cannot save.
+    f!("CanSave", |_l, inner, ui, _a: Variadic<Value>| {
+        let m = ui.model();
+        Ok(m.faction_by_key(&ui.link.human).is_some_and(|f| m.can_save(f.id)))
+    });
 
     // SaveCampaign(name, overwrite) (`0x009F4A20`; exe help: "Out: true if overwrite request is
     // requested and needed. false, save success if overwrite not requested or not needed"). The
@@ -146,7 +147,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
             return Ok(None);
         };
         let season = season_string(&inner, &ui.model().calendar);
-        save_info_table(lua, &inner, &saves.current_info(&season).header).map(Some)
+        save_info_table(lua, &inner, &saves.current_info(&season).header, SAVE_MAP_KEY).map(Some)
     });
 
     // QuickSave() (`0x009EF470`, the `quick_save` shortcut when CanSave()): saves under the loc

@@ -128,7 +128,7 @@ pub struct ScriptState {
     /// The game_interface argument-type errors already logged, by (method, type found): each is
     /// logged once (`game::type_error_once`).
     pub(crate) type_errors_logged: BTreeSet<(&'static str, &'static str)>,
-    /// The model events a script command caused (`grant_faction_handover`, `force_make_protectorate`),
+    /// The model events a script command caused (`grant_faction_handover`, `force_make_peace`, `force_declare_war`, `force_make_protectorate`),
     /// waiting for the host to fire them after the Lua that issued it returns
     /// ([`crate::ScriptHost::apply`] and the turn steps; see `ScriptHost::fire_script_events`).
     pub(crate) script_events: Vec<CampaignEvent>,

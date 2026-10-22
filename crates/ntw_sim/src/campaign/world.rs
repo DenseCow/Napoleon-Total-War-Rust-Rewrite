@@ -20,6 +20,15 @@ use crate::fixed::Fixed20;
 use crate::fnv::Fnv64;
 use crate::rng::CaRng;
 
+/// The CAI stream's preset ([`CampaignModel::cai_rng`]): the CAI loader `0x00A3CE70` stores it at
+/// +0x71C (`0x00A3DC40`) before it reads `CAI_INTERFACE` #0, CONFIRMED.
+pub const CAI_RNG_SEED: u32 = 0x0001_11EE;
+
+/// [`CampaignModel::cai_rng`] before a file sets it: [`CAI_RNG_SEED`].
+fn cai_rng_preset() -> CaRng {
+    CaRng::new(CAI_RNG_SEED)
+}
+
 /// The map's movement grid, shared and immutable. Compared by pointer (two models built from the
 /// same map share one grid), so `CampaignModel` equality stays cheap.
 #[derive(Debug, Clone)]
@@ -67,6 +76,13 @@ pub struct CampaignModel {
     /// save from before the field reads a new campaign's).
     #[cfg_attr(feature = "serde", serde(default))]
     pub director: super::director::DirectorState,
+    /// The campaign AI's own random stream (CAI interface +0x71C; the CAI draws `0x00A9D9C0` /
+    /// `0x00A9DA10` step it), CONFIRMED: the CAI loader `0x00A3CE70` presets [`CAI_RNG_SEED`]
+    /// (`0x00A3DC40`), then reads `CAI_INTERFACE` #0 into it (`0x00A3DE5C`); the writer `0x00A5B5B0`
+    /// saves it there. A new campaign reseeds it from the campaign RNG once the model is built
+    /// ([`Self::reseed_cai_rng`]). Saved and hashed (an own save from before the field reads the preset).
+    #[cfg_attr(feature = "serde", serde(default = "cai_rng_preset"))]
+    pub cai_rng: CaRng,
     /// A battle waiting to be fought (the original's `PENDING_BATTLE` record, W3 §2; its content
     /// is not decoded). Set by an attack, cleared by autoresolve or a battle result.
     pub pending_battle: Option<PendingBattle>,
@@ -76,17 +92,12 @@ pub struct CampaignModel {
     pub pending_capture: Option<super::capture::CapturePreview>,
     /// The calls to war waiting for a human ally's answer, the last one on top (the campaign's pending
     /// stack +0xF70 holding `0x00885DA0` offers, [`super::treaties::AllyWarCall`]): pushed when a
-    /// declaration reaches a human ally not yet at war (only with [`Self::ask_human_allies`] on),
-    /// answered (top first) by `RespondToAllyWarCall`. While one waits, the turn sequence does not
-    /// advance ([`Self::step`]). Saved and hashed (an own save from before the field reads none waiting).
+    /// declaration reaches a human ally not yet at war, answered (top first) by `RespondToAllyWarCall`
+    /// (the human's `ally_attacked` event message, ntw_script `ui/campaign/ally_attacked.rs`). While one
+    /// waits, the turn sequence does not advance ([`Self::step`]). Saved and hashed (an own save from
+    /// before the field reads none waiting).
     #[cfg_attr(feature = "serde", serde(default))]
     pub pending_ally_war_calls: Vec<super::treaties::AllyWarCall>,
-    /// Whether a declaration of war asks a human ally not yet at war to join (an
-    /// [`super::treaties::AllyWarCall`] pushed on [`Self::pending_ally_war_calls`]). Off (the default):
-    /// the human ally is not asked, not listed and keeps its alliance; the gate and why it is off are in
-    /// `treaties.rs` `call_allies`. A session setting: not saved, hashed or compared.
-    #[cfg_attr(feature = "serde", serde(skip))]
-    pub ask_human_allies: bool,
     /// Game data from the DB (see [`CampaignRules`]).
     #[cfg_attr(feature = "serde", serde(skip))]
     pub rules: Arc<CampaignRules>,
@@ -114,9 +125,8 @@ pub struct CampaignModel {
     pub zones: super::zones::Zones,
 }
 
-/// Equality over everything but [`CampaignModel::negotiations`], [`CampaignModel::zones`] and
-/// [`CampaignModel::ask_human_allies`]: the negotiation slot is a UI session, neither saved nor
-/// hashed; the zones are derived; the switch is a session setting.
+/// Equality over everything but [`CampaignModel::negotiations`] and [`CampaignModel::zones`]: the
+/// negotiation slot is a UI session, neither saved nor hashed; the zones are derived.
 /// Every other field is compared, including `rules`, `terrain` and `last_autoresolve`,
 /// which are also neither saved nor hashed.
 impl PartialEq for CampaignModel {
@@ -132,13 +142,13 @@ impl PartialEq for CampaignModel {
             pending_battle,
             pending_capture,
             pending_ally_war_calls,
-            ask_human_allies: _,
             rules,
             terrain,
             last_autoresolve,
             script_rngs,
             mod_state,
             director,
+            cai_rng,
             negotiations: _,
             zones: _,
         } = self;
@@ -157,6 +167,7 @@ impl PartialEq for CampaignModel {
             && *script_rngs == other.script_rngs
             && *mod_state == other.mod_state
             && *director == other.director
+            && *cai_rng == other.cai_rng
     }
 }
 
@@ -173,10 +184,10 @@ impl CampaignModel {
             deal_inflation: super::deal_value::DealInflation::default(),
             mod_state: super::mod_state::ModState::default(),
             director: super::director::DirectorState::default(),
+            cai_rng: cai_rng_preset(),
             pending_battle: None,
             pending_capture: None,
             pending_ally_war_calls: Vec::new(),
-            ask_human_allies: false,
             rules: Arc::new(CampaignRules::default()),
             terrain: None,
             last_autoresolve: None,
@@ -184,6 +195,15 @@ impl CampaignModel {
             negotiations: super::negotiation::Negotiations::default(),
             zones: super::zones::Zones::default(),
         }
+    }
+
+    /// A new campaign's reseed of the CAI stream ([`Self::cai_rng`]), CONFIRMED: once the model is
+    /// built, the world's constructor `0x00987070` (only for a new campaign, the argument it also posts
+    /// `NewCampaignStarted` for: `0x00988148` / `0x00988A1F`) calls `ReseedCaiRandomFromCampaignRng`
+    /// `0x00AA3200`, which steps the campaign RNG once and keeps its upper 16 bits as the CAI state. A
+    /// loaded save keeps the stream it stored. Called by the campaign opener for a new campaign only.
+    pub fn reseed_cai_rng(&mut self) {
+        self.cai_rng = CaRng::new(self.rng.next16());
     }
 
     /// The most units an army (`is_navy` false) or a navy may hold: the campaign's
@@ -227,6 +247,7 @@ impl CampaignModel {
         h.u32(self.deal_inflation.factor.to_bits());
         h.u32(script_rngs.trait_rng.state);
         h.u32(script_rngs.ancillary_rng.state);
+        h.u32(self.cai_rng.state);
         // Only when a mod keeps values, so a vanilla campaign hashes as before.
         if !self.mod_state.is_empty() {
             self.mod_state.hash_into(&mut h);
@@ -467,6 +488,10 @@ impl CampaignModel {
             h.i32(r.discontent_growth);
             h.u32(r.town_wealth);
             h.i32(r.town_wealth_growth);
+            h.u32(r.commodity_demand.len() as u32);
+            for &d in &r.commodity_demand {
+                h.u32(d);
+            }
             h.u32(u32::from(r.tax_exempt));
             h.u32(r.unit_resources.len() as u32);
             for k in &r.unit_resources {
@@ -579,6 +604,12 @@ impl CampaignModel {
             h.u32(a.raw());
             h.str(gov);
         }
+        h.u32(w.rebel_army_sides.len() as u32);
+        for (a, side) in &w.rebel_army_sides {
+            h.u32(a.raw());
+            h.str(&side.faction);
+            h.u32(side.link);
+        }
         h.u32(w.deal_regions_received.len() as u32);
         for (f, n) in &w.deal_regions_received {
             h.i32(f.raw());
@@ -609,7 +640,9 @@ impl CampaignModel {
     /// the rebels, dead, out of the game or not yet emerged alike (CONFIRMED by disassembly). The
     /// registry (model +0xF5C) hashes each faction of its own list (+0x2C / +0x30) under its
     /// record's key (0x009516A0, key 0x008E5060). That list is `WORLD/FACTION_ARRAY` in file order
-    /// on load (0x0090BEB0) or every faction of the new campaign's setup (0x0090C4A0); the rebels
+    /// (0x0090BEB0) for every campaign a player starts or loads (a new one reads `startpos.esf`); only
+    /// the developer tool that preprocesses `startpos.esf` (0x00A19350) builds it from setup data
+    /// (0x0090C4A0); the rebels
     /// (`REBEL_FACTION`) are held apart at +0x1C. Nothing removes a faction from it: a destroyed
     /// faction only gets its out-of-game flag (+0x824, `DestroyFactionAndResetRelations`
     /// 0x008AB6C0), and the only other rebuild (0x0095A810, via 0x00915E20) reorders it, human
@@ -634,6 +667,14 @@ impl CampaignModel {
     /// The force a character commands, if any.
     pub fn force_of(&self, character: CharacterId) -> Option<ForceId> {
         self.world.forces.values().find(|f| f.commander == Some(character)).map(|f| f.id)
+    }
+
+    /// The force a character commands when it is a navy (`navy`) or an army (`GetCharacterForceAsNavy`
+    /// `0x009D3A80` / `GetCharacterForceAsArmy` `0x009D3A40`: character +0x2A8 through the force's vtable
+    /// +0x44 / +0x3C, which return the force in the navy's vtable `0x013556B4` / the army's `0x013555C0` and
+    /// null in the other; CONFIRMED, disassembly).
+    pub fn force_of_kind(&self, character: CharacterId, navy: bool) -> Option<ForceId> {
+        self.force_of(character).filter(|f| self.world.forces.get(f).is_some_and(|f| f.is_navy == navy))
     }
 }
 
@@ -714,11 +755,15 @@ pub struct World {
     pub relationships: super::details::RelationshipMap,
     /// Each faction's diplomacy records in the order the original keeps them (the target of each, in
     /// `DIPLOMACY_RELATIONSHIPS_ARRAY` order), read through [`World::record_targets_in_order`]. The
-    /// loader `InitializeFromSave` `0x00AE8E10` appends the records in file order, a new faction's
-    /// record is pushed at the end (`0x00B5F330`), nothing sorts or removes them, and the writer saves
-    /// them in that order (CONFIRMED; the vanilla saves list them out of id order). The importer
-    /// fills it; the ESF writer patches the records in place, so the order survives there. An own save
-    /// older than format version 10 takes the campaign start's (`ntw_campaign::own_save::read_with_start`).
+    /// loader `InitializeFromSave` `0x00AE8E10` appends the records in file order, for a new campaign
+    /// (`startpos.esf`) and a save load alike (`0x00485B90` → `0x008B8930` → … → `0x0087A190` →
+    /// `0x00AE8E10`; the setup path `0x00B45EA0` runs only in the developer tool `0x00A19350` that
+    /// preprocesses `startpos.esf`, and its order is the one written into the file), nothing in play
+    /// adds, sorts or removes one, and the writer saves them in that order (CONFIRMED; the vanilla
+    /// saves list them out of id order). The importer fills it; a record our model makes in play is listed last
+    /// ([`World::list_new_record`]); the ESF writer patches the records in place, so the order survives
+    /// there. An own save older than format version 10 takes the campaign start's
+    /// (`ntw_campaign::own_save::read_with_start`).
     #[cfg_attr(feature = "serde", serde(default))]
     pub diplomacy_record_order: BTreeMap<FactionId, Vec<FactionId>>,
     /// The accumulated value of the route of a pair with no stored route, by (exporter, importer).
@@ -852,6 +897,12 @@ pub struct World {
     /// in place.
     #[cfg_attr(feature = "serde", serde(default))]
     pub rebel_army_governments: BTreeMap<ForceId, String>,
+    /// The side of each army with a `REBEL_DATA` block (army +0x98) in its rising ([`RebelArmySide`]),
+    /// which the capture report reads to skip the capture choice ([`capture`](super::capture)). Kept and
+    /// freed with [`Self::rebel_army_governments`]; our saves keep it (the `.save` writer patches the
+    /// `ARMY` items in place, the own save stores it from format 13).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub rebel_army_sides: BTreeMap<ForceId, RebelArmySide>,
     /// The script missions of each faction (see [`CampaignMission`](super::details::CampaignMission)).
     /// Not part of `state_hash`; no rule runs them yet (PROVISIONAL: loaded for the UI and scripts).
     pub missions: super::details::MissionMap,
@@ -944,7 +995,7 @@ pub struct World {
     /// Saving is switched off (campaign +0x115, `CAMPAIGN_MODEL/EPISODIC_RESTRICTIONS` #25 bool,
     /// read by the loader `0x009968A0` for versions above 0xB; CONFIRMED). Its only writer is the
     /// script method `disable_saving_game(bool)` (`0x0097B840`); the save (`0x00A1F000`) refuses
-    /// while it is set and `CampaignUI.CanSave` (`0x008BE4A0`) answers false. False in every
+    /// while it is set and `CampaignUI.CanSave` ([`CampaignModel::can_save`], `0x008BE4A0`) answers false. False in every
     /// vanilla save; only the tutorial scripts set it. An own save from before the field reads false.
     #[cfg_attr(feature = "serde", serde(default))]
     pub saving_disabled: bool,
@@ -995,6 +1046,13 @@ pub struct World {
     /// #32 by the writer `0x009A1070`. An own save from before the field reads false.
     #[cfg_attr(feature = "serde", serde(default))]
     pub victory_notification_disabled: bool,
+    /// The campaign camera's tilt bounds (episodic restrictions +0xBC / +0xC0,
+    /// `CAMPAIGN_MODEL/EPISODIC_RESTRICTIONS` #14 / #13; CONFIRMED, see [`super::zoom_limit`]): the
+    /// tweakers' 0.5..1.0 unless the scripts' `set_zoom_limit` (`0x00977CB0`) narrowed them; the
+    /// camera's tilt step (`0x00920D00`) clamps every tilt change to them. An own save from before
+    /// the field reads the tweakers' range.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub zoom_limit: super::zoom_limit::ZoomLimit,
     /// The faction whose shroud keeps the AI from shopping under it: the script's
     /// `disable_shopping_for_ai_under_shroud` (`0x00AA9B40`, CAI interface +0x618, CONFIRMED), set
     /// by [`CampaignModel::set_ai_shopping_shroud`] and read by
@@ -1066,6 +1124,24 @@ pub struct AiArea {
     /// `CAI_REGION` #7 (+0x170/+0x174): its boundaries (`CAI_REGION_BOUNDARY` #0/#1, the two areas),
     /// in order, as the indexes in [`World::ai_areas`] of the areas on their other side.
     pub links: Vec<usize>,
+}
+
+/// A risen army's side in its rising, from its `REBEL_DATA` block (army +0x98; [`World::rebel_army_sides`]).
+/// CONFIRMED: the `ARMY` reader `0x00870FD0` builds the block with `0x00886950`, which reads
+/// `REBEL_DATA_INNARDS` with `0x00886C90`: its `REBEL_SETUP` (`0x00886F10`, #1 the faction key, resolved to
+/// its `factions` record at +0x10), then a bool and, only when the bool is set, a u32 stored at +0x34
+/// (0 otherwise). In play +0x34 is a faction the rising set from its own spec (`0x00886BA0` →
+/// `0x00886D30`, the spec's +0x28; with it set the rebels take their colours from their government,
+/// `0x008C73A0`, not from the faction, `0x0087CC80`; `TransferSettlementOwnership` `0x00B449F0` reads it as a
+/// faction). How the loaded u32 becomes that faction is not traced; the capture report reads only whether
+/// it is 0 (`0x00B4DA40`). Every risen army of the vanilla saves has the bool clear.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct RebelArmySide {
+    /// `REBEL_SETUP` #1: the faction the rebels rise for (e.g. `spa_spain`, `portugese_rebels`).
+    pub faction: String,
+    /// `REBEL_DATA_INNARDS` #3 when #2 is set, else 0: `REBEL_DATA` +0x34.
+    pub link: u32,
 }
 
 /// The campaign AI keys stored with a faction ([`World::ai_keys`]).
@@ -1340,20 +1416,49 @@ impl World {
         out
     }
 
-    /// The targets of `owner`'s diplomacy records in record order ([`World::diplomacy_record_order`]):
-    /// the listed ones that still exist (first listing only), then every other faction but `owner`
-    /// by id (a record made since is pushed at the end in the original, `0x00B5F330`). Allocates:
+    /// The targets of `owner`'s diplomacy records in record order ([`World::diplomacy_record_order`]),
+    /// the one reader of that order: the listed ones that still exist (first listing only), then
+    /// `owner`'s records the list lacks (an own save older than format 10 with no usable start) by
+    /// target id, then every other faction but `owner` that `owner` holds no record towards, by id
+    /// (our own addition for a world whose stances have no record, tests and mods: the exe walks only
+    /// the records, and a vanilla campaign has one towards every faction but the rebels). Allocates:
     /// cold paths only.
     pub fn record_targets_in_order(&self, owner: FactionId) -> Vec<FactionId> {
         let mut seen = std::collections::BTreeSet::from([owner]);
         let mut out = Vec::with_capacity(self.factions.len());
         let listed = self.diplomacy_record_order.get(&owner).into_iter().flatten().copied();
-        for f in listed.chain(self.factions.keys().copied()) {
+        for f in listed.chain(self.record_targets_by_id(owner)).chain(self.factions.keys().copied()) {
             if self.factions.contains_key(&f) && seen.insert(f) {
                 out.push(f);
             }
         }
         out
+    }
+
+    /// The targets of `owner`'s records, by target id.
+    fn record_targets_by_id(&self, owner: FactionId) -> impl Iterator<Item = FactionId> + '_ {
+        self.relationships.range((owner, FactionId(i32::MIN))..=(owner, FactionId(i32::MAX))).map(|(&(_, t), _)| t)
+    }
+
+    /// Lists a record of `owner` towards `target` made in play at the end of `owner`'s record order
+    /// ([`World::diplomacy_record_order`]), after every record `owner` already holds (any the list
+    /// lacks are listed first, by target id, where [`World::record_targets_in_order`] walked them), so
+    /// the walk and our own save keep the creation order. A player's campaign, new (`startpos.esf`) or
+    /// loaded, gets its records only from the loader (`0x00AE8E10`), in file order, never removed (the
+    /// setup path `0x00B45EA0` → `0x00B0A3A0` → the vector push `0x00B5F330` runs only in the developer
+    /// tool `0x00A19350` that preprocesses `startpos.esf`); in play it makes none (its lookup `0x00B64C50` adds nothing; the
+    /// record copy constructor `0x00AE9160` has no other caller, CONFIRMED), so a vanilla campaign
+    /// reaches this only for a pair the start has no record for. Called before the record is inserted;
+    /// a target already listed keeps its place.
+    pub fn list_new_record(&mut self, owner: FactionId, target: FactionId) {
+        let held: Vec<FactionId> = self.record_targets_by_id(owner).collect();
+        let order = self.diplomacy_record_order.entry(owner).or_default();
+        let mut listed: std::collections::HashSet<FactionId> = order.iter().copied().collect();
+        for t in held.into_iter().chain([target]) {
+            if listed.insert(t) {
+                order.push(t);
+            }
+        }
     }
 
     /// Every faction in turn order: [`World::turn_order`] first, then any other faction in id
@@ -1486,6 +1591,11 @@ pub struct RegionSlot {
     /// The faction holding the slot: its `GARRISON_RESIDENCE` #0 (a faction id, CONFIRMED against the
     /// `FACTION` ids of the vanilla saves). `None` = the region owner. A slot held by another faction
     /// (an occupied town, or settlement slots still held by the previous owner) adds no building effects.
+    /// PROVISIONAL: a character taking a town or port slot (the slot capture virtuals `0x00A92380` / `0x00A925C0` /
+    /// `0x00A971B0` and the port docking `0x00A924D0`) is not modelled, so neither is what it runs for another
+    /// faction's slot: `ApplySlotBuildingDamage` `0x00A729E0` (the building's health down by 10, to 60 at least,
+    /// then the slot refresh `0x00A682F0`: the region's demand and town wealth), the queue cancels and its
+    /// `SetSettlementOwner` (BACKLOG §5 "Slot capture").
     pub holder: Option<FactionId>,
     /// `REGION_SLOT` #2 u32: the slot's id (= its residence's #1; a school's id is what a technology's
     /// `techs[]` #3 names as its researcher, CONFIRMED in the vanilla saves). 0 when unknown.
@@ -1756,17 +1866,33 @@ pub struct Region {
     /// `REGION` #10 u32: the region's GDP (region +0xBC in the exe). CONFIRMED: the REGION writer
     /// (0x00A51E30) writes +0xBC as child #10; the tax functions (0x00AB5560 upper, 0x00A8C2E0
     /// lower) tax `gdp + town_wealth`, and the faction GDP (0x008C3110) is
-    /// `faction_gdp_other + Σ gdp`. The original recomputes it each turn from the region's slots
-    /// (`slots_gdp_values`, building effects; 0x00A6AFC0): `economy::recompute_region` at each round
-    /// end, which reproduces every region of the shipped start positions.
+    /// `faction_gdp_other + Σ gdp`. The original recomputes it from the region's slots
+    /// (`slots_gdp_values`, building effects; 0x00A6AFC0) at each town wealth refresh
+    /// (`economy::update_region_town_wealth`: the load, the round start and end, and the events listed
+    /// there); `economy::recompute_region` reproduces every region of the shipped start positions as
+    /// stored, the faction-wide form every region of the vanilla saves.
     pub gdp: u32,
     /// `REGION` #12 u32: town wealth (region +0xCC). CONFIRMED: written as #12, part of the tax
     /// base, and updated each turn as `max(0, town_wealth + town_wealth_growth)` (0x00AB4410).
     pub town_wealth: u32,
     /// `REGION` #15 i32: town wealth growth per turn (region +0xD8, CONFIRMED position and use).
-    /// The original recomputes it each turn (building `tw_growth*` effects, taxes, unrest;
-    /// 0x00A6AFC0): `economy::recompute_region` at each round end.
+    /// The original recomputes it at each town wealth refresh (building `tw_growth*` effects, taxes,
+    /// unrest; 0x00A6AFC0): `economy::update_region_town_wealth`.
     pub town_wealth_growth: i32,
+    /// The growth's breakdown and the wealth trend as the last refresh stored them (region +0x388 and
+    /// +0xC4, `economy::update_region_town_wealth`). Not saved and not hashed: derived, and refreshed at
+    /// every load as the original's are (its region writer `0x00A51E30` writes neither).
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub town_wealth_refresh: super::economy::TownWealthRefresh,
+    /// `REGION` #32 u32[]: the region's demand per commodity (region +0x154, the vector at +0x148),
+    /// in `World::commodity_keys` order. CONFIRMED: the loader reads #32 into it (`0x00445910` on
+    /// +0x148) and the writer saves it (`0x00A524BC`); the demand step `0x00AB49F0` rebuilds it
+    /// ([`super::CampaignModel::refresh_region_demand`]) and the faction demand (`0x008F4E50`) and the
+    /// price update (`0x00BCB020`) read it as stored. The load does not run the step (`0x0095FF00`), so
+    /// between a load and the region's next demand step (the round start, or an owner change) the demand
+    /// is the file's.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub commodity_demand: Vec<u32>,
     /// `REGION` #17 (region +0xEC, an integer; UNKNOWN meaning, 0 in every shipped file): subtracted
     /// from the tax modifier of the town wealth growth (CONFIRMED use, 0x00A6AFC0).
     pub wealth_growth_offset: i32,

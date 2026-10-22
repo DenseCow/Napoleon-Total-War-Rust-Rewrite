@@ -574,8 +574,8 @@ tooltips, (3) credits, (4) custom battle setup. The 0-E work before the pause is
 | ClipChildren clipping (draw and hit test) | resolved | tiled pieces PROVISIONAL |
 | BuildingBrowserDetails | resolved (PROVISIONAL parts listed in code) | 0x009B5AF0 |
 | ConstructBuildingTree (browser tree view) | resolved, layout INFERRED | 0x009B8830 |
-| RetrieveFactionListForDiplomacy, RetrieveDiplomacyDetails | resolved (trade status CONFIRMED, `CampaignModel::diplomacy_trade_status`; the _can / _cannot tooltip parameter `0x00BC7910` PROVISIONAL; CAMPAIGN_FIDELITY "Scripted diplomacy permissions") | 0x009F2EA0, 0x009B2690 |
-| UI scale for windows under 1280x960 (0x0114EB20) | resolved | campaign and battle HUDs (one mapping, `frontend::render`; device-wide, BATTLE_FLOW.md §3); the front end still draws at scale 1 |
+| RetrieveFactionListForDiplomacy, RetrieveDiplomacyDetails | resolved (trade status CONFIRMED, `CampaignModel::diplomacy_trade_status`; the _can / _cannot tooltip parameter `0x00BC7910` CONFIRMED by disassembly `0x009F35CC`, `CampaignModel::diplomacy_trade_tooltip`; CAMPAIGN_FIDELITY "Scripted diplomacy permissions") | 0x009F2EA0, 0x009B2690 |
+| UI scale for windows under 1280x960 (0x0114EB20) | resolved | campaign and battle HUDs (one mapping, `frontend::render`; device-wide, BATTLE_FLOW.md §3) and the front end (2026-10-22: layout in the virtual screen, cursor through `window_to_ui`, draw at `ui_scale`). CONFIRMED one device for every HUD: the "no UI scaling" flag (device +0x69C70) has one writer, `0x011326BB` in the device constructor `0x01132530`, called only from `0x01159A10`, which makes the global device `0x0182EB14`; every component image goes through the one component draw `0x01028DB0` → `0x01028C00` → `0x01028510`. PROVISIONAL: DrawMode 1 (device +0x284 / +0x288, `0x011AD330` / `0x011AD3E0`, 1:1) is drawn scaled (napoleon_battles unscaled_bg / movie, the options calibration image, construction_item / tech tooltips); `FrontEnd.ScreenSize` (`0x00478250`, unclamped) returns the virtual screen, its source untraced |
 | Government screen: InitialiseGovernmentDetails (ministers keyed by post number), RetrieveGovernorshipDetails, SetGovernorshipTaxRate, TradeInfo | resolved, parts PROVISIONAL | popularity inputs, class tax split, trade prices and route kinds, minister pool |
 | Objectives: MissionsDetails, PrestigeDetails, VictoryConditions, CurrentSeasonString | resolved, parts PROVISIONAL | prestige and victory conditions are not in the model |
 | Lists: tabgroup script (template.<id>.lua rule), IsMergingUnit | resolved (rule INFERRED) | |
@@ -1286,10 +1286,10 @@ implementation).
 | (2) which record a held treaty swaps | trade record: id 1 (trade_cancel) when the proposer's relationship to the recipient has the trade agreement (`+0x788`), else id 0. Alliance record: id 5 when the two are allied-like (`0x008CE390`: neither is the rebel faction and stance allied / patron / protectorate, or the same faction), else id 4 | CONFIRMED | `0x00BF3E90`, `0x00BF3A30` |
 | (2) forbidden | for every action, the proposer's relationship to the recipient, `diplomacy_options[map[id]]` (map `0x01459080`: 0,0,1,2,3,3,4,5,6,7,8,9,10,11,12,13) equal to 2 or 3 sets the forbidden flag | CONFIRMED | `0x00BF5CB3` loop, `0x00B27FE0`, `0x008CE140` |
 | (2) which buttons show | `BuildPossibleActions` (`0x009B5220`): type 1 entries listed only when available (Active true); type 0 entries listed when available, and also when unavailable for ids 0, 4, 13, 14, 15 if the local player's stance towards the counterpart is not war (stance index ≠ 0) — those carry a `Tooltip` and Active false (the greyed "Joining Wars"). Otherwise an unavailable type-0 entry is left out | CONFIRMED | `0x009B5220` |
-| (2) tooltips | request_join_war: `random_localisation_strings` `join_war_tooltip_not_allied` (id 0x1BB) when not allied-like (`0x00B0CDF0`: stance 2/3/4), else `..._can_join_war` (0x1BD) when `0x00B28010` holds either way, else `..._no_joinable_wars` (0x1BC). trade (`0x00BC7910(local, other, counts 1)` from `0x009B55FF`, keys `trade_agreement_tooltip_*` 0x1C7..0x1CD): either side without a capital → "" ; else the reason (embargo either way → `embargoed`; else the route check other → local 0 → `no_route_them`; else by local → other: 0 → `no_route_you`, 1 → `neighbour`, 2/3/5/7 → `sea_routes`, 4/6 → `sea_routes` + `existing_route_shifted`), then the `export_route_count` line (each side's sea routes left and cap) before the shifted line; full decoding in CAMPAIGN_FIDELITY.md (dippermai). `Tooltip` is set only for a non-empty text (`0x004F3500` at `0x009B58B4`). alliance (`0x00B0CBD0`, `alliance_tooltip_*` 0x1B7..0x1BA), break_trade (`0x00B13CB0`, `break_trade_tooltip_*` 0x1C0/0x1C1), break_alliance (`0x00B13B80`, `break_alliance_tooltip_*` 0x1BE/0x1BF) | CONFIRMED keys, the trade branches and the non-empty test (disassembly 2026-10-17); branches of the alliance / break_trade / break_alliance builders UNKNOWN | listed |
+| (2) tooltips | request_join_war: `random_localisation_strings` `join_war_tooltip_not_allied` (id 0x1BB) when not allied-like (`0x00B0CDF0`: stance 2/3/4), else `..._can_join_war` (0x1BD) when `0x00B28010` holds either way, else `..._no_joinable_wars` (0x1BC). trade (`0x00BC7910(local, other, counts 1)` from `0x009B55FF`, keys `trade_agreement_tooltip_*` 0x1C7..0x1CD): either side without a capital → "" ; else the reason (embargo either way → `embargoed`; else the route check other → local 0 → `no_route_them`; else by local → other: 0 → `no_route_you`, 1 → `neighbour`, 2/3/5/7 → `sea_routes`, 4/6 → `sea_routes` + `existing_route_shifted`), then the `export_route_count` line (each side's sea routes left and cap) before the shifted line; full decoding in CAMPAIGN_FIDELITY.md (dippermai). `Tooltip` is set only for a non-empty text (`0x004F3500` at `0x009B58B4`). The other three (negtips, 2026-10-22): each builder's `this` is the local player's relationship record to the other side (found at `0x009B5662` / `0x009B5740` / `0x009B57A8`; record +0 owner = local, +4 target = other); the id → key table is `0x0164DB58` (8 bytes per id, `0x00F555C0`), filled at `0x0043605E`..`0x004360F4`. alliance (`0x00B0CBD0`): either side has a patron (`FactionHasPatron` `0x008CEEA0`) → `alliance_tooltip_is_protectorate` (0x1B7); else `0x00B27F70(local, other)` (over the other side's records, one with stance war whose target the local player's record calls allied-like, `0x00B0CDF0`) → `alliance_tooltip_allied_war` (0x1B8); else `0x00B27F70(other, local)` → `alliance_tooltip_war_allied` (0x1B9); else `alliance_tooltip_can_ally` (0x1BA). break_trade (`0x00B13CB0`): `0x00B28130(other, local)` or `(local, other)` (over the second faction's records, one whose target is not the first, `0x00898B80`, without a running embargo, `0x00B28E10` +0x840) → `break_trade_tooltip_can_embargo` (0x1C1), else `break_trade_tooltip_no_unembargoed_factions` (0x1C0). break_alliance (`0x00B13B80`): `0x00B280C0` the same way (stance index 2 exactly, target not the first) → `break_alliance_tooltip_can_break_alliance` (0x1BF), else `break_alliance_tooltip_no_allies` (0x1BE). Ours: `CampaignModel::action_tooltip` (`at_war_with_ally_of`, `unembargoed_third`, `allied_with_third`); tests `alliance_tooltip_follows_patrons_then_wars_on_allies`, `break_alliance_tooltip_needs_an_ally_besides_the_other_side`, `break_trade_tooltip_needs_an_unembargoed_third_faction` (ntw_sim) and `alliance_and_break_buttons_carry_the_model_s_tooltip` (ntw_script). | CONFIRMED keys, the trade branches and the non-empty test (disassembly 2026-10-17); the alliance / break_trade / break_alliance branches and keys CONFIRMED (disassembly 2026-10-22) | listed |
 | (2) possible: trade | at war → no; an agreement held → yes (the cancel); else both route tests `0x00BA42E0(p, r)` and `(r, p)` non-zero and neither relationship embargoing (`+0x840` = 0 both ways) | CONFIRMED (decompile); ours `CampaignModel::trade_possible`, the route check `CheckTradeRoutePossible` `0x00BA42E0` = `trade_route_check` | `0x00C1A7D0` |
 | (2) possible: access / access_cancel | access: not at war and the relevant side's access not already indefinite (`+0x78C` ≠ −1), either direction; access_cancel: the proposer gives access (`+0x78C` ≠ 0), the stance is not protectorate and `allied_in_war_against` (`+0x7D0`) is empty | CONFIRMED | `0x00C1A6E0`, `0x00C1A5D0` |
-| (2) possible: alliance | allied already (stance 2) → yes (the cancel); else not allied-like, not at war, and `0x00C16990` false (no faction at war with one of them while allied-like with the other) | CONFIRMED | `0x00C1A630`, `0x00C16990` |
+| (2) possible: alliance | allied already (stance 2) → yes (the cancel); else not allied-like, not at war, and `0x00C16990` false (neither side at war with a faction the other is allied-like with: it inlines `0x00B27F70` once each way) | CONFIRMED | `0x00C1A630`, `0x00C16990` |
 | (2) possible: others | regions, technology, payments: always; state_gift: the recipient is not human (`+0x6E0`); protector: neither side has a protectorate relationship (`0x00B4D9A0`), not at war, the recipient holds exactly one region (count of its faction `+0x76C` list == 1: the region list, CONFIRMED by `0x008AE270`, which appends a region to it and makes it the capital `+0x72C` when there is none, and `0x008B4330`, which marks a faction out of the game only when it has no regions; its character test is in PATHFINDING.md §8) and the recipient not human; peace: at war and option 9 allowed (0 or 1); war: not at war, and when the proposer has a forced war target (`+0x754`) the recipient is it or at war with it; request_join_war: allied-like and `0x00C1E590` either way (a faction at war with one side, not with the other); break_trade: not at war and either side trades with a third faction (`0x00C3E410`); break_alliance: not at war and either side is allied (stance 2) with a third faction (`0x00C3D5A0`) | CONFIRMED (protector's region count 2026-10-09) | listed, `0x00C1A770` |
 | (2) "at war" | `0x008CE9B0(a, b)`: a ≠ b and (either is the rebel faction, i.e. has no faction record `+0x514`, or a's stance to b is war) | CONFIRMED | `0x008CE9B0`, `0x008CEEF0` |
 | (2) three screens | France (war): state_gift; regions, technology, payments, peace. Ottomans (neutral, trade): trade_cancel, alliance, state_gift, war, request_join_war (grey, not allied), break_trade, break_alliance; access, regions, technology, payments. Austria (allied, trade, access both ways indefinite): trade_cancel, access_cancel, alliance_cancel, state_gift, war, request_join_war (grey, no joinable war), break_trade, break_alliance; regions, technology, payments. All three match the rules above | CONFIRMED (screenshots) | |
@@ -1378,6 +1378,7 @@ All CONFIRMED (disassembly).
 | Technologies executor | `0x009340A0`: same, keys looked up in the technology table (unknown key aborts), but the record is cleared when the flag is set **or both lists are empty** | CONFIRMED | `0x009340A0`, `0x00C4B560` |
 | Propose payments (deals-fix, 2026-10-14) | action 9 is called `Propose(offer, amount, turns, regular, action)`; read top-down: the action, `regular` (bool reader `0x01055840`: Lua type 1, else a type error `0x01095090` and nothing proposed), `turns` and `amount` (number reader `0x010556D0` → `0x01055700`: Lua type 3, a float rounded to the nearest, ties to even; out of range gives the x87 integer indefinite, 0x80000000), `offer`. An offer stores −amount (`0x00C43D70` / `0x00C43D90`), a demand amount (`0x00C1F6D0` / `0x00C1F6F0`); turns = the panel's when `regular` and turns > 1 (signed), else 1. The record's virtual `+0x40` (`0x00C4AD60`) posts the payments command (descriptor `0x013879FC`, clear flag 0) | CONFIRMED (disassembly `0x009BF64C`–`0x009BF701`) | `0x009BF3C0` |
 | Payments executor and row | the record copies the pair and caps an offered one-off payment at the proposer's treasury (`0x00C4AB20`, CAMPAIGN_FIDELITY.md §Treasury changes "Payment cap"), then builds its row text from the capped amount (`0x00C4AB85`): turns 1 `diplomacy_strings_string_offer_or_demand_single_payment`, else `…_regular_payment`, with \|amount\| (and the turns). `BuildOfferAndDemandStrings` `0x009B48B0` adds a record's offers row when its offer-text getter (vtable `+0x14`, payments `0x00C123F0`: amount < 0) returns text and its demands row when the demand getter (`+0x4`, `0x00C11F20`: amount > 0) does. `RemoveAction('payments')` (record `+0x4C`, `0x00C5CBC0`) posts the same command with the clear flag and zeros | CONFIRMED | `0x00C4AB20`, `0x009B48B0`, `0x00C5CBC0` |
+| Propose / remove peace (peacepanel, 2026-10-22) | the panel calls `negotiation:Propose(current_action.Action)` with the action alone for a "peace" (and "trade" / "alliance") button (diplomacy_panel.lua:666–667, luac_dump). Action id 11 takes the jump table `0x009BFCB0`'s default `0x009BFBBC`, which reads no argument and calls the peace record's vt+0x40 `PostProposeDealPeaceCommand` `0x00C4AF90`: `CCQ_DIPLOMACY_PROPOSE_PEACE` (command id `0x015C3C98`, registered by `0x00420D00`, descriptor `0x01333700`, shared by about 10 posters, not peace-specific) with the clear flag 0. `RemoveAction('peace')` → vt+0x4C `PostClearDealPeaceItemCommand` `0x00C5CE20`, the same command with flag 1. Row: vt+0x4 `GetDealPeaceItemRowText` `0x00C11F30` returns nothing while byte `+0x14` is 0, else the `diplomacy_strings` row `offer_or_demand_peace` (a missing row is logged, then the text is read through a null record, a crash at `0x00C11FC2`: ORIGINAL BUG; ours gives "" and logs once); vt+0x14 `0x005647C0` jumps to vt+0x4, so `0x009B48B0` lists the peace row in the offers AND the demands | CONFIRMED (disassembly, bytecode) | `0x009BF3C0`, `0x00C4AF90`, `0x00C5CE20`, `0x00C11F30` |
 | Accept | `AcceptCampaignNegotiationDeal` `0x00C114B0`: unless `0x00C1E240` (a deal with no demands at all may be turned into a payment; AI, §6), the embedded record `+0x184` then every record of `+0x2A0/+0x2A4` runs its virtual `+0x3C` | CONFIRMED order; `0x00C1E240` not ported | `0x00C114B0` |
 | Region item applied | `0x00C18BF0`: each demanded region (record `+0x14`) goes to the proposer (negotiation `+0x18`), then each offered one (`+0x24`) to the recipient (`+0x1C`), through the settlement's `0x00B58A10(new owner, 1, 0)` = `0x00B449F0(new owner, NULL force, no report, 1, 0)` | CONFIRMED | `0x00C18BF0`, `0x00B58A10` |
 | Region transfer | `0x00B449F0` → `SetSettlementOwner` `0x00B2B810` (settlement `+0x88`), `TransferRegionToFaction` `0x00A64AC0` (schools stop researching `0x008B4AB0`; constructions cancelled `0x00A6CC10`; recruitment drained `0x00B1A760`; the old owner's capital cleared if it was this region `0x008BA580`; region joins the new owner), `TransferRegionSlotOwners` `0x00B1B300` (a slot with no occupant and no holder passes to the new owner), recruitables / effects / economy refreshed. **No army is moved or destroyed on this path** (the capture variants destroy the garrison first, e.g. `0x00B58A30` deletes settlement virtual `+0x1C`); the campaign's `+0x420` owner-changed hub only has UI subscribers (`0x00906C00`, `0x00907150`, `0x009087C0`) | CONFIRMED for the call chain | as named |
@@ -1407,6 +1408,12 @@ offered) is set by `CampaignCommand::ProposePayment` (`CampaignModel::propose_pa
 the seam `diplomacy.proposed_payment` once); `Propose` and `RemoveAction` post it, the offers / demands
 row reads the record (`payment_row_text`), `CanPropose` counts it and `AcceptDeal` pays it. Test
 `a_proposed_payment_is_capped_once_and_its_row_shows_the_capped_amount`.
+Peace (peacepanel, 2026-10-22): `Propose('peace')` / `RemoveAction('peace')` post
+`CampaignCommand::ProposePeace { clear: false / true }` (`CampaignModel::propose_peace`); the offers /
+demands strings give a proposed peace a row on both sides (after payments, before join war) with the
+loc text `diplomacy_strings_string_offer_or_demand_peace`, empty and logged once when missing (§4.9
+row "Propose / remove peace"). Tests `proposing_peace_posts_its_command_and_shows_on_both_sides`,
+`a_missing_peace_string_is_an_empty_text_logged_once`.
 Open: the other actions' `Propose` items (state gift, protector, war, lists 13–15) have no
 command yet (PLACEHOLDER, logged once per action); the AI's evaluation (`0x00C49BE0` →
 `EvaluateProposedNegotiationDealAI 0x00AA5ED0`, `0x00C1E240`) is traced in AI_RESEARCH.md §4 "Deal evaluation" (technology value, evaluation and accept tests ported in `campaign::deal_value`; the goal lists and weights traced, and a deal of regions and technologies answered as the exe, `ai_accepts_deal`, with the region inputs PROVISIONAL as listed there).
@@ -1635,7 +1642,8 @@ synchronous save callback `CampaignSaves` / `CampaignSaver` (`crates/napoleon/sr
 the shortcuts CTRL+S / CTRL+L / ESCAPE sent to the root's `OnShortcut` (`hud.rs` `keys`; F5 removed),
 and `World::saving_disabled` set by `disable_saving_game` (`game.rs`), read from vanilla saves
 (`EPISODIC_RESTRICTIONS` #25, loader `0x009968A0`, versions above 0xB) and kept in our own saves.
-Tests: `saves_tests.rs` (9). Tags left: `CanSave` PROVISIONAL (the other `0x008BE4A0` fields). The
+Tests: `saves_tests.rs` (9). `CanSave` is traced in full since 2026-10-21 ("CanSave's test" below;
+three conditions stay PROVISIONAL on state the model does not keep). The
 shortcut bindings (read from `default_keys.xml` since 2026-10-20) and the order of a shortcut
 against a focused text field are CONFIRMED: see "Shortcut keys" below.
 
@@ -1681,10 +1689,29 @@ against a focused text field are CONFIRMED: see "Shortcut keys" below.
   can force a holder; the focus-lost handler (vtable `0x01393B6C` +0x1C = `0x00DA9C80`) clears it.
   While a field has the focus, CTRL+letter types nothing: Windows sends a control character, which
   `IsCharPrintable` `0x01015F10` rejects (CTRL+ALT is AltGr and types its character).
+- **Once per frame (worker keybind2, 2026-10-21; disassembly, CONFIRMED unless tagged).** The
+  bindings are polled every frame, not per key event. The main loop `0x00485B90` reads the
+  DirectInput key state (`0x00E29200`), then the frame tick `0x0048A650` builds the frame context
+  {+0 total ms, +4 delta ms (`0x010A1E10`, capped at 300 ms unless the frame-rate test
+  `g_dwFrameRateTestFps` is on, × the `root_time` debug value `0x0149F5E8`, default 1.0), +8 delta
+  s = ms × 0.001} and `0x0048B400` → `0x0048BD40` runs every enabled listener (byte +0x10 = 1):
+  vtable +0x14 per key event, +0x18 per character, +0x1C per mouse event, then +0x20 (handled
+  flag, context) once per frame whether or not an event came. The campaign listener (vtable
+  `0x0136B40C`; +0x14 `0x00A0C610` focus / text) has `0x00A27EB0` at +0x20 (no Ghidra function
+  there yet): it calls `HandleShortcutKeyEvent` `0x00EEE1E0`(&handled, time = context +8, 0,
+  focus held = `[0x0146443C]` ≠ 0) every frame; when that returns true it calls `0x009C60E0`
+  (this −0x18) and `0x00A20900` (this +0xF24). `0x00EEE1E0` takes the modifier snapshot
+  (`0x00EEE220`), returns false while the focus is held, else runs `0x00EEE250`, whose key test
+  `0x00E20190` reads the frame's DirectInput state (bit 0x80; only while the window is in the
+  foreground). The front end's `0x0048B3D0` has the same shape; the battle's (vtable `0x0132FAA0`)
+  is not re-checked. So a repeating binding (the camera's steps) presses every frame it is held,
+  with the frame's time, and a non-repeating one on the hold's first frame, released the next.
+  Ours before this: the bindings ran only on OS key events (press, auto-repeat), so a held W
+  stepped once and then at the OS repeat rate (the "WASD barely moves" bug, user 2026-10-20).
 - **The state machine (worker keybind, 2026-10-20; disassembly, CONFIRMED unless tagged).** The
-  campaign (`0x00A27EDF`), front end (`0x0048B3F0`) and battle (`0x00607AA9`) key handlers call
-  `HandleShortcutKeyEvent` `0x00EEE1E0` on every key event (press, OS auto-repeat, release), which
-  calls `0x00EEE250` (its only caller). `0x00EEE250` returns at once when the handler is switched
+  campaign (`0x00A27EDF`), front end (`0x0048B3F0`) and battle (`0x00607AA9`) handlers call
+  `HandleShortcutKeyEvent` `0x00EEE1E0` (once per frame, above), which calls `0x00EEE250` (its
+  only caller). `0x00EEE250` returns at once when the handler is switched
   off (manager +0x30, `CampaignUI.EnableShortcutHandler` `0x009E2550` → `0x00EA5080`), and while
   the handler lock (+0x84, `0x00A22430`; `steal_user_input` `0x00979680` → `0x00A22400`) is set
   unless the key is ESCAPE. Else it fills one entry per binding: slot k1 / k2 held = that key is
@@ -1694,7 +1721,7 @@ against a focused text field are CONFIRMED: see "Shortcut keys" below.
     stolen the stealer's key-up (`0x00EB0900`);
   - a slot held, binding's handler gone, or it is the active one (+0x24) and not repeating
     (bit5/6): released if pressed. So a non-repeating binding presses once per hold and is
-    released on the next key event (the first auto-repeat or the key's release);
+    released on the next frame;
   - a slot held whose key is not stolen: the handler's +0x28 (func name, frame time) when the
     handler is unlocked (`+0x38`) or the func has `ignore_lock` (+0x49), and ready (`+0x3C`); it
     becomes the active binding;
@@ -1723,41 +1750,73 @@ against a focused text field are CONFIRMED: see "Shortcut keys" below.
   `0x0095A510(func, time)` (Ghidra: `CampaignCameraShortcutHandler::HandleCampaignCameraShortcutPress`,
   the camera's get-position call at `0x0095A54A` given a call-site signature, structs
   `CampaignCamera` / `CampaignCameraVtbl`): time ×2 while SHIFT is held, read from the handler's
-  +0x20 when the key event is handled (not the event's own modifiers); `0x00970A90` sets it each
-  frame from LSHIFT/RSHIFT (as controller +0x48; INFERRED the same field, the handler at
-  controller +0x28). d = `CAMPAIGN_CAMERA_PAN_SPEED` × time × (h × 0.01 + 0.25), the pan speed
+  +0x20 when the binding is pressed (not the modifiers of the poll); `0x00970A90` (vtable slot
+  `0x01362D6C`) sets it each frame from LSHIFT/RSHIFT (as controller +0x48; INFERRED the same
+  field, the handler at controller +0x28; whether it runs before or after the poll in a frame is
+  not traced). d = `CAMPAIGN_CAMERA_PAN_SPEED` × time × (h × 0.01 + 0.25), the pan speed
   being tweak `0x015C4258` +0x5C (default 50, used here), the time the one the binding passes on
-  (`[ctx+8]` in `0x00ED76E0`; whether it is the frame time is not traced); the tilt keys use the
-  undoubled time,
+  (`[ctx+8]` in `0x00ED76E0`: the frame's delta in seconds, capped at 0.3, "Once per frame"
+  above); the tilt keys use the undoubled time,
   h = the camera's `+0x30` position y (INFERRED: its eye height); nothing while the busy test
   `0x00955820` is set; `step_fwd` `0x00956F10` (z += d, north), `step_fwd_fast` 2d, `step_bck`
   `0x00956E70`, `step_r` / `rot_r` `0x009570F0` (x += d), `step_l` / `rot_l` `0x00956FA0`,
   `cam_up` / `cam_down` tilt `0x00977100` (tilt speed, +0x138, `0x00920D00`), `camera_bookmark_save<n>`
   `0x00968900`, `camera_bookmark_view<n>` `0x00974B10`; release `0x0044A780` does nothing; +0x38
   `0x009535B0`; +0x3C true. The per-frame camera update `0x00970A90` otherwise reads only the mouse (drag,
-  edge scroll), so the campaign's keyboard camera moves only on key events.
+  edge scroll), so the campaign's keyboard camera moves only through the bindings, every frame a
+  camera key is held.
+- **Arrow keys (user check 2026-10-20: "arrows don't move the camera"; the original does the
+  same).** The arrows are campaign bindings only in the `total_war` keyset (`rot_l` LEFT, `rot_r`
+  RIGHT, `step_fwd` UP, `step_bck` DOWN); the default `fps` keyset (the exe's default without a
+  `custom_keys` file, and the user's) has none. Their codes in `0x0139FEC8` are UP 0x77, LEFT
+  0x79, RIGHT 0x7A, DOWN 0x7C; the only campaign code testing them directly is `0x00970F70`
+  (vtable `0x01362DBC`), the "Campaign Debug" listener (constructor `0x00901350`, built by
+  `0x008B7FE0`), whose vtable[0] `0x00447880` returns true, so its enabled byte +0x10 stays 0
+  and `0x0048BD40` never runs it. `GetAsyncKeyState` is used only for VK 0xA0 / 0xA2 / 0x12
+  (LSHIFT, LCONTROL, ALT). So with vanilla's default keys the arrows do nothing in the campaign;
+  ours matches (test `default_keys_install.rs` `the_default_keyset_binds_no_arrows_in_the_campaign`).
 - **Ours.** `ntw_formats::default_keys` parses the file (`Shortcuts::parse`; `mode_bindings(mode)`:
   the default keyset's funcs with a mapping in the mode, each with its component, `repeating`,
   `ignore_lock`, `hidden`); `ntw_script::ui::shortcuts::ShortcutMachine` is `0x00EEE250` +
   `0x00ED76E0` behind a `ShortcutTarget` (components by name, the camera, the stolen keys);
-  `UiScriptHost::campaign_key` (`ui/campaign/mod.rs`) runs the focus order above, then the machine;
-  `CampaignHud` builds the machine once on entering (`hud.rs` `campaign_shortcuts`), `keys` feeds
-  it every key event with the keys down replayed from the frame's start
-  (`napoleon::shortcut_keys::KeysDown`), camera presses go to `camera.rs` `key_step` (with the SHIFT of the frame's start, as `CameraKeyPress`); Return's old
-  hand-written end turn and the camera's own WASD table are gone. `EnableShortcutHandler` switches
-  the machine. Tests: `default_keys.rs`, `ui/shortcuts.rs` (5), `ui/campaign/shortcut_tests.rs` (6),
+  `UiScriptHost::campaign_key` (`ui/campaign/mod.rs`) gives each key event to the focused
+  component, `UiScriptHost::campaign_keys` runs the frame's poll (nothing while the focus is held
+  or the handler is off); `CampaignHud` builds the machine once on entering (`hud.rs`
+  `campaign_shortcuts`), `keys` sends the frame's key events (modifiers replayed from the frame's
+  start, `napoleon::shortcut_keys::KeysDown`) and then polls once with the keys down at the frame's
+  end and the real frame time capped at 0.3 s; camera presses go to `camera.rs` `key_step` (with
+  the SHIFT of the poll, as `CameraKeyPress`); Return's old hand-written end turn and the
+  camera's own WASD table are gone. The poll allocates nothing (the machine keeps its entries
+  buffer, the stolen keys are read in place). `EnableShortcutHandler` switches
+  the machine. Tests: `default_keys.rs`, `ui/shortcuts.rs` (5), `ui/campaign/shortcut_tests.rs` (7),
   `tests/campaign_ui.rs` `shipped_key_bindings_…` (the shipped file on the original HUD: Return
   ends the turn on release, ESCAPE opens the escape menu, W steps the camera),
   `tests/default_keys_install.rs` (`#[ignore]`), `camera.rs` `key_steps_follow_the_exes_formula`.
 - PROVISIONAL (ours): the bindings walk in the keyset file's order, not the handlers' registration
-  order (matters only when one event presses two bindings); a binding's component is the first
+  order (matters only when one poll presses two bindings); a binding's component is the first
   component of that name under the root (the exe gives every registered handler of the name the
-  binding); the input layer / lock (`0x00DACBA0`, `0x00A22430`, `steal_user_input`) is not modelled;
+  binding); the handler lock (`0x00A22430`, `steal_user_input`) is not modelled (the input layer
+  is: "Input layer" below);
   the release's post to the event lists is not ported; a key's stealer is our most recent shown
   stealer (the exe: newest with +0x38 / +0x3C, no reorder on re-steal); the camera's busy test.
   PROVISIONAL (`input_focus_held`): ours keeps the focus on a component that is destroyed; what the
   exe does then is not traced. Not done yet: `custom_keys.keys.xml` and the keyset choice
   (`0x00ED27D0`), the front end's and the battle's bindings, the camera's tilt and bookmarks.
+- **Input layer (worker keybind, 2026-10-20; disassembly, CONFIRMED).** `g_nUIMinInputLayer`
+  `0x01765944` is the lowest priority a UI component's shortcut handler takes keys at.
+  `Component.LockPriority(n)` (`0x01018130`) reads its argument as a number, rounds it to the
+  nearest integer with ties to even (`0x010556D0`), pushes the old layer as its result and stores
+  the new one; loading the root layout resets it to 0 (`0x00DB226F`). A UI component's handler
+  is unlocked (+0x38, `0x00DACBA0`) while the component's priority (+0xE0, the one `Priority()`
+  returns, `0x01014680`) is at least the layer; the campaign camera's (+0x38, `0x009535B0`) while
+  the layer is below 10. A locked binding is not pressed (a pressed one is still released)
+  unless its func has `ignore_lock` (`quick_save` in vanilla). PanelManager locks to an opening panel's
+  `PriorityLock` and restores the old layer on close, so with the escape menu (priority 40) or the
+  save panel open, `button_end_turn` (priority 0) ignores Return and the camera its keys (the
+  "Return ends the turn under the save box" bug, user 2026-10-20). Ours: `Inner::min_input_layer`
+  (`ui/host.rs`), `LockPriority` in the `Component` table, `HudShortcuts::unlocked`
+  (`ui/campaign/mod.rs`); tests `a_priority_lock_locks_the_bindings_of_lower_components` and the
+  escape-menu part of `shipped_key_bindings_…`.
 
 - **Entry:** `text\default_keys.xml` binds `escape_menu` = ESCAPE (any modifier, component root,
   all modes), `quick_save` = CTRL+S, `quick_load` = CTRL+L (campaign). `layout.root.luac`
@@ -1818,9 +1877,56 @@ against a focused text field are CONFIRMED: see "Shortcut keys" below.
     `World::saving_disabled`, set by `game.rs`; the save then refuses (SaveCampaign returns
     `false, false` / `false`). The flag is kept in the save: `EPISODIC_RESTRICTIONS` #25, read by the
     loader `0x009968A0` for versions above 0xB (CONFIRMED position; false in the vanilla saves).
-  - `CampaignUI.CanSave` (`0x009E0D50`) returns `0x008BE4A0([ui+0x9FC]+8, [ui+0x9FC]+0xB0)`, which
-    is false while the flag above is set; its other fields are not traced (ours is true otherwise,
-    PROVISIONAL).
+  - `CampaignUI.CanSave` (`0x009E0D50`) returns `0x008BE4A0([ui+0x9FC]+8, [ui+0x9FC]+0xB0)` (the
+    campaign model and the local player's faction), which is false while the flag above is set;
+    the rest of its test is in "CanSave's test" below.
+- **CanSave's test** (worker cansave, 2026-10-21; `0x008BE4A0` read in full, CONFIRMED unless
+  tagged). Ours is one model rule, `CampaignModel::can_save(faction)` (`ntw_sim` `campaign/turn.rs`),
+  which `CanSave` calls with the local player's faction; tests `ntw_sim` `campaign/tests/can_save_tests.rs`
+  (one per condition) and `saves_tests.rs` `can_save_asks_the_model_for_the_local_player`. Other
+  callers of `0x008BE4A0`: the multiplayer save `0x00A1F3D0` and the game-mode transition's pending
+  accept (+0xAE). Named in Ghidra (V5): `CanFactionSaveCampaign` `0x008BE4A0`,
+  `IsMapMovementQueueIdle` `0x009559D0`, `SetBattleSequenceStageAndNotifyDone` `0x0088FEE0`,
+  `IsFactionInPendingBattle` `0x008CEE40`, `FindPendingBattleSideMemberForFaction` `0x008C1970`.
+  The conditions, in the exe's order:
+  1. campaign +0xFE9 (campaign over) set → false. Ours `TurnState::campaign_over`.
+  2. `[+0xFA8]+0x115` (saving disabled) set → false. Ours `World::saving_disabled`.
+  3. the location manager `[+0xF60]` not idle (`0x009559D0`: its moving list +0x24 / +0x28, a
+     vector of characters in motion, not empty) → false. Ours: the model's moves are instant and
+     only the map animates them (`napoleon` `campaign/play.rs`), so nothing is ever moving.
+     PROVISIONAL (BACKLOG: refuse while a move plays on the map).
+  4. the battle sequence `[+0xF6C]`, state +0x58 (getter `0x004B4A50`, set only by `0x0088FEE0`,
+     which fires `[+0xC90]` vfunc +8 on state 8; 0 from the constructor `0x00882C30`): 0 or 8 (done:
+     `0x008DDF00`, `0x008DDEA0`, `0x008B9ECC`, the state machine's end) go on; state 1 (pre-battle,
+     set by `0x008DBE10`) returns **true at once**, skipping 5-7, when `0x008CEE40(faction)` finds
+     the faction on one of the two sides (`0x008C1970` over sides +0x68 / +0x6C through
+     `0x008C19B0` / `0x008C1B40`: the side's faction +8 or its list +0x70 / +0x74), else goes on;
+     states 2-7 → false (the second `== 8` test at `0x008BE509` is dead code). The state machine
+     `0x008F7880`: 1 waits for every entry of its +0x8C list, then 2 / 3 (real-time battle) or the
+     autoresolve `0x008AE5A0` and 4 → 5 (waits for `0x009559D0`) → 6 (waits for every entry of the
+     +0x9C list, `0x008A9D20`) → 7 (waits for `0x009559D0` and `0x008CF150`) → 8. Ours: a
+     `pending_battle` is state 1, and the participant test is the owner of its attacker or of a
+     defender; `autoresolve` / `apply_battle_result` run 2-7 in one call. PROVISIONAL: the
+     aftermath's waits (states 5-7) are not modelled, and `0x008C19B0` counts a faction with +0x814
+     set and +0x81C clear as `[[+0xF5C]]+0x1C` (a state the model does not have).
+  5. the pending-action stack `[+0xF70]` top set (`0x005865E0`) → false. It holds the
+     `0x008E2B80` pushes (36 call sites; `0x008F7850` updates it). Ours: `pending_ally_war_calls`
+     (pushed at `0x00B26C1F` / `0x00B26E17`) or `pending_capture` (the capture report
+     `0x00885F90`, pushed at `0x00B58745` / `0x00B58D96`). PROVISIONAL (BACKLOG): the other pushers
+     wait in states the model does not keep: `0x008AF620` (negotiation greeting `0x00885D70`),
+     `0x008DC8F0` (`0x008861C0`), the agent actions `0x0094C010`, `0x0094C920` (`0x00885EC0`),
+     `0x0094CFF0`, `0x0094D390`, `0x0094D660`, `0x0094D970`, and `0x009195A0`, `0x00918AB0`,
+     `0x0091A560`, `0x00923760`-`0x00924790`, `0x008BD6D0`, `0x00C4B990`, `0x009382B2`.
+  6. the faction's +0x93E set → false. Its only writer is `0x008B49E6` in `0x008B46A0` (the
+     revolution choice offered to a human at its capital, event +0x8A0); cleared by the revolution's
+     start `0x008EE3E0` and the constructors (`0x0087A076`, `0x0087A807`, `0x0087C80E`); CanSave is
+     its only reader. PROVISIONAL: revolutions are not modelled (BACKLOG §6).
+  7. `[+0xF5C]+0x18` (the current faction) is the faction and `[+0xF5C]+0x3C` == 1, else false.
+     +0x3C goes 0 → 1 in `0x0094A940` once the turn start is done (`0x008C2120` false: no army of the faction left with an order to
+     run at army +0x94 / +0x84, which it issues as a move, `0x009549B0`), 1 → 2 in `0x0096E200` (the end of turn, from
+     `0x008BD6D0`), and the state-2 handler `0x008A9870` advances the turn. Ours
+     `TurnState::current` and `TurnState::in_turn` (set by the human's `Decide`, cleared by
+     `begin_end_turn`); a campaign not yet started cannot save.
 - **`CampaignUI.DefaultSaveName`** (`0x009E22C0` → `0x009D5400`): `"<name> <round> <year>"` where
   round + year = `"%S %d"` of the calendar's round description and year (the same pair the engine
   sends as `round_description` / `year` in `UpdateFactionFundsAndDate`, `0x009C1AD0`), and name =
@@ -1925,6 +2031,113 @@ against a focused text field are CONFIRMED: see "Shortcut keys" below.
   multiplayer; otherwise `0x008A0A00` → `0x0085F7D0` lists the write class 0 folder, callback
   `0x0085F990` keeps the newest file with the class extension that `0x00A0BA70` accepts, and loads it
   (`0x00A0C960`): the same choice as the front end's ContinueCampaign (`latest_campaign_save`).
+- **CTRL+S and CTRL+L on the campaign map (user check 2026-10-20; worker keybind2, 2026-10-21).**
+  "CTRL+S does nothing": the original does the same. Its single-player `QuickSave` path
+  (`0x009EF470`, above) writes the save and shows nothing (no message, no Lua result); ours wrote
+  `%APPDATA%\NapoleonRust\save_games\quick_save.save` at the time of the check, so the key worked.
+  "CTRL+L moves the camera back to London after ~3 s instead of opening load": `QuickLoad`
+  (`0x009EF420`) loads the newest save at once and opens no panel, as ours does (the ~3 s is the
+  reload). What differs is the camera: the original's save holds the campaign camera
+  (`CAMPAIGN_CAMERA_MANAGER`, getter `0x009129D0`; `CAMPAIGN_CAMERA` `0x00912970`): its reader
+  `0x0090E5A0` (version > 1) reads the camera `0x0092C250` +0x134 with `0x00900C00` and applies it
+  with `0x0090E120` (version < 4 also `0x0094F9D0`); the writer `0x0090FC90` writes the entries
+  (`0x0090FB20`) and then the current camera. Ours now does the same (worker camerasave, 2026-10-21):
+  see "The camera in the save" below.
+- **The camera in the save (worker camerasave, 2026-10-21; CONFIRMED from the exe and the vanilla
+  saves).** Layout: `CAMPAIGN_ENV/CAMPAIGN_CAMERA_MANAGER` v4 (version `0x004CDC70`), written by
+  `0x0090FC90`: u32 count of named cameras (manager +0x38, 16-byte entries from +0x3C), per entry a
+  utf16 key then its camera (entry +0xC), and last the current camera (`0x0092C250`). Each
+  `CAMPAIGN_CAMERA` v2 (`0x004CDC40`, writer `0x0090FB20`): f32 tilt +0x138, u32 +0x13C, coord3d
+  target +0x14/+0x18/+0x1C (logic east, height, north; the height is 0), bool +0x140. Reader
+  `0x0090E5A0(reader, manager)` (cdecl, one caller, the `CAMPAIGN_ENV` loader `0x00987070` at
+  `0x00988607`, run only when `CAMPAIGN_ENV` is above v1): the named cameras through the read
+  constructor `0x00900C00` (into 0x174-byte objects appended to the vector +0x34/+0x38/+0x3C), then
+  for a manager above v1 the current camera, copied in with `0x0090E120`; a manager below v4 has
+  the current camera's +0x13C and +0x140 cleared (`0x0094F9D0`). `0x00900C00` starts u32 0 and
+  bool false, reads f32, u32 and coord3d, places the eye from the tilt with `0x009208B0` and reads
+  the bool only for a camera above v1. `0x009208B0`: distance = (tilt − 0.5) / (1.0 − 0.5) ×
+  (15 − 100) + 100 (tweakers `0x015C4078`, `0x015C3B20`, `0x015C3A30`, `0x015C2FA0`), eye = target
+  + distance × (0, cos tilt, −sin tilt): this CONFIRMS the linear tilt/zoom law ours had INFERRED.
+  **Restore:** after the reader, `0x00987070` replaces the camera only on a new game (its second
+  argument is set by the new-campaign caller `0x008B8930`, null from the loaded-game caller
+  `0x008B8A60`; the test at `0x0098860F`) and only when campaign +0x1034, the multiplayer flag, is
+  set (`0x00988620`; the victory check `0x0096CD10` tests the same flag at `0x0096CEA9`, the loader
+  `0x00872550` reads it as a bool at `0x00873247`, CAMPAIGN_FIDELITY.md "Writers (callers of
+  `0x008C30A0`)"): target = the human faction's capital settlement (`0x008B3790`, faction +0x72C →
+  region +0xFC; its fixed-point ints +4/+8 × 2^-20, `0x0131BAF8`) at height 0, built with
+  `0x00900E50` (tilt = the minimum tilt tweaker `0x015C4078`, stored at `0x00900F23`; +0x13C 0,
+  +0x140 false; the eye at height 100 the loader passes is replaced by the tilt law's, `0x00920D00`
+  → `0x009208B0`), copied into the current camera with `0x0090E120`. The version test at
+  `0x009885FA` skips only the reader, so this runs with no block too. So a loaded save and a new
+  single-player game open on the file's camera (every start position has the block, eur: tilt 0.5,
+  (−54, 0, 151.12)); only a new multiplayer campaign opens on its capital. Which capital: the
+  loader walks the campaign's faction list (+0xF5C), skips each faction whose `0x008B3790` is null
+  (`0x0098864B` / `0x0098864D`), and matches the faction key (`0x008E5060`) against its own key
+  ([EBX+0x34]); `0x00988684` / `0x009886A8` run only for that non-null match. No match (the human
+  faction has no capital) jumps to `0x00988764` and keeps the file's camera (CONFIRMED, review
+  trace 2026-10-22; an earlier "crash at `0x009886AD`" reading was wrong, no ORIGINAL BUG). Ours
+  walks the same way, logged at debug. Ours: `ntw_campaign::camera::opening_camera`, called
+  by `scene.rs` (no multiplayer campaign starts yet). No block (`CAMPAIGN_ENV` ≤ v1) keeps the
+  default camera. Vanilla saves: all v4, no
+  named cameras, u32 0, bool false (orig_fr_t1: tilt 0.65 at (−64, 0, −4), Peninsular campaign;
+  orig_gb_apr1811: 0.989 at (−146.05, 0, 16.95)). UNKNOWN: the meaning of +0x13C and +0x140, and
+  what names the named cameras (not the bookmarks, which are controller +0x28, `0x00968900` /
+  `0x00974B10`). A manager of v1 or lower has named cameras but no current camera; ours drops
+  them with a warning (none in any vanilla file).
+  **Clamp (fix round, 2026-10-22):** neither `0x009208B0` nor `0x00900C00` clamps the tilt or the
+  distance; the tilt step `0x00920D00` clamps the tilt +0x138 to bounds at +0xC0 (min) / +0xBC
+  (max) of an object reached from camera +0x134 → +8 → +0xFA8.
+  **Zoom limit (2026-10-22, CONFIRMED):** that object is the campaign model's episodic restrictions
+  (`CAMPAIGN_MODEL/EPISODIC_RESTRICTIONS`, constructor and reader `0x009968A0`, called by the model
+  loader `0x00872550`; writer `0x009A1070`). Its constructor sets +0xBC = `_MAXIMUM_TILT_ANGLE` (1.0,
+  `0x009969E6`) and +0xC0 = `_MINIMUM_TILT_ANGLE` (0.5, `0x009969FC`); the record then overrides them:
+  #13 is the min (read in every version, `0x00997B9D`; a v1 record has no #8, so
+  it sits at #12 there) and #14 the max (only version above 2, `0x00997BBA`); the writer stores both
+  (`0x009A1957`, `0x009A19A1`). The bounds' only writer is the script method `set_zoom_limit(a, b)`
+  (`SCRIPT_SetZoomLimit` `0x00977CB0`, f32 SSE math): it reads b (the stack top) and then a, raises
+  each to 0.02 (float `0x013359F8`) and lowers it to upper = f32(f64(MIN_D / (MAX_D − MIN_D)) − 0.02
+  (double `0x0133BC08`)) × (MAX_T − MIN_T) + MAX_T (≈ 1.0782); a NaN passes both tests and is kept.
+  Then (`0x00977D9F`) if the second > the first, max = second and min = first, else max = first and
+  min = second. It moves no camera. ORIGINAL BUG (`0x00977CB0`): when a read fails its type check the
+  slot is not written (the lua_State word, or stack garbage, is left there) and is still clamped and
+  stored as a bound; ours reports the type error once and leaves the bounds unchanged. The only
+  reader is the tilt step `CampaignCamera_ClampTiltAndPlaceEye` `0x00920D00` (min > tilt → min; else
+  tilt > max → max; NaN kept), run by `CampaignCamera_SetTilt` `0x009770E0`, `CampaignCamera_AddTiltPercent`
+  `0x00977100` (tilt += v × 0.01; called by the wheel `CampaignCamera_ApplyMouseWheelZoom`
+  `0x00956E10` from `HandleCampaignMapMouseEvent` `0x00A0EDF0`, and the camera keys `0x0095A510`) and
+  the fresh camera constructor `0x00900E50` (tilt = `_MINIMUM_TILT_ANGLE`, then the step; called from
+  the `CAMPAIGN_ENV` loader `0x00987070` after the model loads at `0x00987FFD`, so a new camera is
+  clamped to the loaded bounds). The save-read camera `0x00900C00` is not clamped until its next
+  tilt change. Evidence: all 8 startpos files hold the defaults (1.0, 0.5); the vanilla saves
+  orig_fr_t1 and orig_fr_may1811 hold (max 1.0, min 0.61), the eur script's `set_zoom_limit(1.0,
+  0.61)` (it also sets (1.00, 0.2) during pans; tut sets (0.93, 1.00) and (1.00, 0.00)). Ours:
+  `ntw_sim::campaign::zoom_limit` (`ZoomLimit`, `World::zoom_limit`), read and written by
+  `ntw_campaign::details` (`read_zoom_limit`, `write_switches`), set by the `set_zoom_limit` script
+  arm in `ntw_script::game`, applied in `ntw_campaign::camera::opening_camera` and
+  `napoleon::campaign::camera::CampaignCamera::zoom`; `distance_for_tilt` is the unclamped law.
+  Not ported: the wheel's step law (`FUN_00E23470(last, new) × −0.03`, `0x00956E10`) and the
+  camera keys' steps (ours keeps its own wheel step, clamped to the zoom limit).
+  **Orphan `0x0095EEA0`** (`CampaignCamera::CampaignCamera_GetVector144`, vtable slot +0x30 of
+  `0x013606E8`, entry `0x01360718`, no direct caller): thiscall, copies the float vector
+  +0x144/+0x148/+0x14C to its out-pointer and returns it (RET 4). No writer of +0x144 found in the
+  camera code: its meaning is UNKNOWN. Struct field `aVector144`.
+  Ghidra names (V5): `CampaignCameraManager_WriteSave` `0x0090FC90`, `CampaignCamera_WriteSave`
+  `0x0090FB20`, `CampaignCameraManager_ReadSave` `0x0090E5A0`, `CampaignCamera_ConstructFromSave`
+  `0x00900C00`, `CampaignCamera_ClearSaveFlags` `0x0094F9D0`, `CampaignCamera_ComputeEyeFromTilt`
+  `0x009208B0`; the tweakers are `CAMPAIGN_CAMERA_MINIMUM_TILT_ANGLE` (`0x015C4078`, 0.5),
+  `_MAXIMUM_TILT_ANGLE` (`0x015C3B20`, 1.0), `_MAXIMUM_DISTANCE` (`0x015C2FA0`, 100) and
+  `_MINIMUM_DISTANCE` (`0x015C3A30`, 15), registered at `0x0041EB5B`..`0x0041EC4B`.
+  **Ours:** `ntw_campaign::camera` reads the block into `LoadedCampaign::camera` (plain data,
+  `CameraSave`/`CameraView`), our own save keeps it (`SaveData::camera`, serde default: older saves
+  load without one), and `napoleon::campaign::scene` opens a loaded game and a new single-player
+  game on the view `ntw_campaign::camera::opening_camera` gives (target and the distance of its
+  tilt, `camera::distance_for_tilt`); the multiplayer capital view is in that function, unused until
+  our multiplayer campaign exists. A file without a block opens on our start view (its first army,
+  else first settlement, at distance 60; the exe's default camera is not traced). The live camera's
+  view is kept on the saver each frame (`camera::control`), the unknown fields as loaded. Tests:
+  `ntw_campaign` camera unit tests, `own_save` round trip, `tests/camera_install.rs` (two vanilla
+  saves; the eur startpos opening view, single-player and multiplayer),
+  `napoleon` `a_saved_view_opens_and_saves_back`.
 - **`0x00A1F000`** (Ghidra `SaveCampaignGameToFile(pSaveName, pStartposSource)`): the second
   argument is an object pointer, not a bool: null writes a save (root node `CAMPAIGN_SAVE_GAME`,
   path of write class 0), non-null writes `%Scampaigns/%S/startpos.esf` (root `CAMPAIGN_STARTPOS`,
@@ -1938,7 +2151,7 @@ against a focused text field are CONFIRMED: see "Shortcut keys" below.
   `0x009EE550`, `CAMPAIGNUI_LoadNewestSaveQuick` `0x009EF420` (created),
   `CAMPAIGNUI_WriteQuickSaveOrSendMpCommand` `0x009EF470` (created); global
   `g_dwEsfWriterOpenSize` `0x01458838` (1000000, the writer-open size argument).
-- Still open: the other `0x008BE4A0` fields CanSave tests; the round-description loc id per turn
+- Still open: CanSave's conditions 3-6 on unmodelled state ("CanSave's test" above); the round-description loc id per turn
   (above). Shortcut keys: see "Shortcut keys" above for what is left.
 
 ## 6. Region labels on the campaign map (slot campaign-ui, branch `work/campaign-ui`, 2026-10-05)
@@ -3245,3 +3458,70 @@ calls now get their lists too, as in the exe. Test:
 `created_layouts_land_at_the_scripts_x_y_not_their_file_offset` (battle.rs) covers the pip_frame,
 esc_menu option, relative-to-parent, rounding, no-position, images and 6-argument shapes, and the
 non-number x (nil returned, nothing created, logged once).
+
+## 14. The ally_attacked message: a human ally's call to war (allyattacked, 2026-10-20)
+
+When a declaration of war asks a human ally to join (CAMPAIGN_FIDELITY.md "Allies called into a war"),
+the original asks through an event message, not a panel of its own. CONFIRMED by disassembly and
+luac_dump unless tagged:
+
+- **Posting.** The campaign's UI event handler `0x009CA900` posts message type 0xD (+4 the ally, +8 the
+  declarer, +0xC the target, +0x10 / +0x11 invited by the declarer / by the target). The queuer
+  `0x009D3250` builds the message's `message_event_strings` record (`0x00F57390`: the row of event
+  `ally_attacked` for the ally's culture, `CampaignRules::culture_row` `0x00F54F80`), and the details
+  converter `0x00A22B30` calls the root script's `ShowMessage(details)` for the local faction only
+  (`0x00898B20`).
+- **`details` keys, in the exe's order:** `ScreenWidth` / `ScreenHeight` (the UI root's size,
+  `0x01037880` +0x24 / `0x0102ACF0` +0x28, unclamped, unlike `CampaignUI.ScreenSize`), `Event`,
+  `Title`, `Text` (the row's loc strings; the title gets no "<x>: " prefix, the message's title part
+  +0x2C is empty here), `Image`, `Layout` (`ally_attacked`), `RequiresResponse`, `Icon`
+  (`data/ui/EventIcons/<icon>`), `AutoShow`, `Data`.
+- **`Text` of one line break:** the record builder `0x00F57390` compares the looked-up text with
+  `"\n"` (the ANSI string `0x013139B4`, bytes 0A 00, built at `0x00F574C9`; `0x004F0F40` →
+  `0x004EFB20`, equal when `CompareUniStrings` gives 0) and when equal passes the empty static string
+  `0x0164EB58` (default-constructed once, `0x004F0910`) to `0x00F43090` instead (`CMOVZ` at
+  `0x00F574F4`). Ours: `message_events::message_text`. Also seen there, not acted on: the builder
+  makes no record when either loc lookup (text or title, the loc table's vtable +8) gives null;
+  what a null lookup result means and what the queuer does with no record are not traced (ours shows
+  a missing loc string as "" and logs it once).
+- **`Image`:** `ui/EventPics/<culture>/<picture>`, else the culture's alternate folder (`cultures` #2),
+  else `european`, whether it exists or not, with `data/` in front (`0x00F840E0`). The picture is
+  column #3, not #8 (eventpic, 2026-10-21, CONFIRMED by disassembly). The table is read by
+  `0x00E225F0` → `0x00F40200` → the generic loader `0x00F27570`, which calls the row callback
+  `0x00F58EB0` → `0x00F3B110` per row into a 0x58-byte builder; `0x00F3B110` reads the file's nine
+  columns in order into builder +0x00, +0x0C, +0x24, +0x18, +0x3C, +0x54 (bool), +0x55 (bool), +0x30,
+  +0x48. `0x00F22680` → `0x00F490D0` then only turns each builder into a 0x5C record through
+  `0x00F57390` → `0x00F43090`, which writes: +0x00 the message type (`0x00F54EC0` on #0), +0x04 #0,
+  +0x10 the culture record, +0x14 title, +0x18 text, +0x1C the resolved picture of builder +0x18
+  (#3), +0x28 #3 as is, +0x34 `data/ui/EventIcons/<#7>`, +0x40 #4, +0x4C #8, +0x58 #5, +0x59 #6. The
+  details converter `0x00A22B30` sets `Image` from record +0x1C (`0x00A22E79`), `Layout` +0x40,
+  `RequiresResponse` +0x58, `Icon` +0x34, `AutoShow` +0x59, and never reads +0x4C. On the shipped data
+  #3 and #8 differ in 77 rows, but not in the two `ally_attacked` rows (both `biggest-army.tga.tga`;
+  the earlier note said otherwise); real-data test `ally_attacked_message_row_from_the_real_data`
+  pins a differing row (`agent_dies_suspicious`: #3 `Assassination_Post_eu.tga`, #8
+  `pre_assassin_eu.tga`). Ours already read #3; no code change.
+- **`Data`** (`0x00A08B90`): `Aggressor` and `Defender`, each the side's diplomacy lists for mask 0x1A
+  (`0x009B2690`: all five keys `AtWar`, `Allies`, `TradeRights`, `Protectorates`, `ProtectorOf` are
+  set, list i is filled only when bit i is set, so here Allies, Protectorates and ProtectorOf) plus
+  `Name` (`0x008DA780`) and `Key`; `LocalFaction` (the ally's key); `AlliedWithAggressor` /
+  `AlliedWithDefender` (the ally's own record of that side is allied, patron or protectorate,
+  `0x00B0CDF0`); `InvitedByAggressor` / `InvitedByDefender` (+0x10 / +0x11).
+- **The panel** is the shipped `message_handler`: `AutoShow` opens the icon into the `event_message`
+  panel, whose `ally_attacked` layout (`event_message.lua` 462-530) picks the state text and buttons
+  from `Data`: both sides invited → assist_button1 = the aggressor, assist_button2 = the defender,
+  decline_button `DeclineSidingWithAlly()`; one side invited → assist_button1 sides with it and the
+  decline button (state `tx_decline(breaks_alliance)` when the defender invited) passes that side's
+  key; closing the panel unanswered declines with no key (line 711). Its `Layout` reads
+  `CampaignUI.PlayersCulture()` (`HandlePlayersCultureLuaCall` `0x009EEF10`: the local faction's subculture record, `0x008F3490`, its
+  culture +0x10, that record's key) for the envelope picture.
+- **Bindings:** `SideWithAlly(key)` (`HandleSideWithAllyLuaCall` `0x009F6DB0`) queues `CCQ_RESPOND_TO_ALLY_WAR_INVITATION` with the
+  faction `key` and accept 1; `DeclineSidingWithAlly([key])` (`HandleDeclineSidingWithAllyLuaCall` `0x009E21D0`) with the faction of its one
+  argument (none otherwise) and accept 0.
+
+Ours: `UiScriptHost::campaign_ally_war_call` (`crates/ntw_script/src/ui/campaign/ally_attacked.rs`),
+called from the campaign HUD's update, shows the top waiting call once (keyed by its factions and the
+stack depth) and the bindings push `CampaignCommand::RespondToAllyWarCall`; the model decides what the
+answer does. The diplomacy lists are one function, `diplomacy_lists` (diplomacy.rs), shared with
+`CampaignUI.DiplomacyDetails` (mask 0x1F). Tests (campaign_ui.rs):
+`ally_attacked_message_opens_and_its_assist_button_joins_the_ally`,
+`ally_attacked_decline_refuses_the_call`.

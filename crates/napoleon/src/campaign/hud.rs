@@ -30,7 +30,7 @@ use ntw_formats::default_keys::{self, Shortcuts};
 use ntw_formats::loc::Localisation;
 use ntw_formats::pack::Vfs;
 use ntw_script::ScriptSource;
-use ntw_script::ui::{CampaignKey, CampaignLink, CampaignRequest, CampaignSelection, FrontEndFacts, NodeId, PointerEvent, ShortcutMachine, UiScriptHost};
+use ntw_script::ui::{CampaignKey, CampaignKeys, CampaignLink, CampaignRequest, CampaignSelection, FrontEndFacts, NodeId, PointerEvent, ShortcutMachine, UiScriptHost};
 
 use super::play::CampaignSim;
 use crate::GameMode;
@@ -235,9 +235,7 @@ fn campaign_shortcuts(vfs: &Vfs) -> ShortcutMachine {
 
 /// The `keys` system's buffers, kept between frames so they are not allocated again once they
 /// have grown: the frame's key events, their (key, pressed) changes, the keys down replayed from
-/// the frame's start and the exe's names of those keys. The binding walk itself
-/// ([`ShortcutMachine::key_event`]) still allocates on each key event: its per-binding held flags
-/// and the list of stolen keys it reads from the UI (plus the stolen keys a stealer hears).
+/// the frame's start and the exe's names of those keys.
 #[derive(Default)]
 pub struct KeyBuffers {
     events: Vec<bevy::input::keyboard::KeyboardInput>,
@@ -246,18 +244,22 @@ pub struct KeyBuffers {
     names: Vec<&'static str>,
 }
 
-/// Keyboard → the HUD in the exe's order ([`UiScriptHost::campaign_key`]), once per key event
-/// (press, auto-repeat, release), as the campaign's key handler runs the bindings only then
-/// (`0x00A27EB0` → `0x00EEE1E0`): while a component holds the input focus, the editing keys and
-/// the typed text go to it and no binding runs; else the campaign's bindings of
-/// `text/default_keys.xml` ([`campaign_shortcuts`]) go through the shortcut handler's state
-/// machine: in vanilla ESCAPE (any modifier) is the root's `escape_menu`, CTRL+S `quick_save`,
-/// CTRL+L `quick_load` (the root's script decides, quick save only when `CanSave()`), Return
-/// `end_turn` on `button_end_turn` (its script ends the turn), W/S/A/D and the arrows the camera's
-/// steps ([`CampaignHud::camera_steps`], with the SHIFT of the frame's start, see
-/// [`super::camera::key_step`]); a key a component stole goes to its `OnKey`. Keys are matched by
-/// the exe's name of the physical key, the keys down at each event replayed from the frame's start
-/// ([`crate::shortcut_keys::KeysDown`]). Harness runs ignore the keyboard.
+/// Keyboard → the HUD in the exe's order: first each key event of the frame (press, auto-repeat,
+/// release) to the focused component ([`UiScriptHost::campaign_key`]: while a component holds the
+/// input focus the editing keys and the typed text go to it), then once per frame the shortcut
+/// poll ([`UiScriptHost::campaign_keys`]), as the campaign's listener runs it from its per-frame
+/// slot whether or not a key event came (`0x00A27EB0`, vtable `0x0136B40C` +0x20, called by
+/// `0x0048BD40` after the frame's events). The poll runs the campaign's bindings of
+/// `text/default_keys.xml` ([`campaign_shortcuts`]) on the keys down at the frame's end, through
+/// the shortcut handler's state machine: in vanilla ESCAPE (any modifier) is the root's
+/// `escape_menu`, CTRL+S `quick_save`, CTRL+L `quick_load` (the root's script decides, quick save
+/// only when `CanSave()`), Return `end_turn` on `button_end_turn` (its script ends the turn),
+/// W/S/A/D the camera's steps, pressed every frame they are held with the frame's time
+/// ([`CampaignHud::camera_steps`], [`super::camera::key_step`]); a key a component stole goes to
+/// its `OnKey`. The frame time is the real one capped at 0.3 s (`0x0048A650`). Keys are matched by
+/// the exe's name of the physical key against the keys down at the frame's end; the replay of the
+/// frame's events gives only each event's modifiers ([`crate::shortcut_keys::KeysDown`]). Harness
+/// runs ignore the keyboard.
 pub fn keys(
     hud: Option<NonSendMut<CampaignHud>>,
     mut input: MessageReader<bevy::input::keyboard::KeyboardInput>,
@@ -267,7 +269,7 @@ pub fn keys(
     mut buf: Local<KeyBuffers>,
 ) {
     let Some(mut hud) = hud else { return };
-    if harness.is_some() || input.is_empty() {
+    if harness.is_some() {
         input.clear();
         return;
     }
@@ -277,30 +279,33 @@ pub fn keys(
     changes.clear();
     changes.extend(events.iter().map(|ev| (ev.key_code, ev.state.is_pressed())));
     down.rewind(held.get_pressed().copied(), changes);
-    let shift = down.modifiers().shift;
-    let dt = time.delta_secs();
     let hud = &mut *hud;
     for (ev, &(key, pressed)) in events.iter().zip(changes.iter()) {
         down.apply(key, pressed);
-        down.names_into(names);
-        let event = CampaignKey {
-            down: names.as_slice(),
+        hud.host.campaign_key(CampaignKey {
             up: !pressed,
             edit: if pressed { crate::frontend::key_name(key) } else { None },
             text: if pressed { ev.text.as_deref() } else { None },
             repeat: ev.repeat,
             held: down.modifiers(),
-            time: dt,
-        };
-        let steps = &mut hud.camera_steps;
-        hud.host.campaign_key(&mut hud.shortcuts, event, &mut |func, time| {
-            if let Some(func) = super::camera::CameraFunc::from_binding(func) {
-                steps.push(super::camera::CameraKeyPress { func, time, shift });
-            }
         });
     }
+    // After the replay `down` is the keys held now.
+    down.names_into(names);
+    let held = down.modifiers();
+    let keys = CampaignKeys { down: names.as_slice(), held, time: time.delta_secs().min(MAX_FRAME_TIME) };
+    let steps = &mut hud.camera_steps;
+    hud.host.campaign_keys(&mut hud.shortcuts, keys, &mut |func, time| {
+        if let Some(func) = super::camera::CameraFunc::from_binding(func) {
+            steps.push(super::camera::CameraKeyPress { func, time, shift: held.shift });
+        }
+    });
     log_errors(&hud.host);
 }
+
+/// The longest frame time the frame tick passes on, 300 ms (CONFIRMED, `0x0048A650`: the delta
+/// from `0x010A1E10` is capped at 300 ms unless the frame-rate test is on).
+const MAX_FRAME_TIME: f32 = 0.3;
 
 /// The scripts' requests outside the HUD (`UiRequest`): a load (`CampaignUI.LoadCampaign` from the
 /// save panel, `QuickLoad`) reloads the campaign from that save, as the front end's Load Game does
@@ -415,7 +420,8 @@ fn apply_requests(hud: &mut CampaignHud, sim: &mut CampaignSim) {
 
 /// Feeds the model's treasury and date (`UpdateFactionFundsAndDate`) and the map selection to the
 /// layout whenever the campaign changed, and opens the movie panel for each defeat / victory movie
-/// the model queued (`UiScriptHost::campaign_outcome_movie`).
+/// the model queued (`UiScriptHost::campaign_outcome_movie`), and shows the human a waiting
+/// capture's screen and a waiting call to war's `ally_attacked` message.
 pub fn update(hud: Option<NonSendMut<CampaignHud>>, sim: Option<NonSendMut<CampaignSim>>) {
     let (Some(mut hud), Some(mut sim)) = (hud, sim) else { return };
     if hud.sim_generation == sim.generation {
@@ -440,6 +446,8 @@ pub fn update(hud: Option<NonSendMut<CampaignHud>>, sim: Option<NonSendMut<Campa
     }
     // A capture the human must answer opens the capture screen (see `campaign_capture_screen`).
     hud.host.campaign_capture_screen();
+    // A call to war waiting for the human's answer shows its message (see `campaign_ally_war_call`).
+    hud.host.campaign_ally_war_call();
     log_errors(&hud.host);
 }
 

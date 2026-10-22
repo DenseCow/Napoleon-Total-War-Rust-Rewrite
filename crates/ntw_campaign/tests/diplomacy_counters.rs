@@ -201,6 +201,19 @@ fn war_started_and_record_order_load_and_round_trip() {
         assert_eq!(unique.len(), order.len(), "{owner:?}: no record twice");
     }
     assert!(!w.diplomacy_record_order.is_empty());
+    // Every faction but the rebels holds a record towards every other one from the start, and none is held by
+    // or towards the rebels: a player's campaign, new or loaded, gets its records only from the file
+    // through the loader (`0x00AE8E10`), never in play (the setup path `0x00B45EA0` runs only in the
+    // developer tool `0x00A19350` that preprocesses `startpos.esf`), so these are all a campaign has.
+    for &owner in w.factions.keys() {
+        let want: Vec<FactionId> = match w.is_rebel_faction(owner) {
+            true => Vec::new(),
+            false => w.factions.keys().copied().filter(|&f| f != owner && !w.is_rebel_faction(f)).collect(),
+        };
+        let mut have = w.diplomacy_record_order.get(&owner).cloned().unwrap_or_default();
+        have.sort_unstable();
+        assert_eq!(have, want, "{owner:?}: a record towards every other faction but the rebels");
+    }
     let mut m = l.model.clone();
     let france = m.faction_by_key("france").unwrap().id;
     let austria = m.faction_by_key("austria").unwrap().id;

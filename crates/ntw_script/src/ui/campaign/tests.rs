@@ -109,6 +109,8 @@ pub(super) fn test_hud_setup(db: GameDatabase, setup: HudSetup) -> TestHud {
             discontent_growth: 0,
             town_wealth: 0,
             town_wealth_growth: 0,
+            town_wealth_refresh: Default::default(),
+            commodity_demand: Vec::new(),
             tax_exempt: false,
             religions: Vec::new(),
             class_bases: Vec::new(),
@@ -193,7 +195,7 @@ impl TestHud {
         self._scripts.state_mut().model.world.factions.get_mut(&A).unwrap().treasury = gold;
     }
     /// The commands the calls in `script` request.
-    fn requests_of(&self, script: &str) -> Vec<CampaignRequest> {
+    pub(super) fn requests_of(&self, script: &str) -> Vec<CampaignRequest> {
         self.host.take_campaign_requests();
         self.host.lua().load(script).exec().unwrap();
         self.host.take_campaign_requests()
@@ -1969,7 +1971,7 @@ fn finished_queue_items_leave_the_address_store() {
 
 /// The human (A) in a negotiation with a MADE-UP second faction B (treasury 300) that A
 /// proposed, the counterpart set as the "started" event leaves it, and a 500 state gift offered.
-fn negotiation_with_offer(hud: &TestHud) {
+pub(super) fn negotiation_with_offer(hud: &TestHud) {
     use ntw_sim::campaign::{Faction, GovernmentType};
     hud._scripts.state_mut().model.world.factions.insert(
         B,

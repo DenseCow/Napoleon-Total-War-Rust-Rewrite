@@ -36,8 +36,11 @@
 //! Not ported, none needed (`PATHFINDING.md` §8, CONFIRMED by disassembly): the script barriers'
 //! refresh (`0x00B64E30`, every faction; no barriers are modelled, [`zoc::zone_in`]); `0x0096CBE0`
 //! at a battle's start, which floods the characters lifted off the map in mid-move (+0x1B7, set by
-//! character vtable slot +0x1C `0x00A28B50`, cleared by the move's last step at `0x00A28855`; a walk
-//! of ours moves whole, so none is ever lifted); `0x009CB4C0`, run by the force reader `0x00881120`
+//! character vtable slot +0x1C `0x00A28B50`, cleared by the move's last step at `0x00A28855`): it
+//! walks the moving characters' list (the move manager at campaign +0xF60, its list +0x24, node +8
+//! the character, whose movable base keeps a pointer to him at +0x20), the one `0x00973B90` steps
+//! every update (`0x00972CA0` per character). A walk of ours moves whole
+//! ([`CampaignModel::set_down`]), so none is ever lifted; `0x009CB4C0`, run by the force reader `0x00881120`
 //! while a save is read, so it floods nothing (+0xFC7 is still set). `HireAdmiral`'s own flood
 //! (`0x00A16110` at `0x00A162CA`: the new commander at the fleet's place) is the one
 //! `rebuild_force_zones` makes there.
@@ -870,7 +873,7 @@ mod tests {
         m.world.characters.get_mut(&GA).unwrap().position = at(20, 21);
         m.world.characters.get_mut(&GB).unwrap().position = at(60, 21);
         // The rule alone floods nothing (`0x00B67BD0`).
-        m.cancel_military_access(A, B);
+        m.cancel_military_access(A, B, &mut Vec::new());
         assert_eq!((zone(&m, GA), zone(&m, GB)), (a.clone(), b));
         // The command floods the target's zones (`0x00B67B20`), not the canceller's.
         m.apply_diplomatic_action(A, B, super::super::treaties::DiplomaticAction::CancelMilitaryAccess).unwrap();
@@ -1058,6 +1061,83 @@ mod tests {
         assert!(ev.iter().any(|e| matches!(e, super::super::events::CampaignEvent::CharacterDisembarksNavy { .. })), "{ev:?}");
         assert_ne!(m.world.characters[&admiral].position, at(2, 5), "the fleet sailed");
         assert!(!zone(&m, admiral).is_empty());
+        assert_flooded(&m, GA);
+    }
+
+    /// Every unit can hide on the campaign map, and `cs` have details to hold the flag.
+    fn all_stealthy(m: &mut CampaignModel, cs: &[CharacterId]) {
+        let mut rules = (*m.rules).clone();
+        for r in rules.units.values_mut() {
+            r.campaign_stealth = true;
+        }
+        m.rules = Arc::new(rules);
+        for c in cs {
+            m.world.character_details.entry(*c).or_default();
+        }
+    }
+
+    /// A walk's last step sets the walker down (`0x00A285E0` with 1, `0x00972EB1`): his hidden flag is
+    /// recomputed, and only his (`0x009D3000` at `0x00A2885C` runs on `this`): a navy's walk leaves
+    /// the flag of the army aboard as it was.
+    #[test]
+    fn a_walk_sets_the_walkers_hidden_flag_only() {
+        let (mut m, admiral) = coast_model();
+        all_stealthy(&mut m, &[GA, admiral]);
+        m.apply(CampaignCommand::MoveForce { force: ForceId(1000), to: at(15, 5) }).unwrap();
+        assert!(m.world.character_details[&GA].hidden);
+
+        let (mut m, admiral) = coast_model();
+        all_stealthy(&mut m, &[GA, admiral]);
+        m.world.characters.get_mut(&GA).unwrap().position = at(6, 5);
+        m.world.embarked.insert(ForceId(1000), ForceId(1002));
+        m.world.character_details.get_mut(&GA).unwrap().hidden = false;
+        m.apply(CampaignCommand::MoveForce { force: ForceId(1002), to: at(2, 5) }).unwrap();
+        assert_ne!(m.world.characters[&admiral].position, at(6, 5), "the fleet sailed");
+        assert!(m.world.character_details[&admiral].hidden);
+        assert!(!m.world.character_details[&GA].hidden, "the carried army's flag is not re-evaluated");
+    }
+
+    /// A landing's fleet sail ends like a walk: the admiral's hidden flag is recomputed.
+    #[test]
+    fn a_landing_sets_the_admirals_hidden_flag() {
+        let (mut m, admiral) = coast_model();
+        for c in [GA, admiral] {
+            m.world.characters.get_mut(&c).unwrap().position = at(2, 5);
+        }
+        m.world.embarked.insert(ForceId(1000), ForceId(1002));
+        all_stealthy(&mut m, &[GA, admiral]);
+        m.apply(CampaignCommand::Disembark { force: ForceId(1000), to: at(15, 5) }).unwrap();
+        assert_ne!(m.world.characters[&admiral].position, at(2, 5), "the fleet sailed");
+        assert!(m.world.character_details[&admiral].hidden);
+    }
+
+    /// The landed army is set down at the landing (`0x00A285E0` with 1 from the step mover at the
+    /// route's end, `0x00972EB1` / `0x00973A01`, after the `navy_disembark` and `teleport` waypoints
+    /// `0x0094BD50` / `0x0090B720` of `0x00918750`): its sight from the landing is added to the
+    /// shroud and its own hidden flag is recomputed.
+    #[test]
+    fn a_landing_sets_the_landed_army_down() {
+        use super::super::visibility::{CellSet, Shroud, SightGrid};
+        let (mut m, admiral) = coast_model();
+        for c in [GA, admiral] {
+            m.world.characters.get_mut(&c).unwrap().position = at(2, 5);
+        }
+        m.world.embarked.insert(ForceId(1000), ForceId(1002));
+        all_stealthy(&mut m, &[GA, admiral]);
+        // Only the army sees, 1 unit around it; nothing is visible yet.
+        let ids: Vec<CharacterId> = m.world.characters.keys().copied().collect();
+        for c in ids {
+            m.world.sight_radius.insert(c, if c == GA { 1.0 } else { 0.0 });
+        }
+        m.world.regions.clear();
+        m.world.sight_grid = Some(SightGrid::centred(64, 64, 64));
+        m.world.shrouds.insert(A, Shroud { explored: CellSet::new(64, 64), visible: CellSet::new(64, 64), hidden: CellSet::new(64, 64), active: true });
+        m.apply(CampaignCommand::Disembark { force: ForceId(1000), to: at(15, 5) }).unwrap();
+        assert_eq!(m.carrier_of(ForceId(1000)), None, "landed");
+        let (x, z) = m.world.characters[&GA].position;
+        let east = (x.to_f32() + 0.9, z.to_f32());
+        assert!(m.sees(A, east), "the army's sight from the landing");
+        assert!(m.world.character_details[&GA].hidden, "the landed army's hidden flag");
         assert_flooded(&m, GA);
     }
 

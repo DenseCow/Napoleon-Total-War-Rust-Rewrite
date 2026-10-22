@@ -46,8 +46,6 @@ impl std::error::Error for TableError {}
 /// The exe row layouts of the tables the AI reads, as `Schema::from_codes` strings
 /// (`s` string, `o` optional string, `b` bool, `i` i32, `f` f32). Source: DB_BUILDERS.md.
 pub mod layouts {
-    /// `campaign_ai_personalities` (reader 0xDD29B0): key, bool.
-    pub const CAMPAIGN_AI_PERSONALITIES: &str = "sb";
     /// `campaign_ai_personality_junctions` (reader 0xDD22A0): personality, tunable, value (f32 INFERRED).
     pub const CAMPAIGN_AI_PERSONALITY_JUNCTIONS: &str = "ssf";
     /// `campaign_ai_managers` (reader 0xDD2220): key.

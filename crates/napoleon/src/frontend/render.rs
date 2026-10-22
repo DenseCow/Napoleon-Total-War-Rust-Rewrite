@@ -249,10 +249,11 @@ fn shaded_color(argb: u32, state: &ntw_formats::ui_layout::UiState, undrawn: &mu
 /// window / scale and drawn scaled by it (0x011617C0 sizes, 0x011881C0 positions: scale ×
 /// position plus anchor × window, which is the same for docked components). The mapping is the render
 /// device's, with no per-HUD switch (the only one, device `+0x69C70`, is set in its ctor
-/// `0x01132530`), so every HUD (campaign, battle) is drawn through it; the screen size it reads is
-/// the device's back buffer (`DAT_0182EB18` `+0xC` / `+0x10`). The helpers below (and the scale
-/// [`spawn_world`] draws with) are the one place a HUD maps between window pixels and its virtual
-/// screen.
+/// `0x01132530`, the one global device `0x0182EB14` made by `0x01159A10`), so every HUD (front
+/// end, campaign, battle) is drawn through it: each one's component images reach the device through
+/// the same component draw `0x01028510`. The screen size it reads is the device's back buffer
+/// (`DAT_0182EB18` `+0xC` / `+0x10`). The helpers below (and the scale [`spawn_world`] draws with)
+/// are the one place a HUD maps between window pixels and its virtual screen.
 pub fn ui_scale(window: Vec2) -> f32 {
     (window.x / 1280.0).min(window.y / 960.0).min(1.0)
 }
@@ -317,6 +318,13 @@ fn clip_sprite(sprite: &mut Sprite, rect: UiRect, clip: Option<UiRect>, images: 
 
 /// Spawns the sprites for every visible component under `root`, in draw order. `scale` is the UI
 /// scale (see [`ui_scale`]; 1.0 draws the layout 1:1 in window pixels).
+///
+/// PROVISIONAL: DrawMode 1 subtrees (`UiComponent::unknown_140`) are drawn scaled like the rest.
+/// The exe draws them 1:1 (device slots `+0x284` / `+0x288`, `0x011AD330` / `0x011AD3E0`:
+/// position + anchor × window, no scale), so below 1280x960 the front end's `napoleon_battles`
+/// `unscaled_bg` / `movie`, the options calibration `image` and two campaign tooltips come out
+/// smaller than the original's; at 1280x960 and above the two modes are the same. The anchor the
+/// image draw passes (its 6th stack argument, from `0x01028C00`) is not traced yet.
 pub fn spawn_world(world: &UiWorld, root: NodeId, commands: &mut Commands, assets: &mut UiAssets, images: &mut Assets<Image>, window: Vec2, scale: f32) {
     let mut z = 0.0f32;
     world.visit_visible(root, &mut |id, node| {

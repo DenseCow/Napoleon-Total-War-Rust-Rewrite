@@ -56,7 +56,7 @@ fn play(f: &Fixture, m: &mut CampaignModel, turns: u32) {
     m.attach_terrain(f.terrain.clone());
     let ctx = driver::context_for(m, "eur_napoleon");
     for _ in 0..turns {
-        driver::end_turn(m, &f.data, &ctx);
+        driver::end_turn_declining_calls(m, &f.data, &ctx);
     }
 }
 

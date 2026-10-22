@@ -116,18 +116,23 @@ pub struct LandUnit {
     pub acceleration: f32,
     /// Deceleration in m/s² (column 6, locomotive `+0x100`), as [`LandUnit::acceleration`].
     pub deceleration: f32,
-    /// Each man's radius in metres: the soldier's `+0x620`, which the soldier set-up `0x0061CB90`
-    /// sets from `+0x58`, column 12 of the `battle_entities` record his unit builds its men from
-    /// (unit `+0x60`, pushed at `0x0051C09B`; men 0.35). The copy at `0x0061D2D8` is CONFIRMED;
-    /// INFERRED that nothing else rewrites a plain (0x660-byte) soldier's `+0x620`: a scan for direct
-    /// stores to `[reg+0x620]` finds 24 besides `0x0061D2D8` and `0x00607540`, none traced to a
-    /// soldier (UNITS_TERRAIN_FIDELITY.md "The radius grown over attached entities"). The measured
-    /// box adds twice the largest to each extent ([`super::march::SquadBox`]). Unit stat
-    /// input; 0 without entity data. PROVISIONAL: `0x00607540` grows `+0x620` of the 0x6C8-byte
-    /// soldier objects to cover their attached entities; ours keeps the man's own radius, and which
-    /// units those objects are and whether their squad box reads them is UNKNOWN
-    /// (UNITS_TERRAIN_FIDELITY.md "The radius grown over attached entities").
+    /// Each man's own radius in metres: the soldier's `+0x58`, column 12 of the `battle_entities`
+    /// record his unit builds its men from (unit `+0x60`, pushed at `0x0051C09B`; men 0.35). The
+    /// soldier tests that read `+0x58` read this: the attacker-list contact (`0x0052EDB0`, both
+    /// soldiers' `+0x58` at `0x0052EE29` / `0x0052EE38`, CONFIRMED static; [`Battle::fill_attackers`])
+    /// and the in-area test (`0x005857A0`, `men_inside`). Unit stat input; 0 without entity data.
+    /// Set with [`LandUnit::set_man_radius`], which also sets [`LandUnit::cover_radius`].
     pub man_radius: f32,
+    /// Each man's cover radius in metres: the soldier's `+0x620`, which the soldier set-up
+    /// `0x0061CB90` copies from `+0x58` (CONFIRMED, `0x0061D2D8`). The squad summary's man record
+    /// reads it (`0x00519150`, [`super::march::SummaryMan::radius`]) and the measured box adds twice
+    /// the largest to each extent ([`super::march::SquadBox`]). Nothing else rewrites a man's
+    /// `+0x620` except the growth over attached entities (`0x00607540`, [`cover_radius_over_attached`]),
+    /// which only gun trains run (CONFIRMED static: the 24 other direct stores to `[reg+0x620]` are
+    /// all in non-soldier classes or on stack locals, and no soldier-sized bulk copy exists;
+    /// UNITS_TERRAIN_FIDELITY.md "The radius grown over attached entities"). Ours builds no gun
+    /// train, so for every man it models this equals [`LandUnit::man_radius`].
+    pub cover_radius: f32,
     /// The ground speed (m/s) the unit moved at in its last tick (the soldier's `+0x194`): the
     /// speed the next tick's change starts from ([`step_speed`]). 0 when it stopped.
     pub speed: f32,
@@ -331,6 +336,12 @@ impl LandUnit {
         self.destination
     }
 
+    /// Sets each man's radius `+0x58` ([`LandUnit::man_radius`]) and, as the soldier set-up
+    /// copies it at `0x0061D2D8`, his cover radius `+0x620` ([`LandUnit::cover_radius`]).
+    pub fn set_man_radius(&mut self, radius: f32) {
+        (self.man_radius, self.cover_radius) = (radius, radius);
+    }
+
     /// A new unit with neutral placeholder stats. Speeds and morale stat are inputs the caller
     /// should set from the unit's game data.
     pub fn new(id: u32, side: u8, men: u32, position: (f32, f32)) -> Self {
@@ -348,6 +359,7 @@ impl LandUnit {
             acceleration: f32::INFINITY,
             deceleration: f32::INFINITY,
             man_radius: 0.0,
+            cover_radius: 0.0,
             speed: 0.0,
             timed_move: None,
             march: Default::default(),
@@ -622,16 +634,37 @@ pub struct Battle {
 /// True if every living man of `u` where he stands ([`LandUnit::men_standing`]) has his circle
 /// inside the area `[min x, min y, max x, max y]`, edges included: the soldier test of `0x005857A0`
 /// (CONFIRMED: `min ≤ p − r` and `p + r ≤ max` on both axes, `0x0058582D` / `0x00585831`). True
-/// without men, as the exe's empty loop. Ours tests `+0x58` itself: each man's radius comes from
-/// `+0x58`'s source, `battle_entities` column 12. For a plain soldier it equals the squad box's
-/// [`LandUnit::man_radius`] (soldier `+0x620`): equal at set-up (CONFIRMED, the copy at `0x0061D2D8`
-/// in `0x0061CB90`); stays equal afterwards INFERRED (no other writer identified; see the field
-/// doc); for a 0x6C8-byte
-/// object the two differ (`0x00607540` grows `+0x620` over the attached entities at `+0x674`).
+/// without men, as the exe's empty loop. The radius is the soldier's `+0x58` (`0x00585800`),
+/// [`LandUnit::man_radius`], not the squad box's cover radius `+0x620` ([`LandUnit::cover_radius`]).
 fn men_inside(u: &LandUnit, a: [f32; 4]) -> bool {
+    let r = u.man_radius;
     u.men_standing().all(|m| {
-        let r = m.radius;
         a[0] <= m.pos.0 - r && m.pos.0 + r <= a[2] && a[1] <= m.pos.1 - r && m.pos.1 + r <= a[3]
+    })
+}
+
+/// The cover radius `+0x620` of a man that carries attached entities: his own radius `+0x58`
+/// grown to reach the far edge of each one, i.e. the largest of `own_radius` and every entity's
+/// ground (x/z) distance from the man's `centre` plus that entity's radius `+0x58` (CONFIRMED,
+/// `0x00607540`: it resets `+0x620` to `+0x58`, then walks the attachment nodes at `+0x674` and
+/// each node's slots, taking the maximum over every filled slot; an empty slot is skipped, so
+/// `attached` holds only the filled ones, as `((x, z), radius)`).
+///
+/// Only gun trains (the limbered team, the 0x6C8-byte objects `0x00544E60` builds from the unit's
+/// gun-train `battle_entities` record) run it, from their vtable slots `+0x0C` (`0x005FCEB0`, call
+/// at `0x005FCF83`) and `+0x58` / `+0x54` (`0x005ED030` / `0x005ED060` → `0x005ED4B0`, tail jump at `0x005ED56A`);
+/// their slots hold the team's horses, the ammo caisson and one more member at the tail
+/// (UNITS_TERRAIN_FIDELITY.md "The radius grown over attached entities"). A gun train stays in its
+/// unit's man list, so its squad box reads the grown radius. Ours builds no gun train yet (BACKLOG
+/// §3 limbering), so no unit calls this and every man keeps `cover_radius == man_radius`.
+pub fn cover_radius_over_attached(
+    own_radius: f32,
+    centre: (f32, f32),
+    attached: impl IntoIterator<Item = ((f32, f32), f32)>,
+) -> f32 {
+    attached.into_iter().fold(own_radius, |cover, ((x, z), radius)| {
+        let reach = ((x - centre.0).powi(2) + (z - centre.1).powi(2)).sqrt() + radius;
+        cover.max(reach)
     })
 }
 
@@ -2778,7 +2811,7 @@ mod combatant_fatigue_tests {
         let mut b = Battle::new(1, KvMorale::default(), KvFatigue::default());
         for (id, side, x) in [(0, 0, 0.0), (1, 1, 200.0), (2, 0, 400.0)] {
             let mut u = LandUnit::new(id, side, 16, (x, 0.0));
-            u.man_radius = 0.5;
+            u.set_man_radius(0.5);
             u.place_at((x, 0.0), 0.0);
             b.add_unit(u);
         }
@@ -2829,6 +2862,53 @@ mod combatant_fatigue_tests {
         b.units[1].place_at((p.0 + 500.0, p.1), f);
         b.step();
         assert!(b.units[0].attackers.entries().is_empty());
+    }
+
+    #[test]
+    fn cover_radius_grows_to_the_far_edge_of_each_attached_entity() {
+        // 0x00607540: +0x620 = +0x58, then the max of (x/z distance + entity +0x58) over each slot.
+        let centre = (10.0, 20.0);
+        assert_eq!(cover_radius_over_attached(1.0, centre, []), 1.0);
+        // A horse 0.75 m aside and 2 m behind (radius 1.2) reaches 2.136 + 1.2; the caisson 14 m
+        // behind (radius 1.5) reaches 15.5, the largest.
+        let horse = ((10.75, 18.0), 1.2);
+        let grown = cover_radius_over_attached(1.0, centre, [horse]);
+        assert!((grown - (0.75f32.hypot(2.0) + 1.2)).abs() < 1e-5);
+        let grown = cover_radius_over_attached(1.0, centre, [horse, ((10.0, 6.0), 1.5), horse]);
+        assert!((grown - 15.5).abs() < 1e-5);
+        // An entity inside the own radius leaves it.
+        assert_eq!(cover_radius_over_attached(5.0, centre, [((11.0, 20.0), 1.0)]), 5.0);
+    }
+
+    #[test]
+    fn contact_and_area_tests_read_the_own_radius_not_the_cover_radius() {
+        // 0x0052EDB0 reads both soldiers' +0x58 (0x0052EE29 / 0x0052EE38) and 0x005857A0 his +0x58
+        // (0x00585800); the cover radius +0x620 the squad box reads (grown by 0x00607540 over
+        // attached entities) plays no part in either.
+        let mut b = Battle::new(1, KvMorale::default(), KvFatigue::default());
+        for (id, side, x) in [(0, 0, 0.0), (1, 1, 100.0)] {
+            let mut u = LandUnit::new(id, side, 1, (x, 0.0));
+            u.set_man_radius(0.5);
+            u.cover_radius = 5.0;
+            u.place_at((x, 0.0), 0.0);
+            b.add_unit(u);
+        }
+        let man = |b: &Battle, i: usize| b.units[i].men_standing().next().unwrap().pos;
+        // 3.5 m apart: out of the +0x58 reach (0.5 + 0.5 + 2), inside the +0x620 one (12).
+        let (p, q, at, f) = (man(&b, 0), man(&b, 1), b.units[1].position, b.units[1].facing);
+        b.units[1].place_at((at.0 - (q.0 - p.0) + 3.5, at.1 - (q.1 - p.1)), f);
+        assert!((dist2(man(&b, 0), man(&b, 1)).sqrt() - 3.5).abs() < 1e-4);
+        b.fill_attackers(0);
+        assert!(b.units[0].attackers.entries().is_empty());
+        // 2.9 m apart: in reach.
+        let at = b.units[1].position;
+        b.units[1].place_at((at.0 - 0.6, at.1), f);
+        b.fill_attackers(0);
+        assert_eq!(b.units[0].attackers.entries().len(), 1);
+        // The man 1 m from each edge of the area: inside by +0x58 (0.5), not by +0x620 (5).
+        let (x, z) = man(&b, 0);
+        assert!(men_inside(&b.units[0], [x - 1.0, z - 1.0, x + 1.0, z + 1.0]));
+        assert!(!men_inside(&b.units[0], [x - 0.4, z - 1.0, x + 1.0, z + 1.0]));
     }
 
     #[test]

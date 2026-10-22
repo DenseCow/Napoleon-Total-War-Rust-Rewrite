@@ -539,7 +539,7 @@ mod tests {
     fn losing_the_route_region_breaks_the_trade_both_ways() {
         let mut m = trade_map();
         trading(&mut m, A, B);
-        assert!(m.transfer_region(RegionId(12), C));
+        assert!(m.transfer_region(RegionId(12), C, &mut Vec::new()));
         let e = event("break_trade");
         for (x, y) in [(A, B), (B, A)] {
             let r = &m.world.relationships[&(x, y)];
@@ -557,7 +557,7 @@ mod tests {
         let mut m = trade_map();
         trading(&mut m, A, B);
         link(&mut m, 13, 11);
-        assert!(m.transfer_region(RegionId(12), C));
+        assert!(m.transfer_region(RegionId(12), C, &mut Vec::new()));
         assert!(m.world.relationships[&(A, B)].trade_agreement && m.world.relationships[&(B, A)].trade_agreement);
         assert!(!m.world.trade_paths.contains_key(&(A, B)) && !m.world.trade_paths.contains_key(&(B, A)));
     }
@@ -568,7 +568,7 @@ mod tests {
         let mut m = trade_map();
         trading(&mut m, A, B);
         m.world.factions.get_mut(&B).unwrap().key.clear();
-        assert!(m.transfer_region(RegionId(12), C));
+        assert!(m.transfer_region(RegionId(12), C, &mut Vec::new()));
         assert_eq!(m.world.trade_paths[&(A, B)].len(), 1);
         assert!(m.world.relationships[&(A, B)].trade_agreement);
     }
@@ -579,7 +579,7 @@ mod tests {
     fn a_route_the_rescan_cannot_remove_is_dropped_instead_of_hanging() {
         let mut m = trade_map();
         add_route(&mut m, A, C, route(&[10, 12], false));
-        assert!(m.transfer_region(RegionId(12), A));
+        assert!(m.transfer_region(RegionId(12), A, &mut Vec::new()));
         assert!(!m.world.trade_paths.contains_key(&(A, C)));
     }
 

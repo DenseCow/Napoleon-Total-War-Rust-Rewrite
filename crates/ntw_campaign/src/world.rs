@@ -16,7 +16,7 @@ use ntw_formats::esf::{EsfNode, EsfRecord};
 use ntw_sim::campaign::{
     BuildingRef, CampaignUnit, Character, CharacterId, CharacterKind, ConstructionItem, ConstructionKind, Faction,
     FactionId, Fort, FortId, ForceId, GovernmentType, MilitaryForce, PopulationClassState, RecruitmentItem, RecruitmentItemId, RecruitmentManager, RecruitmentSource,
-    PortBlockade, Region, RegionId, RegionSlot, Settlement, SlotRef, Stance, UnitId, World,
+    PortBlockade, RebelArmySide, Region, RegionId, RegionSlot, Settlement, SlotRef, Stance, UnitId, World,
 };
 use ntw_sim::campaign::rules::DEFAULT_TAX_LEVEL;
 use ntw_sim::fixed::Fixed20;
@@ -190,6 +190,9 @@ pub(crate) fn load_world(
                     Entry::Vacant(slot) => {
                         if !is_navy && let Some(gov) = rebel_army_government(rec, &apath) {
                             world.rebel_army_governments.insert(force.id, gov);
+                        }
+                        if !is_navy && let Some(side) = rebel_army_side(rec, &apath) {
+                            world.rebel_army_sides.insert(force.id, side);
                         }
                         slot.insert(force);
                     }
@@ -812,6 +815,10 @@ fn read_region(rec: &EsfRecord, path: &str, check: &mut Checker<'_>) -> Result<(
     let town_wealth = rec.get_u32(12).unwrap_or(0);
     let town_wealth_growth = rec.get_i32(15).unwrap_or(0);
     let tax_exempt = rec.get_bool(19).unwrap_or(false);
+    // #32: the stored demand per commodity (the loader `0x00445910` on +0x148, CONFIRMED; see `Region`). The
+    // load keeps it as stored: the demand step rebuilds it at the round start and at an owner change. A missing
+    // #32 reads empty; the trade load (`trade::read_network`, which knows the commodity count) logs it once.
+    let commodity_demand = rec.get(32).and_then(EsfNode::as_u32_array).map(<[u32]>::to_vec).unwrap_or_default();
     // Public-order data of the population (CONFIRMED layout: POPULATION #0 REGION_FACTORS #1 classes,
     // #11 RELIGION_BREAKDOWN).
     let factors = rec.child("POPULATION").and_then(|p| p.child("REGION_FACTORS"));
@@ -868,6 +875,9 @@ fn read_region(rec: &EsfRecord, path: &str, check: &mut Checker<'_>) -> Result<(
         discontent_growth,
         town_wealth,
         town_wealth_growth,
+        // Derived: the load refreshes it (`CampaignModel::refresh_all_town_wealth`).
+        town_wealth_refresh: Default::default(),
+        commodity_demand,
         tax_exempt,
         religions,
         class_bases,
@@ -944,6 +954,31 @@ fn rebel_army_government(rec: &EsfRecord, path: &str) -> Option<String> {
             None
         }
     }
+}
+
+/// The rising's side of an `ARMY`'s `REBEL_DATA` block (`World::rebel_army_sides`). CONFIRMED by the
+/// reader `0x00886950`: from record version 4 it reads `REBEL_DATA_INNARDS` (`0x00886C90`), below that
+/// `REBEL_DATA` itself, in the same order: `REBEL_SETUP` (#0, its #1 the faction key), the bonus values
+/// (#1), a bool (#2) and, only when the bool is set, a u32 (#3), REBEL_DATA +0x34. `None` without the
+/// block; a block without the faction string or the bool is logged once here.
+fn rebel_army_side(rec: &EsfRecord, path: &str) -> Option<RebelArmySide> {
+    let data = rec.child("REBEL_DATA")?;
+    let body = data.child("REBEL_DATA_INNARDS").unwrap_or(data);
+    let faction = body.child("REBEL_SETUP").and_then(|s| s.get_str(1));
+    let (Some(faction), Some(set)) = (faction, body.get_bool(2)) else {
+        log::warn!("{path}/REBEL_DATA: no REBEL_SETUP faction (#1) or no link flag (#2); the army's rising side is unknown");
+        return None;
+    };
+    let link = if set {
+        let Some(link) = body.get_u32(3) else {
+            log::warn!("{path}/REBEL_DATA: the link flag is set but no u32 follows it; the army's rising side is unknown");
+            return None;
+        };
+        link
+    } else {
+        0
+    };
+    Some(RebelArmySide { faction: faction.to_string(), link })
 }
 
 /// The forts of one `REGION`: its `FORT_ARRAY` items.

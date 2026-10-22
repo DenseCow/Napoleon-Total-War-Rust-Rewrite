@@ -989,13 +989,13 @@ fn make_unit(db: &GameDatabase, setup: &SetupData, key: &str, id: u32, side: u8)
         // PLACEHOLDER speeds when the entity is unknown (e.g. on the test fixture).
         None => (u.walk_speed, u.run_speed) = if is_cavalry { (3.0, 9.0) } else { (1.5, 4.0) },
     }
-    // Each man's radius (a plain soldier's `+0x620`): column 12 of the man's `battle_entities`
-    // record (unit `+0x60`), the margin the squad box adds around the men (`LandUnit::man_radius`,
-    // evidence and tags: see the field doc in ntw_sim `battle/model.rs`).
+    // Each man's radius (the soldier's `+0x58`, copied to the cover radius `+0x620` the squad box
+    // adds around the men): column 12 of the man's `battle_entities` record (unit `+0x60`;
+    // `LandUnit::set_man_radius`, evidence and tags: see the field docs in ntw_sim `battle/model.rs`).
     // Without the tables (the test fixture) it stays 0: the box spans the men's centres.
     if let Some(t) = entities {
         match t.entity(&stats.man_entity) {
-            Some(e) => u.man_radius = e.radius,
+            Some(e) => u.set_man_radius(e.radius),
             None => warn!("unit {key}: no battle_entities record {:?} for the man's radius", stats.man_entity),
         }
     }

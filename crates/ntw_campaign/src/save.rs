@@ -11,7 +11,7 @@
 //! |---|---|---|
 //! | root | `CAMPAIGN_STARTPOS` → `CAMPAIGN_SAVE_GAME`, `CAMPAIGN_PREOPEN_MAP_INFO` dropped | CONFIRMED difference (W3 §4) |
 //! | header | `SAVE_GAME_HEADER` #0 faction, #2 turn, #3 year, `DATE` | CONFIRMED fields |
-//! | calendar, RNG | `CAMPAIGN_CALENDAR` #0..#3 + `DATE`, `RandSeed` #0 | CONFIRMED |
+//! | calendar, RNGs | `CAMPAIGN_CALENDAR` #0..#3 + `DATE`, `RandSeed` #0, `CAI_INTERFACE` #0 (the CAI stream, writer `0x00A5B5B0`) | CONFIRMED |
 //! | treasury | `FACTION_ECONOMICS` #1 | CONFIRMED position |
 //! | characters | `LOCOMOTABLE` #0/#1 position, #8 base and #9 current action points; removed characters' items are dropped | CONFIRMED positions |
 //! | forces | `MILITARY_FORCE` #0/#1, `UNITS_ARRAY` rebuilt from the model (existing unit items kept and patched: `UNIT` #5 men, #6 max men; new units cloned from a template unit item); destroyed forces dropped; new forces cloned from a template `ARMY`/`NAVY` item | CONFIRMED positions; cloning PROVISIONAL |
@@ -21,7 +21,7 @@
 //! | treaty money | `DIPLOMACY_RELATIONSHIP` #8 protectorate tribute, #9 patron income, #14 `REGULAR_PAYMENTS[]` (`write_treaty_money`) | CONFIRMED (writer `0x00AFC340`) |
 //! | script slots | `EPISODIC_RESTRICTIONS/LUA[]` ([`write_save_with`]) | CONFIRMED (CAMPAIGN_DATA.md §4) |
 //! | historical events triggered | `HISTORICAL_EVENT_MANAGER/TRIGGERED_DYNAMIC_EVENT_ARRAY[]` (`write_triggered_events`) | CONFIRMED (writer `0x00895050`) |
-//! | episodic switches | `EPISODIC_RESTRICTIONS` #8, #20, #22, #25, #29, #31, #32 (`details::write_switches`) | CONFIRMED positions (writer `0x009A1070`) |
+//! | episodic switches, zoom limit | `EPISODIC_RESTRICTIONS` #8, #20, #22, #25, #29, #31, #32, the f32s #13 / #14 (`details::write_switches`) | CONFIRMED positions (writer `0x009A1070`) |
 //! | links | `CHARACTER` #4 (force commanded) / #5 (unit attached), `UNIT` #10, `ARMY` #5 and residence #12 (garrisons), new colonels / captains cloned from a template character | CONFIRMED links (SAVE_COMPAT.md §4); cloned names PROVISIONAL |
 //! | other id sites | recruitment pools, `CHARACTER` #6, `MILITARY_FORCE` #2, residence #14, `PORT_GARRISON_MANAGER` #0, `COMMERCE_RAIDS`: cleared of objects the model no longer has | sites CONFIRMED (`save_audit refsites`) |
 //! | AI block | `CAI_INTERFACE` kept while the world's objects are unchanged, else version 12 (the original rebuilds it) | CONFIRMED loader rule, SAVE_COMPAT.md §5 |
@@ -30,7 +30,8 @@
 //! An unchanged model wrote every user save back byte for byte (measured once, see SAVE_COMPAT.md; the test was removed), and
 //! every save written passes `save_check` (tests). Not written yet (kept as loaded): forces'
 //! positions inside settlements, character details and government posts (the model does not change
-//! them), `PENDING_BATTLE`.
+//! them), `PENDING_BATTLE`, the camera block (`CAMPAIGN_ENV/CAMPAIGN_CAMERA_MANAGER` is copied as
+//! loaded, so a written save holds the view it was loaded with, not the live one).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -313,12 +314,17 @@ fn write_save_tree(source: &EsfFile, model: &CampaignModel, human: &str, timesta
     if let Some(seed) = child_mut(m, "RandSeed") {
         set(seed, 0, EsfNode::U32(model.rng.state));
     }
+    // The CAI's random stream, `CAI_INTERFACE` #0 (the writer `0x00A5B5B0`).
+    if let Some(cai) = child_mut(m, "CAI_INTERFACE") {
+        set(cai, 0, EsfNode::U32(model.cai_rng.state));
+    }
     // The portrait decks the model drew from (CHARACTERS_FIDELITY.md §14).
     crate::portraits::write(m, model);
     // The campaign director: its RNG, queued region transfers and region-transfer counter.
     crate::director::write(m, model);
     write_triggered_events(m, &model.world.historical_events_triggered);
-    // The episodic switches (`EPISODIC_RESTRICTIONS` #8, #20, #22, #25, #29, #31, #32).
+    // The episodic switches (`EPISODIC_RESTRICTIONS` #8, #20, #22, #25, #29, #31, #32) and the zoom
+    // limit (#13 / #14).
     crate::details::write_switches(m, &model.world);
     if let Some(c) = child_mut(m, "CAMPAIGN_CALENDAR") {
         set(c, 0, EsfNode::U32(cal.turns_per_year));
@@ -717,6 +723,26 @@ impl SourceIndex {
     }
 }
 
+/// What every faction record needs from the whole world, built once per save (not per faction): who
+/// commands which force (CHARACTER #4), which unit each character is attached to (#5) and the
+/// settlement residences of the source.
+struct FactionLinks {
+    commands: BTreeMap<i32, u32>,
+    attached: BTreeMap<i32, i32>,
+    settlement_residences: BTreeSet<u32>,
+}
+
+impl FactionLinks {
+    fn new(model: &CampaignModel, ix: &SourceIndex) -> Self {
+        let w = &model.world;
+        Self {
+            commands: w.forces.values().filter_map(|fo| Some((fo.commander?.raw(), fo.id.raw()))).collect(),
+            attached: w.forces.values().flat_map(|fo| fo.units.iter()).filter_map(|u| Some((u.character?.raw(), u.id.raw()))).collect(),
+            settlement_residences: ix.settlement_residence.values().copied().collect(),
+        }
+    }
+}
+
 fn write_factions(
     world: &mut EsfRecord,
     model: &CampaignModel,
@@ -724,10 +750,11 @@ fn write_factions(
     residences: &BTreeMap<u32, u32>,
     residents: &BTreeMap<ntw_sim::campaign::CharacterId, ntw_sim::campaign::RegionId>,
 ) -> Result<(), SaveError> {
+    let links = FactionLinks::new(model, ix);
     let patch = |f: &mut EsfRecord| -> Result<(), SaveError> {
         let Some(id) = faction_id(f) else { return Ok(()) };
         let Some(faction) = model.world.factions.values().find(|x| x.id.raw() == id) else { return Ok(()) };
-        write_faction(f, faction, model, ix, residences, residents)
+        write_faction(f, faction, model, ix, residences, residents, &links)
     };
     if let Some(a) = array_mut(world, "FACTION_ARRAY") {
         for item in &mut a.items {
@@ -921,11 +948,12 @@ fn write_new_details(d: &mut EsfRecord, details: &ntw_sim::campaign::details::Ch
 
 /// A character's `CHARACTER_DETAILS` #8 `PORTRAIT_DETAILS` from the model (card, custom name, info,
 /// number): a new character's drawn portrait, a promoted one's new pictures. Only changed values
-/// are written, so a portrait the model never touched stays bit for bit. A character the model
-/// has no portrait for (number -1, no pictures) keeps the record's: a new minister keeps his
-/// template's (the family's PLACEHOLDER, CHARACTERS_FIDELITY.md §5c).
-fn write_portrait(d: &mut EsfRecord, p: &ntw_sim::campaign::details::Portrait) {
-    if d.name != "CHARACTER_DETAILS" || *p == ntw_sim::campaign::details::Portrait::default() {
+/// are written, so a portrait the model never touched stays bit for bit. A loaded character the
+/// model has no portrait for (number -1, no pictures) keeps the record's; a `new` one (not in the
+/// source) always gets the model's, so an empty deck gives him none, as the exe's does, not his
+/// template's (CHARACTERS_FIDELITY.md §14).
+fn write_portrait(d: &mut EsfRecord, p: &ntw_sim::campaign::details::Portrait, new: bool) {
+    if d.name != "CHARACTER_DETAILS" || (!new && *p == ntw_sim::campaign::details::Portrait::default()) {
         return;
     }
     let Some(EsfNode::Record(r)) = d.children.get_mut(8) else { return };
@@ -1029,6 +1057,7 @@ fn write_faction(
     ix: &SourceIndex,
     residences: &BTreeMap<u32, u32>,
     residents: &BTreeMap<ntw_sim::campaign::CharacterId, ntw_sim::campaign::RegionId>,
+    links: &FactionLinks,
 ) -> Result<(), SaveError> {
     use ntw_sim::campaign::CharacterId;
     if let Some(e) = child_mut(f, "FACTION_ECONOMICS") {
@@ -1059,13 +1088,10 @@ fn write_faction(
     write_pools(f, model.world.faction_details.get(&faction.id));
     write_technologies(f, model.world.faction_details.get(&faction.id));
     let w = &model.world;
-    // Who commands what, and which unit each character is attached to (CHARACTER #4 / #5).
-    let commands: BTreeMap<i32, u32> = w.forces.values().filter_map(|fo| Some((fo.commander?.raw(), fo.id.raw()))).collect();
-    let attached: BTreeMap<i32, i32> =
-        w.forces.values().flat_map(|fo| fo.units.iter()).filter_map(|u| Some((u.character?.raw(), u.id.raw()))).collect();
+    // Who commands what, and which unit each character is attached to (CHARACTER #4 / #5), built once per save.
+    let FactionLinks { commands, attached, settlement_residences } = links;
     // The settlement residence each resident is in (CHARACTER #7; SAVE_COMPAT.md §4).
     let resident_in = |id: i32| residents.get(&CharacterId(id)).and_then(|r| ix.settlement_residence.get(&r.raw())).copied();
-    let settlement_residences: BTreeSet<u32> = ix.settlement_residence.values().copied().collect();
     // Characters: patch survivors, drop the dead, add the new.
     if let Some(chars) = array_mut(f, "CHARACTER_ARRAY") {
         chars.items.retain(|item| {
@@ -1149,7 +1175,7 @@ fn write_faction(
                 }
                 if let Some(EsfNode::Record(dr)) = c.children.get_mut(1) {
                     write_traits(dr, d);
-                    write_portrait(dr, &d.portrait);
+                    write_portrait(dr, &d.portrait, !have.contains(&id));
                     if !have.contains(&id) {
                         write_new_details(dr, d);
                     }
@@ -1594,7 +1620,8 @@ fn write_settlement_residents(r: &mut EsfRecord, residents: &[ntw_sim::campaign:
 /// region offset, CAMPAIGN_FIDELITY.md "Economy"; CONFIRMED positions): #9 base GDP, #10 GDP,
 /// #12 town wealth, #14 stored town wealth (= #12 in every region of every original save,
 /// CONFIRMED), #15 town wealth growth, #17 bankruptcy growth offset (u32 in the files; `set` only
-/// writes a value of the stored type), #18 the discontent part of the growth, #19 tax exempt. #13
+/// writes a value of the stored type), #18 the discontent part of the growth, #19 tax exempt, #32 the
+/// demand per commodity (written by `0x00A524BC`). #13
 /// (town wealth at the last wealth level) and #16 (wealth level count) are not modelled: kept.
 fn write_region_economy(r: &mut EsfRecord, region: &Region) {
     set(r, 9, EsfNode::U32(region.base_gdp));
@@ -1606,6 +1633,7 @@ fn write_region_economy(r: &mut EsfRecord, region: &Region) {
     set(r, 17, EsfNode::I32(region.wealth_growth_offset));
     set(r, 18, EsfNode::I32(region.discontent_growth));
     set(r, 19, EsfNode::Bool(region.tax_exempt));
+    set(r, 32, EsfNode::U32Array(region.commodity_demand.clone()));
 }
 
 /// The region's population fields the model changes each round (`POPULATION/REGION_FACTORS`, the
@@ -2320,6 +2348,8 @@ mod tests {
             discontent_growth: 0,
             town_wealth: 0,
             town_wealth_growth: 0,
+            town_wealth_refresh: Default::default(),
+            commodity_demand: Vec::new(),
             tax_exempt: false,
             religions: Vec::new(),
             class_bases: Vec::new(),

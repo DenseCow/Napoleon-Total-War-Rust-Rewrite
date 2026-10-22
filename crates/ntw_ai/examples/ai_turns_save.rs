@@ -38,7 +38,7 @@ fn main() {
     m.attach_terrain(Terrain(Arc::new(ntw_campaign::pathing::build_grid(&map))));
     let ctx = driver::context_for(&m, "eur_napoleon");
     for _ in 0..turns {
-        driver::end_turn(&mut m, &data, &ctx);
+        driver::end_turn_declining_calls(&mut m, &data, &ctx);
     }
     let season = ntw_sim::calendar::Season::from_code(m.calendar.date.season).and_then(|s| {
         let key = s.onscreen_key();

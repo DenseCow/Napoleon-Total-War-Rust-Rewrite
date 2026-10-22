@@ -250,12 +250,16 @@ impl CampaignModel {
                 if port {
                     self.update_commodity_prices_with(false);
                 }
+                // `SetSettlementOwner` rebuilds the region's demand (`0x00AB49F0(0)` at `0x00B2B85F`) and then
+                // refreshes its town wealth (`0x00AB4410(0)` at `0x00B2B86F`, CONFIRMED).
+                self.refresh_region_demand(region);
+                self.refresh_region_town_wealth(region);
             }
             if let Some(killer) = killer {
                 if let Some(d) = self.world.faction_details.get_mut(&killer) {
                     d.destroyed_faction = true;
                 }
-                self.hand_regions_to_killer(faction, killer);
+                self.hand_regions_to_killer(faction, killer, events);
             }
         } else {
             self.end_campaign();
@@ -332,7 +336,7 @@ impl CampaignModel {
     /// faction's region list, `0x00B58A10(killer, 0, 0)` each): the first region of the list
     /// ([`super::world::World::faction_regions_in_list_order`]), or the second when the first is the
     /// faction's capital (`0x00A8B5A0`) and another is left.
-    fn hand_regions_to_killer(&mut self, faction: FactionId, killer: FactionId) {
+    fn hand_regions_to_killer(&mut self, faction: FactionId, killer: FactionId, events: &mut Vec<CampaignEvent>) {
         loop {
             let list = self.world.faction_regions_in_list_order(faction);
             let mut held = list.iter().copied();
@@ -341,7 +345,7 @@ impl CampaignModel {
                 Some(second) if self.world.is_capital(first) => second,
                 _ => first,
             };
-            if !self.transfer_region(region, killer) {
+            if !self.transfer_region(region, killer, events) {
                 // Not reached: the killer is another faction, so the owner always changes.
                 log::error!("{faction:?}'s region {region:?} did not pass to {killer:?}: hand-over stopped");
                 return;
@@ -395,7 +399,7 @@ impl CampaignModel {
         if !self.in_the_game(faction) {
             self.reemerge_faction(faction, prev, true, events);
         }
-        self.transfer_region(region, faction)
+        self.transfer_region(region, faction, events)
     }
 
     /// `faction`, out of the game, comes back (`0x008AE6E0`, CONFIRMED): every relationship between it and

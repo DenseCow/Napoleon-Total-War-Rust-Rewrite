@@ -392,14 +392,77 @@ fn force_make_protectorate_outside_the_patrons_turn_returns_its_events() {
     assert!(st.log.iter().any(|l| l.contains("force_make_protectorate") && !l.contains("refused")), "{:?}", st.log);
 }
 
+/// Made-up: a region of `owner`'s whose settlement holds a garrison army of `garrison_faction`'s.
+fn garrison_in_a_region_of(
+    model: &mut ntw_sim::campaign::CampaignModel,
+    owner: ntw_sim::campaign::FactionId,
+    garrison_faction: ntw_sim::campaign::FactionId,
+) -> (ntw_sim::campaign::RegionId, ntw_sim::campaign::CharacterId) {
+    use ntw_sim::campaign::{Character, CharacterId, CharacterKind, ForceId, MilitaryForce, Region, RegionId, Settlement};
+    use ntw_sim::fixed::Fixed20;
+    let (region, general, force) = (RegionId(1), CharacterId(7), ForceId(70));
+    let origin = (Fixed20::from_int(0), Fixed20::from_int(0));
+    model.world.regions.insert(
+        region,
+        Region {
+            id: region,
+            key: "test_region_1".into(),
+            owner,
+            settlement: Settlement { key: "settlement:test_region_1:town".into(), position: origin },
+            slots: Vec::new(),
+            road: None,
+            fortification: None,
+            road_holder: None,
+            fortification_holder: None,
+            population: 1000,
+            base_gdp: 100,
+            gdp: 100,
+            wealth_growth_offset: 0,
+            discontent_growth: 0,
+            town_wealth: 0,
+            town_wealth_growth: 0,
+            town_wealth_refresh: Default::default(),
+            commodity_demand: Vec::new(),
+            tax_exempt: false,
+            religions: Vec::new(),
+            class_bases: Vec::new(),
+            unit_resources: Vec::new(),
+            population_state: Default::default(),
+            recruitment_queue: Vec::new(),
+            construction: Vec::new(),
+            garrison: Some(force),
+            fleet: None,
+            siege: Default::default(),
+        },
+    );
+    model.world.characters.insert(
+        general,
+        Character {
+            id: general,
+            faction: garrison_faction,
+            kind: CharacterKind::General,
+            position: origin,
+            movement_points: 10,
+            max_movement_points: 10,
+            base_movement_points: 10,
+            garrisoned_in: Some(region),
+        },
+    );
+    model.world.forces.insert(force, MilitaryForce { id: force, faction: garrison_faction, commander: Some(general), units: Vec::new(), is_navy: false });
+    (region, general)
+}
+
 #[test]
 fn force_make_peace_outside_the_first_factions_turn_makes_peace() {
-    // 0x0097AC90 queues CCQ_MAKE_PEACE, whose handler 0x00936710 has no turn test: France's peace with
-    // Austria holds when a handler in Austria's turn calls it.
+    // 0x0097AC90 queues CCQ_MAKE_PEACE (messages on), whose handler 0x00936710 has no turn test, then
+    // CCQ_MOVE_ARMIES_OUT_OF_REGIONS (0x009838B0, handler 0x00936AB0): France's peace with Austria holds
+    // when a handler in Austria's turn calls it, France's garrison leaves Austria's settlement, and the
+    // peace's events (its stance change and ceasefire messages) reach the host.
     use ntw_sim::campaign::{CampaignCommand, CampaignEvent, Stance};
     let src = ScriptSource::empty().with_memory_file("events.lua", EVENTS).with_memory_file("test.lua", SCRIPT);
     let mut model = common::tiny_model();
     let (fr, au) = (model.faction_by_key("france").unwrap().id, model.faction_by_key("austria").unwrap().id);
+    let (region, general) = garrison_in_a_region_of(&mut model, au, fr);
     model.apply(CampaignCommand::DeclareWar { a: fr, b: au }).unwrap();
     model.turn.humans = vec![fr, au];
     let mut h = ScriptHost::new(model, "france", src).unwrap();
@@ -417,10 +480,106 @@ fn force_make_peace_outside_the_first_factions_turn_makes_peace() {
     )
     .unwrap();
     let fired = h.end_turn();
-    assert!(fired.iter().any(|(e, _)| matches!(e, CampaignEvent::FactionTurnStart { faction } if *faction == au)), "Austria's turn started");
+    let start = fired.iter().position(|(e, _)| matches!(e, CampaignEvent::FactionTurnStart { faction } if *faction == au)).expect("Austria's turn started");
     assert_eq!(h.model().world.stance(fr, au), Stance::Neutral);
+    let peace = fired
+        .iter()
+        .position(|(e, _)| matches!(e, CampaignEvent::StanceChanged { a, b, stance: Stance::Neutral } if [*a, *b].contains(&fr) && [*a, *b].contains(&au)))
+        .expect("the peace's event is returned");
+    assert!(start < peace);
+    assert!(fired.iter().any(|(e, _)| matches!(e, CampaignEvent::Message { .. })), "the peace posts its ceasefire messages (suppress byte 0)");
+    assert_eq!(h.model().world.regions[&region].garrison, None, "France's army left Austria's settlement");
+    assert_eq!(h.model().world.characters[&general].garrisoned_in, None);
     let st = h.state();
     assert!(st.log.iter().any(|l| l.contains("force_make_peace") && !l.contains("refused")), "{:?}", st.log);
+}
+
+#[test]
+fn force_make_peace_when_not_at_war_does_nothing() {
+    // 0x0097AC90 tests the war (0x008CE9B0) before it queues anything: no peace and no move-out, so
+    // France's garrison in Austria's settlement stays.
+    let src = ScriptSource::empty().with_memory_file("events.lua", EVENTS).with_memory_file("test.lua", SCRIPT);
+    let mut model = common::tiny_model();
+    let (fr, au) = (model.faction_by_key("france").unwrap().id, model.faction_by_key("austria").unwrap().id);
+    let (region, general) = garrison_in_a_region_of(&mut model, au, fr);
+    let h = ScriptHost::new(model, "france", src).unwrap();
+    h.run_file("data/test.lua").unwrap();
+    h.fire("NewSession", ScriptContext::default());
+    h.lua().load(r#"game_interface:force_make_peace("france", "austria")"#).exec().unwrap();
+    assert_eq!(h.model().world.regions[&region].garrison, Some(ntw_sim::campaign::ForceId(70)));
+    assert_eq!(h.model().world.characters[&general].garrisoned_in, Some(region));
+    let st = h.state();
+    assert!(st.log.iter().any(|l| l.contains("force_make_peace") && l.contains("not at war") && !l.contains("refused")), "{:?}", st.log);
+}
+
+#[test]
+fn force_declare_war_declares_war_and_returns_its_events() {
+    // 0x0097A930 queues CCQ_DECLARE_WAR (0x009837F0), whose handler 0x00932B70 has no turn test: France's
+    // war on Austria holds when a handler in Austria's turn calls it, and the war's stance change reaches
+    // the host after Austria's turn start.
+    use ntw_sim::campaign::{CampaignEvent, Stance};
+    let src = ScriptSource::empty().with_memory_file("events.lua", EVENTS).with_memory_file("test.lua", SCRIPT);
+    let mut model = common::tiny_model();
+    let (fr, au) = (model.faction_by_key("france").unwrap().id, model.faction_by_key("austria").unwrap().id);
+    model.turn.humans = vec![fr, au];
+    let mut h = ScriptHost::new(model, "france", src).unwrap();
+    h.run_file("data/test.lua").unwrap();
+    h.fire("NewSession", ScriptContext::default());
+    h.exec(
+        r#"local e = require "data.events"
+           starts = 0
+           e.FactionTurnStart[#e.FactionTurnStart+1] = function(context)
+               starts = starts + 1
+               if starts == 2 then -- Austria's turn, after France's
+                   game_interface:force_declare_war("france", "austria")
+               end
+           end"#,
+    )
+    .unwrap();
+    let fired = h.end_turn();
+    let start = fired.iter().position(|(e, _)| matches!(e, CampaignEvent::FactionTurnStart { faction } if *faction == au)).expect("Austria's turn started");
+    assert_eq!(h.model().world.stance(fr, au), Stance::War);
+    let war = fired
+        .iter()
+        .position(|(e, _)| matches!(e, CampaignEvent::StanceChanged { a, b, stance: Stance::War } if [*a, *b].contains(&fr) && [*a, *b].contains(&au)))
+        .expect("the war's event is returned");
+    assert!(start < war);
+    let st = h.state();
+    assert!(st.log.iter().any(|l| l.contains("force_declare_war") && !l.contains("refused")), "{:?}", st.log);
+}
+
+#[test]
+fn force_declare_war_when_at_war_does_nothing() {
+    // 0x0097A930 tests the war (0x008CE9B0) before it queues anything: no second CCQ_DECLARE_WAR, so no
+    // stance change reaches the host and nothing is refused.
+    use ntw_sim::campaign::{CampaignCommand, CampaignEvent, Stance};
+    let src = ScriptSource::empty().with_memory_file("events.lua", EVENTS).with_memory_file("test.lua", SCRIPT);
+    let mut model = common::tiny_model();
+    let (fr, au) = (model.faction_by_key("france").unwrap().id, model.faction_by_key("austria").unwrap().id);
+    model.apply(CampaignCommand::DeclareWar { a: fr, b: au }).unwrap();
+    model.turn.humans = vec![fr, au];
+    let mut h = ScriptHost::new(model, "france", src).unwrap();
+    h.run_file("data/test.lua").unwrap();
+    h.fire("NewSession", ScriptContext::default());
+    h.exec(
+        r#"local e = require "data.events"
+           starts = 0
+           e.FactionTurnStart[#e.FactionTurnStart+1] = function(context)
+               starts = starts + 1
+               if starts == 2 then
+                   game_interface:force_declare_war("france", "austria")
+               end
+           end"#,
+    )
+    .unwrap();
+    let fired = h.end_turn();
+    assert_eq!(h.model().world.stance(fr, au), Stance::War);
+    assert!(
+        !fired.iter().any(|(e, _)| matches!(e, CampaignEvent::StanceChanged { a, b, .. } if [*a, *b].contains(&fr) && [*a, *b].contains(&au))),
+        "no stance change is returned"
+    );
+    let st = h.state();
+    assert!(st.log.iter().any(|l| l.contains("force_declare_war") && l.contains("already at war") && !l.contains("refused")), "{:?}", st.log);
 }
 
 #[test]
@@ -582,6 +741,38 @@ fn the_world_created_switches_set_the_world_flags() {
         .exec()
         .unwrap();
     assert_eq!(flags(&h), (false, false, false));
+}
+
+#[test]
+fn set_zoom_limit_sets_the_camera_tilt_bounds() {
+    // 0x00977CB0: two numbers off the stack top, each raised to 0.02 and lowered to ~1.0782, the
+    // larger the largest tilt; a non-number keeps the limit (ORIGINAL BUG: the exe stores garbage).
+    use ntw_sim::campaign::ZoomLimit;
+    let src = ScriptSource::empty().with_memory_file("events.lua", EVENTS).with_memory_file("test.lua", SCRIPT);
+    let h = ScriptHost::new(common::tiny_model(), "france", src).unwrap();
+    h.run_file("data/test.lua").unwrap();
+    h.fire("NewSession", ScriptContext::default());
+    let limit = |h: &ScriptHost| h.model().world.zoom_limit;
+    assert_eq!(limit(&h), ZoomLimit::default());
+    h.lua().load("game_interface:set_zoom_limit(1.0, 0.61)").exec().unwrap();
+    assert_eq!(limit(&h), ZoomLimit { max_tilt: 1.0, min_tilt: 0.61 });
+    h.lua().load("game_interface:set_zoom_limit(0.00, 1)").exec().unwrap();
+    assert_eq!(limit(&h), ZoomLimit { max_tilt: 1.0, min_tilt: 0.02 });
+    // A bad last argument skips the read of the other: one error per call (boolean is a new type).
+    h.lua().load("game_interface:set_zoom_limit(\"x\", true)").exec().unwrap();
+    assert_eq!(limit(&h), ZoomLimit { max_tilt: 1.0, min_tilt: 0.02 });
+    // A string, a missing argument: the type error, logged once each, and no change.
+    h.lua().load("game_interface:set_zoom_limit(\"0.7\", 0.9) game_interface:set_zoom_limit(0.7)").exec().unwrap();
+    assert_eq!(limit(&h), ZoomLimit { max_tilt: 1.0, min_tilt: 0.02 });
+    let errors: Vec<_> = h.state().log.iter().filter(|l| l.starts_with("ERROR game_interface:set_zoom_limit:")).cloned().collect();
+    assert_eq!(
+        errors,
+        [
+            "ERROR game_interface:set_zoom_limit: Trying to retrieve type number, found type boolean (logged once)",
+            "ERROR game_interface:set_zoom_limit: Trying to retrieve type number, found type string (logged once)",
+            "ERROR game_interface:set_zoom_limit: Trying to retrieve type number, found type table (logged once)",
+        ]
+    );
 }
 
 #[test]
@@ -820,6 +1011,8 @@ fn a_liberate_choice_fires_the_protectorate_event_with_the_liberator() {
             discontent_growth: 0,
             town_wealth: 0,
             town_wealth_growth: 0,
+            town_wealth_refresh: Default::default(),
+            commodity_demand: Vec::new(),
             tax_exempt: false,
             religions: Vec::new(),
             class_bases: Vec::new(),
@@ -869,7 +1062,6 @@ fn a_call_to_war_pauses_the_turn_until_the_human_ally_answers() {
     let id = |m: &ntw_sim::campaign::CampaignModel, k: &str| m.faction_by_key(k).unwrap().id;
     let (fr, au, pr, ru) = (id(&model, "france"), id(&model, "austria"), id(&model, "prussia"), id(&model, "russia"));
     model.turn.humans = vec![fr, au];
-    model.ask_human_allies = true;
     model.form_alliance(au, pr).unwrap();
     let mut h = ScriptHost::new(model, "france", src).unwrap();
     h.run_file("data/test.lua").unwrap();

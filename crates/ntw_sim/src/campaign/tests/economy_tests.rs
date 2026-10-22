@@ -209,7 +209,7 @@ fn the_running_taxes_follow_tax_levels_and_owners() {
     m.apply(CampaignCommand::SetTaxLevel { faction: A, class: TaxClass::Upper, level: "tax_high".into() }).unwrap();
     assert_eq!(m.world.last_economy_record(A).unwrap()[5], 2400);
     m.world.economy_history.insert(B, vec![[0; 25]]);
-    assert!(m.transfer_region(RegionId(12), B));
+    assert!(m.transfer_region(RegionId(12), B, &mut Vec::new()));
     assert_eq!(m.world.last_economy_record(A).unwrap()[5], economy::faction_income(&m, A).taxes);
     assert_eq!(m.world.last_economy_record(B).unwrap()[5], economy::faction_income(&m, B).taxes);
     assert_ne!(m.world.last_economy_record(A).unwrap()[5], 2400);
@@ -511,15 +511,38 @@ fn only_the_current_faction_may_act() {
 #[test]
 fn peace_holds_outside_the_proposers_turn() {
     // No exe peace path tests the turn (the handler 0x00936710, the deal's peace item 0x00C18B60, the
-    // protectorate 0x00B105C0): B makes peace with C during A's turn; declaring war still checks it.
+    // protectorate 0x00B105C0): B makes peace with C during A's turn.
     let mut m = test_model();
-    m.apply(CampaignCommand::DeclareWar { a: B, b: C }).unwrap();
+    m.declare_war_rules(B, C).unwrap();
     m.turn.humans = vec![A];
     m.start_campaign();
     assert_eq!(m.turn.current, Some(A));
-    assert_eq!(m.apply(CampaignCommand::DeclareWar { a: B, b: A }), Err(CommandError::NotYourTurn(B)));
     m.apply(CampaignCommand::MakePeace { a: B, b: C, suppress_messages: false }).unwrap();
     assert_eq!(m.world.stance(B, C), Stance::Neutral);
+}
+
+#[test]
+fn war_holds_outside_the_declarers_turn() {
+    // The CCQ_DECLARE_WAR handler 0x00932B70 has no turn test: B declares war on A during A's turn.
+    let mut m = test_model();
+    m.turn.humans = vec![A];
+    m.start_campaign();
+    assert_eq!(m.turn.current, Some(A));
+    m.apply(CampaignCommand::DeclareWar { a: B, b: A }).unwrap();
+    assert_eq!(m.world.stance(B, A), Stance::War);
+}
+
+#[test]
+fn declare_war_command_refuses_out_of_game_and_same_faction() {
+    // 0x00953CA0 writes no payload when either faction has +0x824 set, so the handler 0x00932B70 does
+    // nothing; a == b is the ORIGINAL BUG of 0x00B64C50's miss (the first record), refused here.
+    let mut m = test_model();
+    assert!(!m.in_the_game(C));
+    assert_eq!(m.apply(CampaignCommand::DeclareWar { a: A, b: C }), Err(CommandError::OutOfGame(C)));
+    assert_eq!(m.apply(CampaignCommand::DeclareWar { a: C, b: A }), Err(CommandError::OutOfGame(C)));
+    assert_eq!(m.world.stance(A, C), Stance::Neutral);
+    assert_eq!(m.apply(CampaignCommand::DeclareWar { a: A, b: A }), Err(CommandError::SameFaction(A)));
+    assert_eq!(m.world.stance(A, B), Stance::Neutral);
 }
 
 #[test]
@@ -635,4 +658,225 @@ fn the_trade_update_refreshes_the_running_trade() {
     let r = m.world.last_economy_record(A).unwrap();
     assert_eq!(r[7], economy::trade_routes_value(&m, A));
     assert_eq!((r[5], r[6]), (999, 999));
+}
+
+/// A made-up `tw_growth_industry` 25 on the test building, so region 10 (one building) grows by 25.
+fn with_industry_growth(m: &mut CampaignModel) {
+    let mut rules = (*m.rules).clone();
+    rules.buildings.get_mut("test_building_level").unwrap().effects.push(("tw_growth_industry".into(), 25.0));
+    m.rules = Arc::new(rules);
+}
+
+/// A stored refresh no computation gives (trend 9), to see which regions a step refreshes.
+fn mark_stale(m: &mut CampaignModel, region: RegionId) {
+    m.world.regions.get_mut(&region).unwrap().town_wealth_refresh = economy::TownWealthRefresh { factors: [7; 10], trend: 9 };
+}
+
+fn is_stale(m: &CampaignModel, region: RegionId) -> bool {
+    m.world.regions[&region].town_wealth_refresh.trend == 9
+}
+
+/// `UpdateRegionTownWealth` `0x00AB4410`: without apply it stores the GDP, the growth, its breakdown
+/// (+0x388) and the predicted growth's trend (+0xC4) and leaves the town wealth; the round end's apply
+/// (`0x00AB4410(1)`) adds the growth.
+#[test]
+fn the_town_wealth_refresh_stores_the_breakdown_and_the_trend() {
+    let mut m = test_model();
+    with_industry_growth(&mut m);
+    let r10 = RegionId(10);
+    m.world.regions.get_mut(&r10).unwrap().town_wealth = 1000;
+    assert_eq!(m.world.regions[&r10].town_wealth_refresh, economy::TownWealthRefresh::default());
+    m.refresh_region_town_wealth(r10);
+    let fx = Effects::compute_for(&m, A);
+    let r = &m.world.regions[&r10];
+    let now = economy::region_wealth(&m, Some(&fx), r, false);
+    assert_eq!((r.gdp, r.town_wealth_growth, r.town_wealth), (now.gdp, 25, 1000));
+    assert_eq!(r.town_wealth_refresh.factors, now.factors);
+    // 25 is above 20: trend 0.
+    assert_eq!(r.town_wealth_refresh.trend, 0);
+    economy::settle_round(&mut m, A, &mut Vec::new());
+    assert_eq!(m.world.regions[&r10].town_wealth, 1025);
+    assert_eq!(m.world.regions[&r10].town_wealth_refresh.trend, 0);
+    // A growth far below -20: trend 4, the town wealth still untouched without apply.
+    m.world.regions.get_mut(&r10).unwrap().discontent_growth = -5000;
+    m.refresh_region_town_wealth(r10);
+    assert_eq!(m.world.regions[&r10].town_wealth_refresh.trend, 4);
+    assert_eq!(m.world.regions[&r10].town_wealth, 1025);
+}
+
+/// The round start refreshes only the given factions' regions (`0x008F1F60` → `0x00AAE710`), with
+/// each faction's own effects.
+#[test]
+fn the_round_start_refreshes_the_listed_factions_regions() {
+    let mut m = test_model();
+    for r in [10, 11, 12] {
+        mark_stale(&mut m, RegionId(r));
+    }
+    m.refresh_regions_round_start(&[A]);
+    assert!(!is_stale(&m, RegionId(10)) && !is_stale(&m, RegionId(12)));
+    assert!(is_stale(&m, RegionId(11)));
+}
+
+/// A finished construction refreshes its region (`0x00B78800` → `0x00A682F0` → `0x00AB4410(0)`): the
+/// second building's growth shows at once, not only at the next round.
+#[test]
+fn a_finished_building_refreshes_the_town_wealth() {
+    let mut m = test_model();
+    with_industry_growth(&mut m);
+    m.turn.humans = vec![A];
+    m.start_campaign();
+    m.apply(CampaignCommand::ConstructBuilding { region: RegionId(10), slot: SlotRef::Slot(1), level_key: "test_building_level".into() })
+        .unwrap();
+    m.end_turn();
+    let ev = m.end_turn();
+    assert!(ev.contains(&CampaignEvent::BuildingCompleted { region: RegionId(10), slot: SlotRef::Slot(1) }));
+    assert_eq!(m.world.regions[&RegionId(10)].town_wealth_growth, 50);
+    assert_eq!(m.world.regions[&RegionId(10)].town_wealth_refresh.trend, 0);
+}
+
+/// A tax change refreshes the governorship's regions (`0x00937A70` → `0x008EE1E0`) and an owner
+/// change the region (`0x00A64AC0` at `0x00A65113`, then each slot's `SetSettlementOwner`).
+#[test]
+fn tax_and_owner_changes_refresh_the_town_wealth() {
+    let mut m = test_model();
+    m.world.faction_details.entry(A).or_default().posts.push(super::details::GovernmentPost {
+        id: 1,
+        key: "governor_europe".into(),
+        holder: None,
+        governorship: Some(super::details::Governorship {
+            taxes: super::details::GovernorshipTaxes { lower: 2, upper: 2, lower_rate: 15, upper_rate: 15 },
+            theatre_id: 1,
+            regions: vec![RegionId(10)],
+            faction: A,
+            flags: (false, false),
+        }),
+    });
+    mark_stale(&mut m, RegionId(10));
+    mark_stale(&mut m, RegionId(12));
+    m.apply(CampaignCommand::SetTaxLevel { faction: A, class: TaxClass::Lower, level: "tax_high".into() }).unwrap();
+    assert!(!is_stale(&m, RegionId(10)));
+    assert!(is_stale(&m, RegionId(12)));
+    assert!(m.transfer_region(RegionId(12), B, &mut Vec::new()));
+    let fx = Effects::compute_for(&m, B);
+    let r = &m.world.regions[&RegionId(12)];
+    assert_eq!(r.town_wealth_refresh.factors, economy::region_wealth(&m, Some(&fx), r, false).factors);
+    assert!(!is_stale(&m, RegionId(12)));
+}
+
+/// The faction demand and the price update read each region's stored demand (`REGION` #32, region +0x154),
+/// which only the demand step `0x00AB49F0` rebuilds. A load keeps the file's (`0x0095FF00` runs the town
+/// wealth refresh, not the step), so until the first round start (`0x00AAE710` → `0x00AB49F0(1)`, then
+/// `0x00AB4410(0)`) the prices come from it, and the round start builds it from the GDP before its own refresh.
+#[test]
+fn the_stored_demand_holds_from_the_load_to_the_round_start() {
+    let mut m = split_model(&["c0", "c1"], vec![0, 0]);
+    let mut rules = (*m.rules).clone();
+    rules.variables.insert("background_commodity_supply".into(), 1.0);
+    m.rules = Arc::new(rules);
+    m.world.commodity_market.factors = vec![1.0, 1.0];
+    // As a file stores it: not what the formula gives for any region.
+    for r in m.world.regions.values_mut() {
+        r.commodity_demand = vec![5, 0];
+    }
+    let owned = m.world.regions.values().filter(|r| m.world.factions.contains_key(&r.owner)).count() as u32;
+    // The load's refresh replaces the GDP; the stored demand stays, and so do the prices it gives.
+    let gdp = m.world.regions[&RegionId(10)].gdp;
+    m.refresh_all_town_wealth();
+    m.world.regions.get_mut(&RegionId(10)).unwrap().gdp = gdp + 700;
+    m.update_commodity_prices_with(false);
+    assert_eq!(m.world.commodity_prices, vec![5 * owned, 1]);
+    assert!(m.world.regions.values().all(|r| r.commodity_demand == [5, 0]));
+    // The round start: A's regions get the step's demand from the GDP they held before the refresh; B's and
+    // C's are not refreshed (not listed here).
+    let town_wealth = m.world.regions[&RegionId(10)].town_wealth;
+    m.refresh_regions_round_start(&[A]);
+    let r10 = &m.world.regions[&RegionId(10)];
+    assert_eq!(r10.commodity_demand, vec![gdp + 700, (town_wealth as f32).sqrt() as u32]);
+    assert_ne!(r10.gdp, gdp + 700, "the refresh ran after the step");
+    assert_eq!(m.world.regions[&RegionId(11)].commodity_demand, [5, 0]);
+}
+
+/// A loot refreshes the region's town wealth (`0x00B541E0` → `0x00AAA580` → `0x00AB4410(0)`); an occupation
+/// does not go through it.
+#[test]
+fn a_loot_refreshes_the_town_wealth_and_an_occupation_does_not() {
+    use super::capture::CaptureChoice;
+    for (choice, refreshed) in [(CaptureChoice::Loot, true), (CaptureChoice::Occupy, false)] {
+        let mut m = capture_model(vec![A]);
+        m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+        assert!(m.pending_capture.is_some());
+        mark_stale(&mut m, RegionId(11));
+        m.apply(CampaignCommand::ChooseCapture { choice }).unwrap();
+        assert_eq!(!is_stale(&m, RegionId(11)), refreshed, "{choice:?}");
+    }
+}
+
+/// A destroyed faction's held slots go back to their regions' owners, each through `SetSettlementOwner`, which
+/// refreshes the region (`0x00B2B810` → `0x00AB4410(0)` at `0x00B2B86F`).
+#[test]
+fn a_destroyed_factions_held_slots_refresh_their_regions() {
+    let mut m = test_model();
+    for r in [10, 12] {
+        m.world.regions.get_mut(&RegionId(r)).unwrap().owner = B;
+    }
+    m.world.regions.get_mut(&RegionId(11)).unwrap().slots[0].holder = Some(A);
+    mark_stale(&mut m, RegionId(11));
+    mark_stale(&mut m, RegionId(12));
+    m.destroy_faction(A, &mut Vec::new());
+    assert_eq!(m.world.regions[&RegionId(11)].slots[0].holder, None);
+    assert!(!is_stale(&m, RegionId(11)));
+    assert!(is_stale(&m, RegionId(12)), "no slot of region 12 was held");
+}
+
+/// A port slot going back to its region's owner (`RestorePortSlotHolderToRegionOwner` `0x00A8D830` →
+/// `SetSettlementOwner`) refreshes the region.
+#[test]
+fn a_port_slot_given_back_refreshes_the_town_wealth() {
+    let mut m = test_model();
+    let slot = &mut m.world.regions.get_mut(&RegionId(10)).unwrap().slots[0];
+    slot.holder = Some(B);
+    mark_stale(&mut m, RegionId(10));
+    m.restore_port_holder(RegionId(10), 0);
+    assert_eq!(m.world.regions[&RegionId(10)].slots[0].holder, None);
+    assert!(!is_stale(&m, RegionId(10)));
+}
+
+/// Every owner change rebuilds the region's stored demand (`0x00AB49F0(0)`, unconditional): `SetSettlementOwner`
+/// before its town wealth refresh (`0x00B2B85F`, then `0x00AB4410(0)` at `0x00B2B86F`), so it reads the GDP the
+/// refresh replaces; `TransferRegionToFaction` after its refresh (`0x00A65113`, then `0x00A6511C`). Before
+/// gdprefresh round 3 the stored demand stayed stale until the next round start.
+#[test]
+fn an_owner_change_rebuilds_the_stored_demand() {
+    let mut m = split_model(&["c0", "c1"], vec![0, 0]);
+    for r in m.world.regions.values_mut() {
+        r.commodity_demand = vec![5, 0];
+    }
+    // Marks the region's GDP so the demand shows whether the step ran before the refresh; returns the
+    // demand the step gives then.
+    let mark = |m: &mut CampaignModel, id: u32| {
+        let r = m.world.regions.get_mut(&RegionId(id)).unwrap();
+        r.gdp += 700;
+        vec![r.gdp, (r.town_wealth as f32).sqrt() as u32]
+    };
+    // A region its owner already holds: the settlement's `SetSettlementOwner` (`0x00B44ACC`) and then the
+    // slots' run, each the step before its refresh; the slots' step sees the GDP the settlement's refresh stored.
+    let before = mark(&mut m, 12);
+    assert!(!m.transfer_region(RegionId(12), C, &mut Vec::new()));
+    let r = &m.world.regions[&RegionId(12)];
+    assert_ne!(r.gdp, before[0], "the refresh ran after the step");
+    assert_eq!(r.commodity_demand, m.commodity_demand(r));
+    assert_ne!(r.commodity_demand, before);
+    // A change of hands: the transfer's step after its refresh, then the slots' before theirs; both see the
+    // refreshed GDP.
+    m.world.regions.get_mut(&RegionId(12)).unwrap().commodity_demand = vec![5, 0];
+    assert!(m.transfer_region(RegionId(12), B, &mut Vec::new()));
+    let r = &m.world.regions[&RegionId(12)];
+    assert_eq!(r.commodity_demand, m.commodity_demand(r));
+    assert_ne!(r.commodity_demand, [5, 0]);
+    assert_eq!(m.world.regions[&RegionId(11)].commodity_demand, [5, 0], "other regions keep theirs");
+    // A port slot given back (`0x00A8D830` → `SetSettlementOwner`).
+    m.world.regions.get_mut(&RegionId(10)).unwrap().slots[0].holder = Some(B);
+    let before = mark(&mut m, 10);
+    m.restore_port_holder(RegionId(10), 0);
+    assert_eq!(m.world.regions[&RegionId(10)].commodity_demand, before);
 }

@@ -148,7 +148,8 @@ impl CampaignModel {
     /// - every international route's volumes are cleared first (`0x00B1C1A0`);
     /// - an exporter without a capital (faction `+0x72C`) has no supply entry and exports nothing;
     /// - a partner's demand is its **net** demand: Σ region demand over its regions (`0x008F4E50`,
-    ///   [`Self::commodity_demand`]) minus its own supply when it has a capital ([`Self::trade_supply`];
+    ///   the stored `Region::commodity_demand`, which [`Self::refresh_region_demand`] rebuilds) minus its own
+    ///   supply when it has a capital ([`Self::trade_supply`];
     ///   region production, the other term, is 0 in every shipped region). A partner counts only when its
     ///   net demand is above 0 for at least one commodity; for the others its demand is 0;
     /// - the partners are the factions in the campaign's faction list order ([`World::factions_in_turn_order`])
@@ -201,13 +202,16 @@ impl CampaignModel {
     }
 
     /// A faction's net demand per commodity for [`Self::trade_split`] (`0x00BC26D0`, CONFIRMED): its
-    /// demand (`0x008F4E50`: Σ [`Self::commodity_demand`] over its regions; the exe counts the regions in
+    /// demand (`0x008F4E50`: Σ the stored demand `Region::commodity_demand` over its regions; the exe counts the regions in
     /// its home theatre, and every shipped map is one theatre) minus its own supply when it has a capital,
     /// kept where it is above 0. `None` when no commodity is above 0 (the faction takes no share).
     fn trade_net_demand(&self, faction: FactionId, n: usize) -> Option<Vec<u32>> {
         let mut demand = vec![0i32; n];
         for r in self.world.regions.values().filter(|r| r.owner == faction) {
-            for (x, v) in demand.iter_mut().zip(self.commodity_demand(r)) {
+            // A stored demand of another length than the commodities comes only from a malformed file (the
+            // demand step writes one entry each); the load logs it once (`ntw_campaign::trade`), and the
+            // missing entries count 0 here.
+            for (x, &v) in demand.iter_mut().zip(&r.commodity_demand) {
                 *x = x.wrapping_add(v as i32);
             }
         }
@@ -576,6 +580,14 @@ impl CampaignModel {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The flags of every price update this thread ran ([`CampaignModel::update_commodity_prices_with`], tests
+    /// only): a flag-0 update recomputes the same prices from the same state, so how many times `0x00BCB020`
+    /// runs is otherwise not observable.
+    pub(crate) static PRICE_UPDATES: std::cell::RefCell<Vec<bool>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// The commodity market of `CAMPAIGN_TRADE_MANAGER` (CONFIRMED layout, see `0x00BCB020`).
 #[derive(Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -616,6 +628,40 @@ impl CampaignModel {
         out.into_iter().map(|v| v.clamp(0, i64::from(u32::MAX)) as u32).collect()
     }
 
+    /// The demand step `0x00AB49F0`: stores the region's [`Self::commodity_demand`] as its demand
+    /// (`Region::commodity_demand`, region +0x154), which the faction demand and the price update then
+    /// read. CONFIRMED callers: the round start for each region of every listed faction in the game
+    /// (`ProcessRegionRoundStart` `0x00AAE710`, flag 1, before the town wealth refresh); with flag 0,
+    /// every owner change: `SetSettlementOwner` (`0x00B2B85F`, before its town wealth refresh at
+    /// `0x00B2B86F`; on the settlement before `TransferRegionToFaction` at `0x00B44ACC`, on each slot after
+    /// it) and `TransferRegionToFaction` (`0x00A6511C`, after its refresh at `0x00A65113`; both skipped
+    /// when the region had no owner, `TEST EDI,EDI` at `0x00A650F7`, which a model region never lacks:
+    /// `Region::owner` is always a faction); ours: `change_region_owner`, the destruction's slot release and
+    /// `restore_port_holder`. The flag only turns on the exe's debug log of the step. The step also
+    /// rebuilds the region's production (+0x144), which is not modelled. PROVISIONAL: the
+    /// construction-finished path `0x00A682F0` (two conditional calls) is not wired (BACKLOG §5 "Region
+    /// demand step at the event sites").
+    pub fn refresh_region_demand(&mut self, region: RegionId) {
+        let Some(r) = self.world.regions.get(&region) else {
+            log::warn!("refresh_region_demand: no region {region:?}");
+            return;
+        };
+        let demand = self.commodity_demand(r);
+        if let Some(r) = self.world.regions.get_mut(&region) {
+            r.commodity_demand = demand;
+        }
+    }
+
+    /// Every region's demand rebuilt from its formula ([`Self::refresh_region_demand`]): an own save
+    /// from before the model kept the stored demand gets it from the save's own GDP and town wealth, the
+    /// values the demand stored with it was last built from.
+    pub fn refresh_all_demand(&mut self) {
+        let ids: Vec<RegionId> = self.world.regions.keys().copied().collect();
+        for id in ids {
+            self.refresh_region_demand(id);
+        }
+    }
+
     /// The round-end price update (`0x00BCB020`, CONFIRMED formula; reproduces the stored prices of
     /// the eur and spa start positions exactly): per commodity, D = Σ demand of every faction-owned
     /// region (the original counts the regions in each faction's home theatre; the shipped campaigns
@@ -640,6 +686,8 @@ impl CampaignModel {
     /// (`0x00BBD7C0(2)` at `0x00BCE78E`, the world list +0x2C / +0x30: not the rebels, out-of-game
     /// factions included).
     pub fn update_commodity_prices_with(&mut self, shift_history: bool) {
+        #[cfg(test)]
+        PRICE_UPDATES.with(|u| u.borrow_mut().push(shift_history));
         self.recompute_commodity_prices(shift_history);
         self.validate_commerce_raids();
         for faction in self.world.factions_in_turn_order() {
@@ -657,7 +705,8 @@ impl CampaignModel {
         }
         let mut d = vec![0u64; n];
         for r in self.world.regions.values().filter(|r| self.world.factions.contains_key(&r.owner)) {
-            for (c, v) in self.commodity_demand(r).into_iter().enumerate().take(n) {
+            // A demand of another length (a malformed file, logged once at the load): missing entries count 0.
+            for (c, &v) in r.commodity_demand.iter().enumerate().take(n) {
                 d[c] += u64::from(v);
             }
         }

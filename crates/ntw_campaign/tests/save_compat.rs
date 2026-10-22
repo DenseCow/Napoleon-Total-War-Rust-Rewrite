@@ -199,17 +199,21 @@ fn region_economy_is_written() {
     }
     let out = save::write_save(&esf, &m, "france", 1, None).unwrap();
     let back = ntw_campaign::read(&out.to_bytes().unwrap(), &db).unwrap();
+    let rm = out.root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD/REGION_MANAGER").unwrap();
     for id in &ids {
         let (a, b) = (&m.world.regions[id], &back.model.world.regions[id]);
         assert_eq!(
-            (a.base_gdp, a.gdp, a.town_wealth, a.town_wealth_growth, a.wealth_growth_offset, a.discontent_growth, a.tax_exempt),
-            (b.base_gdp, b.gdp, b.town_wealth, b.town_wealth_growth, b.wealth_growth_offset, b.discontent_growth, b.tax_exempt),
+            (a.base_gdp, a.town_wealth, a.wealth_growth_offset, a.discontent_growth, a.tax_exempt),
+            (b.base_gdp, b.town_wealth, b.wealth_growth_offset, b.discontent_growth, b.tax_exempt),
             "{}",
             a.key
         );
+        // GDP (#10) and growth (#15) are written as they are; the load recomputes them (`0x00AB4410(0)`, the
+        // "Town wealth refresh"), so they are checked in the file.
+        let rec = rm.record_array("REGIONS_ARRAY").unwrap().records().find(|r| r.get_str(0) == Some(a.key.as_str())).unwrap();
+        assert_eq!((rec.get_u32(10), rec.get_i32(15)), (Some(a.gdp), Some(a.town_wealth_growth)), "{}", a.key);
     }
     // #14 follows #12 (CONFIRMED in every original save).
-    let rm = out.root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD/REGION_MANAGER").unwrap();
     for r in rm.record_array("REGIONS_ARRAY").unwrap().records() {
         assert_eq!(r.get_u32(12), r.get_u32(14));
     }

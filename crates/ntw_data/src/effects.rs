@@ -103,7 +103,7 @@ db_record! {
 
 db_record! {
     /// `technology_effects_junction` (`ssf`, 106 rows).
-    pub struct TechnologyEffect in "technology_effects_junction", key = technology {
+    pub struct TechnologyEffect in "technology_effects_junction", key = technology + effect {
         technology: String,
         effect: String,
         value: f32,
@@ -113,7 +113,7 @@ db_record! {
 db_record! {
     /// `building_factionwide_effects_junctions` (`ssf`, 98 rows): effects a building level gives its
     /// whole faction.
-    pub struct BuildingFactionwideEffect in "building_factionwide_effects_junctions", key = building {
+    pub struct BuildingFactionwideEffect in "building_factionwide_effects_junctions", key = building + effect {
         building: String,
         effect: String,
         value: f32,
@@ -148,7 +148,7 @@ db_record! {
 
 db_record! {
     /// `trait_level_effects` (`ssf`, 564 rows).
-    pub struct TraitLevelEffect in "trait_level_effects", key = level_key {
+    pub struct TraitLevelEffect in "trait_level_effects", key = level_key + effect {
         level_key: String,
         effect: String,
         value: f32,
@@ -157,7 +157,7 @@ db_record! {
 
 db_record! {
     /// `trait_attribute_effects` (`ssi`, 157 rows): a trait level's agent attribute bonus (e.g. research +1).
-    pub struct TraitAttributeEffect in "trait_attribute_effects", key = level_key {
+    pub struct TraitAttributeEffect in "trait_attribute_effects", key = level_key + attribute {
         level_key: String,
         attribute: String,
         value: i32,
@@ -166,7 +166,7 @@ db_record! {
 
 db_record! {
     /// `ancillary_to_attribute_effects` (`ssi`, 58 rows): an ancillary's agent attribute bonus.
-    pub struct AncillaryAttributeEffect in "ancillary_to_attribute_effects", key = ancillary {
+    pub struct AncillaryAttributeEffect in "ancillary_to_attribute_effects", key = ancillary + attribute {
         ancillary: String,
         attribute: String,
         value: i32,
@@ -175,7 +175,7 @@ db_record! {
 
 db_record! {
     /// `ancillary_to_effects` (`ssf`, 317 rows).
-    pub struct AncillaryEffect in "ancillary_to_effects", key = ancillary {
+    pub struct AncillaryEffect in "ancillary_to_effects", key = ancillary + effect {
         ancillary: String,
         effect: String,
         value: f32,

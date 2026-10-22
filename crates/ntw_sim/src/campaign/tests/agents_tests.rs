@@ -343,6 +343,26 @@ fn misdeeds_set_the_attitude_factors_from_the_config() {
     assert_eq!(m.world.relationships[&(B, A)].attitudes[18].value, 0);
 }
 
+/// treatyorder: the victim walks its records in their creation order (`0x00B0D740` indexes them through
+/// `0x00B64CB0`) and takes the first one whoever it points at, so the order decides who is blamed: with
+/// B's records listed C first, C (-5) is blamed and the culprit A (-100) is skipped; listed A first (also
+/// id order, a world with no list), A is taken first and C, liked more, never replaces it.
+#[test]
+fn an_unseen_misdeed_is_blamed_in_record_order() {
+    use super::agents::Misdeed;
+    let mut m = agents_model();
+    with_relationships(&mut m, &[((B, A), -100), ((B, C), -5)]);
+    m.world.diplomacy_record_order.insert(B, vec![C, A]);
+    m.blamed_misdeed(A, B, Misdeed::Sabotage);
+    assert_eq!(m.world.relationships[&(B, C)].attitudes[18].value, -20);
+    assert_eq!(m.world.relationships[&(B, A)].attitudes[18].value, 0);
+    let mut m = agents_model();
+    with_relationships(&mut m, &[((B, A), -100), ((B, C), -5)]);
+    m.blamed_misdeed(A, B, Misdeed::Sabotage);
+    assert_eq!(m.world.relationships[&(B, A)].attitudes[18].value, -20);
+    assert_eq!(m.world.relationships[&(B, C)].attitudes[18].value, 0);
+}
+
 #[test]
 fn misdeeds_against_the_rebels_change_nothing() {
     use super::agents::Misdeed;

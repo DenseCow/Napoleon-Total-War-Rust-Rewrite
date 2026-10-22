@@ -2,7 +2,7 @@
 //!
 //! | table | what the AI uses it for |
 //! |---|---|
-//! | `campaign_ai_personalities` + `_junctions` | ~245 tunables per personality (`default` + overlays) |
+//! | `campaign_ai_personalities` + `_junctions` | ~245 tunables per personality (`default` + overlays; the model's table, through the merged database) |
 //! | `campaign_ai_managers` + `_manager_behaviour_junctions` | which behaviours a manager runs, and their priorities |
 //! | `cdir_unit_balances` | target army composition by army size |
 //! | `cdir_unit_qualities` | each unit's quality (strength value) |
@@ -16,8 +16,9 @@ use std::collections::BTreeMap;
 
 use ntw_data::GameDatabase;
 use ntw_formats::pack::Vfs;
+use ntw_sim::campaign::personalities::AiPersonalities;
 
-use crate::tables::{self, TableError, col_bool, col_f32, col_i32, col_str, keys, layouts};
+use crate::tables::{self, TableError, col_f32, col_i32, col_str, keys, layouts};
 
 /// One row of `cdir_unit_balances` (CONFIRMED layout; column meanings INFERRED from the values).
 #[derive(Debug, Clone, PartialEq)]
@@ -70,10 +71,11 @@ pub struct AiBuildingInfo {
 /// Everything the campaign AI reads from the DB.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CampaignAiData {
-    /// Personality key → its own tunables (overlays only hold the keys they change).
-    pub personalities: BTreeMap<String, BTreeMap<String, f32>>,
-    /// The personality flagged as default (`campaign_ai_personalities` col 1, INFERRED meaning).
-    pub default_personality: String,
+    /// The personalities and their tunables: the table the model's [`CampaignRules::ai_personalities`](ntw_sim::campaign::CampaignRules::ai_personalities)
+    /// holds, built by the same [`ntw_campaign::ai_personalities_from_db`] from the same merged database (the AI
+    /// reads an [`AiWorld`](super::AiWorld) snapshot, not the model). The default is the first record whose #1
+    /// (record +0xC) is set, CONFIRMED by the exe's loader `0x00DD5870` (`0x00DD58DC`).
+    pub personalities: AiPersonalities,
     /// Manager key → behaviour → priority.
     pub managers: BTreeMap<String, BTreeMap<String, f32>>,
     /// `cdir_unit_balances` rows.
@@ -101,19 +103,7 @@ impl CampaignAiData {
         let mut d = CampaignAiData::default();
         let mut warnings = Vec::new();
         let w = &mut warnings;
-        for r in tables::load_raw(vfs, "campaign_ai_personalities", layouts::CAMPAIGN_AI_PERSONALITIES, keys::first, w)?.rows {
-            let key = col_str(&r, 0).to_string();
-            if col_bool(&r, 1) {
-                d.default_personality = key.clone();
-            }
-            d.personalities.entry(key).or_default();
-        }
-        for r in tables::load_raw(vfs, "campaign_ai_personality_junctions", layouts::CAMPAIGN_AI_PERSONALITY_JUNCTIONS, keys::junction, w)?.rows {
-            d.personalities
-                .entry(col_str(&r, 0).to_string())
-                .or_default()
-                .insert(col_str(&r, 1).to_string(), col_f32(&r, 2));
-        }
+        d.personalities = ntw_campaign::ai_personalities_from_db(db);
         for r in tables::load_raw(vfs, "campaign_ai_managers", layouts::CAMPAIGN_AI_MANAGERS, keys::first, w)?.rows {
             d.managers.entry(col_str(&r, 0).to_string()).or_default();
         }
@@ -167,10 +157,6 @@ impl CampaignAiData {
 
     /// A personality tunable: the personality's own value, else the default personality's.
     pub fn tunable(&self, personality: &str, key: &str) -> Option<f32> {
-        self.personalities
-            .get(personality)
-            .and_then(|p| p.get(key))
-            .or_else(|| self.personalities.get(&self.default_personality).and_then(|p| p.get(key)))
-            .copied()
+        self.personalities.tunable(personality, key)
     }
 }

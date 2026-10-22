@@ -107,6 +107,63 @@ impl KeyPart for Option<String> {
     }
 }
 
+/// The tables the exe reads through its table loader 0x00DBDB90, one per caller (CONFIRMED,
+/// `analysis/mods/MOD_LOADING.md` §3.3). Their row readers (0x00DD2250, 0x00DD22A0, 0x00E85910) put
+/// column 0 at record+0 and column 1 at record+0xC, and the loader hashes the two joined with nothing
+/// between (0x004F1200 at 0x00DBE511), so a later file's row merges into an earlier one only when
+/// both columns match. This list is the one statement of that key: a `db_record!` of one of these
+/// tables that does not merge on exactly its first two columns (`key = <column 0> + <column 1>`) fails
+/// to compile.
+pub const COLUMN_0_1_KEYED_TABLES: [&str; 16] = [
+    "building_effects_junction",
+    "building_factionwide_effects_junctions",
+    "units_to_exclusive_faction_permissions",
+    "technology_effects_junction",
+    "trait_ability_effects",
+    "trait_attribute_effects",
+    "trait_attribute_situation_effects",
+    "trait_level_effects",
+    "agent_spawning_to_government_types",
+    "agent_spawning_to_building_chains",
+    "agent_spawning_to_policies",
+    "agent_to_agent_abilities",
+    "ancillary_to_ability_effects",
+    "ancillary_to_attribute_effects",
+    "ancillary_to_attribute_situation_effects",
+    "ancillary_to_effects",
+];
+
+/// `a == b` in a `const` context.
+const fn str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// The compile-time check `db_record!` makes of every record: a table in [`COLUMN_0_1_KEYED_TABLES`]
+/// must merge on its first two columns (`fields` are the record's columns in file order, `merge` the
+/// columns its files merge on); any other table passes.
+#[doc(hidden)]
+pub const fn merges_like_the_loader(table: &str, fields: &[&str], merge: &[&str]) -> bool {
+    let mut i = 0;
+    while i < COLUMN_0_1_KEYED_TABLES.len() {
+        if str_eq(COLUMN_0_1_KEYED_TABLES[i], table) {
+            return fields.len() >= 2 && merge.len() == 2 && str_eq(merge[0], fields[0]) && str_eq(merge[1], fields[1]);
+        }
+        i += 1;
+    }
+    true
+}
+
 /// A struct that mirrors one DB table's rows. Implemented by `db_record!`.
 pub trait DbRecord: Sized {
     /// The table name, e.g. `"units"`. The file is `db\<TABLE>_tables\<TABLE>`.
@@ -286,6 +343,19 @@ macro_rules! __db_joined_key {
     };
 }
 
+/// The columns a record's files merge on, by name, for [`merges_like_the_loader`]: `merge = ..` when
+/// given, else `key = a + b ..`, else the one key column.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __db_merge_columns {
+    ($key:ident $( + $more:ident )* ; $first:ident $( + $rest:ident )*) => {
+        &[stringify!($first) $( , stringify!($rest) )*]
+    };
+    ($key:ident $( + $more:ident )* ;) => {
+        &[stringify!($key) $( , stringify!($more) )*]
+    };
+}
+
 /// Defines a record struct together with its schema. See the module docs.
 ///
 /// ```ignore
@@ -360,6 +430,11 @@ macro_rules! db_record {
                 }
             )?
         }
+
+        const _: () = assert!(
+            $crate::record::merges_like_the_loader($table, &[$( stringify!($f) ),*], $crate::__db_merge_columns!($key $( + $more )* ; $( $m1 $( + $m )* )?)),
+            concat!("`", $table, "`: the exe's loader 0x00DBDB90 merges this table's files on columns 0 + 1; declare `key = <column 0> + <column 1>` (COLUMN_0_1_KEYED_TABLES)")
+        );
     };
     // A key the exe's row reader builds by joining columns (e.g. `cdir_configs`, 0x00FCD150): it is
     // kept in the extra field `$key` (not a column), filled by `from_row`.
@@ -409,6 +484,11 @@ macro_rules! db_record {
                 &self.$key
             }
         }
+
+        const _: () = assert!(
+            $crate::record::merges_like_the_loader($table, &[$( stringify!($f) ),*], &[]),
+            concat!("`", $table, "`: the exe's loader 0x00DBDB90 merges this table's files on columns 0 + 1 (COLUMN_0_1_KEYED_TABLES)")
+        );
     };
 }
 pub(crate) use db_record;

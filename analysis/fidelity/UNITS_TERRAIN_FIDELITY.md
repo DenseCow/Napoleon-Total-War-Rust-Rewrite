@@ -1648,6 +1648,38 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
     `GetUnitDrillTolerance` `0x0057E1F0` (84.7), `IsUnitMounted` `0x0055ABF0` (88.6), `IsUnitRidingAndNotDismounted`
     `0x0055C2A0` (91.4), `ParseTrainingLevelKey` `0x00EED960` (93.3); the period global
     `g_dwInPlaceCheckPeriod` `0x014A35D0` (10, set from 10.0 by `0x00407740`).
+    *The soldier action flags `+0x35B` / `+0x35C` (soldierflags, CONFIRMED static).* Every soldier holds one action
+    in place in his action slot (the slot object at `+0x2CC`; the action at its `+8`, soldier `+0x2D4`, 0x87
+    bytes; the action's done flag `+0x10` is soldier `+0x2E4`, its tick count `+0x14`). Slot `+0x8F` (soldier
+    `+0x35B`) is *present*: the base action ctor `0x007E3A50` sets it (and numbers the action from the battle
+    model's counter, ctx `+0x28` → `+8` → `+0x5C`). Slot `+0x90` (soldier `+0x35C`) is *started*: the slot update
+    `0x0066E780` (from the soldier update `0x00658C50` at `0x00658E1F` / `0x00658E3D` / `0x00658E7A`, and from
+    `0x00670EB0`), for a present action not done and not started, runs `0x0063CDD0` when slot `+0x91` is set,
+    zeroes `+0x14`, runs the entry vfunc `+4` and sets started; then, while not done, the update vfunc `+8` and
+    `+0x14`++ (so entry and first update fall in one call); when done and slot `+0x92` is set it destroys the
+    action and clears both flags; it returns present. Every install (`0x006533E0` timed move, `0x00653560` plain
+    move, the family `0x00651F30`–`0x00653430`) destroys a present action (vfunc 0 with 1; the timed move's
+    `0x007EDF70` frees only when its flags & 5 == 5), clears both flags and builds the new one in place. Readers
+    test busy = present and not done (`+0x35B` == 1 and `+0x2E4` == 0): `0x0063E290` (ready: not present, or done,
+    or `0x008118F0` when `+0x224` ≠ 0) and some 20 sites (`0x00531BE0`, `0x00539840`, `0x0055D470`,
+    `0x0055F600`, `0x0055F710`, `0x0057FB70`, `0x00583390`, `0x00583980`, `0x005F3040`, `0x005FCFB0`,
+    `0x00646BE4`, `0x0064DE80`, `0x006718F0`, `0x006B29F0`, `0x006D9A40`, `0x006DC700`, `0x006F9FFB`,
+    `0x006FC7C0`); `0x007FF390` returns the action when present, done or not, for the fire state's gather
+    (`0x00539910`, `0x0062F750`): the one reader for which a present done action differs from none.
+    The idle update `0x005577C0` first, for each living man, destroys a present action and clears `+0x35B`, and
+    always clears `+0x35C`, then runs the in-place check: an idle unit's men lose their actions on every idle tick
+    without a transition. Ours (`march.rs` `LandUnit::idle_update`, test `the_idle_update_ends_every_mans_action`):
+    each living man's walk to his slot ends (`ManMarch::walk` None) and his move is ended (`finished`, which
+    stands for `0x0063E290`); his kept speed (`+0x440`) is outside the action and stays. Ours has no started flag
+    (a move starts in its issue tick, as entry and first update share a call) and no present-but-done state (no
+    fire gather). Other clears, for states ours does not build (BACKLOG): unit-level `0x0051A230` (fire-order
+    base ctor, every man), `0x0051AC80`, `0x00520110` (from `0x0051F150`), `0x00522080`, `0x0052F770`,
+    `0x00563420` (thunk `0x004F951D`), `0x00553770` (thunk `0x004F9C2D`), `0x00574090`, `0x00580C20` (vtable
+    `0x01325018`), and `SQUAD::update` `0x00580A30` at `0x00580B49` (every man, when `+0x515` is set, `+0x508`
+    ≠ 1 or `+0x498` set, `+0x460` == 0 and `0x00586440(0)` fails; those fields are not traced); soldier-level
+    `0x005BE5D0`, `0x005EFFE0`, `0x005DD2A0` / `0x005DD500`, `0x0064A520` (from `0x008057F0`), `0x0069B5F0`,
+    `0x006C2880`, `0x006CCE10`, the death vfunc `+0x104` `0x00653A10`, the resets `0x00660AB0` and `0x00623960`;
+    `+0x35C` alone (with `+0x364`) at `0x00658E24` in the soldier update and in `0x0066B080`.
     *The slot assignment and the reform walk (formation3, CONFIRMED static).* `LayOutSlotsAndAssignSoldiers` `0x00555CA0` (the full re-slot,
     also the partial lay-out with its re-slot argument clear) lays the shape out (vfunc `+0x24`), then
     `AssignSoldiersToNearestSlots` `0x005373F0` pairs soldiers and slots and the soldier vector is rebuilt in
@@ -1785,13 +1817,13 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
     max(`+0x620`, the x/z distance from the soldier (`+0x48`/`+0x50`) to the entity's `+0x48`/`+0x50` plus the
     entity's `+0x58`). So `+0x620` is the radius of a circle round the soldier that also covers his attached
     entities; it equals `+0x58` only while the list is empty. Its two callers both read fields past 0x660:
-    `0x005ED4B0` first moves each list node's point (`+0x0C`/`+0x10`) to the soldier's position plus the
+    `UpdateGunTrainAttachNodes` `0x005ED4B0` first moves each list node's point (`+0x0C`/`+0x10`) to the soldier's position plus the
     offset (`+0x68C`, `+0x690` − node `+0x18`) rotated by his heading `+0x64`, then calls `0x0060CAC0`,
-    `0x005ED450` and `0x00607540`; it is reached from vtable slot `+0x58` (`0x005ED030` / `0x005ED060`, which
+    `0x005ED450` and `0x00607540`; it is reached from vtable slots `+0x58` / `+0x54` (`0x005ED030` / `0x005ED060`, which
     first call the base `0x00659D20` / `0x00659D40`) of the vtables `0x0132BE3C`, `0x0132C0C8`, `0x0132C2F0`
     and `0x0132C528`, and from `0x005BD200` / `0x005BD310` (slot `+0x1C0` of `0x0132C2F0` / `0x0132C528`). A plain
     soldier's vtable `0x01333714` holds `0x00659D20` in that slot. The other caller is the code at `0x005FCF83`
-    (not a defined function in Ghidra), which also reads `+0x69D`..`+0x6A8`. `0x0132C2F0` and `0x0132C528` are
+    (in `0x005FCEB0`, slot `+0x0C` of the gun-train vtables; see below), which also reads `+0x69D`..`+0x6A8`. `0x0132C2F0` and `0x0132C528` are
     written by `0x005A1EB0` and `0x005A38C0`, the constructors of the 0x6C8-byte objects that `0x00544E60`
     allocates once per entry of its `+0x1F4` → `+0x24` list when it has a record at `+0xB4` (`0x005A1EB0` when
     that record's `+0x18` is 6, else `0x005A38C0`), each followed by 0x69C-byte objects built by `0x0059EED0`
@@ -1809,13 +1841,71 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
     `0x00879BF4`, `0x0087A3B0` / `0x0087AC73` / `0x0087AC7D` / `0x0087AD0B`, `0x0087C189`, `0x00A3D992` /
     `0x00A3DEB8` / `0x00A3EF81`, `0x00A3FB1D` (vtables from `0x013779AC`), `0x00DF2BBA`, `0x00E0F0F2`,
     `0x00E83836` / `0x00E83DA2` / `0x00E840DA` (`0x00E83E40` runs on a stack object of `0x00545C20`),
-    `0x01123519`, `0x01130C36`, plus stack locals at `0x00788B68`, `0x00A42791` and `0x0100EAB4`. None is
-    a virtual method or traced to a soldier, but their classes are not all identified, and bulk copies or
-    stores through a computed pointer are not covered. So that only `0x0061D2D8` and `0x00607540` write a
-    soldier's `+0x620` is INFERRED. UNKNOWN: what the 0x6C8 and 0x69C objects and the attached entities are;
-    the class chain between
-    `BattleSoldier` and those classes (their fields past 0x660 have no Ghidra type); and whether a 0x6C8 object
-    is in a squad's man list, so whether the squad summary's box and radius see the grown radius.
+    `0x01123519`, `0x01130C36`, plus stack locals at `0x00788B68`, `0x00A42791` and `0x0100EAB4`.
+    *Classified (attachradius, 2026-10-22, CONFIRMED static):* none of the 24 is in a soldier.
+    `0x0070A254` / `0x007D70E0`: the alliance AI object (constructor `0x00709FB0`, update `0x007B25A0` reached
+    through `0x00583380`; analysis/ai/AI_RESEARCH.md), whose `+0x620` is its previous mode, compared with
+    `+0x61C`; it has no vtable (`+0` is copied from an argument). `0x0071FE72`: constructor `0x0071FC80`
+    (installs `0x0132CE04` then `0x01340828`, no soldier base constructor; caller `0x0071C740` ← `0x007101D0`).
+    `0x00875999` .. `0x0087C189` and `0x00A3D992` .. `0x00A3FB1D`: campaign objects (vtables `0x0135456C`,
+    `0x01354488` with the registered-campaign-object vtable `0x01321294`, `0x013779AC`, installed on the
+    same base register) built by the campaign model load `0x00872550` ("**CAMPAIGN MODEL LOAD**") /
+    `0x008742C0`, from `0x00987070` (startpos / save open). `0x00DF2BBA` / `0x00E0F0F2`: the DB manager
+    (`0x00E0EFB0` loads "ancillaries_table" into `+0x620` on first use; set-up `0x00DF20D0`, caller
+    `0x004809A0`). `0x00E83836` / `0x00E83DA2` / `0x00E840DA`: the 0x66C-byte battle map definition (vtable
+    `0x013BEFE4`, constructors `0x00E83550` / `0x00E83B40` / `0x00E83E40`, a heap object that
+    `0x00545C20` `create_battle_map_definition` builds; the earlier "stack object" was wrong). `0x01123519` /
+    `0x01130C36`: the renderer ("custom_sprite_land_radar_t0", "Custom_Sprite.fx"; caller chain through
+    `0x01127580`, "Rigid.fx" / "ShadowMap View"). `0x00788B68`, `0x00A42791`, `0x0100EAB4`: ESP-relative
+    locals. The field's address is taken (`LEA [reg+0x620]`) only at `0x00A8F019` (`0x00A8EFF0`, a container
+    passed to `0x00A86F80`, no refs) and `0x0123A9E4` / `0x0123AA55` (`0x0123A9D0`, engine code, data ref
+    `0x014291F8`). The wide stores the scan misses include three 16-byte `MOVUPS [reg+0x618]` at `0x0115056D` /
+    `0x0115272B` / `0x011555AD`, which overlap `+0x620`: each is the last row of a 4x4 matrix stored at
+    `+0x5F8`..`+0x637` from terms like (a+b)/(a−b), a renderer projection matrix, not a soldier. No copy is soldier-sized: 0x660 / 0x69C / 0x6C8 appear only as allocation sizes
+    (`0x0051B7D0`, `0x00544E60`, `0x00691C10`, `0x006BA560`, `0x006BAE10`, `0x005AD510`) and in the deleting
+    destructors `0x00624D40` / `0x005AD470`. None of the soldier constructors that call the set-up `0x0061CB90`
+    (`0x0051B7D0`, `0x0059EC50`, `0x0068C750`, `0x00691C10`, `0x006BA560`, `0x006BAE10`, `0x007EB3B0`) holds a
+    store. So a man's `+0x620` is written only at `0x0061D2D8` and by `0x00607540`; the plain (`0x01333714`)
+    and intermediate (`0x0132B7D8`) soldier vtables hold `0x00659D20` at `+0x58` and never reach it, and the
+    other caller `0x005FCF83` lies in `0x005FCEB0`, slot `+0x0C` of the same four gun-train vtables
+    (`0x0132BE3C`, `0x0132C0C8`, `0x0132C2F0`, `0x0132C528`). The call always runs: the checks before it (`+0x69D` == 1, `+0x6A8` set, the
+    record `+0x1E8` → `+0x18` == 5, the `+0x6A8` object's `+0xEC` == 1) gate only the copy of that object's byte
+    `+0x118` into this one's at `0x005FCF5F`; the five calls at `0x005FCF67`..`0x005FCF83`, ending in
+    `0x00607540`, run unconditionally.
+    *What the 0x6C8 objects are (CONFIRMED static):* gun trains, the limbered team of an artillery unit.
+    `0x00544E60` builds one from the unit's `+0xB4` gun-train `battle_entities` record, whose `+0x18` is the
+    skeleton kind (man 0, horse 1, camel 2, elephant 3, artillery 4, gun_train_2 5, gun_train_6 6, ammo_caisson
+    7; table `0x013B3DD0`, setup.rs `garrison_radius`): kind 6 takes `0x005A1EB0` (vtable `0x0132C2F0`), any
+    other `0x005A38C0` (vtable `0x0132C528`, 5 nodes); base chain `0x0059EAB0` (`0x0132C0C8`) → `0x0058EF40`
+    (`0x0132BE3C`, sets `+0x674` = 0); teardown `0x005A8140`, deleting destructor `0x005AD470`. `0x005A1EB0`
+    passes the pivot {0, 6.0} to `0x0059EAB0` (`+0x68C` / `+0x690`) and adds its nodes with `0x005B1F60`
+    (offset, width) = (0, 2), (2, 2), (4, 2), (8, 2), (12, 2), (14.5, 2), (16.5, 1), each at the gun's position
+    plus the pivot rotated by `+0x64` (x = `+0x68C`, z = `+0x690` − offset). The node (Ghidra `GunTrainAttachNode`, 0x34 bytes from `0x005B1F60`, constructor `0x0058F210`,
+    vtable `0x0132BE38`) holds its position `+0x0C`/`+0x10`, width `+0x14`, offset `+0x18`, heading `+0x1C` and
+    its slot vector at `+0x20` (count `+0x2C`, data `+0x30`), linked from the gun's `+0x674` (head) / `+0x678`
+    (tail). Slots (0x2C bytes, constructor `0x0058F180`; `0x005B1E40` makes the offset relative to the node,
+    `0x005B1EF0` allocates and pushes it): six horse slots, kinds 0/1, at (∓0.75, −2), (∓0.75, −6), (∓0.75,
+    −10) on nodes 1–3, also kept in the gun's vector `+0x6AC` (count `+0x6B8`, data `+0x6BC`); `+0x6C0` at
+    (0, −14) on node 4 and `+0x6C4` at (0, −16.5) on node 5. `0x005CD7C0`, last in the constructor, records the
+    node chain at `+0x680` / `+0x684` / `+0x688` and `+0x694` / `+0x698` from the tail node.
+    *Attaching (CONFIRMED static):* `AttachSoldierToGroup` `0x00655B20` (member, group) calls the group's slots `+0x1B0` and `+0x1B8`,
+    takes the member out of the unit's man list `+0x2CC` (`0x00564890`) when its `+0x1F0` is set, and sets
+    member `+0x1EC` = group. The gun train's `+0x1B0` (`0x005F0080`, not a defined function) first runs the
+    base `0x005EFFE0`, then puts a member whose slot `+0xEC` is true (`0x005DB820` on the 0x69C vtable
+    `0x0132BA04`: its `+0x67C` is set) in `+0x6C4`; else one whose `+0xF0` is true (`0x00447880`, always true on
+    `0x0132BA04`) and of kind 1 (horse) in the nearest free horse slot; else a kind-7 (ammo_caisson) one in
+    `+0x6C0`. `0x005C38C0` fills the slot (`+0x20` = member). Men are never slotted: the plain and intermediate
+    soldier vtables hold `0x00462CB0` (returns false) in `+0xEC` and `+0xF0`. So the attached entities are the
+    team's horses, the caisson and the `+0x6C4` member (0x69C objects from `0x0059EED0`, whose own `+0x674` is a
+    byte flag, not a list).
+    *Squad man list (CONFIRMED static):* the squad partition `0x0057B0E0` takes men from the unit's `+0x2CC`
+    (entries with `+0x388` == 0) and adds them with `0x0052F770`. The gun train stays in `+0x2CC` (only the
+    attached members leave it), so it is a squad man and the squad summary's man record (`0x00519150`, through
+    `0x0053C180`) reads its grown `+0x620`: a limbered artillery unit's squad box covers its whole team.
+    *Ours:* `cover_radius_over_attached` (ntw_sim battle/model.rs) is the rule of `0x00607540`; ntw_sim builds
+    no gun train, so no unit calls it yet and every modelled man keeps `cover_radius` == `man_radius` (exact:
+    only gun trains grow it). The growth comes with the gun-train entity (BACKLOG §3 limbering and
+    unlimbering).
     Ours (`march.rs`): `MenMarch::laid` holds the formation; `LandUnit::reslot_tick` (every active unit's tick,
     `placeholder_movement`) restarts a 20-tick countdown at each loss, lays out every tick while the unit's own
     order (`TimedMove`) is short of its end, re-lays when the countdown runs out and clears the pending re-slot
@@ -2493,3 +2583,15 @@ INFERRED (debugger, SITTING_SHEET 3k/3l):
   `+0xC14` access in the battle unit code besides the insert and the destructor.
 
 Not ported: `0x0054F070` (the main attacker = the entry with the most contacts); no reader in ours yet.
+
+**Reach radius (2026-10-22, reachradius; polish42 follow-up, CONFIRMED static).** The contact test reads each
+soldier's own radius `+0x58`, never the cover radius `+0x620`: `MOVSS XMM2,[ECX+0x58]` (own soldier) at
+`0x0052EE29`, `ADDSS XMM2,[EDI+0x58]` (other soldier) at `0x0052EE38`, then `+ 2.0` and the square. The in-area
+test `0x005857A0` also reads `+0x58` (`0x00585800`). So a soldier whose `+0x620` is grown over attached entities
+(`0x00607540`) keeps his contact reach. Ours had one field, `LandUnit::man_radius`, documented as `+0x620`, that
+both the box and the contact read (the same value, since ours never grows it). Now split: `man_radius` is `+0x58`
+(read by `fill_attackers` and `men_inside`), `cover_radius` is `+0x620` (read by `men_standing` →
+`SummaryMan::radius`, the box's margin); `LandUnit::set_man_radius` sets both, as the copy at `0x0061D2D8`. The
+growth stays PROVISIONAL on `cover_radius`. Test
+`contact_and_area_tests_read_the_own_radius_not_the_cover_radius` (model.rs) fails when either test reads
+`cover_radius`.

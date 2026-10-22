@@ -241,7 +241,7 @@ fn the_road_and_walls_count_only_while_the_owner_holds_them() {
     assert_eq!(effect_keys(&m), ["test_building_level", "test_road", "test_depot"]);
     // The region passes to C: the road and the walls always pass to the new owner, B's hold too (`0x00B1B300`).
     m.world.regions.get_mut(&r10).unwrap().fortification_holder = Some(B);
-    assert!(m.transfer_region(r10, C));
+    assert!(m.transfer_region(r10, C, &mut Vec::new()));
     let r = &m.world.regions[&r10];
     assert_eq!((r.road_holder, r.fortification_holder), (None, None));
     assert!(r.slot_held(SlotRef::Road) && r.slot_held(SlotRef::Walls));
@@ -415,12 +415,12 @@ fn an_owner_change_hands_every_slot_over_but_a_port_with_a_navy_docked() {
     let admiral = Character { id: CharacterId(109), faction: B, kind: CharacterKind::Admiral, position: pos(5, 5), movement_points: 0, max_movement_points: 0, base_movement_points: 0, garrisoned_in: None };
     m.world.characters.insert(admiral.id, admiral);
     m.world.forces.insert(ForceId(1005), MilitaryForce { id: ForceId(1005), faction: B, commander: Some(CharacterId(109)), units: vec![unit(9)], is_navy: true });
-    assert!(m.transfer_region(r10, C));
+    assert!(m.transfer_region(r10, C, &mut Vec::new()));
     let r = &m.world.regions[&r10];
     assert_eq!((r.slots[0].holder, r.slots[1].holder), (Some(A), None), "the docked port stays the old owner's; B's slot passes");
     // Without the navy, a later change hands the port over too.
     m.world.forces.remove(&ForceId(1005));
-    assert!(m.transfer_region(r10, B));
+    assert!(m.transfer_region(r10, B, &mut Vec::new()));
     let r = &m.world.regions[&r10];
     assert_eq!((r.slots[0].holder, r.slots[1].holder), (None, None));
 }
@@ -439,15 +439,15 @@ fn a_lost_capital_moves_to_the_nearest_town_and_back_home() {
     m.world.regions.insert(town.id, town);
     set_details(&mut m, A, Some(10), false);
     set_details(&mut m, B, Some(11), false);
-    assert!(m.transfer_region(RegionId(10), B));
+    assert!(m.transfer_region(RegionId(10), B, &mut Vec::new()));
     // Region 12 (2 away, no settlement slot) is nearer than region 13 (90 away, 4 slots).
     assert_eq!(m.world.capital(A), Some(RegionId(13)));
     assert_eq!(m.world.capital(B), Some(RegionId(11)));
-    assert!(m.transfer_region(RegionId(10), A));
+    assert!(m.transfer_region(RegionId(10), A, &mut Vec::new()));
     assert_eq!(m.world.capital(A), Some(RegionId(10)), "the home region is the capital again");
     // Without a town of 4 slots the nearest region is taken.
     m.world.regions.remove(&RegionId(13));
-    assert!(m.transfer_region(RegionId(10), B));
+    assert!(m.transfer_region(RegionId(10), B, &mut Vec::new()));
     assert_eq!(m.world.capital(A), Some(RegionId(12)));
 }
 
@@ -766,7 +766,7 @@ fn a_navy_leaving_its_port_hands_the_slot_back_to_the_owner() {
         m.world.characters.insert(admiral.id, admiral);
         m.world.forces.insert(ForceId(1005), MilitaryForce { id: ForceId(1005), faction: B, commander: Some(CharacterId(109)), units: vec![unit(9)], is_navy: true });
         // The owner changes while the navy lies there: the port stays A's.
-        assert!(m.transfer_region(r10, C));
+        assert!(m.transfer_region(r10, C, &mut Vec::new()));
         assert_eq!(m.world.regions[&r10].slots[0].holder, Some(A));
         m
     };

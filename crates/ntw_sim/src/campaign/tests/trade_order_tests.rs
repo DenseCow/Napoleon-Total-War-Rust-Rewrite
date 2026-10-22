@@ -447,6 +447,7 @@ fn partners_without_net_demand_take_nothing_and_the_rest_may_stay_home() {
     let mut rules = (*m.rules).clone();
     rules.commodity_demand.clear();
     m.rules = Arc::new(rules);
+    m.refresh_all_demand();
     assert_eq!(m.trade_split(A).unwrap().values().cloned().collect::<Vec<_>>(), vec![vec![0], vec![0]]);
 
     // C has no demand for c0 (GDP 0) but some for c1 (town wealth 100 → 10), so it counts with demand
@@ -455,6 +456,7 @@ fn partners_without_net_demand_take_nothing_and_the_rest_may_stay_home() {
     let mut m = split_model(&["c0", "c1"], vec![5, 0]);
     let r = m.world.regions.get_mut(&RegionId(12)).unwrap();
     (r.gdp, r.town_wealth) = (0, 100);
+    m.refresh_region_demand(RegionId(12));
     let split = m.trade_split(A).unwrap();
     assert_eq!((split[&C][0], split[&B][0]), (1, 3));
     // One unit for two partners: C (first, two partners left) gets nothing, B takes max(1, 0) = 1.

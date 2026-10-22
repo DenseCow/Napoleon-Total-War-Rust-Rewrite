@@ -412,8 +412,24 @@ marks functions `__thiscall` in memory before decompiling (the decompile then sh
       +0x1D0, +0x1E0, +0x4C8, +0x4E0 cleared); argument 1 sets him down: +0x1B7 = 0 at `0x00A28855`, between the
       core and the hidden flag. So argument 0 is a mid-move step (lifted, sight only) and argument 1 the last
       (flood, core, hidden flag); the hidden flag also runs only with 1. `0x00B795A0` skips lifted characters
-      (`0x00B795FC`). The values its move callers pass are not traced (the virtual's callers were not found),
-      so that every walk's last step passes 1 is INFERRED.
+      (`0x00B795FC`). Its callers (walkflood 2026-10-22, CONFIRMED by disassembly; Ghidra name
+      `UpdateCharacterAfterMoveStep`): the character's primary vtable `0x0136A62C` (set at `0x0098F3CA`) sits
+      over a movable base at offset 0 (vtable `0x0135FAC8`, slots +0x1C / +0x20 purecall; constructors
+      `0x00907440` / `0x009078A0`, which store the character himself at +0x20, `0x0099154E`). The move manager
+      (campaign +0xF60) keeps the moving characters in a list at +0x24..+0x28 whose node +8 is the character;
+      `UpdateMovingCampaignCharacters` `0x00973B90` steps it every update and `StepCampaignCharacterMove`
+      `0x00972CA0` steps one character (`this` = the character, `0x00973C73`). Its +0x20 calls pass: 1 when the
+      order is done (`0x00972DC9`) and when the current waypoint is the path's last and no order object is
+      left (`0x00972EB1`); in the stop branch, after the route is trimmed (`0x00924D30` / `0x00924BD0`), 1 if
+      no waypoint was kept and 0 if one was (`0x009732E3`, flag byte +1 of `0x00924BD0`'s result read by
+      `0x0096E4E0`); 2 for a blocked step (`0x0097342C`) and a pending stop that still holds (`0x00973B44`);
+      the finished flag at the waypoint loop's end (`0x00973A01`, 0 mid-route; a multi-turn order, character
+      +0x9C). Its result codes: 0 keep moving, 1 remove, 2 blocked, 3/4 restart, 5/6 queue. Other callers
+      pass 1: `0x00960620`, `0x00923140`, `0x00921EE0`, `0x00921CD0`, `0x00A1A6E0`, `0x0090B770`, and the
+      placement `PlaceCampaignCharacterAtPosition` `0x0096C8D0` on its second call (`0x0096C9C4`, after a 0
+      at `0x0096C930`), so a placed character is set down even in place. INFERRED: which branch ends a walk
+      cut short by its action points, and that it passes 1 (debugger: break at `0x00A285E0` on a move longer
+      than a turn's points, read [ESP+4] at that character's last call of the turn and +0x1B7 at turn end).
     - `0x009CB4C0` (polish58): called only by the `MILITARY_FORCE` reader `0x00881120` (from the `ARMY` reader
       `0x00870FD0` and the navy reader `0x008822F0`) on the commander read by id: links him and the force
       (`0x008CFAB0`, a thunk that adds 0x74 to its stack argument and jumps to `0x008CF920`) and, when his
@@ -424,8 +440,10 @@ marks functions `__thiscall` in memory before decompiling (the decompile then sh
       entry (`0x00963840`) and his zone flooded again (`0x00A28440(0)` at `0x00A162CA`), then `0x0096C8D0`.
     - `0x0096CBE0` (polish58; from the battle set-ups `0x008E18D0` / `0x008E1A90`, model +0xF60): floods
       (`0x00A285C0`) and re-adds (`0x00B084F0`) each character of its list (+0x24..+0x28, entry +8 → +0x20)
-      that is lifted (+0x1B7): INFERRED, an army caught in mid-move gets its zone back for the battle (the list is
-      not identified).
+      that is lifted (+0x1B7): the list is the move manager's moving characters (above; node +8 the character,
+      +0x20 his movable base's pointer to himself, read at `0x0096CC06`), so a character caught in mid-move
+      gets his zone back for the battle (walkflood, CONFIRMED by disassembly; Ghidra name
+      `UpdateLiftedMovingCharacterZones`).
     - `0x00A285C0` callers: `0x008F9400` (a force's commander plus the characters it carries or that carry it;
       from the commander pick `0x008B8E50` and the unit transfers `0x008D47B0` / `0x008D5F10`), a split or new
       force `0x008F04C0`, the boarding joins `0x008F0F20` / `0x008F17D0`, a commander's death `0x008DB3E0`, the
@@ -448,8 +466,11 @@ marks functions `__thiscall` in memory before decompiling (the decompile then sh
     are rebuilt at the events above (`rebuild_zone`, `rebuild_force_zones`, `rebuild_moved_zones`,
     `refresh_faction_zones`, called from the walk, merge and transfer, settlement entry, recruit, hire,
     promotion, command succession, boarding and landing, and the treaty, expulsion and capture rules in the
-    exe's orders). The walk runs the sight, then the zones, then the hidden flags, as `0x00A285E0`'s last step
-    does; it moves whole, so no character is left lifted. A stored zone stays until such an event, wherever its
+    exe's orders). The walk runs the sight, then the zones, then the hidden flag, as `0x00A285E0`'s last step
+    does; it moves whole, so no character is left lifted. One function, `CampaignModel::set_down` (walkflood),
+    is that mode-1 step: the walk's end (`0x00972EB1`), the landing's fleet sail, the landed army (its route
+    ends at the landing, PATHFINDING_PORTS.md §5 "Disembark") and the expulsion placement (`0x0096C9C4`) call it, and only the moved character's hidden flag is re-evaluated (`0x00A2885C`), not
+    the flags of the characters he carries. A stored zone stays until such an event, wherever its
     character stands (an army an enemy walks up to keeps its zone; an expelled army the rule places is
     flooded at its new place, one it cannot place (`to: None`) keeps its old zone until its faction is flooded
     again: the treaty expulsions refresh both factions inside the expel branch, the cancel `0x00B67BD0` none,
@@ -502,9 +523,11 @@ marks functions `__thiscall` in memory before decompiling (the decompile then sh
     `expel_faction_from_region` did armies by force id, then navies, and now walks the list (test
     `the_expulsion_walks_the_faction_list_in_its_order`). Order-independent: the out-of-game flag `0x008B4330`
     (an all-of check: with no region, +0x824 is set only when every character's +0x2B8 handle resolves through
-    `0x006649C0`, returning at the first that does not; +0x2B8 is the character's government post handle, set by `0x009CB1E0`, CONFIRMED by charflag, see CHARACTERS_FIDELITY.md "Out-of-game flag") and peace `0x00B262C0`
-    (`0x00B263A6`, `0x00B263E4`: each character's `0x00A25570` ends only his own raids; ours
-    `clear_raids_on_peace` builds a set). About forty more functions read +0x768 (BACKLOG).
+    `0x006649C0`, returning at the first that does not; +0x2B8 is the character's government post handle, set by `0x009CB1E0`, CONFIRMED by charflag, see CHARACTERS_FIDELITY.md "Out-of-game flag"). Not
+    order-independent after all: peace `0x00B262C0` (`0x00B263A6`, `0x00B263E4`): each character's `0x00A25570`
+    ends his own siege, blockade and raids, but each end's price update runs the raid check, which can end a
+    later character's raids first, so the number of updates follows the list; ours walks it
+    (`end_war_actions_on_peace`, peaceprice 2026-10-20). About forty more functions read +0x768 (BACKLOG).
 - Save layout (`OBSTACLE_LISTS/CHARACTER_OBSTACLE[]/OBSTACLE`): #0 six boundary slots (slot 0 = zone pieces,
   slot 1 = core pieces, entries 0x80000000 | run-time boundary index), #6 = 9, #7..#10 Fixed20 bbox, #11..#18 u16
   ranges (cell ranges of the two cut layers, decoded in PATHFINDING_PORTS.md §10.4). Tool: `cargo run -p ntw_campaign --example obstacle_probe -- <esf>`.

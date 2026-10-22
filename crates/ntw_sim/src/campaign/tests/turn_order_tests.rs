@@ -204,7 +204,17 @@ fn ending_a_siege_updates_the_prices_keeping_the_history() {
 #[test]
 fn a_region_lost_mid_turn_updates_the_prices_keeping_the_history() {
     let mut m = price_model();
-    assert!(m.transfer_region(RegionId(12), A), "C hands region 12 over");
+    assert!(m.transfer_region(RegionId(12), A, &mut Vec::new()), "C hands region 12 over");
+    assert_eq!(price_state(&m), (vec![140], vec![100], vec![120], vec![0]));
+}
+
+/// The route loss's price update reads the demand the settlement's `SetSettlementOwner` rebuilt before
+/// `TransferRegionToFaction` (`0x00B44ACC` → `0x00AB49F0(0)` at `0x00B2B85F`), not a demand stored earlier.
+#[test]
+fn the_route_loss_reads_the_demand_rebuilt_before_the_transfer() {
+    let mut m = price_model();
+    m.world.regions.get_mut(&RegionId(12)).unwrap().commodity_demand = vec![99_999];
+    assert!(m.transfer_region(RegionId(12), A, &mut Vec::new()), "C hands region 12 over");
     assert_eq!(price_state(&m), (vec![140], vec![100], vec![120], vec![0]));
 }
 
@@ -225,7 +235,7 @@ fn a_port_slot_passing_updates_the_prices() {
             m.world.characters.insert(admiral.id, admiral);
             m.world.forces.insert(ForceId(1005), MilitaryForce { id: ForceId(1005), faction: B, commander: Some(CharacterId(109)), units: vec![unit(9)], is_navy: true });
         }
-        assert!(m.transfer_region(r12, A), "the rebels lose region 12");
+        assert!(m.transfer_region(r12, A, &mut Vec::new()), "the rebels lose region 12");
         price_state(&m)
     };
     let unchanged = (vec![10], vec![100], vec![120], vec![9]);
@@ -245,7 +255,7 @@ fn a_same_owner_handover_updates_the_prices_only_through_a_port() {
         let mut slot = m.world.regions[&RegionId(10)].slots[1].clone();
         slot.port = port;
         m.world.regions.get_mut(&r12).unwrap().slots.push(slot);
-        assert!(!m.transfer_region(r12, C), "C already owns region 12");
+        assert!(!m.transfer_region(r12, C, &mut Vec::new()), "C already owns region 12");
         assert_eq!(m.world.regions[&r12].owner, C);
         price_state(&m)
     };
@@ -358,9 +368,9 @@ fn the_turn_end_walks_the_faction_list_with_gains_last_and_losses_dropped() {
     // A's list: 13, 12, 10 (id order would be 10, 12, 13).
     m.world.region_order = [13, 12, 11, 10].map(RegionId).to_vec();
     m.start_campaign();
-    assert!(m.transfer_region(RegionId(11), A), "gained: to the end");
+    assert!(m.transfer_region(RegionId(11), A, &mut Vec::new()), "gained: to the end");
     assert_eq!(m.world.faction_regions_in_list_order(A), [13, 12, 10, 11].map(RegionId));
-    assert!(m.transfer_region(RegionId(12), B), "lost: removed");
+    assert!(m.transfer_region(RegionId(12), B, &mut Vec::new()), "lost: removed");
     assert_eq!(m.world.faction_regions_in_list_order(A), [13, 10, 11].map(RegionId));
     let region_ends: Vec<u32> = a_turn_end(&mut m)
         .iter()
@@ -480,6 +490,42 @@ fn the_round_end_economy_skips_the_rebels_settle() {
     assert_ne!(m.world.regions[&RegionId(11)].town_wealth_growth, i32::MIN, "the rebels' region growth was recomputed");
 }
 
+/// rebelroundend: the round-end economy steps the relationships' per-turn update (`0x00B29100`) and research
+/// (`0x008F3C40`, whose end refreshes the technology availability) only for a faction with a record still in
+/// the game (the JNZs at `0x008BC869` / `0x008BC871`): A's alliance commitment counts down and its technology
+/// opens, the rebels' keep theirs.
+#[test]
+fn the_round_end_economy_skips_the_rebels_relations_and_research() {
+    use super::research::state;
+    use super::rules::{BuildingRules, TechRules};
+    let mut m = test_model();
+    make_rebels(&mut m, B);
+    let mut rules = (*m.rules).clone();
+    rules.buildings.insert("admin_1".into(), BuildingRules { chain: "sAdmin".into(), level: 1, chain_thread: 2, ..Default::default() });
+    rules.technologies.insert("admin_t".into(), TechRules { cost: 10, building_level: "admin_1".into(), ..Default::default() });
+    m.rules = Arc::new(rules);
+    for (f, region) in [(A, 10), (B, 11)] {
+        m.world.regions.get_mut(&RegionId(region)).unwrap().slots[0].building = Some(BuildingRef { level_key: "admin_1".into(), health: 100 });
+        m.world.faction_details.entry(f).or_default().technologies = vec![("admin_t".into(), state::UNAVAILABLE)];
+    }
+    // The rebels hold a record of their own here (the startpos has none), so a wrongly stepped one shows.
+    m.relationship_mut(A, B).alliance_commitment_turns = 5;
+    m.relationship_mut(B, A).alliance_commitment_turns = 5;
+    m.turn.humans = vec![A];
+    m.start_campaign();
+    m.begin_end_turn();
+    while m.turn.queue.front().is_some_and(|s| !matches!(s, TurnStep::Economy(_))) {
+        m.step();
+    }
+    while let Some(TurnStep::Economy(_)) = m.turn.queue.front() {
+        m.step();
+    }
+    assert_eq!(m.world.relationships[&(A, B)].alliance_commitment_turns, 4, "A's record stepped");
+    assert_eq!(m.world.relationships[&(B, A)].alliance_commitment_turns, 5, "the rebels' record did not");
+    assert_eq!(m.tech_state(A, "admin_t"), Some(state::AVAILABLE), "A's research step refreshed its availability");
+    assert_eq!(m.tech_state(B, "admin_t"), Some(state::UNAVAILABLE), "the rebels' did not");
+}
+
 /// The events of the human A's turn end (`0x008BD0F0`) and nothing else: ends A's turn and runs only
 /// its first step (`TurnStep::FactionEnd`), which closes with `FactionTurnEnd`.
 fn a_turn_end(m: &mut CampaignModel) -> Vec<CampaignEvent> {
@@ -558,8 +604,31 @@ fn the_population_round_end_walks_the_faction_list_with_gains_last() {
     m.world.regions.insert(RegionId(13), region(13, A, 1000, 0));
     // A's list: 13, 12, 10 (id order would be 10, 12, 13), then 11 gained in play.
     m.world.region_order = [13, 12, 11, 10].map(RegionId).to_vec();
-    assert!(m.transfer_region(RegionId(11), A), "gained: to the end");
+    assert!(m.transfer_region(RegionId(11), A, &mut Vec::new()), "gained: to the end");
     m.population_round_end(A);
     let order = m.mod_state.get(&ModKey::new(OWNER, ModScope::Campaign, "order")).cloned();
     assert_eq!(order, Some(ModValue::List([13, 12, 10, 11].map(ModValue::Int).to_vec())));
+}
+
+/// charloops: the faction turn start runs the spotting manager (a human's spy-network step `0x008F2480`)
+/// after its regions and the faction-level updates, at `0x008F2C3C` past the join `0x008F2BB1`, then the
+/// standing orders (`0x008F2C5B` → `0x009653D0`) and the pools' step (`0x008F2C99` → `0x00A25310`), and
+/// `FactionTurnStart` last; not with the characters' turn starts (`0x008F2AC4`).
+#[test]
+fn the_spy_network_step_comes_after_the_regions_and_before_the_faction_turn_start() {
+    let mut m = agents_model();
+    m.world.character_details.get_mut(&CharacterId(103)).unwrap().idle_turns = 3;
+    m.turn.humans = vec![A];
+    let ev = m.start_campaign();
+    // A's turn start comes last in the start events (B plays first as AI).
+    let a_chars = ev.iter().position(|e| matches!(e, CampaignEvent::CharacterTurnStart { character } if *character == CharacterId(103))).unwrap();
+    let network = ev.iter().position(|e| *e == CampaignEvent::CharacterBuildsSpyNetwork { character: CharacterId(103) }).unwrap();
+    for r in [10, 12] {
+        assert_eq!(m.world.regions[&RegionId(r)].owner, A, "region {r} belongs to A");
+    }
+    let last_region = ev.iter().rposition(|e| matches!(e, CampaignEvent::RegionTurnStart { region } if [10, 12].contains(&region.raw()))).unwrap();
+    let a_start = ev.iter().position(|e| *e == CampaignEvent::FactionTurnStart { faction: A }).unwrap();
+    assert!(a_chars < last_region, "A's regions come after its characters");
+    assert!(last_region < network, "the spy network after A's regions");
+    assert!(network < a_start, "and before FactionTurnStart");
 }

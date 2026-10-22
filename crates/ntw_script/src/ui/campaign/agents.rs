@@ -718,22 +718,23 @@ pub(super) fn menu_target_of(m: &CampaignModel, v: &Value) -> Option<AgentMenuTa
 /// the shipped scripts use to reach it (`agent_options.lua:109`, `agent_action.lua:49`).
 /// `layout.root.lua:1187` is `OpenAgentActionPopup(action, src, targets)` (arity 3 CONFIRMED) and
 /// `layout.root.lua:1191` is `OpenAgentOptionsPopup(src, target, mask, pct, pct)` (arity 5); both
-/// forward to `panel_manager.OpenPanel(<panel>, nil, "Initialise", ...)`.
+/// forward to `panel_manager.OpenPanel(<panel>, nil, "Initialise", ...)`. A script error is logged
+/// here; see [`try_call_root_global`] for a caller that logs the outcome itself.
 pub(super) fn call_root_global(lua: &Lua, inner: &Inner, name: &str, args: impl mlua::IntoLuaMulti) -> bool {
-    let Some(root) = inner.root_node() else { return false };
-    let r = (|| -> mlua::Result<bool> {
-        let mut a = args.into_lua_multi(lua)?;
-        a.push_front(Value::String(lua.create_string(name)?));
-        a.push_front(addr(root));
-        call_entry::<bool>(lua, inner, root, "__ntw_call_if_defined", a)
-    })();
-    match r {
-        Ok(b) => b,
-        Err(e) => {
-            log(inner, format!("ERROR in {name}: {e}"));
-            false
-        }
-    }
+    try_call_root_global(lua, inner, name, args).unwrap_or_else(|e| {
+        log(inner, format!("ERROR in {name}: {e}"));
+        false
+    })
+}
+
+/// [`call_root_global`] without the logging: `Ok(false)` when there is no root or it defines no
+/// global `name`, `Err` when the call failed.
+pub(super) fn try_call_root_global(lua: &Lua, inner: &Inner, name: &str, args: impl mlua::IntoLuaMulti) -> mlua::Result<bool> {
+    let Some(root) = inner.root_node() else { return Ok(false) };
+    let mut a = args.into_lua_multi(lua)?;
+    a.push_front(Value::String(lua.create_string(name)?));
+    a.push_front(addr(root));
+    call_entry::<bool>(lua, inner, root, "__ntw_call_if_defined", a)
 }
 
 /// The engine side of the agents panel's action buttons: open the target picker for the button's

@@ -240,9 +240,9 @@ pub(super) struct DealRow {
 }
 
 /// One item of the pending deal the UI still holds: the model's `DiplomaticAction`s (see
-/// `accept_deal`). The region, technology and payment items are the model's
-/// (`ntw_sim::campaign::negotiation::Negotiation::regions` / `technologies` / `payment`, set by
-/// `Propose` through their commands, UI_FIDELITY.md §4.9).
+/// `accept_deal`). The region, technology, payment, peace and join-war items are the model's
+/// (`ntw_sim::campaign::negotiation::Negotiation::regions` / `technologies` / `payment` / `peace` /
+/// `join_war`, set by `Propose` through their commands, UI_FIDELITY.md §4.9).
 ///
 /// Nothing constructs one of these yet: `Propose` (0x009BF3C0) builds the other actions' items
 /// too (state gift, protector, war, the faction lists), whose commands are not ported.
@@ -367,9 +367,22 @@ fn faction_list_for_diplomacy(lua: &Lua, inner: &Inner, ui: &CampaignUi) -> mlua
 /// (0x009B1B50): Name, Label (the faction key), Flag ("<flag path>/small.tga"). `None` (the call
 /// returns nothing) for a faction the registry does not hold: see [`faction_key_args`].
 fn diplomacy_details(lua: &Lua, inner: &Inner, ui: &CampaignUi, key: &str) -> mlua::Result<Option<Table>> {
+    let out = lua.create_table()?;
+    Ok(diplomacy_lists(lua, inner, ui, key, DIPLOMACY_LISTS_ALL, &out)?.then_some(out))
+}
+
+/// All five lists of [`diplomacy_lists`] (the mask `RetrieveDiplomacyDetails` passes).
+const DIPLOMACY_LISTS_ALL: u8 = 0x1F;
+
+/// The lists of `0x009B2690`, set on `out` (CONFIRMED by disassembly): `AtWar`, `Allies`,
+/// `TradeRights`, `Protectorates` and `ProtectorOf` are always set, and list `i` of that order is
+/// filled only when `mask` has bit `i` (the `ally_attacked` message passes 0x1A: allies,
+/// protectorates, protector of; `RetrieveDiplomacyDetails` 0x1F). See [`diplomacy_details`] for the
+/// entries. False, with nothing set, for a faction the registry does not hold.
+pub(super) fn diplomacy_lists(lua: &Lua, inner: &Inner, ui: &CampaignUi, key: &str, mask: u8, out: &Table) -> mlua::Result<bool> {
     use ntw_sim::campaign::Stance;
     let m = ui.model();
-    let Some(f) = m.registry_faction(key) else { return Ok(None) };
+    let Some(f) = m.registry_faction(key) else { return Ok(false) };
     let lists: Vec<Table> = (0..5).map(|_| lua.create_table()).collect::<mlua::Result<_>>()?;
     for (other, stance) in &f.diplomacy {
         let Some(o) = m.world.factions.get(other) else { continue };
@@ -388,19 +401,18 @@ fn diplomacy_details(lua: &Lua, inner: &Inner, ui: &CampaignUi, key: &str) -> ml
             Stance::Protectorate => Some(4),
             Stance::Neutral => None,
         };
-        if let Some(i) = list {
+        if let Some(i) = list.filter(|i| mask & 1 << i != 0) {
             lists[i].set(o.key.as_str(), e.clone())?;
         }
         // `f`'s own record about `other` (the `[f + 0x528]` entry, `+0x788` read at 0x009B2869).
-        if m.world.trade_held(f.id, *other) {
+        if mask & 0x4 != 0 && m.world.trade_held(f.id, *other) {
             lists[2].set(o.key.as_str(), e)?;
         }
     }
-    let out = lua.create_table()?;
     for (i, name) in ["AtWar", "Allies", "TradeRights", "Protectorates", "ProtectorOf"].iter().enumerate() {
         out.set(*name, lists[i].clone())?;
     }
-    Ok(Some(out))
+    Ok(true)
 }
 
 /// The faction-key arguments of `RetrieveDiplomacyDetails` (0x009F2750, one key),
@@ -872,6 +884,29 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
         });
         Ok(has_allies)
     });
+    // DeclareWarInstant(a, b): `a` declares war on `b` (`HandleCampaignUIDeclareWarInstant`
+    // `0x009E2090`, registered at `0x00428A1A`, CONFIRMED by disassembly): it reads two faction keys
+    // (the reader takes the top of the stack, so its first read is `b`), looks both up in the
+    // registry (`0x00955B70`) and queues CCQ_DECLARE_WAR (a, b), with no at-war, turn or human test;
+    // the model's command (`CampaignModel::declare_war_command`) does the rest and refuses a war
+    // already declared (its ORIGINAL BUG note). No shipped UI script calls it.
+    // ORIGINAL BUG: the exe has no null test, so an unknown key reaches the command's payload writer
+    // (`0x00953CA0`) as a null faction, which reads its +0x824 and crashes. Ours queues nothing and
+    // logs it once per pair; a wrong-typed or missing argument is logged by `faction_key_args`.
+    f!("DeclareWarInstant", |lua, inner, ui, args: MultiValue| {
+        let Some([a, b]) = faction_key_args::<2>(lua, &inner, "DeclareWarInstant", &args) else { return Ok(()) };
+        let ids = {
+            let m = ui.model();
+            (m.registry_faction(&a).map(|f| f.id), m.registry_faction(&b).map(|f| f.id))
+        };
+        match ids {
+            (Some(a), Some(b)) => ui.push(CampaignRequest::Command(CampaignCommand::DeclareWar { a, b })),
+            _ => inner.log_once_for_pair("DeclareWarInstant faction", &a, &b, || {
+                format!("UNKNOWN CampaignUI.DeclareWarInstant({a:?}, {b:?}): no such faction; no war is declared (the original crashes here; logged once per pair)")
+            }),
+        }
+        Ok(())
+    });
     // IsMultiplayerOttomansFrenchDiplomacy(): only in multiplayer (CONFIRMED description); false.
     f!("IsMultiplayerOttomansFrenchDiplomacy", |_l, inner, ui, _a: Variadic<Value>| Ok(false));
     // StateGiftValues() → {v1, v2, v3}: the `state_gift_values` values in ascending order
@@ -996,20 +1031,21 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     // `offer_or_demand_regions` (InitialiseNegotiation reads `offers, demands, regions_text =` and
     // hands each row to AddToOffersDemandsList). `Regions` is set for the region-transfer action
     // (action id 6). INFERRED: `Action` is the host's action name (the exe gives the action
-    // record). The region, technology, payment and join-war rows come from the model's records (one row per
-    // side that has items, `Regions` the region keys), after the UI's rows, in the action list's
-    // order; their `Action` is the action's name, our stand-in for the action record everywhere
-    // (`BuildPossibleActions`' `Address`), which the panel hands back to `RemoveAction`
+    // record). The region, technology, payment, peace and join-war rows come from the model's records
+    // (one row per side that has items, `Regions` the region keys), after the UI's rows, in the
+    // action list's order; their `Action` is the action's name, our stand-in for the action record
+    // everywhere (`BuildPossibleActions`' `Address`), which the panel hands back to `RemoveAction`
     // (diplomacy_panel.lua:1024). A row's `Text` is the record's text (the getters `0x00C43D20`
-    // offer / `0x005647C0` demand, which also decide the row's side); only the payment record's is
-    // built here ([`payment_row_text`]: an offer when the stored amount is negative, `0x00C123F0`, a
-    // demand when positive, `0x00C11F20`); the other rows carry none (INFERRED, their texts not traced).
+    // offer / `0x005647C0` demand, which also decide the row's side); only the payment record's
+    // ([`payment_row_text`]: an offer when the stored amount is negative, `0x00C123F0`, a demand when
+    // positive, `0x00C11F20`) and the peace record's (both sides, `0x00C11F30`, below) are built
+    // here; the other rows carry none (INFERRED, their texts not traced).
     f!("BuildOfferAndDemandStrings", |lua, inner, ui, _a: Variadic<Value>| {
         let state = ui.negotiation.borrow();
         if state.target.is_none() {
             return Ok(mlua::MultiValue::new());
         }
-        let (regions, techs, payment, join_war) = {
+        let (regions, techs, payment, peace, join_war) = {
             let m = ui.model();
             let keys = |list: &[RegionId]| -> Vec<String> { list.iter().filter_map(|r| m.world.regions.get(r).map(|x| x.key.clone())).collect() };
             match m.negotiations.current.as_ref().filter(|n| Some(n.serial) == state.target) {
@@ -1017,11 +1053,19 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
                     [keys(&n.regions.offered), keys(&n.regions.demanded)],
                     [!n.technologies.offered.is_empty(), !n.technologies.demanded.is_empty()],
                     n.payment,
+                    n.peace,
                     [!n.join_war.offered.is_empty(), !n.join_war.demanded.is_empty()],
                 ),
                 None => Default::default(),
             }
         };
+        // The peace record's offer and demand getters are one function (vt+0x14 `0x005647C0` jumps to
+        // vt+0x4 `0x00C11F30`, CONFIRMED by disassembly), so a proposed peace is a row on BOTH sides,
+        // with the `diplomacy_strings` row `offer_or_demand_peace` (CONFIRMED key `0x01388038`) as its
+        // text. A missing row gives an empty text, logged once (ORIGINAL BUG: the exe logs the missing
+        // key, then reads the text through a null record, a crash (0x00C11FC2)).
+        const PEACE_KEY: &str = "diplomacy_strings_string_offer_or_demand_peace";
+        let peace_text = peace.then(|| loc_required(&inner, PEACE_KEY));
         let mut out = Vec::new();
         for (side, items) in [&state.offers, &state.demands].into_iter().enumerate() {
             let list = lua.create_table()?;
@@ -1045,6 +1089,12 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
                 let row = lua.create_table()?;
                 row.set("Action", NegotiationAction::Payments.name())?;
                 row.set("Text", payment_row_text(&inner, payment))?;
+                list.push(row)?;
+            }
+            if let Some(text) = &peace_text {
+                let row = lua.create_table()?;
+                row.set("Action", NegotiationAction::Peace.name())?;
+                row.set("Text", text.as_str())?;
                 list.push(row)?;
             }
             if join_war[side] {
@@ -1224,6 +1274,10 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     //   go to `0x00C1F690`, the offers to `0x00C43D30`; CONFIRMED by disassembly) →
     //   `CampaignCommand::ProposeJoinWar`. A key the registry lacks gives the exe a null entry (what its
     //   command then carries is UNKNOWN, not traced); ours proposes nothing and logs the key once.
+    // - peace `(action)` (diplomacy_panel.lua:666-667 passes only the action; CONFIRMED by
+    //   disassembly: action id 11 takes the jump table `0x009BFCB0`'s default `0x009BFBBC`, which reads
+    //   no argument, and the peace record's vt+0x40 `0x00C4AF90` posts CCQ_DIPLOMACY_PROPOSE_PEACE,
+    //   command id `0x015C3C98`, with the clear flag 0) → `CampaignCommand::ProposePeace`.
     // PLACEHOLDER: the other actions' items (state gift, protector, war, the break-trade and
     // break-alliance faction lists) have no model command yet; logged once per action.
     f!("Propose", |_l, inner, ui, a: Variadic<Value>| {
@@ -1291,6 +1345,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
                     _ => None,
                 }
             }
+            Some(NegotiationAction::Peace) => Some(CampaignCommand::ProposePeace { clear: false }),
             other => {
                 let name = other.map_or("unknown", NegotiationAction::name);
                 inner.log_once_for("Propose action", name, || {
@@ -1367,9 +1422,11 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     // action out of the deal. For regions, technologies and payments that posts the action's own
     // command with the clear flag set and no items (0x00C5CF20 / 0x00C5CFF0 / 0x00C5CBC0, the last
     // with the payment command's descriptor 0x013879FC that Propose's 0x00C4AD60 posts with the flag
-    // clear; CONFIRMED), and for join war 0x00C5CA50 (descriptor 0x01387A04, the flag set; CONFIRMED).
-    // PLACEHOLDER: the other actions' items are not built (see [`NegotiationItem`]), so there is
-    // nothing to remove.
+    // clear; CONFIRMED), for join war 0x00C5CA50 (descriptor 0x01387A04, the flag set; CONFIRMED) and
+    // for peace 0x00C5CE20 (CCQ_DIPLOMACY_PROPOSE_PEACE, command id 0x015C3C98, with the clear flag 1,
+    // the command Propose's 0x00C4AF90 posts with flag 0; CONFIRMED by disassembly).
+    // PLACEHOLDER: the other actions' items (state gift, protector, war, the break-trade and
+    // break-alliance lists) are not built (see [`NegotiationItem`]), so there is nothing to remove.
     f!("RemoveAction", |_l, inner, ui, a: Variadic<Value>| {
         if negotiation_factions(&ui).is_none() {
             return Ok(());
@@ -1383,6 +1440,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
             Some(NegotiationAction::Technology) => CampaignCommand::ProposeTechnologies { clear: true, demanded: Vec::new(), offered: Vec::new() },
             Some(NegotiationAction::Payments) => CampaignCommand::ProposePayment { clear: true, amount: 0, turns: 0 },
             Some(NegotiationAction::RequestJoinWar) => CampaignCommand::ProposeJoinWar { clear: true, demanded: Vec::new(), offered: Vec::new() },
+            Some(NegotiationAction::Peace) => CampaignCommand::ProposePeace { clear: true },
             _ => return Ok(()),
         };
         ui.push(CampaignRequest::Command(cmd));
@@ -1397,7 +1455,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
             .negotiations
             .current
             .as_ref()
-            .is_some_and(|n| Some(n.serial) == state.target && !(n.regions.is_empty() && n.technologies.is_empty() && n.join_war.is_empty() && !n.payment.has_items()));
+            .is_some_and(|n| Some(n.serial) == state.target && !(n.regions.is_empty() && n.technologies.is_empty() && n.join_war.is_empty() && !n.payment.has_items() && !n.peace));
         Ok(!state.offers.is_empty() || !state.demands.is_empty() || modelled)
     });
     // CanThreaten(): UNKNOWN shape; INFERRED: any counterparty not already at war.

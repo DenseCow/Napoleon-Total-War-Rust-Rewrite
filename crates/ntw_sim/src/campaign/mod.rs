@@ -28,6 +28,7 @@ pub mod agents;
 pub mod autoresolve;
 pub mod battles;
 pub mod capture;
+pub mod capture_ai;
 pub mod commander_recruitment;
 pub mod commands;
 pub mod details;
@@ -46,6 +47,7 @@ pub mod historical_events;
 pub mod features;
 pub mod names;
 pub mod negotiation;
+pub mod message_events;
 pub mod movers;
 pub mod mod_state;
 pub mod naval;
@@ -62,6 +64,7 @@ pub mod port_blockade;
 pub mod rtcut;
 pub mod zoc;
 pub mod zones;
+pub mod zoom_limit;
 pub mod religion;
 pub mod research;
 pub mod rules;
@@ -71,6 +74,7 @@ pub mod trade_check;
 pub mod treaties;
 pub mod treasury;
 pub mod turn;
+pub mod personalities;
 pub mod pool;
 pub mod region_value;
 pub mod portraits;
@@ -86,7 +90,7 @@ pub use events::{CampaignEvent, CampaignMessage};
 pub use ids::{CharacterId, FactionId, FortId, ForceId, RecruitmentItemId, RegionId, UnitId};
 pub use rules::{BuildingRules, BuildingTable, CampaignRules, TaxClass, UnitAutoresolve, UnitRules};
 pub use turn::{TurnState, TurnStep};
-pub use world::{SlotRef, FactionAiKeys, AiArea,
+pub use world::{SlotRef, FactionAiKeys, AiArea, RebelArmySide,
     BuildingRef, CampaignModel, CampaignUnit, Character, CharacterKind, ConstructionItem, ConstructionKind, Faction,
     GovernmentType, MilitaryForce, RecruitmentItem, RecruitmentManager, Reinforcement, RecruitmentSource, Region, RegionSlot, PortBlockade, Settlement, Stance,
     Terrain, World,
@@ -94,7 +98,8 @@ pub use world::{SlotRef, FactionAiKeys, AiArea,
 pub use visibility::{FogState, Shroud, SightGrid};
 pub use world::{Fort, PopulationClassState};
 pub use siege::SiegeState;
-pub use world::{EconomyRecord, ECONOMY_HISTORY_LEN, TREATY_BREAKS_START};
+pub use zoom_limit::ZoomLimit;
+pub use world::{EconomyRecord, ECONOMY_HISTORY_LEN, TREATY_BREAKS_START, CAI_RNG_SEED};
 
 #[cfg(test)]
 mod tests;

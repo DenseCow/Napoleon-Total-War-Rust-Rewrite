@@ -362,7 +362,8 @@ pub fn enter(world: &mut World) {
     });
     world.flush();
 
-    // Camera: centred on the human player's faction (its first army, else its first settlement).
+    // Camera, for a file with no camera block (the exe keeps its default camera then, whose view is
+    // not traced): centred on the human player's faction (its first army, else its first settlement).
     let human_id = loaded.model.faction_by_key(&human).map(|f| f.id);
     let m = &loaded.model;
     let focus = human_id
@@ -382,6 +383,15 @@ pub fn enter(world: &mut World) {
         max: Vec2::new(tmax.0, -tmin.1),
         ground: map.height_at(focus.0, focus.1),
     };
+    // A loaded game opens on the camera it was saved with, a new single-player game on the start
+    // position's (`0x0090E5A0` via `0x00987070`); only a new multiplayer campaign (campaign +0x1034)
+    // replaces it, in `ntw_campaign::camera::opening_camera`. No multiplayer campaign starts here yet.
+    let new_multiplayer_game = false;
+    let saved_camera = ntw_campaign::camera::opening_camera(loaded.camera, new_multiplayer_game, &loaded.model, Some(&human));
+    if let Some(c) = &saved_camera {
+        cam.look_at_view(&c.current);
+        cam.ground = map.height_at(cam.target.x, -cam.target.y);
+    }
     // Test harness: `NAPOLEON_CAMPAIGN_CAMERA=x,z,distance` (logic units) overrides the start view.
     if let Ok(s) = std::env::var("NAPOLEON_CAMPAIGN_CAMERA") {
         let v: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
@@ -390,6 +400,11 @@ pub fn enter(world: &mut World) {
             cam.distance = d.clamp(camera::MIN_DISTANCE, camera::MAX_DISTANCE);
         }
     }
+    // What a save written before the camera moves holds (`camera::control` keeps it current).
+    let (cam_view, named_cameras) = match saved_camera {
+        Some(c) => (cam.view(c.current), c.named),
+        None => (cam.view(ntw_campaign::camera::CameraView::looking_at(0.0, 0.0, camera::MIN_TILT)), Vec::new()),
+    };
     world.spawn((
         Camera3d::default(),
         Projection::Perspective(PerspectiveProjection { fov: camera::FOV_DEGREES.to_radians(), near: 0.1, far: 5000.0, ..default() }),
@@ -462,6 +477,8 @@ pub fn enter(world: &mut World) {
         info: loaded.info,
         rebel_faction: loaded.rebel_faction,
         pictures: Arc::new(pictures),
+        camera: std::cell::Cell::new(cam_view),
+        named_cameras,
     };
     let mut sim = CampaignSim {
         host,

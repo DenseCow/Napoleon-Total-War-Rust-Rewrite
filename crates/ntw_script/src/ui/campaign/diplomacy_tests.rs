@@ -6,13 +6,14 @@ use ntw_formats::loc::{LocEntry, LocFile, Localisation};
 use ntw_sim::campaign::Stance;
 use ntw_sim::campaign::negotiation::{TRADE_TIP_ROUTE_COUNT, TRADE_TIP_ROUTE_SHIFTED, TRADE_TIP_SEA_ROUTES, TradeAgreementTooltip};
 
-use super::tests::{A, HudSetup, TestHud, test_hud_setup};
+use super::tests::{A, HudSetup, TestHud, negotiation_with_offer, test_hud_setup};
 use super::*;
 
 const B: FactionId = FactionId(2);
 const C: FactionId = FactionId(3);
 
-/// A HUD with A (the player), B and C in the game, C displayed as "Cland", and the treaty strings.
+/// A HUD with A (the player), B and C in the game, C displayed as "Cland", the treaty strings and
+/// three negotiation button tooltips.
 fn hud() -> TestHud {
     let mut loc = Localisation::new();
     let entries = [
@@ -26,6 +27,18 @@ fn hud() -> TestHud {
         entries: entries
             .iter()
             .map(|(k, t)| LocEntry { key: format!("diplomacy_strings_string_current_treaty_{k}"), text: (*t).into(), flag: false })
+            .collect(),
+    });
+    let tips = [
+        ("alliance_tooltip_can_ally", "We can ally."),
+        ("break_trade_tooltip_can_embargo", "They can embargo."),
+        ("break_alliance_tooltip_can_break_alliance", "They can break an alliance."),
+    ];
+    loc.add(&LocFile {
+        version: 1,
+        entries: tips
+            .iter()
+            .map(|(k, t)| LocEntry { key: format!("random_localisation_strings_string_{k}"), text: (*t).into(), flag: false })
             .collect(),
     });
     let hud = test_hud_setup(GameDatabase::test_fixture(), HudSetup { loc, ..HudSetup::default() });
@@ -257,6 +270,30 @@ fn an_empty_trade_tooltip_is_left_unset() {
     assert!(hud.errors().is_empty(), "{:?}", hud.errors());
 }
 
+/// The alliance, break_trade and break_alliance buttons carry the text of the model's
+/// `random_localisation_strings` key (`0x00B0CBD0`, `0x00B13CB0`, `0x00B13B80`). Bug: they had no
+/// `Tooltip` (the template's own text showed).
+#[test]
+fn alliance_and_break_buttons_carry_the_model_s_tooltip() {
+    let hud = hud();
+    {
+        let mut st = hud._scripts.state_mut();
+        st.model.world.set_stance(A, C, Stance::Allied).unwrap();
+        st.model.apply(ntw_sim::campaign::CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+        let n = st.model.negotiations.clone();
+        let ui = hud.host.campaign_ui().unwrap();
+        let mut state = ui.negotiation.borrow_mut();
+        (state.seen_begun, state.seen_ended) = (n.begun, n.ended);
+        state.target = n.current.map(|c| c.serial);
+    }
+    let tip = |state: &str| -> Option<String> {
+        eval(&hud, &format!("for _, e in ipairs(CampaignUI.BuildPossibleActions().Unilaterals) do if e.State == '{state}' then return e.Tooltip end end"))
+    };
+    assert_eq!(tip("alliance").as_deref(), Some("We can ally."));
+    assert_eq!(tip("break_trade").as_deref(), Some("They can embargo."));
+    assert_eq!(tip("break_alliance").as_deref(), Some("They can break an alliance."));
+}
+
 /// The number of values each call returns: `select('#', ...)` counts a returned nil, so 0 means the
 /// call returned nothing.
 fn result_counts(hud: &TestHud, args: &str) -> (i64, i64, i64) {
@@ -347,4 +384,96 @@ fn faction_keys_are_the_last_arguments() {
     assert_eq!(turns, (5, -1), "a = the next-to-last argument (A gives B 5 turns), b = the last (B, the protectorate, gives A access for good)");
     assert_eq!(result_counts(&hud, "'test_faction_a', 'nobody'; 'test_faction_a', 'test_faction_b', 'nobody'"), (0, 0, 0), "an unknown last key");
     assert!(hud.errors().is_empty(), "{:?}", hud.errors());
+}
+
+/// Peace `Propose(action)` (`0x009BF3C0`: action id 11 reads no argument, the record's vt+0x40
+/// `0x00C4AF90` posts CCQ_DIPLOMACY_PROPOSE_PEACE with flag 0) and `RemoveAction` (vt+0x4C
+/// `0x00C5CE20`, flag 1) are the model's peace command; the proposed peace is a row on BOTH sides
+/// (`0x00C11F30` is the offer and the demand getter) with the `offer_or_demand_peace` text.
+#[test]
+fn proposing_peace_posts_its_command_and_shows_on_both_sides() {
+    let mut loc = Localisation::new();
+    let entry = LocEntry { key: "diplomacy_strings_string_offer_or_demand_peace".into(), text: "Peace treaty".into(), flag: false };
+    loc.add(&LocFile { version: 1, entries: vec![entry] });
+    let hud = test_hud_setup(GameDatabase::test_fixture(), HudSetup { loc, ..HudSetup::default() });
+    negotiation_with_offer(&hud);
+    hud.host.take_log();
+    let peace = |clear| vec![CampaignRequest::Command(CampaignCommand::ProposePeace { clear })];
+    assert_eq!(hud.requests_of("CampaignUI.Propose('peace')"), peace(false));
+    assert_eq!(hud.requests_of("CampaignUI.RemoveAction('peace')"), peace(true));
+    let log = hud.host.take_log();
+    assert!(log.is_empty(), "no PLACEHOLDER or error for peace: {log:?}");
+
+    let rows = "local o, d = CampaignUI.BuildOfferAndDemandStrings() return #o, o[#o].Action, o[#o].Text, #d, d[1].Action, d[1].Text";
+    let before: (usize, String) = eval(&hud, "local o, d = CampaignUI.BuildOfferAndDemandStrings() return #o, tostring(d[1])");
+    assert_eq!(before, (1, "nil".into()), "no peace row before the model holds one");
+    hud._scripts.state_mut().model.apply(CampaignCommand::ProposePeace { clear: false }).unwrap();
+    let got: (usize, String, String, usize, String, String) = eval(&hud, rows);
+    assert_eq!(got, (2, "peace".into(), "Peace treaty".into(), 1, "peace".into(), "Peace treaty".into()));
+    hud._scripts.state_mut().model.apply(CampaignCommand::ProposePeace { clear: true }).unwrap();
+    let after: (usize, usize) = eval(&hud, "local o, d = CampaignUI.BuildOfferAndDemandStrings() return #o, #d");
+    assert_eq!(after, (1, 0), "a cleared peace leaves no row");
+}
+
+/// A missing `offer_or_demand_peace` string gives the peace rows an empty text, logged once (ORIGINAL BUG: the exe
+/// logs the missing row, then reads the text through a null record, a crash, 0x00C11FC2).
+#[test]
+fn a_missing_peace_string_is_an_empty_text_logged_once() {
+    let hud = test_hud_setup(GameDatabase::test_fixture(), HudSetup::default());
+    negotiation_with_offer(&hud);
+    hud._scripts.state_mut().model.apply(CampaignCommand::ProposePeace { clear: false }).unwrap();
+    hud.host.take_log();
+    for _ in 0..2 {
+        let text: String = eval(&hud, "local o, d = CampaignUI.BuildOfferAndDemandStrings() return d[1].Text");
+        assert_eq!(text, "");
+    }
+    let log: Vec<String> = hud.host.take_log().into_iter().filter(|l| l.contains("offer_or_demand_peace")).collect();
+    assert_eq!(log.len(), 1, "{log:?}");
+}
+
+/// The commands `code` queues, drained.
+fn queued_commands(hud: &TestHud, code: &str) -> Vec<CampaignCommand> {
+    hud.host.take_campaign_requests();
+    hud.host.lua().load(code).exec().unwrap();
+    hud.host
+        .take_campaign_requests()
+        .into_iter()
+        .filter_map(|r| match r {
+            CampaignRequest::Command(c) => Some(c),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `DeclareWarInstant(a, b)` (0x009E2090) queues CCQ_DECLARE_WAR with `a` the declarer, as it reads
+/// them (two registry lookups, no at-war, turn or human test). The model refuses a war already
+/// declared (the ORIGINAL BUG of 0x00B26700's re-apply). ORIGINAL BUG: an unknown key is a null faction
+/// the payload writer 0x00953CA0 crashes on; ours queues nothing and logs it once per pair. Bug: the
+/// binding did not exist.
+#[test]
+fn declare_war_instant_queues_the_declaration() {
+    let hud = hud();
+    let call = "CampaignUI.DeclareWarInstant('test_faction_a', 'test_faction_b')";
+    assert_eq!(queued_commands(&hud, call), vec![CampaignCommand::DeclareWar { a: A, b: B }]);
+    hud._scripts.state_mut().model.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
+    assert_eq!(hud._scripts.state_mut().model.world.stance(A, B), Stance::War);
+    // At war: the binding still queues (it tests nothing), the model refuses.
+    assert_eq!(queued_commands(&hud, call), vec![CampaignCommand::DeclareWar { a: A, b: B }]);
+    assert_eq!(
+        hud._scripts.state_mut().model.apply(CampaignCommand::DeclareWar { a: A, b: B }),
+        Err(ntw_sim::campaign::CommandError::AlreadyAtWar(A, B))
+    );
+    assert!(hud.errors().is_empty(), "{:?}", hud.errors());
+    // An unknown key: nothing queued, logged once per pair.
+    let unknown = "CampaignUI.DeclareWarInstant('nobody', 'test_faction_b')";
+    assert_eq!(queued_commands(&hud, unknown), vec![]);
+    let errors = hud.errors();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].contains("UNKNOWN CampaignUI.DeclareWarInstant(\"nobody\", \"test_faction_b\")"), "{errors:?}");
+    assert_eq!(queued_commands(&hud, unknown), vec![]);
+    assert!(hud.errors().is_empty(), "logged once: {:?}", hud.errors());
+    // A missing key: nothing queued, the argument fault logged.
+    assert_eq!(queued_commands(&hud, "CampaignUI.DeclareWarInstant('test_faction_a')"), vec![]);
+    let errors = hud.errors();
+    assert!(errors.len() == 1 && errors[0].contains("DeclareWarInstant: Trying to retrieve type string"), "{errors:?}");
 }

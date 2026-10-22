@@ -8,6 +8,7 @@
 
 use super::details::Portrait;
 use super::ids::{CharacterId, FactionId};
+use super::portraits::CulturePortraits;
 use super::world::{CampaignModel, GovernmentType};
 use crate::rng::CaRng;
 
@@ -119,19 +120,26 @@ impl Family {
             .unwrap_or_default()
     }
 
-    /// The PLACEHOLDER portrait of a new member: the first filled member of the same sex's (the
-    /// original picks one by age and sex, `0x008EF630` → `0x009CB440`, not modelled).
-    fn placeholder_portrait(&self, male: bool) -> Portrait {
-        self.members.iter().find(|m| m.named() && m.male == male).map(|m| m.portrait.clone()).unwrap_or_default()
+    /// Member `slot`'s portrait (`0x008EF630`, CONFIRMED): from the king / queen decks of his
+    /// culture's set, by his age and sex ([`CulturePortraits::resolve_family_portrait`]). The exe
+    /// takes the culture of the member's owner (+0x64), which is always the family's faction (every
+    /// filled slot of a family has its id); `portraits` is that culture's set, `None` when the
+    /// allocator has none (`0x009CB440` then changes nothing). The draws are on the deck's own LCG,
+    /// never the campaign RNG.
+    fn resolve_portrait(&mut self, slot: usize, portraits: Option<&mut CulturePortraits>) {
+        if let Some(set) = portraits {
+            let m = &mut self.members[slot];
+            set.resolve_family_portrait(&mut m.portrait, m.age, m.male);
+        }
     }
 
-    /// A new adult member (`0x008B8860`): the slot is cleared, then present, owned by `owner`,
-    /// the faction's religion, `male`, a name unless `keep_name` (PLACEHOLDER), `age`, and #4
-    /// drawn (`uniform_below(3)`).
-    fn new_member(&mut self, rng: &mut CaRng, slot: usize, owner: u32, male: bool, age: i32, keep_name: bool) {
+    /// A new adult member (`0x008B8860`): the slot is cleared (portrait number -1), then present,
+    /// owned by `owner`, the faction's religion, `male`, a name unless `keep_name` (PLACEHOLDER),
+    /// `age`, #4 drawn (`uniform_below(3)`), and last his portrait ([`Self::resolve_portrait`]).
+    #[allow(clippy::too_many_arguments)]
+    fn new_member(&mut self, rng: &mut CaRng, portraits: Option<&mut CulturePortraits>, slot: usize, owner: u32, male: bool, age: i32, keep_name: bool) {
         let names = if keep_name { self.members[slot].names.clone() } else { self.placeholder_names(male) };
         let religion = self.members[LEADER].religion.clone();
-        let portrait = self.placeholder_portrait(male);
         let m = &mut self.members[slot];
         m.clear();
         m.exists = true;
@@ -141,16 +149,16 @@ impl Family {
         m.names = names;
         m.age = age;
         m.trait_4 = rng.uniform_below(3) as i32;
-        m.portrait = portrait;
+        self.resolve_portrait(slot, portraits);
     }
 
     /// A newborn (`0x008B8C80`): cleared, present, owned by `owner`, a boy when a 0..=100 draw is
-    /// above 50, a name (PLACEHOLDER), age 0.
+    /// above 50, a name (PLACEHOLDER), age 0. No portrait yet (number -1): each caller resolves it
+    /// once the child's age is set (the yearly pass at 0, the succession at his real age).
     fn birth(&mut self, rng: &mut CaRng, slot: usize, owner: u32) {
         let religion = self.members[LEADER].religion.clone();
         let male = rng.percent_0_100() > 50;
         let names = self.placeholder_names(male);
-        let portrait = self.placeholder_portrait(male);
         let m = &mut self.members[slot];
         m.clear();
         m.exists = true;
@@ -158,7 +166,6 @@ impl Family {
         m.religion = religion;
         m.male = male;
         m.names = names;
-        m.portrait = portrait;
     }
 }
 
@@ -207,11 +214,10 @@ fn member_year(rng: &mut CaRng, m: &mut FamilyMember) {
 pub fn family_year(model: &mut CampaignModel, faction: FactionId, hazards: &[f32; 101]) {
     let gov = model.world.factions.get(&faction).map(|f| f.government);
     let owner = faction.raw() as u32;
-    let Some(fam) = model.world.faction_details.get_mut(&faction).and_then(|d| d.family.as_mut()) else { return };
+    let Some((fam, mut portraits, rng)) = model.family_parts(faction) else { return };
     if fam.members.len() < 10 {
         return;
     }
-    let rng = &mut model.rng;
     fam.members[LEADER].age += 1;
     for k in 0..fam.child_count() {
         let c = &mut fam.members[FIRST_CHILD + k];
@@ -231,7 +237,7 @@ pub fn family_year(model: &mut CampaignModel, faction: FactionId, hazards: &[f32
             fam.members[LEADER].married_to = owner;
             let d = rng.uniform_below(5) as i32;
             let age = if lmale { lage - d } else { lage + d };
-            fam.new_member(rng, SPOUSE, owner, !lmale, age, false);
+            fam.new_member(rng, portraits.as_deref_mut(), SPOUSE, owner, !lmale, age, false);
             fam.members[SPOUSE].married_to = owner;
             fam.members[SPOUSE].spouse_names = vec![String::new(), String::new()];
         }
@@ -243,6 +249,7 @@ pub fn family_year(model: &mut CampaignModel, faction: FactionId, hazards: &[f32
             if rng.percent_0_100() < fert {
                 fam.birth(rng, FIRST_CHILD + usize::from(n), owner);
                 fam.members[LEADER].children += 1;
+                fam.resolve_portrait(FIRST_CHILD + usize::from(n), portraits.as_deref_mut());
                 fam.members[SPOUSE].children = fam.members[SPOUSE].children.saturating_add(1);
             }
         }
@@ -277,20 +284,20 @@ pub fn family_year(model: &mut CampaignModel, faction: FactionId, hazards: &[f32
         let r = rng.percent_0_100();
         let threshold = (2.0f32.powf(-(n as f32)) * 100.0) as u32;
         if r <= threshold {
-            new_relative(fam, rng, FIRST_RELATIVE + n, owner);
+            new_relative(fam, rng, portraits.as_deref_mut(), FIRST_RELATIVE + n, owner);
         }
     }
     let republic = !matches!(gov, Some(GovernmentType::AbsoluteMonarchy | GovernmentType::ConstitutionalMonarchy));
     if republic && super::characters::dies_this_year(rng, hazards, fam.members[LEADER].age) {
-        succession(fam, rng, owner);
+        succession(fam, rng, portraits, owner);
     }
 }
 
 /// A new relative aged 16..=50 (a man unless daughters may inherit, then a 0..=100 draw above 50).
-fn new_relative(fam: &mut Family, rng: &mut CaRng, slot: usize, owner: u32) {
+fn new_relative(fam: &mut Family, rng: &mut CaRng, portraits: Option<&mut CulturePortraits>, slot: usize, owner: u32) {
     let age = rng.int_range(0, 34) + 16;
     let male = if fam.female_heirs { rng.percent_0_100() > 50 } else { true };
-    fam.new_member(rng, slot, owner, male, age, false);
+    fam.new_member(rng, portraits, slot, owner, male, age, false);
 }
 
 /// The regnal numeral shown after a monarch's name (`0x008DCF50`, CONFIRMED): "X" repeated
@@ -324,7 +331,7 @@ pub fn regnal_numeral(n: i32) -> String {
 ///
 /// Returns whether the heir came from outside the children (the original then may name another
 /// faction as a claimant: UNKNOWN effect, not modelled).
-pub fn succession(fam: &mut Family, rng: &mut CaRng, owner: u32) -> bool {
+pub fn succession(fam: &mut Family, rng: &mut CaRng, mut portraits: Option<&mut CulturePortraits>, owner: u32) -> bool {
     let n = fam.child_count();
     let mut pick = None;
     for i in 0..n {
@@ -339,7 +346,7 @@ pub fn succession(fam: &mut Family, rng: &mut CaRng, owner: u32) -> bool {
         Some(k) => fam.members[LEADER] = fam.members[FIRST_CHILD + k].clone(),
         None => {
             if !fam.members[FIRST_RELATIVE].named() {
-                new_relative(fam, rng, FIRST_RELATIVE, owner);
+                new_relative(fam, rng, portraits.as_deref_mut(), FIRST_RELATIVE, owner);
             }
             fam.members[LEADER] = fam.members[FIRST_RELATIVE].clone();
             close_up(fam, FIRST_RELATIVE);
@@ -363,7 +370,7 @@ pub fn succession(fam: &mut Family, rng: &mut CaRng, owner: u32) -> bool {
         if keep {
             fam.members[SPOUSE].names = leader.spouse_names.clone();
         }
-        fam.new_member(rng, SPOUSE, leader.married_to, male, age, keep);
+        fam.new_member(rng, portraits.as_deref_mut(), SPOUSE, leader.married_to, male, age, keep);
         fam.members[SPOUSE].children = leader.children;
     }
     let count = usize::from(leader.children).min(4);
@@ -371,6 +378,7 @@ pub fn succession(fam: &mut Family, rng: &mut CaRng, owner: u32) -> bool {
         if k < count {
             fam.birth(rng, FIRST_CHILD + k, owner);
             fam.members[FIRST_CHILD + k].age = leader.age - leader.child_ages[k];
+            fam.resolve_portrait(FIRST_CHILD + k, portraits.as_deref_mut());
         } else {
             fam.members[FIRST_CHILD + k].clear();
         }
@@ -380,6 +388,16 @@ pub fn succession(fam: &mut Family, rng: &mut CaRng, owner: u32) -> bool {
 }
 
 impl CampaignModel {
+    /// What the family pass changes, borrowed apart: faction `faction`'s family, the portrait set
+    /// of its culture (`0x008EF630`: the owner faction's subculture record → its culture; `None`
+    /// when the allocator has no set for it) and the campaign RNG. `None` without a family.
+    fn family_parts(&mut self, faction: FactionId) -> Option<(&mut Family, Option<&mut CulturePortraits>, &mut CaRng)> {
+        let culture = self.rules.characters.culture(&self.world.factions.get(&faction)?.key);
+        let fam = self.world.faction_details.get_mut(&faction)?.family.as_mut()?;
+        let set = self.world.portraits.iter_mut().find(|s| s.culture == culture);
+        Some((fam, set, &mut self.rng))
+    }
+
     /// A post whose holder died gets a new holder at once (`0x008E05E0` → `0x008E4610` → the
     /// government class's slot +0x10: `0x008B7070` absolute monarchy, `0x008B7340` constitutional
     /// monarchy, `0x008B75C0` republic; CONFIRMED code; that the death of the holder is what calls
@@ -388,6 +406,9 @@ impl CampaignModel {
     ///   and his age;
     /// - any other post, and a republic's leader: a new minister aged 21 + a 0..=30 draw (absolute
     ///   monarchy) or 25 + a 0..=30 draw (the other two).
+    ///
+    /// His portrait is a minister's, drawn at his age ([`Self::assign_portrait`]); a monarch then takes
+    /// the family leader's (CONFIRMED).
     ///
     /// He stands off the map at (0, 0) as the original's ministers do. PROVISIONAL: his name for an
     /// ordinary post is drawn by the save writer (`ntw_campaign::charnames`), the original's name
@@ -412,10 +433,12 @@ impl CampaignModel {
         let year = self.calendar.date.year as i32;
         let mut names = (String::new(), String::new());
         let mut numeral = String::new();
+        let mut monarch_portrait = None;
         let age = if leader_post && monarchy && details.family.as_ref().is_some_and(|f| f.members.len() == 10) {
-            let fam = self.world.faction_details.get_mut(&faction).and_then(|d| d.family.as_mut()).expect("checked");
-            succession(fam, &mut self.rng, faction.raw() as u32);
+            let (fam, portraits, rng) = self.family_parts(faction).expect("checked");
+            succession(fam, rng, portraits, faction.raw() as u32);
             let l = &fam.members[LEADER];
+            monarch_portrait = Some(l.portrait.clone());
             names.0 = l.names.first().cloned().unwrap_or_default();
             // The new monarch-minister's name carries the successor's numeral (`0x008B7070` /
             // `0x008B7340` call `0x008DCF50` into character +0x33C, CONFIRMED).
@@ -451,6 +474,14 @@ impl CampaignModel {
                 ..self.rules.characters.new_character_details(CharacterKind::Minister.esf_name())
             },
         );
+        // The minister constructor `0x00990900` resolves a minister portrait at his age (an empty
+        // spec to `0x00992E60`), so the minister deck advances for a monarch too; then `0x008B7070` /
+        // `0x008B7340` copy the family leader's whole portrait block over it (`0x009D21B0` from
+        // family member +0x30, CONFIRMED).
+        self.assign_portrait(id, CharacterKind::Minister.esf_name());
+        if let (Some(portrait), Some(d)) = (monarch_portrait, self.world.character_details.get_mut(&id)) {
+            d.portrait = portrait;
+        }
         if let Some(p) = self.world.faction_details.get_mut(&faction).and_then(|d| d.posts.get_mut(post)) {
             p.holder = Some(id);
         }
@@ -617,7 +648,7 @@ mod tests {
     fn a_daughter_heir_hands_on_to_the_first_son() {
         let mut f = family();
         let mut rng = CaRng::new(5);
-        assert!(!succession(&mut f, &mut rng, 7));
+        assert!(!succession(&mut f, &mut rng, None, 7));
         let l = &f.members[LEADER];
         assert_eq!((l.names[0].as_str(), l.age), ("Karl", 28));
         // Karl again: the third of the name.
@@ -628,7 +659,7 @@ mod tests {
         // Daughters may inherit: Maria.
         let mut f = family();
         f.female_heirs = true;
-        succession(&mut f, &mut rng, 7);
+        succession(&mut f, &mut rng, None, 7);
         assert_eq!(f.members[LEADER].names[0], "Maria");
     }
 
@@ -637,7 +668,7 @@ mod tests {
         let mut f = family();
         f.members[FIRST_CHILD].heir = false;
         let mut rng = CaRng::new(5);
-        assert!(succession(&mut f, &mut rng, 7));
+        assert!(succession(&mut f, &mut rng, None, 7));
         assert_eq!(f.members[LEADER].names[0], "Otto");
         // Hans moves up, the last slot is empty; Otto is a new name in the ordinal list.
         assert_eq!(f.members[FIRST_RELATIVE].names[0], "Hans");
@@ -648,7 +679,7 @@ mod tests {
         f.members[FIRST_CHILD].heir = false;
         f.members[FIRST_RELATIVE].clear();
         f.members[FIRST_RELATIVE + 1].clear();
-        succession(&mut f, &mut rng, 7);
+        succession(&mut f, &mut rng, None, 7);
         let l = &f.members[LEADER];
         assert!(l.named() && l.male && (16..=50).contains(&l.age));
     }
@@ -662,7 +693,7 @@ mod tests {
         otto.children = 2;
         otto.child_ages = [25, 30, 0, 0];
         let mut rng = CaRng::new(9);
-        succession(&mut f, &mut rng, 7);
+        succession(&mut f, &mut rng, None, 7);
         let s = &f.members[SPOUSE];
         assert!(s.exists && !s.male && (36..=40).contains(&s.age) && s.children == 2);
         assert_eq!((f.members[FIRST_CHILD].age, f.members[FIRST_CHILD + 1].age), (15, 10));
@@ -679,5 +710,169 @@ mod tests {
         }
         assert_eq!(m.married_to, 7);
         assert!(m.children > 0 && m.child_ages[0] >= 40);
+    }
+
+    /// A european set with king / queen decks: Info young, Info old (the Cards decks are never drawn).
+    fn royal_set() -> CulturePortraits {
+        use super::super::portraits::{PortraitCategory, PortraitDeck};
+        let deck = |order: Vec<u32>| PortraitDeck { count: order.len() as u32, cursor: 0, order, seed: 3 };
+        let decks = |young: Vec<u32>, old: Vec<u32>| vec![deck(young), deck(old), deck(Vec::new()), deck(Vec::new())];
+        CulturePortraits {
+            culture: "european".into(),
+            paths: vec![("king".into(), "european".into()), ("queen".into(), "european".into()), ("minister".into(), "european".into())],
+            categories: vec![
+                PortraitCategory { key: "minister".into(), decks: decks(vec![8, 9], vec![10, 11]) },
+                PortraitCategory { key: "king".into(), decks: decks(vec![4, 1, 6, 2], vec![7, 2]) },
+                PortraitCategory { key: "queen".into(), decks: decks(vec![3, 0, 5, 1], vec![5, 6]) },
+            ],
+        }
+    }
+
+    fn cursor(set: &CulturePortraits, key: &str, deck: usize) -> u32 {
+        set.categories.iter().find(|c| c.key == key).unwrap().decks[deck].cursor
+    }
+
+    fn index_and_card(p: &Portrait) -> (i32, String) {
+        (p.index, p.card.clone())
+    }
+
+    /// `0x00A055E0`: a man from the king decks, a woman from the queen decks, the old deck at 45 or
+    /// older; a number already held is kept; an empty deck leaves -1 and no pictures.
+    #[test]
+    fn a_family_portrait_comes_from_the_king_or_queen_decks_by_age() {
+        let mut set = royal_set();
+        let mut p = Portrait::default();
+        assert!(set.resolve_family_portrait(&mut p, 50, true));
+        assert_eq!((p.index, p.card.as_str()), (7, "ui/portraits/european/Cards/king/old/007.tga"));
+        assert_eq!(p.info, "ui/portraits/european/Info/king/old/007.jpg");
+        let mut q = Portrait::default();
+        assert!(set.resolve_family_portrait(&mut q, 44, false));
+        assert_eq!((q.index, q.card.as_str()), (3, "ui/portraits/european/Cards/queen/young/003.tga"));
+        // A kept number at a new age: only the pictures change.
+        assert!(set.resolve_family_portrait(&mut q, 45, false));
+        assert_eq!((q.index, q.card.as_str()), (3, "ui/portraits/european/Cards/queen/old/003.tga"));
+        assert_eq!((cursor(&set, "queen", 0), cursor(&set, "queen", 1)), (1, 0));
+        // A custom picture name does not stop the resolve (no check in `0x00A055E0`).
+        let mut r = Portrait { alternative: "custom".into(), ..Default::default() };
+        assert!(set.resolve_family_portrait(&mut r, 20, true));
+        assert_eq!(r.index, 4);
+        // An empty deck.
+        set.categories[1].decks[0] = Default::default();
+        let mut e = Portrait::default();
+        assert!(!set.resolve_family_portrait(&mut e, 20, true));
+        assert_eq!(e, Portrait::default());
+    }
+
+    /// The succession's new spouse (`0x008B8860`) and children (`0x008B9500`: resolved after the
+    /// child's age is set) get their portraits; the campaign RNG stream is the same with or
+    /// without portraits (the decks have their own LCG).
+    #[test]
+    fn a_successors_new_spouse_and_children_get_family_portraits() {
+        let mut f = family();
+        f.members[FIRST_CHILD].heir = false;
+        let otto = &mut f.members[FIRST_RELATIVE];
+        otto.married_to = 7;
+        otto.children = 2;
+        otto.child_ages = [25, 30, 0, 0];
+        let mut set = royal_set();
+        let (mut with, mut without) = (f.clone(), f);
+        let (mut rng_a, mut rng_b) = (CaRng::new(9), CaRng::new(9));
+        succession(&mut with, &mut rng_a, Some(&mut set), 7);
+        succession(&mut without, &mut rng_b, None, 7);
+        assert_eq!(rng_a, rng_b, "no campaign-RNG draw");
+        assert_eq!(index_and_card(&with.members[SPOUSE].portrait), (3, "ui/portraits/european/Cards/queen/young/003.tga".to_string()));
+        // Children aged 15 and 10: each from his sex's young deck, in slot order.
+        let (mut kings, mut queens) = ([4, 1, 6, 2].into_iter(), [0, 5, 1].into_iter());
+        for k in 0..2 {
+            let c = &with.members[FIRST_CHILD + k];
+            let (folder, n) = if c.male { ("king", kings.next().unwrap()) } else { ("queen", queens.next().unwrap()) };
+            assert_eq!(index_and_card(&c.portrait), (n, format!("ui/portraits/european/Cards/{folder}/young/{n:03}.tga")));
+        }
+        // Without a set nothing is drawn: number -1, no pictures, everything else the same.
+        assert!(without.members[SPOUSE..FIRST_CHILD + 2].iter().all(|m| m.portrait == Portrait::default()));
+        for m in with.members.iter_mut().chain(without.members.iter_mut()) {
+            m.portrait = Portrait::default();
+        }
+        assert_eq!(with, without);
+    }
+
+    /// A model with France (european, absolute monarchy, id 7), its family and the royal set.
+    fn royal_model() -> CampaignModel {
+        use super::super::details::{FactionDetails, GovernmentPost};
+        use super::super::world::{Faction, World};
+        use crate::calendar::{Calendar, Date};
+        let mut w = World::default();
+        let faction = Faction {
+            id: FactionId(7),
+            key: "france".into(),
+            treasury: 0,
+            government: GovernmentType::AbsoluteMonarchy,
+            government_key: String::new(),
+            tax_lower: String::new(),
+            tax_upper: String::new(),
+            diplomacy: Default::default(),
+        };
+        w.factions.insert(FactionId(7), faction);
+        let posts = vec![
+            GovernmentPost { id: 1, key: "faction_leader".into(), holder: None, governorship: None },
+            GovernmentPost { id: 2, key: "finance".into(), holder: None, governorship: None },
+        ];
+        w.faction_details.insert(FactionId(7), FactionDetails { family: Some(family()), posts, ..Default::default() });
+        w.portraits = vec![royal_set()];
+        let date = Date { year: 1805, season: 0, month: 4, half: 0 };
+        let mut m = CampaignModel::new(Calendar::new(date, 2), CaRng::new(1), w);
+        let rules = std::sync::Arc::make_mut(&mut m.rules);
+        rules.characters.faction_subculture.insert("france".into(), "sc_european".into());
+        rules.characters.subculture_culture.insert("sc_european".into(), "european".into());
+        m
+    }
+
+    /// The yearly pass's newborn is resolved at age 0 (`0x008BC9C0` at `0x008BCB31`).
+    #[test]
+    fn a_newborn_gets_a_young_family_portrait() {
+        let mut m = royal_model();
+        let fam = m.world.faction_details.get_mut(&FactionId(7)).unwrap().family.as_mut().unwrap();
+        fam.members[LEADER].age = 30;
+        fam.members[LEADER].children = 0;
+        fam.members[LEADER].married_to = 7;
+        fam.members[SPOUSE] = member("Louise", false, 28);
+        for _ in 0..40 {
+            family_year(&mut m, FactionId(7), &[0.0; 101]);
+            if m.world.faction_details[&FactionId(7)].family.as_ref().unwrap().members[LEADER].children > 0 {
+                break;
+            }
+        }
+        let fam = m.world.faction_details[&FactionId(7)].family.as_ref().unwrap();
+        let c = &fam.members[FIRST_CHILD];
+        assert!(c.exists && c.age == 0, "a child this year");
+        let (folder, n) = if c.male { ("king", 4) } else { ("queen", 3) };
+        assert_eq!(index_and_card(&c.portrait), (n, format!("ui/portraits/european/Cards/{folder}/young/{n:03}.tga")));
+    }
+
+    /// A new minister draws a minister portrait at his age (`0x00990900` → `0x00992E60`); a
+    /// monarch-minister draws one too (the minister deck advances), then takes the family
+    /// leader's whole portrait (`0x009D21B0`).
+    #[test]
+    fn new_ministers_get_minister_portraits_and_the_monarch_the_familys() {
+        let mut m = royal_model();
+        m.refill_post(FactionId(7), 1);
+        let id = m.world.faction_details[&FactionId(7)].posts[1].holder.expect("a finance minister");
+        let d = &m.world.character_details[&id];
+        let age = 1805 - d.birth.unwrap().year as i32;
+        assert!((21..=51).contains(&age));
+        let (deck, folder, n) = if age >= 45 { (1, "old", 10) } else { (0, "young", 8) };
+        assert_eq!(index_and_card(&d.portrait), (n, format!("ui/portraits/european/Cards/minister/{folder}/{n:03}.tga")));
+        assert_eq!(cursor(&m.world.portraits[0], "minister", deck), 1);
+        // The heir (Karl, the second child, as Maria may not inherit) has a portrait of his own.
+        let held = Portrait { card: "c".into(), alternative: "a".into(), info: "i".into(), index: 12 };
+        m.world.faction_details.get_mut(&FactionId(7)).unwrap().family.as_mut().unwrap().members[FIRST_CHILD + 1].portrait = held.clone();
+        let before = m.world.portraits[0].categories[0].decks.iter().map(|d| d.cursor).sum::<u32>();
+        m.refill_post(FactionId(7), 0);
+        let fam = m.world.faction_details[&FactionId(7)].family.as_ref().unwrap();
+        let id = m.world.faction_details[&FactionId(7)].posts[0].holder.expect("a monarch");
+        assert_eq!(fam.members[LEADER].names[0], "Karl");
+        assert_eq!(m.world.character_details[&id].portrait, held);
+        let after = m.world.portraits[0].categories[0].decks.iter().map(|d| d.cursor).sum::<u32>();
+        assert_eq!(after, before + 1, "the monarch drew from the minister deck too");
     }
 }

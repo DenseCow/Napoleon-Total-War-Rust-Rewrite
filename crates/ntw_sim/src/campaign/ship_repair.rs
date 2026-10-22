@@ -80,6 +80,10 @@ impl CampaignModel {
         if s.port {
             self.update_commodity_prices_with(false);
         }
+        // Then `SetSettlementOwner` rebuilds the region's demand (`0x00AB49F0(0)` at `0x00B2B85F`) and refreshes
+        // its town wealth (`0x00AB4410(0)` at `0x00B2B86F`, CONFIRMED).
+        self.refresh_region_demand(region);
+        self.refresh_region_town_wealth(region);
     }
 
     /// Can the port slot repair ships (`0x00A894D0` → the port manager's slot +0x18, `0x00B44E50`): a building

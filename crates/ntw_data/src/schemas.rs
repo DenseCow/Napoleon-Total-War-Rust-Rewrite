@@ -782,7 +782,7 @@ db_record! {
 
 db_record! {
     /// One row of `technology_effects_junction` (106 rows): a technology's effect and its value.
-    pub struct TechnologyEffect in "technology_effects_junction", key = technology {
+    pub struct TechnologyEffect in "technology_effects_junction", key = technology + effect {
         /// #0 H: technology key (`technologies.key`).
         technology: String,
         /// #1 H: effect key.

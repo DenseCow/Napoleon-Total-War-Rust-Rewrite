@@ -35,7 +35,7 @@ fn the_policing_tracker_books_and_follows_the_owner() {
     economy::set_policing_tracker(&mut m, RegionId(10), 30);
     assert_eq!(m.world.last_economy_record(A).unwrap()[21], 30);
     assert_eq!(m.world.regions[&RegionId(10)].population_state.policing_booked, 30);
-    assert!(m.transfer_region(RegionId(10), B));
+    assert!(m.transfer_region(RegionId(10), B, &mut Vec::new()));
     assert_eq!(m.world.last_economy_record(A).unwrap()[21], 0);
     assert_eq!(m.world.last_economy_record(B).unwrap()[21], 30);
     assert_eq!(m.world.regions[&RegionId(10)].population_state.policing_booked, 30);
@@ -76,7 +76,7 @@ fn a_same_owner_deal_handover_stops_research_and_passes_slots_only() {
     let after = m.world.last_economy_record(A).unwrap();
     assert_eq!((after[5], after[21]), (before[5], before[21]), "neither the taxes nor the policing tracker refresh");
     assert_eq!(m.world.deal_regions_received.get(&A), Some(&1));
-    assert!(!m.transfer_region(r10, A), "the region did not change hands");
+    assert!(!m.transfer_region(r10, A, &mut Vec::new()), "the region did not change hands");
 }
 
 /// The round end's first pass sets every listed faction's upkeep trackers to its upkeep and each of its

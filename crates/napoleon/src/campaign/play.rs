@@ -80,6 +80,11 @@ pub struct CampaignSaver {
     /// The theatres' base and lookup pictures for the save header's territory maps
     /// (`ntw_campaign::header_map`).
     pub pictures: Arc<Vec<ntw_campaign::header_map::TheatrePictures>>,
+    /// The camera a save written now holds: the live camera's view, which `super::camera::control`
+    /// keeps here every frame, with the fields ours does not use kept from the loaded save.
+    pub camera: std::cell::Cell<ntw_campaign::camera::CameraView>,
+    /// The loaded save's named cameras (`ntw_campaign::camera::CameraSave::named`), written back unchanged.
+    pub named_cameras: Vec<(String, ntw_campaign::camera::CameraView)>,
 }
 
 impl CampaignSaver {
@@ -104,14 +109,17 @@ impl ntw_script::ui::CampaignSaves for CampaignSaver {
         }
         let (saved, hash) = {
             let st = self.script.state();
-            // The hash the load logs ("save state hash"): equal when the save keeps the state.
-            let hash = st.model.saved_state_hash();
+            // The hash the load logs ("save state hash"): equal when the save keeps the state. Taken as the
+            // load leaves the model, whose town wealth refresh recomputes the GDP and growth from the live
+            // factors (`own_save::loaded_state_hash`; a clone, once per save).
+            let hash = ntw_campaign::own_save::loaded_state_hash(&st.model);
             let data = ntw_campaign::own_save::SaveDataRef {
                 human: &self.human,
                 model: &st.model,
                 rebel_faction: self.rebel_faction,
                 // The scripts' restricted building levels and units are in the model.
                 script_values: script_values_out(&values),
+                camera: Some(ntw_campaign::camera::CameraSave { current: self.camera.get(), named: self.named_cameras.clone() }),
             };
             (ntw_campaign::own_save::write(&self.header(&st.model, season_name), &data), hash)
         };

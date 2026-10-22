@@ -1,18 +1,29 @@
 //! The campaign camera: a target point on the map, a distance and a tilt that follows the zoom.
 //!
 //! The keyboard moves the camera only through the campaign's key bindings of
-//! `text/default_keys.xml` (the camera's `step_fwd` / `step_bck` / `step_l` / `step_r`, W/S/A/D and
-//! the arrows in vanilla), once per key event (press, auto-repeat), queued by `super::hud::keys`
-//! (CONFIRMED, `0x0095A510`; see [`key_step`]).
+//! `text/default_keys.xml` (the camera's `step_fwd` / `step_bck` / `step_l` / `step_r`, W/S/A/D in
+//! vanilla's default `fps` keyset; the arrows only in its `total_war` keyset), each a repeating
+//! binding pressed every frame it is held, queued by `super::hud::keys` (CONFIRMED, `0x0095A510`
+//! and the per-frame poll `0x00A27EB0`; see [`key_step`]). No campaign code reads the arrows
+//! directly but the debug camera listener (`0x00970F70`), which vanilla never enables
+//! (CONFIRMED, `analysis/fidelity/UI_FIDELITY.md` §5.1 "Shortcut keys").
 //!
 //! CONFIRMED (tweaker defaults in `Napoleon.exe`, `CampaignCamera.cpp` lines 91-100 and
 //! `EmpireCampaignController.cpp` 70-71, read with `analysis/worker1/re_tools tweak`):
 //! minimum distance 15, maximum distance 100, tilt from straight down (-y) between 0.5 and 1.0
 //! radians, field of view 57.2957 (= 1 radian), pan speed 50, tilt speed 50.
 //!
+//! CONFIRMED (`0x009208B0`, the eye placement the save's read constructor `0x00900C00` runs): the
+//! distance is linear in the tilt, from the maximum distance at the minimum tilt (tweakers
+//! `0x015C4078` 0.5 and `0x015C2FA0` 100) to the minimum distance at the maximum tilt (`0x015C3B20`
+//! 1.0 and `0x015C3A30` 15), and the eye sits at target + distance × (0, cos tilt, −sin tilt) in the
+//! engine's axes (z north), so south of the target looking north ([`CampaignCamera::transform`]).
+//!
+//! A loaded game opens on the camera it was saved with (`ntw_campaign::camera`, CONFIRMED,
+//! `0x0090E5A0` from the `CAMPAIGN_ENV` loader `0x00987070`): the save keeps the tilt, from which
+//! [`distance_for_tilt`] gives the distance, and the target.
+//!
 //! INFERRED / PROVISIONAL (our own until the CampaignCamera code is read in Ghidra):
-//! - the tilt is 1.0 rad when fully zoomed in and 0.5 rad when fully zoomed out, linear in
-//!   the distance (the Lua help says zoom is "clamped at 1.2 - 0.675, see ..._TILT_ANGLE");
 //! - the field of view is vertical;
 //! - the mouse drag pans by `distance` × 0.002 per pixel (our own; the exe's per-frame mouse
 //!   update `0x00970A90` is not ported yet);
@@ -22,14 +33,15 @@
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 
-/// Tweaker `CAMPAIGN_CAMERA_MINIMUM_DISTANCE` (CONFIRMED default).
-pub const MIN_DISTANCE: f32 = 15.0;
-/// Tweaker `CAMPAIGN_CAMERA_MAXIMUM_DISTANCE` (CONFIRMED default).
-pub const MAX_DISTANCE: f32 = 100.0;
-/// Tweaker `CAMPAIGN_CAMERA_MINIMUM_TILT_ANGLE`, radians from -y (CONFIRMED default).
-pub const MIN_TILT: f32 = 0.5;
-/// Tweaker `CAMPAIGN_CAMERA_MAXIMUM_TILT_ANGLE`, radians from -y (CONFIRMED default).
-pub const MAX_TILT: f32 = 1.0;
+use ntw_sim::campaign::{zoom_limit, ZoomLimit};
+
+/// Tweaker `CAMPAIGN_CAMERA_MINIMUM_DISTANCE` (CONFIRMED default, [`zoom_limit::MIN_DISTANCE`]).
+pub const MIN_DISTANCE: f32 = zoom_limit::MIN_DISTANCE;
+/// Tweaker `CAMPAIGN_CAMERA_MAXIMUM_DISTANCE` (CONFIRMED default, [`zoom_limit::MAX_DISTANCE`]).
+pub const MAX_DISTANCE: f32 = zoom_limit::MAX_DISTANCE;
+/// Tweaker `CAMPAIGN_CAMERA_MINIMUM_TILT_ANGLE`, radians from -y (CONFIRMED default,
+/// [`zoom_limit::MIN_TILT`]).
+pub const MIN_TILT: f32 = zoom_limit::MIN_TILT;
 /// Tweaker field of view, 57.2957 degrees (CONFIRMED default).
 pub const FOV_DEGREES: f32 = 57.2957;
 
@@ -48,11 +60,40 @@ pub struct CampaignCamera {
     pub ground: f32,
 }
 
+/// The distance the exe places the eye at for `tilt` (`0x009208B0`, CONFIRMED linear law; see the
+/// module doc), not clamped: neither `0x009208B0` nor the save's read constructor `0x00900C00`
+/// clamps, so a loaded tilt is shown as saved. The tilt is clamped only on a tilt change, by the tilt
+/// step `0x00920D00`, to the world's zoom limit (CONFIRMED, [`ZoomLimit`]: the tweakers' 0.5..1.0,
+/// 15..100 here, unless the scripts' `set_zoom_limit` narrowed it; [`CampaignCamera::zoom`]).
+pub fn distance_for_tilt(tilt: f32) -> f32 {
+    zoom_limit::distance_for_tilt(tilt)
+}
+
 impl CampaignCamera {
-    /// Tilt from straight down for the current distance (INFERRED linear law).
+    /// Tilt from straight down for the current distance (the inverse of [`distance_for_tilt`]).
     pub fn tilt(&self) -> f32 {
-        let t = ((self.distance - MIN_DISTANCE) / (MAX_DISTANCE - MIN_DISTANCE)).clamp(0.0, 1.0);
-        MAX_TILT + (MIN_TILT - MAX_TILT) * t
+        zoom_limit::tilt_for_distance(self.distance)
+    }
+
+    /// Zooms by `factor` (our own wheel step: the exe's wheel law `0x00956E10` is not ported yet),
+    /// the new tilt clamped to `limit` as the exe's tilt step `0x00920D00` clamps every tilt change
+    /// (`0x00956E10` → `0x00977100` → `0x00920D00`, CONFIRMED).
+    pub fn zoom(&mut self, factor: f32, limit: &ZoomLimit) {
+        self.distance = distance_for_tilt(limit.clamp(zoom_limit::tilt_for_distance(self.distance * factor)));
+    }
+
+    /// Looks where the saved camera `view` looks: its target (logic east, north) and the distance
+    /// of its tilt, the target kept inside the allowed area.
+    pub fn look_at_view(&mut self, view: &ntw_campaign::camera::CameraView) {
+        let [east, _, north] = view.target;
+        self.target = Vec2::new(east, -north).clamp(self.min, self.max);
+        self.distance = distance_for_tilt(view.tilt);
+    }
+
+    /// `kept` with this camera's tilt and target (logic east, height 0, north, as the exe saves it),
+    /// its other fields as they are.
+    pub fn view(&self, kept: ntw_campaign::camera::CameraView) -> ntw_campaign::camera::CameraView {
+        ntw_campaign::camera::CameraView { tilt: self.tilt(), target: [self.target.x, 0.0, -self.target.y], ..kept }
     }
 
     /// The camera transform for this state.
@@ -121,12 +162,13 @@ pub struct CameraKeyPress {
 /// height × 0.01 + 0.25), the time doubled while SHIFT is held; `step_fwd` moves north
 /// (`0x00956F10`, engine +z = Bevy −z), `step_fwd_fast` twice as far, `step_bck` south
 /// (`0x00956E70`), `step_r` / `rot_r` east (`0x009570F0`) and `step_l` / `rot_l` west
-/// (`0x00956FA0`). The press reads SHIFT from the handler's flag (+0x20) at the key event, a flag
-/// the camera's frame update `0x00970A90` sets from LSHIFT / RSHIFT once per frame: the SHIFT of
-/// the last frame update, not the key event's own modifiers; ours passes the SHIFT state of the
-/// frame's start (`super::hud::keys`). INFERRED: the height is the camera's eye height above the
-/// map's zero (the camera's `+0x30` position, its y); and that the last frame update's SHIFT is
-/// the frame's start's (where `0x00970A90` falls among the frame's key events is not traced).
+/// (`0x00956FA0`). `time` is the frame time (the shortcut poll's, `0x00A27EB0`), the press coming
+/// every frame the key is held. The press reads SHIFT from the handler's flag (+0x20), a flag the
+/// camera's frame update `0x00970A90` (vtable slot `0x01362D6C`) sets from LSHIFT / RSHIFT once
+/// per frame; ours passes the SHIFT held at the frame's poll (`super::hud::keys`). INFERRED: the
+/// height is the camera's eye height above the map's zero (the camera's `+0x30` position, its
+/// y); and that the flag is this frame's SHIFT (whether `0x00970A90` runs before or after the
+/// poll in a frame, one frame's difference, is not traced).
 /// PROVISIONAL: the handler's busy test (`0x00955820`, no step while it is set) is not ported.
 pub fn key_step(func: CameraFunc, time: f32, shift: bool, eye_height: f32) -> Option<Vec2> {
     let time = if shift { time * 2.0 } else { time };
@@ -150,6 +192,7 @@ pub fn control(
     motion: Res<AccumulatedMouseMotion>,
     ground: Option<Res<super::scene::CampaignGround>>,
     mut hud: Option<NonSendMut<super::hud::CampaignHud>>,
+    sim: Option<NonSend<super::play::CampaignSim>>,
     harness: Option<Res<crate::frontend::AutoScreenshot>>,
     mut cams: Query<(&mut CampaignCamera, &mut Transform)>,
     mut unported: Local<bool>,
@@ -183,7 +226,8 @@ pub fn control(
         }
         let zoom = -scroll.delta.y;
         if zoom != 0.0 {
-            cam.distance = (cam.distance * 1.12f32.powf(zoom)).clamp(MIN_DISTANCE, MAX_DISTANCE);
+            let limit = sim.as_ref().map_or_else(ZoomLimit::default, |s| s.host.model().world.zoom_limit);
+            cam.zoom(1.12f32.powf(zoom), &limit);
         }
         let (min, max) = (cam.min, cam.max);
         cam.target = cam.target.clamp(min, max);
@@ -191,6 +235,13 @@ pub fn control(
             cam.ground = g.0.height_at(cam.target.x, -cam.target.y);
         }
         *tf = cam.transform();
+    }
+    // The saver keeps the camera a save written now holds (the save is called from the HUD's scripts,
+    // which do not see the camera).
+    if let Some(sim) = &sim
+        && let Some((cam, _)) = cams.iter().next()
+    {
+        sim.saver.camera.set(cam.view(sim.saver.camera.get()));
     }
     if let Some(h) = &mut hud {
         h.camera_steps.clear();
@@ -204,7 +255,7 @@ mod tests {
     #[test]
     fn tilt_follows_zoom() {
         let mut c = CampaignCamera { target: Vec2::ZERO, distance: MIN_DISTANCE, min: Vec2::splat(-1.0), max: Vec2::splat(1.0), ground: 0.0 };
-        assert!((c.tilt() - MAX_TILT).abs() < 1e-6);
+        assert!((c.tilt() - zoom_limit::MAX_TILT).abs() < 1e-6);
         c.distance = MAX_DISTANCE;
         assert!((c.tilt() - MIN_TILT).abs() < 1e-6);
         let t = c.transform();
@@ -212,6 +263,50 @@ mod tests {
         assert!(t.translation.y > 0.0 && t.translation.z > 0.0);
         assert!(t.forward().z < 0.0 && t.forward().y < 0.0);
     }
+
+    /// The saved camera's tilt gives the exe's distance (`0x009208B0`: 0.5 → 100, 1.0 → 15, linear),
+    /// and a camera opened on a saved view saves the same view back (logic north is Bevy −z), its
+    /// unknown fields kept.
+    #[test]
+    fn a_saved_view_opens_and_saves_back() {
+        use ntw_campaign::camera::CameraView;
+        assert!((distance_for_tilt(MIN_TILT) - MAX_DISTANCE).abs() < 1e-4);
+        assert!((distance_for_tilt(zoom_limit::MAX_TILT) - MIN_DISTANCE).abs() < 1e-4);
+        assert!((distance_for_tilt(0.65) - 74.5).abs() < 1e-3);
+        let mut c = CampaignCamera { target: Vec2::ZERO, distance: 60.0, min: Vec2::splat(-200.0), max: Vec2::splat(200.0), ground: 0.0 };
+        let saved = CameraView { tilt: 0.65, field_13c: 3, target: [-64.0, 0.0, -4.0], flag_140: true };
+        c.look_at_view(&saved);
+        assert_eq!(c.target, Vec2::new(-64.0, 4.0));
+        let back = c.view(CameraView { tilt: 0.0, target: [0.0; 3], ..saved });
+        assert!((back.tilt - 0.65).abs() < 1e-5);
+        assert_eq!((back.target, back.field_13c, back.flag_140), ([-64.0, 0.0, -4.0], 3, true));
+        // A target outside the theatre is brought inside it.
+        c.look_at_view(&CameraView { target: [500.0, 0.0, 0.0], ..saved });
+        assert_eq!(c.target, Vec2::new(200.0, 0.0));
+    }
+
+    /// A zoom clamps the new tilt to the world's zoom limit (`0x00920D00`); a loaded tilt outside it
+    /// is shown as saved (`0x00900C00` does not clamp) until the next zoom.
+    #[test]
+    fn a_zoom_clamps_the_tilt_to_the_zoom_limit() {
+        let mut c = CampaignCamera { target: Vec2::ZERO, distance: 60.0, min: Vec2::splat(-1.0), max: Vec2::splat(1.0), ground: 0.0 };
+        let full = ZoomLimit::default();
+        c.zoom(10.0, &full);
+        assert!((c.distance - MAX_DISTANCE).abs() < 1e-3);
+        c.zoom(0.01, &full);
+        assert!((c.distance - MIN_DISTANCE).abs() < 1e-3);
+        // The eur script's limit after the intro (`set_zoom_limit(1.0, 0.61)`): out to about 81.3.
+        let eur = ZoomLimit::from_script(1.0, 0.61);
+        c.zoom(10.0, &eur);
+        assert!((c.distance - 81.3).abs() < 1e-3, "{}", c.distance);
+        // A tilt the scripts allow below 0.5 gives a distance past 100, unclamped.
+        let low = ZoomLimit::from_script(1.0, 0.0);
+        c.zoom(10.0, &low);
+        assert!((c.distance - distance_for_tilt(0.02)).abs() < 1e-3 && c.distance > MAX_DISTANCE);
+        c.look_at_view(&ntw_campaign::camera::CameraView { tilt: 0.3, field_13c: 0, target: [0.0; 3], flag_140: false });
+        assert!((c.tilt() - 0.3).abs() < 1e-5);
+    }
+
     /// The key step's length and direction (`0x0095A510`): 50 × time × (height × 0.01 + 0.25),
     /// doubled with SHIFT; forward is north (Bevy −z).
     #[test]

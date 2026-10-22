@@ -38,8 +38,13 @@
 //!       for a commander march to him, [`CampaignModel::march_reinforcements`]; CONFIRMED place), research
 //!       availability (`0x008F91F0` through `0x008AE3B0` at `0x008F2B40`, CONFIRMED place); the rebels skip
 //!       both, since their branch `0x008F28E1` → `0x008F2B47` runs only the character and region walks
-//!       (CONFIRMED); then the other calls of `0x008F2620` not modelled (character pools `0x00A24C90`, pending orders resumed
-//!       `0x009653D0`, forces in transit), and last `FactionTurnStart` (posted at its end, CONFIRMED).
+//!       (CONFIRMED); then, for every faction, the calls after the join `0x008F2BB1`: the character pools'
+//!       turn `0x00A24C90` (not modelled), the spotting manager (a human gets its spy-network step `0x008F2480`
+//!       and then the spotting pass `0x008B4B70`; an AI only the spotting pass), every character's standing order `0x009653D0` (PROVISIONAL: the
+//!       model keeps none), the recruitment pools' step `0x00A25310`, forces in transit (not modelled), and
+//!       last `FactionTurnStart` (posted at its end, CONFIRMED). The human-only loop at `0x008F26DC`, before
+//!       the characters, counts generals of rank 8 or more for an achievement (`0x009C7660`): no game
+//!       state, not modelled (no Steam features; CAMPAIGN_FIDELITY.md "Turn-start character loops").
 //!    4. The faction acts: a **human** faction stops here and waits for commands until
 //!       `CCQ_END_TURN`; an AI faction is played by the campaign AI (`ntw_ai`), which the caller runs
 //!       while `TurnStep::AiTurn` is the next step (without a driver the AI does nothing).
@@ -107,9 +112,10 @@ pub enum TurnStep {
     Economy(FactionId),
     /// One region's turn.
     Region(RegionId),
-    /// `CharacterTurnStart` and action point refill for the faction's characters.
+    /// `CharacterTurnStart`, the action point refill and the hidden flag for the faction's characters.
     CharactersStart(FactionId),
-    /// The end of the faction's turn start: research availability (not for the rebels), then `FactionTurnStart`.
+    /// The end of the faction's turn start: the reinforcement march and research availability (not for the
+    /// rebels), the spy network and spotting, the pools' step, then `FactionTurnStart`.
     FactionReady(FactionId),
     /// Either stop for a human player or play the AI's turn.
     Decide(FactionId),
@@ -181,7 +187,7 @@ impl CampaignModel {
     /// once the flag is set (`ntw_ai::campaign::apply_orders_with_events`; PROVISIONAL: that stops
     /// the AI's remaining orders of the frame, while the exe's CAI loop has no test of the flag and
     /// finishes the frame's steps; what those steps then do is not traced). Saving is refused too
-    /// (`0x008BE4A0` returns false while it is set; the save button's check is the UI's, BACKLOG).
+    /// ([`Self::can_save`], `0x008BE4A0`, returns false while it is set).
     ///
     /// Callers: a human faction destroyed ([`Self::destroy_faction_by`], `0x008AB6C0`). Not modelled
     /// (BACKLOG): the multiplayer victory check (`0x0096CD10` sets it when a human has won and another
@@ -310,6 +316,54 @@ impl CampaignModel {
             || self.turn.queue.front() == Some(&TurnStep::AiTurn(faction))
     }
 
+    /// True if `faction` (the local player) may save now: the rule behind `CampaignUI.CanSave`
+    /// (`0x009E0D50`, which passes the local player's faction). The exe's multiplayer save
+    /// (`0x00A1F3D0`) also uses `0x008BE4A0`; ours has no multiplayer save yet. The exe's test
+    /// `CanFactionSaveCampaign` `0x008BE4A0` (CONFIRMED, read in full), in its order:
+    ///
+    /// 1. the campaign is over (+0xFE9, [`TurnState::campaign_over`]): false;
+    /// 2. the scripts switched saving off (`[+0xFA8]+0x115`, [`super::world::World::saving_disabled`]): false;
+    /// 3. a character is still moving (the location manager `[+0xF60]`'s moving list +0x24 / +0x28
+    ///    not empty, `0x009559D0`): false. PROVISIONAL: the model's moves are instant and only the map
+    ///    animates them (`napoleon` `campaign::play`), so here nothing is ever moving (BACKLOG);
+    /// 4. the battle sequence `[+0xF6C]` (state +0x58, set only through `0x0088FEE0`): idle (0) or done
+    ///    (8) goes on; its pre-battle state 1 (`0x008DBE10`; ours: a [`Self::pending_battle`]) returns
+    ///    true at once when `faction` is on one of its two sides (`0x008CEE40` → `0x008C1970`, sides
+    ///    +0x68 / +0x6C: their faction +8 or their list +0x70; ours: the owner of the attacker or of a
+    ///    defender) and goes on otherwise; any other state (2-7: the real-time battle, the autoresolve and
+    ///    its aftermath, `0x008F7880`) is false. The model runs states 2-7 in one call
+    ///    ([`Self::autoresolve`], [`Self::apply_battle_result`]), so it is never in one. PROVISIONAL: the
+    ///    exe's aftermath waits in state 5 and 7 for the moving list (as 3) and in state 6 for every entry
+    ///    of a list at sequence +0x9C (`0x008A9D20`, its writer not traced), refusing a save meanwhile;
+    ///    and `0x008C19B0` counts a faction with +0x814 set and +0x81C clear as `[[+0xF5C]]+0x1C`
+    ///    instead, a state the model does not have (see [`Self::end_campaign`]);
+    /// 5. something waits on the pending-action stack (`[+0xF70]` top set, `0x005865E0`): false. Ours:
+    ///    a call to war waiting for the human ally's answer ([`Self::pending_ally_war_calls`], pushed at
+    ///    `0x00B26C1F` / `0x00B26E17`) or a capture waiting for the occupy / loot / liberate choice
+    ///    ([`Self::pending_capture`], pushed at `0x00B58745` / `0x00B58D96`). PROVISIONAL: the other
+    ///    pushers of `0x008E2B80` (negotiation greetings, agent actions, ...) wait in states the model
+    ///    does not keep (BACKLOG);
+    /// 6. `faction` +0x93E (set only at `0x008B49E6`, the revolution choice offered to a human at its
+    ///    capital; CanSave is its only reader): false. PROVISIONAL: revolutions are not modelled (§6);
+    /// 7. it is `faction`'s turn (`[+0xF5C]+0x18`) and that turn is under way (`[+0xF5C]+0x3C` == 1: set
+    ///    when the turn start finished, `0x0094A940`, and moved on to 2 by the end of turn,
+    ///    `0x0096E200`): ours [`TurnState::current`] and [`TurnState::in_turn`]. Otherwise false.
+    pub fn can_save(&self, faction: FactionId) -> bool {
+        if self.turn.campaign_over || self.world.saving_disabled {
+            return false;
+        }
+        if let Some(battle) = &self.pending_battle {
+            let owner = |f: &super::ids::ForceId| self.world.forces.get(f).map(|f| f.faction);
+            if std::iter::once(&battle.attacker).chain(&battle.defenders).any(|f| owner(f) == Some(faction)) {
+                return true;
+            }
+        }
+        if !self.pending_ally_war_calls.is_empty() || self.pending_capture.is_some() {
+            return false;
+        }
+        self.turn.in_turn && self.turn.current == Some(faction)
+    }
+
     /// Runs every queued step and returns all their events.
     pub fn run_pending(&mut self) -> Vec<CampaignEvent> {
         let mut events = Vec::new();
@@ -355,12 +409,15 @@ impl CampaignModel {
                 for &faction in &listed {
                     events.push(CampaignEvent::FactionRoundStart { faction });
                 }
-                // The listed factions' regions (not the rebels', not an out-of-game faction's), then the
-                // relationships' computed factors (`0x008BAF30`, the same faction set).
+                // The listed factions' regions (not the rebels', not an out-of-game faction's): `0x00AAE710`
+                // runs, per region, the commodity demand (`0x00AB49F0(1)`), the town wealth refresh without
+                // apply (`0x00AB4410(0)`: GDP, growth, breakdown and trend, CONFIRMED) and the population
+                // factors; then the relationships' computed factors (`0x008BAF30`, the same faction set).
+                let in_game: Vec<_> = listed.iter().copied().filter(|&f| self.in_the_game_with_record(f)).collect();
+                self.refresh_regions_round_start(&in_game);
                 self.refresh_population_factors();
                 // The same factions' running economics records: upkeep, taxes, category 6 and trade
                 // (`0x008F1F60` step 1d, CONFIRMED; [`super::economy::refresh_running_record_round_start`]).
-                let in_game: Vec<_> = listed.iter().copied().filter(|&f| self.in_the_game(f)).collect();
                 for faction in in_game {
                     super::economy::refresh_running_record_round_start(self, faction);
                 }
@@ -459,6 +516,33 @@ impl CampaignModel {
                     events.extend(self.march_reinforcements(f));
                     self.update_tech_availability(f);
                 }
+                // From the join at 0x008F2BB1 on (CONFIRMED by listing): the character pools' turn (0x00A24C90) and
+                // 0x008DA210 run for every faction, the rebels too; the message manager (0x00A18A70) and the
+                // government's popularity (0x008F2E10) are gated by IsFactionWithoutRecord 0x008CEEF0 (tested at
+                // 0x008F2BBA / 0x008F2C28), so the rebels skip them. None of these four is modelled here (the
+                // regions' own walk, 0x00AAE820, is `TurnStep::Region`, before the join);
+                // then the spotting manager (faction +0x800, at 0x008F2C3C): a human faction's spy-network
+                // step (`0x008F2480`: last turn's network shapes revealed again, this turn's listed and
+                // revealed, `CharacterBuildsSpyNetwork` at exactly 3 idle turns) and the spotting pass
+                // (`0x008B4B70`; an AI faction runs only the spotting pass); CHARACTERS_FIDELITY.md §10.
+                if self.turn.humans.contains(&f) {
+                    for character in self.spy_network_step(f) {
+                        events.push(CampaignEvent::CharacterBuildsSpyNetwork { character });
+                    }
+                }
+                self.spotting_pass(f);
+                // Then every character's standing order, in the character list order (0x008F2C5B →
+                // 0x009653D0, CONFIRMED): a resumable order (+0x14, set by the refill 0x0096C140 at his turn
+                // start) goes on if its class's check (vtable +0x10) passes, else it is cancelled.
+                // PROVISIONAL: the model keeps no standing orders (every move command is dropped where its
+                // action points run out, `CampaignCommand::MoveForce`), so there is nothing to resume;
+                // CAMPAIGN_FIDELITY.md "Turn-start character loops".
+                // Then the recruitment pools' step (`0x00A25310` on the manager at faction +0x940, both
+                // pools' slot 12 `0x00A252B0`, at 0x008F2C99); CHARACTERS_FIDELITY.md §8.
+                self.pool_tick(f);
+                // The faction's sight: a turn start only adds (the box updates OR into the visible tree); the
+                // reset is the turn end's (`0x008BD0F0` → `0x00B66EF0`, see `FactionEnd`).
+                self.refresh_shroud(f, false);
                 events.push(CampaignEvent::FactionTurnStart { faction: f });
             }
             TurnStep::CharactersStart(f) => {
@@ -495,26 +579,11 @@ impl CampaignModel {
                         }
                     }
                 }
-                // Each character's hidden flag at his turn start (`0x00A24EB0` → `0x009D3000`); then, in the
-                // faction turn start `0x008F2620` (CONFIRMED order): a human faction's spy-network step
-                // (`0x008F2480`: last turn's network shapes revealed again, this turn's listed and revealed,
-                // `CharacterBuildsSpyNetwork` at exactly 3 idle turns) and the spotting pass (`0x008B4B70`;
-                // an AI faction runs only the spotting pass), then the recruitment pools' step
-                // (`0x00A25310` on the manager at faction +0x940, both pools' slot 12 `0x00A252B0`);
-                // CHARACTERS_FIDELITY.md §8, §10.
+                // Each character's hidden flag at his turn start (`0x00A24EB0` → `0x009D3000`). The spotting,
+                // the standing orders and the pools' step come after the regions (`TurnStep::FactionReady`).
                 for c in self.world.faction_characters_in_list_order(f) {
                     self.update_hidden(c);
                 }
-                if self.turn.humans.contains(&f) {
-                    for character in self.spy_network_step(f) {
-                        events.push(CampaignEvent::CharacterBuildsSpyNetwork { character });
-                    }
-                }
-                self.spotting_pass(f);
-                self.pool_tick(f);
-                // The faction's sight: a turn start only adds (the box updates OR into the visible tree); the
-                // reset is the turn end's (`0x008BD0F0` → `0x00B66EF0`, see `FactionEnd`).
-                self.refresh_shroud(f, false);
             }
             TurnStep::Decide(f) => {
                 if self.stops_for(f) {
@@ -706,6 +775,12 @@ impl CampaignModel {
                         }
                     }
                 }
+                // The slot's building changed (`0x00A682F0`, called by `0x00B78800` for every finished
+                // item): the region's town wealth refreshed without apply (`0x00AB4410(0)`, CONFIRMED).
+                // PROVISIONAL: `0x00A682F0` also runs the demand step (`0x00AB49F0(0)`), at `0x00A683D8` and
+                // `0x00A68478`, both calls conditional (the conditions not traced); ours does not yet (BACKLOG §5
+                // "Region demand step at the event sites").
+                self.refresh_region_town_wealth(region);
             }
         }
     }

@@ -127,7 +127,31 @@ mover's type; only one port node per expansion (a flag stops the landing scan to
 - The embark command (`CCQ_EMBARK_NAVY`, handler `0x00934820` → `0x00948980` → `0x0091A560`) checks
   the army can act (`0x008BE360`), then compares **the fleet's units + the army's units with the
   fleet's capacity** (fleet virtual +0x48 vs +8; value UNKNOWN) before boarding.
-  Disembark: `CCQ_DISEMBARK_NAVY` (`0x00934720` → `0x009315C0`).
+  Disembark: `CCQ_DISEMBARK_NAVY` (`0x00934720` → `0x009315C0`). CONFIRMED by disassembly
+  (disembark, 2026-10-22):
+  - `0x009315C0` checks the army can act (`0x008BE360`), then `0x0091A210` checks the plan
+    (`0x00923B00`) and starts a 0xD0-byte order (`0x00905980`, vtable `0x0135F778`: target +0xAC, navy
+    force +0xB8, the chosen units +0xBC with their count at +0xC8) through `0x009651A0` → its vt+0x28
+    `0x0095C070` → `0x008FDB60`.
+  - `0x008FDB60` sends the fleet sailing first (result 1) unless it is at the landing already (the
+    transport search `0x00B59EA0` / `0x00B59CD0`; result 2). At the landing: some units only split into a
+    new force placed by `0x00B37370` (1.5 radius) and `0x008F04C0` → the placement `0x0096C8D0` (set
+    down), or join a force there (`0x008F0F20`); the whole army in a port (navy +0xE0) enters the
+    settlement (`0x008BB9D0`); otherwise the move is prepared (`0x008FF470`) and the step `0x00918750` is
+    queued (`0x00974700`).
+  - `0x00918750` finds the landing position (`0x00B37970`, or `0x00B38EE0` for a character without an
+    army), checks a land path to the target (`0x0091F850`, built into a local list and freed at once), and
+    pushes two waypoints: `navy_disembark` (`0x00904BA0`, vtable `0x013612C8`, kind 0xC, which the
+    per-step update `0x00B6A270` skips) and `teleport` to the landing (`0x0091DC30` → `0x0090B720`,
+    vtable `0x0136160C`).
+  - `navy_disembark`'s execute `0x0094BD50` unlinks the army from the navy (`0x008EA270`, messages
+    `0x008F56D0`), resets the admiral's move data (`0x00A2A140`), calls the vtable slots +0x5E8, +0x14C and +0x900 (event ids not proven) and
+    sets the army's facing (`0x008ADF80` / `0x0096B930`); it sets neither down. The teleport's execute
+    `0x0094C4E0` is empty.
+  - So the route ends at the landing, and the step mover `0x00972CA0` sets the army down with mode 1
+    (`0x00A285E0`, `0x00972EB1` / `0x00973A01`): sight, zones, its own hidden flag. The navy is not set
+    down again. Ours: `disembark` calls `CampaignModel::set_down` on the landed army
+    (test `a_landing_sets_the_landed_army_down`).
 - Map cursor names (CONFIRMED strings, `0x00DE55F0`): `land_can_disembark`,
   `land_cannot_disembark`, `player_port`, `non_player_port_occupied/unoccupied`.
 

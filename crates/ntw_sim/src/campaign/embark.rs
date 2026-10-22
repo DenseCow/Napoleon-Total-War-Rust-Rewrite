@@ -737,6 +737,29 @@ impl CampaignModel {
         }
     }
 
+    /// The step that sets `character` down again at the end of a move or a placement: `0x00A285E0`
+    /// (character vtable `0x0136A62C` slot +0x20) with its first argument 1. CONFIRMED by disassembly,
+    /// in this order: the sight from the new place for him and each army he carries (`0x00A27F10` →
+    /// `0x00B1B8B0`; the model recomputes the faction's whole set, CHARACTERS_FIDELITY.md §10), his
+    /// zones of control (`0x00A28440` at `0x00A28843`, [`super::zones`], with the armies a navy
+    /// carries), the lifted byte +0x1B7 cleared (`0x00A28855`), then his own hidden flag
+    /// (`0x009D3000` at `0x00A2885C` on `this` alone, `0x00A285E5`; a carried army's flag is not
+    /// re-evaluated). Argument 1 comes from every step that ends a move: the step mover
+    /// `0x00972CA0` at the path's end (`0x00972DC9`, `0x00972EB1`, and `0x00973A01` with the
+    /// finished flag) or when the move is stopped (`0x00960620`, `0x00921EE0`, `0x00921CD0`,
+    /// `0x00923140`), and the second call of every placement `0x0096C8D0` (`0x0096C9C4`). Ours: the
+    /// walk's end, the fleet's sail and the army's landing in [`Self::disembark`], and the expulsion
+    /// placement. Argument 0
+    /// (a step in mid-move, `0x00973A01`; a placement's first call `0x0096C930`) runs only the sight
+    /// and keeps him lifted; argument 2 (a step waiting on a blocked path, `0x0097342C`,
+    /// `0x00973B44`) returns at `0x00A2860D`. The model's moves are whole, so it runs only this one.
+    pub(crate) fn set_down(&mut self, character: CharacterId) {
+        let Some(faction) = self.world.characters.get(&character).map(|c| c.faction) else { return };
+        self.refresh_shroud(faction, false);
+        self.rebuild_moved_zones(character);
+        self.update_hidden(character);
+    }
+
     /// Moves the commanders of the armies aboard the navy `character` commands to its position.
     pub(crate) fn sync_passengers(&mut self, character: CharacterId) {
         let Some(navy) = self.force_of(character) else { return };
@@ -851,8 +874,9 @@ impl CampaignModel {
         let mut events = Vec::new();
         if fleet_end > 0 {
             self.move_character(nc, to_fixed(plan.points[fleet_end]));
-            // The fleet's move (`0x00A285E0`): its zones again, with the army aboard.
-            self.rebuild_moved_zones(nc);
+            // The fleet's move ends like a walk ([`Self::set_down`]): its sight, its zones with the
+            // army aboard, its admiral's hidden flag.
+            self.set_down(nc);
             let ch = self.world.characters.get_mut(&nc).expect("checked");
             let used = ((plan.costs[fleet_end] - plan.costs[0]) * ch.max_movement_points as f32).ceil() as i32;
             let had = ch.movement_points;
@@ -869,7 +893,16 @@ impl CampaignModel {
             ch.position = to_fixed(plan.points[l]);
             ch.movement_points = 0;
             self.world.embarked.remove(&force);
-            self.rebuild_force_zones(force);
+            // The landing ends the army's route, so it is set down there ([`Self::set_down`]: its
+            // sight from the landing, its zones, its own hidden flag). CONFIRMED by disassembly: the
+            // order's step `0x00918750` (from `0x008FDB60` via `0x00974700`) pushes two waypoints, a
+            // `navy_disembark` (`0x00904BA0`, vtable `0x013612C8`, kind 0xC; its execute `0x0094BD50`
+            // unlinks the army from the navy and sets nothing down) and a `teleport` to the landing
+            // (`0x0091DC30` → `0x0090B720`, vtable `0x0136160C`, execute `0x0094C4E0` empty); the
+            // land path it checks (`0x0091F850`) goes into a local list it frees, so the route ends
+            // at the landing and the step mover `0x00972CA0` passes 1 to `0x00A285E0` there
+            // (`0x00972EB1` / `0x00973A01`). The navy is not set down again at the landing.
+            self.set_down(c);
             events.push(CampaignEvent::CharacterMoved { character: c, path: vec![plan.points[l - 1], plan.points[l]] });
             events.push(CampaignEvent::CharacterDisembarksNavy { character: c, navy });
         }

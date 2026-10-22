@@ -416,3 +416,42 @@ fn a_hired_admiral_leaves_the_raids_of_an_admiral_already_in_command() {
     assert!(only_raider(&m, CharacterId(120)));
     assert!(!m.is_raiding(c));
 }
+
+/// A peace runs the price update with flag 0 once of its own (`0x00B262C0`, the call at `0x00B2643F`, after
+/// both sides' `0x00A25570` walks), plus one for each siege end, blockade lift and raid end those walks make
+/// (`0x008BD65B`, `0x00A784E0`, `0x009DA160`). The walk is per character in the faction's list order, and an
+/// update's raid check (`0x00BD1020`) ends raids no longer raidable at peace: a raider walked after another
+/// character's siege end has no raid left to end, so he runs no update of his own, unless a third faction at
+/// war with him also trades on the segment, which keeps it raidable for the check.
+#[test]
+fn a_peace_runs_its_own_price_update_after_one_per_ended_siege_lift_and_raid() {
+    let g = CharacterId(100);
+    let mut m = raid_model();
+    assert_eq!(price_updates(|| drop(m.make_peace_rules(A, B, true).unwrap())), [false], "nothing to end: the peace's own");
+    let mut m = raid_model();
+    assert!(m.raid_trade_route(g, at(55.0, 50.0)));
+    assert_eq!(price_updates(|| drop(m.make_peace_rules(B, A, true).unwrap())), [false, false], "his raid end, then the peace's");
+    assert!(m.world.commerce_raids.is_empty());
+    // A's colonel 99 commands force 1002, besieging B's region 11. With `third`, C (at war with A) has a
+    // route of its own over the segment, worth less than B's: the raid is still on B.
+    let sieging = |first: CharacterId, third: bool| {
+        let mut m = raid_model();
+        m.world.characters.insert(CharacterId(99), character(99, A, CharacterKind::Colonel, 0));
+        m.world.forces.insert(ForceId(1002), MilitaryForce { id: ForceId(1002), faction: A, commander: Some(CharacterId(99)), units: vec![unit(4)], is_navy: false });
+        m.world.regions.get_mut(&RegionId(11)).unwrap().siege.besiegers = vec![ForceId(1002)];
+        m.world.character_order = vec![first, if first == g { CharacterId(99) } else { g }];
+        if third {
+            let path = TradePath { waypoints: vec![waypoint(11, 1, 2), waypoint(11, u32::MAX, u32::MAX)], volumes: vec![1, 0], capital_port: false, accumulated: 0 };
+            m.world.domestic_trade.insert(C, vec![path]);
+            m.world.set_stance(A, C, Stance::War).unwrap();
+        }
+        assert!(m.raid_trade_route(g, at(55.0, 50.0)));
+        assert!(m.world.commerce_raids.iter().all(|r| r.target == B));
+        let updates = price_updates(|| drop(m.make_peace_rules(A, B, true).unwrap()));
+        assert!(!m.world.regions[&RegionId(11)].siege.under_siege() && m.world.commerce_raids.is_empty());
+        updates.len()
+    };
+    assert_eq!(sieging(g, false), 3, "the raider first: his raid end, the siege end, the peace's");
+    assert_eq!(sieging(CharacterId(99), false), 2, "the besieger first: his update's raid check ends the raids");
+    assert_eq!(sieging(CharacterId(99), true), 3, "C keeps the segment raidable: the siege end, his raid end, the peace's");
+}

@@ -395,3 +395,46 @@ fn mod_unit_grouping_rows_merge_on_unit_and_grouping() {
     );
     assert_eq!(t.get("unit_a").map(|r| r.grouping.as_str()), Some("euro_group"), "lookups stay on the unit");
 }
+
+/// A `trait_attribute_effects` table with the given (level, attribute, value) rows.
+fn trait_attributes(rows: &[(&str, &str, i32)]) -> Vec<u8> {
+    let rows = rows.iter().map(|r| vec![DbValue::Str(r.0.into()), DbValue::Str(r.1.into()), DbValue::I32(r.2)]).collect();
+    let schema = ntw_data::effects::TraitAttributeEffect::schema();
+    DbTable { version: 0, has_version_marker: false, flag: 1, rows }.to_bytes(&schema).unwrap()
+}
+
+/// The 16 tables of the exe's loader 0x00DBDB90 (`COLUMN_0_1_KEYED_TABLES`) merge on columns 0 + 1
+/// (0x004F1200 at 0x00DBE511): a mod row sharing only column 0 with a vanilla row is added beside it,
+/// and a row repeating both columns replaces that one row when its pack wins (a mod pack beats the
+/// release pack; of two mod packs, the one the user script names first).
+#[test]
+fn mod_rows_of_the_pair_keyed_loader_merge_on_columns_0_and_1() {
+    let root = temp_dir("pair_keyed");
+    let data = root.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let table = "db\\trait_attribute_effects_tables\\";
+    let vanilla = trait_attributes(&[("lvl_a", "research", 1), ("lvl_a", "zeal", 2), ("lvl_b", "research", 4)]);
+    std::fs::write(data.join("data.pack"), pack(1, &[(&format!("{table}trait_attribute_effects"), vanilla)])).unwrap();
+    let first = trait_attributes(&[("lvl_a", "research", 5), ("lvl_a", "command", 3)]);
+    std::fs::write(data.join("first.pack"), pack(3, &[(&format!("{table}first"), first)])).unwrap();
+    let second = trait_attributes(&[("lvl_a", "command", 9), ("lvl_b", "zeal", 6)]);
+    std::fs::write(data.join("second.pack"), pack(3, &[(&format!("{table}second"), second)])).unwrap();
+
+    let (vfs, _) = Vfs::open_with_mods(&data, &script("mod first.pack;\nmod second.pack;", None)).unwrap();
+    let mut warnings = Vec::new();
+    let t = load_table::<ntw_data::effects::TraitAttributeEffect>(&vfs, &mut warnings).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let mut rows: Vec<(&str, &str, i32)> = t.iter().map(|r| (r.level_key.as_str(), r.attribute.as_str(), r.value)).collect();
+    rows.sort_unstable();
+    assert_eq!(
+        rows,
+        [
+            ("lvl_a", "command", 3),
+            ("lvl_a", "research", 5),
+            ("lvl_a", "zeal", 2),
+            ("lvl_b", "research", 4),
+            ("lvl_b", "zeal", 6),
+        ],
+        "rows sharing column 0 are all kept; a repeated level + attribute is one row, from the winning pack"
+    );
+}

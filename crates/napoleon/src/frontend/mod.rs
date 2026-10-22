@@ -30,7 +30,7 @@ use ntw_script::ui::{FrontEndFacts, NodeId, PointerEvent, UiRequest, UiScriptHos
 
 use crate::GameMode;
 use crate::config;
-use render::{UiAssets, UiSprite, spawn_world};
+use render::{UiAssets, UiSprite, spawn_world, ui_scale, ui_virtual_screen, window_to_ui};
 
 /// The UI script host plus pointer bookkeeping. Lua is single-threaded, so this is a
 /// non-`Send` resource used only from the main thread.
@@ -39,10 +39,31 @@ pub struct FrontEndUi {
     hovered: Option<NodeId>,
     pressed: Option<NodeId>,
     drawn_generation: u64,
+    /// The window size the sprites were last drawn for: the draw scale and centre follow the window,
+    /// and two windows with the same virtual screen (1024x768 and 800x600 both lay out in 1280x960)
+    /// leave the layout, and so its generation, unchanged.
+    drawn_screen: Vec2,
+    /// The window size in pixels (the scripts see its virtual screen, `render::ui_virtual_screen`).
     screen: Vec2,
     /// Milliseconds since the front end started (the `OnUpdatePulse` clock).
     clock_ms: f64,
     cursor: Option<String>,
+}
+
+impl FrontEndUi {
+    /// The scripts' host for a window of `screen` pixels, laid out in its virtual screen: the
+    /// original UI scale, like the campaign and battle HUDs (the scale is the render device's, so
+    /// the front end draws through it too, see `ui_scale`).
+    fn new(source: ScriptSource, loc: Localisation, facts: FrontEndFacts, screen: Vec2, limits: ntw_sim::limits::GameLimits) -> mlua::Result<Self> {
+        let virt = ui_virtual_screen(screen);
+        let host = UiScriptHost::new(source, loc, facts, (virt.x, virt.y), limits)?;
+        Ok(Self { host, hovered: None, pressed: None, drawn_generation: u64::MAX, drawn_screen: Vec2::ZERO, screen, clock_ms: 0.0, cursor: None })
+    }
+
+    /// Whether the sprites are out of date: the UI tree changed, or the window they were drawn for.
+    fn needs_redraw(&self) -> bool {
+        self.host.world().generation != self.drawn_generation || self.screen != self.drawn_screen
+    }
 }
 
 /// Front-end state and systems.
@@ -105,19 +126,19 @@ fn enter(world: &mut World) {
         .unwrap_or(Vec2::new(1280.0, 960.0));
     // The custom battle pages read the moddable unit limits and funds (GameDatabase::limits).
     let limits = world.resource::<crate::data::GameData>().db.limits.clone();
-    let host = match UiScriptHost::new(source, loc, facts, (screen.x, screen.y), limits) {
-        Ok(h) => h,
+    let ui = match FrontEndUi::new(source, loc, facts, screen, limits) {
+        Ok(ui) => ui,
         Err(e) => {
             error!("UI script host failed to start: {e}");
             return;
         }
     };
-    if let Err(e) = host.load_root_layout("data/ui/frontend ui/layout") {
+    if let Err(e) = ui.host.load_root_layout("data/ui/frontend ui/layout") {
         error!("Could not load the front-end layout: {e}");
         return;
     }
     world.insert_resource(UiAssets::new(vfs));
-    world.insert_non_send(FrontEndUi { host, hovered: None, pressed: None, drawn_generation: u64::MAX, screen, clock_ms: 0.0, cursor: None });
+    world.insert_non_send(ui);
 }
 
 /// Leaving the front end (a battle starts): drop the UI and put the normal cursor back.
@@ -129,13 +150,14 @@ fn leave(world: &mut World) {
     }
 }
 
-/// Tells the scripts' world about the window size.
+/// Tells the scripts' world about the window size (as its virtual screen).
 fn resize(ui: Option<NonSendMut<FrontEndUi>>, window: Query<&Window, With<PrimaryWindow>>) {
     let (Some(mut ui), Ok(window)) = (ui, window.single()) else { return };
     let size = Vec2::new(window.width(), window.height());
     if ui.screen != size {
         ui.screen = size;
-        ui.host.set_screen(size.x, size.y);
+        let virt = ui_virtual_screen(size);
+        ui.host.set_screen(virt.x, virt.y);
     }
 }
 
@@ -157,10 +179,12 @@ fn pointer(
         return;
     }
     let (Some(mut ui), Ok(window)) = (ui, window.single()) else { return };
-    if let Some(p) = window.cursor_position() {
+    // The cursor in the virtual screen (the inverse of the draw mapping, `0x0119B270`).
+    let cursor = window.cursor_position().map(|p| window_to_ui(p, ui.screen));
+    if let Some(p) = cursor {
         ui.host.set_cursor_position(p.x, p.y);
     }
-    let hit = window.cursor_position().and_then(|p| ui.host.hit(p.x, p.y));
+    let hit = cursor.and_then(|p| ui.host.hit(p.x, p.y));
     if hit != ui.hovered {
         if let Some(old) = ui.hovered {
             ui.host.pointer(old, PointerEvent::Leave);
@@ -322,7 +346,7 @@ fn cursor(mut commands: Commands, ui: Option<NonSendMut<FrontEndUi>>, window: Qu
     }
 }
 
-/// Rebuilds all sprites when the UI tree changed.
+/// Rebuilds all sprites when the UI tree or the window size changed.
 fn redraw(
     mut commands: Commands,
     ui: Option<NonSendMut<FrontEndUi>>,
@@ -341,17 +365,18 @@ fn redraw(
         };
         ui.drawn_generation = u64::MAX;
     }
-    let generation = ui.host.world().generation;
-    if generation == ui.drawn_generation {
+    if !ui.needs_redraw() {
         return;
     }
     for e in &sprites {
         commands.entity(e).despawn();
     }
     if let Some(root) = ui.host.root() {
-        spawn_world(&ui.host.world(), root, &mut commands, &mut assets, &mut images, ui.screen, 1.0);
+        spawn_world(&ui.host.world(), root, &mut commands, &mut assets, &mut images, ui.screen, ui_scale(ui.screen));
     }
+    let generation = ui.host.world().generation;
     ui.drawn_generation = generation;
+    ui.drawn_screen = ui.screen;
 }
 
 /// `--screenshot <file.png>`: save one picture once the scene has settled (4 s after start, or
@@ -517,5 +542,72 @@ mod key_name_tests {
         assert_eq!(key_name(KeyCode::KeyS), None);
         assert_eq!(key_name(KeyCode::ArrowUp), None);
         assert_eq!(crate::shortcut_keys::exe_key_name(KeyCode::NumpadEnter), Some("NUMPADENTER"));
+    }
+}
+
+#[cfg(test)]
+mod ui_scale_tests {
+    use super::*;
+    use bevy::window::WindowResolution;
+
+    fn front_end(screen: Vec2) -> FrontEndUi {
+        FrontEndUi::new(ScriptSource::empty(), Localisation::new(), FrontEndFacts::default(), screen, Default::default()).unwrap()
+    }
+
+    fn script_screen(ui: &FrontEndUi) -> (f32, f32) {
+        ui.host.lua().load("return FrontEnd.ScreenSize()").eval().unwrap()
+    }
+
+    /// The front end lays out in the same virtual screen as the campaign and battle HUDs: a window
+    /// under 1280x960 is scaled by `0x0114EB20`, so its scripts see 1280x960 (not the window), and a
+    /// resize keeps it in step.
+    #[test]
+    fn the_front_end_follows_the_window_ui_scale() {
+        let mut app = App::new();
+        app.add_systems(Update, resize);
+        app.world_mut().spawn((Window { resolution: WindowResolution::new(1600, 1200), ..default() }, PrimaryWindow));
+        app.world_mut().insert_non_send(front_end(Vec2::new(1600.0, 1200.0)));
+        assert_eq!(script_screen(app.world().non_send::<FrontEndUi>()), (1600.0, 1200.0));
+
+        let mut window = app.world_mut().query::<&mut Window>();
+        window.single_mut(app.world_mut()).unwrap().resolution = WindowResolution::new(1024, 768);
+        app.update();
+        let ui = app.world().non_send::<FrontEndUi>();
+        assert_eq!(ui.screen, Vec2::new(1024.0, 768.0));
+        let (w, h) = script_screen(ui);
+        assert!((w - 1280.0).abs() < 1e-3 && (h - 960.0).abs() < 1e-3, "{w}x{h}");
+        // The draw scale and the cursor mapping are the HUDs' (render::ui_scale / window_to_ui).
+        assert!((ui_scale(ui.screen) - 0.8).abs() < 1e-6);
+        assert!(window_to_ui(Vec2::new(512.0, 384.0), ui.screen).abs_diff_eq(Vec2::new(640.0, 480.0), 1e-3));
+    }
+
+    /// A resize between two windows with the same virtual screen (1024x768 and 800x600 both lay out
+    /// in 1280x960) changes the draw scale and centre but not the layout, so its generation stays:
+    /// the front end must redraw for the new window anyway, not keep the old window's scale.
+    #[test]
+    fn a_resize_to_the_same_virtual_screen_still_redraws() {
+        let mut app = App::new();
+        app.add_systems(Update, resize);
+        app.world_mut().spawn((Window { resolution: WindowResolution::new(1024, 768), ..default() }, PrimaryWindow));
+        app.world_mut().insert_non_send(front_end(Vec2::new(1024.0, 768.0)));
+        app.update();
+        let generation = {
+            let mut ui = app.world_mut().non_send_mut::<FrontEndUi>();
+            assert!(ui.needs_redraw(), "nothing drawn yet");
+            // As `redraw` leaves it after drawing.
+            let generation = ui.host.world().generation;
+            ui.drawn_generation = generation;
+            ui.drawn_screen = ui.screen;
+            assert!(!ui.needs_redraw());
+            ui.drawn_generation
+        };
+
+        let mut window = app.world_mut().query::<&mut Window>();
+        window.single_mut(app.world_mut()).unwrap().resolution = WindowResolution::new(800, 600);
+        app.update();
+        let ui = app.world().non_send::<FrontEndUi>();
+        assert_eq!(ui.host.world().generation, generation, "same virtual screen, same layout");
+        assert!((ui_scale(ui.screen) - ui_scale(Vec2::new(1024.0, 768.0))).abs() > 0.1);
+        assert!(ui.needs_redraw(), "the window changed, so the sprites are out of date");
     }
 }

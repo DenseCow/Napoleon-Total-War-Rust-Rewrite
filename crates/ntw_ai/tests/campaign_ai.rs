@@ -67,7 +67,7 @@ fn play(f: &Fixture, turns: u32) -> (CampaignModel, Vec<AiTurnReport>) {
     let ctx = driver::context_for(&m, "eur_napoleon");
     let mut log = Vec::new();
     for _ in 0..turns {
-        let (_, reports) = driver::end_turn(&mut m, &f.data, &ctx);
+        let (_, reports) = driver::end_turn_declining_calls(&mut m, &f.data, &ctx);
         log.extend(reports);
     }
     (m, log)
@@ -95,7 +95,7 @@ fn negative_treasuries(m: &CampaignModel, human: FactionId) -> Vec<String> {
 fn ai_tables_load_from_the_install() {
     let Some(f) = fixture() else { return };
     let d = &f.data;
-    assert_eq!(d.default_personality, "default");
+    assert_eq!(d.personalities.default, "default");
     assert_eq!(d.tunable("default", "BASIC_SPENDING_BIAS_CONSTRUCTION"), Some(0.25));
     assert_eq!(d.tunable("eur_france", "BASIC_SPENDING_BIAS_CONSTRUCTION"), Some(0.25), "falls back to default");
     assert_eq!(d.tunable("eur_france", "LOOT_SETTLEMENT_BASE_CHANCE"), Some(0.0), "overlay wins");
@@ -105,6 +105,24 @@ fn ai_tables_load_from_the_install() {
     assert_eq!((cfg.manager.as_str(), cfg.personality.as_str()), ("nap_eur_france", "eur_france"));
     let cfg = FactionAiConfig::resolve(d, "eur_napoleon", "prussia");
     assert_eq!((cfg.manager.as_str(), cfg.personality.as_str()), ("nap_eur_full", "default"));
+}
+
+/// The AI's capture choice reads the seven loot tunables (`0x00CB0860`..`0x00CB0850`) from the model's own
+/// personality table, the one the campaign AI reads too; vanilla's default personality sets all seven.
+#[test]
+fn the_default_personality_has_the_capture_tunables() {
+    let Some(f) = fixture() else { return };
+    let p = &f.model.rules.ai_personalities;
+    assert_eq!(p, &f.data.personalities, "one table");
+    // Vanilla `campaign_ai_personality_junctions`, in percent (CONFIRMED: the install's data; the exe scales
+    // them by 0.01 at load, `0x00DDFFB0`): base, expenditure pct, economic, diplomatic, grouping, never-loot
+    // floor, always-loot ceiling.
+    let default = [10.0, 110.0, 35.0, 2.0, 10.0, 20.0, 80.0];
+    let france = [0.0, 110.0, 35.0, 2.0, 10.0, 50.0, 100.0];
+    for (i, key) in ntw_sim::campaign::capture_ai::TUNABLES.into_iter().enumerate() {
+        assert_eq!(p.tunable(&p.default, key), Some(default[i]), "default {key}");
+        assert_eq!(p.tunable("eur_france", key), Some(france[i]), "eur_france {key}");
+    }
 }
 
 

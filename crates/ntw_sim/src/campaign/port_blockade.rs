@@ -5,7 +5,7 @@
 //! blockade calls; [`CampaignModel::lift_port_blockade`] is ours. Its callers in the exe (CONFIRMED,
 //! xrefs and disassembly):
 //! * a peace (`MakePeace` `0x00B262C0` → `ClearCommerceRaidsBetweenFactions` `0x00A25570`, the call at
-//!   `0x00A25627`): [`CampaignModel::lift_blockades_on_peace`];
+//!   `0x00A25627`): [`CampaignModel::lift_blockade_on_peace`];
 //! * an owner change's slot pass (`TransferRegionSlotOwners` `0x00B1B300`, the call at `0x00B1B3EF`):
 //!   [`CampaignModel::clear_blockades_after_slot_pass`];
 //! * the navy's destructor (`0x0088EF90`): [`CampaignModel::lift_blockade_of_navy`];
@@ -14,7 +14,7 @@
 //!   handler at `0x00932710`): not in the model, nor is the blockade's start (`0x00A66F80`, from the
 //!   move-order step `0x0094B9B0`), so no blockade begins in our campaign yet (BACKLOG).
 
-use super::ids::{FactionId, ForceId, RegionId};
+use super::ids::{CharacterId, FactionId, ForceId, RegionId};
 use super::CampaignModel;
 
 impl CampaignModel {
@@ -59,20 +59,17 @@ impl CampaignModel {
         out
     }
 
-    /// A peace between `a` and `b` (`ClearCommerceRaidsBetweenFactions` `0x00A25570`, CONFIRMED,
-    /// disassembly `0x00A255FD`–`0x00A25627`): each commander of either side whose navy blockades a port
-    /// (navy +0xE8) held by the other side (the port's slot +0x70, its holder: slot virtual +0x14, the
-    /// slot's holder or else the region's owner) lifts that blockade. The exe walks each side's
-    /// characters and does each one's siege end, blockade lift and raid clear in turn; the raid clear
-    /// ([`Self::clear_raids_on_peace`]) reads nothing the lift changes, so the lifts run first. The
-    /// navy's side is the force's faction (its commander's).
-    pub(crate) fn lift_blockades_on_peace(&mut self, a: FactionId, b: FactionId) {
-        let forces = &self.world.forces;
-        let lifted = self.blockaded_slots(|r, s, navy| {
-            let held = s.holder.unwrap_or(r.owner);
-            forces.get(&navy).is_some_and(|f| (f.faction == a && held == b) || (f.faction == b && held == a))
-        });
-        for (region, slot) in lifted {
+    /// A peace's blockade step for character `c` towards the other side `other` (`ClearCommerceRaidsBetweenFactions`
+    /// `0x00A25570`, CONFIRMED, disassembly `0x00A255CA`–`0x00A25627`, after his siege step): the navy he
+    /// commands (character +0x2A8 as a navy, `0x009D3A80`, [`Self::force_of_kind`]: an army is not looked
+    /// at), if it blockades a port (navy +0xE8) held by `other` (the port's slot +0x70, its holder: slot
+    /// virtual +0x14, the slot's holder or else the region's owner), lifts that blockade
+    /// ([`Self::lift_port_blockade`], with its price update). The exe reaches a navy only through its
+    /// commander's step, so a blockading navy with no commander, or whose commander is in neither side's
+    /// character list (+0x764 / +0x768; in the model, a commander id with no character), keeps blockading.
+    pub(crate) fn lift_blockade_on_peace(&mut self, c: CharacterId, other: FactionId) {
+        let Some(navy) = self.force_of_kind(c, true) else { return };
+        for (region, slot) in self.blockaded_slots(|r, s, n| n == navy && s.holder.unwrap_or(r.owner) == other) {
             self.lift_port_blockade(region, slot);
         }
     }

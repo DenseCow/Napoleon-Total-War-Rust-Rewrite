@@ -801,6 +801,99 @@ fn diplomacy_trade_tooltip_only_for_an_allowed_new_agreement() {
     assert_eq!(m.diplomacy_trade_tooltip(A, B), None, "at war");
 }
 
+/// The negotiation panel's tooltip key for `action` with A the local player negotiating B.
+fn action_tip(m: &CampaignModel, action: super::negotiation::NegotiationAction) -> Option<&'static str> {
+    use super::negotiation::ActionTooltip;
+    let button = m.possible_actions(A, A, B).unilaterals.into_iter().find(|a| a.action == action);
+    match button.expect("listed while not at war").tooltip {
+        Some(ActionTooltip::Key(key)) => Some(key),
+        _ => None,
+    }
+}
+
+/// The alliance button's tooltip (`0x00B0CBD0`, CONFIRMED disassembly): a patron on either side first,
+/// then the other side at war with one of the local player's allied-like factions (`0x00B27F70(local,
+/// other)`), then the reverse, else "can ally".
+#[test]
+fn alliance_tooltip_follows_patrons_then_wars_on_allies() {
+    let tip = |m: &CampaignModel| action_tip(m, super::negotiation::NegotiationAction::Alliance);
+    let mut m = test_model();
+    assert_eq!(tip(&m), Some("alliance_tooltip_can_ally"));
+    m.world.set_stance(B, C, Stance::Protectorate).unwrap();
+    assert_eq!(tip(&m), Some("alliance_tooltip_is_protectorate"), "the other side has a patron");
+    m.world.set_stance(B, C, Stance::Neutral).unwrap();
+    m.world.set_stance(A, C, Stance::Protectorate).unwrap();
+    assert_eq!(tip(&m), Some("alliance_tooltip_is_protectorate"), "the local player has a patron");
+    // A's patron C is allied-like with A, so B at war with C is still the patron case first.
+    m.world.set_stance(B, C, Stance::War).unwrap();
+    assert_eq!(tip(&m), Some("alliance_tooltip_is_protectorate"));
+    m.world.set_stance(A, C, Stance::Allied).unwrap();
+    assert_eq!(tip(&m), Some("alliance_tooltip_allied_war"), "B fights A's ally C");
+    m.world.set_stance(A, C, Stance::War).unwrap();
+    m.world.set_stance(B, C, Stance::Allied).unwrap();
+    assert_eq!(tip(&m), Some("alliance_tooltip_war_allied"), "A fights B's ally C");
+    m.world.set_stance(B, C, Stance::Neutral).unwrap();
+    assert_eq!(tip(&m), Some("alliance_tooltip_can_ally"), "a war on a faction neither is allied with");
+}
+
+/// The alliance offer's possible flag (`0x00C1A630`): `0x00C16990` blocks it when either side is at
+/// war with a faction the other is allied-like with (`0x00B27F70` inlined once each way, CONFIRMED
+/// disassembly).
+#[test]
+fn alliance_is_blocked_by_a_war_on_either_sides_ally() {
+    use super::negotiation::NegotiationAction as N;
+    let possible = |m: &CampaignModel| {
+        m.negotiation_actions(A, B).iter().find(|r| r.action == N::Alliance).expect("alliance listed").possible
+    };
+    let mut m = test_model();
+    assert!(possible(&m));
+    m.world.set_stance(A, C, Stance::Allied).unwrap();
+    m.world.set_stance(B, C, Stance::War).unwrap();
+    assert!(!possible(&m), "the recipient is at war with the proposer's ally");
+    m.world.set_stance(A, C, Stance::War).unwrap();
+    m.world.set_stance(B, C, Stance::Allied).unwrap();
+    assert!(!possible(&m), "the proposer is at war with the recipient's ally");
+    m.world.set_stance(A, C, Stance::Neutral).unwrap();
+    assert!(possible(&m), "an ally nobody is at war with");
+}
+
+/// The break_alliance button's tooltip (`0x00B13B80`, CONFIRMED disassembly): "can break" when either
+/// side is allied (stance 2 only) with a faction besides the other (`0x00B280C0` both ways).
+#[test]
+fn break_alliance_tooltip_needs_an_ally_besides_the_other_side() {
+    let tip = |m: &CampaignModel| action_tip(m, super::negotiation::NegotiationAction::BreakAlliance);
+    let mut m = test_model();
+    assert_eq!(tip(&m), Some("break_alliance_tooltip_no_allies"));
+    m.world.set_stance(A, B, Stance::Allied).unwrap();
+    assert_eq!(tip(&m), Some("break_alliance_tooltip_no_allies"), "their alliance with each other does not count");
+    m.world.set_stance(A, C, Stance::Patron).unwrap();
+    assert_eq!(tip(&m), Some("break_alliance_tooltip_no_allies"), "a protectorate is not an alliance");
+    m.world.set_stance(A, C, Stance::Allied).unwrap();
+    assert_eq!(tip(&m), Some("break_alliance_tooltip_can_break_alliance"), "the local player's ally");
+    m.world.set_stance(A, C, Stance::Neutral).unwrap();
+    m.world.set_stance(B, C, Stance::Allied).unwrap();
+    assert_eq!(tip(&m), Some("break_alliance_tooltip_can_break_alliance"), "the other side's ally");
+}
+
+/// The break_trade button's tooltip (`0x00B13CB0`, CONFIRMED disassembly): "can embargo" when either
+/// side's relationship to a faction besides the other has no running embargo (`0x00B28130` both ways).
+#[test]
+fn break_trade_tooltip_needs_an_unembargoed_third_faction() {
+    let tip = |m: &CampaignModel| action_tip(m, super::negotiation::NegotiationAction::BreakTrade);
+    let mut m = test_model();
+    assert_eq!(tip(&m), Some("break_trade_tooltip_can_embargo"));
+    m.relationship_mut(A, C).trade_embargo_turns = 3;
+    m.relationship_mut(B, C).trade_embargo_turns = 3;
+    assert_eq!(tip(&m), Some("break_trade_tooltip_no_unembargoed_factions"), "the only third faction embargoed by both");
+    m.relationship_mut(A, B).trade_embargo_turns = 3;
+    m.relationship_mut(A, C).trade_embargo_turns = 0;
+    m.relationship_mut(C, A).trade_embargo_turns = 3;
+    assert_eq!(tip(&m), Some("break_trade_tooltip_can_embargo"), "A's own record to C decides, not C's to A");
+    m.relationship_mut(A, C).trade_embargo_turns = 3;
+    m.relationship_mut(B, C).trade_embargo_turns = 0;
+    assert_eq!(tip(&m), Some("break_trade_tooltip_can_embargo"), "the other side's free record");
+}
+
 /// The join-war record (11): `CCQ_DIPLOMACY_PROPOSE_JOIN_WAR` (`0x009336C0`) replaces its two lists,
 /// leaves it on two empty ones and empties it on `clear`, as the regions record; an unknown faction
 /// aborts; `ClearNegotiation` empties it too.
@@ -883,7 +976,7 @@ fn a_join_war_item_against_an_existing_enemy_applies_again() {
     use super::treaties::{event, slot};
     let mut m = test_model();
     m.turn.humans = vec![A, B];
-    m.apply(CampaignCommand::DeclareWar { a: A, b: C }).unwrap();
+    m.declare_war_rules(A, C).unwrap(); // C holds no region: out of the game, so not the command.
     m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
     m.apply(CampaignCommand::ProposeJoinWar { clear: false, demanded: vec![], offered: vec![C] }).unwrap();
     let ev = m.apply(CampaignCommand::AcceptDeal).unwrap();

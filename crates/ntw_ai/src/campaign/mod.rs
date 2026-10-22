@@ -185,10 +185,10 @@ pub struct FactionAiConfig {
 
 impl FactionAiConfig {
     /// PROVISIONAL naming rule (the original's assignment is UNKNOWN): manager
-    /// `nap_<prefix>_<faction>` if it exists, else `nap_<prefix>_full`; personality
-    /// `<prefix>_<faction>` if it exists, else the default. `<prefix>` is the campaign key's
-    /// part after an optional `mp_` (e.g. `eur` from `eur_napoleon`). The shipped data fits this
-    /// rule (`nap_eur_france` + `eur_france`, `nap_eur_britain`).
+    /// `nap_<prefix>_<faction>` if it exists, else `nap_<prefix>_full`; personality by the model's rule
+    /// ([`AiPersonalities::resolve`](ntw_sim::campaign::personalities::AiPersonalities::resolve)): `<prefix>_<faction>` if it
+    /// exists, else the default. `<prefix>` is the campaign key's part after an optional `mp_` (e.g. `eur`
+    /// from `eur_napoleon`). The shipped data fits this rule (`nap_eur_france` + `eur_france`, `nap_eur_britain`).
     pub fn resolve(data: &CampaignAiData, campaign_key: &str, faction_key: &str) -> Self {
         let c = campaign_key.strip_prefix("mp_").unwrap_or(campaign_key);
         let prefix = c.split('_').next().unwrap_or(c);
@@ -199,8 +199,7 @@ impl FactionAiConfig {
             let full = format!("nap_{prefix}_full");
             if data.managers.contains_key(&full) { full } else { "nap_eur_full".to_string() }
         };
-        let p = format!("{prefix}_{faction_key}");
-        let personality = if data.personalities.contains_key(&p) { p } else { data.default_personality.clone() };
+        let personality = data.personalities.resolve(campaign_key, faction_key, None);
         let behaviours = data.managers.get(&manager).cloned().unwrap_or_default();
         FactionAiConfig { manager, personality, behaviours }
     }
@@ -215,9 +214,7 @@ impl FactionAiConfig {
                 cfg.manager = k.manager.clone();
                 cfg.behaviours = b.clone();
             }
-            if data.personalities.contains_key(&k.personality) {
-                cfg.personality = k.personality.clone();
-            }
+            cfg.personality = data.personalities.resolve(campaign_key, faction_key, Some(&k.personality));
         }
         cfg
     }
@@ -1304,6 +1301,8 @@ mod tests {
             discontent_growth: 0,
             town_wealth: 0,
             town_wealth_growth: 0,
+            town_wealth_refresh: Default::default(),
+            commodity_demand: Vec::new(),
             tax_exempt: false,
             religions: Vec::new(),
             class_bases: Vec::new(),

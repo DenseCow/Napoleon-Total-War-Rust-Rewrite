@@ -169,10 +169,9 @@ pub struct ListedAction {
     pub action: NegotiationAction,
     /// `Active`: the action is available (an unavailable one is shown greyed).
     pub active: bool,
-    /// `Tooltip`: for trade and request_join_war while the local player is not at war with the other
-    /// side (`action_tooltip`); `None` for every other action. The exe
-    /// also explains alliance, break_trade and break_alliance (`0x00B0CBD0`, `0x00B13CB0`,
-    /// `0x00B13B80`), still undecoded: see the PROVISIONAL note on `action_tooltip`.
+    /// `Tooltip`: for trade, alliance, request_join_war, break_trade and break_alliance while the
+    /// local player is not at war with the other side (`action_tooltip`); `None` for every other
+    /// action.
     pub tooltip: Option<ActionTooltip>,
 }
 
@@ -279,6 +278,10 @@ pub struct Negotiation {
     /// The payment record (record 7): set by [`super::CampaignCommand::ProposePayment`], applied by
     /// [`super::CampaignCommand::AcceptDeal`].
     pub payment: DealPayment,
+    /// The peace record (record 9, the negotiation's embedded record at `+0x184`; its item is the
+    /// byte `+0x14`, has-items `0x00AAB430`): set by [`super::CampaignCommand::ProposePeace`],
+    /// applied by [`super::CampaignCommand::AcceptDeal`] before every other record.
+    pub peace: bool,
     /// The join-war record's two lists (record 11, vtable `0x0138202C`): `offered` the factions the
     /// proposer is to declare war on for the recipient, `demanded` those the recipient is to declare
     /// war on for the proposer. Set by [`super::CampaignCommand::ProposeJoinWar`], applied by
@@ -348,7 +351,7 @@ impl<T> DealItems<T> {
 /// the one source of truth the UI reads. Changed only by the commands
 /// [`super::CampaignCommand::BeginNegotiation`] / [`super::CampaignCommand::EndNegotiation`]
 /// (`CCQ_DIPLOMACY_BEGIN_NEGOTIATION` / `CCQ_DIPLOMACY_END_NEGOTIATION`) and the deal's
-/// `ProposeRegions` / `ProposeTechnologies` / `ProposePayment` / `ProposeJoinWar` /
+/// `ProposeRegions` / `ProposeTechnologies` / `ProposePayment` / `ProposePeace` / `ProposeJoinWar` /
 /// `ClearNegotiation`, so a negotiation and the
 /// RNG draw of its greeting go through the command queue like every other command. The counts
 /// stand in for the exe's "started" (hub +0x318) and "ended" (hub +0x378) events: a listener that
@@ -456,6 +459,13 @@ impl CampaignModel {
         self.world.is_rebel_faction(f)
     }
 
+    /// `a`'s stance towards `b` is allied, patron or protectorate (`0x00B0CDF0` on `a`'s record of `b`; no
+    /// rebel or same-faction test, unlike [`Self::allied_with`]): the `ally_attacked` message's
+    /// `AlliedWithAggressor` / `AlliedWithDefender` (`0x00A08B90`, CONFIRMED by disassembly).
+    pub fn allied_like_with(&self, a: FactionId, b: FactionId) -> bool {
+        allied_like(self.world.stance(a, b))
+    }
+
     /// `0x008CE390`: neither is the rebel faction, and the same faction or an allied-like stance.
     pub(crate) fn allied_with(&self, a: FactionId, b: FactionId) -> bool {
         !self.is_rebel_faction(a) && !self.is_rebel_faction(b) && (a == b || allied_like(self.world.stance(a, b)))
@@ -492,19 +502,32 @@ impl CampaignModel {
         self.third_factions(a).any(|x| x != b && self.world.trade_held(a, x))
     }
 
-    /// `0x00C3D5A0(a, b)`: `a` is allied (stance 2) with a faction other than `b`.
+    /// `0x00C3D5A0(a, b)`: `a` is allied (stance 2) with a faction other than `b`. The same test as
+    /// `0x00B280C0(b, a)` (CONFIRMED disassembly: over `a`'s relationships, stance index 2 and the
+    /// target not `b`, `0x00898B80`).
     fn allied_with_third(&self, a: FactionId, b: FactionId) -> bool {
         self.third_factions(a).any(|x| x != b && self.world.stance(a, x) == Stance::Allied)
     }
 
-    /// `0x00C16990`: a faction at war with one of the two while allied-like with the other blocks an
-    /// alliance. INFERRED direction of the two loops (the decompiler hides which list each walks;
-    /// both directions are tested).
+    /// `0x00B27F70(a, b)`, CONFIRMED (disassembly): over `b`'s relationships, some `x` with `b`'s
+    /// stance war (stance index 0) and `a`'s relationship to `x` allied-like (`0x00B0CDF0`): `b` is
+    /// at war with a faction `a` is allied-like with.
+    fn at_war_with_ally_of(&self, a: FactionId, b: FactionId) -> bool {
+        self.third_factions(b).any(|x| self.world.stance(b, x) == Stance::War && allied_like(self.world.stance(a, x)))
+    }
+
+    /// `0x00B28130(b, a)`, CONFIRMED (disassembly): over `a`'s relationships, some `x` other than `b`
+    /// (`0x00898B80`, an inequality) without a running embargo ([`Self::trade_embargoed`],
+    /// `0x00B28E10`): a faction `a` could still embargo.
+    fn unembargoed_third(&self, a: FactionId, b: FactionId) -> bool {
+        self.third_factions(a).any(|x| x != b && !self.trade_embargoed(a, x))
+    }
+
+    /// `0x00C16990`: either side at war with a faction the other is allied-like with blocks an
+    /// alliance. CONFIRMED (disassembly): it inlines [`Self::at_war_with_ally_of`] (`0x00B27F70`)
+    /// once each way.
     fn alliance_blocked(&self, p: FactionId, r: FactionId) -> bool {
-        let blocks = |a: FactionId, b: FactionId| {
-            self.third_factions(a).any(|x| x != b && self.world.stance(a, x) == Stance::War && allied_like(self.world.stance(x, b)))
-        };
-        blocks(p, r) || blocks(r, p)
+        self.at_war_with_ally_of(p, r) || self.at_war_with_ally_of(r, p)
     }
 
     /// `0x00B4D9A0`: the faction has a relationship with the protectorate stance (index 4), so it has a
@@ -778,12 +801,47 @@ impl CampaignModel {
     /// CONFIRMED by disassembly),
     /// else `..._no_joinable_wars`. trade (`0x009B55FF`, CONFIRMED disassembly):
     /// [`Self::trade_agreement_tooltip`] of the local player to the other side with the counts
-    /// (`0x00BC7910(local, other, 1)`). PROVISIONAL: the alliance / break_trade / break_alliance
-    /// builders (`0x00B0CBD0`, `0x00B13CB0`, `0x00B13B80`) are not decoded, so those buttons keep the
-    /// template's own tooltip.
+    /// (`0x00BC7910(local, other, 1)`).
+    ///
+    /// The other three, CONFIRMED (disassembly 2026-10-22; `this` is the local player's relationship
+    /// record to the other side, `0x009B5220` at `0x009B5662` / `0x009B5740` / `0x009B57A8`, owner
+    /// record +0 the local player, target +4 the other side; keys from the id table `0x0164DB58`,
+    /// filled at `0x0043605E`..`0x004360F4`):
+    /// - alliance (`0x00B0CBD0`): `alliance_tooltip_is_protectorate` (0x1B7) when either side has a
+    ///   patron ([`Self::has_patron`], `0x008CEEA0`); else `..._allied_war` (0x1B8) when the other
+    ///   side is at war with a faction the local player is allied-like with
+    ///   ([`Self::at_war_with_ally_of`]`(local, other)`, `0x00B27F70`); else `..._war_allied` (0x1B9)
+    ///   when the local player is at war with one the other side is allied-like with; else
+    ///   `..._can_ally` (0x1BA);
+    /// - break_trade (`0x00B13CB0`): `break_trade_tooltip_can_embargo` (0x1C1) when either side has a
+    ///   faction besides the other without a running embargo ([`Self::unembargoed_third`],
+    ///   `0x00B28130`), else `..._no_unembargoed_factions` (0x1C0);
+    /// - break_alliance (`0x00B13B80`): `break_alliance_tooltip_can_break_alliance` (0x1BF) when
+    ///   either side is allied with a faction besides the other ([`Self::allied_with_third`],
+    ///   `0x00B280C0`), else `..._no_allies` (0x1BE).
     fn action_tooltip(&self, action: NegotiationAction, local: FactionId, other: FactionId) -> Option<ActionTooltip> {
+        let either = |test: fn(&Self, FactionId, FactionId) -> bool| test(self, local, other) || test(self, other, local);
         match action {
             NegotiationAction::Trade => Some(ActionTooltip::TradeAgreement(self.trade_agreement_tooltip(local, other, true))),
+            NegotiationAction::Alliance => Some(ActionTooltip::Key(if self.has_patron(local) || self.has_patron(other) {
+                "alliance_tooltip_is_protectorate"
+            } else if self.at_war_with_ally_of(local, other) {
+                "alliance_tooltip_allied_war"
+            } else if self.at_war_with_ally_of(other, local) {
+                "alliance_tooltip_war_allied"
+            } else {
+                "alliance_tooltip_can_ally"
+            })),
+            NegotiationAction::BreakTrade => Some(ActionTooltip::Key(if either(Self::unembargoed_third) {
+                "break_trade_tooltip_can_embargo"
+            } else {
+                "break_trade_tooltip_no_unembargoed_factions"
+            })),
+            NegotiationAction::BreakAlliance => Some(ActionTooltip::Key(if either(Self::allied_with_third) {
+                "break_alliance_tooltip_can_break_alliance"
+            } else {
+                "break_alliance_tooltip_no_allies"
+            })),
             NegotiationAction::RequestJoinWar => Some(ActionTooltip::Key(if !allied_like(self.world.stance(local, other)) {
                 "join_war_tooltip_not_allied"
             } else if self.joinable_war(local, other) || self.joinable_war(other, local) {
@@ -844,6 +902,7 @@ impl CampaignModel {
             regions: DealItems::default(),
             technologies: DealItems::default(),
             payment: DealPayment::default(),
+            peace: false,
             join_war: DealItems::default(),
             applied: false,
             threat: false,
@@ -940,14 +999,32 @@ impl CampaignModel {
         Ok(())
     }
 
-    /// `CCQ_DIPLOMACY_CLEAR_NEGOTIATION` (executor `0x00932EC0`): the deal is emptied. The model
-    /// holds the regions, technology, payment and join-war records; the other items are still held
-    /// by the UI.
+    /// `CCQ_DIPLOMACY_PROPOSE_PEACE` (registered at `0x00420D00`, executor `0x00933B90`, CONFIRMED by
+    /// disassembly; its payload one flag): `clear` empties the peace record (`0x00C11B80(9)` →
+    /// `0x00C5C730` → its vt+0x50 `0x00C5CC40`, the byte `+0x14` set to 0); otherwise the record takes
+    /// the deal (`0x00C49AA0` → its vt+0x44 `0x00C4ADE0`, the byte set to 1). The executor checks
+    /// nothing else: neither the pair's stance nor the record's possible flag.
+    ///
+    /// PROVISIONAL: the possible flags are not modelled: `0x00C4ADE0` also clears the record's own
+    /// and re-tests records 0, 1 and 3 (`0x00BA42E0`); `0x00C5CC40` (vtable `0x01381F84`, slot +0x50)
+    /// sets its own and clears records 0, 1, 3, 8, 12 and 13, each only when that record's vt+0x2C test passes; our code acts on
+    /// none of those records here. Those records are still held by the UI (BACKLOG).
+    pub(crate) fn propose_peace(&mut self, clear: bool) -> Result<(), super::CommandError> {
+        let n = self.negotiations.current.as_mut().ok_or(super::CommandError::NoNegotiation)?;
+        n.peace = !clear;
+        n.applied = false;
+        Ok(())
+    }
+
+    /// `CCQ_DIPLOMACY_CLEAR_NEGOTIATION` (executor `0x00932EC0` → `0x00C1D140`, which clears each
+    /// record holding items): the deal is emptied. The model holds the regions, technology,
+    /// payment, peace and join-war records; the other items are still held by the UI.
     pub(crate) fn clear_negotiation(&mut self) -> Result<(), super::CommandError> {
         let n = self.negotiations.current.as_mut().ok_or(super::CommandError::NoNegotiation)?;
         n.regions.clear();
         n.technologies.clear();
         n.payment = DealPayment::default();
+        n.peace = false;
         n.join_war.clear();
         n.applied = false;
         Ok(())
@@ -980,11 +1057,29 @@ impl CampaignModel {
     }
 
     /// `CCQ_DIPLOMACY_ACCEPT_DEAL` (`AcceptCampaignNegotiationDeal` `0x00C114B0`) for the records
-    /// the model holds, each through its virtual +0x3C, in the records' order (regions,
-    /// technologies, the payment, then join war). The deal stays (it goes with the negotiation's end), as in the exe; it is
+    /// the model holds, each through its virtual +0x3C: the peace record first, then the others in
+    /// the records' order (regions, technologies, the payment, then join war). The deal stays (it goes with the negotiation's end), as in the exe; it is
     /// applied once: accepting it again before a Propose or Clear changes it does nothing
     /// ([`Negotiation::applied`]; the exe re-applies every record on each accept, which its UI
     /// never asks for, and which would raise the traded counts again).
+    /// - peace (`0x00C18B60`, called before the record loop): the proposer makes peace with the
+    ///   recipient, messages not suppressed ([`Self::make_peace_rules`], `MakePeaceWithFaction`
+    ///   `0x00B262C0` on the proposer's manager). The exe has no at-war test here (nor has
+    ///   `0x00B26590`); ours refuses a peace item between factions not at war (`NotAtWar`, checked
+    ///   before any record is applied), which is equivalent: in the exe such an item never reaches an
+    ///   accept (CONFIRMED by disassembly, CAMPAIGN_FIDELITY.md "The deal's peace record"). The
+    ///   record is possible only at war (`0x00BF3CD0` → `0x00C1A730`), and the panel and scripts get
+    ///   it only from the possible actions (`0x009B5220`, `0x00C1A530`). The AI's peace goals are
+    ///   created only by `0x00CC13D0` and the peace intention `0x00CCC7C0`, both tested with
+    ///   `0x00C1A730`; the counter-offer `0x00CC58C0` also builds a goal of type = record index
+    ///   (9 included, `0x00CC701E`) for every record that already holds items, and the type-9
+    ///   goals are applied first, but each copies a peace item already in the deal, so the
+    ///   possible flag still gates it. The flag is set once, when the negotiation is built
+    ///   (`0x00BF3CD0`), and nothing else ends the war mid-negotiation except a script's
+    ///   `force_make_peace` (`CCQ_MAKE_PEACE` `0x00936710`) while the panel is open: in the exe
+    ///   the flag stays on and the peace item stays possible, ours refuses it as `NotAtWar`.
+    ///   PROVISIONAL (this one case; mod scripts only). No pending deal survives a save: there is
+    ///   no negotiation save block, and BEGIN/END_NEGOTIATION are transient commands.
     /// - regions (`0x00C18BF0`): each demanded region passes to the proposer, then each offered one
     ///   to the recipient ([`Self::transfer_region`]), each counted for its receiver
     ///   ([`Self::count_deal_region_received`]);
@@ -1003,10 +1098,15 @@ impl CampaignModel {
     ///   PROVISIONAL: the exe has no such test and would declare a faction's war on itself; what that
     ///   does, and whether anything can propose it, is not traced.
     ///
-    /// Then the expulsions (`0x008D9DC0`, [`Self::expel_from_region`]): the proposer's forces leave
-    /// each offered region, then the recipient's each demanded one. A deal with a peace record first
-    /// expels each side from all of the other's regions (record `+0x184`); PROVISIONAL: the model's
-    /// deal holds no peace record, so that pass is not run (BACKLOG).
+    /// Then the expulsions (`0x008D9DC0`, [`Self::expel_from_region`]; CONFIRMED by disassembly of
+    /// `0x00C114B0`). A deal with a peace item ([`Negotiation::peace`], the byte `+0x14` of the record
+    /// at `+0x184`, read at `0x00C11519`) first moves the proposer's forces out of each of the
+    /// recipient's regions, then the recipient's out of each of the proposer's (the loops at
+    /// `0x00C11528`..`0x00C115A2` over each owner's region list, read after the transfers;
+    /// [`Self::expel_from_each_region_of`], as `CCQ_MOVE_ARMIES_OUT_OF_REGIONS` `0x00936AB0`, with no
+    /// zone flood). Then the proposer's forces leave each offered region and the recipient's each
+    /// demanded one. Whether a force goes is the rule's own test at that moment (the peace is already
+    /// made); forces in a third faction's regions are not touched.
     ///
     /// Then, for a threat ([`Negotiation::threat`]), the recipient gets the `threatened` factor
     /// towards the proposer ([`Self::apply_threatened`], `0x00C11671`).
@@ -1014,7 +1114,7 @@ impl CampaignModel {
     /// Not ported: `0x00C1E240`, which can turn a deal with no demands into a payment before it is
     /// applied (the AI's side, AI_RESEARCH.md §6).
     /// A deal [`Self::ai_refuses_deal`] refuses is not applied (`CommandError::DealRefused`); nor is
-    /// one whose payment or join-war item names an invalid faction pair (checked before any record
+    /// one whose payment, peace or join-war item names an invalid faction pair (checked before any record
     /// is applied).
     pub(crate) fn accept_deal(&mut self) -> Result<Vec<super::CampaignEvent>, super::CommandError> {
         if self.negotiations.current.is_some() && self.ai_refuses_deal() {
@@ -1024,7 +1124,7 @@ impl CampaignModel {
         if n.applied {
             return Ok(Vec::new());
         }
-        let (proposer, recipient, payment, threat) = (n.proposer, n.recipient, n.payment, n.threat);
+        let (proposer, recipient, payment, peace, threat) = (n.proposer, n.recipient, n.payment, n.peace, n.threat);
         let (regions, techs, join_war) = (n.regions.clone(), n.technologies.clone(), n.join_war.clone());
         // The deal applies whole or not at all: the payment's and the join-war wars' only failure
         // (the faction pair) is checked before any record is applied, so an error leaves the deal
@@ -1032,6 +1132,10 @@ impl CampaignModel {
         // fail on its amount.
         if payment.has_items() {
             self.check_diplomacy_pair(proposer, recipient)?;
+        }
+        // The peace's failures (the pair, not at war), as `make_peace_rules` would find them; see the doc above.
+        if peace {
+            self.world.check_make_peace(proposer, recipient)?;
         }
         // PROVISIONAL: an item naming its own joiner refuses the whole deal here (SameFaction). The
         // exe has no such test (`0x00C188F0` → `0x00B26700` takes any pair); what its war of a
@@ -1047,17 +1151,21 @@ impl CampaignModel {
             n.applied = true;
         }
         let mut events = Vec::new();
+        // Record 9, peace (`0x00C18B60`), before the record loop. Checked above: it cannot fail here.
+        if peace {
+            events.extend(self.make_peace_rules(proposer, recipient, false)?);
+        }
         for (list, to) in [(&regions.demanded, proposer), (&regions.offered, recipient)] {
             for &r in list {
                 let old = self.world.regions.get(&r).map(|x| x.owner);
-                if self.transfer_region(r, to)
+                if self.transfer_region(r, to, &mut events)
                     && let Some(old) = old
                 {
                     // A deal sets the owner change's first flag (`0x00B58A10(faction, 1, 0)`): losing the
                     // capital with the last region ends the giver (`0x00A64AC0`, CONFIRMED).
                     self.end_if_capital_lost(old, &mut events);
                 }
-                self.count_deal_region_received(to);
+                self.count_deal_region_received(to, peace);
             }
         }
         for (techs, to, from) in [(&techs.offered, recipient, proposer), (&techs.demanded, proposer, recipient)] {
@@ -1083,11 +1191,18 @@ impl CampaignModel {
                 events.extend(self.join_war_by_deal(joiner, f, ally));
             }
         }
-        // After every record: the proposer's forces leave each offered region, then the recipient's
-        // each demanded one (`0x00C114B0` → `0x008D9DC0`, CONFIRMED).
+        // After every record, with a peace item: the proposer's forces leave each of the recipient's
+        // regions, then the recipient's each of the proposer's, the lists read now, after the
+        // transfers (`0x00C11519`..`0x00C115A2` → `0x008D9DC0`, CONFIRMED).
+        if peace {
+            self.expel_from_each_region_of(proposer, recipient, &mut events);
+            self.expel_from_each_region_of(recipient, proposer, &mut events);
+        }
+        // Then the proposer's forces leave each offered region, then the recipient's each demanded
+        // one (`0x00C114B0` → `0x008D9DC0`, CONFIRMED).
         for (list, f) in [(&regions.offered, proposer), (&regions.demanded, recipient)] {
             for &r in list {
-                self.expel_from_region(f, r);
+                self.expel_from_region(f, r, &mut events);
             }
         }
         // After the expulsions, `0x00C43520` and result 1, the threat (`0x00C11655`).
@@ -1122,11 +1237,11 @@ impl CampaignModel {
     }
 
     /// `0x008E2B70`, from the regions record's accept (`0x00C18C5F` / `0x00C18CD5`): a human
-    /// faction that receives a region in a deal with no peace item counts it
-    /// ([`super::World::deal_regions_received`], faction `+0x938`). CONFIRMED. PROVISIONAL: the
-    /// model does not hold the peace record, so every deal counts as one without peace.
-    fn count_deal_region_received(&mut self, faction: FactionId) {
-        if self.is_human(faction) {
+    /// faction that receives a region in a deal with no peace item (`peace`, [`Negotiation::peace`]:
+    /// the record `0x00C11B80(9)` tested through `0x00C4BC10`) counts it
+    /// ([`super::World::deal_regions_received`], faction `+0x938`). CONFIRMED.
+    fn count_deal_region_received(&mut self, faction: FactionId, peace: bool) {
+        if !peace && self.is_human(faction) {
             let n = self.world.deal_regions_received.entry(faction).or_insert(0);
             *n = n.wrapping_add(1);
         }

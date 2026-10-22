@@ -33,7 +33,7 @@ db_record! {
 
 db_record! {
     /// `building_effects_junction` (`ssf`, 354 rows): an effect a building level gives.
-    pub struct BuildingEffect in "building_effects_junction", key = building {
+    pub struct BuildingEffect in "building_effects_junction", key = building + effect {
         /// #0 H: building level key.
         building: String,
         /// #1 H: effect key (FK `effects`), e.g. `recruitment_points`, `gdp_industry`.
@@ -306,7 +306,7 @@ db_record! {
     /// `units_to_exclusive_faction_permissions` (`ssb`, 1012 rows): a faction's own units. Each row adds the
     /// unit to the faction's unit set (`allowed`) or takes one copy of it out (CONFIRMED, `0x00F74CB0`, see
     /// `CampaignRules::faction_units`).
-    pub struct UnitFactionPermission in "units_to_exclusive_faction_permissions", key = unit {
+    pub struct UnitFactionPermission in "units_to_exclusive_faction_permissions", key = unit + faction {
         /// #0 H: unit key.
         unit: String,
         /// #1 H: faction key.
@@ -566,6 +566,37 @@ db_record! {
 }
 
 db_record! {
+    /// `message_event_strings` (9 columns, 1023 rows, CONFIRMED layout from the vanilla file): what a
+    /// campaign event message shows, by (event, culture). The exe's row reader (`0x00F57390`) builds the
+    /// title key `message_event_strings_title_<event><culture>` and the text key
+    /// `message_event_text_text_<#2>`; the message queuer (`0x009D3250`) picks the row by (event, culture)
+    /// with the `european` fallback (`0x00F54F80`). CAMPAIGN_FIDELITY.md "Allies called into a war".
+    pub struct MessageEventStringRecord in "message_event_strings", key = event + culture {
+        /// #0 H: the message event, e.g. `ally_attacked`.
+        event: String,
+        /// #1 H: the culture it is for (`european`, `egy_european`, ...).
+        culture: String,
+        /// #2: the text's loc key suffix (`message_event_text_text_<#2>`), e.g. `battle_rout_1`.
+        text: String,
+        /// #3: the message's picture under `ui/EventPics/<culture>/` (CONFIRMED: the row reader
+        /// `0x00F3B110` puts it at builder +0x18, which becomes the message's `Image`; ntw_sim
+        /// `message_events::MessageEventRow::picture`).
+        picture: String,
+        /// #4: the `event_message` layout the UI script selects, e.g. `standard`, `ally_attacked`.
+        layout: String,
+        /// #5: the message needs an answer (`RequiresResponse`).
+        requires_response: bool,
+        /// #6: the message opens by itself (`AutoShow`).
+        auto_show: bool,
+        /// #7: the icon under `ui/EventIcons/`.
+        icon: String,
+        /// #8: a second picture name (equal to #3 in all but 77 rows): builder +0x48, copied to record
+        /// +0x4C at `0x00F4316E`; the message details read only record +0x1C (#3).
+        image: String,
+    }
+}
+
+db_record! {
     /// `diplomacy_negotiation_faction_override_strings` (`sssss`, 537 rows, CONFIRMED layout): a
     /// faction's own line for (event, culture, government); `ResolveDiplomacyNegotiationString`
     /// (`0x00C55CC0`) picks it over the generic row on a campaign-RNG draw below 0.5.
@@ -612,6 +643,31 @@ db_record! {
         variable: String,
         /// #3: value as text (a float, or `0`/`1` for a flag).
         value: Option<String>,
+    }
+}
+
+db_record! {
+    /// `campaign_ai_personalities` (`sb`; loader `0xDC7DB0`, reader `0xDD29B0`, keyed on #0): a campaign
+    /// AI personality.
+    pub struct AiPersonalityRecord in "campaign_ai_personalities", key = key {
+        /// #0 H: personality key, e.g. `eur_france`.
+        key: String,
+        /// #1: the default personality (the one whose tunables a personality without its own falls back to).
+        default: bool,
+    }
+}
+
+db_record! {
+    /// `campaign_ai_personality_junctions` (`ssf`): one tunable of a personality. Merge key: the loader
+    /// `0xDC6B50` builds `<personality>;<tunable>` after the reader `0xDD22A0` (`;` at `0x013305F8`), so a
+    /// mod row changes one tunable of one personality.
+    pub struct AiPersonalityTunableRecord in "campaign_ai_personality_junctions", key = row_key: joined(";", personality, tunable) {
+        /// #0 H: personality key.
+        personality: String,
+        /// #1 H: tunable key, e.g. `LOOT_SETTLEMENT_BASE_CHANCE`.
+        tunable: String,
+        /// #2: value.
+        value: f32,
     }
 }
 
@@ -907,12 +963,18 @@ pub struct CampaignTables {
     pub attitude_thresholds: Table<AttitudeThresholdRecord>,
     /// `cdir_configs`.
     pub cdir_configs: Table<CdirConfigRecord>,
+    /// `campaign_ai_personalities`.
+    pub ai_personalities: Table<AiPersonalityRecord>,
+    /// `campaign_ai_personality_junctions`.
+    pub ai_personality_tunables: Table<AiPersonalityTunableRecord>,
     /// `diplomacy_negotiation_strings`.
     pub negotiation_strings: Table<NegotiationStringRecord>,
     /// `diplomacy_negotiation_faction_override_strings`.
     pub negotiation_override_strings: Table<NegotiationOverrideStringRecord>,
     /// `movie_event_strings`.
     pub movie_event_strings: Table<MovieEventStringRecord>,
+    /// `message_event_strings`.
+    pub message_event_strings: Table<MessageEventStringRecord>,
     /// `unit_stats_naval`.
     pub naval_stats: Table<NavalStatsRecord>,
     /// `building_chains`.

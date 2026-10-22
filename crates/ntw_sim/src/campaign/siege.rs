@@ -42,7 +42,7 @@
 //!   object +0x94: a no-op after the listener);
 //! - a peace (`0x00B262C0` → `0x00A25570` per commander of either side, the call `0x00A255C5`):
 //!   his force's siege of a settlement the other side owns (target virtual +0x14 equal to it,
-//!   `0x00898B20`) ends ([`CampaignModel::end_sieges_on_peace`]); a besieger with no commander is
+//!   `0x00898B20`) ends ([`CampaignModel::end_siege_on_peace`]); a besieger with no commander is
 //!   not reached.
 //!
 //! Each end that finds a siege also runs the trade price update with flag 0 (`0x00BCB020(0)` at
@@ -223,22 +223,14 @@ impl CampaignModel {
         }
     }
 
-    /// A peace between `a` and `b` (`0x00B262C0` → `0x00A25570` per commander of either side, the call
-    /// `0x00A255C5`, CONFIRMED): a commanded force of one side besieging a settlement the other side owns
-    /// ends its siege ([`Self::end_force_siege`]). The exe reaches a force only through its commander, so
-    /// a besieger with none goes on besieging.
-    pub(crate) fn end_sieges_on_peace(&mut self, a: FactionId, b: FactionId) {
-        let w = &self.world;
-        let ended: Vec<ForceId> = w
-            .regions
-            .values()
-            .filter(|r| r.owner == a || r.owner == b)
-            .flat_map(|r| {
-                let other = if r.owner == a { b } else { a };
-                r.siege.besiegers.iter().copied().filter(move |f| w.forces.get(f).is_some_and(|f| f.faction == other && f.commander.is_some()))
-            })
-            .collect();
-        for force in ended {
+    /// A peace's siege step for character `c` towards the other side `other` (`0x00B262C0` → `0x00A25570`,
+    /// the call `0x00A255C5`, CONFIRMED): the army he commands (`0x009D3A40`, [`Self::force_of_kind`]: a navy
+    /// is not looked at), if it besieges a settlement `other` owns (the target's virtual +0x14 equal to it,
+    /// `0x00898B20`), ends its siege ([`Self::end_force_siege`]). The exe reaches a force only through its
+    /// commander, so a besieger with none goes on besieging.
+    pub(crate) fn end_siege_on_peace(&mut self, c: CharacterId, other: FactionId) {
+        let Some(force) = self.force_of_kind(c, false) else { return };
+        if self.world.regions.values().any(|r| r.owner == other && r.siege.besiegers.contains(&force)) {
             self.end_force_siege(force);
         }
     }
@@ -476,8 +468,8 @@ mod tests {
     }
 
     /// Peace between the owner and a besieger's faction ends that siege (`0x00A25570`, the call
-    /// `0x00A255C5`); a besieger of a third faction goes on, and so does one with no commander (the
-    /// exe walks commanders).
+    /// `0x00A255C5`); a besieger of a third faction goes on, and so does one with no commander or a commander
+    /// in no character list (the exe walks each side's character list).
     #[test]
     fn peace_ends_the_siege_of_the_other_sides_besieger() {
         let mut m = besieged_model(4, 2);
@@ -490,6 +482,20 @@ mod tests {
         no_commander.make_peace_rules(FactionId(3), FactionId(1), true).expect("at war");
         assert_eq!(no_commander.world.regions[&BESIEGED].siege.besiegers, [third], "no commander: not reached");
         m.world.forces.get_mut(&third).unwrap().commander = Some(CharacterId(300));
+        let mut unlisted = m.clone();
+        unlisted.make_peace_rules(FactionId(3), FactionId(1), true).expect("at war");
+        assert_eq!(unlisted.world.regions[&BESIEGED].siege.besiegers, [third], "a commander in no character list: not reached");
+        let general = crate::campaign::Character {
+            id: CharacterId(300),
+            faction: FactionId(3),
+            kind: crate::campaign::CharacterKind::General,
+            position: Default::default(),
+            movement_points: 0,
+            max_movement_points: 0,
+            base_movement_points: 0,
+            garrisoned_in: None,
+        };
+        m.world.characters.insert(general.id, general);
         m.make_peace_rules(FactionId(3), FactionId(1), true).expect("at war");
         assert!(!m.world.regions[&BESIEGED].siege.under_siege(), "either side may propose");
     }

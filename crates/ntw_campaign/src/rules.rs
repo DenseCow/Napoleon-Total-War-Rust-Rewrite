@@ -14,7 +14,8 @@ const NO_RIVAL_FACTION: &str = "pirates";
 
 /// Reports, once at load, a link a row of `table` (the row of `row`) cannot make because `key` is not
 /// a key of `target`: the exe's table lookup logs "In table %S: '%S' is not a valid key for this
-/// table" there (e.g. `0x00F21A30`) and drops the link.
+/// table" there (e.g. `0x00F21A30`) and drops the link. Caveat: the unit-tech linker (`0x00EA9B10`) drops a
+/// row naming no built unit with no log at all; ours logs that case too (a deliberate extra, once per load).
 fn invalid_key(table: &str, row: &str, target: &str, key: &str) {
     log::warn!("In table {table}: '{key}' is not a valid key of {target} (row of {row}); the link is dropped");
 }
@@ -158,11 +159,11 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
     // `unit_required_technology_junctions`, linked at load by `0x00EA9B10` (CONFIRMED): for each built
     // unit, each row naming it (exact case) in table order adds its technology to the unit's list, unless
     // the technology is no `technologies` key (logged, row dropped). A row naming no built unit matches
-    // nothing and is dropped without a log in the exe; ours logs it too (once, here).
+    // nothing and is dropped without a log in the exe; ours logs it too (once per campaign load, here).
     for u in c.unit_techs.iter() {
         let table = "unit_required_technology_junctions";
         if !r.units.contains_key(&u.unit) {
-            log::warn!("In table {table}: '{}' is not a unit (row requiring {}); the row is dropped", u.unit, u.technology);
+            invalid_key(table, &u.technology, "units", &u.unit);
         } else if r.technologies.contains_key(&u.technology) {
             r.unit_techs.entry(u.unit.clone()).or_default().push(u.technology.clone());
         } else {
@@ -196,6 +197,8 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
         })
         .collect();
     r.director.no_rival_keys = vec![NO_RIVAL_FACTION.to_owned()];
+    r.ai_personalities = ai_personalities_from_db(db);
+    warn_missing_capture_tunables(&r.ai_personalities);
     // A repeated key keeps the last row, as the original: its table build (`0x00F7AA60`, overrides
     // `0x00F7A6E0`) keeps every row and inserts each row index into the key map with `0x007C7A60`, which
     // overwrites the index of a key already there; the lookups (`0x00BF5A60` / `0x00C55CC0`) read that
@@ -231,6 +234,21 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
         .movie_event_strings
         .iter()
         .map(|m| ntw_sim::campaign::outcome::MovieEventRow { event: m.event.clone(), culture: m.culture.clone(), movie: m.movie.clone(), id: m.id.clone() })
+        .collect();
+    r.message_events = c
+        .message_event_strings
+        .iter()
+        .map(|m| ntw_sim::campaign::message_events::MessageEventRow {
+            event: m.event.clone(),
+            culture: m.culture.clone(),
+            text: m.text.clone(),
+            picture: m.picture.clone(),
+            layout: m.layout.clone(),
+            requires_response: m.requires_response,
+            auto_show: m.auto_show,
+            icon: m.icon.clone(),
+            image: m.image.clone(),
+        })
         .collect();
     for m in c.effects.religion_conversion.iter() {
         r.conversion_mods.insert((m.religion.clone(), m.other.clone()), m.value);
@@ -341,6 +359,62 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
     r.characters = character_rules_from_db(db);
     r.historical_events = crate::historical_events::rules(db);
     r
+}
+
+/// The campaign AI's personalities from the merged database (`campaign_ai_personalities` and
+/// `campaign_ai_personality_junctions`, mods included): the one table the model's AI rules and the
+/// campaign AI (`ntw_ai`) read. As the exe's loader `0x00DD5870` builds them (CONFIRMED): the default is the
+/// FIRST record whose flag (record +0xC) is set (`0x00DD58DC`: kept only while none is held yet); the default's
+/// junction rows apply to every record (pass 1), every other row only to a record not flagged default (pass 2,
+/// `0x00DD5996`). So a later record flagged default keeps none of its own rows (it reads the default's values)
+/// and a row naming no record applies to none; each is logged once per load.
+pub fn ai_personalities_from_db(db: &GameDatabase) -> ntw_sim::campaign::personalities::AiPersonalities {
+    let c = &db.campaign;
+    let mut p = ntw_sim::campaign::personalities::AiPersonalities::default();
+    let mut extra_defaults = std::collections::BTreeSet::new();
+    for r in c.ai_personalities.iter() {
+        if r.default {
+            if p.default.is_empty() {
+                p.default = r.key.clone();
+            } else if r.key != p.default {
+                extra_defaults.insert(r.key.as_str());
+            }
+        }
+        p.by_key.entry(r.key.clone()).or_default();
+    }
+    for key in &extra_defaults {
+        log::warn!(
+            "campaign_ai_personalities: {key:?} is flagged default after {:?}; as in the original, the first is the default and {key:?} keeps none of its own tunables",
+            p.default
+        );
+    }
+    let mut orphans = 0usize;
+    for t in c.ai_personality_tunables.iter().filter(|t| !extra_defaults.contains(t.personality.as_str())) {
+        match p.by_key.get_mut(&t.personality) {
+            Some(own) => {
+                own.insert(t.tunable.clone(), t.value);
+            }
+            None => orphans += 1,
+        }
+    }
+    if orphans > 0 {
+        log::warn!("campaign_ai_personality_junctions: {orphans} rows name no campaign_ai_personalities record; as in the original, they apply to none");
+    }
+    p
+}
+
+/// Logs once, when the rules load, each capture-choice tunable ([`ntw_sim::campaign::capture_ai::TUNABLES`])
+/// the default personality lacks: a personality without it reads 0 there. Vanilla's default personality
+/// has all seven (test `the_default_personality_has_the_capture_tunables`).
+fn warn_missing_capture_tunables(p: &ntw_sim::campaign::personalities::AiPersonalities) {
+    if p.by_key.is_empty() {
+        return;
+    }
+    for key in ntw_sim::campaign::capture_ai::TUNABLES {
+        if p.tunable(&p.default, key).is_none() {
+            log::warn!("campaign AI: the default personality {:?} has no {key}; the AI capture choice reads 0 for it", p.default);
+        }
+    }
 }
 
 /// Compiles every effect source (slot 0-F, `ntw_sim::campaign::effects`): the effect → bonus mapping
@@ -617,5 +691,33 @@ pub fn fill_ship_guns(rules: &mut CampaignRules, db: &GameDatabase, world: &ntw_
             "steam_frigate" => 38,
             _ => m.rsplit(|c: char| !c.is_ascii_digit()).find(|s| !s.is_empty()).and_then(|s| s.parse().ok()).unwrap_or(0),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ntw_data::campaign::{AiPersonalityRecord, AiPersonalityTunableRecord};
+    use ntw_data::{GameDatabase, Table};
+
+    /// aicapture review: the exe's loader `0x00DD5870` keeps the FIRST record flagged default (`0x00DD58DC`)
+    /// and applies a row only to the default (to all, pass 1) or to a record not flagged default (pass 2), so
+    /// a later default-flagged record keeps none of its own rows and a row naming no record applies to none.
+    #[test]
+    fn the_first_default_flagged_personality_is_the_default() {
+        let mut db = GameDatabase::test_fixture();
+        let rec = |key: &str, default: bool| AiPersonalityRecord { key: key.into(), default };
+        let row = |p: &str, t: &str, value: f32| AiPersonalityTunableRecord { row_key: format!("{p};{t}"), personality: p.into(), tunable: t.into(), value };
+        db.campaign.ai_personalities = Table::from_rows(1, vec![rec("own", false), rec("first", true), rec("second", true)]);
+        db.campaign.ai_personality_tunables = Table::from_rows(
+            1,
+            vec![row("first", "A", 1.0), row("second", "A", 2.0), row("own", "A", 3.0), row("nobody", "B", 4.0)],
+        );
+        let p = super::ai_personalities_from_db(&db);
+        assert_eq!(p.default, "first", "the first flagged record, not the last");
+        assert_eq!(p.tunable("second", "A"), Some(1.0), "a later default-flagged record reads the default's value");
+        assert!(p.by_key["second"].is_empty(), "and keeps none of its own rows");
+        assert_eq!(p.tunable("own", "A"), Some(3.0));
+        assert!(!p.contains("nobody"), "a row naming no record makes none");
+        assert_eq!(p.tunable("own", "B"), None);
     }
 }

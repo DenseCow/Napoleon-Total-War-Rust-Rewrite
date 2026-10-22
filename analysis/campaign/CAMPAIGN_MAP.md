@@ -58,11 +58,13 @@ Coord3d position, Coord2d, Angle, ...}}), `trade_nodes`. Slot types seen on Euro
 From `analysis/worker1/re_tools tweak` on `Napoleon.exe` (`CampaignCamera.cpp` 91-100,
 `EmpireCampaignController.cpp` 70-71): min distance 15, max distance 100, tilt from -y between
 0.5 and 1.0 rad, FOV 57.2957° (1 rad), pan speed 50, tilt speed 50. The startpos also has
-`CAMPAIGN_CAMERA_MANAGER/CAMPAIGN_CAMERA` v2 {f32 0.5, u32 0, Coord3d (-54, 0, 151.12), bool}
-(meaning UNKNOWN; the scripts move the camera at the start, e.g. `SetCameraTargetInstant(-215,-2)`).
-INFERRED/PROVISIONAL: tilt linear in distance (1.0 rad zoomed in → 0.5 zoomed out), vertical FOV,
-pan speed = distance per second, target clamped to the theatre, no rotation; start view on the
-human faction's first army.
+`CAMPAIGN_CAMERA_MANAGER/CAMPAIGN_CAMERA` v2 {f32 tilt 0.5, u32 0, Coord3d target (-54, 0, 151.12),
+bool}: the saved camera, CONFIRMED (UI_FIDELITY.md "The camera in the save"); a new single-player
+game and a loaded save open on it, only a new multiplayer campaign replaces it (the scripts also move the camera at the start, e.g.
+`SetCameraTargetInstant(-215,-2)`). CONFIRMED (`0x009208B0`): distance linear in tilt (1.0 rad at
+15 → 0.5 at 100). INFERRED/PROVISIONAL: vertical FOV,
+pan speed = distance per second, target clamped to the theatre, no rotation; for a file without
+a camera block, start view on the human faction's first army.
 
 ## 7. Models
 - Settlements: `rigidmodels\campaignbuildings\templates\eu\eu_city_<n>_slot.rigid_model` where `<n>`
@@ -77,8 +79,8 @@ human faction's first army.
 ## 8. Questions for Ghidra
 1. The heightmap vertical scale (campaign terrain build; `heightmaps/default.tga` string at init).
 2. The display↔logic transform constant (confirm 0.0254) and the settlement model scale/rotation.
-3. CampaignCamera: tilt vs distance law, FOV axis, clamping area, and the
-   meaning of the startpos `CAMPAIGN_CAMERA` fields. (Pan speed 50, answered: the key step is 50 × time (×2 with SHIFT) × (eye height × 0.01 + 0.25), `0x0095A510`, UI_FIDELITY.md "Campaign camera handler".)
+3. CampaignCamera: FOV axis and clamping area. (The tilt law and the `CAMPAIGN_CAMERA` fields,
+   answered: UI_FIDELITY.md "The camera in the save"; the u32 +0x13C and bool +0x140 stay UNKNOWN.) (Pan speed 50, answered: the key step is 50 × time (×2 with SHIFT) × (eye height × 0.01 + 0.25), `0x0095A510`, UI_FIDELITY.md "Campaign camera handler".)
 4. Supertexture alpha channel use, the stpi `value` field and the second `6`.
 5. Settlement template choice (culture prefix, fortification level, rotation) and army/agent models.
 

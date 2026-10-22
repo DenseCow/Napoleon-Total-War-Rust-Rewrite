@@ -27,6 +27,7 @@ use ntw_sim::campaign::{
 use super::host::{CallTarget, Inner, PostedCall, UiScriptHost, addr, call_entry, log, state_function_guard};
 use super::shortcuts::ShortcutMachine;
 use super::world::{NodeId, UiRect};
+use diplomacy::diplomacy_lists;
 use crate::ScriptState;
 
 const PRELUDE: &str = include_str!("../campaign_prelude.lua");
@@ -52,6 +53,7 @@ macro_rules! campaign_fn {
 }
 
 mod agents;
+mod ally_attacked;
 mod army;
 mod characters;
 mod diplomacy;
@@ -84,13 +86,10 @@ use settlement::*;
 use tabs::*;
 use technology::*;
 
-/// One key event (a press, an auto-repeat or a release) for [`UiScriptHost::campaign_key`].
+/// One key event (a press, an auto-repeat or a release) for [`UiScriptHost::campaign_key`]: what
+/// a focused text field hears.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CampaignKey<'a> {
-    /// The exe's names of the keys down now, this event's key included on a press (its key table
-    /// `0x0139FEC8`, e.g. `"S"`, `"ESCAPE"`, `"NUMPADENTER"`): what `default_keys.xml` binds and
-    /// `StealShortcutKey` steals. The exe polls its frame's key snapshot (`0x00E20190`).
-    pub down: &'a [&'a str],
     /// A key release (else a press or a repeat).
     pub up: bool,
     /// The editing key's name a focused text field hears (`"ESCAPE"`, `"RETURN"`, `"BACK"`, ...).
@@ -99,10 +98,21 @@ pub struct CampaignKey<'a> {
     pub text: Option<&'a str>,
     /// A key repeat (the key is held).
     pub repeat: bool,
+    /// The modifiers held at the event.
+    pub held: ntw_formats::default_keys::Held,
+}
+
+/// The keyboard of one frame for [`UiScriptHost::campaign_keys`]: what the shortcut handler polls.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CampaignKeys<'a> {
+    /// The exe's names of the keys down now (its key table `0x0139FEC8`, e.g. `"S"`, `"ESCAPE"`,
+    /// `"NUMPADENTER"`): what `default_keys.xml` binds and `StealShortcutKey` steals. The exe
+    /// polls the frame's DirectInput key state (`0x00E20190`).
+    pub down: &'a [&'a str],
     /// The modifiers held.
     pub held: ntw_formats::default_keys::Held,
-    /// The frame's time in seconds, which a pressed binding passes on (the camera's steps scale
-    /// with it, `0x0095A510`).
+    /// The frame's time in seconds (`0x0048A650`: the real frame time, capped at 0.3 s), which a
+    /// pressed binding passes on (the camera's steps scale with it, `0x0095A510`).
     pub time: f32,
 }
 
@@ -110,7 +120,7 @@ pub struct CampaignKey<'a> {
 /// camera controller registers under it, `0x009012B0`).
 pub const CAMERA_COMPONENT: &str = "camera";
 
-/// The campaign HUD as the shortcut handler's target ([`UiScriptHost::campaign_key`]).
+/// The campaign HUD as the shortcut handler's target ([`UiScriptHost::campaign_keys`]).
 struct HudShortcuts<'a> {
     host: &'a UiScriptHost,
     camera: &'a mut dyn FnMut(&str, f32),
@@ -142,10 +152,19 @@ impl super::shortcuts::ShortcutTarget for HudShortcuts<'_> {
         component == CAMERA_COMPONENT || self.component(component).is_some()
     }
 
-    /// PROVISIONAL: the input layer (`0x00DACBA0`, a component's priority against
-    /// `g_nUIMinInputLayer` `0x01765944`; the camera `0x009535B0`) is not modelled: never locked.
-    fn unlocked(&self, _: &str) -> bool {
-        true
+    /// The input layer `g_nUIMinInputLayer` (`0x01765944`, set by `Component.LockPriority`): a UI
+    /// component is unlocked while its priority (`+0xE0`, the one `Priority()` returns,
+    /// `0x01014680`) is at least the layer (`0x00DACBA0`); the camera while the layer is below 10
+    /// (`0x009535B0`). CONFIRMED (UI_FIDELITY.md §5.1 "Input layer"). A panel PanelManager opens
+    /// with a `PriorityLock` (the ESC menu, the save panel, diplomacy, ...) so locks the bindings
+    /// of every lower component, e.g. `button_end_turn`'s RETURN.
+    fn unlocked(&self, component: &str) -> bool {
+        let layer = self.host.inner().min_input_layer.get();
+        if component == CAMERA_COMPONENT {
+            return layer < 10;
+        }
+        let Some(id) = self.component(component) else { return false };
+        self.host.inner().world.borrow().get(id).is_some_and(|n| n.data.priority >= layer)
     }
 
     /// A component takes shortcuts while its current state is not disabled (`0x00DACBB0` reads the
@@ -180,8 +199,8 @@ impl super::shortcuts::ShortcutTarget for HudShortcuts<'_> {
         self.host.stealer_of(key).is_some()
     }
 
-    fn stolen_keys(&self) -> Vec<String> {
-        self.host.stolen_key_names()
+    fn each_stolen_key(&self, f: &mut dyn FnMut(&str)) {
+        self.host.each_stolen_key(f);
     }
 
     fn send_stolen(&mut self, keys: &[&str], down: bool) -> bool {
@@ -420,6 +439,8 @@ pub(super) struct CampaignUi {
     town_factor_pips: std::cell::OnceCell<HashMap<String, String>>,
     /// The capture whose screen is open (see `campaign_capture_screen`).
     capture_shown: Cell<Option<RegionId>>,
+    /// The waiting call to war whose `ally_attacked` message was shown (see `campaign_ally_war_call`).
+    ally_call_shown: Cell<Option<ally_attacked::ShownCall>>,
     /// Negotiation state for the diplomacy panel.
     negotiation: RefCell<NegotiationState>,
 }
@@ -976,6 +997,17 @@ fn install_functions(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tabl
     f!("PlayerFactionId", |_l, inner, ui, _a: Variadic<Value>| Ok(ui.link.human.clone()));
     f!("PlayersFactionKey", |_l, inner, ui, _a: Variadic<Value>| Ok(ui.link.human.clone()));
     f!("CampaignKey", |_l, inner, ui, _a: Variadic<Value>| Ok(ui.link.campaign.clone()));
+    // PlayersCulture(): "Out: string (players culture database key)" (`0x009EEF10`, CONFIRMED by
+    // disassembly: the local faction's subculture record, `0x008F3490`, its culture +0x10, that
+    // record's key): the model's `CampaignRules::faction_cultures` entry. A faction without one
+    // gives "" (logged once).
+    f!("PlayersCulture", |_l, inner, ui, _a: Variadic<Value>| {
+        let culture = ui.model().rules.faction_cultures.get(&ui.link.human).cloned();
+        Ok(culture.unwrap_or_else(|| {
+            inner.log_once("players culture", || format!("UNKNOWN CampaignUI.PlayersCulture: {} has no culture; \"\" (logged once)", ui.link.human));
+            String::new()
+        }))
+    });
     f!("FactionDetails", |lua, inner, ui, key: Option<String>| {
         let key = key.unwrap_or_else(|| ui.link.human.clone());
         faction_details(lua, &inner, &ui, &key)
@@ -1086,7 +1118,7 @@ fn install_functions(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tabl
     });
     // EnableShortcutHandler(on): switches the key bindings on or off (CONFIRMED, `0x009E2550` reads
     // the argument and calls `0x00EA5080`, which sets the shortcut manager's +0x30 that
-    // `0x00EEE250` and `0x00ED76E0` test first; see `UiScriptHost::campaign_key`).
+    // `0x00EEE250` and `0x00ED76E0` test first; see `UiScriptHost::campaign_keys`).
     f!("EnableShortcutHandler", |_l, inner, ui, on: Value| {
         inner.shortcuts_enabled.set(!matches!(on, Value::Nil | Value::Boolean(false)));
         Ok(())
@@ -1135,6 +1167,7 @@ fn install_functions(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tabl
         Ok(())
     });
     agents::install(lua, inner, ui, t)?;
+    ally_attacked::install(lua, inner, ui, t)?;
     army::install(lua, inner, ui, t)?;
     diplomacy::install(lua, inner, ui, t)?;
     government::install(lua, inner, ui, t)?;
@@ -1233,6 +1266,7 @@ impl UiScriptHost {
             order_factor_pips: std::cell::OnceCell::new(),
             town_factor_pips: std::cell::OnceCell::new(),
             capture_shown: Cell::new(None),
+            ally_call_shown: Cell::new(None),
             negotiation: RefCell::new(NegotiationState::default()),
         });
         let lua = self.lua();
@@ -1333,56 +1367,59 @@ impl UiScriptHost {
 
     /// The root's `OnShortcut(name, true)`: what a root binding's release does (CONFIRMED,
     /// `layout.root.luac` line 1602 acts only when the second argument is true). The harness's
-    /// quick save calls it; keys go through [`Self::campaign_key`]. Returns false when the root has
+    /// quick save calls it; keys go through [`Self::campaign_keys`]. Returns false when the root has
     /// no `OnShortcut`.
     pub fn campaign_shortcut(&self, name: &str) -> bool {
         call_root_global(self.lua(), self.inner(), "OnShortcut", (name, true))
     }
 
-    /// One key event in the campaign, in the exe's order (CONFIRMED, disassembly): the campaign
-    /// mode's key handler `0x00A27EB0` passes "a component holds the input focus"
-    /// ([`Self::input_focus_held`]) to the shortcut handler `0x00EEE1E0`, which then runs no
-    /// binding at all: while a text field has the focus no shortcut fires (CTRL+S does not quick
-    /// save, ESCAPE does not open the escape menu) and no component that stole the key hears it;
-    /// a press goes to the focused field only (its editing keys, [`Self::focused_key`], and the
-    /// typed text, [`Self::text_input`]; while CTRL is held without ALT nothing is typed: Windows
-    /// sends CTRL+letter as a control character, which `IsCharPrintable` `0x01015F10` rejects,
-    /// while CTRL+ALT is AltGr and types its character).
+    /// One key event in the campaign (the campaign listener's key event, vtable `0x0136B40C`
+    /// +0x14, run by `0x0048BD40` for each of the frame's key events before the frame's shortcut
+    /// poll [`Self::campaign_keys`]): it acts only while a component holds the input focus
+    /// ([`Self::input_focus_held`]). A press goes to the focused field only: its editing keys
+    /// ([`Self::focused_key`]) and the typed text ([`Self::text_input`]); while CTRL is held
+    /// without ALT nothing is typed: Windows sends CTRL+letter as a control character, which
+    /// `IsCharPrintable` `0x01015F10` rejects, while CTRL+ALT is AltGr and types its character.
+    pub fn campaign_key(&self, press: CampaignKey) {
+        if !self.input_focus_held() || press.up {
+            return;
+        }
+        if let Some(name) = press.edit {
+            // ESCAPE / RETURN act once per press; the editing keys repeat.
+            if !(press.repeat && matches!(name, "ESCAPE" | "RETURN")) {
+                self.focused_key(name);
+            }
+            return;
+        }
+        let shortcut_modifier = press.held.ctrl && !press.held.alt;
+        if let Some(text) = press.text
+            && !shortcut_modifier
+        {
+            self.text_input(text);
+        }
+    }
+
+    /// The campaign's shortcut poll, once per frame after the frame's key events (CONFIRMED,
+    /// disassembly; UI_FIDELITY.md §5.1 "Shortcut keys"): the listener's per-frame slot
+    /// `0x00A27EB0` (vtable `0x0136B40C` +0x20, called by `0x0048BD40` every frame whether or not
+    /// a key event came) passes "a component holds the input focus" to the shortcut handler
+    /// `0x00EEE1E0`, which then runs no binding at all: while a text field has the focus no
+    /// shortcut fires (CTRL+S does not quick save, ESCAPE does not open the escape menu) and no
+    /// component that stole the key hears it.
     ///
     /// Without a focus, and while `CampaignUI.EnableShortcutHandler` has not switched them off,
-    /// the key bindings run ([`ShortcutMachine::key_event`], `0x00EEE250`): a binding of a UI
-    /// component calls that component's `OnShortcut(func, false)` when pressed and
-    /// `OnShortcut(func, true)` when released (Return: `end_turn` to `button_end_turn`, whose
-    /// script ends the turn on the release); a camera binding calls `camera(func, time)` on each
-    /// press; a stolen key (`StealShortcutKey`) goes to its stealer's `OnKey`.
-    ///
-    /// The handler's lock (`steal_user_input`) is not modelled yet: its tag is on
-    /// [`ShortcutMachine::key_event`].
-    pub fn campaign_key(&self, machine: &mut ShortcutMachine, press: CampaignKey, camera: &mut dyn FnMut(&str, f32)) {
-        if self.input_focus_held() {
-            if press.up {
-                return;
-            }
-            if let Some(name) = press.edit {
-                // ESCAPE / RETURN act once per press; the editing keys repeat.
-                if !(press.repeat && matches!(name, "ESCAPE" | "RETURN")) {
-                    self.focused_key(name);
-                }
-                return;
-            }
-            let shortcut_modifier = press.held.ctrl && !press.held.alt;
-            if let Some(text) = press.text
-                && !shortcut_modifier
-            {
-                self.text_input(text);
-            }
+    /// the key bindings run on the keys down now ([`ShortcutMachine::poll`], `0x00EEE250`):
+    /// a binding of a UI component calls that component's `OnShortcut(func, false)` when pressed
+    /// and `OnShortcut(func, true)` when released (Return: `end_turn` to `button_end_turn`, whose
+    /// script ends the turn on the release, the frame after the press); a repeating camera
+    /// binding calls `camera(func, time)` every frame it is held, with the frame's time; a stolen
+    /// key (`StealShortcutKey`) goes to its stealer's `OnKey`.
+    pub fn campaign_keys(&self, machine: &mut ShortcutMachine, keys: CampaignKeys, camera: &mut dyn FnMut(&str, f32)) {
+        if self.input_focus_held() || !self.inner().shortcuts_enabled.get() {
             return;
         }
-        if !self.inner().shortcuts_enabled.get() {
-            return;
-        }
-        let is_down = |k: &str| press.down.contains(&k);
-        machine.key_event(&is_down, press.held, press.time, &mut HudShortcuts { host: self, camera });
+        let is_down = |k: &str| keys.down.contains(&k);
+        machine.poll(&is_down, keys.held, keys.time, &mut HudShortcuts { host: self, camera });
     }
 
     /// The engine's HUD treasury and date update `0x009C1AD0` (CONFIRMED, UI_FIDELITY.md §5.1): with

@@ -69,23 +69,31 @@ impl World {
         }])
     }
 
-    /// `a` and `b` make peace: from war back to neutral. Fails if they are not at war.
-    /// PLACEHOLDER: peace terms (regions, payments, ...) are not modelled.
+    /// `a` and `b` make peace: from war back to neutral. Fails if they are not at war
+    /// ([`Self::check_make_peace`]). The peace itself carries no terms (`0x00B262C0` takes the two factions
+    /// and a suppress byte, 0 from `0x00C18B60`); a deal's regions or payments are its other records, applied after its peace
+    /// record (`0x00C114B0`, `CampaignModel::accept_deal`).
     pub fn make_peace(
         &mut self,
         a: FactionId,
         b: FactionId,
     ) -> Result<Vec<CampaignEvent>, CommandError> {
-        self.check_pair(a, b)?;
-        if self.stance(a, b) != Stance::War {
-            return Err(CommandError::NotAtWar(a, b));
-        }
+        self.check_make_peace(a, b)?;
         self.set_stance(a, b, Stance::Neutral)?;
         Ok(vec![CampaignEvent::StanceChanged {
             a,
             b,
             stance: Stance::Neutral,
         }])
+    }
+
+    /// Whether `a` and `b` may make peace ([`Self::make_peace`]): two known, different factions at war.
+    pub fn check_make_peace(&self, a: FactionId, b: FactionId) -> Result<(), CommandError> {
+        self.check_pair(a, b)?;
+        if self.stance(a, b) != Stance::War {
+            return Err(CommandError::NotAtWar(a, b));
+        }
+        Ok(())
     }
 
     /// `true` if every stored stance has a matching mirrored stance on the other side.

@@ -11,6 +11,7 @@
 
 use super::ids::{CharacterId, FactionId, ForceId, RegionId, UnitId};
 use super::world::{SlotRef, Stance};
+use crate::fixed::Fixed20;
 
 /// Something that happened in the campaign model.
 #[derive(Debug, Clone, PartialEq)]
@@ -423,9 +424,11 @@ pub enum CampaignEvent {
     },
     /// Project event: a message for `recipient`'s message feed (the message manager, model +0xFA0,
     /// posts it with `0x009D3250`; the display shows the messages of the human it views). The exe's
-    /// delivery gates belong to the display: none for the rebels (`0x008CEEF0`), none while the flag
-    /// at model +0xD9C → +0x6C is 1 (meaning UNKNOWN), and for a faction in a revolution (`0x008CA0B0`,
-    /// faction +0x814) only when its +0x81C is set (not modelled: no revolutions in the model yet).
+    /// delivery gates belong to the display: none for the rebels (`0x008CEEF0`), and for a faction in a
+    /// revolution (`0x008CA0B0`, faction +0x814) only when its +0x81C is set (not modelled: no
+    /// revolutions in the model yet). Its third gate, the campaign session's byte +0x6C (model +0xD9C),
+    /// never closes in the shipped game: every session is created with it 0 (CONFIRMED by disassembly
+    /// 2026-10-22, analysis/fidelity/CAMPAIGN_FIDELITY.md "allybreak"), so ours has none.
     Message {
         /// The faction whose feed gets the message.
         recipient: FactionId,
@@ -486,6 +489,18 @@ pub enum CampaignMessage {
         /// The faction that joined the war (the title).
         joiner: FactionId,
     },
+    /// Type 0x119 `your_army_retreats_region` (`SendArmyRetreatsRegionMessage` `0x009FB680`, CONFIRMED by
+    /// disassembly 2026-10-22): the title is the character's name (`0x00A0FDA0` on character +0x2F0),
+    /// the detail empty, and it carries his position after the move (message +0x1C), which the message
+    /// screen's filler (`0x00A08A80`) shows as its map position. Posted only by a region expulsion
+    /// (`0x008D9DC0` at `0x008DA091`) to the army's faction (character +0x2A0), right after it moves
+    /// a land army that may not stay, with no human test ([`super::CampaignModel::move_armies_out_of_regions`]).
+    YourArmyRetreatsRegion {
+        /// The army's commander (the title).
+        character: CharacterId,
+        /// Where the army stands after the move (the message's map position).
+        at: (Fixed20, Fixed20),
+    },
     /// A historical event (`0x00A06DA0`, model +0xFA0; CONFIRMED by disassembly): not a type of the
     /// message type table but a message of its own, posted by the round start's historical events
     /// ([`super::historical_events`]) and by the script's `trigger_historical_event` (`0x0096D520`). It
@@ -507,6 +522,7 @@ impl CampaignMessage {
             CampaignMessage::MilitaryAccessPrompt { .. } => "military_access_prompt",
             CampaignMessage::WarDeclared { .. } => "war_declared",
             CampaignMessage::FactionJoinsYourEnemies { .. } => "campmap_faction_joins_your_enemies",
+            CampaignMessage::YourArmyRetreatsRegion { .. } => "your_army_retreats_region",
             CampaignMessage::HistoricalEvent { .. } => "historical_event",
         }
     }

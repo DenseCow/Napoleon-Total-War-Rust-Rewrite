@@ -372,7 +372,7 @@ fn a_transfer_refunds_an_ai_old_owners_queued_units_and_a_humans_none() {
             m.turn.humans = vec![A];
         }
         let (a, b) = (m.world.factions[&A].treasury, m.world.factions[&B].treasury);
-        assert!(m.transfer_region(RegionId(10), B));
+        assert!(m.transfer_region(RegionId(10), B, &mut Vec::new()));
         let r = &m.world.regions[&RegionId(10)];
         assert!(r.recruitment_queue.is_empty() && r.construction.is_empty());
         assert_eq!(m.world.factions[&A].treasury, a + refund, "human old owner: {human}");

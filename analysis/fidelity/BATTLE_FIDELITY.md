@@ -1414,7 +1414,7 @@ comment.
   has a soldier outside. Reinforcements now join that way, and leaving units leave that way (`Battle::leave_step`): ours
   tests each man's standing place with his radius from `+0x58`'s source (`battle_entities` column 12), which is what
   `0x005857A0` tests. The soldier's `+0x620` (the squad box's man radius) is a copy of `+0x58` for a plain soldier
-  (`0x0061D2D8`) and grown over attached entities for a 0x6C8-byte object (`0x00607540`; UNITS_TERRAIN_FIDELITY.md).
+  (`0x0061D2D8`) and grown over attached entities only for a 0x6C8-byte gun train (limbered team) (`0x00607540`; UNITS_TERRAIN_FIDELITY.md).
   The bounds are inclusive (`CMPLEPS` at `0x0058582D` / `0x00585831`).
 - **Update slot 4 (CONFIRMED, `0x005828A0`).** It decrements the unit's under-fire timers (`+0xC80/+0xC84/+0xC88`) and
   computes a casualty-rate state.

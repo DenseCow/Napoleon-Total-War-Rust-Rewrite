@@ -204,3 +204,27 @@ fn a_candidate_keeps_his_portrait_through_an_esf_save() {
     let stepped = (0..n).fold(m.rng.state, |s, _| lcg_step(s));
     assert_eq!(back.rng.state, stepped, "{n} decks, one step each");
 }
+
+/// Royal family portraits (`0x00A055E0`) against the install: in every start position, each
+/// culture's king / queen decks give a man and a woman, young and old, pictures the install has
+/// (an empty deck gives none).
+#[test]
+fn family_portraits_name_pictures_that_exist() {
+    let Some(i) = install() else { return };
+    let mut checked = 0;
+    for campaign in ["eur_napoleon", "egy_napoleon", "spa_napoleon", "ita_napoleon"] {
+        let mut l = ntw_campaign::read_esf(&startpos(&i, campaign), &i.db).expect("load");
+        for set in &mut l.model.world.portraits {
+            for (male, age) in [(true, 20), (true, 60), (false, 20), (false, 60)] {
+                let mut p = ntw_sim::campaign::details::Portrait::default();
+                if set.resolve_family_portrait(&mut p, age, male) {
+                    assert!(i.vfs.contains(&p.card) && i.vfs.contains(&p.info), "{campaign} {}: {p:?}", set.culture);
+                    checked += 1;
+                } else {
+                    assert_eq!(p.index, -1, "{campaign} {}: only an empty deck gives no pictures", set.culture);
+                }
+            }
+        }
+    }
+    assert!(checked > 20, "{checked} portraits");
+}

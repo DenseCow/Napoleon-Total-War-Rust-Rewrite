@@ -58,7 +58,11 @@ fn a_new_character_starts_at_minus_one_then_his_types_rows() {
     assert_eq!(start[ATTRIBUTES.len()], ("made_up".to_string(), 2));
     // A type without rows has every attribute at -1.
     assert!(rules.characters.starting_attributes("rake").iter().all(|(_, l)| *l == -1));
-    assert_eq!(rules.characters.new_character_details("General").attributes, start);
+    let d = rules.characters.new_character_details("General");
+    assert_eq!(d.attributes, start);
+    // The situation slot (#14) starts at one `dummy` 0, as the maker clears details +0x13C
+    // (`0x00992E60` at `0x00992F5D`) and the writer writes one entry per key of `0x0145DA24`.
+    assert_eq!(d.attribute_bonuses, vec![("dummy".to_string(), 0)]);
 }
 
 #[test]
@@ -241,6 +245,20 @@ fn the_army_make_up_gives_the_command_bonuses() {
     // Without an army, no bonus.
     m.world.forces.remove(&ForceId(1000));
     assert_eq!(rank(&m, CharacterId(100)), 5);
+}
+
+/// The saved situation slot (`CHARACTER_DETAILS` #14, details +0x13C) and the situation tables give no
+/// rank: `GetCharacterRank` `0x00A198D0` never reads them (CHARACTERS_FIDELITY.md §17), so neither a
+/// `dummy` value nor a situation key there moves the stars.
+#[test]
+fn the_situation_slot_gives_no_rank() {
+    let mut m = rank_model(&ARMY_BONUSES);
+    with_rank_trait(&mut m, 100, "command_land", 2);
+    m.world.forces.remove(&ForceId(1000));
+    assert_eq!(rank(&m, CharacterId(100)), 2);
+    let d = m.world.character_details.get_mut(&CharacterId(100)).unwrap();
+    d.attribute_bonuses = vec![("dummy".into(), 3), ("Command_Land_Attack".into(), 4)];
+    assert_eq!(rank(&m, CharacterId(100)), 2);
 }
 
 #[test]

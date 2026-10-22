@@ -197,7 +197,7 @@ fn a_capital_tie_keeps_the_first_region_of_the_list() {
     r8.settlement.position = pos(8, 0);
     m.world.regions.insert(r8.id, r8);
     m.world.region_order = vec![RegionId(12), RegionId(8), RegionId(10), RegionId(11)];
-    assert!(m.transfer_region(RegionId(10), B));
+    assert!(m.transfer_region(RegionId(10), B, &mut Vec::new()));
     assert_eq!(m.world.capital(A), Some(RegionId(12)), "12 is first in A's list");
 }
 

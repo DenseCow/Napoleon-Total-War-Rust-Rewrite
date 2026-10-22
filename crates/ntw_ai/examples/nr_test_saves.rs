@@ -126,7 +126,8 @@ fn end_turn(host: &mut ScriptHost) {
     if host.model().pending_battle.is_some() {
         let _ = host.apply(CampaignCommand::Autoresolve);
     }
-    host.apply(CampaignCommand::EndTurn).expect("end turn");
+    // Nobody plays the human here: every call to war that waits for it is declined, so the turn ends.
+    driver::end_host_turn_declining_calls(host).expect("end turn");
     let m = host.model();
     println!("  end turn -> turn {}, {} forces, {} characters", m.calendar.turn_number(), m.world.forces.len(), m.world.characters.len());
 }

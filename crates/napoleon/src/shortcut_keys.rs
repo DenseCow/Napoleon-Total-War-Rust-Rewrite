@@ -152,11 +152,12 @@ pub(crate) fn exe_key_name(k: KeyCode) -> Option<&'static str> {
     })
 }
 
-/// The keys down at each of a frame's key events, as the exe's frame key snapshot (`0x00E20190`)
-/// has them when a key event runs the bindings (`0x00EEE250`). Bevy's [`ButtonInput`] only holds
-/// the frame's end state, so [`Self::rewind`] winds it back to the frame's start and
-/// [`Self::apply`] replays the events in order (a key pressed and let go in one frame is still
-/// down at its press).
+/// The keys down at each of a frame's key events (the modifiers a focused component's key hears)
+/// and, after the last, the keys down at the frame's end, which the frame's shortcut poll reads as
+/// the exe's frame key snapshot (`0x00E20190`) has them (`0x00EEE250`). Bevy's
+/// [`ButtonInput`] only holds the frame's end state, so [`Self::rewind`] winds it back to the
+/// frame's start and [`Self::apply`] replays the events in order (a key pressed and let go in one
+/// frame is still down at its press).
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct KeysDown(pub Vec<KeyCode>);
 

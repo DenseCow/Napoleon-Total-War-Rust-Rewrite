@@ -26,6 +26,56 @@ is ready: `analysis/fidelity/debugger/SITTING_SHEET.md`. Steps in order:
 
 Side-by-side looks (no debugger): the first full side-by-side run, once step 3 is done.
 
+## 2026-10-21 (night mode, started Wed 21:50)
+
+### Usage
+
+- The week reset at Wed 00:00 (now 0%). Last night didn't run, and its ~15 points expired with the old week, so
+  they can't carry over; instead tonight is front-loaded: tonight's block allows 22% (12 + 10 extra), and each
+  block from Thursday on gets 12 (`BlockPercent` 16 → 12), which fits the week's 100 points to the Wed 10-28
+  reset. The usage stop hook had been removed from `.claude/settings.json` (uncommitted); restored so the cap holds.
+- Ended Thu 03:50 at your call: 18% used of tonight's 22% cap, so 4 points were left. They carry over to the next block: `tools/usage_budget.ps1 extra-next 4`, applied once when Thursday's block opens, so its cap is its opening reading + 16 instead of + 12. Every block after that gets 12 again: 18 + 16 + 5×12 = 94 of 100 by the Wed 10-28 reset.
+
+### Needs you
+
+- Quick look, campaign keys (keybind2): `cargo run --release -p napoleon`, start a campaign, hold W/A/S/D (the camera should glide), open ESC → Save and press Return (the turn must not end). The debugger sitting sheet above is still open.
+- Optional tidy: delete `C:\Program Files\Git\tmp_x` (a 30 KB scratch copy of ntw_campaign lib.rs a worker wrote by mistake; a safety check stopped me removing it). Harmless if left.
+
+### Done tonight
+
+- treatyorder merged (32b7b820): diplomacy records keep the original's creation order (a new campaign takes them from startpos.esf in file order; records made in play go last and keep their place through our save). Logic only, covered by tests; nothing to look at.
+- allyattacked merged (f90658c9): when an AI faction calls a human ally to war, the call now waits for the player's answer in the original's ally_attacked message panel instead of being skipped. Left: which table column holds the panel's picture (worker eventpic). See: be allied to a faction an AI declares war on, end the turn.
+- peaceprice merged (f4533827): making peace now runs the original's steps in its order and updates trade prices once more at the end, as the original does. Logic only, covered by tests; nothing to look at.
+- charloops merged (194d48bd): each faction's turn start runs the spy network, spotting and character pools after its regions, as the original does. Commanders' standing orders are not modelled yet (new BACKLOG item). Logic only, covered by tests.
+- attrsituation merged (ccc3abb4): settled that the attribute situation tables change nothing in play in the original; a new character's attribute list now starts as the original's does. Logic only, covered by tests.
+- eventpic merged (854fd4ea): the event-message picture is confirmed to be the column we already read (#3), so the ally-attacked panel and every other event message show the original's picture. Logic only, covered by a real-data test.
+- keybind2 merged (86063bdd): campaign keys fixed from your 2026-10-20 check: held WASD now moves the camera smoothly every frame; Return no longer ends the turn while the save box is open; arrow keys and a silent CTRL+S are what the original does too (its default keyset doesn't bind arrows); CTRL+L loads correctly, but the camera position isn't restored yet (worker camerasave on it).
+- polish60 merged (f58adcca): a batch of small clean-ups (warnings, an index for faster saving, doc fixes). Logic only.
+- mergekey merged (678f7af9): when a mod changes one of 16 effect tables (building, technology, trait, ancillary, agent effects), its rows now match on the same two columns the original uses, so a mod's added effects no longer overwrite vanilla ones. Logic only, covered by a two-pack test.
+- forcepeace merged (16b8ae9a): a script that makes peace between two warring factions now also moves each side's armies out of the other's regions, as the original does; peace between factions not at war does nothing. Logic only, covered by tests.
+- declarewar merged (93b98fcd): a script that declares war on a faction already at war with it now does nothing, as the original does; war can no longer be declared on yourself (an original bug fixed). Logic only, covered by tests.
+- cansave merged (ef3d1281): whether you may save now follows the original's own check, in its order (campaign over, saving switched off by a script, battle in progress, war call pending, turn under way). Logic only, covered by tests.
+- aicapture merged: AI factions now choose to occupy, loot or liberate a captured settlement the way the original does, from the same random stream, kept in saves. Logic only, covered by tests.
+- dealpeace merged: a peace agreed in a diplomacy deal now also moves each side's armies out of the other's regions after any region exchange, as the original does. Logic only, covered by tests.
+- reachradius merged (ed0a8c7b): battle contact between soldiers uses the radius field the original reads; same behaviour as before, now named and split to match the original. Logic only, covered by tests.
+- warsenders merged: the diplomacy screen's instant war declaration now goes through the one war rule, and a war is never declared twice (original bug fixed: a repeat declaration re-added the war penalties, re-ran the capital's war event, called the allies again and re-posted the notices). Logic only, covered by tests.
+- negtips merged: the diplomacy alliance, break-trade and break-alliance buttons now show the original's tooltips for why they are blocked. Quick look: open diplomacy with a faction and hover those buttons.
+- expelnotice merged: when an army has to leave a region (lost access, region handed over, peace), its faction now gets the original's "your army retreats from the region" message. No screen shows campaign messages yet. Logic only, covered by tests.
+- attachradius merged: traced which battle objects grow the soldier radius over attached men (only limbered gun teams, which we do not build yet); every man we model already uses the exact radius. Logic only, covered by tests.
+- camerasave merged: the campaign camera is kept in our saves, and a loaded original save opens where its camera was (a new single-player game keeps the start camera, as the original). Quick look: `cargo run --release -p napoleon`, Load Game → orig_gb_apr1811: the map opens where that save was looking; then CTRL+S and CTRL+L keep the view.
+- navyrepair merged: a destroyed UI component and its children now hear OnDestroyed (as the original, `0x0102F3F0`), and the load-game list shows each save's faction, date, time played and maps (`0x008982C0`), skipping unreadable files. Quick look: `cargo run --release -p napoleon`, Load Game: each save shows its details.
+- gdprefresh merged: a region's town wealth (GDP, growth) is now refreshed where the original does it (load, construction, tax change, owner change, loot; `0x00AB4410(0)`), so the region panel's wealth matches the live game. Quick look: `cargo run --release -p napoleon`, load a campaign, open a region's details: wealth and growth show real values.
+- peacepanel merged: the diplomacy panel can propose peace and take it off the table again (`CCQ_DIPLOMACY_PROPOSE_PEACE`, `0x00C4AF90` / `0x00C5CE20`); the peace row shows on both sides as in the original. Quick look: `cargo run --release -p napoleon`, open diplomacy with a faction at war, click Peace: the row appears on both sides; remove it again.
+- walkflood merged: a character is set down (zone flood, hidden flag) exactly where the original does it: end of a walk, landing, expulsion (`0x00A285E0` mode 1, CONFIRMED); one case left for the debugger sitting (sheet step 2c). Logic only, covered by tests.
+- peacenowar merged: the original never lets a peace item between factions not at war reach an accept (the at-war test `0x00C1A730` gates every path), so our refusal matches; settled from the exe, no check needed.
+- transfercall merged: the region-transfer loops at 0x00936B37 belong to the move-armies-out-of-regions command, posted only by the force_make_peace / force_make_protectorate scripts; ours already has it (notes only).
+- soldierflags merged: soldiers' finished actions now clear on each idle tick, as the original does (0x005577C0); logic only, covered by tests.
+- msglisteners merged: the other listeners of the cancelled-access event are traced and matched; logic only, covered by tests.
+- accessloss2 merged: ORIGINAL BUG fixed. The original gives suspended military access back only to the peace proposer's allies (0x00B262C0 runs 0x00B0D0C0 on one side); ours gives both sides' back. Logic only, covered by tests.
+- frontscale merged: the front end now scales with the window like the in-game HUDs (one UI device, 0x01132530). Quick look: `cargo run --release -p napoleon`, drag the window smaller than 1280x960; the main menu should shrink to fit, and buttons still click where drawn.
+- portraits merged: new family members and ministers get their portraits the way the original draws them (0x008EF630; minister deck 0x00990900; own deck random streams, campaign RNG untouched). Covered by tests.
+- disembark merged: an army landing from a fleet is now set down like the original (0x00918750 → step mover mode 1): its sight and hidden flag update on landing. Logic only, covered by tests.
+- tiltbounds merged: the campaign camera tilt limits now come from the game (defaults 1.0 / 0.5, saved in the campaign save, changed by the set_zoom_limit script call), as in the original. ORIGINAL BUG fixed: a set_zoom_limit call with a wrong argument type stored garbage; ours leaves the limits unchanged. Logic only, covered by tests.
 ## 2026-10-20 (night mode, started Mon 10-19 21:40)
 
 ### Usage

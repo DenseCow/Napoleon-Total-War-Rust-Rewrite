@@ -381,6 +381,7 @@ pub fn read_network(esf: &EsfFile, m: &mut CampaignModel) {
         }
     }
     m.world.commodity_keys = keys;
+    warn_demand_mismatch(m);
     let u = |i: usize| t.get(i).and_then(EsfNode::as_u32_array).map(<[u32]>::to_vec).unwrap_or_default();
     m.world.commodity_market = ntw_sim::campaign::trade::CommodityMarket {
         initial: u(2),
@@ -392,6 +393,26 @@ pub fn read_network(esf: &EsfFile, m: &mut CampaignModel) {
     m.world.trade_network = legs;
     m.world.trade_nodes = nodes;
     m.world.trade_node_regions = regions;
+}
+
+/// Logs once per load the regions whose stored demand (`REGION` #32, `Region::commodity_demand`) does not
+/// hold one entry per commodity: a #32 missing (read empty) or of another length, which no shipped file
+/// has. How the exe reads a short #32 vector is not traced, so ours keeps it as loaded: the faction demand
+/// and the price update count the entries it has (the missing ones as 0), until the next demand step
+/// rebuilds it.
+fn warn_demand_mismatch(m: &CampaignModel) {
+    let n = m.world.commodity_keys.len();
+    if n == 0 {
+        return;
+    }
+    let missing = m.world.regions.values().filter(|r| r.commodity_demand.is_empty()).count();
+    let other = m.world.regions.values().filter(|r| !r.commodity_demand.is_empty() && r.commodity_demand.len() != n).count();
+    if missing > 0 {
+        log::warn!("{missing} regions have no stored demand (REGION #32): their demand counts 0 until the next demand step");
+    }
+    if other > 0 {
+        log::warn!("{other} regions store a demand (REGION #32) whose length is not the {n} commodities: kept as loaded until the next demand step");
+    }
 }
 
 /// Attaches each trade node's `trade_nodes` DB row, matching the file's node positions with the

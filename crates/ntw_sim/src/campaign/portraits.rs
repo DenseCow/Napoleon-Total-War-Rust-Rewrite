@@ -36,6 +36,7 @@
 //!   the custom picture name (`PORTRAIT_DETAILS` #1, `0x009CBD60`); neither occurs in the shipped
 //!   data for created characters.
 
+use super::details::Portrait;
 use super::ids::CharacterId;
 use super::names::{lcg_step, shuffle_in_place};
 use super::world::CampaignModel;
@@ -114,7 +115,41 @@ impl CulturePortraits {
     fn category_mut(&mut self, key: &str) -> Option<&mut PortraitCategory> {
         self.categories.iter_mut().find(|c| c.key == key)
     }
+
+    /// A royal family member's portrait (`ResolveFamilyMemberPortraitPictures` `0x00A055E0`,
+    /// reached through `0x008EF630` → `AssignFamilyMemberPortraitForCulture` `0x009CB440` with the
+    /// culture of the member's faction, his age (+0x5C) and sex (+0x19); CONFIRMED): the category
+    /// is [`KING_CATEGORY`] for a man, [`QUEEN_CATEGORY`] for a woman, used both as the
+    /// `CULTURE_PATHS` key and as the folder; while the number is -1 one is drawn from its Info old
+    /// deck when he is 45 or older, else Info young; then, with a number, the card and info
+    /// pictures. Unlike a character's resolve (`0x00A05440`) there is no custom-name check and no
+    /// fallback category. Returns whether the pictures were built: an empty deck leaves -1 and the
+    /// pictures as they were.
+    ///
+    /// The exe looks the category and its `CULTURE_PATHS` entry up without checking against the
+    /// map's end (`BuildPortraitAllocator` `0x00999BE0` gives every culture both); ours leaves the
+    /// pictures as they were when either is missing (modded data only).
+    pub fn resolve_family_portrait(&mut self, p: &mut Portrait, age: i32, male: bool) -> bool {
+        let category = if male { KING_CATEGORY } else { QUEEN_CATEGORY };
+        let old = age >= OLD_AGE;
+        if p.index == -1 {
+            let Some(k) = self.category_mut(category) else { return false };
+            p.index = k.decks.get_mut(usize::from(old)).and_then(PortraitDeck::draw).map_or(-1, |n| n as i32);
+        }
+        if p.index == -1 {
+            return false;
+        }
+        let Some(path) = self.path(category) else { return false };
+        (p.card, p.info) = picture_paths(path, category, old, p.index);
+        true
+    }
 }
+
+/// The allocator category of a royal family man's portrait (`0x00A055E0`'s "king"; the builder
+/// `0x00999BE0` adds it after every culture's agent types).
+pub const KING_CATEGORY: &str = "king";
+/// The category of a royal family woman's portrait (`0x00A055E0`'s "queen").
+pub const QUEEN_CATEGORY: &str = "queen";
 
 /// Picture paths for a number: (card, info) (`0x009CBF40` types 2/3 and 0/1). The number is
 /// signed, as the exe's `%03d` prints it (-5 → "-05").

@@ -27,9 +27,12 @@
 //! - [`OUTCOME_MOVIE`]: the movie a faction's campaign outcome plays ([`super::outcome::outcome_movie`]).
 //! - [`SIEGE_ATTRITION`]: a besieged settlement's round-start attrition ([`super::siege::siege_attrition`]).
 //! - [`CHARACTER_RANK`]: a character's rank, his command stars ([`super::agents::rank_original`]).
+//! - [`CAPTURE_AI_CHOICE`]: an AI faction's loot / occupy / liberate choice after it takes a settlement
+//!   ([`super::capture_ai::capture_choice_original`]).
 
 use std::sync::Arc;
 
+use super::capture::{CaptureChoice, CapturePreview};
 use super::commerce_raid::OwnedRoute;
 use super::director::DirectorState;
 use super::events::CampaignEvent;
@@ -73,6 +76,8 @@ pub const OUTCOME_MOVIE: &str = "campaign.outcome_movie";
 pub const SIEGE_ATTRITION: &str = "siege.attrition";
 /// Seam key of a character's rank ([`CharacterRank`]).
 pub const CHARACTER_RANK: &str = "character.rank";
+/// Seam key of an AI faction's choice after it takes a settlement ([`CaptureAiChoice`]).
+pub const CAPTURE_AI_CHOICE: &str = "capture.ai_choice";
 
 /// A region's population after one round of growth: given the model, the region, its population
 /// and its population state, the new population and state. The original's is
@@ -148,6 +153,12 @@ pub type SiegeAttrition = dyn Fn(&mut CampaignModel, RegionId, &mut ModWrites) -
 /// conversion and the character panel. The original's is [`super::agents::rank_original`]. A query: it changes
 /// no state.
 pub type CharacterRank = dyn Fn(&CampaignModel, CharacterId, &EffectSet, bool) -> i32 + Send + Sync;
+/// An AI faction's choice after it takes a settlement by force: given the model (it may change state: the
+/// RNG), the capture preview (the region, the capturer and the options the screen would show) and the
+/// settlement's owner before the capture, loot, occupy or liberate; the model then applies the choice
+/// ([`CampaignModel::resolve_capture`]). The original's is [`super::capture_ai::capture_choice_original`].
+/// Its mod-state changes go to the [`ModWrites`].
+pub type CaptureAiChoice = dyn Fn(&mut CampaignModel, &CapturePreview, Option<FactionId>, &mut ModWrites) -> CaptureChoice + Send + Sync;
 
 /// The campaign rules in use, one field per seam (see the module docs).
 #[derive(Clone, Debug, PartialEq)]
@@ -180,6 +191,8 @@ pub struct CampaignSeams {
     pub siege_attrition: Seam<SiegeAttrition>,
     /// [`CHARACTER_RANK`].
     pub character_rank: Seam<CharacterRank>,
+    /// [`CAPTURE_AI_CHOICE`].
+    pub capture_ai_choice: Seam<CaptureAiChoice>,
 }
 
 impl Default for CampaignSeams {
@@ -202,6 +215,9 @@ impl Default for CampaignSeams {
             outcome_movie: Seam::original(Arc::new(super::outcome::outcome_movie)),
             siege_attrition: Seam::original(Arc::new(|m: &mut CampaignModel, r: RegionId, _: &mut ModWrites| super::siege::siege_attrition(m, r))),
             character_rank: Seam::original(Arc::new(super::agents::rank_original)),
+            capture_ai_choice: Seam::original(Arc::new(|m: &mut CampaignModel, p: &CapturePreview, prev: Option<FactionId>, _: &mut ModWrites| {
+                super::capture_ai::capture_choice_original(m, p, prev)
+            })),
         }
     }
 }
@@ -209,7 +225,7 @@ impl Default for CampaignSeams {
 impl CampaignSeams {
     /// Every seam's key and implementation chain, in a fixed order (for the multiplayer handshake
     /// and the log).
-    pub fn chains(&self) -> [(&'static str, &[String]); 14] {
+    pub fn chains(&self) -> [(&'static str, &[String]); 15] {
         [
             (POPULATION_GROW, self.population_grow.chain()),
             (POPULATION_CLASS_ROUND, self.population_class_round.chain()),
@@ -225,6 +241,7 @@ impl CampaignSeams {
             (OUTCOME_MOVIE, self.outcome_movie.chain()),
             (SIEGE_ATTRITION, self.siege_attrition.chain()),
             (CHARACTER_RANK, self.character_rank.chain()),
+            (CAPTURE_AI_CHOICE, self.capture_ai_choice.chain()),
         ]
     }
 }
@@ -262,6 +279,8 @@ pub struct CampaignRuleRegistry {
     pub siege_attrition: SeamRegistry<SiegeAttrition>,
     /// [`CHARACTER_RANK`] implementations.
     pub character_rank: SeamRegistry<CharacterRank>,
+    /// [`CAPTURE_AI_CHOICE`] implementations.
+    pub capture_ai_choice: SeamRegistry<CaptureAiChoice>,
 }
 
 impl CampaignRuleRegistry {
@@ -286,6 +305,7 @@ impl CampaignRuleRegistry {
                 OUTCOME_MOVIE => self.outcome_movie.apply(&mut seams.outcome_movie, key),
                 SIEGE_ATTRITION => self.siege_attrition.apply(&mut seams.siege_attrition, key),
                 CHARACTER_RANK => self.character_rank.apply(&mut seams.character_rank, key),
+                CAPTURE_AI_CHOICE => self.capture_ai_choice.apply(&mut seams.capture_ai_choice, key),
                 _ => {
                     warnings.push(format!("rule seam {seam}: no such seam; {key} is ignored"));
                     continue;
@@ -371,6 +391,7 @@ mod tests {
                 (OUTCOME_MOVIE, &original[..]),
                 (SIEGE_ATTRITION, &original[..]),
                 (CHARACTER_RANK, &original[..]),
+                (CAPTURE_AI_CHOICE, &original[..]),
             ]
         );
         // The round end through the seam gives exactly what the original's function gives.

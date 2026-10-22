@@ -443,7 +443,9 @@ impl CampaignModel {
     /// 8, `0x00CC53D0`) spend from it, which our AI does not have) is not ported: the `fair` test
     /// takes it as covering any payment; a deal the AI would not accept is declined where the exe
     /// may first make a counter-offer (`0x00CC58C0`, fewer than 10 per negotiation); the records the
-    /// model does not hold (trade, alliance, peace, ...) are not evaluated; the join-war goal weight
+    /// model does not hold (trade, alliance, ...) and the peace record
+    /// ([`super::negotiation::Negotiation::peace`]) are not evaluated (a deal holding only a peace item
+    /// goes through unevaluated); the join-war goal weight
     /// reads a PROVISIONAL stance-belief state ([`Self::join_war_attitude`]) and its value a
     /// PROVISIONAL nearness ([`Self::war_strength`]).
     pub fn ai_accepts_deal(&self) -> Option<bool> {

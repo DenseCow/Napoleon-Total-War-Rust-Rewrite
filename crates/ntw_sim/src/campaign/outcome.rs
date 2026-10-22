@@ -102,9 +102,6 @@ const VICTORY_CONSTITUTIONAL: &str = "game_victory_constitutional_monachy";
 /// Event 0x1F.
 const VICTORY_REPUBLIC: &str = "game_victory_republic";
 
-/// The culture the victory lookup falls back to (`0x00F54F80`, string `0x0132EE78`).
-const FALLBACK_CULTURE: &str = "european";
-
 /// The original's outcome movie for `faction` (the [`OUTCOME_MOVIE`](super::seams::OUTCOME_MOVIE)
 /// seam's original rule), or `None` when no row matches (the exe then queues nothing). A query.
 ///
@@ -113,7 +110,8 @@ const FALLBACK_CULTURE: &str = "european";
 ///   `0x004EFB20`), so a faction without an id (or without a `factions` row) gets the last row without one; exit `ExitGame`, `show_everyone` and
 ///   `only_call_function_for_local_faction` set (data word +4 = 0x0101).
 /// - [`CampaignOutcome::Won`] (`0x00A14E00` → `0x009FBA60` → `0x00F54F80`): the government's victory event
-///   (see [`VICTORY_ABSOLUTE`]); of its rows, the one [`victory_row`] picks; exit `ExitGame` when the
+///   (see [`VICTORY_ABSOLUTE`]); of its rows, the one
+///   [`CampaignRules::culture_row`](super::rules::CampaignRules::culture_row) picks for the faction's culture; exit `ExitGame` when the
 ///   win ends a multiplayer campaign, else `ShowVictoryOptionsPopup`; both flags clear (data word +4 = 0).
 pub fn outcome_movie(m: &CampaignModel, faction: FactionId, outcome: CampaignOutcome) -> Option<OutcomeMovie> {
     let f = m.world.factions.get(&faction)?;
@@ -134,35 +132,11 @@ pub fn outcome_movie(m: &CampaignModel, faction: FactionId, outcome: CampaignOut
                 _ => VICTORY_ABSOLUTE,
             };
             let culture = m.rules.faction_cultures.get(&f.key).map(String::as_str);
-            let row = victory_row(m, rows.iter().filter(|r| r.event == event), culture)?;
+            let row = m.rules.culture_row(rows.iter().filter(|r| r.event == event), culture, |r| &r.culture)?;
             let exit = if multiplayer_over { MovieExit::ExitGame } else { MovieExit::ShowVictoryOptionsPopup };
             Some(OutcomeMovie { event: row.event.clone(), culture: row.culture.clone(), movie: row.movie.clone(), exit, show_everyone: false, only_local_faction: false })
         }
     }
-}
-
-/// The victory event's row for a faction of `culture` (`0x00F54F80`, CONFIRMED by disassembly), walking
-/// `rows` in table order: a row of the faction's own culture is taken at once; a row whose culture's
-/// `cultures` #2 ([`CampaignRules::culture_alternates`](super::rules::CampaignRules::culture_alternates))
-/// is the faction's culture becomes the pick, the last such row winning; otherwise the first row is the
-/// pick, which, until such a #2 match is seen, a `european` row replaces unless the pick is already
-/// `european`. A faction whose culture is unknown takes only the first / `european` steps.
-fn victory_row<'a>(m: &CampaignModel, rows: impl Iterator<Item = &'a MovieEventRow>, culture: Option<&str>) -> Option<&'a MovieEventRow> {
-    let mut pick: Option<&MovieEventRow> = None;
-    let mut alternate_seen = false;
-    for row in rows {
-        if culture == Some(row.culture.as_str()) {
-            return Some(row);
-        }
-        let alternate = m.rules.culture_alternates.get(&row.culture).map(String::as_str);
-        if culture.is_some() && alternate == culture {
-            alternate_seen = true;
-            pick = Some(row);
-        } else if pick.is_none_or(|p| !alternate_seen && p.culture != FALLBACK_CULTURE && row.culture == FALLBACK_CULTURE) {
-            pick = Some(row);
-        }
-    }
-    pick
 }
 
 impl CampaignModel {

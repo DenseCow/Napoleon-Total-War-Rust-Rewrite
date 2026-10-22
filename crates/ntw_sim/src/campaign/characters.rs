@@ -210,9 +210,15 @@ impl CharacterRules {
     }
 
     /// The details a new character of agent type `agent` starts with: his
-    /// [`Self::starting_attributes`], everything else empty (the caller fills birth, names, post...).
+    /// [`Self::starting_attributes`] and the situation slot at 0
+    /// ([`starting_attribute_bonuses`](super::details::starting_attribute_bonuses), `0x00992E60` at
+    /// `0x00992F5D`, CONFIRMED), everything else empty (the caller fills birth, names, post...).
     pub fn new_character_details(&self, agent: &str) -> CharacterDetails {
-        CharacterDetails { attributes: self.starting_attributes(agent), ..Default::default() }
+        CharacterDetails {
+            attributes: self.starting_attributes(agent),
+            attribute_bonuses: super::details::starting_attribute_bonuses(),
+            ..Default::default()
+        }
     }
 }
 
@@ -405,9 +411,22 @@ fn add_trait_points_inner(model: &mut CampaignModel, c: CharacterId, key: &str, 
 pub fn load_trait_levels(model: &mut CampaignModel) {
     let rules = model.rules.clone();
     for d in model.world.character_details.values_mut() {
-        for t in d.traits.iter_mut().filter(|t| t.level == 0) {
-            t.points = t.points.max(0);
-            rules.characters.update_trait_level(t, true);
+        for t in d.traits.iter_mut() {
+            if t.level == 0 {
+                t.points = t.points.max(0);
+                rules.characters.update_trait_level(t, true);
+            }
+            // A held level with no `character_trait_levels` row applies no effects and shows no level.
+            // Reported once per trait key per process (not per load), a key with no rows at all apart.
+            if t.level != 0 && rules.effects.held_level_row(&t.key, t.level).is_none() {
+                static LOGGED: std::sync::Mutex<std::collections::BTreeSet<String>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+                let first = LOGGED.lock().map(|mut s| s.insert(t.key.clone())).unwrap_or(false);
+                if first && rules.effects.trait_levels.contains_key(&t.key) {
+                    log::warn!("trait {:?} is held at level {} but has no character_trait_levels row for that level; its level effects do not apply", t.key, t.level);
+                } else if first {
+                    log::warn!("trait {:?} is held at level {} but the data has no character_trait_levels rows for the trait at all; its level effects do not apply", t.key, t.level);
+                }
+            }
         }
     }
 }

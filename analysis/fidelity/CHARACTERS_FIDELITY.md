@@ -98,12 +98,12 @@ Effects are read through the effects store (`EFFECTS_FIDELITY.md` §4).
 | who takes command when a commander goes | CONFIRMED (§5b): the original's unit order; the unit's character or a new colonel / captain; modelled (2 keys PROVISIONAL) |
 | force without units when its commander goes | CONFIRMED (§5b): removed, modelled |
 | +0x52C characters (`CHARACTER` #34) | CONFIRMED: skip the death check, rebuilt when killed as a copy where he stood, counters reset, linked to his force (§5b, §12); modelled (riding along not kept: no riders in the model) |
-| royal family (FAMILY) yearly pass | CONFIRMED (§5c), modelled (new members' names / portraits PLACEHOLDER) |
+| royal family (FAMILY) yearly pass | CONFIRMED (§5c), modelled (new members' names PLACEHOLDER; portraits CONFIRMED, §5c) |
 | faction leader succession | CONFIRMED (§5c), modelled (claimant faction UNKNOWN, not modelled) |
 | vacated posts | CONFIRMED code, trigger INFERRED (§5c): a new minister at once; modelled |
 | recruitment pool (who appears, when) | CONFIRMED (§8, §12), modelled: refill at the faction turn start after the spotting pass, historical candidates first (table rows due by faction / type / year, the created list), generic ones else; `HireGeneral { into }` and `HireAdmiral` with the exe's cost; `PromoteUnit` (cost PROVISIONAL) |
 | new character age, appeared turn | CONFIRMED (§8): age 21..40, +0x4EC = turns elapsed |
-| portraits of new characters (pool hires, field promotions) | CONFIRMED (§14), modelled: the portrait allocator loaded (one campaign-RNG step per deck) and saved, drawn by agent folder and age; builder ORIGINAL BUG (last picture never dealt) recorded, no builder in ours yet; ministers / family / trained agents still from templates |
+| portraits of new characters (pool hires, field promotions) | CONFIRMED (§14), modelled: the portrait allocator loaded (one campaign-RNG step per deck) and saved, drawn by agent folder and age; builder ORIGINAL BUG (last picture never dealt) recorded, no builder in ours yet; ministers and family drawn as the exe does (§5c); agents trained in buildings not modelled (§5) |
 | agent actions and success formulas | CONFIRMED (§7, §10, §12): assassination, duel (the loser of an ordinary outcome flees, `CHARACTER` #27), army and building sabotage, spying, technology stealing ported with their script events; diplomatic reactions ported; the episodic force-success switches honoured; conversion with 0-B (region religion); exchange decoded (a forces order, §10) |
 | campaign sight (grid, sources, shroud) | CONFIRMED (§10, §12), modelled: loaded, added to after each walk and at the turn start, rebuilt at the faction's turn end (timing CONFIRMED from the tree ops), the human's spy-network discs as sources; gates hidden obstacles; protectorate sharing CONFIRMED; trade-route lists frozen at load (routes built in play are the trade area's) |
 | hidden characters, exposed lists, spotting | CONFIRMED (§10, §12), modelled: knows / expose, the stealth test (equals all 118 saved commander flags of 4 vanilla saves; a duel loser who fled, `CHARACTER` #27, cannot hide), the hidden flag refresh, the spotting pass; used by pathing and agent actions |
@@ -151,7 +151,7 @@ Effects are read through the effects store (`EFFECTS_FIDELITY.md` §4).
 - **ORIGINAL BUG (`0x008B5380` / `0x008C2D30`):** gaining points into a level under a level kept from below the first
   threshold moves the level record down but returns false, so no slot runs: the kept level's attribute effects stay
   and the new level's are never added. Ours moves them on every level change.
-- **Save (CONFIRMED):** the trait list's ESF loader `0x0088B110` reads each held trait with `0x0088AFF0`: key and
+- **Save (CONFIRMED):** the trait list's ESF loader `0x0088B110` reads each held trait with `0x0088AFF0`, and its save writer `0x00897DF0` writes: key and
   points only; the level comes from `0x008EF070` on a null record. **ORIGINAL BUG:** a level kept below the first
   threshold is lost on reload (the trait then has no level, its effect set goes, `0x008EDAE0` → `0x008AFC90`), while
   its attribute effects stay in the saved attribute levels with no loss slot left to take them off. Our own save
@@ -332,9 +332,27 @@ six pushes, resolve the strings with `strat:`. The resulting table is bulk exe t
   `CampaignModel::refill_post` from `character_dies` for every post the dead held (the leader exemption is gone; post
   holders now fall in battle too, only +0x52C characters escape). The writer: new ministers from a `minister` template,
   `CHARACTER` #8 and the post holders from the model, a new leader keeps the family name (the namer skips him), birth
-  dates of new characters. PLACEHOLDER: new family members take the name and portrait of a filled member of the same
-  sex (the original draws a royal or generic name, `0x008AA5E0`, and a portrait by age and sex, `0x008EF630`; those
-  draws are not on the model's RNG); no messages; the spare-minister pool and government changes are not modelled.
+  dates of new characters. PLACEHOLDER: new family members take the name of a filled member of the same sex (the
+  original draws a royal or generic name, `0x008AA5E0`); no messages; the spare-minister pool and government changes
+  are not modelled.
+- **Family and minister portraits** (CONFIRMED, traced 2026-10-22, portraits branch). `AssignFamilyMemberPortraitFromFactionCulture`
+  (`0x008EF630`) takes the allocator through the member's faction (+0x64 → +0xA8 → +8 → +0xF94) and the culture of
+  its subculture, then `AssignFamilyMemberPortraitForCulture` (`0x009CB440`, false with no set) →
+  `ResolveFamilyMemberPortraitPictures` (`0x00A055E0`): king decks for a man, queen for a woman, the old deck from
+  45; a number is drawn only while the member's is -1, then the Cards / Info paths are built (no custom-name check,
+  no campaign-RNG draw: each deck has its own LCG). Its three callers: the end of `InitializeFamilyMemberForFaction`
+  (`0x008B8860`, new relative or spouse: clear `0x008B6860`, faction, religion, sex, name unless kept, age, +0x58 =
+  one nonzero campaign-RNG step % 3, then the portrait), the yearly pass's newborn (`0x008BC9C0`, resolved at age 0
+  after the child count rises, `0x008BCB31`; `InitializeFamilyNewborn` `0x008B8C80` draws no portrait) and the
+  succession (`0x008B9500`, each child after its age is set, `0x008B9968`). A new minister (`0x00990900` →
+  `0x00992E60` with an empty spec) draws a minister-deck portrait at his age; a monarch-minister then gets the family
+  leader's whole block (`CopyPortraitBlockToCharacterDetails` `0x009D21B0` from `0x008B7070` / `0x008B7340`: number
+  → details +0x7C; card / info / custom name (`alternative`) at block +4 / +0x10 / +0x1C → +0x80 / +0x8C / +0x98, the layout
+  `0x00A05440` and `0x00A055E0` write: Info into +0x10, custom name tested at +0x1C), so his minister draw still advances the deck.
+  Ours: `CulturePortraits::resolve_family_portrait`, `Family::resolve_portrait` at the same three points,
+  `refill_post` (minister draw, then the leader's copy); the save writes a new character's portrait even when empty.
+  Tests: `family::tests` (4 new), `characters.rs` (`a_dead_monarch_is_succeeded_and_posts_are_refilled`),
+  `portraits_install.rs` (`family_portraits_name_pictures_that_exist`, all four campaigns).
   Tests: `family::tests` (6), `ntw_campaign/tests/characters.rs` (`families_load`,
   `a_dead_monarch_is_succeeded_and_posts_are_refilled`: Austria's emperor and a minister die, the first relative
   succeeds, the save has 0 violations and reads back the same family and holders). `ai_turns_save 26` (one year end):
@@ -520,7 +538,7 @@ character within 1 unit of a port slot. Test: `campaign::tests::turn_end_counter
     at turns elapsed + refill time while below the cap;
   - a candidate is a generic General or admiral at the capital without a force, aged 21..40 on the campaign RNG
     (`create_candidate`). PROVISIONAL: historical characters due for the faction are not created; names and
-    portraits are the save writer's (as for new ministers); the appeared turn (#24) is not kept.
+    portraits are the save writer's; the appeared turn (#24) is not kept.
     Portraits since 2026-10-10: drawn by the model when the candidate is made (§14);
   - `CampaignCommand::HireGeneral` (`0x00A1B8F0` → `0x00A164C0`): cost CONFIRMED (`0x00A1BB20` + `0x00A1BBE0`):
     `character_recruitment_base_cost` 400 + `character_recruitment_cost_per_command_star` 300 × rank + min(10,
@@ -663,7 +681,7 @@ Model: `ntw_sim::campaign::visibility` (grid, cell sets, sight sources, shrouds)
   - Model: `FactionDetails::exposed` (loaded). A dead character is taken off every list (INFERRED: the loader re-links
     the ids, `0x008E07F0`).
 - **Spotting pass** (`0x008B4B70`, from `0x008F2480` at the faction's turn start; CONFIRMED, ported as
-  `CampaignModel::spotting_pass`, run in `CharactersStart` after the hidden flags):
+  `CampaignModel::spotting_pass`, run in `FactionReady` (the faction turn start, after the regions, past the join `0x008F2BB1`)):
   - Spotters: the faction's characters not in a settlement with `subterfuge`, `research` or `zeal` > 0 that are
     missionaries (agent types 6..10, `0x00F9C710`), or carry +0x4C5 (`CHARACTER` #14, false in every vanilla save, not
     modelled). In practice missionaries spot.
@@ -757,7 +775,7 @@ reason it cannot be observed and the tested behaviour in its place.
 | spotting order of draws | unobservable without the original's list order (file order of characters; the model's id order equals it for loaded files) | — | id order |
 | spying: force protector, staying inside, cheat flag | cheat flag CONFIRMED (`EPISODIC_RESTRICTIONS` #22 via `0x0097A8F0`, human agents only); the force protector of `0x00B417E0` and the spy's stay are the AI / forces areas' (the order's +0x48 target) | §12 | the flag is read from the save and honoured (tested), C = 0 |
 | historical candidates, hiring admirals | CONFIRMED | `0x0089B830` / `0x008C9580` / `0x008C4BB0`; `0x00A16110`; the `HISTORICAL_CHARACTER_MANAGER` list (18 keys in the Peninsular saves) | due rows offered first by `uniform_below` on the campaign RNG; `HireAdmiral` onto a fleet (tested) |
-| pool step phase | CONFIRMED | `0x008F2620` → `0x00A25310` on faction +0x940 after the spotting pass | `CharactersStart` after the spotting pass |
+| pool step phase | CONFIRMED | `0x008F2620` → `0x00A25310` on faction +0x940 after the spotting pass | `FactionReady`, after the spotting pass (past the join `0x008F2BB1`) |
 | `CharacterPromoted` trigger point | CONFIRMED | `0x00A1A2E0` (the field promotion of a unit's commander), not the hire | `PromoteUnit` fires it; hiring does not (tested); the promotion cost PROVISIONAL (see below) |
 | +0x52C characters rebuilt when killed | CONFIRMED | `0x0099D2D0` → `0x0098FE60`, placed where he stood, linked to his force | he stays where he fell, counters reset (tested); riding along not kept (no riders in the model) |
 | duel "spare" | CONFIRMED: the loser flees | `0x00A18460`: flag +0x510, a flight order to his force or the region's settlement; dies when none | ordinary outcomes: flight, `fled`; critical ones: death (tested) |
@@ -815,7 +833,7 @@ message 0xFA `spy_network_established` (`0x00A24670`) and counts stat 0x29. The 
 `0x00B617E0` (`0x00AE5F40` copies faction +0x800 +0x20). Corrections to §6: `0x009DA210` sets +0x4C5 = "did not
 act" and then +0x4C8 += 1 (idle turns); `0x00A28B50` (a move starts) clears +0x4C8 and the hidden flag; `0x009D3000`
 with a non-zero second argument sets +0x4C8 to it. Model: `World::network_sight` (per human faction), filled by
-`spy_network_step` in `CharactersStart`, read by `compute_visible`; the event `CharacterBuildsSpyNetwork` (its
+`spy_network_step` in `FactionReady` (after the regions, past the join `0x008F2BB1`), read by `compute_visible`; the event `CharacterBuildsSpyNetwork` (its
 class vtable `0x01355BD0`, built at `0x008F9A91`). Test: `a_spy_network_is_established_after_three_idle_turns`.
 
 **The pool step's phase (CONFIRMED).** The recruitment manager is faction +0x940 (`0x0087B850` in the faction
@@ -824,7 +842,7 @@ constructor, loader `0x00994F00`: two pointers, the general pool (vtable `0x0136
 base vtable `0x0136ADF4`). Its turn step `0x00A25310` calls slot 12 (`0x00A252B0`) of both and is called from the
 faction turn start `0x008F2620` after the characters' turn starts (`0x00A24EB0` per character), the forces'
 (`0x00AAE820`), `0x00A18A70`, `0x00A24C90`, `0x008F2E10`, `0x008DA210`, the spotting / network step and
-`0x009653D0` per character. Model unchanged (`CharactersStart` after the spotting pass).
+`0x009653D0` per character. Model unchanged (`FactionReady` after the spotting pass).
 
 **Historical candidates (CONFIRMED).** `0x008C4BB0` (this = the model's `HISTORICAL_CHARACTER_MANAGER`, +8/+0xC a
 sorted list of created keys) builds a collector context for (faction, agent type) (`0x0087F720`), fires the script
@@ -1340,9 +1358,8 @@ All CONFIRMED by static trace (Ghidra names applied in this round) unless tagged
   `PromoteLandUnitCommanderInField` (`0x008E1C20`) makes a force (`0x0087FEA0`, vtable `0x01355494`) whose slot 1
   `AttachNewColonelToLandForce` (`0x008B7EF0`) pushes 0 (`0x008B7F05`); naval `0x008E2260` pushes 0 (`0x008E2558`),
   as does `AttachNewCaptainToNavalForce` (`0x008B7F60`, `0x008B7F85`). So a promoted unit's officer always draws.
-- Open: new ministers and family members (`0x008BF310`, `ResolveFamilyMemberPortraitPictures` `0x00A055E0` with the
-  king / queen decks) and agents trained in buildings still take their portraits from the save writer's templates
-  (§5c PLACEHOLDER).
+- New ministers and family members: drawn as the exe does (§5c, CONFIRMED 2026-10-22). Open: agents trained in
+  buildings (`0x00A241E0` → `0x00A0DFC0`, the pool's own maker) are not modelled yet (BACKLOG §5).
 
 **V5 write-up (polish11, 2026-10-12, static trace; applied in Ghidra):**
 - **30 functions** documented: names, prototypes, plates and EOL comments on every constant. Completeness:
@@ -1529,3 +1546,74 @@ level plus situation bonuses, clamped to −1..9. The UI shows `PrimaryLevel` = 
   `0x008ADE70`, `0x00984AD0`, `0x00992E60`, `0x009D3A60` (character's army), `0x009D3AA0` (navy),
   `0x00A06D80`, `0x008B9EE0` (subtract points, report the level change), `0x008BDB20` (vector erase,
   0xC rows), `0x008EDAE0` (re-sum the trait list's effects).
+
+## 17. Attribute situation tables (2026-10-20, worker attrsituation)
+
+Question (BACKLOG §5, cmdstars review): which situation tables feed each character attribute and the
+rank, how each situation is detected, and where the data comes from. Answer: none do. The attribute
+situation system is an Empire leftover that Napoleon loads and checks but never applies. All
+CONFIRMED by static trace in Ghidra and by the tests named below.
+
+- **The tables.** `agent_attribute_situations` (16 vanilla rows: `Command_Land_{Ambushes,
+  Artillery_Troops, Attack, Cavalry_Troops, Command_Amphibious_Attack, Defence, In_Americas, In_India,
+  Infantry_Troops, Siege_Attack, Siege_Defence}` on `command_land`, `Command_Sea_{Attack, Defence}` on
+  `command_sea`, `Movement_Points_Land_{Artillery, Cavalry, Infantry}` on `movement_points_land`).
+  `trait_attribute_situation_effects` and `ancillary_to_attribute_situation_effects`: one file each in
+  vanilla, 0 rows. Test: `vanilla_attribute_situation_tables_feed_nothing`
+  (`crates/ntw_campaign/tests/characters.rs`, reads them through the merged database).
+- **Merge keys and layout (CONFIRMED, static trace).** `agent_attribute_situations`: loader
+  `0x00DCC540` (reader `0x00E55090`) hashes record +0, column 0. The two situation effect tables and
+  `trait_attribute_effects` share one loader instance and reader: their name getters (`0x00F098E0`,
+  `0x00F95160`, `0x00F09890`) pass thunk `0x00DE2610` (reader `0x00DD2250`: column 0 at record +0,
+  column 1 at +0xC, an i32 at +0x18) to `0x00DBDB90`, which joins record +0 and +0xC (`0x004F1200` at
+  `0x00DBE511`) and hashes that: the key is columns 0 + 1 (`RowKey::Concat(&[0, 1])`). The empty
+  vanilla files cannot show the `ssi` layout; `trait_attribute_effects` (same reader, 157 rows) reads in
+  full with it. Test: `the_situation_effect_layout_reads_its_sibling_table`. Found here, not fixed
+  (other tables): ntw_data merges `trait_attribute_effects` and the other `0x00DBDB90` tables on
+  column 0 alone (BACKLOG Polish line).
+- **Loading.** `GetOrLoadAgentAttributeSituationsTable` `0x00E0E4C0` (database +0x564) builds the
+  situation table on first use and formats each row's text key
+  `agent_attribute_situations_effect_text_<key>`. Its only callers are the full database load list
+  (`0x00E20760`) and the trait effect loader (`0x00E2FF20`): no rule or screen reads it.
+- **Effect rows.** `ResolveTraitSituationEffectRow` `0x00F21620` (row callback of the builder
+  `0x00F1B9D0`) looks the row's situation key up in the situation table; an unknown key logs "not a
+  valid key" and the row is dropped; a known one goes to `InitTraitAttributeSituationEffect`
+  `0x00F0DA60`, which stores the trait level key, the situation index and the value. The situation
+  record is only a validity check. Ancillary twin: `InitAncillaryAttributeSituationEffect`
+  `0x00F944C0`. The trait level's situation list (+0x88..+0x94) is touched only by
+  `InitTraitLevelRecord` `0x00F72B80`; `ApplyTraitLevelAttributeEffects` `0x00A0ECB0`,
+  `ApplyAncillaryAttributeEffects` `0x00A0EC10`, the trait text and antitrait functions do not read it.
+- **The index list.** `GetAttributeSituationIndex` `0x00F9C370` maps a key through
+  `g_apszAttributeSituationKeys` `0x0145DA24`, which holds one entry, `dummy`: `dummy` → 0, every real
+  situation key → 1 (out of range). `GetAttributeSituationKey` `0x00F9DB30` is the reverse; its only
+  caller is the save writer.
+- **The per-character slot.** `CHARACTER_DETAILS` #14 `AgentAttributeBonuses` is details +0x13C, one
+  u32: every maker sets 0 (`0x00992E60`, at `0x00992F5D`), the copy (`0x00992C80`) keeps it, the save
+  reader (`0x00993280`, at `0x00993E6D`) writes +0x13C + 4 × index and the writer (`0x009A0580`,
+  `0x009A0AB6` / `0x009A0B2E`) writes one `dummy` entry. Nothing else reads it. Every character in the
+  vanilla `eur_napoleon` start position holds `[("dummy", 0)]`; test:
+  `vanilla_attribute_bonuses_are_one_dummy_zero`.
+- **Ours.** Nothing to model: `agents::rank_original` (the one rank rule) and the stored attribute
+  levels take no situation input, and `details.rs` only carries #14 through the save; both doc
+  comments say so. A character made in play starts with `[("dummy", 0)]`
+  (`details::starting_attribute_bonuses` over `ATTRIBUTE_SITUATION_KEYS`, called by
+  `CharacterRules::new_character_details`), as the maker clears +0x13C; the writer's clone of a
+  template character keeps it in the save. Tests: `the_situation_slot_gives_no_rank` (rank_tests.rs),
+  a `dummy` value and a situation key in the slot leave the rank unchanged;
+  `a_new_character_starts_at_minus_one_then_his_types_rows` (the new slot);
+  `a_new_characters_attribute_bonuses_survive_the_save` (characters.rs, a new British minister
+  through `write_save` and back). The rank's real situation bonuses
+  are GetCharacterRank's own effect bonuses (§16); the pending-battle ones stay under the separate
+  BACKLOG line "Pending battles (cmdstars review)".
+- **Not an ORIGINAL BUG.** The one-entry `dummy` list shows the exe means to have no situations, and
+  the vanilla effect tables are empty. A mod's situation effect rows load and do nothing, as in the
+  original; giving them an effect would need Empire semantics the exe does not hold.
+- **Skipped (malformed saves only):** a save with a non-`dummy` #14 key makes the reader write +0x140,
+  the next details field. Vanilla saves never hold one (project rule: malformed-save edge cases are
+  dropped).
+- **Ghidra (V5, completeness scores):** `GetAttributeSituationIndex` 82, `GetAttributeSituationKey`
+  95, `InitTraitAttributeSituationEffect` 78, `InitAncillaryAttributeSituationEffect` ~81,
+  `GetOrLoadAgentAttributeSituationsTable` 78, `ResolveTraitSituationEffectRow` 89; globals
+  `g_apszAttributeSituationKeys` (typed `char*[1]`), `g_szFmtInvalidAgentAttributeSituationKey`, `g_szAgentAttributeSituationsTableName`; structs `TraitAttributeSituationEffectRecord`
+  (0x20), `TraitAttributeSituationEffectDbRow` (0x1C), `AgentAttributeSituationTable` (0x5C; +0x0C count, +0x10 records, +0x14 key hash). The remaining deductions are the untyped database and situation record pointers (no struct for them yet). EOL
+  comments on the #14 slot at `0x00992F5D`, `0x00993E6D`, `0x009A0AB6`, `0x009A0B2E`.

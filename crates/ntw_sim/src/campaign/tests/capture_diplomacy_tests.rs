@@ -394,7 +394,18 @@ fn alliance_broken_messages_follow_the_exe() {
     );
     // Cancelled access: B (an AI) is told.
     act(&mut m, A, B, D::GrantMilitaryAccess(10));
-    assert_eq!(act(&mut m, A, B, D::CancelMilitaryAccess), vec![broken(B, B, A)]);
+    // After the move notices of B's armies leaving A's regions (`0x00B67BD0` runs first).
+    let events = act(&mut m, A, B, D::CancelMilitaryAccess);
+    let (last, notices) = events.split_last().unwrap();
+    assert_eq!(last, &broken(B, B, A));
+    assert!(
+        !notices.is_empty()
+            && notices.iter().all(|e| matches!(
+                e,
+                CampaignEvent::Message { recipient: B, message: CampaignMessage::YourArmyRetreatsRegion { .. } }
+            )),
+        "{events:?}"
+    );
     assert_eq!(CampaignMessage::AllianceBroken { first: A, second: B }.type_name(), "alliance_broken");
 }
 
@@ -441,7 +452,7 @@ fn the_make_protectorate_command_follows_the_exe_handler() {
     m.turn = TurnState::in_turn_of(C, vec![C]);
     assert_eq!(m.apply(CampaignCommand::MakeProtectorate { patron: A, protectorate: A }), Err(CommandError::SameFaction(A)));
     assert_eq!(m.apply(CampaignCommand::MakeProtectorate { patron: A, protectorate: FactionId(99) }), Err(CommandError::UnknownFaction(FactionId(99))));
-    m.apply(CampaignCommand::DeclareWar { a: C, b: B }).unwrap();
+    m.declare_war_rules(C, B).unwrap(); // C holds no region: out of the game, so not the command.
     assert_eq!(m.apply(CampaignCommand::MakeProtectorate { patron: B, protectorate: C }), Err(CommandError::AlreadyAtWar(B, C)));
     m.apply(CampaignCommand::MakeProtectorate { patron: A, protectorate: B }).unwrap();
     assert_eq!((m.world.stance(B, A), m.world.stance(A, B)), (Stance::Protectorate, Stance::Patron));
@@ -689,6 +700,33 @@ fn a_war_between_majors_is_announced_to_the_uninvolved() {
     assert_eq!(CampaignMessage::WarDeclared { declarer: A, target: B }.type_name(), "war_declared");
 }
 
+/// ORIGINAL BUG fixed: the console's `declare_war` (`0x00930CD0`) and the UI's `DeclareWarInstant`
+/// (`0x009E2090`) test no war, and the handler `0x00932B70` → `0x00B268B0` → `0x00B26700` declares an
+/// existing war again: allies called, `war_declared` notices posted and the third parties'
+/// `declared_war_against_*` factors added once more. Ours refuses it, either way round, before anything
+/// changes.
+#[test]
+fn declaring_an_existing_war_again_changes_nothing() {
+    use super::treaties::{slot, DiplomaticAction as D_};
+    let mut m = war_test_model();
+    m.apply(CampaignCommand::Diplomacy { a: A, b: C, action: D_::Alliance }).unwrap();
+    // E likes B very much: A's war on B costs A with E (`declared_war_against_friends`).
+    m.relationship_mut(E, B).attitudes[slot("alliance")].value = 80;
+    let ev = m.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
+    assert!(ev.iter().any(|e| matches!(e, CampaignEvent::Message { message: CampaignMessage::WarDeclared { .. }, .. })));
+    let friends = m.world.relationships[&(E, A)].attitudes[slot("declared_war_against_friends")];
+    assert_eq!(friends.value, -15, "the first war's factor");
+    let (relationships, breaks, calls) =
+        (m.world.relationships.clone(), m.world.treaty_breaks.clone(), m.pending_ally_war_calls.len());
+    assert_eq!(m.apply(CampaignCommand::DeclareWar { a: A, b: B }), Err(CommandError::AlreadyAtWar(A, B)));
+    assert_eq!(m.apply(CampaignCommand::DeclareWar { a: B, b: A }), Err(CommandError::AlreadyAtWar(B, A)));
+    assert_eq!(m.world.relationships[&(E, A)].attitudes[slot("declared_war_against_friends")], friends);
+    assert_eq!(m.world.relationships, relationships, "no attitude factor added again");
+    assert_eq!(m.world.treaty_breaks, breaks);
+    assert_eq!(m.pending_ally_war_calls.len(), calls, "no ally called again");
+    assert_eq!((m.world.stance(A, B), m.world.stance(C, B)), (Stance::War, Stance::War));
+}
+
 /// The war's third-party loop (`0x00B26700`) walks the world's faction list, which never holds the rebels: a
 /// rebel faction hostile to the target gets no `war_against_enemies`.
 #[test]
@@ -724,8 +762,35 @@ fn the_allies_are_called_in_record_order() {
     let mut by_record = m.clone();
     by_record.world.diplomacy_record_order.insert(B, vec![F, D, A, C]);
     assert_eq!(wars(&mut by_record), vec![(D, A), (C, A), (A, B)]);
-    // Without a loaded order (a faction's records made since), by id.
+    // Without a loaded order: B's records in creation order, then the factions it has none towards, by id.
     assert_eq!(wars(&mut m), vec![(C, A), (D, A), (A, B)]);
+}
+
+/// treatyorder: a record made in play goes after every record its owner holds, in creation order (the exe
+/// appends each record, `0x00B5F330`, and removes none), and stays there in the walk; a record a list lacks
+/// (an own save older than format 10 with no start) is walked after the listed ones by target id, and a
+/// faction with no record from the owner (the rebels) comes last.
+#[test]
+fn records_made_in_play_are_walked_in_creation_order() {
+    let mut m = war_test_model();
+    m.world.relationships.retain(|&(o, _), _| o != B);
+    for t in [F, D, A] {
+        m.world.relationships.insert((B, t), Default::default());
+    }
+    m.world.diplomacy_record_order.insert(B, vec![F, D]);
+    assert_eq!(m.world.record_targets_in_order(B), vec![F, D, A, C, E, R], "listed, unlisted by id, then no record by id");
+    m.relationship_mut(B, E);
+    m.relationship_mut(B, C);
+    m.relationship_mut(B, E);
+    assert_eq!(m.world.diplomacy_record_order[&B], vec![F, D, A, E, C], "the unlisted record is listed before the new ones");
+    assert_eq!(m.world.record_targets_in_order(B), vec![F, D, A, E, C, R]);
+    // An owner with no list (a test world, an old save): its records by id, then each new one last.
+    m.world.relationships.retain(|&(o, _), _| o != D);
+    m.world.diplomacy_record_order.remove(&D);
+    m.world.relationships.insert((D, E), Default::default());
+    m.world.relationships.insert((D, A), Default::default());
+    m.relationship_mut(D, C);
+    assert_eq!(m.world.record_targets_in_order(D), vec![A, E, C, B, F, R]);
 }
 
 /// A declaration sets the `WarStartedCharacterFaction` flag (+0x925) of both sides and of a joining ally's

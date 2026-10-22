@@ -166,6 +166,11 @@ pub(super) struct Inner {
     /// The shortcut handler runs its bindings (manager `+0x30`, set by `0x00EA5080`, which
     /// `CampaignUI.EnableShortcutHandler` calls); on from the start.
     pub(super) shortcuts_enabled: std::cell::Cell<bool>,
+    /// The lowest input layer (`g_nUIMinInputLayer` `0x01765944`): a component whose priority is
+    /// below it takes no shortcut (`0x00DACBA0`), and at 10 or more the camera is locked
+    /// (`0x009535B0`). `Component.LockPriority` sets it (`0x01018130`); loading the root layout
+    /// resets it to 0 (`0x00DB226F`). CONFIRMED (UI_FIDELITY.md §5.1 "Input layer").
+    pub(super) min_input_layer: std::cell::Cell<i32>,
     /// The components the key bindings name, as last found ([`Inner::find_under_root`]).
     named_nodes: RefCell<Vec<NamedNode>>,
     /// The component that last called `StealInputFocus`.
@@ -412,6 +417,7 @@ impl UiScriptHost {
             requests: RefCell::new(Vec::new()),
             stolen_keys: RefCell::new(Vec::new()),
             shortcuts_enabled: std::cell::Cell::new(true),
+            min_input_layer: std::cell::Cell::new(0),
             named_nodes: RefCell::new(Vec::new()),
             focus: RefCell::new(None),
             hovered: std::cell::Cell::new(None),
@@ -484,6 +490,9 @@ impl UiScriptHost {
 
     /// Loads a layout file as the top root, sized to the screen, and runs its scripts.
     pub fn load_root_layout(&self, path: &str) -> Result<NodeId, String> {
+        // `LoadUIManagerRootLayout` clears the input layer before it creates the root
+        // (`0x00DB226F`, ahead of the component's allocation).
+        self.inner.min_input_layer.set(0);
         let id = create_layout(&self.lua, &self.inner, path, None, None, None)?;
         *self.inner.root.borrow_mut() = Some(id);
         init_new(&self.lua, &self.inner, id);
@@ -695,16 +704,23 @@ impl UiScriptHost {
     }
 
     /// The keys a shown component holds ([`Self::stealer_of`]), each once, in the order first
-    /// stolen.
+    /// stolen. Owned, for callers that run scripts (which may steal or give back keys) meanwhile.
     pub(super) fn stolen_key_names(&self) -> Vec<String> {
-        let all: Vec<String> = self.inner.stolen_keys.borrow().iter().map(|(_, k)| k.clone()).collect();
         let mut keys: Vec<String> = Vec::new();
-        for k in all {
-            if !keys.contains(&k) && self.stealer_of(&k).is_some() {
-                keys.push(k);
+        self.each_stolen_key(&mut |k| keys.push(k.to_owned()));
+        keys
+    }
+
+    /// Calls `f` with each key a shown component holds ([`Self::stealer_of`]), each once, in the
+    /// order first stolen; allocates nothing. `f` must not run scripts (the stolen keys stay
+    /// borrowed meanwhile).
+    pub(super) fn each_stolen_key(&self, f: &mut dyn FnMut(&str)) {
+        let all = self.inner.stolen_keys.borrow();
+        for (i, (_, k)) in all.iter().enumerate() {
+            if !all[..i].iter().any(|(_, e)| e == k) && self.stealer_of(k).is_some() {
+                f(k);
             }
         }
-        keys
     }
 
     /// The stealer of `key` ([`Self::stealer_of`]) hears it go down (`OnKey(key, false, false)`)
@@ -2460,13 +2476,31 @@ fn component_methods(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
     });
     method!("Priority", |inner, lua, id, args| ret(lua, inner.world.borrow().get(id).map(|n| n.data.priority).unwrap_or(0)));
     method!("StealShortcutKey", |inner, lua, id, args| {
-        // StealShortcutKey(false): give back every key this component stole (INFERRED from
-        // PanelManager's ClearupPanel and the results popup's OnDismissed).
-        if matches!(args.front(), Some(Value::Boolean(false)) | None) {
+        // StealShortcutKey([take,] [key]) (CONFIRMED `0x01015C70`): it pops a key name off the
+        // top of the stack if one is there, then a boolean `take` (default true) if one is there.
+        // PanelManager passes (true, "ESCAPE") and ("ESCAPE"), its ClearupPanel (false). `take`
+        // false (its handler's +0x1C, `0x00DA9C80`, CONFIRMED) gives back every key the component
+        // stole and clears the input focus, whichever component holds it.
+        // Bug (2026-10-20): ours read the first argument as the key, so (true, "ESCAPE") failed
+        // and closing a panel that re-shows another (`CheckAndShowSide`) stopped there.
+        let mut rev = args.iter().rev().peekable();
+        let key = match rev.peek() {
+            Some(Value::String(s)) => Some(lua_text(s)),
+            _ => None,
+        };
+        if key.is_some() {
+            rev.next();
+        }
+        if matches!(rev.next(), Some(Value::Boolean(false))) {
             inner.stolen_keys.borrow_mut().retain(|(n, _)| *n != id);
+            set_focus(lua, &inner, None, false);
             return ret(lua, ());
         }
-        let key: String = arg(lua, &args, 0)?;
+        let Some(key) = key else {
+            // UNKNOWN: no key name steals key code 0x8F (`0x01015C70`), not ported.
+            inner.log_once("StealShortcutKey no key", || "UNKNOWN StealShortcutKey without a key name (code 0x8F)".to_owned());
+            return ret(lua, ());
+        };
         let mut keys = inner.stolen_keys.borrow_mut();
         keys.retain(|(n, k)| !(*n == id && *k == key));
         keys.push((id, key));
@@ -2632,7 +2666,7 @@ fn component_methods(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
     // DestroyChildren(): the children leave the tree at once and are destroyed later (graphics.lua
     // takes list_box:Find(0) as the row template, destroys the children, and then copies the
     // template). CONFIRMED `0x01027B20`: while the component has children, its first child is scheduled for
-    // destruction ([`schedule_destroy`]), so the component hears `OnDivorceChild` for each, in order
+    // destruction ([`schedule_destroy`]: its tree hears `OnDestroyed`), so the component hears `OnDivorceChild` for each, in order
     // (CardGroup.lua's `OnDivorce` takes the card out of its card manager there).
     // ORIGINAL BUG: a handler that gives a destroyed child back to the component makes `0x01027B20`
     // loop for ever; ours stops at a child it has already scheduled, logged once. That child stays: the
@@ -2657,11 +2691,40 @@ fn component_methods(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
     Ok(t)
 }
 
-/// `ScheduleUIComponentDestroy` (`0x01037230`, CONFIRMED): the component leaves its parent now
-/// ([`divorce`]: the parent hears `OnDivorceChild`) and is destroyed at the end of the frame.
+/// `ScheduleUIComponentDestroy` (`0x01037230`, CONFIRMED): the component and everything under it
+/// hear `OnDestroyed` ([`fire_destroyed`]), then it leaves its parent ([`divorce`]: the parent
+/// hears `OnDivorceChild`) and is destroyed at the end of the frame.
 fn schedule_destroy(lua: &Lua, inner: &Inner, id: NodeId) {
+    fire_destroyed(lua, inner, id);
     divorce(lua, inner, id);
     inner.pending_destroy.borrow_mut().push(id);
+}
+
+/// `OnDestroyed` for a component about to be destroyed and for every component under it, parent
+/// first, then each child in order (pre-order), all before the detach. CONFIRMED
+/// `FireUIComponentTreeOnDestroyed` (`0x0102F3F0`): per component it fires the event through
+/// `DispatchUIComponentEventByName` (`0x010259F0`, name `+0x24C`, length `+0x244`) and then recurses
+/// into the children (`+0x90`), read after the handler ran. Only a component with the event bound
+/// (in its layout or by `SetEventCallback`) runs anything: an unbound name has length 0 and the
+/// dispatcher returns at once, so a script's global `OnDestroyed` the layout never binds is never
+/// called. That is `layout.navy_repair`: its `OnDestroyed` calls the undefined
+/// `army_manager.OnRepairButtonDestroyed`, but `navy_repair` binds only `OnMouseLClickUp` in
+/// `ui/campaign ui/layout`, so the original never runs it and logs nothing. A bound handler's error
+/// is logged each time it happens, as the exe's `LogLuaScriptErrorWithTraceback` (`0x0106BD10`) does.
+/// The template skip (`+0xE4`) never applies: templates are not components here. No world borrow
+/// is held while a handler runs.
+fn fire_destroyed(lua: &Lua, inner: &Inner, id: NodeId) {
+    let mut stack = vec![id];
+    while let Some(c) = stack.pop() {
+        let bound = inner.world.borrow().get(c).is_some_and(|n| n.data.event("OnDestroyed").is_some() || n.script_events.iter().any(|e| e == "OnDestroyed"));
+        if bound {
+            fire_event(lua, inner, c, "OnDestroyed", MultiValue::new());
+        }
+        // The children as they are after the handler, last pushed first so they run in order.
+        if let Some(n) = inner.world.borrow().get(c) {
+            stack.extend(n.children.iter().rev());
+        }
+    }
 }
 
 fn destroy(lua: &Lua, inner: &Rc<Inner>, id: NodeId) -> mlua::Result<()> {
@@ -2761,7 +2824,8 @@ fn component_functions(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
     // `Component.Destroy(panel)` at line 93 and then reads `UIComponent(panel):Id()` at line 103
     // ("Removing panel " .. Id()), and its own log says "Marked for destroy". Destroying at once
     // made that Id nil, the concatenation failed and the close stopped half way (2026-10-06).
-    // The parent hears `OnDivorceChild` ([`schedule_destroy`], CONFIRMED `0x01017F63`).
+    // The component's tree hears `OnDestroyed`, then the parent `OnDivorceChild`
+    // ([`schedule_destroy`], CONFIRMED `0x01017F63`).
     t.set("Destroy", lua.create_function(move |lua, (_a, target): (Value, Value)| {
         if let Some(c) = node_of(&target) {
             schedule_destroy(lua, &i4, c);
@@ -2881,8 +2945,25 @@ fn component_functions(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
     })?)?;
     // KeyboardModifiersHeld() → shift, ctrl, alt (INFERRED order); the mouse UI never holds any.
     t.set("KeyboardModifiersHeld", lua.create_function(|_, _: Variadic<Value>| Ok((false, false, false)))?)?;
-    // Input priority / focus: no visible effect in our renderer yet (UNKNOWN details).
-    t.set("LockPriority", lua.create_function(|_, _: Variadic<Value>| Ok(()))?)?;
+    // LockPriority(n) → the previous lowest input layer, which becomes `n` (CONFIRMED
+    // `0x01018130`: it reads the top of the stack as a number, rounds it to the nearest integer,
+    // pushes the old `g_nUIMinInputLayer` `0x01765944` and stores the new one). PanelManager locks
+    // to an opening panel's priority and restores the old layer when it closes (`ui/panelmanager`).
+    // A non-number argument: the exe logs the type mismatch and stores an unset local; ours logs
+    // once and keeps the layer.
+    let layer = inner.clone();
+    t.set("LockPriority", lua.create_function(move |_, args: Variadic<Value>| {
+        let old = layer.min_input_layer.get();
+        // The first argument is the calling component's address (`__ntw_make_env`).
+        match args.iter().skip(1).last() {
+            Some(Value::Integer(n)) => layer.min_input_layer.set(*n as i32),
+            Some(Value::Number(n)) => layer.min_input_layer.set(n.round_ties_even() as i32),
+            other => layer.log_once("LockPriority non-number", || {
+                format!("ERROR: Component.LockPriority expects a number, got {other:?}")
+            }),
+        }
+        Ok(old)
+    })?)?;
     Ok(t)
 }
 
@@ -2895,6 +2976,11 @@ fn frontend_functions(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
     super::battle_setup::install_offline(lua, &t)?;
     super::army_setup::install(lua, inner, &t)?;
     let i = inner.clone();
+    // ScreenSize() → the screen the layouts are laid out in: the caller passes the virtual screen of
+    // the UI scale, as for CampaignUI.ScreenSize (which only adds a 1280x960 floor). PROVISIONAL:
+    // `0x00478250` returns +0xC / +0x10 of the object from `0x0048A5E0` → +0x148 → vcall +0x78,
+    // unclamped; whether that is the back buffer or the virtual screen is untraced (its one script
+    // use, root.lua's black backdrop, looks the same either way).
     t.set("ScreenSize", lua.create_function(move |_, ()| Ok(*i.screen.borrow()))?)?;
     let i = inner.clone();
     t.set("CampaignSavesExist", lua.create_function(move |_, ()| Ok(i.facts.campaign_saves_exist))?)?;
@@ -3212,6 +3298,69 @@ pub(crate) mod tests {
         host.pulse(0.0);
         let after = host.world().get(root).unwrap().children.clone();
         assert!(!after.is_empty() && after.iter().all(|c| before.contains(c) && host.world().get(*c).is_some()), "{before:?} -> {after:?}");
+    }
+
+    /// `OnDestroyed` (`FireUIComponentTreeOnDestroyed` `0x0102F3F0`) runs on Component.Destroy and
+    /// DestroyChildren for the destroyed component and everything under it, parent first, before the
+    /// parent hears `OnDivorceChild`. Bug: it never fired.
+    #[test]
+    fn a_destroyed_tree_hears_on_destroyed_before_the_divorce() {
+        let root_script = "events = {}\n\
+            UIComponent(Address):SetEventCallback('OnDivorceChild', function(c) table.insert(events, 'divorce:' .. UIComponent(c):Id()) end)";
+        let source = ScriptSource::empty()
+            .with_memory_file("ui/test/page", layout_bytes_with_root(root_script, ""))
+            .with_memory_file("ui/test/label", layout_bytes(""));
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
+        let root = host.load_root_layout("ui/test/page").unwrap();
+        let env = component_env(&host, root);
+        let run = |code: &str| host.lua().load(code).set_environment(env.clone()).exec().unwrap();
+        // The created component is the layout's (leaf) button, renamed; l1 gets a child of its own.
+        run("Component.CreateFromLayout('data/ui/test/label', 'l1', Address, 0, 0)\n\
+            local function hear(c, name) UIComponent(c):SetEventCallback('OnDestroyed', function() table.insert(events, 'destroyed:' .. name) end) end\n\
+            local l1 = UIComponent(Address):Find('l1')\n\
+            Component.CreateFromLayout('data/ui/test/label', 'l1 kid', l1, 0, 0)\n\
+            hear(l1, 'l1')\n\
+            hear(UIComponent(l1):Find('l1 kid'), 'l1 kid')\n\
+            hear(UIComponent(Address):Find('button'), 'button')");
+        run("Component.Destroy(UIComponent(Address):Find('l1'))");
+        run("UIComponent(Address):DestroyChildren()");
+        let events: Vec<String> = env.get::<Table>("events").unwrap().sequence_values().map(Result::unwrap).collect();
+        assert_eq!(events, ["destroyed:l1", "destroyed:l1 kid", "divorce:l1", "destroyed:button", "divorce:button"]);
+        // The frame end destroys them without firing it again.
+        host.pulse(0.0);
+        assert_eq!(env.get::<Table>("events").unwrap().raw_len(), 5);
+        no_errors(&host);
+    }
+
+    /// `layout.navy_repair` defines a global `OnDestroyed` that calls the undefined
+    /// `army_manager.OnRepairButtonDestroyed`, but its layout never binds the event, so destroying it
+    /// runs nothing (`DispatchUIComponentEventByName` `0x010259F0` returns on an unbound name). Once
+    /// bound, the handler's error is logged each time and nothing stops.
+    #[test]
+    fn an_unbound_on_destroyed_global_never_runs() {
+        let navy_repair = "army_manager = {}\nfunction OnDestroyed() army_manager.OnRepairButtonDestroyed() end";
+        let source = ScriptSource::empty()
+            .with_memory_file("ui/test/page", layout_bytes_with_root("", ""))
+            .with_memory_file("ui/test/label", layout_bytes(navy_repair));
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
+        let root = host.load_root_layout("ui/test/page").unwrap();
+        let env = component_env(&host, root);
+        let run = |code: &str| host.lua().load(code).set_environment(env.clone()).exec().unwrap();
+        for i in 1..=3 {
+            run(&format!("Component.CreateFromLayout('data/ui/test/label', 'l{i}', Address, 0, 0)"));
+        }
+        run("Component.Destroy(UIComponent(Address):Find('l1'))");
+        host.pulse(0.0);
+        no_errors(&host);
+        // Bound by name, as a layout binding would: each destroy logs its error.
+        run("for _, id in ipairs({'l2', 'l3'}) do\n\
+                UIComponent(UIComponent(Address):Find(id)):SetEventCallback('OnDestroyed', 'OnDestroyed')\n\
+                Component.Destroy(UIComponent(Address):Find(id))\n\
+            end");
+        host.pulse(0.0);
+        let log = host.take_log();
+        assert_eq!(log.iter().filter(|l| l.starts_with("ERROR in OnDestroyed") && l.contains("OnRepairButtonDestroyed")).count(), 2, "{log:?}");
+        assert_eq!(host.world().get(root).unwrap().children.len(), 1, "only the root's button is left");
     }
 
     /// `log_once_for` logs a key's text once per `what`; the text is built only the first time.

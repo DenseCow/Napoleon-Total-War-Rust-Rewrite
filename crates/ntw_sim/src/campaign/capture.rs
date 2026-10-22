@@ -17,9 +17,10 @@
 //!      [`CampaignModel::liberation_target`] for what is and is not decoded.
 //!
 //!    Both rolls run for every capture, AI or human, in that order, on the campaign RNG.
-//! 2. **Choice**: the AI's comes from `0x00AAABA0` (an AI-side virtual, `+0x2F8`; not decoded, §6); a human
-//!    gets the three previews in a UI event (`+0xC78`) and answers with a choice; two report flags (+0x9A,
-//!    +0x9B, set from the capturer's faction, `0x00B4DA40` / `0x00B4D9E0`) skip the choice and occupy.
+//! 2. **Choice**: the AI's comes from `0x00AAABA0` (the capturer's AI virtual `+0x2F8`, `0x00D8C8B0`, CONFIRMED;
+//!    the [`CAPTURE_AI_CHOICE`](super::seams::CAPTURE_AI_CHOICE) seam, [`super::capture_ai`]); a human gets the
+//!    three previews in a UI event (`+0xC78`) and answers with a choice; two report flags (+0x9A, +0x9B, set
+//!    from the rebel data, `0x00B4DA40` / `0x00B4D9E0`) skip the choice and occupy.
 //! 3. **Apply** (`0x008C0310`): 0 → `0x00B541E0` (buildings set to the previewed health, money paid through
 //!    the economy, `0x00AAA580`: every population class's resistance base (+0x74) minus the reduction, town
 //!    wealth set, region economy refreshed); 1 → `0x00B582E0` (buildings only); 2 → `0x00B4F090` when a
@@ -304,11 +305,21 @@ impl CampaignModel {
         self.relationship_mut(resentful, looter).add_factor(&factor, AttitudeEvent { value, ..e });
     }
 
-    /// After a capture by force: builds the preview, then lets the AI choose at once or leaves the choice to a
-    /// human ([`CampaignModel::pending_capture`], answered with `ChooseCapture`).
+    /// A capture by force: `faction` occupies the settlement ([`CampaignModel::occupy`]), the report builds the
+    /// preview, then the AI chooses at once or the choice waits for a human ([`CampaignModel::pending_capture`],
+    /// answered with `ChooseCapture`). The report keeps the settlement's owner before the capture (+0x10) for the
+    /// AI's choice.
     pub(crate) fn settle_capture(&mut self, region: RegionId, faction: FactionId, by: Option<ForceId>, surrender: bool, events: &mut Vec<CampaignEvent>) {
+        let previous = self.world.regions.get(&region).map(|r| r.owner);
+        // The skip flags are taken before the settlement changes hands (`0x00B586AF`, before `0x00B449F0`).
+        let skip_choice = self.capture_skips_choice(region, by);
+        self.occupy(region, faction, by, events);
         let preview = self.capture_preview(region, faction, by, surrender);
-        if self.turn.humans.contains(&faction) {
+        if skip_choice {
+            self.resolve_capture(preview, CaptureChoice::Occupy, events);
+        } else if self.turn.humans.contains(&faction) {
+            // PROVISIONAL: the exe also occupies at once for a human when a campaign byte is set (model
+            // +0xFA8 → +0x114, read at `0x008F8D22`, tested at `0x008F8DBF`); what sets it is not traced.
             // A capture still waiting is settled as an occupation first (PROVISIONAL: the original's screen is modal).
             if let Some(old) = self.pending_capture.take() {
                 self.resolve_capture(old, CaptureChoice::Occupy, events);
@@ -316,18 +327,41 @@ impl CampaignModel {
             events.push(CampaignEvent::CaptureChoicePending { region, faction });
             self.pending_capture = Some(preview);
         } else {
-            // The AI's choice (0x00AAABA0) is not decoded: PROVISIONAL occupy (AI_RESEARCH.md §7).
-            self.resolve_capture(preview, CaptureChoice::Occupy, events);
+            let rules = std::sync::Arc::clone(&self.rules);
+            let mut writes = super::mod_state::ModWrites::default();
+            let choice = rules.seams.capture_ai_choice.rule()(self, &preview, previous, &mut writes);
+            self.mod_state.apply(&mut writes);
+            self.resolve_capture(preview, choice, events);
         }
     }
 
-    /// A capture by force without the battle: `faction` takes the settlement (`occupy`, as after a
-    /// won assault or an undefended settlement) and the capture report follows (`settle_capture`:
-    /// a human's choice waits in [`CampaignModel::pending_capture`]). For harnesses and tests that
-    /// stage a capture; the game's own path goes through the battle or `AttackSettlement`.
+    /// The capture report's two skip flags (+0x9A, +0x9B): either one makes the report occupy at once, for
+    /// an AI and a human capturer alike (CONFIRMED by disassembly: `0x008F8DCA` / `0x008F8DD7` for a human,
+    /// `0x008F8E70` / `0x008F8E79` before the AI's choice `0x00AAABA0`, both jumping to the occupy at
+    /// `0x008F8EB3`). The settle step computes them for the capturing force and passes them to the report's
+    /// constructor (`0x00B586AF`..`0x00B58739`), both false without a force:
+    /// - +0x9A (`0x00B4DA40`): the force has a `REBEL_DATA` block, its +0x34 is set
+    ///   ([`RebelArmySide::link`](super::RebelArmySide::link)) and the region it rose in (block +0x68,
+    ///   [`World::region_risen_armies`](super::World::region_risen_armies)) holds the captured settlement;
+    /// - +0x9B (`0x00B4D9E0`): the force has a `REBEL_DATA` block whose faction (block +0x10) the campaign's
+    ///   faction registry finds (model +0xF5C, `0x00955B30`; [`Self::registry_faction`]) and that faction is
+    ///   still in the game (+0x824 clear, [`Self::in_the_game`]).
+    fn capture_skips_choice(&self, region: RegionId, by: Option<ForceId>) -> bool {
+        let Some((force, side)) = by.and_then(|f| Some((f, self.world.rebel_army_sides.get(&f)?))) else {
+            return false;
+        };
+        let rose_here = || self.world.region_risen_armies.get(&region).is_some_and(|armies| armies.contains(&force));
+        let restores = side.link != 0 && rose_here();
+        let rises_for_live_faction = self.registry_faction(&side.faction).is_some_and(|f| self.in_the_game(f.id));
+        restores || rises_for_live_faction
+    }
+
+    /// A capture by force without the battle: `faction` takes the settlement as after a won assault or an
+    /// undefended settlement (`settle_capture`: a human's choice waits in [`CampaignModel::pending_capture`]).
+    /// For harnesses and tests that stage a capture; the game's own path goes through the battle or
+    /// `AttackSettlement`.
     pub fn capture_by_force(&mut self, region: RegionId, faction: FactionId, by: Option<ForceId>) -> Vec<CampaignEvent> {
         let mut events = Vec::new();
-        self.occupy(region, faction, by, &mut events);
         self.settle_capture(region, faction, by, false, &mut events);
         events
     }
@@ -341,6 +375,10 @@ impl CampaignModel {
         let money = match choice {
             CaptureChoice::Loot => {
                 self.apply_outcome(p.region, p.faction, &p.loot, true);
+                // The loot's town wealth is set through `0x00AAA580` (`0x00B5432D`), which then refreshes the
+                // region's town wealth without apply (`0x00AB4410(0)`, CONFIRMED). The occupation's path sets no
+                // town wealth through it and runs no refresh.
+                self.refresh_region_town_wealth(p.region);
                 self.loot_resentment(p.region, p.faction);
                 // 0x00B541E0 posts CharacterLootedSettlement (at 0x00B54468) after the option and the
                 // resentment are applied, with the report's commander (CONFIRMED). It posts even with no
@@ -375,7 +413,7 @@ impl CampaignModel {
                 // then changes nothing.
                 if let Some(liberator) = self.world.regions.get(&p.region).map(|r| r.owner) {
                     events.push(CampaignEvent::FactionBecomesLiberationProtectorate { faction: liberator });
-                    self.expel_from_region(liberator, p.region);
+                    self.expel_from_region(liberator, p.region, events);
                 }
                 self.liberate_region(p.region, target, events);
                 0

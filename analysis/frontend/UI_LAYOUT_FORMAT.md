@@ -227,16 +227,17 @@ frame:     4 × i32 (I x, y, w, h), 4 × u8 (I colour R,G,B,A), v>35: 4 × u32 (
   `0x01165870`), `+0x64` (mode 1, `0x011668D0`) and `+0x6C` (mode 2, `0x01166210`) are the same code except for the
   two device virtuals that turn the image's size and position into screen (clip) space:
   - **mode 0 (normal):** size `+0x278` (`0x011617C0`) and position `+0x274` (`0x011881C0`) **scaled by the UI scale**
-    (`0x0114EB20`, INFERRED: the window resolution over the layout's authored resolution) with the component's anchor;
+    (`0x0114EB20`: min(1, width / 1280, height / 960), BATTLE_FLOW.md §3) with the component's anchor;
     when the device's "no UI scaling" flag (device +0x69C70) is set they fall through to the mode 1 functions;
   - **mode 1 (unscaled):** size `+0x284` (`0x011AD330`) and position `+0x288` (`0x011AD3E0`) **1:1 in window pixels**
     (no UI scale), which matches its users' names (`unscaled_bg`, the movie, the options image, two tooltips);
   - **mode 2 (full screen):** size `+0x280` (`0x01161770`) is the whole screen and position `+0x27C` (`0x01188100`) its
     top-left corner: the image **stretches over the whole screen**, ignoring its own position and size. No shipped
     layout uses mode 2.
-  The text draw (`0x01028DB0`) uses the same pairs for its placement. Our front end draws at the layouts' authored
-  resolution (fixed window size), where modes 0 and 1 give the same picture; the UI scale and mode 2 are not
-  implemented (PROVISIONAL, nothing ships with mode 2).
+  The text draw (`0x01028DB0`) uses the same pairs for its placement. Our front end, campaign and battle HUDs all
+  draw mode 0 through the UI scale (`frontend::render::ui_scale`, UI_FIDELITY.md "UI scale"); mode 1 is drawn
+  scaled too, so below 1280x960 its components come out smaller than the exe's (PROVISIONAL: its anchor, the image
+  draw's 6th argument from `0x01028C00`, is untraced); mode 2 is not implemented (PROVISIONAL, nothing ships with mode 2).
 - **State +0xD0 / +0xD4:** also not read by the text layout `0x010258A0` or the text draw `0x01028DB0` (checked); still
   UNKNOWN, INFERRED editor-only.
 

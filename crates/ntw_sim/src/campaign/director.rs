@@ -619,9 +619,9 @@ fn rival_score_in(model: &CampaignModel, areas: &[Area], f: FactionId) -> f32 {
 /// order, each with its game region (none for a sea, a theatre or `all`) and its links as indexes
 /// into the list. Without them (a custom map, or a file without CAI state) the game regions in id
 /// order with [`super::World::region_neighbours`].
-struct Area<'a> {
-    region: Option<&'a Region>,
-    links: Vec<usize>,
+pub(super) struct Area<'a> {
+    pub(super) region: Option<&'a Region>,
+    pub(super) links: Vec<usize>,
     /// The CAI area's key (empty without CAI areas), for a sea area's [`human_in`].
     key: &'a str,
     /// Whether a human has a mobile in it, found on first use by [`human_in`]: only the transfer
@@ -631,7 +631,7 @@ struct Area<'a> {
 
 /// The director's map areas ([`Area`]). Cold path: built once per desire step, and once per due
 /// transfer (a transfer changes owners).
-fn areas(model: &CampaignModel) -> Vec<Area<'_>> {
+pub(super) fn areas(model: &CampaignModel) -> Vec<Area<'_>> {
     let w = &model.world;
     if !w.ai_areas.is_empty() {
         let by_key: BTreeMap<&str, &Region> = w.regions.values().map(|r| (r.key.as_str(), r)).collect();
@@ -855,7 +855,7 @@ pub(crate) fn is_pirate(model: &CampaignModel, f: FactionId) -> bool {
 /// A faction the boost, XP and replenish desires serve (`0x00BB5160`, `0x00BB50D0`): not human,
 /// still in the game, neither the rebels nor the pirates.
 fn served(model: &CampaignModel, f: FactionId) -> bool {
-    !model.is_human(f) && model.in_the_game(f) && !model.is_rebel_faction(f) && !is_pirate(model, f)
+    !model.is_human(f) && model.in_the_game_with_record(f) && !is_pirate(model, f)
 }
 
 /// A mobile's position (CAI mobile, the CAI world's mobiles of a faction: its forces, garrisons
@@ -1620,7 +1620,7 @@ mod tests {
             ("embargo", |m| drop(m.embargo(C, B, A).unwrap())),
             ("one-off payment", |m| drop(m.one_off_payment(A, B, 100).unwrap())),
             ("computed factors", CampaignModel::refresh_computed_factors),
-            ("deal handover", |m| assert!(m.transfer_region(RegionId(12), A))),
+            ("deal handover", |m| assert!(m.transfer_region(RegionId(12), A, &mut Vec::new()))),
         ];
         for (what, change) in keeps {
             let mut m = base.clone();

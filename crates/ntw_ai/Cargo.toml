@@ -11,11 +11,10 @@ publish.workspace = true
 # ntw_formats so that mods that change those tables take effect.
 
 [dependencies]
+ntw_campaign = { path = "../ntw_campaign" }
 ntw_sim = { path = "../ntw_sim" }
 ntw_formats = { path = "../ntw_formats" }
 ntw_data = { path = "../ntw_data" }
 ntw_script = { path = "../ntw_script" }
 log = "0.4"
 
-[dev-dependencies]
-ntw_campaign = { path = "../ntw_campaign" }

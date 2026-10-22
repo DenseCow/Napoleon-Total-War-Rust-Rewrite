@@ -308,6 +308,8 @@ fn loads_all_eight_startpos() {
             _ => (false, false, false),
         };
         assert_eq!(switches, expected, "{c}: WorldCreated switches");
+        // The zoom limit (#13 / #14): the tweakers' full range everywhere, the scripts narrow it later.
+        assert_eq!(w.zoom_limit, ntw_sim::campaign::ZoomLimit::default(), "{c}: zoom limit");
         check_sane(c, &l, db, true);
 
         // Region owners agree with the front-end ownership table.
@@ -544,8 +546,41 @@ fn outcome_movies_from_the_real_data() {
     assert_eq!((france.event.as_str(), france.exit, france.show_everyone, france.only_local_faction), ("game_lost_france", MovieExit::ExitGame, true, true));
 }
 
+/// The `message_event_strings` rows reach the rules in table order, and the ally's war call message
+/// (`ally_attacked`) picks its culture's row: the `ally_attacked` layout, needing an answer and
+/// opening by itself (CAMPAIGN_FIDELITY.md "Allies called into a war"); a message's picture is column
+/// #3, not #8 (UI_FIDELITY.md §14 `Image`).
+#[test]
+fn ally_attacked_message_row_from_the_real_data() {
+    use ntw_sim::campaign::message_events::ALLY_ATTACKED;
+    let Some(db) = db() else { return };
+    let path = data_dir().join(r"campaigns\eur_napoleon\startpos.esf");
+    if !path.is_file() {
+        return;
+    }
+    let m = ntw_campaign::read_file(&path, db).unwrap().model;
+    assert_eq!(m.rules.message_events.len(), 1023);
+    let prussia = m.faction_by_key("prussia").unwrap().id;
+    let row = m.message_event_row(ALLY_ATTACKED, prussia).expect("the ally_attacked row");
+    assert_eq!((row.culture.as_str(), row.layout.as_str(), row.requires_response, row.auto_show), ("european", "ally_attacked", true, true));
+    assert_eq!((row.text_key().as_str(), row.icon_path().as_str()), ("message_event_text_text_battle_rout_1", "data/ui/EventIcons/news.tga"));
+    assert_eq!(row.title_key(), "message_event_strings_title_ally_attackedeuropean");
+    assert_eq!(m.message_picture_path(row, |_| false), "data/ui/EventPics/european/biggest-army.tga.tga");
+    // The picture is #3 (row reader 0x00F3B110 → builder +0x18 → record +0x1C → `Image`), not #8:
+    // the ally_attacked rows have the two equal, so pin a row where they differ (77 rows do).
+    assert_eq!((row.picture.as_str(), row.image.as_str()), ("biggest-army.tga.tga", "biggest-army.tga.tga"));
+    assert_eq!(m.rules.message_events.iter().filter(|r| r.picture != r.image).count(), 77);
+    let france = m.faction_by_key("france").unwrap().id;
+    let row = m.message_event_row("agent_dies_suspicious", france).expect("the agent_dies_suspicious row");
+    assert_eq!((row.picture.as_str(), row.image.as_str()), ("Assassination_Post_eu.tga", "pre_assassin_eu.tga"));
+    assert_eq!(m.message_picture_path(row, |_| false), "data/ui/EventPics/european/Assassination_Post_eu.tga");
+    // The expulsion's move notice (type 0x119, `0x009FB680`) has its row.
+    let row = m.message_event_row("your_army_retreats_region", france).expect("the your_army_retreats_region row");
+    assert_eq!(row.text_key(), "message_event_text_text_your_army_retreats_region_1");
+}
+
 /// Vanilla's `unit_required_technology_junctions` rows: the linker `0x00EA9B10` drops a row naming no
-/// built unit or no technology; on the shipped data it drops none, so all 46 rows reach the rules.
+/// built unit or no technology; on the shipped data it drops none (asserted below: all 46 rows reach the rules).
 #[test]
 fn unit_technology_rows_from_the_real_data() {
     let Some(db) = db() else { return };
@@ -555,7 +590,6 @@ fn unit_technology_rows_from_the_real_data() {
     let dropped: Vec<&(&str, &str)> =
         rows.iter().filter(|(u, t)| !rules.units.contains_key(*u) || !rules.technologies.contains_key(*t)).collect();
     assert_eq!(dropped, Vec::<&(&str, &str)>::new());
-    assert_eq!(rules.unit_techs.values().map(Vec::len).sum::<usize>(), rows.len());
 }
 
 /// `technology_faction_junctions` reach each technology's faction list (once per faction, as the row

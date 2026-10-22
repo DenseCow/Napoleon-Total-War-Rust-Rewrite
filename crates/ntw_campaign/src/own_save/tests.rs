@@ -49,6 +49,8 @@ fn region(id: u32, owner: FactionId) -> Region {
         discontent_growth: 3,
         town_wealth: 17,
         town_wealth_growth: 1,
+        town_wealth_refresh: Default::default(),
+        commodity_demand: Vec::new(),
         tax_exempt: true,
         religions: Vec::new(),
         class_bases: Vec::new(),
@@ -141,9 +143,18 @@ pub(crate) fn info() -> CampaignInfo {
     }
 }
 
+/// A camera block with every field set (a named camera too), for the round trips.
+fn made_up_camera() -> crate::camera::CameraSave {
+    use crate::camera::{CameraSave, CameraView};
+    CameraSave {
+        current: CameraView { tilt: 0.73, field_13c: 9, target: [-12.5, 0.25, 40.0], flag_140: true },
+        named: vec![("made_up_view".into(), CameraView::looking_at(3.0, -4.0, 0.5))],
+    }
+}
+
 /// A campaign that never came from an ESF file saves and loads back field for field: header,
-/// model, script slots and restricted units (in their list order, a unit added twice listed twice, as the
-/// exe's list `0x009C9700`).
+/// model, script slots, restricted units (in their list order, a unit added twice listed twice, as the
+/// exe's list `0x009C9700`) and the camera.
 #[test]
 fn a_made_up_campaign_round_trips() {
     let mut model = made_up_model();
@@ -154,6 +165,7 @@ fn a_made_up_campaign_round_trips() {
         rebel_faction: Some(B),
         script_values: vec![ScriptSaveValue::Bool(true), ScriptSaveValue::Int(-12)],
         restricted_units: Vec::new(),
+        camera: Some(made_up_camera()),
     };
     let bytes = write(&info(), &data).expect("write");
     assert!(is_own_save(&bytes));
@@ -162,6 +174,12 @@ fn a_made_up_campaign_round_trips() {
     let (h, back) = read_parts(&bytes).expect("read");
     assert_eq!(h, info());
     assert_eq!(back, data);
+    // The load hands the camera on, and a save without one (written before it was kept) loads with none.
+    let loaded = read(&bytes, &ntw_data::GameDatabase::test_fixture()).expect("load");
+    assert_eq!(loaded.camera, data.camera);
+    let older = SaveData { camera: None, ..data };
+    let loaded = read(&write(&info(), &older).expect("write"), &ntw_data::GameDatabase::test_fixture()).expect("load");
+    assert_eq!(loaded.camera, None);
 }
 
 /// recruit-gates: the scripts' restricted units moved from the save body into the model
@@ -174,7 +192,7 @@ fn a_legacy_restricted_unit_list_loads_into_the_model() {
     let mut model = made_up_model();
     model.world.restricted_units = vec!["fixture_line_infantry".into(), "made_up_gone".into(), "fixture_line_infantry".into()];
     let legacy = vec!["fixture_foot_artillery".into(), "fixture_line_infantry".into(), "made_up_legacy_gone".into(), "fixture_foot_artillery".into()];
-    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: legacy };
+    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: legacy, camera: None };
     let loaded = read(&write(&info(), &data).expect("write"), &ntw_data::GameDatabase::test_fixture()).expect("read");
     assert_eq!(
         loaded.model.world.restricted_units.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -198,7 +216,7 @@ fn mod_state_round_trips() {
     for (k, v) in values.clone() {
         model.mod_state.set(k, v);
     }
-    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
     let (_, back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
     assert_eq!(back.model.mod_state, data.model.mod_state);
     assert_eq!(back.model.mod_state.len(), values.len());
@@ -237,7 +255,7 @@ fn director_victory_regions_and_ai_areas_round_trip() {
         AiArea { key: "made_up_sea".into(), links: vec![0] },
         AiArea { key: "made_up_region_2".into(), links: vec![0, 0] },
     ];
-    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
     let (_, back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
     assert_eq!(back.model.director, data.model.director);
     assert_eq!(back.model.world.victory_regions, data.model.world.victory_regions);
@@ -257,7 +275,7 @@ fn fields_the_original_does_not_save_are_not_saved() {
     let mut model = made_up_model();
     model.world.sabotaged.insert(ForceId(3));
     model.world.agents_acted.insert(CharacterId(100));
-    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
     let (_, back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
     assert!(back.model.world.sabotaged.is_empty() && back.model.world.agents_acted.is_empty());
     assert_eq!(back.model.world.factions, data.model.world.factions);
@@ -266,7 +284,7 @@ fn fields_the_original_does_not_save_are_not_saved() {
 /// A newer format version, a truncated file and a damaged body give errors, never a panic.
 #[test]
 fn bad_saves_are_errors() {
-    let data = SaveData { human: "made_up_a".into(), model: made_up_model(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+    let data = SaveData { human: "made_up_a".into(), model: made_up_model(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
     let bytes = write(&info(), &data).expect("write");
     let mut newer = bytes.clone();
     newer[16..20].copy_from_slice(&(FORMAT_VERSION + 1).to_le_bytes());
@@ -303,8 +321,8 @@ fn a_save_written_from_a_borrowed_model_equals_one_from_an_owned_model() {
     let mut model = made_up_model();
     model.mod_state.set(ModKey::new("made_up_mod", ModScope::Faction(B), "grain"), ModValue::Float(0.1));
     model.mod_state.set(ModKey::new("another_mod", ModScope::Campaign, "era"), ModValue::Text("meiji".into()));
-    let owned = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: Some(B), script_values: Vec::new(), restricted_units: Vec::new() };
-    let borrowed = SaveDataRef { human: "made_up_a", model: &model, rebel_faction: Some(B), script_values: Vec::new() };
+    let owned = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: Some(B), script_values: Vec::new(), restricted_units: Vec::new(), camera: Some(made_up_camera()) };
+    let borrowed = SaveDataRef { human: "made_up_a", model: &model, rebel_faction: Some(B), script_values: Vec::new(), camera: Some(made_up_camera()) };
     assert_eq!(write(&info(), &owned).expect("owned"), write(&info(), &borrowed).expect("borrowed"));
 }
 
@@ -319,15 +337,15 @@ pub(crate) fn as_version_1(bytes: &[u8]) -> Vec<u8> {
 /// the commerce raids with the trade network's course (8: `commerce_raids`, `splines`, `curves`) and the
 /// expense trackers (9: `upkeep_booked`, `policing_cost`, `policing_booked`) and the region manager's order (11: `region_order`),
 /// and the stored relation beliefs' ally lists (12: `allies`, the one field a save may lack: a model with no stored
-/// belief has none).
+/// belief has none), the risen armies' sides and the CAI random stream (13: `rebel_army_sides`, `cai_rng`) and the regions' stored demand (14: `commodity_demand`).
 /// A list or map value ends at its first `]` / `}` (the made-up keys hold none), an
-/// `Option` of a faction id or a number at its first `,`, a struct's last field (`,accumulated:`, the leading
+/// `Option` of a faction id, a number or `cai_rng`'s `(state:…)` at its first `,`, a struct's last field (`,accumulated:`, the leading
 /// comma keeping `trade_accumulated` out; `,policing_booked:`) at its struct's `)`, which is kept.
 pub(crate) fn as_version(bytes: &[u8], version: u32) -> Vec<u8> {
     let (_, header, body) = sections(bytes).expect("sections");
     let mut text = String::new();
     flate2::read::ZlibDecoder::new(body).read_to_string(&mut text).expect("inflate");
-    let added: [(u32, &str, char); 14] = [
+    let added: [(u32, &str, char); 17] = [
         (2, "unit_resources:[", ']'),
         (3, "road_holder:", ','),
         (3, "fortification_holder:", ','),
@@ -342,6 +360,9 @@ pub(crate) fn as_version(bytes: &[u8], version: u32) -> Vec<u8> {
         (9, ",policing_booked:", ')'),
         (11, "region_order:[", ']'),
         (12, "allies:[", ']'),
+        (13, "rebel_army_sides:{", '}'),
+        (13, "cai_rng:", ','),
+        (14, "commodity_demand:[", ']'),
     ];
     for (_, field, end_char) in added.into_iter().filter(|&(v, ..)| v > version) {
         let mut old = String::with_capacity(text.len());
@@ -379,7 +400,9 @@ fn a_version_1_save_takes_its_unit_resources_from_the_start() {
     for (i, r) in start.world.regions.values_mut().enumerate() {
         r.unit_resources = vec!["global".into(), format!("made_up_resource_{i}")];
     }
-    let data = SaveData { human: "made_up_a".into(), model: start.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+    // The load refreshes the town wealth (`0x00AB4410(0)`): refresh the saved model too, so the regions compare equal.
+    start.refresh_all_town_wealth();
+    let data = SaveData { human: "made_up_a".into(), model: start.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
     let old = as_version_1(&write(&info(), &data).expect("write"));
     let (version, _, stored) = read_stored(&old).expect("stored");
     assert_eq!(version, 1);
@@ -431,7 +454,8 @@ fn a_version_2_save_takes_its_road_and_walls_holders_from_the_start() {
     let mut model = start.clone();
     let r = model.world.regions.get_mut(&r2).unwrap();
     (r.owner, r.road_holder) = (A, None);
-    let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+    model.refresh_all_town_wealth();
+    let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
     let current = write(&info(), &data).expect("write");
     let old = as_version(&current, 2);
     let (version, _, stored) = read_stored(&old).expect("stored");
@@ -477,7 +501,7 @@ fn older_saves_get_their_repairs_and_this_rounds_construction_step_back() {
     let load = |model: &CampaignModel, current: FactionId, version: u32| {
         let mut model = model.clone();
         model.turn = TurnState::in_turn_of(current, vec![A]);
-        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
         let bytes = as_version(&write(&info(), &data).expect("write"), version);
         let loaded = read_with_start(&bytes, &db, || Ok(model.clone())).expect("read").model;
         let items = |id| loaded.world.regions[&RegionId(id)].construction.iter().map(|c| (c.slot, c.turns_remaining, c.kind)).collect::<Vec<_>>();
@@ -512,7 +536,7 @@ fn construction_items_keep_their_active_byte_and_older_saves_read_active() {
     let item = ConstructionItem { slot: SlotRef::Road, level_key: "made_up_road_2".into(), turns_remaining: 2, cost: 0, kind: ConstructionKind::Build, active: false };
     let mut model = made_up_model();
     model.world.regions.get_mut(&RegionId(1)).unwrap().construction = vec![item.clone()];
-    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
     let db = ntw_data::GameDatabase::test_fixture();
     let loaded = read(&write(&info(), &data).expect("write"), &db).expect("read");
     assert_eq!(loaded.model.world.regions[&RegionId(1)].construction, vec![item.clone()]);
@@ -531,7 +555,7 @@ fn trade_routes_keep_their_capital_port_flag_and_older_saves_derive_it() {
     let db = ntw_data::GameDatabase::test_fixture();
     let model = made_up_model();
     let load = |model: &CampaignModel, version: u32| {
-        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
         let bytes = as_version(&write(&info(), &data).expect("write"), version);
         let loaded = read_with_start(&bytes, &db, || Ok(model.clone())).expect("read").model;
         loaded.world.trade_paths[&(A, B)].iter().map(|p| p.capital_port).collect::<Vec<_>>()
@@ -556,7 +580,7 @@ fn a_version_5_save_moves_its_treaty_break_counts_to_the_preset_start() {
     model.world.treaty_breaks = BTreeMap::from([(A, 3)]);
     model.world.access_abuses = BTreeMap::from([(A, 2)]);
     let load = |version: u32| {
-        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
         let bytes = as_version(&write(&info(), &data).expect("write"), version);
         read_with_start(&bytes, &db, || Ok(model.clone())).expect("read").model.world
     };
@@ -585,7 +609,7 @@ fn a_route_left_after_a_broken_agreement_still_earns_after_a_load() {
     assert!(economy::trade_partners(&model, A).is_empty());
     let value = economy::trade_routes_value(&model, A);
     assert!(value > 0, "the leftover route earns its GDP part");
-    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
     let (_, mut back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
     // The rules come from the data, not the save.
     back.model.rules = data.model.rules.clone();
@@ -601,7 +625,7 @@ fn a_route_left_after_a_broken_agreement_still_earns_after_a_load() {
 fn trade_routes_keep_their_own_accumulated_value_and_a_version_6_save_moves_its_pair_value() {
     let db = ntw_data::GameDatabase::test_fixture();
     let load = |model: &CampaignModel, version: u32| {
-        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
         let bytes = as_version(&write(&info(), &data).expect("write"), version);
         read_with_start(&bytes, &db, || Ok(model.clone())).expect("read").model.world
     };
@@ -626,7 +650,7 @@ fn commerce_raids_round_trip_and_a_version_7_save_takes_the_trade_course_from_th
     let db = ntw_data::GameDatabase::test_fixture();
     let model = made_up_model();
     let bytes = |version: u32| {
-        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
         as_version(&write(&info(), &data).expect("write"), version)
     };
     let now = read_with_start(&bytes(FORMAT_VERSION), &db, || panic!("start read for a current save")).expect("read").model.world;
@@ -648,7 +672,7 @@ fn campaign_over_round_trips_and_an_older_save_loads_it_as_false() {
     let mut model = made_up_model();
     model.end_campaign();
     assert!(model.turn.queue.is_empty(), "ending the campaign clears the queue");
-    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
     let (_, back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
     assert!(back.model.turn.campaign_over);
     // An older turn state: the same record without the field, removed from the parsed value (not
@@ -668,7 +692,7 @@ fn campaign_over_round_trips_and_an_older_save_loads_it_as_false() {
 fn triggered_historical_events_round_trip() {
     let mut model = made_up_model();
     model.world.historical_events_triggered = vec!["a_once".into(), "b_quiet".into()];
-    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
     let (_, back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
     assert_eq!(back.model.world.historical_events_triggered, ["a_once", "b_quiet"]);
 }
@@ -682,7 +706,7 @@ fn a_port_blockade_round_trips() {
     let blockade = PortBlockade { navy: ForceId(77), docked_navy_attacked: true };
     let slot = RegionSlot { key: "made_up_port".into(), slot_type: "port".into(), building: None, position: None, port: true, holder: None, id: 2, blockade: Some(blockade) };
     model.world.regions.get_mut(&RegionId(1)).unwrap().slots.push(slot);
-    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
     let (_, back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
     assert_eq!(back.model.world.regions[&RegionId(1)].slots.last().unwrap().blockade, Some(blockade));
 }
@@ -705,7 +729,7 @@ fn expense_trackers_round_trip_and_a_version_8_save_takes_them_from_its_record()
         (r.population_state.policing_cost, r.population_state.policing_booked) = (15, 12);
     }
     let bytes = |version: u32| {
-        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
         as_version(&write(&info(), &data).expect("write"), version)
     };
     let now = read_with_start(&bytes(FORMAT_VERSION), &db, || panic!("start read for a current save")).expect("read").model;
@@ -731,7 +755,7 @@ fn diplomacy_record_order_round_trips_and_a_version_9_save_takes_it_from_the_sta
     let mut model = made_up_model();
     model.world.diplomacy_record_order.insert(A, vec![B]);
     let bytes = |version: u32| {
-        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
         as_version(&write(&info(), &data).expect("write"), version)
     };
     let now = read_with_start(&bytes(FORMAT_VERSION), &db, || panic!("start read for a current save")).expect("read").model;
@@ -742,6 +766,34 @@ fn diplomacy_record_order_round_trips_and_a_version_9_save_takes_it_from_the_sta
     assert_eq!(old.world.diplomacy_record_order, start.world.diplomacy_record_order, "taken from the start");
     let bare = read_with_start(&bytes(9), &db, || Err("no start".into())).expect("loads without a start").model;
     assert_eq!(bare.world.diplomacy_record_order, model.world.diplomacy_record_order);
+}
+
+/// treatyorder: a record our model makes in play is listed after its owner's records (`World::list_new_record`;
+/// the exe appends, `0x00B5F330`), and the list round-trips; a version-9 save takes the start's list, which lacks
+/// the new records, so they are walked after the listed ones (by target id).
+#[test]
+fn a_record_made_in_play_keeps_its_place_through_a_save() {
+    const C: FactionId = FactionId(12);
+    const D: FactionId = FactionId(5);
+    let db = ntw_data::GameDatabase::test_fixture();
+    let mut model = made_up_model();
+    model.world.factions.insert(C, faction(C, "made_up_c", A));
+    model.world.factions.insert(D, faction(D, "made_up_d", A));
+    model.world.relationships.insert((A, B), Default::default());
+    model.world.diplomacy_record_order.insert(A, vec![B]);
+    let start = model.clone();
+    model.relationship_mut(A, C);
+    model.relationship_mut(A, D);
+    assert_eq!(model.world.diplomacy_record_order[&A], vec![B, C, D]);
+    let bytes = |version: u32| {
+        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
+        as_version(&write(&info(), &data).expect("write"), version)
+    };
+    let now = read_with_start(&bytes(FORMAT_VERSION), &db, || panic!("start read for a current save")).expect("read").model;
+    assert_eq!(now.world.record_targets_in_order(A), vec![B, C, D]);
+    let old = read_with_start(&bytes(9), &db, || Ok(start.clone())).expect("read").model;
+    assert_eq!(old.world.diplomacy_record_order[&A], vec![B], "taken from the start");
+    assert_eq!(old.world.record_targets_in_order(A), vec![B, D, C], "the records made since, by target id");
 }
 
 /// accessloss2: format version 11 keeps the region manager's order (`World::region_order`), which each faction's
@@ -756,7 +808,7 @@ fn region_order_round_trips_the_gains_do_not_and_a_version_10_save_takes_it_from
     model.world.note_region_gain(RegionId(5_000_000));
     assert_eq!(model.world.regions_in_list_order(), vec![RegionId(2), RegionId(1), RegionId(5_000_000)]);
     let bytes = |version: u32| {
-        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
         as_version(&write(&info(), &data).expect("write"), version)
     };
     let now = read_with_start(&bytes(FORMAT_VERSION), &db, || panic!("start read for a current save")).expect("read").model;
@@ -793,7 +845,7 @@ fn stored_beliefs_keep_their_ally_list_and_a_version_11_save_rebuilds_it() {
     assert_eq!(belief.allies, [A]);
     model.director.beliefs.insert(B, belief);
     let bytes = |model: &CampaignModel, version: u32| {
-        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
         as_version(&write(&info(), &data).expect("write"), version)
     };
     let now = read_with_start(&bytes(&model, FORMAT_VERSION), &db, || panic!("start read for a current save")).expect("read").model;
@@ -819,6 +871,31 @@ fn stored_beliefs_keep_their_ally_list_and_a_version_11_save_rebuilds_it() {
     assert!(!believes_allied(&old, B, A));
 }
 
+/// gdprefresh: format version 14 keeps each region's stored demand (`Region::commodity_demand`, region
+/// +0x154, which the exe's own save keeps as #32 and only the demand step rebuilds), so a
+/// load does not rebuild it from the GDP the load's town wealth refresh writes. A version-13 save holds
+/// none: its load builds it with the demand step from the save's own GDP and town wealth.
+#[test]
+fn the_stored_demand_round_trips_and_a_version_13_save_builds_it() {
+    let db = ntw_data::GameDatabase::test_fixture();
+    let mut model = made_up_model();
+    model.world.commodity_keys = vec!["made_up_c".into()];
+    model.world.regions.get_mut(&RegionId(1)).unwrap().commodity_demand = vec![3];
+    let bytes = |version: u32| {
+        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
+        as_version(&write(&info(), &data).expect("write"), version)
+    };
+    let now = read_with_start(&bytes(FORMAT_VERSION), &db, || panic!("start read for a current save")).expect("read").model;
+    assert_eq!(now.world.regions[&RegionId(1)].commodity_demand, [3], "the stored demand kept");
+    let (_, _, stored) = read_stored(&bytes(13)).expect("read stored");
+    assert!(stored.model.world.regions[&RegionId(1)].commodity_demand.is_empty(), "a version-13 save holds no demand");
+    let old = read_with_start(&bytes(13), &db, || panic!("start read for a version-13 save")).expect("read").model;
+    for r in old.world.regions.values() {
+        assert_eq!((r.commodity_demand.len(), &r.commodity_demand), (1, &old.commodity_demand(r)), "built by the demand step");
+    }
+    assert_ne!(old.world.regions[&RegionId(1)].commodity_demand, [3]);
+}
+
 /// classfactor: each population class keeps its war factor (class +0x20); an older save's
 /// `(class, education, resistance)` reads it as 0.
 #[test]
@@ -827,7 +904,7 @@ fn population_classes_keep_their_war_factor_and_older_saves_read_zero() {
     let class = PopulationClassState { class: "lower".into(), education: 4, resistance: -2, war: -15 };
     let mut model = made_up_model();
     model.world.regions.get_mut(&RegionId(1)).unwrap().class_bases = vec![class.clone()];
-    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
     let db = ntw_data::GameDatabase::test_fixture();
     let loaded = read(&write(&info(), &data).expect("write"), &db).expect("read");
     assert_eq!(loaded.model.world.regions[&RegionId(1)].class_bases, vec![class.clone()]);
@@ -858,7 +935,7 @@ fn settlement_residents_round_trip() {
     let mut g = model.world.characters[&CharacterId(100)].clone();
     (g.id, g.kind, g.garrisoned_in) = (CharacterId(103), CharacterKind::Gentleman, Some(RegionId(1)));
     model.world.characters.insert(g.id, g);
-    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: Some(B), script_values: Vec::new(), restricted_units: Vec::new() };
+    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: Some(B), script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
     let (_, back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
     assert_eq!(back.model.settlement_residents(RegionId(1)), vec![CharacterId(103)]);
     assert_eq!(back, data);
@@ -881,7 +958,7 @@ fn a_waiting_call_to_war_round_trips_and_an_older_save_has_none() {
         called: CalledAllies { joined_b: vec![FactionId(12)], torn_b: vec![FactionId(13)], ..CalledAllies::default() },
     };
     model.pending_ally_war_calls.push(call.clone());
-    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
     let (_, back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
     assert_eq!(back.model.pending_ally_war_calls, [call]);
     // An older save: the same model text without the field.
@@ -903,9 +980,50 @@ fn a_held_trait_keeps_its_level_through_our_own_save() {
     let mut model = made_up_model();
     let kept = CharacterTrait { key: "made_up_trait".into(), points: 1, level: 2 };
     model.world.character_details.entry(CharacterId(900)).or_default().traits = vec![kept.clone()];
-    let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+    let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
     let back = read_with_start(&write(&info(), &data).expect("write"), &db, || Ok(model.clone())).expect("read").model;
     assert_eq!(back.world.character_details[&CharacterId(900)].traits, vec![kept]);
     let old: CharacterTrait = ron::from_str("(key: \"made_up_trait\", points: 5)").expect("a trait from before the level");
     assert_eq!(old, CharacterTrait { key: "made_up_trait".into(), points: 5, level: 0 });
+}
+
+/// gdprefresh: the hash a save logs is the one its load logs, though the load's town wealth refresh
+/// replaces a GDP the live model last refreshed under other factors.
+#[test]
+fn the_logged_save_hash_is_the_loaded_models() {
+    let db = ntw_data::GameDatabase::test_fixture();
+    let mut model = made_up_model();
+    model.world.regions.get_mut(&RegionId(1)).unwrap().gdp = 1;
+    let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
+    let loaded = read(&write(&info(), &data).expect("write"), &db).expect("read").model;
+    assert_ne!(loaded.world.regions[&RegionId(1)].gdp, 1, "the load refreshes the GDP");
+    assert_ne!(model.saved_state_hash(), loaded.saved_state_hash());
+    assert_eq!(loaded_state_hash(&model), loaded.saved_state_hash());
+}
+
+/// aicapture: format 13 keeps the CAI's random stream (`CampaignModel::cai_rng`, `CAI_INTERFACE` #0): a stepped
+/// stream comes back as it was saved, and a format-12 body (no `cai_rng`, no `rebel_army_sides`) still loads, its
+/// stream at the exe's preset `CAI_RNG_SEED` and no risen army's side.
+#[test]
+fn the_cai_stream_round_trips_and_a_version_12_save_starts_it_from_the_preset() {
+    use ntw_sim::campaign::RebelArmySide;
+    use ntw_sim::campaign::world::CAI_RNG_SEED;
+    let db = ntw_data::GameDatabase::test_fixture();
+    let mut model = made_up_model();
+    model.cai_rng = CaRng::new(1234);
+    model.cai_rng.float_range(0.0, 1.0);
+    model.cai_rng.int_range(1, 10);
+    assert_ne!(model.cai_rng, CaRng::new(CAI_RNG_SEED));
+    model.world.rebel_army_sides.insert(ForceId(42), RebelArmySide { faction: "made_up_b".into(), link: 7 });
+    let bytes = |model: &CampaignModel, version: u32| {
+        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
+        as_version(&write(&info(), &data).expect("write"), version)
+    };
+    let now = read_with_start(&bytes(&model, FORMAT_VERSION), &db, || panic!("start read for a current save")).expect("read").model;
+    assert_eq!(now.cai_rng, model.cai_rng, "the stepped stream kept");
+    assert_eq!(now.world.rebel_army_sides, model.world.rebel_army_sides);
+    let old = read_with_start(&bytes(&model, 12), &db, || panic!("start read for a version-12 save")).expect("a version-12 save loads").model;
+    assert_eq!(old.cai_rng, CaRng::new(CAI_RNG_SEED), "the exe's preset");
+    assert!(old.world.rebel_army_sides.is_empty());
+    assert_eq!(old.world.regions, now.world.regions, "the rest kept, as a current save loads (the load refreshes the GDP)");
 }

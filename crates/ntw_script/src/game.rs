@@ -359,29 +359,56 @@ fn dispatch(lua: &Lua, s: &Shared, name: &'static str, args: &MultiValue) -> mlu
             st.log.push(line);
         }
 
-        // force_make_peace / force_declare_war(a, b) → the model's own diplomacy commands.
-        // PROVISIONAL: the exe's force_make_peace (`0x0097AC90`) also queues the move-armies-out
-        // command (`0x009838B0`, `CampaignCommand::MoveArmiesOutOfRegions`) after the peace when the
-        // two are at war (CONFIRMED); ours sends only the peace (BACKLOG §0).
-        "force_make_peace" | "force_declare_war" => {
+        // force_make_peace(a, b) (`HandleScriptForceMakePeace` `0x0097AC90`, CONFIRMED, disassembly):
+        // nothing unless both factions exist and are at war (`0x008CE9B0`, tested before anything is
+        // queued, so a same-faction call does nothing); then `CCQ_MAKE_PEACE` (`0x00983850`) with a
+        // proposing and its messages on (suppress byte 0), then one `CCQ_MOVE_ARMIES_OUT_OF_REGIONS`
+        // (`0x009838B0`) with (a, b), whose handler (`0x00936AB0`) moves each side's forces out of the
+        // other's regions. The exe queues the two commands; ours applies them in the same order, their
+        // events queued for the host. Like every command, each is refused while a battle is pending.
+        "force_make_peace" => {
             let (Some(a), Some(b)) = (arg_str(args, 1), arg_str(args, 2)) else {
                 return bad_args(s, text);
             };
             let mut st = s.borrow_mut();
-            let (Some(a_id), Some(b_id)) = (st.faction_id(&a), st.faction_id(&b)) else {
+            let (Some(a), Some(b)) = (st.faction_id(&a), st.faction_id(&b)) else {
                 st.log.push(format!("{text}: unknown faction"));
                 return Ok(Value::Nil);
             };
-            let cmd = if name == "force_make_peace" {
-                CampaignCommand::MakePeace { a: a_id, b: b_id, suppress_messages: false }
-            } else {
-                CampaignCommand::DeclareWar { a: a_id, b: b_id }
+            if !st.model.at_war(a, b) {
+                st.log.push(format!("{text}: not at war"));
+                return Ok(Value::Nil);
+            }
+            let results = [
+                st.model.apply(CampaignCommand::MakePeace { a, b, suppress_messages: false }),
+                st.model.apply(CampaignCommand::MoveArmiesOutOfRegions { a, b }),
+            ];
+            queue_command_results(&mut st, text, results);
+        }
+
+        // force_declare_war(a, b) (`HandleScriptForceDeclareWar` `0x0097A930`, CONFIRMED, disassembly):
+        // the same layout as force_make_peace (a declares, b is the target). Nothing unless both
+        // factions exist and are not at war (`0x008CE9B0`: false for the same faction, true when either
+        // is the rebels), tested before anything is queued; then one `CCQ_DECLARE_WAR`
+        // (`SendDeclareWarCommand` `0x009837F0`, payload (a, b)), whose handler (`0x00932B70`) declares
+        // the war with both sides' allies called. Ours applies `CampaignCommand::DeclareWar`, which has
+        // no turn test either and refuses what the exe's command drops or gets wrong (a faction out of
+        // the game, the same faction); its events are queued for the host.
+        "force_declare_war" => {
+            let (Some(a), Some(b)) = (arg_str(args, 1), arg_str(args, 2)) else {
+                return bad_args(s, text);
             };
-            let result = st.model.apply(cmd);
-            st.log.push(match result {
-                Ok(_) => text,
-                Err(e) => format!("{text}: refused by the model ({e})"),
-            });
+            let mut st = s.borrow_mut();
+            let (Some(a), Some(b)) = (st.faction_id(&a), st.faction_id(&b)) else {
+                st.log.push(format!("{text}: unknown faction"));
+                return Ok(Value::Nil);
+            };
+            if st.model.at_war(a, b) {
+                st.log.push(format!("{text}: already at war"));
+                return Ok(Value::Nil);
+            }
+            let result = st.model.apply(CampaignCommand::DeclareWar { a, b });
+            queue_command_results(&mut st, text, [result]);
         }
 
         // force_make_protectorate(patron, protectorate) (`HandleScriptForceMakeProtectorate`
@@ -417,14 +444,7 @@ fn dispatch(lua: &Lua, s: &Shared, name: &'static str, args: &MultiValue) -> mlu
                 results.push(st.model.apply(CampaignCommand::MakeProtectorate { patron, protectorate }));
             }
             results.push(st.model.apply(CampaignCommand::MoveArmiesOutOfRegions { a: patron, b: protectorate }));
-            let mut refused = Vec::new();
-            for result in results {
-                match result {
-                    Ok(events) => st.script_events.extend(events),
-                    Err(e) => refused.push(e.to_string()),
-                }
-            }
-            st.log.push(if refused.is_empty() { text } else { format!("{text}: refused by the model ({})", refused.join(", ")) });
+            queue_command_results(&mut st, text, results);
         }
 
         // force_diplomacy(a, b, option, offer, accept) (`SetDiplomacyOptionFromScript`
@@ -562,6 +582,36 @@ fn dispatch(lua: &Lua, s: &Shared, name: &'static str, args: &MultiValue) -> mlu
             st.log.push(text);
         }
 
+        // set_zoom_limit(a, b): CONFIRMED (`0x00977CB0`): two numbers read off the top of the Lua
+        // stack (`0x01055700`: the last argument first, then the one before it; a real Lua number
+        // only, no string coercion), each raised to 0.02 and lowered to just above the minimum
+        // distance's tilt, the larger stored as the camera's largest tilt (episodic restrictions
+        // +0xBC) and the smaller as its smallest (+0xC0); `ZoomLimit::from_script`. Saved with the
+        // campaign; the camera clamps its next tilt change to them (`0x00920D00`). The eur, mp,
+        // spa, ita, egy and tut scripts call it. ORIGINAL BUG: on a non-number argument `0x00977CB0`
+        // logs the type error and still clamps and stores both slots, the unread one holding stack
+        // garbage (the lua_State pointer's bits or an uninitialised local), so the camera bounds
+        // become arbitrary. Ours logs the error once and keeps the limit.
+        "set_zoom_limit" => {
+            let n = args.len();
+            let read = |at: Option<usize>| match at.and_then(|i| args.get(i)) {
+                Some(Value::Number(x)) => Some(*x as f32),
+                Some(Value::Integer(x)) => Some(*x as f32),
+                v => {
+                    type_error_once(s, name, "number", lua_found_type(v));
+                    None
+                }
+            };
+            // The exe skips the second read once the first cleared its ok flag: one error per call.
+            let b = read(n.checked_sub(1));
+            let a = b.and_then(|_| read(n.checked_sub(2)));
+            if let (Some(a), Some(b)) = (a, b) {
+                let mut st = s.borrow_mut();
+                st.model.world.zoom_limit = ntw_sim::campaign::ZoomLimit::from_script(a, b);
+                st.log.push(text);
+            }
+        }
+
         // trigger_custom_mission(key, faction, type, 0, target, heading, text, reward_text, 0, "",
         // context, bool, rewards...) (W3 §7, CONFIRMED argument layout). Recorded only:
         // PLACEHOLDER, missions are not tracked or rewarded yet.
@@ -587,4 +637,22 @@ fn dispatch(lua: &Lua, s: &Shared, name: &'static str, args: &MultiValue) -> mlu
 fn bad_args(s: &Shared, text: String) -> mlua::Result<Value> {
     log(s, format!("{text}: unexpected arguments, ignored"));
     Ok(Value::Nil)
+}
+
+/// Queues the events of the model commands a script call applied, for the host to fire once the
+/// calling Lua returns (`ScriptHost::fire_script_events`), and logs the call once, with every refusal
+/// the model gave.
+fn queue_command_results(
+    st: &mut ScriptState,
+    text: String,
+    results: impl IntoIterator<Item = Result<Vec<ntw_sim::campaign::CampaignEvent>, ntw_sim::campaign::CommandError>>,
+) {
+    let mut refused = Vec::new();
+    for result in results {
+        match result {
+            Ok(events) => st.script_events.extend(events),
+            Err(e) => refused.push(e.to_string()),
+        }
+    }
+    st.log.push(if refused.is_empty() { text } else { format!("{text}: refused by the model ({})", refused.join(", ")) });
 }

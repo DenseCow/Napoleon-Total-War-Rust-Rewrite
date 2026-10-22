@@ -287,6 +287,8 @@ fn open_from<'a>(
             let mut loaded = source.new_campaign(db)?;
             // Not the start position's own 20 / 14: a new campaign sets its caps (`0x00872550`).
             loaded.model.force_caps = ntw_sim::campaign::rules::ForceCaps::new_campaign(&loaded.model.rules.limits, unit_multiplier);
+            // The CAI stream restarts from the campaign RNG, once the model is built (`0x00988155`).
+            loaded.model.reseed_cai_rng();
             (source, loaded)
         }
         Start::Save(bytes) if crate::own_save::is_own_save(bytes) => {
@@ -335,7 +337,7 @@ mod tests {
         }
         fn new_campaign(&self, _db: &GameDatabase) -> Result<LoadedCampaign, SourceError> {
             let info = own_save::tests::info();
-            Ok(LoadedCampaign { model: self.1.clone(), info, rebel_faction: None, warnings: Vec::new(), script_values: Vec::new() })
+            Ok(LoadedCampaign { model: self.1.clone(), info, rebel_faction: None, warnings: Vec::new(), script_values: Vec::new(), camera: None })
         }
         fn map(&self, _db: &GameDatabase, _info: &CampaignInfo) -> Result<MapData, SourceError> {
             use ntw_formats::campaign_map::{Heightmap, RegionMap};
@@ -386,6 +388,20 @@ mod tests {
         assert_eq!(with(None).loaded.model.rules.features, before);
     }
 
+    /// A new campaign reseeds the CAI stream from one step of the campaign RNG (`0x00988155` →
+    /// `0x00AA3200`); the start position's own CAI state is not kept.
+    #[test]
+    fn a_new_campaign_reseeds_the_cai_stream() {
+        let vfs = Vfs::new();
+        let files = GameFiles { vfs: &vfs };
+        let db = GameDatabase::test_fixture();
+        let start = own_save::tests::made_up_model();
+        let mut campaign = start.rng;
+        let seed = campaign.next16();
+        let opened = open_from(files, Start::New("made_up_campaign", None), &db, move |_, _| Some(Box::new(Fake(None, own_save::tests::made_up_model())) as Box<dyn CampaignSource>)).expect("opens");
+        assert_eq!((opened.loaded.model.rng, opened.loaded.model.cai_rng), (campaign, ntw_sim::rng::CaRng::new(seed)));
+    }
+
     /// recruit-gates review: an own save written before format version 2 (no region unit resources) opens
     /// with every region's resources from its campaign's start, so a queued unit that needs one stays
     /// recruitable and survives the first turn start (without them the queue step removes and refunds it).
@@ -400,7 +416,7 @@ mod tests {
         let r = model.world.regions.get_mut(&r1).unwrap();
         r.fortification = Some(BuildingRef { level_key: "made_up_stables".into(), health: 100 });
         r.recruitment_queue.push(RecruitmentItem { id: RecruitmentItemId(9001), unit_key: "made_up_cavalry".into(), turns_remaining: 3, cost: 400, target: None, target_lost: false });
-        let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+        let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
         let old = own_save::tests::as_version_1(&own_save::write(&own_save::tests::info(), &data).expect("write"));
         let vfs = Vfs::new();
         let files = GameFiles { vfs: &vfs };
@@ -430,7 +446,7 @@ mod tests {
     #[test]
     fn a_save_of_an_unknown_campaign_is_not_found() {
         let info = own_save::tests::info();
-        let data = SaveData { human: "made_up_a".into(), model: own_save::tests::made_up_model(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new() };
+        let data = SaveData { human: "made_up_a".into(), model: own_save::tests::made_up_model(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
         let bytes = own_save::write(&info, &data).expect("write");
         let vfs = Vfs::new();
         let files = GameFiles { vfs: &vfs };

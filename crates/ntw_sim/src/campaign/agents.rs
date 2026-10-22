@@ -139,6 +139,12 @@ pub fn rank(model: &CampaignModel, c: CharacterId) -> i32 {
 /// `_siege_defence`, `sea_command_attack` / `_defence`, by the battle's type and his side, `0x008CE700`)
 /// and the enemy bonuses (`hates_ottomans`, `hates_europeans`, `hates_french`, `hates_british`); the
 /// model has no pending-battle state for them yet.
+///
+/// The `agent_attribute_situations` table and its two effect tables
+/// (`trait_attribute_situation_effects`, `ancillary_to_attribute_situation_effects`) give nothing to
+/// the rank or the stored attribute levels: the exe only loads and checks them (vanilla's effect
+/// tables are empty) and no rule or screen reads them. The situations above are GetCharacterRank's
+/// own effect bonuses (CHARACTERS_FIDELITY §17, CONFIRMED).
 pub fn rank_original(model: &CampaignModel, c: CharacterId, own: &super::effects::EffectSet, faction: bool) -> i32 {
     let Some(ch) = model.world.characters.get(&c) else { return -1 };
     let main = main_attribute(&model.rules, ch.kind);
@@ -505,14 +511,15 @@ impl CampaignModel {
 
     /// An unseen success (`0x00B0D700` assassination, `0x00B67E60` sabotage; outcome 0): the victim
     /// searches its own relationships (`0x00B0D740`: the list at victim +0x528) for the faction it
-    /// likes least (its lowest attitude total, `0x00B0DB60`; ties go to the lower id; the culprit
+    /// likes least (its lowest attitude total, `0x00B0DB60`; ties go to the lower id, compared unsigned (`JNC`); the culprit
     /// itself is passed over unless it is the first one looked at), which gets the victim values;
     /// then every faction other than the victim and the blamed one (`0x00B0D800`: the loop compares
     /// with the victim, not the culprit) gives the blamed one the third-party values, the culprit
     /// included; then the diplomacy-changed broadcast (`0x00B0D861` / `0x00B67FC1`), also when no
     /// one is blamed. CONFIRMED (disassembly). Nothing at all when the victim is the rebels
-    /// (`0x008CEEF0`). The victim's relationships are taken in target id order (PROVISIONAL: the
-    /// original keeps the file order, which matters only for the first one looked at). A victim
+    /// (`0x008CEEF0`). The victim's relationships are taken in its record order
+    /// ([`super::World::record_targets_in_order`]; `0x00B0D740` indexes the record vector front to back
+    /// with `0x00B64CB0`, CONFIRMED by disassembly), which decides the first one looked at. A victim
     /// with no relationships blames no one here; the exe would index the empty list (`0x00B64C50`
     /// returns the list start when nothing matches), which no campaign reaches.
     pub fn blamed_misdeed(&mut self, culprit: FactionId, victim: FactionId, m: Misdeed) {
@@ -520,16 +527,14 @@ impl CampaignModel {
             return;
         }
         let mut blamed: Option<(FactionId, i32)> = None;
-        for ((o, t), r) in &self.world.relationships {
-            if *o != victim {
-                continue;
-            }
+        for t in self.world.record_targets_in_order(victim) {
+            let Some(r) = self.world.relationships.get(&(victim, t)) else { continue };
             let total = r.attitude_total();
             match blamed {
-                None => blamed = Some((*t, total)),
+                None => blamed = Some((t, total)),
                 Some((b, bt)) => {
-                    if *t != culprit && (total < bt || (total == bt && t.raw() < b.raw())) {
-                        blamed = Some((*t, total));
+                    if t != culprit && (total < bt || (total == bt && (t.raw() as u32) < (b.raw() as u32))) {
+                        blamed = Some((t, total));
                     }
                 }
             }

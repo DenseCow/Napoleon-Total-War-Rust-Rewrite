@@ -420,9 +420,15 @@ pub(super) fn install_saves(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Re
         Ok((Some(ext.to_owned()), dir))
     })?)?;
 
-    // EnumerateCampaignSaves(dir, "*<ext>") → { {FileName, Path, Date, DateString, TimePlayed}, ... }
-    // (fields read by sp_load_game.lua; TimePlayed = the header's turn number, INFERRED). For our
-    // own save folder the original's saves of the same class are listed too (see above).
+    // EnumerateCampaignSaves(dir, "*<ext>") → { {FileName, Path, Date, DateString} plus the
+    // save header's details ([`save_info_table`]), ... }. CONFIRMED: the Lua function `0x008B86D0`
+    // lists the folder (`0x0103F350` → `0x010297B0`); each file's entry gets FileName, Path, Date,
+    // DateString and IsDir (`0x01025150`), then the campaign-save filter's slot 0 (vtable
+    // `0x01357DF0`, `0x0089A6F0`) reads the file's header and adds `0x008982C0`'s fields (Faction,
+    // FlagPath, LeaderPortrait, TimePlayed = turn, Year, Season, Maps); a file whose header does not
+    // read is left out of the list. sp_load_game's `OnDestroyed` walks every entry's `Maps`. The
+    // exe also sets IsDir, which no script reads (not set here). For our own save folder the original's
+    // saves of the same class are listed too (see above).
     let i = inner.clone();
     let n2 = names.clone();
     t.set("EnumerateCampaignSaves", lua.create_function(move |lua, (dir, pattern): (String, Option<String>)| {
@@ -431,16 +437,32 @@ pub(super) fn install_saves(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Re
         let files = folders.list(&ext);
         let out = lua.create_table()?;
         let mut names = n2.borrow_mut();
-        for (n, f) in files.iter().enumerate() {
-            names.insert(save_name(&f.file_name, &ext).to_ascii_lowercase(), f.path.clone());
-            let e = lua.create_table()?;
+        for f in &files {
+            let info = match std::fs::read(&f.path).map_err(|e| e.to_string()).and_then(|b| ntw_campaign::read_info(&b).map_err(|e| e.to_string())) {
+                Ok(info) => info,
+                Err(e) => {
+                    let path = f.path.display().to_string();
+                    i.log_once_for("EnumerateCampaignSaves unreadable", &path, || format!("EnumerateCampaignSaves: {path} left out, its header does not read: {e}"));
+                    continue;
+                }
+            };
+            let n = out.raw_len() + 1;
+            let e = save_info_table(lua, &i, &info.header, &format!("{LISTED_SAVE_MAP_KEY}{n}"))?;
             e.set("FileName", f.file_name.as_str())?;
             e.set("Path", f.path.display().to_string())?;
             e.set("Date", f.modified as f64)?;
             e.set("DateString", date_string(to_local_time(f.modified)))?;
-            let turn = std::fs::read(&f.path).ok().and_then(|b| ntw_campaign::read_info(&b).ok()).map(|i| i.header.turn_number);
-            e.set("TimePlayed", turn.unwrap_or(0))?;
-            out.set(n + 1, e)?;
+            names.insert(save_name(&f.file_name, &ext).to_ascii_lowercase(), f.path.clone());
+            out.set(n, e)?;
+        }
+        // Entry n's pictures keep their keys from listing to listing (their version goes up, so
+        // the renderer rebuilds them in place); the pictures of entries past this listing's end go.
+        let listed = out.raw_len();
+        let mut world = i.world.borrow_mut();
+        let before = world.runtime_images.len();
+        world.runtime_images.retain(|k, _| listed_save_index(k).is_none_or(|n| n <= listed));
+        if world.runtime_images.len() != before {
+            world.generation += 1;
         }
         Ok(out)
     })?)?;
@@ -456,7 +478,7 @@ pub(super) fn install_saves(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Re
                 return Ok(None);
             }
         };
-        save_info_table(lua, &i, &info.header).map(Some)
+        save_info_table(lua, &i, &info.header, SAVE_MAP_KEY).map(Some)
     })?)?;
 
     // LoadCampaign(name) (and the front end's ContinueCampaign): hand over to the game (campaign mode). The page
@@ -477,6 +499,24 @@ pub(super) fn install_saves(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Re
     Ok(())
 }
 
+/// The run-time image key of a single save's details ([`save_info_table`]): `GetExtendedSaveGameInfo`
+/// and the campaign's `GetCurrentGameInfo`, one save at a time.
+pub(super) const SAVE_MAP_KEY: &str = "save_map";
+/// The run-time image key prefix of `EnumerateCampaignSaves` entry n's pictures (`save_list<n>`),
+/// one key per entry so every listed save keeps its own map.
+const LISTED_SAVE_MAP_KEY: &str = "save_list";
+
+/// The listing entry index of a run-time image key made from [`LISTED_SAVE_MAP_KEY`], or `None`
+/// for any other key.
+fn listed_save_index(key: &str) -> Option<usize> {
+    let rest = key.strip_prefix(LISTED_SAVE_MAP_KEY)?;
+    let digits = rest.split('_').next()?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
 /// The newest file of the save class that reads as a campaign save, ours and the original's
 /// folders: the front end's `ContinueCampaign` and the campaign's `QuickLoad` (both CONFIRMED to
 /// make this choice, `0x0046CF00` → `0x0085F7D0` and `0x009EF420`).
@@ -489,9 +529,9 @@ pub(super) fn latest_campaign_save(facts: &super::host::FrontEndFacts) -> Option
 /// `GetExtendedSaveGameInfo` (a save on disk) and the campaign's `GetCurrentGameInfo` (the running
 /// campaign's header, `0x009E4BB0`), which the exe shares. Maps[theatre] = the header's
 /// region-ownership picture (MAPS item), shown on the page's `map_<map>` component through
-/// UIImage(...):SetComponentTexture; here a run-time image (one per theatre, replaced on the next
-/// call).
-pub(super) fn save_info_table(lua: &Lua, inner: &Inner, h: &ntw_campaign::SaveHeader) -> mlua::Result<Table> {
+/// UIImage(...):SetComponentTexture; here a run-time image keyed `<image_key>_<theatre>`, replaced
+/// (version bumped) by the next call with the same `image_key`.
+pub(super) fn save_info_table(lua: &Lua, inner: &Inner, h: &ntw_campaign::SaveHeader, image_key: &str) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     t.set("Faction", h.faction_key.as_str())?;
     t.set("FlagPath", h.flag_path.as_str())?;
@@ -505,7 +545,7 @@ pub(super) fn save_info_table(lua: &Lua, inner: &Inner, h: &ntw_campaign::SaveHe
     t.set("Season", h.season_name.as_str())?;
     let maps = lua.create_table()?;
     for m in h.maps.iter().filter(|m| m.width > 0 && m.height > 0 && m.pixels.len() >= (m.width * m.height) as usize) {
-        let key = format!("save_map_{}", m.theatre);
+        let key = format!("{image_key}_{}", m.theatre);
         let mut world = inner.world.borrow_mut();
         let version = world.runtime_images.get(&key).map_or(0, |r| r.version + 1);
         let mut img = super::world::RuntimeImage::from_rgba(m.width, m.height, m.rgba());
@@ -897,6 +937,18 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a listing entry's own picture keys are read as entry indices, so pruning the pictures
+    /// past a listing's end leaves the single-save pictures and every other run-time image alone.
+    #[test]
+    fn listed_save_picture_keys_carry_their_entry_index() {
+        assert_eq!(listed_save_index("save_list3_europe_main"), Some(3));
+        assert_eq!(listed_save_index("save_list12_egypt"), Some(12));
+        assert_eq!(listed_save_index("save_map_europe_main"), None);
+        assert_eq!(listed_save_index("save_list_europe"), None);
+        assert_eq!(listed_save_index("save_listx_europe"), None);
+        assert_eq!(listed_save_index("portrait"), None);
+    }
 
     #[test]
     fn only_our_saves_can_be_deleted_and_names_resolve() {

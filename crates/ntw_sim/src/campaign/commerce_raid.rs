@@ -386,7 +386,8 @@ impl CampaignModel {
     }
 
     /// Ends every raid of a character (`0x009DA140` → `0x008BC580`; the price update `0x00BCB020` the exe
-    /// runs after it is not run at once here, see the trade notes).
+    /// runs after it is not run at once here, see the trade notes, except by the peace's raid step
+    /// [`Self::end_raids_on_peace`], which runs it right after).
     pub fn clear_character_raids(&mut self, character: CharacterId) {
         self.world.commerce_raids.retain(|r| r.character != character);
     }
@@ -449,19 +450,18 @@ impl CampaignModel {
         self.hand_over_raids(old, at, &[new]);
     }
 
-    /// A peace between `a` and `b` (`0x00B262C0` → `0x00A25570`, CONFIRMED): every commander of either
-    /// side who raids for the other side loses all his raids.
-    pub fn clear_raids_on_peace(&mut self, a: FactionId, b: FactionId) {
-        let w = &self.world;
-        let ended: BTreeSet<CharacterId> = w
-            .commerce_raids
-            .iter()
-            .filter(|r| {
-                w.characters.get(&r.character).is_some_and(|c| (c.faction == a && r.target == b) || (c.faction == b && r.target == a))
-            })
-            .map(|r| r.character)
-            .collect();
-        self.world.commerce_raids.retain(|r| !ended.contains(&r.character));
+    /// A peace's raid step for character `c` towards the other side `other` (`0x00B262C0` → `0x00A25570`,
+    /// CONFIRMED, after his siege and blockade steps): if he still raids (`0x008BC560`) and one of his raids
+    /// is on `other` (`0x008CEEB0`), he loses all his raids and the price update runs
+    /// (`EndCharacterCommerceRaids` `0x009DA140`: the list clear `0x008BC580`, then `0x00BCB020(0)` at
+    /// `0x009DA160`, then the +0xF7C dispatcher's +0x268 listener, which has none in the model). A raid an
+    /// earlier step's price update already ended (its raid check, [`Self::validate_commerce_raids`]) is not
+    /// ended again, so it runs no update.
+    pub(crate) fn end_raids_on_peace(&mut self, c: CharacterId, other: FactionId) {
+        if self.world.commerce_raids.iter().any(|r| r.character == c && r.target == other) {
+            self.clear_character_raids(c);
+            self.update_commodity_prices_with(false);
+        }
     }
 
     /// The trade update's rebuild check, at the round start and end (`0x00BD1020` → `0x00BA4A70` → `0x008B3690`, CONFIRMED): a raider

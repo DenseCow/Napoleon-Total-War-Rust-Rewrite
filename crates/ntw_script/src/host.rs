@@ -232,8 +232,8 @@ impl ScriptHost {
     }
 
     /// Fires the model events that script commands queued while the last Lua ran
-    /// (`ScriptState::script_events`: `grant_faction_handover`'s destruction, `force_make_protectorate`'s
-    /// peace and protectorate), then those their own
+    /// (`ScriptState::script_events`: `grant_faction_handover`'s destruction, the commands of
+    /// `force_make_peace`, `force_declare_war` and `force_make_protectorate`), then those their own
     /// handlers queued, until none is left, through [`Self::fire_all`] like a command's events, so
     /// the caller gets every one (`OutcomeMovie` with an empty report). Run after
     /// each batch of handlers in [`Self::apply`] and the turn steps; a command issued by a handler of

@@ -550,7 +550,7 @@ impl CampaignModel {
         // factors read only that region's own state, which no other region's refresh writes.
         // The faction set once per refresh: `in_the_game` may scan every region and character (old saves).
         let listed: BTreeSet<FactionId> =
-            self.world.factions.keys().copied().filter(|&f| !self.is_rebel_faction(f) && self.in_the_game(f)).collect();
+            self.world.factions.keys().copied().filter(|&f| self.in_the_game_with_record(f)).collect();
         let updates: Vec<(RegionId, PopulationState)> = self
             .world
             .regions

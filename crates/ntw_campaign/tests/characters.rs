@@ -6,6 +6,8 @@ use std::path::PathBuf;
 
 use ntw_data::GameDatabase;
 use ntw_formats::campaign_map::GameFiles;
+use ntw_formats::db::DbValue;
+use ntw_formats::db_folder::{RawTable, RowKey};
 use ntw_formats::esf::EsfFile;
 use ntw_formats::pack::Vfs;
 use ntw_sim::campaign::characters::{self, AncillaryRefusal, TraitOutcome};
@@ -220,6 +222,13 @@ fn a_dead_monarch_is_succeeded_and_posts_are_refilled() {
     let refilled = d.posts[minister_post].holder.expect("refilled");
     assert_ne!(refilled, minister);
     assert_eq!(m.world.character_details[&refilled].post, d.posts[minister_post].id as u32);
+    // Portraits (`0x009D21B0`, `0x00990900`): the monarch has the family leader's, the new
+    // minister one from the minister decks, a picture the install has.
+    assert_eq!(nl.portrait, fam.members[0].portrait);
+    let vfs = Vfs::open_install(&dir).unwrap();
+    let p = &m.world.character_details[&refilled].portrait;
+    assert!(p.index >= 0 && p.card.contains("/Cards/minister/") && p.info.contains("/Info/minister/"), "{p:?}");
+    assert!(vfs.contains(&p.card) && vfs.contains(&p.info), "{p:?}");
     // Every post of a faction with characters has a living holder.
     for (f, d) in &m.world.faction_details {
         if m.world.characters.values().any(|c| c.faction == *f) {
@@ -243,6 +252,9 @@ fn a_dead_monarch_is_succeeded_and_posts_are_refilled() {
     assert_eq!(bd.family, d.family);
     assert_eq!(l.model.world.character_details[&new_leader].forename, heir.names[0]);
     assert_eq!(l.model.world.character_details[&refilled].post, d.posts[minister_post].id as u32);
+    for c in [new_leader, refilled] {
+        assert_eq!(l.model.world.character_details[&c].portrait, m.world.character_details[&c].portrait, "the save carries the new portraits");
+    }
 }
 
 /// Dismissing and appointing ministers (CHARACTERS_FIDELITY.md §5c): France (absolute monarchy)
@@ -366,6 +378,133 @@ fn stored_attributes_are_the_start_levels_plus_the_effects() {
     }
     assert_eq!(checked, 531);
     assert_eq!(wrong.iter().map(|w| (w.0, w.1)).collect::<Vec<_>>(), vec![(749615820, "rake")], "{wrong:?}");
+}
+
+/// `agent_attribute_situations` {situation key, attribute}: loader `0x00DCC540` (row reader
+/// `0x00E55090`) hashes record +0, column 0.
+const SITUATIONS: RawTable = RawTable { name: "agent_attribute_situations", codes: "s,s", key: RowKey::Concat(&[0]) };
+
+/// The situation effect tables {level or ancillary key, situation key, i32 value}, and
+/// `trait_attribute_effects`, which the exe reads the same way: all three name getters (`0x00F098E0`,
+/// `0x00F95160`, `0x00F09890`) pass row reader thunk `0x00DE2610` (reader `0x00DD2250`: column 0 at
+/// record +0, column 1 at +0xC, the i32 at +0x18) to loader `0x00DBDB90`, which hashes record +0 joined
+/// with record +0xC (`0x004F1200` at `0x00DBE511`): the key is columns 0 + 1.
+const fn level_situation_table(name: &'static str) -> RawTable {
+    RawTable { name, codes: "s,s,i", key: RowKey::Concat(&[0, 1]) }
+}
+
+/// One table's rows through the merged view (every file, the exe's row rule and key); the install
+/// must ship it and every file must decode.
+fn merged(vfs: &Vfs, table: RawTable) -> Vec<Vec<DbValue>> {
+    let mut warnings = Vec::new();
+    let rows = table.read_with(vfs, &mut warnings).unwrap_or_else(|e| panic!("{}: {e}", table.name));
+    assert!(warnings.is_empty(), "{}: {warnings:?}", table.name);
+    rows
+}
+
+/// The attribute situation tables are Empire's and give no attribute or rank in Napoleon
+/// (CHARACTERS_FIDELITY.md §17). `agent_attribute_situations` (16 rows, getter `0x00E0E4C0`) is only
+/// loaded: its two callers are the database loaders. The effect tables
+/// `trait_attribute_situation_effects` (into the trait level's +0x88 list, `0x00F72B80`) and
+/// `ancillary_to_attribute_situation_effects` (`0x00F944C0`) ship with no rows, and neither the trait
+/// nor the ancillary gain (`0x00A0ECB0` / `0x00A0EC10`) nor `GetCharacterRank` `0x00A198D0` reads
+/// them; the rank's situation bonuses are its own hardcoded effect bonuses (`agents::rank_original`).
+#[test]
+fn vanilla_attribute_situation_tables_feed_nothing() {
+    let dir = data_dir();
+    if !dir.is_dir() {
+        eprintln!("skipped: no install at {}", dir.display());
+        return;
+    }
+    let vfs = Vfs::open_install(&dir).expect("vfs");
+    let mut pairs: Vec<(String, String)> = merged(&vfs, SITUATIONS)
+        .iter()
+        .map(|r| (r[0].as_str().unwrap_or("").to_owned(), r[1].as_str().unwrap_or("").to_owned()))
+        .collect();
+    pairs.sort();
+    let land = ["Ambushes", "Artillery_Troops", "Attack", "Cavalry_Troops", "Command_Amphibious_Attack", "Defence", "In_Americas", "In_India", "Infantry_Troops", "Siege_Attack", "Siege_Defence"];
+    let mut expected: Vec<(String, String)> = land.iter().map(|k| (format!("Command_Land_{k}"), "command_land".to_string())).collect();
+    expected.extend(["Attack", "Defence"].iter().map(|k| (format!("Command_Sea_{k}"), "command_sea".to_string())));
+    expected.extend(["Artillery", "Cavalry", "Infantry"].iter().map(|k| (format!("Movement_Points_Land_{k}"), "movement_points_land".to_string())));
+    expected.sort();
+    assert_eq!(pairs, expected);
+    for table in ["trait_attribute_situation_effects", "ancillary_to_attribute_situation_effects"] {
+        let rows = merged(&vfs, level_situation_table(table));
+        assert!(rows.is_empty(), "{table}: {rows:?}");
+    }
+}
+
+/// The situation effect tables' `ssi` layout, which their own empty files cannot show: the exe reads
+/// them with the same row reader (`0x00DD2250`) and loader (`0x00DBDB90`) as `trait_attribute_effects`,
+/// whose 157 shipped rows read in full with that layout (a key, one of the attributes, a small level
+/// bonus), and a row merges with a later file's row only on the same level and situation key.
+#[test]
+fn the_situation_effect_layout_reads_its_sibling_table() {
+    use ntw_sim::campaign::agents::ATTRIBUTES;
+    let dir = data_dir();
+    if !dir.is_dir() {
+        eprintln!("skipped: no install at {}", dir.display());
+        return;
+    }
+    let vfs = Vfs::open_install(&dir).expect("vfs");
+    let rows = merged(&vfs, level_situation_table("trait_attribute_effects"));
+    assert_eq!(rows.len(), 157);
+    for r in &rows {
+        assert_eq!(r.len(), 3, "{r:?}");
+        assert!(r[0].as_str().is_some_and(|k| !k.is_empty()), "{r:?}");
+        assert!(r[1].as_str().is_some_and(|a| ATTRIBUTES.contains(&a)), "{r:?}");
+        assert!(r[2].as_i32().is_some_and(|v| (-10..=10).contains(&v) && v != 0), "{r:?}");
+    }
+    // One level with two attributes keeps both rows: the key is not the level alone.
+    let row = |l: &str, s: &str| vec![DbValue::Str(l.into()), DbValue::Str(s.into()), DbValue::I32(1)];
+    let key = level_situation_table("x").key;
+    assert_ne!(key.of(&row("lvl", "Command_Land_Attack")), key.of(&row("lvl", "Command_Land_Defence")));
+}
+
+/// `CHARACTER_DETAILS` #14 `AgentAttributeBonuses` is the one per-character situation slot (details
+/// +0x13C): the character maker sets it to 0 (`0x00992E60`, at `0x00992F5D`), the copy keeps it, and
+/// the save writer `0x009A0580` writes exactly one entry, `dummy` (the only key of the situation
+/// list at `0x0145DA24`) with that value. Nothing else reads or writes it, so every start-position
+/// character holds `[("dummy", 0)]`.
+#[test]
+fn vanilla_attribute_bonuses_are_one_dummy_zero() {
+    let Some(m) = model() else { return };
+    let odd: Vec<_> = m
+        .world
+        .character_details
+        .iter()
+        .filter(|(_, d)| d.attribute_bonuses != [("dummy".to_string(), 0)])
+        .map(|(id, d)| (id.0, d.attribute_bonuses.clone()))
+        .collect();
+    assert!(!m.world.character_details.is_empty());
+    assert!(odd.is_empty(), "{odd:?}");
+}
+
+/// A character made in play starts with the maker's `[("dummy", 0)]` (`0x00992F5D`), and the save our
+/// writer builds for him (his `CHARACTER` cloned from a template minister) reads back with it.
+#[test]
+fn a_new_characters_attribute_bonuses_survive_the_save() {
+    use ntw_sim::campaign::CampaignCommand;
+    let Some(mut m) = model() else { return };
+    let dir = data_dir();
+    let britain = m.faction_by_key("britain").unwrap().id;
+    let minister = m.world.faction_details[&britain]
+        .posts
+        .iter()
+        .filter(|p| p.key != "faction_leader" && p.governorship.is_none())
+        .find_map(|p| p.holder)
+        .expect("a British minister");
+    let before: std::collections::BTreeSet<CharacterId> = m.world.characters.keys().copied().collect();
+    m.apply(CampaignCommand::DismissMinister { minister }).unwrap();
+    let new: Vec<CharacterId> = m.world.characters.keys().copied().filter(|c| !before.contains(c)).collect();
+    assert_eq!(new.len(), 1, "Britain makes one new minister");
+    let dummy = vec![("dummy".to_string(), 0)];
+    assert_eq!(m.world.character_details[&new[0]].attribute_bonuses, dummy);
+    let db = GameDatabase::from_install(&dir).expect("DB");
+    let bytes = GameFiles { vfs: &Vfs::open_install(&dir).unwrap() }.read("campaigns/eur_napoleon/startpos.esf").unwrap();
+    let out = ntw_campaign::save::write_save(&EsfFile::from_bytes(&bytes).unwrap(), &m, "france", 1, None).unwrap();
+    let back = ntw_campaign::read_esf(&EsfFile::from_bytes(&out.to_bytes().unwrap()).unwrap(), &db).unwrap();
+    assert_eq!(back.model.world.character_details[&new[0]].attribute_bonuses, dummy);
 }
 
 /// The battle card the campaign builds for each unit (`0x008AF200`, CHARACTERS_FIDELITY.md §16,

@@ -242,9 +242,18 @@ fn vanilla_save_risen_armies_keep_their_government() {
             assert_eq!(classes, Some(ntw_sim::campaign::economy::government_classes(m, w.governing_faction(*region).unwrap_or(reg.owner))), "{region:?}");
         }
     }
+    // Each also has its side in the rising (`World::rebel_army_sides`, REBEL_SETUP #1 and the INNARDS bool #2,
+    // `0x00886C90`): the save's armies rise for `spa_spain` or `portugese_rebels`, all with the bool clear (+0x34 0).
+    assert_eq!(w.rebel_army_sides.keys().collect::<Vec<_>>(), w.rebel_army_governments.keys().collect::<Vec<_>>());
+    for (id, side) in &w.rebel_army_sides {
+        assert!(["spa_spain", "portugese_rebels"].contains(&side.faction.as_str()), "{id:?}: {side:?}");
+        assert_eq!(side.link, 0, "{id:?}");
+    }
+    assert!(w.rebel_army_sides.values().any(|s| s.faction == "spa_spain"));
     let out = ntw_campaign::save::write_save(&esf, m, &loaded.info.header.faction_key, 1, None).expect("save");
     let back = ntw_campaign::read(&out.to_bytes().expect("bytes"), &db).expect("reload").model.world;
     assert_eq!(back.rebel_army_governments, w.rebel_army_governments);
+    assert_eq!(back.rebel_army_sides, w.rebel_army_sides);
     assert_eq!(back.embarked, w.embarked);
 }
 
@@ -290,4 +299,28 @@ fn vanilla_save_region_order_is_the_manager_order() {
     let out = ntw_campaign::save::write_save(&esf, &loaded.model, &loaded.info.header.faction_key, 1, None).expect("save");
     let back = ntw_campaign::read(&out.to_bytes().expect("bytes"), &db).expect("reload").model.world;
     assert_eq!(back.regions_in_list_order(), file);
+}
+
+/// The CAI's random stream is `CAI_INTERFACE` #0 (the CAI loader `0x00A3CE70` reads it at `0x00A3DE5C`, the
+/// writer `0x00A5B5B0` saves it there): the original's save gives it, our writer stores it back.
+#[test]
+fn vanilla_save_keeps_the_cai_random_state() {
+    let dir = data_dir();
+    let path = common::evidence_dir().join("orig_fr_may1811.save");
+    if !dir.is_dir() || !path.is_file() {
+        eprintln!("skipped: no install or no evidence save");
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).expect("DB");
+    let bytes = std::fs::read(&path).expect("read");
+    let esf = EsfFile::from_bytes(&bytes).expect("esf");
+    let loaded = ntw_campaign::read_esf(&esf, &db).expect("load");
+    let mut m = loaded.model;
+    let stored = esf.root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL/CAI_INTERFACE").and_then(|c| c.get_u32(0)).expect("CAI_INTERFACE #0");
+    assert_eq!(m.cai_rng.state, stored);
+    m.cai_rng.float_range(0.0, 1.0);
+    let out = ntw_campaign::save::write_save(&esf, &m, &loaded.info.header.faction_key, 1, None).expect("save");
+    let back = ntw_campaign::read(&out.to_bytes().expect("bytes"), &db).expect("reload").model;
+    assert_eq!(back.cai_rng, m.cai_rng);
+    assert_ne!(back.cai_rng.state, stored);
 }

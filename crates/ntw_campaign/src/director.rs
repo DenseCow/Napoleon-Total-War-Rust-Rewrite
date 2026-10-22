@@ -425,6 +425,8 @@ mod tests {
             discontent_growth: 0,
             town_wealth: 0,
             town_wealth_growth: 0,
+            town_wealth_refresh: Default::default(),
+            commodity_demand: Vec::new(),
             tax_exempt: false,
             religions: Vec::new(),
             class_bases: Vec::new(),

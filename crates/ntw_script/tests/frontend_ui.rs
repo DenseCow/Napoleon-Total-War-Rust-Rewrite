@@ -198,7 +198,9 @@ fn options_tabs_open_without_script_errors() {
 /// The load-game page (sp_load_game.lua) on two made-up save folders under `target`: ours
 /// (NapoleonRust's) and a stand-in for the original's. Ours are listed first and win on equal
 /// names; selecting a save shows its header (year, season, the theatre map); Load hands the
-/// chosen save's full path to the game although the page passes only its name.
+/// chosen save's full path to the game although the page passes only its name. A file whose
+/// header does not read is left out of the list (`0x0089A6F0`), and every listed entry carries its
+/// own theatre maps (sp_load_game's `OnDestroyed` walks them).
 #[test]
 fn load_game_page_lists_both_folders_and_loads_by_name() {
     let dir = data_dir();
@@ -216,6 +218,7 @@ fn load_game_page_lists_both_folders_and_loads_by_name() {
             std::fs::copy(&startpos, d.join("save_games").join(n)).unwrap();
         }
     }
+    std::fs::write(ours.join("save_games").join("D broken game.save"), b"not a save").unwrap();
     let source = ScriptSource::from_install(&dir).expect("open packs");
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).unwrap();
     let loc = Localisation::from_vfs(&vfs).unwrap();
@@ -234,6 +237,11 @@ fn load_game_page_lists_both_folders_and_loads_by_name() {
     });
     rows.sort();
     assert_eq!(rows, vec!["A game", "B game", "C original"]);
+    {
+        let world = host.world();
+        assert!((1..=3).all(|n| world.runtime_images.contains_key(&format!("save_list{n}_europe_main"))), "every listed save has its map");
+        assert!(!world.runtime_images.contains_key("save_list4_europe_main"), "the unreadable file is not listed");
+    }
     // The newest is selected on entry; pick the original's save and load it.
     let mut entry = None;
     host.world().visit_visible(root, &mut |id, n| {

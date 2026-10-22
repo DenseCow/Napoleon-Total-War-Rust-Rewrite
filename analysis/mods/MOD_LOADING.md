@@ -342,6 +342,36 @@ technology_required_technology_junctions (§3.2 table). Three typed records are 
 (`UniformRecord`, faction + unit), `building_culture_variants` (`BuildingCultureVariant`, building + culture) and
 `technology_required_technology_junctions` (`TechnologyRequirementRecord`, technology + required).
 
+### 3.3 The 16 two-key junction tables of loader 0x00DBDB90 (CONFIRMED, 2026-10-21)
+`DB_LoadTableFolderMergedByCol0Col1` 0x00DBDB90 is a sibling of 0x00e778a0: the same file list,
+version marker, flag byte 0 restart and row rule (VFS +0x68 in both directions, `bob_` wins a tie),
+with a 0x1C-byte row (`TwoKeyJunctionRow` in Ghidra: col0 UniString at +0, col1 UniString at +0xC,
+value at +0x18). After the reader fills the row (0x00DBE4F6), the loader joins col0 and col1
+(0x004F1200 at 0x00DBE511) and hashes that (0x0045C1A0), so the merge key is **col0 + col1**: two rows
+that share col0 but not col1 are both kept. Readers: `ReadTwoKeyDwordValueJunctionRow` 0x00DD2250 (4
+raw value bytes, so it serves int and float tables; thunk 0x00DE2610), `ReadTwoKeyDwordRowPerFieldStream`
+0x00DD22A0 (same layout, thunk 0x00DE2620) and `ReadTwoKeyBoolValueJunctionRow` 0x00E85910 (1-byte
+bool; thunk 0x00EDC670). The 16 callers (constructor → table):
+| constructor | table | reader |
+|---|---|---|
+| 0xdd3340 | building_effects_junction | 0xdd2250 |
+| 0xdd3390 | building_factionwide_effects_junctions | 0xdd22a0 |
+| 0xe86730 | units_to_exclusive_faction_permissions | 0xe85910 |
+| 0xf09570 | technology_effects_junction | 0xdd2250 |
+| 0xf09840 / 0xf09890 / 0xf098e0 / 0xf099d0 | trait_ability_effects / trait_attribute_effects / trait_attribute_situation_effects / trait_level_effects | 0xdd2250 |
+| 0xf94d50 / 0xf94df0 / 0xf94e40 / 0xf94e90 | agent_spawning_to_government_types / agent_spawning_to_building_chains / agent_spawning_to_policies / agent_to_agent_abilities | 0xdd2250 |
+| 0xf950c0 / 0xf95110 / 0xf95160 / 0xf951b0 | ancillary_to_ability_effects / ancillary_to_attribute_effects / ancillary_to_attribute_situation_effects / ancillary_to_effects | 0xdd2250 |
+
+Ours: `ntw_data::record::COLUMN_0_1_KEYED_TABLES` is the one list of these 16 tables. `db_record!`
+checks it at compile time: a record of a listed table must declare `key = <column 0> + <column 1>`
+(its first two fields), or the crate does not build. The eight typed records of these tables
+(`BuildingEffect`, `UnitFactionPermission`, `TechnologyEffect` in effects.rs and schemas.rs,
+`BuildingFactionwideEffect`, `TraitLevelEffect`, `TraitAttributeEffect`, `AncillaryAttributeEffect`,
+`AncillaryEffect`) now merge on both columns (before, col0 only, so a mod's second effect row for the
+same building or trait level overrode the vanilla rows of that col0 even when col1 differed). The other eight tables are not read by our code yet;
+a record added for one inherits the key from the check. Vanilla has one file per table, so its rows are
+unchanged. Test: `mod_rows_of_the_pair_keyed_loader_merge_on_columns_0_and_1` (ntw_data `mods`).
+
 ## 4. Text (.loc) (CONFIRMED)
 The exe opens only `text/localisation.loc` (0x013a85c0, opened at 0x00e20760) and `text/ui.loc`
 (0x01395cb8), by fixed path through the VFS: the §2 winner replaces the whole file; other `.loc` names

@@ -76,6 +76,9 @@ pub struct CampaignFeatures {
     /// `0x009E0570` makes), Empire campaign keys no Napoleon campaign uses (set by
     /// `ntw_campaign::features::original`). Read by [`super::CampaignModel::effects_table_technologies`].
     pub effects_technologies_hidden: bool,
+    /// The AI capture choice's liberation rules (`0x00D8C8B0` steps 1 and 2, CONFIRMED in `spa_napoleon`;
+    /// [`super::capture_ai`]). `None`: an AI capturer never liberates.
+    pub ai_capture_liberation: Option<AiCaptureLiberation>,
 }
 
 impl Default for CampaignFeatures {
@@ -96,6 +99,7 @@ impl Default for CampaignFeatures {
             diplomacy_hidden_factions: Vec::new(),
             peace_access_grants: Vec::new(),
             effects_technologies_hidden: false,
+            ai_capture_liberation: None,
         }
     }
 }
@@ -199,4 +203,21 @@ impl PeaceAccessGrant {
             None
         }
     }
+}
+
+/// Which AI capturers liberate which faction ([`CampaignFeatures::ai_capture_liberation`]). CONFIRMED
+/// (`0x00D8C8B0`, the faction keys compared case-sensitively): when the capture preview offers to liberate
+/// [`Self::target`], [`Self::liberator`] always liberates; [`Self::contested_liberator`] may, when the
+/// settlement borders a [`Self::rival`] region ([`super::capture_ai`]).
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct AiCaptureLiberation {
+    /// The faction that always liberates (CONFIRMED: `spa_portugal`, string `0x01316010`).
+    pub liberator: String,
+    /// The faction that liberates by the border test and a draw (CONFIRMED: `spa_britain`, `0x01316004`).
+    pub contested_liberator: String,
+    /// The faction liberated (CONFIRMED: `spa_spain`, `0x01316020`).
+    pub target: String,
+    /// The faction whose bordering regions the contested test looks for (CONFIRMED: `spa_france`, `0x01319F48`).
+    pub rival: String,
 }

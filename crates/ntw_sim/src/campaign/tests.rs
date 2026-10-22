@@ -13,10 +13,13 @@ mod agents_tests;
 mod ally_war_call_tests;
 mod black_shroud_tests;
 mod buildings_tests;
+mod can_save_tests;
+mod capture_ai_tests;
 mod capture_diplomacy_tests;
 mod commerce_raid_tests;
 mod construction_tests;
 mod deals_tests;
+mod peace_deal_tests;
 mod economy_tests;
 mod expense_tracker_tests;
 mod fog_turn_end_tests;
@@ -125,6 +128,8 @@ fn region(id: u32, owner: FactionId, gdp: u32, slots: usize) -> Region {
         discontent_growth: 0,
         town_wealth: 0,
         town_wealth_growth: 0,
+        town_wealth_refresh: Default::default(),
+        commodity_demand: Vec::new(),
         tax_exempt: false,
         religions: Vec::new(),
         class_bases: Vec::new(),
@@ -155,6 +160,13 @@ fn character(id: i32, faction: FactionId, kind: CharacterKind, mp: i32) -> Chara
         base_movement_points: mp,
         garrisoned_in: None,
     }
+}
+
+/// The flags of the price updates `f` runs on this thread ([`super::trade::PRICE_UPDATES`]).
+fn price_updates(f: impl FnOnce()) -> Vec<bool> {
+    super::trade::PRICE_UPDATES.with(|u| u.take());
+    f();
+    super::trade::PRICE_UPDATES.with(|u| u.take())
 }
 
 fn unit(id: i32) -> CampaignUnit {
@@ -289,6 +301,8 @@ fn split_model(commodities: &[&str], home: Vec<u32>) -> CampaignModel {
     }
     let w = TradeWaypoint { region: RegionId(10), from: 120, to: 1, sea: true, from_pos: None, to_pos: None };
     m.world.domestic_trade.insert(A, vec![TradePath { waypoints: vec![w], volumes: home, capital_port: false, accumulated: 0 }]);
+    // Each region's stored demand as a round start's demand step leaves it (`CampaignModel::refresh_region_demand`).
+    m.refresh_all_demand();
     m
 }
 

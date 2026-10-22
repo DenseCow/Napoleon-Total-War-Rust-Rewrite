@@ -27,7 +27,7 @@ directly), INFERRED (deduced, consistent with all data seen), PROVISIONAL (our s
 - `UIComponent` methods: Address, Id, Parent, ChildCount, Find, SetVisible, Visible, CurrentState, SetState, Position, Dimensions,
   MoveTo, Resize, GetStateText, SetStateText, Get/SetStateTextDetails (colour), GetProperty, Adopt, Divorce, DestroyChildren,
   SetGlobal, GlobalExists, LuaCall, SetEventCallback. Any other method logs `UNKNOWN UIComponent:<name>` and returns nil.
-- `Component.*`: Address, Root, Adopt, Destroy, CreateFromLayout, LockPriority (no effect). Others log UNKNOWN.
+- `Component.*`: Address, Root, Adopt, Destroy, CreateFromLayout, LockPriority (sets the input layer, `UI_FIDELITY.md` §5.1 "Input layer"). Others log UNKNOWN.
 - `FrontEnd.*`: ScreenSize, CampaignSavesExist (looks for `%APPDATA%\The Creative Assembly\Napoleon\save_games\*.save`),
   SpanishCampaignEnabled (false, PROVISIONAL), GameVersion ("1.3.0", PROVISIONAL), SteamNewContentAvailable (false: no Steam),
   MPHasGameInvite (false), PreviousGameType (-1), Quit, LocalisationString, UILocalisationString. The other 100 log UNKNOWN.

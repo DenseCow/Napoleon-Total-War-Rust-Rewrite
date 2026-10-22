@@ -114,7 +114,7 @@ fn campaign(turns: u32) -> Option<()> {
     let ctx = driver::context_for(&m, "eur_napoleon");
     println!("turn 0 {:016x}", m.state_hash());
     for t in 1..=turns {
-        let (_, reports) = driver::end_turn(&mut m, &data, &ctx);
+        let (_, reports) = driver::end_turn_declining_calls(&mut m, &data, &ctx);
         let orders: usize = reports.iter().map(|r| r.accepted).sum();
         println!("turn {t} {:016x} orders {orders}", m.state_hash());
         // NTW_TREASURY=1: every faction's treasury after the turn (effects slot 0-F before/after runs).

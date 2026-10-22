@@ -174,7 +174,8 @@ fn order_pips(lua: &Lua, inner: &Inner, ui: &CampaignUi, class: Option<&ClassPub
 
 /// The town wealth pip table (`0x00A995A0`, CONFIRMED): Total the region's growth (+0xD8), PipValue 50,
 /// not a percentage; per `economy::TOWN_WEALTH_FACTORS` slot with a value now or predicted (`now` /
-/// `next`: `economy::region_wealth` without and with the prediction) whose key the table has: one
+/// `next`: the stored breakdown, region +0x388 as the last `0x00AB4410` refresh left it, and a fresh
+/// `economy::region_wealth` with the prediction) whose key the table has: one
 /// factor, or two (now, then predicted, each against 0) when the two have opposite signs; the tax slot
 /// of a tax-exempt region counts as 0 now and never splits. A factor (`0x00A4E250`) is positive when its
 /// first non-zero value is not negative; its pip is the table's column 1 and its text the sign's
@@ -255,6 +256,8 @@ struct Facts {
     governorship: bool,
     projection: population::Projection,
     wealth_next: economy::RegionWealth,
+    /// The stored trend of the predicted growth (region +0xC4, `economy::TownWealthRefresh`).
+    wealth_trend: u32,
 }
 
 /// What the details (`0x009E69B0`) add: only `InitialiseRegionInfoDetails` computes these.
@@ -263,7 +266,8 @@ struct DetailFacts {
     governor: Option<CharacterId>,
     upper: Option<ClassPublicOrder>,
     lower: Option<ClassPublicOrder>,
-    wealth_now: economy::RegionWealth,
+    /// The growth breakdown as the region last refreshed it (region +0x388, `economy::TownWealthRefresh`).
+    wealth_now: [i32; 10],
     predicted_upper: Option<ClassPublicOrder>,
     predicted_lower: Option<ClassPublicOrder>,
 }
@@ -319,7 +323,7 @@ fn region_facts(ui: &CampaignUi, r: RegionId, details: bool) -> Option<(Facts, O
             governor: post.and_then(|p| p.holder).filter(|c| m.world.characters.contains_key(c)),
             upper,
             lower,
-            wealth_now: economy::region_wealth(&m, Some(&fx), reg, false),
+            wealth_now: reg.town_wealth_refresh.factors,
             predicted_upper,
             predicted_lower,
         }
@@ -341,6 +345,7 @@ fn region_facts(ui: &CampaignUi, r: RegionId, details: bool) -> Option<(Facts, O
         governorship: post.is_some(),
         projection,
         wealth_next: economy::region_wealth(&m, Some(&fx), reg, true),
+        wealth_trend: reg.town_wealth_refresh.trend,
     };
     Some((facts, extra))
 }
@@ -367,9 +372,9 @@ fn region_info_table(lua: &Lua, inner: &Inner, ui: &CampaignUi, r: RegionId, fac
     t.set("PopulationChange", facts.projection.predicted.trend)?;
     let wealth = i64::from(facts.gdp) + i64::from(facts.town_wealth);
     t.set("Wealth", wealth)?;
-    // Region +0xC4: the trend of the predicted town wealth growth (`0x00AB4410`'s second recompute, the
-    // predicted mode of `0x00A6AFC0`), `economy::wealth_trend`.
-    t.set("WealthChange", economy::wealth_trend(facts.wealth_next.growth))?;
+    // Region +0xC4 as stored: the trend of the predicted town wealth growth that the region's last refresh
+    // set (`0x00AB4410`'s second recompute, the predicted mode of `0x00A6AFC0`; `economy::TownWealthRefresh`).
+    t.set("WealthChange", facts.wealth_trend)?;
     let (upper_tax, lower_tax) = match facts.rates {
         Some(x) if !facts.rebel => (x.upper, x.lower),
         _ => (0.0, 0.0),
@@ -421,7 +426,7 @@ fn region_details_extras(lua: &Lua, inner: &Inner, ui: &CampaignUi, t: &Table, f
     // table (`table_list wealth`: only `town_wealth_growth_factors`), so the original lists none either.
     let wealth = i64::from(facts.gdp) + i64::from(facts.town_wealth);
     t.set("RegionWealth", bare_pips(lua, wealth, 50, false)?)?;
-    let (now, next) = (&details.wealth_now.factors, &facts.wealth_next.factors);
+    let (now, next) = (&details.wealth_now, &facts.wealth_next.factors);
     t.set("TownWealth", town_wealth_pips(lua, inner, ui, details.town_wealth_growth, now, next, facts.tax_exempt)?)?;
     // ReligiousBreakdown (`0x00A99510` → `0x00A4E200`, CONFIRMED): each religion of the projection's
     // current breakdown (normalised, `0x00A72990`) with a share above 0, in the region's order:

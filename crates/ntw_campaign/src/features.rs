@@ -2,7 +2,7 @@
 //! [`CampaignFeatures`] the exe hard-codes for them (MODDING_AUDIT.md §1.1). The model reads the
 //! table, never the key, so a campaign of another source sets its own.
 
-use ntw_sim::campaign::features::{CampaignFeatures, LootResentment, PeaceAccessGrant, UnitKeyEffects};
+use ntw_sim::campaign::features::{AiCaptureLiberation, CampaignFeatures, LootResentment, PeaceAccessGrant, UnitKeyEffects};
 
 /// The Peninsular campaign's key: the exe's switches below test it (each CONFIRMED at the address the
 /// feature's field names).
@@ -49,6 +49,13 @@ pub fn original(key: &str) -> CampaignFeatures {
             grantee: "spa_britain".into(),
             turns: -1,
         }];
+        // The AI capture choice `0x00D8C8B0`: Portugal liberates Spain; Britain may, by the French border test.
+        f.ai_capture_liberation = Some(AiCaptureLiberation {
+            liberator: "spa_portugal".into(),
+            contested_liberator: "spa_britain".into(),
+            target: "spa_spain".into(),
+            rival: "spa_france".into(),
+        });
     }
     if key == MP_EUROPE {
         f.ai_recruitment_points = vec![("france".into(), 1)];
@@ -91,6 +98,8 @@ mod tests {
         assert_eq!((lr.exempt_looter.as_deref(), lr.factor.as_str(), lr.value), (Some("spa_france"), "abandoned_ally_in_war", -50));
         let [grant] = spa.peace_access_grants.as_slice() else { panic!("one peace access grant") };
         assert_eq!((grant.granters.as_slice(), grant.grantee.as_str(), grant.turns), (&["spa_spain".to_owned(), "spa_portugal".to_owned()][..], "spa_britain", -1));
+        let lib = spa.ai_capture_liberation.as_ref().expect("AI capture liberation");
+        assert_eq!((lib.liberator.as_str(), lib.contested_liberator.as_str(), lib.target.as_str(), lib.rival.as_str()), ("spa_portugal", "spa_britain", "spa_spain", "spa_france"));
         let mp = original("mp_eur_napoleon");
         assert_eq!(mp.ai_recruitment_bonus("france"), 1);
         assert_eq!(mp.ai_recruitment_bonus("britain"), 0);

@@ -6,9 +6,10 @@
 //! - **Add** (`0x0052EDB0`, called by the soldier-pair collision handler `0x0064CAD0` once for each
 //!   soldier of the pair, and by the local group pair loop `0x0066E680`): an enemy soldier counts
 //!   when he is within `r_own + r_enemy + 2 m` of one of the squad's soldiers ([`CONTACT_MARGIN_M`],
-//!   the radii are the soldiers' `+0x58`); his unit's entry gains one contact, or a new entry
-//!   `{unit, 1, 0}` is appended. A bitset keyed by the enemy soldier's battle-wide index makes each
-//!   soldier count at most once per update.
+//!   the radii are the soldiers' `+0x58`, read at `0x0052EE29` / `0x0052EE38`: our
+//!   [`LandUnit::man_radius`], not the squad box's cover radius `+0x620`); his unit's entry gains
+//!   one contact, or a new entry `{unit, 1, 0}` is appended. A bitset keyed by the enemy soldier's
+//!   battle-wide index makes each soldier count at most once per update.
 //! - **Commit** (`0x00551A40`, called only from `SQUAD::update` `0x00580A30` at `0x00580B85`, after
 //!   the summary refresh, when the squad has men): every entry whose unit was also in the last
 //!   committed list takes that entry's update counter plus one; the filled list becomes the
@@ -111,6 +112,8 @@ impl Battle {
         let mut own = std::mem::take(&mut list.men.0);
         own.clear();
         own.extend(u.men_standing().map(|m| m.pos));
+        // The reach is both men's own radius `+0x58` (`0x0052EE29` / `0x0052EE38`), not the cover
+        // radius `+0x620` the squad box reads (`LandUnit::cover_radius`).
         let (own_box, own_r) = (u.squad_box(), u.man_radius);
         let (mut lo, mut hi) = ((f32::INFINITY, f32::INFINITY), (f32::NEG_INFINITY, f32::NEG_INFINITY));
         for &(x, z) in own.iter() {

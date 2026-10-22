@@ -110,6 +110,7 @@ fn a_played_campaign_round_trips_through_our_own_save() {
         rebel_faction: opened.loaded.rebel_faction,
         script_values: opened.loaded.script_values.clone(),
         restricted_units: Vec::new(),
+        camera: opened.loaded.camera.clone(),
     };
     let t = std::time::Instant::now();
     let bytes = own_save::write(&info, &data).expect("write");

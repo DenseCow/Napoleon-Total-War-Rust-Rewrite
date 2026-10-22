@@ -763,9 +763,10 @@ impl CampaignModel {
 
     /// Re-evaluates a character's hidden flag (`0x009D3000` → `0x009D0FB0` → [`Self::stealthy`];
     /// `CharacterDetails::hidden`). The original runs it for every character when a campaign is
-    /// created (`0x008B42F0`), at the character's turn start (`0x00A24EB0`), after a move
-    /// (`0x00A285E0`) and when his force's units change (`0x008B4260`). Rebel characters are left
-    /// as they are (INFERRED: rebel armies on hiding ground are not hidden in the vanilla saves).
+    /// created (`0x008B42F0`), at the character's turn start (`0x00A24EB0`), after a move or a
+    /// placement (`0x00A285E0` with argument 1, [`Self::set_down`]) and when his force's units change
+    /// (`0x008B4260`). Rebel characters are left as they are (INFERRED: rebel armies on hiding ground
+    /// are not hidden in the vanilla saves).
     pub fn update_hidden(&mut self, c: CharacterId) {
         let Some(ch) = self.world.characters.get(&c) else { return };
         // A character of a faction the world no longer holds is left as it is too.

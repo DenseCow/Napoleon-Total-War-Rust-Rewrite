@@ -502,19 +502,6 @@ function __ntw_battle_click(addr, add)
     return false
 end
 
--- Component.LockPriority(p) returns the previous lock (INFERRED: PanelManager stores the result
--- as the panel's PriorityLock and logs "Priority lock on panel open. Was: ..."). Input priority
--- itself has no effect in our renderer yet.
-local priority_lock = 0
-__comp.LockPriority = function(_, p)
-    local prev = priority_lock
-    priority_lock = tonumber(p) or priority_lock
-    return prev
-end
-__comp.UnLockPriority = function()
-    priority_lock = 0
-end
-
 -- MPAvatar(index): the player's online (Steam) avatar image for the results' team entries
 -- (CONFIRMED use in template.battle_results_team_entry.lua). No Steam: an object whose
 -- SetComponentTexture / Free do nothing (PLACEHOLDER: the entry keeps its default picture).

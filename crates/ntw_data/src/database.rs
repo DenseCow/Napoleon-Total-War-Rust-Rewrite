@@ -348,11 +348,16 @@ fn load_campaign(vfs: &Loader) -> Result<crate::campaign::CampaignTables, DataEr
         government_relations: load(vfs)?,
         attitude_thresholds: load(vfs)?,
         cdir_configs: load(vfs)?,
+        // Only the campaign AI reads them (no row: no personality, no tunable).
+        ai_personalities: load_optional(vfs)?,
+        ai_personality_tunables: load_optional(vfs)?,
         // Only the diplomat's greeting reads them (no line → "Missing String", as the exe).
         negotiation_strings: load_optional(vfs)?,
         negotiation_override_strings: load_optional(vfs)?,
         // Only the campaign's outcome movies read it (no row: no movie, as the exe).
         movie_event_strings: load_optional(vfs)?,
+        // Only the campaign event messages read it (no row: the exe posts no message).
+        message_event_strings: load_optional(vfs)?,
         naval_stats: load(vfs)?,
         chains: load(vfs)?,
         chain_slots: load(vfs)?,

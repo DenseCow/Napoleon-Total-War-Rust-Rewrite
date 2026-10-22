@@ -2780,13 +2780,23 @@ fn minister_portrait_fallback_follows_the_models_alternate() {
 #[test]
 fn shipped_key_bindings_end_the_turn_open_the_escape_menu_and_step_the_camera() {
     use ntw_formats::default_keys::{Held, PATH, Shortcuts};
-    use ntw_script::ui::{CampaignKey, ShortcutMachine};
+    use ntw_script::ui::{CampaignKey, CampaignKeys, ShortcutMachine};
+    /// One frame: a key event (`up`, `repeat`), then the frame's poll with `down` held.
+    type KeyFn<'a> = dyn FnMut(&Setup, &[&str], bool, bool, &mut Vec<String>) + 'a;
     let Some(s) = setup() else { return };
+    {
+        // France's turn under way, as the game starts it: the escape menu's save button opens the
+        // save panel only when CanSave() (`CampaignModel::can_save`).
+        let mut st = s.scripts.state_mut();
+        let f = st.model.faction_by_key(&s.human).unwrap().id;
+        st.model.turn = ntw_sim::campaign::TurnState::in_turn_of(f, vec![f]);
+    }
     let vfs = ntw_formats::pack::Vfs::open_install(data_dir()).unwrap();
     let mut m = ShortcutMachine::new(Shortcuts::parse(&vfs.read(PATH).unwrap()).unwrap().mode_bindings("campaign"));
     let mut steps = Vec::new();
     let mut key = |s: &Setup, down: &[&str], up: bool, repeat: bool, steps: &mut Vec<String>| {
-        s.host.campaign_key(&mut m, CampaignKey { down, up, repeat, held: Held::default(), time: 0.1, ..Default::default() }, &mut |f, _| steps.push(f.to_owned()))
+        s.host.campaign_key(CampaignKey { up, repeat, held: Held::default(), ..Default::default() });
+        s.host.campaign_keys(&mut m, CampaignKeys { down, held: Held::default(), time: 0.1 }, &mut |f, _| steps.push(f.to_owned()));
     };
     key(&s, &["RETURN"], false, false, &mut steps);
     assert!(s.host.take_campaign_requests().iter().all(|r| !matches!(r, CampaignRequest::EndTurn)), "the button acts on the release");
@@ -2799,5 +2809,121 @@ fn shipped_key_bindings_end_the_turn_open_the_escape_menu_and_step_the_camera() 
     key(&s, &["ESCAPE"], false, false, &mut steps);
     key(&s, &[], true, false, &mut steps);
     assert!(errors(&s.host).is_empty());
-    assert!(find(&s.host, s.root, "esc_menu_campaign").is_some(), "ESCAPE opens the escape menu");
+    let menu = find(&s.host, s.root, "esc_menu_campaign").expect("ESCAPE opens the escape menu");
+    // Bug (user, 2026-10-20): Return still ended the turn with the save panel open from the escape
+    // menu. PanelManager locks the input layer to the menu's priority (40, `PriorityLock`), above
+    // `button_end_turn`'s (0): its binding is locked (`0x00DACBA0`), and so is the camera (layer
+    // 10 or more, `0x009535B0`).
+    let ends_turn = |s: &Setup, key: &mut KeyFn, steps: &mut Vec<String>| {
+        key(s, &["RETURN"], false, false, steps);
+        key(s, &[], true, false, steps);
+        key(s, &["W"], false, false, steps);
+        key(s, &[], true, false, steps);
+        s.host.take_campaign_requests().iter().any(|r| matches!(r, CampaignRequest::EndTurn))
+    };
+    steps.clear();
+    assert!(!ends_turn(&s, &mut key, &mut steps), "the escape menu locks end_turn");
+    let save = find(&s.host, menu, "button_save").expect("the menu's save button");
+    click(&s.host, save);
+    // This setup has no save folder (`FrontEndFacts::default`), so the panel's save list fails.
+    assert!(errors(&s.host).iter().all(|e| e.contains("EnumerateMultiplayerCampaignSaves")));
+    assert!(find(&s.host, s.root, "load-save_game").is_some(), "the save panel is open");
+    assert!(!ends_turn(&s, &mut key, &mut steps), "the save panel locks end_turn");
+    assert!(steps.is_empty(), "the camera is locked: {steps:?}");
+    // Cancel closes the save panel and PanelManager shows the escape menu again (`CheckAndShowSide`,
+    // which locks to its priority once more); ESCAPE closes the menu and the layer is back to 0.
+    let cancel = find(&s.host, s.root, "button_cancel").expect("the save panel's cancel");
+    click(&s.host, cancel);
+    assert!(find(&s.host, s.root, "esc_menu_campaign").is_some(), "the escape menu is back");
+    assert!(!ends_turn(&s, &mut key, &mut steps), "the escape menu locks end_turn again");
+    key(&s, &["ESCAPE"], false, false, &mut steps);
+    key(&s, &[], true, false, &mut steps);
+    // Bug (2026-10-20): PanelManager's `StealShortcutKey(true, "ESCAPE")` failed, so the close
+    // stopped in `CheckAndShowSide`.
+    assert!(errors(&s.host).is_empty());
+    assert!(find(&s.host, s.root, "load-save_game").is_none() && find(&s.host, s.root, "esc_menu_campaign").is_none(), "both panels closed");
+    assert!(ends_turn(&s, &mut key, &mut steps), "Return ends the turn again");
+    assert_eq!(steps, ["step_fwd"], "the camera is unlocked");
+}
+
+/// Makes an AI faction declare war on an AI ally of the human (France), so the call to war waits
+/// for France's answer: returns (declarer, target) keys.
+fn france_is_called_to_war(s: &Setup) -> (String, String) {
+    use ntw_sim::campaign::Stance;
+    let mut st = s.scripts.state_mut();
+    let m = &mut st.model;
+    let me = m.faction_by_key(&s.human).unwrap().id;
+    let live: Vec<_> = m.world.factions.values().filter(|f| f.id != me && m.in_the_game(f.id) && f.key != "rebels").map(|f| (f.id, f.key.clone())).collect();
+    let neutral = |m: &ntw_sim::campaign::CampaignModel, a, b| m.world.stance(a, b) == Stance::Neutral && m.world.stance(b, a) == Stance::Neutral;
+    let (target, declarer) = live
+        .iter()
+        .flat_map(|t| live.iter().map(move |d| (t, d)))
+        .find(|(t, d)| t.0 != d.0 && neutral(m, me, t.0) && neutral(m, me, d.0) && neutral(m, t.0, d.0))
+        .map(|(t, d)| (t.clone(), d.clone()))
+        .expect("three factions at peace");
+    m.form_alliance(me, target.0).unwrap();
+    m.apply(CampaignCommand::DeclareWar { a: declarer.0, b: target.0 }).unwrap();
+    assert_eq!(m.pending_ally_war_calls.len(), 1, "France's call waits");
+    (declarer.1, target.1)
+}
+
+/// The human side of a call to war on the original layouts: the waiting call reaches the root's
+/// `ShowMessage`, the shipped message handler opens the `event_message` panel by itself
+/// (`AutoShow`) in its `ally_attacked` layout with both sides named, the assist button for the
+/// attacked ally sends `RespondToAllyWarCall` for that side, and the message is shown once per call.
+/// Run on the install: `cargo test -p ntw_script --test campaign_ui ally_attacked -- --nocapture`.
+#[test]
+fn ally_attacked_message_opens_and_its_assist_button_joins_the_ally() {
+    let Some(s) = setup() else { return };
+    no_errors(&s.host);
+    let (declarer, target) = france_is_called_to_war(&s);
+    assert!(s.host.campaign_ally_war_call(), "the message is shown");
+    assert!(errors(&s.host).is_empty());
+    assert!(!s.host.campaign_ally_war_call(), "once per call");
+    let aggressor = find(&s.host, s.root, "dy_aggressor").expect("the ally_attacked layout shows the aggressor");
+    let defender = find(&s.host, s.root, "dy_defender").expect("and the defender");
+    let name = |k: &str| loc_text(&format!("factions_screen_name_{k}"));
+    assert_eq!(text(&s.host, aggressor), name(&declarer));
+    assert_eq!(text(&s.host, defender), name(&target));
+    let assist = find(&s.host, s.root, "assist_button1").expect("the assist button");
+    click(&s.host, assist);
+    let target_id = s.scripts.state_mut().model.faction_by_key(&target).unwrap().id;
+    let reqs = s.host.take_campaign_requests();
+    assert!(
+        reqs.iter().any(|r| matches!(r, CampaignRequest::Command(CampaignCommand::RespondToAllyWarCall { side: Some(f), accept: true }) if *f == target_id)),
+        "requests: {reqs:?}"
+    );
+    assert!(errors(&s.host).is_empty());
+}
+
+/// The decline button refuses the call (`DeclineSidingWithAlly` with the inviting side's key: here the
+/// attacked ally invited, event_message.lua:515), and the model's answer clears the call and breaks
+/// France's alliance with it, after which nothing is shown.
+#[test]
+fn ally_attacked_decline_refuses_the_call() {
+    let Some(s) = setup() else { return };
+    no_errors(&s.host);
+    let (_, target) = france_is_called_to_war(&s);
+    let (me, target_id) = {
+        let st = s.scripts.state_mut();
+        (st.model.faction_by_key(&s.human).unwrap().id, st.model.faction_by_key(&target).unwrap().id)
+    };
+    assert!(s.host.campaign_ally_war_call());
+    assert!(errors(&s.host).is_empty());
+    click(&s.host, find(&s.host, s.root, "decline_button").expect("the decline button"));
+    let reqs = s.host.take_campaign_requests();
+    let answers: Vec<_> = reqs.into_iter().filter(|r| matches!(r, CampaignRequest::Command(CampaignCommand::RespondToAllyWarCall { .. }))).collect();
+    assert!(
+        matches!(answers.as_slice(), [CampaignRequest::Command(CampaignCommand::RespondToAllyWarCall { side: Some(f), accept: false })] if *f == target_id),
+        "answers: {answers:?}"
+    );
+    for r in answers {
+        if let CampaignRequest::Command(cmd) = r {
+            s.scripts.state_mut().model.apply(cmd).expect("the answer applies");
+        }
+    }
+    assert!(s.scripts.state_mut().model.pending_ally_war_calls.is_empty());
+    assert!(!s.scripts.state_mut().model.allied_like_with(me, target_id), "refusing breaks the alliance");
+    assert!(!s.host.campaign_ally_war_call(), "nothing waits");
+    assert!(errors(&s.host).is_empty());
 }

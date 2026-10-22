@@ -22,7 +22,7 @@
 
 use super::details::{AttitudeFactor, RegularPayment, Relationship, ATTITUDE_FACTORS};
 use super::events::{CampaignEvent, CampaignMessage};
-use super::ids::FactionId;
+use super::ids::{CharacterId, FactionId};
 use super::population::ClassWarEvent;
 use super::world::{CampaignModel, GovernmentType, Stance};
 use super::CommandError;
@@ -95,6 +95,20 @@ pub struct AllyWarCall {
 }
 
 impl AllyWarCall {
+    /// The `ally_attacked` message's `InvitedByAggressor`: the signal `0x00B268B0` fires on the campaign's
+    /// +0xB10 slot (+0xC, handler `0x00A14B80` → `0x009CA900`) carries the offer's +0x61 flag when the
+    /// target's loop asks (`0x00B26B80`) and 1 when the declarer's does (`0x00B26D79`): in both cases
+    /// [`Self::allied_to_declarer`]. CONFIRMED by disassembly.
+    pub fn invited_by_declarer(&self) -> bool {
+        self.allied_to_declarer
+    }
+
+    /// The message's `InvitedByDefender` (the signal's +0xD): 1 from the target's loop, 0 from the
+    /// declarer's, even when the ally is allied to the target too (CONFIRMED, same addresses).
+    pub fn invited_by_target(&self) -> bool {
+        self.asked_by_target_side
+    }
+
     pub(crate) fn hash_into(&self, h: &mut crate::fnv::Fnv64) {
         for f in [self.declarer, self.target, self.ally] {
             h.i32(f.raw());
@@ -260,8 +274,12 @@ pub fn attitude_category(thresholds: &std::collections::BTreeMap<String, i32>, t
 }
 
 impl CampaignModel {
-    /// The relationship record of `a` towards `b`, created (24 zeroed factors) when missing.
+    /// The relationship record of `a` towards `b`, created (24 zeroed factors) when missing and then
+    /// listed last in `a`'s record order ([`super::World::list_new_record`]).
     pub fn relationship_mut(&mut self, a: FactionId, b: FactionId) -> &mut Relationship {
+        if !self.world.relationships.contains_key(&(a, b)) {
+            self.world.list_new_record(a, b);
+        }
         let r = self.world.relationships.entry((a, b)).or_insert_with(|| Relationship {
             attitudes: vec![AttitudeFactor::default(); ATTITUDE_FACTORS.len()],
             allows_region_return: true,
@@ -308,8 +326,7 @@ impl CampaignModel {
     ///    it by their attitude after the allies' wars and broken alliances;
     /// 4. then the zones of control again (`0x00B795A0`).
     ///
-    /// When step 1 reaches a human ally not yet at war (with [`CampaignModel::ask_human_allies`] on;
-    /// off, it is skipped), the declaration stops there: the ally's
+    /// When step 1 reaches a human ally not yet at war, the declaration stops there: the ally's
     /// [`AllyWarCall`] is pushed on [`CampaignModel::pending_ally_war_calls`] with the lists so far,
     /// [`CampaignEvent::AllyWarCallPending`] is raised, and steps 2-4 wait for the answer
     /// ([`Self::respond_to_ally_war_call`], which resumes here). CONFIRMED: `0x00B268B0` returns after
@@ -319,6 +336,9 @@ impl CampaignModel {
     /// the path grid's view and the trade price update (`0x00B67490`, `0x00BCB020`, no model state).
     pub fn declare_war_rules(&mut self, a: FactionId, b: FactionId) -> Result<Vec<CampaignEvent>, CommandError> {
         self.check_diplomacy_pair(a, b)?;
+        // ORIGINAL BUG: `0x00B268B0` / `0x00B26700` declare a war that already exists again (allies
+        // called, notices and attitude factors added once more); ours refuses it (see
+        // [`Self::declare_war_command`]).
         if self.world.stance(a, b) == Stance::War {
             return Err(CommandError::AlreadyAtWar(a, b));
         }
@@ -532,7 +552,7 @@ impl CampaignModel {
         if gave_access {
             match ally {
                 Some(_) => self.relationship_mut(b, a).military_access_turns = 0,
-                None => self.abuse_access(b, a),
+                None => self.abuse_access(b, a, &mut events),
             }
         }
         if ally.is_none() {
@@ -577,8 +597,8 @@ impl CampaignModel {
     /// `owner`'s `abused_military_access` factor gets the event's value + `count` × (−10), `count` =
     /// the times `a` abused an access before (`a`'s manager +0x18, read by `0x004CE450`; 0 when it has
     /// no entry); then that count +1 (`0x00B0DABA`). CONFIRMED by disassembly.
-    fn abuse_access(&mut self, owner: FactionId, a: FactionId) {
-        self.cancel_military_access(owner, a);
+    fn abuse_access(&mut self, owner: FactionId, a: FactionId, events: &mut Vec<CampaignEvent>) {
+        self.cancel_military_access(owner, a, events);
         let count = self.world.access_abuses.get(&a).copied().unwrap_or(0);
         let e = event("abused_military_access");
         self.relationship_mut(owner, a).factor_mut("abused_military_access").add(e.value + ABUSED_ACCESS_STEP * count as i32, e.drift, e.limit);
@@ -589,23 +609,18 @@ impl CampaignModel {
     /// `a` and `b` make peace (`0x00B262C0` → `0x00B26590` on both records):
     /// the `war` factor gets the `peace` event added (`peace_dragged_by_ally` if the side was in the war
     /// for an ally, `war_ally`, which is then cleared); friendship 10 turns; the war counters (#10–#13)
-    /// zeroed. The access an alliance of `a` had suspended for this enemy is restored (`0x00B0D0C0`, on
-    /// `a`'s side only), and a side given back no access leaves the other's regions. Unless
+    /// zeroed. The access each side's alliances had suspended for the war on the other is restored
+    /// (`0x00B0D0C0`: `a`'s alliances, then `b`'s; the exe does `a`'s only, an ORIGINAL BUG fixed below),
+    /// and a side given back no access leaves the other's regions. Unless
     /// `suppress_messages`, each side gets the `ceasefire_declared` message about the other, `b` first
     /// (`0x009D1F20`, posted with no human test; the flag is the `CCQ_MAKE_PEACE` command's byte, set only
-    /// by the script's `force_make_protectorate` `0x0097AA20`, never saved). Last, a
+    /// by the script's `force_make_protectorate` `0x0097AA20`, never saved), after the peace's own trade price
+    /// update with flag 0 ([`Self::update_commodity_prices_with`], `0x00BCB020(0)` at `0x00B2643F`, on every
+    /// peace; each siege end, blockade lift and raid clear before it runs its own). Last, a
     /// [`CampaignFeatures::peace_access_grants`](super::features::CampaignFeatures::peace_access_grants) row
     /// gives its grantee access (`0x00B444B0`). CONFIRMED by disassembly of `0x00B262C0`.
     pub fn make_peace_rules(&mut self, a: FactionId, b: FactionId, suppress_messages: bool) -> Result<Vec<CampaignEvent>, CommandError> {
         let mut events = self.world.make_peace(a, b)?;
-        // 0x00A25570 (0x00A255C5): a commander of either side besieging a settlement the other side
-        // owns ends his siege.
-        self.end_sieges_on_peace(a, b);
-        // 0x00A25570 (0x00A25627, after the siege call): a commander of either side blockading a port the
-        // other side holds lifts the blockade.
-        self.lift_blockades_on_peace(a, b);
-        // 0x00A25570: a commander of either side raiding the other side loses all his raids.
-        self.clear_raids_on_peace(a, b);
         for (x, y) in [(a, b), (b, a)] {
             let r = self.relationship_mut(x, y);
             let e = if r.war_ally.is_some() { event("peace_dragged_by_ally") } else { event("peace") };
@@ -618,24 +633,48 @@ impl CampaignModel {
             r.turns_since_battle = 0;
         }
         // 0x00B0D0C0 (enemy `b`) on each of `a`'s alliance records (stance 2–4, record order), then on that
-        // ally's record towards `a`. Only `a`'s side: the loop runs on the proposer's manager alone (CONFIRMED,
-        // `0x00B262C0`, `force_make_peace` `0x00936710` passing the first faction's).
-        let allies: Vec<FactionId> = self
-            .world
-            .record_targets_in_order(a)
-            .into_iter()
-            .filter(|&x| matches!(self.world.stance(a, x), Stance::Allied | Stance::Patron | Stance::Protectorate))
-            .collect();
-        for ally in allies {
-            for (owner, target) in [(a, ally), (ally, a)] {
-                if self.restore_access_suspended_for(owner, target, b) {
-                    self.expel_from_lands_of(target, owner);
+        // ally's record towards `a` (CONFIRMED, `0x00B262C0`'s loop over its own manager's records).
+        // ORIGINAL BUG (0x00B262C0): the loop runs on the proposer's manager alone (`this` = the first
+        // faction's +0x528: `HandleMakePeaceCommand` `0x00936710`, `ApplyPeaceRecordOnAccept` `0x00C18B60`
+        // with the deal's proposer), so `b`'s allies that joined `b`'s war on `a` keep their indefinite
+        // access and their `allied_in_war_against` item for `a` after the peace: the saved access is never
+        // given back (only an alliance break, or that ally's own peace with `a` as the proposer, clears it),
+        // the cancel stays forbidden (`0x00C1A5D0` → `0x00B0CCD0`), and which side keeps them depends only on
+        // who proposed, while every other step of `0x00B262C0` (both records, both zone floods, both
+        // character walks, both messages) treats the two sides alike. Ours runs the same loop for `b`'s
+        // alliances (enemy `a`) after `a`'s.
+        for (side, enemy) in [(a, b), (b, a)] {
+            let allies: Vec<FactionId> = self
+                .world
+                .record_targets_in_order(side)
+                .into_iter()
+                .filter(|&x| matches!(self.world.stance(side, x), Stance::Allied | Stance::Patron | Stance::Protectorate))
+                .collect();
+            for ally in allies {
+                for (owner, target) in [(side, ally), (ally, side)] {
+                    if self.restore_access_suspended_for(owner, target, enemy) {
+                        self.expel_from_lands_of(target, owner, &mut events);
+                    }
                 }
             }
         }
-        // `0x00B262C0` floods the zones again: the proposer's, then the target's (CONFIRMED, disassembly).
-        self.refresh_faction_zones(a);
-        self.refresh_faction_zones(b);
+        // Then, per side, the zone flood `0x00B795A0` and `ClearCommerceRaidsBetweenFactions` `0x00A25570` on
+        // each character of its character list towards the other: the proposer's (`0x00B26392`, the walk's call
+        // at `0x00B263C5`), then the target's (`0x00B263D7`, `0x00B26409`; CONFIRMED, disassembly). The loop
+        // above comes first, so a raider its expulsion moves has lost his raids (`move_character`) without a
+        // price update before the walk reaches him. Each character's steps run in turn, and each that ends
+        // something runs its own price update, whose raid check can end a later character's raids first; so
+        // the walk is per character.
+        for (side, other) in [(a, b), (b, a)] {
+            self.refresh_faction_zones(side);
+            for c in self.world.faction_characters_in_list_order(side) {
+                self.end_war_actions_on_peace(c, other);
+            }
+        }
+        // `0x00B262C0`'s own price update `0x00BCB020(0)` (the call at `0x00B2643F`, after both sides'
+        // `0x00A25570` loops and the path grid's `0x00B67490`, before the messages), on every peace: one more
+        // than the siege ends, lifts and raid clears ran (CONFIRMED, disassembly).
+        self.update_commodity_prices_with(false);
         if !suppress_messages {
             for (recipient, other) in [(b, a), (a, b)] {
                 events.push(CampaignEvent::Message { recipient, message: CampaignMessage::CeasefireDeclared { other } });
@@ -654,6 +693,19 @@ impl CampaignModel {
         }
         self.diplomacy_changed();
         Ok(events)
+    }
+
+    /// A peace's step for character `c` towards the other side `other` (`ClearCommerceRaidsBetweenFactions`
+    /// `0x00A25570`, CONFIRMED, disassembly), in the exe's order: his force (character +0x2A8 as an army,
+    /// `0x009D3A40`) besieging a settlement `other` owns ends that siege ([`Self::end_siege_on_peace`], the
+    /// call at `0x00A255C5`); his force as a navy (`0x009D3A80`) blockading a port `other` holds lifts it
+    /// ([`Self::lift_blockade_on_peace`], `0x00A25627`); then, while he still raids and one of his raids is
+    /// on `other` (`0x008BC560`, `0x008CEEB0`), his raids end ([`Self::end_raids_on_peace`], `0x009DA140`).
+    /// Each step that ends something runs the price update `0x00BCB020(0)`.
+    fn end_war_actions_on_peace(&mut self, c: CharacterId, other: FactionId) {
+        self.end_siege_on_peace(c, other);
+        self.lift_blockade_on_peace(c, other);
+        self.end_raids_on_peace(c, other);
     }
 
     /// `0x00B0D0C0` on `owner`'s record towards `target`: the `allied_in_war_against` item for `enemy` gives
@@ -766,14 +818,16 @@ impl CampaignModel {
         let lost = self.restore_first_suspended_access(a, b);
         self.world.set_stance(a, b, Stance::Neutral)?;
         if lost && !from_war {
-            self.expel_from_lands_of(b, a);
+            self.expel_from_lands_of(b, a, &mut events);
         }
         // 0x00B0CA20 on `b`→`a`: a protectorate's tie to its patron `a` ends first (the war flag passed
-        // as its skip flag), then the record's own steps. Deliberately deduplicated: the tie's only event is
-        // the pair's change to neutral, the same change pushed once below, so it is not passed on.
+        // as its skip flag), then the record's own steps. The tie's move notices pass on; its last event,
+        // the pair's change to neutral, is the same change pushed once below, so it is dropped here.
         if b_protectorate {
-            let tie = self.end_protectorate_tie_with(b, a, from_war)?;
-            debug_assert!(matches!(tie.as_slice(), [CampaignEvent::StanceChanged { stance: Stance::Neutral, .. }]));
+            let mut tie = self.end_protectorate_tie_with(b, a, from_war)?;
+            debug_assert!(matches!(tie.last(), Some(CampaignEvent::StanceChanged { stance: Stance::Neutral, .. })));
+            tie.pop();
+            events.extend(tie);
         }
         {
             let r = self.relationship_mut(b, a);
@@ -785,7 +839,7 @@ impl CampaignModel {
         self.change_treaty_money(b, a, |r| (r.protectorate_income, r.protectorate_tribute) = (0, 0));
         let lost = self.restore_first_suspended_access(b, a);
         if lost && !from_war {
-            self.expel_from_lands_of(a, b);
+            self.expel_from_lands_of(a, b, &mut events);
         }
         self.diplomacy_changed();
         events.push(CampaignEvent::StanceChanged { a, b, stance: Stance::Neutral });
@@ -890,9 +944,9 @@ impl CampaignModel {
     /// base − used share by the granted length (5: 50 − 10·elapsed; 10: 60 − 6·elapsed; 20: 70 − 7·elapsed/2;
     /// other: 90 − 5·elapsed/2, unsigned halves) and the access ends; then `b`'s forces leave each of `a`'s
     /// regions ([`Self::expel_from_each_region_of`], unconditionally: the war abuse path, `0x00B0DAF0`, comes after
-    /// the stance turned to war, so they may stay there). Returns the grievance added (the
+    /// the stance turned to war, so they may stay there; the move notices go to `events`). Returns the grievance added (the
     /// command path, `0x00B67B20`, also adds a third of it to `a`'s manager +0x20: [`World::access_cancel_marks`](super::World::access_cancel_marks)).
-    pub fn cancel_military_access(&mut self, a: FactionId, b: FactionId) -> i32 {
+    pub fn cancel_military_access(&mut self, a: FactionId, b: FactionId, events: &mut Vec<CampaignEvent>) -> i32 {
         let r = self.relationship_mut(a, b);
         let e = r.military_access_elapsed;
         let (base, used) = match r.military_access_granted {
@@ -904,7 +958,7 @@ impl CampaignModel {
         let g = (base as u32).wrapping_sub(used) as i32;
         r.access_cancel_grievance = r.access_cancel_grievance.wrapping_add(g as u32);
         r.military_access_turns = 0;
-        self.expel_from_each_region_of(b, a);
+        self.expel_from_each_region_of(b, a, events);
         g
     }
 
@@ -1043,6 +1097,49 @@ impl CampaignModel {
         Ok(events)
     }
 
+    /// The `CCQ_DECLARE_WAR` command (`HandleDeclareWarCommand` `0x00932B70`, CONFIRMED by disassembly):
+    /// both factions exist and differ, both are in the game ([`Self::in_the_game`]), then
+    /// [`Self::declare_war_rules`] (the handler calls `DeclareWarAndCallAllies` `0x00B268B0` on `a`'s
+    /// diplomacy with `b`, both sides' allies called, no negotiation context). Against the exe:
+    /// - in the game: the command's payload writer (`0x00953CA0`, vtable `0x0136190C` slot 0) writes the
+    ///   two factions only when neither has +0x824 set; with no payload the handler's reader
+    ///   (`0x008FDEB0`) leaves both 0 and the handler does nothing. Ours refuses ([`CommandError::OutOfGame`]).
+    /// - ORIGINAL BUG: with `a == b` the handler reaches `0x00B268B0` with the declarer as its own
+    ///   target; `FindDiplomacyRelationshipByTarget` `0x00B64C50` misses and returns the first record, so
+    ///   `DeclareWarOnFactionRecords` `0x00B26700` writes the war onto whichever faction comes first in
+    ///   `a`'s list. The exe's intent is no self-war: its at-war test `0x008CE9B0` is false for `a == b`,
+    ///   and the peace handler `0x00936710` and `force_make_protectorate` `0x0097AA20` refuse it. Ours
+    ///   refuses ([`CommandError::SameFaction`]).
+    /// - ORIGINAL BUG: already at war. The handler, `0x00B268B0` and `0x00B26700` have no at-war test
+    ///   for the pair, and two senders test nothing either: the console's `declare_war`
+    ///   (`Console_CmdDeclareWar` `0x00930CD0`, the turn faction on the named one) and the UI's
+    ///   `DeclareWarInstant` (`HandleCampaignUIDeclareWarInstant` `0x009E2090`). Through them the exe
+    ///   declares the war again: both sides' allies are called again (a human ally not yet at war gets
+    ///   the offer again), every listed third party gets the `war_declared` notice again, and
+    ///   `0x00B26700` adds the third parties' `declared_war_against_*` attitude factors and the war's own
+    ///   factors once more and clears the payments, with the stance already war. The exe's intent is no
+    ///   declaration between factions at war: every other path tests `IsFactionAtWarWith` `0x008CE9B0`
+    ///   first (`force_declare_war` at `0x0097A9D1`; the deal's war action is offered only without a war,
+    ///   `0x00C1A890`; `0x00B268B0` guards each ally's own war with it; the AI declares only on a neutral
+    ///   stance). Ours refuses ([`CommandError::AlreadyAtWar`], in [`Self::declare_war_rules`]) before
+    ///   anything changes. The console is a developer tool and not ported; `DeclareWarInstant` is
+    ///   (ntw_script `ui/campaign/diplomacy.rs`).
+    /// - Not modelled: when either side is human (+0x6E0) the handler then posts model event 0xBC (the
+    ///   declarer, no position) on the model's event broadcaster (+0x9C0, `0x008DBAC0`). Its one listener
+    ///   (the object `0x0090AE10` builds, handler `0x009593A0`) passes it on only when the event's faction
+    ///   is its own (+0xB4), so only the local declarer hears it. It is a sound: 0xBC is sound slot 188,
+    ///   `CAMPAIGN_EVENT_WAR_DECLARED` (ntw_formats `sound/slots.rs`); the event carries no sound name
+    ///   (+0x0C holds the default key at `0x01457CAC`), so the listener plays slot +0x10 through its +0x74 object, the sound
+    ///   manager (vtable +0x1C), and treats slot 0x191 as no sound. No model state reads it; the sound
+    ///   belongs to the campaign audio, not this rule.
+    pub fn declare_war_command(&mut self, a: FactionId, b: FactionId) -> Result<Vec<CampaignEvent>, CommandError> {
+        self.check_diplomacy_pair(a, b)?;
+        if let Some(f) = [a, b].into_iter().find(|&f| !self.in_the_game(f)) {
+            return Err(CommandError::OutOfGame(f));
+        }
+        self.declare_war_rules(a, b)
+    }
+
     /// The `CCQ_MAKE_PROTECTORATE` command (`HandleMakeProtectorateCommand` `0x009367A0`, CONFIRMED):
     /// both factions exist and differ, `patron` is not at war with `protectorate` ([`Self::at_war`],
     /// `0x008CE9B0`) and neither side already has a patron ([`Self::has_patron`], `0x008CEEA0`);
@@ -1081,11 +1178,13 @@ impl CampaignModel {
         self.relationship_mut(patron, protectorate);
         self.change_treaty_money(protectorate, patron, |r| r.protectorate_tribute = 0);
         self.change_treaty_money(patron, protectorate, |r| r.protectorate_income = 0);
+        let mut events = Vec::new();
         if !skip_expulsion {
-            self.expel_from_lands_of(patron, protectorate);
+            self.expel_from_lands_of(patron, protectorate, &mut events);
         }
         self.diplomacy_changed();
-        Ok(vec![CampaignEvent::StanceChanged { a: protectorate, b: patron, stance: Stance::Neutral }])
+        events.push(CampaignEvent::StanceChanged { a: protectorate, b: patron, stance: Stance::Neutral });
+        Ok(events)
     }
 
     /// Both factions exist and differ: the model's argument check for a two-faction diplomacy action.
@@ -1169,7 +1268,7 @@ impl CampaignModel {
             // 0x00B29170: the access just ran out, so `t`'s forces leave `faction`'s regions, before the
             // war balances below read where the armies stand (CONFIRMED order).
             if access_ran_out {
-                self.expel_from_lands_of(t, faction);
+                self.expel_from_lands_of(t, faction, &mut events);
             }
             let at_war = self.world.stance(faction, t) == Stance::War;
             let allied = matches!(self.world.stance(faction, t), Stance::Allied | Stance::Patron | Stance::Protectorate);
@@ -1355,15 +1454,21 @@ impl CampaignModel {
             DiplomaticAction::CancelMilitaryAccess => {
                 self.check_diplomacy_pair(a, b)?;
                 // 0x00B67B20: a third of the grievance stays on the canceller's manager (+0x20).
-                let g = self.cancel_military_access(a, b);
+                let mut events = Vec::new();
+                let g = self.cancel_military_access(a, b, &mut events);
                 let m = self.world.access_cancel_marks.entry(a).or_insert(0);
                 *m = m.wrapping_add((g / 3).max(0) as u32);
                 // Then `b`'s zones of control again (`0x00B67B20` → `0x00B795A0`; `0x00B67BD0` refreshes none).
                 self.refresh_faction_zones(b);
-                self.diplomacy_changed();
                 // Then `b` gets the `alliance_broken` message "<b> - <a>" (`0x009CA7B0`, no human
                 // or major test; the display shows only the viewed human's messages).
-                Ok(vec![CampaignEvent::Message { recipient: b, message: CampaignMessage::AllianceBroken { first: b, second: a } }])
+                events.push(CampaignEvent::Message { recipient: b, message: CampaignMessage::AllianceBroken { first: b, second: a } });
+                // Then the model's +0x870 event ({a, b}): its only listener, the CAI's
+                // `HandleCaiMilitaryAccessCancelledEvent` `0x00A8F950`, just times a profiling scope
+                // (CONFIRMED by disassembly 2026-10-22), so nothing follows from it. Last the
+                // diplomacy-changed event (+0x3A8).
+                self.diplomacy_changed();
+                Ok(events)
             }
             DiplomaticAction::StateGift(amount) => self.state_gift(a, b, amount),
             DiplomaticAction::OneOffPayment(amount) => self.one_off_payment(a, b, amount),
@@ -1385,7 +1490,7 @@ impl CampaignModel {
     pub fn refresh_computed_factors(&mut self) {
         let fx = super::effects::Effects::compute(self);
         let alive: Vec<FactionId> =
-            self.world.factions.keys().copied().filter(|&f| !self.is_rebel_faction(f) && self.in_the_game(f)).collect();
+            self.world.factions.keys().copied().filter(|&f| self.in_the_game_with_record(f)).collect();
         let keys: Vec<(FactionId, FactionId)> = self.world.relationships.keys().copied().filter(|(o, _)| alive.contains(o)).collect();
         for (o, t) in keys {
             let leader = fx.faction(t, "diplomacy_bonus_faction_leader") as i32;
@@ -1610,8 +1715,7 @@ impl CampaignModel {
     /// CONFIRMED flow and order), before the war itself: every faction X allied to `b` (stance allied,
     /// patron or protectorate), in the game, not `a` (`0x00898B80`), not yet answered for `b`'s side
     /// (in `called`'s lists +0x20 / +0x30, `0x00B673D0`): if X is already at war with `a` it is not asked
-    /// and simply joins; else a human X is asked (only with [`CampaignModel::ask_human_allies`] on, else
-    /// it is skipped): its [`AllyWarCall`] is returned (`0x00885DA0` at
+    /// and simply joins; else a human X is asked: its [`AllyWarCall`] is returned (`0x00885DA0` at
     /// `0x00B26C06`, pushed `0x00B26C1F`) and the calling stops there; an AI X decides through the AI
     /// (`0x00AAA950` → `0x00AAA920`, §6). Join ([`Self::join_war`]): X's own war on `a` on `b`'s behalf
     /// unless already at war, then the access of X and `b` is saved for the war (`0x00B0CCE0` on both
@@ -1640,13 +1744,6 @@ impl CampaignModel {
                 }
                 let at_war = self.world.stance(x, enemy) == Stance::War;
                 if !at_war && self.is_human(x) {
-                    // PLACEHOLDER: ally_attacked panel not built; humans keep main's skip. With
-                    // `ask_human_allies` off (the app's setting) a human ally not yet at war is not
-                    // asked, not listed, and keeps its alliance; the exe asks it through the
-                    // `ally_attacked` event message (BACKLOG §3 event messages), which turns it on.
-                    if !self.ask_human_allies {
-                        continue;
-                    }
                     let allied_to_enemy = self.allied_with(x, enemy);
                     return CallOutcome::Asked(AllyWarCall {
                         declarer: a,

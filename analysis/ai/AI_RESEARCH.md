@@ -123,6 +123,15 @@ Tunable families (default personality; full list via the probe): `BASIC_SPENDING
 CONFIRMED: the exe registers these tunables by name in one long compare chain (`0x00DE31E0`,
 each name stored to a fixed float slot), so a mod can change any value but cannot add new keys.
 
+CONFIRMED (aicapture fix round, 2026-10-22, `LoadCaiPersonalitiesFromTables` `0x00DD5870`): the default
+personality is the FIRST record whose flag (record +0xC; table count +0xC, records +0x10) is set: the scan
+keeps a record only while none is held (`0x00DD58DC` TEST / CMOVZ). Pass 1 writes every junction row of the
+default (row name +0xC, f32 value +0x18 read by MOVSS) into every record; pass 2 writes each row into the first
+record not flagged default that it belongs to (`0x00DD5996`, match `0x004F0F40`). So a later record flagged
+default keeps none of its own rows (it reads the default's values) and a row naming no record applies to
+none. Ours: `ntw_campaign::ai_personalities_from_db` (test `the_first_default_flagged_personality_is_the_default`;
+each case logged once per load); the own-else-default lookup `AiPersonalities::tunable` gives the two passes.
+
 ### 2.2 Battle AI data
 - **No battle-AI DB table exists** (CONFIRMED by the table list). The numbers are in the exe.
 - Tweakers (CONFIRMED, `tweakers.tsv`): `Battle AI Exclusive` (AI v AI), `Battle AI Invert` (AI
@@ -840,8 +849,21 @@ counter, `+0x646` deploying, `+0x647` first update done, `+0x648` deployed.
 - **CAI RNG (round 4, CONFIRMED).** `0x00A9DA10(lo, hi)` (float) and `0x00A9D9C0(lo, hi)` (int)
   step the LCG `x = x × 0x343FD + 0x269EC3` held at `+0x71C` of their object and use `x >> 16`
   (float: `× 1.5259022e-05 × (hi − lo) + lo`; int: `(span + 1) × (x >> 16) / 0xFFFF`, capped) —
-  the same LCG and draws as `ntw_sim::rng::CaRng`. Which object holds that state (the campaign
-  model's RNG or a CAI-own one) is UNKNOWN.
+  the same LCG and draws as `ntw_sim::rng::CaRng`. The state is the CAI's own (the CAI interface's
+  +0x71C, seeded `0x111EE`, reseeded from the campaign RNG by `ReseedCaiRandomFromCampaignRng`
+  `0x00AA3200`; CONFIRMED 2026-10-20 while decoding the capture choice). (2026-10-21, CONFIRMED) The
+  CAI loader `0x00A3CE70` (from the model ctor `0x00872550`) presets `0x111EE` (`0x00A3DC40`), then reads
+  `CAMPAIGN_MODEL/CAI_INTERFACE` #0 (u32) into +0x71C (`0x00A3DE5C`); `0x00A3EFF0` presets it too
+  (`0x00A3FE95`); the writer `0x00A5B5B0` (from `0x008EBAB0`) saves +0x71C as that record's first field
+  (`0x00A5B60D`). The reseed's only caller is `0x008B14E0` (a thin wrapper over model +0xF7C), called only
+  from the campaign world constructor `0x00987070` at `0x00988155`, right after the model is built and only
+  when the stack argument `[ESP+0x3CC]` is non-null, the same test that gates posting `NewCampaignStarted`
+  (`0x00988A1F`): it runs once, when a new campaign starts, one campaign-RNG step (model +0xFB8 =
+  `RandSeed`) whose `x >> 16` becomes the CAI state. Vanilla saves: orig_fr_t1 690575457, orig_fr_may1811
+  2178231288. Ours: `CampaignModel::cai_rng` (loaded and written by `ntw_campaign`, kept by our save from
+  format 13, reseeded by `CampaignModel::reseed_cai_rng` in `source::open_from` for a new campaign); the
+  capture choice draws on it. Other users of +0x71C still on other streams: the desire jitter
+  (`0x00A9DA10`, ntw_ai) and the comparator `0x00AAAC30` (a 0.5 coin flip, caller `0x008EA6E0`).
 - **EXCESS_RECRUITMENT = new-unit recruitment (round 6, CONFIRMED; round 4 had the structure, filed under MERGE_UNITS by the shifted table).** The
   behaviour (ctor `0x00D26BB0`, id 0x16D, vtable `0x01378884`, step `0x00D68380`) creates
   **`CAI_BDI_UNIT_RECRUITMENT_NEW` intentions** (`0x00C8C1F0`, 0x154 bytes, vtable `0x0138A1B0`,
@@ -1640,12 +1662,43 @@ sub-move objects are not decoded), DOUBLE_ENVELOPMENT's geometry.
      army / navy rate mods (`research_rate_mod_army_tech` / `_navy_tech`) are still not applied.
    - Buildings and units now need their technologies (`building_tech_ok` / `unit_tech_ok`), so the AI
      must not plan blocked options (`can_build` and `recruitable_units` already filter them).
-   - (round 9) **Capture choice:** after taking a settlement the AI's occupy / loot / liberate choice comes from
-     `0x00AAABA0` → the AI object's virtual `+0x2F8` (args: settlement, faction, capturing army, the preview struct
-     with all three options; not decoded). The model applies **occupy** for every AI capture (PROVISIONAL,
-     `capture::settle_capture`). The AI needs: the three `CapturePreview` options (money, town wealth after, damage,
-     public-order reduction, liberation target) and its own war / treasury state; then call
-     `resolve_capture` with its choice instead of the default.
+   - (round 9, decoded 2026-10-20) **Capture choice (CONFIRMED):** the capture report's step `0x008F8E70` asks
+     `ResolveAiSettlementCaptureOption` `0x00AAABA0` (settlement, capturer, previous owner = report +0x10, the
+     preview); a missing AI object answers occupy, else the capturer's attitude object's virtual `+0x2F8`
+     `0x00D8C8B0` decides, in order: (1) the campaign's liberator (`spa_portugal`) with a preview offering the
+     target (`spa_spain`) → liberate; (2) the contested liberator (`spa_britain`) with that preview, both of the
+     campaign's factions present, the region bordering the rival (`spa_france`, `0x00C3DE80`) and another of its
+     own regions bordering the rival too: target out of the game (`0x00C3F700`) → liberate; else S = the target's
+     region count + the capturer-owned neighbours, B = the capturer's count + the target-owned neighbours
+     (`0x00AAF550`, as the exe writes it); B ≤ 1 and no target army with units in the region (`0x00C3DEE0`) →
+     step 3; else a CAI int draw in 1..=S+B ≤ B → liberate; (3) a rebel capturer (`0x00C3FE80`) → p = 0.7
+     (`0x01325CDC`), else a rebel previous owner → p = 0.2 (`0x01325CA8`), both straight to the draw; (4) the
+     personality's seven `LOOT_SETTLEMENT_*` tunables (getters `0x00CB0860`..`0x00CB0850`, vtable
+     `0x0138AE88`..`0x0138AEA0`, fields +0x3B4..+0x3CC): p = base; spending (economy categories 13..=24) ×
+     expenditure pct > income (0..=12) → p = economic + base; p += |min(attitude total to the previous owner,
+     0) / 20| × diplomatic (integer division); no neighbour region of the capturer → p += region grouping;
+     (5) clamp to [0, 1] (NaN → 0); p ≤ never-loot floor → occupy; p ≥ always-loot ceiling → loot; (6) a CAI
+     float draw r in [0, 1] (`0x00A9DA10`): p < r → occupy, else loot. The table holds percent:
+     `SetCaiPersonalityTunableByName` `0x00DE31E0` stores raw and `NormalizeCaiPersonalityTunablesAfterLoad`
+     `0x00DDFFB0` (per personality from `LoadCaiPersonalitiesFromTables` `0x00DD5870`) multiplies the loot
+     fields (and ~90 others) by 0.01 (`0x0139E870`); it also normalises weight groups to sum 1 (`0x00DD7EF0`)
+     and maps +0xCC/+0xD0/+0xD4/+0xF0/+0xF4 as 1 − (x − 1) × 0.05. Vanilla: default personality 10 / 110 /
+     35 / 2 / 10 / 20 / 80, `eur_france` 0 / 110 / 35 / 2 / 10 / 50 / 100. Ours: `capture_ai.rs`
+     `capture_choice_original` behind the seam `capture.ai_choice`, called by `capture::settle_capture` with the
+     model's own preview; the faction keys come from the merged database (`AiCaptureLiberation` feature).
+     (2026-10-21) The draws run on the CAI stream `CampaignModel::cai_rng` (§4 "CAI RNG", CONFIRMED). The
+     report's skip flags are modelled (`capture::capture_skips_choice`, CONFIRMED): +0x9A
+     (`0x00B4DA40`) is set when the capturer is a rebel army whose REBEL_DATA link (+0x34) is set and whose
+     home region holds the settlement; +0x9B (`0x00B4D9E0`) when the rebel army's REBEL_SETUP faction is in
+     the game (faction registry lookup `0x00955B30`); either one skips the choice and occupies. Left: the
+     human branch's campaign byte model +0xFA8 → +0x114 (read `0x008F8D22`, tested `0x008F8DBF`) is untraced
+     (PROVISIONAL in `settle_capture`); `TransferSettlementOwnership` `0x00B449F0` skips the transfer when
+     +0x34 is the owner, not modelled. The preview `0x00D8C8B0` reads is the report's three capture options
+     (loot, occupy, liberate; 0x2C bytes each, Ghidra `CaptureOption`): +0x7C / +0x80 are the liberate
+     option's available flag (+0x24) and liberation target (+0x28), CONFIRMED by the offsets (2 × 0x2C + 0x24 / 0x28).
+     Ghidra holds the structs `CaiDiplomaticAttitude`, `CaiPersonalityAccessor` (getter vtable +0x358..+0x370),
+     `CaiPersonalityTunables` (0x3D0, every tunable key as a field), `CaiPersonalityRecord` / `CaiPersonalityTable`
+     and the junction-row types.
    - (round 9) **Repairs:** the AI repairs through `0x00AA4910` (called from `0x00CE9A60`): when a building can be
      repaired (`0x00B1A6B0`) and paid for (`0x00B16430`, the AI's cost capped at its treasury) it calls the repair
      order `0x00B66260`. The model's stand-in repairs every damaged building an AI faction can pay the full cost

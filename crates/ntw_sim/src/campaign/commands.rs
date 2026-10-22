@@ -345,7 +345,12 @@ pub enum CampaignCommand {
         /// The slot.
         slot: SlotRef,
     },
-    /// `a` declares war on `b`. Our own command (scripts use `force_declare_war`, W3 §6.3).
+    /// `a` declares war on `b`: the exe's `CCQ_DECLARE_WAR` (`HandleDeclareWarCommand` `0x00932B70`,
+    /// [`CampaignModel::declare_war_command`]; sent by the script's `force_declare_war` `0x0097A930`
+    /// through `SendDeclareWarCommand` `0x009837F0`, the console's `declare_war` `0x00930CD0` (not
+    /// ported: we have no console) and the UI script's `DeclareWarInstant` `0x009E2090`; our AI sends it
+    /// too). No turn test: the handler has none
+    /// and none of its senders tests the turn (CONFIRMED, disassembly 2026-10-21).
     DeclareWar {
         /// The faction declaring war.
         a: FactionId,
@@ -361,7 +366,8 @@ pub enum CampaignCommand {
     /// deal's peace item `ApplyPeaceRecordOnAccept` `0x00C18B60` (the human's `CCQ_DIPLOMACY_ACCEPT_DEAL`
     /// `0x00932E40` and the AI's `0x00AA5ED0`, both through `0x00C114B0`).
     MakePeace {
-        /// The proposer (its alliances get their suspended access back).
+        /// The proposer (in the exe only its alliances get their suspended access back, an ORIGINAL
+        /// BUG: ours gives both sides' back, `CampaignModel::make_peace_rules`).
         a: FactionId,
         /// The target.
         b: FactionId,
@@ -452,6 +458,12 @@ pub enum CampaignCommand {
         amount: i32,
         /// 1: paid once; more: paid each turn for that many turns.
         turns: u32,
+    },
+    /// `CCQ_DIPLOMACY_PROPOSE_PEACE` (executor `0x00933B90`): sets the open negotiation's peace
+    /// record, or empties it with `clear` (`CampaignModel::propose_peace`).
+    ProposePeace {
+        /// Empty the record instead.
+        clear: bool,
     },
     /// `CCQ_DIPLOMACY_PROPOSE_JOIN_WAR` (posted by the join-war record's `0x00C4A960`, executor
     /// `0x009336C0`): sets the open negotiation's join-war record (`CampaignModel::propose_join_war`).
@@ -578,6 +590,8 @@ pub enum CommandError {
     UnknownTechnology(String),
     /// The faction is already a protectorate (it has a patron: `FactionHasPatron` `0x008CEEA0`).
     HasPatron(FactionId),
+    /// The faction is out of the game (faction +0x824, [`CampaignModel::in_the_game`]).
+    OutOfGame(FactionId),
 }
 
 impl fmt::Display for CommandError {
@@ -630,6 +644,7 @@ impl fmt::Display for CommandError {
             CommandError::DealRefused => write!(f, "the deal is refused"),
             CommandError::UnknownTechnology(k) => write!(f, "unknown technology {k}"),
             CommandError::HasPatron(id) => write!(f, "faction {} is already a protectorate", id.0),
+            CommandError::OutOfGame(id) => write!(f, "faction {} is out of the game", id.0),
         }
     }
 }
@@ -756,6 +771,7 @@ impl CampaignModel {
                 | CampaignCommand::ProposeRegions { .. }
                 | CampaignCommand::ProposeTechnologies { .. }
                 | CampaignCommand::ProposePayment { .. }
+                | CampaignCommand::ProposePeace { .. }
                 | CampaignCommand::ProposeJoinWar { .. }
                 | CampaignCommand::ClearNegotiation
                 | CampaignCommand::ProposeDeal { .. }
@@ -843,15 +859,13 @@ impl CampaignModel {
                     })
                 })
             }
-            CampaignCommand::DeclareWar { a, b } => {
-                self.check_turn(a)?;
-                self.declare_war_rules(a, b)
-            }
+            // No turn test: the exe's handler (`0x00932B70`) has none.
+            CampaignCommand::DeclareWar { a, b } => self.declare_war_command(a, b),
             // No turn test: no exe peace path has one (`MakePeace`).
             CampaignCommand::MakePeace { a, b, suppress_messages } => self.make_peace_rules(a, b, suppress_messages),
             // No turn test: the exe's handlers (`0x009367A0`, `0x00936AB0`) have none.
             CampaignCommand::MakeProtectorate { patron, protectorate } => self.make_protectorate_command(patron, protectorate),
-            CampaignCommand::MoveArmiesOutOfRegions { a, b } => self.move_armies_out_of_regions(a, b).map(|()| Vec::new()),
+            CampaignCommand::MoveArmiesOutOfRegions { a, b } => self.move_armies_out_of_regions(a, b),
             CampaignCommand::Diplomacy { a, b, action } => {
                 self.check_turn(a)?;
                 self.apply_diplomatic_action(a, b, action)
@@ -878,6 +892,7 @@ impl CampaignModel {
                 self.propose_technologies(clear, demanded, offered).map(|()| Vec::new())
             }
             CampaignCommand::ProposePayment { clear, amount, turns } => self.propose_payment(clear, amount, turns).map(|()| Vec::new()),
+            CampaignCommand::ProposePeace { clear } => self.propose_peace(clear).map(|()| Vec::new()),
             CampaignCommand::ProposeJoinWar { clear, demanded, offered } => self.propose_join_war(clear, demanded, offered).map(|()| Vec::new()),
             CampaignCommand::ClearNegotiation => self.clear_negotiation().map(|()| Vec::new()),
             CampaignCommand::ProposeDeal { threat } => self.propose_deal(threat).map(|()| Vec::new()),
@@ -1054,25 +1069,14 @@ impl CampaignModel {
         if available > 0 && ch.movement_points <= 0 {
             events.push(CampaignEvent::MovementPointsExhausted { character });
         }
-        // After a move `0x00A285E0` runs, in this order (CONFIRMED, disassembly): the sight from the
-        // new place for the mover and each army he carries (`0x00A27F10` → `0x00B1B8B0`; the model
-        // recomputes the whole set, CHARACTERS_FIDELITY.md §10), the zones of control (`0x00A28440`,
-        // [`super::zones`]), then the hidden flags (`0x009D3000`). `0x00A285E0` (a virtual, character
-        // vtable `0x0136A62C` slot +0x20) runs the zones and the hidden flags only when its first argument
-        // is 1, the step that sets the character down again (+0x1B7 cleared at `0x00A28855`); argument 0
-        // keeps him lifted off the map (slot +0x1C `0x00A28B50`) and runs only the sight, argument 2
-        // returns at `0x00A2860D`. INFERRED: a walk's last step passes 1, so the walk runs both (the move
-        // callers that pass it are not traced; PATHFINDING.md §8).
-        let faction = self.world.characters[&character].faction;
-        self.refresh_shroud(faction, false);
-        self.rebuild_moved_zones(character);
-        let carried: Vec<CharacterId> = self
-            .force_of(character)
-            .map(|f| self.world.embarked.iter().filter(|(_, n)| **n == f).filter_map(|(a, _)| self.world.forces.get(a).and_then(|x| x.commander)).collect())
-            .unwrap_or_default();
-        for c in std::iter::once(character).chain(carried) {
-            self.update_hidden(c);
-        }
+        // The walk's last step sets him down ([`Self::set_down`]): the step mover `0x00972CA0` passes 1
+        // when the current waypoint is the path's last and no order object is left (`0x00972EB1`,
+        // CONFIRMED by disassembly). INFERRED: a walk cut short by its action points ends the same
+        // way. The exe's stop branch passes 1 only when trimming the route kept no waypoint and 0 when
+        // one is kept for later (`0x009732E3`, flag from `0x00924BD0`), and a multi-turn order
+        // (character +0x9C) passes its finished flag at `0x00973A01`; which branch ends a walk that
+        // runs out of points is not traced (PATHFINDING.md §8).
+        self.set_down(character);
         Ok(Walk { events, arrived: end == target_idx })
     }
 
@@ -1306,9 +1310,8 @@ impl CampaignModel {
         }
         let defenders = self.defenders_of(region);
         if defenders.is_empty() {
-            self.occupy(region, fa, Some(force), &mut events);
-            // An undefended settlement: the capture report with the surrender flag clear (PROVISIONAL: which
-            // capture variant the original uses here, 0x00B58560 or 0x00B58C00 with the flag set, is not traced).
+            // An undefended settlement: the occupation and the capture report with the surrender flag clear
+            // (PROVISIONAL: which capture variant the original uses here, 0x00B58560 or 0x00B58C00 with the flag set, is not traced).
             self.settle_capture(region, fa, Some(force), false, &mut events);
         } else {
             self.pending_battle = Some(PendingBattle { attacker: force, defenders, settlement: Some(region), resume: None });
@@ -1409,6 +1412,21 @@ impl CampaignModel {
         // The running economics record takes the new taxes (`0x00BC5380` lower / `0x00BC5440` upper end
         // with `0x00BBD7C0(0)`, CONFIRMED).
         super::economy::refresh_running_income(self, faction, super::economy::RunningIncome::Taxes);
+        // Then each region of the governorship refreshes its town wealth without apply (`0x00937A70` →
+        // `0x008EE1E0`: after the setter, `0x00AB4410(0)` per region of the governorship, CONFIRMED). The
+        // faction's effects cover every region it governs (`Effects::compute_for`), so they are summed once.
+        let regions: Vec<RegionId> = self
+            .world
+            .faction_details
+            .get(&faction)
+            .into_iter()
+            .flat_map(|d| d.posts.iter().filter_map(|p| p.governorship.as_ref()))
+            .flat_map(|g| g.regions.iter().copied())
+            .collect();
+        let fx = super::effects::Effects::compute_for(self, faction);
+        for region in regions {
+            super::economy::update_region_town_wealth(self, &fx, region, false);
+        }
         Ok(vec![CampaignEvent::GovernorshipTaxRateChanged { faction }])
     }
 

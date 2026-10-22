@@ -6,16 +6,8 @@ use std::collections::VecDeque;
 
 const D: FactionId = FactionId(4);
 
-/// A, B, C and D in the game, every one a major power; `humans` plays and is asked to join wars
-/// ([`CampaignModel::ask_human_allies`] on).
+/// A, B, C and D in the game, every one a major power; `humans` plays.
 fn model(humans: &[FactionId]) -> CampaignModel {
-    let mut m = model_without_offers(humans);
-    m.ask_human_allies = true;
-    m
-}
-
-/// [`model`] with the app's setting: human allies are not asked.
-fn model_without_offers(humans: &[FactionId]) -> CampaignModel {
     let mut m = test_model();
     m.world.factions.insert(D, super::faction(D, "test_faction_d", 0, GovernmentType::AbsoluteMonarchy));
     for f in [A, B, C, D] {
@@ -103,18 +95,29 @@ fn a_refused_call_from_the_attacked_side_breaks_the_alliance() {
     assert_eq!(m.world.stance(A, B), Stance::War);
 }
 
-/// The app's setting (`ask_human_allies` off, the ally_attacked panel not built): an AI's war on the
-/// human's ally asks nothing, the war is declared at once, and the human keeps its alliance and its peace.
+/// The flags the `ally_attacked` message shows (`0x00A08B90`): `InvitedByAggressor` / `InvitedByDefender`
+/// from the +0xB10 signal (`0x00B26B80` / `0x00B26D79`), `AlliedWithAggressor` / `AlliedWithDefender` from
+/// the ally's stances (`0x00B0CDF0`). An ally of the target alone; of the declarer alone; of both (asked by
+/// the target's loop, invited by both).
 #[test]
-fn a_human_keeps_its_alliance_when_offers_are_off() {
-    let mut m = model_without_offers(&[C]);
+fn the_message_flags_follow_the_loop_that_asks() {
+    let flags = |m: &CampaignModel| {
+        let c = m.pending_ally_war_calls.last().unwrap();
+        (c.invited_by_declarer(), c.invited_by_target(), m.allied_like_with(c.ally, c.declarer), m.allied_like_with(c.ally, c.target))
+    };
+    let mut m = model(&[C]);
     m.form_alliance(C, B).unwrap();
-    let ev = m.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
-    assert!(pending(&ev).is_empty());
-    assert!(m.pending_ally_war_calls.is_empty());
-    assert_eq!(m.world.stance(A, B), Stance::War);
-    assert_eq!(m.world.stance(C, B), Stance::Allied, "the alliance is kept");
-    assert_ne!(m.world.stance(C, A), Stance::War);
+    m.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
+    assert_eq!(flags(&m), (false, true, false, true), "the target's ally");
+    let mut m = model(&[C]);
+    m.form_alliance(C, A).unwrap();
+    m.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
+    assert_eq!(flags(&m), (true, false, true, false), "the declarer's ally");
+    let mut m = model(&[C]);
+    m.form_alliance(C, B).unwrap();
+    m.form_alliance(C, A).unwrap();
+    m.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
+    assert_eq!(flags(&m), (true, true, true, true), "an ally of both");
 }
 
 /// The declarer's human ally is asked by the declarer's loop (`0x00B26DFE`, UI event flag B = 0); a refusal

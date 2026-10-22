@@ -13,6 +13,18 @@ use std::collections::BTreeMap;
 use super::ids::{CharacterId, FactionId, RegionId};
 use crate::calendar::Date;
 
+/// The attribute situation keys the exe saves `CHARACTER_DETAILS` #14 under
+/// (`g_apszAttributeSituationKeys` `0x0145DA24`, one entry; CHARACTERS_FIDELITY §17, CONFIRMED). The
+/// exe holds this list itself, not in a table: every real situation key maps outside it.
+pub const ATTRIBUTE_SITUATION_KEYS: &[&str] = &["dummy"];
+
+/// A new character's `CHARACTER_DETAILS` #14: every situation key at 0, as the character maker
+/// `0x00992E60` clears details +0x13C (at `0x00992F5D`) and the save writer `0x009A0580` writes one
+/// entry per key (CONFIRMED).
+pub fn starting_attribute_bonuses() -> Vec<(String, u32)> {
+    ATTRIBUTE_SITUATION_KEYS.iter().map(|k| ((*k).to_owned(), 0)).collect()
+}
+
 /// `CHARACTER_DETAILS` v3 (CONFIRMED structure in all 8 startpos files and the user's saves).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -50,7 +62,12 @@ pub struct CharacterDetails {
     pub attributes: Vec<(String, i32)>,
     /// #13 `AgentAbilities[]` {utf16 key, i32, utf16} (`can_assassinate`, ...).
     pub abilities: Vec<(String, i32, String)>,
-    /// #14 `AgentAttributeBonuses[]` {utf16 key, u32}.
+    /// #14 `AgentAttributeBonuses[]` {utf16 key, u32}: the attribute situation slot (details +0x13C),
+    /// an Empire leftover that gives no attribute or rank (CHARACTERS_FIDELITY §17, CONFIRMED): the
+    /// situation list holds only `dummy` ([`ATTRIBUTE_SITUATION_KEYS`]), every maker sets it to 0
+    /// (`0x00992F5D`; ours [`starting_attribute_bonuses`]), the copy keeps it and the save writer
+    /// (`0x009A0580`) writes that one `dummy` entry. Nothing else in the exe reads it; ours only
+    /// carries it through the save.
     pub attribute_bonuses: Vec<(String, u32)>,
     /// #16 `CAMPAIGN_LOCALISATION` on-screen type name, e.g.
     /// `agent_culture_details_onscreen_name_ministereuropean`.

@@ -3,9 +3,9 @@
 Keep this file short. It holds what is true now: replace finished items rather than appending logs.
 Old session logs are in `docs/archive/`.
 
-Last updated: 2026-10-19. Main tests at last full run (2026-10-08): `cargo test --workspace` passes on the install.
+Last updated: 2026-10-21. Main tests at last full run (2026-10-08): `cargo test --workspace` passes on the install.
 
-## Resume here (2026-10-20)
+## Resume here (2026-10-22)
 
 - **Repos:** work happens in the private repo (origin, `…-Private`). The public repo
   `DenseCow/Napoleon-Total-War-Rust-Rewrite` is a snapshot mirror for contributors: publish after a
@@ -17,20 +17,36 @@ Last updated: 2026-10-19. Main tests at last full run (2026-10-08): `cargo test 
   → push (the hook syncs public #2) → publish in batches. Running work = the BACKLOG `(running: …)`
   markers and `git worktree list`; merged work = `git log`.
 - **Resume points:** the one debugger sitting sheet at the top of docs/FOR_USER.md. Running work: BACKLOG markers.
-- **Night 2026-10-20 (cap lifted to 100% until Wed 2026-10-21 00:00):** a second session, the supervisor (`tools/supervisor.md`), runs the reviews and fix rounds and never pushes; the manager starts task workers, merges and pushes. Slots: manager 3 task workers, supervisor 4 (7 in all, `~/.cargo/config.toml` jobs = 6 for memory, kept by the user 2026-10-20). Protocol: the manager messages "work/<x> done at <hash>"; the supervisor answers "clean at <hash>" with ticks/polish/tags; the manager merges. Running work = the BACKLOG `(running: …)` markers and `git worktree list`. Merged tonight: see git log and FOR_USER "Done tonight". The user has decisions in FOR_USER "Needs you".
-  Every brief names `tools/self_check.sh` and holds one item. §11: framework parts only; the unwrap audit last.
+- **Night 2026-10-21 ended (user, Thu 03:50):** 33 branches merged, all §0. Six branches are open; their BACKLOG `(running: …)` markers stay, and each goes to a fresh worker (pushed, worktrees `../NR-<x>`):
+  - **peaceweigh:** reviewed; a fix round is needed. Blocking: `deal_value.rs:122-131` `peace_weighted_mean` must divide each term by the total weight before adding, as the exe does at `0x00A35712`-`0x00A35740` and `0x00A35A40` (it adds first now, so the f32 result differs). Polish:
+    - `RegionStrengths::of` looks up the region once per character;
+    - stale comments (no peace listed) at `negotiation.rs:1035`, `commands.rs:586` and `diplomacy.rs:1365`;
+    - the dead "human ally ±0.25" branch in the `0x00D63260` Ghidra comments.
+    New trace item: `peace_turn_factor` drops from 3.33 to 0 between 4 and 5 turns; is it an ORIGINAL BUG? Not checked yet: `0x00CC13D0` case 9 and the ntw_ai tests.
+  - **foreigngarrison:** done (`479e66b6`), awaiting review. BACKLOG line 102: tick the foreign-garrison part and cite `0x00B43A60`/`0x00B44ED0` (not `0x008EF790`). New lines:
+    - allied entry into a settlement with no garrison (`0x00B16700`, `0x0094CFF0`);
+    - the full own garrison (`0x00885F30`, `0x008B2720`);
+    - the free spot (`0x00B39FE0`) and the case with no free spot;
+    - the tie order (`0x00BA6770`).
+  - **classbattle:** code done (`a51732cc`). Left: the V5 write-ups, all below the score of 70 (`0x0054AE90`, `0x0057C710`, `0x007B49A0`, `0x008ACCF0`, `0x008B55A0`); then review. New UNKNOWN: where a real-time battle's result codes come from.
+  - **moveinto:** code done (`c1b303eb`). Left: V5 to a score of 70 on `0x009C9EF0`, `0x009D1190`, `0x009D1540`, `0x009D0D00`, `0x00B28D20`, `0x00AAF1F0`, `0x00A06C90`, `0x0094CFF0`, `0x009EE150`, `0x009C9CA0`. Run self_check with `--not-mine 0x00B6D270`. Never type register locals with set_variables: it broke `0x009C9CA0`'s decompile.
+  - **camerainput:** WIP (`9fe57a4f`). The wheel, cam_up/down and set_map_bounds are ported. Left:
+    - the full tests, clippy and self_check;
+    - the V5 write-ups for `0x00E23470`, `0x00977C10`, `0x00956E70`/`F10`/`FA0`/`0x009570F0`, `0x00E23110`, `0x00955820`, `0x00955A00`, `0x00968900`/`0x00974B10`;
+    - the BACKLOG line's outline clamp `0x008B65B0`, bookmarks and the busy test.
+  - **placements:** done (`6e4cb9f1`), awaiting review. BACKLOG: line 149 is done for expulsion, HireGeneral, HireAdmiral and promotions, and line 150 can be ticked (CONFIRMED, `0x00A28605`). New lines:
+    - transfers `0x008D47B0`/`0x008D5F10` re-pick commanders (`0x008ED2C0`) and place the changed ones;
+    - partial boardings (`0x008F0F20`/`0x008F17D0`);
+    - the `0x0094C010` zone trace;
+    - the callers with no counterpart (PATHFINDING.md §8), with the shroud refresh batched per faction.
+- Usage (user, 2026-10-22): 12-point blocks (`BlockPercent` in tools/usage_budget.ps1) to the Wed 2026-10-28 reset. The Wed 10-21 night ended at 18% of its 22% cap; its 4 unused points go to the next block (`usage_budget.ps1 extra-next 4`, stored in `next_extra.txt` and applied once when the block opens, so Thu's cap is its opening reading + 16).
 - **Disk:** C: filled up on 2026-10-09; 21 merged worktrees were removed (~100 GB back). Remove a
   worktree after its merge; check `df -h /c` before starting builds.
 - Evidence saves live in `%USERPROFILE%\Documents\ntw-evidence\saves` (never inside a target folder);
   recovered build-folder data in `ntw-evidence\recovered-targets\`.
-- Usage (user plan, 2026-10-17): 16-point blocks (`BlockPercent` in tools/usage_budget.ps1). On Tue 2026-10-20 the user lifted the cap: this block runs to 100% (`extra`), night mode kept, until the weekly reset Wed 2026-10-21 00:00.
 
 ## Open bugs
 
-- **Campaign keys (user check 2026-10-20, after keybind):** arrow keys do not move the camera; WASD barely moves it
-  (far too slow); CTRL+S does nothing; with the save box opened from the ESC menu, Return still ends the turn (text
-  focus / modal not blocking the binding); CTRL+L moves the camera back to London after ~3 s instead of opening load.
-  Return (end turn) and ESC (menu) work. Fix worker: keybind2.
 - **Campaign:** the region details panel is filled since 2026-10-10 except Effects, NextTown and the selected-army
   garrison (PROVISIONAL, BACKLOG §0-E); the user couldn't find the demolish button (offered from a building slot via
   `CanDemolishBuilding`: check it shows).

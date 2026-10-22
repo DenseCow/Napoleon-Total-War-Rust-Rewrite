@@ -273,7 +273,7 @@ pub struct SummaryMan {
     pub pos: (f32, f32),
     /// The 16-bit heading he faces.
     pub heading: u16,
-    /// His radius (soldier `+0x620`; ours the man's own, see [`LandUnit::man_radius`]).
+    /// His cover radius (soldier `+0x620`, [`LandUnit::cover_radius`]).
     pub radius: f32,
 }
 
@@ -1099,8 +1099,9 @@ impl LandUnit {
     /// afresh, re-slots in full when a re-slot is due (its byte `+0x35`: pending with the countdown
     /// out), else keeps each man's slot, and sends every man off his slot to it
     /// ([`LandUnit::send_men_to_slots`]); the state ends when every man's move has ended, stamping
-    /// the men in place (`0x00581CA0` → `0x00557D80`). Without the gate the idle update runs the
-    /// in-place check on the unit's ticks ([`LandUnit::in_place_check`]). CONFIRMED static.
+    /// the men in place (`0x00581CA0` → `0x00557D80`). Without the gate the idle update runs: it
+    /// ends every man's action and runs the in-place check on the unit's ticks
+    /// ([`LandUnit::idle_update`]). CONFIRMED static.
     ///
     /// The exe checks the pending re-slot in each order update found (the fire order `0x00581200`,
     /// the move order `0x00581AE0`, `0x0066E9B0`) and in the unit states through the this-adjust
@@ -1140,8 +1141,8 @@ impl LandUnit {
                     // Every man is at his slot: the state ends, stamping the men in place.
                     self.march.in_place_at = tick;
                 }
-            } else if !self.march.reforming && tick % IN_PLACE_CHECK_TICKS == self.serial() % IN_PLACE_CHECK_TICKS {
-                self.in_place_check(tick);
+            } else if !self.march.reforming {
+                self.idle_update(tick);
             }
         } else {
             self.march.idle_reformed = false;
@@ -1153,6 +1154,33 @@ impl LandUnit {
             self.march.reslot &= !due;
         }
         self.march.reslot_in = self.march.reslot_in.saturating_sub(1);
+    }
+
+    /// The idle state's update (`UpdateIdleStateInPlaceCheck` `0x005577C0`, vtable `0x0131D984`
+    /// slot 2 through `0x004F8570`; the state machine's pass `0x010FBBD0` runs it on every idle
+    /// tick without a transition), CONFIRMED static: first it ends every living man's action, then
+    /// it runs the in-place check on the unit's ticks ([`LandUnit::in_place_check`]).
+    ///
+    /// The man's action is the one in place in his action slot (soldier `+0x2CC`; the action at
+    /// `+0x2D4`, its done flag `+0x10` at `+0x2E4`) with two flags: `+0x35B`, present (set by the
+    /// base action constructor `0x007E3A50`), and `+0x35C`, started (set by the slot update
+    /// `0x0066E780` once the action's entry vfunc `+4` has run, before its first update in the same
+    /// call). The idle update destroys a present action (vfunc 0 with 1) and clears both flags, as
+    /// every action install does (`0x006533E0`, `0x00653560`). With no action present a man is
+    /// ready (`0x0063E290`) and his slot update does nothing, so he stands: ours ends his walk to
+    /// his slot ([`ManMarch::walk`]) and marks his move ended ([`ManMarch::finished`]). His kept
+    /// speed (`+0x440`) lies outside the action and stays. Ours needs no started flag: it starts a
+    /// move in the tick it is issued, as the exe's slot update enters and first updates it in one
+    /// call. A present action that is done differs from none only for the fire state's gather of
+    /// the men's actions (`0x00539910` through `0x007FF390`), not built.
+    fn idle_update(&mut self, tick: u32) {
+        let alive = (self.men as usize).min(self.march.men.len());
+        for m in &mut self.march.men[..alive] {
+            (m.walk, m.finished) = (None, true);
+        }
+        if tick % IN_PLACE_CHECK_TICKS == self.serial() % IN_PLACE_CHECK_TICKS {
+            self.in_place_check(tick);
+        }
     }
 
     /// The unit's serial, the stagger of its alternate-tick summary refresh
@@ -1302,11 +1330,11 @@ impl LandUnit {
     }
 
     /// The living men where they stand: each man at his slot in the laid formation, his offset
-    /// from it ([`ManMarch::side`], [`ManMarch::lag`]), facing the unit's facing, with the man
-    /// radius [`LandUnit::man_radius`].
+    /// from it ([`ManMarch::side`], [`ManMarch::lag`]), facing the unit's facing, with his
+    /// cover radius [`LandUnit::cover_radius`].
     pub fn men_standing(&self) -> impl Iterator<Item = SummaryMan> + Clone + '_ {
         let formation = self.formation();
-        let (facing, pos, radius) = (self.facing, self.position, self.man_radius);
+        let (facing, pos, radius) = (self.facing, self.position, self.cover_radius);
         let heading = heading_of((facing.cos(), facing.sin()));
         let lags = &self.march.men;
         (0..self.men as usize).map(move |i| {
@@ -1715,7 +1743,8 @@ mod tests {
         assert_eq!((f.place(11).1, f.rank_of(11)), (3.0 - 1.5, 3));
         // The ability lays it: a width of 4 m less p1 = 2 × 0.35 m holds 4 files.
         let mut u = LandUnit::new(0, 0, 10, (0.0, 0.0));
-        (u.formation_files, u.formation_width, u.formation_rank_spacing, u.man_radius) = (4, 4.0, 1.5, 0.35);
+        (u.formation_files, u.formation_width, u.formation_rank_spacing) = (4, 4.0, 1.5);
+        u.set_man_radius(0.35);
         u.active_abilities = 1 << 6;
         assert_eq!(u.shape_kind(), 3);
         assert_eq!(u.formation(), Formation::new(3, 10, 4, 1.0, 1.0));
@@ -2492,6 +2521,31 @@ mod tests {
         u.men = 0;
         u.in_place_check(80);
         assert_eq!(u.march.in_place_at, 80, "no man counted");
+    }
+
+    /// `0x005577C0`: each idle update ends every living man's action (`+0x35B`, `+0x35C` cleared),
+    /// so a man left in a walk to his slot stands, keeping his kept speed; the reform state's ticks
+    /// run no idle update, and the dead men's entries are not touched.
+    #[test]
+    fn the_idle_update_ends_every_mans_action() {
+        let mut u = LandUnit::new(0, 0, 4, (0.0, 0.0));
+        u.reslot_tick(1);
+        assert!(u.march.idle_reformed && !u.march.reforming && u.march.in_place_at == 1, "the first tick reforms, every man at his slot");
+        let stale = ManMarch { walk: Some(2.0), finished: false, kept: Some(1.5), ..u.march.men[0] };
+        u.march.men[0] = stale;
+        u.march.men[3] = stale;
+        u.men = 3;
+        // The reform state: no idle update.
+        u.march.reforming = true;
+        u.reslot_tick(2);
+        assert_eq!(u.march.men[0], stale);
+        // The idle state with its gate shut (stamped in place at tick 1): the idle update.
+        u.march.reforming = false;
+        assert!(!u.idle_gate(3));
+        u.reslot_tick(3);
+        let m = u.march.men[0];
+        assert_eq!((m.walk, m.finished, m.kept), (None, true, Some(1.5)));
+        assert_eq!(u.march.men[3], stale, "a dead man's entry");
     }
 
     /// `0x0057E1F0`: the light-infantry behaviour gives 1.5 m, else the training level's value.

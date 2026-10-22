@@ -84,22 +84,6 @@ function CampaignCharacter(address)
     })
 end
 
--- Component.LockPriority(p) returns the previous lock; PanelManager keeps it as the panel's
--- PriorityLock (CONFIRMED use: "Priority lock on panel open. Was: " .. PriorityLock), and
--- UnLockPriority() clears it (same INFERRED behaviour as the battle HUD's). Input priority
--- itself has no effect in our renderer yet (PROVISIONAL).
-do
-    local priority_lock = 0
-    __comp.LockPriority = function(_, p)
-        local prev = priority_lock
-        priority_lock = tonumber(p) or priority_lock
-        return prev
-    end
-    __comp.UnLockPriority = function()
-        priority_lock = 0
-    end
-end
-
 -- CampaignUI.ConstructBuildingTree(slot, parent) → the tree's height: the building browser's tree
 -- view (building_browser.lua calls it with the selected entry's slot and its tree component).
 -- The node list comes from CampaignUI.__BuildingTreeNodes (see `building_tree` in ui/campaign/settlement.rs,

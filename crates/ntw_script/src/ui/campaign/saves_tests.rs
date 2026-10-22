@@ -77,12 +77,15 @@ fn loc_of(entries: &[(&str, &str)]) -> Localisation {
     loc
 }
 
-/// A HUD of campaign `campaign` saving into `dir`'s `save_games` through a [`FakeSaves`].
+/// A HUD of campaign `campaign` saving into `dir`'s `save_games` through a [`FakeSaves`], in the
+/// human's turn (where a player saves).
 fn hud_saving(dir: &TempDir, campaign: &'static str, loc: Localisation) -> (TestHud, Rc<FakeSaves>) {
     let saves = Rc::new(FakeSaves { calls: Cell::new(0), paths: RefCell::new(Vec::new()) });
     let mut setup = HudSetup { campaign, loc, saves: Some(saves.clone() as Rc<dyn CampaignSaves>), ..HudSetup::default() };
     setup.facts.user_dir = Some(dir.0.clone());
-    (test_hud_setup(GameDatabase::test_fixture(), setup), saves)
+    let hud = test_hud_setup(GameDatabase::test_fixture(), setup);
+    hud._scripts.state_mut().model.turn = ntw_sim::campaign::TurnState::in_turn_of(A, vec![A]);
+    (hud, saves)
 }
 
 fn eval<R: mlua::FromLuaMulti>(hud: &TestHud, code: &str) -> R {
@@ -137,6 +140,20 @@ fn disable_saving_game_closes_can_save_and_every_save() {
     let _: () = eval(&hud, "CampaignUI.QuickSave()");
     assert_eq!(saves.calls.get(), 0);
     assert!(hud.host.take_log().iter().any(|l| l.contains("saving is disabled")));
+}
+
+/// CanSave asks the model's rule (`CampaignModel::can_save`, `0x008BE4A0`) for the local player's
+/// faction: refused once the campaign is over (+0xFE9) and outside the player's turn under way.
+#[test]
+fn can_save_asks_the_model_for_the_local_player() {
+    let dir = TempDir::new("can_save_rule");
+    let (hud, _) = hud_saving(&dir, "test_campaign", Localisation::new());
+    assert!(eval::<bool>(&hud, "return CampaignUI.CanSave()"));
+    hud._scripts.state_mut().model.turn.in_turn = false;
+    assert!(!eval::<bool>(&hud, "return CampaignUI.CanSave()"), "the player ended its turn");
+    hud._scripts.state_mut().model.turn.in_turn = true;
+    hud._scripts.state_mut().model.end_campaign();
+    assert!(!eval::<bool>(&hud, "return CampaignUI.CanSave()"), "the campaign is over");
 }
 
 #[test]

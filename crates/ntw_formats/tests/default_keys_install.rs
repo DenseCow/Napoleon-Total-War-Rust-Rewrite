@@ -47,3 +47,30 @@ fn shipped_campaign_root_shortcuts() {
     assert!(!find("end_turn").repeating);
     assert_eq!(find("escape_menu").component, "root");
 }
+
+/// User check (2026-10-20): "the arrow keys don't move the campaign camera". The original does the
+/// same: the default keyset `fps` gives no campaign func an arrow; only `total_war` binds them, to
+/// the camera (`rot_l` LEFT, `rot_r` RIGHT, `step_fwd` UP, `step_bck` DOWN). No other campaign
+/// code reads the arrows (`analysis/fidelity/UI_FIDELITY.md` §5.1 "Arrow keys").
+#[test]
+#[ignore]
+fn the_default_keyset_binds_no_arrows_in_the_campaign() {
+    let s = Shortcuts::parse(&vfs().read(PATH).unwrap()).unwrap();
+    const ARROWS: [&str; 4] = ["UP", "DOWN", "LEFT", "RIGHT"];
+    let arrow_funcs = |keyset: &str| -> Vec<(String, String)> {
+        let ks = s.keysets.iter().find(|k| k.name == keyset).unwrap();
+        ks.funcs
+            .iter()
+            .filter(|f| !s.component("campaign", &f.name).is_empty())
+            .flat_map(|f| f.keys.iter().filter(|k| ARROWS.contains(&k.key.as_str())).map(|k| (f.name.clone(), k.key.clone())))
+            .collect()
+    };
+    assert_eq!(s.default_keyset().unwrap().name, "fps");
+    assert_eq!(arrow_funcs("fps"), Vec::<(String, String)>::new());
+    assert!(s.mode_bindings("campaign").0.iter().all(|b| b.keys.iter().all(|k| !ARROWS.contains(&k.key.as_str()))));
+    let tw = arrow_funcs("total_war");
+    for (func, key) in [("rot_l", "LEFT"), ("rot_r", "RIGHT"), ("step_fwd", "UP"), ("step_bck", "DOWN")] {
+        assert!(tw.contains(&(func.to_owned(), key.to_owned())), "{func} {key} in {tw:?}");
+        assert_eq!(s.component("campaign", func), "camera");
+    }
+}
