@@ -97,7 +97,7 @@ fn merging_takes_the_commander_along_and_destroying_kills_attached_characters() 
     m.world.characters.insert(CharacterId(105), character(105, A, CharacterKind::General, 26));
     m.world.forces.insert(
         ForceId(1010),
-        MilitaryForce { id: ForceId(1010), faction: A, commander: Some(CharacterId(105)), units: vec![unit(20)], is_navy: false },
+        MilitaryForce { id: ForceId(1010), faction: A, commander: Some(CharacterId(105)), units: vec![CampaignUnit { character: Some(CharacterId(105)), ..unit(20) }], is_navy: false },
     );
     m.merge_units(ForceId(1000), ForceId(1010), &mut events);
     assert!(!m.world.forces.contains_key(&ForceId(1000)));
@@ -284,6 +284,8 @@ fn identical_models_stay_identical_for_50_turns() {
 #[test]
 fn armies_board_navies_sail_and_land() {
     let mut m = test_model();
+    // The commanders ride their own units, as in every save (the transfer's commander pick reads them).
+    m.world.forces.get_mut(&ForceId(1000)).unwrap().units[0].character = Some(CharacterId(100));
     let mut admiral = character(103, A, CharacterKind::Admiral, 60);
     admiral.position = pos(2, 0);
     m.world.characters.insert(admiral.id, admiral);
@@ -311,7 +313,7 @@ fn armies_board_navies_sail_and_land() {
     m.world.characters.insert(colonel.id, colonel);
     m.world.forces.insert(
         ForceId(1003),
-        MilitaryForce { id: ForceId(1003), faction: A, commander: Some(CharacterId(104)), units: vec![unit(5), unit(6)], is_navy: false },
+        MilitaryForce { id: ForceId(1003), faction: A, commander: Some(CharacterId(104)), units: vec![CampaignUnit { character: Some(CharacterId(104)), ..unit(5) }, unit(6)], is_navy: false },
     );
     m.apply(CampaignCommand::Embark { force: ForceId(1003), navy: ForceId(1002) }).unwrap();
     assert!(!m.world.forces.contains_key(&ForceId(1003)), "merged into the carried army");

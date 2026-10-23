@@ -91,6 +91,8 @@ fn turn_loop_from_the_startpos() {
     assert_eq!(m.rules.agent_caps.get("General"), Some(&(4, 0)));
     assert_eq!(m.rules.agent_caps.get("admiral"), Some(&(3, 0)));
     assert_eq!(m.rules.agent_caps.get("rake"), Some(&(0, 12)));
+    // The vanilla `abilities` table has the `can_exchange` row the agent menu's exchange actions need.
+    assert!(!m.rules.no_exchange_ability);
     // France starts with the cap bonus: 6 Generals and 4 admirals at most.
     assert_eq!(m.commanders_max(france, ntw_sim::campaign::pool::PoolKind::General), 6);
     assert_eq!(m.commanders_max(france, ntw_sim::campaign::pool::PoolKind::Admiral), 4);

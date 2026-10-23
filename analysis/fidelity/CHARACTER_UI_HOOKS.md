@@ -468,16 +468,22 @@ concatenates it unguarded) and `Attributes` was absent (`CampaignCharacterCard.I
 unguarded). `Faction.FlagPath` is the flag **folder**, not the picture.
 
 **Still PROVISIONAL / named open items:**
-- **The mask is the engine's and only four of its nine bits are derivable.** `agent_options_mask` sets
-  `assassinate` / `sabotage` / `duel` when the matching `Request*Targets` list is non-empty, and
-  `sabotage_army` from the same two questions the panel asks (`can_sabotage_army` and
-  `ValidSabotageArmyTarget`). The other five (`visit` 1, `embed` 8, `research` 16, `steal_research` 32,
-  and the dead `counterspy` 256) all end in `CampaignUI.MoveIntoTarget(src, target[, true])`, which
-  appears in **no** shipped `.luac`, so its contract is UNKNOWN; their bits are left **out** rather
-  than faked, and `MoveIntoTarget` is bound to a logging stub so the route cannot raise.
+- **The mask.** `agent_options_mask` sets `assassinate` / `sabotage` / `duel` when the matching
+  `Request*Targets` list is non-empty, and `sabotage_army` from the same two questions the panel asks
+  (`can_sabotage_army` and `ValidSabotageArmyTarget`). `visit` 1, `embed` 8, `research` 16 and
+  `steal_research` 32 come from the model's `exchange_actions` for the clicked target, the exe's mask
+  builders `0x009C9CA0` (character) / `0x009C9EF0` (settlement) behind the `can_exchange` gates
+  `0x009D1190` / `0x009D1540` (CONFIRMED, disassembly; UI_FIDELITY.md §9.10.8), and the buttons give
+  the model's `CampaignCommand::MoveIntoTarget` (`0x009EE150`). `counterspy` 256 is never set: neither
+  builder writes it. PROVISIONAL: the target-dependent filters of `duel` (`0x009CA440`) and
+  `assassinate` (`0x009CA2A0`) inside the builders are not compared with ours.
 - `AgentRogueSabotageArmy` is still a no-op with a log line: its only target is an **army** and no
   `Request*Targets` list exists for one (`SabotageArmy(agent, force)` is called straight from the popup
   button, `agent_options.lua:159`), so the original's exe picked the force itself.
+  (Superseded: the binding `0x009DCED0` picks the garrison army of the agent's residence and
+  queues `SabotageArmy` through `0x00983910` (SubmitSabotageArmyCommand); `CampaignUI.SabotageArmy`
+  itself (`0x009F4910`) takes a target character or a residence, not a force; UI_FIDELITY.md
+  §9.10.9.)
 - The address-representation gap: `string.find(tostring(target), "CHARACTER")` can never match ours,
   because our addresses are light userdata and `tostring` gives `userdata: 0x...`. The original's
   addresses must stringify with a `CHARACTER` prefix (that is the only reason the test exists). **The

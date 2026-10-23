@@ -65,6 +65,7 @@ pub mod rtcut;
 pub mod zoc;
 pub mod zones;
 pub mod zoom_limit;
+pub mod map_bounds;
 pub mod religion;
 pub mod research;
 pub mod rules;
@@ -81,7 +82,7 @@ pub mod portraits;
 pub mod visibility;
 pub mod world;
 
-pub use battles::{BattleCommandRole, BattleGeneralCard, BattleResult, PendingBattle};
+pub use battles::{battle_grade, battle_side_results, BattleCommandRole, BattleGeneralCard, BattleResult, BattleResultCode, PendingBattle};
 pub use capture::{CaptureChoice, CaptureOutcome, CapturePreview};
 pub use commander_recruitment::{CommanderOption, CommanderRecruitment};
 pub use commands::{CampaignCommand, CommandError, CommandQueue, ConstructionOption, PlannedMove};
@@ -99,6 +100,7 @@ pub use visibility::{FogState, Shroud, SightGrid};
 pub use world::{Fort, PopulationClassState};
 pub use siege::SiegeState;
 pub use zoom_limit::ZoomLimit;
+pub use map_bounds::MapBounds;
 pub use world::{EconomyRecord, ECONOMY_HISTORY_LEN, TREATY_BREAKS_START, CAI_RNG_SEED};
 
 #[cfg(test)]

@@ -358,14 +358,14 @@ fn government_change_drifts_the_government_type_factor() {
     assert_eq!(m.world.relationships.keys().count(), 6);
 
     // The counterpart's round end walks its own record towards #3...
-    m.diplomacy_round_end(B);
+    m.diplomacy_round_end(B, &mut Vec::new());
     assert_eq!(m.world.relationships[&(B, A)].attitudes[i].value, -88);
-    m.diplomacy_round_end(C);
+    m.diplomacy_round_end(C, &mut Vec::new());
     assert_eq!(m.world.relationships[&(C, A)].attitudes[i].value, 68);
     // ...and holds it there once it is on the limit (-90 -> -30 is 30 turns, 70 -> 15 is 28).
     for _ in 0..40 {
-        m.diplomacy_round_end(B);
-        m.diplomacy_round_end(C);
+        m.diplomacy_round_end(B, &mut Vec::new());
+        m.diplomacy_round_end(C, &mut Vec::new());
     }
     assert_eq!(m.world.relationships[&(B, A)].attitudes[i].value, -30);
     assert_eq!(m.world.relationships[&(C, A)].attitudes[i].value, 15);
@@ -396,12 +396,12 @@ fn government_change_skips_the_dead_and_rejects_the_unknown() {
     // B is in the game: written and drifting.
     assert_eq!(m.world.relationships[&(B, A)].attitudes[i].value, -90);
     assert!(m.world.relationships[&(B, A)].attitudes[i].limited);
-    m.diplomacy_round_end(B);
+    m.diplomacy_round_end(B, &mut Vec::new());
     assert_eq!(m.world.relationships[&(B, A)].attitudes[i].value, -88);
     // C is out of the game: written all the same, but its round end moves nothing.
     assert_eq!(m.world.relationships[&(C, A)].attitudes[i].value, 70);
     assert!(m.world.relationships[&(C, A)].attitudes[i].limited);
-    m.diplomacy_round_end(C);
+    m.diplomacy_round_end(C, &mut Vec::new());
     assert_eq!(m.world.relationships[&(C, A)].attitudes[i].value, 70);
 }
 

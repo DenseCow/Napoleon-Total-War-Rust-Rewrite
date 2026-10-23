@@ -4,17 +4,28 @@
 //! At each round start, after the trade update, `0x008F5990` (the model's historical event manager,
 //! model +0xF84) gathers the round's candidate events and gives each human faction its share of them:
 //!
-//! 1. The candidates: the manager posts the `HistoricalEvents` script event (`0x0087F960`); each handler
-//!    asks `conditions.IsTriggerableHistoricalEvent` (`0x008A1DC0`) and, when it passes, pushes the
-//!    event with `effect.historical_event` (`0x008C97B0`). The condition finds the `events` record (none:
-//!    false), builds the date `year` + the turn of year (`0x008EDC80` with `(turn − 1) · 48 /
-//!    turns_per_year` quarter-months, [`event_date`]) and compares it with the calendar's whole date
-//!    (`0x00898AF0`); a once-only event also enters the manager's triggered list (`0x008BBC50`), and an
-//!    event already listed fails. So the condition lists the key even when no faction gets the event.
+//! 1. The candidates: the manager builds a holder on its stack (`0x0088B300`: the calendar's date, an
+//!    empty candidate vector, itself and the turns a year) and posts the `HistoricalEvents` script event
+//!    with it (`0x0087F960`, vtable `0x01358184`, named by `0x008BDEB0`) through the dispatcher
+//!    `0x00E30700`, which runs every handler of `events.HistoricalEvents` in list order (`0x00E142B0`).
+//!    The event's context answers no faction, region or character getter; only its holder getter
+//!    (vtable +0x48, `0x0044A500`) is set, and every other event's is null (`0x00461180`). Two script
+//!    calls use it, so both do something only inside this event:
+//!    - `conditions.IsTriggerableHistoricalEvent(turn_of_year, key, year, season, context)`
+//!      (`0x008A1DC0`, [`CampaignModel::is_triggerable_historical_event`]): finds the `events` record
+//!      (none: false), builds the date `year` + the turn of year (`0x008EDC80` with `(turn − 1) · 48 /
+//!      turns_per_year` quarter-months, [`event_date`]) and compares it with the holder's whole date
+//!      (`0x00898AF0`); a once-only event also enters the manager's triggered list (`0x008BBC50`), and
+//!      an event already listed fails. The season is read and not used; the date comes from the
+//!      call's arguments, not from the record.
+//!    - `effect.historical_event(key, context)` (`0x008C97B0`, [`CampaignModel::push_historical_event`]):
+//!      appends the record to the holder's vector, no check, a second push of a key listing it twice.
+//!
 //!    The vanilla script (`export_historic_events.lua`, required by every campaign's `scripting.lua`
-//!    but the tutorial's) has one handler per `events` row, in table order, with the row's own year and
-//!    turn of year; the model runs the same check over the table ([`HistoricalEventRules::scripted`]
-//!    says whether the campaign's script registers them).
+//!    but the tutorial's) has one handler per `events` row, each pushing its event when the condition
+//!    passes. The script host runs the event between the model's [`TurnStep::RoundStart`] and
+//!    [`TurnStep::HistoricalEvents`] steps; without a script host (or handlers) no event is a
+//!    candidate, as in the exe.
 //! 2. For each listed faction (the world's turn list) that is human (+0x6E0): each candidate, in order,
 //!    goes to a "forced" bucket by the event's effect groupings ([`grouping_priority`]), else to a
 //!    "random" bucket by its view groupings, else nowhere. Forced events: the buckets' events in bucket
@@ -24,10 +35,14 @@
 //!    no forced one, none otherwise.
 //! 3. Each chosen event whose text is not `n` posts its message (`0x00A06DA0`, model +0xFA0) to the
 //!    faction ([`CampaignMessage::HistoricalEvent`]). The event's effects are not applied (the exe
-//!    fills its effect text with "Not Implemented: displaying event effects").
+//!    fills its effect text with "Not Implemented: displaying event effects"). The candidates are then
+//!    freed: they last one round start.
 //!
-//! The model calls it through the [`events.historical`](super::seams::HISTORICAL_EVENTS) seam
+//! Steps 2 and 3 run through the [`events.historical`](super::seams::HISTORICAL_EVENTS) seam
 //! ([`CampaignModel::historical_events_round_start`]).
+//!
+//! [`TurnStep::RoundStart`]: super::TurnStep::RoundStart
+//! [`TurnStep::HistoricalEvents`]: super::TurnStep::HistoricalEvents
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -71,10 +86,6 @@ pub struct HistoricalEventRule {
     pub key: String,
     /// `events` #2 (record +0x18): once only; also the matcher's flag ([`grouping_priority`]).
     pub once: bool,
-    /// `events` #3: the year.
-    pub year: i32,
-    /// `events` #7: the turn of the year, from 1.
-    pub turn_of_year: i32,
     /// `events` #6 (record +0x38): the message picture, under `ui/eventpics/<recipient's culture>/`
     /// (`0x00F840E0`).
     pub picture: String,
@@ -96,15 +107,17 @@ pub struct HistoricalEventRules {
     pub groupings: BTreeMap<String, EventGrouping>,
     /// `regions` #1, the continent, by region key.
     pub region_continents: BTreeMap<String, String>,
-    /// The campaign's script registers the round start's `HistoricalEvents` handlers (its
-    /// `scripting.lua` requires `export_historic_events`): without them no event is a candidate.
-    pub scripted: bool,
 }
 
 impl HistoricalEventRules {
     /// The record with this key (`0x008C9850`).
     pub fn event(&self, key: &str) -> Option<&HistoricalEventRule> {
-        self.events.iter().find(|e| e.key == key)
+        self.events.get(self.index_of(key)?)
+    }
+
+    /// The index in [`Self::events`] of the record with this key (`0x008C9850`).
+    fn index_of(&self, key: &str) -> Option<usize> {
+        self.events.iter().position(|e| e.key == key)
     }
 }
 
@@ -194,35 +207,38 @@ fn mark_triggered(list: &mut Vec<String>, key: &str) -> bool {
     }
 }
 
-/// The round's candidates: the `events` records whose condition passes, in table order (see the
-/// module docs, step 1). Lists each once-only candidate in the triggered list.
-///
-/// PROVISIONAL: stands in for the original running the `HistoricalEvents` script event through the script
-/// host (0x0087F960); the vanilla handlers' condition is evaluated here directly, so a mod's own
-/// `HistoricalEvents` handlers are ignored until the script host posts that event.
-fn candidates(model: &mut CampaignModel) -> Vec<usize> {
-    let rules = std::sync::Arc::clone(&model.rules);
-    let events = &rules.historical_events;
-    if !events.scripted {
-        return Vec::new();
-    }
-    let calendar = model.calendar;
-    let mut out = Vec::new();
-    for (i, e) in events.events.iter().enumerate() {
-        if event_date(e.year, e.turn_of_year, calendar.turns_per_year) != Some(calendar.date) {
-            continue;
+impl CampaignModel {
+    /// `conditions.IsTriggerableHistoricalEvent` (`0x008A1DC0`, module docs step 1): whether the event
+    /// `key` fires on the date of `year` and `turn_of_year`; a once-only event that passes enters the
+    /// triggered list, and one listed already fails. False outside the `HistoricalEvents` event (the
+    /// exe's context has no holder there: [`Self::historical_candidates`] is `None`, or the caller's
+    /// context is not that event's).
+    pub fn is_triggerable_historical_event(&mut self, key: &str, year: i32, turn_of_year: i32) -> bool {
+        if self.historical_candidates.is_none() {
+            return false;
         }
-        if e.once && !mark_triggered(&mut model.world.historical_events_triggered, &e.key) {
-            continue;
+        let rules = std::sync::Arc::clone(&self.rules);
+        let Some(e) = rules.historical_events.event(key) else { return false };
+        if event_date(year, turn_of_year, self.calendar.turns_per_year) != Some(self.calendar.date) {
+            return false;
         }
-        out.push(i);
+        !e.once || mark_triggered(&mut self.world.historical_events_triggered, &e.key)
     }
-    out
+
+    /// `effect.historical_event` (`0x008C97B0`, module docs step 1): appends the event `key` to the
+    /// round's candidates, without a check (a key pushed twice is listed twice). Nothing for an unknown
+    /// key or outside the `HistoricalEvents` event; returns whether it was listed.
+    pub fn push_historical_event(&mut self, key: &str) -> bool {
+        let Some(found) = self.historical_candidates.as_mut() else { return false };
+        let Some(i) = self.rules.historical_events.index_of(key) else { return false };
+        found.push(i);
+        true
+    }
 }
 
-/// The original's round-start historical events (`0x008F5990`, module docs): the messages to post.
-pub fn historical_events(model: &mut CampaignModel, _writes: &mut ModWrites) -> Vec<CampaignEvent> {
-    let found = candidates(model);
+/// The original's round-start share of the candidates `found` (`0x008F5990`, module docs steps 2 and
+/// 3): the messages to post.
+pub fn historical_events(model: &mut CampaignModel, found: &[usize], _writes: &mut ModWrites) -> Vec<CampaignEvent> {
     let mut out = Vec::new();
     if found.is_empty() {
         return out;
@@ -235,7 +251,7 @@ pub fn historical_events(model: &mut CampaignModel, _writes: &mut ModWrites) -> 
         }
         let mut forced: [Vec<usize>; BUCKETS] = Default::default();
         let mut random: [Vec<usize>; BUCKETS] = Default::default();
-        for &i in &found {
+        for &i in found {
             let e = &events[i];
             let p = grouping_priority(model, faction, &e.effect_groups, e.once);
             if let Some(bucket) = forced.get_mut(usize::from(p)) {
@@ -268,12 +284,30 @@ pub fn historical_events(model: &mut CampaignModel, _writes: &mut ModWrites) -> 
 }
 
 impl CampaignModel {
-    /// The round start's historical events through the
-    /// [`events.historical`](super::seams::HISTORICAL_EVENTS) seam: the messages go to `events`.
+    /// Opens the round's candidates (the holder `0x008F5990` builds before posting `HistoricalEvents`):
+    /// the event's handlers fill them until [`Self::historical_events_round_start`].
+    pub(crate) fn open_historical_events(&mut self) {
+        self.historical_candidates = Some(Vec::new());
+    }
+
+    /// The round start's share of the candidates the `HistoricalEvents` handlers pushed, through the
+    /// [`events.historical`](super::seams::HISTORICAL_EVENTS) seam: the messages go to `events`. The
+    /// candidates are freed. Without [`Self::open_historical_events`] first (a state the turn steps never
+    /// reach: the two steps run back to back and no save falls between them) there are none, logged once.
     pub fn historical_events_round_start(&mut self, events: &mut Vec<CampaignEvent>) {
+        static UNOPENED_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let found = match self.historical_candidates.take() {
+            Some(found) => found,
+            None => {
+                if !UNOPENED_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    log::warn!("historical events: the round start shares out candidates that were never opened; none are posted (logged once)");
+                }
+                Vec::new()
+            }
+        };
         let mut writes = ModWrites::default();
         let rules = std::sync::Arc::clone(&self.rules);
-        events.extend(rules.seams.historical_events.rule()(self, &mut writes));
+        events.extend(rules.seams.historical_events.rule()(self, &found, &mut writes));
         self.mod_state.apply(&mut writes);
     }
 }
@@ -287,15 +321,15 @@ mod tests {
 
     const A: FactionId = FactionId(1); // test_model's faction A
     const A_KEY: &str = "test_faction_a";
+    /// The test calendar's date as the scripts give it: `model_with` sets it to turn 11 of 24 in 1806.
+    const YEAR: i32 = 1806;
+    const TURN: i32 = 11;
 
-    /// A MADE-UP event on 24 turns a year: the date of the test model's calendar.
-    fn event(key: &str, effect: &[&str], view: &[&str], once: bool, model: &CampaignModel) -> HistoricalEventRule {
-        let d = model.calendar.date;
+    /// A MADE-UP event.
+    fn event(key: &str, effect: &[&str], view: &[&str], once: bool) -> HistoricalEventRule {
         HistoricalEventRule {
             key: key.into(),
             once,
-            year: d.year as i32,
-            turn_of_year: (d.turn_in_year() * model.calendar.turns_per_year / 24) as i32 + 1,
             picture: "p.tga".into(),
             effect_groups: effect.iter().map(|s| (*s).to_owned()).collect(),
             view_groups: view.iter().map(|s| (*s).to_owned()).collect(),
@@ -307,21 +341,36 @@ mod tests {
         EventGrouping { factions: factions.iter().map(|s| (*s).to_owned()).collect(), ..Default::default() }
     }
 
-    /// test_model with faction A human, its calendar on a date event_date can give, and `events`.
-    fn model_with(events: impl FnOnce(&CampaignModel) -> Vec<HistoricalEventRule>, groupings: Vec<(&str, EventGrouping)>) -> CampaignModel {
+    /// test_model with faction A human, its calendar on the date of [`YEAR`] / [`TURN`], and `events`.
+    fn model_with(events: Vec<HistoricalEventRule>, groupings: Vec<(&str, EventGrouping)>) -> CampaignModel {
         let mut m = test_model();
         m.calendar.turns_per_year = 24;
-        m.calendar.date = event_date(1806, 11, 24).expect("24 turns");
+        m.calendar.date = event_date(YEAR, TURN, 24).expect("24 turns");
         m.turn.humans = vec![A];
         let mut rules = (*m.rules).clone();
         rules.historical_events = HistoricalEventRules {
-            events: events(&m),
+            events,
             groupings: groupings.into_iter().map(|(k, g)| (k.to_owned(), g)).collect(),
             region_continents: BTreeMap::new(),
-            scripted: true,
         };
         m.rules = Arc::new(rules);
         m
+    }
+
+    /// A round start with the vanilla script's handlers (`export_historic_events.lua`): one per event,
+    /// in table order, pushing its event when the condition passes on the given date.
+    fn round(m: &mut CampaignModel, year: i32, turn: i32) -> Vec<CampaignEvent> {
+        m.open_historical_events();
+        let rules = Arc::clone(&m.rules);
+        for e in &rules.historical_events.events {
+            if m.is_triggerable_historical_event(&e.key, year, turn) {
+                assert!(m.push_historical_event(&e.key));
+            }
+        }
+        let mut out = Vec::new();
+        m.historical_events_round_start(&mut out);
+        assert_eq!(m.historical_candidates, None, "the candidates last one round start");
+        out
     }
 
     fn messages(events: &[CampaignEvent]) -> Vec<(FactionId, &str)> {
@@ -353,7 +402,7 @@ mod tests {
     /// their value without comparing; empires never match.
     #[test]
     fn the_matcher_takes_the_best_grouping_and_regions_overwrite() {
-        let mut m = model_with(|_| Vec::new(), Vec::new());
+        let mut m = model_with(Vec::new(), Vec::new());
         let key = m.world.factions[&A].key.clone();
         let region = m.world.regions.values().find(|r| r.owner == A).expect("A owns a region").key.clone();
         let mut rules = (*m.rules).clone();
@@ -390,13 +439,9 @@ mod tests {
     /// Forced events: the first 4 in bucket order, and no draw.
     #[test]
     fn forced_events_take_the_first_four_without_a_draw() {
-        let mut m = model_with(
-            |m| (0..6).map(|i| event(&format!("e{i}"), &["all"], &["all"], false, m)).collect(),
-            vec![("all", grouping(&[A_KEY]))],
-        );
+        let mut m = model_with((0..6).map(|i| event(&format!("e{i}"), &["all"], &["all"], false)).collect(), vec![("all", grouping(&[A_KEY]))]);
         let rng = m.rng;
-        let mut out = Vec::new();
-        m.historical_events_round_start(&mut out);
+        let out = round(&mut m, YEAR, TURN);
         assert_eq!(messages(&out), [(A, "e0"), (A, "e1"), (A, "e2"), (A, "e3")]);
         assert_eq!(m.rng, rng, "no draw");
     }
@@ -405,50 +450,55 @@ mod tests {
     /// none and draw nothing; no candidate, no draw.
     #[test]
     fn a_random_event_is_drawn_once_per_human_faction() {
-        let mut m = model_with(|m| (0..3).map(|i| event(&format!("e{i}"), &[], &["all"], false, m)).collect(), vec![("all", grouping(&[A_KEY]))]);
+        let mut m = model_with((0..3).map(|i| event(&format!("e{i}"), &[], &["all"], false)).collect(), vec![("all", grouping(&[A_KEY]))]);
         let mut expected_rng = m.rng;
         let pick = expected_rng.uniform_below(3) as usize;
-        let mut out = Vec::new();
-        m.historical_events_round_start(&mut out);
+        let out = round(&mut m, YEAR, TURN);
         let picked = format!("e{pick}");
         assert_eq!(messages(&out), [(A, picked.as_str())]);
         assert_eq!(m.rng, expected_rng, "exactly one draw");
-        // Next round's date matches no event: no candidate, no draw.
+        // Next round's date matches no event's: no candidate, no draw.
         m.calendar.advance_turn(None);
         let rng = m.rng;
-        let mut out = Vec::new();
-        m.historical_events_round_start(&mut out);
-        assert!(out.is_empty());
+        assert!(round(&mut m, YEAR, TURN).is_empty());
         assert_eq!(m.rng, rng);
     }
 
     /// A once-only event enters the triggered list (UTF-16 sorted) and does not fire again; an
-    /// event without text posts nothing but is still chosen; a campaign without the script gets none.
+    /// event without text posts nothing but is still chosen.
     #[test]
-    fn once_only_events_fire_once_and_unscripted_campaigns_get_none() {
-        let mut m = model_with(
-            |m| {
-                let mut quiet = event("b_quiet", &["all"], &[], true, m);
-                quiet.posts_message = false;
-                vec![event("a_once", &["all"], &[], true, m), quiet]
-            },
-            vec![("all", grouping(&[A_KEY]))],
-        );
-        let mut out = Vec::new();
-        m.historical_events_round_start(&mut out);
+    fn once_only_events_fire_once() {
+        let mut quiet = event("b_quiet", &["all"], &[], true);
+        quiet.posts_message = false;
+        let mut m = model_with(vec![event("a_once", &["all"], &[], true), quiet], vec![("all", grouping(&[A_KEY]))]);
+        let out = round(&mut m, YEAR, TURN);
         assert_eq!(messages(&out), [(A, "a_once")]);
         assert_eq!(m.world.historical_events_triggered, ["a_once", "b_quiet"]);
+        assert!(round(&mut m, YEAR, TURN).is_empty(), "listed events fail the condition");
+    }
+
+    /// `0x008A1DC0` / `0x008C97B0`: the date is the call's, not the record's; an unknown key fails and
+    /// pushes nothing; a failed date check leaves a once-only event unlisted; a key pushed twice is a
+    /// candidate twice; outside the event (no holder) both do nothing.
+    #[test]
+    fn the_condition_and_the_push_follow_the_script_calls() {
+        let mut m = model_with(vec![event("e", &["all"], &[], true)], vec![("all", grouping(&[A_KEY]))]);
+        assert!(!m.is_triggerable_historical_event("e", YEAR, TURN), "no holder outside the event");
+        assert!(!m.push_historical_event("e"));
+        assert!(m.world.historical_events_triggered.is_empty());
+        m.open_historical_events();
+        assert!(!m.is_triggerable_historical_event("missing", YEAR, TURN));
+        assert!(!m.push_historical_event("missing"));
+        assert!(!m.is_triggerable_historical_event("e", YEAR, TURN + 1), "another date");
+        assert!(!m.is_triggerable_historical_event("e", YEAR + 1, TURN), "another year");
+        assert!(m.world.historical_events_triggered.is_empty(), "a failed date lists nothing");
+        // A push needs no condition: a mod's handler may push an event twice, on any date.
+        assert!(m.push_historical_event("e") && m.push_historical_event("e"));
+        assert_eq!(m.historical_candidates, Some(vec![0, 0]));
         let mut out = Vec::new();
         m.historical_events_round_start(&mut out);
-        assert!(out.is_empty(), "listed events fail the condition");
-        // Without the script's handlers no event is a candidate.
-        let mut m = model_with(|m| vec![event("e", &["all"], &[], false, m)], vec![("all", grouping(&[A_KEY]))]);
-        let mut rules = (*m.rules).clone();
-        rules.historical_events.scripted = false;
-        m.rules = Arc::new(rules);
-        let mut out = Vec::new();
-        m.historical_events_round_start(&mut out);
-        assert!(out.is_empty());
+        assert_eq!(messages(&out), [(A, "e"), (A, "e")], "listed twice, posted twice");
+        assert!(m.world.historical_events_triggered.is_empty(), "the push does not list a once-only event");
     }
 
     /// The triggered list's order is `CompareUniStrings`' (UTF-16 code units), not UTF-8 bytes.

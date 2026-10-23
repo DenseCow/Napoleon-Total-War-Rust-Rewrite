@@ -721,9 +721,19 @@ impl CampaignModel {
     /// landing, a force taking a settlement). A navy that moves leaves the port it lies in first ([`Self::undock`],
     /// `0x00A8C0B0`: its repair orders cancelled and refunded) and carries its embarked armies along
     /// ([`Self::sync_passengers`]). A move ends a raiding commander's raids (the move order's start `0x0095D940` →
-    /// `0x009DA140`, [`Self::clear_character_raids`]; that every move goes through that order is INFERRED).
+    /// `0x009DA140`, [`Self::end_character_raids`]; that every move goes through that order is INFERRED).
     pub(crate) fn move_character(&mut self, character: CharacterId, pos: (Fixed20, Fixed20)) {
-        let Some(old) = self.world.characters.get(&character).map(|c| c.position) else { return };
+        // 0x0095D940 → 0x009DA140: a move ends his raids (INFERRED: every move is that order).
+        if self.relocate(character, pos) {
+            self.end_character_raids(character);
+        }
+    }
+
+    /// The position change of [`Self::move_character`] and [`Self::place_character`]: a navy that
+    /// moves leaves its port, the position is set and its embarked armies follow. Whether the
+    /// position changed (false for an unknown character).
+    fn relocate(&mut self, character: CharacterId, pos: (Fixed20, Fixed20)) -> bool {
+        let Some(old) = self.world.characters.get(&character).map(|c| c.position) else { return false };
         if old != pos
             && let Some(force) = self.force_of(character)
         {
@@ -731,10 +741,7 @@ impl CampaignModel {
         }
         self.world.characters.get_mut(&character).expect("checked").position = pos;
         self.sync_passengers(character);
-        // 0x0095D940 → 0x009DA140: a move ends his raids (INFERRED: every move is that order).
-        if old != pos {
-            self.clear_character_raids(character);
-        }
+        old != pos
     }
 
     /// The step that sets `character` down again at the end of a move or a placement: `0x00A285E0`
@@ -748,8 +755,8 @@ impl CampaignModel {
     /// `0x00972CA0` at the path's end (`0x00972DC9`, `0x00972EB1`, and `0x00973A01` with the
     /// finished flag) or when the move is stopped (`0x00960620`, `0x00921EE0`, `0x00921CD0`,
     /// `0x00923140`), and the second call of every placement `0x0096C8D0` (`0x0096C9C4`). Ours: the
-    /// walk's end, the fleet's sail and the army's landing in [`Self::disembark`], and the expulsion
-    /// placement. Argument 0
+    /// walk's end, the fleet's sail and the army's landing in [`Self::disembark`], and every placement
+    /// ([`Self::place_character`]). Argument 0
     /// (a step in mid-move, `0x00973A01`; a placement's first call `0x0096C930`) runs only the sight
     /// and keeps him lifted; argument 2 (a step waiting on a blocked path, `0x0097342C`,
     /// `0x00973B44`) returns at `0x00A2860D`. The model's moves are whole, so it runs only this one.
@@ -758,6 +765,24 @@ impl CampaignModel {
         self.refresh_shroud(faction, false);
         self.rebuild_moved_zones(character);
         self.update_hidden(character);
+    }
+
+    /// Places `character` at `pos`: the exe's placement `0x0096C8D0` (CONFIRMED by disassembly). It
+    /// lifts him (character vtable slot +0x1C) and runs `0x00A285E0` with argument 0 (`0x0096C930`),
+    /// which ends his raids whenever his raid list (+0x2D0) is not empty, even when he is placed where
+    /// he stands (`0x00A28605`). It then copies the position and sets him down with argument 1
+    /// (`0x0096C9C4`, [`Self::set_down`]). Ours: his raids end, he is put there ([`Self::relocate`],
+    /// which also carries a navy's armies and leaves its port when the position changes), then he is
+    /// set down. The callers in the model are the region expulsion (`0x008DA072` / `0x008DA1B2`) and a
+    /// force's new commander after a General hire (`0x00A165B9`), an admiral hire that replaced a
+    /// ship's character (`0x00A162E9`), a field promotion (`0x008E2147` / `0x008E24FF`) or a unit
+    /// transfer ([`Self::merge_units`]: `0x008D5299` / `0x008D5356`, `0x008D6812` / `0x008D68EC`). Those
+    /// set the new commander's position first, so he is placed where he stands. The other callers of
+    /// `0x0096C8D0` are listed in PATHFINDING.md §8.
+    pub(crate) fn place_character(&mut self, character: CharacterId, pos: (Fixed20, Fixed20)) {
+        self.end_character_raids(character);
+        self.relocate(character, pos);
+        self.set_down(character);
     }
 
     /// Moves the commanders of the armies aboard the navy `character` commands to its position.
@@ -848,7 +873,13 @@ impl CampaignModel {
                 self.world.embarked.insert(force, navy);
             }
         }
-        // The boarding join (`0x008F0F20` / `0x008F17D0` → `0x00A285C0`): the fleet's zones again.
+        // A whole army boards through the navy_embark order (execute `0x0094C010`, CONFIRMED): onto a
+        // fleet that carries an army it is the unit transfer `0x008D7310` → `0x008D47B0` /
+        // `0x008D5F10`, which places a force's commander (`0x0096C8D0`) only when the commander pick
+        // `0x008ED2C0` chose another ([`Self::merge_units`]); onto an empty fleet the army goes
+        // aboard whole (`0x008EF090`, `0x008F3150`), with no placement. (`0x008F0F20` / `0x008F17D0`
+        // board part of an army, not modelled.) The fleet's zones again: INFERRED, the zone step
+        // of these two paths is not traced.
         self.rebuild_force_zones(navy);
         Ok(events)
     }

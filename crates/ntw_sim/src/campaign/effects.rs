@@ -15,7 +15,8 @@
 //!     handicap, [`apply_start_handicaps`]) + Σ owned regions' faction-wide
 //!     building effects (buildings at health ≥ 100) + researched technologies + government type +
 //!     every ministerial post holder (his post's level effects + his character set);
-//!   - **region** (`0x00A67530`) = its buildings' local effects (health ≥ 100) + its owner's faction
+//!   - **region** (`0x00A67530`) = its buildings' local effects (health ≥ 100) + its traits' set
+//!     (region +0x1DC, [`region_trait_set`]; no region has traits in vanilla) + its owner's faction
 //!     set (+ the governor's sets outside the home theatre: never the case in the shipped campaigns, not
 //!     modelled, PROVISIONAL).
 //!
@@ -503,6 +504,8 @@ pub struct Effects {
     pub region_local: BTreeMap<RegionId, EffectSet>,
     /// Each region's faction-wide building effects (region +0x198).
     pub region_factionwide: BTreeMap<RegionId, EffectSet>,
+    /// Each region's trait set (region +0x1DC, [`region_trait_set`]), for the regions that have traits.
+    pub region_traits: BTreeMap<RegionId, EffectSet>,
     /// Each character's traits + ancillaries.
     pub character: BTreeMap<CharacterId, EffectSet>,
     region_owner: BTreeMap<RegionId, FactionId>,
@@ -510,6 +513,26 @@ pub struct Effects {
 }
 
 impl Effects {
+    /// Stores region `r`'s own sets: its buildings' local and faction-wide effects (health ≥ 100) and, when it
+    /// has traits, its trait set.
+    fn insert_region(&mut self, rules: &EffectRules, r: &super::world::Region) {
+        let mut local = EffectSet::default();
+        let mut wide = EffectSet::default();
+        for b in r.effect_buildings() {
+            if let Some(set) = rules.building_local.get(&b.level_key) {
+                local.merge(set);
+            }
+            if let Some(set) = rules.building_factionwide.get(&b.level_key) {
+                wide.merge(set);
+            }
+        }
+        self.region_local.insert(r.id, local);
+        self.region_factionwide.insert(r.id, wide);
+        if !r.traits.is_empty() {
+            self.region_traits.insert(r.id, region_trait_set(rules, r));
+        }
+    }
+
     /// Builds every sum for `model` (see the module docs for the composition).
     pub fn compute(model: &CampaignModel) -> Self {
         let rules = &model.rules.effects;
@@ -522,21 +545,10 @@ impl Effects {
                 fx.character_owner.insert(*id, c.faction);
             }
         }
-        // Regions: local and faction-wide building effects.
+        // Regions: local and faction-wide building effects, and the region's traits.
         let gov = w.governing_factions();
         for (id, r) in &w.regions {
-            let mut local = EffectSet::default();
-            let mut wide = EffectSet::default();
-            for b in r.effect_buildings() {
-                if let Some(set) = rules.building_local.get(&b.level_key) {
-                    local.merge(set);
-                }
-                if let Some(set) = rules.building_factionwide.get(&b.level_key) {
-                    wide.merge(set);
-                }
-            }
-            fx.region_local.insert(*id, local);
-            fx.region_factionwide.insert(*id, wide);
+            fx.insert_region(rules, r);
             fx.region_owner.insert(*id, gov.get(id).copied().unwrap_or(r.owner));
         }
         // Factions.
@@ -562,18 +574,7 @@ impl Effects {
             if r.owner != faction && g != faction {
                 continue;
             }
-            let mut local = EffectSet::default();
-            let mut wide = EffectSet::default();
-            for b in r.effect_buildings() {
-                if let Some(set) = rules.building_local.get(&b.level_key) {
-                    local.merge(set);
-                }
-                if let Some(set) = rules.building_factionwide.get(&b.level_key) {
-                    wide.merge(set);
-                }
-            }
-            fx.region_local.insert(*id, local);
-            fx.region_factionwide.insert(*id, wide);
+            fx.insert_region(rules, r);
             fx.region_owner.insert(*id, g);
             factions.insert(g);
         }
@@ -636,15 +637,16 @@ impl Effects {
         self.faction.get(&f).map_or(0.0, |s| s.get_qualified(kind, bonus, qualifier))
     }
 
-    /// A region's basic bonus: its own buildings plus its governing faction's set (`0x00A67530`; normally
-    /// the owner, see [`super::World::governing_faction`]).
-    /// Not added (PROVISIONAL): region +0x1DC and the governorship container (UNKNOWN contents), and the
-    /// governor's post-level set and his +0x48C, which the exe adds only outside the faction's home
-    /// theatre; in the shipped campaigns every faction has one governorship, its home (tested).
+    /// A region's basic bonus: its own buildings, its traits (region +0x1DC, [`region_trait_set`]) and its
+    /// governing faction's set (`0x00A67530`; normally the owner, see [`super::World::governing_faction`]).
+    /// Not added (PROVISIONAL): the governorship container (UNKNOWN contents), and the governor's
+    /// post-level set and his +0x48C, which the exe adds only outside the faction's home theatre; in the
+    /// shipped campaigns every faction has one governorship, its home (tested).
     pub fn region(&self, r: RegionId, bonus: &str) -> f32 {
         let local = self.region_local.get(&r).map_or(0.0, |s| s.get(bonus));
+        let traits = self.region_traits.get(&r).map_or(0.0, |s| s.get(bonus));
         let owner = self.region_owner.get(&r).map_or(0.0, |f| self.faction(*f, bonus));
-        local + owner
+        local + traits + owner
     }
 
     /// A character's full view (`0x008AFC00`, CONFIRMED structure): his faction's sum (+0x6FC) plus his
@@ -788,17 +790,55 @@ fn add_saved(entries: &mut Vec<SavedBonus>, key: &EffectKey, value: f32) -> Save
 }
 
 
+/// The held traits' current level keys, in list order; a trait at level 0 has none (no level record).
+fn held_levels<'a>(rules: &'a EffectRules, traits: &'a [super::details::CharacterTrait]) -> impl Iterator<Item = &'a str> + 'a {
+    traits.iter().filter_map(|t| rules.held_level_key(&t.key, t.level))
+}
+
+/// The set of a trait container (container +0x24, the same class for characters and regions): the
+/// rebuild `0x008EDAE0` empties it, then merges each held trait's current level set (`0x008AFC90`, the
+/// level record's) in list order (CONFIRMED disassembly).
+fn merge_trait_sets(rules: &EffectRules, traits: &[super::details::CharacterTrait], s: &mut EffectSet) {
+    for level in held_levels(rules, traits) {
+        if let Some(set) = rules.trait_level_set(level) {
+            s.merge(set);
+        }
+    }
+}
+
+/// A region's trait set (region +0x1DC, its trait container's set: [`merge_trait_sets`] over
+/// [`super::world::Region::traits`]); part of the region's effect set (`0x00A67530` merges it after the
+/// buildings' local set +0x188). Empty in vanilla, where no region has traits.
+pub fn region_trait_set(rules: &EffectRules, region: &super::world::Region) -> EffectSet {
+    let mut s = EffectSet::default();
+    merge_trait_sets(rules, &region.traits, &mut s);
+    s
+}
+
+/// A region's effect list (region +0x1CC, its trait container's +0x14): each effect of its held traits'
+/// current levels with its value, the values of one effect summed, in first-appearance order (CONFIRMED:
+/// the rebuild `0x008EDAE0` empties the list, then hands each held trait's level effect list, in list order,
+/// to `0x00F840A0`, whose `0x00F84220` adds a value to the entry of the same effect record or appends a new
+/// entry). The region details panel lists it ([`super::world::Region::traits`]; rebuilt whenever a trait
+/// changes or loads, so it is derived here rather than stored).
+pub fn region_trait_rows(rules: &EffectRules, region: &super::world::Region) -> Vec<(String, f32)> {
+    let mut rows: Vec<(String, f32)> = Vec::new();
+    for level in held_levels(rules, &region.traits) {
+        for (effect, value) in rules.trait_level_rows(level) {
+            match rows.iter_mut().find(|(k, _)| k == effect) {
+                Some((_, v)) => *v += value,
+                None => rows.push((effect.clone(), *value)),
+            }
+        }
+    }
+    rows
+}
+
 /// A character's own set: traits by level + ancillaries.
 fn character_set(rules: &EffectRules, d: Option<&super::details::CharacterDetails>) -> EffectSet {
     let mut s = EffectSet::default();
     let Some(d) = d else { return s };
-    for t in &d.traits {
-        if let Some(level) = rules.held_level_key(&t.key, t.level)
-            && let Some(set) = rules.trait_level_set(level)
-        {
-            s.merge(set);
-        }
-    }
+    merge_trait_sets(rules, &d.traits, &mut s);
     for a in &d.ancillaries {
         if let Some(set) = rules.ancillary.get(a) {
             s.merge(set);

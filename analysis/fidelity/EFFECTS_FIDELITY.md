@@ -18,7 +18,7 @@ decompiled code is stored. Temp files: `target\tmp`.
   `effects_check` (research helper), integration tests (`ntw_campaign/tests/effects.rs`).
 
   normal gets e.g. land upkeep 5525 instead of 5580 and taxes 6870 instead of 6182 on turn 1 (§5.3).
-- Open (PROVISIONAL, listed in §6): region +0x1DC and governorship container contents, the army container in the
+- Open (PROVISIONAL, listed in §6): the governorship container's contents, the army container in the
   character view, the governor part (never applies in shipped campaigns), qualified kinds other than unit
   category/class/pop class/agent, the front-end difficulty choice, the minister attribute key, trait points falling.
 - Value checks: the vanilla saves written by the original confirm upkeep (22/23, 4/4, 4/4 factions exact with
@@ -82,7 +82,7 @@ decompiled code is stored. Temp files: `target\tmp`.
   effects, `0x00A62380` → `0x00A91FC0`; the holder is `REGION_SLOT` #0 `GARRISON_RESIDENCE` #0, round 6) + the technology
   manager's container (faction +0x7C4 object +0x18: researched technologies) + government (faction +0x70C, `0x008AFAB0`):
   the government type's container + for every ministerial post holder his post-level set (`0x008D9D40`) and his +0x48C.
-- **Region** (computed on the fly, `0x00A67530`): region +0x188 (its buildings' local effects) + region +0x1DC + the
+- **Region** (computed on the fly, `0x00A67530`): region +0x188 (its buildings' local effects) + region +0x1DC (its traits' level sets, CAMPAIGN_UI.md region details Effects; empty in vanilla) + the
   faction part `0x008AFB50` (of the governing faction: the one whose governorship lists the region, normally the
   owner; INFERRED from `eur_bavaria` in the vanilla save `auto_after_c8`, see CAMPAIGN_FIDELITY.md §Public order): faction +0x6FC + the region's governorship container (`0x00BA2170`: governorship +0x14, empty when
   governorship +0xE4 is set) + the governor's post-level set and his +0x48C when the region's theatre (`0x008F4100`)
@@ -177,7 +177,7 @@ this branch merged with it: every faction's treasury is identical on all 10 turn
 details now carry the containers and the AI difficulty). Expected: no formula reads the effects yet (0-B's step).
 
 ## 6. PROVISIONAL / open
-- Region +0x1DC and the governorship container (+0x14 unless governorship +0xE4) are added by the exe; contents
+- The governorship container (+0x14 unless governorship +0xE4) is added by the exe (region +0x1DC, the region traits' sets, is modelled); contents
   UNKNOWN, not modelled. The governor's post set + his +0x48C are added only outside the home theatre: every faction
   has one governorship in the shipped campaigns (tested), so it never applies; not modelled.
 - Character view (`0x008AFC00`) uses the army's container (army +0x98 → +0x24) instead of the faction sum when the

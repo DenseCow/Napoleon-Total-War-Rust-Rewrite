@@ -1,6 +1,7 @@
 //! The round start's historical events data ([`ntw_sim::campaign::historical_events`]), built from the
-//! merged database, the localisation and the campaign's script (CAMPAIGN_FIDELITY.md "Historical
-//! events"; CONFIRMED by disassembly unless a line says otherwise).
+//! merged database and the localisation (CAMPAIGN_FIDELITY.md "Historical events"; CONFIRMED by
+//! disassembly). Which events a round picks is the campaign script's (its `HistoricalEvents`
+//! handlers, run by `ntw_script`).
 //!
 //! The exe builds an `events` record (`0x00F74A90`) from each row in the converter `0x00F875E0`,
 //! which drops the row when:
@@ -12,23 +13,18 @@
 //!   `groupings`, one in `events_hist_chars_junct` a key not in `historical_characters`, or one in
 //!   `events_to_policies_junction` a key not in `policies`.
 //!
-//! The database part is [`rules`] (called by [`crate::rules`]); the localisation and script part is
+//! The database part is [`rules`] (called by [`crate::rules`]); the localisation part is
 //! [`attach`] (called when a campaign opens).
 
 use std::collections::BTreeMap;
 
 use ntw_data::GameDatabase;
 use ntw_formats::loc::Localisation;
-use ntw_formats::pack::Vfs;
 use ntw_sim::campaign::historical_events::{EventGrouping, HistoricalEventRule, HistoricalEventRules};
 use ntw_sim::campaign::CampaignModel;
 
 /// The season keys `0x00F55970` knows (any other key gives 4: no season, and the record is dropped).
 const SEASONS: [&str; 4] = ["season_summer", "season_winter", "season_spring", "season_autumn"];
-
-/// The script the vanilla campaigns `require` for their `HistoricalEvents` handlers (generated from
-/// `events`: one handler per row, in table order, CONFIRMED for the 8 vanilla rows).
-const EVENTS_SCRIPT: &str = "export_historic_events";
 
 /// The text that means "no message" (`0x008F5990` posts an event's message only when its text is
 /// not this).
@@ -69,8 +65,6 @@ pub fn rules(db: &GameDatabase) -> HistoricalEventRules {
         events.push(HistoricalEventRule {
             key: e.key.clone(),
             once: e.once,
-            year: e.year,
-            turn_of_year: e.turn_of_year,
             picture: e.picture.clone(),
             effect_groups,
             view_groups,
@@ -104,43 +98,15 @@ pub fn rules(db: &GameDatabase) -> HistoricalEventRules {
         add(&j.grouping, |g| &mut g.subcultures, &j.member);
     }
     let region_continents = db.regions.iter().map(|r| (r.key.clone(), r.continent.clone())).collect();
-    HistoricalEventRules { events, groupings, region_continents, scripted: false }
+    HistoricalEventRules { events, groupings, region_continents }
 }
 
-/// Whether a campaign script requires the events script: a line, outside a `--` comment, that
-/// calls `require` with [`EVENTS_SCRIPT`]. Without that `require` the campaign registers no
-/// `HistoricalEvents` handler (the vanilla tutorial), so no event is ever a candidate.
-///
-/// PROVISIONAL: stands in for running the `HistoricalEvents` script event through the script host; a
-/// mod's own handlers (without this `require`) are not seen.
-fn requires_events_script(script: &str) -> bool {
-    script.lines().any(|line| {
-        let code = line.split("--").next().unwrap_or_default();
-        code.contains("require") && code.contains(EVENTS_SCRIPT)
-    })
-}
-
-/// Finishes the model's events with the localisation and the campaign's script: drops the events
-/// whose title or text is missing, marks the ones whose text is not `n` as posting their message,
-/// and sets [`HistoricalEventRules::scripted`] from `campaigns/<key>/scripting.lua`. A missing
-/// localisation drops every event (as the original, which finds no text); each problem is logged
-/// once.
-pub fn attach(model: &mut CampaignModel, vfs: &Vfs, loc: Option<&Localisation>, campaign_key: &str) {
-    let path = format!("campaigns/{campaign_key}/scripting.lua");
-    let scripted = match vfs.read(&path) {
-        Ok(bytes) => requires_events_script(&String::from_utf8_lossy(&bytes)),
-        Err(e) => {
-            log::warn!("Historical events: {path} cannot be read ({e}); the campaign gets no historical events");
-            false
-        }
-    };
-    finish(model, loc, scripted);
-}
-
-/// [`attach`] with the script's answer given.
-fn finish(model: &mut CampaignModel, loc: Option<&Localisation>, scripted: bool) {
+/// Finishes the model's events with the localisation: drops the events whose title or text is
+/// missing and marks the ones whose text is not `n` as posting their message. A missing
+/// localisation drops every event (as the original, which finds no text); the dropped events are
+/// logged once.
+pub fn attach(model: &mut CampaignModel, loc: Option<&Localisation>) {
     let rules = &mut std::sync::Arc::make_mut(&mut model.rules).historical_events;
-    rules.scripted = scripted;
     let mut dropped = Vec::new();
     rules.events.retain_mut(|e| {
         let text = loc.and_then(|l| Some((l.get(&title_key(&e.key))?, l.get(&text_key(&e.key))?)));
@@ -196,21 +162,12 @@ mod tests {
         let r = rules(&db);
         assert_eq!(r.events.iter().map(|e| e.key.as_str()).collect::<Vec<_>>(), ["kept"]);
         let e = &r.events[0];
-        assert_eq!((e.year, e.turn_of_year, e.picture.as_str(), e.once), (1805, 3, "pic.tga", false));
+        assert_eq!((e.picture.as_str(), e.once), ("pic.tga", false));
         assert_eq!(e.view_groups, ["g2", "g1"], "junction rows in file order");
         assert_eq!(e.effect_groups, ["g1"]);
         assert_eq!(r.groupings.keys().collect::<Vec<_>>(), ["g1", "g2"]);
         assert_eq!(r.groupings["g1"].factions, ["f"]);
         assert_eq!(r.groupings["g2"].continents, ["c"]);
-        assert!(!r.scripted, "set by attach");
-    }
-
-    /// The `require` check: comments do not count.
-    #[test]
-    fn the_events_script_is_found_outside_comments() {
-        assert!(requires_events_script("local x = 1\r\nlocal historic_events = require \"export_historic_events\"\r\n"));
-        assert!(!requires_events_script("-- local historic_events = require \"export_historic_events\"\n"));
-        assert!(!requires_events_script("require \"export_ancillaries\"\n"));
     }
 
     /// MADE-UP localisation: an event without its text is dropped; a text of `n` posts no message.
@@ -225,11 +182,10 @@ mod tests {
             file.entries.push(ntw_formats::loc::LocEntry { key: k.into(), text: v.into(), flag: false });
         }
         loc.add(&file);
-        finish(&mut model, Some(&loc), true);
+        attach(&mut model, Some(&loc));
         let r = &model.rules.historical_events;
-        assert!(r.scripted);
         assert_eq!(r.events.iter().map(|e| (e.key.as_str(), e.posts_message)).collect::<Vec<_>>(), [("a", true), ("b", false)]);
-        finish(&mut model, None, false);
+        attach(&mut model, None);
         assert!(model.rules.historical_events.events.is_empty(), "no localisation: no event");
     }
 }

@@ -16,7 +16,9 @@
 //! of version 2 or later, and places the eye from the tilt (`0x009208B0`, the tilt/distance law of
 //! `napoleon::campaign::camera`).
 //!
-//! What the u32 (+0x13C) and the bool (+0x140) mean is UNKNOWN (0 and false in every vanilla save
+//! The u32 (+0x13C) counts the camera's running controllers and the bool (+0x140) is the pre-battle
+//! hold; either makes the camera ignore input ([`CameraView::holds_input`]). The current camera's
+//! copy `0x0090E120` keeps both, so a loaded camera keeps them (0 and false in every vanilla save
 //! seen); they are kept as read. No vanilla save or start position has a named camera.
 //!
 //! After the reader, the loader replaces the current camera only on a new multiplayer campaign
@@ -32,16 +34,33 @@ pub struct CameraView {
     /// The tilt (+0x138), from which the exe places the eye (`0x009208B0`): 0.5 at the farthest
     /// zoom, 1.0 at the nearest.
     pub tilt: f32,
-    /// +0x13C, meaning UNKNOWN (kept as read; 0 in every vanilla save seen).
+    /// +0x13C: the count of camera controllers running on this camera (CONFIRMED: one more when
+    /// `0x00925E20` installs a controller, `0x00955800`; one less at `0x00925E33` (inside `0x00925E20`) and at `0x0096E560` when one ends
+    /// (`0x0096F280`), when a named camera is restored (`0x00968300`) and when the turn's start
+    /// restores the `start_of_turn` camera (`0x00A13BF0`)). Kept as read (0 in every vanilla save seen); while it is not 0 the camera
+    /// takes no input ([`Self::holds_input`]).
     pub field_13c: u32,
     /// The point looked at (+0x14/+0x18/+0x1C), in logic units: east, height, north. The height is
     /// 0 in every vanilla save seen (the new-game view of `0x00987070` sets it to 0 too).
     pub target: [f32; 3],
-    /// +0x140, meaning UNKNOWN (kept as read; false in every vanilla save seen).
+    /// +0x140: the pre-battle hold (CONFIRMED: set only by the pre-battle panel `0x009994B0` through
+    /// `0x00955810`, after it moves the camera to the battle; cleared on every camera of the
+    /// manager by `0x0096E580`, which only the campaign UI's listener `0x00A13DA0`, vtable
+    /// `0x0136B808` slot 1 at UI +0x9C4, calls; which event reaches that listener is UNKNOWN).
+    /// Kept as read (false in every vanilla save seen); while it is set the camera takes no input
+    /// ([`Self::holds_input`]).
     pub flag_140: bool,
 }
 
 impl CameraView {
+    /// Whether this camera ignores the player's input: the camera's busy test `0x00955820`, true
+    /// while a controller runs (+0x13C not 0) or the pre-battle hold is set (+0x140) (CONFIRMED).
+    /// It gates every camera key binding (`0x0095A510`, `0x0095A591`) and the wheel (`0x00A0EDF0`,
+    /// `0x00A0EF7F`; a wheel turn while busy is deferred, `0x00A0EF86`, which ours drops), and the mouse update `0x00970A90` twice (`0x00970C0D`, `0x00970D52`).
+    pub fn holds_input(&self) -> bool {
+        self.field_13c != 0 || self.flag_140
+    }
+
     /// A camera looking at logic (`east`, `north`) with `tilt`, its unknown fields as the read
     /// constructor `0x00900C00` starts them (0, false).
     pub fn looking_at(east: f32, north: f32, tilt: f32) -> Self {
@@ -233,5 +252,15 @@ mod tests {
         let mut root = EsfRecord::new("CAMPAIGN_SAVE_GAME", 0);
         root.children = vec![EsfNode::Record(Box::new(env))];
         assert_eq!(read(&EsfFile::new(root)), None);
+    }
+
+    /// The busy test `0x00955820`: a running controller (+0x13C not 0) or the pre-battle hold
+    /// (+0x140) holds the input; a fresh camera holds none.
+    #[test]
+    fn a_controller_or_the_battle_hold_holds_the_input() {
+        let free = CameraView::looking_at(0.0, 0.0, 0.7);
+        assert!(!free.holds_input());
+        assert!(CameraView { field_13c: 1, ..free }.holds_input());
+        assert!(CameraView { flag_140: true, ..free }.holds_input());
     }
 }

@@ -313,8 +313,8 @@ fn treaties_and_the_per_turn_update() {
     assert_eq!(m.world.relationships[&(A, B)].trade_embargo_turns, 10);
     // Military access for 10 turns, cancelled after 2: grievance 60 − 6 × 2.
     act(&mut m, A, B, D::GrantMilitaryAccess(10));
-    m.diplomacy_round_end(A);
-    m.diplomacy_round_end(A);
+    m.diplomacy_round_end(A, &mut Vec::new());
+    m.diplomacy_round_end(A, &mut Vec::new());
     let r = &m.world.relationships[&(A, B)];
     assert_eq!((r.military_access_turns, r.military_access_elapsed, r.military_access_streak), (8, 2, 2));
     act(&mut m, A, B, D::CancelMilitaryAccess);
@@ -322,8 +322,8 @@ fn treaties_and_the_per_turn_update() {
     assert_eq!(m.world.access_cancel_marks[&A], 16);
     // The per-turn update: the grievance falls by 2, the embargo by 1, the alliance_broken factor recovers by 2.
     let before = m.world.relationships[&(B, A)].attitudes[slot("alliance_broken")].value;
-    m.diplomacy_round_end(A);
-    m.diplomacy_round_end(B);
+    m.diplomacy_round_end(A, &mut Vec::new());
+    m.diplomacy_round_end(B, &mut Vec::new());
     let r = &m.world.relationships[&(A, B)];
     assert_eq!((r.access_cancel_grievance, r.trade_embargo_turns), (46, 7), "three updates since the embargo");
     assert_eq!(m.world.relationships[&(B, A)].attitudes[slot("alliance_broken")].value, before + 2);
@@ -343,7 +343,7 @@ fn treaties_and_the_per_turn_update() {
     act(&mut m, A, B, D::RegularPayment(100, 3));
     assert_eq!(m.world.relationships[&(A, B)].payments.len(), 1);
     for _ in 0..3 {
-        m.diplomacy_round_end(A);
+        m.diplomacy_round_end(A, &mut Vec::new());
     }
     assert!(m.world.relationships[&(A, B)].payments.is_empty());
     // Protectorate: B becomes A's protectorate.
@@ -613,7 +613,9 @@ fn peace_posts_ceasefire_messages_unless_suppressed() {
 /// indefinite access post none, and the granter's records are walked in record order (`0x00B29100`).
 #[test]
 fn timed_access_with_one_turn_left_posts_the_access_prompt() {
-    let prompts = |ev: Vec<CampaignEvent>| -> Vec<(FactionId, FactionId)> {
+    let prompts = |m: &mut CampaignModel, f: FactionId| -> Vec<(FactionId, FactionId)> {
+        let mut ev = Vec::new();
+        m.diplomacy_round_end(f, &mut ev);
         ev.iter()
             .filter_map(|e| match e {
                 CampaignEvent::Message { recipient, message: CampaignMessage::MilitaryAccessPrompt { granter } } => Some((*recipient, *granter)),
@@ -627,20 +629,25 @@ fn timed_access_with_one_turn_left_posts_the_access_prompt() {
     m.world.diplomacy_record_order.insert(A, vec![C, B]);
     m.grant_military_access(A, B, 3).unwrap();
     m.grant_military_access(A, C, 2).unwrap();
-    assert_eq!(prompts(m.diplomacy_round_end(A)), vec![(C, A)], "C's 2 turns leave 1");
-    assert_eq!(prompts(m.diplomacy_round_end(A)), vec![(B, A)], "B's 3 turns leave 1; C's run out silently");
-    assert_eq!(prompts(m.diplomacy_round_end(A)), vec![]);
+    assert_eq!(prompts(&mut m, A), vec![(C, A)], "C's 2 turns leave 1");
+    assert_eq!(prompts(&mut m, A), vec![(B, A)], "B's 3 turns leave 1; C's run out silently");
+    assert_eq!(prompts(&mut m, A), vec![]);
     assert_eq!(m.world.relationships[&(A, B)].military_access_turns, 0);
     // Both at 2 together: record order, C before B.
     m.grant_military_access(A, B, 2).unwrap();
     m.grant_military_access(A, C, 2).unwrap();
-    assert_eq!(prompts(m.diplomacy_round_end(A)), vec![(C, A), (B, A)]);
+    assert_eq!(prompts(&mut m, A), vec![(C, A), (B, A)]);
     // A 1-turn grant and indefinite access never leave one turn.
-    drop(m.diplomacy_round_end(A));
+    m.diplomacy_round_end(A, &mut Vec::new());
     m.grant_military_access(A, B, 1).unwrap();
     m.grant_military_access(A, C, -1).unwrap();
-    assert_eq!(prompts(m.diplomacy_round_end(A)), vec![]);
-    assert_eq!(prompts(m.diplomacy_round_end(A)), vec![]);
+    assert_eq!(prompts(&mut m, A), vec![]);
+    assert_eq!(prompts(&mut m, A), vec![]);
+    // A target out of the game is skipped: its access neither counts down nor posts the prompt.
+    m.world.relationships.get_mut(&(A, C)).unwrap().military_access_turns = 2;
+    m.world.faction_details.entry(C).or_default().out_of_game = Some(true);
+    assert_eq!(prompts(&mut m, A), vec![]);
+    assert_eq!(m.world.relationships[&(A, C)].military_access_turns, 2);
     assert_eq!(CampaignMessage::MilitaryAccessPrompt { granter: A }.type_name(), "military_access_prompt");
 }
 

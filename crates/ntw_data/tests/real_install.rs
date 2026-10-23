@@ -483,3 +483,19 @@ fn historical_event_tables() {
     assert_eq!(e.grouping_continents.len(), 2);
     assert!(e.grouping_cultures.is_empty() && e.grouping_subcultures.is_empty() && e.grouping_regions.is_empty() && e.grouping_empires.is_empty());
 }
+
+/// The unrest tables the class pass reads (`0x008F9690`, CAMPAIGN_FIDELITY.md §Class war): the classes'
+/// unrest paths and the demand per cause and kind.
+#[test]
+#[ignore = "needs the game installed"]
+fn unrest_tables() {
+    let db = GameDatabase::from_install(data_dir()).unwrap();
+    let c = &db.campaign;
+    let paths: Vec<(&str, bool, bool, bool)> = c.population_classes.iter().map(|r| (r.key.as_str(), r.strikes, r.demands, r.flag_3)).collect();
+    assert_eq!(paths, [("lower", true, false, false), ("middle", true, false, false), ("upper", false, true, true)]);
+    assert_eq!(c.unrest_demands.len(), 48);
+    let demand = |cause: &str, kind: &str| c.unrest_demands.iter().find(|r| r.cause == cause && r.kind == kind).map(|r| r.demand.as_str());
+    assert_eq!(demand("bankruptcy", "riots"), Some("change_government_head"));
+    // No row for a rebellion: its demand is 0, none.
+    assert!(c.unrest_demands.iter().all(|r| r.kind != "rebellion"));
+}

@@ -39,15 +39,24 @@ impl CampaignModel {
         true
     }
 
-    /// [`Self::lift_port_blockade`] without its price update, for a caller that runs it once afterwards.
+    /// [`Self::lift_port_blockade`] without its price update, for a caller that runs the update once afterwards.
     fn clear_port_blockade(&mut self, region: RegionId, slot: usize) -> bool {
         self.world.regions.get_mut(&region).and_then(|r| r.slots.get_mut(slot)).and_then(|s| s.blockade.take()).is_some()
     }
 
-    /// The slots `pred` picks among the blockaded ones, in region and slot order.
-    fn blockaded_slots(&self, mut pred: impl FnMut(&super::Region, &super::RegionSlot, ForceId) -> bool) -> Vec<(RegionId, usize)> {
+    /// The slots `pred` picks among the blockaded ones, in region and slot order; `only` limits the walk to one region.
+    fn blockaded_slots(
+        &self,
+        only: Option<RegionId>,
+        mut pred: impl FnMut(&super::Region, &super::RegionSlot, ForceId) -> bool,
+    ) -> Vec<(RegionId, usize)> {
         let mut out = Vec::new();
-        for r in self.world.regions.values() {
+        let (one, all) = match only {
+            Some(id) => (self.world.regions.get(&id), None),
+            None => (None, Some(self.world.regions.values())),
+        };
+        let regions = one.into_iter().chain(all.into_iter().flatten());
+        for r in regions {
             for (i, s) in r.slots.iter().enumerate() {
                 if let Some(b) = s.blockade
                     && pred(r, s, b.navy)
@@ -67,9 +76,11 @@ impl CampaignModel {
     /// ([`Self::lift_port_blockade`], with its price update). The exe reaches a navy only through its
     /// commander's step, so a blockading navy with no commander, or whose commander is in neither side's
     /// character list (+0x764 / +0x768; in the model, a commander id with no character), keeps blockading.
+    /// The slots are collected first and lifted as a batch, which is order-free: a lift touches only its own
+    /// slot, and each lift runs the price update.
     pub(crate) fn lift_blockade_on_peace(&mut self, c: CharacterId, other: FactionId) {
         let Some(navy) = self.force_of_kind(c, true) else { return };
-        for (region, slot) in self.blockaded_slots(|r, s, n| n == navy && s.holder.unwrap_or(r.owner) == other) {
+        for (region, slot) in self.blockaded_slots(None, |r, s, n| n == navy && s.holder.unwrap_or(r.owner) == other) {
             self.lift_port_blockade(region, slot);
         }
     }
@@ -78,7 +89,7 @@ impl CampaignModel {
     /// holder goes back to the region's owner, a blockade it holds, navy +0xE8, is lifted; skipped there only
     /// while the campaign is torn down, campaign +0xFC5).
     pub(crate) fn lift_blockade_of_navy(&mut self, navy: ForceId) {
-        for (region, slot) in self.blockaded_slots(|_, _, n| n == navy) {
+        for (region, slot) in self.blockaded_slots(None, |_, _, n| n == navy) {
             self.lift_port_blockade(region, slot);
         }
     }
@@ -88,11 +99,11 @@ impl CampaignModel {
     /// `region` whose holder is now the new owner `faction` is lifted when the blockading navy's faction (navy
     /// +0x7C) is `faction` or not at war with it (`IsFactionAtWarWith` `0x008CE9B0`, [`Self::at_war`]). A port
     /// whose holder stayed (a docked navy kept it) keeps its blockade. The price updates are left to the
-    /// caller (see [`Self::pass_region_slots`]); returns whether a blockade was lifted.
+    /// caller (see [`Self::pass_region_slots`]); returns whether a blockade was lifted. The slots are lifted in one
+    /// batch after the walk, which is order-free: each lift touches only its own slot.
     pub(crate) fn clear_blockades_after_slot_pass(&mut self, region: RegionId, faction: FactionId) -> bool {
-        let lifted = self.blockaded_slots(|r, s, navy| {
-            r.id == region
-                && s.holder.is_none_or(|h| h == faction)
+        let lifted = self.blockaded_slots(Some(region), |_, s, navy| {
+            s.holder.is_none_or(|h| h == faction)
                 && self.world.forces.get(&navy).is_some_and(|f| !self.at_war(f.faction, faction))
         });
         for &(region, slot) in &lifted {

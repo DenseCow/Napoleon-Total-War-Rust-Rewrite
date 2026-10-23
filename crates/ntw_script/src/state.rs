@@ -79,6 +79,11 @@ pub struct ScriptContext {
     pub mission: Option<String>,
     /// The building level the event is about (building level key).
     pub building_level: Option<String>,
+    /// The context carries the round's historical-event candidates (CONFIRMED: only the
+    /// `HistoricalEvents` context's getter at vtable +0x48, `0x0044A500`, returns them; every other
+    /// context's is the null stub). `conditions.IsTriggerableHistoricalEvent` and
+    /// `effect.historical_event` do nothing without it.
+    pub historical_events: bool,
 }
 
 impl ScriptContext {

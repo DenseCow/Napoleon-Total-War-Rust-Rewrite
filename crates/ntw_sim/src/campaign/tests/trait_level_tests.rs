@@ -168,3 +168,37 @@ fn a_load_sets_unset_levels_from_the_points() {
     assert_eq!(traits, &vec![held(6, 2), held(0, 0), held(1, 3), held(1, 0)]);
     assert_eq!(land(&m), before, "the saved attribute levels already hold the effects");
 }
+
+/// A region's traits load as a character's do (the same container class, `0x0088AFF0`).
+#[test]
+fn a_load_sets_region_trait_levels_too() {
+    let mut m = model(2);
+    m.world.regions.get_mut(&RegionId(10)).unwrap().traits = vec![held(6, 0), CharacterTrait { key: "S".into(), points: -2, level: 0 }, held(1, 3)];
+    load_trait_levels(&mut m);
+    assert_eq!(m.world.regions[&RegionId(10)].traits, vec![held(6, 2), held(0, 0), held(1, 3)]);
+}
+
+/// A region's effect list (region +0x1CC, `0x008EDAE0` → `0x00F84220`) sums one effect's values over its held
+/// traits' current levels in first-appearance order, a trait with no level adding none; its set (+0x1DC) is part
+/// of the region's effects (`0x00A67530`). MADE-UP traits `S` (level 2: `t_z` 2, `t_b` 3) and `T` (level 1:
+/// `t_c` 1, `t_b` 0.5).
+#[test]
+fn a_regions_effect_list_sums_its_traits_level_effects_in_first_appearance_order() {
+    use super::effects::{Effects, region_trait_rows, region_trait_set};
+    let mut m = model(2);
+    let r = Arc::make_mut(&mut m.rules);
+    r.effects.insert_trait_level("S_2".into(), [("t_z", 2.0), ("t_b", 3.0)]);
+    r.effects.trait_levels.insert("T".into(), vec![(1, 1, "T_1".into())]);
+    r.effects.insert_trait_level("T_1".into(), [("t_c", 1.0), ("t_b", 0.5)]);
+    let region = RegionId(10);
+    let before = (Effects::compute(&m).region(region, "b"), economy::region_effect_set(&m, &m.world.regions[&region]).get("b"));
+    m.world.regions.get_mut(&region).unwrap().traits = vec![held(6, 2), held(1, 0), CharacterTrait { key: "T".into(), points: 1, level: 1 }];
+    let reg = &m.world.regions[&region];
+    let rows = region_trait_rows(&m.rules.effects, reg);
+    assert_eq!(rows, [("t_z".to_string(), 2.0), ("t_b".to_string(), 3.5), ("t_c".to_string(), 1.0)]);
+    assert_eq!(region_trait_set(&m.rules.effects, reg).get("b"), 3.5, "only the mapped effect has a bonus");
+    assert_eq!(Effects::compute(&m).region(region, "b"), before.0 + 3.5);
+    assert_eq!(Effects::compute_for(&m, reg.owner).region(region, "b"), before.0 + 3.5);
+    assert_eq!(economy::region_effect_set(&m, reg).get("b"), before.1 + 3.5);
+    assert_eq!(Effects::compute(&m).region_local(region, "b"), 0.0, "the buildings' part alone");
+}

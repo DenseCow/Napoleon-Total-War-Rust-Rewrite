@@ -828,19 +828,33 @@ fn read_region(rec: &EsfRecord, path: &str, check: &mut Checker<'_>) -> Result<(
         .flat_map(|a| a.items.iter())
         .filter_map(|it| Some((it.first()?.as_str()?.to_string(), it.get(1)?.as_f32()?)))
         .collect();
-    // Each class's stored values (`0x008861E0`): #1 the 13 happiness slots (element 7, class +0x20, is the
-    // war factor), #11 the education base (+0x70), #12 the resistance base (+0x74).
+    // Each class's stored values (`0x008861E0`; CONFIRMED layout from a vanilla save, `POPULATION_CLASS` v3):
+    // #1 the 13 happiness slots (+0x04..; element 7, +0x20, is the war factor, element 9, +0x28, the
+    // bankruptcy factor), #2 the repression slots (element 5, +0x54, is the crackdown factor), #3 / #4 / #5 the
+    // positive, negative and repression sums (+0x38 / +0x3C / +0x58), #6 the riot chance (+0x5C), #7 the stage
+    // (+0x60), #8 / #9 / #10 the unrest kind, demand and cause (+0x64 / +0x68 / +0x6C), #11 the education base
+    // (+0x70), #12 the resistance base (+0x74). A value the record lacks takes the class's default.
     let class_bases: Vec<PopulationClassState> = factors
         .and_then(|f| f.record_array("POPULATION CLASSES"))
         .into_iter()
         .flat_map(|a| a.records())
         .filter_map(|c| {
-            Some(PopulationClassState {
-                class: c.get_str(0)?.to_string(),
-                education: c.get_i32(11).unwrap_or(0),
-                resistance: c.get_i32(12).unwrap_or(0),
-                war: c.get(1).and_then(EsfNode::as_i32_array).and_then(|h| h.get(7).copied()).unwrap_or(0),
-            })
+            let mut s = PopulationClassState::new(c.get_str(0)?);
+            if let Some(h) = c.get(1).and_then(EsfNode::as_i32_array) {
+                let mut slots = [0; 13];
+                for (slot, v) in slots.iter_mut().zip(h) {
+                    *slot = *v;
+                }
+                s.set_slots(slots);
+            }
+            s.crackdown = c.get(2).and_then(EsfNode::as_i32_array).and_then(|r| r.get(5).copied()).unwrap_or(0);
+            let i32_at = |i: usize, d: i32| c.get_i32(i).unwrap_or(d);
+            let u32_at = |i: usize, d: u32| c.get_u32(i).unwrap_or(d);
+            (s.positive, s.negative, s.repression) = (i32_at(3, 0), i32_at(4, 0), i32_at(5, 0));
+            (s.riot_chance, s.stage) = (i32_at(6, 0), i32_at(7, 0));
+            (s.unrest, s.demand, s.cause) = (u32_at(8, 0), u32_at(9, 0), u32_at(10, s.cause));
+            (s.education, s.resistance) = (i32_at(11, 0), i32_at(12, 0));
+            Some(s)
         })
         .collect();
     // `RESOURCES_ARRAY`: one utf16 key per item (CONFIRMED shape: 102 items over the 72 regions of
@@ -892,6 +906,9 @@ fn read_region(rec: &EsfRecord, path: &str, check: &mut Checker<'_>) -> Result<(
         // #13 the besieging forces (+0x12C) (CONFIRMED, reader `0x00AF4B00`); besiegers are checked
         // against the forces in `load_world`.
         siege: read_siege(garrison_res, &gpath)?,
+        // #2 `TRAITS`: the region's traits (the loader `0x00A45950` at `0x00A45DB0`, CONFIRMED); their levels
+        // are set once the rules are attached (`load_trait_levels`).
+        traits: rec.child("TRAITS").map(crate::details::read_traits).unwrap_or_default(),
     };
     let residents = read_settlement_residents(garrison_res, &gpath)?;
     Ok((region, recruitment_sources, residents))

@@ -1482,8 +1482,26 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
       centre n/2 behind (the box depth halved less p2 halved). Ours: `Formation::front`, the distance
       from the measured centre to the front, per kind (tests in `march.rs`). Ours lays every order this way;
       the exe lays a moving order's rows along its planned path from the path cursor, wheeling on its arcs
-      (`0x007F2DA0`): PROVISIONAL in ours. Missing: what the path piece classes' vfuncs `+0x14` / `+0x18`
-      return, the path builder reached from `0x00815F80`, and how an arc piece lays its rows.
+      (`0x007F2DA0`): PROVISIONAL in ours, for bent paths only (formshapes, CONFIRMED static):
+      - `0x007F2DA0`'s callers all pass flag 0: `0x007F2D70` (from `LayOutUnitMoveOrderSlots` `0x00576B3D`
+        and `IssueUnitMoveOrderToSoldiers` `0x00584ED4`) and `0x007F2D40`. With 0 the builder (`0x00815F80`'s
+        vfunc `+4`) and the in-function vfunc `+0x14` / `+0x18` branch never run (dead in this exe). It builds a
+        0x3C-byte slot target (`0x0061DE40`: `+0` byte 1, a piece-pointer vector at `+4` (cap `+0xC`, count
+        `+0x10`, data `+0x14`), ground point `+0x18..+0x28`, and via `0x0061CA40` `+0x2C..+0x38` = {the owner's
+        `+0x2CC`, the order width `+0x54`, 2, `+8`}) and appends a clone (`0x0062A150` → `0x0063EC00`) of each
+        path piece from the cursor's node, following its `+4` links.
+      - The anchor walk `0x00659E70` calls piece 0's vfunc `+0x18` (cursor point, men, walk state) and each later
+        piece's `+0x14`; both piece classes share `+0x14` = `0x0065A130` (vfunc `+4`, the piece's start, then
+        `+0x18`). Straight piece (vtable `0x01333944`, `+0x18` = `0x00659F00`): start `+0xC/+0x10`, end
+        `+0x14/+0x18`, unit direction `+0x8C/+0x90`, heading `+8`; the first row at start + carry (state `+0x14`)
+        × direction; f = its projection over the length; f > 1 → carry = (f − 1) × length and no rows; else
+        L = (1 − f) × length, floor(L / p4) + 1 rows every p4 (state `+0x10`) along it, each by `0x0065A3F0` with
+        the piece heading, then carry = p4 − (L − floor(L / p4) × p4) when positive, else 0. On a straight path
+        this is ours (one row every p4 back from the front). Arc piece (vtable `0x0133396C`, `+0x18` =
+        `0x0065A160`): centre `+0x98/+0x9C`, radius `+0xA0`, side `+4` (2 flips it), 0.1 tolerance, rows through
+        `0x0063A120` and `0x0065A3F0` round the bend. Ours has no battlefield path finder (BACKLOG "Unit
+        pathfinding on the battlefield"), so its paths never bend and the arc piece has nothing to lay; it is
+        ported with the path finder.
     - *Kind 1, the diamond.* Layout `0x0062FDC0` builds generator `0x006208B0` (vtable `0x01333AE4`), whose
       `+0x20..+0x28` come from `0x006209F0(men)`: A = `0x0063C010` = the single-precision square root rounded
       to nearest plus one when the root is above it, i.e. ceil(√men); B = A/2 + A²/2 rounded half to even
@@ -1535,11 +1553,37 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
       loop runs to nMen). Ours: `Formation::laid_slots` (march.rs) counts the extra corner and puts it at slot
       men; only the slots past it (a man added after the lay-out, ours) stand behind.
     - *Kind 3, the pike wall `0x006311B0`.* Full rows of `files` from the left, 1 m apart, the remainder row
-      starting at (files − rem) >> 1 slots in; every heading 0. files = `0x00642EE0` = min(`0x00642C90`(width,
+      starting at (files − rem) >> 1 slots in; every heading the anchor piece's (vfunc `+8`) plus the half turn
+      `0x014D0650`, the same for all (0 in the unit's frame). files = `0x00642EE0` = min(`0x00642C90`(width,
       p1, 1.0), men) = min(floor(width + 0.001 − p1) + 1, men). Its box is the pike square's k × k (the shared
-      measure `0x0063A590`), not its own rows. Ours takes the width as the unit's fresh width and p1 as two man
-      radii: PROVISIONAL. Missing: the re-form width the ability switch `0x00578860` gives it, and which
-      entity's `+0x4C` reaches p1 through `0x00579780` (shape `+0x18`).
+      measure `0x0063A590`), not its own rows. Width (formshapes, CONFIRMED static): pike wall on is case 6 of
+      the switch `0x00578860` (enum `0x0131C3A0`: "pike_wall_formation" = 6); it runs the task `0x00518870`(unit,
+      3) (vtable `0x013249B0`), then `0x0057ADB0`(6, 1) and `0x0052ED80`(6, 0); off runs `0x0057ADB0`(6, 0),
+      `0x00549F30`(6) and `0x005315A0`. Neither writes shape params. `0x00518870`, when `0x0055AC60` holds, reads
+      the unit's formation width `+0x384` → `+0x24` (`0x005188E4` / `0x005188EA`) and re-forms at it
+      (`0x0053FBD0`, then `0x00537FA0` → `0x00537E40`(a, b, width, 0, 1, 0), which takes the files from
+      `0x00642C60`(width, `+0x2CC`) and builds the order into `+0x384` with `0x0051D330`), runs `0x0057E260` per
+      soldier and builds each squad's kind-3 shape (`CreateSquadFormationShape`(squad, 3) at `0x00518932` → the
+      factory `0x00531680` → `0x00621140`(sq + 4, p1 = `+0x2F8`, p2 = `+0x2FC`)). A move's lay-out passes the
+      order's width (`0x00576B30` → order `+0x54`, the `+0x384` → `+0x24` float of the path query `0x0054D900`).
+      So the width is the unit's formation width, never narrowed by the men (only the files are capped). The
+      earlier note's `0x00578EDD`..`0x00578F47` / `0x00579042`..`0x0057907F` are case 7 (fire_and_advance), not
+      the pike wall. p1: the unit's `+0x2F8` is written only by the set-up `0x0051B7D0` (0 at `0x0051BA9F`, then
+      2 × `+0x2EC` at `0x0051C739` / `0x0051C747`, `+0x2EC` = the largest soldier `+0x58` at `0x0051C200`,
+      `0x0051C43C`, `0x0051C691`) and by `SetUnitFormationShapeParams` `0x00579780` (`0x005797AC`), whose callers
+      are: case 7 (`0x00578F47` / `0x0057907F`: 2 × `+0x2EC`, the same value); the dismount task `0x00514900`'s
+      states (their getters `0x00556700` / `0x00556C30` sit in its table at `0x013247AC` / `0x013247B4`, before
+      its vtable `0x013247BC`): dismount on-enter `0x0054DD70` (thunk `0x004F8230`; task `+0x38` = 1) sets p1 =
+      p2 = 2 × the man entity's radius (unit `+0x60` → `+0x4C`), p3 / p4 = `+0x148` / `+0x14C`, and remount
+      on-enter `0x005748A0` (thunk `0x004F8330`; `+0x38` = 0) sets p1 = p2 = 2 × the mount entity's radius (unit
+      `+0x8C` → `+0x4C`), p3 / p4 = `+0x138` / `+0x13C`; `0x005446F0`, for category 1 (artillery) from the task
+      ctor `0x0051B6B0` (via `0x0057EAC0`), sets p1 = the first gun's `+0x58`; `0x005445A0`, when the guns object
+      `+0x1F4` (made only when unit `+0x38` ≠ 0, `0x0051BF7D`, `0x0051C462`) has emptied (callers `0x0052E840`,
+      `0x00574E90`), sets p1 = p2 = the man entity's radius once, p3 / p4 = `+0x148` / `+0x14C`. Ours:
+      `LandUnit::formation_width` (else the `fresh_width` fallback) and 2 × `man_radius` (test
+      `the_pike_wall_fills_rows_from_the_left`), CONFIRMED for a unit on foot (set-up, case 7 and the dismounted
+      state all give it). PROVISIONAL: a remounted unit (`0x005748A0`) and a unit with guns (`0x005446F0`,
+      `0x005445A0`); ours models neither a mount radius nor guns objects and keeps 2 × `man_radius` there.
     - *Kind 4, the square `0x00631560`.* The template table `0x014D0690` (0x20-byte entries: side `+8`, slot
       array `+0x1C` of 0x18-byte records), built once by `0x00621F00`, holds templates of side n = 7, 8, … ,
       51, adding sides until the last holds 400 slots or more. `0x00661690` picks the template whose 8n − 8 to
@@ -1556,10 +1600,24 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
       on it: the front row stands 1 m ahead of the order point and the centre block off the rings' middle.
       Ours starts at the inner corner (−(n/2 − 1), n/2 − 1): rings centred, the outer n wide and deep.
     - *Not modelled.* The slot headings are recorded (`Formation::slot_heading`) but ours does not turn the
-      men to them nor weigh them in the slot cost (PROVISIONAL, see `slot_cost`); the slot pose word (FormationSlot
-      `+0x14`) is not modelled: the pike wall `0x006311B0` writes 5 for its first row, 4 for its second, 3 for the
-      rest and its remainder row (CONFIRMED static); what the men do with it is untraced. A slot past a square's laid men (more slots than the shape places) gets a place of its own
-      behind the shape (ours).
+      men to them nor weigh them in the slot cost (PROVISIONAL, see `slot_cost`). Where the exe applies them
+      (formshapes, CONFIRMED static): the timed move `IssueUnitMoveOrderToSoldiers` `0x00584E10` reads only the
+      slot's flag `+0` and point `+4` and turns every man to the order's travel heading (atan2 of the
+      `0x00817CF0` direction × 10430.378), not his slot's; the slot heading `+0x18` reaches a man through the
+      reform move (`0x005736B0` → `MoveSoldierToSlotIfOutOfPlace` `0x0055F160`: moves when the heading differs by
+      more than 910 or distance² > 0.0625, the request carrying the slot heading) and the deployment branch of
+      `0x00584E10` (soldier vfunc `+0xB8` with slot `+0x18`, plus a (soldier `+0x5D0` − 0.5) × `0x0057E230`
+      jitter when soldier `+0x1F0` is set); the soldier's locomotive turns him (`0x00806D40`: turn rate `+0x104`
+      × 0.1 a tick, snapping within 1°). Ours needs a per-man heading and that turn: a new system, left over.
+      The slot pose word (FormationSlot `+0x20`; an earlier note said `+0x14`, which is the point's last word:
+      the slot is built at `[EBP−0x70]` with the pose at `[EBP−0x50]`) is not modelled: the pike wall
+      `0x006311B0` writes 5 for its first row, 4 for its second, 3 for later rows and its remainder row
+      (`0x00631377` / `0x00631384` / `0x006314F8`, CONFIRMED static). No reader is found statically among the
+      slot's users (`0x00584E10`, `0x0055F160`, `StampSquadMenInPlaceByMeanOffset` `0x00557C80`, the fire
+      re-lay `0x00581200`, and a scan of the functions that walk 0x24-byte slots and read `+0x20`); what the
+      men do with it needs a debugger watch (a write/read breakpoint) on a pike wall slot's
+      `+0x20`: PROVISIONAL, ours keeps none. A slot past a square's laid men (more slots than the shape places)
+      gets a place of its own behind the shape (ours).
     Ours: `march::Formation` (`row`, `row_first`, `place`, `slot_heading`, `front`), `row_offset`,
     `triangle_row`, `diamond_half`, `floor_sqrt`, `pike_square_block_heading`, `pike_square_extra`,
     `square_slot`, `SQUARE_SPACING_M`, `SQUARE_MIN_SIDE`, `LIGHT_INFANTRY_SPACING_M` / `LIGHT_INFANTRY_PITCH_M`;
@@ -1579,8 +1637,12 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
     0x18 (`+4` the squad's `+4`, p1..p4 at `+8..+0x14`); globals `g_SquareTemplateTable`,
     `g_wHeadingEighthTurn` / `QuarterTurn` / `ThreeEighthsTurn` / `HalfTurn`. Names in these notes only:
     `MeasureSquareShapeBox` `0x0063A660` (prototype and plate applied; 65.9, held under 70 by register-only
-    locals and shared globals), `LayOutPikeWallFormation` `0x006311B0` and `LayOutPikeSquareFormation`
-    `0x00630390` (not yet given a V5 pass).
+    locals and shared globals) and `LayOutPikeSquareFormation` `0x00630390` (not yet given a V5 pass).
+    formshapes (V5, completeness 73.4): `LayOutPikeWallFormationSlots` `0x006311B0` (`this` `PikeWallShape`,
+    every local typed, constants commented); new structs `FormationSlotTarget` (0x3C: `+0` flag,
+    `+0xC/+0x10/+0x14` the piece vector's capacity/count/data, `+0x18` ground point, `+0x2C` owner, `+0x30`
+    width, `+0x34/+0x38` unknown) and `FormationSlotList` (0x14, from `0x00621090` / `0x00620FC0`: `+4`
+    capacity, `+8` count, `+0xC` `FormationSlot *`, `+0x10` a mark the append `0x00629B30` can set to the count).
     *The backward order `+0x8C` (CONFIRMED static).* The path request builder `0x008102F0` sets the request's
     `+0x8C` (at `0x00810D3F`) when the goal minus the summary's front centre (`+0x9C`) has a negative dot product
     with the summary's front (`+0x34`), i.e. the goal lies behind the men's front. `BuildUnitMoveOrder`

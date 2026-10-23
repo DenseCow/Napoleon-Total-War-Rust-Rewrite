@@ -218,7 +218,7 @@ impl CampaignModel {
     /// `f`'s forces leave `region` (`0x008D9DC0`), as the [`super::seams::REGION_EXPULSION`] rule
     /// plans it ([`expel_faction_from_region`] in the original game). An army leaves its residence (its
     /// commander no longer garrisoned, the region's garrison link cleared); a navy leaves its port
-    /// ([`Self::undock`]); then each placed force's commander moves ([`Self::move_character`]) and,
+    /// ([`Self::undock`]); then each placed force's commander is placed ([`Self::place_character`]) and,
     /// when the plan says so ([`ExpelledForce::notice`]), his faction (character `+0x2A0`) gets the
     /// move notice in `events` at once, before the next force moves (`0x009FB680` at `0x008DA091`,
     /// right after the move `0x0096C8D0`; [`CampaignMessage::YourArmyRetreatsRegion`]).
@@ -244,10 +244,8 @@ impl CampaignModel {
                 }
             }
             if let (Some(c), Some(to)) = (commander, e.to) {
-                self.move_character(c, to);
-                // Placed by `0x0096C8D0` (`0x008DA072` army, `0x008DA1B2` navy), whose second call to
-                // `0x00A285E0` passes 1 (`0x0096C9C4`, CONFIRMED by disassembly): set down there.
-                self.set_down(c);
+                // Placed by `0x0096C8D0` (`0x008DA072` army, `0x008DA1B2` navy, CONFIRMED by disassembly).
+                self.place_character(c, to);
                 if e.notice
                     && let Some(ch) = self.world.characters.get(&c)
                 {

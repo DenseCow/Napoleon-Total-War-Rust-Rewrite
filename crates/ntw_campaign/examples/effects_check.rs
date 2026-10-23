@@ -71,18 +71,13 @@ fn main() {
             if std::env::var("FX_UNITS").is_ok_and(|k| k == f.key) {
                 println!("{} units: {:?}", f.key, units);
             }
-            let mut with = (0i64, 0i64);
+            // The model's per-force rule (each force costed with its commander's set).
+            let (land, naval) = ntw_sim::campaign::economy::faction_upkeep_split_with(m, &fx, f.id);
+            let with = (i64::from(land), i64::from(naval));
             let mut without = (0i64, 0i64);
             for k in &units {
                 let Some(rec) = db.unit(k) else { continue };
                 let naval = rec.category.starts_with("naval");
-                let fmod = fx.faction(f.id, if naval { "upkeep_cost_mod_naval_all" } else { "upkeep_cost_mod_land_all" });
-                let cat = fx.faction_qualified(f.id, BonusKind::UnitCategory, "upkeep_mod", &rec.category);
-                let class = fx.faction_qualified(f.id, BonusKind::UnitClass, "upkeep_mod", &rec.unit_class);
-                let mult = (100.0 + fmod + cat + class).max(0.0);
-                let cost = (f64::from(rec.upkeep) * f64::from(mult) * 0.01).round_ties_even() as i64;
-                let slot = if naval { &mut with.1 } else { &mut with.0 };
-                *slot += cost;
                 let slot = if naval { &mut without.1 } else { &mut without.0 };
                 *slot += i64::from(rec.upkeep);
             }

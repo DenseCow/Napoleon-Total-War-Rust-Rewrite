@@ -259,6 +259,10 @@ fn region_population_is_written() {
             c.war = [6, -15, 3][(i + k) % 3];
             c.education = 4 + k as i32;
             c.resistance = -3 - i as i32;
+            // classslots: the bankruptcy and crackdown factors, the stored slots and sums and the unrest.
+            (c.bankruptcy, c.crackdown, c.happiness[2]) = (-8 - i as i32, 5, 11 + k as i32);
+            (c.positive, c.negative, c.repression, c.riot_chance, c.stage) = (9, -14, 2 + k as i32, 30, 1);
+            (c.unrest, c.demand, c.cause) = (1 + i as u32, 3, 4 + k as u32);
         }
     }
     let check = |m: &ntw_sim::campaign::CampaignModel| {

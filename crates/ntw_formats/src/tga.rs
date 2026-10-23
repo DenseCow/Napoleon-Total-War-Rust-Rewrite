@@ -114,6 +114,9 @@ impl Tga {
         let mut palette = Vec::new();
         if cmap_type == 1 {
             let entry = (cmap_bits as usize).div_ceil(8);
+            if entry == 0 {
+                return Err(TgaError::Unsupported("colour map with 0-bit entries".into()));
+            }
             let size = cmap_len * entry;
             let raw = b.get(pos..pos + size).ok_or(TgaError::Truncated)?;
             palette = vec![[0, 0, 0, 255]; cmap_first];
@@ -124,7 +127,8 @@ impl Tga {
         let count = width as usize * height as usize;
         // Raw stored pixels in file order, `px_bytes` each.
         let stored: Vec<u8> = if rle {
-            let mut out = Vec::with_capacity(count * px_bytes);
+            // Cap: one RLE packet expands to at most 128 pixels.
+            let mut out = Vec::with_capacity((count * px_bytes).min(b.len().saturating_mul(128)));
             while out.len() < count * px_bytes {
                 let head = *b.get(pos).ok_or(TgaError::Truncated)?;
                 pos += 1;
@@ -188,6 +192,12 @@ mod tests {
     }
 
     #[test]
+    fn zero_bit_empty_colour_map_is_rejected() {
+        let b = header(1, 1, 0, 0, 1, 1, 8, 0);
+        assert!(Tga::parse(&b).is_err());
+    }
+
+    #[test]
     fn palette_bottom_up_is_flipped() {
         // 2x2, palette of 2 BGR entries, rows stored bottom-up.
         let mut b = header(1, 1, 2, 24, 2, 2, 8, 0);
@@ -213,5 +223,18 @@ mod tests {
     fn truncated_is_an_error() {
         let b = header(0, 2, 0, 0, 4, 4, 32, 0x20);
         assert_eq!(Tga::parse(&b), Err(TgaError::Truncated));
+    }
+
+    #[test]
+    fn zero_bit_colour_map_is_an_error_not_a_panic() {
+        let mut b = header(1, 1, 2, 0, 1, 1, 8, 0);
+        b.extend([0, 0]);
+        assert!(matches!(Tga::parse(&b), Err(TgaError::Unsupported(_))));
+    }
+
+    #[test]
+    fn huge_rle_dimensions_with_little_data_is_truncated() {
+        let b = header(0, 10, 0, 0, u16::MAX, u16::MAX, 24, 0);
+        assert!(matches!(Tga::parse(&b), Err(TgaError::Truncated)));
     }
 }

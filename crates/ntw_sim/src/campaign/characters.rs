@@ -408,24 +408,28 @@ fn add_trait_points_inner(model: &mut CampaignModel, c: CharacterId, key: &str, 
 /// the level record's), while its attribute effects stay in the saved attribute levels and no loss
 /// slot can take them off any more. Our own save keeps the level; an original save has no level to
 /// read, so its load still gives none there.
+///
+/// A region's traits (`REGION` #2, [`super::Region::traits`]) load the same way: the region's trait
+/// container is the same class, loaded through the same `0x0088AFF0` (CONFIRMED, `0x00A45950` at
+/// `0x00A45DB0`).
 pub fn load_trait_levels(model: &mut CampaignModel) {
     let rules = model.rules.clone();
-    for d in model.world.character_details.values_mut() {
-        for t in d.traits.iter_mut() {
-            if t.level == 0 {
-                t.points = t.points.max(0);
-                rules.characters.update_trait_level(t, true);
-            }
-            // A held level with no `character_trait_levels` row applies no effects and shows no level.
-            // Reported once per trait key per process (not per load), a key with no rows at all apart.
-            if t.level != 0 && rules.effects.held_level_row(&t.key, t.level).is_none() {
-                static LOGGED: std::sync::Mutex<std::collections::BTreeSet<String>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
-                let first = LOGGED.lock().map(|mut s| s.insert(t.key.clone())).unwrap_or(false);
-                if first && rules.effects.trait_levels.contains_key(&t.key) {
-                    log::warn!("trait {:?} is held at level {} but has no character_trait_levels row for that level; its level effects do not apply", t.key, t.level);
-                } else if first {
-                    log::warn!("trait {:?} is held at level {} but the data has no character_trait_levels rows for the trait at all; its level effects do not apply", t.key, t.level);
-                }
+    let characters = model.world.character_details.values_mut().flat_map(|d| d.traits.iter_mut());
+    let regions = model.world.regions.values_mut().flat_map(|r| r.traits.iter_mut());
+    for t in characters.chain(regions) {
+        if t.level == 0 {
+            t.points = t.points.max(0);
+            rules.characters.update_trait_level(t, true);
+        }
+        // A held level with no `character_trait_levels` row applies no effects and shows no level.
+        // Reported once per trait key per process (not per load), a key with no rows at all apart.
+        if t.level != 0 && rules.effects.held_level_row(&t.key, t.level).is_none() {
+            static LOGGED: std::sync::Mutex<std::collections::BTreeSet<String>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+            let first = LOGGED.lock().map(|mut s| s.insert(t.key.clone())).unwrap_or(false);
+            if first && rules.effects.trait_levels.contains_key(&t.key) {
+                log::warn!("trait {:?} is held at level {} but has no character_trait_levels row for that level; its level effects do not apply", t.key, t.level);
+            } else if first {
+                log::warn!("trait {:?} is held at level {} but the data has no character_trait_levels rows for the trait at all; its level effects do not apply", t.key, t.level);
             }
         }
     }
@@ -771,7 +775,7 @@ impl CampaignModel {
         self.drop_recruitment_target(c);
         self.command_vacated(&dead);
         // 0x0099D62E (EndCharacterCommerceRaids): any raid he still holds ends with him (a commander's ended in the hand-over).
-        self.clear_character_raids(c);
+        self.end_character_raids(c);
         for (f, i) in vacated {
             self.refill_post(f, i);
         }
@@ -792,20 +796,14 @@ impl CampaignModel {
     /// `old` no longer commands his forces (he died, or escaped from a lost battle): each force he
     /// led either goes, when it has no units left (the destructor `0x0099D2D0`: a force whose unit
     /// count is 0 is removed with its characters), or gets a new commander as the original picks
-    /// him (`0x008B8E50` → `0x008ED2C0`, CONFIRMED): the first unit in [`Self::commander_unit`]
-    /// order gives its own character if it has one, else a new colonel (army) or captain (navy)
-    /// attached to it (the unit classes' slot +4: `0x008B7EF0` colonel, `0x008B7F60` captain, both
-    /// `0x00990EF0` with agent type 2 / 3). The new commander stands where the old one stood
-    /// (`0x00963840`). A save never has a force without a commander (CONFIRMED rule of every
-    /// original save, SAVE_COMPAT.md §23); a new colonel takes his unit's officer's name
-    /// ([`Self::name_new_character`]). His commerce raids pass to the new commanders
-    /// ([`Self::hand_over_raids`], the force's observer `0x008DB3E0`).
+    /// him (`0x008B8E50` → `0x008ED2C0`, [`Self::pick_commander`]). A save never has a force without
+    /// a commander (CONFIRMED rule of every original save, SAVE_COMPAT.md §23). His commerce raids
+    /// pass to the new commanders ([`Self::hand_over_raids`], the force's observer `0x008DB3E0`).
     pub(crate) fn command_vacated(&mut self, old: &super::world::Character) {
-        use super::world::{Character, CharacterKind};
         let commanded: Vec<ForceId> = self.world.forces.values().filter(|f| f.commander == Some(old.id)).map(|f| f.id).collect();
         let mut successors = Vec::with_capacity(commanded.len());
         for fid in commanded {
-            let (navy, empty) = (self.world.forces[&fid].is_navy, self.world.forces[&fid].units.is_empty());
+            let empty = self.world.forces[&fid].units.is_empty();
             if let Some(f) = self.world.forces.get_mut(&fid) {
                 f.commander = None;
             }
@@ -815,53 +813,76 @@ impl CampaignModel {
                 self.remove_force(fid, port);
                 continue;
             }
-            let Some(ui) = self.commander_unit(fid) else { continue };
-            if let Some(next) = self.world.forces[&fid].units[ui].character.filter(|n| self.world.characters.contains_key(n)) {
-                // The unit's own character (a general riding with the army, a colonel) takes over.
-                if let Some(ch) = self.world.characters.get_mut(&next) {
-                    ch.position = old.position;
-                    ch.garrisoned_in = old.garrisoned_in;
-                }
-                self.world.forces.get_mut(&fid).expect("force exists").commander = Some(next);
-                successors.push(next);
-                // The new commander's zones (`0x008B8E50` → `0x008F9400`).
-                self.rebuild_force_zones(fid);
-                continue;
-            }
-            let kind = if navy { CharacterKind::Captain } else { CharacterKind::Colonel };
-            let mp = self
-                .rules
-                .agent_action_points
-                .get(kind.esf_name())
-                .copied()
-                .or_else(|| self.world.characters.values().filter(|x| x.kind == kind).map(|x| x.max_movement_points).max())
-                .unwrap_or(0);
-            let id = CharacterId(self.world.alloc_id() as i32);
-            let colonel = Character {
-                id,
-                faction: old.faction,
-                kind,
-                position: old.position,
-                movement_points: old.movement_points.min(mp),
-                max_movement_points: mp,
-                base_movement_points: mp,
-                garrisoned_in: old.garrisoned_in,
-            };
-            self.world.characters.insert(id, colonel);
-            self.world.character_details.insert(id, self.rules.characters.new_character_details(kind.esf_name()));
-            self.update_sight_radius(id);
-            let f = self.world.forces.get_mut(&fid).expect("force exists");
-            f.commander = Some(id);
-            f.units[ui].character = Some(id);
-            // He carries his unit's officer's name (`0x008B7EF0` colonel / `0x008B7F60` captain pass unit
-            // +0x7c to `0x00990EF0`).
-            self.name_new_character(id);
-            successors.push(id);
+            let Some((next, _)) = self.pick_commander(fid, old) else { continue };
+            successors.push(next);
+            // The new commander's zones (`0x008B8E50` → `0x008F9400`).
             self.rebuild_force_zones(fid);
         }
         self.hand_over_raids(old.id, old.position, &successors);
         // He commands nothing now: his zone goes (`0x008DB3E0`).
         self.rebuild_zone(old.id);
+    }
+
+    /// The commander pick `0x008ED2C0` (CONFIRMED by disassembly) on `force`, whose commander was
+    /// `old` (as he was before the change: he may have died or left the force since): the first unit
+    /// in [`Self::commander_unit`] order gives its own character if it has one, else a new colonel
+    /// (army) or captain (navy) attached to it (the unit classes' slot +4: `0x008B7EF0` colonel,
+    /// `0x008B7F60` captain, both `0x00990EF0` with agent type 2 / 3), who takes his unit's officer's
+    /// name ([`Self::name_new_character`]). He commands the force (`0x008B7EA0`) and stands where
+    /// `old` stood (`0x00963840` on the pick's position, which every caller takes from the old
+    /// commander), holding the place `old` held inside a settlement, while `old`, when another was
+    /// picked, rides on with his unit ([`Self::pass_place_on`]). That holds for a commander who fell
+    /// and comes back too ([`Self::character_falls`]): the exe links his copy to the force as a rider
+    /// (`0x008CF9D0`) and puts him on the map with `0x009D3B60`, which enters no residence (no slot
+    /// +0x88 call in it, CONFIRMED by disassembly), so he is inside only through the army, never a
+    /// resident. Returns the commander and whether he was made here; `None` for a force without
+    /// units. The callers run the zones and the placement as their own code does.
+    pub(crate) fn pick_commander(&mut self, force: ForceId, old: &super::world::Character) -> Option<(CharacterId, bool)> {
+        use super::world::{Character, CharacterKind};
+        let ui = self.commander_unit(force)?;
+        let f = &self.world.forces[&force];
+        let navy = f.is_navy;
+        let picked = f.units[ui].character.filter(|n| self.world.characters.contains_key(n));
+        let (next, made) = match picked {
+            Some(next) => {
+                if let Some(ch) = self.world.characters.get_mut(&next) {
+                    ch.position = old.position;
+                }
+                (next, false)
+            }
+            None => {
+                let kind = if navy { CharacterKind::Captain } else { CharacterKind::Colonel };
+                let mp = self
+                    .rules
+                    .agent_action_points
+                    .get(kind.esf_name())
+                    .copied()
+                    .or_else(|| self.world.characters.values().filter(|x| x.kind == kind).map(|x| x.max_movement_points).max())
+                    .unwrap_or(0);
+                let id = CharacterId(self.world.alloc_id() as i32);
+                let colonel = Character {
+                    id,
+                    faction: old.faction,
+                    kind,
+                    position: old.position,
+                    movement_points: old.movement_points.min(mp),
+                    max_movement_points: mp,
+                    base_movement_points: mp,
+                    garrisoned_in: None,
+                };
+                self.world.characters.insert(id, colonel);
+                self.world.character_details.insert(id, self.rules.characters.new_character_details(kind.esf_name()));
+                self.update_sight_radius(id);
+                self.world.forces.get_mut(&force).expect("force exists").units[ui].character = Some(id);
+                // He carries his unit's officer's name (`0x008B7EF0` colonel / `0x008B7F60` captain pass
+                // unit +0x7c to `0x00990EF0`).
+                self.name_new_character(id);
+                (id, true)
+            }
+        };
+        self.world.forces.get_mut(&force).expect("force exists").commander = Some(next);
+        self.pass_place_on(old.id, old.garrisoned_in, force);
+        Some((next, made))
     }
 
     /// The unit of `force` that gives a new commander: the first in the original's order
@@ -870,7 +891,8 @@ impl CampaignModel {
     /// 1. a unit whose character is a General (army) / admiral (navy) comes first;
     /// 2. then the higher rank of the unit's character: his `command_land` / `command_sea`
     ///    attribute (character +0xA4 + 4·{0, 1}; INFERRED to be the saved `AgentAttributes` in
-    ///    order, whose first two are these; compared unsigned, so -1 ranks highest; 0 without one);
+    ///    order, whose first two are these; 0 without one), compared unsigned, so -1 ranks highest
+    ///    (CONFIRMED, `0x008CF620`'s `JC` / `JA` at `0x008CF638` / `0x008CF63A`);
     /// 3. then the lower unit category (`UNIT_RECORD` +0x1C from `units` #2, `0x00EED2B0`:
     ///    cavalry 0 (elephants count as 0), artillery 1, infantry 2, dragoons 3, camels 5,
     ///    ships of the line 6, frigates 7, galleys 8, specialists 9, auxiliaries 10, merchants 11,

@@ -234,8 +234,9 @@ pub fn grow(model: &CampaignModel, reg: &Region, pop: u32, state: &PopulationSta
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClassWarEvent {
     /// Kinds 0..=5, a battle result's step (`0x008ACCF0`, for each side's capital): the factor gains
-    /// [`BATTLE_WAR_CHANGE`]`[kind]`. PROVISIONAL: never called: the battle results' step `0x008ACCF0`
-    /// (from `0x008F7880` at `0x008F7B7C`) is not modelled, the battle results lack the victory type it reads.
+    /// [`BATTLE_WAR_CHANGE`]`[kind]`. Called by the battle result's class war step in the post-battle state 4
+    /// (`0x008F7880` at `0x008F7B7C`, CONFIRMED; [`CampaignModel::battle_class_war`]), which picks the kind from
+    /// the battle type and the sides' result codes.
     Battle(u8),
     /// Kind 6: the region's owner declared war on the other faction (`0x00B27070` → `0x00A63490`).
     WarDeclared,
@@ -243,7 +244,8 @@ pub enum ClassWarEvent {
 
 /// The war factor's change per battle-result kind (the i32 table `0x014579F0`, CONFIRMED by reading
 /// memory): kinds 0 and 1 for the loser (result codes 13/14 and 15/16), 2 and 3 for the winner (8/9 and
-/// 10/11), 4 and 5 for the loser and the winner of the battles `0x008ACCF0` tests first.
+/// 10/11), 4 and 5 for the loser and the winner of an assault on a walled settlement (battle types 6 and 7),
+/// which `0x008ACCF0` tests first ([`CampaignModel::battle_class_war`]).
 pub const BATTLE_WAR_CHANGE: [i32; 6] = [-1, -2, 1, 2, -4, 4];
 
 /// The war factor's range (`0x008A94D0` clamps after every change: below −15 to −15, above 6 to 6).
@@ -290,44 +292,295 @@ pub fn class_war_change(model: &CampaignModel, class: &str, event: ClassWarEvent
     war.saturating_add(change).clamp(CLASS_WAR_RANGE.0, CLASS_WAR_RANGE.1)
 }
 
-/// One class's round-end pass (`0x008F9690`'s first part, CONFIRMED by decompilation; the riot checks
-/// that follow it are not modelled): the war factor one step toward 0, a negative resistance base +1, a
-/// positive education base −2 (1 or 2 become 0). (Also, not stored here: a negative bankruptcy factor,
-/// class +0x28, +1 and a positive repression slot 5, +0x54, −1; the model keeps neither, both are 0.)
-pub fn class_round_step(class: &mut PopulationClassState) {
+/// The unrest causes by index (class +0x6C; the name table `0x0145BC78`, CONFIRMED by reading memory): the
+/// happiness slots in order, each slot its own cause (`0x01457A08` pairs slot k with cause k).
+pub const UNREST_CAUSES: [&str; 13] = [
+    "gov_type",
+    "taxes",
+    "religion",
+    "events",
+    "culture",
+    "industrialisation",
+    "characters",
+    "war",
+    "reform",
+    "bankruptcy",
+    "resistance",
+    "gentlemen",
+    "alignment",
+];
+
+/// The unrest kinds by index (class +0x64; the name table `0x0145BCD4`, CONFIRMED by reading memory).
+pub const UNREST_KINDS: [&str; 6] = ["happy", "strikes", "riots", "ultimatum", "letter_of_demand", "rebellion"];
+
+/// The kind index of a rebellion ([`UNREST_KINDS`]).
+pub const UNREST_REBELLION: u32 = 5;
+
+/// The demands by index (class +0x68; the name table `0x0145BCB0`, CONFIRMED by reading memory).
+pub const UNREST_DEMANDS: [&str; 8] = [
+    "none",
+    "change_government_head",
+    "end_war",
+    "lower_taxes",
+    "power_to_the_upper_classes",
+    "reforms",
+    "religious_freedom",
+    "return_to_old_faction",
+];
+
+/// The bankruptcy factor's range (`0x008A8A70` clamps after its change: below −16 to −16, above 0 to 0).
+pub const CLASS_BANKRUPTCY_RANGE: (i32, i32) = (-16, 0);
+
+/// A class's bankruptcy factor after its faction cannot pay (`0x008A8A70`, CONFIRMED by decompilation): −4,
+/// clamped to [`CLASS_BANKRUPTCY_RANGE`]. `0x00A61580` applies it to every class of the faction's capital
+/// (from `0x008AE710` → `0x00A65DC0` → `0x00A61570`, after the capital's wealth growth offset;
+/// [`super::economy::settle_round`]).
+pub fn bankruptcy_change(bankruptcy: i32) -> i32 {
+    bankruptcy.saturating_sub(4).clamp(CLASS_BANKRUPTCY_RANGE.0, CLASS_BANKRUPTCY_RANGE.1)
+}
+
+/// The share of order in a class's happiness (`0x008C9120`, CONFIRMED by disassembly): 50 when both sums are
+/// 0, else |positive| / (|positive| + |negative|) × 100 in single precision (the absolute values and their
+/// sum in 32-bit arithmetic that wraps, as the exe's CDQ / XOR / SUB).
+pub fn order_share(positive: i32, negative: i32) -> f32 {
+    let (p, n) = (positive.wrapping_abs(), negative.wrapping_abs());
+    let sum = p.wrapping_add(n);
+    if sum == 0 {
+        return 50.0;
+    }
+    p as f32 / sum as f32 * 100.0
+}
+
+/// A class's riot chance from its stored sums (`0x008F9690`, CONFIRMED by disassembly): (50 −
+/// trunc([`order_share`])) × 2, clamped to 0..=100.
+pub fn riot_chance(positive: i32, negative: i32) -> i32 {
+    ((50 - order_share(positive, negative) as i32) * 2).clamp(0, 100)
+}
+
+/// The cause a riot check draws (`0x008B37D0`, CONFIRMED by decompilation): the happiness slots below 0
+/// (`slots`, [`PopulationClassState::slots`]), most negative first (a stable insertion sort with `0x008F67C0`,
+/// an unsigned compare of the values, so for these negative values the signed order); then one of the first
+/// two when there are three or more (`uniform_below(2)`), the first otherwise; with two the exe still draws
+/// (`uniform_below(1)`, always 0), with one or none it draws nothing. The cause is the slot's (`0x01457A08`).
+///
+/// Only the first two of the sorted list can be picked, so ours scans for them (a later slot goes ahead only
+/// when strictly lower, as in the stable sort) and builds no list. The 13 slots are the class's fixed
+/// happiness layout (class +0x04..+0x34, saved as `POPULATION_CLASS` #1 i32[13]), not a content count.
+///
+/// ORIGINAL BUG: with no slot below 0 it reads the list it never allocated (a null pointer) and crashes
+/// (`0x008B37D0`). It is reachable: the riot check runs on the stored order of the last refresh, while the
+/// slots have moved since (a war or bankruptcy factor of −1 decays to 0 in the same pass). Ours returns the
+/// function's own default cause, 1 (`taxes`), the value it gives when the table names no cause.
+pub fn unrest_cause(slots: &[i32; 13], rng: &mut crate::rng::CaRng) -> u32 {
+    let key = |v: i32| v as u32;
+    let (mut count, mut first, mut second) = (0u32, None::<(u32, i32)>, None::<(u32, i32)>);
+    for (slot, v) in (0u32..).zip(slots.iter().copied()).filter(|&(_, v)| v < 0) {
+        count += 1;
+        match first {
+            Some((_, f)) if key(v) >= key(f) => {
+                if second.is_none_or(|(_, s)| key(v) < key(s)) {
+                    second = Some((slot, v));
+                }
+            }
+            _ => (second, first) = (first, Some((slot, v))),
+        }
+    }
+    let pick = match count {
+        0 | 1 => 0,
+        2 => rng.uniform_below(1),
+        _ => rng.uniform_below(2),
+    };
+    let chosen = if pick == 0 { first } else { second };
+    chosen.map_or(1, |(slot, _)| slot)
+}
+
+/// The four permissions a class's riot check gets (`GrowRegionPopulation` `0x00AB4070` passes them to
+/// `0x008F9690`, CONFIRMED by disassembly), in the exe's argument order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UnrestFlags {
+    /// Step on to rebellion (from stage 2).
+    pub rebellion: bool,
+    /// Riot (stage 1 of a striking class).
+    pub riots: bool,
+    /// Strike (stage 0 of a striking class).
+    pub strikes: bool,
+    /// Send a letter of demand (stage 0) or an ultimatum (stage 1), for a demanding class.
+    pub demands: bool,
+}
+
+impl UnrestFlags {
+    fn any(self) -> bool {
+        self.rebellion || self.riots || self.strikes || self.demands
+    }
+}
+
+/// One class's round-end pass (`0x008F9690`, CONFIRMED by decompilation and disassembly), returning its
+/// unrest kind:
+/// - **Decay**: the war factor one step toward 0; a negative bankruptcy factor and a negative resistance base
+///   +1; a positive crackdown −1; a positive education base −2 (1 or 2 become 0); a rebellion (kind 5) clears
+///   the kind, the demand and the stage.
+/// - **Gate**: a rebel owner returns 0 and keeps the rest. A class that is not the owner's government's lower
+///   or upper class (the faction tests `0x008CE230` / `0x008CE2F0` with the owner), a stored order
+///   ([`PopulationClassState::stored_order`]) of 0 or more, or no flag: stage, kind and demand become 0.
+/// - **Check**: the cause ([`unrest_cause`] on the decayed slots), the riot chance ([`riot_chance`] of the
+///   stored sums), then the stage: from stage 2 on, with `rebellion`, the stage grows and the class rebels
+///   (kind 5) unless it already does. Below 2 the class's paths ([`CampaignRules::class_unrest_paths`]):
+///   a striking class strikes at stage 0 (with `strikes`) and riots at stage 1 (with `riots`); otherwise a
+///   demanding class sends a letter of demand at stage 0 and an ultimatum at stage 1 (with `demands`). A step
+///   taken grows the stage; the new kind's demand is the cause's ([`CampaignRules::unrest_demands`],
+///   `0x008EB3F0`; none for a rebellion). A step not allowed changes nothing.
+///
+/// The riot chance is only stored here; the turn start reads the kind (BACKLOG: unrest outcomes).
+///
+/// [`CampaignRules::class_unrest_paths`]: super::rules::CampaignRules::class_unrest_paths
+/// [`CampaignRules::unrest_demands`]: super::rules::CampaignRules::unrest_demands
+pub fn class_pass(model: &CampaignModel, reg: &Region, class: &mut PopulationClassState, flags: UnrestFlags, rng: &mut crate::rng::CaRng) -> u32 {
     class.war -= class.war.signum();
+    if class.bankruptcy < 0 {
+        class.bankruptcy += 1;
+    }
     if class.resistance < 0 {
         class.resistance += 1;
+    }
+    if class.crackdown > 0 {
+        class.crackdown -= 1;
     }
     if class.education > 0 {
         class.education = if class.education < 3 { 0 } else { class.education - 2 };
     }
-}
-
-/// A region's classes after its round-end passes (`GrowRegionPopulation` `0x00AB4070`, CONFIRMED by
-/// disassembly; each pass is [`class_round_step`]). A rebel owner: one pass per class. Otherwise three
-/// passes, on the first class that is the owner's government's lower class (`0x00A60FE0`), on the first
-/// that is its upper class (`0x00A61320`) and on the first that is neither (`0x00A89C90`); a find with no
-/// match takes the first class, so with fewer than three classes that one has more than one pass. No
-/// classes: nothing. The original's rule of the seam `population.class_round` ([`super::seams`]).
-pub fn class_round(model: &CampaignModel, reg: &Region) -> Vec<PopulationClassState> {
-    let mut classes = reg.class_bases.clone();
-    if classes.is_empty() {
-        return classes;
+    if class.unrest == UNREST_REBELLION {
+        class.unrest = 0;
+        class.demand = 0;
+        class.stage = 0;
     }
     if model.is_rebel_faction(reg.owner) {
-        classes.iter_mut().for_each(class_round_step);
-        return classes;
+        return 0;
     }
     let (upper, lower) = super::economy::government_classes(model, reg.owner);
-    let find = |classes: &[PopulationClassState], pick: &dyn Fn(&str) -> bool| classes.iter().position(|c| pick(&c.class)).unwrap_or(0);
-    let passes = [
-        find(&classes, &|c| c == lower),
-        find(&classes, &|c| c == upper),
-        find(&classes, &|c| c != upper && c != lower),
-    ];
-    for i in passes {
-        class_round_step(&mut classes[i]);
+    if (class.class != upper && class.class != lower) || class.stored_order() >= 0 || !flags.any() {
+        class.stage = 0;
+        class.unrest = 0;
+        class.demand = 0;
+        return 0;
+    }
+    class.cause = unrest_cause(&class.slots(), rng);
+    class.riot_chance = riot_chance(class.positive, class.negative);
+    let next = if class.stage >= 2 {
+        if !flags.rebellion {
+            return class.unrest;
+        }
+        class.stage = class.stage.wrapping_add(1);
+        if class.unrest == UNREST_REBELLION {
+            return class.unrest;
+        }
+        UNREST_REBELLION
+    } else {
+        let (strikes, demands) = model.rules.class_unrest_paths.get(&class.class).copied().unwrap_or_default();
+        let next = match (class.stage < 1, strikes) {
+            (true, true) => flags.strikes.then_some(1),
+            (true, false) => (demands && flags.demands).then_some(4),
+            (false, true) => flags.riots.then_some(2),
+            (false, false) => (demands && flags.demands).then_some(3),
+        };
+        let Some(next) = next else { return class.unrest };
+        class.stage += 1;
+        next
+    };
+    class.unrest = next;
+    class.demand = model.rules.unrest_demands.get(&(class.cause, next)).copied().unwrap_or(0);
+    class.unrest
+}
+
+/// Which class a region class find looks for.
+#[derive(Clone, Copy)]
+pub(crate) enum ClassFind {
+    Lower,
+    Upper,
+    Neither,
+}
+
+/// The index of the class a region class find picks (`0x00A60FE0` lower, `0x00A61320` upper, `0x00A89C90`
+/// neither: the region tests `0x008CE260` / `0x008CE320`, [`super::economy::region_government_classes`]): the
+/// first class that matches, else the first class (also when the region's government names no classes).
+/// `None` without classes.
+pub(crate) fn find_class(model: &CampaignModel, reg: &Region, classes: &[PopulationClassState], which: ClassFind) -> Option<usize> {
+    if classes.is_empty() {
+        return None;
+    }
+    let names = super::economy::region_government_classes(model, reg);
+    let found = names.and_then(|(upper, lower)| {
+        classes.iter().position(|c| match which {
+            ClassFind::Lower => c.class == lower,
+            ClassFind::Upper => c.class == upper,
+            ClassFind::Neither => c.class != upper && c.class != lower,
+        })
+    });
+    Some(found.unwrap_or(0))
+}
+
+/// A region's classes after their round-end passes (`GrowRegionPopulation` `0x00AB4070`, CONFIRMED by
+/// disassembly; each pass is [`class_pass`] on `classes`, the region's or a projection copy's, drawing from
+/// `rng`). A rebel owner: one pass per class with no flag. Otherwise, with `calm` = the region has no risen
+/// rebel army (region +0x220, [`super::World::region_risen_armies`]) and `rebel` = `calm` and rebellions are
+/// not switched off ([`super::World::rebellions_disabled`], episodic restrictions +0xEB):
+/// 1. the lower class (found with the region tests, see `find_class`) with every flag (`rebel`, `calm`, `calm`,
+///    `calm`), giving its kind `l`;
+/// 2. the upper class: no flag when `l` is a rebellion; only rebellion and demands when it riots;
+///    no strikes when it strikes; else every flag; giving its kind `u`;
+/// 3. when `u` is a rebellion, or `u` riots while `l` strikes, the lower class's kind and demand become 0
+///    (`0x008B6A40`; its stage stays);
+/// 4. the class that is neither, with no flag.
+///
+/// A find with no match takes the first class, so with fewer than three classes one class has more than
+/// one pass. No classes: nothing. The original's rule of the seam `population.class_round` ([`super::seams`]).
+pub fn class_round(model: &CampaignModel, reg: &Region, classes: &[PopulationClassState], rng: &mut crate::rng::CaRng) -> Vec<PopulationClassState> {
+    let mut classes = classes.to_vec();
+    if model.is_rebel_faction(reg.owner) {
+        for c in &mut classes {
+            class_pass(model, reg, c, UnrestFlags::default(), rng);
+        }
+        return classes;
+    }
+    let Some(lower) = find_class(model, reg, &classes, ClassFind::Lower) else { return classes };
+    let calm = model.world.region_risen_armies.get(&reg.id).is_none_or(Vec::is_empty);
+    let rebel = calm && !model.world.rebellions_disabled;
+    let all = UnrestFlags { rebellion: rebel, riots: calm, strikes: calm, demands: calm };
+    let l = class_pass(model, reg, &mut classes[lower], all, rng);
+    let upper_flags = match l {
+        UNREST_REBELLION => UnrestFlags::default(),
+        2 => UnrestFlags { riots: false, strikes: false, ..all },
+        1 => UnrestFlags { strikes: false, ..all },
+        _ => all,
+    };
+    let upper = find_class(model, reg, &classes, ClassFind::Upper).unwrap_or(0);
+    let u = class_pass(model, reg, &mut classes[upper], upper_flags, rng);
+    if u == UNREST_REBELLION || (u == 2 && l == 1) {
+        classes[lower].unrest = 0;
+        classes[lower].demand = 0;
+    }
+    let neither = find_class(model, reg, &classes, ClassFind::Neither).unwrap_or(0);
+    class_pass(model, reg, &mut classes[neither], UnrestFlags::default(), rng);
+    classes
+}
+
+/// `input`'s classes (the region's, or a projection copy's) with the happiness slots and sums the refresh
+/// stores (`0x008EDF70`, CONFIRMED by decompilation): for each class the owner's government governs
+/// ([`super::economy::ClassPublicOrder::governed`]; a rebel owner's: none), the happiness slots, the positive
+/// sum (slots ≥ 1), the negative sum (slots ≤ 0) and the repression total of its public order
+/// ([`super::economy::public_order_factors_with`] on `input`). Every other class keeps what it stored.
+pub fn refresh_class_sums(model: &CampaignModel, reg: &Region, input: &FactorInputs<'_>) -> Vec<PopulationClassState> {
+    let mut classes = input.classes.to_vec();
+    if model.is_rebel_faction(reg.owner) || classes.is_empty() {
+        return classes;
+    }
+    let garrison = super::economy::garrison_units(model, reg);
+    let factors = super::economy::public_order_factors_with(model, reg, input.set, input.religions, input.classes, garrison);
+    for (c, f) in classes.iter_mut().zip(factors).filter(|(_, f)| f.governed) {
+        let (positive, negative, repression) = f.sums();
+        c.set_slots(f.happiness);
+        c.positive = positive;
+        c.negative = negative;
+        c.repression = repression;
     }
     classes
 }
@@ -473,6 +726,10 @@ fn construction_change(set: &mut EffectSet, r: &Region, sets: &std::collections:
     }
 }
 
+/// The seed of the random stream the projection's riot checks draw from (`0x00A727D0`, CONFIRMED by
+/// disassembly: a stream built on its stack with 0x61266 and passed to `0x00AB4070`).
+pub const PROJECTION_SEED: u32 = 0x61266;
+
 /// The panel's one-round projection of a region (`0x00A727D0`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Projection {
@@ -515,8 +772,12 @@ pub fn project(model: &CampaignModel, region: RegionId) -> Option<Projection> {
         normalise_religions(&mut current_religions);
     }
     // The class and growth rules in use (seams `population.class_round`, `population.grow`), in the round
-    // end's order; a projection drops the rules' mod-state writes.
-    let classes = model.rules.seams.population_class_round.rule()(model, reg, &mut ModWrites::default());
+    // end's order; a projection drops the rules' mod-state writes. The copy's classes take the refresh's sums
+    // first (`0x00A72990` → `0x00AA9C10` → `0x008EDF70` on the copy), and their riot draws come from a stream
+    // of their own ([`PROJECTION_SEED`]), so the projection never moves the campaign's stream.
+    let refreshed = refresh_class_sums(model, reg, &own);
+    let mut rng = crate::rng::CaRng::new(PROJECTION_SEED);
+    let classes = model.rules.seams.population_class_round.rule()(model, reg, &refreshed, &mut rng, &mut ModWrites::default());
     let (population, grown) = model.rules.seams.population_grow.rule()(model, reg, reg.population, &current, &mut ModWrites::default());
     let mut religions = current_religions.clone();
     let flows = model.conversion_flows_for(reg, population, &religions, &set);
@@ -551,7 +812,9 @@ impl CampaignModel {
         // The faction set once per refresh: `in_the_game` may scan every region and character (old saves).
         let listed: BTreeSet<FactionId> =
             self.world.factions.keys().copied().filter(|&f| self.in_the_game_with_record(f)).collect();
-        let updates: Vec<(RegionId, PopulationState)> = self
+        // Each region's classes store their happiness slots and sums too (`0x00AA9C10` → `0x008EDF70`,
+        // [`refresh_class_sums`]), which the round end's riot checks read.
+        let updates: Vec<(RegionId, PopulationState, Vec<PopulationClassState>)> = self
             .world
             .regions
             .values()
@@ -559,45 +822,54 @@ impl CampaignModel {
             .map(|r| {
                 let set = super::economy::region_effect_set(self, r);
                 let input = FactorInputs::of(self, r, &set);
-                (r.id, growth_factors(self, r, r.population, &r.population_state, &input))
+                (r.id, growth_factors(self, r, r.population, &r.population_state, &input), refresh_class_sums(self, r, &input))
             })
             .collect();
         // No owner here is the rebels, so every breakdown is normalised (`0x00AA9C10` skips it only for them).
-        for (id, state) in updates {
+        for (id, state, classes) in updates {
             if let Some(r) = self.world.regions.get_mut(&id) {
                 normalise_religions(&mut r.religions);
                 r.population_state = state;
+                r.class_bases = classes;
             }
         }
     }
 
-    /// The round end's population step of `faction`'s regions (`0x00AB42F0` → `0x00AB3FF0` → `0x00AB4070`):
-    /// each region's classes take their round-end passes first (seam `population.class_round`, [`class_round`]
-    /// in vanilla), then it grows by its stored factors, then its religions convert on the new population
-    /// (`0x00A63FE0`). The growth is the rule in use (seam `population.grow`, [`grow`] in vanilla). Each rule's
-    /// mod-state writes apply before the next rule runs.
-    ///
-    /// The regions in the faction's region list order (`0x008BC68E`–`0x008BC6C3` walks +0x778 / +0x77C,
-    /// CONFIRMED; [`super::world::World::faction_regions_in_list_order`]). The vanilla rules read only their
-    /// own region, so the order shows only through a mod rule's state writes, which the next region's rule sees.
-    pub fn population_round_end(&mut self, faction: FactionId) {
-        let regions = self.world.faction_regions_in_list_order(faction);
+    /// The population step of one region at its round end (`0x00AB42F0` → `0x00AB3FF0` → `0x00AB4070`): its
+    /// classes take their round-end passes first (seam `population.class_round`, [`class_round`] in vanilla),
+    /// drawing from the campaign's stream (model +0xFB8, [`CampaignModel::rng`], passed at `0x00AB4309`), then
+    /// it grows by its stored factors, then its religions convert on the new population (`0x00A63FE0`). The
+    /// growth is the rule in use (seam `population.grow`, [`grow`] in vanilla). Each rule's mod-state writes
+    /// apply before the next rule runs, so a mod rule's writes reach the next region's rules. The turn runs it
+    /// in [`super::economy::settle_round`]'s region loop, before the region's town wealth.
+    pub fn population_region_round_end(&mut self, id: RegionId) {
         let mut writes = ModWrites::default();
-        for id in regions {
-            let Some(reg) = self.world.regions.get(&id) else { continue };
-            let classes = self.rules.seams.population_class_round.rule()(self, reg, &mut writes);
-            if let Some(r) = self.world.regions.get_mut(&id) {
-                r.class_bases = classes;
-            }
-            self.mod_state.apply(&mut writes);
-            let Some(reg) = self.world.regions.get(&id) else { continue };
-            let (pop, state) = self.rules.seams.population_grow.rule()(self, reg, reg.population, &reg.population_state, &mut writes);
-            if let Some(r) = self.world.regions.get_mut(&id) {
-                r.population = pop;
-                r.population_state = state;
-            }
-            self.mod_state.apply(&mut writes);
-            self.convert_region(id);
+        let Some(reg) = self.world.regions.get(&id) else { return };
+        let mut rng = self.rng;
+        let classes = self.rules.seams.population_class_round.rule()(self, reg, &reg.class_bases, &mut rng, &mut writes);
+        self.rng = rng;
+        if let Some(r) = self.world.regions.get_mut(&id) {
+            r.class_bases = classes;
+        }
+        self.mod_state.apply(&mut writes);
+        let Some(reg) = self.world.regions.get(&id) else { return };
+        let (pop, state) = self.rules.seams.population_grow.rule()(self, reg, reg.population, &reg.population_state, &mut writes);
+        if let Some(r) = self.world.regions.get_mut(&id) {
+            r.population = pop;
+            r.population_state = state;
+        }
+        self.mod_state.apply(&mut writes);
+        self.convert_region(id);
+    }
+
+    /// [`Self::population_region_round_end`] of each of `faction`'s regions in its region list order
+    /// (`0x008BC68E`–`0x008BC6C3` walks +0x778 / +0x77C, CONFIRMED;
+    /// [`super::world::World::faction_regions_in_list_order`]): the population part of the round end alone, for
+    /// tools and tests. The turn runs it per region inside [`super::economy::settle_round`], where each region's
+    /// town wealth follows its own population step.
+    pub fn population_round_end(&mut self, faction: FactionId) {
+        for id in self.world.faction_regions_in_list_order(faction) {
+            self.population_region_round_end(id);
         }
     }
 

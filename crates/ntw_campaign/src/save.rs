@@ -827,6 +827,20 @@ fn write_pools(f: &mut EsfRecord, details: Option<&ntw_sim::campaign::details::F
     }
 }
 
+/// A `TRAITS` record's `TRAIT[]` items {key, points} from `traits` (a character's `CHARACTER_DETAILS` #0, a
+/// region's `REGION` #2; the level is not saved, `0x0088AFF0` reads only the two). Whether the record had the
+/// array to write.
+fn write_trait_items(t: &mut EsfRecord, traits: &[ntw_sim::campaign::details::CharacterTrait]) -> bool {
+    if t.name == "TRAITS"
+        && let Some(EsfNode::RecordArray(a)) = t.children.get_mut(0)
+        && a.name == "TRAIT"
+    {
+        a.items = traits.iter().map(|t| vec![EsfNode::Utf16String(t.key.clone()), EsfNode::I32(t.points)]).collect();
+        return true;
+    }
+    false
+}
+
 /// `CHARACTER_DETAILS` #0 `TRAITS/TRAIT[]` {key, points}, #11 `AgentAncillaries[]` {key} and #12
 /// `AgentAttributes[]` ([`write_attributes`]) from
 /// the model, for every character (traits and ancillaries change in play; layouts CONFIRMED in
@@ -835,12 +849,8 @@ fn write_traits(d: &mut EsfRecord, details: &ntw_sim::campaign::details::Charact
     if d.name != "CHARACTER_DETAILS" {
         return;
     }
-    if let Some(EsfNode::Record(t)) = d.children.get_mut(0)
-        && t.name == "TRAITS"
-        && let Some(EsfNode::RecordArray(a)) = t.children.get_mut(0)
-        && a.name == "TRAIT"
-    {
-        a.items = details.traits.iter().map(|t| vec![EsfNode::Utf16String(t.key.clone()), EsfNode::I32(t.points)]).collect();
+    if let Some(EsfNode::Record(t)) = d.children.get_mut(0) {
+        write_trait_items(t, &details.traits);
     }
     if let Some(EsfNode::RecordArray(a)) = d.children.get_mut(11)
         && a.name == "AgentAncillaries"
@@ -1641,9 +1651,11 @@ fn write_region_economy(r: &mut EsfRecord, region: &Region) {
 /// capacity, #4 its base, #5 the growth, #6 the trend, #7 overcrowded, #8 the migrants, #9 the policing
 /// cost, and each `RELIGION_BREAKDOWN` item's share (#1) by religion key; and `POPULATION` #4, the policing
 /// tracker's booked amount; and each `POPULATION_CLASS` the model keeps, by position (the classes
-/// `world::read_region` reads: the item records with a key #0, in order): #1 element 7 the
-/// war factor (class +0x20), #11 the education base, #12 the resistance base (where the record's version has
-/// them, `0x008861E0`). `POPULATION` #1..#3 and the classes' other values are not modelled: kept.
+/// `world::read_region` reads: the item records with a key #0, in order): #1 the happiness slots (with the
+/// war factor at 7 and the bankruptcy factor at 9), #2 element 5 the crackdown factor, #3..#7 the sums, the
+/// riot chance and the stage, #8..#10 the unrest kind, demand and cause, #11 the education base, #12 the
+/// resistance base (where the record's version has them, `0x008861E0`). `POPULATION` #1..#3 and the classes'
+/// other repression slots are not modelled: kept.
 fn write_region_population(r: &mut EsfRecord, region: &Region) {
     let Some(pop) = child_mut(r, "POPULATION") else { return };
     // #4: the policing tracker's booked amount (`world::read_region`).
@@ -1666,10 +1678,21 @@ fn write_region_population(r: &mut EsfRecord, region: &Region) {
             _ => None,
         });
         for (c, state) in records.zip(&region.class_bases) {
-            if let Some(EsfNode::I32Array(h)) = c.children.get_mut(1)
-                && let Some(war) = h.get_mut(7)
+            if let Some(EsfNode::I32Array(h)) = c.children.get_mut(1) {
+                for (slot, v) in h.iter_mut().zip(state.slots()) {
+                    *slot = v;
+                }
+            }
+            if let Some(EsfNode::I32Array(r)) = c.children.get_mut(2)
+                && let Some(crackdown) = r.get_mut(5)
             {
-                *war = state.war;
+                *crackdown = state.crackdown;
+            }
+            for (i, v) in [(3, state.positive), (4, state.negative), (5, state.repression), (6, state.riot_chance), (7, state.stage)] {
+                set(c, i, EsfNode::I32(v));
+            }
+            for (i, v) in [(8, state.unrest), (9, state.demand), (10, state.cause)] {
+                set(c, i, EsfNode::U32(v));
             }
             set(c, 11, EsfNode::I32(state.education));
             set(c, 12, EsfNode::I32(state.resistance));
@@ -1789,6 +1812,12 @@ fn write_region(
     set(r, 20, EsfNode::U32(new_owner));
     write_region_economy(r, region);
     write_region_population(r, region);
+    // #2 `TRAITS`: the region's traits (written by `0x00A51E30`, CONFIRMED). Every REGION record has the array;
+    // one without it cannot keep the region's traits, so the save fails rather than drop them.
+    let written = child_mut(r, "TRAITS").is_some_and(|t| write_trait_items(t, &region.traits));
+    if !written && !region.traits.is_empty() {
+        return Err(SaveError::Missing("REGION TRAITS/TRAIT array"));
+    }
     if let Some(sgr) = child_mut(r, "SETTLEMENT").and_then(|s| child_mut(s, "SIEGEABLE_GARRISON_RESIDENCE")) {
         // The siege (CONFIRMED, writer `0x00B7A5F0`): #2 turns to surrender, #3 turns besieged,
         // #13 the besieging force ids.
@@ -1968,14 +1997,15 @@ fn write_slot_holder(slot: &mut EsfRecord, region: &Region, holder: Option<ntw_s
 
 /// A port slot's blockade, where the reader finds it (`PORT_GARRISON_MANAGER` #1 the blockading navy's id or 0,
 /// #2 the +0x74 byte; CONFIRMED, writer `0x00A51D90`). A slot without the record (not a port) is left alone, as
-/// is a v1 record's missing #2 while the byte is clear; a record that can't take the values is logged once.
+/// is a v1 record's missing #2 while the byte is clear; with no blockade nothing is lost, so only a record that
+/// can't take a live blockade is logged once.
 fn write_port_blockade(slot: &mut EsfRecord, blockade: Option<ntw_sim::campaign::PortBlockade>) {
     let Some(pgm) = child_mut(slot, "PORT_GARRISON_MANAGER") else { return };
     let attacked = blockade.is_some_and(|b| b.docked_navy_attacked);
     let navy_ok = set(pgm, 1, EsfNode::U32(blockade.map_or(0, |b| b.navy.raw())));
     let has_byte = pgm.children.len() > 2;
     let byte_ok = set(pgm, 2, EsfNode::Bool(attacked)) || (!has_byte && !attacked);
-    if !(navy_ok && byte_ok) {
+    if blockade.is_some() && !(navy_ok && byte_ok) {
         static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
             log::warn!("save: a PORT_GARRISON_MANAGER lacks the u32 at #1 or the bool at #2; its port blockade is not all written (logged once)");
@@ -2327,6 +2357,22 @@ mod tests {
         EsfNode::Record(Box::new(r))
     }
 
+    /// A region's (and a character's) `TRAITS/TRAIT[]` keeps its traits' keys and points over a save, in order;
+    /// the level is not saved (`0x00A51E30` / `0x0088AFF0`), the load sets it again. A record without the array
+    /// cannot hold them.
+    #[test]
+    fn region_traits_round_trip_without_their_levels() {
+        use ntw_sim::campaign::details::CharacterTrait;
+        let array = EsfNode::RecordArray(Box::new(ntw_formats::esf::EsfRecordArray { name: "TRAIT".into(), version: 0, items: Vec::new() }));
+        let EsfNode::Record(mut traits) = rec("TRAITS", vec![array]) else { unreachable!() };
+        let held = vec![CharacterTrait { key: "R_b".into(), points: 4, level: 2 }, CharacterTrait { key: "R_a".into(), points: 0, level: 0 }];
+        assert!(write_trait_items(&mut traits, &held));
+        let back = crate::details::read_traits(&traits);
+        assert_eq!(back, held.iter().map(|t| CharacterTrait { level: 0, ..t.clone() }).collect::<Vec<_>>());
+        let EsfNode::Record(mut bare) = rec("TRAITS", Vec::new()) else { unreachable!() };
+        assert!(!write_trait_items(&mut bare, &held));
+    }
+
     /// A region owned by faction 1, with nothing built or queued.
     fn test_region() -> Region {
         use ntw_sim::campaign::{FactionId, RegionId, Settlement};
@@ -2360,6 +2406,7 @@ mod tests {
             garrison: None,
             fleet: None,
             siege: Default::default(),
+            traits: Vec::new(),
         }
     }
 

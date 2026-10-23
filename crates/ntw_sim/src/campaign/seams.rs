@@ -44,6 +44,7 @@ use super::outcome::{CampaignOutcome, OutcomeMovie};
 use super::population::{ClassWarEvent, PopulationState};
 use super::turn::ConstructionStep;
 use super::world::{CampaignModel, ConstructionItem, PopulationClassState, Region};
+use crate::rng::CaRng;
 use crate::seam::{Seam, SeamRegistry};
 
 /// Seam key of a region's population growth for one round ([`PopulationGrow`]).
@@ -83,10 +84,12 @@ pub const CAPTURE_AI_CHOICE: &str = "capture.ai_choice";
 /// and its population state, the new population and state. The original's is
 /// [`super::population::grow`]. Its mod-state changes go to the [`ModWrites`].
 pub type PopulationGrow = dyn Fn(&CampaignModel, &Region, u32, &PopulationState, &mut ModWrites) -> (u32, PopulationState) + Send + Sync;
-/// A region's population classes after their round-end passes, before the region grows: given the model and
-/// the region, its new classes (the region's [`Region::class_bases`] is replaced with them). The original's is
-/// [`super::population::class_round`]. Its mod-state changes go to the [`ModWrites`].
-pub type PopulationClassRound = dyn Fn(&CampaignModel, &Region, &mut ModWrites) -> Vec<PopulationClassState> + Send + Sync;
+/// A region's population classes after their round-end passes, before the region grows: given the model, the
+/// region, its classes and the random stream the riot draws take (the model's at the round end, a fixed seed in
+/// the projection), its new classes (the region's [`Region::class_bases`] is replaced with them). The original's
+/// is [`super::population::class_round`]. Its mod-state changes go to the [`ModWrites`].
+pub type PopulationClassRound =
+    dyn Fn(&CampaignModel, &Region, &[PopulationClassState], &mut CaRng, &mut ModWrites) -> Vec<PopulationClassState> + Send + Sync;
 /// A population class's war factor after an event: given the model, the class key, the event, the region's
 /// owner, the other faction (the war's target, the battle's opponent) and the current value, the new value.
 /// Called for each class of the owner's capital ([`CampaignModel::move_class_war`]). The original's is
@@ -133,10 +136,11 @@ pub type TradeRouteCheck = dyn Fn(&CampaignModel, FactionId, FactionId) -> u8 + 
 /// the amount; it is the raider's income and, on an international route, the owner's loss. The original's
 /// is [`super::commerce_raid::raid_take`]. A query: it changes no state.
 pub type RaidTake = dyn Fn(&CampaignModel, &OwnedRoute, f32) -> i32 + Send + Sync;
-/// The round start's historical events: given the model (it may change state: the RNG, the triggered list),
-/// the messages to post. The original's is [`super::historical_events::historical_events`]. Its mod-state
-/// changes go to the [`ModWrites`].
-pub type HistoricalEvents = dyn Fn(&mut CampaignModel, &mut ModWrites) -> Vec<CampaignEvent> + Send + Sync;
+/// The round start's historical events: given the model (it may change state: the RNG) and the round's
+/// candidates (indexes into `HistoricalEventRules::events`, in the order the `HistoricalEvents` script
+/// handlers pushed them), the messages to post. The original's is
+/// [`super::historical_events::historical_events`]. Its mod-state changes go to the [`ModWrites`].
+pub type HistoricalEvents = dyn Fn(&mut CampaignModel, &[usize], &mut ModWrites) -> Vec<CampaignEvent> + Send + Sync;
 /// The movie a faction's campaign outcome plays and its panel data ([`OutcomeMovie`]), or none: given the
 /// model, the faction and how its campaign ended ([`CampaignOutcome`]). The UI shows the movie panel with it;
 /// the panel's OK then runs the movie's exit. The original's is [`super::outcome::outcome_movie`]. A query:
@@ -200,7 +204,9 @@ impl Default for CampaignSeams {
     fn default() -> Self {
         CampaignSeams {
             population_grow: Seam::original(Arc::new(|m: &CampaignModel, r: &Region, pop: u32, s: &PopulationState, _: &mut ModWrites| super::population::grow(m, r, pop, s))),
-            population_class_round: Seam::original(Arc::new(|m: &CampaignModel, r: &Region, _: &mut ModWrites| super::population::class_round(m, r))),
+            population_class_round: Seam::original(Arc::new(
+                |m: &CampaignModel, r: &Region, c: &[PopulationClassState], rng: &mut CaRng, _: &mut ModWrites| super::population::class_round(m, r, c, rng),
+            )),
             population_class_war: Seam::original(Arc::new(|m: &CampaignModel, c: &str, e: ClassWarEvent, a: FactionId, b: FactionId, w: i32, _: &mut ModWrites| {
                 super::population::class_war_change(m, c, e, a, b, w)
             })),

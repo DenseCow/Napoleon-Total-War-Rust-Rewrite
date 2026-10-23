@@ -64,11 +64,11 @@ impl DdsFormat {
     pub fn level_size(self, w: u32, h: u32) -> usize {
         let blocks = |n: u32| n.div_ceil(4).max(1) as usize;
         match self {
-            Self::Dxt1 => blocks(w) * blocks(h) * 8,
-            Self::Dxt3 | Self::Dxt5 => blocks(w) * blocks(h) * 16,
-            Self::Rgb { bits, .. } => w as usize * h as usize * (bits as usize / 8),
-            Self::A16B16G16R16 => w as usize * h as usize * 8,
-            Self::Q8W8V8U8 => w as usize * h as usize * 4,
+            Self::Dxt1 => blocks(w).saturating_mul(blocks(h)).saturating_mul(8),
+            Self::Dxt3 | Self::Dxt5 => blocks(w).saturating_mul(blocks(h)).saturating_mul(16),
+            Self::Rgb { bits, .. } => (w as usize).saturating_mul(h as usize).saturating_mul(bits as usize / 8),
+            Self::A16B16G16R16 => (w as usize).saturating_mul(h as usize).saturating_mul(8),
+            Self::Q8W8V8U8 => (w as usize).saturating_mul(h as usize).saturating_mul(4),
         }
     }
 }
@@ -339,6 +339,15 @@ mod tests {
     }
 
     #[test]
+    fn huge_dxt_dimensions_do_not_overflow() {
+        for cc in [b"DXT1", b"DXT3", b"DXT5"] {
+            let _ = DdsFormat::Dxt5.level_size(u32::MAX, u32::MAX);
+            let b = header(u32::MAX, u32::MAX, 1, 4, cc, 0, [0; 4]);
+            assert!(Dds::parse(&b).is_err());
+        }
+    }
+
+    #[test]
     fn dxt1_solid_red_with_mips() {
         // 8x8 DXT1, 4 mips claimed but only 8x8 + 4x4 present -> 2 kept.
         let mut b = header(8, 8, 4, 4, b"DXT1", 0, [0; 4]);
@@ -374,5 +383,11 @@ mod tests {
         assert_eq!(Dds::parse(&b).unwrap_err(), DdsError::Truncated);
         let b = header(4, 4, 1, 4, b"ATI2", 0, [0; 4]);
         assert!(matches!(Dds::parse(&b), Err(DdsError::Unsupported(_))));
+    }
+
+    #[test]
+    fn absurd_dimensions_are_truncated_not_an_overflow_panic() {
+        let b = header(u32::MAX, u32::MAX, 1, 0x40, b"\0\0\0\0", 32, [0xFF, 0xFF00, 0xFF0000, 0]);
+        assert!(matches!(Dds::parse(&b), Err(DdsError::Truncated)));
     }
 }

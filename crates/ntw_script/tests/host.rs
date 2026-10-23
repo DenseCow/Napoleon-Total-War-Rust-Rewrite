@@ -285,6 +285,10 @@ fn a_handover_from_a_handler_returns_its_destruction_events() {
     let fr = model.faction_by_key("france").unwrap().id;
     let au = model.faction_by_key("austria").unwrap().id;
     model.turn.humans = vec![fr, au];
+    // A defeat movie row for austria (its movie id is empty here, as the empty `id` compares).
+    let mut rules = (*model.rules).clone();
+    rules.movie_events = vec![ntw_sim::campaign::outcome::MovieEventRow { movie: "lost.bik".into(), ..Default::default() }];
+    model.rules = std::sync::Arc::new(rules);
     let mut h = ScriptHost::new(model, "france", src).unwrap();
     h.run_file("data/test.lua").unwrap();
     h.fire("NewSession", ScriptContext::default());
@@ -307,8 +311,13 @@ fn a_handover_from_a_handler_returns_its_destruction_events() {
         .position(|(e, _)| matches!(e, ntw_sim::campaign::CampaignEvent::FactionDestroyed { faction } if *faction == au))
         .expect("the handover's FactionDestroyed is returned");
     assert!(start < destroyed, "after the batch whose handler issued it");
+    assert!(
+        fired.iter().any(|(e, _)| matches!(e, ntw_sim::campaign::CampaignEvent::OutcomeMovie { faction, .. } if *faction == au)),
+        "the human target's outcome movie is returned too"
+    );
     assert_eq!(h.model().world.faction_details.get(&au).and_then(|d| d.out_of_game), Some(true));
 }
+
 #[test]
 fn end_turn_forwards_model_events() {
     let mut h = host();
@@ -433,6 +442,7 @@ fn garrison_in_a_region_of(
             garrison: Some(force),
             fleet: None,
             siege: Default::default(),
+            traits: Vec::new(),
         },
     );
     model.world.characters.insert(
@@ -776,6 +786,36 @@ fn set_zoom_limit_sets_the_camera_tilt_bounds() {
 }
 
 #[test]
+fn set_map_bounds_sets_the_camera_target_bounds() {
+    // 0x00977C10: left, top, right, bottom stored unchecked as west, north, east, south; a
+    // non-number keeps the bounds (ORIGINAL BUG: the exe stores garbage).
+    use ntw_sim::campaign::MapBounds;
+    let src = ScriptSource::empty().with_memory_file("events.lua", EVENTS).with_memory_file("test.lua", SCRIPT);
+    let h = ScriptHost::new(common::tiny_model(), "france", src).unwrap();
+    h.run_file("data/test.lua").unwrap();
+    h.fire("NewSession", ScriptContext::default());
+    let bounds = |h: &ScriptHost| h.model().world.map_bounds;
+    assert_eq!(bounds(&h), MapBounds::default());
+    // The tutorial's first call.
+    h.lua().load("game_interface:set_map_bounds(-130, -75, -113, -98)").exec().unwrap();
+    let tut = MapBounds { min_x: -130.0, min_z: -98.0, max_x: -113.0, max_z: -75.0 };
+    assert_eq!(bounds(&h), tut);
+    // A bad argument anywhere, or a missing one: the type error once per type, and no change.
+    h.lua().load("game_interface:set_map_bounds(1, 2, 3, true) game_interface:set_map_bounds(\"1\", 2, 3, 4)").exec().unwrap();
+    h.lua().load("game_interface:set_map_bounds(1, 2, 3)").exec().unwrap();
+    assert_eq!(bounds(&h), tut);
+    let errors: Vec<_> = h.state().log.iter().filter(|l| l.starts_with("ERROR game_interface:set_map_bounds:")).cloned().collect();
+    assert_eq!(
+        errors,
+        [
+            "ERROR game_interface:set_map_bounds: Trying to retrieve type number, found type boolean (logged once)",
+            "ERROR game_interface:set_map_bounds: Trying to retrieve type number, found type string (logged once)",
+            "ERROR game_interface:set_map_bounds: Trying to retrieve type number, found type table (logged once)",
+        ]
+    );
+}
+
+#[test]
 fn shroud_switches_read_the_last_argument_and_only_its_own_type() {
     // 0x01055840 / 0x01055760 read the top of the Lua stack (the last argument) and pop it; a
     // wrong type is the script error "Trying to retrieve type %s, found type %s" (0x01095090),
@@ -1023,6 +1063,7 @@ fn a_liberate_choice_fires_the_protectorate_event_with_the_liberator() {
             garrison: None,
             fleet: None,
             siege: Default::default(),
+            traits: Vec::new(),
         },
     );
     model.world.region_rebel_factions.insert(region, "prussia".into());

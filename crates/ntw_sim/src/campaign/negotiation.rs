@@ -269,6 +269,14 @@ pub struct Negotiation {
     /// The proposer's `approach_<attitude>` line, picked when the recipient is human (hub +0x330);
     /// `None` when the recipient is not human.
     pub approach: Option<Greeting>,
+    /// The 14 action records' flags (the vector at `+0x2A4`), computed once by the constructor
+    /// ([`CampaignModel::negotiation_actions`], `0x00BF5A60` and its forbidden loop) and changed only
+    /// by the peace record's take and clear (`CampaignModel::propose_peace`, `0x00C4ADE0` /
+    /// `0x00C5CC40`), the join-war record's clear ([`Negotiation::clear_join_war`], `0x00C5CA30`) and
+    /// the accept (`0x00C43520`); the panel reads them ([`CampaignModel::possible_actions`]). Of the
+    /// records the model holds, the regions, technology and payment records' take and clear write no
+    /// flag (CONFIRMED: none of them calls the flag setter `0x005F5A30`).
+    pub actions: Vec<ActionRecord>,
     /// The regions action record's two lists (UI_FIDELITY.md §4.9): set by
     /// [`super::CampaignCommand::ProposeRegions`], applied by [`super::CampaignCommand::AcceptDeal`].
     pub regions: DealItems<RegionId>,
@@ -295,6 +303,55 @@ pub struct Negotiation {
     /// `ProposeDeal(false)`, diplomacy_panel.lua:1566 / :635): accepting or declining the deal then
     /// gives the recipient the `threatened` factor towards the proposer ([`CampaignModel::apply_threatened`]).
     pub threat: bool,
+}
+
+/// Indices of the records the peace record's side effects touch, in the negotiation's record vector
+/// ([`Negotiation::actions`], the order of [`CampaignModel::negotiation_actions`]).
+const TRADE_RECORD: usize = 0;
+const ACCESS_RECORD: usize = 1;
+const ALLIANCE_RECORD: usize = 3;
+const PROTECTOR_RECORD: usize = 8;
+const PEACE_RECORD: usize = 9;
+const JOIN_WAR_RECORD: usize = 11;
+const BREAK_TRADE_RECORD: usize = 12;
+const BREAK_ALLIANCE_RECORD: usize = 13;
+
+impl Negotiation {
+    /// Record `i`'s possible flag (`0x005F5A30` on `+0x10`). Every negotiation has the 14 records
+    /// (built by [`CampaignModel::negotiation_actions`]), so `i` is always in range.
+    fn set_possible(&mut self, i: usize, possible: bool) {
+        debug_assert!(i < self.actions.len(), "negotiation record {i} out of range ({} records)", self.actions.len());
+        if let Some(a) = self.actions.get_mut(i) {
+            a.possible = possible;
+        }
+    }
+
+    /// The join-war record's clear (vtable `0x0138202C` slot +0x50, `0x00C5CA30`, CONFIRMED
+    /// disassembly): both lists emptied (`+0x1C` = 0, `+0x2C` = 0, the counts its has-items
+    /// `0x00C125E0` tests) and the record made possible (`0x00C5CA40` → `0x005F5A30(1)`), whatever it
+    /// held. Its take (vt+0x44 `0x00C4A670`, the setter `propose_join_war` reaches) copies the
+    /// deal's two lists into the record (`0x00522F00`: deal `+0x90` → `+0x14` demanded, `+0xA0` →
+    /// `+0x24` offered) and builds its tooltip text (`+0x34`, `+0x40`); it writes no flag
+    /// (CONFIRMED disassembly).
+    pub(crate) fn clear_join_war(&mut self) {
+        self.join_war.clear();
+        self.set_possible(JOIN_WAR_RECORD, true);
+    }
+
+    /// The peace record's clear (vtable `0x01381F84` slot +0x50, `0x00C5CC40`, CONFIRMED
+    /// disassembly), in order: the peace item off (byte `+0x14` = 0) and the record possible again;
+    /// then records 0, 1, 3, 8, 12 and 13 (trade, access, alliance, protector, break trade, break
+    /// alliance) are each cleared when they hold items (their vt+0x2C, then `0x00C5C730`: vt+0x50
+    /// and the "deal changed" notice) and then made impossible, whatever they held. Those six
+    /// records hold no items in the model (their `Propose` posts no command), so only their flags
+    /// change here; their items, once modelled, are cleared here first.
+    pub(crate) fn clear_peace(&mut self) {
+        self.peace = false;
+        self.set_possible(PEACE_RECORD, true);
+        for i in [TRADE_RECORD, ACCESS_RECORD, ALLIANCE_RECORD, PROTECTOR_RECORD, BREAK_TRADE_RECORD, BREAK_ALLIANCE_RECORD] {
+            self.set_possible(i, false);
+        }
+    }
 }
 
 /// A deal's payment record (record 7, vtable `0x01381EDC`): `amount` (`+0x14`) for `turns` turns
@@ -497,14 +554,16 @@ impl CampaignModel {
         })
     }
 
-    /// `0x00C3E410(a, b)`: `a` has a trade agreement with a faction other than `b`.
+    /// `0x00C3E410(b, a)`: `a` has a trade agreement with a faction other than `b` (CONFIRMED
+    /// disassembly: over its second argument's relationships, the agreement `+0x788` and the target
+    /// not the first argument, `0x00898B80`).
     fn trades_with_third(&self, a: FactionId, b: FactionId) -> bool {
         self.third_factions(a).any(|x| x != b && self.world.trade_held(a, x))
     }
 
-    /// `0x00C3D5A0(a, b)`: `a` is allied (stance 2) with a faction other than `b`. The same test as
-    /// `0x00B280C0(b, a)` (CONFIRMED disassembly: over `a`'s relationships, stance index 2 and the
-    /// target not `b`, `0x00898B80`).
+    /// `0x00C3D5A0(b, a)`: `a` is allied (stance 2) with a faction other than `b`; `0x00B280C0(b, a)`
+    /// has the same body (CONFIRMED disassembly: over the second argument's relationships, stance
+    /// index 2 and the target not the first argument, `0x00898B80`).
     fn allied_with_third(&self, a: FactionId, b: FactionId) -> bool {
         self.third_factions(a).any(|x| x != b && self.world.stance(a, x) == Stance::Allied)
     }
@@ -680,6 +739,15 @@ impl CampaignModel {
         Some(TradeAgreementTooltip { reason, sea_routes, route_shifted })
     }
 
+    /// The protector record's test (`IsProtectorNegotiationActionPossible` `0x00C1A770`): neither
+    /// side has a protectorate, peace, the recipient holds exactly one region (faction +0x76C list
+    /// count == 1; CONFIRMED the region list: `0x008AE270` adds a region to it and makes it the
+    /// capital +0x72C when there is none) and is not human.
+    fn protector_possible(&self, p: FactionId, r: FactionId) -> bool {
+        let regions_of_r = self.world.regions.values().filter(|x| x.owner == r).count();
+        !self.has_patron(p) && !self.has_patron(r) && !self.at_war(p, r) && regions_of_r == 1 && !self.is_human(r)
+    }
+
     /// The 14 action records of a negotiation of `proposer` with `recipient`, in the exe's order
     /// (the constructors `0x00BF3E90` .. `0x00BF3520` called by `0x00BF5A60`). Every record is then
     /// forbidden when the proposer's relationship to the recipient has its option at 2 or 3
@@ -702,11 +770,7 @@ impl CampaignModel {
         let allied = self.allied_with(p, r);
         let alliance_possible = self.world.stance(p, r) == Stance::Allied
             || (!allied_like(self.world.stance(p, r)) && !war && !self.alliance_blocked(p, r));
-        // Protector (`0x00C1A770`): neither has a protectorate, peace, the recipient holds exactly
-        // one region (faction +0x76C list count == 1; CONFIRMED the region list: `0x008AE270` adds a
-        // region to it and makes it the capital +0x72C when there is none) and is not human.
-        let regions_of_r = self.world.regions.values().filter(|x| x.owner == r).count();
-        let protector = !self.has_patron(p) && !self.has_patron(r) && !war && regions_of_r == 1 && !self.is_human(r);
+        let protector = self.protector_possible(p, r);
         // Peace (`0x00C1A730`): at war and the peace option allowed (0 or 1).
         let peace = war && self.diplomacy_option(p, r, A::Peace.option()) <= 1;
         // War (`0x00C1A890`): not at war. PROVISIONAL: its patron test is not modelled (BACKLOG): a
@@ -770,13 +834,20 @@ impl CampaignModel {
     /// negotiating `proposer` → `recipient` (`0x009B5220`): a type-1 action is listed only when
     /// available; a type-0 action when available, and — for trade, alliance, request_join_war,
     /// break_trade and break_alliance — also when not available while the local player's stance to
-    /// the other side is not war, then greyed with a tooltip.
+    /// the other side is not war, then greyed with a tooltip. The records are the open
+    /// negotiation's ([`Negotiation::actions`]) when it is `proposer` → `recipient`, as the panel
+    /// reads the negotiation's own records; otherwise those a new one would have.
     pub fn possible_actions(&self, local: FactionId, proposer: FactionId, recipient: FactionId) -> PossibleActions {
         use NegotiationAction as A;
         let counterpart = if local == proposer { recipient } else { proposer };
         let not_at_war = self.world.stance(local, counterpart) != Stance::War;
+        let open = self.negotiations.current.as_ref().filter(|n| (n.proposer, n.recipient) == (proposer, recipient));
+        let records = match open {
+            Some(n) => std::borrow::Cow::Borrowed(n.actions.as_slice()),
+            None => std::borrow::Cow::Owned(self.negotiation_actions(proposer, recipient)),
+        };
         let mut out = PossibleActions::default();
-        for a in self.negotiation_actions(proposer, recipient) {
+        for &a in records.iter() {
             let active = a.available();
             if a.offers_and_demands {
                 if active {
@@ -887,10 +958,13 @@ impl CampaignModel {
     /// campaign RNG ([`Self::diplomat_line`]) — here and only here: reading
     /// [`CampaignModel::negotiations`] draws nothing. Reached only through the command
     /// ([`super::CampaignCommand::BeginNegotiation`]), so the draw is ordered with every other
-    /// command (multiplayer, replays). Both factions exist (the command checks).
+    /// command (multiplayer, replays). Both factions exist (the command checks). The constructor
+    /// also builds the action records once ([`Negotiation::actions`], from
+    /// [`Self::negotiation_actions`]).
     pub(crate) fn begin_negotiation(&mut self, proposer: FactionId, recipient: FactionId) {
         let greeting = self.is_human(proposer).then(|| self.diplomat_line("receive", recipient, proposer));
         let approach = self.is_human(recipient).then(|| self.diplomat_line("approach", proposer, recipient));
+        let actions = self.negotiation_actions(proposer, recipient);
         let n = &mut self.negotiations;
         n.begun += 1;
         n.current = Some(Negotiation {
@@ -899,6 +973,7 @@ impl CampaignModel {
             recipient,
             greeting,
             approach,
+            actions,
             regions: DealItems::default(),
             technologies: DealItems::default(),
             payment: DealPayment::default(),
@@ -976,8 +1051,9 @@ impl CampaignModel {
 
     /// `CCQ_DIPLOMACY_PROPOSE_JOIN_WAR` (posted by the join-war record's `0x00C4A960`, executor
     /// `ExecuteProposeJoinWarCommand` `0x009336C0`, CONFIRMED by disassembly): as
-    /// [`Self::propose_regions`] with factions: `clear` empties the record (`0x00C11B80(11)` →
-    /// `0x00C5C730`); otherwise, when either list has a faction, the record's two lists are replaced
+    /// [`Self::propose_regions`] with factions: `clear` empties the record and makes it possible
+    /// (`0x00C11B80(11)` → `0x00C5C730` → its vt+0x50 `0x00C5CA30`, [`Negotiation::clear_join_war`];
+    /// unconditionally, `0x009339AB`..`0x009339C1`, no has-items test); otherwise, when either list has a faction, the record's two lists are replaced
     /// by these (the demand setter `0x00C1F690`, the offer setter `0x00C43D30`, then `0x00C49AA0` →
     /// the record's setter `0x00C4A670`); two empty lists leave it as it is. A faction that does not
     /// exist aborts the command (the executor drops it when an id does not resolve, `0x0090E2F0`).
@@ -990,7 +1066,7 @@ impl CampaignModel {
         }
         let n = self.negotiations.current.as_mut().ok_or(super::CommandError::NoNegotiation)?;
         if clear {
-            n.join_war.clear();
+            n.clear_join_war();
             n.applied = false;
         } else if !demanded.is_empty() || !offered.is_empty() {
             n.join_war = DealItems { demanded, offered };
@@ -1003,37 +1079,74 @@ impl CampaignModel {
     /// disassembly; its payload one flag): `clear` empties the peace record (`0x00C11B80(9)` →
     /// `0x00C5C730` → its vt+0x50 `0x00C5CC40`, the byte `+0x14` set to 0); otherwise the record takes
     /// the deal (`0x00C49AA0` → its vt+0x44 `0x00C4ADE0`, the byte set to 1). The executor checks
-    /// nothing else: neither the pair's stance nor the record's possible flag.
+    /// nothing else: neither the pair's stance nor the record's possible flag. The clear runs even
+    /// when the record holds no peace (`0x00933BF0`..`0x00933BF7`, no has-items test).
     ///
-    /// PROVISIONAL: the possible flags are not modelled: `0x00C4ADE0` also clears the record's own
-    /// and re-tests records 0, 1 and 3 (`0x00BA42E0`); `0x00C5CC40` (vtable `0x01381F84`, slot +0x50)
-    /// sets its own and clears records 0, 1, 3, 8, 12 and 13, each only when that record's vt+0x2C test passes; our code acts on
-    /// none of those records here. Those records are still held by the UI (BACKLOG).
+    /// Each side changes the possible flags ([`Negotiation::actions`]; CONFIRMED by disassembly,
+    /// the peace vtable `0x01381F84`, take +0x44, clear +0x50, flag setter `0x005F5A30` on +0x10):
+    /// - taking the deal (`0x00C4ADE0`) makes the peace record impossible, then makes possible (it
+    ///   never makes one impossible): record 0, trade, when a route exists both ways (`0x00BA42E0`
+    ///   proposer → recipient and back, the embargo and a held agreement not tested); records 1 and 3,
+    ///   access and alliance, always; record 8, protector, when [`Self::protector_possible`]
+    ///   (`0x00C1A770`, which needs peace, so never while at war); record 12, break trade, when either
+    ///   side trades with a faction besides the other (`0x00C3E410` both ways); record 13, break
+    ///   alliance, when either is allied with one (`0x00C3D5A0` both ways);
+    /// - clearing (`0x00C5CC40`, [`Negotiation::clear_peace`]) makes the peace record possible again and
+    ///   those six impossible.
     pub(crate) fn propose_peace(&mut self, clear: bool) -> Result<(), super::CommandError> {
+        let (p, r) = self.negotiations.current.as_ref().map(|n| (n.proposer, n.recipient)).ok_or(super::CommandError::NoNegotiation)?;
+        let made_possible = if clear {
+            None
+        } else {
+            Some([
+                (TRADE_RECORD, self.trade_route_check(p, r) != 0 && self.trade_route_check(r, p) != 0),
+                (ACCESS_RECORD, true),
+                (ALLIANCE_RECORD, true),
+                (PROTECTOR_RECORD, self.protector_possible(p, r)),
+                (BREAK_TRADE_RECORD, self.trades_with_third(r, p) || self.trades_with_third(p, r)),
+                (BREAK_ALLIANCE_RECORD, self.allied_with_third(p, r) || self.allied_with_third(r, p)),
+            ])
+        };
         let n = self.negotiations.current.as_mut().ok_or(super::CommandError::NoNegotiation)?;
-        n.peace = !clear;
+        match made_possible {
+            None => n.clear_peace(),
+            Some(tests) => {
+                n.peace = true;
+                n.set_possible(PEACE_RECORD, false);
+                for (i, _) in tests.into_iter().filter(|&(_, ok)| ok) {
+                    n.set_possible(i, true);
+                }
+            }
+        }
         n.applied = false;
         Ok(())
     }
 
     /// `CCQ_DIPLOMACY_CLEAR_NEGOTIATION` (executor `0x00932EC0` → `0x00C1D140`, which clears each
     /// record holding items): the deal is emptied. The model holds the regions, technology,
-    /// payment, peace and join-war records; the other items are still held by the UI.
+    /// payment, peace and join-war records; the other items are still held by the UI. The peace
+    /// and join-war records are cleared only when they hold items (has-items `0x00AAB430` / `0x00C125E0`,
+    /// tested by `0x00C4BC10` at `0x00C1D172`), so only then do their possible-flag side effects run
+    /// ([`Negotiation::clear_peace`], [`Negotiation::clear_join_war`]), in the records' order.
     pub(crate) fn clear_negotiation(&mut self) -> Result<(), super::CommandError> {
         let n = self.negotiations.current.as_mut().ok_or(super::CommandError::NoNegotiation)?;
         n.regions.clear();
         n.technologies.clear();
         n.payment = DealPayment::default();
-        n.peace = false;
-        n.join_war.clear();
+        if n.peace {
+            n.clear_peace();
+        }
+        if !n.join_war.is_empty() {
+            n.clear_join_war();
+        }
         n.applied = false;
         Ok(())
     }
 
     /// The AI's answer to the open negotiation's deal (`CCQ_DIPLOMACY_PROPOSE_DEAL` → `ProcessNegotiationDealProposal 0x00C49BE0`
     /// → `EvaluateProposedNegotiationDealAI 0x00AA5ED0`, run when the recipient is not human; AI_RESEARCH.md §4 "Deal evaluation"):
-    /// true when it is refused, as the exe evaluates the regions, technology and payment records
-    /// ([`Self::ai_accepts_deal`]). A human recipient answers for itself: never refused here.
+    /// true when it is refused, as the exe evaluates the regions, technology, payment, peace and
+    /// join-war records ([`Self::ai_accepts_deal`]). A human recipient answers for itself: never refused here.
     pub fn ai_refuses_deal(&self) -> bool {
         self.ai_accepts_deal() == Some(false)
     }
@@ -1205,7 +1318,13 @@ impl CampaignModel {
                 self.expel_from_region(f, r, &mut events);
             }
         }
-        // After the expulsions, `0x00C43520` and result 1, the threat (`0x00C11655`).
+        // After the expulsions, `0x00C43520` (`0x00C11650`: every record's possible flag set to 0,
+        // CONFIRMED disassembly), result 1, then the threat (`0x00C11655`).
+        if let Some(n) = self.negotiations.current.as_mut() {
+            for a in &mut n.actions {
+                a.possible = false;
+            }
+        }
         if threat {
             self.apply_threatened(recipient, proposer);
         }
@@ -1289,7 +1408,7 @@ impl CampaignModel {
     pub(crate) fn force_power(&self, f: &super::MilitaryForce, unknown_units: &mut BTreeSet<String>) -> i32 {
         let none = super::effects::ForceEffects::default();
         let mut sum = 0i32;
-        let units = super::economy::costed_force(f).map_or(&[][..], |(_, units)| units);
+        let units = super::economy::costed_force(f).map_or(&[][..], |_| f.units.as_slice());
         for u in units {
             match self.rules.units.get(&u.unit_key) {
                 Some(r) => sum = sum.wrapping_add(super::economy::unit_upkeep(none, &self.rules.features, &u.unit_key, r)),

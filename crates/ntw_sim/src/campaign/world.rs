@@ -123,6 +123,15 @@ pub struct CampaignModel {
     /// world and the map).
     #[cfg_attr(feature = "serde", serde(skip))]
     pub zones: super::zones::Zones,
+    /// The round start's historical event candidates while its `HistoricalEvents` script event runs
+    /// (the vector of the holder `0x008F5990` builds on its stack with `0x0088B300`): `Some` from
+    /// [`TurnStep::RoundStart`](super::TurnStep::RoundStart) to
+    /// [`TurnStep::HistoricalEvents`](super::TurnStep::HistoricalEvents), indexes into
+    /// [`HistoricalEventRules::events`](super::historical_events::HistoricalEventRules::events) in
+    /// the order the handlers pushed them ([`Self::push_historical_event`]). Not saved (the exe frees
+    /// it in the same call); compared, and hashed only while `Some`.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub historical_candidates: Option<Vec<usize>>,
 }
 
 /// Equality over everything but [`CampaignModel::negotiations`] and [`CampaignModel::zones`]: the
@@ -151,6 +160,7 @@ impl PartialEq for CampaignModel {
             cai_rng,
             negotiations: _,
             zones: _,
+            historical_candidates,
         } = self;
         *calendar == other.calendar
             && *rng == other.rng
@@ -168,6 +178,7 @@ impl PartialEq for CampaignModel {
             && *mod_state == other.mod_state
             && *director == other.director
             && *cai_rng == other.cai_rng
+            && *historical_candidates == other.historical_candidates
     }
 }
 
@@ -194,6 +205,7 @@ impl CampaignModel {
             script_rngs: super::characters::ScriptRngs::default(),
             negotiations: super::negotiation::Negotiations::default(),
             zones: super::zones::Zones::default(),
+            historical_candidates: None,
         }
     }
 
@@ -278,6 +290,13 @@ impl CampaignModel {
             h.u32(self.pending_ally_war_calls.len() as u32);
             for c in &self.pending_ally_war_calls {
                 c.hash_into(&mut h);
+            }
+        }
+        // Only between the round start's two historical event steps, so a campaign hashes as before.
+        if let Some(found) = &self.historical_candidates {
+            h.u32(found.len() as u32);
+            for &i in found {
+                h.u32(i as u32);
             }
         }
 
@@ -505,6 +524,15 @@ impl CampaignModel {
             }
             h.u32(r.siege.surrender_turns);
             h.u32(r.siege.turns_besieged);
+            // Only when the region has traits, so a vanilla campaign (none) hashes as before.
+            if !r.traits.is_empty() {
+                h.u32(r.traits.len() as u32);
+                for t in &r.traits {
+                    h.str(&t.key);
+                    h.i32(t.points);
+                    h.i32(t.level);
+                }
+            }
             h.u32(r.recruitment_queue.len() as u32);
             for item in &r.recruitment_queue {
                 h.i32(item.id.raw());
@@ -999,6 +1027,14 @@ pub struct World {
     /// vanilla save; only the tutorial scripts set it. An own save from before the field reads false.
     #[cfg_attr(feature = "serde", serde(default))]
     pub saving_disabled: bool,
+    /// Rebellions are switched off (episodic restrictions +0xEB, `CAMPAIGN_MODEL/EPISODIC_RESTRICTIONS` #21
+    /// bool, read by the loader `0x009968A0` for versions above 8 with #20 and #22; CONFIRMED): the round
+    /// end's class passes then never step a class to rebellion (`GrowRegionPopulation` `0x00AB4070` clears
+    /// their first flag, [`super::population::class_round`]). The script method
+    /// `disable_rebellions_and_revolutions_worldwide` sets it (its handler is not traced: BACKLOG). False in
+    /// every vanilla save. An own save from before the field reads false.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub rebellions_disabled: bool,
     /// The HUD shows turns instead of dates (episodic restrictions +0xD1, `CAMPAIGN_MODEL/
     /// EPISODIC_RESTRICTIONS` #8 bool, read by the loader `0x009968A0` for versions above 1;
     /// CONFIRMED). Its only writer is the script method `display_turns(bool)` (`0x00979600`); while
@@ -1053,6 +1089,13 @@ pub struct World {
     /// the field reads the tweakers' range.
     #[cfg_attr(feature = "serde", serde(default))]
     pub zoom_limit: super::zoom_limit::ZoomLimit,
+    /// The campaign camera target's bounds (episodic restrictions +0xAC..+0xB8,
+    /// `CAMPAIGN_MODEL/EPISODIC_RESTRICTIONS` #9..#12; CONFIRMED, see [`super::map_bounds`]): the
+    /// start position's rectangle unless the scripts' `set_map_bounds` (`0x00977C10`) moved it; the
+    /// camera's key steps clamp the target to it. An own save from before the field reads the
+    /// reader's defaults.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub map_bounds: super::map_bounds::MapBounds,
     /// The faction whose shroud keeps the AI from shopping under it: the script's
     /// `disable_shopping_for_ai_under_shroud` (`0x00AA9B40`, CAI interface +0x618, CONFIRMED), set
     /// by [`CampaignModel::set_ai_shopping_shroud`] and read by
@@ -1768,9 +1811,11 @@ pub struct RecruitmentSource {
 }
 
 /// A region's population class (`POPULATION_CLASS`, 0x78 bytes in the exe; CONFIRMED layout, reader
-/// `0x008861E0`): the values public order keeps from round to round. The other factors are refilled from
-/// the region's effects each time (`0x008EDF70` never writes these three).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// `0x008861E0`): the values public order keeps from round to round. The refresh (`0x008EDF70`) refills the
+/// other happiness slots and the sums from the region's effects and never writes the war (+0x20) or
+/// bankruptcy (+0x28) slots; the round-end pass (`0x008F9690`, [`super::population::class_pass`]) moves the
+/// stored bases and the unrest state.
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize), serde(from = "PopulationClassRepr", into = "PopulationClassRepr"))]
 pub struct PopulationClassState {
     /// The class (`upper` / `lower` / `middle`, `POPULATION_CLASS` #0).
@@ -1782,28 +1827,112 @@ pub struct PopulationClassState {
     pub resistance: i32,
     /// The war factor (class +0x20, #1 element 7; happiness slot 7), in [−15, 6]: moved by a war
     /// declaration and by battle results (`0x008A94D0`, [`super::population::class_war_change`]), one step
-    /// back toward 0 at each round-end growth (`0x008F9690`).
+    /// back toward 0 at each round-end pass (`0x008F9690`).
     pub war: i32,
+    /// The bankruptcy factor (class +0x28, #1 element 9; happiness slot 9), in [−16, 0]: −4 for each class of
+    /// a bankrupt faction's capital (`0x008A8A70`, [`super::population::bankruptcy_change`]), +1 at each
+    /// round-end pass while negative.
+    pub bankruptcy: i32,
+    /// The crackdown repression (class +0x54, #2 element 5; repression slot 5): 6 after a risen rebel army is
+    /// destroyed (`0x008DBEA0`, not modelled: BACKLOG), −1 at each round-end pass while positive.
+    pub crackdown: i32,
+    /// The happiness slots as the last refresh stored them (#1, class +0x04..+0x34). Slots 7 and 9 stay 0
+    /// here: [`Self::war`] and [`Self::bankruptcy`] hold them ([`Self::slots`], [`Self::set_slots`]).
+    pub happiness: [i32; 13],
+    /// The positive happiness sum (class +0x38, #3): the slots ≥ 1 at the last refresh.
+    pub positive: i32,
+    /// The negative happiness sum (class +0x3C, #4): the slots ≤ 0 at the last refresh.
+    pub negative: i32,
+    /// The repression total (class +0x58, #5) at the last refresh.
+    pub repression: i32,
+    /// The riot chance (class +0x5C, #6) the last round-end pass stored, 0..=100.
+    pub riot_chance: i32,
+    /// The unrest stage (class +0x60, #7): how many steps the class has taken (strikes or a demand, then
+    /// riots or an ultimatum, then rebellion).
+    pub stage: i32,
+    /// The unrest kind (class +0x64, #8; [`super::population::UNREST_KINDS`]): 0 happy, 1 strikes, 2 riots,
+    /// 3 ultimatum, 4 letter of demand, 5 rebellion.
+    pub unrest: u32,
+    /// The demand (class +0x68, #9; [`super::population::UNREST_DEMANDS`]), 0 none.
+    pub demand: u32,
+    /// The unrest cause (class +0x6C, #10; [`super::population::UNREST_CAUSES`]): the happiness slot the last
+    /// riot check drew. 7 in a new class (the class constructor's value).
+    pub cause: u32,
 }
 
-/// [`PopulationClassState`] as an own save stores it: a tuple whose last element (the war factor, added
-/// without a format-version change) reads 0, through `#[serde(default)]`, from an older save's
-/// `(class, education, resistance)`.
+impl Default for PopulationClassState {
+    fn default() -> Self {
+        PopulationClassState {
+            class: String::new(),
+            education: 0,
+            resistance: 0,
+            war: 0,
+            bankruptcy: 0,
+            crackdown: 0,
+            happiness: [0; 13],
+            positive: 0,
+            negative: 0,
+            repression: 0,
+            riot_chance: 0,
+            stage: 0,
+            unrest: 0,
+            demand: 0,
+            cause: 7,
+        }
+    }
+}
+
+/// [`PopulationClassState`] as an own save stores it: a tuple whose later elements (added without a
+/// format-version change) read their default, through `#[serde(default)]`, from an older save's shorter
+/// tuple.
 #[cfg(feature = "serde")]
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-struct PopulationClassRepr(String, i32, i32, #[serde(default)] i32);
+struct PopulationClassRepr(
+    String,
+    i32,
+    i32,
+    #[serde(default)] i32,
+    #[serde(default)] i32,
+    #[serde(default)] i32,
+    #[serde(default)] [i32; 13],
+    #[serde(default)] (i32, i32, i32),
+    #[serde(default)] (i32, i32),
+    #[serde(default)] (u32, u32),
+    #[serde(default = "PopulationClassRepr::default_cause")] u32,
+);
+
+#[cfg(feature = "serde")]
+impl PopulationClassRepr {
+    fn default_cause() -> u32 {
+        PopulationClassState::default().cause
+    }
+}
 
 #[cfg(feature = "serde")]
 impl From<PopulationClassRepr> for PopulationClassState {
-    fn from(PopulationClassRepr(class, education, resistance, war): PopulationClassRepr) -> Self {
-        PopulationClassState { class, education, resistance, war }
+    fn from(r: PopulationClassRepr) -> Self {
+        let PopulationClassRepr(class, education, resistance, war, bankruptcy, crackdown, happiness, sums, unrest, kind, cause) = r;
+        let ((positive, negative, repression), (riot_chance, stage), (unrest, demand)) = (sums, unrest, kind);
+        PopulationClassState { class, education, resistance, war, bankruptcy, crackdown, happiness, positive, negative, repression, riot_chance, stage, unrest, demand, cause }
     }
 }
 
 #[cfg(feature = "serde")]
 impl From<PopulationClassState> for PopulationClassRepr {
     fn from(c: PopulationClassState) -> Self {
-        PopulationClassRepr(c.class, c.education, c.resistance, c.war)
+        PopulationClassRepr(
+            c.class,
+            c.education,
+            c.resistance,
+            c.war,
+            c.bankruptcy,
+            c.crackdown,
+            c.happiness,
+            (c.positive, c.negative, c.repression),
+            (c.riot_chance, c.stage),
+            (c.unrest, c.demand),
+            c.cause,
+        )
     }
 }
 
@@ -1811,6 +1940,30 @@ impl PopulationClassState {
     /// A class with nothing stored (what a region loaded without classes starts from).
     pub fn new(class: impl Into<String>) -> Self {
         PopulationClassState { class: class.into(), ..Default::default() }
+    }
+
+    /// The happiness slots as the class holds them (class +0x04..+0x34): the refreshed [`Self::happiness`]
+    /// with the stored war (slot 7) and bankruptcy (slot 9) factors.
+    pub fn slots(&self) -> [i32; 13] {
+        let mut h = self.happiness;
+        h[7] = self.war;
+        h[9] = self.bankruptcy;
+        h
+    }
+
+    /// Stores `slots` as the class's happiness slots (class +0x04..+0x34): slot 7 into [`Self::war`], slot 9
+    /// into [`Self::bankruptcy`], the rest into [`Self::happiness`].
+    pub fn set_slots(&mut self, slots: [i32; 13]) {
+        self.war = slots[7];
+        self.bankruptcy = slots[9];
+        self.happiness = slots;
+        self.happiness[7] = 0;
+        self.happiness[9] = 0;
+    }
+
+    /// The stored public order (`0x008E2AB0`: +0x38 + +0x3C + +0x58, 32-bit sums).
+    pub fn stored_order(&self) -> i32 {
+        self.positive.wrapping_add(self.negative).wrapping_add(self.repression)
     }
 }
 
@@ -1897,8 +2050,8 @@ pub struct Region {
     /// from the tax modifier of the town wealth growth (CONFIRMED use, 0x00A6AFC0).
     pub wealth_growth_offset: i32,
     /// `REGION` #18 i32 (region +0xF0): `-town_wealth_growth_discontent_reduction` while the region
-    /// has unrest, else 0 (set by 0x00AB42F0; the unrest condition is not modelled, the value is kept
-    /// as loaded). Part of the town wealth growth.
+    /// has unrest, else 0 (set by each region round end `0x00AB42F0`,
+    /// [`super::economy::discontent_growth`]; kept as loaded until then). Part of the town wealth growth.
     pub discontent_growth: i32,
     /// `REGION` #19 bool: the region is exempt from taxes (region +0xE4; CONFIRMED: the effective
     /// tax rate 0x00BA4210 is 0 when it is set).
@@ -1938,6 +2091,15 @@ pub struct Region {
     /// [`super::siege`]).
     #[cfg_attr(feature = "serde", serde(default))]
     pub siege: super::siege::SiegeState,
+    /// `REGION` #2 `TRAITS`: the region's traits (`TRAIT` {key, points}), the trait container at region
+    /// +0x1B8 (CONFIRMED: built by the region loader `0x00A45950` at `0x00A45DB0` with the same per-trait
+    /// load as a character's, `0x0088AFF0`, and written back by `0x00A51E30`). Their level effects are the
+    /// region's effect list (+0x1CC) and add to its effect set (+0x1DC):
+    /// [`super::effects::region_trait_rows`], [`super::effects::region_trait_set`]. Empty in vanilla
+    /// (CONFIRMED: every `trait_info` row has the scope `agent`, every shipped trigger gives its traits to
+    /// agents, and every vanilla save has an empty array).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub traits: Vec<super::details::CharacterTrait>,
 }
 
 /// A region's building slot, as the commands, construction items and the HUD address it: the

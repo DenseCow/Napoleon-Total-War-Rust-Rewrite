@@ -21,6 +21,10 @@ pub enum CampaignEvent {
         /// The faction.
         faction: FactionId,
     },
+    /// Script event `HistoricalEvents` (CONFIRMED: `0x0087F960`'s event, named by `0x008BDEB0`), posted by
+    /// the round start (`0x008F5990`): its handlers push the round's historical event candidates
+    /// ([`super::historical_events`]). Its context carries no faction, region or character.
+    HistoricalEvents,
     /// Script event `FactionTurnStart` (CONFIRMED name).
     FactionTurnStart {
         /// The faction.
@@ -539,6 +543,7 @@ impl CampaignEvent {
     pub fn script_name(&self) -> Option<&'static str> {
         Some(match self {
             CampaignEvent::FactionRoundStart { .. } => "FactionRoundStart",
+            CampaignEvent::HistoricalEvents => "HistoricalEvents",
             CampaignEvent::FactionTurnStart { .. } => "FactionTurnStart",
             CampaignEvent::RegionTurnStart { .. } => "RegionTurnStart",
             CampaignEvent::SlotTurnStart { .. } => "SlotTurnStart",

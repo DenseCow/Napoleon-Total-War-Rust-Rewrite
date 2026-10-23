@@ -1313,6 +1313,7 @@ mod tests {
             garrison: None,
             fleet: None,
             siege: Default::default(),
+            traits: Vec::new(),
         };
         let mut w = World::default();
         w.regions.insert(region.id, region);

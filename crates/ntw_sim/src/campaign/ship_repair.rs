@@ -516,7 +516,7 @@ mod tests {
         m.apply(CampaignCommand::RepairShip { force: NAVY, unit: 0 }).unwrap();
         let paid = treasury(&m, a);
         m.pending_battle = Some(super::super::battles::PendingBattle { attacker: ForceId(1001), defenders: vec![NAVY], settlement: None, resume: None });
-        m.apply_battle_result(super::super::battles::BattleResult { attacker_won: false, attacker_casualties: 0.0, defender_casualties: 0.0 });
+        m.apply_battle_result(super::super::battles::BattleResult { attacker_won: false, attacker_casualties: 0.0, defender_casualties: 0.0, codes: None });
         assert!(!flagged(&m));
         assert_eq!(treasury(&m, a), paid + 400);
     }

@@ -608,6 +608,11 @@ fn the_population_round_end_walks_the_faction_list_with_gains_last() {
     m.population_round_end(A);
     let order = m.mod_state.get(&ModKey::new(OWNER, ModScope::Campaign, "order")).cloned();
     assert_eq!(order, Some(ModValue::List([13, 12, 10, 11].map(ModValue::Int).to_vec())));
+    // A region lost leaves the list: the next round end walks 13, 10, 11 (12 is B's now).
+    assert!(m.transfer_region(RegionId(12), B, &mut Vec::new()), "lost: removed");
+    m.population_round_end(A);
+    let order = m.mod_state.get(&ModKey::new(OWNER, ModScope::Campaign, "order")).cloned();
+    assert_eq!(order, Some(ModValue::List([13, 12, 10, 11, 13, 10, 11].map(ModValue::Int).to_vec())));
 }
 
 /// charloops: the faction turn start runs the spotting manager (a human's spy-network step `0x008F2480`)

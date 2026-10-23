@@ -26,6 +26,34 @@ is ready: `analysis/fidelity/debugger/SITTING_SHEET.md`. Steps in order:
 
 Side-by-side looks (no debugger): the first full side-by-side run, once step 3 is done.
 
+## 2026-10-22 (night mode, started Thu 22:23, ended Fri 01:30 at the block cap; no resume scheduled)
+
+### Needs you
+
+- Nothing yet.
+
+### Done tonight
+
+- **foreigngarrison** merged (`ce75ede3`): when the owner's army reaches a settlement a foreign garrison holds after a deal or liberation, it now behaves as the exe does (0x00B43A60 / 0x00B44ED0) instead of waiting outside. Logic only, covered by tests.
+- **peaceweigh** merged (`344e02b6`): the AI now weighs a peace deal's record the way the original does, down to the f32 rounding. Logic only, covered by tests.
+- **peacefactor** settled (`1f2d74eb`): the AI's peace bonus dropping from 3.33 at 4 turns of war to 0 at 5 is the original's own formula (checked in its disassembly), so ours keeps it. Nothing to see in game.
+- **placements** merged (`a5ce26ea`): hiring a general or admiral, promotions and expulsions now place the character as the original does: sight is added, the hidden flag is set, and raids end even when the character doesn't move. Logic only, covered by tests.
+- **classslots** merged (`b4eaa2f5`): a region's unrest now counts war bankruptcy and repression in each class's happiness, and the riot check picks its cause the way the original does (a crash in the original when no class is unhappy is fixed). Logic only, covered by tests.
+- **polish66** merged (`dee7a23e`): 6 clean-up lines and 2 partly done (rebel zone view on one path, effects_check uses the real upkeep rule, camera notes, tests). Nothing to look at in game.
+- **traderaid2** merged: trade raiding now applies the top gallants' bonus and takes the raided side's losses on domestic routes at the right moment, as the original does.
+- **formshapes** merged: a pike wall now spans the unit's whole formation width, as in the original, instead of narrowing with the number of men.
+- **sabotagearmy** merged: an agent's "sabotage army" button now sends the order against the army the original picks. Before, it did nothing.
+- **transferpick** merged: moving units between armies, or into a garrison, now re-picks each army's commander and moves a changed commander's figure on the map, as the original does.
+- **polish65** merged: 8 small clean-ups. A mod that sets a negative gentlemen happiness limit now gets that value, as the original does, and no longer crashes.
+- **histscript** merged: a mod's `HistoricalEvents` Lua handlers now choose the round start's historical events, as in the original. Vanilla's events table still picks the same events.
+- **camerainput** merged (`61e262b9`): the campaign camera's mouse wheel zoom, camera keys, map bounds, bookmarks and the busy gate now work as in the original. The outline clamp at the map edge is still ours (BACKLOG §0 line ~260).
+- **peaceflags** merged (`49406079`): a peace deal, a join-war deal or an accepted proposal now clears the negotiation's "possible" flags as the original does, so a finished offer can't be proposed again.
+- **regioneffects** merged: the region details panel's Effects list now shows the region traits' effects, as the original does. Vanilla regions have none, so it stays empty there. Covered by an install test.
+- **moveinto** merged: an agent's move-into-target order now does what the original does. It spies on a foreign army or settlement, or enters as a resident, and the agent menu's visit / embed / research options come from the model. Logic only, covered by tests.
+- **classbattle** merged: after a battle, each side's capital moves its class war factor by the original's battle-result step (0x008ACCF0), including the walled-settlement assault case. Fixes an original bug that moved the wrong capital. Logic only, covered by tests.
+- **polish64** merged (`82044131`): 8 small clean-ups. Diplomacy round-end events, blockade clears now walk only one region, fewer false save warnings, and a fixed self-comparing test. Logic only, covered by tests.
+- **polish63** merged (`0830cf6e`): the audit of loaders for install and mod files. Malformed TGA colour maps and oversized TGA/DDS images now give an error instead of crashing. Covered by tests.
+
 ## 2026-10-21 (night mode, started Wed 21:50)
 
 ### Usage

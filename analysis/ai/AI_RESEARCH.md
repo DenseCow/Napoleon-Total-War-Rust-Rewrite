@@ -1211,8 +1211,8 @@ deal-region, 2026-10-10, below "Region value").
   (`World::deal_regions_received`). Tests `the_ai_evaluates_region_deals`,
   `the_ai_evaluates_regions_and_technologies_together`, and `region_deals_on_the_europe_start`
   (economy_fidelity, real data). PROVISIONAL inputs: the `+0x22C` and siege tests read false; every region is taken to have a group (`+0x12C`, region groups not
-  in the model); the peace record is not in the model (taken as empty); the group state is always NEW
-  (belief 0x52 not ported), so the SPLIT / MERGED factors are not reached; the `+0x1C0` list reads
+  in the model); a peace item in the deal sets `m` = 0 (see "Peace record" below); the group state is
+  always NEW (belief 0x52 not ported), so the SPLIT / MERGED factors are not reached; the `+0x1C0` list reads
   false (not imported); several theatres count as one; `+0x938` is not read from original saves
   (its `FACTION` child index is not found); the base value is the startpos one (its refresh,
   settlement `+0xE8`, is not traced).
@@ -1462,10 +1462,64 @@ deal-region, 2026-10-10, below "Region value").
   (other branch, `0x00AA20A6`: MERGED `+0x22C`, divisor `2 − REDUCED` `+0x21C`) change the value;
   states 0 and 3 only reach analyser 0x56 (`0x00AB8BC0`); `0x00A364B0` builds an offered region's
   factors from campaign region `+0x28`.
+- **Peace record (worker peaceweigh, 2026-10-22, CONFIRMED by disassembly and decompile).**
+  `ai_accepts_deal` evaluates record 9 (deal `+0x184`) after the region, technology and payment
+  records and before join war, declined by `may_accept` (option 9) like the others.
+  - **Goal weight** (`0x00CC13D0` case 9): allowed, at war and option 9 ≤ 1 → clamp(attitude, −1,
+    0.9) with the attitude `ComputeAiPeaceAttitude` `0x00D63260` (AI attitude vt `+0x2B0`, flag 0);
+    else 0. Ours `CampaignModel::peace_goal_weight`.
+  - **Attitude** `0x00D63260` (`peace_attitude` / `peace_attitude_with`): Peninsular only (feature
+    `ai_peace_refusal_attitude` = −200, the threshold is `< −199`) a hated human gets −1; not on the
+    enemy list 0; then the protector / lone-capital attitude `ComputeAiProtectorCapitalAttitude`
+    `0x00D593F0` (at-war branch ported; with protectorates −1), the "make peace now" test (> 1 turn
+    at war, momentum > 0 or > 5 turns since battle, not rebels, flag 0, no protectorate or ally at
+    war with the proposer) → 1, momentum below −10 → 1, `CheckFactionThreatensLoneCapital`
+    `0x00D63810` → 1, else max(f, −0.8); another human enemy lifts it to 0 / 0.5 by difficulty. The
+    −0.25 / 0.25 floors after it (`0x00D63718`) are dead code: the test at `0x00D636AA` repeats
+    `0x00A64A60` on the same belief and proposer (a pure read), so its false branch never runs.
+  - **Value** `ValuePeaceDealRecord` `0x00C130E0` (record vt `+0x38`) → `ForwardPeaceDealValue`
+    `0x00A75390` → `CalculatePeaceDealValue` `0x00A351E0` (thiscall pResult, pProposer, pAi; RET 8),
+    then the deal inflation. Base pair by `GetAiPeaceAttitudeState` `0x00D63790` (flag 1): states
+    0–1 (2500, 6000), 2 (5000, 3000), 3–4 (10000, 1500); the rank log, the two weighted means of
+    per-region log strength ratios (sort `SortFloatsDescending` `0x00A2BB10`, weights n − i + 2, each term divided by
+    the total weight before it is added: `0x00A35712` / `0x00A35A40`),
+    the human factors `GetHumanPeaceStrengthFactor` `0x00A75B60` (1.2 / 1.3 / 1.1) and
+    `GetHumanPeaceRankBoost` `0x00A75BC0` (0.67 / 1.0 / 0.33), the momentum and war-length factors
+    and the (k, off) table `0x00A35F00`. Formulas in the doc comments of `peace_value` and its
+    pieces (deal_value.rs).
+  - **War-length factor, faithful (worker peacefactor, 2026-10-22, CONFIRMED by disassembly).**
+    `peace_turn_factor` = (t + 1) × 2/3 below 5 turns, else 4 × log2(t / 5) (`0x00A35C67`–`0x00A35CA7`;
+    constants 5.0 `0x01325D24`, 0.6666667 `0x01331B2C`, 0.2 `0x01325CA8`, 4.0 `0x01325D20`, ln 2
+    `0x014589CC`, the only reader of that ln 2). Curve: 0.67, 1.33, 2, 2.67, 3.33, then 0 at 5, 1.05,
+    1.94, 2.71, 3.39 at 9, 4 at 10, 8 at 20. It scales the gain and the cost (and the given through
+    max(0.85 tf, 1)), so at 5 turns the record adds gain 0 and cost 0: no crash, NaN or dead check
+    follows (`0x00CB21C0` sums, `0x00CE5750` / `0x00CEFA40` compare). `t` is the relation's turns at
+    war (`+0x7E4`, getter `0x00B77DC0`, +1 at round end `0x00B29649`, zeroed at peace), read only by
+    `0x00A351E0` and the attitude `0x00D63260` (its > 1 turn test); `0x00CC13D0` case 9 reads it
+    only through that attitude. Not an ORIGINAL BUG: no table or wrong compare or clamp explains the
+    gap (`t` ≤ 5 would still drop 4 to 1.05; joining the pieces needs a different constant, a
+    guess), and 5 turns starts the function's other long-war terms from 0 too (turns since a battle
+    zeroed below 5 at `0x00A35DB4`, extra max(tsb + t − off, 0) × k with off 5), so it reads as a
+    design choice and stays 1:1. A debugger read would add nothing: the code path is unambiguous.
+    Ours: the curve test in `the_peace_value_pieces_follow_the_traced_formula`; no ntw_ai test
+    reads it (ntw_ai's peace order does not use the deal value).
+  - **Tests:** `the_peace_value_pieces_follow_the_traced_formula`,
+    `the_peace_value_follows_the_traced_formula` (deal_value.rs); `the_ai_peace_attitude_follows_the_war`,
+    `the_peninsular_ai_refuses_peace_with_a_hated_human`, `an_ai_answers_a_peace_deal`
+    (tests/peace_deal_tests.rs).
+  - **PROVISIONAL leaves:** `RegionStrengths` (a mobile's strength from its mobile belief
+    `0x00D96DE0` and the garrison's `0x0080DC60` are not traced: ours the force value, a common scale
+    that cancels in the ratios); the alliance attitude `+0x2AC` (`0x00D61D80`) taken > 0 for every
+    ally; the war-event belief `0x00D56FD0`, the CAI `+0x1B0` target and `0x00C3E4A0` read clear;
+    the threat test's capital strategy check (CAI `+0x34` → vt `+0x94`, INFERRED a siege) reads
+    false; the script-gated peace intention goal `0x00CCC7C0` builds nothing; the not-at-war branch
+    of `0x00D593F0` is not reached (the attitude is 0 before it) and not ported.
+  - **Ghidra (V5 plates and prototypes, saved):** the ten functions above; completeness raw 70.6–85 (V5 plates, typed prototypes, named float constants and both jump tables),
+    the proposer typed `CaiFaction *` in `0x00D63260`, `0x00A351E0` and `0x00A75390` (the last corrected from `CampaignFaction *`), new struct `FactionRankingTable` (16 bytes: count +8, 0x40-byte records +0xC); left: the AI attitude and context objects have no struct.
 - **Resume point:** the region value's PROVISIONAL inputs: the
   `0x00C3E0C0` (`+0x22C`) and siege tests, belief 0x52's region-group analysis (`0x00A634D0` /
-  `0x00A63FD0`), the CAI `+0x1C0` list import, `+0x938` from original saves, the peace record,
-  multi-theatre maps and the base-value refresh (`+0xE8`). The counter-offer `0x00CC58C0` stays its
+  `0x00A63FD0`), the CAI `+0x1C0` list import, `+0x938` from original saves, the peace record's
+  PROVISIONAL leaves ("Peace record" below), multi-theatre maps and the base-value refresh (`+0xE8`). The counter-offer `0x00CC58C0` stays its
   own item.
 - **Ghidra V5 write-up (polish11, 2026-10-12, applied).** Plates, prototypes and EOL comments on the 14
   deal functions: `0x00C114B0`, `0x00C1F210`, `0x00C13360`, `0x00C42FB0`, `0x00CB21C0`, `0x00CE5750`,

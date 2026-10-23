@@ -534,6 +534,36 @@ pub fn believes_at_war(model: &CampaignModel, f: FactionId, g: FactionId) -> boo
     read_belief(model, f, |b| b.enemies.contains(&g), || g != f && on_enemy_list(model, f, g))
 }
 
+/// The factions on `f`'s relation belief's list `on_list` decides, in its order: the stored list
+/// (`stored`) while the belief is clean, else the rebuild's over [`ai_order`].
+fn believed_list(model: &CampaignModel, f: FactionId, stored: fn(&RelationBelief) -> &[FactionId], on_list: fn(&CampaignModel, FactionId, FactionId) -> bool) -> Vec<FactionId> {
+    read_belief(model, f, |b| stored(b).to_vec(), || ai_order(model).into_iter().filter(|&g| g != f && on_list(model, f, g)).collect())
+}
+
+/// `f`'s relation belief's enemy list (`+0x40`, the list `0x00A649F0` tests), in its order
+/// ([`believed_list`] of [`on_enemy_list`]).
+pub(crate) fn believed_enemies(model: &CampaignModel, f: FactionId) -> Vec<FactionId> {
+    believed_list(model, f, |b| &b.enemies, on_enemy_list)
+}
+
+/// `f`'s relation belief's ally list (`+0x2C`, `0x00A63AB0`), in its order ([`believed_list`] of
+/// [`on_ally_list`]).
+pub(crate) fn believed_allies(model: &CampaignModel, f: FactionId) -> Vec<FactionId> {
+    believed_list(model, f, |b| &b.allies, on_ally_list)
+}
+
+/// `f`'s protectorates as its relation belief holds them (the list `+0x94` that
+/// `BuildCaiRelationBelief` `0x00ABAFB0` fills in the ally list's walk): each `g` of the CAI world
+/// ([`ai_order`]), neither of them the rebels, `g` in the game, whose record towards `f` is
+/// protectorate. CONFIRMED (decompile). Read live, as the patron slot `+0x90` filled beside it
+/// (`CampaignModel::believed_patron`).
+pub(crate) fn believed_protectorates(model: &CampaignModel, f: FactionId) -> Vec<FactionId> {
+    if model.is_rebel_faction(f) {
+        return Vec::new();
+    }
+    ai_order(model).into_iter().filter(|&g| g != f && !model.is_rebel_faction(g) && model.in_the_game(g) && model.world.stance(g, f) == Stance::Protectorate).collect()
+}
+
 /// A faction's player rival score (`0x00BD21B0`, the belief stored at +0x100): how much of a rival
 /// to the human players it is, the highest over the humans of
 /// `m × (RELATION_PCT × (1 − relation) + VICTORY_REGIONS_PCT × b + PROXIMITY_PCT × c)`, capped at
@@ -1601,7 +1631,7 @@ mod tests {
             ("regular payment", |m| drop(m.regular_payment(A, B, 100, 5).unwrap())),
             ("protectorate", |m| drop(m.make_protectorate(C, A).unwrap())),
             ("join war", |m| drop(m.join_war(A, C, B).unwrap())),
-            ("round end", |m| drop(m.diplomacy_round_end(B))),
+            ("round end", |m| m.diplomacy_round_end(B, &mut Vec::new())),
             ("capture", |m| assert!(m.take_settlement(RegionId(12), A, None, &mut Vec::new()))),
             ("break alliance", |m| {
                 m.form_alliance(A, B).unwrap();

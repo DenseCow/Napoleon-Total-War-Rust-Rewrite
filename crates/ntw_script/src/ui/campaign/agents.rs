@@ -2,6 +2,7 @@
 //! `agent_options.luac`, `agent_action.luac`).
 
 use super::*;
+use ntw_sim::campaign::agents::exchange_actions;
 
 // ---------------------------------------------------------------------------------------------
 // The agents tab (`ui/agents.luac`, CHARACTER_UI_HOOKS.md "Agents panel"). What the panel does with
@@ -544,11 +545,10 @@ fn agent_action_command(ui: &CampaignUi, name: &str, agent: &Value, target: &Val
 /// This also explains `Initialise`'s first instruction. `string.find(tostring(target), "CHARACTER")`
 /// (`agent_options.lua:2-9`) is how one popup serves both kinds: only the character branch builds the
 /// `CampaignCharacter` handle the teardown releases at `:89`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentMenuTarget {
-    Character(CharacterId),
-    Settlement(RegionId),
-}
+///
+/// The type is the model's ([`ntw_sim::campaign::agents::AgentTarget`]), so the menu and the
+/// `MoveIntoTarget` order it ends in name the target the same way.
+pub type AgentMenuTarget = ntw_sim::campaign::agents::AgentTarget;
 
 /// The military force an [`AgentMenuTarget`] names, for the Sabotage Army percentage.
 ///
@@ -639,8 +639,8 @@ pub(super) fn agent_options_percentages(
 /// (`SETLIST n=8`, pc 86), so `counterspy`'s bit is computed and dropped -- which is why the popup
 /// can never show its Counterspy button even though the layout has one.
 pub(super) mod action_bit {
-    // Five of the nine are named but never set: see `agent_options_mask` below, which is where the
-    // reason is written down. They are here so the table is the shipped one, complete.
+    // `COUNTERSPY` is named but never set: see `agent_options_mask` below, which is where the reason
+    // is written down. It is here so the table is the shipped one, complete.
     #![allow(dead_code)]
     pub const VISIT: i32 = 1 << 0;
     pub const ASSASSINATE: i32 = 1 << 1;
@@ -664,29 +664,39 @@ pub(super) mod action_bit {
 /// `Request*Targets` bindings use, which keeps the popup and the list in step (a bit whose list is
 /// empty would show a button that then opens nothing).
 ///
-/// **The other five bits are not set, and the reason changed in 0-E round 5.** It used to be "the
-/// contract of `MoveIntoTarget` is UNKNOWN"; it is not any more. `MoveIntoTarget`'s parameter kinds
-/// and its third flag are CONFIRMED from the exe's own registration document (see
-/// [`AgentMenuTarget`]): `(agent, character-or-settlement target[, steal-research])`. What is still
-/// missing is the *behaviour* -- what the agent does on arrival, which is the model's agent-order
-/// machinery and not a scripting fact. Queueing a bare `CampaignCommand::MoveCharacter` would put an
-/// agent in a foreign city with nothing to do there, which is worse than no button. So:
-/// - `visit`(1), `embed`(8), `research`(16), `steal_research`(32) and `counterspy`(256) all end in
-///   `CampaignUI.MoveIntoTarget(src, target[, true])` (`agent_options.lua:139/144/149/154/164`,
-///   CONFIRMED, no other caller), and `MoveIntoTarget` stays a logging stub so the route can never
-///   raise. **Next round's target, now sharp:** `embed`'s on-arrival action is the model's
-///   `CampaignModel::spy(agent, SpyTarget::Settlement(...))` (`0x0094CCB0`, CONFIRMED) on the advisor's
-///   own wording, so wiring `embed` needs the *move-then-resolve* step and nothing else.
-/// - `embed` and `sabotage_army` are the two actions `Initialise` puts a percentage on
-///   (`percent_dy`, pc 71-87 and 88-120); those two numbers are the model's own chances (which chance each one is: INFERRED), see
-///   [`agent_options_percentages`].
+/// **Four more come from the target**: `visit`(1), `embed`(8), `research`(16) and
+/// `steal_research`(32), the buttons that end in `CampaignUI.MoveIntoTarget(src, target[, true])`
+/// (`agent_options.lua:139/144/149/154`, CONFIRMED, no other caller). They are the model's
+/// [`exchange_actions`] for the menu's target, the exe's own mask builders (`0x009C9EF0`
+/// settlement, `0x009C9CA0` character, CONFIRMED, disassembly), so the button and the order it
+/// gives ([`CampaignCommand::MoveIntoTarget`]) read one rule. No target, none of the four.
 ///
-/// `target` is still accepted and ignored here, deliberately: our `Request*Targets` bindings ignore
-/// their second argument too (see [`target_candidates`]), so narrowing here would offer an action the
-/// list then refuses. INFERRED that the original narrows the mask by the picked target -- which the
-/// two engine call sites are consistent with, as each of them is reached only after a target test.
-pub(super) fn agent_options_mask(m: &CampaignModel, src: CharacterId, own: FactionId) -> i32 {
+/// **`counterspy`(256) is never set**: neither exe builder writes it, and the shipped module drops
+/// its bit too (see [`action_bit`]).
+///
+/// The first four are not narrowed by the target here: our `Request*Targets` bindings ignore their
+/// second argument too (see [`target_candidates`]), so narrowing here would offer an action the list
+/// then refuses. The exe does narrow them (the character builder filters `duel` through
+/// `0x009CA440` and `assassinate` through `0x009CA2A0`), not yet ported.
+///
+/// `embed` and `sabotage_army` are the two actions `Initialise` puts a percentage on (`percent_dy`,
+/// pc 71-87 and 88-120); those two numbers are the model's own chances (which chance each one is:
+/// INFERRED), see [`agent_options_percentages`].
+pub(super) fn agent_options_mask(m: &CampaignModel, src: CharacterId, own: FactionId, target: Option<AgentMenuTarget>) -> i32 {
     let mut mask = 0;
+    if let Some(t) = target {
+        let x = exchange_actions(m, src, t);
+        for (on, bit) in [
+            (x.visit, action_bit::VISIT),
+            (x.embed, action_bit::EMBED),
+            (x.research, action_bit::RESEARCH),
+            (x.steal_research, action_bit::STEAL_RESEARCH),
+        ] {
+            if on {
+                mask |= bit;
+            }
+        }
+    }
     if !assassination_targets(m, src, own).is_empty() {
         mask |= action_bit::ASSASSINATE;
     }
@@ -857,29 +867,49 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     for name in ["AgentCardSelectionChanged", "AgentEmbarkOrDisembark"] {
         t.raw_set(name, lua.create_function(|_, _: Variadic<Value>| Ok(()))?)?;
     }
-    // AgentRogueSabotageArmy(agent): the harass / sabotage-army button. STILL A NO-OP, and now for a
-    // named reason: its only target is an **army**, and unlike the three above there is no
-    // `Request*Targets` list for one -- `SabotageArmy(agent, force)` is called straight from the
-    // popup button (`agent_options.lua:159`), so the original's exe picked the force itself. With no
-    // force list to show, opening a picker we cannot fill would be a worse answer than a logged gap.
+    // AgentRogueSabotageArmy(agent): the agent card's harass / sabotage-army button (`0x009DCED0`,
+    // CONFIRMED, disassembly). It opens no popup and asks no target list: the exe picks the army
+    // itself (the model's `rogue_sabotage_army_target`: the garrison of the agent's residence, not
+    // the local player's) and queues `CCQ_SABOTAGE_ARMY` (`0x00983910`, SubmitSabotageArmyCommand),
+    // the model's `SabotageArmy` command. With no such army the exe does nothing; we log it.
     t.raw_set("AgentRogueSabotageArmy", {
         let inner2 = inner.clone();
-        lua.create_function(move |_, _: Variadic<Value>| {
-            log(&inner2, "agent action sabotage_army: no army target list (named open item)".to_owned());
+        let ui2 = ui.clone();
+        lua.create_function(move |_, agent: Value| {
+            use ntw_sim::campaign::agents::rogue_sabotage_army_target;
+            let m = ui2.model();
+            let player = m.faction_by_key(&ui2.link.human).map(|f| f.id);
+            let order = agent_of(&m, &agent).map(|(a, _)| (a, rogue_sabotage_army_target(&m, a, player)));
+            drop(m);
+            match order {
+                Some((agent, Some(force))) => ui2.push(CampaignRequest::Command(CampaignCommand::SabotageArmy { agent, force })),
+                Some((_, None)) => log(&inner2, "AgentRogueSabotageArmy: no foreign army in the agent's residence".to_owned()),
+                None => log(&inner2, "AgentRogueSabotageArmy: the argument names no agent".to_owned()),
+            }
             Ok(())
         })?
     })?;
-    // CampaignUI.MoveIntoTarget(src, target [, research]) -- what five of the nine `agent_options`
-    // actions end in (`agent_options.lua:139/144/149/154/164`, CONFIRMED, and no other caller).
-    // **The contract is known** (0-E round 5): the exe's registration document reads
-    // "In: Character (agent), character or settlement (target), bool (research - steal if enemy
-    // settlement)" -- see [`AgentMenuTarget`]. What is still missing is the behaviour on arrival,
-    // which is the model's agent-order machinery, so this stays a deliberate no-op that LOGS rather
-    // than silently succeeding, and the five bits that reach it stay out of [`agent_options_mask`].
+    // CampaignUI.MoveIntoTarget(src, target [, research]) -- what the `visit`, `embed`, `research`,
+    // `steal_research` and (never shown) `counterspy` buttons end in (`agent_options.lua:139/144/
+    // 149/154/164`, CONFIRMED, and no other caller). The exe's registration document reads "In:
+    // Character (agent), character or settlement (target), bool (research - steal if enemy
+    // settlement)" -- see [`AgentMenuTarget`]. Queued as the model's `MoveIntoTarget` command
+    // (`0x009EE150`); arguments that name no agent or no target are logged and dropped.
     t.raw_set("MoveIntoTarget", {
         let inner2 = inner.clone();
-        lua.create_function(move |_, _: Variadic<Value>| {
-            log(&inner2, "MoveIntoTarget is not implemented (named open item)".to_owned());
+        let ui2 = ui.clone();
+        lua.create_function(move |_, (src, target, research): (Value, Value, Option<bool>)| {
+            let m = ui2.model();
+            let order = agent_of(&m, &src).zip(menu_target_of(&m, &target));
+            drop(m);
+            match order {
+                Some(((agent, _), target)) => ui2.push(CampaignRequest::Command(CampaignCommand::MoveIntoTarget {
+                    agent,
+                    target,
+                    research: research.unwrap_or(false),
+                })),
+                None => log(&inner2, "MoveIntoTarget: the arguments name no agent or no target".to_owned()),
+            }
             Ok(())
         })?
     })?;
@@ -906,8 +936,9 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     f!("__OpenAgentOptionsPopup", |l, inner, ui, (src, target): (Value, Value)| {
         let m = ui.model();
         let Some((c, own)) = agent_of(&m, &src) else { return Ok(false) };
-        let mask = agent_options_mask(&m, c, own);
-        let (infiltrate, sabotage_army) = agent_options_percentages(&m, c, own, menu_target_of(&m, &target));
+        let menu_target = menu_target_of(&m, &target);
+        let mask = agent_options_mask(&m, c, own, menu_target);
+        let (infiltrate, sabotage_army) = agent_options_percentages(&m, c, own, menu_target);
         Ok(call_root_global(l, &inner, "OpenAgentOptionsPopup", (src, target, mask, infiltrate, sabotage_army)))
     });
     // The agent action popups (`agent_options.luac` / `agent_action.luac`, CONFIRMED on the install

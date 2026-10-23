@@ -2194,6 +2194,44 @@ fn settlement_labels_draw_under_the_diplomatic_relations_panel() {
     assert_eq!(labels, (0..labels.len()).collect::<Vec<_>>(), "the labels are the first children: under the whole HUD");
 }
 
+/// The region details panel's `Effects` (`0x009ACD10`): one {Icon, Tooltip} per effect of the region's
+/// traits' levels' effect lists with a priority above 0 (not their attributes), the tooltip the effect's
+/// description with its value, and region_details.lua shows them without an error. No vanilla region has traits, so France's regions
+/// are given `C_General_Brave` at level 5 here (the level's effects are the shipped rows).
+#[test]
+fn region_effects_list_the_region_traits_level_effects() {
+    use ntw_sim::campaign::details::CharacterTrait;
+    let Some(s) = setup() else { return };
+    let lua = s.host.lua();
+    let row: mlua::Table = lua.load("return CampaignUI.RetrieveFactionRegionList('france')[1]").eval().unwrap();
+    let address: mlua::Value = row.get("Address").unwrap();
+    let get = lua.create_function(|lua, a: mlua::Value| lua.load("return CampaignUI.InitialiseRegionInfoDetails(...)").call::<mlua::Table>(a)).unwrap();
+    let before: mlua::Table = get.call(address.clone()).unwrap();
+    assert_eq!(before.get::<mlua::Table>("Effects").unwrap().raw_len(), 0, "vanilla regions have no traits");
+    {
+        let mut st = s.scripts.state_mut();
+        let m = &mut st.model;
+        let france = m.faction_by_key("france").unwrap().id;
+        for r in m.world.regions.values_mut().filter(|r| r.owner == france) {
+            r.traits = vec![CharacterTrait { key: "C_General_Brave".into(), points: 16, level: 5 }];
+        }
+    }
+    let d: mlua::Table = get.call(address.clone()).unwrap();
+    let effects: Vec<(String, String)> = d
+        .get::<mlua::Table>("Effects")
+        .unwrap()
+        .sequence_values::<mlua::Table>()
+        .map(|e| e.unwrap())
+        .map(|e| (e.get("Icon").unwrap(), e.get("Tooltip").unwrap()))
+        .collect();
+    // The level's effect list (`trait_level_effects`): morale_bonus 4 (priority 1) is shown and
+    // prestige_military_generic 1 (priority 0) is left out; its attribute (`command_land`) is not an effect.
+    assert_eq!(effects, [("data/ui/campaign ui/pips/effect_army.tga".to_owned(), "+4 to morale in battles".to_owned())]);
+    let show: mlua::Function = s.host.script_env(s.root).unwrap().raw_get("ShowRegionInfo").unwrap();
+    show.call::<()>(address).expect("the panel's script runs to its end");
+    no_errors(&s.host);
+}
+
 /// The region details panel shows the region: the root's ShowRegionInfo opens it with
 /// `CampaignUI.InitialiseRegionInfoDetails(region)` and region_details.lua fills it to its end: the
 /// title is the region's name, the tax income is Wealth × (UpperTax + LowerTax) truncated, the rate

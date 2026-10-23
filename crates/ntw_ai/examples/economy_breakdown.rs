@@ -55,10 +55,13 @@ fn main() {
         let (land, naval) = economy::faction_upkeep_split_with(&m, &fx, f);
         // The raw `units` upkeep and unit counts beside it, split by force kind and over the same
         // (commanded) forces as the upkeep.
-        let (mut land_plain, mut naval_plain, mut land_units, mut ships) = (0, 0, 0, 0);
+        let (mut land_plain, mut naval_plain, mut land_units, mut ships, mut skipped) = (0, 0, 0, 0, 0);
         for force in m.world.forces.values().filter(|x| x.faction == f) {
-            let Some((_, units)) = economy::costed_force(force) else { continue };
-            for u in units {
+            if economy::costed_force(force).is_none() {
+                skipped += 1;
+                continue;
+            }
+            for u in &force.units {
                 let Some(r) = m.rules.units.get(&u.unit_key) else { continue };
                 if force.is_navy {
                     naval_plain += r.upkeep;
@@ -76,7 +79,7 @@ fn main() {
             .collect();
         let treasury = m.world.factions[&f].treasury;
         println!(
-            "round {round}: treasury {treasury} | taxes {} trade {} other {} | upkeep land {land} (plain {land_plain}, {land_units} units) naval {naval} (plain {naval_plain}, {ships} ships) | net {:+} | regions {regions} | {}",
+            "round {round}: treasury {treasury} | taxes {} trade {} other {} | upkeep land {land} (plain {land_plain}, {land_units} units) naval {naval} (plain {naval_plain}, {ships} ships), {skipped} commanderless forces skipped | net {:+} | regions {regions} | {}",
             inc.taxes,
             inc.trade,
             inc.other,

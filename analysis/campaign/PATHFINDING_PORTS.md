@@ -136,7 +136,8 @@ mover's type; only one port node per expansion (a flag stops the landing scan to
   - `0x008FDB60` sends the fleet sailing first (result 1) unless it is at the landing already (the
     transport search `0x00B59EA0` / `0x00B59CD0`; result 2). At the landing: some units only split into a
     new force placed by `0x00B37370` (1.5 radius) and `0x008F04C0` → the placement `0x0096C8D0` (set
-    down), or join a force there (`0x008F0F20`); the whole army in a port (navy +0xE0) enters the
+    down; ours has no split yet, PATHFINDING.md §8 "Placement callers"), or join a force there
+    (`0x008F0F20`, which places too); the whole army in a port (navy +0xE0) enters the
     settlement (`0x008BB9D0`); otherwise the move is prepared (`0x008FF470`) and the step `0x00918750` is
     queued (`0x00974700`).
   - `0x00918750` finds the landing position (`0x00B37970`, or `0x00B38EE0` for a character without an
@@ -242,7 +243,7 @@ mover's type; only one port node per expansion (a flag stops the landing scan to
   from `CCQ_EMBARK_NAVY` → `0x00934820` → `0x00948980`): when the navy already holds an army
   (`0x009D3A80` → `+0xD8`), the units of that army (virtual `+8`) plus the boarding army's
   (`+0xC` of the order's force record) are compared with the held army's virtual `+0x48`; above it
-  the order takes another branch (`0x00885F30`, not decoded), else the armies are joined
+  the order takes another branch (`0x00885F30`: a pending exchange, vtable `0x013573A4`; CAMPAIGN_FIDELITY.md §Foreign garrisons), else the armies are joined
   (`0x008F17D0` / `0x008D47B0`). INFERRED: one army per fleet, a second one joins it when both fit
   in one army (20 units). No action-point write was found on the boarding branch (INFERRED:
   boarding itself costs nothing; the walk to the fleet does, and the landing rule then keeps an

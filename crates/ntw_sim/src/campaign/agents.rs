@@ -834,6 +834,169 @@ impl CampaignModel {
     }
 }
 
+/// What the agent action menu acts on: a character or a settlement, never a bare force. The exe's
+/// own registration document for `CampaignUI.MoveIntoTarget` (`0x01364B50`, bound to `0x009EE150`)
+/// reads "In: Character (agent), character or settlement (target), bool (research - steal if enemy
+/// settlement)" (CONFIRMED).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentTarget {
+    /// A character (his army, for an exchange).
+    Character(CharacterId),
+    /// A region's settlement.
+    Settlement(RegionId),
+}
+
+/// The four "exchange" actions an agent may take at a target through `MoveIntoTarget`: the
+/// `visit`, `embed`, `research` and `steal_research` buttons of the agent action menu. The exe's
+/// mask builders (`0x009C9CA0` character, `0x009C9EF0` settlement) set them only when the agent's
+/// action list for the target holds the `can_exchange` ability (pushed by `0x009D1190` /
+/// `0x009D1540`). The fifth `MoveIntoTarget` button, `counterspy`, is never offered: neither
+/// builder writes its bit (256), and the shipped `agent_options` module drops it as well
+/// (CONFIRMED, disassembly of both builders).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExchangeActions {
+    /// Go in (an own or a foreign settlement), nothing more.
+    pub visit: bool,
+    /// Go in as a spy (another faction's settlement or army).
+    pub embed: bool,
+    /// Go in to research (an own settlement with a research building).
+    pub research: bool,
+    /// Go in to steal research (another faction's settlement with a research building).
+    pub steal_research: bool,
+}
+
+/// Whether `region`'s settlement has a research building: `0x00B28D20` (settlement vtable slot
+/// +0x74) walks the settlement's ordinary slots (list +0x1A8 / +0x1AC, filled by `0x00B6D270`; the
+/// road and the walls are not in it) and asks `0x00AAF1F0` of each building whether its own effects
+/// give `research_points` (effect 39) above 0. CONFIRMED, disassembly: no health or slot-holder
+/// test, unlike a school ([`CampaignModel::school`]).
+pub fn has_research_building(model: &CampaignModel, region: RegionId) -> bool {
+    let Some(r) = model.world.regions.get(&region) else { return false };
+    r.slots
+        .iter()
+        .filter_map(|s| s.building.as_ref())
+        .any(|b| model.rules.effects.building_local().get(&b.level_key).is_some_and(|e| e.get_int("research_points") > 0))
+}
+
+/// The exchange actions `agent` (a character without a force) may take at `target`: the exe's
+/// action-list gate for `can_exchange`, then its mask builder (CONFIRMED, disassembly).
+///
+/// The gate (`0x009D1540` settlement, `0x009D1190` character) needs a `can_exchange` row in the
+/// merged `abilities` table (`0x00E0D4E0` reads it;
+/// [`super::rules::CampaignRules::no_exchange_ability`]), and then:
+/// - **settlement:** the agent may enter it ([`CampaignModel::may_reside`], the can-enter check
+///   `0x00B165B0` at settlement vtable +0x6C);
+/// - **another faction's character:** the agent commands no force (`0x009D0910`), his type counts
+///   against a residence's room (`agents` #4, `0x00A0B9C0`), the target commands an army
+///   (`0x009D3A60`) whose accompanying characters (army +0x60, `0x006A3110`) number fewer than the
+///   room, and the agent's `subterfuge` is above 0.
+///
+/// The mask, settlement (`0x009C9EF0`): with a research building ([`has_research_building`]), an
+/// agent who has `can_research` at all (its raw level ≥ 0, `0x00A06C90`) and an owner who is not
+/// the rebels (`0x008CEEF0`), `research` if the owner is his faction, else `steal_research`; then
+/// `embed` if his `subterfuge` is at least 1, he has not acted this turn (+0x4CC) and the owner is
+/// another faction, else `visit`; and `visit` is dropped again when either research action is set.
+/// The mask, character (`0x009C9CA0`): `embed` iff `subterfuge` > 0 and he has not acted; the
+/// other three are never set for a character.
+///
+/// PROVISIONAL: the model keeps no accompanying characters (`MILITARY_FORCE` #2), so the army's
+/// count is 0, as in [`CampaignModel::may_reside`]'s garrison branch.
+/// PLACEHOLDER: `embed` into an army of the agent's **own** faction is left unset. The exe allows
+/// it (the same-faction gate `0x009D0D00`: his type counts, the target commands a force, fewer than
+/// the room accompany it), and `MoveIntoTarget` then queues `CCQ_ATTACH_TO_FORCE` (`0x00915090`,
+/// order `0x008FF7B0`), whose arrival is not traced and which needs the accompanying characters.
+pub fn exchange_actions(model: &CampaignModel, agent: CharacterId, target: AgentTarget) -> ExchangeActions {
+    let mut out = ExchangeActions::default();
+    let Some(a) = model.world.characters.get(&agent) else { return out };
+    if model.rules.no_exchange_ability {
+        return out;
+    }
+    let subterfuge = attribute(model, agent, SUBTERFUGE);
+    let acted = model.world.agents_acted.contains(&agent);
+    match target {
+        AgentTarget::Settlement(r) => {
+            let Some(owner) = model.world.regions.get(&r).map(|x| x.owner) else { return out };
+            if !model.may_reside(agent, r) {
+                return out;
+            }
+            if has_research_building(model, r) && ability(model, agent, ABILITIES[8]) >= 0 && !model.world.is_rebel_faction(owner) {
+                if owner == a.faction {
+                    out.research = true;
+                } else {
+                    out.steal_research = true;
+                }
+            }
+            if subterfuge >= 1 && !acted && owner != a.faction {
+                out.embed = true;
+            } else {
+                out.visit = true;
+            }
+            if out.research || out.steal_research {
+                out.visit = false;
+            }
+        }
+        AgentTarget::Character(t) => {
+            let Some(tc) = model.world.characters.get(&t) else { return out };
+            if tc.faction == a.faction || model.force_of(agent).is_some() {
+                return out;
+            }
+            let counts = !model.rules.residence_exempt_agents.contains(a.kind.esf_name());
+            let accompanying = 0;
+            let room = model.rules.limits.max_residence_characters as usize;
+            let army = model.force_of_kind(t, false).is_some();
+            out.embed = counts && army && accompanying < room && subterfuge > 0 && !acted;
+        }
+    }
+    out
+}
+
+impl CampaignModel {
+    /// [`super::commands::CampaignCommand::MoveIntoTarget`]: the order the agent action menu's
+    /// `visit`, `embed`, `research` and `steal_research` buttons give (`CampaignUI.MoveIntoTarget`
+    /// `0x009EE150`, CONFIRMED, disassembly). An agent with `subterfuge` above 0 sent at another
+    /// faction's target spies on it: a character's force through `CCQ_CHARACTER_SPY`
+    /// (`0x0091A190`, the force spy `0x0094C500`), a settlement through `CCQ_GARRISON_SPY`
+    /// (`0x0091BDF0`, the settlement spy `0x0094CCB0`); both are [`Self::spy`]. Anyone else sent at
+    /// a settlement goes in as a resident through `CCQ_CHARACTER_JOIN_GARRISON_RESIDENCE`
+    /// (`0x009549B0` with the enter flag +0x58 set), which is
+    /// [`super::commands::CampaignCommand::AgentEnterSettlement`].
+    ///
+    /// `research` is the order's research flag (+0x59) and changes nothing in the world: on
+    /// arrival, once he is in, the step `0x0094CFF0` recomputes the foreign flag (+0x5A: the owner
+    /// is not his faction) and, when world +0xF5C +0x3C is 1, his faction fails `0x008CA0B0` or has
+    /// its flag +0x81C set, and neither the residence's faction nor its region's owner is a faction
+    /// without a record (the rebels), broadcasts the world's model event +0x978 (vtable `0x013550E8`, `BroadcastModelEventToListeners`) with the
+    /// agent and the settlement. PLACEHOLDER: that event's listeners are not traced, so nothing is
+    /// sent for it.
+    ///
+    /// PLACEHOLDER: an agent sent at a character on the exe's other branch (`CCQ_ATTACH_TO_FORCE`,
+    /// `0x00915090` / order `0x008FF7B0`: an own-faction target, or an agent without `subterfuge`)
+    /// is refused; see [`exchange_actions`].
+    pub(crate) fn move_into_target(&mut self, agent: CharacterId, target: AgentTarget, research: bool) -> Result<Vec<CampaignEvent>, CommandError> {
+        let _ = research;
+        let faction = self.world.characters.get(&agent).ok_or(CommandError::UnknownCharacter(agent))?.faction;
+        let spy = attribute(self, agent, SUBTERFUGE) > 0;
+        match target {
+            AgentTarget::Character(t) => {
+                let tc = self.world.characters.get(&t).ok_or(CommandError::UnknownCharacter(t))?;
+                if tc.faction == faction || !spy {
+                    return Err(CommandError::Unsupported("joining a force as an accompanying character is not modelled (0x008FF7B0)"));
+                }
+                let force = self.force_of(t).ok_or(CommandError::Unsupported("the target commands no force"))?;
+                self.spy(agent, SpyTarget::Force(force))
+            }
+            AgentTarget::Settlement(r) => {
+                let owner = self.world.regions.get(&r).ok_or(CommandError::UnknownRegion(r))?.owner;
+                if spy && owner != faction {
+                    self.spy(agent, SpyTarget::Settlement(r))
+                } else {
+                    self.agent_enter_settlement(agent, r)
+                }
+            }
+        }
+    }
+}
+
 /// The chance in percent that `agent` sabotages `force` (`0x00922BA0`, CONFIRMED), or `None` when
 /// he cannot (no `can_sabotage_army`, or the force has no commander): R / ((units + C) × 0.33 + R)
 /// × 100 with R the agent's rank and C the commander's, then 5..=95.
@@ -847,6 +1010,32 @@ pub fn army_sabotage_chance(model: &CampaignModel, agent: CharacterId, force: Fo
     let c = rank(model, commander) as f32;
     let units = f.units.len() as f32;
     Some(((r / ((units + c) * 0.33 + r)) * 100.0) as i32).map(|x| x.clamp(5, 95))
+}
+
+/// The force the agent card's sabotage-army button (`CampaignUI.AgentRogueSabotageArmy`,
+/// `0x009DCED0`, CONFIRMED, disassembly) orders `agent` against, if any: the button takes only the
+/// agent and picks the army itself. The army of the agent's residence (his own land army's
+/// residence, else his own, `0x009FB9D0`), read through the residence's garrison-commander
+/// accessor (vtable +0x20, `0x00B3F8B0`, the same in the settlement, fort and slot residences),
+/// when it has a commander and that commander is not of `player`'s faction (the local player's,
+/// `0x009BF110`). No chance or ability test here: the order is queued as `CCQ_SABOTAGE_ARMY`
+/// (`0x00983910`, SubmitSabotageArmyCommand) and the arrival
+/// ([`CampaignModel::sabotage_army`]) asks [`army_sabotage_chance`].
+///
+/// PROVISIONAL: the exe first takes the army the agent accompanies (character +0x198) and its
+/// commander, with no faction test; the model keeps no accompanying characters (`MILITARY_FORCE`
+/// #2), as in [`exchange_actions`]. The model's residences are settlements only
+/// ([`super::World::residence_of`], [`super::Region::garrison`]): an agent in a slot residence (a
+/// port) finds no army, and forts hold none in any shipped file.
+pub fn rogue_sabotage_army_target(model: &CampaignModel, agent: CharacterId, player: Option<FactionId>) -> Option<ForceId> {
+    let region = match model.force_of_kind(agent, false) {
+        Some(own) => model.world.regions.values().find(|r| r.garrison == Some(own)).map(|r| r.id),
+        None => model.world.residence_of(agent),
+    }?;
+    let force = model.world.regions.get(&region)?.garrison?;
+    let commander = model.world.forces.get(&force)?.commander?;
+    let faction = model.world.characters.get(&commander)?.faction;
+    (Some(faction) != player).then_some(force)
 }
 
 /// The protector of a building: the owner's character with the most `subterfuge` (above 0) standing

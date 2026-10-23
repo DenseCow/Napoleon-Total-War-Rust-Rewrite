@@ -315,7 +315,7 @@ fn open_from<'a>(
     let loc = ntw_formats::loc::Localisation::from_vfs(files.vfs).map_err(|e| log::warn!("Campaign: the localisation cannot be read ({e}); names keep their table text and no historical event is kept")).ok();
     // The names new characters get when they are created (game data, like the rules).
     crate::names::attach(&mut loaded.model, files.vfs, db, loc.as_ref());
-    crate::historical_events::attach(&mut loaded.model, files.vfs, loc.as_ref(), source.key());
+    crate::historical_events::attach(&mut loaded.model, loc.as_ref());
     Ok(OpenedCampaign { loaded, map })
 }
 

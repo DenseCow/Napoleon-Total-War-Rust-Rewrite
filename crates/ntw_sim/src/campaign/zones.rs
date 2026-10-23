@@ -162,6 +162,18 @@ impl GridState {
         self.region = region;
     }
 
+    /// A risen rebel commander's view stored from his home region's grid index
+    /// ([`CampaignModel::risen_home_index`]'s inner value). One whose home region is not on the grid
+    /// gets no stored view (our own fallback: he floods behind [`CampaignModel::region_gate`], not the
+    /// previous rebel's view); the exe never reaches that case, it reads army +0x98 with no null
+    /// check. The load pass and the order-time store both come through here.
+    fn store_rebel_commander(&mut self, faction: FactionId, home: Option<u32>) {
+        match home {
+            Some(x) => self.store_rebel(faction, x),
+            None => self.view = None,
+        }
+    }
+
     /// The faction of the stored view (+0x3FC).
     fn view_faction(self) -> Option<FactionId> {
         match self.view? {
@@ -450,14 +462,8 @@ impl CampaignModel {
             }
             for c in commanders.iter().filter(|c| c.faction == f) {
                 if rebel {
-                    match self.risen_home_index(c.force) {
-                        Some(Some(x)) => grid.store_rebel(f, x),
-                        // A rebel commander with no home region on the grid gets no stored view (our
-                        // own fallback: he floods behind [`Self::region_gate`], not the previous
-                        // rebel's view). The exe never reaches this case: its load pass reads
-                        // army +0x98 with no null check ([`Self::region_gate`]).
-                        _ => grid.view = None,
-                    }
+                    // No risen-army entry at all floods behind the faction flags ([`Self::region_gate`]).
+                    grid.store_rebel_commander(f, self.risen_home_index(c.force).flatten());
                 }
                 let z = self.flood_zone(map, c, &zones, true, &owners, grid);
                 zones.insert(c.id, z);
@@ -504,13 +510,15 @@ impl CampaignModel {
     /// `0x00A65360` and the other callers in `0x00A6xxxx`–`0x00AAxxxx`; CONFIRMED by decompile).
     /// `force` is the order's force, whose commander is the acting character. Nothing for a force of a
     /// faction with a record, one without a commander, or one that is no risen army (our own
-    /// fallback: the exe reads army +0x98 with no null check).
+    /// fallback: the exe reads army +0x98 with no null check). A risen army whose home region is not on
+    /// the grid has no region to store: it clears the view, as in the load pass
+    /// ([`GridState::store_rebel_commander`]). Nothing is stored before the zones are built.
     pub(crate) fn store_rebel_view(&mut self, force: ForceId) {
-        let commander = self.world.forces.get(&force).and_then(|f| self.commander_of_force(f));
-        let Some(c) = commander.filter(|c| self.world.is_rebel_faction(c.faction)) else { return };
-        let Some(Some(x)) = self.risen_home_index(c.force) else { return };
+        let Some(f) = self.world.forces.get(&force).filter(|f| self.world.is_rebel_faction(f.faction)) else { return };
+        let Some(c) = self.commander_of_force(f) else { return };
+        let Some(home) = self.risen_home_index(c.force) else { return };
         if let Some(b) = self.zones.0.as_mut() {
-            b.grid.store_rebel(c.faction, x);
+            b.grid.store_rebel_commander(f.faction, home);
         }
     }
 
@@ -581,17 +589,42 @@ impl CampaignModel {
     }
 
     /// `0x008F9400`: a force's commander (and the commanders of the armies a navy carries, or of the
-    /// navy carrying this army) rebuilt after the force changed.
+    /// navy carrying this army) rebuilt after the force changed: the zone steps alone
+    /// ([`Self::rebuild_force_zones_and_sight`] adds its sight steps).
     pub(crate) fn rebuild_force_zones(&mut self, force: ForceId) {
-        let Some(c) = self.world.forces.get(&force).and_then(|f| f.commander) else { return };
-        self.rebuild_zone(c);
-        let mut linked: Vec<ForceId> = self.passengers_of(force);
-        linked.extend(self.carrier_of(force));
-        for f in linked {
-            if let Some(c) = self.world.forces.get(&f).and_then(|f| f.commander) {
-                self.rebuild_zone(c);
+        for c in self.force_zone_characters(force) {
+            self.rebuild_zone(c);
+        }
+    }
+
+    /// `0x008F9400` with its sight steps: `0x00A285C0` on each of [`Self::rebuild_force_zones`]'
+    /// characters in turn floods his zone (`0x00A28440(0)`), runs the core `0x009CC0E0`, then adds
+    /// his sight (`0x00A27F10`); the hidden flags are left as they are (CONFIRMED by disassembly).
+    /// The model adds sight as the faction's whole visible set ([`Self::refresh_shroud`]), which zone
+    /// floods do not change, so each faction is refreshed once, after its first character's zone:
+    /// its later sight steps would add nothing.
+    pub(crate) fn rebuild_force_zones_and_sight(&mut self, force: ForceId) {
+        let mut refreshed: Vec<FactionId> = Vec::new();
+        for c in self.force_zone_characters(force) {
+            self.rebuild_zone(c);
+            let Some(faction) = self.world.characters.get(&c).map(|x| x.faction) else { continue };
+            if !refreshed.contains(&faction) {
+                refreshed.push(faction);
+                self.refresh_shroud(faction, false);
             }
         }
+    }
+
+    /// The characters `0x008F9400` rebuilds, in its order: the force's commander, then the commanders
+    /// of the armies a navy carries, or of the navy carrying this army. (The exe also runs every unit
+    /// character of a linked force and the force's +0x6C list; the model keeps zones for commanders
+    /// only, and its sight is the faction's whole set.) Empty without a commander.
+    fn force_zone_characters(&self, force: ForceId) -> Vec<CharacterId> {
+        let Some(c) = self.world.forces.get(&force).and_then(|f| f.commander) else { return Vec::new() };
+        let mut linked: Vec<ForceId> = self.passengers_of(force);
+        linked.extend(self.carrier_of(force));
+        let commanders = linked.into_iter().filter_map(|f| self.world.forces.get(&f).and_then(|f| f.commander));
+        std::iter::once(c).chain(commanders).collect()
     }
 
     /// `0x00A285E0` after `character` moved ([`Self::move_character`]): his force's zones, with the
@@ -897,7 +930,7 @@ mod tests {
         m.grant_military_access(A, B, 1).unwrap();
         spoil(&mut m, GA);
         spoil(&mut m, GB);
-        m.diplomacy_round_end(A);
+        m.diplomacy_round_end(A, &mut Vec::new());
         assert_eq!(m.world.relationships[&(A, B)].military_access_turns, 0);
         assert_flooded(&m, GA);
         assert_flooded(&m, GB);
@@ -930,7 +963,8 @@ mod tests {
         assert_eq!(zone(&m, next), fresh(&m, next));
     }
 
-    /// A second army of A's, commanded by character 103 at (40, 25), with one unit.
+    /// A second army of A's, commanded by character 103 at (40, 25), with one unit; both armies'
+    /// commanders ride their own units, as in every save (the transfers' commander pick reads them).
     fn second_army(m: &mut CampaignModel) -> CharacterId {
         let c = CharacterId(103);
         let mut ch = m.world.characters[&GA].clone();
@@ -939,7 +973,8 @@ mod tests {
         m.world.characters.insert(c, ch);
         let mut unit = m.world.forces[&ForceId(1000)].units[0].clone();
         unit.id = UnitId(77);
-        unit.character = None;
+        unit.character = Some(c);
+        m.world.forces.get_mut(&ForceId(1000)).unwrap().units[0].character = Some(GA);
         m.world.forces.insert(ForceId(1002), MilitaryForce { id: ForceId(1002), faction: A, commander: Some(c), units: vec![unit], is_navy: false });
         c
     }
@@ -958,13 +993,38 @@ mod tests {
 
     #[test]
     fn a_transfer_floods_both_forces() {
+        // The target has room for one unit only: the source keeps the other and its commander.
+        let mut m = full_target_and_two_unit_source();
+        let c = CharacterId(103);
+        spoil(&mut m, GA);
+        spoil(&mut m, c);
+        m.merge_units(ForceId(1002), ForceId(1000), &mut Vec::new());
+        assert_eq!(m.world.forces[&ForceId(1002)].units.len(), 1);
+        assert_flooded(&m, GA);
+        assert_flooded(&m, c);
+
+        // Into a garrison (`0x008D5F10`): `0x008F9400` runs on the source alone (`0x008D71C1`).
+        let mut m = full_target_and_two_unit_source();
+        m.world.characters.get_mut(&GA).unwrap().garrisoned_in = Some(RegionId(10));
+        let c = CharacterId(103);
+        spoil(&mut m, GA);
+        spoil(&mut m, c);
+        m.merge_units(ForceId(1002), ForceId(1000), &mut Vec::new());
+        assert_eq!(m.world.forces[&ForceId(1002)].units.len(), 1);
+        assert!(zone(&m, GA).is_empty(), "the garrison is not flooded again");
+        assert_flooded(&m, c);
+    }
+
+    /// [`second_army`] with a second, characterless unit, on the map, and A's first army one unit
+    /// short of the cap.
+    fn full_target_and_two_unit_source() -> CampaignModel {
         let mut m = world(true);
         let c = second_army(&mut m);
         let mut extra = m.world.forces[&ForceId(1002)].units[0].clone();
         extra.id = UnitId(78);
+        extra.character = None;
         m.world.forces.get_mut(&ForceId(1002)).unwrap().units.push(extra);
         m.attach_terrain(open_terrain());
-        // The target has room for one unit only: the source keeps the other and its commander.
         let max = m.max_units(false);
         let filler = m.world.forces[&ForceId(1000)].units[0].clone();
         let units = &mut m.world.forces.get_mut(&ForceId(1000)).unwrap().units;
@@ -974,12 +1034,23 @@ mod tests {
             u.character = None;
             units.push(u);
         }
+        assert!(m.stored_zones().unwrap().contains_key(&c));
+        m
+    }
+
+    /// A source that empties into a garrison (`0x008D5F10`, its empty flag `0x008D65BE` tested at
+    /// `0x008D6F43`) floods neither force; its commander, now in no force, loses his entry.
+    #[test]
+    fn a_merge_into_a_garrison_floods_neither_force() {
+        let mut m = world(true);
+        let c = second_army(&mut m);
+        m.world.characters.get_mut(&GA).unwrap().garrisoned_in = Some(RegionId(10));
+        m.attach_terrain(open_terrain());
         spoil(&mut m, GA);
-        spoil(&mut m, c);
         m.merge_units(ForceId(1002), ForceId(1000), &mut Vec::new());
-        assert_eq!(m.world.forces[&ForceId(1002)].units.len(), 1);
-        assert_flooded(&m, GA);
-        assert_flooded(&m, c);
+        assert!(!m.world.forces.contains_key(&ForceId(1002)));
+        assert!(zone(&m, GA).is_empty(), "the garrison is not flooded again");
+        assert!(!m.stored_zones().unwrap().contains_key(&c));
     }
 
     #[test]
@@ -1423,5 +1494,55 @@ mod tests {
         assert!(m.apply(CampaignCommand::MoveForce { force: ForceId(1000), to: at(30, 21) }).is_ok());
         let g = m.grid_state().unwrap();
         assert_eq!((g.view, g.region), (Some(GridView::Rebel(REBELS)), 1));
+    }
+
+    /// A rebel army risen in a region the grid does not hold, in a model with no acting faction yet.
+    fn homeless_rebel() -> CampaignModel {
+        let mut m = border_world();
+        m.world.forces.get_mut(&ForceId(1000)).unwrap().faction = REBELS;
+        m.world.characters.get_mut(&GA).unwrap().faction = REBELS;
+        m.world.region_risen_armies.insert(RegionId(999), vec![ForceId(1000)]);
+        m.turn.current = None;
+        m.attach_terrain(region_terrain());
+        m
+    }
+
+    #[test]
+    fn a_rebel_with_no_home_region_on_the_grid_stores_no_view_at_load_and_at_his_order() {
+        // The load pass: his view is not stored (and the previous one is not kept), he still floods.
+        let mut m = homeless_rebel();
+        assert_eq!(m.grid_state().unwrap().view, None);
+        assert!(!zone(&m, GA).is_empty());
+        // His order clears a view stored before it, the same way.
+        reflood_in_turn_of(&mut m, A);
+        assert_eq!(m.grid_state().unwrap().view, Some(GridView::Faction(A)));
+        m.store_rebel_view(ForceId(1000));
+        assert_eq!(m.grid_state().unwrap().view, None);
+    }
+
+    /// [`CampaignModel::flood_view`] on grid states made by hand: the view faction, then the layers
+    /// the stored view left, for the rebel army risen in region index 1.
+    #[test]
+    fn the_flood_view_choice_follows_the_stored_view() {
+        let m = risen_rebel(RegionId(11));
+        let rebel = m.commander(GA).unwrap();
+        let other = m.commander(GB).unwrap();
+        let view = |c: &Commander, grid: GridState| {
+            let (modes, flags) = m.flood_view(map(&m), c, &m.region_owners(), grid);
+            (modes, flags.unwrap())
+        };
+        let state = |view, region, read_view| GridState { view, region, read_view };
+        // Before campaign +0x39: the commander's own faction, whatever is stored.
+        assert_eq!(view(&other, state(Some(GridView::Rebel(REBELS)), 1, false)).0, B);
+        // A rebel view with +0x400 set: its modes and only its region's slots, for any commander.
+        assert_eq!(view(&other, state(Some(GridView::Rebel(REBELS)), 1, true)), (REBELS, vec![false, true, false, false]));
+        // A rebel faction view with +0x400 set: its modes and every single region closed.
+        assert_eq!(view(&other, state(Some(GridView::Faction(REBELS)), 1, true)), (REBELS, vec![false, false, false, true]));
+        // A view faction with a record: its modes with the commander's own flags.
+        assert_eq!(view(&rebel, state(Some(GridView::Faction(A)), 1, true)), (A, vec![false, true, false, false]));
+        // No view stored (only after the load-pass fallback): the commander's own faction and gate.
+        assert_eq!(view(&rebel, state(None, 1, true)), (REBELS, vec![false, true, false, false]));
+        // +0x400 still 0: the scope, whatever the rebel view.
+        assert_eq!(view(&rebel, state(Some(GridView::Rebel(REBELS)), 0, true)), (REBELS, vec![false, true, false, false]));
     }
 }

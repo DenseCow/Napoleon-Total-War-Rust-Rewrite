@@ -248,6 +248,40 @@ db_record! {
 }
 
 db_record! {
+    /// `population_classes` (`sbbb`, 3 rows, CONFIRMED layout from the vanilla file): a population class and
+    /// the unrest paths it takes. The record builder `0x00F58090` → `0x00F453C0` copies columns 1..3 to the
+    /// class record's +0x10 / +0x11 / +0x12; the class pass `0x008F9690` reads +0x10 and +0x11 to pick the
+    /// unrest kind (CAMPAIGN_FIDELITY.md §Class war). Vanilla: `lower` and `middle` (true, false, false),
+    /// `upper` (false, true, true).
+    pub struct PopulationClassRecord in "population_classes", key = key {
+        /// #0 H: class key (`lower`, `middle`, `upper`).
+        key: String,
+        /// #1: the class strikes, riots and rebels (record +0x10).
+        strikes: bool,
+        /// #2: otherwise the class writes letters of demand, ultimatums and rebels (record +0x11).
+        demands: bool,
+        /// #3: UNKNOWN (record +0x12; no reader traced).
+        flag_3: bool,
+    }
+}
+
+db_record! {
+    /// `unrest_cause_to_demands` (`ssss`, 48 rows, CONFIRMED layout from the vanilla file): what an unrest
+    /// cause of a kind demands. Keyed by cause + kind (`0x008EB3F0` builds the key `"%s%s"` from the cause's
+    /// and the kind's names); the class pass stores the demand's index (class +0x68).
+    pub struct UnrestCauseToDemand in "unrest_cause_to_demands", key = cause + kind {
+        /// #0 H: the cause, a happiness slot's name (`bankruptcy`, `taxes`, ...).
+        cause: String,
+        /// #1 H: the unrest kind (`strikes`, `riots`, `ultimatum`, `letter_of_demand`, `rebellion`).
+        kind: String,
+        /// #2: the demand (`change_government_head`, `lower_taxes`, ...).
+        demand: String,
+        /// #3: the message's localisation key (e.g. `region_demands_default`).
+        message: String,
+    }
+}
+
+db_record! {
     /// `government_types_to_effects` (`ssf`, 24 rows): effects of a government type.
     pub struct GovernmentEffect in "government_types_to_effects", key = government {
         /// #0 H: government key, e.g. `gov_empire` (the ESF `GOVERNMENT` #1 string).
@@ -299,6 +333,23 @@ db_record! {
         /// its `cap` bonus (agent record +0x1A8, CONFIRMED: read by `0x009D1E00`). Vanilla: General
         /// 4, admiral 3, else 0.
         cap_base: i32 => since 1,
+    }
+}
+
+db_record! {
+    /// `abilities` (exe reader `0x00DF0600`, 4 columns, DB_BUILDERS.md "abilities_tables"): one row
+    /// per agent ability. The campaign asks it for a row by key (`0x00E0D4E0`, lookup `0x0047AA40`):
+    /// the agent action lists push `can_exchange` only when it has that row (`0x009D1190` /
+    /// `0x009D1540`, CONFIRMED, disassembly). Vanilla has a `can_exchange` row of type `exchange`.
+    pub struct AbilityRecord in "abilities", key = key {
+        /// #0 @0x00: ability key, e.g. `can_spy`, `can_exchange`.
+        key: String,
+        /// #1 @0x0C: the attribute added to the ability's level (empty for none).
+        attribute: Option<String>,
+        /// #2 @0x18: ability type, e.g. `exchange`.
+        kind: String,
+        /// #3 @0x24: UNKNOWN flag.
+        unknown_24: bool,
     }
 }
 
@@ -810,7 +861,8 @@ db_record! {
         c58: i32,
         /// #59: raw.
         c59: i32,
-        /// #60: UNKNOWN flag.
+        /// #60: the ship has top gallants (CONFIRMED: builder +0x168, copied by `0x00F0CE30` to naval record
+        /// +0x1D4, which the campaign moves `0x008A86D0` read; `UnitRules::top_gallants`).
         c60: bool,
         /// #61..#114: 18 ship-part triples {i32, i32 hit points, f32 sink weight}.
         c61: i32,
@@ -993,6 +1045,8 @@ pub struct CampaignTables {
     pub government_effects: Table<GovernmentEffect>,
     /// `agents`.
     pub agents: Table<AgentRecord>,
+    /// `abilities`.
+    pub abilities: Table<AbilityRecord>,
     /// `units_to_exclusive_faction_permissions`.
     pub unit_factions: Table<UnitFactionPermission>,
     /// `units_to_groupings_military_permissions`.
@@ -1028,6 +1082,10 @@ pub struct CampaignTables {
     pub building_culture_variants: Table<BuildingCultureVariant>,
     /// `government_types`.
     pub government_types: Table<GovernmentTypeRecord>,
+    /// `population_classes`.
+    pub population_classes: Table<PopulationClassRecord>,
+    /// `unrest_cause_to_demands`.
+    pub unrest_demands: Table<UnrestCauseToDemand>,
     /// `diplomatic_relations_religion`.
     pub religion_relations: Table<ReligionRelationRecord>,
     /// `commodities_demand_junction`.

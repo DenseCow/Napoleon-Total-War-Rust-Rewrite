@@ -464,7 +464,9 @@ fn same_panel_movie(want: Option<&(NodeId, Rc<str>)>, playing: Option<&PanelMovi
 /// `movie_window`, CONFIRMED event_movie_panel.luac) and `CampaignUI.MovieDismissed` drops it.
 /// Starts it into a texture, draws it in that component and stops it when it is dropped or the
 /// component is gone. INFERRED: the movie plays once with its sound track in the player's language
-/// (the bink control that `0x00A13EA0` hands the panel constructor `0x00998E20` is not traced).
+/// (what the exe does with the sound volume it hands the bink control is traced only up to the
+/// player: which two settings feed it and how the player applies it are not, see the PROVISIONAL
+/// note in the body).
 pub fn panel_movie(
     hud: Option<NonSendMut<CampaignHud>>,
     assets: Option<ResMut<UiAssets>>,

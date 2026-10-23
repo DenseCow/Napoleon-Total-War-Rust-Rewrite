@@ -5,8 +5,10 @@
 //! the evaluation sum and its accept tests, the goal weights of region and technology items (the
 //! research need, the technology spread) and how a record sums them, the region value
 //! (`0x00C131C0` → `0x00A364B0` → `0x00AA1E90`, then `0x00C4D140`), the join-war goal weights and
-//! value (`0x00CC13D0` / `0x00CC0280`, `0x00C12D40`, the war strength `0x00AB5400`), and the
-//! answer to a deal of regions, technologies, payments and join-war items
+//! value (`0x00CC13D0` / `0x00CC0280`, `0x00C12D40`, the war strength `0x00AB5400`), the peace goal
+//! weight and value (`0x00CC13D0` case 9 and the peace attitude `0x00D63260`, `0x00C130E0` →
+//! `0x00A351E0`), and the
+//! answer to a deal of regions, technologies, payments, peace and join-war items
 //! ([`CampaignModel::ai_accepts_deal`]).
 //!
 //! A deal item's value is a triple of integers (`0x00518210`): `gain`, what the recipient gets
@@ -170,6 +172,237 @@ impl DealEvaluation {
     pub fn good(&self) -> bool {
         let limit = self.bonus + self.value.gain as f32;
         self.value.given.wrapping_mul(2) as f32 <= limit && self.value.cost.wrapping_mul(2) as f32 <= limit
+    }
+}
+
+/// `0x00D63790` (the AI attitude object's virtual `+0x2B4`): the state of a peace attitude `v`
+/// ([`CampaignModel::peace_attitude`]): 0 at most −0.75, else 1 at most −0.25, else 4 at least
+/// 0.75, else 3 at least 0.25, else 2. CONFIRMED (decompile).
+pub fn peace_attitude_state(v: f32) -> u8 {
+    if v <= -0.75 {
+        0
+    } else if v <= -0.25 {
+        1
+    } else if v >= 0.75 {
+        4
+    } else if v >= 0.25 {
+        3
+    } else {
+        2
+    }
+}
+
+/// The peace value's base pair by the AI's peace attitude state ([`peace_attitude_state`];
+/// `0x00A351E0`): what the AI asks for peace (first) and the scale of what it gives (second).
+/// States 0 and 1 (2500, 6000), 2 (5000, 3000), 3 and 4 (10000, 1500). CONFIRMED (disassembly).
+pub fn peace_base_pair(state: u8) -> (u32, u32) {
+    match state {
+        0 | 1 => (2500, 6000),
+        2 => (5000, 3000),
+        _ => (10000, 1500),
+    }
+}
+
+/// `0x00A75B60`: a human faction's strength factor in the peace value by its difficulty (faction
+/// `+0x6E4`): 0 → 1.2, 1 → 1.3, −1 → 1.1, any other 1.0 (an AI's strength is not scaled).
+/// CONFIRMED (decompile).
+pub fn human_strength_factor(difficulty: i32) -> f32 {
+    match difficulty {
+        0 => 1.2,
+        1 => 1.3,
+        -1 => 1.1,
+        _ => 1.0,
+    }
+}
+
+/// `0x00A75BC0`: a human faction's rank boost in the peace value by its difficulty: 0 → 0.67,
+/// 1 → 1.0, −1 → 0.33, any other 0 (an AI gets none). CONFIRMED (decompile).
+pub fn human_rank_boost(difficulty: i32) -> f32 {
+    match difficulty {
+        0 => 0.67,
+        1 => 1.0,
+        -1 => 0.33,
+        _ => 0.0,
+    }
+}
+
+/// The peace value's clamp of a strength ratio to [0.333 (`0x3EAA7EFA`), 3.0] (`0x00A351E0`).
+/// CONFIRMED (constants).
+fn peace_ratio_clamped(x: f32) -> f32 {
+    let lo = f32::from_bits(0x3EAA_7EFA);
+    if x < lo {
+        lo
+    } else if x > 3.0 {
+        3.0
+    } else {
+        x
+    }
+}
+
+/// The peace value's rank term (`0x00A351E0`): log10 of the clamped ratio
+/// ([`peace_ratio_clamped`]) of the two sides' power ranks, `ai` and `p` = 5 − power category
+/// ([`super::negotiation::Rankings::power`]) and `boost` the proposer's [`human_rank_boost`]:
+/// with `b` = `p` + `boost`, (`b` − `ai`) × 0.4 + 1 when `ai` < `p`, else 1 / ((`ai` − `b`) × 0.4
+/// + 1). CONFIRMED (disassembly).
+pub fn peace_rank_log(ai: i32, p: i32, boost: f32) -> f32 {
+    let b = p as f32 + boost;
+    let r = if ai < p { (b - ai as f32) * 0.4 + 1.0 } else { 1.0 / ((ai as f32 - b) * 0.4 + 1.0) };
+    peace_ratio_clamped(r).log10()
+}
+
+/// The peace value's weighted mean of one side's region log ratios (`0x00A351E0`): sorted largest
+/// first (`0x00A2BB10`, an introsort with a greater-than comparator), the `i`-th (from 0) of `n`
+/// weighs `n − i + 2`; each weighted term is divided by the integer total weight `n(n+1)/2 + 2n`
+/// before it is added (the loops at `0x00A35712` and `0x00A35A40`: MULSS, DIVSS, then ADDSS), in
+/// f32 from 0; 0 with no region. CONFIRMED (disassembly).
+pub fn peace_weighted_mean(mut v: Vec<f32>) -> f32 {
+    let n = v.len();
+    if n == 0 {
+        return 0.0;
+    }
+    v.sort_by(|a, b| b.total_cmp(a));
+    let total = (n * (n + 1) / 2 + 2 * n) as f32;
+    v.iter().enumerate().fold(0.0f32, |s, (i, x)| s + (n - i + 2) as f32 * x / total)
+}
+
+/// The peace value's war-length factor of `t` turns at war (`0x00A351E0`): (t + 1) × 2/3 below 5
+/// turns, else 4 × log2(t / 5) (`logf` `0x012710FD` over ln 2, `0x014589CC`). CONFIRMED
+/// (disassembly, `0x00A35C67`–`0x00A35CA7`: COMISS t against 5.0 `0x01325D24`, JC to
+/// (t + 1.0) × 0.6666667 `0x01331B2C`, else t × 0.2 `0x01325CA8`, `logf`, ÷ ln 2, × 4.0
+/// `0x01325D20`). The two pieces do not meet: the factor drops from 3.33 at 4 turns to 0 at 5 and
+/// is back above 3.33 only at 9. Faithful, not an ORIGINAL BUG (CONFIRMED, peacefactor
+/// 2026-10-22): `t` is the relation's turns at war (`+0x7E4`, read by `0x00B77DC0`, +1 at each
+/// round end `0x00B29649`), read only here and by the attitude `0x00D63260`; no table, no wrong
+/// compare or clamp joins the pieces (`t` ≤ 5 would still drop 4 to 1.05), and 5 turns starts the
+/// same function's long-war terms, which also start from 0 there (the turns since a battle count
+/// only from 5 turns, the extra max(tsb + t − 5, 0) × k), so the shape reads as designed.
+pub fn peace_turn_factor(turns: u32) -> f32 {
+    let t = turns as f32;
+    if t < 5.0 { (t + 1.0) * (2.0 / 3.0) } else { 4.0 * ((t * 0.2).ln() / f32::from_bits(0x3F31_7218)) }
+}
+
+/// The peace value's momentum factor `m` (`0x00A351E0`) of the AI's war momentum towards the
+/// proposer: 1 + momentum × 0.0057692304 (`0x3BBD0BD0`, a human proposer) or × 0.009374999
+/// (`0x3C199999`, an AI), at least −0.75, when it is negative; else 1 + momentum × 0.075, at most
+/// 0.75. CONFIRMED (disassembly).
+pub fn peace_momentum_factor(momentum: i32, proposer_human: bool) -> f32 {
+    let m = momentum as f32;
+    let x = if momentum < 0 {
+        let scale = f32::from_bits(if proposer_human { 0x3BBD_0BD0 } else { 0x3C19_9999 });
+        (m * scale).max(-0.75)
+    } else {
+        (m * 0.075).min(0.75)
+    };
+    1.0 + x
+}
+
+/// What the peace value reads ([`peace_value`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PeaceValueInputs {
+    /// [`peace_base_pair`] of the AI's peace attitude state.
+    pub base: (u32, u32),
+    /// [`peace_rank_log`].
+    pub rank_log: f32,
+    /// [`peace_weighted_mean`] over the AI's regions (its enemies' strength over its own side's).
+    pub own_mean: f32,
+    /// [`peace_weighted_mean`] over the proposer's regions (the AI's strength over the proposer's side).
+    pub their_mean: f32,
+    /// The AI's record towards the proposer: turns at war, war momentum, turns since a battle.
+    pub war_turns: u32,
+    /// See `war_turns`.
+    pub momentum: i32,
+    /// See `war_turns`.
+    pub turns_since_battle: u32,
+    /// The proposer is human, and its difficulty (faction `+0x6E4`).
+    pub proposer_human: bool,
+    /// See `proposer_human`.
+    pub proposer_difficulty: i32,
+}
+
+/// `0x00A351E0` after its loops: the peace record's value from its inputs (before the deal
+/// inflation). CONFIRMED (disassembly):
+/// - `A` = trunc(base.0 × clamp(10^(own_mean × 2/3 + rank_log / 3))), `c` = clamp(10^((2 ×
+///   their_mean − rank_log) / 3)), `B` = trunc(c × 10000), `X` = trunc(base.1 × c) (truncating
+///   float-to-unsigned `0x0126E2B0`; clamp [`peace_ratio_clamped`]);
+/// - with `m` ([`peace_momentum_factor`]) and `tf` ([`peace_turn_factor`]): `A'` = (2 − m) × A,
+///   `B'` = B × m (CVTTSS2SI);
+/// - `v` = `A'`; when `A'` < `B'` (unsigned) `v` = `A'` + round(max(tsb + turns − off, 0) × k),
+///   at most `B'`, with `tsb` the turns since a battle (0 below 5 turns at war) and (k, off) by a
+///   human proposer's difficulty (jump table `0x00A35F00`): −2 (10, 5), −1 (30, 5), 1 (60, 0),
+///   else (and an AI) (50, 5); the round is FISTP's, to even;
+/// - the value (trunc(v × tf), trunc(B' × tf), trunc(max(tf × 0.85, 1) × X × m)).
+pub fn peace_value(i: &PeaceValueInputs) -> DealValue {
+    use super::commands::cvttss2si;
+    // `0x0126E2B0`: truncate through a 64-bit integer, keep the low 32 bits.
+    let ftoui = |v: f32| v as i64 as u32;
+    let pow1 = peace_ratio_clamped(10f32.powf(i.own_mean * (2.0 / 3.0) + i.rank_log * (1.0 / 3.0)));
+    let a = ftoui(i.base.0 as f32 * pow1);
+    let c = peace_ratio_clamped(10f32.powf((2.0 * i.their_mean - i.rank_log) * (1.0 / 3.0)));
+    let (b, x) = (ftoui(c * 10000.0), ftoui(i.base.1 as f32 * c));
+    let m = peace_momentum_factor(i.momentum, i.proposer_human);
+    let tf = peace_turn_factor(i.war_turns);
+    let a2 = cvttss2si((2.0 - m) * a as f32) as u32;
+    let b2 = cvttss2si(b as f32 * m) as u32;
+    let (k, off) = match (i.proposer_human, i.proposer_difficulty) {
+        (true, -2) => (10.0f32, 5.0f32),
+        (true, -1) => (30.0, 5.0),
+        (true, 1) => (60.0, 0.0),
+        _ => (50.0, 5.0),
+    };
+    let tsb = if i.war_turns < 5 { 0 } else { i.turns_since_battle };
+    let mut v = a2;
+    if a2 < b2 {
+        let extra = ((tsb as f32 + i.war_turns as f32 - off).max(0.0) * k).round_ties_even() as i32;
+        v = a2.wrapping_add(extra as u32).min(b2);
+    }
+    DealValue {
+        gain: cvttss2si(v as f32 * tf) as u32,
+        cost: cvttss2si(b2 as f32 * tf) as u32,
+        given: cvttss2si((tf * 0.85).max(1.0) * x as f32 * m) as u32,
+    }
+}
+
+/// The AI's strength of each faction in each region, as its region beliefs hold it (`0x00D7B9E0`,
+/// the map entry's `+8` of the region belief `0x00D96360` builds: the land strength of each
+/// faction's mobiles with units in the region, plus the garrison's for the owner), taken once per
+/// peace evaluation.
+///
+/// PROVISIONAL: a mobile's strength is its mobile belief's `+0xFC` (`0x00D96DE0`: 2000 × its raw
+/// strength (`+0x104` of another belief) over a per-faction land norm (`0x00D8E600` slot 0xC, or
+/// a unit-record fallback), not traced further); ours is the force's value
+/// ([`CampaignModel::force_power`]), the commander's region its area ([`super::economy::in_region`]),
+/// and the garrison's strength (`0x00C3C5F0` → `0x0080DC60`, not traced) the garrison force's
+/// value. Every use is a ratio of two of them, so a common scale cancels.
+struct RegionStrengths(std::collections::BTreeMap<(RegionId, FactionId), i32>);
+
+impl RegionStrengths {
+    fn of(m: &CampaignModel) -> Self {
+        let w = &m.world;
+        // Unknown unit keys count 0 here; the rankings report them (`FactionRankings::unknown_units`).
+        let mut unknown = std::collections::BTreeSet::new();
+        let mut map = std::collections::BTreeMap::new();
+        let garrisons: std::collections::BTreeSet<_> = w.regions.values().filter_map(|r| r.garrison).collect();
+        for (id, f) in &w.forces {
+            if f.is_navy || f.units.is_empty() || garrisons.contains(id) {
+                continue;
+            }
+            let Some(c) = f.commander.and_then(|c| w.characters.get(&c)) else { continue };
+            let Some(r) = super::economy::region_of(m, c) else { continue };
+            let e: &mut i32 = map.entry((r.id, f.faction)).or_default();
+            *e = e.wrapping_add(m.force_power(f, &mut unknown));
+        }
+        for r in w.regions.values() {
+            if let Some(g) = r.garrison.and_then(|g| w.forces.get(&g)) {
+                let e: &mut i32 = map.entry((r.id, r.owner)).or_default();
+                *e = e.wrapping_add(m.force_power(g, &mut unknown));
+            }
+        }
+        RegionStrengths(map)
+    }
+
+    /// `faction`'s strength in `region` (0 with none).
+    fn get(&self, region: RegionId, faction: FactionId) -> i32 {
+        self.0.get(&(region, faction)).copied().unwrap_or(0)
     }
 }
 
@@ -413,7 +646,7 @@ impl CampaignModel {
     }
 
     /// The AI recipient's answer to the open negotiation's deal (the evaluator `0x00AA5ED0` for
-    /// the records the model holds: 4 regions, 5 technology, 7 payment, then 11 join war): `None` when there is nothing to
+    /// the records the model holds: 4 regions, 5 technology, 7 payment, 9 peace, then 11 join war): `None` when there is nothing to
     /// answer (no negotiation, a human recipient, no item), else whether it accepts. For each
     /// record with items, in record order, CONFIRMED:
     /// - decline when the recipient's `diplomacy_options` towards the proposer for the record is 1
@@ -429,9 +662,10 @@ impl CampaignModel {
     ///     demands when it is a list-2 goal (from the AI to the proposer) with
     ///     [`Self::given_technology_goal_weight`];
     ///   - payment: 0 (`0x00A62400` builds its goal with weight 0);
+    ///   - peace: [`Self::peace_goal_weight`];
     ///   - join war: [`Self::join_war_record_weight`];
     /// - [`DealEvaluation::add`] of the record's value ([`Self::region_deal_value`] /
-    ///   [`Self::technology_deal_value`] / [`Self::join_war_deal_value`] at the campaign's inflation
+    ///   [`Self::technology_deal_value`] / [`Self::peace_deal_value`] / [`Self::join_war_deal_value`] at the campaign's inflation
     ///   factor, [`Self::payment_deal_value`] as it is), scale 1.0.
     ///
     /// Then accept when `fair` and the diplomatic budget is at least the payment (slot 2 of the
@@ -443,9 +677,8 @@ impl CampaignModel {
     /// 8, `0x00CC53D0`) spend from it, which our AI does not have) is not ported: the `fair` test
     /// takes it as covering any payment; a deal the AI would not accept is declined where the exe
     /// may first make a counter-offer (`0x00CC58C0`, fewer than 10 per negotiation); the records the
-    /// model does not hold (trade, alliance, ...) and the peace record
-    /// ([`super::negotiation::Negotiation::peace`]) are not evaluated (a deal holding only a peace item
-    /// goes through unevaluated); the join-war goal weight
+    /// model does not hold (trade, alliance, ...) are not evaluated; the peace record reads the
+    /// PROVISIONAL leaves of [`Self::peace_attitude_with`] and [`RegionStrengths`]; the join-war goal weight
     /// reads a PROVISIONAL stance-belief state ([`Self::join_war_attitude`]) and its value a
     /// PROVISIONAL nearness ([`Self::war_strength`]).
     pub fn ai_accepts_deal(&self) -> Option<bool> {
@@ -456,7 +689,7 @@ impl CampaignModel {
         let has_techs = !(n.technologies.offered.is_empty() && n.technologies.demanded.is_empty());
         let has_payment = n.payment.has_items();
         let has_join_war = !n.join_war.is_empty();
-        if self.is_human(ai) || !(has_regions || has_techs || has_payment || has_join_war) {
+        if self.is_human(ai) || !(has_regions || has_techs || has_payment || n.peace || has_join_war) {
             return None;
         }
         let declines = |index: usize| !self.may_accept(ai, proposer, index);
@@ -508,6 +741,14 @@ impl CampaignModel {
         } else {
             0
         };
+        // Record 9, peace: its goal weight, then its value; the region strengths read once for both.
+        if n.peace {
+            let st = RegionStrengths::of(self);
+            let weight = |allowed: bool| self.peace_goal_weight(ai, proposer, allowed, &st);
+            if !step(NegotiationAction::Peace, &weight, &|| self.peace_deal_value(ai, proposer, &st).inflated(inflation)) {
+                return Some(false);
+            }
+        }
         // Record 11, join war: its goal weight ([`Self::join_war_record_weight`]), then its value.
         if has_join_war && !step(NegotiationAction::RequestJoinWar, &|allowed| self.join_war_record_weight(n, allowed), &|| self.join_war_deal_value(n, inflation)) {
             return Some(false);
@@ -588,10 +829,10 @@ impl CampaignModel {
     ///   slot 2;
     /// - the sum times the inflation factor ([`DealValue::inflated`]);
     /// - [`human_demand_scaled`] with `m` = the demanded regions plus
-    ///   [`super::World::deal_regions_received`] when the proposer is human (0 otherwise).
+    ///   [`super::World::deal_regions_received`] when the proposer is human and the deal holds no
+    ///   peace item (0 otherwise).
     ///
-    /// PROVISIONAL: the two tests read false (sieges are not in the model; `+0x22C` is UNKNOWN);
-    /// the deal's peace record is not in the model, so `m` treats it as empty.
+    /// PROVISIONAL: the two tests read false (sieges are not in the model; `+0x22C` is UNKNOWN).
     pub fn region_deal_value(&self, n: &Negotiation, inflation: f32) -> DealValue {
         let (ai, proposer) = (n.recipient, n.proposer);
         // The regions bordering one of the AI's, built once and only if a test needs it.
@@ -618,7 +859,7 @@ impl CampaignModel {
             v.cost = v.cost.wrapping_add(self.region_deal_worth_with(r, proposer, &proposer_census));
             v.given = v.given.wrapping_add(self.region_deal_worth_with(r, ai, &ai_census));
         }
-        let m = if self.is_human(proposer) {
+        let m = if self.is_human(proposer) && !n.peace {
             (n.regions.demanded.len() as u32).wrapping_add(self.world.deal_regions_received.get(&proposer).copied().unwrap_or(0))
         } else {
             0
@@ -803,7 +1044,7 @@ impl CampaignModel {
         let mut unknown = std::collections::BTreeSet::new();
         let area = |f: &super::MilitaryForce| {
             let c = f.commander.and_then(|c| self.world.characters.get(&c))?;
-            self.world.regions.values().find(|r| super::economy::in_region(self, r, c)).map(|r| r.id)
+            super::economy::region_of(self, c).map(|r| r.id)
         };
         let forces = self.world.forces.values().filter(|f| f.faction == attacker && !f.units.is_empty());
         forces.map(|f| WarMobile { value: self.force_power(f, &mut unknown) as u32, navy: f.is_navy, area: if f.is_navy { None } else { area(f) } }).collect()
@@ -872,6 +1113,248 @@ impl CampaignModel {
         });
         offered.chain(demanded).fold(DealValue::default(), |s, v| s + v).inflated(inflation)
     }
+
+    /// A faction's difficulty (faction `+0x6E4`, `0x00C288E0`; a human's −2..1, an AI's the player's negated).
+    fn faction_difficulty(&self, f: FactionId) -> i32 {
+        self.world.faction_details.get(&f).map_or(0, |d| d.difficulty)
+    }
+
+    /// The AI's capital when it holds exactly one region (`GetCaiFactionRegionCount` = 1 and the
+    /// region `0x00C1C200` gives), and the capital's land neighbours (its boundaries' other
+    /// regions, as [`Self::war_strength`] reads them).
+    fn lone_capital(&self, ai: FactionId) -> Option<(RegionId, &[RegionId])> {
+        let w = &self.world;
+        if w.regions.values().filter(|r| r.owner == ai).count() != 1 {
+            return None;
+        }
+        let cap = w.capital(ai).filter(|c| w.regions.get(c).is_some_and(|r| r.owner == ai))?;
+        Some((cap, w.region_neighbours.get(&cap).map_or(&[][..], Vec::as_slice)))
+    }
+
+    /// `0x00D593F0` (attitude virtual `+0x29C`) at war: the AI's eagerness to make peace with `p`
+    /// for its capital's sake. CONFIRMED (decompile): −1 when the AI's patron
+    /// ([`Self::believed_patron`]) is someone other than `p`; else, the AI holding one region, its
+    /// capital ([`Self::lone_capital`]), with `s` the AI's strength there and `t` `p`'s there plus
+    /// in each neighbour ([`RegionStrengths`]) and `q` = t / max(s, 1) (integers): when the capital
+    /// borders a region of `p`, and `s` < t / 2: q 2 → 0.25, 3 → 0.5, 4 → 0.75, more → 0.9; when it
+    /// does not, and `s` < t / 4: q 4 → 0.25, 5 → 0.5, 6 → 0.75, more → 0.9; −1 otherwise.
+    ///
+    /// The exe's branch for an AI not at war with `p` (an ally whose capital borders `p`) is not
+    /// ported: the one caller, [`Self::peace_attitude`], reads it only at war.
+    fn protector_attitude(&self, ai: FactionId, p: FactionId, st: &RegionStrengths) -> f32 {
+        if self.believed_patron(ai).is_some_and(|g| g != p) {
+            return -1.0;
+        }
+        let Some((cap, neighbours)) = self.lone_capital(ai) else { return -1.0 };
+        let s = st.get(cap, ai);
+        let t = neighbours.iter().fold(st.get(cap, p), |t, &nb| t.wrapping_add(st.get(nb, p)));
+        let q = t / s.max(1);
+        let borders = neighbours.iter().any(|nb| self.world.regions.get(nb).is_some_and(|r| r.owner == p));
+        if borders && s < t / 2 {
+            match q {
+                0 | 1 => -1.0,
+                2 => 0.25,
+                3 => 0.5,
+                4 => 0.75,
+                _ => 0.9,
+            }
+        } else if !borders && s < t / 4 {
+            match q {
+                0..=3 => -1.0,
+                4 => 0.25,
+                5 => 0.5,
+                6 => 0.75,
+                _ => 0.9,
+            }
+        } else {
+            -1.0
+        }
+    }
+
+    /// `0x00D63810` (attitude virtual `+0x2D4`): `p` threatens the AI's lone capital
+    /// ([`Self::lone_capital`]). CONFIRMED (decompile): with `s` the AI's strength there and `t`
+    /// `p`'s ([`RegionStrengths`]): false when `t` is 0; true when `t` > 3s (or > 2s with the
+    /// capital's strategy test `+0x34 → +0x94`); else `t` plus, over the capital's neighbours,
+    /// max(`p`'s strength − the AI's, 0), against 4s.
+    ///
+    /// PROVISIONAL: the strategy test (INFERRED a siege, as [`Self::region_deal_value`]'s) reads false.
+    fn peace_threatened_by(&self, ai: FactionId, p: FactionId, st: &RegionStrengths) -> bool {
+        let Some((cap, neighbours)) = self.lone_capital(ai) else { return false };
+        let (s, mut t) = (st.get(cap, ai), st.get(cap, p));
+        if t == 0 {
+            return false;
+        }
+        let siege = false;
+        if (siege && t > s.wrapping_mul(2)) || t > s.wrapping_mul(3) {
+            return true;
+        }
+        for &nb in neighbours {
+            t = t.wrapping_add(st.get(nb, p).wrapping_sub(st.get(nb, ai)).max(0));
+        }
+        t > s.wrapping_mul(4)
+    }
+
+    /// The AI's peace attitude towards `p` (`0x00D63260`, attitude virtual `+0x2B0`), from −1 (no
+    /// peace) to 1 (eager); `valuing` is the call's flag (the peace value's read, 1; the goal's, 0).
+    /// [`Self::peace_attitude_with`] with the strengths read for it.
+    pub fn peace_attitude(&self, ai: FactionId, p: FactionId, valuing: bool) -> f32 {
+        self.peace_attitude_with(ai, p, valuing, &RegionStrengths::of(self))
+    }
+
+    /// [`Self::peace_attitude`] with the region strengths already read. CONFIRMED steps (decompile),
+    /// with `rebels` = either side the rebels and the AI's record towards `p` (war momentum, turns
+    /// at war, turns since a battle; read only without `rebels`):
+    /// 1. −1 when the campaign has [`super::features::CampaignFeatures::ai_peace_refusal_attitude`],
+    ///    `p` is human and the AI's attitude total towards it is at most that;
+    /// 2. 0 when `p` is not on the AI's enemy list ([`super::director::believes_at_war`]);
+    /// 3. `f` = [`Self::protector_attitude`] when the AI has no protectorates
+    ///    ([`super::director::believed_protectorates`]), else −1;
+    /// 4. `f` = 1 when (A: not `valuing`, not `rebels`, more than 1 turn at war and momentum > 0 or
+    ///    more than 5 turns since a battle; or B: not `rebels`, no protectorates and `f` > 0) and
+    ///    none of the AI's protectorates nor its allies ([`super::director::believed_allies`]) is at
+    ///    war with `p`;
+    /// 5. else `f` = 1 when not `rebels`, more than 1 turn at war and momentum below −10; else
+    ///    max(`f`, −0.8) when `rebels` or `p` does not threaten the AI ([`Self::peace_threatened_by`]);
+    ///    else 1;
+    /// 6. without `rebels`, with a human other than `p` on the AI's enemy list (`0x00A64A60`): at
+    ///    least 0 for an AI of difficulty 0 and 0.5 for one above 0 (`f` at most that gives it).
+    ///
+    /// PROVISIONAL: the leaves the model lacks read as absent: A also needs the AI's war-event
+    /// belief (`0x00D56FD0`), the AI's target faction (CAI faction `+0x1B0`) and `0x00C3E4A0` to be
+    /// clear, and those two raise the step-5 threshold to −15 / −20; an ally counts in step 4 only
+    /// with an alliance attitude above 0 (`0x00D61D80`, attitude virtual `+0x2AC`, not ported), taken
+    /// as every ally; [`RegionStrengths`].
+    fn peace_attitude_with(&self, ai: FactionId, p: FactionId, valuing: bool, st: &RegionStrengths) -> f32 {
+        use super::director::{believed_allies, believed_enemies, believed_protectorates, believes_at_war};
+        let rel = self.world.relationships.get(&(ai, p));
+        if let Some(min) = self.rules.features.ai_peace_refusal_attitude
+            && self.is_human(p)
+            && rel.map_or(0, super::details::Relationship::attitude_total) <= min
+        {
+            return -1.0;
+        }
+        if !believes_at_war(self, ai, p) {
+            return 0.0;
+        }
+        // PROVISIONAL: the war-event belief, the target faction and 0x00C3E4A0 read clear.
+        let (recent, target, c3e4a0) = (false, false, false);
+        let protectorates = believed_protectorates(self, ai);
+        let mut f = if protectorates.is_empty() { self.protector_attitude(ai, p, st) } else { -1.0 };
+        let rebels = self.is_rebel_faction(ai) || self.is_rebel_faction(p);
+        let (momentum, long, since_battle) = match rel {
+            Some(r) if !rebels => (r.war_momentum, r.war_turns > 1, r.turns_since_battle),
+            _ => (0, false, 0),
+        };
+        let a = !valuing && !c3e4a0 && !rebels && !recent && !target && long && (momentum > 0 || since_battle > 5);
+        let b = !rebels && protectorates.is_empty() && f > 0.0;
+        // PROVISIONAL: every ally is taken to have an alliance attitude above 0.
+        let free = (a || b) && !protectorates.iter().any(|&g| believes_at_war(self, g, p)) && !believed_allies(self, ai).into_iter().any(|x| believes_at_war(self, x, p));
+        if free {
+            f = 1.0;
+        } else {
+            let threshold = if target {
+                -20
+            } else if recent {
+                -15
+            } else {
+                -10
+            };
+            if !rebels && long && momentum < threshold {
+                f = 1.0;
+            } else if rebels || !self.peace_threatened_by(ai, p, st) {
+                f = f.max(-0.8);
+            } else {
+                f = 1.0;
+            }
+        }
+        if !rebels && believed_enemies(self, ai).into_iter().any(|g| g != p && self.is_human(g)) {
+            match self.faction_difficulty(ai) {
+                0 if f <= 0.0 => return 0.0,
+                d if d > 0 && f <= 0.5 => return 0.5,
+                _ => {}
+            }
+        }
+        f
+    }
+
+    /// The peace record's goal weight for the AI (`0x00CC13D0` case 9, CONFIRMED): with the
+    /// record's goals allowed ([`Self::deal_goal_allowed`], `allowed`), the two at war
+    /// ([`Self::at_war`]) and the AI's peace option towards `p` 0 or 1 (`0x00C1A730`), its peace
+    /// attitude ([`Self::peace_attitude`], flag 0) clamped to [−1, 0.9]; else 0 (no goal).
+    ///
+    /// PROVISIONAL: the AI's peace intentions (`0x00CCC7C0`, script-gated) build no goal here.
+    fn peace_goal_weight(&self, ai: FactionId, p: FactionId, allowed: bool, st: &RegionStrengths) -> f32 {
+        use super::negotiation::NegotiationAction;
+        if allowed && self.at_war(ai, p) && self.diplomacy_option(ai, p, NegotiationAction::Peace.option()) <= 1 {
+            self.peace_attitude_with(ai, p, false, st).clamp(-1.0, 0.9)
+        } else {
+            0.0
+        }
+    }
+
+    /// The peace record valued for its AI recipient `ai` and proposer `p` (virtual `+0x38` =
+    /// `0x00C130E0` → `0x00A75390` → `0x00A351E0`; not inflated). CONFIRMED (disassembly):
+    /// [`peace_value`] of:
+    /// - `base`: [`peace_base_pair`] of [`peace_attitude_state`] of the AI's peace attitude (flag 1);
+    /// - `rank_log`: [`peace_rank_log`] of 5 − each side's power category
+    ///   ([`Self::faction_rankings`]; 0 for an unranked side), with `p`'s [`human_rank_boost`];
+    /// - `own_mean`: [`peace_weighted_mean`] over the AI's regions of log10 of the clamped ratio of
+    ///   its enemies' strength ([`super::director::believed_enemies`], each `e`'s strength × k ×
+    ///   [`human_strength_factor`] for a human, summed through an integer) over max(its own, 1): the
+    ///   AI's strength × k plus each ally's ([`super::director::believed_allies`]) × k halved
+    ///   (`>> 1`), k = 2 in the capital, else 1;
+    /// - `their_mean`: the same over `p`'s regions of the AI's strength × k over `p`'s side (`p`'s ×
+    ///   k × its factor, truncated, plus each of `p`'s allies' × k halved);
+    /// - the AI's record towards `p`, and `p`'s humanity and difficulty.
+    ///
+    /// The strengths are [`RegionStrengths`] (PROVISIONAL).
+    fn peace_deal_value(&self, ai: FactionId, p: FactionId, st: &RegionStrengths) -> DealValue {
+        use super::commands::cvttss2si;
+        use super::director::{believed_allies, believed_enemies};
+        let base = peace_base_pair(peace_attitude_state(self.peace_attitude_with(ai, p, true, st)));
+        let ranks = self.faction_rankings().ranks;
+        let rank = |f: FactionId| ranks.get(&f).map_or(0, |r| 5 - i32::from(r.power));
+        let p_human = self.is_human(p);
+        let boost = if p_human { human_rank_boost(self.faction_difficulty(p)) } else { 0.0 };
+        let rank_log = peace_rank_log(rank(ai), rank(p), boost);
+        let scaled = |v: i32, f: FactionId| if self.is_human(f) { v as f32 * human_strength_factor(self.faction_difficulty(f)) } else { v as f32 };
+        let halved = |allies: &[FactionId], r: RegionId, k: i32| allies.iter().fold(0u32, |s, &x| s.wrapping_add(st.get(r, x).wrapping_mul(k) as u32 >> 1));
+        let ratio_log = |num: f32, den: u32| peace_ratio_clamped(num / (den as f32).max(1.0)).log10();
+        let regions_of = |f: FactionId| {
+            let cap = self.world.capital(f);
+            self.world.regions.values().filter(move |r| r.owner == f).map(move |r| (r.id, if Some(r.id) == cap { 2 } else { 1 }))
+        };
+        let (enemies, ai_allies, p_allies) = (believed_enemies(self, ai), believed_allies(self, ai), believed_allies(self, p));
+        let own_mean = peace_weighted_mean(
+            regions_of(ai)
+                .map(|(r, k)| {
+                    let own = (st.get(r, ai).wrapping_mul(k) as u32).wrapping_add(halved(&ai_allies, r, k));
+                    let theirs = enemies.iter().fold(0i32, |acc, &e| cvttss2si(acc as f32 + scaled(st.get(r, e).wrapping_mul(k), e)));
+                    ratio_log(theirs as f32, own)
+                })
+                .collect(),
+        );
+        let their_mean = peace_weighted_mean(
+            regions_of(p)
+                .map(|(r, k)| {
+                    let side = (cvttss2si(scaled(st.get(r, p).wrapping_mul(k), p)) as u32).wrapping_add(halved(&p_allies, r, k));
+                    ratio_log(st.get(r, ai).wrapping_mul(k) as f32, side)
+                })
+                .collect(),
+        );
+        let rel = self.world.relationships.get(&(ai, p));
+        peace_value(&PeaceValueInputs {
+            base,
+            rank_log,
+            own_mean,
+            their_mean,
+            war_turns: rel.map_or(0, |r| r.war_turns),
+            momentum: rel.map_or(0, |r| r.war_momentum),
+            turns_since_battle: rel.map_or(0, |r| r.turns_since_battle),
+            proposer_human: p_human,
+            proposer_difficulty: self.faction_difficulty(p),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -888,6 +1371,63 @@ mod tests {
         assert_eq!(human_demand_scaled(DealValue { given: 100, ..v }, 3).given, 225);
         // NaN truncates to 0x80000000 (not a saturated 0 or i32::MAX): an odd slot keeps only that bit.
         assert_eq!(DealValue { gain: 1, cost: 2, given: 3 }.inflated(f32::NAN), DealValue { gain: 0x8000_0000, cost: 0, given: 0x8000_0000 });
+    }
+
+    #[test]
+    fn the_peace_value_pieces_follow_the_traced_formula() {
+        let s: Vec<u8> = [-1.0, -0.75, -0.5, -0.25, 0.0, 0.2, 0.25, 0.74, 0.75, 1.0].into_iter().map(peace_attitude_state).collect();
+        assert_eq!(s, [0, 0, 1, 1, 2, 2, 3, 3, 4, 4]);
+        assert_eq!([0, 1, 2, 3, 4].map(peace_base_pair), [(2500, 6000), (2500, 6000), (5000, 3000), (10000, 1500), (10000, 1500)]);
+        assert_eq!([-2, -1, 0, 1, 7].map(human_strength_factor), [1.0, 1.1, 1.2, 1.3, 1.0]);
+        assert_eq!([-2, -1, 0, 1, 7].map(human_rank_boost), [0.0, 0.33, 0.67, 1.0, 0.0]);
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        // Ranks: 1 below 3 → 1.8; 3 over 1 + 1 → 1 / 1.4; 0 below 5 → 3 (the cap).
+        assert!(close(peace_rank_log(1, 3, 0.0), 1.8f32.log10()));
+        assert!(close(peace_rank_log(3, 1, 1.0), (1.0f32 / 1.4).log10()));
+        assert!(close(peace_rank_log(0, 5, 0.0), 3.0f32.log10()));
+        assert_eq!(peace_ratio_clamped(0.1), f32::from_bits(0x3EAA_7EFA));
+        // Largest first: weights 4, 3 over 7; one region weighs 3 over 3.
+        assert!(close(peace_weighted_mean(vec![1.0, 3.0]), 15.0 / 7.0));
+        assert!(close(peace_weighted_mean(vec![0.5]), 0.5));
+        assert_eq!(peace_weighted_mean(Vec::new()), 0.0);
+        // Each term is divided before it is added (0x00A35712): 5/12 × 0.3 + 4/12 × 0.2 + 3/12 × 0.1
+        // gives 0x3E5DDDDE in f32, where adding first and dividing once gives 0x3E5DDDDD.
+        assert_eq!(peace_weighted_mean(vec![0.1, 0.2, 0.3]).to_bits(), 0x3E5D_DDDE);
+        // The war-length factor jumps from 3.33 at 4 turns to 0 at 5 (faithful, 0x00A35C67), then
+        // 4 × log2(t / 5), back above 3.33 only at 9.
+        assert!(close(peace_turn_factor(0), 2.0 / 3.0) && close(peace_turn_factor(4), 10.0 / 3.0));
+        assert_eq!(peace_turn_factor(5), 0.0);
+        assert!(peace_turn_factor(8) < peace_turn_factor(4) && peace_turn_factor(9) > peace_turn_factor(4));
+        assert!(close(peace_turn_factor(10), 4.0) && close(peace_turn_factor(20), 8.0));
+        assert!(close(peace_momentum_factor(2, true), 1.15) && close(peace_momentum_factor(20, false), 1.75));
+        assert!(close(peace_momentum_factor(-200, true), 0.25) && close(peace_momentum_factor(-10, false), 0.90625));
+    }
+
+    #[test]
+    fn the_peace_value_follows_the_traced_formula() {
+        let base = PeaceValueInputs {
+            base: (5000, 3000),
+            rank_log: 0.0,
+            own_mean: 0.0,
+            their_mean: 0.0,
+            war_turns: 0,
+            momentum: 0,
+            turns_since_battle: 0,
+            proposer_human: false,
+            proposer_difficulty: 0,
+        };
+        // Even sides, no war yet: A = 5000, B = 10000, X = 3000, tf = 2/3; no turns past the offset.
+        assert_eq!(peace_value(&base), DealValue { gain: 3333, cost: 6666, given: 3000 });
+        // 10 turns (tf = 4), 3 since a battle, momentum 2 (m = 1.15), a human proposer of difficulty
+        // 1 (k 60, no offset): A' = 0.85 × 5000, B' = 11500, v = 4250 + 13 × 60.
+        let i = PeaceValueInputs { war_turns: 10, turns_since_battle: 3, momentum: 2, proposer_human: true, proposer_difficulty: 1, ..base };
+        assert_eq!(peace_value(&i), DealValue { gain: 5030 * 4, cost: 46000, given: 11730 });
+        // Long enough and v reaches B': the AI asks what it gives up.
+        let v = peace_value(&PeaceValueInputs { base: (2500, 6000), war_turns: 100, turns_since_battle: 200, ..base });
+        assert_eq!(v.gain, v.cost);
+        // A strong AI (own mean high) asks more than it is worth when it is not ahead.
+        let v = peace_value(&PeaceValueInputs { own_mean: 0.477, ..base });
+        assert!(v.gain >= v.cost);
     }
 
     #[test]

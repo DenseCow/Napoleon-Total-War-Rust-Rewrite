@@ -239,7 +239,10 @@ fn vanilla_save_risen_armies_keep_their_government() {
         if w.is_rebel_faction(reg.owner) {
             assert_eq!(classes.as_ref(), m.rules.government_classes.get("gov_absolute_monarchy"), "{region:?}");
         } else {
-            assert_eq!(classes, Some(ntw_sim::campaign::economy::government_classes(m, w.governing_faction(*region).unwrap_or(reg.owner))), "{region:?}");
+            let governing = w.governing_faction(*region).unwrap_or(reg.owner);
+            let rules_classes = m.rules.government_classes.get(&w.factions[&governing].government_key);
+            assert!(rules_classes.is_some(), "{region:?}: the governing faction's government is in the rules");
+            assert_eq!(classes.as_ref(), rules_classes, "{region:?}");
         }
     }
     // Each also has its side in the rising (`World::rebel_army_sides`, REBEL_SETUP #1 and the INNARDS bool #2,

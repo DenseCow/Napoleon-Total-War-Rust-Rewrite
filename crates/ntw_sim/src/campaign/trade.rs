@@ -109,30 +109,53 @@ impl CampaignModel {
 }
 
 impl CampaignModel {
-    /// A faction's commodity supply this turn, per commodity. With the trade nodes known (map
-    /// attached): what its navies gather at the nodes ([`Self::node_supply`]), minus the nodes whose
-    /// loaded domestic route home is blockaded. Otherwise the volumes its open domestic routes
-    /// bring home. `None` when neither is available (then the international volumes stand).
+    /// A faction's commodity supply this turn, per commodity, as the trade split reads it (`0x00BC26D0`).
+    /// With the trade nodes known (map attached): what its navies gather at the nodes
+    /// ([`Self::node_supply`]), minus the nodes whose loaded domestic route home is blockaded. Otherwise
+    /// the volumes its open domestic routes bring home. Either way a domestic route brings home its volume
+    /// less what the raiders take of it ([`Self::domestic_net_volumes`], `0x00B1D1C0` at `0x00BC2D6C`,
+    /// CONFIRMED): the gathering at a node with a route home is summed per commodity first, as the route
+    /// holds it. `None` when neither is available (then the international volumes stand).
     pub fn trade_supply(&self, faction: FactionId) -> Option<Vec<u32>> {
+        self.supply_with(faction, true)
+    }
+
+    /// The faction's part of the price update's supply S: [`Self::trade_supply`] before the raids, as the
+    /// price update reads the fleets' gathering itself (`0x00BC9DE0` at `0x00BCBBD3`, per navy at its
+    /// position), not the routes' net volumes (CONFIRMED).
+    pub fn price_supply(&self, faction: FactionId) -> Option<Vec<u32>> {
+        self.supply_with(faction, false)
+    }
+
+    fn supply_with(&self, faction: FactionId, after_raids: bool) -> Option<Vec<u32>> {
         let n = self.world.commodity_prices.len();
         let mut supply = vec![0u32; n];
+        let view = if after_raids { self.raid_view(faction) } else { super::commerce_raid::RaidView::default() };
+        let mut add = |c: usize, v: u32| {
+            if let Some(s) = supply.get_mut(c) {
+                *s = s.saturating_add(v);
+            }
+        };
         if let Some(list) = self.node_supply(faction) {
             let routes = self.world.domestic_trade.get(&faction);
+            let mut gathered: std::collections::BTreeMap<(u32, usize), u32> = std::collections::BTreeMap::new();
             for (node, c, v) in list {
-                let home = routes.and_then(|r| r.iter().find(|p| p.waypoints.first().is_some_and(|w| w.from == node)));
-                if home.is_some_and(|p| self.trade_path_blockaded(faction, p)) {
-                    continue;
-                }
-                if let Some(s) = supply.get_mut(c) {
-                    *s = s.saturating_add(v);
+                let e = gathered.entry((node, c)).or_insert(0);
+                *e = e.saturating_add(v);
+            }
+            for ((node, c), v) in gathered {
+                match routes.and_then(|r| r.iter().find(|p| p.waypoints.first().is_some_and(|w| w.from == node))) {
+                    Some(home) if self.trade_path_blockaded(faction, home) => {}
+                    Some(home) => add(c, v.saturating_sub(super::commerce_raid::raided_volume(&self.route_raid_shares(&view, faction, home), v))),
+                    None => add(c, v),
                 }
             }
             return Some(supply);
         }
         let routes = self.world.domestic_trade.get(&faction)?;
-        for r in routes.iter().filter(|r| !self.trade_path_blockaded(faction, r)) {
-            for (s, v) in supply.iter_mut().zip(&r.volumes) {
-                *s = s.saturating_add(*v);
+        for r in routes {
+            for (c, v) in self.domestic_net_volumes(&view, faction, r, &r.volumes).into_iter().enumerate() {
+                add(c, v);
             }
         }
         Some(supply)
@@ -248,7 +271,9 @@ impl CampaignModel {
 
     /// The hard-coded extra of `0x00BB3490` (CONFIRMED; the campaign's [`home_trade_faction`](super::features::CampaignFeatures::home_trade_faction)): in `spa_napoleon` the faction
     /// `spa_france` also earns `Σ domestic volume × price` over its domestic routes (those whose last
-    /// waypoint is in the faction's capital: `0x00A8B5A0`, region == faction `+0x72C`) minus
+    /// waypoint is in the faction's capital: `0x00A8B5A0`, region == faction `+0x72C`), each volume the
+    /// route's net one (`0x00B1D1C0` at `0x00BB362F`: 0 when blockaded, less what the raiders take,
+    /// [`Self::domestic_net_volumes`], CONFIRMED) minus
     /// `Σ current volume × price` (`0x008AFAA0`) over every international route of the faction, blockaded
     /// or not, with or without an agreement: the `routes` of each importer
     /// ([`super::economy::trade_route_importer_paths`]) with this turn's volumes ([`Self::trade_path_volumes`];
@@ -272,10 +297,11 @@ impl CampaignModel {
             volumes.iter().zip(&self.world.commodity_prices).map(|(v, p)| i64::from(*v) * i64::from(*p)).sum()
         };
         let capital = self.world.capital(faction);
+        let view = self.raid_view(faction);
         let home: i64 = domestic
             .iter()
             .filter(|r| r.waypoints.last().is_some_and(|w| Some(w.region) == capital))
-            .map(|r| value(&r.volumes))
+            .map(|r| value(&self.domestic_net_volumes(&view, faction, r, &r.volumes)))
             .sum();
         let exported: i64 = routes
             .iter()
@@ -684,7 +710,8 @@ impl CampaignModel {
     /// every path reaches the tail at `0x00BCE75A` (CONFIRMED: the jumps at `0x00BCC621` / `0x00BCD6B2`),
     /// which writes the trade income of every listed faction's running economics record
     /// (`0x00BBD7C0(2)` at `0x00BCE78E`, the world list +0x2C / +0x30: not the rebels, out-of-game
-    /// factions included).
+    /// factions included). The raid takes rebuilt by the update stand booked as each faction's income
+    /// category 9 ([`super::economy::book_raid_income`]).
     pub fn update_commodity_prices_with(&mut self, shift_history: bool) {
         #[cfg(test)]
         PRICE_UPDATES.with(|u| u.borrow_mut().push(shift_history));
@@ -694,6 +721,10 @@ impl CampaignModel {
             if !self.world.is_rebel_faction(faction) {
                 super::economy::refresh_running_income(self, faction, super::economy::RunningIncome::Trade);
             }
+        }
+        let factions: Vec<FactionId> = self.world.factions.keys().copied().collect();
+        for faction in factions {
+            super::economy::book_raid_income(self, faction);
         }
     }
 
@@ -712,7 +743,7 @@ impl CampaignModel {
         }
         let mut s = vec![0u64; n];
         for f in self.world.factions.keys() {
-            for (c, v) in self.trade_supply(*f).unwrap_or_default().into_iter().enumerate().take(n) {
+            for (c, v) in self.price_supply(*f).unwrap_or_default().into_iter().enumerate().take(n) {
                 s[c] += u64::from(v);
             }
         }

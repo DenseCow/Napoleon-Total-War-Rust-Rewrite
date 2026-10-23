@@ -400,6 +400,9 @@ impl ScriptHost {
                 c.character = Some(agent.raw());
                 c.faction = w.characters.get(agent).and_then(|ch| faction_of(ch.faction));
             }
+            // The context answers only its candidate holder (vtable 0x01358184 +0x48, 0x0044A500); its
+            // faction, region and character getters are the null stubs (CONFIRMED).
+            CampaignEvent::HistoricalEvents => c.historical_events = true,
             CampaignEvent::StanceChanged { .. } => {}
             CampaignEvent::GovernmentChanged { .. }
             | CampaignEvent::ConstructionItemDropped { .. }

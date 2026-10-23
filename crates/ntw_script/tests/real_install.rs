@@ -222,3 +222,39 @@ fn eur_napoleon_looting_reaches_the_looter_trait_trigger() {
         st.character_log
     );
 }
+
+/// The install's `HistoricalEvents` handlers (`export_historic_events.lua`, one per `events` row) run
+/// at the round start: on the 1812_war date (`IsTriggerableHistoricalEvent(12, "1812_war", 1812, ...)`,
+/// the only event of that date) the human France gets that event and no other.
+#[test]
+fn eur_napoleon_historical_events_come_from_the_scripts() {
+    use ntw_sim::campaign::events::{CampaignEvent, CampaignMessage};
+    let dir = data_dir();
+    if !dir.join("campaigns").join("eur_napoleon").join("startpos.esf").is_file() {
+        eprintln!("skipped: no install at {}", dir.display());
+        return;
+    }
+    let db = ntw_data::GameDatabase::from_install(&dir).expect("DB");
+    let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
+    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+    let mut loaded = ntw_campaign::source::open(files, ntw_campaign::source::Start::New("eur_napoleon", None), &db).expect("open eur_napoleon").loaded;
+    assert!(loaded.set_human("france"));
+    let france = loaded.model.faction_by_key("france").expect("france").id;
+    let per_year = loaded.model.calendar.turns_per_year;
+    loaded.model.calendar.date = ntw_sim::campaign::historical_events::event_date(1812, 12, per_year).expect("a date");
+    let source = ScriptSource::from_install(&dir).expect("open packs");
+    let mut host = ScriptHost::new(loaded.model, "france", source).unwrap();
+    host.load_campaign("eur_napoleon").expect("scripts load");
+    host.open_campaign(ScriptContext::for_faction("france"), CampaignOpening::NewCampaign, &loaded.script_values);
+    let started = host.start_campaign();
+    let (_, report) = started.iter().find(|(e, _)| *e == CampaignEvent::HistoricalEvents).expect("the event fires");
+    assert_eq!((report.handlers, report.errors.clone()), (8, vec![]), "one handler per vanilla row");
+    let got: Vec<_> = started
+        .iter()
+        .filter_map(|(e, _)| match e {
+            CampaignEvent::Message { recipient, message: CampaignMessage::HistoricalEvent { event } } => Some((*recipient, event.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(got, [(france, "1812_war")]);
+}

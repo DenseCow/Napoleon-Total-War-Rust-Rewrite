@@ -211,6 +211,38 @@ fn a_waiting_call_pauses_the_turn_steps() {
     assert!(m.step().is_some(), "the steps go on after the answer");
 }
 
+/// A call to war asked by a `FactionRoundStart` handler (`force_declare_war`) does not split the round
+/// start (`0x0096C050` runs to its end in one call: `0x008F5990`, then the rebels' `0x008F1F60`): the
+/// historical events and the rebels' `FactionRoundStart` come before the pause, the candidates are
+/// freed, and no save falls between the two steps.
+#[test]
+fn a_call_asked_during_the_round_start_waits_until_the_round_start_ends() {
+    const REBELS: FactionId = FactionId(9);
+    let mut m = model(&[A, C]);
+    m.world.factions.insert(REBELS, super::faction(REBELS, "", 0, GovernmentType::AbsoluteMonarchy));
+    m.form_alliance(C, B).unwrap();
+    m.turn.queue = VecDeque::from([TurnStep::RoundStart, TurnStep::FactionStart(B)]);
+    let ev = m.step().unwrap();
+    assert!(!ev.iter().any(|e| matches!(e, CampaignEvent::FactionRoundStart { faction: REBELS })), "the rebels' event comes last");
+    assert!(m.historical_candidates.is_some());
+    // The turn state alone would allow a save in A's turn, so only the open candidates refuse it.
+    m.turn.in_turn = true;
+    m.turn.current = Some(A);
+    assert!(!m.can_save(A), "no save between the round start's two steps");
+    m.turn.in_turn = false;
+    m.turn.current = None;
+    // A handler of the events just posted declares a war that asks the human ally C.
+    m.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
+    assert_eq!(m.pending_ally_war_calls.len(), 1);
+    let ev = m.step().expect("the round start's second step runs while the call waits");
+    assert!(ev.iter().any(|e| matches!(e, CampaignEvent::FactionRoundStart { faction: REBELS })));
+    assert_eq!(m.historical_candidates, None, "the candidates do not outlive the round start");
+    assert_eq!(m.turn.queue, [TurnStep::FactionStart(B)]);
+    assert!(m.step().is_none(), "then the turn waits for the answer");
+    answer(&mut m, Some(B), true);
+    assert!(m.step().is_some());
+}
+
 /// The waiting call is part of the state hash.
 #[test]
 fn a_waiting_call_changes_the_state_hash() {

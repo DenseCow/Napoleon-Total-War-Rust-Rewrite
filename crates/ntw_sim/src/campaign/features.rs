@@ -79,6 +79,12 @@ pub struct CampaignFeatures {
     /// The AI capture choice's liberation rules (`0x00D8C8B0` steps 1 and 2, CONFIRMED in `spa_napoleon`;
     /// [`super::capture_ai`]). `None`: an AI capturer never liberates.
     pub ai_capture_liberation: Option<AiCaptureLiberation>,
+    /// An AI makes no peace with a human whose attitude total from the AI is at most this
+    /// ([`super::CampaignModel::peace_attitude`] gives −1). CONFIRMED: `0x00D63260` (the AI's peace
+    /// attitude, attitude virtual `+0x2B0`) returns −1 first when the campaign key is `spa_napoleon`,
+    /// the other faction is human and the AI's attitude total towards it is below −199 (set to −200 by
+    /// `ntw_campaign::features::original`). `None`: no such refusal.
+    pub ai_peace_refusal_attitude: Option<i32>,
 }
 
 impl Default for CampaignFeatures {
@@ -100,6 +106,7 @@ impl Default for CampaignFeatures {
             peace_access_grants: Vec::new(),
             effects_technologies_hidden: false,
             ai_capture_liberation: None,
+            ai_peace_refusal_attitude: None,
         }
     }
 }

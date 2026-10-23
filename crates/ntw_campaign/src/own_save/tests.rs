@@ -60,6 +60,7 @@ fn region(id: u32, owner: FactionId) -> Region {
         garrison: None,
         fleet: None,
         siege: Default::default(),
+        traits: Vec::new(),
     }
 }
 
@@ -896,12 +897,16 @@ fn the_stored_demand_round_trips_and_a_version_13_save_builds_it() {
     assert_ne!(old.world.regions[&RegionId(1)].commodity_demand, [3]);
 }
 
-/// classfactor: each population class keeps its war factor (class +0x20); an older save's
-/// `(class, education, resistance)` reads it as 0.
+/// classfactor / classslots: each population class keeps its war factor (class +0x20), its bankruptcy and
+/// crackdown factors (+0x28, +0x54), its stored sums and its unrest; an older save's
+/// `(class, education, resistance)` reads the rest as the class's defaults (cause 7).
 #[test]
 fn population_classes_keep_their_war_factor_and_older_saves_read_zero() {
     use ntw_sim::campaign::PopulationClassState;
-    let class = PopulationClassState { class: "lower".into(), education: 4, resistance: -2, war: -15 };
+    let mut class = PopulationClassState { education: 4, resistance: -2, war: -15, bankruptcy: -8, crackdown: 3, ..PopulationClassState::new("lower") };
+    class.happiness[0] = 5;
+    (class.positive, class.negative, class.repression) = (5, -9, 2);
+    (class.riot_chance, class.stage, class.unrest, class.demand, class.cause) = (40, 1, 1, 3, 0);
     let mut model = made_up_model();
     model.world.regions.get_mut(&RegionId(1)).unwrap().class_bases = vec![class.clone()];
     let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
@@ -909,9 +914,11 @@ fn population_classes_keep_their_war_factor_and_older_saves_read_zero() {
     let loaded = read(&write(&info(), &data).expect("write"), &db).expect("read");
     assert_eq!(loaded.model.world.regions[&RegionId(1)].class_bases, vec![class.clone()]);
     let text = ron::to_string(&class).expect("encode");
-    assert_eq!(text, "(\"lower\",4,-2,-15)");
+    assert!(text.starts_with("(\"lower\",4,-2,-15,-8,3,"), "{text}");
+    assert_eq!(ron::from_str::<PopulationClassState>(&text).expect("decode"), class);
     let older: PopulationClassState = ron::from_str("(\"lower\",4,-2)").expect("decode");
-    assert_eq!(older, PopulationClassState { war: 0, ..class });
+    assert_eq!(older, PopulationClassState { education: 4, resistance: -2, ..PopulationClassState::new("lower") });
+    assert_eq!(older.cause, 7);
 }
 
 /// classfactor: a class an older own save stored as `(class, education, resistance)` reads with war 0, and
@@ -920,7 +927,7 @@ fn population_classes_keep_their_war_factor_and_older_saves_read_zero() {
 fn population_class_reads_an_older_three_tuple() {
     use ntw_sim::campaign::PopulationClassState;
     let old: PopulationClassState = ron::from_str(r#"("lower", 3, -2)"#).expect("an older class reads");
-    assert_eq!(old, PopulationClassState { class: "lower".into(), education: 3, resistance: -2, war: 0 });
+    assert_eq!(old, PopulationClassState { education: 3, resistance: -2, ..PopulationClassState::new("lower") });
     let now = PopulationClassState { war: -7, ..old };
     let text = ron::to_string(&now).expect("a class writes");
     assert_eq!(ron::from_str::<PopulationClassState>(&text).expect("a class reads back"), now);

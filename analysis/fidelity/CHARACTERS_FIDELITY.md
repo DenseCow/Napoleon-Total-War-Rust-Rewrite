@@ -931,7 +931,10 @@ Model: `ntw_script::characters` reads `FamilyMember::male` of member 0.
 (`0x0097A620`) and `force_garrison_infiltration_success_for_human` (`0x0097A8F0`); `0x0094ACB0` / `0x0094CCB0` use
 them only when the agent's faction is human (+0x6E0): outcome 1 without a roll. Both false in every vanilla save
 (`orig_fr_t1`: #17..#22 = false, true, true, false, false, false). Model: `World::force_success_for_human`,
-`forced_or_roll`.
+`forced_or_roll`. The loader reads #20 / #21 / #22 (+0xEA / +0xEB / +0xEC) only from a record version above 8
+(`CMP AL,0x8; JBE` at `0x00997F5F`, CONFIRMED by disassembly); an older record leaves them as they were. Ours
+(`details::switch_slots`, classslots) reads them only above 8 (test
+`each_switch_needs_a_record_above_its_version`); before it read #20 / #22 at any version.
 
 **The agent script events (CONFIRMED fire sites, `evt:`):** `SufferSpyingAttempt` (`0x0094C540`, the watched
 force's commander, before the roll), `SpyingAttemptSuccess` (`0x0094C5A6`), `CharacterFactionSpyAttemptSuccessful`

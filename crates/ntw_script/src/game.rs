@@ -115,6 +115,19 @@ pub(crate) fn arg_f32(args: &MultiValue, i: usize) -> Option<f32> {
     }
 }
 
+/// Argument `i` as the exe's integer reader `0x010556D0` reads it (CONFIRMED): a Lua number only
+/// (the f32 `lua_Number`, DESIGN §3.5) rounded ties to even, out of range the x87 "integer
+/// indefinite" `i32::MIN`; any other type is `None` (the reader's type error).
+pub(crate) fn arg_int(args: &MultiValue, i: usize) -> Option<i32> {
+    let x = match args.get(i)? {
+        Value::Integer(n) => *n as f32,
+        Value::Number(n) => *n as f32,
+        _ => return None,
+    };
+    let r = x.round_ties_even();
+    Some(if (-2_147_483_648.0..2_147_483_648.0).contains(&r) { r as i32 } else { i32::MIN })
+}
+
 /// The type the exe's argument readers name in their script error ("found type %s", `lua_typename`
 /// of the stack top, Lua 5.1): a missing argument finds the slot below the arguments, the called
 /// function itself (see `faction_key_args`, ui/campaign/diplomacy.rs); a light userdata is
@@ -134,7 +147,7 @@ pub(crate) fn lua_found_type(v: Option<&Value>) -> &'static str {
 /// The exe logs it on every call, and its cleared ok flag silences the later argument reads of
 /// that script context too (the ORIGINAL BUG noted at `CreateFromLayout`, ui/host.rs); ours fails
 /// just the call.
-fn type_error_once(s: &Shared, name: &'static str, want: &str, found: &'static str) {
+pub(crate) fn type_error_once(s: &Shared, name: &'static str, want: &str, found: &'static str) {
     let mut st = s.borrow_mut();
     if st.type_errors_logged.insert((name, found)) {
         st.log.push(format!("ERROR game_interface:{name}: Trying to retrieve type {want}, found type {found} (logged once)"));
@@ -331,17 +344,7 @@ fn dispatch(lua: &Lua, s: &Shared, name: &'static str, args: &MultiValue) -> mlu
         // garrison colonel, a human target's `FactionDestroyed` and defeat movie) are queued for the host,
         // which fires them once the calling Lua returns (`ScriptHost::fire_script_events`).
         "grant_faction_handover" => {
-            let int = |i: usize| -> Option<i32> {
-                let x = match args.get(i)? {
-                    Value::Integer(n) => *n as f32,
-                    Value::Number(n) => *n as f32,
-                    _ => return None,
-                };
-                let r = x.round_ties_even();
-                // Out of range is the x87 "integer indefinite".
-                Some(if (-2_147_483_648.0..2_147_483_648.0).contains(&r) { r as i32 } else { i32::MIN })
-            };
-            let (Some(killer), Some(target), Some(min_turn), Some(max_turn)) = (arg_str(args, 1), arg_str(args, 2), int(3), int(4)) else {
+            let (Some(killer), Some(target), Some(min_turn), Some(max_turn)) = (arg_str(args, 1), arg_str(args, 2), arg_int(args, 3), arg_int(args, 4)) else {
                 return bad_args(s, text);
             };
             let mut st = s.borrow_mut();
@@ -608,6 +611,37 @@ fn dispatch(lua: &Lua, s: &Shared, name: &'static str, args: &MultiValue) -> mlu
             if let (Some(a), Some(b)) = (a, b) {
                 let mut st = s.borrow_mut();
                 st.model.world.zoom_limit = ntw_sim::campaign::ZoomLimit::from_script(a, b);
+                st.log.push(text);
+            }
+        }
+
+        // set_map_bounds(left, top, right, bottom): CONFIRMED (`0x00977C10`): four numbers read off
+        // the top of the Lua stack with the reader `0x01055700` (the last argument first; a real Lua
+        // number only), stored unchecked as the camera target's west, north, east and south bounds
+        // (episodic restrictions +0xAC, +0xB8, +0xB4, +0xB0); `MapBounds::from_script`. Saved with
+        // the campaign; the camera's key steps clamp the target to them. The tut scripts call it.
+        // ORIGINAL BUG: on a non-number argument `0x00977C10` logs the type error and still stores
+        // all four, the unread ones holding stack garbage (uninitialised locals, or the lua_State
+        // pointer's bits for `left`), so the bounds become arbitrary. Ours logs the error once and
+        // keeps the bounds.
+        "set_map_bounds" => {
+            let n = args.len();
+            let read = |back: usize| match n.checked_sub(back).and_then(|i| args.get(i)) {
+                Some(Value::Number(x)) => Some(*x as f32),
+                Some(Value::Integer(x)) => Some(*x as f32),
+                v => {
+                    type_error_once(s, name, "number", lua_found_type(v));
+                    None
+                }
+            };
+            // The reader skips the later reads once one cleared its ok flag: one error per call.
+            let bottom = read(1);
+            let right = bottom.and_then(|_| read(2));
+            let top = right.and_then(|_| read(3));
+            let left = top.and_then(|_| read(4));
+            if let (Some(left), Some(top), Some(right), Some(bottom)) = (left, top, right, bottom) {
+                let mut st = s.borrow_mut();
+                st.model.world.map_bounds = ntw_sim::campaign::MapBounds::from_script(left, top, right, bottom);
                 st.log.push(text);
             }
         }

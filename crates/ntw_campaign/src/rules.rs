@@ -14,10 +14,16 @@ const NO_RIVAL_FACTION: &str = "pirates";
 
 /// Reports, once at load, a link a row of `table` (the row of `row`) cannot make because `key` is not
 /// a key of `target`: the exe's table lookup logs "In table %S: '%S' is not a valid key for this
-/// table" there (e.g. `0x00F21A30`) and drops the link. Caveat: the unit-tech linker (`0x00EA9B10`) drops a
+/// table" there (e.g. `0x00F21A30`), naming the table it searched (`target`), and drops the link. Caveat: the unit-tech linker (`0x00EA9B10`) drops a
 /// row naming no built unit with no log at all; ours logs that case too (a deliberate extra, once per load).
 fn invalid_key(table: &str, row: &str, target: &str, key: &str) {
-    log::warn!("In table {table}: '{key}' is not a valid key of {target} (row of {row}); the link is dropped");
+    log::warn!("{}", invalid_key_message(table, row, target, key));
+}
+
+/// The line [`invalid_key`] logs: the searched table first, as the exe's, then the table and row that
+/// made the link.
+fn invalid_key_message(table: &str, row: &str, target: &str, key: &str) -> String {
+    format!("In table {target}: '{key}' is not a valid key for this table (link from {table}, row of {row}); the link is dropped")
 }
 
 /// Copies every table the campaign rules use, with `campaign`'s per-campaign variable overrides
@@ -55,6 +61,7 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
                 unit_cap: u.unit_cap,
                 travel_speed: u.unknown_44,
                 unit_resource: u.recruitment_scope.clone().filter(|s| !s.is_empty()),
+                top_gallants: c.naval_stats.get(&u.key).is_some_and(|s| s.c60),
             },
         );
     }
@@ -312,6 +319,31 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
         r.government_classes.insert(g.key.clone(), (g.upper_class.clone(), g.lower_class.clone()));
         r.government_ranks.insert(g.key.clone(), g.value);
     }
+    for p in c.population_classes.iter() {
+        r.class_unrest_paths.insert(p.key.clone(), (p.strikes, p.demands));
+    }
+    // `unrest_cause_to_demands`: the exe keys each row by its cause and kind names joined (`0x008EB3F0`); a name
+    // that is not one of the exe's fixed causes, kinds or demands can never be looked up, so its row is dropped.
+    {
+        use ntw_sim::campaign::population::{UNREST_CAUSES, UNREST_DEMANDS, UNREST_KINDS};
+        let table = "unrest_cause_to_demands";
+        let index = |names: &[&str], key: &str, target: &str, row: &str| {
+            let i = names.iter().position(|n| *n == key).map(|i| i as u32);
+            if i.is_none() {
+                invalid_key(table, row, target, key);
+            }
+            i
+        };
+        for d in c.unrest_demands.iter() {
+            let row = format!("{}{}", d.cause, d.kind);
+            let cause = index(&UNREST_CAUSES, &d.cause, "the unrest causes", &row);
+            let kind = index(&UNREST_KINDS, &d.kind, "the unrest kinds", &row);
+            let demand = index(&UNREST_DEMANDS, &d.demand, "the unrest demands", &row);
+            if let (Some(cause), Some(kind), Some(demand)) = (cause, kind, demand) {
+                r.unrest_demands.insert((cause, kind), demand);
+            }
+        }
+    }
     for x in c.religion_relations.iter() {
         r.religion_relations.insert((x.religion.clone(), x.other.clone()), x.value);
         r.religion_attitudes.insert((x.religion.clone(), x.other.clone()), x.attitude);
@@ -342,6 +374,8 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
             r.agent_portrait_folders.insert(a.key.clone(), folder.clone());
         }
     }
+    // The agent action lists push `can_exchange` only with its row (`0x009D1190` / `0x009D1540`).
+    r.no_exchange_ability = !c.abilities.iter().any(|a| a.key == "can_exchange");
     // Each faction's unit set (`0x00F74CB0`): its grouping's units, then its own permission rows in table order.
     for f in &db.factions {
         let grouping = c.unit_groupings.iter().filter(|g| g.grouping == f.faction_group).map(|g| g.unit.as_str());
@@ -696,8 +730,17 @@ pub fn fill_ship_guns(rules: &mut CampaignRules, db: &GameDatabase, world: &ntw_
 
 #[cfg(test)]
 mod tests {
+    use super::invalid_key_message;
     use ntw_data::campaign::{AiPersonalityRecord, AiPersonalityTunableRecord};
     use ntw_data::{GameDatabase, Table};
+
+    #[test]
+    fn an_invalid_key_line_names_the_table_searched_then_the_junction_and_row() {
+        assert_eq!(
+            invalid_key_message("technology_required_building_levels_junctions", "tech_a", "building_levels", "lvl_x"),
+            "In table building_levels: 'lvl_x' is not a valid key for this table (link from technology_required_building_levels_junctions, row of tech_a); the link is dropped"
+        );
+    }
 
     /// aicapture review: the exe's loader `0x00DD5870` keeps the FIRST record flagged default (`0x00DD58DC`)
     /// and applies a row only to the default (to all, pass 1) or to a record not flagged default (pass 2), so

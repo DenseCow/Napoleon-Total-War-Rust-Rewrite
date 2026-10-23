@@ -49,6 +49,8 @@ pub fn original(key: &str) -> CampaignFeatures {
             grantee: "spa_britain".into(),
             turns: -1,
         }];
+        // The AI peace attitude `0x00D63260`: no peace with a human the AI hates (total below −199).
+        f.ai_peace_refusal_attitude = Some(-200);
         // The AI capture choice `0x00D8C8B0`: Portugal liberates Spain; Britain may, by the French border test.
         f.ai_capture_liberation = Some(AiCaptureLiberation {
             liberator: "spa_portugal".into(),
@@ -98,6 +100,7 @@ mod tests {
         assert_eq!((lr.exempt_looter.as_deref(), lr.factor.as_str(), lr.value), (Some("spa_france"), "abandoned_ally_in_war", -50));
         let [grant] = spa.peace_access_grants.as_slice() else { panic!("one peace access grant") };
         assert_eq!((grant.granters.as_slice(), grant.grantee.as_str(), grant.turns), (&["spa_spain".to_owned(), "spa_portugal".to_owned()][..], "spa_britain", -1));
+        assert_eq!(spa.ai_peace_refusal_attitude, Some(-200));
         let lib = spa.ai_capture_liberation.as_ref().expect("AI capture liberation");
         assert_eq!((lib.liberator.as_str(), lib.contested_liberator.as_str(), lib.target.as_str(), lib.rival.as_str()), ("spa_portugal", "spa_britain", "spa_spain", "spa_france"));
         let mp = original("mp_eur_napoleon");

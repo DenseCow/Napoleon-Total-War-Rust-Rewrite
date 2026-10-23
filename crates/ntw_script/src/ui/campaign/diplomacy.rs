@@ -621,8 +621,9 @@ pub(super) fn negotiation_action_name(item: &NegotiationItem) -> &'static str {
 ///
 /// - **regions, technologies, the payment and join war** are the model's records:
 ///   `CampaignCommand::AcceptDeal` applies them (`0x00C18BF0` region transfer, `0x00C18CF0` technology
-///   grant, `0x00C18A70` payment, `0x00C188F0` join war; `CampaignModel::accept_deal`). The payment's amount is the one stored when it was proposed,
-///   already capped there (`CampaignModel::proposed_payment`, `0x00C4AB20`).
+///   grant, `0x00C18A70` payment, `0x00C188F0` join war; `CampaignModel::accept_deal`). The
+///   payment's amount is the one stored when it was proposed, already capped there
+///   (`CampaignModel::proposed_payment`, `0x00C4AB20`).
 /// - the rows the UI still holds, the first time only (a row marked applied is skipped, so a row
 ///   applies at most once; see [`DealRow`]), become one `CampaignCommand::Diplomacy` each
 ///   ([`deal_item_command`]). INFERRED mapping from `negotiation_action_name` onto
@@ -1362,10 +1363,9 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
         }
         Ok(())
     });
-    // ProposeDeal(threat): the AI's answer (`CampaignModel::ai_refuses_deal`: the regions, technology
-    // and payment records evaluated as the exe's `EvaluateProposedNegotiationDealAI 0x00AA5ED0`; every
-    // deal with a join-war item is declined, PROVISIONAL: the exe's join-war goal and value are not
-    // ported, see `CampaignModel::ai_accepts_deal`) — declined as `DeclineOffer` does
+    // ProposeDeal(threat): the AI's answer (`CampaignModel::ai_refuses_deal`: the regions, technology,
+    // payment, peace and join-war records evaluated as the exe's `EvaluateProposedNegotiationDealAI
+    // 0x00AA5ED0`, see `CampaignModel::ai_accepts_deal` for its PROVISIONAL leaves) — declined as `DeclineOffer` does
     // (the evaluator calls `0x00C1F210`), else accepted at once (`0x00C114B0`). The proposal itself
     // is a command (`CampaignCommand::ProposeDeal`): it stores the threat flag (+0x2B8), and the AI
     // recipient's evaluation keeps its relation belief, which the campaign director reads later.

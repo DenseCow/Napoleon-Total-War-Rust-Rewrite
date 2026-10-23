@@ -255,8 +255,16 @@ fn exemption_town_wealth_and_bankruptcy() {
     assert_eq!(economy::settle_round(&mut m, A, &mut Vec::new()), economy::Settlement::Paid);
     assert_eq!(m.world.regions[&RegionId(10)].town_wealth_growth, 25);
     assert_eq!(m.world.regions[&RegionId(10)].town_wealth, 1025);
-    m.world.regions.get_mut(&RegionId(10)).unwrap().discontent_growth = -5000;
+    // A region whose lower class has unrest grows by −town_wealth_growth_discontent_reduction (#18, which the
+    // region's round end sets right before its town wealth, `0x00AB42F0`): a made-up 5000 empties it.
+    Arc::make_mut(&mut m.rules).variables.insert("town_wealth_growth_discontent_reduction".into(), 5000.0);
+    m.world.regions.get_mut(&RegionId(10)).unwrap().class_bases = vec![
+        PopulationClassState { unrest: 1, negative: -10, ..PopulationClassState::new("lower") },
+        PopulationClassState::new("upper"),
+        PopulationClassState::new("middle"),
+    ];
     economy::settle_round(&mut m, A, &mut Vec::new());
+    assert_eq!(m.world.regions[&RegionId(10)].discontent_growth, -5000);
     assert_eq!(m.world.regions[&RegionId(10)].town_wealth, 0);
 
     // Cannot pay (treasury + income < upkeep).
@@ -583,6 +591,7 @@ fn event_order_is_stable() {
         FactionRoundStart { faction: B },
         FactionRoundStart { faction: A },
         FactionRoundStart { faction: C },
+        HistoricalEvents,
         CharacterTurnStart { character: ch(101) },
         SlotTurnStart { region: r(11), slot: 0 },
         RegionTurnStart { region: r(11) },

@@ -19,7 +19,7 @@
 //!   min(d, max) / max)) × 100, d = his distance to the capital, max =
 //!   `character_recruitment_max_distance` (1000).
 
-use super::ids::{CharacterId, FactionId, ForceId, UnitId};
+use super::ids::{CharacterId, FactionId, ForceId, RegionId, UnitId};
 use super::world::{CampaignModel, CampaignUnit, Character, CharacterKind, MilitaryForce};
 use super::commands::CommandError;
 use super::details::CharacterDetails;
@@ -448,23 +448,34 @@ impl CampaignModel {
         }
     }
 
-    /// After `force`'s command passed from `from` to another character (a hire or a field promotion):
-    /// the new commander holds the place `from` held inside a settlement or port
-    /// ([`super::Character::garrisoned_in`]), and `from` rides on with his unit, inside through the
-    /// force and not one of the settlement's residents ([`super::World::residence_of`]). The command
-    /// changes touch no residence list: the General hire `0x00A164C0` adds the unit (`0x008CFBE0`)
-    /// and picks the commander again (`0x008D2FA0`, whose one indirect call is the campaign's event
-    /// at +0xB40), and neither they nor the admiral hire `0x00A16110` (with `0x008B8E50`) nor the
-    /// field promotions `0x008E1C20` / `0x008E2260` (same `0x008CFBE0` + `0x008D2FA0` steps; their
-    /// indirect calls are the unit's, the force's and the campaign's events) reach the residence's
-    /// list append `0x008CFA70` or its leave `0x00B4EE70` (CONFIRMED, decompiled and call graphs to
-    /// depth 3-4); the residence keeps the army at +0xC0 (the enter `0x00B4E760`).
-    fn pass_garrison_on(&mut self, from: CharacterId, force: ForceId) {
+    /// After `force`'s command passed from `from` to another character (a hire, a field promotion or
+    /// the commander pick [`Self::pick_commander`]): the new commander holds the place `from` held
+    /// inside a settlement ([`super::Character::garrisoned_in`], the model's whole residence state:
+    /// the army's residence +0x9C stays with the force), and `from` rides on with his unit, inside
+    /// through the force and not one of the settlement's residents ([`super::World::residence_of`]).
+    /// The command changes touch no residence list: the General hire `0x00A164C0` adds the unit
+    /// (`0x008CFBE0`) and picks the commander again (`0x008D2FA0`, whose one indirect call is the
+    /// campaign's event at +0xB40), and neither they nor the admiral hire `0x00A16110` (with
+    /// `0x008B8E50`) nor the field promotions `0x008E1C20` / `0x008E2260` (same `0x008CFBE0` +
+    /// `0x008D2FA0` steps; their indirect calls are the unit's, the force's and the campaign's
+    /// events) reach the residence's list append `0x008CFA70` or its leave `0x00B4EE70` (CONFIRMED,
+    /// decompiled and call graphs to depth 3-4); the residence keeps the army at +0xC0 (the enter
+    /// `0x00B4E760`).
+    pub(crate) fn pass_garrison_on(&mut self, from: CharacterId, force: ForceId) {
+        let inside = self.world.characters.get(&from).and_then(|x| x.garrisoned_in);
+        self.pass_place_on(from, inside, force);
+    }
+
+    /// [`Self::pass_garrison_on`] with the place `from` held given: for a commander the caller noted
+    /// before he died or left (he may be gone from the world, or have his own place cleared already).
+    pub(crate) fn pass_place_on(&mut self, from: CharacterId, inside: Option<RegionId>, force: ForceId) {
         let Some(now) = self.world.forces.get(&force).and_then(|f| f.commander) else { return };
         if now == from {
             return;
         }
-        let inside = self.world.characters.get_mut(&from).and_then(|x| x.garrisoned_in.take());
+        if let Some(x) = self.world.characters.get_mut(&from) {
+            x.garrisoned_in = None;
+        }
         if let Some(x) = self.world.characters.get_mut(&now) {
             x.garrisoned_in = inside;
         }
@@ -474,7 +485,8 @@ impl CampaignModel {
     /// pays the cost, takes him out of the pool and makes him a new army with his culture's general
     /// unit (`0x0087FB30`); with `into` (an army of his faction; the interface's "recruit general"
     /// is given on an army) that army is merged into it (`0x008D2FA0`) at the army's position, where
-    /// the General takes command (the commander pick puts a General first), and the cost counts the
+    /// the General takes command (the commander pick puts a General first) and is placed there
+    /// ([`Self::place_character`]); the cost counts the
     /// distance from the capital to that army; a raiding commander's raids pass to the General
     /// ([`hand_over_raids_on_command_change`](Self::hand_over_raids_on_command_change), CONFIRMED).
     /// Without a target (PROVISIONAL, no such path in the original) the army stands at the capital,
@@ -509,7 +521,7 @@ impl CampaignModel {
         let uid = UnitId(self.world.alloc_id() as i32);
         let men = self.rules.units.get(&unit_key).map_or(1, |u| u.men.max(1));
         let unit = CampaignUnit { id: uid, unit_key, men, max_men: men, character: Some(c), officer_name: Default::default() };
-        let fid = match target {
+        let (fid, placed_at) = match target {
             Some((f, (position, garrisoned_in))) => {
                 if let Some(x) = self.world.characters.get_mut(&c) {
                     x.position = position;
@@ -522,7 +534,7 @@ impl CampaignModel {
                 if let Some(old) = old {
                     self.pass_garrison_on(old, f);
                 }
-                f
+                (f, Some(position))
             }
             None => {
                 let capital = self.world.faction_details.get(&ch.faction).and_then(|d| d.capital);
@@ -537,14 +549,22 @@ impl CampaignModel {
                         reg.garrison = Some(fid);
                     }
                 }
-                fid
+                (fid, None)
             }
         };
         self.name_new_unit(fid, uid);
+        match placed_at {
+            // `HireGeneral` `0x00A164C0`, when the army's commander changed: its zones again
+            // (`0x00A285C0`), then the General is placed where the old commander stood (`0x0096C8D0`
+            // at `0x00A165B9`), before the raid hand-over.
+            Some(at) => self.place_character(c, at),
+            // The new army at the capital (no such path in the original, see above): no placement.
+            None => {
+                self.update_hidden(c);
+                self.rebuild_force_zones(fid);
+            }
+        }
         self.hand_over_raids_on_command_change(raider, fid);
-        self.update_hidden(c);
-        // `HireGeneral` `0x00A164C0` → `0x00A285C0`: the force's zones again.
-        self.rebuild_force_zones(fid);
         Ok(vec![CampaignEvent::CharacterHired { character: c, force: fid, cost }])
     }
 
@@ -555,7 +575,8 @@ impl CampaignModel {
     /// an empty ship takes him (`0x008EDE20`), otherwise he replaces its character (`0x008B3B00` →
     /// `0x008CFBD0`), who is destroyed (`0x00A0C6F0(1)`). Then the fleet's commander is picked again
     /// (`0x008D2FA0` / `0x008B8E50` → `0x008ED2C0`, [`commander_unit`](Self::commander_unit)), so an
-    /// admiral already aboard with a higher `command_sea` keeps command; when the command changes, a
+    /// admiral already aboard with a higher `command_sea` keeps command; when the command changes and a ship's character was replaced, the new
+    /// commander is placed at the fleet ([`Self::place_character`]), and a
     /// raiding commander's raids pass to the new one
     /// ([`hand_over_raids_on_command_change`](Self::hand_over_raids_on_command_change), CONFIRMED). A fleet with no such ship
     /// (all admirals) is refused: a crash guard, not a rule of the original (`0x00A278B0` returns null
@@ -592,19 +613,36 @@ impl CampaignModel {
                 f.commander = next.or(f.commander);
             }
         }
+        // Whoever commands now holds the fleet's place; the others ride on aboard.
+        self.pass_garrison_on(lead, fleet);
+        let now = self.world.forces.get(&fleet).and_then(|f| f.commander);
+        let changed = now != Some(lead);
+        match now {
+            // A replaced ship's character, and the command changed: the new commander is placed at the
+            // noted position (`0x0096C8D0` at `0x00A162E9`), before the raid hand-over. The exe
+            // destroys the replaced character first (`0x00A16217`); ours removes him below, after the
+            // hand-over (whose raids `character_dies` would end). The sight he leaves is the one at
+            // the same spot, and the shroud only adds, so the order changes nothing seen.
+            Some(n) if old.is_some() && changed => self.place_character(n, position),
+            // No placement: an empty ship took him (`0x00A162F3`), or the command stayed
+            // (`0x00A162A6`). The pick runs `0x008F9400` (zones and sight, no hidden flag) when a
+            // ship's character was replaced (`0x008B3B00` → `0x008B8E50`, whatever it picks) or, on
+            // an empty ship, when the command changed (`0x008EDE20` → `0x008D2FA0`, which returns at
+            // `0x008D2FEF` when it did not); CONFIRMED by disassembly. PROVISIONAL: both run it only
+            // when `0x00A28F30` passed for the commander before the pick (`0x008B8E6C`, `0x008D2FB9`:
+            // he is not lifted, +0x1B7, and further tests through `0x009D3CB0` / `0x009FB9D0` /
+            // `0x00A17D20` not traced); ours always does.
+            _ if old.is_some() || changed => self.rebuild_force_zones_and_sight(fleet),
+            _ => {}
+        }
         // The raids pass to the new commander, at the noted position (`0x00A163CC` / `0x00A163DF`). When
         // the replaced character was the raider, the exe ends his raids by destroying him first (flag
         // set at `0x00A161CB`, `0x00A0C6F0`); handing over before `character_dies` leaves the same raids.
         self.hand_over_raids_on_command_change(raider, fleet);
-        // Whoever commands now holds the fleet's place; the others ride on aboard.
-        self.pass_garrison_on(lead, fleet);
         // The replaced character goes the way of any destroyed character (posts, pools, queued items).
         if let Some(old) = old {
             self.character_dies(old);
         }
-        // The fleet's commander picked again (`0x008B8E50` → `0x008F9400`): its zones again.
-        self.rebuild_force_zones(fleet);
-        self.update_hidden(c);
         Ok(vec![CampaignEvent::CharacterHired { character: c, force: fleet, cost }])
     }
 
@@ -614,8 +652,8 @@ impl CampaignModel {
     /// character gets the General (land) / admiral (naval) agent record through `0x00A1A2E0` →
     /// `0x00A1A300`, which copies the record's attributes and abilities, fires `CharacterPromoted`
     /// and re-sums his effects; a unit without a character gets a new one first (`0x00990EF0`).
-    /// He then commands the force (`0x008CFBE0`), standing where the old commander stood, and a raiding
-    /// old commander's raids pass to him
+    /// He then commands the force (`0x008CFBE0`), placed where the old commander stood when he did not
+    /// command it before ([`Self::place_character`]), and a raiding old commander's raids pass to him
     /// ([`hand_over_raids_on_command_change`](Self::hand_over_raids_on_command_change), CONFIRMED). The gate: in the original it never runs, because
     /// slot +0x40, which `CanPromoteUnit` `0x009E0AF0`, the console and the executors ask, is `0x00462CB0`
     /// (constant false) in both unit vtables (CONFIRMED, CHARACTERS_FIDELITY.md §12, field promotion gate). Ours
@@ -705,16 +743,28 @@ impl CampaignModel {
         // officer still at number -1 draws one now (an admiral from the General decks); one who drew
         // from the colonel or captain deck keeps his number, and only his pictures change folder.
         self.assign_portrait(c, new_kind.esf_name());
-        if let Some(old) = self.world.forces.get_mut(&force).and_then(|x| x.commander.replace(c)) {
+        let old = self.world.forces.get_mut(&force).and_then(|x| x.commander.replace(c));
+        if let Some(old) = old {
             self.pass_garrison_on(old, force);
+        }
+        // `0x00A1A300` gave him the new type's sight.
+        self.update_sight_radius(c);
+        // The command changed: the pick's zones and sight (`0x008D2FA0` → `0x008F9400`), a new
+        // character's `0x009D3B60` (zone and sight, land `0x008E2047`, naval `0x008E2627`), his zone
+        // again (land `0x008E1ECA` / `0x008E2094`, naval `0x008E24D0`), then he is placed where the
+        // old commander stood (`0x0096C8D0`, land `0x008E2147`, naval `0x008E24FF`), before the raid
+        // hand-over; the `0x00A285C0` at the end changes nothing more. The placement covers them all.
+        // When the unit's character already commanded there is no zone, sight or hidden step: the pick
+        // returns at `0x008D2FEF`, the placement is skipped (land `0x008E1E96`, naval `0x008E249C`) and
+        // so is that last `0x00A285C0` (land `0x008E2237`, naval `0x008E274B`: only for a commander
+        // other than the one noted on entry); `0x009D3B60` runs only on a character made for a unit
+        // that had none, who never held the command. CONFIRMED by disassembly.
+        if old != Some(c) {
+            self.place_character(c, at);
         }
         // A raiding commander's raids pass to him, at the old commander's position (land `0x008E2170` /
         // `0x008E2190`, naval `0x008E2650` / `0x008E2670`).
         self.hand_over_raids_on_command_change(raider, force);
-        // He commands the force (`0x008E1C20` / `0x008E2260` → `0x00A285C0`): its zones again.
-        self.rebuild_force_zones(force);
-        self.update_sight_radius(c);
-        self.update_hidden(c);
         Ok(vec![CampaignEvent::CharacterPromoted { character: c }])
     }
 }

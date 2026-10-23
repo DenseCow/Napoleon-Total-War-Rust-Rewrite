@@ -16,8 +16,8 @@
 //!   TechnologyPercentage (`0x00BC75F0`) and AdministrationCostPercentage (`0x00BC73C0`); NextTownName
 //!   and TurnsUntilNextTown when a next town exists (`0x00A673A0`).
 //! - Then Governor (the governorship's character, `BuildCharacterDetailsInfoTable`), Effects
-//!   (`0x009ACD10`: {Icon, Tooltip} per effect of region `+0x1CC`), the pip tables UpperOrder,
-//!   LowerOrder, PopulationGrowth, RegionWealth and TownWealth, ReligiousBreakdown and TaxExempt.
+//!   (`0x009ACD10`: {Icon, Tooltip} per effect of region `+0x1CC`, its traits' level effects, [`effect_rows`]),
+//!   the pip tables UpperOrder, LowerOrder, PopulationGrowth, RegionWealth and TownWealth, ReligiousBreakdown and TaxExempt.
 //! - A pip table holds Total, PipValue, IsPercentage and its factors as the array part (the pip
 //!   group's `init_pips` walks it with `ipairs`): {Pip, Total, Predicted, Tooltip, PredictedTooltip,
 //!   EqualPipPredictedTooltip, Positive}, RegionWealth's factors also Lost and LostTooltip.
@@ -25,6 +25,8 @@
 use super::*;
 use ntw_sim::campaign::economy::{self, ClassPublicOrder};
 use ntw_sim::campaign::population;
+use super::characters::effect_text;
+use ntw_data::effects::EffectRecord;
 
 /// The happiness slots' factor keys, in slot order (`0x008C9110` → `0x014579A4`, CONFIRMED).
 const HAPPINESS_FACTORS: [&str; 13] = [
@@ -270,6 +272,8 @@ struct DetailFacts {
     wealth_now: [i32; 10],
     predicted_upper: Option<ClassPublicOrder>,
     predicted_lower: Option<ClassPublicOrder>,
+    /// The region's effect list (region +0x1CC, `effects::region_trait_rows`).
+    effects: Vec<(String, f32)>,
 }
 
 pub(super) fn region_info_details(lua: &Lua, inner: &Inner, ui: &CampaignUi, r: RegionId) -> mlua::Result<Value> {
@@ -326,6 +330,7 @@ fn region_facts(ui: &CampaignUi, r: RegionId, details: bool) -> Option<(Facts, O
             wealth_now: reg.town_wealth_refresh.factors,
             predicted_upper,
             predicted_lower,
+            effects: ntw_sim::campaign::effects::region_trait_rows(&m.rules.effects, reg),
         }
     });
     let facts = Facts {
@@ -409,15 +414,49 @@ fn region_info_table(lua: &Lua, inner: &Inner, ui: &CampaignUi, r: RegionId, fac
     Ok(t)
 }
 
+/// The entries of a region's effect list the panel shows, in its order (`0x009ACD10`, CONFIRMED): the
+/// entries whose `effects` record has a priority above 0 (record +0x18), sorted by effect key (each entry is
+/// inserted before the first row whose key is not less, `0x004F1250`'s ordinal compare; the list's keys are
+/// unique, `effects::region_trait_rows`). An effect the table does not have is left out.
+fn shown_effects<'a>(table: &'a ntw_data::Table<EffectRecord>, rows: &'a [(String, f32)], mut unknown: impl FnMut(&str)) -> Vec<(&'a EffectRecord, f32)> {
+    let mut shown: Vec<_> = rows
+        .iter()
+        .filter_map(|(key, value)| match table.get(key) {
+            Some(rec) => (rec.priority > 0).then_some((rec, *value)),
+            None => {
+                unknown(key);
+                None
+            }
+        })
+        .collect();
+    shown.sort_by(|a, b| a.0.key.cmp(&b.0.key));
+    shown
+}
+
+/// `Effects` (`0x009ACD10`): one `{Icon, Tooltip}` per [`shown_effects`] entry (`0x009ACC40` →
+/// `0x00F88950`): the effect's picture and [`effect_text`] of loc `effects_description_<effect>` with the
+/// entry's value. Empty in vanilla, where no region has traits.
+fn effect_rows(lua: &Lua, inner: &Inner, ui: &CampaignUi, rows: &[(String, f32)]) -> mlua::Result<Table> {
+    let table = &ui.link.db.campaign.effects.effects;
+    let unknown = |key: &str| {
+        inner.log_once_for("region effect", key, || format!("UNKNOWN region effect {key:?}: not in the effects table; left out of the region panel (logged once per effect)"));
+    };
+    let t = lua.create_table()?;
+    for (i, (rec, value)) in shown_effects(table, rows, unknown).into_iter().enumerate() {
+        let e = lua.create_table()?;
+        e.set("Icon", rec.icon.clone().unwrap_or_default())?;
+        e.set("Tooltip", effect_text(&loc_required(inner, &format!("effects_description_{}", rec.key)), value))?;
+        t.set(i + 1, e)?;
+    }
+    Ok(t)
+}
+
 /// What `InitialiseRegionInfoDetails` (`0x009E69B0`) adds to the info table.
 fn region_details_extras(lua: &Lua, inner: &Inner, ui: &CampaignUi, t: &Table, facts: &Facts, details: &DetailFacts) -> mlua::Result<()> {
     if let Some(c) = details.governor {
         t.set("Governor", character_details(lua, inner, ui, c)?)?;
     }
-    // PROVISIONAL: the region's effect list (`0x009ACD10` over region +0x1CC: {Icon, Tooltip} per entry
-    // of an effect record with a positive priority, equal records merged) is not in the model, and its
-    // writer is not traced (BACKLOG §0-E): none.
-    t.set("Effects", lua.create_table()?)?;
+    t.set("Effects", effect_rows(lua, inner, ui, &details.effects)?)?;
     t.set("UpperOrder", order_pips(lua, inner, ui, details.upper.as_ref(), details.predicted_upper.as_ref())?)?;
     t.set("LowerOrder", order_pips(lua, inner, ui, details.lower.as_ref(), details.predicted_lower.as_ref())?)?;
     t.set("PopulationGrowth", growth_pips(lua, inner, ui, &facts.projection)?)?;
@@ -453,7 +492,20 @@ fn region_details_extras(lua: &Lua, inner: &Inner, ui: &CampaignUi, t: &Table, f
 
 #[cfg(test)]
 mod tests {
-    use super::{ca_float, format_s};
+    use super::{EffectRecord, ca_float, format_s, shown_effects};
+
+    /// The panel lists the region's effects sorted by key, leaving out a priority-0 effect and one the
+    /// `effects` table lacks (`0x009ACD10`). MADE-UP effects.
+    #[test]
+    fn region_effects_show_by_key_with_a_positive_priority() {
+        let rec = |key: &str, priority: i32| EffectRecord { key: key.into(), icon: Some(format!("{key}.tga")), priority };
+        let table = ntw_data::Table::from_rows(1, vec![rec("zeta", 1), rec("alpha", 3), rec("hidden", 0), rec("mid", 2)]);
+        let rows = [("zeta", 1.0), ("hidden", 4.0), ("missing", 5.0), ("mid", -2.5), ("alpha", 7.0)].map(|(k, v)| (k.to_string(), v));
+        let mut unknown = Vec::new();
+        let shown: Vec<(&str, f32)> = shown_effects(&table, &rows, |k| unknown.push(k.to_string())).into_iter().map(|(r, v)| (r.key.as_str(), v)).collect();
+        assert_eq!(shown, [("alpha", 7.0), ("mid", -2.5), ("zeta", 1.0)]);
+        assert_eq!(unknown, ["missing"]);
+    }
 
     #[test]
     fn the_engine_float_keeps_one_decimal_at_least() {

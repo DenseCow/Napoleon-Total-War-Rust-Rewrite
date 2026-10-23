@@ -46,6 +46,9 @@ fn vanilla_saves_hold_their_camera() {
         // The eur script's `set_zoom_limit(1.0, 0.61)` after the intro, saved at
         // `EPISODIC_RESTRICTIONS` #13 / #14 (writer `0x009A1070`).
         assert_eq!(loaded.model.world.zoom_limit, ntw_sim::campaign::ZoomLimit { max_tilt: 1.0, min_tilt: 0.61 }, "{name}");
+        // The map bounds at #9..#12 (`0x009968A0`): every vanilla Europe save holds this square.
+        let square = ntw_sim::campaign::MapBounds { min_x: -320.0, min_z: -320.0, max_x: 320.0, max_z: 320.0 };
+        assert_eq!(loaded.model.world.map_bounds, square, "{name}");
         let (mut lo, mut hi) = ((f32::MAX, f32::MAX), (f32::MIN, f32::MIN));
         for r in loaded.model.world.regions.values() {
             let (x, y) = (r.settlement.position.0.to_f32(), r.settlement.position.1.to_f32());

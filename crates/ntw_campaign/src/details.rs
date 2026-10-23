@@ -11,7 +11,7 @@ use ntw_sim::campaign::details::{
     AlliedWar, AttitudeFactor, CharacterDetails, CharacterTrait, FactionDetails, GovernmentPost, Governorship,
     GovernorshipTaxes, Portrait, RegularPayment, Relationship,
 };
-use ntw_sim::campaign::{CharacterId, FactionId, RegionId, World, ZoomLimit};
+use ntw_sim::campaign::{CharacterId, FactionId, MapBounds, RegionId, World, ZoomLimit};
 
 fn date_of(r: Option<&EsfRecord>) -> Option<Date> {
     let r = r?;
@@ -44,7 +44,8 @@ pub(crate) fn historical_created(model_rec: &EsfRecord) -> Vec<String> {
 
 /// The `CAMPAIGN_MODEL/EPISODIC_RESTRICTIONS` switches, in this order: #8 `display_turns` (+0xD1,
 /// UI_FIDELITY.md §5.1); #20 / #22 `force_assassination_success_for_human` /
-/// `force_garrison_infiltration_success_for_human` (CHARACTERS_FIDELITY.md §7, §8); #25
+/// `force_garrison_infiltration_success_for_human` (CHARACTERS_FIDELITY.md §7, §8) and #21
+/// `disable_rebellions_and_revolutions_worldwide` (+0xEB), all three read above version 8 (`0x00997F5F`); #25
 /// `disable_saving_game` (+0x115); #29 `set_technology_research_disabled` (+0x118); #31
 /// `set_liberation_options_disabled` (+0x124); #32 `set_ui_notification_of_victory_disabled`
 /// (+0x125). Each is (position, the record version the loader `0x009968A0` needs to exceed to read
@@ -54,17 +55,18 @@ pub(crate) fn historical_created(model_rec: &EsfRecord) -> Vec<String> {
 /// #30 is the scripts' `LUA[]` slot array, which the loader reads only when present
 /// (CAMPAIGN_DATA.md §4); every shipped start position and save has it. Without it the last two
 /// switches move up to #30 / #31, so their positions follow whether #30 is that array.
-fn switch_slots(restrictions: &EsfRecord) -> [(usize, Option<u8>); 7] {
+fn switch_slots(restrictions: &EsfRecord) -> [(usize, Option<u8>); 8] {
     let has_lua = matches!(restrictions.get(30), Some(EsfNode::RecordArray(a)) if a.name == "LUA");
     let after_lua = if has_lua { 31 } else { 30 };
-    [(8, Some(1)), (20, None), (22, None), (25, Some(0xB)), (29, Some(0xE)), (after_lua, Some(0xF)), (after_lua + 1, Some(0x10))]
+    [(8, Some(1)), (20, Some(8)), (21, Some(8)), (22, Some(8)), (25, Some(0xB)), (29, Some(0xE)), (after_lua, Some(0xF)), (after_lua + 1, Some(0x10))]
 }
 
 /// The world's switches in [`switch_slots`] order.
-fn switch_values(world: &World) -> [bool; 7] {
+fn switch_values(world: &World) -> [bool; 8] {
     [
         world.display_turns,
         world.force_success_for_human.0,
+        world.rebellions_disabled,
         world.force_success_for_human.1,
         world.saving_disabled,
         world.technology_research_disabled,
@@ -99,30 +101,64 @@ fn read_zoom_limit(r: &EsfRecord) -> ZoomLimit {
     z
 }
 
-/// Reads the [`switch_slots`] and the zoom limit into `world`. The shipped start positions carry the
-/// scripts' values (CONFIRMED: Egypt sets #31, Italy #29 and #31, the tutorial #31 and #32).
+/// The position of the first of the four map bounds ([`ntw_sim::campaign::map_bounds`]: episodic
+/// restrictions +0xAC, +0xB0, +0xB4, +0xB8, in that order) in an `EPISODIC_RESTRICTIONS` record: the
+/// loader `0x009968A0` reads them in every version right after #8 (present above version 1), so at
+/// #9..#12 (#8..#11 in a version-1 record; `0x00997B51`..`0x00997B98`); the writer `0x009A1070`
+/// writes all four (`0x009A180E`..`0x009A18E9`). CONFIRMED (every vanilla Europe save holds -320,
+/// -320, 320, 320 there).
+fn map_bounds_at(restrictions: &EsfRecord) -> usize {
+    if restrictions.version > 1 { 9 } else { 8 }
+}
+
+/// The map bounds in their record order ([`map_bounds_at`]).
+fn map_bounds_values(b: &MapBounds) -> [f32; 4] {
+    [b.min_x, b.min_z, b.max_x, b.max_z]
+}
+
+/// Reads the map bounds ([`map_bounds_at`]); a bound that is not an f32 keeps the loader's default
+/// (`0x009968A0`).
+fn read_map_bounds(r: &EsfRecord) -> MapBounds {
+    let first = map_bounds_at(r);
+    let mut v = map_bounds_values(&MapBounds::default());
+    for (at, out) in (first..).zip(v.iter_mut()) {
+        match r.get(at) {
+            Some(EsfNode::F32(x)) => *out = *x,
+            _ => log::warn!("EPISODIC_RESTRICTIONS v{} #{at} is not an f32 map bound: the default {out} is kept", r.version),
+        }
+    }
+    let [min_x, min_z, max_x, max_z] = v;
+    MapBounds { min_x, min_z, max_x, max_z }
+}
+
+/// Reads the [`switch_slots`], the zoom limit and the map bounds into `world`. The shipped start
+/// positions carry the scripts' values (CONFIRMED: Egypt sets #31, Italy #29 and #31, the tutorial #31
+/// and #32).
 pub(crate) fn read_switches(model_rec: &EsfRecord, world: &mut World) {
-    let mut v = [false; 7];
+    let mut v = [false; 8];
     world.zoom_limit = ZoomLimit::default();
+    world.map_bounds = MapBounds::default();
     if let Some(r) = model_rec.child("EPISODIC_RESTRICTIONS") {
         for (out, (at, above)) in v.iter_mut().zip(switch_slots(r)) {
             *out = above.is_none_or(|a| r.version > a) && r.get_bool(at).unwrap_or(false);
         }
         world.zoom_limit = read_zoom_limit(r);
+        world.map_bounds = read_map_bounds(r);
     }
-    let [turns, assassination, infiltration, saving, research, liberation, victory] = v;
+    let [turns, assassination, rebellions, infiltration, saving, research, liberation, victory] = v;
     world.display_turns = turns;
     world.force_success_for_human = (assassination, infiltration);
+    world.rebellions_disabled = rebellions;
     world.saving_disabled = saving;
     world.technology_research_disabled = research;
     world.liberation_options_disabled = liberation;
     world.victory_notification_disabled = victory;
 }
 
-/// Writes the world's switches and zoom limit back into the [`switch_slots`] and
-/// [`zoom_limit_slots`] the source record has (the writer `0x009A1070` saves every one). A slot the
-/// record's version does not have, or one of another type, keeps the source's node, so the
-/// record's layout never changes.
+/// Writes the world's switches, zoom limit and map bounds back into the [`switch_slots`],
+/// [`zoom_limit_slots`] and [`map_bounds_at`] slots the source record has (the writer `0x009A1070`
+/// saves every one). A slot the record's version does not have, or one of another type, keeps the
+/// source's node, so the record's layout never changes.
 pub(crate) fn write_switches(model_rec: &mut EsfRecord, world: &World) {
     let Some(r) = model_rec.children.iter_mut().find_map(|c| match c {
         EsfNode::Record(b) if b.name == "EPISODIC_RESTRICTIONS" => Some(&mut **b),
@@ -143,6 +179,12 @@ pub(crate) fn write_switches(model_rec: &mut EsfRecord, world: &World) {
             *node = EsfNode::F32(value);
         }
     }
+    let first = map_bounds_at(r);
+    for (at, value) in (first..).zip(map_bounds_values(&world.map_bounds)) {
+        if let Some(node @ EsfNode::F32(_)) = r.children.get_mut(at) {
+            *node = EsfNode::F32(value);
+        }
+    }
 }
 
 /// `CAMPAIGN_MODEL/HISTORICAL_EVENT_MANAGER` (v1) → `TRIGGERED_DYNAMIC_EVENT_ARRAY[]` {utf16 key}: the
@@ -157,17 +199,20 @@ pub(crate) fn triggered_historical_events(model_rec: &EsfRecord) -> Vec<String> 
     ntw_sim::campaign::historical_events::sorted_triggered(keys)
 }
 
+/// A `TRAITS` record (a character's `CHARACTER_DETAILS` #0, a region's `REGION` #2): its `TRAIT` items {#0 key,
+/// #1 points}, in file order, each at level 0 until `ntw_sim::campaign::characters::load_trait_levels` sets it (both
+/// containers load each trait through `0x0088AFF0`, CONFIRMED). An item without both values is not read.
+pub(crate) fn read_traits(t: &EsfRecord) -> Vec<CharacterTrait> {
+    items(t, "TRAIT")
+        .filter_map(|it| Some(CharacterTrait { key: it.first()?.as_str()?.to_string(), points: it.get(1)?.as_i32()?, level: 0 }))
+        .collect()
+}
+
 /// `CHARACTER` → its details (`CHARACTER_DETAILS` v3 at #1, post id at #8).
 pub(crate) fn character_details(ch: &EsfRecord) -> Option<CharacterDetails> {
     let d = ch.get(1)?.as_record().filter(|r| r.name == "CHARACTER_DETAILS")?;
     let rec = |i: usize| d.get(i).and_then(EsfNode::as_record);
-    let traits = rec(0)
-        .map(|t| {
-            items(t, "TRAIT")
-                .filter_map(|it| Some(CharacterTrait { key: it.first()?.as_str()?.to_string(), points: it.get(1)?.as_i32()?, level: 0 }))
-                .collect()
-        })
-        .unwrap_or_default();
+    let traits = rec(0).map(read_traits).unwrap_or_default();
     let other = rec(3).map(|l| (s(l.get(0)), s(l.get(1)))).unwrap_or_default();
     let portrait = rec(8)
         .filter(|p| p.name == "PORTRAIT_DETAILS")
@@ -532,23 +577,26 @@ mod tests {
         EsfRecord { name: "CAMPAIGN_MODEL".into(), version: 0, children: vec![EsfNode::Record(Box::new(restrictions))] }
     }
 
-    fn switches(model_rec: &EsfRecord) -> [bool; 7] {
+    fn switches(model_rec: &EsfRecord) -> [bool; 8] {
         let mut world = World::default();
         read_switches(model_rec, &mut world);
         switch_values(&world)
     }
 
     /// Each switch is read only from a record above the version the loader `0x009968A0` checks:
-    /// #8 above 1, #25 above 0xB, #29 above 0xE, #31 above 0xF, #32 above 0x10; #20 / #22 at any
-    /// version.
+    /// #8 above 1, #20 / #21 / #22 above 8 (`0x00997F5F`), #25 above 0xB, #29 above 0xE, #31 above 0xF,
+    /// #32 above 0x10.
     #[test]
     fn each_switch_needs_a_record_above_its_version() {
-        assert_eq!(switches(&model_with_restrictions(17, true)), [true; 7]);
-        assert_eq!(switches(&model_with_restrictions(0x10, true)), [true, true, true, true, true, true, false]);
-        assert_eq!(switches(&model_with_restrictions(0xF, true)), [true, true, true, true, true, false, false]);
-        assert_eq!(switches(&model_with_restrictions(0xE, true)), [true, true, true, true, false, false, false]);
-        assert_eq!(switches(&model_with_restrictions(0xB, true)), [true, true, true, false, false, false, false]);
-        assert_eq!(switches(&model_with_restrictions(1, true)), [false, true, true, false, false, false, false]);
+        let (t, f) = (true, false);
+        assert_eq!(switches(&model_with_restrictions(17, true)), [true; 8]);
+        assert_eq!(switches(&model_with_restrictions(0x10, true)), [t, t, t, t, t, t, t, f]);
+        assert_eq!(switches(&model_with_restrictions(0xF, true)), [t, t, t, t, t, t, f, f]);
+        assert_eq!(switches(&model_with_restrictions(0xE, true)), [t, t, t, t, t, f, f, f]);
+        assert_eq!(switches(&model_with_restrictions(0xB, true)), [t, t, t, t, f, f, f, f]);
+        assert_eq!(switches(&model_with_restrictions(9, true)), [t, t, t, t, f, f, f, f]);
+        assert_eq!(switches(&model_with_restrictions(8, true)), [t, f, f, f, f, f, f, f]);
+        assert_eq!(switches(&model_with_restrictions(1, true)), [false; 8]);
     }
 
     /// The liberation and victory-notification switches follow the `LUA[]` array at #30, and move
@@ -558,11 +606,11 @@ mod tests {
         let mut model = model_with_restrictions(17, true);
         let EsfNode::Record(r) = &mut model.children[0] else { unreachable!() };
         r.children[31] = EsfNode::Bool(false);
-        assert_eq!(switches(&model)[5..], [false, true]);
+        assert_eq!(switches(&model)[6..], [false, true]);
         let mut model = model_with_restrictions(17, false);
         let EsfNode::Record(r) = &mut model.children[0] else { unreachable!() };
         r.children[31] = EsfNode::Bool(false);
-        assert_eq!(switches(&model)[5..], [true, false]);
+        assert_eq!(switches(&model)[6..], [true, false]);
     }
 
     /// The writer puts each switch back where the reader takes it, and leaves the slots an older
@@ -570,6 +618,7 @@ mod tests {
     #[test]
     fn the_switches_are_written_where_they_are_read() {
         let world = World {
+            rebellions_disabled: true,
             technology_research_disabled: false,
             liberation_options_disabled: true,
             victory_notification_disabled: false,
@@ -632,6 +681,39 @@ mod tests {
         write_switches(&mut v2, &world);
         let EsfNode::Record(r) = &v2.children[0] else { unreachable!() };
         assert_eq!((r.get_f32(13), r.get_f32(14)), (Some(0.61), Some(0.9)));
+    }
+
+    /// The map bounds sit at #9..#12 (west, south, east, north; #8..#11 in a version-1 record) in
+    /// every version (`0x009968A0`), and the writer `0x009A1070` puts them back there; a slot that
+    /// is not an f32 keeps the loader's default when read and its node when written.
+    #[test]
+    fn the_map_bounds_are_read_and_written_by_version() {
+        let with_bounds = |version: u8, first: usize| {
+            let mut model = model_with_restrictions(version, true);
+            let EsfNode::Record(r) = &mut model.children[0] else { unreachable!() };
+            for (i, v) in [-320.0, -310.0, 330.0, 340.0].into_iter().enumerate() {
+                r.children[first + i] = EsfNode::F32(v);
+            }
+            model
+        };
+        let read = |model: &EsfRecord| {
+            let mut world = World::default();
+            read_switches(model, &mut world);
+            world.map_bounds
+        };
+        let vanilla = MapBounds { min_x: -320.0, min_z: -310.0, max_x: 330.0, max_z: 340.0 };
+        assert_eq!(read(&with_bounds(17, 9)), vanilla);
+        assert_eq!(read(&with_bounds(2, 9)), vanilla);
+        assert_eq!(read(&with_bounds(1, 8)), vanilla);
+        assert_eq!(read(&model_with_restrictions(17, true)), MapBounds::default());
+        let world = World { map_bounds: MapBounds::from_script(-130.0, -75.0, -113.0, -98.0), ..World::default() };
+        let mut model = with_bounds(17, 9);
+        write_switches(&mut model, &world);
+        assert_eq!(read(&model), world.map_bounds);
+        let mut no_f32 = model_with_restrictions(17, true);
+        write_switches(&mut no_f32, &world);
+        let EsfNode::Record(r) = &no_f32.children[0] else { unreachable!() };
+        assert_eq!(r.get_bool(9), Some(true));
     }
 
     /// The triggered list is read in the exe's order (UTF-16 code units, each key once).

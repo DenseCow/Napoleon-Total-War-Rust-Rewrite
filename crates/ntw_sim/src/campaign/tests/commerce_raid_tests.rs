@@ -34,7 +34,7 @@ fn raid_model() -> CampaignModel {
     m
 }
 
-fn at(x: f32, z: f32) -> (Fixed20, Fixed20) {
+pub(super) fn at(x: f32, z: f32) -> (Fixed20, Fixed20) {
     (Fixed20::from_f64(f64::from(x)), Fixed20::from_f64(f64::from(z)))
 }
 
@@ -202,7 +202,7 @@ fn a_change_of_commander_hands_the_raids_on() {
     assert!(m.is_raiding(CharacterId(101)));
     assert!(m.world.commerce_raids.iter().all(|r| r.character == CharacterId(101) && r.segment == 0 && r.target == B));
     // A commander who was not raiding hands nothing on.
-    m.clear_character_raids(CharacterId(101));
+    m.end_character_raids(CharacterId(101));
     m.character_dies(CharacterId(101));
     let next = m.world.forces[&ForceId(1000)].commander.expect("a colonel takes over");
     assert!(!m.is_raiding(next));
@@ -250,16 +250,18 @@ fn the_round_start_checks_the_raids() {
     m.turn.humans = vec![A];
     m.turn.queue.push_back(TurnStep::RoundStart);
     m.step().expect("the round-start step");
+    m.step().expect("the historical-events step");
     assert!(m.is_raiding(g), "still at war: the raids stay");
     m.world.set_stance(A, B, Stance::Neutral).unwrap();
     m.turn.queue.push_back(TurnStep::RoundStart);
     m.step().expect("the round-start step");
+    m.step().expect("the historical-events step");
     assert!(!m.is_raiding(g), "no longer raidable: the round start ends his raids");
 }
 
 /// [`raid_model`] with the pools' rules (the hire tests' `pool_model`): A's army 1002 under colonel 107
 /// and fleet 1003 under captain 108 (on its one ship), both standing on segment 0.
-fn raid_pool_model() -> CampaignModel {
+pub(super) fn raid_pool_model() -> CampaignModel {
     let mut m = raid_model();
     m.world.faction_details.entry(A).or_default().capital = Some(RegionId(10));
     let rules = Arc::make_mut(&mut m.rules);
@@ -279,7 +281,7 @@ fn raid_pool_model() -> CampaignModel {
 }
 
 /// A candidate drawn into A's admiral (`admiral`) or General pool, with the campaign started for human A.
-fn candidate(m: &mut CampaignModel, admiral: bool) -> CharacterId {
+pub(super) fn candidate(m: &mut CampaignModel, admiral: bool) -> CharacterId {
     let elapsed = m.calendar.turns_elapsed;
     let d = m.world.faction_details.get_mut(&A).unwrap();
     d.general_pool = (Vec::new(), if admiral { elapsed + 100 } else { elapsed });
@@ -345,7 +347,7 @@ fn a_hired_admiral_on_an_empty_ship_takes_the_raids_of_the_commander_he_outranks
 }
 
 /// Grants A both field promotion bonuses (`promote_general_in_field` 64, `promote_admiral_at_sea` 65).
-fn allow_promotion(m: &mut CampaignModel) {
+pub(super) fn allow_promotion(m: &mut CampaignModel) {
     use crate::campaign::effects::SavedBonus;
     let d = m.world.faction_details.get_mut(&A).unwrap();
     d.bonus_base = [64, 65].map(|bonus| SavedBonus { kind: 1, bonus, value: 1.0, qualifier: String::new(), ..Default::default() }).to_vec();
@@ -420,9 +422,9 @@ fn a_hired_admiral_leaves_the_raids_of_an_admiral_already_in_command() {
 /// A peace runs the price update with flag 0 once of its own (`0x00B262C0`, the call at `0x00B2643F`, after
 /// both sides' `0x00A25570` walks), plus one for each siege end, blockade lift and raid end those walks make
 /// (`0x008BD65B`, `0x00A784E0`, `0x009DA160`). The walk is per character in the faction's list order, and an
-/// update's raid check (`0x00BD1020`) ends raids no longer raidable at peace: a raider walked after another
-/// character's siege end has no raid left to end, so he runs no update of his own, unless a third faction at
-/// war with him also trades on the segment, which keeps it raidable for the check.
+/// update's raid check (`0x00BD1020`) ends raids no longer raidable at peace, each end with a nested update of its
+/// own (`0x008B3690` → `0x00BA4A60` → `0x009DA140`): a raider walked after another character's siege end has no raid
+/// left to end, unless a third faction at war with him also trades on the segment, which keeps it raidable.
 #[test]
 fn a_peace_runs_its_own_price_update_after_one_per_ended_siege_lift_and_raid() {
     let g = CharacterId(100);
@@ -452,6 +454,98 @@ fn a_peace_runs_its_own_price_update_after_one_per_ended_siege_lift_and_raid() {
         updates.len()
     };
     assert_eq!(sieging(g, false), 3, "the raider first: his raid end, the siege end, the peace's");
-    assert_eq!(sieging(CharacterId(99), false), 2, "the besieger first: his update's raid check ends the raids");
+    assert_eq!(sieging(CharacterId(99), false), 3, "the besieger first: the siege end, its raid check's nested raid end, the peace's");
     assert_eq!(sieging(CharacterId(99), true), 3, "C keeps the segment raidable: the siege end, his raid end, the peace's");
+}
+
+/// `0x008A86D0`: a ship with top gallants (`unit_stats_naval` #60, naval record +0x1D4) adds effect 73 to
+/// effect 72 only while its commander's `enable_top_gallants` (70), rounded half to even, is not 0; a ship
+/// without them and a land unit never read 73.
+#[test]
+fn top_gallants_add_their_bonus_only_once_enabled() {
+    use crate::campaign::effects::{EffectKey, EffectSet, Effects};
+    use crate::campaign::rules::UnitRules;
+    let mut m = test_model();
+    let ship = UnitRules { is_naval: true, category: "naval_frigate".into(), travel_speed: 40, ..Default::default() };
+    let rules = std::sync::Arc::make_mut(&mut m.rules);
+    rules.units.insert("tg".into(), UnitRules { top_gallants: true, ..ship.clone() });
+    rules.units.insert("plain".into(), ship);
+    rules.units.insert("foot".into(), UnitRules { category: "infantry".into(), travel_speed: 40, ..Default::default() });
+    let c = CharacterId(7);
+    let fx_with = |enable: f32| {
+        let mut set = EffectSet::default();
+        set.add(EffectKey::basic("mod_ship_movement_campaign"), 10.0);
+        set.add(EffectKey::basic("mod_ship_movement_campaign_top_gallants"), 15.0);
+        set.add(EffectKey::basic("enable_top_gallants"), enable);
+        let mut fx = Effects::default();
+        fx.character.insert(c, set);
+        fx
+    };
+    // Enabled: (10 + 15 + 100) × 40 / 100 = 50; the plain ship (10 + 100) × 40 / 100 = 44; land 40.
+    let on = fx_with(1.0);
+    assert_eq!(m.unit_campaign_moves(&on, c, "tg"), 50);
+    assert_eq!(m.unit_campaign_moves(&on, c, "plain"), 44);
+    assert_eq!(m.unit_campaign_moves(&on, c, "foot"), 40);
+    // Not enabled, or 0.5 (rounds to 0, ties to even): 44.
+    assert_eq!(m.unit_campaign_moves(&fx_with(0.0), c, "tg"), 44);
+    assert_eq!(m.unit_campaign_moves(&fx_with(0.5), c, "tg"), 44);
+    // 1.5 rounds to 2: enabled.
+    assert_eq!(m.unit_campaign_moves(&fx_with(1.5), c, "tg"), 50);
+}
+
+/// `AddCommerceRaidEntry` `0x00BA76A0` runs the price update with flag 0 after each new entry, and
+/// `EndCharacterCommerceRaids` `0x009DA140` once after the clear (`0x009DA160`); a character who does not
+/// raid ends nothing and runs none (its callers test `IsListEmpty` first).
+#[test]
+fn each_raid_entry_and_each_raid_end_runs_a_price_update() {
+    let mut m = raid_model();
+    let g = CharacterId(100);
+    assert_eq!(price_updates(|| assert!(m.raid_trade_route(g, at(55.0, 50.0)))), [false], "one entry, one update");
+    assert_eq!(price_updates(|| m.end_character_raids(g)), [false]);
+    assert!(m.world.commerce_raids.is_empty());
+    assert!(price_updates(|| m.end_character_raids(g)).is_empty(), "not raiding: no update");
+    // Out of range or at peace: no entry, no update.
+    assert!(price_updates(|| assert!(!m.raid_trade_route(g, at(0.0, 0.0)))).is_empty());
+}
+
+/// The raid check of a price update (`0x008B3690`) ends an invalid raider through `0x00BA4A60` →
+/// `0x009DA140`, so with its own nested update.
+#[test]
+fn the_raid_check_ends_a_raider_with_a_nested_price_update() {
+    let mut m = raid_model();
+    assert!(m.raid_trade_route(CharacterId(100), at(55.0, 50.0)));
+    m.world.set_stance(A, B, Stance::Neutral).unwrap();
+    assert_eq!(price_updates(|| m.update_commodity_prices_with(true)), [true, false]);
+    assert!(m.world.commerce_raids.is_empty());
+}
+
+/// Category 9 is what the last price update booked (`0x00BBE9A0` entries rebuilt by `0x00BCB020`), not the
+/// take of the moment: a route that grows after it pays the old take until the next update.
+#[test]
+fn the_booked_raid_income_stands_until_the_next_price_update() {
+    let mut m = raid_model();
+    assert!(m.raid_trade_route(CharacterId(100), at(55.0, 50.0)));
+    let booked = |m: &CampaignModel| m.world.economy_history[&A].last().map(|r| r[9]);
+    assert_eq!(booked(&m), Some(30), "booked by the entry's update");
+    m.world.domestic_trade.get_mut(&B).unwrap()[0].volumes = vec![60, 40];
+    assert_eq!(m.raid_income(A), 70);
+    assert_eq!(booked(&m), Some(30), "no update yet");
+    m.update_commodity_prices_with(false);
+    assert_eq!(booked(&m), Some(70));
+}
+
+/// The domestic victim side (`0x00B1D1C0` / `0x00B1D1F0`): a raided domestic route carries its volume less
+/// the raided part, each raider's part added in turn and truncated (`taken = trunc(taken + volume × share)`).
+/// The split and the home term use the net volume; the price update's supply (`0x00BC9DE0` at `0x00BCBBD3`)
+/// is the gross one.
+#[test]
+fn a_domestic_raid_lowers_the_victims_net_volume_not_the_price_supply() {
+    use crate::campaign::commerce_raid::raided_volume;
+    assert_eq!(raided_volume(&[(A, 0.05), (C, 0.05)], 30), 2, "trunc(trunc(1.5) + 1.5), not trunc(3.0)");
+    assert_eq!(raided_volume(&[], 30), 0);
+    let mut m = raid_model();
+    assert_eq!(m.trade_supply(B), Some(vec![30, 20]));
+    assert!(m.raid_trade_route(CharacterId(100), at(55.0, 50.0)));
+    assert_eq!(m.trade_supply(B), Some(vec![29, 19]), "share 0.05: 1.5 → 1, 1.0 → 1");
+    assert_eq!(m.price_supply(B), Some(vec![30, 20]));
 }

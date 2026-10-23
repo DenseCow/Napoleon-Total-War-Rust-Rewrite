@@ -245,6 +245,14 @@ spa none (the user's mp_eur saves: all false). Ours: `ntw_campaign::details::rea
 values), `ntw_script` `tests/host.rs` `the_world_created_switches_set_the_world_flags`, `ntw_sim`
 `the_scripts_liberation_switch_offers_no_liberation`.
 
+**Camera map bounds (2026-10-22, CONFIRMED):** `EPISODIC_RESTRICTIONS` #9..#12 (#8..#11 in a v1 record) are four
+f32, the camera target's rectangle at +0xAC (min x), +0xB0 (min z), +0xB4 (max x), +0xB8 (max z), engine axes (z
+north); read in every version (`0x00997B51`..`0x00997B98`), written at `0x009A180E` / `0x009A1857` / `0x009A18A0` /
+`0x009A18E9`, defaults -1280, -640, 1280, 640 before the read (`0x009969B9`..`0x009969D7`). Every vanilla Europe
+save holds -320, -320, 320, 320. Set by `set_map_bounds`, applied by the camera key steps (UI_FIDELITY.md "Map
+bounds"). Ours: `ntw_sim::campaign::MapBounds` (`World::map_bounds`), `ntw_campaign::details::read_map_bounds` /
+`write_switches`.
+
 ## 5. Save compatibility
 - **Original saves load fully**: all 8 user saves (mp_eur, 1.3.0 build 2081) load with every detail record
   (`tests/real_install.rs`).

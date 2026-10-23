@@ -1428,10 +1428,10 @@ command yet (PLACEHOLDER, logged once per action); the AI's evaluation (`0x00C49
 - Round 2: the model's owner change (`change_region_owner`, shared by capture, liberation and
   deals) moves no army either: after a deal or a liberation (now `transfer_region`, as
   `0x00B58A10`) the old owner's garrison stays inside, linked and selectable (capture still drops
-  the links: its variants destroy the garrison first). Downstream, PROVISIONAL until traced: an
-  army entering its own settlement never merges into another faction's garrison (it waits
-  outside), `defenders_of` still counts that garrison, a recruit then stands outside (the spawn
-  check `0x008EF790` not traced for it). `AcceptDeal` itself enforces `ai_refuses_deal`
+  the links: its variants destroy the garrison first). Downstream (traced 2026-10-22, CAMPAIGN_FIDELITY.md
+  §Foreign garrisons): an army entering its own settlement never merges into another faction's garrison
+  (ORIGINAL BUG fixed: the exe hands its units over), `defenders_of` counts that garrison (CONFIRMED), a
+  recruit joins a nearby own army or stands outside (`0x00B43A60`). `AcceptDeal` itself enforces `ai_refuses_deal`
   (`CommandError::DealRefused`).
 - A deal applies once (`Negotiation::applied`, reset by Propose / Clear): ProposeDeal then
   AcceptOffer no longer raises the traded count twice.
@@ -1798,10 +1798,10 @@ against a focused text field are CONFIRMED: see "Shortcut keys" below.
   binding); the handler lock (`0x00A22430`, `steal_user_input`) is not modelled (the input layer
   is: "Input layer" below);
   the release's post to the event lists is not ported; a key's stealer is our most recent shown
-  stealer (the exe: newest with +0x38 / +0x3C, no reorder on re-steal); the camera's busy test.
+  stealer (the exe: newest with +0x38 / +0x3C, no reorder on re-steal); the camera's controllers (its busy test is ported: "Busy test" below).
   PROVISIONAL (`input_focus_held`): ours keeps the focus on a component that is destroyed; what the
   exe does then is not traced. Not done yet: `custom_keys.keys.xml` and the keyset choice
-  (`0x00ED27D0`), the front end's and the battle's bindings, the camera's tilt and bookmarks.
+  (`0x00ED27D0`), the front end's and the battle's bindings (the camera's tilt and bookmarks are ported: "Camera keys", "Bookmarks" below).
 - **Input layer (worker keybind, 2026-10-20; disassembly, CONFIRMED).** `g_nUIMinInputLayer`
   `0x01765944` is the lowest priority a UI component's shortcut handler takes keys at.
   `Component.LockPriority(n)` (`0x01018130`) reads its argument as a number, rounds it to the
@@ -2114,13 +2114,84 @@ against a focused text field are CONFIRMED: see "Shortcut keys" below.
   `ntw_sim::campaign::zoom_limit` (`ZoomLimit`, `World::zoom_limit`), read and written by
   `ntw_campaign::details` (`read_zoom_limit`, `write_switches`), set by the `set_zoom_limit` script
   arm in `ntw_script::game`, applied in `ntw_campaign::camera::opening_camera` and
-  `napoleon::campaign::camera::CampaignCamera::zoom`; `distance_for_tilt` is the unclamped law.
-  Not ported: the wheel's step law (`FUN_00E23470(last, new) × −0.03`, `0x00956E10`) and the
-  camera keys' steps (ours keeps its own wheel step, clamped to the zoom limit).
+  `napoleon::campaign::camera::CampaignCamera::add_tilt_percent`; `distance_for_tilt` is the
+  unclamped law.
+  **Wheel (2026-10-22, CONFIRMED):** `WM_MOUSEWHEEL` (`0x00E23110`) adds the message's delta (120 a
+  notch, forward positive) into a 16-bit running sum (`0x0164B408`). The map's mouse event
+  `0x00A0EDF0` calls `0x00956E10`, which takes the sum's shortest signed change since the camera's
+  last read (`0x00E23470`, last value at `0x015C4580`, wrapping at the float 65535.0 `0x0131A7CC`)
+  and passes the change × −0.03 as the tilt percent (net tilt += 0.0003 × units) through `0x00977100` (× 0.01, float
+  `0x01318034`) and the clamp `0x00920D00`): 0.036 radian a notch forward, zooming in; no frame time.
+  The UI's hit test `0x00DB2350` takes a wheel over a UI component and reads the same sum against
+  its own last value (`0x01459F90`). ORIGINAL BUG (two): the wrap at 65535 where a u16 wraps at
+  65536 (one unit off across the wrap); and the camera's last value goes stale while the UI takes
+  the wheel, so that travel is applied to the camera on the next turn over the map. Ours: the
+  frame's line wheel × 120 over the map only (`wheel_units`, `wheel_tilt_percent`), skipped over a
+  HUD panel (`CampaignHud::covers`, the click rule); a pixel-scrolling device is warned once and
+  not read.
+  **Camera keys (CONFIRMED, `0x0095A510`):** `cam_up` adds −`CAMPAIGN_CAMERA_TILT_SPEED` (tweak
+  `0x015C36E0`, 50) × time, `cam_down` +50 × time, through `0x00977100` (the time not doubled by
+  SHIFT). The steps (see "Campaign camera handler") stop at the map bounds below. Ours:
+  `key_tilt_percent`, `key_step`.
+  **Map bounds (2026-10-22, CONFIRMED):** episodic restrictions +0xAC / +0xB0 / +0xB4 / +0xB8
+  (min x, min z, max x, max z; z north), defaults -1280, -640, 1280, 640 (`0x009968A0`, stores
+  `0x009969B9`..`0x009969D7`; a new world copies its map object's at `0x00874D98`), saved at
+  `EPISODIC_RESTRICTIONS` #9..#12 (CAMPAIGN_DATA.md §4). `set_map_bounds(left, top, right, bottom)`
+  (`0x00977C10`) reads four numbers with `PopScriptFloatArg` `0x01055700`, stack top first, the reads chained (one error
+  per call), and stores +0xAC = left, +0xB8 = top, +0xB4 = right, +0xB0 = bottom; no order check
+  (every vanilla call has left < right, bottom < top: the tutorial's (-130, -75, -113, -98) gives x
+  -130..-113, z -98..-75); returns 0 and moves no camera. ORIGINAL BUG: a failed read is still
+  stored (an uninitialised local, or the lua_State word for left); ours reports it once and leaves
+  the bounds unchanged. Readers: the key steps through camera +0x134 → +8 → +0xFA8, each clamping
+  only its own axis and direction (`step_fwd` `0x00956F10`: z + d > max z → max z; `step_bck`
+  `0x00956E70`: min z > z − d → min z; `step_l` `0x00956FA0` min x; `step_r` `0x009570F0` max x;
+  `COMISS` + `JBE`, so a NaN never clamps, and a target outside the bound it steps toward snaps to
+  it), then a clamp to the map's outline (world `0x008B65B0` / `0x008B6400` build an inset outline
+  through `0x008C7850` (3930 bytes), `0x008B64A0` / `0x008B62F0` limit a key step to it,
+  `0x008B6260` clamps a jump or a tilt (`0x00920D00`, `0x00955A00`); skipped while `0x015C0D26`
+  == 1. A separate system, its own BACKLOG line; not ported, ours clamps to the theatre instead,
+  PROVISIONAL) and the move through camera vtable +0x5C.
+  **Jump to a point (CONFIRMED, `0x00955A00`):** x clamped to [+0xAC, +0xB4], z to [+0xB0, +0xB8]
+  (`0x00955A61`..`0x00955A9E`, `COMISS` + `JA` / `JBE`: below min → min, else above max → max, a
+  NaN kept), then the outline clamp `0x008B6260`, the eye rebuilt from the tilt (`0x009208B0`),
+  placed through camera vtable +0xF0 into +8 and copied to +0x144 / +0x15C (see the orphan
+  `0x0095EEA0` below). Ours: `MapBounds::clamp`, `napoleon::campaign::camera::jump_target`.
+  **Bookmarks (2026-10-22, CONFIRMED):** `camera_bookmark_save<n>` / `camera_bookmark_view<n>`
+  take the slot from the binding name's character at position 20 (`0x004F47D0`, substring 20,
+  length 1), read as leading digits (`0x004F37B0`), else 0. The camera manager holds 4 record
+  pointers at +0x28 (`0x00901120`: capacity 4 and count 4 at +0x20 / +0x24, all NULL; the
+  manager comes from `0x00987070` / `0x00988B00`). The save `0x00968900(n)` frees slot n's old
+  record (sized delete 0x18, `0x0126E016`) and stores a new 24-byte {eye (camera +8..+0x10),
+  target (+0x14..+0x1C)} of the active camera (`0x0092C250`), or NULL when the allocation fails;
+  the view `0x00974B10` does nothing for a NULL slot, else calls the jump `0x00955A00` with the
+  stored target's x and z (the stored eye is not used: the eye comes from the current tilt).
+  Not saved: the manager's writer `0x0090FC90` writes only the named cameras and the current
+  camera, so bookmarks last for the session. Vanilla binds slots 0..3 (SHIFT+F9..F12 save,
+  F9..F12 view). ORIGINAL BUG: no bounds check on n, so a modded binding with a slot ≥ 4 frees and
+  overwrites heap past the 4-pointer array (and a view reads past it); ours grows the list
+  (`napoleon::campaign::camera::CameraBookmarks`, one per camera entity; a slot never saved does
+  nothing, as the exe's NULL).
+  **Busy test (CONFIRMED, `0x00955820`):** true while camera +0x13C (the count of running camera
+  controllers: +1 by `0x00955800` from the controller start `0x00925E20`, −1 at `0x00925E33` (inside `0x00925E20`) and by `0x0096E560` from
+  `0x0096F280` / `0x00968300` and the turn start `0x00A13BF0`) is non-zero, or +0x140 (the
+  pre-battle hold: set by `0x00955810` from `0x009994B0`, cleared by `0x0096E580`, called from
+  the orphan thunk `0x00A13DA0`, slot 1 of vtable `0x0136B808` at UI +0x9C4; the event that
+  reaches it is UNKNOWN) is set. It gates the camera keys (`0x0095A591`), the wheel (`0x00A0EF7F`; a wheel turn while busy is deferred, `0x00A0EF86`, which ours drops)
+  and twice the per-frame mouse update `0x00970A90` (`0x00970C0D`, `0x00970D52`; that update is
+  not ported, so ours does not gate the drag). Ours: `ntw_campaign::camera::CameraView::holds_input`,
+  checked in `napoleon::campaign::camera::control` on the saved camera block (the controllers
+  themselves, `0x00925E20` with 17 callers, are not ported, so the count is the save's).
+  Ours: `ntw_sim::campaign::MapBounds`, the `set_map_bounds` arm in `ntw_script::game`,
+  `napoleon::campaign::camera::key_step`.
   **Orphan `0x0095EEA0`** (`CampaignCamera::CampaignCamera_GetVector144`, vtable slot +0x30 of
   `0x013606E8`, entry `0x01360718`, no direct caller): thiscall, copies the float vector
-  +0x144/+0x148/+0x14C to its out-pointer and returns it (RET 4). No writer of +0x144 found in the
-  camera code: its meaning is UNKNOWN. Struct field `aVector144`.
+  +0x144/+0x148/+0x14C to its out-pointer and returns it (RET 4). Writers (2026-10-22, CONFIRMED):
+  `0x010F5510` (thiscall, RET 4) copies one 3-float point into both halves of a 0x18-byte pair;
+  the jump `0x00955A00` calls it on +0x144 with the new eye (camera +8, just written from the
+  vtable +0xF0 result) and on +0x15C with the new target (`0x00955B03`, `0x00955B0F`), then
+  camera vtable +0xEC; `CampaignCamera_ConstructFromSave` does the same at `0x00900DE6` /
+  `0x00900DF2`. So +0x144 holds the last placed eye; what reads the pairs' second halves is
+  UNKNOWN. Struct field `aVector144`.
   Ghidra names (V5): `CampaignCameraManager_WriteSave` `0x0090FC90`, `CampaignCamera_WriteSave`
   `0x0090FB20`, `CampaignCameraManager_ReadSave` `0x0090E5A0`, `CampaignCamera_ConstructFromSave`
   `0x00900C00`, `CampaignCamera_ClearSaveFlags` `0x0094F9D0`, `CampaignCamera_ComputeEyeFromTilt`
@@ -2477,9 +2548,11 @@ five are left out rather than invented.
   **logging stub**, not to a command: it appears in **no** shipped `.luac`, so its contract -- what the
   third `true` means, whether it moves the agent, resolves the action or sets a flag -- is UNKNOWN.
   The five mask bits that reach it are left **out**, so no button offers it and nothing can raise.
+  (Superseded by §9.10.8: the executor and the masks are traced and ported.)
 - `AgentRogueSabotageArmy` is still a no-op with a log line: its only target is an **army**, and there
   is no `Request*Targets` list for one (`SabotageArmy(agent, force)` is called straight from the popup
   button, `agent_options.lua:159`), so the original's exe picked the force itself.
+  (Superseded by §9.10.9: the binding picks the garrison army of the agent's residence and is ported.)
 
 ## 9. The address representation, and the format `tostring` has to produce (0-E, 2026-10-06)
 
@@ -2856,6 +2929,7 @@ nothing to do there, which is worse than no button, so the five mask bits stay u
 **Next round's target, now sharp and small:** `CampaignModel`'s agent order queue. With it, `embed`
 (bit 8) is `MoveIntoTarget(src, settlement)` = move, then on arrival `spy(src, Settlement(settlement))`
 -- the advisor's sentence, the model's `spy`, and the documented target kind all agreeing.
+(Superseded by §9.10.8.)
 
 #### 9.10.7 One correction this round found in our own code
 
@@ -2873,6 +2947,97 @@ signature string is the recruitment card's `item_ptr`: nothing in any shipped sc
 (it goes straight back to `CampaignUI.CancelRecruitment`, `template.RecruitmentCard.lua:99` pc 22-30),
 so it keeps the `void` fallback rather than gaining an invented name.
 
+#### 9.10.8 `MoveIntoTarget` traced and ported (2026-10-22)
+
+All CONFIRMED by disassembly unless marked.
+
+- **The executor `0x009EE150`** (the function the `0x004295D0` registration binds) reads the agent and
+  the target and branches four ways:
+  - a character target, the agent's `subterfuge` above 0 and the target foreign: `CCQ_CHARACTER_SPY`
+    (`0x0091A190`), the force spy `0x0094C500`;
+  - a character target otherwise: `CCQ_ATTACH_TO_FORCE` (`0x00915090`, order `0x008FF7B0`). Its
+    arrival is not traced, so it is not ported (the model refuses it);
+  - a settlement target, `subterfuge` above 0 and foreign: `CCQ_GARRISON_SPY` (`0x0091BDF0`), the
+    settlement spy `0x0094CCB0`;
+  - a settlement target otherwise: `CCQ_CHARACTER_JOIN_GARRISON_RESIDENCE`, the move-to-residence
+    order `0x009549B0` with enter = 1 and the research flag = the third argument.
+- **The arrival step `0x0094CFF0`** enters him (enter flag +0x58) and sends world event +0x3D8. With
+  the research flag (+0x59) it also recomputes the foreign flag (+0x5A) and may send world event +0x978
+  (conditions in CAMPAIGN_FIDELITY.md, residence). Neither event's listeners are traced
+  (PLACEHOLDER in `move_into_target`). The flag changes no world state itself, so `research` and
+  `steal_research` behave like `visit` in the model.
+- **The settlement mask `0x009C9EF0`**, behind the gate `0x009D1540` (the settlement-target ability-list builder: it also pushes `can_duel`, `can_assassinate`, `can_sabotage_army` and `can_sabotage`; only its `can_exchange` row matters here):
+  - the gate needs the agent may enter (`0x00B165B0`, our `may_reside`) and a `can_exchange` row in
+    the merged `abilities` table (`0x00E0D4E0`);
+  - `research` (own faction) or `steal_research` (another) is set when the settlement has a research
+    building, the agent's `can_research` reads 0 or more (`0x00A06C90`) and the owner is not the
+    rebels. A research building (`0x00B28D20`, settlement vtable +0x74) is an ordinary slot whose
+    building's own effects give `research_points` above 0 (`0x00AAF1F0`), with no health test;
+  - `embed` is set for `subterfuge` 1 or more, not yet acted (+0x4CC) and a foreign owner; `visit`
+    otherwise;
+  - `visit` is cleared when either research bit is set.
+- **The character mask `0x009C9CA0`**, behind the gate `0x009D1190` (the character-target ability-list builder: it also pushes `can_attack_land` / `can_attack_naval`, `can_sabotage_army`, `can_duel` and `can_assassinate`; only its `can_exchange` row matters here):
+  - for a foreign target, the gate needs the agent to command no force (`0x009D0910`), his type to
+    count against a residence (`0x00A0B9C0`), the target to command an army (`0x009D3A60`) with fewer
+    than 20 accompanying characters (army +0x60, `0x006A3110`), `subterfuge` above 0, and the
+    `can_exchange` row;
+  - for an own-faction target, the gate is `0x009D0D00` (not ported);
+  - the builder sets `embed` iff `subterfuge` is above 0 and he has not acted.
+  - The same builder also filters `duel` (`0x009CA440`) and `assassinate` (`0x009CA2A0`) by target.
+    Those filters are not compared with ours.
+- **`counterspy` (256)** is written by neither builder, so it is never offered.
+- **Model:** one rule, `ntw_sim::campaign::agents::exchange_actions`. The UI's `agent_options_mask`
+  and the `MoveIntoTarget` binding (`CampaignCommand::MoveIntoTarget`) both call it.
+  - PROVISIONAL: the accompanying count is 0, because the model keeps no accompanying characters.
+  - Model orders resolve at once, so nothing new is saved.
+  - Tests: `agents_tests.rs` (`exchange_actions_*`, `move_into_target_spies_or_enters`) and the
+    ntw_script mask and call tests.
+
+#### 9.10.9 `AgentRogueSabotageArmy` traced and ported (2026-10-22)
+
+All CONFIRMED by disassembly unless marked.
+
+- **The binding `0x009DCED0`** (registered at `0x004280B5`) reads one argument, the agent, and opens
+  no popup and asks no target list: the exe picks the army itself.
+  - First the army the agent accompanies (character +0x198, the handle the residence enter's
+    accompanying loop `0x00B4E88B` and the arrival `0x0094DA30` also read; its meaning INFERRED) and
+    that army's commander (+0x74), with **no** faction test.
+  - Else the agent's residence (`0x009FB9D0`: his own land army's residence, army +0x9C through
+    `0x009D3A60`, else his own, character +0x2C0) and its garrison commander (residence vtable
+    +0x20 = `0x00B3F8B0`, the same entry in the settlement, fort and slot residence vtables: the
+    army from vtable +0x18 = `0x00A64440`, the army at residence +0xC0, then that army's commander
+    +0x74). No commander, or a commander of the local player's faction (+0x2A0 against
+    `0x009BF110`): nothing happens.
+  - No ability or chance test in the binding.
+- **The order:** `0x00983910` (SubmitSabotageArmyCommand) queues `CCQ_SABOTAGE_ARMY` (type
+  `0x015C29D0`, registered at `0x00422500`, command vtable `0x013618E8`) with the agent (+4) and
+  the target commander (+8). The type is fixed, not the queue's: `0x008FD390` stores the global
+  `0x015C29D0`, `0x008D1F30` finds that type's registration (table `0x015C0D6C`), and the writer
+  (`0x00592C00` on queue +4) takes the type and the registration's +0xC as the header. So it only
+  ever submits sabotage-army commands; both callers are sabotage-army. Its handler
+  `0x00937190` calls `0x00968790` (world +0xF60): a gate `0x008BE360` on the agent (INFERRED: he can
+  take an order now; else `0x008BE410` and stop), a post of (agent, 0xE6, or 0xE9 when `0x00F9C6F0`
+  on agent +0x1AC holds) to world +0x9A8 vtable +8 (UNKNOWN what it is), then `0x00917A10`: a new
+  0xD0-byte order built by `0x008FFAC0` (vtable `0x0135FA70`) that keeps the
+  target's force (target +0x2A8) at +0xC8, started by `0x009651A0`. Its arrival is `0x0094DA30` (the
+  only reference is the vtable at `0x01361840`), already ported as `CampaignModel::sabotage_army`.
+- **Model:** the target rule is `ntw_sim::campaign::agents::rogue_sabotage_army_target` (the
+  garrison of the agent's settlement residence, not the local player's); the binding calls it and
+  queues `CampaignCommand::SabotageArmy`, logging once per click when there is no target.
+  - PROVISIONAL: the accompanied-army branch (+0x198): the model keeps no accompanying characters.
+  - PROVISIONAL: the model's residences are settlements only, so an agent in a slot residence (a
+    port) finds no army; forts are empty in every shipped file.
+  - Not ported: the `0x008BE360` gate and the 0xE6 / 0xE9 post (the model's order resolves at once).
+- **`CampaignUI.SabotageArmy` is `0x009F4910`** (registered at `0x0042A23A`, document "In:
+  Character (agent), target character (general)"), the other caller. It reads the agent and a
+  target through `0x009C1230`, which gives a character or a residence: a character is the target
+  commander itself (the same submission, inlined); a residence gives its garrison commander
+  (vtable +0x20, as above) and goes through `0x00983910`; neither, or no commander, does nothing.
+  No faction test. Our port takes a **force** address (`agents.rs` `"SabotageArmy"`), not a
+  character or residence: not ported yet (BACKLOG trace line).
+  - Tests: `agents_tests.rs` `the_rogue_sabotage_army_target_is_the_residence_garrison` and
+    `the_rogue_sabotage_army_target_follows_his_own_land_army`, ntw_script
+    `the_rogue_sabotage_army_button_targets_the_residence_garrison`.
 ### 9.11 Review 0-E (2026-10-06): what of §9 stands, and on what evidence
 
 The review environment has no install and no exe, so nothing in §9 was re-read; the verdicts below

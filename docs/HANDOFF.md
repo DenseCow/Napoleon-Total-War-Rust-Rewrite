@@ -3,7 +3,7 @@
 Keep this file short. It holds what is true now: replace finished items rather than appending logs.
 Old session logs are in `docs/archive/`.
 
-Last updated: 2026-10-21. Main tests at last full run (2026-10-08): `cargo test --workspace` passes on the install.
+Last updated: 2026-10-23. Main tests at last full run (2026-10-08): `cargo test --workspace` passes on the install.
 
 ## Resume here (2026-10-22)
 
@@ -17,28 +17,14 @@ Last updated: 2026-10-21. Main tests at last full run (2026-10-08): `cargo test 
   → push (the hook syncs public #2) → publish in batches. Running work = the BACKLOG `(running: …)`
   markers and `git worktree list`; merged work = `git log`.
 - **Resume points:** the one debugger sitting sheet at the top of docs/FOR_USER.md. Running work: BACKLOG markers.
-- **Night 2026-10-21 ended (user, Thu 03:50):** 33 branches merged, all §0. Six branches are open; their BACKLOG `(running: …)` markers stay, and each goes to a fresh worker (pushed, worktrees `../NR-<x>`):
-  - **peaceweigh:** reviewed; a fix round is needed. Blocking: `deal_value.rs:122-131` `peace_weighted_mean` must divide each term by the total weight before adding, as the exe does at `0x00A35712`-`0x00A35740` and `0x00A35A40` (it adds first now, so the f32 result differs). Polish:
-    - `RegionStrengths::of` looks up the region once per character;
-    - stale comments (no peace listed) at `negotiation.rs:1035`, `commands.rs:586` and `diplomacy.rs:1365`;
-    - the dead "human ally ±0.25" branch in the `0x00D63260` Ghidra comments.
-    New trace item: `peace_turn_factor` drops from 3.33 to 0 between 4 and 5 turns; is it an ORIGINAL BUG? Not checked yet: `0x00CC13D0` case 9 and the ntw_ai tests.
-  - **foreigngarrison:** done (`479e66b6`), awaiting review. BACKLOG line 102: tick the foreign-garrison part and cite `0x00B43A60`/`0x00B44ED0` (not `0x008EF790`). New lines:
-    - allied entry into a settlement with no garrison (`0x00B16700`, `0x0094CFF0`);
-    - the full own garrison (`0x00885F30`, `0x008B2720`);
-    - the free spot (`0x00B39FE0`) and the case with no free spot;
-    - the tie order (`0x00BA6770`).
-  - **classbattle:** code done (`a51732cc`). Left: the V5 write-ups, all below the score of 70 (`0x0054AE90`, `0x0057C710`, `0x007B49A0`, `0x008ACCF0`, `0x008B55A0`); then review. New UNKNOWN: where a real-time battle's result codes come from.
-  - **moveinto:** code done (`c1b303eb`). Left: V5 to a score of 70 on `0x009C9EF0`, `0x009D1190`, `0x009D1540`, `0x009D0D00`, `0x00B28D20`, `0x00AAF1F0`, `0x00A06C90`, `0x0094CFF0`, `0x009EE150`, `0x009C9CA0`. Run self_check with `--not-mine 0x00B6D270`. Never type register locals with set_variables: it broke `0x009C9CA0`'s decompile.
-  - **camerainput:** WIP (`9fe57a4f`). The wheel, cam_up/down and set_map_bounds are ported. Left:
-    - the full tests, clippy and self_check;
-    - the V5 write-ups for `0x00E23470`, `0x00977C10`, `0x00956E70`/`F10`/`FA0`/`0x009570F0`, `0x00E23110`, `0x00955820`, `0x00955A00`, `0x00968900`/`0x00974B10`;
-    - the BACKLOG line's outline clamp `0x008B65B0`, bookmarks and the busy test.
-  - **placements:** done (`6e4cb9f1`), awaiting review. BACKLOG: line 149 is done for expulsion, HireGeneral, HireAdmiral and promotions, and line 150 can be ticked (CONFIRMED, `0x00A28605`). New lines:
-    - transfers `0x008D47B0`/`0x008D5F10` re-pick commanders (`0x008ED2C0`) and place the changed ones;
-    - partial boardings (`0x008F0F20`/`0x008F17D0`);
-    - the `0x0094C010` zone trace;
-    - the callers with no counterpart (PATHFINDING.md §8), with the shroud refresh batched per faction.
+- **Night 2026-10-22 ended at the block cap (Fri 01:30), no resume.** Branches left (worktrees `../NR-<x>`, fresh worker each, BACKLOG markers kept):
+  - `regionvalue` (8b57dc8d): done, needs its full review (stopped mid-review).
+  - `traderaid3` (54442d04): split + mid-turn re-booking done, needs its full review (stopped mid-review).
+  - `actionclears` (b227c71e): review fix round WIP: trace `0x005445A0` (does losing the last gun drop the gun trains from +0x2CC?), then fix actions.rs:13-24/33 notes and the duplicate test.
+  - `allygarrison` (c3da22e3): WIP, tests pass: V5 for `0x00BA6770` / `0x00885F30` / `0x008EA7E0` / `0x00B16C00` (or revert names), then self_check and review.
+  - `victoryscreen3` (f69478b3): WIP: QuitToMainScreen comment (mod.rs ~1084), +0x9C hold / ContinueGameSelected, victory check with +0x125, V5, UI_FIDELITY notes.
+  - `expelplace` (666bbf78): WIP, placement traced (CAMPAIGN_FIDELITY "Placement traced, port in progress"): write campaign/place_flood.rs, stepwise expulsion seam; msvc_sort push/pop_heap unused yet.
+  - `polish67` (dc6509d8): WIP, workspace tests pass, clippy not run: needs clippy + review; not done: handover CharacterCreated assert, `rank()` EffectSet, the (0,0) walk end.
 - Usage (user, 2026-10-22): 12-point blocks (`BlockPercent` in tools/usage_budget.ps1) to the Wed 2026-10-28 reset. The Wed 10-21 night ended at 18% of its 22% cap; its 4 unused points go to the next block (`usage_budget.ps1 extra-next 4`, stored in `next_extra.txt` and applied once when the block opens, so Thu's cap is its opening reading + 16).
 - **Disk:** C: filled up on 2026-10-09; 21 merged worktrees were removed (~100 GB back). Remove a
   worktree after its merge; check `df -h /c` before starting builds.

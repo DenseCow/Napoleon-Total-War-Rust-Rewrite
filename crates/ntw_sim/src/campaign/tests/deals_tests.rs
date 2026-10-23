@@ -1252,7 +1252,7 @@ fn share_religion(m: &mut CampaignModel, faction: FactionId, regions: &[RegionId
 #[test]
 fn a_class_order_under_another_faction() {
     use super::economy::{hypothetical_class_order, ClassPublicOrder};
-    let mut c = ClassPublicOrder { class: "lower".into(), happiness: [0; 13], repression: [0; 6] };
+    let mut c = ClassPublicOrder { class: "lower".into(), happiness: [0; 13], repression: [0; 6], governed: true };
     // Government 5, tax −3, resistance −2, the owner's gentlemen 1; government buildings 2, garrison 4.
     (c.happiness[0], c.happiness[1], c.happiness[10], c.happiness[11]) = (5, -3, -2, 1);
     (c.repression[1], c.repression[4]) = (2, 4);
@@ -1262,7 +1262,7 @@ fn a_class_order_under_another_faction() {
     // Two gentlemen on the new side's terms: 5.
     assert_eq!(hypothetical_class_order(&c, 1, 2), 5);
     // Positive tax and resistance stay as they are.
-    let mut p = ClassPublicOrder { class: "lower".into(), happiness: [0; 13], repression: [0; 6] };
+    let mut p = ClassPublicOrder { class: "lower".into(), happiness: [0; 13], repression: [0; 6], governed: true };
     (p.happiness[1], p.happiness[10]) = (2, 3);
     assert_eq!(hypothetical_class_order(&p, 0, 0), 5);
 }
@@ -1335,4 +1335,77 @@ fn the_fallback_class_still_loses_the_owners_gentlemen() {
     assert_eq!((gentlemen_factor(&m, reg), gentlemen_factor_for(&m, reg, B)), (2.0, -2.0));
     // 0 − 2 (owner's) + (−2) (B's).
     assert_eq!(hypothetical_order_attitude(&m, reg, B), -4);
+}
+
+/// A negative `gentleman_happiness_positive_limit` (a mod value) is the positive part itself, as
+/// `0x008C5729`'s `CMOVL` takes it whenever limit < sum: −3 for the owner's +2 and for B's 0 (no
+/// gentleman of B's side), not a panic in `clamp(0, limit)`.
+#[test]
+fn a_negative_gentleman_limit_is_the_positive_part() {
+    use super::economy::{gentlemen_factor, gentlemen_factor_for};
+    let mut m = test_model();
+    let mut rules = (*m.rules).clone();
+    rules.variables.insert("gentleman_happiness_positive_limit".into(), -3.0);
+    rules.variables.insert("gentleman_happiness_negative_limit".into(), -8.0);
+    m.rules = Arc::new(rules);
+    let r = RegionId(10);
+    let owner = m.world.regions[&r].owner;
+    let mut g = character(106, owner, CharacterKind::Gentleman, 10);
+    g.garrisoned_in = Some(r);
+    m.world.characters.insert(g.id, g);
+    m.world.character_details.entry(CharacterId(106)).or_default().attributes = vec![("research".into(), 2)];
+    let reg = &m.world.regions[&r];
+    assert_eq!((gentlemen_factor(&m, reg), gentlemen_factor_for(&m, reg, B)), (-3.0, -5.0));
+}
+
+/// `region_of` is the first region (in id order) `in_region` accepts, for a garrisoned character and one
+/// standing at a settlement, and none for one far from every region.
+#[test]
+fn region_of_agrees_with_in_region() {
+    use super::economy::{in_region, region_of};
+    let mut m = test_model();
+    let at = m.world.regions[&RegionId(10)].settlement.position;
+    m.world.characters.get_mut(&CharacterId(100)).unwrap().position = at;
+    m.world.characters.get_mut(&CharacterId(101)).unwrap().garrisoned_in = Some(RegionId(10));
+    m.world.characters.get_mut(&CharacterId(102)).unwrap().position = (Fixed20::from_int(9_000), Fixed20::from_int(9_000));
+    for c in m.world.characters.values() {
+        let expect = m.world.regions.values().find(|r| in_region(&m, r, c)).map(|r| r.id);
+        assert_eq!(region_of(&m, c).map(|r| r.id), expect, "character {:?}", c.id);
+    }
+    assert_eq!(region_of(&m, &m.world.characters[&CharacterId(101)]).map(|r| r.id), Some(RegionId(10)));
+    assert_eq!(region_of(&m, &m.world.characters[&CharacterId(102)]).map(|r| r.id), None);
+}
+
+/// With the map, `region_of` is still the first region `in_region` accepts: the garrison wins over the
+/// grid, the grid's region cell decides otherwise, and a cell of no region is in none.
+#[test]
+fn region_of_agrees_with_in_region_on_the_map() {
+    use super::economy::{in_region, region_of};
+    use crate::campaign::pathing::{CellKind, PathGrid};
+    let mut m = test_model();
+    let mut grid = PathGrid::new((0.0, 0.0), 1.0, 20, 4);
+    grid.region_keys = vec!["test_region_11".into(), "test_region_10".into()];
+    for i in 0..grid.kind.len() {
+        let (kind, region) = match i % 20 {
+            0..=4 => (CellKind::Land, 0),
+            5..=9 => (CellKind::Land, 1),
+            _ => (CellKind::Blocked, u32::MAX),
+        };
+        grid.kind[i] = kind as u8;
+        grid.region[i] = region;
+    }
+    m.attach_terrain(crate::campaign::world::Terrain(Arc::new(grid)));
+    let place = |m: &mut CampaignModel, id: i32, x: f64| m.world.characters.get_mut(&CharacterId(id)).unwrap().position = (Fixed20::from_f64(x), Fixed20::from_f64(1.5));
+    place(&mut m, 100, 2.5);
+    place(&mut m, 101, 15.5);
+    place(&mut m, 102, 15.5);
+    m.world.characters.get_mut(&CharacterId(101)).unwrap().garrisoned_in = Some(RegionId(12));
+    for c in m.world.characters.values() {
+        let expect = m.world.regions.values().find(|r| in_region(&m, r, c)).map(|r| r.id);
+        assert_eq!(region_of(&m, c).map(|r| r.id), expect, "character {:?}", c.id);
+    }
+    let of = |id: i32| region_of(&m, &m.world.characters[&CharacterId(id)]).map(|r| r.id);
+    assert_eq!((of(100), of(101), of(102)), (Some(RegionId(11)), Some(RegionId(12)), None));
+    place(&mut m, 100, 7.5);
+    assert_eq!(region_of(&m, &m.world.characters[&CharacterId(100)]).map(|r| r.id), Some(RegionId(10)));
 }

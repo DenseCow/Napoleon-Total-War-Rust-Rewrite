@@ -382,9 +382,9 @@ fn timed_access_running_out_expels_the_target() {
     let mut m = spread_model();
     add_army(&mut m, 103, C, pos(205, 0));
     m.relationship_mut(A, C).military_access_turns = 2;
-    m.diplomacy_round_end(A);
+    m.diplomacy_round_end(A, &mut Vec::new());
     assert_eq!(at(&m, 103), pos(205, 0), "one turn left");
-    m.diplomacy_round_end(A);
+    m.diplomacy_round_end(A, &mut Vec::new());
     assert_eq!(m.world.relationships[&(A, C)].military_access_turns, 0);
     assert_eq!(at(&m, 103), pos(400, 0));
 
@@ -392,7 +392,7 @@ fn timed_access_running_out_expels_the_target() {
     let mut m = spread_model();
     add_army(&mut m, 103, C, pos(205, 0));
     m.relationship_mut(A, C).military_access_turns = -1;
-    m.diplomacy_round_end(A);
+    m.diplomacy_round_end(A, &mut Vec::new());
     assert_eq!(at(&m, 103), pos(205, 0));
 }
 
@@ -469,8 +469,8 @@ fn peace_gives_back_both_sides_allies_access() {
 }
 
 /// Peace's step order (`0x00B262C0`): the `0x00B0D0C0` loop's expulsion runs before the character walk
-/// (`0x00A25570`), so a raider it moves out has lost his raids (the move ends them, with no price update)
-/// and his walk step finds none to end: the peace runs only its own update. Given back access, he stays,
+/// (`0x00A25570`), so a raider it moves out has lost his raids (the placement ends them, `0x0096C930` → `0x00A285E0` → `0x009DA140`, with its price update)
+/// and his walk step finds none to end: the peace adds only its own update. Given back access, he stays,
 /// and his walk step ends the raid with its own update first.
 #[test]
 fn a_peace_expels_before_its_character_walk_ends_raids() {
@@ -495,7 +495,7 @@ fn a_peace_expels_before_its_character_walk_ends_raids() {
         assert!(m.world.commerce_raids.is_empty());
         (at(&m, 104), updates.len())
     };
-    assert_eq!(run(0), (pos(200, 0), 1), "expelled to A's region 12 first: the peace's own update only");
+    assert_eq!(run(0), (pos(200, 0), 2), "expelled to A's region 12 first: the expulsion's raid end, then the peace's");
     assert_eq!(run(3), (pos(405, 0), 2), "kept access: his raid end's update, then the peace's");
 }
 

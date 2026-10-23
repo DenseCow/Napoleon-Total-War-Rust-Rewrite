@@ -128,10 +128,10 @@ fn the_round_end_and_start_refresh_the_tribute() {
     act(&mut m, B, A, D::BecomeProtectorate);
     assert_eq!(record(&m, B)[24], 100);
     m.world.economy_history.get_mut(&B).unwrap().last_mut().unwrap()[5] = -1004;
-    m.diplomacy_round_end(B);
+    m.diplomacy_round_end(B, &mut Vec::new());
     assert_eq!((record(&m, B)[24], m.world.relationships[&(B, A)].protectorate_tribute), (-200, -200));
     assert_eq!(record(&m, A)[10], 100);
-    m.diplomacy_round_end(A);
+    m.diplomacy_round_end(A, &mut Vec::new());
     assert_eq!((record(&m, A)[10], m.world.relationships[&(A, B)].protectorate_income), (-200, -200));
     m.world.economy_history.get_mut(&B).unwrap().last_mut().unwrap()[5] = 1500;
     m.refresh_computed_factors();

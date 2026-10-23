@@ -3,15 +3,17 @@
 //! next to the trade segments it raids and takes a share of every route along them that belongs to
 //! its raid's target.
 //!
-//! - **Starting a raid** (`0x009D3AC0` → `0x00BA7680` → `0x00BA7600`, CONFIRMED): the character's
-//!   raids are cleared, then every trade segment within [`RAID_RADIUS`] of his position
-//!   ([`segment_distance`]) that is raidable for his faction ([`CampaignModel::segment_raidable`],
-//!   `0x00BA7DF0`) gets one raid entry with its target ([`CampaignModel::raid_target`], `0x00BAFB20`).
-//!   With none, the order is cancelled (`0x00921CD0`).
-//! - **Moving** (the move order's start slot `0x0095D940`, vtable `0x0135F498`, CONFIRMED; that every
-//!   move goes through this order is INFERRED): a raiding character (raid list +0x2D0 not empty,
-//!   `IsListEmpty` `0x008BC550`) loses all his raids (`EndCharacterCommerceRaids` `0x009DA140` →
-//!   `0x008BC580`).
+//! - **Starting a raid** (`0x009D3AC0` → `0x00BA7680` → `0x00BA7600`, CONFIRMED): every trade segment
+//!   within [`RAID_RADIUS`] of his position ([`segment_distance`]) that is raidable for his faction
+//!   ([`CampaignModel::segment_raidable`], `0x00BA7DF0`), taken in turn, gets one raid entry with its
+//!   target ([`CampaignModel::raid_target`], `0x00BAFB20`), and each entry runs the price update with
+//!   flag 0 (`AddCommerceRaidEntry` `0x00BA76A0`). With none in range the order is cancelled
+//!   (`0x00921CD0`). His earlier raids are ended by the order's start, not here.
+//! - **Moving** (the move order's start slot `0x0095D940`, vtable `0x0135F498`, CONFIRMED: once the
+//!   path is accepted, `0x0095DA8C`; the step update `0x00A285E0` also ends them on every step it runs
+//!   with an argument other than 1, `0x00A28605`; that every model move is such an order is INFERRED):
+//!   a raiding character (raid list +0x2D0 not empty, `IsListEmpty` `0x008BC550`) loses all his raids
+//!   ([`CampaignModel::end_character_raids`], `EndCharacterCommerceRaids` `0x009DA140`).
 //! - **A change of commander** hands the raids on (`CampaignModel::hand_over_raids`, CONFIRMED): when
 //!   the old commander raided, his raids end and the new one raids where he stands, the old one's place
 //!   (`0x009D3AC0`). The force's observer `0x008DB3E0` does it when its commander dies or leaves (the
@@ -27,16 +29,19 @@
 //!   rest (the force split `0x008B9030`, which hands the raids on only when the remaining force's new
 //!   commander is a new officer, `0x008D47B0`, `0x008D5F10`) are paths our model does not have yet.
 //! - **Ending**: his death (`0x0099D62E`); a peace (`0x00B262C0` → `0x00A25570`: every commander of either
-//!   side with a raid on the other side loses all his raids); the trade update's rebuild at the round start and end (`0x00BD1020` →
-//!   `0x00BA4A70` → `0x008B3690`: a raider no longer raidable on one of his segments loses all his raids).
+//!   side with a raid on the other side loses all his raids); the raid check of every price update
+//!   (`0x00BD1020` → `0x00BA4A70` → `0x008B3690`: a raider no longer raidable on one of his segments loses
+//!   all his raids). Every end runs the price update with flag 0 (`0x009DA140` → `0x00BCB020(0)`).
 //! - **The take** (`0x00B83C30` for an international route, `0x00B83360` for a domestic one, the same
 //!   pass): over the route's legs, the characters raiding its segments whose target is the route's
 //!   owner, once each; each one's share ([`CampaignModel::force_raid_share`]) summed per faction; when
 //!   the shares sum above 1 each is divided by the sum; each faction takes
 //!   [`raid_take`] of the route (seam [`trade.raid_take`](super::seams::RAID_TAKE)). The raider's
 //!   faction books the take as income category 9 (`0x00BBE9A0` group 1,
-//!   `finances_commerce_raiding_income`); the international route's owner earns its net value
-//!   (`GetTradeRouteNetValue` `0x00B79B20`: total less the takes).
+//!   `finances_commerce_raiding_income`) as the last price update left it
+//!   ([`super::economy::book_raid_income`]); the international route's owner earns its net value
+//!   (`GetTradeRouteNetValue` `0x00B79B20`: total less the takes), and a domestic route's owner its
+//!   volume less the raided part (`0x00B1D1C0` / `0x00B1D1F0`, [`CampaignModel::domestic_net_volumes`]).
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -186,6 +191,12 @@ pub fn raid_take(model: &CampaignModel, route: &OwnedRoute<'_>, share: f32) -> i
             .map(|(v, p)| ((*v as f32 * share) as i32).saturating_mul(*p as i32))
             .fold(0i32, i32::saturating_add),
     }
+}
+
+/// The part of a domestic route's `volume` the raiders take (`0x00B1D1F0`, CONFIRMED): over the
+/// faction shares, `taken = trunc(taken + volume × share)` in single precision (`0x0126E2B0`).
+pub fn raided_volume(shares: &[(FactionId, f32)], volume: u32) -> u32 {
+    shares.iter().fold(0i32, |taken, (_, share)| (taken as f32 + volume as f32 * share) as i32).max(0) as u32
 }
 
 /// The raid shares on one victim's routes: every character raiding for that target, with his faction
@@ -385,28 +396,39 @@ impl CampaignModel {
         self.world.commerce_raids.iter().any(|r| r.character == character)
     }
 
-    /// Ends every raid of a character (`0x009DA140` → `0x008BC580`; the price update `0x00BCB020` the exe
-    /// runs after it is not run at once here, see the trade notes, except by the peace's raid step
-    /// [`Self::end_raids_on_peace`], which runs it right after).
-    pub fn clear_character_raids(&mut self, character: CharacterId) {
+    /// Ends every raid of a character (`EndCharacterCommerceRaids` `0x009DA140`, CONFIRMED): the list clear
+    /// `0x008BC580`, then the price update with flag 0 (`0x00BCB020(0)` at `0x009DA160`, which rebuilds the
+    /// raid takes and books them, [`Self::update_commodity_prices_with`]), then the +0xF7C dispatcher's
+    /// +0x268 listener (none in the model). Its callers run it only for a raiding character (`IsListEmpty`
+    /// on +0x2D0 first), so a character who does not raid runs no update.
+    pub fn end_character_raids(&mut self, character: CharacterId) {
+        if !self.is_raiding(character) {
+            return;
+        }
         self.world.commerce_raids.retain(|r| r.character != character);
+        self.update_commodity_prices_with(false);
     }
 
     /// The character raids the trade at `pos` (`0x009D3AC0`, CONFIRMED): each segment near `pos` raidable
     /// for his faction gets a raid on its [`Self::raid_target`] (`0x00BA7680` → `0x00BA7600` →
     /// `0x00BA76A0`). His existing raids are kept: none of these ends them (the order's start does, see
-    /// [`CampaignCommand::RaidTradeRoute`](super::commands::CampaignCommand::RaidTradeRoute)). Returns
-    /// whether any segment is in range, raidable or not (with none the raid order is cancelled,
-    /// `0x0094BA50` → `0x00921CD0`).
+    /// [`CampaignCommand::RaidTradeRoute`](super::commands::CampaignCommand::RaidTradeRoute)). The
+    /// segments are taken in turn, each checked against the trade as the entries before it left it, and
+    /// each new entry runs the price update with flag 0 (`AddCommerceRaidEntry` `0x00BA76A0`:
+    /// `0x00BCB020(0)` after the push, CONFIRMED), which books the takes. Returns whether any segment is in
+    /// range, raidable or not (with none the raid order is cancelled, `0x0094BA50` → `0x00921CD0`).
     pub fn raid_trade_route(&mut self, character: CharacterId, pos: (Fixed20, Fixed20)) -> bool {
         let Some(faction) = self.world.characters.get(&character).map(|c| c.faction) else { return false };
         let near = self.trade_segments_near(pos);
-        for (segment, list) in &self.segment_routes(&near) {
+        for &segment in &near {
+            let routes = self.segment_routes(&BTreeSet::from([segment]));
+            let list = routes.get(&segment).map_or(&[][..], Vec::as_slice);
             if !self.segment_raidable(list, faction) {
                 continue;
             }
             if let Some(target) = self.raid_target(list, faction) {
-                self.world.commerce_raids.push(CommerceRaid { character, segment: *segment, target });
+                self.world.commerce_raids.push(CommerceRaid { character, segment, target });
+                self.update_commodity_prices_with(false);
             }
         }
         !near.is_empty()
@@ -423,7 +445,7 @@ impl CampaignModel {
         if !self.is_raiding(old) {
             return;
         }
-        self.clear_character_raids(old);
+        self.end_character_raids(old);
         for &c in successors {
             self.raid_trade_route(c, at);
         }
@@ -452,39 +474,43 @@ impl CampaignModel {
 
     /// A peace's raid step for character `c` towards the other side `other` (`0x00B262C0` → `0x00A25570`,
     /// CONFIRMED, after his siege and blockade steps): if he still raids (`0x008BC560`) and one of his raids
-    /// is on `other` (`0x008CEEB0`), he loses all his raids and the price update runs
-    /// (`EndCharacterCommerceRaids` `0x009DA140`: the list clear `0x008BC580`, then `0x00BCB020(0)` at
-    /// `0x009DA160`, then the +0xF7C dispatcher's +0x268 listener, which has none in the model). A raid an
-    /// earlier step's price update already ended (its raid check, [`Self::validate_commerce_raids`]) is not
-    /// ended again, so it runs no update.
+    /// is on `other` (`0x008CEEB0`), he loses all his raids ([`Self::end_character_raids`], `0x009DA140`,
+    /// which runs the price update). A raid an earlier step's price update already ended (its raid check,
+    /// [`Self::validate_commerce_raids`]) is not ended again, so it runs no update.
     pub(crate) fn end_raids_on_peace(&mut self, c: CharacterId, other: FactionId) {
         if self.world.commerce_raids.iter().any(|r| r.character == c && r.target == other) {
-            self.clear_character_raids(c);
-            self.update_commodity_prices_with(false);
+            self.end_character_raids(c);
         }
     }
 
-    /// The trade update's rebuild check, at the round start and end (`0x00BD1020` → `0x00BA4A70` → `0x008B3690`, CONFIRMED): a raider
-    /// for whom one of his segments is no longer raidable ([`Self::segment_raidable`]) loses all his raids,
-    /// as does a raider who no longer exists. The exe skips the check while the game flag +0xFC6 is set
-    /// (UNKNOWN meaning; we always run it).
+    /// The trade update's raid check (`0x00BD1020` → `ValidateAllCommerceRaids` `0x00BA4A70` →
+    /// `ValidateCharacterCommerceRaids` `0x008B3690`, CONFIRMED), so at every price update: a raider for whom
+    /// one of his segments is no longer raidable ([`Self::segment_raidable`]) loses all his raids, as does
+    /// a raider who no longer exists. The exe ends the first such raider through `0x00BA4A60` →
+    /// `0x009DA140` ([`Self::end_character_raids`]), whose nested price update runs this check again, and
+    /// then restarts its walk; ours does the same. The exe skips the check while the game flag +0xFC6 is
+    /// set (UNKNOWN meaning; we always run it).
     pub fn validate_commerce_raids(&mut self) {
+        while let Some(c) = self.first_invalid_raider() {
+            self.end_character_raids(c);
+        }
+    }
+
+    /// The first raider (in raid order) [`Self::validate_commerce_raids`] ends.
+    fn first_invalid_raider(&self) -> Option<CharacterId> {
         if self.world.commerce_raids.is_empty() {
-            return;
+            return None;
         }
         let segments: BTreeSet<u32> = self.world.commerce_raids.iter().map(|r| r.segment).collect();
         let routes = self.segment_routes(&segments);
-        let ended: BTreeSet<CharacterId> = self
-            .world
+        self.world
             .commerce_raids
             .iter()
-            .filter(|r| match self.world.characters.get(&r.character) {
+            .find(|r| match self.world.characters.get(&r.character) {
                 None => true,
                 Some(c) => !self.segment_raidable(routes.get(&r.segment).map_or(&[][..], Vec::as_slice), c.faction),
             })
             .map(|r| r.character)
-            .collect();
-        self.world.commerce_raids.retain(|r| !ended.contains(&r.character));
     }
 
     /// The divisor of the raid shares (`0x00B83C30`, CONFIRMED): the largest `travel_speed` (unit record
@@ -499,16 +525,22 @@ impl CampaignModel {
     ///   `mod_ship_movement_campaign` (72) for a ship, plus the unit-category `movement_mod` of its
     ///   category, read from the commander's view ([`Effects::character_total`]); with a bonus the
     ///   points are `round((bonus + 100) × base / 100)`, else the base;
+    /// - a ship with top gallants ([`super::rules::UnitRules::top_gallants`], naval record +0x1D4) adds
+    ///   `mod_ship_movement_campaign_top_gallants` (73) to the ship bonus when its commander's
+    ///   `enable_top_gallants` (70), read as an int (`0x00E1F130` → `0x00E23E10`, rounded half to even),
+    ///   is not 0;
     /// - the result is scaled by the force's action point factor ([`super::turn::force_action_point_factor`])
     ///   and rounded (ties to even).
-    ///
-    /// PROVISIONAL: a ship whose naval record has the byte +0x1D4 set also adds
-    /// `mod_ship_movement_campaign_top_gallants` (73) once its commander's `enable_top_gallants` (70) is
-    /// not 0; the record column that sets the byte is not traced, so no ship counts as having it.
     pub fn unit_campaign_moves(&self, fx: &Effects, commander: CharacterId, unit_key: &str) -> i32 {
         let Some(u) = self.rules.units.get(unit_key) else { return 0 };
-        let bonus = if u.is_naval { "mod_ship_movement_campaign" } else { "mod_land_movement_campaign" };
-        let sum = fx.character_total(commander, bonus) + fx.character_total_qualified(commander, BonusKind::UnitCategory, "movement_mod", &u.category);
+        let own = if !u.is_naval {
+            fx.character_total(commander, "mod_land_movement_campaign")
+        } else if u.top_gallants && f64::from(fx.character_total(commander, "enable_top_gallants")).round_ties_even() != 0.0 {
+            fx.character_total(commander, "mod_ship_movement_campaign") + fx.character_total(commander, "mod_ship_movement_campaign_top_gallants")
+        } else {
+            fx.character_total(commander, "mod_ship_movement_campaign")
+        };
+        let sum = own + fx.character_total_qualified(commander, BonusKind::UnitCategory, "movement_mod", &u.category);
         let base = if sum != 0.0 { ((sum + 100.0) * u.travel_speed as f32 * 0.01).round_ties_even() as i32 } else { u.travel_speed };
         let factor = super::turn::force_action_point_factor(&self.rules, fx.character_total(commander, "general_admiral_action_point_bonus"));
         (base as f32 * factor).round_ties_even() as i32
@@ -540,20 +572,19 @@ impl CampaignModel {
         out
     }
 
-    /// What each raiding faction takes from one route (`0x00B83C30` / `0x00B83360`, CONFIRMED): the
-    /// characters raiding the route's segments ([`Self::route_segments`]) for its owner, once each in
-    /// walk order; their shares summed per faction (in the order the factions first appear); when the
-    /// faction shares sum above 1, each is divided by the sum; each faction's take is the
-    /// [`trade.raid_take`](super::seams::RAID_TAKE) rule. Empty when nobody raids the route.
-    pub fn route_raid_takes(&self, view: &RaidView<'_>, route: &OwnedRoute<'_>) -> Vec<(FactionId, i32)> {
+    /// The raid shares on one route (`0x00B83C30` / `0x00B83360`, CONFIRMED): the characters raiding the
+    /// route's segments ([`Self::route_segments`]) for its owner, once each in walk order; their shares
+    /// summed per faction (in the order the factions first appear); when the faction shares sum above 1,
+    /// each is divided by the sum. Empty when nobody raids the route.
+    pub fn route_raid_shares(&self, view: &RaidView<'_>, owner: FactionId, path: &TradePath) -> Vec<(FactionId, f32)> {
         let shares = &view.shares;
-        if shares.is_empty() || shares.victim != Some(route.owner) || route.path.waypoints.is_empty() {
+        if shares.is_empty() || shares.victim != Some(owner) || path.waypoints.is_empty() {
             return Vec::new();
         }
         let mut seen: BTreeSet<CharacterId> = BTreeSet::new();
         let mut per_faction: Vec<(FactionId, f32)> = Vec::new();
-        for s in Self::route_segments(&view.legs, &route.path) {
-            for r in self.world.commerce_raids.iter().filter(|r| r.segment == s && r.target == route.owner) {
+        for s in Self::route_segments(&view.legs, path) {
+            for r in self.world.commerce_raids.iter().filter(|r| r.segment == s && r.target == owner) {
                 if !seen.insert(r.character) {
                     continue;
                 }
@@ -570,8 +601,32 @@ impl CampaignModel {
                 e.1 /= total;
             }
         }
+        per_faction
+    }
+
+    /// What each raiding faction takes from one route: its share ([`Self::route_raid_shares`]) through
+    /// the [`trade.raid_take`](super::seams::RAID_TAKE) rule. Empty when nobody raids the route.
+    pub fn route_raid_takes(&self, view: &RaidView<'_>, route: &OwnedRoute<'_>) -> Vec<(FactionId, i32)> {
+        let shares = self.route_raid_shares(view, route.owner, &route.path);
+        if shares.is_empty() {
+            return Vec::new();
+        }
         let rule = self.rules.seams.raid_take.rule();
-        per_faction.into_iter().map(|(f, share)| (f, rule(self, route, share))).collect()
+        shares.into_iter().map(|(f, share)| (f, rule(self, route, share))).collect()
+    }
+
+    /// A domestic route's volumes after the raids on it, its owner's (CONFIRMED): 0 when the route is
+    /// blockaded (`0x00B1D1C0`, route +0x34); else each volume less what the raiders take of it
+    /// (`0x00B1D1F0`: over the route's faction → share map, which the price update's rebuild
+    /// `0x00B61720` stores from [`Self::route_raid_shares`], `taken = trunc(taken + volume × share)` in
+    /// single precision). This is what the route brings home: the exporter's supply in the trade split
+    /// (`0x00BC26D0` at `0x00BC2D6C`) and the home term of `0x00BB3490` (at `0x00BB362F`).
+    pub fn domestic_net_volumes(&self, view: &RaidView<'_>, owner: FactionId, path: &TradePath, volumes: &[u32]) -> Vec<u32> {
+        if self.trade_path_blockaded(owner, path) {
+            return vec![0; volumes.len()];
+        }
+        let shares = self.route_raid_shares(view, owner, path);
+        volumes.iter().map(|&v| v.saturating_sub(raided_volume(&shares, v))).collect()
     }
 
     /// The sum of the takes from one international route ([`Self::route_raid_takes`]): what its owner
@@ -584,9 +639,12 @@ impl CampaignModel {
     /// its takes ([`Self::route_raid_takes`]) from every route, domestic and international, of each faction
     /// its raids target.
     ///
-    /// INFERRED: the domestic routes' takes are rebuilt only at the trade update's rebuild (round start and end) and at a raid change
-    /// (`0x00BD1020` → `0x00B61720` → `0x00BA76F0`), the international ones at every route recompute; ours
-    /// computes both from the current state when asked.
+    /// Computed from the current state. What the round end pays is the value the last price update
+    /// booked ([`super::economy::book_raid_income`], CONFIRMED): the update rebuilds both kinds of take, the
+    /// international ones by `0x00BBD870` at `0x00BCC52F` and the domestic ones by `0x00BD1020` →
+    /// `0x00B61720` at `0x00BD1B23`. PROVISIONAL: the route builder `0x00BA0490` also rebuilds the
+    /// international takes outside a price update (a trade agreement `0x00B55090` → `0x00B55130`, the
+    /// listeners `0x00BB9410` / `0x00BB9B90`); ours books them only at the next price update.
     pub fn raid_income(&self, faction: FactionId) -> i32 {
         let w = &self.world;
         let victims: BTreeSet<FactionId> = w

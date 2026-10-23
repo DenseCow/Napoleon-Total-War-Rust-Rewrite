@@ -199,6 +199,17 @@ pub enum CampaignCommand {
         /// What he watches.
         target: super::agents::SpyTarget,
     },
+    /// `CampaignUI.MoveIntoTarget` (`0x009EE150`, CONFIRMED): the agent action menu's `visit`,
+    /// `embed`, `research` and `steal_research` order; a spy sent at a foreign target spies, anyone
+    /// else enters the settlement ([`CampaignModel::move_into_target`]).
+    MoveIntoTarget {
+        /// The agent (a character without a force).
+        agent: CharacterId,
+        /// What he is sent at.
+        target: super::agents::AgentTarget,
+        /// The research flag (`research` / `steal_research`).
+        research: bool,
+    },
     /// Hire a General from his faction's recruitment pool ([`super::pool`]): into an army of his
     /// faction (the original's way: the interface offers the candidates on an army), or, without
     /// one, as a new army at the capital (PROVISIONAL).
@@ -583,8 +594,8 @@ pub enum CommandError {
     Unsupported(&'static str),
     /// A deal command with no negotiation open.
     NoNegotiation,
-    /// The deal is refused (`CampaignModel::ai_refuses_deal`: the AI's evaluation of the regions and
-    /// technology records).
+    /// The deal is refused (`CampaignModel::ai_refuses_deal`: the AI's evaluation of the regions,
+    /// technology, payment, peace and join-war records).
     DealRefused,
     /// A technology key the `technologies` table does not have.
     UnknownTechnology(String),
@@ -799,7 +810,7 @@ impl CampaignModel {
             CampaignCommand::RaidTradeRoute { force, to } => {
                 let (c, walk) = self.move_force(force, to)?;
                 // The order's start ends his raids, also when he raids where he already stands.
-                self.clear_character_raids(c);
+                self.end_character_raids(c);
                 if walk.arrived {
                     self.raid_trade_route(c, to);
                 }
@@ -834,6 +845,7 @@ impl CampaignModel {
             CampaignCommand::SabotageArmy { agent, force } => self.sabotage_army(agent, force),
             CampaignCommand::SabotageBuilding { agent, region, slot } => self.sabotage_building(agent, region, slot),
             CampaignCommand::Spy { agent, target } => self.spy(agent, target),
+            CampaignCommand::MoveIntoTarget { agent, target, research } => self.move_into_target(agent, target, research),
             CampaignCommand::HireGeneral { character, into } => self.hire_general(character, into),
             CampaignCommand::HireAdmiral { character, fleet } => self.hire_admiral(character, fleet),
             CampaignCommand::PromoteUnit { force, unit } => self.promote_unit(force, unit),
@@ -1114,9 +1126,14 @@ impl CampaignModel {
     }
 
     /// Forces inside a region's settlement: its garrison and every army whose commander is
-    /// garrisoned there. PROVISIONAL: a garrison of another faction than the owner (one an owner
-    /// change does not expel: the rebels, a faction out of the game or one without a capital) is
-    /// counted too; whom the exe makes fight then is not traced.
+    /// garrisoned there. A garrison of another faction than the owner (one an owner change does not
+    /// expel: the rebels, a faction out of the game or one without a capital) defends too, whatever
+    /// its faction (CONFIRMED by disassembly): the settlement attack is allowed by war with the
+    /// region's owner alone (`0x00917D20` → `0x009D0980`, owner through the residence's region,
+    /// vtable `0x0137C9A4` +0x34 `0x00B62090`), its arrival `0x0094B600` starts the assault
+    /// `0x008E1A90` → battle setup `0x00883680`, whose defending side is led by the garrison army's
+    /// commander (residence +0x24 `0x00B3F890`) with the owner as the defending faction for the
+    /// reinforcements (`0x008C30B0` → `0x008E8680`).
     pub fn defenders_of(&self, region: RegionId) -> Vec<ForceId> {
         let Some(r) = self.world.regions.get(&region) else { return Vec::new() };
         let mut out: Vec<ForceId> = r.garrison.into_iter().filter(|f| self.world.forces.contains_key(f)).collect();
@@ -1199,13 +1216,64 @@ impl CampaignModel {
     }
 
     /// Moves `force`'s units into `into` (up to its cap, [`CampaignModel::max_units`]), each with
-    /// its attached character. The commander's own unit (the one he is attached to, `UNIT` #10) moves last, so
-    /// when not everything fits he stays with what is left. When everything moves, `force` is
+    /// its attached character: the unit transfer `0x008D7310`, which runs `0x008D5F10` when `into`'s
+    /// commander has a residence (`0x009FB9A0` at `0x008D7D7E`: for a character in a force, his army's
+    /// +0x9C, else his own +0x2C0) and `0x008D47B0` otherwise (CONFIRMED by disassembly). An army's
+    /// +0x9C is the residence whose garrison handle +0xC0 holds it, linked only by the shared enter
+    /// `0x00B4E760` (`0x008CFA60` at `0x00B4E790`; and the settlement loader `0x00AF4B00`; the enter is
+    /// called by the settlement constructor `0x00AF48D0` at `0x00AF4AC6`, the fort's enter and the
+    /// vtables), which a
+    /// settlement (vtable `0x0137C9A4`), a region slot (`0x0137695C`: a port or another slot
+    /// building), their two base classes and a fort (`0x0137D3E4`, its enter `0x00B4E6B0` calls it)
+    /// all use; a navy docked in a port is linked by its +0xE0 instead (the dock step `0x00A924D0`
+    /// enters nothing). The model's residence state is [`super::world::Character::garrisoned_in`]
+    /// (a settlement). PROVISIONAL: an army garrisoning a port or other region slot, or a fort, is not
+    /// modelled (no slot or fort garrison state), so a transfer into one takes `0x008D47B0`'s branch.
+    ///
+    /// The commander's own unit (the one he is attached to, `UNIT` #10) moves last, so when not
+    /// everything fits he stays with what is left. When everything moves, `force` is
     /// gone and its commander goes along as the character attached to his unit (`CHARACTER` #4 = 0,
     /// #5 = the unit), standing where `into` is: the state the original saves for merged armies
     /// (SAVE_COMPAT.md §4, CONFIRMED in its saves).
+    ///
+    /// Both forces then pick their commanders again ([`Self::pick_commander`], `0x008ED2C0`): `force`
+    /// first when it kept units, at its old commander's place, then `into` at its own (CONFIRMED,
+    /// `0x008D4F06` / `0x008D4F49`, `0x008D65E0` / `0x008D6620`). A commander who changed is placed
+    /// where he now stands ([`Self::place_character`]: `0x008D5299` / `0x008D5356`, `0x008D6812` /
+    /// `0x008D68EC`), except one made by the pick: `0x008D47B0` places none of those (its created
+    /// flags, `0x008D51E6` / `0x008D52B0`), and `0x008D5F10` places one only once he is on the map
+    /// (character +0x4C4, set by `0x009D3B60` at `0x009D3C37`, which it runs on `force`'s new one
+    /// before its placement test, `0x008D6689` / `0x008D6753`, and on `into`'s after it, `0x008D682D`
+    /// / `0x008D6933`). A changed commander's raids then pass to the new one where the old one stood
+    /// ([`Self::hand_over_raids_on_command_change`]: `0x008D5DDD`, `0x008D6910`, `0x008D6A00`).
+    /// ORIGINAL BUG: `0x008D47B0` hands `force`'s raids over (`0x008D5078`) before it places the new
+    /// commander (`0x008D5299`), and the placement ends his raids (`0x00A28605`), so the raids it just
+    /// handed over are lost; it hands `into`'s over after the placement, as `0x008D5F10` does for both.
+    /// Ours hands over after the placement on both sides.
+    /// A commander the pick made is put on the map by `0x009D3B60` (`0x008D4FB7` / `0x008D50DD`,
+    /// `0x008D6689` / `0x008D6933`), which gives him his zone (`0x00A28440(0)`, the core `0x009CC0E0`)
+    /// and sight (`0x00A27F10`); in `0x008D47B0`'s branch ours gives them through the zones-and-sight
+    /// step below, as the force's commander.
+    /// Then the forces' zones and sight again ([`Self::rebuild_force_zones_and_sight`], `0x008F9400`).
+    /// `0x008D47B0` runs it on both forces (`0x008D5B1A` / `0x008D5C0A` / `0x008D5D08` / `0x008D5D66`).
+    /// `0x008D5F10` runs it, with `0x008F9890` (the force's characters in the character index at
+    /// +0xF74 `0x00BA4D30`, which the model does not keep), on the source alone (ECX = EBP, its first
+    /// force, at `0x008D71C1` / `0x008D71C8`), and only when neither force emptied: the source's empty
+    /// flag (`0x008D65BE`) and the garrison's (`0x008D6601`) take other ends (`0x008D6F43`,
+    /// `0x008D707B`). The garrison army gets none; a commander the pick made for it has his zone and
+    /// sight from `0x009D3B60` alone. CONFIRMED by disassembly.
+    /// PROVISIONAL: not modelled are the events a changed command sends through the old commander
+    /// (his +0x14C slot 8, the +0x900 dispatcher), the +0x4E8 building flag (`0x00A0C810` /
+    /// `0x009DA300`), `0x008D5F10`'s residence steps at its end (`0x008D6BF6`–`0x008D6C16`) and the
+    /// rest of the made commander's `0x009D3B60` (his +0x1C and +0x2EC flags, `0x00A07660`, the
+    /// optional `0x009551D0`, the event `0x01355768`, his +0x520).
     pub(crate) fn merge_units(&mut self, force: ForceId, into: ForceId, events: &mut Vec<CampaignEvent>) {
         let room = self.world.forces.get(&into).map_or(0, |f| self.max_units(f.is_navy).saturating_sub(f.units.len()));
+        // What the transfers note on entry: both commanders as they were, and whether they raid.
+        let before = |m: &Self, f: ForceId| m.world.forces.get(&f).and_then(|f| f.commander).and_then(|c| m.world.characters.get(&c)).cloned();
+        let (old_src, old_dst) = (before(self, force), before(self, into));
+        let (src_raider, dst_raider) = (self.raiding_commander(force), self.raiding_commander(into));
+        let residence = old_dst.as_ref().is_some_and(|c| c.garrisoned_in.is_some());
         let Some(src) = self.world.forces.get_mut(&force) else { return };
         let commander = src.commander;
         // Stable order with the commander's own unit last.
@@ -1232,16 +1300,58 @@ impl CampaignModel {
             self.tidy_embarked();
             events.push(CampaignEvent::ForceDestroyed { force });
         }
+        let src_pick = old_src.as_ref().filter(|_| !empty).and_then(|o| Some((o.id, self.pick_commander(force, o)?)));
+        let dst_pick = old_dst.as_ref().and_then(|o| Some((o.id, self.pick_commander(into, o)?)));
+        let mut replaced = Vec::new();
+        for (pick, on_map_when_made) in [(src_pick, residence), (dst_pick, false)] {
+            let Some((old, (new, made))) = pick else { continue };
+            if new == old {
+                continue;
+            }
+            replaced.push(old);
+            if !made || on_map_when_made {
+                let at = self.world.characters[&new].position;
+                self.place_character(new, at);
+            }
+        }
+        if !empty {
+            self.hand_over_raids_on_command_change(src_raider, force);
+        }
         // After a unit transfer, a navy outside a port loses its repair orders (`0x008B36D0` from the transfers).
         self.cancel_undocked_repairs(force);
         self.cancel_undocked_repairs(into);
-        // The forces' zones again (`0x008F9400` from the transfers `0x008D47B0` / `0x008D5F10`): the
-        // target's commander, the source's if it is left, a commander without a force dropped.
-        self.rebuild_force_zones(into);
-        match commander {
-            Some(c) if empty => self.rebuild_zone(c),
-            _ => self.rebuild_force_zones(force),
+        if residence {
+            // `0x008D5F10`: each commander the pick made gets his zone and sight from `0x009D3B60`
+            // (the source's at `0x008D6689`, the garrison's at `0x008D6933`); then `0x008F9400` on
+            // the source alone, only when neither force emptied (`0x008D6F43` / `0x008D707B` →
+            // `0x008D71C1`).
+            for (_, (new, made)) in [src_pick, dst_pick].into_iter().flatten() {
+                if made {
+                    self.rebuild_zone(new);
+                    let faction = self.world.characters[&new].faction;
+                    self.refresh_shroud(faction, false);
+                }
+            }
+            let into_empty = self.world.forces.get(&into).is_none_or(|f| f.units.is_empty());
+            if !empty && !into_empty {
+                self.rebuild_force_zones_and_sight(force);
+            }
+        } else {
+            // `0x008D47B0`: `0x008F9400` on the target, then on the source if it is left.
+            self.rebuild_force_zones_and_sight(into);
+            if !empty {
+                self.rebuild_force_zones_and_sight(force);
+            }
         }
+        // A commander whose force is gone commands nothing now: his zone goes.
+        if let Some(c) = commander.filter(|_| empty) {
+            self.rebuild_zone(c);
+        }
+        // A commander the pick replaced commands nothing now: his zone goes.
+        for old in replaced {
+            self.rebuild_zone(old);
+        }
+        self.hand_over_raids_on_command_change(dst_raider, into);
         events.push(CampaignEvent::CampaignArmiesMerge { force, into });
     }
 
@@ -1281,11 +1391,19 @@ impl CampaignModel {
         }
         if !hostile {
             // A settlement holds one garrison army (`SIEGEABLE_GARRISON_RESIDENCE` #12, CONFIRMED):
-            // an army entering one that has a garrison joins it (INFERRED; PROVISIONAL when the
-            // garrison is full: the army then waits outside). A garrison of another faction (one an
-            // owner change does not expel, `expel_after_owner_change`: the rebels, a faction out of the
-            // game or one without a capital; or one from a loaded save) is never joined: the army waits outside
-            // (PROVISIONAL: what the exe does then is not traced).
+            // an army entering one that has a garrison joins it (CONFIRMED by disassembly: the order
+            // builder `0x0091BE30` walks it to the garrison's commander, `0x0091D1F0`, whose arrival
+            // `0x0094D660` moves the units across, `0x008D7310`). PROVISIONAL when the garrison is
+            // full: the exe's fit check `0x008B2720` (a human's two armies must fit whole, an AI's
+            // receiver needs room) otherwise queues a pending exchange (`0x00885F30`, the exchange
+            // panel for a human); ours waits outside.
+            // ORIGINAL BUG: a garrison of another faction (one an owner change does not expel,
+            // `expel_after_owner_change`: the rebels, a faction out of the game or one without a
+            // capital; or one from a loaded save) takes the owner's units in the exe: the residence's
+            // fit check `0x00B16700` (vtable `0x0137C9A4` +0x68) lets the owner's army in by its
+            // faction alone, assuming the garrison is the owner's, and neither `0x0094D660` nor
+            // `0x008D7310` checks the faction, so another faction's army gains the owner's units.
+            // Ours never joins it: the army waits outside.
             let held = self.world.regions[&region].garrison.filter(|g| *g != force && self.world.forces.contains_key(g));
             if let Some(g) = held {
                 if self.world.forces[&g].faction == fa && self.world.forces[&g].units.len() < self.max_units(self.world.forces[&g].is_navy) {
@@ -1359,11 +1477,12 @@ impl CampaignModel {
     /// it inside, and `CharacterEntersGarrison` fires (the enter `0x00B4E760`, vtable `0x0137C9A4`
     /// slot +0x88, appends him to the list +0xC8 through `0x008CFA70` and fires the event of vtable
     /// `0x013561B0`; CONFIRMED, disassembly); his zone and hidden flag follow (the enter's tail
-    /// `0x00A285C0`). Without room he stays where the walk ended. PROVISIONAL: which of the order
-    /// paths into `0x009549B0` set the enter flag the arrival step tests (+0x58; without it the step
-    /// opens diplomacy instead), and the second event the arrival step sends after entering (world
-    /// +0x3D8), are not traced.
-    fn agent_enter_settlement(&mut self, agent: CharacterId, region: RegionId) -> Result<Vec<CampaignEvent>, CommandError> {
+    /// `0x00A285C0`). Without room he stays where the walk ended. `MoveIntoTarget` (`0x009EE150`)
+    /// reaches this with the enter flag the arrival step tests set (+0x58 = 1, CONFIRMED,
+    /// disassembly; [`Self::move_into_target`]). PROVISIONAL: whether the map's right-click order
+    /// into `0x009549B0` sets it too (without it the step opens diplomacy instead), and the second
+    /// event the arrival step sends after entering (world +0x3D8), are not traced.
+    pub(super) fn agent_enter_settlement(&mut self, agent: CharacterId, region: RegionId) -> Result<Vec<CampaignEvent>, CommandError> {
         let faction = self.world.characters.get(&agent).ok_or(CommandError::UnknownCharacter(agent))?.faction;
         self.check_turn(faction)?;
         if self.force_of(agent).is_some() {
@@ -2068,9 +2187,17 @@ impl CampaignModel {
     /// vtable +0x20, `0x00B1E500` land / `0x00B1D7E0` naval; this is the last phase of each, the
     /// single-item spawn for land and naval items that do not march to a commander, see
     /// [`Self::spawn_reinforcement`]):
-    /// * land: into the army garrisoned in the region's settlement, if it is the owner's and has
-    ///   room (up to `CampaignModel::max_units`); otherwise a new army led by a new colonel attached to
-    ///   the unit, garrisoned in the settlement (CONFIRMED placement branch).
+    /// * land (`0x00B1E500` phase 3, `0x00B43A60`, CONFIRMED by disassembly): with no garrison, a new
+    ///   army led by a new colonel attached to the unit, garrisoned in the settlement; into the
+    ///   garrison army if it is the owner's and has room (up to `CampaignModel::max_units`; the
+    ///   residence's room check `0x00B44ED0` → +0x78 `0x00B67DA0`, add +0x84 `0x00B4EA10`); otherwise
+    ///   into the owner's army nearest full that has room within 5.0 map units of the settlement
+    ///   ([`Self::recruit_army_near`]); otherwise a new army outside the settlement (`0x008D25F0`).
+    ///   ORIGINAL BUG: the exe's room check ignores the garrison's faction, so with another
+    ///   faction's garrison inside (the rebels, out of the game or without a capital, which an owner
+    ///   change does not expel) the owner's recruit joins that foreign army; ours treats it as no
+    ///   room. PROVISIONAL: the exe stands the new army on a free spot near the settlement
+    ///   (`0x00B39FE0`) and raises none when it finds no spot; ours at the settlement's position.
     /// * naval: into the navy that received the port's last ship while it is still in the port
     ///   with room; otherwise a new navy led by a new captain, at the port's slot position (CONFIRMED).
     ///
@@ -2092,19 +2219,23 @@ impl CampaignModel {
                 f.faction == owner && f.is_navy == naval && f.units.len() < self.max_units(f.is_navy) && f.commander.is_some()
             })
         };
+        // A garrison id with no force behind it counts as none.
+        let garrison = garrison.filter(|g| self.world.forces.contains_key(g));
         let join = if naval {
             reg.fleet.filter(|&id| joinable(id) && self.force_position(id) == Some(spot))
         } else {
-            garrison.filter(|&id| joinable(id))
+            match garrison {
+                Some(g) if joinable(g) => Some(g),
+                Some(_) => self.recruit_army_near(region),
+                None => None,
+            }
         };
         let unit_id = super::ids::UnitId(self.world.alloc_id() as i32);
         let (force_id, character) = match join {
             Some(id) => (id, None),
             None => {
-                // Inside the settlement when it has no garrison (land only). PROVISIONAL: with a
-                // garrison of another faction inside (the rebels, out of the game or without a
-                // capital) the recruit stands outside; the spawn `0x00B1E500` is not traced for that case.
-                let inside = !naval && self.world.regions[&region].garrison.is_none_or(|g| !self.world.forces.contains_key(&g));
+                // Inside the settlement when it has no garrison (land only), else outside.
+                let inside = !naval && garrison.is_none();
                 let (f, c) = self.new_recruit_force(owner, naval, spot, inside.then_some(region));
                 let r = self.world.regions.get_mut(&region).expect("region exists");
                 if naval {
@@ -2118,6 +2249,34 @@ impl CampaignModel {
         self.push_recruited_unit(force_id, unit_id, unit_key, character);
         self.name_new_unit(force_id, unit_id);
         CampaignEvent::UnitTrained { force: force_id, unit: unit_id }
+    }
+
+    /// The army a land recruit joins when the settlement's garrison takes none (`0x00B43A60`, CONFIRMED
+    /// by disassembly): the characters standing in the box 5.0 map units (`0x01325D24`) either side of
+    /// the settlement's position, edges included (the character index at manager +0x3C → +8 → +0xF74,
+    /// query `0x00BA6440`), sorted by their force's unit count, most first (`0x00AC3740`), and the
+    /// first of them of the region owner's faction (`0x00B2B7C0`) leading an army (+0x2A8, not a
+    /// navy: `0x009D3A60`) with room (units +8 below the cap +0x48). PROVISIONAL: the exe's sort is
+    /// stable, so among armies of equal size the index's cell order wins (`0x00BA6770`); ours takes
+    /// the lowest force id. The box is compared on the exact fixed-point positions (the exe's in
+    /// floats).
+    fn recruit_army_near(&self, region: RegionId) -> Option<ForceId> {
+        let r = self.world.regions.get(&region)?;
+        let (sx, sz) = (i64::from(r.settlement.position.0.raw()), i64::from(r.settlement.position.1.raw()));
+        let reach = 5 * i64::from(ONE_RAW);
+        let cap = self.max_units(false);
+        self.world
+            .forces
+            .values()
+            .filter(|f| f.faction == r.owner && !f.is_navy && f.units.len() < cap)
+            .filter(|f| {
+                f.commander.and_then(|c| self.world.characters.get(&c)).is_some_and(|c| {
+                    (i64::from(c.position.0.raw()) - sx).abs() <= reach && (i64::from(c.position.1.raw()) - sz).abs() <= reach
+                })
+            })
+            // `max_by_key` keeps the last maximum, so the id is reversed to keep the lowest.
+            .max_by_key(|f| (f.units.len(), std::cmp::Reverse(f.id)))
+            .map(|f| f.id)
     }
 
     /// The finished land items recruited through `target` (item +0x18) while he leads an army: their

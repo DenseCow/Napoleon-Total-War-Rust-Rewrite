@@ -613,7 +613,7 @@ impl CampaignModel {
         if self.turn.humans.contains(&faction) {
             return;
         }
-        // In region-id order, part of the stand-in: the exe repairs from the CAI's slot intentions (`0x00CE9A60`: repair
+        // PROVISIONAL: region-id order is a stand-in: the exe repairs from the CAI's slot intentions (`0x00CE9A60`: repair
         // `0x00AA4910` when the slot's building handle is the intention's +0x110, else build `0x00A67890`), in the
         // intention order, not traced. The order matters: each repair's cost is capped at the treasury left.
         let regions: Vec<RegionId> = self.world.regions.values().filter(|r| r.owner == faction).map(|r| r.id).collect();

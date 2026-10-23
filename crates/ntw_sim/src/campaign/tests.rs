@@ -20,12 +20,15 @@ mod commerce_raid_tests;
 mod construction_tests;
 mod deals_tests;
 mod peace_deal_tests;
+mod placement_tests;
 mod economy_tests;
 mod expense_tracker_tests;
 mod fog_turn_end_tests;
 mod handover_tests;
 mod forces_tests;
+mod foreign_garrison_tests;
 mod hiring_tests;
+mod battle_result_tests;
 mod population_class_tests;
 mod port_blockade_tests;
 mod rank_tests;
@@ -141,6 +144,7 @@ fn region(id: u32, owner: FactionId, gdp: u32, slots: usize) -> Region {
         garrison: None,
         fleet: None,
         siege: Default::default(),
+        traits: Vec::new(),
     }
 }
 

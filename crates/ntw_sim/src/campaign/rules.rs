@@ -70,6 +70,11 @@ pub struct UnitRules {
     /// ([`super::world::Region::unit_resources`]) holds it (vanilla: `global`, `horses`, ...). A unit whose
     /// value is not a key never reaches the rules: the loader drops its row, as `0x00EDC000` does.
     pub unit_resource: Option<String>,
+    /// `unit_stats_naval` #60: the ship carries top gallants (naval record +0x1D4, CONFIRMED: the naval
+    /// record builder `0x00F09CD0` stores itself at `UNIT_RECORD` +0xA0 of the unit its row names and fills
+    /// its +0x1C8 block through `0x00F0CE30`, which copies builder +0x168, #60, to +0x1D4). Read by
+    /// [`super::CampaignModel::unit_campaign_moves`]; false for a unit without a `unit_stats_naval` row.
+    pub top_gallants: bool,
 }
 
 /// A land unit's autoresolve inputs, from its `units` / `unit_stats_land` rows.
@@ -271,6 +276,11 @@ pub struct CampaignRules {
     /// characters without a force (agent record +0x18 via `0x00A0B9C0`, read by the can-enter check
     /// `0x00B165B0`, CONFIRMED; vanilla: minister and bandit). A type without a row counts.
     pub residence_exempt_agents: std::collections::BTreeSet<String>,
+    /// True when the merged `abilities` table has no `can_exchange` row: the agent action lists then
+    /// never get that ability (`0x00E0D4E0` reads the table; `0x009D1190` / `0x009D1540` push it
+    /// only with the row, CONFIRMED, disassembly), so no `visit`, `embed`, `research` or
+    /// `steal_research` is offered ([`super::agents::exchange_actions`]). Vanilla has the row.
+    pub no_exchange_ability: bool,
     /// `agents` #8 (record +0x44) by agent key: the type's main attribute, which its rank and the cards'
     /// primary attribute picture are read from (`0x00A198C0`, CONFIRMED data: General and colonel
     /// `command_land`, admiral and captain `command_sea`, rake `subterfuge`, ...). A type without one has
@@ -328,6 +338,16 @@ pub struct CampaignRules {
     /// governments when it moves the declarer's classes' war factor
     /// ([`super::population::class_war_change`]). A missing key ranks 0.
     pub government_ranks: BTreeMap<String, i32>,
+    /// `population_classes` #1 / #2 by class key (class record +0x10 / +0x11, CONFIRMED read by
+    /// `0x008F9690`): whether the class strikes and riots (true), and whether it sends a letter of demand and an
+    /// ultimatum (when the first is false) on its way to rebellion ([`super::population::class_pass`]). A missing
+    /// class takes neither path.
+    pub class_unrest_paths: BTreeMap<String, (bool, bool)>,
+    /// `unrest_cause_to_demands` as (cause, kind) → demand, each the index of its name in
+    /// [`super::population::UNREST_CAUSES`], [`super::population::UNREST_KINDS`] and
+    /// [`super::population::UNREST_DEMANDS`] (`0x008EB3F0`, CONFIRMED: keyed by the cause and kind names joined).
+    /// A missing pair demands nothing (0).
+    pub unrest_demands: BTreeMap<(u32, u32), u32>,
     /// `technologies` with their `technology_required_technology_junctions` and
     /// `technology_required_building_levels_junctions` rows, by key.
     pub technologies: BTreeMap<String, TechRules>,
@@ -609,11 +629,11 @@ impl CampaignRules {
         }
         r.units.insert(
             "test_unit".into(),
-            UnitRules { cost: 500, upkeep: 10, turns: 2, is_naval: false, men: 100, autoresolve: Some(TEST_AUTORESOLVE), category: "infantry".into(), unit_class: "infantry_line".into(), campaign_cost: 400, flag_21: false, militia: false, campaign_stealth: false, unit_cap: 0, travel_speed: 30, unit_resource: None },
+            UnitRules { cost: 500, upkeep: 10, turns: 2, is_naval: false, men: 100, autoresolve: Some(TEST_AUTORESOLVE), category: "infantry".into(), unit_class: "infantry_line".into(), campaign_cost: 400, flag_21: false, militia: false, campaign_stealth: false, unit_cap: 0, travel_speed: 30, unit_resource: None, top_gallants: false },
         );
         r.units.insert(
             "test_recruit".into(),
-            UnitRules { cost: 500, upkeep: 10, turns: 2, is_naval: false, men: 100, autoresolve: Some(TEST_AUTORESOLVE), category: "infantry".into(), unit_class: "infantry_line".into(), campaign_cost: 400, flag_21: false, militia: false, campaign_stealth: false, unit_cap: 0, travel_speed: 30, unit_resource: None },
+            UnitRules { cost: 500, upkeep: 10, turns: 2, is_naval: false, men: 100, autoresolve: Some(TEST_AUTORESOLVE), category: "infantry".into(), unit_class: "infantry_line".into(), campaign_cost: 400, flag_21: false, militia: false, campaign_stealth: false, unit_cap: 0, travel_speed: 30, unit_resource: None, top_gallants: false },
         );
         r.buildings.insert(
             "test_building_level".into(),

@@ -459,6 +459,82 @@ marks functions `__thiscall` in memory before decompiling (the decompile then sh
       (+0x20), the target's that refused and broke with it (+0x30), the target, the declarer (the joins'
       `0x00B26700` passes 0 for its refresh); a captured region's owner change (`0x00B62120` from
       `TransferRegionToFaction` `0x00A64AC0`) the new owner, then the old.
+    - Placement callers (`0x0096C8D0`, every xref, placements 2026-10-22, CONFIRMED by disassembly). In the
+      model, through `place_character` (tests `placement_tests.rs`, one per group): the region expulsion
+      (`0x008DA072` army, `0x008DA1B2` navy); `HireGeneral` (`0x00A165B9`, before the raid hand-over);
+      `HireAdmiral` (`0x00A162E9`, only when the fleet's commander changed, `0x00A162A6`; the empty-ship
+      branch `0x00A162F3` places no one); the field promotions (`0x008E1C20` at `0x008E2147`, `0x008E2260` at
+      `0x008E24FF`; with the commander unchanged both skip the placement and the pick's `0x008F9400`, so
+      nothing is flooded or seen: `0x008E205D` / `0x008E249C`, `0x008D2FEF`, `0x008E1E96`, `0x008E2237`;
+      `0x009D3B60` runs only on a newly made character, `0x008E2047` / `0x008E2627`). `HireAdmiral`'s other
+      cases run `0x008F9400` (zones, core and sight through `0x00A285C0`, no hidden flag): a replaced ship's
+      character with the command unchanged (`0x008B3B00` → `0x008B8E50`), and an empty ship whose command
+      changed (`0x008EDE20` → `0x008D2FA0`); an empty ship with the command unchanged runs nothing
+      (`0x008D2FEF`). Both picks call `0x008F9400` only past the gate `0x00A28F30` (`0x008B8E6C`, `0x008D2FB9`;
+      its +0x1B7 flag and `0x009D3CB0` / `0x009FB9D0` / `0x00A17D20` not traced); ours always runs it
+      (PROVISIONAL in `pool.rs`). The unit transfers
+      `0x008D47B0` (`0x008D5299`, `0x008D5356`) and `0x008D5F10` (`0x008D6812`, `0x008D68EC`, `0x008D69E2`)
+      place only a force commander that the re-pick `0x008ED2C0` changed (transferpick 2026-10-22, CONFIRMED
+      by disassembly; ours: `merge_units` → `pick_commander` → `place_character`, tests in
+      `placement_tests.rs`). Both are reached through `0x008D7310(src, dst)` (callers `0x0094C1EB` navy_embark
+      onto a carried army, `0x0094D7ED` an arrival at a garrison, `0x00A75F2B`, `0x00A7832E`), which runs
+      `0x008D5F10` when dst's commander has a residence (`0x009FB9A0` at `0x008D7D7E`: his army's +0x9C when
+      he is in a force, else his own +0x2C0), else `0x008D47B0`. An army's +0x9C is set only by `0x008CFA60`,
+      from the shared enter `0x00B4E760` (at `0x00B4E790`) and the settlement loader `0x00AF4B00`; the enter
+      is used by settlements (vtable `0x0137C9A4`), region slots (`0x0137695C`, ports and other slot
+      buildings), their two bases (`0x0137C7F0`, `0x0137C8B4`) and forts (`0x0137D3E4` via `0x00B4E6B0`, at
+      `0x00B4E708`), and called directly by the settlement constructor `0x00AF48D0` (at `0x00AF4AC6`, for each
+      character it places, after placing him at `0x00AF4AB4`); a docked navy is linked by its +0xE0 instead
+      (the dock step `0x00A924D0` enters nothing). CONFIRMED by disassembly. Ours tests `garrisoned_in`
+      (settlements only): slot and fort garrisons PROVISIONAL. Zones and sight after the transfer
+      (`0x008F9400`): `0x008D47B0` runs it on both forces (`0x008D5B1A` / `0x008D5C0A` / `0x008D5D08` /
+      `0x008D5D66`). `0x008D5F10` runs it, then `0x008F9890` (the force's commander, its +0x6C list and its
+      linked forces' characters updated in the character index at +0xF74 by `0x00BA4D30`; the model keeps no
+      such index), on the source alone: ECX = EBP at `0x008D71C1` / `0x008D71C8`, EBP being `*arg1`, the
+      first force `0x008D7310` passes (arg1 at `0x008D7DAB` is the same slot as `0x008D47B0`'s source at
+      `0x008D7DCE`; arg2 is the residence, whose garrison army is EBX from `0x008D5F7E` / `0x008D5F8E`). It
+      runs only when neither force emptied: the source's units test sets the flag at `0x008D65BE`, the
+      garrison's at `0x008D6601`, and `0x008D6F43` / `0x008D707B` send either case to its own end, with no
+      `0x008F9400`. The garrison army never gets it. Ours (`merge_units`): with a residence, only the
+      source, only when neither emptied; tests `a_transfer_floods_both_forces` (second half),
+      `a_merge_into_a_garrison_floods_neither_force` (zones.rs) and
+      `a_merge_into_a_garrison_that_keeps_its_commander_adds_no_sight` (placement_tests.rs). CONFIRMED by
+      disassembly. A commander the pick made is embodied by `0x009D3B60` (`0x008D4FB7` / `0x008D50DD`,
+      `0x008D6689` for the source's / `0x008D6933` for the garrison's), whose zone flood `0x00A28440(0)`, core
+      `0x009CC0E0` and sight `0x00A27F10` (unless `0x009D3CB0`) ours runs for him in `0x008D5F10`'s branch;
+      in `0x008D47B0`'s the force's `0x008F9400` covers him. Its other steps are not modelled. A fallen commander who comes back (`0x008CF9D0` links the copy as a rider) is
+      embodied with no residence entered (no slot +0x88 call), so `pick_commander` leaves his
+      `garrisoned_in` cleared. Their other callers
+      (`0x008D47B0`: `0x00919D16`, `0x00918F0A`, `0x009192B0`, `0x0091A968`, `0x008D7DCF`, `0x00935578`,
+      `0x00935790`, `0x00BCAC64`; `0x008D5F10`: `0x00AAD196`, `0x008D7DAC`, `0x00935B5C`, `0x00935E00`,
+      `0x00B11042`, `0x00BCAA28`, `0x00BCABB7`) are not mapped to orders yet. The pick runs on the source
+      first when it kept units (at its old commander's place), then on the target (`0x008D4F06` /
+      `0x008D4F49`; `0x008D65E0` / `0x008D6620`); its comparator `0x008CF620` compares the rank unsigned
+      (`JC` / `JA` at `0x008CF638` / `0x008CF63A`). `0x008D47B0` places no commander the pick made (its
+      created flags tested at `0x008D51E6` / `0x008D52B0`). `0x008D5F10` places one only when his +0x4C4
+      ("on the map", set by the embody step `0x009D3B60` at `0x009D3C37` and by the save reader
+      `0x00991520` at `0x00991F25`) is set: it embodies the source's made commander before its placement
+      test (`0x008D6689` / `0x008D6753`) and the target's after (`0x008D682D` / `0x008D6933`), so only the
+      source's is placed. `0x008D69E2` (the source's old commander became the target's, placed at the
+      residence) is a no-op after the pick moved him there. Raids pass to the new commander where the old one
+      stood (`0x008D5DDD`, `0x008D6910`, `0x008D6A00`). ORIGINAL BUG: `0x008D47B0` hands the source's raids
+      over (`0x008D5078`) before placing its new commander (`0x008D5299`), whose placement ends them
+      (`0x00A28605`); ours hands over after the placement on both sides. Not modelled: the events sent
+      through the old commander's +0x14C slot 8 / the +0x900 dispatcher, the +0x4E8 building flag
+      (`0x00A0C810` / `0x009DA300`), and the residence's end steps (`0x00B790F0`, `0x00A285C0` on its
+      commander, `0x00B4D2F0` at `0x008D6BF6`–`0x008D6C16`). navy_embark onto an empty fleet (`0x00A17D50`, `0x008EF090`,
+      `0x008F3150`, `0x00A2A140`) places no one; its zone step is not traced (INFERRED in `embark.rs`). The
+      partial boardings `0x008F0F20` (`0x008F1412`, `0x008F1479`) and `0x008F17D0` (`0x008F1A73`,
+      `0x008F1AAB`) board part of an army; ours boards whole only. No counterpart in the model yet: the split
+      `0x008F04C0` (`0x008F07AB`); `0x00AAE250` (`0x00AAE3B0`); the fort constructor `0x00AEB4A0`
+      (`0x00AEB8B9`); the settlement constructor `0x00AF48D0` (`0x00AF4AB4`); the load pass `0x00B5B790`
+      (`0x00B5BA25`); `0x008DD450` (`0x008DDC5C`); `0x008DA210` (`0x008DA3BD`); `0x008DA4F0` (`0x008DA633`);
+      the turn start `0x00A24EB0` (`0x00A2512D`, every character; ours re-evaluates only the hidden flags
+      there, `turn.rs`); a recruited general `0x00B67670` (`0x00B6797F`); the battle set-up `0x008E18D0`
+      (`0x008E1988`); the post-battle retreat `0x008F7880` (`0x008F825B`); `0x00920E80` (`0x00920FAB`,
+      `0x00920FEC`, `0x00921024`); `0x0094A960` (`0x0094A9B6`, `0x0094A9C3`); `0x0095EAA0` (`0x0095EC39`);
+      `0x00A1A6E0` (`0x00A1A84A`). A loop over many characters (turn start, the constructors) should refresh
+      each faction's shroud once, not per character.
   - Ours (zocflood 2026-10-17): `ntw_sim::campaign::zones` stores each commander's zone in the model
     (`world.zones`, not saved or compared), built by the load pass when the map is attached to a loaded model
     (`attach_terrain` from `MapData::attach`, as the constructor runs it right after the world load; 3.8 ms for
@@ -469,8 +545,10 @@ marks functions `__thiscall` in memory before decompiling (the decompile then sh
     exe's orders). The walk runs the sight, then the zones, then the hidden flag, as `0x00A285E0`'s last step
     does; it moves whole, so no character is left lifted. One function, `CampaignModel::set_down` (walkflood),
     is that mode-1 step: the walk's end (`0x00972EB1`), the landing's fleet sail, the landed army (its route
-    ends at the landing, PATHFINDING_PORTS.md §5 "Disembark") and the expulsion placement (`0x0096C9C4`) call it, and only the moved character's hidden flag is re-evaluated (`0x00A2885C`), not
-    the flags of the characters he carries. A stored zone stays until such an event, wherever its
+    ends at the landing, PATHFINDING_PORTS.md §5 "Disembark") and every placement call it, and only the moved character's hidden flag is re-evaluated (`0x00A2885C`), not
+    the flags of the characters he carries. The placement (placements 2026-10-22) is
+    `CampaignModel::place_character`: it ends his raids first, even in place (`0x0096C930` → `0x00A28605`),
+    moves him and sets him down (`0x0096C9C4`), one path for each placement caller the model has (above). A stored zone stays until such an event, wherever its
     character stands (an army an enemy walks up to keeps its zone; an expelled army the rule places is
     flooded at its new place, one it cannot place (`to: None`) keeps its old zone until its faction is flooded
     again: the treaty expulsions refresh both factions inside the expel branch, the cancel `0x00B67BD0` none,

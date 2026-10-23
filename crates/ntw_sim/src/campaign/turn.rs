@@ -16,7 +16,9 @@
 //! 1. Round start (`0x0096C050`): `FactionRoundStart` for every faction, in turn order, out-of-game
 //!    factions included and the rebels last (CONFIRMED: posted by `0x008F1F60` outside its +0x824 test;
 //!    that function also refreshes the region population factors, `0x00AAE710`, of a faction in the game
-//!    other than the rebels).
+//!    other than the rebels). Before the rebels' event, `HistoricalEvents` (`0x008F5990`): the script
+//!    host runs its handlers between [`TurnStep::RoundStart`] and [`TurnStep::HistoricalEvents`], which
+//!    shares their candidates out ([`super::historical_events`]).
 //! 2. For each faction in turn order, the turn start `0x008F2620` (CONFIRMED order of its calls):
 //!    1. Every character, in the faction's character list order (faction +0x764 count / +0x768 data, front
 //!       to back, `0x008F2AC4`, and `0x008F2B47` in the branch for the rebels; CONFIRMED;
@@ -99,8 +101,13 @@ use crate::fnv::Fnv64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TurnStep {
-    /// `FactionRoundStart` for every faction (out-of-game ones included, the rebels last; `0x0096C050`).
+    /// `FactionRoundStart` for every faction but the rebels (out-of-game ones included; `0x0096C050`), the
+    /// round start's refreshes, then `HistoricalEvents`; queues [`TurnStep::HistoricalEvents`].
     RoundStart,
+    /// The round start's historical events after the `HistoricalEvents` script event: the human factions'
+    /// share of the candidates its handlers pushed, then the rebels' `FactionRoundStart` (`0x008F5990`,
+    /// then the tail call in `0x0096C050`).
+    HistoricalEvents,
     /// The calendar advances.
     RoundEnd,
     /// The round end's first pass (`0x00948CF0` → `0x008E1030` for every listed faction, before any economy):
@@ -321,6 +328,8 @@ impl CampaignModel {
     /// (`0x00A1F3D0`) also uses `0x008BE4A0`; ours has no multiplayer save yet. The exe's test
     /// `CanFactionSaveCampaign` `0x008BE4A0` (CONFIRMED, read in full), in its order:
     ///
+    /// 0. ours only: the round start's historical event candidates are open (between its two steps; the
+    ///    exe runs both in one call, `0x0096C050`, so no save falls between them): false;
     /// 1. the campaign is over (+0xFE9, [`TurnState::campaign_over`]): false;
     /// 2. the scripts switched saving off (`[+0xFA8]+0x115`, [`super::world::World::saving_disabled`]): false;
     /// 3. a character is still moving (the location manager `[+0xF60]`'s moving list +0x24 / +0x28
@@ -349,7 +358,9 @@ impl CampaignModel {
     ///    when the turn start finished, `0x0094A940`, and moved on to 2 by the end of turn,
     ///    `0x0096E200`): ours [`TurnState::current`] and [`TurnState::in_turn`]. Otherwise false.
     pub fn can_save(&self, faction: FactionId) -> bool {
-        if self.turn.campaign_over || self.world.saving_disabled {
+        // Ours: between the round start's two steps the historical event candidates, which are not
+        // saved, are open; the exe runs both in one call (`0x0096C050`), so no save falls between them.
+        if self.turn.campaign_over || self.world.saving_disabled || self.historical_candidates.is_some() {
             return false;
         }
         if let Some(battle) = &self.pending_battle {
@@ -382,8 +393,13 @@ impl CampaignModel {
     /// runs `0x008F7850`, which leaves an offer waiting for a human (counter 0) on the stack. An
     /// [`TurnStep::AiTurn`] at the front still runs (it does nothing: its faction's orders were given
     /// before it, and one of them asked), so a driver does not play that faction again on resuming.
+    /// So does a [`TurnStep::HistoricalEvents`]: it is the second half of the round start
+    /// (`0x0096C050`), which runs to its end in one call (`0x008F5990`, then the rebels'
+    /// `0x008F1F60`) whatever a handler of its events asked, so the candidates never outlive it.
     pub fn step(&mut self) -> Option<Vec<CampaignEvent>> {
-        if !self.pending_ally_war_calls.is_empty() && !matches!(self.turn.queue.front(), Some(TurnStep::AiTurn(_))) {
+        if !self.pending_ally_war_calls.is_empty()
+            && !matches!(self.turn.queue.front(), Some(TurnStep::AiTurn(_) | TurnStep::HistoricalEvents))
+        {
             return None;
         }
         let step = self.turn.queue.pop_front()?;
@@ -404,8 +420,7 @@ impl CampaignModel {
                 // refreshes the faction's regions' population factors (`0x00AAE710`) unless the faction is the
                 // rebels (`0x008CEEF0`) or out of the game (+0x824), and posts the event (`0x013563E4`, named by
                 // `0x008BDE70`) either way. So every faction gets the event, the rebels' after the refreshes.
-                let (rebels, listed): (Vec<_>, Vec<_>) =
-                    self.world.factions_in_turn_order().into_iter().partition(|&f| self.world.is_rebel_faction(f));
+                let listed: Vec<_> = self.world.factions_in_turn_order().into_iter().filter(|&f| !self.world.is_rebel_faction(f)).collect();
                 for &faction in &listed {
                     events.push(CampaignEvent::FactionRoundStart { faction });
                 }
@@ -428,11 +443,20 @@ impl CampaignModel {
                 // The trade update with flag 0 (`0x00BCB020(0)`): prices and trends, no history shift, then the
                 // raid check (`0x00BD1020`) as at the round end.
                 self.update_commodity_prices_with(false);
-                // The round's historical events (`0x008F5990`, [`super::historical_events`]): the human factions'
-                // event messages, with at most one campaign RNG draw per human faction.
+                // The round's historical events (`0x008F5990`, [`super::historical_events`]): the candidate holder
+                // opens and `HistoricalEvents` is posted; the script host runs its handlers before the next
+                // step, which shares the candidates out and posts the rebels' `FactionRoundStart`.
+                self.open_historical_events();
+                events.push(CampaignEvent::HistoricalEvents);
+                self.turn.queue.push_front(TurnStep::HistoricalEvents);
+            }
+            TurnStep::HistoricalEvents => {
+                // The human factions' event messages, with at most one campaign RNG draw per human faction.
                 self.historical_events_round_start(&mut events);
-                for faction in rebels {
-                    events.push(CampaignEvent::FactionRoundStart { faction });
+                for faction in self.world.factions_in_turn_order() {
+                    if self.world.is_rebel_faction(faction) {
+                        events.push(CampaignEvent::FactionRoundStart { faction });
+                    }
                 }
             }
             TurnStep::RoundEndRefresh => self.prepare_round_end(),
@@ -472,19 +496,16 @@ impl CampaignModel {
                 // The treaty money (regular payments, protectorate tribute and income) is in the running
                 // record the settle pays (categories 8 / 10 / 22 / 24, booked by its writers,
                 // `CampaignModel::change_treaty_money`). The rebels and a faction out of the game pay nothing
-                // (`economy::Settlement::Skipped`).
+                // (`economy::Settlement::Skipped`). The settle then runs each region's round end (0x00AB42F0:
+                // its classes' riot checks, population growth and religion conversion, 0x00AB3FF0 →
+                // 0x00AB4070 → 0x00A63FE0, then its discontent and town wealth), for the rebels too:
+                // `0x008BC650` tests only faction +0x824 at `0x008BC685` before that loop (CONFIRMED by listing).
                 if economy::settle_round(self, f, &mut events) == (economy::Settlement::CannotPay { first_turn: true }) {
                     events.push(CampaignEvent::PendingBankruptcy { faction: f });
                 }
                 // The payments to `f` that an earlier payer's update finished this round go now that `f` has
                 // been paid their last round (ORIGINAL BUG fix, `CampaignModel::diplomacy_round_end` step 8).
                 self.drop_finished_payments_to(f);
-                // Each region's population growth, then its religion conversion (0x00AB42F0 → 0x00AB4070 →
-                // 0x00A63FE0, in the same step), for the rebels too: `0x008BC650` tests only faction +0x824 at
-                // `0x008BC685` before that loop (CONFIRMED by listing).
-                if self.in_the_game(f) {
-                    self.population_round_end(f);
-                }
                 // Then, for a faction with a record still in the game (`Self::in_the_game_with_record`: the JNZs
                 // at `0x008BC869` / `0x008BC871` jump past the whole block to `0x008BC8C4` for the rebels and a
                 // faction out of the game, CONFIRMED by listing), `0x008BC650` steps each owned region's
@@ -496,7 +517,7 @@ impl CampaignModel {
                 // (over the faction's +0x7BC / +0x7C0 force list; not modelled).
                 if self.in_the_game_with_record(f) {
                     self.construction_round_end(f, &mut events);
-                    events.extend(self.diplomacy_round_end(f));
+                    self.diplomacy_round_end(f, &mut events);
                     // The saves agree on research's place: AI techs started in turn 1 hold one step in the turn-2 save.
                     for technology in self.research_step(f) {
                         events.push(CampaignEvent::ResearchCompleted { faction: f, technology });

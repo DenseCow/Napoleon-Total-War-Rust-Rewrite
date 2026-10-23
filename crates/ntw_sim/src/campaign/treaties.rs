@@ -1225,12 +1225,11 @@ impl CampaignModel {
     /// 9. the cancel grievance (#26) −2 (to 0); embargo turns (#27) −1.
     ///
     /// Then the manager's own counter (+0x20, [`World::access_cancel_marks`](super::World::access_cancel_marks)) −1.
-    pub fn diplomacy_round_end(&mut self, faction: FactionId) -> Vec<CampaignEvent> {
-        let mut events = Vec::new();
+    pub fn diplomacy_round_end(&mut self, faction: FactionId, events: &mut Vec<CampaignEvent>) {
         // A faction out of the game updates nothing (0x00B29100 tests the owner's +0x824 first, [`Self::in_the_game`]).
         // The vanilla saves agree: such factions' records do not drift.
         if !self.in_the_game(faction) {
-            return events;
+            return;
         }
         // 0x00B29100 walks the faction's record vector (stride 0x848) in its own order (CONFIRMED), so the
         // messages and expulsions come in record order.
@@ -1268,7 +1267,7 @@ impl CampaignModel {
             // 0x00B29170: the access just ran out, so `t`'s forces leave `faction`'s regions, before the
             // war balances below read where the armies stand (CONFIRMED order).
             if access_ran_out {
-                self.expel_from_lands_of(t, faction, &mut events);
+                self.expel_from_lands_of(t, faction, events);
             }
             let at_war = self.world.stance(faction, t) == Stance::War;
             let allied = matches!(self.world.stance(faction, t), Stance::Allied | Stance::Patron | Stance::Protectorate);
@@ -1321,7 +1320,6 @@ impl CampaignModel {
             *n = n.saturating_sub(1);
         }
         self.diplomacy_changed();
-        events
     }
 
     /// The two war balances of `owner` against `target` (#10, #11 of the per-turn update, `0x00B29170`):

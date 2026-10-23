@@ -1,4 +1,5 @@
 use super::*;
+use ntw_sim::campaign::agents::{exchange_actions, AgentTarget};
 use ntw_sim::campaign::treaties::DiplomaticAction as D;
 
 pub(super) const A: FactionId = FactionId(1);
@@ -121,6 +122,7 @@ pub(super) fn test_hud_setup(db: GameDatabase, setup: HudSetup) -> TestHud {
             garrison: None,
             fleet: None,
             siege: Default::default(),
+            traits: Vec::new(),
         },
     );
     let start = Date { year: 1805, season: 1, month: 0, half: HALF_EARLY };
@@ -1138,6 +1140,9 @@ fn the_agent_action_calls_answer_the_model_and_queue_its_commands() {
     call2("InstigateDuel", hud.char_addr(OWN_GENTLEMAN), hud.char_addr(FOREIGN_GENTLEMAN));
     call2("InstigateAssassination", hud.char_addr(RAKE), hud.char_addr(FOREIGN_GENTLEMAN));
     call2("SabotageArmy", hud.char_addr(RAKE), hud.force_addr(ntw_sim::campaign::ForceId(4242)));
+    // `MoveIntoTarget(src, target)` without the research flag, at a settlement and at a character.
+    call2("MoveIntoTarget", hud.char_addr(RAKE), hud.region_addr(REGION));
+    call2("MoveIntoTarget", hud.char_addr(RAKE), hud.char_addr(FOREIGN_GENTLEMAN));
     let queued = hud.host.take_campaign_requests();
     let cmds: Vec<CampaignCommand> = queued.into_iter().filter_map(|r| match r {
         CampaignRequest::Command(c) => Some(c),
@@ -1150,6 +1155,8 @@ fn the_agent_action_calls_answer_the_model_and_queue_its_commands() {
             CampaignCommand::Assassinate { agent: RAKE, target: FOREIGN_GENTLEMAN },
             // A force that does not exist: the command is queued anyway and the model refuses it.
             CampaignCommand::SabotageArmy { agent: RAKE, force: ntw_sim::campaign::ForceId(4242) },
+            CampaignCommand::MoveIntoTarget { agent: RAKE, target: AgentTarget::Settlement(REGION), research: false },
+            CampaignCommand::MoveIntoTarget { agent: RAKE, target: AgentTarget::Character(FOREIGN_GENTLEMAN), research: false },
         ]
     );
     // A target of the wrong kind queues nothing.
@@ -1160,8 +1167,9 @@ fn the_agent_action_calls_answer_the_model_and_queue_its_commands() {
 
 /// The agent action mask. `agent_options.Initialise` shows a button per bit and **divorces** the
 /// ones whose bit is clear (`agent_options.lua:0` pc 45-56), so a bit that is not set is a
-/// button that never appears -- which is why the five `MoveIntoTarget` actions are left out
-/// rather than faked (see [`agent_options_mask`]).
+/// button that never appears. The `MoveIntoTarget` bits (visit, embed, research, steal_research)
+/// come from the model's [`exchange_actions`] for the clicked target; `counterspy` is never set,
+/// because neither of the exe's builders sets it (`0x009C9CA0`, `0x009C9EF0`).
 #[test]
 fn the_agent_options_mask_is_the_models_own_gates() {
     let hud = test_hud();
@@ -1170,25 +1178,34 @@ fn the_agent_options_mask_is_the_models_own_gates() {
     hud.add_character(RAKE, A, CharacterKind::Rake, Some(REGION), &[("can_assassinate", 2)]);
     hud.add_character(FOREIGN_GENTLEMAN, B, CharacterKind::Gentleman, Some(REGION), &[("can_duel", 1)]);
     hud.add_character(OWN_GENTLEMAN, A, CharacterKind::Gentleman, Some(REGION), &[("can_receive_duel", 1)]);
-    let mask = |c: CharacterId| {
+    let mask = |c: CharacterId, target: Option<AgentTarget>| {
         let st = hud._scripts.state();
         let m = &st.model;
-        agent_options_mask(m, c, m.world.characters[&c].faction)
+        agent_options_mask(m, c, m.world.characters[&c].faction, target)
     };
     use action_bit::*;
     // The rake has exactly one assassination candidate and no building to sabotage.
-    assert_eq!(mask(RAKE), ASSASSINATE, "one known foreign target the model's gate accepts");
+    assert_eq!(mask(RAKE, None), ASSASSINATE, "one known foreign target the model's gate accepts");
     // The foreign gentleman has one duel partner in his residence and nothing else.
-    assert_eq!(mask(FOREIGN_GENTLEMAN), DUEL);
+    assert_eq!(mask(FOREIGN_GENTLEMAN, None), DUEL);
     // Our own gentleman is nobody's target: no bits at all, so the popup shows no button.
-    assert_eq!(mask(OWN_GENTLEMAN), 0);
-    // The five `MoveIntoTarget` bits and the dead `counterspy` bit are never set, whatever the
-    // model says -- `MoveIntoTarget` is a logging stub, so a button for one of them would be a
-    // button that does nothing.
-    let never = VISIT | EMBED | RESEARCH | STEAL_RESEARCH | COUNTERSPY;
+    assert_eq!(mask(OWN_GENTLEMAN, None), 0);
+    // A settlement target adds the model's exchange actions and nothing else: no research
+    // building here, so a visit for anyone without subterfuge.
+    let exchange = VISIT | EMBED | RESEARCH | STEAL_RESEARCH;
     for c in [RAKE, FOREIGN_GENTLEMAN, OWN_GENTLEMAN] {
-        assert_eq!(mask(c) & never, 0, "the MoveIntoTarget actions stay out of the mask");
+        let with = mask(c, Some(AgentTarget::Settlement(REGION)));
+        assert_eq!(with & !exchange, mask(c, None), "the target adds only the exchange bits");
+        let st = hud._scripts.state();
+        let x = exchange_actions(&st.model, c, AgentTarget::Settlement(REGION));
+        let want = [(x.visit, VISIT), (x.embed, EMBED), (x.research, RESEARCH), (x.steal_research, STEAL_RESEARCH)]
+            .into_iter()
+            .filter(|(on, _)| *on)
+            .fold(0, |m, (_, b)| m | b);
+        assert_eq!(with & exchange, want, "the model's exchange actions, bit for bit");
+        assert_eq!(with & COUNTERSPY, 0, "counterspy is never set");
     }
+    assert_eq!(mask(OWN_GENTLEMAN, Some(AgentTarget::Settlement(REGION))) & exchange, VISIT, "an own settlement: a visit");
 }
 
 /// The agents panel's three action buttons open the target picker, and an action with no valid
@@ -1217,7 +1234,7 @@ fn an_agent_action_button_reports_itself_when_there_is_no_target() {
     for name in ["assassinate", "sabotage", "duel"] {
         assert!(log.iter().any(|l| l == &format!("agent action {name}: no valid target")), "{log:?}");
     }
-    // The two remaining gaps say which they are, so a click is never a silent no-op.
+    // A call naming no agent, or no agent and target, says so: a click is never a silent no-op.
     for name in ["AgentRogueSabotageArmy", "MoveIntoTarget"] {
         let f: Function = lua
             .load(format!("return function(...) return CampaignUI.{name}(...) end"))
@@ -1226,8 +1243,51 @@ fn an_agent_action_button_reports_itself_when_there_is_no_target() {
         f.call::<mlua::MultiValue>(mlua::MultiValue::new()).unwrap();
     }
     let log = hud.host.take_log();
-    assert!(log.iter().any(|l| l.contains("no army target list")), "{log:?}");
-    assert!(log.iter().any(|l| l.contains("MoveIntoTarget is not implemented")), "{log:?}");
+    assert!(log.iter().any(|l| l.contains("AgentRogueSabotageArmy: the argument names no agent")), "{log:?}");
+    assert!(log.iter().any(|l| l.contains("MoveIntoTarget: the arguments name no agent or no target")), "{log:?}");
+    assert!(hud.errors().is_empty(), "{:?}", hud.errors());
+}
+
+/// The agent card's sabotage-army button (`CampaignUI.AgentRogueSabotageArmy`, `0x009DCED0`,
+/// CONFIRMED, disassembly) takes only the agent and queues the model's `SabotageArmy` against the
+/// army of his residence, when its commander is not the local player's; otherwise nothing, logged.
+#[test]
+fn the_rogue_sabotage_army_button_targets_the_residence_garrison() {
+    use ntw_sim::campaign::{CampaignUnit, ForceId, MilitaryForce, UnitId};
+    let hud = test_hud();
+    hud.add_character(RAKE, A, CharacterKind::Rake, Some(REGION), &[("can_sabotage_army", 1)]);
+    hud.add_character(GENERAL, B, CharacterKind::General, Some(REGION), &[]);
+    let force = ForceId(5151);
+    {
+        let mut st = hud._scripts.state_mut();
+        let w = &mut st.model.world;
+        let u = CampaignUnit { id: UnitId(81), unit_key: "test_unit".into(), men: 100, max_men: 100, character: Some(GENERAL), officer_name: Default::default() };
+        w.forces.insert(force, MilitaryForce { id: force, faction: B, commander: Some(GENERAL), units: vec![u], is_navy: false });
+        w.regions.get_mut(&REGION).unwrap().garrison = Some(force);
+    }
+    let lua = hud.host.lua();
+    let f: Function = lua.load("return function(a) return CampaignUI.AgentRogueSabotageArmy(a) end").eval().unwrap();
+    hud.host.take_log();
+    hud.host.take_campaign_requests();
+    let click = || {
+        f.call::<mlua::MultiValue>(hud.char_addr(RAKE)).unwrap();
+        hud.host.take_campaign_requests()
+    };
+    // A foreign garrison: the order is queued at once, no popup.
+    let queued = click();
+    assert!(
+        matches!(queued.as_slice(), [CampaignRequest::Command(CampaignCommand::SabotageArmy { agent: RAKE, force: f })] if *f == force),
+        "{queued:?}"
+    );
+    // The garrison's commander is the local player's: nothing.
+    hud._scripts.state_mut().model.world.characters.get_mut(&GENERAL).unwrap().faction = A;
+    assert!(click().is_empty());
+    // No garrison: nothing.
+    hud._scripts.state_mut().model.world.characters.get_mut(&GENERAL).unwrap().faction = B;
+    hud._scripts.state_mut().model.world.regions.get_mut(&REGION).unwrap().garrison = None;
+    assert!(click().is_empty());
+    let log = hud.host.take_log();
+    assert_eq!(log.iter().filter(|l| l.contains("no foreign army in the agent's residence")).count(), 2, "{log:?}");
     assert!(hud.errors().is_empty(), "{:?}", hud.errors());
 }
 

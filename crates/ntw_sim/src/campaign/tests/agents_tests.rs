@@ -778,3 +778,133 @@ fn capture_damage_roll_matches_the_listing() {
     // spa: × 2, cap 10000.
     assert_eq!(damage_roll(&mut CaRng::new(0), 100, 1000, LOOT_DAMAGE, (2, 10_000)), (1, 1978));
 }
+
+/// The settlement mask (`0x009C9EF0`): a spy (`subterfuge` >= 1) who has not acted this turn is
+/// offered `embed` at another faction's settlement and anyone else `visit`; a settlement with a
+/// research building (a building whose own effects give `research_points`, `0x00B28D20`) offers
+/// an agent with `can_research` `research` at home and `steal_research` abroad instead of the
+/// visit, unless the owner is the rebels. No room, or no `can_exchange` row, offers nothing.
+#[test]
+fn exchange_actions_at_a_settlement_follow_the_exes_mask() {
+    use super::agents::{exchange_actions, AgentTarget, ExchangeActions};
+    let at = |r: u32| AgentTarget::Settlement(RegionId(r));
+    let visit = ExchangeActions { visit: true, ..Default::default() };
+    let embed = ExchangeActions { embed: true, ..Default::default() };
+    let research = ExchangeActions { research: true, ..Default::default() };
+    let steal = ExchangeActions { steal_research: true, ..Default::default() };
+    let (rake, own_g, foreign_g) = (CharacterId(103), CharacterId(104), CharacterId(105));
+    let mut m = agents_model();
+    // No research building effect yet: the rake embeds abroad and visits at home; a gentleman
+    // (no subterfuge) visits anywhere.
+    assert_eq!(exchange_actions(&m, rake, at(11)), embed);
+    assert_eq!(exchange_actions(&m, rake, at(10)), visit);
+    assert_eq!(exchange_actions(&m, own_g, at(10)), visit);
+    assert_eq!(exchange_actions(&m, foreign_g, at(10)), visit);
+    // An agent who has acted this turn (+0x4CC) only visits.
+    m.world.agents_acted.insert(rake);
+    assert_eq!(exchange_actions(&m, rake, at(11)), visit);
+    m.world.agents_acted.clear();
+    // Region 10's and 11's first slot hold `test_building_level`; give it research points.
+    m.rules = test_model_with([map_basic("research_points", "research_points")]).rules;
+    let mut rules = (*m.rules).clone();
+    let rows = mapped(&rules, vec![("research_points", 10.0)]);
+    rules.effects.insert_building_local("test_building_level".into(), rows);
+    m.rules = Arc::new(rules);
+    assert!(super::agents::has_research_building(&m, RegionId(10)));
+    assert!(!super::agents::has_research_building(&m, RegionId(12)), "no building at all");
+    // Without `can_research` nothing changes.
+    assert_eq!(exchange_actions(&m, own_g, at(10)), visit);
+    for g in [104, 105] {
+        let d = m.world.character_details.get_mut(&CharacterId(g)).unwrap();
+        d.abilities.push(("can_research".into(), 0, "research".into()));
+    }
+    assert_eq!(exchange_actions(&m, own_g, at(10)), research, "research replaces the visit at home");
+    assert_eq!(exchange_actions(&m, foreign_g, at(10)), steal, "and is stolen abroad");
+    // A rebel owner offers no research.
+    m.world.factions.get_mut(&B).unwrap().key = String::new();
+    assert_eq!(exchange_actions(&m, own_g, at(11)), visit);
+    // No room in the settlement, or no `can_exchange` ability row: nothing at all.
+    let mut rules = (*m.rules).clone();
+    rules.limits.max_residence_characters = 0;
+    m.rules = Arc::new(rules);
+    assert_eq!(exchange_actions(&m, own_g, at(10)), ExchangeActions::default());
+    let mut rules = (*m.rules).clone();
+    rules.limits.max_residence_characters = 20;
+    rules.no_exchange_ability = true;
+    m.rules = Arc::new(rules);
+    assert_eq!(exchange_actions(&m, own_g, at(10)), ExchangeActions::default());
+}
+
+/// The character mask (`0x009C9CA0`): a spy without a force is offered `embed` at another faction's
+/// army; an own-faction target, or an agent without `subterfuge`, is offered nothing (the
+/// own-faction attach of `0x009D0D00` is not ported).
+#[test]
+fn exchange_actions_at_a_character_embed_only_a_spy_in_a_foreign_army() {
+    use super::agents::{exchange_actions, AgentTarget, ExchangeActions};
+    let m = agents_model();
+    let (rake, gent) = (CharacterId(103), CharacterId(104));
+    let embed = ExchangeActions { embed: true, ..Default::default() };
+    assert_eq!(exchange_actions(&m, rake, AgentTarget::Character(CharacterId(101))), embed);
+    assert_eq!(exchange_actions(&m, rake, AgentTarget::Character(CharacterId(100))), ExchangeActions::default());
+    assert_eq!(exchange_actions(&m, gent, AgentTarget::Character(CharacterId(101))), ExchangeActions::default());
+    // A target who commands no force.
+    assert_eq!(exchange_actions(&m, rake, AgentTarget::Character(CharacterId(105))), ExchangeActions::default());
+}
+
+/// `MoveIntoTarget` (`0x009EE150`): a spy sent at another faction's settlement spies on it, anyone
+/// else sent at a settlement enters it as a resident; an own-faction character target (the
+/// attach-to-force order `0x008FF7B0`) is refused.
+#[test]
+fn move_into_target_spies_or_enters() {
+    use super::agents::AgentTarget;
+    let mut m = agents_model();
+    let (rake, gent) = (CharacterId(103), CharacterId(104));
+    agent_details(&mut m, 103, &[("can_spy", 1, "subterfuge")], &[("subterfuge", 2)]);
+    m.world.regions.get_mut(&RegionId(11)).unwrap().settlement.position = pos(0, 0);
+    let ev = m.apply(CampaignCommand::MoveIntoTarget { agent: rake, target: AgentTarget::Settlement(RegionId(11)), research: false }).unwrap();
+    assert!(ev.iter().any(|e| matches!(e, CampaignEvent::AgentActionResolved { agent, .. } if *agent == rake)), "{ev:?}");
+    let r = RegionId(12);
+    m.world.characters.get_mut(&gent).unwrap().position = pos(10, 0);
+    let ev = m.apply(CampaignCommand::MoveIntoTarget { agent: gent, target: AgentTarget::Settlement(r), research: true }).unwrap();
+    assert!(ev.contains(&CampaignEvent::CharacterEntersGarrison { character: gent, region: r }), "{ev:?}");
+    assert_eq!(m.world.characters[&gent].garrisoned_in, Some(r));
+    assert!(m.apply(CampaignCommand::MoveIntoTarget { agent: gent, target: AgentTarget::Character(CharacterId(100)), research: false }).is_err());
+    assert!(m.apply(CampaignCommand::MoveIntoTarget { agent: gent, target: AgentTarget::Character(CharacterId(101)), research: false }).is_err());
+}
+
+#[test]
+fn the_rogue_sabotage_army_target_is_the_residence_garrison() {
+    use super::agents::rogue_sabotage_army_target;
+    let mut m = agents_model();
+    let (rake, force) = (CharacterId(103), ForceId(1001));
+    // Not a resident anywhere: no army (`0x009FB9D0` finds no residence).
+    assert_eq!(rogue_sabotage_army_target(&m, rake, Some(A)), None);
+    // A resident of region 11, which B's force 1001 (commander 101) garrisons.
+    m.world.characters.get_mut(&rake).unwrap().garrisoned_in = Some(RegionId(11));
+    m.world.regions.get_mut(&RegionId(11)).unwrap().garrison = Some(force);
+    assert_eq!(rogue_sabotage_army_target(&m, rake, Some(A)), Some(force));
+    // The commander is the local player's: nothing (`0x009BF110` compared with commander +0x2A0).
+    assert_eq!(rogue_sabotage_army_target(&m, rake, Some(B)), None);
+    // A garrison without a commander: nothing.
+    m.world.forces.get_mut(&force).unwrap().commander = None;
+    assert_eq!(rogue_sabotage_army_target(&m, rake, Some(A)), None);
+}
+
+#[test]
+fn the_rogue_sabotage_army_target_follows_his_own_land_army() {
+    use super::agents::rogue_sabotage_army_target;
+    let mut m = agents_model();
+    let (rake, own) = (CharacterId(103), ForceId(2000));
+    // He resides in region 11 (garrisoned by B's force 1001) and commands A's land army 2000.
+    m.world.characters.get_mut(&rake).unwrap().garrisoned_in = Some(RegionId(11));
+    m.world.regions.get_mut(&RegionId(11)).unwrap().garrison = Some(ForceId(1001));
+    m.world.forces.insert(own, MilitaryForce { id: own, faction: A, commander: Some(rake), units: vec![unit(9)], is_navy: false });
+    // His own land army's residence wins (`0x009FB9D0`: army +0x9C through `0x009D3A60`); it is in
+    // none, so there is no army, and his own residence is not asked.
+    assert_eq!(rogue_sabotage_army_target(&m, rake, Some(B)), None);
+    // His army garrisons region 10: that residence's garrison is the target.
+    m.world.regions.get_mut(&RegionId(10)).unwrap().garrison = Some(own);
+    assert_eq!(rogue_sabotage_army_target(&m, rake, Some(B)), Some(own));
+    // Its commander is the local player's: nothing.
+    assert_eq!(rogue_sabotage_army_target(&m, rake, Some(A)), None);
+}

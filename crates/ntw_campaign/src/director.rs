@@ -437,6 +437,7 @@ mod tests {
             garrison: None,
             fleet: None,
             siege: Default::default(),
+            traits: Vec::new(),
         };
         m.world.regions.insert(region.id, region);
         m

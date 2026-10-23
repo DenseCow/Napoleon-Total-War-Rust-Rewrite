@@ -337,14 +337,14 @@ impl CampaignModel {
     /// ([`super::world::World::faction_regions_in_list_order`]), or the second when the first is the
     /// faction's capital (`0x00A8B5A0`) and another is left.
     fn hand_regions_to_killer(&mut self, faction: FactionId, killer: FactionId, events: &mut Vec<CampaignEvent>) {
-        loop {
-            let list = self.world.faction_regions_in_list_order(faction);
-            let mut held = list.iter().copied();
-            let Some(first) = held.next() else { return };
-            let region = match held.next() {
-                Some(second) if self.world.is_capital(first) => second,
-                _ => first,
+        // The list is read once: a hand-over only takes the region out of it, the rest keep their order.
+        let mut list = self.world.faction_regions_in_list_order(faction);
+        while let Some(&first) = list.first() {
+            let at = match list.get(1) {
+                Some(_) if self.world.is_capital(first) => 1,
+                _ => 0,
             };
+            let region = list.remove(at);
             if !self.transfer_region(region, killer, events) {
                 // Not reached: the killer is another faction, so the owner always changes.
                 log::error!("{faction:?}'s region {region:?} did not pass to {killer:?}: hand-over stopped");

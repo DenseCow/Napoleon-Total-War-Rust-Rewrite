@@ -17,7 +17,8 @@
 //! whose defenders lose is occupied (its garrison army destroyed and its queues cleared: CONFIRMED, see `occupy`).
 
 use super::events::CampaignEvent;
-use super::ids::{CharacterId, ForceId, RegionId};
+use super::ids::{CharacterId, FactionId, ForceId, RegionId};
+use super::population::ClassWarEvent;
 use super::world::{CampaignModel, MilitaryForce};
 use super::CommandError;
 use super::autoresolve::{resolve, ArUnit, ArVars};
@@ -47,6 +48,108 @@ pub struct BattleResult {
     pub attacker_casualties: f32,
     /// Fraction of the defenders' men lost (0..=1).
     pub defender_casualties: f32,
+    /// The result codes of the attacker's and the defenders' sides ([`battle_side_results`]), read by the
+    /// class war step ([`CampaignModel::battle_class_war`]). The autoresolves fill them; `None` skips the step.
+    /// UNKNOWN: where a real-time battle's codes come from (its hook is not wired yet).
+    pub codes: Option<(BattleResultCode, BattleResultCode)>,
+}
+
+/// A battle side's result: the code `0x0054AE90` writes to the side record's `+0x54` (CONFIRMED by
+/// disassembly; the names are the result strings of `0x0089AA20`). Codes 8..=11 are the winner's, 13..=16
+/// the loser's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BattleResultCode {
+    /// 8: `close_victory`.
+    CloseVictory,
+    /// 9: `decisive_victory`.
+    DecisiveVictory,
+    /// 10: `heroic_victory`.
+    HeroicVictory,
+    /// 11: `pyrrhic_victory`.
+    PyrrhicVictory,
+    /// 13: `close_defeat`.
+    CloseDefeat,
+    /// 14: `decisive_defeat`.
+    DecisiveDefeat,
+    /// 15: `crushing_defeat`.
+    CrushingDefeat,
+    /// 16: `valiant_defeat`.
+    ValiantDefeat,
+}
+
+impl BattleResultCode {
+    /// The exe's code (8..=11, 13..=16).
+    pub fn code(self) -> u8 {
+        match self {
+            Self::CloseVictory => 8,
+            Self::DecisiveVictory => 9,
+            Self::HeroicVictory => 10,
+            Self::PyrrhicVictory => 11,
+            Self::CloseDefeat => 13,
+            Self::DecisiveDefeat => 14,
+            Self::CrushingDefeat => 15,
+            Self::ValiantDefeat => 16,
+        }
+    }
+
+    /// The code of a grade ([`battle_grade`], 0..=6) for the winning or the losing side (the jump tables
+    /// `0x0054B088` / `0x0054B0A4`, CONFIRMED): 0 and 3 close, 1 and 4 decisive, 2 and 5 heroic / crushing,
+    /// 6 pyrrhic / valiant.
+    pub fn from_grade(grade: u8, winner: bool) -> Self {
+        match (grade, winner) {
+            (0 | 3, true) => Self::CloseVictory,
+            (1 | 4, true) => Self::DecisiveVictory,
+            (2 | 5, true) => Self::HeroicVictory,
+            (_, true) => Self::PyrrhicVictory,
+            (0 | 3, false) => Self::CloseDefeat,
+            (1 | 4, false) => Self::DecisiveDefeat,
+            (2 | 5, false) => Self::CrushingDefeat,
+            (_, false) => Self::ValiantDefeat,
+        }
+    }
+}
+
+/// A battle side record's grade, 0..=6 (`0x0054AE90`, CONFIRMED by disassembly; it stores it at the record's
+/// `+0x58`). The input (`0x007B49A0`) is oriented to the winner: `potentials` and `losses` are (winner, loser),
+/// the potentials the resolver's side sums (`+0x2C` / `+0x30`) and the losses each side's men (land) or ships
+/// (naval) lost less those the enemy captured (`+0x4..+0x10`). `land`: the record holds an army with land units
+/// (`0x005573F0`). In f32 as the exe:
+/// - ratio = (winner potential / loser potential, 0 unless the loser's is > 0) × (winner losses / loser
+///   losses, 0 when the loser lost none);
+/// - total = the two losses, against the sizes (small, large) = (1000, 3000) with land units, else (400, 1500);
+/// - ratio < 0.1: 2 if total < small, else 5; < 0.3: 1 or 4; < 1.1: 0 or 3; otherwise 6 if total > large,
+///   3 if total ≥ small, else 0 (the constants at `0x0131A7B0`, `0x01325CB0`, `0x01325CF8`).
+pub fn battle_grade(potentials: (f32, f32), losses: (u32, u32), land: bool) -> u8 {
+    let loss_ratio = if losses.1 != 0 { losses.0 as f32 / losses.1 as f32 } else { 0.0 };
+    let strength = if potentials.1 > 0.0 { potentials.0 / potentials.1 } else { 0.0 };
+    let ratio = strength * loss_ratio;
+    // The exe adds the two counts as integers and converts the sum as a signed one.
+    let total = losses.0.wrapping_add(losses.1) as i32 as f32 as i32;
+    let (small, large) = if land { (1000, 3000) } else { (400, 1500) };
+    let small_battle = total < small;
+    if ratio < 0.1 {
+        if small_battle { 2 } else { 5 }
+    } else if ratio < 0.3 {
+        if small_battle { 1 } else { 4 }
+    } else if ratio < 1.1 {
+        if small_battle { 0 } else { 3 }
+    } else if total > large {
+        6
+    } else if small_battle {
+        0
+    } else {
+        3
+    }
+}
+
+/// Both sides' result codes, (side A, side B), from the resolver's sums (`0x007ADDD0` grades side A's record,
+/// then side B's, CONFIRMED): `potentials` and `losses` per side (A, B), `land` whether each side has land
+/// units. Each record's grade gets the same winner-oriented input; only its `land` and whether it won differ.
+pub fn battle_side_results(a_won: bool, potentials: (f32, f32), losses: (u32, u32), land: (bool, bool)) -> (BattleResultCode, BattleResultCode) {
+    let (p, l) = if a_won { (potentials, losses) } else { ((potentials.1, potentials.0), (losses.1, losses.0)) };
+    let a = BattleResultCode::from_grade(battle_grade(p, l, land.0), a_won);
+    let b = BattleResultCode::from_grade(battle_grade(p, l, land.1), !a_won);
+    (a, b)
 }
 
 impl CampaignModel {
@@ -91,10 +194,16 @@ impl CampaignModel {
         let a = self.autoresolve_units(&[battle.attacker]);
         let b = self.autoresolve_units(&battle.defenders);
         let men = |s: &[(ForceId, usize, ArUnit)]| s.iter().map(|x| x.2.men).sum::<u32>();
-        let attacker_won = if men(&b) == 0 {
-            true
+        // A side record has land units when one of its forces is an army (`0x005573F0`).
+        let land = |s: &[(ForceId, usize, ArUnit)]| s.iter().any(|x| self.world.forces.get(&x.0).is_some_and(|f| !f.is_navy));
+        let land = (land(&a), land(&b));
+        // A side without men is not resolved: nobody loses anyone, so both grades come out of zero losses
+        // (grade 2). PROVISIONAL: the exe has no such test; `0x008AE5A0` → `0x007ADDD0` always runs the resolver
+        // and grades both records (`0x0054AE90`), and what the resolver gives a side without men is not traced.
+        let (attacker_won, potentials, losses) = if men(&b) == 0 {
+            (true, (0.0, 0.0), (0, 0))
         } else if men(&a) == 0 {
-            false
+            (false, (0.0, 0.0), (0, 0))
         } else {
             let ua: Vec<ArUnit> = a.iter().map(|x| x.2).collect();
             let ub: Vec<ArUnit> = b.iter().map(|x| x.2).collect();
@@ -108,23 +217,45 @@ impl CampaignModel {
                     u.men = u.men.saturating_sub(*lost);
                 }
             }
-            self.last_autoresolve = Some(o.clone());
-            o.a_won
+            // The resolver's loss sums (`+0x4` / `+0x8`, `0x0074FF40` adds each unit's men lost); land battles capture nothing.
+            let losses = (o.losses_a.iter().sum::<u32>(), o.losses_b.iter().sum::<u32>());
+            let r = (o.a_won, o.potentials, losses);
+            self.last_autoresolve = Some(o);
+            r
         };
-        Ok(self.apply_battle_result(BattleResult { attacker_won, attacker_casualties: 0.0, defender_casualties: 0.0 }))
+        let codes = Some(battle_side_results(attacker_won, potentials, losses, land));
+        Ok(self.apply_battle_result(BattleResult { attacker_won, attacker_casualties: 0.0, defender_casualties: 0.0, codes }))
     }
 
     /// Applies a battle's outcome to the pending battle and clears it. Also the hook for a
     /// real-time battle's result. Returns no events if no battle is pending.
     pub fn apply_battle_result(&mut self, result: BattleResult) -> Vec<CampaignEvent> {
         let Some(battle) = self.pending_battle.take() else { return Vec::new() };
-        self.settle_battle(&battle, result, true)
+        let sides = self.battle_sides(&battle);
+        self.settle_battle(&battle, result, true, sides)
+    }
+
+    /// The factions of a battle's two sides (the side records' factions, `0x008F7880` passes them to
+    /// `0x008ACCF0`): the attacker's force's and the first defender's. Read before any force of the battle
+    /// can be destroyed. Each side's faction is its record's force's (`+0x24`, through the force's `+0x74` owner
+    /// and its `+0x2A0` handle, `0x008F7B39`..`0x008F7B73`, as `0x008E1B50` reads side `+0x68`); PROVISIONAL: that
+    /// the defenders' record holds the first defender (the record is filled by `0x008B7D60`, not traced).
+    fn battle_sides(&self, battle: &PendingBattle) -> (Option<FactionId>, Option<FactionId>) {
+        let faction = |f: &ForceId| self.world.forces.get(f).map(|f| f.faction);
+        (faction(&battle.attacker), battle.defenders.first().and_then(faction))
     }
 
     /// The battle's outcome ([`Self::apply_battle_result`]) for `battle`, already taken off the model. `undock`: the
     /// post-battle undock is still to run, after the casualties ([`Self::undock_after_battle`]); the naval
-    /// autoresolve runs it itself, before its captures, and passes false, so every battle undocks once.
-    fn settle_battle(&mut self, battle: &PendingBattle, result: BattleResult, undock: bool) -> Vec<CampaignEvent> {
+    /// autoresolve runs it itself, before its captures, and passes false, so every battle undocks once. `sides`:
+    /// the two sides' factions ([`Self::battle_sides`]).
+    fn settle_battle(
+        &mut self,
+        battle: &PendingBattle,
+        result: BattleResult,
+        undock: bool,
+        sides: (Option<FactionId>, Option<FactionId>),
+    ) -> Vec<CampaignEvent> {
         let mut events = Vec::new();
         let attacker_faction = self.world.forces.get(&battle.attacker).map(|f| f.faction);
         let commanders: Vec<_> = std::iter::once(battle.attacker)
@@ -135,6 +266,10 @@ impl CampaignModel {
         for &d in &battle.defenders {
             self.apply_casualties(d, result.defender_casualties, &mut events);
         }
+        // The class war step: post-battle state 4 (`0x008ACCF0` at `0x008F7B7C`), before the capture, which comes
+        // after the battle when the winner moves into the emptied settlement (`0x0094B600` calls the settlement's
+        // capture virtual at `0x0094B7EC` only when it holds no garrison; `0x008F7880` captures nothing).
+        self.battle_class_war(battle, &result, sides);
         if undock {
             self.undock_after_battle(battle);
         }
@@ -171,6 +306,49 @@ impl CampaignModel {
             events.append(&mut more);
         }
         events
+    }
+
+    /// A battle's class war events (`0x008ACCF0`, CONFIRMED by decompilation and disassembly): the war factor of
+    /// each side's capital moves by [`ClassWarEvent::Battle`] (through [`Self::move_class_war`], so only when the
+    /// faction has a capital; the rule leaves the rebels alone, as the step's own tests do). Nothing without result
+    /// codes ([`BattleResult::codes`]; the exe returns when the battle has no winner, which the model never has).
+    /// - An assault on a walled settlement (battle types 6 and 7, `settlement_standard` / `settlement_sally` of
+    ///   the type parser `0x0057C710`; the assault `0x008E1A90` (from `0x0094B600` at `0x0094B98A`) takes its type
+    ///   from `0x008B5930`, 6 over the unwalled 9 when the settlement's fortification slot holds a building,
+    ///   `0x00B3F7C0`, and the sequence `0x00883680` stores the settlement at `+0x64` for any type; `0x008CE150`
+    ///   also passes 6): kind 5 (+4) on the winner's capital, kind 4 (−4) on the loser's, and nothing else. The
+    ///   step also tests type 8 (`settlement_relief`), which never has the settlement it needs (the other sequence
+    ///   `0x00883120` keeps it only for types 3, 4, 6, 7, 9 and 10). The model has no sally, so its settlement
+    ///   battles are type 6 (or 9) assaults.
+    ///   ORIGINAL BUG (`0x008ACF02`): kind 4 goes to the capital of the sequence's second side (`+0x6C`), not the
+    ///   loser's, so when that side wins its own capital takes −4 after its +4 and the loser's is untouched, against
+    ///   the step's own test of the loser (not the rebels, has a capital) just before it at `0x008ACEE4`. Ours
+    ///   moves the loser's capital.
+    /// - Any other battle: the winner's capital by its code (close or decisive victory kind 2, +1; heroic or
+    ///   pyrrhic kind 3, +2), then the loser's (close or decisive defeat kind 0, −1; crushing or valiant kind 1, −2).
+    pub(crate) fn battle_class_war(&mut self, battle: &PendingBattle, result: &BattleResult, sides: (Option<FactionId>, Option<FactionId>)) {
+        let (Some((code_a, code_d)), (Some(fa), Some(fd))) = (result.codes, sides) else { return };
+        let (winner, loser, won, lost) = if result.attacker_won { (fa, fd, code_a, code_d) } else { (fd, fa, code_d, code_a) };
+        let walled = battle.settlement.and_then(|r| self.world.regions.get(&r)).is_some_and(|r| r.fortification.is_some());
+        let (win_kind, lose_kind) = if walled {
+            (5, 4)
+        } else {
+            let win_kind = match won {
+                BattleResultCode::HeroicVictory | BattleResultCode::PyrrhicVictory => 3,
+                _ => 2,
+            };
+            let lose_kind = match lost {
+                BattleResultCode::CrushingDefeat | BattleResultCode::ValiantDefeat => 1,
+                _ => 0,
+            };
+            (win_kind, lose_kind)
+        };
+        if let Some(capital) = self.world.capital(winner) {
+            self.move_class_war(capital, ClassWarEvent::Battle(win_kind), loser);
+        }
+        if let Some(capital) = self.world.capital(loser) {
+            self.move_class_war(capital, ClassWarEvent::Battle(lose_kind), winner);
+        }
     }
 
     /// The post-battle placement (`0x008F7880`) undocks each force of the battle still standing ([`Self::undock`]):
@@ -626,6 +804,13 @@ impl CampaignModel {
         let human = a.iter().chain(&b).find(|x| x.2.human).and_then(|x| self.world.forces.get(&x.0)).map(|f| f.faction);
         vars.land.difficulty = human.and_then(|f| self.world.faction_details.get(&f)).map_or(0, |d| d.difficulty);
         let o = resolve(&mut ua, &mut ub, &vars, &mut self.rng);
+        // The grade's losses: the ships sunk (the damage and wipeout slots return 1 per ship, `0x0074FA70` /
+        // `0x007DD800`) less those captured (`0x0075C090` adds 1 per ship to the loser's capture count): the ships
+        // still sunk after the captures, which clear the flag (`capture_ship`). A navy has no land units.
+        let sunk = |s: &[NavalUnit]| s.iter().filter(|u| u.state.sunk).count() as u32;
+        let codes = Some(battle_side_results(o.a_won, o.potentials, (sunk(&ua), sunk(&ub)), (false, false)));
+        // The sides' factions, before any navy of the battle is destroyed.
+        let sides = self.battle_sides(battle);
         let mut events = Vec::new();
         let mut emptied = Vec::new();
         for ((fid, i, _), u) in a.iter().zip(&ua).chain(b.iter().zip(&ub)) {
@@ -671,7 +856,8 @@ impl CampaignModel {
             self.destroy_force(fid, &mut events);
         }
         self.pending_battle = None;
-        let mut rest = self.settle_battle(battle, BattleResult { attacker_won: o.a_won, attacker_casualties: 0.0, defender_casualties: 0.0 }, false);
+        let result = BattleResult { attacker_won: o.a_won, attacker_casualties: 0.0, defender_casualties: 0.0, codes };
+        let mut rest = self.settle_battle(battle, result, false, sides);
         events.append(&mut rest);
         events
     }

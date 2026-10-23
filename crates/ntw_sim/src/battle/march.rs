@@ -54,11 +54,17 @@
 //!   [`Formation`]); the anchor is ours: the slots are centred on the unit at that centre and laid
 //!   straight back along its facing, as the open-ground anchor is (`0x007F2680`, one straight
 //!   piece sized by the kind's own measure, vfunc `+0xC` through `0x007FC920`), where the exe lays
-//!   them from the order's path cursor along the planned path (`0x007F2DA0`: its first piece
-//!   through the anchor builder's vfunc `+0x18` with the order point `0x0080E9D0`, the later ones
-//!   through `+0x14`; not traced: those vfuncs of the path piece classes, the builder `0x00815F80`
-//!   hands out, and how an arc piece lays its rows); a man's lag is along the unit's facing only
-//!   (ours moves straight, so the places do not wheel);
+//!   them from the order's path cursor along the planned path. CONFIRMED static: `0x007F2DA0`
+//!   gets flag 0 from all its callers (`0x007F2D70` from `0x00576B30` and `0x00584E10`, and
+//!   `0x007F2D40`), so its builder (`0x00815F80`'s vfunc `+4`) never runs; it copies the path's
+//!   pieces from the cursor's node (`0x0062A150`) into the slot target (`0x0061DE40`), and the
+//!   anchor walk (`0x00659E70`) lays the first piece's rows from the order point (piece vfunc
+//!   `+0x18`) and each later piece's from its start (`+0x14`, `0x0065A130`). A straight piece
+//!   (`0x00659F00`) lays a row every p4 metres along it and carries the rest of a pitch into the
+//!   next, which on a straight path is ours; an arc piece (`0x0065A160`, centre `+0x98`/`+0x9C`)
+//!   lays its rows round its bend. Ours plans no bent battle paths (no battlefield path finder),
+//!   so its places never bend round an arc; a man's lag is along the unit's facing only (ours
+//!   moves straight, so the places do not wheel);
 //! - a move that follows an enemy (the advance, the fire-target approach) is a new order, a first
 //!   issue to every man, whenever the enemy's position changed (`0x0054D9F0` re-reads it each tick
 //!   and builds a new move order, `0x0051A940` → `0x0051A530`, on a change, CONFIRMED); the value it
@@ -440,8 +446,12 @@ pub const REFORM_RUN_SQ: f32 = 25.0;
 /// the way he faces (`dir16` of his heading `+0x64`): a slot behind him costs up to 1 more than
 /// one as far ahead. PROVISIONAL (ours): every man faces his unit's facing, straight ahead in its
 /// frame; the men's own headings (soldier `+0x64`) are not modelled, so the squares' slot headings
-/// ([`Formation::slot_heading`]) are not applied to them, and how the exe's differ from the
-/// unit's while men walk or turn is not traced.
+/// ([`Formation::slot_heading`]) are not applied to them. CONFIRMED static, where the exe applies
+/// them: the timed move (`0x00584E10`) turns every man to the order's travel heading, not his
+/// slot's; the reform move (`0x0055F160`) and the deployment placement (soldier vfunc `+0xB8`
+/// with slot `+0x18`) carry the slot heading, and the soldier's locomotive turns to it
+/// (`0x00806D40`, at its turn rate `+0x104` × 0.1 a tick, snapping within 1°). Ours needs a
+/// per-man heading and that turn to apply them.
 pub fn slot_cost(man: (f32, f32), slot: (f32, f32)) -> f32 {
     let d = (slot.0 - man.0, slot.1 - man.1);
     let c = d.0 * d.0 + d.1 * d.1;
@@ -746,7 +756,7 @@ fn square_slot(n: usize, i: usize) -> Option<((f32, f32), i16)> {
 /// lies [`Formation::front`] behind the front. On open ground the anchor is one straight piece from
 /// the front centre straight back along the facing (`0x007F2680`, sized by that box); ours lays
 /// every kind that way (PROVISIONAL, see the module note: the exe anchors at the order's path
-/// cursor and lays the rows along the planned path, `0x007F2DA0`).
+/// cursor and lays the rows along the planned path, `0x007F2DA0`, round its arcs too).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Formation {
     /// The shape kind laid ([`LandUnit::shape_kind`]).
@@ -923,9 +933,12 @@ impl Formation {
     /// positive to the right; CONFIRMED static): the pike square's block men face out by their
     /// sector, see [`pike_square_block_heading`], and its ring men out from their corner or side,
     /// see [`pike_square_extra`]; the square's men out from their side, see [`square_slot`]; the pike
-    /// wall's men all ahead (`0x006311B0`). The row kinds give every slot its row's heading
-    /// (`0x00619EB0` copies the row's `+0x1C`): 0 here, the facing. Ours does not turn the men to
-    /// these headings (see [`slot_cost`]).
+    /// wall's men all ahead (`0x006311B0`: its anchor piece's heading, vfunc `+8`, plus a half
+    /// turn, the same for every slot; it also writes a pose word at slot `+0x20`, 5 in the
+    /// first row, 4 in the second, 3 behind; PROVISIONAL: no reader of it is found among the
+    /// slot's users, so ours keeps none). The
+    /// row kinds give every slot its row's heading (`0x00619EB0` copies the row's `+0x1C`): 0
+    /// here, the facing. Ours does not turn the men to these headings (see [`slot_cost`]).
     pub fn slot_heading(&self, i: usize) -> i16 {
         self.slot(i).1
     }
@@ -1021,12 +1034,31 @@ impl LandUnit {
     /// (`0x006210D0`; its layout `0x006302E0` builds its generator from the shape's p1..p4,
     /// CONFIRMED static). Kinds 2 to 4 stand 1 m apart ([`SQUARE_SPACING_M`]); the pike wall's
     /// files are its vfunc `+0x10` (`0x00642EE0` → `0x00642C90` at a 1 m spacing, CONFIRMED
-    /// static): `floor(width + 0.001 − p1) + 1`, capped at the men.
+    /// static): `floor(width + 0.001 − p1) + 1`, capped at the men. Its width, CONFIRMED static:
+    /// pike wall on (ability 6 of the switch `0x00578860`) runs the task `0x00518870` with kind
+    /// 3, which re-forms the men at the unit's formation width (unit `+0x384` → `+0x24`, read at
+    /// `0x005188E4` / `0x005188EA`, through `0x0053FBD0` and `0x00537FA0` → `0x00537E40`) and
+    /// builds each squad's kind-3 shape from the unit's p1 / p2 (`+0x2F8` / `+0x2FC`;
+    /// `0x00531630` at `0x00518932` → the factory `0x00531680` → `0x00621140`); a move's lay-out
+    /// (`0x00576B30`) passes the order's width, the same `+0x384` → `+0x24` float its path query
+    /// carries (`0x0054D900`). That width is not narrowed by the men (only the files are capped),
+    /// so ours takes [`LandUnit::formation_width`] (else the fallback of
+    /// [`LandUnit::fresh_width`]). Its p1, CONFIRMED static for a unit on foot: ability 6 writes
+    /// no shape params; the unit set-up `0x0051B7D0` sets p1 = p2 = twice the unit's `+0x2EC`
+    /// (`0x0051C739` / `0x0051C747`), the largest soldier radius `+0x58` (`0x0051C200`,
+    /// `0x0051C43C`, `0x0051C691`). Of the other writers (the callers of `0x00579780`), the
+    /// fire-and-advance switch (ability 7, `0x00578F47` / `0x0057907F`) writes the same value and
+    /// the dismount task's on-enter (`0x0054DD70`, in the state table of the task `0x00514900`)
+    /// writes twice the man entity's radius (unit `+0x60` → `+0x4C`): both are twice
+    /// [`LandUnit::man_radius`], which ours takes.
+    /// PROVISIONAL: the pike wall's p1 on a remounted unit or a unit with guns. The dismount
+    /// task's remount on-enter (`0x005748A0`) sets twice the mount entity's radius (unit `+0x8C`
+    /// → `+0x4C`); an artillery unit's task set-up (`0x005446F0`, category 1) sets the first
+    /// gun's `+0x58`, and losing the last gun (`0x005445A0`, gated on the guns object `+0x1F4`)
+    /// sets the man entity's radius once, not twice. Ours models neither a mount radius nor guns
+    /// objects, so it keeps twice [`LandUnit::man_radius`] there.
     /// PROVISIONAL: kind 6 keeps the line's files (the exe's come from `0x00642D90` over the width
-    /// the light-infantry task `0x00515210` re-forms to, not traced); the pike wall's width is
-    /// ours, [`LandUnit::fresh_width`] (the width the ability switch `0x00578860` re-forms it to
-    /// is not traced), and its p1 (shape `+0x18`, from the entity's `+0x4C` its callers pass to
-    /// `0x00579780`) ours, twice [`LandUnit::man_radius`] as the line's.
+    /// the light-infantry task `0x00515210` re-forms to, not traced).
     fn fresh_formation(&self) -> Formation {
         let kind = self.shape_kind();
         let men = self.men as usize;
@@ -1035,7 +1067,8 @@ impl LandUnit {
             6 => (files, LIGHT_INFANTRY_SPACING_M, LIGHT_INFANTRY_PITCH_M),
             2 | 4 => (files, SQUARE_SPACING_M, SQUARE_SPACING_M),
             3 => {
-                let room = self.fresh_width() + 0.001 - 2.0 * self.man_radius;
+                let width = if self.formation_width > 0.0 { self.formation_width } else { self.fresh_width() };
+                let room = width + 0.001 - 2.0 * self.man_radius;
                 let wall = (room / SQUARE_SPACING_M).floor().max(0.0) as usize + 1;
                 (wall.min(men).max(1), SQUARE_SPACING_M, SQUARE_SPACING_M)
             }
@@ -1748,6 +1781,14 @@ mod tests {
         u.active_abilities = 1 << 6;
         assert_eq!(u.shape_kind(), 3);
         assert_eq!(u.formation(), Formation::new(3, 10, 4, 1.0, 1.0));
+        // The width is the unit's formation width, not narrowed to the men (`0x00578860`,
+        // `0x00576B30`): 6 m less 0.7 m holds 6 files of the 8 men, where the line's fresh width
+        // over 8 of its 12 files (4 m) would hold only 4.
+        let mut u = LandUnit::new(0, 0, 8, (0.0, 0.0));
+        (u.formation_files, u.formation_width, u.formation_rank_spacing) = (12, 6.0, 1.5);
+        u.set_man_radius(0.35);
+        u.active_abilities = 1 << 6;
+        assert_eq!((u.formation().files, u.formation().ranks), (6, 2));
     }
 
     /// Kind 4, the square (`0x00631560`): the template of side max(7, men / 8 + 1)
