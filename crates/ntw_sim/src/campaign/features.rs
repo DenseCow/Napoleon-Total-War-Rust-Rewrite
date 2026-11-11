@@ -5,7 +5,8 @@
 //! this table instead of the key, so a custom or mod campaign can switch any of them on or off in its
 //! own data. The original's importer fills it from the campaign key exactly as the exe switches
 //! (`ntw_campaign::features::original`); [`CampaignFeatures::default`] is a campaign the exe has no
-//! switch for (e.g. `eur_napoleon`).
+//! switch for (e.g. `eur_napoleon`), less the one faction-key rule the exe applies in every campaign
+//! ([`CampaignFeatures::victory_rival`]), which names a Napoleon faction and so is data, not a default.
 
 /// One campaign's rule switches. See the module docs; every field's default is the exe's behaviour
 /// outside the switched campaigns.
@@ -85,6 +86,30 @@ pub struct CampaignFeatures {
     /// the other faction is human and the AI's attitude total towards it is below −199 (set to −200 by
     /// `ntw_campaign::features::original`). `None`: no such refusal.
     pub ai_peace_refusal_attitude: Option<i32>,
+    /// The victory test's rival rule ([`super::outcome::victory_state_original`]). CONFIRMED: the exe's
+    /// victory test (`0x0096FCE0`) replaces the region count test of every conditions record of type 5 with
+    /// "the faction `spa_france` (string looked up with `0x00955B70`) holds at most the record's count of
+    /// regions", met at once when that faction does not exist. The exe does this in every campaign, so
+    /// `ntw_campaign::features::original` sets it for every key; `None` (a custom campaign's default):
+    /// every record type counts regions.
+    pub victory_rival: Option<VictoryRival>,
+    /// The conditions type that shares a won campaign with an allied human ([`super::outcome`]'s victory
+    /// check). CONFIRMED: the check (`0x0096CD10`) gives the other human of a multiplayer campaign the
+    /// victory instead of the defeat when the campaign key is `spa_napoleon`, the two are the same or
+    /// allied (`0x008CE390`) and both conditions records are of type 5 (set to 5 for that key by
+    /// `ntw_campaign::features::original`). `None`: the other human always loses.
+    pub shared_victory_kind: Option<u32>,
+}
+
+/// The victory test's rival rule ([`CampaignFeatures::victory_rival`]): a conditions record of type
+/// [`Self::kind`] is met when the faction [`Self::faction`] holds at most the record's count of regions.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct VictoryRival {
+    /// The conditions type the rule applies to (CONFIRMED: 5).
+    pub kind: u32,
+    /// The rival's faction key (CONFIRMED: `spa_france`).
+    pub faction: String,
 }
 
 impl Default for CampaignFeatures {
@@ -107,6 +132,8 @@ impl Default for CampaignFeatures {
             effects_technologies_hidden: false,
             ai_capture_liberation: None,
             ai_peace_refusal_attitude: None,
+            victory_rival: None,
+            shared_victory_kind: None,
         }
     }
 }

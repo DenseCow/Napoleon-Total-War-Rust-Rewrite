@@ -188,8 +188,8 @@ fn end_turn_declining_with(model: &mut CampaignModel, play: &mut PlayFaction<'_>
 /// factions and the scripts see every event): `EndTurn` through [`ScriptHost::apply`], declining each
 /// waiting call to war with `RespondToAllyWarCall { side: None, accept: false }` (whose `apply`
 /// resumes the paused steps), in the same order, so one call ends exactly one turn. Returns every
-/// event with its script report, or the first command the host refused (a pending battle refuses
-/// `EndTurn`: autoresolve it first).
+/// event with its script report, or the first command the host refused (a pending battle or a capture
+/// waiting for its choice refuses `EndTurn`, `CampaignModel::check_end_turn`: settle it first).
 pub fn end_host_turn_declining_calls(host: &mut ScriptHost) -> Result<Vec<(CampaignEvent, FireReport)>, CommandError> {
     fn decline(host: &mut ScriptHost, out: &mut Vec<(CampaignEvent, FireReport)>) -> Result<(), CommandError> {
         while !host.model().pending_ally_war_calls.is_empty() {

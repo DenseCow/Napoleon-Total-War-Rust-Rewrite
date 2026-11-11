@@ -360,6 +360,9 @@ pub fn build_battle(db: &GameDatabase, setup: &SetupData, seed: u32) -> BattleSi
         sim.battle.units[i].skirmish = sim.battle.skirmish_default(i);
     }
     sim.phase = if skip { BattlePhase::Conflict } else { BattlePhase::Deployment };
+    // The model's own deployment flag (the special-ability gate reads it); `end_deployment`
+    // clears it when the conflict starts.
+    sim.battle.deploying = !skip;
     // The battle file's own wind, in world axes and read as metres per second (see
     // `BattleSim::wind`). Only the flag cloth reads it.
     if let Some((x, y)) = setup.battle.as_ref().and_then(|(_, s)| s.prevailing_wind) {

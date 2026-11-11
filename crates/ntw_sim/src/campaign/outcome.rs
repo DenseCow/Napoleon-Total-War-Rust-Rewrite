@@ -16,9 +16,11 @@
 //! victory screen ([`CampaignModel::continue_game_selected`]).
 
 use super::capture::CaptureChoice;
-use super::events::CampaignEvent;
-use super::ids::FactionId;
-use super::world::CampaignModel;
+use super::economy::regions_owned;
+use super::events::{CampaignEvent, CampaignMessage};
+use super::ids::{FactionId, RegionId};
+use super::world::{CampaignModel, Stance};
+use crate::calendar::Date;
 
 /// A human faction's state by its victory conditions, as the victory check reads it (`0x008F3DF0`,
 /// CONFIRMED by disassembly: after the victory test `0x0096FCE0` it reads the conditions record's
@@ -35,15 +37,213 @@ pub enum VictoryState {
     Lost,
 }
 
+/// The date a conditions record holds for "no date" (`0x00951430` compares all four fields with it:
+/// year 0, season 1, month 0, half 0; CONFIRMED by disassembly).
+pub const NO_DATE: Date = Date { year: 0, season: 1, month: 0, half: 0 };
+
+/// The conditions type the victory check runs no test for (`0x008F3DF0` skips a record whose +0x7C
+/// is 6; CONFIRMED by disassembly). Also the type of a record built without data.
+pub const KIND_NONE: u32 = 6;
+
+/// One faction's campaign victory conditions, the exe's `CAMPAIGN_VICTORY_CONDITIONS` record (the
+/// faction's +0x724; ESF fields #0..#10, CONFIRMED by the loader and the victory test `0x0096FCE0`).
+/// The data of a campaign: the importer reads it from the start position or the save, a custom
+/// campaign writes its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct VictoryConditions {
+    /// #0 (+0x28 count / +0x2C data): the regions the faction must hold, in record order. Also the
+    /// CAI region's victory list the director reads ([`super::director`]).
+    pub regions: Vec<RegionId>,
+    /// #1 (+0x31): the conditions are met. Once set the test does nothing more.
+    pub met: bool,
+    /// #2 (+0x24 area): a u32 the victory test does not read (24 in every shipped record). Kept
+    /// for the save.
+    pub unknown_2: u32,
+    /// #3 (+0x34): the deadline, or [`NO_DATE`] for none. Once a turn's date is past it the
+    /// conditions fail.
+    pub deadline: Date,
+    /// #4 (+0x44): the number of regions the faction (with its protectorates) must hold; for a
+    /// record of the rival type ([`super::features::CampaignFeatures::victory_rival`]), the most the
+    /// rival may hold.
+    pub count: u32,
+    /// #5 (+0x48): the faction must also have the highest prestige (`0x00953660`).
+    pub prestige_test: bool,
+    /// #6 (+0x7C): the conditions type. [`KIND_NONE`] is never tested.
+    pub kind: u32,
+    /// #7 (+0x30): the conditions are being held (the hold has started at [`Self::since`]).
+    pub holding: bool,
+    /// #8 (+0x32): the conditions failed (the deadline passed).
+    pub failed: bool,
+    /// #9 (+0x80): the turns the conditions must be held before they count; 0 for none.
+    pub hold_turns: u32,
+    /// #10 (+0x84): the date the hold started.
+    pub since: Date,
+}
+
+impl Default for VictoryConditions {
+    /// A record with no data: no regions, no deadline, type [`KIND_NONE`].
+    fn default() -> Self {
+        VictoryConditions {
+            regions: Vec::new(),
+            met: false,
+            unknown_2: 0,
+            deadline: NO_DATE,
+            count: 0,
+            prestige_test: false,
+            kind: KIND_NONE,
+            holding: false,
+            failed: false,
+            hold_turns: 0,
+            since: NO_DATE,
+        }
+    }
+}
+
+impl VictoryConditions {
+    /// Feeds every field into the model hash.
+    pub(crate) fn hash_into(&self, h: &mut crate::fnv::Fnv64) {
+        h.u32(self.regions.len() as u32);
+        for r in &self.regions {
+            h.u32(r.raw());
+        }
+        for b in [self.met, self.prestige_test, self.holding, self.failed] {
+            h.u32(u32::from(b));
+        }
+        for v in [self.unknown_2, self.count, self.kind, self.hold_turns] {
+            h.u32(v);
+        }
+        for d in [&self.deadline, &self.since] {
+            for v in [d.year, d.season, d.month, d.half] {
+                h.u32(v);
+            }
+        }
+    }
+}
+
 /// The original's state of `faction` by its victory conditions (the
-/// [`VICTORY_STATE`](super::seams::VICTORY_STATE) seam's original rule). A query.
+/// [`VICTORY_STATE`](super::seams::VICTORY_STATE) seam's original rule): the caller `0x008F3DF0`
+/// runs the victory test on the faction's record, then reads its met and failed bytes. No record or
+/// a record of type [`KIND_NONE`]: undecided, untested. CONFIRMED by disassembly.
 ///
-/// PROVISIONAL: always [`VictoryState::Undecided`]. The model keeps no conditions record and the
-/// victory test `0x0096FCE0` is not ported (BACKLOG §6 "Victory conditions for each campaign";
-/// its traced shape is in CAMPAIGN_FIDELITY.md "Campaign over" → "The victory test"), so no
-/// vanilla campaign is won or lost by its conditions yet; a mod's rule on the seam is.
-pub fn victory_state_original(_m: &CampaignModel, _faction: FactionId) -> VictoryState {
-    VictoryState::Undecided
+/// The victory test (`0x0096FCE0`, CONFIRMED by disassembly) updates the record and posts its events:
+/// 1. Nothing once met or failed.
+/// 2. With a deadline (not [`NO_DATE`], `0x00951430`) that is before the turn's date
+///    ([`Date::is_before`], `0x00898E90`): the conditions fail ([`CampaignEvent::VictoryConditionFailed`]).
+/// 3. Every region of the record must be held: owned by the faction, or by a faction other than the
+///    rebels (`0x008CEEF0`) that is the faction's protectorate (the owner's stance towards the faction
+///    is [`Stance::Protectorate`], `0x00B64C50` / `0x00B5DCC0`). A missing region is not held.
+/// 4. For the rival type ([`super::features::CampaignFeatures::victory_rival`], `0x00955B70`): the
+///    rival holds at most [`VictoryConditions::count`] regions, or does not exist. Else: the faction's
+///    regions plus those of every faction it is the patron of ([`Stance::Patron`], `0x00B64CB0` /
+///    `0x00B5DCB0`) reach the count (unsigned, wrapping sum).
+/// 5. With a hold ([`VictoryConditions::hold_turns`] not 0, `0x00951590`): not met stops the hold;
+///    met starts it at the turn's date unless it runs.
+/// 6. Met, with the highest prestige when the record asks (`0x00953660`: no other faction's is
+///    strictly greater) and, with a hold, held for at least `hold_turns` turns
+///    ([`Calendar::turns_between`](crate::calendar::Calendar::turns_between), `0x008EB610`): the
+///    conditions are met ([`CampaignEvent::VictoryConditionMet`], then the `campaign_won` message
+///    unless [`World::victory_notification_disabled`](super::World::victory_notification_disabled)).
+pub fn victory_state_original(m: &mut CampaignModel, faction: FactionId, events: &mut Vec<CampaignEvent>) -> VictoryState {
+    let Some(c) = m.world.victory_conditions.get(&faction).filter(|c| c.kind != KIND_NONE) else {
+        return VictoryState::Undecided;
+    };
+    let update = victory_test(m, faction, c);
+    let c = m.world.victory_conditions.get_mut(&faction).expect("checked above");
+    match update {
+        TestResult::Unchanged => {}
+        TestResult::Failed => {
+            c.failed = true;
+            events.push(CampaignEvent::VictoryConditionFailed { faction });
+        }
+        TestResult::Hold(holding, since) => {
+            c.holding = holding;
+            if let Some(since) = since {
+                c.since = since;
+            }
+        }
+        TestResult::Met(holding, since) => {
+            c.holding = holding;
+            if let Some(since) = since {
+                c.since = since;
+            }
+            c.met = true;
+            events.push(CampaignEvent::VictoryConditionMet { faction });
+            if !m.world.victory_notification_disabled {
+                events.push(CampaignEvent::Message { recipient: faction, message: CampaignMessage::CampaignWon });
+            }
+        }
+    }
+    let c = &m.world.victory_conditions[&faction];
+    if c.met {
+        VictoryState::Won
+    } else if c.failed {
+        VictoryState::Lost
+    } else {
+        VictoryState::Undecided
+    }
+}
+
+/// What one run of the victory test changes on a record.
+enum TestResult {
+    Unchanged,
+    Failed,
+    /// Not met (yet): the new holding byte and, when the hold starts, its date.
+    Hold(bool, Option<Date>),
+    /// Met: the holding byte and hold start as for [`Self::Hold`].
+    Met(bool, Option<Date>),
+}
+
+/// The victory test's reads (`0x0096FCE0`; see [`victory_state_original`]). A query.
+fn victory_test(m: &CampaignModel, faction: FactionId, c: &VictoryConditions) -> TestResult {
+    if c.met || c.failed {
+        return TestResult::Unchanged;
+    }
+    let now = m.calendar.date;
+    if c.deadline != NO_DATE && c.deadline.is_before(&now) {
+        return TestResult::Failed;
+    }
+    let held = |r: &RegionId| {
+        m.world.regions.get(r).is_some_and(|r| {
+            r.owner == faction || (!m.is_rebel_faction(r.owner) && m.world.stance(r.owner, faction) == Stance::Protectorate)
+        })
+    };
+    // The exe walks every region without stopping at the first one not held (no reads past it matter).
+    let all_held = c.regions.iter().all(held);
+    let rival = m.rules.features.victory_rival.as_ref().filter(|v| v.kind == c.kind);
+    let met = all_held
+        && match rival {
+            Some(v) => m.registry_faction(&v.faction).is_none_or(|r| regions_owned(m, r.id) as u32 <= c.count),
+            None => {
+                let patron_of = m.world.factions.keys().filter(|&&g| g != faction && m.world.stance(faction, g) == Stance::Patron);
+                let total = patron_of.fold(regions_owned(m, faction) as u32, |n, &g| n.wrapping_add(regions_owned(m, g) as u32));
+                total >= c.count
+            }
+        };
+    let (holding, since) = if c.hold_turns != 0 {
+        if !met {
+            return TestResult::Hold(false, None);
+        }
+        if c.holding { (true, None) } else { (true, Some(now)) }
+    } else {
+        if !met {
+            return TestResult::Unchanged;
+        }
+        (c.holding, None)
+    };
+    let prestige_ok = !c.prestige_test || {
+        let own = m.prestige(faction);
+        !m.world.factions.values().any(|f| !f.key.is_empty() && m.prestige(f.id) > own)
+    };
+    let started = since.unwrap_or(c.since);
+    let held_long_enough = c.hold_turns == 0 || m.calendar.turns_between(&started, &now) >= c.hold_turns;
+    if prestige_ok && held_long_enough {
+        TestResult::Met(holding, since)
+    } else if c.hold_turns != 0 {
+        TestResult::Hold(holding, since)
+    } else {
+        TestResult::Unchanged
+    }
 }
 
 /// One `movie_event_strings` row (the DB record `MovieEventStringRecord`), as the lookups read it.
@@ -181,10 +381,14 @@ impl CampaignModel {
     }
 
     /// `faction`'s state by its victory conditions, through the
-    /// [`VICTORY_STATE`](super::seams::VICTORY_STATE) seam ([`victory_state_original`] in vanilla).
-    /// A query.
-    pub fn victory_state(&self, faction: FactionId) -> VictoryState {
-        (self.rules.seams.victory_state.rule())(self, faction)
+    /// [`VICTORY_STATE`](super::seams::VICTORY_STATE) seam ([`victory_state_original`] in vanilla):
+    /// the rule updates the faction's conditions record and posts its events to `events`.
+    pub fn victory_state(&mut self, faction: FactionId, events: &mut Vec<CampaignEvent>) -> VictoryState {
+        let rules = std::sync::Arc::clone(&self.rules);
+        let mut writes = super::mod_state::ModWrites::default();
+        let state = (rules.seams.victory_state.rule())(self, faction, events, &mut writes);
+        self.mod_state.apply(&mut writes);
+        state
     }
 
     /// The end of one campaign update, after the work of a command, a turn step or a battle result:
@@ -212,22 +416,30 @@ impl CampaignModel {
     ///    its choice is not offered until the player continues ([`Self::continue_game_selected`]).
     ///    A report already offered ignores the flag (its step `0x008F8D00` returns at once when its
     ///    pending byte +0x98 is clear), so ours holds only a choice raised in this update. INFERRED:
-    ///    that the check runs before the report's first step when both come in one update (after a
-    ///    battle the update's poll of the stack at `0x008F4699` is skipped while the battle sequence
-    ///    state is not 0 or 8; the case of a capture without a battle is not traced). The model
+    ///    that the check runs before the report's first step when both come in one update. The
+    ///    campaign update (`0x008F4120`) polls the stack (`0x008F4699`) inside its step loop and calls
+    ///    the check only after the loop (`0x008F487A`); after a battle the poll is skipped while the
+    ///    battle sequence state is not 0 or 8, but for a capture without a battle the order of the
+    ///    push and the poll within one pass is not traced (debugger: take an undefended settlement
+    ///    with the victory met and see which of `0x0096CE7C` and `0x008F8D00` is hit first). The model
     ///    keeps one waiting capture, not the exe's stack of pending actions: a hold while another
     ///    kind of action is on top is not modelled.
     /// 2. Per winner, unless the scripts turned the notification off
     ///    ([`World::victory_notification_disabled`](super::World::victory_notification_disabled),
-    ///    +0x125 read at `0x0096CE9C`): in multiplayer (campaign +0x1034) the first other human of
-    ///    the faction list gets the defeat event (+0x108 with its flag 1, here its defeat movie) and
-    ///    the campaign is over ([`Self::end_campaign`]); then the winner's victory event (+0x120,
-    ///    here its movie) with the flag "this ended a multiplayer campaign". INFERRED: the model
-    ///    keeps no multiplayer flag, so another human in the list stands for it. PROVISIONAL: the
-    ///    exe's shared win (campaign key `spa_napoleon`, `0x008CE390(winner, other)` and both
-    ///    factions' conditions of type 5: the other human gets the victory event with flag 1 instead
-    ///    of the defeat) is not modelled: it needs the conditions record (BACKLOG §6) and must become
-    ///    campaign data, not a key test. Not modelled, no equivalent in ours (no Steam integration):
+    ///    +0x125 read at `0x0096CE9C`): in a multiplayer campaign
+    ///    ([`World::multiplayer_campaign`](super::World::multiplayer_campaign), +0x1034 tested at
+    ///    `0x0096CEA9`) the first other human of the world's faction list (`0x0096CEB9`..`0x0096CEF1`)
+    ///    gets the defeat event (+0x108 with its flag 1, here its defeat movie) and the campaign is
+    ///    over ([`Self::end_campaign`], `0x008C30A0`); then the winner's victory event (+0x120, here
+    ///    its movie) with the flag "this ended a multiplayer campaign" (set only on that path,
+    ///    `0x0096CFB4`). Outside multiplayer, or with no other human, only the winner's event is
+    ///    posted, with the flag clear. The shared win
+    ///    (`0x0096CF69`..`0x0096CF84`): when the campaign shares a win
+    ///    ([`CampaignFeatures::shared_victory_kind`](super::features::CampaignFeatures::shared_victory_kind),
+    ///    the exe's test of the campaign key `spa_napoleon`), the other human is the same as or allied
+    ///    with the winner ([`Self::allied_with`], `0x008CE390(other, winner)`) and both factions'
+    ///    conditions records are of that type, the other human gets the victory event with flag 1
+    ///    (+0x120, its victory movie) instead of the defeat; the campaign is over either way. Not modelled, no equivalent in ours (no Steam integration):
     ///    for every winner, also with the notification off, the exe calls the campaign achievement
     ///    tracker (`0x009C7660`'s vfunc +0x50, `0x004AFD40`, called at `0x0096D0B1`) with the
     ///    winner's key, the campaign key and campaign numbers. It only sets the tracked faction's
@@ -245,12 +457,19 @@ impl CampaignModel {
         if self.turn.victory_checked || self.turn.campaign_over {
             return;
         }
-        // Nothing is allocated until a faction has won or lost. The exe asks the humans of its
-        // faction list: a human id with no faction in the world is in no list and is never asked.
+        // The exe asks the humans of its faction list in its order (the test posts its events in that
+        // order; winners and losers are told in it): a human id with no faction in the world is in no
+        // list and is never asked. Only the humans are listed (`victory_state` takes `&mut self`); a
+        // single human needs no ordering, so the faction list is walked only with several.
+        let humans: Vec<FactionId> = if self.turn.humans.len() <= 1 {
+            self.turn.humans.iter().copied().filter(|f| self.world.factions.contains_key(f)).collect()
+        } else {
+            self.world.factions_in_turn_order().into_iter().filter(|&f| self.is_human(f)).collect()
+        };
         let mut decided: Vec<(FactionId, VictoryState)> = Vec::new();
         let mut undecided = false;
-        for &faction in self.turn.humans.iter().filter(|f| self.world.factions.contains_key(*f)) {
-            match self.victory_state(faction) {
+        for &faction in &humans {
+            match self.victory_state(faction, events) {
                 VictoryState::Undecided => undecided = true,
                 state => decided.push((faction, state)),
             }
@@ -262,10 +481,6 @@ impl CampaignModel {
         if !won && undecided {
             return;
         }
-        // The exe walks the faction list: winners and losers are told in that order (the list holds
-        // every faction of the world, so each decided faction has a place).
-        let order = self.world.factions_in_turn_order();
-        decided.sort_by_key(|&(f, _)| order.iter().position(|&o| o == f));
         let lost = |events: &mut Vec<CampaignEvent>| {
             events.extend(decided.iter().filter(|(_, s)| *s == VictoryState::Lost).map(|&(faction, _)| CampaignEvent::CampaignLost { faction }));
         };
@@ -285,12 +500,16 @@ impl CampaignModel {
             if self.world.victory_notification_disabled {
                 continue;
             }
-            let other = order.iter().copied().find(|&f| f != winner && self.is_human(f));
+            // Only in a multiplayer campaign (+0x1034 tested at `0x0096CEA9`) is another human looked for.
+            let other = if self.world.multiplayer_campaign { humans.iter().copied().find(|&f| f != winner) } else { None };
             if let Some(other) = other {
                 // Event +0x108 {other, 1}: the movie listener answers it as it answers a destroyed
                 // human's (`0x00A14E80`). UNKNOWN: what that event's other listeners do when the
-                // check posts it for a faction still in the game.
-                if let Some(movie) = self.outcome_movie(other, CampaignOutcome::Destroyed) {
+                // check posts it for a faction still in the game. A shared win posts +0x120 {other, 1}.
+                let kind_is = |f: FactionId, k: u32| self.world.victory_conditions.get(&f).is_some_and(|c| c.kind == k);
+                let shared = self.rules.features.shared_victory_kind.is_some_and(|k| self.allied_with(other, winner) && kind_is(winner, k) && kind_is(other, k));
+                let outcome = if shared { CampaignOutcome::Won { multiplayer_over: true } } else { CampaignOutcome::Destroyed };
+                if let Some(movie) = self.outcome_movie(other, outcome) {
                     events.push(CampaignEvent::OutcomeMovie { faction: other, movie });
                 }
                 self.end_campaign();

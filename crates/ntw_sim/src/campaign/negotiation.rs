@@ -1447,9 +1447,8 @@ impl CampaignModel {
     /// largest first, and get [`rank_categories`]. The rebel faction is not ranked (INFERRED).
     ///
     /// Values: power = [`Self::faction_powers`]; wealth = the last turn's income, categories 5..11
-    /// of the last economics record (`0x00BBCC40`, [`super::World::last_income`]); prestige
-    /// (`0x008F4D30` over the faction's `PRESTIGE` record, which the model does not hold yet;
-    /// UI_FIDELITY.md §4.7 row "(1) prestige value"): PROVISIONAL 0 for every faction.
+    /// of the last economics record (`0x00BBCC40`, [`super::World::last_income`]); prestige =
+    /// [`Self::prestige`].
     pub fn faction_rankings(&self) -> FactionRankings {
         let ids: Vec<FactionId> = self.world.factions.values().filter(|f| !f.key.is_empty()).map(|f| f.id).collect();
         let out_of_game: Vec<bool> = ids.iter().map(|&f| !self.in_the_game(f)).collect();
@@ -1457,10 +1456,17 @@ impl CampaignModel {
         let powers = self.faction_powers(&mut unknown_units);
         let power: Vec<f32> = ids.iter().map(|f| powers.get(f).map_or(0, |p| p.total()) as f32).collect();
         let wealth: Vec<f32> = ids.iter().map(|&f| self.world.last_income(f) as f32).collect();
-        let prestige = vec![0.0f32; ids.len()];
+        let prestige: Vec<f32> = ids.iter().map(|&f| self.prestige(f) as f32).collect();
         let (p, w, s) = (rank_categories(&power, &out_of_game), rank_categories(&wealth, &out_of_game), rank_categories(&prestige, &out_of_game));
         let ranks = ids.iter().enumerate().map(|(i, &f)| (f, Rankings { power: p[i], wealth: w[i], prestige: s[i] })).collect();
         FactionRankings { ranks, unknown_units }
+    }
+
+    /// A faction's prestige (`0x008F4D30` over the faction's `PRESTIGE` record; UI_FIDELITY.md §4.7 row
+    /// "(1) prestige value"), read by the rankings and the victory test's prestige rule. PROVISIONAL: the
+    /// model does not hold the `PRESTIGE` record yet, so every faction has 0.
+    pub fn prestige(&self, _f: FactionId) -> u32 {
+        0
     }
 }
 

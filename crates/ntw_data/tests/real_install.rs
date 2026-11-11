@@ -497,7 +497,7 @@ fn historical_event_tables() {
 fn unrest_tables() {
     let db = GameDatabase::from_install(data_dir()).unwrap();
     let c = &db.campaign;
-    let paths: Vec<(&str, bool, bool, bool)> = c.population_classes.iter().map(|r| (r.key.as_str(), r.strikes, r.demands, r.flag_3)).collect();
+    let paths: Vec<(&str, bool, bool, bool)> = c.population_classes.iter().map(|r| (r.key.as_str(), r.strikes, r.demands, r.rebels_led_by_general)).collect();
     assert_eq!(paths, [("lower", true, false, false), ("middle", true, false, false), ("upper", false, true, true)]);
     assert_eq!(c.unrest_demands.len(), 48);
     let demand = |cause: &str, kind: &str| c.unrest_demands.iter().find(|r| r.cause == cause && r.kind == kind).map(|r| r.demand.as_str());

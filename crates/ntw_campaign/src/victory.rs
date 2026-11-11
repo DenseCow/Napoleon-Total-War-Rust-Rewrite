@@ -28,6 +28,7 @@
 //! records; for eur_napoleon the same rule is INFERRED).
 
 use ntw_formats::esf::{EsfFile, EsfNode, EsfRecord};
+use ntw_sim::campaign::outcome::VictoryConditions;
 
 /// The record name.
 pub const RECORD: &str = "CAMPAIGN_VICTORY_CONDITIONS";
@@ -158,30 +159,133 @@ fn region_keys(r: &EsfRecord) -> impl Iterator<Item = &str> {
     r.record_array("REGION_KEYS").into_iter().flat_map(|a| a.items.iter()).filter_map(|it| it.first().and_then(EsfNode::as_str))
 }
 
-/// Fills [`World::victory_regions`](ntw_sim::campaign::World::victory_regions) from a start
-/// position or save (`root` = the file's root record): for each faction, the regions its tested
-/// record names (the `FACTION`'s own, else its `CAMPAIGN_PLAYER_SETUP`'s). A start position holds
-/// only the empty default, so there a faction with options gets its [`DEFAULT_OPTION`]'s regions,
-/// as the front end gives a new campaign's human (the module notes give the evidence and its tag);
-/// [`crate::LoadedCampaign::set_human`] then keeps the human's alone.
-/// Region keys the world does not have are skipped.
-pub fn fill(root: &EsfRecord, model: &mut ntw_sim::campaign::CampaignModel) {
-    let Some(world) = root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD") else { return };
+/// A faction's tested record (faction +0x724): the `FACTION`'s own, else its
+/// `CAMPAIGN_PLAYER_SETUP`'s (the non-playable factions hold only that one).
+fn tested(f: &EsfRecord) -> Option<&EsfRecord> {
+    f.child(RECORD).or_else(|| f.child("CAMPAIGN_PLAYER_SETUP").and_then(|p| p.child(RECORD)))
+}
+
+/// [`tested`], writable.
+fn tested_mut(f: &mut EsfRecord) -> Option<&mut EsfRecord> {
+    let own = f.children.iter().position(|n| n.as_record().is_some_and(|r| r.name == RECORD));
+    let i = match own {
+        Some(i) => i,
+        None => {
+            let p = f.children.iter_mut().filter_map(as_rec_mut).find(|p| p.name == "CAMPAIGN_PLAYER_SETUP")?;
+            return p.children.iter_mut().filter_map(as_rec_mut).find(|r| r.name == RECORD);
+        }
+    };
+    as_rec_mut(&mut f.children[i])
+}
+
+/// The `DATE` record at child `i` of a conditions record.
+fn date_at(r: &EsfRecord, i: usize) -> Result<ntw_sim::calendar::Date, String> {
+    match r.children.get(i) {
+        Some(EsfNode::Record(d)) if d.name == "DATE" => crate::fields::date(d, &format!("{RECORD}/#{i}")).map_err(|e| e.to_string()),
+        _ => Err(format!("{RECORD} #{i} is not a DATE")),
+    }
+}
+
+/// A conditions record as the model holds it ([`VictoryConditions`], fields #0..#10, layout in the
+/// module notes). Region keys `region_ids` does not have are left out and counted in `unknown`.
+pub fn parse(
+    r: &EsfRecord,
+    region_ids: &std::collections::HashMap<&str, ntw_sim::campaign::RegionId>,
+    unknown: &mut usize,
+) -> Result<VictoryConditions, String> {
+    let field = |i: usize| -> Result<u32, String> { r.get_u32(i).ok_or_else(|| format!("{RECORD} #{i} is not a u32")) };
+    let flag = |i: usize| -> Result<bool, String> { r.get_bool(i).ok_or_else(|| format!("{RECORD} #{i} is not a bool")) };
+    let mut regions = Vec::new();
+    for k in region_keys(r) {
+        match region_ids.get(k) {
+            Some(&id) => regions.push(id),
+            None => *unknown += 1,
+        }
+    }
+    Ok(VictoryConditions {
+        regions,
+        met: flag(1)?,
+        unknown_2: field(2)?,
+        deadline: date_at(r, 3)?,
+        count: field(4)?,
+        prestige_test: flag(5)?,
+        kind: field(6)?,
+        holding: flag(7)?,
+        failed: flag(8)?,
+        hold_turns: field(9)?,
+        since: date_at(r, 10)?,
+    })
+}
+
+/// The conditions [`crate::LoadedCampaign::set_human`] gives a new campaign's human, per faction
+/// with options: its [`DEFAULT_OPTION`]'s record (a start position only; empty for a save).
+pub type NewCampaignOptions = std::collections::BTreeMap<ntw_sim::campaign::FactionId, VictoryConditions>;
+
+/// Fills [`World::victory_conditions`](ntw_sim::campaign::World::victory_conditions) from a start
+/// position or save (`root` = the file's root record): for each faction, its tested record (the
+/// `FACTION`'s own, else its `CAMPAIGN_PLAYER_SETUP`'s), as the exe's loader leaves faction +0x724.
+/// Returns, for a start position, each faction's [`DEFAULT_OPTION`] record, which the front end copies
+/// into the human's records ([`crate::LoadedCampaign::set_human`]; the module notes give the evidence
+/// and its tag). A record that does not parse leaves its faction without conditions (no test); it and
+/// region keys the world does not have are logged once per file.
+pub fn fill(root: &EsfRecord, model: &mut ntw_sim::campaign::CampaignModel) -> NewCampaignOptions {
+    let mut opts = NewCampaignOptions::new();
+    let Some(world) = root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD") else { return opts };
     let region_ids: std::collections::HashMap<&str, ntw_sim::campaign::RegionId> = model.world.regions.values().map(|r| (r.key.as_str(), r.id)).collect();
     let mut out = std::collections::BTreeMap::new();
+    let (mut unknown, mut broken) = (0usize, Vec::new());
     for f in world.record_array("FACTION_ARRAY").into_iter().flat_map(|a| a.records()).filter(|r| r.name == "FACTION") {
         let Some(key) = f.values().nth(1).and_then(EsfNode::as_str) else { continue };
         let Some(id) = model.faction_by_key(key).map(|x| x.id) else { continue };
-        let tested = f.child(RECORD).or_else(|| f.child("CAMPAIGN_PLAYER_SETUP").and_then(|p| p.child(RECORD)));
-        let mut regions: std::collections::BTreeSet<_> = tested.into_iter().flat_map(region_keys).filter_map(|k| region_ids.get(k).copied()).collect();
-        if regions.is_empty()
-            && let Some(opt) = options(root, key).and_then(|o| o.into_iter().nth(DEFAULT_OPTION))
-        {
-            regions = region_keys(&opt).filter_map(|k| region_ids.get(k).copied()).collect();
+        if let Some(r) = tested(f) {
+            match parse(r, &region_ids, &mut unknown) {
+                Ok(c) => {
+                    out.insert(id, c);
+                }
+                Err(e) => broken.push(format!("{key}: {e}")),
+            }
         }
-        if !regions.is_empty() {
-            out.insert(id, regions);
+        if let Some(opt) = options(root, key).and_then(|o| o.into_iter().nth(DEFAULT_OPTION)) {
+            match parse(&opt, &region_ids, &mut unknown) {
+                Ok(c) => {
+                    opts.insert(id, c);
+                }
+                Err(e) => broken.push(format!("{key} option {DEFAULT_OPTION}: {e}")),
+            }
         }
     }
-    model.world.victory_regions = out;
+    if !broken.is_empty() {
+        log::warn!("victory conditions not read, those factions have none: {}", broken.join("; "));
+    }
+    if unknown > 0 {
+        log::warn!("{unknown} victory condition region keys name no region of the world; left out");
+    }
+    model.world.victory_conditions = out;
+    opts
+}
+
+/// Writes the fields the victory test changes (#1 met, #7 holding, #8 failed, #10 the hold's start)
+/// from `c` into the faction's tested record (the one [`fill`] reads; `f` = the `FACTION`), as the
+/// exe's writer saves faction +0x724. The other fields are data the test only reads.
+pub fn write_state(f: &mut EsfRecord, c: &VictoryConditions) {
+    let Some(r) = tested_mut(f) else { return };
+    let mut set = |i: usize, v: EsfNode| {
+        if let Some(slot) = r.children.get_mut(i)
+            && slot.type_code() == v.type_code()
+        {
+            *slot = v;
+        }
+    };
+    set(1, EsfNode::Bool(c.met));
+    set(7, EsfNode::Bool(c.holding));
+    set(8, EsfNode::Bool(c.failed));
+    if let Some(EsfNode::Record(d)) = r.children.get_mut(10)
+        && d.name == "DATE"
+    {
+        for (i, v) in [c.since.year, c.since.season, c.since.month, c.since.half].into_iter().enumerate() {
+            if let Some(slot @ EsfNode::U32(_)) = d.children.get_mut(i) {
+                *slot = EsfNode::U32(v);
+            }
+        }
+    }
 }

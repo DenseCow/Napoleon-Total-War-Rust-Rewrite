@@ -630,8 +630,8 @@ fn rival_score_in(model: &CampaignModel, areas: &[Area], f: FactionId) -> f32 {
     let mut best = 0.0f32;
     for &h in &model.turn.humans {
         let a = 1.0 - relation_belief_value(model, f, h);
-        let b = match model.world.victory_regions.get(&h) {
-            Some(named) if !mine.is_empty() => mine.iter().filter(|r| named.contains(r)).count() as f32 / mine.len() as f32,
+        let b = match model.world.victory_conditions.get(&h) {
+            Some(named) if !mine.is_empty() => mine.iter().filter(|r| named.regions.contains(r)).count() as f32 / mine.len() as f32,
             _ => 0.0,
         };
         let c = if neighbours.is_empty() {
@@ -1498,7 +1498,7 @@ mod tests {
         for c in m.world.characters.values_mut() {
             c.position = (Fixed20::from_int(-500), Fixed20::from_int(-500));
         }
-        m.world.victory_regions.insert(A, [RegionId(11), RegionId(12)].into());
+        m.world.victory_conditions.insert(A, crate::campaign::outcome::VictoryConditions { regions: vec![RegionId(11), RegionId(12)], ..Default::default() });
         m
     }
 

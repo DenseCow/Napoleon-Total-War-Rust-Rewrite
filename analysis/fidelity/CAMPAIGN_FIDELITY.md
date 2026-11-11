@@ -780,7 +780,7 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
     `campaign.victory_state` rule until the victory test is ported (BACKLOG §6 victory conditions).
   - **(3), the revolution** (CONFIRMED by decompilation): faction +0x814 = in a revolution. Its only setter
     `0x008EE3E0` (copies {settlement → +0x818, side byte → +0x81C, two more bytes → +0x81D/+0x81E}, clears +0x93E) is
-    called by the region unrest outcomes `0x008B46A0` (case 5; case 1 is the riot) when it strikes a faction's capital (`0x00ABE4E0` / `0x00A8B5A0`:
+    called by the region unrest outcomes `0x008B46A0` (kind 5, a rebellion; kind 2 is the riot) when it strikes a faction's capital (`0x00ABE4E0` / `0x00A8B5A0`:
     the region is its owner's +0x72C): for an AI faction with side byte 1 (then the rebels spawn,
     `0x00AAB440(.., 1, ..)`); for a human it only sets +0x93E and fires event +0x8A0 (the choice), and the human's
     answer, the command `CCQ_BEGIN_REVOLUTION_IN_REGION` (registered `0x0041F480`, handler `0x00931BE0` →
@@ -879,6 +879,15 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
     `0x009D5A60` / `0x0099DD60`), builds the new one (its volume argument is int(setting 4 × 0.01 × setting 5), CVTTSS2SI at ~`0x00A13FC0`) and keeps it at +0xCC0. So the panel opens only
     on a human machine, for that player's own movie or one shown to everyone, and `local_faction_involved` is
     exactly "the event's faction is the local player's".
+  - **Freeing the previous panel** (worker victorytest, 2026-11-10; CONFIRMED by decompilation): the kept object
+    (+0xCC0 of the +0x3BC part, UI manager +0x107C) is freed only there and by `CampaignUI.MovieDismissed`
+    (`0x00A0FC30`), so it is still kept only while its panel was not dismissed. `0x009D5A60` calls the panel
+    script's `DismissMovieEvent()` (string `0x0136FD3C`) when the object's component +0x18 is set; the object is in the
+    component's listener list (`0x00447260`) and its slot 0 (`0x00A144B0` → `0x009D5880`) clears +0x18 when the
+    component goes. The destructor `0x0099DD60` stops the movie (`0x00A25560` → `MOVIE_StopFullscreenMovie`
+    `0x00D9FB70` on the bink control +0x20). So a movie arriving while the last one's panel is open runs that panel's
+    exit (e.g. "ExitGame") and closes it first. Ours: `UiScriptHost::free_movie_panel` (ntw_script ui/campaign),
+    the kept panel `Inner::movie_panel`; test `a_new_movie_dismisses_the_open_movie_panel_first`.
   - **The title:** the movie event (`0x0099A4F0`, queued by `0x00A20700`) keeps at +0x18 the movie-event row's +0x14.
     The row builder `0x00F57D60` (record constructor `0x00F43E00`) formats `"movie_event_strings_title_%S"`
     (`0x013D43E4`) with the row's key (event + culture) and stores that loc string at +0x14: the title is the loc
@@ -889,7 +898,8 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
     multiplayer campaign-over step (test `0x0096CE9C`), and the victory test `0x0096FCE0` still marks the faction won
     but skips the `campaign_won` post (test `0x0096FFE7`). Saved at `EPISODIC_RESTRICTIONS` #32; set in the tut start
     position. Ours: `World::victory_notification_disabled` (CAMPAIGN_DATA.md §4.2), read by
-    `CampaignModel::victory_check` (the `campaign_won` message of the victory test is not modelled: §6).
+    `CampaignModel::victory_check` and by the victory test `victory_state_original`, which then posts no
+    `campaign_won` message.
   - **CampaignUI bindings** (registration thunks hold name and handler): `QuitToMainScreen` (`0x00429CF0`) →
     `0x009EF630` → `0x009BFED0` sets byte +0x7C of the UI manager's +0x9FC object to 1 (the request to leave). Its
     neighbour `QuitToWindowsFromEscapeMenu` (`0x00429D10` → `0x009EF640` → `0x009BFEE0`) sets +0x7D. Both are read
@@ -980,7 +990,11 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
   is the loc text of `OutcomeMovie::title_key` (`movie_event_strings_title_<event><culture>`, the row's new `culture`
   field; a missing string gives "" and logs once), and `local_faction_involved` = the faction is the local
   player's, a movie not shown to everyone opening only for that player (both CONFIRMED, `0x00A13EA0` and the title
-  above; worker victoryscreen2, 2026-10-20). INFERRED: the movie plays once with its sound. Tests: outcome.rs `the_defeat_movie_is_the_last_row_with_the_factions_id`,
+  above; worker victoryscreen2, 2026-10-20). The movie plays once with its sound (CONFIRMED, worker victorytest
+  2026-11-10: the panel's open passes option byte +1 = 0 to the bink control's open `0x00D9F600`, which hands
+  it to its player's open (vtable 0x01429D90 +12, `0x01215C10`); the player keeps it at +0x59 (`0x01215D72`),
+  and its update `0x0124DA70` at the last frame seeks back to frame 1 (vtable +16, `0x0121E110`) when it is
+  set and closes the movie (vtable +20) when it is clear, `0x0124DB74`-`0x0124DB85`). Tests: outcome.rs `the_defeat_movie_is_the_last_row_with_the_factions_id`,
   `the_victory_movie_follows_the_government_and_the_culture`,
   `the_victory_movie_takes_a_culture_standing_in_for_the_factions`, `a_destroyed_human_plays_its_defeat_movie`; ntw_campaign
   `the_outcome_movie_rows_and_faction_ids_reach_the_rules`, real_install `outcome_movies_from_the_real_data`;
@@ -988,8 +1002,7 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
   `the_victory_movie_panel_opens_the_campaign_result_as_a_victory` (the shipped scripts, real install).
   Next: the victory test `0x0096FCE0` behind the check (BACKLOG §6, the victory conditions), the consumer of
   `0x00A065A0`'s code 2, the launcher of the next campaign in a chain (mode +0x2C vfunc +4), the
-  `campaign_result` buttons, and the panel's loop flag (play-once stays INFERRED: option byte +1 of the panel's
-  movie open). The movie volume is traced (worker victoryscreen3's branch, first session): `0x00A13EA0`
+  `campaign_result` buttons (the loop flag is traced, above). The movie volume is traced (worker victoryscreen3's branch, first session): `0x00A13EA0`
   (`0x00A13F05`..`0x00A13FC0`) and the full-screen player `0x004831D0` (CVTTSS2SI at `0x00483289`) both compute
   int(group 4 × 0.01 × group 5) from the sound manager's group volumes (vfunc +0xDC): group 4 is the movie volume
   and group 5 the master volume, with no speaker or 2D multiplier, and hand it to the bink control's open
@@ -1011,12 +1024,35 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
     update. Only with a loser and no undecided human does it post +0x138 to every loser and set the done byte
     (+0x38). So a loser is told exactly once, together with the verdict; there is no repeat (re-read for the
     review's fix round, worker victoryscreen3fix; the first write-up of this branch had a repeat here, wrong).
-  - **The victory test** `0x0096FCE0` (shape only, for BACKLOG §6; not ported): it returns at once when the record
-    is already met or failed; past the record's deadline it sets failed; every region of the record's list must be
-    held; type 5 compares the `spa_france` region count with the record's +0x44 (at most), the other types the
-    faction's own plus allied-like region counts (at least +0x44); an optional hold-for-duration (+0x30, +0x84,
-    +0x80); then it posts the `campaign_won` message unless EPISODIC_RESTRICTIONS +0x125 is set (read at
-    `0x0096FFE7`) and sets met. Its helpers are not traced.
+  - **The victory test** `0x0096FCE0` (worker victorytest, 2026-11-10; ported, CONFIRMED by disassembly with its
+    helpers): the record is `CAMPAIGN_VICTORY_CONDITIONS` #0..#10 (#0 regions +0x28/+0x2C, #1 met +0x31, #2 a u32
+    the test never reads (24 in every shipped record), #3 deadline +0x34, #4 count +0x44, #5 prestige test +0x48,
+    #6 type +0x7C, #7 holding +0x30, #8 failed +0x32, #9 hold turns +0x80, #10 hold start +0x84). In order:
+    1. Met or failed: nothing.
+    2. A deadline other than "no date" (`0x00951430`: year 0, season 1, month 0, half 0) that is before the turn's
+       date (`0x00898E90`: year, then month, then half; the season is not compared) sets failed and posts the
+       failed event.
+    3. Every listed region must be held: its owner is the faction, or a faction other than the rebels
+       (`0x008CEEF0`) whose stance towards the faction is protectorate (`0x00B64C50` → `0x00B5DCC0`). The walk does
+       not stop at the first region not held; a region missing from the world is not held.
+    4. Type 5, in every campaign (no campaign key is tested here): the faction `spa_france`, looked up in the
+       faction registry (`0x00955B70`), holds at most the count, or does not exist (then the held regions alone
+       decide). Else: the faction's own regions plus those of every faction it is the patron of (its relation
+       list, `0x00B64CB0` → `0x00B5DCB0`), an unsigned wrapping sum, reach the count.
+    5. With hold turns (`0x00951590`, not 0): not met clears holding (the start date stays); met sets holding
+       and, if it was clear, the start date to the turn's date.
+    6. Met, with the highest prestige when +0x48 asks (`0x00953660`: no faction's is strictly greater) and, with
+       hold turns, `turns_between(start, now) >= hold turns` (`0x008EB610`: turns per year × quarter-months between
+       the dates / 48, unsigned): sets met, posts the met event and, unless EPISODIC_RESTRICTIONS +0x125 is set
+       (`0x0096FFE7`), the `campaign_won` message (`0x0096FFF7`).
+    **Ours:** `outcome::victory_state_original` (the `campaign.victory_state` seam's original rule) with the
+    record as `outcome::VictoryConditions` in `World::victory_conditions` (saved, hashed); the rival rule is
+    campaign data, `CampaignFeatures::victory_rival` (kind 5, `spa_france`, set by ntw_campaign
+    `features::original` for every original campaign). The importer (ntw_campaign `victory::fill`) reads every faction's tested record (its own
+    +0x724, else `CAMPAIGN_PLAYER_SETUP`'s), and `LoadedCampaign::set_human` gives a new campaign's human the start
+    position's first option (as `write_human` does in the save); the save writer writes #1, #7, #8 and #10 back
+    into the tested record. PROVISIONAL: `CampaignModel::prestige` is 0 for every faction (prestige is not
+    modelled, negotiation.rs), so the prestige test always passes; no shipped record sets it.
   - **+0x125** (`set_ui_notification_of_victory_disabled`, setter `0x0097B980`) has two readers: the test's message
     (`0x0096FFE7`) and the check's per-winner block (`0x0096CE9C`). With it set a winner gets no event +0x120 and
     no other human is ended, but the capture hold, the stats reporter (`0x009C7660` vfunc +0x50), the losers'
@@ -1049,8 +1085,8 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
   - **Ours** (ntw_sim outcome.rs): `CampaignModel::victory_check` posts the same events in the same order from
     one place, `CampaignModel::end_update`, which ends `apply`, `step`, `apply_battle_result` and
     `capture_by_force` (our updates). The verdict per human is the rule `campaign.victory_state`
-    (`CampaignRules::seams`, `VictoryState` Undecided / Won / Lost); its original, `victory_state_original`, is
-    PROVISIONAL: it answers Undecided until `0x0096FCE0` is ported (§6), so vanilla play is unchanged. Event +0x120
+    (`CampaignRules::seams`, `VictoryState` Undecided / Won / Lost); its original, `victory_state_original`, runs
+    the victory test above (no record or type 6: undecided, untested). Event +0x120
     is `CampaignEvent::OutcomeMovie` (`CampaignOutcome::Won { multiplayer_over }`), the other human's +0x108 its
     Destroyed movie plus `end_campaign`, +0x138 the new `CampaignEvent::CampaignLost`, which the game hands to
     `UiScriptHost::campaign_lost_popup` (the root's `ShowCampaignResultPopup(false)` for the local player, as
@@ -1062,21 +1098,25 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
     it and raises the choice again, and a held capture is occupied at the next update once looting is disabled.
     INFERRED: that a capture and the win it causes meet in one update with the report already pushed and not yet
     stepped (the order of the poll `0x008F4699` and the check `0x008F487A` when a settlement falls without a
-    battle is not traced through the capture's own path). Not modelled: the shared win of `spa_napoleon` (event
-    +0x120 to the other human when the winner passes `0x008CE390` and both records are type 5: the other human
-    gets the defeat, PROVISIONAL in the code), the achievement tracker's call (no equivalent in ours, no Steam
+    battle is not traced through the capture's own path). The shared win of `spa_napoleon` (`0x0096CF69`..
+    `0x0096CF84`: event +0x120 with flag 1 to the other human instead of +0x108 when `0x008CE390(other, winner)`
+    passes and both records are type 5) is campaign data, `CampaignFeatures::shared_victory_kind` (5 for
+    `spa_napoleon`); the campaign is over either way. Not modelled: the achievement tracker's call (no equivalent in ours, no Steam
     integration: made for every winner, also with the notice off, at `0x0096D0B1` with ten arguments, the winner's
     key, the campaign key and campaign numbers, only one of them a list count, the fourth list's, pushed at
     `0x0096D091`; the callee, vfunc +0x50 `0x004AFD40`, writes only the tracker's own bytes +0x9C..+0xC6, the
     tracked faction's campaign-won achievement flags, then runs the tracker's own update `0x0049E5D0`, the stats
-    store and achievement unlocks of "Achievement hook" below; CONFIRMED by disassembly), the test's
-    `campaign_won` message. A human id with no faction in the world is never asked (the exe walks its faction list).
-    PROVISIONAL: `EndTurn` occupies a waiting capture also while it is held (commands.rs; whether the exe lets
-    the turn end with +0x9C set is not traced).
+    store and achievement unlocks of "Achievement hook" below; CONFIRMED by disassembly). A human id with no faction in the world is never asked (the exe walks its faction list).
+    A waiting capture, held or not, refuses the end of turn (`0x008BE2A0` stack test, `CampaignModel::check_end_turn`;
+    CONFIRMED by decompile).
   - **Tests:** ntw_sim `crates/ntw_sim/src/campaign/tests/victory_check_tests.rs` (the win, the notice turned
     off, the win against another human, the loser after the winner, the single loss told once,
     `a_loser_is_not_told_while_another_human_is_undecided`, `a_human_without_a_faction_is_never_asked`, the held
-    choice and continue, a choice already offered, looting disabled, the hash); ntw_campaign own_save
+    choice and continue, a choice already offered, looting disabled, the hash; the victory test: no record or
+    type 6, the deadline, held regions and protectorates, the patron count, the rival rule, the hold, prestige, the
+    notification switch, the shared win); ntw_campaign `economy_fidelity::ai_areas_on_the_europe_start` (the
+    Europe start position's records and France's first option, real data), own_save
+    `director_victory_regions_and_ai_areas_round_trip`, own_save
     `the_victory_verdict_and_a_held_capture_round_trip_and_an_older_save_loads_them_as_false`; ntw_script movie_panel_tests
     `quit_to_main_screen_asks_the_game_to_leave_and_continue_sends_the_models_command`,
     `the_defeat_popup_opens_for_the_local_faction_only`, `a_held_capture_opens_no_capture_screen`.
@@ -1089,8 +1129,27 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
   loop (`0x008F4539`-`0x008F4540`), so while it is set the whole loop is skipped (the AI step, the pending-stack
   update at `0x008F4699`, the movement update, the queued negotiations); the calls after the loop, the victory
   check at `0x008F487A` among them, still run every update. Ours: `World::looting_options_disabled_for_human`, `World::advance_to_next_campaign`
-  (CAMPAIGN_DATA.md §4.2); ours stores the flag and does not stop the update's steps while it is set (PROVISIONAL
-  in the field's doc, `crates/ntw_sim/src/campaign/world.rs`).
+  (CAMPAIGN_DATA.md §4.2); ours refuses the end of turn and every force order while the flag is set
+  (`CommandError::CampaignAdvancing`, `CampaignModel::check_end_turn`; worker victorytest, 2026-11-10).
+- **The end of turn and the pending stack** (worker victorytest, 2026-11-10; CONFIRMED by decompilation): the
+  end-turn executor `0x008BD6D0` (callers: the command `CCQ_END_TURN` `0x00934910`, the campaign update at
+  `0x008F4383` / `0x008F451F`, and `0x00A787D0`) ends the turn only when `0x008BE2A0` passes: phase +0x3C is 1,
+  the movement queue (+0xF60) is idle, `0x00898B80` is false, the battle sequence state +0x54 is 0 or 8, and
+  the pending-action stack (+0xF70) has no first entry. A capture waiting for its choice and a call to war
+  waiting for its answer both sit on that stack, so the turn does not end while either waits (the earlier
+  "settled as an occupation at the end of the turn" was ours, not the exe's). `0x0096E200` moves the phase from
+  1 to 2 and `0x0094A910` tests phase 2. In multiplayer (+0x1034) `CCQ_END_TURN` only records the request
+  (+0x1037). Ours: `CampaignModel::check_end_turn` (the advancing flag above, a pending battle, then
+  `CommandError::ActionPending` for a waiting capture or call to war), asked by `apply` and by the script host's
+  end of turn. Tests: capture_diplomacy_tests (the end of turn refused, the state unchanged, then allowed after
+  the choice), can_save_tests `no_save_while_a_call_to_war_waits_for_the_answer`, forces_tests (the advancing
+  flag).
+- **The multiplayer flag** (worker victorytest, 2026-11-10; CONFIRMED): campaign +0x1034 is `CAMPAIGN_MODEL`
+  #5, the bool after `WORLD` (constructor `0x008742C0` clears it at `0x00874B5D`, loader `0x00872550` reads it
+  for record version 8 or above at `0x00873239`, writer `0x008EBAB0` at `0x008EBC11`). Ours:
+  `World::multiplayer_campaign` (ntw_campaign `read_multiplayer_campaign`); the victory check looks for
+  another human only when it is set (`0x0096CEA9`). Tests: ntw_campaign
+  `the_multiplayer_flag_is_the_bool_after_world`, victory_check_tests.
 - **Exe names and plates of this branch** are filed as pending records (`victoryscreen3.jsonl` in the names
   folder of the IDA setup; there is no Ghidra on this machine): `0x0096CD10`, `0x008F3DF0`, `0x0096FCE0`,
   `0x0055C390`, `0x00949C40`, `0x00932B40`, `0x00882AC0`, `0x005865E0`, `0x008F8D00`, `0x004470B0`, `0x00461180`,
@@ -2626,7 +2685,7 @@ the original's files, which ours reads without a warning: `economy::reports_unkn
 nothing and the stored factors stay (ours computes default
 `upper` / `lower` factors: `public_order_factors_with`); and the region panel's `ActiveUpperClass` /
 `ActiveLowerClass` read `0x00A975F0`, which for a rebel owner takes the region's REBEL_DATA template (+0x21C →
-+0x18 government; `0x00A91EB0` frees the template when the region's risen list drops below 2 entries and the
++0x18 government; `0x00A91EB0` frees the template when the region's last risen army goes (list at most 1 entry) and the
 owner is not the rebels) and with no template the first `government_types` record (db +0x4D8, `0x00E1F150`), not
 the risen army's (ours: default classes; region_info.rs).
 Not traced: what `0x00B0D3B0` adds (an effect set built by `0x00BC74B0` from `lower_classes;` / `upper_classes;`
@@ -3219,7 +3278,28 @@ incoming-reinforcement list (below).
   1. Per queued item whose target (+0x18) or +0x50 is set, the distinct (target, +0x50) pairs in queue
      order. A finished item (`0x00B5C110`) whose target leads no army (`0x009D3A40` = 0) is retargeted
      to the character of the holder at target +0x2B0 when that holder's vfunc +0x38 says so (vfunc +0x14
-     with holder(+0x34)+0x74), else its +0x18 is cleared.
+     with holder(+0x34)+0x74), else its +0x18 is cleared (`0x00B1E7AD`). The holder is the unit the
+     target is attached to (land unit vtable `0x01355494`, naval `0x0135552C`): +0x38 `0x008C92F0` = its
+     force link (unit +0x11C) resolves, +0x34 `0x008D9BB0` = that force, +0x74 its commander. So a general
+     riding in another's army hands the item to that army's commander (recruitmarch2c, disassembly).
+     **ORIGINAL BUG:** the new target is not checked for an army: when the holder's force is a navy (a
+     general aboard a ship, or the target an admiral attached to his own ship) the retarget (item vfunc
+     +0x14, `0x00B1B480`) relinks the item into the admiral's army list, `0x009D3A40` (null) →
+     `0x008A9110` (+0xA4, then `0x008A9100`: +0x30) → `0x008CF810`, whose list pointer is then 0xD4: it
+     passes the null test at `0x008CF822` and is read at `0x008CF82A`, a crash in phase 1 itself
+     (recruitmarchfix, disassembly; phase 2's +0x9C read at `0x00B1E6EE` is never reached). Ours
+     (`reinforcement_commander`) spawns that item as a settlement recruit, with its target cleared, the
+     branch the exe takes for a target in no force (test `an_item_through_a_rider_marches_to_the_army_he_rides_in`).
+     A target with no army reaches phase 1 only by losing his army after the queueing (the constructor
+     crashes otherwise, below).
+     **ORIGINAL BUG (the duplicated army):** the pair is looked up before the retarget
+     (`0x00B1E596`-`0x00B1E5AF`, the original target) and pushed after it (`0x00B1E677`, the new one), so an
+     item through a rider whose commander already has a pair (an item through the commander, or a second
+     item through the same rider) pushes the commander's pair again. Phase 2 runs the group spawn once
+     per pair, and `0x00B1D3F0` gathers every finished item of the pair each time (`0x00B5C110`, which does
+     not read the spawned flag +0x48): two new armies, each with the units of all those items
+     (recruitmarchfix, disassembly). Ours groups by the commander after the retarget: one army (test
+     `items_through_a_general_and_his_rider_raise_one_army`).
   2. Per pair: the spawn spot is the settlement position (manager +8), moved by a path query, to the
      target army's building (`0x00B6D760`, mover 9) when it has +0x9C, else to its commander
      (`0x00B6D8D0`, mover 6); both run the pathfinder `0x00B6E6E0` and trim the path (`0x00B77820` →
@@ -3235,8 +3315,10 @@ incoming-reinforcement list (below).
   Each new unit posts the `UnitTrained` script event (vtable `0x0137D120`, name string `0x0135056C`,
   posted by `0x00E30700`): in the group spawn at `0x00B1D74F`, the naval spawn `0x00B1D7E0` at
   `0x00B1E44F` and phase 3 at `0x00B1F1C9`.
-  Which unit the new army's colonel is attached to: `0x008D25F0` → `0x008D24B0` (commander pick
-  `0x008B8E50` / `0x008ED2C0`) or `0x00870E60` (army constructor), not traced (PROVISIONAL in ours).
+  Which unit the new army's colonel is attached to (recruitmarch2b, static, CONFIRMED): `0x008D25F0` →
+  `0x008D24B0`, which builds the army with no commander (`0x00870E60` attaches none when given 0) and
+  then picks one with `0x008B8E50` → `0x008ED2C0`, the first unit in the commander sort; a recruit has no
+  character, so a new colonel is made on that unit. Ours: `commander_unit`, the same sort.
 - **+0x50 (`RECRUITMENT_ITEM` #11)** is `QueueRecruitmentItemForUnit`'s third argument: 0 from the
   player's command (`HandleRecruitUnitCommand` pushes 0 at `0x00936C55`, and passes the command's
   commander as the target) and from the console (`0x00924FE2`) and one AI site (`0x00A9F350`); the AI site
@@ -3251,20 +3333,108 @@ incoming-reinforcement list (below).
   +8 target, +0xC settlement, +0x10 done; `0x008EF790` links the source army's units into the target's
   incoming list. The entry listens to both characters (`0x0137DA8C` / `0x0137DA98` → `0x00B57DA0`: either
   destroyed, the entry is dead; `0x00B57E50`).
+- **The incoming list `0x008EF790`** (recruitmarch2c, static, CONFIRMED). Each unit of the new army
+  (unit +0x124 link, first unlinked by `0x008B0150`) is linked into the owner list +0x1C of the target's
+  army (target vfunc +0x3C) or, for an admiral, his navy (+0x44), through `0x008A94C0` → `0x008CF7D0`;
+  `0x008B0080` and `0x0086EC20` drop the links. The item constructor `0x00AECEE0` likewise links a
+  targeted item into the army's list (`0x008A9110`, item +0x5C, army +0xD4; with no army the list is
+  0xD4 itself and the link faults at `0x008CF82A`, ORIGINAL BUG below). Readers: the force snapshot's
+  byte +0xC4 (`0x008CA6C0`, `0x008CAA90`, `0x008DF190`) and `0x0099BC70`, not yet traced for what they
+  show. Not ported: no reader is modelled.
+- **No faction check on the target** (recruitmarch2c, static, CONFIRMED). The recruit command
+  `0x00936B90` reads the target as an object reference (`0x008FDE50`), `0x00B58DD0` passes it on and the
+  item constructor `0x00AECEE0` stores it whatever his faction (its only caller is `0x00B58E91`). Ours:
+  `recruit` queues a character of any faction (test `a_recruit_through_another_factions_general_is_queued`).
+  **ORIGINAL BUG:** nothing checks that he leads a force either, and the constructor links the item into
+  his army's list (`0x00AECF7A`-`0x00AECF89`: `0x009D3A40` → `0x008A9110` → `0x008CF810`), which for a
+  character with no army faults at `0x008CF82A` as above; the naval constructor `0x00AED220` does the
+  same through his navy (`0x009D3A80` → `0x008A9120`: +0x94, +0x30 = 0xC4). Ours queues the item, and the
+  spawn treats it as a target who lost his army (phase 1) (recruitmarchfix, disassembly; the rider test
+  queues items through a rider and an admiral).
+  A foreign target's entry is refused by our march (`march_and_merge`: `WrongFaction`, logged at debug)
+  and kept, so it is tried again each turn: PROVISIONAL (`reinforce.rs` `march_reinforcements`). The exe
+  checks no faction on that path: not the validity check `0x00B5C830` / `0x009D0D00`, the issue
+  `0x00968B00`, the step builder `0x0091CED0` (exchange partner the target army's +0x74) nor the arrival
+  `0x0094D660` (the fit `0x008B2720`, then the transfer `0x008D7310`), so it gives the order; whether the
+  route `0x0091E5E0` reaches a foreign army and what the transfer does across factions is not traced
+  (recruitmarchfix; the UI offers only own generals).
 - **The march, at the faction turn start.** `0x008F2620` calls `0x00B71FA0(faction +0x52C)` at
   `0x008F2B35`, after the regions (`0x008F2B14`) and before research availability; only on the
   non-rebel branch (the rebels' `0x008F2B47` skips it; "The rebels' turn start"). An earlier version of
   the turn-start list's item (g) called this "the diplomacy manager": it is the reinforcement manager. `0x00B71FA0` → `0x00B5C710` (character
   entries) and `0x00B5C7A0` (unit entries). Per character entry: valid (`0x00B5C830`: source and target
-  set, the source's `0x009D0D00(target, 1)` UNKNOWN, done flag clear) → `0x00B5C4A0`, else deleted. `0x00B5C4A0`:
+  set, the source's `0x009D0D00(target, 1)`, done flag clear) → `0x00B5C4A0`, else deleted. `0x00B5C4A0`:
   `0x00968B00(movers, target, 1)` (`0x008BE360`, else the move-to-character order `0x009195A0`, a
   multi-turn order object `0x00905460` of 0x120 bytes resumed by `0x009653D0`; events 0xEF / 0xE8); true
   → `0x00967070`, source army +0x9C +0x14 = 1, entry done and deleted; false → kept for next turn.
+- **`0x009D0D00(agent, target, 1)`, may the agent join the target's force** (recruitmarch2, disassembly,
+  CONFIRMED). An agent type that does not count against a residence's room (`agents` #4 via `0x00A0B9C0`;
+  vanilla minister, bandit) → no. Both lead a force (character +0x2A8): army to navy → yes when the navy
+  carries no army (+0xD8), else when the army fits the carried one; navy to army → no when it carries
+  nothing, else when its carried army fits the target; navy to navy → the navies fit, and when both carry
+  an army those fit too (one carrying only: the navies fit); army to army → yes. "Fits" is the exchange fit
+  `0x008B2720(a, b, 1)`; the army and navy are the force views `0x009D3A60` / `0x009D3AA0`. Otherwise
+  (`0x009D0F10`) yes only when the agent's type counts and the target leads a force, army or navy (his
+  +0x2A8 resolves), whose accompanying characters (force +0x60, `0x006A3110`) are fewer than the literal
+  20 (`0x009D0F2D`; the ability-list builder `0x009D1190` has its own copy at `0x009D12CA`, on the army
+  view `0x009D3A60`) (recruitmarchfix, disassembly; test `who_may_join_an_own_force`).
+- **Giving the order** (recruitmarch2, CONFIRMED). The gate `0x008BE360` refuses while a battle is pending
+  or outside the faction's own turn stage; then `0x009195A0` builds the order and `RunCharacterOrder`
+  `0x009651A0` runs its execute `0x0095BA40` (vtable `0x0135F868` +0x28) at once. The execute reads where
+  the target force's commander stands now, finds a path (none → the order is abandoned and `0x00968B00`
+  returns 0) and commits it whatever the action points left, so an army out of reach this turn still
+  gets the order. A new order on the same character cancels the old one (`0x00924D30`), and it does so
+  before the new order's execute runs: `RunCharacterOrder` `0x009651A0`, with its second flag set,
+  checks `0x00921160` and then calls `0x00924D30` on the holder (order +0x04) at `0x009651C6`, which
+  cancels (vtable +0x00) and releases (`0x009310D0`) the order at holder +0x9C; only then the execute
+  (+0x28) finds the path and spends the points. So a new order whose execute then finds no path or no
+  action points still ends the march (CONFIRMED by decompile); one refused by the gate `0x008BE360` or a
+  pre-check never reaches it. The pre-checks (recruitmarchfix3, CONFIRMED by decompile):
+  - **An army's move.** The plain move `CCQ_CHARACTER_LOCOMOTE_TO` (handler `0x009329B0`, registered by
+    `0x00420200`) builds its mover list with `0x00907E20` (a rider of an army whose commander passes
+    `0x009D0F50` is replaced by that commander and kept at +0x18) and runs `0x00974B50`: the gate
+    `0x008BE360`, then for a rider `0x009179D0` (an order built by `0x008FFA80`, `RunCharacterOrder(.., 1,
+    1, 0)`, no pre-check), else `0x0091FC80`. That runs the pre-check `0x00924790` (prompt allowed), then
+    builds the order (vtable `0x0135F1A0`, `0x0090BE70`) and calls `RunCharacterOrder(order, 0, 1, 0)` at
+    `0x009200D8`. The theatre move `CCQ_TRANSITION_THEATRE` (`0x009388A0` → `0x0096D3C0` → `0x0091DF70`)
+    does the same with the twin `0x009246C0` (order vtable `0x0135F82C`, `0x0090BC30`; call at
+    `0x0091E27C`). Both pre-checks: when the character passes the army test `0x009D0F50` (agent record
+    +0x18 and +0x4C), ask the path query `0x00B17A10` with the cost limit FLT_MAX (the action points do not
+    count); when it fails, stop before `RunCharacterOrder`, and for a human faction (faction +0x6E0) whose
+    target-opened query `0x00B25470` finds a path push the trespass prompt (`0x00886160`, vtable
+    `0x013573E0`) through `0x008E2B80` unless the last flag is set. The query's search `0x00B17DD0` fails
+    when either point is off the map (`0x00B5AD40`), the start equals the target (the raw Fixed20 pair),
+    the two cells are in different components (cell word +20), either cell is of type 12, or the search
+    `0x00B31320` finds nothing. The orders' executes (`0x0095DC60` at vtable `0x0135F1A0` +0x28,
+    `0x0095DAE0` at `0x0135F82C` +0x28) run the same pre-check again, the first with its caller's flag.
+    So an army's move with no path keeps the march, and its siege too: the order start `0x008FF470`
+    that ends it runs in the execute, after `RunCharacterOrder` (ours: `CampaignModel::move_order` asks
+    for the path before `walk`'s `begin_order`). The transport branch of `0x0091DF70` / `0x0091FC80`
+    (order parameter +0x10 set) also returns before `RunCharacterOrder` when its route search fails.
+  - The order built by `0x0091C1F0` reaches `RunCharacterOrder` at `0x0091C456` after `0x009242C0`, which
+    stops before the cancel only when it pushes its prompt (`0x00886100`); `0x0091C1F0` itself returns 0
+    first when the target's virtual +0x98 (siege) holds. The residence order `0x00918AB0` checks room
+    (`0x00B165B0`) and the siege (`0x00A8B9C0`) before `RunCharacterOrder` (`0x009194CD` / `0x009194E5`).
+    Embarking (`0x0091A560`, its a1[4] == 0 path through `0x009235F0`) has no path pre-check: its
+    embark-point search is in the execute. The order is
+  complete (`0x0094E840`, checked by the step mover `0x00972CA0` at `0x00973A04`) when the mover's force
+  is the target's, i.e. the merge is made; an exchange left pending does not complete it. Each later
+  turn start resumes it (section (o) of "Turn-start character loops"): `0x0096C140` marks every
+  character's order resumable at his turn start, unconditionally, and its still-valid check (+0x10
+  `0x00974660`) passes while the mover leads a force and the target force exists: it reads two bytes
+  (+0x110, +0x111) that only the order's listeners and its cancel `0x00915470` set, not a check of the
+  live state. Its four listeners (vtables `0x0135F8A4` / `8B0` / `8BC` / `8C8`) are `0x00957F20` (the
+  target force and the mover's force) / `0x009580B0` / `0x00957FA0` / `0x009580D0`; all but `0x009580B0`,
+  which sets the re-snapshot bytes +0x112 / +0x113, set those two. Not modelled:
+  `0x00B5C4A0`'s mover list also takes the source's holder character (+0x198 → +0x74) when `0x009D0F50`
+  passes (Polish).
 - **Saved.** `ARMY_REINFORCEMENT_MANAGER`: writer `0x00AFB6C0` (from `0x00892A80`),
   `CHARACTER_REINFORCEMENTS_ARRAY` items by `0x00AFC060` (i32 source, i32 target, i32 settlement, bool
   done), `UNIT_REINFORCEMENTS_ARRAY` by `0x00AFDEC0`; reader `0x00AE62F0` (from `0x0087A190`) →
-  `0x00AE8C10`; post-load `0x00B5B740` (from `0x008E07F0`) → `0x00B5C130` / `0x00B5C330`. Not modelled
-  in our saves (an entry lives only from its region step to the same turn start's march in ours).
+  `0x00AE8C10`; post-load `0x00B5B740` (from `0x008E07F0`) → `0x00B5C130` / `0x00B5C330`. Ours saves the entries (`World::reinforcements`) and
+  the orders they become (`World::standing_orders`) in our own saves, both `serde(default)` so an older
+  save of ours loads them empty (test `own_save` `reinforcements_and_standing_orders_round_trip_…`).
+  The original-save importer still does not load the entries (`LoadWarning::UnloadedReinforcements`).
 - **`RECRUITMENT_ITEM` #2** (settled): `WriteRecruitmentItemToEsf` `0x00B5C900` writes #0 the item, #1
   raw +0x14, #2 raw +0x18; `LoadRecruitmentItemFromEsf` `0x00AF3D00` reads #1 / #2 raw and registers the
   item under #0 (`0x0105AEC0`); the item's post-load resolver `0x00B5C2D0` (item vtable `0x0137CAE8`
@@ -3273,16 +3443,26 @@ incoming-reinforcement list (below).
   listener (`0x005301C0`). So #2 is the target character's object id, 0 for none (CONFIRMED). No vanilla
   evidence save holds a nonzero #2.
 
-**Ours.** `region_turn` spawns the finished land items whose target leads an army first, one new army
-per target (`spawn_reinforcement`: units, then the colonel's army at the settlement position, not
+**Ours.** `region_turn` spawns the finished land items whose target leads an army, or rides in an army
+whose commander takes the item (`reinforcement_commander`, phase 1), first, one new army per target (`spawn_reinforcement`: units, then the colonel's army at the settlement position, not
 garrisoned, the colonel on `commander_unit`'s pick, an entry in `World::reinforcements`), then the rest
 (`spawn_recruited_unit`). The faction's `FactionReady` step runs `march_reinforcements` before research
-availability: an entry whose source or target leads no force is dropped; else the merge order's walk and
-merge (`march_and_merge`, shared with `MergeForces`). PROVISIONAL: the spawn spot (no path query; the
-exe's failed query → settlement spawn; node 0 / `0x00B39FE0`); the holder retarget of phase 1; the
-colonel's unit; the march is one walk this turn, then the entry is dropped (the exe's order lasts until
-it arrives, and a refused order retries next turn); the entries are not saved; naval targeted items
-(`0x00B1D7E0`) and the AI's (0, handle) groups spawn as ordinary recruits.
+availability (`reinforce.rs`): an entry that fails `may_join_own_force` (`0x009D0D00`) or whose source or
+target leads no force is dropped; while a battle is pending it is kept; else the order is given, i.e. the
+merge order's walk and merge (`march_and_merge`, shared with `MergeForces`), and kept on the army's
+colonel as `StandingOrder::JoinForce` until the merge is made; any other refusal keeps the entry for the
+next turn start. `TurnStep::FactionReady` resumes the standing orders (`resume_standing_orders`) where the
+exe's loop (o) runs; a new force order or a lost target ends one (`CampaignModel::apply` drops the
+commander's standing order when the order succeeds or fails with `NotEnoughMovementPoints`, or with
+`NoPath` unless it is an army's `MoveForce` / `MoveCharacter`, and keeps it on the refusals ours makes
+before its walk). INFERRED: our search's `NoPath` matches the failure of `0x00B17A10`; whether its run-time
+cuts (`0x00AF5A80`) hold our zone-of-control obstacles is not traced. Differences left: an army's move to
+the exact spot it stands on is refused by the exe's pre-check (start equals target), so the march stays,
+while ours returns `Ok` (arrived) and ends it; the trespass prompt is not modelled; which pre-check, if
+any, `AttackForce`, `MergeForces` and `RaidTradeRoute` go through is not traced (ours ends the march on
+their `NoPath`). Still PROVISIONAL: the spawn spot (no
+path query; the exe's failed query → settlement spawn; node 0 / `0x00B39FE0`); the accompanying-character count of `0x009D0D00` (0: the model keeps none);
+naval targeted items (`0x00B1D7E0`) and the AI's (0, handle) groups spawn as ordinary recruits.
 
 ### Foreign garrisons (foreigngarrison, 2026-10-22; static trace, CONFIRMED unless tagged; code `commands.rs` `enter_settlement`, `defenders_of`, `spawn_recruited_unit` / `recruit_army_near`; tests `tests/foreign_garrison_tests.rs`)
 
@@ -4087,7 +4267,8 @@ capital), or comes from a loaded save. The settlement residence (vtable `0x0137C
   first turn in a row.
 - Each bankrupt turn: the capital region's +0xEC (`REGION` #17) += 2 (max 6), −1 at each of the faction's turn ends
   (0x008BD0F0 → 0x00A786C0); it scales town wealth growth by `(m − #17)`. A faction counter +0x828 does the same
-  (+2 max 6, −1 per turn; use not found).
+  (+2 max 6, −1 per turn; use not found). A revolution's end clears both and the classes' bankruptcy factor
+  (`0x008B69B0`, §Population "Revolution-end clear").
 - **Desertion** (0x008AE710 → 0x008BA020 / 0x008BA1E0, CONFIRMED formula; code `economy::bankrupt_desertion`). It
   runs while faction +0x50C > 1. That field's meaning is UNKNOWN; it is not written by the `FACTION` saver, and the
   model uses bankrupt turns > 1: PROVISIONAL. It applies to every force of a character in the faction's +0x764 list
@@ -4633,7 +4814,7 @@ CONFIRMED from the exe unless tagged; the Ghidra names below are in the program.
       where `0x008C9120` = 50 with both sums 0, else |pos| / (|pos| + |neg|) × 100 (f32; 32-bit abs and sum).
     - *Stage*: from stage 2 with `rebellion`: the stage grows and the class rebels (kind 5) unless it already
       does; without the flag nothing changes. Below 2, by the class's `population_classes` row (record +0x10
-      strikes_and_riots, +0x11 sends_demands; +0x12, the third column, has no traced reader): a striking class
+      strikes_and_riots, +0x11 sends_demands; +0x12, the third column, is read only by the rebel spawn, below): a striking class
       strikes at stage 0 (`strikes`) and riots at stage 1 (`riots`); else a demanding class sends a letter of
       demand at stage 0 and an ultimatum at stage 1 (`demands`). A step taken grows the stage and sets the kind;
       its demand = `0x008EB3F0`: the `unrest_cause_to_demands` row keyed "%s%s" of cause and kind names, its
@@ -4642,7 +4823,11 @@ CONFIRMED from the exe unless tagged; the Ghidra names below are in the program.
       not switched off (episodic restrictions +0xEB). Lower pass: (rebel, calm, calm, calm) → kind l. Upper
       pass: no flag when l is a rebellion; only rebellion and demands when l riots; no strikes when l strikes;
       else all → kind u. When u is a rebellion, or u riots while l strikes, `0x008B6A40` clears the lower class's
-      kind and demand (stage kept). The neither pass: no flag (decay only).
+      kind and demand (stage kept). The neither pass: no flag (decay only). The switch +0xEB is set by the
+      script's `disable_rebellions_and_revolutions_worldwide` (classslots2, CONFIRMED by decompilation: handler
+      `0x0097A8B0`, registered in the episodic table at `0x01458248` / `0x0145824C`, stores the popped bool at
+      *(model +0xFA8) + 0xEB); ours: `World::rebellions_disabled` from `ntw_script` `game.rs`, test
+      `disable_rebellions_sets_the_rebellions_switch`.
     - *Bankruptcy*: the cannot-pay settle `0x008AE710` calls `0x00A65DC0` on the capital (faction +0x72C) at
       `0x008AE72A`: region +0xEC = min(+0xEC + 2, 6), then (thunks `0x00A61570`, ECX + 0x28 + 0x24) `0x00A61580`
       gives every class `0x008A8A70`: +0x28 − 4 clamped to [−16, 0]. Ours: the CannotPay path in `settle_round`.
@@ -4658,11 +4843,70 @@ CONFIRMED from the exe unless tagged; the Ghidra names below are in the program.
       own no-match cause, 1 (taxes).
     - *Seams*: `population.class_round` (the passes; the rules tables `CampaignRules::class_unrest_paths` and
       `unrest_demands` come from the merged database). No new seam.
-    - *Not modelled* (BACKLOG): the turn-start unrest outcomes that read the kind and riot chance (`0x008B46A0`,
-      `0x00AAD7D0`, `0x00AAB440`, revolution); crackdown = 6 on a risen army's destruction (the `0x008DBEA0`
-      chain) and the other +0x54 stores (`0x00A40020`, `0x00A407D0`, `0x00A418B0`, `0x00A41DE0`, `0x00A42FD0`,
-      `0x00A8FA50`, `0x00AAFE60`, not traced); the owner-change reset (`0x00AA1730` / `0x008E6400`); the
-      revolution-end clear (`0x008B69B0`); the script's `disable_rebellions_and_revolutions_worldwide`.
+    - *Turn-start outcomes* (classslots2, CONFIRMED by decompilation; code `population::{unrest_outcome, riot,
+      riot_health}`, seam `population.unrest_outcome`, tests `campaign/tests/unrest_outcome_tests.rs`): the faction
+      turn start's step (k) (`0x008F2C04`, every faction, the rebels too, after the region join at `0x008F2BB1`
+      and before the spotting manager at `0x008F2C3C`) walks the region list → `0x00A6F720` → `0x00A6F730` →
+      `0x008B46A0` per class, reading the kind the round end left (not cleared). Message type: the
+      `unrest_cause_to_demands` row's #3 by (cause, kind) (`CampaignRules::unrest_messages`), else 207
+      `region_riots_default`, 218 `region_strikes_default`, 199 `region_demands_default`; the exe also falls back
+      when the row's type is not in its fixed 366-entry table (ours has none: a non-empty row is used).
+      Riots (2): the riot, `RegionRiots`, the riot notice `0x00A1EEC0` (deaths, building). Strikes (1): a row
+      containing `riot` (`0x008B4877`) posts the riot notice with 0 deaths and no building, else the unrest notice
+      `0x00A1B610`; then `RegionStrikes`. Kinds 3 / 4: `RegionIssuesDemands`, then the unrest notice. Rebellion
+      (5): `RegionRebels`; PROVISIONAL: the capital branch (`0x00ABE4E0` / `0x00A8B5A0`: a human owner's +0x93E
+      and handler +0x8A0, an AI owner's revolution `0x008EE3E0`, then the rebel spawn `0x00AAB440` with 1) and
+      elsewhere the rebel spawn with 0 are not modelled (revolutions, BACKLOG §6). The four events' vtables
+      (`RegionRiots` `0x013566D4`, `RegionStrikes` `0x0135684C`, `RegionIssuesDemands` `0x01356618`,
+      `RegionRebels` `0x01356790`, CONFIRMED from their bytes) are `RegionTurnStart`'s `0x01376DB8` but for slot 0:
+      the context offers the region (`ntw_script` `event_classes.rs`, test `event_gate`).
+    - *The riot* `0x00AAD7D0` (CONFIRMED by decompilation): deaths = (`int_range(0, 150)` + trunc(√(pop / 10))
+      + 1000) × (riot chance × 0.01), f32, truncated; when pop − deaths would fall below `minimum_population`
+      (`0x008B25E0`) and pop is not already below, deaths = pop − minimum. `0x00A8BDF0` takes them off (to the
+      minimum when it would fall below, so a population already below it is raised to it). Then one building:
+      list A `0x00AAF5E0` (slots whose `slots` type has the town flag `0x00A8B9B0` and whose REGION_SLOT +0x20C
+      creates port objects), else list B `0x00AAA790` (slots attached to the settlement, `0x00A8B790` byte +0x40,
+      with a building); a non-empty list draws `int_range(0, count − 1)` (even with one entry); the building's
+      health = clamp(max(h − riot chance, 0), 10, 90) through `SetBuildingHealth` `0x00B452A0`
+      (`CampaignBuildingDamaged`); then `0x00A6AE40` rebuilds the region's recruitables and effects (ours computes
+      them on read). PROVISIONAL: list A is not modelled (+0x20C is REGION_SLOT item #8, not loaded; in vanilla
+      only `town_UNUSED` has the town flag, so list A is empty). INFERRED: list B = our slots whose key starts
+      `settlement:` (`RegionSlot::in_settlement`; `0x00A4D4F0` attaches them through `AttachSlotToSettlement`
+      `0x00B6D270` at `0x00A4D952`).
+    - *Crackdown after a rising* (classslots2, CONFIRMED by decompilation; `CampaignModel::crack_down_after_last_rising`
+      from `remove_force`, test `the_last_risen_army_going_cracks_down`): the army destructor `0x0088CE30` at
+      `0x0088CF08` (campaign not torn down, +0xFC5; the force has REBEL_DATA +0x98) asks its region (REBEL_DATA
+      +0x68) `0x00A91EB0`: with at most one army in the risen list +0x220 (the army is unlinked after,
+      `0x0088F310` → `0x008B0150`), `0x00A91EA0` → `0x00A91F30` → `0x008DBEA0` sets every class's +0x54 to 6.
+      Ours finds the region as the list holding the army, which is the exe's link (classslotsfix, CONFIRMED by
+      decompilation): REBEL_DATA +0x68 is a link {+0 army, +4 the region's list +0x220, whose +0 is the region};
+      `ResolveObjectHandle` `0x006649C0` gives the region only while +4 is set; +4 is set only by
+      `AppendOwnedLinkToOwnerList` `0x008CF7D0` together with the append (it refuses a link already in a list)
+      and cleared only by `0x008B0150` together with the erase. So the region found always holds the army (its
+      count, `0x006A3110` → +0x22C, is never 0 there) and "at most one" is the army alone. The loader keeps this:
+      `0x00A45950` links each id through `0x008CFB60` in region file order (`0x00A4CE20`), so a repeated id stays
+      in the first list that names it, once; the importer drops a repeat the same way (`link_risen_armies`, test
+      `a_risen_army_is_linked_once`). An army with REBEL_DATA in no list (only a malformed save) gives the exe a
+      null region, read at `0x00A91EB9`; ours does nothing. Not modelled: `0x00A91EB0`'s second step, which with
+      at most one army left and an owner that is not the rebels (`IsFactionWithoutRecord` false at `0x00A91ED8`)
+      frees the region's REBEL_DATA template (+0x21C) and zeroes it; the model keeps no template and the save
+      rewrites REGION #34 as loaded, so an own save keeps a template the original would have dropped.
+      The other +0x54 stores (`0x00A40020`, `0x00A407D0`, `0x00A418B0`, `0x00A41DE0`, `0x00A42FD0`, `0x00A8FA50`,
+      `0x00AAFE60`) are not PopulationClass stores (CONFIRMED by decompilation, read in full): `0x00A40020`,
+      `0x00A407D0` and `0x00A8FA50` (`0x00A903B8` / `0x00A903E6`) set the data pointer of a pointer vector
+      (`sub_444B40`, count at +0x50); `0x00A418B0` and `0x00A41DE0` are constructors zeroing +0x54 of other
+      objects (vtable `0x01376A94`; the campaign map/theatre); `0x00A42FD0` is a copy constructor; `0x00AAFE60`
+      (slot 1 of vtable `0x01376A94`) stores nothing at +0x54. So 6 is the only crackdown a rising sets.
+    - *Revolution-end clear* `0x008B69B0` (classslots2, CONFIRMED by decompilation;
+      `CampaignModel::clear_bankruptcy_after_revolution`, test `a_revolutions_end_clears_the_factions_bankruptcy`):
+      every region of the faction in its home theatre (+0x734) gets +0xEC = 0 and every class +0x28 = 0, then
+      faction +0x828 = 0. Callers: the revolution ends `0x008BEAA0` / `0x008DB1A0` only (not modelled yet, §6:
+      the revolution's end calls `clear_bankruptcy_after_revolution`).
+    - *Rebel spawn reads column 3* (classslots2, CONFIRMED by disassembly): `population_classes` record +0x12
+      (`rebels_led_by_general`, renamed from `flag_3` in `ntw_data`) is read at `0x00AACBB2` in the rebel spawn
+      `0x00AAB440`, for whether the risen army is led by a general. No other reader.
+    - *Not modelled* (BACKLOG): the rebel spawn and revolution (above); the owner-change reset (`0x00AA1730` /
+      `0x008E6400`).
     - *Ghidra names* (classslots): `0x008F9690` PopulationClass::UpdatePopulationClassUnrestRoundEnd,
       `0x008B37D0` PopulationClass::PickPopulationClassUnrestCause, `0x008EB3F0`
       PopulationClass::LookupUnrestCauseDemand, `0x008F67C0` CompareUnrestSlotValuesUnsigned, `0x008C9120`
@@ -4702,7 +4946,8 @@ CONFIRMED from the exe (the calls of each function in order; event posters found
   building-driven spawns), the settlement's virtual +0x98 → `0x00A22480`, then **`RegionTurnStart`** (vtable
   `0x01376DB8`); (g) the reinforcement manager `0x00B71FA0` (faction +0x52C, §Recruitment spawn and reinforcements); (h) **research availability `0x008F91F0`**
   (thunk `0x008AE3B0`); (i) the message manager `0x00A18A70` (model +0xFA0); (j) the character recruitment pools
-  `0x00A24C90` (+0x6F4); (k) every region `0x00A6F720`; (l) `0x008F2E10` (the government +0x70C's popularity, see
+  `0x00A24C90` (+0x6F4); (k) every region `0x00A6F720` → `0x00A6F730` → the unrest outcome `0x008B46A0` per class
+  (§Population "Turn-start outcomes"; ours after the region steps, seam `population.unrest_outcome`); (l) `0x008F2E10` (the government +0x70C's popularity, see
   "The rebels' turn start"); (m) `0x008DA210` (characters with skill 5 or flag +0x4E0); (n) +0x800: AI `0x008B4B70` / human
   `0x008F2480`; (o) every character's standing order `ResumeCharacterStandingOrder` `0x009653D0` (+0x9C, resumed or dropped; "Turn-start character loops"); (p) +0x940 → `0x00A25310`;
   (q) forces in transit (+0x90C list → `0x00A2A080` / `0x00A29F20`); (r) **`FactionTurnStart`** (vtable `0x01356328`,
@@ -4846,11 +5091,12 @@ character walks of the faction turn start `0x008F2620`, same list and order as a
   +0x28). The loop itself draws no RNG and posts no event; the order classes' +0x10 / +0x28 do the work
   (for example the move-to-character order `0x00905460`, vtable `0x0135F868`: +0x10 `0x00974660`, +0x28
   `0x0095BA40`). Helpers: `0x00924D30` sets a character's order (cancelling the old one), `0x00921C70`
-  finishes it (+0x14 = 0, +0x9C cleared). Model: none of this yet. A move, attack, merge, enter or agent
-  command walks as far as this turn's action points reach and is dropped there (`CampaignCommand::MoveForce`,
-  `RaidTradeRoute`, `march_reinforcements`, all PROVISIONAL), so there is no order to resume; the place
-  is marked PROVISIONAL in `TurnStep::FactionReady`. Needs a standing-order system (the slot, the save
-  field, each order class's +0x10 / +0x28): BACKLOG §5 line.
+  finishes it (+0x14 = 0, +0x9C cleared). Model (recruitmarch2): the slot is `World::standing_orders`
+  (saved), resumed by `resume_standing_orders` in `TurnStep::FactionReady` at this place, with one order
+  class so far, the reinforcement march's move-to-character (`StandingOrder::JoinForce`). Every other
+  move, attack, merge, enter or agent command still walks as far as this turn's action points reach and
+  is dropped there (`CampaignCommand::MoveForce`, `RaidTradeRoute`, PROVISIONAL), so it has nothing to
+  resume: BACKLOG §5 standing-orders line.
 - **Order fix (charloops).** Ours ran the spy-network step, the spotting pass, the pools' step and the
   turn start's sight refresh in `TurnStep::CharactersStart`, before the regions and the reinforcement
   march; the exe runs them after (above). They moved to `TurnStep::FactionReady`, after the march and
@@ -5438,7 +5684,13 @@ further here).
     `0x009E0A40`, the end-turn command `0x00934910`, `0x008F4120` at `0x008F4358` / `0x008F44D1`), the
     CAI step gate `0x008EFAB0` (called at `0x008F4628`, the test at
     `0x008EFAF9`, the step `0x00A761F0`), `0x00A6C9A0` (the CAI order objects `0x00CB42A0` /
-    `0x00CCD420` → `0x00CCD1B0`) and `0x008F4236`. `0x008F457A` only caps the step loop's budget. The
+    `0x00CCD420` → `0x00CCD1B0`) and `0x008F4236`. The script's `CanEndTurn` (`0x009E0A40` →
+    `0x008DE800` with the local faction → `0x008BE2A0` flag 0, victorytest 2026-11-10) is ported as the
+    human's turn and `CampaignModel::check_nothing_waiting` (a pending battle, INFERRED for the +0xF6C
+    stage, or a pending-stack action); it reads no +0xD0, so the scripts' move to the next campaign
+    leaves it true. PROVISIONAL there: the revolution swaps (`0x008DE800`'s world +0x1C faction,
+    `0x008BE2A0`'s `GetActingTurnFaction` `0x00974EF0`), with revolutions (§6); INFERRED: true before the
+    campaign's start. `0x008F457A` only caps the step loop's budget. The
     resume is the answer itself: `0x009370F0` empties the stack, the next frame's gate passes and the
     faction's next CAI step is decided then. PROVISIONAL in ours: the AI's later orders of that turn
     are applied before the answer (`apply_orders_with_events`); holding them or re-planning is open

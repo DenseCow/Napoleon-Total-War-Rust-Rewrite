@@ -551,6 +551,17 @@ fn dispatch(lua: &Lua, s: &Shared, name: &'static str, args: &MultiValue) -> mlu
             st.log.push(text);
         }
 
+        // disable_rebellions_and_revolutions_worldwide(on): CONFIRMED (`0x0097A8B0`, the script method
+        // table's entry `0x01458248`; one boolean read with its slot cleared first, so default false,
+        // stored at episodic restrictions +0xEB): the round end's class passes never step a class to
+        // rebellion while it is set (World::rebellions_disabled).
+        "disable_rebellions_and_revolutions_worldwide" => {
+            let on = top_bool(s, name, args).unwrap_or(false);
+            let mut st = s.borrow_mut();
+            st.model.world.rebellions_disabled = on;
+            st.log.push(text);
+        }
+
         // display_turns(on): CONFIRMED (`0x00979600`, one boolean stored at episodic restrictions
         // +0xD1): the HUD shows the turn number instead of the date (World::display_turns). No
         // vanilla script calls it. ORIGINAL BUG: `0x00979600` does not clear its result before the

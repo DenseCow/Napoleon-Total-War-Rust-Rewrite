@@ -102,6 +102,18 @@ impl Date {
             _ => Season::Autumn,
         } as u32;
     }
+
+    /// The date's place in its year in quarter-months, `half + 4 × month` (`0x008FA130`, CONFIRMED;
+    /// wrapping as the exe's 32-bit sum).
+    pub fn quarter(&self) -> u32 {
+        self.half.wrapping_add(self.month.wrapping_mul(4))
+    }
+
+    /// Whether this date is strictly before `other` by year, then month, then half; the season is not
+    /// compared (`0x00898E90`, CONFIRMED by disassembly; unsigned compares).
+    pub fn is_before(&self, other: &Date) -> bool {
+        (self.year, self.month, self.half) < (other.year, other.month, other.half)
+    }
 }
 
 /// The date step per turn, in quarter-months, the exe gives a calendar of `turns_per_year`
@@ -157,6 +169,14 @@ impl Calendar {
             date,
             turns_elapsed,
         }
+    }
+
+    /// The turns from `since` to `until` (`0x008EB610`, CONFIRMED by disassembly): `turns_per_year ×
+    /// (quarter-months between the two) / 48`, in the exe's wrapping 32-bit arithmetic with an unsigned
+    /// division (so an `until` before `since` gives a huge count, not a negative one).
+    pub fn turns_between(&self, since: &Date, until: &Date) -> u32 {
+        let at = |d: &Date| d.quarter().wrapping_add(d.year.wrapping_mul(QUARTERS_PER_YEAR));
+        self.turns_per_year.wrapping_mul(at(until).wrapping_sub(at(since))) / QUARTERS_PER_YEAR
     }
 
     /// The 1-based turn number shown in the save header. W3 §3.1 (CONFIRMED).

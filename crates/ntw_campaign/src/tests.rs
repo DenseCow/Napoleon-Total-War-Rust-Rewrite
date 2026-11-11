@@ -372,6 +372,25 @@ fn tiny(root_name: &str, world: EsfNode) -> Vec<u8> {
     EsfFile::new(root).to_bytes().unwrap()
 }
 
+/// `CAMPAIGN_MODEL` #5, the bool after `WORLD`, is the multiplayer flag (campaign +0x1034, loader
+/// `0x00872550` at `0x00873239`); a record without it there (an older version, or #4 not `WORLD`) reads
+/// false, and the tiny start position (no #5) loads it false.
+#[test]
+fn the_multiplayer_flag_is_the_bool_after_world() {
+    let model = |children: Vec<EsfNode>| match rec("CAMPAIGN_MODEL", 10, children) {
+        EsfNode::Record(r) => *r,
+        _ => unreachable!(),
+    };
+    let head = || vec![rec("CAMPAIGN_MAP_DATA", 2, vec![]), EsfNode::U32(0), rec("RandSeed", 0, vec![]), rec("CAMPAIGN_CALENDAR", 2, vec![])];
+    let with = |fourth: EsfNode, fifth: EsfNode| model(head().into_iter().chain([fourth, fifth]).collect());
+    assert!(read_multiplayer_campaign(&with(rec("WORLD", 0, vec![]), EsfNode::Bool(true))));
+    assert!(!read_multiplayer_campaign(&with(rec("WORLD", 0, vec![]), EsfNode::Bool(false))));
+    assert!(!read_multiplayer_campaign(&with(rec("WORLD", 0, vec![]), rec("LOCOMOTION_MANAGER", 0, vec![]))), "an older version");
+    assert!(!read_multiplayer_campaign(&with(rec("OTHER", 0, vec![]), EsfNode::Bool(true))), "#4 is not WORLD");
+    let loaded = read(&tiny(STARTPOS_ROOT, tiny_world()), &GameDatabase::test_fixture()).unwrap();
+    assert!(!loaded.model.world.multiplayer_campaign);
+}
+
 #[test]
 fn loads_tiny_startpos() {
     let db = GameDatabase::test_fixture();

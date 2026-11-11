@@ -450,11 +450,11 @@ fn same_panel_movie(want: Option<&(NodeId, Rc<str>)>, playing: Option<&PanelMovi
 /// Starts it into a texture, draws it in that component and stops it when it is dropped or the
 /// component is gone. It plays once with its sound track in the player's language, at the level
 /// every movie plays at (see the note in the body). CONFIRMED: the panel's open `0x00A23330` hands
-/// the bink control's open `0x00D9F600` the option bytes {+0 1, +1 0, +2 1, +3 1, +5 1, +6 1}, with
-/// +1 = 0 as in the intro movies' call (`0x004782F0` → `0x004831D0(name, 1, 0, 0)`); the only caller
-/// with +1 = 1 is the front end's looping background (`0x004858D0`, `(name, 0, 1, 0)`). INFERRED: +1
-/// is the loop flag (the player the control builds after `0x00D9FA3F` is not traced; `crate::video`
-/// takes the same reading).
+/// the bink control's open `0x00D9F600` the option bytes {+0 1, +1 0, +2 1, +3 1, +5 1, +6 1}, and
+/// +1 is the loop flag: the control passes it to its player's open (vtable +12, `0x01215C10`), which
+/// stores it at player +0x59; at the last frame the player's update (`0x0124DA70`, `0x0124DB74`) seeks
+/// back to frame 1 (vtable +16, `0x0121E110`) when it is set and closes the movie (vtable +20) when
+/// it is clear. So the panel's movie plays once.
 pub fn panel_movie(
     hud: Option<NonSendMut<CampaignHud>>,
     assets: Option<ResMut<UiAssets>>,

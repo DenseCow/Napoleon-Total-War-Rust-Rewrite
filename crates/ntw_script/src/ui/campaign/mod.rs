@@ -86,6 +86,10 @@ use settlement::*;
 use tabs::*;
 use technology::*;
 
+/// The outcome movie panel's component (`panelmanager.luac` registers it; the root's
+/// `InitialiseMoviePanel` opens it).
+const MOVIE_PANEL: &str = "event_movie_panel";
+
 /// One key event (a press, an auto-repeat or a release) for [`UiScriptHost::campaign_key`]: what
 /// a focused text field hears.
 #[derive(Clone, Copy, Debug, Default)]
@@ -560,6 +564,14 @@ impl CampaignUi {
         std::cell::Ref::map(self.link.state.borrow(), |s| &s.model)
     }
 
+    /// The human faction is inside its turn, or the campaign has not started yet (its start begins
+    /// the human's first turn): `IsPlayersTurn`, and the acting-faction test of `CanEndTurn`.
+    fn players_turn(&self) -> bool {
+        let m = self.model();
+        let human = m.faction_by_key(&self.link.human).map(|f| f.id);
+        m.turn.in_turn && m.turn.current == human || !m.turn.started
+    }
+
     fn push(&self, r: CampaignRequest) {
         self.requests.borrow_mut().push(r);
     }
@@ -908,11 +920,7 @@ fn install_functions(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tabl
         faction_details(lua, &inner, &ui, &key)
     });
     // IsPlayersTurn(): true while the human faction is inside its turn.
-    f!("IsPlayersTurn", |_l, inner, ui, _a: Variadic<Value>| {
-        let m = ui.model();
-        let human = m.faction_by_key(&ui.link.human).map(|f| f.id);
-        Ok(m.turn.in_turn && m.turn.current == human || !m.turn.started)
-    });
+    f!("IsPlayersTurn", |_l, inner, ui, _a: Variadic<Value>| Ok(ui.players_turn()));
     f!("PlayerInControl", |_l, inner, ui, _a: Variadic<Value>| Ok(true));
     f!("CurrentFactionIsHuman", |_l, inner, ui, _a: Variadic<Value>| {
         let m = ui.model();
@@ -975,7 +983,21 @@ fn install_functions(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tabl
         ui.push(CampaignRequest::EndTurn);
         Ok(())
     });
-    f!("CanEndTurn", |_l, inner, ui, _a: Variadic<Value>| Ok(true));
+    // CanEndTurn(): `0x009E0A40` asks `0x008DE800` for the local faction, which asks
+    // `CanFactionActNow` `0x008BE2A0` with the phase-3 flag clear (CONFIRMED by decompile): the
+    // faction's turn under way (phase 1, the acting faction) and its waits
+    // (`CampaignModel::check_nothing_waiting`: a pending battle, INFERRED there, or an action on the
+    // pending stack). It reads no campaign +0xD0, so the scripts' move to the next campaign
+    // (`check_end_turn`'s first refusal) leaves it true. INFERRED: before the campaign's start ours
+    // answers true (`players_turn`); the exe needs phase 1 then too, and what phase it holds before
+    // the start is not traced. PROVISIONAL: `0x008DE800` asks for the faction the world names
+    // (+0x1C) instead when the local one is in a revolution (`0x008CA0B0`) and its +0x81C is clear,
+    // and `0x008BE2A0` compares with the acting turn faction (`GetActingTurnFaction` `0x00974EF0`)
+    // when the turn's faction is in a revolution; ours asks for the local one (revolutions are not
+    // modelled, BACKLOG §6).
+    f!("CanEndTurn", |_l, inner, ui, _a: Variadic<Value>| {
+        Ok(ui.players_turn() && ui.model().check_nothing_waiting().is_ok())
+    });
     // QuitToMainScreen(): the OK of the defeat movie panel and the Exit of the campaign result
     // (CONFIRMED callers, event_movie_panel.luac / campaign_result.luac). The exe (`0x00429CF0` →
     // `0x009EF630` → `0x009BFED0`) sets the leave request, byte +0x7C of the UI manager's +0x9FC
@@ -985,17 +1007,22 @@ fn install_functions(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tabl
     // only by `advance_to_next_campaign()` `0x00979050`: `World::advance_to_next_campaign`) and the
     // mode holds a launcher (+0x2C), whose vfunc +4 it then calls with "campaign|<the mode's +0x30>".
     // INFERRED: code 2 is the main menu, as the name says (the code's consumer, the caller
-    // `0x00A166F0`'s user, is not traced). Ours: the game leaves for the main menu
+    // `0x00A166F0`'s user, is not found statically; debugger: break
+    // at `0x00A16778` with code 2 and step out). Ours: the game leaves for the main menu
     // (`CampaignRequest::QuitToMainScreen`). PROVISIONAL: also with `advance_to_next_campaign` set
     // (the end of the tutorial): the launcher's vfunc +4 and what fills the mode's +0x30 are not
-    // traced, so the chained campaign is not started.
+    // traced, so the chained campaign is not started (debugger: break at `0x00A06631` at the
+    // tutorial's end and follow the vfunc call).
     f!("QuitToMainScreen", |_l, inner, ui, _a: Variadic<Value>| {
         ui.push(CampaignRequest::QuitToMainScreen);
         Ok(())
     });
     // MovieDismissed(): the movie panel closed (event_movie_panel.luac `RemoveMoviePanel`). The exe
-    // (`0x004295F0` → `0x009EE380` → `0x00A0FC30`) frees the playing movie, CONFIRMED.
+    // (`0x004295F0` → `0x009EE380` → `0x00A0FC30`) frees the movie-panel object (UI manager +0x107C,
+    // the +0x3BC part's +0xCC0 that `0x00A13EA0` fills), whose destructor `0x0099DD60` stops the
+    // movie (`0x00A25560` → `0x00D9FB70`), CONFIRMED.
     f!("MovieDismissed", |_l, inner, ui, _a: Variadic<Value>| {
+        inner.movie_panel.set(None);
         *inner.attached_movie.borrow_mut() = None;
         Ok(())
     });
@@ -1528,7 +1555,8 @@ impl UiScriptHost {
     /// missing string is "" and logged once, which the panel shows the same as no title, its script
     /// reading `data.title or ""`); the panel opens only when the local faction is human (ours always
     /// is) and, unless the data's `show_everyone` is set, only when the movie's faction is the local
-    /// one; `local_faction_involved` is that equality (`0x00898B20`). Returns true when the panel
+    /// one; `local_faction_involved` is that equality (`0x00898B20`). A panel still open from the
+    /// previous movie is dismissed first ([`Self::free_movie_panel`]). Returns true when the panel
     /// opened.
     pub fn campaign_outcome_movie(&self, faction: FactionId, movie: &ntw_sim::campaign::outcome::OutcomeMovie) -> bool {
         let Some(ui) = self.campaign_ui() else { return false };
@@ -1536,6 +1564,7 @@ impl UiScriptHost {
         if !movie.show_everyone && !local {
             return false;
         }
+        self.free_movie_panel();
         let lua = self.lua();
         let r = (|| -> mlua::Result<Table> {
             let d = lua.create_table()?;
@@ -1552,7 +1581,9 @@ impl UiScriptHost {
         match r {
             Ok(t) => {
                 let opened = call_root_global(lua, self.inner(), "InitialiseMoviePanel", t);
-                if !opened {
+                if opened {
+                    self.inner().movie_panel.set(self.inner().find_under_root(MOVIE_PANEL));
+                } else {
                     log(self.inner(), format!("ERROR: the movie panel for {} did not open (no root InitialiseMoviePanel, or it failed)", movie.event));
                 }
                 opened
@@ -1562,6 +1593,25 @@ impl UiScriptHost {
                 false
             }
         }
+    }
+
+    /// Frees the movie panel the previous outcome movie left open, as the exe's movie queue step
+    /// does before it builds a new one (`0x00A13EA0` at `0x00A13F65`..`0x00A13F92`, CONFIRMED by
+    /// decompilation): while the panel's component lives (the object's +0x18, which the component's
+    /// close notice `0x009D5880` clears), `0x009D5A60` runs the panel script's
+    /// `DismissMovieEvent()` (its exit function, then its close); the destructor `0x0099DD60`
+    /// then stops the movie. Nothing when no panel is kept (none opened, or
+    /// `CampaignUI.MovieDismissed` already freed it).
+    fn free_movie_panel(&self) {
+        let inner = self.inner();
+        let Some(panel) = inner.movie_panel.take() else { return };
+        let alive = inner.world.borrow().get(panel).is_some_and(|n| n.data.id == MOVIE_PANEL);
+        if alive
+            && let Err(e) = call_entry::<bool>(self.lua(), inner, panel, "__ntw_call_if_defined", (addr(panel), "DismissMovieEvent"))
+        {
+            log(inner, format!("ERROR in the movie panel's DismissMovieEvent: {e}"));
+        }
+        *inner.attached_movie.borrow_mut() = None;
     }
 
     /// The defeat popup for a faction that lost by its victory conditions

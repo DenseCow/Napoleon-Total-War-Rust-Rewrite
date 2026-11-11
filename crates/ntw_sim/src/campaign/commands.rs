@@ -533,7 +533,8 @@ pub enum CampaignCommand {
     DeclineDeal,
 }
 
-/// Why a command was rejected. A rejected command leaves the model unchanged.
+/// Why a command was rejected. A rejected command leaves the model unchanged, except as
+/// [`CampaignModel::apply`] says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandError {
     /// No faction with this id.
@@ -615,6 +616,13 @@ pub enum CommandError {
     WrongFaction,
     /// A battle is pending; it must be resolved first.
     BattlePending,
+    /// The scripts asked to move on to the next campaign of a chain
+    /// ([`World::advance_to_next_campaign`](super::World::advance_to_next_campaign)): the campaign
+    /// update's step loop no longer runs, so the turn does not end and no force moves.
+    CampaignAdvancing,
+    /// The end of turn while something waits on the original's pending-action stack (+0xF70): a
+    /// capture waiting for its choice or a call to war waiting for the human ally's answer.
+    ActionPending,
     /// Autoresolve without a pending battle.
     NoPendingBattle,
     /// Not supported yet (naval battles, merging armies and navies, ...).
@@ -686,6 +694,8 @@ impl fmt::Display for CommandError {
             }
             CommandError::WrongFaction => write!(f, "wrong faction for this action"),
             CommandError::BattlePending => write!(f, "a battle is pending"),
+            CommandError::CampaignAdvancing => write!(f, "the campaign is moving on to the next one"),
+            CommandError::ActionPending => write!(f, "an action is waiting for an answer"),
             CommandError::NoPendingBattle => write!(f, "no battle is pending"),
             CommandError::Unsupported(what) => write!(f, "not supported yet: {what}"),
             CommandError::NoNegotiation => write!(f, "no negotiation is open"),
@@ -772,11 +782,20 @@ impl CampaignModel {
     }
 
     /// Validates and applies one command. On success returns the events it caused; on failure the
-    /// model is left as it was, except the path grid's stored view a rebel's force order sets first and
-    /// the siege or blockade a character's order ends when it starts ([`Self::begin_order`]: the exe ends
-    /// them before it creates the order, so they stay ended when the order then finds no path or no
-    /// action points).
+    /// model is left as it was, except the path grid's stored view a rebel's force order sets first,
+    /// the standing order a force order refused for its action points (or, but for an army's move,
+    /// for its path) ends, and the siege or blockade a character's order ends when it starts
+    /// ([`Self::begin_order`]: the exe ends them before it creates the order, so they stay ended when
+    /// the order then finds no path or no action points; an army's move without a path is refused
+    /// before that, [`Self::move_order`]).
     pub fn apply(&mut self, cmd: CampaignCommand) -> Result<Vec<CampaignEvent>, CommandError> {
+        if matches!(cmd, CampaignCommand::EndTurn) {
+            self.check_end_turn()?;
+        }
+        // A force order while the campaign moves on to the next one: see `check_end_turn`.
+        if self.world.advance_to_next_campaign && self.order_force(&cmd).is_some() {
+            return Err(CommandError::CampaignAdvancing);
+        }
         // Characters a command creates (a successor after an assassination, ...) fire
         // `CharacterCreated`; the end of turn fires its own from each step.
         let known: Option<std::collections::BTreeSet<CharacterId>> =
@@ -785,10 +804,43 @@ impl CampaignModel {
         // (`CampaignModel::store_rebel_view`), and it stays when the order fails: the order step
         // `0x00A645C0` stores it (`0x00B077B0`) before issuing the order (`0x00915F20`) and never
         // puts the old view back (CONFIRMED by decompile).
-        if let Some(force) = self.order_force(&cmd) {
+        let force = self.order_force(&cmd);
+        if let Some(force) = force {
             self.store_rebel_view(force);
         }
+        let commander = force.and_then(|f| self.world.forces.get(&f)).and_then(|f| f.commander);
+        // An army's move, whose pre-check asks for a path before the order is run (below).
+        let army_move = matches!(cmd, CampaignCommand::MoveForce { .. } | CampaignCommand::MoveCharacter { .. })
+            && force.and_then(|f| self.world.forces.get(&f)).is_some_and(|f| !f.is_navy);
         let mut out = self.apply_inner(cmd);
+        // A force order replaces its commander's standing order (`World::standing_orders`) once it
+        // is given, also when its execute then finds no path or no action points (CONFIRMED by
+        // decompile): RunCharacterOrder `0x009651A0` cancels the holder's old order (`0x00924D30`:
+        // the order at character +0x9C, its virtual 0 and `0x009310D0`) before the new order's
+        // execute (virtual +0x28), which finds the path and spends the points, and nothing puts the
+        // old order back. Refused before that, the old order stays: the gate `0x008BE360` (the
+        // turn, a pending battle), the residence order's room and siege checks, `0x009242C0`
+        // stopping after it pushes a pending action (`0x00886100`); ours makes those refusals
+        // before its walk. An army's move is also refused before it when there is no path: its
+        // pre-check (`0x00924790` for the plain move `CCQ_CHARACTER_LOCOMOTE_TO`, `0x009329B0` →
+        // `0x00974B50` → `0x0091FC80`; its twin `0x009246C0` for the theatre move
+        // `CCQ_TRANSITION_THEATRE`, `0x0091DF70`) asks, for a character who passes the army test
+        // `0x009D0F50`, the path query `0x00B17A10` with no cost limit (FLT_MAX), so the action
+        // points do not count, and stops when it fails (CONFIRMED by decompile). So an army's move
+        // that finds no path keeps the march. INFERRED: our search fails exactly when that query
+        // does (`0x00B17DD0`: either point off the map, start equal to the target, different
+        // components, a cell of type 12, then the search `0x00B31320`); whether its run-time
+        // cuts (`0x00AF5A80`) hold the same zone-of-control obstacles as ours is not traced.
+        let ends_order = match &out {
+            Ok(_) | Err(CommandError::NotEnoughMovementPoints { .. }) => true,
+            Err(CommandError::NoPath) => !army_move,
+            Err(_) => false,
+        };
+        if let Some(c) = commander
+            && ends_order
+        {
+            self.world.standing_orders.remove(&c);
+        }
         if let Ok(events) = &mut out {
             // The update ends with the victory check (`0x0096CD10`); a refused command changed nothing.
             self.end_update(events);
@@ -797,6 +849,54 @@ impl CampaignModel {
             }
         }
         out
+    }
+
+    /// Whether the human's end of turn (`CCQ_END_TURN`) may run now; [`Self::apply`] and the script
+    /// host's `EndTurn` both ask it. Refused, in this order:
+    ///
+    /// 1. the scripts asked for the next campaign of a chain (campaign +0xD0,
+    ///    [`World::advance_to_next_campaign`](super::World::advance_to_next_campaign)): the campaign
+    ///    update `0x008F4120` then skips its whole step loop (`0x008F4539`-`0x008F4540`, CONFIRMED by
+    ///    decompile): the end-of-turn steps (`0x0094A940`), the AI step, the movement update and the
+    ///    pending-stack update. So the turn does not end and a force order never moves its force
+    ///    ([`Self::apply`] refuses those too); the flag is not saved and only the loader clears it, so
+    ///    nothing resumes them in this campaign;
+    /// 2. a pending battle, then an action on the pending stack ([`Self::check_nothing_waiting`]): the
+    ///    end-turn executor (`0x008BD6D0`, called by `CCQ_END_TURN` `0x00934910` and by the deferred
+    ///    request at `0x008F4383`) ends the turn only when `CanFactionActNow` `0x008BE2A0` passes.
+    pub fn check_end_turn(&self) -> Result<(), CommandError> {
+        if self.world.advance_to_next_campaign {
+            return Err(CommandError::CampaignAdvancing);
+        }
+        self.check_nothing_waiting()
+    }
+
+    /// The waits of `CanFactionActNow` `0x008BE2A0` (phase-3 flag clear) beyond its turn tests (phase
+    /// 1, the acting faction), which [`Self::check_end_turn`] and the script's `CanEndTurn` both ask.
+    /// Refused, in the exe's order:
+    ///
+    /// 1. a battle is pending: [`CommandError::BattlePending`]. INFERRED: the exe asks that the stage
+    ///    of the battle sequence (model +0xF6C, its +0x54 read by `0x004B4A50`) is 0 or 8; that object
+    ///    holds the pending battle's two side lists (+0x68 / +0x6C,
+    ///    `FindPendingBattleSideMemberForFaction` `0x008C1970`), and the save gate
+    ///    `CanFactionSaveCampaign` `0x008BE4A0` lets a side save at stage 1, so stages 1-7 are taken
+    ///    for ours' pending battle; what sets each stage is not traced;
+    /// 2. something waits on the pending-action stack (+0xF70): refused while the stack has an entry
+    ///    (`HasNonNullFirstEntry` `0x005865E0`, CONFIRMED by decompile). A capture waiting for its
+    ///    choice, held behind the victory screen or not, and a call to war waiting for the human ally's
+    ///    answer are both on that stack ([`Self::can_save`] condition 5):
+    ///    [`CommandError::ActionPending`].
+    ///
+    /// Not modelled: its map movement queue test (+0xF60, `IsMapMovementQueueIdle` `0x009559D0`; ours
+    /// applies a move at once, the app only animates it).
+    pub fn check_nothing_waiting(&self) -> Result<(), CommandError> {
+        if self.pending_battle.is_some() {
+            return Err(CommandError::BattlePending);
+        }
+        if self.pending_capture.is_some() || !self.pending_ally_war_calls.is_empty() {
+            return Err(CommandError::ActionPending);
+        }
+        Ok(())
     }
 
     /// The force of a force order (a move, raid, attack, merge, settlement entry, embarking or
@@ -844,17 +944,8 @@ impl CampaignModel {
         }
         match cmd {
             CampaignCommand::EndTurn => {
-                // A capture still waiting for a choice is settled as an occupation (PROVISIONAL: the original's
-                // capture screen is modal, so the turn cannot end with one open). The same holds for a
-                // choice held back behind the victory screen (`CapturePreview::held`): ending the turn
-                // occupies without the choice ever being offered. Not traced: whether the exe lets the
-                // turn end while its report waits with +0x9C set.
-                let mut events = Vec::new();
-                if let Some(p) = self.pending_capture.take() {
-                    self.resolve_capture(p, super::capture::CaptureChoice::Occupy, &mut events);
-                }
-                events.extend(self.end_turn());
-                Ok(events)
+                // `apply` asked `check_end_turn` first.
+                Ok(self.end_turn())
             }
             CampaignCommand::ChooseCapture { choice } => self.choose_capture(choice),
             CampaignCommand::ContinueGameSelected => Ok(self.continue_game_selected()),
@@ -1122,12 +1213,19 @@ impl CampaignModel {
 
     /// A character's move order to `to`: a navy sent onto a port of a faction it is at war with
     /// ([`Self::hostile_port_at`]) carries out the port order ([`Self::port_order`]: it docks there or
-    /// blockades the port); every other move is a walk ([`Self::walk`]).
+    /// blockades the port); every other move is a walk ([`Self::walk`]). An army's move is refused with
+    /// [`CommandError::NoPath`] before the order starts when there is no path: its pre-check
+    /// (`0x00924790`, the path query `0x00B17A10` with no cost limit; see [`Self::apply`]) runs before
+    /// RunCharacterOrder `0x009651A0` and so before the execute's order start (`0x008FF470`), and the
+    /// siege stays. The execute then searches again, as ours does in the walk.
     pub(crate) fn move_order(&mut self, character: CharacterId, to: (Fixed20, Fixed20)) -> Result<Walk, CommandError> {
         if let Some(navy) = self.force_of_kind(character, true)
             && let Some(port) = self.hostile_port_at(navy, to)
         {
             return self.port_order(character, navy, port, to);
+        }
+        if self.force_of_kind(character, false).is_some() && self.plan_path_with(character, to, false).is_none() {
+            return Err(CommandError::NoPath);
         }
         self.walk(character, to, false)
     }
@@ -1135,7 +1233,10 @@ impl CampaignModel {
     /// A character's order to move towards `to`: the order starts ([`Self::begin_order`]: his army's
     /// siege or his navy's blockade ends), then he moves as far as his action points reach
     /// ([`Self::walk_on`]). Errors if he cannot move at all; the siege or blockade stays ended then, as in
-    /// the exe, and nothing else changes.
+    /// the exe, and nothing else changes. The walk leaves the character's standing order alone:
+    /// [`Self::apply`] ends it for a force order that gets past its pre-checks, whether or not the walk
+    /// then moves (an army's move without a path does not), and [`Self::resume_standing_orders`] takes a
+    /// march out before its walk and puts it back when it goes on.
     pub(crate) fn walk(&mut self, character: CharacterId, to: (Fixed20, Fixed20), target: bool) -> Result<Walk, CommandError> {
         self.begin_order(character);
         self.walk_on(character, to, target)
@@ -1262,18 +1363,18 @@ impl CampaignModel {
 
     fn merge(&mut self, force: ForceId, into: ForceId) -> Result<Vec<CampaignEvent>, CommandError> {
         let c = self.commander_of(force)?;
-        self.march_and_merge(c, force, into)
+        self.march_and_merge(c, force, into).map(|w| w.events)
     }
 
     /// The merge order's checks, walk and exchange for `force` led by `c`, without the turn check:
-    /// [`Self::merge`] and the reinforcement step ([`Self::march_reinforcements`], which runs inside the
-    /// faction's turn start) share it. The exe's move-to-character order (execute `0x0095BA40`,
+    /// [`Self::merge`], the reinforcement step ([`Self::march_reinforcements`], which runs inside the
+    /// faction's turn start) and its standing order ([`Self::resume_standing_orders`]) share it. The exe's move-to-character order (execute `0x0095BA40`,
     /// builder `0x0091CED0`) pushes the same exchange step as the residence order (`0x009081F0`),
     /// so the arrival is [`Self::exchange_on_arrival`]. Neither the execute nor the builder calls
     /// the fit `0x008B2720` (CONFIRMED: the execute's callee list, the builder's decompile; the
     /// execute's helper `0x008FD870` is not read): a full receiver does not refuse the order, the
     /// arrival decides.
-    fn march_and_merge(&mut self, c: CharacterId, force: ForceId, into: ForceId) -> Result<Vec<CampaignEvent>, CommandError> {
+    pub(crate) fn march_and_merge(&mut self, c: CharacterId, force: ForceId, into: ForceId) -> Result<Walk, CommandError> {
         let a = &self.world.forces[&force];
         let b = self.world.forces.get(&into).ok_or(CommandError::UnknownForce(into))?;
         if a.faction != b.faction || force == into {
@@ -1288,7 +1389,7 @@ impl CampaignModel {
         if walk.arrived {
             self.exchange_on_arrival(force, into, &mut events);
         }
-        Ok(events)
+        Ok(Walk { events, arrived: walk.arrived })
     }
 
     /// The exchange step's arrival `0x0094D660` (CONFIRMED, disassembly), the one place a force that
@@ -1307,46 +1408,6 @@ impl CampaignModel {
         } else if self.world.forces.get(&force).is_some_and(|f| self.is_human(f.faction)) {
             events.push(CampaignEvent::ExchangePending { force, into });
         }
-    }
-
-    /// Steps `faction`'s reinforcement entries ([`World::reinforcements`](super::world::World::reinforcements)),
-    /// as the faction turn start does after its regions (`0x008F2620` calls `0x00B71FA0` on the
-    /// manager at faction +0x52C at `0x008F2B35`, CONFIRMED; the rebels' branch `0x008F2B47` skips it, so
-    /// `TurnStep::FactionReady` never calls this for them and their entries stay). Per entry,
-    /// in order (`0x00B5C710`): one whose new army or target commander is gone is dropped
-    /// (`0x00B5C830`: source and target set; their death listener `0x00B57DA0` clears the entry, CONFIRMED);
-    /// else the new army is ordered to the target to merge into his army (`0x00B5C4A0` → `0x00968B00`,
-    /// the move-to-character order `0x009195A0`, CONFIRMED), here the merge command's walk and merge.
-    /// PROVISIONAL: the original's order is a multi-turn one (order object `0x00905460`, resumed by
-    /// `0x009653D0`); ours walks as far as this turn's action points reach and is dropped there, like
-    /// every order (see `CampaignCommand::MoveForce`). PROVISIONAL: when the order cannot be given
-    /// the original keeps the entry and tries again next turn (`0x00B5C4A0` returns 0); ours drops it
-    /// and logs it. UNKNOWN: the source's check `0x009D0D00(target, 1)` before the order.
-    pub(crate) fn march_reinforcements(&mut self, faction: super::FactionId) -> Vec<CampaignEvent> {
-        let mut events = Vec::new();
-        // The faction's entries, and any whose new army's commander is gone (dropped below).
-        let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.world.reinforcements)
-            .into_iter()
-            .partition(|r| self.world.characters.get(&r.source).is_none_or(|c| c.faction == faction));
-        self.world.reinforcements = rest;
-        if mine.is_empty() {
-            return events;
-        }
-        // Who leads which force, looked up once for the pass. A merge only removes a force (its
-        // commander then leads none), so an entry still checks that the force it finds is there
-        // and led by him.
-        let led: BTreeMap<CharacterId, ForceId> = self.world.forces.values().filter_map(|f| Some((f.commander?, f.id))).collect();
-        let force_led_by = |model: &Self, c: CharacterId| {
-            led.get(&c).copied().filter(|f| model.world.forces.get(f).is_some_and(|f| f.commander == Some(c)))
-        };
-        for r in mine {
-            let (Some(src), Some(dst)) = (force_led_by(self, r.source), force_led_by(self, r.target)) else { continue };
-            match self.march_and_merge(r.source, src, dst) {
-                Ok(mut ev) => events.append(&mut ev),
-                Err(e) => log::warn!("the reinforcement raised in {:?} could not march to {:?}: {e}; it stays where it is", r.settlement, r.target),
-            }
-        }
-        events
     }
 
     /// Moves `force`'s units into `into` (up to its cap, [`CampaignModel::max_units`]), each with
@@ -1720,7 +1781,7 @@ impl CampaignModel {
     /// PROVISIONAL: its two other refusals are not ported: two navies that both lie in a port (the
     /// handle at +0xD8), and the accompanying characters of both above 20 (`0x006A3110`), which the
     /// model does not keep.
-    fn exchange_fits(&self, giver: ForceId, receiver: ForceId) -> bool {
+    pub(crate) fn exchange_fits(&self, giver: ForceId, receiver: ForceId) -> bool {
         let (Some(g), Some(r)) = (self.world.forces.get(&giver), self.world.forces.get(&receiver)) else { return false };
         if g.is_navy != r.is_navy {
             return false;
@@ -2084,7 +2145,15 @@ impl CampaignModel {
         // points, which only pace the training (see `region_turn`). What it charges is the entry's cost
         // ([`super::economy::recruitment_cost`]), through the spending category 2 converter, which passes it
         // unchanged ([`super::treasury::pay`]), then the region's population (`0x00AAF190`,
-        // [`super::population::RecruitmentPopulation::charged`]).
+        // [`super::population::RecruitmentPopulation::charged`]). Nor does it check the target: the
+        // handler reads it as an object reference (`0x008FDE50`) and neither it nor the item
+        // constructor `0x00AECEE0` looks at his faction (CONFIRMED), so a character of any faction is
+        // queued.
+        // ORIGINAL BUG: nothing checks that the target leads a force either, and the constructor links
+        // the item into his army's list (`0x00AECF7A`, `0x009D3A40` → `0x008A9110` → `0x008CF810`),
+        // which for a character with no army reads a small offset from null at `0x008CF82A`, a crash;
+        // the naval constructor `0x00AED220` does the same with his navy (`0x009D3A80` → `0x008A9120`).
+        // Ours queues the item, and the spawn treats it as it treats a target who lost his force.
         let cost = super::economy::recruitment_cost(self, &self.world.regions[&region], &unit_key, &unit);
         let flags = self.recruitable_entry_flags(&self.world.regions[&region], &entry, &unit, cost, &self.unit_type_counts(owner));
         if flags & ENTRY_BUILDING_FLAGS != 0 {
@@ -2650,9 +2719,10 @@ impl CampaignModel {
     /// places it at the first node of the path from the settlement to the target (`0x00B6D8D0` /
     /// `0x00B6D760` → pathfinder `0x00B6E6E0`, trimmed by `0x00B77820`) or, when no node is left, at a
     /// free spot near the settlement (`0x00B39FE0`); ours at the settlement's position.
-    /// PROVISIONAL: which unit the colonel is attached to is not traced (`0x008D25F0` → `0x00870E60`);
-    /// ours takes [`Self::commander_unit`]'s pick, the order the exe uses for a force that loses its
-    /// commander. Returns one `UnitTrained` per unit, in `unit_keys` order.
+    /// The colonel is attached to [`Self::commander_unit`]'s pick: the army is built with no commander
+    /// (`0x008D25F0` → `0x008D24B0`, `0x00870E60` given none), so `0x008B8E50` gives it one through the
+    /// same sort `0x008ED2C0`, and a new colonel is made on the first unit since a recruit carries no
+    /// character (CONFIRMED, static). Returns one `UnitTrained` per unit, in `unit_keys` order.
     pub(crate) fn spawn_reinforcement(&mut self, region: RegionId, target: CharacterId, unit_keys: Vec<String>) -> Vec<CampaignEvent> {
         let Some(reg) = self.world.regions.get(&region) else {
             log::warn!("reinforcement for {target:?} from unknown region {region:?}: its {} units are not raised", unit_keys.len());

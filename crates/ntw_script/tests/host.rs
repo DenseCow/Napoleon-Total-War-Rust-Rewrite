@@ -700,6 +700,24 @@ fn disable_saving_game_sets_the_saving_switch() {
 }
 
 #[test]
+fn disable_rebellions_sets_the_rebellions_switch() {
+    // 0x0097A8B0: the boolean goes to episodic restrictions +0xEB (World::rebellions_disabled); its
+    // slot is cleared first, so no argument or a number stores false.
+    let src = ScriptSource::empty().with_memory_file("events.lua", EVENTS).with_memory_file("test.lua", SCRIPT);
+    let h = ScriptHost::new(common::tiny_model(), "france", src).unwrap();
+    h.run_file("data/test.lua").unwrap();
+    h.fire("NewSession", ScriptContext::default());
+    assert!(!h.model().world.rebellions_disabled);
+    h.lua().load("game_interface:disable_rebellions_and_revolutions_worldwide(true)").exec().unwrap();
+    assert!(h.model().world.rebellions_disabled);
+    h.lua().load("game_interface:disable_rebellions_and_revolutions_worldwide(1)").exec().unwrap();
+    assert!(!h.model().world.rebellions_disabled);
+    h.lua().load("game_interface:disable_rebellions_and_revolutions_worldwide(true)").exec().unwrap();
+    h.lua().load("game_interface:disable_rebellions_and_revolutions_worldwide()").exec().unwrap();
+    assert!(!h.model().world.rebellions_disabled);
+}
+
+#[test]
 fn display_turns_sets_the_turns_display_switch() {
     // 0x00979600: the boolean goes to episodic restrictions +0xD1 (World::display_turns); a call
     // without one stores false (ORIGINAL BUG fixed: the exe stores a leftover byte).

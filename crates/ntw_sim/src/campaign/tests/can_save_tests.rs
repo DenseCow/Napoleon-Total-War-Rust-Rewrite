@@ -98,6 +98,8 @@ fn no_save_while_a_call_to_war_waits_for_the_answer() {
     m.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
     assert_eq!(m.pending_ally_war_calls.len(), 1);
     assert!(!m.can_save(A));
+    // Nor does the turn end (`0x008BE2A0` tests the same stack).
+    assert_eq!(m.apply(CampaignCommand::EndTurn), Err(CommandError::ActionPending));
     m.apply(CampaignCommand::RespondToAllyWarCall { side: Some(B), accept: false }).unwrap();
     assert!(m.pending_ally_war_calls.is_empty());
     assert!(m.can_save(A));

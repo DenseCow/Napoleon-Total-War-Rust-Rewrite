@@ -210,6 +210,11 @@ fn a_model_events_context_is_what_its_class_answers() {
     // The region classes (0x01376DB8 / 0x01376CFC / 0x01376F30): the region, no settlement or faction.
     assert_eq!(h.context_for(&CampaignEvent::RegionTurnStart { region: r }), only_region);
     assert_eq!(h.context_for(&CampaignEvent::RegionTurnEnd { region: r }), only_region);
+    // The unrest classes (0x013566D4 / 0x0135684C / 0x01356618 / 0x01356790): RegionTurnStart's accessors.
+    assert_eq!(h.context_for(&CampaignEvent::RegionRiots { region: r }), only_region);
+    assert_eq!(h.context_for(&CampaignEvent::RegionStrikes { region: r }), only_region);
+    assert_eq!(h.context_for(&CampaignEvent::RegionIssuesDemands { region: r }), only_region);
+    assert_eq!(h.context_for(&CampaignEvent::RegionRebels { region: r }), only_region);
     // The building classes: the settlement (through the slot's residence), and for a finished one its level.
     assert_eq!(h.context_for(&CampaignEvent::CampaignBuildingDamaged { region: r, slot: SlotRef::Walls }), only_settlement);
     assert_eq!(

@@ -12,6 +12,8 @@
 //!   ([`super::population::class_round`]).
 //! - [`POPULATION_CLASS_WAR`]: a class's war factor after a war declaration or a battle
 //!   ([`super::population::class_war_change`]).
+//! - [`POPULATION_UNREST_OUTCOME`]: what a region's classes' unrest does at its owner's turn start
+//!   ([`super::population::unrest_outcome`]).
 //! - [`DIRECTOR_REGION_TRANSFER`]: the campaign director's region-transfer step at a handover from
 //!   a human to an AI faction ([`super::director::region_transfer_step`]).
 //! - [`DIRECTOR_DESIRES`]: the campaign director's other desires after it
@@ -58,6 +60,8 @@ pub const POPULATION_GROW: &str = "population.grow";
 pub const POPULATION_CLASS_ROUND: &str = "population.class_round";
 /// Seam key of a class's war factor after an event ([`PopulationClassWar`]).
 pub const POPULATION_CLASS_WAR: &str = "population.class_war";
+/// Seam key of what a region's classes' unrest does at the turn start ([`PopulationUnrestOutcome`]).
+pub const POPULATION_UNREST_OUTCOME: &str = "population.unrest_outcome";
 
 /// Seam key of the campaign director's region-transfer step ([`DirectorRegionTransfer`]).
 pub const DIRECTOR_REGION_TRANSFER: &str = "director.region_transfer";
@@ -104,6 +108,11 @@ pub type PopulationClassRound =
 /// Called for each class of the owner's capital ([`CampaignModel::move_class_war`]). The original's is
 /// [`super::population::class_war_change`]. Its mod-state changes go to the [`ModWrites`].
 pub type PopulationClassWar = dyn Fn(&CampaignModel, &str, ClassWarEvent, FactionId, FactionId, i32, &mut ModWrites) -> i32 + Send + Sync;
+/// What a region's classes' unrest does at its owner's turn start: given the model (it changes state: the
+/// population, the buildings' health, the RNG) and the region, the events to report. Called for each region
+/// of the faction whose turn starts, in its region list order. The original's is
+/// [`super::population::unrest_outcome`]. Its mod-state changes go to the [`ModWrites`].
+pub type PopulationUnrestOutcome = dyn Fn(&mut CampaignModel, RegionId, &mut ModWrites) -> Vec<CampaignEvent> + Send + Sync;
 
 /// The campaign director's region-transfer step: given the model (the director's state in
 /// [`CampaignModel::director`]), its state after the step; a transfer it queues
@@ -182,10 +191,12 @@ pub type CaptureAiChoice = dyn Fn(&mut CampaignModel, &CapturePreview, Option<Fa
 /// [`super::port_blockade::port_arrival`]. A query: it changes no state.
 pub type PortArrivalRule = dyn Fn(&CampaignModel, ForceId, RegionId, usize) -> PortArrival + Send + Sync;
 /// Whether a human faction has won or lost by its victory conditions ([`VictoryState`]): given the model
-/// and the faction. The victory check ([`CampaignModel::victory_check`]) asks it for each human faction
-/// where an update ends, until the check is done. The original's is
-/// [`super::outcome::victory_state_original`]. A query: it changes no state.
-pub type VictoryStateRule = dyn Fn(&CampaignModel, FactionId) -> VictoryState + Send + Sync;
+/// (it changes state: the faction's [`World::victory_conditions`](super::World::victory_conditions) record)
+/// and the faction, the state; the events it posts (the conditions met or failed, the `campaign_won`
+/// message) go to the event list. The victory check ([`CampaignModel::victory_check`]) asks it for each
+/// human faction where an update ends, until the check is done. The original's is
+/// [`super::outcome::victory_state_original`]. Its mod-state changes go to the [`ModWrites`].
+pub type VictoryStateRule = dyn Fn(&mut CampaignModel, FactionId, &mut Vec<CampaignEvent>, &mut ModWrites) -> VictoryState + Send + Sync;
 
 /// The campaign rules in use, one field per seam (see the module docs).
 #[derive(Clone, Debug, PartialEq)]
@@ -196,6 +207,8 @@ pub struct CampaignSeams {
     pub population_class_round: Seam<PopulationClassRound>,
     /// [`POPULATION_CLASS_WAR`].
     pub population_class_war: Seam<PopulationClassWar>,
+    /// [`POPULATION_UNREST_OUTCOME`].
+    pub population_unrest_outcome: Seam<PopulationUnrestOutcome>,
     /// [`DIRECTOR_REGION_TRANSFER`].
     pub director_region_transfer: Seam<DirectorRegionTransfer>,
     /// [`DIRECTOR_DESIRES`].
@@ -237,6 +250,7 @@ impl Default for CampaignSeams {
             population_class_war: Seam::original(Arc::new(|m: &CampaignModel, c: &str, e: ClassWarEvent, a: FactionId, b: FactionId, w: i32, _: &mut ModWrites| {
                 super::population::class_war_change(m, c, e, a, b, w)
             })),
+            population_unrest_outcome: Seam::original(Arc::new(|m: &mut CampaignModel, r: RegionId, _: &mut ModWrites| super::population::unrest_outcome(m, r))),
             director_region_transfer: Seam::original(Arc::new(|m: &CampaignModel, _: &mut ModWrites| super::director::region_transfer_step(m))),
             director_desires: Seam::original(Arc::new(|m: &mut CampaignModel, w: &mut ModWrites| super::director::director_desires(m, w))),
             proposed_payment: Seam::original(Arc::new(super::treaties::proposed_payment)),
@@ -254,7 +268,9 @@ impl Default for CampaignSeams {
                 super::capture_ai::capture_choice_original(m, p, prev)
             })),
             port_arrival: Seam::original(Arc::new(super::port_blockade::port_arrival)),
-            victory_state: Seam::original(Arc::new(super::outcome::victory_state_original)),
+            victory_state: Seam::original(Arc::new(|m: &mut CampaignModel, f: FactionId, e: &mut Vec<CampaignEvent>, _: &mut ModWrites| {
+                super::outcome::victory_state_original(m, f, e)
+            })),
         }
     }
 }
@@ -262,11 +278,12 @@ impl Default for CampaignSeams {
 impl CampaignSeams {
     /// Every seam's key and implementation chain, in a fixed order (for the multiplayer handshake
     /// and the log).
-    pub fn chains(&self) -> [(&'static str, &[String]); 17] {
+    pub fn chains(&self) -> [(&'static str, &[String]); 18] {
         [
             (POPULATION_GROW, self.population_grow.chain()),
             (POPULATION_CLASS_ROUND, self.population_class_round.chain()),
             (POPULATION_CLASS_WAR, self.population_class_war.chain()),
+            (POPULATION_UNREST_OUTCOME, self.population_unrest_outcome.chain()),
             (DIRECTOR_REGION_TRANSFER, self.director_region_transfer.chain()),
             (DIRECTOR_DESIRES, self.director_desires.chain()),
             (PROPOSED_PAYMENT, self.proposed_payment.chain()),
@@ -296,6 +313,8 @@ pub struct CampaignRuleRegistry {
     pub population_class_round: SeamRegistry<PopulationClassRound>,
     /// [`POPULATION_CLASS_WAR`] implementations.
     pub population_class_war: SeamRegistry<PopulationClassWar>,
+    /// [`POPULATION_UNREST_OUTCOME`] implementations.
+    pub population_unrest_outcome: SeamRegistry<PopulationUnrestOutcome>,
     /// [`DIRECTOR_REGION_TRANSFER`] implementations.
     pub director_region_transfer: SeamRegistry<DirectorRegionTransfer>,
     /// [`DIRECTOR_DESIRES`] implementations.
@@ -337,6 +356,7 @@ impl CampaignRuleRegistry {
                 POPULATION_GROW => self.population_grow.apply(&mut seams.population_grow, key),
                 POPULATION_CLASS_ROUND => self.population_class_round.apply(&mut seams.population_class_round, key),
                 POPULATION_CLASS_WAR => self.population_class_war.apply(&mut seams.population_class_war, key),
+                POPULATION_UNREST_OUTCOME => self.population_unrest_outcome.apply(&mut seams.population_unrest_outcome, key),
                 DIRECTOR_REGION_TRANSFER => self.director_region_transfer.apply(&mut seams.director_region_transfer, key),
                 DIRECTOR_DESIRES => self.director_desires.apply(&mut seams.director_desires, key),
                 PROPOSED_PAYMENT => self.proposed_payment.apply(&mut seams.proposed_payment, key),
@@ -425,6 +445,7 @@ mod tests {
                 (POPULATION_GROW, &original[..]),
                 (POPULATION_CLASS_ROUND, &original[..]),
                 (POPULATION_CLASS_WAR, &original[..]),
+                (POPULATION_UNREST_OUTCOME, &original[..]),
                 (DIRECTOR_REGION_TRANSFER, &original[..]),
                 (DIRECTOR_DESIRES, &original[..]),
                 (PROPOSED_PAYMENT, &original[..]),

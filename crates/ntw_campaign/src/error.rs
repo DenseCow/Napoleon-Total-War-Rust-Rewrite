@@ -203,9 +203,9 @@ pub enum LoadWarning {
         region: String,
     },
     /// A faction's `ARMY_REINFORCEMENT_MANAGER/CHARACTER_REINFORCEMENTS_ARRAY` holds entries (new
-    /// armies on their way to the commander they were raised for). They are not loaded: ours keeps
-    /// such an entry only from its region step to the same turn start's march
-    /// (see `CampaignModel::march_reinforcements`), so those armies stay where they are.
+    /// armies on their way to the commander they were raised for). They are not loaded yet
+    /// (the model keeps them in `World::reinforcements`, but the importer does not map the entry's
+    /// character ids), so those armies stay where they are.
     UnloadedReinforcements {
         /// The faction key (empty for the rebels).
         faction: String,

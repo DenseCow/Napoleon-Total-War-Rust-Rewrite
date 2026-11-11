@@ -228,6 +228,9 @@ pub struct LoadedCampaign {
     /// start position has one too: a loaded game and a new single-player game open on it, only a new
     /// multiplayer campaign replaces it (`0x00987070`, [`camera::opening_camera`]).
     pub camera: Option<camera::CameraSave>,
+    /// A start position's victory conditions option a new campaign's human gets, per faction with
+    /// options ([`victory::fill`]); empty for a save. [`Self::set_human`] applies it.
+    pub victory_options: victory::NewCampaignOptions,
 }
 
 /// Loads a start position from bytes (root must be `CAMPAIGN_STARTPOS`).
@@ -434,6 +437,7 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
 
     let campaign_key = str_at(setup, 0, &setup_path)?.to_string();
     let mut model = CampaignModel::new(calendar, CaRng::new(seed), loaded.world);
+    model.world.multiplayer_campaign = read_multiplayer_campaign(model_rec);
     model.force_caps = read_force_caps(model_rec, &mut check.warnings);
     model.deal_inflation = read_deal_inflation(model_rec);
     if let Some(cai_rng) = read_cai_rng(model_rec) {
@@ -468,8 +472,8 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
     shroud::read(esf, &mut model);
     // The campaign AI's manager / personality keys and region base values (AI_RESEARCH.md §2.3, §4).
     ai_keys::fill(root, &mut model);
-    // The regions each faction's victory conditions name (the campaign director's rival score).
-    victory::fill(root, &mut model);
+    // Each faction's victory conditions (the victory test's record and the director's rival score).
+    let victory_options = victory::fill(root, &mut model);
     names::fill_allocators(root, &mut model);
     // The portrait allocator; reading it advances the campaign RNG once per deck, as the
     // original's loader does (CHARACTERS_FIDELITY.md §14).
@@ -516,6 +520,7 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
         warnings: check.warnings,
         script_values: script_values::read_script_values(esf),
         camera: camera::read(esf),
+        victory_options,
     })
 }
 
@@ -541,6 +546,21 @@ pub(crate) const CAMPAIGN_OVER_AT: usize = OSMOSIS_CULTURES_AT - 2;
 /// constructor's value, as the exe's loader leaves it for a record of version 2 or below.
 fn read_campaign_over(model_rec: &EsfRecord) -> bool {
     has_model_layout(model_rec) && model_rec.get_bool(CAMPAIGN_OVER_AT) == Some(true)
+}
+
+/// Position of the multiplayer flag in `CAMPAIGN_MODEL` (#5, the bool after `WORLD`, campaign +0x1034;
+/// STARTPOS_LAYOUT.md §2 order): the loader `0x00872550` reads it right after building `WORLD` when the
+/// record version is 8 or above (`0x00873239`), the writer `0x008EBAB0` saves it right after `WORLD`
+/// (`0x008EBC11`); CONFIRMED.
+pub(crate) const MULTIPLAYER_CAMPAIGN_AT: usize = 5;
+
+/// `CAMPAIGN_MODEL` #5, the multiplayer flag ([`ntw_sim::campaign::World::multiplayer_campaign`]). A
+/// record whose #4 is not `WORLD`, or whose #5 is not a bool (an older version), gives false, the
+/// constructor's value (`0x008742C0` at `0x00874B5D`). The save writer leaves the source's value, which
+/// nothing in the campaign changes.
+fn read_multiplayer_campaign(model_rec: &EsfRecord) -> bool {
+    let world_before = model_rec.get(MULTIPLAYER_CAMPAIGN_AT - 1).and_then(EsfNode::as_record).is_some_and(|r| r.name == "WORLD");
+    world_before && model_rec.get_bool(MULTIPLAYER_CAMPAIGN_AT) == Some(true)
 }
 
 /// `CAMPAIGN_MODEL` #23 / #24, the units per army and per navy; the original's 20 / 20 (with a
@@ -716,10 +736,19 @@ impl LoadedCampaign {
             // campaign start's 0x008DD090, [`CampaignModel::start_shrouds`]). Run here, not at the
             // turn start, since the exe does it in the model ctor, before any script event.
             self.model.start_shrouds();
-            // Only the human gets the default victory option ([`victory::fill`] gives it to every
-            // faction with options, as the human is not known yet); the other factions keep the start
-            // position's empty default (CONFIRMED: the Coalition saves, victory.rs module notes).
-            self.model.world.victory_regions.retain(|f, _| *f == id);
+            // Only the human gets the default victory option, as the front end copies it; the other
+            // factions keep the start position's default (CONFIRMED: the original's turn-1 save,
+            // victory.rs module notes). Called once, before the campaign starts.
+            match self.victory_options.get(&id) {
+                Some(c) => {
+                    self.model.world.victory_conditions.insert(id, c.clone());
+                }
+                // The start position's own record stays: one with no regions to hold and no deadline
+                // is met at the first update.
+                None => log::warn!(
+                    "set_human: {faction_key} has no victory option in the start position; it keeps the start position's own conditions record"
+                ),
+            }
         }
         true
     }

@@ -787,6 +787,7 @@ impl GameDatabase {
             marksmen: stats.unknown_1ec,          // col 56
             col63: stats.unknown_1f3,             // col 63
             col64: stats.unknown_1f4,             // col 64
+            fires_mounted: stats.unknown_1f5,     // col 65
             steadfast: stats.unknown_206,         // col 71
             impetuous: stats.unknown_207,         // col 72
             frightens_horses: stats.unknown_208,  // col 73

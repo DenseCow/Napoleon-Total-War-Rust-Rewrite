@@ -98,7 +98,9 @@ pub fn language_track(code: &str) -> u32 {
 }
 
 /// The front end's background movie. CONFIRMED: Napoleon.exe `0x004858D0` looks up component
-/// `movie_bg` and plays `Frontend2.bik` in it through `0x004831D0(name, 0, 1, 0)` (looped: INFERRED).
+/// `movie_bg` and plays `Frontend2.bik` in it through `0x004831D0(name, 0, 1, 0)`, looped: the third
+/// argument is option byte +1 of the bink control's open `0x00D9F600`, the player's loop flag (+0x59,
+/// see `crate::campaign::hud::panel_movie`), CONFIRMED.
 pub const FRONTEND_MOVIE: &str = "movies\\frontend2.bik";
 
 /// Render layer of the full-screen movie camera and picture.

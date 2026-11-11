@@ -1097,6 +1097,10 @@ fn write_faction(
     links: &FactionLinks,
 ) -> Result<(), SaveError> {
     use ntw_sim::campaign::CharacterId;
+    // The victory test's state (a new campaign's human already holds its option, `write_human`).
+    if let Some(c) = model.world.victory_conditions.get(&faction.id) {
+        crate::victory::write_state(f, c);
+    }
     if let Some(e) = child_mut(f, "FACTION_ECONOMICS") {
         set(e, 1, EsfNode::I32(faction.treasury));
         // #3: bankrupt turns in a row (economics +0x460, CONFIRMED by its saver 0x00BD46E0).

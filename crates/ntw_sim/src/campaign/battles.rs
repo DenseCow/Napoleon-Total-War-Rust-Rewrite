@@ -521,6 +521,8 @@ impl CampaignModel {
         // A besieger ends its siege (the destructor `0x0088CE30` calls `0x008BD550` at `0x0088CE93`
         // when force +0x94 is set, CONFIRMED), the price update with it; the siege's turns stay.
         self.end_force_siege(force);
+        // The region's last risen army gone: its classes crack down (`0x0088CF08`, before the unlink below).
+        self.crack_down_after_last_rising(force);
         // Its entry in the risen armies goes too, keeping the rest in order, with its rebel government
         // and side (`World::region_risen_armies`, `World::rebel_army_governments`,
         // `World::rebel_army_sides`): the army's destructor

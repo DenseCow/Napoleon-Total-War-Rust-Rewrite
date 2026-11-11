@@ -1,37 +1,57 @@
-//! Timed special abilities: the slot timers every special ability shares, and the general's Rally
-//! and Inspire (BATTLE_FIDELITY.md §60 "Rally and Inspire").
+//! Special abilities: the gate, the toggle, the slot timers every ability with a slot shares, and
+//! the general's Rally and Inspire (BATTLE_FIDELITY.md §60).
 //!
 //! In the original a unit has one slot per special ability its card lists (container at unit
 //! `+0xDAC`, built by `0x0051DBE0` from the card's 16-byte records). A record carries the ability's
 //! active time, recharge time and number of uses ([`AbilityRecord`]); a slot counts them down
 //! ([`AbilitySlot`]). CONFIRMED static, all of it: the record sources (`0x0050CAE0`, `0x005363C0`,
-//! `0x00518D70`), the gate's use and recharge tests (`0x0053EA60`), the perform and toggle paths
-//! (`0x005612D0`, `0x00578860`), activation (`0x0052ED80` → `0x0052ECC0`), the tick (`0x005805E0`,
-//! `0x00582830`), Rally (`0x0051DDB0`) and Inspire (`0x0051DAF0`, removal `0x00522970`).
+//! `0x00518D70`), the gate and its per-ability conditions (`0x0053EA60`), the perform and toggle
+//! paths (`0x005612D0`, `0x00578860`), activation (`0x0052ED80` → `0x0052ECC0`), switch-off
+//! (`0x00549F30` → `0x00549F10`), plugging bayonets (`0x0054E8E0` / `0x0054DB50`), the tick
+//! (`0x005805E0`, `0x00582830`), Rally (`0x0051DDB0`) and Inspire (`0x0051DAF0`, removal
+//! `0x00522970`).
 //!
 //! PROVISIONAL, the stand-ins of this module (each is marked "stand-in" where it is used):
-//! 1. the rest of the gate `0x0053EA60`: its per-ability conditions (formations, fire and advance,
-//!    plug bayonets, stakes, unlimber, the artillery boosts) are read as "the unit is active and has
-//!    men", and for Rally and Inspire the test of the unit's special-men list (unit `+0x280`, one
-//!    entry whose vfunc `+0x1B0` returns 0) as the same; the refusal `0x0055C780` (battle byte
-//!    `+0x2704` set and the unit's state 2 or 3) is read as "routing or shattered"; the model has no
-//!    deployment phase, where the original performs neither Rally nor Inspire;
+//! 1. the gate's (`0x0053EA60`) and the perform path's (`0x005612D0`) inputs the model does not
+//!    hold: the squad byte `+0x72C` (squad `+0xADC`), which with `0x0054EE90` refuses an inactive
+//!    square, pike square, pike wall or dismount, and the unit byte `+0xE0C` that refuses stakes,
+//!    are read as clear (their writers are not traced); unlimber's test of the current order
+//!    (vfunc `+0xDC`) and of unit `+0x2A4` is read as "has guns"; for Rally and Inspire the unit's
+//!    special-men list (unit `+0x280`, one entry whose vfunc `+0x1B0` returns 0) is read as "has
+//!    men"; the refusal `0x0055C780` (battle byte `+0x2704` set and the unit's state 2 or 3) is
+//!    read as "routing or shattered"; the building test (`0x0055B140`, the building of the unit's
+//!    current order `+0xAE8`) reads the building the unit holds, the model having no order objects;
+//!    the model also refuses a unit not on the field (`active` false: a reinforcement waiting or
+//!    walking in) or without men, which neither `0x0053EA60` nor `0x005612D0` tests (a unit without
+//!    men leaves its army's list at the next army update `0x00580390`; whether the original's
+//!    callers can reach a waiting reinforcement is not traced); in deployment the perform path
+//!    acts only when battle `+0x58` is 0 or the byte at unit `+0x1EC → +0xD4 → +0x38` is set
+//!    (read as passing), and with a current order (unit `+0xAE8`, the order stack's count) it first
+//!    hands the unit's current order the request (`0x0056AC40` → the order's vfunc `+0x54`) and
+//!    stops there when it takes it (ours toggles at once, or refuses Rally and Inspire);
 //! 2. the Inspire order's approach: the original's move (`0x00652950`) installs an approach task
 //!    (`0x00621640`) holding the request {target, 75.0, run byte}, whose per-tick logic is not
 //!    traced; here the general heads for the target until the two boxes are less than 75 m apart,
 //!    and the box distance is the exact one where `0x005774A0` searches from the closest pair of
 //!    corners;
-//! 3. the artillery boosts (abilities 19 and 20, effects `0x0051D9C0` / `0x0051DA00`) run their
-//!    slot timers here but have no effect yet; ability 21 (effect `0x0051DA60`, also built by
-//!    `0x0052ECC0`) is switched on like a formation ability, without effect or slot; switching an
-//!    active formation or behaviour ability off again is not ported. Formation and behaviour abilities do
-//!    not use their slot: the original activates it on switch-on (`0x00578860` → `0x0052ED80` on
-//!    the switch-on path of cases 0..4, 6, 7, 9..11 and 16), spending a use and starting the timers;
-//!    here a mod's record for them (a `unit_special_abilities` row, or a battle file's own
-//!    `recharge_time`) is ignored, and the slot tick leaves them alone ([`uses_slot`]).
+//! 3. effects not ported: the artillery boosts (19 and 20, `0x0051D9C0` / `0x0051DA00`) and the
+//!    column (21, `0x0051DA60`) run their slot but change nothing yet; stakes (11) are placed at once
+//!    (`0x006525F0`), the original plants them over time; fougasse (9, 10) is not placed
+//!    (`0x006526F0`); the formation shapes are not rebuilt (`0x005315A0`, `0x00579780`) nor laid out
+//!    in deployment (`0x0054A7D0`, `0x0054A760`, `0x0054A850`); square switched on without a current
+//!    order is queued in the original (battle `+0x94 → +0xBA8`), here it is active at once; dismount
+//!    (15) acts in the original only when the unit has no current order (unit `+0xAE8` is 0), calls
+//!    `0x00514900` under option 68 and, in deployment, re-lays the unit (`0x0054A710`), and its
+//!    flag is not set by the toggle itself (the dismounting is not traced); the model has no order
+//!    objects, so here the ability flips at once and nothing is re-laid; the event every toggle case
+//!    but 5, 12..14, 17..21 posts (an id from `0x0057ADB0` by ability and on / off, with the unit and
+//!    its centre `0x00563DA0`, to battle `+0x94 → +0x3D8`, vfunc `+8`) has no sink in the model;
+//!    light infantry behaviour's extra call under option 52 (`0x00515210`) and unlimber's unit
+//!    `+0xE30` (`0x0054C1F0`) are not ported.
 
 use super::abilities::ability_ids;
-use super::march::SquadBox;
+use super::attributes::ability::{FIRE_AND_ADVANCE, PIKE_SQUARE_FORMATION, PLUG_BAYONETS, SQUARE_FORMATION};
+use super::march::{SQUARE_MIN_SIDE, SquadBox};
 use super::model::{Battle, LandUnit, dist2};
 use super::morale::{TransientEffect, effect_id};
 use super::rules::x87_round;
@@ -125,14 +145,20 @@ pub fn rally_bonus(rank: i32, min: i32, max: i32) -> i32 {
     x87_round((rank as f32 * RALLY_RANK_STEP) * (max as f32 - min as f32) + min as f32)
 }
 
-/// Whether `ability` is activated through its slot here (`0x0052ED80`: a use spent, the timers
-/// started) and switched off by the toggle or the slot tick: Rally, Inspire and the two artillery
-/// boosts. Every other ability is switched on without its slot (stand-in 3).
+/// The fewest men a unit needs to form square: the smallest square template, side
+/// [`SQUARE_MIN_SIDE`], takes `8n − 8` of them (`0x00658B30` against the template table's minimum
+/// `0x00655240`, CONFIRMED static: 48). The original also refuses more than the largest template
+/// holds (side 51, `8n − 1` = 407 men, `0x006551F0`); ours lays out a square of any size
+/// ([`SQUARE_MIN_SIDE`]), so it has no upper bound.
+pub const SQUARE_MIN_MEN: u32 = 8 * SQUARE_MIN_SIDE as u32 - 8;
+
+/// Whether `ability` is activated through its slot (`0x0052ED80`: a use spent, the timers
+/// started) and switched off through it (`0x00549F30`), by the toggle or the slot tick: the toggle
+/// `0x00578860` does so for the formations and behaviours 0..4, 6, 7, the defences 9..11, unlimber
+/// and 17..21 (CONFIRMED). Plug bayonets (8) and dismount (15) have their own switch, and loose
+/// formation, chevaux de frise, earthworks and gabionade (5, 12..14) do nothing when performed.
 fn uses_slot(ability: u8) -> bool {
-    matches!(
-        ability,
-        ability_ids::RALLY | ability_ids::INSPIRE_UNIT | ability_ids::ARTILLERY_ACCURACY_BOOST | ability_ids::ARTILLERY_ROF_BOOST
-    )
+    matches!(ability, 0..=4 | 6 | 7 | 9..=11 | 16..=21)
 }
 
 /// The four corners of a squad box.
@@ -228,16 +254,35 @@ impl LandUnit {
 }
 
 impl Battle {
-    /// Whether unit `i` can perform `ability` now, `0x0053EA60`. CONFIRMED: the unit must list the
-    /// ability; wedge and diamond (2, 3) are refused while dismount is active; an ability with
-    /// counted uses is refused when none is left, and a timed one while its recharge runs. The rest
-    /// is stand-in 1 of the module list.
+    /// Whether unit `i` can perform `ability` now, `0x0053EA60` (CONFIRMED static): the one gate the
+    /// player's button, the AI and the scripts go through. The unit must be on the field with men
+    /// (PROVISIONAL, stand-in 1: the original tests neither here) and list the ability; wedge and
+    /// diamond (2, 3) are refused while dismount is active; an ability with counted uses is refused
+    /// when none is left, and a timed one while its recharge runs. Then, per ability:
+    /// - square, pike square, pike wall and dismount (1, 0, 6, 15): refused in a building
+    ///   (`0x0055B140`, the building of the unit's current order; ours, the building it holds:
+    ///   stand-in 1) and, unless already active, while the squad byte `+0x72C` is set (stand-in 1)
+    ///   or enemies attack the unit (`0x0054EE90`: a squad's committed attacker list is not empty,
+    ///   `0x00557430`); square also needs the men for its smallest template ([`SQUARE_MIN_MEN`]);
+    /// - fire and advance (7): [`Battle::can_fire_and_advance`];
+    /// - plug bayonets (8): in deployment always, otherwise only while not plugged;
+    /// - stakes (11): refused in a building and in deployment;
+    /// - unlimber (16): with the gabionade selected, only in deployment and with guns; otherwise
+    ///   with guns;
+    /// - the artillery boosts (19, 20): refused in deployment, for limbered artillery
+    ///   ([`Battle::limbered_artillery`]) and for a unit on foot ([`super::strength::on_foot`]);
+    /// - every other ability (Rally and Inspire after stand-in 1): allowed.
+    ///
+    /// The tests the model cannot feed are stand-in 1 of the module list.
     pub fn can_perform_special_ability(&self, i: usize, ability: u8) -> bool {
         let u = &self.units[i];
-        if !u.capabilities.has_ability(ability) {
+        // Stand-in 1: `active` and `men` are the model's own precondition, not the gate's.
+        if !u.active || u.men == 0 || !u.capabilities.has_ability(ability) {
             return false;
         }
-        if u.ability_active(ability_ids::DISMOUNT) && (ability == 2 || ability == 3) {
+        if super::strength::dismount_active(u)
+            && (ability == ability_ids::WEDGE_FORMATION || ability == ability_ids::DIAMOND_FORMATION)
+        {
             return false;
         }
         let spent = |s: &AbilitySlot| {
@@ -246,22 +291,78 @@ impl Battle {
         if u.ability_slot(ability).is_some_and(spent) {
             return false;
         }
-        u.active && u.men > 0
+        let guns = u.missile.map_or(0, |w| w.guns);
+        match ability {
+            PIKE_SQUARE_FORMATION | SQUARE_FORMATION | ability_ids::PIKE_WALL_FORMATION | ability_ids::DISMOUNT => {
+                // An inactive ability is refused while the squad byte `+0x72C` is set (stand-in 1:
+                // read as clear) or enemies attack the unit (`0x0054EE90`).
+                let engaged = !u.attackers.entries().is_empty();
+                if u.garrison.is_some() || (!u.ability_active(ability) && engaged) {
+                    return false;
+                }
+                // The original counts the unit's entities (`+0x2CC`), the men for infantry.
+                ability != SQUARE_FORMATION || u.men >= SQUARE_MIN_MEN
+            }
+            FIRE_AND_ADVANCE => self.can_fire_and_advance(i),
+            PLUG_BAYONETS => self.deploying || !u.bayonets_plugged,
+            // Stand-in 1: the unit byte `+0xE0C` is read as clear.
+            ability_ids::WOODEN_STAKES => u.garrison.is_none() && !self.deploying,
+            ability_ids::UNLIMBER if u.deployable == Some(ability_ids::GABIONADE) => self.deploying && guns != 0,
+            // Stand-in 1: the current order's vfunc `+0xDC` and unit `+0x2A4` are not tested.
+            ability_ids::UNLIMBER => guns != 0,
+            ability_ids::ARTILLERY_ACCURACY_BOOST | ability_ids::ARTILLERY_ROF_BOOST => {
+                !self.deploying && !self.limbered_artillery(i) && !super::strength::on_foot(u)
+            }
+            // Stand-in 1 for Rally and Inspire: the special-men list is read as "has men".
+            _ => true,
+        }
+    }
+
+    /// Whether unit `i` may fire and advance, `0x0053EFE0` (CONFIRMED static): it needs a
+    /// projectile; grenades (shot types 19 and 20) always may; any other only with bayonets not
+    /// plugged, not riding unless its stats allow it (column 65,
+    /// [`super::attributes::UnitAttributes::fires_mounted`]), and rounds left (unit `+0xE10`).
+    pub fn can_fire_and_advance(&self, i: usize) -> bool {
+        let u = &self.units[i];
+        if u.missile.is_none() {
+            return false;
+        }
+        if matches!(u.shot_type, Some(19 | 20)) {
+            return true;
+        }
+        !u.bayonets_plugged && (!super::strength::riding(u) || u.attributes.fires_mounted) && u.ammunition != 0
+    }
+
+    /// Limbered artillery, `0x0055C230` (CONFIRMED static): the gabionade is not selected, the unit
+    /// is artillery (type record `+0x1C` == 1), it could unlimber now (the gate for 16) and has not.
+    /// The artillery boosts' gate and the skirmish default ([`Battle::skirmish_default`]) read it.
+    pub fn limbered_artillery(&self, i: usize) -> bool {
+        let u = &self.units[i];
+        u.deployable != Some(ability_ids::GABIONADE)
+            && super::strength::category(u) == super::strength::Category::Artillery
+            && !u.ability_active(ability_ids::UNLIMBER)
+            && self.can_perform_special_ability(i, ability_ids::UNLIMBER)
     }
 
     /// Performs a special ability for unit `id`, `0x005612D0` (CONFIRMED): the one entry of the
     /// player's ability button, the AI and the scripts ([`Battle::order_special_ability`]). Nothing
     /// happens when the unit is refused (`0x0055C780`, stand-in 1) or fails the gate
-    /// ([`Battle::can_perform_special_ability`]). Inspire (18) becomes an order: the general goes
-    /// to `target` (running when `run`) and inspires it on arrival ([`InspireOrder`]); any other
-    /// order replaces it. Every other ability is done at once (Rally in the original too; the
-    /// others' order acts when it starts and the model has no order queue): an inactive one is
-    /// switched on, an active Rally, Inspire or artillery boost off (`0x00578860`). Who may be
-    /// inspired is the caller's choice (the AI offers its alliance's units); the ability code does
-    /// not test it. Returns whether the ability was performed or its order taken.
+    /// ([`Battle::can_perform_special_ability`]). In deployment (`0x0055AD60`) the original toggles
+    /// only an ability outside Rally and Inspire (17, 18), so those two are refused there (its
+    /// order path with a current order: stand-in 1). Out of deployment Inspire (18) becomes an
+    /// order: the general goes to `target` (running when `run`) and inspires it on arrival
+    /// ([`InspireOrder`]); any other order replaces it. Every other ability is done at once (Rally,
+    /// wedge, diamond and fire and advance in the original too; the others' order acts when it
+    /// starts and the model has no order queue) through the toggle (`0x00578860`,
+    /// [`Battle::do_special_ability`]). Who may be inspired is the caller's choice (the AI offers
+    /// its alliance's units); the ability code does not test it. Returns whether the ability was
+    /// performed or its order taken.
     pub fn perform_special_ability(&mut self, id: u32, ability: u8, target: Option<u32>, run: bool) -> bool {
         let Some(i) = self.unit_index(id) else { return false };
         if self.units[i].morale.is_routing_or_shattered() || !self.can_perform_special_ability(i, ability) {
+            return false;
+        }
+        if self.deploying && matches!(ability, ability_ids::RALLY | ability_ids::INSPIRE_UNIT) {
             return false;
         }
         if ability != ability_ids::INSPIRE_UNIT {
@@ -276,16 +377,56 @@ impl Battle {
         true
     }
 
-    /// The toggle `0x00578860` (CONFIRMED for Rally, Inspire and the artillery boosts): an inactive
-    /// ability must pass the gate again and is activated; an active one of those four is switched
-    /// off. Through [`Battle::perform_special_ability`] a timed ability is never switched off: the
-    /// gate refuses it while its recharge runs, and the tick ends it when the recharge is over.
+    /// The toggle `0x00578860` (CONFIRMED static): an inactive ability must pass the gate again.
+    /// Then, per ability:
+    /// - plug bayonets (8): plugged bayonets are unplugged in deployment (`0x0054DB50`), otherwise
+    ///   the bayonets are plugged (`0x0054E8E0`) ([`Battle::plug_bayonets`]);
+    /// - dismount (15): flips (stand-in 3: the original acts only with no current order, unit
+    ///   `+0xAE8` 0, and sets no flag itself);
+    /// - column (21): its slot is activated again even while active (`0x0052ED80`; refused while
+    ///   it recharges), never switched off here;
+    /// - unlimber (16): switching on first drops a selected gabionade (`0x00544620`, the unit's
+    ///   deployable becomes `none`); both ways the skirmish default is set again (`0x005357B0`);
+    /// - every other ability with a slot ([`uses_slot`]): an active one is switched off
+    ///   (`0x00549F30`), an inactive one activated (`0x0052ED80`);
+    /// - loose formation, chevaux de frise, earthworks, gabionade (5, 12..14): nothing.
+    ///
+    /// Through [`Battle::perform_special_ability`] a timed ability is never switched off: the gate
+    /// refuses it while its recharge runs, and the tick ends it when the recharge is over.
+    ///
+    /// Every case but 5, 12..14 and 17..21 also posts the ability event `0x0057ADB0` at the unit's
+    /// centre, which the model has no sink for (stand-in 3). The original returns the low byte of
+    /// its last callee's result; ours returns whether the ability acted.
     fn do_special_ability(&mut self, i: usize, ability: u8, target: Option<u32>) -> bool {
         let active = self.units[i].ability_active(ability);
         if !active && !self.can_perform_special_ability(i, ability) {
             return false;
         }
         match ability {
+            PLUG_BAYONETS => {
+                let plug = !(self.units[i].bayonets_plugged && self.deploying);
+                self.plug_bayonets(i, plug);
+                true
+            }
+            ability_ids::DISMOUNT => {
+                self.units[i].active_abilities ^= 1u32 << ability;
+                true
+            }
+            ability_ids::COLUMN_FORMATION => self.activate_ability(i, ability, target),
+            ability_ids::UNLIMBER => {
+                let done = if active {
+                    self.deactivate_ability(i, ability);
+                    true
+                } else {
+                    let u = &mut self.units[i];
+                    if u.deployable == Some(ability_ids::GABIONADE) {
+                        u.deployable = None;
+                    }
+                    self.activate_ability(i, ability, target)
+                };
+                self.units[i].skirmish = self.skirmish_default(i);
+                done
+            }
             a if uses_slot(a) => {
                 if active {
                     self.deactivate_ability(i, ability);
@@ -294,19 +435,31 @@ impl Battle {
                     self.activate_ability(i, ability, target)
                 }
             }
-            // Stand-in 3: an active formation or behaviour ability stays on.
-            _ if active => false,
-            _ => {
-                self.switch_on_untimed_ability(i, ability);
-                true
-            }
+            _ => true,
         }
+    }
+
+    /// Plugs (`plug` true, `0x0054E8E0`) or unplugs (`0x0054DB50`) unit `i`'s bayonets (CONFIRMED
+    /// static): unit `+0xD9D` is set or cleared, melee attack (unit `+0x170`) gains or loses the
+    /// `kv_rules` value `bayonet_melee_attack_bonus`, and the unit's state bytes are set again
+    /// (`0x005357B0`: the skirmish default). The byte both also write, unit `+0xD98`, is overwritten
+    /// at once by `0x005357B0` with "cannot fire and advance" (`!0x0053EFE0`), so it is not modelled.
+    /// Like the original, neither tests the present state: the gate and the toggle only plug
+    /// unplugged bayonets and unplug plugged ones.
+    fn plug_bayonets(&mut self, i: usize, plug: bool) {
+        let bonus = self.kv_rules.bayonet_melee_attack_bonus;
+        let u = &mut self.units[i];
+        u.bayonets_plugged = plug;
+        u.melee_attack = u.melee_attack.wrapping_add(if plug { bonus } else { bonus.wrapping_neg() });
+        self.units[i].skirmish = self.skirmish_default(i);
     }
 
     /// Activates a slot, `0x0052ED80` → `0x0052ECC0` (CONFIRMED): refused without a use left or
     /// while the recharge runs (`0x0053E940`); the slot's old effect ends first; the ability's
     /// effect is made; a counted use is spent; a timed ability starts its active time and its
-    /// recharge; the slot is active.
+    /// recharge; the slot is active. The effects in the model: Rally, Inspire, square (the melee
+    /// square flag, combatant `+0x54`) and stakes (placed in front of the unit, `0x006525F0`; at
+    /// once, stand-in 3).
     fn activate_ability(&mut self, i: usize, ability: u8, target: Option<u32>) -> bool {
         let inspired = if ability == ability_ids::INSPIRE_UNIT {
             let Some(t) = target.and_then(|t| self.unit_index(t)) else { return false };
@@ -327,7 +480,9 @@ impl Battle {
         match (ability, inspired) {
             (ability_ids::RALLY, _) => self.rally(i, slot.record.active_time),
             (_, Some(t)) => self.inspire(t, slot.record.active_time),
-            // Stand-in 3: the artillery boosts have no effect yet.
+            (SQUARE_FORMATION, _) => self.units[i].in_square = true,
+            (ability_ids::WOODEN_STAKES, _) => self.build_defence(i, ability_ids::WOODEN_STAKES),
+            // Stand-in 3: the other effects are not ported.
             _ => {}
         }
         let u = &mut self.units[i];
@@ -347,14 +502,18 @@ impl Battle {
     /// Ends a slot's effect and clears its active flag (`0x00549F10`, CONFIRMED). Inspire's effect
     /// takes its two stat bonuses off the target again, re-reading the `kv_rules` values as the
     /// original does (`0x00522970`); Rally's leaves nothing to undo (its morale effect runs out by
-    /// its own time). PROVISIONAL: the original skips the subtraction while the battle byte
-    /// `+0x54` is set, a flag whose meaning is UNKNOWN; here it always subtracts.
+    /// its own time); square's clears the melee square flag. PROVISIONAL: the original skips the
+    /// Inspire subtraction while the battle byte `+0x54` is set, a flag whose meaning is UNKNOWN
+    /// (`0x00537E40` reads it too); here it always subtracts.
     fn deactivate_ability(&mut self, i: usize, ability: u8) {
         let u = &mut self.units[i];
         if !u.ability_active(ability) {
             return;
         }
         u.active_abilities &= !(1u32 << ability);
+        if ability == SQUARE_FORMATION {
+            u.in_square = false;
+        }
         let target = u.ability_slots.iter_mut().find(|s| s.ability == ability).and_then(|s| s.target.take());
         if let Some(t) = target.and_then(|t| self.unit_index(t)) {
             let (accuracy, melee_attack) = self.inspire_stat_bonuses();
@@ -366,9 +525,8 @@ impl Battle {
     /// each slot's own tick ([`AbilitySlot::tick`]), then an active timed ability whose recharge
     /// has reached 0 is switched off. So a timed ability stays active for its whole recharge time
     /// (180 s for Rally and Inspire in the shipped table), longer than its active time (30 s).
-    /// Only the abilities activated through their slot ([`uses_slot`]) are switched off here: a
-    /// formation or behaviour ability never started its timers (stand-in 3), so a timed record
-    /// must not end it.
+    /// Only the abilities activated through their slot ([`uses_slot`]) are switched off here
+    /// (dismount flips its flag without its slot, stand-in 3).
     pub(super) fn ability_tick(&mut self, i: usize) {
         for k in 0..self.units[i].ability_slots.len() {
             let u = &mut self.units[i];
@@ -711,25 +869,212 @@ mod tests {
         assert_eq!(b.units[0].ability_slot(ability_ids::RALLY).unwrap().uses_left, -1);
     }
 
-    /// Regression: a timed record on a formation ability (a mod's `unit_special_abilities` row, or a
-    /// battle file's own `recharge_time`; both become the unit's slot records) does not end the
-    /// formation on the next tick, and its slot stays unused (stand-in 3).
+    /// A unit listing `abilities`, with `men` men.
+    fn able(id: u32, men: u32, abilities: &[&'static str]) -> LandUnit {
+        let mut u = unit_of(id, 0, men, (id as f32 * 50.0, 0.0));
+        u.capabilities = UnitCapabilities::from_names(abilities.iter().copied(), []);
+        u
+    }
+
+    fn weapon(guns: u32, is_artillery: bool) -> MissileWeapon {
+        MissileWeapon {
+            range: 400,
+            accuracy: 40.0,
+            reload_skill: 50,
+            reload_time_s: 20,
+            damage: 10.0,
+            projectiles_per_shot: 1,
+            is_artillery,
+            guns,
+            ballistics: Default::default(),
+        }
+    }
+
+    /// A formation ability uses its slot like any other (`0x00578860` → `0x0052ED80`): a timed
+    /// record spends a use and starts the timers, the gate refuses it while it recharges, and the
+    /// tick ends it when the recharge is over, taking the melee square flag off.
     #[test]
-    fn a_timed_record_does_not_end_a_formation_ability() {
-        use crate::battle::attributes::ability::SQUARE_FORMATION;
+    fn a_formation_ability_runs_its_slot() {
         let mut b = battle();
-        let mut u = unit_of(1, 0, 60, (0.0, 0.0));
-        u.capabilities = UnitCapabilities::from_names(["square_formation"], []);
+        let mut u = able(1, 60, &["square_formation"]);
         u.set_ability_records([(SQUARE_FORMATION, SHIPPED)]);
         b.add_unit(u);
         assert!(b.perform_special_ability(1, SQUARE_FORMATION, None, false));
-        for _ in 0..20 {
-            b.step();
-        }
-        assert!(b.units[0].ability_active(SQUARE_FORMATION));
         assert!(b.units[0].in_square);
-        let slot = *b.units[0].ability_slot(SQUARE_FORMATION).unwrap();
-        assert_eq!((slot.uses_left, slot.recharge_left, slot.duration_left), (2, 0.0, -1.0));
+        let slot = |b: &Battle| *b.units[0].ability_slot(SQUARE_FORMATION).unwrap();
+        assert_eq!((slot(&b).uses_left, slot(&b).recharge_left, slot(&b).duration_left), (1, 180.0, 30.0));
+        b.step();
+        assert!(!b.perform_special_ability(1, SQUARE_FORMATION, None, false), "recharging");
+        assert!(b.units[0].in_square);
+        let mut ticks = 1;
+        while b.units[0].ability_active(SQUARE_FORMATION) && ticks < 2000 {
+            b.step();
+            ticks += 1;
+        }
+        assert!((1795..=1805).contains(&ticks), "{ticks} ticks");
+        assert!(!b.units[0].in_square);
+        assert!(b.perform_special_ability(1, SQUARE_FORMATION, None, false));
+        assert_eq!(slot(&b).uses_left, 0);
+    }
+
+    /// Square (`0x0053EA60`, ability 1): the men of its smallest template, no building, and not
+    /// while engaged unless already active; switching it off clears the melee square flag.
+    #[test]
+    fn square_needs_its_men_and_no_melee_to_start() {
+        assert_eq!(SQUARE_MIN_MEN, 48);
+        let mut b = battle();
+        b.add_unit(able(1, SQUARE_MIN_MEN - 1, &["square_formation"]));
+        assert!(!b.can_perform_special_ability(0, SQUARE_FORMATION), "47 men");
+        b.units[0].men = SQUARE_MIN_MEN;
+        assert!(b.can_perform_special_ability(0, SQUARE_FORMATION));
+        // Far above the original's 407: the limit is lifted.
+        b.units[0].men = 2000;
+        assert!(b.can_perform_special_ability(0, SQUARE_FORMATION));
+        b.units[0].garrison = Some(0);
+        assert!(!b.can_perform_special_ability(0, SQUARE_FORMATION), "in a building");
+        b.units[0].garrison = None;
+        assert!(b.perform_special_ability(1, SQUARE_FORMATION, None, false));
+        assert!(b.units[0].in_square);
+        b.units[0].attackers.add_contact(9);
+        b.units[0].attackers.commit();
+        // Active: it can still be switched off while engaged.
+        assert!(b.perform_special_ability(1, SQUARE_FORMATION, None, false));
+        assert!(!b.units[0].ability_active(SQUARE_FORMATION));
+        assert!(!b.units[0].in_square);
+        assert!(!b.perform_special_ability(1, SQUARE_FORMATION, None, false), "engaged");
+    }
+
+    /// Fire and advance (`0x0053EFE0`): a projectile; grenades always; otherwise bayonets not
+    /// plugged, not riding unless column 65 allows it, and ammunition.
+    #[test]
+    fn fire_and_advance_needs_a_loaded_weapon() {
+        let mut b = battle();
+        b.add_unit(able(1, 60, &["fire_and_advance"]));
+        let can = |b: &Battle| b.can_perform_special_ability(0, FIRE_AND_ADVANCE);
+        assert!(!can(&b), "no projectile");
+        b.units[0].missile = Some(weapon(0, false));
+        b.units[0].ammunition = 10;
+        assert!(can(&b));
+        b.units[0].ammunition = 0;
+        assert!(!can(&b), "no ammunition");
+        b.units[0].shot_type = Some(19);
+        assert!(can(&b), "grenades");
+        b.units[0].shot_type = None;
+        b.units[0].ammunition = 10;
+        b.units[0].bayonets_plugged = true;
+        assert!(!can(&b), "plugged");
+        b.units[0].bayonets_plugged = false;
+        b.units[0].is_cavalry = true;
+        assert!(!can(&b), "riding");
+        b.units[0].attributes.fires_mounted = true;
+        assert!(can(&b), "column 65");
+        // Switched on and off through its slot.
+        assert!(b.perform_special_ability(1, FIRE_AND_ADVANCE, None, false));
+        assert!(b.units[0].ability_active(FIRE_AND_ADVANCE));
+        assert!(b.perform_special_ability(1, FIRE_AND_ADVANCE, None, false));
+        assert!(!b.units[0].ability_active(FIRE_AND_ADVANCE));
+    }
+
+    /// Plug bayonets (`0x0054E8E0` / `0x0054DB50`): plugging adds the `kv_rules` bonus to melee
+    /// attack; out of deployment plugged bayonets stay plugged, in deployment they come out again.
+    #[test]
+    fn bayonets_unplug_only_in_deployment() {
+        let mut b = battle();
+        b.kv_rules.bayonet_melee_attack_bonus = 4;
+        let mut u = able(1, 60, &["plug_bayonets"]);
+        u.melee_attack = 8;
+        b.add_unit(u);
+        let state = |b: &Battle| (b.units[0].bayonets_plugged, b.units[0].melee_attack);
+        assert!(b.perform_special_ability(1, PLUG_BAYONETS, None, false));
+        assert_eq!(state(&b), (true, 12));
+        assert!(!b.perform_special_ability(1, PLUG_BAYONETS, None, false), "plugged, not deploying");
+        assert_eq!(state(&b), (true, 12));
+        b.deploying = true;
+        assert!(b.perform_special_ability(1, PLUG_BAYONETS, None, false));
+        assert_eq!(state(&b), (false, 8));
+        assert!(b.perform_special_ability(1, PLUG_BAYONETS, None, false));
+        assert_eq!(state(&b), (true, 12));
+    }
+
+    /// Stakes (11): refused in deployment and in a building.
+    #[test]
+    fn stakes_are_refused_in_deployment_and_buildings() {
+        let mut b = battle();
+        b.add_unit(able(1, 60, &["wooden_stakes"]));
+        b.deploying = true;
+        assert!(!b.perform_special_ability(1, ability_ids::WOODEN_STAKES, None, false));
+        b.deploying = false;
+        b.units[0].garrison = Some(0);
+        assert!(!b.perform_special_ability(1, ability_ids::WOODEN_STAKES, None, false));
+        b.units[0].garrison = None;
+        assert!(b.perform_special_ability(1, ability_ids::WOODEN_STAKES, None, false));
+        assert!(!b.defences.is_empty());
+    }
+
+    /// Unlimber (16): needs guns; with the gabionade selected only in deployment, and switching it
+    /// on drops the gabionade.
+    #[test]
+    fn unlimber_needs_guns_and_drops_the_gabionade() {
+        let mut b = battle();
+        let mut u = able(1, 20, &["unlimber", "gabionade"]);
+        u.unit_category = "artillery".into();
+        b.add_unit(u);
+        assert!(!b.perform_special_ability(1, ability_ids::UNLIMBER, None, false), "no guns");
+        b.units[0].missile = Some(weapon(2, true));
+        assert!(b.limbered_artillery(0));
+        assert!(b.perform_special_ability(1, ability_ids::UNLIMBER, None, false));
+        assert!(b.units[0].ability_active(ability_ids::UNLIMBER));
+        assert!(!b.limbered_artillery(0));
+        assert!(b.perform_special_ability(1, ability_ids::UNLIMBER, None, false));
+        assert!(!b.units[0].ability_active(ability_ids::UNLIMBER));
+        b.units[0].deployable = Some(ability_ids::GABIONADE);
+        assert!(!b.perform_special_ability(1, ability_ids::UNLIMBER, None, false), "gabionade, not deploying");
+        b.deploying = true;
+        assert!(b.perform_special_ability(1, ability_ids::UNLIMBER, None, false));
+        assert_eq!(b.units[0].deployable, None);
+        assert!(b.units[0].ability_active(ability_ids::UNLIMBER));
+    }
+
+    /// The artillery boosts (19, 20): only unlimbered artillery with guns, out of deployment.
+    #[test]
+    fn artillery_boosts_need_unlimbered_guns() {
+        let mut b = battle();
+        let mut u = able(1, 20, &["unlimber", "artillery_accuracy_boost"]);
+        u.unit_category = "artillery".into();
+        b.add_unit(u);
+        let boost = ability_ids::ARTILLERY_ACCURACY_BOOST;
+        assert!(!b.can_perform_special_ability(0, boost), "no guns: on foot");
+        b.units[0].missile = Some(weapon(2, true));
+        assert!(!b.can_perform_special_ability(0, boost), "limbered");
+        assert!(b.perform_special_ability(1, ability_ids::UNLIMBER, None, false));
+        assert!(b.can_perform_special_ability(0, boost));
+        b.deploying = true;
+        assert!(!b.can_perform_special_ability(0, boost), "deployment");
+        b.deploying = false;
+        // Infantry is on foot.
+        let mut inf = able(2, 20, &["artillery_accuracy_boost"]);
+        inf.unit_category = "infantry".into();
+        inf.missile = Some(weapon(2, true));
+        b.add_unit(inf);
+        assert!(!b.can_perform_special_ability(1, boost));
+        assert!(b.perform_special_ability(1, boost, None, false));
+        assert!(b.units[0].ability_active(boost));
+    }
+
+    /// Wedge and diamond (2, 3) are refused while dismounted.
+    #[test]
+    fn wedge_is_refused_while_dismounted() {
+        let mut b = battle();
+        let mut u = able(1, 60, &["wedge_formation", "dismount"]);
+        u.is_cavalry = true;
+        b.add_unit(u);
+        let wedge = ability_ids::WEDGE_FORMATION;
+        assert!(b.perform_special_ability(1, wedge, None, false));
+        assert!(b.perform_special_ability(1, wedge, None, false));
+        assert!(!b.units[0].ability_active(wedge));
+        assert!(b.perform_special_ability(1, ability_ids::DISMOUNT, None, false));
+        assert!(super::super::strength::dismount_active(&b.units[0]));
+        assert!(!b.perform_special_ability(1, wedge, None, false));
     }
 
     fn inspire_battle(rank: i32, target_at: (f32, f32)) -> Battle {
@@ -832,6 +1177,26 @@ mod tests {
         b.step();
         assert_eq!(b.units[0].inspire_order, None);
         assert!(!b.units[0].ability_active(ability_ids::INSPIRE_UNIT));
+    }
+
+    /// `0x005612D0` toggles only abilities outside Rally and Inspire (17, 18) in deployment: both
+    /// are refused there without spending a use, and work once the battle starts.
+    #[test]
+    fn rally_and_inspire_are_not_performed_in_deployment() {
+        let mut b = inspire_battle(5, (20.0, 0.0));
+        b.deploying = true;
+        for ability in [ability_ids::RALLY, ability_ids::INSPIRE_UNIT] {
+            assert!(!b.perform_special_ability(1, ability, Some(2), false), "ability {ability} in deployment");
+            assert!(!b.units[0].ability_active(ability));
+            assert_eq!(b.units[0].ability_slot(ability).unwrap().uses_left, 2, "no use was spent");
+        }
+        assert_eq!(b.units[0].inspire_order, None);
+        assert!(b.units[1].morale.transient_effects.is_empty(), "nobody was rallied or inspired");
+        b.deploying = false;
+        assert!(b.perform_special_ability(1, ability_ids::RALLY, None, false));
+        assert!(b.units[0].ability_active(ability_ids::RALLY));
+        assert!(b.perform_special_ability(1, ability_ids::INSPIRE_UNIT, Some(2), false));
+        assert!(b.units[0].inspire_order.is_some());
     }
 
     #[test]

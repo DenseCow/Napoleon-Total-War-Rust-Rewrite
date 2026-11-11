@@ -2,7 +2,7 @@
 //! [`CampaignFeatures`] the exe hard-codes for them (MODDING_AUDIT.md §1.1). The model reads the
 //! table, never the key, so a campaign of another source sets its own.
 
-use ntw_sim::campaign::features::{AiCaptureLiberation, CampaignFeatures, LootResentment, PeaceAccessGrant, UnitKeyEffects};
+use ntw_sim::campaign::features::{AiCaptureLiberation, CampaignFeatures, LootResentment, PeaceAccessGrant, UnitKeyEffects, VictoryRival};
 
 /// The Peninsular campaign's key: the exe's switches below test it (each CONFIRMED at the address the
 /// feature's field names).
@@ -18,12 +18,24 @@ const EPISODIC_3: &str = "episodic_3";
 /// The campaign-key prefix whose building effects tables show no technologies (`0x009B2BB0`, string
 /// `0x0136C4F8` tested at `0x009B2FD9`, CONFIRMED); no Napoleon campaign key has it.
 const EPISODIC_PREFIX: &str = "episodic";
+/// The conditions type of the victory test's rival rule and of the Peninsular shared win (`0x0096FCE0`
+/// and `0x0096CD10` compare the record's +0x7C with 5, CONFIRMED).
+const PENINSULAR_CONDITIONS: u32 = 5;
+/// The rival the victory test looks up for that type (`0x0096FCE0` → `0x00955B70`, CONFIRMED).
+const VICTORY_RIVAL: &str = "spa_france";
 
-/// The feature set the exe gives the original's campaign `key`; any other key gets none (the exe's
-/// behaviour for every campaign it has no switch for).
+/// The feature set the exe gives the original's campaign `key`; any other key gets only the rules the
+/// exe applies in every campaign (the victory test's rival rule).
 pub fn original(key: &str) -> CampaignFeatures {
-    let mut f = CampaignFeatures::default();
+    // The victory test `0x0096FCE0` looks the rival up whatever the campaign; outside the Peninsular map
+    // the faction does not exist, so a type-5 record is then met by its regions alone.
+    let mut f = CampaignFeatures {
+        victory_rival: Some(VictoryRival { kind: PENINSULAR_CONDITIONS, faction: VICTORY_RIVAL.into() }),
+        ..CampaignFeatures::default()
+    };
     if key == PENINSULAR {
+        // The victory check `0x0096CD10`: an allied human with a type-5 record shares the win.
+        f.shared_victory_kind = Some(PENINSULAR_CONDITIONS);
         f.loot_value = (2, 10_000);
         f.looting_alignment = Some(("align_pro_french".into(), "align_anti_french".into()));
         f.unit_key_effects = vec![
@@ -74,18 +86,26 @@ pub fn original(key: &str) -> CampaignFeatures {
 mod tests {
     use super::*;
 
+    /// What every original key gets: the default plus the victory test's rival rule.
+    fn base() -> CampaignFeatures {
+        CampaignFeatures { victory_rival: Some(VictoryRival { kind: 5, faction: "spa_france".into() }), ..CampaignFeatures::default() }
+    }
+
     /// Only the two switched campaigns get rule features, and the four single-player Napoleon
-    /// campaigns the save-name switch; the others behave as the exe's default.
+    /// campaigns the save-name switch; the others behave as the exe's default, with the victory test's
+    /// rival rule every campaign has.
     #[test]
     fn the_original_keys_get_the_exe_switches() {
         for key in ["eur_napoleon", "egy_napoleon", "ita_napoleon", "tut_napoleon"] {
             let f = original(key);
             assert!(f.save_name_uses_campaign_name, "{key}");
-            assert_eq!(CampaignFeatures { save_name_uses_campaign_name: false, ..f }, CampaignFeatures::default(), "{key}");
+            assert_eq!(CampaignFeatures { save_name_uses_campaign_name: false, ..f }, base(), "{key}");
         }
         for key in ["mp_ita_napoleon", "made_up_campaign"] {
-            assert_eq!(original(key), CampaignFeatures::default(), "{key}");
+            assert_eq!(original(key), base(), "{key}");
         }
+        assert_eq!(original("spa_napoleon").shared_victory_kind, Some(5));
+        assert_eq!(original("spa_napoleon").victory_rival, base().victory_rival);
         assert!(!original("spa_napoleon").save_name_uses_campaign_name, "the Peninsular campaign takes the faction's name");
         let spa = original("spa_napoleon");
         assert_eq!(spa.loot_value, (2, 10_000));
@@ -106,13 +126,13 @@ mod tests {
         let mp = original("mp_eur_napoleon");
         assert_eq!(mp.ai_recruitment_bonus("france"), 1);
         assert_eq!(mp.ai_recruitment_bonus("britain"), 0);
-        assert_eq!(CampaignFeatures { ai_recruitment_points: Vec::new(), ..mp }, CampaignFeatures::default());
+        assert_eq!(CampaignFeatures { ai_recruitment_points: Vec::new(), ..mp }, base());
         assert_eq!(original("episodic_3").diplomacy_hidden_factions, ["britain"]);
         for key in ["episodic_1", "episodic_3"] {
             assert!(original(key).effects_technologies_hidden, "{key}");
         }
         assert!(!original("Episodic_1").effects_technologies_hidden, "case-sensitive prefix");
-        assert_eq!(CampaignFeatures { effects_technologies_hidden: false, ..original("episodic_1") }, CampaignFeatures::default());
+        assert_eq!(CampaignFeatures { effects_technologies_hidden: false, ..original("episodic_1") }, base());
     }
 
     /// A campaign's own data can name any feature set: it round-trips through the open text format.

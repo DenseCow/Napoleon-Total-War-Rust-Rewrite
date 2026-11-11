@@ -348,6 +348,10 @@ pub struct CampaignRules {
     /// [`super::population::UNREST_DEMANDS`] (`0x008EB3F0`, CONFIRMED: keyed by the cause and kind names joined).
     /// A missing pair demands nothing (0).
     pub unrest_demands: BTreeMap<(u32, u32), u32>,
+    /// `unrest_cause_to_demands` #3 as (cause, kind) → the message key the turn start's outcome posts
+    /// ([`super::population::unrest_outcome`], `0x008B46A0`, CONFIRMED: the row found by the same cause + kind
+    /// key, its #3 at row +0xC). A missing pair posts the kind's default.
+    pub unrest_messages: BTreeMap<(u32, u32), String>,
     /// `technologies` with their `technology_required_technology_junctions` and
     /// `technology_required_building_levels_junctions` rows, by key.
     pub technologies: BTreeMap<String, TechRules>,

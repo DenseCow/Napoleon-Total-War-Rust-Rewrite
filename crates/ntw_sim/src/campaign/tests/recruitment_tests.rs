@@ -487,6 +487,292 @@ fn a_reinforcement_whose_commander_is_gone_stays_where_it_was_raised() {
     assert_eq!(m.world.forces[&force].units.len(), 2);
 }
 
+/// The army raised for general 100 at region 10, its colonel, and the colonel's action points set to `mp`.
+fn raised_reinforcement(m: &mut CampaignModel, mp: i32) -> (ForceId, CharacterId) {
+    let ev = m.spawn_reinforcement(RegionId(10), CharacterId(100), vec!["test_recruit".into(), "test_unit".into()]);
+    let CampaignEvent::UnitTrained { force, .. } = ev[0] else { panic!("{ev:?}") };
+    let colonel = m.world.forces[&force].commander.unwrap();
+    m.world.characters.get_mut(&colonel).unwrap().movement_points = mp;
+    (force, colonel)
+}
+
+/// The reinforcement order is a multi-turn one (`0x009195A0`, order object `0x00905460`): given even when
+/// the new army cannot move this turn (the execute `0x0095BA40` commits the path whatever the points), it
+/// replaces the entry, stays on the colonel (character +0x9C) and is resumed at each later turn start
+/// (`0x009653D0`), following the target, until the merge completes it (`0x0094E840`).
+#[test]
+fn a_reinforcement_out_of_reach_marches_on_at_later_turn_starts() {
+    let mut m = commander_recruitment_model();
+    let general = CharacterId(100);
+    let (force, colonel) = raised_reinforcement(&mut m, 0);
+    assert!(m.march_reinforcements(A).is_empty());
+    assert!(m.world.reinforcements.is_empty(), "the entry is deleted once the order is given");
+    assert_eq!(m.world.standing_orders.get(&colonel), Some(&StandingOrder::JoinForce { into: ForceId(1000) }));
+    // Still no points: the order waits.
+    assert!(m.resume_standing_orders(A).is_empty());
+    assert!(m.world.standing_orders.contains_key(&colonel));
+    // The general comes closer and the colonel has his points back: the march reaches him and merges.
+    m.world.characters.get_mut(&general).unwrap().position = pos(10, 1);
+    m.world.characters.get_mut(&colonel).unwrap().movement_points = 25;
+    let ev = m.resume_standing_orders(A);
+    assert!(ev.contains(&CampaignEvent::CampaignArmiesMerge { force, into: ForceId(1000) }), "{ev:?}");
+    assert!(!m.world.forces.contains_key(&force));
+    assert_eq!(m.world.forces[&ForceId(1000)].units.len(), 3);
+    assert!(m.world.standing_orders.is_empty(), "the merge completes the order");
+}
+
+/// The turn start resumes the order (`0x008F2C5B` → `0x009653D0`, after the reinforcement manager): an
+/// order kept from an earlier turn merges once the general is in reach.
+#[test]
+fn the_turn_start_resumes_the_reinforcement_order() {
+    let mut m = commander_recruitment_model();
+    let general = CharacterId(100);
+    m.turn.humans = vec![A];
+    m.start_campaign();
+    // Given in A's turn without points (the order waits); A's next turn start refills them first.
+    let (force, colonel) = raised_reinforcement(&mut m, 0);
+    m.world.characters.get_mut(&general).unwrap().position = pos(11, 1);
+    m.world.reinforcements.clear();
+    m.world.standing_orders.insert(colonel, StandingOrder::JoinForce { into: ForceId(1000) });
+    let ev = m.end_turn();
+    let merged = ev.iter().position(|e| *e == CampaignEvent::CampaignArmiesMerge { force, into: ForceId(1000) }).expect("the army merges");
+    let started = ev.iter().position(|e| *e == CampaignEvent::FactionTurnStart { faction: A }).unwrap();
+    assert!(merged < started);
+    assert!(m.world.standing_orders.is_empty());
+}
+
+/// When the order cannot be given (`0x00968B00` returns 0: here the gate `0x008BE360` refuses while a battle
+/// is pending), the entry is kept and tried again at the next turn start (`0x00B5C710` deletes only on
+/// success).
+#[test]
+fn a_reinforcement_whose_order_cannot_be_given_keeps_its_entry() {
+    let mut m = commander_recruitment_model();
+    let (_, colonel) = raised_reinforcement(&mut m, 0);
+    let entry = m.world.reinforcements.clone();
+    m.pending_battle = Some(PendingBattle { attacker: ForceId(1001), defenders: vec![ForceId(1000)], settlement: None, resume: None });
+    assert!(m.march_reinforcements(A).is_empty());
+    assert_eq!(m.world.reinforcements, entry);
+    assert!(m.world.standing_orders.is_empty());
+    m.pending_battle = None;
+    m.march_reinforcements(A);
+    assert!(m.world.reinforcements.is_empty());
+    assert!(m.world.standing_orders.contains_key(&colonel));
+}
+
+/// A new order ends the march (`0x00924D30` cancels the holder's old order), and so does the target's
+/// force going away (the still-valid check, vtable +0x10): the next resume cancels it.
+#[test]
+fn a_new_order_or_a_lost_target_ends_the_reinforcement_march() {
+    let mut m = commander_recruitment_model();
+    let (_, colonel) = raised_reinforcement(&mut m, 0);
+    m.march_reinforcements(A);
+    m.world.characters.get_mut(&colonel).unwrap().movement_points = 25;
+    m.apply(CampaignCommand::MoveCharacter { character: colonel, to: pos(10, 1) }).unwrap();
+    assert!(m.world.standing_orders.is_empty(), "the move is a new order");
+
+    let mut m = commander_recruitment_model();
+    raised_reinforcement(&mut m, 0);
+    m.march_reinforcements(A);
+    assert_eq!(m.world.standing_orders.len(), 1);
+    m.world.forces.remove(&ForceId(1000));
+    assert!(m.resume_standing_orders(A).is_empty());
+    assert!(m.world.standing_orders.is_empty());
+}
+
+/// A new order the army has no action points for still ends the march: RunCharacterOrder `0x009651A0`
+/// cancels the old order (`0x00924D30`) before the new one's execute finds the path and the points. One
+/// refused at the gate (`0x008BE360`, here a pending battle) never reaches it, and the march stays.
+#[test]
+fn a_new_order_refused_for_its_points_still_ends_the_reinforcement_march() {
+    let mut m = commander_recruitment_model();
+    let (force, colonel) = raised_reinforcement(&mut m, 0);
+    m.march_reinforcements(A);
+    let march = m.world.standing_orders.clone();
+    assert_eq!(march.len(), 1);
+    let order = CampaignCommand::MoveForce { force, to: pos(10, 1) };
+    m.pending_battle = Some(PendingBattle { attacker: ForceId(1001), defenders: vec![ForceId(1000)], settlement: None, resume: None });
+    assert_eq!(m.apply(order.clone()), Err(CommandError::BattlePending));
+    assert_eq!(m.world.standing_orders, march, "refused at the gate");
+    m.pending_battle = None;
+    assert!(matches!(m.apply(order), Err(CommandError::NotEnoughMovementPoints { available: 0, .. })));
+    assert!(m.world.standing_orders.is_empty(), "the new order replaced the march");
+    m.world.characters.get_mut(&colonel).unwrap().movement_points = 25;
+    assert!(m.resume_standing_orders(A).is_empty(), "no march to resume");
+}
+
+/// An army's move that finds no path keeps the march: the move's pre-check (`0x00924790` / `0x009246C0`) asks
+/// the path query `0x00B17A10` with no cost limit for a character who passes the army test `0x009D0F50`, and
+/// stops before RunCharacterOrder `0x009651A0` reaches the cancel (`0x00924D30`) when there is none, so
+/// also before the execute's order start (`0x008FF470`): the army's siege goes on.
+#[test]
+fn an_army_move_without_a_path_keeps_the_reinforcement_march() {
+    use crate::campaign::pathing::PathGrid;
+    let mut m = commander_recruitment_model();
+    let (force, colonel) = raised_reinforcement(&mut m, 0);
+    m.march_reinforcements(A);
+    m.world.characters.get_mut(&colonel).unwrap().movement_points = 25;
+    let march = m.world.standing_orders.clone();
+    assert_eq!(march.get(&colonel), Some(&StandingOrder::JoinForce { into: ForceId(1000) }));
+    // A map with no passable cell: no path anywhere.
+    m.attach_terrain(crate::campaign::world::Terrain(Arc::new(PathGrid::new((0.0, 0.0), 1.0, 30, 4))));
+    m.world.regions.get_mut(&RegionId(11)).unwrap().siege.besiegers.push(force);
+    let besieging = |m: &CampaignModel| m.world.regions[&RegionId(11)].siege.besiegers.contains(&force);
+    assert_eq!(m.apply(CampaignCommand::MoveForce { force, to: pos(15, 1) }), Err(CommandError::NoPath));
+    assert_eq!(m.world.standing_orders, march, "the move's pre-check refused it before the cancel");
+    assert!(besieging(&m), "and before the order start");
+    assert_eq!(m.apply(CampaignCommand::MoveCharacter { character: colonel, to: pos(15, 1) }), Err(CommandError::NoPath));
+    assert_eq!(m.world.standing_orders, march);
+    assert!(besieging(&m));
+}
+
+/// `0x009D0D00`, the entry's check that its army may join the target's force: two armies always; an army
+/// to a navy carrying nothing; never a navy carrying nothing to an army; a navy carrying an army when that
+/// army fits; an agent without a force while the target's army has room; never a type that does not count
+/// against a residence's room (`agents` #4).
+#[test]
+fn who_may_join_an_own_force() {
+    let mut m = commander_recruitment_model();
+    let (_, colonel) = raised_reinforcement(&mut m, 0);
+    let general = CharacterId(100);
+    assert!(m.may_join_own_force(colonel, general));
+    let admiral = character(103, A, CharacterKind::Admiral, 60);
+    m.world.characters.insert(admiral.id, admiral);
+    m.world.forces.insert(
+        ForceId(1002),
+        MilitaryForce { id: ForceId(1002), faction: A, commander: Some(CharacterId(103)), units: vec![unit(4)], is_navy: true },
+    );
+    assert!(m.may_join_own_force(colonel, CharacterId(103)), "an army to a navy carrying nothing");
+    assert!(!m.may_join_own_force(CharacterId(103), general), "a navy carrying nothing to an army");
+    // A third army of A aboard the navy: an army joins the navy when it fits the carried army.
+    let mut other = character(105, A, CharacterKind::General, 30);
+    other.position = pos(3, 0);
+    m.world.characters.insert(other.id, other);
+    m.world.forces.insert(
+        ForceId(1005),
+        MilitaryForce { id: ForceId(1005), faction: A, commander: Some(CharacterId(105)), units: vec![unit(6)], is_navy: false },
+    );
+    m.world.embarked.insert(ForceId(1005), ForceId(1002));
+    assert!(m.may_join_own_force(colonel, CharacterId(103)));
+    assert!(m.may_join_own_force(CharacterId(103), general), "the carried army fits the target's");
+    m.world.forces.get_mut(&ForceId(1005)).unwrap().units = (10..30).map(unit).collect();
+    m.world.forces.get_mut(&ForceId(1000)).unwrap().units = (30..50).map(unit).collect();
+    assert!(!m.may_join_own_force(CharacterId(103), general), "a full target army");
+    assert!(!m.may_join_own_force(colonel, CharacterId(103)), "a full carried army");
+    // An agent without a force, while the target's army has room.
+    let rake = character(104, A, CharacterKind::Rake, 10);
+    m.world.characters.insert(rake.id, rake);
+    assert!(m.may_join_own_force(CharacterId(104), general));
+    // ... and to a navy: the branch needs the target to lead any force (`0x009D0F10`, his +0x2A8).
+    assert!(m.may_join_own_force(CharacterId(104), CharacterId(103)), "an agent without a force to an admiral");
+    // Not to a character who leads no force.
+    let spy = character(106, A, CharacterKind::Rake, 10);
+    m.world.characters.insert(spy.id, spy);
+    assert!(!m.may_join_own_force(CharacterId(104), CharacterId(106)));
+    let mut rules = (*m.rules).clone();
+    rules.limits.max_residence_characters = 0;
+    m.rules = std::sync::Arc::new(rules);
+    assert!(!m.may_join_own_force(CharacterId(104), general));
+    // A type that does not count never joins.
+    let mut rules = (*m.rules).clone();
+    rules.residence_exempt_agents.insert("colonel".into());
+    m.rules = std::sync::Arc::new(rules);
+    assert!(!m.may_join_own_force(colonel, general));
+}
+
+/// `0x00B1E500` phase 1: an item raised through a general who leads no army but rides in another's army
+/// (attached to one of its units, his holder +0x2B0) marches to that army's commander. Riding in a navy,
+/// or an admiral attached to his own ship, the exe hands it to the admiral, and the retarget's relink
+/// into the admiral's army list crashes (ORIGINAL BUG, `0x00B1B480` → `0x008CF82A`); ours spawns it in
+/// the settlement and clears its target.
+/// The exe reaches phase 1 with such a target only when he lost his army after the queueing: queueing
+/// through a character with no army crashes in the item constructor (ORIGINAL BUG, `0x00AECEE0` →
+/// `0x008CF82A`); ours queues it, as the recruits below through the rider and the admiral show.
+#[test]
+fn an_item_through_a_rider_marches_to_the_army_he_rides_in() {
+    let general = CharacterId(100);
+    let rider = CharacterId(105);
+    for in_navy in [false, true] {
+        let mut m = commander_recruitment_model();
+        m.world.characters.insert(rider, character(105, A, CharacterKind::General, 30));
+        m.world.characters.get_mut(&general).unwrap().position = pos(10, 1);
+        let admiral = character(103, A, CharacterKind::Admiral, 60);
+        m.world.characters.insert(admiral.id, admiral);
+        let mut ship = unit(4);
+        ship.character = Some(CharacterId(103));
+        m.world.forces.insert(
+            ForceId(1002),
+            MilitaryForce { id: ForceId(1002), faction: A, commander: Some(CharacterId(103)), units: vec![ship], is_navy: true },
+        );
+        let mut mount = unit(5);
+        mount.character = Some(rider);
+        m.world.forces.get_mut(&ForceId(if in_navy { 1002 } else { 1000 })).unwrap().units.push(mount);
+        let mut targets = vec![rider];
+        if in_navy {
+            targets.push(CharacterId(103));
+        }
+        for &t in &targets {
+            m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into(), target: Some(t) }).unwrap();
+        }
+        let leaders = [general].into_iter().collect();
+        assert_eq!(m.reinforcement_commander(rider, &leaders), (!in_navy).then_some(general));
+        assert_eq!(m.reinforcement_commander(general, &leaders), Some(general));
+        m.turn.humans = vec![A];
+        m.start_campaign();
+        let ev = m.end_turn();
+        let trained: Vec<_> = ev.iter().filter_map(|e| if let CampaignEvent::UnitTrained { force, .. } = e { Some(*force) } else { None }).collect();
+        assert_eq!(trained.len(), targets.len(), "{ev:?}");
+        if in_navy {
+            assert!(trained.iter().all(|f| m.world.regions[&RegionId(10)].garrison == Some(*f)), "{ev:?}");
+            assert!(m.world.reinforcements.is_empty() && m.world.standing_orders.is_empty());
+        } else {
+            assert!(ev.contains(&CampaignEvent::CampaignArmiesMerge { force: trained[0], into: ForceId(1000) }), "{ev:?}");
+            assert_eq!(m.world.regions[&RegionId(10)].garrison, None);
+        }
+    }
+}
+
+/// ORIGINAL BUG (`0x00B1E500` phase 1): the exe looks an item's (target, AI key) pair up before the
+/// retarget to the rider's commander (`0x00B1E596`-`0x00B1E5AF`) and pushes it after it (`0x00B1E677`), so
+/// an item through the general and one through a rider in his army, or two items through the rider, push
+/// the general's pair twice; the group spawn `0x00B1D3F0` runs once per pair and gathers every finished
+/// item of the general each time (`0x00B5C110` does not read the spawned flag +0x48): two armies, each
+/// with both units. Ours raises one army with the two units.
+#[test]
+fn items_through_a_general_and_his_rider_raise_one_army() {
+    let general = CharacterId(100);
+    let rider = CharacterId(105);
+    for targets in [[general, rider], [rider, rider]] {
+        let mut m = commander_recruitment_model();
+        m.world.characters.insert(rider, character(105, A, CharacterKind::General, 30));
+        m.world.characters.get_mut(&general).unwrap().position = pos(10, 1);
+        let mut mount = unit(5);
+        mount.character = Some(rider);
+        m.world.forces.get_mut(&ForceId(1000)).unwrap().units.push(mount);
+        for t in targets {
+            m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into(), target: Some(t) }).unwrap();
+        }
+        m.turn.humans = vec![A];
+        m.start_campaign();
+        let ev = m.end_turn();
+        let trained: Vec<_> = ev.iter().filter_map(|e| if let CampaignEvent::UnitTrained { force, .. } = e { Some(*force) } else { None }).collect();
+        assert_eq!(trained.len(), 2, "{targets:?}: {ev:?}");
+        assert!(trained.iter().all(|f| *f == trained[0]), "one army: {targets:?}: {ev:?}");
+        assert_eq!(m.world.regions[&RegionId(10)].garrison, None);
+    }
+}
+
+/// The recruit command takes any character as the item's target: neither the handler (`0x00936B90`, its
+/// target read by `0x008FDE50`) nor the queueing (`0x00B58DD0`, the item constructor `0x00AECEE0`) checks
+/// his faction, so another faction's general is queued as the target.
+#[test]
+fn a_recruit_through_another_factions_general_is_queued() {
+    let mut m = commander_recruitment_model();
+    let foreign = CharacterId(101);
+    assert_ne!(m.world.characters[&foreign].faction, A);
+    m.apply(CampaignCommand::Recruit { region: RegionId(10), unit_key: "test_recruit".into(), target: Some(foreign) }).unwrap();
+    assert_eq!(m.world.regions[&RegionId(10)].recruitment_queue.last().unwrap().target, Some(foreign));
+}
+
 /// An item whose commander died before it finished has lost its target (`0x00B57F40`) and spawns as a
 /// settlement recruit; so does one whose commander leads no army (`0x00B1E500` phase 1: +0x18 cleared).
 #[test]

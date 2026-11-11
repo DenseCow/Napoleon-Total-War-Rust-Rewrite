@@ -42,6 +42,7 @@ mod trade_order_tests;
 mod transfer;
 mod treaty_money_tests;
 mod turn_order_tests;
+mod unrest_outcome_tests;
 mod victory_check_tests;
 
 const A: FactionId = FactionId(1);

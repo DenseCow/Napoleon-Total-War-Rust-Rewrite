@@ -339,6 +339,11 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
             let cause = index(&UNREST_CAUSES, &d.cause, "the unrest causes", &row);
             let kind = index(&UNREST_KINDS, &d.kind, "the unrest kinds", &row);
             let demand = index(&UNREST_DEMANDS, &d.demand, "the unrest demands", &row);
+            // The turn start's outcome reads the row's message key (#3) by the same cause + kind key
+            // (`0x008B46A0`), whatever its demand names.
+            if let (Some(cause), Some(kind)) = (cause, kind) {
+                r.unrest_messages.insert((cause, kind), d.message.clone());
+            }
             if let (Some(cause), Some(kind), Some(demand)) = (cause, kind, demand) {
                 r.unrest_demands.insert((cause, kind), demand);
             }

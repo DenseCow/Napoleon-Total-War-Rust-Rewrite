@@ -128,11 +128,17 @@ fn ai_capture_occupies_and_liberation_hands_the_region_over() {
     assert_eq!(m.liberation_target(RegionId(11), A), None);
     m.world.region_rebel_factions.insert(RegionId(11), "test_faction_a".into());
     assert_eq!(m.liberation_target(RegionId(11), A), None);
-    // An open capture is settled as an occupation when the turn ends.
+    // The turn does not end while a capture waits for its choice (`0x008BE2A0` refuses while the
+    // pending stack +0xF70 has an entry); it ends once the choice is made.
     let mut m = capture_model(vec![A]);
     m.capture_by_force(RegionId(11), A, Some(ForceId(1000)));
+    let before = m.state_hash();
+    assert_eq!(m.apply(CampaignCommand::EndTurn), Err(CommandError::ActionPending));
+    assert_eq!(m.state_hash(), before);
+    assert!(m.pending_capture.is_some());
+    m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Occupy }).unwrap();
     let ev = m.apply(CampaignCommand::EndTurn).unwrap();
-    assert!(ev.iter().any(|e| matches!(e, CampaignEvent::CaptureResolved { choice: CaptureChoice::Occupy, .. })));
+    assert!(ev.iter().any(|e| matches!(e, CampaignEvent::FactionTurnEnd { faction } if *faction == A)));
 }
 
 #[test]

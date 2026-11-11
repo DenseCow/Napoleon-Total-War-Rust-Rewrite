@@ -1218,11 +1218,18 @@ fn ai_areas_on_the_europe_start() {
     // region-transfer desire (counter 0), not the constructor's seed.
     assert_eq!((loaded.model.director.rng.state, loaded.model.director.transfer_counter), (37_138, 0));
     assert!(loaded.model.director.pending.is_empty());
-    // Every faction with victory options gets option 0 until the human is picked; then only it.
-    assert!(loaded.model.world.victory_regions.len() > 1);
+    // Every faction holds the start position's default victory conditions (type 5, no regions) until
+    // the human is picked; then the human alone gets its option 0 (eur france: type 1, the five
+    // regions, 35 in all by 1812).
+    let id = |m: &ntw_sim::campaign::CampaignModel, k: &str| m.faction_by_key(k).expect(k).id;
+    let (france, britain) = (id(&loaded.model, "france"), id(&loaded.model, "britain"));
+    let vc = |m: &ntw_sim::campaign::CampaignModel, f| m.world.victory_conditions[&f].clone();
+    assert!(loaded.model.world.victory_conditions.len() > 1);
+    assert_eq!((vc(&loaded.model, france).kind, vc(&loaded.model, france).regions.len()), (5, 0));
     assert!(loaded.set_human("france"));
-    let france = loaded.model.faction_by_key("france").expect("france").id;
-    assert_eq!(loaded.model.world.victory_regions.keys().copied().collect::<Vec<_>>(), [france]);
+    let fr = vc(&loaded.model, france);
+    assert_eq!((fr.kind, fr.count, fr.regions.len(), fr.deadline.year, fr.hold_turns, fr.met), (1, 35, 5, 1812, 0, false));
+    assert_eq!((vc(&loaded.model, britain).kind, vc(&loaded.model, britain).regions.len()), (5, 0));
     let m = loaded.model;
     let areas = &m.world.ai_areas;
     assert_eq!(areas.len(), 101);

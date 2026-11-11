@@ -210,6 +210,10 @@ pub(super) struct Inner {
     posted_calls: RefCell<Vec<PostedCall>>,
     /// The movie a component shows (`AttachCustomControl`), until `CampaignUI.MovieDismissed`.
     pub(super) attached_movie: RefCell<Option<(NodeId, Rc<str>)>>,
+    /// The outcome movie panel the campaign UI keeps (the exe's movie-panel object at +0xCC0 of
+    /// the UI manager's +0x3BC part): set when the panel opens, cleared by
+    /// `CampaignUI.MovieDismissed` or when the next movie replaces it.
+    pub(super) movie_panel: std::cell::Cell<Option<NodeId>>,
     /// The component whose script the engine is running (see [`ScriptContext`]).
     script_context: std::cell::Cell<Option<NodeId>>,
     /// How many calls switched the context through `__ntw_call_as` (tests check that per-frame
@@ -434,6 +438,7 @@ impl UiScriptHost {
             logged_pairs: RefCell::default(),
             posted_calls: RefCell::default(),
             attached_movie: RefCell::default(),
+            movie_panel: std::cell::Cell::new(None),
             script_context: std::cell::Cell::new(None),
             #[cfg(test)]
             cross_context_calls: std::cell::Cell::new(0),

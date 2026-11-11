@@ -223,6 +223,8 @@ pub(crate) fn load_world(
     let mut recruitment_sources = BTreeMap::new();
     // Each settlement's resident characters (`read_region`'s third value), applied after the garrisons.
     let mut settlement_residents: Vec<(RegionId, Vec<CharacterId>)> = Vec::new();
+    // The risen armies linked to a region so far, in file order (see `link_risen_armies`).
+    let mut risen_linked = BTreeSet::new();
     for (i, item) in regions.items.iter().enumerate() {
         let rpath = format!("{rm_path}/REGIONS_ARRAY[{i}]/REGION");
         let rec = first_record(item, "REGION").ok_or_else(|| LoadError::MissingRecord {
@@ -258,6 +260,10 @@ pub(crate) fn load_world(
         let (known, dangling): (Vec<ForceId>, Vec<ForceId>) = read_risen_armies(rec).into_iter().partition(|id| world.forces.contains_key(id));
         if !dangling.is_empty() {
             log::warn!("{rpath}: risen army ids {dangling:?} name no loaded force; dropped");
+        }
+        let (known, linked_before) = link_risen_armies(known, &mut risen_linked);
+        if !linked_before.is_empty() {
+            log::warn!("{rpath}: risen armies {linked_before:?} are already in an earlier risen list; dropped (the exe links an army once)");
         }
         // The exe links each listed army's REBEL_DATA (`0x008CFB60` takes army +0x98 + 0x68), so a
         // listed army without one is malformed: its region's class tests find no government.
@@ -949,6 +955,18 @@ fn read_risen_armies(rec: &EsfRecord) -> Vec<ForceId> {
         .unwrap_or_default()
 }
 
+/// One region's risen armies as the exe links them (CONFIRMED by decompilation): each army's
+/// `REBEL_DATA` holds one link to its region (+0x68, {+0 the army, +4 the region's list}), and
+/// `0x008CFB60` → `AppendOwnedLinkToOwnerList` `0x008CF7D0` appends it only while that link has no
+/// list yet. So an id a save lists twice, in one region or in a later one (the region manager
+/// `0x00A4CE20` builds the regions in file order), stays where it was first linked. Returns the ids
+/// kept, in order, and those already linked; `linked` gains the kept ones. This keeps the model's
+/// lists what the exe's links are: each army in at most one list, once, which
+/// `CampaignModel::crack_down_after_last_rising` relies on to find the army's region.
+fn link_risen_armies(ids: Vec<ForceId>, linked: &mut BTreeSet<ForceId>) -> (Vec<ForceId>, Vec<ForceId>) {
+    ids.into_iter().partition(|id| linked.insert(*id))
+}
+
 /// The child of a `REGION` holding its risen-army ids ([`read_risen_armies`]; the save writes the
 /// model's list back there): #35 when #34 is the `REBEL_DATA_INNARDS` record, else #34.
 pub(crate) fn risen_armies_slot(rec: &EsfRecord) -> usize {
@@ -1314,6 +1332,17 @@ mod transport_tests {
         assert_eq!(read_risen_armies(&rec("REGION", 0, children.clone())), [ForceId(12)]);
         children.truncate(35);
         assert!(read_risen_armies(&rec("REGION", 0, children)).is_empty());
+    }
+
+    /// An army is linked to the first list that names it, once (`0x008CF7D0` refuses a linked army):
+    /// a repeat in the same list or a later region's list is dropped, the rest keep their order.
+    #[test]
+    fn a_risen_army_is_linked_once() {
+        let mut linked = BTreeSet::new();
+        let (kept, again) = link_risen_armies(vec![ForceId(7), ForceId(9), ForceId(7)], &mut linked);
+        assert_eq!((kept, again), (vec![ForceId(7), ForceId(9)], vec![ForceId(7)]));
+        let (kept, again) = link_risen_armies(vec![ForceId(9), ForceId(12)], &mut linked);
+        assert_eq!((kept, again), (vec![ForceId(12)], vec![ForceId(9)]));
     }
 
     #[test]

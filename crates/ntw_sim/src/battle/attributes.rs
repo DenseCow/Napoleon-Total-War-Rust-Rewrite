@@ -10,6 +10,7 @@
 //! | `+0x188` | `+0x1A8` | 56 | melee strength +30 | marksmen (rifles, jägers, guerrillas) |
 //! | `+0x18F` | `+0x1AF` | 63 | melee strength +60 | (only the Austrian Windbüchse jägers) |
 //! | `+0x190` | `+0x1B0` | 64 | missile strength +70 | (only the Austrian Windbüchse jägers) |
+//! | `+0x168` | `+0x188` | 65 | fire and advance allowed while riding (`0x0053EFE0`) | (which units set it: not checked) |
 //! | `+0x169` | `+0x189` | 71 | rally ½ instead of ⅓, shock never persists, melee +50 | steadfast (heavy cavalry, guards …) |
 //! | `+0x16A` | `+0x18A` | 72 | morale: Eager → Impetuous allowed | impetuous (British heavy cavalry) |
 //! | `+0x16B` | `+0x18B` | 73 | frightens enemy cavalry within 100 m, melee +50 | frightens horses (camels) |
@@ -36,6 +37,8 @@ pub struct UnitAttributes {
     pub col63: bool,
     /// Column 64 (record `+0x190`): missile strength +70.
     pub col64: bool,
+    /// Column 65 (unit `+0x188`): a riding unit may still fire and advance (`0x0053EFE0`).
+    pub fires_mounted: bool,
     /// Column 71 (unit `+0x189`): easier rally, no lasting shock, melee strength +50.
     pub steadfast: bool,
     /// Column 72 (unit `+0x18A`): the morale state may rise to Impetuous.

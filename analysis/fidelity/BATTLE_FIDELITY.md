@@ -2735,8 +2735,7 @@ Ported in `ntw_sim::battle::special_abilities`; static traces, CONFIRMED unless 
   unit `+0xDAC`): duration left −1.0, recharge left −1.0, uses left = the record's number, active byte `+0x28`.
 - **Gate** `0x0053EA60`: the unit must list the ability; wedge / diamond are refused while dismount is active; an
   ability with counted uses is refused with none left, a timed one while its recharge runs. Its per-ability
-  conditions (formations, fire and advance, plug bayonets, stakes, unlimber, the artillery boosts; for Rally and
-  Inspire a test of the unit's special-men list `+0x280`) are not ported: PROVISIONAL "active and has men".
+  conditions are below ("The gate per ability", worker abilitygate).
 - **Perform** `0x005612D0` (the one entry of the button, the AI and the scripts): refused by `0x0055C780` (battle
   byte `+0x2704` with the unit's state 2 or 3; ported as "routing or shattered", PROVISIONAL) or the gate.
   Out of deployment (`0x0055AD60` false, battle phase ≥ 2) abilities 2, 3, 7 and 0x11 (Rally) go straight to
@@ -2744,9 +2743,21 @@ Ported in `ntw_sim::battle::special_abilities`; static traces, CONFIRMED unless 
   becomes an order (`0x0051D940`: id `+0x24`, target `+0x28`, run byte `+0x2C`; built only when the byte
   argument is clear or unit `+0x930` < 10, that argument being the queue flag, INFERRED). Its start
   `0x00550E30` builds the Inspire behaviour `0x0051E360` (target `+0x24`, run `+0x28`) for 0x12 and calls the
-  toggle at once for any other id. In deployment only an order through `0x005186C0` / `0x0056AC40` or the
-  toggle of an ability outside 0x11..0x12 is possible, so neither Rally nor Inspire is performed there.
-  Toggle: inactive → gate again and activate; active Rally / Inspire / artillery boost → switch off.
+  toggle at once for any other id. In deployment (worker abilitygatefix, CONFIRMED static) it acts only when
+  battle `+0x58` is 0 or the byte at unit `+0x1EC → +0xD4 → +0x38` is set (both read as passing, stand-in 1):
+  with a current order (unit `+0xAE8`, the order stack's count; top entry at `+0xADC + 4 × count`) it builds a
+  special-ability order (`0x005186C0`, `0x0051D940`, vtable `0x0132389C`) holding the request {ability id,
+  target, run} at `+0x24`, Rally and Inspire included, and hands that request to the unit's current order:
+  `0x0056AC40` walks the stack from the top entry, skips an entry whose byte `+0xD` is set (`0x00497550`), and
+  for any other calls `0x0056AAC0` on the built order with the entry as parameter; that sets the built order's
+  byte `+0x1C` (only outside deployment) and calls its vfunc `+0xC` = `0x0056AC00`, which calls the current
+  entry's vfunc `+0x54` with the request; the loop repeats while the stack shrinks. It stops there when the request is
+  taken; then it toggles the ability only when it is outside 0x11..0x12. So Rally and Inspire are never
+  toggled in deployment; with a current order their request goes to that order's vfunc `+0x54`, whose handling
+  is not traced (it may keep the request for later). Ours refuses both in deployment (test
+  `rally_and_inspire_are_not_performed_in_deployment`: the exe's rule for a unit with no current order; the
+  model has no orders) and toggles every other ability at once (the order path is stand-in 1). Toggle: see
+  "The toggle per ability" below.
 - **Activation** `0x0052ED80` → `0x0052ECC0`: refused without a use left or while the recharge runs
   (`0x0053E940`); the slot's old effect ends first; the effect object is built by id (0x11 → `0x0051DDB0`,
   0x12 → `0x0051DAF0`, 0x13 / 0x14 → `0x0051D9C0` / `0x0051DA00`, 0x15 → `0x0051DA60`); a counted use is spent;
@@ -2831,21 +2842,116 @@ Ported in `ntw_sim::battle::special_abilities`; static traces, CONFIRMED unless 
 - The toggle's case 18 (Inspire) also clears unit byte `+0xD99` on both paths (`0x00579622`): meaning UNKNOWN,
   not ported.
 
-### Formation and behaviour abilities and their slot (stand-in 3)
-The toggle `0x00578860` activates the slot through `0x0052ED80(id, 0)` on the switch-on path of cases 0..4, 6,
-7, 9..11 and 16 too, spending a use and starting the timers; the gate then refuses those slots like any other.
-Ours switches them on without the slot (`switch_on_untimed_ability`), so a mod's record for them (a
-`unit_special_abilities` row, or a battle file's own `recharge_time`) is ignored, and the slot tick switches off
-only Rally, Inspire and the artillery boosts (`uses_slot`): before, a timed record ended square formation one
-tick after switch-on with `in_square` left set (test `a_timed_record_does_not_end_a_formation_ability`). Vanilla
-is unaffected (the shipped table has rows only for 0x11..0x14). `0x0052ED80`'s return is not a clean bool (the
-recharge word or a test result); whether its callers use it is not read.
+### The gate per ability (worker abilitygate, 2026-11-10; CONFIRMED static)
+`0x0053EA60` after its common part (slot `0x00557480` → `0x0057ACA0`; dismount; uses and recharge), by ability.
+Ported in `Battle::can_perform_special_ability`; the tests are named after each case.
+- **0, 1, 6, 15 (pike square, square, pike wall, dismount):** refused when `0x0055B140` returns a building (the
+  building of the unit's current order, order `+0xAE8`; ours: the building it holds, stand-in 1: the model has no
+  order objects). Unless the ability is already active, also refused while the squad byte `+0x72C` (squad
+  `+0xADC`) is set (writer not traced; read as clear, stand-in 1) or `0x0054EE90` holds: a squad's committed
+  attacker list is not empty (`0x00557430`, count at list `+0x18`; ours `LandUnit::attackers`). (Corrected by
+  worker abilitygatefix: the `+0x72C` test is not unconditional.) Square (1) also needs `0x00658B30` on the
+  unit's entity count `+0x2CC` (the men, for infantry; ours reads `men`): the count within the square template
+  table's smallest and largest size (`0x00655240` / `0x006551F0`: 48..=407 in vanilla). Ours keeps the minimum
+  (`SQUARE_MIN_MEN` = 48, from the smallest side of 7, `march.rs`) and lifts the 407 maximum (no engine limits;
+  a unit of more men forms a larger square).
+- **7 (fire and advance):** `0x0053EFE0`: the unit needs a projectile; shot types 19 and 20 (grenades) always
+  pass; any other needs bayonets not plugged (`+0xD9D`), not riding (`0x0055ABF0`) unless stats column 65
+  (`fires_mounted`, `unit_stats_land` `unknown_1f5`) is set, and rounds left (`+0xE10`).
+- **8 (plug bayonets):** in deployment (`0x0055AD60`, battle phase < 2; ours `Battle::deploying`, set by the
+  battle setup and cleared by `end_deployment`) always; otherwise only while not plugged.
+- **11 (stakes):** refused when unit byte `+0xE0C` is set (writer not traced; read as clear, stand-in 1) or in a
+  building; then only out of deployment.
+- **16 (unlimber):** with the gabionade selected (deployable 14), only in deployment and with guns (guns object
+  `+0x1F4 → +0x10`); otherwise (no current order, or its vfunc `+0xDC` passes) with guns and unit `+0x2A4` set.
+  The order test and `+0x2A4` are not modelled (ours: has guns, stand-in 1).
+- **17, 18 (Rally, Inspire):** the special-men list (`+0x280`) needs an entry whose vfunc `+0x1B0` returns 0;
+  not modelled (ours: allowed, stand-in 1).
+- **19, 20 (artillery boosts):** refused in deployment, for limbered artillery (`0x0055C230`: no gabionade,
+  category artillery, the gate passes for 16 and 16 is not active) and for a unit on foot (`0x0055C1C0`:
+  infantry, artillery without guns, or dismount active; ours `strength::on_foot`).
+- **Every other ability:** allowed.
+- **Not in the gate:** `0x0053EA60` tests neither whether the unit is on the field nor its men. Ours refuses a
+  unit with `active` false (a reinforcement waiting or walking in) or without men before the gate (PROVISIONAL,
+  stand-in 1; whether the original's callers can reach such a unit is not traced).
+- **Refusal `0x0055C780`** (before the gate in `0x005612D0`): battle byte `+0x2704` set and the unit's state 2
+  or 3. The byte's writer and the state's meaning were not settled; ours stays "routing or shattered"
+  (PROVISIONAL, stand-in 1).
+
+### The toggle per ability (`0x00578860`, CONFIRMED static)
+An inactive ability passes the gate again first. Ported in `Battle::do_special_ability`. Re-read in full by
+worker abilitygatefix (2026-11-10, corrects the dismount line and the return value of the first write-up).
+- **The event.** Every case but 5, 12..14 and 17..21 posts an ability event: the record {unit, event id, byte 1,
+  the unit's centre (`0x00563DA0`: the squad summary's centre, as a world position)} goes to battle
+  `+0x94 → +0x3D8`, vfunc `+8`. The id comes from `0x0057ADB0` (ability id, on / off flag): 0 and 1 → 51 when
+  on; 2 → 52 when on; 3 → 53 when off; 5 → 55 when on; 8 → 58 + flag; 9 → 60, 10 → 61, 11 → 62, 12 → 63 when
+  on; 13 → flag × 64; 14 → 65 when on; 15 → 66 + flag; 16 → 68 + flag; anything else 0. The ids each case
+  posts are listed below. Not ported: the model has no sink for it (stand-in 3).
+- **0, 1 (squares):** on: `0x0051B5B0` under option 92, event 51, `0x0054A7D0` in deployment, then
+  `0x0052ED80` when the unit has a current order (`+0xAE8` non-zero), else the shape rebuild `0x005315A0` and
+  a queued request (battle `+0x94 → +0xBA8`, vfunc `+8`; ours: on at once, stand-in 3). Off: event 0,
+  `0x00549F30`, `0x005315A0`.
+- **2, 3 (wedge, diamond):** on: event 52 / 53, `0x0052ED80`; off: event 0, `0x00549F30`; then `0x005315A0`.
+- **4 (light infantry behaviour):** on: `0x0052ED80`, event 0, `0x00515210` under option 52; off: event 0,
+  `0x00549F30`; then `0x005315A0`.
+- **6 (pike wall):** on: `0x00518870` under option 72, event 0, `0x0054A760` in deployment, `0x0052ED80`;
+  off: event 0, `0x00549F30`, `0x005315A0`.
+- **7 (fire and advance):** event 0 both ways, the slot on / off, then `SetUnitFormationShapeParams`
+  `0x00579780`, `RebuildUnitPlacementHolder` `0x00537E40` and `0x005315A0`.
+- **9, 10 (fougasse):** on: `0x0052ED80`, event 0, placement `0x006526F0`; off: event 60 / 61, `0x00549F30`.
+- **11 (stakes):** on: `0x0052ED80`, event 62, placement `0x006525F0`; off: event 0, `0x00549F30`.
+- **17, 19, 20:** the slot on / off (`0x00549F30` → `0x00549F10`, or `0x0052ED80`: a use spent, the timers
+  started; the slot tick then ends a timed one when its recharge is over), no event. Square's effect in ours is
+  the melee square flag (set on, cleared off); stakes are placed at once (PROVISIONAL).
+- **18 (Inspire):** the same with the target, and unit byte `+0xD99` cleared on both paths (readers not traced;
+  not modelled).
+- **8 (plug bayonets):** plugged and in deployment → event 59, unplug `0x0054DB50`; otherwise event 58, plug
+  `0x0054E8E0`. Plugging sets `+0xD9D` and `+0xD98`, adds `_kv_rules bayonet_melee_attack_bonus` to melee
+  attack `+0x170` and runs `0x005357B0` (the skirmish default); unplugging clears both and subtracts. Neither
+  tests the present state (ours no longer does either; the gate and the toggle never plug twice, test
+  `bayonets_unplug_only_in_deployment`). `0x005357B0` then overwrites `+0xD98` with "cannot fire and advance"
+  (`!0x0053EFE0`; the meaning INFERRED), so the value written by plug / unplug is replaced at once.
+- **15 (dismount):** acts only with no current order (`+0xAE8` 0); then `0x00514900` under option 68, event
+  66 + active, `0x0054A710` in deployment. It calls no slot function and writes no flag: who sets the dismount
+  flag is not traced. With a current order nothing happens. Ours flips the flag at once and re-lays nothing
+  (stand-in 3: the model has no order objects).
+- **16 (unlimber):** off: event 69, `0x00549F30`. On: with the gabionade selected (deployable 14) it first
+  drops it (`0x00544620`, deployable 22); `0x0051E6D0` under option 112; `0x0054A850` in deployment;
+  `0x0052ED80`; event 68. Both ways then `0x005357B0`, and unit `+0xE30` = `0x0054C1F0` (not ported).
+- **21 (column):** `0x0052ED80` even while active (refused while it recharges), then `0x005315A0`; never
+  switched off here.
+- **5, 12, 13, 14:** nothing (deployables are chosen in deployment, `0x00551BA0`).
+- **Return:** the low byte of the last callee's result (or false from the gate), not a clean "done"; whether
+  its callers use it is not read. Ours returns whether the ability acted.
+
+Before this branch ours switched formation abilities on without their slot (no use spent, no timer); a mod's
+timed record for them is now honoured (test `a_formation_ability_runs_its_slot`). Vanilla is unaffected (the
+shipped table has rows only for 0x11..0x14). `0x0052ED80`'s return is not a clean bool (the recharge word or a
+test result); whether its callers use it is not read.
 
 ### Still open (PROVISIONAL in code)
-The gate's per-ability conditions and the refusal `0x0055C780` (stand-in 1), the Inspire approach move
-(stand-in 2), the artillery boosts' and ability 0x15's effects, switching an active formation ability off and
-the formation abilities' slots (stand-in 3); Rally's reach to reinforcements waiting or walking in (INFERRED,
-above); no deployment phase in the model (the original performs neither ability there). The AI tactic
-GENERAL_SUPPORT (AI_RESEARCH.md) now has its call: `Battle::perform_special_ability(general, RALLY, None, run)`
-and `(general, INSPIRE_UNIT, Some(target), run)`. Exe names and plate comments: pending `rallyinspire.jsonl`
-(read in the IDA pool, 2026-11-10).
+- Stand-in 1: the building of the current order, squad `+0x72C`, unit `+0xE0C`, unlimber's order vfunc `+0xDC` and `+0x2A4`, the special-men list
+  `+0x280`, the refusal `0x0055C780`, the model's own `active && men` precondition, and in deployment battle
+  `+0x58` / the unit's `+0x1EC → +0xD4 → +0x38` byte and the request handed to a unit's current order
+  (`0x0056AC40`). Next: the writers of `+0x72C` / `+0xE0C` / `+0x2A4` (xrefs on the offsets in the squad and
+  unit constructors; `+0xADC` is also entry 0 of the order stack; which object it is is INFERRED), the `+0x280`
+  list's builder, and the vfunc `+0x54` of the order types a deploying unit can hold.
+- Rally and Inspire in deployment with a current order: the request goes to the current order's vfunc `+0x54`
+  (`0x0056AC40` → `0x0056AAC0` → `0x0056AC00`); whether it is kept and performed once the battle starts is not
+  traced (stand-in 1; ours refuses both).
+- Stand-in 2: the Inspire approach move.
+- Stand-in 3: the effects of 19, 20 (removals not traced), 21 (`0x0051DA60`), stakes placed at once, fougasse placement
+  (`0x006526F0`), the shape rebuilds and deployment layouts (`0x005315A0`, `0x00579780`, `0x0054A7D0`,
+  `0x0054A760`, `0x0054A710`, `0x0054A850`), the square queue, dismount's no-order filter and `0x00514900`, the
+  `0x0057ADB0` event post, the option calls (`0x0051B5B0`, `0x00515210`, `0x00518870`, `0x0051E6D0`), unlimber's
+  `+0xE30`.
+- The Inspire removal `0x00522970` skips its subtraction while battle byte `+0x54` is set; `0x00537E40` reads
+  the same byte; its writer is UNKNOWN (no direct store found in the battle constructors read). Unit `+0xD99`
+  (cleared by the Inspire toggle) has no traced reader; `+0xD98` is overwritten by `0x005357B0` right after plug
+  and unplug (above). Next: a scan for stores to `[reg+0x54]` in functions taking the battle object, or a
+  debugger watch on it.
+- Rally's reach to reinforcements waiting or walking in (INFERRED, above); not traced this branch.
+
+The AI tactic GENERAL_SUPPORT (AI_RESEARCH.md) now has its call: `Battle::perform_special_ability(general,
+RALLY, None, run)` and `(general, INSPIRE_UNIT, Some(target), run)`. Exe names and plate comments: pending
+`rallyinspire.jsonl` and `abilitygate.jsonl` (read in the IDA pool, 2026-11-10).

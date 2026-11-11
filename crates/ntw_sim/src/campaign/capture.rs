@@ -154,7 +154,7 @@ impl CampaignModel {
     /// residences. The fortification slot ([`Region::fortification`](super::Region::fortification)) is rolled after them, without money.
     fn settlement_slots(&self, region: RegionId) -> Vec<usize> {
         self.world.regions.get(&region).map_or(Vec::new(), |r| {
-            r.slots.iter().enumerate().filter(|(_, s)| s.key.starts_with("settlement:")).map(|(i, _)| i).collect()
+            r.slots.iter().enumerate().filter(|(_, s)| s.in_settlement()).map(|(i, _)| i).collect()
         })
     }
 

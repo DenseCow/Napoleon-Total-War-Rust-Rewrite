@@ -45,7 +45,7 @@
 //!       (CONFIRMED); then, for every faction, the calls after the join `0x008F2BB1`: the character pools'
 //!       turn `0x00A24C90` (not modelled), the spotting manager (a human gets its spy-network step `0x008F2480`
 //!       and then the spotting pass `0x008B4B70`; an AI only the spotting pass), every character's standing order `0x009653D0` (PROVISIONAL: the
-//!       model keeps none), the recruitment pools' step `0x00A25310`, forces in transit (not modelled), and
+//!       model keeps only the reinforcement march's), the recruitment pools' step `0x00A25310`, forces in transit (not modelled), and
 //!       last `FactionTurnStart` (posted at its end, CONFIRMED). The human-only loop at `0x008F26DC`, before
 //!       the characters, counts generals of rank 8 or more for an achievement (`0x009C7660`): no game
 //!       state, not modelled (no Steam features; CAMPAIGN_FIDELITY.md "Turn-start character loops").
@@ -555,8 +555,17 @@ impl CampaignModel {
                 // 0x008DA210 run for every faction, the rebels too; the message manager (0x00A18A70) and the
                 // government's popularity (0x008F2E10) are gated by IsFactionWithoutRecord 0x008CEEF0 (tested at
                 // 0x008F2BBA / 0x008F2C28), so the rebels skip them. None of these four is modelled here (the
-                // regions' own walk, 0x00AAE820, is `TurnStep::Region`, before the join);
-                // then the spotting manager (faction +0x800, at 0x008F2C3C): a human faction's spy-network
+                // regions' own walk, 0x00AAE820, is `TurnStep::Region`, before the join). Between them, at
+                // 0x008F2C04 for every faction (the rebels too), each region of the faction's list (+0x77C)
+                // acts on its classes' unrest (0x00A6F720 → 0x00A6F730 → 0x008B46A0, CONFIRMED by
+                // decompilation; seam `population.unrest_outcome`).
+                let mut writes = super::mod_state::ModWrites::default();
+                let rules = std::sync::Arc::clone(&self.rules);
+                for region in self.world.faction_regions_in_list_order(f) {
+                    events.extend(rules.seams.population_unrest_outcome.rule()(self, region, &mut writes));
+                    self.mod_state.apply(&mut writes);
+                }
+                // Then the spotting manager (faction +0x800, at 0x008F2C3C): a human faction's spy-network
                 // step (`0x008F2480`: last turn's network shapes revealed again, this turn's listed and
                 // revealed, `CharacterBuildsSpyNetwork` at exactly 3 idle turns) and the spotting pass
                 // (`0x008B4B70`; an AI faction runs only the spotting pass); CHARACTERS_FIDELITY.md §10.
@@ -568,10 +577,12 @@ impl CampaignModel {
                 self.spotting_pass(f);
                 // Then every character's standing order, in the character list order (0x008F2C5B →
                 // 0x009653D0, CONFIRMED): a resumable order (+0x14, set by the refill 0x0096C140 at his turn
-                // start) goes on if its class's check (vtable +0x10) passes, else it is cancelled.
-                // PROVISIONAL: the model keeps no standing orders (every move command is dropped where its
-                // action points run out, `CampaignCommand::MoveForce`), so there is nothing to resume;
-                // CAMPAIGN_FIDELITY.md "Turn-start character loops".
+                // start) goes on if its class's check (vtable +0x10) passes, else it is cancelled. The model keeps
+                // the reinforcement march's order (`World::standing_orders`).
+                // PROVISIONAL: every other move command is dropped where its action points run out
+                // (`CampaignCommand::MoveForce`), so it has nothing to resume; CAMPAIGN_FIDELITY.md
+                // "Turn-start character loops".
+                events.extend(self.resume_standing_orders(f));
                 // Then the recruitment pools' step (`0x00A25310` on the manager at faction +0x940, both
                 // pools' slot 12 `0x00A252B0`, at 0x008F2C99); CHARACTERS_FIDELITY.md §8.
                 self.pool_tick(f);
@@ -940,10 +951,18 @@ impl CampaignModel {
         // per commander that marches to him ([`Self::spawn_reinforcement`]), then every other item
         // ([`Self::spawn_recruited_unit`]). The exe groups by (+0x18, +0x50); +0x50 is 0 for a player's
         // item (`HandleRecruitUnitCommand` passes 0 at `0x00936C55`) and an AI handle only for AI items
-        // queued with no target (`0x00A9F126`), so grouping by commander is the exe's for every item with one.
-        // PROVISIONAL: a commander with no army: the exe hands the item to the holder at his +0x2B0 when
-        // that holder's vfunc +0x38 says so (`0x00B1E500` phase 1), ours spawns it as a settlement recruit
-        // (the exe's other branch, +0x18 cleared). PROVISIONAL: the exe also spawns a group as settlement
+        // queued with no target (`0x00A9F126`). Ours groups by commander, which gives the exe's groups for
+        // every item with one except the duplicate army of the ORIGINAL BUG below, which it fixes.
+        // ORIGINAL BUG: phase 1 looks the pair up before the retarget below (`0x00B1E596`-`0x00B1E5AF`)
+        // and pushes it after it (`0x00B1E677`), so an item through a rider whose commander already has a
+        // pair (an item through the commander, or a second item through the same rider) pushes that
+        // commander's pair again. Phase 2 then runs the group spawn `0x00B1D3F0` once per pair, and each
+        // run gathers every finished item of the commander (`0x00B5C110`, which does not read the spawned
+        // flag +0x48): two new armies, each with the units of all those items. Ours raises one army per
+        // commander.
+        // A target who leads no army ([`Self::reinforcement_commander`], `0x00B1E500` phase 1) hands the item
+        // to the commander of the force he rides in; with none the item's target is cleared and it spawns as
+        // a settlement recruit. PROVISIONAL: the exe also spawns a group as settlement
         // recruits when its path query from the settlement to the commander fails (`0x00B6D8D0` /
         // `0x00B6D760`) or its own free-spot call does (`0x00B39FE0` at `0x00B1E88E`); ours always
         // raises the army. PROVISIONAL: naval items recruited through an
@@ -960,8 +979,9 @@ impl CampaignModel {
         } else {
             std::collections::BTreeSet::new()
         };
+        let mut cleared = Vec::new();
         for (index, target, is_naval, waited) in finished {
-            match target.filter(|t| !is_naval && army_leaders.contains(t)) {
+            match target.filter(|_| !is_naval).and_then(|t| self.reinforcement_commander(t, &army_leaders)) {
                 Some(t) => {
                     keep[index] = false;
                     let unit_key = key_of(self, index);
@@ -970,8 +990,19 @@ impl CampaignModel {
                         None => groups.push((t, vec![unit_key])),
                     }
                 }
-                None => others.push((index, is_naval, waited)),
+                None => {
+                    if target.is_some() && !is_naval {
+                        cleared.push(index);
+                    }
+                    others.push((index, is_naval, waited));
+                }
             }
+        }
+        // Phase 1's other branch clears the item's +0x18 (`0x00B1E7AD`, CONFIRMED), so one left queued without a free
+        // spot is a settlement recruit from now on.
+        let reg = self.world.regions.get_mut(&region).expect("region exists");
+        for index in cleared {
+            reg.recruitment_queue[index].target = None;
         }
         for (target, unit_keys) in groups {
             let ev = self.spawn_reinforcement(region, target, unit_keys);

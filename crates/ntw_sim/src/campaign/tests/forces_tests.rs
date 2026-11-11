@@ -157,6 +157,22 @@ fn move_force_spends_and_end_turn_refills_movement_points() {
     assert_eq!(m.world.characters[&CharacterId(100)].movement_points, 30);
 }
 
+/// While the scripts ask for the next campaign (+0xD0) the update's step loop is skipped
+/// (`0x008F4539`): the turn does not end and no force moves; other commands still apply.
+#[test]
+fn advancing_to_the_next_campaign_stops_the_end_of_turn_and_force_orders() {
+    let mut m = test_model();
+    m.world.advance_to_next_campaign = true;
+    let before = m.state_hash();
+    assert_eq!(m.apply(CampaignCommand::EndTurn), Err(CommandError::CampaignAdvancing));
+    assert_eq!(
+        m.apply(CampaignCommand::MoveForce { force: ForceId(1000), to: pos(18, 24) }),
+        Err(CommandError::CampaignAdvancing)
+    );
+    assert_eq!(m.state_hash(), before);
+    assert!(m.apply(CampaignCommand::DeclareWar { a: A, b: B }).is_ok());
+}
+
 #[test]
 fn attack_and_autoresolve() {
     fn fight() -> (CampaignModel, Vec<CampaignEvent>) {

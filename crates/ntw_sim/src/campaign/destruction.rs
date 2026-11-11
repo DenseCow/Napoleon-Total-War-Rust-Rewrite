@@ -24,11 +24,9 @@ use super::world::{CampaignModel, Region, Stance};
 const CAPITAL_TOWN_SLOTS: usize = 4;
 
 /// The settlement's own building slots (settlement +0x1A8: the slots `AttachSlotToSettlement`
-/// `0x00B6D270` appends, road and walls apart, CONFIRMED; it is called from `0x00A4D952` for a
-/// slot whose region-template record has its byte +0x40 set). INFERRED: those are the slots whose
-/// key starts with `settlement:` (the byte +0x40 read as "the slot sits in the settlement").
+/// `0x00B6D270` appends, road and walls apart, CONFIRMED), see [`RegionSlot::in_settlement`](super::RegionSlot::in_settlement).
 fn settlement_slots(r: &Region) -> usize {
-    r.slots.iter().filter(|s| s.key.starts_with("settlement:")).count()
+    r.slots.iter().filter(|s| s.in_settlement()).count()
 }
 
 /// The relationship reset of a faction leaving the game (`0x00B72900`; `0x00B2B920` does the same

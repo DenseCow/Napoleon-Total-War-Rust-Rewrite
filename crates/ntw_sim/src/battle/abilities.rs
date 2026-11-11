@@ -22,7 +22,7 @@
 use std::cell::RefCell;
 use std::f32::consts::TAU;
 
-use super::attributes::{ability, shot_type_value};
+use super::attributes::shot_type_value;
 use super::march::SquadBox;
 use super::model::{Battle, dist2};
 use super::morale::{self, ScriptMorale};
@@ -65,8 +65,14 @@ pub const FILE_SPACING_M: f32 = 1.0;
 
 /// Ability enum values used here (`0x0131C3A0`, CONFIRMED; see [`super::attributes::ABILITY_NAMES`]).
 pub mod ability_ids {
+    /// `wedge_formation`.
+    pub const WEDGE_FORMATION: u8 = 2;
+    /// `diamond_formation`.
+    pub const DIAMOND_FORMATION: u8 = 3;
     /// `light_infantry_behaviour`.
     pub const LIGHT_INFANTRY_BEHAVIOUR: u8 = 4;
+    /// `pike_wall_formation`.
+    pub const PIKE_WALL_FORMATION: u8 = 6;
     /// `fougasse_basic`.
     pub const FOUGASSE_BASIC: u8 = 9;
     /// `fougasse_improved`.
@@ -91,6 +97,8 @@ pub mod ability_ids {
     pub const ARTILLERY_ACCURACY_BOOST: u8 = 19;
     /// `artillery_rof_boost`.
     pub const ARTILLERY_ROF_BOOST: u8 = 20;
+    /// `column_formation`.
+    pub const COLUMN_FORMATION: u8 = 21;
 }
 
 /// The skirmish check's memory on the unit's behaviour object.
@@ -642,20 +650,14 @@ impl Battle {
 
     /// The skirmish default `0x005357B0` (CONFIRMED; run by the unit constructor `0x0051B7D0` and when
     /// abilities change): `+0xD9C` = the unit may skirmish (stats column 53, not dismounted,
-    /// `0x0053F9C0`) && `0x0055C230` (no gabionade selected, category artillery (type record
-    /// `+0x1C` == 1), can unlimber and is not unlimbered) && class `artillery_horse` (type record
-    /// `+0x20` == 2; the enums are in `crate::unit_kind`). No shipped unit has column 53 and
-    /// is horse artillery, so every unit starts with skirmish off.
+    /// `0x0053F9C0`) && `0x0055C230` ([`Battle::limbered_artillery`]) && class `artillery_horse`
+    /// (type record `+0x20` == 2; the enums are in `crate::unit_kind`). No shipped unit has column
+    /// 53 and is horse artillery, so every unit starts with skirmish off.
     pub fn skirmish_default(&self, idx: usize) -> bool {
         let u = &self.units[idx];
-        let dismounted = super::strength::dismount_active(u);
-        let unlimbered = u.active_abilities & (1 << ability_ids::UNLIMBER) != 0;
         u.attributes.skirmisher
-            && !dismounted
-            && u.deployable != Some(ability_ids::GABIONADE)
-            && crate::unit_kind::category(&u.unit_category) == crate::unit_kind::Category::Artillery
-            && u.capabilities.has_ability(ability_ids::UNLIMBER)
-            && !unlimbered
+            && !super::strength::dismount_active(u)
+            && self.limbered_artillery(idx)
             && u.unit_class == "artillery_horse"
     }
 
@@ -684,8 +686,10 @@ impl Battle {
     /// End of deployment, `0x00551BA0` (CONFIRMED): for each unit and each deployable it has
     /// (fougasse 9/10, chevaux de frise 12, earthworks 13, gabionade 14), the selected one is kept
     /// and the others are removed. The model has no defences placed during deployment, so the
-    /// selected one is built here, at the unit's final position ([`defence_pieces`]).
+    /// selected one is built here, at the unit's final position ([`defence_pieces`]). The
+    /// deployment phase is over ([`Battle::deploying`]).
     pub fn end_deployment(&mut self) {
+        self.deploying = false;
         let kinds = [
             ability_ids::FOUGASSE_BASIC,
             ability_ids::FOUGASSE_IMPROVED,
@@ -705,7 +709,7 @@ impl Battle {
         }
     }
 
-    fn build_defence(&mut self, idx: usize, kind: u8) {
+    pub(super) fn build_defence(&mut self, idx: usize, kind: u8) {
         let u = &self.units[idx];
         if self.defences.iter().any(|x| x.unit == u.id && x.kind == kind) {
             return;
@@ -806,21 +810,6 @@ impl Battle {
             return Ok(false);
         }
         Ok(self.perform_special_ability(id, ability_value, None, false))
-    }
-
-    /// Switches on an ability that has no timed effect of its own (called by the toggle in
-    /// [`super::special_abilities`]). Effects in the model: `square_formation` sets the melee
-    /// square flag; `wooden_stakes` builds stakes in front of the unit (PROVISIONAL: at once, the
-    /// original plants them over time); the others (`unlimber`: the model's guns are always ready;
-    /// formation and light infantry behaviours) are recorded only. The ability's slot is not used:
-    /// no use is spent and no timer starts (stand-in 3 of [`super::special_abilities`]).
-    pub(super) fn switch_on_untimed_ability(&mut self, i: usize, ability_value: u8) {
-        self.units[i].active_abilities |= 1u32 << ability_value;
-        match ability_value {
-            ability::SQUARE_FORMATION => self.units[i].in_square = true,
-            ability_ids::WOODEN_STAKES => self.build_defence(i, ability_ids::WOODEN_STAKES),
-            _ => {}
-        }
     }
 
     /// `change_shot_type(name)`: loads another shot (the shot type enum `0x00F59030`, CONFIRMED
@@ -1012,6 +1001,7 @@ mod tests {
         assert_eq!(b.defences.len(), 4);
         assert_eq!(b.defences[0].kind, ability_ids::EARTHWORKS);
         assert!(b.order_special_ability(1, ability_ids::UNLIMBER).is_err());
+        use crate::battle::attributes::ability;
         assert_eq!(b.order_special_ability(1, ability::SQUARE_FORMATION), Ok(true));
         assert!(b.units[0].in_square);
         assert_eq!(b.order_special_ability(1, ability::SQUARE_FORMATION), Ok(false));
@@ -1102,6 +1092,18 @@ mod tests {
         u.unit_category = "artillery".into();
         u.unit_class = "artillery_horse".into();
         u.capabilities = UnitCapabilities::from_names(["unlimber"], []);
+        assert!(!b.skirmish_default(0), "no guns: it cannot unlimber, so it is not limbered");
+        b.units[0].missile = Some(super::super::shooting::MissileWeapon {
+            range: 400,
+            accuracy: 40.0,
+            reload_skill: 50,
+            reload_time_s: 20,
+            damage: 10.0,
+            projectiles_per_shot: 1,
+            is_artillery: true,
+            guns: 2,
+            ballistics: Default::default(),
+        });
         assert!(b.skirmish_default(0));
         b.units[0].active_abilities |= 1 << ability_ids::UNLIMBER;
         assert!(!b.skirmish_default(0), "unlimbered: off");

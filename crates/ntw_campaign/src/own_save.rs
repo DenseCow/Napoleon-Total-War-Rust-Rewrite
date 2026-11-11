@@ -445,6 +445,11 @@ pub fn read_with_start(bytes: &[u8], db: &GameDatabase, start: impl FnOnce() -> 
             None => {}
         }
     }
+    // A save from before the victory conditions were kept reads none (`World::victory_conditions`).
+    let without = model.turn.humans.iter().filter(|h| !model.world.victory_conditions.contains_key(h)).count();
+    if without > 0 {
+        log::warn!("Own save: {without} human factions have no victory conditions record (a save from before they were kept has none); the victory test never decides for them");
+    }
     finish_load(&mut model);
     Ok(LoadedCampaign {
         model,
@@ -453,6 +458,8 @@ pub fn read_with_start(bytes: &[u8], db: &GameDatabase, start: impl FnOnce() -> 
         warnings: Vec::new(),
         script_values: data.script_values,
         camera: data.camera,
+        // The model's own records are saved; no start position options.
+        victory_options: Default::default(),
     })
 }
 

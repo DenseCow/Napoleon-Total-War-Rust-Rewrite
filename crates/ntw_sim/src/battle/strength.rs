@@ -57,6 +57,17 @@ pub fn riding(u: &LandUnit) -> bool {
     mounted(u) && !dismount_active(u)
 }
 
+/// `0x0055C1C0` (CONFIRMED static): the unit fights on foot: category infantry (2), artillery (1)
+/// without guns (the guns object `+0x1F4 → +0x10` is 0), or `dismount` (15) active. The artillery
+/// boosts' gate refuses such a unit (`0x0053EA60`, abilities 19 and 20).
+pub fn on_foot(u: &LandUnit) -> bool {
+    match category(u) {
+        Category::Infantry => true,
+        Category::Artillery if u.missile.map_or(0, |w| w.guns) == 0 => true,
+        _ => dismount_active(u),
+    }
+}
+
 /// The `dismount` ability (15) is active (`IsSpecialAbilityActive(+0xDAC, 15)`, CONFIRMED).
 pub fn dismount_active(u: &LandUnit) -> bool {
     u.active_abilities & (1 << super::abilities::ability_ids::DISMOUNT) != 0

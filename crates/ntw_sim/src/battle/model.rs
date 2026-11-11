@@ -285,6 +285,10 @@ pub struct LandUnit {
     /// Special abilities that are active (bit `n` = ability `n`; a slot's byte `+0x28`), see
     /// [`Battle::perform_special_ability`].
     pub active_abilities: u32,
+    /// `+0xD9D`: bayonets plugged (`plug_bayonets`, ability 8, has no slot: the toggle plugs them,
+    /// `0x0054E8E0`, and in deployment unplugs them, `0x0054DB50`; CONFIRMED), see
+    /// [`super::special_abilities`].
+    pub bayonets_plugged: bool,
     /// The special-ability slots (container at `+0xDAC`): active time, recharge and uses left, see
     /// [`super::special_abilities`]. Filled by [`LandUnit::set_ability_records`].
     pub ability_slots: Vec<super::special_abilities::AbilitySlot>,
@@ -428,6 +432,7 @@ impl LandUnit {
             skirmish_eval: Default::default(),
             deployable: None,
             active_abilities: 0,
+            bayonets_plugged: false,
             ability_slots: Vec::new(),
             inspire_order: None,
             shot_type: None,
@@ -638,6 +643,10 @@ pub struct Battle {
     pub defences: Vec<super::abilities::Defence>,
     /// The battlefield's buildings (the map's near list, in file order), see [`super::garrison`].
     pub buildings: Vec<super::garrison::BattleBuilding>,
+    /// The battle is in its deployment phase (`0x0055AD60`: battle phase `+0x14` < 2, CONFIRMED).
+    /// The battle setup sets it; [`Battle::end_deployment`] clears it. The special-ability gate
+    /// and toggle read it ([`super::special_abilities`]).
+    pub deploying: bool,
 }
 
 /// True if every living man of `u` where he stands ([`LandUnit::men_standing`]) has his circle
@@ -994,6 +1003,7 @@ impl Battle {
             playable_area: None,
             defences: Vec::new(),
             buildings: Vec::new(),
+            deploying: false,
         }
     }
 
@@ -1903,6 +1913,7 @@ impl Battle {
         h.u32(self.weather_intensity);
         h.u32(self.climate_fatigue.0 as u32);
         h.u32(self.climate_fatigue.1 as u32);
+        h.u32(self.deploying as u32);
         for u in &self.units {
             h.u32(u.id);
             h.u32(u.side as u32);
@@ -2015,6 +2026,9 @@ impl Battle {
             // Special abilities: what is active, the slots' timers, a pending Inspire order and the
             // two stats Inspire changes.
             h.u32(u.active_abilities);
+            h.u32(u.bayonets_plugged as u32);
+            h.u32(u.in_square as u32);
+            h.u32(u.skirmish as u32);
             for s in &u.ability_slots {
                 h.u32(s.ability as u32);
                 h.u32(s.duration_left.to_bits());

@@ -224,7 +224,12 @@ checked).
   `int(group_volume(4) * 0.01 * group_volume(5))` (slot `+0xDC` of the sound manager returns the int at
   `+0xC140 + 8*group`; group 5 = master per AUDIO_FORMAT.md), passed to `BinkSetVolume(bink, track, volume)`
   (`0x0121609D`). Ours: `mixer::movie_gain` (victoryscreen3, 2026-11-10).
-- Intro order: CONFIRMED 2026-10-04 (§8.3). Front-end movie looping: INFERRED (the `1` argument of `0x004831D0`).
+- Intro order: CONFIRMED 2026-10-04 (§8.3). Front-end movie looping: CONFIRMED (victorytest, 2026-11-10):
+  the third argument of `0x004831D0` is option byte +1 of the bink control's open `0x00D9F600`, which hands it
+  to the player's open (vtable 0x01429D90 +12, `0x01215C10`, stored at player +0x59, `0x01215D72`); the player's
+  update `0x0124DA70` at the last frame seeks back to frame 1 (vtable +16, `0x0121E110`) when it is set and
+  closes the movie (vtable +20) when it is clear (`0x0124DB74`-`0x0124DB85`). So the front end's background
+  loops and the intro movies and the campaign movie panel play once.
 - INFERRED: ±1 colour differences on the GPU path (§8.2).
 
 ## 8. Player (`crates/napoleon/src/video/`, worker bink-audio)

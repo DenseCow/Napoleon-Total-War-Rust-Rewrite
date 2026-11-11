@@ -250,7 +250,23 @@ fn director_victory_regions_and_ai_areas_round_trip() {
         beliefs: [(A, RelationBelief { relations: vec![(B, 0.25)], enemies: vec![B], allies: vec![B] })].into(),
     };
     model.world.ai_factions = vec![B, A];
-    model.world.victory_regions.insert(A, [RegionId(2), RegionId(5_000_000)].into());
+    let date = |year| ntw_sim::calendar::Date { year, season: 2, month: 3, half: 2 };
+    model.world.victory_conditions.insert(
+        A,
+        ntw_sim::campaign::outcome::VictoryConditions {
+            regions: vec![RegionId(5_000_000), RegionId(2)],
+            met: true,
+            unknown_2: u32::MAX,
+            deadline: date(1812),
+            count: 35,
+            prestige_test: true,
+            kind: 1,
+            holding: true,
+            failed: false,
+            hold_turns: 4,
+            since: date(1806),
+        },
+    );
     model.world.ai_areas = vec![
         AiArea { key: "made_up_region_1".into(), links: vec![1, 2], hlcis: vec![AiHlci { index: 2, pieces: vec![0, 3] }] },
         AiArea { key: "made_up_sea".into(), links: vec![0], hlcis: Vec::new() },
@@ -259,7 +275,7 @@ fn director_victory_regions_and_ai_areas_round_trip() {
     let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
     let (_, back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
     assert_eq!(back.model.director, data.model.director);
-    assert_eq!(back.model.world.victory_regions, data.model.world.victory_regions);
+    assert_eq!(back.model.world.victory_conditions, data.model.world.victory_conditions);
     assert_eq!(back.model.world.ai_areas, data.model.world.ai_areas);
     assert_eq!(back.model.state_hash(), data.model.state_hash());
     assert_eq!(back, data);
@@ -267,7 +283,7 @@ fn director_victory_regions_and_ai_areas_round_trip() {
     let plain = SaveData { model: made_up_model(), ..data };
     let (_, back) = read_parts(&write(&info(), &plain).expect("write")).expect("read");
     assert_eq!(back.model.director, DirectorState::default());
-    assert!(back.model.world.victory_regions.is_empty() && back.model.world.ai_areas.is_empty());
+    assert!(back.model.world.victory_conditions.is_empty() && back.model.world.ai_areas.is_empty());
 }
 
 /// The fields the original does not save come back empty (as after the original's own load).
@@ -752,6 +768,32 @@ fn the_victory_verdict_and_a_held_capture_round_trip_and_an_older_save_loads_the
     assert_eq!(turn.humans, back.model.turn.humans, "the other fields load as they were");
     let older: CapturePreview = without(ron::to_string(&held).expect("encode"), "held").into_rust().expect("an older capture loads");
     assert_eq!(older, CapturePreview { held: false, ..held });
+}
+
+/// recruitmarch2: the reinforcement manager's entries (`World::reinforcements`, the original's
+/// `CHARACTER_REINFORCEMENTS_ARRAY`) and the multi-turn orders they become (`World::standing_orders`)
+/// save and load back. A save of ours written before they were kept loads both empty (`serde(default)`,
+/// no format bump: an older build never wrote them).
+#[test]
+fn reinforcements_and_standing_orders_round_trip_and_an_older_save_loads_them_empty() {
+    use ntw_sim::campaign::{Reinforcement, StandingOrder};
+    let mut model = made_up_model();
+    let entry = Reinforcement { source: CharacterId(100), target: CharacterId(101), settlement: RegionId(1) };
+    model.world.reinforcements = vec![entry];
+    model.world.standing_orders.insert(CharacterId(100), StandingOrder::JoinForce { into: ForceId(7) });
+    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
+    let (_, back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
+    assert_eq!(back.model.world.reinforcements, vec![entry]);
+    assert_eq!(back.model.world.standing_orders.get(&CharacterId(100)), Some(&StandingOrder::JoinForce { into: ForceId(7) }));
+    // An older world record: the same one without the two fields (written empty, then cut from the text).
+    let mut world = back.model.world.clone();
+    world.reinforcements.clear();
+    world.standing_orders.clear();
+    let text = ron::to_string(&world).expect("encode");
+    let older = text.replacen("reinforcements:[],", "", 1).replacen("standing_orders:{},", "", 1);
+    assert_eq!(older.len() + "reinforcements:[],standing_orders:{},".len(), text.len(), "both fields are written: {text:.200}");
+    let loaded: World = ron::from_str(&older).expect("an older world loads");
+    assert_eq!(loaded, world);
 }
 
 /// The once-only historical events already triggered are kept by the save (`World::historical_events_triggered`).

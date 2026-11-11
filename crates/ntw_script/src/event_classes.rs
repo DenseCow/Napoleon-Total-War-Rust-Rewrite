@@ -187,6 +187,11 @@ pub const CLASSES: &[EventClass] = &[
     gated("MultiTurnMove", 0x0136_2294),
     open("PendingBankruptcy", 0x0135_655C, Offers::FACTION),
     open("RecruitmentItemIssuedByPlayer", 0x0137_DB44, Offers::NONE),
+    // The four unrest events' vtables are `RegionTurnStart`'s but for slot 0 (the name).
+    open("RegionIssuesDemands", 0x0135_6618, Offers::REGION),
+    open("RegionRebels", 0x0135_6790, Offers::REGION),
+    open("RegionRiots", 0x0135_66D4, Offers::REGION),
+    open("RegionStrikes", 0x0135_684C, Offers::REGION),
     open("RegionTurnEnd", 0x0137_6CFC, Offers::REGION),
     open("RegionTurnStart", 0x0137_6DB8, Offers::REGION),
     // The character (+0x1C, the event's first object) and the technology (+0x68); no faction.
@@ -204,6 +209,9 @@ pub const CLASSES: &[EventClass] = &[
     // Only the unit (+0x24).
     open("UnitTrained", 0x0137_D120, Offers::NONE),
     open("UnitTurnEnd", 0x0135_69C4, Offers::NONE),
+    // Its vtable differs from the met class's only in the name (slot 0) and the faction getter (+0x38,
+    // the null stub 0x00461180 here); the gate (+0xB8) is the "always" stub 0x00447880 in both.
+    open("VictoryConditionFailed", 0x0135_FD98, Offers::NONE),
     open("VictoryConditionMet", 0x0135_FE54, Offers::FACTION),
 ];
 
@@ -324,6 +332,8 @@ mod tests {
         assert_eq!(only("SettlementOccupied"), ScriptContext { settlement: Some("t".into()), ..Default::default() });
         assert_eq!(only("RegionTurnStart"), ScriptContext { region: Some("r".into()), ..Default::default() });
         assert_eq!(only("BattleCompleted"), ScriptContext::default());
+        assert_eq!(only("VictoryConditionFailed"), ScriptContext::default());
+        assert_eq!(only("VictoryConditionMet"), ScriptContext { faction: Some("france".into()), ..Default::default() });
         assert_eq!(only("HistoricalEvents"), ScriptContext { historical_events: true, ..Default::default() });
     }
 }

@@ -251,7 +251,7 @@ db_record! {
     /// `population_classes` (`sbbb`, 3 rows, CONFIRMED layout from the vanilla file): a population class and
     /// the unrest paths it takes. The record builder `0x00F58090` → `0x00F453C0` copies columns 1..3 to the
     /// class record's +0x10 / +0x11 / +0x12; the class pass `0x008F9690` reads +0x10 and +0x11 to pick the
-    /// unrest kind (CAMPAIGN_FIDELITY.md §Class war). Vanilla: `lower` and `middle` (true, false, false),
+    /// unrest kind (CAMPAIGN_FIDELITY.md §Class war), the rebel spawn `0x00AAB440` reads +0x12. Vanilla: `lower` and `middle` (true, false, false),
     /// `upper` (false, true, true).
     pub struct PopulationClassRecord in "population_classes", key = key {
         /// #0 H: class key (`lower`, `middle`, `upper`).
@@ -260,8 +260,12 @@ db_record! {
         strikes: bool,
         /// #2: otherwise the class writes letters of demand, ultimatums and rebels (record +0x11).
         demands: bool,
-        /// #3: UNKNOWN (record +0x12; no reader traced).
-        flag_3: bool,
+        /// #3: the class's rebels are led by a general (record +0x12). CONFIRMED reader: the rebel spawn
+        /// `0x00AAB440` at `0x00AACBB2` sets "led by a general" when this or its own caller flag holds, for
+        /// the first army it builds only; the army builder `0x00A72010` then makes the leader a general
+        /// (`0x00990EF0` type 0, else type 2) with a bodyguard unit (`0x0087FB30`, dropping the last unit
+        /// when the army is full). The spawn is a revolt rule not yet modelled (BACKLOG §6).
+        rebels_led_by_general: bool,
     }
 }
 

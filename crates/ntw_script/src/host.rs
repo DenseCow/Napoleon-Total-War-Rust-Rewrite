@@ -237,9 +237,7 @@ impl ScriptHost {
         cmd: ntw_sim::campaign::CampaignCommand,
     ) -> Result<Vec<(CampaignEvent, FireReport)>, ntw_sim::campaign::CommandError> {
         if cmd == ntw_sim::campaign::CampaignCommand::EndTurn {
-            if self.state.borrow().model.pending_battle.is_some() {
-                return Err(ntw_sim::campaign::CommandError::BattlePending);
-            }
+            self.state.borrow().model.check_end_turn()?;
             return Ok(self.end_turn());
         }
         let resumes = matches!(cmd, ntw_sim::campaign::CampaignCommand::RespondToAllyWarCall { .. });
@@ -336,7 +334,11 @@ impl ScriptHost {
             | CampaignEvent::FactionBecomesLiberationProtectorate { faction } => c.faction = st.faction_key(*faction),
             CampaignEvent::RegionTurnStart { region }
             | CampaignEvent::RegionTurnEnd { region }
-            | CampaignEvent::SlotTurnStart { region, .. } => c.region = w.regions.get(region).map(|r| r.key.clone()),
+            | CampaignEvent::SlotTurnStart { region, .. }
+            | CampaignEvent::RegionRiots { region }
+            | CampaignEvent::RegionStrikes { region }
+            | CampaignEvent::RegionIssuesDemands { region }
+            | CampaignEvent::RegionRebels { region } => c.region = w.regions.get(region).map(|r| r.key.clone()),
             CampaignEvent::CharacterTurnStart { character }
             | CampaignEvent::CharacterTurnEnd { character }
             | CampaignEvent::CharacterCreated { character }
@@ -388,6 +390,11 @@ impl ScriptHost {
             }
             // The context answers only its candidate holder (vtable 0x01358184 +0x48, 0x0044A500).
             CampaignEvent::HistoricalEvents => c.historical_events = true,
+            // The victory test `0x0096FCE0` builds `VictoryConditionMet` (vtable `0x0135FE54`) with the
+            // faction at +0x10, which its faction getter (+0x38, `0x0044A500`) returns; every getter of
+            // `VictoryConditionFailed` (vtable `0x0135FD98`) is the null stub `0x00461180` (CONFIRMED).
+            CampaignEvent::VictoryConditionMet { faction } => c.faction = st.faction_key(*faction),
+            CampaignEvent::VictoryConditionFailed { .. } => {}
             // Classes that answer nothing our context carries: the tax event its own payload (+0xAC),
             // the unit events their unit (+0x24), the battle event its results (+0xA0..+0xA8).
             CampaignEvent::GovernorshipTaxRateChanged { .. }

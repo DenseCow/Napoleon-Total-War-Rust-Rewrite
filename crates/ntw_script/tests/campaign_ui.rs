@@ -2797,6 +2797,35 @@ fn the_victory_movie_panel_opens_the_campaign_result_as_a_victory() {
     assert!(errors(&s.host).is_empty());
 }
 
+/// A movie while the previous movie's panel is still open dismisses that panel first, as the exe's
+/// movie queue step frees its kept panel (`0x00A13EA0`: `DismissMovieEvent` while the component
+/// lives, then the movie stops): the defeat panel's "ExitGame" exit runs. A panel its player
+/// already dismissed is not dismissed again.
+#[test]
+fn a_new_movie_dismisses_the_open_movie_panel_first() {
+    use ntw_sim::campaign::outcome::CampaignOutcome;
+    let Some(s) = setup() else { return };
+    errors(&s.host);
+    let (france, lost, won) = {
+        let st = s.scripts.state();
+        let f = st.model.faction_by_key("france").unwrap().id;
+        (f, st.model.outcome_movie(f, CampaignOutcome::Destroyed).unwrap(), st.model.outcome_movie(f, CampaignOutcome::Won { multiplayer_over: false }).unwrap())
+    };
+    assert!(s.host.campaign_outcome_movie(france, &lost));
+    s.host.take_campaign_requests();
+    assert!(s.host.campaign_outcome_movie(france, &won));
+    assert_eq!(s.host.take_campaign_requests(), vec![CampaignRequest::QuitToMainScreen], "the defeat panel's exit ran");
+    let (_, attached) = s.host.attached_movie().expect("the victory movie is attached");
+    assert_eq!(&*attached, won.movie.as_str());
+    let panel = find(&s.host, s.root, "event_movie_panel").expect("the victory movie panel");
+    let env = s.host.script_env(panel).expect("the panel's script");
+    s.host.lua().load("DismissMovieEvent()").set_environment(env).exec().unwrap();
+    assert!(s.host.take_campaign_requests().is_empty());
+    assert!(s.host.campaign_outcome_movie(france, &lost));
+    assert!(s.host.take_campaign_requests().is_empty(), "the dismissed panel's exit does not run again");
+    assert!(errors(&s.host).is_empty());
+}
+
 /// The minister card's fallback folder is the model's `CampaignRules::culture_alternates`, not a
 /// second read of the `cultures` table: a culture with no folder of its own falls to its alternate.
 #[test]

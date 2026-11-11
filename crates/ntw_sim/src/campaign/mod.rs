@@ -80,6 +80,7 @@ pub mod personalities;
 pub mod pool;
 pub mod region_groups;
 pub mod region_value;
+pub mod reinforce;
 pub mod portraits;
 pub mod visibility;
 pub mod world;
@@ -96,7 +97,7 @@ pub use turn::{TurnState, TurnStep};
 pub use world::{SlotRef, FactionAiKeys, AiArea, AiHlci, RebelArmySide,
     BuildingRef, CampaignModel, CampaignUnit, Character, CharacterKind, ConstructionItem, ConstructionKind, Faction,
     GovernmentType, MilitaryForce, RecruitmentItem, RecruitmentManager, Reinforcement, RecruitmentSource, Region, RegionSlot, PortBlockade, Settlement, Stance,
-    Terrain, World,
+    StandingOrder, Terrain, World,
 };
 pub use visibility::{FogState, Shroud, SightGrid};
 pub use world::{Fort, PopulationClassState};

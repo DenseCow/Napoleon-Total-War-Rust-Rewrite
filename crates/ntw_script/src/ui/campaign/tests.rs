@@ -2397,3 +2397,38 @@ fn the_diplomacy_relationship_names_only_the_players_protectorates() {
     }
     assert!(hud.errors().is_empty(), "{:?}", hud.errors());
 }
+
+/// `CanEndTurn` (`0x009E0A40` -> `0x008DE800` -> `CanFactionActNow` `0x008BE2A0`): true only in the
+/// human's own turn and while nothing waits (`check_nothing_waiting`); the scripts' move to the next
+/// campaign (+0xD0), which `0x008BE2A0` does not read, leaves it true.
+#[test]
+fn can_end_turn_asks_the_turn_and_what_waits() {
+    use ntw_sim::campaign::treaties::{AllyWarCall, CalledAllies};
+    let hud = test_hud();
+    let can = || -> bool { hud.host.lua().load("return CampaignUI.CanEndTurn()").eval().unwrap() };
+    {
+        let mut st = hud._scripts.state_mut();
+        st.model.turn.humans = vec![A];
+        st.model.start_campaign();
+    }
+    assert!(can(), "the human's turn, nothing waiting");
+    hud._scripts.state_mut().model.turn.current = Some(B);
+    assert!(!can(), "another faction acts");
+    hud._scripts.state_mut().model.turn.current = Some(A);
+    let call = AllyWarCall {
+        declarer: B,
+        target: FactionId(3),
+        ally: A,
+        allied_to_target: false,
+        allied_to_declarer: true,
+        asked_by_target_side: false,
+        called: CalledAllies::default(),
+    };
+    hud._scripts.state_mut().model.pending_ally_war_calls.push(call);
+    assert!(!can(), "a call to war waits on the pending stack");
+    hud._scripts.state_mut().model.pending_ally_war_calls.clear();
+    hud._scripts.state_mut().model.world.advance_to_next_campaign = true;
+    assert!(can(), "+0xD0 alone: the exe's gate does not read it");
+    assert!(hud._scripts.state().model.check_end_turn().is_err(), "the end of turn itself is still refused");
+    assert!(hud.errors().is_empty(), "{:?}", hud.errors());
+}

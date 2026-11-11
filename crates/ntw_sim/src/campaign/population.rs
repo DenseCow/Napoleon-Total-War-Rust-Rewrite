@@ -29,9 +29,10 @@
 use std::collections::BTreeSet;
 
 use super::effects::EffectSet;
+use super::events::{CampaignEvent, CampaignMessage};
 use super::ids::{FactionId, RegionId};
 use super::mod_state::ModWrites;
-use super::world::{CampaignModel, PopulationClassState, Region};
+use super::world::{CampaignModel, PopulationClassState, Region, SlotRef};
 
 /// The growth factors' keys in their slots (`0x00A88F20`: the table at `0x01458B04`; rows of
 /// `public_order_factors`, which give each its picture and tooltip).
@@ -435,7 +436,7 @@ impl UnrestFlags {
 ///   taken grows the stage; the new kind's demand is the cause's ([`CampaignRules::unrest_demands`],
 ///   `0x008EB3F0`; none for a rebellion). A step not allowed changes nothing.
 ///
-/// The riot chance is only stored here; the turn start reads the kind (BACKLOG: unrest outcomes).
+/// The owner's next turn start acts on the kind and the riot chance ([`unrest_outcome`]).
 ///
 /// [`CampaignRules::class_unrest_paths`]: super::rules::CampaignRules::class_unrest_paths
 /// [`CampaignRules::unrest_demands`]: super::rules::CampaignRules::unrest_demands
@@ -804,6 +805,126 @@ pub fn project(model: &CampaignModel, region: RegionId) -> Option<Projection> {
     Some(Projection { current, current_religions, population, predicted, religions, classes, set: predicted_set })
 }
 
+/// The message type a riot posts when its `unrest_cause_to_demands` row names none (`0x008B46A0`: type 207,
+/// CONFIRMED).
+pub const RIOTS_DEFAULT_MESSAGE: &str = "region_riots_default";
+/// The message type a strike posts when its row names none (`0x008B46A0`: type 218, CONFIRMED).
+pub const STRIKES_DEFAULT_MESSAGE: &str = "region_strikes_default";
+/// The message type an ultimatum or a letter of demand posts when its row names none (`0x008B46A0`: type
+/// 199, CONFIRMED).
+pub const DEMANDS_DEFAULT_MESSAGE: &str = "region_demands_default";
+
+/// What a region's classes' unrest does at its owner's turn start (`0x008B46A0`, CONFIRMED by
+/// decompilation): `0x008F2620` walks the owner's region list (faction +0x77C, at `0x008F2C04`, the rebels
+/// too) and `0x00A6F730` calls it for each class in order, reading the kind the last round end's pass left
+/// ([`class_pass`]; the kind is not cleared here). The message type is the `unrest_cause_to_demands` row's
+/// #3 found by the class's cause and kind ([`CampaignRules::unrest_messages`]), else the kind's default:
+/// - **riots** (2): the riot (`0x00AAD7D0`: deaths, then one settlement building damaged), then `RegionRiots`, then the riot notice ([`CampaignMessage::RegionRiot`],
+///   `0x00A1EEC0`) to the owner with the deaths and the damaged building;
+/// - **strikes** (1): when the row's type contains `riot` (`0x008B4877`), a riot notice with no deaths and
+///   no building, else the unrest notice ([`CampaignMessage::RegionUnrest`], `0x00A1B610`); then
+///   `RegionStrikes`;
+/// - **ultimatum, letter of demand** (3, 4): `RegionIssuesDemands`, then the unrest notice;
+/// - **rebellion** (5): `RegionRebels`. PROVISIONAL: what comes before it is not modelled: in the owner's
+///   capital (`0x00ABE4E0` and `0x00A8B5A0`) a human owner's faction +0x93E set and the model's +0x8A0
+///   handler called, an AI owner's revolution (`0x008EE3E0`) and then the rebel spawn `0x00AAB440` with 1;
+///   elsewhere the rebel spawn with 0 (revolutions and the rebel spawn, BACKLOG §5/§6).
+/// - any other kind: nothing.
+///
+/// The exe falls back to the default also when the row's type is not in its fixed message type table (366
+/// entries); ours has no fixed table, so a row's type is used as it is unless it is empty. The original's
+/// rule of the seam `population.unrest_outcome` ([`super::seams`]).
+///
+/// [`CampaignRules::unrest_messages`]: super::rules::CampaignRules::unrest_messages
+pub fn unrest_outcome(model: &mut CampaignModel, region: RegionId) -> Vec<CampaignEvent> {
+    let mut events = Vec::new();
+    let Some(reg) = model.world.regions.get(&region) else { return events };
+    let owner = reg.owner;
+    let classes: Vec<(u32, u32, i32)> = reg.class_bases.iter().map(|c| (c.unrest, c.cause, c.riot_chance)).collect();
+    for (kind, cause, riot_chance) in classes {
+        if !(1..=UNREST_REBELLION).contains(&kind) {
+            continue;
+        }
+        let row = model.rules.unrest_messages.get(&(cause, kind)).filter(|m| !m.is_empty()).cloned();
+        let message = |message: CampaignMessage| CampaignEvent::Message { recipient: owner, message };
+        match kind {
+            2 => {
+                let (deaths, building) = riot(model, region, riot_chance, &mut events);
+                events.push(CampaignEvent::RegionRiots { region });
+                let message_type = row.unwrap_or_else(|| RIOTS_DEFAULT_MESSAGE.to_string());
+                events.push(message(CampaignMessage::RegionRiot { message_type, region, deaths, building }));
+            }
+            1 => {
+                events.push(match row {
+                    Some(message_type) if message_type.contains("riot") => {
+                        message(CampaignMessage::RegionRiot { message_type, region, deaths: 0, building: None })
+                    }
+                    row => message(CampaignMessage::RegionUnrest {
+                        message_type: row.unwrap_or_else(|| STRIKES_DEFAULT_MESSAGE.to_string()),
+                        region,
+                    }),
+                });
+                events.push(CampaignEvent::RegionStrikes { region });
+            }
+            3 | 4 => {
+                events.push(CampaignEvent::RegionIssuesDemands { region });
+                let message_type = row.unwrap_or_else(|| DEMANDS_DEFAULT_MESSAGE.to_string());
+                events.push(message(CampaignMessage::RegionUnrest { message_type, region }));
+            }
+            _ => events.push(CampaignEvent::RegionRebels { region }),
+        }
+    }
+    events
+}
+
+/// A riot in `region` (`0x00AAD7D0`, CONFIRMED by decompilation), with the rioting class's riot chance
+/// `riot_chance` (class +0x5C), drawing from the campaign's stream (model +0xFB8):
+/// 1. the deaths: (`int_range(0, 150)` + trunc(√(population / 10)) + 1000) × riot chance × 0.01, in single
+///    precision, truncated; when they would take the population below `minimum_population` (rules variable,
+///    `0x008B25E0`) and it is not already below, they are the population above it;
+/// 2. the population loses them (`0x00A8BDF0`: to `minimum_population` when it would fall below);
+/// 3. one of the settlement's slots with a building is drawn (`int_range(0, count − 1)`; no draw when there is
+///    none) and the building's health becomes [`riot_health`] ([`CampaignModel::set_building_health`], which
+///    posts `CampaignBuildingDamaged`).
+///
+/// It returns the deaths and the damaged building's level key. The exe then rebuilds the region's
+/// recruitables and effects (`0x00A6AE40`), which this model computes when read.
+///
+/// The slots drawn from are the exe's second list (`0x00AAA790`: the slots attached to the settlement,
+/// `0x00A8B790`, [`super::RegionSlot::in_settlement`], INFERRED). PROVISIONAL: its first list
+/// (`0x00AAF5E0`), used when not empty, is not modelled: the slots whose type has the `slots` table's town
+/// flag (`0x00A8B9B0`) and whose `REGION_SLOT` creates port objects (slot +0x20C, not loaded). In the
+/// vanilla data only `town_UNUSED` has the town flag, so the first list is empty there.
+fn riot(model: &mut CampaignModel, region: RegionId, riot_chance: i32, events: &mut Vec<CampaignEvent>) -> (u32, Option<String>) {
+    let min = model.rules.var("minimum_population", 0.0);
+    let mut rng = model.rng;
+    let Some(r) = model.world.regions.get_mut(&region) else { return (0, None) };
+    let pop = r.population;
+    let draw = rng.int_range(0, 150);
+    let crowd = f64::from(pop / 10).sqrt() as i32;
+    let mut deaths = (draw.wrapping_add(crowd).wrapping_add(1000) as f32 * (riot_chance as f32 * 0.01)) as i32;
+    if min + deaths as f32 > pop as f32 && pop as f32 >= min {
+        deaths = (pop as f32 - min) as i32;
+    }
+    r.population = if min + deaths as f32 <= pop as f32 { pop.saturating_sub(deaths.max(0) as u32) } else { min as u32 };
+    let candidates: Vec<usize> = r.slots.iter().enumerate().filter(|(_, s)| s.in_settlement() && s.building.is_some()).map(|(i, _)| i).collect();
+    let hit = (!candidates.is_empty()).then(|| candidates[rng.int_range(0, candidates.len() as i32 - 1) as usize]);
+    model.rng = rng;
+    let deaths = deaths.max(0) as u32;
+    let Some(slot) = hit else { return (deaths, None) };
+    let Some((key, health)) = model.world.regions.get(&region).and_then(|r| r.slots[slot].building.as_ref()).map(|b| (b.level_key.clone(), b.health)) else {
+        return (deaths, None);
+    };
+    model.set_building_health(region, SlotRef::Slot(slot), riot_health(health, riot_chance), events);
+    (deaths, Some(key))
+}
+
+/// A building's health after a riot with `riot_chance` (`0x00AAD7D0`, CONFIRMED): its health less the riot
+/// chance, at least 0, then clamped to 10..=90 (so an undamaged building drops to 90 at most).
+pub fn riot_health(health: u32, riot_chance: i32) -> u32 {
+    (health as i32).saturating_sub(riot_chance).max(0).clamp(10, 90) as u32
+}
+
 impl CampaignModel {
     /// The population factors of every region owned by a faction that is not the rebels and is still in the
     /// game refreshed (`0x00AA9C10` with the region's set, then the religion breakdown normalised,
@@ -916,4 +1037,62 @@ impl CampaignModel {
         }
         self.mod_state.apply(&mut writes);
     }
+
+    /// The crackdown after a region's last risen rebel army goes (CONFIRMED by decompilation): the army's
+    /// destructor `0x0088CE30` (at `0x0088CF08`, only while the campaign is not torn down, campaign +0xFC5,
+    /// and only for an army with REBEL_DATA, force +0x98) asks its region `0x00A91EB0`: when the region's
+    /// risen list (+0x220) holds at most one army, `0x00A91EA0` → `0x00A91F30` → `0x008DBEA0` sets every
+    /// class's crackdown (class +0x54) to [`RISING_CRACKDOWN`]. It runs before the army is unlinked from the
+    /// list (`0x0088F310` → `0x008B0150`).
+    ///
+    /// The region is the list holding `force`, which is the exe's own link: REBEL_DATA +0x68 is the army's
+    /// link {+0 the army, +4 the region's list, whose +0 is the region}; `ResolveObjectHandle` `0x006649C0`
+    /// gives the region only while the link sits in a list, and the link joins a list only by
+    /// `AppendOwnedLinkToOwnerList` `0x008CF7D0` (which appends it and sets +4 together, and refuses a
+    /// linked army) and leaves it only by `0x008B0150` (which erases it and clears +4 together). So a
+    /// region found through +0x68 always holds the army: its list is never empty there, "at most one" is
+    /// the army alone, and our loader keeps each army in one list once as those links do
+    /// (`ntw_campaign` `link_risen_armies`). An army with REBEL_DATA in no list (only a malformed save
+    /// makes one) gives the exe a null region, read at `0x00A91EB9`; ours does nothing.
+    ///
+    /// Not modelled: `0x00A91EB0`'s second step, which with at most one army left and an owner that is not
+    /// the rebels (`IsFactionWithoutRecord` false at `0x00A91ED8`) frees the region's REBEL_DATA template
+    /// (+0x21C) and zeroes it. The model keeps no template, and the save rewrites REGION #34 as loaded, so
+    /// an own save keeps a template the original would have dropped.
+    ///
+    /// The caller is [`CampaignModel::remove_force`], the one path a force leaves the world.
+    pub fn crack_down_after_last_rising(&mut self, force: super::ids::ForceId) {
+        let Some(region) = self.world.region_risen_armies.iter().find(|(_, armies)| armies.contains(&force)).map(|(r, a)| (*r, a.len())) else {
+            return;
+        };
+        if region.1 > 1 {
+            return;
+        }
+        if let Some(r) = self.world.regions.get_mut(&region.0) {
+            for c in &mut r.class_bases {
+                c.crackdown = RISING_CRACKDOWN;
+            }
+        }
+    }
+
+    /// The bankruptcy cleared after a revolution ends (`0x008B69B0`, CONFIRMED by decompilation): every
+    /// region `faction` owns in its home theatre (faction +0x734) gets its wealth growth offset (region
+    /// +0xEC, [`Region::wealth_growth_offset`]) and every class's bankruptcy factor (class +0x28) set to 0,
+    /// then the faction's counter +0x828 is cleared (the one bankruptcy raises with the capital's offset;
+    /// no reader of it is found, so this model has no field for it: CAMPAIGN_FIDELITY.md "Bankruptcy"). Its
+    /// only callers are the two revolution ends `0x008BEAA0` and `0x008DB1A0`, which this model does not
+    /// have yet (revolutions, BACKLOG §6): this is the step they call. Every region counts as in its owner's
+    /// home theatre (the model has no theatres, see the module doc), so it walks every region of `faction`.
+    pub fn clear_bankruptcy_after_revolution(&mut self, faction: FactionId) {
+        for r in self.world.regions.values_mut().filter(|r| r.owner == faction) {
+            r.wealth_growth_offset = 0;
+            for c in &mut r.class_bases {
+                c.bankruptcy = 0;
+            }
+        }
+    }
 }
+
+/// The crackdown every class of a region takes when its last risen rebel army is destroyed (`0x008DBEA0`
+/// stores 6 at class +0x54, CONFIRMED by decompilation).
+pub const RISING_CRACKDOWN: i32 = 6;

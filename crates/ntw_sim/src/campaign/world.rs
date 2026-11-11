@@ -87,8 +87,8 @@ pub struct CampaignModel {
     /// is not decoded). Set by an attack, cleared by autoresolve or a battle result.
     pub pending_battle: Option<PendingBattle>,
     /// A capture waiting for the human's occupy / loot / liberate choice (see [`capture`](super::capture)). Set
-    /// when a human faction takes a settlement by force, cleared by `ChooseCapture` (or settled as an occupation
-    /// at the end of the turn).
+    /// when a human faction takes a settlement by force, cleared by `ChooseCapture`; the turn does not end while
+    /// it is set ([`CampaignModel::check_end_turn`](super::CampaignModel::check_end_turn)).
     pub pending_capture: Option<super::capture::CapturePreview>,
     /// The calls to war waiting for a human ally's answer, the last one on top (the campaign's pending
     /// stack +0xF70 holding `0x00885DA0` offers, [`super::treaties::AllyWarCall`]): pushed when a
@@ -294,6 +294,24 @@ impl CampaignModel {
             h.u32(self.pending_ally_war_calls.len() as u32);
             for c in &self.pending_ally_war_calls {
                 c.hash_into(&mut h);
+            }
+        }
+        // Only while a reinforcement waits or marches, so a campaign without one hashes as before.
+        if !self.world.reinforcements.is_empty() {
+            h.u32(self.world.reinforcements.len() as u32);
+            for r in &self.world.reinforcements {
+                h.i32(r.source.raw());
+                h.i32(r.target.raw());
+                h.u32(r.settlement.raw());
+            }
+        }
+        if !self.world.standing_orders.is_empty() {
+            h.u32(self.world.standing_orders.len() as u32);
+            for (c, order) in &self.world.standing_orders {
+                h.i32(c.raw());
+                match order {
+                    StandingOrder::JoinForce { into } => h.u32(into.raw()),
+                }
             }
         }
         // Only between the round start's two historical event steps, so a campaign hashes as before.
@@ -647,13 +665,10 @@ impl CampaignModel {
             h.i32(f.raw());
             h.u32(*n);
         }
-        h.u32(w.victory_regions.len() as u32);
-        for (f, regions) in &w.victory_regions {
+        h.u32(w.victory_conditions.len() as u32);
+        for (f, c) in &w.victory_conditions {
             h.i32(f.raw());
-            h.u32(regions.len() as u32);
-            for r in regions {
-                h.u32(r.raw());
-            }
+            c.hash_into(&mut h);
         }
         h.u32(w.historical_events_triggered.len() as u32);
         for key in &w.historical_events_triggered {
@@ -942,8 +957,11 @@ pub struct World {
     /// order (the army's destructor `0x0088CE30` → the `REBEL_DATA` destructor `0x0088F310` → `0x0088CA00`
     /// → `0x008B0150`, which erases the link and shifts the rest down; CONFIRMED by decompile). So the
     /// first entry is the region's "first risen army" whose government the class tests read
-    /// ([`economy::region_government_classes`](super::economy::region_government_classes)). A force leaves
-    /// its list when it leaves the world (`CampaignModel::remove_force`); the save writes the lists back
+    /// ([`economy::region_government_classes`](super::economy::region_government_classes)). An army sits in
+    /// one list at most, once, as the exe's one link per `REBEL_DATA` (+0x68) allows (`0x008CF7D0` refuses a
+    /// linked army; the importer drops a repeat, `link_risen_armies`): the crackdown finds the army's region
+    /// by its list ([`CampaignModel::crack_down_after_last_rising`](super::CampaignModel::crack_down_after_last_rising)).
+    /// A force leaves its list when it leaves the world (`CampaignModel::remove_force`); the save writes the lists back
     /// to the same slot. Nothing of ours adds to them yet: the rising that makes an army's `REBEL_DATA`
     /// (`0x00870E60` / `0x008AF5D0`) is not modelled (BACKLOG: rebellions).
     #[cfg_attr(feature = "serde", serde(default))]
@@ -1024,10 +1042,16 @@ pub struct World {
     /// New armies marching to the commander they were recruited through, in the order they were
     /// raised ([`Reinforcement`]; [`CampaignModel::spawn_reinforcement`] adds them in a region's
     /// update, [`CampaignModel::march_reinforcements`] steps them after the faction's regions, in the
-    /// same turn start). Not saved: none is left once that step has run (the original keeps an entry
-    /// it could not finish, see [`CampaignModel::march_reinforcements`]).
-    #[cfg_attr(feature = "serde", serde(skip))]
+    /// same turn start). An entry whose order could not be given stays for the next turn start, so
+    /// the list is saved (the original's `ARMY_REINFORCEMENT_MANAGER`, written by `0x00AFB6C0`).
+    #[cfg_attr(feature = "serde", serde(default))]
     pub reinforcements: Vec<Reinforcement>,
+    /// The orders that go on over several turns, by the character who holds one
+    /// ([`StandingOrder`]; the exe's order object in the character's holder, +0x9C).
+    /// [`CampaignModel::walk`] drops a character's order when he is given another, and
+    /// [`CampaignModel::resume_standing_orders`] carries them on at the faction's turn start.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub standing_orders: BTreeMap<CharacterId, StandingOrder>,
     /// The sight cell grid (`super::visibility`), from the loaded file; `None` when unknown.
     pub sight_grid: Option<super::visibility::SightGrid>,
     /// Each faction's shroud (`FACTION` `CAMPAIGN_SHROUD`; only factions that have one).
@@ -1065,6 +1089,16 @@ pub struct World {
     /// the field reads false.
     #[cfg_attr(feature = "serde", serde(default))]
     pub looting_options_disabled_for_human: bool,
+    /// The campaign's multiplayer flag (campaign +0x1034, `CAMPAIGN_MODEL` #5, the bool after
+    /// `WORLD`; CONFIRMED): the campaign model's constructor `0x008742C0` clears it (`0x00874B5D`),
+    /// the loader `0x00872550` reads it for a record of version 8 or above (`0x00873239`, after
+    /// building `WORLD`) and the writer `0x008EBAB0` saves it (`0x008EBC11`); nothing else writes it,
+    /// so it comes from the start position or save only. The victory check `0x0096CD10` tests it
+    /// (`0x0096CEA9`) before it tells another human of the winner's victory
+    /// ([`CampaignModel::victory_check`](super::CampaignModel::victory_check)). The save writer
+    /// keeps the source file's value. An own save from before the field reads false.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub multiplayer_campaign: bool,
     /// The scripts asked to move on to the next campaign of a chain (campaign +0xD0, CONFIRMED): its
     /// only writer is the script method `advance_to_next_campaign()` (`0x00979050`, no argument,
     /// sets it true); the loader `0x009968A0` clears it (`0x00996A0E`) and the writer `0x009A1070`
@@ -1074,8 +1108,8 @@ pub struct World {
     /// step loop has it as its condition (`0x008F4539`-`0x008F4540`): while it is set the whole loop
     /// is skipped (the AI step, the pending-stack update, the movement update, the queued
     /// negotiations), and the calls after the loop, the victory check among them, still run. Only
-    /// the tutorial sets it, just before its `QuitToMainScreen`. PROVISIONAL: ours stores it and
-    /// does not stop the update's steps while it is set.
+    /// the tutorial sets it, just before its `QuitToMainScreen`. Ours refuses the end of turn and
+    /// every force order while it is set (`CommandError::CampaignAdvancing`).
     #[cfg_attr(feature = "serde", serde(skip))]
     pub advance_to_next_campaign: bool,
     /// Saving is switched off (campaign +0x115, `CAMPAIGN_MODEL/EPISODIC_RESTRICTIONS` #25 bool,
@@ -1089,8 +1123,9 @@ pub struct World {
     /// bool, read by the loader `0x009968A0` for versions above 8 with #20 and #22; CONFIRMED): the round
     /// end's class passes then never step a class to rebellion (`GrowRegionPopulation` `0x00AB4070` clears
     /// their first flag, [`super::population::class_round`]). The script method
-    /// `disable_rebellions_and_revolutions_worldwide` sets it (its handler is not traced: BACKLOG). False in
-    /// every vanilla save. An own save from before the field reads false.
+    /// `disable_rebellions_and_revolutions_worldwide(bool)` sets it (`0x0097A8B0`, CONFIRMED by decompilation: it
+    /// stores its boolean, false without one). False in every vanilla save. An own save from before the
+    /// field reads false.
     #[cfg_attr(feature = "serde", serde(default))]
     pub rebellions_disabled: bool,
     /// The HUD shows turns instead of dates (episodic restrictions +0xD1, `CAMPAIGN_MODEL/
@@ -1135,8 +1170,8 @@ pub struct World {
     /// `0x0096FCE0` still marks the faction won and fires its own event but posts no `campaign_won`
     /// message (test `0x0096FFE7`), and the victory check `0x0096CD10` fires no win event +0x120 for
     /// a winner and skips that winner's multiplayer campaign-over step (test `0x0096CE9C`); the
-    /// losers' event +0x138 is unchanged. Ours: [`CampaignModel::victory_check`] reads it (the
-    /// `campaign_won` message is not modelled). Set in the tut start position (as its scripts set it);
+    /// losers' event +0x138 is unchanged. Ours: [`CampaignModel::victory_check`] and the victory test
+    /// ([`super::outcome::victory_state_original`]) read it. Set in the tut start position (as its scripts set it);
     /// saved at #32 by the writer `0x009A1070`. An own save from before the field reads false.
     #[cfg_attr(feature = "serde", serde(default))]
     pub victory_notification_disabled: bool,
@@ -1199,14 +1234,15 @@ pub struct World {
     /// so a loaded game starts every faction at 0.
     #[cfg_attr(feature = "serde", serde(default))]
     pub deal_regions_received: BTreeMap<FactionId, u32>,
-    /// The regions each faction's campaign victory conditions name (`CAMPAIGN_VICTORY_CONDITIONS` #0
-    /// `REGION_KEYS`: the `FACTION`'s own record, else its `CAMPAIGN_PLAYER_SETUP`'s). The CAI region's
-    /// victory list (CAI region #13, read by `0x00C40540`) holds the factions naming the region; the
-    /// campaign director's rival score reads it for the humans ([`super::director`]). Static after
-    /// the import (nothing in play changes the conditions); hashed so a desync check notices a file
-    /// that loaded a different set. A faction without an entry names none.
+    /// Each faction's campaign victory conditions (the faction's record +0x724,
+    /// `CAMPAIGN_VICTORY_CONDITIONS`: the `FACTION`'s own record, else its `CAMPAIGN_PLAYER_SETUP`'s;
+    /// [`super::outcome::VictoryConditions`]). The victory test ([`super::outcome::victory_state_original`])
+    /// reads and updates a human's; its region list is also the CAI region's victory list (CAI region #13,
+    /// read by `0x00C40540`), which the campaign director's rival score reads for the humans
+    /// ([`super::director`]). Hashed. A faction without an entry has no record (the exe's null +0x724:
+    /// no test). An own save from before the field reads none (its load warns once).
     #[cfg_attr(feature = "serde", serde(default))]
-    pub victory_regions: BTreeMap<FactionId, std::collections::BTreeSet<RegionId>>,
+    pub victory_conditions: BTreeMap<FactionId, super::outcome::VictoryConditions>,
     /// The once-only historical events already triggered (the historical event manager's list, model
     /// +0xF84 +8/+0xC, kept sorted by `0x008BBC50`: `CompareUniStrings`, by UTF-16 code unit;
     /// [`super::historical_events`]). Saved as `HISTORICAL_EVENT_MANAGER` /
@@ -1434,10 +1470,14 @@ impl World {
     }
 
     /// Remove a character from the world and from [`World::character_order`] (every listing of
-    /// him), so the list holds no dead id. Returns the removed character.
+    /// him), so the list holds no dead id. His standing order goes with him (the order object is
+    /// his holder's), and so does every reinforcement entry he is the source or the target of (the
+    /// entry's death listener `0x00B57DA0` clears it, CONFIRMED). Returns the removed character.
     pub fn remove_character(&mut self, id: CharacterId) -> Option<Character> {
         let dead = self.characters.remove(&id)?;
         self.character_order.retain(|x| *x != id);
+        self.standing_orders.remove(&id);
+        self.reinforcements.retain(|r| r.source != id && r.target != id);
         Some(dead)
     }
 
@@ -1723,6 +1763,17 @@ pub struct RegionSlot {
     pub blockade: Option<PortBlockade>,
 }
 
+impl RegionSlot {
+    /// The slot is one of the settlement's own building slots: the ones the slot constructor `0x00A4D4F0`
+    /// attaches to the settlement (`AttachSlotToSettlement` `0x00B6D270`, called at `0x00A4D952`) when
+    /// `0x00A8B790` holds, i.e. the slot's region-template record has its byte +0x40 set (CONFIRMED).
+    /// INFERRED: those are the slots whose key starts with `settlement:` (the byte read as "the slot sits
+    /// in the settlement").
+    pub fn in_settlement(&self) -> bool {
+        self.key.starts_with("settlement:")
+    }
+}
+
 /// A port's blockade (`PORT_GARRISON_MANAGER` #1/#2, CONFIRMED structure): the port's +0x68 handle linked
 /// with the navy's +0xE8 handle (`0x008CFB20` in the blockade start `0x00A66F80`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1835,6 +1886,24 @@ pub struct Reinforcement {
     pub settlement: RegionId,
 }
 
+/// An order a character keeps until it is finished, given up or replaced
+/// ([`World::standing_orders`]). In the exe every order is one: the order object stays in the
+/// character's holder (+0x9C), each turn start marks it resumable (`0x0096C140` sets its +0x14) and
+/// `0x009653D0` runs it again (CONFIRMED by disassembly, CAMPAIGN_FIDELITY.md "Turn-start character
+/// loops"). The model keeps the reinforcement's march only; the other orders still end where their
+/// action points run out (BACKLOG §5, the standing-orders line).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum StandingOrder {
+    /// March to `into` and hand the units over on arrival: the move-to-character order
+    /// (`0x00905460`, 0x120 bytes; its +0x118 is the target force, and each run reads where that
+    /// force's commander stands now, `0x0095BA40`).
+    JoinForce {
+        /// The force marched to.
+        into: ForceId,
+    },
+}
+
 /// A unit being recruited. Saves hold `RECRUITMENT_ITEM` v2 {i32 id, i32, i32, #3 u32 turns
 /// remaining (INFERRED), #4 u32 cost (INFERRED), #5 bool (+0x24, [`Self::target_lost`]), #6 unit key (CONFIRMED), ...}.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1909,7 +1978,8 @@ pub struct PopulationClassState {
     /// round-end pass while negative.
     pub bankruptcy: i32,
     /// The crackdown repression (class +0x54, #2 element 5; repression slot 5): 6 after a risen rebel army is
-    /// destroyed (`0x008DBEA0`, not modelled: BACKLOG), −1 at each round-end pass while positive.
+    /// destroyed as its region's last (`0x008DBEA0`, [`CampaignModel::crack_down_after_last_rising`]), −1 at
+    /// each round-end pass while positive.
     pub crackdown: i32,
     /// The happiness slots as the last refresh stored them (#1, class +0x04..+0x34). Slots 7 and 9 stay 0
     /// here: [`Self::war`] and [`Self::bankruptcy`] hold them ([`Self::slots`], [`Self::set_slots`]).

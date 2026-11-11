@@ -338,7 +338,7 @@ mod tests {
         }
         fn new_campaign(&self, _db: &GameDatabase) -> Result<LoadedCampaign, SourceError> {
             let info = own_save::tests::info();
-            Ok(LoadedCampaign { model: self.1.clone(), info, rebel_faction: None, warnings: Vec::new(), script_values: Vec::new(), camera: None })
+            Ok(LoadedCampaign { model: self.1.clone(), info, rebel_faction: None, warnings: Vec::new(), script_values: Vec::new(), camera: None, victory_options: Default::default() })
         }
         fn map(&self, _db: &GameDatabase, _info: &CampaignInfo) -> Result<MapData, SourceError> {
             use ntw_formats::campaign_map::{Heightmap, RegionMap};

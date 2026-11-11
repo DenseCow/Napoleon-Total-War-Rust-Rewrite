@@ -234,6 +234,30 @@ pub enum CampaignEvent {
         /// The building's slot.
         slot: super::world::SlotRef,
     },
+    /// Script event `RegionRiots` (CONFIRMED name, string `0x0134D0FC`, event vtable `0x013566D4`): a class of
+    /// the region rioted at its owner's turn start ([`super::population::unrest_outcome`], `0x008B46A0`).
+    RegionRiots {
+        /// The region.
+        region: RegionId,
+    },
+    /// Script event `RegionStrikes` (CONFIRMED name, string `0x01350394`, event vtable `0x0135684C`): a class
+    /// of the region struck at its owner's turn start (`0x008B46A0`).
+    RegionStrikes {
+        /// The region.
+        region: RegionId,
+    },
+    /// Script event `RegionIssuesDemands` (CONFIRMED name, string `0x0135031C`, event vtable `0x01356618`): a
+    /// class of the region sent an ultimatum or a letter of demand at its owner's turn start (`0x008B46A0`).
+    RegionIssuesDemands {
+        /// The region.
+        region: RegionId,
+    },
+    /// Script event `RegionRebels` (CONFIRMED name, string `0x0134D1F4`, event vtable `0x01356790`): a class of
+    /// the region rebelled at its owner's turn start (`0x008B46A0`, after the rebel spawn).
+    RegionRebels {
+        /// The region.
+        region: RegionId,
+    },
     /// Script event `CampaignArmiesMerge` (CONFIRMED name): units moved from one force into another.
     CampaignArmiesMerge {
         /// The force that gave its units.
@@ -349,6 +373,19 @@ pub enum CampaignEvent {
     /// that faction's machine). From [`super::CampaignModel::victory_check`].
     CampaignLost {
         /// The faction that lost.
+        faction: FactionId,
+    },
+    /// A faction's victory conditions were met (script event `VictoryConditionMet`, vtable
+    /// `0x0135FE54`, name `0x00949390`, faction context): posted by the victory test `0x0096FCE0`
+    /// ([`super::outcome::victory_state_original`]) the turn the conditions are first met.
+    VictoryConditionMet {
+        /// The faction whose conditions were met.
+        faction: FactionId,
+    },
+    /// A faction's victory deadline passed (script event `VictoryConditionFailed`, vtable
+    /// `0x0135FD98`, name `0x00949380`, posted with no context): from the victory test `0x0096FCE0`.
+    VictoryConditionFailed {
+        /// The faction whose deadline passed (not part of the script event).
         faction: FactionId,
     },
     /// Project event: a force lost all its units and was removed.
@@ -568,13 +605,44 @@ pub enum CampaignMessage {
         /// The `events` key.
         event: String,
     },
+    /// A region's unrest notice (`0x00A1B610`, called with the owner, the region and the type; CONFIRMED
+    /// arguments): a class's strike or demand at its owner's turn start ([`super::population::unrest_outcome`]).
+    RegionUnrest {
+        /// The message type: the `unrest_cause_to_demands` row's #3, else the kind's default
+        /// (`region_strikes_default`, `region_demands_default`).
+        message_type: String,
+        /// The region.
+        region: RegionId,
+    },
+    /// A region's riot notice (`0x00A1EEC0`, called with the owner, the region, the type, the deaths and a
+    /// list of the damaged buildings' names; CONFIRMED arguments): a class's riot, or a strike whose row's
+    /// message key contains "riot", at its owner's turn start ([`super::population::unrest_outcome`]). The
+    /// riot damages one building at most, so the exe's list holds one name or none.
+    RegionRiot {
+        /// The message type: the `unrest_cause_to_demands` row's #3, else `region_riots_default` (a riot) or
+        /// `region_strikes_default` (a strike).
+        message_type: String,
+        /// The region.
+        region: RegionId,
+        /// The people the riot killed (0 for a strike).
+        deaths: u32,
+        /// The building level key of the building the riot damaged (none for a strike); the exe lists the
+        /// building's name (`0x00B146F0`).
+        building: Option<String>,
+    },
+    /// Type 37 `campaign_won` (`0x009D0870`, table `0x0145C530`; CONFIRMED by disassembly
+    /// 2026-11-10): posted to the winner by the victory test `0x0096FCE0` when its conditions are
+    /// met, unless the campaign turned the victory notification off (world
+    /// `victory_notification_disabled`, model +0x125).
+    CampaignWon,
 }
 
 impl CampaignMessage {
     /// The message type's name (the exe's type table entry, the `message_events` key; for
     /// [`CampaignMessage::HistoricalEvent`], outside the table, our own name).
-    pub fn type_name(&self) -> &'static str {
+    pub fn type_name(&self) -> &str {
         match self {
+            CampaignMessage::RegionUnrest { message_type, .. } | CampaignMessage::RegionRiot { message_type, .. } => message_type,
             CampaignMessage::AllianceBroken { .. } => "alliance_broken",
             CampaignMessage::CeasefireDeclared { .. } => "ceasefire_declared",
             CampaignMessage::MilitaryAccessPrompt { .. } => "military_access_prompt",
@@ -584,6 +652,7 @@ impl CampaignMessage {
             CampaignMessage::SpyDetectedExecute { .. } => "spy_detected_execute",
             CampaignMessage::YourSpyDetectedExecute { .. } => "your_spy_detected_execute",
             CampaignMessage::HistoricalEvent { .. } => "historical_event",
+            CampaignMessage::CampaignWon => "campaign_won",
         }
     }
 }
@@ -626,6 +695,10 @@ impl CampaignEvent {
             CampaignEvent::BuildingConstructionIssuedByPlayer { .. } => "BuildingConstructionIssuedByPlayer",
             CampaignEvent::BuildingCompleted { .. } => "BuildingCompleted",
             CampaignEvent::CampaignBuildingDamaged { .. } => "CampaignBuildingDamaged",
+            CampaignEvent::RegionRiots { .. } => "RegionRiots",
+            CampaignEvent::RegionStrikes { .. } => "RegionStrikes",
+            CampaignEvent::RegionIssuesDemands { .. } => "RegionIssuesDemands",
+            CampaignEvent::RegionRebels { .. } => "RegionRebels",
             CampaignEvent::CampaignArmiesMerge { .. } => "CampaignArmiesMerge",
             CampaignEvent::CharacterEntersGarrison { .. } => "CharacterEntersGarrison",
             CampaignEvent::PreBattle { .. } => "PreBattle",
@@ -636,6 +709,8 @@ impl CampaignEvent {
             CampaignEvent::FactionBecomesLiberationProtectorate { .. } => "FactionBecomesLiberationProtectorate",
             CampaignEvent::CharacterEmbarksNavy { .. } => "CharacterEmbarksNavy",
             CampaignEvent::CharacterDisembarksNavy { .. } => "CharacterDisembarksNavy",
+            CampaignEvent::VictoryConditionMet { .. } => "VictoryConditionMet",
+            CampaignEvent::VictoryConditionFailed { .. } => "VictoryConditionFailed",
             CampaignEvent::StanceChanged { .. }
             | CampaignEvent::CaptureChoicePending { .. }
             | CampaignEvent::AllyWarCallPending { .. }
