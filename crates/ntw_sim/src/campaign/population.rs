@@ -1053,12 +1053,15 @@ impl CampaignModel {
     /// The region is the list holding `force`, which is the exe's own link: REBEL_DATA +0x68 is the army's
     /// link {+0 the army, +4 the region's list, whose +0 is the region}; `ResolveObjectHandle` `0x006649C0`
     /// gives the region only while the link sits in a list, and the link joins a list only by
-    /// `AppendOwnedLinkToOwnerList` `0x008CF7D0` (which appends it and sets +4 together, and refuses a
-    /// linked army) and leaves it only by `0x008B0150` (which erases it and clears +4 together). So a
-    /// region found through +0x68 always holds the army: its list is never empty there, "at most one" is
-    /// the army alone, and our loader keeps each army in one list once as those links do
-    /// (`ntw_campaign` `link_risen_armies`). An army with REBEL_DATA in no list (only a malformed save
-    /// makes one) gives the exe a null region, read at `0x00A91EB9`; ours does nothing.
+    /// `AppendOwnedLinkToOwnerList` `0x008CF7D0` or `AttachOwnedLinkToOwnerList` `0x008CF6B0` (each appends
+    /// it and sets +4 together, and refuses a linked army) and leaves it only by `0x008B0150` (which erases
+    /// it and clears +4 together). So a region found through +0x68 always holds the army: its list is never
+    /// empty there, "at most one" is the army alone, and our loader keeps each army in one list once as
+    /// those links do (`ntw_campaign` `link_risen_armies`). An army with REBEL_DATA in no list (only a
+    /// malformed save makes one) gives the exe a null region: the call at `0x00A91EB9` hands `0x006A3110`
+    /// the null region's list, and its count read (+0xC of the list, region +0x22C) faults there. Ours does
+    /// nothing, and the load warns once for such armies (`ntw_campaign` `LoadWarning::UnlistedRisenArmies`;
+    /// CAMPAIGN_FIDELITY.md "Crackdown after a rising").
     ///
     /// Not modelled: `0x00A91EB0`'s second step, which with at most one army left and an owner that is not
     /// the rebels (`IsFactionWithoutRecord` false at `0x00A91ED8`) frees the region's REBEL_DATA template

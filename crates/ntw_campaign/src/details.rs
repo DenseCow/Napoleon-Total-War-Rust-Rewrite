@@ -222,13 +222,24 @@ pub(crate) fn read_traits(t: &EsfRecord) -> Vec<CharacterTrait> {
 }
 
 /// A `CHARACTER_DETAILS` record's `AgentAttributeBonuses` items {#0 key, #1 u32}, in file order (the save
-/// writes them back with `save::write_attribute_bonuses`). An item without both values is not read.
-pub(crate) fn read_attribute_bonuses(d: &EsfRecord) -> Vec<(String, u32)> {
-    items(d, "AgentAttributeBonuses").filter_map(|it| Some((it.first()?.as_str()?.to_string(), it.get(1)?.as_u32()?))).collect()
+/// writes them back with `save::write_attribute_bonuses`). An item whose #0 is not a string or whose #1 is
+/// not a u32 is not read, so not written back either, and is counted in `dropped` for the load's one
+/// warning (`LoadWarning::UnreadableAttributeBonuses`): the exe's reader `0x00993280` takes only those two
+/// types and on any other marks the read failed (`0x00DE9D50` + `0x00DEB000`, at `0x00993DFF` / `0x00993E47`).
+pub(crate) fn read_attribute_bonuses(d: &EsfRecord, dropped: &mut usize) -> Vec<(String, u32)> {
+    let mut out = Vec::new();
+    for it in items(d, "AgentAttributeBonuses") {
+        match (it.first().and_then(EsfNode::as_str), it.get(1).and_then(EsfNode::as_u32)) {
+            (Some(key), Some(value)) => out.push((key.to_string(), value)),
+            _ => *dropped += 1,
+        }
+    }
+    out
 }
 
-/// `CHARACTER` → its details (`CHARACTER_DETAILS` v3 at #1, post id at #8).
-pub(crate) fn character_details(ch: &EsfRecord) -> Option<CharacterDetails> {
+/// `CHARACTER` → its details (`CHARACTER_DETAILS` v3 at #1, post id at #8). `dropped_bonuses` counts its
+/// unreadable `AgentAttributeBonuses` items ([`read_attribute_bonuses`]).
+pub(crate) fn character_details(ch: &EsfRecord, dropped_bonuses: &mut usize) -> Option<CharacterDetails> {
     let d = ch.get(1)?.as_record().filter(|r| r.name == "CHARACTER_DETAILS")?;
     let rec = |i: usize| d.get(i).and_then(EsfNode::as_record);
     let traits = rec(0).map(read_traits).unwrap_or_default();
@@ -254,7 +265,7 @@ pub(crate) fn character_details(ch: &EsfRecord) -> Option<CharacterDetails> {
         abilities: items(d, "AgentAbilities")
             .filter_map(|it| Some((it.first()?.as_str()?.to_string(), it.get(1)?.as_i32()?, s(it.get(2)))))
             .collect(),
-        attribute_bonuses: read_attribute_bonuses(d),
+        attribute_bonuses: read_attribute_bonuses(d, dropped_bonuses),
         onscreen_name: loc(d.get(16)),
         post: ch.get_u32(8).unwrap_or(0),
         returns_after_death: ch.get_bool(34).unwrap_or(false),
@@ -283,6 +294,18 @@ pub(crate) fn flags_anchor(f: &EsfRecord) -> Option<usize> {
     let after = exposed + 1;
     let arr = f.children[after..].iter().position(|c| matches!(c, EsfNode::BoolArray(_))).map(|i| after + i)?;
     (arr >= after + 2 && f.children[arr - 1].as_u32().is_some()).then_some(arr)
+}
+
+/// The index in `FACTION` of the out-of-game flag (faction +0x824, read at `0x0087B4CC`): the bool two
+/// before the flag anchor ([`flags_anchor`]). `None`, with one warning for the record (as the +0x924 /
+/// +0x925 pair warns, [`war_started_index`]), when there is no anchor or no bool there; `what` names the
+/// reader or writer in the warning.
+pub(crate) fn out_of_game_index(f: &EsfRecord, what: &str) -> Option<usize> {
+    let i = flags_anchor(f).map(|arr| arr - 2).filter(|&i| f.children[i].as_bool().is_some());
+    if i.is_none() {
+        log::warn!("{what}: a FACTION v{} has no out-of-game flag (the bool two before the flag anchor); left out", f.version);
+    }
+    i
 }
 
 /// A `FACTION`'s land and naval upkeep trackers (faction +0x738 / +0x744, the amounts they booked into the
@@ -335,11 +358,8 @@ pub(crate) fn faction_details(f: &EsfRecord) -> (FactionDetails, Option<(String,
         };
         d.capital = region(exposed.checked_sub(2));
         d.capital_2 = region(exposed.checked_sub(1));
-        // The out-of-game flag (faction +0x824, read at 0x0087B4CC): the bool two before the anchor
-        // ([`flags_anchor`]).
-        if let Some(arr) = flags_anchor(f) {
-            d.out_of_game = f.children[arr - 2].as_bool();
-        }
+        // The out-of-game flag (faction +0x824, [`out_of_game_index`]); `None` without it.
+        d.out_of_game = out_of_game_index(f, "load").and_then(|i| f.children[i].as_bool());
     }
     d.religion = f.values().filter_map(EsfNode::as_str).find(|v| v.starts_with("rel_") || v.starts_with("align_")).unwrap_or_default().to_string();
     // Trade income of the last ECONOMICS_DATA record (category 7 = #1[2], CAMPAIGN_FIDELITY.md).
@@ -594,6 +614,22 @@ mod tests {
         }
         let restrictions = EsfRecord { name: "EPISODIC_RESTRICTIONS".into(), version, children };
         EsfRecord { name: "CAMPAIGN_MODEL".into(), version: 0, children: vec![EsfNode::Record(Box::new(restrictions))] }
+    }
+
+    /// The out-of-game flag is the bool two before the flag anchor; a record with another value there,
+    /// or without the anchor, has none (`None`, warned once by the reader and the writer each).
+    #[test]
+    fn the_out_of_game_flag_is_the_bool_two_before_the_anchor() {
+        let exposed = EsfNode::RecordArray(Box::new(EsfRecordArray { name: "EXPOSED_CHARACTERS".into(), version: 0, items: Vec::new() }));
+        let faction = |slot: EsfNode| EsfRecord {
+            name: "FACTION".into(),
+            version: 18,
+            children: vec![exposed.clone(), slot, EsfNode::U32(0), EsfNode::BoolArray(vec![false])],
+        };
+        assert_eq!(out_of_game_index(&faction(EsfNode::Bool(true)), "test"), Some(1));
+        assert_eq!(out_of_game_index(&faction(EsfNode::I32(1)), "test"), None);
+        let no_anchor = EsfRecord { name: "FACTION".into(), version: 18, children: vec![exposed.clone(), EsfNode::Bool(true)] };
+        assert_eq!(out_of_game_index(&no_anchor, "test"), None);
     }
 
     fn switches(model_rec: &EsfRecord) -> [bool; 9] {

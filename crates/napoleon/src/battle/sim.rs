@@ -35,8 +35,10 @@ pub struct BattleSim {
     pub camera_start: Option<([f32; 3], [f32; 3])>,
     /// The player's deployment area (map metres), if the battle has one.
     pub deployment_area: Option<ntw_formats::battle_terrain::DeploymentArea>,
-    /// Deployment, conflict or finished.
-    pub phase: BattlePhase,
+    /// The battle was decided (or a harness decided it) and the player has not chosen to continue.
+    /// Private: [`Self::finish`] and [`Self::continue_battle`] are its writers; [`Self::phase`]
+    /// reads it.
+    finished: bool,
     /// The battle file's time limit and timeout winner (none for the test slice).
     pub victory: VictoryRules,
     /// How the battle ended (Ongoing until then).
@@ -83,7 +85,7 @@ impl BattleSim {
             battle_key: None,
             camera_start: None,
             deployment_area: None,
-            phase: BattlePhase::Conflict,
+            finished: false,
             victory: VictoryRules::default(),
             outcome: Outcome::Ongoing,
             continued: false,
@@ -92,6 +94,45 @@ impl BattleSim {
             wind: [0.0; 3],
             build: next_build(),
         }
+    }
+
+    /// Deployment, conflict or finished. Deployment is the model's own flag
+    /// ([`Battle::deploying`]), the one source the special-ability gate also reads.
+    pub fn phase(&self) -> BattlePhase {
+        if self.finished {
+            BattlePhase::Finished
+        } else if self.battle.deploying {
+            BattlePhase::Deployment
+        } else {
+            BattlePhase::Conflict
+        }
+    }
+
+    /// Ends the deployment phase (`0x00551BA0`, [`Battle::end_deployment`]: the selected deployable
+    /// defences are built); nothing once it is over.
+    pub fn end_deployment(&mut self) {
+        if !self.battle.deploying {
+            return;
+        }
+        self.battle.end_deployment();
+        if !self.battle.defences.is_empty() {
+            info!("Battle: {} deployable defences built", self.battle.defences.len());
+        }
+    }
+
+    /// The battle is decided: `outcome` is kept and the results are shown.
+    pub fn finish(&mut self, outcome: Outcome) {
+        self.outcome = outcome;
+        self.finished = true;
+    }
+
+    /// The player keeps fighting after the result (`PostBattleDismissContinueBattle`): the battle
+    /// runs again, with no victory check from then on (a battle a harness decided during
+    /// deployment ends its deployment here).
+    pub fn continue_battle(&mut self) {
+        self.continued = true;
+        self.finished = false;
+        self.end_deployment();
     }
 
     /// The current battle speed.

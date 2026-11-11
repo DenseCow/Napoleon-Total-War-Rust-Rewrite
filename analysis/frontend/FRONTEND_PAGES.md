@@ -102,11 +102,14 @@ else text; `UISelectionManager` calls each item's Lua `Select(bool)`; `string.le
     `1e999` all store +infinity, a negative one -infinity, and the setting counts as set. Ours: `number_value` gives the same infinity (the
     overflow test is a float parse of the same text). Test: `a_number_beyond_a_floats_range_is_infinite`.
   - An int beyond its range (traced 2026-11-11, CONFIRMED): the int read `0x010DFF00` gathers the digit field with `0x010E4460` (a sign, then
-    decimal digits, leading zeros dropped, at most 30 kept and the rest read and lost) and converts it with `0x010F5F50`, a `sscanf` "%i"
-    (`0x0044AAC0` → UCRT `0x0127D720`); it fails only when no digit was read or `sscanf` converted nothing. The UCRT's `%i` (`0x0127C18E`, base 0,
-    signed) parses a 64-bit number (`0x01277818`), saturating past i64's range (`0x012753BF`: i64::MAX, i64::MIN when negative), and stores its
-    low 32 bits (`0x0127D5C1`). So `2147483648` stores -2147483648, `4294967296` stores 0, a number past i64's range -1 (0 when negative), and
-    the setting counts as set. Difference: ours reads every numeric setting as the float read does and keeps the number.
+    decimal digits, leading zeros dropped, kept up to buffer+31: at most 30 digits after a sign, 31 without one, the rest read and lost) and
+    converts it with `0x010F5F50`, a `sscanf` "%i" (the exe's sscanf wrapper `0x0044AAC0` → the UCRT's `__stdio_common_vsscanf` `0x0127D720`); it
+    fails only when no digit was read or `sscanf` converted nothing. The UCRT's `%i` (`0x0127C18E`, base 0, signed) parses a 64-bit number
+    (`0x01277818`); past i64's range `0x012753BF` (`is_overflow_condition`) only detects the overflow, and `parse_integer` sets the saturated
+    value at `0x01277A6E`-`0x01277A88` (i64::MAX, i64::MIN when negative); the low 32 bits are stored (`0x0127D5C1`). So `2147483648` stores
+    -2147483648, `4294967296` stores 0, a number past i64's range -1 (0 when negative), `2.5` stores 2, and the setting counts as set. Ours: the
+    int settings (all numeric ones but the five floats, constructor `0x00454380`'s callers) are read the same way (`preferences.rs`
+    `int_value`, `FLOAT_SETTINGS`). Test: `an_int_setting_is_wrapped_as_the_exes_int_read`.
   - Bool (`0x00454480`; write `0x0044AB80`, read `0x0044ABA0` → `0x010D3950` → `0x010E0180`): in the stream's names mode the text must be `false`
     or `true` (name table `0x01402BB4`, matcher `0x010E1770`), in the other mode an unsigned 0 / 1; no match raises the stream's fail state and
     stores nothing. INFERRED names mode (the exe's own file spells the words; where the mode is set was not traced).
@@ -118,8 +121,7 @@ else text; `UISelectionManager` calls each item's Lua `Select(bool)`; `string.le
     (`__prefs.get`) still hands the scripts the file's text. Tests: `a_setting_reads_as_the_files_value_else_the_registered_default`,
     `a_number_is_the_leading_number_and_never_nan`, `a_bool_is_true_or_false_only`, `mistyped_lines_are_listed_once_each` (ntw_formats),
     `a_mistyped_file_value_is_the_registered_default_on_the_pages`, `a_preferences_warning_is_said_once_per_file` (ntw_script).
-  - Difference: an int setting's read stops at a point in the exe (`2.5` is 2); ours keeps the fraction and the readers of whole-number settings
-    drop it.
+  - An int setting's read stops at a point in the exe (`2.5` is 2); ours too since 2026-11-11 (`int_value`, the int-range item above).
   - UNKNOWN (not traced): the loader's loop (how a line becomes the stream, whether a failed read affects the lines after it, what happens to
     text left after a number).
 - A preferences file that exists but cannot be read is reported once per path (`read_preferences_file` returns the error, `load_preferences` logs

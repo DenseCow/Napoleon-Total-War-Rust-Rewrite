@@ -112,24 +112,14 @@ impl Preferences {
     /// A file value that does not read as a number is passed over for the registered default, as
     /// in [`Self::get_bool`]. CONFIRMED: the exe's int (`0x0044C500`) and float (`0x0044D300`)
     /// settings store the stream read's result only when the read did not fail (`0x010D3780`,
-    /// `0x010E00B0`). The read takes the number the text starts with (`3abc` is 3) and knows only
-    /// a sign, digits, a point and an exponent (`0x010E3C80`), so `nan` and `inf` are no numbers.
-    /// A float setting's number beyond a float's range is stored as infinity (`number_value`).
-    ///
-    /// Difference: an int setting's read stops at a point in the exe (`2.5` is 2); here the
-    /// fraction is kept and the readers of whole-number settings drop it. Ours reads every
-    /// numeric setting as the float read does. The exe's int read (`0x010DFF00`) gathers the
-    /// digit field (`0x010E4460`: a sign, then decimal digits, leading zeros dropped, at most 30
-    /// kept and the rest read and lost) and converts it with `sscanf("%i")` (`0x010F5F50` →
-    /// `0x0044AAC0`, the UCRT's `__stdio_common_vsscanf`); it fails only when no digit was read or
-    /// sscanf converted nothing (CONFIRMED). So a number beyond an int's range does not fail. The
-    /// statically linked UCRT's `%i` parses a signed 64-bit number (`0x0127C18E` with base 0,
-    /// signed, → `0x01277818`), saturating beyond that range (`0x012753BF`: to i64::MAX, or
-    /// i64::MIN for a negative), and stores its low 32 bits into the int (`0x0127D5C1`)
-    /// (CONFIRMED). So `2147483648` stores -2147483648, `4294967296` stores 0, and a number beyond
-    /// i64's range stores -1 (0 when negative). Difference: ours keeps the number.
+    /// `0x010E00B0`). The float read takes the number the text starts with (`3abc` is 3) and knows
+    /// only a sign, digits, a point and an exponent (`0x010E3C80`), so `nan` and `inf` are no
+    /// numbers; its number beyond a float's range is stored as infinity (`number_value`).
+    /// An int setting (every numeric one but [`FLOAT_SETTINGS`]) is read as the exe's int read
+    /// takes it (`int_value`): the whole number the text starts with, wrapped to an int, so `2.5`
+    /// is 2, `1e2` is 1 and `4294967296` is 0.
     pub fn get_f64(&self, key: &str) -> Option<f64> {
-        self.file_value(key).and_then(number_value).or_else(|| registered_default(key).and_then(number_value))
+        self.file_value(key).and_then(|v| setting_number(key, v)).or_else(|| registered_default(key).and_then(|v| setting_number(key, v)))
     }
 
     /// The keys of the file's lines whose value does not read as the setting's type (the type of
@@ -140,7 +130,7 @@ impl Preferences {
         for l in &self.lines {
             let PrefLine::Setting { key, value, .. } = l else { continue };
             let Some(default) = registered_default(key) else { continue };
-            let reads = if bool_value(default).is_some() { bool_value(value).is_some() } else { number_value(value).is_some() };
+            let reads = if bool_value(default).is_some() { bool_value(value).is_some() } else { setting_number(key, value).is_some() };
             if !reads && !keys.contains(&key.as_str()) {
                 keys.push(key);
             }
@@ -316,6 +306,57 @@ const REGISTERED_DEFAULTS: &[(&str, &str)] = &[
     ("y_pos", "0"),                                         // 0x00405B80
     ("y_res", "0"),                                         // 0x00405BD0
 ];
+
+/// The numeric settings the exe builds as floats (constructor `0x00454380`, called from these five
+/// initialisers only, CONFIRMED by its xrefs); every other numeric setting in
+/// [`REGISTERED_DEFAULTS`] is an int (constructor `0x00454300`, 49 initialisers). Part of the
+/// settings list, so it is replaced with it.
+const FLOAT_SETTINGS: &[&str] = &[
+    "camera_move_speed",        // 0x00403140
+    "camera_turn_speed",        // 0x00403190
+    "campaign_unit_multiplier", // 0x004032D0
+    "gfx_brightness_setting",   // 0x004039A0
+    "gfx_gamma_setting",        // 0x00403CD0
+];
+
+/// A setting's value text as its number: the int read for an int setting, else the float read (a
+/// float setting, or a key the game does not register as a number).
+fn setting_number(key: &str, text: &str) -> Option<f64> {
+    let int = registered_default(key).is_some_and(|d| bool_value(d).is_none()) && !FLOAT_SETTINGS.contains(&key);
+    if int { int_value(text).map(f64::from) } else { number_value(text) }
+}
+
+/// A value text as an int setting's value, as the exe's int read (`0x010DFF00`) stores it
+/// (CONFIRMED). It gathers the digit field (`0x010E4460`: a sign, then decimal digits, leading
+/// zeros dropped, kept up to buffer+31, so at most 30 digits after a sign and 31 without one,
+/// the rest read and lost; a point or any other character ends it, so `2.5` is 2 and `1e2` is 1),
+/// fails when no digit was read, and converts the field with `sscanf("%i")` (`0x010F5F50` → the
+/// exe's sscanf wrapper `0x0044AAC0` → the statically linked UCRT's `__stdio_common_vsscanf`
+/// `0x0127D720`). The UCRT's `%i` (`0x0127C18E`, base 0, signed) parses a 64-bit number
+/// (`0x01277818`); past i64's range `0x012753BF` (`is_overflow_condition`) detects the overflow
+/// and `parse_integer` sets the saturated value (`0x01277A6E`-`0x01277A88`: i64::MAX, or i64::MIN
+/// when negative). The low 32 bits are stored into the int (`0x0127D5C1`). So `2147483648` is
+/// -2147483648, `4294967296` is 0, and a number past i64's range is -1 (0 when negative). No base
+/// prefix reaches `%i`: the field is decimal digits with the leading zeros gone.
+fn int_value(text: &str) -> Option<i32> {
+    let text = text.trim_start();
+    let negative = text.starts_with('-');
+    let sign = usize::from(negative || text.starts_with('+'));
+    let digits: Vec<u8> = text.as_bytes()[sign..].iter().take_while(|c| c.is_ascii_digit()).map(|c| c - b'0').collect();
+    if digits.is_empty() {
+        return None;
+    }
+    // The kept field: leading zeros dropped, at most 31 characters with the sign.
+    let kept = digits.iter().skip_while(|&&d| d == 0).take(31 - sign);
+    // 31 digits are below 2^128, so the sum never overflows.
+    let magnitude = kept.fold(0u128, |n, &d| n * 10 + u128::from(d));
+    let wide: i64 = if negative {
+        if magnitude > 1u128 << 63 { i64::MIN } else { (-(magnitude as i128)) as i64 }
+    } else {
+        i64::try_from(magnitude).unwrap_or(i64::MAX)
+    };
+    Some(wide as i32)
+}
 
 /// A value text as a bool: `true` or `false`, nothing else (see [`Preferences::get_bool`]).
 fn bool_value(text: &str) -> Option<bool> {
@@ -500,10 +541,10 @@ gfx_hardware_shadows true; # b #\r\n";
     }
 
     /// A number is what the text starts with: `nan` and `inf` text used to count as numbers and
-    /// reached the sliders and the audio volumes.
+    /// reached the sliders and the audio volumes. (A float setting; an int one is read below.)
     #[test]
     fn a_number_is_the_leading_number_and_never_nan() {
-        let read = |value: &str| Preferences::parse(&format!("sound_master_volume {value}; # #\r\n")).get_f64("sound_master_volume");
+        let read = |value: &str| Preferences::parse(&format!("camera_move_speed {value}; # #\r\n")).get_f64("camera_move_speed");
         for (text, number) in [("40", 40.0), (" 40 ", 40.0), ("-1.5", -1.5), ("+.5", 0.5), ("3.", 3.0), ("1e2", 100.0), ("2E-1", 0.2), ("3abc", 3.0), ("7e", 7.0), ("7e+", 7.0)] {
             assert_eq!(read(text), Some(number), "{text:?}");
         }
@@ -530,6 +571,52 @@ gfx_hardware_shadows true; # b #\r\n";
         // Just inside the float's range stays finite.
         assert_eq!((read("3.4e38"), read("-3.4e38")), (Some(3.4e38), Some(-3.4e38)));
         assert!(Preferences::parse(&format!("{key} 1e39; # #\r\n")).mistyped().is_empty());
+    }
+
+    /// An int setting is read as the exe's int read stores it (`int_value`): the whole number the
+    /// text starts with, saturated to i64 and wrapped to its low 32 bits. Before, every numeric
+    /// setting was read as a float: `sound_master_volume 4294967296` was clamped to 100 by the audio
+    /// where the exe reads 0, and `2.5` kept its fraction.
+    #[test]
+    fn an_int_setting_is_wrapped_as_the_exes_int_read() {
+        let read = |value: &str| Preferences::parse(&format!("sound_master_volume {value}; # #\r\n")).get_f64("sound_master_volume");
+        for (text, number) in [
+            ("40", 40.0),
+            (" 40 ", 40.0),
+            ("2.5", 2.0),
+            ("-1.5", -1.0),
+            ("3.", 3.0),
+            ("1e2", 1.0),
+            ("3abc", 3.0),
+            ("+7", 7.0),
+            ("0010", 10.0),
+            ("-0", 0.0),
+            ("2147483647", 2147483647.0),
+            ("2147483648", -2147483648.0),
+            ("4294967296", 0.0),
+            ("4294967297", 1.0),
+            ("-4294967295", 1.0),
+            ("9223372036854775807", -1.0),
+            ("9223372036854775808", -1.0),
+            ("-9223372036854775808", 0.0),
+            ("99999999999999999999999999999999999999", -1.0),
+            ("-99999999999999999999999999999999999999", 0.0),
+        ] {
+            assert_eq!(read(text), Some(number), "{text:?}");
+        }
+        // No digit before the point or the sign's end: not a number, the registered default stands.
+        for text in [".5", "+.5", "-", "e5", "nan", ""] {
+            assert_eq!(read(text), Some(100.0), "{text:?}");
+        }
+        let p = Preferences::parse("sound_master_volume .5; # #\r\nsound_sfx_volume 2.5; # #\r\n");
+        assert_eq!(p.mistyped(), ["sound_master_volume"]);
+        // A float setting keeps the fraction and the whole range.
+        let f = Preferences::parse("gfx_gamma_setting 2.5; # #\r\ncamera_move_speed 4294967296; # #\r\n");
+        assert_eq!((f.get_f64("gfx_gamma_setting"), f.get_f64("camera_move_speed")), (Some(2.5), Some(4294967296.0)));
+        // Every float setting is a registered numeric one.
+        for key in FLOAT_SETTINGS {
+            assert!(registered_default(key).is_some_and(|d| bool_value(d).is_none()), "{key}");
+        }
     }
 
     /// A bool is one of the two names; a number is not one (the exe matches the names only).

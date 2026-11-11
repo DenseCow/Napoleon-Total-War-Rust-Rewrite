@@ -661,7 +661,7 @@ pub fn fx_log(
     }
     *acc = 0.0;
     let (phase, t) =
-        sim.as_ref().map_or(("-".into(), 0.0), |s| (format!("{:?}", s.phase), s.battle.time_seconds()));
+        sim.as_ref().map_or(("-".into(), 0.0), |s| (format!("{:?}", s.phase()), s.battle.time_seconds()));
     let (buckets, quads) = drawn.as_ref().map_or((0, 0), |d| (d.buckets, d.quads));
     info!(
         "FX {phase} t={t:.1} s: {} particles live in {buckets} buckets ({quads} quads), {} released, {} dropped at the cap",

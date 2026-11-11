@@ -301,10 +301,14 @@ fn assassination_events_carry_the_agent_type_of_a_character_it_kills() {
             _ => None,
         });
         match outcome.expect("resolved") {
-            Outcome::CriticalSuccess | Outcome::Success => target_killed += 1,
+            Outcome::CriticalSuccess | Outcome::Success => {
+                assert!(!m.world.characters.contains_key(&CharacterId(105)), "seed {seed}: the target is gone");
+                target_killed += 1;
+            }
             Outcome::CriticalFailure => {
                 let failed = CampaignEvent::CharacterCriticallyFailsAssassination { character: CharacterId(103), agent_type: Some(CharacterKind::Rake) };
                 assert!(ev.contains(&failed), "seed {seed}");
+                assert!(!m.world.characters.contains_key(&CharacterId(103)), "seed {seed}: the agent is gone");
                 agent_killed += 1;
             }
             Outcome::Failure => {}

@@ -293,6 +293,13 @@ impl Vfs {
     /// and for DB rows ([`db_row_replaces`](Self::db_row_replaces)). When both layers are packs
     /// that are nodes of the [`PackGraph`], the later node wins (and a pack replaces itself);
     /// else the higher [`Layer::rank`] wins; equal ranks: `false` (the copy already there stays).
+    ///
+    /// It is a pairwise rule, not a total order: it mixes the graph position with the rank, so
+    /// when the graph puts a pack `a` after a pack `b` of higher rank, and a third pack `c` (no
+    /// graph node) is ranked between them, `a` beats `b`, `b` beats `c` and `c` beats `a`. Of
+    /// three such copies of one file, the one kept then depends on the mount order (each new copy
+    /// is only compared with the one held), and a caller that orders copies with it
+    /// (`material.rs`'s `takes`) on the order it meets them in.
     pub fn beats(&self, new: usize, old: usize) -> bool {
         layer_beats(&self.layers, &self.graph_pos, new, old)
     }

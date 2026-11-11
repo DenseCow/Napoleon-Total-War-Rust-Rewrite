@@ -220,15 +220,9 @@ fn battle_background(mut commands: Commands) {
 /// copies that tick's volleys into the display-only [`VolleyFx`].
 fn tick_battle(mut sim: ResMut<BattleSim>, mut fx: ResMut<VolleyFx>) {
     // Only the conflict phase runs the model (not deployment; not once decided, unless the player
-    // chose to continue). The victory conditions are checked after each tick.
-    if sim.phase == BattlePhase::Conflict {
-        if sim.battle.tick == 0 {
-            // Deployment is over (0x00551BA0): the selected deployable defences are built.
-            sim.battle.end_deployment();
-            if !sim.battle.defences.is_empty() {
-                info!("Battle: {} deployable defences built", sim.battle.defences.len());
-            }
-        }
+    // chose to continue). The victory conditions are checked after each tick. The selected
+    // deployables were built when deployment ended (`BattleSim::end_deployment`).
+    if sim.phase() == BattlePhase::Conflict {
         let fired_at = sim.battle.time_seconds();
         sim.battle.step();
         fx.recent.extend(sim.battle.volleys.iter().map(|v| (fired_at, *v)));
@@ -236,8 +230,7 @@ fn tick_battle(mut sim: ResMut<BattleSim>, mut fx: ResMut<VolleyFx>) {
             let outcome = victory::check(&sim.battle, &sim.victory);
             if outcome.is_over() {
                 info!("Battle over at {:.1} s: {outcome:?}", sim.battle.time_seconds());
-                sim.outcome = outcome;
-                sim.phase = BattlePhase::Finished;
+                sim.finish(outcome);
             }
         }
     }
@@ -439,5 +432,32 @@ mod tests {
         let mut sim = BattleSim::new(Battle::new(1, KvMorale::default(), KvFatigue::default()), 1);
         sim.battle.add_unit(LandUnit::new(1, 0, 100, (0.0, 0.0)));
         sim.add_unit(LandUnit::new(2, 0, 100, (0.0, 0.0)), info(2));
+    }
+
+    /// Regression (abilitygate review): the deployment phase was kept twice, `BattleSim::phase` and
+    /// the model's `Battle::deploying`, set and cleared at different times. The phase now reads
+    /// the model's flag, so the two cannot disagree.
+    #[test]
+    fn the_deployment_phase_is_the_models_own_flag() {
+        use ntw_sim::battle::victory::Outcome;
+        let mut sim = BattleSim::new(Battle::new(1, KvMorale::default(), KvFatigue::default()), 1);
+        sim.battle.deploying = true;
+        assert_eq!(sim.phase(), BattlePhase::Deployment);
+        sim.end_deployment();
+        assert!(!sim.battle.deploying);
+        assert_eq!(sim.phase(), BattlePhase::Conflict);
+        sim.finish(Outcome::Won { side: 0 });
+        assert_eq!((sim.phase(), sim.outcome), (BattlePhase::Finished, Outcome::Won { side: 0 }));
+        sim.continue_battle();
+        assert_eq!(sim.phase(), BattlePhase::Conflict);
+        assert!(sim.continued);
+        // A battle a harness decides during deployment shows its result; continuing ends the deployment.
+        let mut sim = BattleSim::new(Battle::new(1, KvMorale::default(), KvFatigue::default()), 1);
+        sim.battle.deploying = true;
+        sim.finish(Outcome::Won { side: 1 });
+        assert_eq!(sim.phase(), BattlePhase::Finished);
+        sim.continue_battle();
+        assert_eq!(sim.phase(), BattlePhase::Conflict);
+        assert!(!sim.battle.deploying);
     }
 }

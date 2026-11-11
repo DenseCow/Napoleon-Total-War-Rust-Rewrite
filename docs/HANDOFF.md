@@ -58,11 +58,26 @@ Last updated: 2026-11-10. Main tests at last full run (2026-10-08): `cargo test 
   → push (the hook syncs public #2) → publish in batches. Running work = the BACKLOG `(running: …)`
   markers and `git worktree list`; merged work = `git log`.
 - **Resume points:** the one debugger sitting sheet at the top of docs/FOR_USER.md. Running work: BACKLOG markers.
-- **Branches (state on 2026-11-10; worktrees `../NR-<x>`, a fresh worker for each next step, BACKLOG markers kept).**
+- **Branches (state on 2026-11-11 night; worktrees `../NR-<x>`, a fresh worker for each next step, BACKLOG markers kept).**
   Reviews are files in the session scratchpad, so a new session reruns a review it cannot find.
+  - `polish77`: batch e111e62e + fix round d35f4e80 (`fire_destroyed` ORIGINAL BUG 0x0102F4C4..0x0102F4DF;
+    ntw_script 370/0, clippy clean). Next: rerun the fix review, then merge. Polish lines owed at merge: the
+    `fire_destroyed` re-entry (trace 0x01037230 before guarding), `read_faction` (line 13's open part),
+    `BuildingChainRecord` duplicates `BuildingChain`.
+  - `polish80` (docs and `polish80.jsonl` only): batch 7d48f80d + fix round 1b3bc665 (both blocking findings).
+    Left: the 0x00933B90 plate gets the campaign stack arg +0x08 (+0xF9C read at 0x00933BBF); rename
+    0x0080DC60 → GetDwordAt100 with a V5 plate (291 refs, vtable slot 0x01347258) or say why not; the
+    encoding test; then a fix review. Polish: create a function at 0x00933B90 (size 0x74) before importing
+    its name; 0x00932E54 has no function in IDA.
+  - `polish81` (from 96600871): WIP 167fad3f, not tested beyond ntw_sim campaign (970/0). Lines 1-6, 11-13
+    done, 8 and 9 in part, 7 traced only (occupy with no kind-0 fortification sets wall health 0 at
+    0x00B58314 / 0x00B583F2; not shown to be an ORIGINAL BUG, stays faithful), 10 not started. Own save
+    moves to v17; line 11 adds two seams in seams.rs (polish77 edits it too: merge one, rebase the other).
+  - `polish82` (from bd020952): WIP 0ee04544, tests not run. Lines 8, 11, 12, 13 done; 9 in part (card
+    +0xC8 readers left); 5 traced only (plan in the commit message); 1-4, 6, 7, 10 not started.
   - Exe write-ups: `actionclearsv5`, `regionvaluefix`, `actionclearsfix`, `victoryscreen3` and `allygarrison` are in
     the journal but not yet in the live database (one importer `--apply` is owed), and so are `scriptevents`,
-    `expelplace`, `rallyinspire`, `battlekeys`, `warcall`, `portblockade2`, `residents`, `victorytest`, `recruitmarch2`, `abilitygate`, `classslots2`, `sieges` + `siegesfix`, `charrank` (merged 2026-11-10), `battlecamera`, `grass`, `walldamage`, `forcedmarch` and `cameramodes` (merged 2026-11-11). Still in `names\pending\`, each to
+    `expelplace`, `rallyinspire`, `battlekeys`, `warcall`, `portblockade2`, `residents`, `victorytest`, `recruitmarch2`, `abilitygate`, `classslots2`, `sieges` + `siegesfix`, `charrank` (merged 2026-11-10), `battlecamera`, `grass`, `walldamage`, `forcedmarch`, `cameramodes`, `polish78` and `polish79` (merged 2026-11-11). Still in `names\pending\`, each to
     merge after its branch's review corrections: the branches above.
 - **Plan from next session (user, 2026-10-23: finish as fast as possible):** 1) finish the WIP branches above. §0 is closed for new lines: the triage of 2026-11-10 moved its open lines to the "From §0 (triage, 2026-11-10)" blocks at the end of §3, §5, §7 and §12; 2) slots go to §2, §3 and §5 in parallel; 3) add the week's net tag change to the Progress block (`tools/progress.sh`) and brief workers to leave their area with fewer tags than they found.
 - Usage (user, 2026-10-22): 12-point blocks (`BlockPercent` in tools/usage_budget.ps1) to the Wed 2026-10-28 reset. The Wed 10-21 night ended at 18% of its 22% cap; its 4 unused points go to the next block (`usage_budget.ps1 extra-next 4`, stored in `next_extra.txt` and applied once when the block opens, so Thu's cap is its opening reading + 16).
@@ -124,6 +139,7 @@ Batched for the user: only what the screenshot harness can't do (a worker ran th
 Delete a line once checked and record the result where it belongs. Base command: `cargo run --release -p napoleon -- <flags>`.
 - (user 2026-10-10: the rest is verified by workers from data, layouts, the harness and Ghidra; only a look that no file, trace or harness shot can settle comes here)
 - Side by side, battle camera modes (cameramodes; PROVISIONAL intelli-zoom threshold and leave_zoom): `--battle-key NHB_Austerlitz --skip-deployment`. Select a unit and toggle tracking (the camera follows it, the transition eases in, and it ends when the unit is deselected or the camera is moved); intelli-zoom onto a unit and back (the camera glides in and returns to where it was); both look and time the same as the original.
+- Quick look, the int settings wrap as the exe's int read (polish79): put `sound_master_volume 4294967296` in the preferences file and start with no flags: the game is silent (the value wraps to 0), as in the original.
 - Side by side, siege wall damage (walldamage): `--campaign egy_napoleon --campaign-faction france`, besiege egy_palestine for several turns: the walls lose health on the same turns as in the original, and the repair cost matches.
 - Quick look, grass (grass; INFERRED ground gate): `--battle --battle-map hb_nile` (a `.jpg` grass map with its `_alpha.jpg`) and `--battle --battle-map hb_austerlitz` (a `.tga` map): grass is drawn where the original draws it, its kinds and density match, and it sways with the gusts; gfx_grass_quality 0 draws none.
 - Side-by-side, campaign sieges (sieges): `--campaign eur_napoleon --campaign-faction france`; an army without artillery into an enemy walled settlement with a garrison: it lays siege with no battle, the settlement panel shows the turns until surrender, the garrison loses men each round, and it falls at your next turn start after the turns run out; with artillery the assault starts on arrival; without artillery "assault" does nothing against walls; "Lift siege" ends it; the general's offensive / defensive sieges fought go up by one on both sides.

@@ -39,7 +39,7 @@ use ntw_sim::battle::shooting::MissileWeapon;
 use ntw_sim::battle::fatigue::FatigueEffects;
 
 
-use super::{BattlePhase, BattleSim, UnitInfo};
+use super::{BattleSim, UnitInfo};
 use ntw_sim::battle::victory::VictoryRules;
 use crate::data::GameData;
 
@@ -359,10 +359,13 @@ pub fn build_battle(db: &GameDatabase, setup: &SetupData, seed: u32) -> BattleSi
     for i in 0..sim.battle.units.len() {
         sim.battle.units[i].skirmish = sim.battle.skirmish_default(i);
     }
-    sim.phase = if skip { BattlePhase::Conflict } else { BattlePhase::Deployment };
-    // The model's own deployment flag (the special-ability gate reads it); `end_deployment`
-    // clears it when the conflict starts.
-    sim.battle.deploying = !skip;
+    // The model's own deployment flag, the one source of the deployment phase (`BattleSim::phase`;
+    // the special-ability gate reads it too). A battle with no deployment ends it at once, which
+    // builds the deployables its units hold (`0x00551BA0`).
+    sim.battle.deploying = true;
+    if skip {
+        sim.end_deployment();
+    }
     // The battle file's own wind, in world axes and read as metres per second (see
     // `BattleSim::wind`). Only the flag cloth reads it.
     if let Some((x, y)) = setup.battle.as_ref().and_then(|(_, s)| s.prevailing_wind) {

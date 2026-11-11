@@ -878,8 +878,13 @@ fn write_traits(d: &mut EsfRecord, details: &ntw_sim::campaign::details::Charact
 /// (type 14, `0x009A0AE8`) and details +0x13C as a u32 (type 8, `0x009A0B35`); CONFIRMED,
 /// CHARACTERS_FIDELITY.md §17. So the items are exactly the model's entries in its order, each with
 /// a UTF-16 key and a u32: a source entry the model lacks is not kept, and none is skipped for its
-/// node type. Vanilla gives the one `dummy` entry the exe writes; the model's list (a mod's
-/// situations) lifts the exe's single value, and each of its entries is written, a repeated key too.
+/// node type. Vanilla gives the one `dummy` entry the exe writes (every startpos and original save
+/// holds `[("dummy", 0)]`). The model's entries other than `dummy` only ever come from the source
+/// file (`ATTRIBUTE_SITUATION_KEYS` is a const; the exe's reader `0x00993280` maps any key but
+/// `dummy` to index 1, details +0x140, which its writer never writes): each is written, a repeated
+/// key too. A known difference, only for a foreign or mod file: a list that is empty or lacks
+/// `dummy` is written with no `dummy` entry, where the exe always writes exactly one (its +0x13C,
+/// which its reader then leaves unset).
 fn write_attribute_bonuses(items: &mut Vec<Vec<EsfNode>>, bonuses: &[(String, u32)]) {
     *items = bonuses.iter().map(|(key, value)| vec![EsfNode::Utf16String(key.clone()), EsfNode::U32(*value)]).collect();
 }
@@ -1109,11 +1114,11 @@ fn write_faction(
         set(f, arr + 1, EsfNode::I32(land));
         set(f, arr + 2, EsfNode::I32(naval));
     }
-    // The out-of-game flag (faction +0x824, the bool two before the flag anchor, which the loader reads at
-    // 0x0087B4CC; `details::faction_details`), from the one in-the-game rule, so a faction destroyed or
-    // brought back in play is saved as such.
-    if let Some(arr) = crate::details::flags_anchor(f) {
-        set(f, arr - 2, EsfNode::Bool(!model.in_the_game(faction.id)));
+    // The out-of-game flag (faction +0x824, `details::out_of_game_index`, which warns once for a record
+    // without it), from the one in-the-game rule, so a faction destroyed or brought back in play is saved
+    // as such.
+    if let Some(i) = crate::details::out_of_game_index(f, "save") {
+        set(f, i, EsfNode::Bool(!model.in_the_game(faction.id)));
     }
     // The `WarStartedCharacterFaction` flag (`details::war_started_index`) and the
     // `FactionDestroyedByCharacterFaction` flag, the bool before it, where the record has them.
@@ -2480,7 +2485,7 @@ mod tests {
         write_traits(&mut d, &details);
         let written = &d.record_array("AgentAttributeBonuses").unwrap().items;
         assert_eq!(*written, vec![utf16("dummy", 5), utf16("mod_situation", 2)]);
-        assert_eq!(crate::details::read_attribute_bonuses(&d), details.attribute_bonuses);
+        assert_eq!(crate::details::read_attribute_bonuses(&d, &mut 0), details.attribute_bonuses);
         // A source with a repeated key, an entry the model lacks and a value that is not a u32: the
         // array is rebuilt to the model's entries, nothing of the source kept (`0x009A0580` writes from
         // its own state only).
@@ -2490,12 +2495,16 @@ mod tests {
             utf16("stale_situation", 4),
         ];
         let mut d = details_rec(array("AgentAttributeBonuses", source));
+        // Read first: the I32-valued item is the one dropped and counted for the load warning.
+        let mut dropped = 0;
+        assert_eq!(crate::details::read_attribute_bonuses(&d, &mut dropped), vec![("dummy".into(), 1), ("stale_situation".into(), 4)]);
+        assert_eq!(dropped, 1);
         write_traits(&mut d, &details);
         assert_eq!(d.record_array("AgentAttributeBonuses").unwrap().items, vec![utf16("dummy", 5), utf16("mod_situation", 2)]);
         // A model list with a repeated key writes each entry and reads back the same.
         let twice = CharacterDetails { attribute_bonuses: vec![("dummy".into(), 1), ("dummy".into(), 3)], ..Default::default() };
         write_traits(&mut d, &twice);
-        assert_eq!(crate::details::read_attribute_bonuses(&d), twice.attribute_bonuses);
+        assert_eq!(crate::details::read_attribute_bonuses(&d, &mut 0), twice.attribute_bonuses);
         // Another array at #14: not this layout, untouched.
         let other = array("AgentAbilities", Vec::new());
         let mut d = details_rec(other.clone());

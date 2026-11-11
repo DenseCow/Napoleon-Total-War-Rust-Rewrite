@@ -123,7 +123,7 @@ pub fn update_labels(
     // The original HUD's panels (cards, orders, popups); labels are hidden over them, and all of
     // them once the battle is decided (the end-of-battle popups and results screen).
     let panels: &[Rect] = hud.as_ref().map_or(&[], |h| h.panels.as_slice());
-    let hide_all = sim.phase == super::BattlePhase::Finished;
+    let hide_all = sim.phase() == super::BattlePhase::Finished;
     for (mut label, mut node, image, text, computed) in &mut labels {
         let Some(unit) = sim.unit(label.id) else { continue };
         let Some(lines) = label_lines(&sim, label.id) else { continue };

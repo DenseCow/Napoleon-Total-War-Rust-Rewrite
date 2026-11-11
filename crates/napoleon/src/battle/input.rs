@@ -70,7 +70,7 @@ const DOUBLE_CLICK_PX: f32 = 4.0;
 /// The last right-click that gave an order: when (real time, seconds), where (window pixels) and
 /// to which selected unit.
 #[derive(Clone, Copy)]
-pub struct OrderClick {
+pub(super) struct OrderClick {
     at: f64,
     pos: Vec2,
     unit: u32,
@@ -119,7 +119,7 @@ pub fn mouse(
     // Deployment: a right click inside the player's deployment area puts the selected unit there
     // at once, keeping its facing (PROVISIONAL: the original drags out a formation; the exact
     // placement rules are UNKNOWN). Clicks outside the area are refused.
-    if right && sim.phase == BattlePhase::Deployment {
+    if right && sim.phase() == BattlePhase::Deployment {
         if let Some(i) = sim.selected.and_then(|id| sim.battle.unit_index(id))
             && sim.deployment_area.as_ref().is_none_or(|a| setup::area_contains(a, (point_m.x, point_m.y)))
         {
@@ -185,8 +185,9 @@ mod tests {
         assert!(!is_double_click(None, 10.1, Vec2::new(100.0, 100.0), 3), "no first click");
     }
 
-    /// A selection changed between the two right-clicks (a unit card or a selection key, which
-    /// do not pass through the left-click reset) breaks the double click.
+    /// A selection changed between the two right-clicks breaks the double click: also one made by
+    /// a key or a script (`BattleUiRequest::Select`), which does not pass through the left-click
+    /// reset in `mouse` (a unit card clicked with the mouse is a left press, so it does).
     #[test]
     fn a_selection_change_breaks_the_double_click() {
         let first = Some(OrderClick { at: 10.0, pos: Vec2::new(100.0, 100.0), unit: 3 });

@@ -343,7 +343,7 @@ fn refresh_facts(out: &mut BattleHudFacts, hud: &mut BattleHud, sim: &BattleSim,
         *units_left = t.units_fighting;
     }
     let (mine, theirs) = (results[0].men_alive as f32, results[1].men_alive as f32);
-    *phase = match sim.phase {
+    *phase = match sim.phase() {
         BattlePhase::Deployment => HudPhase::Deployment,
         BattlePhase::Conflict => HudPhase::Conflict,
         BattlePhase::Finished => HudPhase::Finished,
@@ -455,8 +455,8 @@ pub fn frame(
     };
     hud.host.pulse(f64::from(t));
     // Phase popups (the engine's calls into root.lua) and the music of each phase.
-    if hud.shown != Some(sim.phase) {
-        match sim.phase {
+    if hud.shown != Some(sim.phase()) {
+        match sim.phase() {
             BattlePhase::Deployment => {
                 let _ = ui_battle::call_event(&hud.host, "ShowDeploymentPopup");
                 let _ = ui_battle::call_event(&hud.host, "SetDeploymentPopupAsDeploymentStart");
@@ -478,7 +478,7 @@ pub fn frame(
                 music.write(music_for(&sim, &data.db, "music_land_battle_results"));
             }
         }
-        hud.shown = Some(sim.phase);
+        hud.shown = Some(sim.phase());
     }
     // Pointer → HUD (harness runs ignore the live mouse).
     let mut over = false;
@@ -575,9 +575,9 @@ fn apply(hud: &mut BattleHud, sim: &mut BattleSim, r: BattleUiRequest, next: &mu
             sim.set_speed(next);
         }
         BattleUiRequest::DeploymentFinished => {
-            if sim.phase == BattlePhase::Deployment {
+            if sim.phase() == BattlePhase::Deployment {
                 info!("Battle: deployment finished, the battle starts");
-                sim.phase = BattlePhase::Conflict;
+                sim.end_deployment();
             }
         }
         BattleUiRequest::Select { ids, add: _ } => {
@@ -592,8 +592,7 @@ fn apply(hud: &mut BattleHud, sim: &mut BattleSim, r: BattleUiRequest, next: &mu
         BattleUiRequest::ContinueBattle => {
             // Keep fighting after the result (PostBattleDismissContinueBattle).
             info!("Battle: continue after the result");
-            sim.continued = true;
-            sim.phase = BattlePhase::Conflict;
+            sim.continue_battle();
             hud.shown = Some(BattlePhase::Conflict);
         }
         BattleUiRequest::EndBattle => {
@@ -613,7 +612,7 @@ fn apply(hud: &mut BattleHud, sim: &mut BattleSim, r: BattleUiRequest, next: &mu
         // PROVISIONAL: always to the front end (the campaign return through CampaignModel's
         // pending_battle / apply_battle_result is not wired yet).
         BattleUiRequest::SummaryDismissed => {
-            if sim.phase == BattlePhase::Finished || sim.continued {
+            if sim.phase() == BattlePhase::Finished || sim.continued {
                 info!("Battle: results dismissed, back to the front end");
                 next.set(GameMode::FrontEnd);
             }
@@ -792,8 +791,7 @@ pub fn harness(
     // `wait` does nothing for a second.
     if let Some(r) = id.strip_prefix("end:") {
         if let Some(mut sim) = sim {
-            sim.outcome = victory::Outcome::Won { side: if r == "win" { 0 } else { 1 } };
-            sim.phase = BattlePhase::Finished;
+            sim.finish(victory::Outcome::Won { side: if r == "win" { 0 } else { 1 } });
             info!("Harness: battle decided ({r})");
         }
         return;

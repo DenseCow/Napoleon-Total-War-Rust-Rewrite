@@ -101,8 +101,8 @@ pub fn tick(world: &mut World) {
 fn step(s: &mut BattleScripts, sim: &mut BattleSim) -> Vec<BattleScriptRequest> {
     // The buildings were given at load time and do not change.
     s.host.set_facts(facts_of(&sim.battle, sim.infos(), &[]));
-    if s.shown != Some(sim.phase) {
-        match sim.phase {
+    if s.shown != Some(sim.phase()) {
+        match sim.phase() {
             BattlePhase::Deployment => s.host.phase("Deployment"),
             BattlePhase::Conflict => {
                 if s.shown == Some(BattlePhase::Deployment) || s.shown.is_none() {
@@ -117,7 +117,7 @@ fn step(s: &mut BattleScripts, sim: &mut BattleSim) -> Vec<BattleScriptRequest> 
                 s.host.results(won);
             }
         }
-        s.shown = Some(sim.phase);
+        s.shown = Some(sim.phase());
     }
     if s.last_tick != Some(sim.battle.tick) {
         s.host.advance();

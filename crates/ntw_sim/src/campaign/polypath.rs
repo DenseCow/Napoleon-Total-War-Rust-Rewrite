@@ -997,7 +997,10 @@ impl<'a> View<'a> {
     /// PROVISIONAL: for a land or sea polygon and
     /// the first four polygons of its kind group, the exe reads a stored touch bit (`0x00B57520`)
     /// instead of comparing outlines, and in the start cell indexes it by the count of compatible
-    /// polygons before the tested one (`0x00B573C0`); those bits are not in our map data, ours
+    /// polygons before the tested one (`0x00B573C0`); a neighbour cell's spread (`0x00AF0910`'s
+    /// second pass) does the same, counting the polygons whose kind is compatible with the work
+    /// list's current one (`0x00AF14BD`) and passing that count to `0x00B168D0` (`0x00AF139B`;
+    /// CONFIRMED by decompilation). Those bits are not in our map data, ours
     /// compares outlines for every pair. The touch test between cells when the neighbour node is
     /// built (`0x00B16800` → `0x00B122D0` / `0x00B12840`) is not read and taken to equal the one
     /// in the main loop. The exe steps into a neighbouring grid at the map edge (`0x00B5B6C0`,

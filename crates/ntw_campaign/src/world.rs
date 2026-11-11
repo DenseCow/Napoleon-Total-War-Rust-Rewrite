@@ -105,6 +105,8 @@ pub(crate) fn load_world(
     let mut transport_links: Vec<(u32, u32)> = Vec::new();
     // The armies with a `REBEL_DATA` block (a block's own faults are logged where it is read).
     let mut rebel_blocks: BTreeSet<ForceId> = BTreeSet::new();
+    // (character id, items) of the `AgentAttributeBonuses` items not read, said once per load.
+    let mut bonus_drops: Vec<(i32, usize)> = Vec::new();
     for rf in &raw {
         let fid = rf.faction.id;
         let fkey = rf.faction.key.clone();
@@ -142,8 +144,12 @@ pub(crate) fn load_world(
                 };
                 if let Some(c) = read_character(rec, &cpath, fid, check)? {
                     if !world.characters.contains_key(&c.id) {
-                        if let Some(d) = crate::details::character_details(rec) {
+                        let mut dropped = 0;
+                        if let Some(d) = crate::details::character_details(rec, &mut dropped) {
                             world.character_details.insert(c.id, d);
+                        }
+                        if dropped > 0 {
+                            bonus_drops.push((c.id.raw(), dropped));
                         }
                         // #17 f32: the sight radius (character +0x2EC, CHARACTERS_FIDELITY.md §10).
                         if let Some(r) = rec.get(17).and_then(EsfNode::as_f32) {
@@ -204,6 +210,9 @@ pub(crate) fn load_world(
                 }
             }
         }
+    }
+    if !bonus_drops.is_empty() {
+        check.warnings.push(LoadWarning::UnreadableAttributeBonuses { characters: bonus_drops });
     }
 
     // Commanders must be loaded characters.

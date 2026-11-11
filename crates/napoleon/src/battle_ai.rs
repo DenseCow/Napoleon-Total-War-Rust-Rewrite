@@ -68,7 +68,7 @@ fn run_ai(
     }
     let Some(mut sim) = sim else { return };
     // The AI gives orders only while the battle runs (not during deployment, not once decided).
-    if sim.phase != crate::battle::BattlePhase::Conflict {
+    if sim.phase() != crate::battle::BattlePhase::Conflict {
         return;
     }
     let tick = sim.battle.tick;
@@ -106,7 +106,7 @@ fn ai_harness(
     mut exit: MessageWriter<AppExit>,
 ) {
     let Some(sim) = sim else { return };
-    if sim.phase == crate::battle::BattlePhase::Finished && std::env::var_os("NAPOLEON_AI_EXIT_AT_END").is_some() {
+    if sim.phase() == crate::battle::BattlePhase::Finished && std::env::var_os("NAPOLEON_AI_EXIT_AT_END").is_some() {
         let t = *over_at.get_or_insert(real.elapsed_secs());
         if real.elapsed_secs() > t + 2.0 {
             info!("Harness: battle decided, exiting (NAPOLEON_AI_EXIT_AT_END)");

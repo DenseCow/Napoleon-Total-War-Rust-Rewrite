@@ -133,8 +133,15 @@ const SETTLEMENT_CHARACTER: Offers = Offers::SETTLEMENT.and(Offers::CHARACTER);
 /// faction, region or settlement accessor (a character condition finds the faction through the
 /// character). The four garrison events answer the settlement through their garrison residence
 /// (+0x40, the event's first object; `0x008EF740` asks the residence), never a faction or a region.
-/// INFERRED: for the two building events the residence of a slot outside the town (a farm, a port)
-/// answers the region's settlement as the town's does; what `0x008EF740` returns for it is not traced.
+/// `0x008EF740` returns the residence's vtable +0x58, which answers a settlement only for the settlement
+/// residence itself (vtable `0x0137C9A4` +0x58 is `0x004470B0`, "return this"); a fort's (`0x0137D3E4`)
+/// and a region slot's (`0x0137695C`) +0x58 is `0x00461180`, null (CONFIRMED, vtable reads). The two
+/// building events carry the building's slot object (`0x00B6D260`): `CampaignBuildingDamaged` always
+/// (`0x00B452BC`), `BuildingCompleted` unless `0x00A8B790` (that object's +0x1DC, then +0x40) sends it
+/// the region's settlement instead (vt+0x34, then +0xFC; `0x00B78352`). INFERRED: a slot outside the
+/// town (a farm, a port) is a region slot there, so the exe offers no settlement for it, while ours
+/// (host.rs) answers the region's settlement as the town's does; which object `0x00B6D260` returns per
+/// slot kind, and what the +0x40 flag means, are not traced.
 ///
 /// ORIGINAL BUG: `CharacterTurnStart` is declared to the scripts (`0x00419EB0`: "Fired for every
 /// character at the start of their turn"; its name string `0x0134F898` has that one reference in the

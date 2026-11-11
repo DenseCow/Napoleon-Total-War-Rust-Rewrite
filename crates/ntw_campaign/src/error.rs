@@ -223,6 +223,14 @@ pub enum LoadWarning {
         /// The armies' raw force ids, in id order.
         armies: Vec<u32>,
     },
+    /// `AgentAttributeBonuses` items whose key is not a string or whose value is not a u32: not
+    /// loaded, so not written back by a save either. The exe's reader `0x00993280` takes only those
+    /// two types and marks the read failed on any other (`0x00DE9D50` + `0x00DEB000`, at
+    /// `0x00993DFF` / `0x00993E47`).
+    UnreadableAttributeBonuses {
+        /// (raw character id, items not read), in file order.
+        characters: Vec<(i32, usize)>,
+    },
     /// A recruitment manager (the region's or a port slot's) without its `REGION_RECRUITMENT_ITEM_ARRAY`:
     /// read as an empty queue (the save adds the array only when a new item is written to that manager).
     RecruitmentManagerWithoutItems {
@@ -330,6 +338,14 @@ impl fmt::Display for LoadWarning {
             }
             Self::UnlistedRisenArmies { armies } => {
                 write!(f, "armies {armies:?} have a REBEL_DATA block but are in no region's risen list (kept); their removal sets no crackdown")
+            }
+            Self::UnreadableAttributeBonuses { characters } => {
+                let items: usize = characters.iter().map(|(_, n)| n).sum();
+                write!(
+                    f,
+                    "{items} AgentAttributeBonuses items without a string key and a u32 value not loaded (and not saved again); \
+                     (character, items): {characters:?}"
+                )
             }
             Self::RecruitmentManagerWithoutItems { region, manager } => {
                 let manager = match manager {
