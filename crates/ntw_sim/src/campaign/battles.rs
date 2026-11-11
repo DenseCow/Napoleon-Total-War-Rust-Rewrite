@@ -16,7 +16,7 @@
 //! removed; the loser of a field battle stays where it is (CONFIRMED: no aftermath step of 0x008F7880 moves it); a settlement
 //! whose defenders lose is occupied (its garrison army destroyed and its queues cleared: CONFIRMED, see `occupy`).
 
-use super::events::CampaignEvent;
+use super::events::{CampaignEvent, CampaignMessage};
 use super::ids::{CharacterId, FactionId, ForceId, RegionId};
 use super::population::ClassWarEvent;
 use super::world::{CampaignModel, MilitaryForce};
@@ -326,7 +326,7 @@ impl CampaignModel {
         if result.attacker_won
             && let Some(region) = battle.resume
             && self.world.forces.contains_key(&battle.attacker)
-            && let Ok(mut more) = self.enter_settlement(battle.attacker, region)
+            && let Ok(mut more) = self.attack_settlement(battle.attacker, region, true)
         {
             events.append(&mut more);
         }
@@ -606,10 +606,10 @@ impl CampaignModel {
         }
         let Some(r) = self.world.regions.get_mut(&region) else { return false };
         // The capture variants destroy the garrison army first; the settlement's links go with it.
-        // PROVISIONAL: the settlement's residents (characters in no force, `World::settlement_residents`)
-        // stay inside under the new owner, so a foreign gentleman goes on counting in its public
-        // order; what the capture variants (`0x00B58560` / `0x00B58C00`) do to the residence's list
-        // +0xC8 is not traced.
+        // Its residents (characters in no force) stay inside under the new owner, so a foreign
+        // gentleman goes on counting in its public order, except the hostile spies the new owner
+        // knows ([`Self::execute_caught_spies`]): no other step of the variants or of the owner change
+        // (`0x00B449F0`, `0x00A64AC0`) touches the residence's list +0xC8 (CONFIRMED, disassembly).
         r.garrison = None;
         r.fleet = None;
         let pos = r.settlement.position;
@@ -629,7 +629,42 @@ impl CampaignModel {
         if old != faction {
             self.end_if_capital_lost(old, events);
         }
+        self.execute_caught_spies(region, events);
         true
+    }
+
+    /// What every capture variant and the director's transfer (`0x00B58560`, `0x00B58890`,
+    /// `0x00B58A30`, `0x00B58C00`) does last, after the owner change, the siege's end and the
+    /// region's recruitables rebuild (`0x00B44920`, CONFIRMED by disassembly): each settlement
+    /// resident of a spy type (rake, assassin, guerilla: agent type 11, 12 or 16, `0x00F9C740`)
+    /// whose faction the new owner is at war with (`0x008CE9B0`) and whom it knows
+    /// ([`agents::knows_character`], `0x008CE880`) is executed: his faction gets
+    /// [`CampaignMessage::YourSpyDetectedExecute`] (`0x00A245A0`), the new owner
+    /// [`CampaignMessage::SpyDetectedExecute`] (`0x00A15A70`), then he dies (`0x00A0C6F0` reason 5).
+    /// The exe walks the resident list in the order the residents entered (`0x00B4E760` appends);
+    /// ours walks them in id order, which orders only the messages (PROVISIONAL: the model keeps
+    /// no entry order).
+    fn execute_caught_spies(&mut self, region: RegionId, events: &mut Vec<CampaignEvent>) {
+        let Some(owner) = self.world.regions.get(&region).map(|r| r.owner) else { return };
+        for c in self.world.settlement_residents(region) {
+            let Some(ch) = self.world.characters.get(&c) else { continue };
+            let (spy_faction, at) = (ch.faction, ch.position);
+            if !super::agents::is_spy(ch.kind) || !self.at_war(owner, spy_faction) || !super::agents::knows_character(self, owner, c) {
+                continue;
+            }
+            let name = match self.world.character_details.get(&c) {
+                Some(d) => (d.forename.clone(), d.surname.clone()),
+                None => {
+                    log::warn!("executed spy {c:?} has no name record: his detection messages carry an empty name");
+                    Default::default()
+                }
+            };
+            let mine = CampaignMessage::YourSpyDetectedExecute { character: c, name: name.clone(), at };
+            events.push(CampaignEvent::Message { recipient: spy_faction, message: mine });
+            let theirs = CampaignMessage::SpyDetectedExecute { character: c, name, at };
+            events.push(CampaignEvent::Message { recipient: owner, message: theirs });
+            self.character_dies(c);
+        }
     }
 
     /// A region handed over without a capturing force: the deal's region item (`0x00C18BF0` →

@@ -67,7 +67,7 @@ fn a_pending_battle_lets_its_sides_save_and_others_go_on() {
 /// A capture's report as `ChooseCapture` waits for it.
 fn capture_waiting() -> super::capture::CapturePreview {
     let mut m = capture_model(vec![A]);
-    m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+    m.capture_by_force(RegionId(11), A, Some(ForceId(1000)));
     m.pending_capture.expect("A took the settlement by force")
 }
 
@@ -76,7 +76,7 @@ fn capture_waiting() -> super::capture::CapturePreview {
 fn no_save_while_a_capture_waits_for_its_choice() {
     let mut m = capture_model(vec![A]);
     assert!(m.can_save(A));
-    m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+    m.capture_by_force(RegionId(11), A, Some(ForceId(1000)));
     assert!(m.pending_capture.is_some());
     assert!(!m.can_save(A));
     m.apply(CampaignCommand::ChooseCapture { choice: super::capture::CaptureChoice::Occupy }).unwrap();

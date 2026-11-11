@@ -90,7 +90,7 @@ fn a_win_with_the_notification_off_posts_nothing_but_is_the_verdict() {
     let mut m = model(vec![A]);
     m.world.victory_notification_disabled = true;
     with_states(&mut m, &[(A, VictoryState::Won)]);
-    let ev = m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+    let ev = m.capture_by_force(RegionId(11), A, Some(ForceId(1000)));
     assert_eq!(movies(&ev), Vec::new());
     assert!(m.turn.victory_checked && !m.turn.campaign_over);
     assert!(m.pending_capture.as_ref().is_some_and(|p| p.held), "the hold comes before the notification test (0x0096CE7C)");
@@ -170,7 +170,7 @@ fn a_human_without_a_faction_is_never_asked() {
 fn the_winning_captures_choice_waits_for_continue() {
     let mut m = model(vec![A]);
     with_states(&mut m, &[(A, VictoryState::Won)]);
-    let ev = m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+    let ev = m.capture_by_force(RegionId(11), A, Some(ForceId(1000)));
     assert!(!ev.iter().any(|e| matches!(e, CampaignEvent::CaptureChoicePending { .. })), "{ev:?}");
     assert_eq!(movies(&ev), vec![(A, "won.bik", MovieExit::ShowVictoryOptionsPopup)]);
     assert!(m.pending_capture.as_ref().is_some_and(|p| p.held));
@@ -192,7 +192,7 @@ fn the_winning_captures_choice_waits_for_continue() {
 #[test]
 fn a_choice_already_offered_is_not_held() {
     let mut m = model(vec![A]);
-    let ev = m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+    let ev = m.capture_by_force(RegionId(11), A, Some(ForceId(1000)));
     assert!(ev.contains(&CampaignEvent::CaptureChoicePending { region: RegionId(11), faction: A }));
     with_states(&mut m, &[(A, VictoryState::Won)]);
     let ev = update(&mut m);
@@ -207,7 +207,7 @@ fn a_choice_already_offered_is_not_held() {
 fn a_held_capture_is_occupied_once_looting_is_disabled() {
     let mut m = model(vec![A]);
     with_states(&mut m, &[(A, VictoryState::Won)]);
-    m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+    m.capture_by_force(RegionId(11), A, Some(ForceId(1000)));
     assert!(m.pending_capture.as_ref().is_some_and(|p| p.held));
     m.world.looting_options_disabled_for_human = true;
     let ev = update(&mut m);

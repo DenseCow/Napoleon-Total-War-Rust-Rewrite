@@ -462,7 +462,7 @@ fn capturing_the_last_region_ends_an_ai_faction() {
     m.relationship_mut(A, B).trade_agreement = true;
     m.relationship_mut(B, C).military_access_turns = 3;
     m.world.set_stance(B, C, Stance::Allied).unwrap();
-    let ev = m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+    let ev = m.capture_by_force(RegionId(11), A, Some(ForceId(1000)));
     assert!(ev.contains(&CampaignEvent::FactionDestroyed { faction: B }), "{ev:?}");
     assert_eq!(m.world.faction_details[&B].out_of_game, Some(true));
     assert!(!m.in_the_game(B));
@@ -483,7 +483,7 @@ fn a_human_faction_out_of_the_game_keeps_its_forces() {
     use super::capture::CaptureChoice;
     let mut m = capture_model(vec![A, B]);
     set_details(&mut m, B, Some(11), false);
-    m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+    m.capture_by_force(RegionId(11), A, Some(ForceId(1000)));
     let ev = m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Occupy }).unwrap();
     assert!(!ev.iter().any(|e| matches!(e, CampaignEvent::FactionDestroyed { .. })), "ended at the capture, before the choice");
     assert_eq!(m.world.faction_details[&B].out_of_game, Some(true));
@@ -591,7 +591,7 @@ fn a_liberation_brings_the_faction_back_as_the_liberators_protectorate() {
     m.relationship_mut(A, C).start_attitude = 10;
     m.relationship_mut(C, B).start_attitude = 5;
     m.relationship_mut(C, A).factor_mut("trade").reset(7);
-    m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+    m.capture_by_force(RegionId(11), A, Some(ForceId(1000)));
     assert_eq!(m.pending_capture.as_ref().unwrap().liberate, Some(C));
     let ev = m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Liberate }).unwrap();
     assert!(!ev.iter().any(|e| matches!(e, CampaignEvent::FactionDestroyed { faction } if *faction == A)));

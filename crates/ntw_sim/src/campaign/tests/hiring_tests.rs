@@ -39,7 +39,7 @@ fn spa_looting_turns_the_region_against_the_looter() {
     m.rules = Arc::new(rules);
     m.world.faction_details.entry(A).or_default().religion = "align_pro_french".into();
     m.world.regions.get_mut(&RegionId(11)).unwrap().religions = vec![("align_pro_french".into(), 0.6), ("align_anti_french".into(), 0.4)];
-    m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+    m.capture_by_force(RegionId(11), A, Some(ForceId(1000)));
     m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Loot }).unwrap();
     let rel = &m.world.regions[&RegionId(11)].religions;
     assert!((rel[0].1 - 0.1).abs() < 1e-6 && (rel[1].1 - 0.9).abs() < 1e-6, "{rel:?}");
@@ -67,7 +67,7 @@ fn looting_a_homeland_region_angers_its_faction() {
         if c_at_war {
             m.world.set_stance(C, A, Stance::War).unwrap();
         }
-        m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+        m.capture_by_force(RegionId(11), A, Some(ForceId(1000)));
         m.apply(CampaignCommand::ChooseCapture { choice }).unwrap();
         m.world.relationships.get(&(C, A)).map(|r| r.attitudes[slot("abandoned_ally_in_war")])
     };
@@ -98,7 +98,7 @@ fn looting_shifts_the_alignments_a_campaign_names() {
         m.rules = Arc::new(rules);
         m.world.faction_details.entry(A).or_default().religion = "loyal".into();
         m.world.regions.get_mut(&RegionId(11)).unwrap().religions = vec![("loyal".into(), 0.6), ("rebel".into(), 0.4)];
-        m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+        m.capture_by_force(RegionId(11), A, Some(ForceId(1000)));
         m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Loot }).unwrap();
         let rel = &m.world.regions[&RegionId(11)].religions;
         assert!((rel[0].1 - expect.0).abs() < 1e-6 && (rel[1].1 - expect.1).abs() < 1e-6, "{rel:?}");

@@ -212,7 +212,9 @@ pub(crate) fn own_bonus(model: &CampaignModel, c: CharacterId, bonus: &str) -> i
     Effects::character_effects(model, c).get_int(bonus)
 }
 
-fn is_spy(kind: CharacterKind) -> bool {
+/// The spy types: rake, assassin, guerilla (agent types 11, 12 and 16, `0x00F9C740`, CONFIRMED by
+/// the type table `0x0145D9E0`).
+pub(crate) fn is_spy(kind: CharacterKind) -> bool {
     matches!(kind, CharacterKind::Rake | CharacterKind::Assassin | CharacterKind::Guerilla)
 }
 
@@ -581,9 +583,10 @@ impl CampaignModel {
     /// - failure: detected ([`Self::detected_misdeed`]), the agent escapes;
     /// - critical failure: detected, the agent is executed.
     ///
-    /// On detection the victim also spots the agent ([`Self::expose`]).
-    /// PROVISIONAL (not modelled): the target's unit losing a man, the messages
-    /// (0x13D / 0x13F, 246 / 248), and the forced result for a human target when a world flag is set.
+    /// On detection the victim also spots the agent ([`Self::expose`]). Then he enters the
+    /// target's settlement or leaves his own ([`Self::residence_after_action`]).
+    /// The forced result for a human agent is [`Self::forced_or_roll`]. PROVISIONAL (not modelled):
+    /// the target's unit losing a man, the messages (0x13D / 0x13F, 246 / 248).
     pub(crate) fn assassinate(&mut self, agent: CharacterId, target: CharacterId) -> Result<Vec<CampaignEvent>, CommandError> {
         if assassination_chance(self, agent, target).is_none() {
             return Err(CommandError::Unsupported("this agent cannot assassinate that character"));
@@ -599,18 +602,18 @@ impl CampaignModel {
         let outcome = self.forced_or_roll(agent, chance, SUBTERFUGE, self.world.force_success_for_human.0);
         self.world.agents_acted.insert(agent);
         match outcome {
-            Outcome::CriticalSuccess => {
-                self.blamed_misdeed(culprit, victim, Misdeed::Assassination);
-                self.character_falls(target);
+            Outcome::CriticalSuccess | Outcome::Success => {
+                if outcome == Outcome::CriticalSuccess {
+                    self.blamed_misdeed(culprit, victim, Misdeed::Assassination);
+                }
+                events.extend(self.residence_after_action(agent, target, outcome));
                 events.push(CampaignEvent::AssassinationAttemptSuccess { character: agent });
-            }
-            Outcome::Success => {
                 self.character_falls(target);
-                events.push(CampaignEvent::AssassinationAttemptSuccess { character: agent });
             }
             Outcome::Failure => {
                 self.detected_misdeed(culprit, victim, Misdeed::Assassination);
                 self.expose(victim, agent);
+                events.extend(self.residence_after_action(agent, target, outcome));
             }
             Outcome::CriticalFailure => {
                 self.detected_misdeed(culprit, victim, Misdeed::Assassination);
@@ -621,6 +624,57 @@ impl CampaignModel {
         }
         events.push(CampaignEvent::AgentActionResolved { agent, target: Some(target), action: AgentAction::Assassinate, outcome });
         Ok(events)
+    }
+
+    /// Where the agent stands after an assassination or an army sabotage on `target`: both end
+    /// with the agent's moves `0x00915150` (`0x0094ACB0` at `0x0094B12E` / `0x0094B1FC`,
+    /// `0x0094DA30` at `0x0094DC3F` / `0x0094DC8D`; CONFIRMED, decompile), before the success
+    /// event and before the target dies, so the room counts him.
+    /// - Success (either kind), the target inside a settlement
+    ///   ([`CampaignModel::character_residence`]): the agent enters it when he is not in it
+    ///   already and the room allows him ([`Self::may_reside`], the residence's can-enter slot
+    ///   +0x6C), through [`Self::enter_residence`] (slot +0x88). No siege test.
+    /// - Failure: an agent inside a settlement that is not under siege (the residence's slot
+    ///   +0x98) leaves it to the free spot near it (`0x00B3B460` → `FindFreeSpotNearPosition`
+    ///   `0x00B39FE0`, with his faction's region test): he is taken off its residents (slot +0x8C,
+    ///   [`Self::leave_garrison`]) and stands there (`0x00963840`, which floods no zone); without
+    ///   a spot he stays inside.
+    /// - Critical failure: nothing (the agent is executed).
+    ///
+    /// PROVISIONAL, two parts. The free spot is searched as for an army (mover 0); the exe passes
+    /// the agent's own mover type (`0x0095E3D0`, `super::movers`: 1 for a land agent outside a
+    /// building, 3 to 5 inside one) and runs the search inside a context (`0x00AF5B60`, ended by
+    /// `0x00AF7BE0`), neither of which `free_spot` ports. And the force moves of `0x00915150` are
+    /// not modelled (no accompanying characters, `MILITARY_FORCE` #2). On success with a target in a force and in no settlement, the
+    /// agent joins that force (`0x008F34A0`, with room `0x008B2620`), unless it is a one-unit army
+    /// he accompanies, which he leaves when the test `0x00B37370` (100.0 map units) passes
+    /// (`0x008B0150`); entering a settlement also takes him out of the force he accompanies. On
+    /// failure an agent accompanying a force and in no unbesieged settlement leaves it the same
+    /// way.
+    pub(super) fn residence_after_action(&mut self, agent: CharacterId, target: CharacterId, outcome: Outcome) -> Vec<CampaignEvent> {
+        match outcome {
+            Outcome::CriticalSuccess | Outcome::Success => {
+                let Some(region) = self.character_residence(target) else { return Vec::new() };
+                let inside = self.world.characters.get(&agent).is_some_and(|a| a.garrisoned_in == Some(region));
+                if inside || !self.may_reside(agent, region) {
+                    return Vec::new();
+                }
+                vec![self.enter_residence(agent, region)]
+            }
+            Outcome::Failure => {
+                let Some(region) = self.world.residence_of(agent) else { return Vec::new() };
+                let r = &self.world.regions[&region];
+                if r.siege.under_siege() {
+                    return Vec::new();
+                }
+                let faction = self.world.characters[&agent].faction;
+                let Some(spot) = self.free_spot_near(faction, r.settlement.position) else { return Vec::new() };
+                self.leave_garrison(agent);
+                self.world.characters.get_mut(&agent).expect("checked").position = spot;
+                Vec::new()
+            }
+            Outcome::CriticalFailure => Vec::new(),
+        }
     }
 
     /// The roll, or outcome 1 without a draw when `forced` holds and the agent's faction is human
@@ -1093,8 +1147,9 @@ impl CampaignModel {
     /// its commander's action points are 0 at his next turn start, `0x008F2290` → `0x00A2A140`), and
     /// a guerilla also kills men ([`guerilla_casualties`]); a critical success also makes the victim
     /// blame the faction it likes least. Failure: detected; critical failure: detected and executed.
-    /// On detection the victim also spots the agent ([`Self::expose`]). PROVISIONAL (not modelled):
-    /// messages.
+    /// On detection the victim also spots the agent ([`Self::expose`]). Then he enters the
+    /// settlement the force garrisons or leaves his own ([`Self::residence_after_action`]).
+    /// PROVISIONAL (not modelled): messages.
     pub(crate) fn sabotage_army(&mut self, agent: CharacterId, force: ForceId) -> Result<Vec<CampaignEvent>, CommandError> {
         if army_sabotage_chance(self, agent, force).is_none() {
             return Err(CommandError::Unsupported("this agent cannot sabotage that force"));
@@ -1117,14 +1172,18 @@ impl CampaignModel {
                 if guerilla {
                     let r = rank(self, agent);
                     guerilla_casualties(self, force, r);
-                    events.push(CampaignEvent::HarassmentAttemptSuccess { character: agent });
-                } else {
-                    events.push(CampaignEvent::ArmySabotageAttemptSuccess { character: agent });
                 }
+                events.extend(self.residence_after_action(agent, commander, outcome));
+                events.push(if guerilla {
+                    CampaignEvent::HarassmentAttemptSuccess { character: agent }
+                } else {
+                    CampaignEvent::ArmySabotageAttemptSuccess { character: agent }
+                });
             }
             Outcome::Failure => {
                 self.detected_misdeed(culprit, victim, Misdeed::Sabotage);
                 self.expose(victim, agent);
+                events.extend(self.residence_after_action(agent, commander, outcome));
             }
             Outcome::CriticalFailure => {
                 self.detected_misdeed(culprit, victim, Misdeed::Sabotage);

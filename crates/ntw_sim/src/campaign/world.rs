@@ -696,6 +696,18 @@ impl CampaignModel {
         self.world.regions.values().find(|r| r.garrison == Some(force)).map(|r| r.settlement.position)
     }
 
+    /// The settlement `character` is inside (`GetCharacterResidence` `0x009FB9A0`, CONFIRMED,
+    /// decompile): with an army he commands (`GetCharacterForceAsArmy` `0x009D3A40`), the army's
+    /// residence (+0x9C: the settlement it garrisons); else his own (+0x2C0: a resident,
+    /// [`World::residence_of`], which gives none for a navy's commander: the model keeps no
+    /// residence but a settlement's).
+    pub fn character_residence(&self, character: CharacterId) -> Option<RegionId> {
+        match self.force_of_kind(character, false) {
+            Some(f) => self.world.regions.values().find(|r| r.garrison == Some(f)).map(|r| r.id),
+            None => self.world.residence_of(character),
+        }
+    }
+
     /// The force a character commands, if any.
     pub fn force_of(&self, character: CharacterId) -> Option<ForceId> {
         self.world.forces.values().find(|f| f.commander == Some(character)).map(|f| f.id)

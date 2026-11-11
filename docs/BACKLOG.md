@@ -10,7 +10,7 @@ the original's values. See the Goal section of `CLAUDE.md`.
 
 Generated 2026-11-10 by `bash tools/progress.sh` (from `tools/backlog_count.sh` and `tools/tag_count.sh`); never edit it by hand.
 
-Tags left in the code (done means zero): 1916 (832 PROVISIONAL, 100 PLACEHOLDER, 984 INFERRED), plus 614 UNKNOWN.
+Tags left in the code (done means zero): 1918 (834 PROVISIONAL, 100 PLACEHOLDER, 984 INFERRED), plus 614 UNKNOWN.
 
 | Section | Done | Partly done | To do |
 |---|---|---|---|
@@ -19,7 +19,7 @@ Tags left in the code (done means zero): 1916 (832 PROVISIONAL, 100 PLACEHOLDER,
 | 2. Graphics and rendering | 0 | 12 | 37 |
 | 3. Battle gameplay (land) | 5 | 12 | 38 |
 | 4. Naval battles | 0 | 1 | 7 |
-| 5. Campaign gameplay | 30 | 13 | 119 |
+| 5. Campaign gameplay | 30 | 13 | 123 |
 | 6. AI | 0 | 1 | 16 |
 | 7. User interface | 1 | 7 | 26 |
 | 8. Video (Bink) | 2 | 1 | 1 |
@@ -498,10 +498,10 @@ the input; how it is drawn is ours. Items below that say "as the original" mean 
 **Formations and abilities**
 - [ ] Line, column, square, skirmish, fire by rank, wedge and the rest, exactly as unit abilities define them.
 - [ ] **PARTLY DONE:** Special abilities: rally, inspire, rockets, and any others in the DB. Done: perform_special_ability (square, stakes, unlimber recorded), tech-gated abilities, Rally and Inspire (§60). Open: rockets, the artillery boosts' effects (`0x0051D9C0` / `0x0051DA00`, removals untraced) and ability 0x15 (`0x0051DA60`).
-- [ ] The gate `0x0053EA60`'s per-ability conditions (formations, fire and advance, plug bayonets, stakes, unlimber, the artillery boosts) and the refusal `0x0055C780` (battle `+0x2704`, unit state 2/3): PROVISIONAL stand-in 1 in ntw_sim `battle/special_abilities.rs` (rallyinspire review)
-- [ ] Formation and behaviour abilities: switch-off through the toggle, and their slot (uses and timers through `0x0052ED80` on switch-on): PROVISIONAL stand-in 3 in `battle/special_abilities.rs` (rallyinspire review)
-- [ ] Rally's unit filter: whether reinforcements waiting or walking in (`+0xAA0 == 0`) are in the army lists Rally walks (alliance list `+0x20/+0x24`; `0x0050AFE0` → `0x0050CAE0`); units without men and withdrawn units leave `+0xF0` at the army update (`0x00580390` → `0x00575AE0`, CONFIRMED). INFERRED in `battle/special_abilities.rs` (rallyinspire review)
-- [ ] Inspire removal `0x00522970`: trace byte `+0x54` of `*(effect+4)+8` (skips the subtraction) and unit byte `+0xD99` (cleared by the toggle's case 18), and match (rallyinspire review)
+- [ ] (running: abilitygate) The gate `0x0053EA60`'s per-ability conditions (formations, fire and advance, plug bayonets, stakes, unlimber, the artillery boosts) and the refusal `0x0055C780` (battle `+0x2704`, unit state 2/3): PROVISIONAL stand-in 1 in ntw_sim `battle/special_abilities.rs` (rallyinspire review)
+- [ ] (running: abilitygate) Formation and behaviour abilities: switch-off through the toggle, and their slot (uses and timers through `0x0052ED80` on switch-on): PROVISIONAL stand-in 3 in `battle/special_abilities.rs` (rallyinspire review)
+- [ ] (running: abilitygate) Rally's unit filter: whether reinforcements waiting or walking in (`+0xAA0 == 0`) are in the army lists Rally walks (alliance list `+0x20/+0x24`; `0x0050AFE0` → `0x0050CAE0`); units without men and withdrawn units leave `+0xF0` at the army update (`0x00580390` → `0x00575AE0`, CONFIRMED). INFERRED in `battle/special_abilities.rs` (rallyinspire review)
+- [ ] (running: abilitygate) Inspire removal `0x00522970`: trace byte `+0x54` of `*(effect+4)+8` (skips the subtraction) and unit byte `+0xD99` (cleared by the toggle's case 18), and match (rallyinspire review)
 - [ ] **PARTLY DONE:** Deployables, if the DB defines any for NTW. Done: placement geometry (CONFIRMED), drawn with the original models, contact kills (CONFIRMED triggers), cover. Open: defences blocking movement (PROVISIONAL).
 
 **Artillery**
@@ -679,13 +679,17 @@ the input; how it is drawn is ours. Items below that say "as the original" mean 
 
 - [ ] Traits (stickytrait review): a gain can drop below the no-going-back level (characters.rs ~177), as the exe does; trace whether that contradicts the exe's own intent (ORIGINAL BUG or 1:1)
 - [ ] Unit records (unittechs review): `0x00EDC000` drops units with a null name, class or category; not modelled
-- [ ] (running: residents) Residents (residence): residents on a capture (`0x00B58560` / `0x00B58C00`, +0xC8; PROVISIONAL battles.rs ~353); trace and match
-- [ ] (running: residents) Residents (residence): `0x009D9FB0`, a resident joins the garrison army; trace and model
-- [ ] (running: residents) Residents (residence): the school #14 list is never updated; trace whether the exe changes it in play
-- [ ] (running: residents) Residents (residence): the callers of `0x009549B0`, the leave callers through vt+0x8C, and the enter-flag callers (PROVISIONAL); trace and match
-- [ ] (running: residents) Residents (residence): accompanying characters (`0x008B2620`, MILITARY_FORCE #2, `0x00B4E874`, `0x0095C070`; PROVISIONAL); trace and match
-- [ ] (running: residents) Residents (residence): agent spawn `0x00A241E0` and a returning agent (`0x00A24EB0` +0x530) set residence; trace and match
-- [ ] (running: residents) Residents (residence): `0x0094CFF0` (+0x59 / +0x3D8) and `0x00915150` (re-enter after an agent action); trace and match
+- [ ] Residents (residence): embark at port: `CCQ_AGENT_EMBARK_AT_PORT` `0x009318C0` → `0x009D9FB0` leaves the residence and boards the docked navy as an accompanying character (`0x008F34A0`); needs accompanying characters; model
+- [ ] Residents (residence): the school #14 list is never updated; trace whether the exe changes it in play
+- [ ] Residents (residence): accompanying characters (`0x008B2620`, MILITARY_FORCE #2, `0x00B4E874`, `0x0095C070`; PROVISIONAL); trace and match
+- [ ] Residents (residence): agents trained in buildings spawn inside the residence when the slot position test fails (`0x00A241E0`); the +0x530 return to the capital (`0x00A24EB0`, save field UNKNOWN); traced, model
+- [ ] Residents (residence): `0x00915150`'s force moves after an agent action (join / leave force, needs accompanying characters) and the arrival step's world listeners +0x3D8 / +0x978 (`0x0094CFF0`); trace and model
+- [ ] Residents (residence): `walk` does not refuse a move out of a besieged settlement (route builders' vt+0x98 test, PROVISIONAL `leave_garrison`); model with sallies
+- [ ] Residents (residence): the walk-in on an undefended settlement lays siege in the exe (`0x008AF6A0`, then `0x008E1A90` when `0x008B26C0` holds); ours captures with the report (PROVISIONAL `attack_settlement`); trace `0x008B26C0` and model with "Sieges on the campaign map"
+- [ ] Residents (residence): a spy who succeeds on an army rides on with it (`0x0094C500` → `0x0094A9F0`); ours keeps him in place (PROVISIONAL `spy`); needs accompanying characters
+- [ ] Residents (residence): a caught research thief is reported and thrown out of the residence (`0x008DD450`, message 246, `0x00B372A0`); not modelled (no research theft)
+- [ ] Residents (residence): the free spot after a failed agent action uses the agent's mover (`0x0095E3D0`, type 1) and the search context `0x00AF5B60` / `0x00AF7BE0`; the node builder `0x00AF0910`'s in-cell spread for mover 1 is not traced (PROVISIONAL `residence_after_action`)
+- [ ] Residents (residence): `0x00B44920` (spy execution) also runs on the slot-residence owner changes `0x00A92380` / `0x00A924D0` / `0x00A925C0` / `0x00A971B0`, the second residence vtable's +0xA0 / +0xA4 / +0xB8 (`0x00B584A0` / `0x00B587D0` / `0x00B58B90`, class not traced) and the post-battle resume's second pass (`0x008F85EB` / `0x008F873C` / `0x008F8AD1`); ours only on a settlement capture; trace and match
 - [ ] Round end (rebelroundend): `0x008AB200` / `0x008ABF50` (over the faction force list +0x7BC / +0x7C0, skipped for the rebels and out-of-game factions) are not modelled; trace and model
 - [x] Script events (libevent review): SettlementOccupied answers only the settlement (`event_classes.rs` class table, host.rs; scriptevents)
 - [ ] Script events: build the synchronous post design (CAMPAIGN_FIDELITY.md "Script event classes" → "Order"; the exe's `0x00E30700` posts at once, nested inside a running handler, before the owner change; ours fires after the command and after a faction's AI orders, PROVISIONAL host.rs ~78/206/230/262/284; this replaces the handover, eventdrop and libevent order lines) (scriptevents review)
@@ -707,11 +711,11 @@ the input; how it is drawn is ours. Items below that say "as the original" mean 
 - [ ] Trade raiding left (traderaid): game+0xFC6; the ESF COMMERCE_RAIDS save layout; the raid order in the UI and AI raiding; raid events (0x0094BA50); raid orders over several turns; vt slot 8 0x00A285E0 modes; the order 0x0135F498 identity
 - [ ] (running: victorytest) Defeat / victory screen left (victoryscreen, victoryscreen2, victoryscreen3 merged: outcome movie and its volume, the victory check `0x0096CD10` with the capture hold +0x9C, `ContinueGameSelected` `0x00932B40`, the lost popup `0x00A134E0`, the script switches +0x114 / +0xD0): the victory test `0x0096FCE0` is not ported, so `victory_state_original` never decides (§6 victory conditions; ntw_sim outcome.rs); the shared win (`spa_napoleon`, conditions type 5) as campaign data; the multiplayer flag +0x1034 (another human stands for it, INFERRED); the hold against the report's first step for a capture without a battle (INFERRED); the update's step loop is not stopped while +0xD0 is set (exe `0x008F4539`-`0x008F4540`, PROVISIONAL, ntw_sim world.rs ~1046); whether the turn can end while a held capture report waits (PROVISIONAL, untraced, commands.rs ~807); the `QuitToMainScreen` code-2 consumer and the chained campaign's launcher (`0x00A065A0`, mode +0x2C / +0x30; ntw_script ui/campaign mod.rs ~1090); play-once (INFERRED, option byte +1)
 - [ ] WorldCreated switches left (wcstubs, techswitch): the technology switch's model queries are done (`CampaignModel::building_level_technologies` / `building_info_technologies` / `effects_table_technologies`), but the UI's Lua tables don't call them yet (row format `0x009ABB50` not traced), and the construction-complete message (not posted yet) must carry its +0xBC copy of the switch (`0x00A09D93`); the victory switch (+0x125) must skip the campaign_won post and the winners' event (`0x0096FFE7`, `0x0096CE9C`) once the defeat/victory screen posts them
-- [ ] Population turn-start unrest outcomes (classslots): `0x008B46A0` / `0x00AAD7D0` / `0x00AAB440`
-- [ ] Population repression (classslots): crackdown = 6 when a risen army is destroyed (`0x008DBEA0` chain); seven other +0x54 stores untraced
-- [ ] Population revolution end clears the classes (`0x008B69B0`) and the `disable_rebellions_and_revolutions_worldwide` handler (classslots)
+- [ ] (running: classslots2) Population turn-start unrest outcomes (classslots): `0x008B46A0` / `0x00AAD7D0` / `0x00AAB440`
+- [ ] (running: classslots2) Population repression (classslots): crackdown = 6 when a risen army is destroyed (`0x008DBEA0` chain); seven other +0x54 stores untraced
+- [ ] (running: classslots2) Population revolution end clears the classes (`0x008B69B0`) and the `disable_rebellions_and_revolutions_worldwide` handler (classslots)
 - [ ] Ally war call auto-refusal (warcall): a human ally in a revolution with faction +0x81C ≠ 1 is pushed with countdown 1 and refused unanswered (`0x008E2B80`, `0x008EA660`, `0x008F7850`); model with revolutions
-- [ ] population_classes column 3 (record +0x12) has no traced reader (UNKNOWN in ntw_data) (classslots)
+- [ ] (running: classslots2) population_classes column 3 (record +0x12) has no traced reader (UNKNOWN in ntw_data) (classslots)
 - [ ] Battle result (classbattle): trace which force `0x008B7D60` puts in the defenders' record (lead: `0x00883680` seeds it with the target's vfunc +0x24 character); settles the first-defender PROVISIONAL in battles.rs
 - [ ] Battle result (classbattle): a side without men: `0x008AE5A0` → `0x007ADDD0` always resolves and grades; trace the resolver's result for it and drop our "grade 2" shortcut if it differs (PROVISIONAL battles.rs)
 - [ ] Battle result (classbattle): UNKNOWN where a real-time battle's result codes come from (the result hook is not wired)
@@ -946,6 +950,8 @@ the input; how it is drawn is ours. Items below that say "as the original" mean 
 
 ## Polish
 Non-blocking review findings, one line each (CLAUDE.md "Done means"). A worker editing a file clears that file's lines.
+- [ ] ntw_sim world.rs (residents review): `character_residence` repeats `garrison_position`'s force → garrisoned region lookup; share one helper
+- [ ] ntw_sim tests capture_diplomacy_tests.rs (residents review): `the_resume_after_a_battle_keeps_the_report` doc says "an unwalled settlement"; walls no longer matter there ("an undefended settlement")
 - [ ] ntw_sim zones.rs (portblockade2 review): `seen_commanders` builds a Vec per call; reuse a buffer or iterate
 - [ ] ntw_sim port_blockade.rs (portblockade2 review): `clear_port_blockade` builds a Vec per lift; iterate in place
 - [ ] ntw_sim turn.rs `region_turn` (portblockade2 review): `land_recruit_place` runs twice per turn for a finishing land item (once for the hold, once for the spawn), so the free-spot flood search can run twice per region; pass the hold's place into the first spawn

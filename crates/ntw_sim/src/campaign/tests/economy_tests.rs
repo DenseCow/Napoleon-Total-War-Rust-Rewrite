@@ -848,7 +848,7 @@ fn a_loot_refreshes_the_town_wealth_and_an_occupation_does_not() {
     use super::capture::CaptureChoice;
     for (choice, refreshed) in [(CaptureChoice::Loot, true), (CaptureChoice::Occupy, false)] {
         let mut m = capture_model(vec![A]);
-        m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+        m.capture_by_force(RegionId(11), A, Some(ForceId(1000)));
         assert!(m.pending_capture.is_some());
         mark_stale(&mut m, RegionId(11));
         m.apply(CampaignCommand::ChooseCapture { choice }).unwrap();

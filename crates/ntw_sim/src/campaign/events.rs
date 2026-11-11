@@ -535,6 +535,30 @@ pub enum CampaignMessage {
         /// Where the army stands after the move (the message's map position).
         at: (Fixed20, Fixed20),
     },
+    /// Type 0xF8 `spy_detected_execute` (`0x00A15A70` with type 248, CONFIRMED by disassembly
+    /// 2026-11-10): the title is the character's name (`0x00A0FDA0`), the detail empty, and it
+    /// carries his position (message +0x1C, `0x00A17D50`). Posted by a capture to the new owner about
+    /// each hostile spy it executes inside the settlement (`0x00B44920`,
+    /// [`super::CampaignModel::take_settlement`]), with no human test.
+    SpyDetectedExecute {
+        /// The executed character (dead once the message is read).
+        character: CharacterId,
+        /// His name, as the title is built when the message is made: (forename, surname) loc keys.
+        name: (String, String),
+        /// Where he stood (the message's map position).
+        at: (Fixed20, Fixed20),
+    },
+    /// Type 0x13F `your_spy_detected_execute` (`0x00A245A0` with type 319, CONFIRMED by disassembly
+    /// 2026-11-10): as [`Self::SpyDetectedExecute`], posted to the executed spy's own faction
+    /// (character +0x2A0) just before the new owner's message.
+    YourSpyDetectedExecute {
+        /// The executed character (dead once the message is read).
+        character: CharacterId,
+        /// His name: (forename, surname) loc keys.
+        name: (String, String),
+        /// Where he stood (the message's map position).
+        at: (Fixed20, Fixed20),
+    },
     /// A historical event (`0x00A06DA0`, model +0xFA0; CONFIRMED by disassembly): not a type of the
     /// message type table but a message of its own, posted by the round start's historical events
     /// ([`super::historical_events`]) and by the script's `trigger_historical_event` (`0x0096D520`). It
@@ -557,6 +581,8 @@ impl CampaignMessage {
             CampaignMessage::WarDeclared { .. } => "war_declared",
             CampaignMessage::FactionJoinsYourEnemies { .. } => "campmap_faction_joins_your_enemies",
             CampaignMessage::YourArmyRetreatsRegion { .. } => "your_army_retreats_region",
+            CampaignMessage::SpyDetectedExecute { .. } => "spy_detected_execute",
+            CampaignMessage::YourSpyDetectedExecute { .. } => "your_spy_detected_execute",
             CampaignMessage::HistoricalEvent { .. } => "historical_event",
         }
     }

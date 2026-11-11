@@ -1204,7 +1204,10 @@ test `religion_gentlemen_war_and_education_in_public_order`).
     UI and AI 0x00A845B0) → 0x00918AB0 → command 0x00904EF0 (vtable 0x0135F8F4, execute 0x0095B7F0) → 0x0091BE30,
     which builds the walk and an enter step (0x009071F0, vtable 0x013613DC); on arrival the step (0x0094CFF0)
     checks can-enter again (false: he stops outside), and with its enter flag (+0x58) set enters him and sends a
-    world event (+0x3D8); with it clear it opens diplomacy (PushPendingDiplomacyAction). Any later move leaves.
+    world event (+0x3D8); with it clear (land, can-enter passing) it queues a pending exchange instead (a 0x18-byte
+    record built by `0x00885F60` with the agent and the residence, queued by `0x008E2B80` on world +0xF70, world
+    event +0xBD0 {agent, 0, residence}; the same record as the army exchange below, not diplomacy; residents2,
+    CONFIRMED, disassembly). Leaving: see "Who leaves a residence" below.
     Model: the importer makes each #14 agent resident (`garrisoned_in`, a listed id that is not a loaded forceless
     character is logged and dropped); `CampaignCommand::AgentEnterSettlement` walks and enters (`may_reside`, the
     room is the moddable `max_residence_characters`, default 20), `leave_garrison` (every walk) leaves; our save
@@ -1216,19 +1219,110 @@ test `religion_gentlemen_war_and_education_in_public_order`).
     army's place inside and the old one rides on with his unit (`pool.rs` `pass_garrison_on`, CONFIRMED).
     The map's right click on a settlement orders it for a forceless character. Tests: `residence_tests.rs`,
     `residence_install.rs` (the vanilla GB April 1811 save: five Spanish missionaries), own-save round trip.
+  - Who sets the enter flag (residents2, CONFIRMED, decompile / disassembly of each caller of 0x009549B0; the flag
+    is its argument stored at +0x140 and copied to the step's +0x58): `CampaignUI.MoveIntoTarget` 0x009EE150
+    (enter = 1, research flag = its third argument); the map order dispatcher 0x00A0BD50 case 4 (enter = no held
+    order key, or a character without a force; the key, 0x37 / 0x74, is read in 0x00A0EDF0), so a forceless
+    agent's right click always enters and an army's plain click enters while a held key turns it into the
+    exchange; ScriptJoinGarrison 0x0097B520; the AI's 0x00A845B0; and 0x008C2120, 0x008F7880, 0x008FD580 /
+    0x008FD870 / 0x008FDB60, 0x009327A0, 0x009564C0 and the step 0x0095C930 (vtable 0x0135F700, constructors
+    0x00905E70 / 0x00905FA0, built by 0x0091A560). The model's two entries are `AgentEnterSettlement` (the right
+    click and MoveIntoTarget) and `JoinGarrison` / `EnterSettlement` for armies.
+  - Who leaves a residence (residents2, CONFIRMED, disassembly; every caller of the leave slot +0x8C):
+    - Every move. Each route builder out of a residence (0x0091C470, 0x0091C800, 0x0091C620, 0x0091C8A0 move to a
+      character, 0x0091CAB0, whose callers include the disembark execute 0x0095C070, 0x0091CB30, 0x0091CBB0,
+      0x00920370) first asks the start residence's virtual +0x98 (under siege) and builds nothing when it holds;
+      otherwise it builds the walk (0x0091ED50) and puts the leave step (0x00907360 / 0x009073C0, vtable
+      0x01361470, execute 0x0094D4F0) at its head (0x00952390). Model: `walk` → `leave_garrison`. Gap: `walk`
+      does not refuse a move out of a besieged settlement (PROVISIONAL in `leave_garrison`; the model has no
+      sally and `flee_duel` walks).
+    - Embark at port: `CCQ_AGENT_EMBARK_AT_PORT` 0x009318C0, gate 0x009D0AC0, then 0x009D9FB0 leaves (skip
+      notifications = 1), attaches the agent to the navy lying in the port as an accompanying character
+      (0x008F34A0(navy, agent, 1): character +0x198 links to force +0x60; 0x008B0150 detaches) and fires the
+      script event of vtable 0x01355A58. Not modelled: the UI's `CanAgentEmbarkOrDisembark` /
+      `AgentEmbarkOrDisembark` are stubs, the model has no accompanying characters.
+    - Joining an army: the join step 0x0094A9F0 (vtable 0x01361204, constructor 0x008FF770, built by 0x00905650
+      agent_join_force from 0x0091A060 and by 0x00917420 from 0x0095ADE0) leaves, then attaches him to the army.
+      The force spy step 0x0094C500 falls through to it on outcomes 0 and 1 (spying success, faction counter 37,
+      +0x4CC = 1): a successful spy on an army rides on with it. Outcome 2 (messages 317 / 246, result {0, 8})
+      and 3 (319 / 248, counter 36, result {3, 5}) do not join. Model: `spy` keeps him where he stands
+      (PROVISIONAL there). navy_embark 0x0094C010 leaves the same way.
+    - After an agent action (residents3, CONFIRMED, decompile): 0x00915150(agent, force, residence, join force,
+      enter residence, leave force, leave residence), called by assassinate 0x0094ACB0 (0x0094B0E6, 0x0094B12E,
+      0x0094B1D7, 0x0094B1FC) and sabotage army 0x0094DA30 (0x0094DBFB, 0x0094DC3F, 0x0094DC68, 0x0094DC8D), after
+      the outcome's messages and exposure and before the success event (0x0094B226 / 0x0094DCB8) and the target's
+      death (0x00A0C6F0 / 0x00A0C670 at the end of 0x0094ACB0).
+      - Join: when the force is not the one he accompanies (+0x198) and the army has room (0x008B2620), he is
+        attached (0x008F34A0), stands at the force and two world listeners (+0x900, +0x5E8) get him.
+      - Enter: when the residence is not his own (+0x2C0) and its can-enter slot +0x6C passes, slot +0x88, then he
+        stands at the residence's position (slot +0x3C, setter 0x00963840). No siege test.
+      - Leave force: when 0x00B37370(force position, his mover, 100.0, 1) holds, 0x008B0150 detaches him and he
+        stands at the force.
+      - Leave residence: 0x00B3B460 (a thin wrapper of FindFreeSpotNearPosition 0x00B39FE0 inside the context
+        0x00AF5B60 / 0x00AF7BE0) with the residence's position, his faction (+0x2A0) and his mover (0x0095E3D0:
+        3 to 5 when the byte +0x4E8 of his record +0x20 is set; else 2 when his slot +0x24 fails; else 0 when
+        0x009D0F50 holds, 1 otherwise); with a spot, slot +0x8C and he stands at the spot.
+      - The flags. Success (outcomes 0, 1): a target in a force (+0x198 or +0x2A8) gets the join, unless his army
+        has one unit and is the one the agent accompanies (then leave force); a target inside a settlement
+        (GetCharacterResidence 0x009FB9A0: his army's residence +0x9C, else his own +0x2C0) cancels the join and
+        gets the enter, and an agent who accompanies a force is detached from it (0x008B0150) with two listener
+        calls. Failure (outcome 2): leave force when he accompanies one, replaced by leave residence when he is
+        inside a settlement not under siege (slot +0x98). Critical failure (3): none. 0x0094DA30 sets the same
+        flags (its join on the target's +0x2A8 only).
+      - Model (residents3): `residence_after_action` runs the enter (`may_reside`, `enter_residence`, the one
+        enter path the arrival of `AgentEnterSettlement` uses too) and the leave (`free_spot_near`, then
+        `leave_garrison`) from `assassinate` and `sabotage_army`. PROVISIONAL there: the free spot is the army's
+        (mover 0, no context), and the force moves (no accompanying characters).
+      - What the agent's mover changes in the free spot (residents3, decompile): a land agent outside a building
+        is type 1 (`0x009D0F50` is the army test, `ntw_sim::campaign::movers`). The iterator filter
+        `0x00B5ACA0` lets types 1 / 4 / 7 / 10 use kinds 0, 6, 7, 8, 10, 11, 4, 5 (types 0 / 3 / 6 / 9 the same
+        without 8; types 2 / 5 / 8 / 11 kinds 1, 4, 7, 10, 11), and `0x00B39FE0` narrows it to 0, 6, 7 itself,
+        so the filter gives type 1 the army's result. Open: the node builder `0x00AF0910`'s in-cell spread
+        (pass 2) for a type other than 0, which may run through kind 8, and the context `0x00AF5B60(ctx, 1,
+        this+0xAC, this+0x300)` / `0x00AF7BE0` that `0x00B3B460` wraps the search in.
+    - A caught research thief: the per-turn research pass 0x008DD450 rolls the campaign LCG for each foreign
+      agent in a research building's list against 0x008F32C0; success grants the technology (0x00A25400);
+      failure reports him (message 246), leaves his residence (0x008DDC1D, skip 0) and places him within 100.0
+      of it (0x00B372A0 → PlaceCampaignCharacterAtPosition). Not modelled (no research theft).
+  - Spawning into a residence (residents2, CONFIRMED, decompile): the trained-agent spawn 0x00A241E0 walks the
+    settlement's candidate building slots (a port slot, 0x00A8B790, stands for the settlement's residence), takes
+    the slot's position, draws the name with the campaign LCG, creates the agent (0x00A0DFC0; `spa_napoleon` passes
+    an extra argument). When the position test 0x00B37370(position, 1, 3.0, 1) holds he stands at the position;
+    when it fails and the slot's virtual +0x80(1) passes he is entered into the residence (virtual +0x88); when
+    both fail the next slot is tried, and with none left no agent is made (what 0x00B37370 tests is not
+    traced). The model trains no agents in buildings
+    (CHARACTERS_FIDELITY.md, agent training).
+  - Return to the capital (residents2, CONFIRMED, decompile of 0x00A24EB0, the character's turn start): the
+    countdown +0x530 (the returning copy 0x0098FE60 sets 2) counts down; at 1 a general / admiral type
+    (0x00F9C6C0 on +0x1AC), when the faction has a capital (0x008B3790), is placed by 0x00B67670 (where is not
+    traced; retried next turn when it fails) and fires the returning event (0x009D2A60 with IsReturningNapoleonBonaparte); any other character
+    enters the capital's residence (virtual +0x88) and his move data is reset. The agent branch does not test
+    that the faction has a capital (the general branch does); whether a faction with no capital can reach it is
+    not traced, so it is no ORIGINAL BUG yet. Not modelled: the +0x530 save field is UNKNOWN.
+  - Residents on a capture (residents, CONFIRMED, disassembly): `0x00B44920` executes each settlement resident of a
+    spy type whose faction the new owner is at war with and knows (messages 0xF8 / 0x13F, death reason 5; ours
+    `execute_caught_spies`, battles.rs). Its callers (residentsfix, xrefs in pool b): the settlement capture
+    variants `0x00B58560` (`0x00B586FB`), `0x00B58890` (`0x00B5899C`), `0x00B58C00` (`0x00B58D4D`) and the
+    director's transfer `0x00B58A30` (`0x00B58B5F`), which ours covers through `take_settlement`; the post-battle
+    resume `0x008F7880` right after its attack-entry calls (`0x008F85EB`, `0x008F873C`, `0x008F8AD1`; whether
+    this second pass can execute anyone the capture's did not is not traced); the slot
+    residences' owner changes `0x00A92380` (`0x00A9241F`), `0x00A924D0` (`0x00A9256B`), `0x00A925C0`
+    (`0x00A9265F`), `0x00A971B0` (`0x00A9720B`); and the +0xA0 / +0xA4 / +0xB8 slots of a second residence vtable
+    (`0x00B584A0` / `0x00B587D0` / `0x00B58B90`, at `0x0137D484` / `0x0137D488` / `0x0137D49C`: the garrison's
+    removal, the siege's end, `0x00B1B010`, then `0x00B44920`, with no owner change; which class is not traced).
+    Not modelled: the slot-residence and second-vtable callers (no slot residences; BACKLOG).
   - PROVISIONAL (residence): the model keeps no accompanying characters (`MILITARY_FORCE` #2, army +0x60), so the
-    garrison branch counts 0 and an army entering brings none; which other callers of 0x009549B0 set the enter
-    flag (+0x140 → step +0x58; `CampaignUI.MoveIntoTarget` 0x009EE150 passes enter = 1, research flag = its
-    third argument, CONFIRMED) and the listeners of the arrival step's two world events are not traced: +0x3D8
+    garrison branch counts 0 and an army entering brings none; the listeners of the arrival step's two world events are not traced: +0x3D8
     (vtable 0x01354E18, after entering) and +0x978 (vtable 0x013550E8, through BroadcastModelEventToListeners
     0x008DBAC0, with the agent and the residence). +0x978 is sent only with the research flag (+0x59) set: the
     step recomputes the foreign flag (+0x5A, the owner is not his faction), then sends it when world +0xF5C
     +0x3C is 1, the agent's faction fails 0x008CA0B0 or has its flag +0x81C set, and neither the residence's faction
     (residence vt+0x14) nor its region's owner is a faction without a record (IsFactionWithoutRecord) (CONFIRMED,
     disassembly; the constructors writing both event slots are 0x00872550 / 0x008742C0 / 0x0088D1A0). The
-    research flag changes no world state of its own. Not modelled (BACKLOG §5): residents when a settlement changes hands, agents
-    spawning into a residence (0x00A241E0), the returning-agent countdown (character +0x530, 0x00A24EB0 →
-    0x008B3790), the re-enter / leave after an agent action (0x00915150), school-slot residents.
+    research flag changes no world state of its own. Not modelled (BACKLOG §5): agents spawning into a residence
+    (0x00A241E0), the returning-agent countdown (character +0x530, 0x00A24EB0), the force moves after an
+    agent action (0x00915150), embarking at a port, a spy riding on with the army, the research thief's
+    ejection, school-slot residents.
   - `economy_check` (`ECON_MAP=1 ECON_POSUM=1`, the 8 vanilla saves):
     slot 11 went from 134/144 on each eur save (model +1 / +2 from the capitals' gentlemen, rank 2) to 144/144;
     exact classes 854 → 904 of 906 (the 2 left are `auto_nr1`'s garrison slot 17, older). `ECON_RESIDENTS=1`
@@ -2435,7 +2529,31 @@ construction `0x00A6CBE0(0)`; then the two single slots +0x24 / +0x20 (walls / r
     listeners, `0x008B37B0`, `0x00A6AE40` / `0x00AB3DF0`. ORIGINAL BUG: the destruction hang above, fixed in
     `destroy_faction_by` (logged refusal).
 
-**Flow.** A capture (after a won assault, `0x00B58560`; an undefended settlement, PROVISIONAL same variant) changes the
+**Which variant an attack order takes (residents, 2026-11-10; CONFIRMED by disassembly).** The attack entry
+`0x00916980` carries a skip-gate flag through the builder `0x0091B9E0` (order +0x121, constructor `0x00906C00`), the
+execute `0x0095D140` and the step pusher `0x00917D20` to the step's +0x5D (constructor `0x008FFEA0`); the arrival
+`0x0094B600` reads it. Set (only the post-battle resume `0x008F7880` sets it, at `0x008F85BC` / `0x008F8702`, and at
+`0x008F8AB0` with flags 0, 1, 1, which takes the surrender variant vt+0xB8 `0x00B58C00`): an undefended settlement
+is taken by `0x00B58560` (vtable +0xA0) with the report. Clear (the player's attack command `0x009324F0` at
+`0x0093263C`, the AI's `0x00AAAE00` at `0x00AAAF1F`, and `0x008BF940` at `0x008BF9FF` / `0x008BFA72`, flags 0, 0):
+the arrival first computes a besiege flag (`0x0094B60D`-`0x0094B6E7`). It starts from the residence's virtual
++0x54, which in the settlement vtable `0x0137C9A4` (slot at `0x0137C9F8`) is `ReturnThis` `0x004470B0`: an "is a
+settlement" cast, always non-null here, not a walls test (the walls level, `GetSettlementFortificationLevel`
+`0x00B3F7C0`, is not read on this path; slot +0x08 is `ReturnThis` too and +0x4C `ReturnNull` `0x00461180`, so the
+port branch at `0x0094B6F2` is dead for a settlement). It is then cleared when the attacker is a risen rebel army
+(its `REBEL_DATA` +0x98; with the block's +0x34 set it also needs no garrison, always so here), or when the owner
+(region +0xF4) is the rebels with no risen armies in the region (region +0x220, `0x006A3110`). With it set (every
+other walk-in, walls or not) the army lays siege (`0x008AF6A0` at `0x0094B94B`, then the assault `0x008E1A90` when the
+order's +0x5C is clear and `0x008B26C0` holds); with it clear the settlement is taken by `0x00B58890` (vtable +0xA4):
+no report, no choice. Both send code 211 with the character on the world's notifier +0x9A8 (`0x0094B804` /
+`0x0094B885`; no listener traced, not sent). Model: `attack_settlement(.., resumed)` and `walk_in_besieges`
+(commands.rs); the besieged walk-in stays PROVISIONAL (no siege start in the model yet: it takes the settlement as
+the assault does, with the report). Correction (residentsfix, 2026-11-10): the first version read virtual +0x54 as
+"walled" and occupied an unwalled settlement without the report; the vtable slot above disproves it. Tests:
+`capture_diplomacy_tests.rs` (`a_walk_in_walled_or_not_...`, `a_rebel_walk_in_...`,
+`the_resume_after_a_battle_keeps_the_report`).
+
+**Flow.** A capture (after a won assault or the resume of an attack, `0x00B58560`; see above for the walk-in) changes the
 owner and clears the queues (round 8), then queues a report object (`0x00885F90`, vtable `0x013574DC`; flags +0x98
 pending, +0x99 surrender, +0x9A / +0x9B skip the choice). Its slot 9 `0x008F8D00`:
 - computes the preview `0x00B14930(report+0x14, surrender, looting multiplier 0x008D20F0, faction)`;

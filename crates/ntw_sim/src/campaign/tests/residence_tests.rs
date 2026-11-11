@@ -98,6 +98,58 @@ fn a_garrison_takes_its_own_agents_in() {
     ));
 }
 
+/// A capture (`0x00B44920`, after the owner change): a resident of a spy type whose faction the new
+/// owner is at war with and whom it knows is executed, his faction told first
+/// (`your_spy_detected_execute`), then the new owner (`spy_detected_execute`); a spy it does not
+/// know, a spy of a faction at peace with it and every other resident stay inside.
+#[test]
+fn a_capture_executes_the_known_hostile_spies_inside() {
+    let mut m = residence_model(20);
+    let r = RegionId(12);
+    let inside = m.world.regions[&r].settlement.position;
+    for id in [103, 104] {
+        let ch = m.world.characters.get_mut(&CharacterId(id)).unwrap();
+        (ch.position, ch.garrisoned_in) = (inside, Some(r));
+    }
+    let mut c_rake = character(106, C, CharacterKind::Rake, 10);
+    (c_rake.position, c_rake.garrisoned_in) = (inside, Some(r));
+    m.world.characters.insert(c_rake.id, c_rake);
+    agent_details(&mut m, 106, &[], &[("subterfuge", 2)]);
+    set_details(&mut m, A, Some(10), false);
+    set_details(&mut m, B, Some(11), false);
+    m.world.set_stance(B, A, Stance::War).unwrap();
+    m.world.set_stance(B, C, Stance::Neutral).unwrap();
+    m.expose(B, CharacterId(106));
+
+    // B does not know A's rake (subterfuge 2, never exposed): nobody is executed.
+    let mut ev = Vec::new();
+    m.occupy(r, B, None, &mut ev);
+    assert!(!ev.iter().any(|e| matches!(e, CampaignEvent::Message { message: CampaignMessage::SpyDetectedExecute { .. }, .. })));
+    assert_eq!(m.settlement_residents(r), vec![CharacterId(103), CharacterId(104), CharacterId(106)]);
+
+    // Back to A; now B has exposed him: B's next capture executes him, and only him.
+    m.occupy(r, A, None, &mut Vec::new());
+    m.expose(B, CharacterId(103));
+    let mut ev = Vec::new();
+    m.occupy(r, B, None, &mut ev);
+    let messages: Vec<_> = ev
+        .iter()
+        .filter_map(|e| match e {
+            CampaignEvent::Message { recipient, message } if matches!(message, CampaignMessage::SpyDetectedExecute { .. } | CampaignMessage::YourSpyDetectedExecute { .. }) => {
+                Some((*recipient, message.type_name()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(messages, vec![(A, "your_spy_detected_execute"), (B, "spy_detected_execute")]);
+    assert!(ev.iter().any(|e| matches!(
+        e,
+        CampaignEvent::Message { recipient: B, message: CampaignMessage::SpyDetectedExecute { character: CharacterId(103), at, .. } } if *at == inside
+    )));
+    assert!(!m.world.characters.contains_key(&CharacterId(103)));
+    assert_eq!(m.settlement_residents(r), vec![CharacterId(104), CharacterId(106)]);
+}
+
 /// A General hired into a garrison army takes its command inside (`0x00A164C0`: the unit added by
 /// `0x008CFBE0`, the commander picked again by `0x008D2FA0`), and the old commander rides on with his
 /// unit, inside through the army and not one of the settlement's residents: the hire reaches no
@@ -134,4 +186,93 @@ fn a_general_hired_into_a_garrison_leaves_no_resident() {
     assert_eq!(m.world.residence_of(CharacterId(107)), None);
     assert!(!m.settlement_residents(r).contains(&CharacterId(107)));
     assert!(!m.world.settlement_residence_index().contains_key(&CharacterId(107)));
+}
+
+/// After a successful action on a character inside a settlement the agent enters it
+/// (`0x00915150` with its enter flag, from `0x0094ACB0` / `0x0094DA30`): a resident's settlement,
+/// or the one his army garrisons (`0x009FB9A0`). The room counts the target, who is still inside
+/// then, and an agent already inside fires nothing. A failure or critical failure enters nothing.
+#[test]
+fn a_successful_agent_enters_his_targets_settlement() {
+    use super::agents::Outcome;
+    let mut m = residence_model(1);
+    let r = RegionId(12);
+    let inside = m.world.regions[&r].settlement.position;
+    let (agent, target) = (CharacterId(103), CharacterId(105));
+    let t = m.world.characters.get_mut(&target).unwrap();
+    (t.position, t.garrisoned_in) = (inside, Some(r));
+    m.world.characters.get_mut(&agent).unwrap().position = inside;
+    // Room 1, the target fills it.
+    assert!(m.residence_after_action(agent, target, Outcome::Success).is_empty());
+    assert_eq!(m.world.characters[&agent].garrisoned_in, None);
+    let mut rules = (*m.rules).clone();
+    rules.limits.max_residence_characters = 2;
+    m.rules = Arc::new(rules);
+    for outcome in [Outcome::Failure, Outcome::CriticalFailure] {
+        assert!(m.residence_after_action(agent, target, outcome).is_empty());
+        assert_eq!(m.world.characters[&agent].garrisoned_in, None);
+    }
+    assert_eq!(m.residence_after_action(agent, target, Outcome::CriticalSuccess), vec![CampaignEvent::CharacterEntersGarrison { character: agent, region: r }]);
+    assert_eq!(m.settlement_residents(r), vec![agent, target]);
+    assert!(m.residence_after_action(agent, target, Outcome::Success).is_empty());
+
+    // A commander inside through his garrison army: B's colonel 101 in B's region 11.
+    let r11 = RegionId(11);
+    m.world.regions.get_mut(&r11).unwrap().garrison = Some(ForceId(1001));
+    m.world.characters.get_mut(&CharacterId(101)).unwrap().garrisoned_in = Some(r11);
+    assert_eq!(m.character_residence(CharacterId(101)), Some(r11));
+    assert_eq!(m.residence_after_action(agent, CharacterId(101), Outcome::Success), vec![CampaignEvent::CharacterEntersGarrison { character: agent, region: r11 }]);
+    let a = &m.world.characters[&agent];
+    assert_eq!((a.garrisoned_in, a.position), (Some(r11), m.world.regions[&r11].settlement.position));
+    // A commander outside any settlement: nothing to enter.
+    m.world.regions.get_mut(&r11).unwrap().garrison = None;
+    assert_eq!(m.character_residence(CharacterId(101)), None);
+}
+
+/// After a failed action an agent inside a settlement that is not under siege leaves it to the
+/// free spot near it (`0x00915150` with its leave flag, `0x00B3B460` → `0x00B39FE0`; without a
+/// polygon map the settlement's own position); under siege he stays inside. Success and critical
+/// failure leave him where he is.
+#[test]
+fn a_failed_agent_leaves_his_settlement_unless_besieged() {
+    use super::agents::Outcome;
+    let mut m = residence_model(20);
+    let r = RegionId(12);
+    let inside = m.world.regions[&r].settlement.position;
+    let agent = CharacterId(103);
+    let a = m.world.characters.get_mut(&agent).unwrap();
+    (a.position, a.garrisoned_in) = (inside, Some(r));
+    m.world.regions.get_mut(&r).unwrap().siege.besiegers = vec![ForceId(1001)];
+    assert!(m.residence_after_action(agent, CharacterId(105), Outcome::Failure).is_empty());
+    assert_eq!(m.world.residence_of(agent), Some(r));
+    m.world.regions.get_mut(&r).unwrap().siege.besiegers.clear();
+    for outcome in [Outcome::Success, Outcome::CriticalFailure] {
+        m.residence_after_action(agent, CharacterId(105), outcome);
+        assert_eq!(m.world.residence_of(agent), Some(r));
+    }
+    assert!(m.residence_after_action(agent, CharacterId(105), Outcome::Failure).is_empty());
+    let a = &m.world.characters[&agent];
+    assert_eq!((a.garrisoned_in, a.position), (None, inside));
+    assert!(m.settlement_residents(r).is_empty());
+}
+
+/// The assassination's order (`0x0094ACB0`): the agent enters the target's settlement
+/// (`CharacterEntersGarrison`) before `AssassinationAttemptSuccess`, and the target falls after.
+#[test]
+fn an_assassin_enters_before_the_success_event() {
+    let mut m = residence_model(20);
+    let r = RegionId(12);
+    let inside = m.world.regions[&r].settlement.position;
+    let (agent, target) = (CharacterId(103), CharacterId(105));
+    let t = m.world.characters.get_mut(&target).unwrap();
+    (t.position, t.garrisoned_in) = (inside, Some(r));
+    m.world.characters.get_mut(&agent).unwrap().position = inside;
+    m.turn.humans = vec![A];
+    m.world.force_success_for_human.0 = true;
+    let ev = m.apply(CampaignCommand::Assassinate { agent, target }).unwrap();
+    let enter = ev.iter().position(|e| *e == CampaignEvent::CharacterEntersGarrison { character: agent, region: r });
+    let success = ev.iter().position(|e| *e == CampaignEvent::AssassinationAttemptSuccess { character: agent });
+    assert!(enter.is_some() && enter < success, "{ev:?}");
+    assert!(!m.world.characters.contains_key(&target));
+    assert_eq!(m.settlement_residents(r), vec![agent]);
 }

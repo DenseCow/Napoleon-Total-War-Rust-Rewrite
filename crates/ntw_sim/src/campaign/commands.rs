@@ -1492,7 +1492,12 @@ impl CampaignModel {
     /// The character leaves the settlement he is in (if any): his force stops garrisoning it, or,
     /// without a force, he leaves its residents (the settlement residence's leave `0x00B4EE70`,
     /// vtable `0x0137C9A4` slot +0x8C: he is taken off the list +0xC8; no script event; CONFIRMED,
-    /// disassembly). Every move starts with it ([`Self::walk`]).
+    /// disassembly). Every move starts with it ([`Self::walk`]): each route builder out of a
+    /// residence (`0x0091C470`, `0x0091C800`, `0x0091C620`, `0x0091C8A0`, `0x0091CAB0`,
+    /// `0x0091CB30`, `0x0091CBB0`, `0x00920370`) puts the leave step (`0x00907360` / `0x009073C0`,
+    /// vtable `0x01361470`) at the head of the route (CONFIRMED, decompile of `0x0091C800`). Those
+    /// builders also refuse a route out of a besieged settlement (the residence's virtual +0x98),
+    /// which `walk` does not (PROVISIONAL: the model has no sally yet).
     pub(crate) fn leave_garrison(&mut self, character: CharacterId) {
         let Some(ch) = self.world.characters.get_mut(&character) else { return };
         let Some(region) = ch.garrisoned_in.take() else { return };
@@ -1505,7 +1510,24 @@ impl CampaignModel {
         }
     }
 
+    /// The player's or the AI's order into a settlement ([`CampaignCommand::EnterSettlement`]; the attack
+    /// command `0x009324F0` and the AI's `0x00AAAE00` call the attack entry `0x00916980` with its
+    /// skip-gate flag clear).
     pub(crate) fn enter_settlement(&mut self, force: ForceId, region: RegionId) -> Result<Vec<CampaignEvent>, CommandError> {
+        self.attack_settlement(force, region, false)
+    }
+
+    /// The attack order into `region`'s settlement. `resumed` is the post-battle resume
+    /// (`0x008F7880` at `0x008F85BC` / `0x008F8702`), which calls the attack entry `0x00916980` with
+    /// its skip-gate flag set. The entry hands the flag on (builder `0x0091B9E0` → order +0x121,
+    /// constructor `0x00906C00`; execute `0x0095D140` → step pusher `0x00917D20` → step +0x5D,
+    /// constructor `0x008FFEA0`), and the arrival `0x0094B600` picks the capture by it
+    /// (CONFIRMED, disassembly): set, the assault's capture with its report (`0x00B58560`, settlement
+    /// vtable +0xA0, [`Self::settle_capture`]); clear, the siege ([`Self::walk_in_besieges`]) unless a
+    /// rebel exception takes it without a report (`0x00B58890`, +0xA4, [`Self::occupy`]: no capture
+    /// choice). A settlement's surrender after a battle with no result (`0x008F8AB0`, flags set) takes
+    /// the third variant `0x00B58C00`, not reached here.
+    pub(crate) fn attack_settlement(&mut self, force: ForceId, region: RegionId, resumed: bool) -> Result<Vec<CampaignEvent>, CommandError> {
         let c = self.commander_of(force)?;
         let fa = self.world.forces[&force].faction;
         if self.world.forces[&force].is_navy {
@@ -1540,14 +1562,45 @@ impl CampaignModel {
         }
         let defenders = self.defenders_of(region);
         if defenders.is_empty() {
-            // An undefended settlement: the occupation and the capture report with the surrender flag clear
-            // (PROVISIONAL: which capture variant the original uses here, 0x00B58560 or 0x00B58C00 with the flag set, is not traced).
-            self.settle_capture(region, fa, Some(force), false, &mut events);
+            // An undefended settlement. Both captures then send code 211 with the character on the world's
+            // notifier +0x9A8 (`0x0094B804` / `0x0094B885`; no listener traced, not sent) and the army goes inside.
+            if resumed {
+                self.settle_capture(region, fa, Some(force), false, &mut events);
+            } else if self.walk_in_besieges(force, region) {
+                // PROVISIONAL: the exe lays siege here (`0x008AF6A0` at `0x0094B94B`, then the assault
+                // `0x008E1A90` when the order's +0x5C is clear and `0x008B26C0` holds); the model has no siege
+                // start yet (BACKLOG "Sieges on the campaign map"), so it takes the settlement as an assault would.
+                self.settle_capture(region, fa, Some(force), false, &mut events);
+            } else {
+                // Only the rebel exceptions of `walk_in_besieges` come here.
+                self.occupy(region, fa, Some(force), &mut events);
+            }
         } else {
             self.pending_battle = Some(PendingBattle { attacker: force, defenders, settlement: Some(region), resume: None });
             events.push(CampaignEvent::PreBattle { attacker: force });
         }
         Ok(events)
+    }
+
+    /// Whether a player's or AI's attack on an undefended settlement lays siege instead of taking it:
+    /// the arrival `0x0094B600`'s flag, computed when the step's +0x5D is clear (CONFIRMED,
+    /// disassembly, `0x0094B60D`-`0x0094B6E7`). The flag starts from the residence's virtual +0x54,
+    /// which in the settlement vtable `0x0137C9A4` (slot at `0x0137C9F8`) is `ReturnThis`
+    /// `0x004470B0`: an "is a settlement" cast, never null here, not a walls test (the walls level,
+    /// `GetSettlementFortificationLevel` `0x00B3F7C0`, is not read on this path). So every walk-in
+    /// is besieged, walls or not, except when:
+    /// - the attacking army is a risen rebel army (its `REBEL_DATA` +0x98, ours
+    ///   [`World::rebel_army_sides`](super::World::rebel_army_sides)): with the block's +0x34 clear
+    ///   (`0x0094B655`), or set and no garrison (`0x0094B68E`), which is always so here;
+    /// - the owner (region +0xF4) is the rebels (`0x008CEEF0`) and the region's risen armies
+    ///   (region +0x220, `0x006A3110`; ours [`World::region_risen_armies`](super::World::region_risen_armies)) are none.
+    fn walk_in_besieges(&self, force: ForceId, region: RegionId) -> bool {
+        let Some(r) = self.world.regions.get(&region) else { return false };
+        if self.world.rebel_army_sides.contains_key(&force) {
+            return false;
+        }
+        let no_risen = self.world.region_risen_armies.get(&region).is_none_or(|a| a.is_empty());
+        !(self.is_rebel_faction(r.owner) && no_risen)
     }
 
     /// [`CampaignCommand::JoinGarrison`], the script's `join_garrison` (`0x0097B520`): the order goes
@@ -1719,9 +1772,12 @@ impl CampaignModel {
     /// settlement is under siege (the order builder `0x0091BE30` tests the residence's virtual +0x98,
     /// `0x00A8B9C0`, for every character; CONFIRMED, decompile). `MoveIntoTarget` (`0x009EE150`)
     /// reaches this with the enter flag the arrival step tests set (+0x58 = 1, CONFIRMED,
-    /// disassembly; [`Self::move_into_target`]). PROVISIONAL: whether the map's right-click order
-    /// into `0x009549B0` sets it too (without it the step opens diplomacy instead), and the second
-    /// event the arrival step sends after entering (world +0x3D8), are not traced.
+    /// disassembly; [`Self::move_into_target`]). The map's right-click order sets it too for a
+    /// character without a force (the map order dispatcher `0x00A0BD50`, case 4: enter = no held
+    /// order key, or a forceless character; the key is read in `0x00A0EDF0`; CONFIRMED, decompile),
+    /// so this command is that click. With the flag clear the arrival queues a garrison exchange
+    /// (`0x00885F60` / `0x008E2B80`), which a forceless agent never reaches. PROVISIONAL: the second
+    /// event the arrival step sends after entering (world +0x3D8) is not traced.
     pub(super) fn agent_enter_settlement(&mut self, agent: CharacterId, region: RegionId) -> Result<Vec<CampaignEvent>, CommandError> {
         let faction = self.world.characters.get(&agent).ok_or(CommandError::UnknownCharacter(agent))?.faction;
         self.check_turn(faction)?;
@@ -1741,13 +1797,25 @@ impl CampaignModel {
         if !walk.arrived || !self.may_reside(agent, region) {
             return Ok(events);
         }
-        let ch = self.world.characters.get_mut(&agent).expect("checked");
+        events.push(self.enter_residence(agent, region));
+        Ok(events)
+    }
+
+    /// A character without a force enters `region`'s settlement (the settlement residence's enter
+    /// `0x00B4E760`, vtable `0x0137C9A4` slot +0x88, then his position set to the settlement's,
+    /// `0x00963840`): he stands on it inside, his zone and hidden flag follow (the enter's tail
+    /// `0x00A285C0`), and `CharacterEntersGarrison` fires (CONFIRMED, disassembly). The callers
+    /// check the room first ([`Self::may_reside`]): the arrival of
+    /// [`CampaignCommand::AgentEnterSettlement`] and an agent's action on a character inside
+    /// (`0x00915150`, [`Self::residence_after_action`]).
+    pub(crate) fn enter_residence(&mut self, character: CharacterId, region: RegionId) -> CampaignEvent {
+        let pos = self.world.regions[&region].settlement.position;
+        let ch = self.world.characters.get_mut(&character).expect("the caller checked the character");
         ch.position = pos;
         ch.garrisoned_in = Some(region);
-        self.rebuild_zone(agent);
-        self.update_hidden(agent);
-        events.push(CampaignEvent::CharacterEntersGarrison { character: agent, region });
-        Ok(events)
+        self.rebuild_zone(character);
+        self.update_hidden(character);
+        CampaignEvent::CharacterEntersGarrison { character, region }
     }
 
     fn set_tax_level(&mut self, faction: FactionId, class: TaxClass, level: String) -> Result<Vec<CampaignEvent>, CommandError> {
@@ -2530,7 +2598,7 @@ impl CampaignModel {
     /// the test. Without a polygon map (unit tests), `at`.
     ///
     /// [`View::free_spot`]: super::polypath::View::free_spot
-    fn free_spot_near(&self, owner: FactionId, at: (Fixed20, Fixed20)) -> Option<(Fixed20, Fixed20)> {
+    pub(super) fn free_spot_near(&self, owner: FactionId, at: (Fixed20, Fixed20)) -> Option<(Fixed20, Fixed20)> {
         let Some(map) = self.terrain.as_ref().and_then(|t| t.0.poly.as_ref()) else { return Some(at) };
         let open = self.region_test_flags(owner);
         let (x, z) = map.view().free_spot((at.0.raw(), at.1.raw()), open.as_deref())?;
