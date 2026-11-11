@@ -21,9 +21,11 @@ decompiled code is stored. Temp files: `target\tmp`.
 - Open (PROVISIONAL, listed in §6): the governorship container's contents, the army container in the
   character view, the governor part (never applies in shipped campaigns), qualified kinds other than unit
   category/class/pop class/agent, the front-end difficulty choice, the minister attribute key, trait points falling.
-- Value checks: the vanilla saves written by the original confirm upkeep (22/23, 4/4, 4/4 factions exact with
-  effects), taxes (20/23, 3/4, 4/4) and the #55 basic sets (§5.1). The start positions' stored figures do not come
-  from the game's formulas.
+- Value checks: the vanilla saves written by the original confirm upkeep (23/23, 4/4, 4/5 factions with a stored
+  figure exact with effects; the miss is the rebel faction of `orig_fr_may1811.save`, UNKNOWN), taxes (20/23, 3/4, 4/4)
+  and the #55 sets of the spa saves the original started (§5.1; every eur evidence save stores #55 = #54, as the save
+  of ours it descends from, so they cannot check the handicap). The start positions' stored figures do not come from
+  the game's formulas.
 
 ## 1. The effect store (CONFIRMED)
 - An effect container is a sorted vector of 20-byte entries {key: 4 × u32 = (bonus type, qualifier 1, qualifier 2, bonus
@@ -132,8 +134,14 @@ are summed as given by the DB (percent points where the formula uses percent).
 ## 5. Checks against the original
 Tool: `cargo run -p ntw_campaign --release --example effects_check -- <data dir> <file|vfs:campaigns/../startpos.esf>...
 [--human key] [--bonus a,b]` (env `FX_BLOCKS=1` raw #54/#55, `FX_DIFF=1` handicap table, `FX_TECH=<faction>` tech
-states, `FX_UNITS=<faction>` unit list). It prints per faction: unit upkeep with / without the upkeep effects against
-`ECONOMICS_DATA` #5[1]/#5[2], taxes with / without the tax bonuses against #1[0], and #55 against #54 + handicap.
+states, `FX_UNITS=<faction>` the units summed). Both upkeep totals sum the units of the model's costed forces
+(`economy::costed_force`), from the model's unit table; a faction is skipped only when it has no such unit and the
+file stores no upkeep for it either (none, or 0 / 0), so a stored figure with no costed unit stays a row to see
+(polish69; polish67 gated on the units alone, and before that on the file's own unit list under `FACTION_ARRAY`).
+Stored figures are read from every faction record: the `FACTION_ARRAY` items and `WORLD/REBEL_FACTION/FACTION`. It
+prints per faction: unit upkeep with / without the upkeep effects against `ECONOMICS_DATA` #5[1]/#5[2], taxes by
+`economy::region_taxes_with` with the model's effects / with an empty effect set (no tax bonus, `admin_cost_mod` 0)
+against #1[0], and #55 against #54 + handicap, counting on their own the factions whose stored #55 is just their #54.
 
 ### 5.1 What the files can and cannot check
 - **Start positions**: stored land upkeep equals the plain unit upkeep (ita 5/7, spa 4/4, egy 1/5 factions exact, eur
@@ -142,9 +150,36 @@ states, `FX_UNITS=<faction>` unit list). It prints per faction: unit upkeep with
   2–4× lower, no common factor): authoring figures, not the game's formula. They cannot check effect values.
 - **Vanilla saves written by the original** (round 6, 0-B; `effects_check` on `auto_nr4_t4.save` = eur after 3 turns,
   `orig_fr_t1.save` / `orig_fr_may1811.save` = spa turn 1 and after 3 turns):
-  - upkeep with effects 22/23, 4/4 and 4/4 factions exact (plain upkeep: 15/23, 0/4, 0/4);
-  - taxes 20/23, 3/4 and 4/4;
-  - #55: the basic entries equal #54 + the handicap row for every faction. The only difference is the chain-keyed
+  - upkeep with effects 23/23, 4/4 and 4/5 factions exact (plain upkeep: 15/23, 0/4, 0/5), rerun 2026-11-10
+    (polish69). The eur save read 22/23 in round 6: the miss was the Netherlands' fleet, exact since a force is costed
+    with its commander's set (CAMPAIGN_FIDELITY.md "A force's upkeep set"). The fifth row of `orig_fr_may1811.save` is
+    the rebel faction (empty key, `WORLD/REBEL_FACTION`), whose stored figure the tool now reads: stored 3952 / 0, ours
+    4140 / 0 (plain 4600; its set holds only the AI handicap's −10). UNKNOWN why: no flat percentage of 4600 gives
+    3952, so either the record counts another unit set than the file's (the rebels' units can change between their
+    record and the save) or the rebels' upkeep takes a rule not traced (needs the exe);
+  - taxes 20/23, 3/4 and 4/4 with effects, 3/23, 0/4 and 0/4 with the empty effect set (same rerun);
+  - #55, rerun 2026-11-10: the spa saves print 5/5 (`orig_fr_t1`, `orig_fr_may1811`, `auto_orig_spa_0245`),
+    `auto_nr4_t4.save` prints 0/39 with all 39 storing #55 = #54 (France: the four agent caps only), while the rebuilt
+    set adds the handicap row (AI: `gdp_mod_all` 10, `policing_cost_mod` −20, `research_rate_mod` 25, upkeep −10/−10,
+    chain entries −8; human: recruitment −5/+8, upkeep +10/+10). The file is right and the check does not apply to it:
+    every eur save in the evidence folder (`auto_nr4_t4`, `auto_nr1`, `auto_after_c8`, `auto_b2b3_0211`,
+    `orig_over_nr4_0252`) prints the same 0/39 with 39 storing #55 = #54. They are the original's saves of campaigns
+    it loaded from a save of ours (`nr1 → auto_nr1` in CAMPAIGN_FIDELITY.md "Saves"; the others INFERRED from their
+    names, the `NR-4`, `NR-B3` and `NR-C8` saves of ours lying beside them), ours of that date stored the start
+    position's #55 unchanged (`nr1.save` itself: 0/39, 39 store #55 = #54), and the exe builds #55 only at campaign
+    start and keeps a loaded save's (§1). The original then played those campaigns with no handicap, which the files'
+    own figures show: upkeep 23/23 and taxes 20/23 are exact with the stored #55. So the eur saves confirm the sums
+    but not the handicap; an eur save of a campaign the original started is not in the evidence folder. The round 6
+    reading below is the spa saves' (its `rFarm` −50 / −58 are the spa base and base + handicap);
+  - `orig_gb_apr1811.save` (spa, Britain human; not a round 6 file) reproduces nothing: upkeep 0/4, taxes 0/4, #55
+    0/5. Its stored #55 − #54 is not a row of the handicap table for its stored difficulty 0: the AI factions add only
+    `subterfuge_assassination` −10 (ours: the (0, AI) row), the human adds recruitment +20/+20, upkeep +20/+20,
+    `repression_ministers` 2 and `security_versus_assassination` 10 (ours: the (0, human) row), and none of the sets
+    compiled from `campaign_difficulty_handicap_effects` (`FX_DIFF=1`) holds them. UNKNOWN (needs the exe: which
+    table or setting gives these sets, and whether the file's difficulty is read from the right field); its upkeep
+    and taxes cannot be judged before that;
+  - #55 (round 6, the spa saves): the basic entries equal #54 + the handicap row for every faction. The only
+    difference is the chain-keyed
     building cost entries (exe type 2, e.g. `rFarm` −50 stored −58): the handicap's `building_cost_mod_*` rows feed
     building-chain-keyed entries (`Saved(2)`, id 0, qualifier = chain; the chain junction is mapped in `effect_rules_from_db`).
     Round 16 (CONFIRMED, `0x00B43300`): the construction cost reads that entry from the region effect set
@@ -164,12 +199,19 @@ states, `FX_UNITS=<faction>` unit list). It prints per faction: unit upkeep with
 ### 5.3 Turn-1 figures the effects give (eur_napoleon, France human at normal, `--human france`)
 | faction | land upkeep plain → with effects | naval upkeep | taxes plain → with bonuses | main bonuses |
 |---|---|---|---|---|
-| France (human) | 5580 → 5525 | 2290 → 2496 | 6182 → 6870 | minister tax +4, upkeep land −1 / naval +9, gdp +3 |
-| Austria (AI) | 6590 → 5461 | 0 | 5314 → 5314 | upkeep land −17 / naval −10, gdp +13 |
-| Britain (AI) | 3880 → 3492 | 4420 → 2871 | 3324 → 3586 | minister tax +3, upkeep land −10 / naval −35 |
+| France (human) | 5580 → 5525 | 2290 → 2496 | 5160 → 6880 | minister tax +4, upkeep land −1 / naval +9, gdp +3 |
+| Austria (AI) | 6590 → 5461 | 0 | 4724 → 5334 | upkeep land −17 / naval −10, gdp +13 |
+| Britain (AI) | 3880 → 3492 | 4420 → 2871 | 2642 → 3598 | minister tax +3, upkeep land −10 / naval −35 |
 Upkeep with effects = round_half_even(upkeep × max(0, 100 + faction mod + unit category + unit class) × 0.01)
 (`0x008F9B10`); taxes use `economy::{tax_efficiency, effective_tax_rate, class_taxes}` with `TaxBonuses {character:
 tax_bonus_minister (home theatre), building: region-local tax_bonus_building, technology: tax_bonus_technology}`.
+Rerun 2026-11-10 (polish69): the upkeep columns reproduce round 6 exactly; the tax columns are this rerun's. "Plain"
+is the same rule with an empty effect set (no minister, building or technology tax bonus, `admin_cost_mod` 0) over
+the same region wealth. Round 6 printed 6182 → 6870, 5314 → 5314 and 3324 → 3586: its plain column was the model's
+`economy::region_taxes` of that date, before the effects were wired into it (the tool's first version), a rule that
+no longer exists, so those plain figures cannot be reproduced; the 10 to 20 points between its totals with bonuses
+and today's are not re-derived (UNKNOWN which model change since round 6 moved them; the saves' stored taxes, §5.1,
+are the check that counts).
 
 ### 5.4 Campaign run, treasuries before / after
 `NTW_TREASURY=1 cargo run -p ntw_ai --release --example determinism -- campaign 10` on origin/main (b794116) and on

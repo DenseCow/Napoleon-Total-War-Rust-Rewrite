@@ -414,6 +414,13 @@ struct RegionCensus {
     with_slots: usize,
 }
 
+/// What every region worth of one deal evaluation shares ([`CampaignModel::region_deal_worth`]):
+/// the region groups of the current owners and the evaluating AI's multipliers.
+struct RegionWorthContext {
+    groups: super::region_groups::RegionGroups,
+    multipliers: super::region_value::Multipliers,
+}
+
 /// The weight of a region goal in either of the AI's goal lists (`0x00CCB810` and `0x00CCB210`
 /// both write −1.0, constant `0x01318068`): each region of a deal that is in the giver's goal list
 /// counts −1 (× [`goal_type_weight`] 2500 in the bonus). CONFIRMED.
@@ -846,18 +853,21 @@ impl CampaignModel {
                 .contains(&r)
         };
         let (ai_census, proposer_census) = (self.region_census(ai), self.region_census(proposer));
+        // The groups and the AI's multipliers, built once and only when the deal holds a region.
+        let cell = std::cell::OnceCell::new();
+        let ctx = || cell.get_or_init(|| self.region_worth_context(ai));
         let mut v = DealValue::default();
         for &r in &n.regions.offered {
             // A deal only holds existing regions (`propose_regions` refuses an unknown id).
             let Some(reg) = self.world.regions.get(&r) else { continue };
             let a = super::economy::hypothetical_order_attitude(self, reg, ai);
             if a >= 0 || (a >= -5 && borders_ai(r)) {
-                v.gain = v.gain.wrapping_add(self.region_deal_worth_with(r, ai, &ai_census));
+                v.gain = v.gain.wrapping_add(self.region_deal_worth_with(r, ai, &ai_census, ctx()));
             }
         }
         for &r in &n.regions.demanded {
-            v.cost = v.cost.wrapping_add(self.region_deal_worth_with(r, proposer, &proposer_census));
-            v.given = v.given.wrapping_add(self.region_deal_worth_with(r, ai, &ai_census));
+            v.cost = v.cost.wrapping_add(self.region_deal_worth_with(r, proposer, &proposer_census, ctx()));
+            v.given = v.given.wrapping_add(self.region_deal_worth_with(r, ai, &ai_census, ctx()));
         }
         let m = if self.is_human(proposer) && !n.peace {
             (n.regions.demanded.len() as u32).wrapping_add(self.world.deal_regions_received.get(&proposer).copied().unwrap_or(0))
@@ -867,20 +877,34 @@ impl CampaignModel {
         human_demand_scaled(v.inflated(inflation), m)
     }
 
-    /// `0x00AA1E90`: region `r`'s worth to `faction` in a deal ([`region_value::faction_value`]),
-    /// from its base ([`region_value::stored_or_formula`]). Read from the model, CONFIRMED: `n`
-    /// counts `r`'s neighbours its owner holds; the theatre doubling counts `faction`'s regions
-    /// over the whole map (vanilla campaigns have one theatre holding every region); the ×1.5
-    /// reads the regions' building slots.
-    /// PROVISIONAL: the own branch is `r`'s owner being `faction` and `r` belonging to a region
-    /// group (`+0x12C`); groups are not in the model, so every region is taken to have one
-    /// (INFERRED from the group analysis grouping each faction's regions, not traced); the region
-    /// group's change state is NEW (the group analysis, belief 0x52, is not ported), so the
-    /// personality multipliers are not reached and read their shipped defaults, not the AI
-    /// personality's; the faction's CAI region list `+0x1C0` (`0x00C45CF0`, ×2) is not in the
-    /// model and reads false; a map with several theatres is counted as one.
-    pub fn region_deal_worth(&self, r: RegionId, faction: FactionId) -> u32 {
-        self.region_deal_worth_with(r, faction, &self.region_census(faction))
+    /// `0x00AA1E90`: region `r`'s worth to `faction` in a deal ([`region_value::faction_value`])
+    /// that `evaluator`'s AI weighs, from its base ([`region_value::stored_or_formula`]). Read from
+    /// the model, CONFIRMED:
+    /// - the own branch is `r`'s owner being `faction` (region virtual `+8` = `0x006CC990`, the
+    ///   owner test) once `r` has a region group entry: the call at `0x00AA1ED2` reads the CAI
+    ///   region's settlement (`+0x12C`, getter `0x008CF5F0`) and the jump at `0x00AA1F0A` tests the
+    ///   entry `0x00A75460` returned, null only without a settlement; every game region has one
+    ///   (`0x00A766C0` makes one per land map area with a campaign region);
+    /// - the change state is `r`'s region group's for `faction` ([`super::region_groups`], with
+    ///   its one INFERRED step: when the exe refreshes the state after an owner change);
+    /// - the multipliers are the evaluator's personality's (`pAiContext` virtual `+0x1C` → `+0x88`
+    ///   → `+0x174`, `0x00B2B7B0` / `0x0047B710`: the faction AI whose CAI faction `0x00CEFB50`
+    ///   gives is the deal's AI side; the personality lookup's fallback is PROVISIONAL, see
+    ///   `AiPersonalities::resolve`);
+    /// - `n` counts `r`'s neighbours its owner holds (`0x00A2C170` over the game region's list
+    ///   `+0x20` / `+0x24`, game region = CAI region `+0x1A0`, `0x00C3C340`: the items whose `+0xF4`
+    ///   faction is the owner's, `0x00898B20`); the theatre doubling counts `faction`'s
+    ///   regions over the whole map (vanilla campaigns have one theatre holding every region); the
+    ///   ×1.5 reads the regions' building slots.
+    ///
+    /// PROVISIONAL: a multiplier tunable the personality and the default lack reads its shipped
+    /// value (`Multipliers::from_tunables`): where the exe gets a value for a row the table lacks is
+    /// not traced, and `capture_ai` reads 0 for such a row of the same table (the shipped table has
+    /// every row, so only a mod's table can differ); the faction's CAI region list `+0x1C0`
+    /// (`0x00C45CF0`, ×2) is not in the model and reads false; a map with several theatres is
+    /// counted as one.
+    pub fn region_deal_worth(&self, r: RegionId, faction: FactionId, evaluator: FactionId) -> u32 {
+        self.region_deal_worth_with(r, faction, &self.region_census(faction), &self.region_worth_context(evaluator))
     }
 
     /// How many regions `faction` holds and how many of them have building slots: the two counts every
@@ -890,14 +914,21 @@ impl CampaignModel {
         RegionCensus { held: owned().count(), with_slots: owned().filter(|x| !x.slots.is_empty()).count() }
     }
 
-    /// [`Self::region_deal_worth`] with `faction`'s [`RegionCensus`] already taken.
-    fn region_deal_worth_with(&self, r: RegionId, faction: FactionId, census: &RegionCensus) -> u32 {
-        use super::region_value::{faction_value, stored_or_formula, FactionRegion, GroupChange, Multipliers};
+    /// The [`RegionWorthContext`] of an evaluation by `evaluator`'s AI.
+    fn region_worth_context(&self, evaluator: FactionId) -> RegionWorthContext {
+        let personality = self.ai_personality(evaluator);
+        let p = &self.rules.ai_personalities;
+        let multipliers = super::region_value::Multipliers::from_tunables(|k, d| p.tunable(&personality, k).unwrap_or(d));
+        RegionWorthContext { groups: self.region_groups(), multipliers }
+    }
+
+    /// [`Self::region_deal_worth`] with `faction`'s [`RegionCensus`] and the evaluation's
+    /// [`RegionWorthContext`] already taken.
+    fn region_deal_worth_with(&self, r: RegionId, faction: FactionId, census: &RegionCensus, ctx: &RegionWorthContext) -> u32 {
+        use super::region_value::{faction_value, stored_or_formula, FactionRegion};
         // A deal only holds existing regions (`propose_regions` refuses an unknown id).
         let Some(reg) = self.world.regions.get(&r) else { return 0 };
-        // PROVISIONAL: every region is taken to belong to a region group (`+0x12C` non-null).
-        let grouped = true;
-        let own_branch = reg.owner == faction && grouped;
+        let own_branch = reg.owner == faction;
         let held = census.held;
         let owner_neighbours = self
             .world
@@ -906,7 +937,7 @@ impl CampaignModel {
             .map_or(0, |ns| ns.iter().filter(|x| self.world.regions.get(x).is_some_and(|x| x.owner == reg.owner)).count()) as i32;
         let fr = FactionRegion {
             own_branch,
-            change: GroupChange::New,
+            change: ctx.groups.change(r, faction),
             owner_neighbours,
             theatre_double: if own_branch { held == 1 } else { held == 0 },
             key_region: false,
@@ -914,7 +945,7 @@ impl CampaignModel {
             last_with_slots: !reg.slots.is_empty() && census.with_slots == usize::from(reg.owner == faction),
         };
         let base = stored_or_formula(self.world.region_base_values.get(&r).copied(), reg.gdp);
-        faction_value(base, &fr, &Multipliers::from_tunables(|_, d| d)) as u32
+        faction_value(base, &fr, &ctx.multipliers) as u32
     }
 
     /// Whether `tech` is a technology goal from `giver` to `receiver` (`0x008F4F10(this = giver,

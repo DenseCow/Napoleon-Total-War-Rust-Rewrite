@@ -8,7 +8,7 @@
 //! - The roll (`0x00920B70`): one 0..=100 draw on the campaign RNG against the chance; the outcome
 //!   ([`Outcome`], `0x00920C60`) also uses the agent's skill in the action's attribute.
 
-use super::effects::Effects;
+use super::effects::{Effects, OwnEffects};
 use super::commands::CommandError;
 use super::events::CampaignEvent;
 use super::ids::{CharacterId, FactionId, ForceId, RegionId};
@@ -104,9 +104,9 @@ pub fn main_attribute(rules: &super::rules::CampaignRules, kind: CharacterKind) 
 
 /// A character's rank, his command stars (`0x00A198D0`): the rule behind the
 /// [`super::seams::CHARACTER_RANK`] seam ([`rank_original`] in the original game), called with his own
-/// effect set and with the faction's terms included.
+/// effect set (built only if the rule reads it, [`OwnEffects::of`]) and with the faction's terms included.
 pub fn rank(model: &CampaignModel, c: CharacterId) -> i32 {
-    (model.rules.seams.character_rank.rule())(model, c, &Effects::character_effects(model, c), true)
+    (model.rules.seams.character_rank.rule())(model, c, &OwnEffects::of(model, c), true)
 }
 
 /// The original's rank (`0x00A198D0`, CONFIRMED listing): the level of his type's main attribute
@@ -145,7 +145,7 @@ pub fn rank(model: &CampaignModel, c: CharacterId) -> i32 {
 /// the rank or the stored attribute levels: the exe only loads and checks them (vanilla's effect
 /// tables are empty) and no rule or screen reads them. The situations above are GetCharacterRank's
 /// own effect bonuses (CHARACTERS_FIDELITY §17, CONFIRMED).
-pub fn rank_original(model: &CampaignModel, c: CharacterId, own: &super::effects::EffectSet, faction: bool) -> i32 {
+pub fn rank_original(model: &CampaignModel, c: CharacterId, own: &OwnEffects<'_>, faction: bool) -> i32 {
     let Some(ch) = model.world.characters.get(&c) else { return -1 };
     let main = main_attribute(&model.rules, ch.kind);
     let (lo, hi) = model.rules.characters.rank_limits;
@@ -153,7 +153,8 @@ pub fn rank_original(model: &CampaignModel, c: CharacterId, own: &super::effects
     let force = |navy: bool| model.force_of(c).and_then(|f| model.world.forces.get(&f)).filter(|f| f.is_navy == navy);
     // A unit key with no `units` record has no category, so it is none of these classes but still
     // counts in n. Not logged here (the rank is read for every display and AI query): the loader
-    // warns once per such unit (`LoadWarning::UnknownUnitKey`) and commands refuse unknown units.
+    // warns once per such unit (`LoadWarning::UnknownUnitKey`) and only recruiting refuses an
+    // unknown unit (`CommandError::UnknownUnit`, `recruit` in commands.rs).
     let counts = |f: &super::world::MilitaryForce, codes: &[u8]| {
         f.units.iter().filter(|u| model.rules.units.get(&u.unit_key).is_some_and(|r| codes.contains(&crate::unit_kind::category(&r.category).code()))).count()
     };
@@ -883,13 +884,16 @@ pub fn has_research_building(model: &CampaignModel, region: RegionId) -> bool {
 ///
 /// The gate (`0x009D1540` settlement, `0x009D1190` character) needs a `can_exchange` row in the
 /// merged `abilities` table (`0x00E0D4E0` reads it;
-/// [`super::rules::CampaignRules::no_exchange_ability`]), and then:
+/// [`super::rules::CampaignRules::exchange_ability_missing`]), and then:
 /// - **settlement:** the agent may enter it ([`CampaignModel::may_reside`], the can-enter check
 ///   `0x00B165B0` at settlement vtable +0x6C);
-/// - **another faction's character:** the agent commands no force (`0x009D0910`), his type counts
-///   against a residence's room (`agents` #4, `0x00A0B9C0`), the target commands an army
-///   (`0x009D3A60`) whose accompanying characters (army +0x60, `0x006A3110`) number fewer than the
-///   room, and the agent's `subterfuge` is above 0.
+/// - **another faction's character:** the exe's test `0x009D0910` (both command a force and their factions
+///   differ, as this gate calls it: with flag 1, at `0x009D1273`; the function compares the factions only
+///   for a non-zero flag) fails, which for a foreign target who commands an army means the agent commands
+///   no force; his type counts against a residence's room (`agents` #4, `0x00A0B9C0`), the target commands
+///   an army (`0x009D3A60`) whose accompanying characters (army +0x60, `0x006A3110`) number fewer than the
+///   room (the exe's literal 20, `CMP EAX,0x14` at `0x009D12CA`, lifted to `max_residence_characters`),
+///   and the agent's `subterfuge` is above 0.
 ///
 /// The mask, settlement (`0x009C9EF0`): with a research building ([`has_research_building`]), an
 /// agent who has `can_research` at all (its raw level ≥ 0, `0x00A06C90`) and an owner who is not
@@ -908,7 +912,7 @@ pub fn has_research_building(model: &CampaignModel, region: RegionId) -> bool {
 pub fn exchange_actions(model: &CampaignModel, agent: CharacterId, target: AgentTarget) -> ExchangeActions {
     let mut out = ExchangeActions::default();
     let Some(a) = model.world.characters.get(&agent) else { return out };
-    if model.rules.no_exchange_ability {
+    if model.rules.exchange_ability_missing {
         return out;
     }
     let subterfuge = attribute(model, agent, SUBTERFUGE);
@@ -942,6 +946,7 @@ pub fn exchange_actions(model: &CampaignModel, agent: CharacterId, target: Agent
             }
             let counts = !model.rules.residence_exempt_agents.contains(a.kind.esf_name());
             let accompanying = 0;
+            // The exe compares against the literal 20 (`CMP EAX,0x14`, `0x009D12CA`); ours is moddable data.
             let room = model.rules.limits.max_residence_characters as usize;
             let army = model.force_of_kind(t, false).is_some();
             out.embed = counts && army && accompanying < room && subterfuge > 0 && !acted;

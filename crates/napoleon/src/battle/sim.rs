@@ -22,7 +22,7 @@ pub struct BattleSim {
     info: Vec<UnitInfo>,
     /// Names of the two sides, e.g. ["France", "Austria"].
     pub side_names: [String; 2],
-    /// RNG seed this battle started from (shown in the HUD; R restarts with seed + 1).
+    /// RNG seed this battle started from (shown in the HUD; the test key F8 restarts with seed + 1).
     pub seed: u32,
     /// The currently selected player (side 0) unit id, if any.
     pub selected: Option<u32>,
@@ -54,7 +54,7 @@ pub struct BattleSim {
     /// but the exe normalises the vector separately for the wind audio levels, so its own unit is
     /// not the metre. PROVISIONAL target: the exe-side wind speed the verlet item is fed.
     pub wind: [f32; 3],
-    /// A number no other `BattleSim` of this run has: a restart (R) or a new battle gets a new one,
+    /// A number no other `BattleSim` of this run has: a restart (the test key F8) or a new battle gets a new one,
     /// even with the same unit ids, so the views of one battle are never reused for another.
     pub build: u32,
 }

@@ -741,6 +741,52 @@ fn region_neighbours_come_from_the_map_outlines() {
     }
 }
 
+/// The settlement area outlines the region expulsion measures to (`0x008AF750`), from the shipped
+/// map: every region of the Europe campaign gets the outlines of one area, each a loop of at least
+/// three points, and that area is the one its settlement stands on (the settlement is inside the
+/// outlines, or on their edge).
+#[test]
+fn every_region_gets_the_outlines_of_the_area_its_settlement_stands_on() {
+    let dir = data_dir();
+    if !dir.is_dir() {
+        println!("SKIP: no install at {}", dir.display());
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).expect("database");
+    let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
+    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+    let bytes = files.read("campaigns/eur_napoleon/startpos.esf").expect("startpos");
+    let esf = EsfFile::from_bytes(&bytes).expect("esf");
+    let mut loaded = ntw_campaign::read_esf(&esf, &db).expect("load");
+    let map = ntw_formats::campaign_map::CampaignMap::load(&files, &loaded.info.map_key).expect("map");
+    ntw_campaign::trade::attach_map(&mut loaded.model, &map.regions);
+    let w = &loaded.model.world;
+    assert_eq!(w.regions.len(), 72);
+    let mut wrong = Vec::new();
+    for r in w.regions.values() {
+        let Some(loops) = w.settlement_area_outlines.get(&r.id) else {
+            wrong.push(format!("{}: no outlines", r.key));
+            continue;
+        };
+        if loops.is_empty() || loops.iter().any(|l| l.len() < 3) {
+            wrong.push(format!("{}: loops of {:?} points", r.key, loops.iter().map(Vec::len).collect::<Vec<_>>()));
+            continue;
+        }
+        let p = (r.settlement.position.0.to_f32(), r.settlement.position.1.to_f32());
+        use ntw_sim::campaign::polypath::{dist_to_segment, point_in_polygon};
+        // Even-odd over every loop, so a hole's loop counts as outside.
+        let inside = loops.iter().filter(|l| point_in_polygon(l, p.0, p.1)).count() % 2 == 1;
+        let to_edge = loops
+            .iter()
+            .flat_map(|l| (0..l.len()).map(move |i| dist_to_segment(p, l[i], l[(i + 1) % l.len()])))
+            .fold(f32::INFINITY, f32::min);
+        if !inside && to_edge > 0.01 {
+            wrong.push(format!("{}: settlement {p:?} is {to_edge} outside its area's outlines", r.key));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
 #[test]
 fn tech_availability_rule_keeps_every_start_position_state() {
     let dir = data_dir();
@@ -1189,6 +1235,42 @@ fn ai_areas_on_the_europe_start() {
     }
 }
 
+/// The region groups' land masses on the eur start (`0x00C3D6E0` over the CAI regions' HLCIs,
+/// `CAI_WORLD_REGION_HLCIS[]`, kept by `0x00C5C490` when a piece's `regions.esf` area has flag #2):
+/// every land region lies on one; the British Isles are one (Ireland included), the mainland
+/// another (Sicily included), Corsica a third, so Corsica is a group of its own (LOST for its owner).
+#[test]
+fn region_land_masses_on_the_europe_start() {
+    use ntw_sim::campaign::region_value::GroupChange;
+    let dir = data_dir();
+    if !dir.is_dir() {
+        println!("SKIP: no install at {}", dir.display());
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).expect("database");
+    let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
+    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+    let bytes = files.read("campaigns/eur_napoleon/startpos.esf").expect("startpos");
+    let mut loaded = ntw_campaign::read_esf(&EsfFile::from_bytes(&bytes).expect("esf"), &db).expect("loads");
+    assert!(loaded.model.world.ai_areas.iter().any(|a| !a.hlcis.is_empty()), "the CAI regions' HLCIs");
+    let map = ntw_formats::campaign_map::CampaignMap::load(&files, &loaded.info.map_key).expect("map");
+    ntw_campaign::trade::attach_map(&mut loaded.model, &map.regions);
+    let m = loaded.model;
+    let masses = &m.world.region_land_masses;
+    assert_eq!(masses.len(), m.world.regions.len());
+    let id = |k: &str| m.world.regions.values().find(|r| r.key == k).unwrap_or_else(|| panic!("{k}")).id;
+    for r in m.world.regions.values() {
+        assert!(!masses[&r.id].is_empty(), "{} lies on no land mass", r.key);
+    }
+    let shared = |a: &str, b: &str| masses[&id(a)].iter().any(|x| masses[&id(b)].contains(x));
+    assert!(shared("eur_england", "eur_scotland") && shared("eur_england", "eur_wales"));
+    assert!(shared("eur_england", "eur_ireland") && shared("eur_provence", "eur_sicily"), "the crossings join them");
+    assert!(!shared("eur_england", "eur_france") && !shared("eur_provence", "eur_corsica"));
+    let groups = m.region_groups();
+    let corsica = id("eur_corsica");
+    assert_eq!(groups.change(corsica, m.world.regions[&corsica].owner), GroupChange::Lost);
+}
+
 /// The campaign director's state in the original's own save (CDIR_INTERFACE v3, loader
 /// `0x00B94170`; the region-transfer desire's counter, `0x00B90210`): `orig_fr_may1811` holds RNG
 /// 3875805033 and counter 3. Our save writes a changed state back, and reading it again gives it.
@@ -1257,9 +1339,6 @@ fn vanilla_director_floats_all_parse() {
         d::XP_ARMY_EXTRA_CHANCE_PER_TURN,
     ];
     let rows: Vec<&d::CdirConfig> = rules.director.configs.iter().filter(|c| floats.contains(&c.variable.as_str())).collect();
-    for c in &rows {
-        println!("{} {} {} = {:?}", c.campaign, c.faction, c.variable, c.value);
-    }
     assert!(!rows.is_empty());
     let failing: Vec<_> = rows.iter().filter(|c| d::parse_cdir_float(&c.value).is_none()).map(|c| (&c.campaign, &c.faction, &c.variable, &c.value)).collect();
     assert!(failing.is_empty(), "rows the exe reads as 0: {failing:?}");

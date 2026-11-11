@@ -21,8 +21,8 @@ fn waypoint(region: u32, from: u32, to: u32) -> TradeWaypoint {
 
 /// The test model with a network of one leg (nodes 1–2) running along segments 0 (x 50..60 at z 50)
 /// and 1 (far away); B owns a domestic route over it carrying 30 of commodity 0 (price 10) and 20 of
-/// commodity 1 (price 20): worth 700. A and B are at war; A's general 100 (force 1000, one unit of
-/// travel speed 30: share 30 × 0.05 / 30 = 0.05) stands at the origin.
+/// commodity 1 (price 20): worth 700, ending in B's capital, region 11. A and B are at war; A's general
+/// 100 (force 1000, one unit of travel speed 30: share 30 × 0.05 / 30 = 0.05) stands at the origin.
 fn raid_model() -> CampaignModel {
     let mut m = test_model();
     m.world.commodity_prices = vec![10, 20];
@@ -30,6 +30,7 @@ fn raid_model() -> CampaignModel {
     m.world.trade_sight = vec![sight(vec![line((50.0, 50.0), (60.0, 50.0))]), sight(vec![line((-90.0, -90.0), (-80.0, -90.0))])];
     let path = TradePath { waypoints: vec![waypoint(11, 1, 2), waypoint(11, u32::MAX, u32::MAX)], volumes: vec![30, 20], capital_port: false, accumulated: 0 };
     m.world.domestic_trade.insert(B, vec![path]);
+    m.world.faction_details.entry(B).or_default().capital = Some(RegionId(11));
     m.world.set_stance(A, B, Stance::War).unwrap();
     m
 }
@@ -548,4 +549,42 @@ fn a_domestic_raid_lowers_the_victims_net_volume_not_the_price_supply() {
     assert!(m.raid_trade_route(CharacterId(100), at(55.0, 50.0)));
     assert_eq!(m.trade_supply(B), Some(vec![29, 19]), "share 0.05: 1.5 → 1, 1.0 → 1");
     assert_eq!(m.price_supply(B), Some(vec![30, 20]));
+}
+
+/// The split's supply (`0x00BC26D0`) counts only the domestic routes whose last waypoint's region is its
+/// owner's capital (`0x00A8B5A0` at `0x00BC2A5C`): not the route's owner's, so a route ending in another
+/// faction's capital counts too. The price update's supply counts every route. B's first route keeps ending
+/// in B's capital throughout, so its loaded routes are not taken as stale (the stand-in of
+/// `CampaignModel::domestic_route_counts`, tested in `trade_order_tests`).
+#[test]
+fn the_split_counts_only_domestic_routes_ending_in_a_capital() {
+    let mut m = raid_model();
+    assert_eq!(m.trade_supply(B), Some(vec![30, 20]), "ends in B's capital");
+    let second = TradePath { waypoints: vec![waypoint(11, 3, 4), waypoint(11, u32::MAX, u32::MAX)], volumes: vec![5, 7], capital_port: false, accumulated: 0 };
+    m.world.domestic_trade.get_mut(&B).unwrap().push(second);
+    assert_eq!(m.trade_supply(B), Some(vec![35, 27]), "both end in B's capital");
+    let end = |m: &mut CampaignModel, region: u32| m.world.domestic_trade.get_mut(&B).unwrap()[1].waypoints.last_mut().unwrap().region = RegionId(region);
+    end(&mut m, 10);
+    assert_eq!(m.trade_supply(B), Some(vec![30, 20]), "region 10: A has no capital");
+    assert_eq!(m.price_supply(B), Some(vec![35, 27]));
+    m.world.faction_details.entry(A).or_default().capital = Some(RegionId(10));
+    assert_eq!(m.trade_supply(B), Some(vec![35, 27]), "region 10 is its owner A's capital");
+    end(&mut m, 12);
+    assert_eq!(m.trade_supply(B), Some(vec![30, 20]), "region 12 is A's, not its capital");
+}
+
+/// A trade agreement (`0x00B55090`, price update at `0x00B550CD`) and a broken one (`0x00B29BB0`, at
+/// `0x00B29BED`) each run a flag-0 price update, which re-books the raid income mid-turn.
+#[test]
+fn a_trade_agreement_and_its_break_each_run_a_price_update() {
+    let mut m = raid_model();
+    assert!(m.raid_trade_route(CharacterId(100), at(55.0, 50.0)));
+    let booked = |m: &CampaignModel| m.world.economy_history[&A].last().map(|r| r[9]);
+    assert_eq!(booked(&m), Some(30));
+    m.world.domestic_trade.get_mut(&B).unwrap()[0].volumes = vec![60, 40];
+    assert_eq!(price_updates(|| drop(m.trade_agreement(B, C).unwrap())), [false]);
+    assert_eq!(booked(&m), Some(70), "re-booked by the agreement's update");
+    m.world.domestic_trade.get_mut(&B).unwrap()[0].volumes = vec![30, 20];
+    assert_eq!(price_updates(|| drop(m.break_trade(C, B).unwrap())), [false]);
+    assert_eq!(booked(&m), Some(30), "re-booked by the break's update");
 }

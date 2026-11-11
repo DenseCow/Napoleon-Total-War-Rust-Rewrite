@@ -16,19 +16,26 @@
 //! that give back no access. All but the cancel then flood both factions' zones of control again
 //! ([`CampaignModel::expel_from_lands_of`]); the cancel loops alone ([`CampaignModel::expel_from_each_region_of`]).
 //!
-//! The rule ([`expel_faction_from_region`], behind the [`super::seams::REGION_EXPULSION`] seam) says
-//! which forces go where; the model applies it ([`CampaignModel::expel_from_region`]). Agents are
+//! The original moves the forces one at a time: each is placed on the map as the moves before it
+//! left it. So the rule ([`next_expelled_force`], behind the [`super::seams::REGION_EXPULSION`]
+//! seam) names one force and where it goes, the model applies that
+//! ([`CampaignModel::expel_from_region`]) and asks again until the rule has no more. Agents are
 //! never moved.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use super::events::{CampaignEvent, CampaignMessage};
 use super::ids::{CharacterId, FactionId, ForceId, RegionId};
 use super::mod_state::ModWrites;
-use super::pathing::Domain;
-use super::events::{CampaignEvent, CampaignMessage};
-use super::world::{CampaignModel, MilitaryForce, Region, Stance};
+use super::pathing::{Domain, PathGrid};
+use super::place_flood::{self, Point};
+use super::polypath::PolyMap;
+use super::rtcut::{self, Cut, Shape};
+use super::world::{CampaignModel, Character, MilitaryForce, Region, Stance};
+use super::zoc::{self, Obstacle};
 use crate::fixed::Fixed20;
+use crate::msvc_sort;
 
 /// How far from a candidate point a force may be placed, in map units: the 100.0 every placement of
 /// `0x008D9DC0` passes (`0x00B37670`, `0x00B35570`, `0x00B377E0`; CONFIRMED). The flood `0x00B35640`
@@ -68,11 +75,51 @@ fn to_fixed(p: (f32, f32)) -> (Fixed20, Fixed20) {
     (Fixed20::from_f64(f64::from(p.0)), Fixed20::from_f64(f64::from(p.1)))
 }
 
+fn raw(p: (Fixed20, Fixed20)) -> Point {
+    (p.0.raw(), p.1.raw())
+}
+
+fn from_raw(p: Point) -> (Fixed20, Fixed20) {
+    (Fixed20::from_raw(p.0), Fixed20::from_raw(p.1))
+}
+
+/// A raw position in map units.
+fn units(p: Point) -> (f32, f32) {
+    (Fixed20::from_raw(p.0).to_f32(), Fixed20::from_raw(p.1).to_f32())
+}
+
+/// The map's path grid and its polygon grid, when the map has both: the ground the original places
+/// forces on.
+fn polygon_ground(m: &CampaignModel) -> Option<(&PathGrid, &PolyMap)> {
+    let g = &*m.terrain.as_ref()?.0;
+    Some((g, g.poly.as_ref()?))
+}
+
+/// One place a land army is tried at.
+#[derive(Clone, Copy)]
+struct Candidate<'a> {
+    /// The region it would stand in.
+    region: &'a Region,
+    /// The point the placement starts from (raw Fixed20).
+    point: Point,
+    /// The region it leaves, at its own position ("may stay").
+    stay: bool,
+}
+
 /// Where a land army standing at `here` may go when it leaves `region`, in the order they are tried
-/// (`0x008C6010` builds the list, `0x008DCB30` orders it; CONFIRMED): the region itself at the
-/// army's own position when it may stay; `f`'s other regions; the regions of factions not at war
-/// with `f` whose record lets it stand ([`record_lets_stand`]), not the region. Each of the last two
-/// lists is sorted by the squared distance from the army to the candidate's point.
+/// (`0x008C6010` picks the regions, `0x008DCB30` builds and orders the list; CONFIRMED):
+/// 1. the region itself at the army's own position, as it is (no conversion), when it may stay;
+/// 2. `f`'s other regions, in its list's order (faction `+0x778`,
+///    [`super::world::World::regions_in_list_order`]);
+/// 3. the regions of factions not at war with `f` whose record lets it stand
+///    ([`record_lets_stand`]), not the region, in the region manager's order (world `+0x34` →
+///    `+0x10` / `+0x14`, [`super::world::World::regions_in_manager_order`]).
+///
+/// Each region of 2 and 3 is entered at the point of its settlement area's outlines nearest to the
+/// army (`0x008AF750`, [`place_flood::outline_point`]; the army's own position for a region without
+/// such an outline). Each of the two lists is then sorted on its own by the squared distance from
+/// the army to that point ([`place_flood::distance_key`]) with the library's sort (`0x00868A30`,
+/// [`msvc_sort::sort_by`]: equal distances keep their order up to 32 regions and may not above).
 ///
 /// PROVISIONAL: the model has no theatres (as `nearest_capital`), so every region counts and the
 /// exe's fourth part, `f`'s capital in another theatre, never happens. That matches every shipped
@@ -80,86 +127,179 @@ fn to_fixed(p: (f32, f32)) -> (Fixed20, Fixed20) {
 /// CAMPAIGN_FIDELITY.md "Theatres CONFIRMED a no-op"); a map with several theatres needs the exe's
 /// theatre filter.
 ///
-/// PROVISIONAL stand-ins: the point is the region's nearest outline point in the exe (`0x008AF750`);
-/// ours is the centre of the region's path-grid cell nearest to the army, or its settlement without
-/// the map. `f`'s regions go in in its list's order (faction `+0x778`,
-/// [`super::world::World::regions_in_list_order`]) and the others' in the region manager's order
-/// (world `+0x34` → `+0x10` / `+0x14`, [`super::world::World::regions_in_manager_order`]), as in the
-/// exe (CONFIRMED), but the exe's sort (std::sort `0x00868A30`) is not stable where ours is, so
-/// equal distances may come out in another order.
-fn army_candidates<'a>(m: &'a CampaignModel, f: FactionId, region: &'a Region, here: (f32, f32), stay: bool) -> Vec<(&'a str, (f32, f32))> {
-    let cells = m.terrain.as_ref().map(|t| (&t.0, t.0.nearest_cell_per_region(here.0, here.1)));
-    let point = |r: &Region| {
-        let s = (r.settlement.position.0.to_f32(), r.settlement.position.1.to_f32());
-        match &cells {
-            Some((g, cells)) => g.region_index(&r.key).and_then(|i| cells.get(i as usize).copied().flatten()).map_or(s, |c| g.centre(c)),
-            None => s,
+/// A map without the polygon grid (the original always has one; ours: a model without the map, or a
+/// map given as cells only) has no outlines: there a region's point is the centre of its path-grid
+/// cell nearest to the army, or its settlement without the map. Our own rule for such maps.
+fn army_candidates<'a>(m: &'a CampaignModel, f: FactionId, region: &'a Region, here: Point, stay: bool) -> Vec<Candidate<'a>> {
+    let outlines = polygon_ground(m).map(|_| &m.world.settlement_area_outlines);
+    let cells = match (&m.terrain, outlines) {
+        (Some(t), None) => {
+            let p = units(here);
+            Some((&*t.0, t.0.nearest_cell_per_region(p.0, p.1)))
         }
+        _ => None,
     };
-    let by_distance = |list: &mut Vec<(&str, (f32, f32))>| {
-        list.sort_by(|a, b| {
-            let d = |p: (f32, f32)| (p.0 - here.0).powi(2) + (p.1 - here.1).powi(2);
-            d(a.1).total_cmp(&d(b.1))
-        });
+    let point = |r: &Region| -> Point {
+        if let Some(outlines) = outlines {
+            return place_flood::outline_point(outlines.get(&r.id).map_or(&[][..], |o| &o[..]), here);
+        }
+        let cell = cells.as_ref().and_then(|(g, cells)| Some(g.centre(cells.get(g.region_index(&r.key)? as usize).copied().flatten()?)));
+        raw(cell.map_or(r.settlement.position, to_fixed))
     };
-    let mut own: Vec<(&str, (f32, f32))> = m
-        .world
-        .faction_regions_in_list_order(f)
-        .into_iter()
-        .filter_map(|id| m.world.regions.get(&id))
-        .filter(|r| r.id != region.id)
-        .map(|r| (r.key.as_str(), point(r)))
-        .collect();
-    let mut open: Vec<(&str, (f32, f32))> = m
-        .world
-        .regions_in_manager_order()
-        .into_iter()
-        .filter_map(|id| m.world.regions.get(&id))
-        .filter(|r| r.id != region.id && r.owner != f && !m.at_war(r.owner, f) && record_lets_stand(m, r.owner, f))
-        .map(|r| (r.key.as_str(), point(r)))
-        .collect();
-    by_distance(&mut own);
-    by_distance(&mut open);
+    let sorted = |ids: Vec<RegionId>, fits: &dyn Fn(&Region) -> bool| {
+        let mut list: Vec<(&'a Region, Point, f32)> = ids
+            .into_iter()
+            .filter_map(|id| m.world.regions.get(&id))
+            .filter(|r| r.id != region.id && fits(r))
+            .map(|r| {
+                let p = point(r);
+                (r, p, place_flood::distance_key(here, p))
+            })
+            .collect();
+        msvc_sort::sort_by(&mut list, |a, b| a.2 < b.2);
+        list
+    };
+    let own = sorted(m.world.faction_regions_in_list_order(f), &|_| true);
+    let open = sorted(m.world.regions_in_manager_order(), &|r| r.owner != f && !m.at_war(r.owner, f) && record_lets_stand(m, r.owner, f));
     let mut out = Vec::with_capacity(own.len() + open.len() + 1);
     if stay {
-        out.push((region.key.as_str(), here));
+        out.push(Candidate { region, point: here, stay: true });
     }
-    out.extend(own);
-    out.extend(open);
+    out.extend(own.into_iter().chain(open).map(|(region, point, _)| Candidate { region, point, stay: false }));
     out
 }
 
-/// Places a force near `point`: in the region `key` on land (`0x00B37670` for the region itself,
-/// `0x00B35570` for another, both the flood `0x00B35640`), or at sea (`0x00B377E0`, mode 2) when
-/// `key` is `None`. PROVISIONAL stand-in for the flood (a best-first search over the region's cells
-/// from the point, avoiding other characters' footprints): the point itself when its path-grid cell
-/// fits, else the nearest fitting cell's centre closer than [`PLACEMENT_RADIUS`]
-/// ([`super::pathing::PathGrid::nearest_place_within`]); the model has no footprints. Without the
-/// map, a land placement is the point itself and a sea one fails.
-fn place(m: &CampaignModel, key: Option<&str>, point: (f32, f32)) -> Option<(f32, f32)> {
-    let Some(t) = &m.terrain else { return key.map(|_| point) };
-    let g = &t.0;
-    match key {
-        Some(k) => g.nearest_place_within(point.0, point.1, Some(g.region_index(k)?), Domain::Land, PLACEMENT_RADIUS),
-        None => g.nearest_place_within(point.0, point.1, None, Domain::Sea, PLACEMENT_RADIUS),
+/// Places the army `mover` commands at a candidate, on the polygon grid as its faction sees it: the
+/// flood `0x00B35640` ([`place_flood::flood`]) from the candidate's point over the candidate
+/// region's own land, within [`PLACEMENT_RADIUS`]. `others` are the obstacles the faction sees, the
+/// mover left out ([`CampaignModel::obstacles_with_stored_zones`]).
+///
+/// CONFIRMED: the flood and what the view holds (below). Not covered by that: a position next to a
+/// core or a zone depends on the pieces [`rtcut`] cuts the cell's polygons into, which that module
+/// tags as not matched to the original's clipper (its module doc and its split), and the order of
+/// the polygons inside a rebuilt cell, which decides between equally near positions, was not
+/// compared with the original's.
+///
+/// The view ([`zoc::view_cuts`], each layer prepared for the faction by `0x00B06280`): the stored
+/// zones of factions at war with it are no place (kind 8), nor is the core of any commander it sees
+/// (kind 9). For another region the mover's own core counts too, where he still stands
+/// (`0x00B35570`); for the region he leaves, his own footprint is lifted first (`0x00B37670`:
+/// `0x00AF59B0` / `0x00B0C830`, put back by `0x00B66720`), so he may be put where he is.
+///
+/// Obstacles too far from the point to touch a cell the flood can scan are left out (that changes
+/// nothing): it scans no cell at [`PLACEMENT_RADIUS`] or more from the point on either axis, and a
+/// cell's polygons lie in the cell. A region the grid does not hold places nothing.
+fn place_on_polygons(g: &PathGrid, map: &PolyMap, others: &[Obstacle], mover: &Character, cand: &Candidate<'_>) -> Option<Point> {
+    let region = g.region_index(&cand.region.key)?;
+    let at = units(cand.point);
+    let reach = (PLACEMENT_RADIUS + map.cell) * std::f32::consts::SQRT_2;
+    let mut cuts = zoc::view_cuts(map, others, |o, r| {
+        let r = reach + r;
+        (o.pos.0 - at.0).powi(2) + (o.pos.1 - at.1).powi(2) < r * r
+    });
+    if !cand.stay {
+        let core = zoc::core_shape(units(raw(mover.position)), mover.garrisoned_in.is_some());
+        cuts.push(Cut { shape: Shape::Convex(core), kind: zoc::CORE_KIND });
     }
+    let overlay = rtcut::build(map, &cuts);
+    place_flood::flood(&map.with(&overlay), cand.point, region, PLACEMENT_RADIUS)
 }
 
-/// The original's expulsion of `f`'s forces from `region` (`0x008D9DC0`, CONFIRMED), as a plan the
-/// model applies ([`CampaignModel::expel_from_region`]); the default [`super::seams::RegionExpulsion`].
+/// Places a force near `point` on the path grid's cells: in the region `key` on land, or at sea when
+/// `key` is `None`. The point itself when its cell fits, else the nearest fitting cell's centre
+/// closer than [`PLACEMENT_RADIUS`] ([`super::pathing::PathGrid::nearest_place_within`]); without
+/// the map, a land placement is the point itself and a sea one fails.
+///
+/// For a land army this is our own rule for a map without the polygon grid ([`army_candidates`]);
+/// for a navy it stands in for the original's flood at sea ([`navy_step`]). Other characters' cores
+/// do not count here.
+fn place_on_cells(m: &CampaignModel, key: Option<&str>, point: Point) -> Option<Point> {
+    let Some(t) = &m.terrain else { return key.map(|_| point) };
+    let g = &t.0;
+    let p = units(point);
+    let q = match key {
+        Some(k) => g.nearest_place_within(p.0, p.1, Some(g.region_index(k)?), Domain::Land, PLACEMENT_RADIUS),
+        None => g.nearest_place_within(p.0, p.1, None, Domain::Sea, PLACEMENT_RADIUS),
+    }?;
+    Some(if q == p { point } else { raw(to_fixed(q)) })
+}
+
+/// The move of the land army `force` under commander `c`, if it stands in `reg` (the army branch of
+/// `0x008D9DC0`, CONFIRMED).
+///
+/// - The army counts when the path-grid polygon under its commander's position is the region's
+///   (`0x00A075B0` → `0x00B4D7B0` → `0x00B4D800`, [`place_flood::in_region`]). For a garrisoned
+///   commander the original tests his residence's position record instead of his own (`0x00A17D60`,
+///   the residence case); ours reads the model's garrison link, which gives the same region because
+///   the model keeps a garrisoned commander at his settlement. On a map without the polygon grid:
+///   [`super::economy::in_region`].
+/// - An army aboard a navy never counts. INFERRED: the original tests it at the stored position of
+///   the commander of the fleet carrying it (`0x00A17D60`, the case at `0x00A17E05`: army `+0xEC`,
+///   the fleet, then its `+0x74` commander's position record), with the same polygon test. At sea
+///   no polygon there is the land region's. Only a docked navy's own commander is given the port's
+///   way out to sea by `0x00A17D60` (`0x00A99A60`); an army aboard is not. Not traced: where the
+///   record of a fleet docked in one of the region's ports lies, and so whether the polygon under
+///   it can name the region.
+/// - The candidates ([`army_candidates`]) are tried in order, while the army still stands in its
+///   residence, until one places it ([`place_on_polygons`]). `None` placed: it does not move.
+/// - It gets the move notice when it was placed and may not stay (the test at `0x008DA077`).
+fn army_step(m: &CampaignModel, f: FactionId, reg: &Region, stay: bool, force: &MilitaryForce, c: &Character) -> Option<ExpelledForce> {
+    if m.carrier_of(force.id).is_some() {
+        return None;
+    }
+    let here = raw(c.position);
+    let ground = polygon_ground(m);
+    let inside = match ground {
+        Some((g, map)) => c.garrisoned_in == Some(reg.id) || g.region_index(&reg.key).is_some_and(|i| place_flood::in_region(map, here, i)),
+        None => super::economy::in_region(m, reg, c),
+    };
+    if !inside {
+        return None;
+    }
+    let candidates = army_candidates(m, f, reg, here, stay);
+    let to = match ground {
+        Some((g, map)) => {
+            let others = m.obstacles_with_stored_zones(f, c.id);
+            candidates.iter().find_map(|cand| place_on_polygons(g, map, &others, c, cand))
+        }
+        None => candidates.iter().find_map(|cand| place_on_cells(m, Some(&cand.region.key), cand.point)),
+    };
+    Some(ExpelledForce { force: force.id, to: to.map(from_raw), notice: to.is_some() && !stay })
+}
+
+/// The move of the navy `force`, if it is docked in one of `reg`'s ports (the navy branch of
+/// `0x008D9DC0`, CONFIRMED): undocked, then placed at sea from the port's way out; unplaced, it stays
+/// where it is, undocked. Never a notice (the branch has no call).
+///
+/// PROVISIONAL, the placement: the original takes the port's way out from `0x00A99A60` (a virtual
+/// call on the port's `+0x70` object, not traced) and floods the polygon grid at sea from it
+/// (`0x00B377E0`, the flood's mode 2, within [`PLACEMENT_RADIUS`]; not ported). Ours: the harbour's
+/// dock point, else the port slot, placed on the path grid's cells ([`place_on_cells`]).
+/// PROVISIONAL, the link: the model ties a navy to its port by position
+/// ([`CampaignModel::docked_port`]), so one left in place still counts as docked there.
+fn navy_step(m: &CampaignModel, reg: &Region, force: &MilitaryForce) -> Option<ExpelledForce> {
+    let (r, slot) = m.docked_port(force.id).filter(|(r, _)| *r == reg.id)?;
+    let port = m.world.regions.get(&r)?.slots.get(slot)?.position?;
+    let port = (port.0.to_f32(), port.1.to_f32());
+    let harbours = m.terrain.as_ref().map_or(&[][..], |t| &t.0.harbours[..]);
+    let exit = harbours.iter().find(|h| (h.port.0 - port.0).powi(2) + (h.port.1 - port.1).powi(2) < 1.0).map_or(port, |h| h.dock);
+    Some(ExpelledForce { force: force.id, to: place_on_cells(m, None, raw(to_fixed(exit))).map(from_raw), notice: false })
+}
+
+/// The original's expulsion of `f`'s forces from `region` (`0x008D9DC0`, CONFIRMED), one force at a
+/// time: given the forces this expulsion has handled so far (`done`, in order), the next force to
+/// move and where to, or `None` when it is over. The model applies each move before it asks again
+/// ([`CampaignModel::expel_from_region`]), so each force is placed on the map the moves before it
+/// left: the original places each (`0x0096C8D0`) before it tests the next. The default
+/// [`super::seams::RegionExpulsion`].
 ///
 /// Nothing moves when `f` is out of the game (faction `+0x824`, the early return at `0x008D9DDC`;
 /// CONFIRMED), whichever caller asks. The forces come in the order of `f`'s character list (+0x768,
 /// [`super::world::World::characters_in_list_order`]), each commander's army or navy in turn, as the
-/// exe's one loop takes them (CONFIRMED, `0x008D9E7A`).
+/// exe's one loop takes them (CONFIRMED, `0x008D9E7A`); the loop never goes back, so the walk goes
+/// on behind the commander of the force handled last.
 ///
-/// - **Land armies** of `f` standing in the region ([`super::economy::in_region`]): the candidates
-///   ([`army_candidates`]) are tried in order until one places it ([`place`]). An army aboard a navy
-///   never counts. INFERRED: the exe's test (`0x00A075B0` → `0x00B4D7B0` → `0x00B4D800`) is the
-///   region of the path-grid polygon under the army's position (`0x00A17D50`), which for an army
-///   aboard is its carrier's (at sea, or a docked carrier's port exit `0x00A99A60`), so a sea
-///   polygon; whether the grid's shared-polygon lists (index past `+0x140`, lists at `+0x154`) can
-///   name a land region there is not traced.
+/// - **Land armies** of `f` standing in the region: [`army_step`].
 /// - Placed or not, an army leaves its residence (vt+0x90; for a settlement `0x00B0D610` unlinks
 ///   the garrison), whether or not it may stay (CONFIRMED, `0x008D9DC0`). The exe's one exception:
 ///   the owner at war with `f` and the residence's vt+0x54 returning 0 leaves the army untouched.
@@ -168,69 +308,70 @@ fn place(m: &CampaignModel, key: Option<&str>, point: (f32, f32)) -> Option<(f32
 ///   `0x0137C8B4`) it returns 0 (`0x00461180`). The model garrisons armies only in settlements, so
 ///   the exception never applies here.
 /// - **Navies** of `f` docked in one of the region's ports, when the owner is not at war with `f`:
-///   undocked, then placed at sea from the port's way out (`0x00A99A60`; ours: the harbour's dock
-///   point, else the port slot); unplaced, it stays where it is, undocked. PROVISIONAL: the model
-///   links a navy to its port by position ([`CampaignModel::docked_port`]), so one left in place
-///   still counts as docked there.
-///
+///   [`navy_step`].
 /// - **The move notice** (`SendArmyRetreatsRegionMessage` `0x009FB680`, CONFIRMED from the
 ///   disassembly): a land army that a candidate placed gets it ([`ExpelledForce::notice`]) unless it
 ///   may stay (the test at `0x008DA077`, after the move `0x0096C8D0`); an unplaced army and a navy never do (the navy branch has no call).
-pub fn expel_faction_from_region(m: &CampaignModel, f: FactionId, region: RegionId) -> Vec<ExpelledForce> {
-    let Some(reg) = m.world.regions.get(&region) else { return Vec::new() };
+pub fn next_expelled_force(m: &CampaignModel, f: FactionId, region: RegionId, done: &[ForceId]) -> Option<ExpelledForce> {
+    let reg = m.world.regions.get(&region)?;
     if !m.in_the_game(f) {
-        return Vec::new();
+        return None;
     }
     let n = reg.owner;
     let stay = may_stay(m, n, f);
     let at_war = m.at_war(n, f);
-    let harbours = m.terrain.as_ref().map_or(&[][..], |t| &t.0.harbours[..]);
-    // The exe walks the faction's character list (+0x768, `0x008D9E7A`) in its order, each
-    // commander's army or navy in turn (CONFIRMED), so the plan, and the moves the model applies
-    // from it, follow that order ([`super::world::World::characters_in_list_order`]).
     let commanded: BTreeMap<CharacterId, &MilitaryForce> =
         m.world.forces.values().filter(|x| x.faction == f).filter_map(|x| Some((x.commander?, x))).collect();
-    let mut out = Vec::new();
-    for id in m.world.characters_in_list_order() {
-        let (Some(force), Some(c)) = (commanded.get(&id), m.world.characters.get(&id)) else { continue };
-        if !force.is_navy {
-            if m.carrier_of(force.id).is_some() || !super::economy::in_region(m, reg, c) {
-                continue;
-            }
-            let here = (c.position.0.to_f32(), c.position.1.to_f32());
-            let to = army_candidates(m, f, reg, here, stay).into_iter().find_map(|(key, p)| place(m, Some(key), p));
-            out.push(ExpelledForce { force: force.id, to: to.map(to_fixed), notice: to.is_some() && !stay });
+    let order = m.world.characters_in_list_order();
+    let last = done.last().and_then(|d| m.world.forces.get(d)).and_then(|x| x.commander);
+    let start = last.and_then(|c| order.iter().position(|&id| id == c)).map_or(0, |i| i + 1);
+    for id in &order[start..] {
+        let (Some(force), Some(c)) = (commanded.get(id), m.world.characters.get(id)) else { continue };
+        if done.contains(&force.id) {
             continue;
         }
-        if at_war {
-            continue;
+        let step = if !force.is_navy {
+            army_step(m, f, reg, stay, force, c)
+        } else if at_war {
+            None
+        } else {
+            navy_step(m, reg, force)
+        };
+        if step.is_some() {
+            return step;
         }
-        let Some((r, slot)) = m.docked_port(force.id).filter(|(r, _)| *r == region) else { continue };
-        let Some(port) = m.world.regions.get(&r).and_then(|r| r.slots.get(slot)).and_then(|s| s.position) else { continue };
-        let port = (port.0.to_f32(), port.1.to_f32());
-        let exit = harbours.iter().find(|h| (h.port.0 - port.0).powi(2) + (h.port.1 - port.1).powi(2) < 1.0).map_or(port, |h| h.dock);
-        out.push(ExpelledForce { force: force.id, to: place(m, None, exit).map(to_fixed), notice: false });
     }
-    out
+    None
 }
 
 impl CampaignModel {
-    /// `f`'s forces leave `region` (`0x008D9DC0`), as the [`super::seams::REGION_EXPULSION`] rule
-    /// plans it ([`expel_faction_from_region`] in the original game). An army leaves its residence (its
+    /// `f`'s forces leave `region` (`0x008D9DC0`), one at a time as the
+    /// [`super::seams::REGION_EXPULSION`] rule names them ([`next_expelled_force`] in the original
+    /// game): the rule is asked for the next force, its move is applied, and the rule is asked again
+    /// with the forces handled so far, until it has none. An army leaves its residence (its
     /// commander no longer garrisoned, the region's garrison link cleared); a navy leaves its port
-    /// ([`Self::undock`]); then each placed force's commander is placed ([`Self::place_character`]) and,
-    /// when the plan says so ([`ExpelledForce::notice`]), his faction (character `+0x2A0`) gets the
-    /// move notice in `events` at once, before the next force moves (`0x009FB680` at `0x008DA091`,
-    /// right after the move `0x0096C8D0`; [`CampaignMessage::YourArmyRetreatsRegion`]).
+    /// ([`Self::undock`]); then a placed force's commander is placed ([`Self::place_character`], which
+    /// rebuilds the zones the move touches) and, when the rule says so ([`ExpelledForce::notice`]),
+    /// his faction (character `+0x2A0`) gets the move notice in `events` at once, before the next
+    /// force moves (`0x009FB680` at `0x008DA091`, right after the move `0x0096C8D0`;
+    /// [`CampaignMessage::YourArmyRetreatsRegion`]).
+    ///
+    /// A rule that names a force twice, or one that does not exist, ends the expulsion there (logged).
     pub(crate) fn expel_from_region(&mut self, f: FactionId, region: RegionId, events: &mut Vec<CampaignEvent>) {
-        let mut writes = ModWrites::default();
         let rules = Arc::clone(&self.rules);
-        let plan = rules.seams.region_expulsion.rule()(self, f, region, &mut writes);
-        self.mod_state.apply(&mut writes);
-        for e in plan {
+        let mut done: Vec<ForceId> = Vec::new();
+        loop {
+            let mut writes = ModWrites::default();
+            let next = rules.seams.region_expulsion.rule()(self, f, region, &done, &mut writes);
+            self.mod_state.apply(&mut writes);
+            let Some(e) = next else { break };
+            if done.contains(&e.force) {
+                log::warn!("region expulsion from {region:?}: the rule names force {:?} a second time; the expulsion ends here", e.force);
+                break;
+            }
             let Some(force) = self.world.forces.get(&e.force) else {
-                log::warn!("region expulsion from {region:?}: the rule names force {:?}, which does not exist; skipped", e.force);
-                continue;
+                log::warn!("region expulsion from {region:?}: the rule names force {:?}, which does not exist; the expulsion ends here", e.force);
+                break;
             };
             let (navy, commander) = (force.is_navy, force.commander);
             if navy {
@@ -253,23 +394,19 @@ impl CampaignModel {
                     events.push(CampaignEvent::Message { recipient: ch.faction, message });
                 }
             }
+            done.push(e.force);
         }
     }
 
     /// The expulsion at a change of `region`'s owner (`TransferRegionToFaction` `0x00A64AC0` with its
     /// fourth argument 0; CONFIRMED): each faction of the world's list (campaign `+0xF5C`, which holds
     /// no rebels) other than the new owner, with a capital and still in the game, leaves the region
-    /// ([`Self::expel_from_region`]). The model's faction ids stand in for the list's order (the
-    /// placements do not depend on it: the model keeps no footprints).
+    /// ([`Self::expel_from_region`]), in the list's order ([`super::world::World::factions_in_turn_order`]):
+    /// it decides who is placed first when two factions' armies leave for the same spot.
     pub(crate) fn expel_after_owner_change(&mut self, region: RegionId, events: &mut Vec<CampaignEvent>) {
         let Some(owner) = self.world.regions.get(&region).map(|r| r.owner) else { return };
-        let factions: Vec<FactionId> = self
-            .world
-            .factions
-            .keys()
-            .copied()
-            .filter(|&f| f != owner && !self.is_rebel_faction(f) && self.world.capital(f).is_some() && self.in_the_game(f))
-            .collect();
+        let mut factions = self.world.factions_in_turn_order();
+        factions.retain(|&f| f != owner && !self.is_rebel_faction(f) && self.world.capital(f).is_some() && self.in_the_game(f));
         for f in factions {
             self.expel_from_region(f, region, events);
         }
@@ -294,8 +431,8 @@ impl CampaignModel {
     /// The list is walked in its order ([`super::world::World::regions_in_list_order`]; CONFIRMED: the
     /// manager's order after a load, each gain appended at the end, a loss removed in place; see
     /// [`super::world::World::region_order`]). The order matters when a force one step moves stands in
-    /// a region a later step expels from: with no footprints in the model, that takes a force that may
-    /// stay but cannot be placed where it stands and is sent to another of `owner`'s regions.
+    /// a region a later step expels from: a force that may stay there but finds its place taken (another
+    /// commander's core, an enemy zone) is sent on to another of `owner`'s regions.
     pub(crate) fn expel_from_each_region_of(&mut self, f: FactionId, owner: FactionId, events: &mut Vec<CampaignEvent>) {
         for r in self.world.faction_regions_in_list_order(owner) {
             self.expel_from_region(f, r, events);

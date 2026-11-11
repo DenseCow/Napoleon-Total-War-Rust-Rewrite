@@ -273,7 +273,7 @@ pub fn enter(world: &mut World) {
             None => {
                 // The `campaign_unit_multiplier` preference sets a new campaign's units per army / navy.
                 let prefs = ntw_script::ui::frontend::load_preferences(crate::config::user_dir().as_deref(), crate::config::original_user_dir().as_deref());
-                let multiplier = prefs.get_f64(ntw_sim::campaign::rules::CAMPAIGN_UNIT_MULTIPLIER_KEY).map(|v| v as f32);
+                let multiplier = prefs.get_f64(ntw_sim::limits::UNIT_SIZE_SETTING).map(|v| v as f32);
                 ntw_campaign::source::open(files, ntw_campaign::source::Start::New(&start.campaign, multiplier), db)
             }
         }
@@ -464,10 +464,23 @@ pub fn enter(world: &mut World) {
             warn!("Campaign script {name}: {e}");
         }
     }
+    // Turn 1 of a new campaign: its project events go to the game side once the sim exists
+    // (`CampaignSim::note_events`), which keeps the outcome movies and lost campaigns and logs the dropped items. Its walks
+    // are recorded too but never animated: no marker exists before the first `sync_markers`, which takes
+    // the recorded walks and spawns each marker where the model has its character. Each script error is
+    // logged here, once.
+    let mut opening_events = Vec::new();
     if start.save.is_none() {
         let started = host.start_campaign();
         let errors: usize = started.iter().map(|(_, r)| r.errors.len()).sum();
-        info!("Campaign: turn 1 started as {human} ({} script events, {errors} script errors)", started.len());
+        let scripted = started.iter().filter(|(e, _)| e.script_name().is_some()).count();
+        info!("Campaign: turn 1 started as {human} ({scripted} script events, {errors} script errors)");
+        for (event, r) in &started {
+            for e in &r.errors {
+                warn!("Campaign script {} (turn 1): {e}", event.script_name().unwrap_or("event"));
+            }
+        }
+        opening_events = started.into_iter().map(|(e, _)| e).collect();
     }
     let demo = std::env::args().any(|a| a == "--campaign-demo");
     let saver = CampaignSaver {
@@ -487,11 +500,13 @@ pub fn enter(world: &mut World) {
         selected: None,
         selected_region: None,
         selected_fort: None,
-        moves: Vec::new(),
+        moves: HashMap::new(),
         outcome_movies: Vec::new(),
+        campaign_lost: Vec::new(),
         last_message: String::new(),
         demo_target: None,
     };
+    sim.note_events(&opening_events);
     if demo {
         super::demo(&mut sim);
     }

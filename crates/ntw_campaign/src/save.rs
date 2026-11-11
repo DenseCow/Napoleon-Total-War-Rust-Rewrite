@@ -21,7 +21,7 @@
 //! | treaty money | `DIPLOMACY_RELATIONSHIP` #8 protectorate tribute, #9 patron income, #14 `REGULAR_PAYMENTS[]` (`write_treaty_money`) | CONFIRMED (writer `0x00AFC340`) |
 //! | script slots | `EPISODIC_RESTRICTIONS/LUA[]` ([`write_save_with`]) | CONFIRMED (CAMPAIGN_DATA.md §4) |
 //! | historical events triggered | `HISTORICAL_EVENT_MANAGER/TRIGGERED_DYNAMIC_EVENT_ARRAY[]` (`write_triggered_events`) | CONFIRMED (writer `0x00895050`) |
-//! | episodic switches, zoom limit | `EPISODIC_RESTRICTIONS` #8, #20, #22, #25, #29, #31, #32, the f32s #13 / #14 (`details::write_switches`) | CONFIRMED positions (writer `0x009A1070`) |
+//! | episodic switches, zoom limit | `EPISODIC_RESTRICTIONS` #8, #20, #21, #22, #25, #28, #29, #31, #32, the f32s #13 / #14 (`details::write_switches`) | CONFIRMED positions (writer `0x009A1070`) |
 //! | links | `CHARACTER` #4 (force commanded) / #5 (unit attached), `UNIT` #10, `ARMY` #5 and residence #12 (garrisons), new colonels / captains cloned from a template character | CONFIRMED links (SAVE_COMPAT.md §4); cloned names PROVISIONAL |
 //! | other id sites | recruitment pools, `CHARACTER` #6, `MILITARY_FORCE` #2, residence #14, `PORT_GARRISON_MANAGER` #0, `COMMERCE_RAIDS`: cleared of objects the model no longer has | sites CONFIRMED (`save_audit refsites`) |
 //! | AI block | `CAI_INTERFACE` kept while the world's objects are unchanged, else version 12 (the original rebuilds it) | CONFIRMED loader rule, SAVE_COMPAT.md §5 |
@@ -323,8 +323,8 @@ fn write_save_tree(source: &EsfFile, model: &CampaignModel, human: &str, timesta
     // The campaign director: its RNG, queued region transfers and region-transfer counter.
     crate::director::write(m, model);
     write_triggered_events(m, &model.world.historical_events_triggered);
-    // The episodic switches (`EPISODIC_RESTRICTIONS` #8, #20, #22, #25, #29, #31, #32) and the zoom
-    // limit (#13 / #14).
+    // The episodic switches (`EPISODIC_RESTRICTIONS` #8, #20, #21, #22, #25, #28, #29, #31, #32) and
+    // the zoom limit (#13 / #14).
     crate::details::write_switches(m, &model.world);
     if let Some(c) = child_mut(m, "CAMPAIGN_CALENDAR") {
         set(c, 0, EsfNode::U32(cal.turns_per_year));
@@ -363,8 +363,10 @@ fn write_save_tree(source: &EsfFile, model: &CampaignModel, human: &str, timesta
     }
     let ix = SourceIndex::build(world);
     let residences = ix.residences(model);
-    // Each settlement resident and his settlement, built once (`World::settlement_residence_index`).
+    // Each settlement resident and his settlement, built once (`World::settlement_residence_index`),
+    // and grouped once by settlement for the regions' lists.
     let residents = model.world.settlement_residence_index();
+    let residents_by_region = residents_by_region(&residents);
     write_factions(world, model, &ix, &residences, &residents)?;
     // Regiment and ship names of new units, and the name lists' in-use flags (SAVE_COMPAT.md §20).
     let new_units: BTreeSet<i32> = model.world.forces.values().flat_map(|f| f.units.iter()).map(|u| u.id.raw()).filter(|id| !ix.unit_items.contains_key(id)).collect();
@@ -372,7 +374,7 @@ fn write_save_tree(source: &EsfFile, model: &CampaignModel, human: &str, timesta
     // The model's names of new unit officers and its name decks (SAVE_COMPAT.md §21; new
     // characters' names go with their details).
     crate::charnames::write_model_names(world, model, &new_units);
-    write_regions(world, model, &residents)?;
+    write_regions(world, model, &residents_by_region)?;
     write_residences(world, &residences);
     drop_dangling_refs(m, model, &ix);
     // The trade routes' accumulated values (SAVE_COMPAT.md §12).
@@ -841,8 +843,9 @@ fn write_trait_items(t: &mut EsfRecord, traits: &[ntw_sim::campaign::details::Ch
     false
 }
 
-/// `CHARACTER_DETAILS` #0 `TRAITS/TRAIT[]` {key, points}, #11 `AgentAncillaries[]` {key} and #12
-/// `AgentAttributes[]` ([`write_attributes`]) from
+/// `CHARACTER_DETAILS` #0 `TRAITS/TRAIT[]` {key, points}, #11 `AgentAncillaries[]` {key}, #12
+/// `AgentAttributes[]` ([`write_attributes`]) and #14 `AgentAttributeBonuses[]`
+/// ([`write_attribute_bonuses`]) from
 /// the model, for every character (traits and ancillaries change in play; layouts CONFIRMED in
 /// every original save; SAVE_COMPAT.md §23).
 fn write_traits(d: &mut EsfRecord, details: &ntw_sim::campaign::details::CharacterDetails) {
@@ -861,6 +864,30 @@ fn write_traits(d: &mut EsfRecord, details: &ntw_sim::campaign::details::Charact
         && a.name == "AgentAttributes"
     {
         write_attributes(&mut a.items, &details.attributes);
+    }
+    if let Some(EsfNode::RecordArray(a)) = d.children.get_mut(14)
+        && a.name == "AgentAttributeBonuses"
+    {
+        write_attribute_bonuses(&mut a.items, &details.attribute_bonuses);
+    }
+}
+
+/// `CHARACTER_DETAILS` #14 `AgentAttributeBonuses[]` {key, u32} from the model: the exe's writer
+/// `0x009A0580` writes details +0x13C under each key of its situation list, which holds only `dummy`
+/// (CONFIRMED, CHARACTERS_FIDELITY.md §17). Nothing in play changes the value, so this only keeps the
+/// model's entries from depending on what the source record (or a new character's template) held: each
+/// entry's value is set in place, and one the record lacks is appended with the UTF-16 key the original
+/// writes.
+fn write_attribute_bonuses(items: &mut Vec<Vec<EsfNode>>, bonuses: &[(String, u32)]) {
+    for (key, value) in bonuses {
+        match items.iter_mut().find(|it| it.first().and_then(EsfNode::as_str) == Some(key.as_str())) {
+            Some(it) => {
+                if let Some(n @ EsfNode::U32(_)) = it.get_mut(1) {
+                    *n = EsfNode::U32(*value);
+                }
+            }
+            None => items.push(vec![EsfNode::Utf16String(key.clone()), EsfNode::U32(*value)]),
+        }
     }
 }
 
@@ -1534,16 +1561,24 @@ fn drop_duplicate_regions(world: &mut EsfRecord) -> Vec<i32> {
     dropped
 }
 
-fn write_regions(
-    world: &mut EsfRecord,
-    model: &CampaignModel,
+/// Each settlement's residents in id order: the one index (`World::settlement_residence_index`,
+/// character → settlement) grouped by settlement, once per save (`write_save_tree`).
+fn residents_by_region(
     residents: &BTreeMap<ntw_sim::campaign::CharacterId, ntw_sim::campaign::RegionId>,
-) -> Result<(), SaveError> {
-    // Each settlement's residents in id order, from the one index (`World::settlement_residence_index`).
-    let mut by_region: BTreeMap<ntw_sim::campaign::RegionId, Vec<ntw_sim::campaign::CharacterId>> = BTreeMap::new();
+) -> BTreeMap<ntw_sim::campaign::RegionId, Vec<ntw_sim::campaign::CharacterId>> {
+    let mut by_region: BTreeMap<_, Vec<_>> = BTreeMap::new();
     for (&c, &r) in residents {
         by_region.entry(r).or_default().push(c);
     }
+    by_region
+}
+
+/// `by_region`: [`residents_by_region`].
+fn write_regions(
+    world: &mut EsfRecord,
+    model: &CampaignModel,
+    by_region: &BTreeMap<ntw_sim::campaign::RegionId, Vec<ntw_sim::campaign::CharacterId>>,
+) -> Result<(), SaveError> {
     let gov_of = |f: ntw_sim::campaign::FactionId| model.world.factions.get(&f);
     // A BUILDING record to clone for new buildings.
     let mut template: Option<EsfRecord> = None;
@@ -2373,6 +2408,36 @@ mod tests {
         assert!(!write_trait_items(&mut bare, &held));
     }
 
+    /// `CHARACTER_DETAILS` #14 is written from the model (`0x009A0580` writes details +0x13C), not left as
+    /// the source record or a new character's template held it: an entry's value is set in place and one
+    /// the record lacks is added; a record without the array at #14 is left alone.
+    #[test]
+    fn attribute_bonuses_are_written_from_the_model() {
+        use ntw_sim::campaign::details::CharacterDetails;
+        let array = |name: &str, items: Vec<Vec<EsfNode>>| EsfNode::RecordArray(Box::new(EsfRecordArray { name: name.into(), version: 0, items }));
+        let details_rec = |bonuses: EsfNode| {
+            let mut children: Vec<EsfNode> = (0..14).map(|_| EsfNode::Bool(false)).collect();
+            children.push(bonuses);
+            let EsfNode::Record(d) = rec("CHARACTER_DETAILS", children) else { unreachable!() };
+            *d
+        };
+        let details = CharacterDetails { attribute_bonuses: vec![("dummy".into(), 5), ("mod_situation".into(), 2)], ..Default::default() };
+        // The template's entry holds 0 under a single-byte key: the value changes, the key node stays.
+        let mut d = details_rec(array("AgentAttributeBonuses", vec![vec![EsfNode::AsciiString("dummy".into()), EsfNode::U32(0)]]));
+        write_traits(&mut d, &details);
+        let written = &d.record_array("AgentAttributeBonuses").unwrap().items;
+        assert_eq!(
+            *written,
+            vec![vec![EsfNode::AsciiString("dummy".into()), EsfNode::U32(5)], vec![EsfNode::Utf16String("mod_situation".into()), EsfNode::U32(2)]]
+        );
+        assert_eq!(crate::details::read_attribute_bonuses(&d), details.attribute_bonuses);
+        // Another array at #14: not this layout, untouched.
+        let other = array("AgentAbilities", Vec::new());
+        let mut d = details_rec(other.clone());
+        write_traits(&mut d, &details);
+        assert_eq!(d.children[14], other);
+    }
+
     /// A region owned by faction 1, with nothing built or queued.
     fn test_region() -> Region {
         use ntw_sim::campaign::{FactionId, RegionId, Settlement};
@@ -2438,6 +2503,63 @@ mod tests {
             let items: Vec<_> = crate::world::read_construction(slot, SlotRef::Walls, region.fortification.as_ref()).unwrap().into_iter().collect();
             assert_eq!(items, region.construction, "wrapped: {wrapped}");
         }
+    }
+
+    /// The population classes are written by position (`write_region_population`): the model's classes are
+    /// the item records with a key, in order (`world::read_region`), so an item without a key between two
+    /// classes takes no class and stays as it was, each class's values land on its own record and not the
+    /// neighbour's, a keyed record past the model's classes is kept, and a record without the later fields
+    /// (an older `POPULATION_CLASS` version) gets only the ones it has.
+    #[test]
+    fn population_classes_are_written_by_position_onto_the_keyed_records() {
+        use ntw_sim::campaign::PopulationClassState;
+        // #0 the key (or a number: no class), #1 the 13 happiness slots, #2 the repression slots, #3..#7 i32,
+        // #8..#10 u32, #11 / #12 i32.
+        let item = |key: Option<&str>| {
+            let mut c = vec![key.map_or(EsfNode::U32(77), |k| EsfNode::Utf16String(k.into())), EsfNode::I32Array(vec![-1; 13]), EsfNode::I32Array(vec![-2; 8])];
+            c.extend((3..8).map(|_| EsfNode::I32(-3)));
+            c.extend((8..11).map(|_| EsfNode::U32(99)));
+            c.extend((11..13).map(|_| EsfNode::I32(-4)));
+            vec![rec("POPULATION_CLASS", c)]
+        };
+        let old_version = vec![rec("POPULATION_CLASS", vec![EsfNode::Utf16String("lower".into()), EsfNode::I32Array(vec![-1; 13])])];
+        let source = vec![item(Some("upper")), item(None), old_version, item(Some("middle")), item(Some("spare"))];
+        let mut classes = EsfRecordArray::new("POPULATION CLASSES", 0);
+        classes.items = source.clone();
+        let EsfNode::Record(mut region_rec) = rec("REGION", vec![rec("POPULATION", vec![rec("REGION_FACTORS", vec![EsfNode::RecordArray(Box::new(classes))])])]) else {
+            unreachable!()
+        };
+
+        // Three classes, each with its own value in every field (base + the field's number).
+        let class = |key: &str, base: i32| {
+            let mut s = PopulationClassState::new(key);
+            s.set_slots(std::array::from_fn(|i| base + i as i32));
+            s.crackdown = base + 20;
+            (s.positive, s.negative, s.repression, s.riot_chance, s.stage) = (base + 3, base + 4, base + 5, base + 6, base + 7);
+            (s.unrest, s.demand, s.cause) = (base as u32 + 8, base as u32 + 9, base as u32 + 10);
+            (s.education, s.resistance) = (base + 11, base + 12);
+            s
+        };
+        let region = Region { class_bases: vec![class("upper", 100), class("lower", 200), class("middle", 300)], ..test_region() };
+        write_region_population(&mut region_rec, &region);
+
+        let written = &region_rec.child("POPULATION").and_then(|p| p.child("REGION_FACTORS")).and_then(|f| f.record_array("POPULATION CLASSES")).unwrap().items;
+        assert_eq!(written.len(), source.len());
+        let expect = |key: &str, base: i32| {
+            let mut repression = vec![-2; 8];
+            repression[5] = base + 20;
+            let mut c = vec![EsfNode::Utf16String(key.into()), EsfNode::I32Array((0..13).map(|i| base + i).collect()), EsfNode::I32Array(repression)];
+            c.extend((3..8).map(|i| EsfNode::I32(base + i)));
+            c.extend((8..11).map(|i| EsfNode::U32(base as u32 + i)));
+            c.extend((11..13).map(|i| EsfNode::I32(base + i)));
+            vec![rec("POPULATION_CLASS", c)]
+        };
+        assert_eq!(written[0], expect("upper", 100));
+        assert_eq!(written[1], source[1], "an item without a key is no class: untouched");
+        // The second class goes to the second keyed record (the old-version one), which has only #1.
+        assert_eq!(written[2], vec![rec("POPULATION_CLASS", vec![EsfNode::Utf16String("lower".into()), EsfNode::I32Array((200..213).collect())])]);
+        assert_eq!(written[3], expect("middle", 300), "the third class, not shifted by the keyless item");
+        assert_eq!(written[4], source[4], "a keyed record past the model's classes is kept");
     }
 
     /// construction2: every item type keeps its kind over a save (`0x00AFBA90` writes #0 the type, then the
@@ -2810,7 +2932,7 @@ mod tests {
             ntw_sim::rng::CaRng::new(1),
             w,
         );
-        write_regions(&mut world, &model, &model.world.settlement_residence_index()).unwrap();
+        write_regions(&mut world, &model, &residents_by_region(&model.world.settlement_residence_index())).unwrap();
         let items = &mut array_mut(child_mut(&mut world, "REGION_MANAGER").unwrap(), "REGIONS_ARRAY").unwrap().items;
         let ids: Vec<Option<i32>> = items.iter().map(|it| first_rec(it).and_then(|r| r.get_i32(4))).collect();
         assert_eq!(ids, [Some(1), Some(2)], "the first record of each id, in file order");

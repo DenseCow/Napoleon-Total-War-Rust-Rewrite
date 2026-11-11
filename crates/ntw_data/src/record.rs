@@ -107,61 +107,18 @@ impl KeyPart for Option<String> {
     }
 }
 
-/// The tables the exe reads through its table loader 0x00DBDB90, one per caller (CONFIRMED,
-/// `analysis/mods/MOD_LOADING.md` §3.3). Their row readers (0x00DD2250, 0x00DD22A0, 0x00E85910) put
-/// column 0 at record+0 and column 1 at record+0xC, and the loader hashes the two joined with nothing
-/// between (0x004F1200 at 0x00DBE511), so a later file's row merges into an earlier one only when
-/// both columns match. This list is the one statement of that key: a `db_record!` of one of these
-/// tables that does not merge on exactly its first two columns (`key = <column 0> + <column 1>`) fails
-/// to compile.
-pub const COLUMN_0_1_KEYED_TABLES: [&str; 16] = [
-    "building_effects_junction",
-    "building_factionwide_effects_junctions",
-    "units_to_exclusive_faction_permissions",
-    "technology_effects_junction",
-    "trait_ability_effects",
-    "trait_attribute_effects",
-    "trait_attribute_situation_effects",
-    "trait_level_effects",
-    "agent_spawning_to_government_types",
-    "agent_spawning_to_building_chains",
-    "agent_spawning_to_policies",
-    "agent_to_agent_abilities",
-    "ancillary_to_ability_effects",
-    "ancillary_to_attribute_effects",
-    "ancillary_to_attribute_situation_effects",
-    "ancillary_to_effects",
-];
-
-/// `a == b` in a `const` context.
-const fn str_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut i = 0;
-    while i < a.len() {
-        if a[i] != b[i] {
-            return false;
-        }
-        i += 1;
-    }
-    true
-}
+/// The tables the exe's loader 0x00DBDB90 merges on columns 0 + 1: the one list, kept with the raw
+/// readers that check it too. A `db_record!` of one of these tables that does not merge on exactly
+/// its first two columns (`key = <column 0> + <column 1>`) fails to compile.
+pub use ntw_formats::db_folder::COLUMN_0_1_KEYED_TABLES;
+use ntw_formats::db_folder::{const_str_eq as str_eq, is_column_0_1_keyed};
 
 /// The compile-time check `db_record!` makes of every record: a table in [`COLUMN_0_1_KEYED_TABLES`]
 /// must merge on its first two columns (`fields` are the record's columns in file order, `merge` the
 /// columns its files merge on); any other table passes.
 #[doc(hidden)]
 pub const fn merges_like_the_loader(table: &str, fields: &[&str], merge: &[&str]) -> bool {
-    let mut i = 0;
-    while i < COLUMN_0_1_KEYED_TABLES.len() {
-        if str_eq(COLUMN_0_1_KEYED_TABLES[i], table) {
-            return fields.len() >= 2 && merge.len() == 2 && str_eq(merge[0], fields[0]) && str_eq(merge[1], fields[1]);
-        }
-        i += 1;
-    }
-    true
+    !is_column_0_1_keyed(table) || (fields.len() >= 2 && merge.len() == 2 && str_eq(merge[0], fields[0]) && str_eq(merge[1], fields[1]))
 }
 
 /// A struct that mirrors one DB table's rows. Implemented by `db_record!`.
@@ -578,6 +535,26 @@ mod tests {
         assert_eq!(a.clone().id(), a.id());
         assert_eq!(a, b);
         assert_eq!(a.get_row("k").map(|(i, r)| (i, r.count)), Some((0, 1)));
+    }
+
+    /// The check `db_record!` turns into a compile error: a table of the loader 0x00DBDB90 passes only
+    /// when its files merge on exactly its first two columns, in order; any other table passes.
+    #[test]
+    fn a_listed_table_must_merge_on_its_first_two_columns() {
+        let fields = ["building", "effect", "value"];
+        for table in COLUMN_0_1_KEYED_TABLES {
+            assert!(merges_like_the_loader(table, &fields, &["building", "effect"]), "{table}");
+            for wrong in [&["building"][..], &["effect", "building"], &["building", "value"], &["building", "effect", "value"], &[]] {
+                assert!(!merges_like_the_loader(table, &fields, wrong), "{table} merged on {wrong:?}");
+            }
+            // A one-column record has no column 1 to join.
+            assert!(!merges_like_the_loader(table, &["building"], &["building"]), "{table}");
+        }
+        // A name that only starts like a listed one is another table.
+        for table in ["units", "trait_level_effect", "trait_level_effects_extra", ""] {
+            assert!(merges_like_the_loader(table, &fields, &["building"]), "{table:?}");
+            assert!(merges_like_the_loader(table, &fields, &[]), "{table:?}");
+        }
     }
 }
 

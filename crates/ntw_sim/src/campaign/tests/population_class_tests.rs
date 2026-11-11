@@ -371,6 +371,94 @@ fn the_projection_runs_the_class_passes_on_its_copy() {
     assert_eq!(m.world.regions[&RegionId(10)].class_bases, projected, "the next round's classes");
 }
 
+/// classfactor: the projection's growth rule is handed the copy with the classes its passes gave, as the
+/// round end's rule finds them stored. A MADE-UP mod growth rule that adds the first class's war factor to
+/// the population sees the lower class's 3 (5 after its two passes), not the region's 5.
+#[test]
+fn the_projections_growth_rule_sees_the_copys_classes() {
+    use super::super::mod_state::ModWrites;
+    use super::super::population::{project, PopulationState};
+    use super::super::seams::{CampaignRuleRegistry, PopulationGrow, POPULATION_GROW};
+    const OWNER: &str = "test_mod.war_growth";
+    let mut m = ranked_model();
+    m.world.regions.get_mut(&RegionId(10)).unwrap().class_bases =
+        vec![PopulationClassState { war: 5, ..PopulationClassState::new("lower") }, PopulationClassState { war: -3, ..PopulationClassState::new("upper") }];
+    m.refresh_population_factors();
+    let original = project(&m, RegionId(10)).unwrap();
+    assert_eq!(original.classes[0].war, 3);
+    let mut reg = CampaignRuleRegistry::default();
+    let maker = |prev: Arc<PopulationGrow>| {
+        Arc::new(move |m: &CampaignModel, r: &Region, pop: u32, s: &PopulationState, w: &mut ModWrites| {
+            let (grown, state) = prev(m, r, pop, s, w);
+            (grown + r.class_bases[0].war as u32, state)
+        }) as Arc<PopulationGrow>
+    };
+    assert!(reg.population_grow.register(OWNER, Arc::new(maker)));
+    let mut warnings = Vec::new();
+    Arc::make_mut(&mut m.rules).seams = reg.seams(&[(POPULATION_GROW.to_owned(), OWNER.to_owned())], &mut warnings);
+    assert!(warnings.is_empty());
+    let modded = project(&m, RegionId(10)).unwrap();
+    assert_eq!(modded.population, original.population + 3);
+    // The round end gives the rule the same classes.
+    m.population_region_round_end(RegionId(10));
+    assert_eq!(m.world.regions[&RegionId(10)].population, modded.population);
+}
+
+/// classfactor: the policing cost counts the classes of the region's government (the region tests
+/// `0x008CE320` / `0x008CE260`, `region_government_classes`), the ones the factors are computed for
+/// (`0x008EDF70`). All three resolve the owner link (region +0xF4), so where another faction's governorship
+/// lists the region (region +0x248, read only by the effect set `0x00A67530`) the classes are still the
+/// owner's: B's `upper` is neither refreshed nor policed in A's region.
+#[test]
+fn the_policing_cost_counts_the_owners_classes_under_another_governor() {
+    use super::super::population::{policing_cost, FactorInputs};
+    let mut m = ranked_model();
+    m.turn.humans = vec![A];
+    {
+        let rules = Arc::make_mut(&mut m.rules);
+        rules.government_classes.insert("gov_a".into(), ("middle".into(), "lower".into()));
+        rules.variables.insert("policing_automated_cap".into(), 4.0);
+        rules.variables.insert("policing_automated_cost_per_pop".into(), 1.0);
+    }
+    m.world.regions.get_mut(&RegionId(10)).unwrap().class_bases =
+        vec![PopulationClassState { war: -10, ..PopulationClassState::new("lower") }, PopulationClassState { war: -10, ..PopulationClassState::new("upper") }];
+    let cost = |m: &CampaignModel| {
+        let reg = &m.world.regions[&RegionId(10)];
+        let set = economy::region_effect_set(m, reg);
+        policing_cost(m, reg, &FactorInputs::of(m, reg, &set), 10_000)
+    };
+    // What the region's classes read: (class, taken by the factor pass, its automated policing).
+    let policed = |m: &CampaignModel| -> Vec<(String, bool, i32)> {
+        economy::public_order_factors(m, RegionId(10)).into_iter().map(|c| (c.class, c.governed, c.repression[3])).collect()
+    };
+    let owners = [("lower".to_owned(), true, 4), ("upper".to_owned(), false, 0)];
+    // A owns and governs: of its (`middle`, `lower`) only `lower` is a class of the region, policed up to
+    // the cap of 4; 1 × 4 × √10 000.
+    assert_eq!(policed(&m), owners);
+    assert_eq!(cost(&m), 400);
+    // B's governorship lists the region. B's government is (`upper`, `lower`), but the owner is still A.
+    m.world.faction_details.entry(B).or_default().posts.push(super::details::GovernmentPost {
+        id: 1,
+        key: "governor_europe".into(),
+        holder: None,
+        governorship: Some(super::details::Governorship {
+            taxes: super::details::GovernorshipTaxes { lower: 2, upper: 2, lower_rate: 15, upper_rate: 15 },
+            theatre_id: 1,
+            regions: vec![RegionId(10)],
+            faction: B,
+            flags: (false, false),
+        }),
+    });
+    assert_eq!(m.world.governing_faction(RegionId(10)), Some(B), "the governorship took");
+    assert_eq!(economy::region_government_classes(&m, &m.world.regions[&RegionId(10)]), Some(("middle".into(), "lower".into())));
+    assert_eq!(policed(&m), owners, "the `upper` class takes no factors: it is not a class of A's government");
+    assert_eq!(cost(&m), 400);
+    // The class finds read the same government: the region has no `middle` class, so the upper find is
+    // empty (not B's `upper`), and the lower find names `lower`.
+    let (upper, lower) = economy::governed_class_factors(&m, RegionId(10));
+    assert_eq!((upper.map(|c| c.class), lower.map(|c| c.class)), (None, Some("lower".to_owned())));
+}
+
 /// The projection's riot checks draw from their own stream seeded 0x61266 (`0x00A727D0`), on the copy's
 /// refreshed sums, and leave the campaign's stream alone.
 #[test]

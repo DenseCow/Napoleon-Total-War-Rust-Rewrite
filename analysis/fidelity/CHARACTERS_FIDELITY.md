@@ -1600,12 +1600,17 @@ CONFIRMED by static trace in Ghidra and by the tests named below.
   levels take no situation input, and `details.rs` only carries #14 through the save; both doc
   comments say so. A character made in play starts with `[("dummy", 0)]`
   (`details::starting_attribute_bonuses` over `ATTRIBUTE_SITUATION_KEYS`, called by
-  `CharacterRules::new_character_details`), as the maker clears +0x13C; the writer's clone of a
-  template character keeps it in the save. Tests: `the_situation_slot_gives_no_rank` (rank_tests.rs),
-  a `dummy` value and a situation key in the slot leave the rank unchanged;
+  `CharacterRules::new_character_details`), as the maker clears +0x13C; the save writes #14 from the
+  model (`save::write_attribute_bonuses`, as `0x009A0580` writes +0x13C; polish69 2026-11-10), not the
+  source record's or the cloned template's value. Tests: `the_situation_slot_gives_no_rank`
+  (rank_tests.rs), a `dummy` value and a situation key in the slot leave the rank unchanged;
   `a_new_character_starts_at_minus_one_then_his_types_rows` (the new slot);
-  `a_new_characters_attribute_bonuses_survive_the_save` (characters.rs, a new British minister
-  through `write_save` and back). The rank's real situation bonuses
+  `attribute_bonuses_are_written_from_the_model` (save.rs);
+  `a_new_characters_attribute_bonuses_survive_the_save` (characters.rs, a new British minister and a
+  start-position character with other values through `write_save` and back);
+  `the_originals_saves_carry_one_dummy_zero` (the evidence saves the original wrote, `orig_fr_t1`,
+  `orig_fr_may1811`, `orig_gb_apr1811`, `auto_orig_spa_0245`: every character holds
+  `[("dummy", 0)]`). The rank's real situation bonuses
   are GetCharacterRank's own effect bonuses (§16); the pending-battle ones stay under the separate
   BACKLOG line "Pending battles (cmdstars review)".
 - **Not an ORIGINAL BUG.** The one-entry `dummy` list shows the exe means to have no situations, and

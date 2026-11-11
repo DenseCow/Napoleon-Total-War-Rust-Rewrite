@@ -889,7 +889,7 @@ impl GroundSpeed {
     /// ([`on_ground`]).
     fn observe(&mut self, pos: Vec2, tick: u32, moved: bool, on_ground: bool) {
         let Some(ticks) = tick.checked_sub(self.tick) else {
-            // The tick went back. A restart (R) rebuilds the views (`spawn_missing_views`), so
+            // The tick went back. A restart (the test key F8) rebuilds the views (`spawn_missing_views`), so
             // this is not expected; start over, standing.
             *self = GroundSpeed::new(pos, tick, on_ground);
             return;
@@ -1143,8 +1143,11 @@ pub fn spawn_camera(
         }
     }
     commands.spawn((Camera3d::default(), Transform::default(), cam));
+    // Test harness: `NAPOLEON_FPS_SHADOWS=0` draws no sun shadows, so two `NAPOLEON_FPS_LOG` runs
+    // give the shadow passes' cost (Bevy 0.19 records no time for them).
+    let shadow_maps_enabled = !matches!(std::env::var("NAPOLEON_FPS_SHADOWS").as_deref(), Ok("0"));
     commands.spawn((
-        DirectionalLight { illuminance: 10_000.0, shadow_maps_enabled: true, ..default() },
+        DirectionalLight { illuminance: 10_000.0, shadow_maps_enabled, ..default() },
         Transform::from_xyz(-60.0, 120.0, 80.0).looking_at(Vec3::ZERO, Vec3::Y),
         // PROVISIONAL: 2 shadow cascades out to 150 m (Bevy's default is 4); every cascade
         // re-draws every skinned figure, so this halves the cost of soldier shadows.
@@ -1183,8 +1186,128 @@ pub fn camera_harness_run() -> bool {
     })
 }
 
-/// Arrow keys pan, mouse wheel zooms, Q / E turn the camera (not in harness runs, see
-/// [`camera_harness_run`]).
+/// A battle camera func of `text/default_keys.xml` (component `camera`) that our camera acts on:
+/// the steps and turns of the camera's shortcut handler (`0x005EAF00`, CONFIRMED func names and
+/// the input action each one posts to the battle scripts: codes 0..10 of the name table
+/// `0x014518E0`). Each is a repeating binding: pressed every frame its key is held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraFunc {
+    StepFwd,
+    /// The forward step doubled (CONFIRMED `0x005EAF00`).
+    StepFwdFast,
+    StepBck,
+    StepL,
+    StepR,
+    RotL,
+    RotR,
+    CamUp,
+    CamDown,
+    RotU,
+    RotD,
+}
+
+impl CameraFunc {
+    /// The func of a binding's name; `None` for the camera funcs our camera has nothing for yet
+    /// ([`CameraKeys::press`] logs those).
+    pub fn from_binding(func: &str) -> Option<Self> {
+        Some(match func {
+            "step_fwd" => Self::StepFwd,
+            "step_fwd_fast" => Self::StepFwdFast,
+            "step_bck" => Self::StepBck,
+            "step_l" => Self::StepL,
+            "step_r" => Self::StepR,
+            "rot_l" => Self::RotL,
+            "rot_r" => Self::RotR,
+            "cam_up" => Self::CamUp,
+            "cam_down" => Self::CamDown,
+            "rot_u" => Self::RotU,
+            "rot_d" => Self::RotD,
+            _ => return None,
+        })
+    }
+
+    /// The input action a battle script's input handler hears for this func
+    /// (`ntw_script::battle_script::INPUT_EVENT_NAMES`; CONFIRMED: the camera handler broadcasts
+    /// the code after each step, `0x004B0CF0`, so a held key posts it every frame, and the Battle
+    /// Script Interface's listener `0x00657230` names codes 0..10 from table `0x014518E0` as here).
+    pub fn input_name(self) -> &'static str {
+        match self {
+            Self::StepFwd => "move forward",
+            Self::StepFwdFast => "move forward fast",
+            Self::StepBck => "move backward",
+            Self::StepL => "move left",
+            Self::StepR => "move right",
+            Self::RotR => "rotate right",
+            Self::RotL => "rotate left",
+            Self::CamUp => "move up",
+            Self::CamDown => "move down",
+            Self::RotU => "rotate up",
+            Self::RotD => "rotate down",
+        }
+    }
+}
+
+/// The frame's camera key presses, from the battle HUD's shortcut poll (`hud::keys`, the battle
+/// bindings of `text/default_keys.xml`) to [`move_camera`], which empties it: each (func, the
+/// frame's time in seconds). The buffer is kept between frames.
+#[derive(Resource, Default)]
+pub struct CameraKeys {
+    presses: Vec<(CameraFunc, f32)>,
+    /// The camera funcs without a counterpart here, each logged once.
+    not_done: Vec<String>,
+}
+
+impl CameraKeys {
+    /// One press of the camera binding `func` this frame. The original's other camera funcs
+    /// (`accel`, `decel`, `increase_camera_rot`, `decrease_camera_rot`, `toggle_move_fast`,
+    /// `toggle_tracking`, `intelli_zoom`, `context_camera`, `camera_bookmark_save0..3`,
+    /// `camera_bookmark_view0..3`; traced in BATTLE_FIDELITY.md §59.2) are not done yet: logged
+    /// once each.
+    pub fn press(&mut self, func: &str, time: f32) {
+        if let Some(f) = CameraFunc::from_binding(func) {
+            self.presses.push((f, time));
+        } else if !self.not_done.iter().any(|n| n == func) {
+            info!("Battle camera: shortcut {func} is not done yet (logged once)");
+            self.not_done.push(func.to_owned());
+        }
+    }
+}
+
+/// Applies one camera key press to the orbit camera. PROVISIONAL speeds and motion: the original's
+/// camera is a free camera whose step is (2 when exactly one of its move-fast byte and byte `+0x21`
+/// is set, else 1, `0x005B7AE0`) × its move scale and whose turn is
+/// its rotation scale × 0.5, handed to the camera object's own step functions (`0x005EAF00`; those
+/// functions and the scales' start values are not traced). Ours pans the focus by 0.8 × the
+/// distance per second, turns 1 rad/s, tilts 0.5 rad/s and changes the distance by its own length
+/// per second.
+fn camera_key_step(cam: &mut BattleCamera, func: CameraFunc, time: f32) {
+    let fwd = Vec3::new(-cam.yaw.sin(), 0.0, -cam.yaw.cos());
+    let right = Vec3::new(cam.yaw.cos(), 0.0, -cam.yaw.sin());
+    let step = cam.distance * 0.8 * time;
+    match func {
+        CameraFunc::StepFwd => cam.focus += fwd * step,
+        CameraFunc::StepFwdFast => cam.focus += fwd * (step + step),
+        CameraFunc::StepBck => cam.focus -= fwd * step,
+        CameraFunc::StepR => cam.focus += right * step,
+        CameraFunc::StepL => cam.focus -= right * step,
+        CameraFunc::RotL => cam.yaw += time,
+        CameraFunc::RotR => cam.yaw -= time,
+        // Up / down: farther from / closer to the focus along the view.
+        CameraFunc::CamUp => cam.distance = (cam.distance * (1.0 + time)).min(MAX_CAMERA_DISTANCE),
+        CameraFunc::CamDown => cam.distance = (cam.distance * (1.0 - time)).max(MIN_CAMERA_DISTANCE),
+        // Turn up / down: the view tilts towards the horizon / the ground.
+        CameraFunc::RotU => cam.pitch = (cam.pitch - 0.5 * time).max(MIN_CAMERA_PITCH),
+        CameraFunc::RotD => cam.pitch = (cam.pitch + 0.5 * time).min(MAX_CAMERA_PITCH),
+    }
+}
+
+/// The orbit camera's limits (PROVISIONAL, ours): its distance from the focus in metres and its
+/// angle above the ground in radians.
+const MIN_CAMERA_DISTANCE: f32 = 4.0;
+const MAX_CAMERA_DISTANCE: f32 = 1_500.0;
+const MIN_CAMERA_PITCH: f32 = 0.15;
+const MAX_CAMERA_PITCH: f32 = 1.2;
+
 /// A camera position requested by a battle script (`camera:move_to`): (camera position, look-at
 /// target) in engine coordinates (x, height, map y). Applied at once (PROVISIONAL: the script's
 /// move time is not used).
@@ -1203,69 +1326,30 @@ pub fn apply_script_camera(mut pending: ResMut<ScriptCamera>, mut cams: Query<&m
     }
 }
 
+/// Moves the battle camera: the frame's camera key presses ([`CameraKeys`]: the keys the keys file
+/// binds, in vanilla W/S/A/D or the number pad to step, Q/E to turn, X/Z up and down, V/C to
+/// tilt), each also told to the battle scripts as its input action, and the mouse wheel's zoom
+/// (PROVISIONAL, ours). Harness runs get no key presses and ignore the wheel
+/// ([`camera_harness_run`]).
 pub fn move_camera(
-    keys: Res<ButtonInput<KeyCode>>,
+    mut keys: ResMut<CameraKeys>,
     scroll: Res<AccumulatedMouseScroll>,
-    time: Res<Time<Real>>,
     mut cams: Query<(&mut BattleCamera, &mut Transform)>,
     sim: Option<ResMut<BattleSim>>,
 ) {
     let fixed = camera_harness_run();
-    // The camera actions a battle script's input handler hears (the original's action names; keys:
-    // arrows or W/A/S/D move, Q/E rotate, X/Z up/down, INFERRED from the tutorial's texts).
     if let Some(mut sim) = sim
-        && !fixed
+        && !keys.presses.is_empty()
     {
-        for (k, alt, name) in [
-            (KeyCode::ArrowUp, KeyCode::KeyW, "move forward"),
-            (KeyCode::ArrowDown, KeyCode::KeyS, "move backward"),
-            (KeyCode::ArrowLeft, KeyCode::KeyA, "move left"),
-            (KeyCode::ArrowRight, KeyCode::KeyD, "move right"),
-            (KeyCode::KeyQ, KeyCode::KeyQ, "rotate left"),
-            (KeyCode::KeyE, KeyCode::KeyE, "rotate right"),
-            (KeyCode::KeyX, KeyCode::KeyX, "move up"),
-            (KeyCode::KeyZ, KeyCode::KeyZ, "move down"),
-        ] {
-            if keys.just_pressed(k) || keys.just_pressed(alt) {
-                sim.script_events.push(super::ScriptEvent::Input(name));
-            }
-        }
+        sim.script_events.extend(keys.presses.iter().map(|(f, _)| super::ScriptEvent::Input(f.input_name())));
     }
-    let dt = if fixed { 0.0 } else { time.delta_secs() };
     for (mut cam, mut tf) in &mut cams {
-        let fwd = Vec3::new(-cam.yaw.sin(), 0.0, -cam.yaw.cos());
-        let right = Vec3::new(cam.yaw.cos(), 0.0, -cam.yaw.sin());
-        let speed = cam.distance * 0.8 * dt;
-        let mut pan = Vec3::ZERO;
-        if keys.any_pressed([KeyCode::ArrowUp, KeyCode::KeyW]) {
-            pan += fwd;
-        }
-        if keys.any_pressed([KeyCode::ArrowDown, KeyCode::KeyS]) {
-            pan -= fwd;
-        }
-        if keys.any_pressed([KeyCode::ArrowRight, KeyCode::KeyD]) {
-            pan += right;
-        }
-        if keys.any_pressed([KeyCode::ArrowLeft, KeyCode::KeyA]) {
-            pan -= right;
-        }
-        cam.focus += pan * speed;
-        if keys.pressed(KeyCode::KeyQ) {
-            cam.yaw += dt;
-        }
-        if keys.pressed(KeyCode::KeyE) {
-            cam.yaw -= dt;
-        }
-        // X / Z: camera up / down (closer / farther along the view).
-        if keys.pressed(KeyCode::KeyX) {
-            cam.distance = (cam.distance * (1.0 + dt)).min(1_500.0);
-        }
-        if keys.pressed(KeyCode::KeyZ) {
-            cam.distance = (cam.distance * (1.0 - dt)).max(4.0);
+        for &(func, time) in &keys.presses {
+            camera_key_step(&mut cam, func, time);
         }
         if scroll.delta.y != 0.0 && !fixed {
-            cam.distance = (cam.distance * (1.0 - scroll.delta.y * 0.1)).clamp(4.0, 1_500.0);
-            cam.pitch = (0.15 + cam.distance / 600.0).clamp(0.15, 1.2);
+            cam.distance = (cam.distance * (1.0 - scroll.delta.y * 0.1)).clamp(MIN_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE);
+            cam.pitch = (0.15 + cam.distance / 600.0).clamp(MIN_CAMERA_PITCH, MAX_CAMERA_PITCH);
         }
         // Follow the terrain: the focus sits on the ground, or on the sea where the ground is the
         // sea bed; the camera never goes below either.
@@ -1276,17 +1360,18 @@ pub fn move_camera(
         tf.translation.y = tf.translation.y.max(floor);
         tf.look_at(cam.focus, Vec3::Y);
     }
+    keys.presses.clear();
 }
 
 /// Whether the views on screen show this battle: built for this very [`BattleSim`] (`built` is
-/// the `build` they were made for) and one per unit. A restart (R) builds a new `BattleSim`,
+/// the `build` they were made for) and one per unit. A restart (the test key, `input::keyboard`) builds a new `BattleSim`,
 /// usually with the same unit ids, so the ids alone do not tell; nor does the tick going back
 /// (a restart at tick ≤ 1 can reach the old tick by the next frame).
 fn views_current(built: Option<u32>, build: u32, view_ids: impl Iterator<Item = u32> + Clone, mut unit_ids: impl Iterator<Item = u32> + Clone) -> bool {
     built == Some(build) && view_ids.clone().count() == unit_ids.clone().count() && unit_ids.all(|u| view_ids.clone().any(|v| v == u))
 }
 
-/// Creates the views and labels of a battle: on its first frame, on every restart (R), which
+/// Creates the views and labels of a battle: on its first frame, on every restart (the test key), which
 /// replaces the battle, and when its units change; the old pictures are thrown away first.
 ///
 /// Figures are GPU-skinned (`skin`): all kits are built first, then their clips go into one
@@ -2592,7 +2677,7 @@ mod tests {
         assert!((g.speed - WALK).abs() < 1e-3, "speed {}", g.speed);
     }
 
-    /// A restart (R) builds a new battle with the same unit ids. It was told only by the tick
+    /// A restart (the test key F8) builds a new battle with the same unit ids. It was told only by the tick
     /// going back, which a restart at tick ≤ 1 that reached the old tick by the next frame did not
     /// show, so the old views (their speeds, men and corpses) stayed. The views now carry the
     /// battle they were built for.

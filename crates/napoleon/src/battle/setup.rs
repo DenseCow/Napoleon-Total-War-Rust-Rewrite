@@ -23,14 +23,15 @@ use std::sync::Arc;
 
 use bevy::prelude::*;
 use ntw_data::GameDatabase;
-use ntw_formats::battle_spec::{BattleSpec, SpecUnit};
+use ntw_formats::battle_spec::{BattleSpec, SpecAbility, SpecUnit};
 use ntw_formats::battle_terrain::{BattleMap, DeploymentArea, DeploymentSetup};
 use ntw_formats::group_formation::{self, GroupUnit, PURPOSE_DEPLOYMENT, Role, Template};
 use ntw_formats::db::DbValue;
 use ntw_formats::db_folder::{self, TableError, tables};
 use ntw_formats::pack::Vfs;
 use ntw_formats::unit_model::BattleTables;
-use ntw_sim::battle::attributes::shot_type_value;
+use ntw_sim::battle::attributes::{ability_value, shot_type_value};
+use ntw_sim::battle::special_abilities::AbilityRecord;
 use ntw_sim::battle::ground::{BattleGround, GridSpec, GroundTypeGrid, HeightGrid, speed_table};
 use ntw_sim::battle::model::{Battle, LandUnit, Reinforcement};
 use ntw_sim::battle::strength;
@@ -84,7 +85,7 @@ const FALLBACK_RANKS: (u32, u32) = (4, 2);
 pub const FIRST_SEED: u32 = 1805;
 
 /// What the setup reads from the install besides `GameData`: entity speeds, the map's ground
-/// and deployment areas. Built once; R (restart) reuses it.
+/// and deployment areas. Built once; a restart (the test key F8) reuses it.
 #[derive(Resource, Default)]
 pub struct SetupData {
     /// `battle_personalities` + `battle_entities`.
@@ -105,12 +106,17 @@ pub struct SetupData {
     pub weather: Option<String>,
     /// A custom battle's armies ([`BattleStart::custom`]); empty otherwise.
     pub custom: Vec<ntw_script::ui::CustomArmy>,
+    /// The player's unit-size setting ([`ntw_sim::limits::UNIT_SIZE_SETTING`], a scale) as the
+    /// preferences gave it when the battle started; R (restart) keeps it. `None`: a game that
+    /// registers no such setting, or a test building a battle without preferences. The rule that
+    /// turns it into men is the model's (`Battle::set_unit_scale_setting`).
+    pub unit_size: Option<f32>,
 }
 
 impl SetupData {
     /// Reads everything from the install, the loaded battle map (`crate::terrain`) and the
-    /// chosen battle's specification file.
-    pub fn load(vfs: Option<&Vfs>, map: Option<&BattleMap>, start: Option<&BattleStart>) -> Self {
+    /// chosen battle's specification file. `unit_size` is [`SetupData::unit_size`].
+    pub fn load(vfs: Option<&Vfs>, map: Option<&BattleMap>, start: Option<&BattleStart>, unit_size: Option<f32>) -> Self {
         let entities = vfs.and_then(|v| BattleTables::from_vfs(v).map_err(|e| warn!("battle_entities: {e}")).ok());
         let modifiers = vfs.map(movement_modifiers).unwrap_or_default();
         let ground = Arc::new(map.map_or_else(BattleGround::default, |m| ground_of(m, &modifiers)));
@@ -137,7 +143,7 @@ impl SetupData {
         let buildings = map.map(|m| battle_buildings(vfs, m, radius)).unwrap_or_default();
         let weather = map.and_then(|m| m.weather.as_ref()).map(|w| w.max_weather_type_key.clone()).filter(|k| !k.is_empty());
         let custom = start.map(|s| s.custom.clone()).unwrap_or_default();
-        Self { entities, ground, deployment, battle, group_formations, technologies, buildings, weather, custom }
+        Self { entities, ground, deployment, battle, group_formations, technologies, buildings, weather, custom, unit_size }
     }
 }
 
@@ -292,11 +298,20 @@ pub fn ground_of(map: &BattleMap, modifiers: &[(String, [f32; 4])]) -> BattleGro
     BattleGround { types, heights, speed_modifiers: speed_table(modifiers.iter().map(|(n, v)| (n.as_str(), *v))) }
 }
 
+/// The player's unit-size setting from the preferences (the file's value, else the default the
+/// game registers it with): read once per battle start, every kind of battle (`--battle`, a
+/// historical battle, a custom battle) the same way.
+fn unit_size_setting() -> Option<f32> {
+    let user = crate::config::user_dir();
+    let prefs = ntw_script::ui::frontend::load_preferences(user.as_deref(), crate::config::original_user_dir().as_deref());
+    prefs.get_f64(ntw_sim::limits::UNIT_SIZE_SETTING).map(|v| v as f32)
+}
+
 /// Startup system: reads the setup data and creates the `BattleSim` resource.
 pub fn start_battle(mut commands: Commands, data: Res<GameData>, start: Option<Res<BattleStart>>) {
     let vfs = Vfs::open_install(crate::config::game_data_dir()).ok();
     let map = crate::terrain::current_map();
-    let setup = SetupData::load(vfs.as_ref(), map.as_deref(), start.as_deref());
+    let setup = SetupData::load(vfs.as_ref(), map.as_deref(), start.as_deref(), unit_size_setting());
     commands.insert_resource(build_battle(&data.db, &setup, FIRST_SEED));
     commands.insert_resource(setup);
 }
@@ -318,6 +333,10 @@ pub fn build_battle(db: &GameDatabase, setup: &SetupData, seed: u32) -> BattleSi
     battle.experience_fatigue = db.experience_fatigue_bonuses();
     // The moddable reinforcement cap (the original's 20, ntw_sim::limits).
     battle.max_reinforcement_units = db.limits.max_reinforcement_units as usize;
+    // The unit size: the player's setting becomes the battle's scale before any unit is built
+    // (the whole rule is the model's; evidence and tags in ntw_sim `battle/unit_scale.rs`).
+    let scale = battle.set_unit_scale_setting(setup.unit_size, &db.limits);
+    info!("Battle unit size: setting {:?} -> scale {scale}", setup.unit_size);
     battle.ground = Arc::clone(&setup.ground);
     apply_weather(&mut battle, db, setup.weather.as_deref());
     let mut sim = BattleSim::new(battle, seed);
@@ -392,7 +411,7 @@ fn historical_armies(db: &GameDatabase, setup: &SetupData, key: &str, spec: &Bat
                     warn!("{key}: unit type {} is not in the database; skipped", su.unit_type);
                     continue;
                 };
-                let (mut unit, mut info) = make_unit(db, setup, &unit_key, next_id, side);
+                let (mut unit, mut info) = make_unit(db, setup, &unit_key, next_id, side, None);
                 apply_spec_unit(db, &unit_key, su, &mut unit, &mut info);
                 unit.army_index = army_number(ri);
                 info.faction = army.faction.clone();
@@ -433,7 +452,7 @@ fn historical_armies(db: &GameDatabase, setup: &SetupData, key: &str, spec: &Bat
                     warn!("{key}: reinforcement unit type {} is not in the database; skipped", su.unit_type);
                     continue;
                 };
-                let (mut unit, mut info) = make_unit(db, setup, &unit_key, next_id, side);
+                let (mut unit, mut info) = make_unit(db, setup, &unit_key, next_id, side, None);
                 apply_spec_unit(db, &unit_key, su, &mut unit, &mut info);
                 unit.army_index = army_index;
                 unit.active = false;
@@ -493,11 +512,30 @@ fn apply_spec_unit(db: &GameDatabase, key: &str, su: &SpecUnit, unit: &mut LandU
     unit.general_rank = su.general.as_ref().map(|g| g.star_rating.unwrap_or(0) as i32);
     // The card's capability block (special abilities and shot types; CONFIRMED enums).
     unit.capabilities = ntw_sim::battle::attributes::UnitCapabilities::from_names(
-        su.special_abilities.iter().map(String::as_str),
+        su.special_abilities.iter().map(|a| a.name.as_str()),
         su.shot_types.iter().map(String::as_str),
     );
+    unit.set_ability_records(su.special_abilities.iter().filter_map(|a| Some((ability_value(&a.name)?, file_ability_record(db, a)))));
     info.category = su.category.clone();
     info.script_name = su.script_name.clone();
+}
+
+/// The record of one ability a battle file lists (the parser `0x0050CAE0`, CONFIRMED): the
+/// element's own `active_time` / `recharge_time` / `num_uses` if it gives any of them (one it
+/// leaves out keeps the default record's value), else the ability's `unit_special_abilities` row,
+/// else the default record (the exe notes the missing key in its log and carries on: most
+/// abilities have no row).
+fn file_ability_record(db: &GameDatabase, a: &SpecAbility) -> AbilityRecord {
+    const DEFAULT: AbilityRecord = AbilityRecord::UNTIMED;
+    if a.has_own_record() {
+        AbilityRecord {
+            active_time: a.active_time.unwrap_or(DEFAULT.active_time),
+            recharge_time: a.recharge_time.unwrap_or(DEFAULT.recharge_time),
+            num_uses: a.num_uses.unwrap_or(DEFAULT.num_uses),
+        }
+    } else {
+        db.special_ability_record(&a.name).unwrap_or(DEFAULT)
+    }
 }
 
 /// The fixed France vs Austria test armies (the `--battle` slice without a battle key).
@@ -521,7 +559,7 @@ fn test_armies(db: &GameDatabase, setup: &SetupData, sim: &mut BattleSim) {
                 warn!("No unit available for slot {}", slot.key);
                 continue;
             };
-            let (mut unit, mut unit_info) = make_unit(db, setup, &key, next_id, side as u8);
+            let (mut unit, mut unit_info) = make_unit(db, setup, &key, next_id, side as u8, Some(&sim.battle));
             unit.position = (slot.x + copy as f32 * 300.0, y);
             unit.general_rank = slot.general;
             if slot.general.is_some() {
@@ -564,9 +602,10 @@ fn test_armies(db: &GameDatabase, setup: &SetupData, sim: &mut BattleSim) {
 /// The armies of a custom battle (the front end's StartBattle): every alliance is a side, every
 /// army of it is deployed in its deployment area of the map's 1v1 setup like the test armies
 /// (default deployment templates, else side by side). Experience comes from the army page;
-/// the general's unit carries the army's general. PROVISIONAL: the men are the units' full
-/// numbers (the unit size option is not applied yet), and a 2v2 army uses its alliance's
-/// area of the same index (or the first one).
+/// the general's unit carries the army's general. The men are the unit cards' thinned by the
+/// battle's unit size (`Battle::men_at_scale`; what is traced of it and what is not: ntw_sim
+/// `battle/unit_scale.rs`). PROVISIONAL: a 2v2 army uses its alliance's area of the same index
+/// (or the first one).
 fn custom_armies(db: &GameDatabase, setup: &SetupData, sim: &mut BattleSim) {
     let mut next_id = 1;
     let mut army_counts = [0usize; 2];
@@ -588,7 +627,7 @@ fn custom_armies(db: &GameDatabase, setup: &SetupData, sim: &mut BattleSim) {
                 warn!("Custom battle: unit {key} is not a land unit in the database; skipped");
                 continue;
             };
-            let (mut unit, mut info) = make_unit(db, setup, &unit_key, next_id, side as u8);
+            let (mut unit, mut info) = make_unit(db, setup, &unit_key, next_id, side as u8, Some(&sim.battle));
             info.experience = *xp;
             // Byte `unit+0xD48` (CONFIRMED experience level for the waver/rout timers).
             unit.experience = (*xp).min(255) as u8;
@@ -932,7 +971,10 @@ fn warn_missing_training_row(unit: &str, level: &str) {
 }
 
 /// Builds one model unit (position not set) and its display info from its database rows.
-fn make_unit(db: &GameDatabase, setup: &SetupData, key: &str, id: u32, side: u8) -> (LandUnit, UnitInfo) {
+/// `sized_by` is the battle whose unit size thins the card's men (`Battle::men_at_scale`): every
+/// unit built from a unit card. `None` keeps the card's full count: a battle file's unit, whose
+/// own `num_soldiers` the exe uses unscaled (`apply_spec_unit`).
+fn make_unit(db: &GameDatabase, setup: &SetupData, key: &str, id: u32, side: u8, sized_by: Option<&Battle>) -> (LandUnit, UnitInfo) {
     let entities = setup.entities.as_ref();
     // The side's researched technologies (campaign battles), read-only from the campaign model.
     let researched = setup.technologies.get(side as usize).and_then(|t| t.as_deref());
@@ -941,7 +983,8 @@ fn make_unit(db: &GameDatabase, setup: &SetupData, key: &str, id: u32, side: u8)
     let mounted = stats.num_mounts > 0 && stats.mount_entity.is_some();
     let is_cavalry = ntw_sim::unit_kind::category(&record.category) == ntw_sim::unit_kind::Category::Cavalry || mounted;
 
-    let mut u = LandUnit::new(id, side, stats.num_men.max(0) as u32, (0.0, 0.0));
+    let men = sized_by.map_or(stats.num_men.max(0) as u32, |b| b.men_at_scale(stats.num_men));
+    let mut u = LandUnit::new(id, side, men, (0.0, 0.0));
     // Real stats (unit_stats_land; column numbers per analysis/worker1/DB_BUILDERS.md):
     u.melee_attack = stats.melee_attack; // col 34
     u.charge_bonus = stats.charge_bonus; // col 35
@@ -962,6 +1005,9 @@ fn make_unit(db: &GameDatabase, setup: &SetupData, key: &str, id: u32, side: u8)
     u.attributes = GameDatabase::unit_attributes(stats);
     // The card's capability block from the DB (battle files replace it with their own list).
     u.capabilities = db.unit_capabilities_with(key, &record.unit_class, researched);
+    // Each listed ability's record: its `unit_special_abilities` row where it has one (`0x005363C0`
+    // over the card's records, called by the campaign card builder `0x008AF200`, CONFIRMED).
+    u.set_ability_records(db.special_ability_records());
     u.is_cavalry = is_cavalry;
     u.unit_class = record.unit_class.clone();
     u.unit_category = record.category.clone();
@@ -1009,7 +1055,7 @@ fn make_unit(db: &GameDatabase, setup: &SetupData, key: &str, id: u32, side: u8)
     } else {
         FALLBACK_RANKS.0
     };
-    let files = (stats.num_men.max(1) as f32 / ranks as f32).ceil();
+    let files = (men.max(1) as f32 / ranks as f32).ceil();
     u.formation_files = files as u32;
     // The laid grid ([`LandUnit::formation`]) the men stand in, so the squad box measured from them
     // (skirmish strips, defence pieces, the drawn block): files by the file spacing, ranks by the rank spacing.
@@ -1052,6 +1098,32 @@ mod tests {
         assert_eq!(training_of(&levels, "elite"), (5, Some(0.13)));
         assert_eq!(training_of(&levels, "mob"), (0, None));
         assert_eq!(training_of(&levels, "unknown"), (6, None));
+    }
+
+    /// The unit-size setting reaches the battle the game builds: at the registered 0.75 every
+    /// unit of the test slice (the `--battle` armies) has three quarters of its card's men,
+    /// truncated, and its files follow the thinned count; a smaller setting thins further; a
+    /// battle built without a setting (`None`: no such setting registered) keeps the cards. On
+    /// the built-in fixture, so it runs without an install.
+    #[test]
+    fn the_unit_size_setting_thins_the_battles_units() {
+        let db = GameDatabase::test_fixture();
+        let build = |unit_size| build_battle(&db, &SetupData { unit_size, ..Default::default() }, FIRST_SEED);
+        let full = build(None);
+        assert_eq!(full.battle.unit_scale, 1.0);
+        assert!(!full.battle.units.is_empty());
+        for (setting, scale) in [(0.75, 0.75), (0.5, 0.5), (0.6, 0.75), (1.0, 1.0)] {
+            let sim = build(Some(setting));
+            assert_eq!(sim.battle.unit_scale, scale, "setting {setting}");
+            assert_eq!(sim.battle.units.len(), full.battle.units.len());
+            for (u, f) in sim.battle.units.iter().zip(&full.battle.units) {
+                let men = (f.max_men as f32 * scale) as u32;
+                assert_eq!((u.men, u.max_men), (men, men), "setting {setting}, unit {}", u.id);
+                assert!(u.formation_files <= f.formation_files, "setting {setting}, unit {}", u.id);
+            }
+        }
+        let thinned = build(Some(0.75));
+        assert!(thinned.battle.units.iter().zip(&full.battle.units).any(|(u, f)| u.men < f.men), "0.75 thins the slice");
     }
 
     /// The real France vs Austria slice, run headless (no window) from the player's install.
@@ -1104,7 +1176,7 @@ mod tests {
                 continue;
             }
             let start = BattleStart { key: rec.key.clone(), spec: Some(rec.spec.clone()), map: None, technologies: Vec::new(), custom: Vec::new() };
-            let setup = SetupData::load(Some(&vfs), None, Some(&start));
+            let setup = SetupData::load(Some(&vfs), None, Some(&start), None);
             let Some((_, spec)) = setup.battle.clone() else { continue };
             if spec.is_naval() {
                 continue;
@@ -1276,7 +1348,7 @@ mod tests {
                 continue;
             }
             let start = BattleStart { key: rec.key.clone(), spec: Some(rec.spec.clone()), map: None, technologies: Vec::new(), custom: Vec::new() };
-            let setup = SetupData::load(Some(&vfs), None, Some(&start));
+            let setup = SetupData::load(Some(&vfs), None, Some(&start), None);
             let Some((_, spec)) = setup.battle.clone() else { panic!("{}: {} not read", rec.key, rec.spec) };
             if spec.is_naval() {
                 continue;
@@ -1337,9 +1409,14 @@ mod tests {
             },
         ];
         let start = BattleStart { key: "NAP_MP_Amazon".into(), spec: None, map: Some("nap_mp_amazon".into()), technologies: Vec::new(), custom };
-        let setup = SetupData::load(Some(&vfs), Some(&map), Some(&start));
+        // The unit size the game registers: every custom battle unit has three quarters of its card.
+        let setup = SetupData::load(Some(&vfs), Some(&map), Some(&start), Some(0.75));
         let sim = build_battle(&db, &setup, FIRST_SEED);
         assert_eq!(sim.infos().len(), 10);
+        for (u, i) in sim.battle.units.iter().zip(sim.infos()) {
+            let card = db.unit_stats(&i.key).expect("the unit's stats").num_men;
+            assert_eq!(u.max_men, (card as f32 * 0.75) as u32, "{}", i.key);
+        }
         assert_eq!(sim.side_factions, ["austria".to_string(), "denmark".to_string()]);
         assert!(sim.battle_key.is_none(), "no battle file");
         let xp: Vec<u32> = sim.infos().iter().map(|i| i.experience).collect();

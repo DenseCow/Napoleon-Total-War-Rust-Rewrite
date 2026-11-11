@@ -69,6 +69,22 @@ pub fn manager_gain(master: GroupVolume, group: GroupVolume, event_volume: f32, 
     g.clamp(0.0, 1.0)
 }
 
+/// A movie's sound level: `int(vol_movie × 0.01 × vol_master)` (group 4 × 0.01 × group 5, the sound
+/// manager's slot `+0xDC` group volumes, truncated by CVTTSS2SI), as a 0..1 gain times the movie's
+/// `sound_events` table volume. CONFIRMED: the full-screen player `0x004831D0` (CVTTSS2SI at
+/// `0x00483289`) and the movie panel's constructor call `0x00A13EA0` (`0x00A13F05`..`0x00A13FC0`)
+/// compute the same level and both hand it to the bink control's open `0x00D9F600`; no speaker or
+/// 2D multiplier. INFERRED: a disabled group silences the movie as it does an event (the slot reads
+/// only the volume int; what the enabled flags do to it is not traced), and the level maps to gain
+/// as `level × 0.01` (the open multiplies it by 0x102 for the player, whose law is BINK.md §7's).
+pub fn movie_gain(master: GroupVolume, movie: GroupVolume, table_volume: f32) -> f32 {
+    if !master.enabled || !movie.enabled {
+        return 0.0;
+    }
+    let level = (movie.volume as f32 * 0.01 * master.volume as f32) as i32;
+    (level as f32 * 0.01 * table_volume).clamp(0.0, 1.0)
+}
+
 /// Miles' volume curve: `v^1.6666666` (§1.3 step 3).
 pub fn miles_curve(v: f32) -> f32 {
     v.clamp(0.0, 1.0).powf(VOLUME_EXPONENT)
@@ -337,6 +353,16 @@ mod tests {
         assert!(close(manager_gain(half, full, 0.3, 1.0, 2.0), 0.3, 1e-6));
         assert_eq!(manager_gain(full, GroupVolume { enabled: false, volume: 100 }, 1.0, 1.0, 1.0), 0.0);
         assert_eq!(manager_gain(full, full, 1.0, 1.0, 2.0), 1.0, "clamped");
+    }
+
+    #[test]
+    fn movie_gain_truncates_the_level() {
+        let g = |volume| GroupVolume { enabled: true, volume };
+        // 75 × 0.01 × 55 = 41.25 → 41 → 0.41.
+        assert!(close(movie_gain(g(55), g(75), 1.0), 0.41, 1e-6));
+        assert!(close(movie_gain(g(100), g(100), 0.5), 0.5, 1e-6));
+        assert_eq!(movie_gain(g(3), g(30), 1.0), 0.0, "0.9 truncates to 0");
+        assert_eq!(movie_gain(GroupVolume { enabled: false, volume: 100 }, g(100), 1.0), 0.0);
     }
 
     #[test]

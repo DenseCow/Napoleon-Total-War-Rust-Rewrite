@@ -328,16 +328,39 @@ fn zeal_counts_the_own_and_faction_bonus_only_where_the_feature_is_on() {
     assert_eq!(rank(&m, CharacterId(103)), 4);
     // The faction set's call leaves the faction term out.
     let own = super::effects::Effects::character_effects(&m, CharacterId(103));
-    assert_eq!(super::agents::rank_original(&m, CharacterId(103), &own, false), 3);
+    assert_eq!(super::agents::rank_original(&m, CharacterId(103), &super::effects::OwnEffects::held(&own), false), 3);
 }
 
 #[test]
 fn a_mod_rule_replaces_the_rank() {
     let mut m = rank_model(&ARMY_BONUSES);
     with_rank_trait(&mut m, 100, "command_land", 2);
-    let maker: crate::seam::Maker<super::seams::CharacterRank> = Arc::new(|_| Arc::new(|_: &CampaignModel, _: CharacterId, _: &super::effects::EffectSet, _: bool| 7));
+    let maker: crate::seam::Maker<super::seams::CharacterRank> = Arc::new(|_| Arc::new(|_: &CampaignModel, _: CharacterId, _: &super::effects::OwnEffects<'_>, _: bool| 7));
     Arc::make_mut(&mut m.rules).seams.character_rank.apply("test.seven", &maker);
     assert_eq!(rank(&m, CharacterId(100)), 7);
+}
+
+/// The rank was built from the character's whole effect set on every call; the set is now built only
+/// by a rank that reads one of its bonuses, and gives the same rank as a set held beforehand.
+#[test]
+fn the_rank_builds_the_own_set_only_when_it_reads_it() {
+    use super::effects::{Effects, OwnEffects};
+    let mut m = rank_model(&ARMY_BONUSES);
+    with_rank_trait(&mut m, 100, "command_land", 2);
+    army(&mut m, &["t_inf_rich", "t_inf_flag", "t_cav"]);
+    let c = CharacterId(100);
+    // Commanding an army whose make-up earns a bonus: read, so built.
+    let own = OwnEffects::of(&m, c);
+    assert!(!own.is_built());
+    assert_eq!(super::agents::rank_original(&m, c, &own, true), 2 + 1 + 2);
+    assert!(own.is_built());
+    let held = Effects::character_effects(&m, c);
+    assert_eq!(super::agents::rank_original(&m, c, &OwnEffects::held(&held), true), 2 + 1 + 2);
+    // Without an army no bonus is read: the same trait, no set.
+    m.world.forces.remove(&ForceId(1000));
+    let own = OwnEffects::of(&m, c);
+    assert_eq!(super::agents::rank_original(&m, c, &own, true), 2);
+    assert!(!own.is_built());
 }
 
 /// The battle card of unit `i` of force `f`.
@@ -393,7 +416,7 @@ fn the_battle_card_reads_the_rank_through_its_seam() {
     with_rank_trait(&mut m, 100, "command_land", 2);
     m.world.forces.get_mut(&ForceId(1000)).unwrap().units[0].character = Some(CharacterId(100));
     assert_eq!(card(&m, 1000, 0).rank, rank(&m, CharacterId(100)));
-    let maker: crate::seam::Maker<super::seams::CharacterRank> = Arc::new(|_| Arc::new(|_: &CampaignModel, _: CharacterId, _: &super::effects::EffectSet, _: bool| 7));
+    let maker: crate::seam::Maker<super::seams::CharacterRank> = Arc::new(|_| Arc::new(|_: &CampaignModel, _: CharacterId, _: &super::effects::OwnEffects<'_>, _: bool| 7));
     Arc::make_mut(&mut m.rules).seams.character_rank.apply("test.seven", &maker);
     assert_eq!(card(&m, 1000, 0).army_general_rank(), Some(7));
 }
@@ -416,7 +439,7 @@ fn the_autoresolve_star_ratings_are_the_battle_cards_ranks() {
     assert_eq!(expected[0], rank(&m, CharacterId(100)));
     assert_eq!(ranks(&m), (expected.clone(), expected));
     // Through the rank seam (the one rank rule), for both resolvers.
-    let maker: crate::seam::Maker<super::seams::CharacterRank> = Arc::new(|_| Arc::new(|_: &CampaignModel, _: CharacterId, _: &super::effects::EffectSet, _: bool| 7));
+    let maker: crate::seam::Maker<super::seams::CharacterRank> = Arc::new(|_| Arc::new(|_: &CampaignModel, _: CharacterId, _: &super::effects::OwnEffects<'_>, _: bool| 7));
     Arc::make_mut(&mut m.rules).seams.character_rank.apply("test.seven", &maker);
     assert_eq!(ranks(&m), (vec![7, 7, 0], vec![7, 7, 0]));
 }

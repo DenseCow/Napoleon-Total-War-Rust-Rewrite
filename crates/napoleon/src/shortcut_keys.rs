@@ -2,7 +2,29 @@
 //! (`ntw_formats::default_keys`): a physical key → the name the exe's key table gives it.
 
 use bevy::prelude::*;
-use ntw_formats::default_keys::Held;
+use ntw_formats::default_keys::{self, Held, Shortcuts};
+use ntw_formats::pack::Vfs;
+use ntw_script::ui::ShortcutMachine;
+
+/// One input mode's key bindings ("campaign", "battle"), read once from `text/default_keys.xml`
+/// through the install's file system (mods included): the default keyset's funcs with a mapping in
+/// that mode or in "all", each to its component (`Shortcuts::mode_bindings`; the exe's loader
+/// `0x00EDB080`, its mode switch `0x00ED5640`). The one reader of the keys file for every HUD. A
+/// missing or unreadable file is logged once and leaves no bindings.
+pub(crate) fn mode_shortcuts(vfs: &Vfs, mode: &str) -> ShortcutMachine {
+    match vfs.read(default_keys::PATH).map_err(|e| e.to_string()).and_then(|b| Shortcuts::parse(&b).map_err(|e| e.to_string())) {
+        Ok(s) => ShortcutMachine::new(s.mode_bindings(mode)),
+        Err(e) => {
+            warn!("{} not read, no {mode} keyboard shortcuts: {e}", default_keys::PATH);
+            ShortcutMachine::default()
+        }
+    }
+}
+
+/// The longest frame time the frame tick passes on, 300 ms: the time a shortcut poll gives its
+/// presses (CONFIRMED, `0x0048A650`: the delta from `0x010A1E10` is capped at 300 ms unless the
+/// frame-rate test is on).
+pub(crate) const MAX_FRAME_TIME: f32 = 0.3;
 
 /// The exe's name of a physical key (CONFIRMED: its key table `0x0139FEC8`, 143 entries of
 /// {code, DirectInput scan code, name}, which the keys file's parser `0x00E20290` searches by

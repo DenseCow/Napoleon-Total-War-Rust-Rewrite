@@ -13,7 +13,7 @@
 //! the HUD's `button_end_turn`, the root's quick save, quick load, escape menu..., the camera's
 //! steps) are the bindings of `text/default_keys.xml`, run by the HUD (`super::hud::keys`).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -21,7 +21,7 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use ntw_script::ScriptHost;
 use ntw_sim::campaign::outcome::OutcomeMovie;
-use ntw_sim::campaign::{CampaignCommand, CampaignEvent, CampaignModel, CharacterId, CharacterKind, FactionId, ForceId, RegionId};
+use ntw_sim::campaign::{CampaignCommand, CampaignEvent, CampaignModel, Character, CharacterId, CharacterKind, FactionId, ForceId, RegionId};
 use ntw_sim::fixed::Fixed20;
 
 use super::camera::CampaignCamera;
@@ -51,10 +51,13 @@ pub struct CampaignSim {
     /// only from the HUD.
     pub selected_fort: Option<RegionId>,
     /// Paths to animate, one per character (logic x, z), from the last command or end turn.
-    pub moves: Vec<(CharacterId, Vec<(f32, f32)>)>,
+    pub moves: HashMap<CharacterId, Vec<(f32, f32)>>,
     /// Defeat / victory movies the model queued (`CampaignEvent::OutcomeMovie`), for the HUD's movie
     /// panel; drained by `hud::update`.
     pub outcome_movies: Vec<(FactionId, OutcomeMovie)>,
+    /// Factions the victory check found lost (`CampaignEvent::CampaignLost`), for the HUD's defeat
+    /// popup; drained by `hud::update`.
+    pub campaign_lost: Vec<FactionId>,
     /// A short status line for the log and the harness.
     pub last_message: String,
     /// Harness (`--campaign-demo`): a fixed logic (x, z) for the path preview instead of the cursor.
@@ -170,21 +173,7 @@ impl CampaignSim {
                         Err(e) => warn!("Autoresolve: {e}"),
                     }
                 }
-                for e in &events {
-                    if let CampaignEvent::CharacterMoved { character, path } = e {
-                        record_move(&mut self.moves, *character, path);
-                    }
-                    if let CampaignEvent::OutcomeMovie { faction, movie } = e {
-                        self.outcome_movies.push((*faction, movie.clone()));
-                    }
-                    if let CampaignEvent::ConstructionItemDropped { region, slot, level_key } = e {
-                        warn!("Campaign: dropped construction item {level_key} in region {region:?}: its slot {slot:?} does not exist");
-                    }
-                    if let CampaignEvent::BattleCompleted { attacker_won, .. } = e {
-                        self.last_message = format!("Battle: the attacker {}", if *attacker_won { "won" } else { "lost" });
-                        info!("{}", self.last_message);
-                    }
-                }
+                self.note_events(&events);
                 if self.last_message.is_empty() || !label.starts_with("Attack") {
                     self.last_message = format!("{label}: ok");
                 }
@@ -195,6 +184,31 @@ impl CampaignSim {
             }
         }
         self.generation += 1;
+    }
+
+    /// Takes what the game side needs from the events a command, an end turn or the opening of turn 1
+    /// fired: the walks to animate, the outcome movies, the factions the victory check found lost, the
+    /// dropped construction items to log (the model has no logger) and the battle result for the status
+    /// line.
+    pub fn note_events(&mut self, events: &[CampaignEvent]) {
+        for e in events {
+            if let CampaignEvent::CharacterMoved { character, path } = e {
+                record_move(&mut self.moves, *character, path);
+            }
+            if let CampaignEvent::OutcomeMovie { faction, movie } = e {
+                self.outcome_movies.push((*faction, movie.clone()));
+            }
+            if let CampaignEvent::CampaignLost { faction } = e {
+                self.campaign_lost.push(*faction);
+            }
+            if let CampaignEvent::ConstructionItemDropped { region, slot, level_key } = e {
+                warn!("Campaign: dropped construction item {level_key} in region {region:?}: its slot {slot:?} does not exist");
+            }
+            if let CampaignEvent::BattleCompleted { attacker_won, .. } = e {
+                self.last_message = format!("Battle: the attacker {}", if *attacker_won { "won" } else { "lost" });
+                info!("{}", self.last_message);
+            }
+        }
     }
 
     /// Ends the human's turn (the AI factions play, then the human's next turn starts).
@@ -217,11 +231,8 @@ impl CampaignSim {
 /// Adds a `CharacterMoved` path to the moves to animate. A character moving more than once (an AI's
 /// moves in an end turn, an embark's legs) walks them one after another, as one path, so his marker
 /// ends where the model put him.
-fn record_move(moves: &mut Vec<(CharacterId, Vec<(f32, f32)>)>, character: CharacterId, path: &[(f32, f32)]) {
-    match moves.iter_mut().find(|(c, _)| *c == character) {
-        Some((_, walked)) => walked.extend_from_slice(path),
-        None => moves.push((character, path.to_vec())),
-    }
+fn record_move(moves: &mut HashMap<CharacterId, Vec<(f32, f32)>>, character: CharacterId, path: &[(f32, f32)]) {
+    moves.entry(character).or_default().extend_from_slice(path);
 }
 
 /// A character's marker on the map.
@@ -246,13 +257,24 @@ pub struct MoveAnimation {
     done: f32,
 }
 
+/// Whether a walk's last point is off `target` (an empty walk is).
+fn ends_off(path: &[Vec3], target: Vec3) -> bool {
+    path.last().is_none_or(|p| p.distance_squared(target) > 1e-6)
+}
+
 /// Ends a marker's walk at the model's position `target`: a character relocated with no
 /// `CharacterMoved` after his last one (put into or out of a settlement, a transport's landing...)
 /// steps there at the end instead of stopping off it until the next command.
 fn end_at(path: &mut Vec<Vec3>, target: Vec3) {
-    if path.last().is_none_or(|p| p.distance_squared(target) > 1e-6) {
+    if ends_off(path, target) {
         path.push(target);
     }
+}
+
+/// The character the marker of `id` stands for, `None` once he is gone or off the map
+/// ([`Character::on_map`]): his marker is removed then, instead of walking or jumping to (0, 0).
+fn marked(characters: &BTreeMap<CharacterId, Character>, id: CharacterId) -> Option<&Character> {
+    characters.get(&id).filter(|c| c.on_map())
 }
 
 /// Animation speed in map units per second. PLACEHOLDER (presentation only).
@@ -298,7 +320,7 @@ pub fn sync_markers(
         m.world.forces.values().filter_map(|f| f.commander.map(|c| (c, f.is_navy))).collect();
     let mut seen = std::collections::HashSet::new();
     for (e, marker, mut tf, anim) in &mut markers {
-        let Some(ch) = m.world.characters.get(&marker.id) else {
+        let Some(ch) = marked(&m.world.characters, marker.id) else {
             commands.entity(e).despawn();
             continue;
         };
@@ -307,19 +329,22 @@ pub fn sync_markers(
         let lift = marker_lift(ch.kind, navy == Some(true), navy == Some(false));
         let (x, z) = (ch.position.0.to_f32(), ch.position.1.to_f32());
         let target = ground_pos(&ground, x, z, lift);
-        if let Some((_, path)) = moves.iter().find(|(c, _)| *c == ch.id) {
+        if let Some(path) = moves.get(&ch.id) {
             let mut pts: Vec<Vec3> = path.iter().map(|&(px, pz)| ground_pos(&ground, px, pz, lift)).collect();
             end_at(&mut pts, target);
             commands.entity(e).insert(MoveAnimation { path: pts, done: 0.0 });
         } else if let Some(mut anim) = anim {
-            // Relocated during a running walk without a new move: the walk still ends where he is.
-            end_at(&mut anim.path, target);
-        } else {
+            // Relocated during a running walk without a new move: the walk still ends where he is. Tested
+            // before the write, so a walk that ends there already is not marked changed.
+            if ends_off(&anim.path, target) {
+                anim.path.push(target);
+            }
+        } else if tf.translation != target {
             tf.translation = target;
         }
     }
     for ch in m.world.characters.values() {
-        if seen.contains(&ch.id) || (ch.position.0.raw() == 0 && ch.position.1.raw() == 0) {
+        if seen.contains(&ch.id) || !ch.on_map() {
             continue;
         }
         let navy = navies.get(&ch.id).copied();
@@ -392,7 +417,7 @@ fn cursor_ground(
 fn character_near(m: &CampaignModel, x: f32, z: f32, radius: f32, prefer: Option<FactionId>) -> Option<CharacterId> {
     let mut best: Option<(bool, f32, CharacterId)> = None;
     for c in m.world.characters.values() {
-        if c.position.0.raw() == 0 && c.position.1.raw() == 0 {
+        if !c.on_map() {
             continue;
         }
         let d = ((c.position.0.to_f32() - x).powi(2) + (c.position.1.to_f32() - z).powi(2)).sqrt();
@@ -441,7 +466,7 @@ fn map_pick(m: &CampaignModel, x: f32, z: f32, human: Option<FactionId>) -> MapP
     for c in m.world.characters.values() {
         if c.garrisoned_in.is_some()
             || c.kind == CharacterKind::Minister
-            || (c.position.0.raw() == 0 && c.position.1.raw() == 0)
+            || !c.on_map()
             || on_a_settlement(m, c.position)
         {
             continue;
@@ -828,13 +853,13 @@ mod tests {
     #[test]
     fn a_characters_moves_walk_as_one_path() {
         // An end turn returns every AI move: a character moving twice walks both legs, in order.
-        let mut moves = Vec::new();
+        let mut moves = HashMap::new();
         record_move(&mut moves, CharacterId(1), &[(0.0, 0.0), (1.0, 0.0)]);
         record_move(&mut moves, CharacterId(2), &[(5.0, 5.0), (6.0, 5.0)]);
         record_move(&mut moves, CharacterId(1), &[(1.0, 0.0), (1.0, 1.0)]);
         assert_eq!(
             moves,
-            vec![(CharacterId(1), vec![(0.0, 0.0), (1.0, 0.0), (1.0, 0.0), (1.0, 1.0)]), (CharacterId(2), vec![(5.0, 5.0), (6.0, 5.0)])]
+            HashMap::from([(CharacterId(1), vec![(0.0, 0.0), (1.0, 0.0), (1.0, 0.0), (1.0, 1.0)]), (CharacterId(2), vec![(5.0, 5.0), (6.0, 5.0)])])
         );
     }
 
@@ -851,6 +876,27 @@ mod tests {
         let mut empty = Vec::new();
         end_at(&mut empty, Vec3::Y);
         assert_eq!(empty, vec![Vec3::Y]);
+    }
+
+    #[test]
+    fn a_marker_goes_when_its_character_leaves_the_map() {
+        // A marker of a character now at the off-map spot (0, 0) walked or jumped there; it is
+        // removed like a dead character's, and no marker is made for him while he stays there.
+        let at = |id: i32, x: i32, z: i32| Character {
+            id: CharacterId(id),
+            faction: FactionId(1),
+            kind: CharacterKind::General,
+            position: (Fixed20::from_int(x), Fixed20::from_int(z)),
+            movement_points: 0,
+            max_movement_points: 0,
+            base_movement_points: 0,
+            garrisoned_in: None,
+        };
+        let characters: BTreeMap<CharacterId, Character> = [at(1, 0, 0), at(2, 3, 0), at(3, 0, -4)].into_iter().map(|c| (c.id, c)).collect();
+        assert!(marked(&characters, CharacterId(1)).is_none(), "off the map");
+        assert_eq!(marked(&characters, CharacterId(2)).map(|c| c.id), Some(CharacterId(2)));
+        assert_eq!(marked(&characters, CharacterId(3)).map(|c| c.id), Some(CharacterId(3)), "one zero coordinate is on the map");
+        assert!(marked(&characters, CharacterId(9)).is_none(), "gone");
     }
 
     /// A click on any settlement of the Europe start position opens that settlement, unless a

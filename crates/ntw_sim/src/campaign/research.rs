@@ -10,6 +10,7 @@
 
 use super::effects::{EffectSet, Effects};
 use super::ids::{FactionId, RegionId};
+use super::rules::BuildingRules;
 use super::world::CampaignModel;
 use super::CharacterKind;
 
@@ -287,16 +288,8 @@ impl CampaignModel {
     /// manager's +0x14, its faction, and the entry), not identified and not ported.
     pub fn update_tech_availability(&mut self, faction: FactionId) {
         let Some(d) = self.world.faction_details.get(&faction) else { return };
-        let owned: Vec<&super::rules::BuildingRules> = self
-            .world
-            .regions
-            .values()
-            .filter(|r| r.owner == faction)
-            .flat_map(|r| r.slots.iter().filter_map(|s| s.building.as_ref()))
-            .filter_map(|b| self.rules.buildings.get(&b.level_key))
-            .collect();
-        let researched = |k: &str| d.technologies.iter().any(|(x, s)| x == k && *s == state::RESEARCHED);
-        let holds = |need: &super::rules::BuildingRules| owned.iter().any(|b| b.chain == need.chain && b.level >= need.level);
+        let owned = self.owned_building_rules(faction);
+        let holds = |need: &BuildingRules| owned.iter().any(|b| b.chain == need.chain && b.level >= need.level);
         let updates: Vec<(usize, u32)> = d
             .technologies
             .iter()
@@ -305,9 +298,7 @@ impl CampaignModel {
             .filter_map(|(i, (k, _))| {
                 let t = self.rules.technologies.get(k)?;
                 let need = self.rules.buildings.get(&t.building_level)?;
-                let tree = need.chain_pair();
-                let met = t.requires.iter().all(|q| researched(q)) && owned.iter().any(|b| b.chain_pair() == tree && b.level >= need.level);
-                if !met {
+                if !(self.has_researched(faction, &t.requires) && tree_held(&owned, need)) {
                     return None;
                 }
                 let built = t.required_buildings.iter().all(|l| self.rules.buildings.get(l).is_some_and(holds));
@@ -320,6 +311,32 @@ impl CampaignModel {
             }
         }
     }
+
+    /// The rules of every building in a slot of `faction`'s regions (faction region list +0x77C →
+    /// region +0x120 slots, `0x008B13E0`; any health, any holder): what the building tests of
+    /// [`Self::update_tech_availability`] read.
+    fn owned_building_rules(&self, faction: FactionId) -> Vec<&BuildingRules> {
+        let slots = self.world.regions.values().filter(|r| r.owner == faction).flat_map(|r| &r.slots);
+        slots.filter_map(|s| s.building.as_ref()).filter_map(|b| self.rules.buildings.get(&b.level_key)).collect()
+    }
+
+    /// The two tests of [`Self::update_tech_availability`] that open `tech` for `faction`, as it
+    /// reads them: (every requirement researched, a building of the technology's tree held at its
+    /// building level or higher). `None` for a technology the rules lack or one without a known
+    /// building level, which the update never opens. For tools that show a stored state next to the
+    /// rule (`economy_check`); it gathers the faction's buildings on each call.
+    pub fn tech_availability_tests(&self, faction: FactionId, tech: &str) -> Option<(bool, bool)> {
+        let t = self.rules.technologies.get(tech)?;
+        let need = self.rules.buildings.get(&t.building_level)?;
+        Some((self.has_researched(faction, &t.requires), tree_held(&self.owned_building_rules(faction), need)))
+    }
+}
+
+/// Whether one of `owned` is of `need`'s tree (the same [`BuildingRules::chain_pair`], chain record
+/// +0x10 / +0x14) at its level or higher: the tree test of the availability rule (`0x008F91F0`).
+fn tree_held(owned: &[&BuildingRules], need: &BuildingRules) -> bool {
+    let tree = need.chain_pair();
+    owned.iter().any(|b| b.chain_pair() == tree && b.level >= need.level)
 }
 
 impl CampaignModel {

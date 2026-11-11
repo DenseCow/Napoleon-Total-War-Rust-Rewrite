@@ -226,17 +226,22 @@ fn units_per_army_come_from_the_campaign_and_a_mod() {
     let merge = CampaignCommand::MergeForces { force: ForceId(1005), into: ForceId(1000) };
     let mut m = setup(1);
     assert_eq!((m.max_units(false), m.max_units(true)), (20, 20));
-    assert_eq!(m.apply(merge.clone()), Err(CommandError::Unsupported("the receiving force is full")));
+    // The order itself is not refused (the exe's builder `0x0091CED0` has no fit test): the arrival's
+    // fit `0x008B2720` decides, and for an AI's full receiver nothing moves and nothing is sent.
+    let ev = m.apply(merge.clone()).unwrap();
+    assert!(!ev.iter().any(|e| matches!(e, CampaignEvent::CampaignArmiesMerge { .. } | CampaignEvent::ExchangePending { .. })), "{ev:?}");
+    assert_eq!((m.world.forces[&ForceId(1000)].units.len(), m.world.forces[&ForceId(1005)].units.len()), (20, 1));
     // The campaign's own value (CAMPAIGN_MODEL #23).
     m.force_caps.army = 21;
     m.apply(merge.clone()).unwrap();
     assert_eq!(m.world.forces[&ForceId(1000)].units.len(), 21);
     // A new campaign: the original's caps at each `campaign_unit_multiplier` step (20 and 6 / 8 /
-    // 10 / 20; the default 0.75 gives 10 ships)...
+    // 10 / 20; the 0.75 the game registers the setting with gives 10 ships). A game that
+    // registers no unit-size setting takes the last step, not a second copy of that default...
     let l = crate::limits::GameLimits::default();
     let caps = |m: Option<f32>| super::rules::ForceCaps::new_campaign(&l, m);
     assert_eq!([0.25, 0.5, 0.75, 1.0].map(|s| caps(Some(s))).map(|c| (c.army, c.navy)), [(20, 6), (20, 8), (20, 10), (20, 20)]);
-    assert_eq!(caps(None), caps(Some(0.75)));
+    assert_eq!(caps(None), caps(Some(1.0)));
     // ...and under a mod's 40-unit armies: 25 units arrive, 20 fit.
     let mut m = setup(25);
     Arc::make_mut(&mut m.rules).limits.max_land_units = 40;

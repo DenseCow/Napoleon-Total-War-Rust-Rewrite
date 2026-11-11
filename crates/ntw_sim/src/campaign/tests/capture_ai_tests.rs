@@ -37,6 +37,7 @@ fn preview(region: u32, faction: FactionId, liberate: Option<FactionId>) -> Capt
         occupy: Default::default(),
         liberate,
         looter: None,
+        held: false,
     }
 }
 

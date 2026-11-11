@@ -67,7 +67,9 @@ From a byte survey of 322,982 vertices (`variant_probe bytestats 40`) and hand c
   to 4 bone-local positions/normals, the bone matrices of every clip frame sit in one storage buffer, and each man has
   his own phase (PROVISIONAL hash) and frame blend. FPS (RTX 5070, 1280x720, no vsync, `NAPOLEON_BATTLE_REPEAT`/
   `NAPOLEON_FPS_LOG`): 2,000 men 87-95 FPS with CPU skinning in lockstep -> ~175 FPS on the GPU with per-man phases;
-  4,000 men 15.5 -> 110-127 FPS. The model viewer still skins on the CPU.
+  4,000 men 15.5 -> 110-127 FPS. The model viewer still skins on the CPU. Those numbers are from an idle machine and
+  the build of that day; the series of 2026-11-10 (per-pass times, 1,048 to 10,480 men, taken while other builds ran)
+  is in `docs/DESIGN.md` §3.7.2 "Frame budget": the frame is bound by CPU work per mesh entity, not by the GPU.
 - Format 0 (64 bytes, plumes and equipment pieces): f32 x4 position (w = 1), u8x4 normal, tangent, binormal (same byte
   order), f32 u, v, then f32 u2, v2 (equipment only), u32 colour (FFFFFFFF), 8 zero bytes, f32 1.0, 1.0 (tail UNKNOWN).
 - LOD order: the first LOD block is the most detailed in 287 of 297 part files (CONFIRMED survey; 5 single-LOD, 5 mixed).

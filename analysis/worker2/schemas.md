@@ -249,7 +249,7 @@ Status: **exe** = layout taken from Worker 1's DB_BUILDERS.md (authoritative). *
 | campaign_ai_manager_behaviour_junctions | 0 | 236 | inferred | str,str,f32 |
 | campaign_ai_managers | 0 | 10 | inferred | str |
 | campaign_ai_personalities | 0 | 3 | inferred | str,bool |
-| campaign_ai_personality_junctions | 0 | 258 | inferred | str,str,f32 |
+| campaign_ai_personality_junctions | 0 | 258 | exe | str,str,f32 (reader `0x00DD22A0`, DB_BUILDERS.md; the value is an f32, CONFIRMED: the personalities' loader `0x00DD5870` reads row +0x18 with MOVSS at `0x00DD592C` and `0x00DD59B4` and passes it as a float to `0x00DE31E0`) |
 | campaign_anim_action_to_sets | 0 | 19 | inferred | str,str,str |
 | campaign_anim_sets | 0 | 2 | inferred | str |
 | campaign_anim_transitions | 0 | 12 | inferred | str,str,str,str |

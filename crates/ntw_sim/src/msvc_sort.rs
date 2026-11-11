@@ -180,6 +180,37 @@ fn adjust_heap<T: Copy, F: Fn(&T, &T) -> bool>(v: &mut [T], mut hole: usize, bot
     v[hole] = val;
 }
 
+/// The library's `push_heap`: appends `val` and moves it up while its parent goes before it
+/// (`less(parent, val)`), as the open lists of the expulsion flood and the free-spot search do
+/// (`0x00AC2140`, CONFIRMED).
+pub fn push_heap<T: Copy, F: Fn(&T, &T) -> bool>(v: &mut Vec<T>, val: T, less: F) {
+    v.push(val);
+    let mut hole = v.len() - 1;
+    while hole > 0 {
+        let parent = (hole - 1) / 2;
+        if !less(&v[parent], &val) {
+            break;
+        }
+        v[hole] = v[parent];
+        hole = parent;
+    }
+    v[hole] = val;
+}
+
+/// The library's `pop_heap` with the pop: the last element fills the hole the top leaves (sift
+/// down, then up: the `_Adjust_heap` of [`sort_by`]'s heap sort; `0x00AF8620` + `0x00AC1B50` in the
+/// expulsion flood and the free-spot search, CONFIRMED). Returns the old top.
+pub fn pop_heap<T: Copy, F: Fn(&T, &T) -> bool>(v: &mut Vec<T>, less: F) -> Option<T> {
+    let top = *v.first()?;
+    let n = v.len();
+    if n > 1 {
+        let val = v[n - 1];
+        v[n - 1] = top;
+        adjust_heap(v, 0, n - 1, val, &less);
+    }
+    v.pop()
+}
+
 fn heap_sort<T: Copy, F: Fn(&T, &T) -> bool>(v: &mut [T], less: &F) {
     let n = v.len();
     let mut hole = n / 2;
@@ -252,5 +283,29 @@ mod tests {
         assert_eq!(ones.len(), 16);
         assert_eq!(zeros.len(), 17);
         assert_ne!(zeros, (0..33).step_by(2).collect::<Vec<u32>>(), "a stable sort would keep the input order");
+    }
+
+    #[test]
+    fn heap_pops_in_priority_order_and_keeps_the_library_layout() {
+        // A min-heap on the value, as the expulsion flood keeps its open cells.
+        let less = |a: &(u32, i32), b: &(u32, i32)| a.1 > b.1;
+        let mut h = Vec::new();
+        for v in values(50, 7, 3) {
+            push_heap(&mut h, v, less);
+        }
+        // The library's push: [2] then [1] land under the root when they are not smaller.
+        let mut small = Vec::new();
+        for v in [(0, 5), (1, 3), (2, 3)] {
+            push_heap(&mut small, v, less);
+        }
+        assert_eq!(small, vec![(1, 3), (0, 5), (2, 3)]);
+        let mut out = Vec::new();
+        while let Some(v) = pop_heap(&mut h, less) {
+            out.push(v.1);
+        }
+        let mut sorted = out.clone();
+        sorted.sort_unstable();
+        assert_eq!(out, sorted);
+        assert_eq!(out.len(), 50);
     }
 }

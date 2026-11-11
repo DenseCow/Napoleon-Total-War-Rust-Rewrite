@@ -176,10 +176,9 @@ pub(super) fn traits_table(lua: &Lua, inner: &Inner, ui: &CampaignUi, m: &Campai
         if m.rules.characters.traits.get(&tr.key).is_some_and(|r| r.hidden) {
             continue;
         }
-        let Some((_, level, level_key)) = m.rules.effects.held_level_row(&tr.key, tr.level) else { continue };
-        if *level <= 0 {
-            continue;
-        }
+        // No current level and a level number of 0 are one case here: the held level is the level record's
+        // number, and `held_level_key` gives none at 0.
+        let Some(level_key) = m.rules.effects.held_level_key(&tr.key, tr.level) else { continue };
         let row = lua.create_table()?;
         row.set("Name", loc_required(inner, &format!("character_trait_levels_onscreen_name_{level_key}")))?;
         let category = db.characters.traits.get(&tr.key).map(|r| r.category.as_str());

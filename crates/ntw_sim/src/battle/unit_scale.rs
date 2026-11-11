@@ -1,62 +1,59 @@
 //! The unit-size option: how many men a unit card's men count becomes in the battle.
-//! W1 §12.9 / BATTLE_FIDELITY.md §18 and §18a (the sandbox 0-A `unit_scale` sweep, CONFIRMED).
+//! W1 §12.9 / BATTLE_FIDELITY.md §18 and §18a.
 //!
 //! The exe keeps the four steps as a plain float table at `0x01392770` = {0.25, 0.5, 0.75, 1.0}
 //! (`0x00DAFBB0` index → scale, `0x00DAFBC0` scale → index) and multiplies the unit's card men by
-//! the scale when it builds the battle unit (`0x004A6600`, the army → battle unit creator):
-//!
-//! ```text
-//! 0x004a66c9  CALL 0x004a6540            ; clamp(scale, 0.1, 1.0)
-//! 0x004a66d2  FSTP float ptr [ESP + 0x2c]
-//! 0x004a67c5  MOVZX EAX,word ptr [EBP + 0xa]     ; the card's men (u16)
-//! 0x004a67de  MOVD XMM0,EAX
-//! 0x004a67e2  CVTDQ2PS XMM0,XMM0
-//! 0x004a67e5  MULSS XMM0,dword ptr [ESP + 0x30] ; * scale   [ESP+0x30] = [ESP+0x2c] after the push
-//! 0x004a67eb  CVTTSS2SI ESI,XMM0                ; (int), TRUNCATING
-//! ```
+//! the scale when it builds the battle unit (`0x004A6600`, the session's army → battle unit
+//! creator): it asks `0x004A6540` for the battle's scale once, then for each land unit card turns
+//! the card's 16-bit men count into a float, multiplies it by the scale and converts the product
+//! back with truncation (CONFIRMED, `0x004A67C5..0x004A67EB`).
 //!
 //! The result is what the battle unit card carries at `+0xC8`/`+0xCC` (`0x005363C0` → `0x00513320`,
 //! which stores the men into dwords `0x32` and `0x33` of the card), and that field is the "men" the
 //! rest of the battle reads (CONFIRMED: strength potentials read `card+0xC8`, §6). Naval units take a
-//! **byte** count at `card+0x0E` instead and are NOT scaled (`0x004A6A06`, no MULSS on that path).
+//! **byte** count at `card+0x0E` instead and are NOT scaled (`0x004A6A06`, no multiplication on
+//! that path).
 //!
 //! The battle-file path is different: `0x0050CAE0` hands `num_soldiers` to the card builder
 //! `0x00513440` unchanged (§39), so a `.battle` file's unit sizes are used as they are.
 //!
-//! Which index the battle uses (CONFIRMED code): `0x004A6540` reads the battle-settings entry with
-//! key `0x0B` (`FUN_004A2B80(0x0B)`) — except in battle modes 2 and 4, where it takes the **smallest**
-//! per-unit size class byte over the army's units that carry flags `+0x5D & 4`, `!(+0x5D & 8)` and
-//! `+0x5D & 2` (0xFF when there are none). Whether that key is fed by the `unit_scale` preference
-//! (`0x0044C9C5` loads / `0x00471B44` saves that name) is INFERRED; the model takes the scale
-//! straight from the setting, which is the same value for every unit. What *sets* that per-unit
-//! size class byte, and therefore the minimum modes 2 and 4 use, is still UNKNOWN.
-
-use crate::limits::GameLimits;
+//! Which scale the battle uses (CONFIRMED): `0x004A6540` reads the game-settings entry with key
+//! `0x0B`, a unit-size **index**, except in game modes 2 and 4, where it takes the **smallest**
+//! per-slot index byte over the session's slots whose flag byte `+0x5D` has bits 4 and 2 set and
+//! bit 8 clear; the index goes through `0x00DAFBB0` and the result is clamped to `[0.1, 1.0]`.
+//! Key `0x0B` is written by the settings constructors only (`0x004A1930`, `0x004A1680`,
+//! `0x004A14B0`): a hosted battle hands the battle setup's `unit_scale`
+//! (`FrontEnd.MPHostCustomBattle`, `0x00473920`), and `LoadBattleSetup` (`0x004709F0`) fills that
+//! field with the step of the player's unit-size setting, the float preference
+//! `campaign_unit_multiplier` ([`crate::limits::UNIT_SIZE_SETTING`]). So the chain is setting
+//! (a scale) → step index → step scale → clamp → men, which is
+//! [`crate::battle::model::Battle::set_unit_scale_setting`].
+//!
+//! INFERRED: a single-player battle (`FrontEnd.StartBattle`, `0x004783E0` → `0x00488520`) uses the
+//! same chain. Its setup tables carry no unit scale and no men count (`0x00455F00`, `0x004553B0`)
+//! and it builds no game-settings object, so where its men are scaled is UNKNOWN (untraced: the
+//! battle description's unit build behind `0x0050AA00`); the setting is the only unit size the
+//! front end shows, so ours applies it there too. UNKNOWN: what sets the per-slot index byte modes
+//! 2 and 4 read, whether an artillery unit's gun count follows the unit size (ours keeps the
+//! card's guns), and what the int preference `gfx_unit_scale` (`0x00404230`, default 2) does: the
+//! exe only registers it and writes it to the preferences file.
 
 /// The original's four step sizes, in index order (`0x01392770`, CONFIRMED): the default of
-/// [`GameLimits::unit_scales`], which a mod may change or extend. The names (small / medium /
-/// large / ultra) are INFERRED; index 3 is the "no scaling" step.
+/// [`crate::limits::GameLimits::unit_scales`], which a mod may change or extend. The names (small /
+/// medium / large / ultra) are INFERRED; index 3 is the "no scaling" step.
 pub const STEPS: [f32; 4] = [0.25, 0.5, 0.75, 1.0];
-
-/// The `gfx_unit_scale` setting index the **exe** defaults to (`0x00404230` registers it as an
-/// environment variable preference — int, storage `0x0149D880`, help
-/// `"Set unit scale. 0 - lowest, 3 - ultra"` — with the default 2; CONFIRMED). The player's own
-/// `preferences.script.txt` ships `gfx_unit_scale 2` as well, so an out-of-the-box battle thins its
-/// units to [`STEPS`][2] = 0.75 of the card's men. The model keeps 1.0 when there is no preference
-/// (a deliberate deviation, see [`crate::battle::model::Battle::unit_scale`] and BATTLE_FIDELITY.md §18a).
-pub const PREFERENCE_DEFAULT: i32 = 2;
 
 /// The lowest and highest scale the exe accepts (`0x004A6540`): below `MIN` and above `MAX` the
 /// value is replaced by the bound, so a stray setting can never produce 0 or > 1 men. Ours keeps
-/// `MIN` and raises the top to a modded step above 1.0 ([`GameLimits::max_scale`]); without one
-/// the top is the original's `MAX`.
+/// `MIN` and raises the top to a modded step above 1.0
+/// ([`crate::limits::GameLimits::max_scale`]); without one the top is the original's `MAX`.
 pub const MIN: f32 = 0.1;
 /// See [`MIN`].
 pub const MAX: f32 = 1.0;
 
-/// The scale a battle uses, the way `0x004A6540` returns it: `if 0.1 <= s { if 1.0 <= s { 1.0 } else
-/// { s } } else { 0.1 }` — i.e. a plain clamp to `[MIN, top]` (CONFIRMED with `top` = [`MAX`]; `top`
-/// is [`GameLimits::max_scale`], which is `MAX` unless a mod adds a larger step).
+/// The scale a battle uses, the way `0x004A6540` returns it: a plain clamp to `[MIN, top]`
+/// (CONFIRMED with `top` = [`MAX`]; `top` is [`crate::limits::GameLimits::max_scale`], which is
+/// `MAX` unless a mod adds a larger step).
 pub fn clamp(scale: f32, top: f32) -> f32 {
     if scale >= top {
         top
@@ -68,9 +65,9 @@ pub fn clamp(scale: f32, top: f32) -> f32 {
 }
 
 /// The battle's men for a card that carries `card_men` men: `(int)((float)card_men * scale)` with
-/// the exe's **truncating** float→int conversion (`CVTTSS2SI` at `0x004A67EB`), so 160 men at
-/// 0.75 is 120, not 120.5 rounded, and 1 man at 0.25 is 0 (the exe never gets there: the smallest
-/// step still leaves a man for every shipped card). Negative counts are clamped to 0.
+/// the exe's **truncating** float→int conversion (`0x004A67EB`), so 160 men at 0.75 is 120, not
+/// 120.5 rounded, and 1 man at 0.25 is 0 (the exe never gets there: the smallest step still leaves
+/// a man for every shipped card). Negative counts are clamped to 0.
 ///
 /// `scale` is expected to come from [`clamp`] (the caller clamps once per battle).
 pub fn scaled_men(card_men: i32, scale: f32) -> u32 {
@@ -78,27 +75,10 @@ pub fn scaled_men(card_men: i32, scale: f32) -> u32 {
     men.max(0) as u32
 }
 
-/// The scale a battle takes from the `gfx_unit_scale` **preference index** it was handed — the whole
-/// of the decision, in one tested place.
-///
-/// `None` is the "no preferences file" case (no `gfx_unit_scale` value to hand), which keeps the
-/// model's 1.0 rather than guessing the exe's default; an index outside the steps takes the last
-/// step (`0x00DAFBB0` reads past its four entries and lands on 1.0 through the clamp). The steps
-/// are `limits.unit_scales` (the original's [`STEPS`] unless a mod changes them).
-pub fn scale_for_setting(setting: Option<i32>, limits: &GameLimits) -> f32 {
-    setting.map_or(MAX, |i| clamp(limits.unit_scale(i), limits.max_scale()))
-}
-
-/// [`scale_for_setting`] applied to a card's men: the count the unit is actually built with. The
-/// one call the display layer needs, so the preference index, the step table, the clamp and the
-/// truncation cannot drift apart between crates.
-pub fn men_for_setting(card_men: i32, setting: Option<i32>, limits: &GameLimits) -> u32 {
-    scaled_men(card_men, scale_for_setting(setting, limits))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::limits::GameLimits;
 
     /// The original's limits.
     fn l() -> GameLimits {
@@ -122,8 +102,8 @@ mod tests {
         assert_eq!(clamp(2.0, MAX), 1.0);
     }
 
-    /// `CVTDQ2PS / MULSS / CVTTSS2SI` at `0x004A67DE`: the men are **truncated**, not rounded, and
-    /// the small steps really do thin a unit out. 160 is the real `num_men` of a line battalion.
+    /// The men are **truncated** (`0x004A67DE..0x004A67EB`), not rounded, and the small steps
+    /// really do thin a unit out. 160 is the real `num_men` of a line battalion.
     #[test]
     fn men_are_truncated() {
         assert_eq!(scaled_men(160, 1.0), 160);
@@ -133,90 +113,65 @@ mod tests {
         assert_eq!(scaled_men(155, 0.75), 116); // 116.25 -> 116
         assert_eq!(scaled_men(159, 0.5), 79); // 79.5 -> 79; rounding would give 80
         assert_eq!(scaled_men(3, 0.25), 0); // 0.75 -> 0
+        // A 7-man card at 0.75 is 5 (5.25), and 158 men are 118 (118.5), not 119.
+        assert_eq!(scaled_men(7, 0.75), 5);
+        assert_eq!(scaled_men(158, 0.75), 118);
+        assert_eq!(scaled_men(2, 0.75), 1); // 1.5 -> 1
         // Nothing goes negative.
         assert_eq!(scaled_men(-5, 0.5), 0);
     }
 
-    /// The four settings end to end, so the head-to-head comparison maths is pinned down: setting
-    /// 0 = 0.25×, 1 = 0.5×, 2 = **0.75×**, 3 = 1.0× (no thinning). 160 men is a line battalion's
-    /// real `num_men`; 160 × 0.75 = 120 exactly, and the product is always truncated.
+    /// The four steps end to end: step 0 = 0.25×, 1 = 0.5×, 2 = 0.75×, 3 = 1.0× (no thinning).
+    /// 160 men is a line battalion's real `num_men`.
     #[test]
-    fn the_four_settings_scale_the_men() {
-        for (setting, factor, men) in [(0, 0.25, 40), (1, 0.5, 80), (2, 0.75, 120), (3, 1.0, 160)] {
-            let scale = clamp(l().unit_scale(setting), MAX);
-            assert_eq!(scale, factor, "setting {setting}");
-            assert_eq!(scaled_men(160, scale), men, "setting {setting}");
+    fn the_four_steps_scale_the_men() {
+        for (step, factor, men) in [(0, 0.25, 40), (1, 0.5, 80), (2, 0.75, 120), (3, 1.0, 160)] {
+            let scale = clamp(l().unit_scale(step), MAX);
+            assert_eq!(scale, factor, "step {step}");
+            assert_eq!(scaled_men(160, scale), men, "step {step}");
         }
     }
 
-    /// The exe's own default setting, `gfx_unit_scale 2`, is **0.75** (CONFIRMED at `0x00404230`:
-    /// the preference's default value is 2; the player's `preferences.script.txt` ships the same).
+    /// The setting → men chain of a battle's start (setting scale → step `0x00DAFBC0` → step scale
+    /// `0x00DAFBB0` → clamp `0x004A6540` → truncated men `0x004A6600`): the setting the game
+    /// registers, 0.75, gives three quarters of the card; a setting between two steps takes the
+    /// higher step; one outside the steps the first or the last. `None` (a game that registers no
+    /// unit-size setting) is the last step.
     #[test]
-    fn default_setting_is_three_quarters() {
-        assert_eq!(PREFERENCE_DEFAULT, 2);
-        assert_eq!(l().unit_scale(PREFERENCE_DEFAULT), 0.75);
-        assert_eq!(clamp(l().unit_scale(PREFERENCE_DEFAULT), MAX), 0.75);
-        assert_eq!(scaled_men(160, l().unit_scale(PREFERENCE_DEFAULT)), 120);
-        assert_eq!(scaled_men(200, l().unit_scale(PREFERENCE_DEFAULT)), 150);
-        // The exe's conversion truncates: a 7-man card at 0.75 is 5 (7 × 0.75 = 5.25), never 5.25
-        // and never 6, and 158 men are 118 (118.5), not 119.
-        assert_eq!(scaled_men(7, 0.75), 5);
-        assert_eq!(scaled_men(158, 0.75), 118);
-        // A 1-man card at the lowest step disappears (0.25 -> 0), at the default it does not
-        // (0.75 -> 0 too: the exe would build a unit with no men, which never happens because
-        // every shipped card has more).
-        assert_eq!(scaled_men(1, 0.25), 0);
-        assert_eq!(scaled_men(2, 0.75), 1); // 1.5 -> 1
-        assert_eq!(scaled_men(3, 0.75), 2); // 2.25 -> 2
+    fn the_setting_becomes_the_step_and_then_the_men() {
+        let men = |setting: Option<f32>, limits: &GameLimits| {
+            let mut b = crate::battle::model::Battle::new(1, Default::default(), Default::default());
+            let scale = b.set_unit_scale_setting(setting, limits);
+            assert_eq!(scale, b.unit_scale);
+            (scale, b.men_at_scale(160), b.men_at_scale(7))
+        };
+        assert_eq!(men(Some(0.75), &l()), (0.75, 120, 5));
+        assert_eq!([0.25, 0.5, 1.0].map(|s| men(Some(s), &l()).1), [40, 80, 160]);
+        // 0.6 is not a step: the first step not below it is 0.75. 0.05 and 3.0 are outside.
+        assert_eq!(men(Some(0.6), &l()), (0.75, 120, 5));
+        assert_eq!((men(Some(0.05), &l()).0, men(Some(3.0), &l()).0), (0.25, 1.0));
+        assert_eq!(men(None, &l()), (1.0, 160, 7));
+        // A mod's step above the original's 1.0 is reached by a setting of that size.
+        let mut big = l();
+        big.unit_scales.push(1.5);
+        assert_eq!(men(Some(1.5), &big), (1.5, 240, 10));
+        assert_eq!(men(Some(1.0), &big), (1.0, 160, 7));
     }
 
-    /// The preference index → men path, which is all the display layer has to get right: the whole
-    /// decision in one call, so it can be tested here instead of in the Bevy crate (`napoleon`),
-    /// which headless CI cannot build.
+    /// The same factor, end to end through a real [`crate::battle::model::Battle`]: units built
+    /// from a unit card at the registered setting (0.75) carry **three quarters** of the card's
+    /// men, the truncation holds, and the thinned units are the ones the battle's own strength
+    /// maths reads, so the option moves a number the battle acts on. 160 is a line battalion's
+    /// real `num_men`, 7 the truncation case. (`napoleon`'s battle start calls the same two
+    /// methods: `set_unit_scale_setting` once, `men_at_scale` per unit card.)
     #[test]
-    fn the_preference_index_becomes_the_scale_and_then_the_men() {
-        // No preferences file -> the model's 1.0, not a guess at the exe's default.
-        assert_eq!(scale_for_setting(None, &l()), 1.0);
-        assert_eq!(men_for_setting(160, None, &l()), 160);
-        // The exe's default, `gfx_unit_scale 2`, really is 0.75 and really thins the men.
-        assert_eq!(scale_for_setting(Some(PREFERENCE_DEFAULT), &l()), 0.75);
-        assert_eq!(men_for_setting(160, Some(PREFERENCE_DEFAULT), &l()), 120);
-        // The truncation survives the whole path: 7 * 0.75 = 5.25 -> 5, 158 -> 118.5 -> 118.
-        assert_eq!(men_for_setting(7, Some(PREFERENCE_DEFAULT), &l()), 5);
-        assert_eq!(men_for_setting(158, Some(PREFERENCE_DEFAULT), &l()), 118);
-        // All four steps, and an index past the table landing on 1.0 through the clamp.
-        assert_eq!([0, 1, 2, 3].map(|i| men_for_setting(160, Some(i), &l())), [40, 80, 120, 160]);
-        assert_eq!(men_for_setting(160, Some(9), &l()), 160);
-        // It agrees with `Battle::men_at_scale`, which is the other way in.
-        let b = crate::battle::model::Battle::new(1, Default::default(), Default::default());
-        for i in 0..4 {
-            let mut b = b.clone();
-            let scale = b.set_unit_scale_setting(Some(i), &Default::default());
-            assert_eq!(scale, scale_for_setting(Some(i), &l()), "step {i}");
-            assert_eq!(b.men_at_scale(160), men_for_setting(160, Some(i), &l()), "step {i}");
-        }
-        let mut none = b.clone();
-        assert_eq!(none.set_unit_scale_setting(None, &Default::default()), 1.0);
-        assert_eq!(none.men_at_scale(160), 160);
-    }
-
-    /// The same factor, end to end through a real [`crate::battle::model::Battle`]: units built from a unit card at the
-    /// preference default carry **three quarters** of the card's men, the truncation holds, and the
-    /// thinned units are the ones the battle's own strength maths reads — so the option moves a
-    /// number the battle acts on, not just a field nobody reads. 160 is a line battalion's real
-    /// `num_men`, 7 the truncation case.
-    ///
-    /// The display layer (`crates/napoleon`, Bevy) is not wired to this yet and cannot be built
-    /// headless, so the end-to-end check runs here, on the same [`crate::battle::model::Battle`]
-    /// the display layer drives.
-    #[test]
-    fn a_battle_at_the_preference_default_really_is_thinned() {
+    fn a_battle_at_the_registered_setting_really_is_thinned() {
         use crate::battle::model::{Battle, LandUnit};
-        // One builder for every step, so a comparison is between two battles built the same way and
-        // differs only in the setting — that is the whole claim being tested here.
-        let build = |setting: Option<i32>| {
+        // One builder for every setting, so a comparison is between two battles built the same way
+        // and differs only in the setting.
+        let build = |setting: f32| {
             let mut b = Battle::new(4242, Default::default(), Default::default());
-            let applied = b.set_unit_scale_setting(setting, &Default::default());
+            let applied = b.set_unit_scale_setting(Some(setting), &Default::default());
             // Two sides' line battalions, plus a 7-man card for the truncation.
             for (id, side, card_men) in [(1u32, 0u8, 160i32), (2, 1, 160), (3, 0, 7)] {
                 let men = b.men_at_scale(card_men);
@@ -230,8 +185,7 @@ mod tests {
             (applied, b)
         };
 
-        // The player's shipped `preferences.script.txt` value, applied the way the display applies it.
-        let (applied, b) = build(Some(PREFERENCE_DEFAULT));
+        let (applied, b) = build(0.75);
         assert_eq!(applied, 0.75);
         assert_eq!(b.unit_scale, 0.75);
         // Three quarters of the card, truncated: 160 -> 120 and 7 -> 5.
@@ -243,15 +197,13 @@ mod tests {
         assert_eq!(thin.len(), 2);
         assert!(thin.iter().all(|(_, s)| *s > 0.0));
 
-        // The same three cards at the other three settings: 40 / 80 / 160 men, and 7 -> 1 / 3 / 4 / 5.
-        assert_eq!(build(Some(0)).1.units.iter().map(|u| u.men).collect::<Vec<_>>(), vec![40, 40, 1]);
-        assert_eq!(build(Some(1)).1.units.iter().map(|u| u.men).collect::<Vec<_>>(), vec![80, 80, 3]);
-        assert_eq!(build(Some(3)).1.units.iter().map(|u| u.men).collect::<Vec<_>>(), vec![160, 160, 7]);
-        // No preferences file: the model's 1.0, the card's men untouched.
-        assert_eq!(build(None).1.units.iter().map(|u| u.men).collect::<Vec<_>>(), vec![160, 160, 7]);
+        // The same three cards at the other three settings: 40 / 80 / 160 men, and 7 -> 1 / 3 / 7.
+        assert_eq!(build(0.25).1.units.iter().map(|u| u.men).collect::<Vec<_>>(), vec![40, 40, 1]);
+        assert_eq!(build(0.5).1.units.iter().map(|u| u.men).collect::<Vec<_>>(), vec![80, 80, 3]);
+        assert_eq!(build(1.0).1.units.iter().map(|u| u.men).collect::<Vec<_>>(), vec![160, 160, 7]);
 
         // Strictly more men is strictly more strength, per side (`side_strengths` is ascending).
-        let fat = build(Some(3)).1.side_strengths();
+        let fat = build(1.0).1.side_strengths();
         assert_eq!(thin.iter().map(|(s, _)| *s).collect::<Vec<_>>(), fat.iter().map(|(s, _)| *s).collect::<Vec<_>>());
         for ((side, t), (_, f)) in thin.iter().zip(&fat) {
             assert!(f > t, "side {side}: unthinned {f} must beat thinned {t}");

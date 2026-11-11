@@ -57,6 +57,7 @@ pub mod siege;
 pub mod events;
 pub mod ids;
 pub mod pathing;
+pub mod place_flood;
 pub mod population;
 pub mod polypath;
 pub mod polysmooth;
@@ -77,6 +78,7 @@ pub mod treasury;
 pub mod turn;
 pub mod personalities;
 pub mod pool;
+pub mod region_groups;
 pub mod region_value;
 pub mod portraits;
 pub mod visibility;
@@ -91,7 +93,7 @@ pub use events::{CampaignEvent, CampaignMessage};
 pub use ids::{CharacterId, FactionId, FortId, ForceId, RecruitmentItemId, RegionId, UnitId};
 pub use rules::{BuildingRules, BuildingTable, CampaignRules, TaxClass, UnitAutoresolve, UnitRules};
 pub use turn::{TurnState, TurnStep};
-pub use world::{SlotRef, FactionAiKeys, AiArea, RebelArmySide,
+pub use world::{SlotRef, FactionAiKeys, AiArea, AiHlci, RebelArmySide,
     BuildingRef, CampaignModel, CampaignUnit, Character, CharacterKind, ConstructionItem, ConstructionKind, Faction,
     GovernmentType, MilitaryForce, RecruitmentItem, RecruitmentManager, Reinforcement, RecruitmentSource, Region, RegionSlot, PortBlockade, Settlement, Stance,
     Terrain, World,

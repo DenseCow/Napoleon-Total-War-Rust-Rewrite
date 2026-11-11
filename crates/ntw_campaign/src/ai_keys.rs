@@ -26,10 +26,10 @@
 //! [`World::ai_keys`]: ntw_sim::campaign::World::ai_keys
 //! [`World::region_base_values`]: ntw_sim::campaign::World::region_base_values
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ntw_formats::esf::{EsfNode, EsfRecord};
-use ntw_sim::campaign::{AiArea, CampaignModel, FactionAiKeys, FactionId};
+use ntw_sim::campaign::{AiArea, AiHlci, CampaignModel, FactionAiKeys, FactionId};
 
 /// Reads the AI keys of one `FACTION` record: the four strings right before its first
 /// `FACTION_FLAG_AND_COLOURS` child (two strings for record versions below 15, the others then
@@ -105,8 +105,12 @@ pub fn read_region_base_values(root: &EsfRecord) -> BTreeMap<String, i32> {
 /// appends them to its list +0x130/+0x134, and the saver `0x00C09400` writes them back), each
 /// `CAI_REGION` key (#10) with its boundaries (#7, `CAI_REGION_BOUNDARY` components of
 /// `CAI_WORLD_REGION_BOUNDARIES[]`, whose #0/#1 are the two areas' component ids) as the indexes of
-/// the areas on their other side. A boundary naming an unknown area is left out. Empty when the
-/// file has no CAI state.
+/// the areas on their other side, and its HLCIs (#1, `CAI_REGION_HLCI` components of
+/// `CAI_WORLD_REGION_HLCIS[]`, read by `0x00BEDB50`: #1 the connectivity index, #2 the pieces, the
+/// indexes into the map region's areas `0x00C47A00` resolves). A boundary or HLCI naming an unknown
+/// component is left out, and so is an HLCI record that cannot be read (no id, no connectivity index
+/// or no pieces array): each kind is counted in one warning of its own. Empty when the file has no
+/// CAI state.
 pub fn read_ai_areas(root: &EsfRecord) -> Vec<AiArea> {
     let Some(world) = root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL/CAI_INTERFACE/CAI_WORLD") else { return Vec::new() };
     fn class<'a>(item: &'a [EsfNode], name: &str) -> Option<&'a EsfRecord> {
@@ -121,6 +125,24 @@ pub fn read_ai_areas(root: &EsfRecord) -> Vec<AiArea> {
             boundaries.insert(c, (x, y));
         }
     }
+    let mut hlcis: BTreeMap<u32, AiHlci> = BTreeMap::new();
+    // The HLCI records that cannot be read, and the ids of those that have one: a region naming such
+    // an id is not reported a second time as naming no HLCI.
+    let (mut unreadable, mut unreadable_ids) = (0usize, BTreeSet::new());
+    for item in world.record_array("CAI_WORLD_REGION_HLCIS").map_or(&[][..], |a| a.items.as_slice()) {
+        let c = id(item);
+        let read = class(item, "CAI_REGION_HLCI")
+            .and_then(|h| Some(AiHlci { index: h.get(1).and_then(EsfNode::as_u32)?, pieces: h.get(2).and_then(EsfNode::as_u32_array)?.to_vec() }));
+        match (c, read) {
+            (Some(c), Some(h)) => {
+                hlcis.insert(c, h);
+            }
+            (c, _) => {
+                unreadable += 1;
+                unreadable_ids.extend(c);
+            }
+        }
+    }
     let regions: Vec<(u32, &EsfRecord)> = world
         .record_array("CAI_WORLD_REGIONS")
         .map_or(&[][..], |a| a.items.as_slice())
@@ -128,7 +150,7 @@ pub fn read_ai_areas(root: &EsfRecord) -> Vec<AiArea> {
         .filter_map(|item| Some((id(item)?, class(item, "CAI_REGION")?)))
         .collect();
     let index: BTreeMap<u32, usize> = regions.iter().enumerate().map(|(i, (id, _))| (*id, i)).collect();
-    let mut dropped = 0usize;
+    let (mut dropped, mut dropped_hlcis) = (0usize, 0usize);
     let areas = regions
         .iter()
         .map(|(me, r)| {
@@ -139,11 +161,25 @@ pub fn read_ai_areas(root: &EsfRecord) -> Vec<AiArea> {
                     None => dropped += 1,
                 }
             }
-            AiArea { key: r.get(10).and_then(EsfNode::as_str).unwrap_or_default().to_string(), links }
+            let mut own = Vec::new();
+            for h in r.get(1).and_then(EsfNode::as_u32_array).unwrap_or_default() {
+                match hlcis.get(h) {
+                    Some(h) => own.push(h.clone()),
+                    None if unreadable_ids.contains(h) => {}
+                    None => dropped_hlcis += 1,
+                }
+            }
+            AiArea { key: r.get(10).and_then(EsfNode::as_str).unwrap_or_default().to_string(), links, hlcis: own }
         })
         .collect();
     if dropped > 0 {
         log::warn!("load: {dropped} CAI region links name no known boundary or area; left out");
+    }
+    if unreadable > 0 {
+        log::warn!("load: {unreadable} CAI_REGION_HLCI records have no id, no connectivity index or no pieces array; left out, so their regions lack that land mass");
+    }
+    if dropped_hlcis > 0 {
+        log::warn!("load: {dropped_hlcis} CAI region HLCI ids name no HLCI record; left out");
     }
     areas
 }
@@ -174,6 +210,7 @@ pub fn fill(root: &EsfRecord, model: &mut CampaignModel) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ntw_formats::esf::EsfRecordArray;
 
     fn s(v: &str) -> EsfNode {
         EsfNode::Utf16String(v.to_string())
@@ -193,5 +230,49 @@ mod tests {
         rec.children = vec![EsfNode::I32(1), s("x"), s("m"), s("p"), flag];
         let k = faction_ai_keys(&rec).expect("keys");
         assert_eq!((k.manager.as_str(), k.personality.as_str()), ("m", "p"));
+    }
+    /// `CAI_WORLD_REGION_HLCIS[]` (`0x00BEDB50`): each CAI region's HLCIs (#1, by component id) with
+    /// their connectivity index (#1) and pieces (#2); an id naming no HLCI is left out, and so is a
+    /// record with no connectivity index or no pieces array (review: such a record was kept with no
+    /// pieces, or dropped and reported as an unknown id).
+    #[test]
+    fn reads_each_cai_regions_hlcis() {
+        fn item(id: u32, rec: EsfRecord) -> Vec<EsfNode> {
+            vec![EsfNode::Record(Box::new(EsfRecord::new("CAI_BDI_COMPONENT_PROPERTY_SET", 1))), EsfNode::U32(id), EsfNode::Record(Box::new(rec))]
+        }
+        let mut hlcis = EsfRecordArray::new("CAI_WORLD_REGION_HLCIS", 0);
+        for (id, index, pieces) in [(35, 2, vec![0]), (36, 9, vec![1, 4]), (39, 6, vec![])] {
+            let mut h = EsfRecord::new("CAI_REGION_HLCI", 0);
+            h.children = vec![EsfNode::U32(34), EsfNode::U32(index), EsfNode::U32Array(pieces)];
+            hlcis.items.push(item(id, h));
+        }
+        // 37 has no pieces array, 38 no connectivity index: neither is kept.
+        for (id, children) in [(37, vec![EsfNode::U32(34), EsfNode::U32(5)]), (38, vec![EsfNode::U32(34), s("made_up"), EsfNode::U32Array(vec![0])])] {
+            let mut h = EsfRecord::new("CAI_REGION_HLCI", 0);
+            h.children = children;
+            hlcis.items.push(item(id, h));
+        }
+        let mut regions = EsfRecordArray::new("CAI_WORLD_REGIONS", 1);
+        let mut r = EsfRecord::new("CAI_REGION", 1);
+        r.children = vec![EsfNode::U32Array(vec![28]), EsfNode::U32Array(vec![36, 37, 35, 38, 99, 39])];
+        r.children.extend((2..10).map(|_| EsfNode::U32(0)));
+        r.children.push(s("made_up_region"));
+        regions.items.push(item(34, r));
+        let mut world = EsfRecord::new("CAI_WORLD", 0);
+        world.children = vec![EsfNode::RecordArray(Box::new(regions)), EsfNode::RecordArray(Box::new(hlcis))];
+        let mut root = world;
+        for name in ["CAI_INTERFACE", "CAMPAIGN_MODEL", "CAMPAIGN_ENV", "ROOT"] {
+            let mut up = EsfRecord::new(name, 0);
+            up.children = vec![EsfNode::Record(Box::new(root))];
+            root = up;
+        }
+        let areas = read_ai_areas(&root);
+        assert_eq!(areas.len(), 1);
+        assert_eq!(areas[0].key, "made_up_region");
+        assert_eq!(
+            areas[0].hlcis,
+            [AiHlci { index: 9, pieces: vec![1, 4] }, AiHlci { index: 2, pieces: vec![0] }, AiHlci { index: 6, pieces: Vec::new() }],
+            "a record with an empty pieces array is read; the unreadable ones and the unknown id are left out"
+        );
     }
 }

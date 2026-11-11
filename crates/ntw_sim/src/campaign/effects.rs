@@ -58,7 +58,14 @@ pub enum BonusKind {
 }
 
 /// One entry key: the bonus kind, the engine bonus name and its qualifier ("" for basic).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// Two keys are one entry when their kinds and bonus names are equal and their qualifiers are equal
+/// ignoring ASCII case, and they sort that way. The exe's key holds each qualifier as a u32, not as
+/// text (EFFECTS_FIDELITY §1; its merge `0x00E04760` sums entries whose key words are equal), so one
+/// record has one entry however a row spells its key; ours gets the same by folding the case. Vanilla
+/// data spells each key one way, so this shows only with a mod's rows. A set keeps the spelling of the
+/// first key added.
+#[derive(Debug, Clone)]
 pub struct EffectKey {
     /// Which junction the key comes from.
     pub kind: BonusKind,
@@ -66,6 +73,92 @@ pub struct EffectKey {
     pub bonus: String,
     /// The qualifier (unit category, class, population class, agent); "" for basic.
     pub qualifier: String,
+}
+
+/// A key's three parts. An [`EffectKey`] is borrowed as this, so a read looks a set up with borrowed
+/// parts (no key built, nothing allocated) under the same order the set is sorted by.
+trait KeyParts {
+    fn parts(&self) -> (BonusKind, &str, &str);
+}
+
+impl KeyParts for EffectKey {
+    fn parts(&self) -> (BonusKind, &str, &str) {
+        (self.kind, &self.bonus, &self.qualifier)
+    }
+}
+
+impl KeyParts for (BonusKind, &str, &str) {
+    fn parts(&self) -> (BonusKind, &str, &str) {
+        *self
+    }
+}
+
+/// A qualifier as keys compare it: its bytes with ASCII letters lowered.
+fn folded(qualifier: &str) -> impl Iterator<Item = u8> + '_ {
+    qualifier.bytes().map(|b| b.to_ascii_lowercase())
+}
+
+/// The one key order ([`EffectKey`]): kind, bonus name, then the qualifier ignoring ASCII case.
+fn cmp_parts(a: (BonusKind, &str, &str), b: (BonusKind, &str, &str)) -> std::cmp::Ordering {
+    a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)).then_with(|| folded(a.2).cmp(folded(b.2)))
+}
+
+impl PartialEq for dyn KeyParts + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        cmp_parts(self.parts(), other.parts()).is_eq()
+    }
+}
+
+impl Eq for dyn KeyParts + '_ {}
+
+impl PartialOrd for dyn KeyParts + '_ {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for dyn KeyParts + '_ {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        cmp_parts(self.parts(), other.parts())
+    }
+}
+
+impl<'a> std::borrow::Borrow<dyn KeyParts + 'a> for EffectKey {
+    fn borrow(&self) -> &(dyn KeyParts + 'a) {
+        self
+    }
+}
+
+impl PartialEq for EffectKey {
+    fn eq(&self, other: &Self) -> bool {
+        cmp_parts(self.parts(), other.parts()).is_eq()
+    }
+}
+
+impl Eq for EffectKey {}
+
+impl PartialOrd for EffectKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for EffectKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        cmp_parts(self.parts(), other.parts())
+    }
+}
+
+// Equal keys hash alike: the qualifier is hashed folded, as it is compared.
+impl std::hash::Hash for EffectKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.kind.hash(state);
+        self.bonus.hash(state);
+        for b in folded(&self.qualifier) {
+            state.write_u8(b);
+        }
+        state.write_u8(0xFF);
+    }
 }
 
 impl EffectKey {
@@ -114,18 +207,11 @@ impl EffectSet {
         self.get_qualified(BonusKind::Basic, bonus, "")
     }
 
-    /// A qualified bonus (0 when absent): the value of [`Self::find_qualified`].
+    /// A qualified bonus (0 when absent), the lookup of every read: the entry of the key
+    /// (`kind`, `bonus`, `qualifier`), compared as [`EffectKey`]s are (the qualifier ignoring ASCII
+    /// case), found by the map's own search as the exe binary-searches its sorted entries (`0x00DEE380`).
     pub fn get_qualified(&self, kind: BonusKind, bonus: &str, qualifier: &str) -> f32 {
-        self.find_qualified(kind, bonus, qualifier).map_or(0.0, |(_, v)| v)
-    }
-
-    /// The lookup rule of every read: the first entry in key order of `kind` and `bonus` whose
-    /// qualifier equals `qualifier` ignoring ASCII case, with its key.
-    pub fn find_qualified(&self, kind: BonusKind, bonus: &str, qualifier: &str) -> Option<(&EffectKey, f32)> {
-        self.values
-            .iter()
-            .find(|(k, _)| k.kind == kind && k.bonus == bonus && k.qualifier.eq_ignore_ascii_case(qualifier))
-            .map(|(k, v)| (k, *v))
+        self.values.get(&(kind, bonus, qualifier) as &dyn KeyParts).copied().unwrap_or(0.0)
     }
 
     /// The int form the exe uses in integer formulas (`0x00E23E10`: rounded half to even).
@@ -162,20 +248,54 @@ impl<'a> ForceEffects<'a> {
     }
 
     /// A qualified bonus (0 when absent), the value the merged copy (faction sum with the
-    /// commander's set merged in) gives under [`EffectSet::find_qualified`]: its first matching key
-    /// is the smaller of the two sets' first matches, and its value the sum of both sets' entries
-    /// under exactly that key. So qualifiers that differ only in case are not added together.
+    /// commander's set merged in) gives under [`EffectSet::get_qualified`]: a merge adds the two
+    /// sets' entries of one key, so it is the sum of both sets' reads.
     pub fn get_qualified(&self, kind: BonusKind, bonus: &str, qualifier: &str) -> f32 {
-        let f = self.faction.and_then(|s| s.find_qualified(kind, bonus, qualifier));
-        let c = self.commander.and_then(|s| s.find_qualified(kind, bonus, qualifier));
-        match (f, c) {
-            (Some((fk, fv)), Some((ck, cv))) => match fk.cmp(ck) {
-                std::cmp::Ordering::Less => fv,
-                std::cmp::Ordering::Greater => cv,
-                std::cmp::Ordering::Equal => fv + cv,
-            },
-            (Some((_, v)), None) | (None, Some((_, v))) => v,
-            (None, None) => 0.0,
+        let read = |s: Option<&EffectSet>| s.map_or(0.0, |s| s.get_qualified(kind, bonus, qualifier));
+        read(self.faction) + read(self.commander)
+    }
+}
+
+/// A character's own effect set (traits by level + ancillaries, character +0x48C) as the rank rule
+/// is given it ([`super::seams::CharacterRank`]); it reads as the [`EffectSet`]. Either the set its
+/// caller already holds, or one built on the first read: the rank is asked for on every display and
+/// AI query, and a rank that reads no bonus of the set (an agent's, a general's without a force)
+/// then builds none.
+pub struct OwnEffects<'a>(Own<'a>);
+
+enum Own<'a> {
+    Held(&'a EffectSet),
+    Lazy { rules: &'a EffectRules, details: Option<&'a super::details::CharacterDetails>, built: std::cell::OnceCell<EffectSet> },
+}
+
+impl<'a> OwnEffects<'a> {
+    /// The set its caller holds.
+    pub fn held(set: &'a EffectSet) -> Self {
+        Self(Own::Held(set))
+    }
+
+    /// Character `c`'s set ([`Effects::character_effects`]), built on the first read.
+    pub fn of(model: &'a CampaignModel, c: CharacterId) -> Self {
+        Self(Own::Lazy { rules: &model.rules.effects, details: model.world.character_details.get(&c), built: std::cell::OnceCell::new() })
+    }
+
+    /// Whether the set exists already (held, or built by a read).
+    #[cfg(test)]
+    pub(crate) fn is_built(&self) -> bool {
+        match &self.0 {
+            Own::Held(_) => true,
+            Own::Lazy { built, .. } => built.get().is_some(),
+        }
+    }
+}
+
+impl std::ops::Deref for OwnEffects<'_> {
+    type Target = EffectSet;
+
+    fn deref(&self) -> &EffectSet {
+        match &self.0 {
+            Own::Held(set) => set,
+            Own::Lazy { rules, details, built } => built.get_or_init(|| character_set(rules, *details)),
         }
     }
 }
@@ -257,7 +377,10 @@ pub struct SavedBonus {
     pub qualifier2: String,
 }
 
-// Compared bit for bit (the value is stored exactly), so details holding it stay `Eq`.
+// Two entries are equal when they are stored alike: the value bit for bit and the qualifiers as spelled
+// (what a save writes back), so details holding it stay `Eq` and a round trip that changed a spelling
+// shows. Which entry a key adds to is a different question: `add_saved` matches the qualifiers ignoring
+// ASCII case, as `EffectKey` compares them.
 impl PartialEq for SavedBonus {
     fn eq(&self, o: &Self) -> bool {
         self.kind == o.kind
@@ -663,7 +786,8 @@ impl Effects {
     /// here a view rather than a merged copy. So an admiral's `upkeep_cost_mod_naval_all` trait lowers
     /// his fleet's upkeep (`netherlands` in `auto_after_c8`: faction −1 + `C_Admiral_Dutch_Seamanship`
     /// −5, 1006 as saved). A force without a commander has no set: the exe counts it 0 (`0x008F9C62`,
-    /// [`super::economy::faction_upkeep_split_with`]).
+    /// [`super::economy::faction_upkeep_split_with`]); which forces have a set is
+    /// [`super::economy::costed_force`].
     /// PROVISIONAL: the exe takes the force's army container (force virtual +0x38 → +0x98 → +0x24)
     /// instead of the faction sum when it has one; its content is UNKNOWN and not modelled, as in
     /// [`Self::character_total`].
@@ -780,7 +904,9 @@ fn add_saved(entries: &mut Vec<SavedBonus>, key: &EffectKey, value: f32) -> Save
     let Some((kind, bonus, how)) = saved else { return SavedAdd::NoId };
     // Type 1 has no qualifier.
     let (qualifier, qualifier2) = if kind == 1 { (String::new(), String::new()) } else { (q1.to_string(), q2.to_string()) };
-    if let Some(e) = entries.iter_mut().find(|e| e.kind == kind && e.bonus == bonus && e.qualifier == qualifier && e.qualifier2 == qualifier2) {
+    // The same entry as [`EffectKey`] compares it: the qualifiers ignoring ASCII case.
+    let same = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+    if let Some(e) = entries.iter_mut().find(|e| e.kind == kind && e.bonus == bonus && same(&e.qualifier, &qualifier) && same(&e.qualifier2, &qualifier2)) {
         e.value += value;
         return how;
     }
@@ -888,7 +1014,7 @@ fn faction_set(
             let ch = character(holder);
             // His rank through the seam, without the faction's terms (this is the faction's set being built): the
             // stored main attribute already holds his trait and ancillary attribute effects.
-            let rank = (model.rules.seams.character_rank.rule())(model, holder, &ch, false);
+            let rank = (model.rules.seams.character_rank.rule())(model, holder, &OwnEffects::held(&ch), false);
             let level = minister_level(rules, &f.government_key, rank);
             if let Some(set) = rules.ministerial.get(&(post.key.clone(), level)) {
                 s.merge(set);
@@ -912,8 +1038,49 @@ mod tests {
         r
     }
 
-    /// The force view reads as the merged copy does: equal keys add up, and of qualifiers that differ
-    /// only in case the first key in order wins, not their sum.
+    /// Qualifiers that differ only in ASCII case are one key (the exe's key holds the record, not its
+    /// text): they add up in one entry under the first spelling, read under any spelling, and are told
+    /// apart from another kind, bonus or qualifier.
+    #[test]
+    fn qualifiers_that_differ_only_in_case_are_one_key() {
+        let key = |q: &str| EffectKey { kind: BonusKind::UnitCategory, bonus: "upkeep_mod".into(), qualifier: q.into() };
+        assert_eq!(key("Infantry"), key("infantry"));
+        assert_eq!(key("Infantry").cmp(&key("infantry")), std::cmp::Ordering::Equal);
+        assert_ne!(key("infantry"), key("infantry_"));
+        assert!(key("Cavalry") < key("infantry") && key("infantry") < key("Skirmisher"), "sorted by the folded text");
+        let mut set = EffectSet::default();
+        set.add(key("Infantry"), -10.0);
+        set.add(key("infantry"), -5.0);
+        set.add(key("cavalry"), -3.0);
+        set.add(EffectKey { kind: BonusKind::UnitClass, ..key("infantry") }, -1.0);
+        set.add(EffectKey { bonus: "cost_mod".into(), ..key("INFANTRY") }, 7.0);
+        assert_eq!(set.values.len(), 4);
+        assert_eq!(set.values.keys().filter(|k| k.kind == BonusKind::UnitCategory && k.bonus == "upkeep_mod").map(|k| k.qualifier.as_str()).collect::<Vec<_>>(), ["cavalry", "Infantry"]);
+        for q in ["infantry", "Infantry", "INFANTRY"] {
+            assert_eq!(set.get_qualified(BonusKind::UnitCategory, "upkeep_mod", q), -15.0, "{q}");
+        }
+        assert_eq!(set.get_qualified(BonusKind::UnitCategory, "upkeep_mod", "cavalry"), -3.0);
+        assert_eq!(set.get_qualified(BonusKind::UnitClass, "upkeep_mod", "Infantry"), -1.0);
+        assert_eq!(set.get_qualified(BonusKind::UnitCategory, "cost_mod", "infantry"), 7.0);
+        assert_eq!(set.get_qualified(BonusKind::UnitCategory, "upkeep_mod", "artillery"), 0.0);
+        assert_eq!(set.get_qualified(BonusKind::UnitCategory, "upkeep_mod", "infantr"), 0.0);
+        // A set and its other spelling are equal, and taking one from the other leaves zeros.
+        let mut other = EffectSet::default();
+        other.add(key("INFANTRY"), -15.0);
+        let mut one = EffectSet::default();
+        one.add(key("infantry"), -15.0);
+        assert_eq!(one, other);
+        one.subtract(&other);
+        assert_eq!(one.get_qualified(BonusKind::UnitCategory, "upkeep_mod", "infantry"), 0.0);
+        assert_eq!(one.values.len(), 1);
+        // A saved entry grows under either spelling (`add_saved`).
+        let mut entries = vec![SavedBonus { kind: 0xE, bonus: 1, value: 2.0, qualifier: "Infantry".into(), ..Default::default() }];
+        assert_eq!(add_saved(&mut entries, &key("infantry"), 3.0), SavedAdd::Named);
+        assert_eq!(entries, [SavedBonus { kind: 0xE, bonus: 1, value: 5.0, qualifier: "Infantry".into(), ..Default::default() }]);
+    }
+
+    /// The force view reads as the merged copy does: the two sets' entries of one key add up,
+    /// whatever case each set spells its qualifier in.
     #[test]
     fn the_force_view_reads_as_the_merged_copy() {
         let key = |q: &str| EffectKey { kind: BonusKind::UnitCategory, bonus: "upkeep_mod".into(), qualifier: q.into() };
@@ -930,7 +1097,8 @@ mod tests {
         for q in ["infantry", "INFANTRY", "cavalry", "artillery"] {
             assert_eq!(view.get_qualified(BonusKind::UnitCategory, "upkeep_mod", q), merged.get_qualified(BonusKind::UnitCategory, "upkeep_mod", q), "{q}");
         }
-        assert_eq!(view.get_qualified(BonusKind::UnitCategory, "upkeep_mod", "infantry"), -5.0);
+        assert_eq!(view.get_qualified(BonusKind::UnitCategory, "upkeep_mod", "infantry"), -15.0);
+        assert_eq!(view.get_qualified(BonusKind::UnitCategory, "upkeep_mod", "cavalry"), -3.0);
         assert_eq!(view.get("upkeep_cost_mod_naval_all"), -6.0);
         assert_eq!(ForceEffects::faction_only(&faction).get("upkeep_cost_mod_naval_all"), -1.0);
         assert_eq!(ForceEffects::default().get("upkeep_cost_mod_naval_all"), 0.0);

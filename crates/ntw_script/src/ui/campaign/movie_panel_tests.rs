@@ -112,11 +112,55 @@ fn an_attached_movie_shows_until_the_panel_dismisses_it() {
     assert_eq!(hud.host.take_log().iter().filter(|l| l.contains("AttachCustomControl")).count(), 1);
 }
 
+/// `QuitToMainScreen` asks the game to leave; `ContinueGameSelected` sends the model's command
+/// (`CCQ_CONTINUE_GAME_SELECTED`, `0x00932B40`) and decides nothing itself.
 #[test]
-fn quit_to_main_screen_asks_the_game_to_leave_and_continue_does_nothing_yet() {
+fn quit_to_main_screen_asks_the_game_to_leave_and_continue_sends_the_models_command() {
     let hud = test_hud();
     hud.host.take_campaign_requests();
-    hud.host.lua().load("CampaignUI.QuitToMainScreen() CampaignUI.ContinueGameSelected() CampaignUI.ContinueGameSelected()").exec().unwrap();
-    assert_eq!(hud.host.take_campaign_requests(), vec![CampaignRequest::QuitToMainScreen]);
-    assert_eq!(hud.host.take_log().iter().filter(|l| l.contains("ContinueGameSelected")).count(), 1);
+    hud.host.lua().load("CampaignUI.QuitToMainScreen() CampaignUI.ContinueGameSelected()").exec().unwrap();
+    assert_eq!(hud.host.take_campaign_requests(), vec![CampaignRequest::QuitToMainScreen, CampaignRequest::Command(CampaignCommand::ContinueGameSelected)]);
+    assert!(!hud.host.take_log().iter().any(|l| l.contains("ContinueGameSelected")));
+}
+
+/// A faction lost by its victory conditions (`0x00A134E0`): the root's `ShowCampaignResultPopup(false)`
+/// for the local player's faction only; a root without it says so once.
+#[test]
+fn the_defeat_popup_opens_for_the_local_faction_only() {
+    let hud = test_hud();
+    assert!(!hud.host.campaign_lost_popup(A));
+    assert!(!hud.host.campaign_lost_popup(A));
+    assert_eq!(hud.host.take_log().iter().filter(|l| l.contains("ShowCampaignResultPopup")).count(), 1);
+    let env = hud.host.script_env(hud.root).unwrap();
+    hud.host.lua().load("shown = {}\nfunction ShowCampaignResultPopup(won) table.insert(shown, won) end").set_environment(env.clone()).exec().unwrap();
+    assert!(!hud.host.campaign_lost_popup(FactionId(2)), "another faction's defeat shows nothing here");
+    assert!(hud.host.campaign_lost_popup(A));
+    let shown: Table = env.get("shown").unwrap();
+    assert_eq!(shown.raw_len(), 1);
+    assert!(!shown.get::<bool>(1).unwrap(), "the defeat popup: won = false");
+}
+
+/// A capture choice the model holds back behind the victory screen (`CapturePreview::held`, the exe's
+/// report +0x9C) opens no capture screen until the model offers it.
+#[test]
+fn a_held_capture_opens_no_capture_screen() {
+    let hud = test_hud();
+    let env = hud.host.script_env(hud.root).unwrap();
+    hud.host.lua().load("opened = 0\nfunction SettlementLootingOptions(o) opened = opened + 1 end\nfunction ClearSettlementLootingOptions() end").set_environment(env.clone()).exec().unwrap();
+    // The state after A took the fixture's settlement: the region is A's already (the exe occupies
+    // before it asks) and the model's preview waits for the answer, held back.
+    let region = {
+        let mut st = hud._scripts.state_mut();
+        st.model.turn.humans = vec![A];
+        let region = *st.model.world.regions.keys().next().expect("the fixture's region");
+        let mut preview = st.model.capture_preview(region, A, None, false);
+        preview.held = true;
+        st.model.pending_capture = Some(preview);
+        region
+    };
+    assert!(!hud.host.campaign_capture_screen());
+    assert_eq!(env.get::<i64>("opened").unwrap(), 0);
+    hud._scripts.state_mut().model.pending_capture.as_mut().expect("still waiting").held = false;
+    assert!(hud.host.campaign_capture_screen(), "the capture of {region:?} is offered once released");
+    assert_eq!(env.get::<i64>("opened").unwrap(), 1);
 }

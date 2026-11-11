@@ -8,7 +8,7 @@
 //! ```
 
 use ntw_data::GameDatabase;
-use ntw_formats::esf::{EsfFile, EsfNode};
+use ntw_formats::esf::{EsfFile, EsfNode, EsfRecord};
 use ntw_sim::campaign::effects::{BonusKind, Effects};
 
 fn main() {
@@ -60,34 +60,41 @@ fn main() {
         let fx = Effects::compute(m);
         println!("== {file}");
         let stored = stored_upkeep(&esf);
-        let file_units = units_in_file(&esf);
-        let (mut exact_with, mut exact_without, mut n) = (0, 0, 0);
+        let (mut exact_with, mut exact_without, mut n, mut no_figure) = (0, 0, 0, 0);
         for f in m.world.factions.values() {
-            // Every unit the file holds for the faction (armies, navies and garrisons alike).
-            let units: Vec<&str> = file_units.get(&f.key).map(|v| v.iter().map(String::as_str).collect()).unwrap_or_default();
-            if units.is_empty() {
+            // The forces both totals sum: the model's costed forces (a force with no commander counts 0 in
+            // both), and `FX_UNITS` prints the same units. A faction is skipped only when it has no unit
+            // in them and the file stores no upkeep for it either (none, or 0 / 0): a stored figure with
+            // no costed unit is a row to see.
+            let forces: Vec<_> = m.world.forces.values().filter(|x| x.faction == f.id && ntw_sim::campaign::economy::costed_force(x).is_some()).collect();
+            let s = stored.get(&f.key).copied();
+            if forces.iter().all(|x| x.units.is_empty()) && matches!(s, None | Some((0, 0))) {
                 continue;
             }
             if std::env::var("FX_UNITS").is_ok_and(|k| k == f.key) {
+                let units: Vec<&str> = forces.iter().flat_map(|x| x.units.iter().map(|u| u.unit_key.as_str())).collect();
                 println!("{} units: {:?}", f.key, units);
             }
             // The model's per-force rule (each force costed with its commander's set).
             let (land, naval) = ntw_sim::campaign::economy::faction_upkeep_split_with(m, &fx, f.id);
             let with = (i64::from(land), i64::from(naval));
+            // The same units without the effects, from the unit table the rule reads (a key it lacks
+            // counts 0 in both totals).
             let mut without = (0i64, 0i64);
-            for k in &units {
-                let Some(rec) = db.unit(k) else { continue };
-                let naval = rec.category.starts_with("naval");
-                let slot = if naval { &mut without.1 } else { &mut without.0 };
-                *slot += i64::from(rec.upkeep);
+            for force in &forces {
+                for u in &force.units {
+                    let Some(rec) = m.rules.units.get(&u.unit_key) else { continue };
+                    let slot = if force.is_navy { &mut without.1 } else { &mut without.0 };
+                    *slot += i64::from(rec.upkeep);
+                }
             }
-            let s = stored.get(&f.key).copied();
-            n += 1;
-            if s == Some(with) {
-                exact_with += 1;
-            }
-            if s == Some(without) {
-                exact_without += 1;
+            // Only a faction with a stored figure can be exact or not.
+            if s.is_some() {
+                n += 1;
+                exact_with += usize::from(s == Some(with));
+                exact_without += usize::from(s == Some(without));
+            } else {
+                no_figure += 1;
             }
             let sums: Vec<String> = bonuses.iter().map(|b| format!("{b}={}", fx.faction(f.id, b))).filter(|x| !x.ends_with("=0")).collect();
             println!(
@@ -101,7 +108,7 @@ fn main() {
                 sums.join(" ")
             );
         }
-        println!("upkeep exact: with effects {exact_with}/{n}, without {exact_without}/{n}");
+        println!("upkeep exact: with effects {exact_with}/{n}, without {exact_without}/{n} ({no_figure} more with units and no stored figure)");
         taxes_check(m, &fx, &esf);
         difficulty_check(m);
         if let Ok(k) = std::env::var("FX_TECH")
@@ -119,17 +126,27 @@ fn main() {
     }
 }
 
-/// The newest `ECONOMICS_DATA` #5[1] (land upkeep) and #5[2] (naval upkeep) per faction key.
+/// Every faction record of the file with its key (its first string, as the loader reads it): the
+/// `FACTION_ARRAY` items, then `WORLD/REBEL_FACTION/FACTION`, which the model lists too.
+fn faction_records(esf: &EsfFile) -> Vec<(&str, &EsfRecord)> {
+    let Some(world) = esf.root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD") else { return Vec::new() };
+    let listed = world.record_array("FACTION_ARRAY").into_iter().flat_map(|a| a.items.iter()).filter_map(|item| item.first().and_then(EsfNode::as_record));
+    let rebels = world.child("REBEL_FACTION").and_then(|r| r.child("FACTION"));
+    listed.chain(rebels).filter_map(|f| Some((f.values().find_map(EsfNode::as_str)?, f))).collect()
+}
+
+/// The newest `ECONOMICS_DATA` record of a faction (the last of its `FACTION_ECONOMICS` history).
+fn newest_economics(faction: &EsfRecord) -> Option<&EsfRecord> {
+    let history = faction.child("FACTION_ECONOMICS")?.get(0)?.as_record_array()?;
+    history.items.last()?.first()?.as_record()
+}
+
+/// The newest `ECONOMICS_DATA` #5[1] (land upkeep) and #5[2] (naval upkeep) per faction key. A
+/// faction with no history record has no entry.
 fn stored_upkeep(esf: &EsfFile) -> std::collections::BTreeMap<String, (i64, i64)> {
     let mut out = std::collections::BTreeMap::new();
-    let Some(arr) = esf.root.find_record_array("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD/FACTION_ARRAY") else { return out };
-    for item in &arr.items {
-        let Some(f) = item.first().and_then(EsfNode::as_record) else { continue };
-        let Some(key) = f.values().find_map(EsfNode::as_str) else { continue };
-        let Some(e) = f.child("FACTION_ECONOMICS") else { continue };
-        let Some(h) = e.get(0).and_then(EsfNode::as_record_array) else { continue };
-        let Some(d) = h.items.last().and_then(|it| it.first()).and_then(EsfNode::as_record) else { continue };
-        let Some(a) = d.get(5).and_then(EsfNode::as_i32_array) else { continue };
+    for (key, f) in faction_records(esf) {
+        let Some(a) = newest_economics(f).and_then(|d| d.get(5)).and_then(EsfNode::as_i32_array) else { continue };
         out.insert(key.to_string(), (i64::from(a.get(1).copied().unwrap_or(0)), i64::from(a.get(2).copied().unwrap_or(0))));
     }
     out
@@ -150,52 +167,17 @@ fn human_of(esf: &EsfFile) -> Option<String> {
     None
 }
 
-/// Every `UNIT_RECORD_KEY` under each faction's `ARMY_ARRAY`, by faction key.
-fn units_in_file(esf: &EsfFile) -> std::collections::BTreeMap<String, Vec<String>> {
-    let mut out: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
-    let Some(arr) = esf.root.find_record_array("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD/FACTION_ARRAY") else { return out };
-    for item in &arr.items {
-        let Some(f) = item.first().and_then(EsfNode::as_record) else { continue };
-        let Some(key) = f.values().find_map(EsfNode::as_str) else { continue };
-        let Some(armies) = f.record_array("ARMY_ARRAY") else { continue };
-        let list = out.entry(key.to_string()).or_default();
-        for a in armies.records() {
-            a.walk(&mut |r: &ntw_formats::esf::EsfRecord| {
-                if r.name == "UNIT_RECORD_KEY"
-                    && let Some(k) = r.get_str(0)
-                {
-                    list.push(k.to_string());
-                }
-            });
-        }
-    }
-    out
-}
-
-/// Faction taxes with the effect bonuses (tax efficiency with `admin_cost_mod`; per region: the
-/// governor/minister bonus (here `tax_bonus_minister`: every region is taken as home theatre,
-/// PROVISIONAL), `tax_bonus_building` of the region, `tax_bonus_technology` of the faction) next to the
-/// stored taxes (`ECONOMICS_DATA` #1[0], newest record) and the model without effects.
+/// Faction taxes by the model's rule (`economy::region_taxes_with`: the tax efficiency with
+/// `admin_cost_mod` and the region's `economy::tax_bonuses`) next to the stored taxes (`ECONOMICS_DATA`
+/// #1[0], newest record) and to the same rule with no effect at all (an empty [`Effects`]: no bonus,
+/// `admin_cost_mod` 0). Both columns read the same regions' wealth, so they differ only by the effects.
 fn taxes_check(m: &ntw_sim::campaign::CampaignModel, fx: &Effects, esf: &EsfFile) {
     use ntw_sim::campaign::economy;
-    let mut stored = std::collections::BTreeMap::new();
-    if let Some(arr) = esf.root.find_record_array("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD/FACTION_ARRAY") {
-        for item in &arr.items {
-            let Some(f) = item.first().and_then(EsfNode::as_record) else { continue };
-            let Some(key) = f.values().find_map(EsfNode::as_str) else { continue };
-            let v = f
-                .child("FACTION_ECONOMICS")
-                .and_then(|e| e.get(0))
-                .and_then(EsfNode::as_record_array)
-                .and_then(|h| h.items.last())
-                .and_then(|it| it.first())
-                .and_then(EsfNode::as_record)
-                .and_then(|d| d.get(1))
-                .and_then(EsfNode::as_i32_array)
-                .and_then(|a| a.first().copied());
-            stored.insert(key.to_string(), v);
-        }
-    }
+    let stored: std::collections::BTreeMap<&str, i32> = faction_records(esf)
+        .into_iter()
+        .filter_map(|(key, f)| Some((key, *newest_economics(f)?.get(1)?.as_i32_array()?.first()?)))
+        .collect();
+    let none = Effects::default();
     let (mut exact_fx, mut exact_plain, mut n) = (0, 0, 0);
     for f in m.world.factions.values() {
         let regions: Vec<&ntw_sim::campaign::Region> = m.world.regions.values().filter(|r| r.owner == f.id).collect();
@@ -203,27 +185,15 @@ fn taxes_check(m: &ntw_sim::campaign::CampaignModel, fx: &Effects, esf: &EsfFile
             continue;
         }
         let admin = fx.faction.get(&f.id).map_or(0, |s| s.get_int("admin_cost_mod"));
-        let eff = economy::tax_efficiency(&m.rules, regions.len() as i32, admin);
-        let mut taxes = 0;
-        for r in &regions {
-            if r.tax_exempt {
-                continue;
-            }
-            let bonuses = economy::TaxBonuses {
-                character: fx.faction(f.id, "tax_bonus_minister"),
-                building: fx.region_local(r.id, "tax_bonus_building"),
-                technology: fx.faction(f.id, "tax_bonus_technology"),
-            };
-            taxes += [&f.tax_lower, &f.tax_upper]
-                .into_iter()
-                .map(|level| economy::class_taxes(economy::effective_tax_rate(m.rules.tax_rate(level), eff, bonuses), r.gdp, r.town_wealth))
-                .sum::<i32>();
+        let taxes: i32 = regions.iter().map(|r| economy::region_taxes_with(m, fx, r)).sum();
+        let plain: i32 = regions.iter().map(|r| economy::region_taxes_with(m, &none, r)).sum();
+        let s = stored.get(f.key.as_str()).copied();
+        // Only a faction with a stored figure can be exact or not.
+        if s.is_some() {
+            n += 1;
+            exact_fx += usize::from(s == Some(taxes));
+            exact_plain += usize::from(s == Some(plain));
         }
-        let plain: i32 = regions.iter().map(|r| economy::region_taxes(m, r)).sum();
-        let s = stored.get(&f.key).copied().flatten();
-        n += 1;
-        exact_fx += usize::from(s == Some(taxes));
-        exact_plain += usize::from(s == Some(plain));
         println!("  taxes {:<26} stored {:?} with effects {taxes} plain {plain} (admin {admin})", f.key, s);
     }
     println!("taxes exact: with effects {exact_fx}/{n}, plain {exact_plain}/{n}");
@@ -232,10 +202,7 @@ fn taxes_check(m: &ntw_sim::campaign::CampaignModel, fx: &Effects, esf: &EsfFile
 /// Prints every faction's saved `CAMPAIGN_BONUS_VALUES` blocks (`FACTION` #54 base, #55 base + difficulty
 /// handicap) as (type, bonus id, value, qualifier).
 fn bonus_blocks(esf: &EsfFile) {
-    let Some(arr) = esf.root.find_record_array("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD/FACTION_ARRAY") else { return };
-    for item in &arr.items {
-        let Some(f) = item.first().and_then(EsfNode::as_record) else { continue };
-        let Some(key) = f.values().find_map(EsfNode::as_str) else { continue };
+    for (key, f) in faction_records(esf) {
         for idx in [54, 55] {
             let Some(rec) = f.get(idx).and_then(EsfNode::as_record) else { continue };
             let mut blocks = Vec::new();
@@ -254,7 +221,8 @@ fn bonus_blocks(esf: &EsfFile) {
 }
 
 /// The saved `FACTION` #55 (base + difficulty handicap) against #54 + the model's difficulty set for
-/// (difficulty, human).
+/// (difficulty, human). A faction that differs because its stored #55 is just its #54 (the file holds
+/// no handicap entry at all: a campaign whose start did not build #55) is counted on its own.
 fn difficulty_check(m: &ntw_sim::campaign::CampaignModel) {
     use ntw_sim::campaign::effects::{apply_start_handicaps, saved_set};
     let mut rebuilt = m.clone();
@@ -265,7 +233,7 @@ fn difficulty_check(m: &ntw_sim::campaign::CampaignModel) {
             println!("  table ({d},{h}): {}", v.join(" "));
         }
     }
-    let (mut ok, mut n) = (0, 0);
+    let (mut ok, mut n, mut bare) = (0, 0, 0);
     for f in m.world.factions.values() {
         let Some(d) = m.world.faction_details.get(&f.id) else { continue };
         if d.bonus_with_difficulty.is_empty() && d.bonus_base.is_empty() {
@@ -278,9 +246,12 @@ fn difficulty_check(m: &ntw_sim::campaign::CampaignModel) {
         model.values.retain(|_, v| *v != 0.0);
         let mut saved = saved_set(&d.bonus_with_difficulty);
         saved.values.retain(|_, v| *v != 0.0);
+        let mut base = saved_set(&d.bonus_base);
+        base.values.retain(|_, v| *v != 0.0);
         n += 1;
         let same = model == saved;
         ok += usize::from(same);
+        bare += usize::from(!same && saved == base);
         let show = |s: &ntw_sim::campaign::effects::EffectSet| {
             s.values.iter().map(|(k, v)| if k.kind == BonusKind::Basic { format!("{}={v}", k.bonus) } else { format!("{:?}:{}:{}={v}", k.kind, k.bonus, k.qualifier) }).collect::<Vec<_>>().join(" ")
         };
@@ -288,5 +259,5 @@ fn difficulty_check(m: &ntw_sim::campaign::CampaignModel) {
             println!("  difficulty {:<24} diff {diff} human {human} {}\n    saved #55: {}\n    model    : {}", f.key, if same { "ok" } else { "DIFFERS" }, show(&saved), show(&model));
         }
     }
-    println!("difficulty (#55 = #54 + handicap): {ok}/{n}");
+    println!("difficulty (#55 = #54 + handicap): {ok}/{n}; of the rest, {bare} store #55 = #54 (no handicap entry in the file)");
 }

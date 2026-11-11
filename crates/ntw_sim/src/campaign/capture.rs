@@ -108,6 +108,16 @@ pub struct CapturePreview {
     /// `CharacterLootedSettlement`.
     #[cfg_attr(feature = "serde", serde(default))]
     pub looter: Option<CharacterId>,
+    /// The choice is held back while the victory screen is up (report +0x9C, CONFIRMED by disassembly:
+    /// cleared by the report's constructor at `0x00886087`; set by the victory check `0x0096CD10` at
+    /// `0x0096CE7C` on the report on top of the pending-action stack when a human has won; cleared by
+    /// `CCQ_CONTINUE_GAME_SELECTED` `0x00932B40`; read only by the report's step `0x008F8D00` at
+    /// `0x008F8D32`, which leaves a held report waiting unless the scripts' looting switch +0x114 is
+    /// set). While set the choice is not offered ([`CampaignModel::victory_check`],
+    /// [`CampaignModel::continue_game_selected`]). The exe's save does not keep the pending-action
+    /// stack; an own save from before the field reads false.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub held: bool,
 }
 
 /// `0x00B14560`: one building's damage roll. Returns (new health, value). Draws once from `rng`.
@@ -219,7 +229,7 @@ impl CampaignModel {
             occupy.fortification = Some(damage_roll(&mut self.rng, b.health, cost, OCCUPY_DAMAGE, loot_value).0);
         }
         let looter = by.and_then(|f| self.world.forces.get(&f)).and_then(|f| f.commander);
-        let mut preview = CapturePreview { region, faction, surrender, loot, occupy, liberate: self.liberation_target(region, faction), looter };
+        let mut preview = CapturePreview { region, faction, surrender, loot, occupy, liberate: self.liberation_target(region, faction), looter, held: false };
         if self.turn.humans.contains(&faction) {
             for o in [&mut preview.loot, &mut preview.occupy] {
                 let mut m = self.clone();
@@ -315,11 +325,14 @@ impl CampaignModel {
         let skip_choice = self.capture_skips_choice(region, by);
         self.occupy(region, faction, by, events);
         let preview = self.capture_preview(region, faction, by, surrender);
-        if skip_choice {
+        let human = self.turn.humans.contains(&faction);
+        // A human also occupies at once while the scripts' looting switch is set
+        // ([`World::looting_options_disabled_for_human`](super::World::looting_options_disabled_for_human), read at
+        // `0x008F8D22`, tested at `0x008F8DBF`, which jumps to the occupy at `0x008F8EB3`; CONFIRMED). The exe reads it
+        // when it processes the report; ours settles in that same step, so no script can change it in between.
+        if skip_choice || (human && self.world.looting_options_disabled_for_human) {
             self.resolve_capture(preview, CaptureChoice::Occupy, events);
-        } else if self.turn.humans.contains(&faction) {
-            // PROVISIONAL: the exe also occupies at once for a human when a campaign byte is set (model
-            // +0xFA8 → +0x114, read at `0x008F8D22`, tested at `0x008F8DBF`); what sets it is not traced.
+        } else if human {
             // A capture still waiting is settled as an occupation first (PROVISIONAL: the original's screen is modal).
             if let Some(old) = self.pending_capture.take() {
                 self.resolve_capture(old, CaptureChoice::Occupy, events);
@@ -359,10 +372,11 @@ impl CampaignModel {
     /// A capture by force without the battle: `faction` takes the settlement as after a won assault or an
     /// undefended settlement (`settle_capture`: a human's choice waits in [`CampaignModel::pending_capture`]).
     /// For harnesses and tests that stage a capture; the game's own path goes through the battle or
-    /// `AttackSettlement`.
+    /// `AttackSettlement`. Ends the update as a command does ([`CampaignModel::end_update`]).
     pub fn capture_by_force(&mut self, region: RegionId, faction: FactionId, by: Option<ForceId>) -> Vec<CampaignEvent> {
         let mut events = Vec::new();
         self.settle_capture(region, faction, by, false, &mut events);
+        self.end_update(&mut events);
         events
     }
 
@@ -422,8 +436,13 @@ impl CampaignModel {
         events.push(CampaignEvent::CaptureResolved { region: p.region, faction: p.faction, choice, money });
     }
 
-    /// Command `ChooseCapture`: the human's answer to [`CampaignModel::pending_capture`].
+    /// Command `ChooseCapture`: the human's answer to [`CampaignModel::pending_capture`]. A choice
+    /// held back behind the victory screen ([`CapturePreview::held`]) was not offered yet, so it takes
+    /// no answer (ours: the exe's capture screen is not open then, so its command cannot come).
     pub(crate) fn choose_capture(&mut self, choice: CaptureChoice) -> Result<Vec<CampaignEvent>, CommandError> {
+        if self.pending_capture.as_ref().is_some_and(|p| p.held) {
+            return Err(CommandError::Unsupported("the capture choice waits for the victory screen"));
+        }
         let p = self.pending_capture.take().ok_or(CommandError::Unsupported("no capture is waiting for a choice"))?;
         let mut events = Vec::new();
         self.resolve_capture(p, choice, &mut events);

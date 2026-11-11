@@ -38,9 +38,10 @@
 //! | 12 | the director's stored CAI relation beliefs keep their ally list (`RelationBelief::allies`); an older save's stored beliefs get it rebuilt from the loaded world, which leaves off an ally destroyed since the belief was stored (see [`read_with_start`]) |
 //! | 13 | risen armies keep their side in the rising (`World::rebel_army_sides`: the `REBEL_SETUP` faction and the `REBEL_DATA` +0x34 value, which the capture report reads); an older save has none and nothing holds them (the start has no risen army of the save), so its risen armies never skip the capture choice; the load warns once with their count. The CAI random stream (`CampaignModel::cai_rng`, `CAI_INTERFACE` #0); an older save starts it from the exe preset (see [`read_with_start`])
 //! | 14 | regions keep their demand per commodity (`Region::commodity_demand`, `REGION` #32), which the load leaves as stored; an older save's regions get it from the demand step on the save's own GDP and town wealth (see [`read_with_start`]) |
+//! | 15 | the CAI map areas keep their high level connectivity indexes (`AiArea::hlcis`, `CAI_REGION` #1), from which the regions' land masses are built at map attach; an older save's areas take them from the campaign's start, or without one every region counts as lying on one land mass, with a warning (see [`read_with_start`]) |
 //!
 //! **What is saved.** The whole [`CampaignModel`] except the fields marked `serde(skip)` in
-//! `ntw_sim`: game data rebuilt on load (`rules` from the DB, `terrain` from the map), fields the
+//! `ntw_sim`: game data rebuilt on load (`rules` from the DB, `terrain` and the regions' land masses from the map), fields the
 //! original does not save either (the trait / ancillary script RNGs, the open negotiation, a duel
 //! wound, sabotage marks, agents' used actions, spy-network sight, the regions' gain order: its reload
 //! rebuilds each faction's region list in the manager's order) and the ESF writer's own
@@ -60,7 +61,7 @@ use crate::{CampaignInfo, LoadError, LoadedCampaign};
 /// The first bytes of every save in this format.
 pub const MAGIC: &[u8; 16] = b"NAPOLEONRUST\0SAV";
 /// The format version this build writes and the newest it reads.
-pub const FORMAT_VERSION: u32 = 14;
+pub const FORMAT_VERSION: u32 = 15;
 
 /// Everything a save holds besides its header.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -265,7 +266,7 @@ pub fn read(bytes: &[u8], db: &GameDatabase) -> Result<LoadedCampaign, FormatErr
 
 /// [`read`], converting a save older than [`FORMAT_VERSION`] from `start`, the campaign at its start
 /// (its source's [`new_campaign`](crate::source::CampaignSource::new_campaign) model), called only
-/// for a save older than version 11:
+/// for a save older than version 11, or older than version 15 when it holds CAI map areas:
 /// * version 1 → 2: every region takes the unit resources (`RESOURCES_ARRAY`) of the start's region
 ///   of the same key. Nothing in the campaign changes a region's resources, so the start's are the
 ///   ones the save would hold. A region the start does not have fails the load: never a region left
@@ -328,11 +329,21 @@ pub fn read(bytes: &[u8], db: &GameDatabase) -> Result<LoadedCampaign, FormatErr
 ///   refresh replaces the GDP. The older save did not keep the demand the exe would hold (built at the last
 ///   round start from the GDP before that round start's own refresh, and changed by the round's events), so
 ///   until the next round start rebuilds it the faction demand and the prices can differ from it.
+/// * version 14 → 15: an older save's CAI map areas (`World::ai_areas`) hold no high level connectivity
+///   indexes (`AiArea::hlcis` reads empty), the data the regions' land masses are built from at map attach
+///   (`World::region_land_masses`, `crate::trade::attach_land_masses`). Each area takes the HLCIs of the
+///   start's area of the same key: they are static data of the CAI world (nothing in our model changes
+///   them). An area the start does not have keeps none, counted in one warning. Without a usable start the
+///   load goes on with a warning and the region groups take every region to lie on one land mass. A save
+///   with no CAI areas (a map without them, or an own save written before `World::ai_areas` was stored,
+///   which reads them empty) has nothing to take and does not read the start.
 pub fn read_with_start(bytes: &[u8], db: &GameDatabase, start: impl FnOnce() -> Result<CampaignModel, String>) -> Result<LoadedCampaign, FormatError> {
     let (version, info, data) = read_stored(bytes)?;
     let mut model = data.model;
-    // Only the steps before version 11 need the start (built here, once, before the steps).
-    let start = (version < 11).then(start);
+    // Only the steps before version 11, and the land-mass step of a save with CAI areas, need the
+    // start (built here, once, before the steps).
+    let needs_hlcis = version < 15 && !model.world.ai_areas.is_empty();
+    let start = (version < 11 || needs_hlcis).then(start);
     if version < 3 {
         let fail = |reason: String| FormatError::NeedsStart { found: version, reason };
         let start = match &start {
@@ -354,8 +365,7 @@ pub fn read_with_start(bytes: &[u8], db: &GameDatabase, start: impl FnOnce() -> 
             model.world.restricted_units.push(key);
         }
     }
-    let units = std::mem::take(&mut model.world.restricted_units);
-    model.world.restricted_units = crate::known_restricted_units(&model, units, "the own save's restricted units");
+    crate::drop_unknown_restricted_units(&model.rules.units, &mut model.world.restricted_units, "the own save's restricted units");
     if version < 4 {
         let n = model.convert_legacy_repairs();
         if n > 0 {
@@ -422,6 +432,19 @@ pub fn read_with_start(bytes: &[u8], db: &GameDatabase, start: impl FnOnce() -> 
         model.refresh_all_demand();
         log::info!("Own save format version {version}: the demand of {} regions built from the save's GDP and town wealth", model.world.regions.len());
     }
+    if needs_hlcis {
+        match &start {
+            Some(Ok(start)) => {
+                let (taken, unknown) = copy_area_hlcis(&mut model, start);
+                log::info!("Own save format version {version}: the land-mass data (HLCIs) of {taken} CAI areas taken from the campaign's start");
+                if unknown > 0 {
+                    log::warn!("Own save format version {version}: {unknown} CAI areas are not in the campaign's start and keep no land-mass data (the map attach reports the regions left on no land mass)");
+                }
+            }
+            Some(Err(e)) => log::warn!("Own save format version {version}: the CAI areas' land-mass data (HLCIs) was not restored (no campaign start: {e}); the region groups take every region to lie on one land mass"),
+            None => {}
+        }
+    }
     finish_load(&mut model);
     Ok(LoadedCampaign {
         model,
@@ -455,6 +478,23 @@ pub fn loaded_state_hash(model: &CampaignModel) -> u64 {
     let mut as_loaded = model.clone();
     finish_load(&mut as_loaded);
     as_loaded.saved_state_hash()
+}
+
+/// The version 14 → 15 step of [`read_with_start`]: each CAI map area takes the HLCIs of the start's area
+/// of the same key; returns how many areas the start had and how many it did not (those keep none).
+fn copy_area_hlcis(model: &mut CampaignModel, start: &CampaignModel) -> (usize, usize) {
+    let by_key: std::collections::BTreeMap<&str, &ntw_sim::campaign::AiArea> = start.world.ai_areas.iter().map(|a| (a.key.as_str(), a)).collect();
+    let (mut taken, mut unknown) = (0, 0);
+    for a in &mut model.world.ai_areas {
+        match by_key.get(a.key.as_str()) {
+            Some(s) => {
+                a.hlcis.clone_from(&s.hlcis);
+                taken += 1;
+            }
+            None => unknown += 1,
+        }
+    }
+    (taken, unknown)
 }
 
 /// The version 7 → 8 step of [`read_with_start`]: copies the trade network's static course from the campaign's

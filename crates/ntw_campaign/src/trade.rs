@@ -434,12 +434,106 @@ pub fn attach_trade_nodes(m: &mut CampaignModel, map_nodes: &[(String, (f32, f32
 }
 
 /// Attaches the campaign map's static data the model reads: the trade nodes' DB rows
-/// ([`attach_trade_nodes`]), the regions' land neighbours ([`attach_region_neighbours`]) and the
-/// black shroud outlines (`World::black_shroud_outlines`).
+/// ([`attach_trade_nodes`]), the regions' land neighbours ([`attach_region_neighbours`]), their land
+/// masses ([`attach_land_masses`]), the black shroud outlines (`World::black_shroud_outlines`) and
+/// the settlements' area outlines ([`attach_settlement_areas`]).
 pub fn attach_map(m: &mut CampaignModel, map: &ntw_formats::campaign_map::RegionMap) {
     attach_trade_nodes(m, &map.trade_nodes);
     attach_region_neighbours(m, map);
+    attach_land_masses(m, map);
     m.world.black_shroud_outlines = map.black_shroud_outlines.clone();
+    attach_settlement_areas(m, map);
+}
+
+/// Fills `World::settlement_area_outlines` for `0x008AF750`: the area index at each region's
+/// settlement (the exe asks its map quadtree `0x00AA0FD0`, whose record's high half is the index of
+/// the area within its map region, `0x00A0BBD0`; ours finds the area whose triangles hold the point,
+/// the same area for any point inside one) and the outlines of the region's own area at that index
+/// (area `+0x44` is its index in the region's list: the loader `0x00A4A7B0` passes each area its
+/// running index and the area constructor `0x00A49C30` stores it, 16 bits, at `0x00A49CA8`;
+/// CONFIRMED). The settlement position is the model's, Fixed20 read as map units as the exe reads
+/// it.
+///
+/// A region is left out, and named in one warning per cause, when its settlement is on no area (or
+/// the map has no region of its key, or no area at that index) and when one of the area's outlines
+/// names a vertex past the map's vertex list (a damaged map: an outline with a point missing would
+/// give a wrong entry point, so none is given). The model then measures from the force's own
+/// position (`World::settlement_area_outlines`). A map region with an area face naming a vertex past
+/// the list is named in a third warning (the face is skipped, so a settlement on it reads as on no
+/// area).
+pub fn attach_settlement_areas(m: &mut CampaignModel, map: &ntw_formats::campaign_map::RegionMap) {
+    let (out, gaps) = settlement_areas(&m.world, map);
+    if !gaps.no_area.is_empty() {
+        log::warn!("map: {} regions have no map area at their settlement, so an expulsion measures the way to them from the army's own position: {:?}", gaps.no_area.len(), gaps.no_area);
+    }
+    if !gaps.bad_outline.is_empty() {
+        log::warn!("map: {} regions' settlement areas have an outline vertex past the map's vertex list and are left out, so an expulsion measures the way to them from the army's own position: {:?}", gaps.bad_outline.len(), gaps.bad_outline);
+    }
+    if !gaps.bad_face.is_empty() {
+        log::warn!("map: {} map regions have an area face naming a vertex past the map's vertex list; the face is skipped, so a settlement standing on it reads as on no area: {:?}", gaps.bad_face.len(), gaps.bad_face);
+    }
+    m.world.settlement_area_outlines = out;
+}
+
+/// The regions [`settlement_areas`] left out, by key, each list reported once by
+/// [`attach_settlement_areas`].
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SettlementAreaGaps {
+    /// No map region of the key, the settlement on no area, or no area of the region at that index.
+    no_area: Vec<String>,
+    /// An outline of the area names a vertex past the map's vertex list.
+    bad_outline: Vec<String>,
+    /// Map regions (by their own key, game region or not) with an area face that names a vertex
+    /// past the map's vertex list: the face is skipped when looking for the area under a
+    /// settlement, so a settlement on it is among `no_area`.
+    bad_face: Vec<String>,
+}
+
+/// The settlement area outlines by region, each outline a loop of map points
+/// (`World::settlement_area_outlines`).
+type AreaOutlines = BTreeMap<RegionId, Vec<Vec<(f32, f32)>>>;
+
+/// The settlement area outlines of every game region that has them (see
+/// [`attach_settlement_areas`]) and the regions left out.
+fn settlement_areas(w: &ntw_sim::campaign::World, map: &ntw_formats::campaign_map::RegionMap) -> (AreaOutlines, SettlementAreaGaps) {
+    let v = |i: u32| map.vertices.get(i as usize).copied();
+    let holds = |area: &ntw_formats::campaign_map::RegionArea, p: (f32, f32)| {
+        area.faces.as_chunks::<3>().0.iter().any(|t| match (v(t[0]), v(t[1]), v(t[2])) {
+            (Some(a), Some(b), Some(c)) => in_triangle(p, a, b, c),
+            _ => false,
+        })
+    };
+    let mut out = BTreeMap::new();
+    let mut gaps = SettlementAreaGaps {
+        bad_face: map.regions.iter().filter(|mr| mr.areas.iter().any(|a| a.faces.iter().any(|&i| v(i).is_none()))).map(|mr| mr.key.clone()).collect(),
+        ..SettlementAreaGaps::default()
+    };
+    for r in w.regions.values() {
+        let p = (r.settlement.position.0.to_f32(), r.settlement.position.1.to_f32());
+        let area = map.regions.iter().find(|mr| mr.key == r.key).and_then(|mr| {
+            let index = map.regions.iter().find_map(|x| x.areas.iter().position(|a| holds(a, p)))?;
+            mr.areas.get(index)
+        });
+        let Some(area) = area else {
+            gaps.no_area.push(r.key.clone());
+            continue;
+        };
+        let loops: Option<Vec<Vec<(f32, f32)>>> = area.outlines.iter().map(|l| l.iter().map(|&i| v(i)).collect()).collect();
+        match loops {
+            Some(loops) => {
+                out.insert(r.id, loops);
+            }
+            None => gaps.bad_outline.push(r.key.clone()),
+        }
+    }
+    (out, gaps)
+}
+
+/// True when `p` is inside or on triangle (a, b, c), either winding.
+fn in_triangle(p: (f32, f32), a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> bool {
+    let side = |u: (f32, f32), w: (f32, f32)| (w.0 - u.0) * (p.1 - u.1) - (w.1 - u.1) * (p.0 - u.0);
+    let (d1, d2, d3) = (side(a, b), side(b, c), side(c, a));
+    !((d1 < 0.0 || d2 < 0.0 || d3 < 0.0) && (d1 > 0.0 || d2 > 0.0 || d3 > 0.0))
 }
 
 /// Fills `World::region_neighbours` from the map's outline connectivity: two game regions are
@@ -455,4 +549,282 @@ pub fn attach_region_neighbours(m: &mut CampaignModel, map: &ntw_formats::campai
         out.insert(id, list);
     }
     m.world.region_neighbours = out;
+}
+
+/// Fills `World::region_land_masses`: each game region's CAI area's HLCIs (`AiArea::hlcis`) that pass
+/// `0x00C5C490`, i.e. have a piece whose area of the region's map region (`regions.esf` `areas[]`,
+/// the piece resolved by `0x00C47A00`) has flag #2 set (area byte +2, read by `0x00A49C30`).
+///
+/// Left empty when no area carries HLCIs: the region groups then take every region to lie on one
+/// land mass (no warning for a campaign with no CAI areas at all; one when it has areas and none
+/// has an HLCI). Otherwise every game region gets an entry, so the groups never fall back to "one
+/// land mass" on partial data: a region with no CAI area or map region, or with no HLCI that
+/// passes, gets an empty one, joins no neighbour and forms a region group of its own. Each such
+/// gap, and a piece index past the map region's areas, is counted in one warning (the exe's
+/// resolve `0x00C47A00` stops at such an index and returns false; UNKNOWN what its caller then
+/// does, so leaving that piece out and reading the rest is PROVISIONAL).
+pub fn attach_land_masses(m: &mut CampaignModel, map: &ntw_formats::campaign_map::RegionMap) {
+    let w = &mut m.world;
+    w.region_land_masses.clear();
+    if w.ai_areas.iter().all(|a| a.hlcis.is_empty()) {
+        if !w.ai_areas.is_empty() {
+            log::warn!("map: none of the {} CAI areas has land-mass data (HLCIs); every region counts as lying on one land mass", w.ai_areas.len());
+        }
+        return;
+    }
+    let (out, gaps) = land_masses(w, map);
+    if gaps.missing > 0 {
+        log::warn!("map: {} regions have no CAI area or map region, so no land mass: each forms a region group of its own", gaps.missing);
+    }
+    if gaps.bad_pieces > 0 {
+        log::warn!("map: {} HLCI pieces name no area of their map region; left out of the land-mass test", gaps.bad_pieces);
+    }
+    if gaps.no_land > 0 {
+        log::warn!("map: {} regions have a CAI area but no HLCI with a land piece, so no land mass: each forms a region group of its own", gaps.no_land);
+    }
+    w.region_land_masses = out;
+}
+
+/// What [`land_masses`] could not fill, each reported once by [`attach_land_masses`].
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LandMassGaps {
+    /// Game regions with no CAI area or no map region of their key.
+    missing: usize,
+    /// HLCI pieces whose index is past their map region's areas.
+    bad_pieces: usize,
+    /// Game regions with both, but no HLCI that passes the land test.
+    no_land: usize,
+}
+
+/// The land masses of every game region (see [`attach_land_masses`]; an empty list where there is
+/// none) and what was missing.
+fn land_masses(w: &ntw_sim::campaign::World, map: &ntw_formats::campaign_map::RegionMap) -> (BTreeMap<RegionId, Vec<u32>>, LandMassGaps) {
+    let by_key: BTreeMap<&str, &ntw_formats::campaign_map::MapRegion> = map.regions.iter().map(|r| (r.key.as_str(), r)).collect();
+    let areas: BTreeMap<&str, &ntw_sim::campaign::AiArea> = w.ai_areas.iter().map(|a| (a.key.as_str(), a)).collect();
+    let mut gaps = LandMassGaps::default();
+    let mut out = BTreeMap::new();
+    for r in w.regions.values() {
+        let mut land = Vec::new();
+        match (areas.get(r.key.as_str()), by_key.get(r.key.as_str())) {
+            (Some(a), Some(mr)) => {
+                for h in &a.hlcis {
+                    let mut passes = false;
+                    for &p in &h.pieces {
+                        match mr.areas.get(p as usize) {
+                            Some(x) => passes |= x.flags[2],
+                            None => gaps.bad_pieces += 1,
+                        }
+                    }
+                    if passes {
+                        land.push(h.index);
+                    }
+                }
+                if land.is_empty() {
+                    gaps.no_land += 1;
+                }
+            }
+            _ => gaps.missing += 1,
+        }
+        out.insert(r.id, land);
+    }
+    (out, gaps)
+}
+
+#[cfg(test)]
+mod settlement_area_tests {
+    use ntw_formats::campaign_map::{MapRegion, RegionArea, RegionMap};
+
+    use super::*;
+
+    /// A map whose every region is a row of 10 x 10 squares, one area each: region `n`'s area `k`
+    /// covers x `10k..10k+10`, z `20n..20n+10`. An area's outline starts at its far corner (so the
+    /// outline order differs from the vertex order), and `bad` (region, area) gets an outline that
+    /// names a vertex the map does not have.
+    fn map(regions: &[(&str, usize)], bad: Option<(usize, usize)>) -> RegionMap {
+        let mut vertices = Vec::new();
+        let mut out = Vec::new();
+        for (n, &(key, areas)) in regions.iter().enumerate() {
+            let mut list = Vec::new();
+            for k in 0..areas {
+                let (x, z, i) = (10.0 * k as f32, 20.0 * n as f32, vertices.len() as u32);
+                vertices.extend([(x, z), (x + 10.0, z), (x + 10.0, z + 10.0), (x, z + 10.0)]);
+                let mut outline = vec![i + 2, i + 3, i, i + 1];
+                if bad == Some((n, k)) {
+                    outline[1] = u32::MAX;
+                }
+                list.push(RegionArea { faces: vec![i, i + 1, i + 2, i, i + 2, i + 3], outlines: vec![outline], flags: [false; 3] });
+            }
+            out.push(MapRegion { key: key.into(), is_sea: false, min: (0.0, 0.0), max: (1.0, 1.0), areas: list, settlement: None, neighbours: Vec::new() });
+        }
+        RegionMap {
+            bounds_min: (0.0, 0.0),
+            bounds_max: (1.0, 1.0),
+            theatre: ((0.0, 0.0), (1.0, 1.0)),
+            labels: Vec::new(),
+            vertices,
+            regions: out,
+            trade_nodes: Vec::new(),
+            ground_types: Vec::new(),
+            black_shroud_outlines: Vec::new(),
+        }
+    }
+
+    fn settle(m: &mut CampaignModel, region: u32, x: i32, z: i32) {
+        m.world.regions.get_mut(&RegionId(region)).unwrap().settlement.position = (Fixed20::from_int(x), Fixed20::from_int(z));
+    }
+
+    /// The outline a region is entered at (`0x008AF750`) is the one of its own area with the index
+    /// the map gives at its settlement, its points in the outline's order; a region whose
+    /// settlement is on no area, or whose map region is missing, gets no entry and is named.
+    #[test]
+    fn a_region_gets_the_outline_of_its_own_area_at_its_settlements_index() {
+        // The made-up model's regions: made_up_region_1, _2 and _5000000.
+        let mut m = crate::own_save::tests::made_up_model();
+        let regions = map(&[("made_up_region_1", 2), ("made_up_region_2", 2)], None);
+        // Region 1's settlement in its second area, region 2's in its first, and the third region
+        // (no map region of its key) on region 2's second area.
+        settle(&mut m, 1, 15, 5);
+        settle(&mut m, 2, 5, 25);
+        settle(&mut m, 5_000_000, 15, 25);
+        let (areas, gaps) = settlement_areas(&m.world, &regions);
+        let want: AreaOutlines = [
+            (RegionId(1), vec![vec![(20.0, 10.0), (10.0, 10.0), (10.0, 0.0), (20.0, 0.0)]]),
+            (RegionId(2), vec![vec![(10.0, 30.0), (0.0, 30.0), (0.0, 20.0), (10.0, 20.0)]]),
+        ]
+        .into();
+        assert_eq!(areas, want);
+        assert_eq!(gaps, SettlementAreaGaps { no_area: vec!["made_up_region_5000000".into()], ..SettlementAreaGaps::default() });
+        attach_settlement_areas(&mut m, &regions);
+        assert_eq!(m.world.settlement_area_outlines, want);
+
+        // The index is the one of the area under the settlement, whichever map region that area
+        // belongs to, and the outline is the region's own area at that index: region 2's settlement
+        // on region 1's second area gives region 2's second area.
+        settle(&mut m, 2, 15, 5);
+        let (areas, gaps) = settlement_areas(&m.world, &regions);
+        assert_eq!(areas[&RegionId(2)], vec![vec![(20.0, 30.0), (10.0, 30.0), (10.0, 20.0), (20.0, 20.0)]]);
+        assert_eq!(gaps.no_area, vec!["made_up_region_5000000".to_string()]);
+
+        // A settlement on no area (here past every square), and an index its own map region does not
+        // have (region 2 has one area, the settlement is on region 1's second): no entry, named.
+        settle(&mut m, 1, 500, 500);
+        let regions = map(&[("made_up_region_1", 2), ("made_up_region_2", 1)], None);
+        let (areas, gaps) = settlement_areas(&m.world, &regions);
+        assert!(areas.is_empty(), "{areas:?}");
+        assert_eq!(gaps.no_area, ["made_up_region_1", "made_up_region_2", "made_up_region_5000000"].map(String::from));
+        // An attach replaces what an earlier map gave.
+        attach_settlement_areas(&mut m, &regions);
+        assert!(m.world.settlement_area_outlines.is_empty());
+    }
+
+    /// An outline that names a vertex the map does not have leaves its region out and names it
+    /// (review: the point was dropped without a log, and the shortened outline was used).
+    #[test]
+    fn an_outline_with_a_vertex_past_the_list_leaves_its_region_out() {
+        let mut m = crate::own_save::tests::made_up_model();
+        let regions = map(&[("made_up_region_1", 2), ("made_up_region_2", 2)], Some((1, 0)));
+        settle(&mut m, 1, 15, 5);
+        settle(&mut m, 2, 5, 25);
+        let (areas, gaps) = settlement_areas(&m.world, &regions);
+        assert_eq!(areas.keys().copied().collect::<Vec<_>>(), vec![RegionId(1)]);
+        assert_eq!(
+            gaps,
+            SettlementAreaGaps { no_area: vec!["made_up_region_5000000".into()], bad_outline: vec!["made_up_region_2".into()], bad_face: Vec::new() }
+        );
+        attach_settlement_areas(&mut m, &regions);
+        assert_eq!(m.world.settlement_area_outlines, areas);
+    }
+
+    /// A face that names a vertex the map does not have is skipped, so the settlement on it reads
+    /// as on no area; its map region is named on its own (review: it was skipped without a report).
+    #[test]
+    fn a_face_with_a_vertex_past_the_list_is_named() {
+        let mut m = crate::own_save::tests::made_up_model();
+        let mut regions = map(&[("made_up_region_1", 2), ("made_up_region_2", 2)], None);
+        settle(&mut m, 1, 15, 5);
+        settle(&mut m, 2, 5, 25);
+        // Region 1's second area (under its settlement) loses a vertex of both its triangles.
+        for f in [0, 3] {
+            regions.regions[0].areas[1].faces[f] = u32::MAX;
+        }
+        let (areas, gaps) = settlement_areas(&m.world, &regions);
+        assert_eq!(areas.keys().copied().collect::<Vec<_>>(), vec![RegionId(2)]);
+        assert_eq!(
+            gaps,
+            SettlementAreaGaps {
+                no_area: vec!["made_up_region_1".into(), "made_up_region_5000000".into()],
+                bad_outline: Vec::new(),
+                bad_face: vec!["made_up_region_1".into()],
+            }
+        );
+    }
+}
+
+#[cfg(test)]
+mod land_mass_tests {
+    use ntw_formats::campaign_map::{MapRegion, RegionArea, RegionMap};
+    use ntw_sim::campaign::{AiArea, AiHlci};
+
+    use super::*;
+
+    fn map(regions: Vec<(&str, Vec<bool>)>) -> RegionMap {
+        let area = |land: bool| RegionArea { faces: Vec::new(), outlines: Vec::new(), flags: [false, false, land] };
+        let region = |(key, areas): (&str, Vec<bool>)| MapRegion {
+            key: key.into(),
+            is_sea: false,
+            min: (0.0, 0.0),
+            max: (1.0, 1.0),
+            areas: areas.into_iter().map(area).collect(),
+            settlement: None,
+            neighbours: Vec::new(),
+        };
+        RegionMap {
+            bounds_min: (0.0, 0.0),
+            bounds_max: (1.0, 1.0),
+            theatre: ((0.0, 0.0), (1.0, 1.0)),
+            labels: Vec::new(),
+            vertices: Vec::new(),
+            regions: regions.into_iter().map(region).collect(),
+            trade_nodes: Vec::new(),
+            ground_types: Vec::new(),
+            black_shroud_outlines: Vec::new(),
+        }
+    }
+
+    fn area(key: &str, hlcis: Vec<(u32, Vec<u32>)>) -> AiArea {
+        AiArea { key: key.into(), links: Vec::new(), hlcis: hlcis.into_iter().map(|(index, pieces)| AiHlci { index, pieces }).collect() }
+    }
+
+    /// Every game region gets an entry once a CAI area carries HLCIs: an HLCI counts when one of its
+    /// pieces is a flag #2 area of the map region (`0x00C5C490`); a region with no CAI area, no map
+    /// region or no passing HLCI gets an empty list (a group of its own) and is counted, and so is a
+    /// piece index past the map region's areas (review: these read as "flag not set" with no log,
+    /// and a map left empty flipped the groups to "every region on one land mass").
+    #[test]
+    fn every_region_gets_an_entry_and_the_gaps_are_counted() {
+        // The made-up model's regions: made_up_region_1, _2 and _5000000.
+        let mut m = crate::own_save::tests::made_up_model();
+        m.world.ai_areas = vec![area("made_up_region_1", vec![(4, vec![0, 1]), (9, vec![0]), (7, vec![1, 5])]), area("made_up_region_2", vec![(4, vec![0])])];
+        let regions = map(vec![("made_up_region_1", vec![false, true]), ("made_up_region_2", vec![false])]);
+        let (masses, gaps) = land_masses(&m.world, &regions);
+        let want: BTreeMap<RegionId, Vec<u32>> = [(RegionId(1), vec![4, 7]), (RegionId(2), vec![]), (RegionId(5_000_000), vec![])].into();
+        assert_eq!(masses, want);
+        assert_eq!(gaps, LandMassGaps { missing: 1, bad_pieces: 1, no_land: 1 });
+        attach_land_masses(&mut m, &regions);
+        assert_eq!(m.world.region_land_masses, masses);
+
+        // Every region missing from the map: the entries stay, so no region joins another.
+        attach_land_masses(&mut m, &map(Vec::new()));
+        assert_eq!(m.world.region_land_masses.len(), 3);
+        assert!(m.world.region_land_masses.values().all(Vec::is_empty));
+
+        // No HLCI anywhere (a save or start without them), then no CAI area at all: left empty,
+        // which the region groups read as one land mass.
+        m.world.ai_areas = vec![area("made_up_region_1", Vec::new())];
+        attach_land_masses(&mut m, &regions);
+        assert!(m.world.region_land_masses.is_empty());
+        m.world.ai_areas.clear();
+        attach_land_masses(&mut m, &regions);
+        assert!(m.world.region_land_masses.is_empty());
+    }
 }

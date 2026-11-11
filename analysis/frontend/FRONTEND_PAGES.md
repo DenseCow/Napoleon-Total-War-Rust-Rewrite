@@ -14,7 +14,7 @@ Tags: CONFIRMED (exe/script/data), INFERRED (deduced), PROVISIONAL/PLACEHOLDER (
 | Rule | Evidence | Tag |
 |---|---|---|
 | All page changes are root.lua's own `TransitionTo(name, is_back, ...)` / `TransitionBack()`: pushes the current page on `Previous`, divorces + hides it, `CreateFromLayout("data/ui/frontend ui/"..name, name, root)`, calls the new page's `OnEnter(...)`; Back re-adopts the previous page and destroys the left one on the next forward move | root.lua bytecode | CONFIRMED |
-| ESCAPE: root.lua `StealShortcutKey("ESCAPE")`, `OnKey(key, _, released)` → `TransitionBack` when the 3rd argument is true. A key goes to the most recent stealer still shown | root.lua, options.lua sub-panels steal ESCAPE/RETURN | names CONFIRMED, routing INFERRED |
+| ESCAPE: root.lua `StealShortcutKey("ESCAPE")`, `OnKey(key, _, released)` → `TransitionBack` when the 3rd argument is true. A key goes to the newest stealer still shown (a re-steal keeps the stealer's place, `0x00EC3DE0`) | root.lua, options.lua sub-panels steal ESCAPE/RETURN | names CONFIRMED, routing INFERRED |
 | `CreateFromLayout` returns the file root's first child (every page file is `root` + one child named like the page); the engine's own front-end layout load keeps its root (root.lua runs on it) | `0x01027400` takes the holder's first child as the template (BATTLE_FLOW.md §3 "Where CreateFromLayout puts a layout"); options.lua `Find(2)` = button_ok of the child | CONFIRMED |
 | Script files of a component: override first (`ui/templates/<o>` or `<layout>_scripts/<o>`; `"null"` = none), then `<layout>_scripts/<id>.lua`, `<layout>.<id>.lua`, and for a layout's top component `<layout>.lua` | battle_icon.lua override, options' gamma slider override `null`, message_box.luac/credits.luac | names CONFIRMED, order INFERRED |
 | Each frame is `OnUpdatePulse(time_ms)`; callbacks may be function names (`SetEventCallback("OnUpdatePulse","OnUpdate")`) | template.heading.lua (slides in over 750 ms) | INFERRED unit |
@@ -65,6 +65,75 @@ else text; `UISelectionManager` calls each item's Lua `Select(bool)`; `string.le
   Written on every Set*Options; the original's file is never written.
 - PROVISIONAL: graphics dropdown option lists and screen modes (only the preferences resolution), quality presets (all available, "custom"),
   key sets (empty), sound providers.
+- **Defaults without a file (2026-11-10).** CONFIRMED: every setting is an "environment variable" object built by its own static initialiser
+  (`0x00402C60`..`0x00405BD0`, source `EnvironmentVariable.cpp`; constructors `0x00454300` int, `0x00454380` float, `0x00454400` text, `0x00454480` bool),
+  which passes help text, usage text, the key and a pointer to the default. 110 settings; the 105 int/float/bool defaults are the table
+  `ntw_formats::preferences::registered_default`, each line with its initialiser's address (e.g. `camera_move_speed` 100.0 at `0x00403140`,
+  `camera_turn_speed` 5.0 at `0x00403190`, the three difficulties 0 at `0x00403230` / `0x00402F20` / `0x00402E30`). The key is the constructor's
+  key argument, read from the instruction operands of all 105; it differs from the usage text for six: `limitless_ammo` (usage says `show_cpu_moves`,
+  `0x00404540`, default true), `default_camera_type` (usage `default_battle_camera`, `0x00403450`), `gfx_volumetric_effect` (`0x00404320`),
+  `invert_cam_x_axis` / `invert_cam_y_axis` (`0x004044A0` / `0x004044F0`), `occupiable_building_markers` (`0x004047D0`). So `analysis/worker1/preferences_keys.tsv`
+  (usage texts) is not a key list. The help text of `campaign_difficulty` gives the stored values (-2 very hard .. 1 easy, CONFIRMED); the slider order stays INFERRED.
+- **Ours: one reading of a setting.** `Preferences::get` is the file's value (first line with the key), else that default, else nothing (a text
+  setting or a key the game does not have); `get_bool` / `get_f64` are the typed reads over the same rule. Every reader goes through it and none
+  keeps a default of its own: `__prefs.get` and the typed `__prefs.bool` / `__prefs.number` (the Lua bridge behind `UIPrefsInterface`), the unit
+  size (`campaign_unit_multiplier`, registered 0.75 at `0x004032D0`: the options page's dropdown, the battle setup's `unit_scale_setting`, the
+  battle start in `napoleon` `battle/setup.rs` and the campaign's unit multiplier all read this one key; trace and rule in BATTLE_FIDELITY.md §18a),
+  the settlement labels, the sound groups / `enable_sound` / `sound_provider`, and the tree draw distance (`gfx_tree_quality`, registered 2 at
+  `0x00404190`, read once at each battle start into the `TreeFarDistance` resource). Before 2026-11-10 only `__prefs.get` had the default, so with
+  no file the options page and the battle setup disagreed on the unit size and the trees drew at quality 3; all follow the page now. Where a
+  reader gets nothing (a game that registers no such setting, never "no preferences file") it takes the type's zero or the engine's own neutral
+  (sound group enabled at 100, the last unit-size step = full size), never a Napoleon value: `ntw_sim` holds no copy of a registered default.
+  `registered_default` is the one place another game's or a mod's settings list replaces.
+- Why it matters: an install whose original never wrote `preferences.script.txt` (Steam install never started: `%APPDATA%\The Creative Assembly\Napoleon`
+  holds no `scripts` folder) gave nil for every key and the shipped scripts stopped where they hand a setting to a slider: options `controls.lua`
+  (camera speeds), `sp_episodic_campaign.lua` and the grand campaign page (campaign difficulty), the Napoleon's battles page (battle difficulty).
+- **A file value that does not read as the setting's type (traced 2026-11-10, CONFIRMED).** Each setting object has three methods: write its
+  file line (`0x0044CCF0`, shared), write its value, and read its value from a text stream. The read sets the object's "was set" byte (+0x59) and
+  stores the value (+0x5C) only when the stream read did not fail, so a value that does not read leaves the setting at what its initialiser built:
+  the registered default.
+  - Int (`0x00454300`; write `0x0044C4A0`, read `0x0044C500` → `0x010D3780`) and float (`0x00454380`; write `0x0044D2E0`, read `0x0044D300` →
+    `0x010D38C0` → `0x010E00B0`): the number collector `0x010E3C80` takes a sign, digits, a point, digits and an exponent, nothing else. The number
+    the text starts with is taken (`3abc` is 3); `nan`, `inf` and text with no digit are no numbers.
+  - A float beyond its range (traced 2026-11-10, CONFIRMED): `0x010E00B0` converts the collected text with `0x010F5E50`, a `sscanf` "%f"
+    into a float (UCRT, statically linked), then multiplies it by 10 per whole digit the collector dropped past its 36 significant ones (0.1 per
+    extra zero after the point of a number below 1). The read fails only when `sscanf` matched nothing: the float specifier `0x01278132`
+    fails only on "no digits", and on an overflow the result writer `0x012772CA` stores infinity with the number's sign. So `1e39`, `3.5e38` and
+    `1e999` all store +infinity, a negative one -infinity, and the setting counts as set. Ours: `number_value` gives the same infinity (the
+    overflow test is a float parse of the same text). Test: `a_number_beyond_a_floats_range_is_infinite`. Not traced (UNKNOWN): what the int
+    read `0x010DFF00` gives for a number beyond an int's range; ours reads every numeric setting as the float read does.
+  - Bool (`0x00454480`; write `0x0044AB80`, read `0x0044ABA0` → `0x010D3950` → `0x010E0180`): in the stream's names mode the text must be `false`
+    or `true` (name table `0x01402BB4`, matcher `0x010E1770`), in the other mode an unsigned 0 / 1; no match raises the stream's fail state and
+    stores nothing. INFERRED names mode (the exe's own file spells the words; where the mode is set was not traced).
+  - The constructors also file each object by id in a per-type table (`0x014A06D8` int, `0x014A06E4` float, `0x014A06E0` bool) and by name
+    (`0x00487970`).
+  - Ours, one answer for Rust and Lua: `Preferences::get_bool` / `get_f64` read the same way and pass such a line over for the registered default;
+    the prelude's `pref_read(kind, key)` goes through `__prefs.bool` / `__prefs.number`, so a script no longer gets nil / false where Rust gets the
+    default. `Preferences::mistyped` lists the lines and `load_preferences` warns once per file (per path), naming the keys. The text read
+    (`__prefs.get`) still hands the scripts the file's text. Tests: `a_setting_reads_as_the_files_value_else_the_registered_default`,
+    `a_number_is_the_leading_number_and_never_nan`, `a_bool_is_true_or_false_only`, `mistyped_lines_are_listed_once_each` (ntw_formats),
+    `a_mistyped_file_value_is_the_registered_default_on_the_pages`, `a_preferences_warning_is_said_once_per_file` (ntw_script).
+  - Difference: an int setting's read stops at a point in the exe (`2.5` is 2); ours keeps the fraction and the readers of whole-number settings
+    drop it.
+  - UNKNOWN (not traced): the loader's loop (how a line becomes the stream, whether a failed read affects the lines after it, what happens to
+    text left after a number).
+- A preferences file that exists but cannot be read is reported once per path (`read_preferences_file` returns the error, `load_preferences` logs
+  it and uses the next source); a missing file is not an error. Test: `preferences_come_from_our_copy_then_the_originals_then_the_defaults`.
+- `EnumerateScreenModes` lists the file's mode only when both `x_res` and `y_res` are above 0, else its whole stand-in mode (one axis is never mixed
+  with the stand-in's other axis).
+- UNKNOWN (needs tracing): the text settings' defaults; what the first run changes before the options page is first seen (`gfx_first_run` starts true,
+  `x_res` / `y_res` start at 0, so the graphics values and the screen mode of a fresh install may not be the registered ones; `EnumerateScreenModes`
+  keeps its stand-in until both are set); the read path from `CurrentOptions` (`0x01459B10` table) to these objects, which the INFERRED pairing
+  above already covers.
+  - What one bounded pass found (2026-11-10): `gfx_first_run` is the bool setting id 0x34, built true by `0x00403B80` (object `0x0149F2B8`). In
+    the whole code section its object is named by three places only: that initialiser, its exit destructor, and the preferences writer
+    `0x0045A6F0`; no instruction names its value (+0x5C) or its "was set" byte (+0x59) by address, which is how the settings traced so far are
+    read (e.g. `campaign_unit_multiplier` in `0x004795F0`). So no reader of it was found; a read through the by-id table (`0x014A06E0`, named
+    directly only by the bool constructor) is not excluded. `gfx_unit_scale` (int id 0x1C) looks the same: initialiser, destructor, writer.
+  - Decision for our own file (2026-11-10): no graphics lines are dropped. Our file is either a copy of the original's (seeded once, so it holds
+    whatever the original's first run chose) or, on an install whose original never ran, the registered defaults the options page showed when the
+    player pressed OK. Dropping lines would only bring the same registered defaults back. It is looked at again when the first-run trace shows
+    values that differ from the registered ones (BACKLOG Polish "First-run trace").
 
 ## Tooltips (2026-10-04, save-compat worker on 0-E)
 - **Engine side, ours (INFERRED):** when the pointer comes to rest on a component, its tooltip text is
@@ -134,7 +203,9 @@ settings) and sp_battle3 (players and armies).
     most deployment areas per alliance in the preset's `deployment_areas.xml`.
 - **sp_battle3 (players and armies), done:**
   - `ArmyFundsForSize` (CONFIRMED tables: land 5000 / 10000 / 14000, sea 5000 / 14000 / 24000).
-  - `UnitScaleFactor` (0.25 / 0.5 / 0.75 / 1.0; preference INFERRED `gfx_unit_scale`).
+  - `UnitScaleFactor` (`0x004795F0`): the float preference `campaign_unit_multiplier` (registered 0.75, `0x004032D0`) → its step
+    (`0x00DAFBC0`, the first of 0.25 / 0.5 / 0.75 / 1.0 not below it) → that step's scale (`0x00DAFBB0`). CONFIRMED; it is not
+    `gfx_unit_scale` (BATTLE_FIDELITY.md §18a).
   - `MaxUnitsFromUnitScaleFactor` (20 and 6 / 8 / 10 / 20).
   - `BuildCpuName` ("CPU %d").
   - `FactionListForBattles` / front-end `FactionDetails` (`0x0046EB10` / `0x0046E950`,
@@ -154,8 +225,10 @@ settings) and sp_battle3 (players and armies).
     experience, the human army is the player's, the general's unit commands, and each army is
     deployed in its alliance's deployment area of the map's 1v1 setup (the original's default
     deployment templates, as for the test armies).
-    - PROVISIONAL: units have their full men (the unit size option is not applied yet); a 2v2
-      army uses its alliance's area of the same index (else the first); no technologies.
+    - The units' men are the cards' thinned by the unit size (`Battle::set_unit_scale_setting` at
+      the battle start, `Battle::men_at_scale` per unit; what is traced and what is not:
+      BATTLE_FIDELITY.md §18a). PROVISIONAL: a 2v2 army uses its alliance's area of the same
+      index (else the first); no technologies.
     - Tests: `custom_battle_start_requests_both_armies` (frontend_ui) and
       `custom_battle_armies_deploy_in_their_areas` (napoleon). Checked in the game:
       `--ui-click single_player,sp_battle,button_classic_battle,button_host,button_ok` opens the
@@ -177,8 +250,9 @@ settings) and sp_battle3 (players and armies).
     - `LoadArmySetup(path)` `0x004708A0` (`0x00461790`): the setup table with each card's unit
       details, Cost, Cap, TotalCost, TotalCards, IsHuman, Name, limits; nil if it does not open.
       PROVISIONAL: the battle's category mask (`+0x94`) is not applied.
-    - `LoadBattleSetup(path)` `0x004709F0`: one flat table (the settings, `unit_scale` from the
-      game's preference, `Armies` {[team] = setups}, `map` {File, Name, Type, TotalPlayers,
+    - `LoadBattleSetup(path)` `0x004709F0`: one flat table (the settings, `unit_scale` = the step
+      scale of the player's `campaign_unit_multiplier`, not the file's (CONFIRMED, the write at
+      `0x00470A7B`), `Armies` {[team] = setups}, `map` {File, Name, Type, TotalPlayers,
       IsNaval, Image, Description, Map, Key, IsHistoric, Teams}). INFERRED flat: sp_battle3.lua
       reads `allowed_funds`, `era` and `map` from it ("Preferences" is the exe's name for its
       reference, like "unit" / "preset" / "army").
@@ -203,7 +277,7 @@ settings) and sp_battle3 (players and armies).
 - **Next:**
   1. Text entry in our UI host (the requesters' file name field cannot be typed in yet, so
      Save army / Save battle from the GUI need it; Load works by choosing a listed file).
-  2. The unit size option in our battle, the category mask, naval custom battles (ships are
+  2. The category mask, naval custom battles (ships are
      not in our battle yet), `GenerateShipName`.
 
 ## Not done

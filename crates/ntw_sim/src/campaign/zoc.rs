@@ -211,6 +211,28 @@ fn zone_extent(map: &PolyMap, limit: f32) -> f32 {
     limit + 3.0 * map.cell
 }
 
+/// The grid as a faction sees it, as the shapes to cut in (the scope `0x00AF5200`, which prepares
+/// every obstacle of every layer for the faction, `0x00B06280` with the mode rule `0x00B3F4F0`;
+/// CONFIRMED): of each of `others` (the obstacles the faction sees, `at_war` = at war with it), the
+/// stored zone as kind 8 when at war, then the core as kind 9. The view a zone is flooded on
+/// ([`zone_in`]) and a force is placed on ([`super::expulsion`]).
+///
+/// `near(o, reach)`: whether a shape reaching `reach` map units from obstacle `o` can touch what
+/// the caller reads; the others are left out (that changes nothing). A zone reaches
+/// [`zone_extent`], a core [`CORE_RADIUS`].
+pub fn view_cuts(map: &PolyMap, others: &[Obstacle], near: impl Fn(&Obstacle, f32) -> bool) -> Vec<Cut> {
+    let mut cut = Vec::new();
+    for o in others {
+        if o.at_war && !o.zone.is_empty() && near(o, zone_extent(map, zone_limit(o.navy, o.garrisoned))) {
+            cut.push(Cut { shape: Shape::Polygons(Arc::clone(&o.zone)), kind: ZONE_KIND });
+        }
+        if near(o, CORE_RADIUS) {
+            cut.push(Cut { shape: Shape::Convex(core_shape(o.pos, o.garrisoned)), kind: CORE_KIND });
+        }
+    }
+    cut
+}
+
 /// The zone of a commander at `pos` (`navy`, `garrisoned`: [`zone_limit`]), flooded the way the
 /// original floods it (CONFIRMED `0x00A28440` → `0x00B7BAF0`): over the map with the other
 /// obstacles cut in as the commander's own faction sees them. The scope `0x00AF5200` prepares
@@ -234,20 +256,10 @@ fn zone_extent(map: &PolyMap, limit: f32) -> f32 {
 /// exist in the shipped start positions.
 pub fn zone_in(map: &PolyMap, pos: (f32, f32), navy: bool, garrisoned: bool, others: &[Obstacle], gate: Option<&[bool]>) -> Vec<u32> {
     let limit = zone_limit(navy, garrisoned);
-    let reach_of = |o: &Obstacle| zone_extent(map, zone_limit(o.navy, o.garrisoned));
-    let near = |o: &Obstacle, r: f32| {
+    let cut = view_cuts(map, others, |o, r| {
         let r = zone_extent(map, limit) + r;
         (o.pos.0 - pos.0).powi(2) + (o.pos.1 - pos.1).powi(2) < r * r
-    };
-    let mut cut = Vec::new();
-    for o in others {
-        if o.at_war && !o.zone.is_empty() && near(o, reach_of(o)) {
-            cut.push(Cut { shape: Shape::Polygons(Arc::clone(&o.zone)), kind: ZONE_KIND });
-        }
-        if near(o, CORE_RADIUS) {
-            cut.push(Cut { shape: Shape::Convex(core_shape(o.pos, o.garrisoned)), kind: CORE_KIND });
-        }
-    }
+    });
     let ov = rtcut::build(map, &cut);
     let view = map.with(&ov);
     let mover = if navy { Mover::Sea } else { Mover::Land };

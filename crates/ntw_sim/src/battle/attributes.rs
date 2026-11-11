@@ -94,6 +94,13 @@ pub const ABILITY_NAMES: [(&str, u8); 22] = [
     ("column_formation", 21),
 ];
 
+/// The enum value of a special-ability name ([`ABILITY_NAMES`], case ignored), `None` for a name
+/// the enum does not have. The one ability lookup: the unit card's ability list, the scripts'
+/// `perform_special_ability` and the `unit_special_abilities` rows (`ntw_data`) use it.
+pub fn ability_value(name: &str) -> Option<u8> {
+    ABILITY_NAMES.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| *v)
+}
+
 /// The unit card's capability block (card `+0x78`, filled by the battle-file parser `0x0050CAE0`
 /// from `unit_capabilities`; CONFIRMED layout as the strength code reads it): firing drill `[0]`
 /// (`fire_volley` 0, `mass_fire` 1, `platoon_fire_dispersed` 2, `platoon_fire_grouped` 3,
@@ -119,7 +126,7 @@ impl UnitCapabilities {
                 c.firing_drill = c.firing_drill.max(d as u8);
                 continue;
             }
-            if let Some((_, v)) = ABILITY_NAMES.iter().find(|(n, _)| n.eq_ignore_ascii_case(a)) {
+            if let Some(v) = ability_value(a) {
                 c.abilities |= 1 << v;
             }
         }

@@ -500,13 +500,14 @@ fn close_up(fam: &mut Family, slot: usize) {
 impl CampaignModel {
     /// The spare ministers of a faction: its `minister` characters without a post, in id order.
     /// The government keeps five (`0x008BF280` tops the list up to 5 with new ministers); every
-    /// faction of the vanilla saves has exactly 5 (CONFIRMED, 23 + 4 factions).
+    /// faction of the vanilla saves has exactly 5 (CONFIRMED, 23 + 4 factions). "Without a post" is the
+    /// government's own record ([`Self::post_of`], `GovernmentPost::holder`), not `CharacterDetails::post`.
     pub fn spare_ministers(&self, faction: FactionId) -> Vec<CharacterId> {
         self.world
             .characters
             .values()
             .filter(|c| c.faction == faction && c.kind == super::world::CharacterKind::Minister)
-            .filter(|c| self.world.character_details.get(&c.id).is_none_or(|d| d.post == 0))
+            .filter(|c| self.post_of(c.id).is_none())
             .map(|c| c.id)
             .collect()
     }

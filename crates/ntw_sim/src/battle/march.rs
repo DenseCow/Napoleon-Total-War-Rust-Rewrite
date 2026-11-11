@@ -196,8 +196,11 @@ pub struct MenMarch {
     /// and when the unit is built (`0x00518DC0`).
     pub in_place_at: u32,
     /// Whether the idle task has entered the reform state (the task's `+0x2C`, set by
-    /// `0x005735A0`): a new idle task (`0x0051A3A0`, `+0x2C` = 0) is pushed when the unit's task
-    /// stack empties, so ours clears it whenever the unit is under a move order.
+    /// `0x005735A0`): the squad update `0x00580A30` pushes a new idle task (`0x0051A3A0`, `+0x2C` =
+    /// 0) when the unit's task stack is empty, its gate holds (squad `+0x515` set; `+0x508` not 1
+    /// or `+0x498` set) and the placement check `0x00586440(0)` holds; when that check fails the
+    /// men's actions end and nothing is pushed (never in ours, see [`super::actions`]). So ours
+    /// clears it whenever the unit is under a move order.
     pub idle_reformed: bool,
     /// Whether this tick's layout step ([`LandUnit::reslot_tick`]) assigned the men their slots,
     /// and in full: `Some(full)` when it did, `None` when not (also for the reform state's entry
@@ -1144,7 +1147,9 @@ impl LandUnit {
     /// `0x01450BDC`, reload, reform, ready), which sets the task's `+0x2C` to 1. PROVISIONAL
     /// (ours): a standing unit is idle, whatever it does; the exe's firing and fighting units run
     /// their own task states (the fire-at-target group's reform entry `0x005732B0` and its gate are
-    /// not traced).
+    /// not traced; the fire orders built on `0x0051A230`, the volley order of drill 0 among them
+    /// but not the mass, platoon and rank orders, end every man's action when built, which ours
+    /// does not do for a unit that starts such a volley during a reform: [`super::actions`]).
     pub(super) fn reslot_tick(&mut self, tick: u32) {
         self.march.ensure_men(self.max_men as usize);
         if self.men < self.march.last_men {
@@ -1191,26 +1196,12 @@ impl LandUnit {
 
     /// The idle state's update (`UpdateIdleStateInPlaceCheck` `0x005577C0`, vtable `0x0131D984`
     /// slot 2 through `0x004F8570`; the state machine's pass `0x010FBBD0` runs it on every idle
-    /// tick without a transition), CONFIRMED static: first it ends every living man's action, then
-    /// it runs the in-place check on the unit's ticks ([`LandUnit::in_place_check`]).
-    ///
-    /// The man's action is the one in place in his action slot (soldier `+0x2CC`; the action at
-    /// `+0x2D4`, its done flag `+0x10` at `+0x2E4`) with two flags: `+0x35B`, present (set by the
-    /// base action constructor `0x007E3A50`), and `+0x35C`, started (set by the slot update
-    /// `0x0066E780` once the action's entry vfunc `+4` has run, before its first update in the same
-    /// call). The idle update destroys a present action (vfunc 0 with 1) and clears both flags, as
-    /// every action install does (`0x006533E0`, `0x00653560`). With no action present a man is
-    /// ready (`0x0063E290`) and his slot update does nothing, so he stands: ours ends his walk to
-    /// his slot ([`ManMarch::walk`]) and marks his move ended ([`ManMarch::finished`]). His kept
-    /// speed (`+0x440`) lies outside the action and stays. Ours needs no started flag: it starts a
-    /// move in the tick it is issued, as the exe's slot update enters and first updates it in one
-    /// call. A present action that is done differs from none only for the fire state's gather of
-    /// the men's actions (`0x00539910` through `0x007FF390`), not built.
+    /// tick without a transition), CONFIRMED static: first it ends every living man's action
+    /// ([`LandUnit::end_men_actions`]; the action slot, its flags and the exe's other places that
+    /// end the men's actions: [`super::actions`]), then it runs the in-place check on the unit's
+    /// ticks ([`LandUnit::in_place_check`]).
     fn idle_update(&mut self, tick: u32) {
-        let alive = (self.men as usize).min(self.march.men.len());
-        for m in &mut self.march.men[..alive] {
-            (m.walk, m.finished) = (None, true);
-        }
+        self.end_men_actions();
         if tick % IN_PLACE_CHECK_TICKS == self.serial() % IN_PLACE_CHECK_TICKS {
             self.in_place_check(tick);
         }

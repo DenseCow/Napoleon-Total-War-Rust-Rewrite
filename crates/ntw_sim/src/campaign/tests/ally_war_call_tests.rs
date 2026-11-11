@@ -243,6 +243,41 @@ fn a_call_asked_during_the_round_start_waits_until_the_round_start_ends() {
     assert!(m.step().is_some());
 }
 
+/// A second declaration of a war whose call waits, by either side, is refused (ORIGINAL BUG: the exe
+/// stacks a second offer and declares the war twice, `0x00932B70` / `0x00B268B0` read no stack): one
+/// call waits, and its answer declares the war once.
+#[test]
+fn a_war_whose_call_waits_cannot_be_declared_again() {
+    let mut m = model(&[C]);
+    m.form_alliance(C, B).unwrap();
+    m.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
+    for (a, b) in [(A, B), (B, A)] {
+        assert_eq!(m.apply(CampaignCommand::DeclareWar { a, b }), Err(CommandError::WarCallWaiting(A, B)), "{a:?} on {b:?}");
+        assert_eq!(m.pending_ally_war_calls.len(), 1);
+    }
+    // Another pair is not held back.
+    assert!(m.declare_war_rules(A, D).is_ok());
+    let ev = answer(&mut m, Some(B), true);
+    let declared = ev.iter().filter(|e| matches!(e, CampaignEvent::StanceChanged { a: A, b: B, stance: Stance::War })).count();
+    assert_eq!(declared, 1);
+    assert!(m.pending_ally_war_calls.is_empty());
+}
+
+/// The pair went to war by another path while the call waited: the answer is applied, the call is
+/// gone and the declaration ends with no second war and no `war_declared` notices.
+#[test]
+fn an_answer_after_the_pair_went_to_war_ends_the_declaration() {
+    let mut m = model(&[C]);
+    m.form_alliance(C, B).unwrap();
+    m.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
+    m.world.set_stance(A, B, Stance::War).unwrap();
+    let ev = answer(&mut m, None, false);
+    assert!(m.pending_ally_war_calls.is_empty());
+    assert!(!matches!(m.world.stance(C, B), Stance::Allied), "the refusal is applied");
+    assert!(!ev.iter().any(|e| matches!(e, CampaignEvent::StanceChanged { a: A, b: B, .. })));
+    assert!(!ev.iter().any(|e| matches!(e, CampaignEvent::Message { message: CampaignMessage::WarDeclared { .. }, .. })));
+}
+
 /// The waiting call is part of the state hash.
 #[test]
 fn a_waiting_call_changes_the_state_hash() {

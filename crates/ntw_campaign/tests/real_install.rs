@@ -308,6 +308,9 @@ fn loads_all_eight_startpos() {
             _ => (false, false, false),
         };
         assert_eq!(switches, expected, "{c}: WorldCreated switches");
+        // #28 (looting options disabled for a human): the tutorial's scripts set it at turn 1, not
+        // in WorldCreated, so no start position carries it.
+        assert!(!w.looting_options_disabled_for_human, "{c}: #28 looting switch");
         // The zoom limit (#13 / #14): the tweakers' full range everywhere, the scripts narrow it later.
         assert_eq!(w.zoom_limit, ntw_sim::campaign::ZoomLimit::default(), "{c}: zoom limit");
         check_sane(c, &l, db, true);

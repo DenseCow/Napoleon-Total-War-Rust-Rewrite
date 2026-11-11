@@ -107,11 +107,31 @@ pub fn tree_far_distance(quality: i64) -> f32 {
     }
 }
 
-/// The far distance from the user's preferences (`gfx_tree_quality`, default 3).
-pub fn far_distance_from_prefs() -> f32 {
+/// The trees' far distance of the battle being entered: the preferences file is read once per
+/// battle start ([`read_tree_far_distance`]), and the billboard materials and the near trees both
+/// take this value, so the two layers always switch at the same distance.
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+pub struct TreeFarDistance(pub f32);
+
+impl Default for TreeFarDistance {
+    /// A game that registers no tree quality setting: quality 0.
+    fn default() -> Self {
+        Self(tree_far_distance(0))
+    }
+}
+
+/// On entering a battle, before the trees are built: reads the tree quality from the user's
+/// preferences (a change made on the options page since the last battle is picked up here).
+pub fn read_tree_far_distance(mut far: ResMut<TreeFarDistance>) {
     let user = crate::config::user_dir();
-    let prefs = ntw_script::ui::frontend::load_preferences(user.as_deref(), crate::config::original_user_dir().as_deref());
-    tree_far_distance(prefs.get_f64("gfx_tree_quality").map_or(3, |v| v as i64))
+    far.0 = far_distance_for(&ntw_script::ui::frontend::load_preferences(user.as_deref(), crate::config::original_user_dir().as_deref()));
+}
+
+/// The far distance for the `gfx_tree_quality` setting: the file's value, else the default the
+/// game registers it with (`Preferences::get_f64`; the original's is 2, `0x00404190`), the same
+/// value the options page shows. A game that registers no such setting gets quality 0.
+pub fn far_distance_for(prefs: &ntw_formats::preferences::Preferences) -> f32 {
+    tree_far_distance(prefs.get_f64("gfx_tree_quality").unwrap_or_default() as i64)
 }
 
 /// Per-vertex extra data (leaf cards: corner offset right/up in metres, dimming).
@@ -385,12 +405,13 @@ pub fn setup_near_trees(
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<TreeGeomMaterial>>,
+    far: Res<TreeFarDistance>,
 ) {
     let (Some(map), Some(vfs)) = (current_map(), vfs) else { return };
     let map = map.as_ref();
     let vfs = &vfs.0;
     let mut near = NearTrees {
-        trees: Layer { far: far_distance_from_prefs(), ..Default::default() },
+        trees: Layer { far: far.0, ..Default::default() },
         shrubs: Layer { far: shrub_far_distance(), ..Default::default() },
         ..Default::default()
     };
@@ -712,6 +733,19 @@ pub fn update_wind(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With no preferences file the trees draw as far as the options page says: the registered
+    /// default of `gfx_tree_quality` (2 in the original, `0x00404190`), not a value of our own.
+    #[test]
+    fn tree_distance_follows_the_setting_the_options_page_shows() {
+        use ntw_formats::preferences::{Preferences, registered_default};
+        let none = Preferences::default();
+        let shown: i64 = registered_default("gfx_tree_quality").expect("registered").parse().expect("an int");
+        assert_eq!(far_distance_for(&none), tree_far_distance(shown));
+        assert_eq!(far_distance_for(&none), 150.0);
+        assert_eq!(far_distance_for(&Preferences::parse("gfx_tree_quality 3; # #\r\n")), 200.0);
+        assert_eq!(far_distance_for(&Preferences::parse("gfx_tree_quality 0; # #\r\n")), 50.0);
+    }
 
     /// The sway's source is the battle's own `prevailing_wind`, read off the game's speed ladder.
     /// Austerlitz ships `(0, 9)` — world `(0, 0, −9)` — so the strength is 9/16 and the wind blows

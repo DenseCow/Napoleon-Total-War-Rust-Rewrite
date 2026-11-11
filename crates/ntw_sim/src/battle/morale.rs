@@ -20,6 +20,12 @@
 pub mod effect_id {
     /// Positive category bonus (+6 / +4 / +2). W1 §12.4 (CONFIRMED).
     pub const CATEGORY_BONUS: i32 = 0x05;
+    /// Inspired by a general: the timed effect the Inspire ability gives its target
+    /// (`0x0051DAF0`, CONFIRMED).
+    pub const INSPIRED: i32 = 0x10;
+    /// Rallied by a general: the timed effect the Rally ability gives every unit in range
+    /// (`0x0051DDB0`, CONFIRMED).
+    pub const RALLIED: i32 = 0x11;
     /// Kill ratio ("blood") bonus. W1 §12.4 (CONFIRMED).
     pub const BLOOD: i32 = 0x06;
     /// Charge bonus while the charge timer runs. W1 §12.3 (CONFIRMED).
@@ -279,7 +285,8 @@ impl MoraleComponent {
 /// The `kv_morale` table: every key in game-data order (W1 `kv_layout.tsv`, CONFIRMED key list).
 ///
 /// All values are integers because the loader truncates them (W1 §9, `cvttss2si` at 0x00F3A899),
-/// except the `special_ability_*` keys whose third adder is not yet understood (kept as `i32` here).
+/// the three `special_ability_*` keys included: the loader adds them with the same integer adder
+/// `0x00F3A830` (calls at `0x00F42458`, `0x00F4246A`, `0x00F4247C`, CONFIRMED).
 ///
 /// **No numbers are hard-coded**: `Default` gives all zeros. Real values are loaded from the
 /// player's game files; tests use obviously made-up placeholders.

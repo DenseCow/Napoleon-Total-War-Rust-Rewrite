@@ -43,15 +43,20 @@
 //! - a peace (`0x00B262C0` → `0x00A25570` per commander of either side, the call `0x00A255C5`):
 //!   his force's siege of a settlement the other side owns (target virtual +0x14 equal to it,
 //!   `0x00898B20`) ends ([`CampaignModel::end_siege_on_peace`]); a besieger with no commander is
-//!   not reached.
+//!   not reached;
+//! - the start of the besieging general's next order (the order helper `0x008FF470`, the call at
+//!   `0x008FF4B7` through `0x00A0B8C0`; CONFIRMED by decompile): every order but the settlement order onto
+//!   the besieged settlement itself ([`CampaignModel::begin_order`]);
+//! - a battle's casualty step for a force left with no units (`0x008AC010`, the call at `0x008AC130`;
+//!   CONFIRMED by decompile): the emptied force is removed ([`CampaignModel::remove_force`]).
 //!
 //! Each end that finds a siege also runs the trade price update with flag 0 (`0x00BCB020(0)` at
 //! `0x008BD65B`), as the exe's `0x008BD550` does.
 //!
-//! PROVISIONAL: its other callers are not traced (`0x008FF4B7`, `0x008BEB42`, `0x008AC130`,
-//! `0x00B290B0`, `0x008DB7BD` the listener `0x008DB7A0`, `0x008F801B` the post-battle placement,
-//! `0x00A787C0`, `0x00B584ED`, `0x00B5881D`, `0x00B58BD8`, `0x00932794`), so a besieger that moves
-//! off, among others, does not end its siege here; nor how a siege starts in the model (BACKLOG
+//! PROVISIONAL: its other callers are not traced (`0x008BEB42`, `0x00B290B0`, `0x008DB7BD` the listener
+//! `0x008DB7A0`, `0x008F801B` the post-battle placement for a beaten side's commander, `0x00A787C0`,
+//! `0x00B584ED`, `0x00B5881D`, `0x00B58BD8`, `0x00932794` the end-siege command next to the end-blockade
+//! one), so those do not end a siege here; nor how a siege starts in the model (BACKLOG
 //! "Sieges on the campaign map"). The model has no forts under siege (`World::forts` is empty in
 //! every shipped campaign), so only settlements run it.
 //!

@@ -6,7 +6,8 @@
 //! # How the game reads them (Worker 1 §9, `kv_layout.tsv`, CONFIRMED)
 //! The exe does **not** keep the floats. For most keys the loader converts the value to an
 //! integer with the x86 instruction `cvttss2si` (at 0x00F3A899), which *truncates toward
-//! zero*: 2.9 → 2, -2.9 → -2. Only a short list of `_kv_rules` keys stays as floats.
+//! zero*: 2.9 → 2, -2.9 → -2. Only a short list of `_kv_rules` keys stays as floats, and its
+//! four `special_ability_*` keys become unsigned integers ([`exe_unsigned`]).
 //! [`exe_truncate`] reproduces `cvttss2si` exactly, including its out-of-range result.
 //!
 //! * `_kv_morale` → [`KvMorale`] (from `ntw_sim`), all integers.
@@ -30,6 +31,14 @@ use crate::DataError;
 pub fn exe_truncate(v: f32) -> i32 {
     // -2^31 is exactly representable; 2^31 is the first value that does not fit.
     if v.is_nan() || !(-2_147_483_648.0..2_147_483_648.0).contains(&v) { i32::MIN } else { v as i32 }
+}
+
+/// Converts a float to an unsigned integer exactly like the exe's runtime helper `0x0126E2B0`
+/// (called by the third kv adder at `0x00F3A95E`, CONFIRMED from its instructions): values in
+/// `(-1, 2^32)` truncate toward zero (so `-0.5` gives 0), and everything else (`<= -1`, `>= 2^32`,
+/// NaN, the infinities) gives `0xFFFFFFFF`.
+pub fn exe_unsigned(v: f32) -> u32 {
+    if v > -1.0 && v < 4_294_967_296.0 { v as u32 } else { u32::MAX }
 }
 
 /// A raw key-value table: every row of the file, in order, with lookup by key.
@@ -108,7 +117,9 @@ pub enum KvType {
     Int,
     /// Kept as a float.
     Float,
-    /// Stored by a third adder (0x00F3A8F0) whose conversion is UNKNOWN; kept as the raw float here.
+    /// Stored by the third adder (`0x00F3A8F0`, CONFIRMED) as an unsigned 32-bit integer
+    /// ([`exe_unsigned`]). Its only four callers are the `special_ability_*` keys of `_kv_rules`
+    /// (`0x00F42FB6..0x00F42FEC` in the loader `0x00F42950`).
     Other,
 }
 
@@ -119,6 +130,8 @@ pub enum KvValue {
     Int(i32),
     /// A float key.
     Float(f32),
+    /// An unsigned integer key ([`KvType::Other`], already converted).
+    Unsigned(u32),
 }
 
 impl KvValue {
@@ -127,6 +140,7 @@ impl KvValue {
         match self {
             Self::Int(i) => i as f32,
             Self::Float(f) => f,
+            Self::Unsigned(u) => u as f32,
         }
     }
 }
@@ -253,12 +267,14 @@ impl KvRules {
         KV_RULES_KEYS.iter().find(|(k, _)| *k == key).map(|&(_, t)| t)
     }
 
-    /// The value as the exe sees it: truncated for integer keys, the float otherwise.
+    /// The value as the exe sees it: truncated for integer keys, converted to an unsigned
+    /// integer for the [`KvType::Other`] keys, the float otherwise.
     /// Keys the exe does not read are returned as their raw float.
     pub fn get(&self, key: &str) -> Option<KvValue> {
         let raw = self.table.raw(key)?;
         Some(match Self::key_type(key) {
             Some(KvType::Int) => KvValue::Int(exe_truncate(raw)),
+            Some(KvType::Other) => KvValue::Unsigned(exe_unsigned(raw)),
             _ => KvValue::Float(raw),
         })
     }
@@ -267,15 +283,15 @@ impl KvRules {
     pub fn int(&self, key: &str) -> Option<i32> {
         match self.get(key)? {
             KvValue::Int(i) => Some(i),
-            KvValue::Float(_) => None,
+            KvValue::Float(_) | KvValue::Unsigned(_) => None,
         }
     }
 
-    /// A float key's value (`None` if missing or an integer key).
+    /// A float key's value (`None` if missing or not a float key).
     pub fn float(&self, key: &str) -> Option<f32> {
         match self.get(key)? {
             KvValue::Float(f) => Some(f),
-            KvValue::Int(_) => None,
+            KvValue::Int(_) | KvValue::Unsigned(_) => None,
         }
     }
 
@@ -432,7 +448,8 @@ impl TryFrom<&KvTable> for KvFatigue {
 
 /// A field type of the simulation's `KvRules`: how a raw kv float becomes that field.
 pub trait FromKv: Sized {
-    /// The storage kind this Rust type stands for (`i32` = [`KvType::Int`], `f32` = float).
+    /// The storage kind this Rust type stands for (`i32` = [`KvType::Int`], `f32` = float,
+    /// `u32` = [`KvType::Other`]).
     const KIND: KvType;
     /// Converts the raw float the way the exe does.
     fn from_kv(raw: f32) -> Self;
@@ -449,6 +466,13 @@ impl FromKv for f32 {
     const KIND: KvType = KvType::Float;
     fn from_kv(raw: f32) -> Self {
         raw
+    }
+}
+
+impl FromKv for u32 {
+    const KIND: KvType = KvType::Other;
+    fn from_kv(raw: f32) -> Self {
+        exe_unsigned(raw)
     }
 }
 
@@ -730,16 +754,33 @@ mod tests {
     }
 
     /// Every sim field has a W1 key, every W1 key has a sim field, and the Rust type agrees
-    /// with the exe's int/float rule (the unknown "other" keys are kept as f32).
+    /// with the exe's storage (`i32` truncated, `f32` kept, `u32` the third adder's unsigned).
     #[test]
     fn sim_kv_rules_fields_match_the_exe_types() {
         let kinds = kv_rules_sim_field_kinds();
         assert_eq!(kinds.len(), KV_RULES_KEYS.len());
         for (name, kind) in &kinds {
             let exe = KvRules::key_type(name).unwrap_or_else(|| panic!("{name} is not a W1 kv_rules key"));
-            let expected = if exe == KvType::Int { KvType::Int } else { KvType::Float };
-            assert_eq!(*kind, expected, "{name}");
+            assert_eq!(*kind, exe, "{name}");
         }
+    }
+
+    /// The third adder's conversion (`0x0126E2B0`): truncation inside `(-1, 2^32)`, else all ones.
+    #[test]
+    fn unsigned_keys_convert_like_the_exe() {
+        assert_eq!(exe_unsigned(7.9), 7);
+        assert_eq!(exe_unsigned(0.0), 0);
+        assert_eq!(exe_unsigned(-0.99), 0);
+        assert_eq!(exe_unsigned(-1.0), u32::MAX);
+        assert_eq!(exe_unsigned(-250.0), u32::MAX);
+        assert_eq!(exe_unsigned(3e9), 3_000_000_000);
+        assert_eq!(exe_unsigned(4_294_967_296.0), u32::MAX);
+        assert_eq!(exe_unsigned(f32::NAN), u32::MAX);
+        assert_eq!(exe_unsigned(f32::NEG_INFINITY), u32::MAX);
+        let t = KvTable::from_entries("_kv_rules", vec![("special_ability_inspire_unit_melee_attack_bonus".into(), 2.6)]);
+        let rules = KvRules { table: t };
+        assert_eq!(rules.get("special_ability_inspire_unit_melee_attack_bonus"), Some(KvValue::Unsigned(2)));
+        assert_eq!(rules.float("special_ability_inspire_unit_melee_attack_bonus"), None);
     }
 
     #[test]

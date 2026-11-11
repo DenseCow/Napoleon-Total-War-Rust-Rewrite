@@ -748,6 +748,24 @@ impl CampaignModel {
         !self.has_patron(p) && !self.has_patron(r) && !self.at_war(p, r) && regions_of_r == 1 && !self.is_human(r)
     }
 
+    /// The war record's possible test `0x00C1A890(proposer, recipient)`, CONFIRMED (decompile and
+    /// disassembly): whether `p` can declare war on `r` through diplomacy. Not at war with the
+    /// recipient (`IsFactionAtWarWith` `0x008CE9B0`), and the proposer has no patron
+    /// (`FactionHasPatron` `0x008CEEA0`), or its patron (`0x008E2A80`, faction +0x754) is the
+    /// recipient itself (`0x00898B20`, a plain equality) or at war with the recipient: a protectorate
+    /// declares only on its patron or on its patron's enemies. Called by the war record's constructor
+    /// `0x00BF3FD0` (proposer `0x004CE450`, recipient `0x004631B0`; the war record of
+    /// [`Self::negotiation_actions`]) and by the CAI target filter `0x00D5C250` (twice, at
+    /// `0x00D5C3C4` / `0x00D5C4BA`: a candidate passes when `0x00A649F0` holds or this does; the AI's
+    /// war order reads it through its snapshot, `ntw_ai` `AiWorld::war_options`). `0x00CCCBF0` runs it
+    /// only when its third argument is non-null and equals its +0x108; with 0 it queues the war deal
+    /// untested. Not a rule of the declaration itself: the command's handler `0x00932B70` has no such
+    /// test, so a script's `force_declare_war` still declares for a protectorate
+    /// ([`Self::declare_war_rules`]).
+    pub fn war_option_possible(&self, p: FactionId, r: FactionId) -> bool {
+        !self.at_war(p, r) && self.patron(p).is_none_or(|x| x == r || self.at_war(x, r))
+    }
+
     /// The 14 action records of a negotiation of `proposer` with `recipient`, in the exe's order
     /// (the constructors `0x00BF3E90` .. `0x00BF3520` called by `0x00BF5A60`). Every record is then
     /// forbidden when the proposer's relationship to the recipient has its option at 2 or 3
@@ -773,10 +791,8 @@ impl CampaignModel {
         let protector = self.protector_possible(p, r);
         // Peace (`0x00C1A730`): at war and the peace option allowed (0 or 1).
         let peace = war && self.diplomacy_option(p, r, A::Peace.option()) <= 1;
-        // War (`0x00C1A890`): not at war. PROVISIONAL: its patron test is not modelled (BACKLOG): a
-        // proposer with a patron (+0x754, `Self::has_patron`) may declare only on the patron
-        // itself or on a faction the patron is at war with.
-        let declare = !war;
+        // War (`0x00C1A890`).
+        let declare = self.war_option_possible(p, r);
         let join = allied && (self.joinable_war(r, p) || self.joinable_war(p, r));
         let break_trade = !war && (self.trades_with_third(r, p) || self.trades_with_third(p, r));
         let break_alliance = !war && (self.allied_with_third(p, r) || self.allied_with_third(r, p));
@@ -1250,10 +1266,13 @@ impl CampaignModel {
         if peace {
             self.world.check_make_peace(proposer, recipient)?;
         }
-        // PROVISIONAL: an item naming its own joiner refuses the whole deal here (SameFaction). The
-        // exe has no such test (`0x00C188F0` → `0x00B26700` takes any pair); what its war of a
-        // faction on itself does to the records, and whether its panel or the AI can ever propose
-        // one, is not traced.
+        // ORIGINAL BUG: a join-war item naming its own joiner lands the war on an unrelated faction's
+        // record (`0x00C188F0`): the joiner's record for itself is looked up with `0x00B64C50`, whose
+        // miss returns the manager's first record (`0x00B64C88`), and `0x00B26700` declares on any pair
+        // (no same-faction test, CONFIRMED). The AI never proposes one (`0x008FA020` leaves out the
+        // joiner); the executor (`0x009336C0`) lets the panel's lists through unchecked. Ours refuses
+        // the whole deal here (SameFaction, as DeclareWar refuses a == b). A joiner that the same deal's
+        // region transfer ended still declares (no alive test in `0x00C188F0`), as here.
         let join_wars = [(&join_war.offered, proposer, recipient), (&join_war.demanded, recipient, proposer)];
         for (list, joiner, _) in join_wars {
             for &f in list {

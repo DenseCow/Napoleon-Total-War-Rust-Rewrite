@@ -90,11 +90,71 @@ pub fn merge_keyed<R>(files: Vec<Vec<R>>, key: impl Fn(&R) -> &str, replaces: im
     rows.into_iter().flatten().collect()
 }
 
+/// The tables the exe reads through its table loader 0x00DBDB90, one per caller (CONFIRMED,
+/// `analysis/mods/MOD_LOADING.md` §3.3). Their row readers (0x00DD2250, 0x00DD22A0, 0x00E85910) put
+/// column 0 at record+0 and column 1 at record+0xC, and the loader hashes the two joined with nothing
+/// between (0x004F1200 at 0x00DBE511), so a later file's row merges into an earlier one only when
+/// both columns match. This list is the one statement of that key, and every reader checks it: an
+/// `ntw_data` `db_record!` of one of these tables that does not merge on exactly its first two
+/// columns (`key = <column 0> + <column 1>`) fails to compile, a [`RawTable`] of one must be keyed
+/// `RowKey::Concat(&[0, 1])` ([`RawTable::merges_like_the_loader`]), and [`merged_rows`], whose key
+/// is a closure nothing can check, refuses them.
+pub const COLUMN_0_1_KEYED_TABLES: [&str; 16] = [
+    "building_effects_junction",
+    "building_factionwide_effects_junctions",
+    "units_to_exclusive_faction_permissions",
+    "technology_effects_junction",
+    "trait_ability_effects",
+    "trait_attribute_effects",
+    "trait_attribute_situation_effects",
+    "trait_level_effects",
+    "agent_spawning_to_government_types",
+    "agent_spawning_to_building_chains",
+    "agent_spawning_to_policies",
+    "agent_to_agent_abilities",
+    "ancillary_to_ability_effects",
+    "ancillary_to_attribute_effects",
+    "ancillary_to_attribute_situation_effects",
+    "ancillary_to_effects",
+];
+
+/// `a == b` in a `const` context.
+pub const fn const_str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// True when `table` is one of [`COLUMN_0_1_KEYED_TABLES`] (`const`, for the compile-time checks).
+pub const fn is_column_0_1_keyed(table: &str) -> bool {
+    let mut i = 0;
+    while i < COLUMN_0_1_KEYED_TABLES.len() {
+        if const_str_eq(COLUMN_0_1_KEYED_TABLES[i], table) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 /// The rows of one table through the merged view: every file in `db\<table>_tables\` decoded by
 /// `decode`, in the original's order, merged by `key` with the original's row rule
 /// ([`Vfs::db_row_replaces`]). `key` must be the key the exe's loader for that table hashes. A
 /// table with no file gives no rows; files from mods that fail to decode are skipped and described
 /// in `warnings`.
+///
+/// # Panics
+/// For a table in [`COLUMN_0_1_KEYED_TABLES`]: nothing can check that a closure joins columns 0 and
+/// 1, so those tables are read as a typed `ntw_data` record or a [`RawTable`], which are checked.
 pub fn merged_rows<R, E>(
     vfs: &Vfs,
     table: &str,
@@ -105,6 +165,10 @@ pub fn merged_rows<R, E>(
 where
     E: From<PackError> + fmt::Display,
 {
+    assert!(
+        !is_column_0_1_keyed(table),
+        "{table}: the exe's loader 0x00DBDB90 merges this table's files on columns 0 + 1 (COLUMN_0_1_KEYED_TABLES); read it as a typed record or a RawTable keyed RowKey::Concat(&[0, 1]), whose key is checked"
+    );
     let (files, tables) = read_files(vfs, table, warnings, decode)?;
     Ok(merge_keyed(tables, key, |holder, new| vfs.db_row_replaces(&files[holder], &files[new])))
 }
@@ -208,6 +272,20 @@ impl From<PackError> for TableError {
 }
 
 impl RawTable {
+    /// False for a table in [`COLUMN_0_1_KEYED_TABLES`] whose [`key`](Self::key) is not columns 0
+    /// and 1 joined with nothing between, the key its loader hashes; any other table passes.
+    /// Checked at compile time for [`tables`] and by [`read_with`](Self::read_with) for a table
+    /// built elsewhere.
+    pub const fn merges_like_the_loader(&self) -> bool {
+        if !is_column_0_1_keyed(self.name) {
+            return true;
+        }
+        match self.key {
+            RowKey::Concat(cols) => cols.len() == 2 && cols[0] == 0 && cols[1] == 1,
+            _ => false,
+        }
+    }
+
     /// The table's rows through the merged view (every file of its folder, in the original's
     /// order, merged by [`RawTable::key`] with the original's row rule). A mod file that does not
     /// read or decode is skipped with a `WARN` line; a table with no file is [`TableError::Missing`].
@@ -223,7 +301,16 @@ impl RawTable {
     }
 
     /// [`read`](Self::read) with the skipped mod files described in `warnings` instead of logged.
+    ///
+    /// # Panics
+    /// When the table does not [merge like its loader](Self::merges_like_the_loader): a wrong key
+    /// in the code, which would merge away a mod's rows that share only column 0.
     pub fn read_with(&self, vfs: &Vfs, warnings: &mut Vec<String>) -> Result<Vec<Vec<DbValue>>, TableError> {
+        assert!(
+            self.merges_like_the_loader(),
+            "{}: the exe's loader 0x00DBDB90 merges this table's files on columns 0 + 1; key it RowKey::Concat(&[0, 1]) (COLUMN_0_1_KEYED_TABLES)",
+            self.name
+        );
         let schema = Schema::from_codes(self.codes).expect("table schemas in `tables` are valid codes");
         let table = self.name;
         let decode = |b: &[u8]| -> Result<Vec<(String, Vec<DbValue>)>, TableError> {
@@ -246,7 +333,10 @@ pub mod tables {
     use super::{RawTable, RowKey};
 
     const fn table(name: &'static str, codes: &'static str, key: RowKey) -> RawTable {
-        RawTable { name, codes, key }
+        let table = RawTable { name, codes, key };
+        // A compile error for a constant below (COLUMN_0_1_KEYED_TABLES).
+        assert!(table.merges_like_the_loader(), "the exe's loader 0x00DBDB90 merges this table's files on columns 0 + 1: key it RowKey::Concat(&[0, 1])");
+        table
     }
 
     /// (mount, model key, weight).
@@ -327,9 +417,25 @@ pub mod tables {
     pub const PUBLIC_ORDER_FACTORS: RawTable = table("public_order_factors", "s,s,o", RowKey::Concat(&[0]));
     /// (factor key, pip picture, text).
     pub const TOWN_WEALTH_GROWTH_FACTORS: RawTable = table("town_wealth_growth_factors", "s,s,s", RowKey::Concat(&[0]));
+    /// (script event name): the events the gate `0x008F9EE0` lets reach Lua (the table is built on
+    /// first use by `0x00E30810`). Key column 0 (CONFIRMED): the table's entry_pack `0x00E9AFF0` (from
+    /// its constructor `0x00E6DD40`) keys each loaded row by a copy of row +0x00, the event name, and
+    /// looks it up in the loaded source's key map (+0x14, `0x0047AA40`; "not a valid key" when absent).
+    pub const TRIGGER_EVENTS: RawTable = table("trigger_events", "s", RowKey::Concat(&[0]));
+    /// (script event name, agent type key): the agent types the gate keeps an event from. Key columns
+    /// 0 + 1 (CONFIRMED): the entry_pack `0x00E9B370` (constructor `0x00E6DE50`, folder
+    /// `trigger_event_to_excluded_agent_types_tables`, `0x00E8FEA0`) keys each loaded row by row +0x00
+    /// joined with row +0x0C (`0x004F1200`), looks that up in the source's key map and indexes the
+    /// records by it. In memory +0x00 is the event key and +0x0C the agent key (CONFIRMED,
+    /// `0x00E8FD50` matches the first with the event record's key and keeps the second). INFERRED: the
+    /// file's column order is the record's (event, then agent type); vanilla ships the table empty, so
+    /// no file shows it, and the row reader that fills +0x00 / +0x0C (the loader that builds the rows
+    /// `0x00E8FEA0` is given) is not traced: tracing it settles this.
+    pub const TRIGGER_EVENT_TO_EXCLUDED_AGENT_TYPES: RawTable =
+        table("trigger_event_to_excluded_agent_types", "s,s", RowKey::Concat(&[0, 1]));
 
     /// Every table above (for checks over all of them).
-    pub const ALL: [RawTable; 35] = [
+    pub const ALL: [RawTable; 37] = [
         MOUNT_VARIANTS, WARSCAPE_ANIMATED, WARSCAPE_ANIMATED_LOD, WARSCAPE_RIGID, WARSCAPE_RIGID_LOD, UNIFORMS,
         UNIFORM_TO_FACTION_COLOURS, FACTION_UNIFORM_COLOURS, WARSCAPE_TREES, NAMES, BATTLEFIELD_BUILDINGS,
         UNIT_MOVEMENT_MODIFIERS, BATTLE_TYPE_SETUP_LIMITS, BATTLE_TYPE_FACTION_PRESETS, BATTLE_TYPE_UNIT_TO_FACTION_PRESETS,
@@ -337,6 +443,7 @@ pub mod tables {
         MINISTERIAL_POSITIONS_BY_GOV_TYPES, MINISTERIAL_POSITIONS, STATE_GIFT_VALUES, DIPLOMATIC_RELATIONS_ATTITUDES,
         RELIGIONS, CULTURES, BUILDING_CULTURE_VARIANTS, TECHNOLOGY_REQUIRED_TECHNOLOGY_JUNCTIONS, WARSCAPE_EQUIPMENT_THEMES,
         WARSCAPE_EQUIPMENT_ITEMS, BATTLE_PERSONALITIES, BATTLE_ENTITIES, PUBLIC_ORDER_FACTORS, TOWN_WEALTH_GROWTH_FACTORS,
+        TRIGGER_EVENTS, TRIGGER_EVENT_TO_EXCLUDED_AGENT_TYPES,
     ];
 }
 
@@ -438,6 +545,65 @@ mod tests {
         let rows = merged_rows(&vfs, "models_building", &mut warnings, |b| crate::models_building::read(b).map_err(|error| TableError::Db { table: "models_building", error }), |r| r.key.as_str()).unwrap();
         assert_eq!(rows.iter().map(|r| r.key.as_str()).collect::<Vec<_>>(), ["farm", "mill"]);
         assert!(warnings.is_empty());
+    }
+
+    /// Only columns 0 and 1 joined with nothing between is the key of a table of the loader
+    /// 0x00DBDB90; any other table takes any key.
+    #[test]
+    fn a_listed_table_merges_like_the_loader_only_on_columns_0_and_1() {
+        for name in COLUMN_0_1_KEYED_TABLES {
+            let keyed = |key| RawTable { name, codes: "s,s,f", key };
+            assert!(keyed(RowKey::Concat(&[0, 1])).merges_like_the_loader(), "{name}");
+            for wrong in [
+                RowKey::Concat(&[0]),
+                RowKey::Concat(&[1, 0]),
+                RowKey::Concat(&[0, 1, 2]),
+                RowKey::Concat(&[]),
+                RowKey::Joined(&[0, 1], "_"),
+                RowKey::Decimal(0),
+            ] {
+                assert!(!keyed(wrong).merges_like_the_loader(), "{name}");
+            }
+        }
+        assert!(tables::ALL.iter().all(RawTable::merges_like_the_loader));
+        assert!(!is_column_0_1_keyed("trait_level_effect") && !is_column_0_1_keyed("trait_level_effects_") && !is_column_0_1_keyed(""));
+    }
+
+    /// A raw read of a listed table keyed on column 0 alone is refused before any file is read
+    /// (it would merge away a mod's row that shares only its column 0).
+    #[test]
+    #[should_panic(expected = "trait_level_effects: the exe's loader 0x00DBDB90 merges this table's files on columns 0 + 1")]
+    fn a_raw_column_0_read_of_a_listed_table_is_refused() {
+        let _ = RawTable { name: "trait_level_effects", codes: "s,s,f", key: RowKey::Concat(&[0]) }.read(&Vfs::new());
+    }
+
+    /// [`merged_rows`] cannot check its key closure, so it refuses a listed table whatever the key.
+    #[test]
+    #[should_panic(expected = "ancillary_to_effects: the exe's loader 0x00DBDB90 merges this table's files on columns 0 + 1")]
+    fn merged_rows_refuses_a_listed_table() {
+        let decode = |_: &[u8]| -> Result<Vec<String>, TableError> { Ok(Vec::new()) };
+        let _ = merged_rows(&Vfs::new(), "ancillary_to_effects", &mut Vec::new(), decode, |k| k.as_str());
+    }
+
+    /// The same listed table keyed as its loader keys it: a mod row that shares only column 0 with
+    /// a vanilla row is a new row, and one that shares both merges into it (the vanilla row stays,
+    /// the file being no `bob_` one).
+    #[test]
+    fn a_listed_raw_table_keeps_rows_that_share_only_column_0() {
+        let schema = Schema::from_codes("s,s,f").unwrap();
+        let encode = |rows: &[(&str, &str, f32)]| {
+            let rows = rows.iter().map(|r| vec![DbValue::Str(r.0.into()), DbValue::Str(r.1.into()), DbValue::F32(r.2)]).collect();
+            DbTable { version: 0, has_version_marker: false, flag: 1, rows }.to_bytes(&schema).unwrap()
+        };
+        let vfs = two_pack_vfs(
+            "db_folder_listed_raw",
+            &[("db\\trait_level_effects_tables\\trait_level_effects", &encode(&[("level", "a", 1.0)]))],
+            &[("db\\trait_level_effects_tables\\more", &encode(&[("level", "a", 2.0), ("level", "b", 3.0)]))],
+        );
+        let table = RawTable { name: "trait_level_effects", codes: "s,s,f", key: RowKey::Concat(&[0, 1]) };
+        let rows = table.read(&vfs).unwrap();
+        let cells: Vec<(&DbValue, &DbValue)> = rows.iter().map(|r| (&r[1], &r[2])).collect();
+        assert_eq!(cells, [(&DbValue::Str("a".into()), &DbValue::F32(1.0)), (&DbValue::Str("b".into()), &DbValue::F32(3.0))]);
     }
 
     #[test]

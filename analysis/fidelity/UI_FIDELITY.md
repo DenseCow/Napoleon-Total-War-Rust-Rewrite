@@ -1735,7 +1735,9 @@ against a focused text field are CONFIRMED: see "Shortcut keys" below.
   → `0x00E8CE80` → `0x00EDD1B0`), so the walk follows registration order.
 - **Stealing.** `StealShortcutKey(key)` (`0x01015C70` → `0x00EC3DE0`) marks every binding with
   that key stolen and clears its repeat; a key no binding has gets a dummy binding for the stealer
-  (`0x00EAF250`: the key, modifier NONE, not repeating). `StealShortcutKey(false)` gives the keys
+  (`0x00EAF250`: the key, modifier NONE, not repeating). A stealer already in the key's list keeps
+  its place and a new one goes to the head of the list (`0x00EC3DE0`, CONFIRMED by disassembly,
+  polish67 review), so a re-steal does not make a component the newest. `StealShortcutKey(false)` gives the keys
   back (`0x00EC3AA0`) and also clears the input focus (`0x00DA9C80`).
 - **UI component handler** (vtable `0x01393BD0`): +0x28 `0x00DAD190` → `0x0102F280` calls the
   component's Lua `OnShortcut(func, false)`; +0x2C `0x00DAD1B0` calls `OnShortcut(func, true)`
@@ -1797,8 +1799,10 @@ against a focused text field are CONFIRMED: see "Shortcut keys" below.
   component of that name under the root (the exe gives every registered handler of the name the
   binding); the handler lock (`0x00A22430`, `steal_user_input`) is not modelled (the input layer
   is: "Input layer" below);
-  the release's post to the event lists is not ported; a key's stealer is our most recent shown
-  stealer (the exe: newest with +0x38 / +0x3C, no reorder on re-steal); the camera's controllers (its busy test is ported: "Busy test" below).
+  the release's post to the event lists is not ported; a key's stealer is our newest shown
+  stealer, a re-steal keeping its place as in the exe (`0x00EC3DE0`, ported: `stealer_of`, test
+  `a_re_steal_keeps_the_stealers_place`); the exe also tests the stealer's handler +0x38 / +0x3C
+  (`0x00DACBA0` / `0x00DACBB0`), ours does not; the camera's controllers (its busy test is ported: "Busy test" below).
   PROVISIONAL (`input_focus_held`): ours keeps the focus on a component that is destroyed; what the
   exe does then is not traced. Not done yet: `custom_keys.keys.xml` and the keyset choice
   (`0x00ED27D0`), the front end's and the battle's bindings (the camera's tilt and bookmarks are ported: "Camera keys", "Bookmarks" below).
@@ -2736,6 +2740,8 @@ is the whole point.
 
 ### 9.9 `MoveIntoTarget` -- NOT 0-B's, and not a UI shell around nothing
 
+(Superseded by §9.10.8.)
+
 Round 3 left it as "a logging stub, contract UNKNOWN". It is better described than that, and it is
 **not** a model gap. What is now settled, all CONFIRMED from the install's bytecode:
 
@@ -2977,7 +2983,10 @@ All CONFIRMED by disassembly unless marked.
     otherwise;
   - `visit` is cleared when either research bit is set.
 - **The character mask `0x009C9CA0`**, behind the gate `0x009D1190` (the character-target ability-list builder: it also pushes `can_attack_land` / `can_attack_naval`, `can_sabotage_army`, `can_duel` and `can_assassinate`; only its `can_exchange` row matters here):
-  - for a foreign target, the gate needs the agent to command no force (`0x009D0910`), his type to
+  - for a foreign target, the gate needs the test `0x009D0910` (both command a force and their factions
+    differ: the gate calls it with flag 1 at `0x009D1273`, and the function compares the factions only for
+    a non-zero flag; with flag 0 it uses the relation test `0x00A0B6B0` instead, a path this gate does not
+    take; disassembly, polish67 review) to fail, which for a target who commands an army means the agent commands no force, his type to
     count against a residence (`0x00A0B9C0`), the target to command an army (`0x009D3A60`) with fewer
     than 20 accompanying characters (army +0x60, `0x006A3110`), `subterfuge` above 0, and the
     `can_exchange` row;
@@ -3690,3 +3699,35 @@ answer does. The diplomacy lists are one function, `diplomacy_lists` (diplomacy.
 `CampaignUI.DiplomacyDetails` (mask 0x1F). Tests (campaign_ui.rs):
 `ally_attacked_message_opens_and_its_assist_button_joins_the_ally`,
 `ally_attacked_decline_refuses_the_call`.
+
+## 15. The defeat / victory screens: what the UI calls (victoryscreen3, 2026-11-10)
+
+The rules are the campaign's (CAMPAIGN_FIDELITY.md "Campaign over": the movies, "The victory check and the
+capture hold"); this is the UI side only. CONFIRMED by disassembly unless tagged. The two scripts
+(`event_movie_panel.luac`, `campaign_result.luac`) and the root's functions are cited from the `luac_dump` of
+the shipped bytecode by worker victoryscreen, 2026-10-17 (CAMPAIGN_FIDELITY.md "Campaign over", "The scripts'
+side", with the line numbers); they were not dumped again for this section.
+
+- **The screens are the shipped ones:** the movie panel (`event_movie_panel`, opened by the root's
+  `InitialiseMoviePanel`) and the campaign result popup (`campaign_result`, opened by the root's
+  `ShowCampaignResultPopup(won)`). Ours opens both through those root functions; nothing is drawn by hand.
+- **Victory:** the model's `CampaignEvent::OutcomeMovie` (event +0x120) opens the movie panel; its exit
+  (`MovieExit::ShowVictoryOptionsPopup`) has the script open the result popup as a victory.
+- **Defeat by the conditions:** event +0x138's UI listener `0x00A134E0` calls `ShowCampaignResultPopup(false)`
+  for the local player only, with no movie. Ours: `CampaignEvent::CampaignLost` → `CampaignSim::campaign_lost`
+  → `UiScriptHost::campaign_lost_popup` (one logged error when the root has no such function).
+- **`CampaignUI.ContinueGameSelected()`** (the popup's Continue; `0x00428910` → `0x009E1D20`) queues
+  `CCQ_CONTINUE_GAME_SELECTED`, whose handler `0x00932B40` only releases the capture report the victory check
+  held back. Ours: the binding sends `CampaignCommand::ContinueGameSelected` and holds no rule of its own.
+- **The settlement options behind the victory movie:** while the report is held the exe does not step it, so
+  no looting screen opens. Ours: `UiScriptHost::campaign_capture_screen` shows nothing for a
+  `CapturePreview` with `held` set, and shows it once the model has released it.
+- **`CampaignUI.QuitToMainScreen()`** (`0x00429CF0` → `0x009EF630` → `0x009BFED0`) sets the leave request
+  (byte +0x7C of the UI manager's +0x9FC object); the campaign mode's next-mode step `0x00A065A0` answers mode
+  code 2, or starts the next campaign of a chain when the scripts asked for it (campaign +0xD0) and the mode
+  holds a launcher (+0x2C). INFERRED: code 2 is the main menu (its consumer, behind the caller `0x00A166F0`,
+  is not traced). PROVISIONAL: ours leaves for the main menu in both cases.
+- **The movie's sound level** is the movie volume times the master volume (CAMPAIGN_FIDELITY.md, same section).
+- Tests: ntw_script `movie_panel_tests`
+  (`quit_to_main_screen_asks_the_game_to_leave_and_continue_sends_the_models_command`,
+  `the_defeat_popup_opens_for_the_local_faction_only`, `a_held_capture_opens_no_capture_screen`).

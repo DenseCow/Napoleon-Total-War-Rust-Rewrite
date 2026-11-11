@@ -626,8 +626,8 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
       0x00B7A5F0). None of the evidence saves holds a siege (#13 empty everywhere).
     - **Siege ends** (siegeattr fix rounds 1–2, 2026-10-20, disassembly, CONFIRMED unless tagged). Every end of a
       siege goes through `EndForceSiegeOfSettlement` 0x008BD550(force), a destroyed besieger's too: it destroys the
-      siege object at force +0x94 (unlinking the force from the target's besieger list), calls the untraced
-      0x00B084F0 on the target's character, then, unless the campaign is torn down (+0xFC5), the price update
+      siege object at force +0x94 (unlinking the force from the target's besieger list), calls 0x00B084F0 on the
+      target's character (re-floods, stores and re-adds his obstacle zone; "Port blockades", "While it lasts"), then, unless the campaign is torn down (+0xFC5), the price update
       0x00BCB020(0) at 0x008BD65B and `RebuildRegionRecruitablesAndEffects` 0x00A6AE40 at 0x008BD678, then posts
       event 0xDF (model +0x9A8). The turns stay. 17 callers. Traced: (1) destruction: the military force's
       destructor 0x0088CE30 (sole caller 0x0089A2F3) calls it at 0x0088CE93 when force +0x94 is set and +0xFC5 is
@@ -639,10 +639,13 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
       listens (0x008DB7D0, its call 0x008DB84A) and ends its siege when the besieger's faction is the new owner or not
       at war with it (0x008CE9B0), an at-war besieger goes on; (4) peace: 0x00A25570 per commander of either side
       (from 0x00B262C0) ends his force's siege when the besieged settlement's owner (vt+0x14, compared by
-      0x00898B20) is the other side (0x00A255C5); a force with no commander is not reached. PROVISIONAL (untraced
-      callers): 0x008FF4B7, 0x008BEB42, 0x008AC130, 0x00B290B0, 0x008DB7BD (listener 0x008DB7A0), 0x008F801B
-      (post-battle placement), 0x00A787C0, 0x00B584ED, 0x00B5881D, 0x00B58BD8, 0x00932794 (moving off is among
-      them), and 0x00B084F0 / event 0xDF. Nor the siege start's other callers of 0x00B112F0.
+      0x00898B20) is the other side (0x00A255C5); a force with no commander is not reached; (5) the order helper
+      0x008FF470 (the call 0x008FF4B7 through 0x00A0B8C0) at the start of every order of the besieging general but
+      the settlement order onto the besieged settlement itself (0x0095D140; portblockade2, CONFIRMED by decompile;
+      ours `begin_order`); (6) the casualty step 0x008AC010 (0x008AC130) for an army left with no units (ours
+      `remove_force`). PROVISIONAL (untraced callers): 0x008BEB42, 0x00B290B0, 0x008DB7BD (listener 0x008DB7A0),
+      0x008F801B (post-battle placement), 0x00A787C0, 0x00B584ED, 0x00B5881D, 0x00B58BD8, 0x00932794 (the
+      end-siege command), and event 0xDF. Nor the siege start's other callers of 0x00B112F0.
     - **Model:** `Region::siege` (`SiegeState`: besiegers, surrender turns, turns besieged; ntw_sim campaign/siege.rs),
       read from and written to #2 / #3 / #13 (ntw_campaign world.rs `read_siege`, save.rs `write_region`; every vanilla
       startpos.esf and evidence save has the residence at version 1 with all three fields, so only a corrupt save
@@ -729,8 +732,11 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
       `empires` 6 rows, `empires_regions_junct` and `groupings_empires_junct` 0 rows, so no grouping names an empire.
       Ours: `grouping_priority` ignores `EventGrouping::empires` (test
       `the_matcher_takes_the_best_grouping_and_regions_overwrite`, both flags); a mod wanting empire buckets replaces
-      the `events.historical` seam. Gap: our loader keeps a grouping whose junction member is missing from its
-      table (any of the six lists); the exe drops it (BACKLOG).
+      the `events.historical` seam. Our loader (`historical_events::groupings`, polish69 2026-11-10) drops a grouping
+      whose junction member is missing from its table, with the events that name it, and logs each once: CONFIRMED
+      for `empires` (above), INFERRED for the other five lists (taken as the tables their keys belong to; the
+      converter's lookups for them are not written up, needs the exe). Every vanilla member is in its table (ntw_data
+      real_install.rs `historical_event_tables`). Test: `a_grouping_with_an_unknown_member_is_dropped_with_its_events`.
     - *Records* (converter 0x00F875E0, constructor 0x00F74A90): a row is dropped when `events_onscreen_name_<key>` or
       `events_event_text_<key>` is missing, its season is not `season_summer` / `_winter` / `_spring` / `_autumn`
       (0x00F55970 returns 4), or a row of `events_effect_group_junct` / `events_view_group_junct` names a key not in
@@ -760,7 +766,8 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
   `0x008EE3E0`, ended by `0x008BD4F0`), then event +0x108. Details (worker campover2, 2026-10-20):
   - **(2), the multiplayer victory** (`0x0096CD10`, CONFIRMED by decompilation): it runs only while its done byte
     (+0x38) and the flag are clear. Each human faction (+0x6E0) is sorted by the victory test `0x008F3DF0` into
-    winners, losers or undecided (a non-human with +0x824 set goes in a fourth list, unused here). With a winner, it
+    winners, losers or undecided (a non-human with +0x824 clear, tested at `0x0096CE1A` / `0x0096CE21`, goes in a
+    fourth list; its count is the last argument of the statistics call below, pushed at `0x0096D091`). With a winner, it
     first sets byte +0x9C of the object from campaign +0xF70's first entry (vfunc +0x1C; the byte the
     `CCQ_CONTINUE_GAME_SELECTED` handler `0x00932B40` clears). Then for each winner, unless the victory notice is off
     (EPISODIC_RESTRICTIONS +0x125): in multiplayer the first other human in the faction list gets event +0x120 (a
@@ -768,8 +775,9 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
     both factions' +0x724 → +0x7C equal 5, else event +0x108 (a defeat, flag 1); then the flag is set (only that one
     other human gets the event). The winner then gets +0x120 {winner, the flag just set}; a stats reporter
     (`0x009C7660`, vfunc +0x50) gets the winner's key and campaign numbers. Every loser gets +0x138. The done byte is
-    set when a winner exists, or when a loser exists and no human is undecided. Ours: there is no victory check in
-    the model yet (BACKLOG §6 victory conditions), nor a multiplayer campaign; this writer goes with them.
+    set when a winner exists, or when a loser exists and no human is undecided. Ours: `CampaignModel::victory_check`
+    ("The victory check and the capture hold" below; worker victoryscreen3), behind the PROVISIONAL
+    `campaign.victory_state` rule until the victory test is ported (BACKLOG §6 victory conditions).
   - **(3), the revolution** (CONFIRMED by decompilation): faction +0x814 = in a revolution. Its only setter
     `0x008EE3E0` (copies {settlement → +0x818, side byte → +0x81C, two more bytes → +0x81D/+0x81E}, clears +0x93E) is
     called by the region unrest outcomes `0x008B46A0` (case 5; case 1 is the riot) when it strikes a faction's capital (`0x00ABE4E0` / `0x00A8B5A0`:
@@ -880,14 +888,17 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
     (campaign +0xFA8) +0x125; the victory check `0x0096CD10` then posts no +0x120 for a winner and skips its
     multiplayer campaign-over step (test `0x0096CE9C`), and the victory test `0x0096FCE0` still marks the faction won
     but skips the `campaign_won` post (test `0x0096FFE7`). Saved at `EPISODIC_RESTRICTIONS` #32; set in the tut start
-    position. Ours: `World::victory_notification_disabled` (CAMPAIGN_DATA.md §4.2); the victory check must read it.
+    position. Ours: `World::victory_notification_disabled` (CAMPAIGN_DATA.md §4.2), read by
+    `CampaignModel::victory_check` (the `campaign_won` message of the victory test is not modelled: §6).
   - **CampaignUI bindings** (registration thunks hold name and handler): `QuitToMainScreen` (`0x00429CF0`) →
     `0x009EF630` → `0x009BFED0` sets byte +0x7C of the UI manager's +0x9FC object to 1 (the request to leave). Its
     neighbour `QuitToWindowsFromEscapeMenu` (`0x00429D10` → `0x009EF640` → `0x009BFEE0`) sets +0x7D. Both are read
     by `0x00A065A0` (worker victoryscreen2), the campaign mode's next-mode step (called by `0x00A166F0`, vtable
     `0x0136A540` slot +0x14, which copies the result {pointer, code} to its out +0xC / +0x10): +0x7D → code 6;
     +0x7C → if the mode's +0x2C is set and EPISODIC_RESTRICTIONS (`[[obj +8] +0xFA8]`) +0xD0 is set, it calls +0x2C
-    vfunc +4 with `"campaign|<mode +0x30>"` (an episodic campaign chain, UNKNOWN), else code 2; code 1 builds the
+    vfunc +4 with `"campaign|<mode +0x30>"` (the next campaign of a chain: +0xD0 is set only by the script method
+    `advance_to_next_campaign()` `0x00979050`, cleared by the loader at `0x00996A0E` and never saved, CONFIRMED,
+    worker victoryscreen3; the +0x2C object, its vfunc +4 and what fills mode +0x30 are not traced), else code 2; code 1 builds the
     0x178 battle object (`0x00506B50`), 3 the campaign loader (`0x00872380`), 0 stays (CONFIRMED by its other
     callers, worker victoryfix: `0x00506B50` is called by `0x005D73A0`, which formats `"battle|%C|%S"`, and by the
     tutorial-battle starter `0x00488C60` (`Battle_Tutorial.xml` / `NavalTutorial.xml`); `0x00872380` by the mode
@@ -900,12 +911,13 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
     menu stays INFERRED. `MovieDismissed` (`0x004295F0`) → `0x009EE380`
     → `0x00A0FC30` frees the playing movie (UI manager +0x107C, 0x2C bytes, `0x0099DD60`). `ContinueGameSelected`
     (`0x00428910`) → `0x009E1D20` sends the command `CCQ_CONTINUE_GAME_SELECTED` (registered `0x00420380`), whose
-    handler `0x00932B40` clears byte +0x9C of the object returned by vfunc +0x1C of campaign +0xF70's first entry
-    (UNKNOWN meaning). Its only setter through that path (worker victoryscreen2): the victory check `0x0096CD10`
+    handler `0x00932B40` clears byte +0x9C of the object returned by vfunc +0x1C of campaign +0xF70's first entry:
+    the capture report's hold. Its only setter through that path (worker victoryscreen2): the victory check `0x0096CD10`
     sets it to 1 at `0x0096CE7C` whenever a human winner exists, in single player too (early-outs only on its done
-    byte +0x38 and campaign +0xFE9). Campaign +0xF70 is the 8-byte object from `0x00882AC0` (stored at `0x008732D1`
-    in `0x00872550` and at `0x00874E8C` in `0x008742C0`); the reader of +0x9C is not found, so what continuing
-    changes stays UNKNOWN.
+    byte +0x38 and campaign +0xFE9). Campaign +0xF70 is the 8-byte pending-action stack: built by `0x00882AC0` in
+    `0x00872550` (its only call site `0x008732C6`, stored at `0x008732D1`) and by its no-argument twin `0x00444E70`
+    in `0x008742C0` (called at `0x00874E7E`, stored at `0x00874E8C`). Its reader and what continuing
+    changes: "The victory check and the capture hold" below (worker victoryscreen3).
 - **The scripts' side** (worker victoryscreen, 2026-10-17; CONFIRMED by `luac_dump` of the shipped bytecode; the exe
   side is "What is shown next" above):
   - `ui/campaign ui/event_movie_panel_scripts/event_movie_panel.luac`: the panel (`panelmanager.luac` registers
@@ -944,8 +956,9 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
   all-AI fallback for listed humans who are all out of the game: that state (an own save from before the flag, or a
   hand-built world) plays out the round and ends the campaign at the next round start (tested once per round), with
   one warning (our own guard; the exe cannot reach it). Not modelled
-  (BACKLOG): writers (2) and (3) (they go with the victory check and multiplayer, and with revolutions), the save refusal (the UI's save check), the victory event (+0x120: the victory
-  check does not post it yet, so only the defeat movie is reached in play). Tests:
+  (BACKLOG): writer (3) (it goes with revolutions), the save refusal (the UI's save check). Writer (2) and the
+  victory event +0x120 are `CampaignModel::victory_check` now ("The victory check and the capture hold" below), but
+  its rule never decides until the victory test is ported, so only the defeat movie is reached in play. Tests:
   slots_exit_tests `a_destroyed_human_ends_the_campaign_and_the_turn_loop_stops`,
   `a_human_destroyed_in_an_ai_turn_drops_the_rest_of_the_round`,
   `every_human_out_of_the_game_without_the_flag_ends_the_campaign`; own_save
@@ -962,7 +975,8 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
   `bink_control_ptr` is the movie's file name); the original `event_movie_panel` script attaches it with the new
   component method `AttachCustomControl`, and `hud::panel_movie` plays it into a texture drawn in `movie_window`.
   `CampaignUI.QuitToMainScreen` → `CampaignRequest::QuitToMainScreen` → the main menu (INFERRED, see the bindings
-  above); `MovieDismissed` drops the movie; `ContinueGameSelected` is a logged PROVISIONAL no-op. The panel's `title`
+  above); `MovieDismissed` drops the movie; `ContinueGameSelected` sends the model's command of that name (the
+  capture hold below; worker victoryscreen3). The panel's `title`
   is the loc text of `OutcomeMovie::title_key` (`movie_event_strings_title_<event><culture>`, the row's new `culture`
   field; a missing string gives "" and logs once), and `local_faction_involved` = the faction is the local
   player's, a movie not shown to everyone opening only for that player (both CONFIRMED, `0x00A13EA0` and the title
@@ -972,13 +986,117 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
   `the_outcome_movie_rows_and_faction_ids_reach_the_rules`, real_install `outcome_movies_from_the_real_data`;
   ntw_script movie_panel_tests (6, `the_movie_panel_title_is_the_rows_loc_text` added) and campaign_ui `the_defeat_movie_panel_shows_the_movie_and_its_ok_quits`,
   `the_victory_movie_panel_opens_the_campaign_result_as_a_victory` (the shipped scripts, real install).
-  Next: the victory check's +0x120 post (BACKLOG, the victory conditions), the consumer of `0x00A065A0`'s code 2
-  and the episodic +0xD0 chain, the reader of +0x9C (`CCQ_CONTINUE_GAME_SELECTED`'s effect), play-once, the
-  `campaign_result` buttons, and the movie volume: `0x00A13EA0` passes the panel (+0x24) `setting 4 × 0.01 ×
-  setting 5` from the options object's vfunc +0xDC; `0x00A23330` hands +0x24 to the bink open `0x00D9F600`, which
-  scales it by 0x102 (0 when the control's +0xC vfunc +0xD4(5) is false) for the player's vfunc +0xC. Not traced: which
-  two settings, and how the player applies the value; ours plays it as any movie (movie table × `MOVIE_VOLUME` × master),
-  PROVISIONAL in `panel_movie`.
+  Next: the victory test `0x0096FCE0` behind the check (BACKLOG §6, the victory conditions), the consumer of
+  `0x00A065A0`'s code 2, the launcher of the next campaign in a chain (mode +0x2C vfunc +4), the
+  `campaign_result` buttons, and the panel's loop flag (play-once stays INFERRED: option byte +1 of the panel's
+  movie open). The movie volume is traced (worker victoryscreen3's branch, first session): `0x00A13EA0`
+  (`0x00A13F05`..`0x00A13FC0`) and the full-screen player `0x004831D0` (CVTTSS2SI at `0x00483289`) both compute
+  int(group 4 × 0.01 × group 5) from the sound manager's group volumes (vfunc +0xDC): group 4 is the movie volume
+  and group 5 the master volume, with no speaker or 2D multiplier, and hand it to the bink control's open
+  `0x00D9F600` (`0x00A23330` passes the panel's +0x24). Ours: `mixer::movie_gain(master, movie, table_volume)`
+  for both players (CONFIRMED the two groups and the product; INFERRED: a disabled group silences, and the level
+  × 0.01 is the gain).
+- **The victory check and the capture hold** (worker victoryscreen3, 2026-11-10; CONFIRMED from the disassembly
+  unless tagged; read through IDA and, once that target closed, from the exe's bytes):
+  - **When it runs:** `0x0096CD10` is called once per campaign update, from `0x008F4120` at `0x008F487A`, after the
+    update's step loop. The pending-action stack is polled earlier in the same update (`0x008F4699`), and only while
+    the battle sequence state is 0 or 8.
+  - **The verdict per human:** `0x008F3DF0(faction, &won, &lost)` clears both; for a human faction (+0x6E0) with a
+    victory conditions record (+0x724) whose type (+0x7C) is not 6 it runs the victory test `0x0096FCE0` and then
+    reads the record's met byte (+0x31, getter `0x0055C390`) and failed byte (+0x32, getter `0x00949C40`). Plain
+    reads, no latch.
+  - **Without a winner** (winner count tested at `0x0096CE43`): no loser (`0x0096CE47`) or any undecided human
+    (`0x0096CE4F` / `0x0096CE57`) sends the check straight to its clean-up `0x0096D115`, past the loser loop
+    (`0x0096D0E5`) and the done byte (`0x0096D111`): nothing is posted and the check runs again at the next
+    update. Only with a loser and no undecided human does it post +0x138 to every loser and set the done byte
+    (+0x38). So a loser is told exactly once, together with the verdict; there is no repeat (re-read for the
+    review's fix round, worker victoryscreen3fix; the first write-up of this branch had a repeat here, wrong).
+  - **The victory test** `0x0096FCE0` (shape only, for BACKLOG §6; not ported): it returns at once when the record
+    is already met or failed; past the record's deadline it sets failed; every region of the record's list must be
+    held; type 5 compares the `spa_france` region count with the record's +0x44 (at most), the other types the
+    faction's own plus allied-like region counts (at least +0x44); an optional hold-for-duration (+0x30, +0x84,
+    +0x80); then it posts the `campaign_won` message unless EPISODIC_RESTRICTIONS +0x125 is set (read at
+    `0x0096FFE7`) and sets met. Its helpers are not traced.
+  - **+0x125** (`set_ui_notification_of_victory_disabled`, setter `0x0097B980`) has two readers: the test's message
+    (`0x0096FFE7`) and the check's per-winner block (`0x0096CE9C`). With it set a winner gets no event +0x120 and
+    no other human is ended, but the capture hold, the stats reporter (`0x009C7660` vfunc +0x50), the losers'
+    +0x138 and the done byte happen all the same.
+  - **The pending-action stack** (campaign +0xF70; Ghidra's names call it the pending-diplomacy stack, though it
+    holds every class below): built by `0x00882AC0` in `0x00872550` and by its no-argument twin `0x00444E70` in
+    `0x008742C0` (top +0 and countdown +4 both 0); push
+    `PushPendingDiplomacyAction` `0x008E2B80` (the new action's +4 takes the old top; the countdown becomes 1 when
+    the action's vfunc +4, "needs a human answer", says no, else 0); "has a top" `0x005865E0`; the per-update
+    step `UpdatePendingDiplomacyStack` `0x008F7850` (empty: nothing; countdown 0: the top's vfunc +0x24; else
+    the countdown is decremented and at 0 `PopAndApplyPendingDiplomacyAction` `0x008BF910` takes the top off,
+    applies it through its vfunc 0, frees it (`0x0126E016`) and clears the countdown). All three re-read through
+    REA for the fix round: they agree with the export's names and plates. Its classes (vtables): pending_duel
+    `0x013572A0`, pending_diplomacy `0x013572D8`, two unnamed `0x01357314` / `0x0135735C`, pending_exchange
+    `0x013573A4`, pending_move_to_enemy_territory `0x013573E0`, pending_attack `0x01357428`,
+    pending_siege_surrender `0x01357460`, pending_bankruptcy `0x013574A0`, pending_loot_options `0x013574DC`.
+    Vfunc +0x1C answers "the loot report": `this` for pending_loot_options (stub `0x004470B0`), null for every
+    other class (stub `0x00461180`).
+  - **The hold, report +0x9C:** the loot report (ctor `SettlementCaptureReport::InitializeSettlementCaptureReport`
+    `0x00885F90`) starts with pending +0x98 = 1 and hold
+    +0x9C = 0 (`0x00886087`). The check sets the hold of the stack's top report whenever a human winner exists
+    (`0x0096CE7C`, before the +0x125 test). The report's step `0x008F8D00` returns while pending is clear; with
+    the hold set and the scripts' looting switch (+0x114, read at `0x008F8D22`) clear it returns too, so the
+    settlement options do not open behind the victory movie; else it clears pending and goes on to the human
+    choice, the AI's choice or, with looting disabled, the plain occupation (`0x008F8DBF` → `0x008F8EB3`).
+    `CCQ_CONTINUE_GAME_SELECTED` (`0x00932B40`, sent by the victory popup's continue button) clears the hold of the
+    top report and does nothing else; the report then opens at its next step. These four are the only byte
+    accesses of +0x9C. INFERRED: the step's early return when `0x009D3A40(commander)` is null (its meaning is not
+    traced; not modelled).
+  - **Ours** (ntw_sim outcome.rs): `CampaignModel::victory_check` posts the same events in the same order from
+    one place, `CampaignModel::end_update`, which ends `apply`, `step`, `apply_battle_result` and
+    `capture_by_force` (our updates). The verdict per human is the rule `campaign.victory_state`
+    (`CampaignRules::seams`, `VictoryState` Undecided / Won / Lost); its original, `victory_state_original`, is
+    PROVISIONAL: it answers Undecided until `0x0096FCE0` is ported (§6), so vanilla play is unchanged. Event +0x120
+    is `CampaignEvent::OutcomeMovie` (`CampaignOutcome::Won { multiplayer_over }`), the other human's +0x108 its
+    Destroyed movie plus `end_campaign`, +0x138 the new `CampaignEvent::CampaignLost`, which the game hands to
+    `UiScriptHost::campaign_lost_popup` (the root's `ShowCampaignResultPopup(false)` for the local player, as
+    `0x00A134E0`). The done byte is `TurnState::victory_checked` (saved, hashed only when set; UNKNOWN whether the
+    exe saves +0x38). The hold is `CapturePreview::held` (saved, hashed): set when the capture's choice was raised
+    in the same update as the win (its `CaptureChoicePending` is withdrawn), `choose_capture` refuses while held,
+    `UiScriptHost::campaign_capture_screen` shows no screen for it, the new command
+    `CampaignCommand::ContinueGameSelected` (the `CampaignUI.ContinueGameSelected` binding only sends it) releases
+    it and raises the choice again, and a held capture is occupied at the next update once looting is disabled.
+    INFERRED: that a capture and the win it causes meet in one update with the report already pushed and not yet
+    stepped (the order of the poll `0x008F4699` and the check `0x008F487A` when a settlement falls without a
+    battle is not traced through the capture's own path). Not modelled: the shared win of `spa_napoleon` (event
+    +0x120 to the other human when the winner passes `0x008CE390` and both records are type 5: the other human
+    gets the defeat, PROVISIONAL in the code), the achievement tracker's call (no equivalent in ours, no Steam
+    integration: made for every winner, also with the notice off, at `0x0096D0B1` with ten arguments, the winner's
+    key, the campaign key and campaign numbers, only one of them a list count, the fourth list's, pushed at
+    `0x0096D091`; the callee, vfunc +0x50 `0x004AFD40`, writes only the tracker's own bytes +0x9C..+0xC6, the
+    tracked faction's campaign-won achievement flags, then runs the tracker's own update `0x0049E5D0`, the stats
+    store and achievement unlocks of "Achievement hook" below; CONFIRMED by disassembly), the test's
+    `campaign_won` message. A human id with no faction in the world is never asked (the exe walks its faction list).
+    PROVISIONAL: `EndTurn` occupies a waiting capture also while it is held (commands.rs; whether the exe lets
+    the turn end with +0x9C set is not traced).
+  - **Tests:** ntw_sim `crates/ntw_sim/src/campaign/tests/victory_check_tests.rs` (the win, the notice turned
+    off, the win against another human, the loser after the winner, the single loss told once,
+    `a_loser_is_not_told_while_another_human_is_undecided`, `a_human_without_a_faction_is_never_asked`, the held
+    choice and continue, a choice already offered, looting disabled, the hash); ntw_campaign own_save
+    `the_victory_verdict_and_a_held_capture_round_trip_and_an_older_save_loads_them_as_false`; ntw_script movie_panel_tests
+    `quit_to_main_screen_asks_the_game_to_leave_and_continue_sends_the_models_command`,
+    `the_defeat_popup_opens_for_the_local_faction_only`, `a_held_capture_opens_no_capture_screen`.
+- **Scripts' switches traced on the same branch** (first session of victoryscreen3; CONFIRMED):
+  `set_looting_options_disabled_for_human(bool)` (`0x0097B800`) stores its boolean (anything else counts as
+  false) at campaign +0x114, EPISODIC_RESTRICTIONS #28 (loader `0x009968A0` at `0x009986B9` for record versions
+  above 0xD, writer `0x009A1070` at `0x009A1FA6`; read only by the loot report's step). `advance_to_next_campaign()`
+  (`0x00979050`, no argument) sets campaign +0xD0, which the loader clears (`0x00996A0E`) and nothing saves; its
+  readers are `0x00A065A0` (above) and the campaign update `0x008F4120`: the byte is the condition of its step
+  loop (`0x008F4539`-`0x008F4540`), so while it is set the whole loop is skipped (the AI step, the pending-stack
+  update at `0x008F4699`, the movement update, the queued negotiations); the calls after the loop, the victory
+  check at `0x008F487A` among them, still run every update. Ours: `World::looting_options_disabled_for_human`, `World::advance_to_next_campaign`
+  (CAMPAIGN_DATA.md §4.2); ours stores the flag and does not stop the update's steps while it is set (PROVISIONAL
+  in the field's doc, `crates/ntw_sim/src/campaign/world.rs`).
+- **Exe names and plates of this branch** are filed as pending records (`victoryscreen3.jsonl` in the names
+  folder of the IDA setup; there is no Ghidra on this machine): `0x0096CD10`, `0x008F3DF0`, `0x0096FCE0`,
+  `0x0055C390`, `0x00949C40`, `0x00932B40`, `0x00882AC0`, `0x005865E0`, `0x008F8D00`, `0x004470B0`, `0x00461180`,
+  `0x0097B800`, `0x00979050`, `0x004831D0`. The four functions Ghidra's export already names keep their names
+  and plates (`0x008E2B80`, `0x008F7850`, `0x008BF910`: nothing filed; `0x00885F90`: its plate filed again,
+  the export's text plus the hold byte +0x9C).
 - **Ghidra (V5):** `0x008C30A0` renamed `SetCampaignOverFlag` (prototype, plate; completeness 89.4, effective 95);
   plate comments without renames on `0x0096CD10`, `0x008F4120`, `0x008BEAA0`, `0x008DB1A0` (campover2 rewrote the last three and added plates on `0x008EE3E0` and `0x00CB1D90`, no renames).
 - **Ghidra (V5), the movies** (worker victoryscreen, 2026-10-19; prototype + plate each, completeness / effective):
@@ -1169,7 +1287,18 @@ eur `auto_nr4_t4`, `auto_after_c8` and `auto_b2b3_0211` 144/144, `auto_nr1` and 
   levels) comes from the faction whose governorship lists the region (`GOVERNORSHIP` #2), normally the owner. The
   same `eur_bavaria` is still in the dead Bavaria's governorship and shows Bavaria's government and none of Austria's
   minister effects (`happiness_character` −2 elsewhere in Austria). `World::governing_faction`; on capture the
-  region moves to the new owner's governorship.
+  region moves to the new owner's governorship. Only the effect set is the governing faction's (CONFIRMED by
+  decompile, 2026-11-10): the set builder `0x00A67530` takes its faction part from the governorship link (region
+  +0x248, at `0x00A67558`), while every class pick resolves the owner link (region +0xF4): the region class tests
+  `0x008CE320` (at `0x008CE32F`) / `0x008CE260`, the per-class factor refresh `0x008EDF70` (at
+  `0x008EDF79`–`0x008EDF84`, then the faction tests `0x008CE230` / `0x008CE2F0` with that faction; its gentlemen
+  factor at `0x008EE11D`–`0x008EE131` reads the same link) and the panel's active classes `0x00A975F0` (at
+  `0x00A975FF`). So in a region A owns and B's governorship lists, the classes that take factors, are policed
+  (`policing_cost`) and are shown are those of A's government, computed on a set with B's faction part. Ours:
+  `economy::region_effect_set` (governing faction) against `public_order_factors_with`,
+  `region_government_classes` and region_info.rs (owner); tests
+  `the_policing_cost_counts_the_owners_classes_under_another_governor`,
+  `region_info_active_classes_are_the_owners_under_another_governor`.
 - **Gentlemen** (CONFIRMED, 2026-10-20): the term is the gentleman's rank `0x00A198D0` (call at `0x008C5698`) and
   his own set's `gentleman_happiness_bonus` (character +0x48C at `0x008C569E`), counted only for the settlement's
   residents (region +0xFC → +0xC8), see round 4 above; the earlier reading (rank 0, the faction's bonus) is withdrawn.
@@ -1376,8 +1505,10 @@ Recomputed for every owned region at the round end (then `tw += growth`, 0x00AB4
 ## Trade (0x00BB3490 / 0x00B15B50, CONFIRMED; code `economy::trade_routes_value`, `campaign::trade`)
 - Faction trade income (0x00BB3490) = Σ over its international routes of the route total (0x00B79B20). Hard-coded
   extra (CONFIRMED): if the campaign is `spa_napoleon` and the faction is `spa_france`, it also earns
-  `Σ domestic volume × price` (over domestic routes whose last waypoint passes 0x00A8B5A0, meaning UNKNOWN; we take
-  it as "not blockaded") minus `Σ volume × price` over its international routes (`trade_home_value`).
+  `Σ domestic volume × price` (over domestic routes whose last waypoint's region is its owner's capital,
+  IsRegionCapitalOfOwner 0x00A8B5A0 at 0x00BB3608, CONFIRMED; each volume the route's net one, 0 when blockaded:
+  see "Split supply: capital routes only" below) minus `Σ volume × price` over its international routes
+  (`trade_home_value`).
 - Route total (0x00B15B50), recomputed per route. The previous accumulated value is copied into the value (+0x38 =
   +0x3C). Then:
   - **blockaded** (0x00B12050) → total 0;
@@ -1406,12 +1537,14 @@ Recomputed for every owned region at the round end (then `tw += growth`, 0x00AB4
 - **Blockade** (0x00B12050, CONFIRMED structure). A route is blockaded when, for any waypoint:
   - the waypoint is a sea hop and 0x00BC4860 finds a navy that is hostile (0x00A67430; INFERRED at war with the
     exporter) and stands in the area of the hop's `from` or `to` node (0x00A8BDE0 area `+0x14` == node);
-  - or the waypoint's object (port / settlement) answers vtable `+0x98` (blockaded / besieged).
+  - or the waypoint region's settlement (waypoint +0xFC, the last waypoint's too) answers vtable `+0x98`, which is
+    `0x00A8B9C0` (portblockade2, CONFIRMED by decompile): its besieger list (+0x12C) is not empty. A port blockade
+    alone does not cut a route: neither `0x00B12050` nor `0x00A8B9C0` reads the port object (+0x68 / +0x74).
 
-  Model: a hostile navy within 1 map unit of the node's position (PROVISIONAL: the area shapes are not read). In the
-  vanilla eur save a British navy 1.17 units off Rotterdam does not blockade the Dutch sea routes. Sieges are not
-  modelled. Whether the waypoint object's vt+0x98 reads the port blockade below (port +0x68 / +0x74) is untraced, so
-  ours does not yet let a port blockade blockade a route (BACKLOG).
+  Model (`trade_path_blockaded`): a besieged waypoint region (`SiegeState::under_siege`), or a hostile navy within 1
+  map unit of a sea hop's node (PROVISIONAL: the area shapes are not read). In the vanilla eur save a British navy
+  1.17 units off Rotterdam does not blockade the Dutch sea routes. Test
+  `a_siege_on_the_route_cuts_it_and_a_port_blockade_alone_does_not`.
 - **Port blockades** (portblockade 2026-10-20, CONFIRMED by decompile and disassembly; V5 in Ghidra). A port is the
   PORT_GARRISON_MANAGER object at region slot +0x1E4 (+0x70 = its slot, +0x60 = the docked navy's handle, +0x68 = the
   blockading navy's handle, linked both ways with the navy's +0xE8, +0x74 = a byte).
@@ -1419,36 +1552,131 @@ Recomputed for every owned region at the round end (then `tw += growth`, 0x00AB4
     byte +0x58 of the slot's naval recruitment manager (slot +0x1E8), posts message 0xBA when the navy's faction or
     the slot's holder is human, runs the price update `0x00BCB020(0)`, posts the slot's +0x480 event, sets slot
     byte +0x220 = 1 (never cleared by the lift), calls `0x00A17BE0` and, with a navy docked, `0x00B653A0`, then fires
-    CharacterBlockadedPort (vtable `0x01376C40`) and the holder's +0x2A0 event. Its only caller is the move-order
-    step `0x0094B9B0` (`0x0094BA2A`), when the target port has a docked navy or a garrison. Not modelled yet
-    (BACKLOG: ours has no naval move orders onto ports).
-  - Byte +0x74 (save #2): set to 1 only at `0x0095B667` in the attack step `0x0095B370`, when the attacker's +0xE8
-    port is the port the attacked navy is docked in; cleared only by the lift.
+    CharacterBlockadedPort (vtable `0x01376C40`) and the holder's +0x2A0 event. Its only caller is the arrival step
+    `0x0094B9B0` (`0x0094BA2A`) of the port order (execute `0x0095D6A0`, created only for a navy at war with the
+    slot's faction: `0x00917E20` → `0x009D0980` → `0x00A0B730`, `0x008CE9B0`; a port with a blockader refuses the
+    order in its pre-check `0x009243A0` at `0x009245E7`; the command path `0x009324F0` → `0x00916B30` → `0x0091D4A0`
+    runs it at `0x0091D4C9` and the order with `0x009651A0(order, 0, 1, 0)` at `0x0091D796`, so the execute
+    re-checks only for the turn-start resume `0x009653D0`, portblockadefix): the navy docks (`0x00A924D0`) when the port has no docked navy (+0x60) and
+    the slot's garrison test (vt+0x1C) answers 0, and blockades it otherwise. Model (portblockade2):
+    `CampaignModel::port_order` from a navy's `MoveForce` onto a hostile port, the dock-or-blockade answer through
+    the `port.arrival` seam (`port_arrival`); PROVISIONAL: the slot's garrison is not held, so only a docked navy
+    makes it a blockade; the blockader stops `CONTACT_DISTANCE` short of the port (where the exe's path ends is not
+    traced); the dock step's slot take-over is not run (BACKLOG "Slot capture"); slot byte +0x220 (`0x00A6707B`)
+    is not traced to a reader (the REGION_SLOT save record reads +0x220 from version 2, see the slot reader
+    `0x00A4D4F0` below; not modelled). `0x00A17BE0` is an event
+    message, CONFIRMED by decompile: it builds a 24-byte record (vtable `0x0136FC7C`: the navy's faction, the slot's
+    vt+0x30 value, the region display name and theatre at the slot's vt+0x3C position) and posts it as event type
+    307 to the holder faction (`0x009D39A0` → `0x009D3250`, the faction event post that looks the event up in the
+    movie-event table by the faction's subculture); not modelled, with the other blockade messages (BACKLOG).
+  - **While it lasts** (portblockade2, CONFIRMED by decompile):
+    - `0x00B653A0` takes the docked navy's character off the path-grid obstacle layers; the re-add `0x00B084F0`
+      (27 callers: the load pass `0x00B0DC10` / `0x00B0DF30`, the lift, the siege end...) floods his zone, stores it
+      and adds him only when `0x00B1D100` lets it, which for a docked navy means its port (`0x00A17D20`) has no
+      blockader (+0x68). So the docked navy is no obstacle until the lift. Ours: `navies_docked_in_blockaded_ports`,
+      read by `seen_commanders` (zones.rs); the lift rebuilds the docked commander's zone (`rebuild_zone`). The
+      besieged-garrison half of `0x00B1D100` waits for sieges.
+    - The +0x58 byte of the naval recruitment manager (slot +0x1E8) is read only by the queue step `0x00B71FB0`,
+      which first writes it (`0x00B71FD5`): set when the queue cannot deliver (vt+0x1C: naval `0x00B61E70`, the port
+      exists and has no blockader; land `0x00B61E90`, the settlement's vt+0x98, not besieged) or `0x00B6A8D0` finds
+      no spot; while set the finished items stay queued at 0 turns (spawn skipped at `0x00B72189`). The start's and
+      lift's writes are therefore overwritten before any read. Ours: the hold in `region_turn` (test
+      `a_blockaded_port_holds_its_ships_and_a_siege_its_land_units`).
+    - The no-place test `0x00B6A8D0` (portblockadefix, CONFIRMED by disassembly): it calls `0x00B43A60` with the land
+      flag = (vt+0x28 answers 0; land `0x00461180` answers 0, naval `0x004CDC40` answers 2) and returns its first out
+      flag (read at `0x00B6A90E`), the no-spot flag set at `0x00B43C81` when no garrison room, no owner's army within
+      5.0 and no free spot (`0x00B39FE0`) were found. Since +0x58 holds the whole queue, a land queue with no place
+      also keeps a commander's finished recruits, which would march to him. Ours: `land_recruit_place` (commands.rs),
+      the one placement both `spawn_recruited_unit` and the hold in `region_turn` read (test
+      `with_no_place_for_a_recruit_the_commander_s_recruits_wait_too`). PROVISIONAL: the naval queue's test (vtable
+      `0x0137CBE4`, +0x24 `0x00B44EB0` → `0x00AA67E0`, a navy within 5.0, the kind-2 free spot search) is not
+      modelled: our naval spawn always finds a place.
+    - Trade routes: the port blockade is not read by the route blockade test (see "Blockade" above).
+  - Byte +0x74 (save #2): set to 1 only at `0x0095B667` in the attack step `0x0095B370`, when the attacker is docked
+    (navy +0xE0) in the port the attacked navy blockades (+0xE8); while it is set that attack is refused; cleared
+    only by the lift. The attack starts at once, with no move and no order helper (battle type 12 `naval_blockade`,
+    `0x008B55A0`). Ours: `sally` from the `AttackForce` command.
   - **Lift**, `LiftPortSlotBlockade` `0x00A784E0` (ECX = the port): unlinks +0x68, clears the +0x58 byte, always
-    runs the price update `0x00BCB020(0)`, calls the untraced `0x00B084F0` on the docked navy's character if any,
+    runs the price update `0x00BCB020(0)`, calls `0x00B084F0` on the docked navy's character if any (above),
     posts the slot's +0x480 event and the holder's +0x2A0 event, and sets +0x74 = 0. Its 7 callers:
     1. the peace, `ClearCommerceRaidsBetweenFactions` `0x00A25570` (the call at `0x00A25627`, from
        `MakePeaceWithFaction` `0x00B262C0`): per character of either side, after the siege end and before the
-       raids, a navy whose +0xE8 port's slot holder (vt+0x14) is the other side;
+       raids, a navy whose +0xE8 port's slot holder (vt+0x14) is the other side. The navy is reached only through
+       its commander (`0x009D3A80` on the listed character), so a blockading navy with no commander keeps its
+       blockade (portblockade2, CONFIRMED by disassembly `0x00A255CA`–`0x00A25627`; ours the same, test
+       `a_peace_keeps_a_blockade_its_character_walk_does_not_reach`);
     2. the owner change's slot pass `TransferRegionSlotOwners` `0x00B1B300` (`0x00B1B3EF`): after the holder pass
        (which runs only with no garrison and no docked navy, +0x60), when the port is blockaded, the slot's holder
        is now the new owner, and the blockading navy is the new owner's or not at war with it (`0x008CE9B0`);
     3. the navy destructor `0x0088EF90`: restores the docked port's holder, then lifts the navy's +0xE8 port (both
        skipped while campaign +0xFC5 is set);
-    4. the move wrapper `0x008AC010` when the move result is 2 (the navy sails off);
-    5. the post-battle state machine `0x008F7880` (`0x008F8981`, state 1);
-    6. the attack-step helper `0x008FF470`;
+    4. a battle's casualty step `0x008AC010` (only caller `0x008AC720`) for a force left with no units (its vt+0x5C
+       answers 2; a navy's `0x008AD6E0`: no ship left): an army's siege ends, a navy's blockade lifts. Ours:
+       `remove_force` (portblockade2, CONFIRMED by decompile);
+    5. the post-battle sequence `0x008F7880` (stage 7, battle type 12, the lift at `0x008F8981`), after the docked
+       navy's attack: only when the beaten side has no character left to place (the docked attacker destroyed), the
+       blockader still blockades and the port has no docked navy (+0x60) or one of the blockader's faction (+0x7C).
+       A beaten attacker that survives stays docked (types 12/13 place nobody, `0x008F8317`); a docked loser of any
+       other battle is undocked only from a port nobody blockades (`0x008B29E0`). Ours: `lift_after_sally`,
+       `undock_after_battle`. In a sequence with byte +0xB2 set (only `0x00882DF0` and `0x00883680` set it; it does
+       not mark settlement battles) and no settlement (+0x64), a docked loser in a free port is undocked and placed
+       within 100.0 of the port's way out (`0x00B372A0`) or deleted (`0x008CF310`); in a blockaded port he instead
+       gets the breakout order (portblockadefix, CONFIRMED by decompile): `IssueBlockadeBreakoutOrder` `0x0094F4A0`
+       (only caller `0x008F8B86`) runs the order helper, then builds `force_blockade_breakout_battle` (`0x0091B9A0`
+       → `0x009069F0`, vtable `0x0136177C`), whose step `0x0094CC60` starts a type-12 `naval_blockade` battle with
+       the blockader at once (`0x008E18D0`). The sequences that reach it (portblockadefix2, CONFIRMED by decompile):
+       the type-14 `0x00882DF0` (+0xB2 = 1, +0x64 = 0, result +0xA4 null at `0x00882EFF`, straight to stage 7 with no
+       battle fought) is the `region_slot_captured_force_navy_surrender` order (`0x0090AB70`, vtable `0x01361740`,
+       built by `0x0091D7B0`, issued by `0x0094F660`; step `0x0094DA00` → `0x008E18D0` with a5 = 1): the capturing
+       army (+0x68) against the navy docked in the settlement's port slot (+0x6C, the beaten side). It is issued when
+       an army enters an at-war settlement left without a defender whose port holds a docked force (`0x0094B600` at
+       `0x0094B78E`), and by the placement for the navy docked in a beaten garrison's port (+0xB4 set at
+       `0x008F83CD`, issued at `0x008F8BC9`). The type-6 `0x008CE150` (from `0x008A81A0` ← `0x008C02D0` /
+       `0x008DC8F0`) is not traced. Ours has no navy-surrender step: an enemy navy docked in a captured settlement's
+       port stays docked. PROVISIONAL in `battles.rs` `undock_after_battle`. Result +4 = 1 is the defender's win (CONFIRMED by decompile: the sequence constructor
+       `0x00883120` stores the attacker's side record at +0x68, `0x0088353D`, and the defender's at +0x6C,
+       `0x00883579`; the placement step takes the beaten side as +0x6C, or +0x68 when +4 is 1 or byte +0xBB is set,
+       `0x008F7ECA`–`0x008F7EF5`). The beaten blockader that survives always loses its blockade (CONFIRMED by
+       decompile): with no port of his own (`0x00A17CF0`, navy +0xE0) he passes `0x008F8317` and reaches the
+       retreat `0x00A18550(…, 0)` at `0x008F8421`, which (byte +0x510 clear, then set) orders him away through
+       `0x0094EE20` (`0x00A18635`) → `0x0091B950` → order `0x009069A0` (vtable `0x0135F1DC`) → `RunCharacterOrder`
+       `0x009651A0`, whose execute `0x0095D080` runs the order helper at `0x0095D096` (caller 6); when the retreat
+       answers 0 (+0x510 already set, or the pre-check `0x00921160` refuses: more than one queued order and a later
+       one answering no to vt+0x14) the fallback `0x008CF310` (`0x008F8199`) deletes his +0x2A8 force, whose
+       destructor (caller 3) lifts it. Ours: `lift_after_sally` lifts it, test
+       `a_beaten_blockader_that_survives_the_docked_navys_attack_loses_its_blockade`; the retreat's move and the
+       fallback's deletion are not modelled. PROVISIONAL: the winning side record's byte +60 (writer untraced);
+    6. the order helper `0x008FF470` with its flag set, at the start of every character order (30 call sites) but
+       the settlement order onto the army's own besieged settlement (`0x0095D140`) and the docked navy's attack; it
+       acts on the ordered character's own force (`0x00A0B680` navy → lift; `0x00A0B8C0` army → siege end) before
+       the order is created, so the end stands when the order then fails. The orders built outside the command
+       handlers reach it too (CONFIRMED by decompile): the duel loser's flight `0x00A18460` (→ `0x0094EE20` at
+       `0x00A1852B`) and the post-battle retreat `0x00A18550` share the order `0x009069A0` above; the reinforcement
+       march `0x00968B00` → `0x009195A0` builds the merge-with-force order `0x00905460` (vtable `0x0135F868`), whose execute
+       `0x0095BA40` calls the helper at `0x0095BCEA` once the path step `0x00951090` passes and the carrier step
+       (`0x008FD580` / `0x008FD870`) answers 2 (`0x0095BC6F`; other non-zero answers return 1 without it). The
+       carrier step answers 2 for an army with no carrier (army +0xEC empty, `0x008FD604`). Ours: `begin_order`
+       from every walk. INFERRED: for a navy or an army aboard a ship the carrier step may issue another order first
+       (`IssueMoveToResidenceOrder` `0x009549B0`, `0x009535C0`, not traced), so whether such a merge march runs
+       the helper is open. The landing order (portblockadefix, CONFIRMED by decompile) is the general's, not the
+       admiral's: its execute `0x0095C070` takes the carrying navy through the general's army (+0xEC, `0x0095C1D0`)
+       and runs the helper on the general (`0x0095C2C0`), which lifts only for a navy force (`0x00A0B680`, navy
+       +0xE8); no move step calls the lift. ORIGINAL BUG: a blockading navy that sails off with its army aboard keeps
+       its port blockaded; ours lifts it (`disembark`, embark.rs, `begin_order` on the navy's commander; test
+       `a_blockading_navy_that_sails_off_to_land_its_army_lifts_the_blockade`);
     7. the `CCQ_CHARACTER_END_BLOCKADE` command handler at `0x00932710` (no function defined there; command
-       name string `0x0135E534`).
+       name string `0x0135E534`): lifts the +0xE8 port of `GetCharacterForceAsNavy`'s navy. ORIGINAL BUG: no null
+       check, so a character with no navy or a navy blockading nothing reads through a null pointer; ours
+       (`end_blockade`, `CampaignCommand::EndBlockade`) refuses with an error.
   - Saves: PORT_GARRISON_MANAGER v2 = [u32 #0 docked navy, u32 #1 blockading navy, bool #2 = +0x74] (reader
     `0x00A45860`, #2 only from version 2; writer `0x00A51D90`). All 64 vanilla and evidence saves and every start
     position hold #1 = 0 and #2 false.
   - Model (`campaign::port_blockade`): `RegionSlot::blockade` (navy, +0x74) is the one state, loaded from and
     written to #1 / #2, and in our own save (a defaulted field, so no format bump). `lift_port_blockade` is the one
     lift and runs the price update; the peace (`make_peace_rules`), the slot pass (`pass_region_slots`; its lifts'
-    price updates fold into the owner change's one, as the port passes' do) and the navy's removal (`remove_force`) call it.
-    Callers 4 to 7, the start, the +0x58 byte's reader and `0x00B084F0` wait for naval moves, battles and the
-    command (BACKLOG).
+    price updates fold into the owner change's one, as the port passes' do), the navy's removal (`remove_force`),
+    `begin_order`, `end_blockade` and `lift_after_sally` call it. Tests: `tests/port_blockade_tests.rs`. Not
+    modelled: the script event CharacterBlockadedPort and the messages (BACKLOG).
 - Checked: the computed trade income equals the stored figure for **all 83 factions** of the shipped start positions
   (`economy_fidelity`). Round 7: it also equals it for **every faction of all 9 original vanilla saves** (5 eur, 4 spa;
   `economy_check` ECON_TRADE).
@@ -1908,10 +2136,18 @@ Recomputed for every owned region at the round end (then `tw += growth`, 0x00AB4
       0x00BD1020 → 0x00B61720 at 0x00BD1B23); the round end pays (0x008BC650 → 0x00BABE30) before its own trade
       update, so it pays the takes of the last update. Ours: `economy::book_raid_income` writes r[9] at the end of
       every `update_commodity_prices_with`; `pay_running_record` no longer overwrites it (test
-      `the_booked_raid_income_stands_until_the_next_price_update`). PROVISIONAL: the route builder 0x00BA0490 also
-      runs 0x00BBD870 outside a price update (the trade agreement 0x00B55090 → 0x00B55130, region transfer 0x00BBE1A0,
-      whose price update follows, and the listeners 0x00BB9410 / 0x00BB9B90); ours re-books only at the next price
-      update. At load the exe's step 0x00BB4250 (from 0x00872550 at 0x00873CFB and 0x008742C0 at 0x00874EF0) runs
+      `the_booked_raid_income_stands_until_the_next_price_update`). Mid-turn re-booking (traderaid3, CONFIRMED,
+      disassembly): the trade agreement 0x00B55090 calls 0x00B55130 on both records (its route build 0x00BA0490 at
+      0x00B55194) and then 0x00BCB020(0) at 0x00B550CD, before the diplomacy refresh; the break
+      BreakTradeAgreementWithFaction 0x00B29BB0 (from the war declaration at 0x00B2716A, the embargo at 0x00B28DCA
+      and the deal loop at 0x00C18DE5) calls 0x00B13C30 / 0x00B733B0 and then 0x00BCB020(0) at 0x00B29BED. Ours:
+      `trade_agreement` and `break_trade` run `update_commodity_prices_with(false)` there (test
+      `a_trade_agreement_and_its_break_each_run_a_price_update`); the region transfer 0x00BBE1A0 has its own
+      update (0x00BBE7C4). PROVISIONAL: the trade listeners 0x00BB9410 (vtable 0x0137FA60, a faction's routes
+      removed and rebuilt by 0x00BA0490 at 0x00BB97EA / 0x00BB97F9, no price update of its own) and 0x00BB9B90
+      (0x00BA0490 at 0x00BBA0D4 / 0x00BBA377, a price update at 0x00BBA4A8); ours re-books only at the next price
+      update. Side finding (BACKLOG): the war declaration also runs 0x00BCB020(0) itself (DeclareWarOnFactionRecords
+      at 0x00B2684A, DeclareWarAndCallAllies at 0x00B26FFD), which ours lacks. At load the exe's step 0x00BB4250 (from 0x00872550 at 0x00873CFB and 0x008742C0 at 0x00874EF0) runs
       0x00BD1020 and then 0x00BCB020(0): the entries come back from the loaded state, as ours
       (`rebuild_running_record` sets r[9] from the current takes), but ours runs no flag-0 price update at load
       (prices, trends and the trade category are kept as saved; BACKLOG).
@@ -1927,8 +2163,42 @@ Recomputed for every owned region at the round end (then `tw += growth`, 0x00AB4
       is gross. Ours: `raided_volume`, `domestic_net_volumes`; `trade_supply` (split) is net, `price_supply` (price
       update) gross, `trade_home_value` uses the net volumes (test
       `a_domestic_raid_lowers_the_victims_net_volume_not_the_price_supply`). Not ported: 0x00BA0270's net seed
-      (BACKLOG), and the split counts only the domestic routes ending in the owner's capital while ours counts all
       (BACKLOG).
+    - Split supply: capital routes only (traderaid3, CONFIRMED, disassembly). 0x00BC26D0 walks each faction's
+      domestic routes and takes the last waypoint's region (0x004A6C90, then `[EAX + ECX*8 - 0x18]`,
+      0x00BC2A42..0x00BC2A50); a null region or IsRegionCapitalOfOwner 0x00A8B5A0 (region == its owner's capital,
+      faction +0x72C; call at 0x00BC2A5C) false skips the route (JZ 0x00BC2D93 at 0x00BC2A56 / 0x00BC2A63), so
+      only those routes add their net volume (0x00BC2D6C). The test is on the region's owner, not the route's,
+      so a route ending in another faction's capital counts. The home term 0x00BB3490 uses the same call at
+      0x00BB3608. Ours: one rule, `CampaignModel::domestic_route_counts` (the exe's test is
+      `domestic_route_reaches_capital`, `World::is_capital`), used by `trade_supply` (node path: a node whose
+      route home fails it adds nothing) and `trade_home_value` (which had compared with the route owner's
+      capital); `price_supply` stays unfiltered (tests `the_split_counts_only_domestic_routes_ending_in_a_capital`,
+      `a_nodes_gathering_counts_in_the_split_with_a_route_home_to_a_capital`,
+      `the_home_term_needs_a_domestic_map_entry`). `ECON_SPLIT` / `ECON_TRADE` on the 13 evidence saves: output
+      identical to before the change (352/352 vanilla route volumes kept), and with the stand-in below, which
+      fires for no faction in them; this shows only that every loaded route ends in a capital at the load.
+      PROVISIONAL (the test on our routes): the exe tests routes its builder has just rebuilt; ours are the
+      loaded ones. Every price update runs the builder 0x00BC0960 before the split, and the builder's send step
+      0x00BC56C0 replaces a domestic route (0x00BA0270, its only caller, at 0x00BC599C, CONFIRMED). Ours are
+      loaded once (`World::domestic_trade`) and never rebuilt, so a route keeps the end it had at the load.
+      After a faction's capital moved (`capital_after_owner_change`) the exe's test would fail on every one of
+      its routes: no supply, no export volume and a higher net demand as an importer for the rest of the
+      campaign, not a state the exe is shown to keep (its builder is untraced). Stand-in: while a faction has
+      a capital and none of its loaded domestic routes ends in a capital, its routes are taken as stale and
+      all count, in the split and in the home term (tests
+      `a_moved_capital_keeps_the_factions_supply_in_the_split`, which checks both through a real capital
+      move, `a_nodes_gathering_counts_in_the_split_with_a_route_home_to_a_capital` and
+      `the_home_term_needs_a_domestic_map_entry`). The stand-in cannot tell a stale route from one the
+      builder ended outside a capital: a loaded campaign in which a faction's routes all end outside a
+      capital is counted by ours and skipped by the exe. None in the 8 vanilla start positions or the 40
+      evidence saves probed (review probe, 2026-11-10: the stand-in fires for 0 factions). A stale
+      route next to one that does end in a capital is still skipped, and a lost region that is its new
+      owner's capital keeps the old owner's routes counting. A node with no loaded route home adds its whole
+      gathering (PROVISIONAL, older stand-in for the same builder, `supply_with`; not traced: whether the
+      builder routes such a node and where the route ends). Not traced: which
+      destination the builder gives a domestic route after a capital moved, and what it does when no path
+      exists (0x00BC0960 / 0x00BC0DC0 / 0x00BA0270; BACKLOG, the route builder port).
     - The economics +0x418 converter applied to the booked amount is the identity (traderaid2, CONFIRMED): it is one
       of the income converters ConstructNewFactionEconomics 0x00B96100 sets to `g_IdentityEconomyConverter`
       0x01459050 and the loader 0x00B95B90 restores through 0x00BA8D10 (see "Money arithmetic").
@@ -2031,8 +2301,9 @@ scripted capture) `0x00B541E0` still builds and posts the event (no null check),
 an event to Lua (`0x00E142B0`) only when its vtable +0xB8 passes; for this event (vtable `0x0137CCB8`, +0xB8 =
 `0x008F9EE0`, +0x1C = `0x0044A500`) that check returns 0 at once when the character getter is null, so no script
 ever sees a looter-less loot (CONFIRMED). For a non-null character `0x008F9EE0` also requires the event name to be
-a `trigger_events_table` record (`0x00E30810`) and that record to be absent from the character's list at +0x1AC
-(`0x00EC5360`); ours does not model those two gates yet (open trace). Ours: `CapturePreview::looter` keeps the
+a `trigger_events` record (`0x00E30810`) and the character's agent record (+0x1AC) to be absent from that record's
+excluded agent types (`0x00EC5360`); ours models all three in `ntw_script::event_classes::EventGate` (section
+"Script event classes" below). Ours: `CapturePreview::looter` keeps the
 capturing force's commander from `capture_preview`; `resolve_capture`'s loot arm pushes
 `CampaignEvent::CharacterLootedSettlement { character }` (a plain `CharacterId`) only when there is a looter,
 after `apply_outcome` and `loot_resentment`, before `CaptureResolved`; `ScriptHost::context_for` gives it the character only (no faction, so `FactionIsLocal` answers
@@ -2231,8 +2502,10 @@ government → no class (both previews 0). Data: orig_fr_may1811's 8 rebel ARMYs
 REBEL_DATA record, so the type check skipped it and the navy link was silently not saved (our bug, fixed:
 `army_navy_slot`, #8 behind the block, test `a_rebel_armys_navy_goes_behind_its_rebel_data`; a new army drops a
 rebel template's block). The faction-level tests (`0x008CE230` / `0x008CE2F0`) stay `economy::government_classes`.
-Left, PROVISIONAL: `RefreshRegionPopulationFactors`' per-class pass `0x008EDF70` picks classes with the faction tests,
-which match none for the rebels, so it refreshes nothing and the stored factors stay (ours computes default
+Left, PROVISIONAL: `RefreshRegionPopulationFactors`' per-class pass `0x008EDF70` returns at once for an owner
+without a record (`0x008CEEF0` at `0x008EDF8C`, before its faction tests; the rebels have no government key in
+the original's files, which ours reads without a warning: `economy::reports_unknown_government`), so it refreshes
+nothing and the stored factors stay (ours computes default
 `upper` / `lower` factors: `public_order_factors_with`); and the region panel's `ActiveUpperClass` /
 `ActiveLowerClass` read `0x00A975F0`, which for a rebel owner takes the region's REBEL_DATA template (+0x21C →
 +0x18 government; `0x00A91EB0` frees the template when the region's risen list drops below 2 entries and the
@@ -2429,7 +2702,8 @@ faction and liberation target.
     reward lifts a restriction; CONFIRMED by xrefs, unitrestrict 2026-10-20); a region or settlement changing hands (`TransferRegionToFaction` `0x00A64AC0` via `0x008AE6E0` / `0x008E4420`,
     `TransferSettlementOwnership` `0x00B449F0` via `0x008BEAA0`; the capture options `0x00B541E0`, `0x00B582E0`);
     a technology granted (`GrantFactionTechnology` `0x008CDCB0` unless its param_2 is set; `0x00948A40`, `0x00948AD0`);
-    `0x0095FF00` (from `0x00872550`); and three
+    `0x0095FF00` (from `0x00872550`); two calls at `0x00961307` and `0x0096141E` that lie outside any function
+    Ghidra defines (found by the unitrestrict review's xrefs; what code owns them is UNKNOWN); and three
     command handlers near `0x00936530` (`0x008F3760`, `0x008C9C50`, `0x008EB9D0`; which commands is UNKNOWN). None is
     on a trait or minister-level change, so a sum reader can see a stale +0x6FC until the next of these. Ours
     sums on demand. Whether any reader observably lags is a question for the effects system (every reader of the
@@ -2776,10 +3050,12 @@ Round 12 mapped the spawn *path* and left three sub-items open: placement, `num_
 garrison join. Round 15's read of `0x00B71FB0` (1523 bytes, the queue tick) settles two of them.
 
 - **The queue tick creates no units — CONFIRMED from the decompile.** `0x00B71FB0` does exactly four
-  things: set the manager's `+0x16` flag from `0x00B6A8D0`, drop items whose unit the region can no
+  things: set the manager's byte `+0x58` (dword index 0x16) from its method `+0x1C` and `0x00B6A8D0`, drop items whose unit the region can no
   longer recruit (`0x00B45690` → `0x00B1A820(item, 1)`), advance the first `recruitment_points` items
-  through item method `+0x18`, and — when `+0x16` is clear — collect the finished items through the
-  manager's method `+0x20`, hand each to `0x00B0A270`, and delete the entries that fail `0x00B5C110`.
+  through item method `+0x18`, and — when that byte is clear — collect the finished items through the
+  manager's method `+0x20`, hand each to `0x00B0A270`, and delete the returned items that pass `0x00B5C110`
+  (corrected 2026-11-10, allygarrison: the tests at `0x00B72461` / `0x00B724D6` delete on true; `0x00B5C110` is
+  true when item +0x1C is 0 or the byte +0x24 is clear).
   There is **no unit construction and no `num_men` read anywhere on it**. So round 12's
   "no `num_men` reader and no position / garrison-branch reader found on this path" was not a failure to
   find them: they are not there. The spawn is elsewhere (corrected 2026-10-20: in the manager's +0x20 itself, `0x00B1E500` / `0x00B1D7E0`, §Recruitment spawn and reinforcements; `0x008EF790` only links reinforcements).
@@ -2903,18 +3179,44 @@ capital), or comes from a loaded save. The settlement residence (vtable `0x0137C
 
 - **The owner's army arrives.** The order builder `0x0091BE30` sends an army ordered into a
   settlement with a garrison to that garrison's commander (`0x0091D1F0`, the exchange step
-  `0x009081F0`, vtable `0x013611C0`; the move-to-character command `0x0095BA40` reaches the same step
-  through `0x0091CED0`, and its validation `0x009235F0` only sets "valid"). The step's arrival
+  `0x009081F0`, vtable `0x013611C0`; the move-to-character order's execute `0x0095BA40` reaches the
+  same step through `0x0091CED0`, and its validation `0x009235F0` only sets "valid"). Neither
+  `0x0095BA40` nor `0x0091CED0` calls the fit `0x008B2720` (their callees `0x00951090` and `0x008FD580`
+  are not fit tests: `0x008FD580` is the carrier helper, see "Aboard a navy" below), so a full
+  receiver does not refuse the order: the mover walks and the arrival decides. Ours:
+  `march_and_merge` has no fit of its own before the walk and ends in `exchange_on_arrival`, the one
+  rule both orders share (allygarrisonfix; before it refused "receiving force is full" at the order).
+  `0x0091CED0`'s exchange partner: for an army mover the commander of the target's army (+0x74); for a
+  navy mover whose target lies in a port the port's docked navy character (`0x00A84990`); navy to navy
+  the target; the step's turn count is the route length `0x00B0FB60` rounded up. The step's arrival
   `0x0094D660` (vtable +0x10) moves the units across (`0x008D7310`) when the fit check `0x008B2720`
-  passes, else queues a pending exchange (`0x00885F30` / `0x00885F60`, vtable `0x013573A4`; for a human
-  the event +0x3C0, likely the exchange panel). `0x008B2720`: an army and a navy never exchange; an AI
+  passes, else queues a pending exchange: a 0x18-byte record (vtable `0x013573A4`) built by `0x00885F30`
+  (ConstructPendingArmyExchange: giver character +8, receiver character +0xC) or its sibling
+  `0x00885F60` (source +8, another target +0x14), queued with `0x008E2B80` on world +0xF70, and the world
+  event at +0xBD0 fires. The step also takes this branch when its enter flag +0x58 is clear, whatever
+  the fit says: the order builder runs the same fit first and clears the flag when it fails, and
+  nothing changes during the walk in ours, so the arrival's fit decides. The record's
+  execute (vtable +4, `0x008EA7E0` ExecutePendingArmyExchangeForHuman) fires the world event at +0x3C0
+  for a human faction (+0x6E0) only, and not for a human in a revolution (+0x814) whose side byte
+  +0x81C is not 1 (PROVISIONAL in ours, BACKLOG §6 revolutions: the model has no revolution state, so
+  a human always gets `ExchangePending`); INFERRED: the exchange panel listens to it. The record has 15 construction sites
+  (`0x00885F30`: `0x009195A0`, `0x0091A560`, `0x00938140`, four in `0x0094C010`, `0x0094D660`;
+  `0x00885F60`: `0x00918AB0`, `0x00938140`, `0x0094CFF0`, `0x0094D390`, two in `0x0094D660`,
+  `0x0094D970`); only `0x0094D660`'s are read, so that the others mean an exchange too is INFERRED.
+  `0x008B2720`: an army and a navy never exchange; an AI
   faction (faction +0x6E0 = 0) with the flag needs the receiver below the cap; a human needs both
   armies to fit whole; the two never exceed 20 (0x14) together. `0x00B16700` lets a force in with no
   garrison or when its faction is the owner's, so it assumes the garrison is the owner's.
   ORIGINAL BUG: with a foreign garrison inside, the owner's units go into that other faction's army.
-  Ours: the army stops outside, nothing changes hands. PROVISIONAL (ours): a full own garrison makes
-  ours wait outside, where the exe queues the exchange; the human / AI fit difference is not ported
-  (ours: the receiver needs room, and what fits moves).
+  Ours (`join_residence`, allygarrison): the army stops outside, nothing changes hands. With the
+  owner's own garrison the fit `0x008B2720` decides: what fits moves (`merge_units`); otherwise a human
+  gets `ExchangePending` (the execute `0x008EA7E0` acts for a human only) and an AI nothing. The
+  builder `0x0091BE30` refuses in this order: the residence's force fit (`0x0091BE4F`), then a
+  settlement under siege (`0x0091BE63`, the residence's virtual +0x98 `0x00A8B9C0`); ours tests them in
+  the same order (`NoResidenceRoom`, then `UnderSiege`). Its approach step `0x0091DB80` (result tested
+  at `0x0091BF9F`) always succeeds, so it adds no refusal. PROVISIONAL
+  (BACKLOG): `0x008B2720`'s two-navies-in-port refusal (+0xD8) and its accompanying-character cap
+  (`0x006A3110`), which the model does not keep; the exchange screen behind `ExchangePending`.
 - **Defence.** The attack is the garrison-attack order (`GARRISON_ATTACK_ACTION_CONTROLLER`,
   constructor `0x00906C00`, vtable `0x0135F36C`, loader `0x00906A10`, name `0x00912DF0`): plan
   `0x0095D140` → `0x00923DC0` → `0x00917D20`, which needs war with the region's owner (`0x009D0980`;
@@ -2939,13 +3241,202 @@ capital), or comes from a loaded save. The settlement residence (vtable `0x0137C
   units (+8) below the cap (+0x48) takes the unit. (a3) otherwise the free spot `0x00B39FE0` and a new
   army `0x008D25F0(owner, units, spot, 1, 0, 1, 1)` there; (a1) no spot, no army.
   ORIGINAL BUG: (a2) puts the owner's recruit into a foreign garrison. Ours treats a foreign garrison
-  as no room and goes on to (a4) / (a3). PROVISIONAL (ours): equal-sized armies in (a4) take the
-  lowest force id, not the grid order; (a3) stands at the settlement position and (a1) is not ported.
+  as no room and goes on to (a4) / (a3). (a3) and (a1) are ported (`free_spot_near`, `View::free_spot`):
+  the spot is `0x00B39FE0(&settlement position, owner, 0)` (called at `0x00B1EB78`); with none the
+  spawn loop leaves at `0x00B1EAE6`, so that item and every later land item of the region stay queued,
+  finished, and `0x00B71FB0` deletes only the spawned ones (`0x00B5C110`). Its countdown steps every
+  unblocked item (vfunc +0x18) and each takes a recruitment point whatever its count, so a finished
+  item still queued takes one again every turn (ours matches). The held-back test `0x00B5AD90` has no
+  caller in the spawn (its callers: `0x00B71FB0`'s countdown at `0x00B72156` and `0x009FE7B0`), so a
+  finished item spawns whether or not it is held back or within the points (ours matches). The naval
+  manager `0x00B1D7E0` is separate (its free-spot calls not traced). PROVISIONAL (BACKLOG, needs the
+  debugger): equal-sized armies in (a4) take the lowest force id; the exe keeps the order of
+  `0x00BA6770`'s query (QueryCharacterIndexCellsInBox: per grid of the index, count at owner +0xD0,
+  array pointer +0xD4, 0x34-byte entries; the first cell index outer, the second inner over the box,
+  bounds `0x00BBB770` clamped to the grid; the cell at grid +0x2C, 0x70 bytes each, through
+  `0x00BA4B20`; each cell's list, count +8 / pointers +0xC, walked from 0 by `0x00BA4FE0`, whose
+  insertion order as characters move is not traced). The cell query is more than one list: it has
+  two byte flags (one appends each matched entry's related list, the other walks three more lists of
+  the cell, counts +0x18 / +0x38 / +0x48, and appends their objects' lists), its clean-up `0x008FE930`
+  drops null entries (a remove-by-value with a null value, not a de-duplication), and `0x00BA6440`
+  asks no further grid once one grid has a hit. Which flag values `0x00B43A60` passes is not traced;
+  both facts bear on the tie order and are part of this PROVISIONAL.
   `0x008EF790` is not part of the spawn: it links a reinforcement army's units into the target's
   incoming list (caller `0x00B0A270`).
-- **Allied entry** (not ported): `0x00B16700` and the capture arrival `0x0094CFF0` (its +0x59 / +0x5A
-  branch, event +0x978) let a non-owner army into a settlement with no garrison; ours lets only the
-  owner in, or an enemy at war.
+- **Allied entry** (`CampaignCommand::JoinGarrison`, allygarrison): the script's `join_garrison`
+  (method `0x014582C0` → `0x0097B520`) orders the character or his army in with the move-to-residence
+  order `0x009549B0`, enter flag set, with no owner or stance check; `0x00B16700` lets any force in
+  while there is no garrison, and the arrival `0x0094CFF0` (its +0x59 / +0x5A branch, event +0x978)
+  enters without a capture. The map's right click never gives it for another faction's settlement
+  (`0x009CE010` gives the join action 4 only to the owner's characters; `0x00A0BD50` sends 5, an
+  attack). `0x0097B520` swaps the characters when the one named travels with a force: that force's
+  commander (the +0x198 link's +0x74, when he passes `0x009D0F50`) takes the order and the named one
+  goes along as the order's second character (`0x0097B5E2`-`0x0097B649`).
+  Not yet wired: the script host's `join_garrison` call to the command (BACKLOG).
+- **The move-to-residence chain** (allygarrisonfix, 2026-11-10; decompile and disassembly; corrects the
+  chain the first pass cited, in which `0x009549B0` called the builder directly): `0x009549B0`
+  (IssueMoveToResidenceOrder) → the gate `0x008BE360` (skipped with its skip flag; run on the order's
+  second character when set, else on its character; on a refusal `0x008BE410` repeats the tests with
+  no effect) → `0x00918AB0` → the order object `0x00904EF0` (vtable `0x0135F8F4`) → run `0x009651A0`
+  → the execute `0x0095B7F0` (vtable +0x28) → the builder `0x0091BE30`. After a successful order
+  `0x009549B0` sends {character, code} on the world's notifier +0x9A8 when `0x00A0B9D0` holds for the
+  character or his faction is human: 241 when `0x00A0B9D0` holds, else 243 when [faction +0x70C] +0xC8
+  is 0 or 1, else 241 (`0x00954A41`-`0x00954ABB`). The script command sends no event itself. Ours does
+  not send it (PROVISIONAL in `join_garrison`: `0x00A0B9D0`, the codes and the listener are not traced).
+  - **The gate `0x008BE360`** (CanCharacterTakeOrderNow; model in ECX, the character object on the
+    stack; its tests run on the record at +0x20 of that object). It refuses when: (1) `0x00A20040` is
+    true (the block byte +0x53C of the character or, through the elements of his +0x2A8 object and
+    their +0xF4 handles, of a character attached to one of them; recursive; meaning UNKNOWN); (2) his
+    faction (+0x2A0, `0x008BE280`) is not the acting faction of the turn (`0x00974EF0` on model +0xF5C:
+    the faction at +0x18, or the one at +0x1C while the first is in a revolution with equal bytes +0x81C
+    / +0x81D); (3) the battle-sequence stage ([model +0xF6C] +0x54) is neither 0 nor 8; (4) the
+    pending-action stack at model +0xF70 is not empty; (5) the counter record at model +0x1028 has
+    reached its limit (`0x00949590`: float value ≥ int limit ≥ 0; what it counts UNKNOWN); (6) the
+    object at character +0x9C, when set, answers false to its virtual +0x1C (UNKNOWN). It has **no
+    test of a carrier**. Ours: (2) is `check_turn`, (3) the pending-battle refusal of `apply_inner`;
+    (1), (4), (5), (6) are PROVISIONAL in `join_garrison`.
+  - **The execute `0x0095B7F0`** (ExecuteMoveToResidenceOrder): refuses with its byte +0x145 set or no
+    residence; with its first flag the plan check `0x009235F0`; then `0x00950DF0` on the residence
+    (UNTRACED) must pass; then the carrier helper `0x008FD870(residence)`: 0 ends the order refused, 2
+    goes on to the builder, anything else ends the execute with no steps built. `0x008FD870` is not
+    decompiled; its callee list is that of its twin `0x008FD580` (the landing finders `0x00B596B0` /
+    `0x00B598B0`, `0x00898B20`, `0x009549B0`, `0x00916B30`, `0x009550F0`, `0x00974B50`), which for the
+    move-to-character order gives the carrier's commander an order of his own and answers 1, or 2 with
+    no carrier or nothing to do. That the two behave alike is INFERRED. On 2: when the army's carrier
+    (army +0xEC) resolves and the carrier commander's navy lies in a port (`0x00A17CF0`, navy +0xE0),
+    `0x008BB9D0` puts the army ashore into that port's settlement (port +0x70; the residence's enter
+    +0x88, no owner or garrison test in it); then `0x0091BE30` builds the steps and `0x00974700` hands
+    them over.
+  - **The builder `0x0091BE30`'s routes**, by where the character is: inside a residence
+    (`0x009FB9A0`: the army's +0x9C handle, or his own +0x2C0) → `0x0091C470` (refuses when that
+    residence is under siege; route `0x00B6D760`; the 104-byte leave-residence step `0x009073C0` at
+    the head of the list); a navy in a port → the same with port +0x70; his +0x198 object's virtual
+    +0x3C → `0x009175F0` (route `0x00B70660` from that object's commander); **an army aboard a navy**
+    → `0x00918670` with the carrier's commander: a landing position from the commander's
+    (`0x00B37970` with the faction for an army, `0x00B38EE0` for an agent), the walk from there
+    (`0x0091F750`, route `0x00B6E260`), the 100-byte leave-ship step `0x00904BA0` and the position
+    step `0x0091DC30` (the same two steps the disembark order's builder `0x00918750` pushes); else
+    the plain walk `0x0091EBF0` (UNTRACED).
+  - **Aboard a navy, ours** (`CampaignModel::refuse_aboard`, PROVISIONAL; one rule, called by
+    `JoinGarrison` and by the arm shared by the other force orders in `apply_inner`): every order of an
+    army aboard is refused ("land it first"). The exe does not refuse: neither the gate nor the
+    builders test the carrier; the residence and character orders run their carrier helpers
+    (`0x008FD870`, `0x008FD580`), unload a docked army (`0x008BB9D0`) and build the leave-ship route
+    (`0x00918670`; for the move-to-character order `0x00918590`, UNTRACED). Not ported and not
+    traced: what the landing costs inside these orders, the routes, when the helpers send the
+    carrier, and the attack order's builder. Test
+    `an_army_aboard_a_navy_gets_one_refusal_from_every_order`.
+- **The free spot `0x00B39FE0`** (ours `View::free_spot`, `CampaignModel::region_test_flags`): a
+  best-first heap of cells from the query point's cell (seeded by `0x00AF1590`, pushed by `0x00AF0910`,
+  priority the distance to the cell) with a visited hash (packed cell xor `0x4A545EED`), no distance
+  limit and no early exit; it succeeds only when the best distance ends below FLT_MAX. Per popped cell
+  `0x00B421D0` tests its reached polygons of kind 0 or 6 (mover 0) whose region passes `0x00B16C00`:
+  inside one, distance 0 and the point itself; else the nearest outline point (`0x00B1CA50`), kept only
+  when strictly nearer. `0x00B16C00` (IsPolygonRegionOpenToFaction): everything passes while the layer's
+  gate byte +0x168 is clear; region id 0 passes; a single region (id below +0x140, region word at
+  +0x144) when `0x00B622E0` opens it to the faction; a group (table +0x154, 16-byte entries, count +8,
+  region words +0xC) when all its non-zero regions do, an empty one always. For a faction without a
+  record (the rebels) `0x00B622E0` returns false at its entry (`0x008CEEF0`, test at `0x00B622E7`), so
+  only region id 0 and empty groups pass (ours matches, `region_test_flags`). INFERRED: ours takes the
+  gate byte +0x168 as set whenever a recruit is placed; who sets it is not traced.
+  **The search in full** (allygarrisonfix, 2026-11-10; disassembly and decompile, CONFIRMED unless
+  tagged; ours is a port of it for mover 0, replacing a search that spread through every enterable
+  polygon and stopped at a straight-line bound, which the exe does not):
+  1. Entry: `0x00B53AB0` finds the grid holding the point (none: no spot); `0x00B44740` the cell
+     (column and row from the grid origin and cell size, clamped at 0); `0x00B53D00` the cell data.
+  2. Seed node `0x00AF1590` (36-byte nodes: cell data, grid, packed cell, float priority +0xC, a
+     reached byte per entry +0x10, mover +0x20). Reached are the entries of **kind 7** (the building
+     footprints, PATHFINDING_PORTS.md §9.2) that hold the point (`0x00B1FA60`); then, with no kind
+     filter, every entry of the cell that touches a reached one (`0x00B168D0`), until none is added.
+     The node is pushed even with nothing reached; the start cell is not put in the visited set.
+  3. Priority (the same in `0x00AF1590` and `0x00AF0910`): minus the smallest of the four signed
+     distances from the point to the cell's sides (rectangle `0x00B44880`, sides as segments with
+     unit normals `0x010D0900`): outside the cell the larger axis overshoot, inside minus the
+     distance to the nearest side.
+  4. Heap, smallest priority first. Push appends and sifts up (`0x00AC2140`): a new node does not
+     pass a parent of equal priority. Pop (`0x00AF8620` + `0x00AC1B50`): the last node is set aside,
+     the hole at the root walks down taking the smaller child, the right one on a tie, and the node
+     set aside goes in the hole and is sifted up. It is the placement flood's heap too (`0x00B35640`);
+     ours runs both on the one port (`msvc_sort::push_heap` / `pop_heap`), so equal priorities pop in
+     the exe's order.
+  5. Loop until the heap is empty; best distance starts at FLT_MAX. The top node's candidates are
+     tested by `0x00B421D0` in cell order: entries of kind 0 or 6 whose reached byte is set and whose
+     region passes `0x00B16C00`; inside (`0x00B1FA60`) gives distance 0 and the point itself, else
+     the nearest outline point (`0x00B1CA50`) when strictly nearer (the first found wins a tie).
+  6. Neighbours: the 8 cells, rows outer, columns inner. A visited cell is skipped. A neighbour is
+     taken only when one of its entries of kind 0, 6 or 7 (through the filtered iterator `0x00B108A0`,
+     filters `0x00B573C0` and `0x00B5ACA0`) touches a reached **kind-7** entry of the current cell
+     (`0x00B3A595`, `0x00B168D0`). Its node (`0x00AF0910`): reached are the entries the mover may
+     enter, of kind 0, 6 or 7, that touch (`0x00B16800`) a reached kind-7 entry of the parent, then
+     the cell's entries of kind 0, 6, 10 or 11 that touch a reached one, until none is added (a
+     kind-7 entry is reached only from the cell before). The cell is pushed and marked visited; with
+     no hit it is neither. Off-grid neighbours go to another grid (`0x00B5B6C0`, `0x00B44730`).
+  7. The touch test `0x00B168D0`: a diagonal step needs `0x00B27EB0` (kinds 0, 1, 4 to 11 only their
+     own kind; kind 2 never; kind 3 and 12 up any); for a land or sea entry, an index below 4 and no
+     diagonal the answer is a stored bit (`0x00B57520`: bit index + 4·(dx + 2·(dy + 1)) of the 20-bit
+     field in bits 4 to 23 of the entry's first dword); kind 10 touches only 10, 11, 7 and kind 11
+     only 11; then the corner test `0x00B125A0` or the edge test `0x00B12CD0`. `0x00B16800` has the
+     same kind rules without stored bits (`0x00B122D0` / `0x00B12840`).
+  8. End: found when the best distance is no longer FLT_MAX.
+  Consequences: the search follows building footprints, never open land; a point under which no
+  kind-7 polygon lies gets no spot (every settlement of the five maps stands on one; a mod's map must
+  give its settlements a footprint to place recruits outside); the point itself is the answer only
+  where a land or road polygon overlaps the footprint. Tests `polypath.rs` `free_spot_*` (the detour case
+  `free_spot_searches_past_farther_cells_for_a_nearer_spot` and
+  `free_spot_offers_only_reached_polygons` fail on the search this replaced) and
+  `foreign_garrison_tests.rs` `a_recruit_outside_stands_at_the_nearest_free_spot`.
+  **One port with the placement flood** (expelplacefix2, 2026-11-10; `0x00B421D0` read again): the
+  candidate step is the flood's cell scan `0x00B41A60`'s per-polygon step (inside `0x00B1FA60`, else
+  `0x00B1CA50` with the FLT_MAX argument and the strict compare on the root of the squared raw
+  distance), and the cell lookup `0x00B44740`, the priority `0x00AF1590` and the heap are the same
+  functions, so `View::free_spot` now runs in raw Fixed20 on `place_flood`'s ports (`cell_of`,
+  `cell_priority`, `Scratch::holds` / `Scratch::offer`, `msvc_sort` heap). Where the two ports
+  differed the exe agrees with `place_flood`: `0x00B1CA50` ends in the row search `0x00B1C800`, which
+  moves the outline point inside the polygon; the inside test holds a polygon's west and south edges
+  and not its east and north ones, so a spot on a land polygon's east or north edge is one raw unit
+  inside it, where the `f32` port gave the edge point itself (tests
+  `free_spot_on_an_east_edge_is_one_unit_inside`, and the east-edge case of
+  `a_recruit_outside_stands_at_the_nearest_free_spot`); a point west or south of the grid falls in its
+  first column or row (`0x00B44740` clamps), where the `f32` port had no cell (no spot either way: no
+  footprint holds such a point). Where they differed the other way the free-spot port was right:
+  `0x00B421D0`'s second kind test passes only kinds 0 and 6 for movers 0 and 1, not the run-time kinds
+  10 and 11 the flood's mode 0 takes. The early return at a held point is gone (the exe has none;
+  the result is the same).
+  PROVISIONAL (in `View::free_spot`'s doc): the
+  stored touch bits are not in our map data, ours compares outlines for every pair, and in the seed
+  the exe indexes the bit by the count of compatible entries before the tested one (for a land or
+  sea front and an incompatible entry the bit read belongs to the next compatible one; not shown to
+  contradict the exe's data, so not counted as a bug); `0x00B16800`'s inner tests are not read and
+  taken to equal the main loop's; ours has one grid; where run-time pieces stand in a cell's order
+  is not traced. Other callers of `0x00B39FE0` (7 in all, other movers) are not ported.
+  `PolyMap::build`'s diagonal rule (same kind, not kind 2) differs from `0x00B27EB0` for kind 3
+  (a river touches any kind diagonally in the exe); nobody enters rivers, so no result changes.
+- **Write-ups** (allygarrison, 2026-11-10; read in IDA, name and plate comment filed for the manager
+  to apply in `%LOCALAPPDATA%\rea-ida\names\pending\allygarrison.jsonl`):
+  - Names the export already had are kept: `0x00BA6770` QueryCharacterIndexCellsInBox, `0x00885F30`
+    ConstructPendingArmyExchange, `0x008EA7E0` ExecutePendingArmyExchangeForHuman, `0x00B16C00`
+    IsPolygonRegionOpenToFaction (plates corrected after the review, each with its `NapoleonRust:` line).
+  - Orders (allygarrisonfix): `0x008BE360` CanCharacterTakeOrderNow, `0x008BE410`
+    RecheckCharacterOrderGateNoEffect, `0x00A20040` HasCharacterOrOfficerBlockFlag, `0x008BE280`
+    IsCharacterOfFaction, `0x00974EF0` GetActingTurnFaction, `0x00949590` HasCounterReachedLimit,
+    `0x009FB9A0` GetCharacterResidence, `0x00A17CF0` GetCharacterNavyPort, `0x0097B520`
+    ScriptJoinGarrison, `0x009549B0` IssueMoveToResidenceOrder, `0x009651A0` RunCharacterOrder,
+    `0x0095B7F0` ExecuteMoveToResidenceOrder, `0x008BB9D0` UnloadArmyIntoPortSettlement, `0x0091BE30`
+    BuildMoveToResidenceSteps, `0x00918670` BuildLeaveShipAndWalkToResidenceSteps, `0x0091C470`
+    BuildLeaveResidenceAndWalkSteps, `0x009175F0` BuildWalkFromAttachedForceSteps, `0x0091DB80`
+    PushResidenceApproachStep, `0x0091F750` PushWalkRouteToResidenceStep, `0x0091DC30`
+    PushStartPositionStep, `0x0091CED0` BuildMoveToCharacterSteps, `0x008FE930` RemoveValueFromPtrRange.
+  - Free spot (allygarrisonfix): `0x00B39FE0` FindFreeSpotNearPosition, `0x00AF1590`
+    InitCellSearchSeedNode (renamed by expelplacefix2: the placement flood `0x00B35640` builds its
+    start node with it too), `0x00AF0910` InitFreeSpotNeighbourNode, `0x00B421D0`
+    TestFreeSpotCandidatesInCell, `0x00B168D0` DoPolygonsTouchInGrid, `0x00B16800`
+    DoPolygonsTouchAcrossGrids, `0x00B57520` GetStoredTouchBit, `0x00B27EB0`
+    MayPolygonKindsTouchDiagonally, `0x00AC2140` SiftFreeSpotNodeUp, `0x00AC1B50`
+    SiftFreeSpotHoleDown, `0x00B44880` GetCellRectangle, `0x00B44740` GetCellOfPosition, `0x010D0900`
+    InitLineSegmentWithNormal, `0x00B573C0` ArePolygonKindsCompatible, `0x00B5ACA0`
+    MayMoverUsePolygonKind.
+  - Read but not written up (named in the text above only): `0x008FD870`, `0x008FD580`, `0x00951090`,
+    `0x00918AB0`, `0x00918590`, the iterator `0x00B108A0` / `0x00AE8D20` / `0x00B00C00`.
 
 ## Research (round 7; code `ntw_sim::campaign::research`)
 - **Save layout** (CONFIRMED). `FACTION_TECHNOLOGY_MANAGER` `techs[]` entries are {utf16 key, u32 state, f32
@@ -4185,13 +4676,15 @@ Ghidra: EOL comments at `0x008F28E1`, `0x008F28E7`, `0x008F2B35`, `0x008F2B40`, 
   - Bankrupt desertion (`economy::bankrupt_desertion`, round-end step) destroyed the emptied forces into a local
     list, losing their `ForceDestroyed`. It now goes to the step's events (test
     `an_army_emptied_by_desertion_is_reported_by_the_economy_step`).
-- Still open (UNKNOWN, not traced): an AI turn applies all its orders and only then fires their script events
-  (`ntw_ai` `driver::play_faction` through the host's AI hook). A human's command fires its events right after it.
-  Whether the exe dispatches each AI order's events before its next order (event dispatch from model +0x120 /
-  +0x870) is untraced. (The +0x870 event itself has no script listener: msglisteners 2026-10-22.)
+- Traced (scriptevents 2026-11-10, "Script event classes" → "Order" below): the exe has no script event queue, so
+  each AI order's script events reach Lua inside the order, before the next one. Ours still applies all of an AI
+  turn's orders and only then fires their script events (`ntw_ai` `driver::play_faction` through the host's AI
+  hook), and a human's command fires its events right after it: PROVISIONAL until the design of "Order" is built.
+  (The +0x870 event itself has no script listener: msglisteners 2026-10-22.)
 - Events a script command queues (`grant_faction_handover`, `ScriptState::script_events`) are fired by
   `ScriptHost::fire_script_events` through the same `fire_all` after each batch, so they are returned too.
   `force_make_peace` and `force_declare_war` queue theirs the same way (forcepeace 2026-10-21; they were dropped).
+  The exe runs their handlers inside the handler that issued the command ("Order" below); ours after its batch.
 
 **Character walk order** (charwalk 2026-10-20, CONFIRMED by listing). The per-character loops of the turn start and
 turn end walk the faction's character list (faction +0x764 count, +0x768 data; see `World::character_order`),
@@ -4262,6 +4755,162 @@ exe: `0x00AA4910`'s one caller is the CAI slot-intention executor `0x00CE9A60` (
 repairs when the slot's building handle equals the intention's +0x110, else builds through `0x00A67890`). The order
 is the CAI's intention order, not traced, and it matters (an AI repair's cost is capped at the treasury left), so
 `capture::ai_repairs` keeps its id-order stand-in (tagged in its doc).
+
+### Script event classes (scriptevents, 2026-11-10; static trace, CONFIRMED unless tagged; code `ntw_script::event_classes`, `host::fire_in`)
+
+**Post path `0x00E30700`.** One argument, the event object. It asks the event's vtable +0x08 (the always-true stub
+`0x00447880` in the seven vtables read), then needs a script environment on top of the environment stack (count
+`0x0145AE88`, array `0x0145AE8C`, top entry not null), then asks the event's gate, vtable +0xB8, and only then
+calls the dispatcher `0x00E142B0`. Nothing is stored: there is no queue, no deferred list and no "in dispatch"
+flag, so a post made while a handler runs dispatches at once, nested inside that handler.
+
+**Dispatcher `0x00E142B0`.** Reads the global `events` of the Lua state (nothing else: not `package.loaded`), then
+`events[<event name>]` (vtable slot 0 gives the name); either missing ends it with 0. It takes the list's length
+once, then for i = 1..length reads entry i raw at that moment (so a handler that replaces a later entry is seen,
+one that appends is not, until the next post), pushes the event as the context userdata (`0x00DEBA40`: one
+userdata per event pointer, kept in the global `udata_lookup`; a null event pushes nil) with `0x00E0CF60` as its
+metatable's `__index`, and calls the entry with that one argument and one result through `0x01057D80`. It counts
+the entries that answered boolean true and returns the count. **Call wrapper `0x01057D80`** (arguments, results):
+pushes `LogLuaScriptErrorWithTraceback` `0x0106BD10` under the function as the error handler; when the value under
+the arguments is a function it makes a protected call with that handler, so an error is logged with its traceback
+and the dispatcher goes on to the next entry; when it is anything else it logs the type mismatch
+(`LUA_LogArgTypeMismatch` `0x01095090`, expected function) and drops the value and its arguments, calling nothing;
+then it removes the handler. Ours: `fire_in` reads the global `events` first (the `package.loaded["data.events"]`
+fallback is our own), the length once and each entry live, reports a failing handler and a non-function entry in
+`FireReport::errors` and goes on (tests `handler_errors_are_reported_and_others_still_run`,
+`an_entry_that_is_not_a_function_is_reported_and_passed_over`, `the_handler_list_is_read_live_but_its_length_once`).
+
+**The gate, vtable +0xB8.** Two functions fill the slot: `0x00447880` (always yes) and `0x008F9EE0`, shared by 32
+classes (the `gated` rows of `event_classes::CLASSES`: every `Character*` class but `CharacterEntersGarrison`,
+the agent action results, `CampaignArmiesMerge`, `DuelFought`, `MultiTurnMove`, `MovementPointsExhausted`, the two
+trade route raids). `0x008F9EE0`, in order:
+1. the event's character (vtable +0x1C) is null → no;
+2. the `trigger_events` table (`0x00E30810`, on the database reached from the character: +0x194 → +0x10 → +0x10)
+   is searched for the event's name; not found → the "is not a valid key for this table" line is logged and the
+   answer is no;
+3. the record's exclusion list holds the key of the character's agent record (character +0x1AC; `0x00EC5360`
+   walks the list, 12-byte strings, count at record +0x14, data at +0x18; `0x004F0F40` → `0x004EFB20` →
+   `CompareUniStrings` `0x004F1F30` = 0, an exact, case-sensitive match) → no; otherwise yes.
+
+The table is built on first use and cached at database +0x438 (`0x00E30810`; it first gets
+`trigger_event_to_excluded_agent_types`, `0x00E30750`, cached at +0x434). Each `trigger_events` record
+(`0x00E8FD50`, thunk `0x00EDBC80`) copies its key and walks every exclusion row, appending the row's second string
+(+0x0C) when its first (+0x00) equals the key: the record's exclusion list. Keys (CONFIRMED): each table's
+entry_pack walks its loaded rows, keys each row, looks the key up in the loaded source's key map (source +0x14,
+`0x0047AA40`; missing: "In table %S: '%S' is not a valid key", then "Invalid key") and indexes the built records by
+it. `trigger_events` (`0x00E9AFF0`, constructor `0x00E6DD40`): a copy of row +0x00, the event name, so column 0.
+The exclusion table (`0x00E9B370`, constructor `0x00E6DE50`, from `0x00E8FEA0` with the folder name
+`trigger_event_to_excluded_agent_types_tables`): row +0x00 joined with row +0x0C (`0x004F1200`, copy then append),
+event key + agent type key, so columns 0 + 1 (two rows of one event with different agent types are both kept).
+INFERRED: the on-disk column order of the exclusion table is the record's (event, agent type); vanilla ships the
+table empty, so no file shows it, and the row reader that fills +0x00 / +0x0C (in the loader that builds the rows
+handed to `0x00E8FEA0`) is not traced. Vanilla data (install test
+`the_installs_trigger_events_cover_the_gated_classes`): `trigger_events` has 167 rows with one for each of the 32
+gated classes (and `CharacterTurnStart`); the exclusion table has none. So in vanilla only step 1 ever stops an
+event; steps 2 and 3 are what a mod's tables change. Ours: `EventGate::admit`, called by `fire_in` (the one place
+an event is handed to Lua), reads both tables through the merged database (`db_folder::tables::TRIGGER_EVENTS`,
+`TRIGGER_EVENT_TO_EXCLUDED_AGENT_TYPES`; keys CONFIRMED as above), compares the agent key with
+`CharacterKind::esf_name`, and logs a refused name once. Tests (`tests/event_gate.rs`):
+`a_gated_event_without_a_character_never_reaches_lua`, `a_gated_event_needs_its_trigger_events_row`,
+`an_excluded_agent_type_stops_the_event`.
+
+**What each class answers.** A `conditions.*` function reads the context through one accessor slot of the event's
+vtable; a class without that object has the null stub `ReturnNull` `0x00461180` there and the condition is false
+(for example `FactionIsLocal` `0x0089FA60`: slot +0x38 null → false). Slots: +0x14 string, +0x18 UI component,
++0x1C character, +0x20 second character, +0x24 unit, +0x28 region, +0x2C slot, +0x30 settlement, +0x34 fort, +0x38
+faction, +0x40 garrison residence, +0x48 historical event candidates, +0x4C mission, +0x5C trade route, +0x64
+building, +0x68 technology, +0xA0..+0xA8 battle results, +0xAC the tax event's payload. Read from the vtable
+bytes, per class (`event_classes::CLASSES` holds the vtable address of each):
+- The 32 gated classes: the character (+0x1C `0x0044A500`, event +0x10) and nothing else our context carries. No
+  faction, region or settlement accessor: `CharacterCompletedBattle` (`0x013558E0`), `CharacterLootedSettlement`,
+  `CharacterTurnEnd` and the rest give `FactionIsLocal`, `FactionName`, `SettlementName` nothing; scripts reach
+  the faction through the character conditions (`CharacterFactionName` `0x0089CAE0`). `CampaignArmiesMerge`
+  (`0x01355824`) also has the second character (+0x20 `0x004E74C0`, event +0x14).
+- `SettlementOccupied` (`0x01355EC0`), `CampaignBuildingDamaged` (`0x0137CE30`), `CharacterEntersGarrison`
+  (`0x013561B0`), `BuildingCompleted` (`0x0137CEEC`): the settlement (+0x30 `0x008EF740`: asks the event's first
+  object, the garrison residence at +0x10, its vtable +0x58), the residence (+0x40) and the slot (+0x2C
+  `0x008E6670`); no faction and no region. `CharacterEntersGarrison` adds its character, `BuildingCompleted` a
+  character (+0x1C `0x004E74C0`, the event's second object) and the building (+0x64, its third). INFERRED: the
+  residence of a slot outside the town answers the region's settlement as the town's does (what the residence's
+  +0x58 returns for a farm or a port is not traced).
+- Faction only (+0x38): `FactionTurnStart`, `FactionTurnEnd`, `FactionRoundStart`,
+  `FactionGovernmentTypeChanged`, `PendingBankruptcy`, `FactionBecomesLiberationProtectorate`,
+  `VictoryConditionMet`, `TradeRouteEstablished` (also its trade route, +0x5C).
+- Region only (+0x28): `RegionTurnStart`, `RegionTurnEnd`, `SlotTurnStart` (also its slot, +0x2C; no settlement).
+- `ResearchCompleted` (`0x01356038`): a character (+0x1C, the event's first object) and the technology (+0x68);
+  no faction. `BuildingConstructionIssuedByPlayer`: the building (+0x64). `UnitTrained`, `UnitTurnEnd`,
+  `RecruitmentItemIssuedByPlayer`: nothing our context carries (the unit, +0x24). `GovernorshipTaxRateChanged`:
+  only its payload (+0xAC). `BattleCompleted`: only its results (+0xA0..+0xA8). `HistoricalEvents`: +0x48.
+  `TimeTrigger`: +0x14.
+Ours: `ScriptHost::context_for` gathers what the model event carries and `EventClass::offer` keeps only what the
+class answers, so `SettlementOccupied` gives its settlement and no faction or region, and a character event its
+character and no faction (tests `a_model_events_context_is_what_its_class_answers`,
+`a_settlement_occupied_handler_reads_the_settlement_and_no_faction`, `a_class_offers_only_its_accessors`). An event
+with no class in the table is handed over as built and not gated. Left PROVISIONAL in `context_for` (the model
+event does not carry the object, and which one the exe passes is not traced): the characters of
+`BuildingCompleted`, `ResearchCompleted` and `CampaignArmiesMerge` (without one, the gate keeps the merge event
+from Lua; no shipped script handles it), and the ordered building of `BuildingConstructionIssuedByPlayer`.
+Unverified: `FactionIsEnemyCampaign` (`0x0089F920`) with a null faction; ours falls back to the local faction.
+
+**Two names without a poster.**
+- `CharacterTurnStart`. ORIGINAL BUG: the declaration `0x00419EB0` ("Fired for every character at the start of
+  their turn", owner "Tom"; the declaring call `0x00DF2F40` is an empty stub in this build) is the only reference
+  to the name string `0x0134F898` in the image: no event class returns the name, so the exe never posts the event,
+  although `trigger_events` has its row and the shipped scripts register five handlers for it (trait triggers).
+  The data and the scripts contradict the code. Ours posts it at the character's turn start
+  (`TurnStep::CharactersStart`, the per-character step `0x00A24EB0` of the faction turn start), gated like every
+  `Character*` event: the place is the one the declaration's own text gives ("at the start of their turn"). The
+  five handlers then run, which they never did in the original.
+- `PreBattle`: a `trigger_events` row and an `events.lua` list, but no class and no name string in the exe (no
+  ASCII or UTF-16 `PreBattle`; the image's strings only contain it inside longer names such as `PreBattleAttack`
+  and `ShowPreBattlePopup`), and no shipped handler: the Lua API scan of the 8 campaign `scripting.lua`, the other
+  loose and `data.pack` `.lua` files and the 497 UI `.luac` finds no registration and no reference (real-install
+  test `eur_napoleon_scripts_load_and_handle_events`: no `events.PreBattle` handler after the eur_napoleon scripts
+  load). Not an ORIGINAL BUG (nothing in the code declares it as something the engine raises). Ours posts it, with
+  the attacker's faction, as our own event kept for mods: not 1:1, but vanilla runs the same since nothing handles
+  it.
+
+**Order (BACKLOG §5: script handlers after the command, handover, AI-order timing).** Because the post path is a
+plain call chain, the exe's order is the order of the posts in its code:
+- A handler sees the model exactly as it is at the post. `FactionBecomesLiberationProtectorate` is posted before
+  the owner change (`0x00B4F0FE` / `0x00B5089D`), so its handler reads the capturer as the owner;
+  `SettlementOccupied` right after its owner change (`0x00B58755`, `0x00B589AC`, `0x00B58DA6`) and before the
+  capture choice; `CharacterLootedSettlement` after the loot is applied (`0x00B54468`).
+- A script command a handler issues runs to its end inside the handler, and every event that command posts runs
+  its handlers there too, before the handler's next line (a faction handover's destruction events, forced peace
+  and war).
+- An AI order's events are posted from the model code the order runs, so their handlers have run before the AI
+  issues its next order. (The model's own broadcasters work the same way: `0x008DBAC0` calls every listener at
+  once.)
+Ours differs in all three (PROVISIONAL, tagged in `host.rs`): `CampaignModel::apply` returns a command's events
+and the host fires them after the whole command; events a script command causes wait in
+`ScriptState::script_events` until the handler batch ends (`fire_script_events`); the AI hook holds the state for
+the faction's whole turn and its events fire after all orders. A handler that only reads what its context names
+gets the same answer; one that reads state the command changes after the post (the owner in the protectorate
+handler) or relies on a nested event having run does not.
+
+Design for the match (not built; one event path, no second queue):
+1. The model holds one event sink (`Option<Rc<dyn Fn(&mut CampaignModel, &CampaignEvent)>>`, not saved), and one
+   function, `post(&mut self, events, event)`, replaces every `events.push(script event)`: it calls the sink (a
+   clone of the `Rc`, so a nested post finds it too), then appends the event to the caller's list. Events are still
+   returned to the caller for the app (move animations, movies, logs); only the Lua call moves to the post.
+2. One host helper runs anything that changes the model (`apply`, `step`, an AI order, a script binding's
+   command): it takes the model out of the shared state cell (a placeholder stays; nothing is borrowed), runs
+   the change on the owned model, and puts it back. The sink does the reverse around Lua: model back into the
+   cell, `fire_in`, model out again. So a handler's bindings borrow the state as they do today, a handler's
+   command goes through the same helper on the live model, and its events' handlers run inside it, nested, as in
+   the exe. No borrow is held across Lua (today's rule) and nothing is queued.
+3. `ScriptState::script_events` and `fire_script_events` go: a script command's events are delivered by the sink
+   inside the command, and the binding hands the `(event, report)` pairs to the host's result list.
+4. The AI hook (`AiTurnHook`) gets the helper instead of `&mut ScriptState`, so `ntw_ai` `driver::play_faction`
+   applies each order through it: each order's events before the next order. That file changes by its `apply`
+   calls only (`work/polish68` also edits it).
+5. The cost, and why this is its own task: a push site inside a function that holds a partial borrow of the model
+   (`&mut self.world` next to the event list) cannot call `post(&mut self, ..)` until that borrow ends, so each such
+   function is reshaped; and each site's place is then checked against the exe's post address (the three captures
+   above are traced; the turn steps already post at their step). Until a site is checked it stays PROVISIONAL.
+This is a seam in the sense of DESIGN.md §3.3.1 only for delivery (who hears an event), not a rule; it does not
+go in `CampaignRules::seams`.
 
 ## Diplomacy rules (round 9 item 3; code `ntw_sim::campaign::treaties`)
 CONFIRMED from the exe unless tagged. The relationship record is S1_LEFTOVERS.md §1 (29 fields, 24 attitude factors).
@@ -4654,11 +5303,33 @@ further here).
     returns: no notices, no war, no zones. The campaign update `0x008F4120` calls `0x008F7850` (at
     `0x008F4699`): with a countdown of 0 it waits (the offer's vfunc +0x24); else it counts down and at 0
     pops and applies the offer unanswered (+0x62 = 0: a refusal), so an ally that is no longer
-    human-needed is refused automatically (not modelled: revolutions; BACKLOG). While the stack is not
+    human-needed is refused automatically. When that happens (CONFIRMED, warcall 2026-11-10):
+    `0x008EA660` is true only for a human ally that is not in a revolution (`0x008CA0B0` false) or has
+    faction +0x81C == 1, and the countdown is set only at the push, so the auto-refusal fires only for
+    a human ally in a revolution with +0x81C not 1 (an AI ally is never pushed by `0x00B268B0`); what
+    +0x81C means within a revolution is left to the revolution work (§6). Revolutions are not modelled (§6), so ours has no such
+    ally and the path is unreachable; it comes with revolutions. While the stack is not
     empty `0x008F4120` does not advance the turn phases (`0x008F41F9`, `0x008F457A`, `0x008F4686`,
     `0x008F4706`, `0x008F4754`); ours: `CampaignModel::step` returns none and keeps the queue, except for
-    an `AiTurn` step (its orders already ran; PROVISIONAL: the AI's later orders of that turn are applied
-    before the answer, the exe's CAI pauses).
+    an `AiTurn` step (its orders already ran). The CAI pause (CONFIRMED, warcall 2026-11-10): the one gate
+    is `0x008BE2A0`(model, faction, allow phase 3). With the flag set and the turn phase (+0xF5C → +0x3C)
+    3 it is true at once, skipping every other test; otherwise it needs phase 1, the map movement queue
+    idle, the faction acting (the turn's faction +0xF5C → +0x18, or the acting turn faction when that one
+    is in a revolution, `0x008CA0B0`), +0xF6C → +0x54 0 or 8, and no stack top (+0xF70). Its callers:
+    the end-turn routine `0x008BD6D0` (call at `0x008BD880`, flag 0), `0x008DE800` (`CanEndTurn`
+    `0x009E0A40`, the end-turn command `0x00934910`, `0x008F4120` at `0x008F4358` / `0x008F44D1`), the
+    CAI step gate `0x008EFAB0` (called at `0x008F4628`, the test at
+    `0x008EFAF9`, the step `0x00A761F0`), `0x00A6C9A0` (the CAI order objects `0x00CB42A0` /
+    `0x00CCD420` → `0x00CCD1B0`) and `0x008F4236`. `0x008F457A` only caps the step loop's budget. The
+    resume is the answer itself: `0x009370F0` empties the stack, the next frame's gate passes and the
+    faction's next CAI step is decided then. PROVISIONAL in ours: the AI's later orders of that turn
+    are applied before the answer (`apply_orders_with_events`); holding them or re-planning is open
+    (BACKLOG §5). Nothing in the exe gates a declaration on the stack: the UI's `DeclareWarInstant`
+    `0x009E2090`, the console `0x00930CD0`, a script `0x0097A930` and `HandleDeclareWarCommand`
+    `0x00932B70` read neither it nor the stance, so a second declaration of a war whose call waits
+    stacks a second offer and the war is declared twice (ORIGINAL BUG; ours refuses it,
+    `CommandError::WarCallWaiting`, tested both ways, and an answer that finds the pair already at war
+    ends the declaration without a second war).
     The answer is `CCQ_RESPOND_TO_ALLY_WAR_INVITATION` (string `0x0135BA00`, registered `0x00422480`,
     handler `0x009370F0`): it reads {side faction, accept byte} (`0x0090E2F0`), sets +0x62 (`0x008A8190`)
     and +0x14 (`0x008EFCE0`), then `0x008BF910` pops the top offer, applies it (vfunc 0) and frees it.
@@ -4686,8 +5357,17 @@ further here).
     the inviting side's key, which the model ignores (`0x008BFA80` reads only +0x60 / +0x61 on a
     refusal). Ours: `UiScriptHost::campaign_ally_war_call` (ntw_script `ui/campaign/ally_attacked.rs`)
     shows the top waiting call once and the bindings send `RespondToAllyWarCall`; the model decides what
-    the answer does. Not traced: `CCQ_INVITE_ALLIES_INTO_WAR` (`0x0135BB34`, handler `0x00936630`, the
-    diplomacy screen's `InviteAlliesIntoWar`); the queuer's other paths (`0x009D3250`: a message kept for
+    the answer does. `CCQ_INVITE_ALLIES_INTO_WAR` (`0x0135BB34`, handler `0x00936630`, the diplomacy
+    screen's `InviteAlliesIntoWar`; CONFIRMED, warcall 2026-11-10) is not about this offer: it answers a
+    second pending action, "pending_diplomacy_war_declared" (vtable `0x0135735C`, ctor `0x00885E80`,
+    needs-human `0x008EA690`, apply `0x008BFCA0` → `0x00B268B0`), which only the deal's war record
+    (record vtable `0x0138201C`, apply `0x00C4B990`) pushes when a human is declared on through a deal.
+    The handler reads one byte, sets the action's +0x11 (call the target's allies) when it is set, then
+    pops and applies it. For an AI recipient the record applies the war at once: `0x00B268B0` with the
+    deal's ally flags (`0x00C3F270` on deal +0xB0; the CAI's choice `0x00AAAB40` → `0x00AAAB10`, context
+    `0x004B4A50`). Ours has no war record in `accept_deal` (a war goes through `DeclareWar`, both sides'
+    allies called), so the record, its pending action and this command are not ported (BACKLOG §5).
+    Not traced: the queuer's other paths (`0x009D3250`: a message kept for
     a hotseat faction that is not the local one; a row whose loc string is missing posts nothing,
     `0x00F57390`);
   - an AI ally decides through the AI (`0x00AAA950` → `0x00AAA920`, §6).
@@ -4773,7 +5453,13 @@ further here).
     `accept_deal` → `join_war_by_deal` → `war_on(x, F, Some(ally))` + `CampaignMessage::FactionJoinsYourEnemies`
     + `refresh_faction_zones(F)`, then the joiner's; `war_on` now skips the stance change when already at
     war (the records are applied again, as the exe's). An item naming its own joiner fails the deal
-    (project check: the exe would declare a faction's war on itself). The AI's evaluation of record 11
+    (ORIGINAL BUG, CONFIRMED warcall 2026-11-10: `0x00C188F0` → `0x00B26700` has no same-faction test,
+    and the joiner's record for itself is looked up with `0x00B64C50`, whose miss returns the manager's
+    first record (`0x00B64C88`), so the war factors and stance land on an unrelated faction's record;
+    the executor `0x009336C0` passes the panel's lists unchecked, while the AI never proposes one,
+    `0x008FA020` leaving out the joiner). A joiner the same deal ended (its last region given,
+    `0x00A64AC0`) still declares: `0x00C188F0` has no alive test and runs after the region records
+    (CONFIRMED; ours the same, test `a_joiner_the_deal_ended_still_declares`). The AI's evaluation of record 11
     (joinwarrule 2026-10-20) is ported (`deal_value.rs`; formulas in AI_RESEARCH.md §4 "Join war"):
     in `0x00AA5ED0`'s record loop after the payments, decline when the AI's `diplomacy_options` index 11
     towards the proposer is 1 or 3 (a decline is final, so where in the loop it falls does not change
@@ -5582,8 +6268,10 @@ systems the model lacks stay PROVISIONAL.
   a character without an army or navy stays where it is (ours: test
   `a_transfer_leaves_the_old_owners_agents_in_place`; our agents never stand in a settlement).
   Modelled (transfer3, 2026-10-15, CONFIRMED from the disassembly): the rule is
-  `expulsion::expel_faction_from_region` behind the seam `region.expulsion`
-  (`CampaignSeams::region_expulsion`), applied by `CampaignModel::expel_from_region`; its callers are
+  `expulsion::next_expelled_force` behind the seam `region.expulsion`
+  (`CampaignSeams::region_expulsion`; one force per call since expelplace, 2026-11-10: the rule
+  names the next force and where it goes, given those already handled), applied move by move by
+  `CampaignModel::expel_from_region`; its callers are
   `change_region_owner` (`expel_after_owner_change`, every handover), `accept_deal` and
   `end_protectorate_tie` (tests `campaign/tests/transfer.rs`):
   - **Where it runs:** inside `0x00A64AC0`, after the research stop `0x008B4AB0`, the early return
@@ -5649,34 +6337,134 @@ systems the model lacks stay PROVISIONAL.
     army is teleported (`0x0096C8D0`) and, unless "may stay", the notice fires.
   - **Out of the game:** the function itself returns at once when F is out of the game (faction
     `+0x824`, `0x008D9DD5` / `0x008D9DDC`), so every caller gets it (ours: in
-    `expel_faction_from_region`; test `a_faction_out_of_the_game_is_not_expelled`).
+    `next_expelled_force`; test `a_faction_out_of_the_game_is_not_expelled`).
   - **Embarked armies** (INFERRED): the region test (`0x00A075B0` → `0x00B4D7B0`, campaign
     `+0xF64`'s layers `+0xB4` / `+0xB8`, each `0x00B4D800`) takes the path-grid polygon under the
     position (`0x00A17D50`) and compares its region index (`0x00B62280`) with the region's
     (`0x00B62290`); an index past `+0x140` instead names an entry of the shared list `+0x154`
-    (16-byte entries holding region ids, compared with region `+0x10` → `+0xA4`). An army aboard
-    stands at its carrier's position: at sea, or for a docked carrier its port's exit
-    (`0x00A99A60`), both on sea polygons, so ours never counts an embarked army. Not traced: whether
-    a shared-list polygon under a port exit can name the land region (debugger sitting).
+    (16-byte entries holding region ids, compared with region `+0x10` → `+0xA4`; ported as
+    `place_flood::in_region`, see "Placement"). An army aboard is tested at the stored position
+    record of its carrier's commander (expelplace, 2026-11-10: `0x00A17D60`'s second case,
+    `0x00A17E02..0x00A17E1F`: the army (`0x009D3A60`, holder vt+0x38) `+0xEC` is the fleet carrying
+    it (PATHFINDING_PORTS.md, "army `+0xEC` ↔ navy `+0xD8`"), the fleet's `+0x74` its commander,
+    whose record `0x00A17D50` is returned as it is: not the port's exit, which only the docked
+    navy's own commander gets). At sea no polygon under it is the land region's, so the army does
+    not count. Not traced: where the record of a commander docked in one of the region's ports
+    lies (what docking writes there), and so whether the polygon under it can be the region's or a
+    group's that lists it; until then ours never counts an embarked army (debugger sitting: hand
+    over a port region with an army aboard a fleet docked there).
   - **Navies:** for every character, when N is not at war with F and its navy (`0x009D3A80`) is
     docked in a port (`+0xE0`) of the region: undocked (`UndockCharacterFromPort` `0x00A8C0B0`),
     then placed at sea from the port's exit point (`0x00A99A60`) by `0x00B377E0` (mode 2, 100.0);
     teleported on success, else it stays where it is, undocked.
-  - **Positions** (`0x00A17D60`): a garrisoned army stands at its settlement, an army aboard at its
-    carrier's position, a docked navy at its port's exit (`0x00A99A60`), anything else at its own.
-  - Agents are never moved. Our stand-ins (PROVISIONAL, in `expulsion.rs`): the candidate's point
-    is the centre of the region's path-grid cell nearest to the army (the settlement without the
-    map) for the outline point; the flood is `PathGrid::nearest_place_within` (the point itself if
-    its cell fits, else the nearest fitting cell of the region closer than 100; no footprints in the
-    model); F's regions go in in its list's order (`World::regions_in_list_order`, CONFIRMED below,
-    "Faction region list order"), the third parties' in the manager's order (`World::regions_in_manager_order`),
-    but our sort is stable, std::sort is
-    not; the port's exit is the harbour's dock point, else the port slot; no theatres in the model
-    (every shipped map is one theatre, CONFIRMED, see "Theatres CONFIRMED a no-op"; a map with several needs the
-    exe's theatre filter). The move notice: "The expulsion's move notice" below.
-    An army that no candidate places stays where it stands, out of the settlement; the model
-    garrisons armies only in settlements, so the at-war exception for other residences never
-    applies.
+  - **Positions** (`0x00A17D60`, `__thiscall` on the character, one argument: a byte set to 1
+    except in the last case): without the special state (`0x009D3CB0` false) the character's own
+    record (`+0x24`). With it, the first case that applies, in this order: (a) the object behind
+    his `+0x198` handle has a commander (`+0x74`): that commander's record; (b) his army is aboard
+    a fleet (`+0xEC`) with a commander: that commander's record; (c) he or his army has a residence
+    (`GetCharacterOrArmyResidence` `0x009FB9D0`): the residence's vt+0x3C, so a garrisoned army
+    stands at its settlement; (d) his `+0x2B0` handle is set and his force handle `+0x2A8` is not,
+    and the `+0x2B0` object's vt+0x30 result has a commander: that commander's record; (e) his navy
+    (`0x009D3AA0`) is docked (`+0xE0`): the port's exit `0x00A99A60`, which is one
+    virtual call (slot `+0x40`) on the port's `+0x70` object (its class not identified, so the
+    exit point itself is untraced); (f) his `+0x298` handle is set or `0x00A0B920` passes, and
+    `0x008B3790` of his faction (`+0x2A0`) gives an object: its vt+0x3C; else his own record with
+    the byte 0. Cases (a), (d) and (f) are not interpreted.
+  - Agents are never moved. An army that no candidate places stays where it stands, out of the
+    settlement; the model garrisons armies only in settlements, so the at-war exception for other
+    residences never applies. The move notice: "The expulsion's move notice" below.
+  - **Ours, what is left** (expelplace, 2026-11-10; tags in `expulsion.rs`). The land placement on
+    the polygon grid is the port of the exe's ("Placement" below): the outline point, the candidate
+    order and sort, the region test, the flood and the faction's view of the grid. Still our own:
+    (1) PROVISIONAL, a navy's way out of the port: placed by `PathGrid::nearest_place_within` at sea
+    from the harbour's dock point, else the port slot, where the exe floods the polygon grid at sea
+    (`0x00B377E0`, the flood's mode 2) from the port's exit (`0x00A99A60`); other characters' cores
+    do not count there; (2) PROVISIONAL, the model links a navy to its port by position, so one
+    left unplaced still counts as docked; (3) PROVISIONAL, no theatres in the model (every shipped
+    map is one theatre, CONFIRMED, see "Theatres CONFIRMED a no-op"; a map with several needs the
+    exe's theatre filter in `0x008C6010`); (4) INFERRED, an army aboard never counts ("Embarked
+    armies" above). Not the exe's, by design: a map without the polygon grid (a model without the
+    map, or a map given as cells only; the original always has the grid) enters a region at the
+    centre of its path-grid cell nearest to the army (its settlement without the map), places by
+    `PathGrid::nearest_place_within` and tests "in the region" with `economy::in_region`.
+  - **Placement** (expelplace, traced 2026-10-23, ported 2026-11-10; CONFIRMED from the
+    disassembly. Ours: `campaign/place_flood.rs` (`outline_point`, `distance_key`, `in_region`,
+    `flood`) on the poly map's fixed outlines, the importer's settlement area outlines
+    `World::settlement_area_outlines` and the library `push_heap` / `pop_heap` in `msvc_sort`;
+    called by `expulsion::army_step` / `place_on_polygons`; tests in `place_flood.rs` and
+    `campaign/tests/transfer.rs`, the polygon-grid tests at its end):
+    - **Order of work:** each army is placed (`0x0096C8D0`) before the next is tested, so later
+      floods see the moved army's new core and its faction's refreshed sight. Ours: the seam names
+      one force per call, given those already handled, and `CampaignModel::expel_from_region`
+      applies each move (`place_character`, which rebuilds the zones the move touches) before it
+      asks again; a rule that names a force twice, or one that does not exist, ends the expulsion
+      with one log line (tests `each_army_is_placed_on_the_map_the_one_before_it_left`,
+      `a_rule_naming_a_force_twice_or_an_unknown_force_ends_the_expulsion`). Within one army the
+      candidates are tried while it still stands in its residence; it leaves the residence after.
+    - **Faction order at an owner change:** `0x00A64AC0` walks the world's faction list (campaign
+      `+0xF5C`); ours `World::factions_in_turn_order` (was the faction map's id order). It decides
+      who is placed first when two factions' armies leave for the same point.
+    - **Candidate list `0x008DCB30`:** the stay entry (context `+0x24`) is written first with the
+      army's position as it is (no conversion, no outline point); then the own regions and the
+      access regions, each list sorted on its own; the capital entry (context `+0x20`) last when
+      set. A region's point is `0x008AF750` of the army's position.
+    - **Outline point `0x008AF750`** (f32): over the region's settlement area outlines (area `+0x44`
+      index: the loader `0x00A4A7B0` passes it, the area constructor `0x00A49C30` stores it, 16
+      bits, at `0x00A49CA8`), each edge (last→first, then consecutive): len =
+      sqrt(dx²+dz²); t = 0 when len ≤ 0, else ((dx/len)(px−ax))/len + ((dz/len)/len)(pz−az), clamped
+      to 0..1; the point a + d·t with the strictly smallest squared distance wins (start FLT_MAX,
+      output the army position); stored as Fixed20 by truncation.
+    - **Sort `0x008DCB30`:** key (f32 dz² + f32 dx²)·2^-40 over the raw Fixed20 differences, strict
+      `<`, std::sort (`msvc_sort::sort_by`).
+    - **Region test `0x00B4D800`** (looped by `0x00B4D7B0` over the grid's layers): cell from
+      `0x00B44740` (col = max(0, px−ox) / cell, the same for the row, high 16 bits row); the cell's
+      polygons in order, the first whose inside test `0x00B1FA80` passes decides: slot = id & 0xFFFF;
+      slot < `+0x140` → slot equals `0x00B62290`(region); slot < `+0x140`+`+0x150` → the shared list
+      entry (slot − `+0x140`) (16 bytes, count `+8`, shorts at `+0xC`) holds the region's map index
+      (`+0x10` → `+0xA4`); else the next polygon. Nothing matching: false. With `0x00A17D60` an
+      embarked army is tested at the position record of its carrier's commander ("Positions"
+      above). The cell `0x00B44740` is not clamped to the grid's columns and rows: per axis the
+      fixed-point quotient's low 32 bits are shifted down by 20 and cut to 16 bits, so the
+      original's grid holds fewer than 2048 cells a side. Ours (`place_flood::cell_of`) keeps the
+      full quotient (no such limit) and answers "no cell" past the grid's east or north end, where
+      the flood finds no tile for the position (`0x00B53AB0`); for the region test there the
+      answer is ours (no polygon, so not in the region; what the original reads for a position
+      off the grid was not traced). The region's slot
+      `0x00B62290` is its index in the grid's list of single-region ids (`+0x140` / `+0x144`), −1
+      when the region has no polygon of its own.
+    - **Inside `0x00B1FA80`** (i64): edges (last, first) then consecutive; an edge counts when
+      lo ≤ pz < hi; endpoints ordered low-first by (z, x); toggle when (x1−x0)(pz−z0) ≤ (z1−z0)(px−x0).
+    - **Flood `0x00B35640`**(point, region, 100): no tile → fail; the start cell is pushed (not
+      marked visited) with priority from `0x00AF1590`; best = FLT_MAX; loop: stop when the heap is
+      empty or best ≤ top priority, succeeding when best < radius; else scan the top cell
+      (`0x00B41A60` mode 0), pop (`0x00AF8620` + `0x00AC1B50`), then the 3×3 block (rows outer,
+      (0,0) included) inside the grid: priority = −min of the four signed edge distances of the
+      cell's f32 rect (`0x00B44880`; edges (x0,z1)→(x1,z1), (x1,z0)→(x0,z0), (x0,z0)→(x0,z1),
+      (x1,z1)→(x1,z0), each d = (dz/len)(px−ax) − (dx/len)(pz−az), `≤` keeps the later); skipped
+      when radius ≤ priority, else pushed (`0x00AC2140`, min-heap) and marked visited.
+    - **Cell scan `0x00B41A60` mode 0:** polygons of kinds 10/11 and 0/6 (other modes, read from
+      the function's own compare chain `0x00B41AA9`..`0x00B41B52`, read a second time on
+      2026-11-10: 6/3/9 → 0,6,7; 8/5/11 → 1,4,7; 1 → 0,6,8; 7/4/10 → 0,6,7,8; else 1,4) whose id & 0xFFFF is the region
+      slot; inside → best 0 at the point; else nearest point `0x00B1CA50` and its distance
+      sqrt((f32 dz² + f32 dx²)·2^-40), strict `<`.
+    - **Nearest point `0x00B1CA50`:** best edge by that distance to `0x009257A0`'s point (t in f32,
+      clamped, converted to Fixed20 as int part << 20 | trunc(frac·2^20), point a + (d·t) >> 20),
+      then the snap `0x00B1C800`: row snap `0x00B1CCB0` at the point's row, then rows z0±i while
+      i² < best and inside the outline's z range, cost i² + row cost (saturating), strict `<`.
+      Row snap: crossings of the edges with exactly one end above the row (x rounded half away
+      from zero in i64), std::sort by x (`0x00AC2830`), spans (2k, 2k+1), the left end moved in by
+      one unless on the edge; d = px − left: d < 1 → cost d² (i32 wrapping, compared unsigned);
+      else e = px − right: e < 0 → cost 0 at px, else cost e² at right − 1.
+    - **Views:** `0x00B35570` floods F's view of the grid (kind 8 = the stored zones of factions at
+      war with F, kind 9 = the cores of others F sees, the mover's own core kept); `0x00B37670` the
+      same without the mover. Kinds 8 and 9 fail the mode-0 filter.
+    - **Left over (untraced):** the sea placement `0x00B377E0` → `0x00B37370` → `0x00B38FC0`, the
+      port exit `0x00A99A60` (the class behind the port's `+0x70`), the theatre filter in
+      `0x008C6010`, and where the position record of a fleet commander docked in a port lies, so
+      whether an army aboard that fleet can test inside the land region.
+    - **Depends on the zone pieces:** kinds 8 and 9 are the polygons the zone cutter (`rtcut`)
+      leaves, so a point placed next to a core or an enemy zone is as exact as those clipped
+      shapes are (their own notes: PATHFINDING_PORTS.md §9.1 and §10.2, the run-time cutter).
   - **The expulsion's move notice** (CONFIRMED by disassembly, 2026-10-22; `SendArmyRetreatsRegionMessage`
     `0x009FB680`, renamed with its V5 write-up). `__thiscall` on the message manager (model +0xFA0), one
     argument, the character. It builds a 0x28-byte text message (vtable `0x0136F9A8`): title = the
@@ -5689,7 +6477,7 @@ systems the model lacks stay PROVISIONAL.
     PosX/PosY (when +0x1C is set) and ExtraText. Its only caller is `0x008D9DC0` at `0x008DA091`, right after
     the move `0x0096C8D0`, in the placed land-army branch, skipped when the faction may stay (the test at
     `0x008DA077`); navies (no call in their branch) and unplaced armies get none; no human test. Ours: the
-    plan's `ExpelledForce::notice`, posted by `CampaignModel::expel_from_region` after the move as
+    rule's `ExpelledForce::notice`, posted by `CampaignModel::expel_from_region` after the move as
     `CampaignMessage::YourArmyRetreatsRegion { character, at }` to the army's faction; every expulsion
     caller returns it in its events (owner change, deal, liberation, peace, broken alliance, protectorate
     tie, cancelled or expired access, `CCQ_MOVE_ARMIES_OUT_OF_REGIONS`). No UI receiver exists yet for
@@ -5970,14 +6758,14 @@ systems the model lacks stay PROVISIONAL.
     towards the other (per its plate: a commander with a raid on the other side loses all his raids, see the commerce raid ends). Its other two steps (accessloss2 2026-10-20, CONFIRMED by decompile; V5 in Ghidra):
     a commander whose force (`0x009D3A40`) besieges a settlement of the other side (siege object +0x94, its +0x7C
     target's faction vt+0x14) ends the siege, `EndForceSiegeOfSettlement` `0x008BD550` (destroys the siege object,
-    clears +0x94, calls the untraced `0x00B084F0` on the target's character, then unless model flag +0xFC5 a price
+    clears +0x94, calls `0x00B084F0` (the obstacle re-add) on the target's character, then unless model flag +0xFC5 a price
     update `0x00BCB020(0)` and `RebuildRegionRecruitablesAndEffects` on its region, then event 0xDF); a navy
     (`0x009D3A80`) blockading a port of the other side (+0xE8 port-slot handle, the slot's +0x70 owner) lifts it,
     `LiftPortSlotBlockade` `0x00A784E0` (unlinks slot+0x68, clears the building's +0x1E8→+0x58 byte, price update,
     `0x00B084F0` on a docked navy's character, events, slot +0x74 = 0; see "Port blockades" under Trade). The siege
     call (`0x00A255C5`) comes before the blockade call (`0x00A25627`). Ours ends the siege (`end_siege_on_peace`,
     siegeattr; see "Siege ends") and then lifts the blockade (`lift_blockade_on_peace`, portblockade).
-    `0x00B084F0` stays untraced.
+    `0x00B084F0` is traced under "Port blockades" ("While it lasts").
   - Peace price updates (peaceprice 2026-10-20, CONFIRMED by disassembly of `0x00B262C0`, `0x00A25570`,
     `0x009DA140`, `0x008CEEB0`, `0x00BBD680`, `0x009D3A40`, `0x009D3A80`): `0x00B262C0`'s order is the two records
     (`0x00B26590`), the +0x390 event, the `0x00B0D0C0` loop, `0x00B795A0`(proposer), `0x00A25570`(target) on
@@ -6072,8 +6860,12 @@ systems the model lacks stay PROVISIONAL.
     `0x0087A190` also write it, `DestroyFactionAndResetRelations` `0x008AB6C0` clears it; `GetFactionPatron`
     `0x008E2A80` reads it. So "has a patron" is the model's `has_patron` (`0x00B4D9A0`, a record with
     stance 4). This settles destruction.rs ~128 (the patron reading) and negotiation.rs's war option
-    (`0x00C1A890`: with a patron, war only on the patron or on a faction the patron is at war with; not
-    modelled yet, BACKLOG). Ours: `CampaignCommand::MakeProtectorate` (`make_protectorate_command`, then the
+    (`0x00C1A890`: no war yet, and with a patron, war only on the patron or on a faction the patron is at
+    war with; ported, warcall 2026-11-10: `CampaignModel::war_option_possible`, read by the war record's
+    possible flag and by the AI's war decision through the snapshot's copy of the model's answers
+    (`AiWorld::war_options`; the exe's CAI asks it in its target filter `0x00D5C250`, at `0x00D5C3C4` /
+    `0x00D5C4BA`; `0x00CCCBF0` asks it only with a non-null third argument equal to its +0x108);
+    the declaration command itself has no patron rule, `0x00932B70`). Ours: `CampaignCommand::MakeProtectorate` (`make_protectorate_command`, then the
     existing `make_protectorate`) and `CampaignCommand::MoveArmiesOutOfRegions`
     (`move_armies_out_of_regions`, `expel_from_each_region_of` both ways); the script applies the three in
     the exe's order, their events queued for the host. The peace step sends `CampaignCommand::MakePeace`, which
@@ -6463,6 +7255,129 @@ Ours: `ntw_sim::campaign::destruction` (`capital_after_owner_change`, `end_if_ca
     `0x00AE8DD0`, `0x00AE8E10`; every vanilla save holds 1). Ours now loads and saves all four counters
     and starts `treaty_breaks` at 1 (§Diplomacy manager counters).
 
+## Region groups (worker regionvalue, 2026-10-23, fix round 2026-11-10, static trace, CONFIRMED unless tagged; code `ntw_sim::campaign::region_groups`)
+
+The inputs of the deal region worth `0x00AA1E90` (AI_RESEARCH.md §4 "Region worth") that were
+stand-ins, now read from the model:
+
+- **The `+0x12C` test is the CAI settlement, not a group.** The call at `0x00AA1ED2` reads the CAI
+  region's settlement pointer (`+0x12C`, getter `0x008CF5F0`); the jump at `0x00AA1F0A` tests the
+  group entry `0x00A75460` returned, which is null only when that pointer was null. `0x00A766C0`
+  makes one CAI settlement per land map area with a campaign
+  region, so every game region passes and the own branch is the owner test alone: region virtual
+  `+8` is `0x006CC990` (the `OWNED_DIRECT` slot), `arg == owner`. The null path cannot happen for a
+  game region (no fix needed; not an ORIGINAL BUG: nothing contradicts the data). `n` of the
+  compound factor is counted by `0x00A2C170` over the game region's list `+0x20` / `+0x24` (game
+  region = CAI region `+0x1A0`, `0x00C3C340`): the items whose `+0xF4` faction is the region's
+  owner's (`0x00898B20`), its neighbours the owner holds (`0x00C3FD10` is not that list: a
+  one-argument wrapper forwarding to an inner object's virtual `+8`, a test).
+- **The multipliers' personality.** `pAiContext` virtual `+0x1C` → X; X `+0x88` (`0x00B2B7B0`) → Y;
+  Y `+0x174` (`0x0047B710`) is the personality, Y `+4` (`0x00CEFB50` → `0x004B4A50`) the CAI faction
+  it serves, the evaluating AI (the deal's recipient). Both sides' worths use it. Slots: LOST
+  `+0x218`, REDUCED `+0x21C`, SPLIT `+0x220`, NEW `+0x224`, INCREASED `+0x228`, MERGED `+0x22C`.
+  PROVISIONAL (ours): a tunable neither the personality nor the default sets reads its shipped
+  value (`Multipliers::from_tunables`); where the exe gets a value for a row the table lacks is not
+  traced, and `capture_ai` reads 0 for such a row of the same table (the shipped table has every
+  row, so only a mod's table can differ). The personality lookup's own fallback for a missing or
+  unknown stored key is PROVISIONAL too (`AiPersonalities::resolve`). Code
+  `CampaignModel::ai_personality` (shared with `capture_ai`), `region_worth_context`.
+- **Groups** (builder `0x00A67A90` / `0x00A31680`, flood `0x00A68120`): connected components over
+  the CAI region boundaries (`+0x174`, other side `0x00C1BCE0`). A neighbour joins when it has the
+  same owner (virtual `+0xC`), that owner is not the rebels (`IsCaiFactionRebels`: each rebel region
+  is a group of its own), the same area type (`+0x190` → `+0xC`) and passes the land-mass test
+  `0x00C3D6E0`, and is not yet in a group. A group (belief type 0x51, vtable `0x01377904`) keeps
+  its members (count `+0x108`, data `+0x10C`: size `0x00A6FE10`, membership `0x00A71BC0`), its owner
+  (`+0x138`, `0x00A88770`) and its area type (`+0x13C`); a region's group is `0x00A753D0` (registry
+  lookup `0x00A87130`; it builds the groups when there are none and refreshes a dirty group).
+- **Land masses** (`0x00C3D6E0`): the two regions share an HLCI connectivity index (`+0x100`,
+  `0x0080DC60`), counting only HLCIs that pass `0x00C5C490`: one of their pieces is a map area whose
+  byte `+2` is set (`regions.esf` `areas[]` bool #2, read by `0x00A49C30`). The HLCIs are read by
+  `0x00BEDB50`; `0x00C47A00` resolves a piece to the map region's area of that index. Save path:
+  `CAI_WORLD_REGION_HLCIS[]`, each item's id its first plain value, `CAI_REGION_HLCI` #0 the region's
+  component, #1 the connectivity index, #2 the pieces (u32[]); `CAI_REGION` #1 lists its HLCI ids.
+  On the eur start (test `region_land_masses_on_the_europe_start`): the British Isles share index 3
+  (Ireland included), the mainland 4 (Sicily, Scandinavia included; Moscow also has 2), Balearics 0,
+  Sardinia 1, Corsica 5. Code: `AiArea::hlcis` (`ai_keys::read_ai_areas`), `World::region_land_masses`
+  (`trade::attach_land_masses` at map attach; empty when no CAI area has an HLCI, then every region
+  shares one; otherwise an entry per game region, an empty one for a region with no CAI area, map
+  region or passing HLCI, which then forms a group of its own; each such gap, an unreadable HLCI
+  record and a piece index past the map region's areas are each counted in one warning). Not saved
+  (rebuilt at every map attach); own saves keep the HLCIs from format version 15, an older save
+  takes them from the campaign's start by area key (`own_save::read_with_start`).
+- **Owner's change state** (`0x00A734B0`): the group is the region alone → LOST (2); two regions →
+  REDUCED (0); else the split test `0x00A73210` → SPLIT (1), otherwise REDUCED. The split test copies
+  the group less the region and floods (`0x00AA3DC0`) from the first boundary neighbour of the
+  region with its owner, removing each list member it reaches; only a removed member spreads, by
+  same-owner links, and it stops once the list is empty; SPLIT when anything is left. The start may
+  lie outside the group (a same-owner region on another land mass): nothing is removed and it reads
+  SPLIT (kept as the exe does it; a quirk, not shown to contradict any data, so not classed a bug).
+  The same update also writes a byte at the entry's `+0x101`: 1 for a group of two, else the result
+  of `0x00A73310(region, rest)`. UNKNOWN meaning; `0x00AA1E90` does not read it (not ported; the
+  composite analyser's port must check whether `0x00AB8BC0` does).
+- **Another faction's state** (`0x00AB6ED0` → `0x00A73660(F)`): the distinct groups (`0x00A753D0`)
+  of the region's neighbours outside its own group, of its area type, that F owns: none → NEW (5),
+  one → INCREASED (3), two or more → MERGED (4). A faction with no entry reads NEW (`0x00A634D0`).
+- **When the state is refreshed** (worker regionvaluefix, 2026-11-10, static trace). Ours computes
+  the groups from the current owners at every evaluation; the exe keeps the groups (belief 0x51) and
+  each region's entry (belief 0x52) and refreshes a dirty one before it is read. CONFIRMED:
+  - the dirty flag is the belief's byte `+0xF8` (`IsBeliefDirty` `0x00CF1170`, set by
+    `0x00D09730`); `0x00CB4480` returns the state dword `+0xF0` (2 exempts a belief from marking);
+  - `MarkBeliefDirty` `0x00CF0AB0` adds the source to the belief's dirty-source list (`+0x80` /
+    `+0x84`) and, when the belief was clean, sets the flag and has `0x00CF0B10` mark every
+    dependent (`+0xD0` / `+0xD4`);
+  - `0x00CB22F0(this, dep)` registers a dependency (`+0xBC` / `+0xC0`, present test `0x00CF0D00`;
+    `0x00CB22C0` the reverse link);
+  - the refresh `0x00CCCF60` → `0x00CCCF70` sets the updating byte `+0xFA`, clears the flag,
+    refreshes the dirty sources first, then calls the belief's own update (virtual `+0x24`);
+  - the accessor `0x00A75460` refreshes the region's entry when it is dirty, and the entry's update
+    `0x00AB6ED0` registers the entry as dependent on the region's own group and on each distinct
+    neighbour group;
+  - the group's constructor `0x00A31680` registers the group as dependent on each member's CAI
+    region node (CAI region `+8`); the group's own update `0x00AB6CE0` (vtable slot `+0x24` at
+    `0x01377928`) marks the groups' registry belief dirty and refreshes it when a member's current
+    owner (region virtual `+0xC`) differs from the group's, or a region of its list `+0x11C` /
+    `+0x120` now has the group's area type and owner; `0x00A753D0` and `0x00A78890` build the
+    groups when there are none and refresh each dirty one.
+
+  INFERRED: a change of a region's owner marks that CAI region's node dirty at once, so that an
+  evaluation later in the same turn reads the new groups, as ours does. The call that marks the
+  node was not found: the owner change `0x00B449F0` → `0x00A64AC0` was not traced to it, and these
+  were read without finding it: the handlers `0x00C4E450`, `0x00C4E490`, `0x00C4E4D0`, `0x00C4E530`,
+  `0x00C502C0`, `0x00C50300`, `0x00C50350` (another CAI object), `0x00A666A0`, `0x00A66950`,
+  `0x00A66CD0`, `0x00A66DA0` (state-2 handlers), `0x00BCED30` (a virtual of about 28 CAI vtables
+  forwarding to `0x00CF0B10(this, this)`; its wrapper `0x00BC7830` counts at `+0xFC`, called from
+  `0x00BC7010` ← `0x008A9920`) and the state setter `0x00D0A0F0`. If the node is only marked at a
+  later point (e.g. the turn start), a region deal valued in the turn of a capture or handover
+  reads the old state in the exe and the new one in ours. Check: side by side, take or receive a
+  region, then propose a region deal in the same turn and compare the AI's answer.
+
+Stale parts of the BACKLOG line: the `grant_technology` requirement walk (`research.rs`,
+`0x008CDCB0`) and the capital loss path (`0x008BA580` / `0x008DABC0`, "Destruction and
+re-emergence" above, `destruction.rs`) were already traced; `destruction.rs` keeps its own
+INFERRED items (which slots go back, the garrison sort key). Left over: `ntw_ai`'s composite
+value analyser (`0x00AB8BC0`, `region_value::Composite`) still passes NEW for its group state and
+could call `RegionGroups::change`; `ntw_ai`'s `AiWorld::region_groups` (nearest-settlements
+adjacency, used by the REGION_GROUP_DEFENCE goals) is a second, PROVISIONAL rule for the same
+groups, to be replaced by `RegionGroups`; the `+0x1C0` list and several theatres stay PROVISIONAL.
+
+Re-read in the fix round and as stated: `0x006CC990` (argument equals the dword at `+4`),
+`0x00C3D6E0` (true when a passing HLCI of this region's list `+0x124` / `+0x128` and one of the
+other's have the same `0x0080DC60` value; false for a region with no passing HLCI, as our empty
+entry), `0x00C5C490` (an item of the HLCI's list `+0x10C` / `+0x110` has byte `+2` set),
+`0x00A6FE10`, `0x00A71BC0`, `0x00A753D0`, `0x00A88770`. `0x00A766C0` was read in shape only: its
+per-area loop takes the map areas with byte `+0x34` set, a null `+0xC` and a campaign region
+(`0x00AA1260`), and it ends by asking for the group (`0x00A753D0`) of the last CAI region with a
+settlement, which builds the groups; the settlement field's write was not followed. Also re-read:
+`0x0080DC60` (returns the HLCI's dword `+0x100`), `0x00A49C30` (the map area's loader: its first
+three bytes `+0`, `+1`, `+2` are the area's three flags in file order, then `faces` and
+`outlines`), `0x00CEFB50` → `0x004B4A50` (the dword `+4` of the object at `+0x88`) and
+`0x00C47A00`: it replaces each piece index of the HLCI's list (`+0x10C` / `+0x110`) by the area
+of the HLCI's region (`+0xFC`; areas at `0x00C3C350` `+0x2C` / `+0x30`), and stops and returns
+false at an index past the region's areas or a null area. What its caller does with a failed
+resolve was not read; ours leaves such a piece out and counts it in a warning. Not re-read (as the first trace left them): region virtual `+4`, the rebels as groups of one
+in the builder, the HLCI loader `0x00BEDB50` (which ESF field lands in `+0x100`), and where a
+tunable the table lacks gets its value.
+
 ## Resolved / open
 | question | answer | tag | code |
 |---|---|---|---|
@@ -6476,7 +7391,7 @@ Ours: `ntw_sim::campaign::destruction` (`capital_after_owner_change`, `end_if_ca
 | GDP / town wealth growth recomputation | above; all 238 start-position regions reproduced | CONFIRMED (slots_gdp_values, chain mods, commodities not modelled) | `economy::recompute_region` |
 | Town wealth growth per turn | `max(0, tw + growth)` | CONFIRMED | `settle_round` |
 | Other income: major-power flag | `FACTION` bool before `CHARACTER_ARRAY` (+0x524) | CONFIRMED (83 factions in 7 startpos) | `FactionDetails::major` |
-| Trade income | routes: GDP + commodity (Σ volume × price, prices #4) + accumulated, 0 when blockaded; spa_france home sales; supply from trade fleets at nodes (0x00BC9930) | CONFIRMED (83/83 start-position factions exact; node supply 7/7); re-spread, new-route candidate set and blockade radius PROVISIONAL; prices not moved | `economy::trade_routes_value`, `campaign::trade` |
+| Trade income | routes: GDP + commodity (Σ volume × price, prices #4) + accumulated, 0 when blockaded; spa_france home sales; supply from trade fleets at nodes (0x00BC9930) | CONFIRMED (83/83 start-position factions exact; node supply 7/7); re-spread, new-route candidate set, blockade radius and the split's capital test on loaded domestic routes (stand-in after a capital move, `domestic_route_counts`) PROVISIONAL; prices not moved | `economy::trade_routes_value`, `campaign::trade` |
 | Bankruptcy | treasury 0, counter (saved as `FACTION_ECONOMICS` #3), capital growth offset, desertion | CONFIRMED (desertion gate +0x50C PROVISIONAL; prestige and payment cancellation not modelled) | `economy::settle_round`, `bankrupt_desertion`, `World::bankrupt_turns` |
 | AP bonus: who qualifies | everything in an army or navy (force type 0/1), any commander kind | CONFIRMED (mapping to character AP INFERRED) | `turn::force_action_point_factor` |
 | Upkeep / recruitment cost modifiers | spec above | CONFIRMED formula; effects 0 | `economy::faction_upkeep` (plain sum) |

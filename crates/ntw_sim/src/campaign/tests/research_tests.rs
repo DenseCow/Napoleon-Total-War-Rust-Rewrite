@@ -149,4 +149,28 @@ fn the_research_rate_reads_the_technology_thread() {
     m.world.regions.get_mut(&RegionId(10)).unwrap().slots[0].id = 77;
     let rate = |t: &str| m.research_rate(RegionId(10), 0, t);
     assert_eq!((rate("eco_t"), rate("admin_t"), rate("none_t")), (15.0, 10.0, 10.0));
+    assert_eq!(rate("not_in_the_rules"), 10.0, "a technology the rules lack has no thread");
+}
+
+/// The two tests of the availability rule as a tool reads them: the same answers the update acts on.
+#[test]
+fn the_availability_tests_are_the_updates_own() {
+    let mut m = tech_model();
+    let mut rules = (*m.rules).clone();
+    rules.technologies.get_mut("eco_t").unwrap().requires = vec!["admin_t".into()];
+    m.rules = Arc::new(rules);
+    m.world.faction_details.entry(A).or_default().technologies = vec![("admin_t".into(), state::UNAVAILABLE), ("eco_t".into(), state::UNAVAILABLE)];
+    build(&mut m, 0, "admin_0");
+    build(&mut m, 1, "factory_1");
+    assert_eq!(m.tech_availability_tests(A, "admin_t"), Some((true, false)), "level 0 is too low");
+    assert_eq!(m.tech_availability_tests(A, "eco_t"), Some((false, true)), "its requirement is not researched");
+    assert_eq!(m.tech_availability_tests(B, "eco_t"), Some((false, false)), "B holds no building");
+    assert_eq!(m.tech_availability_tests(A, "lost_t"), None, "no known building level");
+    assert_eq!(m.tech_availability_tests(A, "not_in_the_rules"), None);
+    m.update_tech_availability(A);
+    assert_eq!((m.tech_state(A, "admin_t"), m.tech_state(A, "eco_t")), (Some(state::UNAVAILABLE), Some(state::UNAVAILABLE)));
+    build(&mut m, 0, "admin_1");
+    assert_eq!(m.tech_availability_tests(A, "admin_t"), Some((true, true)));
+    m.update_tech_availability(A);
+    assert_eq!(m.tech_state(A, "admin_t"), Some(state::AVAILABLE));
 }

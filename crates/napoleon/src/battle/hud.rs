@@ -20,7 +20,7 @@ use ntw_formats::loc::Localisation;
 use ntw_formats::pack::Vfs;
 use ntw_script::ScriptSource;
 use ntw_script::ui::battle::{self as ui_battle, BattleHudFacts, BattleUiRequest, HudPhase, HudSideResult, HudUnit};
-use ntw_script::ui::{FrontEndFacts, NodeId, PointerEvent, UiScriptHost};
+use ntw_script::ui::{FrameKeys, FrontEndFacts, NodeId, PointerEvent, ShortcutMachine, UiScriptHost};
 use ntw_sim::battle::morale::{MoraleBehaviour, MoraleState};
 use ntw_sim::battle::orders::MoveSpeed;
 use ntw_sim::battle::speed::BattleSpeed;
@@ -59,6 +59,8 @@ pub struct BattleHud {
     loc: Localisation,
     /// The per-frame steps whose error was logged.
     frame_errors: FrameErrors,
+    /// The battle mode's bindings of `text/default_keys.xml` and their state ([`keys`]).
+    shortcuts: ShortcutMachine,
 }
 
 /// The per-frame HUD steps (model → HUD). A step that fails fails every frame, so each logs its
@@ -160,6 +162,7 @@ pub fn enter(world: &mut World) {
         .and_then(|s| s.battle_key.clone())
         .and_then(|k| loc.get(&format!("battles_localised_name_{k}")).map(str::to_owned))
         .unwrap_or_default();
+    let shortcuts = crate::shortcut_keys::mode_shortcuts(&vfs, "battle");
     let mut hud = BattleHud {
         host,
         screen,
@@ -176,6 +179,7 @@ pub fn enter(world: &mut World) {
         battle_name,
         loc,
         frame_errors: FrameErrors::default(),
+        shortcuts,
     };
     if let Some(sim) = world.get_resource::<BattleSim>()
         && let Err(e) = write_facts(&mut hud, sim, &world.resource::<GameData>().db)
@@ -369,6 +373,34 @@ fn write_facts(hud: &mut BattleHud, sim: &BattleSim, db: &ntw_data::GameDatabase
     result
 }
 
+/// Every frame, before [`frame`]: the battle mode's keyboard shortcuts of `text/default_keys.xml`
+/// ([`ui_battle::keys`]) on the keys down at the frame's end. A HUD binding calls its component's
+/// `OnShortcut` (root.lua's `escape_menu`, P `toggle_pause`, CTRL+T `cycle_battle_speed`, T
+/// `fire_at_will_toggle`, R `battle_land_toggle_run`, ...), whose `BattleUI.*` requests [`frame`]
+/// applies the same frame; a camera binding goes to [`super::view::CameraKeys`]; a key a component
+/// stole goes to its `OnKey`. The press time is the real frame time capped at 0.3 s
+/// ([`crate::shortcut_keys::MAX_FRAME_TIME`]). Harness runs ignore the keyboard.
+pub fn keys(
+    hud: Option<NonSendMut<BattleHud>>,
+    held: Res<ButtonInput<KeyCode>>,
+    time: Res<Time<Real>>,
+    harness: Option<Res<crate::frontend::AutoScreenshot>>,
+    mut camera: ResMut<super::view::CameraKeys>,
+    mut buf: Local<(crate::shortcut_keys::KeysDown, Vec<&'static str>)>,
+) {
+    let Some(mut hud) = hud else { return };
+    if harness.is_some() || super::view::camera_harness_run() || ai_shot_run() {
+        return;
+    }
+    let (down, names) = &mut *buf;
+    down.rewind(held.get_pressed().copied(), &[]);
+    down.names_into(names);
+    let keys = FrameKeys { down: names.as_slice(), held: down.modifiers(), time: time.delta_secs().min(crate::shortcut_keys::MAX_FRAME_TIME) };
+    let hud = &mut *hud;
+    ui_battle::keys(&hud.host, &mut hud.shortcuts, keys, &mut |func, t| camera.press(func, t));
+    log_errors(&hud.host);
+}
+
 /// Every frame: model → HUD, phase popups, pointer → HUD, HUD requests → model.
 #[allow(clippy::too_many_arguments)]
 pub fn frame(
@@ -488,12 +520,6 @@ pub fn frame(
     }
     pointer.over = over;
     pointer.panels.clone_from(&hud.panels);
-    // Keys the scripts stole (ESCAPE opens the battle's escape menu, RETURN confirms).
-    for (k, name) in [(KeyCode::Escape, "ESCAPE"), (KeyCode::Enter, "RETURN")] {
-        if keys.just_released(k) {
-            hud.host.key(name);
-        }
-    }
     log_errors(&hud.host);
     // HUD → model.
     let requests = ui_battle::take_requests(&hud.host).unwrap_or_else(|e| {

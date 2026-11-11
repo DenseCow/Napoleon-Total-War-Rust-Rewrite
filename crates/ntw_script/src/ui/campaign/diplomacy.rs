@@ -890,7 +890,9 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
     // (the reader takes the top of the stack, so its first read is `b`), looks both up in the
     // registry (`0x00955B70`) and queues CCQ_DECLARE_WAR (a, b), with no at-war, turn or human test;
     // the model's command (`CampaignModel::declare_war_command`) does the rest and refuses a war
-    // already declared (its ORIGINAL BUG note). No shipped UI script calls it.
+    // already declared and a declaration whose ally war call still waits (`WarCallWaiting`; its
+    // ORIGINAL BUG notes), and the host logs each refusal once (`napoleon` `CampaignSim::command`).
+    // No shipped UI script calls it.
     // ORIGINAL BUG: the exe has no null test, so an unknown key reaches the command's payload writer
     // (`0x00953CA0`) as a null faction, which reads its +0x824 and crashes. Ours queues nothing and
     // logs it once per pair; a wrong-typed or missing argument is logged by `faction_key_args`.

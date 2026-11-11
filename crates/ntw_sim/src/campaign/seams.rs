@@ -18,8 +18,8 @@
 //!   ([`super::director::director_desires`]).
 //! - [`PROPOSED_PAYMENT`]: the cap on a payment a deal proposes ([`super::treaties::proposed_payment`]).
 //! - [`CONSTRUCTION_STEP`]: one round of a region's construction item ([`super::turn::construction_step`]).
-//! - [`REGION_EXPULSION`]: which of a faction's forces leave a region, and where to
-//!   ([`super::expulsion::expel_faction_from_region`]).
+//! - [`REGION_EXPULSION`]: which of a faction's forces leaves a region next, and where to
+//!   ([`super::expulsion::next_expelled_force`]).
 //! - [`TRADE_ROUTE_CHECK`]: whether one faction can send a trade route to another
 //!   ([`super::trade_check::trade_route_check`]).
 //! - [`RAID_TAKE`]: what a commerce raid takes from one trade route ([`super::commerce_raid::raid_take`]).
@@ -29,6 +29,10 @@
 //! - [`CHARACTER_RANK`]: a character's rank, his command stars ([`super::agents::rank_original`]).
 //! - [`CAPTURE_AI_CHOICE`]: an AI faction's loot / occupy / liberate choice after it takes a settlement
 //!   ([`super::capture_ai::capture_choice_original`]).
+//! - [`PORT_ARRIVAL`]: whether a navy arriving at a hostile port docks there or blockades it
+//!   ([`super::port_blockade::port_arrival`]).
+//! - [`VICTORY_STATE`]: whether a human faction has won or lost by its victory conditions
+//!   ([`super::outcome::victory_state_original`]).
 
 use std::sync::Arc;
 
@@ -37,11 +41,12 @@ use super::commerce_raid::OwnedRoute;
 use super::director::DirectorState;
 use super::events::CampaignEvent;
 use super::expulsion::ExpelledForce;
-use super::effects::EffectSet;
-use super::ids::{CharacterId, FactionId, RegionId};
+use super::effects::OwnEffects;
+use super::ids::{CharacterId, FactionId, ForceId, RegionId};
 use super::mod_state::ModWrites;
-use super::outcome::{CampaignOutcome, OutcomeMovie};
+use super::outcome::{CampaignOutcome, OutcomeMovie, VictoryState};
 use super::population::{ClassWarEvent, PopulationState};
+use super::port_blockade::PortArrival;
 use super::turn::ConstructionStep;
 use super::world::{CampaignModel, ConstructionItem, PopulationClassState, Region};
 use crate::rng::CaRng;
@@ -79,6 +84,10 @@ pub const SIEGE_ATTRITION: &str = "siege.attrition";
 pub const CHARACTER_RANK: &str = "character.rank";
 /// Seam key of an AI faction's choice after it takes a settlement ([`CaptureAiChoice`]).
 pub const CAPTURE_AI_CHOICE: &str = "capture.ai_choice";
+/// Seam key of what a navy does when it arrives at a hostile port ([`PortArrivalRule`]).
+pub const PORT_ARRIVAL: &str = "port.arrival";
+/// Seam key of a human faction's state by its victory conditions ([`VictoryStateRule`]).
+pub const VICTORY_STATE: &str = "campaign.victory_state";
 
 /// A region's population after one round of growth: given the model, the region, its population
 /// and its population state, the new population and state. The original's is
@@ -119,13 +128,15 @@ pub type ProposedPayment = dyn Fn(&CampaignModel, FactionId, i32, u32) -> i32 + 
 /// the result before the next slot steps (`construction_round_end`). The original's is
 /// [`super::turn::construction_step`]. Its mod-state changes go to the [`ModWrites`].
 pub type ConstructionStepRule = dyn Fn(&CampaignModel, &Region, &ConstructionItem, &mut ModWrites) -> ConstructionStep + Send + Sync;
-/// Which of a faction's forces leave a region, and where they go: given the model, the faction and the
-/// region, the forces to move ([`ExpelledForce`]); the model applies the plan
-/// ([`CampaignModel::expel_from_region`]: an army leaves its residence, a navy its port, each placed
-/// commander moves). Called at every change of a region's owner, for an accepted deal's region lists
-/// and at the end of a protectorate tie. The original's is
-/// [`super::expulsion::expel_faction_from_region`]. Its mod-state changes go to the [`ModWrites`].
-pub type RegionExpulsion = dyn Fn(&CampaignModel, FactionId, RegionId, &mut ModWrites) -> Vec<ExpelledForce> + Send + Sync;
+/// Which of a faction's forces leaves a region next, and where it goes: given the model, the faction,
+/// the region and the forces this expulsion has handled so far (in order), the next force to move
+/// ([`ExpelledForce`]), or `None` when the expulsion is over. The model applies the move before it asks
+/// again ([`CampaignModel::expel_from_region`]: an army leaves its residence, a navy its port, a placed
+/// commander moves), so each force is placed on the map as the moves before it left it; a force named
+/// a second time ends the expulsion. Called at every change of a region's owner, for an accepted deal's
+/// region lists, at the end of a protectorate tie and at every loss of military access. The original's
+/// is [`super::expulsion::next_expelled_force`]. Its mod-state changes go to the [`ModWrites`].
+pub type RegionExpulsion = dyn Fn(&CampaignModel, FactionId, RegionId, &[ForceId], &mut ModWrites) -> Option<ExpelledForce> + Send + Sync;
 /// Whether faction `a` can send a trade route to faction `b`: 0 when it cannot, else the kind of route
 /// (the codes of [`super::trade_check::trade_route_check`], the original's). A route through a region that
 /// changes hands is dropped, and a pair that fails it either way loses its agreement. A query: it changes no
@@ -152,17 +163,29 @@ pub type OutcomeMovieRule = dyn Fn(&CampaignModel, FactionId, CampaignOutcome) -
 /// [`super::siege::siege_attrition`]. Its mod-state changes go to the [`ModWrites`].
 pub type SiegeAttrition = dyn Fn(&mut CampaignModel, RegionId, &mut ModWrites) -> Vec<CampaignEvent> + Send + Sync;
 /// A character's rank, his command stars: given the model, the character, his own effect set (traits and
-/// ancillaries) and whether to include his faction's effects (false when the faction's own set asks, for its
+/// ancillaries; [`OwnEffects`] reads as the set and builds it only when read) and whether to include his
+/// faction's effects (false when the faction's own set asks, for its
 /// ministers' levels), the rank. Every reader calls it: agent actions, hiring costs, the ministerial levels,
 /// conversion and the character panel. The original's is [`super::agents::rank_original`]. A query: it changes
 /// no state.
-pub type CharacterRank = dyn Fn(&CampaignModel, CharacterId, &EffectSet, bool) -> i32 + Send + Sync;
+pub type CharacterRank = dyn Fn(&CampaignModel, CharacterId, &OwnEffects<'_>, bool) -> i32 + Send + Sync;
 /// An AI faction's choice after it takes a settlement by force: given the model (it may change state: the
 /// RNG), the capture preview (the region, the capturer and the options the screen would show) and the
 /// settlement's owner before the capture, loot, occupy or liberate; the model then applies the choice
 /// ([`CampaignModel::resolve_capture`]). The original's is [`super::capture_ai::capture_choice_original`].
 /// Its mod-state changes go to the [`ModWrites`].
 pub type CaptureAiChoice = dyn Fn(&mut CampaignModel, &CapturePreview, Option<FactionId>, &mut ModWrites) -> CaptureChoice + Send + Sync;
+/// What a navy does when its order onto a port of a faction it is at war with arrives: given the model, the
+/// navy, the port's region and its slot index, it docks there or blockades the port ([`PortArrival`]); the
+/// model then carries it out ([`CampaignModel::port_order`]). Asked once, when the order is given, so the
+/// navy's route can end outside a port it will blockade. The original's is
+/// [`super::port_blockade::port_arrival`]. A query: it changes no state.
+pub type PortArrivalRule = dyn Fn(&CampaignModel, ForceId, RegionId, usize) -> PortArrival + Send + Sync;
+/// Whether a human faction has won or lost by its victory conditions ([`VictoryState`]): given the model
+/// and the faction. The victory check ([`CampaignModel::victory_check`]) asks it for each human faction
+/// where an update ends, until the check is done. The original's is
+/// [`super::outcome::victory_state_original`]. A query: it changes no state.
+pub type VictoryStateRule = dyn Fn(&CampaignModel, FactionId) -> VictoryState + Send + Sync;
 
 /// The campaign rules in use, one field per seam (see the module docs).
 #[derive(Clone, Debug, PartialEq)]
@@ -197,6 +220,10 @@ pub struct CampaignSeams {
     pub character_rank: Seam<CharacterRank>,
     /// [`CAPTURE_AI_CHOICE`].
     pub capture_ai_choice: Seam<CaptureAiChoice>,
+    /// [`PORT_ARRIVAL`].
+    pub port_arrival: Seam<PortArrivalRule>,
+    /// [`VICTORY_STATE`].
+    pub victory_state: Seam<VictoryStateRule>,
 }
 
 impl Default for CampaignSeams {
@@ -214,7 +241,9 @@ impl Default for CampaignSeams {
             director_desires: Seam::original(Arc::new(|m: &mut CampaignModel, w: &mut ModWrites| super::director::director_desires(m, w))),
             proposed_payment: Seam::original(Arc::new(super::treaties::proposed_payment)),
             construction_step: Seam::original(Arc::new(|m: &CampaignModel, r: &Region, i: &ConstructionItem, _: &mut ModWrites| super::turn::construction_step(m, r, i))),
-            region_expulsion: Seam::original(Arc::new(|m: &CampaignModel, f: FactionId, r: RegionId, _: &mut ModWrites| super::expulsion::expel_faction_from_region(m, f, r))),
+            region_expulsion: Seam::original(Arc::new(|m: &CampaignModel, f: FactionId, r: RegionId, done: &[ForceId], _: &mut ModWrites| {
+                super::expulsion::next_expelled_force(m, f, r, done)
+            })),
             trade_route_check: Seam::original(Arc::new(super::trade_check::trade_route_check)),
             raid_take: Seam::original(Arc::new(super::commerce_raid::raid_take)),
             historical_events: Seam::original(Arc::new(super::historical_events::historical_events)),
@@ -224,6 +253,8 @@ impl Default for CampaignSeams {
             capture_ai_choice: Seam::original(Arc::new(|m: &mut CampaignModel, p: &CapturePreview, prev: Option<FactionId>, _: &mut ModWrites| {
                 super::capture_ai::capture_choice_original(m, p, prev)
             })),
+            port_arrival: Seam::original(Arc::new(super::port_blockade::port_arrival)),
+            victory_state: Seam::original(Arc::new(super::outcome::victory_state_original)),
         }
     }
 }
@@ -231,7 +262,7 @@ impl Default for CampaignSeams {
 impl CampaignSeams {
     /// Every seam's key and implementation chain, in a fixed order (for the multiplayer handshake
     /// and the log).
-    pub fn chains(&self) -> [(&'static str, &[String]); 15] {
+    pub fn chains(&self) -> [(&'static str, &[String]); 17] {
         [
             (POPULATION_GROW, self.population_grow.chain()),
             (POPULATION_CLASS_ROUND, self.population_class_round.chain()),
@@ -248,6 +279,8 @@ impl CampaignSeams {
             (SIEGE_ATTRITION, self.siege_attrition.chain()),
             (CHARACTER_RANK, self.character_rank.chain()),
             (CAPTURE_AI_CHOICE, self.capture_ai_choice.chain()),
+            (PORT_ARRIVAL, self.port_arrival.chain()),
+            (VICTORY_STATE, self.victory_state.chain()),
         ]
     }
 }
@@ -287,6 +320,10 @@ pub struct CampaignRuleRegistry {
     pub character_rank: SeamRegistry<CharacterRank>,
     /// [`CAPTURE_AI_CHOICE`] implementations.
     pub capture_ai_choice: SeamRegistry<CaptureAiChoice>,
+    /// [`PORT_ARRIVAL`] implementations.
+    pub port_arrival: SeamRegistry<PortArrivalRule>,
+    /// [`VICTORY_STATE`] implementations.
+    pub victory_state: SeamRegistry<VictoryStateRule>,
 }
 
 impl CampaignRuleRegistry {
@@ -312,6 +349,8 @@ impl CampaignRuleRegistry {
                 SIEGE_ATTRITION => self.siege_attrition.apply(&mut seams.siege_attrition, key),
                 CHARACTER_RANK => self.character_rank.apply(&mut seams.character_rank, key),
                 CAPTURE_AI_CHOICE => self.capture_ai_choice.apply(&mut seams.capture_ai_choice, key),
+                PORT_ARRIVAL => self.port_arrival.apply(&mut seams.port_arrival, key),
+                VICTORY_STATE => self.victory_state.apply(&mut seams.victory_state, key),
                 _ => {
                     warnings.push(format!("rule seam {seam}: no such seam; {key} is ignored"));
                     continue;
@@ -398,6 +437,8 @@ mod tests {
                 (SIEGE_ATTRITION, &original[..]),
                 (CHARACTER_RANK, &original[..]),
                 (CAPTURE_AI_CHOICE, &original[..]),
+                (PORT_ARRIVAL, &original[..]),
+                (VICTORY_STATE, &original[..]),
             ]
         );
         // The round end through the seam gives exactly what the original's function gives.

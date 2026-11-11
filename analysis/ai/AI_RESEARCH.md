@@ -793,10 +793,23 @@ counter, `+0x646` deploying, `+0x647` first update done, `+0x648` deployed.
     = **25** in `default`, so `mult = 25 − 24 × value / mean`: the most valuable targets get the
     lowest (even negative) priorities. INFERRED: a data quirk (the name says proportion, 0..1);
     how negative priorities are handled downstream is UNKNOWN. Total = integer sum (1 when 0).
-    Candidates (`0x00D90A60`): the target analyser `0x00A88780` lists objects whose `+0x138` is
-    our faction and not flagged `+0xF8`; each gets value `+0xFC` of analyser 0x57 (vtable
-    `0x01378664`, `0x00AB9280`) = the sum over a region list (`0x00A88A60`, INFERRED the region
-    group) of analyser 0x56 values.
+    Candidates (`0x00D90A60`): the candidate list `0x00A88780` gives the CAI region groups
+    (belief 0x51; change state on the region's belief 0x52) whose owner (`0x00A88770`, group
+    `+0x138`) is our faction; a dirty one (`+0xF8`, `0x00CF1170`) is refreshed first (`0x00CCCF60`)
+    and the collection starts again. Each gets value `+0xFC` of analyser 0x57 (vtable
+    `0x01378664`, `0x00AB9280`) = the sum over the group's member list (`0x00A88A60` returns the
+    list at group `+0xFC`: count `+0x108`, data `+0x10C`, the members the constructor `0x00A31680`
+    stores) of analyser 0x56 values. **CONFIRMED (2026-11-10) that the candidates are the region
+    groups:** `0x00A88780` walks the belief list (count `+0x124`, data `+0x128`) of the registry it
+    is called on; a belief enters that list in the registry's register step `0x00A614A0`; the group
+    builder `0x00A67A90` calls that step on its own registry for each member of each group it
+    constructs (call at `0x00A67D72`); the group pass `0x00A78890` runs the builder exactly when
+    that list's count `+0x124` is 0 and then walks the same list; and the group lookup
+    `0x00A753D0`, which runs the builder on a miss, is called on the registry from the same
+    accessor `0x00CBBAB0` as the candidate list (`0x00A80C66`, `0x00D6AA30`; candidates in
+    `0x00D90A60`, accessor call at `0x00D90AD1`). The belief 0x52 entries (`0x00A75460`) and the
+    analysers are fetched on other registries (`0x00CBBAC0`, `0x00CBBA90`). Not checked: the other
+    callers of `0x00A614A0` (110 code references, every belief fetch registers through it).
   - Region value analyser 0x56 (vtable `0x01378630`, update `0x00AB8BC0`), **decoded round 5
     (CONFIRMED)**. Base `v` = `+0xFC` of belief **0x4D** (`0x00A75560(region)`, ctor `0x00A40DF0`,
     vtable `0x013780BC`, update slot 9 `0x00ABD5E0`): with `S` = region `+0x1A0` (INFERRED the
@@ -1095,8 +1108,9 @@ counter, `+0x646` deploying, `+0x647` first update done, `+0x648` deployed.
   - **EXPANSION_BEHAVIOUR's targets are its own region groups** (correction of round 4): its step
     `0x00D65650` creates **`CAI_BDI_GOAL_REGION_GROUP_DEFENCE`** goals (0x124 bytes, vtable
     `0x01378800`, type id 0xD8; record name from its save `0x00D448E0`), one per candidate, where
-    the candidates (`0x00A88780`) are pool beliefs whose `+0x138` is the faction (INFERRED: the
-    faction's region groups; value = Σ of their regions' 0x56 values). The goal (slot 3
+    the candidates (`0x00A88780`) are the faction's CAI region groups (belief 0x51, owner `+0x138`
+    read by `0x00A88770`; CONFIRMED, the chain is under "Candidates" in the EXPANSION entry above;
+    value = Σ of their member regions' 0x56 values, `0x00AB9280`). The goal (slot 3
     `0x00D7E2D0`) makes a request object (`0x00C93480`, 0x154 bytes, vtable `0x0138910C`, type 7)
     and its deliberation (slot 12 `0x00D6A2E0`) links that object to targets from three lists
     through the mission factory `0x00CEEB00` (a switch over 11+ mission kinds, not decoded) and,
@@ -1191,13 +1205,20 @@ deal-region, 2026-10-10, below "Region value").
   `0x00AA1E90(region, recipient)`. CONFIRMED (disassembly).
 - **Region worth `0x00AA1E90(region, faction)`** (CONFIRMED, disassembly): the base is belief 0x4D's
   stored value (`0x00A75560`; the startpos value, else the GDP formula: `region_value::stored_or_formula`).
-  Own branch (the region belongs to a region group, CAI region `+0x12C` non-null, so its group
-  belief 0x52 `0x00A75460` exists, test at `0x00AA1F0A`; and the region's virtual `+8(faction)`
-  holds, the owner check; otherwise the other branch): group state SPLIT → × the compound
+  Own branch (the region has a group entry: the call at `0x00AA1ED2` reads the CAI region's
+  settlement `+0x12C` with `0x008CF5F0`, and the jump at `0x00AA1F0A` tests the entry `0x00A75460`
+  returned, null only without a settlement; true for
+  every game region since `0x00A766C0` makes one per land map area with a campaign region; and the
+  region's virtual `+8(faction)`, `0x006CC990`, is the owner test; otherwise the other branch): group state SPLIT → × the compound
   factor (SPLIT, SPLIT, n); other branch: MERGED → compound (MERGED, REDUCED, n); n = the region's
-  neighbours (`0x00C3FD10`) its owner holds; other states leave the base. The group state comes
-  from `0x00A634D0` (belief 0x52's region-group analysis, via `0x00A63FD0`); the multipliers are
-  the personality's `COMPOSITE_VALUE_ANALYSER_*` slots (virtuals `+0x21C` / `+0x220`). Then ×2 when,
+  neighbours its owner holds (`0x00A2C170` over the game region's list `+0x20` / `+0x24`, game
+  region = CAI region `+0x1A0`, `0x00C3C340`: the items whose `+0xF4` faction is the owner's,
+  `0x00898B20`); other states leave the base. The group state comes
+  from `0x00A634D0` (belief 0x52's region-group analysis, via `0x00A63FD0`; CAMPAIGN_FIDELITY.md
+  "Region groups"); the multipliers are the evaluating AI's personality's
+  `COMPOSITE_VALUE_ANALYSER_*` slots (virtuals `+0x21C` / `+0x220`; the personality is `pAiContext`
+  virtual `+0x1C` → `+0x88` (`0x00B2B7B0`) → `+0x174` (`0x0047B710`), the faction AI whose CAI
+  faction (`+4`, `0x00CEFB50` → `0x004B4A50`) is the deal's recipient, for both sides' worths). Then ×2 when,
   own branch, the faction holds exactly one region of the region's theatre, other branch, none
   (`0x00C40570` / `0x00C3E120` / `0x00C43AD0`); ×2 when the region is in the faction's CAI list
   `+0x1C0` (`0x00C45CF0`); ×1.5 (`v + (v >> 1)`, unsigned) when the region has building slots
@@ -1210,9 +1231,8 @@ deal-region, 2026-10-10, below "Region value").
   `deal_goal_allowed(ai, proposer, 4)`). Accepting a deal counts each region a human receives
   (`World::deal_regions_received`). Tests `the_ai_evaluates_region_deals`,
   `the_ai_evaluates_regions_and_technologies_together`, and `region_deals_on_the_europe_start`
-  (economy_fidelity, real data). PROVISIONAL inputs: the `+0x22C` and siege tests read false; every region is taken to have a group (`+0x12C`, region groups not
-  in the model); a peace item in the deal sets `m` = 0 (see "Peace record" below); the group state is
-  always NEW (belief 0x52 not ported), so the SPLIT / MERGED factors are not reached; the `+0x1C0` list reads
+  (economy_fidelity, real data). PROVISIONAL inputs: the `+0x22C` and siege tests read false; a peace item in the deal sets `m` = 0
+  (see "Peace record" below); the `+0x1C0` list reads
   false (not imported); several theatres count as one; `+0x938` is not read from original saves
   (its `FACTION` child index is not found); the base value is the startpos one (its refresh,
   settlement `+0xE8`, is not traced).
@@ -1696,11 +1716,10 @@ sub-move objects are not decoded), DOUBLE_ENVELOPMENT's geometry.
    `0x00CD6260` (faction list `+0x14C`, item `+0x100→+0x4C/+0x50`); EXPANSION's spawned
    component (id 0x175, vtable `0x0138BCFC`, step `0x00CD5A50`); GLOBAL_CONSTRUCTION's real
    source of construction desires; the children of REGION_DEFENCE's desire (`0x01378770`) and of
-   RECRUIT_STRENGTH_IN_REGION; the mission factory `0x00CEEB00` (kinds); the region-group
-   beliefs (`0x00A88780`, `+0x138`); the pool budget `+0x7C` and who calls pool slots 10 / 11;
-   the recruitment budgets (analyser `+0x60`, `0x00BBE910`, `0x00AAF5D0`); the settlement fields
-   `+0xBC/+0xCC/+0xE8` of the base value; the counts `+0x104→+0x40/+0x44/+0x48`; `0x00898B20`,
-   `0x009749B0`, the +5000 lists.
+   RECRUIT_STRENGTH_IN_REGION; the mission factory `0x00CEEB00` (kinds); the pool budget `+0x7C`
+   and who calls pool slots 10 / 11; the recruitment budgets (analyser `+0x60`, `0x00BBE910`,
+   `0x00AAF5D0`); the settlement fields `+0xBC/+0xCC/+0xE8` of the base value; the counts
+   `+0x104→+0x40/+0x44/+0x48`; `0x00898B20`, `0x009749B0`, the +5000 lists.
 7. Difficulty: the campaign setup's `+0x3C/+0x40` values for AI factions (player value or its
    negation; the prefs are read by name, no reader reached); the writer of the battle army's
    `+0x234` level. RESOLVED round 5: the battle consumer `0x006AD6E0` and the UI index mapping

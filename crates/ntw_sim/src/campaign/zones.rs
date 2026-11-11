@@ -279,11 +279,13 @@ impl CampaignModel {
     }
 
     /// The commanders `faction` sees as obstacles, leaving out `character` and its own force, each with
-    /// whether `faction` is at war with it (`CampaignModel::obstacles_seen_by`'s rule).
+    /// whether `faction` is at war with it (`CampaignModel::obstacles_seen_by`'s rule). A navy docked in a
+    /// blockaded port is no obstacle ([`CampaignModel::navies_docked_in_blockaded_ports`]).
     fn seen_commanders(&self, faction: FactionId, character: CharacterId) -> impl Iterator<Item = (Commander, bool)> + '_ {
         let own_force = self.force_of(character);
+        let shut_in = self.navies_docked_in_blockaded_ports();
         self.commanders()
-            .filter(move |c| Some(c.force) != own_force && c.id != character)
+            .filter(move |c| Some(c.force) != own_force && c.id != character && !shut_in.contains(&c.force))
             .filter(move |c| self.sees(faction, c.pos_f32()) && super::agents::knows_character(self, faction, c.id))
             .map(move |c| {
                 let at_war = c.faction != faction && self.world.stance(faction, c.faction) == Stance::War;
@@ -441,6 +443,29 @@ impl CampaignModel {
         let mut flags = slot_flags(map, &open, false);
         for id in groups_opened {
             flags[id] = true;
+        }
+        Some(flags)
+    }
+
+    /// The region test of the free-spot search ([`View::free_spot`](super::polypath::View::free_spot))
+    /// for faction `f`, one flag per region id of the polygon map (`0x00B16C00`, CONFIRMED by
+    /// disassembly): id 0 always passes; a single region when it is open to `f` (`0x00B622E0`,
+    /// [`region_open_to`]); a group when every region of it is. `None` without a polygon map.
+    /// INFERRED: the test first reads a gate byte at the layer's +0x168 and passes every region
+    /// while it is clear; ours takes it as set whenever a recruit is placed. Who sets the byte is
+    /// not traced.
+    ///
+    /// For a faction without a record (the rebels) every single region reads closed, as in
+    /// [`Self::regions_open_to`], and so does every group that holds a region (CONFIRMED by
+    /// disassembly: `0x00B622E0` returns false at its entry for a faction `0x008CEEF0` reports
+    /// without a record, test at `0x00B622E7`, and `0x00B16C00` has no other branch for it).
+    pub(crate) fn region_test_flags(&self, f: FactionId) -> Option<Vec<bool>> {
+        let grid = &self.terrain.as_ref()?.0;
+        let map = grid.poly.as_ref()?;
+        let open = self.regions_open_to(&grid.region_keys, f, &self.region_owners());
+        let mut flags = slot_flags(map, &open, self.world.is_rebel_faction(f));
+        if let Some(first) = flags.first_mut() {
+            *first = true;
         }
         Some(flags)
     }

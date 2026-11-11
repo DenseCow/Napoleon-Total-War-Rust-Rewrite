@@ -14,8 +14,7 @@ const NO_RIVAL_FACTION: &str = "pirates";
 
 /// Reports, once at load, a link a row of `table` (the row of `row`) cannot make because `key` is not
 /// a key of `target`: the exe's table lookup logs "In table %S: '%S' is not a valid key for this
-/// table" there (e.g. `0x00F21A30`), naming the table it searched (`target`), and drops the link. Caveat: the unit-tech linker (`0x00EA9B10`) drops a
-/// row naming no built unit with no log at all; ours logs that case too (a deliberate extra, once per load).
+/// table" there (e.g. `0x00F21A30`), naming the table it searched (`target`), and drops the link.
 fn invalid_key(table: &str, row: &str, target: &str, key: &str) {
     log::warn!("{}", invalid_key_message(table, row, target, key));
 }
@@ -166,7 +165,8 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
     // `unit_required_technology_junctions`, linked at load by `0x00EA9B10` (CONFIRMED): for each built
     // unit, each row naming it (exact case) in table order adds its technology to the unit's list, unless
     // the technology is no `technologies` key (logged, row dropped). A row naming no built unit matches
-    // nothing and is dropped without a log in the exe; ours logs it too (once per campaign load, here).
+    // nothing and is dropped with no log at all in the exe; ours logs that case too (a deliberate extra,
+    // once per campaign load, here).
     for u in c.unit_techs.iter() {
         let table = "unit_required_technology_junctions";
         if !r.units.contains_key(&u.unit) {
@@ -375,7 +375,7 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
         }
     }
     // The agent action lists push `can_exchange` only with its row (`0x009D1190` / `0x009D1540`).
-    r.no_exchange_ability = !c.abilities.iter().any(|a| a.key == "can_exchange");
+    r.exchange_ability_missing = !c.abilities.iter().any(|a| a.key == "can_exchange");
     // Each faction's unit set (`0x00F74CB0`): its grouping's units, then its own permission rows in table order.
     for f in &db.factions {
         let grouping = c.unit_groupings.iter().filter(|g| g.grouping == f.faction_group).map(|g| g.unit.as_str());

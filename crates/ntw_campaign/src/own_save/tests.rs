@@ -233,7 +233,7 @@ fn mod_state_round_trips() {
 /// loads a new campaign's director and none of the others.
 #[test]
 fn director_victory_regions_and_ai_areas_round_trip() {
-    use ntw_sim::campaign::AiArea;
+    use ntw_sim::campaign::{AiArea, AiHlci};
     use ntw_sim::campaign::director::{DirectorState, PendingTransfer, RelationBelief};
     let mut model = made_up_model();
     let mut rng = CaRng::new(0x0006_1266);
@@ -252,9 +252,9 @@ fn director_victory_regions_and_ai_areas_round_trip() {
     model.world.ai_factions = vec![B, A];
     model.world.victory_regions.insert(A, [RegionId(2), RegionId(5_000_000)].into());
     model.world.ai_areas = vec![
-        AiArea { key: "made_up_region_1".into(), links: vec![1, 2] },
-        AiArea { key: "made_up_sea".into(), links: vec![0] },
-        AiArea { key: "made_up_region_2".into(), links: vec![0, 0] },
+        AiArea { key: "made_up_region_1".into(), links: vec![1, 2], hlcis: vec![AiHlci { index: 2, pieces: vec![0, 3] }] },
+        AiArea { key: "made_up_sea".into(), links: vec![0], hlcis: Vec::new() },
+        AiArea { key: "made_up_region_2".into(), links: vec![0, 0], hlcis: vec![AiHlci { index: 7, pieces: vec![1] }] },
     ];
     let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
     let (_, back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
@@ -338,15 +338,33 @@ pub(crate) fn as_version_1(bytes: &[u8]) -> Vec<u8> {
 /// the commerce raids with the trade network's course (8: `commerce_raids`, `splines`, `curves`) and the
 /// expense trackers (9: `upkeep_booked`, `policing_cost`, `policing_booked`) and the region manager's order (11: `region_order`),
 /// and the stored relation beliefs' ally lists (12: `allies`, the one field a save may lack: a model with no stored
-/// belief has none), the risen armies' sides and the CAI random stream (13: `rebel_army_sides`, `cai_rng`) and the regions' stored demand (14: `commodity_demand`).
-/// A list or map value ends at its first `]` / `}` (the made-up keys hold none), an
+/// belief has none), the risen armies' sides and the CAI random stream (13: `rebel_army_sides`, `cai_rng`), the regions' stored demand (14: `commodity_demand`)
+/// and the CAI areas' connectivity indexes (15: `hlcis`, which a save with no CAI area lacks too).
+/// A list or map value ends at the `]` / `}` closing its own bracket (the made-up keys hold none; an
+/// `hlcis` item holds a `pieces` list), an
 /// `Option` of a faction id, a number or `cai_rng`'s `(state:…)` at its first `,`, a struct's last field (`,accumulated:`, the leading
 /// comma keeping `trade_accumulated` out; `,policing_booked:`) at its struct's `)`, which is kept.
 pub(crate) fn as_version(bytes: &[u8], version: u32) -> Vec<u8> {
     let (_, header, body) = sections(bytes).expect("sections");
     let mut text = String::new();
     flate2::read::ZlibDecoder::new(body).read_to_string(&mut text).expect("inflate");
-    let added: [(u32, &str, char); 17] = [
+    // The offset just past the bracket closing the one `value` starts with.
+    fn bracket_end(value: &str, close: char) -> usize {
+        let open = value.chars().next().expect("an opening bracket");
+        let mut depth = 0usize;
+        for (i, c) in value.char_indices() {
+            if c == open {
+                depth += 1;
+            } else if c == close {
+                depth -= 1;
+                if depth == 0 {
+                    return i + 1;
+                }
+            }
+        }
+        panic!("value end");
+    }
+    let added: [(u32, &str, char); 18] = [
         (2, "unit_resources:[", ']'),
         (3, "road_holder:", ','),
         (3, "fortification_holder:", ','),
@@ -364,19 +382,27 @@ pub(crate) fn as_version(bytes: &[u8], version: u32) -> Vec<u8> {
         (13, "rebel_army_sides:{", '}'),
         (13, "cai_rng:", ','),
         (14, "commodity_demand:[", ']'),
+        (15, "hlcis:[", ']'),
     ];
     for (_, field, end_char) in added.into_iter().filter(|&(v, ..)| v > version) {
         let mut old = String::with_capacity(text.len());
         let mut rest = text.as_str();
         while let Some(at) = rest.find(field) {
             old.push_str(&rest[..at]);
-            let end = at + rest[at..].find(end_char).expect("value end") + usize::from(end_char != ')');
-            rest = if matches!(end_char, ']' | '}') { rest[end..].strip_prefix(',').unwrap_or(&rest[end..]) } else { &rest[end..] };
+            let brackets = matches!(end_char, ']' | '}');
+            let end = if brackets {
+                let value = at + field.len() - 1;
+                value + bracket_end(&rest[value..], end_char)
+            } else {
+                at + rest[at..].find(end_char).expect("value end") + usize::from(end_char != ')')
+            };
+            rest = if brackets { rest[end..].strip_prefix(',').unwrap_or(&rest[end..]) } else { &rest[end..] };
         }
         old.push_str(rest);
         // Every field is stripped from something, but for the ally lists of a save with no stored belief
-        // (`DirectorState::beliefs`, the one field so named, written empty as `beliefs:{}`).
-        let may_lack = field == "allies:[" && text.contains("beliefs:{}");
+        // (`DirectorState::beliefs`, the one field so named, written empty as `beliefs:{}`) and the
+        // connectivity indexes of a save with no CAI area (`World::ai_areas`, written as `ai_areas:[]`).
+        let may_lack = (field == "allies:[" && text.contains("beliefs:{}")) || (field == "hlcis:[" && text.contains("ai_areas:[]"));
         assert!((old.len() < text.len() || may_lack) && !old.contains(field), "no {field} to strip");
         text = old;
     }
@@ -688,6 +714,46 @@ fn campaign_over_round_trips_and_an_older_save_loads_it_as_false() {
     assert_eq!(turn.queue, back.model.turn.queue, "the (empty) queue loads as it was");
 }
 
+/// victoryscreen3: the victory check's verdict (`TurnState::victory_checked`, the check's byte +0x38)
+/// and a capture choice held back behind the victory screen (`CapturePreview::held`, the report's
+/// +0x9C) save and load back; a save of ours written before the fields were kept loads both as false
+/// (`serde(default)`, no format bump).
+#[test]
+fn the_victory_verdict_and_a_held_capture_round_trip_and_an_older_save_loads_them_as_false() {
+    use ntw_sim::campaign::{CaptureOutcome, CapturePreview};
+    let mut model = made_up_model();
+    model.turn.victory_checked = true;
+    let held = CapturePreview {
+        region: RegionId(2),
+        faction: A,
+        surrender: false,
+        loot: CaptureOutcome { money: 900, ..CaptureOutcome::default() },
+        occupy: CaptureOutcome::default(),
+        liberate: Some(B),
+        looter: Some(CharacterId(100)),
+        held: true,
+    };
+    model.pending_capture = Some(held.clone());
+    let data = SaveData { human: "made_up_a".into(), model, rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
+    let (_, back) = read_parts(&write(&info(), &data).expect("write")).expect("read");
+    assert!(back.model.turn.victory_checked);
+    assert_eq!(back.model.pending_capture, Some(held.clone()));
+    // Older records: the same ones without the field, removed from the parsed value (not from the
+    // text, so the test does not depend on RON's layout).
+    let without = |text: String, field: &str| {
+        let ron::Value::Map(mut fields) = ron::from_str::<ron::Value>(&text).expect("parse") else {
+            panic!("a record");
+        };
+        assert_eq!(fields.remove(&ron::Value::String(field.into())), Some(ron::Value::Bool(true)), "{field} is written");
+        ron::Value::Map(fields)
+    };
+    let turn: ntw_sim::campaign::TurnState = without(ron::to_string(&back.model.turn).expect("encode"), "victory_checked").into_rust().expect("an older turn state loads");
+    assert!(!turn.victory_checked);
+    assert_eq!(turn.humans, back.model.turn.humans, "the other fields load as they were");
+    let older: CapturePreview = without(ron::to_string(&held).expect("encode"), "held").into_rust().expect("an older capture loads");
+    assert_eq!(older, CapturePreview { held: false, ..held });
+}
+
 /// The once-only historical events already triggered are kept by the save (`World::historical_events_triggered`).
 #[test]
 fn triggered_historical_events_round_trip() {
@@ -828,6 +894,57 @@ fn region_order_round_trips_the_gains_do_not_and_a_version_10_save_takes_it_from
     let bare = read_with_start(&bytes(10), &db, || Err("no start".into())).expect("loads without a start").model;
     assert!(bare.world.region_order.is_empty(), "a version-10 save holds no order");
     assert_eq!(bare.world.regions_in_list_order(), vec![RegionId(1), RegionId(2), RegionId(5_000_000)], "without a start: id order");
+}
+
+/// regionvalue: format version 15 keeps the CAI areas' connectivity indexes (`AiArea::hlcis`), the data the
+/// regions' land masses are built from at map attach (the land masses themselves are not saved). A version-14
+/// save's areas hold none: its load takes them from the start's area of the same key, whatever the start's
+/// order (an area the start lacks keeps none), and loads with none when there is no start. A save with no CAI
+/// area does not read the start (review: such a save loaded with every region on one land mass, silently).
+#[test]
+fn area_hlcis_round_trip_and_a_version_14_save_takes_them_from_the_start() {
+    use ntw_sim::campaign::{AiArea, AiHlci};
+    let db = ntw_data::GameDatabase::test_fixture();
+    let area = |key: &str, links: Vec<usize>, hlcis: Vec<AiHlci>| AiArea { key: key.into(), links, hlcis };
+    let mut model = made_up_model();
+    model.world.ai_areas = vec![
+        area("made_up_region_1", vec![1, 2], vec![AiHlci { index: 2, pieces: vec![0, 3] }, AiHlci { index: 4, pieces: Vec::new() }]),
+        area("made_up_sea", vec![0], Vec::new()),
+        area("made_up_region_2", vec![0, 0], vec![AiHlci { index: 7, pieces: vec![1] }]),
+    ];
+    model.world.region_land_masses = [(RegionId(2), vec![7])].into();
+    let bytes = |model: &CampaignModel, version: u32| {
+        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
+        as_version(&write(&info(), &data).expect("write"), version)
+    };
+    let now = read_with_start(&bytes(&model, FORMAT_VERSION), &db, || panic!("start read for a current save")).expect("read").model;
+    assert_eq!(now.world.ai_areas, model.world.ai_areas);
+    assert!(now.world.region_land_masses.is_empty(), "built at map attach, not saved");
+
+    let old = bytes(&model, 14);
+    let (version, _, stored) = read_stored(&old).expect("stored");
+    assert_eq!(version, 14);
+    let links = |m: &CampaignModel| m.world.ai_areas.iter().map(|a| a.links.clone()).collect::<Vec<_>>();
+    assert_eq!(links(&stored.model), links(&model), "a version-14 save holds the areas");
+    assert!(stored.model.world.ai_areas.iter().all(|a| a.hlcis.is_empty()), "without their HLCIs");
+
+    let mut start = made_up_model();
+    start.world.ai_areas = vec![
+        area("made_up_sea", vec![1], Vec::new()),
+        area("made_up_region_1", vec![0], vec![AiHlci { index: 9, pieces: vec![5, 6] }]),
+    ];
+    let from_start = read_with_start(&old, &db, || Ok(start.clone())).expect("read").model;
+    assert_eq!(links(&from_start), links(&model), "the save's own areas and links stay");
+    assert_eq!(from_start.world.ai_areas[0].hlcis, start.world.ai_areas[1].hlcis, "taken by key");
+    assert!(from_start.world.ai_areas[1].hlcis.is_empty(), "the start's sea has none");
+    assert!(from_start.world.ai_areas[2].hlcis.is_empty(), "an area the start lacks keeps none");
+
+    let bare = read_with_start(&old, &db, || Err("no start".into())).expect("loads without a start").model;
+    assert_eq!(links(&bare), links(&model));
+    assert!(bare.world.ai_areas.iter().all(|a| a.hlcis.is_empty()));
+
+    let plain = read_with_start(&bytes(&made_up_model(), 14), &db, || panic!("start read for a save with no CAI area")).expect("read").model;
+    assert!(plain.world.ai_areas.is_empty());
 }
 
 /// joinwarrule: format version 12 keeps each stored relation belief's ally list (`RelationBelief::allies`). A

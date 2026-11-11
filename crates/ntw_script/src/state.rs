@@ -58,9 +58,9 @@ pub struct CustomMission {
 /// The `context` object passed to every event handler (W3 §6.2, CONFIRMED that one is passed).
 ///
 /// Scripts read only `context.string` and `context.component` directly (W3 §6.3, CONFIRMED);
-/// everything else is read by the `conditions.*` functions, so the other fields are our own way of
-/// carrying "who/what this event is about" (INFERRED: the original's context is a C++ object with
-/// this information).
+/// everything else is read by the `conditions.*` functions. The original's context is the posted
+/// event object itself: each field here stands for one accessor slot of its vtable, and an event's
+/// class decides which of them answer (CONFIRMED, the table in [`crate::event_classes`]).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ScriptContext {
     /// `context.string`, e.g. the UI name for `UICreated` or the trigger name for `TimeTrigger`.

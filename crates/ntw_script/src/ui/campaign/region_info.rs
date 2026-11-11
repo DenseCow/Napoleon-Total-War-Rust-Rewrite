@@ -10,8 +10,8 @@
 //!   region `+0xCC` town wealth + `+0xBC` GDP); WealthChange (int, region `+0xC4`); UpperTax,
 //!   LowerTax (floats, the effective rates `0x00AB55E0` / `0x00A8C360`, 0 for the rebels);
 //!   ReligionKey, ReligionIcon (the region's strongest religion, the first of equals, `0x00A8C430`);
-//!   Taxed (bool, not tax exempt); ActiveUpperClass, ActiveLowerClass (the government's class keys,
-//!   `0x00A975F0`); with a governorship (region `+0x248`) UpperTaxPercentage, LowerTaxPercentage (the
+//!   Taxed (bool, not tax exempt); ActiveUpperClass, ActiveLowerClass (the owner's government's class
+//!   keys, `0x00A975F0`); with a governorship (region `+0x248`) UpperTaxPercentage, LowerTaxPercentage (the
 //!   levels' rates × 0.01), BuildingPercentage (`0x00BC7540`), GovernorPercentage (`0x00BC7580`),
 //!   TechnologyPercentage (`0x00BC75F0`) and AdministrationCostPercentage (`0x00BC73C0`); NextTownName
 //!   and TurnsUntilNextTown when a next town exists (`0x00A673A0`).
@@ -342,10 +342,13 @@ fn region_facts(ui: &CampaignUi, r: RegionId, details: bool) -> Option<(Facts, O
         tax_exempt: reg.tax_exempt,
         rebel: m.is_rebel_faction(reg.owner),
         religions: reg.religions.clone(),
-        // PROVISIONAL: a rebel region. `ActiveUpperClass` / `ActiveLowerClass` read `0x00A975F0`, which for
-        // a rebel owner takes the region's REBEL_DATA template's government (region +0x21C → +0x18), and
-        // with no template the first `government_types` record; ours gives the rebels' default classes.
-        classes: economy::government_classes(&m, governing),
+        // `ActiveUpperClass` / `ActiveLowerClass` read `0x00A975F0`: the government (faction +0x70C) of the
+        // region's owner (region +0xF4, resolved at `0x00A975FF`; CONFIRMED by decompile), the faction the
+        // class factors are computed for, not the one whose governorship lists the region.
+        // PROVISIONAL: a rebel region. For a rebel owner `0x00A975F0` takes the region's REBEL_DATA
+        // template's government (region +0x21C → +0x18), and with no template the first `government_types`
+        // record; ours gives the rebels' default classes.
+        classes: economy::government_classes(&m, reg.owner),
         rates: economy::region_tax_rates(&m, &fx, reg),
         governorship: post.is_some(),
         projection,

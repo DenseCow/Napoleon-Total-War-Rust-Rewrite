@@ -564,6 +564,26 @@ fn dispatch(lua: &Lua, s: &Shared, name: &'static str, args: &MultiValue) -> mlu
             st.log.push(text);
         }
 
+        // set_looting_options_disabled_for_human(on): CONFIRMED (`0x0097B800`, one boolean read with
+        // its slot cleared first, so a non-boolean gives false, stored at campaign +0x114): a human's
+        // capture occupies at once instead of offering the looting choice (World::
+        // looting_options_disabled_for_human). Tutorial only, at turn 1.
+        "set_looting_options_disabled_for_human" => {
+            let on = top_bool(s, name, args).unwrap_or(false);
+            let mut st = s.borrow_mut();
+            st.model.world.looting_options_disabled_for_human = on;
+            st.log.push(text);
+        }
+
+        // advance_to_next_campaign(): CONFIRMED (`0x00979050`, reads no argument, sets campaign
+        // +0xD0): the next QuitToMainScreen asks the front end for the chained campaign
+        // (World::advance_to_next_campaign). The tutorial calls it at its end.
+        "advance_to_next_campaign" => {
+            let mut st = s.borrow_mut();
+            st.model.world.advance_to_next_campaign = true;
+            st.log.push(text);
+        }
+
         // The WorldCreated switches: CONFIRMED (handlers `0x0097B900` / `0x0097B940` / `0x0097B980`,
         // each one boolean read with its slot cleared first, so a non-boolean gives false, stored at
         // episodic restrictions +0x118 / +0x124 / +0x125; saved and loaded with the campaign).

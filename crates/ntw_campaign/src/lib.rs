@@ -327,6 +327,38 @@ pub fn read_info(bytes: &[u8]) -> Result<CampaignInfo, LoadError> {
     })
 }
 
+/// Reads only the header of a start position, an original save or one of our own saves (what the
+/// Load Game list shows for each file) from a file on disk, without reading the rest of the file:
+/// an own save's header section, which its layout puts first ([`own_save`]), or the ESF root's
+/// `SAVE_GAME_HEADER` record ([`EsfFile::read_root_children`]). Nothing outside the header is
+/// checked, so a file damaged elsewhere still gives its header here and fails when it is loaded.
+pub fn read_header_file(path: impl AsRef<Path>) -> Result<SaveHeader, LoadError> {
+    use std::io::{Read, Seek, SeekFrom};
+    let path = path.as_ref();
+    let io = |error| LoadError::Io { path: path.to_path_buf(), error };
+    let mut file = std::fs::File::open(path).map_err(io)?;
+    // An own save: its magic, version and header length, then the header section.
+    let mut start = Vec::with_capacity(own_save::MAGIC.len() + 8);
+    file.by_ref().take(own_save::MAGIC.len() as u64 + 8).read_to_end(&mut start).map_err(io)?;
+    if own_save::is_own_save(&start) {
+        // The length word; a file cut short before it reads as truncated below.
+        if let Some(len) = start.get(own_save::MAGIC.len() + 4..).and_then(|w| Some(u32::from_le_bytes(w.try_into().ok()?))) {
+            file.by_ref().take(u64::from(len)).read_to_end(&mut start).map_err(io)?;
+        }
+        return Ok(own_save::read_info(&start)?.header);
+    }
+    file.seek(SeekFrom::Start(0)).map_err(io)?;
+    let root = EsfFile::read_root_children(&mut file, "SAVE_GAME_HEADER").map_err(|e| match e.get_ref().and_then(|x| x.downcast_ref::<ntw_formats::esf::EsfError>()) {
+        Some(esf) => LoadError::Esf(esf.clone()),
+        None => io(e),
+    })?;
+    let rp = root.name.as_str();
+    if !matches!(rp, STARTPOS_ROOT | SAVE_ROOT) {
+        return Err(LoadError::WrongRoot { expected: "CAMPAIGN_STARTPOS or CAMPAIGN_SAVE_GAME", found: rp.to_string() });
+    }
+    read_header(child(&root, "SAVE_GAME_HEADER", rp)?, &format!("{rp}/SAVE_GAME_HEADER"))
+}
+
 fn read_bytes(path: &Path) -> Result<Vec<u8>, LoadError> {
     std::fs::read(path).map_err(|error| LoadError::Io {
         path: path.to_path_buf(),
@@ -457,7 +489,8 @@ fn build(esf: &EsfFile, kind: FileKind, db: &GameDatabase) -> Result<LoadedCampa
     let restrictions = script_values::read_restrictions(esf);
     model.world.restricted_buildings = restrictions.buildings.into_iter().collect();
     // The units in file order, duplicates kept (the loader `0x009968A0` appends each item as it reads it).
-    model.world.restricted_units = known_restricted_units(&model, restrictions.units, "UNIT_RESTRICTIONS");
+    model.world.restricted_units = restrictions.units;
+    drop_unknown_restricted_units(&model.rules.units, &mut model.world.restricted_units, "UNIT_RESTRICTIONS");
     if kind == FileKind::Save {
         // A save is made inside the human player's turn (INFERRED); the header names that faction.
         if let Some(f) = model.faction_by_key(&header.faction_key).map(|f| f.id) {
@@ -564,16 +597,19 @@ pub fn attach_rules(model: &mut CampaignModel, db: &GameDatabase, campaign_key: 
 }
 
 /// The one load rule for a restricted-unit list (an original save's `UNIT_RESTRICTIONS` and an own save's,
-/// read after [`attach_rules`]): the keys in order, duplicates kept, less any key the units table lacks, which
-/// is dropped and logged once per load (`source` names the list). The exe logs such a key and appends a null
-/// record, which restricts nothing and crashes its next save (ORIGINAL BUG, see
+/// read after [`attach_rules`]): the keys stay in order, duplicates kept, less any key the units table `units`
+/// lacks, which is dropped and logged once per load (`source` names the list). The exe logs such a key and
+/// appends a null record, which restricts nothing and crashes its next save (ORIGINAL BUG, see
 /// `CampaignModel::add_restricted_unit`).
-pub(crate) fn known_restricted_units(model: &CampaignModel, keys: Vec<String>, source: &str) -> Vec<String> {
-    let (units, unknown): (Vec<String>, Vec<String>) = keys.into_iter().partition(|k| model.rules.units.contains_key(k));
+pub(crate) fn drop_unknown_restricted_units(units: &std::collections::BTreeMap<String, ntw_sim::campaign::rules::UnitRules>, keys: &mut Vec<String>, source: &str) {
+    let mut unknown = Vec::new();
+    keys.retain(|k| units.contains_key(k) || {
+        unknown.push(k.clone());
+        false
+    });
     if !unknown.is_empty() {
-        log::warn!("load: {source} names {} unit key(s) not in the units table, dropped: {}", unknown.len(), unknown.join(", "));
+        log::warn!("load: {source} lists {} unit key(s) missing from the units table; dropped: {}", unknown.len(), unknown.join(", "));
     }
-    units
 }
 
 /// The first multiple of 8 above every integer value (and integer array element) of the tree

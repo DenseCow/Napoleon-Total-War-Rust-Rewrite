@@ -483,7 +483,8 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tab
 /// registered at `0x004057E6` with default true, CONFIRMED).
 const CAMPAIGN_LABELS_PREF: &str = "ui_show_campaign_labels";
 
-/// Whether the settlement labels are on (the preference, true when the file lacks it).
+/// Whether the settlement labels are on: the setting's value (`Preferences::get_bool`: the file's,
+/// else the default it is registered with). A game that registers no such setting has them off.
 fn campaign_labels_shown(inner: &Inner) -> bool {
-    inner.prefs.borrow().get_bool(CAMPAIGN_LABELS_PREF).unwrap_or(true)
+    inner.prefs.borrow().get_bool(CAMPAIGN_LABELS_PREF).unwrap_or_default()
 }

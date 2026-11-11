@@ -598,7 +598,8 @@ marks functions `__thiscall` in memory before decompiling (the decompile then sh
     follow the list: ours `yearly_character_pass` walks `World::characters_in_list_order` (test
     `the_yearly_death_checks_draw_in_list_order`). Expulsion `0x008D9DC0` (loop at `0x008D9E7A`) walks the list
     once, each character's land army then his docked navy, so the moves and notices follow the list: ours
-    `expel_faction_from_region` did armies by force id, then navies, and now walks the list (test
+    `expulsion::next_expelled_force` (once `expel_faction_from_region`, which did armies by force id, then
+    navies) walks the list, one force per call, going on behind the commander it named last (test
     `the_expulsion_walks_the_faction_list_in_its_order`). Order-independent: the out-of-game flag `0x008B4330`
     (an all-of check: with no region, +0x824 is set only when every character's +0x2B8 handle resolves through
     `0x006649C0`, returning at the first that does not; +0x2B8 is the character's government post handle, set by `0x009CB1E0`, CONFIRMED by charflag, see CHARACTERS_FIDELITY.md "Out-of-game flag"). Not

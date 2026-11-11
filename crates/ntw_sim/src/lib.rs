@@ -27,6 +27,7 @@ pub mod fixed;
 pub mod limits;
 mod fnv;
 pub(crate) mod msvc_sort;
+pub(crate) mod reported;
 pub mod rng;
 pub mod seam;
 pub mod unit_kind;

@@ -7,7 +7,8 @@ for dir in crates/*/; do
     crate=$(basename "$dir")
     counts=""
     for tag in PROVISIONAL PLACEHOLDER INFERRED UNKNOWN; do
-        n=$(git grep -o -w "$tag" -- "$dir*.rs" "$dir**/*.rs" 2>/dev/null | wc -l)
+        # .toml too: the material descriptions under ntw_formats are compiled in (include_str!).
+        n=$(git grep -o -w "$tag" -- "$dir*.rs" "$dir**/*.rs" "$dir**/*.toml" 2>/dev/null | wc -l)
         counts="$counts $n"
     done
     # shellcheck disable=SC2086
@@ -15,7 +16,7 @@ for dir in crates/*/; do
 done
 printf '%-14s' total
 for tag in PROVISIONAL PLACEHOLDER INFERRED UNKNOWN; do
-    n=$(git grep -o -w "$tag" -- 'crates/*.rs' 2>/dev/null | wc -l)
+    n=$(git grep -o -w "$tag" -- 'crates/*.rs' 'crates/*.toml' 2>/dev/null | wc -l)
     printf ' %12s' "$n"
 done
 printf '\n'

@@ -71,9 +71,9 @@ fn saved_part(m: &CampaignModel) -> CampaignModel {
 #[test]
 fn a_played_campaign_round_trips_through_our_own_save() {
     let Some(f) = fixture() else { return };
-    let mut opened = source::open(f.files(), Start::New("eur_napoleon", None), &f.db).expect("open eur_napoleon");
-    // A new campaign sets its caps (the default multiplier 0.75: 20 per army, 10 per navy), not the
-    // start position's 20 / 14.
+    let mut opened = source::open(f.files(), Start::New("eur_napoleon", Some(0.75)), &f.db).expect("open eur_napoleon");
+    // A new campaign sets its caps (the unit-size setting the game registers, 0.75: 20 per army, 10
+    // per navy), not the start position's 20 / 14.
     assert_eq!(opened.loaded.model.force_caps, ntw_sim::campaign::rules::ForceCaps { army: 20, navy: 10 });
     assert!(opened.loaded.set_human("france"));
     let m = &mut opened.loaded.model;
@@ -89,7 +89,7 @@ fn a_played_campaign_round_trips_through_our_own_save() {
     let region = m.world.regions.values().find(|r| r.owner == france && r.garrison.is_none()).map(|r| r.id).expect("a French region without a garrison");
     let event = m.spawn_recruited_unit(region, unit_key);
     // His unit's officer carries his name.
-    let ntw_sim::campaign::CampaignEvent::UnitTrained { force, unit } = event else { panic!("no unit: {event:?}") };
+    let Some(ntw_sim::campaign::CampaignEvent::UnitTrained { force, unit }) = event else { panic!("no unit: {event:?}") };
     let raised = m.world.forces[&force].units.iter().find(|u| u.id == unit).expect("the unit").clone();
     let colonel = raised.character.expect("raised with a colonel");
     let cd = &m.world.character_details[&colonel];

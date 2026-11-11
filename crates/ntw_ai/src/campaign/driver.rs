@@ -93,31 +93,45 @@ pub fn next_ai_turn(model: &CampaignModel) -> Option<FactionId> {
 /// `CCQ_END_TURN` on a bare model with the campaign AI playing every AI faction (the model's own
 /// `end_turn` leaves them idle). Returns every event in order and one report per AI turn. A call to war
 /// waiting for a human ally (`CampaignModel::pending_ally_war_calls`) pauses the steps
-/// (`CampaignModel::step`): the turn stops there (logged), and a later call does not end the turn
-/// again until it is answered, through [`answer_ally_war_call`] (or a script host's `apply` of the
-/// answer), which resumes the steps. On a model that has not started, a call raised during the
-/// start-campaign steps stops it before the turn's end is queued: once that call is answered the
-/// human is in their turn, and the next `end_turn` ends it. [`end_turn_declining_calls`] always
-/// ends one turn.
+/// (`CampaignModel::step`): the turn stops there (logged once, when it stops), and a later call runs
+/// no step (and says so at debug level) until it is answered, through [`answer_ally_war_call`] (or a
+/// script host's `apply` of the answer), which resumes the steps. The turn's end is queued as the
+/// script host's `end_turn` queues it (`CampaignModel::begin_end_turn`, which queues it only while
+/// the current faction is in its turn): a call that stopped the AI's steps queues nothing more, and one that waits inside the
+/// current faction's own turn has the end queued behind it, run by the answer. On a model that has
+/// not started, a call raised during the start-campaign steps stops it before the turn's end is
+/// queued: once that call is answered the human is in their turn, and the next `end_turn` ends it.
+/// [`end_turn_declining_calls`] always ends one turn.
 pub fn end_turn(model: &mut CampaignModel, data: &CampaignAiData, ctx: &TurnContext) -> (Vec<CampaignEvent>, Vec<AiTurnReport>) {
-    let mut play = |m: &mut CampaignModel, f| play_faction(m, data, ctx, f);
+    let (out, stopped) = end_turn_with(model, &mut |m: &mut CampaignModel, f| play_faction(m, data, ctx, f));
+    log_stop(stopped);
+    if let (None, Some((ally, declarer, target))) = (stopped, waiting_call(model)) {
+        // Already reported when it stopped the steps (or by its command's events): said again only at
+        // debug level, since a caller may end the turn any number of times before the answer comes.
+        log::debug!("AI driver: end_turn ran behind {ally:?}'s unanswered call to {declarer:?}'s war on {target:?}; the turn stays paused");
+    }
+    (out.events, out.reports)
+}
+
+/// [`end_turn`] with `play` giving each AI faction's turn (tests drive it with their own), and the call
+/// to war that stopped the steps in this call, if one did ([`newly_waiting`]: what `end_turn` logs).
+fn end_turn_with(model: &mut CampaignModel, play: &mut PlayFaction<'_>) -> (Steps, Option<WaitingCall>) {
+    let before = waiting_call(model);
     let mut out = Steps::default();
     if !model.turn.started {
         model.begin_start_campaign();
-        out.run(model, &mut play);
+        out.run(model, play);
     }
-    if !stopped_for_human(model) {
-        model.begin_end_turn();
-        out.run(model, &mut play);
-        stopped_for_human(model);
-    }
-    (out.events, out.reports)
+    model.begin_end_turn();
+    out.run(model, play);
+    (out, newly_waiting(model, before))
 }
 
 /// The human ally's answer to the top waiting call to war on a bare model (`RespondToAllyWarCall`,
 /// `CampaignModel::respond_to_ally_war_call`), then the turn steps the call paused resume with the AI
 /// playing, as in [`end_turn`] (a script host's `apply` of the answer does the same). Returns the
-/// events and AI turn reports of the answer and the resumed steps.
+/// events and AI turn reports of the answer and the resumed steps. A call still waiting afterwards
+/// (the next one of the stack, or one the resumed steps raised) is logged once here.
 pub fn answer_ally_war_call(
     model: &mut CampaignModel,
     data: &CampaignAiData,
@@ -125,10 +139,22 @@ pub fn answer_ally_war_call(
     side: Option<FactionId>,
     accept: bool,
 ) -> Result<(Vec<CampaignEvent>, Vec<AiTurnReport>), CommandError> {
-    let mut out = Steps { events: model.respond_to_ally_war_call(side, accept)?, reports: Vec::new() };
-    out.run(model, &mut |m: &mut CampaignModel, f| play_faction(m, data, ctx, f));
-    stopped_for_human(model);
+    let (out, stopped) = answer_ally_war_call_with(model, &mut |m: &mut CampaignModel, f| play_faction(m, data, ctx, f), side, accept)?;
+    log_stop(stopped);
     Ok((out.events, out.reports))
+}
+
+/// [`answer_ally_war_call`] with `play` giving each AI faction's turn, and the call to war the turn
+/// waits for afterwards, if any. A refused answer changes nothing (the same call keeps waiting).
+fn answer_ally_war_call_with(
+    model: &mut CampaignModel,
+    play: &mut PlayFaction<'_>,
+    side: Option<FactionId>,
+    accept: bool,
+) -> Result<(Steps, Option<WaitingCall>), CommandError> {
+    let mut out = Steps { events: model.respond_to_ally_war_call(side, accept)?, reports: Vec::new() };
+    out.run(model, play);
+    Ok((out, waiting_call(model)))
 }
 
 /// [`end_turn`] for a tool or test with nobody playing the human factions: every call to war that
@@ -182,16 +208,26 @@ pub fn end_host_turn_declining_calls(host: &mut ScriptHost) -> Result<Vec<(Campa
     Ok(out)
 }
 
-/// True (and logged) while a call to war waits for a human ally's answer, which pauses the turn steps.
-fn stopped_for_human(model: &CampaignModel) -> bool {
-    let Some(call) = model.pending_ally_war_calls.last() else { return false };
-    log::warn!(
-        "AI driver: the turn stops until {:?} answers the call to {:?}'s war on {:?} (RespondToAllyWarCall)",
-        call.ally,
-        call.declarer,
-        call.target
-    );
-    true
+/// A call to war waiting for a human ally's answer, which pauses the turn steps: the ally asked, the
+/// declarer and the target.
+type WaitingCall = (FactionId, FactionId, FactionId);
+
+/// The call at the top of the waiting stack (the one the next answer is for), if any.
+fn waiting_call(model: &CampaignModel) -> Option<WaitingCall> {
+    model.pending_ally_war_calls.last().map(|c| (c.ally, c.declarer, c.target))
+}
+
+/// The call the turn waits for now, unless it is `before`, the one it already waited for when the
+/// driver was called (reported when it stopped the steps, so not again on every later `end_turn`).
+fn newly_waiting(model: &CampaignModel, before: Option<WaitingCall>) -> Option<WaitingCall> {
+    waiting_call(model).filter(|c| Some(*c) != before)
+}
+
+/// Logs the call to war that stopped the turn, if one did.
+fn log_stop(stopped: Option<WaitingCall>) {
+    if let Some((ally, declarer, target)) = stopped {
+        log::warn!("AI driver: the turn stops until {ally:?} answers the call to {declarer:?}'s war on {target:?} (RespondToAllyWarCall)");
+    }
 }
 
 /// Plays one AI faction's turn step: [`play_faction`] with the driver's data and context.
@@ -348,5 +384,60 @@ mod tests {
         // The next call ends the next turn (A and B are already at war, so no new call).
         end_turn_declining_with(&mut m, &mut play(false));
         assert_eq!(state(&m), (3, Some(C), true, false));
+    }
+
+    /// A started model in the human C's first turn.
+    fn started() -> CampaignModel {
+        let mut m = model();
+        m.begin_start_campaign();
+        Steps::default().run(&mut m, &mut play(false));
+        assert_eq!(state(&m), (1, Some(C), true, false));
+        m
+    }
+
+    /// Review (allyoffer): the stop was logged on every `end_turn` while the call waited. The call is
+    /// reported by the `end_turn` it stops, and not again by a later one, which runs nothing; the answer
+    /// resumes the steps the call paused, to the end of that one turn.
+    #[test]
+    fn a_waiting_call_stops_the_turn_once_and_its_answer_resumes_it() {
+        let mut m = started();
+        let (out, stopped) = end_turn_with(&mut m, &mut play(true));
+        assert_eq!(stopped, Some((C, A, B)), "the call that stopped the steps is reported");
+        assert!(out.events.iter().any(|e| matches!(e, CampaignEvent::AllyWarCallPending { ally: C, .. })));
+        assert_eq!(out.reports.len(), 1, "A played and asked; B has not played yet");
+        let paused = state(&m);
+        assert_eq!((paused.0, paused.2, paused.3), (2, false, true), "the round advanced; the AI turns before C's next turn are not finished");
+        let queue = m.turn.queue.clone();
+
+        let (out, stopped) = end_turn_with(&mut m, &mut play(false));
+        assert_eq!(stopped, None, "the same call is not reported again");
+        assert!(out.events.is_empty() && out.reports.is_empty(), "nothing runs while the call waits");
+        assert_eq!(state(&m), paused);
+        assert_eq!(m.turn.queue, queue, "and the turn's end is not queued a second time");
+
+        // A refused answer (C is not allied to A) leaves the same call waiting and runs nothing.
+        assert!(answer_ally_war_call_with(&mut m, &mut play(false), Some(A), true).is_err());
+        assert_eq!((waiting_call(&m), state(&m)), (Some((C, A, B)), paused));
+
+        let (out, waiting) = answer_ally_war_call_with(&mut m, &mut play(false), None, false).unwrap();
+        assert_eq!(waiting, None);
+        assert_eq!(out.reports.iter().map(|r| r.faction).collect::<Vec<_>>(), [B], "the resumed steps play B, and A not again");
+        assert_eq!(state(&m), (2, Some(C), true, false), "the paused turn ended, and only that one");
+    }
+
+    /// Review (allyoffer): `end_turn` queues the turn's end as the script host does, with no test of its
+    /// own for a waiting call. A call waiting inside the human's own turn (raised by a command, not by
+    /// the driver's steps) has the end queued behind it; the answer runs it.
+    #[test]
+    fn the_end_of_turn_is_queued_behind_a_call_waiting_in_the_humans_turn() {
+        let mut m = started();
+        m.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
+        assert_eq!(waiting_call(&m), Some((C, A, B)));
+        let (out, stopped) = end_turn_with(&mut m, &mut play(false));
+        assert_eq!(stopped, None, "the call already waited: its command's events reported it");
+        assert!(out.reports.is_empty(), "no step runs before the answer");
+        assert_eq!(state(&m), (1, Some(C), false, true), "the end of C's turn is queued");
+        answer_ally_war_call_with(&mut m, &mut play(false), None, false).unwrap();
+        assert_eq!(state(&m), (2, Some(C), true, false));
     }
 }

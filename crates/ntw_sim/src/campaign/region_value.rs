@@ -76,7 +76,9 @@ pub struct Multipliers {
 
 impl Multipliers {
     /// Reads them through a tunable getter (`key → value`, with the shipped `default` values as
-    /// fallbacks).
+    /// fallbacks). PROVISIONAL fallbacks: where the exe gets a value for a tunable its table lacks
+    /// is not traced (`capture_ai` reads 0 for a missing row of the same table); the shipped table
+    /// has every row, so only a mod's table reaches them.
     pub fn from_tunables(t: impl Fn(&str, f32) -> f32) -> Self {
         let k = |name: &str, d: f32| t(&format!("COMPOSITE_VALUE_ANALYSER_{name}_MULTIPLIER"), d);
         Multipliers {
@@ -188,13 +190,16 @@ pub fn composite(base: i32, c: &Composite, m: &Multipliers) -> i32 {
 /// What `0x00AA1E90` reads about one region for one faction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FactionRegion {
-    /// The "own" branch: the region's owner is the faction (region virtual `+0x8`) and the region
-    /// belongs to a region group (`+0x12C` non-null, read at `0x00AA1F0A`; its group belief is
-    /// `0x00A75460`). Otherwise the "other" branch, an owned region without a group included.
+    /// The "own" branch: the region's owner is the faction (region virtual `+0x8`, `0x006CC990`)
+    /// and the region has a region group entry (the jump at `0x00AA1F0A` tests what `0x00A75460`
+    /// returned, null only when the CAI settlement `+0x12C`, read by the call at `0x00AA1ED2`, is
+    /// null; every game region has one, `0x00A766C0`). Otherwise the "other" branch.
     pub own_branch: bool,
     /// The region group's change state for the faction (`0x00A634D0`).
     pub change: GroupChange,
-    /// `n` of the compounding factor: the region's neighbours (`0x00C3FD10`) owned by its owner.
+    /// `n` of the compounding factor: the region's neighbours owned by its owner (`0x00A2C170`
+    /// counts the items of the game region's list `+0x20` / `+0x24` whose `+0xF4` faction is the
+    /// owner's, `0x00898B20`).
     pub owner_neighbours: i32,
     /// ×2: own branch, the faction owns exactly one region in the region's theatre; other branch,
     /// it owns none there (`0x00C40570` / `0x00C3E120`).

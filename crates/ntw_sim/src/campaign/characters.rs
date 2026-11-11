@@ -422,10 +422,11 @@ pub fn load_trait_levels(model: &mut CampaignModel) {
             rules.characters.update_trait_level(t, true);
         }
         // A held level with no `character_trait_levels` row applies no effects and shows no level.
-        // Reported once per trait key per process (not per load), a key with no rows at all apart.
+        // Reported once per trait key per process (not once per load), with its own wording for a key
+        // that has no rows at all.
         if t.level != 0 && rules.effects.held_level_row(&t.key, t.level).is_none() {
-            static LOGGED: std::sync::Mutex<std::collections::BTreeSet<String>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
-            let first = LOGGED.lock().map(|mut s| s.insert(t.key.clone())).unwrap_or(false);
+            static LOGGED: crate::reported::ReportedKeys = crate::reported::ReportedKeys::new();
+            let first = LOGGED.first(&t.key);
             if first && rules.effects.trait_levels.contains_key(&t.key) {
                 log::warn!("trait {:?} is held at level {} but has no character_trait_levels row for that level; its level effects do not apply", t.key, t.level);
             } else if first {

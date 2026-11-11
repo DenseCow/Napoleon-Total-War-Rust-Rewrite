@@ -55,7 +55,10 @@ pub enum CampaignEvent {
         /// The region.
         region: RegionId,
     },
-    /// Script event `CharacterTurnStart` (CONFIRMED name).
+    /// Script event `CharacterTurnStart` (CONFIRMED name, declared to the scripts by `0x00419EB0`).
+    /// ORIGINAL BUG: the exe declares it and the shipped scripts handle it, but no event class
+    /// returns the name, so the exe never posts it (the name string `0x0134F898` has that one
+    /// reference); ours posts it at the character's turn start.
     CharacterTurnStart {
         /// The character.
         character: CharacterId,
@@ -223,8 +226,8 @@ pub enum CampaignEvent {
     /// `0x0137CE30`): a building's health was set below 100 (`SetBuildingHealth` `0x00B452A0` posts it for
     /// any value below 100). Fired by a repair's turns that do not finish it. Its context accessors are
     /// `BuildingCompleted`'s (vtable `0x0137CEEC`) less +0x1C and +0x64 (that event's entry of the slot's list at +0xD8 and
-    /// its level), the rest read from the slot at event +0x10 in both (CONFIRMED), so the host gives it
-    /// the same region, settlement and faction.
+    /// its level), the rest read from the slot at event +0x10 in both (CONFIRMED): of what a script
+    /// context carries, that is the settlement only (neither class has a region or faction accessor).
     CampaignBuildingDamaged {
         /// The region.
         region: RegionId,
@@ -245,7 +248,13 @@ pub enum CampaignEvent {
         /// The region whose settlement it entered.
         region: RegionId,
     },
-    /// Script event `PreBattle` (CONFIRMED name): a battle is about to be fought.
+    /// Script event `PreBattle`: a battle is about to be fought. Our own addition, not 1:1, kept so a
+    /// mod's handler can use the name the original declares: `events.lua` lists it and `trigger_events`
+    /// has its row (CONFIRMED), but the exe has no event class and no name string for it (no ASCII or
+    /// UTF-16 `PreBattle` in the image), so the original never posts it. No shipped script registers a
+    /// handler (none in the 8 campaign `scripting.lua`, the other loose and pack `.lua` files or the UI
+    /// `.luac`), so vanilla runs the same with or without it. Its context is the attacker's faction
+    /// (`ntw_script` `context_for`).
     PreBattle {
         /// The attacking force.
         attacker: ForceId,
@@ -326,12 +335,21 @@ pub enum CampaignEvent {
     },
     /// Project event: a faction's campaign outcome plays a movie ([`super::CampaignModel::outcome_movie`];
     /// the exe's movie listener `0x0099B720` queues it on campaign +0x288 and the UI shows it in
-    /// `event_movie_panel`). Pushed after the [`Self::FactionDestroyed`] of a human faction.
+    /// `event_movie_panel`). Pushed after the [`Self::FactionDestroyed`] of a human faction, and by the
+    /// victory check ([`super::CampaignModel::victory_check`]) for a winner and, in multiplayer, for the
+    /// other human.
     OutcomeMovie {
         /// The faction the movie is for.
         faction: FactionId,
         /// The movie and its panel data.
         movie: super::outcome::OutcomeMovie,
+    },
+    /// Project event: a human faction lost by its victory conditions (the exe's campaign event +0x138,
+    /// posted by the victory check `0x0096CD10`; its UI listener `0x00A134E0` shows the defeat popup on
+    /// that faction's machine). From [`super::CampaignModel::victory_check`].
+    CampaignLost {
+        /// The faction that lost.
+        faction: FactionId,
     },
     /// Project event: a force lost all its units and was removed.
     ForceDestroyed {
@@ -382,6 +400,18 @@ pub enum CampaignEvent {
         allied_to_declarer: bool,
         /// The target's allies' loop asked it (the UI event's second flag).
         asked_by_target_side: bool,
+    },
+    /// Project event: a human's force reached another of his (a garrison he entered, or the force of
+    /// a merge order) and the two do not fit whole, so the exchange waits for him
+    /// (`CampaignModel::exchange_on_arrival`): the exchange step's arrival `0x0094D660` queues the pending exchange
+    /// `0x00885F30` / `0x00885F60` (vtable `0x013573A4`), whose execute `0x008EA7E0` raises the
+    /// human's UI event (+0x3C0) and does nothing for an AI (CONFIRMED, disassembly). The army stays
+    /// where its walk ended.
+    ExchangePending {
+        /// The arriving force.
+        force: ForceId,
+        /// The force it was to give its units to.
+        into: ForceId,
     },
     /// Project event: a capture choice was applied (`0x008C0310`).
     CaptureResolved {
@@ -533,12 +563,6 @@ impl CampaignMessage {
 }
 
 impl CampaignEvent {
-    /// A project diagnostic: never sent to the scripts, but returned to the app to be logged once
-    /// (the model has no logger).
-    pub fn is_diagnostic(&self) -> bool {
-        matches!(self, CampaignEvent::ConstructionItemDropped { .. })
-    }
-
     /// The original script event name, or `None` for project events.
     pub fn script_name(&self) -> Option<&'static str> {
         Some(match self {
@@ -589,6 +613,7 @@ impl CampaignEvent {
             CampaignEvent::StanceChanged { .. }
             | CampaignEvent::CaptureChoicePending { .. }
             | CampaignEvent::AllyWarCallPending { .. }
+            | CampaignEvent::ExchangePending { .. }
             | CampaignEvent::CaptureResolved { .. }
             | CampaignEvent::AgentActionResolved { .. }
             | CampaignEvent::CharacterHired { .. }
@@ -596,6 +621,7 @@ impl CampaignEvent {
             | CampaignEvent::ForceDestroyed { .. }
             | CampaignEvent::FactionDestroyed { .. }
             | CampaignEvent::OutcomeMovie { .. }
+            | CampaignEvent::CampaignLost { .. }
             | CampaignEvent::GovernmentChanged { .. }
             | CampaignEvent::ConstructionItemDropped { .. }
             | CampaignEvent::Message { .. } => return None,

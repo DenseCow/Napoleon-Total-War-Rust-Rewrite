@@ -2,7 +2,8 @@
 //!
 //! These tables are not (yet) typed in `ntw_data`, so the AI reads them here with the exe's own
 //! row layouts (`analysis/worker1/DB_BUILDERS.md`, CONFIRMED from the loader code; the
-//! int-vs-float choice of each 4-byte column is INFERRED from the data, see each schema).
+//! int-vs-float choice of each 4-byte column is INFERRED from the data unless its schema cites the
+//! exe's read, see each schema).
 //!
 //! **Mods:** every file of `db/<table>_tables/` is read and the rows are merged by key the way
 //! the original merges every table ([`ntw_data::load_merged_rows`], `analysis/mods/MOD_LOADING.md`
@@ -46,7 +47,10 @@ impl std::error::Error for TableError {}
 /// The exe row layouts of the tables the AI reads, as `Schema::from_codes` strings
 /// (`s` string, `o` optional string, `b` bool, `i` i32, `f` f32). Source: DB_BUILDERS.md.
 pub mod layouts {
-    /// `campaign_ai_personality_junctions` (reader 0xDD22A0): personality, tunable, value (f32 INFERRED).
+    /// `campaign_ai_personality_junctions` (reader 0xDD22A0): personality, tunable, value. The value is an
+    /// f32 (CONFIRMED by disassembly): the personalities' loader `0x00DD5870` reads the row's +0x18 with
+    /// MOVSS in both of its junction passes (`0x00DD592C`, `0x00DD59B4`) and passes it as a float to the
+    /// tunable setter `0x00DE31E0`.
     pub const CAMPAIGN_AI_PERSONALITY_JUNCTIONS: &str = "ssf";
     /// `campaign_ai_managers` (reader 0xDD2220): key.
     pub const CAMPAIGN_AI_MANAGERS: &str = "s";

@@ -101,14 +101,9 @@ db_record! {
     }
 }
 
-db_record! {
-    /// `technology_effects_junction` (`ssf`, 106 rows).
-    pub struct TechnologyEffect in "technology_effects_junction", key = technology + effect {
-        technology: String,
-        effect: String,
-        value: f32,
-    }
-}
+/// `technology_effects_junction` (`ssf`, 106 rows): the one record of the table, declared with the
+/// battle tables that read it too.
+pub use crate::schemas::TechnologyEffect;
 
 db_record! {
     /// `building_factionwide_effects_junctions` (`ssf`, 98 rows): effects a building level gives its

@@ -34,6 +34,7 @@ mod port_blockade_tests;
 mod rank_tests;
 mod trait_level_tests;
 mod recruitment_tests;
+mod region_groups_tests;
 mod research_tests;
 mod residence_tests;
 mod slots_exit_tests;
@@ -41,6 +42,7 @@ mod trade_order_tests;
 mod transfer;
 mod treaty_money_tests;
 mod turn_order_tests;
+mod victory_check_tests;
 
 const A: FactionId = FactionId(1);
 const B: FactionId = FactionId(2);

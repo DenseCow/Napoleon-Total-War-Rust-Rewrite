@@ -4,10 +4,24 @@
 //! they go.
 
 use super::*;
-use crate::campaign::expulsion::{expel_faction_from_region, ExpelledForce};
+use crate::campaign::expulsion::{next_expelled_force, ExpelledForce};
 use crate::campaign::pathing::{CellKind, PathGrid};
+use crate::campaign::place_flood;
 use crate::campaign::seams::RegionExpulsion;
+use crate::campaign::world::Terrain;
 use crate::seam::Maker;
+
+/// Everything the original's rule would move on `m` as it stands: the rule asked again with each
+/// force it named, no move applied in between.
+fn plan(m: &CampaignModel, f: FactionId, region: u32) -> Vec<ExpelledForce> {
+    let mut done = Vec::new();
+    let mut out = Vec::new();
+    while let Some(e) = next_expelled_force(m, f, RegionId(region), &done) {
+        done.push(e.force);
+        out.push(e);
+    }
+    out
+}
 
 /// [`test_model`] with the settlements 100 apart (10 at x 0, 11 at 100, 12 at 200), a MADE-UP
 /// region 13 of C's at x 400, capitals A 10, B 11, C 13, and B's army at its own settlement.
@@ -128,7 +142,7 @@ fn own_regions_come_before_a_nearer_third_partys() {
 
 /// The third parties' regions go in in the region manager's order (world +0x34 → +0x10 / +0x14,
 /// `World::regions_in_manager_order`) before the sort, so of two as near the first in that order wins
-/// (our sort is stable).
+/// (the library's sort `0x00868A30` keeps equal keys in order up to 32 regions, `msvc_sort::sort_by`).
 #[test]
 fn a_third_partys_regions_go_in_in_the_manager_order() {
     let army_goes_to = |order: Option<[u32; 4]>| {
@@ -149,13 +163,13 @@ fn a_third_partys_regions_go_in_in_the_manager_order() {
 }
 
 /// An army aboard a navy is never expelled (INFERRED: it stands where its carrier is, `0x00A17D60`,
-/// on a sea polygon; see `expel_faction_from_region`).
+/// on a sea polygon; see `expulsion::army_step`).
 #[test]
 fn an_embarked_army_is_not_expelled() {
     let mut m = spread_model();
     let army = add_army(&mut m, 103, C, pos(205, 0));
     m.world.embarked.insert(army, ForceId(9999));
-    assert!(expel_faction_from_region(&m, C, RegionId(12)).is_empty());
+    assert_eq!(next_expelled_force(&m, C, RegionId(12), &[]), None);
     m.transfer_region(RegionId(12), B, &mut Vec::new());
     assert_eq!(at(&m, 103), pos(205, 0));
 }
@@ -201,9 +215,10 @@ fn terrain_model(with_13: bool) -> CampaignModel {
     m
 }
 
-/// With the map: the army goes to the nearest cell of its nearest own region (the flood
-/// `0x00B35640` within 100 of the candidate's point); the navy leaves its port through the
-/// harbour's dock to the sea, and the port slot it held goes back to the new owner.
+/// With a map of cells only (no polygon grid; our own rule there): the army goes to the nearest cell
+/// of its nearest own region, within 100 of the candidate's point as the original's flood
+/// `0x00B35640` is; the navy leaves its port through the harbour's dock to the sea, and the port
+/// slot it held goes back to the new owner.
 #[test]
 fn on_the_map_the_army_goes_to_its_region_and_the_navy_puts_to_sea() {
     let mut m = terrain_model(true);
@@ -252,7 +267,7 @@ fn an_army_no_region_takes_stays_in_place_out_of_the_settlement() {
     let mut m = terrain_model(false);
     let mut handed = m.clone();
     handed.world.regions.get_mut(&RegionId(12)).unwrap().owner = B;
-    let plan = expel_faction_from_region(&handed, A, RegionId(12));
+    let plan = plan(&handed, A, 12);
     assert!(plan.contains(&ExpelledForce { force: ForceId(1000), to: None, notice: false }), "{plan:?}");
     m.transfer_region(RegionId(12), B, &mut Vec::new());
     assert_eq!(at(&m, 100), fpos(7.5, 1.5));
@@ -267,7 +282,7 @@ fn the_expulsion_walks_the_faction_list_in_its_order() {
     let mut m = terrain_model(true);
     let extra = add_army(&mut m, 104, A, fpos(6.5, 1.5));
     m.world.regions.get_mut(&RegionId(12)).unwrap().owner = B;
-    let forces = |m: &CampaignModel| expel_faction_from_region(m, A, RegionId(12)).into_iter().map(|e| e.force).collect::<Vec<_>>();
+    let forces = |m: &CampaignModel| plan(m, A, 12).into_iter().map(|e| e.force).collect::<Vec<_>>();
     assert_eq!(forces(&m), vec![ForceId(1000), ForceId(1003), extra], "no order listed: id order");
     m.world.character_order = vec![CharacterId(104), CharacterId(103), CharacterId(100)];
     assert_eq!(forces(&m), vec![extra, ForceId(1003), ForceId(1000)]);
@@ -280,7 +295,7 @@ fn the_end_of_a_protectorate_tie_puts_the_patron_out() {
     let mut m = spread_model();
     m.make_protectorate(B, A).unwrap();
     m.world.characters.get_mut(&CharacterId(100)).unwrap().position = pos(95, 0);
-    assert_eq!(expel_faction_from_region(&m, A, RegionId(11)), vec![ExpelledForce { force: ForceId(1000), to: Some(pos(95, 0)), notice: false }], "may stay");
+    assert_eq!(plan(&m, A, 11), vec![ExpelledForce { force: ForceId(1000), to: Some(pos(95, 0)), notice: false }], "may stay");
     m.end_protectorate_tie(B, A).unwrap();
     assert_eq!(at(&m, 100), pos(0, 0), "to A's nearest region, 10 (95 away; 12 is 105)");
 }
@@ -314,7 +329,7 @@ fn a_mod_rule_replaces_the_expulsion() {
     let mut m = spread_model();
     m.world.characters.get_mut(&CharacterId(100)).unwrap().position = pos(200, 0);
     garrison(&mut m, ForceId(1000), 12);
-    let keep: Maker<RegionExpulsion> = Arc::new(|_| Arc::new(|_: &CampaignModel, _: FactionId, _: RegionId, _: &mut _| Vec::new()));
+    let keep: Maker<RegionExpulsion> = Arc::new(|_| Arc::new(|_: &CampaignModel, _: FactionId, _: RegionId, _: &[ForceId], _: &mut _| None));
     Arc::make_mut(&mut m.rules).seams.region_expulsion.apply("test.keep", &keep);
     m.transfer_region(RegionId(12), B, &mut Vec::new());
     assert_eq!(at(&m, 100), pos(200, 0));
@@ -329,7 +344,7 @@ fn a_faction_out_of_the_game_is_not_expelled() {
     m.make_protectorate(B, A).unwrap();
     m.world.characters.get_mut(&CharacterId(100)).unwrap().position = pos(95, 0);
     set_details(&mut m, A, Some(10), true);
-    assert!(expel_faction_from_region(&m, A, RegionId(11)).is_empty());
+    assert_eq!(next_expelled_force(&m, A, RegionId(11), &[]), None);
     m.end_protectorate_tie(B, A).unwrap();
     assert_eq!(at(&m, 100), pos(95, 0));
 }
@@ -550,7 +565,7 @@ fn a_region_list_keeps_the_manager_order_and_a_gain_goes_last() {
 
 /// The access-loss loops walk the giver's region list in its order (`0x00B67BD0` and the other
 /// callers of `expel_from_each_region_of`), a gained region last: here the order the expulsion seam
-/// is asked in.
+/// is asked in (a rule that names no force is asked once per region).
 #[test]
 fn an_access_loss_walks_the_givers_region_list_in_its_order() {
     let mut m = spread_model();
@@ -560,9 +575,9 @@ fn an_access_loss_walks_the_givers_region_list_in_its_order() {
     let log = walked.clone();
     let record: Maker<RegionExpulsion> = Arc::new(move |_| {
         let log = log.clone();
-        Arc::new(move |_: &CampaignModel, f: FactionId, r: RegionId, _: &mut _| {
+        Arc::new(move |_: &CampaignModel, f: FactionId, r: RegionId, _: &[ForceId], _: &mut _| {
             log.lock().unwrap().push((f, r));
-            Vec::new()
+            None
         })
     });
     Arc::make_mut(&mut m.rules).seams.region_expulsion.apply("test.record", &record);
@@ -653,4 +668,227 @@ fn the_expulsion_callers_return_the_move_notices() {
     add_army(&mut m, 103, C, pos(205, 0));
     let events = m.apply(CampaignCommand::MoveArmiesOutOfRegions { a: A, b: C }).unwrap();
     assert_eq!(retreat_notices(&events), vec![(C, CharacterId(103), pos(400, 0))]);
+}
+
+/// [`test_model`] on a polygon grid of 2-unit cells, 80 x 20 map units, by column: x < 20 is region
+/// 13 (A's, added here), x 20..40 region 12 (A's), x 40..60 region 11 (B's), x 60..70 a group of
+/// regions 12 and 11, x 70..80 an empty group; A's capital region 10 is not on the grid. Region 13's
+/// settlement area is the square x 4..8, z 8..12. A's general stands at (30, 10), B's colonel at
+/// (50, 10); `setup` changes the model before the map is attached (the zones are flooded then).
+fn polygon_model(setup: impl FnOnce(&mut CampaignModel)) -> CampaignModel {
+    let mut m = test_model();
+    set_details(&mut m, A, Some(10), false);
+    set_details(&mut m, B, Some(11), false);
+    m.world.regions.insert(RegionId(13), region(13, A, 1000, 0));
+    m.world.characters.get_mut(&CharacterId(100)).unwrap().position = pos(30, 10);
+    m.world.characters.get_mut(&CharacterId(101)).unwrap().position = pos(50, 10);
+    m.world.settlement_area_outlines.insert(RegionId(13), vec![vec![(4.0, 8.0), (8.0, 8.0), (8.0, 12.0), (4.0, 12.0)]]);
+    setup(&mut m);
+    let mut grid = PathGrid::new((0.0, 0.0), 2.0, 40, 10);
+    grid.region_keys = vec!["test_region_13".into(), "test_region_12".into(), "test_region_11".into()];
+    let id = |c: u32| match c {
+        0..10 => 0,
+        10..20 => 1,
+        20..30 => 2,
+        30..35 => 3,
+        _ => 4,
+    };
+    for (i, r) in grid.region.iter_mut().enumerate() {
+        let c = id(i as u32 % 40);
+        *r = if c < 3 { c } else { u32::MAX };
+    }
+    grid.poly = Some(crate::campaign::zoc::tests::open_regions(40, 10, id, vec![vec![0], vec![1], vec![2], vec![1, 2], vec![]], 3));
+    m.attach_terrain(Terrain(Arc::new(grid)));
+    m
+}
+
+/// How far character `c` stands from (x, z), in map units.
+fn distance(m: &CampaignModel, c: i32, x: f64, z: f64) -> f64 {
+    let p = at(m, c);
+    (p.0.to_f64() - x).hypot(p.1.to_f64() - z)
+}
+
+/// Whether character `c` stands in the grid's region `index` (`0x00B4D800`).
+fn stands_in(m: &CampaignModel, c: i32, index: u32) -> bool {
+    let p = at(m, c);
+    place_flood::in_region(m.terrain.as_ref().unwrap().0.poly.as_ref().unwrap(), (p.0.raw(), p.1.raw()), index)
+}
+
+/// On the polygon grid a region is entered at the point of its settlement area's outline nearest
+/// to the army (`0x008AF750`), and the flood from there (`0x00B35640`) puts the army on that very
+/// point when a polygon of the region holds it. A region the grid does not hold (A's 10, first in
+/// its list and, having no outline, entered at the army's own position) places nothing.
+#[test]
+fn on_the_polygon_grid_the_army_is_put_at_the_regions_outline_point() {
+    let mut m = polygon_model(|m| garrison(m, ForceId(1000), 12));
+    let mut events = Vec::new();
+    assert!(m.transfer_region(RegionId(12), B, &mut events));
+    assert_eq!(at(&m, 100), pos(8, 10), "the east edge of region 13's settlement area");
+    assert_eq!(m.world.characters[&CharacterId(100)].garrisoned_in, None);
+    assert_eq!(m.world.regions[&RegionId(12)].garrison, None);
+    assert_eq!(retreat_notices(&events), vec![(A, CharacterId(100), pos(8, 10))]);
+    assert_eq!(at(&m, 101), pos(50, 10), "the new owner's army is not touched");
+}
+
+/// The army counts by the polygon under it (`0x00B4D800`): one of a group id that lists the region
+/// counts as in it, one of a group that does not, or of another region, does not.
+#[test]
+fn an_army_stands_in_the_region_its_polygon_names_or_lists() {
+    let mut m = polygon_model(|m| {
+        add_army(m, 104, A, pos(65, 10));
+        add_army(m, 105, A, pos(75, 10));
+        add_army(m, 106, A, pos(45, 10));
+    });
+    assert!(stands_in(&m, 104, 1) && stands_in(&m, 104, 2), "the group lists both");
+    assert!(!stands_in(&m, 105, 1) && !stands_in(&m, 106, 1));
+    m.world.regions.get_mut(&RegionId(12)).unwrap().owner = B;
+    let forces: Vec<ForceId> = plan(&m, A, 12).into_iter().map(|e| e.force).collect();
+    assert_eq!(forces, vec![ForceId(1000), ForceId(1004)], "the general in region 12 and the army on the group's polygon");
+}
+
+/// Each army is placed on the map as the moves before it left it (`0x0096C8D0` runs before the next
+/// army is tested): two armies bound for one point do not end on it, the second keeping clear of
+/// the first's core (the 1.0 circle, cut as a 24-gon). The rule asked on the unmoved map names the
+/// same point for both.
+#[test]
+fn each_army_is_placed_on_the_map_the_one_before_it_left() {
+    let mut m = polygon_model(|m| {
+        add_army(m, 104, A, pos(32, 10));
+    });
+    let mut handed = m.clone();
+    handed.world.regions.get_mut(&RegionId(12)).unwrap().owner = B;
+    let unmoved: Vec<_> = plan(&handed, A, 12).into_iter().map(|e| (e.force, e.to)).collect();
+    assert_eq!(unmoved, vec![(ForceId(1000), Some(pos(8, 10))), (ForceId(1004), Some(pos(8, 10)))]);
+
+    // The seam is asked again after each move, with the forces handled so far.
+    let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = asked.clone();
+    let record: Maker<RegionExpulsion> = Arc::new(move |original| {
+        let log = log.clone();
+        Arc::new(move |m: &CampaignModel, f: FactionId, r: RegionId, done: &[ForceId], w: &mut _| {
+            log.lock().unwrap().push(done.to_vec());
+            original(m, f, r, done, w)
+        })
+    });
+    Arc::make_mut(&mut m.rules).seams.region_expulsion.apply("test.record", &record);
+    assert!(m.transfer_region(RegionId(12), B, &mut Vec::new()));
+    assert_eq!(*asked.lock().unwrap(), vec![vec![], vec![ForceId(1000)], vec![ForceId(1000), ForceId(1004)]]);
+    assert_eq!(at(&m, 100), pos(8, 10));
+    assert!(distance(&m, 104, 8.0, 10.0) > 0.98, "{:?}", at(&m, 104));
+    assert!(distance(&m, 104, 8.0, 10.0) < 1.5, "the nearest place outside the core: {:?}", at(&m, 104));
+    assert!(stands_in(&m, 104, 0));
+}
+
+/// Another commander's core is no place, whoever he serves (kind 9), nor is the stored zone of a
+/// faction at war with the army's (kind 8): the army is put on the nearest ground of the region
+/// outside them.
+#[test]
+fn a_core_and_an_enemy_zone_are_no_place() {
+    // B's colonel stands on the outline point (at peace with A).
+    let mut m = polygon_model(|m| m.world.characters.get_mut(&CharacterId(101)).unwrap().position = pos(8, 10));
+    assert!(m.transfer_region(RegionId(12), B, &mut Vec::new()));
+    assert!(distance(&m, 100, 8.0, 10.0) > 0.98 && distance(&m, 100, 8.0, 10.0) < 1.5, "{:?}", at(&m, 100));
+    assert!(stands_in(&m, 100, 0));
+
+    // C, at war with A, stands 2 units from the point: its zone covers it.
+    let mut m = polygon_model(|m| {
+        add_army(m, 103, C, pos(10, 10));
+        m.world.declare_war(A, C).unwrap();
+    });
+    let map = m.terrain.as_ref().unwrap().0.poly.clone().unwrap();
+    let zone = m.stored_zone(CharacterId(103)).expect("C's zone");
+    let polygon = |m: &CampaignModel| {
+        let p = at(m, 100);
+        map.polygon_at(p.0.to_f32(), p.1.to_f32()).expect("a polygon under the army") as u32
+    };
+    assert!(zone.contains(&(map.polygon_at(7.5, 10.5).unwrap() as u32)), "the fixture: the point is in C's zone");
+    assert!(m.transfer_region(RegionId(12), B, &mut Vec::new()));
+    assert!(stands_in(&m, 100, 0), "{:?}", at(&m, 100));
+    assert!(!zone.contains(&polygon(&m)), "{:?}", at(&m, 100));
+    assert!(distance(&m, 100, 10.0, 10.0) > 1.0);
+}
+
+/// The view the army is placed on (`0x00B35570` / `0x00B37670`): for another region its own core,
+/// where it still stands, is no place; for the region it leaves (it may stay) its own footprint is
+/// lifted first, so it is put exactly where it stands.
+#[test]
+fn the_armys_own_core_counts_for_another_region_and_not_for_the_one_it_may_stay_in() {
+    let base = || {
+        polygon_model(|m| {
+            // Region 13's settlement area reaches the border of region 12, half a unit from the army.
+            m.world.settlement_area_outlines.insert(RegionId(13), vec![vec![(16.0, 8.0), (20.0, 8.0), (20.0, 12.0), (16.0, 12.0)]]);
+            m.world.characters.get_mut(&CharacterId(100)).unwrap().position = fpos(20.5, 10.0);
+        })
+    };
+    let mut m = base();
+    assert!(m.transfer_region(RegionId(12), B, &mut Vec::new()));
+    assert!(stands_in(&m, 100, 0), "{:?}", at(&m, 100));
+    assert!(distance(&m, 100, 20.5, 10.0) > 0.98, "out of the core it left: {:?}", at(&m, 100));
+    assert!(distance(&m, 100, 20.5, 10.0) < 1.5, "{:?}", at(&m, 100));
+
+    let mut m = base();
+    m.world.declare_war(A, B).unwrap();
+    assert!(m.transfer_region(RegionId(12), B, &mut Vec::new()));
+    assert_eq!(at(&m, 100), fpos(20.5, 10.0), "at war with the new owner: it may stay");
+}
+
+/// After an owner change the foreign factions are expelled in the world's turn order (the loop of
+/// `0x00A64AC0` over the turn list), not in id order: of two factions whose armies are bound for the
+/// same point, the one earlier in the turn list gets the point and the other is put beside it, and
+/// their notices come in that order.
+#[test]
+fn an_owner_change_expels_the_factions_in_turn_order() {
+    let run = |order: [FactionId; 3]| {
+        let mut m = polygon_model(|m| {
+            // Region 11 goes to C too, so B owns nothing on the map; A lets B's armies stand on its
+            // land, so B's army in region 12 is bound for A's region 13 like A's own.
+            m.world.regions.get_mut(&RegionId(11)).unwrap().owner = C;
+            m.relationship_mut(A, B).military_access_turns = 2;
+            add_army(m, 104, B, pos(32, 10));
+            m.world.turn_order = order.to_vec();
+        });
+        let mut events = Vec::new();
+        assert!(m.transfer_region(RegionId(12), C, &mut events));
+        let notified: Vec<_> = retreat_notices(&events).into_iter().map(|(f, c, _)| (f, c)).collect();
+        (m, notified)
+    };
+    let beside = |m: &CampaignModel, c: i32| {
+        let d = distance(m, c, 8.0, 10.0);
+        d > 0.98 && d < 1.5 && stands_in(m, c, 0)
+    };
+
+    // B before A in the turn list (the reverse of their ids): B's army gets the outline point.
+    let (m, notified) = run([B, A, C]);
+    assert_eq!(at(&m, 104), pos(8, 10));
+    assert!(beside(&m, 100), "{:?}", at(&m, 100));
+    assert_eq!(notified, vec![(B, CharacterId(104)), (A, CharacterId(100))]);
+
+    // A before B: A's general gets it.
+    let (m, notified) = run([A, B, C]);
+    assert_eq!(at(&m, 100), pos(8, 10));
+    assert!(beside(&m, 104), "{:?}", at(&m, 104));
+    assert_eq!(notified, vec![(A, CharacterId(100)), (B, CharacterId(104))]);
+}
+
+/// A mod's rule that names a force a second time, or a force that does not exist, ends the
+/// expulsion there: the moves made so far stand and the rule is not asked again.
+#[test]
+fn a_rule_naming_a_force_twice_or_an_unknown_force_ends_the_expulsion() {
+    let run = |force: u32| {
+        let mut m = spread_model();
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = asked.clone();
+        let same: Maker<RegionExpulsion> = Arc::new(move |_| {
+            let count = count.clone();
+            Arc::new(move |_: &CampaignModel, _: FactionId, _: RegionId, _: &[ForceId], _: &mut _| {
+                count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Some(ExpelledForce { force: ForceId(force), to: Some(pos(7, 7)), notice: false })
+            })
+        });
+        Arc::make_mut(&mut m.rules).seams.region_expulsion.apply("test.same", &same);
+        m.expel_from_region(A, RegionId(12), &mut Vec::new());
+        (at(&m, 100), asked.load(std::sync::atomic::Ordering::Relaxed))
+    };
+    assert_eq!(run(1000), (pos(7, 7), 2), "moved once; named again: over");
+    assert_eq!(run(4242), (pos(0, 0), 1), "no such force: over, no one moved");
 }

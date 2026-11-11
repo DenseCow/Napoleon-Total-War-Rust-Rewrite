@@ -378,16 +378,62 @@ pub fn write_class(class: &str) -> Option<(&'static str, &'static str)> {
     })
 }
 
-/// Reads our preferences copy, or seeds it from the original's file (read only), or starts empty.
+/// Reads our preferences copy, or seeds it from the original's file (read only), or starts empty
+/// (every setting is then the default the game registers it with, `Preferences::get`).
+///
+/// A file that is there but cannot be read is passed over for the next source, and a line whose
+/// value does not read as its setting's type is passed over for the registered default
+/// (`Preferences::get_bool`); each is said once per file (and again only when what is wrong
+/// with the file changes), however often the file is loaded.
 pub fn load_preferences(user_dir: Option<&Path>, original_user_dir: Option<&Path>) -> Preferences {
-    let ours = user_dir.map(|d| d.join("scripts").join("preferences.script.txt"));
-    if let Some(b) = ours.as_ref().and_then(|p| std::fs::read(p).ok()) {
-        return Preferences::read(&b);
-    }
-    if let Some(b) = original_user_dir.and_then(|d| std::fs::read(d.join("scripts").join("preferences.script.txt")).ok()) {
-        return Preferences::read(&b);
+    for dir in [user_dir, original_user_dir].into_iter().flatten() {
+        let path = dir.join("scripts").join("preferences.script.txt");
+        match read_preferences_file(&path) {
+            Ok(Some(b)) => {
+                let prefs = Preferences::read(&b);
+                if let Some(warning) = mistyped_warning(&path, &prefs) {
+                    warn_once(warning);
+                }
+                return prefs;
+            }
+            Ok(None) => {}
+            Err(e) => warn_once(format!("preferences file {} not read ({e}); its settings are not used", path.display())),
+        }
     }
     Preferences::default()
+}
+
+/// The bytes of a preferences file: `Ok(None)` when there is no such file, the error when there
+/// is one that cannot be read.
+fn read_preferences_file(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(b) => Ok(Some(b)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// The warning for a loaded file's lines that do not read as their setting's type; `None` when
+/// every line reads.
+fn mistyped_warning(path: &Path, prefs: &Preferences) -> Option<String> {
+    let keys = prefs.mistyped();
+    (!keys.is_empty()).then(|| format!("preferences file {}: the value of {} does not read as the setting's type; the registered default is used", path.display(), keys.join(", ")))
+}
+
+/// Prints a preferences warning the first time it is given. The text names the file, so one
+/// file's warning never silences another's.
+fn warn_once(warning: String) {
+    if first_time(&warning) {
+        eprintln!("WARN ntw_script: {warning}");
+    }
+}
+
+/// True the first time `warning` is seen in this process.
+fn first_time(warning: &str) -> bool {
+    static SAID: std::sync::Mutex<std::collections::BTreeSet<String>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+    // A poisoned lock only means another thread panicked while printing: the set is still good.
+    let mut said = SAID.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    !said.contains(warning) && said.insert(warning.to_owned())
 }
 
 /// Writes our preferences copy (never the original's file).
@@ -428,7 +474,8 @@ pub(super) fn install_saves(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Re
     // FlagPath, LeaderPortrait, TimePlayed = turn, Year, Season, Maps); a file whose header does not
     // read is left out of the list. sp_load_game's `OnDestroyed` walks every entry's `Maps`. The
     // exe also sets IsDir, which no script reads (not set here). For our own save folder the original's
-    // saves of the same class are listed too (see above).
+    // saves of the same class are listed too (see above). Only each file's header block is read from
+    // disk (`ntw_campaign::read_header_file`), not the whole save.
     let i = inner.clone();
     let n2 = names.clone();
     t.set("EnumerateCampaignSaves", lua.create_function(move |lua, (dir, pattern): (String, Option<String>)| {
@@ -438,8 +485,8 @@ pub(super) fn install_saves(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Re
         let out = lua.create_table()?;
         let mut names = n2.borrow_mut();
         for f in &files {
-            let info = match std::fs::read(&f.path).map_err(|e| e.to_string()).and_then(|b| ntw_campaign::read_info(&b).map_err(|e| e.to_string())) {
-                Ok(info) => info,
+            let header = match ntw_campaign::read_header_file(&f.path) {
+                Ok(header) => header,
                 Err(e) => {
                     let path = f.path.display().to_string();
                     i.log_once_for("EnumerateCampaignSaves unreadable", &path, || format!("EnumerateCampaignSaves: {path} left out, its header does not read: {e}"));
@@ -447,7 +494,7 @@ pub(super) fn install_saves(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Re
                 }
             };
             let n = out.raw_len() + 1;
-            let e = save_info_table(lua, &i, &info.header, &format!("{LISTED_SAVE_MAP_KEY}{n}"))?;
+            let e = save_info_table(lua, &i, &header, &format!("{LISTED_SAVE_MAP_KEY}{n}"))?;
             e.set("FileName", f.file_name.as_str())?;
             e.set("Path", f.path.display().to_string())?;
             e.set("Date", f.modified as f64)?;
@@ -471,14 +518,14 @@ pub(super) fn install_saves(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Re
     // GetExtendedSaveGameInfo(path) → the save's SAVE_GAME_HEADER as a details table ([`save_info_table`]).
     let i = inner.clone();
     t.set("GetExtendedSaveGameInfo", lua.create_function(move |lua, path: String| {
-        let info = match std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| ntw_campaign::read_info(&b).map_err(|e| e.to_string())) {
-            Ok(info) => info,
+        let header = match ntw_campaign::read_header_file(&path) {
+            Ok(header) => header,
             Err(e) => {
                 log(&i, format!("GetExtendedSaveGameInfo {path}: {e}"));
                 return Ok(None);
             }
         };
-        save_info_table(lua, &i, &info.header, SAVE_MAP_KEY).map(Some)
+        save_info_table(lua, &i, &header, SAVE_MAP_KEY).map(Some)
     })?)?;
 
     // LoadCampaign(name) (and the front end's ContinueCampaign): hand over to the game (campaign mode). The page
@@ -910,7 +957,24 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Result<(
     // Preferences, for the UIPrefsInterface object in the prelude.
     let p = lua.create_table()?;
     let i = inner.clone();
+    // The setting's value as every reader takes it (`Preferences::get`): a key the file lacks (or
+    // every key, when the original never wrote its file) is the default the game registers it
+    // with. The option pages hand these values to their sliders unchecked.
     p.set("get", lua.create_function(move |_, key: String| Ok(i.prefs.borrow().get(&key).map(str::to_owned)))?)?;
+    // The typed reads the option pages take their fields through, so a file value that does not
+    // read as the setting's type is the registered default for the pages as for every other reader.
+    let i = inner.clone();
+    p.set("bool", lua.create_function(move |_, key: String| Ok(i.prefs.borrow().get_bool(&key)))?)?;
+    let i = inner.clone();
+    p.set("number", lua.create_function(move |_, key: String| Ok(i.prefs.borrow().get_f64(&key)))?)?;
+    // The unit-size slider: the setting is a scale and the slider its step (`GameLimits`).
+    // CONFIRMED: the page's `unit_size` is the step of the float `campaign_unit_multiplier`
+    // (`0x00D9FBB0` through `0x00DAFBC0`), and applying the page stores the step's scale
+    // (`0x00DA2620`, table `0x01392770`).
+    let i = inner.clone();
+    p.set("scale_step", lua.create_function(move |_, key: String| Ok(i.limits.unit_scale_setting(i.prefs.borrow().get_f64(&key).map(|v| v as f32))))?)?;
+    let i = inner.clone();
+    p.set("step_scale", lua.create_function(move |_, index: f64| Ok(f64::from(i.limits.unit_scale(i32::try_from(i.limits.unit_scale_step(index as i64)).unwrap_or(i32::MAX)))))?)?;
     let i = inner.clone();
     p.set("set", lua.create_function(move |_, (key, value): (String, Value)| {
         let mut prefs = i.prefs.borrow_mut();
@@ -948,6 +1012,82 @@ mod tests {
         assert_eq!(listed_save_index("save_list_europe"), None);
         assert_eq!(listed_save_index("save_listx_europe"), None);
         assert_eq!(listed_save_index("portrait"), None);
+    }
+
+    /// Our copy is read first, then the original's; a missing file and one that cannot be read
+    /// (here a folder of that name) both pass on to the next source, and with no source every
+    /// setting is its registered default.
+    #[test]
+    fn preferences_come_from_our_copy_then_the_originals_then_the_defaults() {
+        let base = std::env::temp_dir().join(format!("ntw_load_prefs_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (ours, orig) = (base.join("ours"), base.join("orig"));
+        let file = |d: &Path| d.join("scripts").join("preferences.script.txt");
+        std::fs::create_dir_all(orig.join("scripts")).unwrap();
+        std::fs::write(file(&orig), "gfx_tree_quality 1; # #\r\n").unwrap();
+        // No folder of ours at all: the original's file.
+        assert_eq!(load_preferences(Some(&ours), Some(&orig)).get("gfx_tree_quality"), Some("1"));
+        // Ours cannot be read: that is an error to report (a missing file is not), and the
+        // original's file is still read.
+        assert!(matches!(read_preferences_file(&file(&ours)), Ok(None)), "missing is not reported");
+        std::fs::create_dir_all(file(&ours)).unwrap();
+        assert!(read_preferences_file(&file(&ours)).is_err(), "unreadable is reported");
+        assert_eq!(load_preferences(Some(&ours), Some(&orig)).get("gfx_tree_quality"), Some("1"));
+        // Ours is there: it wins.
+        std::fs::remove_dir(file(&ours)).unwrap();
+        std::fs::write(file(&ours), "gfx_tree_quality 3; # #\r\n").unwrap();
+        assert_eq!(load_preferences(Some(&ours), Some(&orig)).get("gfx_tree_quality"), Some("3"));
+        // Neither: no line, and the setting is the default the game registers.
+        let none = load_preferences(Some(&base.join("nobody")), None);
+        assert!(none.lines.is_empty());
+        assert_eq!(none.get("gfx_tree_quality"), ntw_formats::preferences::registered_default("gfx_tree_quality"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A warning is printed once per file: the once-only is keyed on the warning's text, which
+    /// names the file, so one unreadable file no longer silences the next (it was one flag for
+    /// every path). A file whose lines all read gives no warning.
+    #[test]
+    fn a_preferences_warning_is_said_once_per_file() {
+        let (a, b) = (Path::new("once_test_a").join("preferences.script.txt"), Path::new("once_test_b").join("preferences.script.txt"));
+        let bad = Preferences::parse("gfx_vsync maybe; # #\r\nsound_master_volume nan; # #\r\n");
+        let (wa, wb) = (mistyped_warning(&a, &bad).unwrap(), mistyped_warning(&b, &bad).unwrap());
+        assert!(wa.contains("once_test_a") && wa.contains("gfx_vsync, sound_master_volume"), "{wa}");
+        assert_ne!(wa, wb);
+        assert_eq!((first_time(&wa), first_time(&wa), first_time(&wb), first_time(&wb)), (true, false, true, false));
+        assert_eq!(mistyped_warning(&a, &Preferences::parse("gfx_vsync true; # #\r\n")), None);
+    }
+
+    /// What the option scripts see, on a host with no game files (so it runs on every machine):
+    /// `__prefs.get` is the file's value, else the registered default, else nil; and the screen
+    /// mode list shows the file's mode only when both of its axes are set.
+    #[test]
+    fn scripts_read_a_setting_as_the_files_value_else_the_registered_default() {
+        use crate::ui::{FrontEndFacts, UiScriptHost};
+        let read = |file: Option<&str>| -> (Option<String>, Option<String>, Option<String>, String) {
+            let user = std::env::temp_dir().join(format!("ntw_script_prefs_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&user);
+            if let Some(text) = file {
+                std::fs::create_dir_all(user.join("scripts")).unwrap();
+                std::fs::write(user.join("scripts").join("preferences.script.txt"), text).unwrap();
+            }
+            let facts = FrontEndFacts { user_dir: Some(user.clone()), ..Default::default() };
+            let host = UiScriptHost::new(crate::ScriptSource::empty(), ntw_formats::loc::Localisation::new(), facts, (1280.0, 960.0), ntw_sim::limits::GameLimits::default()).unwrap();
+            let _ = std::fs::remove_dir_all(&user);
+            host.lua()
+                .load("return __prefs.get('camera_move_speed'), __prefs.get('local_player_name'), __prefs.get('no_such_setting'), (UIPrefsInterface():EnumerateScreenModes())[1]")
+                .eval()
+                .unwrap()
+        };
+        let default = ntw_formats::preferences::registered_default("camera_move_speed").map(str::to_owned);
+        assert!(default.is_some());
+        assert_eq!(read(None), (default.clone(), None, None, "1280 x 960".to_owned()));
+        // One axis alone is not a mode: the stand-in mode stays whole.
+        assert_eq!(
+            read(Some("camera_move_speed 40; # #\r\nlocal_player_name ; # #\r\nx_res 1920; # #\r\n")),
+            (Some("40".to_owned()), Some(String::new()), None, "1280 x 960".to_owned())
+        );
+        assert_eq!(read(Some("x_res 1920; # #\r\ny_res 1080; # #\r\n")), (default, None, None, "1920 x 1080".to_owned()));
     }
 
     #[test]

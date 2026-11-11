@@ -283,6 +283,10 @@ impl CampaignModel {
                 h.u32(1);
                 h.u32(p.region.raw());
                 h.i32(p.faction.raw());
+                // Only while held, so a campaign without a held choice hashes as before.
+                if p.held {
+                    h.u32(1);
+                }
             }
         }
         // Only when one waits, so a campaign without one hashes as before.
@@ -830,6 +834,16 @@ pub struct World {
     /// (`regions.esf` outline `connectivity`). Empty when the map is not attached. Static data, not
     /// hashed.
     pub region_neighbours: BTreeMap<RegionId, Vec<RegionId>>,
+    /// Each game region's land masses: the connectivity indexes (`CAI_REGION_HLCI` #1) of its
+    /// [`AiArea::hlcis`] with a piece whose map area has flag #2 set (`0x00C5C490`). Two regions are
+    /// on one land mass when they share one (`0x00C3D6E0`, read by the region group flood
+    /// [`super::region_groups`]). Built when the map is attached, from the CAI areas and the map's
+    /// `regions.esf` areas: every game region has an entry (an empty one lies on no land mass and
+    /// joins no neighbour) whenever a CAI area carries HLCIs; empty when none does, and the groups
+    /// then take every region to share one. Static data, not hashed, and not saved: every load
+    /// attaches the map again.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub region_land_masses: BTreeMap<RegionId, Vec<u32>>,
     /// The campaign AI's map areas (`CAI_WORLD_REGIONS`, the AI world's list +0x130/+0x134, in its
     /// order): the game regions, the seas and the theatre areas, each with its links. The campaign
     /// director walks them ([`super::director`]). Empty for a file or map without them; the director
@@ -848,6 +862,15 @@ pub struct World {
     /// is not attached or has none (of the original's maps only the tutorial has any). Static data, not hashed.
     #[cfg_attr(feature = "serde", serde(default))]
     pub black_shroud_outlines: Vec<(String, Vec<(f32, f32)>)>,
+    /// Per region, the outlines (closed loops, map units) of the area of its map region that holds
+    /// its settlement: the region map's lookup at the settlement position gives an area index, and
+    /// the region's area with that index (area `+0x44`) is the one a force leaving another region is
+    /// sent towards (the nearest outline point `0x008AF750`, [`super::expulsion`]; CONFIRMED). A region
+    /// without an entry (no map attached, its settlement on no area, or an outline the importer could
+    /// not read in full) uses the force's own position.
+    /// Filled by the map importer. Static data, not hashed.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub settlement_area_outlines: BTreeMap<RegionId, Vec<Vec<(f32, f32)>>>,
     /// Bankrupt turns in a row of each faction (the economics object's +0x460, CONFIRMED); a faction
     /// that can pay is not listed.
     pub bankrupt_turns: BTreeMap<FactionId, u32>,
@@ -1020,6 +1043,29 @@ pub struct World {
     /// assassination / settlement spying gets outcome 1 without a roll (`0x0094ACB0`,
     /// `0x0094CCB0`). Both false in every vanilla save; only the tutorial scripts set them.
     pub force_success_for_human: (bool, bool),
+    /// A human's capture skips the looting choice and occupies (campaign +0x114,
+    /// `CAMPAIGN_MODEL/EPISODIC_RESTRICTIONS` #28 bool, read by the loader `0x009968A0` for versions
+    /// above 0xD at `0x009986B9`, saved by the writer `0x009A1070` at `0x009A1FA6`; CONFIRMED). Its
+    /// only writer is the script method `set_looting_options_disabled_for_human(bool)` (`0x0097B800`,
+    /// a non-boolean argument stores false); its only reader is the capture report's step
+    /// (`0x008F8D22`, tested at `0x008F8DBF`), see `CampaignModel::settle_capture`. False in every
+    /// vanilla start position; only the tutorial scripts set it (turn 1). An own save from before
+    /// the field reads false.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub looting_options_disabled_for_human: bool,
+    /// The scripts asked to move on to the next campaign of a chain (campaign +0xD0, CONFIRMED): its
+    /// only writer is the script method `advance_to_next_campaign()` (`0x00979050`, no argument,
+    /// sets it true); the loader `0x009968A0` clears it (`0x00996A0E`) and the writer `0x009A1070`
+    /// never saves it, so ours is not saved either. Its readers: `QuitToMainScreen`'s transition
+    /// `0x00A065A0` (with the front end's chained-campaign handler it starts the next campaign
+    /// instead of returning to the main menu) and the campaign's frame update `0x008F4120`, whose
+    /// step loop has it as its condition (`0x008F4539`-`0x008F4540`): while it is set the whole loop
+    /// is skipped (the AI step, the pending-stack update, the movement update, the queued
+    /// negotiations), and the calls after the loop, the victory check among them, still run. Only
+    /// the tutorial sets it, just before its `QuitToMainScreen`. PROVISIONAL: ours stores it and
+    /// does not stop the update's steps while it is set.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub advance_to_next_campaign: bool,
     /// Saving is switched off (campaign +0x115, `CAMPAIGN_MODEL/EPISODIC_RESTRICTIONS` #25 bool,
     /// read by the loader `0x009968A0` for versions above 0xB; CONFIRMED). Its only writer is the
     /// script method `disable_saving_game(bool)` (`0x0097B840`); the save (`0x00A1F000`) refuses
@@ -1077,9 +1123,9 @@ pub struct World {
     /// `0x0096FCE0` still marks the faction won and fires its own event but posts no `campaign_won`
     /// message (test `0x0096FFE7`), and the victory check `0x0096CD10` fires no win event +0x120 for
     /// a winner and skips that winner's multiplayer campaign-over step (test `0x0096CE9C`); the
-    /// losers' event +0x138 is unchanged. Ours has no victory check yet (BACKLOG "Defeat / victory
-    /// screen"): it must read this. Set in the tut start position (as its scripts set it); saved at
-    /// #32 by the writer `0x009A1070`. An own save from before the field reads false.
+    /// losers' event +0x138 is unchanged. Ours: [`CampaignModel::victory_check`] reads it (the
+    /// `campaign_won` message is not modelled). Set in the tut start position (as its scripts set it);
+    /// saved at #32 by the writer `0x009A1070`. An own save from before the field reads false.
     #[cfg_attr(feature = "serde", serde(default))]
     pub victory_notification_disabled: bool,
     /// The campaign camera's tilt bounds (episodic restrictions +0xBC / +0xC0,
@@ -1167,6 +1213,21 @@ pub struct AiArea {
     /// `CAI_REGION` #7 (+0x170/+0x174): its boundaries (`CAI_REGION_BOUNDARY` #0/#1, the two areas),
     /// in order, as the indexes in [`World::ai_areas`] of the areas on their other side.
     pub links: Vec<usize>,
+    /// `CAI_REGION` #1 (+0x118/+0x124/+0x128): its high level connectivity indexes, the
+    /// `CAI_REGION_HLCI` components of `CAI_WORLD_REGION_HLCIS[]` in that order (reader `0x00BEDB50`).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub hlcis: Vec<AiHlci>,
+}
+
+/// One high level connectivity index of a CAI area ([`AiArea::hlcis`]): a `CAI_REGION_HLCI` record.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct AiHlci {
+    /// #1 (+0x100, read by `0x0080DC60`): the connectivity index; the areas of one land mass share it.
+    pub index: u32,
+    /// #2 (+0x10C/+0x110): its pieces, as indexes into the area's map region's `regions.esf`
+    /// `areas[]` (resolved by `0x00C47A00` into the map area's list +0x2C/+0x30).
+    pub pieces: Vec<u32>,
 }
 
 /// A risen army's side in its rising, from its `REBEL_DATA` block (army +0x98; [`World::rebel_army_sides`]).
@@ -1657,9 +1718,11 @@ pub struct RegionSlot {
 pub struct PortBlockade {
     /// The blockading navy (`PORT_GARRISON_MANAGER` #1, the navy's id).
     pub navy: ForceId,
-    /// `PORT_GARRISON_MANAGER` #2 (port +0x74): set only by the character attack step `0x0095B370` (at
-    /// `0x0095B667`) when the attacker's blockaded port is the attacked navy's docked port; cleared by the
-    /// lift `0x00A784E0` (CONFIRMED). Kept and saved; nothing in the model reads it yet.
+    /// `PORT_GARRISON_MANAGER` #2 (port +0x74): the navy docked in the port has attacked its blockader. Set
+    /// only by the character attack step `0x0095B370` (at `0x0095B667`), on the attacker's docked port (navy
+    /// +0xE0) when that port is the one the attacked navy blockades (navy +0xE8); while it is set the same
+    /// attack is refused. Cleared only by the lift `0x00A784E0` (CONFIRMED by decompile), so the docked navy
+    /// attacks once per blockade ([`CampaignModel::sally`]).
     pub docked_navy_attacked: bool,
 }
 
@@ -2289,6 +2352,14 @@ pub struct Character {
     /// for a commander, the resident list +0xC8 (#14) for a character without a force, see
     /// [`super::CampaignModel::settlement_residents`]).
     pub garrisoned_in: Option<RegionId>,
+}
+
+impl Character {
+    /// Whether he stands on the map. One who does not (a minister, [`super::CampaignModel::refill_post`])
+    /// is kept at (0, 0): he sees nothing, and nothing is drawn, picked or walked to there.
+    pub fn on_map(&self) -> bool {
+        self.position.0.raw() != 0 || self.position.1.raw() != 0
+    }
 }
 
 /// Government type. W3 §3.3 (CONFIRMED): the `GOVERNMENT` block holds a `GOV_IMP` record named

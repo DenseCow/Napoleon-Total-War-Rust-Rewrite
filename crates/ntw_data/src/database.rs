@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use ntw_formats::db_folder;
 use ntw_formats::pack::{FolderFile, PackError, Vfs};
 use ntw_formats::projectile_fx::{ExplosionRow, ExplosionTable, ImpactRow, ImpactTable, TrailRow, TrailTable};
-use ntw_sim::battle::attributes::{UnitAttributes, UnitCapabilities};
+use ntw_sim::battle::attributes::{UnitAttributes, UnitCapabilities, ability_value};
+use ntw_sim::battle::special_abilities::AbilityRecord;
 use ntw_sim::battle::fatigue::KvFatigue;
 use ntw_sim::battle::morale::KvMorale;
 
@@ -78,6 +79,8 @@ pub struct GameDatabase {
     pub fatigue_effects: Table<FatigueEffect>,
     /// `entity_training_levels` (one row per training level).
     pub entity_training_levels: Table<EntityTrainingLevel>,
+    /// `unit_special_abilities` (the times and uses of the timed special abilities).
+    pub unit_special_abilities: Table<UnitSpecialAbility>,
     /// `unit_stats_land_experience_bonuses` (10 rows, one per experience level).
     pub unit_stats_land_experience_bonuses: Table<UnitStatsLandExperienceBonuses>,
     /// `unit_stats_naval_experience_bonuses` (the naval twin of the table above, same ranks).
@@ -443,6 +446,9 @@ fn load_campaign(vfs: &Loader) -> Result<crate::campaign::CampaignTables, DataEr
             grouping_regions: load(vfs)?,
             grouping_continents: load(vfs)?,
             grouping_empires: load(vfs)?,
+            // Only the groupings' member check reads them (no table: a grouping naming one is dropped).
+            empires: load_optional(vfs)?,
+            continents: load_optional(vfs)?,
         },
     })
 }
@@ -486,6 +492,10 @@ pub fn load_game_limits(vfs: &Vfs, warnings: &mut Vec<String>) -> Result<ntw_sim
 /// original's order, merged by `key` with its row rule. `key` must be the key the exe's loader for
 /// that table hashes. A table with no file gives no rows; files from mods that fail to decode are
 /// skipped and described in `warnings`.
+///
+/// # Panics
+/// For a table in [`crate::record::COLUMN_0_1_KEYED_TABLES`], whose two-column key a closure cannot
+/// be checked for ([`db_folder::merged_rows`]): read it as its typed record.
 pub fn load_merged_rows<R>(
     vfs: &Vfs,
     table: &str,
@@ -605,6 +615,11 @@ impl GameDatabase {
         if let Some(first) = slow.first() {
             ld.warnings.borrow_mut().push(format!("units: #9 (march speed) below 1 for {} unit(s), e.g. {first:?}; read as 1", slow.len()));
         }
+        // A row for a name that is not a special ability times nothing: reported once per load.
+        let unit_special_abilities: Table<UnitSpecialAbility> = load(vfs)?;
+        for r in unit_special_abilities.iter().filter(|r| ability_value(&r.ability).is_none()) {
+            ld.warnings.borrow_mut().push(format!("unit_special_abilities: {:?} is not a special ability; its row is not used", r.ability));
+        }
         Ok(Self {
             source: DataSource::Vfs,
             units,
@@ -626,6 +641,7 @@ impl GameDatabase {
             sea_climate_details: load_optional(vfs)?,
             fatigue_effects: load(vfs)?,
             entity_training_levels: load(vfs)?,
+            unit_special_abilities,
             unit_stats_land_experience_bonuses: load(vfs)?,
             unit_stats_naval_experience_bonuses: load(vfs)?,
             factions: load(vfs)?,
@@ -811,6 +827,23 @@ impl GameDatabase {
             self.unit_class_abilities.iter().filter(|r| r.class.eq_ignore_ascii_case(unit_class)).map(|r| r.ability.as_str());
         let names: Vec<&str> = own.chain(class).filter(|a| keep(a)).collect();
         UnitCapabilities::from_names(names, std::iter::empty())
+    }
+
+    /// The ability records of `unit_special_abilities` as the battle model takes them
+    /// ([`ntw_sim::battle::model::LandUnit::set_ability_records`]): `(ability, times and uses)` per
+    /// row, in file order. A unit card's record for an ability takes its row's values (`0x005363C0`,
+    /// CONFIRMED); an ability without a row keeps the default record.
+    pub fn special_ability_records(&self) -> Vec<(u8, AbilityRecord)> {
+        self.unit_special_abilities.iter().filter_map(|r| Some((ability_value(&r.ability)?, Self::ability_record(r)))).collect()
+    }
+
+    /// The ability record of `name`'s row in `unit_special_abilities`, if it has one.
+    pub fn special_ability_record(&self, name: &str) -> Option<AbilityRecord> {
+        self.unit_special_abilities.iter().find(|r| r.ability.eq_ignore_ascii_case(name)).map(Self::ability_record)
+    }
+
+    fn ability_record(r: &UnitSpecialAbility) -> AbilityRecord {
+        AbilityRecord { active_time: r.active_time, recharge_time: r.recharge_time, num_uses: r.num_uses }
     }
 
     /// The abilities and shot types the `researched` technologies enable: their effects
@@ -1105,6 +1138,7 @@ impl GameDatabase {
             sea_climate_details: Table::from_rows(0, Vec::new()),
             fatigue_effects: Table::from_rows(0, Vec::new()),
             entity_training_levels: Table::from_rows(0, Vec::new()),
+            unit_special_abilities: Table::from_rows(0, Vec::new()),
             unit_stats_land_experience_bonuses: Table::from_rows(0, experience_bonuses),
             unit_stats_naval_experience_bonuses: Table::from_rows(0, naval_experience_bonuses),
             factions: Table::from_rows(3, factions),

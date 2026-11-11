@@ -11,10 +11,13 @@
 //! - [`shooting`]: missile units pick targets, reload and fire volleys in the model (W1 §12.6, §12.10).
 //! - [`abilities`]: skirmish mode, deployable defences, special abilities, shot types and the
 //!   script morale modes (the scripts' unit-controller orders).
+//! - [`special_abilities`]: the special abilities' slots (active time, recharge, uses) and the
+//!   general's Rally and Inspire.
 //! - [`cloth`]: the verlet solve of a standard bearer's flag cloth (`VerletItems\*.logic`), stepped
 //!   from the bearer's pole bone. Display state, but a stateful `f32` integrator, so it lives in
 //!   the model crate; the reader is `ntw_formats::verlet`.
 //! - [`unit_scale`]: the unit-size option's four steps and the men it leaves a unit with.
+//! - [`actions`]: the men's action slot: the rule that ends their actions, and where the exe does.
 //! - [`march`]: each man's own timed move in his unit's march (his lag, speed and ground).
 //! - [`attributes`]: the unit attribute flags (`unit_stats_land` boolean columns).
 //! - [`strength`]: unit strength as the morale code reads it (rally test).
@@ -24,6 +27,7 @@
 //! - [`model`]: the `Battle` / `LandUnit` skeleton and the 0.1 s tick (W1 §5 item 6).
 
 pub mod abilities;
+pub mod actions;
 pub mod attackers;
 pub mod attributes;
 pub mod autoresolve;
@@ -40,6 +44,7 @@ pub mod model;
 pub mod morale;
 pub mod rules;
 pub mod shooting;
+pub mod special_abilities;
 pub mod speed;
 pub mod strength;
 pub mod unit_scale;

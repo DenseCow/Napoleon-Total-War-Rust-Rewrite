@@ -32,6 +32,14 @@ pub const KEY_MAX_REINFORCEMENT_UNITS: &str = "max_reinforcement_units";
 /// ([`GameLimits::max_residence_characters`]).
 pub const KEY_MAX_RESIDENCE_CHARACTERS: &str = "max_residence_characters";
 
+/// The player's unit-size setting in the preferences: the float `campaign_unit_multiplier`
+/// (preference id 0x6D, registered with 0.75 at `0x004032D0`; CONFIRMED). It holds the scale
+/// itself: the options page shows its step (`0x00D9FBB0`: `unit_size` = `0x00DAFBC0` of it) and
+/// writes the chosen step's scale back (`0x00DA2620`), `UnitScaleFactor()` returns it with its
+/// step (`0x004795F0`, `0x005D48C0`), the battle setup's `unit_scale` is its step (`0x004709F0`)
+/// and a new campaign's caps come from it (`0x00488720`). BATTLE_FIDELITY.md §18a.
+pub const UNIT_SIZE_SETTING: &str = "campaign_unit_multiplier";
+
 /// Land units per army at any unit scale: 20. The exe's land function is folded into a shared
 /// `return 20` (`0x00851550`), called with the scale by the custom battle army setup
 /// (`0x0045CB50`) and the new campaign setup (from the front end `0x00488720`, call at `0x0048890E`;
@@ -105,11 +113,20 @@ impl GameLimits {
         self.unit_scales.iter().position(|s| scale <= *s).unwrap_or(self.unit_scales.len().saturating_sub(1))
     }
 
-    /// A `gfx_unit_scale` preference index as a unit-size index: missing → the last step (the
-    /// frontend's default), otherwise clamped into the list.
-    pub fn unit_scale_setting(&self, setting: Option<i64>) -> usize {
+    /// The unit-size index of the unit-size setting ([`UNIT_SIZE_SETTING`], a scale): its step by
+    /// [`GameLimits::unit_scale_index`]. The caller hands the setting's value (the preferences
+    /// file's, else the default the game registers it with); `None` is a game that registers no
+    /// such setting, which takes the last step. The one place the setting becomes a step: the
+    /// options page, the battle setup, a battle's start and a new campaign's caps all call it.
+    pub fn unit_scale_setting(&self, setting: Option<f32>) -> usize {
+        setting.map_or(self.unit_scales.len().saturating_sub(1), |scale| self.unit_scale_index(scale))
+    }
+
+    /// A unit-size index a script hands, clamped into the list (below 0 the first step, past the
+    /// end the last). The exe's `UnitScaleFactor(index)` bindings read `0x01392770` unchecked.
+    pub fn unit_scale_step(&self, index: i64) -> usize {
         let last = self.unit_scales.len().saturating_sub(1);
-        setting.map_or(last, |i| usize::try_from(i.max(0)).unwrap_or(last).min(last))
+        usize::try_from(index.max(0)).unwrap_or(last).min(last)
     }
 
     /// The highest scale a battle may use: the original's 1.0, or a modded step above it.
@@ -122,9 +139,14 @@ impl GameLimits {
     /// (`0x00488720` from the front end, `0x00485B90` from the command line, with the
     /// `campaign_unit_multiplier` preference) both use it.
     pub fn max_units(&self, scale: f32) -> (u32, u32) {
-        let i = self.unit_scale_index(scale);
+        self.max_units_at(self.unit_scale_index(scale))
+    }
+
+    /// [`GameLimits::max_units`] of unit-size index `index` (`0x00DACE60` clamps the index into
+    /// its four entries; ours takes the last entry past the list).
+    pub fn max_units_at(&self, index: usize) -> (u32, u32) {
         let naval = &self.max_naval_units;
-        (self.max_land_units, naval.get(i).or(naval.last()).copied().unwrap_or(ORIGINAL_MAX_LAND_UNITS))
+        (self.max_land_units, naval.get(index).or(naval.last()).copied().unwrap_or(ORIGINAL_MAX_LAND_UNITS))
     }
 
     /// The most units the custom battle's `ValidateArmySetup` (`0x00479690`) keeps in a saved
@@ -164,8 +186,22 @@ mod tests {
         assert_eq!((l.max_units(0.3), l.max_units(0.0), l.max_units(5.0)), ((20, 8), (20, 6), (20, 20)));
         assert_eq!((0..4).map(|s| l.custom_battle_funds(s, false)).collect::<Vec<_>>(), [5000, 10000, 14000, 14000]);
         assert_eq!((-1..3).map(|s| l.custom_battle_funds(s, true)).collect::<Vec<_>>(), [5000, 5000, 14000, 24000]);
-        assert_eq!((l.unit_scale_setting(None), l.unit_scale_setting(Some(-2)), l.unit_scale_setting(Some(9))), (3, 0, 3));
+        assert_eq!((l.unit_scale_step(-2), l.unit_scale_step(2), l.unit_scale_step(9)), (0, 2, 3));
         assert_eq!((l.max_setup_units(false), l.max_setup_units(true)), (20, 20));
+    }
+
+    /// The unit-size setting is a scale (the float preference `campaign_unit_multiplier`, id 0x6D):
+    /// its step is the first one not below it (`0x00DAFBC0`), which is what the options page shows
+    /// (`0x00D9FBB0`), the battle setup carries (`0x004709F0`) and the ships per fleet follow
+    /// (`0x00DACE60`). A game that registers no such setting takes the last step.
+    #[test]
+    fn the_unit_size_setting_is_a_scale() {
+        let l = GameLimits::default();
+        assert_eq!([0.25, 0.5, 0.75, 1.0].map(|s| l.unit_scale_setting(Some(s))), [0, 1, 2, 3]);
+        // Between two steps: the higher one. Outside the steps: the first and the last.
+        assert_eq!([0.6, 0.76, 0.0, -1.0, 2.5, f32::NAN].map(|s| l.unit_scale_setting(Some(s))), [2, 3, 0, 0, 3, 3]);
+        assert_eq!(l.unit_scale_setting(None), 3);
+        assert_eq!([0, 1, 2, 3, 9].map(|i| l.max_units_at(i)), [(20, 6), (20, 8), (20, 10), (20, 20), (20, 20)]);
     }
 
     #[test]
@@ -176,7 +212,7 @@ mod tests {
         l.max_land_units = 40;
         assert_eq!(l.max_scale(), 2.0);
         assert_eq!(l.unit_scale(4), 2.0);
-        assert_eq!(l.unit_scale_setting(Some(9)), 4);
+        assert_eq!((l.unit_scale_step(9), l.unit_scale_setting(Some(1.5)), l.unit_scale_setting(None)), (4, 4, 4));
         assert_eq!(l.max_units(1.5), (40, 40));
         // A scale list longer than the naval list: the last naval entry.
         l.unit_scales.push(3.0);

@@ -827,7 +827,9 @@ pub fn region_effect(model: &CampaignModel, region: &Region, key: &str) -> f32 {
 
 /// The faction whose faction-wide sum and government a region's own effect set reads
 /// (`0x00A67530`, CONFIRMED through `region_effect_set`): the region's **governing** faction, which is
-/// its owner unless another faction holds the governorship that lists it (`eur_bavaria`).
+/// its owner unless another faction holds the governorship that lists it (`eur_bavaria`). The set
+/// builder takes it from the governorship link (region +0x248, at `0x00A67558`). Only the set reads it:
+/// every class pick reads the owner's government ([`region_government_classes`]).
 fn governing_faction(model: &CampaignModel, region: &Region) -> FactionId {
     model.world.governing_faction(region.id).unwrap_or(region.owner)
 }
@@ -1334,7 +1336,7 @@ pub struct ClassPublicOrder {
     /// Repression [16..21]: 0 government type, 1 government buildings, 2 ministers, 3 automated
     /// policing, 4 garrison, 5 crackdown (+0x54, the stored [`PopulationClassState::crackdown`]).
     pub repression: [i32; 6],
-    /// The class is the governing faction's government's lower or upper class, the classes `0x008EDF70`
+    /// The class is the lower or upper class of the region's owner's government, the classes `0x008EDF70`
     /// fills; every other class has all factors 0.
     pub governed: bool,
 }
@@ -1356,12 +1358,12 @@ impl ClassPublicOrder {
 }
 
 /// The region's effect set as `0x008EDF70` reads it (`0x00A67530`): its buildings (at full health),
-/// its traits (region +0x1DC, [`super::effects::region_trait_set`]), the owner's faction sum and the
-/// tax-level bundles of both classes (compiled through the effect mapping).
+/// its traits (region +0x1DC, [`super::effects::region_trait_set`]), the governing faction's sum
+/// (`governing_faction`) and the tax-level bundles of both classes (compiled through the effect mapping).
 pub fn region_effect_set(model: &CampaignModel, reg: &Region) -> super::effects::EffectSet {
     let rules = &model.rules;
     // The faction part comes from the governing faction (normally the owner).
-    let gov = model.world.governing_faction(reg.id).unwrap_or(reg.owner);
+    let gov = governing_faction(model, reg);
     let mut set = super::effects::Effects::faction_sum(model, gov);
     for b in reg.effect_buildings() {
         if let Some(s) = rules.effects.building_local().get(&b.level_key) {
@@ -1385,7 +1387,7 @@ pub fn region_effect_set(model: &CampaignModel, reg: &Region) -> super::effects:
 
 /// The public-order factors of every population class of a region (`0x008EDF70`, CONFIRMED
 /// sources and slots). Classes are the region's `POPULATION CLASSES` (lower and upper when none
-/// were loaded: the government's two). The government type names a lower and an upper class
+/// were loaded: the owner's government's two). The owner's government type names a lower and an upper class
 /// (`government_types` #5 / #4, CONFIRMED: a constitutional monarchy governs `upper` and `middle`, a
 /// republic and an empire `middle` and `lower`): its lower class takes the lower government-type and tax
 /// happiness (effects 9 / 10), its upper class the upper ones (11 / 12), and any other class gets no
@@ -1400,8 +1402,13 @@ pub fn public_order_factors(model: &CampaignModel, region: RegionId) -> Vec<Clas
 /// classes whose stored bases it reads (the population object's, a projected copy's for the panel:
 /// `0x00AA9C10` passes the object it refreshes), and the garrison's unit count (`0x008B18F0`'s
 /// argument; −1 there means the garrison's own). The garrison factor's population is always the
-/// region's own (`0x008B18F0` reads region +0x28, not the copy). No classes: the governing faction's
-/// government's two ([`government_class_bases`]).
+/// region's own (`0x008B18F0` reads region +0x28, not the copy). No classes: the owner's government's
+/// two ([`government_class_bases`]).
+///
+/// The classes that take factors are the **owner's** government's (`0x008EDF70` resolves the owner
+/// link, region +0xF4, at `0x008EDF79`–`0x008EDF84` and runs the faction tests `0x008CE230` /
+/// `0x008CE2F0` with that faction; CONFIRMED by decompile), also where another faction's governorship
+/// lists the region: the governing faction supplies only `set`'s faction part ([`region_effect_set`]).
 pub fn public_order_factors_with(
     model: &CampaignModel,
     reg: &Region,
@@ -1416,11 +1423,13 @@ pub fn public_order_factors_with(
         return Vec::new();
     }
     let rules = &model.rules;
-    let governing = model.world.governing_faction(region).unwrap_or(reg.owner);
-    // PROVISIONAL: a rebel owner. `0x008EDF70` picks the classes it refreshes with the faction tests
-    // (`0x008CE230` / `0x008CE2F0`, not the region ones), which match no class of the rebels, so it
-    // refreshes none and the stored factors stay; ours computes the default `upper` / `lower` ones.
-    let (upper_class, lower_class) = government_classes(model, governing);
+    // PROVISIONAL: a rebel owner. `0x008EDF70` returns at once for an owner without a record
+    // (`0x008CEEF0` at `0x008EDF8C`, before its faction tests `0x008CE230` / `0x008CE2F0`), so it
+    // refreshes no class and the stored factors stay; ours computes the default `upper` / `lower` ones. So
+    // where the region's risen army has a (`middle`, `lower`) government, the upper class the region
+    // tests name ([`region_government_classes`], what [`governed_classes`] picks) is `middle`, which
+    // is neither class computed here: it gets no factors and reads 0.
+    let (upper_class, lower_class) = government_classes(model, reg.owner);
     let int = |b: &str| set.get_int(b);
     let class_int = |b: &str, class: &str| f64::from(set.get_qualified(BonusKind::PopClass, b, class)).round_ties_even() as i32;
     let alignment = rules.features.alignment_public_order;
@@ -1435,7 +1444,7 @@ pub fn public_order_factors_with(
     let hostile = !alignment && hostile_in_region(model, reg);
     let garrison = garrison_repression(rules, garrison_units, reg.population) as i32;
     let classes: Vec<PopulationClassState> = if classes.is_empty() {
-        government_class_bases(model, governing)
+        government_class_bases(model, reg.owner)
     } else {
         classes.to_vec()
     };
@@ -1494,8 +1503,8 @@ pub fn public_order(model: &CampaignModel, region: RegionId) -> PublicOrder {
 }
 
 /// The [`public_order_factors`] of the region's government's upper and lower classes (see
-/// [`region_government_classes`]: the governing faction's government, or a rebel region's first risen
-/// army's), in that order; `None` for a class the region does not have, and both `None` for a rebel
+/// [`region_government_classes`]: the owner's government, or a rebel region's first risen army's), in
+/// that order; `None` for a class the region does not have, and both `None` for a rebel
 /// region with no risen army.
 pub fn governed_class_factors(model: &CampaignModel, region: RegionId) -> (Option<ClassPublicOrder>, Option<ClassPublicOrder>) {
     let Some(reg) = model.world.regions.get(&region) else { return (None, None) };
@@ -1575,9 +1584,30 @@ fn default_classes() -> (String, String) {
     ("upper".into(), "lower".into())
 }
 
-/// The (upper, lower) classes of a `government_types` key (`upper` / `lower` when it is not in the rules).
+/// The (upper, lower) classes of a `government_types` key; `upper` / `lower` when it is not in the
+/// rules. A key the rules lack is bad data, reported once per key per process, except the empty key
+/// ([`reports_unknown_government`]). A known key takes no lock; an unknown one takes the reported set's
+/// on every read, the empty key none.
 fn government_type_classes(model: &CampaignModel, key: &str) -> (String, String) {
-    model.rules.government_classes.get(key).cloned().unwrap_or_else(default_classes)
+    if let Some(classes) = model.rules.government_classes.get(key) {
+        return classes.clone();
+    }
+    static REPORTED: crate::reported::ReportedKeys = crate::reported::ReportedKeys::new();
+    if reports_unknown_government(&REPORTED, key) {
+        log::warn!("government type {key:?} is not in the rules' government_types: its classes read as `upper` / `lower`");
+    }
+    default_classes()
+}
+
+/// Whether a `government_types` key the rules lack is reported now: any key once (`reported` keeps
+/// them), the empty key never. An empty key is no government at all, not an unknown one: the rebels of
+/// the original's files have no `GOVERNMENT` block, so every unmodified campaign has it, and the exe has
+/// no government to read for them either (its factor pass `0x008EDF70` skips a faction without a record,
+/// `0x008CEEF0`). That ours reads the default classes there is the open difference
+/// [`public_order_factors_with`] tags. A faction other than the rebels that has no government is
+/// reported by the `.esf` importer, once, when the campaign loads (its `UnknownGovernment` load warning).
+pub(crate) fn reports_unknown_government(reported: &crate::reported::ReportedKeys, key: &str) -> bool {
+    !key.is_empty() && reported.first(key)
 }
 
 /// The (upper, lower) classes the region class tests name (`IsUpperClassOfRegionGovernment` `0x008CE320` /
@@ -1586,11 +1616,16 @@ fn government_type_classes(model: &CampaignModel, key: &str) -> (String, String)
 /// `0x008CFC20(0)`; [`World::region_risen_armies`](super::World::region_risen_armies), kept in file order)
 /// read from that army's REBEL_DATA (army +0x98 → +0x18 government record → class +0x18 / +0x1C;
 /// [`World::rebel_army_governments`](super::World::rebel_army_governments)); `None` with no risen army
-/// (the list count, +0xC, is 0: no class matches) or none with a government. Otherwise the governing
-/// faction's government's ([`government_classes`]).
+/// (the list count, +0xC, is 0: no class matches) or none with a government. Otherwise the **owner's**
+/// government's ([`government_classes`]): both tests resolve the owner link (region +0xF4, at
+/// `0x008CE32F`) and compare the class with that faction's government (+0x70C), also where another
+/// faction's governorship lists the region (that link, region +0x248, is read only by the effect set
+/// builder `0x00A67530`, [`region_effect_set`]). The factor pass `0x008EDF70` picks its classes from the
+/// same owner link ([`public_order_factors_with`]), so the classes that take factors and the classes
+/// every reader of this picks (the policing cost, the class finds, the previews) are one government's.
 pub fn region_government_classes(model: &CampaignModel, reg: &Region) -> Option<(String, String)> {
     if !model.is_rebel_faction(reg.owner) {
-        return Some(government_classes(model, model.world.governing_faction(reg.id).unwrap_or(reg.owner)));
+        return Some(government_classes(model, reg.owner));
     }
     let army = model.world.region_risen_armies.get(&reg.id)?.first()?;
     Some(government_type_classes(model, model.world.rebel_army_governments.get(army)?))

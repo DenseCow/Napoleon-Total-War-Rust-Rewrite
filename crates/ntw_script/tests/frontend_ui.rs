@@ -101,8 +101,16 @@ fn hovering_never_changes_page() {
     assert_eq!(pages, vec!["layout".to_string(), "main".to_string()]);
 }
 
-/// A host on the real front end with clicks by component id (first visible match).
+/// A host on the real front end with clicks by component id (first visible match). The original's
+/// user folder is an empty stand-in (the pages build their paths from it), so there is no
+/// preferences file, every setting is the exe's own default and the pages are the same on every
+/// machine; preference changes stay in memory.
 fn page_host() -> Option<(UiScriptHost, usize)> {
+    page_host_in(None)
+}
+
+/// [`page_host`] with `user_dir` as NapoleonRust's user folder (its preferences are read and written).
+fn page_host_in(user_dir: Option<PathBuf>) -> Option<(UiScriptHost, usize)> {
     let dir = data_dir();
     if !dir.join("data.pack").is_file() {
         eprintln!("skipped: no install at {}", dir.display());
@@ -111,9 +119,10 @@ fn page_host() -> Option<(UiScriptHost, usize)> {
     let source = ScriptSource::from_install(&dir).expect("open packs");
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).unwrap();
     let loc = Localisation::from_vfs(&vfs).unwrap();
-    let original = std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("The Creative Assembly").join("Napoleon"));
-    // user_dir None: preference changes stay in memory (never written by tests).
-    let facts = FrontEndFacts { campaign_saves_exist: true, game_version: "test".into(), original_user_dir: original, user_dir: None, nap_unlock: 1, ..Default::default() };
+    // Never written to (the game only reads the original's folder), so the tests can share it.
+    let original = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("original_user_stand_in");
+    std::fs::create_dir_all(&original).unwrap();
+    let facts = FrontEndFacts { campaign_saves_exist: true, game_version: "test".into(), original_user_dir: Some(original), user_dir, nap_unlock: 1, ..Default::default() };
     let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0), ntw_sim::limits::GameLimits::default()).unwrap();
     let root = host.load_root_layout("data/ui/frontend ui/layout").unwrap();
     host.take_log();
@@ -193,6 +202,86 @@ fn options_tabs_open_without_script_errors() {
         no_errors(&host);
         assert!(host.key("ESCAPE"));
     }
+}
+
+/// A setting no preferences file gives is the exe's own default for it, and a file's value wins.
+/// On an install whose original never wrote its file every key was nil, and the pages that hand a
+/// setting to a slider (camera speeds, the three difficulties) stopped with a script error.
+#[test]
+fn options_read_the_exes_default_for_a_key_no_file_gives() {
+    let user = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("prefs_defaults_user");
+    let _ = std::fs::remove_dir_all(&user);
+    std::fs::create_dir_all(user.join("scripts")).unwrap();
+    std::fs::write(user.join("scripts").join("preferences.script.txt"), "camera_turn_speed 9; # #\r\nx_res 1920; # #\r\n").unwrap();
+    let Some((host, _)) = page_host_in(Some(user.clone())) else {
+        let _ = std::fs::remove_dir_all(&user);
+        return;
+    };
+    let read: (f64, f64, f64, f64, bool, bool, String) = host
+        .lua()
+        .load(
+            "local p = UIPrefsInterface()\n\
+             local o = p:CurrentOptions()\n\
+             return o.controls.move_speed, o.controls.rotation_speed, o.game.campaign_difficulty, o.audio.master,\n\
+                 o.audio.mute_master, o.graphics.windowed, (p:EnumerateScreenModes())[1]",
+        )
+        .eval()
+        .unwrap();
+    // camera_move_speed 100 (0x00403140); the file's turn speed, not the default 5; difficulty 0 =
+    // normal = slider step 1; master volume 100, not muted; full screen; no screen mode chosen
+    // (the file's width alone is not one: y_res is still the exe's 0).
+    assert_eq!(read, (100.0, 9.0, 1.0, 100.0, false, false, "1280 x 960".to_owned()));
+    no_errors(&host);
+    let _ = std::fs::remove_dir_all(&user);
+}
+
+/// The option pages over a preferences file in the original's own format (UTF-16LE with a
+/// byte-order mark, `key value; # help #` lines, a repeated key, an empty text value; the help
+/// texts here are ours): every tab opens without a script error, a setting the file gives is the
+/// file's and one it leaves out is the exe's default.
+#[test]
+fn options_pages_read_a_file_in_the_originals_format() {
+    let text = "gfx_vsync true; # gfx_vsync <bool>, wait for the screen #\r\n\
+                campaign_unit_multiplier 1; # campaign_unit_multiplier <float>, unit size #\r\n\
+                gfx_hardware_shadows false; # gfx_hardware_shadows <bool>, first copy #\r\n\
+                gfx_hardware_shadows false; # gfx_hardware_shadows <bool>, second copy #\r\n\
+                gfx_screenshot_folder ./screenshots; # gfx_screenshot_folder <folder> #\r\n\
+                local_player_name ; # local_player_name <name> #\r\n\
+                x_res 1024; # x_res <int>, width #\r\n\
+                y_res 768; # y_res <int>, height #\r\n\
+                sound_master_volume 55; # sound_master_volume <int>, 0 to 100 #\r\n\
+                sound_music_enabled false; # sound_music_enabled <bool> #\r\n";
+    let user = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("prefs_original_format_user");
+    let _ = std::fs::remove_dir_all(&user);
+    std::fs::create_dir_all(user.join("scripts")).unwrap();
+    let bytes = ntw_formats::preferences::Preferences::parse(text).to_bytes();
+    assert_eq!(bytes[..2], [0xFF, 0xFE]);
+    std::fs::write(user.join("scripts").join("preferences.script.txt"), bytes).unwrap();
+    let Some((host, root)) = page_host_in(Some(user.clone())) else {
+        let _ = std::fs::remove_dir_all(&user);
+        return;
+    };
+    let read: (f64, f64, f64, bool, f64, String, f64) = host
+        .lua()
+        .load(
+            "local p = UIPrefsInterface()\n\
+             local o = p:CurrentOptions()\n\
+             local _, step = FrontEnd.UnitScaleFactor()\n\
+             return o.graphics.unit_size, step, o.audio.master, o.audio.mute_master, o.controls.move_speed,\n\
+                 (p:EnumerateScreenModes())[1], o.game.campaign_difficulty",
+        )
+        .eval()
+        .unwrap();
+    // The file's unit size (on the page and in the battle setup), master volume and screen mode;
+    // the exe's defaults for what the file leaves out (camera_move_speed 100, difficulty normal).
+    assert_eq!(read, (3.0, 3.0, 55.0, false, 100.0, "1024 x 768".to_owned(), 1.0));
+    for tab in ["graphics", "sound", "controls", "ui"] {
+        click_in_group(&host, root, "options", tab);
+        no_errors(&host);
+        assert!(host.key("ESCAPE"));
+    }
+    no_errors(&host);
+    let _ = std::fs::remove_dir_all(&user);
 }
 
 /// The load-game page (sp_load_game.lua) on two made-up save folders under `target`: ours

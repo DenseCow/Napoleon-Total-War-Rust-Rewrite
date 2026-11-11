@@ -752,7 +752,11 @@ impl<'a> FactionTurn<'a> {
             let wsum: f32 = terms.iter().map(|t| t.0).sum::<f32>().max(1e-6);
             let attitude: f32 = terms.iter().map(|t| t.0 * t.1).sum::<f32>() / wsum;
             let weak = my_strength * start_war >= their * 2.0;
+            // The war option's own test (`0x00C1A890`, the model's answer in the snapshot), which the
+            // exe's CAI target filter `0x00D5C250` asks of a candidate (at `0x00D5C3C4` / `0x00D5C4BA`),
+            // then the scripts' permission.
             if (attitude < enemies_under && weak || invade_human)
+                && self.world.war_option_possible(me, other)
                 && self.world.may_propose(me, other, NegotiationAction::War.option())
             {
                 self.orders.push(AiOrder::DeclareWar { a: me, b: other });
@@ -763,9 +767,11 @@ impl<'a> FactionTurn<'a> {
     /// The analyser value of a region as the integer the desires use (`0x00A63FD0` on the
     /// composite value analyser 0x56): the CONFIRMED base and composite formulas
     /// ([`region_value`]). The base is [`region_value::stored_or_formula`] of
-    /// [`AiRegion::base_value`] (PROVISIONAL as noted there). The model has no region groups, so our own regions
-    /// take the own branch with no change entry and the others the default NEW state; the
-    /// loss-likelihood counts are 0, and the capital / ×3 / +5000 tests are off (PROVISIONAL).
+    /// [`AiRegion::base_value`] (PROVISIONAL as noted there). PROVISIONAL: the analyser does not yet read
+    /// `ntw_sim::campaign::region_groups::RegionGroups::change` (the model's region groups: the exe's
+    /// belief 0x51 groups (change state on the region's belief 0x52)):
+    /// the group state is always NEW and the group size 0, so our own regions take the own branch with no
+    /// change entry; the loss-likelihood counts are 0, and the capital / ×3 / +5000 tests are off (PROVISIONAL).
     fn region_value(&self, r: RegionId) -> i32 {
         let reg = &self.world.regions[&r];
         let base = region_value::stored_or_formula(reg.base_value, reg.gdp);
@@ -1236,9 +1242,13 @@ pub fn apply_orders(model: &mut CampaignModel, orders: &[AiOrder]) -> usize {
 /// `0x008F419E` before the step loop, so the orders of the faction's later steps are never given.
 ///
 /// PROVISIONAL: an order that leaves a call to war waiting for a human ally (`CampaignModel::pending_ally_war_calls`)
-/// does not hold back the faction's later orders, which are applied before the answer; the exe gives no
-/// CAI step while the pending stack holds the offer (`0x008F4120`, `0x008F457A`), so its later steps come
-/// after the answer (and may then decide otherwise). Ours decides the whole turn at once.
+/// does not hold back the faction's later orders, which are applied before the answer. The exe gives no
+/// CAI step while the pending stack holds the offer (CONFIRMED: the step gate `0x008EFAB0`, called at
+/// `0x008F4628`, refuses through `0x008BE2A0` at `0x008EFAF9` while the stack top is set; `0x008F457A`
+/// only caps the loop's budget), so its later steps come after the answer, which empties the stack
+/// (`0x009370F0` → `0x008BF910`), and are decided then (and may decide otherwise). Ours decides the
+/// whole turn at once; holding the remaining orders or re-planning after the answer is a design choice
+/// left open (BACKLOG §5).
 pub fn apply_orders_with_events(
     model: &mut CampaignModel,
     orders: &[AiOrder],
@@ -1402,6 +1412,53 @@ mod tests {
         }
         assert!(!w.may_propose(a, b, NegotiationAction::War.option()));
         assert!(!w.may_accept(b, a, NegotiationAction::Peace.option()), "b declines peace from a");
+    }
+
+    /// Review (warcall): the AI's war order reads the model's own war option answer
+    /// (`CampaignModel::war_option_possible`, `0x00C1A890`) through its snapshot: a protectorate
+    /// orders no war on a neutral its patron is not at war with, and does once the patron is.
+    #[test]
+    fn a_protectorate_orders_no_war_on_a_neutral_its_patron_is_at_peace_with() {
+        use ntw_sim::campaign::{Faction, GovernmentType};
+        let mut m = model(None);
+        let (me, patron, target) = (FactionId(1), FactionId(2), FactionId(3));
+        for (id, key) in [(me, "test_faction_a"), (patron, "test_faction_b"), (target, "test_faction_c")] {
+            let f = Faction {
+                id,
+                key: key.into(),
+                treasury: 1000,
+                government: GovernmentType::AbsoluteMonarchy,
+                government_key: String::new(),
+                tax_lower: "tax_normal".into(),
+                tax_upper: "tax_normal".into(),
+                diplomacy: BTreeMap::new(),
+            };
+            m.world.factions.insert(id, f);
+        }
+        // A region each, all at the same place: every faction neighbours every other.
+        for (id, owner) in [(RegionId(2), patron), (RegionId(3), target)] {
+            let mut r = m.world.regions[&RegionId(1)].clone();
+            (r.id, r.key, r.owner) = (id, format!("test_region_{}", id.0), owner);
+            m.world.regions.insert(id, r);
+        }
+        m.world.set_stance(me, patron, Stance::Protectorate).unwrap();
+        let data = CampaignAiData::default();
+        // The target is human and the hints say invade humans: only the war gates decide.
+        let mut ctx = TurnContext::new("test_campaign");
+        ctx.humans.insert(target);
+        ctx.hints.invade_humans = true;
+        let cfg = FactionAiConfig { manager: String::new(), personality: String::new(), behaviours: BTreeMap::from([("EXPANSION_BEHAVIOUR".to_string(), 1.0)]) };
+        let war_orders = |m: &CampaignModel| {
+            let w = AiWorld::from_model_for(m, Some(me));
+            assert_eq!(w.war_option_possible(me, target), m.war_option_possible(me, target), "the model's answer");
+            let mut turn = FactionTurn::new(&w, &data, &ctx, me, cfg.clone());
+            turn.war_and_peace();
+            turn.orders.into_iter().filter(|o| matches!(o, AiOrder::DeclareWar { .. })).collect::<Vec<_>>()
+        };
+        let orders = war_orders(&m);
+        assert!(orders.is_empty(), "the patron is at peace with the target: {orders:?}");
+        m.world.set_stance(patron, target, Stance::War).unwrap();
+        assert_eq!(war_orders(&m), [AiOrder::DeclareWar { a: me, b: target }], "the patron's enemy");
     }
 
     /// Review (0b-recruit): the AI kept its own recruit price (`units` #4 × its handicap) and ignored the unit

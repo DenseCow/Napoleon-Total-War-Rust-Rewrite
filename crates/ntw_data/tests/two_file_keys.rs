@@ -145,6 +145,8 @@ fn every_typed_table_decodes_and_merges_across_two_files() {
     two_files::<ntw_data::events::GroupingRegion>();
     two_files::<ntw_data::events::GroupingContinent>();
     two_files::<ntw_data::events::GroupingEmpire>();
+    two_files::<ntw_data::events::EmpireRecord>();
+    two_files::<ntw_data::events::ContinentRecord>();
     two_files::<ntw_data::characters::AgentAttributeRecord>();
     two_files::<ntw_data::effects::EffectBonusBasic>();
     two_files::<ntw_data::effects::EffectBonusUnitCategory>();
@@ -155,7 +157,6 @@ fn every_typed_table_decodes_and_merges_across_two_files() {
     two_files::<ntw_data::effects::EffectBonusChain>();
     two_files::<ntw_data::effects::ReligionConversionMod>();
     two_files::<ntw_data::effects::EffectBonusAgent>();
-    two_files::<ntw_data::effects::TechnologyEffect>();
     two_files::<ntw_data::effects::BuildingFactionwideEffect>();
     two_files::<ntw_data::effects::TraitLevel>();
     two_files::<ntw_data::effects::TraitLevelEffect>();

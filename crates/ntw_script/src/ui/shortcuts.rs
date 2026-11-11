@@ -1,8 +1,9 @@
 //! The shortcut handler's binding state machine: what one poll of the keys does to the key
 //! bindings of `text/default_keys.xml` (CONFIRMED, disassembly of `0x00EEE250` and `0x00ED76E0`;
 //! evidence in `analysis/fidelity/UI_FIDELITY.md` §5.1 "Shortcut keys"). Generic: the components,
-//! the camera and the stolen keys are behind [`ShortcutTarget`]; the campaign HUD drives it
-//! (`UiScriptHost::campaign_keys`).
+//! the camera and the stolen keys are behind [`ShortcutTarget`]; the campaign HUD
+//! (`UiScriptHost::campaign_keys`) and the battle HUD ([`super::battle::keys`]) drive it, each with
+//! its own mode's bindings, through one host target ([`UiScriptHost::poll_shortcuts`]).
 //!
 //! Once per frame (the mode listener's per-frame slot, `0x00A27EB0` in the campaign, run by
 //! `0x0048BD40` whether or not a key event came), `0x00EEE250` polls each binding's keys: a key
@@ -33,6 +34,9 @@
 //! matters when one poll presses two bindings.
 
 use ntw_formats::default_keys::{Binding, Bindings, Held, KeySlot, Modifier};
+
+use super::host::{UiScriptHost, addr, call_entry, log};
+use super::world::NodeId;
 
 /// What the bindings act on: the UI components (by name), the camera, the stolen keys.
 pub trait ShortcutTarget {
@@ -194,6 +198,154 @@ impl ShortcutMachine {
                 slots.push(Slot { binding, stealer: true, pressed: false });
             }
         });
+    }
+}
+
+/// The keyboard of one frame for the shortcut poll of a HUD ([`UiScriptHost::campaign_keys`],
+/// [`super::battle::keys`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FrameKeys<'a> {
+    /// The exe's names of the keys down now (its key table `0x0139FEC8`, e.g. `"S"`, `"ESCAPE"`,
+    /// `"NUMPADENTER"`): what `default_keys.xml` binds and `StealShortcutKey` steals. The exe
+    /// polls the frame's DirectInput key state (`0x00E20190`).
+    pub down: &'a [&'a str],
+    /// The modifiers held.
+    pub held: Held,
+    /// The frame's time in seconds (`0x0048A650`: the real frame time, capped at 0.3 s), which a
+    /// pressed binding passes on (the camera's steps scale with it, `0x0095A510`).
+    pub time: f32,
+}
+
+/// A shortcut component the engine handles itself (the camera, the battle's card manager), not a
+/// UI component's `OnShortcut`.
+#[derive(Clone, Copy, Debug)]
+pub struct EngineComponent<'a> {
+    /// The component name the mode's mappings give its funcs.
+    pub name: &'a str,
+    /// The lowest input layer (`g_nUIMinInputLayer`) that locks it.
+    pub locked_from: i32,
+}
+
+/// A HUD's script host as the shortcut handler's target ([`UiScriptHost::poll_shortcuts`]): the
+/// UI components by name, and the `engine` components whose presses go to `handler(component,
+/// func, time)`.
+struct HostShortcuts<'a> {
+    host: &'a UiScriptHost,
+    engine: &'a [EngineComponent<'a>],
+    handler: &'a mut dyn FnMut(&str, &str, f32),
+}
+
+impl HostShortcuts<'_> {
+    fn engine(&self, name: &str) -> Option<&EngineComponent<'_>> {
+        self.engine.iter().find(|e| e.name == name)
+    }
+
+    /// The UI component a binding goes to: the first of that name under the root, depth first,
+    /// searched once per UI change (`Inner::find_under_root`).
+    /// PROVISIONAL: the exe binds every registered handler of that name (`0x00EDD1B0`), ours the
+    /// first component found.
+    fn component(&self, name: &str) -> Option<NodeId> {
+        self.host.inner().find_under_root(name)
+    }
+
+    /// The component's global `OnShortcut(func, released)` (`0x0102F280`: the press passes false,
+    /// the release true); a script error is logged.
+    fn on_shortcut(&self, component: &str, func: &str, released: bool) {
+        let Some(id) = self.component(component) else { return };
+        let (lua, inner) = (self.host.lua(), self.host.inner());
+        let r = call_entry::<bool>(lua, inner, id, "__ntw_call_if_defined", (addr(id), "OnShortcut", func, released));
+        if let Err(e) = r {
+            log(inner, format!("ERROR in OnShortcut of {component}: {e}"));
+        }
+    }
+}
+
+impl ShortcutTarget for HostShortcuts<'_> {
+    fn registered(&self, component: &str) -> bool {
+        self.engine(component).is_some() || self.component(component).is_some()
+    }
+
+    /// The input layer `g_nUIMinInputLayer` (`0x01765944`, set by `Component.LockPriority`): a UI
+    /// component is unlocked while its priority (`+0xE0`, the one `Priority()` returns,
+    /// `0x01014680`) is at least the layer (`0x00DACBA0`); an engine component while the layer is
+    /// below its own limit (the campaign camera's 10, `0x009535B0`). CONFIRMED (UI_FIDELITY.md
+    /// §5.1 "Input layer"). A panel PanelManager opens with a `PriorityLock` (the ESC menu, the
+    /// save panel, diplomacy, ...) so locks the bindings of every lower component, e.g.
+    /// `button_end_turn`'s RETURN.
+    fn unlocked(&self, component: &str) -> bool {
+        let layer = self.host.inner().min_input_layer.get();
+        if let Some(e) = self.engine(component) {
+            return layer < e.locked_from;
+        }
+        let Some(id) = self.component(component) else { return false };
+        self.host.inner().world.borrow().get(id).is_some_and(|n| n.data.priority >= layer)
+    }
+
+    /// A component takes shortcuts while its current state is not disabled (`0x00DACBB0` reads the
+    /// state's +0x115 flag, our `disabled`, INFERRED mapping as for clicks); an engine component
+    /// always (`0x0095A510`'s handler answers true).
+    fn ready(&self, component: &str) -> bool {
+        if self.engine(component).is_some() {
+            return true;
+        }
+        let Some(id) = self.component(component) else { return false };
+        !self.host.inner().world.borrow().get(id).and_then(|n| n.current()).is_some_and(|s| s.disabled)
+    }
+
+    fn press(&mut self, component: &str, func: &str, time: f32) {
+        if self.engine(component).is_some() {
+            (self.handler)(component, func, time);
+        } else {
+            self.on_shortcut(component, func, false);
+        }
+    }
+
+    /// A UI component hears `OnShortcut(func, true)` (`0x00DAD1B0`; PROVISIONAL: its post of a
+    /// component string (likely its name) to `[0x01765920]+0x60` and the list at `0x015F8FEC` is not
+    /// ported); an engine component's release does nothing (the camera's, `0x0044A780`).
+    fn release(&mut self, component: &str, func: &str) {
+        if self.engine(component).is_none() {
+            self.on_shortcut(component, func, true);
+        }
+    }
+
+    fn stolen(&self, key: &str) -> bool {
+        self.host.stealer_of(key).is_some()
+    }
+
+    fn each_stolen_key(&self, f: &mut dyn FnMut(&str)) {
+        self.host.each_stolen_key(f);
+    }
+
+    fn send_stolen(&mut self, keys: &[&str], down: bool) -> bool {
+        let mut heard = false;
+        for k in self.host.stolen_key_names() {
+            if keys.contains(&k.as_str()) {
+                heard |= self.host.send_stolen_key(&k, !down).is_some();
+            }
+        }
+        heard
+    }
+}
+
+impl UiScriptHost {
+    /// One frame's shortcut poll of a HUD, after the frame's key events (CONFIRMED, disassembly;
+    /// UI_FIDELITY.md §5.1 "Shortcut keys"): the mode listener's per-frame slot passes "a
+    /// component holds the input focus" to the shortcut handler `0x00EEE1E0`, which then runs no
+    /// binding at all (while a text field has the focus no shortcut fires and no component that
+    /// stole the key hears it); nor does it while `EnableShortcutHandler` has switched the
+    /// bindings off (manager +0x30, `0x00EA5080`). Else the bindings run on the keys down now
+    /// ([`ShortcutMachine::poll`], `0x00EEE250`): a binding of a UI component calls that
+    /// component's `OnShortcut(func, false)` when pressed and `OnShortcut(func, true)` when
+    /// released; a binding of one of the `engine` components calls `handler(component, func,
+    /// time)` on each press (a repeating one every frame it is held, with the frame's time); a
+    /// stolen key (`StealShortcutKey`) goes to its stealer's `OnKey`.
+    pub(super) fn poll_shortcuts(&self, machine: &mut ShortcutMachine, keys: FrameKeys, engine: &[EngineComponent], handler: &mut dyn FnMut(&str, &str, f32)) {
+        if self.input_focus_held() || !self.inner().shortcuts_enabled.get() {
+            return;
+        }
+        let is_down = |k: &str| keys.down.contains(&k);
+        machine.poll(&is_down, keys.held, keys.time, &mut HostShortcuts { host: self, engine, handler });
     }
 }
 

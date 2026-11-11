@@ -1,0 +1,16 @@
+# The material of a mesh no other description applies to (key "default"): a plain white,
+# opaque, non-metal surface with no textures. The format is described in DESIGN.md §3.7.2 and
+# at the top of crates/ntw_formats/src/material.rs. A mod replaces this description by shipping
+# materials/default.toml.
+
+[base_colour]
+value = [1.0, 1.0, 1.0]
+
+[roughness]
+value = 0.5
+
+[metalness]
+value = 0.0
+
+[specular_level]
+value = 0.5

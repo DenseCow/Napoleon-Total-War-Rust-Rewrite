@@ -282,9 +282,15 @@ pub struct LandUnit {
     pub skirmish_eval: super::abilities::SkirmishEval,
     /// `+0xDC0`: the selected deployable defence, an ability enum value (`None` = 0x16, `none`).
     pub deployable: Option<u8>,
-    /// Special abilities the unit has performed (bit `n` = ability `n`), see
-    /// [`Battle::order_special_ability`].
+    /// Special abilities that are active (bit `n` = ability `n`; a slot's byte `+0x28`), see
+    /// [`Battle::perform_special_ability`].
     pub active_abilities: u32,
+    /// The special-ability slots (container at `+0xDAC`): active time, recharge and uses left, see
+    /// [`super::special_abilities`]. Filled by [`LandUnit::set_ability_records`].
+    pub ability_slots: Vec<super::special_abilities::AbilitySlot>,
+    /// A pending Inspire order: the general is on his way to the unit he will inspire. Cleared by
+    /// any other order ([`LandUnit::set_destination`]).
+    pub inspire_order: Option<super::special_abilities::InspireOrder>,
     /// The shot type loaded (index into [`super::attributes::SHOT_TYPE_NAMES`]), if known.
     pub shot_type: Option<u8>,
     /// The other shots the unit's gun can load: `(shot type, weapon)` (artillery; from
@@ -325,10 +331,12 @@ pub struct LandUnit {
 impl LandUnit {
     /// Installs a move order to `dest`, or clears it with `None`: the one path every order source
     /// writes `destination` by. Every install starts a new timed move, also one re-issued to the
-    /// same point (`0x00659520` zeroes the order's elapsed time `+0x43C` on each install).
+    /// same point (`0x00659520` zeroes the order's elapsed time `+0x43C` on each install). A pending
+    /// Inspire order ends: it is an order like the others, and a new order replaces it.
     pub fn set_destination(&mut self, dest: Option<(f32, f32)>) {
         self.destination = dest;
         self.timed_move = None;
+        self.inspire_order = None;
     }
 
     /// The ordered destination, if any (written only through [`LandUnit::set_destination`]).
@@ -420,6 +428,8 @@ impl LandUnit {
             skirmish_eval: Default::default(),
             deployable: None,
             active_abilities: 0,
+            ability_slots: Vec::new(),
+            inspire_order: None,
             shot_type: None,
             shot_options: Vec::new(),
             invincible: false,
@@ -590,12 +600,11 @@ pub struct Battle {
     pub experience_fatigue: Vec<i32>,
     /// The battle's unit-size scale, i.e. the `unit_scale` option's float (`0x004A6540` clamps it
     /// to `[0.1, 1.0]`; the four steps are [`super::unit_scale::STEPS`]). Every unit built from a
-    /// unit card gets `trunc(card_men * scale)` men (CONFIRMED `CVTDQ2PS`/`MULSS`/`CVTTSS2SI` at
-    /// `0x004A67DE..0x004A67EB`), so a battle at 0.25 has a quarter of the men per unit. The
-    /// default 1.0 is the "no scaling" step, which is what the unit constructor got before this
-    /// option was read; the exe's own default is `gfx_unit_scale 2` = 0.75
-    /// ([`super::unit_scale::PREFERENCE_DEFAULT`]), a deliberate deviation when no preference is
-    /// given (BATTLE_FIDELITY.md §18a). [`Battle::men_at_scale`] clamps it again before use.
+    /// unit card gets `trunc(card_men * scale)` men (CONFIRMED, `0x004A67DE..0x004A67EB`), so a
+    /// battle at 0.25 has a quarter of the men per unit. [`Battle::new`] starts at 1.0, the "no
+    /// scaling" step, for battles built in code (tests, tools); the game sets it at every battle's
+    /// start from the player's unit-size setting ([`Battle::set_unit_scale_setting`],
+    /// BATTLE_FIDELITY.md §18a). [`Battle::men_at_scale`] clamps it again before use.
     pub unit_scale: f32,
     /// The top of that clamp: the original's 1.0, or a modded unit-size step above it
     /// ([`crate::limits::GameLimits::max_scale`]); set with the scale.
@@ -1008,13 +1017,17 @@ impl Battle {
         self.unit_scale
     }
 
-    /// Sets [`Battle::unit_scale`] from the `gfx_unit_scale` **preference index** the settings gave
-    /// us, `None` meaning "no preferences file" (the model's 1.0), and returns the clamped float.
-    /// The whole preference → scale decision is [`super::unit_scale::scale_for_setting`].
-    pub fn set_unit_scale_setting(&mut self, setting: Option<i32>, limits: &crate::limits::GameLimits) -> f32 {
-        self.unit_scale_top = limits.max_scale();
-        self.unit_scale = super::unit_scale::scale_for_setting(setting, limits);
-        self.unit_scale
+    /// Sets [`Battle::unit_scale`] from the player's unit-size setting
+    /// ([`crate::limits::UNIT_SIZE_SETTING`], a scale; `None`: a game that registers no such
+    /// setting) and returns the clamped float: the setting's step
+    /// ([`crate::limits::GameLimits::unit_scale_setting`], as `LoadBattleSetup` `0x004709F0` fills
+    /// the setup's `unit_scale`), then [`Battle::set_unit_scale_step`] (the game-settings key
+    /// `0x0B` that `0x004A6540` reads). The whole setting → scale decision of a battle's start.
+    /// INFERRED for a single-player battle (see [`super::unit_scale`]).
+    pub fn set_unit_scale_setting(&mut self, setting: Option<f32>, limits: &crate::limits::GameLimits) -> f32 {
+        let step = limits.unit_scale_setting(setting);
+        // `step` is inside the list, so the conversion keeps it.
+        self.set_unit_scale_step(i32::try_from(step).unwrap_or(i32::MAX), limits)
     }
 
     /// Each side's current strength (alliance `+0x64`, `0x00539E80`), ascending side order.
@@ -1115,6 +1128,8 @@ impl Battle {
         //    Leaving the field (`0x005857A0`, CONFIRMED): see `Battle::leave_step`.
         self.leave_step(idx);
         self.skirmish_step(idx, tick);
+        //    A general's pending Inspire order (see `special_abilities`): inspire when near enough.
+        self.inspire_step(idx);
         self.placeholder_movement(idx);
         //    Garrisons: enter a building on arrival, leave it on a new move (see `garrison`).
         self.garrison_step(idx);
@@ -1210,7 +1225,8 @@ impl Battle {
             u.fatigue = 0;
             u.fatigue_state = FatigueState::Fresh;
         }
-        // 9. Commander/ability handling and FUN_00582830: not modelled yet.
+        // 9. The special-ability slots' tick (`0x00582830`, the update's last step, CONFIRMED).
+        self.ability_tick(idx);
     }
 
     /// Where unit `idx` is heading this tick, at what speed, and whether the goal is its ordered
@@ -1230,6 +1246,9 @@ impl Battle {
                     false,
                 )
             })
+        } else if let Some(d) = self.inspire_goal(idx) {
+            // A pending Inspire order: towards its target until `Battle::inspire_step` ends it.
+            Some((d, self.units[idx].move_speed(), false))
         } else if let Some(d) = self.units[idx].destination {
             let u = &self.units[idx];
             Some((d, u.move_speed(), true))
@@ -1993,6 +2012,19 @@ impl Battle {
             h.u32(u.contact_ticks);
             h.u32(u.left_field as u32);
             h.u32(u.running as u32);
+            // Special abilities: what is active, the slots' timers, a pending Inspire order and the
+            // two stats Inspire changes.
+            h.u32(u.active_abilities);
+            for s in &u.ability_slots {
+                h.u32(s.ability as u32);
+                h.u32(s.duration_left.to_bits());
+                h.u32(s.recharge_left.to_bits());
+                h.u32(s.uses_left as u32);
+                h.u32(s.target.unwrap_or(u32::MAX));
+            }
+            h.u32(u.inspire_order.map_or(u32::MAX, |o| o.target));
+            h.u32(u.melee_attack as u32);
+            h.u32(u.missile.map_or(0, |w| w.accuracy.to_bits()));
         }
         h.finish()
     }
@@ -2662,11 +2694,12 @@ mod tests {
         assert_eq!(men(3), 160);
         // A step index past the table is the last step, clamped at 1.0.
         assert_eq!(men(9), 160);
-        // The exe's own default setting, `gfx_unit_scale 2` (0x00404230), is 0.75.
+        // The unit-size setting the game registers, `campaign_unit_multiplier` 0.75 (0x004032D0),
+        // is step 2.
         let mut b2 = b.clone();
-        assert_eq!(b2.set_unit_scale_step(crate::battle::unit_scale::PREFERENCE_DEFAULT, &Default::default()), 0.75);
+        assert_eq!(b2.set_unit_scale_setting(Some(0.75), &Default::default()), 0.75);
         assert_eq!(b2.men_at_scale(160), 120);
-        // CVTTSS2SI truncates: 7 × 0.75 = 5.25 -> 5, 158 × 0.75 = 118.5 -> 118.
+        // The conversion truncates: 7 × 0.75 = 5.25 -> 5, 158 × 0.75 = 118.5 -> 118.
         assert_eq!(b2.men_at_scale(7), 5);
         assert_eq!(b2.men_at_scale(158), 118);
         // The scale the exe clamps to [0.1, 1.0] (0x004A6540).
@@ -2680,7 +2713,7 @@ mod tests {
         let mut big = b.clone();
         assert_eq!(big.set_unit_scale_step(4, &limits), 1.5);
         assert_eq!(big.men_at_scale(160), 240);
-        assert_eq!(big.set_unit_scale_setting(Some(9), &limits), 1.5);
+        assert_eq!(big.set_unit_scale_setting(Some(9.0), &limits), 1.5);
     }
 
     #[test]

@@ -904,6 +904,15 @@ impl CampaignModel {
         }
         let mut events = Vec::new();
         if fleet_end > 0 {
+            // A navy that sails off ends its blockade ([`Self::begin_order`] on the admiral). ORIGINAL BUG:
+            // the exe's landing order is the general's (its execute `0x0095C070` finds the navy through his
+            // army's +0xEC, `0x0095C1D0`), and it runs the order helper `0x008FF470` on him (`0x0095C2C0`),
+            // which lifts a blockade only for a character whose force is a navy (`0x00A0B680`, navy +0xE8);
+            // no move step lifts one either (the seven callers of `0x00A784E0` are the helper, the battle's
+            // casualty step and placement, the end-blockade command, peace, the slot transfer and the navy's
+            // destructor). So the navy sails off and the port stays blockaded by it, against the helper's
+            // rule that a navy taking an order ends its blockade; ours lifts it.
+            self.begin_order(nc);
             self.move_character(nc, to_fixed(plan.points[fleet_end]));
             // The fleet's move ends like a walk ([`Self::set_down`]): its sight, its zones with the
             // army aboard, its admiral's hidden flag.

@@ -13,6 +13,9 @@
 //!   `groupings`, one in `events_hist_chars_junct` a key not in `historical_characters`, or one in
 //!   `events_to_policies_junction` a key not in `policies`.
 //!
+//! A grouping is not in `groupings` either when one of its junction members is not in its table
+//! (`groupings`' own converter `0x00F56770` builds no record for it).
+//!
 //! The database part is [`rules`] (called by [`crate::rules`]); the localisation part is
 //! [`attach`] (called when a campaign opens).
 
@@ -45,14 +48,16 @@ fn text_key(key: &str) -> String {
 /// logged once, with the reason.
 pub fn rules(db: &GameDatabase) -> HistoricalEventRules {
     let t = &db.campaign.events;
+    let groupings = groupings(db);
     let mut events = Vec::new();
     for e in t.events.iter() {
         let effect_groups: Vec<String> = t.effect_groups.iter().filter(|j| j.event == e.key).map(|j| j.grouping.clone()).collect();
         let view_groups: Vec<String> = t.view_groups.iter().filter(|j| j.event == e.key).map(|j| j.grouping.clone()).collect();
         let unknown = if !SEASONS.contains(&e.season.as_str()) {
             Some(format!("season {:?} is not a season", e.season))
-        } else if let Some(g) = effect_groups.iter().chain(&view_groups).find(|g| t.groupings.get(g).is_none()) {
-            Some(format!("grouping {g:?} is not in groupings"))
+        } else if let Some(g) = effect_groups.iter().chain(&view_groups).find(|g| !groupings.contains_key(*g)) {
+            // The record table the converter looks the key up in: without the groupings dropped below.
+            Some(format!("grouping {g:?} is not in groupings (no row, or a dropped one)"))
         } else if let Some(j) = t.historical_characters.iter().find(|j| j.event == e.key && db.campaign.historical_characters.get(&j.character).is_none()) {
             Some(format!("historical character {:?} is not in historical_characters", j.character))
         } else {
@@ -72,33 +77,59 @@ pub fn rules(db: &GameDatabase) -> HistoricalEventRules {
             posts_message: false,
         });
     }
+    let region_continents = db.regions.iter().map(|r| (r.key.clone(), r.continent.clone())).collect();
+    HistoricalEventRules { events, groupings, region_continents }
+}
+
+/// The groupings with their six member lists. The exe's groupings converter (`0x00F56770`) looks
+/// each junction member up in its record table and builds no record when one is missing, and the
+/// table builder (`0x00F47450`) then drops the grouping (CONFIRMED for a `groupings_empires_junct`
+/// member not in `empires`, CAMPAIGN_FIDELITY.md "Empire bucket"), so an event naming it is dropped
+/// too. INFERRED: the tables of the other five lists (`cultures`, `factions`, `regions`,
+/// `regions_continents`, `cultures_subcultures`: the tables their keys belong to; the converter's
+/// lookups for them are not written up). Every vanilla member is a key of its table
+/// (ntw_data real_install.rs `historical_event_tables`), so only mod data loses a grouping; each
+/// dropped one is logged once, with its first unknown member.
+fn groupings(db: &GameDatabase) -> BTreeMap<String, EventGrouping> {
+    let t = &db.campaign.events;
+    let c = &db.campaign.characters;
     let mut groupings: BTreeMap<String, EventGrouping> = t.groupings.iter().map(|g| (g.key.clone(), EventGrouping::default())).collect();
+    // (grouping, table, member) of each member not in its table, in the order met.
+    let mut unknown: Vec<(String, &'static str, String)> = Vec::new();
     // A junction row of a grouping not in `groupings` is not read: no event can name that grouping.
-    let mut add = |grouping: &str, list: fn(&mut EventGrouping) -> &mut Vec<String>, member: &str| {
-        if let Some(g) = groupings.get_mut(grouping) {
+    let mut add = |grouping: &str, list: fn(&mut EventGrouping) -> &mut Vec<String>, member: &str, table: &'static str, known: bool| {
+        let Some(g) = groupings.get_mut(grouping) else { return };
+        if known {
             list(g).push(member.to_owned());
+        } else {
+            unknown.push((grouping.to_owned(), table, member.to_owned()));
         }
     };
     for j in t.grouping_cultures.iter() {
-        add(&j.grouping, |g| &mut g.cultures, &j.member);
+        add(&j.grouping, |g| &mut g.cultures, &j.member, "cultures", c.cultures.get(&j.member).is_some());
     }
     for j in t.grouping_empires.iter() {
-        add(&j.grouping, |g| &mut g.empires, &j.member);
+        add(&j.grouping, |g| &mut g.empires, &j.member, "empires", t.empires.get(&j.member).is_some());
     }
     for j in t.grouping_factions.iter() {
-        add(&j.grouping, |g| &mut g.factions, &j.member);
+        add(&j.grouping, |g| &mut g.factions, &j.member, "factions", db.factions.get(&j.member).is_some());
     }
     for j in t.grouping_regions.iter() {
-        add(&j.grouping, |g| &mut g.regions, &j.member);
+        add(&j.grouping, |g| &mut g.regions, &j.member, "regions", db.regions.get(&j.member).is_some());
     }
     for j in t.grouping_continents.iter() {
-        add(&j.grouping, |g| &mut g.continents, &j.member);
+        add(&j.grouping, |g| &mut g.continents, &j.member, "regions_continents", t.continents.get(&j.member).is_some());
     }
     for j in t.grouping_subcultures.iter() {
-        add(&j.grouping, |g| &mut g.subcultures, &j.member);
+        add(&j.grouping, |g| &mut g.subcultures, &j.member, "cultures_subcultures", c.subcultures.get(&j.member).is_some());
     }
-    let region_continents = db.regions.iter().map(|r| (r.key.clone(), r.continent.clone())).collect();
-    HistoricalEventRules { events, groupings, region_continents }
+    for (grouping, table, member) in unknown {
+        // Removed (and logged) at its first unknown member only.
+        if groupings.remove(&grouping).is_some() {
+            log::warn!("groupings: {grouping} is dropped, as the original drops it: its member {member:?} is not in {table}");
+        }
+    }
+    groupings
 }
 
 /// Finishes the model's events with the localisation: drops the events whose title or text is
@@ -159,6 +190,8 @@ mod tests {
         t.policies = Table::from_rows(1, vec![EventPolicy { event: "bad_policy".into(), policy: "none".into() }]);
         t.grouping_factions = Table::from_rows(1, vec![GroupingFaction { grouping: "g1".into(), member: "f".into() }, GroupingFaction { grouping: "gone".into(), member: "f".into() }]);
         t.grouping_continents = Table::from_rows(1, vec![GroupingContinent { grouping: "g2".into(), member: "c".into() }]);
+        t.continents = Table::from_rows(0, vec![ContinentRecord { key: "c".into() }]);
+        db.factions = Table::from_rows(1, vec![ntw_data::FactionRecord { key: "f".into(), ..Default::default() }]);
         let r = rules(&db);
         assert_eq!(r.events.iter().map(|e| e.key.as_str()).collect::<Vec<_>>(), ["kept"]);
         let e = &r.events[0];
@@ -168,6 +201,50 @@ mod tests {
         assert_eq!(r.groupings.keys().collect::<Vec<_>>(), ["g1", "g2"]);
         assert_eq!(r.groupings["g1"].factions, ["f"]);
         assert_eq!(r.groupings["g2"].continents, ["c"]);
+    }
+
+    /// MADE-UP rows: a grouping with a junction member that is not in its table is dropped (each of
+    /// the six lists), and the event naming it with it; a grouping whose members are all known stays,
+    /// with its lists whole. Without the member check every grouping and both events were kept.
+    #[test]
+    fn a_grouping_with_an_unknown_member_is_dropped_with_its_events() {
+        use ntw_data::characters::{CultureRecord, SubcultureRecord};
+        use ntw_data::events::*;
+        use ntw_data::record::Table;
+        let mut db = GameDatabase::test_fixture();
+        db.factions = Table::from_rows(1, vec![ntw_data::FactionRecord { key: "f".into(), ..Default::default() }]);
+        db.regions = Table::from_rows(1, vec![ntw_data::RegionRecord { key: "r".into(), continent: "c".into(), ..Default::default() }]);
+        let c = &mut db.campaign.characters;
+        c.cultures = Table::from_rows(0, vec![CultureRecord { key: "cu".into(), ..Default::default() }]);
+        c.subcultures = Table::from_rows(0, vec![SubcultureRecord { key: "su".into(), ..Default::default() }]);
+        let t = &mut db.campaign.events;
+        t.empires = Table::from_rows(0, vec![EmpireRecord { key: "e".into() }]);
+        t.continents = Table::from_rows(0, vec![ContinentRecord { key: "c".into() }]);
+        let lists = ["cultures", "empires", "factions", "regions", "continents", "subcultures"];
+        // "good": one known member in every list. "bad_<list>": a known member, then an unknown one, in that list.
+        t.groupings = Table::from_rows(1, std::iter::once("good".to_owned()).chain(lists.iter().map(|l| format!("bad_{l}"))).map(|key| GroupingRecord { key }).collect());
+        let rows = |list: &str, known: &str| -> Vec<(String, String)> {
+            vec![("good".to_owned(), known.to_owned()), (format!("bad_{list}"), known.to_owned()), (format!("bad_{list}"), "nowhere".to_owned())]
+        };
+        t.grouping_cultures = Table::from_rows(1, rows("cultures", "cu").into_iter().map(|(grouping, member)| GroupingCulture { grouping, member }).collect());
+        t.grouping_empires = Table::from_rows(1, rows("empires", "e").into_iter().map(|(grouping, member)| GroupingEmpire { grouping, member }).collect());
+        t.grouping_factions = Table::from_rows(1, rows("factions", "f").into_iter().map(|(grouping, member)| GroupingFaction { grouping, member }).collect());
+        t.grouping_regions = Table::from_rows(1, rows("regions", "r").into_iter().map(|(grouping, member)| GroupingRegion { grouping, member }).collect());
+        t.grouping_continents = Table::from_rows(1, rows("continents", "c").into_iter().map(|(grouping, member)| GroupingContinent { grouping, member }).collect());
+        t.grouping_subcultures = Table::from_rows(1, rows("subcultures", "su").into_iter().map(|(grouping, member)| GroupingSubculture { grouping, member }).collect());
+        let event = |key: &str| EventRecord { key: key.into(), picture_1: String::new(), once: false, year: 1805, season: "season_winter".into(), unknown_5: None, picture: String::new(), turn_of_year: 1 };
+        t.events = Table::from_rows(1, vec![event("kept"), event("names_dropped")]);
+        t.view_groups = Table::from_rows(1, vec![
+            EventViewGroup { event: "kept".into(), grouping: "good".into() },
+            EventViewGroup { event: "names_dropped".into(), grouping: "good".into() },
+            EventViewGroup { event: "names_dropped".into(), grouping: "bad_empires".into() },
+        ]);
+        let r = rules(&db);
+        assert_eq!(r.groupings.keys().collect::<Vec<_>>(), ["good"], "every grouping with an unknown member is dropped");
+        let g = &r.groupings["good"];
+        assert_eq!((&g.cultures, &g.empires, &g.factions), (&vec!["cu".to_owned()], &vec!["e".to_owned()], &vec!["f".to_owned()]));
+        assert_eq!((&g.regions, &g.continents, &g.subcultures), (&vec!["r".to_owned()], &vec!["c".to_owned()], &vec!["su".to_owned()]));
+        assert_eq!(r.events.iter().map(|e| e.key.as_str()).collect::<Vec<_>>(), ["kept"], "an event naming a dropped grouping is dropped");
     }
 
     /// MADE-UP localisation: an event without its text is dropped; a text of `n` posts no message.

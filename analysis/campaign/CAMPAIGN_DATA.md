@@ -233,7 +233,7 @@ string or no argument stores false), storing it in the episodic restrictions (ca
 |---|---|---|---|---|---|
 | `set_technology_research_disabled` | `0x0097B900` | +0x118 | #29, loader version > 0xE | building screens' unlocked-technology lists only (`0x008C7620`): building info `0x009B7300` (`CampaignUI.BuildingEffects` `0x009DE150`), building-completed message data `0x009CDA30` / `0x009FB920` (message +0xBC via `0x00985A70` / `0x00985CB0`), `CampaignUI.FortEffects` "technology" table `0x009E4AA0` → `0x009B2BB0`. No research gate (every escape of the +0xFA8 pointer and every method on it checked) | `World::technology_research_disabled`, read by `CampaignModel::building_info_technologies`; `effects_table_technologies` takes it from its caller (FortEffects the live value, a building-completed message its +0xBC copy; CAMPAIGN_FIDELITY.md §Research). The Lua tables calling them are still PROVISIONAL empty stubs (`ui/campaign/settlement.rs`) and ours posts no building-completed message yet |
 | `set_liberation_options_disabled` | `0x0097B940` | +0x124 | #31 (after `LUA[]`), version > 0xF | capture options `0x00B14930`, both paths (spa `0x00B15134`, normal `0x00B15214`): no liberation offered | `World::liberation_options_disabled`, read by `CampaignModel::liberation_target` |
-| `set_ui_notification_of_victory_disabled` | `0x0097B980` | +0x125 | #32, version > 0x10 | victory test `0x0096FCE0`: still marks the faction won (+0x31) and fires its own event, but skips the `campaign_won` post (test `0x0096FFE7`, post `0x0096FFF7`); victory check `0x0096CD10`: skips each winner's event +0x120 and that winner's multiplayer campaign-over step (test `0x0096CE9C`); the losers' event +0x138 unchanged | `World::victory_notification_disabled`; no victory check yet (BACKLOG "Defeat / victory screen") |
+| `set_ui_notification_of_victory_disabled` | `0x0097B980` | +0x125 | #32, version > 0x10 | victory test `0x0096FCE0`: still marks the faction won (+0x31) and fires its own event, but skips the `campaign_won` post (test `0x0096FFE7`, post `0x0096FFF7`); victory check `0x0096CD10`: skips each winner's event +0x120 and that winner's multiplayer campaign-over step (test `0x0096CE9C`); the losers' event +0x138 unchanged | `World::victory_notification_disabled`, read by `CampaignModel::victory_check` (CAMPAIGN_FIDELITY.md "The victory check and the capture hold"); the victory test and its `campaign_won` post are not ported (BACKLOG §6) |
 
 The loader `0x009968A0` reads them (+0x118 at `0x009986D7`, +0x124 at `0x009987D3`, +0x125 at `0x009987F1`; the
 `LUA[]` block between is read only when present, so without it the last two sit at #30 / #31); the writer
@@ -244,6 +244,15 @@ spa none (the user's mp_eur saves: all false). Ours: `ntw_campaign::details::rea
 (version gates, `LUA[]` shift, write-back), `tests/real_install.rs` `loads_all_eight_startpos` (each campaign's
 values), `ntw_script` `tests/host.rs` `the_world_created_switches_set_the_world_flags`, `ntw_sim`
 `the_scripts_liberation_switch_offers_no_liberation`.
+
+Two more script switches of the same object (worker victoryscreen3, 2026-11-10, CONFIRMED by disassembly):
+
+| method | handler | field | ESF (`EPISODIC_RESTRICTIONS`) | readers | ours |
+|---|---|---|---|---|---|
+| `set_looting_options_disabled_for_human` | `0x0097B800` | +0x114 | #28, loader `0x009986B9` for version > 0xD, writer `0x009A1FA6` | the loot report's step `0x008F8D00` (`0x008F8D22`, `0x008F8DBF`): a human's capture is a plain occupation, and the victory hold (+0x9C) is ignored | `World::looting_options_disabled_for_human`, read by `CampaignModel::settle_capture` and `end_update` |
+| `advance_to_next_campaign` (no argument) | `0x00979050` | +0xD0 | not saved; the loader clears it (`0x00996A0E`) | the next-mode step `0x00A065A0` (leaving the campaign starts the next one of the chain) and the campaign update `0x008F4120` (the byte is its step loop's condition, `0x008F4539`-`0x008F4540`: while set the whole loop is skipped, i.e. the AI step, the pending-stack update, the movement update and the queued negotiations; the calls after the loop, the victory check among them, still run) | `World::advance_to_next_campaign` (stored; ours does not stop the update's steps while it is set, PROVISIONAL in the field's doc; starting the next campaign is PROVISIONAL, `CampaignUI.QuitToMainScreen`) |
+
+Only the tutorial's scripts call them (INFERRED from the shipped start positions: #28 is false in all eight).
 
 **Camera map bounds (2026-10-22, CONFIRMED):** `EPISODIC_RESTRICTIONS` #9..#12 (#8..#11 in a v1 record) are four
 f32, the camera target's rectangle at +0xAC (min x), +0xB0 (min z), +0xB4 (max x), +0xB8 (max z), engine axes (z
@@ -363,8 +372,12 @@ Ghidra on the main project (read-only), tooling `analysis/graphics/run_ghidra.ps
   a best-first flood over grid cells from a query point. Open list = binary heap of 36-byte nodes {cell, grid, priority,
   per-polygon reachable flags, mover type}; closed set = hash of the packed (col, row) xor 0x4A545EED; it expands the 8
   neighbours of each cell; a node's priority (`0x00AF0910`) is minus the smallest signed distance from the query point to
-  the cell's four edges (so cells are visited nearest first); it stops at a distance limit. It answers "which polygons
-  around this point are reachable for this mover" (CONFIRMED structure); it is not the action-point path itself.
+  the cell's four edges (so cells are visited nearest first). `0x00B39FE0` itself has no distance limit or early exit:
+  it starts from the kind-7 polygons (building footprints, PATHFINDING_PORTS.md §9.2, which supersedes the "road over
+  water" reading above) that hold the point, crosses to a neighbour cell only from a reached kind-7 polygon, and keeps
+  the strictly nearest point of a reached land or road polygon (allygarrisonfix; the full trace and our port for mover 0
+  are in CAMPAIGN_FIDELITY.md "The free spot"; the other callers and movers are not ported). It is not the action-point
+  path itself.
 - **Which polygon kinds each mover type may enter** (CONFIRMED table in `0x00AF0910`; the mover type is the node's
   +0x20 value, its meaning UNKNOWN): types 0, 3, 6, 9: kinds 0, 6, 7 (land, road, bridge); types 1, 4, 7, 10: kinds 0, 6, 7,
   8; types 5, 8, 11 and the others: kinds 1, 4, 7 (sea, kind 4, bridge/ford). Kinds 10 and 11 pass for every type. A

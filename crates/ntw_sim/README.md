@@ -88,7 +88,7 @@ Tags used below:
 | W1 §12.6 dispersion, aspect 0.70710677 | `missile::dispersion` | CONFIRMED |
 | W1 §12.10 chance to hit 0x00DAB9D0 | `missile::chance_to_hit` | CONFIRMED (squaring `Dh` in f32 is INFERRED) |
 | W1 §12.10 impact 0x00DAADF0 (kc 14..94, roll 0..100, d≥7 kill, 1..6 knockdown) | `missile::impact`, `impact_kill_chance`, `roll_100` | CONFIRMED |
-| kv_rules key list and types | `rules::KvRules` | CONFIRMED (the `special_ability_*` "other" type is kept as f32, INFERRED) |
+| kv_rules key list and types | `rules::KvRules` | CONFIRMED (the four `special_ability_*` keys are stored as unsigned integers by the third adder `0x00F3A8F0`, so they are `u32`) |
 | W1 §12.9 hit number 0x00DAB5F0 | `melee::hit_number` | CONFIRMED, every term and in order. A zero divisor gives 0 instead of a crash. |
 | W1 §12.9 height delta 0x006CCAB0 | `melee::height_delta` | CONFIRMED |
 | W1 §12.9 attack/charge × fatigue-effect multiplier; army level +4/+8 | `melee::scaled_stat`, `army_level_attack_bonus` | CONFIRMED numbers. The multiplier source record and the meaning of the level are open, and the model uses 1.0 and 0. |

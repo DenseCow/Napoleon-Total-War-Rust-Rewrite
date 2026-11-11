@@ -1,0 +1,45 @@
+# The default translation of a skinned whole-body mesh (.variant_weighted_mesh: horses, camels,
+# campaign agents) into the renderer's inputs. A mod replaces it by shipping
+# materials/vanilla/mount.toml.
+#
+# Texture slots, from the model's texture stem in warscape_animated (CONFIRMED file names,
+# analysis/units/CAVALRY.md §2): diffuse (<stem>_diffuse), normal (<stem>_normal), gloss
+# (<stem>_gloss_map). There is no colour mask: a coat's colour is in the diffuse.
+#
+# The channel meanings below are INFERRED and the numbers PROVISIONAL until the original's
+# shader is read (BACKLOG §2, "The original's materials read in full"); each is marked.
+
+[applies]
+source = "weighted_mesh"
+
+[alpha]
+mode = "mask"             # PROVISIONAL: today's draw path cuts manes and tails out by alpha
+cutoff = 0.5              # PROVISIONAL: hand-picked, as in today's draw path
+source_flags = false      # a weighted mesh has no flags of its own
+
+[base_colour]
+texture = "diffuse"
+
+[opacity]
+texture = "diffuse.a"
+
+[normal]
+texture = "normal"
+encoding = "rgb"          # PROVISIONAL: the channel layout is UNKNOWN (GRAPHICS_EXE.md §5)
+flip_green = false        # PROVISIONAL: the green axis's direction is UNKNOWN (same section)
+
+[roughness]
+value = 0.75              # PROVISIONAL: today's hand-picked value, for a mesh without a gloss map
+texture = "gloss.a"       # INFERRED: the gloss map's alpha scales the specular exponent
+convert = "specular_power"
+power = 32.0              # PROVISIONAL: the shader's exponent is not traced
+
+[specular_tint]
+texture = "gloss"         # INFERRED: the gloss map's colour is the specular colour
+
+[specular_level]
+value = 0.2               # PROVISIONAL: today's hand-picked value
+
+[baked]
+base_colour_gain = 1.0    # PROVISIONAL: no compensation until the look is compared side by side
+occlusion = 0.0           # PROVISIONAL: likewise

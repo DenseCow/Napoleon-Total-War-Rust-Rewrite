@@ -3,7 +3,48 @@
 Keep this file short. It holds what is true now: replace finished items rather than appending logs.
 Old session logs are in `docs/archive/`.
 
-Last updated: 2026-10-23. Main tests at last full run (2026-10-08): `cargo test --workspace` passes on the install.
+Last updated: 2026-11-10. Main tests at last full run (2026-10-08): `cargo test --workspace` passes on the install.
+
+## This machine (2026-11-10: the checkout moved to a new PC, restored from a backup)
+
+- **Layout:** the main checkout and the `NR-<x>` worktrees sit side by side in one folder (not `%USERPROFILE%\Documents`);
+  `git worktree repair` re-linked them and each is a git `safe.directory`. `ntw-evidence`, `ghidra-backups` and the Ghidra
+  project (`napoleon recomp.rep`) are in that same folder, not under `%USERPROFILE%\Documents`.
+- **Rust:** 1.98.1 (the version the old machine built with), installed through rustup. In bash add it with
+  `export PATH="$HOME/.cargo/bin:$PATH"`.
+- **Exe tracing is REA + IDA here (user, 2026-11-10: IDA for everything, Ghidra kept beside it so no progress is lost):**
+  workers read `Napoleon.exe` through the `mcp__rea__*` tools (provider `ida`, a copy of the exe under
+  `%LOCALAPPDATA%\rea-ida\targets`, same virtual addresses; the first query after an open waits several minutes).
+  ghidra-mcp is not installed (`.mcp.json`'s bridge fails to connect).
+- **Names and comments live outside the exe database.** Every REA open of the exe is a fresh IDA analysis with no names
+  (REA cannot open a saved database), so the names are kept as files and replayed: the Ghidra export
+  `%LOCALAPPDATA%\ghidra\export\napoleon_ghidra_export.jsonl` (2,667 named or typed functions, 1,533 labels, 17,785
+  comments; Ghidra 12.1.4 and the project copy are under `%LOCALAPPDATA%\ghidra`) plus the journal
+  `%LOCALAPPDATA%\rea-ida\names\journal.jsonl` for everything named since. Tools in `%LOCALAPPDATA%\rea-ida\tools`:
+  `import_ghidra_names.py --apply` replays both into the open database (about 23,600 edits; a private test run applied
+  all but 55), `merge_pending.py` checks and `--apply` adds workers' new write-ups to the journal.
+- **V5 on this machine** = the function's name and plate comment as JSON lines in
+  `%LOCALAPPDATA%\rea-ida\names\pending\<worker>.jsonl` (the manager merges them); workers never rename through REA. One
+  writer at a time on the exe database, same lock as Ghidra's.
+- **The names are in the live database (2026-11-10)** as long as the exe stays open in REA: 3,193 names, 2,419 function
+  comments and 14,861 line comments applied, 55 leftovers in the importer's log. After any close and reopen: one query
+  (about 5 minutes), then the importer again (about 20 minutes, run detached; check that `0x420d00` reads
+  `RegisterProposePeaceCommand`). A name can also be looked up with a search for the address in the Ghidra export (the
+  journal file appears with the first merge of pending write-ups).
+- **Bridge fix (applied by the user, 2026-11-10).** IDA queues a few milliseconds of follow-up analysis after some
+  renames and about 1 in 1,400 decompiles; nothing in the headless worker ran that queue, and REA then refused every
+  query ("IDA auto-analysis is incomplete") until a close and reopen. `tools\patch_bridge_drain.py` there makes the
+  bridge's health probe run the queue (the line is marked `LOCAL PATCH` in the venv's `ida_pro_mcp\ida_mcp\api_core.py`,
+  the original is kept beside it as `.orig`). A session may not change that file itself (the permission check refuses
+  it): after a venv reinstall ask the user to run the script again.
+- **File identity fault since the reboot of 2026-11-10 15:33 (after Windows update KB5127690):** a file looked up by
+  path reports a different volume serial than the same file through an open handle, on both drives (Node `lstat` vs
+  `fstat`; verified with a probe). Two effects. REA's `open_binary` refuses the exe copy ("Selected input changed while
+  being read"): open it through the loopback share, `\\localhost\C$\<rest of the path>`, where both lookups agree. The
+  shell tools return no output and kill a command after a few seconds: send output to a scratchpad file and read it, and
+  run cargo detached (`nohup bash -c "... > out.txt 2>&1" & disown`), polling the file. Worker briefs must say both. If a
+  plain `echo` in the shell tool shows its output again, the fault is gone: delete this bullet.
+- **Not installed:** `gh` (so `tools/claims.sh` and the push hook's claim sync cannot run).
 
 ## Resume here (2026-10-22)
 
@@ -17,14 +58,15 @@ Last updated: 2026-10-23. Main tests at last full run (2026-10-08): `cargo test 
   → push (the hook syncs public #2) → publish in batches. Running work = the BACKLOG `(running: …)`
   markers and `git worktree list`; merged work = `git log`.
 - **Resume points:** the one debugger sitting sheet at the top of docs/FOR_USER.md. Running work: BACKLOG markers.
-- **Night 2026-10-22 ended at the block cap (Fri 01:30), no resume.** Branches left (worktrees `../NR-<x>`, fresh worker each, BACKLOG markers kept):
-  - `regionvalue` (8b57dc8d): done, needs its full review (stopped mid-review).
-  - `traderaid3` (54442d04): split + mid-turn re-booking done, needs its full review (stopped mid-review).
-  - `actionclears` (b227c71e): review fix round WIP: trace `0x005445A0` (does losing the last gun drop the gun trains from +0x2CC?), then fix actions.rs:13-24/33 notes and the duplicate test.
-  - `allygarrison` (c3da22e3): WIP, tests pass: V5 for `0x00BA6770` / `0x00885F30` / `0x008EA7E0` / `0x00B16C00` (or revert names), then self_check and review.
-  - `victoryscreen3` (f69478b3): WIP: QuitToMainScreen comment (mod.rs ~1084), +0x9C hold / ContinueGameSelected, victory check with +0x125, V5, UI_FIDELITY notes.
-  - `expelplace` (666bbf78): WIP, placement traced (CAMPAIGN_FIDELITY "Placement traced, port in progress"): write campaign/place_flood.rs, stepwise expulsion seam; msvc_sort push/pop_heap unused yet.
-  - `polish67` (dc6509d8): WIP, workspace tests pass, clippy not run: needs clippy + review; not done: handover CharacterCreated assert, `rank()` EffectSet, the (0,0) walk end.
+- **Branches (state on 2026-11-10; worktrees `../NR-<x>`, a fresh worker for each next step, BACKLOG markers kept).**
+  Reviews are files in the session scratchpad, so a new session reruns a review it cannot find.
+  - Started 2026-11-10, full review each: `recruitmarch2` (the nine recruit-march lines),
+    `residents` (`NR-allygarrison`) and `victorytest` (`NR-victoryscreen3`).
+  - Exe write-ups: `actionclearsv5`, `regionvaluefix`, `actionclearsfix`, `victoryscreen3` and `allygarrison` are in
+    the journal but not yet in the live database (one importer `--apply` is owed), and so are `scriptevents`,
+    `expelplace`, `rallyinspire`, `battlekeys`, `warcall` and `portblockade2` (merged 2026-11-10). Still in `names\pending\`, each to
+    merge after its branch's review corrections: the branches above.
+- **Plan from next session (user, 2026-10-23: finish as fast as possible):** 1) finish the WIP branches above. §0 is closed for new lines: the triage of 2026-11-10 moved its open lines to the "From §0 (triage, 2026-11-10)" blocks at the end of §3, §5, §7 and §12; 2) slots go to §2, §3 and §5 in parallel; 3) add the week's net tag change to the Progress block (`tools/progress.sh`) and brief workers to leave their area with fewer tags than they found.
 - Usage (user, 2026-10-22): 12-point blocks (`BlockPercent` in tools/usage_budget.ps1) to the Wed 2026-10-28 reset. The Wed 10-21 night ended at 18% of its 22% cap; its 4 unused points go to the next block (`usage_budget.ps1 extra-next 4`, stored in `next_extra.txt` and applied once when the block opens, so Thu's cap is its opening reading + 16).
 - **Disk:** C: filled up on 2026-10-09; 21 merged worktrees were removed (~100 GB back). Remove a
   worktree after its merge; check `df -h /c` before starting builds.
@@ -83,6 +125,15 @@ Batched for the user: only what the screenshot harness can't do (a worker ran th
 `analysis/fidelity/IN_GAME_CHECKS_2026-10-10.md`; our shots in `ntw-evidence\screens\ours\2026-10-10_*.png`).
 Delete a line once checked and record the result where it belongs. Base command: `cargo run --release -p napoleon -- <flags>`.
 - (user 2026-10-10: the rest is verified by workers from data, layouts, the harness and Ghidra; only a look that no file, trace or harness shot can settle comes here)
+- Quick look on a fresh user folder (no preferences file; uifail6): start with no flags, open Options → Graphics and the custom battle setup: both show the same unit size (the "large" step, registered default 2), and trees in a battle (`--battle`) draw to the "high" distance (150).
+- Side-by-side, battle unit size (unitscale, INFERRED single-player link): a custom battle (`--ui-click single_player,sp_battle,button_classic_battle,button_host,button_ok`) with one line-infantry unit per side: at the default "large" a 160-man card fields 120 in both games; with the preferences file holding `campaign_unit_multiplier 0.25` ("small") it fields 40. `--battle-key NHB_Austerlitz` shows each unit's `num_soldiers` from the battle file unchanged.
+- Side-by-side, allied garrison and the free spot (allygarrison, PROVISIONAL / INFERRED): `--campaign eur_napoleon --campaign-faction france`; march an army into an ally's settlement that has no garrison (it enters in both games), order a full army into your own full garrison (ours walks up and nothing moves until the exchange panel exists; the original opens the panel), and finish a recruit in a settlement whose garrison is full (the new army stands on the same side of the town in both games).
+- Side-by-side, battle keys (battlekeys, INFERRED / PROVISIONAL): `--battle-key NHB_Austerlitz --skip-deployment`. P pauses, CTRL+T changes speed, T toggles fire at will, R runs the selected units; W/S/A/D move the camera, Q/E rotate, X/Z up and down, V/C tilt, the numpad works; CTRL+A selects all, RETURN deselects; F6 / F7 hide the orders and cards panels on the first press and show them on the second; ESC opens the menu; a double right-click on the ground makes the selected units run. With `$env:NAPOLEON_BATTLE_RESTART_KEY='1'`, F8 restarts with fresh views; without it R and F8 do not restart.
+- Side-by-side, Rally and Inspire (rallyinspire, PROVISIONAL / INFERRED; when the ability button lands): `--battle-key NHB_Austerlitz --skip-deployment`. Rally on a wavering or routing allied unit: the routers rally at once, the morale lift lasts 30 s, the button stays lit, then recharges for 180 s; 2 uses. Inspire on a unit about 200 m away: the general walks up and stops within about 75 m, accuracy and melee rise on the unit card, the morale effect lasts 30 s, the stats drop back after 180 s.
+- Side-by-side, where an expelled army lands (expelplace): `--campaign eur_napoleon --campaign-faction france`; with a third faction's army standing in a region (military access, or an ally's), give that region to another faction in a deal; the army should jump to the same spot as in the original: the edge of its nearest own region's settlement area, and next to it when another army already stands there.
+- Side-by-side, port blockade (portblockade2, PROVISIONAL): `--campaign eur_napoleon --campaign-faction france`. A navy blockades an enemy port: the trade prices, the port's ships held and the siege's land units held match. The docked navy sallies against its blockader: both outcomes match, and the blockade lifts only when no foreign navy is left docked. The end-blockade button, and peace with the port's owner, each lift it. ORIGINAL BUG: an army aboard a blockading navy lands elsewhere; the original keeps the port blockaded, ours lifts it. A settlement with no place for a recruit (garrison full, no army within reach, no free spot) holds its finishing land recruits, including the commander-targeted ones. An army takes an enemy port town with the owner's navy docked: the original puts the navy out to sea (the navy surrender), ours leaves it docked (PROVISIONAL, records the gap).
+- Side-by-side, outcome movie loudness (victoryscreen3, INFERRED: gain = level × 0.01 of master × movie, a disabled group silences): `--campaign`; lose the last region with master 50 / movie 50, then with the movie group off, in both games.
+- Side-by-side, region worth in a deal after a conquest (regionvalue, INFERRED refresh step): `--campaign eur_napoleon --campaign-faction france`; take a region next to a neutral's land, then in the same turn open diplomacy with a third faction and ask for one of its regions that borders the conquest. The AI's answer (accepts / asks more) should match the original's for the same offer; if the original only changes its answer a turn later, the refresh is not immediate.
 
 ## Needs the user
 
@@ -92,6 +143,9 @@ Delete a line once checked and record the result where it belongs. Base command:
 - **Raw Ghidra dumps in the private repo's history** (322 + 65, untracked since): they stay unless the
   user wants a history rewrite. The public repo has fresh history and none of them.
 - **Debugger reads still open:** all in the one sitting sheet (docs/FOR_USER.md top, `analysis/fidelity/debugger/SITTING_SHEET.md`).
+- **Renderer decisions (2026-11-10):** the six "Open decisions (the user's)" at the end of DESIGN.md §3.7.2 (reference
+  machine for 60 fps, vanilla metals, anti-aliasing / deferred, TOML reader vs. the `toml` crate, quality options in
+  settings, vendor upscalers). §2 drawing work waits on them.
 
 ## Waiting for a worker slot
 

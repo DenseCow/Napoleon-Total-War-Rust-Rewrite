@@ -23,9 +23,12 @@ pub(crate) fn element_size(primitive: u8) -> Option<usize> {
     })
 }
 
-/// A read cursor over the whole file plus the already-parsed name table.
+/// A read cursor over the file (or one block of it) plus the already-parsed name table.
+/// Positions and limits are absolute file offsets: `data` holds the file's bytes from `base` on
+/// (0 for a whole file), and no limit a caller passes may lie past `base + data.len()`.
 struct Reader<'a> {
     data: &'a [u8],
+    base: usize,
     pos: usize,
     names: &'a [String],
 }
@@ -36,7 +39,7 @@ impl<'a> Reader<'a> {
         let end = self.pos.checked_add(n).filter(|&e| e <= limit);
         match end {
             Some(end) => {
-                let s = &self.data[self.pos..end];
+                let s = &self.data[self.pos - self.base..end - self.base];
                 self.pos = end;
                 Ok(s)
             }
@@ -234,23 +237,25 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Reads the name table at `offset`: u16 count, then count x { u16 len, bytes }.
-fn read_names(data: &[u8], offset: usize) -> Result<Vec<String>> {
-    let mut r = Reader { data, pos: offset, names: &[] };
-    let count = r.u16(data.len())?;
+/// Reads the name table at file offset `offset`: u16 count, then count x { u16 len, bytes }.
+/// `data` is the file from `base` on, to its end.
+fn read_names(data: &[u8], base: usize, offset: usize) -> Result<Vec<String>> {
+    let file_end = base + data.len();
+    let mut r = Reader { data, base, pos: offset, names: &[] };
+    let count = r.u16(file_end)?;
     let mut names = Vec::with_capacity(usize::from(count));
     for _ in 0..count {
-        names.push(r.ascii(data.len())?);
+        names.push(r.ascii(file_end)?);
     }
-    if r.pos != data.len() {
-        return Err(EsfError::TrailingBytes { count: data.len() - r.pos });
+    if r.pos != file_end {
+        return Err(EsfError::TrailingBytes { count: file_end - r.pos });
     }
     Ok(names)
 }
 
-/// Parses a complete ESF file from bytes. See [`EsfFile::from_bytes`].
-pub(crate) fn read_file(data: &[u8]) -> Result<EsfFile> {
-    let mut hr = Reader { data, pos: 0, names: &[] };
+/// The 16-byte file header's words, after the magic check.
+fn read_header(data: &[u8]) -> Result<EsfHeader> {
+    let mut hr = Reader { data, base: 0, pos: 0, names: &[] };
     let magic = hr.u32(data.len())?;
     if magic != MAGIC {
         return Err(EsfError::BadMagic(magic));
@@ -258,13 +263,120 @@ pub(crate) fn read_file(data: &[u8]) -> Result<EsfFile> {
     let unknown_04 = hr.u32(data.len())?;
     let timestamp = hr.u32(data.len())?;
     let names_offset = hr.u32(data.len())?;
+    Ok(EsfHeader { magic, unknown_04, timestamp, names_offset })
+}
+
+/// Reads the root record of a seekable ESF source with only its child records named `want`, without
+/// reading the rest of the tree. See [`EsfFile::read_root_children`].
+///
+/// Read from the source: the file header and the root's own header (24 bytes), the name table (the
+/// file's tail), 8 bytes at each of the root's children, and the whole of each wanted child. Every
+/// other child is stepped over by its end offset (a value by its size), so what is inside it is
+/// neither read nor checked. A format error comes back as an `InvalidData` I/O error holding the
+/// [`EsfError`].
+pub(crate) fn read_root_children<R: std::io::Read + std::io::Seek>(src: &mut R, want: &str) -> std::io::Result<EsfRecord> {
+    use std::io::SeekFrom;
+    fn bad(e: EsfError) -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+    }
+    /// Root header: type byte, u16 name, u8 version, u32 end. Any child's header is no longer.
+    const NODE_HEADER: usize = 8;
+    const ROOT_AT: usize = 16;
+
+    let file_len = usize::try_from(src.seek(SeekFrom::End(0))?).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let mut head = [0u8; ROOT_AT + NODE_HEADER];
+    if file_len < head.len() {
+        return Err(bad(EsfError::UnexpectedEof { offset: file_len, needed: head.len() - file_len }));
+    }
+    src.seek(SeekFrom::Start(0))?;
+    src.read_exact(&mut head)?;
+    let header = read_header(&head).map_err(bad)?;
+    let names_at = header.names_offset as usize;
+    if names_at < ROOT_AT || names_at > file_len {
+        return Err(bad(EsfError::BadNamesOffset { names_offset: header.names_offset, file_len }));
+    }
+    let mut tail = vec![0u8; file_len - names_at];
+    src.seek(SeekFrom::Start(names_at as u64))?;
+    src.read_exact(&mut tail)?;
+    let names = read_names(&tail, names_at, names_at).map_err(bad)?;
+
+    // The root's header, read as the whole-file reader does (its end must be the name table's start).
+    let mut r = Reader { data: &head, base: 0, pos: ROOT_AT, names: &names };
+    let code = r.u8(head.len()).map_err(bad)?;
+    if code != RECORD {
+        return Err(bad(EsfError::RootNotRecord { type_code: code }));
+    }
+    let name_index = r.u16(head.len()).map_err(bad)?;
+    let name = r.name(name_index, ROOT_AT).map_err(bad)?;
+    let version = r.u8(head.len()).map_err(bad)?;
+    let root_end = u32::from_le_bytes([head[20], head[21], head[22], head[23]]);
+    let end = root_end as usize;
+    if end < head.len() || end > names_at {
+        return Err(bad(EsfError::BadEndOffset { offset: ROOT_AT, end: root_end, min: head.len(), max: names_at }));
+    }
+    if end != names_at {
+        return Err(bad(EsfError::RootEndMismatch { root_end: end, names_offset: names_at }));
+    }
+
+    let mut root = EsfRecord { name, version, children: Vec::new() };
+    let mut pos = head.len();
+    while pos < end {
+        let mut h = [0u8; NODE_HEADER];
+        let have = NODE_HEADER.min(end - pos);
+        src.seek(SeekFrom::Start(pos as u64))?;
+        src.read_exact(&mut h[..have])?;
+        let word = |at: usize, n: usize| -> std::io::Result<usize> {
+            if at + n > have {
+                return Err(bad(EsfError::UnexpectedEof { offset: pos + at, needed: n }));
+            }
+            Ok(h[at..at + n].iter().rev().fold(0usize, |v, &b| (v << 8) | usize::from(b)))
+        };
+        // A block's end offset at `at`, checked as the whole-file reader checks it.
+        let block_end = |at: usize| -> std::io::Result<usize> {
+            let e = word(at, 4)?;
+            if e < pos + at + 4 || e > end {
+                return Err(bad(EsfError::BadEndOffset { offset: pos, end: e as u32, min: pos + at + 4, max: end }));
+            }
+            Ok(e)
+        };
+        let code = h[0];
+        let next = match code {
+            RECORD | RECORD_ARRAY => {
+                let index = word(1, 2)? as u16;
+                let child = names.get(usize::from(index)).ok_or_else(|| bad(EsfError::NameIndexOutOfRange { offset: pos, index, name_count: names.len() }))?;
+                let child_end = block_end(4)?;
+                if code == RECORD && child == want {
+                    let mut block = vec![0u8; child_end - pos];
+                    src.seek(SeekFrom::Start(pos as u64))?;
+                    src.read_exact(&mut block)?;
+                    let mut r = Reader { data: &block, base: pos, pos: pos + 1, names: &names };
+                    root.children.push(EsfNode::Record(Box::new(r.record(pos, child_end, 1).map_err(bad)?)));
+                }
+                child_end
+            }
+            c if c & 0xC0 == ARRAY_FLAG => block_end(1)?,
+            UTF16 => pos + 3 + word(1, 2)? * 2,
+            ASCII => pos + 3 + word(1, 2)?,
+            c => pos + 1 + element_size(c).ok_or_else(|| bad(EsfError::UnknownTypeCode { code: c, offset: pos }))?,
+        };
+        if next > end {
+            return Err(bad(EsfError::UnexpectedEof { offset: pos, needed: next - pos }));
+        }
+        pos = next;
+    }
+    Ok(root)
+}
+
+/// Parses a complete ESF file from bytes. See [`EsfFile::from_bytes`].
+pub(crate) fn read_file(data: &[u8]) -> Result<EsfFile> {
+    let EsfHeader { magic, unknown_04, timestamp, names_offset } = read_header(data)?;
     let names_at = names_offset as usize;
     if names_at < 16 || names_at > data.len() {
         return Err(EsfError::BadNamesOffset { names_offset, file_len: data.len() });
     }
-    let names = read_names(data, names_at)?;
+    let names = read_names(data, 0, names_at)?;
 
-    let mut r = Reader { data, pos: 16, names: &names };
+    let mut r = Reader { data, base: 0, pos: 16, names: &names };
     let code = r.u8(names_at)?;
     if code != RECORD {
         return Err(EsfError::RootNotRecord { type_code: code });

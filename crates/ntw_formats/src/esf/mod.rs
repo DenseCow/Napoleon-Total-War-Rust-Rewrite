@@ -111,6 +111,17 @@ impl EsfFile {
         Ok(Self::from_bytes(&bytes)?)
     }
 
+    /// Reads the root record with only its child records named `name` (in file order; none when the
+    /// root has no such child) from a file or any other seekable source, without reading the rest
+    /// of the tree: for a block that sits near the start of a large file, such as a save's
+    /// `SAVE_GAME_HEADER`. The header, the name table and the wanted records are checked as
+    /// [`EsfFile::from_bytes`] checks them; the root's other children are stepped over by their end
+    /// offsets, so damage inside them is not seen here. A format error is an `InvalidData` I/O error
+    /// whose source is the [`EsfError`].
+    pub fn read_root_children<R: std::io::Read + std::io::Seek>(src: &mut R, name: &str) -> std::io::Result<EsfRecord> {
+        read::read_root_children(src, name)
+    }
+
     /// Serializes back to bytes. See [`EsfWriter::write`].
     pub fn to_bytes(&self) -> Result<Vec<u8>, EsfError> {
         EsfWriter::write(self)
@@ -185,6 +196,85 @@ mod tests {
     fn tiny_round_trips_byte_exact() {
         let bytes = tiny();
         assert_eq!(EsfFile::from_bytes(&bytes).unwrap().to_bytes().unwrap(), bytes);
+    }
+
+    /// A source that counts the bytes read from it.
+    struct Counted<'a>(std::io::Cursor<&'a [u8]>, usize);
+    impl std::io::Read for Counted<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.0.read(buf)?;
+            self.1 += n;
+            Ok(n)
+        }
+    }
+    impl std::io::Seek for Counted<'_> {
+        fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.0.seek(to)
+        }
+    }
+
+    #[test]
+    fn read_root_children_reads_the_wanted_record_and_steps_over_the_rest() {
+        let b = tiny();
+        let root = EsfFile::read_root_children(&mut std::io::Cursor::new(&b[..]), "CHILD").unwrap();
+        let whole = EsfFile::from_bytes(&b).unwrap();
+        assert_eq!((root.name.as_str(), root.version), ("ROOT", 1));
+        assert_eq!(root.children, vec![EsfNode::Record(Box::new(whole.find_path("CHILD").unwrap().clone()))]);
+        // No child of that name (a record array of the name is not one): the root alone.
+        for absent in ["ITEMS", "NOPE"] {
+            assert!(EsfFile::read_root_children(&mut std::io::Cursor::new(&b[..]), absent).unwrap().children.is_empty());
+        }
+
+        // Every node type as a root child is stepped over: the last child is found behind them all.
+        let every = every_type();
+        let bytes = every.to_bytes().unwrap();
+        let root = EsfFile::read_root_children(&mut std::io::Cursor::new(&bytes[..]), "EMPTY").unwrap();
+        assert_eq!(root.children, vec![EsfNode::Record(Box::new(EsfRecord::new("EMPTY", 1)))]);
+
+        // A large record before the wanted one is not read: only the headers, the names and the record.
+        let mut big = EsfRecord::new("BIG", 0);
+        big.children = vec![EsfNode::U8Array(vec![7; 1 << 20])];
+        let mut head = EsfRecord::new("HEAD", 2);
+        head.children = vec![EsfNode::U32(42)];
+        let mut root = EsfRecord::new("ROOT", 0);
+        root.children = vec![EsfNode::Record(Box::new(big)), EsfNode::Record(Box::new(head.clone())), EsfNode::Bool(true)];
+        let bytes = EsfFile::new(root).to_bytes().unwrap();
+        let mut src = Counted(std::io::Cursor::new(&bytes[..]), 0);
+        let got = EsfFile::read_root_children(&mut src, "HEAD").unwrap();
+        assert_eq!(got.children, vec![EsfNode::Record(Box::new(head))]);
+        assert!(src.1 < 200, "{} bytes read of {}", src.1, bytes.len());
+    }
+
+    #[test]
+    fn read_root_children_reports_format_errors_as_the_whole_file_reader_does() {
+        let esf_error = |b: &[u8], want: &str| {
+            let e = EsfFile::read_root_children(&mut std::io::Cursor::new(b), want).unwrap_err();
+            assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+            e.get_ref().and_then(|x| x.downcast_ref::<EsfError>()).cloned().expect("an EsfError inside")
+        };
+        let mut b = tiny();
+        b[0] = 0;
+        assert_eq!(esf_error(&b, "CHILD"), EsfFile::from_bytes(&b).unwrap_err());
+        let mut b = tiny();
+        b[0x10] = 0x01;
+        assert_eq!(esf_error(&b, "CHILD"), EsfError::RootNotRecord { type_code: 1 });
+        // A bad name index or a bad end offset inside the wanted record.
+        let mut b = tiny();
+        b[0x41 + 1] = 9;
+        assert_eq!(esf_error(&b, "CHILD"), EsfFile::from_bytes(&b).unwrap_err());
+        // A skipped block whose end lies past the root's.
+        let mut b = tiny();
+        b[0x1F + 1] = 0x60;
+        assert!(matches!(esf_error(&b, "CHILD"), EsfError::BadEndOffset { offset: 0x1F, .. }));
+        // An unknown type byte among the root's children.
+        let mut b = tiny();
+        b[0x18] = 0x11;
+        assert_eq!(esf_error(&b, "CHILD"), EsfError::UnknownTypeCode { code: 0x11, offset: 0x18 });
+        // Extra bytes after the name table, and a file cut short.
+        let mut b = tiny();
+        b.push(0);
+        assert_eq!(esf_error(&b, "CHILD"), EsfError::TrailingBytes { count: 1 });
+        assert!(matches!(esf_error(&tiny()[..20], "CHILD"), EsfError::UnexpectedEof { .. }));
     }
 
     /// A tree that uses every node type, built in code.

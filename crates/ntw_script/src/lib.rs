@@ -32,6 +32,7 @@
 mod bit;
 pub mod conditions;
 pub mod characters;
+pub mod event_classes;
 pub mod game;
 pub mod host;
 pub mod battle_script;

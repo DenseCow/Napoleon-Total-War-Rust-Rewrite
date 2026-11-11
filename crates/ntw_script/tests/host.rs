@@ -181,7 +181,8 @@ fn unknown_conditions_are_safe_stubs() {
 #[test]
 fn war_started_character_faction_reads_the_faction_flag() {
     // 0x008A66C0: the context character's faction +0x925 (`FactionDetails::war_started`); false
-    // without a character.
+    // without a character (asked from an event whose class has none: a character event without
+    // one never reaches Lua, 0x008F9EE0).
     use ntw_sim::campaign::{Character, CharacterId, CharacterKind};
     use ntw_sim::fixed::Fixed20;
     let src = ScriptSource::empty().with_memory_file("events.lua", EVENTS).with_memory_file("test.lua", SCRIPT);
@@ -207,6 +208,7 @@ fn war_started_character_faction_reads_the_faction_flag() {
         r#"local e = require "data.events"
            e.CharacterTurnEnd = {}
            e.CharacterTurnEnd[1] = function(context) war_started[#war_started+1] = conditions.WarStartedCharacterFaction(context) end
+           e.FactionTurnEnd = { e.CharacterTurnEnd[1] }
            war_started = {}"#,
     )
     .unwrap();
@@ -214,7 +216,8 @@ fn war_started_character_faction_reads_the_faction_flag() {
     assert!(h.fire("CharacterTurnEnd", ctx.clone()).errors.is_empty());
     h.state_mut().model.world.faction_details.entry(fr).or_default().war_started = true;
     h.fire("CharacterTurnEnd", ctx);
-    h.fire("CharacterTurnEnd", ScriptContext::default());
+    assert_eq!(h.fire("CharacterTurnEnd", ScriptContext::default()).handlers, 0);
+    h.fire("FactionTurnEnd", ScriptContext::for_faction("france"));
     let seen: Vec<bool> = h.lua().load("return war_started").eval().unwrap();
     assert_eq!(seen, vec![false, true, false]);
 }
@@ -279,16 +282,33 @@ fn grant_faction_handover_destroys_the_target_and_sets_the_killers_flag() {
 #[test]
 fn a_handover_from_a_handler_returns_its_destruction_events() {
     // The destruction's model events (here a human target's `FactionDestroyed`) were dropped on the
-    // script command path; the host now fires/returns them after the handler's batch.
+    // script command path; the host now fires/returns them after the handler's batch. So is the
+    // `CharacterCreated` of the colonel the killer's new garrison gets in a region handed over to it.
+    use ntw_sim::campaign::{BuildingRef, CampaignEvent, RegionSlot};
     let src = ScriptSource::empty().with_memory_file("events.lua", EVENTS).with_memory_file("test.lua", SCRIPT);
     let mut model = common::tiny_model();
     let fr = model.faction_by_key("france").unwrap().id;
     let au = model.faction_by_key("austria").unwrap().id;
+    let pr = model.faction_by_key("prussia").unwrap().id;
     model.turn.humans = vec![fr, au];
-    // A defeat movie row for austria (its movie id is empty here, as the empty `id` compares).
-    let mut rules = (*model.rules).clone();
+    // A defeat movie row for austria (its movie id is empty here, as the empty `id` compares), and the
+    // test units France may raise its garrison from.
+    let mut rules = ntw_sim::campaign::rules::CampaignRules::test_rules();
     rules.movie_events = vec![ntw_sim::campaign::outcome::MovieEventRow { movie: "lost.bik".into(), ..Default::default() }];
+    rules.faction_units.insert("france".into(), ["test_unit", "test_recruit"].map(String::from).into());
     model.rules = std::sync::Arc::new(rules);
+    // Prussia (AI, so its regions pass to the killer) owns one region with a recruiting building.
+    let (region, prussian) = garrison_in_a_region_of(&mut model, pr, pr);
+    model.world.regions.get_mut(&region).unwrap().slots.push(RegionSlot {
+        key: "test_slot_1".into(),
+        slot_type: "test_slot".into(),
+        building: Some(BuildingRef { level_key: "test_building_level".into(), health: 100 }),
+        position: None,
+        port: false,
+        holder: None,
+        id: 0,
+        blockade: None,
+    });
     let mut h = ScriptHost::new(model, "france", src).unwrap();
     h.run_file("data/test.lua").unwrap();
     h.fire("NewSession", ScriptContext::default());
@@ -300,6 +320,7 @@ fn a_handover_from_a_handler_returns_its_destruction_events() {
                    handed = true
                    local t = conditions.TurnNumber(context) - 1
                    game_interface:grant_faction_handover("france", "austria", t, t)
+                   game_interface:grant_faction_handover("france", "prussia", t, t)
                end
            end"#,
     )
@@ -308,14 +329,25 @@ fn a_handover_from_a_handler_returns_its_destruction_events() {
     let start = fired.iter().position(|(e, _)| e.script_name() == Some("FactionTurnStart")).expect("a turn started");
     let destroyed = fired
         .iter()
-        .position(|(e, _)| matches!(e, ntw_sim::campaign::CampaignEvent::FactionDestroyed { faction } if *faction == au))
+        .position(|(e, _)| matches!(e, CampaignEvent::FactionDestroyed { faction } if *faction == au))
         .expect("the handover's FactionDestroyed is returned");
     assert!(start < destroyed, "after the batch whose handler issued it");
     assert!(
-        fired.iter().any(|(e, _)| matches!(e, ntw_sim::campaign::CampaignEvent::OutcomeMovie { faction, .. } if *faction == au)),
+        fired.iter().any(|(e, _)| matches!(e, CampaignEvent::OutcomeMovie { faction, .. } if *faction == au)),
         "the human target's outcome movie is returned too"
     );
     assert_eq!(h.model().world.faction_details.get(&au).and_then(|d| d.out_of_game), Some(true));
+    // Prussia's region is France's now, with a new garrison under a new colonel.
+    let m = h.model();
+    assert_eq!(m.world.regions[&region].owner, fr);
+    let garrison = &m.world.forces[&m.world.regions[&region].garrison.expect("France's new garrison")];
+    let colonel = garrison.commander.expect("its colonel");
+    assert_ne!(colonel, prussian);
+    assert!(
+        fired.iter().any(|(e, _)| matches!(e, CampaignEvent::CharacterCreated { character } if *character == colonel)),
+        "the new colonel's CharacterCreated is returned: {:?}",
+        fired.iter().map(|(e, _)| e).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -751,6 +783,27 @@ fn the_world_created_switches_set_the_world_flags() {
         .exec()
         .unwrap();
     assert_eq!(flags(&h), (false, false, false));
+}
+
+#[test]
+fn the_tutorial_switches_set_the_world_flags() {
+    // 0x0097B800: one boolean (slot cleared first) stored at campaign +0x114; 0x00979050: no
+    // argument, sets campaign +0xD0.
+    let src = ScriptSource::empty().with_memory_file("events.lua", EVENTS).with_memory_file("test.lua", SCRIPT);
+    let h = ScriptHost::new(common::tiny_model(), "france", src).unwrap();
+    h.run_file("data/test.lua").unwrap();
+    h.fire("NewSession", ScriptContext::default());
+    let flags = |h: &ScriptHost| {
+        let m = h.model();
+        (m.world.looting_options_disabled_for_human, m.world.advance_to_next_campaign)
+    };
+    assert_eq!(flags(&h), (false, false));
+    h.lua().load("game_interface:set_looting_options_disabled_for_human(true)").exec().unwrap();
+    assert_eq!(flags(&h), (true, false));
+    h.lua().load("game_interface:advance_to_next_campaign()").exec().unwrap();
+    assert_eq!(flags(&h), (true, true));
+    h.lua().load("game_interface:set_looting_options_disabled_for_human(1)").exec().unwrap();
+    assert_eq!(flags(&h), (false, true));
 }
 
 #[test]

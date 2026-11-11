@@ -137,6 +137,13 @@ impl Plugin for BattlePlugin {
         bevy::asset::embedded_asset!(app, "soldier_skin_prepass.wgsl");
         bevy::asset::embedded_asset!(app, "particle.wgsl");
         skin::add_fade_upload(app);
+        // Test harness: the per-pass times `fps_log` prints when it quits, and frames drawn at
+        // full rate while the window is not focused (Bevy's default holds an unfocused window
+        // at 60 updates a second, which would cap the measurement).
+        if std::env::var_os("NAPOLEON_FPS_LOG").is_some() {
+            app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin);
+            app.insert_resource(bevy::winit::WinitSettings::continuous());
+        }
         app
             // Run `FixedUpdate` 10 times per (virtual) second = one model tick each time.
             .add_plugins(MaterialPlugin::<skin::SkinMaterial>::default())
@@ -146,6 +153,7 @@ impl Plugin for BattlePlugin {
             .init_resource::<fx_draw::DrawnFx>()
             .init_resource::<fx_draw::FxMeshes>()
             .init_resource::<view::ScriptCamera>()
+            .init_resource::<view::CameraKeys>()
             .add_systems(
                 OnEnter(GameMode::Battle),
                 (
@@ -164,7 +172,7 @@ impl Plugin for BattlePlugin {
             .add_systems(OnExit(GameMode::Battle), (hud::leave, scripts::leave, markers::leave, fx_draw::leave))
             .add_systems(
                 Update,
-                (hud::harness, hud::frame, hud::redraw).chain().before(input::keyboard).run_if(in_state(GameMode::Battle)),
+                (hud::harness, hud::keys, hud::frame, hud::redraw).chain().before(input::keyboard).run_if(in_state(GameMode::Battle)),
             )
             .add_systems(FixedUpdate, (tick_battle, fx_draw::tick_fx, scripts::tick, trace_battle, view::observe_ticks).chain().run_if(in_state(GameMode::Battle)))
             .add_systems(
@@ -231,30 +239,49 @@ fn tick_battle(mut sim: ResMut<BattleSim>, mut fx: ResMut<VolleyFx>) {
             }
         }
     }
-    // Forget volleys that have faded (or that belong to a battle that was restarted with R).
+    // Forget volleys that have faded (or that belong to a battle that was restarted with the test key F8).
     let now = sim.battle.time_seconds();
     fx.recent.retain(|(t, _)| *t <= now && now - *t <= VOLLEY_FX_SECONDS);
 }
 
 /// Test harness: with `NAPOLEON_FPS_LOG=<seconds>`, logs the frame rate every 2 s (mean FPS,
-/// worst frame) and quits after that many seconds of real time. Used for the performance
-/// numbers in `analysis/units/ANIM_FORMAT.md`.
+/// worst frame) and quits after that many seconds of real time. On quitting it logs, once, the
+/// mean CPU and GPU time of every render pass over the last frames (`PASS` lines, from the
+/// `RenderDiagnosticsPlugin` that `BattlePlugin` adds under the same variable).
+/// `NAPOLEON_FPS_SIZE=<width>x<height>` asks for that window size (physical pixels) for the run;
+/// the `PASS` block starts with the size the window really has and the number of entities that
+/// carry a mesh. `NAPOLEON_FPS_SHADOWS=0` (`view::spawn_camera`) runs without sun shadows, whose
+/// passes Bevy 0.19 does not time. Used for the performance numbers
+/// in `analysis/units/ANIM_FORMAT.md` and the frame budget of `docs/DESIGN.md` §3.7.2.
 fn fps_log(
     time: Res<Time<Real>>,
     sim: Res<BattleSim>,
-    mut acc: Local<(f32, u32, f32, f32)>,
+    diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
+    mut state: Local<FpsLog>,
     mut exit: MessageWriter<AppExit>,
     mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>,
+    drawn: Query<(), With<Mesh3d>>,
 ) {
     let Some(limit) = std::env::var("NAPOLEON_FPS_LOG").ok().and_then(|s| s.parse::<f32>().ok()) else { return };
+    let FpsLog { window, frames, worst, total, sized, done } = &mut *state;
+    if *done {
+        return;
+    }
     // Measure without vsync, so the numbers are not capped at the display rate.
     for mut w in &mut windows {
         if w.present_mode != bevy::window::PresentMode::AutoNoVsync {
             w.present_mode = bevy::window::PresentMode::AutoNoVsync;
         }
+        if !*sized {
+            match std::env::var("NAPOLEON_FPS_SIZE").ok().map(|s| fps_size(&s).ok_or(s)) {
+                Some(Ok((width, height))) => w.resolution.set_physical_resolution(width, height),
+                Some(Err(s)) => warn!("NAPOLEON_FPS_SIZE={s:?} is not <width>x<height>; the window keeps its size"),
+                None => {}
+            }
+        }
     }
+    *sized = true;
     let dt = time.delta_secs();
-    let (window, frames, worst, total) = &mut *acc;
     *window += dt;
     *frames += 1;
     *worst = worst.max(dt);
@@ -271,8 +298,46 @@ fn fps_log(
         (*window, *frames, *worst) = (0.0, 0, 0.0);
     }
     if *total >= limit {
+        for w in &windows {
+            info!("PASS window {}x{} physical pixels", w.resolution.physical_width(), w.resolution.physical_height());
+        }
+        info!("PASS mesh entities {}", drawn.iter().count());
+        let mut passes: Vec<(&str, f64, &str)> = diagnostics
+            .iter()
+            .filter(|d| d.path().as_str().starts_with("render/"))
+            .filter_map(|d| Some((d.path().as_str(), d.average()?, &*d.suffix)))
+            .collect();
+        passes.sort_unstable_by_key(|pass| pass.0);
+        for (path, mean, unit) in passes {
+            info!("PASS {path} {mean:.3}{unit}");
+        }
+        *done = true;
         exit.write(AppExit::Success);
     }
+}
+
+/// What `fps_log` keeps between frames.
+#[derive(Default)]
+struct FpsLog {
+    /// Seconds in the 2 s window being measured.
+    window: f32,
+    /// Frames in that window.
+    frames: u32,
+    /// The longest frame of that window, in seconds.
+    worst: f32,
+    /// Seconds since the run began.
+    total: f32,
+    /// The window size was asked for.
+    sized: bool,
+    /// The pass times were logged and the exit sent.
+    done: bool,
+}
+
+/// `NAPOLEON_FPS_SIZE`'s value, `<width>x<height>` in physical pixels (both above 0).
+fn fps_size(text: &str) -> Option<(u32, u32)> {
+    let (width, height) = text.split_once(['x', 'X'])?;
+    let size = (width.trim().parse::<u32>().ok()?, height.trim().parse::<u32>().ok()?);
+    (size.0 > 0 && size.1 > 0).then_some(size)
 }
 
 /// Comparison harness (`docs/COMPARE_WITH_ORIGINAL.md`): with `NAPOLEON_BATTLE_TRACE=<file.csv>`,
@@ -297,7 +362,7 @@ fn trace_battle(sim: Res<BattleSim>, mut out: Local<Option<std::io::BufWriter<st
     }
     let t = sim.battle.time_seconds();
     if t + 10.0 < *next {
-        *next = 0.0; // the battle was restarted (R)
+        *next = 0.0; // the battle was restarted (the test key F8)
     }
     if t < *next {
         return;
@@ -323,6 +388,16 @@ mod tests {
 
     fn info(id: u32) -> UnitInfo {
         UnitInfo { id, name: format!("unit {id}"), ..UnitInfo::default() }
+    }
+
+    /// The harness window size is `<width>x<height>`; anything else is refused, not guessed.
+    #[test]
+    fn the_harness_window_size_parses() {
+        assert_eq!(fps_size("1920x1080"), Some((1920, 1080)));
+        assert_eq!(fps_size(" 2560 X 1440 "), Some((2560, 1440)));
+        for bad in ["", "1920", "1920x", "0x1080", "1920x-1", "wide x tall"] {
+            assert_eq!(fps_size(bad), None, "{bad:?}");
+        }
     }
 
     /// Regression (review of the polish-hotpaths branch): the HUD cards (`hud::refresh_facts`)

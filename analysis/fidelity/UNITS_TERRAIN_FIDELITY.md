@@ -528,7 +528,7 @@ Files this round: `crates/ntw_formats/src/verlet.rs` (new), `crates/ntw_formats/
      element layout and pull-back into the area. The test armies use it (`setup::deploy_with_templates`); historical
      battles keep their file positions, as the exe does. It does not overlap 0-A's movement or formation work: it only
      sets start positions.
-  2. Fire, reload, melee, death and knock-down clips from the model's unit state (display only; `battle/actions.rs`,
+  2. Fire, reload, melee, death and knock-down clips from the model's unit state (display only; `crates/napoleon/src/battle/actions.rs`,
      §1.7). Screenshots: `target/tmp/keep_firing.png`, `keep_melee.png` (not committed).
   3. Unit LOD switching with the CONFIRMED 5/10/15 m thresholds (§2). FPS on Austerlitz (release, 4,350 men; the PC was
      at 99% CPU from other workers' builds, so the numbers are noisy), three interleaved pairs of 6 × 2 s samples:
@@ -636,7 +636,7 @@ against the clip's frame count (`+0x50`) and uses the clip root for one-shots (k
 men by their clips' root motion; the view's in-place looping stays PROVISIONAL.
 
 ### 1.7 Action clips in the battle view (slots CONFIRMED, staging PROVISIONAL)
-The view (`battle/actions.rs`) reads the model's unit state and plays the engine's slots: `COMBAT_READY` / `AIM` while a
+The view (`crates/napoleon/src/battle/actions.rs`) reads the model's unit state and plays the engine's slots: `COMBAT_READY` / `AIM` while a
 shooting unit has a target; on each volley every living man plays `FIRE` (after a per-man delay of up to 0.35 s) then
 `RELOAD_1` or `RELOAD_2`; in melee `COMBAT_IDLE_n` loops with `ATTACK_n` now and then (riders: `RIDER_` slots, the horse
 keeps `COMBAT_IDLE_n` or its gait clip when the rider slot has no mount pair); the men the model removes play a death from
@@ -1198,7 +1198,8 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
     `ntw_data::schemas` puts #43 default_ranks at 0x1C0, #44 spacing_file_close 0x1C4, #45 spacing_rank_close 0x1C8;
     `+0x134` ← row `+0x1E0` is_artillery confirms the alignment). Earlier class notes here were wrong: `0x00515340`
     (0x2DF8 bytes, "Manager", battle model `+0xB0`) is a battle-level manager, `0x00518230` copies a different layout
-    (the recruitment-panel holder), and `0x005181E0` / `0x00518DC0` build a 0x514-byte class, none of them the unit.
+    (the recruitment-panel holder), and `0x005181E0` builds a 0x514-byte men group and `0x00518DC0` the squad, a larger
+    class on the same base ctor `0x00518F10` (it writes up to word `+0x2790`), none of them the unit.
     **Open contradiction:** with n living men and k the rank spacing, a full unit (160 × ~1.5 m) plans t = n·k/v + 2 of
     tens to hundreds of seconds, while the 2026-10-10 sitting's slope (order speed rising ~0.035 a tick from 2.69 under
     `0x00659600`'s d / (t − elapsed)) needs t ≈ 5 s (n·k ≈ 3v). Not resolvable statically (the array `+0x27C` may be
@@ -1658,8 +1659,11 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
     the men were not found in place (`0x00557BA0`: the stamp `+0x2784` older than 20 ticks). The idle update
     `0x005577C0` runs the in-place check `0x00557BC0` → `0x00557C20` (tolerance `0x0057E1F0()` + 2.5 m when
     `0x0055ABF0` holds, else 1 m), which stamps `+0x2784`, every `[0x014A35D0]` ticks (10), staggered by unit.
-    *The idle reform gate (formation4, CONFIRMED static).* The squad tick `0x00580A30` pushes a new idle task when
-    the task stack is empty (`0x0051A3A0`: `+0x2C` = 0, `+0x28` = the width) and the state machine's pass
+    *The idle reform gate (formation4, CONFIRMED static).* The squad tick `0x00580A30` pushes a new idle task
+    (`0x0051A3A0`: `+0x2C` = 0, `+0x28` = the width) when the task stack is empty, its gate holds (squad `+0x515`
+    set; `+0x508` ≠ 1 or `+0x498` set) and the placement check `0x00586440(0)` holds; when that check fails the
+    men's actions end and nothing is pushed (see actionclears below; never in ours, `ntw_sim`
+    `battle/actions.rs`). The state machine's pass
     `0x010FBBD0` runs the idle state's check (`0x00573770`) before its update, so a unit whose order ended reforms
     in its next tick. `0x00557BA0` (disassembled) is `stamp ≠ 0 && stamp + 20 > tick`, unsigned; a stamp of 0
     reads as none (ours: a stamp at our tick 0 reforms again at tick 1; the exe's first tick is not traced). The stamp
@@ -1734,14 +1738,235 @@ exe gathers speed at the entity's acceleration and climbs a ladder of gaits thro
     each living man's walk to his slot ends (`ManMarch::walk` None) and his move is ended (`finished`, which
     stands for `0x0063E290`); his kept speed (`+0x440`) is outside the action and stays. Ours has no started flag
     (a move starts in its issue tick, as entry and first update share a call) and no present-but-done state (no
-    fire gather). Other clears, for states ours does not build (BACKLOG): unit-level `0x0051A230` (fire-order
-    base ctor, every man), `0x0051AC80`, `0x00520110` (from `0x0051F150`), `0x00522080`, `0x0052F770`,
-    `0x00563420` (thunk `0x004F951D`), `0x00553770` (thunk `0x004F9C2D`), `0x00574090`, `0x00580C20` (vtable
-    `0x01325018`), and `SQUAD::update` `0x00580A30` at `0x00580B49` (every man, when `+0x515` is set, `+0x508`
-    ≠ 1 or `+0x498` set, `+0x460` == 0 and `0x00586440(0)` fails; those fields are not traced); soldier-level
+    fire gather). The clear is one rule in ours, `crates/ntw_sim/src/battle/actions.rs`
+    `LandUnit::end_men_actions`, which the idle update calls (the `march.rs` test above covers it) on a standing
+    unit's idle ticks only: not on the tick the reform state is entered, nor while it lasts (`reslot_tick`). The
+    module note keeps one entry per unit-level clear; the trace of each (actionclears, CONFIRMED static except
+    where marked, 2026-10-23):
+    - `SQUAD::update` `0x00580A30`: gated on squad `+0x515` set, `+0x508` ≠ 1 or `+0x498` set, and an empty task
+      stack `+0x460`; then `0x00586440(0)` (the placement anchor's count `+0x2C` ≥ the unit's entity count
+      `+0x2CC`; the anchor is built by `0x0061DE40` from `0x0080DC70`, which keeps its own count or, when that
+      is −1, takes the unit's count from `0x005698A0`: the men `+0x204` when the guns object `+0x1F4` exists
+      with no gun left, its `+0x10` 0, else the entities `+0x2CC`) pushes a new idle task (`0x00522D70` /
+      `0x0051A3A0`); when it fails, every man's action ends at `0x00580B49` and nothing is pushed. The gate's
+      flags are not modelled (ours has no task stack).
+      `0x00586440` (this = the placement holder, unit `+0x384`; its `+4` is the unit) also fails with no anchor:
+      the holder's `+0xC` is null and its `+8` is null or has its byte `+8` clear; a non-zero argument passes
+      with any anchor, skipping the count check. With no `+0xC` anchor the count compared is that of the path
+      node's anchor (holder `+8` → `+0x48` → `+0x2C`). The holders: `0x0051D2B0` (through `0x00538000`, from
+      the order ctor `0x0051E3B0`, vtable `0x01323BB0`, on its branch that lays an anchor with `0x007F2680`)
+      sets `+0xC` and passes; `0x00537E40` builds `0x0051D3A0` (no anchor, no path: fails) or, with its fifth
+      argument set, `0x0051D330` (`+8` = a path node from `0x00811F20`, `+0xC` = 0: passes once the node's
+      byte `+8` is set).
+      *The counts (CONFIRMED static).* The unit ctor `0x0051B7D0` makes `+0x204` the count of the men vector
+      (`+0x1F8`, data `+0x208`, the 0x660 soldiers) and `+0x2CC` the count of the entity list (data `+0x2D0`:
+      the men, the 0x69C mount groups, the 0x75C guns, and from `0x00544E60` the gun trains). `+0x1F4` is the
+      guns object (0x58 bytes, `0x00514990`), built when the engine's gun count is non-zero; each gun goes in
+      its `+0x10` list (data `+0x14`), and its `+0x24` list (data `+0x28`) holds one entry per gun.
+      `0x00544E60` (read in part: every list insert and call, not every branch): with unit `+0xBC` set, one
+      0x69C entity per gun goes into `+0x22C` (data `+0x230`), `+0x2CC` and the guns' `+0x28` entry of that
+      gun (entity `+0x67C` = the gun, gun `+0x700` = the entity); with the train type unit `+0xB4` set, per
+      `+0x24` entry one 0x6C8 train (`0x005A1EB0` when the type's `+0x18` is 6, else `0x005A38C0`) goes into
+      `+0x2A4` (data `+0x2A8`), six 0x69C entities and a seventh of the type unit `+0xB8` into `+0x22C` and
+      `+0x2CC`, then the train itself into `+0x2CC`. Nothing read there links a train or its team to a gun or
+      to a `+0x28` entry.
+      *Losing a gun (CONFIRMED static).* Both removal paths, the soldier removal `0x00574E90` and `0x0052E840`
+      (which also sets the gun's byte `+0x6F8`), take the gun out of `+0x2CC` and of the guns' `+0x10` list,
+      take that gun's `+0x28` partner, when it has one, out of `+0x2CC` (detaching it from its squad,
+      `0x005756D0` / `0x00575560`) and drop the `+0x28` entry; when the `+0x10` count reaches 0 they call
+      `0x005445A0` (its only callers: `0x0052E964`, `0x0057527E`). They differ in three ways. `0x0052E840`
+      first empties the gun's own list (`0x006C0E10`: count `+0x66C`, data `+0x670`; what it holds is not
+      traced), appends the gun to the battle manager's pointer vector at manager `+0x1D8` (`0x00483D40`,
+      its one append) and calls `0x005445A0` on an empty gun list even when the gun was not found in it.
+      `0x00574E90` appends every entry it removes to a companion pointer vector before the swap-remove
+      (`0x00483D40`; vector header: capacity `+8`, count `+0xC`, data `+0x10`): `+0x2CC` → unit `+0x2D4`,
+      `+0x204` → `+0x20C`, `+0x22C` / `+0x240` / `+0x268` → `+0x248`, `+0x27C` → `+0x284`, `+0x2A4` →
+      `+0x2AC`, the guns' `+0x10` → guns `+0x2C` and the `+0x28` entry → guns `+0x40` (INFERRED: the
+      removed, dead entities, kept reachable). Its call of `0x005445A0` also needs the removed entity's
+      vfunc `+0xEC` to be true.
+      *`0x005445A0` (CONFIRMED static, 2026-11-10): the gun trains are not dropped.* It removes nothing from
+      any entity list. It (a) calls `0x00579780` with the unit type's value (`+0x60` → `+0x4C`) twice and
+      unit `+0x148` / `+0x14C`, stores the four at unit `+0x2F0`..`+0x2FC` and refreshes every squad of the
+      lists `+0xAA4` / `+0xAC0` with them (`0x005498D0` picks a shape kind 0-6, `0x00531630` → `0x00531680`
+      applies the values); (b) rebuilds the placement holder through `0x00537E40` with the path-holder
+      argument set, at the old holder's position (`+0x10`), facing (word `+0x28`) and width (`+0x24`);
+      (c) recomputes unit `+0xDC4` (`0x00579840`: for a unit of type category 1 that still has guns and a
+      non-empty list at unit `+0xE4`, the record `0x00F54660` picks from that list, the one with the
+      smallest key or the first whose key is the smallest in the filter at (unit `+0x1C`) + 0x8C; else
+      unit `+0x100`, so a gunless battery falls back to `+0x100`); (d) recomputes the unit bytes
+      (`0x005357B0`, which reads `+0xDC4`): `+0xD98` = not `0x0053EFE0`, `+0xD9A` = `0x0053EE30`, `+0xD9B` =
+      type category 1 or type class 18 or unit `+0x16C` 3 or 8, `+0xD9C` = `0x0053F9C0` and `0x0055C230` and
+      type class 2. `0x00537E40` (arguments: position, facing, width, three bytes) does nothing when unit
+      `+0x14` → `+8` → byte `+0x54` is set or `+0x2CC` is 0; else, when its fourth argument is set and unit
+      `+0x930` is non-zero, it clears byte `+0x89` of the current 0x90-byte entry of the array at unit
+      `+0x390` (index `+0x934`; the byte is UNKNOWN), clears the squad lists `+0xAA4` / `+0xAC0`
+      (`0x00542DB0`), and with its fifth argument set builds a descriptor (`0x007E44A0`: the unit, position,
+      facing, the width snapped by `0x00642C60` on the main squad's shape, unit `+0xADC` → `+0x628`, for
+      `+0x2CC` entities, depth 2 × unit `+0x2EC`, count `+0x2C` = −1, byte `+0x30` = 0, then set to 1 when
+      the sixth argument is 1) and the path holder `0x0051D330`, which keeps the width as passed in, not
+      the snapped one; with the fifth argument clear the empty holder `0x0051D3A0`. It stores the new
+      holder at `+0x384` (null when the allocation fails) and does not release the old one. `0x005445A0`
+      passes 1, 1, 0. The path node (`0x00811F20`, built by `0x007E45A0`: bytes `+8` / `+9` 0,
+      a copy of the descriptor, `+0x48` 0) gets its anchor from `0x0080EF70` (`0x007F2680` on the
+      descriptor copy, stored at node `+0x48` by `0x00814940`, then node byte `+8` set); `0x00811F20` runs
+      that at once only when `0x0055AD60` returns 1 or the descriptor's byte `+0x30` is 1, which it is not
+      here; the only other call of `0x0080EF70` is at `0x0081A503` in `0x0081A2C0` (not read). A whole-image
+      byte scan finds the decrements of a `+0x2CC` field
+      only in `0x0052E840` (`0x0052E884`, `0x0052E913`), `0x00564890` (`0x005648C6`) and `0x00574E90`
+      (`0x00574EE4`, `0x00575157`), no add −1 or sub 1 form, and in the unit code (`0x00510000`..`0x005A0000`)
+      no direct store but the two zero initialisers (`0x005158A0`, `0x0051BA36`); a change through a list
+      helper that takes the list's own address would not show in that scan.
+      *What follows (CONFIRMED static for the functions above; the −1 → `0x005698A0` step is the one at the
+      top of this bullet).* For every unit but a gunless artillery unit the anchor is laid for `+0x2CC`.
+      INFERRED: entities only leave that list (the evidence is the byte scan above, which finds no later
+      insert but would miss one made through a list helper that takes the list's own address; `0x00544E60`,
+      whose one caller is the unit ctor `0x0051B7D0`, was read in part), so once an anchor exists the count
+      check passes. After the last gun
+      is lost the unit holds a path holder; the check fails until the node's byte `+8` is set, and the
+      anchor then laid is for `+0x204` (the crew), compared with `+0x2CC`, which still counts every 0x6C8
+      train and 0x69C team entity not yet removed. While any remains, `0x00586440(0)` fails and
+      `0x00580A30` ends the men's actions on every gated squad tick without an idle task. A unit with no
+      train type (`+0xB4` clear) has `+0x2CC` = `+0x204` by then (each gun's partner left with it) and
+      passes. Not claimed as an original bug: nothing traced shows the standing crew of a gunless battery
+      was meant to get an idle task.
+      Ours: `LandUnit` has no gun, mount or gun-train entities and no gun loss (BACKLOG §3 limbering), so
+      its entity list is its men: it has a placement from its first tick and only loses men, so its
+      placement covers them and the clear branch never runs. That is a property of the model, not of a
+      function, so it has no test of its own (the first one, `the_placement_always_covers_the_men`, could
+      not fail and was removed, 2026-11-10; the re-slot after a loss is covered by the `march.rs` tests
+      `the_men_keep_their_slots_until_the_reslot`, `a_moving_unit_re_lays_after_a_loss_at_once` and
+      `a_due_reslot_walks_a_standing_units_men_to_their_slots`).
+      Left PROVISIONAL in `actions.rs`: which holder a standing unit keeps after each order (the anchorless
+      `0x0051D3A0` and the path holder before its node's byte `+8` is set also take the clear branch) is
+      not traced, and the gunless-artillery case needs guns and trains as entities.
+    - Ctor `0x0051A230` (vtable `0x013239B0`: [0] `0x005297B0`, [1] update `0x00581200`, [13] the gather
+      `0x00539910`), the base of one family of fire orders, not of all: every man, once, when an order of the
+      family is built (re-read 2026-11-10: base ctor `0x00519190`, a loop over the owner's men, `+0x18` count
+      / `+0x1C` data, and an anchor laid with `0x007F2680`, kept at the state's `+0x18`), whether the men
+      stand or walk to their slots.
+      Which orders (review of the fix round, re-traced 2026-11-10; CONFIRMED static: xrefs and the pseudo-code
+      of the ctors named, and of `0x00553C30` in full). `0x0051A230` has six code references, each in a small
+      derived ctor: `0x0051A200` (vtable `0x013239F0`, the volley order), `0x0051A0E0`, `0x0051A110`,
+      `0x0051A140`, `0x0051A1B0` and `0x00621C50`. Their builders (one code reference each but `0x00621C50`,
+      which has two): `0x0051A200` ← the missile-attack state `0x00553C30`; `0x0051A0E0` ← `0x005726A0`;
+      `0x0051A110` ← `0x00572970`; `0x0051A140` ← `0x005727C0`; `0x0051A1B0` ← `0x005728B0`; `0x00621C50` ←
+      the ctors `0x00621BF0` (← `0x00553C30`) and `0x00621C20` (← `0x00572730`). Not read: the four ctors
+      `0x0051A0E0`..`0x0051A1B0` beyond their xrefs, the bodies of `0x00621BF0`, `0x00621C20` and
+      `0x00621C50`, and every builder but `0x00553C30`, so which order each of those classes is, is UNKNOWN.
+      `0x00553C30` picks the order in this sequence: (a) the key of the unit's `+0xDC4` record (record `+0x24`
+      → `+0x10`) is 19 or 20: a 44-byte frame with `0x00621BF0`, then it returns; (b) else special ability 7
+      active (`0x0055C9A0` with 7): a 100-byte frame with `0x00519E80` (not read); (c) else, with a drill
+      object (state `+0x13C`), by the drill `0x00554920` gives: 0 the volley order `0x0051A200` (44-byte
+      frame), 1 mass fire `0x0051A490` (44), 2 / 3 / 4 the platoon orders `0x0051B120` / `0x0051B180` /
+      `0x0051B090` (84), 5 rank fire `0x0051B240` (88); with no drill object the volley order. Before that,
+      when its task's byte `+0x450` is set and the index `+0x454` is below the stack's count − 1, it sets byte
+      `+0x451` and cuts the state stack back to that index + 1 (`0x0056D990`); after (b) and (c) it clears
+      byte `+0x168` and sets byte `+0x160`.
+      The orders of drills 1-5 end no action when built (ctors read): mass fire `0x0051A490` calls the state
+      base `0x00519190` itself (then two helpers on its embedded object at `+0x18`, `0x010D0660` and
+      `0x010F5C60`, not read; vtables `0x013253E0` / `0x0132541C`); the platoon ctors build a descriptor and
+      call `0x0051B060`, which calls `0x0051A040` and sets vtables only; rank fire calls `0x0051A040` itself.
+      `0x0051A040` calls `0x00519190`, copies the descriptor and builds a zero-filled dword array whose count
+      is `+0xBF4` of the owner's unit (`0x00504FF0`); it has two code references, `0x0051B060` and
+      `0x0051B240`. None of these ctors calls `0x0051A230` or loops over the men, and none is one of the
+      clear places listed in this section. Their entry and update functions were not read, so whether those
+      orders end the men's actions later, by a place not in this list, is not traced.
+      Not built, and a difference from the exe for the volley family (PROVISIONAL in `actions.rs`): ours has
+      no fire-order state, a standing unit fires from the idle state (`shooting.rs` `Battle::missile_step`
+      does not look at `march.reforming`), and the idle update's clear does not stand for this one, since it
+      does not run on the reform state's entry tick or while that state lasts. A unit that starts a volley of
+      that family while its men walk to their slots keeps them walking in ours; the exe ends their actions
+      when it builds the order. Not traced: when `0x00553C30` runs (its one code reference is the this-adjust
+      thunk `0x004F7A30`, whose one reference is the table slot `0x0131D50C`; which state owns the slot, and
+      whether it runs once per target or in fire at will too); the builders not read; and the fire-at-target
+      group's reform entry `0x005732B0` with its gate (the older PROVISIONAL at `march.rs` `reslot_tick`).
+      What sends the stopped men back to their slots is not traced either (that entry is a guess): the
+      order's update `0x00581200` re-sends only the men its gather counts (after the clear none has a
+      present action) or after a due re-slot ("When the men are re-laid" above). A port puts the clear
+      where the orders of this family are built, not at every start of fire.
+    - Building occupy ctor `0x0051AC80` (vtable `0x013256CC`, update `0x00581BB0`, dtor `0x00521FE0` with the
+      slot release `0x0057FB70`): every man of its owner (`+0x18` count, `+0x1C` data), then it collects the
+      building's soldier slots: those of `+0x1FB4` always (0x58-byte elements, each with a `+0x50` count /
+      `+0x54` data of 0x30-byte slots), then those of `+0x1FD8` when the owner's dword `+0x510` is 0, of
+      `+0x1FFC` when it is 1, and no more for any other value (compares at `0x0051ADFC`, `0x0051AEF5`;
+      CONFIRMED static, 2026-11-10; the earlier "by alliance" was not shown by the code). Its only caller
+      `0x00648A10` has no direct caller: it is slot [1] of the vtable `0x01333DA8`, whose ctor `0x00621950`
+      (base `0x00621220`) stores the building at `+0x1C` (class not identified; INFERRED an enter-building
+      order). It pushes a 0x34-byte frame on the task stack at its own `+0xC` and builds the state there
+      with the owner = the first field of its `+8` object and the building = its own `+0x1C`; the base
+      state ctor `0x00519190` stores `+4` owner,
+      `+8` its second argument, byte `+0xC` 0, `+0x10` 0, `+0x14` = the owner's `+4`. Two classes fill
+      `+0x510` from their construction descriptor's `+4`: the 0x514-byte men group of `0x005181E0` (vtable
+      `0x013211E8`), where it is an index its builder gives (`0x00691C10` builds three groups at its object's
+      `+0x45C`, `+0x47C`, `+0x49C` through `0x00695FB0` → `0x006BB440` with 0, 1, 2, and four more through
+      `0x006BB3F0` with 3), and the squad of `0x00518DC0` (vtable `0x013211D8`; also byte `+0x514` = 1 and
+      byte `+0x515` from the descriptor's byte `+0xC`), where it is the unit body (see the gait trace above),
+      for which the 0 / 1 test selects neither list. INFERRED: the state's owner is one of the building's own
+      men groups, since the test only has a meaning there. UNKNOWN: what the indices 0-3 stand for. Another
+      state ctor compares the owner's `+0x510` with 2 (`0x00519D1D`, vtable `0x013255DC`). UNKNOWN too (review,
+      2026-11-10): whether the object this bullet calls the building is a building. Its fields `+0x1FB4`..
+      `+0x20DE` lie in the same range as the naval boarding object's `+0x20F8` (`0x00563420` below), and
+      three men groups indexed 0-2 plus four with 3 would also fit a ship's crew groups; the INFERRED above
+      (the owner is one of the object's own men groups) holds either way. Reading the users of
+      `0x00648A10`'s vtable `0x01333DA8` (its ctor `0x00621950`) or the ctor of the object that holds the
+      `+0x1FB4` lists settles it; until then "building" and "garrison" in this bullet are working names.
+      `actions.rs` carries both UNKNOWNs.
+      Building fire-line update `0x00580C20` (vtable `0x01325018`, done check `0x00580CD0`): done when
+      building `+0x20DE` is set; else when the result of `0x006D0620` on its `+0x18` object and the
+      building's `+0x130` differs from the stored byte `+0x24`, every man, then `0x0057FB00` and
+      `0x0056B6E0` re-seat the men on the fire-line slots facing the target (dot ≥ 0.3); then always
+      `0x0055CC90`. Both need per-man garrison slots in `garrison.rs` (whose model is unit-level).
+    - `0x0052F770` (add a man to a squad; from the partition `0x0057B0E0` and the split `0x00534A30`): that one
+      man when its third argument is set, then the squad's vfunc 0. Needs squads.
+    - `0x00574090`, the per-man idle animation pick (from the dtor `0x00521C20` of vtable `0x0132550C`, update
+      `0x00580D70`, for each man when `0x006C9000` is false; and from `0x0055D470`): a pick of none ends his
+      action, else it installs the animation (kind 4, `0x006530E0`). Needs man animations in the model.
+    - `0x00522080`, dtor of vtable `0x01325748` (enter and update no-ops), every man of a copy of the squad's
+      men (`0x00505050`). Only the dtor references the vtable: its ctor and state are not identified.
+    - `0x00563420` (adjustor `0x004F9510`, this − 0x18; in the transition table at `0x0131E900` / `0x0131E93C`
+      next to the ids `THROW_GRAPPLES_STATE` `0x004F94A0` and `WAITING_FOR_BOARDING_ALIGNMENT` `0x004F95B0`,
+      so a naval boarding transition): every man when the owner's `+0x24` → `+0x20F8` is 0. `0x00553770`
+      (adjustor `0x004F9C20`, at `0x0131EB1C` next to `PATH_INVALIDATED_STATE` `0x004F9BE0` and
+      `FINISH_STATE` `0x004F9C10`): every man when `+0x28`'s vfunc `+0xC` holds. Neither state is built.
+    - `0x00520110` (from `0x0051F150`): the battle teardown, nothing to model.
+    The volley-family fire order's gather (`0x00539910`, slot [13] of the vtable `0x013239B0`; `0x007FF390`
+    GetActionSlotPresentAction returns the present action, done or not) counts front-rank men whose present
+    move ended short; ours has none, so it would count none whether a done action stays or is cleared.
+    Soldier-level clears:
     `0x005BE5D0`, `0x005EFFE0`, `0x005DD2A0` / `0x005DD500`, `0x0064A520` (from `0x008057F0`), `0x0069B5F0`,
     `0x006C2880`, `0x006CCE10`, the death vfunc `+0x104` `0x00653A10`, the resets `0x00660AB0` and `0x00623960`;
     `+0x35C` alone (with `+0x364`) at `0x00658E24` in the soldier update and in `0x0066B080`.
+    Ghidra names (V5): `ConstructFireOrderBase` `0x0051A230`, `ConstructBuildingOccupyState` `0x0051AC80`,
+    `UpdateBuildingFireLineState` `0x00580C20`, `AddSoldierToSquad` `0x0052F770`, `PickSoldierIdleAnimation`
+    `0x00574090`, `UpdateBattleSquad` `0x00580A30`, `IsPlacementAnchorLaidForUnitMen` `0x00586440`,
+    `GetUnitPlacementMenCount` `0x005698A0`, `GetActionSlotPresentAction` `0x007FF390`; structs `FireOrderState`,
+    `BuildingOccupyState`, `BuildingFireLineState` (the states' `this`), vtables `g_apFireOrderBaseVtable`,
+    `g_apBuildingOccupyStateVtable`. The name of `0x00586440` misleads: it compares the anchor's count with the
+    unit's entity count `+0x2CC`, not the men `+0x204` (re-read 2026-11-10; that difference is the gunless-battery
+    finding above). Proposed: `IsPlacementAnchorLaidForUnitEntities`, with its plate comment corrected, filed in
+    the pending names file `actionclearsfix.jsonl` next to the one below. The same file re-files the plate
+    comments that named it (`0x005698A0`, `0x00580A30`), the plate of `0x0051A230` (it is the base of the
+    volley family only, see its bullet above; the name `ConstructFireOrderBase` stays) and the four
+    end-of-line comments in `0x0051AC80` that read the owner's `+0x510` as a side (`0x0051ADFC`,
+    `0x0051AE09`, `0x0051AEF5`, `0x0051AF02`).
+    Pending exe write-up (2026-11-10: traced statically without Ghidra; each has its name and plate comment
+    in the pending names file `actionclearsv5.jsonl` under `%LOCALAPPDATA%\rea-ida\names\pending`, not yet
+    applied to the program, and still needs its V5 pass when applied): `RebuildUnitPlacementAfterLastGunLost`
+    `0x005445A0` (refreshes the squads' four shape values, rebuilds the placement holder as a path holder at
+    the old position, facing and width, recomputes `+0xDC4` and the bytes `+0xD98`..`+0xD9C`; removes no
+    entity), `RebuildUnitPlacementHolder` `0x00537E40` (clears the squad lists, builds the path holder or the
+    empty one, stores it at `+0x384`), `ConstructPlacementDescriptor` `0x007E44A0`, `ConstructPathPlacementHolder`
+    `0x0051D330`, `ConstructEmptyPlacementHolder` `0x0051D3A0`, `RemoveGunFromUnit` `0x0052E840` (gun and its
+    partner out of the entity list, gun byte `+0x6F8` set, the rebuild on the last gun), `RemoveSoldierFromUnit`
+    `0x00574E90` (any entity; the same gun branch), `SetUnitFormationShapeParams` `0x00579780` (the name it
+    already has from the formation trace below), `UpdateUnitProjectileRecord` `0x00579840` (`+0xDC4` as the
+    projectile record is INFERRED), `RecomputeUnitStateBytes` `0x005357B0` (expressions above; the meaning
+    of `+0xD9A` / `+0xD9B` is UNKNOWN),
+    `CreatePathPlacementNode` `0x00811F20`, `ConstructPathPlacementNode` `0x007E45A0`, `LayPathNodeAnchor`
+    `0x0080EF70`, `SetPathNodeAnchor` `0x00814940`, `ConstructMenGroup` `0x005181E0`, `ConstructBattleSquad`
+    `0x00518DC0`, `ConstructUnitStateBase` `0x00519190`, `PushBuildingOccupyState` `0x00648A10`,
+    `CreateBuildingMenGroup` `0x006BB440` (through `0x00695FB0`; indices 0-2) and
+    `CreateBuildingMenGroupDirect` `0x006BB3F0` (index 3; its `this` is the parent itself).
     *The slot assignment and the reform walk (formation3, CONFIRMED static).* `LayOutSlotsAndAssignSoldiers` `0x00555CA0` (the full re-slot,
     also the partial lay-out with its re-slot argument clear) lays the shape out (vfunc `+0x24`), then
     `AssignSoldiersToNearestSlots` `0x005373F0` pairs soldiers and slots and the soldier vector is rebuilt in

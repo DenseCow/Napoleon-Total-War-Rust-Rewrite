@@ -115,10 +115,10 @@ fn a_construction_item_for_a_missing_slot_is_dropped() {
     let events = m.end_turn();
     let left: Vec<(SlotRef, u32)> = m.world.regions[&RegionId(10)].construction.iter().map(|c| (c.slot, c.turns_remaining)).collect();
     assert_eq!(left, vec![(SlotRef::Slot(1), 2)]);
-    let dropped: Vec<&CampaignEvent> = events.iter().filter(|e| e.is_diagnostic()).collect();
+    let dropped: Vec<&CampaignEvent> = events.iter().filter(|e| matches!(e, CampaignEvent::ConstructionItemDropped { .. })).collect();
     assert_eq!(dropped, vec![&CampaignEvent::ConstructionItemDropped { region: RegionId(10), slot: SlotRef::Slot(99), level_key: "test_building_level".into() }]);
     assert_eq!(dropped[0].script_name(), None);
-    assert!(m.end_turn().iter().all(|e| !e.is_diagnostic()), "reported once");
+    assert!(m.end_turn().iter().all(|e| !matches!(e, CampaignEvent::ConstructionItemDropped { .. })), "reported once");
 }
 
 /// Cancelling names a queued item by its id, so two cancels issued before the queue is shown

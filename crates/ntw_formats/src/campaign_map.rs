@@ -335,6 +335,10 @@ pub struct RegionArea {
     pub faces: Vec<u32>,
     /// Closed outlines (vertex index loops).
     pub outlines: Vec<Vec<u32>>,
+    /// The area's three leading bools (`areas[]` #0..#2; the area reader `0x00A49C30` stores them at
+    /// bytes +0, +1, +2). #2 marks the pieces the campaign AI's land-mass test counts (`0x00C5C490`:
+    /// a high level connectivity index counts only when one of its pieces has it set).
+    pub flags: [bool; 3],
 }
 
 /// One building slot of a settlement (`slot_descriptions` v1).
@@ -558,7 +562,8 @@ impl RegionMap {
                                 .collect()
                         })
                         .unwrap_or_default();
-                    areas.push(RegionArea { faces, outlines });
+                    let flag = |i: usize| a.get(i).and_then(EsfNode::as_bool).unwrap_or(false);
+                    areas.push(RegionArea { faces, outlines, flags: [flag(0), flag(1), flag(2)] });
                 }
             }
             let settlement = item.iter().find_map(|n| n.as_record().filter(|r| r.name == "settlement_and_slots")).and_then(|r| {

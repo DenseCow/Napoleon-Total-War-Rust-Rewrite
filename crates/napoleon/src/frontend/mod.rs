@@ -586,21 +586,27 @@ mod ui_scale_tests {
     /// the front end must redraw for the new window anyway, not keep the old window's scale.
     #[test]
     fn a_resize_to_the_same_virtual_screen_still_redraws() {
+        // The real systems, in the plugin's order. A sprite left from the last draw stands for what
+        // `redraw` drew: it rebuilds every sprite when it redraws, so the old one goes exactly then.
         let mut app = App::new();
-        app.add_systems(Update, resize);
+        app.add_systems(Update, (resize, redraw).chain());
+        app.init_resource::<Assets<Image>>();
+        app.insert_resource(UiAssets::new(Vfs::new()));
         app.world_mut().spawn((Window { resolution: WindowResolution::new(1024, 768), ..default() }, PrimaryWindow));
         app.world_mut().insert_non_send(front_end(Vec2::new(1024.0, 768.0)));
+        assert!(app.world().non_send::<FrontEndUi>().needs_redraw(), "nothing drawn yet");
         app.update();
         let generation = {
-            let mut ui = app.world_mut().non_send_mut::<FrontEndUi>();
-            assert!(ui.needs_redraw(), "nothing drawn yet");
-            // As `redraw` leaves it after drawing.
-            let generation = ui.host.world().generation;
-            ui.drawn_generation = generation;
-            ui.drawn_screen = ui.screen;
-            assert!(!ui.needs_redraw());
-            ui.drawn_generation
+            let ui = app.world().non_send::<FrontEndUi>();
+            assert!(!ui.needs_redraw(), "drawn for the first window");
+            assert_eq!(ui.drawn_screen, Vec2::new(1024.0, 768.0));
+            ui.host.world().generation
         };
+
+        // Nothing changed: the sprites stay.
+        let old = app.world_mut().spawn(UiSprite).id();
+        app.update();
+        assert!(app.world().get_entity(old).is_ok(), "an unchanged window and tree draw nothing new");
 
         let mut window = app.world_mut().query::<&mut Window>();
         window.single_mut(app.world_mut()).unwrap().resolution = WindowResolution::new(800, 600);
@@ -608,6 +614,8 @@ mod ui_scale_tests {
         let ui = app.world().non_send::<FrontEndUi>();
         assert_eq!(ui.host.world().generation, generation, "same virtual screen, same layout");
         assert!((ui_scale(ui.screen) - ui_scale(Vec2::new(1024.0, 768.0))).abs() > 0.1);
-        assert!(ui.needs_redraw(), "the window changed, so the sprites are out of date");
+        assert_eq!(ui.drawn_screen, Vec2::new(800.0, 600.0), "redrawn for the new window");
+        assert!(!ui.needs_redraw());
+        assert!(app.world().get_entity(old).is_err(), "the sprites drawn at the old window's scale are gone");
     }
 }

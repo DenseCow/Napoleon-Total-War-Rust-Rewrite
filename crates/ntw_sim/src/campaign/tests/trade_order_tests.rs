@@ -135,6 +135,31 @@ fn trade_commodities_and_blockades() {
     assert_eq!(economy::trade_routes_value(&m, A), 263);
 }
 
+/// `0x00B12050`: a siege of any waypoint's settlement cuts the route, the last waypoint's too, with no navy
+/// anywhere; a port blockade alone does not.
+#[test]
+fn a_siege_on_the_route_cuts_it_and_a_port_blockade_alone_does_not() {
+    use super::trade::{TradePath, TradeWaypoint};
+    let mut m = test_model();
+    let path = TradePath {
+        waypoints: vec![
+            TradeWaypoint { region: RegionId(10), from: 1, to: 2, sea: true, from_pos: Some(pos(20, 0)), to_pos: Some(pos(90, 0)) },
+            TradeWaypoint { region: RegionId(11), from: u32::MAX, to: u32::MAX, sea: false, from_pos: None, to_pos: None },
+        ],
+        volumes: vec![2, 1],
+        capital_port: false,
+        accumulated: 0,
+    };
+    assert!(!m.trade_path_blockaded(A, &path));
+    m.world.regions.get_mut(&RegionId(10)).unwrap().slots[0].blockade = Some(PortBlockade { navy: ForceId(1003), docked_navy_attacked: false });
+    assert!(!m.trade_path_blockaded(A, &path), "a port blockade is no siege");
+    m.world.regions.get_mut(&RegionId(11)).unwrap().siege.besiegers.push(ForceId(1001));
+    assert!(m.trade_path_blockaded(A, &path), "the last waypoint's settlement is besieged");
+    m.world.regions.get_mut(&RegionId(11)).unwrap().siege.besiegers.clear();
+    m.world.regions.get_mut(&RegionId(10)).unwrap().siege.besiegers.push(ForceId(1001));
+    assert!(m.trade_path_blockaded(A, &path), "the first waypoint's settlement is besieged");
+}
+
 #[test]
 fn commanders_get_the_force_action_point_factor() {
     let mut rules = CampaignRules::test_rules();
@@ -205,6 +230,23 @@ fn new_trade_agreements_get_a_route_over_the_network() {
     assert_eq!(economy::trade_routes_value(&m, A), 0);
 }
 
+/// A navy of `faction` with `ships` trade ships (MADE-UP unit `trade_ship`, category `naval_merchant`) at
+/// (`x`, 0), led by a new admiral `id` (its force is `1000 + id`).
+fn trade_fleet(m: &mut CampaignModel, faction: FactionId, id: i32, x: i32, ships: i32) {
+    let mut rules = (*m.rules).clone();
+    let mut ship = rules.units["test_unit"].clone();
+    ship.category = "naval_merchant".into();
+    ship.is_naval = true;
+    rules.units.insert("trade_ship".into(), ship);
+    m.rules = Arc::new(rules);
+    let mut admiral = character(id, faction, CharacterKind::Admiral, 60);
+    admiral.position = pos(x, 0);
+    m.world.characters.insert(admiral.id, admiral);
+    let units = (0..ships).map(|i| CampaignUnit { unit_key: "trade_ship".into(), ..unit(id * 10 + i) }).collect();
+    let force = ForceId(1000 + id as u32);
+    m.world.forces.insert(force, MilitaryForce { id: force, faction, commander: Some(CharacterId(id)), units, is_navy: true });
+}
+
 #[test]
 fn trade_fleets_gather_commodities_at_nodes() {
     use super::trade::{node_volume, TradeNode, TradeNodeInfo};
@@ -212,25 +254,59 @@ fn trade_fleets_gather_commodities_at_nodes() {
     // 0x00BC9930: trunc((min((n − 1) × 0.85, 50) + 1) × 20).
     assert_eq!([0, 1, 2, 3, 4].map(|n| node_volume(&info, n)), [0, 20, 37, 54, 71]);
     let mut m = test_model();
-    let mut rules = (*m.rules).clone();
-    let mut ship = rules.units["test_unit"].clone();
-    ship.category = "naval_merchant".into();
-    ship.is_naval = true;
-    rules.units.insert("trade_ship".into(), ship);
-    m.rules = Arc::new(rules);
     m.world.commodity_prices = vec![10];
     m.world.trade_nodes = vec![TradeNode { node: 120, pos: (40.0, 0.0), info: Some(info) }];
-    let mut admiral = character(105, A, CharacterKind::Admiral, 60);
-    admiral.position = pos(40, 0);
-    m.world.characters.insert(admiral.id, admiral);
-    let mut ships = vec![unit(6), unit(7)];
-    for u in &mut ships {
-        u.unit_key = "trade_ship".into();
-    }
-    m.world.forces.insert(ForceId(1004), MilitaryForce { id: ForceId(1004), faction: A, commander: Some(CharacterId(105)), units: ships, is_navy: true });
+    trade_fleet(&mut m, A, 105, 40, 2);
     assert_eq!(m.trade_supply(A), Some(vec![37]));
     // Sailing away ends the gathering.
     m.world.characters.get_mut(&CharacterId(105)).unwrap().position = pos(42, 0);
+    assert_eq!(m.trade_supply(A), Some(vec![0]));
+}
+
+/// The node path of the split's route test (`CampaignModel::domestic_route_counts`, trade nodes known): a
+/// node's gathering counts when its loaded route home ends in a region that is its owner's capital
+/// (`0x00A8B5A0` at `0x00BC2A5C`), the route owner's or another faction's; the price update's supply has no
+/// such test. The stand-ins for the route builder (tagged in `trade.rs`): a node with no loaded route adds its whole
+/// gathering, and a faction with a capital whose loaded routes all end outside a capital (its capital
+/// moved) keeps them all.
+#[test]
+fn a_nodes_gathering_counts_in_the_split_with_a_route_home_to_a_capital() {
+    use super::trade::{TradeNode, TradeNodeInfo, TradePath, TradeWaypoint};
+    let mut m = test_model();
+    m.world.commodity_prices = vec![10];
+    let info = || Some(TradeNodeInfo { commodity: 0, base: 20, per_ship: 0.85, cap: 50.0 });
+    m.world.trade_nodes = vec![TradeNode { node: 120, pos: (40.0, 0.0), info: info() }, TradeNode { node: 121, pos: (60.0, 0.0), info: info() }];
+    // A gathers 37 at node 120 (two ships) and 20 at node 121 (one).
+    trade_fleet(&mut m, A, 105, 40, 2);
+    trade_fleet(&mut m, A, 106, 60, 1);
+    m.world.faction_details.entry(A).or_default().capital = Some(RegionId(10));
+    let home = |node: u32, end: u32| TradePath {
+        waypoints: vec![
+            TradeWaypoint { region: RegionId(end), from: node, to: 1, sea: true, from_pos: None, to_pos: None },
+            TradeWaypoint { region: RegionId(end), from: u32::MAX, to: u32::MAX, sea: false, from_pos: None, to_pos: None },
+        ],
+        volumes: vec![0],
+        capital_port: false,
+        accumulated: 0,
+    };
+    assert_eq!(m.trade_supply(A), Some(vec![57]), "no loaded route: the whole gathering");
+    // Node 120 home to A's capital, node 121 to A's region 12 (no capital): only node 120 counts.
+    m.world.domestic_trade.insert(A, vec![home(120, 10), home(121, 12)]);
+    assert_eq!(m.trade_supply(A), Some(vec![37]));
+    assert_eq!(m.price_supply(A), Some(vec![57]), "the price update's supply counts every node");
+    // Node 120 without a route (the route to the capital is another node's, 122, where no fleet stands): it
+    // still adds its whole gathering, node 121 nothing.
+    m.world.domestic_trade.insert(A, vec![home(121, 12), home(122, 10)]);
+    assert_eq!(m.trade_supply(A), Some(vec![37]));
+    // Region 11 is its owner B's capital: a route ending there counts.
+    m.world.faction_details.entry(B).or_default().capital = Some(RegionId(11));
+    m.world.domestic_trade.insert(A, vec![home(120, 10), home(121, 11)]);
+    assert_eq!(m.trade_supply(A), Some(vec![57]));
+    // No route of A ends in a capital while A has one: the loaded routes are stale and all count.
+    m.world.domestic_trade.insert(A, vec![home(120, 12), home(121, 12)]);
+    assert_eq!(m.trade_supply(A), Some(vec![57]));
+    // A faction without a capital has no such stand-in.
+    m.world.faction_details.entry(A).or_default().capital = None;
     assert_eq!(m.trade_supply(A), Some(vec![0]));
 }
 
@@ -465,6 +541,45 @@ fn partners_without_net_demand_take_nothing_and_the_rest_may_stay_home() {
     assert_eq!((split[&C][0], split[&B][0]), (0, 1));
 }
 
+/// traderaid3 (the stand-in of `CampaignModel::domestic_route_counts`): the loaded domestic routes are
+/// never rebuilt (the builder `0x00BC0960` is not ported), so after the exporter's capital moved they all
+/// still end in the lost region, which is no capital any more. The exe's capital test (`0x00A8B5A0` at
+/// `0x00BC2A5C`) reads rebuilt routes; on ours it would drop the faction's whole supply for the rest of
+/// the campaign. The routes keep counting: the supply, the partners' shares and the home term stay.
+#[test]
+fn a_moved_capital_keeps_the_factions_supply_in_the_split() {
+    let mut m = split_model(&["c0"], vec![33]);
+    // A holds a second region; C has its own capital, so the region it takes does not become one.
+    let second = region(13, A, 1000, 1);
+    m.world.regions.insert(second.id, second);
+    m.world.faction_details.entry(C).or_default().capital = Some(RegionId(12));
+    // A also has the home term, which reads the same route test. With the loaded export volumes (all 0,
+    // split `None`) the term is the domestic part alone: 33 × price 10.
+    let mut rules = (*m.rules).clone();
+    rules.features.home_trade_faction = Some(m.world.factions[&A].key.clone());
+    m.rules = Arc::new(rules);
+    let home_term = |m: &CampaignModel| m.trade_home_value(A, None, &economy::trade_route_importer_paths(m, A));
+    let shares = |m: &CampaignModel| m.trade_split(A).unwrap().values().map(|v| v[0]).collect::<Vec<u32>>();
+    assert_eq!(m.trade_supply(A), Some(vec![33]));
+    assert_eq!(shares(&m).iter().sum::<u32>(), 33);
+    assert_eq!(home_term(&m), 330);
+    // C takes A's capital, region 10, where A's domestic route ends: A's capital moves to region 13.
+    assert!(m.transfer_region(RegionId(10), C, &mut Vec::new()));
+    assert_eq!((m.world.capital(A), m.world.capital(C)), (Some(RegionId(13)), Some(RegionId(12))));
+    let route = &m.world.domestic_trade[&A][0];
+    assert_eq!(route.waypoints.last().map(|w| w.region), Some(RegionId(10)), "the loaded route is not rebuilt");
+    assert!(!m.domestic_route_reaches_capital(route));
+    assert_eq!(m.trade_supply(A), Some(vec![33]));
+    let after = shares(&m);
+    assert!(after.iter().all(|v| *v > 0) && after.iter().sum::<u32>() == 33, "{after:?}");
+    assert_eq!(home_term(&m), 330, "the home term keeps the stale route too");
+    // With a route home to the new capital next to it, the stale one no longer counts: the exe's test stands.
+    let mut home = route.clone();
+    (home.waypoints[0].region, home.volumes) = (RegionId(13), vec![7]);
+    m.world.domestic_trade.get_mut(&A).unwrap().push(home);
+    assert_eq!(m.trade_supply(A), Some(vec![7]));
+}
+
 #[test]
 fn construction_cost_takes_the_local_and_chain_cost_effects() {
     use super::effects::SavedBonus;
@@ -631,6 +746,17 @@ fn the_home_term_needs_a_domestic_map_entry() {
     // A route home to the capital (3 × 10 + 1 × 20 = 50) counts; one ending elsewhere does not.
     m.world.domestic_trade.insert(A, vec![path(10, vec![3, 1]), path(11, vec![5, 5])]);
     assert_eq!(home(&m), 50 - 40);
+    // The test is on the end region's owner (`0x00A8B5A0` at `0x00BB3608`), not the route's: once region 11
+    // is its owner B's capital that route counts too (5 × 10 + 5 × 20 = 150); one ending in A's own region
+    // 12, no capital, does not.
+    m.world.faction_details.entry(B).or_default().capital = Some(RegionId(11));
+    assert_eq!(home(&m), 50 + 150 - 40);
+    m.world.domestic_trade.insert(A, vec![path(10, vec![3, 1]), path(12, vec![5, 5])]);
+    assert_eq!(home(&m), 50 - 40);
+    // The stand-in of `CampaignModel::domestic_route_counts`: A has a capital and none of its loaded
+    // routes ends in one (its capital moved), so they count as the split takes them.
+    m.world.domestic_trade.insert(A, vec![path(12, vec![5, 5])]);
+    assert_eq!(home(&m), 150 - 40);
     // Only the configured faction has the term.
     m.world.domestic_trade.insert(B, vec![path(11, vec![3, 1])]);
     assert_eq!(m.trade_home_value(B, None, &economy::trade_route_importer_paths(&m, B)), 0);

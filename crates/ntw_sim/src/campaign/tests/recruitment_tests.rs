@@ -17,7 +17,7 @@ fn recruited_units_are_sized_by_num_men_or_the_crew_sum() {
     // Through the spawn: a ship type no force holds yet still gets its crew sum.
     let mut m = test_model();
     m.rules = Arc::new(rules);
-    let CampaignEvent::UnitTrained { force, unit } = m.spawn_recruited_unit(RegionId(10), "test_ship".into()) else {
+    let Some(CampaignEvent::UnitTrained { force, unit }) = m.spawn_recruited_unit(RegionId(10), "test_ship".into()) else {
         panic!("a unit is trained")
     };
     let u = m.world.forces[&force].units.iter().find(|u| u.id == unit).expect("the new unit");

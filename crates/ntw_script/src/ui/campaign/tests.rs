@@ -1,5 +1,5 @@
 use super::*;
-use ntw_sim::campaign::agents::{exchange_actions, AgentTarget};
+use ntw_sim::campaign::agents::AgentTarget;
 use ntw_sim::campaign::treaties::DiplomaticAction as D;
 
 pub(super) const A: FactionId = FactionId(1);
@@ -1168,7 +1168,7 @@ fn the_agent_action_calls_answer_the_model_and_queue_its_commands() {
 /// The agent action mask. `agent_options.Initialise` shows a button per bit and **divorces** the
 /// ones whose bit is clear (`agent_options.lua:0` pc 45-56), so a bit that is not set is a
 /// button that never appears. The `MoveIntoTarget` bits (visit, embed, research, steal_research)
-/// come from the model's [`exchange_actions`] for the clicked target; `counterspy` is never set,
+/// come from the model's [`ntw_sim::campaign::agents::exchange_actions`] for the clicked target; `counterspy` is never set,
 /// because neither of the exe's builders sets it (`0x009C9CA0`, `0x009C9EF0`).
 #[test]
 fn the_agent_options_mask_is_the_models_own_gates() {
@@ -1190,22 +1190,16 @@ fn the_agent_options_mask_is_the_models_own_gates() {
     assert_eq!(mask(FOREIGN_GENTLEMAN, None), DUEL);
     // Our own gentleman is nobody's target: no bits at all, so the popup shows no button.
     assert_eq!(mask(OWN_GENTLEMAN, None), 0);
-    // A settlement target adds the model's exchange actions and nothing else: no research
-    // building here, so a visit for anyone without subterfuge.
+    // A settlement target adds the exe's exchange actions and nothing else (`0x009C9EF0`, written out
+    // here, not read back from the model): the settlement has no research building and nobody has
+    // `subterfuge`, so every character who may reside there is offered a visit and no more.
     let exchange = VISIT | EMBED | RESEARCH | STEAL_RESEARCH;
     for c in [RAKE, FOREIGN_GENTLEMAN, OWN_GENTLEMAN] {
         let with = mask(c, Some(AgentTarget::Settlement(REGION)));
         assert_eq!(with & !exchange, mask(c, None), "the target adds only the exchange bits");
-        let st = hud._scripts.state();
-        let x = exchange_actions(&st.model, c, AgentTarget::Settlement(REGION));
-        let want = [(x.visit, VISIT), (x.embed, EMBED), (x.research, RESEARCH), (x.steal_research, STEAL_RESEARCH)]
-            .into_iter()
-            .filter(|(on, _)| *on)
-            .fold(0, |m, (_, b)| m | b);
-        assert_eq!(with & exchange, want, "the model's exchange actions, bit for bit");
+        assert_eq!(with & exchange, VISIT, "no research building, no subterfuge: a visit");
         assert_eq!(with & COUNTERSPY, 0, "counterspy is never set");
     }
-    assert_eq!(mask(OWN_GENTLEMAN, Some(AgentTarget::Settlement(REGION))) & exchange, VISIT, "an own settlement: a visit");
 }
 
 /// The agents panel's three action buttons open the target picker, and an action with no valid
@@ -2253,6 +2247,55 @@ fn region_info_details_carry_the_region_name_for_the_title() {
     assert!(hud.errors().is_empty(), "the call is bound, not an UNKNOWN stub");
     let none: Value = lua.load("return CampaignUI.InitialiseRegionInfoDetails()").eval().unwrap();
     assert!(none.is_nil());
+}
+
+/// The panel's `ActiveUpperClass` / `ActiveLowerClass` are the classes of the owner's government
+/// (`0x00A975F0` resolves the owner link, region +0xF4), also where another faction's governorship lists the
+/// region. Bug: they came from the governorship's faction, whose classes take no public-order factors.
+/// MADE-UP governments: A's `gov_a` = (`middle`, `lower`), B's `gov_b` = (`upper`, `lower`).
+#[test]
+fn region_info_active_classes_are_the_owners_under_another_governor() {
+    use ntw_sim::campaign::{Faction, GovernmentPost, GovernmentType, Governorship, GovernorshipTaxes};
+    let hud = test_hud();
+    {
+        let mut st = hud._scripts.state_mut();
+        let rules = std::sync::Arc::make_mut(&mut st.model.rules);
+        rules.government_classes.insert("gov_a".into(), ("middle".into(), "lower".into()));
+        rules.government_classes.insert("gov_b".into(), ("upper".into(), "lower".into()));
+        let w = &mut st.model.world;
+        w.factions.get_mut(&A).unwrap().government_key = "gov_a".into();
+        w.factions.insert(
+            B,
+            Faction {
+                id: B,
+                key: "test_faction_b".into(),
+                treasury: 0,
+                government: GovernmentType::AbsoluteMonarchy,
+                government_key: "gov_b".into(),
+                tax_lower: "tax_normal".into(),
+                tax_upper: "tax_normal".into(),
+                diplomacy: Default::default(),
+            },
+        );
+        w.faction_details.entry(B).or_default().posts.push(GovernmentPost {
+            id: 1,
+            key: "governor_europe".into(),
+            holder: None,
+            governorship: Some(Governorship {
+                taxes: GovernorshipTaxes { lower: 2, upper: 2, lower_rate: 15, upper_rate: 15 },
+                theatre_id: 1,
+                regions: vec![REGION],
+                faction: B,
+                flags: (false, false),
+            }),
+        });
+        assert_eq!(w.governing_faction(REGION), Some(B), "the governorship took");
+    }
+    let lua = hud.host.lua();
+    lua.globals().set("r", hud.region_addr(REGION)).unwrap();
+    let t: Table = lua.load("return CampaignUI.InitialiseRegionInfoDetails(r)").eval().unwrap();
+    assert_eq!(t.get::<String>("OwningFactionKey").unwrap(), HUMAN);
+    assert_eq!((t.get::<String>("ActiveUpperClass").unwrap(), t.get::<String>("ActiveLowerClass").unwrap()), ("middle".to_owned(), "lower".to_owned()));
 }
 
 /// A character's portrait problem is logged once per problem: drawing his card again logs

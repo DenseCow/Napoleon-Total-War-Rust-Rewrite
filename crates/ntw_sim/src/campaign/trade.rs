@@ -77,11 +77,17 @@ impl TradePath {
 pub const BLOCKADE_RADIUS: f32 = 1.0;
 
 impl CampaignModel {
-    /// `0x00B12050` (CONFIRMED structure): a route is blockaded when a sea hop has a hostile navy
+    /// `0x00B12050` (CONFIRMED by decompile): a route is blockaded when a sea hop has a hostile navy
     /// at its start or end node (`0x00BC4860`; hostile = at war with the exporter, INFERRED from
-    /// `0x00A67430`). The waypoints' own "blockaded / besieged" test (vtable `+0x98`) is covered for
-    /// ports by the same navy test; sieges are not modelled.
+    /// `0x00A67430`), or when the settlement of any waypoint's region (the region's +0xFC, the last
+    /// waypoint's too) is besieged: its virtual +0x98 is `0x00A8B9C0`, the residence's besieger list
+    /// (+0x12C) not empty ([`super::siege::SiegeState::under_siege`]). A port blockade alone does not cut
+    /// a route: the test reads the settlement's siege, not the port's blockader (port +0x68).
     pub fn trade_path_blockaded(&self, exporter: FactionId, path: &TradePath) -> bool {
+        let besieged = |r: RegionId| self.world.regions.get(&r).is_some_and(|r| r.siege.under_siege());
+        if path.waypoints.iter().any(|w| besieged(w.region)) {
+            return true;
+        }
         let navies: Vec<(f32, f32)> = self
             .world
             .forces
@@ -115,9 +121,45 @@ impl CampaignModel {
     /// the volumes its open domestic routes bring home. Either way a domestic route brings home its volume
     /// less what the raiders take of it ([`Self::domestic_net_volumes`], `0x00B1D1C0` at `0x00BC2D6C`,
     /// CONFIRMED): the gathering at a node with a route home is summed per commodity first, as the route
-    /// holds it. `None` when neither is available (then the international volumes stand).
+    /// holds it. Only a domestic route that passes [`Self::domestic_route_counts`] adds anything (the exe's
+    /// capital test, `0x00BC2A42`..`0x00BC2A63`, with a stand-in for routes the load left stale): a node
+    /// whose route home fails it adds nothing. A node with no loaded route home adds its whole gathering
+    /// (a stand-in too, see `supply_with`). `None` when neither is available (then the international
+    /// volumes stand).
     pub fn trade_supply(&self, faction: FactionId) -> Option<Vec<u32>> {
         self.supply_with(faction, true)
+    }
+
+    /// The exe's test of a domestic route in the trade split and the home term: its last waypoint's region
+    /// is its owner's capital (`IsRegionCapitalOfOwner` `0x00A8B5A0`, region == owner faction `+0x72C`;
+    /// called by the split `0x00BC26D0` in `0x00BC2A42`..`0x00BC2A63` and by the home term `0x00BB3490`
+    /// at `0x00BB3608`, CONFIRMED). A route with no waypoints never passes. The split and the home term
+    /// ask [`Self::domestic_route_counts`], which applies it: the raw test stays inside the crate so that no
+    /// caller skips the stand-in.
+    pub(crate) fn domestic_route_reaches_capital(&self, path: &TradePath) -> bool {
+        path.waypoints.last().is_some_and(|w| self.world.is_capital(w.region))
+    }
+
+    /// Which of `faction`'s domestic routes count in the trade split ([`Self::trade_supply`]) and the home
+    /// term ([`Self::trade_home_value`]): the returned test, built once per faction. Ask it only about
+    /// `faction`'s own routes (while the stand-in below holds, it passes any path).
+    ///
+    /// PROVISIONAL: it is the exe's capital test (`domestic_route_reaches_capital`), but the exe
+    /// tests routes its builder has just rebuilt (the price update runs the builder `0x00BC0960` before the
+    /// split, and the builder's send step replaces a domestic route, `0x00BA0270` called at `0x00BC599C`);
+    /// ours are the loaded ones ([`World::domestic_trade`](super::World::domestic_trade), never rebuilt: the
+    /// builder is not ported). A loaded route still ends where it ended at the load, so after the faction's
+    /// capital moved (`capital_after_owner_change`) the test would fail on every one of them for
+    /// the rest of the campaign, not a state the exe is shown to keep (its builder is untraced). Stand-in:
+    /// while the faction has a capital and none of its loaded routes ends in a capital, its routes are taken
+    /// as stale and all count. The stand-in cannot tell a stale route from one the builder ended outside a
+    /// capital: a loaded campaign in which a faction's routes all end outside a capital is counted by ours
+    /// and skipped by the exe (none in the vanilla start positions or the evidence saves probed). Where the
+    /// builder ends a domestic route after a capital moved is not traced.
+    pub fn domestic_route_counts(&self, faction: FactionId) -> impl Fn(&TradePath) -> bool + '_ {
+        let stale = self.world.capital(faction).is_some()
+            && !self.world.domestic_trade.get(&faction).is_some_and(|routes| routes.iter().any(|p| self.domestic_route_reaches_capital(p)));
+        move |path| stale || self.domestic_route_reaches_capital(path)
     }
 
     /// The faction's part of the price update's supply S: [`Self::trade_supply`] before the raids, as the
@@ -127,10 +169,15 @@ impl CampaignModel {
         self.supply_with(faction, false)
     }
 
-    fn supply_with(&self, faction: FactionId, after_raids: bool) -> Option<Vec<u32>> {
+    /// `for_split`: the split's supply (`0x00BC26D0`: after the raids, and only the routes that pass
+    /// [`Self::domestic_route_counts`]); else the price update's (`0x00BC9DE0`: gross, every route).
+    fn supply_with(&self, faction: FactionId, for_split: bool) -> Option<Vec<u32>> {
         let n = self.world.commodity_prices.len();
         let mut supply = vec![0u32; n];
-        let view = if after_raids { self.raid_view(faction) } else { super::commerce_raid::RaidView::default() };
+        let view = if for_split { self.raid_view(faction) } else { super::commerce_raid::RaidView::default() };
+        // The split's route test, for both paths below (see `domestic_route_counts`).
+        let split_test = for_split.then(|| self.domestic_route_counts(faction));
+        let counts = |route: &TradePath| split_test.as_ref().is_none_or(|test| test(route));
         let mut add = |c: usize, v: u32| {
             if let Some(s) = supply.get_mut(c) {
                 *s = s.saturating_add(v);
@@ -146,14 +193,20 @@ impl CampaignModel {
             for ((node, c), v) in gathered {
                 match routes.and_then(|r| r.iter().find(|p| p.waypoints.first().is_some_and(|w| w.from == node))) {
                     Some(home) if self.trade_path_blockaded(faction, home) => {}
+                    Some(home) if !counts(home) => {}
                     Some(home) => add(c, v.saturating_sub(super::commerce_raid::raided_volume(&self.route_raid_shares(&view, faction, home), v))),
+                    // PROVISIONAL: a node no loaded route starts at (a fleet that reached it after the load)
+                    // adds its whole gathering, a stand-in for the route builder (not ported). Not traced:
+                    // whether the builder routes this node and where the route ends (`0x00BC0960` /
+                    // `0x00BC0DC0` / `0x00BA0270`), so whether that route could be blockaded, raided or end
+                    // outside a capital. With no loaded route ours has nothing to test.
                     None => add(c, v),
                 }
             }
             return Some(supply);
         }
         let routes = self.world.domestic_trade.get(&faction)?;
-        for r in routes {
+        for r in routes.iter().filter(|r| counts(r)) {
             for (c, v) in self.domestic_net_volumes(&view, faction, r, &r.volumes).into_iter().enumerate() {
                 add(c, v);
             }
@@ -271,7 +324,8 @@ impl CampaignModel {
 
     /// The hard-coded extra of `0x00BB3490` (CONFIRMED; the campaign's [`home_trade_faction`](super::features::CampaignFeatures::home_trade_faction)): in `spa_napoleon` the faction
     /// `spa_france` also earns `Σ domestic volume × price` over its domestic routes (those whose last
-    /// waypoint is in the faction's capital: `0x00A8B5A0`, region == faction `+0x72C`), each volume the
+    /// waypoint is in a capital, by the split's test; on our loaded routes that test is not confirmed and
+    /// has a stand-in, tagged at [`Self::domestic_route_counts`]), each volume the
     /// route's net one (`0x00B1D1C0` at `0x00BB362F`: 0 when blockaded, less what the raiders take,
     /// [`Self::domestic_net_volumes`], CONFIRMED) minus
     /// `Σ current volume × price` (`0x008AFAA0`) over every international route of the faction, blockaded
@@ -296,11 +350,11 @@ impl CampaignModel {
         let value = |volumes: &[u32]| -> i64 {
             volumes.iter().zip(&self.world.commodity_prices).map(|(v, p)| i64::from(*v) * i64::from(*p)).sum()
         };
-        let capital = self.world.capital(faction);
         let view = self.raid_view(faction);
+        let counts = self.domestic_route_counts(faction);
         let home: i64 = domestic
             .iter()
-            .filter(|r| r.waypoints.last().is_some_and(|w| Some(w.region) == capital))
+            .filter(|r| counts(r))
             .map(|r| value(&self.domestic_net_volumes(&view, faction, r, &r.volumes)))
             .sum();
         let exported: i64 = routes

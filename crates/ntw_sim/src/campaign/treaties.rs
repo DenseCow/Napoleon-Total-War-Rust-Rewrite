@@ -342,9 +342,30 @@ impl CampaignModel {
         if self.world.stance(a, b) == Stance::War {
             return Err(CommandError::AlreadyAtWar(a, b));
         }
+        if let Some((declarer, target)) = self.war_call_waiting_between(a, b) {
+            return Err(CommandError::WarCallWaiting(declarer, target));
+        }
         let mut events = Vec::new();
         self.declare_war_with_calls(a, b, CalledAllies::default(), &mut events)?;
         Ok(events)
+    }
+
+    /// The declaration (declarer, target) between `a` and `b`, in either order, that waits for a human
+    /// ally's answer ([`CampaignModel::pending_ally_war_calls`]), if any: that war is already being declared.
+    ///
+    /// ORIGINAL BUG: the exe has no such test (CONFIRMED: `0x00932B70` and `0x00B268B0` read neither the
+    /// pending stack nor, as above, the stance). The stack's only gate is `0x008BE2A0` (stack top set:
+    /// false), which holds back the end of a turn (`CanEndTurn` `0x009E0A40`, `0x00934910`) and the
+    /// CAI's steps (`0x008EFAB0` at `0x008EFAF9`), not a declaration from the UI (`0x009E2090`), the
+    /// console (`0x00930CD0`) or a script (`0x0097A930`). Such a second declaration of the same war
+    /// stacks a second offer for the same ally, and once both are answered `0x008BFA80` has run
+    /// `0x00B268B0` to its end twice: the war that already exists declared again, the case refused
+    /// above. Ours refuses the second declaration, so one war has one call and is applied once.
+    fn war_call_waiting_between(&self, a: FactionId, b: FactionId) -> Option<(FactionId, FactionId)> {
+        self.pending_ally_war_calls
+            .iter()
+            .map(|c| (c.declarer, c.target))
+            .find(|&pair| pair == (a, b) || pair == (b, a))
     }
 
     /// [`Self::declare_war_rules`] from step 1 on, with the allies in `called` already answered (a
@@ -372,13 +393,17 @@ impl CampaignModel {
             }
         }
         events.extend(self.war_on(a, b, None)?);
-        // Then the zones of control again (`0x00B268B0` → `0x00B795A0`, CONFIRMED order): `a`'s allies
-        // that joined, `b`'s that joined, `b`'s that broke with it, then `b`, then `a`. (Every
-        // `0x00B26700` of `0x00B268B0` passes 0 for its own refresh flag.)
+        self.refresh_declaration_zones(a, b, called);
+        Ok(())
+    }
+
+    /// The zones of control again at the end of `a`'s declaration on `b` (`0x00B268B0` → `0x00B795A0`,
+    /// CONFIRMED order): `a`'s allies that joined, `b`'s that joined, `b`'s that broke with it, then
+    /// `b`, then `a`. (Every `0x00B26700` of `0x00B268B0` passes 0 for its own refresh flag.)
+    fn refresh_declaration_zones(&mut self, a: FactionId, b: FactionId, called: CalledAllies) {
         for x in called.joined_a.into_iter().chain(called.joined_b).chain(called.torn_b).chain([b, a]) {
             self.refresh_faction_zones(x);
         }
-        Ok(())
     }
 
     /// Command `RespondToAllyWarCall`: the human ally's answer to the top waiting call
@@ -438,9 +463,16 @@ impl CampaignModel {
             let result = self.join_war(ally, enemy, side);
             Self::answer_events(result, &mut events);
         }
-        if let Err(e) = self.declare_war_with_calls(declarer, target, called, &mut events) {
-            // Unreachable while the pair stays a valid one: its only errors are the pair's.
-            debug_assert!(false, "respond_to_ally_war_call: {e}");
+        if self.world.stance(declarer, target) == Stance::War {
+            // The two went to war by another path while the call waited (a script's declaration that
+            // drew one of them in as an ally: [`Self::declare_war_rules`] refuses the pair itself). The
+            // exe declares the war again here (`0x008BFA80` → `0x00B268B0`, no at-war test: the ORIGINAL
+            // BUG [`Self::declare_war_rules`] names); ours ends the declaration with the answers given.
+            log::warn!("respond_to_ally_war_call: {declarer:?} and {target:?} are already at war, the waiting declaration is dropped");
+            self.refresh_declaration_zones(declarer, target, called);
+        } else if let Err(e) = self.declare_war_with_calls(declarer, target, called, &mut events) {
+            // The answer is applied and the call is gone; the declaration's only errors are those of an
+            // unknown faction or a faction paired with itself, which no waiting call holds.
             log::warn!("respond_to_ally_war_call: {declarer:?}'s war on {target:?} could not resume: {e}");
         }
         Ok(events)
@@ -848,7 +880,9 @@ impl CampaignModel {
 
     /// A trade agreement between `a` and `b` (`0x00B55130` on both records): the `trade` factor set from the
     /// `trade` event, the agreement flag (#2) set. (The original also builds the trade route, `0x00BA0490`;
-    /// the model's routes follow the flag, see [`trade`](super::trade).)
+    /// the model's routes follow the flag, see [`trade`](super::trade).) Then `0x00B55090` runs the price
+    /// update `0x00BCB020(0)` (the call at `0x00B550CD`, after both records, before the diplomacy refresh;
+    /// CONFIRMED, disassembly), which re-books every faction's raid income mid-turn.
     pub fn trade_agreement(&mut self, a: FactionId, b: FactionId) -> Result<Vec<CampaignEvent>, CommandError> {
         self.check_diplomacy_pair(a, b)?;
         for (x, y) in [(a, b), (b, a)] {
@@ -856,6 +890,7 @@ impl CampaignModel {
             r.set_factor("trade", event("trade"));
             r.trade_agreement = true;
         }
+        self.update_commodity_prices_with(false);
         self.diplomacy_changed();
         Ok(Vec::new())
     }
@@ -864,7 +899,8 @@ impl CampaignModel {
     /// the `break_trade` event and `trade` cleared; `b`→`a` (`EndTradeAgreementForBrokenPartner 0x00B733B0`) `trade` cleared and `trade_broken`
     /// set from the `trade_broken` event; the flag cleared on both. Each side then removes only its first route
     /// to the other ([`Self::remove_first_trade_route`]: `RemoveFirstTradeRouteToImporter 0x00BC0120`, once from
-    /// `0x00B13C30` and once from `0x00B733B0`); any further routes of the pair stay. CONFIRMED.
+    /// `0x00B13C30` and once from `0x00B733B0`); any further routes of the pair stay. Then the price update
+    /// `0x00BCB020(0)` (the call at `0x00B29BED`, after both records, before the diplomacy refresh). CONFIRMED.
     pub fn break_trade(&mut self, a: FactionId, b: FactionId) -> Result<Vec<CampaignEvent>, CommandError> {
         self.check_diplomacy_pair(a, b)?;
         let zero = ev(0, 0, 0);
@@ -882,6 +918,7 @@ impl CampaignModel {
         }
         self.remove_first_trade_route(a, b);
         self.remove_first_trade_route(b, a);
+        self.update_commodity_prices_with(false);
         self.diplomacy_changed();
         Ok(Vec::new())
     }

@@ -2,6 +2,8 @@
 //! trait and ancillary rules on real DB data, and the yearly natural-death pass. Skipped without an
 //! install.
 
+mod common;
+
 use std::path::PathBuf;
 
 use ntw_data::GameDatabase;
@@ -480,8 +482,39 @@ fn vanilla_attribute_bonuses_are_one_dummy_zero() {
     assert!(odd.is_empty(), "{odd:?}");
 }
 
-/// A character made in play starts with the maker's `[("dummy", 0)]` (`0x00992F5D`), and the save our
-/// writer builds for him (his `CHARACTER` cloned from a template minister) reads back with it.
+/// The saves the original wrote carry the slot too (the read-only evidence copies, `NTW_EVIDENCE_DIR`;
+/// skipped without them): every character of a campaign the original started and played, the ones it
+/// made in play included, holds the one `dummy` entry at 0, as its writer `0x009A0580` and makers give.
+#[test]
+fn the_originals_saves_carry_one_dummy_zero() {
+    let (dir, ev) = (data_dir(), common::evidence_dir());
+    if !dir.is_dir() || !ev.is_dir() {
+        eprintln!("skipped: no install at {} or no evidence saves at {}", dir.display(), ev.display());
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).expect("DB");
+    let mut files = 0;
+    for name in ["orig_fr_t1", "orig_fr_may1811", "orig_gb_apr1811", "auto_orig_spa_0245"] {
+        let path = ev.join(format!("{name}.save"));
+        if !path.is_file() {
+            continue;
+        }
+        let m = ntw_campaign::read_file(&path, &db).expect("save loads").model;
+        assert!(!m.world.character_details.is_empty(), "{name}");
+        let odd: Vec<_> = m.world.character_details.iter().filter(|(_, d)| d.attribute_bonuses != [("dummy".to_string(), 0)]).map(|(id, d)| (id.0, d.attribute_bonuses.clone())).collect();
+        assert!(odd.is_empty(), "{name}: {odd:?}");
+        files += 1;
+    }
+    if files == 0 {
+        eprintln!("skipped: none of the original's saves in {}", ev.display());
+    }
+}
+
+/// A character made in play starts with the maker's `[("dummy", 0)]` (`0x00992F5D`), and the save writes
+/// the slot from the model, as the exe's writer `0x009A0580` writes details +0x13C: a value the source
+/// record (or the template minister a new `CHARACTER` is cloned from) does not hold reads back, for the
+/// new character and for one the source already had. The exe itself never changes the value from 0; the
+/// other values here only show that the written entry is the model's, not the template's.
 #[test]
 fn a_new_characters_attribute_bonuses_survive_the_save() {
     use ntw_sim::campaign::CampaignCommand;
@@ -500,11 +533,19 @@ fn a_new_characters_attribute_bonuses_survive_the_save() {
     assert_eq!(new.len(), 1, "Britain makes one new minister");
     let dummy = vec![("dummy".to_string(), 0)];
     assert_eq!(m.world.character_details[&new[0]].attribute_bonuses, dummy);
+    let old = *before.iter().find(|c| m.world.characters.contains_key(c) && m.world.character_details.contains_key(c)).expect("a start-position character");
+    let slot = |v: u32| vec![("dummy".to_string(), v)];
+    m.world.character_details.get_mut(&new[0]).unwrap().attribute_bonuses = slot(5);
+    m.world.character_details.get_mut(&old).unwrap().attribute_bonuses = slot(7);
     let db = GameDatabase::from_install(&dir).expect("DB");
     let bytes = GameFiles { vfs: &Vfs::open_install(&dir).unwrap() }.read("campaigns/eur_napoleon/startpos.esf").unwrap();
     let out = ntw_campaign::save::write_save(&EsfFile::from_bytes(&bytes).unwrap(), &m, "france", 1, None).unwrap();
     let back = ntw_campaign::read_esf(&EsfFile::from_bytes(&out.to_bytes().unwrap()).unwrap(), &db).unwrap();
-    assert_eq!(back.model.world.character_details[&new[0]].attribute_bonuses, dummy);
+    let read = |c: CharacterId| back.model.world.character_details[&c].attribute_bonuses.clone();
+    assert_eq!((read(new[0]), read(old)), (slot(5), slot(7)));
+    // Every other character keeps the start position's `[("dummy", 0)]`.
+    let others = back.model.world.character_details.iter().filter(|(c, d)| **c != new[0] && **c != old && d.attribute_bonuses != dummy).count();
+    assert_eq!(others, 0);
 }
 
 /// The battle card the campaign builds for each unit (`0x008AF200`, CHARACTERS_FIDELITY.md §16,
@@ -523,7 +564,10 @@ fn battle_cards_carry_the_commanders_rank() {
                 continue;
             };
             assert_eq!(card.rank, agents::rank(&m, c), "force {:?} unit {:?}", f.id, u.id);
-            assert_eq!(card.army_general_rank().is_some(), f.commander == Some(c) || f.commander.is_none(), "force {:?} unit {:?}", f.id, u.id);
+            // The force's leader counts only when the model holds him (`battle_general_card`: the handle
+            // must resolve to a character).
+            let leader = f.commander.filter(|l| m.world.characters.contains_key(l));
+            assert_eq!(card.army_general_rank().is_some(), leader.is_none_or(|l| l == c), "force {:?} unit {:?}", f.id, u.id);
             checked += 1;
         }
     }
@@ -541,4 +585,15 @@ fn battle_cards_carry_the_commanders_rank() {
     let rank = agents::rank(&m, napoleon);
     assert_eq!(m.battle_general_card(f, u).army_general_rank(), Some(rank));
     assert!((0..=9).contains(&rank));
+    // A leader handle that resolves to no character does not count (the start position has none such): his
+    // unit is still the army's general. Under another general the model holds, it is a subordinate's.
+    let mut led = f.clone();
+    let nobody = CharacterId(i32::MAX);
+    assert!(!m.world.characters.contains_key(&nobody));
+    led.commander = Some(nobody);
+    assert_eq!(m.battle_general_card(&led, u).role, BattleCommandRole::Commander);
+    let other = m.world.forces.values().filter_map(|x| x.commander).find(|&x| x != napoleon && m.world.characters.contains_key(&x)).expect("another commander");
+    led.commander = Some(other);
+    let card = m.battle_general_card(&led, u);
+    assert_eq!((card.role, card.army_general_rank(), card.rank), (BattleCommandRole::Subordinate, None, rank));
 }

@@ -886,7 +886,7 @@ fn a_rebel_regions_classes_are_its_first_risen_armys_government() {
     // The first risen army's government names the classes, not the second's.
     m.world.region_risen_armies.insert(RegionId(11), vec![ForceId(2000), ForceId(2001)]);
     assert_eq!(classes(&m), (Some("middle".into()), Some("lower".into())));
-    // A non-rebel region keeps its governing faction's government.
+    // A non-rebel region keeps its owner's government.
     assert_eq!(economy::region_government_classes(&m, &m.world.regions[&RegionId(10)]), Some(economy::government_classes(&m, A)));
     // The first army gone: the second counts, and the first's government entry goes with it.
     m.remove_force(ForceId(2000), None);
@@ -1024,4 +1024,18 @@ fn a_liberation_posts_the_protectorate_event_before_the_owner_change() {
         let ev = m.apply(CampaignCommand::ChooseCapture { choice }).unwrap();
         assert!(!ev.iter().any(|e| matches!(e, CampaignEvent::FactionBecomesLiberationProtectorate { .. })), "{choice:?}: {ev:?}");
     }
+}
+
+/// The tutorial's `set_looting_options_disabled_for_human` (campaign +0x114): a human's capture occupies at once
+/// (`0x008F8D22` read, `0x008F8DBF` test → the occupy at `0x008F8EB3`), with no choice left waiting.
+#[test]
+fn human_capture_occupies_at_once_while_looting_is_disabled() {
+    use super::capture::CaptureChoice;
+    let mut m = capture_model(vec![A]);
+    m.world.looting_options_disabled_for_human = true;
+    let ev = m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+    assert!(!ev.iter().any(|e| matches!(e, CampaignEvent::CaptureChoicePending { .. })));
+    assert!(m.pending_capture.is_none());
+    assert!(ev.iter().any(|e| matches!(e, CampaignEvent::CaptureResolved { region: RegionId(11), faction: A, choice: CaptureChoice::Occupy, .. })));
+    assert_eq!(m.world.regions[&RegionId(11)].owner, A);
 }

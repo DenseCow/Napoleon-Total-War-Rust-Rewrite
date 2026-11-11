@@ -1702,19 +1702,17 @@ pub fn tech_detail(esf: &EsfFile) {
 /// `ECON_TECH=avail`: the stored state of every tech next to its prerequisites and building level.
 #[allow(dead_code)]
 pub fn tech_avail(m: &ntw_sim::campaign::CampaignModel, db: &GameDatabase) {
-    let req: Vec<(String, String)> = db.campaign.tech_requirements.iter().map(|r| (r.technology.clone(), r.required.clone())).collect();
     let allowed: std::collections::BTreeSet<(String, String)> = db.campaign.tech_factions.iter().map(|r| (r.technology.clone(), r.faction.clone())).collect();
     let mut tally: std::collections::BTreeMap<String, usize> = Default::default();
     for (fid, d) in &m.world.faction_details {
         let Some(f) = m.world.factions.get(fid) else { continue };
-        let state = |k: &str| d.technologies.iter().find(|(t, _)| t == k).map(|(_, s)| *s);
-        let owned: std::collections::BTreeSet<&str> = m.world.regions.values().filter(|r| r.owner == *fid).flat_map(|r| r.buildings()).map(|b| b.level_key.as_str()).collect();
         for (k, s) in &d.technologies {
-            let prereqs: Vec<&str> = req.iter().filter(|(t, _)| t == k).map(|(_, r)| r.as_str()).collect();
-            let pre_ok = prereqs.iter().all(|p| state(p) == Some(0));
-            let bl = db.technology(k).map(|t| t.building_level.clone()).unwrap_or_default();
-            let need = m.rules.buildings.get(&bl).map(|b| (b.chain_pair(), b.level));
-            let has_bl = need.as_ref().is_some_and(|(c, l)| owned.iter().any(|o| m.rules.buildings.get(*o).is_some_and(|b| b.chain_pair() == *c && b.level >= *l)));
+            // The model's own tests (`update_tech_availability`), not a copy of them; both read
+            // false for a technology the rule never opens (unknown, or no known building level).
+            let (pre_ok, has_bl) = m.tech_availability_tests(*fid, k).unwrap_or_default();
+            let tech = m.rules.technologies.get(k);
+            let prereqs: &[String] = tech.map_or(&[][..], |t| t.requires.as_slice());
+            let bl = tech.map_or("", |t| t.building_level.as_str());
             let fac_ok = allowed.contains(&(k.clone(), f.key.clone()));
             let key = format!("state {s} pre_ok {pre_ok} has_building {has_bl} faction_ok {fac_ok}");
             *tally.entry(key.clone()).or_default() += 1;

@@ -200,6 +200,11 @@ pub struct AiWorld {
     /// the relationships with a non-zero value; read through [`AiWorld::may_propose`] /
     /// [`AiWorld::may_accept`], the model's rule.
     pub diplomacy_options: BTreeMap<(FactionId, FactionId), [u32; DIPLOMACY_OPTIONS.len()]>,
+    /// The pairs (`a`, `b`) where `a` can declare war on `b` through diplomacy: the model's own answer
+    /// ([`CampaignModel::war_option_possible`]), asked for the snapshot's faction against every other
+    /// faction ([`AiWorld::from_model_for`]), or for every pair without one. Read through
+    /// [`AiWorld::war_option_possible`].
+    pub war_options: BTreeSet<(FactionId, FactionId)>,
     /// Movement points per map unit (`road_level_0_action_point_cost` on `main`).
     pub move_cost_per_unit: f32,
     /// Units an army may hold (the model's [`CampaignModel::max_units`](ntw_sim::campaign::CampaignModel::max_units)).
@@ -371,6 +376,14 @@ impl AiWorld {
                 out.diplomacy_options.insert(*pair, r.diplomacy_options);
             }
         }
+        // The war option, asked of the model only for the pairs the snapshot's faction can ask about.
+        for a in w.factions.keys().copied().filter(|a| faction.is_none_or(|f| f == *a)) {
+            for b in w.factions.keys().copied().filter(|b| *b != a) {
+                if m.war_option_possible(a, b) {
+                    out.war_options.insert((a, b));
+                }
+            }
+        }
         for fo in w.forces.values() {
             let (position, mp) = match fo.commander.and_then(|c| w.characters.get(&c)) {
                 Some(ch) => ((ch.position.0.to_f64(), ch.position.1.to_f64()), ch.movement_points),
@@ -410,6 +423,14 @@ impl AiWorld {
         ntw_sim::campaign::details::option_allows_proposal(self.diplomacy_option(a, b, option))
     }
 
+    /// Can `a` declare war on `b` through diplomacy? The model's answer
+    /// ([`CampaignModel::war_option_possible`], the war record's test `0x00C1A890`, which the exe's
+    /// CAI target filter `0x00D5C250` also asks of a candidate) as the snapshot holds it
+    /// ([`AiWorld::war_options`]); false for a pair the snapshot was not built to ask about.
+    pub fn war_option_possible(&self, a: FactionId, b: FactionId) -> bool {
+        self.war_options.contains(&(a, b))
+    }
+
     /// Does `a` accept diplomacy option `option` from `b`? The model's rule
     /// ([`CampaignModel::may_accept`]) on the snapshot.
     pub fn may_accept(&self, a: FactionId, b: FactionId, option: usize) -> bool {
@@ -445,8 +466,14 @@ impl AiWorld {
 
     /// `f`'s region groups: connected blocks of its regions, two regions joined when one is among
     /// the other's [`Self::nearest_regions`]. Each group sorted by region id, groups by their
-    /// first region. INFERRED meaning (the CAI's region groups, whose LOST / SPLIT / MERGED states
-    /// the composite value analyser reads); PROVISIONAL adjacency.
+    /// first region. PROVISIONAL stand-in: the exe's groups are the CAI region groups, the belief 0x51
+    /// groups (change state on the region's belief 0x52, whose LOST / SPLIT / MERGED states the
+    /// composite value analyser reads), joined across the CAI boundaries on one land mass and ported
+    /// in `ntw_sim::campaign::region_groups`; this nearest-settlements adjacency is to be replaced by
+    /// them (one rule, not two). CONFIRMED that the exe's candidates are those groups: the candidate
+    /// list `0x00A88780` walks the belief list of the registry the group builder `0x00A67A90` fills
+    /// (it registers each group there through `0x00A614A0`) and keeps the entries whose owner
+    /// (`0x00A88770`, group `+0x138`) is the faction.
     pub fn region_groups(&self, f: FactionId) -> Vec<Vec<RegionId>> {
         let own: Vec<RegionId> = self.regions.values().filter(|r| r.owner == f).map(|r| r.id).collect();
         let mut link: BTreeMap<RegionId, BTreeSet<RegionId>> = own.iter().map(|r| (*r, BTreeSet::new())).collect();

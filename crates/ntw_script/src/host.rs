@@ -7,6 +7,7 @@ use std::rc::Rc;
 use mlua::{Function, Lua, MultiValue, Table, Value};
 use ntw_sim::campaign::{CampaignEvent, CampaignModel, FactionId, TurnStep};
 
+use crate::event_classes::{self, EventGate};
 use crate::game::{self, Shared};
 use crate::luac;
 use crate::source::ScriptSource;
@@ -59,10 +60,13 @@ impl From<mlua::Error> for ScriptError {
 /// The result of firing one event.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FireReport {
-    /// How many handler functions were called.
+    /// How many handler functions were called (none when the event's gate kept it from Lua,
+    /// [`EventGate`]).
     pub handlers: usize,
-    /// Error messages from handlers that failed. The other handlers still ran (INFERRED: the
-    /// original logs a script error and carries on; its exact behaviour is UNKNOWN).
+    /// Error messages from handlers that failed, and from list entries that are not functions. The
+    /// other handlers still ran (CONFIRMED: the dispatcher calls each entry through `0x01057D80`, a
+    /// protected call whose error handler logs the error with its traceback, `0x0106BD10`, and goes
+    /// on to the next entry).
     pub errors: Vec<String>,
 }
 
@@ -71,6 +75,9 @@ pub struct FireReport {
 /// The campaign AI's turn: called with the script state when a faction's `TurnStep::AiTurn` is the
 /// next step (the model then accepts that faction's commands). Returns the events its commands
 /// caused; the host fires them to the scripts. Set by `ntw_ai::campaign::driver::install`.
+/// PROVISIONAL order: the events of all the faction's orders fire after its last order; the exe
+/// posts each order's events inside that order, before the AI's next one (`0x00E30700` has no
+/// queue; CAMPAIGN_FIDELITY.md "Script event classes", "Order").
 pub type AiTurnHook = Box<dyn FnMut(&mut ScriptState, FactionId) -> Vec<CampaignEvent>>;
 
 /// Typical use:
@@ -90,6 +97,8 @@ pub struct ScriptHost {
     lua: Lua,
     state: Shared,
     source: Rc<ScriptSource>,
+    /// What every event passes on its way to Lua (shared with this host's [`ScriptHandle`]s).
+    gate: Rc<EventGate>,
     /// Plays AI factions during the turn loop (see [`ScriptHost::set_ai_turn_hook`]).
     ai_turn: Option<AiTurnHook>,
 }
@@ -101,7 +110,8 @@ impl ScriptHost {
         let lua = Lua::new();
         let state: Shared = Rc::new(RefCell::new(ScriptState::new(model, local_faction)));
         let source = Rc::new(source);
-        let host = ScriptHost { lua, state, source: source.clone(), ai_turn: None };
+        let gate = Rc::new(EventGate::new(source.clone()));
+        let host = ScriptHost { lua, state, source: source.clone(), gate, ai_turn: None };
         host.install_globals(source)?;
         Ok(host)
     }
@@ -180,11 +190,16 @@ impl ScriptHost {
         self.run_file(&format!("data/campaigns/{campaign}/scripting.lua"))
     }
 
-    /// Fires script event `name`: calls every function in `events[name]`, in list order, with a
-    /// `context` object (W3 §6.2, CONFIRMED mechanism; order INFERRED). The list is copied before
-    /// the calls, so handlers added or removed during the event take effect next time (INFERRED).
+    /// Fires script event `name` as the exe's post path does (`0x00E30700`, CONFIRMED): the event's
+    /// class decides what the context answers and whether Lua sees the event at all ([`EventGate`]),
+    /// then the dispatcher `0x00E142B0` calls the functions of `events[name]` front to back with the
+    /// `context` object. It takes the list's length once and reads each entry when its turn comes, so
+    /// a handler appended during the event waits for the next one and an entry a handler replaced is
+    /// the one called. An entry that is not a function is logged and passed over (CONFIRMED,
+    /// `0x01057D80`: it logs the type mismatch, `0x01095090`, and calls nothing; see
+    /// [`FireReport::errors`]).
     pub fn fire(&self, name: &str, ctx: ScriptContext) -> FireReport {
-        fire_in(&self.lua, &self.state, name, ctx)
+        fire_in(&self.lua, &self.state, &self.gate, name, ctx)
     }
 
     /// Ends the turn in the model and forwards every resulting script event to Lua, in the order
@@ -211,6 +226,12 @@ impl ScriptHost {
     /// Applies a command to the model and fires the script events it caused (`EndTurn` steps
     /// through the turn like [`end_turn`](Self::end_turn); `RespondToAllyWarCall` resumes the turn
     /// steps a waiting call to war had paused, `ntw_sim` `CampaignModel::step`).
+    ///
+    /// PROVISIONAL order: the handlers run after the whole command, so one that reads state the
+    /// command changes after its post sees the end state. The exe posts each event synchronously
+    /// where its code builds it (`0x00E30700`: no queue), e.g. `FactionBecomesLiberationProtectorate`
+    /// before the owner change (CONFIRMED; design in CAMPAIGN_FIDELITY.md "Script event classes",
+    /// "Order").
     pub fn apply(
         &mut self,
         cmd: ntw_sim::campaign::CampaignCommand,
@@ -238,8 +259,10 @@ impl ScriptHost {
     /// the caller gets every one (`OutcomeMovie` with an empty report). Run after
     /// each batch of handlers in [`Self::apply`] and the turn steps; a command issued by a handler of
     /// the opening events, a time trigger or a bare [`Self::fire`] waits for the next of those.
-    /// INFERRED: they fire after the batch whose handler issued the command, not nested inside that
-    /// handler; the exe's order for events posted from inside a script handler is not traced.
+    /// PROVISIONAL order: they fire after the batch whose handler issued the command. The exe has no
+    /// queue: a command posts its events at once (`0x00E30700`), so their handlers run inside the
+    /// handler that issued the command, before its next line (CONFIRMED; the design that matches it is
+    /// in CAMPAIGN_FIDELITY.md "Script event classes", "Order").
     fn fire_script_events(&mut self) -> Vec<(CampaignEvent, FireReport)> {
         let mut out = Vec::new();
         loop {
@@ -297,28 +320,23 @@ impl ScriptHost {
         out
     }
 
-    /// The context for a model event: which faction / region / character it concerns.
+    /// The context of a model event: what the event carries, as far as its exe class answers it
+    /// ([`event_classes::CLASSES`]: a class without, say, a faction accessor gives its handlers no
+    /// faction, whoever the event concerns). A project event (no script name) has none.
     pub fn context_for(&self, ev: &CampaignEvent) -> ScriptContext {
+        let Some(name) = ev.script_name() else { return ScriptContext::default() };
         let st = self.state.borrow();
         let w = &st.model.world;
-        let faction_of = |id| st.faction_key(id);
         let mut c = ScriptContext::default();
         match ev {
             CampaignEvent::FactionRoundStart { faction }
             | CampaignEvent::FactionTurnStart { faction }
             | CampaignEvent::FactionTurnEnd { faction }
-            | CampaignEvent::GovernorshipTaxRateChanged { faction }
-            | CampaignEvent::FactionBecomesLiberationProtectorate { faction } => c.faction = faction_of(*faction),
+            | CampaignEvent::PendingBankruptcy { faction }
+            | CampaignEvent::FactionBecomesLiberationProtectorate { faction } => c.faction = st.faction_key(*faction),
             CampaignEvent::RegionTurnStart { region }
             | CampaignEvent::RegionTurnEnd { region }
-            | CampaignEvent::SlotTurnStart { region, .. }
-            | CampaignEvent::RecruitmentItemIssuedByPlayer { region } => {
-                if let Some(r) = w.regions.get(region) {
-                    c.region = Some(r.key.clone());
-                    c.settlement = Some(r.settlement.key.clone());
-                    c.faction = faction_of(r.owner);
-                }
-            }
+            | CampaignEvent::SlotTurnStart { region, .. } => c.region = w.regions.get(region).map(|r| r.key.clone()),
             CampaignEvent::CharacterTurnStart { character }
             | CampaignEvent::CharacterTurnEnd { character }
             | CampaignEvent::CharacterCreated { character }
@@ -336,82 +354,68 @@ impl ScriptHost {
             | CampaignEvent::HarassmentAttemptSuccess { character }
             | CampaignEvent::DuelFought { character }
             | CampaignEvent::CharacterBuildsSpyNetwork { character }
-            | CampaignEvent::MovementPointsExhausted { character } => {
-                c.character = Some(character.raw());
-                c.faction = w.characters.get(character).and_then(|ch| faction_of(ch.faction));
-            }
-            CampaignEvent::UnitTrained { force, .. } | CampaignEvent::UnitTurnEnd { force, .. } => {
-                c.faction = w.forces.get(force).and_then(|f| faction_of(f.faction));
-            }
-            CampaignEvent::PendingBankruptcy { faction } => c.faction = faction_of(*faction),
-            CampaignEvent::ResearchCompleted { faction, .. } => c.faction = faction_of(*faction),
-            CampaignEvent::BattleCompleted { attacker_faction, .. } => c.faction = faction_of(*attacker_faction),
-            CampaignEvent::BuildingConstructionIssuedByPlayer { region }
-            | CampaignEvent::BuildingCompleted { region, .. }
-            | CampaignEvent::CampaignBuildingDamaged { region, .. } => {
-                if let Some(r) = w.regions.get(region) {
-                    c.region = Some(r.key.clone());
-                    c.settlement = Some(r.settlement.key.clone());
-                    c.faction = faction_of(r.owner);
-                }
-            }
-            CampaignEvent::CaptureChoicePending { region, faction } | CampaignEvent::CaptureResolved { region, faction, .. } => {
-                if let Some(r) = w.regions.get(region) {
-                    c.region = Some(r.key.clone());
-                    c.settlement = Some(r.settlement.key.clone());
-                }
-                c.faction = faction_of(*faction);
-            }
-            CampaignEvent::SettlementOccupied { region, faction } => {
-                if let Some(r) = w.regions.get(region) {
-                    c.region = Some(r.key.clone());
-                    c.settlement = Some(r.settlement.key.clone());
-                }
-                c.faction = faction_of(*faction);
-            }
+            | CampaignEvent::MovementPointsExhausted { character }
+            | CampaignEvent::CharacterCompletedBattle { character }
+            | CampaignEvent::CharacterLootedSettlement { character }
+            | CampaignEvent::CharacterEmbarksNavy { character, .. }
+            | CampaignEvent::CharacterDisembarksNavy { character, .. } => c.character = Some(character.raw()),
             CampaignEvent::CharacterEntersGarrison { character, region } => {
                 c.character = Some(character.raw());
-                c.faction = w.characters.get(character).and_then(|ch| faction_of(ch.faction));
+                c.settlement = w.regions.get(region).map(|r| r.settlement.key.clone());
+            }
+            CampaignEvent::SettlementOccupied { region, .. } | CampaignEvent::CampaignBuildingDamaged { region, .. } => {
+                c.settlement = w.regions.get(region).map(|r| r.settlement.key.clone());
+            }
+            // PROVISIONAL: the class also answers a character (+0x1C, the event's second object); which
+            // one the exe passes is not traced, so none is given.
+            CampaignEvent::BuildingCompleted { region, slot } => {
                 if let Some(r) = w.regions.get(region) {
-                    c.region = Some(r.key.clone());
                     c.settlement = Some(r.settlement.key.clone());
+                    c.building_level = r.building_at(*slot).map(|b| b.level_key.clone());
                 }
             }
-            CampaignEvent::CharacterCompletedBattle { character }
-            | CampaignEvent::CharacterMoved { character, .. }
-            | CampaignEvent::CharacterEmbarksNavy { character, .. }
-            | CampaignEvent::CharacterDisembarksNavy { character, .. } => {
-                c.character = Some(character.raw());
-                c.faction = w.characters.get(character).and_then(|ch| faction_of(ch.faction));
+            // PROVISIONAL: these classes answer objects our events do not carry, so their handlers get
+            // none: the ordered building (+0x64), the researching character (+0x1C; the class has no
+            // faction accessor) and the two armies' characters (+0x1C / +0x20; without one the gate
+            // keeps the merge event from Lua).
+            CampaignEvent::BuildingConstructionIssuedByPlayer { .. }
+            | CampaignEvent::ResearchCompleted { .. }
+            | CampaignEvent::CampaignArmiesMerge { .. } => {}
+            // Our own event (not 1:1; the exe declares the name but never posts it and no shipped script
+            // handles it, `CampaignEvent::PreBattle`), kept for mods: its context is our own choice.
+            CampaignEvent::PreBattle { attacker } => {
+                c.faction = w.forces.get(attacker).and_then(|f| st.faction_key(f.faction));
             }
-            CampaignEvent::CampaignArmiesMerge { force, .. }
-            | CampaignEvent::PreBattle { attacker: force }
-            | CampaignEvent::ForceDestroyed { force } => {
-                c.faction = w.forces.get(force).and_then(|f| faction_of(f.faction));
-            }
-            CampaignEvent::CharacterHired { character, .. } => {
-                c.character = Some(character.raw());
-                c.faction = w.characters.get(character).and_then(|ch| faction_of(ch.faction));
-            }
-            // The exe's event answers only its character getter (vtable +0x1C); its faction getter (+0x38)
-            // is the null stub 0x00461180, so no faction is set (CONFIRMED, vtable 0x0137CCB8).
-            CampaignEvent::CharacterLootedSettlement { character } => c.character = Some(character.raw()),
-            CampaignEvent::AgentActionResolved { agent, .. } => {
-                c.character = Some(agent.raw());
-                c.faction = w.characters.get(agent).and_then(|ch| faction_of(ch.faction));
-            }
-            // The context answers only its candidate holder (vtable 0x01358184 +0x48, 0x0044A500); its
-            // faction, region and character getters are the null stubs (CONFIRMED).
+            // The context answers only its candidate holder (vtable 0x01358184 +0x48, 0x0044A500).
             CampaignEvent::HistoricalEvents => c.historical_events = true,
-            CampaignEvent::StanceChanged { .. } => {}
-            CampaignEvent::GovernmentChanged { .. }
+            // Classes that answer nothing our context carries: the tax event its own payload (+0xAC),
+            // the unit events their unit (+0x24), the battle event its results (+0xA0..+0xA8).
+            CampaignEvent::GovernorshipTaxRateChanged { .. }
+            | CampaignEvent::RecruitmentItemIssuedByPlayer { .. }
+            | CampaignEvent::UnitTrained { .. }
+            | CampaignEvent::UnitTurnEnd { .. }
+            | CampaignEvent::BattleCompleted { .. } => {}
+            // Project events: no script name, so the first line returned already.
+            CampaignEvent::CharacterMoved { .. }
+            | CampaignEvent::ForceDestroyed { .. }
+            | CampaignEvent::CharacterHired { .. }
+            | CampaignEvent::AgentActionResolved { .. }
+            | CampaignEvent::CaptureChoicePending { .. }
+            | CampaignEvent::CaptureResolved { .. }
+            | CampaignEvent::StanceChanged { .. }
+            | CampaignEvent::GovernmentChanged { .. }
             | CampaignEvent::ConstructionItemDropped { .. }
             | CampaignEvent::FactionDestroyed { .. }
             | CampaignEvent::OutcomeMovie { .. }
+            | CampaignEvent::CampaignLost { .. }
             | CampaignEvent::AllyWarCallPending { .. }
+            | CampaignEvent::ExchangePending { .. }
             | CampaignEvent::Message { .. } => {}
         }
-        c
+        match event_classes::class_of(name) {
+            Some(class) => class.offer(c),
+            None => c,
+        }
     }
 
     /// Advances script time by `seconds` and fires `TimeTrigger` (context.string = trigger name)
@@ -431,7 +435,7 @@ impl ScriptHost {
 
     /// Fires `SavingGame` and returns the values the scripts saved with `save_value`, in order.
     pub fn save_values(&mut self) -> (Vec<ScriptValue>, FireReport) {
-        save_values_in(&self.lua, &self.state)
+        save_values_in(&self.lua, &self.state, &self.gate)
     }
 
     /// Fires the script events of a campaign's opening, in the exe's order, and returns each with its
@@ -517,7 +521,7 @@ impl ScriptHost {
     /// host and must fire events while the host itself is owned elsewhere (the campaign HUD's save
     /// callback fires `SavingGame`, see [`ScriptHandle`]).
     pub fn handle(&self) -> ScriptHandle {
-        ScriptHandle { lua: self.lua.clone(), state: self.state.clone() }
+        ScriptHandle { lua: self.lua.clone(), state: self.state.clone(), gate: self.gate.clone() }
     }
 }
 
@@ -528,17 +532,18 @@ impl ScriptHost {
 pub struct ScriptHandle {
     lua: Lua,
     state: Shared,
+    gate: Rc<EventGate>,
 }
 
 impl ScriptHandle {
     /// [`ScriptHost::fire`].
     pub fn fire(&self, name: &str, ctx: ScriptContext) -> FireReport {
-        fire_in(&self.lua, &self.state, name, ctx)
+        fire_in(&self.lua, &self.state, &self.gate, name, ctx)
     }
 
     /// [`ScriptHost::save_values`].
     pub fn save_values(&self) -> (Vec<ScriptValue>, FireReport) {
-        save_values_in(&self.lua, &self.state)
+        save_values_in(&self.lua, &self.state, &self.gate)
     }
 
     /// [`ScriptHost::state`].
@@ -547,32 +552,36 @@ impl ScriptHandle {
     }
 }
 
-/// The event-handler table: `package.loaded["data.events"]` (the module that `events.lua`
-/// declares and every script appends to), else the global `events` (INFERRED).
+/// The event-handler table: the global `events` (CONFIRMED: the dispatcher `0x00E142B0` reads the
+/// field `events` of the globals and nothing else). Without that global, our own fallback is
+/// `package.loaded["data.events"]`, the module `events.lua` declares, for a script set that loads
+/// the module without publishing the global.
 fn events_table(lua: &Lua) -> Result<Option<Table>, ScriptError> {
-    let package: Table = lua.globals().get("package")?;
-    let loaded: Table = package.get("loaded")?;
-    if let Value::Table(t) = loaded.get::<Value>("data.events")? {
+    if let Value::Table(t) = lua.globals().get::<Value>("events")? {
         return Ok(Some(t));
     }
-    Ok(match lua.globals().get::<Value>("events")? {
+    let package: Table = lua.globals().get("package")?;
+    let loaded: Table = package.get("loaded")?;
+    Ok(match loaded.get::<Value>("data.events")? {
         Value::Table(t) => Some(t),
         _ => None,
     })
 }
 
-/// [`ScriptHost::fire`] on a Lua state and its script state.
-fn fire_in(lua: &Lua, state: &Shared, name: &str, ctx: ScriptContext) -> FireReport {
+/// [`ScriptHost::fire`] on a Lua state, its script state and its gate: the one place an event is
+/// handed to Lua.
+fn fire_in(lua: &Lua, state: &Shared, gate: &EventGate, name: &str, ctx: ScriptContext) -> FireReport {
     let mut report = FireReport::default();
-    let handlers: Vec<Function> = match events_table(lua) {
+    let Some(ctx) = gate.admit(&state.borrow(), name, ctx) else { return report };
+    let list = match events_table(lua) {
         Ok(Some(events)) => match events.get::<Value>(name) {
-            Ok(Value::Table(list)) => (1..=list.raw_len()).filter_map(|i| list.raw_get::<Function>(i).ok()).collect(),
-            _ => Vec::new(),
+            Ok(Value::Table(list)) => list,
+            _ => return report,
         },
-        Ok(None) => Vec::new(),
+        Ok(None) => return report,
         Err(e) => {
             report.errors.push(e.to_string());
-            Vec::new()
+            return report;
         }
     };
     let ud = match lua.create_userdata(ctx) {
@@ -582,7 +591,18 @@ fn fire_in(lua: &Lua, state: &Shared, name: &str, ctx: ScriptContext) -> FireRep
             return report;
         }
     };
-    for f in handlers {
+    // 0x00E142B0: the length once, then each entry as it is when its turn comes.
+    for i in 1..=list.raw_len() {
+        let f = match list.raw_get::<Value>(i) {
+            Ok(Value::Function(f)) => f,
+            other => {
+                let found = other.as_ref().map_or("unreadable", Value::type_name);
+                let msg = format!("{name}: handler {i} is not a function ({found})");
+                game::log(state, format!("SCRIPT ERROR {msg}"));
+                report.errors.push(msg);
+                continue;
+            }
+        };
         report.handlers += 1;
         if let Err(e) = f.call::<()>(ud.clone()) {
             let msg = format!("{name}: {e}");
@@ -594,9 +614,9 @@ fn fire_in(lua: &Lua, state: &Shared, name: &str, ctx: ScriptContext) -> FireRep
 }
 
 /// Fires `SavingGame` and returns the values the scripts saved with `save_value`, in order.
-fn save_values_in(lua: &Lua, state: &Shared) -> (Vec<ScriptValue>, FireReport) {
+fn save_values_in(lua: &Lua, state: &Shared, gate: &EventGate) -> (Vec<ScriptValue>, FireReport) {
     state.borrow_mut().saved_values.clear();
-    let report = fire_in(lua, state, "SavingGame", ScriptContext::default());
+    let report = fire_in(lua, state, gate, "SavingGame", ScriptContext::default());
     (std::mem::take(&mut state.borrow_mut().saved_values), report)
 }
 

@@ -11,7 +11,7 @@ use bevy::prelude::*;
 use ntw_script::ScriptSource;
 use ntw_script::battle_script::{BattleScriptFacts, BattleScriptHost, BattleScriptRequest, ScriptUnit};
 use ntw_sim::battle::model::{Battle, Reinforcement};
-use ntw_sim::battle::attributes::ABILITY_NAMES;
+use ntw_sim::battle::attributes::ability_value;
 use ntw_sim::battle::morale::ScriptMorale;
 use ntw_sim::battle::orders::MoveSpeed;
 
@@ -312,9 +312,4 @@ fn flush_log(host: &BattleScriptHost) {
 /// Leaving the battle: drop the script.
 pub fn leave(world: &mut World) {
     world.remove_non_send::<BattleScripts>();
-}
-
-/// The ability enum value of a script's ability name (`0x0057C950`, CONFIRMED names).
-fn ability_value(name: &str) -> Option<u8> {
-    ABILITY_NAMES.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| *v)
 }

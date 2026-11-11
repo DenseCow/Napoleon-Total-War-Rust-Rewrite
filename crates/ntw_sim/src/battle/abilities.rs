@@ -83,6 +83,14 @@ pub mod ability_ids {
     pub const DISMOUNT: u8 = 15;
     /// `unlimber`.
     pub const UNLIMBER: u8 = 16;
+    /// `rally`: the general's Rally ([`super::special_abilities`]).
+    pub const RALLY: u8 = 17;
+    /// `inspire_unit`: the general's Inspire.
+    pub const INSPIRE_UNIT: u8 = 18;
+    /// `artillery_accuracy_boost`.
+    pub const ARTILLERY_ACCURACY_BOOST: u8 = 19;
+    /// `artillery_rof_boost`.
+    pub const ARTILLERY_ROF_BOOST: u8 = 20;
 }
 
 /// The skirmish check's memory on the unit's behaviour object.
@@ -784,29 +792,35 @@ impl Battle {
 
     /// `perform_special_ability(name)` (`0x00645970` → `0x006A74E0` with mode 0, CONFIRMED): an
     /// ability the unit does not have is an error ("unit does not support this special
-    /// ability"); one that is already active, or that the unit cannot perform now (INFERRED for
-    /// `0x0053EA60`: the unit is active, not routing and has men), does nothing. Otherwise it is
-    /// performed (`0x005612D0`). Effects in the model: `square_formation` sets the melee square
-    /// flag; `wooden_stakes` builds stakes in front of the unit (PROVISIONAL: at once, the original
-    /// plants them over time); the others (`unlimber`: the model's guns are always ready; formation
-    /// and light infantry behaviours) are recorded only. Returns whether the ability was performed.
+    /// ability"); one that is already active does nothing; otherwise it is performed through the
+    /// one rule, [`Battle::perform_special_ability`] (`0x005612D0`), which also holds the gate.
+    /// The script call names no target, so Inspire does nothing through it. Returns whether the
+    /// ability was performed.
     pub fn order_special_ability(&mut self, id: u32, ability_value: u8) -> Result<bool, String> {
         let i = self.unit_index(id).ok_or("unknown unit")?;
         let u = &self.units[i];
         if !u.capabilities.has_ability(ability_value) {
             return Err("unit does not support this special ability".into());
         }
-        let bit = 1u32 << ability_value;
-        if u.active_abilities & bit != 0 || !u.active || u.men == 0 || u.morale.is_routing_or_shattered() {
+        if u.ability_active(ability_value) {
             return Ok(false);
         }
-        self.units[i].active_abilities |= bit;
+        Ok(self.perform_special_ability(id, ability_value, None, false))
+    }
+
+    /// Switches on an ability that has no timed effect of its own (called by the toggle in
+    /// [`super::special_abilities`]). Effects in the model: `square_formation` sets the melee
+    /// square flag; `wooden_stakes` builds stakes in front of the unit (PROVISIONAL: at once, the
+    /// original plants them over time); the others (`unlimber`: the model's guns are always ready;
+    /// formation and light infantry behaviours) are recorded only. The ability's slot is not used:
+    /// no use is spent and no timer starts (stand-in 3 of [`super::special_abilities`]).
+    pub(super) fn switch_on_untimed_ability(&mut self, i: usize, ability_value: u8) {
+        self.units[i].active_abilities |= 1u32 << ability_value;
         match ability_value {
             ability::SQUARE_FORMATION => self.units[i].in_square = true,
             ability_ids::WOODEN_STAKES => self.build_defence(i, ability_ids::WOODEN_STAKES),
             _ => {}
         }
-        Ok(true)
     }
 
     /// `change_shot_type(name)`: loads another shot (the shot type enum `0x00F59030`, CONFIRMED

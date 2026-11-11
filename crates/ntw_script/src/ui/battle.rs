@@ -13,6 +13,7 @@
 use mlua::{Function, Lua, Table, Value};
 
 use super::UiScriptHost;
+use super::shortcuts::{EngineComponent, FrameKeys, ShortcutMachine};
 use crate::ScriptSource;
 
 const BATTLE_PRELUDE: &str = include_str!("battle_prelude.lua");
@@ -175,6 +176,16 @@ pub fn install(host: &UiScriptHost, source: ScriptSource) -> mlua::Result<()> {
     // BattleUI.Time (battle_prelude.lua; CONFIRMED `0x005D3BB0`): the UI pulse clock in seconds.
     let inner = host.inner().clone();
     lua.globals().set("__ntw_battle_time", lua.create_function(move |_, ()| Ok(inner.ui_time_secs()))?)?;
+    // BattleUI.EnableShortcutHandler(on) (battle_prelude.lua; CONFIRMED `0x005D0850`: it sets the
+    // shortcut manager's enabled flag through `0x00EA5080`, as the campaign's `0x009E2550` does).
+    let inner = host.inner().clone();
+    lua.globals().set(
+        "__ntw_battle_enable_shortcuts",
+        lua.create_function(move |_, on: Value| {
+            inner.shortcuts_enabled.set(!matches!(on, Value::Nil | Value::Boolean(false)));
+            Ok(())
+        })?,
+    )?;
     // INFERRED: the engine's `loadfile` reads through the VFS (CoreUtils.NamespaceFile calls it on
     // `package.path` templates; the battle root sets `data/ui/battle ui/?.lua` there).
     lua.globals().set(
@@ -201,6 +212,38 @@ pub fn install(host: &UiScriptHost, source: ScriptSource) -> mlua::Result<()> {
 /// battle_hud.lua's InitState creates. Call after [`install`] and a first [`set_facts`].
 pub fn load_hud(host: &UiScriptHost) -> Result<super::NodeId, String> {
     host.load_root_layout("data/ui/battle ui/layout")
+}
+
+/// The component name of the battle camera's bindings (`default_keys.xml` battle mappings; its
+/// shortcut handler is `0x005EAF00`).
+pub const CAMERA_COMPONENT: &str = "camera";
+
+/// The component name of the unit cards' bindings (`default_keys.xml`: `select_next`,
+/// `select_prev`, `usegroup0..9`, and in mode `all` `select_all`, `deselect_all`).
+pub const CARD_MANAGER_COMPONENT: &str = "card_manager";
+
+/// One frame's shortcut poll of the battle HUD, after the frame's key events
+/// ([`UiScriptHost::poll_shortcuts`]: the handler `0x00EEE1E0`, called for the battle at
+/// `0x00607AA9`): `machine` holds the battle mode's bindings of `default_keys.xml`. A binding of
+/// a HUD component (the root, an order button) calls that component's `OnShortcut`, which does
+/// the work through `BattleUI.*` (root.lua, land_hud_move_speed.lua, ...: the requests of
+/// [`take_requests`]); a camera binding calls `camera(func, time)` on each press (the steps and
+/// turns repeat every frame held, with the frame's time); a card manager binding goes to the
+/// prelude's `__ntw_battle_card_shortcut`.
+///
+/// The battle camera acts only while the input layer is 0 or less (CONFIRMED `0x005EAF00`'s
+/// first test of `0x01765944`). PROVISIONAL: the card manager's lock, taken as the same (its
+/// handler is not traced).
+pub fn keys(host: &UiScriptHost, machine: &mut ShortcutMachine, keys: FrameKeys, camera: &mut dyn FnMut(&str, f32)) {
+    let engine =
+        [EngineComponent { name: CAMERA_COMPONENT, locked_from: 1 }, EngineComponent { name: CARD_MANAGER_COMPONENT, locked_from: 1 }];
+    host.poll_shortcuts(machine, keys, &engine, &mut |component, func, time| {
+        if component == CAMERA_COMPONENT {
+            camera(func, time);
+        } else if let Err(e) = host.lua().globals().get::<Function>("__ntw_battle_card_shortcut").and_then(|f| f.call::<()>(func)) {
+            super::host::log(host.inner(), format!("ERROR in the card manager shortcut {func}: {e}"));
+        }
+    });
 }
 
 /// Writes the whole snapshot into `__battle` (read by the `BattleUI.*` functions and card
@@ -662,5 +705,123 @@ mod tests {
         assert!(none, "nothing created");
         let log = host.take_log();
         assert_eq!(log.iter().filter(|l| l.contains("found type nil")).count(), 1, "logged once: {log:#?}");
+    }
+
+    /// A made-up keys file in the shipped format: a root func, an order button's, a repeating
+    /// camera step and three card manager funcs.
+    const KEYS: &str = r#"<shortcuts version="32">
+  <mode>battle</mode>
+  <mode>all</mode>
+  <keyset name="fps">
+    <category name="battle">
+      <group name="g" order="1">
+        <func name="toggle_pause"><key>P</key></func>
+        <func name="battle_land_toggle_run"><key>R</key></func>
+        <func name="step_fwd" repeating="1"><key modifier="ALLOW_SHIFT">W</key></func>
+        <func name="select_next"><key>PERIOD</key></func>
+        <func name="select_all"><key modifier="CTRL">A</key></func>
+        <func name="deselect_all"><key>RETURN</key></func>
+      </group>
+    </category>
+  </keyset>
+  <mappings>
+    <mode name="battle">
+      <func name="toggle_pause" component="root"/>
+      <func name="battle_land_toggle_run" component="button"/>
+      <func name="step_fwd" component="camera"/>
+      <func name="select_next" component="card_manager"/>
+    </mode>
+    <mode name="all">
+      <func name="select_all" component="card_manager"/>
+      <func name="deselect_all" component="card_manager"/>
+    </mode>
+  </mappings>
+</shortcuts>"#;
+
+    /// The battle keys were hardcoded in the game (R restart, F fire at will, Space pause). They
+    /// are the battle mode's bindings of the keys file now, run by the shortcut handler the
+    /// campaign uses: a HUD component's binding reaches its script's `OnShortcut` (which asks for
+    /// the order through `BattleUI.*`, on the release), the camera's funcs repeat with the frame's
+    /// time, the card manager's select and deselect, `BattleUI.EnableShortcutHandler` switches all
+    /// of them off, and a raised input layer locks the camera (`0x005EAF00`).
+    #[test]
+    fn battle_keys_are_the_keys_files_bindings() {
+        use ntw_formats::default_keys::{Held, Shortcuts};
+        let root_script = "function OnShortcut(f, up) if up and f == 'toggle_pause' then BattleUI.Pause() end end";
+        let button_script = "function OnShortcut(f, up) if up and f == 'battle_land_toggle_run' then BattleUI.Current_Selection_Runs() end end";
+        let source = ScriptSource::empty().with_memory_file("ui/test/page", layout_bytes_with_root(root_script, button_script));
+        let host = UiScriptHost::new(source, ntw_formats::loc::Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
+        install(&host, ScriptSource::empty()).unwrap();
+        host.load_root_layout("ui/test/page").unwrap();
+        host.lua().load("__battle.units = { { id = 3 }, { id = 5 } }").exec().unwrap();
+        let mut machine = ShortcutMachine::new(Shortcuts::parse(KEYS.as_bytes()).unwrap().mode_bindings("battle"));
+        let mut steps: Vec<String> = Vec::new();
+        let none = Held { ctrl: false, shift: false, alt: false };
+        fn frame(host: &UiScriptHost, machine: &mut ShortcutMachine, down: &[&str], held: Held, steps: &mut Vec<String>) {
+            keys(host, machine, FrameKeys { down, held, time: 0.25 }, &mut |f, t| steps.push(format!("{f} {t}")));
+        }
+        let mut frame = |down: &[&str], held: Held, steps: &mut Vec<String>| frame(&host, &mut machine, down, held, steps);
+        macro_rules! tap {
+            ($key:expr, $held:expr) => {{
+                frame(&[$key], $held, &mut steps);
+                frame(&[], $held, &mut steps);
+            }};
+        }
+        // P: the root's toggle_pause, on the release.
+        tap!("P", none);
+        assert_eq!(take_requests(&host).unwrap(), [BattleUiRequest::SetSpeed(0.0)]);
+        // R: the run button's binding.
+        tap!("R", none);
+        assert_eq!(take_requests(&host).unwrap(), [BattleUiRequest::Order { name: "Current_Selection_Runs".into(), arg: None }]);
+        // CTRL+A and RETURN: the card manager.
+        tap!("A", Held { ctrl: true, ..none });
+        tap!("RETURN", none);
+        assert_eq!(
+            take_requests(&host).unwrap(),
+            [BattleUiRequest::Select { ids: vec![3, 5], add: false }, BattleUiRequest::Select { ids: vec![], add: false }]
+        );
+        assert!(steps.is_empty(), "no camera func yet: {steps:?}");
+        // W held three frames: a camera step each frame, with the frame's time.
+        for _ in 0..3 {
+            frame(&["W"], none, &mut steps);
+        }
+        frame(&[], none, &mut steps);
+        assert_eq!(steps, ["step_fwd 0.25"; 3]);
+        // A raised input layer (a panel with a priority lock) locks the camera.
+        steps.clear();
+        host.inner().min_input_layer.set(1);
+        frame(&["W"], none, &mut steps);
+        frame(&[], none, &mut steps);
+        assert!(steps.is_empty(), "locked: {steps:?}");
+        host.inner().min_input_layer.set(0);
+        // Switched off, no binding runs.
+        host.lua().load("BattleUI.EnableShortcutHandler(false)").exec().unwrap();
+        tap!("P", none);
+        assert_eq!(take_requests(&host).unwrap(), Vec::<BattleUiRequest>::new());
+        host.lua().load("BattleUI.EnableShortcutHandler(true)").exec().unwrap();
+        tap!("P", none);
+        assert_eq!(take_requests(&host).unwrap(), [BattleUiRequest::SetSpeed(0.0)]);
+        // A card manager func the model has no order for is logged once, not invented.
+        tap!("PERIOD", none);
+        tap!("PERIOD", none);
+        assert_eq!(take_requests(&host).unwrap(), Vec::<BattleUiRequest>::new());
+        let log = host.take_log();
+        assert_eq!(log.iter().filter(|l| l.contains("UNKNOWN card manager shortcut select_next")).count(), 1, "{log:#?}");
+        assert!(!log.iter().any(|l| l.starts_with("ERROR")), "{log:#?}");
+    }
+
+    /// ORIGINAL BUG (0x005D3C60 / 0x005D3BF0): the exe's toggles returned the new minimised flag,
+    /// which root.lua passes as the visibility, so F6 / F7 first showed the shown panel. Ours returns
+    /// the visibility: the first press hides, the second shows, and each panel has its own flag.
+    #[test]
+    fn panel_toggles_hide_on_the_first_press() {
+        let host = UiScriptHost::new(ScriptSource::empty(), ntw_formats::loc::Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
+        install(&host, ScriptSource::empty()).unwrap();
+        let toggle = |name: &str| host.lua().load(format!("return BattleUI.{name}()")).eval::<bool>().unwrap();
+        assert!(!toggle("ToggleMinimisedOrders"));
+        assert!(!toggle("ToggleMinimisedCards"));
+        assert!(toggle("ToggleMinimisedOrders"));
+        assert!(!toggle("ToggleMinimisedOrders"));
+        assert!(toggle("ToggleMinimisedCards"));
     }
 }

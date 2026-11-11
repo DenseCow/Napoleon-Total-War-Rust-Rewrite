@@ -1056,6 +1056,38 @@ fn a_joinable_war_needs_the_joiners_patron_to_allow_it() {
     assert!(!m.joinable_war(B, A), "B has no war");
 }
 
+/// The war record's possible flag (`0x00C1A890`): no war yet, and a proposer with a patron declares
+/// only on the patron itself or on a faction the patron is at war with. The declaration itself has
+/// no such rule (`0x00932B70`): a script still declares for a protectorate.
+#[test]
+fn the_war_option_follows_the_proposers_patron() {
+    use super::negotiation::NegotiationAction as N;
+    let d = FactionId(4);
+    let possible = |m: &CampaignModel, p, r| {
+        let flag = m.negotiation_actions(p, r).iter().find(|x| x.action == N::War).expect("war listed").possible;
+        assert_eq!(flag, m.war_option_possible(p, r), "the record reads the one rule");
+        flag
+    };
+    let mut m = test_model();
+    m.world.factions.insert(d, faction(d, "test_faction_d", 0, GovernmentType::Republic));
+    m.world.set_stance(A, B, Stance::Neutral).unwrap();
+    assert!(possible(&m, A, B), "no patron");
+    m.world.set_stance(A, d, Stance::Protectorate).unwrap();
+    assert_eq!(m.patron(A), Some(d));
+    assert!(!possible(&m, A, B), "A's patron D is at peace with B");
+    assert!(possible(&m, B, A), "the rule reads the proposer's patron only");
+    assert!(possible(&m, A, d), "the patron itself (a plain equality)");
+    m.world.set_stance(d, B, Stance::War).unwrap();
+    assert!(possible(&m, A, B), "the patron is at war with B");
+    m.world.set_stance(A, B, Stance::War).unwrap();
+    assert!(!possible(&m, A, B), "already at war");
+    // The command is not the option: the declaration has no patron rule.
+    m.world.set_stance(A, B, Stance::Neutral).unwrap();
+    m.world.set_stance(d, B, Stance::Neutral).unwrap();
+    assert!(!possible(&m, A, B));
+    assert!(m.declare_war_rules(A, B).is_ok());
+}
+
 /// `0x008FA020`: the first side's wars, not on the second side, that the second side is not
 /// already at war with (its record's stance, `0x008FA0BE..0x008FA0C8`).
 #[test]
@@ -1236,6 +1268,25 @@ fn a_deal_with_an_invalid_join_war_item_applies_none_of_its_records() {
     assert_ne!(treasuries(&m), before);
     assert_eq!((m.world.stance(A, C), m.world.stance(B, C)), (Stance::War, Stance::War));
     assert!(m.negotiations.current.as_ref().unwrap().applied);
+}
+
+/// `0x00C188F0` has no alive test: a joiner the same deal ended (its last region given, no capital,
+/// `0x00A64AC0`) still declares its join-war wars, the records applied after the region transfers.
+#[test]
+fn a_joiner_the_deal_ended_still_declares() {
+    let mut m = test_model();
+    m.turn.humans = vec![A, B];
+    let d = m.world.faction_details.entry(B).or_default();
+    d.capital = None;
+    d.out_of_game = Some(false);
+    m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
+    m.apply(CampaignCommand::ProposeRegions { clear: false, demanded: vec![RegionId(11)], offered: vec![] }).unwrap();
+    m.apply(CampaignCommand::ProposeJoinWar { clear: false, demanded: vec![C], offered: vec![] }).unwrap();
+    let ev = m.apply(CampaignCommand::AcceptDeal).unwrap();
+    assert_eq!(m.world.regions[&RegionId(11)].owner, A);
+    assert_eq!(m.world.faction_details[&B].out_of_game, Some(true), "B gave its last region");
+    assert_eq!(m.world.stance(B, C), Stance::War, "and still joined A's war on C");
+    assert!(ev.contains(&CampaignEvent::Message { recipient: C, message: CampaignMessage::FactionJoinsYourEnemies { joiner: B } }));
 }
 
 /// Gives `faction` the state religion `rel_b` and `regions` that religion as their whole breakdown,

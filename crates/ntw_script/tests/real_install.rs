@@ -36,6 +36,9 @@ fn eur_napoleon_scripts_load_and_handle_events() {
         ("FactionTurnStart", ScriptContext::for_faction("france")),
         ("FactionTurnStart", ScriptContext::for_faction("austria")),
     ];
+    // `PreBattle` is our own event (the exe declares the name but never posts it): no vanilla script
+    // registers a handler for it, so posting it changes nothing in vanilla.
+    assert_eq!(host.fire("PreBattle", ScriptContext::default()).handlers, 0);
     let mut handlers = 0;
     for (name, ctx) in sequence {
         let r = host.fire(name, ctx);
@@ -184,7 +187,8 @@ fn spa_napoleon_new_campaign_reads_its_start_position_values_at_loading_game() {
 /// The vanilla `export_triggers.lua` handler `C_NTW_General_Looter_Good_Trigger` answers the loot
 /// choice's `CharacterLootedSettlement` (character-only context, vtable `0x0137CCB8`): for a
 /// General it rolls `C_NTW_General_Looter_Good` (1 point at 12, then 1 point at 25), so a French
-/// general of the real start position gains it within a few loots, without a script error.
+/// general of the real start position gains it within a few loots, without a script error. The
+/// event passes the gate `0x008F9EE0` with the install's own tables (its `trigger_events` row).
 #[test]
 fn eur_napoleon_looting_reaches_the_looter_trait_trigger() {
     use ntw_sim::campaign::{CampaignEvent, CharacterKind};
@@ -257,4 +261,33 @@ fn eur_napoleon_historical_events_come_from_the_scripts() {
         })
         .collect();
     assert_eq!(got, [(france, "1812_war")]);
+}
+
+/// The gate `0x008F9EE0` hands a character event to Lua only when `trigger_events` has a row of its
+/// name. The install's table has one for every gated class (so the gate's second step never stops a
+/// vanilla event), and it excludes no agent type (`trigger_event_to_excluded_agent_types` is empty,
+/// so neither does the third): in vanilla only the missing character keeps a gated event from Lua.
+#[test]
+fn the_installs_trigger_events_cover_the_gated_classes() {
+    use ntw_formats::db::DbValue;
+    use ntw_formats::db_folder::tables::{TRIGGER_EVENTS, TRIGGER_EVENT_TO_EXCLUDED_AGENT_TYPES};
+    use ntw_script::event_classes::CLASSES;
+    let dir = data_dir();
+    if !dir.join("campaigns").join("eur_napoleon").join("scripting.lua").is_file() {
+        eprintln!("skipped: no install at {}", dir.display());
+        return;
+    }
+    let source = ScriptSource::from_install(&dir).expect("open packs");
+    let rows = source.table_rows_shared(&TRIGGER_EVENTS).expect("trigger_events");
+    let names: std::collections::HashSet<&str> = rows.iter().filter_map(|r| r.first().and_then(DbValue::as_str)).collect();
+    let absent: Vec<&str> = CLASSES.iter().filter(|c| c.gated && !names.contains(c.name)).map(|c| c.name).collect();
+    assert_eq!(absent, Vec::<&str>::new());
+    assert!(source.table_rows_or_empty(&TRIGGER_EVENT_TO_EXCLUDED_AGENT_TYPES).is_empty());
+    // The table ships as an empty file, not a missing one: it reads without an error or a warning, so
+    // `table_rows_or_empty` logs nothing for it.
+    let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
+    let mut warnings = Vec::new();
+    let excluded = TRIGGER_EVENT_TO_EXCLUDED_AGENT_TYPES.read_with(&vfs, &mut warnings);
+    assert!(matches!(&excluded, Ok(rows) if rows.is_empty()), "{excluded:?}");
+    assert_eq!(warnings, Vec::<String>::new());
 }

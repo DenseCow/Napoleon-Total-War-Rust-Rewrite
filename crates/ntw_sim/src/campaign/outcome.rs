@@ -8,9 +8,43 @@
 //! (`ExitFunction`, `show_everyone`, `only_call_function_for_local_faction`); no row queues nothing.
 //! [`outcome_movie`] is that choice, called only through the [`OUTCOME_MOVIE`](super::seams::OUTCOME_MOVIE)
 //! seam ([`CampaignModel::outcome_movie`]).
+//!
+//! The victory check (`0x0096CD10`, CONFIRMED by disassembly; CAMPAIGN_FIDELITY.md "Campaign over" →
+//! "The victory check") is [`CampaignModel::victory_check`]: it asks each human faction's state by its
+//! victory conditions (the [`VICTORY_STATE`](super::seams::VICTORY_STATE) seam), posts the winners'
+//! and the losers' events and holds a capture choice back until the player continues after the
+//! victory screen ([`CampaignModel::continue_game_selected`]).
 
+use super::capture::CaptureChoice;
+use super::events::CampaignEvent;
 use super::ids::FactionId;
 use super::world::CampaignModel;
+
+/// A human faction's state by its victory conditions, as the victory check reads it (`0x008F3DF0`,
+/// CONFIRMED by disassembly: after the victory test `0x0096FCE0` it reads the conditions record's
+/// met byte +0x31 through `0x0055C390` and its failed byte +0x32 through `0x00949C40`; the check
+/// `0x0096CD10` tests the met one first).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VictoryState {
+    /// Neither met nor failed. Also a faction with no conditions record (faction +0x724) or one of
+    /// type 6 (record +0x7C): `0x008F3DF0` runs no test for those and reports both flags clear.
+    Undecided,
+    /// The conditions are met (record +0x31).
+    Won,
+    /// The conditions failed (record +0x32; the victory test sets it once the deadline has passed).
+    Lost,
+}
+
+/// The original's state of `faction` by its victory conditions (the
+/// [`VICTORY_STATE`](super::seams::VICTORY_STATE) seam's original rule). A query.
+///
+/// PROVISIONAL: always [`VictoryState::Undecided`]. The model keeps no conditions record and the
+/// victory test `0x0096FCE0` is not ported (BACKLOG §6 "Victory conditions for each campaign";
+/// its traced shape is in CAMPAIGN_FIDELITY.md "Campaign over" → "The victory test"), so no
+/// vanilla campaign is won or lost by its conditions yet; a mod's rule on the seam is.
+pub fn victory_state_original(_m: &CampaignModel, _faction: FactionId) -> VictoryState {
+    VictoryState::Undecided
+}
 
 /// One `movie_event_strings` row (the DB record `MovieEventStringRecord`), as the lookups read it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -144,6 +178,157 @@ impl CampaignModel {
     /// seam ([`outcome_movie`] in vanilla). A query.
     pub fn outcome_movie(&self, faction: FactionId, outcome: CampaignOutcome) -> Option<OutcomeMovie> {
         (self.rules.seams.outcome_movie.rule())(self, faction, outcome)
+    }
+
+    /// `faction`'s state by its victory conditions, through the
+    /// [`VICTORY_STATE`](super::seams::VICTORY_STATE) seam ([`victory_state_original`] in vanilla).
+    /// A query.
+    pub fn victory_state(&self, faction: FactionId) -> VictoryState {
+        (self.rules.seams.victory_state.rule())(self, faction)
+    }
+
+    /// The end of one campaign update, after the work of a command, a turn step or a battle result:
+    /// a held capture choice whose hold no longer applies is settled, then the victory check runs.
+    /// The exe runs both from its campaign update `0x008F4120` every frame (the pending-action step
+    /// `0x008F7850`, the check `0x0096CD10` at `0x008F487A` after the step loop); the model's state
+    /// changes only in those three places, so checking there gives the same verdicts. The one path
+    /// that runs the check.
+    pub(crate) fn end_update(&mut self, events: &mut Vec<CampaignEvent>) {
+        // The report's step ignores the hold while the scripts' looting switch is set (`0x008F8D32`
+        // tests +0x9C only when +0x114 is clear, CONFIRMED) and then occupies.
+        if self.world.looting_options_disabled_for_human && self.pending_capture.as_ref().is_some_and(|p| p.held) {
+            self.release_held_capture(events);
+        }
+        self.victory_check(events);
+    }
+
+    /// The victory check (`0x0096CD10`, CONFIRMED by disassembly unless tagged). It gives its verdict
+    /// once ([`TurnState::victory_checked`](super::turn::TurnState::victory_checked), the check's byte
+    /// +0x38) and never runs once the campaign is over (campaign +0xFE9).
+    ///
+    /// Each human faction of the faction list is a winner, a loser or undecided
+    /// ([`Self::victory_state`]). With a winner:
+    /// 1. The capture report on top of the pending-action stack is held (+0x9C = 1, `0x0096CE7C`):
+    ///    its choice is not offered until the player continues ([`Self::continue_game_selected`]).
+    ///    A report already offered ignores the flag (its step `0x008F8D00` returns at once when its
+    ///    pending byte +0x98 is clear), so ours holds only a choice raised in this update. INFERRED:
+    ///    that the check runs before the report's first step when both come in one update (after a
+    ///    battle the update's poll of the stack at `0x008F4699` is skipped while the battle sequence
+    ///    state is not 0 or 8; the case of a capture without a battle is not traced). The model
+    ///    keeps one waiting capture, not the exe's stack of pending actions: a hold while another
+    ///    kind of action is on top is not modelled.
+    /// 2. Per winner, unless the scripts turned the notification off
+    ///    ([`World::victory_notification_disabled`](super::World::victory_notification_disabled),
+    ///    +0x125 read at `0x0096CE9C`): in multiplayer (campaign +0x1034) the first other human of
+    ///    the faction list gets the defeat event (+0x108 with its flag 1, here its defeat movie) and
+    ///    the campaign is over ([`Self::end_campaign`]); then the winner's victory event (+0x120,
+    ///    here its movie) with the flag "this ended a multiplayer campaign". INFERRED: the model
+    ///    keeps no multiplayer flag, so another human in the list stands for it. PROVISIONAL: the
+    ///    exe's shared win (campaign key `spa_napoleon`, `0x008CE390(winner, other)` and both
+    ///    factions' conditions of type 5: the other human gets the victory event with flag 1 instead
+    ///    of the defeat) is not modelled: it needs the conditions record (BACKLOG §6) and must become
+    ///    campaign data, not a key test. Not modelled, no equivalent in ours (no Steam integration):
+    ///    for every winner, also with the notification off, the exe calls the campaign achievement
+    ///    tracker (`0x009C7660`'s vfunc +0x50, `0x004AFD40`, called at `0x0096D0B1`) with the
+    ///    winner's key, the campaign key and campaign numbers. It only sets the tracked faction's
+    ///    campaign-won achievement flags on the tracker itself (its bytes +0x9C..+0xC6) and runs the
+    ///    tracker's own update `0x0049E5D0` (CONFIRMED by disassembly).
+    /// 3. Every loser gets the lost event (+0x138, [`CampaignEvent::CampaignLost`]) and the verdict
+    ///    is given, also while another human is undecided.
+    ///
+    /// With no winner the exe tests the loser count (`0x0096CE47`) and then the undecided count
+    /// (`0x0096CE4F` / `0x0096CE57`): with no loser, or while any human is undecided (multiplayer
+    /// only), it goes straight to its clean-up `0x0096D115`, past the loser loop `0x0096D0E5` and the
+    /// done byte `0x0096D111`: nothing is posted and no verdict is given. Only when every human has
+    /// lost do the losers get the lost event, with the verdict. So a loser is told exactly once.
+    pub(crate) fn victory_check(&mut self, events: &mut Vec<CampaignEvent>) {
+        if self.turn.victory_checked || self.turn.campaign_over {
+            return;
+        }
+        // Nothing is allocated until a faction has won or lost. The exe asks the humans of its
+        // faction list: a human id with no faction in the world is in no list and is never asked.
+        let mut decided: Vec<(FactionId, VictoryState)> = Vec::new();
+        let mut undecided = false;
+        for &faction in self.turn.humans.iter().filter(|f| self.world.factions.contains_key(*f)) {
+            match self.victory_state(faction) {
+                VictoryState::Undecided => undecided = true,
+                state => decided.push((faction, state)),
+            }
+        }
+        if decided.is_empty() {
+            return;
+        }
+        let won = decided.iter().any(|(_, s)| *s == VictoryState::Won);
+        if !won && undecided {
+            return;
+        }
+        // The exe walks the faction list: winners and losers are told in that order (the list holds
+        // every faction of the world, so each decided faction has a place).
+        let order = self.world.factions_in_turn_order();
+        decided.sort_by_key(|&(f, _)| order.iter().position(|&o| o == f));
+        let lost = |events: &mut Vec<CampaignEvent>| {
+            events.extend(decided.iter().filter(|(_, s)| *s == VictoryState::Lost).map(|&(faction, _)| CampaignEvent::CampaignLost { faction }));
+        };
+        if !won {
+            lost(events);
+            self.turn.victory_checked = true;
+            return;
+        }
+        if let Some(p) = self.pending_capture.as_mut().filter(|p| !p.held) {
+            let raised = events.iter().rposition(|e| matches!(e, CampaignEvent::CaptureChoicePending { region, faction } if *region == p.region && *faction == p.faction));
+            if let Some(at) = raised {
+                events.remove(at);
+                p.held = true;
+            }
+        }
+        for &(winner, _) in decided.iter().filter(|(_, s)| *s == VictoryState::Won) {
+            if self.world.victory_notification_disabled {
+                continue;
+            }
+            let other = order.iter().copied().find(|&f| f != winner && self.is_human(f));
+            if let Some(other) = other {
+                // Event +0x108 {other, 1}: the movie listener answers it as it answers a destroyed
+                // human's (`0x00A14E80`). UNKNOWN: what that event's other listeners do when the
+                // check posts it for a faction still in the game.
+                if let Some(movie) = self.outcome_movie(other, CampaignOutcome::Destroyed) {
+                    events.push(CampaignEvent::OutcomeMovie { faction: other, movie });
+                }
+                self.end_campaign();
+            }
+            if let Some(movie) = self.outcome_movie(winner, CampaignOutcome::Won { multiplayer_over: other.is_some() }) {
+                events.push(CampaignEvent::OutcomeMovie { faction: winner, movie });
+            }
+        }
+        lost(events);
+        self.turn.victory_checked = true;
+    }
+
+    /// The player continues the campaign after the victory screen (`CCQ_CONTINUE_GAME_SELECTED`
+    /// `0x00932B40`, CONFIRMED by disassembly: it takes the top of the pending-action stack, asks it
+    /// for its capture report (vfunc +0x1C, an object only for a `pending_loot_options`) and clears
+    /// the report's hold +0x9C; nothing else). The held capture choice is then offered
+    /// ([`CampaignEvent::CaptureChoicePending`]), as the report's next step does. With nothing held it
+    /// does nothing.
+    pub(crate) fn continue_game_selected(&mut self) -> Vec<CampaignEvent> {
+        let mut events = Vec::new();
+        if self.pending_capture.as_ref().is_some_and(|p| p.held) {
+            self.release_held_capture(&mut events);
+        }
+        events
+    }
+
+    /// The held capture report's step once its hold no longer stops it (`0x008F8D00`): a human's
+    /// choice is offered, or the settlement is occupied at once while the scripts' looting switch is
+    /// set (`0x008F8DBF` → `0x008F8EB3`). The caller has checked that a held capture waits.
+    fn release_held_capture(&mut self, events: &mut Vec<CampaignEvent>) {
+        let Some(mut p) = self.pending_capture.take() else { return };
+        p.held = false;
+        if self.world.looting_options_disabled_for_human {
+            self.resolve_capture(p, CaptureChoice::Occupy, events);
+        } else {
+            events.push(CampaignEvent::CaptureChoicePending { region: p.region, faction: p.faction });
+            self.pending_capture = Some(p);
+        }
     }
 }
 

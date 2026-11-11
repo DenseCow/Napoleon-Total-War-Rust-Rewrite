@@ -40,9 +40,12 @@ fn an_expulsion_placing_a_raider_where_he_stands_ends_his_raids_and_sets_him_dow
     let colonel = CharacterId(107);
     m.world.sight_radius.insert(colonel, 3.0);
     assert!(m.raid_trade_route(colonel, at(SPOT.0, SPOT.1)));
-    // A rule that puts army 1002 down where it stands.
-    let stay: Maker<RegionExpulsion> =
-        Arc::new(|_| Arc::new(|_: &CampaignModel, _: FactionId, _: RegionId, _: &mut _| vec![ExpelledForce { force: ForceId(1002), to: Some(at(SPOT.0, SPOT.1)), notice: false }]));
+    // A rule that puts army 1002 down where it stands, and no other force.
+    let stay: Maker<RegionExpulsion> = Arc::new(|_| {
+        Arc::new(|_: &CampaignModel, _: FactionId, _: RegionId, done: &[ForceId], _: &mut _| {
+            done.is_empty().then(|| ExpelledForce { force: ForceId(1002), to: Some(at(SPOT.0, SPOT.1)), notice: false })
+        })
+    });
     Arc::make_mut(&mut m.rules).seams.region_expulsion.apply("test.stay", &stay);
     m.expel_from_region(A, RegionId(10), &mut Vec::new());
     // `0x0096C930` → `0x00A28605`: the raids end though the position did not change; `0x0096C9C4`

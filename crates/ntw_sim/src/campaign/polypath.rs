@@ -31,6 +31,9 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
+use super::place_flood::{self, Point};
+use crate::msvc_sort;
+
 /// Polygon kinds (the low 4 bits of a boundary's flags, CONFIRMED getter `0x00B77EC0`).
 pub mod kind {
     /// Open land.
@@ -43,7 +46,8 @@ pub mod kind {
     pub const ROAD: u8 = 6;
     /// River strip (INFERRED from the data: lies along the river splines); nobody may enter it.
     pub const RIVER: u8 = 3;
-    /// Road over water (INFERRED bridge / ford / port): enterable by armies and fleets.
+    /// Building footprints: every settlement and port lies on one, and it never joins two land
+    /// areas (CONFIRMED from the data, `PATHFINDING_PORTS.md` §9.2). Enterable by armies and fleets.
     pub const SHARED: u8 = 7;
 }
 
@@ -116,6 +120,13 @@ pub struct PolyMap {
     pub outline_first: Vec<u32>,
     /// Outline points in map units.
     pub points: Vec<(f32, f32)>,
+    /// The same outline points in Fixed20, as the file gives them: the exact tests the original
+    /// runs on the grid (`0x00B1FA80` inside, `0x00B1CA50` nearest point; [`super::place_flood`]).
+    pub points_fixed: Vec<(i32, i32)>,
+    /// [`PolyMap::origin`] in Fixed20.
+    pub origin_fixed: (i32, i32),
+    /// [`PolyMap::cell`] in Fixed20.
+    pub cell_fixed: i32,
     /// Per polygon: start of its neighbours in [`PolyMap::adj`] (one more entry at the end).
     pub adj_first: Vec<u32>,
     /// Neighbour polygon indices.
@@ -157,6 +168,11 @@ pub const BLOCKED_GOAL_RADIUS: i32 = 10;
 pub const HEURISTIC_PER_UNIT: f32 = 0.33;
 
 const FIXED: f32 = 1.0 / (1 << 20) as f32;
+
+/// A map-unit value in Fixed20, rounded to the nearest step.
+fn to_fixed20(v: f32) -> i32 {
+    crate::fixed::Fixed20::from_f64(f64::from(v)).raw()
+}
 
 /// A path found by [`PolyMap::find_path`].
 #[derive(Debug, Clone, PartialEq)]
@@ -213,6 +229,8 @@ impl PolyMap {
         let mut m = PolyMap {
             origin: (origin.0 as f32 * FIXED, origin.1 as f32 * FIXED),
             cell: cell as f32 * FIXED,
+            origin_fixed: origin,
+            cell_fixed: cell,
             cols,
             rows,
             region_sets,
@@ -229,6 +247,7 @@ impl PolyMap {
                 m.poly_cell.push(ci as u32);
                 m.outline_first.push(m.points.len() as u32);
                 m.points.extend(p.outline.iter().map(|&(x, z)| (x as f32 * FIXED, z as f32 * FIXED)));
+                m.points_fixed.extend_from_slice(&p.outline);
                 exact.push(&p.outline);
             }
         }
@@ -545,6 +564,22 @@ impl<'a> View<'a> {
         }
     }
 
+    /// Outline of polygon `p` in Fixed20, written into `out` (cleared first): a static polygon's
+    /// exact points ([`PolyMap::points_fixed`]); a run-time piece's map-unit points rounded to
+    /// Fixed20 (the cut geometry, [`super::rtcut`], is computed in floating point).
+    pub fn outline_fixed_into(&self, p: usize, out: &mut Vec<(i32, i32)>) {
+        out.clear();
+        let cut = match self.overlay {
+            Some(o) if p >= o.base_len => Some(&o.outline[p - o.base_len]),
+            Some(o) => o.base_outline.get(&(p as u32)),
+            None => None,
+        };
+        match cut {
+            Some(v) => out.extend(v.iter().map(|&(x, z)| (to_fixed20(x), to_fixed20(z)))),
+            None => out.extend_from_slice(&self.map.points_fixed[self.map.outline_first[p] as usize..self.map.outline_first[p + 1] as usize]),
+        }
+    }
+
     /// Neighbours of polygon `p`.
     pub fn neighbours(&self, p: usize) -> &'a [u32] {
         match self.overlay {
@@ -634,20 +669,8 @@ impl<'a> View<'a> {
         if o.is_empty() || point_in_polygon(o, p.0, p.1) {
             return p;
         }
-        let mut best = (f32::INFINITY, p);
-        for i in 0..o.len() {
-            let (a, b) = (o[i], o[(i + 1) % o.len()]);
-            let (vx, vz) = (b.0 - a.0, b.1 - a.1);
-            let len2 = vx * vx + vz * vz;
-            let t = if len2 > 0.0 { (((p.0 - a.0) * vx + (p.1 - a.1) * vz) / len2).clamp(0.0, 1.0) } else { 0.0 };
-            let q = (a.0 + vx * t, a.1 + vz * t);
-            let d = (q.0 - p.0).powi(2) + (q.1 - p.1).powi(2);
-            if d < best.0 {
-                best = (d, q);
-            }
-        }
+        let q = nearest_on_outline(o, p).1;
         let inner = self.inside_point(poly, self.map.centre(self.poly_cell(poly)));
-        let q = best.1;
         let d = ((inner.0 - q.0).powi(2) + (inner.1 - q.1).powi(2)).sqrt();
         if d > 0.0 {
             let f = (0.05 / d).min(1.0);
@@ -926,6 +949,185 @@ impl<'a> View<'a> {
         }
         avg
     }
+
+    /// The free spot near `pos` where a newly raised army stands (`0x00B39FE0`, mover 0, as the
+    /// recruitment spawn `0x00B1E500` → `0x00B43A60` calls it; CONFIRMED by disassembly), in raw
+    /// Fixed20 like the placement flood it shares its pieces with ([`place_flood`]): `pos` itself
+    /// when a candidate polygon holds it, else the nearest position of the nearest candidate
+    /// (`0x00B421D0`, one polygon's step being [`place_flood::Scratch::offer`], the same as the
+    /// flood's: the outline's nearest point moved inside by the row search `0x00B1CA50`, kept only
+    /// when strictly nearer, so the first one found wins a tie). A candidate is a **reached**
+    /// polygon of kind 0 or 6 whose region passes the owner's region test (`0x00B16C00`): `open`,
+    /// one flag per region id (the model's `region_test_flags`), id 0 always open; `None` tests
+    /// nothing. `None` (no spot: the exe raises no army) when `pos` has no cell
+    /// ([`place_flood::cell_of`], `0x00B44740`), when no building footprint (kind 7) of its cell
+    /// holds it, or when no reached polygon passes.
+    ///
+    /// The search runs over cells, each with its own set of reached polygons (CONFIRMED by
+    /// disassembly, the addresses below):
+    /// 1. Start cell (`0x00AF1590`): reached are the kind-7 polygons holding `pos` (`0x00B1FA60`,
+    ///    [`place_flood::Scratch::holds`]),
+    ///    then every polygon of the cell that touches a reached one, of any kind, until nothing is
+    ///    added (`0x00B168D0`). The cell goes on the heap even with nothing reached, and is not
+    ///    marked visited.
+    /// 2. The cell with the smallest priority is taken (the library heap `0x00AC2140` /
+    ///    `0x00AC1B50`, [`msvc_sort::push_heap`] / [`msvc_sort::pop_heap`], which sets the order of
+    ///    equal priorities). The priority is [`place_flood::cell_priority`]: outside the cell the
+    ///    larger of the two axis distances to it, inside minus the distance to the nearest side.
+    ///    Its reached candidates are tested in cell order against the best spot so far.
+    /// 3. Its 8 neighbour cells are walked row by row, west to east; a visited one is skipped.
+    ///    A neighbour is taken only when one of its polygons of kind 0, 6 or 7 touches a reached
+    ///    **kind-7** polygon of the current cell (`0x00B3A595`): the search follows building
+    ///    footprints, never open land. Those polygons are its reached ones (`0x00AF0910`), plus
+    ///    the cell's polygons of kind 0, 6, 10 or 11 that touch a reached one, until nothing is
+    ///    added (a kind-7 polygon is reached only from the cell before). The cell is then marked
+    ///    visited and goes on the heap; a cell reached again later is ignored, except the start
+    ///    cell, which a neighbour may add once more.
+    /// 4. Only the empty heap ends the search: there is no distance limit, and a nearer spot may
+    ///    lie behind farther cells. A candidate holding `pos` does not stop it either.
+    ///
+    /// "Touches" is our stored adjacency ([`View::neighbours`]: a shared outline edge, or the
+    /// shared corner for two polygons of one kind across a diagonal; `0x00B12CD0`, `0x00B125A0`,
+    /// `0x00B27EB0`), with the exe's rule for run-time polygons inside a cell (`0x00B168D0`: from
+    /// kind 10 only into 10, 11 or 7; from kind 11 only into 11).
+    ///
+    /// PROVISIONAL: for a land or sea polygon and
+    /// the first four polygons of its kind group, the exe reads a stored touch bit (`0x00B57520`)
+    /// instead of comparing outlines, and in the start cell indexes it by the count of compatible
+    /// polygons before the tested one (`0x00B573C0`); those bits are not in our map data, ours
+    /// compares outlines for every pair. The touch test between cells when the neighbour node is
+    /// built (`0x00B16800` → `0x00B122D0` / `0x00B12840`) is not read and taken to equal the one
+    /// in the main loop. The exe steps into a neighbouring grid at the map edge (`0x00B5B6C0`,
+    /// `0x00B44730`); ours has one grid and stops there. Where run-time pieces stand in a cell's
+    /// order is not traced (ours: after the base polygons).
+    pub fn free_spot(&self, pos: Point, open: Option<&[bool]>) -> Option<Point> {
+        let m = self.map;
+        let (c0, r0) = place_flood::cell_of(m, pos)?;
+        let start = r0 * m.cols + c0;
+        let candidate = |p: usize| {
+            let id = self.region_id(p) as usize;
+            // The flags hold one entry per region id of this map (`region_test_flags`), so an id is
+            // never outside them; a shorter vector is the caller's mistake and reads open.
+            debug_assert!(open.is_none_or(|f| id < f.len()), "region id {id} outside the region test flags");
+            matches!(self.kind(p), kind::LAND | kind::ROAD) && (id == 0 || open.is_none_or(|f| f.get(id).copied().unwrap_or(true)))
+        };
+        let priority = |ci: u32| place_flood::cell_priority(m, ci % m.cols, ci / m.cols, pos);
+        let mut scratch = place_flood::Scratch::default();
+
+        // Each node's reached polygons, in cell order; a heap node holds its index here.
+        let mut reached_sets: Vec<Vec<usize>> = Vec::new();
+        let polys: Vec<usize> = self.cell_polys(start as usize).collect();
+        let mut reached: Vec<bool> = polys.iter().map(|&p| self.kind(p) == kind::SHARED && scratch.holds(self, p, pos)).collect();
+        self.spread_in_cell(&polys, &mut reached, |_| true);
+        reached_sets.push(kept(&polys, &reached));
+        // `0x00AC2140` / `0x00AC1B50`: smallest priority on top.
+        let less = |a: &SpotCell, b: &SpotCell| a.priority > b.priority;
+        let mut heap = vec![SpotCell { priority: priority(start), cell: start, reached: 0 }];
+        let mut visited = std::collections::HashSet::new();
+        // The exe's "none yet" is the largest float: a candidate must be strictly nearer than it.
+        let mut best = f32::MAX;
+        let mut out = pos;
+        while let Some(node) = msvc_sort::pop_heap(&mut heap, less) {
+            for &p in reached_sets[node.reached].iter().filter(|&&p| candidate(p)) {
+                scratch.offer(self, p, pos, &mut best, &mut out);
+            }
+            let (col, row) = ((node.cell % m.cols) as i64, (node.cell / m.cols) as i64);
+            for (dc, dr) in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)] {
+                let (c, r) = (col + dc, row + dr);
+                if c < 0 || r < 0 || c >= m.cols as i64 || r >= m.rows as i64 {
+                    continue;
+                }
+                let next = (r * m.cols as i64 + c) as u32;
+                if visited.contains(&next) {
+                    continue;
+                }
+                // The polygons an army may enter (`0x00AF0910`'s mover filter), of kind 0, 6 or 7,
+                // that touch a reached footprint polygon of the current cell.
+                let mut entered: Vec<usize> = Vec::new();
+                for &p in reached_sets[node.reached].iter().filter(|&&p| self.kind(p) == kind::SHARED) {
+                    for &q in self.neighbours(p) {
+                        let (q, k) = (q as usize, self.kind(q as usize));
+                        if self.poly_cell(q) == next
+                            && Mover::Land.may_enter(k)
+                            && matches!(k, kind::LAND | kind::ROAD | kind::SHARED)
+                            && !entered.contains(&q)
+                        {
+                            entered.push(q);
+                        }
+                    }
+                }
+                if entered.is_empty() {
+                    continue;
+                }
+                let polys: Vec<usize> = self.cell_polys(next as usize).collect();
+                let mut reached: Vec<bool> = polys.iter().map(|p| entered.contains(p)).collect();
+                self.spread_in_cell(&polys, &mut reached, |k| matches!(k, kind::LAND | kind::ROAD | 10 | 11));
+                visited.insert(next);
+                reached_sets.push(kept(&polys, &reached));
+                msvc_sort::push_heap(&mut heap, SpotCell { priority: priority(next), cell: next, reached: reached_sets.len() - 1 }, less);
+            }
+        }
+        (best != f32::MAX).then_some(out)
+    }
+
+    /// Marks, inside one cell (`polys` in cell order, `reached` beside it), every polygon whose
+    /// kind passes `into` and that touches a reached one, until nothing is added (the second
+    /// passes of `0x00AF1590` and `0x00AF0910`; the exe's work list order cannot change the set).
+    /// The touch test `0x00B168D0` lets a run-time polygon of kind 10 touch only kinds 10, 11 and
+    /// 7, and one of kind 11 only kind 11.
+    fn spread_in_cell(&self, polys: &[usize], reached: &mut [bool], into: impl Fn(u8) -> bool) {
+        let mut work: Vec<usize> = (0..polys.len()).filter(|&i| reached[i]).collect();
+        while let Some(w) = work.pop() {
+            let from = self.kind(polys[w]);
+            let touching = self.neighbours(polys[w]);
+            for (i, &e) in polys.iter().enumerate() {
+                let k = self.kind(e);
+                let kinds_touch = match from {
+                    10 => matches!(k, 10 | 11 | kind::SHARED),
+                    11 => k == 11,
+                    _ => true,
+                };
+                if !reached[i] && into(k) && kinds_touch && touching.contains(&(e as u32)) {
+                    reached[i] = true;
+                    work.push(i);
+                }
+            }
+        }
+    }
+}
+
+/// One cell on the heap of [`View::free_spot`] (the exe's 36-byte node, built by `0x00AF1590` for
+/// the start cell and `0x00AF0910` for a neighbour).
+#[derive(Clone, Copy)]
+struct SpotCell {
+    /// Smallest first.
+    priority: f32,
+    cell: u32,
+    /// The index of the cell's reached polygons in the search's list of them.
+    reached: usize,
+}
+
+/// The polygons of `polys` whose flag is set.
+fn kept(polys: &[usize], reached: &[bool]) -> Vec<usize> {
+    polys.iter().zip(reached).filter(|&(_, &r)| r).map(|(&p, _)| p).collect()
+}
+
+/// The point of outline `o` nearest `p`, with its squared distance (`(INFINITY, p)` for an empty
+/// outline).
+fn nearest_on_outline(o: &[(f32, f32)], p: (f32, f32)) -> (f32, (f32, f32)) {
+    let mut best = (f32::INFINITY, p);
+    for i in 0..o.len() {
+        let (a, b) = (o[i], o[(i + 1) % o.len()]);
+        let (vx, vz) = (b.0 - a.0, b.1 - a.1);
+        let len2 = vx * vx + vz * vz;
+        let t = if len2 > 0.0 { (((p.0 - a.0) * vx + (p.1 - a.1) * vz) / len2).clamp(0.0, 1.0) } else { 0.0 };
+        let q = (a.0 + vx * t, a.1 + vz * t);
+        let d = (q.0 - p.0).powi(2) + (q.1 - p.1).powi(2);
+        if d < best.0 {
+            best = (d, q);
+        }
+    }
+    best
 }
 
 /// The direction index whose step points closest to (dx, dz).
@@ -1080,5 +1282,162 @@ mod tests {
         let g = m.goal_step(0, 1, 0, (1.0, 1.0), (2.0, 1.5), &[]);
         let want = 0.5 * byte_cost(0) + 0.5 * std::f32::consts::SQRT_2 * byte_cost(0);
         assert!((g - want).abs() < 1e-3, "{g} vs {want}");
+    }
+
+    /// A `w` x 1 strip of 2-unit cells, one square polygon per cell with `(kind, region id)` from
+    /// `cell(c)`; region id i holds region index i.
+    fn strip(w: u32, cell: impl Fn(u32) -> (u8, u32)) -> PolyMap {
+        let cells: Vec<CellInput> = (0..w)
+            .map(|c| {
+                let x0 = c as i32 * 2 * U;
+                let (kind, region_id) = cell(c);
+                CellInput { header: [0; 8], polys: vec![PolyInput { kind, region_id, outline: vec![(x0, 0), (x0 + 2 * U, 0), (x0 + 2 * U, 2 * U), (x0, 2 * U)] }] }
+            })
+            .collect();
+        PolyMap::build((0, 0), 2 * U, w, 1, &cells, (0..8).map(|i| vec![i]).collect())
+    }
+
+    /// A polygon of a hand-built cell: region id 0, outline in quarter map units.
+    fn poly(kind: u8, quarters: &[(i32, i32)]) -> PolyInput {
+        PolyInput { kind, region_id: 0, outline: quarters.iter().map(|&(x, z)| (x * (U / 4), z * (U / 4))).collect() }
+    }
+
+    /// Map point (x, z) in raw Fixed20.
+    fn at(x: f64, z: f64) -> Point {
+        ((x * f64::from(U)) as i32, (z * f64::from(U)) as i32)
+    }
+
+    /// The point itself is the spot when a reached candidate holds it (`0x00B421D0`: distance 0).
+    /// Hand-made: a road square (region 1) lies on the footprint square, which map data never does.
+    #[test]
+    fn free_spot_is_the_point_inside_a_reached_open_polygon() {
+        let sq = [(0, 0), (8, 0), (8, 8), (0, 8)];
+        let cells = [CellInput { header: [0; 8], polys: vec![poly(kind::SHARED, &sq), PolyInput { region_id: 1, ..poly(kind::ROAD, &sq) }] }];
+        let m = PolyMap::build((0, 0), 2 * U, 1, 1, &cells, vec![vec![0], vec![1]]);
+        assert_eq!(m.view().free_spot(at(1.0, 1.0), Some(&[true, true])), Some(at(1.0, 1.0)));
+        // No region test at all: the same.
+        assert_eq!(m.view().free_spot(at(1.0, 1.0), None), Some(at(1.0, 1.0)));
+        // The road's region closed: the footprint itself is never a spot.
+        assert_eq!(m.view().free_spot(at(1.0, 1.0), Some(&[true, false])), None);
+    }
+
+    #[test]
+    fn free_spot_is_the_nearest_outline_point_of_an_open_region() {
+        // Cell 0 is the settlement's footprint (closed region 1); cell 1 a road of open region 2,
+        // cell 2 open land (region 3): the nearest open point is cell 1's west edge.
+        let m = strip(4, |c| [(kind::SHARED, 1), (kind::ROAD, 2), (kind::LAND, 3), (kind::LAND, 1)][c as usize]);
+        assert_eq!(m.view().free_spot(at(0.5, 1.0), Some(&[false, false, true, true])), Some(at(2.0, 1.0)));
+        // The search follows footprints only: with the road's region closed, the open land behind
+        // the road is not reached.
+        assert_eq!(m.view().free_spot(at(0.5, 1.0), Some(&[false, false, false, true])), None);
+        // Region id 0 always passes the test.
+        let m0 = strip(2, |c| [(kind::SHARED, 1), (kind::LAND, 0)][c as usize]);
+        assert_eq!(m0.view().free_spot(at(1.0, 1.0), Some(&[false, false])), Some(at(2.0, 1.0)));
+    }
+
+    #[test]
+    fn free_spot_skips_shared_strips_and_unreachable_land() {
+        // A kind-7 strip is crossed but is no candidate; a river (kind 3) is not crossed.
+        let m = strip(4, |c| [(kind::SHARED, 1), (kind::SHARED, 2), (kind::LAND, 2), (kind::LAND, 2)][c as usize]);
+        assert_eq!(m.view().free_spot(at(1.0, 1.0), Some(&[false, false, true])), Some(at(4.0, 1.0)));
+        let cut = strip(3, |c| [(kind::SHARED, 1), (kind::RIVER, 2), (kind::LAND, 2)][c as usize]);
+        assert_eq!(cut.view().free_spot(at(1.0, 1.0), Some(&[false, false, true])), None, "no open polygon reachable: no spot");
+        // West of the map: the first column's cell (`0x00B44740` clamps), whose footprint does not
+        // hold the point, so nothing is reached and there is no spot.
+        assert_eq!(m.view().free_spot(at(-1.0, 1.0), None), None);
+    }
+
+    /// The spot is the exe's nearest position (`0x00B1CA50`): the outline's nearest point moved
+    /// inside by the row search. A polygon does not hold its east edge, so land west of the
+    /// footprint is stood on one raw unit inside its east edge. (The search this replaced took the
+    /// outline point itself, (2, 1), which the land does not hold.)
+    #[test]
+    fn free_spot_on_an_east_edge_is_one_unit_inside() {
+        let m = strip(2, |c| [(kind::LAND, 2), (kind::SHARED, 1)][c as usize]);
+        assert_eq!(m.view().free_spot(at(3.0, 1.0), Some(&[false, false, true])), Some((2 * U - 1, U)));
+    }
+
+    /// Cells of equal priority leave the heap in the exe's order (`0x00AC2140`, `0x00AC1B50`): a
+    /// pushed node stays below an equal parent, and the hole left by a pop takes the right child
+    /// when both are equal. Four equal nodes pushed as 0, 1, 2, 3 so come out 0, 2, 1, 3.
+    #[test]
+    fn free_spot_heap_pops_equal_priorities_in_the_exe_order() {
+        let less = |a: &SpotCell, b: &SpotCell| a.priority > b.priority;
+        let mut heap: Vec<SpotCell> = Vec::new();
+        for cell in 0..4 {
+            msvc_sort::push_heap(&mut heap, SpotCell { priority: 1.0, cell, reached: 0 }, less);
+        }
+        let order: Vec<u32> = std::iter::from_fn(|| msvc_sort::pop_heap(&mut heap, less)).map(|n| n.cell).collect();
+        assert_eq!(order, [0, 2, 1, 3]);
+        // Smallest priority first.
+        for (priority, cell) in [(2.0, 5), (-0.5, 6), (0.25, 7)] {
+            msvc_sort::push_heap(&mut heap, SpotCell { priority, cell, reached: 0 }, less);
+        }
+        let order: Vec<u32> = std::iter::from_fn(|| msvc_sort::pop_heap(&mut heap, less)).map(|n| n.cell).collect();
+        assert_eq!(order, [6, 7, 5]);
+    }
+
+    /// The search has no distance limit (`0x00B39FE0` ends only when its heap is empty). The
+    /// footprint (kind 7) runs from the start cell (0, 0) north to row 3, east to column 2 and back
+    /// south to (2, 1); land A at (1, 2) touches it early, land B at (2, 0) only at its far end, the
+    /// rest is sea. From (1.9, 1) B is 2.1 away and A 3.0017, but B is reached only through cells up
+    /// to 5 away. The search this replaced stopped at the first popped cell farther than its best
+    /// spot (cell (2, 2), 3.66 away, after A was found) and so answered A's corner (2, 4).
+    #[test]
+    fn free_spot_searches_past_farther_cells_for_a_nearer_spot() {
+        let strip7 = [(0, 0), (0, 1), (0, 2), (0, 3), (1, 3), (2, 3), (2, 2), (2, 1)];
+        let m = map(
+            4,
+            4,
+            |c, r| match (c, r) {
+                (1, 2) | (2, 0) => kind::LAND,
+                _ if strip7.contains(&(c, r)) => kind::SHARED,
+                _ => kind::SEA,
+            },
+            |_, _| 0,
+        );
+        assert_eq!(m.view().free_spot(at(1.9, 1.0), None), Some(at(4.0, 1.0)));
+    }
+
+    /// Only reached polygons are offered (`0x00B421D0` reads the node's reached byte). Cell 0 is a
+    /// footprint whose east side is cut at z = 1. Cell 1 holds land south of z = 0.5, a river strip
+    /// up to z = 1 and land north of it: only the north land shares an edge with the footprint, and
+    /// the reach inside a neighbour cell does not pass a river, so the south land, 1.0 from the
+    /// point, is no candidate and the north land's corner, 1.25 away, is the spot.
+    #[test]
+    fn free_spot_offers_only_reached_polygons() {
+        let cells = [
+            CellInput { header: [0; 8], polys: vec![poly(kind::SHARED, &[(0, 0), (8, 0), (8, 4), (8, 8), (0, 8)])] },
+            CellInput {
+                header: [0; 8],
+                polys: vec![
+                    poly(kind::LAND, &[(8, 0), (16, 0), (16, 2), (8, 2)]),
+                    poly(kind::RIVER, &[(8, 2), (16, 2), (16, 4), (8, 4)]),
+                    poly(kind::LAND, &[(8, 4), (16, 4), (16, 8), (8, 8)]),
+                ],
+            },
+        ];
+        let m = PolyMap::build((0, 0), 2 * U, 2, 1, &cells, vec![vec![0]]);
+        assert_eq!(m.view().free_spot(at(1.0, 0.25), None), Some(at(2.0, 1.0)));
+    }
+
+    /// The seed (`0x00AF1590`): only a kind-7 polygon holding the point starts the search, and in
+    /// the start cell the reach passes through polygons of every kind.
+    #[test]
+    fn free_spot_starts_on_the_footprint_under_the_point() {
+        // Plain land under the point: nothing is reached, no spot.
+        let land = strip(3, |_| (kind::LAND, 0));
+        assert_eq!(land.view().free_spot(at(1.0, 1.0), None), None);
+        // One cell: a footprint, a river strip, land. The land is reached through the river.
+        let cells = [CellInput {
+            header: [0; 8],
+            polys: vec![
+                poly(kind::SHARED, &[(0, 0), (4, 0), (4, 8), (0, 8)]),
+                poly(kind::RIVER, &[(4, 0), (6, 0), (6, 8), (4, 8)]),
+                poly(kind::LAND, &[(6, 0), (8, 0), (8, 8), (6, 8)]),
+            ],
+        }];
+        let m = PolyMap::build((0, 0), 2 * U, 1, 1, &cells, vec![vec![0]]);
+        assert_eq!(m.view().free_spot(at(0.5, 1.0), None), Some(at(1.5, 1.0)));
     }
 }

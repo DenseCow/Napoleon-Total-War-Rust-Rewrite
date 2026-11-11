@@ -549,8 +549,44 @@ fn declare_war_command_refuses_out_of_game_and_same_faction() {
     assert_eq!(m.apply(CampaignCommand::DeclareWar { a: A, b: C }), Err(CommandError::OutOfGame(C)));
     assert_eq!(m.apply(CampaignCommand::DeclareWar { a: C, b: A }), Err(CommandError::OutOfGame(C)));
     assert_eq!(m.world.stance(A, C), Stance::Neutral);
+    // a == b: the exe writes the war onto the first record of the declarer's list. Ours changes nothing
+    // at all (no stance, attitude factor, payment or ally call), through the command and through the rule
+    // the other callers share, and names the refusal before the in-the-game test (C is out of the game).
+    let before = m.world.clone();
     assert_eq!(m.apply(CampaignCommand::DeclareWar { a: A, b: A }), Err(CommandError::SameFaction(A)));
-    assert_eq!(m.world.stance(A, B), Stance::Neutral);
+    assert_eq!(m.declare_war_rules(A, A), Err(CommandError::SameFaction(A)));
+    assert_eq!(m.apply(CampaignCommand::DeclareWar { a: C, b: C }), Err(CommandError::SameFaction(C)));
+    assert!(m.world == before, "a refused self-declaration leaves the world as it was");
+    assert!(m.pending_ally_war_calls.is_empty());
+    assert!(m.world.factions.keys().all(|&f| !m.at_war(A, f)), "no war on any record of A's list");
+}
+
+/// rebelgov: a government key the rules do not have reads as `upper` / `lower`, on every read (the
+/// warning's once-per-key set is `crate::reported`, tested there).
+#[test]
+fn an_unknown_government_key_reads_the_default_classes() {
+    let mut m = test_model();
+    m.world.factions.get_mut(&A).unwrap().government_key = "gov_made_up".into();
+    for _ in 0..2 {
+        assert_eq!(economy::government_classes(&m, A), ("upper".to_owned(), "lower".to_owned()));
+    }
+}
+
+/// rebelgov: the empty government key is no government (the rebels of the original's files have none),
+/// so it is never reported, however often it is read; a key the rules lack is reported once.
+#[test]
+fn the_empty_government_key_is_never_reported() {
+    let reported = crate::reported::ReportedKeys::new();
+    assert!(!economy::reports_unknown_government(&reported, ""));
+    assert!(!economy::reports_unknown_government(&reported, ""));
+    assert!(economy::reports_unknown_government(&reported, "gov_made_up"));
+    assert!(!economy::reports_unknown_government(&reported, "gov_made_up"), "once per key");
+    assert!(economy::reports_unknown_government(&reported, "gov_other"));
+    // The empty key reads the default classes like any key the rules lack (the test model's factions
+    // have none).
+    let m = test_model();
+    assert_eq!(m.world.factions[&A].government_key, "");
+    assert_eq!(economy::government_classes(&m, A), ("upper".to_owned(), "lower".to_owned()));
 }
 
 #[test]

@@ -145,11 +145,35 @@ pub struct SpecUnit {
     /// `general`, if the unit is a general's unit.
     pub general: Option<SpecGeneral>,
     /// `unit_capabilities/special_ability`.
-    pub special_abilities: Vec<String>,
+    pub special_abilities: Vec<SpecAbility>,
     /// `unit_capabilities/shot_type`.
     pub shot_types: Vec<String>,
     /// `unit_capabilities/bayonet_type`.
     pub bayonet_type: Option<String>,
+}
+
+/// One `unit_capabilities/special_ability` element: the ability's name (the element's text) and
+/// the three optional attributes the parser reads (`0x0050CAE0`, CONFIRMED). An attribute that is
+/// absent is `None`; one that is there but is not a number reads as 0 (the float reader
+/// `0x005346A0` and the integer reader `0x004F3720`, CONFIRMED).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpecAbility {
+    /// The ability's name, e.g. `rally`.
+    pub name: String,
+    /// `active_time`: seconds the ability's timed effect lasts.
+    pub active_time: Option<f32>,
+    /// `recharge_time`: seconds before the ability can be used again.
+    pub recharge_time: Option<f32>,
+    /// `num_uses`: how often the ability can be used in the battle.
+    pub num_uses: Option<i32>,
+}
+
+impl SpecAbility {
+    /// True if the element gives any of the three attributes: then they, not the ability's
+    /// database row, make its record (`0x0050CAE0`, CONFIRMED).
+    pub fn has_own_record(&self) -> bool {
+        self.active_time.is_some() || self.recharge_time.is_some() || self.num_uses.is_some()
+    }
 }
 
 /// A unit's `general` element.
@@ -302,10 +326,31 @@ fn unit(u: &XmlElement) -> SpecUnit {
             star_rating: g.child("star_rating").and_then(|s| s.attr_i64("level")).and_then(|n| u32::try_from(n).ok()),
             portrait: g.child("portrait").map(|p| p.text.clone()).filter(|t| !t.is_empty()),
         }),
-        special_abilities: list("special_ability"),
+        special_abilities: caps
+            .map(|c| c.children_named("special_ability").filter(|e| !e.text.is_empty()).map(special_ability).collect())
+            .unwrap_or_default(),
         shot_types: list("shot_type"),
         bayonet_type: caps.and_then(|c| c.child("bayonet_type")).map(|b| b.text.clone()).filter(|t| !t.is_empty()),
     }
+}
+
+fn special_ability(e: &XmlElement) -> SpecAbility {
+    SpecAbility {
+        name: e.text.clone(),
+        active_time: e.attr("active_time").map(leading_f32),
+        recharge_time: e.attr("recharge_time").map(leading_f32),
+        // The integer reader reports a failure and the parser then stores 0.
+        num_uses: e.attr("num_uses").map(|t| t.trim().parse().unwrap_or(0)),
+    }
+}
+
+/// The number a text starts with, 0 if it starts with none: the exe's float reader `0x005346A0`
+/// extracts from a text stream (leading spaces skipped, the longest number taken, the rest left)
+/// and returns 0 when that fails (CONFIRMED).
+fn leading_f32(text: &str) -> f32 {
+    let t = text.trim_start();
+    let end = t.find(|c: char| !(c.is_ascii_digit() || matches!(c, '+' | '-' | '.' | 'e' | 'E'))).unwrap_or(t.len());
+    (1..=end).rev().find_map(|n| t[..n].parse().ok()).unwrap_or(0.0)
 }
 
 #[cfg(test)]
@@ -356,7 +401,9 @@ mod tests {
         let u = &a0.units[0];
         assert_eq!((u.unit_type.as_str(), u.num_soldiers, u.width), ("Gen_Early_Napoleon", Some(24), Some(19.9)));
         assert_eq!(u.general.as_ref().unwrap().name, "Napoleon Bonaparte");
-        assert_eq!(u.special_abilities, vec!["rally"]);
+        assert_eq!(u.special_abilities.len(), 1);
+        assert_eq!(u.special_abilities[0].name, "rally");
+        assert!(!u.special_abilities[0].has_own_record());
         assert_eq!(s.alliances[0].victory_conditions, vec!["kill_or_rout_enemy"]);
         assert_eq!(s.alliances[0].rout_position, Some((0.0, 2000.0)));
         assert!(s.alliances[1].non_playable && !s.alliances[1].armies[0].non_playable);
@@ -370,6 +417,25 @@ mod tests {
         assert_eq!(s.playable_area, Some((1400.0, (-200.0, -100.0))));
         assert_eq!(s.player_army(), Some((0, 0)));
         assert!(!s.is_naval());
+    }
+
+    /// A `special_ability` element's own attributes (`0x0050CAE0`): each is optional, and one that
+    /// is not a number reads as 0 (`0x005346A0`, `0x004F3720`).
+    #[test]
+    fn special_ability_attributes_are_optional_and_read_like_the_exe() {
+        let xml = r#"<battle><alliance id="0"><army><faction>france</faction><unit><unit_type type="X"/><unit_capabilities>
+            <special_ability active_time="45.5" num_uses="3">rally</special_ability>
+            <special_ability recharge_time=" 12s" num_uses="many">inspire_unit</special_ability>
+            <special_ability active_time="soon">square_formation</special_ability>
+            <special_ability></special_ability>
+        </unit_capabilities></unit></army></alliance></battle>"#;
+        let s = BattleSpec::parse(xml.as_bytes()).unwrap();
+        let a = &s.alliances[0].armies[0].units[0].special_abilities;
+        assert_eq!(a.len(), 3, "an element without a name is not an ability");
+        assert_eq!((a[0].name.as_str(), a[0].active_time, a[0].recharge_time, a[0].num_uses), ("rally", Some(45.5), None, Some(3)));
+        assert_eq!((a[1].active_time, a[1].recharge_time, a[1].num_uses), (None, Some(12.0), Some(0)));
+        assert_eq!(a[2].active_time, Some(0.0));
+        assert!(a.iter().all(SpecAbility::has_own_record));
     }
 
     #[test]

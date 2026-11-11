@@ -4,8 +4,9 @@
 //! rules adapter (vtable 0x01337A28) whose method `+4*i` returns key `i` (W1 §12.9, CONFIRMED).
 //!
 //! Most keys are truncated to `i32` on load (`cvttss2si`, W1 §9); the keys listed as floats in W1 §9
-//! stay `f32`. The four `special_ability_*` keys use a third, not yet understood adder
-//! (type "other"); we keep them as `f32` until that is resolved (INFERRED).
+//! stay `f32`. The four `special_ability_*` keys go through a third adder (`0x00F3A8F0`,
+//! CONFIRMED) that stores an unsigned 32-bit integer, so they are `u32`; the Inspire effect adds
+//! the stored value to a signed stat with a plain 32-bit add (`0x0051DAF0`), hence wrapping adds.
 //!
 //! **No game data here**: `Default` is all zeros. Values come from the player's own game files.
 
@@ -115,10 +116,10 @@ pub struct KvRules {
     pub ship_penalty_far_mod: f32,
     pub ship_penalty_range: i32,
     pub magazine_explosion_interrupt_chance: f32,
-    pub special_ability_artillery_rof_boost: f32,
-    pub special_ability_artillery_accuracy_boost: f32,
-    pub special_ability_inspire_unit_marksmanship_bonus: f32,
-    pub special_ability_inspire_unit_melee_attack_bonus: f32,
+    pub special_ability_artillery_rof_boost: u32,
+    pub special_ability_artillery_accuracy_boost: u32,
+    pub special_ability_inspire_unit_marksmanship_bonus: u32,
+    pub special_ability_inspire_unit_melee_attack_bonus: u32,
     pub ship_repair_rate: f32,
 }
 

@@ -26,7 +26,6 @@ use bevy::camera::ClearColorConfig;
 use bevy::camera::primitives::{Aabb, Frustum};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use ntw_formats::default_keys::{self, Shortcuts};
 use ntw_formats::loc::Localisation;
 use ntw_formats::pack::Vfs;
 use ntw_script::ScriptSource;
@@ -168,7 +167,7 @@ pub fn enter(world: &mut World) {
     }
     // A 2D camera over the 3D map for the HUD sprites.
     world.spawn((Camera2d, Camera { order: 1, clear_color: ClearColorConfig::None, ..default() }, DespawnOnExit(GameMode::Campaign)));
-    let shortcuts = campaign_shortcuts(&vfs);
+    let shortcuts = crate::shortcut_keys::mode_shortcuts(&vfs, "campaign");
     let mut assets = UiAssets::new(vfs);
     assets.add_embedded(host.template_images());
     world.insert_resource(assets);
@@ -219,20 +218,6 @@ fn advance_ui_clock(clock_ms: &mut f64, real: &Time<Real>) -> f64 {
     *clock_ms
 }
 
-/// The campaign's key bindings, read once from `text/default_keys.xml` through the install's file
-/// system (mods included): the default keyset's funcs with a campaign or "all" mapping, each to
-/// its component (`Shortcuts::mode_bindings`; the exe's loader `0x00EDB080`). A missing or
-/// unreadable file is logged once and leaves no bindings.
-fn campaign_shortcuts(vfs: &Vfs) -> ShortcutMachine {
-    match vfs.read(default_keys::PATH).map_err(|e| e.to_string()).and_then(|b| Shortcuts::parse(&b).map_err(|e| e.to_string())) {
-        Ok(s) => ShortcutMachine::new(s.mode_bindings("campaign")),
-        Err(e) => {
-            warn!("Campaign HUD: {} not read, no keyboard shortcuts: {e}", default_keys::PATH);
-            ShortcutMachine::default()
-        }
-    }
-}
-
 /// The `keys` system's buffers, kept between frames so they are not allocated again once they
 /// have grown: the frame's key events, their (key, pressed) changes, the keys down replayed from
 /// the frame's start and the exe's names of those keys.
@@ -250,8 +235,8 @@ pub struct KeyBuffers {
 /// poll ([`UiScriptHost::campaign_keys`]), as the campaign's listener runs it from its per-frame
 /// slot whether or not a key event came (`0x00A27EB0`, vtable `0x0136B40C` +0x20, called by
 /// `0x0048BD40` after the frame's events). The poll runs the campaign's bindings of
-/// `text/default_keys.xml` ([`campaign_shortcuts`]) on the keys down at the frame's end, through
-/// the shortcut handler's state machine: in vanilla ESCAPE (any modifier) is the root's
+/// `text/default_keys.xml` ([`crate::shortcut_keys::mode_shortcuts`]) on the keys down at the
+/// frame's end, through the shortcut handler's state machine: in vanilla ESCAPE (any modifier) is the root's
 /// `escape_menu`, CTRL+S `quick_save`, CTRL+L `quick_load` (the root's script decides, quick save
 /// only when `CanSave()`), Return `end_turn` on `button_end_turn` (its script ends the turn),
 /// W/S/A/D the camera's steps, pressed every frame they are held with the frame's time
@@ -293,7 +278,7 @@ pub fn keys(
     // After the replay `down` is the keys held now.
     down.names_into(names);
     let held = down.modifiers();
-    let keys = CampaignKeys { down: names.as_slice(), held, time: time.delta_secs().min(MAX_FRAME_TIME) };
+    let keys = CampaignKeys { down: names.as_slice(), held, time: time.delta_secs().min(crate::shortcut_keys::MAX_FRAME_TIME) };
     let steps = &mut hud.camera_steps;
     hud.host.campaign_keys(&mut hud.shortcuts, keys, &mut |func, time| {
         if let Some(func) = super::camera::CameraFunc::from_binding(func) {
@@ -302,10 +287,6 @@ pub fn keys(
     });
     log_errors(&hud.host);
 }
-
-/// The longest frame time the frame tick passes on, 300 ms (CONFIRMED, `0x0048A650`: the delta
-/// from `0x010A1E10` is capped at 300 ms unless the frame-rate test is on).
-const MAX_FRAME_TIME: f32 = 0.3;
 
 /// The scripts' requests outside the HUD (`UiRequest`): a load (`CampaignUI.LoadCampaign` from the
 /// save panel, `QuickLoad`) reloads the campaign from that save, as the front end's Load Game does
@@ -420,7 +401,8 @@ fn apply_requests(hud: &mut CampaignHud, sim: &mut CampaignSim) {
 
 /// Feeds the model's treasury and date (`UpdateFactionFundsAndDate`) and the map selection to the
 /// layout whenever the campaign changed, and opens the movie panel for each defeat / victory movie
-/// the model queued (`UiScriptHost::campaign_outcome_movie`), and shows the human a waiting
+/// the model queued (`UiScriptHost::campaign_outcome_movie`) and the defeat popup for each faction
+/// its victory check found lost (`UiScriptHost::campaign_lost_popup`), and shows the human a waiting
 /// capture's screen and a waiting call to war's `ally_attacked` message.
 pub fn update(hud: Option<NonSendMut<CampaignHud>>, sim: Option<NonSendMut<CampaignSim>>) {
     let (Some(mut hud), Some(mut sim)) = (hud, sim) else { return };
@@ -429,6 +411,9 @@ pub fn update(hud: Option<NonSendMut<CampaignHud>>, sim: Option<NonSendMut<Campa
     }
     for (faction, movie) in std::mem::take(&mut sim.outcome_movies) {
         hud.host.campaign_outcome_movie(faction, &movie);
+    }
+    for faction in std::mem::take(&mut sim.campaign_lost) {
+        hud.host.campaign_lost_popup(faction);
     }
     hud.sim_generation = sim.generation;
     hud.host.campaign_update_funds();
@@ -463,10 +448,13 @@ fn same_panel_movie(want: Option<&(NodeId, Rc<str>)>, playing: Option<&PanelMovi
 /// The movie a HUD panel shows: the scripts attach it with `AttachCustomControl` (the movie panel's
 /// `movie_window`, CONFIRMED event_movie_panel.luac) and `CampaignUI.MovieDismissed` drops it.
 /// Starts it into a texture, draws it in that component and stops it when it is dropped or the
-/// component is gone. INFERRED: the movie plays once with its sound track in the player's language
-/// (what the exe does with the sound volume it hands the bink control is traced only up to the
-/// player: which two settings feed it and how the player applies it are not, see the PROVISIONAL
-/// note in the body).
+/// component is gone. It plays once with its sound track in the player's language, at the level
+/// every movie plays at (see the note in the body). CONFIRMED: the panel's open `0x00A23330` hands
+/// the bink control's open `0x00D9F600` the option bytes {+0 1, +1 0, +2 1, +3 1, +5 1, +6 1}, with
+/// +1 = 0 as in the intro movies' call (`0x004782F0` → `0x004831D0(name, 1, 0, 0)`); the only caller
+/// with +1 = 1 is the front end's looping background (`0x004858D0`, `(name, 0, 1, 0)`). INFERRED: +1
+/// is the loop flag (the player the control builds after `0x00D9FA3F` is not traced; `crate::video`
+/// takes the same reading).
 pub fn panel_movie(
     hud: Option<NonSendMut<CampaignHud>>,
     assets: Option<ResMut<UiAssets>>,
@@ -484,13 +472,11 @@ pub fn panel_movie(
         }
         if let Some((node, movie)) = want {
             let component = hud.host.world().get(node).map(|n| n.data.id.clone()).unwrap_or_default();
-            // PROVISIONAL: the movie's sound plays like every movie's in ours (`audio::movie_audio`):
-            // the `sound_events` movie-table multiplier, in the movie group (`MOVIE_VOLUME`), under
-            // master. The exe: `0x00A13EA0` hands the panel constructor `0x00998E20` int(setting 4 ×
-            // 0.01 × setting 5) (CVTTSS2SI at ~0x00A13FC0), stored at panel +0x24; `0x00A23330` reads
-            // +0x24 and passes it to the bink control's open `0x00D9F600`, which multiplies it by 0x102
-            // (0 when the control's +0xC vfunc +0xD4(5) returns false) and hands it to the player's
-            // vfunc +0xC. Not traced: which two settings, and how the player applies that value.
+            // The sound plays like every movie's (`audio::movie_audio`, level from `mixer::movie_gain`).
+            // CONFIRMED: `0x00A13EA0` hands the panel constructor `0x00998E20` int(group 4 × 0.01 ×
+            // group 5) (the sound manager's slot +0xDC volumes, movie and master; CVTTSS2SI at
+            // `0x00A13FC0`), kept at panel +0x24, which `0x00A23330` passes to the bink control's open
+            // `0x00D9F600`: the same level and open as the full-screen player `0x004831D0`.
             play.write(crate::video::PlayMovie { path: movie.to_string(), mode: crate::video::MovieMode::Texture, track: None, looped: false, sound: true });
             hud.panel_movie = Some(PanelMovie { node, movie, component, shown: false });
         }

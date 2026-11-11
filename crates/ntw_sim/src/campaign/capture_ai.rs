@@ -152,9 +152,7 @@ fn army_with_units_in(model: &CampaignModel, region: RegionId, faction: FactionI
 /// Steps 4 and 5: the personality's loot chance, or the choice the floor or the ceiling forces.
 fn personality_chance(model: &CampaignModel, region: RegionId, own: FactionId, previous: FactionId) -> Result<f32, CaptureChoice> {
     let rules = &model.rules;
-    let faction_key = model.world.factions.get(&own).map_or("", |f| f.key.as_str());
-    let stored = model.world.ai_keys.get(&own).map(|k| k.personality.as_str());
-    let personality = rules.ai_personalities.resolve(&rules.campaign, faction_key, stored);
+    let personality = model.ai_personality(own);
     // The table holds percent (scaled once at load by `0x00DDFFB0`). A tunable the personality and the
     // default lack reads 0 (logged once when the rules load).
     let t = |k: &str| rules.ai_personalities.tunable(&personality, k).unwrap_or(0.0) * PERCENT;

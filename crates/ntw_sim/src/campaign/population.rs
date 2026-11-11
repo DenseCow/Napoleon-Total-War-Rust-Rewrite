@@ -88,16 +88,21 @@ pub struct PopulationState {
 /// disassembly): 0 unless the owner is human (faction +0x6E0; an AI owner pays none, and a rebel-owned
 /// region is zeroed by the rebel branch), else `FISTP(var × Σ × √pop × max(0, policing_cost_mod × 0.01 +
 /// 1))` in single precision, where `var` is campaign variable 18 `policing_automated_cost_per_pop`, Σ the
-/// automated policing (repression slot 3, class +0x4C) of the classes that are the owner's government's
-/// upper or lower class (`0x008CE320` / `0x008CE260`), refreshed just before in the same pass
-/// (`0x008EDF70` with the object it refreshes: `input`'s set, classes and religions), and `pop` the
-/// population the factors are for.
+/// automated policing (repression slot 3, class +0x4C) of the classes that are the region's government's
+/// upper or lower class (the region tests `0x008CE320` / `0x008CE260`,
+/// [`super::economy::region_government_classes`]: the one reading of them), refreshed just before in the
+/// same pass (`0x008EDF70` with the object it refreshes: `input`'s set, classes and religions), and `pop`
+/// the population the factors are for. The region's government is its **owner's** (both tests and the
+/// refresh resolve region +0xF4), also where another faction's governorship lists the region: that
+/// faction (region +0x248) gives only the set's faction part (`0x00A67530`), so its classes are neither
+/// refreshed nor policed.
 pub fn policing_cost(model: &CampaignModel, reg: &Region, input: &FactorInputs<'_>, pop: u32) -> i32 {
     if model.is_rebel_faction(reg.owner) || !model.is_human(reg.owner) {
         return 0;
     }
     let set = input.set;
-    let (upper, lower) = super::economy::government_classes(model, reg.owner);
+    // Never `None` here: only a rebel region, returned above, can have no government.
+    let Some((upper, lower)) = super::economy::region_government_classes(model, reg) else { return 0 };
     let classes = super::economy::public_order_factors_with(model, reg, set, input.religions, input.classes, super::economy::garrison_units(model, reg));
     let policing: i32 = classes.iter().filter(|c| c.class == upper || c.class == lower).map(|c| c.repression[3]).sum();
     // The modifier through the x87 registers (the f32 constant 0.01 at 0x01318034, + 1.0), stored as a
@@ -774,11 +779,15 @@ pub fn project(model: &CampaignModel, region: RegionId) -> Option<Projection> {
     // The class and growth rules in use (seams `population.class_round`, `population.grow`), in the round
     // end's order; a projection drops the rules' mod-state writes. The copy's classes take the refresh's sums
     // first (`0x00A72990` → `0x00AA9C10` → `0x008EDF70` on the copy), and their riot draws come from a stream
-    // of their own ([`PROJECTION_SEED`]), so the projection never moves the campaign's stream.
+    // of their own ([`PROJECTION_SEED`]), so the projection never moves the campaign's stream. The growth
+    // rule is handed the copy with the passes' classes, as the round end's rule finds them stored
+    // ([`CampaignModel::population_region_round_end`]): the original's growth reads no class, a mod's may.
     let refreshed = refresh_class_sums(model, reg, &own);
     let mut rng = crate::rng::CaRng::new(PROJECTION_SEED);
     let classes = model.rules.seams.population_class_round.rule()(model, reg, &refreshed, &mut rng, &mut ModWrites::default());
-    let (population, grown) = model.rules.seams.population_grow.rule()(model, reg, reg.population, &current, &mut ModWrites::default());
+    let mut copy = reg.clone();
+    copy.class_bases.clone_from(&classes);
+    let (population, grown) = model.rules.seams.population_grow.rule()(model, &copy, reg.population, &current, &mut ModWrites::default());
     let mut religions = current_religions.clone();
     let flows = model.conversion_flows_for(reg, population, &religions, &set);
     super::religion::apply_conversion(&mut religions, &flows, population);

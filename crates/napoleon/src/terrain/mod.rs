@@ -190,6 +190,7 @@ impl Plugin for TerrainPlugin {
             MaterialPlugin::<speedtree::TreeGeomMaterial>::default(),
             MaterialPlugin::<water::SeaMaterial>::default(),
         ))
+            .init_resource::<speedtree::TreeFarDistance>()
             .add_systems(Update, extend_camera_far_plane)
             .add_systems(
                 OnEnter(crate::GameMode::Battle),
@@ -198,8 +199,10 @@ impl Plugin for TerrainPlugin {
                     // After the battle setup: the sea reads the battle's sea surface and climate.
                     water::spawn_sea.after(crate::battle::setup::start_battle),
                     objects::spawn_buildings,
-                    trees::spawn_trees,
-                    speedtree::setup_near_trees,
+                    // The preferences file is read once per battle start, before both tree layers.
+                    speedtree::read_tree_far_distance,
+                    trees::spawn_trees.after(speedtree::read_tree_far_distance),
+                    speedtree::setup_near_trees.after(speedtree::read_tree_far_distance),
                     speedtree::setup_wind,
                 ),
             )

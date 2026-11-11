@@ -9,6 +9,9 @@ script `analysis/fidelity/ghidra_scripts/FidDecomp.java` (copy of the AI worker'
 Tags: CONFIRMED (code/bytes), INFERRED, UNKNOWN. Addresses are `Napoleon.exe` VAs.
 
 ## Where I am / what's next (updated with each push)
+- **Rally and Inspire (§60, 2026-11-10, `work/rallyinspire`).** Ported with the shared ability slots (active
+  time, recharge, uses). Next: the gate's per-ability conditions, the Inspire approach move `0x00652950`, the
+  artillery boosts' effects, the GENERAL_SUPPORT AI tactic, the ability button in the battle UI.
 - **Main port of the sandbox battle rules (2026-10-05, `work/fidelity-battle-w5`).** §18a, §19a and
   §§53-58 below were researched in the sandbox fork (`DenseCow/napoleonrust-sandbox`, frozen at
   `90bfc1c`) and this file is now the sandbox's copy of it. Main's tree was identical to sandbox
@@ -19,8 +22,8 @@ Tags: CONFIRMED (code/bytes), INFERRED, UNKNOWN. Addresses are `Napoleon.exe` VA
     from sandbox `420e352` (re-landing `85d91c9`/`aee8f58`). (2) the `kv_rules` list position is the
     adapter slot, CONFIRMED (§57 (2)), test `kv_rules_list_order_is_the_exe_slot_index`, same commit.
     (3) `ntw_sim::battle::unit_scale` (steps `0x01392770`, clamp `0x004A6540`, the truncating
-    `MULSS` at `0x004A67E5`, `PREFERENCE_DEFAULT = 2` from `0x00404230`) plus `Battle::unit_scale`
-    (default 1.0), `men_at_scale`, `set_unit_scale_step`, `set_unit_scale_setting`, CONFIRMED (§18a),
+    multiplication at `0x004A67E5`) plus `Battle::unit_scale`, `men_at_scale`, `set_unit_scale_step`,
+    `set_unit_scale_setting`, CONFIRMED (§18a; the setting is `campaign_unit_multiplier` since 2026-11-10),
     from `e2fdafe` and the module's later rounds `7c46287`/`880c7e2`/`66248c7`. (4) the
     `unit_stats_land_experience_bonuses` and `unit_stats_naval_experience_bonuses` decoders (v0, 10
     rows each; CONFIRMED layouts and readers `+0x20`, `+0x24/+0x28`, `+0x1C/+0x20`; the other columns
@@ -34,11 +37,9 @@ Tags: CONFIRMED (code/bytes), INFERRED, UNKNOWN. Addresses are `Napoleon.exe` VA
     `the_experience_level_moves_fatigue_and_the_morale_timers` and the build-order comment in
     `historical_armies`, from `803493a`/`887c76b`; the §58 text itself (Austerlitz `duration` = 2400 s,
     the 60 s root cause REFUTED) from `46e77d7`/`a51f430`/`3ce155f`.
-  - **Not in main, on purpose:** the `crates/napoleon` `unit_scale` wiring (`SetupData::unit_scale`,
-    `unit_scale_setting()`, the scaled `make_unit`). Two reasons: the link from the `gfx_unit_scale`
-    preference to the battle-settings key `0x0B` that `0x004A6540` reads is INFERRED (§18a), and
-    `make_unit` also builds battle-file units, which the exe does NOT scale (`0x00513440`, §39), so
-    the sandbox wiring would thin historical battles the original leaves alone. The `setup_battle`
+  - **Not in main, on purpose:** the sandbox's `crates/napoleon` `unit_scale` wiring (it read
+    `gfx_unit_scale` and thinned battle-file units, which the exe does NOT scale: `0x00513440`, §39).
+    Main's own wiring, from the traced setting and for unit-card units only, is §18a (2026-11-10). The `setup_battle`
     script callback (`085c964`) is PROVISIONAL with no exe evidence and is left out. The campaign
     XP-cost wiring of §54 (1)/§55 (1)-(2) is in `ntw_sim::campaign`, `ntw_campaign` and
     `ntw_script::ui`, outside this port's files. The `ntw_formats` install test
@@ -46,7 +47,7 @@ Tags: CONFIRMED (code/bytes), INFERRED, UNKNOWN. Addresses are `Napoleon.exe` VA
     measured numbers stand in §58 (2). `napoleon/src/battle/view.rs` (sea surface) and
     `mod.rs` (`labels` visibility) belong to the water and campaign-label ports.
   - **Still UNKNOWN, nothing invented:** formation `+0x670`, garrison cap `+0x6C`, the `unit_scale`
-    reader (key `0x0B`, the modes 2/4 minimum), the `unit+0xD48` writer.
+    modes 2/4 minimum (key `0x0B` is traced, §18a), the `unit+0xD48` writer.
 - **0-A round 19 (§58, 2026-10-05, worker `work/fidelity-battle-w3`, rebased on `fb9ad4d`).** Two
   of the four open 0-A items are now settled; **both needed no debugger**.
   - **§57 (5) — the battle-file `unit_experience`: SETTLED, and it is a load-bearing field.** The
@@ -303,7 +304,7 @@ Tags: CONFIRMED (code/bytes), INFERRED, UNKNOWN. Addresses are `Napoleon.exe` VA
 | 48 | Formation `+0x670`, garrison `+0x6C`, unit_scale reader | §52 (2) + sandbox 0-A follow-up | unit_scale **SOLVED** (§18a: `0x004A67E5` `MULSS`, truncated, into card `+0xC8`); formation `+0x670` and garrison `+0x6C` still UNKNOWN (§54 (3) corrects the object chain of §53 (4): the cap's `+0x54` is the **slot block's**, not the building's) | `unit_scale::scaled_men`, `Battle::unit_scale` |
 | 49 | Experience / chevrons | §2.1, §52 (4), §19a, §54 (1) | CONFIRMED (timers, the `+0x20` fatigue term, and the `+0x24`/`+0x28` XP cost pair: the battle army setup's veteran price, not a campaign cost, §19a; land + naval tables decoded) | `LandUnit::experience`, `morale::waver_timeout`/`rout_timeout`, `fatigue::experience_bonuses`, `UnitStatsLandExperienceBonuses::adjusted_cost`, `GameDatabase::*experience_adjusted_cost`, `ntw_script` army setup `XpAdjustedCost` |
 | 50 | Naval experience bonuses `unit_stats_naval_experience_bonuses` | §19a, §54 (1) | CONFIRMED (getter `0x00E31710` names it twice; v0, 10 rows, decodes with no leftover bytes): the naval branch of the army setup's XP-adjusted cost | `ntw_data::UnitStatsNavalExperienceBonuses`, `UnitStatsNavalExperienceBonuses::adjusted_cost` |
-| 51 | The `gfx_unit_scale` steps and the exe's default | §18a, §54 (2) | CONFIRMED: settings 0/1/2/3 = 0.25 / 0.5 / **0.75** / 1.0, exe default **2**; `CVTTSS2SI` truncates (7 × 0.75 = 5). UNKNOWN: what fills battle-settings key `0x0B` and the per-mode minimum of modes 2/4 | `unit_scale::STEPS`, `unit_scale::PREFERENCE_DEFAULT`, `unit_scale::scaled_men` |
+| 51 | The unit-size steps and the setting behind them | §18a | CONFIRMED: steps 0/1/2/3 = 0.25 / 0.5 / **0.75** / 1.0; the setting is the float preference `campaign_unit_multiplier` (registered 0.75), turned into a step by `0x00DAFBC0` and written to game-settings key `0x0B` by the settings constructors; the men are truncated (7 × 0.75 = 5). INFERRED: a single-player battle uses the same chain. UNKNOWN: the per-slot byte of modes 2/4, the role of `gfx_unit_scale` | `unit_scale::STEPS`, `GameLimits::unit_scale_setting`, `Battle::set_unit_scale_setting`, `napoleon` `setup::build_battle` |
 | 52 | Experience in the melee chain | §57 (1) | CONFIRMED **negative**: no experience term exists. `0x00DAB5F0` names all eleven of its factors and none is experience; the chain reads rules slots `4/0x10/0x14/0x18/0x5C/0x60/0x64/0x68`, never slot 0; a binary-wide sweep for `experience` strings finds only the battle-file parser `0x0050CAE0`. Key 0 is loaded and never read, so omitting experience from melee is faithful | `melee::hit_number` (deliberately no term), test `no_experience_term_in_the_melee_chain` |
 | 53 | `kv_rules` adapter slot numbering | §57 (2) | CONFIRMED: vtable method `+4*i` returns key `i`, so the list position is the slot. Anchored by fatigue `+4`, height `+0x10/0x14/0x18`, attack direction `+0x5C..0x68` | test `kv_rules_list_order_is_the_exe_slot_index` |
 | 54 | Battle-file `unit_experience`: the consumer, and whether it matters | §58 (1)–(3) | **SETTLED**: the three formula readers were already found (§52 (4), §19a) and are ported — the fatigue term `0x00670F40` and both morale timers `0x0053E4D0`/`0x0053A720`; the rest of the twelve `+0xD48` readers are the unit-card panel's `"Experience"`, the campaign script getter table, and unattributed getters. **CONFIRMED the field is live data**: 25/32 shipped battle files, 1267/1350 units, levels exactly 0..9 (the ten chevron rows). **UNKNOWN is now the *writer***: the parser's only card call `0x0050EB77 → 0x00513440` is a plain copy whose one byte store is `card+0x110` = `unit+0x12C`, not `unit+0xD48`, so a debugger write watchpoint is needed | `LandUnit::experience`, tests `battle_file_experience_coverage`, `battle_file_experience_reaches_every_unit`, `the_experience_level_moves_fatigue_and_the_morale_timers` |
@@ -703,8 +704,7 @@ snapshot. The land card `0x00513320` (from `0x005363C0`) copies the record to `+
   `special_ability_rally_min_bonus`) + min), added as a timed morale effect (id 0x11, that value, the ability's
   duration; `0x00531220` appends {id, value, duration} to the unit's morale list) to each unit within 75 m
   (`0x00555F20`) of the general, also setting unit `+0xC60` = −1. The general's rank −1 read as unsigned gives a huge
-  bonus: a possible ORIGINAL BUG, not confirmed (whether a rank −1 card can reach Rally is not traced). Inspire adds kv values to unit `+0x160` / `+0x170` and a timed effect id 0x10; not
-  decoded. Both belong to the general-abilities items (BACKLOG §5 RALLY/INSPIRE), not ported here.
+  bonus: settled in §60 (an ORIGINAL BUG, fixed). Inspire: decoded and ported in §60.
 AI test after this: Austria AI 5/8 v default 3/8, France 8/8 v 5/8.
 
 ## 12. "The battle stays in deployment" in `NAPOLEON_AI_SHOT` runs (bug report, 2026-10-04)
@@ -812,69 +812,88 @@ the French line.
   the PROVISIONAL rule of §11 (general unit destroyed → died recently for 60 s, then dead; routing → fled).
 - Unit size: the option is a float preference (id 0x6D) holding the scale itself; the four steps are the table
   `0x01392770` = {0.25, 0.5, 0.75, 1.0} (CONFIRMED: `0x00DAFBB0` index → scale, `0x00DAFBC0` scale → index, small /
-  medium / large / ultra INFERRED). At battle start (`0x00485B90`) the scale goes into the battle settings object (`+0`,
-  setter `0x00878060`) together with 20 (`0x00851550`) and a per-step 6 / 8 / 10 / 20 (`0x00DACE60`). SOLVED in
-  sandbox 0-A round N+1, see §18a.
+  medium / large / ultra INFERRED). `0x00485B90` is the command-line **campaign** start, not a battle's: the scale
+  goes into the campaign setup part (`+0`, constructor `0x00878060`) together with 20 units per army (`0x00851550`)
+  and the navy's 6 / 8 / 10 / 20 by step (`0x00DACE60`). The battle side is §18a.
 
-## 18a. The unit-size option, end to end (sandbox 0-A round N+1; CONFIRMED, ported)
-> **Main:** `ntw_sim::battle::unit_scale` and the `Battle` methods are ported; the `crates/napoleon`
-> setup wiring described below is NOT (see "Where I am", main port).
+## 18a. The unit-size option, end to end (ported and wired into the game, 2026-11-10; tags per line)
+> This section replaces every older statement in this file about the unit size (the dated rounds in
+> "Where I am", §15, §18, §§53-56): the player's setting is the float preference
+> `campaign_unit_multiplier`, not `gfx_unit_scale`; there is no `PREFERENCE_DEFAULT`, no
+> `scale_for_setting` / `men_for_setting` and no "1.0 without a preference" deviation any more.
 
-The step table and the two converters were already known (§18). What was missing is **where the scale is used**,
-and it is the campaign army → battle unit creator `0x004A6600` (`0x004B61A0` → `0x004AA900` call it):
-
-```
-0x004a66bc  CALL 0x004a6c90                ; entry+0x10: the unit's list of 0x20-byte unit cards
-0x004a66c9  CALL 0x004a6540                ; clamp(step(index), 0.1, 1.0)
-0x004a66d2  FSTP float ptr [ESP + 0x2c]     ; the scale
-   ... per card ([EBP] = card, cards are 0x20 bytes apart, `ADD ECX,0x20`):
-0x004a67c5  MOVZX EAX,word ptr [EBP + 0xa] ; the card's men (u16)
-0x004a67c9  PUSH 0x131005f                  ; <- this push is why the operand below is [ESP+0x2c]
-0x004a67de  MOVD XMM0,EAX
-0x004a67e2  CVTDQ2PS XMM0,XMM0
-0x004a67e5  MULSS XMM0,dword ptr [ESP + 0x30]   ; * scale
-0x004a67eb  CVTTSS2SI ESI,XMM0                  ; (int), TRUNCATED
-0x004a6820  PUSH ESI                           ; -> FUN_005363C0 (and again at 0x004A6831)
-0x004a6840  CALL 0x005363c0
-```
+**Where the scale is used (CONFIRMED).** The session's army → battle unit creator `0x004A6600` (its only callers
+are the session functions `0x004B5240`, `0x004B61A0` and `0x004C2850`) fetches the entry's list of 0x20-byte unit
+cards (`0x004A6C90`), asks `0x004A6540` for the battle's scale once and keeps it, then for every land unit card
+reads the card's 16-bit men count at card `+0x0A`, converts it to a float, multiplies it by the scale and converts
+the product back with a **truncating** float → int conversion (`0x004A67C5..0x004A67EB`); that count is passed
+twice to the battle unit card builder `0x005363C0`.
 `0x005363C0` builds the 0x114-byte battle unit card and calls the card constructor `0x00513320`, whose
 stores of its 4th argument into dword `0x32` and its 11th argument into dword `0x33` are that count: **card `+0xC8` and `+0xCC` are the
 men** (CONFIRMED, and the same pair §6 reads as `men = (unit+0x1C)+0xC8`).
-- **Naval** cards (`card+0x00 == 0`) take a **byte** at `card+0x0E` instead (`0x004A6A06`), pushed unscaled —
-  no MULSS on that path. So ships are not thinned by this option (CONFIRMED).
+- **Naval** cards (`card+0x00 == 0`) take a **byte** at `card+0x0E` instead (`0x004A6A06`), passed on unscaled:
+  there is no multiplication on that path. So ships are not thinned by this option (CONFIRMED).
 - The battle-file path is different and stays unscaled: `0x0050CAE0` hands `num_soldiers` to the card builder
   `0x00513440`, which writes both `+0xC8` and `+0xCC` from the same value with no multiplication (§39).
-- Where the index comes from (CONFIRMED code): `0x004A6540` reads the battle-settings entry with key `0x0B`
-  (`FUN_004A2B80(0x0B)` = a byte-keyed map lookup, `0x0049F940` = the settings object), except in battle
-  modes 2 and 4, where it takes the **smallest** per-unit size-class byte (`*army_unit`, the first byte of the
-  0x60-byte army unit entry) over the army's units whose flag byte `+0x5D` has `&4`, `!(… &8)` and `&2`
-  (0xFF = none). INFERRED: that map key is fed by the `gfx_unit_scale` preference — it is the only unit-size
-  setting with these four steps, and the Lua binding `UnitScaleFactor()` (`0x004795F0`) returns the same
-  table for "the current setting". UNKNOWN: which preference/mechanism fills map key `0x0B`, and what sets
-  the per-unit size class.
-- **The preference itself (CONFIRMED)**: `0x00404230` registers `gfx_unit_scale` through `0x00454300` as an
-  **environment variable** preference — int, storage `0x0149D880`, default **2**, help text
-  `"gfx_unit_scale <int>"` / `"Set unit scale. 0 - lowest, 3 - ultra"`, registered into the global array
-  `0x014A06D8 + id*4`. The player's own `preferences.script.txt` has `gfx_unit_scale 2`.
-  So the exe's **default battle has 0.75 × the men** (index 2), not 1.0.
-- **Port** (`ntw_sim::battle::unit_scale`): `STEPS = [0.25, 0.5, 0.75, 1.0]`, `step(i)`, `clamp(s)` (0.1 … 1.0),
-  `scaled_men(card_men, scale) = trunc(card_men * scale)`; `Battle::unit_scale` (default 1.0),
-  `Battle::men_at_scale`, `Battle::set_unit_scale_step`; the setup reads `gfx_unit_scale` into
-  `SetupData::unit_scale` and `make_unit` builds the unit (and its drawn formation) from the scaled count.
-  Round N+2 added `PREFERENCE_DEFAULT = 2` — the exe's own default for `gfx_unit_scale` (CONFIRMED,
-  `0x00404230`), i.e. **0.75 ×** — so the head-to-head comparison maths has one named constant.
-  Tests: `unit_scale::steps_and_clamp`, `unit_scale::men_are_truncated` (160 → 40/80/120/160, 159 → 79 at
-  0.5, i.e. truncation), `unit_scale::the_four_settings_scale_the_men` (all four settings),
-  `unit_scale::default_setting_is_three_quarters` (7 × 0.75 = 5, 158 × 0.75 = 118 — the truncation of
-  `CVTTSS2SI` at `0x004A67EB` made explicit), `model::unit_size_option_thins_the_men` (which now also
-  goes through `PREFERENCE_DEFAULT`).
-- **Deliberate deviation**: the model keeps **1.0** when there is no `gfx_unit_scale` preference, while the
-  exe's own default is index 2 (0.75). Changing the default would shrink every unit by a quarter and move
-  every tuned expectation (AI balance, battle lengths); the option is honoured as soon as the preference says
-  so. Recorded as the one open fidelity item in §53.
-- `crates/napoleon` note: `SetupData::unit_scale`, `unit_scale_setting()` and `make_unit` live there and were
-  NOT compiled by this round (the sandbox rule forbids building `-p napoleon`). The ntw_sim/ntw_data halves are
-  covered by tests.
+- **Which scale the battle uses (CONFIRMED).** `0x004A6540` reads the game-settings entry with key `0x0B` (lookup
+  `0x004A2B80` on the settings object `0x0049F940` returns; setter `0x00497860`), a unit-size **index**, except
+  in game modes 2 and 4, where it takes the **smallest** per-slot index byte over the session's slots whose flag
+  byte `+0x5D` has bits 4 and 2 set and bit 8 clear (0xFF = none). The index goes through `0x00DAFBB0` (index →
+  step scale) and the result is clamped to `[0.1, 1.0]`. UNKNOWN: what sets the per-slot byte.
+- **Who writes key `0x0B` (CONFIRMED, every writer found).** Only the settings constructors: `0x004A1930`
+  (mode 0), `0x004A1680` (mode 1), `0x004A14B0` (mode 3) take the index as an argument; `0x004A17F0` (mode 4)
+  and `0x004A1A70` store 0; `0x004B61A0` copies the host's settings (the store at `0x004B70C1`).
+  `FrontEnd.MPHostCustomBattle` (`0x00473920`) reads the `unit_scale` field of the battle setup's `prefs` table
+  and builds the settings with it; `FrontEnd.MPHostCampaign` (`0x00473650`) and the fixed demo / test starts
+  (`0x004811F0`, `0x004ABAB0`) pass 0. The settings file's `Options` table is read by `0x0044C8E0`; the saved
+  setup's `unit_scale` is written back from key `0x0B` by `0x00471860`.
+- **The player's setting (CONFIRMED).** It is the **float** preference `campaign_unit_multiplier` (id `0x6D`,
+  registered with 0.75 at `0x004032D0` through the float constructor `0x00454380`, object `0x0149DE18`): a
+  scale, not an index. `LoadBattleSetup` (`0x004709F0`, at `0x00470A7B`) fills the battle setup's `unit_scale`
+  with `0x00DAFBC0`(that float), the index of the first step not below it (table `0x01392770`);
+  `FrontEnd.MPQuickBattleStart` (`0x00475660`) does the same. The options page shows the same index
+  (`0x00D9FBB0`, at `0x00DA0686..0x00DA06E3`) and stores `0x01392770[index]` back into the preference when it is
+  applied (`0x00DA2620`, at `0x00DA2AE9..0x00DA2B60`). `UnitScaleFactor([index])` (front end `0x004795F0`,
+  battle UI `0x005D48C0`, campaign `0x009FAB10`) returns (step scale, index) for an index and (the preference,
+  its index) without one; the campaign's reads the campaign's stored multiplier. `0x00DACE60` turns the scale
+  into the navy's unit cap (6 / 8 / 10 / 20 by index). So the chain is **setting (scale) → step index → step
+  scale → clamp → truncated men**, and the registered setting gives **0.75 ×** the card's men.
+  `0x00DAFBC0` returns 4 for a scale above every step (one past the table); ours takes the last step.
+- **`gfx_unit_scale` (role UNKNOWN).** `0x00404230` registers it through the int constructor `0x00454300`: id
+  `0x1C`, object `0x0149D880`, default 2, help text "Set unit scale. 0 - lowest, 3 - ultra". The object is
+  referenced only by that registration, its exit destructor and the preferences writer `0x0045A6F0` (which hands
+  every setting to the line writer `0x0044CCF0`): no code reading its value was found, so it is written to the
+  preferences file and nothing else is known of it. (A struct serialiser, `0x00DA8BD0`, writes a `unit_size` key
+  from a struct field `+0x34` at `0x00DA8C8F`; untraced.) Ours neither reads nor changes it.
+- **A single-player battle (INFERRED link).** `FrontEnd.StartBattle` (`0x004783E0` → `0x00488520`) builds no
+  game-settings object; its setup parser (`0x00455F00`) reads no `unit_scale` and its army parser (`0x004553B0`,
+  through `0x00463330`) no men count; `0x00457460` copies a 308-byte battle description (`0x00510F10`). Where
+  the men of a single-player battle are scaled is UNKNOWN (untraced: the unit build behind `0x0050AA00` /
+  `0x00506B50`). The setting is the only unit size the front end shows and `UnitScaleFactor()` gives the army
+  page its numbers from it, so ours applies the same chain there. Also untraced: whether an artillery unit's gun
+  count follows the unit size (ours keeps the card's guns).
+- **Ours: one rule, in the model.** `ntw_sim::limits::GameLimits` holds the steps (`unit_scales`, the original's
+  four by default; a mod may change or extend them) with `unit_scale_setting` (setting → step, `0x00DAFBC0`) and
+  `unit_scale` (step → scale, `0x00DAFBB0`); `Battle::set_unit_scale_setting(setting, limits)` is the whole
+  setting → scale decision (step, step scale, clamp) and `Battle::men_at_scale(card_men)` the truncated men.
+  The setting's name is `limits::UNIT_SIZE_SETTING` and its default is the one the game registers
+  (`ntw_formats` `Preferences::get_f64`), never a second constant. `None` means a game that registers no such
+  setting (the last step); the game never passes it.
+- **Ours: the battle start (`crates/napoleon/src/battle/setup.rs`).** `start_battle` reads the setting once
+  from the preferences (`unit_size_setting`) into `SetupData::unit_size`, for every kind of battle (`--battle`,
+  a historical battle, a custom battle; R keeps it); `build_battle` calls `set_unit_scale_setting` before any
+  unit exists; `make_unit` builds a unit card's unit (men and files) from `men_at_scale`, for the custom armies
+  and the test slice. A battle file's units are built with the card's full count and then take the file's
+  `num_soldiers` unchanged, as the exe does (§39). There is no campaign battle hook in `napoleon` yet; the
+  campaign's own multiplier is `ForceCaps::new_campaign` (CAMPAIGN side).
+- Tests: `ntw_sim` `unit_scale::{steps_and_clamp, men_are_truncated, the_four_steps_scale_the_men,
+  the_setting_becomes_the_step_and_then_the_men, a_battle_at_the_registered_setting_really_is_thinned}`;
+  `napoleon` `setup::the_unit_size_setting_thins_the_battles_units` (fixture: 0.75 / 0.5 / 0.6 / 1.0 and no
+  setting) and the install test `custom_battle_armies_deploy_in_their_areas` (every custom unit at 0.75 of its
+  card); `ntw_script` `battle_setup_and_options_page_agree_on_the_unit_size`,
+  `the_options_page_stores_the_unit_size_steps_scale`.
+- In-game check owed (side by side with the original): a custom battle at the default setting shows each unit
+  at three quarters of its card's men, and the options page's unit size moves the next battle.
 
 ## 19. Unit-card terms in the strength potentials (round 4, item 5; CONFIRMED)
 The card block the potentials read at card `+0x78` is the battle file's `unit_capabilities` as parsed by `0x0050CAE0`:
@@ -1019,9 +1038,8 @@ start view (screenshot at 150 s battle time shows the armies engaged).
   cleared in a land battle, and "general dead / died recently" may only come from campaign-side state or the
   `+0x1B4/+0x1B8` countdowns, which nothing found in battle code starts either. Next step: break on writes in a debugger
   run of the original (needs the game), or trace the commander-death event (`kill_commander` → command queue handler).
-- Unit size: the scale (0.25/0.5/0.75/1.0) goes into the battle settings object (`0x00878060`, `+0`) built on the stack in
-  `0x00485B90` and passed on with the battle setup. Lead: follow that object into the battle construction and find the
-  `MULSS` of the men count by settings `+0`.
+- Unit size: the scale (0.25/0.5/0.75/1.0) goes into the campaign setup part (`0x00878060`, `+0`) built on the stack in
+  `0x00485B90` (the command-line campaign start) and passed on with the campaign setup. The battle's men: §18a.
 - `unit_movement_modifiers` column: the only scaled-index float read `[base + i*4 + 0xC]` in the soldier range is
   `0x006C0260` (a ring-buffer path point, not ground). Lead: find the readers of the ground grid's record list
   (`grid+0x48`, grid at battle-grid `+0xA0`) through `0x0061E430`'s object's methods.
@@ -2605,7 +2623,7 @@ the 64-second intro cutscene", and listed "verification needed: read the actual 
   and, for run, `0x0053F4B0` (meanings UNKNOWN). So the option belongs to the order, not the unit.
 - Right-click orders (`0x005DEAB0`) are built with run = 0 (move order byte `+0x5C`, serialiser `0x005DC770`,
   executor `0x005C0C10` → unit order `+0x35`, read by `0x00560F20`). Script `goto` passes its run argument there
-  (`0x00645610`). The double right-click path: UNKNOWN (not traced).
+  (`0x00645610`). The double right-click path: §59.3.
 - Cause of "Run does nothing" (user 2026-10-08): the button set `running`, but only a destination read it; units
   advancing on their own (the placeholder advance) and fire approaches kept `walk_speed`. Fix: `Battle::order_move_speed`
   edits the current move whatever it is; `LandUnit::move_speed` is the one speed rule; the option is cleared when no
@@ -2616,3 +2634,218 @@ the 64-second intro cutscene", and listed "verification needed: read the actual 
   between their last two tick poses by `Time<Fixed>::overstep_fraction` (0.1 s behind); labels follow.
 - Debugger sitting to settle it: run a battle in the original, break per frame on the soldier render transform write
   of one marching unit and compare with its sim position at the last tick (blend vs extrapolate vs per-frame sim).
+
+### 59.1 Battle keys (worker battlekeys, 2026-11-10; CONFIRMED from the data unless tagged)
+- The keys file's format, loader and mode switch are in UI_FIDELITY.md §5.1 ("Shortcut keys") and
+  `ntw_formats::default_keys`. The battle sets mode `battle` (`0x00546C20` → `0x00ED5640`): every func with a
+  mapping in `battle` or `all` (the `all` component wins) is bound to that component. One shortcut poll per frame
+  (`0x00EEE1E0`, called for the battle at `0x00607AA9`) runs the bindings on the frame's keys; the campaign uses the
+  same handler. Ours: `shortcut_keys::mode_shortcuts(vfs, "battle")` (the one reader, through the merged VFS) →
+  `ui::battle::keys` → `hud::keys`, before the HUD frame. The hardcoded keys (R restart, Space pause, Tab speed, F fire
+  at will, arrows) are gone; the restart is a test key, F8 with `NAPOLEON_BATTLE_RESTART_KEY` set.
+- Vanilla `fps` keyset (the active one, `0x00EDB080`), battle and `all` mappings → component:
+  - `camera`: W/S/A/D and numpad 5/2/1/3 steps, SHIFT+NUMPAD8 fast step, Q/E and numpad 4/6 turns, X/Z or
+    MULTIPLY/DIVIDE up/down, V/C or ADD/SUBTRACT tilt, PAGE_UP/DOWN accel/decel, SHIFT+PAGE_UP/DOWN rotation speed,
+    CAPITAL move fast, DELETE tracking, N intelli zoom, INSERT context camera, F9–F12 bookmark views, SHIFT+F9–F12
+    bookmark saves. The camera acts only while the input layer `0x01765944` ≤ 0 (`0x005EAF00`'s first test; it
+    broadcasts each step's input code on its signal, `0x004B0CF0`, INFERRED heard by the Battle Script Interface's
+    `0x00657230`, which names the code from table `0x014518E0`; step multiplier 2 when exactly one of the move-fast
+    byte and the component's byte `+0x21` is set, else 1, `0x005B7AE0`).
+  - `card_manager`: CTRL+A select all, RETURN deselect all, PERIOD/COMMA next/previous, 0–9 and CTRL+0–9 groups.
+  - `root` (root.lua `OnShortcut`): ESCAPE menu, P pause, CTRL+T speed cycle, CTRL+B/H/C/M select artillery / melee /
+    cavalry / infantry, HOME home zoom, END unit zoom, SPACE allied proxies, H ship arcs, F5/F6/F7 radar / order
+    buttons / cards, ALT+S / ALT+M sound and music.
+  - Order buttons (each button's own `OnShortcut`): T fire at will, CTRL+W withdraw, G group, BACK halt, F melee,
+    R run (`button_movespeed`), SHIFT+7..0 abilities 2..5, L / SEMICOLON turn, [ ] rank / file, SLASH / APOSTROPHE
+    step back / forward, ALT+1..9 land formations, SHIFT+1..3 shot types, B boarding, [ ] ' sails, ALT+1..4 naval
+    formations, J minimap size.
+- ORIGINAL BUG: `BattleUI.ToggleMinimisedOrders` / `ToggleMinimisedCards` (`0x005D3C60` / `0x005D3BF0`) flip the
+  panel's minimised flag (battle settings slots 8 / 9; the radar's is slot 10) and return the new flag; root.lua passes the result to
+  `SetOrdersVisibility` / `SetCardsVisibility` as the visibility, and the battle UI init (`0x00597663`) passes
+  `flag == 0`, so the value is the minimised flag: F6 / F7 first show the shown panel and hide it only on the second
+  press. Ours returns the visibility (`battle_prelude.lua`; test `panel_toggles_hide_on_the_first_press`). INFERRED:
+  the flags start clear each battle. `ToggleMinimisedRadar` (`0x005D3CD0`, F5) stays a stub: the radar is not drawn.
+- Tests: `ui::battle::tests::battle_keys_are_the_keys_files_bindings` (P, R, CTRL+A, RETURN, W repeats, the input
+  layer lock, `EnableShortcutHandler`), `shortcuts` machine tests.
+
+### 59.2 Keys whose order the model lacks (listed, not invented)
+- Camera funcs with nothing in our camera yet (logged once, `view::CameraKeys::press`): `accel`, `decel`,
+  `increase_camera_rot`, `decrease_camera_rot`, `toggle_move_fast`, `toggle_tracking`, `intelli_zoom`,
+  `context_camera`, `camera_bookmark_save0..3`, `camera_bookmark_view0..3`. Their exe behaviour (`0x005EAF00`):
+  `accel` / `decel` divide / multiply the move scale (+0x24) by an exp factor, clamped to 0.01..2.0, and
+  `increase_camera_rot` / `decrease_camera_rot` the turn scale (+0x28) the same way; `toggle_move_fast` flips a byte;
+  tracking, context camera and intelli zoom toggle a camera mode when the camera's permission mask (`0x005DB870`,
+  bits 32 / 128 / 64) allows; the bookmark funcs take N from the name. A move step is the move scale times the
+  `0x005B7AE0` multiplier (doubled for `step_fwd_fast`), a turn step half the turn scale; each move kind is gated by
+  its own mask bit. The exp factor's argument, the scales' start values and the camera's step functions are not
+  traced (our speeds PROVISIONAL, `view::camera_key_step`).
+- Card manager funcs not done (logged once, `__ntw_battle_card_shortcut`): `select_next`, `select_prev`,
+  `usegroup0..9` (the card manager's handler and its lock are not traced; the lock is taken as the camera's,
+  PROVISIONAL).
+- HUD orders the model has no order for (the button's script runs, `hud::order` logs "not done yet"): melee mode,
+  withdraw, group, formations, special abilities, rank / file changes, every naval order. `home_zoom` / `unit_zoom`
+  (`ZoomTo` requests) are ignored; the radar funcs and minimap size act on a radar that is not drawn.
+
+### 59.3 Double right-click (CONFIRMED structure; window PROVISIONAL)
+- The order: `BCQ_MULTIPLE_SELECTION_ORDER_DBL_CLICK` (registrar `0x0040D900`, id global `0x014A6FEC`, id getter
+  `0x0058DF60`), executor `0x005C0910` → `0x006D08F0`, which walks the selection's lists: groups → `0x006D0A50`, land
+  units → `0x0055DBA0`, the other two lists → their own handlers (vfunc `+0x88`, `0x006D09A0`; ships, not traced).
+- Issued by the order-mode objects (vtables `0x0132FDD0` / `0x0132FE08`, ctors `0x00598D00` / `0x00598D20`, built by
+  `0x005AF710`) from their double-click slot (slot 13: `0x005DD720` / `0x005DD7E0`); slot 11 is the right-click order
+  builder (`0x005DEAB0` / `0x005DF0B0`, run = 0), slot 12 `0x005DB890` / `0x005DB9E0`.
+- Per land unit (`0x0055DBA0`): unless the gate `0x0055C780` holds, a unit with a current order (order stack count
+  `+0xAE8`) sets run on its top order (vfunc `+0x5C`, INFERRED the same run setter as `0x005600C0`'s); else, with a
+  movement state (count `+0x930`, a ring of 10 at `+0x398`, head `+0x934`), its newest state (vtable `0x01321CA4`,
+  ctor `0x0051D770`) gets vfunc `+0x14` = `0x00533A40`, which only sets the run byte (`+0x59`, setter slot 6
+  `0x0053FC80`) when the unit can run (`0x0053F4B0`); and when that count is ≤ 1 and the head state's vfunc `+0x1C`
+  holds, `0x0057E580(unit +0x388)` clears byte `+0x81` of the head state (meaning UNKNOWN; ours has no such state
+  byte). Then `0x0055DBA0` itself queues the unit for the battle's update list (battle `+0x94` → `+0x680`), in
+  either case. It does not raise the speed-change event `0x005600C0` raises (`+0x3D8`), and it issues
+  no new move. Groups (`0x006D0A50`): the gate `0x0055AC60` (state `+0x14` in 2..5), the pending list flushed
+  (`0x0056E6C0`), a group with a current order sets it to run (order vfunc `+0x0C`), else each unit as above.
+- So a double right-click makes the current move run, like the HUD's Run, with no script event. Ours:
+  `input::mouse` → `Battle::order_move_speed(id, Run)` (the one run rule, as the HUD's `hud::order` uses; the HUD
+  also raises "Change Speed", INFERRED). Test `input::tests::a_double_click_is_two_clicks_close_in_time_and_place`.
+- Not found: where the two clicks are told apart (time window, distance). The search reached the slot-13 callers
+  through vtable slot `0x0132FE04`; the cursor code that calls it was not reached. PROVISIONAL: 0.5 s and 4 px (the
+  Windows defaults), `input::DOUBLE_CLICK_S` / `DOUBLE_CLICK_PX`.
+- The battle scripts also have a "Double Click" input event: `0x00658100` builds an input event of type 12 named
+  "Double Click" (string `0x0133514C`) and posts it (`0x00629A00`); it sits in a vtable of the Battle Script
+  Interface (ctor `0x0061AC40`, 29 embedded event signals at `+0x18`..`+0x398`, dtor `0x00622DA0`), referenced from
+  `0x0133475C`. INFERRED: the exe posts it on a double click; who calls that slot was not traced. Ours does not post
+  it yet (open; `battle_script::INPUT_EVENT_NAMES` lists only the camera actions).
+
+## 60. Rally and Inspire (worker rallyinspire, 2026-11-10)
+Ported in `ntw_sim::battle::special_abilities`; static traces, CONFIRMED unless marked. Tests in that module.
+
+### The ability slots (every timed special ability)
+- **Records.** A unit card holds one 16-byte record per special ability it lists: ability id, active time (`+4`),
+  recharge time (`+8`), number of uses (`+0xC`) (built by `0x00518D90`; the default record `0x00518D70` is
+  −1.0, −1.0, −1: not timed, uses not counted). Sources: a campaign or custom-battle unit takes the
+  `unit_special_abilities` row of each ability (`0x005363C0`, called by the card builder `0x008AF200`); a
+  battle-file unit (`0x0050CAE0`) takes the `special_ability` element's own `active_time` / `recharge_time` /
+  `num_uses` attributes when it gives any (an absent one keeps the default record's value; a non-number reads
+  as 0, readers `0x005346A0` / `0x004F3720`), else the ability's row, else the default (the exe logs the missing
+  key and carries on: most abilities have no row).
+- **`unit_special_abilities`** (row reader `0x00FC5ED0`, loader `0x00FBAC50`): `ability`, `active_time`,
+  `recharge_time`, `num_uses`. Shipped: `rally` and `inspire_unit` 30 s / 180 s / 2 uses,
+  `artillery_accuracy_boost` and `artillery_rof_boost` 60 s / 120 s / 3 (install test
+  `unit_special_abilities_rows`).
+- **Slots.** The unit constructor builds one 44-byte slot per record (`0x0051DBE0` → `0x005148C0`, container at
+  unit `+0xDAC`): duration left −1.0, recharge left −1.0, uses left = the record's number, active byte `+0x28`.
+- **Gate** `0x0053EA60`: the unit must list the ability; wedge / diamond are refused while dismount is active; an
+  ability with counted uses is refused with none left, a timed one while its recharge runs. Its per-ability
+  conditions (formations, fire and advance, plug bayonets, stakes, unlimber, the artillery boosts; for Rally and
+  Inspire a test of the unit's special-men list `+0x280`) are not ported: PROVISIONAL "active and has men".
+- **Perform** `0x005612D0` (the one entry of the button, the AI and the scripts): refused by `0x0055C780` (battle
+  byte `+0x2704` with the unit's state 2 or 3; ported as "routing or shattered", PROVISIONAL) or the gate.
+  Out of deployment (`0x0055AD60` false, battle phase ≥ 2) abilities 2, 3, 7 and 0x11 (Rally) go straight to
+  the toggle `0x00578860` (then `0x0057E580` on unit `+0x388`); every other ability, Inspire (0x12) included,
+  becomes an order (`0x0051D940`: id `+0x24`, target `+0x28`, run byte `+0x2C`; built only when the byte
+  argument is clear or unit `+0x930` < 10, that argument being the queue flag, INFERRED). Its start
+  `0x00550E30` builds the Inspire behaviour `0x0051E360` (target `+0x24`, run `+0x28`) for 0x12 and calls the
+  toggle at once for any other id. In deployment only an order through `0x005186C0` / `0x0056AC40` or the
+  toggle of an ability outside 0x11..0x12 is possible, so neither Rally nor Inspire is performed there.
+  Toggle: inactive → gate again and activate; active Rally / Inspire / artillery boost → switch off.
+- **Activation** `0x0052ED80` → `0x0052ECC0`: refused without a use left or while the recharge runs
+  (`0x0053E940`); the slot's old effect ends first; the effect object is built by id (0x11 → `0x0051DDB0`,
+  0x12 → `0x0051DAF0`, 0x13 / 0x14 → `0x0051D9C0` / `0x0051DA00`, 0x15 → `0x0051DA60`); a counted use is spent;
+  a timed ability starts duration = active time and recharge = recharge time; the slot is active.
+  Deactivation `0x00549F10` ends the effect and clears the active byte.
+- **Tick.** The unit update `0x0057F070` ends with `0x00582830`: each slot's own tick `0x005805E0` (a running time
+  loses 0.1 s; a duration at or below 0 becomes −1.0, a recharge at or below 0 becomes 0; it also calls the
+  effect's vfunc `+4`, `0x00444B60`, an empty function in all six effect vtables), then an active timed
+  ability whose recharge is 0 is switched off. So a timed ability stays active for its whole recharge (180 s for
+  Rally and Inspire), and the toggle cannot switch it off early (the gate refuses it while it recharges).
+
+### Rally (ability 0x11, effect `0x0051DDB0`)
+- Bonus = in single precision `(rank × 1/9) × (special_ability_rally_max_bonus − special_ability_rally_min_bonus)
+  + min`, the step being the f32 `0x3DE38E39` at `0x01325C98`, rounded to nearest by the x87 integer store. The
+  rank is the general card's `+0xBC` (0 on a card with no general, `0x00513A50`). The kv keys are `_kv_morale`
+  integers (adder `0x00F3A830`).
+- Units: every unit of the general's alliance, all its armies, not the general's own, with
+  `(own radius + 75 + other radius)² >` squared distance of the squad-box centres (75.0 from `0x00555F20`);
+  the units are collected by `0x006C9E40` into a 100-unit stack buffer (see the ORIGINAL BUG below). Each gets
+  a timed morale effect id 0x11 of that bonus for the active time (`0x00531220`, a plain append of the 12-byte
+  entry to the vector at morale object `+0x1C` (capacity) / `+0x20` (count) / `+0x24` (data), doubling growth;
+  its only callers are Rally and Inspire), and its rout timer (`+0xC60`) = −1, so a routing unit that can rally
+  does so at its next morale update. Nothing to undo when it ends. Rally and Inspire also hand the unit to a
+  listener of the battle (`(+0x94)+0x5B8`, vfunc `+8`): purpose UNKNOWN, not ported.
+- **Which units the army lists hold (ours skips inactive units and units without men).** The collector tests
+  only the identity and the range, over each army's land list (`+0xF0` count / `+0xF4` data; the vector object
+  at `+0xE4`) of every army in the general's alliance (army `+0xD8`, list `+0x20/+0x24`).
+  - **Units without men and units that left the map leave the list (CONFIRMED).** The army update `0x00580390`
+    (one call per army of an alliance from `0x00580320`, one per alliance from `0x00582FB0`) walks `+0xF0` and,
+    for each unit failing `0x0055CB50` (it fails when `+0xAA0 == 2`, left the map, or when the entity count
+    `+0x2CC` is 0, `0x0055AB80`), calls `0x00575AE0`. Unless the army byte `+0x114` is set (it is set only
+    later in the same update), that erases the unit: with a pending move (`+0x1F0` set) through `0x0057CFF0`
+    into that army (`+0x1EC` takes `+0x1F0`, `+0x1F0` cleared, then `0x00574CE0` / `0x0053A6C0`); otherwise the
+    unit goes onto the army's `+0x198` list, byte `+0x61` of `*(unit+0x1E8)` is set to 1, and `0x00550100`
+    erases it from the vector at `+0xE4`. Between a unit's last man falling (or its leaving) and its army's next
+    update, an order would still rally it, with no effect on the field. Ours skips both cases at once.
+  - `0x0057CFF0` is "move to another army": it appends the unit to the destination's `+0xF0` through
+    `0x00530E30` (vector at `+0xE4`) and erases it from the source, keeping the order. Its callers:
+    `0x00575AE0` above and `0x0057CF60` (find by id), whose callers are the reinforcement arrival `0x005BD160`
+    (from the entry's army `+0x28` into the field army `+0x2C`; called by `0x00608200`, which brings in a unit
+    while the field army has fewer than 20) and `0x005B49A0` (caller `0x005B4970`, not read).
+  - **Reinforcements (INFERRED; ours skips them while waiting and walking in, `active` false).** They have
+    `+0xAA0 == 0` and their men, so they pass `0x0055CB50` and stay in their army's list: the entry's army
+    (`+0x28`, picked by `0x005E63A0`) while waiting, the field army (`+0x2C`) from arrival on. The original
+    rallies them if that army is in the alliance's army list; neither is traced, and the likely difference is
+    the walking-in case (the field army). Next: who fills the alliance list when the battle's armies are built
+    from the setup (`reinforcement_army` is read by `0x0050AFE0`, which calls `0x0050CAE0` with 1 for those
+    armies), or a debugger read of an entry's `+0x28` / `+0x2C` against the alliance's `+0x24` array.
+- A slot without a record (the default one, active time −1.0) gives Rally and Inspire a morale effect of −1 s,
+  dropped at the next morale update (consistent with the exe's list handling; ours does the same).
+- **ORIGINAL BUG (`0x006C9E40`):** the collector appends with no bounds check; its count sits right after the
+  caller's 100-dword buffer in `0x0051DDB0`'s frame, so a 101st allied unit in range overwrites the count, then
+  the stack. Ours has no cap (test `rally_reaches_more_than_a_hundred_units`).
+- **ORIGINAL BUG (`0x0051DDB0`):** the rank is converted as an unsigned number, while the card's rank is signed
+  everywhere else (range −1..9, `0x00A198D0`; signed in `0x0053BC70`). A rank −1 card gives 4294967295 × …, the
+  store overflows and every rallied unit gets −2147483648 morale. Ours reads it signed (test
+  `rally_bonus_reads_rank_minus_one_signed`).
+
+### Inspire (ability 0x12, effect `0x0051DAF0`, removal `0x00522970`)
+- The order (behaviour `0x0051E360`, vtable `0x01323C8C`, its states run by `0x00564870`, the update shared by 19
+  state-machine behaviour vtables): test the box distance (`0x005774A0`), move to the target (`0x00558870`, thunk
+  `0x004F9C90`), inspire through `0x005580C0` (thunk `0x004F9D20`) → the toggle with the target. The move builds
+  the request {target, 75.0 (`0x00555F20`), run byte} and calls `0x00652950`: in battle phases 2..5
+  (`0x0055AC60`) it ends a pending in-place task (vfunc 0 with 1, byte `+0x508`), clears `+0x509` and builds the
+  approach task in place at `+0x488` (`0x00621640`, base `0x00621220`, vtable `0x01333D60`, the request at
+  `+0x1C..+0x24`). That task's per-tick logic is not traced: ours heads for the target until the boxes are under
+  75 m apart (PROVISIONAL), with the exact box gap (the original searches from the closest pair of corners). Any
+  other order replaces it.
+- Effect: the target's accuracy (`+0x160`) and melee attack (`+0x170`) go up by
+  `special_ability_inspire_unit_marksmanship_bonus` / `..._melee_attack_bonus` (plain 32-bit adds) until the
+  ability is switched off; the removal re-reads the kv values and subtracts them, except when the battle byte
+  `+0x54` is set (meaning UNKNOWN; ours always subtracts). A timed morale effect id 0x10
+  of `_kv_morale special_ability_inspire_unit_bonus` runs for the active time. **The rank plays no part**
+  (BACKLOG §5 question answered). Who may be inspired is the caller's choice; the ability code does not test it.
+- The four `_kv_rules` `special_ability_*` keys go through the third adder `0x00F3A8F0` (callers
+  `0x00F42FB6..0x00F42FEC` in `0x00F42950`), which stores an unsigned 32-bit integer by the runtime helper
+  `0x0126E2B0` (truncation inside (−1, 2^32), else `0xFFFFFFFF`): `KvRules` fields are `u32`, `exe_unsigned`.
+- Artillery boosts (traced for the write-ups, not ported, stand-in 3): `0x0051D9C0` (0x13) adds
+  `special_ability_artillery_accuracy_boost` (`_kv_rules +0x21D0`) to unit `+0x160`; `0x0051DA00` (0x14) sets unit
+  `+0x164` = min(`+0x164` + `special_ability_artillery_rof_boost` (`+0x2170`), 99), unsigned compare, keeping the
+  delta at effect `+0xC`. Their removals are not traced.
+- The toggle's case 18 (Inspire) also clears unit byte `+0xD99` on both paths (`0x00579622`): meaning UNKNOWN,
+  not ported.
+
+### Formation and behaviour abilities and their slot (stand-in 3)
+The toggle `0x00578860` activates the slot through `0x0052ED80(id, 0)` on the switch-on path of cases 0..4, 6,
+7, 9..11 and 16 too, spending a use and starting the timers; the gate then refuses those slots like any other.
+Ours switches them on without the slot (`switch_on_untimed_ability`), so a mod's record for them (a
+`unit_special_abilities` row, or a battle file's own `recharge_time`) is ignored, and the slot tick switches off
+only Rally, Inspire and the artillery boosts (`uses_slot`): before, a timed record ended square formation one
+tick after switch-on with `in_square` left set (test `a_timed_record_does_not_end_a_formation_ability`). Vanilla
+is unaffected (the shipped table has rows only for 0x11..0x14). `0x0052ED80`'s return is not a clean bool (the
+recharge word or a test result); whether its callers use it is not read.
+
+### Still open (PROVISIONAL in code)
+The gate's per-ability conditions and the refusal `0x0055C780` (stand-in 1), the Inspire approach move
+(stand-in 2), the artillery boosts' and ability 0x15's effects, switching an active formation ability off and
+the formation abilities' slots (stand-in 3); Rally's reach to reinforcements waiting or walking in (INFERRED,
+above); no deployment phase in the model (the original performs neither ability there). The AI tactic
+GENERAL_SUPPORT (AI_RESEARCH.md) now has its call: `Battle::perform_special_ability(general, RALLY, None, run)`
+and `(general, INSPIRE_UNIT, Some(target), run)`. Exe names and plate comments: pending `rallyinspire.jsonl`
+(read in the IDA pool, 2026-11-10).

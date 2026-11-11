@@ -262,8 +262,11 @@ and the UI script host (a required argument of `UiScriptHost::new`) carry that o
 | Men drawn per unit (ours) | — (the original draws every man) | `MAX_FIGURES` 240 removed: every man is drawn | — |
 
 The units-per-army preset/default `20` literals in `army_setup.rs` and the three copies of the
-`gfx_unit_scale` clamp (`battle_setup.rs`, `campaign/army.rs`, `army_setup.rs`'s setup file
-`unit_scale`) now read `GameLimits` through one helper, `battle_setup::unit_scale_setting`. Tests: `limits::tests`, `kv::tests::game_limits_*`,
+unit-size step clamp (`battle_setup.rs`, `campaign/army.rs`, `army_setup.rs`'s setup file
+`unit_scale`) now read `GameLimits` through one rule, `GameLimits::unit_scale_setting` (the player's
+`campaign_unit_multiplier` scale → its step; the UI calls it as `battle_setup::unit_scale_setting`
+and the battle start as `Battle::set_unit_scale_setting`; 2026-11-10, BATTLE_FIDELITY.md §18a).
+Tests: `limits::tests`, `kv::tests::game_limits_*`,
 `units_per_army_come_from_the_campaign_and_a_mod`, `reinforcements_stop_at_the_cap_and_a_mod_lifts_it`,
 `unit_size_option_thins_the_men` (a 1.5 step gives 240 men from 160), real-install `check_details`
 (20 / 14 in every shipped start position).

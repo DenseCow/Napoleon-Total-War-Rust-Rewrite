@@ -280,7 +280,7 @@ pub struct CampaignRules {
     /// never get that ability (`0x00E0D4E0` reads the table; `0x009D1190` / `0x009D1540` push it
     /// only with the row, CONFIRMED, disassembly), so no `visit`, `embed`, `research` or
     /// `steal_research` is offered ([`super::agents::exchange_actions`]). Vanilla has the row.
-    pub no_exchange_ability: bool,
+    pub exchange_ability_missing: bool,
     /// `agents` #8 (record +0x44) by agent key: the type's main attribute, which its rank and the cards'
     /// primary attribute picture are read from (`0x00A198C0`, CONFIRMED data: General and colonel
     /// `command_land`, admiral and captain `command_sea`, rake `subterfuge`, ...). A type without one has
@@ -461,13 +461,6 @@ pub struct ForceCaps {
     pub navy: u32,
 }
 
-/// The `campaign_unit_multiplier` preference's default (`0x004032F0` registers it as float
-/// preference `0x6D` with 0.75; CONFIRMED). The player's shipped `preferences.script.txt` may set
-/// another value (1 on the user's install).
-pub const CAMPAIGN_UNIT_MULTIPLIER_DEFAULT: f32 = 0.75;
-/// The preference's key in `preferences.script.txt`.
-pub const CAMPAIGN_UNIT_MULTIPLIER_KEY: &str = "campaign_unit_multiplier";
-
 impl Default for ForceCaps {
     /// 20 / 20: the loader's caps for a file without them (`0x00872550`), and the caps of a model
     /// built in code (tests).
@@ -478,8 +471,10 @@ impl Default for ForceCaps {
 
 impl ForceCaps {
     /// A new campaign's caps: the units per army and per fleet
-    /// ([`crate::limits::GameLimits::max_units`]) at the `campaign_unit_multiplier` preference
-    /// (`None`: its default 0.75), i.e. 20 and 6 / 8 / 10 / 20 by the multiplier's unit-size step.
+    /// ([`crate::limits::GameLimits::max_units`]) at the player's unit-size setting
+    /// ([`crate::limits::UNIT_SIZE_SETTING`], the `campaign_unit_multiplier` preference: the
+    /// file's value, else the 0.75 the game registers it with; `None`: a game that registers no
+    /// such setting, which takes the last step), i.e. 20 and 6 / 8 / 10 / 20 by its unit-size step.
     /// CONFIRMED (traced through the stack): the front end's `StartCampaign` script call
     /// (`0x00478840`) builds the campaign setup in `0x00488720`: `0x00878060` fills the setup's
     /// part at `+0x1C` with `return 20` (`0x00851550`) at part `+0x2C` and
@@ -488,8 +483,8 @@ impl ForceCaps {
     /// the caps (`0x00873BD2`). The command-line `campaign` start (`0x00485B90`) builds the same.
     /// The multiplayer lobby's campaign (`0x004AA900`, game type 3) passes a fixed 20 / 14 instead,
     /// at the lobby's unit scale (not modelled: no multiplayer campaign yet).
-    pub fn new_campaign(limits: &crate::limits::GameLimits, campaign_unit_multiplier: Option<f32>) -> Self {
-        let (army, navy) = limits.max_units(campaign_unit_multiplier.unwrap_or(CAMPAIGN_UNIT_MULTIPLIER_DEFAULT));
+    pub fn new_campaign(limits: &crate::limits::GameLimits, unit_size_setting: Option<f32>) -> Self {
+        let (army, navy) = limits.max_units_at(limits.unit_scale_setting(unit_size_setting));
         ForceCaps { army, navy }
     }
 }

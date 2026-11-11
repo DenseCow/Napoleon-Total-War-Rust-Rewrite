@@ -1,0 +1,49 @@
+# The default translation of a soldier's parts and equipment (the meshes a .unit_variant lists)
+# into the renderer's inputs. A mod replaces it by shipping materials/vanilla/unit_part.toml.
+#
+# Texture slots of a unit part, from its texture stem (CONFIRMED file names,
+# analysis/worker2/UNIT_VARIANT_AND_TEXTURES.md §5): diffuse (<stem>_diffuse), normal
+# (<stem>_normal), gloss (<stem>_gloss_map), colour_mask (<stem>_colour_mask).
+#
+# The channel meanings below are INFERRED and the numbers PROVISIONAL until the original's unit
+# shader is read (BACKLOG §2, "The original's materials read in full"); each is marked.
+
+[applies]
+source = "unit_variant"
+
+[alpha]
+mode = "mask"             # PROVISIONAL: today's draw path cuts every part out by its alpha
+cutoff = 0.5              # PROVISIONAL: hand-picked, as in today's draw path
+source_flags = false      # a unit part has no flags of its own
+
+[base_colour]
+texture = "diffuse"
+
+[opacity]
+texture = "diffuse.a"
+
+[normal]
+texture = "normal"
+encoding = "rgb"          # PROVISIONAL: the channel layout is UNKNOWN (GRAPHICS_EXE.md §5)
+flip_green = false        # PROVISIONAL: the green axis's direction is UNKNOWN (same section)
+
+[roughness]
+value = 0.8               # PROVISIONAL: today's hand-picked value, for a part without a gloss map
+texture = "gloss.a"       # INFERRED: the gloss map's alpha scales the specular exponent
+convert = "specular_power"
+power = 32.0              # PROVISIONAL: the unit shader's exponent is not traced
+
+[specular_tint]
+texture = "gloss"         # INFERRED: the gloss map's colour is the specular colour
+
+[specular_level]
+value = 0.15              # PROVISIONAL: today's hand-picked value
+
+[faction_colour]
+# INFERRED: the mask's red, green and blue select the faction's primary, secondary and tertiary
+# uniform colours. How the original's shader mixes them with the diffuse is PROVISIONAL.
+texture = "colour_mask"
+
+[baked]
+base_colour_gain = 1.0    # PROVISIONAL: no compensation until the look is compared side by side
+occlusion = 0.0           # PROVISIONAL: likewise

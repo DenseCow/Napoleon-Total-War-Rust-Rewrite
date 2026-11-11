@@ -642,9 +642,11 @@ impl CampaignModel {
     /// Computed from the current state. What the round end pays is the value the last price update
     /// booked ([`super::economy::book_raid_income`], CONFIRMED): the update rebuilds both kinds of take, the
     /// international ones by `0x00BBD870` at `0x00BCC52F` and the domestic ones by `0x00BD1020` →
-    /// `0x00B61720` at `0x00BD1B23`. PROVISIONAL: the route builder `0x00BA0490` also rebuilds the
-    /// international takes outside a price update (a trade agreement `0x00B55090` → `0x00B55130`, the
-    /// listeners `0x00BB9410` / `0x00BB9B90`); ours books them only at the next price update.
+    /// `0x00B61720` at `0x00BD1B23`. A trade agreement's route build (`0x00B55130` → `0x00BA0490`) and a
+    /// broken agreement are each followed by a price update (`0x00B550CD`, `0x00B29BED`, CONFIRMED; see
+    /// [`Self::trade_agreement`] and [`Self::break_trade`]). PROVISIONAL: the trade listeners `0x00BB9410`
+    /// (vtable `0x0137FA60`; no price update of its own) and `0x00BB9B90` (one at `0x00BBA4A8`) also
+    /// rebuild routes with `0x00BA0490`; ours books their takes only at the next price update.
     pub fn raid_income(&self, faction: FactionId) -> i32 {
         let w = &self.world;
         let victims: BTreeSet<FactionId> = w

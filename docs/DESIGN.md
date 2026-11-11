@@ -492,6 +492,204 @@ assets gets the same renderer with no engine change. One renderer only: no "clas
 - Already merged work that ports original shading (e.g. the battle sea, `terrain/water.rs`) keeps its data decoding; its
   shading is redone when the renderer reaches it (BACKLOG §2).
 
+### 3.7.2 Renderer design (2026-11-10)
+The decisions of §3.7.1 worked out. What is decided here is engineering; what is the user's to decide is listed at the end.
+
+**What exists today.** Bevy 0.19.1 (wgpu 29; default features + `jpeg`). Everything is drawn forward, with Bevy's
+`StandardMaterial` or one small custom material per system, and every value of the look is in code:
+- Battle camera and light, `crates/napoleon/src/battle/view.rs` `spawn_camera`: a default `Camera3d` (no HDR, 4x MSAA,
+  Bevy's default tonemapping), one sun of 10,000 lux with two shadow cascades to 150 m and ambient 500 (PROVISIONAL).
+- Soldiers and mounts, `crates/napoleon/src/soldiers.rs` and `battle/skin.rs`: one `StandardMaterial` per kit part from the diffuse
+  texture only (roughness 0.8 / reflectance 0.15, mounts 0.75 / 0.2, alpha mask 0.5, all hand-picked); faction colours are
+  baked into a copy of the diffuse on the CPU (`load_tinted`, PROVISIONAL); `SkinMaterial` extends it with GPU skinning
+  from shared storage buffers (`soldier_skin.wgsl` and its prepass). One mesh entity per kit part per man.
+- Battle effects and markers: `battle/fx_draw.rs` (`ParticleMaterial`, `particle.wgsl`), `battle/flag.rs`, `battle/markers.rs`.
+- Battle map, `terrain/`: `mod.rs` (`TerrainMaterial`, `terrain.wgsl`; sun and ambient from the map's `.environment`,
+  PROVISIONAL; the clear colour is the map's sky colour), `trees.rs` and `speedtree.rs` (two tree materials), `water.rs`
+  (`SeaMaterial`, with its own sky model from the map's SKYGEN values), `objects.rs` (buildings: diffuse only).
+- Campaign map: `campaign/scene.rs` (sun 6,000 lux without shadows, ambient 900, PROVISIONAL), `arrows.rs`, `detail.rs`,
+  `region_labels.rs`. Model viewer: `model_viewer/mod.rs` (its own sun and ambient). Movies: `video/` (`movie_yuv.wgsl`).
+- Nowhere yet: normal and gloss maps, HDR, bloom, a chosen tonemapping curve, fog, a sky, ambient occlusion, reflections
+  (other than the sea's own), environment light, deferred rendering, anti-aliasing settings.
+- The original's graphics data decoded so far: the `.rigid_model` material record (four textures, named constants, the
+  alpha and two-sided flags in the model's path; `analysis/worker1/GRAPHICS_EXE.md` §2), the unit texture sets
+  (`analysis/worker2/UNIT_VARIANT_AND_TEXTURES.md` §5), the names of the scene constants and of the 136 shader files
+  (`analysis/graphics/SHADERS.md`), and of a map's `.environment` only `battle_terrain::Lighting` (sun, ambient, sky
+  colour, SKYGEN). Not decoded: what each texture channel and constant does in the original's shaders, and the
+  `.environment` sections FOG, POST_PROCESSING, SKY_DOME, clouds and wind.
+
+**Material model.** A *material description* is data: one text file `materials/<key>.toml` in the game's files, read
+through the merged files (`pack::Vfs`) like every game file, so a mod replaces a description by shipping the same path and
+adds one with a new path. It is a recipe, not one mesh's material: it names texture *slots* and the mesh supplies the
+textures (a rigid model's own four names, a unit part's texture stem, a glTF material). Its fields are the inputs of a
+physically based surface: base colour, opacity (with opaque / mask / blend, cutoff, two-sided), normal (with its
+encoding), roughness, metalness, specular level and tint, occlusion, emissive, the faction colour mask, the compensation
+for baked shading, the mesh constants it accepts, extra named numbers, and an optional shader. Each number input is a
+value, or one channel of a slot with a conversion, scale and bias. `[applies]` says which meshes get a description by
+default (the kind of mesh and a path prefix; the longest prefix wins); a mesh can also name a key. The format, with every
+key, is at the top of `crates/ntw_formats/src/material.rs` (`MaterialLibrary`, first slice, not yet used by a draw path).
+- The files are TOML, limited to what `ntw_formats::toml_subset` reads, so they open in any editor and we add no parser
+  dependency. An unknown key, a wrong type or a value out of range is an error with its line; a bad file is logged once
+  and skipped, and a built-in description it would have replaced stays in use.
+- Descriptions without a shader of their own compile to one block of numbers read by one built-in surface function, so
+  they all share one pipeline: a thousand descriptions cost no more shader variants than one.
+- Our defaults are files of the same format compiled into the program (`crates/ntw_formats/src/materials/`): `default`,
+  and the translation layer `vanilla/rigid_model`, `vanilla/unit_part`, `vanilla/mount`.
+
+**Translation of the original's materials** (the `vanilla/*` files; each uncertain line carries its tag there):
+
+| Renderer input | From the original | State |
+|---|---|---|
+| base colour, opacity | diffuse red-green-blue, diffuse alpha | in use today |
+| opaque / mask / blend, two-sided | `_alphatest`, `_alphablend`, `_twosided` in a rigid model's path | CONFIRMED `0x011D9D80`; units are cut out at 0.5, PROVISIONAL |
+| normal | the normal map; strength from `bumpfactor` | channel layout and green direction UNKNOWN: PROVISIONAL |
+| roughness | the gloss map's alpha as a share of the Blinn-Phong exponent `specpower`, turned into the roughness of the same highlight width, `(2 / (n + 2))^(1/4)` | the channel is INFERRED; the conversion is ours |
+| specular tint | the gloss map's colour | INFERRED |
+| metalness | none in the original: 0 | ours (a user decision below) |
+| occlusion | none per material; screen-space occlusion instead | ours |
+| faction colours | the colour mask's three channels pick the faction's three uniform colours, in the shader and per instance (not baked on the CPU) | mask meaning INFERRED, mixing rule PROVISIONAL |
+| dirt map, rim and fresnel constants | not used; a mod shader can read the constants as named numbers | UNKNOWN until read |
+| baked shading | `base_colour_gain` and the share of occlusion already painted in (weakens screen-space occlusion on that material) | 1.0 and 0, PROVISIONAL until compared side by side |
+
+Every INFERRED and UNKNOWN line is settled by reading the original's shader sources at runtime from the install
+(`variantmesh.fx`, `textured_rigid.fx`, `lighting_brdf.fx_fragment`, `util.fx_fragment`; never copied into the repo):
+BACKLOG §2 "The original's materials read in full". Terrain, water, foliage and particles keep specialised shaders;
+their numbers move into the same kind of file when their BACKLOG items are done.
+
+**A mod's own shader.** A description may name `shader = "<path>.wgsl"`, a game file. It holds one *surface function*:
+from the interpolated vertex data, the description's texture slots, its `[params]`, the per-instance data (faction
+colours, a per-instance random number, fade) and read-only scene values (time, wind, weather wetness, camera position) it
+returns the surface inputs listed above. It cannot light, fog, read the screen or depth, move vertices or see game state,
+so every material is lit, shadowed and fogged alike, the engine can change its pipeline without breaking mods, and a
+shader can never change what the rules see. At load the text is composed with our surface prelude (naga_oil, which Bevy
+ships) into a shader asset, and the material's pipeline key selects it (`Material::specialize` receives the key,
+CONFIRMED in Bevy 0.19.1's source; the first mod-shader slice proves the path end to end). No rebuild; a shader that
+fails validation is logged once and the built-in surface is used.
+
+**Forward or deferred: deferred** for opaque and cut-out surfaces, forward for blended ones (water, particles, glass).
+Reasons: Bevy's screen-space reflections need the deferred prepass (CONFIRMED: `ScreenSpaceReflections` requires
+`DeferredPrepass`); lighting is paid once per screen pixel, where a crowd is many small overlapping triangles and
+effects add many small lights; a surface function that only returns surface inputs is exactly a G-buffer writer; and
+ambient occlusion, decals and fog read the same buffers. The price: no MSAA, so temporal anti-aliasing, which needs
+motion vectors from the skinned crowd, and `SkinMaterial` needs deferred shaders. The switch is one resource
+(`DefaultOpaqueRendererMethod`), so forward with MSAA stays as the fallback. Deferred's cost is not measured yet: the
+harness below measures both before the switch is made.
+
+**Lighting pipeline.** All per-map values enter through one plain-data resource, the *scene look* (sun, ambient cube,
+fog, sky, post-processing, wind, water), filled by the importer from the map's `.environment` and `weather.xml`, or read
+from an open text file of a mod's map. Nothing in the renderer reads `.environment` (the rule of §3.5.1). Time of day and
+weather are blends between two scene looks.
+
+| Part | From Bevy | Ours | Scene-look values (original's names) |
+|---|---|---|---|
+| Sun and shadows | `DirectionalLight`, cascaded shadow maps (cascade count, distance and bias from data) | crowd shadow LOD; far terrain shadow from the map's lightmap | `light_direction`, `light_colour` and scale |
+| Ambient and indirect light | environment-map light | one small cube per map built from the ambient cube and the sky model, rebuilt when the look changes; light probes only for mod-made interiors | `ambient_cube_*`, `g_ambient_scale`, SKYGEN |
+| Ambient occlusion | SSAO | weakened per material by its baked share | (the original has its own, `ssaox.fx`) |
+| Reflections | SSR on opaque surfaces, the environment cube elsewhere | water keeps its own reflection march | `g_specular_scale` |
+| Small lights (muzzle flashes, fires) | clustered point lights | which effects emit light is effect data | effect files |
+| Sky | (`Atmosphere`, for a mod map that asks for it) | sky, clouds and sun drawn from the map's values | SKY_DOME / SKYGEN, cloud planes, SUN_MESH |
+| Fog | volumetric fog as a quality option | distance and height fog in the lighting pass and on blended surfaces; visual only | `g_fog_*`, `g_volume_fog_*` |
+| HDR, tonemapping, bloom, grading | HDR camera, `Tonemapping`, `Bloom`, `ColorGrading`, fixed exposure | the mapping of the original's values onto them (INFERRED until traced) | `g_hdr_bloom/cutoff/exposure`, POST_PROCESSING |
+| Anti-aliasing | TAA with sharpening; FXAA or SMAA as low options; MSAA with the forward fallback | none | none |
+| Depth of field, motion blur | depth of field for cutscene cameras only; motion blur off | none | none |
+
+Proposed: no vendor upscalers (DLSS, FSR), since they need their SDKs and the measured GPU cost does not call for
+them (an open decision, listed at the end of this section).
+
+**Crowd path.** Today a man is 10 to 12 mesh entities (12,242 for 1,048 men, measured) and the measurement below shows
+the frame is bound by CPU work per entity, not by the GPU. So, in steps, each measured before the next:
+1. One mesh per kit and LOD holding all its parts and alternatives, textured from the per-faction atlas, drawn as one
+   entity per man: the vertex shader drops the alternatives a man does not wear (a part mask per instance), and faction
+   colours and the atlas offset are per-instance numbers. About ten times fewer entities, still drawn by Bevy's own
+   mesh path (no render phase of ours).
+2. Only if step 1 misses the budget: the crowd leaves the entity path. One instance buffer per unit (transform, clip and
+   phase, part mask, colours, fade) drawn by our own render phase per kit and LOD; culling per unit and LOD per man on the
+   CPU with the original's choices (`0x0125ED60`, the unit-detail option); culling on the GPU only if still needed.
+3. Shadows from a lower LOD and only in the near cascades; far stand-ins only if a mod's heavy models make them needed.
+
+Materials reach the crowd through the same description (`vanilla/unit_part`): the crowd's vertex stage (skinning) runs
+in front of the same surface function, so a mod's shader works on soldiers as on buildings. For temporal anti-aliasing
+the previous frame's bones are kept, or far LODs write no motion.
+
+**Frame budget.** 60 fps is 16.6 ms. The target column is the plan for the reference machine (a user decision below);
+it is a budget, not a measurement. The measured column is today's forward renderer in a release build at 4,192 men on
+an RTX 5070 at 1280x960 with 4x MSAA.
+
+| Pass (GPU) | Target ms | Measured today, ms |
+|---|---|---|
+| Shadow maps | 2.5 | not timed by Bevy 0.19; with its CPU work about 4 by difference (below) |
+| G-buffer and depth (terrain, buildings, crowd, trees) | 4.0 | 1.60 (forward opaque pass, lighting included) |
+| Deferred lighting (sun, small lights, environment) | 1.5 | not measured (no deferred yet) |
+| Ambient occlusion | 1.0 | not there |
+| Screen-space reflections | 1.0 | not there |
+| Sky and fog | 0.5 | not there |
+| Water, particles, other blended surfaces | 1.5 | 0.09 |
+| Anti-aliasing | 1.0 | inside the opaque pass (4x MSAA), plus 0.02 |
+| Bloom, tonemapping, grading | 0.7 | not there |
+| Instance and bin preparation on the GPU | 0.5 | 1.24 |
+| UI | 0.4 | 0.01 |
+| Reserve | 2.0 | |
+| Sum | 16.6 | 3.0 timed |
+
+On the CPU the simulation and the render preparation run on two threads (Bevy's pipelined rendering) and each must fit
+the 16.6 ms; the target is 8 ms of simulation and 6 ms of render preparation at 10,000 men. Their split is not measured.
+
+Measured 2026-11-10, release build, RTX 5070, i9-13900K, the default `--battle` armies times `NAPOLEON_BATTLE_REPEAT`,
+no vsync, 24 s per run, one run each. Other builds were running on the machine (its CPU load before the runs was 12% to
+71%), so the frame rates are a lower bound and differences of a few fps mean nothing:
+
+| Men | Mesh entities | fps before contact | fps in combat | Timed GPU passes, ms |
+|---|---|---|---|---|
+| 1,048 | 12,242 | 122-127 | 110-123 | 1.3 |
+| 2,096 | 22,871 | 69-79 | 79-81 | 2.2 |
+| 4,192 | 44,408 | 56-59 | 45-47 | 3.0 |
+| 4,192 at 1920x1080 | 44,408 | 45-52 | 43-50 | 3.5 |
+| 4,192 without sun shadows | 44,408 | 60-77 | 34-59 | 2.6 |
+| 10,480 | 109,046 | 31-34 | 15-18 | 3.9 |
+| 10,480 without sun shadows | 109,400 | 37-43 | 21-23 | 4.0 |
+
+- The GPU passes Bevy times add up to 1.3 to 4 ms while a frame takes 8 to 65 ms: the frame is bound by the CPU, by
+  work per mesh entity (the frame time follows the entity count) and, in combat, INFERRED by the simulation (the split
+  is not measured, below).
+- Sun shadows cost about 4 ms of a frame at 4,192 men and 5 to 6 ms at 10,480 before contact (frame time with and
+  without them; CPU and GPU together, not a precise number under that load).
+- With unit LOD off (`NAPOLEON_UNIT_LOD=0`) the opaque pass takes 2.9 ms instead of 1.6 at 4,192 men, with no
+  visible change in fps.
+- Debug build (`opt-level = 1` for our crates, 3 for dependencies), same harness, one run each, measured later on an
+  idle machine (CPU load 7% to 9%): 1,048 men 124-132 fps, 4,192 men 57 falling to 48 fps over the run; the timed GPU
+  passes 1.3 and 3.0 ms as in release. So at these sizes the debug build is about as fast as the loaded release runs;
+  a release run on an idle machine, which would give the true difference, was not done.
+- Not measured: deferred rendering, every pass marked "not there", the split between simulation and render
+  preparation, and any GPU other than this one.
+- To repeat: `NAPOLEON_FPS_LOG=24 NAPOLEON_BATTLE_REPEAT=4 cargo run --release -p napoleon -- --battle` prints the fps
+  every 2 s and, at the end, the window size, the mesh entity count and each pass's time; `NAPOLEON_FPS_SIZE=1920x1080`
+  sets the window and `NAPOLEON_FPS_SHADOWS=0` removes the sun shadows.
+
+**Order of work for BACKLOG §2** (each line names the items it needs first):
+1. "The original's materials read in full": settles the INFERRED lines of the translation. Needs nothing.
+2. The material library drawn: buildings first (`terrain/objects.rs`), then unit parts and mounts, with normal and gloss
+   maps and the built-in surface function. Needs 1 for the final values, not to start.
+3. The scene look from `.environment` in full, HDR, tonemapping and bloom, then deferred, ambient occlusion and
+   reflections ("Shadows, lighting, HDR and tone mapping...", "Sky dome and clouds, time of day..."). Needs 2.
+4. "Per-faction texture atlases", then crowd step 1, then "Crowd system" (LOD choices, step 2 if measured). Needs 2.
+5. Shadow quality and the crowd's shadow LOD. Needs 3 and 4.
+6. Terrain maps and lightmap, water, weather, trees and grass, each moving its numbers into material and scene data.
+   Need 3. The campaign map's sea, rivers and walls reuse them.
+7. Effects that emit light, decals. Need 3 (deferred).
+8. A mod's WGSL surface shader and glTF models naming a material key (§11 "open formats"). Need 2 and 3.
+9. "Data-driven figures" builds on 4; "General engine abilities" (terrain that changes) is independent of the look and
+   needs only 6's terrain; the graphics settings list as data comes last, when the options exist.
+
+**Open decisions (the user's):**
+- The reference machine for "60 fps on a mid-range GPU": which GPU class, which resolution, how many men.
+- Vanilla metals: everything non-metal as in the original's data, or metalness derived from the gloss maps for
+  bayonets, cannon and buttons (looks more modern, is our invention).
+- Anti-aliasing: deferred means temporal anti-aliasing by default (slightly softer in motion); the alternative is the
+  forward fallback with MSAA and no screen-space reflections.
+- TOML reader: our own subset reader (no dependency, in this slice) or the `toml` crate (full TOML, one dependency).
+- Which quality options the player gets in the settings screen, and which are data only.
+- Vendor upscalers (DLSS, FSR): left out as proposed above, or added as options.
+
 ## 4. Vertical slice (Phase 5) — done
 
 `cargo run -p napoleon` plays France vs Austria with real unit stats and kv tables from the install.

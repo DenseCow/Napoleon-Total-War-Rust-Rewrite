@@ -482,6 +482,12 @@ fn historical_event_tables() {
     assert_eq!(all, ["austria", "britain", "egy_french_republic", "egy_ottomans", "france", "ita_austrian_alliance", "ita_french_republic", "prussia", "russia"]);
     assert_eq!(e.grouping_continents.len(), 2);
     assert!(e.grouping_cultures.is_empty() && e.grouping_subcultures.is_empty() && e.grouping_regions.is_empty() && e.grouping_empires.is_empty());
+    // The key tables the groupings' members are checked against: every vanilla member is a key (no
+    // vanilla grouping is dropped), and `regions_continents` holds every continent `regions` #1 names.
+    assert_eq!((e.empires.len(), e.continents.len()), (6, 8));
+    assert!(e.grouping_factions.iter().all(|g| db.factions.get(&g.member).is_some()));
+    assert!(e.grouping_continents.iter().all(|g| e.continents.get(&g.member).is_some()));
+    assert!(db.regions.iter().all(|r| e.continents.get(&r.continent).is_some()));
 }
 
 /// The unrest tables the class pass reads (`0x008F9690`, CAMPAIGN_FIDELITY.md §Class war): the classes'
@@ -498,4 +504,31 @@ fn unrest_tables() {
     assert_eq!(demand("bankruptcy", "riots"), Some("change_government_head"));
     // No row for a rebellion: its demand is 0, none.
     assert!(c.unrest_demands.iter().all(|r| r.kind != "rebellion"));
+}
+
+/// `unit_special_abilities` (row reader `0x00FC5ED0`): the four timed abilities' active time,
+/// recharge time and uses, and the records the battle model takes from them.
+#[test]
+#[ignore = "needs the game installed"]
+fn unit_special_abilities_rows() {
+    use ntw_sim::battle::abilities::ability_ids;
+    let db = GameDatabase::from_install(data_dir()).unwrap();
+    let mut rows: Vec<(&str, f32, f32, i32)> =
+        db.unit_special_abilities.iter().map(|r| (r.ability.as_str(), r.active_time, r.recharge_time, r.num_uses)).collect();
+    rows.sort_by(|a, b| a.0.cmp(b.0));
+    assert_eq!(
+        rows,
+        [
+            ("artillery_accuracy_boost", 60.0, 120.0, 3),
+            ("artillery_rof_boost", 60.0, 120.0, 3),
+            ("inspire_unit", 30.0, 180.0, 2),
+            ("rally", 30.0, 180.0, 2),
+        ]
+    );
+    let mut ids: Vec<u8> = db.special_ability_records().iter().map(|(id, _)| *id).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, [ability_ids::RALLY, ability_ids::INSPIRE_UNIT, ability_ids::ARTILLERY_ACCURACY_BOOST, ability_ids::ARTILLERY_ROF_BOOST]);
+    let rally = db.special_ability_record("Rally").expect("the key is matched without case");
+    assert_eq!((rally.active_time, rally.recharge_time, rally.num_uses), (30.0, 180.0, 2));
+    assert!(db.special_ability_record("square_formation").is_none());
 }

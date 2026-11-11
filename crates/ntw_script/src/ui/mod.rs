@@ -18,6 +18,6 @@ pub mod test_support;
 pub mod world;
 
 pub use campaign::{CampaignKey, CampaignKeys, CampaignLink, CampaignRequest, CampaignSaves, CampaignSelection};
-pub use shortcuts::{ShortcutMachine, ShortcutTarget};
+pub use shortcuts::{FrameKeys, ShortcutMachine, ShortcutTarget};
 pub use host::{CustomArmy, FrontEndFacts, UiFrame, UiRequest, UiScriptHost};
 pub use world::{NodeId, PointerEvent, RUNTIME_IMAGE_PREFIX, RuntimeImage, UiNode, UiRect, UiWorld};

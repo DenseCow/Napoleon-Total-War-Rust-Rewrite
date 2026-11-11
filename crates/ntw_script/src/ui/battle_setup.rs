@@ -138,8 +138,8 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Result<(
         Ok(i.limits.custom_battle_funds(size.unwrap_or(0), naval.unwrap_or(false)))
     })?)?;
     // UnitScaleFactor([index]) → scale, index (`0x004795F0`, CONFIRMED table `0x01392770`:
-    // 0.25, 0.5, 0.75, 1.0). Without an index the current setting: the preference read is the
-    // unit scale (INFERRED: our preferences key `gfx_unit_scale`, 0..3).
+    // 0.25, 0.5, 0.75, 1.0). Without an index the current setting: the float preference
+    // `campaign_unit_multiplier` (id 0x6D) itself, with its step `0x00DAFBC0` (CONFIRMED).
     let i = inner.clone();
     t.set("UnitScaleFactor", lua.create_function(move |_, index: Option<i64>| Ok(unit_scale_factor(&i, index)))?)?;
     // MaxUnitsFromUnitScaleFactor(scale) → 20, the ships limit for that scale (`0x00475800` →
@@ -179,21 +179,35 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Result<(
     Ok(())
 }
 
-/// `UnitScaleFactor([index])` (front end `0x004795F0`, campaign `0x009FAB10`): (scale, index) of
-/// unit-size step `index`, or of the `gfx_unit_scale` preference without one (the last step when
-/// it is not set), out of the moddable steps (`GameLimits::unit_scales`, the original's four
-/// `0x01392770`).
+/// `UnitScaleFactor([index])` (front end `0x004795F0`, battle `0x005D48C0`, campaign
+/// `0x009FAB10`; CONFIRMED): with an index, that step's scale out of the moddable steps
+/// (`GameLimits::unit_scales`, the original's four `0x01392770`) and the index; without one, the
+/// unit-size setting's own value (a scale, not rounded to a step) and its step.
 pub(crate) fn unit_scale_factor(inner: &Inner, index: Option<i64>) -> (f32, usize) {
     let idx = unit_scale_setting(inner, index);
-    // `idx` is inside the list (`unit_scale_setting` clamps it), so the conversion keeps it.
-    (inner.limits.unit_scale(i32::try_from(idx).unwrap_or(i32::MAX)), idx)
+    // `idx` is inside the list (both rules clamp it), so the conversion keeps it.
+    let step_scale = inner.limits.unit_scale(i32::try_from(idx).unwrap_or(i32::MAX));
+    match index {
+        Some(_) => (step_scale, idx),
+        None => (unit_size_setting(inner).unwrap_or(step_scale), idx),
+    }
 }
 
-/// The unit-size index of `index`, or of the `gfx_unit_scale` preference without one, clamped
-/// into the moddable steps (`GameLimits::unit_scale_setting`): the one reading of the preference.
+/// The unit-size index of `index` clamped into the moddable steps
+/// (`GameLimits::unit_scale_step`), or without one the step of the unit-size setting
+/// (`GameLimits::unit_scale_setting`), so the options page and the battle setup show the same
+/// step with or without a preferences file.
 pub(crate) fn unit_scale_setting(inner: &Inner, index: Option<i64>) -> usize {
-    let setting = index.or_else(|| inner.prefs.borrow().get("gfx_unit_scale").and_then(|v| v.trim().parse().ok()));
-    inner.limits.unit_scale_setting(setting)
+    match index {
+        Some(index) => inner.limits.unit_scale_step(index),
+        None => inner.limits.unit_scale_setting(unit_size_setting(inner)),
+    }
+}
+
+/// The unit-size setting's value (`ntw_sim::limits::UNIT_SIZE_SETTING`): the preferences file's,
+/// else the default the game registers it with; `None` only for a game that registers none.
+fn unit_size_setting(inner: &Inner) -> Option<f32> {
+    inner.prefs.borrow().get_f64(ntw_sim::limits::UNIT_SIZE_SETTING).map(|v| v as f32)
 }
 
 /// The `factions` table, loaded once per source.
@@ -242,4 +256,103 @@ pub(super) fn install_faction_details(lua: &Lua, inner: &Rc<Inner>, t: &Table) -
 pub(super) fn install_offline(lua: &Lua, t: &Table) -> mlua::Result<()> {
     t.set("MPLocalPlayerId", lua.create_function(|_, ()| Ok(0))?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use ntw_formats::loc::Localisation;
+    use ntw_formats::preferences::registered_default;
+
+    use crate::ScriptSource;
+    use crate::ui::{FrontEndFacts, UiScriptHost};
+
+    /// `FrontEnd.UnitScaleFactor()` (scale, step) and the options page's unit size, on a host with
+    /// no game files and `user_dir` as the only place a preferences file can be.
+    fn unit_size(user_dir: Option<PathBuf>) -> (f64, i64, f64) {
+        let facts = FrontEndFacts { user_dir, ..Default::default() };
+        let host = UiScriptHost::new(ScriptSource::empty(), Localisation::new(), facts, (1280.0, 960.0), ntw_sim::limits::GameLimits::default()).unwrap();
+        host.lua()
+            .load("local scale, step = FrontEnd.UnitScaleFactor()\nreturn scale, step, UIPrefsInterface():CurrentOptions().graphics.unit_size")
+            .eval()
+            .unwrap()
+    }
+
+    /// A user folder under the temp folder whose preferences file is `text`.
+    fn user_with(name: &str, text: &str) -> PathBuf {
+        let user = std::env::temp_dir().join(format!("ntw_unit_size_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&user);
+        std::fs::create_dir_all(user.join("scripts")).unwrap();
+        std::fs::write(user.join("scripts").join("preferences.script.txt"), text).unwrap();
+        user
+    }
+
+    /// The battle setup and the options page read the unit size the same way: the step of the
+    /// scale `campaign_unit_multiplier` holds (`0x004795F0`, `0x00D9FBB0`). With no preferences
+    /// file both show the step of the default the game registers it with (0.75, step 2), and a
+    /// file's value moves both; `UnitScaleFactor()` hands the setting's own value, not its step's.
+    #[test]
+    fn battle_setup_and_options_page_agree_on_the_unit_size() {
+        let registered: f32 = registered_default(ntw_sim::limits::UNIT_SIZE_SETTING).expect("registered").parse().expect("a float");
+        let limits = ntw_sim::limits::GameLimits::default();
+        let default_step = limits.unit_scale_index(registered);
+        let (scale, step, page) = unit_size(None);
+        assert_eq!((scale as f32, step, page), (registered, default_step as i64, default_step as f64), "no file: the registered default on both");
+        assert_ne!(default_step, limits.unit_scales.len() - 1, "not the step of a game without the setting");
+
+        let user = user_with("file", "campaign_unit_multiplier 0.5; # #\r\n");
+        let read = unit_size(Some(user.clone()));
+        let _ = std::fs::remove_dir_all(&user);
+        assert_eq!(read, (0.5, 1, 1.0), "the file's value on both");
+
+        // A scale between two steps keeps its value and shows the first step not below it.
+        let user = user_with("between", "campaign_unit_multiplier 0.6; # #\r\n");
+        let (scale, step, page) = unit_size(Some(user.clone()));
+        let _ = std::fs::remove_dir_all(&user);
+        assert_eq!((scale as f32, step, page), (0.6, 2, 2.0));
+
+        // The old int `gfx_unit_scale` is not the unit size: it moves neither.
+        let user = user_with("old", "gfx_unit_scale 0; # #\r\n");
+        let (_, step, page) = unit_size(Some(user.clone()));
+        let _ = std::fs::remove_dir_all(&user);
+        assert_eq!((step, page), (default_step as i64, default_step as f64));
+    }
+
+    /// A file value that does not read as the setting's type is the registered default for the
+    /// option pages (Lua) as for every other reader (`Preferences::get_bool` / `get_f64`), not nil
+    /// or false.
+    #[test]
+    fn a_mistyped_file_value_is_the_registered_default_on_the_pages() {
+        let user = user_with("mistyped", "campaign_unit_multiplier big; # #\r\nsound_master_volume loud; # #\r\ngfx_vsync 7; # #\r\ncamera_move_speed fast; # #\r\n");
+        let facts = FrontEndFacts { user_dir: Some(user.clone()), ..Default::default() };
+        let host = UiScriptHost::new(ScriptSource::empty(), Localisation::new(), facts, (1280.0, 960.0), ntw_sim::limits::GameLimits::default()).unwrap();
+        let read: (f64, f64, bool, f64) = host
+            .lua()
+            .load("local o = UIPrefsInterface():CurrentOptions()\nreturn o.graphics.unit_size, o.audio.master, o.graphics['v-sync'], o.controls.move_speed")
+            .eval()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&user);
+        let number = |key: &str| registered_default(key).expect("registered").parse::<f64>().expect("a number");
+        let vsync = registered_default("gfx_vsync").expect("registered") == "true";
+        assert_eq!(read, (2.0, number("sound_master_volume"), vsync, number("camera_move_speed")));
+    }
+
+    /// The options page's unit-size slider stores its step's scale in `campaign_unit_multiplier`
+    /// (`0x00DA2620`), which the battle setup then reads back.
+    #[test]
+    fn the_options_page_stores_the_unit_size_steps_scale() {
+        let user = user_with("store", "campaign_unit_multiplier 1; # #\r\n");
+        let facts = FrontEndFacts { user_dir: Some(user.clone()), ..Default::default() };
+        let host = UiScriptHost::new(ScriptSource::empty(), Localisation::new(), facts, (1280.0, 960.0), ntw_sim::limits::GameLimits::default()).unwrap();
+        let read: (f64, i64, f64) = host
+            .lua()
+            .load("local p = UIPrefsInterface()\np:SetGraphicsOptions({ unit_size = 1 })\nlocal scale, step = FrontEnd.UnitScaleFactor()\nreturn scale, step, p:CurrentOptions().graphics.unit_size")
+            .eval()
+            .unwrap();
+        let saved = std::fs::read(user.join("scripts").join("preferences.script.txt")).map(|b| ntw_formats::preferences::Preferences::read(&b));
+        let _ = std::fs::remove_dir_all(&user);
+        assert_eq!(read, (0.5, 1, 1.0));
+        assert_eq!(saved.expect("saved").get_f64(ntw_sim::limits::UNIT_SIZE_SETTING), Some(0.5));
+    }
 }

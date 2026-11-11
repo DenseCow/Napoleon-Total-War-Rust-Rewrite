@@ -176,6 +176,23 @@ end
 B.SelectAllInfantry = function() select_category("infantry") end
 B.SelectAllCavalry = function() select_category("cavalry") end
 B.SelectAllArtillery = function() select_category("artillery") end
+
+-- A key binding of the engine's card manager (default_keys.xml component "card_manager"; called
+-- by battle.rs `keys` on the press). select_all (CTRL+A) and deselect_all (RETURN) are the
+-- selection requests the cards make. PROVISIONAL (the exe's card manager handler is not traced):
+-- that select_all takes every card. select_next, select_prev and usegroup0..9 need a card order
+-- and unit groups the model does not have yet: logged once each, nothing done.
+local card_shortcut_logged = {}
+function __ntw_battle_card_shortcut(func)
+    if func == "select_all" then
+        select_category(nil)
+    elseif func == "deselect_all" then
+        request({ kind = "select", ids = {} })
+    elseif not card_shortcut_logged[func] then
+        card_shortcut_logged[func] = true
+        log("UNKNOWN card manager shortcut " .. tostring(func) .. " (not done yet)")
+    end
+end
 B.SelectionChanged = function() end
 B.IsUnitSelectable = function() return true end
 B.ZoomToUnit = function(u) request({ kind = "zoom", id = u }) end
@@ -186,7 +203,28 @@ B.MouseMovedOffCard = function() end
 B.ExplicitlyCancelMouseHeld = function() end
 B.RequestMouseInterruptType = function() end
 B.ReleaseMouseCursorInterrupt = function() end
-B.EnableShortcutHandler = function() end
+-- CONFIRMED 0x005D0850: true/false switches every key binding on or off (0x00EA5080).
+B.EnableShortcutHandler = function(on) __ntw_battle_enable_shortcuts(on) end
+-- CONFIRMED 0x005D3C60 (orders) / 0x005D3BF0 (cards): flip the panel's minimised flag (slots 8 / 9
+-- of the battle settings store) and return it; root.lua's visibility_toggle_buttons / _cards (F6 /
+-- F7) pass the result to SetOrdersVisibility / SetCardsVisibility, whose argument means visible
+-- (battle_HUD_visibility_manager -> component:SetVisible). The battle UI init (0x00597663) passes
+-- `flag == 0` the same way, so it is the minimised flag.
+-- ORIGINAL BUG: the toggles return the new minimised flag as the visibility (0x005D3C60,
+-- 0x005D3BF0 against the init call at 0x00597663): the first press after a start shows the panel
+-- that is already shown, so it takes two presses to hide it. Ours returns `not minimised`.
+-- INFERRED: the flags start false each battle (the slots' start value is not traced).
+-- PLACEHOLDER: ToggleMinimisedRadar (0x005D3CD0, F5) stays the stub: the radar is not drawn yet
+-- (hud.rs keeps it hidden) and the stub's nil keeps it so.
+local minimised = { orders = false, cards = false }
+B.ToggleMinimisedOrders = function()
+    minimised.orders = not minimised.orders
+    return not minimised.orders
+end
+B.ToggleMinimisedCards = function()
+    minimised.cards = not minimised.cards
+    return not minimised.cards
+end
 B.SetSelectionProxy = function() end
 B.UpdateBattleLocks = function() end
 B.TriggerPanelOpenEvent = function() end

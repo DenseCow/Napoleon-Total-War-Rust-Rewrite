@@ -218,9 +218,12 @@ checked).
   says no; the movie stop itself is `0x00D9FB70` (the movie's +0x28 "can stop" then +0x14 "stop"). The key path that ends
   an intro movie was not found (no `0x1B` Escape compare in the movie code). Front-end Lua: `root.luac` steals ESCAPE for
   Back, not for movies.
-- UNKNOWN: sound group 4. Movie volume in the exe (`0x004831D0`, `0x004832F0`) = `group_volume(4) * 0.01 *
-  group_volume(5)` (slot `+0xDC` of the sound manager returns the int at `+0xC140 + 8*group`; group 5 = master per
-  AUDIO_FORMAT.md), passed to `BinkSetVolume(bink, track, volume)` (`0x0121609D`). What sets group 4 is not read yet.
+- Sound group 4 is the movie group, round(`MOVIE_VOLUME` × 100) (`analysis/fidelity/MIDDLEWARE_VERIFY.md` §1.3 "Volume groups", and the row
+  "group 4 volume" of the settings table just above it). Movie
+  volume in the exe (`0x004831D0`, `0x004832F0`, and the campaign movie panel's call in `0x00A13EA0`) =
+  `int(group_volume(4) * 0.01 * group_volume(5))` (slot `+0xDC` of the sound manager returns the int at
+  `+0xC140 + 8*group`; group 5 = master per AUDIO_FORMAT.md), passed to `BinkSetVolume(bink, track, volume)`
+  (`0x0121609D`). Ours: `mixer::movie_gain` (victoryscreen3, 2026-11-10).
 - Intro order: CONFIRMED 2026-10-04 (§8.3). Front-end movie looping: INFERRED (the `1` argument of `0x004831D0`).
 - INFERRED: ±1 colour differences on the GPU path (§8.2).
 

@@ -303,10 +303,10 @@ pub struct PendingTransfer {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RelationBelief {
     /// The relation value ([`relation_value`]) towards each other faction of the CAI world, in
-    /// [`ai_order`].
+    /// `ai_order`.
     pub relations: Vec<(FactionId, f32)>,
-    /// The enemy list (count `+0x4C`, data `+0x50`): the CAI world's factions in [`ai_order`],
-    /// without the owner, that [`on_enemy_list`] puts on it.
+    /// The enemy list (count `+0x4C`, data `+0x50`): the CAI world's factions in `ai_order`,
+    /// without the owner, that `on_enemy_list` puts on it.
     pub enemies: Vec<FactionId>,
     /// The ally list (`+0x2C`, count `+0x38`): the CAI world's factions in `ai_order`, without
     /// the owner, that `on_ally_list` puts on it. Stored with the enemy list, so both lists'
@@ -455,17 +455,24 @@ pub fn relation_value(model: &CampaignModel, f: FactionId, x: FactionId) -> f32 
 }
 
 /// `f`'s CAI relation belief as `BuildCaiRelationBelief` `0x00ABAFB0` builds it from the CAI
-/// world's faction list (CAI world `+0x110`: count `+0x11C`, data `+0x120`; [`ai_order`]): the
+/// world's faction list (CAI world `+0x110`: count `+0x11C`, data `+0x120`; `ai_order`): the
 /// relation value towards each other faction ([`relation_value`]), the enemy list
-/// ([`on_enemy_list`]) and the ally list ([`on_ally_list`]). CONFIRMED.
+/// (`on_enemy_list`) and the ally list (`on_ally_list`). CONFIRMED.
 pub fn build_relation_belief(model: &CampaignModel, f: FactionId) -> RelationBelief {
     let order = ai_order(model);
-    let others = || order.iter().copied().filter(move |&g| g != f);
     RelationBelief {
-        relations: others().map(|g| (g, relation_value(model, f, g))).collect(),
-        enemies: others().filter(|&g| on_enemy_list(model, f, g)).collect(),
-        allies: others().filter(|&g| on_ally_list(model, f, g)).collect(),
+        relations: order.iter().filter(|&&g| g != f).map(|&g| (g, relation_value(model, f, g))).collect(),
+        enemies: rebuilt_list(model, &order, f, on_enemy_list),
+        allies: rebuilt_list(model, &order, f, on_ally_list),
     }
+}
+
+/// The list a rebuild of `f`'s relation belief makes with `on_list` ([`on_enemy_list`],
+/// [`on_ally_list`]): the factions of `order` (the CAI world's, [`ai_order`]) it puts on it, without
+/// `f`, in that order. The belief's build, a dirty belief's list reads and the ally lists' rebuild
+/// on load use it.
+fn rebuilt_list(model: &CampaignModel, order: &[FactionId], f: FactionId, on_list: fn(&CampaignModel, FactionId, FactionId) -> bool) -> Vec<FactionId> {
+    order.iter().copied().filter(|&g| g != f && on_list(model, f, g)).collect()
 }
 
 /// Whether a rebuild of `f`'s relation belief puts `g` (not `f`) on its enemy list (`+0x40`,
@@ -512,7 +519,7 @@ pub(crate) fn believed_ally_count(model: &CampaignModel, f: FactionId) -> u32 {
 }
 
 /// Whether `g` is on `f`'s relation belief's ally list (`0x00A63A40`): the stored list while the
-/// belief is clean, else what the read's rebuild lists ([`on_ally_list`]). False for `g` = `f`.
+/// belief is clean, else what the read's rebuild lists (`on_ally_list`). False for `g` = `f`.
 pub fn believes_allied(model: &CampaignModel, f: FactionId, g: FactionId) -> bool {
     read_belief(model, f, |b| b.allies.contains(&g), || g != f && on_ally_list(model, f, g))
 }
@@ -529,7 +536,7 @@ pub fn relation_belief_value(model: &CampaignModel, f: FactionId, x: FactionId) 
 
 /// Whether `g` is on `f`'s relation belief's enemy list (`0x00A649F0` on the belief
 /// `0x00A74A20` returns): the stored list while the belief is clean, else what the read's rebuild
-/// lists ([`on_enemy_list`]). False for `g` = `f`.
+/// lists (`on_enemy_list`). False for `g` = `f`.
 pub fn believes_at_war(model: &CampaignModel, f: FactionId, g: FactionId) -> bool {
     read_belief(model, f, |b| b.enemies.contains(&g), || g != f && on_enemy_list(model, f, g))
 }
@@ -537,7 +544,7 @@ pub fn believes_at_war(model: &CampaignModel, f: FactionId, g: FactionId) -> boo
 /// The factions on `f`'s relation belief's list `on_list` decides, in its order: the stored list
 /// (`stored`) while the belief is clean, else the rebuild's over [`ai_order`].
 fn believed_list(model: &CampaignModel, f: FactionId, stored: fn(&RelationBelief) -> &[FactionId], on_list: fn(&CampaignModel, FactionId, FactionId) -> bool) -> Vec<FactionId> {
-    read_belief(model, f, |b| stored(b).to_vec(), || ai_order(model).into_iter().filter(|&g| g != f && on_list(model, f, g)).collect())
+    read_belief(model, f, |b| stored(b).to_vec(), || rebuilt_list(model, &ai_order(model), f, on_list))
 }
 
 /// `f`'s relation belief's enemy list (`+0x40`, the list `0x00A649F0` tests), in its order
@@ -1228,7 +1235,8 @@ impl CampaignModel {
     }
 
     /// Gives every stored (clean) relation belief the ally list a rebuild from the current world
-    /// makes ([`build_relation_belief`]), keeping its relations and enemy list; returns how many.
+    /// makes (the list [`build_relation_belief`] stores, alone: the relation values and the enemy list
+    /// are not computed), keeping its relations and enemy list; returns how many.
     /// For a load of a save written before beliefs kept their ally list ([`RelationBelief::allies`],
     /// own save format 11 and older), which never held the list, so a rebuild is the only source.
     ///
@@ -1242,14 +1250,17 @@ impl CampaignModel {
     ///   stances set to Neutral directly, not through a treaty or war; the beliefs stay clean
     ///   unless something else the same path does marks them; while they stay clean, a stored
     ///   list still naming the destroyed ally comes back without it. (A re-emergence also sets
-    ///   stances directly, but none to an alliance, since a protectorate is made through
-    ///   [`Self::make_protectorate`], which marks them, so it changes no ally list.)
+    ///   stances directly and puts the faction back in the game, but it changes no ally list: the
+    ///   list holds only factions whose stance is allied, a protectorate or a patron is not on it,
+    ///   and a re-emergence writes neutral, war, protectorate or patron over stances the faction's
+    ///   destruction had already set to neutral, never allied.)
     /// * a save without the out-of-game flag (`out_of_game: None`) has it derived by the startpos
     ///   rule ([`Self::in_the_game`], [`Self::out_of_game_by_startpos_rule`]): an ally the exe keeps
     ///   in the game against that rule (one that started without a region and later lost every
     ///   character holding no post) comes back off the list.
     pub fn rebuild_stored_ally_lists(&mut self) -> usize {
-        let lists: Vec<Vec<FactionId>> = self.director.beliefs.keys().map(|&f| build_relation_belief(self, f).allies).collect();
+        let order = ai_order(self);
+        let lists: Vec<Vec<FactionId>> = self.director.beliefs.keys().map(|&f| rebuilt_list(self, &order, f, on_ally_list)).collect();
         let n = lists.len();
         for (b, allies) in self.director.beliefs.values_mut().zip(lists) {
             b.allies = allies;
@@ -1329,8 +1340,15 @@ impl CampaignModel {
             // units and army the way a finished land recruit is placed (unit `0x0087FEA0(faction, record,
             // 0, 0, 1)` and army `0x008D25F0(.., 1, 0, 1, 1)` at the settlement, the same calls as the
             // recruit placement `0x008ECAD0`), so ours reuses that placement. Not a finished recruitment
-            // item: no `UnitTrained`.
-            let _ = self.spawn_recruited_unit(region, unit_key.clone());
+            // item: no `UnitTrained`. Once the new garrison is full (a mod's army cap below the drawn
+            // size; the exe's 20 is never reached, the draw gives at most 10) the placement sends a unit
+            // into an army of the receiver within 5.0 of the settlement (`recruit_army_near`), else
+            // into a new army on a free spot outside; it fails only when there is neither, and the
+            // units left over are not raised.
+            if self.spawn_recruited_unit(region, unit_key.clone()).is_none() {
+                log::warn!("the transfer garrison of {region:?} is full, no army of {receiver:?} with room stands near and no free spot is left: its remaining units are not raised");
+                break;
+            }
         }
     }
 }
@@ -1572,7 +1590,8 @@ mod tests {
         m.apply(CampaignCommand::DeclareWar { a: A, b: B }).unwrap();
         assert!(m.director.beliefs.is_empty(), "the war marks every belief dirty");
         let a = 1.0 - relation_value(&m, B, A);
-        assert_eq!(m.world.stance(B, A), Stance::War);
+        // The enemy-list rule reads A's record towards B (`on_enemy_list`).
+        assert_eq!(m.world.stance(A, B), Stance::War);
         assert!((rival_score(&m, B) - (0.2 * a + 0.4 + 0.4 * 0.5)).abs() < 1e-6);
         assert!(rival_score(&m, B) > at_peace);
         assert!(believes_at_war(&m, B, A));
@@ -1764,7 +1783,7 @@ mod tests {
         r13.key = "test_region_13".into();
         m.world.regions.insert(r13.id, r13);
         m.world.region_neighbours.clear();
-        let area = |key: &str, links: &[usize]| AiArea { key: key.into(), links: links.to_vec() };
+        let area = |key: &str, links: &[usize]| AiArea { key: key.into(), links: links.to_vec(), ..Default::default() };
         m.world.ai_areas = vec![
             area("test_region_13", &[1, 3]),
             area("sea", &[0, 2, 4]),

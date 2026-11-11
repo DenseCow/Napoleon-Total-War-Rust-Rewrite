@@ -224,15 +224,32 @@ impl CampaignModel {
             r
         };
         let codes = Some(battle_side_results(attacker_won, potentials, losses, land));
-        Ok(self.apply_battle_result(BattleResult { attacker_won, attacker_casualties: 0.0, defender_casualties: 0.0, codes }))
+        Ok(self.settle_pending_battle(BattleResult { attacker_won, attacker_casualties: 0.0, defender_casualties: 0.0, codes }))
     }
 
-    /// Applies a battle's outcome to the pending battle and clears it. Also the hook for a
-    /// real-time battle's result. Returns no events if no battle is pending.
+    /// Applies a battle's outcome to the pending battle and clears it, then ends the update
+    /// ([`Self::end_update`]: the victory check). The hook for a real-time battle's result. Returns no
+    /// events if no battle is pending.
     pub fn apply_battle_result(&mut self, result: BattleResult) -> Vec<CampaignEvent> {
+        let mut events = self.settle_pending_battle(result);
+        self.end_update(&mut events);
+        events
+    }
+
+    /// Applies a battle's outcome to the pending battle and clears it; the caller ends the update
+    /// (the autoresolve command through [`Self::apply`]).
+    fn settle_pending_battle(&mut self, result: BattleResult) -> Vec<CampaignEvent> {
         let Some(battle) = self.pending_battle.take() else { return Vec::new() };
         let sides = self.battle_sides(&battle);
-        self.settle_battle(&battle, result, true, sides)
+        let sally = self.battle_sally_port(&battle);
+        self.settle_battle(&battle, result, true, sides, sally)
+    }
+
+    /// The blockaded port a battle is fought out of, when it is the docked navy's attack on its blockader
+    /// ([`Self::sally_port`] for the attacker and the first defender). Read before any force of the battle can
+    /// be destroyed.
+    fn battle_sally_port(&self, battle: &PendingBattle) -> Option<(RegionId, usize)> {
+        self.sally_port(battle.attacker, *battle.defenders.first()?)
     }
 
     /// The factions of a battle's two sides (the side records' factions, `0x008F7880` passes them to
@@ -248,13 +265,16 @@ impl CampaignModel {
     /// The battle's outcome ([`Self::apply_battle_result`]) for `battle`, already taken off the model. `undock`: the
     /// post-battle undock is still to run, after the casualties ([`Self::undock_after_battle`]); the naval
     /// autoresolve runs it itself, before its captures, and passes false, so every battle undocks once. `sides`:
-    /// the two sides' factions ([`Self::battle_sides`]).
+    /// the two sides' factions ([`Self::battle_sides`]). `sally`: the port of a docked navy's attack on its
+    /// blockader ([`Self::battle_sally_port`]); its blockade step runs after the casualties
+    /// ([`Self::lift_after_sally`]).
     fn settle_battle(
         &mut self,
         battle: &PendingBattle,
         result: BattleResult,
         undock: bool,
         sides: (Option<FactionId>, Option<FactionId>),
+        sally: Option<(RegionId, usize)>,
     ) -> Vec<CampaignEvent> {
         let mut events = Vec::new();
         let attacker_faction = self.world.forces.get(&battle.attacker).map(|f| f.faction);
@@ -271,7 +291,12 @@ impl CampaignModel {
         // capture virtual at `0x0094B7EC` only when it holds no garrison; `0x008F7880` captures nothing).
         self.battle_class_war(battle, &result, sides);
         if undock {
-            self.undock_after_battle(battle);
+            self.undock_after_battle(battle, sally.is_some());
+        }
+        if let Some(port) = sally
+            && let Some(&blockader) = battle.defenders.first()
+        {
+            self.lift_after_sally(port, blockader, result.attacker_won);
         }
         // Defenders of a settlement that lose are destroyed (CONFIRMED for the garrison army: the capture
         // 0x00B58560 deletes the settlement's garrison army before the region changes hands).
@@ -355,9 +380,46 @@ impl CampaignModel {
     /// a docked navy's repair orders end, refunded at the ships' new cost (`0x008B36D0`). A ship lost in the battle
     /// takes its order with it (no refund). PROVISIONAL: when the placement runs against the naval captures is not
     /// traced; the naval autoresolve undocks before them, so the refund goes to the faction that paid.
-    pub(crate) fn undock_after_battle(&mut self, battle: &PendingBattle) {
+    ///
+    /// Two forces stay docked (CONFIRMED by decompile of `0x008F7880` stage 7):
+    /// * the attacker of a docked navy's attack on its blockader (`sally`, [`Self::sally`]): beaten, it is
+    ///   placed nowhere (battle types 12 and 13 with the losing admiral's navy in a port, the test at
+    ///   `0x008F8317`); victorious, it is ordered back onto its port's slot (`0x009550F0`);
+    /// * a force docked in a port that has a blockader. In a sequence with byte +0xB2 set (only the
+    ///   constructors `0x00883680` and `0x00882DF0` set it; `0x00883120` clears it at `0x00883298`) and no
+    ///   settlement at +0x64 (or one whose vt+0x1C answers 0, `0x008F8165`), the placement undocks a docked
+    ///   loser (`0x008F81CE`) only when `0x008B29E0` finds its port free of a blockader, placing him within
+    ///   100.0 of the port's way out (`0x00B372A0`) or deleting him (`0x008CF310`); in a blockaded port it gives
+    ///   him the blockade-breakout order instead (`0x0094F4A0` at `0x008F8B86`, order `0x009069F0`, named
+    ///   `force_blockade_breakout_battle`), whose step `0x0094CC60` starts at once a `naval_blockade` battle
+    ///   (type 12) against the port's blockader (`0x008E18D0`). In the other battles a docked loser of types 12
+    ///   and 13 is placed nowhere and any other retreats (`0x00A18550` at `0x008F8421`), a move the model does
+    ///   not make (the tag at [`Self::lift_after_sally`]); ours undocks him from a port nobody blockades.
+    ///
+    /// PROVISIONAL: the sequences that reach the breakout are not modelled. (CONFIRMED by decompile) The
+    /// type-14 sequence `0x00882DF0` (+0xB2 = 1, +0x64 = 0, result +0xA4 left null at `0x00882EFF`, straight to
+    /// stage 7: no battle is fought) is the `region_slot_captured_force_navy_surrender` order (`0x0090AB70`,
+    /// vtable `0x01361740`, built by `0x0091D7B0`, issued by `0x0094F660`), whose step `0x0094DA00` calls
+    /// `0x008E18D0` with a5 = 1. Its sides are the capturing army (+0x68) and the navy docked in the
+    /// settlement's port slot (+0x6C, the beaten side while +0xA4 is null). It is issued when an army enters
+    /// an at-war settlement left without a defender whose port holds a docked force (`0x0094B600` at
+    /// `0x0094B78E`), and by this placement for the navy docked in a beaten garrison's port (+0xB4, set at
+    /// `0x008F83CD`, issued at `0x008F8BC9`). The model has no such step: a settlement captured with an
+    /// enemy navy docked in its port keeps that navy docked ([`Self::enter_settlement`] →
+    /// [`Self::settle_capture`]; the owner-change expulsion takes only navies not at war with the new owner).
+    /// The type-6 sequence `0x008CE150` (+0xB2 = 1 with the settlement set; from `0x008A81A0`, reached from
+    /// `0x008C02D0` ← `0x00936260` and `0x008DC8F0` ← `0x00932D50` / `0x00A92330`) is not traced: which
+    /// battle it is and whether a docked navy can lose it. Settled by porting the navy-surrender step with
+    /// the placement's undock, deletion and breakout, then tracing the type-6 callers.
+    pub(crate) fn undock_after_battle(&mut self, battle: &PendingBattle, sally: bool) {
         for f in std::iter::once(battle.attacker).chain(battle.defenders.iter().copied()) {
-            self.undock(f);
+            if sally && f == battle.attacker {
+                continue;
+            }
+            let blockaded = self.docked_port(f).and_then(|(r, s)| self.world.regions.get(&r)?.slots.get(s)).is_some_and(|s| s.blockade.is_some());
+            if !blockaded {
+                self.undock(f);
+            }
         }
     }
 
@@ -809,8 +871,10 @@ impl CampaignModel {
         // still sunk after the captures, which clear the flag (`capture_ship`). A navy has no land units.
         let sunk = |s: &[NavalUnit]| s.iter().filter(|u| u.state.sunk).count() as u32;
         let codes = Some(battle_side_results(o.a_won, o.potentials, (sunk(&ua), sunk(&ub)), (false, false)));
-        // The sides' factions, before any navy of the battle is destroyed.
+        // The sides' factions and the port of a docked navy's attack on its blockader, before any navy of the
+        // battle is destroyed.
         let sides = self.battle_sides(battle);
+        let sally = self.battle_sally_port(battle);
         let mut events = Vec::new();
         let mut emptied = Vec::new();
         for ((fid, i, _), u) in a.iter().zip(&ua).chain(b.iter().zip(&ub)) {
@@ -823,7 +887,7 @@ impl CampaignModel {
             self.world.ship_states.insert(id, state);
         }
         // The post-battle undock, before any ship changes hands (PROVISIONAL order, see the function).
-        self.undock_after_battle(battle);
+        self.undock_after_battle(battle, sally.is_some());
         // Captured ships join the captor's force (`0x007CD570` marks the card with its captor; CAMPAIGN_FIDELITY.md
         // §Naval autoresolve). The captain attached to the ship, if any, stays behind.
         let (losers, winners): (&[(ForceId, usize, NavalUnit)], Vec<ForceId>) =
@@ -857,7 +921,7 @@ impl CampaignModel {
         }
         self.pending_battle = None;
         let result = BattleResult { attacker_won: o.a_won, attacker_casualties: 0.0, defender_casualties: 0.0, codes };
-        let mut rest = self.settle_battle(battle, result, false, sides);
+        let mut rest = self.settle_battle(battle, result, false, sides, sally);
         events.append(&mut rest);
         events
     }

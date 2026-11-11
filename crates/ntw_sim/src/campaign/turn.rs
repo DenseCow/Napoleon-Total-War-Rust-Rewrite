@@ -23,7 +23,9 @@
 //!    1. Every character, in the faction's character list order (faction +0x764 count / +0x768 data, front
 //!       to back, `0x008F2AC4`, and `0x008F2B47` in the branch for the rebels; CONFIRMED;
 //!       [`World::faction_characters_in_list_order`](super::World::faction_characters_in_list_order)),
-//!       `0x00A24EB0` per character: `CharacterTurnStart` (INFERRED place of the event)
+//!       `0x00A24EB0` per character: `CharacterTurnStart` (ORIGINAL BUG, `ntw_script::event_classes`:
+//!       the exe declares the event but never posts it; we post it here because its declaration
+//!       `0x00419EB0` says "Fired for every character at the start of their turn", and this is that step)
 //!       and the action points refill to the type's base, times [`force_action_point_factor`] for a
 //!       force's commander (CONFIRMED factor; trait, ancillary and technology movement effects are not
 //!       modelled).
@@ -159,13 +161,21 @@ pub struct TurnState {
     /// runs. A save of ours from before it was kept loads it as false.
     #[cfg_attr(feature = "serde", serde(default))]
     pub campaign_over: bool,
+    /// The victory check has given its verdict and runs no more (the check object's byte +0x38, set
+    /// and read only by `0x0096CD10`, CONFIRMED by disassembly). Set only by
+    /// [`CampaignModel::victory_check`]. UNKNOWN whether the exe's save keeps the byte (the check
+    /// object's save record is not traced): ours keeps it, so a campaign continued after its victory
+    /// screen does not show the screen again after a load. A save of ours from before it was kept
+    /// loads it as false.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub victory_checked: bool,
 }
 
 impl TurnState {
     /// The state of a loaded save: inside `faction`'s turn (saves are made by the human during
     /// their own turn; INFERRED). The loader sets [`Self::campaign_over`] from the save afterwards.
     pub fn in_turn_of(faction: FactionId, humans: Vec<FactionId>) -> Self {
-        TurnState { humans, started: true, current: Some(faction), in_turn: true, queue: VecDeque::new(), campaign_over: false }
+        TurnState { humans, started: true, current: Some(faction), in_turn: true, queue: VecDeque::new(), campaign_over: false, victory_checked: false }
     }
 
     pub(crate) fn hash_into(&self, h: &mut Fnv64) {
@@ -178,6 +188,10 @@ impl TurnState {
         h.u32(self.in_turn as u32);
         h.u32(self.queue.len() as u32);
         h.u32(self.campaign_over as u32);
+        // Only once set, so a campaign whose check has given no verdict hashes as before.
+        if self.victory_checked {
+            h.u32(1);
+        }
     }
 }
 
@@ -196,12 +210,12 @@ impl CampaignModel {
     /// finishes the frame's steps; what those steps then do is not traced). Saving is refused too
     /// ([`Self::can_save`], `0x008BE4A0`, returns false while it is set).
     ///
-    /// Callers: a human faction destroyed ([`Self::destroy_faction_by`], `0x008AB6C0`). Not modelled
-    /// (BACKLOG): the multiplayer victory check (`0x0096CD10` sets it when a human has won and another
-    /// human is still in the game; in single player winning or losing by the victory conditions does
-    /// not set it), and the end of a human faction's +0x814 state (`0x008BEAA0` from a settlement
-    /// transfer, `0x008DB1A0` from the faction's listener; a state the model does not have). What the
-    /// exe shows next (the defeat or victory screen) is not traced.
+    /// Callers: a human faction destroyed ([`Self::destroy_faction_by`], `0x008AB6C0`) and the
+    /// victory check in multiplayer ([`Self::victory_check`], `0x0096CD10`: a human has won and
+    /// another human is in the faction list; in single player winning or losing by the victory
+    /// conditions does not set it). Not modelled (BACKLOG): the end of a human faction's +0x814 state
+    /// (`0x008BEAA0` from a settlement transfer, `0x008DB1A0` from the faction's listener; a state the
+    /// model does not have). What is shown next: [`super::outcome`].
     pub fn end_campaign(&mut self) {
         self.turn.campaign_over = true;
         self.turn.queue.clear();
@@ -691,6 +705,8 @@ impl CampaignModel {
                 }
             }
         }
+        // The update ends with the victory check (`0x0096CD10`, after the update's step loop).
+        self.end_update(&mut events);
         if self.turn.campaign_over {
             self.turn.queue.clear();
         }
@@ -859,24 +875,66 @@ impl CampaignModel {
         // managers with their own capacity. An item counts only after a round end has passed since it
         // was queued (flag +0x54, set by `0x00A78620` at the faction's round-end economy), which the
         // turn order here gives already. A held-back item neither counts down nor takes one of the
-        // `recruitment_points`. Items reaching zero finish, in queue order.
+        // `recruitment_points`. Items at zero finish, in queue order. A finished item still queued (no
+        // free spot last turn, below) counts down again and takes one of the points too: the exe
+        // counts every unblocked item it steps, whatever its count (CONFIRMED, `0x00B71FB0`). So
+        // while it is stuck it costs the region one point a turn, and the queue step asks for its place
+        // again each turn ([`Self::land_recruit_place`] below: the region test and one search over the
+        // map, per stuck region);
+        // with one point and never a spot (the rebels, to whom every region reads closed, with a full
+        // garrison) the region's land queue stalls for good, as in the exe.
+        //
+        // A held queue keeps its finished items (CONFIRMED by disassembly, `0x00B71FB0`): the step first sets
+        // the manager's byte +0x58 (`0x00B71FD5`) when the queue cannot deliver (its vtable +0x1C answers 0) or
+        // `0x00B6A8D0` finds no place, and with the byte set it skips the spawn (`0x00B72189`), so the items
+        // stay queued at zero turns and spawn at the first turn the queue is free again. The naval queue
+        // cannot deliver while its port is blockaded (`0x00B61E70`: the port exists and its blockader, port
+        // +0x68, does not resolve; the blockade start and lift also write the byte, overwritten here before it
+        // is read), the land queue while its settlement is besieged (`0x00B61E90`: the settlement's virtual
+        // +0x98, [`super::siege::SiegeState::under_siege`]). The no-place test `0x00B6A8D0` returns the
+        // first out flag of `0x00B43A60` (`0x00B6A90E`; set at `0x00B43C81` when its free-spot search fails),
+        // so a land queue whose settlement has no place for a recruit ([`Self::land_recruit_place`]) holds
+        // every finished item, those recruited through a commander included. A region with no port has no
+        // naval queue in the exe (the manager is the port slot's, slot +0x1E8); the model's queue is the
+        // region's, so it holds naval items only for a blockaded port. PROVISIONAL: the naval queue's
+        // no-place test (vtable `0x0137CBE4`: room check +0x24 `0x00B44EB0` → `0x00AA67E0`, a navy of the
+        // owner within 5.0, else the free-spot search of kind 2, +0x28 `0x004CDC40`) is not modelled: the
+        // model's naval spawn always finds a place (the port's fleet or a new navy at the port).
+        let held_naval = reg.slots.iter().find(|s| s.port).is_some_and(|s| s.blockade.is_some());
+        // Asked only when a land item can finish this turn: the test changes nothing, so skipping it
+        // otherwise gives the exe's result.
+        let no_place = !reg.siege.under_siege()
+            && reg.recruitment_queue.iter().zip(&naval).any(|(i, &n)| !n && i.turns_remaining <= 1)
+            && self.land_recruit_place(region).is_none();
+        let held_land = reg.siege.under_siege() || no_place;
         let reg = self.world.regions.get_mut(&region).expect("region exists");
         let mut finished = Vec::new();
-        let mut waiting = Vec::with_capacity(reg.recruitment_queue.len());
         let (mut land_n, mut naval_n) = (0u32, 0u32);
-        for ((mut item, is_naval), blocked) in std::mem::take(&mut reg.recruitment_queue).into_iter().zip(naval).zip(blocked) {
+        // A land item that counted down to zero this turn into the no-place hold.
+        let mut into_hold = false;
+        for (index, ((item, is_naval), blocked)) in reg.recruitment_queue.iter_mut().zip(naval).zip(blocked).enumerate() {
             let (n, cap) = if is_naval { (&mut naval_n, caps.1) } else { (&mut land_n, caps.0) };
+            let waited = item.turns_remaining == 0;
             if !blocked && *n < cap {
                 *n += 1;
                 item.turns_remaining = item.turns_remaining.saturating_sub(1);
             }
-            if item.turns_remaining == 0 {
-                finished.push((item.unit_key, item.target, is_naval));
-            } else {
-                waiting.push(item);
+            let held = if is_naval { held_naval } else { held_land };
+            if item.turns_remaining == 0 && !held {
+                finished.push((index, item.target, is_naval, waited));
             }
+            into_hold |= no_place && !is_naval && !waited && item.turns_remaining == 0;
         }
-        reg.recruitment_queue = waiting;
+        // Reported once per region in a turn where a land item counts down from 1 to 0 into the hold: not
+        // on the turns its items then wait at zero, nor for an item left at 1 (behind the capacity, which
+        // the held items take, or held back by building flags).
+        if into_hold {
+            log::info!("no place for a recruit near {region:?}'s settlement: its finished land recruits stay queued");
+        }
+        // One flag per queued item: false once it has spawned. A unit key is copied only for an
+        // item that spawns or tries to (the item itself stays queued when it finds no spot).
+        let mut keep = vec![true; reg.recruitment_queue.len()];
+        let key_of = |model: &Self, index: usize| model.world.regions[&region].recruitment_queue[index].unit_key.clone();
         // The finished items spawn through the queue manager's vtable +0x20 (land `0x00B1E500`, CONFIRMED):
         // first the land items recruited through a commander (item +0x18) who leads an army, one new army
         // per commander that marches to him ([`Self::spawn_reinforcement`]), then every other item
@@ -887,7 +945,8 @@ impl CampaignModel {
         // that holder's vfunc +0x38 says so (`0x00B1E500` phase 1), ours spawns it as a settlement recruit
         // (the exe's other branch, +0x18 cleared). PROVISIONAL: the exe also spawns a group as settlement
         // recruits when its path query from the settlement to the commander fails (`0x00B6D8D0` /
-        // `0x00B6D760`); ours always raises the army. PROVISIONAL: naval items recruited through an
+        // `0x00B6D760`) or its own free-spot call does (`0x00B39FE0` at `0x00B1E88E`); ours always
+        // raises the army. PROVISIONAL: naval items recruited through an
         // admiral spawn as port recruits here. The naval spawn `0x00B1D7E0` groups its items by (+0x18,
         // +0x50) too and, when the target has a navy (his +0xE0) and the sea path query `0x00B6D760`
         // succeeds, raises one new fleet per group (`SpawnRecruitmentGroupAsNewArmy`) and returns the
@@ -896,28 +955,56 @@ impl CampaignModel {
         let mut groups: Vec<(super::CharacterId, Vec<String>)> = Vec::new();
         let mut others = Vec::with_capacity(finished.len());
         // The commanders leading an army, looked up once for the pass (and only when a land item has a target).
-        let army_leaders: std::collections::BTreeSet<super::CharacterId> = if finished.iter().any(|(_, t, naval)| t.is_some() && !naval) {
+        let army_leaders: std::collections::BTreeSet<super::CharacterId> = if finished.iter().any(|(_, t, naval, _)| t.is_some() && !naval) {
             self.world.forces.values().filter(|f| !f.is_navy).filter_map(|f| f.commander).collect()
         } else {
             std::collections::BTreeSet::new()
         };
-        for (unit_key, target, is_naval) in finished {
+        for (index, target, is_naval, waited) in finished {
             match target.filter(|t| !is_naval && army_leaders.contains(t)) {
-                Some(t) => match groups.iter_mut().find(|g| g.0 == t) {
-                    Some(g) => g.1.push(unit_key),
-                    None => groups.push((t, vec![unit_key])),
-                },
-                None => others.push(unit_key),
+                Some(t) => {
+                    keep[index] = false;
+                    let unit_key = key_of(self, index);
+                    match groups.iter_mut().find(|g| g.0 == t) {
+                        Some(g) => g.1.push(unit_key),
+                        None => groups.push((t, vec![unit_key])),
+                    }
+                }
+                None => others.push((index, is_naval, waited)),
             }
         }
         for (target, unit_keys) in groups {
             let ev = self.spawn_reinforcement(region, target, unit_keys);
             events.extend(ev);
         }
-        for unit_key in others {
-            let ev = self.spawn_recruited_unit(region, unit_key);
-            events.push(ev);
+        // A land item that finds no free spot stops the land spawn there (`0x00B1E500` leaves its
+        // loop on the no-spot flag at `0x00B1EAE6`, CONFIRMED by disassembly): it and every later
+        // land item stay queued, finished, and spawn on a later turn ([`Self::spawn_recruited_unit`]).
+        // The hold above has already found a place, so this happens only when an earlier spawn of this
+        // pass used it up. The naval spawn is a separate manager and goes on.
+        let mut land_stopped = false;
+        for (index, is_naval, waited) in others {
+            if land_stopped && !is_naval {
+                continue;
+            }
+            match self.spawn_recruited_unit(region, key_of(self, index)) {
+                Some(ev) => {
+                    keep[index] = false;
+                    events.push(ev);
+                }
+                None => {
+                    // Reported on the turn the item first waits, not on every turn it stays.
+                    if !waited {
+                        log::info!("no free spot near {region:?}'s settlement: its finished land recruits stay queued");
+                    }
+                    land_stopped |= !is_naval;
+                }
+            }
         }
+        // `0x00B71FB0` deletes only the items spawned.
+        let reg = self.world.regions.get_mut(&region).expect("region exists");
+        let mut keep = keep.into_iter();
+        reg.recruitment_queue.retain(|_| keep.next().unwrap_or(true));
         events.push(CampaignEvent::RegionTurnStart { region });
     }
 }

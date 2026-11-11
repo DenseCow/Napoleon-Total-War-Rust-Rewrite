@@ -188,6 +188,7 @@ pub fn spawn_trees(
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<TreeMaterial>>,
+    far: Res<super::speedtree::TreeFarDistance>,
 ) {
     let (Some(map), Some(vfs)) = (current_map(), vfs) else { return };
     let map = map.as_ref();
@@ -263,7 +264,7 @@ pub fn spawn_trees(
                 sun_dir: sun_dir.extend(0.0),
                 sun_colour: sun.extend(1.0),
                 ambient: ambient.extend(1.0),
-                misc: Vec4::new(0.33, super::speedtree::far_distance_from_prefs(), super::speedtree::TREE_NEAR_DISTANCE, 0.0),
+                misc: Vec4::new(0.33, far.0, super::speedtree::TREE_NEAR_DISTANCE, 0.0),
                 rects,
             },
             texture: textures[&texture].0.clone(),

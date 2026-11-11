@@ -22,6 +22,8 @@
 //! | [`campaign_map`] | `campaign_maps\<map>\` heightmap, supertexture, SPLN splines, `regions.esf` | the campaign map |
 //! | [`campaign_pathfinding`] | `pathfinding.esf` (with its value cipher), `sea_grids.esf` | campaign movement, AI sea zones |
 //! | [`open_map`] | the open campaign map format's text files (`campaigns/<name>/black_shroud.txt`) | custom campaign maps |
+//! | [`material`] | our material descriptions (`materials/<key>.toml`), with the built-in defaults | how a mesh's textures become the renderer's inputs |
+//! | [`toml_subset`] | the part of TOML our own text formats use | the material descriptions |
 //! | [`tga`] | `.tga` images (palette, true colour, RLE) | UI art, ground-type maps, terrain masks |
 //! | [`xml`] | small XML settings files | battle-map metadata |
 //! | [`unit_variant`] | `.unit_variant` part lists + `.variant_part_mesh` LOD streams | soldiers and equipment |
@@ -64,6 +66,7 @@ pub mod effects;
 pub mod font;
 pub mod group_formation;
 pub mod loc;
+pub mod material;
 pub mod models_building;
 pub mod mount;
 pub mod open_map;
@@ -76,6 +79,7 @@ pub mod sound;
 pub mod speedtree;
 pub mod tga;
 pub mod texture_atlas;
+pub mod toml_subset;
 pub mod vegetation;
 pub mod xml;
 pub mod unit_animation;

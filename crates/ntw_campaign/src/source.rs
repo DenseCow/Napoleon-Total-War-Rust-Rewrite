@@ -253,8 +253,9 @@ pub fn find<'a>(files: GameFiles<'a>, key: &str) -> Option<Box<dyn CampaignSourc
 /// How a campaign starts.
 #[derive(Debug, Clone, Copy)]
 pub enum Start<'a> {
-    /// A new campaign of this key, with the player's `campaign_unit_multiplier` preference (`None`:
-    /// its default), which sets the new campaign's units per army / navy
+    /// A new campaign of this key, with the player's unit-size setting (the
+    /// `campaign_unit_multiplier` preference; `None`: a game that registers no such setting),
+    /// which sets the new campaign's units per army / navy
     /// ([`ntw_sim::campaign::rules::ForceCaps::new_campaign`]).
     New(&'a str, Option<f32>),
     /// A save: one of ours ([`crate::own_save`]) or an original `.save` (read through the importer).

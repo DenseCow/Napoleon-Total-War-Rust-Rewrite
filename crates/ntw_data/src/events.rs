@@ -155,6 +155,25 @@ db_record! {
 }
 
 db_record! {
+    /// `empires` (`s`, 6 rows; row reader `0x00DD2220`, the one of `groupings`): the empire keys, read
+    /// here only to check [`GroupingEmpire`] rows: the groupings converter (`0x00F56770`) builds no
+    /// grouping whose row names a key not here (CONFIRMED, CAMPAIGN_FIDELITY.md "Empire bucket").
+    pub struct EmpireRecord in "empires", key = key {
+        /// #0: the key.
+        key: String,
+    }
+}
+
+db_record! {
+    /// `regions_continents` (`s`, 8 rows; row reader `0x00DD2220`): the continent keys `regions` #1
+    /// names, read here only to check [`GroupingContinent`] rows.
+    pub struct ContinentRecord in "regions_continents", key = key {
+        /// #0: the key, e.g. `cont_europe`.
+        key: String,
+    }
+}
+
+db_record! {
     /// `policies` (`ss`, 2 rows): the policy keys (only their keys are read here, to check
     /// [`EventPolicy`] rows).
     pub struct PolicyRecord in "policies", key = key {
@@ -194,4 +213,8 @@ pub struct EventTables {
     pub grouping_continents: Table<GroupingContinent>,
     /// `groupings_empires_junct`.
     pub grouping_empires: Table<GroupingEmpire>,
+    /// `empires` (the empire keys).
+    pub empires: Table<EmpireRecord>,
+    /// `regions_continents` (the continent keys).
+    pub continents: Table<ContinentRecord>,
 }

@@ -830,7 +830,7 @@ fn exchange_actions_at_a_settlement_follow_the_exes_mask() {
     assert_eq!(exchange_actions(&m, own_g, at(10)), ExchangeActions::default());
     let mut rules = (*m.rules).clone();
     rules.limits.max_residence_characters = 20;
-    rules.no_exchange_ability = true;
+    rules.exchange_ability_missing = true;
     m.rules = Arc::new(rules);
     assert_eq!(exchange_actions(&m, own_g, at(10)), ExchangeActions::default());
 }

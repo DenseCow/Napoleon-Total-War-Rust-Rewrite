@@ -234,13 +234,29 @@ fn main() {
         } else if let Some(k) = a.strip_prefix("stagecapture:") {
             // Stages a capture of region <k> by the human (the model's preview, as after a
             // battle won at that settlement) and lets the HUD open its capture screen. The capturing
-            // force is the human's first one with a commander, so a loot has a looter.
+            // force is the human's army (a general's, never a fleet) nearest the settlement, so the
+            // looter is one that could have taken it: the one in the region, else the one next to it.
             let mut st = scripts.state_mut();
             let m = &mut st.model;
             let f = m.faction_by_key(&human).map(|f| f.id);
             let r = m.world.regions.values().find(|r| r.key == k).map(|r| r.id);
             if let (Some(f), Some(r)) = (f, r) {
-                let by = m.world.forces.values().find(|x| x.faction == f && x.commander.is_some()).map(|x| x.id);
+                let town = m.world.regions[&r].settlement.position;
+                let by = m
+                    .world
+                    .forces
+                    .values()
+                    .filter(|x| x.faction == f && !x.is_navy)
+                    .filter(|x| x.commander.and_then(|c| m.world.characters.get(&c)).is_some_and(|c| c.kind == CharacterKind::General))
+                    .filter_map(|x| {
+                        let (px, py) = m.force_position(x.id)?;
+                        let (dx, dy) = (px.to_f32() - town.0.to_f32(), py.to_f32() - town.1.to_f32());
+                        Some((dx * dx + dy * dy, x.id))
+                    })
+                    .min_by(|a, b| a.0.total_cmp(&b.0))
+                    .map(|(_, id)| id);
+                let inside = by.and_then(|b| m.world.forces.get(&b)?.commander).and_then(|c| m.world.characters.get(&c)).is_some_and(|c| ntw_sim::campaign::economy::in_region(m, &m.world.regions[&r], c));
+                println!("   capturing force {by:?} (in the region: {inside})");
                 let p = m.capture_preview(r, f, by, false);
                 m.pending_capture = Some(p);
             }

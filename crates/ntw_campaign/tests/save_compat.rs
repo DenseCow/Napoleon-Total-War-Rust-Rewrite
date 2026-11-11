@@ -1113,6 +1113,56 @@ fn the_header_season_is_the_callers_string() {
     assert_eq!(ntw_campaign::read_info(&kept.to_bytes().unwrap()).unwrap().header.season_name, "Winter");
 }
 
+/// `read_header_file` gives the header `read_info` gives, from the header block alone. An own save cut
+/// off right behind its header section still gives it (the body is never read); one cut inside the
+/// section, or before its length word, is an error. A start position's file gives its header too.
+#[test]
+fn the_header_reads_from_a_file_without_its_body() {
+    let info = ntw_campaign::CampaignInfo {
+        kind: ntw_campaign::FileKind::Save,
+        timestamp: 0,
+        build_id: String::new(),
+        build_version: String::new(),
+        header: ntw_campaign::SaveHeader {
+            faction_key: "test_faction_a".into(),
+            portrait: "ui/portraits/a.tga".into(),
+            turn_number: 7,
+            year: 1806,
+            season_name: "Spring".into(),
+            flag_path: "ui/flags/a".into(),
+            date: None,
+            maps: Vec::new(),
+        },
+        campaign_key: "test_campaign".into(),
+        map_key: "test_map".into(),
+        players: Vec::new(),
+    };
+    // The body here is not a campaign at all: nothing below may decode it.
+    let bytes = ntw_campaign::own_save::write(&info, &"x".repeat(1 << 20)).unwrap();
+    let header_end = 24 + u32::from_le_bytes(bytes[20..24].try_into().unwrap()) as usize;
+    assert!(header_end < bytes.len());
+    // Our own folder under the system temp dir; never the game's save folder.
+    let dir = std::env::temp_dir().join("napoleonrust_tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("header_only_{}.save", std::process::id()));
+    for (len, reads) in [(bytes.len(), true), (header_end, true), (header_end - 1, false), (22, false), (16, false), (3, false), (0, false)] {
+        std::fs::write(&path, &bytes[..len]).unwrap();
+        let got = ntw_campaign::read_header_file(&path);
+        assert_eq!(got.as_ref().ok(), reads.then_some(&info.header), "cut at {len}: {:?}", got.as_ref().err());
+    }
+    std::fs::remove_file(&path).unwrap();
+    assert!(matches!(ntw_campaign::read_header_file(&path), Err(ntw_campaign::LoadError::Io { .. })));
+
+    let data = data_dir();
+    if !data.is_dir() {
+        println!("SKIPPED (the start position part): no install");
+        return;
+    }
+    let startpos = data.join(r"campaigns\eur_napoleon\startpos.esf");
+    let whole = ntw_campaign::read_info(&std::fs::read(&startpos).unwrap()).unwrap();
+    assert_eq!(ntw_campaign::read_header_file(&startpos).unwrap(), whole.header);
+}
+
 /// esfevents: the triggered historical events are written as the exe's writer `0x00895050` writes them,
 /// at its place in `CAMPAIGN_MODEL` (after `PENDING_BATTLE`, before `HISTORICAL_CHARACTER_MANAGER`, as
 /// the writer `0x008EBAB0` calls them), and read back. With none triggered the block is node for node

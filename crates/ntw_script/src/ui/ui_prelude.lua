@@ -661,9 +661,16 @@ end
 -- registration 0x00DA99D0, method table 0x01459B10). CurrentOptions() returns one table per
 -- section (CONFIRMED section names game/audio/graphics/ui/gamma/voicechat/controls, and the
 -- field names read by Set*Options in the exe). Each field is stored under a key of the original's
--- preferences.script.txt; the field -> key pairing below is INFERRED from the names.
+-- preferences.script.txt; the field -> key pairing below is INFERRED from the names. A key the
+-- file lacks, or whose file value does not read as the setting's type, reads as the default the
+-- game registers it with (__prefs.bool / __prefs.number are ntw_formats Preferences::get_bool /
+-- get_f64, the one reading every other user of a setting takes), so no field is nil on an install
+-- whose original never wrote the file.
 -- kind: "b" bool, "n" number, "!b" inverted bool, "diff" difficulty (slider 0..3 = easy..very
--- hard, stored as 1..-2: INFERRED from the loc texts difficulty_level_1..4 = Easy..Very Hard).
+-- hard, stored as 1..-2: INFERRED from the loc texts difficulty_level_1..4 = Easy..Very Hard),
+-- "step" the unit size: the setting is a scale and the slider its step (CONFIRMED: unit_size is
+-- the step of the float campaign_unit_multiplier, 0x00D9FBB0 / 0x00DA2620; the rule is
+-- ntw_sim GameLimits, reached through __prefs.scale_step / __prefs.step_scale).
 local pref_fields = {
     game = {
         { "campaign_difficulty", "campaign_difficulty", "diff" },
@@ -725,7 +732,7 @@ local pref_fields = {
         { "ships", "gfx_ship_quality", "n" },
         { "building_detail", "gfx_building_quality", "n" },
         { "water", "gfx_water_quality", "n" },
-        { "unit_size", "gfx_unit_scale", "n" },
+        { "unit_size", "campaign_unit_multiplier", "step" },
         { "shadows", "gfx_shadow_quality", "n" },
         { "trees", "gfx_tree_quality", "n" },
         { "grass", "gfx_grass_quality", "n" },
@@ -742,14 +749,16 @@ local pref_fields = {
     },
 }
 __ntw_pref_fields = pref_fields
-local function pref_read(kind, text)
-    if text == nil then return nil end
+-- nil only for a key with neither a readable file value nor a registered default.
+local function pref_read(kind, key)
     if kind == "b" or kind == "!b" then
-        local v = (text == "true" or (tonumber(text) or 0) ~= 0)
+        local v = __prefs.bool(key)
+        if v == nil then return nil end
         if kind == "!b" then v = not v end
         return v
     end
-    local n = tonumber(text)
+    if kind == "step" then return __prefs.scale_step(key) end
+    local n = __prefs.number(key)
     if n == nil then return nil end
     if kind == "diff" then return 1 - n end
     return n
@@ -758,12 +767,16 @@ local function pref_write(kind, value)
     if kind == "b" then return value and true or false end
     if kind == "!b" then return not value end
     if kind == "diff" then return 1 - (tonumber(value) or 0) end
+    if kind == "step" then
+        local index = tonumber(value)
+        return index and __prefs.step_scale(index)
+    end
     return tonumber(value)
 end
 local function section_options(name)
     local t = {}
     for _, f in ipairs(pref_fields[name] or {}) do
-        t[f[1]] = pref_read(f[3], __prefs.get(f[2]))
+        t[f[1]] = pref_read(f[3], f[2])
     end
     return t
 end
@@ -792,10 +805,10 @@ function UIPrefsInterface(core, mp, dropin)
         -- controls: camera speeds and toggles from the preferences (INFERRED pairing), the key sets
         -- (custom_keys.keys.xml and the shipped ones) are UNKNOWN: empty, so no keys are listed.
         all.controls = {
-            move_speed = tonumber(__prefs.get("camera_move_speed")),
-            rotation_speed = tonumber(__prefs.get("camera_turn_speed")),
-            mouse_scroll = pref_read("b", __prefs.get("ui_mouse_scroll")),
-            free_cam = (tonumber(__prefs.get("default_camera_type")) or 0) ~= 0,
+            move_speed = pref_read("n", "camera_move_speed"),
+            rotation_speed = pref_read("n", "camera_turn_speed"),
+            mouse_scroll = pref_read("b", "ui_mouse_scroll"),
+            free_cam = (pref_read("n", "default_camera_type") or 0) ~= 0,
             CurrentKeyset = "total_war",
             Keysets = { total_war = {}, fps = {}, custom = {} },
             mapping = {},
@@ -829,7 +842,12 @@ function UIPrefsInterface(core, mp, dropin)
     function o:EnumerateScreenModes()
         -- Two lists (graphics.lua picks the second one in windowed mode; INFERRED: full-screen and
         -- windowed modes).
-        local m = { (__prefs.get("x_res") or "1280") .. " x " .. (__prefs.get("y_res") or "960") }
+        -- x_res / y_res start at 0 in the exe (0x00405B30 / 0x00405BD0): no mode chosen yet. The mode
+        -- its first run then picks is UNKNOWN, so the stand-in mode is listed until both are set
+        -- (one axis alone is not a mode, and never mixes with the stand-in's other axis).
+        local x, y = math.floor(pref_read("n", "x_res") or 0), math.floor(pref_read("n", "y_res") or 0)
+        local chosen = x > 0 and y > 0
+        local m = { chosen and string.format("%d x %d", x, y) or "1280 x 960" }
         return m, m
     end
     function o:ClosestScreenModeToCurrent() return 0 end

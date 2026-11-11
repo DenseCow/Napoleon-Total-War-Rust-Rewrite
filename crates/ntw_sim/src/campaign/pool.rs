@@ -406,8 +406,9 @@ impl CampaignModel {
         let at = self.force_position(force)?;
         // A unit without a character is given a fresh officer (`0x00990EF0`, with his officer type's
         // `agent_to_agent_attributes` levels) whom the promotion gives the new type's levels
-        // (`0x00A1A300`), so his rank is not -1 once made. PROVISIONAL: the price still uses -1 for him
-        // (with the land price itself, above); the promotion charges this same value.
+        // (`0x00A1A300`), so his rank is not -1 once made. PROVISIONAL: the price is taken at rank -1 for a
+        // unit without a character (as the land price above is), not at the rank the new officer will have;
+        // the promotion charges this same price.
         let rank = f.units[unit].character.map_or(-1, |c| super::agents::rank(self, c));
         Some(self.hire_cost_at_rank(f.faction, at, rank))
     }

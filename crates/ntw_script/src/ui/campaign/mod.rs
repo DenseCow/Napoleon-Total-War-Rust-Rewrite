@@ -25,7 +25,7 @@ use ntw_sim::campaign::{
 };
 
 use super::host::{CallTarget, Inner, PostedCall, UiScriptHost, addr, call_entry, log, state_function_guard};
-use super::shortcuts::ShortcutMachine;
+use super::shortcuts::{EngineComponent, ShortcutMachine};
 use super::world::{NodeId, UiRect};
 use diplomacy::diplomacy_lists;
 use crate::ScriptState;
@@ -103,116 +103,11 @@ pub struct CampaignKey<'a> {
 }
 
 /// The keyboard of one frame for [`UiScriptHost::campaign_keys`]: what the shortcut handler polls.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct CampaignKeys<'a> {
-    /// The exe's names of the keys down now (its key table `0x0139FEC8`, e.g. `"S"`, `"ESCAPE"`,
-    /// `"NUMPADENTER"`): what `default_keys.xml` binds and `StealShortcutKey` steals. The exe
-    /// polls the frame's DirectInput key state (`0x00E20190`).
-    pub down: &'a [&'a str],
-    /// The modifiers held.
-    pub held: ntw_formats::default_keys::Held,
-    /// The frame's time in seconds (`0x0048A650`: the real frame time, capped at 0.3 s), which a
-    /// pressed binding passes on (the camera's steps scale with it, `0x0095A510`).
-    pub time: f32,
-}
+pub use super::shortcuts::FrameKeys as CampaignKeys;
 
 /// The component name of the camera's bindings (`default_keys.xml` mappings; the campaign
 /// camera controller registers under it, `0x009012B0`).
 pub const CAMERA_COMPONENT: &str = "camera";
-
-/// The campaign HUD as the shortcut handler's target ([`UiScriptHost::campaign_keys`]).
-struct HudShortcuts<'a> {
-    host: &'a UiScriptHost,
-    camera: &'a mut dyn FnMut(&str, f32),
-}
-
-impl HudShortcuts<'_> {
-    /// The UI component a binding goes to: the first of that name under the root, depth first,
-    /// searched once per UI change (`Inner::find_under_root`).
-    /// PROVISIONAL: the exe binds every registered handler of that name (`0x00EDD1B0`), ours the
-    /// first component found.
-    fn component(&self, name: &str) -> Option<NodeId> {
-        self.host.inner().find_under_root(name)
-    }
-
-    /// The component's global `OnShortcut(func, released)` (`0x0102F280`: the press passes false,
-    /// the release true); a script error is logged.
-    fn on_shortcut(&self, component: &str, func: &str, released: bool) {
-        let Some(id) = self.component(component) else { return };
-        let (lua, inner) = (self.host.lua(), self.host.inner());
-        let r = call_entry::<bool>(lua, inner, id, "__ntw_call_if_defined", (addr(id), "OnShortcut", func, released));
-        if let Err(e) = r {
-            log(inner, format!("ERROR in OnShortcut of {component}: {e}"));
-        }
-    }
-}
-
-impl super::shortcuts::ShortcutTarget for HudShortcuts<'_> {
-    fn registered(&self, component: &str) -> bool {
-        component == CAMERA_COMPONENT || self.component(component).is_some()
-    }
-
-    /// The input layer `g_nUIMinInputLayer` (`0x01765944`, set by `Component.LockPriority`): a UI
-    /// component is unlocked while its priority (`+0xE0`, the one `Priority()` returns,
-    /// `0x01014680`) is at least the layer (`0x00DACBA0`); the camera while the layer is below 10
-    /// (`0x009535B0`). CONFIRMED (UI_FIDELITY.md §5.1 "Input layer"). A panel PanelManager opens
-    /// with a `PriorityLock` (the ESC menu, the save panel, diplomacy, ...) so locks the bindings
-    /// of every lower component, e.g. `button_end_turn`'s RETURN.
-    fn unlocked(&self, component: &str) -> bool {
-        let layer = self.host.inner().min_input_layer.get();
-        if component == CAMERA_COMPONENT {
-            return layer < 10;
-        }
-        let Some(id) = self.component(component) else { return false };
-        self.host.inner().world.borrow().get(id).is_some_and(|n| n.data.priority >= layer)
-    }
-
-    /// A component takes shortcuts while its current state is not disabled (`0x00DACBB0` reads the
-    /// state's +0x115 flag, our `disabled`, INFERRED mapping as for clicks); the camera always
-    /// (`0x0095A510`'s handler answers true).
-    fn ready(&self, component: &str) -> bool {
-        if component == CAMERA_COMPONENT {
-            return true;
-        }
-        let Some(id) = self.component(component) else { return false };
-        !self.host.inner().world.borrow().get(id).and_then(|n| n.current()).is_some_and(|s| s.disabled)
-    }
-
-    fn press(&mut self, component: &str, func: &str, time: f32) {
-        if component == CAMERA_COMPONENT {
-            (self.camera)(func, time);
-        } else {
-            self.on_shortcut(component, func, false);
-        }
-    }
-
-    /// A UI component hears `OnShortcut(func, true)` (`0x00DAD1B0`; PROVISIONAL: its post of a
-    /// component string (likely its name) to `[0x01765920]+0x60` and the list at `0x015F8FEC` is not
-    /// ported); the camera's release does nothing (`0x0044A780`).
-    fn release(&mut self, component: &str, func: &str) {
-        if component != CAMERA_COMPONENT {
-            self.on_shortcut(component, func, true);
-        }
-    }
-
-    fn stolen(&self, key: &str) -> bool {
-        self.host.stealer_of(key).is_some()
-    }
-
-    fn each_stolen_key(&self, f: &mut dyn FnMut(&str)) {
-        self.host.each_stolen_key(f);
-    }
-
-    fn send_stolen(&mut self, keys: &[&str], down: bool) -> bool {
-        let mut heard = false;
-        for k in self.host.stolen_key_names() {
-            if keys.contains(&k.as_str()) {
-                heard |= self.host.send_stolen_key(&k, !down).is_some();
-            }
-        }
-        heard
-    }
-}
 
 /// What the HUD needs from the running campaign.
 pub struct CampaignLink {
@@ -1086,9 +981,14 @@ fn install_functions(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tabl
     // `0x009EF630` → `0x009BFED0`) sets the leave request, byte +0x7C of the UI manager's +0x9FC
     // object, which the campaign mode's next-mode step `0x00A065A0` reads (CONFIRMED by
     // decompilation): it answers mode code 2 (QuitToWindowsFromEscapeMenu's byte +0x7D gives 6),
-    // unless EPISODIC_RESTRICTIONS +0xD0 is set and the mode holds a launcher (+0x2C), which then
-    // starts "campaign|<the mode's +0x30>" instead (UNKNOWN which campaigns set +0xD0). INFERRED:
-    // code 2 is the main menu, as the name says (the code's consumer is not traced).
+    // unless the scripts asked for the next campaign of a chain (EPISODIC_RESTRICTIONS +0xD0, set
+    // only by `advance_to_next_campaign()` `0x00979050`: `World::advance_to_next_campaign`) and the
+    // mode holds a launcher (+0x2C), whose vfunc +4 it then calls with "campaign|<the mode's +0x30>".
+    // INFERRED: code 2 is the main menu, as the name says (the code's consumer, the caller
+    // `0x00A166F0`'s user, is not traced). Ours: the game leaves for the main menu
+    // (`CampaignRequest::QuitToMainScreen`). PROVISIONAL: also with `advance_to_next_campaign` set
+    // (the end of the tutorial): the launcher's vfunc +4 and what fills the mode's +0x30 are not
+    // traced, so the chained campaign is not started.
     f!("QuitToMainScreen", |_l, inner, ui, _a: Variadic<Value>| {
         ui.push(CampaignRequest::QuitToMainScreen);
         Ok(())
@@ -1101,15 +1001,12 @@ fn install_functions(lua: &Lua, inner: &Rc<Inner>, ui: &Rc<CampaignUi>, t: &Tabl
     });
     // ContinueGameSelected(): Continue on the campaign result (campaign_result.luac `ContinueGame`).
     // The exe (`0x00428910` → `0x009E1D20`) sends `CCQ_CONTINUE_GAME_SELECTED`, whose handler
-    // `0x00932B40` clears byte +0x9C of the object campaign +0xF70's first entry returns (vfunc
-    // +0x1C), the byte the victory check `0x0096CD10` sets when a human has won (at `0x0096CE7C`,
-    // single player too; CONFIRMED by disassembly; no other access through that path). PROVISIONAL:
-    // nothing; the campaign goes on, as in single player the victory conditions never end it (what
-    // reads byte +0x9C is not traced).
+    // `0x00932B40` clears the hold (+0x9C) of the capture report on top of the pending-action stack
+    // (campaign +0xF70), the hold the victory check `0x0096CD10` sets when a human has won
+    // (CONFIRMED by disassembly). The model's command does the same
+    // (`CampaignModel::continue_game_selected`); the campaign goes on either way.
     f!("ContinueGameSelected", |_l, inner, ui, _a: Variadic<Value>| {
-        inner.log_once("ContinueGameSelected", || {
-            "PROVISIONAL: CampaignUI.ContinueGameSelected does nothing yet (the effect of CCQ_CONTINUE_GAME_SELECTED is not traced)".into()
-        });
+        ui.push(CampaignRequest::Command(CampaignCommand::ContinueGameSelected));
         Ok(())
     });
     f!("PlayerHasFunds", |_l, inner, ui, amount: Option<f64>| {
@@ -1414,12 +1311,12 @@ impl UiScriptHost {
     /// script ends the turn on the release, the frame after the press); a repeating camera
     /// binding calls `camera(func, time)` every frame it is held, with the frame's time; a stolen
     /// key (`StealShortcutKey`) goes to its stealer's `OnKey`.
+    ///
+    /// The camera is unlocked while the input layer is below 10 (`0x009535B0`). The poll is the
+    /// one the battle HUD shares ([`UiScriptHost::poll_shortcuts`]).
     pub fn campaign_keys(&self, machine: &mut ShortcutMachine, keys: CampaignKeys, camera: &mut dyn FnMut(&str, f32)) {
-        if self.input_focus_held() || !self.inner().shortcuts_enabled.get() {
-            return;
-        }
-        let is_down = |k: &str| keys.down.contains(&k);
-        machine.poll(&is_down, keys.held, keys.time, &mut HudShortcuts { host: self, camera });
+        let engine = [EngineComponent { name: CAMERA_COMPONENT, locked_from: 10 }];
+        self.poll_shortcuts(machine, keys, &engine, &mut |_, func, time| camera(func, time));
     }
 
     /// The engine's HUD treasury and date update `0x009C1AD0` (CONFIRMED, UI_FIDELITY.md §5.1): with
@@ -1553,10 +1450,12 @@ impl UiScriptHost {
     /// mapping is CONFIRMED: `0x009AB1B0` reads option +0x1C as `LowerOrder` and +0x18 as
     /// `UpperOrder`, the labels at `0x0136BC28` / `0x0136BC1C`; whole numbers, as the exe's ints). INFERRED:
     /// FactionLocation is the liberated faction's on-screen name. When the capture is answered the root's
-    /// `ClearSettlementLootingOptions` closes the panel. Returns true when it opened the screen.
+    /// `ClearSettlementLootingOptions` closes the panel. A capture the model holds back behind the
+    /// victory screen (`CapturePreview::held`) is not offered yet, so it opens nothing. Returns true
+    /// when it opened the screen.
     pub fn campaign_capture_screen(&self) -> bool {
         let Some(ui) = self.campaign_ui() else { return false };
-        let pending = ui.model().pending_capture.clone();
+        let pending = ui.model().pending_capture.clone().filter(|p| !p.held);
         let Some(p) = pending.filter(|p| ui.model().world.factions.get(&p.faction).is_some_and(|f| f.key == ui.link.human)) else {
             if ui.capture_shown.take().is_some() {
                 call_root_global(self.lua(), self.inner(), "ClearSettlementLootingOptions", ());
@@ -1663,6 +1562,23 @@ impl UiScriptHost {
                 false
             }
         }
+    }
+
+    /// The defeat popup for a faction that lost by its victory conditions
+    /// (`CampaignEvent::CampaignLost`, the exe's event +0x138): the UI manager's listener
+    /// `0x00A134E0` calls the root's `ShowCampaignResultPopup(false)` when the faction is the local
+    /// player's (CONFIRMED by decompilation), which opens the original `campaign_result` panel with
+    /// the "defeat" title (Continue / Exit; no movie). Returns true when the popup opened.
+    pub fn campaign_lost_popup(&self, faction: FactionId) -> bool {
+        let Some(ui) = self.campaign_ui() else { return false };
+        if !ui.model().world.factions.get(&faction).is_some_and(|f| f.key == ui.link.human) {
+            return false;
+        }
+        let opened = call_root_global(self.lua(), self.inner(), "ShowCampaignResultPopup", false);
+        if !opened {
+            self.inner().log_once("ShowCampaignResultPopup", || "ERROR: the defeat popup did not open (no root ShowCampaignResultPopup, or it failed)".into());
+        }
+        opened
     }
 
     /// Re-sends the current selection (after the model changed).

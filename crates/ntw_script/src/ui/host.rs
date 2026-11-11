@@ -670,7 +670,8 @@ impl UiScriptHost {
         true
     }
 
-    /// The key goes to the component that most recently stole it with `StealShortcutKey` and is
+    /// The key goes to its newest stealer (`StealShortcutKey`; stealing it again does not make a
+    /// component newer, [`Self::stealer_of`]) that is
     /// still shown (attached under the top root and visible), whose `OnKey(key, false, true)` runs.
     /// INFERRED: root.lua steals ESCAPE and its `OnKey` calls `TransitionBack` only when the third
     /// argument is true; sub-panels such as the options gamma panel steal ESCAPE/RETURN later,
@@ -680,13 +681,13 @@ impl UiScriptHost {
         self.send_stolen_key(key, true)
     }
 
-    /// The component that most recently stole `key` and is still shown ([`Self::stolen_key`]).
+    /// The newest stealer of `key` that is still shown ([`Self::stolen_key`]); a component that steals
+    /// the key again keeps the place of its first steal.
     ///
     /// PROVISIONAL: the stealer choice. The exe's key-down (`0x00EA5090`) gives the key to the
     /// newest stealer whose handler passes its input-layer test (+0x38, `0x00DACBA0`) and is not
     /// disabled (+0x3C, `0x00DACBB0`), and a re-steal keeps the stealer's first place
-    /// (`0x00EC3DE0`); ours takes the newest shown stealer without either test, and a re-steal
-    /// (`StealShortcutKey`) moves it to the newest place.
+    /// (`0x00EC3DE0`, kept by ours); ours takes the newest shown stealer without either test.
     pub(super) fn stealer_of(&self, key: &str) -> Option<NodeId> {
         let w = self.inner.world.borrow();
         let root = *self.inner.root.borrow();
@@ -2502,8 +2503,10 @@ fn component_methods(lua: &Lua, inner: &Rc<Inner>) -> mlua::Result<Table> {
             return ret(lua, ());
         };
         let mut keys = inner.stolen_keys.borrow_mut();
-        keys.retain(|(n, k)| !(*n == id && *k == key));
-        keys.push((id, key));
+        // A re-steal keeps the stealer's place (`0x00EC3DE0`, see `UiScriptHost::stealer_of`).
+        if !keys.iter().any(|(n, k)| *n == id && *k == key) {
+            keys.push((id, key));
+        }
         ret(lua, ())
     });
     method!("StealInputFocus", |inner, lua, id, args| {
@@ -3700,6 +3703,24 @@ pub(crate) mod tests {
         host.lua.load("local b = ...; UIComponent(b):StealInputFocus(true)").into_function().unwrap().call::<()>(addr(button)).unwrap();
         assert!(host.key("ESCAPE"));
         assert_eq!(component_env(&host, root).get::<f64>("width").unwrap(), 80.0);
+        no_errors(&host);
+    }
+
+    /// A re-steal keeps the stealer's place (`0x00EC3DE0`): the root steals ESCAPE, the button steals
+    /// it after, and the root stealing it again does not make the root the newest stealer.
+    #[test]
+    fn a_re_steal_keeps_the_stealers_place() {
+        let source = ScriptSource::empty().with_memory_file("ui/test/page", layout_bytes_with_root("", ""));
+        let host = UiScriptHost::new(source, Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
+        let root = host.load_root_layout("ui/test/page").unwrap();
+        let button = host.world().find(root, "button").unwrap();
+        let steal = host.lua.load("local c = ...; UIComponent(c):StealShortcutKey('ESCAPE')").into_function().unwrap();
+        steal.call::<()>(addr(root)).unwrap();
+        steal.call::<()>(addr(button)).unwrap();
+        assert_eq!(host.stealer_of("ESCAPE"), Some(button));
+        steal.call::<()>(addr(root)).unwrap();
+        assert_eq!(host.stealer_of("ESCAPE"), Some(button), "the root's re-steal keeps its first place");
+        assert_eq!(host.inner.stolen_keys.borrow().len(), 2, "one entry per component and key");
         no_errors(&host);
     }
 

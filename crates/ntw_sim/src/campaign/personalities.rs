@@ -48,6 +48,17 @@ impl AiPersonalities {
     }
 }
 
+impl super::CampaignModel {
+    /// The personality faction `f` runs ([`AiPersonalities::resolve`] of its stored key, the
+    /// `FACTION` record's, [`super::World::ai_keys`]).
+    pub fn ai_personality(&self, f: super::FactionId) -> String {
+        let rules = &self.rules;
+        let faction_key = self.world.factions.get(&f).map_or("", |x| x.key.as_str());
+        let stored = self.world.ai_keys.get(&f).map(|k| k.personality.as_str());
+        rules.ai_personalities.resolve(&rules.campaign, faction_key, stored)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

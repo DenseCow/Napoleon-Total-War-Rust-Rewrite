@@ -330,23 +330,27 @@ impl Volumes {
     fn load() -> Self {
         let user = config::user_dir();
         let prefs = ntw_script::ui::frontend::load_preferences(user.as_deref(), config::original_user_dir().as_deref());
+        // Each setting is the file's value, else the default the game registers it with
+        // (`Preferences::get`). A setting the game does not register leaves the group as made.
+        let made = mixer::GroupVolume::default();
         let group = |k: &str, en: &str| mixer::GroupVolume {
-            enabled: prefs.get_bool(en).unwrap_or(true),
-            volume: prefs.get_f64(k).unwrap_or(100.0).round().clamp(0.0, 100.0) as i32,
+            enabled: prefs.get_bool(en).unwrap_or(made.enabled),
+            volume: prefs.get_f64(k).map_or(made.volume, |v| v.round().clamp(0.0, 100.0) as i32),
         };
         let path = user.map(|d| d.join("scripts").join("preferences.script.txt"));
         let mtime = path.as_ref().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok());
         let mut groups = [mixer::GroupVolume::default(); 6];
         groups[VolumeGroup::Master as usize] = group("sound_master_volume", "sound_master_enabled");
         // `enable_sound` off silences everything (INFERRED: the master group is disabled).
-        if !prefs.get_bool("enable_sound").unwrap_or(true) {
+        if prefs.get_bool("enable_sound") == Some(false) {
             groups[VolumeGroup::Master as usize].enabled = false;
         }
         groups[VolumeGroup::Music as usize] = group("sound_music_volume", "sound_music_enabled");
         groups[VolumeGroup::Speech as usize] = group("sound_speech_volume", "sound_speech_enabled");
         groups[VolumeGroup::Sfx as usize] = group("sound_sfx_volume", "sound_sfx_enabled");
-        // `sound_provider` is an int preference, default 0 (registered at `0x00405140`).
-        let provider = prefs.get_f64("sound_provider").map_or(0, |p| p.round() as i64);
+        // `sound_provider` is an int setting (registered at `0x00405140`; its default comes with
+        // the lookup). A game without the setting opens provider 0, the first one.
+        let provider = prefs.get_f64("sound_provider").unwrap_or_default().round() as i64;
         let headphones = speakers::opened_is_headphones(provider, speakers::system_speaker_config());
         Self { groups, headphones, prefs_path: path, prefs_mtime: mtime, check_timer: 0.0 }
     }
@@ -1838,17 +1842,15 @@ fn update_voices(
         }
         let fade = if v.equal_power { mixer::equal_power_fade(v.fade) } else { v.fade };
         let is_2d = v.position.is_none();
-        let dim = if v.group == VolumeGroup::Movie {
-            1.0
-        } else if is_2d {
-            settings.mult_2d
+        // Movie sound (full screen and the campaign movie panel alike) goes out through Bink's own
+        // driver at `int(group(4) × 0.01 × group(5))`, without the manager's speaker or 2D/3D
+        // multipliers (CONFIRMED `0x004831D0`, `0x00A13EA0`; [`mixer::movie_gain`], BINK.md §7).
+        let g = if v.group == VolumeGroup::Movie {
+            mixer::movie_gain(master, vol.group(v.group), v.volume)
         } else {
-            settings.mult_3d
+            let dim = if is_2d { settings.mult_2d } else { settings.mult_3d };
+            mixer::manager_gain(master, vol.group(v.group), v.volume, settings.speaker_mult(vol.headphones), dim)
         };
-        // Movie sound goes out through Bink's own driver at `group(4) × 0.01 × group(5)`, without
-        // the manager's speaker multiplier (CONFIRMED `0x004831D0`, BINK.md §7).
-        let speaker = if v.group == VolumeGroup::Movie { 1.0 } else { settings.speaker_mult(vol.headphones) };
-        let g = mixer::manager_gain(master, vol.group(v.group), v.volume, speaker, dim);
         // The voice volume Miles gets (pan always 0.5), then Miles' curve and centre pan.
         let side = mixer::miles_curve((g * fade).clamp(0.0, 1.0)) * mixer::CENTRE_PAN;
         let (l, r) = match (v.position, ear) {

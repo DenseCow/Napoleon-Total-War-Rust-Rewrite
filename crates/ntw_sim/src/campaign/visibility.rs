@@ -336,7 +336,7 @@ impl CampaignModel {
         let mut set = CellSet::new(grid.cols, grid.rows);
         let who = self.sight_factions(faction);
         for c in self.world.characters.values().filter(|c| who.contains(&c.faction)) {
-            if c.kind == CharacterKind::Minister || (c.position.0.raw() == 0 && c.position.1.raw() == 0) {
+            if c.kind == CharacterKind::Minister || !c.on_map() {
                 continue;
             }
             let r = self.sight_radius(c.id);

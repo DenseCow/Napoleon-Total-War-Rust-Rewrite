@@ -1066,3 +1066,22 @@ db_record! {
         tolerance: f32,
     }
 }
+
+db_record! {
+    /// One row of `unit_special_abilities` (4 rows; row reader `0x00FC5ED0`, table loader
+    /// `0x00FBAC50`, CONFIRMED): the times and uses of a timed special ability. A unit card's
+    /// ability record takes them (`0x005363C0` for a campaign or custom battle unit, `0x0050CAE0`
+    /// for a battle-file unit that gives no attributes of its own); an ability without a row is not
+    /// timed. BATTLE_FIDELITY.md §60 "Rally and Inspire".
+    pub struct UnitSpecialAbility in "unit_special_abilities", key = ability {
+        /// #0: the ability name (`rally`, `inspire_unit`, `artillery_accuracy_boost`,
+        /// `artillery_rof_boost`).
+        ability: String,
+        /// #1 (row `+0xC`): seconds the ability's timed effect lasts.
+        active_time: f32,
+        /// #2 (row `+0x10`): seconds before the ability can be used again.
+        recharge_time: f32,
+        /// #3 (row `+0x14`): uses per battle.
+        num_uses: i32,
+    }
+}
